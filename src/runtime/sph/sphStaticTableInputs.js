@@ -223,6 +223,45 @@ export function buildSphReactionTableFromViewState(viewState = {}) {
   });
 }
 
+/**
+ * Build the material-general optical route family without rebuilding thermal
+ * or reaction tables. The three returned artifacts share one canonical set of
+ * numeric route identities and are safe to construct before the first
+ * dispersed-medium producer output exists.
+ */
+export function sphCollectiveOpticalStaticInputsFromViewState(viewState = {}) {
+  const materialProperties = viewState.materialProperties || {};
+  const materialDescriptors = Array.isArray(viewState.materials)
+    ? viewState.materials
+    : [];
+  // Do not deduplicate through draw-surface identity here. Distinct declared
+  // phase routes may intentionally share one ordinary material surface.
+  const collectiveStaticPhaseDescriptors =
+    materialDescriptors.map(renderDescriptorOf);
+  const collectiveOpticalRouteDescriptors =
+    collectiveOpticalRouteDescriptorsFromMaterialProperties(materialProperties, {
+      staticPhaseDescriptors: collectiveStaticPhaseDescriptors
+    });
+  const collectiveOpticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(
+    collectiveOpticalRouteDescriptors,
+    {
+      materialProperties,
+      materialPropertyBankGpuWarmInputTable:
+        viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable
+          ?? null
+    }
+  );
+  const dispersedMediumOpticalClosureTable =
+    buildSphDispersedMediumOpticalClosureTable(
+      collectiveOpticalRouteDescriptors
+    );
+  return Object.freeze({
+    collectiveOpticalRouteDescriptors,
+    collectiveOpticalGpuTable,
+    dispersedMediumOpticalClosureTable
+  });
+}
+
 export function sphStaticTableInputsFromViewState(viewState = {}, {
   thermalMaterialTable: providedThermalMaterialTable = null
 } = {}) {
@@ -235,10 +274,6 @@ export function sphStaticTableInputsFromViewState(viewState = {}, {
     ? viewState.materials
     : [];
   const surfaceDescriptors = surfaceDescriptorsFromMaterials(materialDescriptors);
-  // Surface batches intentionally deduplicate identical draw identities. Route
-  // declarations must not inherit that lossy projection: two explicit phase
-  // pairs can share one draw surface while remaining distinct physics routes.
-  const collectiveStaticPhaseDescriptors = materialDescriptors.map(renderDescriptorOf);
   const opticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(
     surfaceDescriptors,
     {
@@ -247,31 +282,15 @@ export function sphStaticTableInputsFromViewState(viewState = {}, {
         viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
     }
   );
-  const collectiveOpticalRouteDescriptors =
-    collectiveOpticalRouteDescriptorsFromMaterialProperties(materialProperties, {
-      staticPhaseDescriptors: collectiveStaticPhaseDescriptors
-    });
-  const collectiveOpticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(
-    collectiveOpticalRouteDescriptors,
-    {
-      materialProperties,
-      materialPropertyBankGpuWarmInputTable:
-        viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
-    }
-  );
-  const dispersedMediumOpticalClosureTable =
-    buildSphDispersedMediumOpticalClosureTable(
-      collectiveOpticalRouteDescriptors
-    );
+  const collectiveOpticalInputs =
+    sphCollectiveOpticalStaticInputsFromViewState(viewState);
   const reactionTable = buildSphReactionTableFromViewState(viewState);
   return {
     thermalMaterialTable,
     thermalClosureGraphSet,
     thermalPhaseResponseTable,
     opticalGpuTable,
-    collectiveOpticalRouteDescriptors,
-    collectiveOpticalGpuTable,
-    dispersedMediumOpticalClosureTable,
+    ...collectiveOpticalInputs,
     reactionTable
   };
 }

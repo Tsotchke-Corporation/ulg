@@ -355,6 +355,42 @@ test('shared post-mechanics closure preserves the post-thermal discovery lineage
     0
   );
   assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.preReactionStateBuffer,
+    thermalState
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.preReactionThermoBuffer,
+    thermalThermo
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.postReactionStateBuffer,
+    reactionState
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.postReactionThermoBuffer,
+    reactionThermo
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
+    reactionState
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer,
+    reactionThermo
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied,
+    true
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.reactionStateMutationApplied,
+    true
+  );
+  assert.equal(
+    result.phaseCarrierTransferFamilyReceipt.reactionThermoMutationApplied,
+    true
+  );
+  assert.equal(
     result.mechanicsRefreshStep
       .submittedWorkCleanupHostQueueFenceCount,
     0
@@ -766,6 +802,99 @@ test('phase output claim remains forwarded only when mechanics consumer is absen
     closure.queueOrderedFinalConsumerCapabilities
       .phaseCarrierOutput,
     null
+  );
+});
+
+test('post-phase consumer submits before mechanics seals the phase-output family', async () => {
+  const inputs = minimalClosureInputs();
+  const order = [];
+  const thermalState = trackedBuffer('post-phase-thermal-state');
+  const thermalThermo = trackedBuffer('post-phase-thermal-thermo');
+  const phaseState = trackedBuffer('post-phase-state');
+  const phaseThermo = trackedBuffer('post-phase-thermo');
+  const phaseMechanics = trackedBuffer('post-phase-mechanics');
+  const refreshedMechanics = trackedBuffer('post-phase-refreshed-mechanics');
+  inputs.sphParticleState.phaseCarrierPlan = {
+    status: 'phase-lane-capacity-ready'
+  };
+  inputs.sphParticleUpload.phaseCarrierPlan =
+    inputs.sphParticleState.phaseCarrierPlan;
+  let observedReceipt = null;
+
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+    ...inputs,
+    thermalMaterialTable: { materialCount: 1 },
+    mechanicsMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => {
+      order.push('thermal');
+      return {
+        stateBuffer: thermalState,
+        thermoBuffer: thermalThermo
+      };
+    },
+    phaseCarrierTransferRunner: async (options) => {
+      order.push('phase');
+      assert.equal(options.sourceStateBuffer, thermalState);
+      assert.equal(options.sourceThermoBuffer, thermalThermo);
+      return {
+        stateBuffer: phaseState,
+        thermoBuffer: phaseThermo,
+        mechanicsBuffer: phaseMechanics,
+        submittedWorkCleanupHostQueueFenceCount: 0
+      };
+    },
+    async afterPhaseCarrierTransfer({
+      phaseCarrierTransferFamilyReceipt
+    }) {
+      order.push('optics');
+      observedReceipt = phaseCarrierTransferFamilyReceipt;
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
+        thermalState
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.preReactionStateBuffer,
+        thermalState
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.postReactionStateBuffer,
+        thermalState
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer,
+        thermalThermo
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.preReactionThermoBuffer,
+        thermalThermo
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.postReactionThermoBuffer,
+        thermalThermo
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.postTransferStateBuffer,
+        phaseState
+      );
+      assert.equal(
+        phaseCarrierTransferFamilyReceipt.postTransferThermoBuffer,
+        phaseThermo
+      );
+    },
+    mechanicsRefreshRunner: async (options) => {
+      order.push('mechanics');
+      assert.equal(options.sourceStateBuffer, phaseState);
+      assert.equal(options.sourceThermoBuffer, phaseThermo);
+      assert.equal(options.sourceMechanicsBuffer, phaseMechanics);
+      return { mechanicsBuffer: refreshedMechanics };
+    }
+  });
+
+  assert.deepEqual(order, ['thermal', 'phase', 'optics', 'mechanics']);
+  assert.equal(closure.phaseCarrierTransferFamilyReceipt, observedReceipt);
+  assert.equal(
+    Object.keys(closure).includes('phaseCarrierTransferFamilyReceipt'),
+    false
   );
 });
 

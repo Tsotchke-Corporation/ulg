@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ABI,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION,
+  SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL,
   SPH_DISPERSED_MEDIUM_OPTICS_ABI,
   SPH_DISPERSED_MEDIUM_OPTICS_ROW_BYTES,
   SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS,
@@ -12,6 +16,32 @@ import {
   ULG_SPH_DISPERSED_MEDIUM_OPTICS_SCHEMA,
   sphDispersedMediumOpticsWgsl
 } from '../ulg-gpu-abi/src/index.js';
+
+test('closure ABI v1 adds a tagged compact complex-index sphere without widening rows', () => {
+  assert.equal(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION, 1);
+  assert.equal(
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+      .singleCompactSphereComplexIndex,
+    3
+  );
+  assert.equal(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.relativeRefractiveIndexN,
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.scatteringEfficiencyQsca
+  );
+  assert.equal(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES
+      .relativeExtinctionCoefficientK,
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.absorptionEfficiencyQabs
+  );
+  assert.equal(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.referenceWavelengthM,
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.reserved0
+  );
+  assert.match(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ABI.taggedLanePolicy,
+    /relative-complex-index.*reference-wavelength/
+  );
+});
 
 test('dispersed-medium optics v0 fixes one exact eight-f32 particle row', () => {
   assert.equal(

@@ -694,8 +694,14 @@ function workerOwnedNativeSurfacePresentationProven(metric) {
       <= 1e-9
     && renderState?.surfaceDrawOverlayPolicyStatus
       === 'surface-draw-native-webgpu-main-canvas'
-    && renderState?.workerOffscreenPresentationStatus
-      === 'worker-offscreen-display-hidden-main-native-owner'
+    && (
+      renderState?.workerOffscreenPresentationDisplayOwner
+        ?? workerPresentation?.displayOwner
+    ) === 'main-native'
+    && (
+      renderState?.workerOffscreenPresentationDisplayCanvasVisible
+        ?? workerPresentation?.displayCanvasVisible
+    ) === false
     && renderState?.workerOffscreenRetainedCompactSnapshotStatus
       === 'presentation-worker-retained-compact-snapshot-exported'
     && renderState?.workerOffscreenRetainedCompactSnapshotAvailable === true

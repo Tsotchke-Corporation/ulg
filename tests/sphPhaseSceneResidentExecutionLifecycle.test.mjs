@@ -320,6 +320,54 @@ test('production worker SS provisioning applies the reaction tri-state only at t
   );
 });
 
+test('scene publishes one physical dispersed-medium declaration into direct and worker resident routes', async () => {
+  const source = await readFile(sceneSourcePath, 'utf8');
+  assert.match(
+    source,
+    /sphCollectiveOpticalStaticInputsFromViewState\(\{[\s\S]*materialProperties:[\s\S]*materials:[\s\S]*collectiveOpticalRouteDescriptors\s*=\s*collectiveOpticalInputs\.collectiveOpticalRouteDescriptors;[\s\S]*sphDispersedMediumOpticalClosureTable\s*=\s*collectiveOpticalInputs\.dispersedMediumOpticalClosureTable;/,
+    'setParticles must derive routes and closure from one shared static builder'
+  );
+  assert.match(
+    source,
+    /buildSphDispersedMediumOpticsProducerSeedRowsFromParticleState\(\{\s*sphParticleState:\s*nextSphGpuParticleState,\s*opticalClosureTable:\s*sphDispersedMediumOpticalClosureTable\s*\}\)/,
+    'the first producer declaration must use canonical packed material identity'
+  );
+  assert.match(
+    source,
+    /buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization\(\{\s*sphParticleState:\s*nextSphGpuParticleState,\s*opticalClosureTable:\s*sphDispersedMediumOpticalClosureTable\s*\}\)/,
+    'a Tier0 single-lane scene must declare the exact prospective four-lane producer seed'
+  );
+  assert.match(
+    source,
+    /sphProspectiveFourLaneDispersedMediumOpticsSeedRows\s*=\s*\n\s*candidateProspectiveDispersedMediumOpticsSeedRows\?\.readyRowCount > 0/,
+    'the prospective Tier0 declaration must remain separate from a currently active four-lane seed'
+  );
+  assert.match(
+    source,
+    /const effectiveDispersedMediumOpticsSeedRows = Boolean\(\s*effectiveThermalMaterialTable\s*&& mlsMpmMechanicsMaterialTable\s*\)[\s\S]*?sphDispersedMediumOpticsSeedRows\s*\?\? sphProspectiveFourLaneDispersedMediumOpticsSeedRows/,
+    'worker schedules may activate a prospective seed only with the thermal/mechanics phase-transfer closures'
+  );
+  const forwardedDeclarations = source.match(
+    /dispersedMediumOpticalClosureTable:\s*\n\s*sphDispersedMediumOpticalClosureTable,\s*\n\s*dispersedMediumOpticsSeedRows:\s*\n\s*effectiveDispersedMediumOpticsSeedRows/g
+  ) || [];
+  assert.equal(
+    forwardedDeclarations.length,
+    2,
+    'single-step and batched resident execution must receive the same declaration pair'
+  );
+  assert.equal(
+    (source.match(/applyResidentWaterVaporOpticalStateToSurfaceBatches\s*\(/g)
+      || []).length,
+    1,
+    'pressure-derived vapor optics must remain an unused compatibility declaration'
+  );
+  assert.doesNotMatch(
+    source,
+    /decodeSphRenderRows\([^;]{0,400}gasPressureSummary/,
+    'resident row decoding must never receive aggregate gas pressure as optical authority'
+  );
+});
+
 test('production scene preseals and latches exact dynamic-law successors after commit', async () => {
   const source = await readFile(sceneSourcePath, 'utf8');
   const scheduleStart = source.indexOf(

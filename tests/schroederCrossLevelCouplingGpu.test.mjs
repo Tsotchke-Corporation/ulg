@@ -80,6 +80,10 @@ import {
   tagWebGpuBufferDevice
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics
+} from '../src/runtime/sph/sphGpuBuffers.js';
+import {
   abandonSchroederFusedMechanicsPendingClosureAfter,
   completeSchroederFusedMechanicsPendingClosureAfter,
   publishSchroederFusedMechanicsPendingClosure,
@@ -295,7 +299,8 @@ function productionM3Fixture({
   baseGridSpacingM = 0.25,
   phaseVolumeInterfaceTransportEnabled = false,
   surfaceTensionEnabled = false,
-  mechanicsFieldPairV2Enabled = true
+  mechanicsFieldPairV2Enabled = true,
+  sourceSphUploadOverrides = null
 }) {
   const particleCount = 1;
   const state = new Float32Array([
@@ -358,6 +363,7 @@ function productionM3Fixture({
   const epochIdentity = {
     storageGeneration: 11,
     bufferFamilyGeneration: 11,
+    identityRevision: 'cross-level-coupling-fixture-identity',
     physicsTick: 13,
     physicsSubstep: 0,
     positionEpoch: 17,
@@ -415,7 +421,8 @@ function productionM3Fixture({
     sourceSlot: 0,
     nextSlot: 1,
     step: 0,
-    time: 0
+    time: 0,
+    ...(sourceSphUploadOverrides ?? {})
   };
   const mlsMpmParticleUpload = {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -673,6 +680,45 @@ test('Schroeder cross-level grid coupling schemas and row layout are stable', ()
     SCHROEDER_CROSS_LEVEL_GRID_CONSERVATION_SUMMARY_ROW_LAYOUT[8],
     'massResidualKg:f32'
   );
+});
+
+test('core SPH upload cloning omits every dispersed-medium optics alias', () => {
+  const optics = Object.freeze({ kind: 'privately-parented-optics-child' });
+  const authority = Object.freeze({ kind: 'opaque-optics-authority' });
+  const buffer = orchestrationBuffer('optics-alias-buffer', 64);
+  const source = Object.freeze({
+    status: 'webgpu-uploaded',
+    stateBuffer: orchestrationBuffer('core-state', 64),
+    thermoBuffer: orchestrationBuffer('core-thermo', 96),
+    particleCount: 2,
+    dispersedMediumOptics: optics,
+    dispersedMediumOpticsAuthority: authority,
+    dispersedMediumOpticsBuffer: buffer,
+    dispersedMediumOpticsRowCount: 2,
+    dispersedMediumOpticsRowStrideFloats: 4,
+    dispersedMediumOpticsBufferByteLength: 64,
+    ownsDispersedMediumOpticsBuffer: true
+  });
+
+  const core = cloneSphGpuParticleUploadWithoutDispersedMediumOptics(source);
+
+  assert.notStrictEqual(core, source);
+  assert.strictEqual(core.stateBuffer, source.stateBuffer);
+  assert.strictEqual(core.thermoBuffer, source.thermoBuffer);
+  assert.equal(core.particleCount, source.particleCount);
+  assert.equal(sphGpuParticleUploadAdvertisesDispersedMediumOptics(core), false);
+  for (const field of [
+    'dispersedMediumOptics',
+    'dispersedMediumOpticsAuthority',
+    'dispersedMediumOpticsBuffer',
+    'dispersedMediumOpticsRowCount',
+    'dispersedMediumOpticsRowStrideFloats',
+    'dispersedMediumOpticsBufferByteLength',
+    'ownsDispersedMediumOpticsBuffer'
+  ]) {
+    assert.equal(field in core, false, `${field} must not cross parent uploads`);
+    assert.equal(field in source, true, `${field} must remain on the source`);
+  }
 });
 
 test('parent-field workspace arena policy preserves low-N overlap and bounds split high-N storage', () => {
@@ -1354,6 +1400,57 @@ test('M3 production controller executes authenticated r=1..4 fused chains withou
     );
     assert.equal(await fixture.controller.completionPromise(), true);
   }
+});
+
+test('M3 changed-parent continuations do not inherit stale optics aliases', async () => {
+  const staleOptics = Object.freeze({ kind: 'source-parent-only-optics' });
+  const staleAuthority = Object.freeze({ kind: 'source-parent-only-authority' });
+  const staleBuffer = orchestrationBuffer('source-parent-only-optics', 16);
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 2,
+    sourceSphUploadOverrides: {
+      dispersedMediumOptics: staleOptics,
+      dispersedMediumOpticsAuthority: staleAuthority,
+      dispersedMediumOpticsBuffer: staleBuffer,
+      dispersedMediumOpticsRowCount: 1,
+      dispersedMediumOpticsRowStrideFloats: 4,
+      dispersedMediumOpticsBufferByteLength: 16,
+      ownsDispersedMediumOpticsBuffer: true
+    }
+  });
+  const p2gOptions = [];
+  const { result } = await runProductionM3Fixture(fixture, { p2gOptions });
+
+  assert.equal(
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      p2gOptions[0].sphParticleUpload
+    ),
+    true
+  );
+  for (const options of p2gOptions.slice(2)) {
+    assert.equal(
+      sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+        options.sphParticleUpload
+      ),
+      false,
+      'a changed state/thermo parent must not advertise its source child'
+    );
+  }
+  assert.equal(
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      result.pendingPostMechanicsClosure.finalSphParticleUpload
+    ),
+    false
+  );
+  assert.equal(staleBuffer.destroyCount, 0);
+
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device,
+    result.pendingPostMechanicsClosure,
+    { reason: new Error('stale optics alias fixture cleanup') }
+  ), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  assert.equal(staleBuffer.destroyCount, 0);
 });
 
 test('two-level mechanics rejects invalid CFL profiles before GPU work', async () => {

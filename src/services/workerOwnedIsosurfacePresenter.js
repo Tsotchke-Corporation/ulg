@@ -21,6 +21,15 @@ import {
   createUlgRenderFieldBufferVolumeDescriptor,
   createUlgWebGpuMarchingCubesExtensionAdapter
 } from '../runtime/sph/sphMarchingCubesSurfaceAdapter.js';
+import {
+  SPH_PARTICIPATING_MEDIUM_DESCRIPTOR_STATUS,
+  SPH_PARTICIPATING_MEDIUM_PACKED_FRAME_STATUS,
+  createSphParticipatingMediumDescriptor,
+  createSphParticipatingMediumGpu,
+  destroySphParticipatingMediumPackedFrame,
+  encodeSphParticipatingMediumPack,
+  encodeSphParticipatingMediumRender
+} from '../runtime/sph/sphParticipatingMediumGpu.js';
 import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
 import {
   ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
@@ -53,6 +62,23 @@ const ULG_SPH_GPU_RENDER_FIELD_SCHEMA =
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const CONSERVATIVE_NO_READBACK_MODE = 'gpu-conservative-no-readback';
 const DEFAULT_DEPTH_FORMAT = 'depth24plus';
+const PARTICIPATING_MEDIUM_PRESENTATION_SCHEMA =
+  'peercompute.ulg.worker-participating-medium-presentation.v0';
+const PARTICIPATING_MEDIUM_NOT_REQUESTED_STATUS = 'not-requested';
+const PARTICIPATING_MEDIUM_READY_STATUS =
+  SPH_PARTICIPATING_MEDIUM_DESCRIPTOR_STATUS.ready;
+const PARTICIPATING_MEDIUM_EMPTY_STATUS =
+  SPH_PARTICIPATING_MEDIUM_DESCRIPTOR_STATUS.empty;
+const PARTICIPATING_MEDIUM_BLOCKED_STATUS =
+  SPH_PARTICIPATING_MEDIUM_DESCRIPTOR_STATUS.blocked;
+const ORDINARY_PRESENTATION_PASS_ORDER = Object.freeze([
+  'ordered-isosurface-and-overlay'
+]);
+const HYBRID_PRESENTATION_PASS_ORDER = Object.freeze([
+  'opaque-isosurface',
+  'depth-clipped-participating-medium',
+  'transparent-isosurface-and-overlay'
+]);
 const BUFFER_USAGE_COPY_SRC = 0x04;
 const BUFFER_USAGE_COPY_DST = 0x08;
 const BUFFER_USAGE_UNIFORM = 0x40;
@@ -349,6 +375,14 @@ export function snapshotWorkerOwnedSurfaceMetadata(metadata) {
   ) {
     snapshot.colorLinear = Object.freeze(Array.from(metadata.colorLinear));
   }
+  if (
+    Array.isArray(metadata.opticalScatteringSourceLinear)
+    || ArrayBuffer.isView(metadata.opticalScatteringSourceLinear)
+  ) {
+    snapshot.opticalScatteringSourceLinear = Object.freeze(
+      Array.from(metadata.opticalScatteringSourceLinear)
+    );
+  }
   if (metadata.opticalState && typeof metadata.opticalState === 'object') {
     snapshot.opticalState = Object.freeze({ ...metadata.opticalState });
   }
@@ -361,6 +395,91 @@ function finiteVector(value, length) {
   }
   const vector = Array.from(value, Number);
   return vector.every(Number.isFinite) ? vector : null;
+}
+
+function invertMatrix4(value) {
+  const matrix = finiteVector(value, 16);
+  if (!matrix) return null;
+  const rows = Array.from({ length: 4 }, (_unused, row) => (
+    Array.from({ length: 8 }, (_unusedColumn, column) => (
+      column < 4
+        ? matrix[column * 4 + row]
+        : (column - 4 === row ? 1 : 0)
+    ))
+  ));
+  for (let column = 0; column < 4; column += 1) {
+    let pivotRow = column;
+    for (let row = column + 1; row < 4; row += 1) {
+      if (Math.abs(rows[row][column]) > Math.abs(rows[pivotRow][column])) {
+        pivotRow = row;
+      }
+    }
+    const pivot = rows[pivotRow][column];
+    if (!Number.isFinite(pivot) || Math.abs(pivot) <= 1e-12) return null;
+    if (pivotRow !== column) {
+      [rows[column], rows[pivotRow]] = [rows[pivotRow], rows[column]];
+    }
+    for (let entry = 0; entry < 8; entry += 1) {
+      rows[column][entry] /= pivot;
+    }
+    for (let row = 0; row < 4; row += 1) {
+      if (row === column) continue;
+      const factor = rows[row][column];
+      if (factor === 0) continue;
+      for (let entry = 0; entry < 8; entry += 1) {
+        rows[row][entry] -= factor * rows[column][entry];
+      }
+    }
+  }
+  const inverse = new Float32Array(16);
+  for (let row = 0; row < 4; row += 1) {
+    for (let column = 0; column < 4; column += 1) {
+      const valueAtEntry = rows[row][column + 4];
+      if (!Number.isFinite(valueAtEntry)) return null;
+      inverse[column * 4 + row] = valueAtEntry;
+    }
+  }
+  return inverse;
+}
+
+function isCollectiveOpticalSurface(metadata) {
+  const hasExplicitCollectiveMarker = Boolean(
+    metadata?.collectiveOpticalRoute === true
+    || metadata?.collectiveOpticalRouteSchema != null
+    || metadata?.collectiveOpticalRouteKey != null
+    || metadata?.collectiveOpticalRouteId != null
+  );
+  if (hasExplicitCollectiveMarker) return true;
+  if (metadata?.opticalStateId == null) return false;
+  const opticalStateId = Number(metadata?.opticalStateId);
+  return !Number.isSafeInteger(opticalStateId) || opticalStateId !== 0;
+}
+
+function workerOwnedParticipatingMediumPresentation(frame) {
+  const medium = frame?.participatingMedium ?? null;
+  const status = medium?.status ?? PARTICIPATING_MEDIUM_NOT_REQUESTED_STATUS;
+  const ready = status === PARTICIPATING_MEDIUM_READY_STATUS
+    && Boolean(medium?.packedFrame);
+  const collectiveOpticalSurfaceCount = Math.max(
+    0,
+    Number(medium?.collectiveSurfaceCount) || 0
+  );
+  return Object.freeze({
+    schema: PARTICIPATING_MEDIUM_PRESENTATION_SCHEMA,
+    status,
+    presentationComposition: collectiveOpticalSurfaceCount > 0
+      ? 'marching-cubes-isosurfaces-plus-participating-medium'
+      : 'marching-cubes-isosurfaces',
+    marchingCubesSurfaceCount: frame?.surfaces?.length ?? 0,
+    collectiveOpticalSurfaceCount,
+    participatingMediumAggregateDrawCount: ready ? 1 : 0,
+    collectiveOpticalShellFallbackCount: 0,
+    participatingMediumDepthClipped: ready,
+    participatingMediumPremultipliedAlpha: ready,
+    presentationPassOrder: ready
+      ? HYBRID_PRESENTATION_PASS_ORDER
+      : ORDINARY_PRESENTATION_PASS_ORDER
+  });
 }
 
 export function buildWorkerOwnedIsosurfaceSurfaceUniformValues(
@@ -605,6 +724,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   format,
   depthFormat = DEFAULT_DEPTH_FORMAT,
   getDepthView,
+  getViewportSize = null,
   drawOverlay = null,
   onTerminal = null,
   onFrameSubmitted = null,
@@ -613,7 +733,13 @@ export function createWorkerOwnedIsosurfacePresenter({
   nextPresentationQueueCompletionSerial = null,
   captureRenderRows = extractSphRenderRowsWebGpu,
   buildRenderField = buildSphRenderFieldWebGpu,
-  buildPresentationFrame = null
+  buildPresentationFrame = null,
+  createParticipatingMediumDescriptor = createSphParticipatingMediumDescriptor,
+  createParticipatingMediumGpu = createSphParticipatingMediumGpu,
+  encodeParticipatingMediumPack = encodeSphParticipatingMediumPack,
+  encodeParticipatingMediumRender = encodeSphParticipatingMediumRender,
+  destroyParticipatingMediumPackedFrame =
+    destroySphParticipatingMediumPackedFrame
 } = {}) {
   if (!device?.createBuffer || !device?.queue?.submit) {
     throw new TypeError('worker-owned isosurface presenter requires a WebGPU device');
@@ -650,6 +776,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   let opaquePipeline = null;
   let transparentPipeline = null;
   let pipelinePromise = null;
+  let participatingMediumRuntime = null;
   let firstDrawValidated = false;
   let presentationQueueCompletionCount = 0;
   const adapterCache = new Map();
@@ -709,6 +836,23 @@ export function createWorkerOwnedIsosurfacePresenter({
     for (const surface of frame.surfaces || []) {
       releaseExtensionFrameSurface(surface, reason);
     }
+    const medium = frame.participatingMedium;
+    if (medium?.packedFrame && medium.released !== true) {
+      medium.released = true;
+      try {
+        destroyParticipatingMediumPackedFrame(medium.packedFrame);
+      } catch {
+        // Device teardown is the final ownership boundary.
+      }
+    }
+  };
+
+  const ensureParticipatingMediumRuntime = () => {
+    participatingMediumRuntime ||= createParticipatingMediumGpu(device, {
+      colorFormat: format,
+      depthFormat
+    });
+    return participatingMediumRuntime;
   };
 
   const releaseAdapterEntry = async (entry) => {
@@ -884,6 +1028,49 @@ export function createWorkerOwnedIsosurfacePresenter({
 
   const surfaceUniformValues = buildWorkerOwnedIsosurfaceSurfaceUniformValues;
 
+  const orderedFrameSurfaces = (frame) => [...(frame.surfaces || [])].sort(
+    (left, right) => {
+      const leftTransparent =
+        Number(left.metadata?.transparencyClassId) > 0 ? 1 : 0;
+      const rightTransparent =
+        Number(right.metadata?.transparencyClassId) > 0 ? 1 : 0;
+      return leftTransparent - rightTransparent
+        || Number(left.metadata?.renderOrder || 0)
+          - Number(right.metadata?.renderOrder || 0);
+    }
+  );
+
+  const drawIsosurface = (pass, frame, surface) => {
+    const vertices = surface.translation?.surfaceVertices;
+    const draw = surface.translation?.surfaceDraw;
+    if (
+      !vertices?.compactPositionRowsBuffer
+      || !vertices?.compactNormalRowsBuffer
+      || !draw?.drawIndirectRowsBuffer
+    ) return false;
+    const transparent = Number(surface.metadata?.transparencyClassId) > 0;
+    const pipeline = transparent ? transparentPipeline : opaquePipeline;
+    device.queue.writeBuffer(
+      surface.uniformBuffer,
+      0,
+      surfaceUniformValues(frame, surface)
+    );
+    if (!surface.bindGroups.has(pipeline)) {
+      surface.bindGroups.set(pipeline, device.createBindGroup({
+        label:
+          `ulg-worker-owned-isosurface-bind-group-${surface.descriptor.surfaceIndex}`,
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: surface.uniformBuffer } }]
+      }));
+    }
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, surface.bindGroups.get(pipeline));
+    pass.setVertexBuffer(0, vertices.compactPositionRowsBuffer);
+    pass.setVertexBuffer(1, vertices.compactNormalRowsBuffer);
+    pass.drawIndirect(draw.drawIndirectRowsBuffer, 0);
+    return true;
+  };
+
   const renderFrame = async (frame, {
     viewProjectionMatrix = frame.viewProjectionMatrix,
     cameraPositionM = frame.cameraPositionM,
@@ -903,89 +1090,196 @@ export function createWorkerOwnedIsosurfacePresenter({
     const nextCameraPosition = finiteVector(cameraPositionM, 3);
     if (nextViewProjection) frame.viewProjectionMatrix = nextViewProjection;
     if (nextCameraPosition) frame.cameraPositionM = nextCameraPosition;
-    await ensurePipelines();
+    const packedMedium = frame.participatingMedium?.status
+      === PARTICIPATING_MEDIUM_READY_STATUS
+      ? frame.participatingMedium.packedFrame
+      : null;
+    const readyParticipatingMediumRuntime = packedMedium
+      ? ensureParticipatingMediumRuntime()
+      : null;
+    await Promise.all([
+      ensurePipelines(),
+      readyParticipatingMediumRuntime?.ready
+    ]);
     if (!frameIsCurrent()) return false;
     const validateThisDraw = !firstDrawValidated
       && typeof device.pushErrorScope === 'function'
       && typeof device.popErrorScope === 'function';
-    if (validateThisDraw) device.pushErrorScope('validation');
-    const encoder = device.createCommandEncoder({
-      label: 'ulg-worker-owned-isosurface-presentation'
-    });
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: context.getCurrentTexture().createView(),
-        clearValue: { r: 0, g: 0, b: 0, a: 0 },
-        loadOp: 'clear',
-        storeOp: 'store'
-      }],
-      depthStencilAttachment: {
-        view: getDepthView(),
-        depthClearValue: 1,
-        depthLoadOp: 'clear',
-        depthStoreOp: 'discard'
-      }
-    });
-    const orderedSurfaces = [...frame.surfaces].sort((left, right) => {
-      const leftTransparent = Number(left.metadata?.transparencyClassId) > 0 ? 1 : 0;
-      const rightTransparent = Number(right.metadata?.transparencyClassId) > 0 ? 1 : 0;
-      return leftTransparent - rightTransparent
-        || Number(left.metadata?.renderOrder || 0) - Number(right.metadata?.renderOrder || 0);
-    });
-    for (const surface of orderedSurfaces) {
-      const vertices = surface.translation?.surfaceVertices;
-      const draw = surface.translation?.surfaceDraw;
-      if (
-        !vertices?.compactPositionRowsBuffer
-        || !vertices?.compactNormalRowsBuffer
-        || !draw?.drawIndirectRowsBuffer
-      ) continue;
-      const transparent = Number(surface.metadata?.transparencyClassId) > 0;
-      const pipeline = transparent ? transparentPipeline : opaquePipeline;
-      device.queue.writeBuffer(
-        surface.uniformBuffer,
-        0,
-        surfaceUniformValues(frame, surface)
-      );
-      if (!surface.bindGroups.has(pipeline)) {
-        surface.bindGroups.set(pipeline, device.createBindGroup({
-          label: `ulg-worker-owned-isosurface-bind-group-${surface.descriptor.surfaceIndex}`,
-          layout: pipeline.getBindGroupLayout(0),
-          entries: [{ binding: 0, resource: { buffer: surface.uniformBuffer } }]
-        }));
-      }
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, surface.bindGroups.get(pipeline));
-      pass.setVertexBuffer(0, vertices.compactPositionRowsBuffer);
-      pass.setVertexBuffer(1, vertices.compactNormalRowsBuffer);
-      pass.drawIndirect(draw.drawIndirectRowsBuffer, 0);
-    }
-    drawOverlay?.(pass, frame.viewProjectionMatrix, frame.boxDimsM);
-    pass.end();
-    if (!frameIsCurrent()) {
-      if (validateThisDraw) await device.popErrorScope();
-      return false;
-    }
-    const submittedFramebufferEpoch = Number(getFramebufferEpoch());
-    if (
-      !Number.isSafeInteger(submittedFramebufferEpoch)
-      || submittedFramebufferEpoch <= 0
-    ) {
-      if (validateThisDraw) await device.popErrorScope();
-      throw new Error(
-        'worker-owned isosurface framebuffer epoch is unavailable'
-      );
-    }
-    const submittedAtMs = nowMs();
-    device.queue.submit([encoder.finish()]);
+    let validationScopeOpen = false;
+    const closeValidationScope = async () => {
+      if (!validationScopeOpen) return null;
+      validationScopeOpen = false;
+      return device.popErrorScope();
+    };
+    let submittedFramebufferEpoch;
+    let submittedAtMs;
     if (validateThisDraw) {
-      const validationError = await device.popErrorScope();
+      device.pushErrorScope('validation');
+      validationScopeOpen = true;
+    }
+    try {
+      const encoder = device.createCommandEncoder({
+        label: 'ulg-worker-owned-isosurface-presentation'
+      });
+      const colorTexture = context.getCurrentTexture();
+      const colorView = colorTexture.createView();
+      const depthView = getDepthView();
+      const orderedSurfaces = orderedFrameSurfaces(frame);
+      if (!packedMedium) {
+        // Preserve the established single-pass marching-cubes path when no
+        // participating medium is ready to composite.
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [{
+            view: colorView,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store'
+          }],
+          depthStencilAttachment: {
+            view: depthView,
+            depthClearValue: 1,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'discard'
+          }
+        });
+        try {
+          for (const surface of orderedSurfaces) {
+            drawIsosurface(pass, frame, surface);
+          }
+          drawOverlay?.(pass, frame.viewProjectionMatrix, frame.boxDimsM);
+        } finally {
+          pass.end();
+        }
+      } else {
+        const inverseViewProjectionMatrix = invertMatrix4(
+          frame.viewProjectionMatrix
+        );
+        if (!inverseViewProjectionMatrix) {
+          throw new Error(
+            'participating-medium presentation requires an invertible view-projection matrix'
+          );
+        }
+        const viewportSize = finiteVector(
+          typeof getViewportSize === 'function'
+            ? getViewportSize()
+            : [colorTexture.width, colorTexture.height],
+          2
+        );
+        if (
+          !viewportSize
+          || !(viewportSize[0] > 0)
+          || !(viewportSize[1] > 0)
+        ) {
+          throw new Error(
+            'participating-medium presentation requires a positive viewport size'
+          );
+        }
+
+        const opaquePass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-opaque-pass',
+          colorAttachments: [{
+            view: colorView,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store'
+          }],
+          depthStencilAttachment: {
+            view: depthView,
+            depthClearValue: 1,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store'
+          }
+        });
+        try {
+          for (const surface of orderedSurfaces) {
+            if (Number(surface.metadata?.transparencyClassId) > 0) continue;
+            drawIsosurface(opaquePass, frame, surface);
+          }
+        } finally {
+          opaquePass.end();
+        }
+
+        const volumePass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-participating-medium-pass',
+          colorAttachments: [{
+            view: colorView,
+            loadOp: 'load',
+            storeOp: 'store'
+          }]
+        });
+        try {
+          await encodeParticipatingMediumRender(
+            readyParticipatingMediumRuntime,
+            volumePass,
+            {
+              packedFrame: packedMedium,
+              inverseViewProjectionMatrix,
+              cameraPositionM: frame.cameraPositionM,
+              viewportSize,
+              depthTextureView: depthView,
+              lightDirection: [0.38, 0.82, 0.42]
+            }
+          );
+        } finally {
+          volumePass.end();
+        }
+
+        const transparentPass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
+          colorAttachments: [{
+            view: colorView,
+            loadOp: 'load',
+            storeOp: 'store'
+          }],
+          depthStencilAttachment: {
+            view: depthView,
+            depthLoadOp: 'load',
+            depthStoreOp: 'discard'
+          }
+        });
+        try {
+          for (const surface of orderedSurfaces) {
+            if (!(Number(surface.metadata?.transparencyClassId) > 0)) continue;
+            drawIsosurface(transparentPass, frame, surface);
+          }
+          drawOverlay?.(
+            transparentPass,
+            frame.viewProjectionMatrix,
+            frame.boxDimsM
+          );
+        } finally {
+          transparentPass.end();
+        }
+      }
+      if (!frameIsCurrent()) {
+        await closeValidationScope();
+        return false;
+      }
+      submittedFramebufferEpoch = Number(getFramebufferEpoch());
+      if (
+        !Number.isSafeInteger(submittedFramebufferEpoch)
+        || submittedFramebufferEpoch <= 0
+      ) {
+        throw new Error(
+          'worker-owned isosurface framebuffer epoch is unavailable'
+        );
+      }
+      submittedAtMs = nowMs();
+      device.queue.submit([encoder.finish()]);
+      const validationError = await closeValidationScope();
       if (validationError) {
         throw new Error(
           validationError.message || String(validationError)
         );
       }
-      firstDrawValidated = true;
+      if (validateThisDraw) firstDrawValidated = true;
+    } catch (error) {
+      try {
+        await closeValidationScope();
+      } catch {
+        // Preserve the originating presentation error.
+      }
+      throw error;
     }
     if (
       !frameIsCurrent()
@@ -1034,7 +1328,11 @@ export function createWorkerOwnedIsosurfacePresenter({
       ? Number(opportunity.observedAtMs)
       : nowMs();
     const opticalPresentation =
-      summarizeWorkerOwnedIsosurfaceOpticalPresentation(frame.surfaces);
+      summarizeWorkerOwnedIsosurfaceOpticalPresentation(
+        frame.opticalMetadataSnapshots || frame.surfaces
+      );
+    const participatingMediumPresentation =
+      workerOwnedParticipatingMediumPresentation(frame);
     const proof = Object.freeze({
       presentationFrameSchema:
         ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA,
@@ -1065,13 +1363,32 @@ export function createWorkerOwnedIsosurfacePresenter({
         ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
       physicsHostQueueFenceParticipation: null,
       workerFramebufferEpoch: submittedFramebufferEpoch,
-      workerOwnedOpticalPresentation: opticalPresentation
+      workerOwnedOpticalPresentation: opticalPresentation,
+      workerOwnedParticipatingMediumPresentation:
+        participatingMediumPresentation,
+      presentationComposition:
+        participatingMediumPresentation.presentationComposition,
+      marchingCubesSurfaceCount:
+        participatingMediumPresentation.marchingCubesSurfaceCount,
+      collectiveOpticalSurfaceCount:
+        participatingMediumPresentation.collectiveOpticalSurfaceCount,
+      participatingMediumStatus: participatingMediumPresentation.status,
+      participatingMediumAggregateDrawCount:
+        participatingMediumPresentation.participatingMediumAggregateDrawCount,
+      collectiveOpticalShellFallbackCount:
+        participatingMediumPresentation.collectiveOpticalShellFallbackCount,
+      participatingMediumDepthClipped:
+        participatingMediumPresentation.participatingMediumDepthClipped,
+      participatingMediumPremultipliedAlpha:
+        participatingMediumPresentation.participatingMediumPremultipliedAlpha,
+      presentationPassOrder:
+        participatingMediumPresentation.presentationPassOrder
     });
     try {
       onFrameSubmitted?.({
         reason,
         generation: frame.generation,
-        surfaceCount: frame.surfaces.length,
+        surfaceCount: frame.totalSurfaceCount ?? frame.surfaces.length,
         sphStep: frame.sphStep,
         ...proof
       });
@@ -1088,6 +1405,10 @@ export function createWorkerOwnedIsosurfacePresenter({
   };
 
   const publishRenderedTerminal = (frame, reason, proof) => {
+    const participatingMediumPresentation =
+      workerOwnedParticipatingMediumPresentation(frame);
+    const submittedSurfaceCount = frame.surfaces.length
+      + participatingMediumPresentation.participatingMediumAggregateDrawCount;
     terminal(
       {
         generation: frame.generation,
@@ -1096,10 +1417,10 @@ export function createWorkerOwnedIsosurfacePresenter({
       ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
       {
         reason,
-        surfaceCount: frame.surfaces.length,
-        submittedSurfaceCount: frame.surfaces.length,
+        surfaceCount: frame.totalSurfaceCount ?? frame.surfaces.length,
+        submittedSurfaceCount,
         activeSurfaceCount: null,
-        indirectDrawCount: frame.surfaces.length,
+        indirectDrawCount: submittedSurfaceCount,
         depthAttachmentFormat: depthFormat,
         depthAttachmentReady: true,
         boxWireframeDrawCount: frame.boxDimsM ? 1 : 0,
@@ -1186,13 +1507,88 @@ export function createWorkerOwnedIsosurfacePresenter({
       throw new Error(blockedDescriptor.reason || blockedDescriptor.status);
     }
 
+    let surfaceDescriptorEntries;
+    let collectiveSurfaceIndices;
+    let participatingMediumDescriptor = null;
+    let consumedCollectiveSurfaceIndices = new Set();
+    let marchingCubesDescriptors;
+    try {
+      surfaceDescriptorEntries = Object.freeze(descriptors.map(
+        (descriptor, surfaceIndex) => Object.freeze({
+          descriptor,
+          metadata: surfaceMetadataSnapshots[surfaceIndex]
+        })
+      ));
+      collectiveSurfaceIndices = surfaceMetadataSnapshots
+        .map((metadata, surfaceIndex) => (
+          isCollectiveOpticalSurface(metadata) ? surfaceIndex : -1
+        ))
+        .filter((surfaceIndex) => surfaceIndex >= 0);
+      if (collectiveSurfaceIndices.length > 0) {
+        const collectiveSurfaceDescriptors = collectiveSurfaceIndices.map(
+          (surfaceIndex) => surfaceDescriptorEntries[surfaceIndex]
+        );
+        participatingMediumDescriptor = createParticipatingMediumDescriptor({
+          device,
+          renderField,
+          surfaceDescriptors: collectiveSurfaceDescriptors
+        });
+        const descriptorStatus = participatingMediumDescriptor?.status;
+        if (![
+          PARTICIPATING_MEDIUM_READY_STATUS,
+          PARTICIPATING_MEDIUM_EMPTY_STATUS,
+          PARTICIPATING_MEDIUM_BLOCKED_STATUS
+        ].includes(descriptorStatus)) {
+          throw new TypeError(
+            'participating-medium descriptor returned an unknown route status'
+          );
+        }
+        const consumedIndices =
+          participatingMediumDescriptor.consumedSurfaceIndices;
+        if (!Array.isArray(consumedIndices)) {
+          throw new TypeError(
+            'participating-medium descriptor omitted consumed surface indices'
+          );
+        }
+        consumedCollectiveSurfaceIndices = new Set(consumedIndices);
+        const expectedCollectiveSurfaceIndices = new Set(
+          collectiveSurfaceIndices
+        );
+        const exactConsumption =
+          consumedCollectiveSurfaceIndices.size
+            === expectedCollectiveSurfaceIndices.size
+          && [...consumedCollectiveSurfaceIndices].every((surfaceIndex) => (
+            Number.isSafeInteger(surfaceIndex)
+            && expectedCollectiveSurfaceIndices.has(surfaceIndex)
+          ));
+        if (!exactConsumption) {
+          throw new TypeError(
+            'participating-medium descriptor did not consume the exact collective optical route set'
+          );
+        }
+      }
+      marchingCubesDescriptors = descriptors.filter(
+        (_descriptor, surfaceIndex) => (
+          !consumedCollectiveSurfaceIndices.has(surfaceIndex)
+        )
+      );
+    } catch (error) {
+      renderField.destroyRenderFieldBuffers?.({
+        force: true,
+        releaseLeases: true,
+        reason: 'worker-participating-medium-descriptor-failed'
+      });
+      throw error;
+    }
+
     const encoder = device.createCommandEncoder({
       label: 'ulg-worker-owned-isosurface-marching-cubes'
     });
     const extracted = [];
     const translatedSurfaces = [];
+    let participatingMediumPackedFrame = null;
     try {
-      for (const descriptor of descriptors) {
+      for (const descriptor of marchingCubesDescriptors) {
         const entry = await adapterForDescriptor(descriptor);
         bindUlgWebGpuMarchingCubesVolumeSuccessorLineage({
           device,
@@ -1216,6 +1612,25 @@ export function createWorkerOwnedIsosurfacePresenter({
           );
         }
         extracted.push({ descriptor, wrapped, rawExecution });
+      }
+      if (
+        participatingMediumDescriptor?.status
+          === PARTICIPATING_MEDIUM_READY_STATUS
+      ) {
+        participatingMediumPackedFrame = await encodeParticipatingMediumPack(
+          ensureParticipatingMediumRuntime(),
+          encoder,
+          participatingMediumDescriptor
+        );
+        if (
+          participatingMediumPackedFrame?.status
+            !== SPH_PARTICIPATING_MEDIUM_PACKED_FRAME_STATUS
+          || participatingMediumPackedFrame.readback !== false
+        ) {
+          throw new TypeError(
+            'participating-medium pack did not return an exact GPU-resident no-readback frame'
+          );
+        }
       }
       device.queue.submit([encoder.finish()]);
       for (const item of extracted) {
@@ -1294,6 +1709,19 @@ export function createWorkerOwnedIsosurfacePresenter({
         viewProjectionMatrix: [...job.admission.viewProjectionMatrix],
         cameraPositionM: [...job.admission.cameraPositionM],
         boxDimsM: finiteVector(job.request.boxDimsM, 3),
+        totalSurfaceCount: surfaceMetadataSnapshots.length,
+        opticalMetadataSnapshots: surfaceMetadataSnapshots,
+        participatingMedium: participatingMediumDescriptor
+          ? {
+              status: participatingMediumDescriptor.status,
+              reason: participatingMediumDescriptor.reason ?? null,
+              collectiveSurfaceCount: collectiveSurfaceIndices.length,
+              consumedSurfaceCount:
+                consumedCollectiveSurfaceIndices.size,
+              packedFrame: participatingMediumPackedFrame,
+              released: false
+            }
+          : null,
         surfaces
       };
     } catch (error) {
@@ -1315,6 +1743,15 @@ export function createWorkerOwnedIsosurfacePresenter({
         if (translatedExecutions.has(item.rawExecution)) continue;
         try {
           item.rawExecution?.result?.release?.();
+        } catch {
+          // Preserve the originating error.
+        }
+      }
+      if (participatingMediumPackedFrame) {
+        try {
+          destroyParticipatingMediumPackedFrame(
+            participatingMediumPackedFrame
+          );
         } catch {
           // Preserve the originating error.
         }
@@ -1818,6 +2255,7 @@ export function createWorkerOwnedIsosurfacePresenter({
           surfaces: invalidatedFrame.surfaces
         };
         invalidatedFrame.surfaces = [];
+        invalidatedFrame.participatingMedium = null;
       }
       return scheduleRedraw({
         viewProjectionMatrix,
@@ -1843,6 +2281,8 @@ export function createWorkerOwnedIsosurfacePresenter({
       return true;
     },
     getStatus() {
+      const participatingMediumPresentation =
+        workerOwnedParticipatingMediumPresentation(currentFrame);
       return Object.freeze({
         schema: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
         status: disposed
@@ -1854,7 +2294,22 @@ export function createWorkerOwnedIsosurfacePresenter({
         queuedGeneration: latestJob?.generation ?? null,
         visibleGeneration: currentFrame?.generation ?? null,
         visibleSphStep: currentFrame?.sphStep ?? null,
-        visibleSurfaceCount: currentFrame?.surfaces?.length ?? 0,
+        visibleSurfaceCount:
+          currentFrame?.totalSurfaceCount
+          ?? currentFrame?.surfaces?.length
+          ?? 0,
+        visibleMarchingCubesSurfaceCount:
+          currentFrame?.surfaces?.length ?? 0,
+        presentationComposition:
+          participatingMediumPresentation.presentationComposition,
+        participatingMediumStatus:
+          participatingMediumPresentation.status,
+        collectiveOpticalSurfaceCount:
+          participatingMediumPresentation.collectiveOpticalSurfaceCount,
+        participatingMediumAggregateDrawCount:
+          participatingMediumPresentation.participatingMediumAggregateDrawCount,
+        collectiveOpticalShellFallbackCount:
+          participatingMediumPresentation.collectiveOpticalShellFallbackCount,
         fieldRowsBufferByteLength,
         adapterCacheEntryCount: adapterCache.size
       });
@@ -1881,6 +2336,12 @@ export function createWorkerOwnedIsosurfacePresenter({
       fieldRowsBuffer?.destroy?.();
       fieldRowsBuffer = null;
       fieldRowsBufferByteLength = 0;
+      try {
+        participatingMediumRuntime?.destroy?.();
+      } catch {
+        // The caller-owned device remains the final teardown boundary.
+      }
+      participatingMediumRuntime = null;
       opaquePipeline = null;
       transparentPipeline = null;
       pipelinePromise = null;

@@ -11,10 +11,14 @@ import {
   SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA,
   SPH_STATIC_TABLE_CACHE_REHYDRATE_SCHEMA,
   SPH_STATIC_TABLE_CACHE_UPDATE_SCHEMA,
+  collectiveOpticalRouteSetAuthoritiesExactlyEqual,
+  compactSphStaticTableBundleForTransfer,
+  createSphCollectiveOpticalRouteSetAuthority,
   createSphStaticTableCacheUpdate,
   parseSphStaticTableCacheSnapshot,
   rehydrateSphStaticTableBundle,
-  rehydrateSphStaticTableCache
+  rehydrateSphStaticTableCache,
+  sphStaticTableInputsFromScene
 } from '../src/runtime/sph/sphColdStartCache.js';
 import {
   buildSphDispersedMediumOpticalClosureTable
@@ -27,6 +31,22 @@ import {
 } from '../src/runtime/sph/sphStaticTableInputs.js';
 
 const generatorFingerprint = 'ulg-test-generator-fingerprint';
+
+test('scene static-table collection retains the dispersed closure through canonical and compatibility getters', () => {
+  const expected = Object.freeze({ schema: 'test-dispersed-closure-table' });
+  assert.equal(
+    sphStaticTableInputsFromScene({
+      getSphDispersedMediumOpticalClosureTable: () => expected
+    }).dispersedMediumOpticalClosureTable,
+    expected
+  );
+  assert.equal(
+    sphStaticTableInputsFromScene({
+      getDispersedMediumOpticalClosureTable: () => expected
+    }).dispersedMediumOpticalClosureTable,
+    expected
+  );
+});
 
 function fakeTableInputs({
   closureScatteringEfficiencyQsca = 2
@@ -365,6 +385,33 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
   assert.equal(bundle.collectiveOpticalRouteSetAuthority.routeCount, 1);
   assert.equal(bundle.collectiveOpticalRouteSetAuthority.opticalRecordCount, 1);
   assert.equal(bundle.collectiveOpticalRouteSetAuthority.closureRowCount, 1);
+  const liveCollectiveOpticalRouteSetAuthority =
+    createSphCollectiveOpticalRouteSetAuthority({
+      routeDescriptors: tableInputs.collectiveOpticalRouteDescriptors,
+      opticalGpuTable: tableInputs.collectiveOpticalGpuTable,
+      closureTable: tableInputs.dispersedMediumOpticalClosureTable
+    });
+  assert.equal(
+    collectiveOpticalRouteSetAuthoritiesExactlyEqual(
+      bundle.collectiveOpticalRouteSetAuthority,
+      liveCollectiveOpticalRouteSetAuthority
+    ),
+    true
+  );
+  const clonedBundle = structuredClone(
+    compactSphStaticTableBundleForTransfer(bundle)
+  );
+  assert.equal(
+    collectiveOpticalRouteSetAuthoritiesExactlyEqual(
+      clonedBundle.collectiveOpticalRouteSetAuthority,
+      liveCollectiveOpticalRouteSetAuthority
+    ),
+    true
+  );
+  assert.ok(clonedBundle.collectiveOpticalGpuTable.records instanceof Float32Array);
+  assert.ok(
+    clonedBundle.dispersedMediumOpticalClosureTable.rows instanceof Float32Array
+  );
   assert.equal(
     bundle.dispersedMediumOpticalClosureTable.schema,
     ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA

@@ -14,6 +14,7 @@ import {
   destroySphDispersedMediumGpuBuffers,
   snapshotSphDispersedMediumGpuBufferDeclaration,
   sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
+  sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches,
   validateSphDispersedMediumGpuBufferAuthority
 } from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
 import {
@@ -28,6 +29,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+  advanceExactParentSphDispersedMediumOpticsTopologyEpoch,
   buildMlsMpmGpuParticleBuffers,
   buildSphGpuParticleBuffers,
   decodeMlsMpmGpuParticleRows,
@@ -35,6 +37,7 @@ import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
+  exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches,
   mlsMpmGpuParticleUploadMatchesDevice,
   registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
@@ -95,9 +98,13 @@ function createTopologyStableOpticsContinuationFixture() {
   const transientBuffer = (label, targetDevice = device) => (
     tagWebGpuBufferDevice({ label }, targetDevice)
   );
-  const sourceFamily = (stateBuffer, thermoBuffer) => ({
+  const sourceFamily = (
+    stateBuffer,
+    thermoBuffer,
+    topologyEpoch = sourceSphUpload.topologyEpoch
+  ) => ({
     particleCount: sourceSphUpload.particleCount,
-    topologyEpoch: sourceSphUpload.topologyEpoch,
+    topologyEpoch,
     identityRevision: sourceSphUpload.identityRevision,
     identityBuffer: sourceSphUpload.identityBuffer,
     stateBuffer,
@@ -472,6 +479,19 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
     }
   };
 
+  assert.throws(
+    () => uploadSphGpuParticleBuffers(device, {
+      ...packed,
+      topologyEpoch: undefined
+    }),
+    /requires an exact u32 topologyEpoch/
+  );
+  assert.deepEqual(
+    writes,
+    [],
+    'missing lineage authority must fail before allocating or uploading'
+  );
+
   const buffers = uploadSphGpuParticleBuffers(device, packed);
   assert.equal(buffers.schema, ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA);
   assert.equal(buffers.status, 'webgpu-uploaded');
@@ -762,10 +782,10 @@ test('SPH GPU particle buffers own and authenticate an optional dispersed-medium
   assert.deepEqual(destroyed, []);
   buffers.__ulgActiveBorrowCount = 0;
   assert.deepEqual(destroyed, [
+    'ulg-sph-dispersed-medium-optics',
     'ulg-sph-particle-state',
     'ulg-sph-particle-thermo',
-    'ulg-sph-particle-identity',
-    'ulg-sph-dispersed-medium-optics'
+    'ulg-sph-particle-identity'
   ]);
   assert.equal(validateSphDispersedMediumGpuBufferAuthority(
     device,
@@ -986,6 +1006,52 @@ test('topology-stable optics source-family continuation accepts exact sequential
   assert.equal(child.buffer.destroyCount, 1);
 });
 
+test('SPH parent teardown preserves ownership when its exact child rejects retirement', () => {
+  const { sourceSphUpload, child } =
+    createTopologyStableOpticsContinuationFixture();
+
+  assert.equal(destroySphDispersedMediumGpuBuffers(child), true);
+  assert.equal(child.buffer.destroyCount, 1);
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), false);
+  assert.notEqual(sourceSphUpload.destroyed, true);
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(sourceSphUpload.stateBuffer.destroyCount, 0);
+  assert.equal(sourceSphUpload.thermoBuffer.destroyCount, 0);
+  assert.equal(sourceSphUpload.identityBuffer.destroyCount, 0);
+});
+
+test('SPH parent teardown retries a throw-first exact child before destroying core buffers', () => {
+  const { sourceSphUpload, child } =
+    createTopologyStableOpticsContinuationFixture();
+  const rawDestroy = child.buffer.destroy.bind(child.buffer);
+  let rawDestroyAttemptCount = 0;
+  child.buffer.destroy = () => {
+    rawDestroyAttemptCount += 1;
+    if (rawDestroyAttemptCount === 1) {
+      throw new Error('synthetic parent-child retirement failure');
+    }
+    rawDestroy();
+  };
+
+  assert.throws(
+    () => destroySphGpuParticleBuffers(sourceSphUpload),
+    /synthetic parent-child retirement failure/
+  );
+  assert.equal(rawDestroyAttemptCount, 1);
+  assert.notEqual(sourceSphUpload.destroyed, true);
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(sourceSphUpload.stateBuffer.destroyCount, 0);
+  assert.equal(sourceSphUpload.thermoBuffer.destroyCount, 0);
+  assert.equal(sourceSphUpload.identityBuffer.destroyCount, 0);
+
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+  assert.equal(rawDestroyAttemptCount, 2);
+  assert.equal(child.buffer.destroyCount, 1);
+  assert.equal(sourceSphUpload.stateBuffer.destroyCount, 1);
+  assert.equal(sourceSphUpload.thermoBuffer.destroyCount, 1);
+  assert.equal(sourceSphUpload.identityBuffer.destroyCount, 1);
+});
+
 test('topology-stable optics source-family continuation returns a scoped rollback authority', () => {
   const {
     device,
@@ -1035,6 +1101,199 @@ test('topology-stable optics source-family continuation returns a scoped rollbac
   );
   assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
   assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+});
+
+test('exact-parent optics topology stamping advances only the epoch and rolls back atomically', () => {
+  const {
+    device,
+    sourceSphUpload,
+    child,
+    sourceFamily
+  } = createTopologyStableOpticsContinuationFixture();
+  const sourceTopologyEpoch = sourceSphUpload.topologyEpoch;
+  const targetTopologyEpoch = sourceTopologyEpoch + 1;
+  const sourceStateBuffer = sourceSphUpload.stateBuffer;
+  const sourceThermoBuffer = sourceSphUpload.thermoBuffer;
+  const sourceIdentityBuffer = sourceSphUpload.identityBuffer;
+  const sourceIdentityRevision = sourceSphUpload.identityRevision;
+  const priorFamily = sourceFamily(
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceTopologyEpoch
+  );
+
+  const receipt =
+    advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload,
+      device,
+      targetTopologyEpoch
+    });
+  const targetFamily = sourceFamily(
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    targetTopologyEpoch
+  );
+
+  assert.equal(Object.isFrozen(receipt), true);
+  assert.equal(Object.isFrozen(receipt.childTransitionWitness), true);
+  assert.equal(receipt.sourceTopologyEpoch, sourceTopologyEpoch);
+  assert.equal(receipt.targetTopologyEpoch, targetTopologyEpoch);
+  assert.equal(sourceSphUpload.topologyEpoch, targetTopologyEpoch);
+  assert.strictEqual(sourceSphUpload.stateBuffer, sourceStateBuffer);
+  assert.strictEqual(sourceSphUpload.thermoBuffer, sourceThermoBuffer);
+  assert.strictEqual(sourceSphUpload.identityBuffer, sourceIdentityBuffer);
+  assert.equal(sourceSphUpload.identityRevision, sourceIdentityRevision);
+  assert.equal(
+    exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches(
+      receipt,
+      { sourceSphUpload, device, targetTopologyEpoch }
+    ),
+    true
+  );
+  assert.equal(
+    exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches(
+      { ...receipt },
+      { sourceSphUpload, device, targetTopologyEpoch }
+    ),
+    false,
+    'copied receipt shape must not authenticate the private transition'
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches(
+      receipt.childTransitionWitness,
+      { upload: child, sourceFamily: priorFamily, targetFamily }
+    ),
+    true
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      child,
+      targetFamily
+    ),
+    true
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(child, priorFamily),
+    false
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(sourceSphUpload, device), true);
+
+  assert.equal(receipt.rollback(), true);
+  assert.equal(receipt.rollback(), true);
+  assert.equal(sourceSphUpload.topologyEpoch, sourceTopologyEpoch);
+  assert.equal(
+    exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches(
+      receipt,
+      { sourceSphUpload, device, targetTopologyEpoch }
+    ),
+    false
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches(
+      receipt.childTransitionWitness,
+      { upload: child, sourceFamily: priorFamily, targetFamily }
+    ),
+    false
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(child, priorFamily),
+    true
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(sourceSphUpload, device), true);
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+});
+
+test('exact-parent optics topology stamping admits the exact observed target only', () => {
+  const {
+    device,
+    sourceSphUpload
+  } = createTopologyStableOpticsContinuationFixture();
+  const sourceTopologyEpoch = sourceSphUpload.topologyEpoch;
+  const targetTopologyEpoch = sourceTopologyEpoch + 1;
+
+  sourceSphUpload.topologyEpoch = targetTopologyEpoch;
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(sourceSphUpload, device),
+    false,
+    'a public topology stamp is not authority before the private transition'
+  );
+  const receipt =
+    advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload,
+      device,
+      targetTopologyEpoch
+    });
+  assert.equal(
+    exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches(
+      receipt,
+      { sourceSphUpload, device, targetTopologyEpoch }
+    ),
+    true
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(sourceSphUpload, device), true);
+  assert.equal(receipt.rollback(), true);
+  assert.equal(sourceSphUpload.topologyEpoch, sourceTopologyEpoch);
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+});
+
+test('exact-parent optics topology stamping rejects drift and stale rollback resurrection', () => {
+  const drifted = createTopologyStableOpticsContinuationFixture();
+  const driftedSourceEpoch = drifted.sourceSphUpload.topologyEpoch;
+  assert.throws(
+    () => advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload: drifted.sourceSphUpload,
+      device: drifted.device,
+      targetTopologyEpoch: driftedSourceEpoch + 2
+    }),
+    /exact source or target stamp|advance by exactly one/
+  );
+  assert.equal(drifted.sourceSphUpload.topologyEpoch, driftedSourceEpoch);
+  const priorRevision = drifted.sourceSphUpload.identityRevision;
+  drifted.sourceSphUpload.identityRevision = `${priorRevision}-drift`;
+  assert.throws(
+    () => advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload: drifted.sourceSphUpload,
+      device: drifted.device,
+      targetTopologyEpoch: driftedSourceEpoch + 1
+    }),
+    /no other parent drift/
+  );
+  drifted.sourceSphUpload.identityRevision = priorRevision;
+  assert.equal(destroySphGpuParticleBuffers(drifted.sourceSphUpload), true);
+
+  const sequential = createTopologyStableOpticsContinuationFixture();
+  const epoch0 = sequential.sourceSphUpload.topologyEpoch;
+  const transition01 =
+    advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload: sequential.sourceSphUpload,
+      device: sequential.device,
+      targetTopologyEpoch: epoch0 + 1
+    });
+  const transition12 =
+    advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload: sequential.sourceSphUpload,
+      device: sequential.device,
+      targetTopologyEpoch: epoch0 + 2
+    });
+  assert.equal(transition01.rollback(), false);
+  assert.equal(transition12.rollback(), true);
+  assert.equal(sequential.sourceSphUpload.topologyEpoch, epoch0 + 1);
+  assert.equal(
+    transition01.rollback(),
+    false,
+    'rolling back the successor must not revive its predecessor capability'
+  );
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(
+      sequential.sourceSphUpload,
+      sequential.device
+    ),
+    true
+  );
+  assert.equal(
+    destroySphGpuParticleBuffers(sequential.sourceSphUpload),
+    true
+  );
 });
 
 test('topology-stable optics source-family continuation rejects wrong predecessors, parents, and devices', () => {
@@ -1181,7 +1440,11 @@ test('topology-stable optics continuation excludes late-getter reentry and fails
   );
   assert.equal(release(), true);
   assert.equal(tornDown.child.buffer.destroyCount, 1);
-  assert.equal(destroySphGpuParticleBuffers(tornDown.sourceSphUpload), true);
+  assert.equal(destroySphGpuParticleBuffers(tornDown.sourceSphUpload), false);
+  assert.equal(
+    tornDown.sourceSphUpload.ownsDispersedMediumOpticsBuffer,
+    true
+  );
   assert.equal(tornDown.child.buffer.destroyCount, 1);
 });
 
@@ -1205,7 +1468,11 @@ test('topology-stable optics continuation rejects pre-existing child and parent 
     /continuation authority is no longer live/
   );
   assert.equal(childRelease(), true);
-  assert.equal(destroySphGpuParticleBuffers(childPending.sourceSphUpload), true);
+  assert.equal(destroySphGpuParticleBuffers(childPending.sourceSphUpload), false);
+  assert.equal(
+    childPending.sourceSphUpload.ownsDispersedMediumOpticsBuffer,
+    true
+  );
 
   const parentPending = createTopologyStableOpticsContinuationFixture();
   parentPending.sourceSphUpload.__ulgActiveBorrowCount = 1;
@@ -1588,7 +1855,8 @@ test('pending-destroy SPH sidecar cannot acquire a continuation parent or owner'
     1
   );
   assert.equal(sphGpuParticleUploadMatchesDevice(target, device), false);
-  assert.equal(destroySphGpuParticleBuffers(source), true);
+  assert.equal(destroySphGpuParticleBuffers(source), false);
+  assert.equal(source.ownsDispersedMediumOpticsBuffer, true);
 });
 
 test('SPH sidecar private lineage rejects an FNV-colliding child swap and tears down its original child', () => {

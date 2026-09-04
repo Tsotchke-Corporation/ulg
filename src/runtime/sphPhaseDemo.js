@@ -14,6 +14,9 @@ import {
   createReferenceAnchoredMaterialClosure,
   resolveMaterialSpec
 } from './material/materialDerivation.js';
+import {
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
+} from './material/condensedDispersedOpticalReferences.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -93,8 +96,8 @@ import { phaseSoundSpeedScaleFor } from './sph/sphMechanicsMaterialTable.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
-const H2O_VAPOR_OPTICAL_STATE_MODEL = 'h2o-vapor-condensation-optical-state-v0';
-const H2O_VAPOR_OPTICAL_STATE_GENERATOR = `${WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL}:sealed-box-gas-summary-v0`;
+const H2O_VAPOR_OPTICAL_STATE_MODEL = 'h2o-vapor-optical-diagnostic-v1';
+const H2O_VAPOR_OPTICAL_STATE_GENERATOR = `${WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL}:sealed-box-gas-summary-nonauthoritative-v1`;
 const REDUCED_H2O_DROPLET_RADIUS_M = 1e-6;
 const AVOGADRO_COUNT = 6.02214076e23;
 const AVOGADRO_R = 8.314462618;
@@ -2456,6 +2459,7 @@ function buildSphInitialBodiesDemoState({
         allowedFallbackSources: [
           'material-property-reference-bank',
           H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+          CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
           ...(allowReducedProductProperties ? ['reactant-packed-product-closure'] : [])
         ]
       });
@@ -2808,6 +2812,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
         allowedFallbackSources: [
           'material-property-reference-bank',
           H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+          CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
           ...(allowReducedProductProperties ? ['reactant-packed-product-closure'] : [])
         ]
       });
@@ -3254,6 +3259,8 @@ function normalizedH2oVaporMicrophysicsState({
   return {
     model: H2O_VAPOR_OPTICAL_STATE_MODEL,
     generator: H2O_VAPOR_OPTICAL_STATE_GENERATOR,
+    authoritative: false,
+    opticalAuthority: null,
     formula: 'h2o',
     phase: 'gas',
     temperatureK: temperatureBucketK,
@@ -3287,23 +3294,21 @@ export function waterVaporOpticalStateFromGasSummary(summary) {
  * render key is only a surface-batching hint. Phase is carried explicitly so non-H2O materials do
  * not get forced through a renderer-side liquid default.
  */
-export function particleRenderDescriptors(demo, { gasPressure = null } = {}) {
-  const waterVaporOpticalState = waterVaporOpticalStateFromGasSummary(gasPressure);
+export function particleRenderDescriptors(demo) {
   return demo.state.particles.map((p) => {
     const props = demo.materialProperties[p.material];
     const phase = stablePhaseFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
     let renderKey = p.material;
-    let opticalState = null;
     if (p.material === 'h2o') {
       if (phase === 'gas') {
         renderKey = 'steam'; // optically-thin vapour -> condensation cloud
-        opticalState = waterVaporOpticalState;
       }
       if (phase === 'solid') renderKey = 'ice'; // translucent solid phase, distinct from clear water
     }
-    return opticalState
-      ? { material: p.material, phase, renderKey, opticalState }
-      : { material: p.material, phase, renderKey };
+    // renderKey is only a presentation label. Visible condensate moments and
+    // their optical route identity come from the conserved resident producer,
+    // never from an aggregate pressure-derived presentation state.
+    return { material: p.material, phase, renderKey };
   });
 }
 
@@ -5914,6 +5919,7 @@ export function createSphPhaseDemo(options = {}) {
       allowedFallbackSources: [
         'material-property-reference-bank',
         H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+        CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
         ...(options.allowReducedProductProperties === true ? ['reactant-packed-product-closure'] : [])
       ]
     });
@@ -6327,7 +6333,8 @@ export function createSphPhaseDemo(options = {}) {
         context: 'createSphPhaseDemo.product-material',
         allowedFallbackSources: [
           'material-property-reference-bank',
-          H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE
+          H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+          CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
         ]
       });
     }

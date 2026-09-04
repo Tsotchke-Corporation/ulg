@@ -982,6 +982,7 @@ export function exactWorkerPhaseCarrierOneToFourTransition(
     || transition.activationAuthority
       !== 'schedule-config-static-declaration-no-readback'
     || ![
+      'static-dispersed-medium-optics-active',
       'static-thermal-law-active',
       'static-reaction-law-active',
       'authenticated-dynamic-reaction-successor'

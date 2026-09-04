@@ -4,6 +4,10 @@ import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
 import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
+import { deriveCompoundClosure } from '../src/runtime/material/compoundClosure.js';
+import {
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
+} from '../src/runtime/material/condensedDispersedOpticalReferences.js';
 import {
   createReferenceAnchoredMaterialClosure
 } from '../src/runtime/material/materialDerivation.js';
@@ -36,7 +40,7 @@ test('every material closure carries per-property provenance', () => {
   }
 });
 
-test('live and fixture H2O share a completely tracked unvalidated optical closure', () => {
+test('live and fixture H2O share a tracked physical sphere optical closure', () => {
   const fixture = createReferenceMaterialClosures().h2o.properties;
   const live = createReferenceAnchoredMaterialClosure('h2o').properties;
   assert.deepEqual(
@@ -50,20 +54,21 @@ test('live and fixture H2O share a completely tracked unvalidated optical closur
   assert.equal(live.dispersedMediumOpticalClosure.scientificValidation, false);
   assert.match(
     live.dispersedMediumOpticalClosure.provenance.method,
-    /unvalidated.*large-particle asymptotic/i
+    /conserved condensed mass.*sphere|compact-sphere radius.*conserved condensed mass/i
   );
   assert.doesNotMatch(
     live.dispersedMediumOpticalClosure.provenance.method,
-    /qsca[^;]*lower.bound/i
+    /qualitative|presentation|lower.bound/i
   );
 
   const expectedPaths = [
     'dispersedMediumOpticalClosure.schema',
     'dispersedMediumOpticalClosure.morphologyModel',
     'dispersedMediumOpticalClosure.condensedDensityKgPerM3',
-    'dispersedMediumOpticalClosure.scatteringEfficiencyQsca',
-    'dispersedMediumOpticalClosure.absorptionEfficiencyQabs',
-    'dispersedMediumOpticalClosure.asymmetryFactorG',
+    'dispersedMediumOpticalClosure.relativeRefractiveIndexN',
+    'dispersedMediumOpticalClosure.relativeExtinctionCoefficientK',
+    'dispersedMediumOpticalClosure.largeSizeRayAsymmetryFactorG',
+    'dispersedMediumOpticalClosure.referenceWavelengthM',
     'dispersedMediumOpticalClosure.provenance',
     'dispersedMediumOpticalClosure.scientificValidation'
   ];
@@ -81,7 +86,7 @@ test('live and fixture H2O share a completely tracked unvalidated optical closur
   assert.equal(densityEntries.at(-1).source, 'material-property-reference-bank');
   assert.equal(
     morphologyEntries.at(-1).source,
-    'unvalidated-compact-carrier-optical-fallback'
+    'reference-index-runtime-radius-sphere-optics'
   );
   assert.notEqual(densityEntries.at(-1).source, morphologyEntries.at(-1).source);
 
@@ -114,6 +119,53 @@ test('live and fixture H2O share a completely tracked unvalidated optical closur
     () => assertNoUnprovenancedMaterialProperties(untrackedRadius),
     /effectiveRadiusM/
   );
+});
+
+test('reference-backed reduced NaOH optics are completely tracked but remain unvalidated', () => {
+  const properties = deriveCompoundClosure({
+    key: 'naoh',
+    label: 'NaOH',
+    atomCounts: { 1: 1, 8: 1, 11: 1 },
+    reactants: [
+      {
+        material: 'Na',
+        molarMassKgPerMol: 0.022989769,
+        densityKgPerM3: 968,
+        bulkModulusPa: 6.3e9,
+        thermalConductivityWPerMK: 142
+      },
+      {
+        material: 'H2O',
+        molarMassKgPerMol: 0.01801528,
+        densityKgPerM3: 997,
+        bulkModulusPa: 2.2e9,
+        thermalConductivityWPerMK: 0.6
+      }
+    ],
+    allowReducedEstimates: true
+  }).properties;
+
+  assert.doesNotThrow(() => assertNoUnprovenancedMaterialProperties(properties));
+  const summary = materialDerivationSummary(properties);
+  assert.equal(summary.fullyLowerLevelDerived, false);
+  assert.equal(summary.hasReferenceFallbacks, true);
+  assert.equal(properties.dispersedMediumOpticalClosure.scientificValidation, false);
+  assert.equal(
+    properties.dispersedMediumOpticalClosure.provenance.source,
+    CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
+  );
+  for (const path of [
+    'dispersedMediumOpticalClosure.condensedDensityKgPerM3',
+    'dispersedMediumOpticalClosure.relativeRefractiveIndexN',
+    'dispersedMediumOpticalClosure.relativeExtinctionCoefficientK',
+    'dispersedMediumOpticalClosure.largeSizeRayAsymmetryFactorG',
+    'dispersedMediumOpticalClosure.referenceWavelengthM'
+  ]) {
+    const entries = provenanceEntriesForPath(properties, path);
+    assert.ok(entries.length > 0, path);
+    assert.equal(entries.at(-1).status, DS.REFERENCE_FALLBACK, path);
+    assert.equal(entries.at(-1).source, CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE, path);
+  }
 });
 
 test('reference-backed H2O/Fe remain blocked while production closures are fully derived', () => {

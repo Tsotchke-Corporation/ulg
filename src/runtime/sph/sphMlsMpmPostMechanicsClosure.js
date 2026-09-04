@@ -1660,6 +1660,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   // which stage wrote a lane.
   stageMechanicsTracer = null,
   afterReactionStep = null,
+  afterPhaseCarrierTransfer = null,
   queueOrderedProducerClaims = []
 } = {}) {
   if (!postMechanicsParticleBuffers || typeof postMechanicsParticleBuffers !== 'object') {
@@ -1693,6 +1694,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   let reactionStep = null;
   let mechanicsRefreshStep = null;
   let phaseCarrierTransferStep = null;
+  let phaseCarrierTransferFamilyReceipt = null;
   let queueOrderedFinalConsumerCapability = null;
   let mechanicsQueueOrderedFinalConsumerCapability = null;
   let replacementResidentProductMass = null;
@@ -2053,6 +2055,12 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     && phaseCarrierSourceThermoBuffer
     && phaseCarrierSourceMechanicsBuffer
   ) {
+    const phaseCarrierParticleLineage = Object.freeze({
+      particleCount: sphParticleUpload?.particleCount,
+      topologyEpoch: sphParticleUpload?.topologyEpoch,
+      identityRevision: sphParticleUpload?.identityRevision,
+      identityBuffer: sphParticleUpload?.identityBuffer ?? null
+    });
     phaseCarrierTransferStep = await timedStage(
       'phaseCarrierTransfer',
       () => phaseCarrierTransferRunner({
@@ -2090,7 +2098,39 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       reactionQueueOrderedClaims,
       queueOrderedFinalConsumerCapability
     );
+    const retainedPhaseCarrierOutput =
+      retainedPhaseCarrierTransferOutputBuffers(
+        phaseCarrierTransferStep
+      );
+    phaseCarrierTransferFamilyReceipt = Object.freeze({
+      schema:
+        'peercompute.ulg.sph-phase-carrier-transfer-family-receipt.v0',
+      status: 'phase-carrier-transfer-family-authenticated',
+      device,
+      phaseCarrierPlan,
+      particleLineage: phaseCarrierParticleLineage,
+      preReactionStateBuffer: reactionSourceStateBuffer,
+      preReactionThermoBuffer: reactionSourceThermoBuffer,
+      postReactionStateBuffer: phaseCarrierSourceStateBuffer,
+      postReactionThermoBuffer: phaseCarrierSourceThermoBuffer,
+      preTransferStateBuffer: phaseCarrierSourceStateBuffer,
+      preTransferThermoBuffer: phaseCarrierSourceThermoBuffer,
+      preTransferMechanicsBuffer: phaseCarrierSourceMechanicsBuffer,
+      postTransferStateBuffer: retainedPhaseCarrierOutput.stateBuffer,
+      postTransferThermoBuffer: retainedPhaseCarrierOutput.thermoBuffer,
+      postTransferMechanicsBuffer:
+        retainedPhaseCarrierOutput.mechanicsBuffer,
+      reactionParticleMutationApplied: reactionMutatesParticles,
+      reactionStateMutationApplied: reactionComponentMutations.state,
+      reactionThermoMutationApplied: reactionComponentMutations.thermo
+    });
     executedStageOrder.push('phase-carrier-transfer-v2');
+    if (typeof afterPhaseCarrierTransfer === 'function') {
+      await afterPhaseCarrierTransfer({
+        phaseCarrierTransferStep,
+        phaseCarrierTransferFamilyReceipt
+      });
+    }
   }
 
   const phaseCarrierOutput = retainedPhaseCarrierTransferOutputBuffers(
@@ -2494,6 +2534,10 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   ]);
   Object.defineProperty(closure, 'queueOrderedCleanupClaims', {
     value: queueOrderedCleanupClaims,
+    enumerable: false
+  });
+  Object.defineProperty(closure, 'phaseCarrierTransferFamilyReceipt', {
+    value: phaseCarrierTransferFamilyReceipt,
     enumerable: false
   });
   if (queueOrderedFinalConsumerCapability) {

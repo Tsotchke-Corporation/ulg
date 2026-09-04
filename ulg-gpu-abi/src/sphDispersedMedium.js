@@ -46,7 +46,7 @@ export const SPH_DISPERSED_MEDIUM_OPTICS_ABI = Object.freeze({
   readbackPolicy: 'no-host-hot-loop-readback'
 });
 
-export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION = 0;
+export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION = 1;
 export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_FLOATS = 12;
 export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_BYTES =
   SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_FLOATS
@@ -60,7 +60,8 @@ export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS = Object.freeze({
 export const SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL = Object.freeze({
   blocked: 0,
   singleCompactCondensateCarrierLowerBound: 1,
-  monodisperseRadius: 2
+  monodisperseRadius: 2,
+  singleCompactSphereComplexIndex: 3
 });
 
 export const SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS =
@@ -68,7 +69,9 @@ export const SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS =
     blocked: 'blocked-missing-or-invalid-morphology',
     singleCompactCondensateCarrierLowerBound:
       'single-compact-condensate-carrier-lower-bound',
-    monodisperseRadius: 'monodisperse-radius'
+    monodisperseRadius: 'monodisperse-radius',
+    singleCompactSphereComplexIndex:
+      'single-compact-sphere-complex-index'
   });
 
 export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES = Object.freeze({
@@ -80,10 +83,14 @@ export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES = Object.freeze({
   status: 5,
   condensedDensityKgPerM3: 6,
   scatteringEfficiencyQsca: 7,
+  relativeRefractiveIndexN: 7,
   absorptionEfficiencyQabs: 8,
+  relativeExtinctionCoefficientK: 8,
   asymmetryFactorG: 9,
+  largeSizeRayAsymmetryFactorG: 9,
   effectiveRadiusM: 10,
-  reserved0: 11
+  reserved0: 11,
+  referenceWavelengthM: 11
 });
 
 export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LAYOUT = Object.freeze([
@@ -120,5 +127,7 @@ export const SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ABI = Object.freeze({
     'already-conserved-dispersed-condensed-mass-only-never-saturation-inference',
   blockedPolicy:
     'missing-or-invalid-morphology-publishes-blocked-zero-closure-lanes',
+  taggedLanePolicy:
+    'morphology-3-reinterprets-efficiency-lanes-as-relative-complex-index-and-large-size-ray-asymmetry;reserved0-is-reference-wavelength-m',
   alignment: 'three-vec4-f32-record'
 });

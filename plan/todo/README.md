@@ -7,21 +7,32 @@ files remain valid, while the superseding seven-goal order below controls
 implementation sequencing. Authority and distributed law execution do not
 count as done while the visible physics loop or measured cadence is incoherent.
 
-## Superseding Immediate Goal Order - 2026-08-31 AKDT
+## Superseding Immediate Goal Order - 2026-09-04 AKDT
 
-1. Restore at least real-time simulation cadence across all six canned presets,
-   with periodic real-desktop animation checks.
-2. Finish gas/phase transport and conserved condensate optics for physically
-   derived steam, mist, smoke, and aerosol.
-3. Deliver coherent solids from SOL-0/SOL-1 through the dependency-gated later
-   milestones.
-4. Generalize per-node dynamic-law activation beyond the reaction seed.
-5. Add epoch-fenced distributed multi-consumer reservations.
-6. Wire online regime-keyed closure derivation, cache, and schedule-boundary
-   adoption.
+1. Verified: restore visual presentation within 10% of 60 Hz for bulk-water and
+   water-realtime, with actual advancing physics across all six defaults.
+   Simulation real time and higher true-isosurface cadence are follow-ons.
+2. In progress: complete conserved phase/transport optics and a shared
+   participating-volume display for physically derived visible steam and
+   aerosol smoke. Final long-horizon plume evidence remains open.
+3. Deliver the minimum coherent-solid foundation, SOL-0/SOL-1, with compatible
+   phase transitions. SOL-2 through SOL-6 remain later dependency-gated work.
+4. Generalize per-node dynamic-law activation beyond the reaction seed, keeping
+   relevant generalized kernels warm across envelope transitions.
+5. Add a bounded compare-and-swap multi-consumer reservation slice around the
+   existing retained ownership model.
+6. Land one local provenance-bound online closure fit/cache slice with
+   envelope invalidation before extending it to remote derivation services.
 7. Add an external fuzzy scientific release audit over immutable, versioned
    database snapshots cached on shitbox. This audit is offline and nonblocking;
    it never becomes runtime authority.
+
+Current verification: the 2026-09-04 desktop sweep passed all six defaults and
+all twelve images were inspected after the optical ownership fix. Bulk-water
+measured 56.704 Hz and water-realtime 56.874 Hz. See
+`plan/implementation-status.md` for evidence and
+the remaining Goal 2 acceptance work. The full transport/property and steam
+microphysics plans remain active where their requirements exceed this slice.
 
 ## Archive Cleanup - 2026-08-31 AKDT
 

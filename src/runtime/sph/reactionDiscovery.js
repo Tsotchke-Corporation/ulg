@@ -38,6 +38,11 @@ import {
 import { deriveElementProperties } from '../material/elementClosures.js';
 import { deriveCompoundClosure } from '../material/compoundClosure.js';
 import {
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
+  createCondensedDispersedMediumOpticalClosure
+} from '../material/condensedDispersedOpticalReferences.js';
+import {
   H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
   deriveMaterialProperties,
   formulaMolarMassKgPerMol,
@@ -63,7 +68,7 @@ export const REACTION_DISCOVERY_CACHE_KEY_SCHEMA = 'peercompute.ulg.reaction-dis
 export const REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA =
   'peercompute.ulg.reaction-discovery-empty-catalog-authority.v0';
 const REACTION_DISCOVERY_EVALUATION_VERSION =
-  'reaction-discovery-evaluation-with-empty-catalog-authority-v0';
+  'reaction-discovery-evaluation-with-empty-catalog-and-condensed-optical-reference-v1';
 
 function reactionDiscoveryEmptyCatalogAuthority(status, reason) {
   return Object.freeze({
@@ -175,6 +180,8 @@ function materialPropertyCacheDigest(properties) {
       temperatureK: transition.temperatureK ?? null,
       latentHeatJPerKg: transition.latentHeatJPerKg ?? null
     })),
+    dispersedMediumOpticalClosure:
+      properties.dispersedMediumOpticalClosure || null,
     materialDerivation: materialDerivationSummary(properties),
     propertyProvenance: properties.propertyProvenance || null,
     validation: properties.validation || null
@@ -209,6 +216,10 @@ export function createReactionDiscoveryCacheKey(keyA, keyB, options = {}) {
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
     strictEnergetics: options.strictEnergetics === true,
     reactionDiscoveryEvaluationVersion: REACTION_DISCOVERY_EVALUATION_VERSION,
+    condensedDispersedOpticalReferenceBankFingerprint:
+      CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
+    condensedDispersedOpticalReferenceMethodRevision:
+      CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
     sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT,
     standardFormationEnthalpyFingerprint: STANDARD_FORMATION_ENTHALPY_FINGERPRINT
   });
@@ -487,6 +498,18 @@ function cachedProductClosureFor(productKey, options = {}) {
   ].filter(Boolean);
   const found = candidates.find((candidate) => candidate?.properties);
   if (!found) return null;
+  const requiredOpticalClosure =
+    createCondensedDispersedMediumOpticalClosure({
+      material: productKey,
+      condensedPhase: 'liquid'
+    });
+  if (
+    requiredOpticalClosure
+    && hashPayload(found.properties.dispersedMediumOpticalClosure || null)
+      !== hashPayload(requiredOpticalClosure)
+  ) {
+    return null;
+  }
   return {
     ...found,
     cacheReuse: {
@@ -1051,6 +1074,10 @@ export function discoverReactions(keyA, keyB, options = {}) {
     allowReducedProductProperties: options.allowReducedProductProperties === true,
     deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
     strictEnergetics: options.strictEnergetics === true,
+    condensedDispersedOpticalReferenceBankFingerprint:
+      CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
+    condensedDispersedOpticalReferenceMethodRevision:
+      CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
     sedenionReactionScopeFingerprint: SEDENION_REACTION_SCOPE_FINGERPRINT,
     standardFormationEnthalpyFingerprint: STANDARD_FORMATION_ENTHALPY_FINGERPRINT
   };

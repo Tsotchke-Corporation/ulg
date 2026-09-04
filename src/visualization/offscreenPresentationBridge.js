@@ -112,6 +112,91 @@ function compactWorkerOwnedOpticalPresentation(value = null) {
   });
 }
 
+function compactWorkerOwnedParticipatingMediumPresentation(value = null) {
+  if (
+    value?.schema
+      !== 'peercompute.ulg.worker-participating-medium-presentation.v0'
+  ) return null;
+  const count = (field) => {
+    const number = value[field];
+    return typeof number === 'number'
+      && Number.isSafeInteger(number)
+      && number >= 0
+      ? number
+      : null;
+  };
+  const presentationComposition = nonEmptyString(
+    value.presentationComposition
+  );
+  const status = nonEmptyString(value.status);
+  const marchingCubesSurfaceCount = count('marchingCubesSurfaceCount');
+  const collectiveOpticalSurfaceCount = count(
+    'collectiveOpticalSurfaceCount'
+  );
+  const participatingMediumAggregateDrawCount = count(
+    'participatingMediumAggregateDrawCount'
+  );
+  const collectiveOpticalShellFallbackCount = count(
+    'collectiveOpticalShellFallbackCount'
+  );
+  const presentationPassOrder = Array.isArray(value.presentationPassOrder)
+    ? value.presentationPassOrder.map(nonEmptyString)
+    : null;
+  if (
+    presentationComposition == null
+    || status == null
+    || marchingCubesSurfaceCount == null
+    || collectiveOpticalSurfaceCount == null
+    || participatingMediumAggregateDrawCount == null
+    || collectiveOpticalShellFallbackCount == null
+    || typeof value.participatingMediumDepthClipped !== 'boolean'
+    || typeof value.participatingMediumPremultipliedAlpha !== 'boolean'
+    || presentationPassOrder == null
+    || presentationPassOrder.length === 0
+    || presentationPassOrder.some((entry) => entry == null)
+  ) return null;
+  return Object.freeze({
+    schema: value.schema,
+    status,
+    presentationComposition,
+    marchingCubesSurfaceCount,
+    collectiveOpticalSurfaceCount,
+    participatingMediumAggregateDrawCount,
+    collectiveOpticalShellFallbackCount,
+    participatingMediumDepthClipped:
+      value.participatingMediumDepthClipped,
+    participatingMediumPremultipliedAlpha:
+      value.participatingMediumPremultipliedAlpha,
+    presentationPassOrder: Object.freeze(presentationPassOrder)
+  });
+}
+
+function workerParticipatingMediumProofReady(receipt, compactProof) {
+  if (!compactProof) return false;
+  const passOrder = receipt?.presentationPassOrder;
+  return Boolean(
+    receipt?.presentationComposition === compactProof.presentationComposition
+    && receipt?.marchingCubesSurfaceCount
+      === compactProof.marchingCubesSurfaceCount
+    && receipt?.collectiveOpticalSurfaceCount
+      === compactProof.collectiveOpticalSurfaceCount
+    && receipt?.participatingMediumStatus === compactProof.status
+    && receipt?.participatingMediumAggregateDrawCount
+      === compactProof.participatingMediumAggregateDrawCount
+    && receipt?.collectiveOpticalShellFallbackCount
+      === compactProof.collectiveOpticalShellFallbackCount
+    && receipt?.participatingMediumDepthClipped
+      === compactProof.participatingMediumDepthClipped
+    && receipt?.participatingMediumPremultipliedAlpha
+      === compactProof.participatingMediumPremultipliedAlpha
+    && Array.isArray(passOrder)
+    && passOrder.length === compactProof.presentationPassOrder.length
+    && passOrder.every(
+      (entry, index) => entry === compactProof.presentationPassOrder[index]
+    )
+  );
+}
+
 function workerPresentationPhysicsPrefixNotAttributed(receipt = null) {
   return Boolean(
     receipt?.physicsQueuePrefixCoverage
@@ -2780,6 +2865,15 @@ export function createUlgWorkerOffscreenPresentationBridge({
         });
         if (ring.length > 32) ring.splice(0, ring.length - 32);
       }
+      const compactParticipatingMediumPresentation =
+        compactWorkerOwnedParticipatingMediumPresentation(
+          contentReceipt?.workerOwnedParticipatingMediumPresentation
+        );
+      const participatingMediumProofReady =
+        workerParticipatingMediumProofReady(
+          contentReceipt,
+          compactParticipatingMediumPresentation
+        );
       const compactContentReceipt = exactFramebufferReceipt
         ? Object.freeze({
             schema: contentReceipt.schema ?? null,
@@ -2964,7 +3058,39 @@ export function createUlgWorkerOffscreenPresentationBridge({
                   workerOwnedOpticalPresentation:
                     compactWorkerOwnedOpticalPresentation(
                       contentReceipt.workerOwnedOpticalPresentation
-                    )
+                    ),
+                  ...(participatingMediumProofReady
+                    ? {
+                        workerOwnedParticipatingMediumPresentation:
+                          compactParticipatingMediumPresentation,
+                        presentationComposition:
+                          compactParticipatingMediumPresentation
+                            .presentationComposition,
+                        marchingCubesSurfaceCount:
+                          compactParticipatingMediumPresentation
+                            .marchingCubesSurfaceCount,
+                        collectiveOpticalSurfaceCount:
+                          compactParticipatingMediumPresentation
+                            .collectiveOpticalSurfaceCount,
+                        participatingMediumStatus:
+                          compactParticipatingMediumPresentation.status,
+                        participatingMediumAggregateDrawCount:
+                          compactParticipatingMediumPresentation
+                            .participatingMediumAggregateDrawCount,
+                        collectiveOpticalShellFallbackCount:
+                          compactParticipatingMediumPresentation
+                            .collectiveOpticalShellFallbackCount,
+                        participatingMediumDepthClipped:
+                          compactParticipatingMediumPresentation
+                            .participatingMediumDepthClipped,
+                        participatingMediumPremultipliedAlpha:
+                          compactParticipatingMediumPresentation
+                            .participatingMediumPremultipliedAlpha,
+                        presentationPassOrder:
+                          compactParticipatingMediumPresentation
+                            .presentationPassOrder
+                      }
+                    : {})
                 }
               : {}),
             ...(temporalMotionFrameProofReady

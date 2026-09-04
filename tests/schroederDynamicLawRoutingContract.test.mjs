@@ -863,11 +863,11 @@ test('target authority and prospective transition reject every legacy disabled t
   });
   const transition = authority.prospectiveDynamicLawTransition;
   assert.equal(ULG_SCHROEDER_TARGET_SCHEDULE_AUTHORITY_SCHEMA,
-    'peercompute.ulg.schroeder-target-schedule-authority.v5');
+    'peercompute.ulg.schroeder-target-schedule-authority.v6');
   assert.equal(ULG_SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_SCHEMA,
     'peercompute.ulg.schroeder-prospective-dynamic-law-transition.v3');
   assert.equal(SCHROEDER_TARGET_SCHEDULE_REQUEST_REVISION,
-    'main-thread-next-schedule-request-prospective-writer-transition-sha256-v9');
+    'main-thread-next-schedule-request-prospective-writer-transition-sha256-v10');
   assert.equal(SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_REVISION,
     'reaction-or-retained-product-gas-boundary-sha256-v3');
   assert.equal(authority.shadowOnly, false);
@@ -875,7 +875,7 @@ test('target authority and prospective transition reject every legacy disabled t
   assert.equal(transition.shadowOnly, false);
   assert.equal(transition.routingAuthority, true);
   assert.match(authority.requestFingerprint,
-    /^sha256:schroeder-target-schedule-authority-v7:/);
+    /^sha256:schroeder-target-schedule-authority-v8:/);
   assert.match(transition.transitionFingerprint,
     /^sha256:schroeder-prospective-dynamic-law-transition-v1:/);
 

@@ -1,0 +1,85 @@
+{
+  "schema": "peercompute.ulg.condensed-dispersed-optical-reference-bank.v0",
+  "methodRevision": "condensed-dispersed-optical-reference-closure.v1",
+  "scientificValidation": false,
+  "records": [
+    {
+      "id": "naoh-pure-anhydrous-molten-693.15k-589.4nm",
+      "materialKeys": [
+        "naoh"
+      ],
+      "formulas": [
+        "NaOH"
+      ],
+      "atomCounts": {
+        "1": 1,
+        "8": 1,
+        "11": 1
+      },
+      "condensedPhase": "liquid",
+      "materialForm": "pure-anhydrous-molten-sodium-hydroxide",
+      "referenceTemperatureK": 693.15,
+      "referenceWavelengthM": 5.894e-7,
+      "condensedDensityKgPerM3": 1736.39704,
+      "absoluteRefractiveIndexN": 1.421,
+      "carrierRefractiveIndexN": 1.000293,
+      "relativeRefractiveIndexN": 1.420583768955696,
+      "relativeExtinctionCoefficientK": 0,
+      "extinctionModel": "lossless-model-assumption",
+      "largeSizeRayAsymmetryFactorG": 0.7016530763788665,
+      "densityModel": {
+        "model": "linear-temperature",
+        "equation": "rho_g_per_cm3 = 2.068 - 0.4784e-3 * temperature_K",
+        "interceptGPerCm3": 2.068,
+        "slopeGPerCm3PerK": -0.0004784,
+        "validTemperatureRangeK": [
+          623,
+          723
+        ],
+        "evaluatedTemperatureK": 693.15
+      },
+      "provenance": {
+        "status": "reference-fallback",
+        "accuracy": "single-wavelength-real-index-reference-with-unvalidated-lossless-extinction-and-compact-sphere-morphology",
+        "method": "use the measured molten-salt density relation and reported sodium-D-line absolute refractive index; divide by the standard-air carrier index; set k=0 only as an explicit lossless model assumption; derive the large-size sphere asymmetry factor from the generic Fresnel ray closure",
+        "sources": [
+          {
+            "role": "density-critical-compilation",
+            "title": "Molten Salts: Volume 1, Electrical Conductance, Density, and Viscosity Data",
+            "publisher": "National Bureau of Standards",
+            "url": "https://nvlpubs.nist.gov/nistpubs/Legacy/NSRDS/nbsnsrds15.pdf",
+            "detail": "NSRDS-NBS 15, table 167 and cumulative density equation table: NaOH rho[g/cm^3] = 2.068 - 0.4784e-3 T[K], stated range 623-723 K"
+          },
+          {
+            "role": "density-primary-study",
+            "title": "Leitfahigkeit und Zahigkeit von geschmolzenem Natrium- und Kaliumhydroxyd",
+            "doi": "10.1515/zpch-1926-12131",
+            "url": "https://doi.org/10.1515/zpch-1926-12131"
+          },
+          {
+            "role": "refractive-index-primary-study",
+            "title": "Uber die Molekularrefraktion einiger geschmolzener Salze",
+            "doi": "10.1515/zpch-1922-10022",
+            "url": "https://doi.org/10.1515/zpch-1922-10022",
+            "detail": "NaOH absolute refractive index n=1.421 at the 589.4 nm sodium D line and 693.15 K reference state"
+          },
+          {
+            "role": "chemical-identity",
+            "title": "PubChem: Sodium Hydroxide",
+            "url": "https://pubchem.ncbi.nlm.nih.gov/compound/Sodium-Hydroxide"
+          }
+        ],
+        "blockers": [
+          "molten-naoh-visible-extinction-spectrum-not-measured",
+          "reaction-plume-hydration-and-composition-not-resolved",
+          "reaction-product-size-distribution-not-produced",
+          "compact-carrier-optics-resolution-dependence-not-validated",
+          "single-wavelength-reference-not-full-visible-spectrum",
+          "runtime-condensed-phase-and-temperature-applicability-not-enforced",
+          "reaction-product-phase-boundaries-and-high-temperature-composition-not-resolved"
+        ]
+      },
+      "scientificValidation": false
+    }
+  ]
+}

@@ -47,7 +47,51 @@ const LIQUID_WATER_DENSITY_KG_PER_M3 = 997;
 const STANDARD_AIR_DENSITY_KG_PER_M3 = 1.225;
 const STANDARD_AIR_RAYLEIGH_SCATTERING_550NM_PER_M = 1.1e-5;
 const AIR_REFRACTIVE_INDEX_VISIBLE = 1.000293;
-export const WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL = 'clausius-clapeyron-droplet-scattering-v0';
+// Hale & Querry, Applied Optics 12 (1973): visible liquid-water optical
+// constants. The 550 nm real index is rounded to the closure's existing 1.333.
+const WATER_LIQUID_REFRACTIVE_INDEX_VISIBLE = 1.333;
+export const SPHERE_OPTICS_REFERENCE_WAVELENGTH_M = 550e-9;
+export const SPHERE_OPTICAL_EFFICIENCY_MODEL =
+  'rayleigh-lorenz-mie-geometric-optics-diffraction-sphere-v1';
+export const WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL =
+  'clausius-clapeyron-monodisperse-lorenz-mie-v1';
+
+export const SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY = Object.freeze({
+  rayleighMaxSizeParameter: 0.1,
+  rayleighMaxInternalSizeParameter: 0.1,
+  rayleighMaxContrastMagnitudeSquared: 1,
+  exactMieMaxSizeParameter: 32,
+  exactMieMaxTerms: 128,
+  exactMieMinInternalSizeParameter: 1e-5,
+  exactMieEnergyRelativeTolerance: 1e-4,
+  geometricOpticsMinSizeParameter: 80,
+  geometricOpticsMinCentralPhaseDelay: 48
+});
+
+const SPHERE_RAYLEIGH_MAX_SIZE_PARAMETER =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY.rayleighMaxSizeParameter;
+const SPHERE_RAYLEIGH_MAX_INTERNAL_SIZE_PARAMETER =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
+    .rayleighMaxInternalSizeParameter;
+const SPHERE_RAYLEIGH_MAX_CONTRAST_MAGNITUDE_SQUARED =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
+    .rayleighMaxContrastMagnitudeSquared;
+const SPHERE_EXACT_MIE_MAX_SIZE_PARAMETER =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY.exactMieMaxSizeParameter;
+const SPHERE_EXACT_MIE_MAX_TERMS =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY.exactMieMaxTerms;
+const SPHERE_EXACT_MIE_MIN_INTERNAL_SIZE_PARAMETER =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
+    .exactMieMinInternalSizeParameter;
+const SPHERE_EXACT_MIE_ENERGY_RELATIVE_TOLERANCE =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
+    .exactMieEnergyRelativeTolerance;
+const SPHERE_GEOMETRIC_OPTICS_MIN_SIZE_PARAMETER =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
+    .geometricOpticsMinSizeParameter;
+const SPHERE_GEOMETRIC_OPTICS_MIN_CENTRAL_PHASE_DELAY =
+  SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
+    .geometricOpticsMinCentralPhaseDelay;
 
 function gauss(x, mu, s1, s2) {
   const t = (x - mu) * (x < mu ? 1 / s1 : 1 / s2);
@@ -235,66 +279,700 @@ export function waterSaturationPressurePa(temperatureK) {
   );
 }
 
+function sphereComplexAdd(a, b) {
+  return [a[0] + b[0], a[1] + b[1]];
+}
+
+function sphereComplexSubtract(a, b) {
+  return [a[0] - b[0], a[1] - b[1]];
+}
+
+function sphereComplexMultiply(a, b) {
+  return [
+    a[0] * b[0] - a[1] * b[1],
+    a[0] * b[1] + a[1] * b[0]
+  ];
+}
+
+function sphereComplexScale(value, scale) {
+  return [value[0] * scale, value[1] * scale];
+}
+
+function sphereComplexDivide(a, b) {
+  const denominator = b[0] * b[0] + b[1] * b[1];
+  return [
+    (a[0] * b[0] + a[1] * b[1]) / denominator,
+    (a[1] * b[0] - a[0] * b[1]) / denominator
+  ];
+}
+
+function sphereComplexAbsSquared(value) {
+  return value[0] * value[0] + value[1] * value[1];
+}
+
+function sphereComplexRealProductConjugate(left, right) {
+  return left[0] * right[0] + left[1] * right[1];
+}
+
+function sphereRayleighEfficiencies(sizeParameter, relativeIndex) {
+  // Electrostatic small-sphere limit of Lorenz-Mie theory:
+  // Qsca=(8/3)x^4 |(m^2-1)/(m^2+2)|^2 and
+  // Qabs=4x Im((m^2-1)/(m^2+2)).
+  const relativeIndexSquared = sphereComplexMultiply(relativeIndex, relativeIndex);
+  const contrast = sphereComplexDivide(
+    sphereComplexSubtract(relativeIndexSquared, [1, 0]),
+    sphereComplexAdd(relativeIndexSquared, [2, 0])
+  );
+  const scatteringEfficiencyQsca = (8 / 3)
+    * sizeParameter ** 4
+    * sphereComplexAbsSquared(contrast);
+  const absorptionEfficiencyQabs = Math.max(
+    0,
+    4 * sizeParameter * contrast[1]
+  );
+  return {
+    scatteringEfficiencyQsca,
+    absorptionEfficiencyQabs,
+    asymmetryFactorG: 0
+  };
+}
+
+function sphereRayleighDomainMatches(sizeParameter, relativeIndex) {
+  if (sizeParameter > SPHERE_RAYLEIGH_MAX_SIZE_PARAMETER) return false;
+  // The electrostatic limit requires both the external and internal size
+  // parameters to be small. It also excludes the m^2+2 polarizability pole,
+  // where the uncorrected Rayleigh expression can violate finite-wave energy
+  // behavior even at small x. Marginal/high-contrast cases use exact Mie.
+  if (
+    Math.hypot(relativeIndex[0], relativeIndex[1]) * sizeParameter
+      > SPHERE_RAYLEIGH_MAX_INTERNAL_SIZE_PARAMETER
+  ) {
+    return false;
+  }
+  const relativeIndexSquared = sphereComplexMultiply(relativeIndex, relativeIndex);
+  const contrastDenominator = sphereComplexAdd(relativeIndexSquared, [2, 0]);
+  const denominatorMagnitudeSquared = sphereComplexAbsSquared(
+    contrastDenominator
+  );
+  if (!(denominatorMagnitudeSquared > 0)) return false;
+  const contrast = sphereComplexDivide(
+    sphereComplexSubtract(relativeIndexSquared, [1, 0]),
+    contrastDenominator
+  );
+  const contrastMagnitudeSquared = sphereComplexAbsSquared(contrast);
+  return Number.isFinite(contrastMagnitudeSquared)
+    && contrastMagnitudeSquared
+      <= SPHERE_RAYLEIGH_MAX_CONTRAST_MAGNITUDE_SQUARED;
+}
+
+function sphereLorenzMieEfficiencies(sizeParameter, relativeIndex) {
+  // Standard homogeneous-sphere Lorenz-Mie a_n/b_n series evaluated using the
+  // downward logarithmic-derivative recurrence documented by Bohren & Huffman,
+  // Absorption and Scattering of Light by Small Particles (1983), algorithm
+  // BHMIE. The bounded term count is a runtime policy, not validation.
+  const x = sizeParameter;
+  const mx = sphereComplexScale(relativeIndex, x);
+  if (Math.hypot(mx[0], mx[1]) <= SPHERE_EXACT_MIE_MIN_INTERNAL_SIZE_PARAMETER) {
+    return {
+      valid: false,
+      failureReason: 'internal-size-parameter-below-numeric-floor',
+      scatteringEfficiencyQsca: 0,
+      absorptionEfficiencyQabs: 0,
+      asymmetryFactorG: 0
+    };
+  }
+  const seriesTerms = Math.ceil(x + 4 * Math.cbrt(x) + 2);
+  const downwardTerms = Math.ceil(Math.max(
+    seriesTerms + 16,
+    Math.hypot(mx[0], mx[1]) + 16
+  ));
+  if (
+    seriesTerms >= SPHERE_EXACT_MIE_MAX_TERMS
+    || downwardTerms >= SPHERE_EXACT_MIE_MAX_TERMS
+  ) {
+    return null;
+  }
+
+  const logarithmicDerivative = Array.from(
+    { length: downwardTerms + 1 },
+    () => [0, 0]
+  );
+  for (let order = downwardTerms; order > 0; order -= 1) {
+    const orderOverMx = sphereComplexDivide([order, 0], mx);
+    logarithmicDerivative[order - 1] = sphereComplexSubtract(
+      orderOverMx,
+      sphereComplexDivide(
+        [1, 0],
+        sphereComplexAdd(logarithmicDerivative[order], orderOverMx)
+      )
+    );
+  }
+
+  let psiPrior = Math.cos(x);
+  let psiCurrent = Math.sin(x);
+  let chiPrior = -Math.sin(x);
+  let chiCurrent = Math.cos(x);
+  let xiCurrent = [psiCurrent, -chiCurrent];
+  let previousA = [0, 0];
+  let previousB = [0, 0];
+  let scatteringSum = 0;
+  let extinctionSum = 0;
+  let asymmetrySum = 0;
+
+  for (let order = 1; order <= seriesTerms; order += 1) {
+    const recurrence = (2 * order - 1) / x;
+    const psiNext = recurrence * psiCurrent - psiPrior;
+    const chiNext = recurrence * chiCurrent - chiPrior;
+    const xiNext = [psiNext, -chiNext];
+    const orderOverX = [order / x, 0];
+    const electricFactor = sphereComplexAdd(
+      sphereComplexDivide(logarithmicDerivative[order], relativeIndex),
+      orderOverX
+    );
+    const magneticFactor = sphereComplexAdd(
+      sphereComplexMultiply(relativeIndex, logarithmicDerivative[order]),
+      orderOverX
+    );
+    const electric = sphereComplexDivide(
+      sphereComplexSubtract(
+        sphereComplexScale(electricFactor, psiNext),
+        [psiCurrent, 0]
+      ),
+      sphereComplexSubtract(
+        sphereComplexMultiply(electricFactor, xiNext),
+        xiCurrent
+      )
+    );
+    const magnetic = sphereComplexDivide(
+      sphereComplexSubtract(
+        sphereComplexScale(magneticFactor, psiNext),
+        [psiCurrent, 0]
+      ),
+      sphereComplexSubtract(
+        sphereComplexMultiply(magneticFactor, xiNext),
+        xiCurrent
+      )
+    );
+    const weight = 2 * order + 1;
+    scatteringSum += weight
+      * (sphereComplexAbsSquared(electric) + sphereComplexAbsSquared(magnetic));
+    extinctionSum += weight * (electric[0] + magnetic[0]);
+    asymmetrySum += (weight / (order * (order + 1)))
+      * sphereComplexRealProductConjugate(electric, magnetic);
+    if (order > 1) {
+      const adjacentWeight = ((order - 1) * (order + 1)) / order;
+      asymmetrySum += adjacentWeight * (
+        sphereComplexRealProductConjugate(previousA, electric)
+        + sphereComplexRealProductConjugate(previousB, magnetic)
+      );
+    }
+    previousA = electric;
+    previousB = magnetic;
+    psiPrior = psiCurrent;
+    psiCurrent = psiNext;
+    chiPrior = chiCurrent;
+    chiCurrent = chiNext;
+    xiCurrent = xiNext;
+  }
+
+  const scale = 2 / (x * x);
+  const scatteringEfficiencyQsca = Math.max(0, scale * scatteringSum);
+  const rawExtinctionEfficiencyQext = scale * extinctionSum;
+  const energyTolerance = SPHERE_EXACT_MIE_ENERGY_RELATIVE_TOLERANCE * Math.max(
+    1,
+    scatteringEfficiencyQsca,
+    Math.abs(rawExtinctionEfficiencyQext)
+  );
+  if (
+    !Number.isFinite(rawExtinctionEfficiencyQext)
+    || rawExtinctionEfficiencyQext + energyTolerance
+      < scatteringEfficiencyQsca
+  ) {
+    return {
+      valid: false,
+      scatteringEfficiencyQsca: 0,
+      absorptionEfficiencyQabs: 0,
+      asymmetryFactorG: 0
+    };
+  }
+  const extinctionEfficiencyQext = Math.max(
+    scatteringEfficiencyQsca,
+    rawExtinctionEfficiencyQext
+  );
+  const absorptionEfficiencyQabs = Math.max(
+    0,
+    extinctionEfficiencyQext - scatteringEfficiencyQsca
+  );
+  const asymmetryFactorG = scatteringEfficiencyQsca > 0
+    ? Math.max(-1, Math.min(
+        1,
+        (4 * asymmetrySum) / (x * x * scatteringEfficiencyQsca)
+      ))
+    : 0;
+  return {
+    valid: true,
+    scatteringEfficiencyQsca,
+    absorptionEfficiencyQabs,
+    asymmetryFactorG
+  };
+}
+
+function sphereGeometricOpticsDiffractionEfficiencies(
+  sizeParameter,
+  relativeIndex,
+  largeSizeRayAsymmetryFactorG
+) {
+  // Large lossless sphere: geometrical interception and Fraunhofer diffraction
+  // contribute one geometric cross section each in the standard extinction-
+  // paradox construction described by van de Hulst, Light Scattering by Small
+  // Particles (1957), so Qsca tends to 2. This is an asymptotic limit, never a
+  // lower bound. Absorbing transport is deliberately unsupported. The
+  // unresolved 32 < x < 80 transition and weak-contrast spheres fail closed;
+  // asymptotic admission requires both large x and large central phase delay.
+  if (relativeIndex[1] > 0) return null;
+  if (relativeIndex[0] === 1) {
+    return {
+      scatteringEfficiencyQsca: 0,
+      absorptionEfficiencyQabs: 0,
+      asymmetryFactorG: 0
+    };
+  }
+  if (sizeParameter < SPHERE_GEOMETRIC_OPTICS_MIN_SIZE_PARAMETER) return null;
+  const centralPhaseDelay = 2
+    * sizeParameter
+    * Math.abs(relativeIndex[0] - 1);
+  if (centralPhaseDelay < SPHERE_GEOMETRIC_OPTICS_MIN_CENTRAL_PHASE_DELAY) {
+    return null;
+  }
+  const scatteringEfficiencyQsca = 2;
+  const diffractionAsymmetry = Math.max(
+    0,
+    Math.min(1, 1 - 1 / (2 * sizeParameter * sizeParameter))
+  );
+  const asymmetryFactorG = Math.max(-1, Math.min(
+    1,
+    0.5 * (diffractionAsymmetry + largeSizeRayAsymmetryFactorG)
+  ));
+  return {
+    scatteringEfficiencyQsca,
+    absorptionEfficiencyQabs: 0,
+    asymmetryFactorG
+  };
+}
+
+export function sphereGeometricRayAsymmetryFactor({
+  relativeRefractiveIndexN,
+  quadratureSteps = 128
+} = {}) {
+  const relativeN = Number(relativeRefractiveIndexN);
+  const steps = Number(quadratureSteps);
+  if (!(relativeN > 0) || !Number.isInteger(steps) || steps < 8) {
+    throw new RangeError(
+      'sphere ray asymmetry requires positive relative index and at least eight quadrature steps'
+    );
+  }
+  let moment = 0;
+  for (let index = 0; index < steps; index += 1) {
+    const impact = (index + 0.5) / steps;
+    const incidenceCos = Math.sqrt(Math.max(0, 1 - impact * impact));
+    const transmittedSin = impact / relativeN;
+    let reflectance = 1;
+    let transmittedRayMoment = 0;
+    if (transmittedSin < 1) {
+      const transmissionCos = Math.sqrt(1 - transmittedSin * transmittedSin);
+      const sDenominator = incidenceCos + relativeN * transmissionCos;
+      const pDenominator = relativeN * incidenceCos + transmissionCos;
+      const reflectanceS = sDenominator !== 0
+        ? (incidenceCos - relativeN * transmissionCos) / sDenominator
+        : 1;
+      const reflectanceP = pDenominator !== 0
+        ? (relativeN * incidenceCos - transmissionCos) / pDenominator
+        : 1;
+      reflectance = 0.5
+        * (reflectanceS * reflectanceS + reflectanceP * reflectanceP);
+      const incidenceAngle = Math.asin(impact);
+      const transmissionAngle = Math.asin(transmittedSin);
+      // Sum every transmitted Debye ray order analytically. Order p=1 exits
+      // without internal reflection; each successor gains phase
+      // (pi-2r) and Fresnel weight R. The geometric series retains the whole
+      // non-reflected energy instead of collapsing it into the p=1 direction.
+      const firstRayAngle = 2 * (incidenceAngle - transmissionAngle);
+      const orderAngle = Math.PI - 2 * transmissionAngle;
+      const denominator = 1
+        - 2 * reflectance * Math.cos(orderAngle)
+        + reflectance * reflectance;
+      transmittedRayMoment = denominator > 0
+        ? ((1 - reflectance) ** 2 / denominator) * (
+            Math.cos(firstRayAngle)
+              * (1 - reflectance * Math.cos(orderAngle))
+            - Math.sin(firstRayAngle)
+              * reflectance * Math.sin(orderAngle)
+          )
+        : 0;
+    }
+    const reflectedCosine = 2 * impact * impact - 1;
+    moment += (2 * impact / steps) * (
+      reflectance * reflectedCosine
+      + transmittedRayMoment
+    );
+  }
+  return Math.max(-1, Math.min(1, moment));
+}
+
+export function sphericalParticleOpticalEfficiencies({
+  radiusM,
+  wavelengthM,
+  relativeRefractiveIndexN,
+  relativeExtinctionCoefficientK = 0,
+  largeSizeRayAsymmetryFactorG = null
+} = {}) {
+  const radius = Number(radiusM);
+  const wavelength = Number(wavelengthM);
+  const relativeN = Number(relativeRefractiveIndexN);
+  const relativeK = Number(relativeExtinctionCoefficientK);
+  if (
+    !(radius > 0)
+    || !(wavelength > 0)
+    || !(relativeN > 0)
+    || !(relativeK >= 0)
+    || ![radius, wavelength, relativeN, relativeK].every(Number.isFinite)
+  ) {
+    throw new RangeError(
+      'sphere optical efficiency requires positive radius/wavelength/index and nonnegative extinction coefficient'
+    );
+  }
+  const sizeParameter = (2 * Math.PI * radius) / wavelength;
+  if (relativeN === 1 && relativeK === 0) {
+    return Object.freeze({
+      model: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+      regime: 'index-matched-no-scattering',
+      valid: true,
+      sizeParameter,
+      referenceWavelengthM: wavelength,
+      relativeRefractiveIndexN: relativeN,
+      relativeExtinctionCoefficientK: relativeK,
+      scatteringEfficiencyQsca: 0,
+      absorptionEfficiencyQabs: 0,
+      extinctionEfficiencyQext: 0,
+      asymmetryFactorG: 0
+    });
+  }
+  const relativeIndex = [relativeN, relativeK];
+  let regime;
+  let efficiencies;
+  if (sphereRayleighDomainMatches(sizeParameter, relativeIndex)) {
+    regime = 'rayleigh-small-sphere';
+    efficiencies = sphereRayleighEfficiencies(sizeParameter, relativeIndex);
+  } else if (sizeParameter <= SPHERE_EXACT_MIE_MAX_SIZE_PARAMETER) {
+    efficiencies = sphereLorenzMieEfficiencies(sizeParameter, relativeIndex);
+    if (efficiencies == null) {
+      return Object.freeze({
+        model: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+        regime: 'blocked-exact-mie-term-cap',
+        valid: false,
+        sizeParameter,
+        referenceWavelengthM: wavelength,
+        relativeRefractiveIndexN: relativeN,
+        relativeExtinctionCoefficientK: relativeK,
+        scatteringEfficiencyQsca: 0,
+        absorptionEfficiencyQabs: 0,
+        extinctionEfficiencyQext: 0,
+        asymmetryFactorG: 0
+      });
+    }
+    if (efficiencies?.valid === false) {
+      const failure = efficiencies.failureReason
+        || 'energy-balance-failure';
+      return Object.freeze({
+        model: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+        regime: `blocked-exact-mie-${failure}`,
+        valid: false,
+        sizeParameter,
+        referenceWavelengthM: wavelength,
+        relativeRefractiveIndexN: relativeN,
+        relativeExtinctionCoefficientK: relativeK,
+        scatteringEfficiencyQsca: 0,
+        absorptionEfficiencyQabs: 0,
+        extinctionEfficiencyQext: 0,
+        asymmetryFactorG: 0
+      });
+    }
+    regime = 'exact-lorenz-mie-series';
+  }
+  if (!efficiencies) {
+    regime = 'geometric-optics-diffraction-lossless-large-sphere-asymptotic';
+    const rayAsymmetry = largeSizeRayAsymmetryFactorG == null
+      ? sphereGeometricRayAsymmetryFactor({
+          relativeRefractiveIndexN: relativeN
+        })
+      : Number(largeSizeRayAsymmetryFactorG);
+    if (!Number.isFinite(rayAsymmetry) || Math.abs(rayAsymmetry) > 1) {
+      throw new RangeError('large-size ray asymmetry must be finite in [-1, 1]');
+    }
+    efficiencies = sphereGeometricOpticsDiffractionEfficiencies(
+      sizeParameter,
+      relativeIndex,
+      rayAsymmetry
+    );
+    if (!efficiencies) {
+      const blockedRegime = relativeK > 0
+        ? 'blocked-absorbing-large-sphere-asymptotic-unavailable'
+        : 'blocked-lossless-large-sphere-asymptotic-domain-unavailable';
+      return Object.freeze({
+        model: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+        regime: blockedRegime,
+        valid: false,
+        sizeParameter,
+        referenceWavelengthM: wavelength,
+        relativeRefractiveIndexN: relativeN,
+        relativeExtinctionCoefficientK: relativeK,
+        scatteringEfficiencyQsca: 0,
+        absorptionEfficiencyQabs: 0,
+        extinctionEfficiencyQext: 0,
+        asymmetryFactorG: 0
+      });
+    }
+  }
+  if (
+    !Number.isFinite(efficiencies.scatteringEfficiencyQsca)
+    || !Number.isFinite(efficiencies.absorptionEfficiencyQabs)
+    || !Number.isFinite(efficiencies.asymmetryFactorG)
+    || efficiencies.scatteringEfficiencyQsca < 0
+    || efficiencies.absorptionEfficiencyQabs < 0
+    || Math.abs(efficiencies.asymmetryFactorG) > 1
+  ) {
+    return Object.freeze({
+      model: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+      regime: 'blocked-nonfinite-or-nonphysical-sphere-efficiency',
+      valid: false,
+      sizeParameter,
+      referenceWavelengthM: wavelength,
+      relativeRefractiveIndexN: relativeN,
+      relativeExtinctionCoefficientK: relativeK,
+      scatteringEfficiencyQsca: 0,
+      absorptionEfficiencyQabs: 0,
+      extinctionEfficiencyQext: 0,
+      asymmetryFactorG: 0
+    });
+  }
+  return Object.freeze({
+    model: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+    regime,
+    sizeParameter,
+    referenceWavelengthM: wavelength,
+    relativeRefractiveIndexN: relativeN,
+    relativeExtinctionCoefficientK: relativeK,
+    valid: true,
+    scatteringEfficiencyQsca: efficiencies.scatteringEfficiencyQsca,
+    absorptionEfficiencyQabs: efficiencies.absorptionEfficiencyQabs,
+    extinctionEfficiencyQext:
+      efficiencies.scatteringEfficiencyQsca
+      + efficiencies.absorptionEfficiencyQabs,
+    asymmetryFactorG: efficiencies.asymmetryFactorG
+  });
+}
+
+export function waterVisibleSphereOpticalInputs({
+  referenceWavelengthM = SPHERE_OPTICS_REFERENCE_WAVELENGTH_M,
+  mediumRefractiveIndexN = AIR_REFRACTIVE_INDEX_VISIBLE
+} = {}) {
+  const wavelength = Number(referenceWavelengthM);
+  const mediumN = Number(mediumRefractiveIndexN);
+  if (!(wavelength > 0) || !(mediumN > 0)) {
+    throw new RangeError('water sphere optics require positive wavelength and medium index');
+  }
+  const relativeN = WATER_LIQUID_REFRACTIVE_INDEX_VISIBLE / mediumN;
+  return Object.freeze({
+    referenceWavelengthM: wavelength,
+    relativeRefractiveIndexN: relativeN,
+    // The repository has no quantitative visible H2O absorption spectrum: its
+    // O-H curve is explicitly render-scaled. Preserve a lossless dielectric
+    // approximation instead of laundering that curve into a complex index.
+    relativeExtinctionCoefficientK: 0,
+    largeSizeRayAsymmetryFactorG: sphereGeometricRayAsymmetryFactor({
+      relativeRefractiveIndexN: relativeN
+    }),
+    provenance: Object.freeze({
+      status: 'reference-fallback',
+      source:
+        'hale-querry-1973-liquid-water-visible-index-550nm-lossless-approximation',
+      method:
+        'Hale-Querry visible liquid-water refractive index at 550 nm, rounded to n=1.333 and made relative to the carrier gas; k=0 because no quantitative visible absorption spectrum is available to this closure',
+      blockers: Object.freeze([
+        'h2o-visible-complex-index-spectrum-not-reference-anchored',
+        'h2o-condensate-size-distribution-not-produced'
+      ])
+    })
+  });
+}
+
 function waterDropletScatteringCoefficientAtNm(nm, {
   scatteringCoefficientPerM,
-  dropletRadiusM
+  dropletRadiusM,
+  dropletNumberDensityPerM3,
+  dropletCrossSectionM2,
+  relativeRefractiveIndexN,
+  relativeExtinctionCoefficientK,
+  largeSizeRayAsymmetryFactorG
 }) {
   if (!(scatteringCoefficientPerM > 0)) return 0;
   const radius = Number(dropletRadiusM);
-  if (!(radius > 0)) return scatteringCoefficientPerM;
-  const wavelengthM = nm * 1e-9;
-  const sizeParameter = (2 * Math.PI * radius) / wavelengthM;
-  if (sizeParameter >= 0.3) return scatteringCoefficientPerM;
-  const refNm = 550;
-  return scatteringCoefficientPerM * (refNm / nm) ** 4;
+  if (
+    !(radius > 0)
+    || !(dropletNumberDensityPerM3 > 0)
+    || !(dropletCrossSectionM2 > 0)
+  ) return 0;
+  const efficiencies = sphericalParticleOpticalEfficiencies({
+    radiusM: radius,
+    wavelengthM: nm * 1e-9,
+    relativeRefractiveIndexN,
+    relativeExtinctionCoefficientK,
+    largeSizeRayAsymmetryFactorG
+  });
+  return dropletNumberDensityPerM3
+    * dropletCrossSectionM2
+    * efficiencies.scatteringEfficiencyQsca;
 }
 
 export function waterDropletOpticalMicrophysics({
   temperatureK = null,
   h2oPartialPressurePa = null,
   pressurePa = null,
-  dropletRadiusM = 1e-6,
+  conservedCondensedMassDensityKgPerM3 = null,
+  dropletRadiusM = null,
   pathLengthM = 0.3
 } = {}) {
   const temperature = Number(temperatureK);
   const vaporPressure = Number(h2oPartialPressurePa ?? pressurePa);
+  const hasConservedCondensedMassDensity =
+    conservedCondensedMassDensityKgPerM3 != null
+    && Number.isFinite(Number(conservedCondensedMassDensityKgPerM3))
+    && Number(conservedCondensedMassDensityKgPerM3) >= 0;
+  const conservedCondensedMassDensity = Number(
+    conservedCondensedMassDensityKgPerM3
+  );
   const radius = Number(dropletRadiusM);
   const saturationPressurePa = waterSaturationPressurePa(temperature);
-  if (!(temperature > 0) || !(vaporPressure > 0) || !(saturationPressurePa > 0) || !(radius > 0)) {
-    return {
-      model: WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL,
-      status: 'pure-vapor-or-state-missing',
-      temperatureK: Number.isFinite(temperature) ? temperature : null,
-      h2oPartialPressurePa: Number.isFinite(vaporPressure) ? vaporPressure : null,
-      pressurePa: Number.isFinite(Number(pressurePa)) ? Number(pressurePa) : null,
-      saturationPressurePa,
-      supersaturationRatio: null,
-      condensedMassFraction: 0,
-      vaporDensityKgPerM3: 0,
-      condensedMassDensityKgPerM3: 0,
-      dropletRadiusM: Number.isFinite(radius) && radius > 0 ? radius : null,
-      dropletNumberDensityPerM3: 0,
-      dropletCrossSectionM2: 0,
-      mieExtinctionEfficiency: 0,
-      scatteringCoefficientPerM: 0,
-      opticalDepth: 0,
-      pathLengthM
-    };
+  const waterSphereInputs = waterVisibleSphereOpticalInputs();
+  const emptyResult = ({
+    status,
+    supersaturationRatio = null,
+    condensedMassFraction = 0,
+    vaporDensityKgPerM3 = 0,
+    condensedMassDensityKgPerM3 = 0
+  }) => ({
+    model: WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL,
+    status,
+    temperatureK: Number.isFinite(temperature) ? temperature : null,
+    h2oPartialPressurePa: Number.isFinite(vaporPressure) ? vaporPressure : null,
+    pressurePa: Number.isFinite(Number(pressurePa)) ? Number(pressurePa) : null,
+    saturationPressurePa,
+    supersaturationRatio,
+    condensedMassFraction,
+    vaporDensityKgPerM3,
+    condensedMassDensityKgPerM3,
+    condensedMassAuthority: hasConservedCondensedMassDensity
+      ? 'caller-supplied-conserved-condensed-mass-density'
+      : null,
+    dropletRadiusM: Number.isFinite(radius) && radius > 0 ? radius : null,
+    dropletNumberDensityPerM3: 0,
+    dropletCrossSectionM2: 0,
+    referenceWavelengthM: waterSphereInputs.referenceWavelengthM,
+    relativeRefractiveIndexN: waterSphereInputs.relativeRefractiveIndexN,
+    relativeExtinctionCoefficientK:
+      waterSphereInputs.relativeExtinctionCoefficientK,
+    largeSizeRayAsymmetryFactorG:
+      waterSphereInputs.largeSizeRayAsymmetryFactorG,
+    opticalEfficiencyModel: SPHERE_OPTICAL_EFFICIENCY_MODEL,
+    opticalEfficiencyRegime: null,
+    mieScatteringEfficiency: 0,
+    mieAbsorptionEfficiency: 0,
+    mieExtinctionEfficiency: 0,
+    asymmetryFactorG: 0,
+    scatteringCoefficientPerM: 0,
+    absorptionCoefficientPerM: 0,
+    extinctionCoefficientPerM: 0,
+    opticalDepth: 0,
+    pathLengthM,
+    provenance: waterSphereInputs.provenance
+  });
+  if (!(temperature > 0) || !(vaporPressure > 0) || !(saturationPressurePa > 0)) {
+    return emptyResult({ status: 'pure-vapor-or-state-missing' });
   }
   const supersaturationRatio = vaporPressure / saturationPressurePa;
-  const condensedMassFraction = supersaturationRatio > 1 ? clamp01(1 - 1 / supersaturationRatio) : 0;
-  const vaporDensityKgPerM3 = vaporPressure / (WATER_VAPOR_GAS_CONSTANT_J_PER_KG_K * temperature);
-  const condensedMassDensityKgPerM3 = vaporDensityKgPerM3 * condensedMassFraction;
+  const vaporDensityKgPerM3 = vaporPressure
+    / (WATER_VAPOR_GAS_CONSTANT_J_PER_KG_K * temperature);
+  if (!hasConservedCondensedMassDensity) {
+    return emptyResult({
+      status: 'condensate-optics-blocked-missing-conserved-mass',
+      supersaturationRatio,
+      vaporDensityKgPerM3
+    });
+  }
+  const condensedMassDensityKgPerM3 = conservedCondensedMassDensity;
+  const condensedMassFraction = condensedMassDensityKgPerM3 > 0
+    ? clamp01(
+        condensedMassDensityKgPerM3
+          / (condensedMassDensityKgPerM3 + vaporDensityKgPerM3)
+      )
+    : 0;
+  if (!(condensedMassFraction > 0)) {
+    return emptyResult({
+      status: supersaturationRatio > 1
+        ? 'supersaturated-zero-conserved-condensate'
+        : 'subsaturated-pure-vapor',
+      supersaturationRatio,
+      condensedMassFraction,
+      vaporDensityKgPerM3,
+      condensedMassDensityKgPerM3
+    });
+  }
+  if (!(radius > 0)) {
+    return emptyResult({
+      status: 'conserved-condensate-optics-blocked-missing-radius',
+      supersaturationRatio,
+      condensedMassFraction,
+      vaporDensityKgPerM3,
+      condensedMassDensityKgPerM3
+    });
+  }
   const dropletVolumeM3 = (4 / 3) * Math.PI * radius ** 3;
   const dropletMassKg = dropletVolumeM3 * LIQUID_WATER_DENSITY_KG_PER_M3;
-  const dropletNumberDensityPerM3 = dropletMassKg > 0 ? condensedMassDensityKgPerM3 / dropletMassKg : 0;
+  const dropletNumberDensityPerM3 = dropletMassKg > 0
+    ? condensedMassDensityKgPerM3 / dropletMassKg
+    : 0;
   const geometricCrossSectionM2 = Math.PI * radius ** 2;
-  const mieExtinctionEfficiency = 2;
-  const scatteringCoefficientPerM = dropletNumberDensityPerM3 * geometricCrossSectionM2 * mieExtinctionEfficiency;
-  const opticalDepth = scatteringCoefficientPerM * Math.max(0, Number(pathLengthM) || 0);
+  const efficiencies = sphericalParticleOpticalEfficiencies({
+    radiusM: radius,
+    wavelengthM: waterSphereInputs.referenceWavelengthM,
+    relativeRefractiveIndexN: waterSphereInputs.relativeRefractiveIndexN,
+    relativeExtinctionCoefficientK:
+      waterSphereInputs.relativeExtinctionCoefficientK,
+    largeSizeRayAsymmetryFactorG:
+      waterSphereInputs.largeSizeRayAsymmetryFactorG
+  });
+  if (efficiencies.valid !== true) {
+    return emptyResult({
+      status: 'conserved-condensate-optics-blocked-efficiency-domain',
+      supersaturationRatio,
+      condensedMassFraction,
+      vaporDensityKgPerM3,
+      condensedMassDensityKgPerM3
+    });
+  }
+  const scatteringCoefficientPerM = dropletNumberDensityPerM3
+    * geometricCrossSectionM2
+    * efficiencies.scatteringEfficiencyQsca;
+  const absorptionCoefficientPerM = dropletNumberDensityPerM3
+    * geometricCrossSectionM2
+    * efficiencies.absorptionEfficiencyQabs;
+  const extinctionCoefficientPerM = scatteringCoefficientPerM
+    + absorptionCoefficientPerM;
+  const opticalDepth = extinctionCoefficientPerM
+    * Math.max(0, Number(pathLengthM) || 0);
   return {
     model: WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL,
-    status: condensedMassFraction > 0 ? 'supersaturated-condensed-droplets' : 'subsaturated-pure-vapor',
+    status: 'conserved-condensed-droplets',
     temperatureK: temperature,
     h2oPartialPressurePa: vaporPressure,
     pressurePa: Number.isFinite(Number(pressurePa)) ? Number(pressurePa) : null,
@@ -303,13 +981,29 @@ export function waterDropletOpticalMicrophysics({
     condensedMassFraction,
     vaporDensityKgPerM3,
     condensedMassDensityKgPerM3,
+    condensedMassAuthority:
+      'caller-supplied-conserved-condensed-mass-density',
     dropletRadiusM: radius,
     dropletNumberDensityPerM3,
     dropletCrossSectionM2: geometricCrossSectionM2,
-    mieExtinctionEfficiency,
+    referenceWavelengthM: waterSphereInputs.referenceWavelengthM,
+    relativeRefractiveIndexN: waterSphereInputs.relativeRefractiveIndexN,
+    relativeExtinctionCoefficientK:
+      waterSphereInputs.relativeExtinctionCoefficientK,
+    largeSizeRayAsymmetryFactorG:
+      waterSphereInputs.largeSizeRayAsymmetryFactorG,
+    opticalEfficiencyModel: efficiencies.model,
+    opticalEfficiencyRegime: efficiencies.regime,
+    mieScatteringEfficiency: efficiencies.scatteringEfficiencyQsca,
+    mieAbsorptionEfficiency: efficiencies.absorptionEfficiencyQabs,
+    mieExtinctionEfficiency: efficiencies.extinctionEfficiencyQext,
+    asymmetryFactorG: efficiencies.asymmetryFactorG,
     scatteringCoefficientPerM,
+    absorptionCoefficientPerM,
+    extinctionCoefficientPerM,
     opticalDepth,
-    pathLengthM
+    pathLengthM,
+    provenance: waterSphereInputs.provenance
   };
 }
 
@@ -884,7 +1578,7 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3,
 // index. Water/ice values are model constants (closureBacked) pending an ab-initio polarizability
 // closure; vapour's index is ~1 (≈air), which is why pure water vapour is nearly invisible.
 const REFRACTIVE_INDEX = Object.freeze({
-  waterLiquid: 1.333,
+  waterLiquid: WATER_LIQUID_REFRACTIVE_INDEX_VISIBLE,
   waterIce: 1.309,
   waterVapor: 1.00025
 });
@@ -1154,10 +1848,10 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
     const waterPhase = isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid');
     const scatteringColor = scatteringCoefficientPerM > 0
       ? spectralResponseToSrgb((nm) => {
-          const s = waterDropletScatteringCoefficientAtNm(nm, {
-            scatteringCoefficientPerM,
-            dropletRadiusM: dropletMicrophysics?.dropletRadiusM
-          });
+          const s = waterDropletScatteringCoefficientAtNm(
+            nm,
+            dropletMicrophysics
+          );
           return s / Math.max(scatteringCoefficientPerM, 1e-30);
         })
       : null;
@@ -1169,10 +1863,7 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
       pathLengthM,
       reflectance: fresnelR0,
       scatteringCoefficientPerM: isVapor
-        ? waterDropletScatteringCoefficientAtNm(nm, {
-          scatteringCoefficientPerM,
-          dropletRadiusM: dropletMicrophysics?.dropletRadiusM
-        })
+        ? waterDropletScatteringCoefficientAtNm(nm, dropletMicrophysics)
         : 0,
       n,
       k: 0
@@ -1194,10 +1885,10 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
       provenance: {
         status: 'derived',
         source: scatteringCoefficientPerM > 0
-          ? 'clausius-clapeyron-condensed-droplet-mie-rayleigh-scattering'
+          ? 'conserved-condensate-monodisperse-lorenz-mie-scattering'
           : 'beer-lambert-oh-overtone-optical-depth',
         method: scatteringCoefficientPerM > 0
-          ? 'saturation vapor pressure -> excess vapor condensed fraction -> droplet number density -> Mie/Rayleigh extinction + O-H absorption'
+          ? 'caller-supplied conserved condensed mass density + monodisperse radius -> size/refractive-index-dependent Lorenz-Mie sphere efficiencies with bounded lossless geometric-optics/diffraction asymptotic; saturation is diagnostic only'
           : 'O-H overtone absorption -> luminous attenuation distance -> Beer-Lambert opacity/transmission',
         inputs: { pathLengthM, phase: waterPhase, opticalState: opticalState || null },
         validation: false

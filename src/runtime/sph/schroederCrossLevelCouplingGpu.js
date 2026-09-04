@@ -147,6 +147,7 @@ import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
+  cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
   sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
 import {
@@ -2302,7 +2303,9 @@ function createCanonicalTwoLevelSubstepUploads({
   };
   return {
     sphParticleUpload: {
-      ...sourceSphParticleUpload,
+      ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+        sourceSphParticleUpload
+      ),
       ...commonEpoch,
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
@@ -4512,7 +4515,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       ?? 0;
     const finalCanonicalUploads = Object.freeze({
       sphParticleUpload: Object.freeze({
-        ...rawFinalCanonicalUploads.sphParticleUpload,
+        ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+          rawFinalCanonicalUploads.sphParticleUpload
+        ),
         // S* is still the terminal private state of macro tick N. The
         // hierarchy owner performs one fresh full classification before it
         // may publish the same buffers as E* at N+1/substep 0.
@@ -5729,7 +5734,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       ?? fallbackMlsUpload;
     result.nextParticleUploads = {
       sphParticleUpload: {
-        ...publishedSphUpload,
+        ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+          publishedSphUpload
+        ),
         sourceStage: 'schroeder-two-level-mechanics-step',
         ownsStateBuffer: true,
         ownsThermoBuffer: transferThermoOwnership

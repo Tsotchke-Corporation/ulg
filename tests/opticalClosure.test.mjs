@@ -10,8 +10,11 @@ import {
   metalRelativisticColorSrgb,
   opticalRenderParams,
   relativisticInterbandOscillators,
+  sphericalParticleOpticalEfficiencies,
+  sphereGeometricRayAsymmetryFactor,
   spectralResponseToSrgb,
   waterDropletOpticalMicrophysics,
+  waterVisibleSphereOpticalInputs,
   waterSaturationPressurePa
 } from '../src/runtime/material/opticalClosure.js';
 import { deriveElementProperties } from '../src/runtime/material/elementClosures.js';
@@ -194,11 +197,196 @@ test('render params are derived from the optics: iron opaque metal, water refrac
   assert.equal(air.provenance.source, 'dry-air-rayleigh-scattering-reference-composition');
 });
 
-test('supersaturated water vapor derives visible droplet scattering without changing pure vapor', () => {
+test('sphere efficiencies cover analytic Rayleigh, exact absorbing Mie, and bounded large-size physics', () => {
+  const wavelengthM = 550e-9;
+  const radiusForSizeParameter = (sizeParameter) =>
+    (sizeParameter * wavelengthM) / (2 * Math.PI);
+  const relativeN = 1.5;
+  const sizeParameter = 0.01;
+  const rayleigh = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(sizeParameter),
+    wavelengthM,
+    relativeRefractiveIndexN: relativeN,
+    relativeExtinctionCoefficientK: 0
+  });
+  const contrast = (relativeN ** 2 - 1) / (relativeN ** 2 + 2);
+  const analyticQsca = (8 / 3) * sizeParameter ** 4 * contrast ** 2;
+  assert.equal(rayleigh.regime, 'rayleigh-small-sphere');
+  assert.ok(Math.abs(rayleigh.scatteringEfficiencyQsca - analyticQsca) < 1e-20);
+  assert.equal(rayleigh.absorptionEfficiencyQabs, 0);
+
+  const indexMatched = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(1),
+    wavelengthM,
+    relativeRefractiveIndexN: 1,
+    relativeExtinctionCoefficientK: 0
+  });
+  assert.equal(indexMatched.regime, 'index-matched-no-scattering');
+  assert.equal(indexMatched.scatteringEfficiencyQsca, 0);
+  assert.equal(indexMatched.extinctionEfficiencyQext, 0);
+
+  const nearPolarizabilityPole = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(0.1),
+    wavelengthM,
+    relativeRefractiveIndexN: 1e-6,
+    relativeExtinctionCoefficientK: Math.sqrt(2)
+  });
+  assert.equal(nearPolarizabilityPole.regime, 'exact-lorenz-mie-series');
+  assert.equal(nearPolarizabilityPole.valid, true);
+  assert.ok(nearPolarizabilityPole.scatteringEfficiencyQsca < 10);
+  assert.ok(nearPolarizabilityPole.absorptionEfficiencyQabs > 0);
+
+  const largeInternalSizeParameter = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(0.1),
+    wavelengthM,
+    relativeRefractiveIndexN: 100,
+    relativeExtinctionCoefficientK: 0.01
+  });
+  assert.equal(largeInternalSizeParameter.regime, 'exact-lorenz-mie-series');
+  assert.equal(largeInternalSizeParameter.valid, true);
+  assert.ok(largeInternalSizeParameter.scatteringEfficiencyQsca > 0);
+
+  const absorbing = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(1),
+    wavelengthM,
+    relativeRefractiveIndexN: relativeN,
+    relativeExtinctionCoefficientK: 0.1
+  });
+  assert.equal(absorbing.regime, 'exact-lorenz-mie-series');
+  assert.equal(absorbing.valid, true);
+  assert.ok(absorbing.scatteringEfficiencyQsca > 0);
+  assert.ok(absorbing.absorptionEfficiencyQabs > 0);
+  assert.ok(
+    absorbing.extinctionEfficiencyQext
+      >= absorbing.scatteringEfficiencyQsca
+  );
+
+  const waterInputs = waterVisibleSphereOpticalInputs();
+  assert.equal(waterInputs.provenance.status, 'reference-fallback');
+  assert.match(waterInputs.provenance.source, /hale-querry-1973/);
+  assert.equal(waterInputs.relativeExtinctionCoefficientK, 0);
+  const large = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(100),
+    wavelengthM,
+    ...waterInputs
+  });
+  assert.equal(
+    large.regime,
+    'geometric-optics-diffraction-lossless-large-sphere-asymptotic'
+  );
+  assert.equal(large.scatteringEfficiencyQsca, 2);
+  assert.equal(large.absorptionEfficiencyQabs, 0);
+  assert.ok(large.asymmetryFactorG > 0.85 && large.asymmetryFactorG < 0.91);
+  assert.ok(Math.abs(
+    sphereGeometricRayAsymmetryFactor({
+      relativeRefractiveIndexN: waterInputs.relativeRefractiveIndexN
+    }) - 0.7641552672
+  ) < 1e-6);
+  assert.ok(Math.abs(large.asymmetryFactorG - 0.8820526336) < 1e-6);
+
+  const weakContrastLarge = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(100),
+    wavelengthM,
+    relativeRefractiveIndexN: 1.0001,
+    relativeExtinctionCoefficientK: 0
+  });
+  assert.equal(weakContrastLarge.valid, false);
+  assert.match(weakContrastLarge.regime, /blocked.*large-sphere/);
+  assert.equal(weakContrastLarge.extinctionEfficiencyQext, 0);
+
+  const nearMatchedAtExactEdge = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(32),
+    wavelengthM,
+    relativeRefractiveIndexN: 1.000001,
+    relativeExtinctionCoefficientK: 0
+  });
+  const nearMatchedBeyondExactEdge = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(32.000001),
+    wavelengthM,
+    relativeRefractiveIndexN: 1.000001,
+    relativeExtinctionCoefficientK: 0
+  });
+  assert.equal(nearMatchedAtExactEdge.valid, true);
+  assert.ok(nearMatchedAtExactEdge.scatteringEfficiencyQsca < 1e-7);
+  assert.equal(nearMatchedBeyondExactEdge.valid, false);
+  assert.equal(nearMatchedBeyondExactEdge.scatteringEfficiencyQsca, 0);
+
+  const transitionGapWater = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(48),
+    wavelengthM,
+    ...waterInputs
+  });
+  assert.equal(transitionGapWater.valid, false);
+  assert.match(transitionGapWater.regime, /blocked.*large-sphere/);
+
+  const admittedAsymptoticWater = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(80),
+    wavelengthM,
+    ...waterInputs
+  });
+  assert.equal(admittedAsymptoticWater.valid, true);
+  assert.equal(
+    admittedAsymptoticWater.regime,
+    'geometric-optics-diffraction-lossless-large-sphere-asymptotic'
+  );
+
+  const exactTinyInternalSize = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(1),
+    wavelengthM,
+    relativeRefractiveIndexN: 1e-10,
+    relativeExtinctionCoefficientK: 0
+  });
+  assert.equal(exactTinyInternalSize.valid, false);
+  assert.match(exactTinyInternalSize.regime, /internal-size-parameter/);
+  assert.equal(exactTinyInternalSize.extinctionEfficiencyQext, 0);
+  const exactInternalSizeFloor = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(1),
+    wavelengthM,
+    relativeRefractiveIndexN: 1e-5,
+    relativeExtinctionCoefficientK: 0
+  });
+  assert.equal(exactInternalSizeFloor.valid, false);
+  assert.match(exactInternalSizeFloor.regime, /internal-size-parameter/);
+
+  const exactTermCap = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(1),
+    wavelengthM,
+    relativeRefractiveIndexN: 200,
+    relativeExtinctionCoefficientK: 0
+  });
+  assert.equal(exactTermCap.valid, false);
+  assert.equal(exactTermCap.regime, 'blocked-exact-mie-term-cap');
+  assert.equal(exactTermCap.extinctionEfficiencyQext, 0);
+
+  const unsupportedAbsorbingLarge = sphericalParticleOpticalEfficiencies({
+    radiusM: radiusForSizeParameter(100),
+    wavelengthM,
+    relativeRefractiveIndexN: relativeN,
+    relativeExtinctionCoefficientK: 0.01
+  });
+  assert.equal(unsupportedAbsorbingLarge.valid, false);
+  assert.match(unsupportedAbsorbingLarge.regime, /blocked-absorbing-large/);
+  assert.equal(unsupportedAbsorbingLarge.extinctionEfficiencyQext, 0);
+});
+
+test('conserved condensed water derives visible droplet scattering without changing pure vapor', () => {
   clearOpticalRenderParamsCache();
   const temperatureK = 293.15;
   const saturationPressurePa = waterSaturationPressurePa(temperatureK);
   assert.ok(saturationPressurePa > 2000 && saturationPressurePa < 3000);
+
+  const supersaturationOnly = waterDropletOpticalMicrophysics({
+    temperatureK,
+    h2oPartialPressurePa: 1.2 * saturationPressurePa,
+    dropletRadiusM: 1e-6,
+    pathLengthM: 1
+  });
+  assert.equal(
+    supersaturationOnly.status,
+    'condensate-optics-blocked-missing-conserved-mass'
+  );
+  assert.equal(supersaturationOnly.scatteringCoefficientPerM, 0);
+  assert.equal(supersaturationOnly.condensedMassAuthority, null);
 
   const pureVapor = opticalRenderParams({
     material: 'h2o',
@@ -207,6 +395,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
     opticalState: {
       temperatureK,
       h2oPartialPressurePa: 0.5 * saturationPressurePa,
+      conservedCondensedMassDensityKgPerM3: 0,
       dropletRadiusM: 1e-6
     }
   });
@@ -217,12 +406,14 @@ test('supersaturated water vapor derives visible droplet scattering without chan
     opticalState: {
       temperatureK,
       h2oPartialPressurePa: 1.2 * saturationPressurePa,
+      conservedCondensedMassDensityKgPerM3: 0.001,
       dropletRadiusM: 1e-6
     }
   });
   const microphysics = waterDropletOpticalMicrophysics({
     temperatureK,
     h2oPartialPressurePa: 1.2 * saturationPressurePa,
+    conservedCondensedMassDensityKgPerM3: 0.001,
     dropletRadiusM: 1e-6,
     pathLengthM: 1
   });
@@ -235,10 +426,10 @@ test('supersaturated water vapor derives visible droplet scattering without chan
   assert.ok(condensedSteam.opacity > pureVapor.opacity);
   assert.ok(condensedSteam.transmission < pureVapor.transmission);
   assert.equal(pureVapor.dropletMicrophysics.status, 'subsaturated-pure-vapor');
-  assert.equal(condensedSteam.dropletMicrophysics.status, 'supersaturated-condensed-droplets');
+  assert.equal(condensedSteam.dropletMicrophysics.status, 'conserved-condensed-droplets');
   assert.ok(Math.abs(condensedSteam.dropletMicrophysics.condensedMassFraction - microphysics.condensedMassFraction) < 1e-12);
   assert.ok(condensedSteam.spectralSamples.some((sample) => sample.scatteringCoefficientPerM > 0));
-  assert.equal(condensedSteam.provenance.source, 'clausius-clapeyron-condensed-droplet-mie-rayleigh-scattering');
+  assert.equal(condensedSteam.provenance.source, 'conserved-condensate-monodisperse-lorenz-mie-scattering');
   const largerDroplets = opticalRenderParams({
     material: 'h2o',
     phase: 'gas',
@@ -246,6 +437,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
     opticalState: {
       temperatureK,
       h2oPartialPressurePa: 1.2 * saturationPressurePa,
+      conservedCondensedMassDensityKgPerM3: 0.001,
       dropletRadiusM: 2e-6
     }
   });
@@ -259,6 +451,7 @@ test('supersaturated water vapor derives visible droplet scattering without chan
     opticalState: {
       temperatureK,
       h2oPartialPressurePa: 1.2 * saturationPressurePa,
+      conservedCondensedMassDensityKgPerM3: 0.001,
       dropletRadiusM: 1e-6
     }
   });

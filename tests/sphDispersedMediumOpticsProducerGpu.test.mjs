@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS,
   SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL,
   SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS,
   SPH_DISPERSED_MEDIUM_OPTICS_STATUS
@@ -18,11 +19,17 @@ import {
   ULG_SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_ENCODER_STAGE_SCHEMA,
   ULG_SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_SCHEMA,
   buildSphDispersedMediumOpticsProducerSeedRows,
+  buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization,
+  buildSphDispersedMediumOpticsProducerSeedRowsFromParticleState,
   consumeSphDispersedMediumOpticsProducerAdoptionClaim,
   createSphDispersedMediumOpticsProducerWebGpuEncoderStage,
   deriveSphDispersedMediumOpticsProducerReference,
   enumerateSphDispersedMediumOpticsProducerPrewarmPipelineDescriptors,
   issueSphDispersedMediumOpticsProducerAdoptionClaim,
+  rebaseSphDispersedMediumOpticsProducerAdoptionTopologyEpoch,
+  runSphDispersedMediumOpticsProducerWebGpu,
+  sphDispersedMediumOpticsProducerAdoptionMatches,
+  sphDispersedMediumOpticsReactionCaptureWgsl,
   sphDispersedMediumOpticsProducerWgsl,
   validateSphDispersedMediumOpticsProducerSeedRows
 } from '../src/runtime/sph/sphDispersedMediumOpticsProducerGpu.js';
@@ -30,6 +37,7 @@ import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.j
 import {
   consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer,
   destroySphDispersedMediumGpuBuffers,
+  snapshotSphDispersedMediumGpuBufferDeclaration,
   sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
   validateSphDispersedMediumGpuBufferAuthority
 } from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
@@ -40,6 +48,7 @@ import {
 import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  advanceExactParentSphDispersedMediumOpticsTopologyEpoch,
   adoptSphGpuParticleDispersedMediumOpticsSidecar,
   destroySphGpuParticleBuffers,
   uploadSphGpuParticleBuffers
@@ -381,6 +390,124 @@ test('CPU producer conserves condensation and evaporation without fogging bulk l
   }
 });
 
+test('CPU producer remaps a reaction-born condensate onto its own optical route before phase transfer', () => {
+  const plan = phasePlan(1);
+  const table = closureTable();
+  const preReaction = emptyPhaseRows([11]);
+  const postReaction = emptyPhaseRows([11]);
+  const postTransfer = emptyPhaseRows([11]);
+  const laneIndex = (phaseId) => (phaseId - 1) * plan.phaseLaneStride;
+  const productPlacementLane = laneIndex(4);
+  setCarrier({
+    ...postReaction,
+    index: productPlacementLane,
+    materialId: 22,
+    phaseId: LIQUID_PHASE_ID,
+    massKg: 1.25,
+    fractions: [0, 1, 0, 0]
+  });
+  setCarrier({
+    ...postTransfer,
+    index: laneIndex(LIQUID_PHASE_ID),
+    materialId: 22,
+    phaseId: LIQUID_PHASE_ID,
+    massKg: 1.25,
+    fractions: [0, 1, 0, 0]
+  });
+  const seed = buildSphDispersedMediumOpticsProducerSeedRows({
+    phaseCarrierPlan: plan,
+    lineageMaterialIds: new Float32Array([11]),
+    opticalClosureTable: table
+  });
+
+  const result = deriveSphDispersedMediumOpticsProducerReference({
+    phaseCarrierPlan: plan,
+    preReactionState: preReaction.state,
+    preReactionThermo: preReaction.thermo,
+    preTransferState: postReaction.state,
+    preTransferThermo: postReaction.thermo,
+    postTransferState: postTransfer.state,
+    postTransferThermo: postTransfer.thermo,
+    seedOpticsRows: seed.rows,
+    opticalClosureTable: table
+  });
+  const offset = laneIndex(LIQUID_PHASE_ID)
+    * SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS;
+
+  assert.deepEqual(Array.from(result.rows.slice(offset, offset + 5)), [
+    22,
+    LIQUID_PHASE_ID,
+    202,
+    SPH_DISPERSED_MEDIUM_OPTICS_STATUS.ready,
+    1.25
+  ]);
+  assert.ok(result.rows[offset + 5] > 0);
+  assert.equal(result.reactionCaptureEnabled, true);
+  assert.equal(result.reactionBornMassKg, 1.25);
+  assert.equal(result.reactionBornRowCount, 1);
+  assert.equal(result.routeRemapRowCount, 1);
+  assert.equal(result.ambiguousRouteRowCount, 0);
+  assert.equal(result.totalDispersedMassKg, 1.25);
+  assert.deepEqual(result.readyOpticalStateIds, [202]);
+});
+
+test('CPU reaction capture leaves a route-less gas product optically thin', () => {
+  const plan = phasePlan(1);
+  const table = closureTable();
+  const preReaction = emptyPhaseRows([11]);
+  const postReaction = emptyPhaseRows([11]);
+  const postTransfer = emptyPhaseRows([11]);
+  const gasIndex = (GAS_PHASE_ID - 1) * plan.phaseLaneStride;
+  setCarrier({
+    ...postReaction,
+    index: gasIndex,
+    materialId: 33,
+    phaseId: GAS_PHASE_ID,
+    massKg: 0.5,
+    fractions: [0, 0, 1, 0]
+  });
+  setCarrier({
+    ...postTransfer,
+    index: gasIndex,
+    materialId: 33,
+    phaseId: GAS_PHASE_ID,
+    massKg: 0.5,
+    fractions: [0, 0, 1, 0]
+  });
+  const blockedSeed = buildSphDispersedMediumOpticsProducerSeedRows({
+    phaseCarrierPlan: plan,
+    lineageMaterialIds: new Float32Array([33]),
+    opticalClosureTable: table
+  });
+  const result = deriveSphDispersedMediumOpticsProducerReference({
+    phaseCarrierPlan: plan,
+    preReactionState: preReaction.state,
+    preReactionThermo: preReaction.thermo,
+    preTransferState: postReaction.state,
+    preTransferThermo: postReaction.thermo,
+    postTransferState: postTransfer.state,
+    postTransferThermo: postTransfer.thermo,
+    seedOpticsRows: blockedSeed.rows,
+    opticalClosureTable: table
+  });
+
+  assert.equal(result.readyRowCount, 0);
+  assert.equal(result.blockedRowCount, plan.particleCapacity);
+  assert.equal(result.reactionBornMassKg, 0);
+  assert.equal(result.totalDispersedMassKg, 0);
+  assert.deepEqual(result.readyOpticalStateIds, []);
+  for (let index = 0; index < plan.particleCapacity; index += 1) {
+    const offset = index * SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS;
+    assert.equal(
+      result.rows[offset + 3],
+      SPH_DISPERSED_MEDIUM_OPTICS_STATUS.blocked
+    );
+    assert.deepEqual(Array.from(result.rows.slice(offset + 4, offset + 8)), [
+      0, 0, 0, 0
+    ]);
+  }
+});
+
 test('seed validation rejects non-condensed routes and malformed immutable declarations', () => {
   const fixture = producerReferenceFixture();
   const summary = validateSphDispersedMediumOpticsProducerSeedRows({
@@ -496,10 +623,122 @@ test('material-general seed builder places each static route on its condensed la
   );
 });
 
+test('packed particle seed builder copies only canonical primary material identities', () => {
+  const plan = phasePlan(2);
+  const packedThermo = emptyPhaseRows([11, 22]).thermo;
+  const seed = buildSphDispersedMediumOpticsProducerSeedRowsFromParticleState({
+    sphParticleState: {
+      particleCount: plan.particleCapacity,
+      thermoStrideFloats: THERMO_FLOATS,
+      thermo: packedThermo,
+      phaseCarrierPlan: plan
+    },
+    opticalClosureTable: closureTable()
+  });
+  assert.equal(seed.readyRowCount, 2);
+  assert.deepEqual(
+    seed.routeDeclarations.map((route) => [
+      route.lineageIndex,
+      route.dispersedMaterialId,
+      route.opticalStateId
+    ]),
+    [[0, 11, 101], [1, 22, 202]]
+  );
+  assert.throws(
+    () => buildSphDispersedMediumOpticsProducerSeedRowsFromParticleState({
+      sphParticleState: {
+        particleCount: plan.particleCapacity,
+        thermoStrideFloats: THERMO_FLOATS,
+        thermo: packedThermo.subarray(0, packedThermo.length - 1),
+        phaseCarrierPlan: plan
+      },
+      opticalClosureTable: closureTable()
+    }),
+    /exact canonical packed particle thermo rows/
+  );
+});
+
+test('prospective seed builder declares the exact four-lane Tier0 transition from primary material identities', () => {
+  const singleLanePlan = {
+    schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+    status: 'phase-lane-capacity-ready',
+    lineageCapacity: 2,
+    primaryCapacity: 2,
+    phaseLaneCount: 1,
+    phaseLaneStride: 2,
+    companionStart: 2,
+    companionCapacity: 0,
+    particleCapacity: 2,
+    stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+    phaseCompanionLanesRequired: false,
+    reason: 'laws-quiescent'
+  };
+  const thermo = new Float32Array(2 * THERMO_FLOATS);
+  thermo[0] = 11;
+  thermo[THERMO_FLOATS] = 22;
+  const seed =
+    buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization({
+      sphParticleState: {
+        particleCount: 2,
+        thermoStrideFloats: THERMO_FLOATS,
+        thermo,
+        phaseCarrierPlan: singleLanePlan
+      },
+      opticalClosureTable: closureTable()
+    });
+  assert.equal(seed.particleCount, 8);
+  assert.equal(seed.readyRowCount, 2);
+  assert.equal(seed.blockedRowCount, 6);
+  assert.deepEqual(
+    seed.routeDeclarations.map((route) => [
+      route.lineageIndex,
+      route.particleIndex,
+      route.dispersedMaterialId,
+      route.opticalStateId
+    ]),
+    [[0, 2, 11, 101], [1, 3, 22, 202]]
+  );
+  assert.throws(
+    () => buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization({
+      sphParticleState: {
+        particleCount: 2,
+        thermoStrideFloats: THERMO_FLOATS,
+        thermo,
+        phaseCarrierPlan: {
+          ...singleLanePlan,
+          companionCapacity: 1
+        }
+      },
+      opticalClosureTable: closureTable()
+    }),
+    /exact laws-quiescent single-lane phase-carrier plan/
+  );
+  const oversizedLineageCapacity = Math.floor(0xffff_ffff / 4) + 1;
+  assert.throws(
+    () => buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization({
+      sphParticleState: {
+        particleCount: oversizedLineageCapacity,
+        thermoStrideFloats: THERMO_FLOATS,
+        thermo: new Float32Array(0),
+        phaseCarrierPlan: {
+          ...singleLanePlan,
+          lineageCapacity: oversizedLineageCapacity,
+          primaryCapacity: oversizedLineageCapacity,
+          phaseLaneStride: oversizedLineageCapacity,
+          companionStart: oversizedLineageCapacity,
+          particleCapacity: oversizedLineageCapacity
+        }
+      },
+      opticalClosureTable: closureTable()
+    }),
+    /exact laws-quiescent single-lane phase-carrier plan/
+  );
+});
+
 test('WGSL producer is numeric/table-driven and writes only moment lanes after copying identity', () => {
   assert.equal(
     SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_KERNEL_REVISION,
-    'four-lane-conserved-condensate-ledger-optical-moments-v0'
+    'four-lane-reaction-birth-conserved-condensate-ledger-optical-moments-v1'
   );
   assert.doesNotMatch(
     sphDispersedMediumOpticsProducerWgsl,
@@ -520,11 +759,71 @@ test('WGSL producer is numeric/table-driven and writes only moment lanes after c
     sphDispersedMediumOpticsProducerWgsl,
     /0\.0,\s*\n\s*post_condensed\.mass_kg/
   );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /COMPACT_COMPLEX_INDEX_MORPHOLOGY/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /fn sphere_lorenz_mie_efficiencies/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /fn sphere_rayleigh_domain_matches[\s\S]*SPHERE_RAYLEIGH_MAX_INTERNAL_X[\s\S]*SPHERE_RAYLEIGH_MAX_CONTRAST_SQUARED/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /var logarithmic_derivative: array<vec2<f32>, 128>/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /raw_q_extinction \+ energy_tolerance < q_scattering/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /dot\(mx, mx\) <= SPHERE_EXACT_MIE_MIN_INTERNAL_X_SQUARED/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /if \(size_parameter <= SPHERE_EXACT_MIE_MAX_X\)[\s\S]*return exact;/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /fn sphere_geometric_optics_diffraction_efficiencies/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /relative_index\.y > 0\.0[\s\S]*SphereEfficiencies\(0\.0, 0\.0, 0\.0, 0u\)/
+  );
+  assert.match(
+    sphDispersedMediumOpticsProducerWgsl,
+    /size_parameter < SPHERE_GEOMETRIC_OPTICS_MIN_X[\s\S]*central_phase_delay[\s\S]*SPHERE_GEOMETRIC_OPTICS_MIN_CENTRAL_PHASE_DELAY/
+  );
+  assert.doesNotMatch(
+    sphDispersedMediumOpticsProducerWgsl,
+    /anomalous.diffraction|geometric.optics.lower.bound/i
+  );
   assert.doesNotMatch(sphDispersedMediumOpticsProducerWgsl, /saturation/i);
+  assert.doesNotMatch(
+    sphDispersedMediumOpticsReactionCaptureWgsl,
+    /\b(h2o|water|steam|preset|scenario)\b/i
+  );
+  assert.match(
+    sphDispersedMediumOpticsReactionCaptureWgsl,
+    /fn capture_reaction_births/
+  );
+  assert.match(
+    sphDispersedMediumOpticsReactionCaptureWgsl,
+    /post_component\.mass_kg - pre_component\.mass_kg/
+  );
+  assert.match(
+    sphDispersedMediumOpticsReactionCaptureWgsl,
+    /captured_optics\[optics_base\] = selected_route\.identity/
+  );
   assert.deepEqual(
     enumerateSphDispersedMediumOpticsProducerPrewarmPipelineDescriptors()
       .map((descriptor) => descriptor.entryPoint),
-    ['preflight', 'apply_production']
+    ['capture_reaction_births', 'preflight', 'apply_production']
   );
 });
 
@@ -610,6 +909,13 @@ function createFakeDevice() {
     createBindGroup(descriptor) {
       bindGroups.push(descriptor);
       return descriptor;
+    },
+    createCommandEncoder() {
+      const encoder = createFakeEncoder();
+      return {
+        ...encoder,
+        finish() { return { encoder }; }
+      };
     }
   };
   return device;
@@ -838,6 +1144,40 @@ test('encode-only WebGPU stage preflights then produces a distinct retained outp
   assert.equal(stage.result.ownsOutputBuffer, false);
 });
 
+test('standalone WebGPU producer submits and retires scratch queue-ordered without a host fence', () => {
+  const device = createFakeDevice();
+  const fixture = producerGpuFixture(device, 3);
+  const result = runSphDispersedMediumOpticsProducerWebGpu(fixture);
+
+  assert.equal(result.status, 'dispersed-medium-optics-producer-submitted');
+  assert.equal(result.submitted, true);
+  assert.equal(result.commandSubmissionCount, 1);
+  assert.equal(result.encodedDispatchCount, 2);
+  assert.equal(device.submissions.length, 1);
+  assert.equal(result.submittedWorkCleanupHostQueueFenceCount, 0);
+  assert.equal(
+    result.submittedWorkCleanupMethod,
+    'same-gpu-queue-submission-order'
+  );
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.outputBuffer.destroyed, false);
+  assert.equal(
+    device.buffers
+      .filter((buffer) => (
+        /seed-optics|closure-rows|evidence|params/.test(buffer.label)
+      ))
+      .every((buffer) => buffer.destroyed === true),
+    true
+  );
+  const claim = issueSphDispersedMediumOpticsProducerAdoptionClaim(result);
+  assert.equal(
+    claim.schema,
+    ULG_SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_ADOPTION_CLAIM_SCHEMA
+  );
+  assert.equal(result.destroyOutputBuffer(), true);
+  assert.equal(result.outputBuffer.destroyCount, 1);
+});
+
 test('GPU producer cannot encode after submitted resources retire', () => {
   const device = createFakeDevice();
   const fixture = producerGpuFixture(device, 2);
@@ -855,6 +1195,245 @@ test('GPU producer cannot encode after submitted resources retire', () => {
     /successfully encoded stage/
   );
   assert.equal(stage.cleanupRetainedOutput(), true);
+  assert.equal(stage.outputBuffer.destroyCount, 1);
+});
+
+test('reaction-aware WebGPU producer captures births before phase-transfer production in three queue-ordered passes', () => {
+  const device = createFakeDevice();
+  const fixture = producerGpuFixture(device, 33);
+  const preReactionStateBuffer = createSourceBuffer(
+    device,
+    'pre-reaction-state',
+    fixture.preTransferStateBuffer.size
+  );
+  const preReactionThermoBuffer = createSourceBuffer(
+    device,
+    'pre-reaction-thermo',
+    fixture.preTransferThermoBuffer.size
+  );
+  const stage = createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
+    ...fixture,
+    preReactionStateBuffer,
+    preReactionThermoBuffer
+  });
+  const encoder = createFakeEncoder();
+  stage.encode(encoder);
+
+  assert.equal(stage.result.reactionCaptureEnabled, true);
+  assert.equal(stage.result.encodedDispatchCount, 3);
+  assert.equal(
+    stage.result.adoptionDeclaration.declarationMode,
+    'gpu-dynamic-route-catalog-v0'
+  );
+  assert.equal(stage.result.adoptionDeclaration.readyRowCount, null);
+  assert.equal(stage.result.adoptionDeclaration.blockedRowCount, null);
+  assert.equal(stage.result.adoptionDeclaration.initialReadyRowCount, 33);
+  assert.equal(stage.result.adoptionDeclaration.initialBlockedRowCount, 99);
+  assert.deepEqual(
+    stage.result.adoptionDeclaration.eligibleOpticalStateIds,
+    [101, 202]
+  );
+  assert.match(
+    stage.result.adoptionDeclaration.routeCatalogSignature,
+    /^f32-bits-v0:/
+  );
+  assert.equal(device.pipelines.length, 3);
+  assert.equal(device.bindGroups.length, 3);
+  assert.deepEqual(
+    encoder.passes.map((pass) => pass.descriptor.label.split('-').at(-1)),
+    ['capture', 'preflight', 'apply']
+  );
+  assert.match(encoder.passes[0].descriptor.label, /reaction-capture$/);
+  assert.deepEqual(encoder.passes[0].dispatches, [[3, 1, 1]]);
+  assert.strictEqual(
+    encoder.passes[0].bindGroup.bindGroup.entries[0].resource.buffer,
+    preReactionStateBuffer
+  );
+  assert.strictEqual(
+    encoder.passes[0].bindGroup.bindGroup.entries[2].resource.buffer,
+    fixture.preTransferStateBuffer
+  );
+  const reactionCaptureBuffer = device.buffers.find(
+    (buffer) => buffer.label.endsWith('-reaction-capture')
+  );
+  assert.ok(reactionCaptureBuffer);
+  assert.strictEqual(
+    encoder.passes[0].bindGroup.bindGroup.entries[6].resource.buffer,
+    reactionCaptureBuffer
+  );
+  assert.strictEqual(
+    encoder.passes[2].bindGroup.bindGroup.entries[4].resource.buffer,
+    reactionCaptureBuffer
+  );
+  assert.equal(stage.result.immutableDeclarationLanes.length, 0);
+  assert.deepEqual(stage.result.dynamicallyResolvedDeclarationLanes, [0, 1, 2, 3]);
+  assert.match(stage.result.massAuthority, /reaction-born-condensed-component/);
+
+  stage.cleanupSubmittedWork();
+  assert.equal(reactionCaptureBuffer.destroyed, true);
+  assert.equal(preReactionStateBuffer.destroyed, false);
+  assert.equal(preReactionThermoBuffer.destroyed, false);
+  assert.equal(stage.outputBuffer.destroyed, false);
+  stage.cleanupRetainedOutput();
+});
+
+test('reaction-aware producer adoption authenticates the dynamic route catalog without active-row readback', () => {
+  const device = createFakeDevice();
+  const fixture = producerGpuFixture(device, 2);
+  const stage = createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
+    ...fixture,
+    preReactionStateBuffer: createSourceBuffer(
+      device,
+      'dynamic-adoption-pre-reaction-state',
+      fixture.preTransferStateBuffer.size
+    ),
+    preReactionThermoBuffer: createSourceBuffer(
+      device,
+      'dynamic-adoption-pre-reaction-thermo',
+      fixture.preTransferThermoBuffer.size
+    )
+  });
+  stage.encode(createFakeEncoder());
+  const claim = issueSphDispersedMediumOpticsProducerAdoptionClaim(
+    stage.result
+  );
+  const transaction =
+    consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(claim, {
+      device,
+      outputBuffer: stage.outputBuffer,
+      particleLineage: fixture.particleLineage,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily,
+      particleSourceFamilyRegistrar: {}
+    });
+  const child = transaction.adoptedOutput;
+
+  assert.equal(child.declarationMode, 'gpu-dynamic-route-catalog-v0');
+  assert.equal(child.readyRowCount, null);
+  assert.equal(child.blockedRowCount, null);
+  assert.equal(child.initialReadyRowCount, 2);
+  assert.equal(child.initialBlockedRowCount, 6);
+  assert.deepEqual(child.eligibleOpticalStateIds, [101, 202]);
+  assert.equal(Object.isFrozen(child.eligibleOpticalStateIds), true);
+  assert.equal(
+    child.activeRouteCountAuthority,
+    'gpu-resident-unobserved-no-host-readback'
+  );
+  const snapshot = snapshotSphDispersedMediumGpuBufferDeclaration(child, {
+    device,
+    particleSourceFamily: fixture.postTransferParticleSourceFamily
+  });
+  assert.equal(snapshot.declarationMode, child.declarationMode);
+  assert.equal(snapshot.readyRowCount, null);
+  assert.deepEqual(
+    snapshot.initialReadyOpticalStateIds,
+    stage.result.adoptionDeclaration.initialReadyOpticalStateIds
+  );
+  assert.deepEqual(
+    snapshot.eligibleOpticalStateIds,
+    stage.result.adoptionDeclaration.eligibleOpticalStateIds
+  );
+  assert.strictEqual(snapshot.buffer, child.buffer);
+
+  const routeCatalogSignature = child.routeCatalogSignature;
+  child.routeCatalogSignature = 'f32-bits-v0:forged-after-adoption';
+  assert.equal(validateSphDispersedMediumGpuBufferAuthority(
+    device,
+    child.authority,
+    { upload: child }
+  ), false);
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    stage.result,
+    child,
+    {
+      device,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily
+    }
+  ), false);
+  child.routeCatalogSignature = routeCatalogSignature;
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    stage.result,
+    child,
+    {
+      device,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily
+    }
+  ), true);
+
+  stage.cleanupSubmittedWork();
+  assert.equal(destroySphDispersedMediumGpuBuffers(child), true);
+  assert.equal(stage.outputBuffer.destroyCount, 1);
+});
+
+test('reaction-aware producer keeps an all-blocked H2-like route catalog optically thin through adoption', () => {
+  const device = createFakeDevice();
+  const fixture = producerGpuFixture(device, 1);
+  const opticalClosureTable = buildSphDispersedMediumOpticalClosureTable([{
+    dispersedMaterialId: 33,
+    vaporPhaseId: GAS_PHASE_ID,
+    condensedPhaseId: LIQUID_PHASE_ID,
+    opticalStateId: 303,
+    morphologyModelId:
+      SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL.blocked,
+    status: SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.blocked
+  }]);
+  const seedOpticsDeclaration = buildSphDispersedMediumOpticsProducerSeedRows({
+    phaseCarrierPlan: fixture.phaseCarrierPlan,
+    lineageMaterialIds: new Float32Array([33]),
+    opticalClosureTable
+  });
+  const stage = createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
+    ...fixture,
+    opticalClosureTable,
+    seedOpticsDeclaration,
+    seedOpticsRows: seedOpticsDeclaration.rows,
+    preReactionStateBuffer: createSourceBuffer(
+      device,
+      'h2-like-pre-reaction-state',
+      fixture.preTransferStateBuffer.size
+    ),
+    preReactionThermoBuffer: createSourceBuffer(
+      device,
+      'h2-like-pre-reaction-thermo',
+      fixture.preTransferThermoBuffer.size
+    )
+  });
+  stage.encode(createFakeEncoder());
+  const claim = issueSphDispersedMediumOpticsProducerAdoptionClaim(
+    stage.result
+  );
+  const transaction =
+    consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(claim, {
+      device,
+      outputBuffer: stage.outputBuffer,
+      particleLineage: fixture.particleLineage,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily,
+      particleSourceFamilyRegistrar: {}
+    });
+
+  assert.equal(transaction.adoptedOutput.readyRowCount, null);
+  assert.equal(transaction.adoptedOutput.blockedRowCount, null);
+  assert.deepEqual(
+    transaction.adoptedOutput.initialReadyOpticalStateIds,
+    []
+  );
+  assert.deepEqual(transaction.adoptedOutput.eligibleOpticalStateIds, []);
+  assert.equal(
+    transaction.adoptedOutput.eligibleOpticalStateRouteCount,
+    0
+  );
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    stage.result,
+    transaction.adoptedOutput,
+    {
+      device,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily
+    }
+  ), true);
+
+  stage.cleanupSubmittedWork();
+  assert.equal(destroySphDispersedMediumGpuBuffers(
+    transaction.adoptedOutput
+  ), true);
   assert.equal(stage.outputBuffer.destroyCount, 1);
 });
 
@@ -1082,6 +1661,27 @@ test('WebGPU producer transfers its fresh output only through an exact one-shot 
     transaction.adoptedOutput,
     wrongFamily
   ), false);
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    stage.result,
+    transaction.adoptedOutput,
+    {
+      device,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily
+    }
+  ), true);
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    { ...stage.result },
+    transaction.adoptedOutput,
+    {
+      device,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily
+    }
+  ), false);
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    stage.result,
+    transaction.adoptedOutput,
+    { device, particleSourceFamily: wrongFamily }
+  ), false);
   assert.equal(stage.result.ownsBuffer, false);
   assert.equal(stage.result.ownsOutputBuffer, false);
   assert.equal(stage.result.outputOwnershipTransferred, true);
@@ -1106,6 +1706,14 @@ test('WebGPU producer transfers its fresh output only through an exact one-shot 
   assert.equal(destroySphDispersedMediumGpuBuffers(
     transaction.adoptedOutput
   ), true);
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(
+    stage.result,
+    transaction.adoptedOutput,
+    {
+      device,
+      particleSourceFamily: fixture.postTransferParticleSourceFamily
+    }
+  ), false);
   assert.equal(destroySphDispersedMediumGpuBuffers(
     transaction.adoptedOutput
   ), false);
@@ -1367,6 +1975,106 @@ test('terminal producer adoption attaches only to an exact sidecar-free SPH pare
     assert.equal(destroySphGpuParticleBuffers(parent), true);
     assert.equal(stage.outputBuffer.destroyCount, 1);
   }
+});
+
+test('adopted producer authority rebases only after the exact parent and child topology epoch transition', () => {
+  const device = createFakeDevice();
+  const fixture = producerGpuFixture(device, 2);
+  const parent = canonicalSidecarFreeParent(device, fixture);
+  const stage = createSphDispersedMediumOpticsProducerWebGpuEncoderStage(
+    producerFixtureTargetingParent(fixture, parent)
+  );
+  stage.encode(createFakeEncoder());
+  const claim = issueSphDispersedMediumOpticsProducerAdoptionClaim(
+    stage.result
+  );
+  const sidecar = adoptSphGpuParticleDispersedMediumOpticsSidecar(
+    device,
+    claim,
+    stage.outputBuffer,
+    { sourceSphUpload: parent }
+  );
+  const sourceFamily = Object.freeze({
+    particleCount: parent.particleCount,
+    topologyEpoch: parent.topologyEpoch,
+    identityRevision: parent.identityRevision,
+    identityBuffer: parent.identityBuffer,
+    stateBuffer: parent.stateBuffer,
+    thermoBuffer: parent.thermoBuffer
+  });
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      stage.result,
+      sidecar,
+      { device, particleSourceFamily: sourceFamily }
+    ),
+    true
+  );
+
+  const parentTransition =
+    advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+      sourceSphUpload: parent,
+      device,
+      targetTopologyEpoch: sourceFamily.topologyEpoch + 1
+    });
+  const targetFamily = Object.freeze({
+    ...sourceFamily,
+    topologyEpoch: parent.topologyEpoch
+  });
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      stage.result,
+      sidecar,
+      { device, particleSourceFamily: targetFamily }
+    ),
+    false,
+    'the producer record must remain stale until its exact rebase'
+  );
+  const producerRebase =
+    rebaseSphDispersedMediumOpticsProducerAdoptionTopologyEpoch(
+      stage.result,
+      sidecar,
+      {
+        topologyEpochTransitionReceipt: parentTransition,
+        targetParticleSourceFamily: targetFamily
+      }
+    );
+  assert.equal(
+    producerRebase.status,
+    'sph-dispersed-medium-optics-producer-topology-rebased'
+  );
+  assert.equal(producerRebase.sourceTopologyEpoch, sourceFamily.topologyEpoch);
+  assert.equal(producerRebase.targetTopologyEpoch, targetFamily.topologyEpoch);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      stage.result,
+      sidecar,
+      { device, particleSourceFamily: targetFamily }
+    ),
+    true
+  );
+
+  assert.equal(producerRebase.rollback(), true);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      stage.result,
+      sidecar,
+      { device, particleSourceFamily: targetFamily }
+    ),
+    false
+  );
+  assert.equal(parentTransition.rollback(), true);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      stage.result,
+      sidecar,
+      { device, particleSourceFamily: sourceFamily }
+    ),
+    true
+  );
+  stage.cleanupSubmittedWork();
+  assert.equal(destroySphGpuParticleBuffers(parent), true);
+  assert.equal(stage.outputBuffer.destroyCount, 1);
 });
 
 test('fabricated adoption authority and declaration getter mutation cannot steal producer ownership', () => {

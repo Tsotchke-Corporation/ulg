@@ -31,6 +31,7 @@ import {
   SCHROEDER_PHASE_VOLUME_MIGRATION_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_PROPOSAL_ROW_LAYOUT,
+  SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SCHROEDER_ACTIVE_NODE_INDEX_EXECUTION_SCHEMA,
@@ -310,10 +311,30 @@ import {
   schroederPhaseVolumeSplitMergeAdmissionAllowsApplication,
   schroederStateDeltaMergeAdmissionAllowsApplication
 } from '../src/runtime/sph/schroederHierarchyGpu.js';
-import { MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
-  mergeResidentProductMassBuffersWebGpu
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  adoptSphGpuParticleDispersedMediumOpticsSidecar,
+  ensureSphGpuParticleBufferSetBorrowLifecycle
+} from '../src/runtime/sph/sphGpuBuffers.js';
+import {
+  isFreshSphDispersedMediumOpticsReplacementPending,
+  mergeResidentProductMassBuffersWebGpu,
+  registerFreshSphDispersedMediumOpticsReplacement,
+  rejectFreshSphDispersedMediumOpticsReplacement,
+  sphDispersedMediumOpticsMatchesParticleUpload
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  beginSphDispersedMediumGpuBufferBorrow
+} from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
+import {
+  buildSphDispersedMediumOpticalClosureTable
+} from '../src/runtime/sph/sphDispersedMediumOpticalClosure.js';
+import {
+  buildSphDispersedMediumOpticsProducerSeedRows,
+  issueSphDispersedMediumOpticsProducerAdoptionClaim,
+  runSphDispersedMediumOpticsProducerWebGpu,
+  sphDispersedMediumOpticsProducerAdoptionMatches
+} from '../src/runtime/sph/sphDispersedMediumOpticsProducerGpu.js';
 import {
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA
@@ -394,6 +415,34 @@ const canonicalSidecarMechanicsMaterialTable =
   buildMlsMpmMechanicsMaterialTable({
     h2o: referenceMaterialClosures.h2o.properties
   });
+const canonicalHierarchyOpticsPhaseCarrierPlan = Object.freeze({
+  schema: 'peercompute.ulg.sph-phase-carrier-plan.v2',
+  status: 'phase-lane-capacity-ready',
+  lineageCapacity: 1,
+  primaryCapacity: 1,
+  phaseLaneCount: 4,
+  phaseLaneStride: 1,
+  companionStart: 1,
+  companionCapacity: 3,
+  particleCapacity: 4,
+  stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex',
+  phaseCompanionLanesRequired: true
+});
+const canonicalHierarchyOpticalClosureTable =
+  buildSphDispersedMediumOpticalClosureTable([{
+    dispersedMaterialId: 11,
+    vaporPhaseId: 3,
+    condensedPhaseId: 2,
+    opticalStateId: 101,
+    morphologyModelId:
+      SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+        .monodisperseRadius,
+    condensedDensityKgPerM3: 1000,
+    scatteringEfficiencyQsca: 2,
+    absorptionEfficiencyQabs: 0.1,
+    asymmetryFactorG: 0.85,
+    effectiveRadiusM: 1e-6
+  }]);
 
 function residentProductMassFixture(device, label) {
   const productEventStrideBytes =
@@ -524,6 +573,8 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxUniformBufferBindingSize: 64 * 1024,
       maxStorageBuffersPerShaderStage: 16,
+      maxComputeInvocationsPerWorkgroup: 256,
+      maxComputeWorkgroupSizeX: 256,
       maxComputeWorkgroupsPerDimension: 65_535
     },
     createdBuffers,
@@ -559,6 +610,12 @@ function createFakeWebGpuDevice({ allowReadbackCopies = false } = {}) {
     },
     createShaderModule(descriptor) {
       shaderModules.push(descriptor);
+      return descriptor;
+    },
+    createBindGroupLayout(descriptor) {
+      return descriptor;
+    },
+    createPipelineLayout(descriptor) {
       return descriptor;
     },
     createComputePipeline(descriptor) {
@@ -13695,6 +13752,874 @@ test('M4: Schroeder two-level authoritative mode runs the thermal sidecar sequen
   );
   assert.equal(step.diagnostics.compactGpuSummaryAvailable, false);
   assert.equal(step.diagnostics.preTerminalMechanicsSummaryAvailable, true);
+});
+
+function createAuthoritativeTwoLevelPhysicalOpticsFixture({
+  prefix = 'two-level-optics',
+  sourceOptics = false
+} = {}) {
+  const device = createFakeWebGpuDevice();
+  armWorkerQueueSubmitBurst(device);
+  const buffers = manualBuffers({
+    particleCount: 4,
+    smoothingLengthM: 0.25
+  });
+  const uploads = authoritativeUploadFamily(device, {
+    particleCount: 4,
+    topologyEpoch: 19,
+    prefix: `${prefix}-source`
+  });
+  const phaseCarrierPlan = canonicalHierarchyOpticsPhaseCarrierPlan;
+  const identityRevision = `${prefix}-lineage-v0`;
+  Object.assign(buffers.sphParticleState, {
+    phaseCarrierPlan,
+    topologyEpoch: 19,
+    identityRevision
+  });
+  Object.assign(buffers.mlsMpmParticleState, { phaseCarrierPlan });
+  Object.assign(uploads.sphParticleUpload, {
+    phaseCarrierPlan,
+    identityRevision
+  });
+  Object.assign(uploads.mlsMpmParticleUpload, { phaseCarrierPlan });
+  const seedRows = buildSphDispersedMediumOpticsProducerSeedRows({
+    phaseCarrierPlan,
+    lineageMaterialIds: new Float32Array([11]),
+    opticalClosureTable: canonicalHierarchyOpticalClosureTable
+  });
+  const storageBuffer = (label, size) => tagWebGpuBufferDevice(
+    device.createBuffer({ label, size, usage: 4 | 8 | 128 }),
+    device
+  );
+  const phaseStateBuffer = storageBuffer(
+    `${prefix}-phase-state`,
+    uploads.sphParticleUpload.stateBufferByteLength
+  );
+  const phaseThermoBuffer = storageBuffer(
+    `${prefix}-phase-thermo`,
+    uploads.sphParticleUpload.thermoBufferByteLength
+  );
+  const phaseMechanicsBuffer = storageBuffer(
+    `${prefix}-phase-mechanics`,
+    uploads.mlsMpmParticleUpload.mechanicsBufferByteLength
+  );
+  const refreshedMechanicsBuffer = storageBuffer(
+    `${prefix}-refreshed-mechanics`,
+    uploads.mlsMpmParticleUpload.mechanicsBufferByteLength
+  );
+  const telemetry = (scope) => createGpuReadbackTelemetry({ scope });
+  const fixture = {
+    device,
+    buffers,
+    uploads,
+    phaseCarrierPlan,
+    seedRows,
+    phaseStateBuffer,
+    phaseThermoBuffer,
+    phaseMechanicsBuffer,
+    refreshedMechanicsBuffer,
+    stageOrder: [],
+    coupledResult: null,
+    thermalStepResult: null,
+    producerArgs: null,
+    producerResult: null,
+    privateCoupledSphUpload: null,
+    sourceProducerResult: null,
+    sourceOptics: null
+  };
+  if (sourceOptics) {
+    const priorStateBuffer = storageBuffer(
+      `${prefix}-prior-state`,
+      uploads.sphParticleUpload.stateBufferByteLength
+    );
+    const priorThermoBuffer = storageBuffer(
+      `${prefix}-prior-thermo`,
+      uploads.sphParticleUpload.thermoBufferByteLength
+    );
+    fixture.sourceProducerResult =
+      runSphDispersedMediumOpticsProducerWebGpu({
+        device,
+        phaseCarrierPlan,
+        particleCount: uploads.sphParticleUpload.particleCount,
+        particleLineage: {
+          particleCount: uploads.sphParticleUpload.particleCount,
+          topologyEpoch: uploads.sphParticleUpload.topologyEpoch,
+          identityRevision: uploads.sphParticleUpload.identityRevision,
+          identityBuffer: uploads.sphParticleUpload.identityBuffer
+        },
+        preTransferStateBuffer: priorStateBuffer,
+        preTransferThermoBuffer: priorThermoBuffer,
+        postTransferStateBuffer: uploads.sphParticleUpload.stateBuffer,
+        postTransferThermoBuffer: uploads.sphParticleUpload.thermoBuffer,
+        seedOpticsRows: seedRows.rows,
+        opticalClosureTable: canonicalHierarchyOpticalClosureTable,
+        label: `${prefix}-source-optics`
+      });
+    const sourceClaim =
+      issueSphDispersedMediumOpticsProducerAdoptionClaim(
+        fixture.sourceProducerResult
+      );
+    fixture.sourceOptics =
+      adoptSphGpuParticleDispersedMediumOpticsSidecar(
+        device,
+        sourceClaim,
+        fixture.sourceProducerResult.outputBuffer,
+        { sourceSphUpload: uploads.sphParticleUpload }
+      );
+  }
+  const twoLevelOpticsMechanicsRunner = Object.assign(
+    async (options) => {
+      fixture.coupledResult = await driveAuthoritativeCanonicalEpochs(options, {
+        prefix
+      });
+      fixture.privateCoupledSphUpload =
+        fixture.coupledResult.nextParticleUploads.sphParticleUpload;
+      return fixture.coupledResult;
+    },
+    { schroederSpatialTopologyTransitionAware: true }
+  );
+  const residentStepOptions = {
+    thermalMaterialTable: canonicalSidecarThermalMaterialTable,
+    mechanicsMaterialTable: canonicalSidecarMechanicsMaterialTable,
+    dispersedMediumOpticalClosureTable:
+      canonicalHierarchyOpticalClosureTable,
+    dispersedMediumOpticsSeedRows: seedRows,
+    thermalStepRunner: async (options) => {
+      fixture.stageOrder.push('thermal');
+      fixture.thermalStepResult = await runSphThermalStepWebGpu(options);
+      return fixture.thermalStepResult;
+    },
+    phaseCarrierTransferRunner(options) {
+      fixture.stageOrder.push('phase');
+      assert.equal(
+        options.sourceStateBuffer,
+        fixture.thermalStepResult.stateBuffer
+      );
+      assert.equal(
+        options.sourceThermoBuffer,
+        fixture.thermalStepResult.thermoBuffer
+      );
+      return {
+        result: {
+          schema: 'peercompute.ulg.sph-phase-carrier-transfer.v2',
+          backend: 'webgpu',
+          status: 'phase-carrier-transfer-submitted',
+          particleCount: 4,
+          stateBuffer: phaseStateBuffer,
+          thermoBuffer: phaseThermoBuffer,
+          mechanicsBuffer: phaseMechanicsBuffer,
+          stateBufferByteLength: phaseStateBuffer.size,
+          thermoBufferByteLength: phaseThermoBuffer.size,
+          mechanicsBufferByteLength: phaseMechanicsBuffer.size,
+          retainedOutputParticleBuffers: true,
+          readbackMode: 'no-full-readback',
+          normalHotLoopReadbackFree: true,
+          fullParticleReadbackPerformed: false,
+          fullParticleReadbackFree: true,
+          ...telemetry(`${prefix}-phase`),
+          destroyOutputParticleBuffers() {
+            phaseStateBuffer.destroy();
+            phaseThermoBuffer.destroy();
+            phaseMechanicsBuffer.destroy();
+          }
+        }
+      };
+    },
+    dispersedMediumOpticsProducerRunner(options) {
+      fixture.stageOrder.push('optics');
+      fixture.producerArgs = options;
+      fixture.producerResult =
+        runSphDispersedMediumOpticsProducerWebGpu(options);
+      return fixture.producerResult;
+    },
+    mechanicsRefreshRunner(options) {
+      fixture.stageOrder.push('mechanics');
+      assert.equal(options.sourceStateBuffer, phaseStateBuffer);
+      assert.equal(options.sourceThermoBuffer, phaseThermoBuffer);
+      assert.equal(options.sourceMechanicsBuffer, phaseMechanicsBuffer);
+      return {
+        result: {
+          schema: 'peercompute.ulg.mls-mpm-mechanics-refresh.v0',
+          backend: 'webgpu',
+          status: 'mechanics-constitutive-refresh-executed',
+          particleCount: 4,
+          mechanicsBuffer: refreshedMechanicsBuffer,
+          mechanicsBufferByteLength: refreshedMechanicsBuffer.size,
+          retainedOutputParticleBuffers: true,
+          readbackMode: 'no-full-readback',
+          normalHotLoopReadbackFree: true,
+          fullParticleReadbackPerformed: false,
+          fullParticleReadbackFree: true,
+          ...telemetry(`${prefix}-mechanics-refresh`),
+          destroyOutputParticleBuffers() {
+            refreshedMechanicsBuffer.destroy();
+          }
+        }
+      };
+    }
+  };
+  const baseOptions = {
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    minLevel: 0,
+    maxLevel: 1,
+    baseGridSpacingM: 0.25,
+    dt: 5e-4,
+    enableTwoLevelMechanics: true,
+    enableMechanicsFieldPairV2: true,
+    twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2,
+    twoLevelMechanicsRunner: twoLevelOpticsMechanicsRunner,
+    residentStepOptions,
+    residentStepRunner: async () => ({ status: 'must-not-run' })
+  };
+  fixture.run = (overrides = {}) => runSchroederSameLevelMechanicsWebGpu({
+    ...baseOptions,
+    ...overrides,
+    residentStepOptions: {
+      ...residentStepOptions,
+      ...(overrides.residentStepOptions ?? {})
+    }
+  });
+  return fixture;
+}
+
+test('authoritative two-level closure adopts one physical optics producer into the exact published family', async () => {
+  const fixture = createAuthoritativeTwoLevelPhysicalOpticsFixture();
+  const result = await fixture.run();
+
+  const step = result.residentStep;
+  const terminalSphUpload = step.nextParticleUploads.sphParticleUpload;
+  assert.deepEqual(fixture.stageOrder, [
+    'thermal',
+    'phase',
+    'optics',
+    'mechanics'
+  ]);
+  assert.equal(
+    fixture.producerArgs.preTransferStateBuffer,
+    fixture.thermalStepResult.stateBuffer
+  );
+  assert.equal(
+    fixture.producerArgs.preTransferThermoBuffer,
+    fixture.thermalStepResult.thermoBuffer
+  );
+  assert.equal(
+    fixture.producerArgs.postTransferStateBuffer,
+    fixture.phaseStateBuffer
+  );
+  assert.equal(
+    fixture.producerArgs.postTransferThermoBuffer,
+    fixture.phaseThermoBuffer
+  );
+  assert.equal(fixture.producerArgs.priorOptics, null);
+  assert.equal(fixture.producerArgs.seedOpticsRows, fixture.seedRows.rows);
+  assert.equal(
+    step.dispersedMediumOpticsProducerStep,
+    fixture.producerResult
+  );
+  assert.equal(
+    step.stageStatus.dispersedMediumOptics,
+    'dispersed-medium-optics-producer-submitted'
+  );
+  assert.equal(step.stageBackends.dispersedMediumOptics, 'webgpu');
+  assert.equal(
+    step.dispersedMediumOpticsReplacementStatus,
+    'fresh-dispersed-medium-optics-committed'
+  );
+  assert.equal(
+    ensureSphGpuParticleBufferSetBorrowLifecycle(terminalSphUpload),
+    true
+  );
+  assert.equal(
+    sphDispersedMediumOpticsMatchesParticleUpload(terminalSphUpload),
+    true
+  );
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      fixture.producerResult,
+      terminalSphUpload.dispersedMediumOptics,
+      {
+        device: fixture.device,
+        particleSourceFamily: terminalSphUpload
+      }
+    ),
+    true
+  );
+  assert.equal(terminalSphUpload.topologyEpoch, 20);
+  assert.equal(step.fullParticleReadbackPerformed, false);
+  assert.equal(step.fullParticleReadbackFree, true);
+  assert.equal(step.mapAsyncCount, 0);
+  assert.equal(
+    step.dispersedMediumOpticsProducerStep.hostQueueFenceCount,
+    0
+  );
+  assert.equal(
+    step.dispersedMediumOpticsProducerStep
+      .submittedWorkCleanupHostQueueFenceCount,
+    0
+  );
+  assert.equal(
+    fixture.privateCoupledSphUpload.dispersedMediumOptics,
+    undefined,
+    'private two-level mechanics intermediates must not inherit optics aliases'
+  );
+  assert.notEqual(fixture.privateCoupledSphUpload, terminalSphUpload);
+});
+
+test('two-level public optics publication finalizes without fallible rebase revalidation', async () => {
+  const fixture = createAuthoritativeTwoLevelPhysicalOpticsFixture({
+    prefix: 'two-level-optics-publication-finalization',
+    sourceOptics: true
+  });
+  let publishedSphUpload = null;
+  let publicationReceipt = null;
+
+  const result = await fixture.run({
+    successorLevelAssignmentRunner: async (options) => {
+      publishedSphUpload = options.sphParticleUpload;
+      return runSchroederLevelAssignmentWebGpu(options);
+    },
+    spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
+      publicationReceipt =
+        publishPreparedSchroederSpatialSuccessorSourceFamily(
+          plan,
+          { commitReceipt }
+        );
+      assert.equal(publicationReceipt.published, true);
+      const release = beginSphDispersedMediumGpuBufferBorrow(
+        fixture.device,
+        publishedSphUpload.dispersedMediumOptics
+      );
+      assert.equal(release(), true);
+      return publicationReceipt;
+    }
+  });
+
+  assert.ok(publishedSphUpload);
+  assert.equal(publicationReceipt.published, true);
+  assert.equal(result.schroederSpatialSuccessorSourceFamilyReady, true);
+  assert.equal(
+    result.residentStep.dispersedMediumOpticsReplacementStatus,
+    'fresh-dispersed-medium-optics-committed'
+  );
+  assert.equal(
+    sphDispersedMediumOpticsMatchesParticleUpload(publishedSphUpload),
+    true
+  );
+});
+
+test('two-level malformed returned receipt cannot retire an already-published fresh optics child', async () => {
+  const fixture = createAuthoritativeTwoLevelPhysicalOpticsFixture({
+    prefix: 'two-level-optics-published-malformed-receipt',
+    sourceOptics: true
+  });
+  let publicationReceipt = null;
+  let rejection = null;
+
+  await assert.rejects(
+    () => fixture.run({
+      spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
+        publicationReceipt =
+          publishPreparedSchroederSpatialSuccessorSourceFamily(
+            plan,
+            { commitReceipt }
+          );
+        assert.equal(publicationReceipt.published, true);
+        // Preserve every public field while stripping the module's private
+        // receipt brand after the exact successor has already been exposed.
+        return Object.freeze({ ...publicationReceipt });
+      }
+    }),
+    (error) => {
+      rejection = error;
+      assert.equal(
+        error.code,
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_PUBLICATION_REJECTED'
+      );
+      return true;
+    }
+  );
+
+  assert.equal(
+    rejection.schroederSpatialSuccessorPublicationWitness.sourceFamily,
+    publicationReceipt.sourceFamily
+  );
+  assert.equal(
+    rejection.schroederSpatialSuccessorPublicationWitness
+      .nextParticleUploads.sphParticleUpload.dispersedMediumOpticsBuffer,
+    fixture.producerResult.outputBuffer
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.producerResult.outputBuffer.destroyCount, 0);
+  assert.equal(fixture.sourceProducerResult.outputBuffer.destroyCount, 0);
+});
+
+test('late two-level optics rebase validation fails before fresh child or public commit', async () => {
+  const fixture = createAuthoritativeTwoLevelPhysicalOpticsFixture({
+    prefix: 'two-level-optics-late-rebase-rejection',
+    sourceOptics: true
+  });
+  let rejectedSphUpload = null;
+  let publicationCallCount = 0;
+
+  await assert.rejects(
+    () => fixture.run({
+      successorLevelAssignmentRunner: async (options) => {
+        rejectedSphUpload = options.sphParticleUpload;
+        const assignment = await runSchroederLevelAssignmentWebGpu(options);
+        const release = beginSphDispersedMediumGpuBufferBorrow(
+          fixture.device,
+          rejectedSphUpload.dispersedMediumOptics
+        );
+        assert.equal(release(), true);
+        return assignment;
+      },
+      spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
+        publicationCallCount += 1;
+        return publishPreparedSchroederSpatialSuccessorSourceFamily(
+          plan,
+          { commitReceipt }
+        );
+      }
+    }),
+    (error) => {
+      assert.equal(
+        error.reason,
+        'two-level-topology-rebase-invalidated-during-classification'
+      );
+      return true;
+    }
+  );
+
+  assert.ok(rejectedSphUpload);
+  assert.equal(publicationCallCount, 0);
+  assert.equal(
+    rejectedSphUpload.topologyEpoch,
+    20,
+    'an externally invalidated transition witness quarantines rather than restamps the target'
+  );
+  assert.equal(fixture.uploads.sphParticleUpload.topologyEpoch, 19);
+  assert.equal(
+    fixture.producerResult.outputBuffer.destroyCount,
+    1,
+    'the uncommitted fresh child must retire on rebase rejection'
+  );
+  assert.equal(fixture.sourceProducerResult.outputBuffer.destroyCount, 0);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      fixture.sourceProducerResult,
+      fixture.sourceOptics,
+      {
+        device: fixture.device,
+        particleSourceFamily: fixture.uploads.sphParticleUpload
+      }
+    ),
+    true
+  );
+});
+
+test('conservative two-level rejection rolls a rebased physical optics producer back to one coherent source family', async () => {
+  const fixture = createAuthoritativeTwoLevelPhysicalOpticsFixture({
+    prefix: 'two-level-optics-rollback',
+    sourceOptics: true
+  });
+  const sourceSphUpload = fixture.uploads.sphParticleUpload;
+  const sourceMlsUpload = fixture.uploads.mlsMpmParticleUpload;
+  const sourceOptics = fixture.sourceOptics;
+  const sourceProducerResult = fixture.sourceProducerResult;
+  let rejectedSphUpload = null;
+  let rejectedMlsUpload = null;
+  const failure = new Error(
+    'intentional successor classifier failure after optics rebase'
+  );
+
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      sourceProducerResult,
+      sourceOptics,
+      {
+        device: fixture.device,
+        particleSourceFamily: sourceSphUpload
+      }
+    ),
+    true,
+    'the predecessor child starts authenticated against the source family'
+  );
+  await assert.rejects(
+    () => fixture.run({
+      successorLevelAssignmentRunner(options) {
+        rejectedSphUpload = options.sphParticleUpload;
+        rejectedMlsUpload = options.mlsMpmParticleUpload;
+        throw failure;
+      }
+    }),
+    (error) => error === failure
+  );
+
+  assert.ok(rejectedSphUpload);
+  assert.ok(rejectedMlsUpload);
+  assert.notEqual(rejectedSphUpload, sourceSphUpload);
+  assert.equal(rejectedSphUpload.topologyEpoch, 19);
+  assert.equal(rejectedMlsUpload.topologyEpoch, 19);
+  assert.equal(
+    rejectedSphUpload.topologyEpoch,
+    rejectedMlsUpload.topologyEpoch,
+    'rollback must restore SPH and MLS as one topology family'
+  );
+  assert.equal(
+    rejectedSphUpload.topologyTransitionStatus,
+    undefined
+  );
+  assert.equal(
+    rejectedMlsUpload.topologyTransitionStatus,
+    undefined
+  );
+  assert.equal(sourceSphUpload.topologyEpoch, 19);
+  assert.equal(sourceMlsUpload.topologyEpoch, 19);
+  assert.equal(sourceSphUpload.dispersedMediumOptics, sourceOptics);
+  assert.equal(ensureSphGpuParticleBufferSetBorrowLifecycle(sourceSphUpload), true);
+  assert.equal(sphDispersedMediumOpticsMatchesParticleUpload(sourceSphUpload), true);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      sourceProducerResult,
+      sourceOptics,
+      {
+        device: fixture.device,
+        particleSourceFamily: sourceSphUpload
+      }
+    ),
+    true,
+    'reverse-order rollback must restore the authentic predecessor source child'
+  );
+  assert.equal(sourceProducerResult.outputBuffer.destroyCount, 0);
+  assert.equal(
+    fixture.producerResult.outputBuffer.destroyCount,
+    1,
+    'the rejected fresh terminal child must be retired'
+  );
+});
+
+function createSingleLevelDeferredPhysicalOpticsFixture({
+  prefix = 'single-level-deferred-optics'
+} = {}) {
+  const device = createFakeWebGpuDevice();
+  armWorkerQueueSubmitBurst(device);
+  const particleCount = 4;
+  const topologyEpoch = 31;
+  const phaseCarrierPlan = canonicalHierarchyOpticsPhaseCarrierPlan;
+  const identityRevision = `${prefix}-lineage-v0`;
+  const buffers = manualBuffers({
+    particleCount,
+    smoothingLengthM: 0.25
+  });
+  const uploads = authoritativeUploadFamily(device, {
+    particleCount,
+    topologyEpoch,
+    prefix: `${prefix}-source`
+  });
+  const targetUploads = authoritativeUploadFamily(device, {
+    particleCount,
+    storageGeneration: 2,
+    physicsTick: 1,
+    physicsSubstep: 0,
+    positionEpoch: 1,
+    topologyEpoch,
+    prefix: `${prefix}-target`
+  });
+  Object.assign(buffers.sphParticleState, {
+    phaseCarrierPlan,
+    topologyEpoch,
+    identityRevision
+  });
+  Object.assign(buffers.mlsMpmParticleState, { phaseCarrierPlan });
+  Object.assign(uploads.sphParticleUpload, {
+    phaseCarrierPlan,
+    identityRevision
+  });
+  Object.assign(uploads.mlsMpmParticleUpload, { phaseCarrierPlan });
+  Object.assign(targetUploads.sphParticleUpload, {
+    phaseCarrierPlan,
+    identityRevision,
+    identityBuffer: uploads.sphParticleUpload.identityBuffer,
+    ownsIdentityBuffer: false
+  });
+  Object.assign(targetUploads.mlsMpmParticleUpload, { phaseCarrierPlan });
+  const seedRows = buildSphDispersedMediumOpticsProducerSeedRows({
+    phaseCarrierPlan,
+    lineageMaterialIds: new Float32Array([11]),
+    opticalClosureTable: canonicalHierarchyOpticalClosureTable
+  });
+  const fixture = {
+    device,
+    buffers,
+    uploads,
+    targetUploads,
+    seedRows,
+    finalStep: null,
+    producerResult: null,
+    targetOptics: null
+  };
+  const residentStepRunner = async (options) => {
+    const readerInputs = {
+      generation: options.schroederSpatialEpochGeneration,
+      sphParticleUpload: options.sphParticleUpload,
+      mlsMpmParticleUpload: options.mlsMpmParticleUpload
+    };
+    for (const [readerId, phase] of [
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION
+      ],
+      [
+        SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+        SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT
+      ]
+    ]) {
+      admitSchroederSpatialEpochTransactionReader(
+        options.schroederSpatialEpochTransaction,
+        { readerId, phase, ...readerInputs }
+      );
+    }
+    sealSchroederSpatialEpochTransactionReaders(
+      options.schroederSpatialEpochTransaction
+    );
+    fixture.producerResult =
+      runSphDispersedMediumOpticsProducerWebGpu({
+        device,
+        phaseCarrierPlan,
+        particleCount,
+        particleLineage: {
+          particleCount,
+          topologyEpoch,
+          identityRevision,
+          identityBuffer: targetUploads.sphParticleUpload.identityBuffer
+        },
+        preTransferStateBuffer: uploads.sphParticleUpload.stateBuffer,
+        preTransferThermoBuffer: uploads.sphParticleUpload.thermoBuffer,
+        postTransferStateBuffer: targetUploads.sphParticleUpload.stateBuffer,
+        postTransferThermoBuffer: targetUploads.sphParticleUpload.thermoBuffer,
+        seedOpticsRows: seedRows.rows,
+        opticalClosureTable: canonicalHierarchyOpticalClosureTable,
+        label: `${prefix}-producer`
+      });
+    const claim = issueSphDispersedMediumOpticsProducerAdoptionClaim(
+      fixture.producerResult
+    );
+    fixture.targetOptics = adoptSphGpuParticleDispersedMediumOpticsSidecar(
+      device,
+      claim,
+      fixture.producerResult.outputBuffer,
+      { sourceSphUpload: targetUploads.sphParticleUpload }
+    );
+    fixture.finalStep = {
+      status: 'resident-step-stubbed-fresh-optics',
+      nextParticleUploads: targetUploads,
+      dispersedMediumOpticsProducerStep: fixture.producerResult,
+      dispersedMediumOpticsReplacementStatus:
+        'fresh-dispersed-medium-optics-pending-step-acceptance'
+    };
+    registerFreshSphDispersedMediumOpticsReplacement({
+      finalStep: fixture.finalStep,
+      sourceSphUpload: uploads.sphParticleUpload,
+      targetSphUpload: targetUploads.sphParticleUpload,
+      sourceOptics: null,
+      intermediateUploads: [],
+      sourceFamilyTransitions: []
+    });
+    return fixture.finalStep;
+  };
+  residentStepRunner.schroederSpatialEpochTransactionAware = true;
+  residentStepRunner.schroederSpatialTopologyTransitionAware = true;
+  const baseOptions = {
+    device,
+    ...buffers,
+    ...uploads,
+    selectedLevel: 0,
+    baseGridSpacingM: 0.25,
+    enableLawQueue: false,
+    enableCrossLevelCoupling: false,
+    enablePressureInterfaceOwnerScope: false,
+    residentStepOptions: {
+      deferContinuationOwnershipTransfer: true
+    },
+    residentStepRunner
+  };
+  fixture.run = (overrides = {}) => runSchroederSameLevelMechanicsWebGpu({
+    ...baseOptions,
+    ...overrides,
+    residentStepOptions: {
+      ...baseOptions.residentStepOptions,
+      ...(overrides.residentStepOptions ?? {})
+    }
+  });
+  fixture.pendingTuple = () => ({
+    finalStep: fixture.finalStep,
+    sourceSphUpload: uploads.sphParticleUpload,
+    targetSphUpload: targetUploads.sphParticleUpload
+  });
+  return fixture;
+}
+
+test('single-level successor rejection retires its deferred fresh physical optics target', async () => {
+  const fixture = createSingleLevelDeferredPhysicalOpticsFixture({
+    prefix: 'single-level-optics-rejection'
+  });
+  let rejectedSphUpload = null;
+  let rejectedMlsUpload = null;
+  const failure = new Error(
+    'intentional single-level successor classifier failure'
+  );
+
+  await assert.rejects(
+    () => fixture.run({
+      successorLevelAssignmentRunner(options) {
+        rejectedSphUpload = options.sphParticleUpload;
+        rejectedMlsUpload = options.mlsMpmParticleUpload;
+        throw failure;
+      }
+    }),
+    (error) => error === failure
+  );
+
+  assert.equal(rejectedSphUpload, fixture.targetUploads.sphParticleUpload);
+  assert.ok(rejectedMlsUpload);
+  assert.equal(rejectedSphUpload.topologyEpoch, 31);
+  assert.equal(rejectedMlsUpload.topologyEpoch, 31);
+  assert.equal(
+    rejectedSphUpload.topologyEpoch,
+    rejectedMlsUpload.topologyEpoch,
+    'the rejected terminal pair must roll back as one topology family'
+  );
+  assert.equal(rejectedSphUpload.topologyTransitionStatus, undefined);
+  assert.equal(rejectedMlsUpload.topologyTransitionStatus, undefined);
+  assert.equal(
+    fixture.finalStep.nextParticleUploads
+      .schroederSpatialTopologyTransitionReceipt,
+    undefined,
+    'rollback must remove the unaccepted envelope receipt'
+  );
+  assert.equal(
+    isFreshSphDispersedMediumOpticsReplacementPending(
+      fixture.pendingTuple()
+    ),
+    false,
+    'outer rejection must consume the exact pending tuple'
+  );
+  assert.equal(
+    fixture.targetUploads.sphParticleUpload.ownsDispersedMediumOpticsBuffer,
+    false
+  );
+  assert.equal(fixture.producerResult.outputBuffer.destroyCount, 1);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      fixture.producerResult,
+      fixture.targetOptics,
+      {
+        device: fixture.device,
+        particleSourceFamily: fixture.targetUploads.sphParticleUpload
+      }
+    ),
+    false
+  );
+  assert.equal(fixture.uploads.sphParticleUpload.topologyEpoch, 31);
+  assert.equal(fixture.uploads.mlsMpmParticleUpload.topologyEpoch, 31);
+});
+
+test('single-level successful hierarchy return retains its exact deferred fresh physical optics tuple', async () => {
+  const fixture = createSingleLevelDeferredPhysicalOpticsFixture({
+    prefix: 'single-level-optics-success'
+  });
+  const result = await fixture.run();
+  const terminalSphUpload =
+    result.residentStep.nextParticleUploads.sphParticleUpload;
+  const terminalMlsUpload =
+    result.residentStep.nextParticleUploads.mlsMpmParticleUpload;
+
+  assert.equal(terminalSphUpload, fixture.targetUploads.sphParticleUpload);
+  assert.equal(terminalSphUpload.topologyEpoch, 32);
+  assert.equal(terminalMlsUpload.topologyEpoch, 32);
+  assert.equal(
+    result.residentStep.dispersedMediumOpticsReplacementStatus,
+    'fresh-dispersed-medium-optics-pending-step-acceptance'
+  );
+  assert.equal(
+    isFreshSphDispersedMediumOpticsReplacementPending(
+      fixture.pendingTuple()
+    ),
+    true,
+    'a successful hierarchy return must preserve downstream acceptance authority'
+  );
+  assert.equal(sphDispersedMediumOpticsMatchesParticleUpload(terminalSphUpload), true);
+  assert.equal(
+    sphDispersedMediumOpticsProducerAdoptionMatches(
+      fixture.producerResult,
+      fixture.targetOptics,
+      {
+        device: fixture.device,
+        particleSourceFamily: terminalSphUpload
+      }
+    ),
+    true
+  );
+  assert.equal(fixture.producerResult.outputBuffer.destroyCount, 0);
+
+  const rejection = rejectFreshSphDispersedMediumOpticsReplacement(
+    fixture.pendingTuple()
+  );
+  assert.equal(rejection.status, 'fresh-dispersed-medium-optics-rejected');
+  assert.equal(rejection.targetChildRetirementRequested, true);
+  assert.equal(fixture.producerResult.outputBuffer.destroyCount, 1);
+});
+
+test('single-level malformed returned receipt preserves its published pending fresh optics tuple', async () => {
+  const fixture = createSingleLevelDeferredPhysicalOpticsFixture({
+    prefix: 'single-level-optics-published-malformed-receipt'
+  });
+  let publicationReceipt = null;
+  let rejection = null;
+
+  await assert.rejects(
+    () => fixture.run({
+      spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
+        publicationReceipt =
+          publishPreparedSchroederSpatialSuccessorSourceFamily(
+            plan,
+            { commitReceipt }
+          );
+        assert.equal(publicationReceipt.published, true);
+        return Object.freeze({ ...publicationReceipt });
+      }
+    }),
+    (error) => {
+      rejection = error;
+      assert.equal(
+        error.code,
+        'ERR_SCHROEDER_SPATIAL_SUCCESSOR_PUBLICATION_REJECTED'
+      );
+      return true;
+    }
+  );
+
+  assert.equal(
+    rejection.schroederSpatialSuccessorPublicationWitness.sourceFamily,
+    publicationReceipt.sourceFamily
+  );
+  assert.equal(
+    rejection.schroederSpatialSuccessorPublicationWitness
+      .nextParticleUploads,
+    fixture.finalStep.nextParticleUploads
+  );
+  assert.equal(
+    isFreshSphDispersedMediumOpticsReplacementPending(
+      fixture.pendingTuple()
+    ),
+    true
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.producerResult.outputBuffer.destroyCount, 0);
 });
 
 test('M4: authoritative two-level mechanics observes a dormant reaction table without executing it', async () => {

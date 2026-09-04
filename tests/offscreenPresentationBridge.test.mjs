@@ -1095,7 +1095,39 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
           'molecular-gas-electronic-band-absorption',
           'water-droplet-scattering'
         ]
-      }
+      },
+      workerOwnedParticipatingMediumPresentation: {
+        schema:
+          'peercompute.ulg.worker-participating-medium-presentation.v0',
+        status: 'participating-medium-ready',
+        presentationComposition:
+          'marching-cubes-isosurfaces-plus-participating-medium',
+        marchingCubesSurfaceCount: 1,
+        collectiveOpticalSurfaceCount: 2,
+        participatingMediumAggregateDrawCount: 1,
+        collectiveOpticalShellFallbackCount: 0,
+        participatingMediumDepthClipped: true,
+        participatingMediumPremultipliedAlpha: true,
+        presentationPassOrder: [
+          'opaque-isosurface',
+          'depth-clipped-participating-medium',
+          'transparent-isosurface-and-overlay'
+        ]
+      },
+      presentationComposition:
+        'marching-cubes-isosurfaces-plus-participating-medium',
+      marchingCubesSurfaceCount: 1,
+      collectiveOpticalSurfaceCount: 2,
+      participatingMediumStatus: 'participating-medium-ready',
+      participatingMediumAggregateDrawCount: 1,
+      collectiveOpticalShellFallbackCount: 0,
+      participatingMediumDepthClipped: true,
+      participatingMediumPremultipliedAlpha: true,
+      presentationPassOrder: [
+        'opaque-isosurface',
+        'depth-clipped-participating-medium',
+        'transparent-isosurface-and-overlay'
+      ]
     }
   });
   assert.equal(canvas.style.visibility, 'visible');
@@ -1121,6 +1153,43 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
         'water-droplet-scattering'
       ]
     }
+  );
+  assert.deepEqual(
+    bridge.workerCanvasLastRenderedContent
+      .workerOwnedParticipatingMediumPresentation,
+    {
+      schema: 'peercompute.ulg.worker-participating-medium-presentation.v0',
+      status: 'participating-medium-ready',
+      presentationComposition:
+        'marching-cubes-isosurfaces-plus-participating-medium',
+      marchingCubesSurfaceCount: 1,
+      collectiveOpticalSurfaceCount: 2,
+      participatingMediumAggregateDrawCount: 1,
+      collectiveOpticalShellFallbackCount: 0,
+      participatingMediumDepthClipped: true,
+      participatingMediumPremultipliedAlpha: true,
+      presentationPassOrder: [
+        'opaque-isosurface',
+        'depth-clipped-participating-medium',
+        'transparent-isosurface-and-overlay'
+      ]
+    }
+  );
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.presentationComposition,
+    'marching-cubes-isosurfaces-plus-participating-medium'
+  );
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.marchingCubesSurfaceCount,
+    1
+  );
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.collectiveOpticalSurfaceCount,
+    2
+  );
+  assert.equal(
+    bridge.workerCanvasLastRenderedContent.participatingMediumStatus,
+    'participating-medium-ready'
   );
 
   const redrawReceipt = {

@@ -5581,6 +5581,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? renderState?.workerOffscreenPresentationStatus
     ?? metric?.rendererInit?.workerOffscreenPresentationStatus
     ?? null;
+  const workerOffscreenPresentationDisplayOwner =
+    renderState?.workerOffscreenPresentationDisplayOwner
+    ?? workerOffscreenPresentation?.displayOwner
+    ?? metric?.rendererInit?.workerOffscreenPresentationDisplayOwner
+    ?? null;
+  const workerOffscreenPresentationDisplayCanvasVisible =
+    renderState?.workerOffscreenPresentationDisplayCanvasVisible
+    ?? workerOffscreenPresentation?.displayCanvasVisible
+    ?? metric?.rendererInit?.workerOffscreenPresentationDisplayCanvasVisible
+    ?? null;
   const workerOffscreenPresentationTransport = workerOffscreenPresentation?.transport
     ?? renderState?.workerOffscreenPresentationTransport
     ?? metric?.rendererInit?.workerOffscreenPresentationTransport
@@ -7647,6 +7657,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
 	    workerOffscreenFrameTransportBudget: workerOffscreenTransportBudget,
 	    workerOffscreenPresentation,
 	    workerOffscreenPresentationStatus,
+	    workerOffscreenPresentationDisplayOwner,
+	    workerOffscreenPresentationDisplayCanvasVisible,
 	    workerOffscreenPresentationTransport,
 	    workerOffscreenPresentationDisplayHandoff,
 	    workerOffscreenPresentationFrameCopyBackRejected,

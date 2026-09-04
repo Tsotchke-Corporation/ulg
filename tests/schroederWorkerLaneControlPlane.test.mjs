@@ -355,6 +355,7 @@ function routeLawActivation(overrides = {}) {
     schema: ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA,
     thermal: false,
     reaction: false,
+    dispersedMediumOptics: false,
     contactSolver: true,
     contactSolverRequested: true,
     contactSolverEscalatedForDynamicLaws: false,
@@ -402,6 +403,7 @@ function routeLawActivation(overrides = {}) {
   const dynamicLawActive = Boolean(
     receipt.thermal
     || receipt.reaction
+    || receipt.dispersedMediumOptics
     || receipt.lawQueue
     || receipt.lawNeighborCandidates
     || receipt.phaseVolumeMigration
@@ -427,6 +429,9 @@ function routeActivationBlockers(activation) {
   return [
     activation.thermal ? 'thermal-active' : null,
     activation.reaction ? 'reaction-active' : null,
+    activation.dispersedMediumOptics
+      ? 'dispersed-medium-optics-active'
+      : null,
     activation.contactSolver ? 'contact-solver-active' : null,
     activation.lawQueue ? 'law-queue-active' : null,
     activation.lawNeighborCandidates
@@ -904,7 +909,8 @@ function oneToFourCanonicalRouteScheduleEvidence({
     'worker:thermo',
     'worker:identity',
     'worker:mechanics'
-  ]
+  ],
+  activationOverrides = { thermal: true }
 }) {
   const sourceParticleCount = 2;
   const terminalParticleCount = 8;
@@ -914,7 +920,7 @@ function oneToFourCanonicalRouteScheduleEvidence({
     stateKey,
     requestedStepCount: 1,
     retainedBufferRefs,
-    activationOverrides: { thermal: true }
+    activationOverrides
   });
   const terminalTopologyLineage = {
     ...ROUTE_SOURCE_LINEAGE,
@@ -1036,7 +1042,11 @@ function oneToFourCanonicalRouteScheduleEvidence({
     mapAsyncCount: 0,
     readbackBytes: 0,
     activationAuthority: 'schedule-config-static-declaration-no-readback',
-    trigger: 'static-thermal-law-active',
+    trigger: activationOverrides.dispersedMediumOptics === true
+      ? 'static-dispersed-medium-optics-active'
+      : activationOverrides.thermal === true
+        ? 'static-thermal-law-active'
+        : 'static-reaction-law-active',
     routingAuthority: false,
     dynamicLawRoutingAuthority: false,
     terminalFenceSatisfied: true,
@@ -1459,6 +1469,8 @@ test('seed upload budget counts each cloneable particle row family exactly once'
 test('resident step options cross the worker boundary without functions or page GPU resources', () => {
   const gpuBuffer = { destroy() {}, byteLength: 256 };
   const dormantReactionWatchRecords = new Float32Array([1, 2, 3, 4]);
+  const dispersedMediumClosureRows = new Float32Array([11, 3, 2, 101]);
+  const dispersedMediumSeedRows = new Float32Array([11, 2, 101, 1, 0, 0, 0, 0]);
   const options = createSchroederWorkerResidentStepOptions({
     internalPressureScale: 0.75,
     gasPressureMechanicsBoundaryEnabled: true,
@@ -1472,6 +1484,17 @@ test('resident step options cross the worker boundary without functions or page 
     thermalStepOptions: {
       conductionRate: 0.2,
       thermalResponseGraphUpload: { stateBuffer: gpuBuffer }
+    },
+    dispersedMediumOpticalClosureTable: {
+      schema: 'peercompute.ulg.sph-dispersed-medium-optical-closure-table.v0',
+      rows: dispersedMediumClosureRows
+    },
+    dispersedMediumOpticalClosureGpuTable: {
+      buffer: gpuBuffer
+    },
+    dispersedMediumOpticsSeedRows: {
+      schema: 'peercompute.ulg.sph-dispersed-medium-optics.v0',
+      rows: dispersedMediumSeedRows
     },
     reactionTable: null,
     reactionActivationWatchTable: {
@@ -1490,6 +1513,44 @@ test('resident step options cross the worker boundary without functions or page 
   assert.equal(options.thermalMaterialTable.helper, undefined);
   assert.equal(options.thermalMaterialTable.deviceBuffer, undefined);
   assert.equal(options.thermalStepOptions.thermalResponseGraphUpload, undefined);
+  assert.equal(options.dispersedMediumOpticalClosureGpuTable, undefined);
+  assert.notEqual(
+    options.dispersedMediumOpticalClosureTable.rows,
+    dispersedMediumClosureRows
+  );
+  assert.deepEqual(
+    [...options.dispersedMediumOpticalClosureTable.rows],
+    [...dispersedMediumClosureRows]
+  );
+  assert.notEqual(options.dispersedMediumOpticsSeedRows.rows, dispersedMediumSeedRows);
+  assert.deepEqual(
+    [...options.dispersedMediumOpticsSeedRows.rows],
+    [...dispersedMediumSeedRows]
+  );
+  dispersedMediumClosureRows[0] = 999;
+  dispersedMediumSeedRows[0] = 999;
+  assert.equal(
+    options.dispersedMediumOpticalClosureTable.rows[0],
+    11,
+    'source closure mutation must not cross the worker boundary'
+  );
+  assert.equal(
+    options.dispersedMediumOpticsSeedRows.rows[0],
+    11,
+    'source seed mutation must not cross the worker boundary'
+  );
+  options.dispersedMediumOpticalClosureTable.rows[1] = 777;
+  options.dispersedMediumOpticsSeedRows.rows[1] = 777;
+  assert.equal(
+    dispersedMediumClosureRows[1],
+    3,
+    'worker-local closure mutation must not reach the source declaration'
+  );
+  assert.equal(
+    dispersedMediumSeedRows[1],
+    2,
+    'worker-local seed mutation must not reach the source declaration'
+  );
   assert.equal(options.reactionTable, null);
   assert.equal(options.reactionActivationWatchTable.reactionCount, 1);
   assert.notEqual(
@@ -3617,7 +3678,11 @@ test('an exact zero-reaction artifact remains fingerprinted but cannot become an
 });
 
 test('phase-capable Tier0-to-canonical claims require an exact one-to-four transition proof', () => {
-  for (const lawFamily of ['thermal', 'reaction']) {
+  for (const lawFamily of [
+    'thermal',
+    'reaction',
+    'dispersedMediumOptics'
+  ]) {
     const scheduleId = `schedule:tier0-${lawFamily}-proof-required`;
     const laneId = `lane:tier0-${lawFamily}-proof-required`;
     const stateKey = `state:tier0-${lawFamily}-proof-required`;
@@ -3683,6 +3748,61 @@ test('phase-capable Tier0-to-canonical claims require an exact one-to-four trans
       requestedStepCount: 1
     }),
     /phase-carrier-one-to-four-transition-proof/
+  );
+});
+
+test('static dispersed-medium optics admits an exact Tier0 one-to-four transition', async () => {
+  const scheduleId = 'schedule:one-to-four-static-optics';
+  const laneId = 'lane:one-to-four-static-optics';
+  const stateKey = 'state:one-to-four-static-optics';
+  const retainedBufferRefs = [
+    'worker:one-to-four-optics:state',
+    'worker:one-to-four-optics:thermo',
+    'worker:one-to-four-optics:identity',
+    'worker:one-to-four-optics:mechanics'
+  ];
+  const scheduleResult = {
+    scheduleId,
+    laneId,
+    stateKey,
+    retainedBufferRefs,
+    ...oneToFourCanonicalRouteScheduleEvidence({
+      scheduleId,
+      laneId,
+      stateKey,
+      retainedBufferRefs,
+      activationOverrides: {
+        thermal: true,
+        dispersedMediumOptics: true
+      }
+    }),
+    gpuFence: terminalScheduleFence({
+      scheduleId,
+      laneId,
+      stateKey,
+      completedStepCount: 1
+    })
+  };
+
+  const fixture = authorityFixture();
+  const result = await runSchroederWorkerLaneScheduleWithAuthority({
+    computeManager: fixture.computeManager,
+    stateManager: fixture.stateManager,
+    scheduleId,
+    laneId,
+    stateKey,
+    stepCount: 1,
+    executeSchedule: async () => scheduleResult
+  });
+
+  assert.equal(
+    result.scheduleResult.phaseCarrierOneToFourTransition.trigger,
+    'static-dispersed-medium-optics-active'
+  );
+  assert.equal(result.stateManagerCommit.accepted, true);
+  assert.deepEqual(
+    fixture.calls.map(([kind]) => kind),
+    ['acquire', 'complete', 'commit']
   );
 });
 

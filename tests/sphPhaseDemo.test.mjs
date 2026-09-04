@@ -55,8 +55,8 @@ test('demo default builds with reference-anchored derived material closures', ()
     const properties = demo.materialProperties[key];
     const summary = materialDerivationSummary(properties);
     // Anchored materials may carry reference fallbacks from the material bank.
-    // H2O additionally carries the explicitly unvalidated, presentation-only
-    // compact-carrier optical fallback.
+    // H2O additionally carries the explicitly unvalidated physical sphere
+    // model driven by conserved condensate mass at runtime.
     const fallbackSources = new Set(
       (properties.propertyProvenance?.entries || [])
         .filter((entry) => ['reference-fallback', 'reduced-estimate', 'blocked'].includes(entry.status))
@@ -65,13 +65,13 @@ test('demo default builds with reference-anchored derived material closures', ()
     const expectedSources = key === 'h2o'
       ? new Set([
           'material-property-reference-bank',
-          'unvalidated-compact-carrier-optical-fallback'
+          'reference-index-runtime-radius-sphere-optics'
         ])
       : key === 'fe'
         ? new Set(['material-property-reference-bank'])
         : new Set();
     assert.deepEqual(fallbackSources, expectedSources);
-    assert.equal(summary.hasReducedEstimates, key === 'h2o');
+    assert.equal(summary.hasReducedEstimates, false);
   }
   // The anchoring must land the known reference boundaries.
   const h2o = demo.materialProperties.h2o;
@@ -2850,7 +2850,7 @@ test('particle render descriptors preserve simulation material and closure phase
   assert.equal(iron.renderKey, 'fe');
 });
 
-test('steam render descriptors carry sealed-box vapor optical state', () => {
+test('steam presentation descriptors never claim optical authority from aggregate gas pressure', () => {
   const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
   const water = demo.state.particles.find((particle) => particle.material === 'h2o');
   water.specificInternalEnergyJPerKg = specificInternalEnergyJPerKg(demo.materialProperties.h2o, 450);
@@ -2860,20 +2860,15 @@ test('steam render descriptors carry sealed-box vapor optical state', () => {
 
   assert.equal(pressure.bySpecies.h2o.material, 'h2o');
   assert.equal(steam.renderKey, 'steam');
-  assert.ok(steam.opticalState.temperatureK > 373);
-  assert.equal(steam.opticalState.model, 'h2o-vapor-condensation-optical-state-v0');
-  assert.equal(steam.opticalState.formula, 'h2o');
-  assert.equal(steam.opticalState.phase, 'gas');
-  assert.equal(steam.opticalState.dropletRadiusM, 1e-6);
-  assert.equal(steam.opticalState.source, undefined);
-  assert.ok(Math.abs(steam.opticalState.h2oPartialPressurePa - pressure.bySpecies.h2o.partialPressurePa) / pressure.bySpecies.h2o.partialPressurePa < 0.001);
-  assert.ok(Math.abs(steam.opticalState.pressurePa - pressure.totalPressurePa) / pressure.totalPressurePa < 0.001);
-  assert.ok(steam.opticalState.saturationPressurePa > 0);
-  assert.match(steam.opticalState.microphysicsStatus, /vapor|droplets/);
-  assert.equal(descriptors.some((descriptor) => descriptor.material === 'h2o' && descriptor.phase !== 'gas' && descriptor.opticalState), false);
+  assert.equal(Object.hasOwn(steam, 'opticalState'), false);
+  assert.equal(
+    descriptors.some((descriptor) => Object.hasOwn(descriptor, 'opticalState')),
+    false,
+    'only the conserved-mass GPU sidecar may publish optical moments'
+  );
 });
 
-test('water vapor optical state derives condensation microphysics from gas pressure', () => {
+test('legacy water-vapor pressure diagnostic cannot infer condensate or optical authority', () => {
   const temperatureK = 293.15;
   const saturated = waterVaporOpticalStateFromGasSummary({
     totalPressurePa: 101325,
@@ -2900,12 +2895,26 @@ test('water vapor optical state derives condensation microphysics from gas press
     }
   });
 
-  assert.equal(saturated.model, 'h2o-vapor-condensation-optical-state-v0');
-  assert.equal(saturated.generator, 'clausius-clapeyron-droplet-scattering-v0:sealed-box-gas-summary-v0');
-  assert.equal(saturated.microphysicsStatus, 'supersaturated-condensed-droplets');
-  assert.ok(saturated.condensedMassFraction > 0);
-  assert.ok(saturated.scatteringCoefficientPerM > 0);
-  assert.equal(dry.microphysicsStatus, 'subsaturated-pure-vapor');
+  assert.equal(saturated.model, 'h2o-vapor-optical-diagnostic-v1');
+  assert.match(
+    saturated.generator,
+    /^clausius-clapeyron-.+:sealed-box-gas-summary-nonauthoritative-v1$/
+  );
+  assert.equal(saturated.authoritative, false);
+  assert.equal(saturated.opticalAuthority, null);
+  assert.equal(
+    saturated.microphysicsStatus,
+    'condensate-optics-blocked-missing-conserved-mass'
+  );
+  assert.ok(saturated.supersaturationRatio > 1);
+  assert.equal(saturated.condensedMassFraction, 0);
+  assert.equal(saturated.condensedMassDensityKgPerM3, 0);
+  assert.equal(saturated.scatteringCoefficientPerM, 0);
+  assert.equal(
+    dry.microphysicsStatus,
+    'condensate-optics-blocked-missing-conserved-mass'
+  );
+  assert.ok(dry.supersaturationRatio < 1);
   assert.equal(dry.condensedMassFraction, 0);
   assert.equal(dry.scatteringCoefficientPerM, 0);
 });

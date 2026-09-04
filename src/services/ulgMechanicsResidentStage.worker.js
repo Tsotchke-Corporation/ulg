@@ -9,6 +9,10 @@ import {
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   retainedContinuationBuffersFromUploads,
+  SPH_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_INCOMPLETE_ERROR_CODE,
+  commitFreshSphDispersedMediumOpticsReplacement,
+  isFreshSphDispersedMediumOpticsReplacementPending,
+  rejectFreshSphDispersedMediumOpticsReplacement,
   sphDispersedMediumOpticsRemapRequiredError,
   sphDispersedMediumOpticsMatchesParticleUpload,
   transferTopologyStableSphDispersedMediumOpticsOwnership,
@@ -38,6 +42,7 @@ import {
 import {
   destroySphGpuParticleBuffers,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
+  sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -142,10 +147,15 @@ import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
 } from '../runtime/sph/schroederDynamicLawRoutingContract.js';
 import {
+  createSphPhaseCarrierOneToFourMaterializationPlan,
   enumerateSphPhaseCarrierOneToFourPrewarmPipelineDescriptors,
   runSphPhaseCarrierOneToFourMaterializationWebGpu,
   validateSphPhaseCarrierOneToFourExecution
 } from '../runtime/sph/sphPhaseCarrierMaterializationGpu.js';
+import {
+  sphDispersedMediumOpticsProducerAdoptionMatches,
+  validateSphDispersedMediumOpticsProducerSeedRows
+} from '../runtime/sph/sphDispersedMediumOpticsProducerGpu.js';
 import {
   ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_PROPOSAL_SCHEMA,
   ULG_SPH_REACTION_MOTION_ENVELOPE_WATCH_DEVICE_LOST_ERROR_CODE,
@@ -157,6 +167,14 @@ import {
   destroySphThermalResponseGraphBuffers,
   uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
+import {
+  destroySphDispersedMediumOpticalClosureGpuTable,
+  uploadSphDispersedMediumOpticalClosureGpuTable,
+  validateSphDispersedMediumOpticalClosureGpuTableAuthority
+} from '../runtime/sph/sphDispersedMediumOpticalClosureGpuBuffers.js';
+import {
+  validateSphDispersedMediumOpticalClosureTable
+} from '../runtime/sph/sphDispersedMediumOpticalClosure.js';
 import {
   diagnoseUploadedMechanicsMaterialPhaseRecordsMatch,
   destroyMlsMpmMechanicsMaterialPhaseUpload,
@@ -261,13 +279,23 @@ export const ULG_WORKER_RESIDENT_SCHEDULE_TERMINAL_REFLUX_RECEIPT_SCHEMA =
 export const ULG_WORKER_SCHEDULE_EXECUTION_ROUTE_RECEIPT_SCHEMA =
   'peercompute.ulg.worker-schedule-execution-route-receipt.v6';
 export const ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA =
-  'peercompute.ulg.worker-schedule-law-activation-receipt.v0';
+  'peercompute.ulg.worker-schedule-law-activation-receipt.v1';
 export const ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_SCHEMA =
   ULG_WORKER_SCHEDULE_DYNAMIC_LAW_OBSERVATION_ROUTE_SCHEMA;
 export const ULG_WORKER_TIER0_TOPOLOGY_ATTESTATION_SCHEMA =
   'peercompute.ulg.worker-tier0-topology-attestation.v0';
 export const ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_SCHEMA =
   ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_ROUTE_SCHEMA;
+const SPH_FRESH_DISPERSED_MEDIUM_OPTICS_REPLACEMENT_SCHEMA =
+  'peercompute.ulg.sph-fresh-dispersed-medium-optics-replacement.v0';
+const WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_QUARANTINE_SCHEMA =
+  'peercompute.ulg.worker-fresh-dispersed-medium-optics-rejection-quarantine.v0';
+const WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_INCOMPLETE_REASON =
+  'fresh-dispersed-medium-optics-rejection-incomplete';
+const WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_QUARANTINE_SCHEMA =
+  'peercompute.ulg.worker-fresh-dispersed-medium-optics-commit-quarantine.v0';
+const WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_INCOMPLETE_REASON =
+  'fresh-dispersed-medium-optics-commit-retirement-incomplete';
 // Keep explicit diagnostic schedules compatible with the historical
 // 128-step sodium batch. The interactive preset uses 64-step admitted chunks;
 // the schedule driver bounds the amount of unfenced work inside either shape.
@@ -827,7 +855,13 @@ function workerLaneSphParticleUploads(record) {
     record?.poisonedCanonicalResidentStep?.nextParticleUploads
       ?.sphParticleUpload,
     record?.poisonedTier0Execution?.finalStep?.nextParticleUploads
-      ?.sphParticleUpload
+      ?.sphParticleUpload,
+    record?.poisonedFreshDispersedMediumOpticsReplacement
+      ?.sourceSphUpload,
+    record?.poisonedFreshDispersedMediumOpticsReplacement
+      ?.targetSphUpload,
+    record?.poisonedFreshDispersedMediumOpticsCommit?.sourceSphUpload,
+    record?.poisonedFreshDispersedMediumOpticsCommit?.targetSphUpload
   ].filter(Boolean));
 }
 
@@ -876,7 +910,118 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       destroyedBufferCount: 0
     };
   }
+  const freshOpticsCommitQuarantine =
+    record.poisonedFreshDispersedMediumOpticsCommit ?? null;
+  let cleanlyCommittedFreshOpticsQuarantine = null;
+  if (freshOpticsCommitQuarantine) {
+    const commit = attemptWorkerFreshDispersedMediumOpticsCommit({
+      finalStep: freshOpticsCommitQuarantine.finalStep,
+      sourceSphUpload: freshOpticsCommitQuarantine.sourceSphUpload,
+      targetSphUpload: freshOpticsCommitQuarantine.targetSphUpload
+    });
+    if (commit.clean !== true) {
+      const retained = retainWorkerFreshDispersedMediumOpticsCommitQuarantine(
+        record,
+        {
+          finalStep: freshOpticsCommitQuarantine.finalStep,
+          sourceSphUpload: freshOpticsCommitQuarantine.sourceSphUpload,
+          targetSphUpload: freshOpticsCommitQuarantine.targetSphUpload,
+          holder: freshOpticsCommitQuarantine.holder,
+          commit,
+          scheduleId: freshOpticsCommitQuarantine.scheduleId,
+          stepOrdinal: freshOpticsCommitQuarantine.stepOrdinal
+        },
+        { poison: false }
+      );
+      return {
+        status:
+          'worker-resident-lane-release-blocked-fresh-optics-commit-incomplete',
+        laneId: normalizeString(laneId, null),
+        stateKey: normalizeString(stateKey, null),
+        reason: WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_INCOMPLETE_REASON,
+        released: false,
+        destroyedBufferCount: 0,
+        freshOpticsCommitAttemptCount: retained.attemptCount,
+        freshOpticsCommitReceiptStatus: retained.commitReceiptStatus
+      };
+    }
+    try {
+      freshOpticsCommitQuarantine.finalStep
+        .dispersedMediumOpticsReplacement = commit.receipt;
+      freshOpticsCommitQuarantine.finalStep
+        .dispersedMediumOpticsReplacementStatus = commit.receipt.status;
+    } catch {
+      // The private commit is authoritative. Teardown does not depend on
+      // mutable public diagnostic fields accepting the retry receipt.
+    }
+    cleanlyCommittedFreshOpticsQuarantine = freshOpticsCommitQuarantine;
+    record.poisonedFreshDispersedMediumOpticsCommit = null;
+  }
+  const freshOpticsRejectionQuarantine =
+    record.poisonedFreshDispersedMediumOpticsReplacement ?? null;
+  let cleanlyRejectedFreshOpticsQuarantine = null;
+  if (freshOpticsRejectionQuarantine) {
+    const rejection = attemptWorkerFreshDispersedMediumOpticsRejection({
+      finalStep: freshOpticsRejectionQuarantine.finalStep,
+      sourceSphUpload: freshOpticsRejectionQuarantine.sourceSphUpload,
+      targetSphUpload: freshOpticsRejectionQuarantine.targetSphUpload
+    });
+    if (rejection.clean !== true) {
+      const retained = retainWorkerFreshDispersedMediumOpticsQuarantine(
+        record,
+        {
+          finalStep: freshOpticsRejectionQuarantine.finalStep,
+          sourceSphUpload: freshOpticsRejectionQuarantine.sourceSphUpload,
+          targetSphUpload: freshOpticsRejectionQuarantine.targetSphUpload,
+          holder: freshOpticsRejectionQuarantine.holder,
+          rejection,
+          scheduleId: freshOpticsRejectionQuarantine.scheduleId,
+          stepOrdinal: freshOpticsRejectionQuarantine.stepOrdinal
+        },
+        { poison: false }
+      );
+      return {
+        status:
+          'worker-resident-lane-release-blocked-fresh-optics-rejection-incomplete',
+        laneId: normalizeString(laneId, null),
+        stateKey: normalizeString(stateKey, null),
+        reason: WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_INCOMPLETE_REASON,
+        released: false,
+        destroyedBufferCount: 0,
+        freshOpticsRejectionAttemptCount: retained.attemptCount,
+        freshOpticsRejectionReceiptStatus:
+          retained.rejectionReceiptStatus
+      };
+    }
+    cleanlyRejectedFreshOpticsQuarantine =
+      freshOpticsRejectionQuarantine;
+    record.poisonedFreshDispersedMediumOpticsReplacement = null;
+  }
   const sphParticleUploads = workerLaneSphParticleUploads(record);
+  if (cleanlyRejectedFreshOpticsQuarantine) {
+    if (cleanlyRejectedFreshOpticsQuarantine.sourceSphUpload) {
+      sphParticleUploads.add(
+        cleanlyRejectedFreshOpticsQuarantine.sourceSphUpload
+      );
+    }
+    if (cleanlyRejectedFreshOpticsQuarantine.targetSphUpload) {
+      sphParticleUploads.add(
+        cleanlyRejectedFreshOpticsQuarantine.targetSphUpload
+      );
+    }
+  }
+  if (cleanlyCommittedFreshOpticsQuarantine) {
+    if (cleanlyCommittedFreshOpticsQuarantine.sourceSphUpload) {
+      sphParticleUploads.add(
+        cleanlyCommittedFreshOpticsQuarantine.sourceSphUpload
+      );
+    }
+    if (cleanlyCommittedFreshOpticsQuarantine.targetSphUpload) {
+      sphParticleUploads.add(
+        cleanlyCommittedFreshOpticsQuarantine.targetSphUpload
+      );
+    }
+  }
   const protectedBuffers = new Set();
   for (const upload of sphParticleUploads) {
     // Every worker-owned continuation gets the same non-enumerable lifecycle
@@ -893,8 +1038,10 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     }
   }
   const successfullyRetiredResidentSphUploads = new Set();
+  const retiredResidentSteps = new Set();
   const retireResidentStep = (step, options) => {
-    if (!step) return;
+    if (!step || retiredResidentSteps.has(step)) return;
+    retiredResidentSteps.add(step);
     const upload = step.nextParticleUploads?.sphParticleUpload ?? null;
     try {
       destroyMlsMpmResidentStepBuffers(step, options);
@@ -913,6 +1060,12 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     destroyInputResidentProductMass: true
   });
   retireResidentStep(record.poisonedTier0Execution?.finalStep, {
+    destroyInputResidentProductMass: true
+  });
+  retireResidentStep(cleanlyCommittedFreshOpticsQuarantine?.finalStep, {
+    destroyInputResidentProductMass: true
+  });
+  retireResidentStep(cleanlyRejectedFreshOpticsQuarantine?.finalStep, {
     destroyInputResidentProductMass: true
   });
   for (const cleanupRecord of (
@@ -938,6 +1091,9 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
   );
   destroyMlsMpmMechanicsMaterialPhaseUpload(
     staticGpuResources?.mechanicsMaterialPhaseUpload
+  );
+  destroySphDispersedMediumOpticalClosureGpuTable(
+    staticGpuResources?.dispersedMediumOpticalClosureGpuTable
   );
   for (const upload of sphParticleUploads) {
     if (successfullyRetiredResidentSphUploads.has(upload)) continue;
@@ -5466,8 +5622,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // schedule and remain lane-local thereafter, just like the particle
     // buffers. Materialize their immutable GPU sidecars once on THIS device;
     // otherwise the resident step would upload and destroy the same thermal
-    // graph and mechanics phase table every step. A later schedule omitting
-    // them must not disable law layers or trigger another upload.
+    // graph, mechanics phase table, and dispersed-medium closure table every
+    // step. A later schedule omitting them must not disable law layers or
+    // trigger another upload.
     const previousOptions = lane.residentStepOptions || {};
     const requestedOptions = data.residentStepOptions;
     const mechanicsMaterialTable =
@@ -5478,7 +5635,15 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       requestedOptions.thermalMaterialTable
       ?? previousOptions.thermalMaterialTable
       ?? null;
+    const dispersedMediumOpticalClosureTable =
+      requestedOptions.dispersedMediumOpticalClosureTable
+      ?? previousOptions.dispersedMediumOpticalClosureTable
+      ?? null;
     const staticGpuResources = lane.staticGpuResources || {};
+    // Publish the ownership container before the first allocation. If a
+    // later static-table upload rejects, lane teardown can still reach every
+    // earlier successful allocation from this same transactional refresh.
+    lane.staticGpuResources = staticGpuResources;
     if (
       thermalMaterialTable
       && !staticGpuResources.thermalResponseGraphUpload
@@ -5516,7 +5681,16 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           mechanicsMaterialTable
         );
     }
-    lane.staticGpuResources = staticGpuResources;
+    if (
+      dispersedMediumOpticalClosureTable
+      && !staticGpuResources.dispersedMediumOpticalClosureGpuTable
+    ) {
+      staticGpuResources.dispersedMediumOpticalClosureGpuTable =
+        uploadSphDispersedMediumOpticalClosureGpuTable(
+          device,
+          dispersedMediumOpticalClosureTable
+        );
+    }
     const thermalResponseGraphUpload =
       staticGpuResources.thermalResponseGraphUpload || null;
     lane.residentStepOptions = {
@@ -5524,6 +5698,15 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       ...requestedOptions,
       ...(thermalMaterialTable ? { thermalMaterialTable } : {}),
       ...(mechanicsMaterialTable ? { mechanicsMaterialTable } : {}),
+      ...(dispersedMediumOpticalClosureTable
+        ? { dispersedMediumOpticalClosureTable }
+        : {}),
+      ...(staticGpuResources.dispersedMediumOpticalClosureGpuTable
+        ? {
+            dispersedMediumOpticalClosureGpuTable:
+              staticGpuResources.dispersedMediumOpticalClosureGpuTable
+          }
+        : {}),
       thermalStepOptions: {
         ...(previousOptions.thermalStepOptions || {}),
         ...(requestedOptions.thermalStepOptions || {}),
@@ -5586,6 +5769,27 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       throw error;
     }
   }
+  const retainedDispersedMediumOpticalClosureTable =
+    lane.residentStepOptions?.dispersedMediumOpticalClosureTable ?? null;
+  const retainedDispersedMediumOpticalClosureGpuTable =
+    lane.staticGpuResources?.dispersedMediumOpticalClosureGpuTable ?? null;
+  if (
+    retainedDispersedMediumOpticalClosureTable
+    || retainedDispersedMediumOpticalClosureGpuTable
+  ) {
+    const matches = validateSphDispersedMediumOpticalClosureGpuTableAuthority(
+      device,
+      retainedDispersedMediumOpticalClosureGpuTable,
+      { table: retainedDispersedMediumOpticalClosureTable }
+    );
+    if (!matches) {
+      throw workerSchroederStageError(
+        stageId,
+        'static-dispersed-medium-optical-closure-authority-drift',
+        'the retained dispersed-medium optical closure GPU table no longer matches its exact host declaration'
+      );
+    }
+  }
   const residentStepOptions = lane.residentStepOptions || {};
   if (
     Object.prototype.hasOwnProperty.call(
@@ -5616,6 +5820,15 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // restore the exact no-summary contract inside the private schedule path.
     residentStepOptions.summaryRunner = null;
   }
+  // The worker is the outer continuation owner. Keep any fresh optics child
+  // pending while the hierarchy and worker postconditions authenticate the
+  // exact terminal family; topology-stable paths remain internally committed.
+  // Clone the retained semantic options so this private transaction bit never
+  // leaks into target-schedule fingerprints or future host declarations.
+  const kernelResidentStepOptions = {
+    ...residentStepOptions,
+    deferContinuationOwnershipTransfer: true
+  };
   const previousResidentStep = lane.residentStep || null;
   const rawPreviousHierarchyTransferCleanupClaims = Array.isArray(
     previousResidentStep?.schroederHierarchyArtifactTransferCleanupClaims
@@ -5773,8 +5986,34 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       ...(twoLevelGpuQueueStageRecorder
         ? { gpuTimestampRecorder: twoLevelGpuQueueStageRecorder }
         : {}),
-      residentStepOptions
+      residentStepOptions: kernelResidentStepOptions
     });
+  } catch (error) {
+    // A two-level hierarchy may reach its final fresh-optics commit inside
+    // kernelRunner, before this worker receives kernelResult. Preserve the
+    // non-transported exact retry tuple now; the schedule error wrapper below
+    // intentionally carries clone-safe diagnostics only.
+    const retryAuthority =
+      exactWorkerFreshDispersedMediumOpticsCommitRetryAuthority(error);
+    if (retryAuthority) {
+      retainWorkerFreshDispersedMediumOpticsCommitQuarantine(record, {
+        finalStep: retryAuthority.finalStep,
+        sourceSphUpload: retryAuthority.sourceSphUpload,
+        targetSphUpload: retryAuthority.targetSphUpload,
+        holder: 'canonical-resident-step',
+        commit: {
+          clean: false,
+          receiptValid: false,
+          receipt: null,
+          error
+        },
+        scheduleId: normalizeString(data.scheduleId, null),
+        stepOrdinal: Number.isSafeInteger(data.stepOrdinal)
+          ? data.stepOrdinal
+          : null
+      });
+    }
+    throw error;
   } finally {
     if (successorConsumption) {
       // Mirror the scene loop: the successor-source lease releases only after
@@ -5822,6 +6061,69 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   const nextUploads = residentStep.nextParticleUploads || null;
   const nextSphUpload = nextUploads?.sphParticleUpload ?? null;
   const nextMlsUpload = nextUploads?.mlsMpmParticleUpload ?? null;
+  const dispersedMediumOpticsDeclared = Boolean(
+    residentStepOptions.dispersedMediumOpticalClosureTable
+    || residentStepOptions.dispersedMediumOpticsSeedRows
+  );
+  if (
+    dispersedMediumOpticsDeclared
+    // Clone-safe worker messages cannot carry a function. Restrict the
+    // unforgeable runtime postcondition to the production runner while unit
+    // fixtures remain free to exercise route/option plumbing in isolation.
+    && kernelRunner === runSchroederSameLevelMechanicsWebGpu
+  ) {
+    const producerResult =
+      residentStep.dispersedMediumOpticsProducerStep?.result
+      ?? residentStep.dispersedMediumOpticsProducerStep
+      ?? null;
+    const adoptedOptics = nextSphUpload?.dispersedMediumOptics ?? null;
+    const exactProducerAdoption = Boolean(
+      nextSphUpload
+      && sphGpuParticleUploadAdvertisesDispersedMediumOptics(nextSphUpload)
+      && ensureSphGpuParticleBufferSetBorrowLifecycle(nextSphUpload)
+      && sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers(
+        nextSphUpload,
+        {
+          device,
+          stateBuffer: nextSphUpload.stateBuffer,
+          thermoBuffer: nextSphUpload.thermoBuffer,
+          identityBuffer: nextSphUpload.identityBuffer
+        }
+      )
+      && sphDispersedMediumOpticsMatchesParticleUpload(nextSphUpload)
+      && sphDispersedMediumOpticsProducerAdoptionMatches(
+        producerResult,
+        adoptedOptics,
+        {
+          device,
+          particleSourceFamily: nextSphUpload
+        }
+      )
+    );
+    if (!exactProducerAdoption) {
+      // Static option plumbing is not execution evidence. Keep the previously
+      // committed lane authoritative and retire only this unadopted result.
+      restoreWorkerContinuationSidecarOwnership({
+        finalStep: residentStep,
+        sourceUploads: { sphParticleUpload, mlsMpmParticleUpload },
+        unadoptedUploads: nextUploads,
+        record
+      });
+      destroyMlsMpmResidentStepBuffers(residentStep, {
+        preserveResidentProductMass:
+          previousCarriedResidentProductMassHandles[0] ?? null,
+        preserveResidentProductMassHandles:
+          previousCarriedResidentProductMassHandles,
+        destroyInputResidentProductMass: true,
+        preserveBuffers: previousContinuationBuffers
+      });
+      throw workerSchroederStageError(
+        stageId,
+        'schedule-dispersed-medium-optics-production-missing-or-unauthenticated',
+        'the canonical worker step declared dispersed-medium optics without an exact producer-adopted terminal sidecar'
+      );
+    }
+  }
   const nextSuccessorSourceFamily =
     residentStep.schroederSpatialSuccessorSourceFamily
     ?? nextUploads?.schroederSpatialSuccessorSourceFamily
@@ -5854,8 +6156,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // authority failed to seal. Preserve the previously committed lane
     // inputs while conservatively tearing down only this unadopted result.
     restoreWorkerContinuationSidecarOwnership({
+      finalStep: residentStep,
       sourceUploads: { sphParticleUpload, mlsMpmParticleUpload },
-      unadoptedUploads: nextUploads
+      unadoptedUploads: nextUploads,
+      record
     });
     destroyMlsMpmResidentStepBuffers(residentStep, {
       preserveResidentProductMass:
@@ -5886,8 +6190,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // the conservative path, then fail the schedule closed; its terminal
     // fence remains the admission boundary for all submitted cleanup.
     restoreWorkerContinuationSidecarOwnership({
+      finalStep: residentStep,
       sourceUploads: { sphParticleUpload, mlsMpmParticleUpload },
-      unadoptedUploads: nextUploads
+      unadoptedUploads: nextUploads,
+      record
     });
     destroyMlsMpmResidentStepBuffers(residentStep, {
       preserveResidentProductMass:
@@ -5902,6 +6208,129 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       'schedule-hierarchy-final-consumer-capability-missing',
       'the canonical worker step did not return authority to retire prior hierarchy transfers'
     );
+  }
+  const freshDispersedMediumReplacementPending =
+    isFreshSphDispersedMediumOpticsReplacementPending({
+      finalStep: residentStep,
+      sourceSphUpload: sphParticleUpload,
+      targetSphUpload: nextSphUpload
+    });
+  if (freshDispersedMediumReplacementPending) {
+    const sourceIdentitySnapshot = {
+      ownsIdentityBuffer: sphParticleUpload?.ownsIdentityBuffer,
+      identityOwnership: sphParticleUpload?.identityOwnership
+    };
+    const targetIdentitySnapshot = {
+      ownsIdentityBuffer: nextSphUpload?.ownsIdentityBuffer,
+      identityOwnership: nextSphUpload?.identityOwnership
+    };
+    let auxiliaryOwnershipTransfer = null;
+    try {
+      auxiliaryOwnershipTransfer =
+        transferPhaseCarrierAuxiliaryBufferOwnership({
+          sourceUploads: { sphParticleUpload, mlsMpmParticleUpload },
+          terminalUploads: nextUploads
+        });
+      if (
+        !sphParticleUpload?.identityBuffer
+        || nextSphUpload?.identityBuffer !== sphParticleUpload.identityBuffer
+      ) {
+        throw new TypeError(
+          'Worker fresh dispersed-medium replacement requires one exact shared identity family'
+        );
+      }
+      if (sphParticleUpload.ownsIdentityBuffer !== false) {
+        sphParticleUpload.ownsIdentityBuffer = false;
+        sphParticleUpload.identityOwnership =
+          'transferred-to-worker-resident-continuation';
+        nextSphUpload.ownsIdentityBuffer = true;
+        nextSphUpload.identityOwnership =
+          'owned-worker-resident-continuation-transfer';
+      }
+      const replacementReceipt =
+        requireWorkerFreshDispersedMediumOpticsCommitReceipt(
+          commitFreshSphDispersedMediumOpticsReplacement({
+            finalStep: residentStep,
+            sourceSphUpload: sphParticleUpload,
+            targetSphUpload: nextSphUpload
+          })
+        );
+      try {
+        residentStep.dispersedMediumOpticsReplacement =
+          replacementReceipt;
+        residentStep.dispersedMediumOpticsReplacementStatus =
+          replacementReceipt.status;
+      } catch {
+        // The private commit is authoritative. Diagnostic fields are
+        // best-effort and cannot roll back an accepted terminal child.
+      }
+    } catch (error) {
+      const replacementStillPending =
+        isFreshSphDispersedMediumOpticsReplacementPending({
+          finalStep: residentStep,
+          sourceSphUpload: sphParticleUpload,
+          targetSphUpload: nextSphUpload
+        });
+      if (!replacementStillPending) {
+        // Commit is stateful. If it stopped reporting pending before a valid
+        // receipt reached this owner, rolling ownership back or attempting a
+        // reject would manufacture two inconsistent parents. Retain the
+        // terminal step intact and poison the lane for explicit retirement.
+        retainWorkerFreshDispersedMediumOpticsCommitQuarantine(record, {
+          finalStep: residentStep,
+          sourceSphUpload: sphParticleUpload,
+          targetSphUpload: nextSphUpload,
+          holder: 'canonical-resident-step',
+          commit: {
+            clean: false,
+            receiptValid: false,
+            receipt: null,
+            error
+          }
+        });
+        throw error;
+      }
+      try {
+        sphParticleUpload.ownsIdentityBuffer =
+          sourceIdentitySnapshot.ownsIdentityBuffer;
+        sphParticleUpload.identityOwnership =
+          sourceIdentitySnapshot.identityOwnership;
+        nextSphUpload.ownsIdentityBuffer =
+          targetIdentitySnapshot.ownsIdentityBuffer;
+        nextSphUpload.identityOwnership =
+          targetIdentitySnapshot.identityOwnership;
+      } catch {}
+      try {
+        auxiliaryOwnershipTransfer?.rollbackOwnershipTransfer?.();
+      } catch {}
+      try {
+        requireCleanWorkerFreshDispersedMediumOpticsRejection({
+          record,
+          finalStep: residentStep,
+          sourceSphUpload: sphParticleUpload,
+          targetSphUpload: nextSphUpload,
+          cause: error
+        });
+      } catch (rejectionError) {
+        // Generic resident-step destruction is safe only after the exact
+        // private replacement transaction confirms a literal clean reject.
+        // The quarantine retains the final/source/target tuple for explicit
+        // lane-release retry without destroying either still-authoritative
+        // optics family.
+        throw rejectionError;
+      }
+      try {
+        destroyMlsMpmResidentStepBuffers(residentStep, {
+          preserveResidentProductMass:
+            previousCarriedResidentProductMassHandles[0] ?? null,
+          preserveResidentProductMassHandles:
+            previousCarriedResidentProductMassHandles,
+          destroyInputResidentProductMass: true,
+          preserveBuffers: previousContinuationBuffers
+        });
+      } catch {}
+      throw error;
+    }
   }
   if (previousResidentStep) {
     // buildNextParticleUploads has already transferred identity and immutable
@@ -6275,6 +6704,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         lane.staticGpuResources?.thermalResponseGraphUpload?.status ?? null,
       mechanicsMaterialPhase:
         lane.staticGpuResources?.mechanicsMaterialPhaseUpload?.status ?? null,
+      dispersedMediumOpticalClosure:
+        lane.staticGpuResources?.dispersedMediumOpticalClosureGpuTable
+          ?.status ?? null,
       retainedAcrossSteps: Boolean(lane.staticGpuResources)
     },
     postMechanicsClosure: residentStep.postMechanicsClosure ? {
@@ -6713,7 +7145,24 @@ function workerResidentScheduleLaneStateSnapshot(record, {
       lane?.nextScheduleLawActivationObservation
         ?.targetScheduleRequestId ?? null,
     lastConsumedDynamicLawTargetScheduleRequestId:
-      lane?.lastConsumedDynamicLawTargetScheduleRequestId ?? null
+      lane?.lastConsumedDynamicLawTargetScheduleRequestId ?? null,
+    freshDispersedMediumOpticsRejectionQuarantined: Boolean(
+      record?.poisonedFreshDispersedMediumOpticsReplacement
+    ),
+    freshDispersedMediumOpticsRejectionAttemptCount:
+      record?.poisonedFreshDispersedMediumOpticsReplacement
+        ?.attemptCount ?? 0,
+    freshDispersedMediumOpticsRejectionReceiptStatus:
+      record?.poisonedFreshDispersedMediumOpticsReplacement
+        ?.rejectionReceiptStatus ?? null,
+    freshDispersedMediumOpticsCommitQuarantined: Boolean(
+      record?.poisonedFreshDispersedMediumOpticsCommit
+    ),
+    freshDispersedMediumOpticsCommitAttemptCount:
+      record?.poisonedFreshDispersedMediumOpticsCommit?.attemptCount ?? 0,
+    freshDispersedMediumOpticsCommitReceiptStatus:
+      record?.poisonedFreshDispersedMediumOpticsCommit
+        ?.commitReceiptStatus ?? null
   };
 }
 
@@ -6868,6 +7317,32 @@ function workerTier0LawsQuiescentPhaseCarrierPlan(plan = null) {
   );
 }
 
+function workerDispersedMediumOpticsFourLanePhaseCarrierPlan(
+  plan = null,
+  particleCount = null
+) {
+  const lineageCapacity = Number(plan?.lineageCapacity);
+  const resolvedParticleCount = Number(
+    particleCount ?? plan?.particleCapacity
+  );
+  return Boolean(
+    plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA
+    && plan.status === 'phase-lane-capacity-ready'
+    && Number.isSafeInteger(lineageCapacity)
+    && lineageCapacity > 0
+    && Number(plan.primaryCapacity) === lineageCapacity
+    && Number(plan.phaseLaneCount) === 4
+    && Number(plan.phaseLaneStride) === lineageCapacity
+    && Number(plan.companionStart) === lineageCapacity
+    && Number(plan.companionCapacity) === lineageCapacity * 3
+    && Number(plan.particleCapacity) === lineageCapacity * 4
+    && resolvedParticleCount === Number(plan.particleCapacity)
+    && plan.stableLaneAddress
+      === 'phaseLane*phaseLaneStride+lineageIndex'
+    && plan.phaseCompanionLanesRequired === true
+  );
+}
+
 export function workerScheduleRequiresPhaseCarrierOneToFourMaterialization({
   phaseCarrierPlan = null,
   scheduleLawActivation = null,
@@ -6885,6 +7360,7 @@ export function workerScheduleRequiresPhaseCarrierOneToFourMaterialization({
     && (
       scheduleLawActivation.thermal === true
       || scheduleLawActivation.reaction === true
+      || scheduleLawActivation.dispersedMediumOptics === true
     )
   );
 }
@@ -7125,9 +7601,434 @@ function transferPhaseCarrierAuxiliaryBufferOwnership({
   return Object.freeze(receipt);
 }
 
+function exactWorkerFreshDispersedMediumOpticsCommitReceipt(receipt) {
+  if (
+    !receipt
+    || typeof receipt !== 'object'
+    || Object.getPrototypeOf(receipt) !== Object.prototype
+    || !Object.isFrozen(receipt)
+    || Reflect.ownKeys(receipt).length !== 6
+    || receipt.schema
+      !== SPH_FRESH_DISPERSED_MEDIUM_OPTICS_REPLACEMENT_SCHEMA
+    || receipt.status !== 'fresh-dispersed-medium-optics-committed'
+    || typeof receipt.sourceChildReplaced !== 'boolean'
+    || !Number.isSafeInteger(receipt.intermediateChildCount)
+    || receipt.intermediateChildCount < 0
+    || !Number.isSafeInteger(receipt.retirementErrorCount)
+    || receipt.retirementErrorCount !== 0
+    || receipt.targetChildAuthenticated !== true
+  ) return false;
+  return true;
+}
+
+function exactWorkerFreshDispersedMediumOpticsRejectionReceipt(receipt) {
+  if (
+    !receipt
+    || typeof receipt !== 'object'
+    || Object.getPrototypeOf(receipt) !== Object.prototype
+    || !Object.isFrozen(receipt)
+    || receipt.schema
+      !== SPH_FRESH_DISPERSED_MEDIUM_OPTICS_REPLACEMENT_SCHEMA
+    || (
+      receipt.status !== 'fresh-dispersed-medium-optics-rejected'
+      && receipt.status
+        !== 'fresh-dispersed-medium-optics-rejection-incomplete'
+    )
+    || typeof receipt.sourceChildPreserved !== 'boolean'
+    || !Number.isSafeInteger(receipt.intermediateChildCount)
+    || receipt.intermediateChildCount < 0
+    || !Number.isSafeInteger(receipt.rejectionErrorCount)
+    || receipt.rejectionErrorCount < 0
+    || receipt.targetChildAuthenticated !== true
+    || typeof receipt.targetChildRetirementRequested !== 'boolean'
+    || (
+      receipt.rejectionErrorCount === 0
+        ? receipt.status !== 'fresh-dispersed-medium-optics-rejected'
+        : receipt.status
+          !== 'fresh-dispersed-medium-optics-rejection-incomplete'
+    )
+  ) return false;
+  return true;
+}
+
+function requireWorkerFreshDispersedMediumOpticsCommitReceipt(receipt) {
+  if (!exactWorkerFreshDispersedMediumOpticsCommitReceipt(receipt)) {
+    const error = new TypeError(
+      'Worker fresh dispersed-medium optics commit returned an invalid receipt'
+    );
+    error.reason = 'fresh-dispersed-medium-optics-commit-receipt-invalid';
+    throw error;
+  }
+  return receipt;
+}
+
+function attemptWorkerFreshDispersedMediumOpticsCommit({
+  finalStep,
+  sourceSphUpload,
+  targetSphUpload
+} = {}) {
+  let receipt = null;
+  let error = null;
+  try {
+    receipt = commitFreshSphDispersedMediumOpticsReplacement({
+      finalStep,
+      sourceSphUpload,
+      targetSphUpload
+    });
+    requireWorkerFreshDispersedMediumOpticsCommitReceipt(receipt);
+  } catch (cause) {
+    error = cause;
+  }
+  const receiptValid = exactWorkerFreshDispersedMediumOpticsCommitReceipt(
+    receipt
+  );
+  return Object.freeze({
+    clean: Boolean(error == null && receiptValid),
+    receiptValid,
+    receipt,
+    error
+  });
+}
+
+function exactWorkerFreshDispersedMediumOpticsCommitRetryAuthority(
+  error
+) {
+  const receipt = error?.commitReceipt ?? null;
+  const authority =
+    error?.freshDispersedMediumOpticsCommitRetryAuthority ?? null;
+  if (
+    error?.code
+      !== SPH_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_INCOMPLETE_ERROR_CODE
+    || error?.retryAuthorityRetained !== true
+    || receipt?.schema
+      !== SPH_FRESH_DISPERSED_MEDIUM_OPTICS_REPLACEMENT_SCHEMA
+    || receipt?.status
+      !== 'fresh-dispersed-medium-optics-commit-incomplete-quarantined'
+    || receipt?.retryAuthorityRetained !== true
+    || !Object.isFrozen(receipt)
+    || authority?.schema
+      !== 'peercompute.ulg.sph-fresh-dispersed-medium-optics-commit-retry-authority.v0'
+    || authority?.status
+      !== 'fresh-dispersed-medium-optics-commit-retry-authority-retained'
+    || !Object.isFrozen(authority)
+    || typeof authority.retryCommit !== 'function'
+    || !authority.finalStep
+    || !authority.sourceSphUpload
+    || !authority.targetSphUpload
+    || authority.finalStep.nextParticleUploads?.sphParticleUpload
+      !== authority.targetSphUpload
+  ) return null;
+  return authority;
+}
+
+function retainWorkerFreshDispersedMediumOpticsCommitQuarantine(
+  record,
+  {
+    finalStep,
+    sourceSphUpload,
+    targetSphUpload,
+    holder = 'canonical-resident-step',
+    tier0Execution = null,
+    commit,
+    scheduleId = null,
+    stepOrdinal = null
+  } = {},
+  { poison = true } = {}
+) {
+  const previous =
+    record?.poisonedFreshDispersedMediumOpticsCommit ?? null;
+  const sameTuple = Boolean(
+    previous
+    && previous.finalStep === finalStep
+    && previous.sourceSphUpload === sourceSphUpload
+    && previous.targetSphUpload === targetSphUpload
+  );
+  if (previous && !sameTuple) {
+    // A poisoned lane cannot admit a second transaction. Preserve the first
+    // exact tuple rather than overwriting the only authority able to complete
+    // or quarantine its retirement at lane release.
+    poisonWorkerResidentScheduleLane(record, {
+      reason: 'fresh-dispersed-medium-optics-commit-quarantine-conflict',
+      scheduleId: previous.scheduleId,
+      stepOrdinal: previous.stepOrdinal
+    });
+    return previous;
+  }
+  const observedReceipt =
+    commit?.receipt ?? commit?.error?.commitReceipt ?? null;
+  const reportedAttemptCount = Number(
+    observedReceipt?.retirementAttemptCount
+  );
+  const receiptAttemptCount = Number.isSafeInteger(reportedAttemptCount)
+    && reportedAttemptCount > 0
+    ? reportedAttemptCount
+    : 0;
+  const quarantine = {
+    schema: WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_QUARANTINE_SCHEMA,
+    status: 'worker-fresh-dispersed-medium-optics-commit-quarantined',
+    attemptCount: sameTuple
+      ? Math.max(previous.attemptCount + 1, receiptAttemptCount)
+      : Math.max(1, receiptAttemptCount),
+    holder,
+    scheduleId: scheduleId ?? previous?.scheduleId ?? null,
+    stepOrdinal: stepOrdinal ?? previous?.stepOrdinal ?? null,
+    commitReceiptValid: commit?.receiptValid === true,
+    commitReceiptStatus: observedReceipt?.status ?? null,
+    commitErrorCount:
+      Number.isSafeInteger(observedReceipt?.retirementErrorCount)
+        ? observedReceipt.retirementErrorCount
+        : null,
+    commitErrorMessage: commit?.error == null
+      ? null
+      : (commit.error instanceof Error
+          ? commit.error.message
+          : String(commit.error))
+  };
+  Object.defineProperties(quarantine, {
+    finalStep: {
+      value: finalStep,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    sourceSphUpload: {
+      value: sourceSphUpload,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    targetSphUpload: {
+      value: targetSphUpload,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    commitReceipt: {
+      value: observedReceipt,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    commitError: {
+      value: commit?.error ?? null,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    }
+  });
+  Object.freeze(quarantine);
+  record.poisonedFreshDispersedMediumOpticsCommit = quarantine;
+  if (holder === 'tier0-fused-execution') {
+    record.poisonedTier0Execution ??= tier0Execution ?? { finalStep };
+  } else {
+    record.poisonedCanonicalResidentStep ??= finalStep;
+  }
+  if (poison) {
+    poisonWorkerResidentScheduleLane(record, {
+      reason: commit?.error?.reason
+        ?? WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_INCOMPLETE_REASON,
+      scheduleId,
+      stepOrdinal
+    });
+  }
+  return quarantine;
+}
+
+function attemptWorkerFreshDispersedMediumOpticsRejection({
+  finalStep,
+  sourceSphUpload,
+  targetSphUpload
+} = {}) {
+  let receipt = null;
+  let error = null;
+  try {
+    receipt = rejectFreshSphDispersedMediumOpticsReplacement({
+      finalStep,
+      sourceSphUpload,
+      targetSphUpload
+    });
+  } catch (cause) {
+    error = cause;
+  }
+  const receiptValid = exactWorkerFreshDispersedMediumOpticsRejectionReceipt(
+    receipt
+  );
+  const clean = Boolean(
+    error == null
+    && receiptValid
+    && receipt.status === 'fresh-dispersed-medium-optics-rejected'
+    && receipt.rejectionErrorCount === 0
+    && receipt.targetChildRetirementRequested === true
+  );
+  return Object.freeze({ clean, receiptValid, receipt, error });
+}
+
+function workerFreshDispersedMediumOpticsQuarantineDiagnostic(
+  quarantine
+) {
+  return Object.freeze({
+    schema: quarantine.schema,
+    status: quarantine.status,
+    attemptCount: quarantine.attemptCount,
+    holder: quarantine.holder,
+    scheduleId: quarantine.scheduleId,
+    stepOrdinal: quarantine.stepOrdinal,
+    rejectionReceiptValid: quarantine.rejectionReceiptValid,
+    rejectionReceiptStatus: quarantine.rejectionReceiptStatus,
+    rejectionErrorCount: quarantine.rejectionErrorCount,
+    rejectionErrorMessage: quarantine.rejectionErrorMessage
+  });
+}
+
+function retainWorkerFreshDispersedMediumOpticsQuarantine(
+  record,
+  {
+    finalStep,
+    sourceSphUpload,
+    targetSphUpload,
+    holder = 'canonical-resident-step',
+    rejection,
+    scheduleId = null,
+    stepOrdinal = null
+  } = {},
+  { poison = true } = {}
+) {
+  const previous =
+    record?.poisonedFreshDispersedMediumOpticsReplacement ?? null;
+  const sameTuple = Boolean(
+    previous
+    && previous.finalStep === finalStep
+    && previous.sourceSphUpload === sourceSphUpload
+    && previous.targetSphUpload === targetSphUpload
+  );
+  const quarantine = {
+    schema:
+      WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_QUARANTINE_SCHEMA,
+    status: 'worker-fresh-dispersed-medium-optics-rejection-quarantined',
+    attemptCount: sameTuple ? previous.attemptCount + 1 : 1,
+    holder,
+    scheduleId: scheduleId ?? previous?.scheduleId ?? null,
+    stepOrdinal: stepOrdinal ?? previous?.stepOrdinal ?? null,
+    rejectionReceiptValid: rejection?.receiptValid === true,
+    rejectionReceiptStatus: rejection?.receipt?.status ?? null,
+    rejectionErrorCount:
+      Number.isSafeInteger(rejection?.receipt?.rejectionErrorCount)
+        ? rejection.receipt.rejectionErrorCount
+        : null,
+    rejectionErrorMessage: rejection?.error == null
+      ? null
+      : (rejection.error instanceof Error
+          ? rejection.error.message
+          : String(rejection.error))
+  };
+  Object.defineProperties(quarantine, {
+    finalStep: {
+      value: finalStep,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    sourceSphUpload: {
+      value: sourceSphUpload,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    targetSphUpload: {
+      value: targetSphUpload,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    rejectionReceipt: {
+      value: rejection?.receipt ?? null,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    },
+    rejectionError: {
+      value: rejection?.error ?? null,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    }
+  });
+  Object.freeze(quarantine);
+  record.poisonedFreshDispersedMediumOpticsReplacement = quarantine;
+  if (holder === 'tier0-fused-execution') {
+    record.poisonedTier0Execution ??= { finalStep };
+  } else {
+    record.poisonedCanonicalResidentStep ??= finalStep;
+  }
+  if (poison) {
+    poisonWorkerResidentScheduleLane(record, {
+      reason:
+        WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_INCOMPLETE_REASON,
+      scheduleId,
+      stepOrdinal
+    });
+  }
+  return quarantine;
+}
+
+function workerFreshDispersedMediumOpticsRejectionIncompleteError(
+  quarantine,
+  cause = null
+) {
+  const error = new Error(
+    'Fresh dispersed-medium optics rejection did not return literal clean retirement evidence'
+  );
+  error.name = 'WorkerFreshDispersedMediumOpticsRejectionIncompleteError';
+  error.code = 'ERR_WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_INCOMPLETE';
+  error.reason =
+    WORKER_FRESH_DISPERSED_MEDIUM_OPTICS_REJECTION_INCOMPLETE_REASON;
+  error.freshDispersedMediumOpticsRejection =
+    workerFreshDispersedMediumOpticsQuarantineDiagnostic(quarantine);
+  if (cause != null) error.cause = cause;
+  return error;
+}
+
+function requireCleanWorkerFreshDispersedMediumOpticsRejection({
+  record,
+  finalStep,
+  sourceSphUpload,
+  targetSphUpload,
+  holder = 'canonical-resident-step',
+  scheduleId = null,
+  stepOrdinal = null,
+  cause = null
+} = {}) {
+  const rejection = attemptWorkerFreshDispersedMediumOpticsRejection({
+    finalStep,
+    sourceSphUpload,
+    targetSphUpload
+  });
+  if (rejection.clean === true) return rejection.receipt;
+  const quarantine = retainWorkerFreshDispersedMediumOpticsQuarantine(
+    record,
+    {
+      finalStep,
+      sourceSphUpload,
+      targetSphUpload,
+      holder,
+      rejection,
+      scheduleId,
+      stepOrdinal
+    }
+  );
+  throw workerFreshDispersedMediumOpticsRejectionIncompleteError(
+    quarantine,
+    cause ?? rejection.error
+  );
+}
+
 function restoreWorkerContinuationSidecarOwnership({
+  finalStep = null,
   sourceUploads = null,
-  unadoptedUploads = null
+  unadoptedUploads = null,
+  record = null,
+  scheduleId = null,
+  stepOrdinal = null
 } = {}) {
   const sourceSph = sourceUploads?.sphParticleUpload ?? null;
   const unadoptedSph = unadoptedUploads?.sphParticleUpload ?? null;
@@ -7141,17 +8042,25 @@ function restoreWorkerContinuationSidecarOwnership({
     identityOwnership: unadoptedSph?.identityOwnership
   };
   let dispersedMediumOwnershipTransfer = null;
+  const freshDispersedMediumReplacementPending =
+    isFreshSphDispersedMediumOpticsReplacementPending({
+      finalStep,
+      sourceSphUpload: sourceSph,
+      targetSphUpload: unadoptedSph
+    });
   try {
-    auxiliaryOwnershipTransfer =
-      transferPhaseCarrierAuxiliaryBufferOwnership({
-        sourceUploads: unadoptedUploads,
-        terminalUploads: sourceUploads
-      });
-    dispersedMediumOwnershipTransfer =
-      transferTopologyStableSphDispersedMediumOpticsOwnership({
-        sourceSphUpload: unadoptedSph,
-        targetSphUpload: sourceSph
-      });
+    if (!freshDispersedMediumReplacementPending) {
+      auxiliaryOwnershipTransfer =
+        transferPhaseCarrierAuxiliaryBufferOwnership({
+          sourceUploads: unadoptedUploads,
+          terminalUploads: sourceUploads
+        });
+      dispersedMediumOwnershipTransfer =
+        transferTopologyStableSphDispersedMediumOpticsOwnership({
+          sourceSphUpload: unadoptedSph,
+          targetSphUpload: sourceSph
+        });
+    }
     if (
       unadoptedSph?.identityBuffer
       && unadoptedSph.identityBuffer === sourceSph?.identityBuffer
@@ -7163,6 +8072,16 @@ function restoreWorkerContinuationSidecarOwnership({
       sourceSph.ownsIdentityBuffer = true;
       sourceSph.identityOwnership =
         'restored-after-unadopted-resident-continuation';
+    }
+    if (freshDispersedMediumReplacementPending) {
+      requireCleanWorkerFreshDispersedMediumOpticsRejection({
+        record,
+        finalStep,
+        sourceSphUpload: sourceSph,
+        targetSphUpload: unadoptedSph,
+        scheduleId,
+        stepOrdinal
+      });
     }
   } catch (error) {
     try {
@@ -7186,13 +8105,143 @@ function restoreWorkerContinuationSidecarOwnership({
   return true;
 }
 
-function persistWorkerScheduleResidentStepOptions(lane, requested = null) {
+const workerDispersedMediumOpticsSeedSnapshots = new WeakMap();
+
+function exactCloneSafeWorkerValueEquals(
+  left,
+  right,
+  seen = new WeakMap()
+) {
+  if (Object.is(left, right)) return true;
+  if (left == null || right == null) return false;
+  if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
+    if (
+      !ArrayBuffer.isView(left)
+      || !ArrayBuffer.isView(right)
+      || left.constructor !== right.constructor
+      || left.byteLength !== right.byteLength
+    ) return false;
+    const leftBytes = new Uint8Array(
+      left.buffer,
+      left.byteOffset,
+      left.byteLength
+    );
+    const rightBytes = new Uint8Array(
+      right.buffer,
+      right.byteOffset,
+      right.byteLength
+    );
+    return leftBytes.every((value, index) => value === rightBytes[index]);
+  }
+  if (left instanceof ArrayBuffer || right instanceof ArrayBuffer) {
+    if (
+      !(left instanceof ArrayBuffer)
+      || !(right instanceof ArrayBuffer)
+      || left.byteLength !== right.byteLength
+    ) return false;
+    const leftBytes = new Uint8Array(left);
+    const rightBytes = new Uint8Array(right);
+    return leftBytes.every((value, index) => value === rightBytes[index]);
+  }
+  if (typeof left !== 'object' || typeof right !== 'object') return false;
+  if (seen.has(left)) return seen.get(left) === right;
+  seen.set(left, right);
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => exactCloneSafeWorkerValueEquals(
+        value,
+        right[index],
+        seen
+      ));
+  }
+  const leftPrototype = Object.getPrototypeOf(left);
+  const rightPrototype = Object.getPrototypeOf(right);
+  if (
+    leftPrototype !== rightPrototype
+    || (leftPrototype !== Object.prototype && leftPrototype !== null)
+  ) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index]
+      && exactCloneSafeWorkerValueEquals(left[key], right[key], seen)
+    ));
+}
+
+function persistWorkerScheduleResidentStepOptions(
+  lane,
+  requested = null,
+  {
+    scheduleId = null,
+    laneId = null,
+    stateKey = null
+  } = {}
+) {
   if (!lane || !requested || typeof requested !== 'object') return;
   const previous = lane.residentStepOptions || {};
   const carriedResidentProductMass = previous.residentProductMass ?? null;
+  const previousSeed = previous.dispersedMediumOpticsSeedRows ?? null;
+  const requestedSeed = requested.dispersedMediumOpticsSeedRows ?? null;
+  let immutableSeedSnapshot =
+    workerDispersedMediumOpticsSeedSnapshots.get(lane) ?? null;
+  const rejectSeedDrift = (detail) => {
+    throw workerResidentScheduleError(
+      'static-dispersed-medium-optics-seed-authority-drift',
+      detail,
+      {
+        scheduleId,
+        stepOrdinal: 0,
+        stageId: 'schedule-route-selection',
+        laneState: {
+          laneId,
+          stateKey
+        }
+      }
+    );
+  };
+  if (immutableSeedSnapshot) {
+    if (
+      previousSeed
+      && !exactCloneSafeWorkerValueEquals(
+        previousSeed,
+        immutableSeedSnapshot
+      )
+    ) {
+      rejectSeedDrift('the retained worker-local seed was mutated');
+    }
+    if (
+      requestedSeed
+      && !exactCloneSafeWorkerValueEquals(
+        requestedSeed,
+        immutableSeedSnapshot
+      )
+    ) {
+      rejectSeedDrift('a later schedule replaced the immutable seed declaration');
+    }
+  } else if (previousSeed || requestedSeed) {
+    if (
+      previousSeed
+      && requestedSeed
+      && !exactCloneSafeWorkerValueEquals(previousSeed, requestedSeed)
+    ) {
+      rejectSeedDrift('the first scheduled seed conflicts with the lane seed');
+    }
+    immutableSeedSnapshot = structuredClone(previousSeed ?? requestedSeed);
+    workerDispersedMediumOpticsSeedSnapshots.set(
+      lane,
+      immutableSeedSnapshot
+    );
+  }
+  const retainedSeed = previousSeed ?? requestedSeed;
   lane.residentStepOptions = {
     ...previous,
     ...requested,
+    ...(retainedSeed
+      ? { dispersedMediumOpticsSeedRows: retainedSeed }
+      : {}),
     thermalStepOptions: {
       ...(previous.thermalStepOptions || {}),
       ...(requested.thermalStepOptions || {})
@@ -8725,6 +9774,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       const reactionTable = laneResidentOptions.reactionTable ?? null;
       const reaction = reactionTable != null
         && !isExactQuiescentSphReactionTable(reactionTable);
+      const dispersedMediumOptics = Boolean(
+        laneResidentOptions.dispersedMediumOpticalClosureTable
+        || laneResidentOptions.dispersedMediumOpticsSeedRows
+      );
       const activeReactionGasProductCount = Number(
         reactionTable?.gasProductCount
       );
@@ -8818,6 +9871,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         schema: ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA,
         thermal,
         reaction,
+        dispersedMediumOptics,
         contactSolver,
         contactSolverRequested,
         contactSolverEscalatedForDynamicLaws,
@@ -9105,7 +10159,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       record.schroederLane?.residentStepOptions;
     persistWorkerScheduleResidentStepOptions(
       record.schroederLane,
-      baseMechanicsOptions.residentStepOptions
+      baseMechanicsOptions.residentStepOptions,
+      { scheduleId, laneId, stateKey }
     );
     const restoreScheduleResidentStepOptions = () => {
       if (scheduleLaneHadResidentStepOptions && record.schroederLane) {
@@ -9122,6 +10177,28 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // including a schedule started after single-stage messages consumed the
     // seed — must strictly advance beyond the seeded words.
     const scheduleStartLane = record.schroederLane || null;
+    // A schedule may be the operation that creates its lane (the direct
+    // worker API and focused worker tests exercise that route). In that case
+    // the exact source family still lives in the step-zero epoch/common
+    // payload until the first epoch stage retains it. Static-law preflight
+    // must validate that same family instead of treating a not-yet-created
+    // lane as proof that the source topology is absent.
+    const scheduleSourceSphParticleState =
+      scheduleStartLane?.sphParticleState
+      ?? commonOptions.sphParticleState
+      ?? null;
+    const scheduleSourceMlsMpmParticleState =
+      scheduleStartLane?.mlsMpmParticleState
+      ?? commonOptions.mlsMpmParticleState
+      ?? null;
+    const scheduleSourceSphParticleUpload =
+      scheduleStartLane?.sphParticleUpload
+      ?? baseEpochOptions.sphParticleUpload
+      ?? null;
+    const scheduleSourceMlsMpmParticleUpload =
+      scheduleStartLane?.mlsMpmParticleUpload
+      ?? baseEpochOptions.mlsMpmParticleUpload
+      ?? null;
     const retainedPredecessorTargetScheduleAuthorityRaw =
       scheduleStartLane?.nextScheduleTargetAuthority ?? null;
     const retainedPredecessorTargetScheduleAuthority =
@@ -9180,8 +10257,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       stepCount
     );
     const tier0PhaseCarrierPlan =
-      scheduleStartLane?.sphParticleUpload?.phaseCarrierPlan
-      ?? scheduleStartLane?.sphParticleState?.phaseCarrierPlan
+      scheduleSourceSphParticleUpload?.phaseCarrierPlan
+      ?? scheduleSourceSphParticleState?.phaseCarrierPlan
+      ?? scheduleSourceMlsMpmParticleUpload?.phaseCarrierPlan
+      ?? scheduleSourceMlsMpmParticleState?.phaseCarrierPlan
       ?? null;
     const tier0TopologyAttestation = workerTier0TopologyAttestation({
       phaseCarrierPlan: tier0PhaseCarrierPlan,
@@ -9189,11 +10268,114 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       sourceMlsUpload: scheduleStartLane?.mlsMpmParticleUpload,
       device: record.workerDevice
     });
-    const scheduleLawActivation = resolveScheduleLawActivation();
     const scheduleResidentStepOptions =
       scheduleStartLane?.residentStepOptions
       || baseMechanicsOptions.residentStepOptions
       || {};
+    const dispersedMediumOpticalClosureTable =
+      scheduleResidentStepOptions.dispersedMediumOpticalClosureTable
+      ?? null;
+    const dispersedMediumOpticsSeedRows =
+      scheduleResidentStepOptions.dispersedMediumOpticsSeedRows
+      ?? null;
+    const dispersedMediumOpticsRequested = Boolean(
+      dispersedMediumOpticalClosureTable || dispersedMediumOpticsSeedRows
+    );
+    if (dispersedMediumOpticsRequested) {
+      const rejectDispersedMediumOptics = (reason, detail) => {
+        restoreScheduleResidentStepOptions();
+        throw workerResidentScheduleError(reason, detail, {
+          scheduleId,
+          stepOrdinal: 0,
+          stageId: 'schedule-route-selection',
+          laneState: workerResidentScheduleLaneStateSnapshot(record, {
+            laneId,
+            stateKey
+          })
+        });
+      };
+      const sourceSphUpload = scheduleSourceSphParticleUpload;
+      const sourceOpticsAdvertised =
+        sphGpuParticleUploadAdvertisesDispersedMediumOptics(sourceSphUpload);
+      if (!dispersedMediumOpticalClosureTable) {
+        rejectDispersedMediumOptics(
+          'dispersed-medium-optics-closure-required',
+          'a producer seed cannot execute without its exact host closure table'
+        );
+      }
+      if (
+        !sourceOpticsAdvertised
+        && !dispersedMediumOpticsSeedRows
+      ) {
+        rejectDispersedMediumOptics(
+          'dispersed-medium-optics-source-required',
+          'the first producer step requires an immutable seed declaration'
+        );
+      }
+      if (
+        sourceOpticsAdvertised
+        && !sphDispersedMediumOpticsMatchesParticleUpload(sourceSphUpload)
+      ) {
+        rejectDispersedMediumOptics(
+          'dispersed-medium-optics-source-authority-mismatch',
+          'the retained optical sidecar no longer matches its particle family'
+        );
+      }
+      if (
+        !scheduleResidentStepOptions.thermalMaterialTable
+        || !scheduleResidentStepOptions.mechanicsMaterialTable
+      ) {
+        rejectDispersedMediumOptics(
+          'dispersed-medium-optics-phase-transfer-required',
+          'optical moments require both thermal and mechanics phase-transfer closures'
+        );
+      }
+      try {
+        validateSphDispersedMediumOpticalClosureTable(
+          dispersedMediumOpticalClosureTable
+        );
+        let producerPhaseCarrierPlan = tier0PhaseCarrierPlan;
+        if (!workerDispersedMediumOpticsFourLanePhaseCarrierPlan(
+          producerPhaseCarrierPlan,
+          sourceSphUpload?.particleCount
+        )) {
+          if (
+            !scheduleStartTier0ContinuationIdentity
+            || !workerTier0LawsQuiescentPhaseCarrierPlan(
+              tier0PhaseCarrierPlan
+            )
+          ) {
+            throw new RangeError(
+              'the source family is neither exact four-lane nor an admitted Tier0 one-to-four transition'
+            );
+          }
+          producerPhaseCarrierPlan =
+            createSphPhaseCarrierOneToFourMaterializationPlan({
+              sphParticleState: scheduleSourceSphParticleState,
+              mlsMpmParticleState: scheduleSourceMlsMpmParticleState,
+              sphParticleUpload: sourceSphUpload,
+              mlsMpmParticleUpload: scheduleSourceMlsMpmParticleUpload,
+              phaseCarrierPlan: tier0PhaseCarrierPlan
+            }).phaseCarrierPlan;
+        }
+        if (dispersedMediumOpticsSeedRows) {
+          validateSphDispersedMediumOpticsProducerSeedRows({
+            rows:
+              dispersedMediumOpticsSeedRows.rows
+              ?? dispersedMediumOpticsSeedRows,
+            particleCount: producerPhaseCarrierPlan.particleCapacity,
+            phaseCarrierPlan: producerPhaseCarrierPlan,
+            opticalClosureTable: dispersedMediumOpticalClosureTable
+          });
+        }
+      } catch (error) {
+        rejectDispersedMediumOptics(
+          'dispersed-medium-optics-declaration-invalid',
+          error?.message || String(error)
+        );
+      }
+    }
+    const scheduleLawActivation = resolveScheduleLawActivation();
     // A dormant table is observation input only. It must never participate in
     // the static activation receipt or Tier0 blocker derivation. Canonical
     // schedules watch their executing table; laws-quiescent Tier0 schedules
@@ -9574,6 +10756,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     }
     if (scheduleLawActivation.thermal) tier0RouteBlockers.push('thermal-active');
     if (scheduleLawActivation.reaction) tier0RouteBlockers.push('reaction-active');
+    if (scheduleLawActivation.dispersedMediumOptics) {
+      tier0RouteBlockers.push('dispersed-medium-optics-active');
+    }
     if (scheduleLawActivation.contactSolver) {
       tier0RouteBlockers.push('contact-solver-active');
     }
@@ -9689,6 +10874,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     const declaredLawsQuiescent = !(
       scheduleLawActivation.thermal
       || scheduleLawActivation.reaction
+      || scheduleLawActivation.dispersedMediumOptics
       || scheduleLawActivation.contactSolver
       || scheduleLawActivation.lawQueue
       || scheduleLawActivation.lawNeighborCandidates
@@ -10419,10 +11605,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           sphParticleUpload: lane.sphParticleUpload,
           mlsMpmParticleUpload: lane.mlsMpmParticleUpload
         };
+        const tier0FreshDispersedMediumReplacementPending =
+          isFreshSphDispersedMediumOpticsReplacementPending({
+            finalStep,
+            sourceSphUpload: lane.sphParticleUpload,
+            targetSphUpload: nextSphUpload
+          });
         // The terminal family becomes the one lane owner atomically. State
         // and mechanics are fresh buffers; quiescent thermo/identity aliases
         // and immutable material sidecars transfer only now, after every
-        // receipt and lineage check passed.
+        // receipt and lineage check passed. A fresh optics child is already
+        // adopted into the terminal parent and commits through its private
+        // replacement record instead of the topology-stable alias path.
         const sourceOwnershipSnapshot = {
           ownsThermoBuffer: lane.sphParticleUpload.ownsThermoBuffer,
           ownsIdentityBuffer: lane.sphParticleUpload.ownsIdentityBuffer,
@@ -10444,11 +11638,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               },
               terminalUploads: nextUploads
             });
-          tier0DispersedMediumOwnershipTransfer =
-            transferTopologyStableSphDispersedMediumOpticsOwnership({
-              sourceSphUpload: lane.sphParticleUpload,
-              targetSphUpload: nextSphUpload
-            });
+          if (!tier0FreshDispersedMediumReplacementPending) {
+            tier0DispersedMediumOwnershipTransfer =
+              transferTopologyStableSphDispersedMediumOpticsOwnership({
+                sourceSphUpload: lane.sphParticleUpload,
+                targetSphUpload: nextSphUpload
+              });
+          }
           if (
             nextSphUpload.thermoBuffer
               === lane.sphParticleUpload.thermoBuffer
@@ -10468,7 +11664,58 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             nextSphUpload.identityOwnership =
               'owned-tier0-terminal-family-transfer';
           }
+          if (tier0FreshDispersedMediumReplacementPending) {
+            const replacementReceipt =
+              requireWorkerFreshDispersedMediumOpticsCommitReceipt(
+                commitFreshSphDispersedMediumOpticsReplacement({
+                  finalStep,
+                  sourceSphUpload: lane.sphParticleUpload,
+                  targetSphUpload: nextSphUpload
+                })
+              );
+            try {
+              finalStep.dispersedMediumOpticsReplacement =
+                replacementReceipt;
+              finalStep.dispersedMediumOpticsReplacementStatus =
+                replacementReceipt.status;
+            } catch {
+              // The private commit is authoritative. Diagnostic fields are
+              // best-effort and cannot roll back an accepted terminal child.
+            }
+          }
         } catch (error) {
+          const replacementStillPending = Boolean(
+            tier0FreshDispersedMediumReplacementPending
+            && isFreshSphDispersedMediumOpticsReplacementPending({
+              finalStep,
+              sourceSphUpload: lane.sphParticleUpload,
+              targetSphUpload: nextSphUpload
+            })
+          );
+          if (
+            tier0FreshDispersedMediumReplacementPending
+            && !replacementStillPending
+          ) {
+            // The private commit may already be authoritative even when its
+            // returned receipt is malformed. Keep outer ownership on the
+            // terminal family and retain the complete fused result; neither
+            // rollback nor rejection is legal once pending state is gone.
+            retainWorkerFreshDispersedMediumOpticsCommitQuarantine(record, {
+              finalStep,
+              sourceSphUpload: lane.sphParticleUpload,
+              targetSphUpload: nextSphUpload,
+              holder: 'tier0-fused-execution',
+              tier0Execution: tier0ExecutionResult,
+              commit: {
+                clean: false,
+                receiptValid: false,
+                receipt: null,
+                error
+              },
+              scheduleId
+            });
+            throw error;
+          }
           try {
             lane.sphParticleUpload.ownsThermoBuffer =
               sourceOwnershipSnapshot.ownsThermoBuffer;
@@ -10490,6 +11737,28 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             tier0AuxiliaryOwnershipTransfer
               ?.rollbackOwnershipTransfer?.();
           } catch {}
+          if (tier0FreshDispersedMediumReplacementPending) {
+            try {
+              // Keep the complete fused result as the only owner until the
+              // exact private replacement transaction can reject cleanly.
+              record.poisonedTier0Execution = tier0ExecutionResult;
+              requireCleanWorkerFreshDispersedMediumOpticsRejection({
+                record,
+                finalStep,
+                sourceSphUpload: lane.sphParticleUpload,
+                targetSphUpload: nextSphUpload,
+                holder: 'tier0-fused-execution',
+                scheduleId,
+                cause: error
+              });
+              record.poisonedTier0Execution = null;
+            } catch (rejectionError) {
+              // An incomplete rejection is now the terminal failure: generic
+              // fused-result teardown could otherwise destroy a target still
+              // held by the authenticated replacement transaction.
+              throw rejectionError;
+            }
+          }
           throw error;
         }
         lane.residentStep = finalStep;
@@ -10855,9 +12124,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             scheduleLawActivation.activationAuthority,
           trigger: authenticatedDynamicReactionSuccessor
             ? 'authenticated-dynamic-reaction-successor'
-            : scheduleLawActivation.thermal
-              ? 'static-thermal-law-active'
-              : 'static-reaction-law-active',
+            : scheduleLawActivation.dispersedMediumOptics
+              ? 'static-dispersed-medium-optics-active'
+              : scheduleLawActivation.thermal
+                ? 'static-thermal-law-active'
+                : 'static-reaction-law-active',
           routingAuthority: authenticatedDynamicReactionSuccessor,
           dynamicLawRoutingAuthority:
             authenticatedDynamicReactionSuccessor,
@@ -12158,44 +13429,88 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         && tier0ExecutionValidation?.valid !== true
       ) {
         if (terminalGpuFence?.fenceSatisfied === true) {
-          try {
-            destroyMlsMpmResidentStepsBuffers(
-              tier0ExecutionResult,
-              {
-                preserveBuffers: [
-                  tier0SupersededUploads?.sphParticleUpload?.stateBuffer,
-                  tier0SupersededUploads?.sphParticleUpload?.thermoBuffer,
-                  tier0SupersededUploads?.sphParticleUpload?.identityBuffer,
-                  tier0SupersededUploads?.mlsMpmParticleUpload
-                    ?.mechanicsBuffer,
+          const rejectedFinalStep =
+            tier0ExecutionValidation?.finalStep
+            ?? tier0ExecutionResult.finalStep
+            ?? null;
+          const rejectedSourceSphUpload =
+            scheduleStartLane?.sphParticleUpload
+            ?? record.schroederLane?.sphParticleUpload
+            ?? null;
+          const rejectedTargetSphUpload =
+            tier0ExecutionValidation?.nextSphUpload
+            ?? rejectedFinalStep?.nextParticleUploads?.sphParticleUpload
+            ?? null;
+          const freshReplacementPending =
+            isFreshSphDispersedMediumOpticsReplacementPending({
+              finalStep: rejectedFinalStep,
+              sourceSphUpload: rejectedSourceSphUpload,
+              targetSphUpload: rejectedTargetSphUpload
+            });
+          let genericTier0DestructionAuthorized = true;
+          if (freshReplacementPending) {
+            try {
+              requireCleanWorkerFreshDispersedMediumOpticsRejection({
+                record,
+                finalStep: rejectedFinalStep,
+                sourceSphUpload: rejectedSourceSphUpload,
+                targetSphUpload: rejectedTargetSphUpload,
+                holder: 'tier0-fused-execution',
+                scheduleId,
+                stepOrdinal: completedStepCount || null,
+                cause: scheduleLoopError
+              });
+            } catch (rejectionError) {
+              genericTier0DestructionAuthorized = false;
+              record.poisonedTier0Execution = tier0ExecutionResult;
+              if (scheduleLoopError.residentScheduleError) {
+                scheduleLoopError.residentScheduleError
+                  .freshDispersedMediumOpticsRejection =
+                    rejectionError.freshDispersedMediumOpticsRejection
+                    ?? null;
+              }
+            }
+          }
+          if (genericTier0DestructionAuthorized) {
+            try {
+              destroyMlsMpmResidentStepsBuffers(
+                tier0ExecutionResult,
+                {
+                  preserveBuffers: [
+                    tier0SupersededUploads?.sphParticleUpload?.stateBuffer,
+                    tier0SupersededUploads?.sphParticleUpload?.thermoBuffer,
+                    tier0SupersededUploads?.sphParticleUpload?.identityBuffer,
+                    tier0SupersededUploads?.mlsMpmParticleUpload
+                      ?.mechanicsBuffer,
+                    scheduleStartLane?.sphParticleUpload?.stateBuffer,
+                    scheduleStartLane?.sphParticleUpload?.thermoBuffer,
+                    scheduleStartLane?.sphParticleUpload?.identityBuffer,
+                    scheduleStartLane?.mlsMpmParticleUpload?.mechanicsBuffer
+                  ].filter(Boolean)
+                }
+              );
+              if (
+                !tier0ExecutionResult.finalStep
+                || tier0ExecutionResult.finalStep.nextParticleUploads
+                  !== tier0ExecutionValidation?.nextUploads
+              ) {
+                const preserved = new Set([
                   scheduleStartLane?.sphParticleUpload?.stateBuffer,
                   scheduleStartLane?.sphParticleUpload?.thermoBuffer,
                   scheduleStartLane?.sphParticleUpload?.identityBuffer,
                   scheduleStartLane?.mlsMpmParticleUpload?.mechanicsBuffer
-                ].filter(Boolean)
+                ].filter(Boolean));
+                for (const buffer of retainedContinuationBuffersFromUploads(
+                  tier0ExecutionValidation?.nextUploads
+                )) {
+                  if (!preserved.has(buffer)) buffer.destroy?.();
+                }
               }
-            );
-            if (
-              !tier0ExecutionResult.finalStep
-              || tier0ExecutionResult.finalStep.nextParticleUploads
-                !== tier0ExecutionValidation?.nextUploads
-            ) {
-              const preserved = new Set([
-                scheduleStartLane?.sphParticleUpload?.stateBuffer,
-                scheduleStartLane?.sphParticleUpload?.thermoBuffer,
-                scheduleStartLane?.sphParticleUpload?.identityBuffer,
-                scheduleStartLane?.mlsMpmParticleUpload?.mechanicsBuffer
-              ].filter(Boolean));
-              for (const buffer of retainedContinuationBuffersFromUploads(
-                tier0ExecutionValidation?.nextUploads
-              )) {
-                if (!preserved.has(buffer)) buffer.destroy?.();
-              }
+            } catch {
+              // Preserve the typed validation failure. The poisoned lane's
+              // final owned-buffer walk remains the best-effort safety net.
+              record.poisonedTier0Execution = tier0ExecutionResult;
             }
-          } catch {
-            // Preserve the typed validation failure. The poisoned lane's final
-            // owned-buffer walk remains the best-effort safety net.
-            record.poisonedTier0Execution = tier0ExecutionResult;
           }
         } else {
           // No satisfied fence means destruction is not yet safe. Retain the
@@ -12205,6 +13520,45 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           record.poisonedTier0Execution = tier0ExecutionResult;
           record.poisonedTier0SubmittedCleanupRecords =
             tier0SubmittedCleanupRecords;
+          const rejectedFinalStep =
+            tier0ExecutionValidation?.finalStep
+            ?? tier0ExecutionResult.finalStep
+            ?? null;
+          const rejectedSourceSphUpload =
+            scheduleStartLane?.sphParticleUpload
+            ?? record.schroederLane?.sphParticleUpload
+            ?? null;
+          const rejectedTargetSphUpload =
+            tier0ExecutionValidation?.nextSphUpload
+            ?? rejectedFinalStep?.nextParticleUploads?.sphParticleUpload
+            ?? null;
+          if (
+            isFreshSphDispersedMediumOpticsReplacementPending({
+              finalStep: rejectedFinalStep,
+              sourceSphUpload: rejectedSourceSphUpload,
+              targetSphUpload: rejectedTargetSphUpload
+            })
+          ) {
+            retainWorkerFreshDispersedMediumOpticsQuarantine(
+              record,
+              {
+                finalStep: rejectedFinalStep,
+                sourceSphUpload: rejectedSourceSphUpload,
+                targetSphUpload: rejectedTargetSphUpload,
+                holder: 'tier0-fused-execution',
+                rejection: Object.freeze({
+                  clean: false,
+                  receiptValid: false,
+                  receipt: null,
+                  error: new Error(
+                    'Fresh optics rejection deferred until explicit lane teardown authority'
+                  )
+                }),
+                scheduleId,
+                stepOrdinal: completedStepCount || null
+              }
+            );
+          }
         }
       }
       const terminalReceiptLoopFailure =

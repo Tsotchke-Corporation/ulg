@@ -583,7 +583,7 @@ test('optical GPU table upload retires every partial allocation exactly once', (
   }
 });
 
-test('optical GPU table updates compatible resident buffers in place', () => {
+test('optical GPU table updates compatible resident buffers from vapor to mass-backed condensate', () => {
   const bindingId = 4321;
   const initial = buildOpticalGpuTable([{
     material: 'h2o',
@@ -595,7 +595,13 @@ test('optical GPU table updates compatible resident buffers in place', () => {
     material: 'h2o',
     phase: 'gas',
     opticalStateId: bindingId,
-    opticalState: { temperatureK: 300, h2oPartialPressurePa: 1e6, pressurePa: 1e6 }
+    opticalState: {
+      temperatureK: 300,
+      h2oPartialPressurePa: 1e6,
+      pressurePa: 1e6,
+      conservedCondensedMassDensityKgPerM3: 0.01,
+      dropletRadiusM: 1e-6
+    }
   }]);
   const writes = [];
   const device = {
@@ -716,23 +722,25 @@ test('optical GPU lookup queries sample packed records by material and phase ids
   );
 });
 
-test('optical GPU table and lookup distinguish phase-resolved optical state', () => {
+test('optical GPU table and lookup distinguish vapor from mass-backed condensate state', () => {
   const clearVaporState = {
     temperatureK: 450,
     h2oPartialPressurePa: 100,
     pressurePa: 101325
   };
-  const supersaturatedState = {
+  const massBackedCondensateState = {
     temperatureK: 300,
     h2oPartialPressurePa: 1e6,
-    pressurePa: 1e6
+    pressurePa: 1e6,
+    conservedCondensedMassDensityKgPerM3: 0.01,
+    dropletRadiusM: 1e-6
   };
   const table = buildOpticalGpuTable([
     { material: 'h2o', phase: 'gas', opticalState: clearVaporState },
-    { material: 'h2o', phase: 'gas', opticalState: supersaturatedState }
+    { material: 'h2o', phase: 'gas', opticalState: massBackedCondensateState }
   ]);
   const lookup = buildOpticalGpuLookupQueries(table, [
-    { material: 'h2o', phase: 'gas', opticalState: supersaturatedState },
+    { material: 'h2o', phase: 'gas', opticalState: massBackedCondensateState },
     { material: 'h2o', phase: 'gas', opticalState: clearVaporState },
     { material: 'h2o', phase: 'gas' }
   ]);
@@ -742,7 +750,7 @@ test('optical GPU table and lookup distinguish phase-resolved optical state', ()
   assert.equal(table.recordCount, 2);
   assert.deepEqual(
     table.recordMetadata.map((record) => record.opticalStateId),
-    [stableOpticalStateId(clearVaporState), stableOpticalStateId(supersaturatedState)]
+    [stableOpticalStateId(clearVaporState), stableOpticalStateId(massBackedCondensateState)]
   );
   assert.notEqual(table.recordMetadata[0].opticalStateId, table.recordMetadata[1].opticalStateId);
   assert.equal(table.recordMetadata[0].renderModel, 'molecular-vapor-transparent-spectrum');
@@ -757,8 +765,8 @@ test('optical GPU table and lookup distinguish phase-resolved optical state', ()
   assert.equal(rows[2].recordIndex, -1);
   assert.ok(rows[0].scatteringCoefficientPerM > rows[1].scatteringCoefficientPerM);
   assert.ok(rows[0].opticalDepth > rows[1].opticalDepth);
-  assert.equal(rows[0].outputOpticalStateId, stableOpticalStateId(supersaturatedState));
-  assert.equal(lookup.queries[2], stableOpticalStateId(supersaturatedState));
+  assert.equal(rows[0].outputOpticalStateId, stableOpticalStateId(massBackedCondensateState));
+  assert.equal(lookup.queries[2], stableOpticalStateId(massBackedCondensateState));
 });
 
 test('optical GPU table packs air as transparent Rayleigh PBR instead of blocked black', () => {

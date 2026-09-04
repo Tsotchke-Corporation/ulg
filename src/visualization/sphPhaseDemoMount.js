@@ -114,6 +114,11 @@ import {
 } from '../runtime/sphInitialBodies.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
 import { deriveCompoundClosure } from '../runtime/material/compoundClosure.js';
+import {
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
+  createCondensedDispersedMediumOpticalClosure
+} from '../runtime/material/condensedDispersedOpticalReferences.js';
 import { CONDUCTOR_OPTICAL_CONSTANTS_BANK } from '../runtime/material/conductorOpticalConstants.js';
 import { deriveElementProperties } from '../runtime/material/elementClosures.js';
 import {
@@ -255,7 +260,7 @@ const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
 const PEER_CLOSURE_CACHE_GENERATOR_SCHEMA = 'peercompute.ulg.material-closure-generator-fingerprint.v1';
 const PEER_CLOSURE_CACHE_APP_VERSION = '0.1.0';
-const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v5';
+const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v6';
 const PEER_CLOSURE_CACHE_MAX_RECORDS_PER_MATERIAL = 32;
 const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
   schema: PEER_CLOSURE_CACHE_GENERATOR_SCHEMA,
@@ -263,6 +268,10 @@ const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
   methodVersion: PEER_CLOSURE_CACHE_METHOD_VERSION,
   moduleUrl: import.meta.url,
   generators: {
+    createCondensedDispersedMediumOpticalClosure:
+      createCondensedDispersedMediumOpticalClosure.toString(),
+    condensedDispersedOpticalReferenceMethodRevision:
+      CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
     createH2oDispersedMediumOpticalClosure:
       createH2oDispersedMediumOpticalClosure.toString(),
     createReferenceAnchoredMaterialClosure:
@@ -275,6 +284,10 @@ const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
     materialDerivationSummary: materialDerivationSummary.toString()
   },
   referenceBanks: {
+    condensedDispersedOpticalConstants: {
+      fingerprint: CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
+      methodRevision: CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION
+    },
     conductorOpticalConstants: CONDUCTOR_OPTICAL_CONSTANTS_BANK,
     molecularElectronicBands: MOLECULAR_ELECTRONIC_BANDS_BANK
   }
@@ -3975,14 +3988,12 @@ export async function materializeSphWorkerLaneNativeSurfacePresentationSource({
     ...hotBufferRecord.mlsMpmPacked,
     ...slotMetadata
   });
-  const sphParticleUpload = Object.freeze({
-    ...hotBufferRecord.sphUpload,
-    ...slotMetadata
-  });
-  const mlsMpmParticleUpload = Object.freeze({
-    ...hotBufferRecord.mlsMpmUpload,
-    ...slotMetadata
-  });
+  // Upload authority is attached to these exact objects (including the SPH
+  // parent/sidecar borrow lifecycle). A structural presentation clone loses
+  // that private authority and cannot be authenticated by the renderer.
+  // Slot metadata remains on the packed presentation states above.
+  const sphParticleUpload = hotBufferRecord.sphUpload;
+  const mlsMpmParticleUpload = hotBufferRecord.mlsMpmUpload;
   let released = false;
   const releaseAfterQueue = async () => {
     if (released) return false;

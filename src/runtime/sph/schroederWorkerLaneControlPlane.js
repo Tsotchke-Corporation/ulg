@@ -69,7 +69,7 @@ export const ULG_WORKER_RESIDENT_SCHEDULE_TERMINAL_REFLUX_RECEIPT_SCHEMA =
 export const ULG_WORKER_SCHEDULE_EXECUTION_ROUTE_RECEIPT_SCHEMA =
   'peercompute.ulg.worker-schedule-execution-route-receipt.v6';
 export const ULG_WORKER_SCHEDULE_LAW_ACTIVATION_RECEIPT_SCHEMA =
-  'peercompute.ulg.worker-schedule-law-activation-receipt.v0';
+  'peercompute.ulg.worker-schedule-law-activation-receipt.v1';
 export const ULG_WORKER_TIER0_TOPOLOGY_ATTESTATION_SCHEMA =
   'peercompute.ulg.worker-tier0-topology-attestation.v0';
 export const ULG_SCHROEDER_WORKER_HIERARCHY_CONFIG_SCHEMA =
@@ -103,6 +103,7 @@ const COMMIT_SCOPE = 'ulg-sph-resident-pass-dag';
 const WORKER_ROUTE_ACTIVATION_FIELDS = Object.freeze([
   'thermal',
   'reaction',
+  'dispersedMediumOptics',
   'contactSolver',
   'contactSolverRequested',
   'contactSolverEscalatedForDynamicLaws',
@@ -121,6 +122,10 @@ const WORKER_ROUTE_ACTIVATION_FIELDS = Object.freeze([
 const WORKER_ROUTE_ACTIVE_LAW_BLOCKERS = Object.freeze([
   Object.freeze(['thermal', 'thermal-active']),
   Object.freeze(['reaction', 'reaction-active']),
+  Object.freeze([
+    'dispersedMediumOptics',
+    'dispersed-medium-optics-active'
+  ]),
   Object.freeze(['contactSolver', 'contact-solver-active']),
   Object.freeze(['lawQueue', 'law-queue-active']),
   Object.freeze([
@@ -317,6 +322,8 @@ const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'stageMechanicsTraceEnabled',
   'thermalMaterialTable',
   'mechanicsMaterialTable',
+  'dispersedMediumOpticalClosureTable',
+  'dispersedMediumOpticsSeedRows',
   'thermalStepOptions',
   'mechanicsRefreshOptions',
   'reactionTable',
@@ -523,9 +530,10 @@ export function createSchroederWorkerResidentStepOptions(options = {}) {
     const cloned = cloneWorkerValue(options?.[field]);
     if (cloned !== undefined) selected[field] = cloned;
   }
-  // A page-device upload can be nested inside thermal/mechanics options. It
-  // is deliberately absent; the worker materializes static GPU tables on its
-  // own device from the retained clone-safe table inputs.
+  // Page-device uploads are deliberately absent; the worker materializes
+  // static GPU tables on its own device from the retained clone-safe table
+  // inputs. This includes dispersedMediumOpticalClosureGpuTable, which is
+  // never selected by WORKER_RESIDENT_STEP_OPTION_FIELDS.
   if (selected.thermalStepOptions) {
     delete selected.thermalStepOptions.thermalResponseGraphUpload;
   }
@@ -914,6 +922,7 @@ function exactWorkerRouteActivationReceipt(value) {
         || !(
           receipt.thermal
           || receipt.reaction
+          || receipt.dispersedMediumOptics
           || receipt.lawQueue
           || receipt.lawNeighborCandidates
           || receipt.phaseVolumeMigration
@@ -1491,17 +1500,22 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
     predecessorTargetTokenConsumption?.configurationContinuityMode
       === 'prospective-reaction-dormant-to-executing'
   );
+  const staticPhaseCarrierTrigger = activation.dispersedMediumOptics === true
+    ? 'static-dispersed-medium-optics-active'
+    : activation.thermal === true
+      ? 'static-thermal-law-active'
+      : activation.reaction === true
+        ? 'static-reaction-law-active'
+        : null;
   requireWorkerRouteReceipt(
     phaseCarrierOneToFourTransition == null
       || (
         route === 'canonical-schroeder'
-        && (activation.thermal === true || activation.reaction === true)
+        && staticPhaseCarrierTrigger != null
         && phaseCarrierOneToFourTransition.trigger
           === (authenticatedDynamicReactionSuccessor
             ? 'authenticated-dynamic-reaction-successor'
-            : activation.thermal === true
-              ? 'static-thermal-law-active'
-              : 'static-reaction-law-active')
+            : staticPhaseCarrierTrigger)
       ),
     'phase-carrier-one-to-four-activation'
   );
@@ -1519,7 +1533,9 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
     'dynamic-reaction-successor-phase-carrier-transition'
   );
   const phaseCarrierLawActive = Boolean(
-    activation.thermal === true || activation.reaction === true
+    activation.dispersedMediumOptics === true
+    || activation.thermal === true
+    || activation.reaction === true
   );
   const tier0CanonicalSameCountClaim =
     receipt.transition === 'tier0-to-canonical-schedule-boundary';

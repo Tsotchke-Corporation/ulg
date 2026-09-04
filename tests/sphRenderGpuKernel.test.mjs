@@ -1171,7 +1171,7 @@ test('SPH render field default surface scale keeps sparse same-material drops vi
   assert.ok(surface.field.reduce((max, value) => Math.max(max, value), 0) > 80);
 });
 
-test('SPH render row decoding applies resident pressure optical state to H2O vapor', () => {
+test('SPH render row decoding cannot mint optical authority from resident gas pressure', () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
   const decoded = decodeSphRenderRows(extracted.renderRows, {
@@ -1197,10 +1197,9 @@ test('SPH render row decoding applies resident pressure optical state to H2O vap
   assert.equal(decoded.materials[1].material, 'h2o');
   assert.equal(decoded.materials[1].phase, 'gas');
   assert.equal(decoded.materials[1].renderKey, 'steam');
-  assert.equal(decoded.materials[1].opticalState.h2oPartialPressurePa, 48000);
-  assert.equal(decoded.materials[1].opticalState.pressurePa, 150000);
-  assert.equal(decoded.materials[1].opticalState.source, 'gpu-resident-reaction-summary');
-  assert.equal(decoded.rows[1].opticalState.temperatureK, 420);
+  assert.equal(Object.hasOwn(decoded.materials[1], 'opticalState'), false);
+  assert.equal(Object.hasOwn(decoded.rows[1], 'opticalState'), false);
+  assert.equal(decoded.rows[1].temperatureK, extracted.renderRows[6 + SPH_GPU_RENDER_ROW_FLOATS]);
 });
 
 test('SPH render material map includes derived reaction products', () => {
@@ -1561,6 +1560,183 @@ test('SPH render field routes conserved dispersed optics by exact collective opt
   assert.equal(field.dispersedMediumOpticsRowCount, 1);
 });
 
+test('SPH render field reserves positive routes before sidecar activation without hiding ordinary surfaces', () => {
+  const resolution = 4;
+  const routeOpticalStateId = 32001;
+  const renderRows = new Float32Array(SPH_GPU_RENDER_ROW_FLOATS);
+  renderRows.set([
+    0.25, 0.25, 0.25, 1,
+    stableOpticalMaterialId('h2'), GPU_PHASE_IDS.gas, 450, 1,
+    0.09, 1, 1, 0,
+    1, 0.1, 1, 0,
+    0, 0, 0, 0
+  ]);
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'ordinary-h2-gas',
+      material: 'h2',
+      phase: 'gas',
+      opticalStateId: 0,
+      resolution,
+      isolation: 10,
+      subtract: 2,
+      radiusNorm: 0.25
+    },
+    {
+      surfaceKey: 'reserved-collective-route',
+      material: 'h2',
+      phase: 'gas',
+      opticalStateId: routeOpticalStateId,
+      resolution,
+      isolation: 10,
+      subtract: 2,
+      radiusNorm: 0.25
+    }
+  ]);
+  const maxSurfaceDensity = (field, surfaceIndex) => {
+    const surface = surfaceTable.metadata[surfaceIndex];
+    let maximum = 0;
+    for (let cellIndex = 0; cellIndex < surface.fieldCellCount; cellIndex += 1) {
+      maximum = Math.max(
+        maximum,
+        field.fieldRows[
+          (surface.fieldOffset + cellIndex) * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+        ]
+      );
+    }
+    return maximum;
+  };
+
+  const beforeSidecar = buildSphRenderFieldCpu({
+    renderRows,
+    surfaceTable,
+    fieldPadding: 0,
+    refEdgeM: 1
+  });
+  assert.ok(maxSurfaceDensity(beforeSidecar, 0) > 0);
+  assert.equal(maxSurfaceDensity(beforeSidecar, 1), 0);
+  assert.equal(beforeSidecar.dispersedMediumOpticsBound, false);
+
+  const dispersedMediumOpticsRows = new Float32Array(
+    SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS
+  );
+  dispersedMediumOpticsRows.set([
+    stableOpticalMaterialId('naoh'),
+    GPU_PHASE_IDS.liquid,
+    routeOpticalStateId,
+    SPH_DISPERSED_MEDIUM_OPTICS_STATUS.ready,
+    0.01,
+    0.125,
+    0.0625,
+    0.0625
+  ]);
+  const afterSidecar = buildSphRenderFieldCpu({
+    renderRows,
+    dispersedMediumOpticsRows,
+    surfaceTable,
+    fieldPadding: 0,
+    refEdgeM: 1
+  });
+  assert.ok(maxSurfaceDensity(afterSidecar, 0) > 0);
+  assert.ok(maxSurfaceDensity(afterSidecar, 1) > 0);
+  assert.equal(afterSidecar.dispersedMediumOpticsBound, true);
+});
+
+test('SPH render field partitions matching dispersed mass out of ordinary condensed volume', () => {
+  const materialId = stableOpticalMaterialId('h2o');
+  const opticalStateId = 32002;
+  const resolution = 4;
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    ...['liquid', 'gas', 'solid'].map((phase) => ({
+      surfaceKey: `ordinary-h2o-${phase}`, material: 'h2o', phase,
+      opticalStateId: 0, resolution, isolation: 10, subtract: 2,
+      radiusNorm: 0.25
+    })),
+    {
+      surfaceKey: 'h2o-dispersed', material: 'h2o', phase: 'gas',
+      opticalStateId, resolution, isolation: 10, subtract: 2,
+      radiusNorm: 0.25
+    }
+  ]);
+  const surfaceRows = (field, index) => {
+    const surface = surfaceTable.metadata[index];
+    return field.fieldRows.slice(
+      surface.fieldOffset * SPH_GPU_RENDER_FIELD_CELL_FLOATS,
+      (surface.fieldOffset + surface.fieldCellCount) * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+    );
+  };
+  for (const mixed of [false, true]) {
+    for (const renderSmearDtS of [0, 0.01]) {
+      for (const dispersedMassKg of [0, 2, mixed ? 5 : 10]) {
+        const renderRows = new Float32Array(2 * SPH_GPU_RENDER_ROW_FLOATS);
+        const dispersedRows = new Float32Array(2 * SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS);
+        for (let i = 0; i < 2; i += 1) {
+          renderRows.set([
+            0.25, 0.25, 0.25, 10,
+            materialId, GPU_PHASE_IDS.liquid, 300, 1000,
+            1, mixed ? 0.25 : 0, 1, 0,
+            1, 0.1, 1, 0,
+            mixed ? 0.25 : 0, i ? 1 : -1, 0, 0
+          ], i * SPH_GPU_RENDER_ROW_FLOATS);
+          dispersedRows.set([
+            materialId, GPU_PHASE_IDS.liquid, opticalStateId,
+            SPH_DISPERSED_MEDIUM_OPTICS_STATUS.ready,
+            dispersedMassKg, dispersedMassKg * 0.125, 0, 0
+          ], i * SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS);
+        }
+        const sourceBefore = renderRows.slice();
+        const opticsBefore = dispersedRows.slice();
+        const options = { surfaceTable, fieldPadding: 0, refEdgeM: 1, renderSmearDtS };
+        const baseline = buildSphRenderFieldCpu({ ...options, renderRows });
+        const actual = buildSphRenderFieldCpu({
+          ...options, renderRows, dispersedMediumOpticsRows: dispersedRows
+        });
+        // Independent reference: change only the liquid phase fraction by
+        // dispersedMass / TOTAL carrier mass. Multiplying the old liquid
+        // fraction by (1 - dispersedMass / mass) is wrong for mixed carriers.
+        const residualRows = renderRows.slice();
+        for (let i = 0; i < 2; i += 1) {
+          residualRows[i * SPH_GPU_RENDER_ROW_FLOATS + 9] += dispersedMassKg / 10;
+        }
+        const residual = buildSphRenderFieldCpu({ ...options, renderRows: residualRows });
+        const expectedLiquid = surfaceRows(residual, 0);
+        const actualLiquid = surfaceRows(actual, 0);
+        for (let i = 0; i < expectedLiquid.length; i += 1) {
+          assert.ok(Math.abs(actualLiquid[i] - expectedLiquid[i]) <= 1e-5 * Math.max(1, Math.abs(expectedLiquid[i])),
+            `mixed=${mixed} smear=${renderSmearDtS} dispersed=${dispersedMassKg} cellLane=${i}`);
+        }
+        assert.deepEqual(surfaceRows(actual, 1), surfaceRows(baseline, 1), 'gas component untouched');
+        assert.deepEqual(surfaceRows(actual, 2), surfaceRows(baseline, 2), 'solid component untouched');
+        const collective = surfaceRows(actual, 3);
+        let scattering = 0;
+        for (let i = 5; i < collective.length; i += SPH_GPU_RENDER_FIELD_CELL_FLOATS) scattering += collective[i];
+        assert.equal(scattering, 2 * dispersedMassKg * 0.125 * resolution ** 2);
+        assert.deepEqual(renderRows, sourceBefore, 'physics render input unchanged');
+        assert.deepEqual(dispersedRows, opticsBefore, 'conserved optical moments unchanged');
+      }
+    }
+  }
+});
+
+test('SPH render field WGSL reserves positive optical routes independently of sidecar binding', () => {
+  assert.match(
+    sphRenderFieldWgsl,
+    /let dispersed_surface_active\s*=\s*s3\.y\s*>\s*0\.0;/
+  );
+  assert.doesNotMatch(
+    sphRenderFieldWgsl,
+    /let dispersed_surface_active\s*=\s*params\.dispersed_medium_enabled/
+  );
+  assert.match(
+    sphRenderFieldWgsl,
+    /if \(params\.dispersed_medium_enabled != 0u\) \{[\s\S]{0,160}let dispersed = dispersed_medium_optics_rows\[particle_index\]/
+  );
+  assert.match(
+    sphRenderFieldWgsl,
+    /if \(dispersed_surface_active\) \{\s*continue;\s*\}/
+  );
+});
+
 test('SPH render field fails closed when a dispersed target id is ambiguous', () => {
   const renderRows = new Float32Array(SPH_GPU_RENDER_ROW_FLOATS);
   const dispersedMediumOpticsRows = new Float32Array(
@@ -1587,6 +1763,14 @@ test('SPH render field fails closed when a dispersed target id is ambiguous', ()
     }
   ]);
 
+  assert.throws(
+    () => buildSphRenderFieldCpu({
+      renderRows,
+      surfaceTable
+    }),
+    /routes to more than one render surface/,
+    'positive collective routes must be unique before any sidecar is present'
+  );
   assert.throws(
     () => buildSphRenderFieldCpu({
       renderRows,

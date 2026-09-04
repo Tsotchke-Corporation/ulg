@@ -16,6 +16,10 @@ import {
 } from '../materials/referenceMaterials.js';
 import { deriveElementProperties, elementMaterialClosure } from './elementClosures.js';
 import { latentHeatOfFusionJPerKg } from './phaseTransitions.js';
+import {
+  SPHERE_OPTICAL_EFFICIENCY_MODEL,
+  waterVisibleSphereOpticalInputs
+} from './opticalClosure.js';
 import { atomicNumberDensity, debyeHeatCapacityJPerKgK, debyeTemperatureFromSoundSpeed, gasMixtureThermal } from './statisticalMechanics.js';
 import {
   PROPERTY_DERIVATION_STATUS as DS,
@@ -35,19 +39,23 @@ const OPEN_TOP_K = 1e6;
 const STANDARD_TEMPERATURE_K = 273.15;
 const BASIS_MAX_Z = 18;
 
+export const H2O_DISPERSED_MEDIUM_OPTICAL_MODEL_SOURCE =
+  'reference-index-runtime-radius-sphere-optics';
+// Compatibility name used by reaction-discovery cache identities. The value
+// now identifies the physical sphere model rather than the removed Q=2 path.
 export const H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE =
-  'unvalidated-compact-carrier-optical-fallback';
+  H2O_DISPERSED_MEDIUM_OPTICAL_MODEL_SOURCE;
 
 const H2O_DISPERSED_MEDIUM_OPTICAL_BLOCKERS = Object.freeze([
   'h2o-condensate-size-distribution-not-produced',
-  'h2o-spectral-mie-optics-not-validated',
-  'compact-carrier-optics-resolution-dependence-not-validated'
+  'h2o-visible-complex-index-spectrum-not-reference-anchored',
+  'compact-carrier-optics-resolution-dependence-not-validated',
+  'sphere-efficiency-regime-transition-not-scientifically-validated'
 ]);
 
 // This constructor is shared by the explicit reference fixture and the live
-// reference-anchored H2O closure. It is deliberately a reduced presentation
-// approximation: Qsca=2 is an unvalidated large-particle asymptotic choice,
-// not a claimed lower bound, and the compact carrier is resolution-dependent.
+// reference-anchored H2O closure. It publishes material response only; the
+// producer combines it with the radius derived from conserved condensed mass.
 export function createH2oDispersedMediumOpticalClosure({
   condensedDensityKgPerM3
 } = {}) {
@@ -57,21 +65,27 @@ export function createH2oDispersedMediumOpticalClosure({
       'H2O dispersed-medium optical closure requires positive condensed density'
     );
   }
+  const sphereInputs = waterVisibleSphereOpticalInputs();
   return Object.freeze({
     schema: ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA,
     morphologyModel:
       SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
-        .singleCompactCondensateCarrierLowerBound,
+        .singleCompactSphereComplexIndex,
     condensedDensityKgPerM3: density,
-    scatteringEfficiencyQsca: 2,
-    absorptionEfficiencyQabs: 0,
-    asymmetryFactorG: 0,
+    relativeRefractiveIndexN: sphereInputs.relativeRefractiveIndexN,
+    relativeExtinctionCoefficientK:
+      sphereInputs.relativeExtinctionCoefficientK,
+    largeSizeRayAsymmetryFactorG:
+      sphereInputs.largeSizeRayAsymmetryFactorG,
+    referenceWavelengthM: sphereInputs.referenceWavelengthM,
     provenance: Object.freeze({
-      status: DS.REDUCED_ESTIMATE,
-      source: H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
-      accuracy: 'qualitative-presentation-only-not-scientifically-validated',
+      status: DS.REFERENCE_FALLBACK,
+      source: H2O_DISPERSED_MEDIUM_OPTICAL_MODEL_SOURCE,
+      accuracy:
+        'physical-sphere-efficiency-model-unvalidated-and-resolution-dependent',
       method:
-        'single compact carrier with resolution-dependent area; Qsca=2 is an unvalidated large-particle asymptotic choice; Qabs=0 and g=0 are unresolved optical defaults',
+        `derive compact-sphere radius from conserved condensed mass and density, then evaluate ${SPHERE_OPTICAL_EFFICIENCY_MODEL} from relative visible refractive index, lossless-dielectric k, and reference wavelength`,
+      opticalInputs: sphereInputs.provenance,
       densitySource: Object.freeze({
         status: DS.REFERENCE_FALLBACK,
         source: 'h2o-reference-liquid-density',
@@ -115,17 +129,23 @@ export function h2oDispersedMediumOpticalPropertyProvenanceEntries({
     propertyProvenanceEntry({
       paths: [
         'dispersedMediumOpticalClosure.morphologyModel',
-        'dispersedMediumOpticalClosure.scatteringEfficiencyQsca',
-        'dispersedMediumOpticalClosure.absorptionEfficiencyQabs',
-        'dispersedMediumOpticalClosure.asymmetryFactorG',
+        'dispersedMediumOpticalClosure.relativeRefractiveIndexN',
+        'dispersedMediumOpticalClosure.relativeExtinctionCoefficientK',
+        'dispersedMediumOpticalClosure.largeSizeRayAsymmetryFactorG',
+        'dispersedMediumOpticalClosure.referenceWavelengthM',
         'dispersedMediumOpticalClosure.provenance'
       ],
-      status: DS.REDUCED_ESTIMATE,
-      source: H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
-      accuracy: 'qualitative-presentation-only-not-scientifically-validated',
+      status: DS.REFERENCE_FALLBACK,
+      source: H2O_DISPERSED_MEDIUM_OPTICAL_MODEL_SOURCE,
+      accuracy:
+        'physical-sphere-efficiency-model-unvalidated-and-resolution-dependent',
       method:
-        'unvalidated resolution-dependent compact-carrier morphology with Qsca=2 as a large-particle asymptotic choice and unresolved Qabs=0/g=0 defaults',
-      inputs: ['already-conserved-condensed-mass', 'h2o-reference-liquid-density'],
+        `runtime conserved-mass radius plus relative visible refractive index feed ${SPHERE_OPTICAL_EFFICIENCY_MODEL}; the lossless k=0 approximation avoids treating render-scaled absorption as quantitative optical data`,
+      inputs: [
+        'already-conserved-condensed-mass',
+        'h2o-reference-liquid-density',
+        'hale-querry-1973-liquid-water-visible-index-550nm-lossless-approximation'
+      ],
       blockers: H2O_DISPERSED_MEDIUM_OPTICAL_BLOCKERS
     })
   ];

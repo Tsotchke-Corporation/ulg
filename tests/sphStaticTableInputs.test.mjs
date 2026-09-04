@@ -9,6 +9,7 @@ import {
 import {
   createReferenceAnchoredMaterialClosure
 } from '../src/runtime/material/materialDerivation.js';
+import { deriveCompoundClosure } from '../src/runtime/material/compoundClosure.js';
 import {
   GPU_PHASE_IDS,
   stableOpticalStateId
@@ -25,6 +26,7 @@ import {
   findSphDispersedMediumOpticalClosureRow
 } from '../src/runtime/sph/sphDispersedMediumOpticalClosure.js';
 import {
+  sphCollectiveOpticalStaticInputsFromViewState,
   sphStaticTableInputsFromViewState,
   surfaceDescriptorsFromMaterials
 } from '../src/runtime/sph/sphStaticTableInputs.js';
@@ -286,6 +288,41 @@ test('SPH static inputs expose collective route descriptors and their exact opti
   assert.equal(inputs.reactionTable.reactionCount, 0);
 });
 
+test('collective-only static builder is byte-identical to the full static table family', () => {
+  const viewState = {
+    materialProperties: volatileMaterials,
+    materials: [
+      { material: 'volatile-b', phase: 'liquid', renderKey: 'b-condensate' },
+      { material: 'volatile-a', phase: 'gas', renderKey: 'a-cloud' }
+    ],
+    reactions: []
+  };
+  const collective = sphCollectiveOpticalStaticInputsFromViewState(viewState);
+  const full = sphStaticTableInputsFromViewState(viewState);
+  assert.deepEqual(
+    collective.collectiveOpticalRouteDescriptors.map((route) => ({
+      routeKey: route.routeKey,
+      routeId: route.routeId
+    })),
+    full.collectiveOpticalRouteDescriptors.map((route) => ({
+      routeKey: route.routeKey,
+      routeId: route.routeId
+    }))
+  );
+  assert.deepEqual(
+    [...collective.collectiveOpticalGpuTable.records],
+    [...full.collectiveOpticalGpuTable.records]
+  );
+  assert.deepEqual(
+    [...collective.collectiveOpticalGpuTable.spectralSamples],
+    [...full.collectiveOpticalGpuTable.spectralSamples]
+  );
+  assert.deepEqual(
+    [...collective.dispersedMediumOpticalClosureTable.rows],
+    [...full.dispersedMediumOpticalClosureTable.rows]
+  );
+});
+
 test('live reference-anchored H2O readies one shared route while missing generic optics stay blocked', () => {
   const h2o = createReferenceAnchoredMaterialClosure('h2o').properties;
   const inputs = sphStaticTableInputsFromViewState({
@@ -327,14 +364,25 @@ test('live reference-anchored H2O readies one shared route while missing generic
     ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA
   );
   assert.equal(h2o.dispersedMediumOpticalClosure.condensedDensityKgPerM3, 1_000);
-  assert.equal(h2o.dispersedMediumOpticalClosure.scatteringEfficiencyQsca, 2);
-  assert.equal(h2o.dispersedMediumOpticalClosure.absorptionEfficiencyQabs, 0);
-  assert.equal(h2o.dispersedMediumOpticalClosure.asymmetryFactorG, 0);
+  assert.equal(
+    h2o.dispersedMediumOpticalClosure.morphologyModel,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+      .singleCompactSphereComplexIndex
+  );
+  assert.ok(h2o.dispersedMediumOpticalClosure.relativeRefractiveIndexN > 1);
+  assert.equal(
+    h2o.dispersedMediumOpticalClosure.relativeExtinctionCoefficientK,
+    0
+  );
+  assert.ok(
+    h2o.dispersedMediumOpticalClosure.largeSizeRayAsymmetryFactorG > 0.7
+  );
+  assert.ok(h2o.dispersedMediumOpticalClosure.referenceWavelengthM > 0);
   assert.equal(h2o.dispersedMediumOpticalClosure.effectiveRadiusM, undefined);
   assert.equal(h2o.dispersedMediumOpticalClosure.scientificValidation, false);
   assert.equal(
     h2o.dispersedMediumOpticalClosure.provenance.status,
-    'reduced-estimate'
+    'reference-fallback'
   );
   assert.equal(h2oClosure.status, SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.ready);
   assert.equal(h2oClosure.opticalStateId, h2oRoute.opticalStateId);
@@ -343,9 +391,21 @@ test('live reference-anchored H2O readies one shared route while missing generic
     h2o.dispersedMediumOpticalClosure.condensedDensityKgPerM3,
     h2o.phases.find((phase) => phase.name === 'liquid').densityKgPerM3
   );
-  assert.equal(h2oClosure.scatteringEfficiencyQsca, 2);
-  assert.equal(h2oClosure.absorptionEfficiencyQabs, 0);
-  assert.equal(h2oClosure.asymmetryFactorG, 0);
+  assert.equal(
+    h2oClosure.relativeRefractiveIndexN,
+    Math.fround(h2o.dispersedMediumOpticalClosure.relativeRefractiveIndexN)
+  );
+  assert.equal(h2oClosure.relativeExtinctionCoefficientK, 0);
+  assert.equal(
+    h2oClosure.largeSizeRayAsymmetryFactorG,
+    Math.fround(
+      h2o.dispersedMediumOpticalClosure.largeSizeRayAsymmetryFactorG
+    )
+  );
+  assert.equal(
+    h2oClosure.referenceWavelengthM,
+    Math.fround(h2o.dispersedMediumOpticalClosure.referenceWavelengthM)
+  );
   assert.equal(h2oClosure.effectiveRadiusM, 0);
   assert.equal(
     missingClosure.status,
@@ -369,6 +429,198 @@ test('live reference-anchored H2O readies one shared route while missing generic
     missingRoute.opticalStateId
   ]));
   assert.deepEqual(closureIds, opticalIds);
+});
+
+test('reduced products without complex-index physics fail closed while H2 stays optically thin', () => {
+  const product = deriveCompoundClosure({
+    key: 'lioh',
+    label: 'LiOH',
+    atomCounts: { 1: 1, 3: 1, 8: 1 },
+    geometry: [],
+    reactants: [
+      {
+        material: 'li',
+        densityKgPerM3: 534,
+        molarMassKgPerMol: 0.00694,
+        bulkModulusPa: 11e9,
+        thermalConductivityWPerMK: 85
+      },
+      {
+        material: 'h2o',
+        densityKgPerM3: 1_000,
+        molarMassKgPerMol: 0.01801528,
+        bulkModulusPa: 2.2e9,
+        thermalConductivityWPerMK: 0.6
+      }
+    ],
+    allowReducedEstimates: true
+  }).properties;
+  const hydrogen = createReferenceAnchoredMaterialClosure('h2').properties;
+  const inputs = sphStaticTableInputsFromViewState({
+    materialProperties: { lioh: product, h2: hydrogen },
+    materials: [
+      { material: 'lioh', phase: 'liquid', renderKey: 'lioh-product' },
+      { material: 'h2', phase: 'gas', renderKey: 'hydrogen-product' }
+    ],
+    reactions: []
+  });
+
+  assert.deepEqual(product.transitions, []);
+  assert.equal(
+    product.dispersedMediumOpticalClosure.schema,
+    ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.scientificValidation,
+    false
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.morphologyModel,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+      .blocked
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.condensedDensityKgPerM3,
+    product.phases[0].densityKgPerM3
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.scatteringEfficiencyQsca,
+    0
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.absorptionEfficiencyQabs,
+    0
+  );
+  assert.equal(product.dispersedMediumOpticalClosure.asymmetryFactorG, 0);
+  assert.equal(
+    product.dispersedMediumOpticalClosure.provenance.status,
+    'blocked'
+  );
+  assert.match(
+    product.dispersedMediumOpticalClosure.provenance.source,
+    /reaction-product.*blocked-missing-size-and-complex-index/
+  );
+  assert.match(
+    product.dispersedMediumOpticalClosure.provenance.accuracy,
+    /blocked-no-authoritative-size-distribution-or-visible-complex-refractive-index/
+  );
+  assert.doesNotMatch(
+    `${product.dispersedMediumOpticalClosure.provenance.accuracy} ${product.dispersedMediumOpticalClosure.provenance.method}`,
+    /qualitative|presentation|lower.bound|Qsca=2/i
+  );
+  assert.match(
+    product.dispersedMediumOpticalClosure.provenance.method,
+    /conserved condensed mass.*density.*size distribution.*complex refractive index/i
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.provenance.blockers.length >= 3,
+    true
+  );
+  assert.deepEqual(inputs.collectiveOpticalRouteDescriptors, []);
+  assert.equal(inputs.dispersedMediumOpticalClosureTable.rowCount, 0);
+  assert.equal(inputs.dispersedMediumOpticalClosureTable.readyRowCount, 0);
+  assert.equal(inputs.dispersedMediumOpticalClosureTable.blockedRowCount, 0);
+  assert.equal(
+    inputs.collectiveOpticalRouteDescriptors.some(
+      (route) => route.material === 'h2'
+    ),
+    false
+  );
+});
+
+test('reference-backed reduced NaOH emits one ready unvalidated static optical route', () => {
+  const product = deriveCompoundClosure({
+    key: 'naoh',
+    label: 'NaOH',
+    atomCounts: { 1: 1, 8: 1, 11: 1 },
+    geometry: [],
+    reactants: [
+      {
+        material: 'na',
+        densityKgPerM3: 968,
+        molarMassKgPerMol: 0.022989769,
+        bulkModulusPa: 6.3e9,
+        thermalConductivityWPerMK: 142
+      },
+      {
+        material: 'h2o',
+        densityKgPerM3: 1_000,
+        molarMassKgPerMol: 0.01801528,
+        bulkModulusPa: 2.2e9,
+        thermalConductivityWPerMK: 0.6
+      }
+    ],
+    allowReducedEstimates: true
+  }).properties;
+  const inputs = sphStaticTableInputsFromViewState({
+    materialProperties: { naoh: product },
+    materials: [
+      { material: 'naoh', phase: 'liquid', renderKey: 'naoh-product' }
+    ],
+    reactions: []
+  });
+  const [route] = inputs.collectiveOpticalRouteDescriptors;
+  const closure = findSphDispersedMediumOpticalClosureRow(
+    inputs.dispersedMediumOpticalClosureTable,
+    route
+  );
+
+  assert.equal(
+    product.dispersedMediumOpticalClosure.morphologyModel,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+      .singleCompactSphereComplexIndex
+  );
+  assert.equal(product.dispersedMediumOpticalClosure.scientificValidation, false);
+  assert.equal(
+    product.dispersedMediumOpticalClosure.provenance.status,
+    'reference-fallback'
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.provenance.referenceCondensedPhase,
+    'liquid'
+  );
+  assert.equal(
+    product.dispersedMediumOpticalClosure.provenance.referenceTemperatureK,
+    693.15
+  );
+  assert.equal(inputs.collectiveOpticalRouteDescriptors.length, 1);
+  assert.equal(route.material, 'naoh');
+  assert.equal(
+    route.closureModel,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+      .singleCompactSphereComplexIndex
+  );
+  assert.equal(
+    route.closureModelId,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+      .singleCompactSphereComplexIndex
+  );
+  assert.equal(
+    closure.status,
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.ready
+  );
+  assert.equal(
+    closure.morphologyModelId,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+      .singleCompactSphereComplexIndex
+  );
+  assert.ok(closure.relativeRefractiveIndexN > 1);
+  assert.equal(closure.relativeExtinctionCoefficientK, 0);
+  assert.equal(inputs.dispersedMediumOpticalClosureTable.rowCount, 1);
+  assert.equal(inputs.dispersedMediumOpticalClosureTable.readyRowCount, 1);
+  assert.equal(inputs.dispersedMediumOpticalClosureTable.blockedRowCount, 0);
+  assert.equal(
+    inputs.dispersedMediumOpticalClosureTable.metadata[0].opticalStateId,
+    route.opticalStateId
+  );
+  assert.equal(
+    inputs.dispersedMediumOpticalClosureTable.metadata[0].scientificValidation,
+    false
+  );
+  assert.equal(
+    inputs.dispersedMediumOpticalClosureTable.metadata[0].provenance.referenceRecordId,
+    'naoh-pure-anhydrous-molten-693.15k-589.4nm'
+  );
 });
 
 test('typed monodisperse material closure selects the shared route model end to end', () => {

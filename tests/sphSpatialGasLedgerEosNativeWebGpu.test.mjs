@@ -270,6 +270,7 @@ function retainedProductEventSource(
 function epochIdentity(overrides = {}) {
   return {
     storageGeneration: 11,
+    identityRevision: 'spatial-gas-ledger-fixture-identity',
     physicsTick: 13,
     physicsSubstep: 0,
     positionEpoch: 17,

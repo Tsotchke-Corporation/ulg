@@ -30,7 +30,7 @@ const localHttpsCertPath = fileURLToPath(new URL('./.cache/vite-https/cert.pem',
 // gets a 400, then Vite falls back to `localhost` (the *client* device on a
 // phone), leaving that page unable to receive live fixes.
 const vpnDevHost = String(
-  process.env.ULG_VITE_VPN_HOST || 'shitbox.tail5c077c.ts.net'
+  process.env.ULG_VITE_VPN_HOST || 'fastbox.tail5c077c.ts.net'
 ).trim().toLowerCase();
 // `server.host` controls where Vite listens, but it does not tell a remote
 // browser where its HMR socket lives.  With an HTTPS tailnet server Vite's

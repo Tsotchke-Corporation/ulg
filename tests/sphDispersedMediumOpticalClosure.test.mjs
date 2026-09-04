@@ -60,6 +60,24 @@ function compactEntry(overrides = {}) {
   };
 }
 
+function complexIndexCompactEntry(overrides = {}) {
+  return {
+    dispersedMaterialId: 1251,
+    vaporPhaseId: 3,
+    condensedPhaseId: 2,
+    opticalStateId: 9251,
+    morphologyModel:
+      SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+        .singleCompactSphereComplexIndex,
+    condensedDensityKgPerM3: 1000,
+    relativeRefractiveIndexN: 1.3326,
+    relativeExtinctionCoefficientK: 0,
+    largeSizeRayAsymmetryFactorG: 0.764,
+    referenceWavelengthM: 550e-9,
+    ...overrides
+  };
+}
+
 function approximatelyEqual(actual, expected, relativeTolerance = 2e-6) {
   const scale = Math.max(Math.abs(actual), Math.abs(expected), 1e-30);
   assert.ok(
@@ -77,7 +95,7 @@ test('dispersed-medium optical closure ABI is one exact three-vec4 record', () =
     ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA,
     'peercompute.ulg.sph-dispersed-medium-optical-closure-property.v0'
   );
-  assert.equal(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION, 0);
+  assert.equal(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION, 1);
   assert.equal(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_FLOATS, 12);
   assert.equal(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_BYTES, 48);
   assert.equal(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_FLOATS % 4, 0);
@@ -90,10 +108,14 @@ test('dispersed-medium optical closure ABI is one exact three-vec4 record', () =
     status: 5,
     condensedDensityKgPerM3: 6,
     scatteringEfficiencyQsca: 7,
+    relativeRefractiveIndexN: 7,
     absorptionEfficiencyQabs: 8,
+    relativeExtinctionCoefficientK: 8,
     asymmetryFactorG: 9,
+    largeSizeRayAsymmetryFactorG: 9,
     effectiveRadiusM: 10,
-    reserved0: 11
+    reserved0: 11,
+    referenceWavelengthM: 11
   });
   assert.deepEqual(SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LAYOUT, [
     'dispersedMaterialId:f32',
@@ -116,7 +138,8 @@ test('dispersed-medium optical closure ABI is one exact three-vec4 record', () =
   assert.deepEqual(MODELS, {
     blocked: 0,
     singleCompactCondensateCarrierLowerBound: 1,
-    monodisperseRadius: 2
+    monodisperseRadius: 2,
+    singleCompactSphereComplexIndex: 3
   });
   assert.equal(
     SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ABI.rowLanes,
@@ -125,6 +148,10 @@ test('dispersed-medium optical closure ABI is one exact three-vec4 record', () =
   assert.match(
     SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ABI.massAuthority,
     /already-conserved.*never-saturation-inference/
+  );
+  assert.match(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ABI.taggedLanePolicy,
+    /morphology-3.*relative-complex-index.*reference-wavelength/
   );
 });
 
@@ -463,6 +490,61 @@ test('compact-carrier fallback explicitly exposes carrier-partition resolution d
       / oneCarrier.scatteringCrossSectionM2,
     2
   );
+});
+
+test('compact complex-index sphere derives Rayleigh, exact Mie, and large-size moments from conserved mass', () => {
+  const momentsAtSizeParameter = (sizeParameter, overrides = {}) => {
+    const entry = complexIndexCompactEntry(overrides);
+    const row = findSphDispersedMediumOpticalClosureRow(
+      buildSphDispersedMediumOpticalClosureTable([entry]),
+      entry
+    );
+    const radiusM = (sizeParameter * row.referenceWavelengthM)
+      / (2 * Math.PI);
+    const massKg = (4 * Math.PI / 3)
+      * row.condensedDensityKgPerM3
+      * radiusM ** 3;
+    return deriveSphDispersedMediumOpticalMoments({
+      closureRow: row,
+      dispersedMassKg: massKg
+    });
+  };
+
+  const rayleigh = momentsAtSizeParameter(0.01);
+  assert.equal(rayleigh.status, SPH_DISPERSED_MEDIUM_OPTICS_STATUS.ready);
+  const rayleighArea = Math.PI * rayleigh.effectiveRadiusM ** 2;
+  const relativeN = complexIndexCompactEntry().relativeRefractiveIndexN;
+  const contrast = (relativeN ** 2 - 1) / (relativeN ** 2 + 2);
+  const expectedRayleighQsca = (8 / 3) * 0.01 ** 4 * contrast ** 2;
+  approximatelyEqual(
+    rayleigh.scatteringCrossSectionM2 / rayleighArea,
+    expectedRayleighQsca,
+    5e-4
+  );
+  assert.equal(rayleigh.absorptionCrossSectionM2, 0);
+
+  const absorbing = momentsAtSizeParameter(1, {
+    relativeExtinctionCoefficientK: 0.1
+  });
+  assert.equal(absorbing.status, SPH_DISPERSED_MEDIUM_OPTICS_STATUS.ready);
+  assert.ok(absorbing.scatteringCrossSectionM2 > 0);
+  assert.ok(absorbing.absorptionCrossSectionM2 > 0);
+
+  const large = momentsAtSizeParameter(100);
+  const largeArea = Math.PI * large.effectiveRadiusM ** 2;
+  approximatelyEqual(large.scatteringCrossSectionM2 / largeArea, 2, 2e-5);
+  const largeG = large.scatteringAsymmetryCrossSectionM2
+    / large.scatteringCrossSectionM2;
+  assert.ok(largeG > 0.85 && largeG < 0.91);
+
+  const unsupportedAbsorbingLarge = momentsAtSizeParameter(100, {
+    relativeExtinctionCoefficientK: 0.01
+  });
+  assert.equal(
+    unsupportedAbsorbingLarge.status,
+    SPH_DISPERSED_MEDIUM_OPTICS_STATUS.blocked
+  );
+  assert.equal(unsupportedAbsorbingLarge.scatteringCrossSectionM2, 0);
 });
 
 test('zero conserved dispersed mass stays a ready route with exactly zero moments', () => {

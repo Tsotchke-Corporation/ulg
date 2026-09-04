@@ -29,24 +29,24 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 
 export const ULG_SCHROEDER_TARGET_SCHEDULE_AUTHORITY_SCHEMA =
-  'peercompute.ulg.schroeder-target-schedule-authority.v5';
+  'peercompute.ulg.schroeder-target-schedule-authority.v6';
 export const ULG_SCHROEDER_TARGET_SCHEDULE_WRITER_SET_SCHEMA =
-  'peercompute.ulg.schroeder-target-schedule-writer-set.v0';
+  'peercompute.ulg.schroeder-target-schedule-writer-set.v1';
 export const ULG_SCHROEDER_TARGET_SCHEDULE_PROVIDER_AUTHORITY_SCHEMA =
   'peercompute.ulg.schroeder-target-schedule-provider-authority.v0';
 export const ULG_SCHROEDER_TARGET_SCHEDULE_TABLE_FINGERPRINTS_SCHEMA =
-  'peercompute.ulg.schroeder-target-schedule-table-fingerprints.v3';
+  'peercompute.ulg.schroeder-target-schedule-table-fingerprints.v4';
 export const ULG_SCHROEDER_TARGET_SCHEDULE_CONFIGURATION_SCHEMA =
-  'peercompute.ulg.schroeder-target-schedule-configuration.v0';
+  'peercompute.ulg.schroeder-target-schedule-configuration.v1';
 export const ULG_SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_SCHEMA =
   'peercompute.ulg.schroeder-prospective-dynamic-law-transition.v3';
 
 export const SCHROEDER_TARGET_SCHEDULE_REQUEST_REVISION =
-  'main-thread-next-schedule-request-prospective-writer-transition-sha256-v9';
+  'main-thread-next-schedule-request-prospective-writer-transition-sha256-v10';
 export const SCHROEDER_TARGET_SCHEDULE_PROVIDER_REVISION =
   'worker-lane-assignment-only-classifier-options-sha256-v2';
 export const SCHROEDER_TARGET_SCHEDULE_TABLE_FINGERPRINT_REVISION =
-  'shader-bound-typed-array-content-layout-count-and-domain-sha256-v5';
+  'shader-bound-typed-array-content-layout-count-and-domain-sha256-v6';
 export const SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_REVISION =
   'reaction-or-retained-product-gas-boundary-sha256-v3';
 export const SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND =
@@ -88,6 +88,7 @@ export const SCHROEDER_TARGET_SCHEDULE_CLASSIFIER_OPTION_FIELDS =
 export const SCHROEDER_TARGET_SCHEDULE_ACTIVATION_FIELDS = Object.freeze([
   'thermal',
   'reaction',
+  'dispersedMediumOptics',
   'contactSolver',
   'contactSolverRequested',
   'contactSolverEscalatedForDynamicLaws',
@@ -132,6 +133,8 @@ const TABLE_FINGERPRINT_KEYS = Object.freeze([
   'thermalClosureGraphBank',
   'thermalPhaseResponseTable',
   'mechanicsMaterialTable',
+  'dispersedMediumOpticalClosureTable',
+  'dispersedMediumOpticsSeedRows',
   'reactionTable',
   'reactionActivationWatchTable',
   'thermalStepOptions',
@@ -473,6 +476,7 @@ function providerWriterIds(writerSet) {
   return [
     writerSet.thermal ? 'thermal-material-table' : null,
     writerSet.reaction ? 'reaction-table' : null,
+    writerSet.dispersedMediumOptics ? 'dispersed-medium-optics' : null,
     writerSet.contactSolver ? 'canonical-contact-solver' : null,
     writerSet.lawQueue ? 'law-queue' : null,
     writerSet.lawNeighborCandidates ? 'law-neighbor-candidates' : null,
@@ -638,6 +642,10 @@ export function createSchroederTargetScheduleWriterSet({
   const thermal = Boolean(resident.thermalMaterialTable);
   const reaction = resident.reactionTable != null
     && !exactQuiescentReactionTable(resident.reactionTable);
+  const dispersedMediumOptics = Boolean(
+    resident.dispersedMediumOpticalClosureTable
+    || resident.dispersedMediumOpticsSeedRows
+  );
   const activeReactionGasProductCount = Number(
     resident.reactionTable?.gasProductCount
   );
@@ -732,6 +740,7 @@ export function createSchroederTargetScheduleWriterSet({
       : 'target-schedule-writer-set-incomplete',
     thermal,
     reaction,
+    dispersedMediumOptics,
     contactSolver: Boolean(
       contactSolverRequested || contactSolverEscalatedForDynamicLaws
     ),
@@ -843,6 +852,14 @@ function tableFingerprint(table, family) {
   return textFingerprint(
     stableToken(table),
     `schroeder-${family}-v2`
+  );
+}
+
+function cloneSafeInputFingerprint(value, family) {
+  if (value == null) return null;
+  return textFingerprint(
+    stableToken(value),
+    `schroeder-${family}-v1`
   );
 }
 
@@ -1058,6 +1075,14 @@ export function createSchroederTargetScheduleTableFingerprints({
       resident.mechanicsMaterialTable ?? null,
       'mechanics-material-table'
     ),
+    dispersedMediumOpticalClosureTable: tableFingerprint(
+      resident.dispersedMediumOpticalClosureTable ?? null,
+      'dispersed-medium-optical-closure-table'
+    ),
+    dispersedMediumOpticsSeedRows: cloneSafeInputFingerprint(
+      resident.dispersedMediumOpticsSeedRows ?? null,
+      'dispersed-medium-optics-seed-rows'
+    ),
     reactionTable: tableFingerprint(reactionTable, 'reaction-table'),
     reactionActivationWatchTable: tableFingerprint(
       reactionActivationWatchTable,
@@ -1108,6 +1133,8 @@ export function exactSchroederTargetScheduleTableFingerprints(value) {
     'thermalClosureGraphBank',
     'thermalPhaseResponseTable',
     'mechanicsMaterialTable',
+    'dispersedMediumOpticalClosureTable',
+    'dispersedMediumOpticsSeedRows',
     'reactionTable',
     'reactionActivationWatchTable',
     'thermalStepOptions',
@@ -1170,7 +1197,7 @@ function targetScheduleConfigurationFingerprint(value) {
   } = value;
   return textFingerprint(
     stableToken(content),
-    'schroeder-target-schedule-configuration-v0'
+    'schroeder-target-schedule-configuration-v1'
   );
 }
 
@@ -1277,6 +1304,10 @@ export function exactSchroederTargetScheduleConfiguration(value) {
       === value.writerSet.contactSolver
     || value.motionEnvelope.thermalPhaseEvolutionEnabled
       !== value.writerSet.thermalPhaseEvolutionEnabled
+    || value.writerSet.dispersedMediumOptics !== Boolean(
+      value.tableFingerprints.dispersedMediumOpticalClosureTable
+      || value.tableFingerprints.dispersedMediumOpticsSeedRows
+    )
   ) return null;
   try {
     return targetScheduleConfigurationFingerprint(value)
@@ -1888,7 +1919,7 @@ function targetAuthorityFingerprint(value) {
   } = value;
   return textFingerprint(
     stableToken(content),
-    'schroeder-target-schedule-authority-v7'
+    'schroeder-target-schedule-authority-v8'
   );
 }
 
@@ -2211,6 +2242,10 @@ export function exactSchroederTargetScheduleAuthority(value) {
       === value.writerSet.contactSolver
     || value.motionEnvelope.thermalPhaseEvolutionEnabled
       !== value.writerSet.thermalPhaseEvolutionEnabled
+    || value.writerSet.dispersedMediumOptics !== Boolean(
+      value.tableFingerprints.dispersedMediumOpticalClosureTable
+      || value.tableFingerprints.dispersedMediumOpticsSeedRows
+    )
     || !prospectiveTransitionMatchesAuthoritySource(
       value.prospectiveDynamicLawTransition,
       value

@@ -173,6 +173,14 @@ import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
+  adoptSphGpuParticleDispersedMediumOpticsSidecar,
+  advanceExactParentSphDispersedMediumOpticsTopologyEpoch,
+  cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
+  ensureSphGpuParticleBufferSetBorrowLifecycle,
+  exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches,
+  registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation,
+  retireSphGpuParticleBufferSetDispersedMediumOptics,
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics,
   sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
 import {
@@ -183,16 +191,29 @@ import {
 import {
   cloneMlsMpmParticleStateForNext,
   cloneSphParticleStateForNext,
+  commitFreshSphDispersedMediumOpticsReplacement,
   createSchroederParticleStorageAdoption,
+  isFreshSphDispersedMediumOpticsReplacementPending,
   isSameResidentProductMass,
   mergeResidentProductMassBuffersWebGpu,
+  preflightFreshSphDispersedMediumOpticsReplacementCommit,
+  registerFreshSphDispersedMediumOpticsReplacement,
+  rejectFreshSphDispersedMediumOpticsReplacement,
   runSchroederFarForceDeltaFusionWebGpu,
   runMlsMpmResidentStepWithOptionalWebGpu,
   runSphPressureInterfaceStageComputeTask,
   selectSphReactionActivationWatchTable,
+  sphDispersedMediumOpticsMatchesParticleUpload,
+  sphDispersedMediumOpticsRemapRequiredError,
   summarizeGpuTimestampRecorderQueueStages,
   ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA
 } from './sphMlsMpmGpuStep.js';
+import {
+  issueSphDispersedMediumOpticsProducerAdoptionClaim,
+  rebaseSphDispersedMediumOpticsProducerAdoptionTopologyEpoch,
+  runSphDispersedMediumOpticsProducerWebGpu,
+  sphDispersedMediumOpticsProducerAdoptionMatches
+} from './sphDispersedMediumOpticsProducerGpu.js';
 import {
   claimMlsMpmPostMechanicsContinuation,
   retireMlsMpmPostMechanicsClosureOutputsAfter,
@@ -18637,6 +18658,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let twoLevelPostMechanicsClosure = null;
   let twoLevelPostMechanicsContinuationClaim = null;
   let twoLevelPostMechanicsClosureRetirementPromise = null;
+  let twoLevelDispersedMediumOpticsProducerStep = null;
+  let twoLevelDispersedMediumOpticsSourceFamilyTransition = null;
+  let twoLevelDispersedMediumOpticsAdoptedTarget = null;
+  let twoLevelDispersedMediumOpticsFinalStep = null;
+  let twoLevelDispersedMediumOpticsReplacementRegistered = false;
+  let twoLevelDispersedMediumOpticsReplacementCommitted = false;
+  let singleLevelPendingDispersedMediumOpticsReplacement = null;
+  const dispersedMediumOpticsTopologyRebases = [];
+  let dispersedMediumOpticsTopologyRebasesFinalized = false;
   let finalTwoLevelContinuationUploads = null;
   let finalTwoLevelContinuationLedgerOwned = false;
   let pendingTwoLevelPostMechanicsClosure = null;
@@ -18648,6 +18678,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let spatialSuccessorSourceFamily = null;
   let spatialSuccessorPublicationPlan = null;
   let spatialSuccessorPublicationReceipt = null;
+  let spatialSuccessorPublicationStampTransaction = null;
+  let spatialSuccessorPublicationWitness = null;
   let resolvedFinalRenderLevelAssignment = null;
   let resolvedFinalRenderActiveNodeList = null;
   let ownsResolvedFinalRenderLevelAssignment = false;
@@ -18656,10 +18688,393 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let finalRenderProxySubmitFusionStatus =
     'final-render-proxy-submit-fusion-not-requested';
   let finalRenderProxySubmitFusion = null;
+  const sourceDispersedMediumOpticsAdvertised =
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      sphParticleUpload
+    );
+  const requestedDispersedMediumOpticsSeedRows =
+    residentStepOptions?.dispersedMediumOpticsSeedRows ?? null;
+  const resolvedDispersedMediumOpticsSeedRows =
+    requestedDispersedMediumOpticsSeedRows?.rows
+      ?? requestedDispersedMediumOpticsSeedRows;
+  const twoLevelDispersedMediumOpticsInputsAdvertised = Boolean(
+    sourceDispersedMediumOpticsAdvertised
+    || resolvedDispersedMediumOpticsSeedRows
+    || residentStepOptions?.dispersedMediumOpticalClosureTable
+  );
   const twoLevelSidecarClaimFinalConsumerExpected = Boolean(
     pairedCanonicalQueueOrderedCleanup === true
     && residentStepOptions?.mechanicsMaterialTable
   );
+  const createSpatialSuccessorPublicationStampTransaction = (
+    nextParticleUploads
+  ) => {
+    const fields = [
+      'storageGeneration',
+      'physicsTick',
+      'physicsSubstep',
+      'positionEpoch',
+      'topologyEpoch',
+      'chartEpoch',
+      'levelEpoch',
+      'supportEpoch',
+      'bufferFamilyGeneration',
+      'bufferFamilyGenerationStatus'
+    ];
+    const snapshots = [];
+    for (const target of [
+      nextParticleUploads?.sphParticleUpload,
+      nextParticleUploads?.mlsMpmParticleUpload
+    ]) {
+      if (!target) continue;
+      for (const key of fields) {
+        snapshots.push(Object.freeze({
+          target,
+          key,
+          descriptor: Object.getOwnPropertyDescriptor(target, key) ?? null
+        }));
+      }
+    }
+    let active = true;
+    return Object.freeze({
+      commit() {
+        active = false;
+        return true;
+      },
+      rollback({ restoreTopology = true } = {}) {
+        if (!active) return true;
+        try {
+          for (const snapshot of snapshots) {
+            if (!restoreTopology && snapshot.key === 'topologyEpoch') {
+              continue;
+            }
+            if (snapshot.descriptor) {
+              Object.defineProperty(
+                snapshot.target,
+                snapshot.key,
+                snapshot.descriptor
+              );
+            } else {
+              delete snapshot.target[snapshot.key];
+            }
+          }
+          active = false;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    });
+  };
+  const rollbackDispersedMediumOpticsTopologyRebases = () => {
+    let attempted = false;
+    let complete = true;
+    for (
+      let index = dispersedMediumOpticsTopologyRebases.length - 1;
+      index >= 0;
+      index -= 1
+    ) {
+      attempted = true;
+      try {
+        complete = dispersedMediumOpticsTopologyRebases[index].rollback()
+          && complete;
+      } catch {
+        complete = false;
+      }
+    }
+    return attempted && complete;
+  };
+  const validateDispersedMediumOpticsTopologyRebases = () => {
+    if (dispersedMediumOpticsTopologyRebasesFinalized) return true;
+    for (const transaction of dispersedMediumOpticsTopologyRebases) {
+      if (transaction.validate() !== true) {
+        throw sphDispersedMediumOpticsRemapRequiredError(
+          'hierarchy-topology-rebase-invalidated-before-commit'
+        );
+      }
+    }
+    return true;
+  };
+  const finalizeDispersedMediumOpticsTopologyRebases = () => {
+    if (dispersedMediumOpticsTopologyRebasesFinalized) return true;
+    for (const transaction of dispersedMediumOpticsTopologyRebases) {
+      transaction.commit();
+    }
+    dispersedMediumOpticsTopologyRebasesFinalized = true;
+    return true;
+  };
+  const captureSpatialSuccessorPublicationWitness = (
+    nextParticleUploads
+  ) => {
+    if (spatialSuccessorPublicationWitness) {
+      return spatialSuccessorPublicationWitness;
+    }
+    const sphUpload = nextParticleUploads?.sphParticleUpload ?? null;
+    const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+    const sourceFamily =
+      nextParticleUploads?.schroederSpatialSuccessorSourceFamily ?? null;
+    if (!sourceFamily || !sphUpload || !mlsUpload) return null;
+    try {
+      const resolution = resolveSchroederSpatialSuccessorSourceFamily(
+        sourceFamily,
+        {
+          device,
+          particleCount: sphUpload.particleCount,
+          stateBuffer: sphUpload.stateBuffer,
+          thermoBuffer: sphUpload.thermoBuffer,
+          identityBuffer: sphUpload.identityBuffer,
+          mechanicsBuffer: mlsUpload.mechanicsBuffer,
+          sphParticleUpload: sphUpload,
+          mlsMpmParticleUpload: mlsUpload
+        }
+      );
+      if (
+        resolution?.admitted !== true
+        || resolution.sourceFamily !== sourceFamily
+      ) return null;
+      spatialSuccessorPublicationWitness = Object.freeze({
+        sourceFamily,
+        nextParticleUploads
+      });
+      // The module-authenticated family, rather than the caller-controlled
+      // returned receipt, is the irreversible outward-publication witness.
+      // Drop rollback authority immediately; all following finalization is
+      // total and may safely repeat after receipt validation succeeds.
+      finalizeDispersedMediumOpticsTopologyRebases();
+      spatialSuccessorPublicationStampTransaction?.commit();
+      return spatialSuccessorPublicationWitness;
+    } catch {
+      return null;
+    }
+  };
+  const retainPublishedSpatialSuccessorOnFailure = (reason = null) => {
+    if (!spatialSuccessorPublicationWitness) return false;
+    if (reason && typeof reason === 'object') {
+      try {
+        Object.defineProperty(
+          reason,
+          'schroederSpatialSuccessorPublicationWitness',
+          {
+            value: spatialSuccessorPublicationWitness,
+            enumerable: false,
+            configurable: false,
+            writable: false
+          }
+        );
+      } catch {}
+    }
+    return true;
+  };
+  const rebaseDispersedMediumOpticsTopologyEpoch = ({
+    targetSphUpload,
+    targetMlsUpload = null,
+    nextParticleUploads = null,
+    targetTopologyEpoch,
+    producerStep = null
+  }) => {
+    if (!sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      targetSphUpload
+    )) return null;
+    const producerResult = producerStep?.result ?? producerStep;
+    if (
+      targetTopologyEpoch === targetSphUpload?.topologyEpoch
+      && sphDispersedMediumOpticsMatchesParticleUpload(targetSphUpload)
+    ) {
+      if (
+        producerResult
+        && !sphDispersedMediumOpticsProducerAdoptionMatches(
+          producerResult,
+          targetSphUpload.dispersedMediumOptics,
+          { device, particleSourceFamily: targetSphUpload }
+        )
+      ) {
+        throw sphDispersedMediumOpticsRemapRequiredError(
+          'hierarchy-topology-stable-producer-authority-mismatch'
+        );
+      }
+      return null;
+    }
+
+    let parentTransition = null;
+    let producerRebase = null;
+    const captureDescriptor = (target, key) => ({
+      target,
+      key,
+      descriptor: target
+        ? Object.getOwnPropertyDescriptor(target, key) ?? null
+        : null
+    });
+    const restoreDescriptor = ({ target, key, descriptor }, valueOverride) => {
+      if (!target) return true;
+      if (descriptor) {
+        Object.defineProperty(target, key, {
+          ...descriptor,
+          ...(
+            Object.prototype.hasOwnProperty.call(descriptor, 'value')
+              ? { value: valueOverride }
+              : {}
+          )
+        });
+      } else if (valueOverride === undefined) {
+        delete target[key];
+      } else {
+        Object.defineProperty(target, key, {
+          value: valueOverride,
+          writable: true,
+          configurable: true,
+          enumerable: true
+        });
+      }
+      return true;
+    };
+    const pairedPublicDescriptors = {
+      mlsTopologyEpoch: captureDescriptor(targetMlsUpload, 'topologyEpoch'),
+      sphTopologyStatus: captureDescriptor(
+        targetSphUpload,
+        'topologyTransitionStatus'
+      ),
+      mlsTopologyStatus: captureDescriptor(
+        targetMlsUpload,
+        'topologyTransitionStatus'
+      ),
+      envelopeReceipt: captureDescriptor(
+        nextParticleUploads,
+        'schroederSpatialTopologyTransitionReceipt'
+      )
+    };
+    const restorePairedPublicTopology = (sourceTopologyEpoch) => {
+      restoreDescriptor(
+        pairedPublicDescriptors.mlsTopologyEpoch,
+        sourceTopologyEpoch
+      );
+      restoreDescriptor(
+        pairedPublicDescriptors.sphTopologyStatus,
+        pairedPublicDescriptors.sphTopologyStatus.descriptor?.value
+      );
+      restoreDescriptor(
+        pairedPublicDescriptors.mlsTopologyStatus,
+        pairedPublicDescriptors.mlsTopologyStatus.descriptor?.value
+      );
+      restoreDescriptor(
+        pairedPublicDescriptors.envelopeReceipt,
+        pairedPublicDescriptors.envelopeReceipt.descriptor?.value
+      );
+      return targetSphUpload.topologyEpoch === sourceTopologyEpoch
+        && (
+          targetMlsUpload == null
+          || targetMlsUpload.topologyEpoch === sourceTopologyEpoch
+        );
+    };
+    try {
+      parentTransition =
+        advanceExactParentSphDispersedMediumOpticsTopologyEpoch({
+          sourceSphUpload: targetSphUpload,
+          device,
+          targetTopologyEpoch
+        });
+      if (producerResult) {
+        producerRebase =
+          rebaseSphDispersedMediumOpticsProducerAdoptionTopologyEpoch(
+            producerResult,
+            targetSphUpload.dispersedMediumOptics,
+            {
+              topologyEpochTransitionReceipt: parentTransition,
+              targetParticleSourceFamily: targetSphUpload
+            }
+          );
+      }
+      if (
+        targetMlsUpload
+        && targetMlsUpload.topologyEpoch !== parentTransition.sourceTopologyEpoch
+        && targetMlsUpload.topologyEpoch !== targetTopologyEpoch
+      ) {
+        throw sphDispersedMediumOpticsRemapRequiredError(
+          'hierarchy-topology-rebase-mls-epoch-mismatch'
+        );
+      }
+      if (
+        !sphDispersedMediumOpticsMatchesParticleUpload(targetSphUpload)
+        || (
+          producerResult
+          && !sphDispersedMediumOpticsProducerAdoptionMatches(
+            producerResult,
+            targetSphUpload.dispersedMediumOptics,
+            { device, particleSourceFamily: targetSphUpload }
+          )
+        )
+      ) {
+        throw sphDispersedMediumOpticsRemapRequiredError(
+          'hierarchy-topology-rebase-authentication-failed'
+        );
+      }
+      let active = true;
+      const transaction = Object.freeze({
+        parentTransition,
+        producerRebase,
+        validate() {
+          if (!active) return true;
+          return Boolean(
+            exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches(
+              parentTransition,
+              {
+                sourceSphUpload: targetSphUpload,
+                device,
+                targetTopologyEpoch
+              }
+            )
+            && (
+              targetMlsUpload == null
+              || targetMlsUpload.topologyEpoch === targetTopologyEpoch
+            )
+            && sphDispersedMediumOpticsMatchesParticleUpload(targetSphUpload)
+            && (
+              !producerResult
+              || sphDispersedMediumOpticsProducerAdoptionMatches(
+                producerResult,
+                targetSphUpload.dispersedMediumOptics,
+                { device, particleSourceFamily: targetSphUpload }
+              )
+            )
+          );
+        },
+        commit() {
+          active = false;
+          return true;
+        },
+        rollback() {
+          if (!active) return true;
+          if (producerRebase && producerRebase.rollback() !== true) {
+            return false;
+          }
+          if (parentTransition.rollback() !== true) return false;
+          if (!restorePairedPublicTopology(
+            parentTransition.sourceTopologyEpoch
+          )) return false;
+          active = false;
+          return true;
+        }
+      });
+      dispersedMediumOpticsTopologyRebases.push(transaction);
+      dispersedMediumOpticsTopologyRebasesFinalized = false;
+      return transaction;
+    } catch (error) {
+      let producerRolledBack = producerRebase == null;
+      try {
+        producerRolledBack = producerRebase?.rollback?.() === true
+          || producerRolledBack;
+      } catch {}
+      if (producerRolledBack) {
+        try {
+          if (parentTransition?.rollback?.() === true) {
+            restorePairedPublicTopology(
+              parentTransition.sourceTopologyEpoch
+            );
+          }
+        } catch {}
+      }
+      throw error;
+    }
+  };
   const cleanupTwoLevelReactionProposal = () => {
     if (
       !twoLevelSpatialReactionDiscoveryProposal
@@ -18680,6 +19095,253 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     );
     twoLevelThermalGraphReleaseScheduled = true;
     return cleaned;
+  };
+  const cleanupTwoLevelDispersedMediumOptics = (reason = null) => {
+    if (twoLevelDispersedMediumOpticsReplacementCommitted) return false;
+    if (
+      twoLevelDispersedMediumOpticsReplacementRegistered
+      && reason?.code
+        === 'ERR_SPH_FRESH_DISPERSED_MEDIUM_OPTICS_COMMIT_INCOMPLETE'
+      && reason.commitReceipt?.retryAuthorityRetained === true
+    ) {
+      // The lifecycle registry quarantines an incompletely retired commit and
+      // retains its exact-tuple retry authority. Rolling back the topology or
+      // rejecting/retiring the target here would destroy that recovery path.
+      return false;
+    }
+    if (retainPublishedSpatialSuccessorOnFailure(reason)) {
+      // The exact target is already reachable through a module-authenticated
+      // public family. It may be quarantined, but never rejected, restamped,
+      // or retired by an exception path after that outward commit.
+      return false;
+    }
+    const topologyRebasesRolledBack =
+      rollbackDispersedMediumOpticsTopologyRebases();
+    const publicationStampRolledBack =
+      spatialSuccessorPublicationStampTransaction?.rollback({
+        restoreTopology: dispersedMediumOpticsTopologyRebases.length === 0
+      }) ?? false;
+    if (
+      twoLevelDispersedMediumOpticsReplacementRegistered
+      && twoLevelDispersedMediumOpticsFinalStep
+      && twoLevelDispersedMediumOpticsAdoptedTarget
+    ) {
+      try {
+        const rejected = rejectFreshSphDispersedMediumOpticsReplacement({
+          finalStep: twoLevelDispersedMediumOpticsFinalStep,
+          sourceSphUpload: sphParticleUpload,
+          targetSphUpload: twoLevelDispersedMediumOpticsAdoptedTarget
+        });
+        if (
+          rejected?.status === 'fresh-dispersed-medium-optics-rejected'
+        ) {
+          twoLevelDispersedMediumOpticsReplacementRegistered = false;
+          twoLevelDispersedMediumOpticsAdoptedTarget = null;
+          twoLevelDispersedMediumOpticsSourceFamilyTransition = null;
+          return true;
+        }
+        if (reason && typeof reason === 'object') {
+          try {
+            Object.defineProperty(
+              reason,
+              'twoLevelDispersedMediumOpticsCleanupFailure',
+              {
+                value: Object.freeze({
+                  scope: 'two-level-pending-replacement',
+                  rejectionReceipt: rejected,
+                  retryAuthorityRetained: true,
+                  pendingReplacement: Object.freeze({
+                    finalStep: twoLevelDispersedMediumOpticsFinalStep,
+                    sourceSphUpload: sphParticleUpload,
+                    targetSphUpload:
+                      twoLevelDispersedMediumOpticsAdoptedTarget
+                  })
+                }),
+                enumerable: false,
+                configurable: false,
+                writable: false
+              }
+            );
+          } catch {}
+        }
+        return false;
+      } catch (rejectionError) {
+        let sourceTransitionRolledBack =
+          twoLevelDispersedMediumOpticsSourceFamilyTransition == null;
+        try {
+          sourceTransitionRolledBack =
+            twoLevelDispersedMediumOpticsSourceFamilyTransition
+              ?.rollback?.() === true
+            || sourceTransitionRolledBack;
+        } catch {}
+        let fallbackRetirement = null;
+        if (sourceTransitionRolledBack) {
+          try {
+            fallbackRetirement =
+              retireSphGpuParticleBufferSetDispersedMediumOptics(
+                twoLevelDispersedMediumOpticsAdoptedTarget
+              );
+          } catch {}
+        }
+        const fallbackTargetRetired = Boolean(
+          fallbackRetirement?.handled === true
+          && fallbackRetirement?.retirementRequested === true
+          && fallbackRetirement?.status
+            === 'private-sidecar-retirement-requested'
+        );
+        if (sourceTransitionRolledBack && fallbackTargetRetired) {
+          twoLevelDispersedMediumOpticsReplacementRegistered = false;
+          twoLevelDispersedMediumOpticsAdoptedTarget = null;
+          twoLevelDispersedMediumOpticsSourceFamilyTransition = null;
+          return true;
+        }
+        if (reason && typeof reason === 'object') {
+          try {
+            Object.defineProperty(
+              reason,
+              'twoLevelDispersedMediumOpticsCleanupFailure',
+              {
+                value: Object.freeze({
+                  scope: 'two-level-pending-replacement',
+                  rejectionError,
+                  topologyRebasesRolledBack,
+                  publicationStampRolledBack,
+                  sourceTransitionRolledBack,
+                  fallbackTargetRetired
+                }),
+                enumerable: false,
+                configurable: false,
+                writable: false
+              }
+            );
+          } catch {}
+        }
+        return false;
+      }
+    }
+    let cleaned = topologyRebasesRolledBack || publicationStampRolledBack;
+    const hadSourceFamilyTransition =
+      twoLevelDispersedMediumOpticsSourceFamilyTransition != null;
+    let sourceTransitionRolledBack = !hadSourceFamilyTransition;
+    if (!sourceTransitionRolledBack) {
+      try {
+        sourceTransitionRolledBack =
+          twoLevelDispersedMediumOpticsSourceFamilyTransition.rollback?.()
+            === true;
+      } catch {}
+    }
+    if (twoLevelDispersedMediumOpticsAdoptedTarget) {
+      let retirement = null;
+      if (sourceTransitionRolledBack) {
+        try {
+          retirement = retireSphGpuParticleBufferSetDispersedMediumOptics(
+            twoLevelDispersedMediumOpticsAdoptedTarget
+          );
+        } catch {}
+      }
+      const targetRetired = Boolean(
+        retirement?.handled === true
+        && retirement?.retirementRequested === true
+        && retirement?.status === 'private-sidecar-retirement-requested'
+      );
+      if (sourceTransitionRolledBack && targetRetired) {
+        cleaned = true;
+        twoLevelDispersedMediumOpticsAdoptedTarget = null;
+        twoLevelDispersedMediumOpticsSourceFamilyTransition = null;
+      } else if (reason && typeof reason === 'object') {
+        try {
+          Object.defineProperty(
+            reason,
+            'twoLevelDispersedMediumOpticsCleanupFailure',
+            {
+              value: Object.freeze({
+                scope: 'two-level-unregistered-adopted-target',
+                topologyRebasesRolledBack,
+                publicationStampRolledBack,
+                sourceTransitionRolledBack,
+                fallbackTargetRetired: targetRetired
+              }),
+              enumerable: false,
+              configurable: false,
+              writable: false
+            }
+          );
+        } catch {}
+      }
+    } else if (twoLevelDispersedMediumOpticsProducerStep) {
+      try {
+        cleaned = Boolean(
+          twoLevelDispersedMediumOpticsProducerStep.destroyOutputBuffer?.()
+        );
+      } catch {}
+    }
+    if (sourceTransitionRolledBack && hadSourceFamilyTransition) {
+      cleaned = true;
+      twoLevelDispersedMediumOpticsSourceFamilyTransition = null;
+    }
+    return cleaned;
+  };
+  const cleanupSingleLevelPendingDispersedMediumOptics = (reason = null) => {
+    const pending = singleLevelPendingDispersedMediumOpticsReplacement;
+    if (!pending) return null;
+    if (retainPublishedSpatialSuccessorOnFailure(reason)) {
+      return null;
+    }
+    try {
+      const receipt = rejectFreshSphDispersedMediumOpticsReplacement(pending);
+      if (
+        receipt?.status === 'fresh-dispersed-medium-optics-rejected'
+      ) {
+        singleLevelPendingDispersedMediumOpticsReplacement = null;
+      } else if (reason && typeof reason === 'object') {
+        try {
+          Object.defineProperty(
+            reason,
+            'singleLevelDispersedMediumOpticsCleanupFailure',
+            {
+              value: Object.freeze({
+                scope: 'single-level-pending-replacement',
+                rejectionReceipt: receipt,
+                retryAuthorityRetained: true,
+                pendingReplacement: pending
+              }),
+              enumerable: false,
+              configurable: false,
+              writable: false
+            }
+          );
+        } catch {}
+      }
+      return receipt;
+    } catch (cleanupError) {
+      let fallbackRetirement = null;
+      try {
+        fallbackRetirement =
+          retireSphGpuParticleBufferSetDispersedMediumOptics(
+            pending.targetSphUpload
+          );
+      } catch {}
+      if (reason && typeof reason === 'object') {
+        try {
+          Object.defineProperty(
+            reason,
+            'singleLevelDispersedMediumOpticsCleanupFailure',
+            {
+              value: Object.freeze({
+                scope: 'single-level-pending-replacement',
+                rejectionError: cleanupError,
+                fallbackTargetRetirementRequested:
+                  fallbackRetirement?.retirementRequested === true
+              }),
+              enumerable: false,
+              configurable: false,
+              writable: false
+            }
+          );
+        } catch {}
+      }
+      return null;
+    }
   };
   const registerTwoLevelSidecarCleanupClaim = ({
     producerOutput,
@@ -18733,6 +19395,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     generation,
     nextParticleUploads,
     forceTopologyAdvance = false,
+    dispersedMediumOpticsProducerStep = null,
     stage
   }) => {
     if (typeof spatialTopologyTransitionRunner !== 'function') {
@@ -18768,16 +19431,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         forceTopologyAdvance
       })
     ));
-    if (!topologyTransitionRunnerExplicitlyInjected) {
-      applySchroederSpatialTopologyTransitionReceipt(
-        nextParticleUploads,
-        receipt,
-        { generation }
-      );
-    } else {
+    const nextTopologyEpoch = receipt?.nextTopologyEpoch;
+    if (topologyTransitionRunnerExplicitlyInjected) {
       // Dependency-injected runners are an explicit test/embedding boundary.
       // They must still return one exact coherent epoch for both descriptors.
-      const nextTopologyEpoch = receipt?.nextTopologyEpoch;
       if (
         receipt?.ready !== true
         || receipt?.gpuAuthenticated !== true
@@ -18792,9 +19449,33 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         error.code = 'ERR_SCHROEDER_SPATIAL_TOPOLOGY_TRANSITION_RECEIPT';
         throw error;
       }
-      sphUpload.topologyEpoch = nextTopologyEpoch;
-      mlsUpload.topologyEpoch = nextTopologyEpoch;
-      nextParticleUploads.schroederSpatialTopologyTransitionReceipt = receipt;
+    }
+    let topologyRebase = null;
+    try {
+      // Advance the private parent/child and producer registries before the
+      // public pair is stamped. A rejected rebase therefore cannot leave the
+      // MLS descriptor or public receipt one epoch ahead of the SPH owner.
+      topologyRebase = rebaseDispersedMediumOpticsTopologyEpoch({
+        targetSphUpload: sphUpload,
+        targetMlsUpload: mlsUpload,
+        nextParticleUploads,
+        targetTopologyEpoch: nextTopologyEpoch,
+        producerStep: dispersedMediumOpticsProducerStep
+      });
+      if (!topologyTransitionRunnerExplicitlyInjected) {
+        applySchroederSpatialTopologyTransitionReceipt(
+          nextParticleUploads,
+          receipt,
+          { generation }
+        );
+      } else {
+        sphUpload.topologyEpoch = nextTopologyEpoch;
+        mlsUpload.topologyEpoch = nextTopologyEpoch;
+        nextParticleUploads.schroederSpatialTopologyTransitionReceipt = receipt;
+      }
+    } catch (error) {
+      try { topologyRebase?.rollback?.(); } catch {}
+      throw error;
     }
     return receipt;
   };
@@ -20778,7 +21459,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     ? {
       ...rawTwoLevelCoupledUploads,
       sphParticleUpload: {
-        ...rawTwoLevelCoupledUploads.sphParticleUpload,
+        ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+          rawTwoLevelCoupledUploads.sphParticleUpload
+        ),
         identitySchema: rawTwoLevelCoupledUploads.sphParticleUpload.identitySchema
           || sphParticleUpload?.identitySchema
           || ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
@@ -21236,6 +21919,126 @@ export async function runSchroederSameLevelMechanicsWebGpu({
               'Canonical two-level reaction proposal was not applied'
             );
           }
+        },
+        afterPhaseCarrierTransfer: async ({
+          phaseCarrierTransferFamilyReceipt
+        }) => {
+          if (!twoLevelDispersedMediumOpticsInputsAdvertised) return;
+          const opticalClosureTable =
+            residentStepOptions?.dispersedMediumOpticalClosureTable
+            ?? null;
+          const producerRunner =
+            residentStepOptions?.dispersedMediumOpticsProducerRunner
+            ?? runSphDispersedMediumOpticsProducerWebGpu;
+          if (!opticalClosureTable) {
+            throw new TypeError(
+              'Canonical two-level phase-carrier optics production requires an authenticated optical closure table'
+            );
+          }
+          if (typeof producerRunner !== 'function') {
+            throw new TypeError(
+              'Canonical two-level phase-carrier optics production requires a producer runner'
+            );
+          }
+          if (
+            !sourceDispersedMediumOpticsAdvertised
+            && !resolvedDispersedMediumOpticsSeedRows
+          ) {
+            throw new TypeError(
+              'Canonical two-level phase-carrier optics production requires prior optics or preregistered seed rows'
+            );
+          }
+          if (
+            sourceDispersedMediumOpticsAdvertised
+            && (
+              ensureSphGpuParticleBufferSetBorrowLifecycle(
+                sphParticleUpload
+              ) !== true
+              || !sphDispersedMediumOpticsMatchesParticleUpload(
+                sphParticleUpload
+              )
+            )
+          ) {
+            throw sphDispersedMediumOpticsRemapRequiredError(
+              'two-level-source-sidecar-authority-mismatch'
+            );
+          }
+          const particleLineage =
+            phaseCarrierTransferFamilyReceipt?.particleLineage;
+          const closureSourceSphUpload =
+            twoLevelClosureSourceUploads.sphParticleUpload;
+          if (
+            phaseCarrierTransferFamilyReceipt?.device !== device
+            || particleLineage?.particleCount
+              !== closureSourceSphUpload?.particleCount
+            || particleLineage?.topologyEpoch
+              !== closureSourceSphUpload?.topologyEpoch
+            || particleLineage?.identityRevision
+              !== closureSourceSphUpload?.identityRevision
+            || particleLineage?.identityBuffer
+              !== closureSourceSphUpload?.identityBuffer
+          ) {
+            throw new TypeError(
+              'Canonical two-level phase-carrier optics production rejected a torn particle lineage receipt'
+            );
+          }
+          if (sourceDispersedMediumOpticsAdvertised) {
+            twoLevelDispersedMediumOpticsSourceFamilyTransition =
+              registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation({
+                sourceSphUpload: sphParticleUpload,
+                device,
+                sourceStateBuffer: sphParticleUpload.stateBuffer,
+                sourceThermoBuffer: sphParticleUpload.thermoBuffer,
+                targetStateBuffer:
+                  phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
+                targetThermoBuffer:
+                  phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer
+              });
+          }
+          twoLevelDispersedMediumOpticsProducerStep =
+            await runHierarchyStage(
+              'two-level-post-mechanics-dispersed-medium-optics',
+              () => producerRunner({
+                device,
+                phaseCarrierPlan:
+                  phaseCarrierTransferFamilyReceipt.phaseCarrierPlan,
+                particleCount: particleLineage.particleCount,
+                particleLineage,
+                preReactionStateBuffer:
+                  phaseCarrierTransferFamilyReceipt
+                    .reactionParticleMutationApplied === true
+                    ? phaseCarrierTransferFamilyReceipt
+                      .preReactionStateBuffer
+                    : null,
+                preReactionThermoBuffer:
+                  phaseCarrierTransferFamilyReceipt
+                    .reactionParticleMutationApplied === true
+                    ? phaseCarrierTransferFamilyReceipt
+                      .preReactionThermoBuffer
+                    : null,
+                preTransferStateBuffer:
+                  phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
+                preTransferThermoBuffer:
+                  phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer,
+                postTransferStateBuffer:
+                  phaseCarrierTransferFamilyReceipt.postTransferStateBuffer,
+                postTransferThermoBuffer:
+                  phaseCarrierTransferFamilyReceipt.postTransferThermoBuffer,
+                priorOptics: sourceDispersedMediumOpticsAdvertised
+                  ? sphParticleUpload.dispersedMediumOptics
+                  : null,
+                seedOpticsRows: sourceDispersedMediumOpticsAdvertised
+                  ? null
+                  : resolvedDispersedMediumOpticsSeedRows,
+                opticalClosureTable,
+                opticalClosureGpuTable:
+                  residentStepOptions
+                    ?.dispersedMediumOpticalClosureGpuTable
+                  ?? null,
+                label:
+                  'ulg-schroeder-two-level-dispersed-medium-optics'
+              })
+            );
         }
       })
       : null;
@@ -21244,6 +22047,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       error?.queueOrderedFinalConsumerCapabilities?.upstream
       ?? error?.queueOrderedFinalConsumerCapability
       ?? null;
+    cleanupTwoLevelDispersedMediumOptics(error);
     scheduleTwoLevelSidecarProposalCleanup({
       recoveryFinalConsumer
     });
@@ -21290,7 +22094,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       residentProductMass:
         twoLevelPostMechanicsContinuation?.residentProductMass ?? null,
       sphParticleUpload: {
-        ...twoLevelPublicEpochUploads?.sphParticleUpload,
+        ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+          twoLevelPublicEpochUploads?.sphParticleUpload
+        ),
         schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
         status: 'webgpu-uploaded',
         sourceStage: 'schroeder-particle-storage-materialization',
@@ -21352,7 +22158,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       residentProductMass:
         twoLevelPostMechanicsContinuation.residentProductMass ?? null,
       sphParticleUpload: {
-        ...twoLevelPublicEpochUploads.sphParticleUpload,
+        ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+          twoLevelPublicEpochUploads.sphParticleUpload
+        ),
         stateBuffer: twoLevelPostMechanicsContinuation.stateBuffer,
         thermoBuffer: twoLevelPostMechanicsContinuation.thermoBuffer,
         // Ownership is normalized from the closure's private claim receipt
@@ -21409,7 +22217,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     ? {
         ...selectedTwoLevelContinuationUploads,
         sphParticleUpload: {
-          ...selectedTwoLevelContinuationUploads.sphParticleUpload
+          ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+            selectedTwoLevelContinuationUploads.sphParticleUpload
+          )
         },
         mlsMpmParticleUpload: {
           ...selectedTwoLevelContinuationUploads.mlsMpmParticleUpload
@@ -21483,6 +22293,58 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       )
     );
   }
+  if (twoLevelDispersedMediumOpticsProducerStep) {
+    if (!closureContinuationSelected) {
+      throw sphDispersedMediumOpticsRemapRequiredError(
+        'two-level-optics-producer-terminal-closure-not-selected'
+      );
+    }
+    const targetSphUpload =
+      finalTwoLevelContinuationUploads?.sphParticleUpload ?? null;
+    if (
+      !targetSphUpload
+      || sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+        targetSphUpload
+      )
+    ) {
+      throw sphDispersedMediumOpticsRemapRequiredError(
+        'two-level-optics-producer-terminal-parent-not-sidecar-free'
+      );
+    }
+    const producerClaim =
+      issueSphDispersedMediumOpticsProducerAdoptionClaim(
+        twoLevelDispersedMediumOpticsProducerStep
+      );
+    const adoptedOptics =
+      adoptSphGpuParticleDispersedMediumOpticsSidecar(
+        device,
+        producerClaim,
+        twoLevelDispersedMediumOpticsProducerStep.outputBuffer,
+        { sourceSphUpload: targetSphUpload }
+      );
+    twoLevelDispersedMediumOpticsAdoptedTarget = targetSphUpload;
+    if (
+      targetSphUpload.dispersedMediumOptics !== adoptedOptics
+      || ensureSphGpuParticleBufferSetBorrowLifecycle(
+        targetSphUpload
+      ) !== true
+      || !sphDispersedMediumOpticsMatchesParticleUpload(
+        targetSphUpload
+      )
+      || !sphDispersedMediumOpticsProducerAdoptionMatches(
+        twoLevelDispersedMediumOpticsProducerStep,
+        adoptedOptics,
+        {
+          device,
+          particleSourceFamily: targetSphUpload
+        }
+      )
+    ) {
+      throw sphDispersedMediumOpticsRemapRequiredError(
+        'two-level-optics-producer-terminal-adoption-failed'
+      );
+    }
+  }
   if (
     twoLevelPostMechanicsEpoch
     && finalTwoLevelContinuationUploads
@@ -21498,6 +22360,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           generation: transitionGeneration,
           nextParticleUploads: finalTwoLevelContinuationUploads,
           forceTopologyAdvance: false,
+          dispersedMediumOpticsProducerStep:
+            twoLevelDispersedMediumOpticsProducerStep,
           stage: 'two-level-final-topology-transition'
         }),
         applyObservedPositionTransition({
@@ -21512,6 +22376,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           generation: transitionGeneration,
           nextParticleUploads: finalTwoLevelContinuationUploads,
           forceTopologyAdvance: false,
+          dispersedMediumOpticsProducerStep:
+            twoLevelDispersedMediumOpticsProducerStep,
           stage: 'two-level-final-topology-transition'
         });
     }
@@ -21550,6 +22416,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     // transitions; the production conservative policy safely advances both
     // epochs without host observation. The full classifier below seals all
     // final state/thermo/mechanics descriptors exactly once.
+    spatialSuccessorPublicationStampTransaction =
+      createSpatialSuccessorPublicationStampTransaction(
+        finalTwoLevelContinuationUploads
+      );
     spatialSuccessorPublicationPlan =
       await prepareSchroederSpatialSuccessorSourceFamilyPublication({
         transaction: twoLevelPostMechanicsEpoch.transaction,
@@ -21557,6 +22427,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         lookupLevelAssignment: twoLevelPostMechanicsEpoch.levelAssignment,
         nextParticleUploads: finalTwoLevelContinuationUploads,
         successorLevelAssignmentRunner: async () => {
+          const topologyRebase = rebaseDispersedMediumOpticsTopologyEpoch({
+            targetSphUpload:
+              finalTwoLevelContinuationUploads.sphParticleUpload,
+            targetMlsUpload:
+              finalTwoLevelContinuationUploads.mlsMpmParticleUpload,
+            nextParticleUploads: finalTwoLevelContinuationUploads,
+            targetTopologyEpoch:
+              finalTwoLevelContinuationUploads.sphParticleUpload
+                .topologyEpoch,
+            producerStep: twoLevelDispersedMediumOpticsProducerStep
+          });
           await prepareFinalRenderProxyArtifacts({
             finalSphParticleState:
               resolvedTwoLevelMechanics?.nextSphParticleState
@@ -21569,6 +22450,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
             finalParticleUploads: finalTwoLevelContinuationUploads,
             successorAuthority: true
           });
+          if (topologyRebase?.validate() === false) {
+            throw sphDispersedMediumOpticsRemapRequiredError(
+              'two-level-topology-rebase-invalidated-during-classification'
+            );
+          }
           return resolvedFinalRenderLevelAssignment;
         },
         topologyTransitionReceipt: spatialTopologyTransitionReceipt,
@@ -21584,6 +22470,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       });
   }
   if (twoLevelPostMechanicsEpoch) {
+    validateDispersedMediumOpticsTopologyRebases();
     const publicCommit = twoLevelCanonicalEpochController.commitPostMechanics(
       twoLevelPostMechanicsEpoch,
       {
@@ -21595,17 +22482,31 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       !topologyTransitionRunnerExplicitlyInjected
       && spatialSuccessorPublicationPlan
     ) {
-      spatialSuccessorPublicationReceipt =
-        spatialSuccessorPublicationRunner(
-          spatialSuccessorPublicationPlan,
-          { commitReceipt: publicCommit.commitReceipt }
+      try {
+        spatialSuccessorPublicationReceipt =
+          spatialSuccessorPublicationRunner(
+            spatialSuccessorPublicationPlan,
+            { commitReceipt: publicCommit.commitReceipt }
+          );
+      } finally {
+        // An injected publisher can expose the authentic family and then
+        // throw or return an unbranded clone. Recover publication truth from
+        // the private source-family registry before receipt validation.
+        captureSpatialSuccessorPublicationWitness(
+          finalTwoLevelContinuationUploads
         );
+      }
       spatialSuccessorSourceFamily = requirePublishedSpatialSuccessorSourceFamily({
         stage: 'two-level post-mechanics E*',
         plan: spatialSuccessorPublicationPlan,
         commitReceipt: publicCommit.commitReceipt,
         nextParticleUploads: finalTwoLevelContinuationUploads
       });
+      // Publication has authenticated and exposed the exact target family.
+      // Finalization only drops rollback authority; it must never revalidate
+      // or throw after that outward commit.
+      finalizeDispersedMediumOpticsTopologyRebases();
+      spatialSuccessorPublicationStampTransaction?.commit();
       resolvedTwoLevelMechanics.schroederSpatialSuccessorSourceFamily =
         spatialSuccessorSourceFamily;
       resolvedTwoLevelMechanics.schroederSpatialSuccessorSourceFamilyStatus =
@@ -21615,6 +22516,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         spatialSuccessorPublicationReceipt.status;
       resolvedTwoLevelMechanics.schroederSpatialSuccessorPublicationReason =
         spatialSuccessorPublicationReceipt.reason;
+      // A branded successor now owns the target epoch. Later hierarchy
+      // cleanup may quarantine that family, but must never restamp it back to
+      // its predecessor after publication.
     }
     scheduleTwoLevelAggregateTraversalCleanup({
       queueOrderedAuthority: twoLevelSpatialAggregateTraversalReceipt
@@ -21990,6 +22894,12 @@ export async function runSchroederSameLevelMechanicsWebGpu({
             source: 'post-mechanics-closure',
             telemetry: twoLevelPostMechanicsClosure
           },
+          ...(twoLevelDispersedMediumOpticsProducerStep
+            ? [{
+                source: 'dispersed-medium-optics-producer',
+                telemetry: twoLevelDispersedMediumOpticsProducerStep
+              }]
+            : []),
           {
             source: 'public-e-star-aggregate-traversal',
             telemetry: publicAggregateTraversalReadbackTelemetry
@@ -22008,11 +22918,18 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     : null;
   const twoLevelResidentFullParticleReadbackPerformed = Boolean(
     twoLevelPostMechanicsClosure?.fullParticleReadbackPerformed === true
+    || twoLevelDispersedMediumOpticsProducerStep
+      ?.fullParticleReadbackPerformed === true
     || twoLevelSpatialAggregateTraversal?.fullReadbackPerformed === true
   );
   const twoLevelResidentFullParticleReadbackFree = Boolean(
     !twoLevelResidentFullParticleReadbackPerformed
     && twoLevelPostMechanicsClosure?.fullParticleReadbackFree === true
+    && (
+      !twoLevelDispersedMediumOpticsProducerStep
+      || twoLevelDispersedMediumOpticsProducerStep
+        .fullParticleReadbackFree === true
+    )
     && publicAggregateTraversalAuthenticated
   );
   const finalTwoLevelSuccessorAuthorityRequired = Boolean(
@@ -22050,6 +22967,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     || twoLevelPostMechanicsClosure?.reactionStep
     || twoLevelPostMechanicsClosure?.mechanicsRefreshStep
     || twoLevelPostMechanicsClosure?.phaseCarrierTransferStep
+    || twoLevelDispersedMediumOpticsProducerStep
   );
   const twoLevelCompactSummaryTerminalFamilyMatches = Boolean(
     twoLevelMechanicsCompactSummary
@@ -22127,12 +23045,16 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       stageStatus: {
         twoLevelMechanics: resolvedTwoLevelMechanics?.status ?? null,
         postMechanicsClosure: twoLevelPostMechanicsClosure?.status ?? null,
+        dispersedMediumOptics:
+          twoLevelDispersedMediumOpticsProducerStep?.status ?? null,
         publicAggregateTraversal:
           twoLevelSpatialAggregateTraversal?.status ?? null
       },
       stageBackends: {
         twoLevelMechanics: 'webgpu',
         postMechanicsClosure: twoLevelPostMechanicsClosure?.backend ?? null,
+        dispersedMediumOptics:
+          twoLevelDispersedMediumOpticsProducerStep?.backend ?? null,
         publicAggregateTraversal: twoLevelSpatialAggregateTraversal
           ? 'webgpu'
           : null
@@ -22174,6 +23096,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         twoLevelPostMechanicsClosure?.mechanicsRefreshStep ?? null,
       phaseCarrierTransferStep:
         twoLevelPostMechanicsClosure?.phaseCarrierTransferStep ?? null,
+      dispersedMediumOpticsProducerStep:
+        twoLevelDispersedMediumOpticsProducerStep,
       residentProductMass:
         (twoLevelAdoptedUploads ?? twoLevelPostMechanicsUploads)
           ?.residentProductMass ?? null,
@@ -22278,6 +23202,45 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     fuseNoFullResidentMechanicsActiveGrid: true,
     fuseNoFullResidentActiveGrid: true
   });
+  if (twoLevelAuthoritative && twoLevelDispersedMediumOpticsProducerStep) {
+    twoLevelDispersedMediumOpticsFinalStep = residentStep;
+    registerFreshSphDispersedMediumOpticsReplacement({
+      finalStep: residentStep,
+      sourceSphUpload: sphParticleUpload,
+      targetSphUpload: twoLevelDispersedMediumOpticsAdoptedTarget,
+      sourceOptics: sourceDispersedMediumOpticsAdvertised
+        ? sphParticleUpload.dispersedMediumOptics
+        : null,
+      intermediateUploads: [],
+      sourceFamilyTransitions:
+        twoLevelDispersedMediumOpticsSourceFamilyTransition
+          ? [twoLevelDispersedMediumOpticsSourceFamilyTransition]
+          : []
+    });
+    twoLevelDispersedMediumOpticsReplacementRegistered = true;
+    residentStep.dispersedMediumOpticsReplacementStatus =
+      'fresh-dispersed-medium-optics-pending-step-acceptance';
+  }
+  if (!twoLevelAuthoritative && residentStep?.nextParticleUploads) {
+    const pendingReplacement = Object.freeze({
+      finalStep: residentStep,
+      sourceSphUpload: sphParticleUpload,
+      targetSphUpload:
+        residentStep.nextParticleUploads.sphParticleUpload
+    });
+    if (isFreshSphDispersedMediumOpticsReplacementPending(
+      pendingReplacement
+    )) {
+      singleLevelPendingDispersedMediumOpticsReplacement = pendingReplacement;
+    } else if (
+      residentStep.dispersedMediumOpticsReplacementStatus
+        === 'fresh-dispersed-medium-optics-pending-step-acceptance'
+    ) {
+      throw sphDispersedMediumOpticsRemapRequiredError(
+        'single-level-pending-optics-replacement-authentication-failed'
+      );
+    }
+  }
   if (residentStep && typeof residentStep === 'object') {
     // Requested-vs-reported readback provenance on the step envelope: the
     // scene's continuation gate needs the reported mode to match the
@@ -22297,11 +23260,36 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     )
   );
   if (singleLevelFinalAuthorityEligible) {
+    const terminalSphUpload =
+      residentStep.nextParticleUploads.sphParticleUpload;
+    const preserveExactDispersedMediumOpticsParent =
+      sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+        terminalSphUpload
+      );
+    if (
+      preserveExactDispersedMediumOpticsParent
+      && (
+        ensureSphGpuParticleBufferSetBorrowLifecycle(
+          terminalSphUpload
+        ) !== true
+        || !sphDispersedMediumOpticsMatchesParticleUpload(
+          terminalSphUpload
+        )
+      )
+    ) {
+      throw sphDispersedMediumOpticsRemapRequiredError(
+        'single-level-hierarchy-terminal-parent-authentication-failed'
+      );
+    }
     residentStep.nextParticleUploads = {
       ...residentStep.nextParticleUploads,
-      sphParticleUpload: {
-        ...residentStep.nextParticleUploads.sphParticleUpload
-      },
+      // A privately adopted optics child is bound to this exact parent
+      // object.  Cloning the public descriptor copies aliases but not the
+      // module-private parent lifecycle or producer receipt, so preserve the
+      // authenticated parent identity through hierarchy publication.
+      sphParticleUpload: preserveExactDispersedMediumOpticsParent
+        ? terminalSphUpload
+        : { ...terminalSphUpload },
       mlsMpmParticleUpload: {
         ...residentStep.nextParticleUploads.mlsMpmParticleUpload
       }
@@ -22320,6 +23308,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           generation: resolvedSpatialEpochGeneration,
           nextParticleUploads: residentStep.nextParticleUploads,
           forceTopologyAdvance: false,
+          dispersedMediumOpticsProducerStep:
+            residentStep.dispersedMediumOpticsProducerStep,
           stage: 'single-level-final-topology-transition'
         }),
         applyObservedPositionTransition({
@@ -22334,6 +23324,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           generation: resolvedSpatialEpochGeneration,
           nextParticleUploads: residentStep.nextParticleUploads,
           forceTopologyAdvance: false,
+          dispersedMediumOpticsProducerStep:
+            residentStep.dispersedMediumOpticsProducerStep,
           stage: 'single-level-final-topology-transition'
         });
     }
@@ -22379,6 +23371,10 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     && singleLevelFinalAuthorityEligible
     && !topologyTransitionRunnerExplicitlyInjected
   ) {
+    spatialSuccessorPublicationStampTransaction =
+      createSpatialSuccessorPublicationStampTransaction(
+        residentStep.nextParticleUploads
+      );
     spatialSuccessorPublicationPlan =
       await prepareSchroederSpatialSuccessorSourceFamilyPublication({
         transaction: spatialEpochTransaction,
@@ -22386,6 +23382,17 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         lookupLevelAssignment: resolvedLevelAssignment,
         nextParticleUploads: residentStep.nextParticleUploads,
         successorLevelAssignmentRunner: async () => {
+          const topologyRebase = rebaseDispersedMediumOpticsTopologyEpoch({
+            targetSphUpload:
+              residentStep.nextParticleUploads.sphParticleUpload,
+            targetMlsUpload:
+              residentStep.nextParticleUploads.mlsMpmParticleUpload,
+            nextParticleUploads: residentStep.nextParticleUploads,
+            targetTopologyEpoch:
+              residentStep.nextParticleUploads.sphParticleUpload
+                .topologyEpoch,
+            producerStep: residentStep.dispersedMediumOpticsProducerStep
+          });
           await prepareFinalRenderProxyArtifacts({
             finalSphParticleState:
               residentStep?.nextSphParticleState
@@ -22402,6 +23409,11 @@ export async function runSchroederSameLevelMechanicsWebGpu({
             finalParticleUploads: residentStep?.nextParticleUploads,
             successorAuthority: true
           });
+          if (topologyRebase?.validate() === false) {
+            throw sphDispersedMediumOpticsRemapRequiredError(
+              'single-level-topology-rebase-invalidated-during-classification'
+            );
+          }
           return resolvedFinalRenderLevelAssignment;
         },
         topologyTransitionReceipt: spatialTopologyTransitionReceipt,
@@ -22551,6 +23563,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           status: 'authenticated-exact-near-consumer-proposals-sealed'
         }
       );
+      validateDispersedMediumOpticsTopologyRebases();
       const commitReceipt = commitSchroederSpatialEpochTransaction(
         spatialEpochTransaction,
         {
@@ -22574,17 +23587,28 @@ export async function runSchroederSameLevelMechanicsWebGpu({
         !topologyTransitionRunnerExplicitlyInjected
         && spatialSuccessorPublicationPlan
       ) {
-        spatialSuccessorPublicationReceipt =
-          spatialSuccessorPublicationRunner(
-            spatialSuccessorPublicationPlan,
-            { commitReceipt }
+        try {
+          spatialSuccessorPublicationReceipt =
+            spatialSuccessorPublicationRunner(
+              spatialSuccessorPublicationPlan,
+              { commitReceipt }
+            );
+        } finally {
+          captureSpatialSuccessorPublicationWitness(
+            residentStep.nextParticleUploads
           );
+        }
         spatialSuccessorSourceFamily = requirePublishedSpatialSuccessorSourceFamily({
           stage: 'single-level E*',
           plan: spatialSuccessorPublicationPlan,
           commitReceipt,
           nextParticleUploads: residentStep?.nextParticleUploads ?? null
         });
+        // Successful publication is the rollback boundary. Finalization is
+        // intentionally total so later result bookkeeping cannot restamp the
+        // public family back to its predecessor.
+        finalizeDispersedMediumOpticsTopologyRebases();
+        spatialSuccessorPublicationStampTransaction?.commit();
       }
     }
   }
@@ -24923,8 +25947,41 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       shadowOnly: true
     });
   }
+  const commitTwoLevelDispersedMediumOpticsReplacement = Boolean(
+    twoLevelDispersedMediumOpticsReplacementRegistered
+    && residentStepOptions?.deferContinuationOwnershipTransfer !== true
+  );
+  if (commitTwoLevelDispersedMediumOpticsReplacement) {
+    preflightFreshSphDispersedMediumOpticsReplacementCommit({
+      finalStep: twoLevelDispersedMediumOpticsFinalStep,
+      sourceSphUpload: sphParticleUpload,
+      targetSphUpload: twoLevelDispersedMediumOpticsAdoptedTarget
+    });
+  }
+  validateDispersedMediumOpticsTopologyRebases();
+  if (commitTwoLevelDispersedMediumOpticsReplacement) {
+    const replacementReceipt =
+      commitFreshSphDispersedMediumOpticsReplacement({
+        finalStep: twoLevelDispersedMediumOpticsFinalStep,
+        sourceSphUpload: sphParticleUpload,
+        targetSphUpload: twoLevelDispersedMediumOpticsAdoptedTarget
+      });
+    twoLevelDispersedMediumOpticsReplacementCommitted = true;
+    try {
+      residentStep.dispersedMediumOpticsReplacement = replacementReceipt;
+      residentStep.dispersedMediumOpticsReplacementStatus =
+        replacementReceipt.status;
+    } catch {
+      // A committed replacement is already irreversible. Public diagnostics
+      // are best-effort and must not turn success into a rollback attempt.
+    }
+  }
+  finalizeDispersedMediumOpticsTopologyRebases();
+  spatialSuccessorPublicationStampTransaction?.commit();
   return result;
   } catch (error) {
+    cleanupTwoLevelDispersedMediumOptics(error);
+    cleanupSingleLevelPendingDispersedMediumOptics(error);
     if (terminalReactionActivationObservationProposal) {
       // The standalone canonical watch owns its success-only fallback fence.
       // One destroy request quarantines the private buffers until that fence

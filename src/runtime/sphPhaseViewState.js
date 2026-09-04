@@ -41,7 +41,7 @@ export function createSphPhaseViewState(driver) {
   });
   const colors = particleColors(demo);
   const pressureSummary = gasPressureSummary(demo);
-  const renderDescriptors = particleRenderDescriptors(demo, { gasPressure: pressureSummary });
+  const renderDescriptors = particleRenderDescriptors(demo);
   const sphGpuParticleState = buildSphGpuParticleBuffers(demo.state, {
     materialProperties: demo.materialProperties,
     initialParticleSpacing: demo.initialParticleSpacing

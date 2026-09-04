@@ -108,6 +108,12 @@ function finiteOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function safeNonNegativeInteger(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
 function median(values) {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   if (sorted.length === 0) return null;
@@ -746,6 +752,63 @@ async function readState(page) {
           rows.physicsQueuePrefixCoverage ?? null,
         physicsHostQueueFenceParticipation:
           rows.physicsHostQueueFenceParticipation ?? null,
+        presentationComposition: rows.presentationComposition ?? null,
+        marchingCubesSurfaceCount:
+          rows.marchingCubesSurfaceCount ?? null,
+        collectiveOpticalSurfaceCount:
+          rows.collectiveOpticalSurfaceCount ?? null,
+        participatingMediumStatus:
+          rows.participatingMediumStatus ?? null,
+        participatingMediumAggregateDrawCount:
+          rows.participatingMediumAggregateDrawCount ?? null,
+        collectiveOpticalShellFallbackCount:
+          rows.collectiveOpticalShellFallbackCount ?? null,
+        participatingMediumDepthClipped:
+          rows.participatingMediumDepthClipped ?? null,
+        participatingMediumPremultipliedAlpha:
+          rows.participatingMediumPremultipliedAlpha ?? null,
+        presentationPassOrder: Array.isArray(rows.presentationPassOrder)
+          ? [...rows.presentationPassOrder]
+          : null,
+        workerOwnedParticipatingMediumPresentation:
+          rows.workerOwnedParticipatingMediumPresentation == null
+            ? null
+            : {
+              schema:
+                rows.workerOwnedParticipatingMediumPresentation.schema ?? null,
+              status:
+                rows.workerOwnedParticipatingMediumPresentation.status ?? null,
+              presentationComposition:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .presentationComposition ?? null,
+              marchingCubesSurfaceCount:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .marchingCubesSurfaceCount ?? null,
+              collectiveOpticalSurfaceCount:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .collectiveOpticalSurfaceCount ?? null,
+              participatingMediumAggregateDrawCount:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .participatingMediumAggregateDrawCount ?? null,
+              collectiveOpticalShellFallbackCount:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .collectiveOpticalShellFallbackCount ?? null,
+              participatingMediumDepthClipped:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .participatingMediumDepthClipped ?? null,
+              participatingMediumPremultipliedAlpha:
+                rows.workerOwnedParticipatingMediumPresentation
+                  .participatingMediumPremultipliedAlpha ?? null,
+              presentationPassOrder: Array.isArray(
+                rows.workerOwnedParticipatingMediumPresentation
+                  .presentationPassOrder
+              )
+                ? [
+                    ...rows.workerOwnedParticipatingMediumPresentation
+                      .presentationPassOrder
+                  ]
+                : null
+            },
         workerOwnedOpticalPresentation:
           rows.workerOwnedOpticalPresentation == null
             ? null
@@ -1793,6 +1856,8 @@ try {
           }
           const opticalPresentation =
             snapshot?.workerRows?.workerOwnedOpticalPresentation;
+          const mediumPresentation =
+            snapshot?.workerRows?.workerOwnedParticipatingMediumPresentation;
           if (
             expectedWorkerGeometry === 'worker-owned-true-isosurface'
             && Number(opticalPresentation?.gasSurfaceCount) > 0
@@ -1806,6 +1871,157 @@ try {
               result.issues.push(
                 `${label}-heuristic-gas-opacity-used`
               );
+            }
+          }
+          if (expectedWorkerGeometry === 'worker-owned-true-isosurface') {
+            const rows = snapshot?.workerRows;
+            const marchingCubesSurfaceCount = safeNonNegativeInteger(
+              rows?.marchingCubesSurfaceCount
+            );
+            const collectiveOpticalSurfaceCount = safeNonNegativeInteger(
+              rows?.collectiveOpticalSurfaceCount
+            );
+            const totalSurfaceCount = safeNonNegativeInteger(
+              rows?.surfaceCount
+            );
+            const mediumStatus = rows?.participatingMediumStatus;
+            const aggregateDrawCount = safeNonNegativeInteger(
+              rows?.participatingMediumAggregateDrawCount
+            );
+            const passOrder = rows?.presentationPassOrder;
+            const ordinaryPassOrder = [
+              'ordered-isosurface-and-overlay'
+            ];
+            const hybridPassOrder = [
+              'opaque-isosurface',
+              'depth-clipped-participating-medium',
+              'transparent-isosurface-and-overlay'
+            ];
+            if (
+              !mediumPresentation
+              || mediumPresentation.schema
+                !== 'peercompute.ulg.worker-participating-medium-presentation.v0'
+            ) {
+              result.issues.push(
+                `${label}-participating-medium-proof-missing`
+              );
+            } else {
+              const flattenedProofFields = [
+                ['presentationComposition', 'presentationComposition'],
+                ['marchingCubesSurfaceCount', 'marchingCubesSurfaceCount'],
+                ['collectiveOpticalSurfaceCount', 'collectiveOpticalSurfaceCount'],
+                [
+                  'participatingMediumAggregateDrawCount',
+                  'participatingMediumAggregateDrawCount'
+                ],
+                [
+                  'collectiveOpticalShellFallbackCount',
+                  'collectiveOpticalShellFallbackCount'
+                ],
+                ['participatingMediumDepthClipped', 'participatingMediumDepthClipped'],
+                [
+                  'participatingMediumPremultipliedAlpha',
+                  'participatingMediumPremultipliedAlpha'
+                ],
+                ['presentationPassOrder', 'presentationPassOrder']
+              ];
+              const proofMismatch = flattenedProofFields.some(
+                ([rowField, proofField]) => JSON.stringify(rows?.[rowField])
+                  !== JSON.stringify(mediumPresentation?.[proofField])
+              ) || rows?.participatingMediumStatus !== mediumPresentation.status;
+              if (proofMismatch) {
+                result.issues.push(
+                  `${label}-participating-medium-proof-flattening-mismatch`
+                );
+              }
+            }
+            if (
+              marchingCubesSurfaceCount + collectiveOpticalSurfaceCount
+                !== totalSurfaceCount
+            ) {
+              result.issues.push(
+                `${label}-participating-medium-surface-accounting-mismatch`
+              );
+            }
+            if (Number(rows?.collectiveOpticalShellFallbackCount) !== 0) {
+              result.issues.push(
+                `${label}-collective-optical-shell-fallback-used`
+              );
+            }
+            if (collectiveOpticalSurfaceCount > 0) {
+              if (
+                rows?.presentationComposition
+                  !== 'marching-cubes-isosurfaces-plus-participating-medium'
+              ) {
+                result.issues.push(
+                  `${label}-participating-medium-composition-missing`
+                );
+              }
+              if (
+                mediumStatus !== 'participating-medium-ready'
+                && mediumStatus !== 'participating-medium-empty'
+              ) {
+                result.issues.push(
+                  `${label}-participating-medium-not-ready-or-empty`
+                );
+              }
+              if (mediumStatus === 'participating-medium-ready') {
+                if (aggregateDrawCount !== 1) {
+                  result.issues.push(
+                    `${label}-participating-medium-aggregate-draw-missing`
+                  );
+                }
+                if (rows?.participatingMediumDepthClipped !== true) {
+                  result.issues.push(
+                    `${label}-participating-medium-depth-clipping-missing`
+                  );
+                }
+                if (rows?.participatingMediumPremultipliedAlpha !== true) {
+                  result.issues.push(
+                    `${label}-participating-medium-premultiplied-alpha-missing`
+                  );
+                }
+                if (JSON.stringify(passOrder) !== JSON.stringify(hybridPassOrder)) {
+                  result.issues.push(
+                    `${label}-participating-medium-pass-order-invalid`
+                  );
+                }
+              } else {
+                if (aggregateDrawCount !== 0) {
+                  result.issues.push(
+                    `${label}-empty-participating-medium-drew`
+                  );
+                }
+                if (JSON.stringify(passOrder) !== JSON.stringify(ordinaryPassOrder)) {
+                  result.issues.push(
+                    `${label}-empty-participating-medium-pass-order-invalid`
+                  );
+                }
+              }
+            } else {
+              if (
+                rows?.presentationComposition
+                  !== 'marching-cubes-isosurfaces'
+              ) {
+                result.issues.push(
+                  `${label}-ordinary-presentation-composition-invalid`
+                );
+              }
+              if (mediumStatus !== 'not-requested') {
+                result.issues.push(
+                  `${label}-ordinary-participating-medium-status-invalid`
+                );
+              }
+              if (aggregateDrawCount !== 0) {
+                result.issues.push(
+                  `${label}-unrequested-participating-medium-drew`
+                );
+              }
+              if (JSON.stringify(passOrder) !== JSON.stringify(ordinaryPassOrder)) {
+                result.issues.push(
+                  `${label}-ordinary-presentation-pass-order-invalid`
+                );
+              }
             }
           }
         }

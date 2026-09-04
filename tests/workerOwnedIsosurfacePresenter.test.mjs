@@ -36,8 +36,9 @@ import {
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 class GPUBuffer {
-  constructor(size = 4096) {
+  constructor(size = 4096, usage = 0) {
     this.size = size;
+    this.usage = usage;
     this.destroyCount = 0;
     this.destroyed = false;
     this.mappedRange = new ArrayBuffer(size);
@@ -82,24 +83,23 @@ function createPresenterRig({
   captureRenderRows = async () => ({ destroyRenderRowsBuffer() {} }),
   buildRenderField = undefined,
   buildPresentationFrame = null,
-  useBuiltInFrame = false
+  useBuiltInFrame = false,
+  createParticipatingMediumDescriptor = undefined,
+  createParticipatingMediumGpu = undefined,
+  encodeParticipatingMediumPack = undefined,
+  encodeParticipatingMediumRender = undefined,
+  destroyParticipatingMediumPackedFrame = undefined
 } = {}) {
   const terminals = [];
   const submittedFrames = [];
   const drawnViewProjectionMatrices = [];
+  const renderPasses = [];
   let presentationOpportunityCalls = 0;
   let queueCompletionPromise = queueCompletion;
   let framebufferEpoch = 1;
-  const pass = {
-    setPipeline() {},
-    setBindGroup() {},
-    setVertexBuffer() {},
-    drawIndirect() {},
-    end() {}
-  };
   const device = {
-    createBuffer({ size = 4096 } = {}) {
-      return new GPUBuffer(size);
+    createBuffer({ size = 4096, usage = 0 } = {}) {
+      return new GPUBuffer(size, usage);
     },
     createShaderModule() {
       return {};
@@ -113,7 +113,26 @@ function createPresenterRig({
     },
     createCommandEncoder() {
       return {
-        beginRenderPass() {
+        beginRenderPass(descriptor) {
+          const actions = [];
+          const pass = {
+            setPipeline(pipeline) {
+              actions.push({ type: 'pipeline', pipeline });
+            },
+            setBindGroup(index, bindGroup) {
+              actions.push({ type: 'bind-group', index, bindGroup });
+            },
+            setVertexBuffer(index, buffer) {
+              actions.push({ type: 'vertex-buffer', index, buffer });
+            },
+            drawIndirect(buffer, offset) {
+              actions.push({ type: 'draw-indirect', buffer, offset });
+            },
+            end() {
+              actions.push({ type: 'end' });
+            }
+          };
+          renderPasses.push({ descriptor, actions, pass });
           return pass;
         },
         finish() {
@@ -135,13 +154,16 @@ function createPresenterRig({
     device,
     context: {
       getCurrentTexture() {
-        return { createView: () => ({}) };
+        return { width: 640, height: 480, createView: () => ({}) };
       }
     },
     format: 'rgba8unorm',
     getDepthView: () => ({}),
-    drawOverlay: (_pass, viewProjectionMatrix) => {
+    getViewportSize: () => [640, 480],
+    drawOverlay: (pass, viewProjectionMatrix) => {
       drawnViewProjectionMatrices.push([...viewProjectionMatrix]);
+      const renderPass = renderPasses.find((entry) => entry.pass === pass);
+      renderPass?.actions.push({ type: 'overlay' });
     },
     onTerminal: (receipt) => terminals.push(receipt),
     onFrameSubmitted: (receipt) => submittedFrames.push(receipt),
@@ -156,6 +178,11 @@ function createPresenterRig({
     getFramebufferEpoch: () => framebufferEpoch,
     captureRenderRows,
     buildRenderField,
+    createParticipatingMediumDescriptor,
+    createParticipatingMediumGpu,
+    encodeParticipatingMediumPack,
+    encodeParticipatingMediumRender,
+    destroyParticipatingMediumPackedFrame,
     buildPresentationFrame: useBuiltInFrame
       ? null
       : (buildPresentationFrame ?? (
@@ -177,6 +204,7 @@ function createPresenterRig({
     terminals,
     submittedFrames,
     drawnViewProjectionMatrices,
+    renderPasses,
     get presentationOpportunityCalls() {
       return presentationOpportunityCalls;
     },
@@ -231,6 +259,49 @@ function validRequest() {
     cameraPositionM: [1, 2, 3],
     fieldPadding: 0.22,
     refEdgeM: 1
+  };
+}
+
+function collectiveOpticalRequest() {
+  const request = validRequest();
+  const metadata = {
+    ...request.surfaceTable.metadata[0],
+    surfaceKey: 'collective-water-vapor',
+    opticalStateId: 41,
+    collectiveOpticalRoute: true,
+    collectiveOpticalRouteSchema:
+      'peercompute.ulg.sph-collective-dispersed-medium-optical-route.v0',
+    collectiveOpticalRouteKey: 'collective-water-vapor',
+    collectiveOpticalRouteId: 41,
+    opticalResponseAuthorityFlag: 1,
+    opticalResponseReady: true,
+    opticalBlockedFlag: 0,
+    opticalVisibilityFlag: 1,
+    transparencyClassId: 1,
+    depthWriteFlag: 0,
+    opticalEffectiveOpacity: 0.4
+  };
+  return {
+    ...request,
+    surfaceTable: {
+      ...request.surfaceTable,
+      metadata: [metadata]
+    }
+  };
+}
+
+function retainedRenderFieldForPresenter(options) {
+  return {
+    schema: 'peercompute.ulg.sph-gpu-render-field.v1',
+    backend: 'webgpu',
+    surfaceTable: options.surfaceTable,
+    particleCount: options.particleCount,
+    fieldRowsBuffer: options.targetFieldRowsBuffer,
+    fieldRowsBufferRetained: true,
+    fieldRowsBufferByteLength: options.targetFieldRowsBufferByteLength,
+    fieldPadding: options.fieldPadding,
+    refEdgeM: options.refEdgeM,
+    destroyRenderFieldBuffers() {}
   };
 }
 
@@ -377,20 +448,24 @@ test('worker-owned isosurface snapshots optical surface metadata before asynchro
     opticalEffectiveOpacity: 0.375,
     opticalRoughness: 0.125,
     colorLinear: [0.2, 0.4, 0.8],
+    opticalScatteringSourceLinear: [0.7, 0.8, 0.9],
     opticalState: { regime: 'condensed-droplet' }
   };
   const snapshot = snapshotWorkerOwnedSurfaceMetadata(metadata);
   metadata.materialId = 99;
   metadata.opticalEffectiveOpacity = 1;
   metadata.colorLinear[0] = 1;
+  metadata.opticalScatteringSourceLinear[0] = 0;
   metadata.opticalState.regime = 'mutated';
 
   assert.equal(snapshot.materialId, 17);
   assert.equal(snapshot.opticalEffectiveOpacity, 0.375);
   assert.deepEqual(snapshot.colorLinear, [0.2, 0.4, 0.8]);
+  assert.deepEqual(snapshot.opticalScatteringSourceLinear, [0.7, 0.8, 0.9]);
   assert.equal(snapshot.opticalState.regime, 'condensed-droplet');
   assert.equal(Object.isFrozen(snapshot), true);
   assert.equal(Object.isFrozen(snapshot.colorLinear), true);
+  assert.equal(Object.isFrozen(snapshot.opticalScatteringSourceLinear), true);
   assert.equal(Object.isFrozen(snapshot.opticalState), true);
 });
 
@@ -460,6 +535,323 @@ test('worker-owned isosurface uniforms use closure opacity and preserve the lega
   assert.equal(summary.visibleClosureGasSurfaceCount, 1);
   assert.equal(summary.opticallyThinHiddenGasSurfaceCount, 1);
   assert.equal(summary.heuristicGasOpacityUsed, false);
+});
+
+test('worker-owned presenter packs collective optics once and composites the aggregate between opaque and transparent passes', async () => {
+  const descriptorCalls = [];
+  const packCalls = [];
+  const renderCalls = [];
+  let packedDestroyCount = 0;
+  let runtimeDestroyCount = 0;
+  const packedFrame = {
+    status: 'participating-medium-packed-gpu-resident',
+    readback: false,
+    drawIndirectBuffer: new GPUBuffer(16)
+  };
+  const runtime = {
+    destroy() {
+      runtimeDestroyCount += 1;
+    }
+  };
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async () => ({
+      particleCount: 32,
+      renderRowsBuffer: new GPUBuffer(),
+      destroyRenderRowsBuffer() {}
+    }),
+    buildRenderField: async (options) =>
+      retainedRenderFieldForPresenter(options),
+    createParticipatingMediumDescriptor(options) {
+      descriptorCalls.push(options);
+      return Object.freeze({
+        status: 'participating-medium-ready',
+        reason: null,
+        consumedSurfaceIndices: Object.freeze([0])
+      });
+    },
+    createParticipatingMediumGpu(device, options) {
+      assert.strictEqual(device, rig.device);
+      assert.deepEqual(options, {
+        colorFormat: 'rgba8unorm',
+        depthFormat: 'depth24plus'
+      });
+      return runtime;
+    },
+    encodeParticipatingMediumPack(
+      passedRuntime,
+      commandEncoder,
+      descriptor
+    ) {
+      packCalls.push({ passedRuntime, commandEncoder, descriptor });
+      return packedFrame;
+    },
+    encodeParticipatingMediumRender(passedRuntime, pass, options) {
+      renderCalls.push({ passedRuntime, pass, options });
+      pass.drawIndirect(options.packedFrame.drawIndirectBuffer, 0);
+    },
+    destroyParticipatingMediumPackedFrame(frame) {
+      assert.strictEqual(frame, packedFrame);
+      packedDestroyCount += 1;
+    }
+  });
+
+  const receipt = await rig.presenter.enqueue({
+    request: collectiveOpticalRequest(),
+    retained: validRetained(),
+    sphStep: 70,
+    receiptFields: { lifecycleCase: 'participating-medium-ready' }
+  });
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  await waitFor(
+    () => rig.terminals.some((terminal) => (
+      terminal.lifecycleCase === 'participating-medium-ready'
+      && terminal.status
+        === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+    )),
+    'the participating-medium aggregate presentation'
+  );
+
+  assert.equal(descriptorCalls.length, 1);
+  assert.equal(descriptorCalls[0].surfaceDescriptors.length, 1);
+  assert.equal(
+    descriptorCalls[0].surfaceDescriptors[0].metadata.opticalStateId,
+    41
+  );
+  assert.equal(
+    Object.isFrozen(descriptorCalls[0].surfaceDescriptors[0].metadata),
+    true
+  );
+  assert.equal(packCalls.length, 1);
+  assert.strictEqual(packCalls[0].passedRuntime, runtime);
+  assert.equal(renderCalls.length, 1);
+  assert.strictEqual(renderCalls[0].passedRuntime, runtime);
+  assert.strictEqual(renderCalls[0].options.packedFrame, packedFrame);
+  assert.deepEqual(renderCalls[0].options.viewportSize, [640, 480]);
+  assert.deepEqual(
+    Array.from(renderCalls[0].options.inverseViewProjectionMatrix),
+    Array.from(validRequest().viewProjectionMatrix)
+  );
+  assert.equal(rig.renderPasses.length, 3);
+  assert.equal(
+    rig.renderPasses[0].descriptor.depthStencilAttachment.depthStoreOp,
+    'store'
+  );
+  assert.equal(
+    Object.hasOwn(rig.renderPasses[1].descriptor, 'depthStencilAttachment'),
+    false,
+    'the volume pass samples depth and therefore cannot attach the same view'
+  );
+  assert.equal(rig.renderPasses[1].descriptor.colorAttachments[0].loadOp, 'load');
+  assert.equal(
+    rig.renderPasses[2].descriptor.depthStencilAttachment.depthLoadOp,
+    'load'
+  );
+  assert.equal(rig.renderPasses[2].actions.at(-2)?.type, 'overlay');
+  const rendered = rig.terminals.find((terminal) => (
+    terminal.lifecycleCase === 'participating-medium-ready'
+    && terminal.status
+      === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+  ));
+  assert.equal(rendered.presentationGeometry, 'worker-owned-true-isosurface');
+  assert.equal(
+    rendered.presentationComposition,
+    'marching-cubes-isosurfaces-plus-participating-medium'
+  );
+  assert.equal(rendered.surfaceCount, 1);
+  assert.equal(rendered.marchingCubesSurfaceCount, 0);
+  assert.equal(rendered.collectiveOpticalSurfaceCount, 1);
+  assert.equal(rendered.participatingMediumStatus, 'participating-medium-ready');
+  assert.equal(rendered.participatingMediumAggregateDrawCount, 1);
+  assert.equal(rendered.collectiveOpticalShellFallbackCount, 0);
+  assert.equal(rendered.participatingMediumDepthClipped, true);
+  assert.equal(rendered.participatingMediumPremultipliedAlpha, true);
+  assert.deepEqual(rendered.presentationPassOrder, [
+    'opaque-isosurface',
+    'depth-clipped-participating-medium',
+    'transparent-isosurface-and-overlay'
+  ]);
+  assert.equal(
+    rendered.workerOwnedParticipatingMediumPresentation.schema,
+    'peercompute.ulg.worker-participating-medium-presentation.v0'
+  );
+  assert.equal(packedDestroyCount, 0);
+
+  rig.setFramebufferEpoch(2);
+  assert.equal(
+    await rig.presenter.resize({
+      viewProjectionMatrix: viewProjectionWithTranslation(2),
+      reason: 'participating-medium-resize'
+    }),
+    true
+  );
+  assert.equal(renderCalls.length, 2);
+  assert.equal(renderCalls[1].options.inverseViewProjectionMatrix[12], -2);
+  assert.equal(packedDestroyCount, 0);
+  assert.equal(
+    rig.presenter.clear({ reason: 'participating-medium-clear' }),
+    true
+  );
+  await waitFor(
+    () => packedDestroyCount === 1,
+    'the participating-medium packed-frame clear cleanup'
+  );
+  await rig.presenter.dispose();
+  assert.equal(packedDestroyCount, 1);
+  assert.equal(runtimeDestroyCount, 1);
+});
+
+test('blocked and empty collective optical routes render no marching-cubes shell or aggregate fallback', async () => {
+  for (const status of [
+    'participating-medium-blocked',
+    'participating-medium-empty'
+  ]) {
+    let packCount = 0;
+    let runtimeCreateCount = 0;
+    const rig = createPresenterRig({
+      useBuiltInFrame: true,
+      captureRenderRows: async () => ({
+        particleCount: 32,
+        renderRowsBuffer: new GPUBuffer(),
+        destroyRenderRowsBuffer() {}
+      }),
+      buildRenderField: async (options) =>
+        retainedRenderFieldForPresenter(options),
+      createParticipatingMediumDescriptor() {
+        return Object.freeze({
+          status,
+          reason: `${status}-for-test`,
+          consumedSurfaceIndices: Object.freeze([0])
+        });
+      },
+      createParticipatingMediumGpu() {
+        runtimeCreateCount += 1;
+        return { destroy() {} };
+      },
+      encodeParticipatingMediumPack() {
+        packCount += 1;
+        throw new Error('blocked/empty routes must not be packed');
+      }
+    });
+    await rig.presenter.enqueue({
+      request: collectiveOpticalRequest(),
+      retained: validRetained(),
+      receiptFields: { lifecycleCase: status }
+    });
+    await waitFor(
+      () => rig.terminals.some((terminal) => (
+        terminal.lifecycleCase === status
+        && terminal.status
+          === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+      )),
+      `${status} no-shell presentation`
+    );
+
+    const rendered = rig.terminals.find((terminal) => (
+      terminal.lifecycleCase === status
+      && terminal.status
+        === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+    ));
+    assert.equal(packCount, 0);
+    assert.equal(runtimeCreateCount, 0);
+    assert.equal(rig.renderPasses.length, 1);
+    assert.equal(rendered.surfaceCount, 1);
+    assert.equal(rendered.submittedSurfaceCount, 0);
+    assert.equal(rendered.indirectDrawCount, 0);
+    assert.equal(rendered.marchingCubesSurfaceCount, 0);
+    assert.equal(rendered.collectiveOpticalSurfaceCount, 1);
+    assert.equal(rendered.participatingMediumStatus, status);
+    assert.equal(rendered.participatingMediumAggregateDrawCount, 0);
+    assert.equal(rendered.collectiveOpticalShellFallbackCount, 0);
+    assert.equal(rendered.participatingMediumDepthClipped, false);
+    assert.equal(rendered.participatingMediumPremultipliedAlpha, false);
+    assert.deepEqual(rendered.presentationPassOrder, [
+      'ordered-isosurface-and-overlay'
+    ]);
+    assert.equal(rig.presenter.getStatus().visibleSurfaceCount, 1);
+    assert.equal(
+      rig.presenter.getStatus().visibleMarchingCubesSurfaceCount,
+      0
+    );
+    await rig.presenter.dispose();
+  }
+});
+
+test('participating-medium pipeline readiness precedes framebuffer acquisition and honors clear', async () => {
+  const runtimeReady = deferred();
+  let runtimeCreated = false;
+  let packedDestroyCount = 0;
+  const packedFrame = {
+    status: 'participating-medium-packed-gpu-resident',
+    readback: false
+  };
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async () => ({
+      particleCount: 32,
+      renderRowsBuffer: new GPUBuffer(),
+      destroyRenderRowsBuffer() {}
+    }),
+    buildRenderField: async (options) =>
+      retainedRenderFieldForPresenter(options),
+    createParticipatingMediumDescriptor() {
+      return Object.freeze({
+        status: 'participating-medium-ready',
+        reason: null,
+        consumedSurfaceIndices: Object.freeze([0])
+      });
+    },
+    createParticipatingMediumGpu() {
+      runtimeCreated = true;
+      return {
+        ready: runtimeReady.promise,
+        destroy() {}
+      };
+    },
+    encodeParticipatingMediumPack() {
+      return packedFrame;
+    },
+    encodeParticipatingMediumRender() {
+      throw new Error('a cleared frame must never encode a volume render');
+    },
+    destroyParticipatingMediumPackedFrame(frame) {
+      assert.strictEqual(frame, packedFrame);
+      packedDestroyCount += 1;
+    }
+  });
+
+  await rig.presenter.enqueue({
+    request: collectiveOpticalRequest(),
+    retained: validRetained(),
+    receiptFields: { lifecycleCase: 'clear-before-volume-pipelines-ready' }
+  });
+  await waitFor(() => runtimeCreated, 'the deferred participating-medium runtime');
+  assert.equal(rig.renderPasses.length, 0);
+  assert.equal(
+    rig.presenter.clear({ reason: 'clear-before-volume-pipelines-ready' }),
+    true
+  );
+  runtimeReady.resolve(true);
+  await waitFor(
+    () => rig.presenter.getStatus().running === false,
+    'the cleared pre-framebuffer participating-medium job cleanup'
+  );
+
+  assert.equal(rig.renderPasses.length, 0);
+  assert.equal(packedDestroyCount, 1);
+  assert.equal(
+    rig.terminals.some((terminal) => (
+      terminal.lifecycleCase === 'clear-before-volume-pipelines-ready'
+      && terminal.status
+        === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+    )),
+    false
+  );
+  await rig.presenter.dispose();
+  assert.equal(packedDestroyCount, 1);
 });
 
 test('worker-owned true-isosurface admission requires exact same-worker GPU authority', () => {

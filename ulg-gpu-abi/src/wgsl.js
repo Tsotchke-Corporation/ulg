@@ -7371,6 +7371,30 @@ fn render_phase_weight(surface_phase_id: f32, row_phase_id: f32, gas_fraction: f
   return select(0.0, 1.0, row_phase_id == surface_phase_id);
 }
 
+// Optical ownership partitions existing mass; it never mutates physics or
+// removes an unrelated carrier. Subtract dispersed / total mass from the phase
+// fraction (not a multiplicative discount of that fraction) for mixed phases.
+fn render_bulk_phase_weight(
+  particle_index: u32,
+  material_id: f32,
+  surface_phase_id: f32,
+  carrier_mass_kg: f32,
+  phase_weight: f32
+) -> f32 {
+  if (params.dispersed_medium_enabled == 0u || !(carrier_mass_kg > 0.0)
+    || !sph_dispersed_medium_optics_finite(carrier_mass_kg)) {
+    return phase_weight;
+  }
+  let dispersed = dispersed_medium_optics_rows[particle_index];
+  if (!sph_dispersed_medium_optics_row_is_ready(dispersed)
+    || dispersed.dispersed_material_id != material_id
+    || dispersed.dispersed_phase_id != surface_phase_id) {
+    return phase_weight;
+  }
+  let dispersed_fraction = min(dispersed.dispersed_mass_kg, carrier_mass_kg) / carrier_mass_kg;
+  return max(0.0, phase_weight - dispersed_fraction);
+}
+
 fn surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
 }
@@ -7868,11 +7892,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // so treating it as authoritative here could invent visible heat.
   var temperature_weighted = 0.0;
   var temperature_weight = 0.0;
-  // Positive optical-state surfaces become exclusive collective-medium
-  // routes whenever the authenticated sidecar is enabled. No ready match
-  // means an empty surface, never a fallback copy of carrier geometry.
-  let dispersed_surface_active = params.dispersed_medium_enabled != 0u
-    && s3.y > 0.0;
+  // Positive optical-state surfaces are reserved as exclusive
+  // collective-medium routes even before an authenticated sidecar is enabled.
+  // No ready match means an empty surface, never a fallback copy of carrier
+  // geometry. Ordinary material surfaces use opticalStateId 0.
+  let dispersed_surface_active = s3.y > 0.0;
   var dispersed_scattering_optical_depth = 0.0;
   var dispersed_absorption_optical_depth = 0.0;
   var dispersed_scattering_asymmetry = RenderFieldSignedF32ScaleAccumulator(
@@ -7982,7 +8006,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       continue;
     }
     let row4 = render_row4(particle_index);
-    let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, row4.x);
+    let phase_weight = render_bulk_phase_weight(
+      particle_index, material_id, phase_id, row0.w,
+      render_phase_weight(phase_id, row1.y, row2.y, row4.x)
+    );
     if (phase_weight <= 0.0) {
       continue;
     }
@@ -8070,7 +8097,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         ) {
           continue;
         }
-        let phase_weight = render_phase_weight(phase_id, row1.y, row2.y, render_row4(particle_index).x);
+        let phase_weight = render_bulk_phase_weight(
+          particle_index, material_id, phase_id, row0.w,
+          render_phase_weight(phase_id, row1.y, row2.y, render_row4(particle_index).x)
+        );
         if (phase_weight <= 0.0) {
           continue;
         }

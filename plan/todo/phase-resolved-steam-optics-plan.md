@@ -2,6 +2,71 @@
 
 Date: 2026-06-11 AKDT
 
+## Current checkpoint - 2026-09-04 AKDT
+
+Goal 2 remains open. Conserved phase-transfer/reaction-born condensed mass now
+feeds an authenticated resident optical sidecar and one material-general
+participating-volume renderer. Its optical state is not inferred from a gas
+label or scripted opacity. Pure vapor and condensed collective routes remain
+distinct; ordinary material surfaces use their own route.
+
+The desktop canonical water-cycle run reached 4.608 simulated seconds and
+showed vaporization/recondensation with negligible mass drift, but did not show
+a convincing transported steam plume. A follow-up shared render fix excludes
+the sidecar's matching condensed mass from bulk geometry without changing the
+physics ledger; mixed phases, other materials, and motion-smear re-sampling are
+covered by focused tests and a native GPU metamorphic test.
+
+The present compact-sphere-per-carrier morphology is a declared reduced model,
+not an unresolved droplet population closure. Droplet number/size evolution,
+airborne versus bulk deposition, and direct long-horizon plume evidence remain
+required work. The historical reduced CPU descriptor work below does not prove
+those resident microphysics requirements, and this plan must not be archived
+on renderer readiness alone.
+
+### Next resident microphysics slices (not yet implemented)
+
+First diagnose the existing long-run motion evidence: water exceeds the
+generic 50 m/s speed threshold late, and sodium's nearly stationary batches
+2-16 are followed by a large authoritative state change at batch 17. Compositor
+pixels agree with the latter trajectory; distinguish physical support/release
+from a state-writer defect before treating it as an optical/capture problem.
+
+The current four-lane transfer merges each lineage's target-phase mass into
+one position/velocity. A single liquid lane therefore cannot represent both a
+bulk pool and spatially separate airborne fog. Adding a smaller optical radius
+would not repair that transport mismatch.
+
+1. Derive species partial-pressure and saturation diagnostics on existing
+   SS-owned gas cells. Use vapor-species moles and free volume, not total mixed
+   gas pressure, for supersaturation. Keep this first slice diagnostic-only.
+2. Introduce an admitted sparse aerosol parcel family with conserved mass,
+   physical droplet multiplicity, position, material/phase and nucleus
+   provenance. Derive radius from mass, density and multiplicity; SPH sample
+   count and molecular entity count are not droplet count. Include this mass
+   in global phase/energy reductions before moving it out of bulk carriers.
+3. Add material-general activation/growth with equal-and-opposite vapor,
+   aerosol and latent-energy deltas. Nuclei population is an explicit
+   environmental input; homogeneous nucleation requires a declared kinetic
+   closure. Missing physical inputs must not manufacture a cloud.
+4. Couple airborne motion to the carrier gas with a declared drag/slip validity
+   domain. Classify direct bulk condensation and subsequent aerosol deposition
+   through an admitted interface witness, preserving mass/momentum/energy.
+5. Prove parcel-count invariance at fixed mass/multiplicity, no spurious
+   activation, phase/energy conservation, gas-following motion, bulk deposition,
+   and a real desktop transported scattering plume. Stochastic coalescence and
+   higher-order size spectra can follow this minimum coherent slice.
+
+This proposed representation follows the physical-multiplicity and coupled
+growth/transport approach of [Shima et al.](https://arxiv.org/html/physics/0701103v2),
+not one rendered sphere per simulated material sample. Its first low-inertia
+regime must be declared rather than assumed for all particles. For water,
+[Petters and Kreidenweis](https://acp.copernicus.org/articles/7/1961/2007/acp-7-1961-2007.html)
+provides a candidate hygroscopic activation closure, and
+[IAPWS saturation properties](https://iapws.org/technical-guidance/release/Supp-sat)
+provides a reference thermodynamic function. These are design inputs, not
+claims of implemented or scientifically calibrated runtime behavior.
+
 ## Purpose
 
 Make water, ice, water vapor, and visible steam render from phase-resolved

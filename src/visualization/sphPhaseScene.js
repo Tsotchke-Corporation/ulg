@@ -11,6 +11,8 @@ import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_HIERARCHY_AGGREGATE_NODE_ROW_LAYOUT,
   SCHROEDER_PHASE_VOLUME_DIAGNOSTIC_SUMMARY_ROW_LAYOUT,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES,
+  SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
@@ -18,7 +20,9 @@ import {
   ULG_SCHROEDER_PHASE_VOLUME_LEVEL_UPDATE_ASSIGNMENT_OVERLAY_SCHEMA,
   ULG_SCHROEDER_PORTABLE_SUMMARY_SCHEMA,
   ULG_SCHROEDER_RENDER_LOD_SUMMARY_SCHEMA,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   ULG_SPH_INTERFACE_SOURCE_KEY_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
@@ -32,6 +36,7 @@ import {
   buildOpticalGpuLookupQueries,
   buildOpticalGpuTable,
   decodeOpticalGpuLookupOutputRows,
+  gpuPhaseId,
   requestOpticalGpuDevice,
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
@@ -164,8 +169,17 @@ import {
   uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
 import {
+  buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization,
+  buildSphDispersedMediumOpticsProducerSeedRowsFromParticleState
+} from '../runtime/sph/sphDispersedMediumOpticsProducerGpu.js';
+import {
+  COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA,
+  collectiveOpticalRouteDescriptor
+} from '../runtime/sph/sphOpticalRouteIdentity.js';
+import {
   buildSphReactionTableFromViewState,
   reactionTablesExactlyEqual,
+  sphCollectiveOpticalStaticInputsFromViewState,
   thermalMaterialTablesExactlyEqual
 } from '../runtime/sph/sphStaticTableInputs.js';
 import {
@@ -243,8 +257,7 @@ import {
   gasPressureInterfaceCouplingSummary,
   gasPressureInterfaceForcePreview,
   gasPressureInterfaceForceSolver,
-  gasPressureSummaryFromResidentThermalPhase,
-  waterVaporOpticalStateFromGasSummary
+  gasPressureSummaryFromResidentThermalPhase
 } from '../runtime/sphPhaseDemo.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 import {
@@ -9929,7 +9942,11 @@ fn find_optical_material(material_id: f32, phase_id: f32, optical_state_id: f32)
           1.0
         );
       }
-      if (id_equal(row5.w, 0.0) && fallback_index < 0) {
+      // State-zero fallback is valid only for an ordinary state-zero query.
+      // Positive ids are reserved for canonical collective routes; falling
+      // those back to bulk condensed optics would grant opacity to a missing
+      // or mismatched route instead of failing closed.
+      if (id_equal(optical_state_id, 0.0) && id_equal(row5.w, 0.0) && fallback_index < 0) {
         fallback_index = i32(record_index);
       }
     }
@@ -10004,6 +10021,10 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let base_color = select(attenuated_base, vec3<f32>(0.55, 0.05, 0.18), blocked);
   let normal = normalize(in.normal);
   let view_dir = resident_view_direction(in.world_position);
+  // Positive optical-state ids are reserved for canonical collective routes.
+  // Those routes retain the condensed phase for material identity but are
+  // participating media, not polished condensed-material boundaries.
+  let is_vapor = round(in.phase_id) == 3.0 || in.optical_state_id > 0.5;
   let roughness = clamp(optical.roughness, 0.04, 1.0);
   let metalness = clamp(optical.metalness, 0.0, 1.0);
   // Recovery retains the closure-admitted material IOR (water = 1.333).
@@ -10013,6 +10034,7 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let refractive_authority = optical.found > 0.5
     && optical.blocked < 0.5
     && abs(optical.status - 255.0) > 0.5
+    && !is_vapor
     && refractive_index > 1.000001
     && refractive_draw_admitted();
   let dielectric_f0_scalar = pow(
@@ -10059,7 +10081,6 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   let refracted_geometry_valid = refracted_path_r.valid > 0.5
     && refracted_path_g.valid > 0.5
     && refracted_path_b.valid > 0.5;
-  let is_vapor = round(in.phase_id) == 3.0;
   let transmissive_surface = optical.transmission > 0.01
     && metalness < 0.1
     && !is_vapor
@@ -10138,6 +10159,20 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   var lit = diffuse + specular + env_specular
     + base_color * rim * ambient_visibility_scale
     + emissive;
+  if (is_vapor && !blocked) {
+    // This proxy is the boundary of an integrated extinction field, not a
+    // material interface. Use an isotropic single-scattering source under the
+    // admitted scene lights; normal-dependent GGX highlights would turn a
+    // cloud into polished droplets even though no such boundary exists.
+    let isotropic_phase = 0.07957747155; // 1 / (4 pi)
+    let hemi_mean_radiance = 0.5 * (hemi_sky + hemi_ground)
+      * 0.9 * direct_light_scale;
+    let incident_radiance = ambient_irradiance
+      + hemi_mean_radiance
+      + key_radiance
+      + fill_radiance;
+    lit = base_color * incident_radiance * isotropic_phase + emissive;
+  }
   // PBR transmission (MeshPhysicalMaterial model): transmissive dielectrics
   // render near-OPAQUE - transparency lives in the transmitted light, not in
   // alpha blending. Transmitted term = environment through the volume,
@@ -10187,8 +10222,17 @@ fn resident_surface_color(in: VertexOut) -> vec4<f32> {
   // Beer-Lambert coverage and must be premultiplied/non-depth-writing.  Treat
   // blocked vapor closures as visible diagnostics instead of invisible depth
   // occluders.
-  var vapor_alpha = clamp(1.0 - exp(-optical_depth), 0.0, 1.0);
-  if (blocked && is_vapor) {
+  // For a locally convex reconstructed volume, |n.v| is the normalized
+  // line-of-sight chord of a spherical patch. Applying Beer-Lambert to that
+  // physical path estimate softens the silhouette without inventing an
+  // opacity curve or altering the transported optical depth.
+  let projected_chord_fraction = clamp(ndotv, 0.0, 1.0);
+  let projected_optical_depth = optical_depth * projected_chord_fraction;
+  var vapor_alpha = clamp(1.0 - exp(-projected_optical_depth), 0.0, 1.0);
+  // Positive optical-state ids are reserved for canonical collective routes.
+  // Those routes fail closed when their typed closure is blocked; the legacy
+  // red diagnostic remains available only for an ordinary gas surface.
+  if (blocked && is_vapor && in.optical_state_id < 0.5) {
     vapor_alpha = 1.0;
   }
   let output_alpha = select(1.0, vapor_alpha, is_vapor);
@@ -11194,12 +11238,12 @@ function surfaceKeyForDescriptor({
   return `${opticalKey}|domain:${renderDomainKey || renderDomainKeyForId(domainId) || domainId}`;
 }
 
-function opticalBindingIdForSurfaceKey(surfaceKey) {
-  return stableOpticalStateId({ surfaceBindingKey: surfaceKey });
-}
-
 function renderDescriptorOf(value) {
   if (value && typeof value === 'object') {
+    const collectiveOpticalRoute = Boolean(
+      value.schema === COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+      || value.collectiveOpticalRoute === true
+    );
     const renderKey = materialKeyOf(value.renderKey ?? value.key ?? value.material);
     const material = materialKeyOf(value.material ?? ((renderKey === 'steam' || renderKey === 'ice') ? 'h2o' : renderKey));
     const phase = value.phase ?? (renderKey === 'steam' ? 'gas' : (renderKey === 'ice' ? 'solid' : null));
@@ -11221,12 +11265,49 @@ function renderDescriptorOf(value) {
       phase,
       opticalState,
       opticalStateKey: stableOpticalStateKey(opticalState),
-      // Geometry carries this stable binding id. Live pressure/temperature
-      // changes alter optical record values, never the vertex/table identity.
-      opticalStateId: Number.isFinite(Number(value.opticalStateId))
+      // Positive optical state IDs are reserved for canonical collective
+      // dispersed-medium routes. Ordinary carrier geometry always uses zero.
+      opticalStateId: collectiveOpticalRoute
+        && Number.isFinite(Number(value.opticalStateId))
         ? Number(value.opticalStateId)
-        : opticalBindingIdForSurfaceKey(surfaceKey),
+        : 0,
       surfaceIdentityKey: value.surfaceIdentityKey ?? null,
+      collectiveOpticalRoute,
+      collectiveOpticalRouteSchema: collectiveOpticalRoute
+        ? COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+        : null,
+      collectiveOpticalRouteKey: collectiveOpticalRoute
+        ? (value.routeKey ?? value.surfaceIdentityKey ?? null)
+        : null,
+      // Preserve the canonical route dimensions through the resident render
+      // descriptor.  The collective optical presentation gate revalidates
+      // these fields against the closure table before it grants visible-media
+      // authority; reducing the descriptor to a surface key/id makes every
+      // otherwise-valid route look forged at that boundary.
+      routeId: collectiveOpticalRoute
+        ? (value.routeId ?? value.collectiveOpticalRouteId ?? null)
+        : null,
+      materialId: collectiveOpticalRoute
+        ? (value.materialId ?? null)
+        : null,
+      condensedPhase: collectiveOpticalRoute
+        ? (value.condensedPhase ?? phase)
+        : null,
+      condensedPhaseId: collectiveOpticalRoute
+        ? (value.condensedPhaseId ?? value.phaseId ?? null)
+        : null,
+      vaporPhase: collectiveOpticalRoute
+        ? (value.vaporPhase ?? null)
+        : null,
+      vaporPhaseId: collectiveOpticalRoute
+        ? (value.vaporPhaseId ?? null)
+        : null,
+      closureModel: collectiveOpticalRoute
+        ? (value.closureModel ?? null)
+        : null,
+      closureModelId: collectiveOpticalRoute
+        ? (value.closureModelId ?? null)
+        : null,
       renderDomainId,
       renderDomainKey,
       surfaceKey
@@ -11242,12 +11323,81 @@ function renderDescriptorOf(value) {
     phase,
     opticalState: null,
     opticalStateKey: 'default',
-    opticalStateId: opticalBindingIdForSurfaceKey(surfaceKey),
+    opticalStateId: 0,
     surfaceIdentityKey: null,
+    collectiveOpticalRoute: false,
+    collectiveOpticalRouteSchema: null,
+    collectiveOpticalRouteKey: null,
     renderDomainId: 0,
     renderDomainKey: null,
     surfaceKey
   };
+}
+
+export function buildResidentCollectiveOpticalRouteDescriptorSet({
+  ordinaryDescriptors = [],
+  collectiveRoutes = []
+} = {}) {
+  if (!Array.isArray(ordinaryDescriptors) || !Array.isArray(collectiveRoutes)) {
+    throw new TypeError('resident optical descriptor inputs must be arrays');
+  }
+  const ordinary = ordinaryDescriptors.map((value) => {
+    const descriptor = renderDescriptorOf(value);
+    if (
+      descriptor.collectiveOpticalRoute === true
+      || descriptor.opticalStateId !== 0
+    ) {
+      throw new RangeError(
+        'ordinary resident surfaces must use optical state id zero'
+      );
+    }
+    return Object.freeze({ ...descriptor });
+  });
+  const routeIds = new Set();
+  const routeKeys = new Set();
+  const collective = collectiveRoutes.map((route) => {
+    // Re-derive the route so an arbitrary self-consistent key/id pair cannot
+    // claim canonical collective presentation authority.
+    const canonicalRoute = collectiveOpticalRouteDescriptor(route);
+    if (
+      canonicalRoute.schema !== COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+      || !Number.isSafeInteger(Number(canonicalRoute.opticalStateId))
+      || Number(canonicalRoute.opticalStateId) <= 0
+      || canonicalRoute.routeId !== canonicalRoute.opticalStateId
+      || canonicalRoute.routeKey !== canonicalRoute.surfaceIdentityKey
+      || routeIds.has(canonicalRoute.opticalStateId)
+      || routeKeys.has(canonicalRoute.routeKey)
+    ) {
+      throw new TypeError(
+        'resident collective optical surfaces require unique canonical route descriptors'
+      );
+    }
+    routeIds.add(canonicalRoute.opticalStateId);
+    routeKeys.add(canonicalRoute.routeKey);
+    const descriptor = Object.freeze(renderDescriptorOf({
+      ...canonicalRoute,
+      collectiveOpticalRoute: true,
+      surfaceIdentityKey: canonicalRoute.routeKey,
+      opticalStateId: canonicalRoute.opticalStateId,
+      renderDomainId: 0,
+      renderDomainKey: null
+    }));
+    if (
+      descriptor.opticalStateId !== canonicalRoute.opticalStateId
+      || descriptor.surfaceKey !== canonicalRoute.routeKey
+      || descriptor.collectiveOpticalRoute !== true
+    ) {
+      throw new RangeError(
+        'resident collective optical surface lost its canonical route identity'
+      );
+    }
+    return Object.freeze({ route: canonicalRoute, descriptor });
+  });
+  return Object.freeze({
+    ordinaryDescriptors: Object.freeze(ordinary),
+    collective: Object.freeze(collective),
+    positiveOpticalStateIds: Object.freeze([...routeIds].sort((a, b) => a - b))
+  });
 }
 
 export function residentRenderGasPressureSummary({
@@ -11285,47 +11435,12 @@ export function residentRenderGasPressureSummary({
 }
 
 export function applyResidentWaterVaporOpticalStateToSurfaceBatches(
-  batches = [],
-  gasPressureSummary = null
+  batches = []
 ) {
-  const opticalState = waterVaporOpticalStateFromGasSummary(gasPressureSummary);
-  return (batches || []).map((batch) => {
-    const material = String(batch?.material || batch?.descriptor?.material || '').toLowerCase();
-    const phase = String(batch?.phase || batch?.descriptor?.phase || '').toLowerCase();
-    if (material !== 'h2o' || (phase !== 'gas' && phase !== 'vapor')) return batch;
-    const descriptor = renderDescriptorOf({
-      ...(batch.descriptor || {}),
-      renderKey: batch.renderKey || batch.descriptor?.renderKey || 'steam',
-      material: 'h2o',
-      phase: 'gas',
-      opticalState,
-      // The resident vapor lane has one optical state for each structural
-      // material/phase/domain cohort. Never adopt a full-readback key that
-      // may have been derived from the previous pressure/temperature values.
-      surfaceIdentityKey: batch.descriptor?.surfaceIdentityKey ?? surfaceKeyForDescriptor({
-        renderKey: batch.renderKey || batch.descriptor?.renderKey || 'steam',
-        material: 'h2o',
-        phase: 'gas',
-        renderDomainId: batch.renderDomainId ?? batch.descriptor?.renderDomainId,
-        renderDomainKey: batch.renderDomainKey ?? batch.descriptor?.renderDomainKey
-      }),
-      renderDomainId: batch.renderDomainId ?? batch.descriptor?.renderDomainId,
-      renderDomainKey: batch.renderDomainKey ?? batch.descriptor?.renderDomainKey
-    });
-    return {
-      ...batch,
-      surfaceKey: descriptor.surfaceKey,
-      renderKey: descriptor.renderKey,
-      material: descriptor.material,
-      phase: descriptor.phase,
-      opticalState: descriptor.opticalState,
-      opticalStateKey: descriptor.opticalStateKey,
-      opticalStateId: descriptor.opticalStateId,
-      renderDomainId: descriptor.renderDomainId,
-      renderDomainKey: descriptor.renderDomainKey,
-      descriptor
-    };
-  });
+  // Compatibility shim for external diagnostics. Aggregate gas pressure is
+  // not conserved condensed-mass evidence and therefore may not mutate live
+  // render-route authority.
+  return [...(batches || [])];
 }
 
 export function materialKeyForSurfaceMaterialId(
@@ -11363,14 +11478,44 @@ export function renderDescriptorForSurfaceRecord(
     ?? renderKeyForMaterialPhase(material, phase)
     ?? sourceSurface?.material
     ?? `surface-${surfaceIndex}`;
+  const opticalStateId = Number(sourceSurface?.opticalStateId);
+  // Positive optical IDs are an ABI-level collective-route discriminator.
+  // Compact GPU metadata may retain only the numeric ID and stable surface
+  // key, while richer CPU metadata also carries the explicit route schema.
+  const collectiveOpticalRoute = Boolean(
+    sourceSurface?.collectiveOpticalRoute === true
+    || sourceSurface?.schema
+      === COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+    || sourceSurface?.collectiveOpticalRouteSchema
+      === COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+    || (Number.isSafeInteger(opticalStateId) && opticalStateId > 0)
+  );
+  const collectiveOpticalRouteKey =
+    sourceSurface?.collectiveOpticalRouteKey
+    ?? sourceSurface?.routeKey
+    ?? sourceSurface?.surfaceIdentityKey
+    ?? sourceSurface?.surfaceKey
+    ?? null;
   return renderDescriptorOf({
+    schema: sourceSurface?.schema
+      ?? sourceSurface?.collectiveOpticalRouteSchema,
+    collectiveOpticalRoute,
+    routeKey: collectiveOpticalRouteKey,
+    routeId: sourceSurface?.routeId ?? sourceSurface?.collectiveOpticalRouteId,
     material,
+    materialId: sourceSurface?.materialId,
     phase,
+    condensedPhase: sourceSurface?.condensedPhase ?? phase,
+    condensedPhaseId: sourceSurface?.condensedPhaseId ?? sourceSurface?.phaseId,
+    vaporPhase: sourceSurface?.vaporPhase,
+    vaporPhaseId: sourceSurface?.vaporPhaseId,
+    closureModel: sourceSurface?.closureModel,
+    closureModelId: sourceSurface?.closureModelId,
     renderKey,
     surfaceIdentityKey: sourceSurface?.surfaceIdentityKey ?? sourceSurface?.surfaceKey,
     opticalState: sourceSurface?.opticalState || null,
     opticalStateKey: sourceSurface?.opticalStateKey ?? 'default',
-    opticalStateId: sourceSurface?.opticalStateId,
+    opticalStateId,
     renderDomainId: sourceSurface?.renderDomainId,
     renderDomainKey: sourceSurface?.renderDomainKey
   });
@@ -11626,6 +11771,9 @@ function opticalPhaseOf(optics = {}, descriptorOrRow = {}) {
 }
 
 function isVaporOpticalSurface(optics = {}, descriptorOrRow = {}) {
+  if (Number(descriptorOrRow.opticalStateId ?? optics.opticalStateId) > 0) {
+    return true;
+  }
   const phase = opticalPhaseOf(optics, descriptorOrRow);
   const material = descriptorOrRow.material ?? optics.material ?? null;
   const renderKey = descriptorOrRow.renderKey ?? descriptorOrRow.renderMaterialKey ?? null;
@@ -11755,6 +11903,148 @@ export function closureDerivedSurfaceOpticalPresentation({
     opticalProvenanceSource: optics?.provenance?.source
       ?? optics?.source
       ?? null
+  });
+}
+
+// A collective dispersed-medium field stores integrated scattering and
+// absorption optical depth, scaled by the surface isolation value. Marching
+// cubes therefore extracts its boundary at tau = 1 exactly:
+//
+//   field = isolation * tau;  field == isolation  =>  tau == 1
+//
+// The boundary opacity must come from that transported optical-depth field,
+// not from the static bulk condensed-material opacity used to seed its color.
+// Beer-Lambert gives transmission exp(-tau) and opacity 1 - exp(-tau). The
+// static closure table gates this presentation so a missing/blocked material
+// response cannot acquire visible-media authority merely by declaring a
+// positive route id. With no dynamic moments, the field remains empty and no
+// geometry is emitted even though the ready route has a renderable opacity.
+export function collectiveOpticalDepthIsosurfacePresentation({
+  optics = {},
+  descriptorOrRow = {},
+  closureTable = null
+} = {}) {
+  const opticalStateId = Number(descriptorOrRow?.opticalStateId);
+  const routeKey = descriptorOrRow?.collectiveOpticalRouteKey
+    ?? descriptorOrRow?.surfaceIdentityKey
+    ?? descriptorOrRow?.surfaceKey
+    ?? null;
+  const material = String(descriptorOrRow?.material ?? '').trim();
+  const phase = String(
+    descriptorOrRow?.condensedPhase ?? descriptorOrRow?.phase ?? ''
+  ).trim().toLowerCase();
+  const materialId = material ? stableOpticalMaterialId(material) : null;
+  const condensedPhaseId = phase ? gpuPhaseId(phase) : null;
+  const routeId = Number(descriptorOrRow?.routeId);
+  const canonicalRoute = Boolean(
+    descriptorOrRow?.collectiveOpticalRoute === true
+    && descriptorOrRow?.collectiveOpticalRouteSchema
+      === COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+    && Number.isSafeInteger(opticalStateId)
+    && opticalStateId > 0
+    && routeId === opticalStateId
+    && material.length > 0
+    && Number(descriptorOrRow?.materialId) === materialId
+    && [GPU_PHASE_IDS.solid, GPU_PHASE_IDS.liquid].includes(condensedPhaseId)
+    && Number(
+      descriptorOrRow?.condensedPhaseId ?? descriptorOrRow?.phaseId
+    ) === condensedPhaseId
+    && typeof routeKey === 'string'
+    && routeKey.length > 0
+  );
+  const closureMetadata = canonicalRoute
+    && closureTable?.schema
+      === ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA
+    && Array.isArray(closureTable?.metadata)
+    ? closureTable.metadata.find((row) => (
+        Number(row?.opticalStateId) === opticalStateId
+        && Number(row?.routeId) === opticalStateId
+        && Number(row?.dispersedMaterialId) === materialId
+        && Number(row?.condensedPhaseId) === condensedPhaseId
+        && row?.routeSchema
+          === COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA
+        && row?.routeKey === routeKey
+      )) ?? null
+    : null;
+  const closureReady = Boolean(
+    closureMetadata?.status
+      === SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.ready
+    && Array.isArray(closureTable?.readyOpticalStateIds)
+    && closureTable.readyOpticalStateIds.includes(opticalStateId)
+  );
+  const closureRowOffset = Number.isSafeInteger(closureMetadata?.rowIndex)
+    && closureMetadata.rowIndex >= 0
+    && closureTable?.rows instanceof Float32Array
+    && Number.isSafeInteger(closureTable?.rowStrideFloats)
+    && closureTable.rowStrideFloats > 0
+    ? closureMetadata.rowIndex * closureTable.rowStrideFloats
+    : null;
+  const closureValue = (lane) => closureRowOffset == null
+    ? null
+    : Number(closureTable.rows[closureRowOffset + lane]);
+  const morphologyModelId = closureValue(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.morphologyModelId
+  );
+  const scatteringParameter = closureValue(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.scatteringEfficiencyQsca
+  );
+  const absorptionParameter = closureValue(
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.absorptionEfficiencyQabs
+  );
+  let singleScatteringAlbedo = null;
+  if (
+    closureReady
+    && morphologyModelId
+      === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+        .singleCompactSphereComplexIndex
+    && absorptionParameter === 0
+  ) {
+    // k=0 makes the compact-sphere response lossless at the declared
+    // wavelength: extinction is scattering, so the scalar transported field
+    // may use an achromatic unit scattering source under scene illumination.
+    singleScatteringAlbedo = 1;
+  } else if (
+    closureReady
+    && Number.isFinite(scatteringParameter)
+    && Number.isFinite(absorptionParameter)
+    && scatteringParameter + absorptionParameter > 0
+  ) {
+    singleScatteringAlbedo = scatteringParameter
+      / (scatteringParameter + absorptionParameter);
+  }
+  const achromaticScattering = singleScatteringAlbedo === 1;
+  const opticalDepth = closureReady ? 1 : 0;
+  const transmission = closureReady ? Math.exp(-opticalDepth) : null;
+  const opacity = closureReady ? -Math.expm1(-opticalDepth) : 0;
+  const provenanceSource = closureMetadata?.provenance?.source
+    ?? optics?.provenance?.source
+    ?? optics?.source
+    ?? null;
+  return Object.freeze({
+    opticalResponseAuthorityFlag: canonicalRoute ? 1 : 0,
+    opticalResponseAuthority: closureReady
+      ? 'conserved-dispersed-extinction-optical-depth-isosurface'
+      : 'collective-optical-depth-closure-blocked-hidden',
+    opticalResponseReady: closureReady,
+    opticalVisibilityFlag: closureReady ? 1 : 0,
+    opticalVisibilityReason: closureReady
+      ? 'derived-collective-optical-depth-isosurface-visible'
+      : 'collective-optical-depth-closure-blocked',
+    opticalOpacity: opacity,
+    opticalEffectiveOpacity: opacity,
+    opticalDepth,
+    // The field carries integrated optical depth rather than one uniform
+    // per-metre coefficient; publishing zero here would falsely claim a
+    // measured absence, so retain an explicit null.
+    opticalScatteringCoefficientPerM: null,
+    opticalSingleScatteringAlbedo: singleScatteringAlbedo,
+    opticalAchromaticScattering: achromaticScattering,
+    opticalScatteringSourceLinear: achromaticScattering ? [1, 1, 1] : null,
+    opticalTransmission: transmission,
+    // A participating medium is not a polished material boundary.
+    opticalRoughness: closureReady ? 1 : null,
+    opticalBlockedFlag: closureReady ? 0 : 1,
+    opticalProvenanceSource: provenanceSource
   });
 }
 
@@ -14502,9 +14792,10 @@ export function createProductEventSurfaceBatches({
 
 export function createOpticalGpuTableForSurfaceBatches(batches, {
   materialProperties = null,
-  materialPropertyBankGpuWarmInputTable = null
+  materialPropertyBankGpuWarmInputTable = null,
+  dispersedMediumOpticalClosureTable = null
 } = {}) {
-  return buildOpticalGpuTable(batches.map((batch) => {
+  const table = buildOpticalGpuTable(batches.map((batch) => {
     const pathLengthM = opticalPathLengthMForSurfaceBatch(batch);
     return {
       material: batch.material,
@@ -14525,6 +14816,120 @@ export function createOpticalGpuTableForSurfaceBatches(batches, {
     materialProperties: materialProperties || {},
     materialPropertyBankGpuWarmInputTable
   });
+  return applyCollectiveOpticalDepthPresentationToGpuTable(table, batches, {
+    closureTable: dispersedMediumOpticalClosureTable
+  });
+}
+
+// The native surface shader consumes the optical GPU table directly rather
+// than the renderer-neutral surface metadata. Keep both consumers on the same
+// physical contract: a collective field is extracted at integrated optical
+// depth tau=1, so its boundary has Beer-Lambert transmission exp(-1). This is
+// a presentation transform only; the conserved moments and material closure
+// rows remain untouched.
+export function applyCollectiveOpticalDepthPresentationToGpuTable(
+  table,
+  batches = [],
+  { closureTable = null } = {}
+) {
+  if (
+    !table?.schema
+    || !(table.records instanceof Float32Array)
+    || !Array.isArray(table.recordMetadata)
+  ) {
+    throw new TypeError('collective optical presentation requires an optical GPU table');
+  }
+  const collectiveBatches = (batches || []).filter((batch) => (
+    batch?.collectiveOpticalRoute === true
+    || batch?.descriptor?.collectiveOpticalRoute === true
+  ));
+  if (collectiveBatches.length === 0) return table;
+
+  const records = new Float32Array(table.records);
+  const metadata = table.recordMetadata.map((record) => ({ ...record }));
+  const layout = table.recordLayout || OPTICAL_GPU_RECORD_LAYOUT;
+  const stride = table.recordStrideFloats || layout.length;
+  const fieldIndex = (name) => opticalRecordIndex(layout, name);
+  const write = (recordIndex, name, value) => {
+    const index = fieldIndex(name);
+    if (index < 0) {
+      throw new RangeError(`optical GPU table is missing ${name}`);
+    }
+    records[recordIndex * stride + index] = value;
+  };
+  let readyCount = 0;
+  let blockedCount = 0;
+
+  for (const batch of collectiveBatches) {
+    const descriptor = batch?.descriptor || batch;
+    const coverage = opticalCoverageKey({
+      material: batch?.material ?? descriptor?.material,
+      phase: batch?.phase ?? descriptor?.phase,
+      opticalStateKey: descriptor?.opticalStateKey ?? batch?.opticalStateKey,
+      opticalState: descriptor?.opticalState ?? batch?.opticalState,
+      opticalStateId: descriptor?.opticalStateId ?? batch?.opticalStateId ?? 0
+    });
+    const record = metadata.find((candidate) => (
+      opticalCoverageKey(candidate) === coverage
+    ));
+    if (!record || !Number.isSafeInteger(record.recordIndex)) {
+      throw new RangeError(
+        `collective optical route ${batch?.surfaceKey || coverage} has no optical GPU record`
+      );
+    }
+    const presentation = collectiveOpticalDepthIsosurfacePresentation({
+      descriptorOrRow: descriptor,
+      closureTable
+    });
+    const ready = presentation.opticalResponseReady === true;
+    write(record.recordIndex, 'roughness', ready ? presentation.opticalRoughness : 1);
+    write(record.recordIndex, 'transmission', ready ? presentation.opticalTransmission : 0);
+    write(record.recordIndex, 'opacity', presentation.opticalEffectiveOpacity);
+    write(record.recordIndex, 'opticalDepth', presentation.opticalDepth);
+    write(record.recordIndex, 'blocked', presentation.opticalBlockedFlag);
+    write(record.recordIndex, 'status', ready ? 1 : 255);
+    // The collective field already transports integrated scattering and
+    // absorption depth. Do not tint it a second time with the condensed bulk
+    // path coefficient. A lossless scalar scattering closure has no admitted
+    // spectral tint, so its source term is neutral and scene illumination
+    // supplies the visible colour.
+    write(record.recordIndex, 'absorptionCoefficientPerM', 0);
+    write(record.recordIndex, 'scatteringCoefficientPerM', 0);
+    if (ready && presentation.opticalAchromaticScattering === true) {
+      for (const name of [
+        'baseColorLinearR',
+        'baseColorLinearG',
+        'baseColorLinearB',
+        'attenuationLinearR',
+        'attenuationLinearG',
+        'attenuationLinearB'
+      ]) {
+        write(record.recordIndex, name, 1);
+      }
+    }
+    record.underlyingMaterialClosureBlocked = record.blocked === true;
+    record.blocked = !ready;
+    record.status = ready ? 1 : 255;
+    record.collectiveOpticalPresentation = presentation;
+    record.collectiveOpticalAchromaticScattering =
+      presentation.opticalAchromaticScattering === true;
+    record.collectiveOpticalRoute = true;
+    record.collectiveOpticalRouteKey =
+      descriptor?.collectiveOpticalRouteKey ?? batch?.collectiveOpticalRouteKey ?? null;
+    if (ready) readyCount += 1;
+    else blockedCount += 1;
+  }
+
+  return {
+    ...table,
+    records,
+    recordMetadata: metadata,
+    collectiveOpticalPresentationRecordCount: collectiveBatches.length,
+    collectiveOpticalPresentationReadyCount: readyCount,
+    collectiveOpticalPresentationBlockedCount: blockedCount,
+    collectiveOpticalPresentationAuthority:
+      'conserved-dispersed-extinction-optical-depth-isosurface'
+  };
 }
 
 export function createOpticalGpuLookupForSurfaceBatches(table, batches) {
@@ -15921,6 +16326,13 @@ export function createSphPhaseScene(container, {
     const status = currentWorkerOffscreenPresentationStatus();
     return {
       workerOffscreenPresentationStatus: status?.status ?? null,
+      // `status` is the bridge's latest event and can transiently contain a
+      // render-completion event. Publish ownership and visibility as stable
+      // semantic fields instead of asking verification to infer them from an
+      // overloaded event string.
+      workerOffscreenPresentationDisplayOwner: status?.displayOwner ?? null,
+      workerOffscreenPresentationDisplayCanvasVisible:
+        status?.displayCanvasVisible ?? null,
       workerOffscreenPresentationReason: status?.reason ?? null,
       workerOffscreenPresentationTransport: status?.transport ?? null,
       workerOffscreenPresentationDisplayHandoff: status?.displayHandoff ?? null,
@@ -17715,6 +18127,11 @@ export function createSphPhaseScene(container, {
 
   const surfaces = new Map();
   let opticalGpuTable = buildOpticalGpuTable([]);
+  let collectiveOpticalRouteDescriptors = Object.freeze([]);
+  let collectiveOpticalGpuTable = buildOpticalGpuTable([]);
+  let sphDispersedMediumOpticalClosureTable = null;
+  let sphDispersedMediumOpticsSeedRows = null;
+  let sphProspectiveFourLaneDispersedMediumOpticsSeedRows = null;
   let opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, []);
   let opticalGpuLookupGeneration = 0;
   let pendingOpticalGpuLookup = null;
@@ -21671,8 +22088,7 @@ export function createSphPhaseScene(container, {
       if (needsSurfaceTableSeed && hasRenderRowsReadback) {
         const decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
           materialProperties: materialProperties || {},
-          reactionTable: sphReactionTable,
-          gasPressureSummary
+          reactionTable: sphReactionTable
         });
         const particleBatches = createContinuousSurfaceBatches({
           positionsM: decoded.positionsM,
@@ -37036,6 +37452,12 @@ fn main(
     const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
     const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
+    const effectiveDispersedMediumOpticsSeedRows = Boolean(
+      effectiveThermalMaterialTable
+      && mlsMpmMechanicsMaterialTable
+    )
+      ? sphDispersedMediumOpticsSeedRows
+      : null;
     // Dynamic reaction routing is admitted only by the serialized multi-step
     // SS worker lane below. This direct single-step path consumes the already
     // resolved effective law groups and never provisions a dormant watcher.
@@ -37306,6 +37728,14 @@ fn main(
           readbackMode: requestedReadbackMode,
           thermalMaterialTable: effectiveThermalMaterialTable,
           mechanicsMaterialTable: mlsMpmMechanicsMaterialTable,
+          ...(effectiveDispersedMediumOpticsSeedRows
+            ? {
+                dispersedMediumOpticalClosureTable:
+                  sphDispersedMediumOpticalClosureTable,
+                dispersedMediumOpticsSeedRows:
+                  effectiveDispersedMediumOpticsSeedRows
+              }
+            : {}),
           thermalStepOptions: {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
@@ -37616,6 +38046,15 @@ fn main(
     const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
     const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
+    const effectiveDispersedMediumOpticsSeedRows = Boolean(
+      effectiveThermalMaterialTable
+      && mlsMpmMechanicsMaterialTable
+    )
+      ? (
+          sphDispersedMediumOpticsSeedRows
+          ?? sphProspectiveFourLaneDispersedMediumOpticsSeedRows
+        )
+      : null;
     let authoritativeDynamicReactionRouting = false;
     let effectiveReactionActivationWatchTable = null;
     if (
@@ -39212,6 +39651,14 @@ fn main(
           readbackMode: requestedReadbackMode,
           thermalMaterialTable: effectiveThermalMaterialTable,
           mechanicsMaterialTable: mlsMpmMechanicsMaterialTable,
+          ...(effectiveDispersedMediumOpticsSeedRows
+            ? {
+                dispersedMediumOpticalClosureTable:
+                  sphDispersedMediumOpticalClosureTable,
+                dispersedMediumOpticsSeedRows:
+                  effectiveDispersedMediumOpticsSeedRows
+              }
+            : {}),
           thermalStepOptions: {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
@@ -42161,7 +42608,9 @@ fn main(
   } = {}) {
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, {
       materialProperties,
-      materialPropertyBankGpuWarmInputTable
+      materialPropertyBankGpuWarmInputTable,
+      dispersedMediumOpticalClosureTable:
+        sphDispersedMediumOpticalClosureTable
     });
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     opticalGpuLookupGeneration += 1;
@@ -42215,14 +42664,20 @@ fn main(
       opticalTableCoversSurfaceBatches(cachedOpticalGpuTable, batches)
       && opticalTableMatchesMaterialBankWarmInputs(cachedOpticalGpuTable, materialPropertyBankGpuWarmInputTable)
     ) {
-      opticalGpuTable = {
-        ...cachedOpticalGpuTable,
-        status: 'static-table-cache-hit'
-      };
+      opticalGpuTable = applyCollectiveOpticalDepthPresentationToGpuTable(
+        {
+          ...cachedOpticalGpuTable,
+          status: 'static-table-cache-hit'
+        },
+        batches,
+        { closureTable: sphDispersedMediumOpticalClosureTable }
+      );
     } else {
       opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, {
         materialProperties,
-        materialPropertyBankGpuWarmInputTable
+        materialPropertyBankGpuWarmInputTable,
+        dispersedMediumOpticalClosureTable:
+          sphDispersedMediumOpticalClosureTable
       });
     }
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
@@ -42603,10 +43058,20 @@ fn main(
           : Math.min(liveBandMatchK, meltTransitionK > 0 ? meltTransitionK + 50 : 0));
       const optics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor)
         || opticalRenderParams(opticalQueryForDescriptor(batch.descriptor, properties));
-      const opticalPresentation = closureDerivedSurfaceOpticalPresentation({
-        optics,
-        descriptorOrRow: batch.descriptor
-      });
+      const collectiveOpticalRoute = Boolean(
+        batch.collectiveOpticalRoute === true
+        || batch.descriptor?.collectiveOpticalRoute === true
+      );
+      const opticalPresentation = collectiveOpticalRoute
+        ? collectiveOpticalDepthIsosurfacePresentation({
+            optics,
+            descriptorOrRow: batch.descriptor,
+            closureTable: sphDispersedMediumOpticalClosureTable
+          })
+        : closureDerivedSurfaceOpticalPresentation({
+            optics,
+            descriptorOrRow: batch.descriptor
+          });
       const renderLayer = renderLayerFromOpticalResponse(optics, batch.descriptor);
       const renderOrder = renderOrderFromOpticalResponse(optics, batch.descriptor);
       const depthWriteFlag = renderDepthWriteFromOpticalResponse(optics, batch.descriptor) ? 1 : 0;
@@ -42615,6 +43080,24 @@ fn main(
         : (renderLayer === 'refractive-surface' ? 2 : 0);
       return {
         surfaceKey: batch.surfaceKey,
+        surfaceIdentityKey:
+          batch.descriptor?.surfaceIdentityKey
+          ?? (collectiveOpticalRoute ? batch.surfaceKey : null),
+        collectiveOpticalRoute,
+        collectiveOpticalRouteSchema: collectiveOpticalRoute
+          ? (batch.descriptor?.collectiveOpticalRouteSchema
+              ?? COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA)
+          : null,
+        collectiveOpticalRouteKey: collectiveOpticalRoute
+          ? (batch.descriptor?.collectiveOpticalRouteKey
+              ?? batch.collectiveOpticalRouteKey
+              ?? batch.surfaceKey)
+          : null,
+        collectiveOpticalRouteId: collectiveOpticalRoute
+          ? (batch.descriptor?.opticalStateId
+              ?? batch.collectiveOpticalRouteId
+              ?? batch.opticalStateId)
+          : null,
         material: batch.material,
         phase: batch.phase,
         emissiveTemperatureK,
@@ -42674,12 +43157,21 @@ fn main(
   function createMaterialInterfaceSurfaceTableForResidentState(surfaceState = sphResidentRenderSurfaceState) {
     const fieldBatches = Array.isArray(surfaceState?.fieldBatches) ? surfaceState.fieldBatches : [];
     if (fieldBatches.length === 0) return surfaceState?.surfaceTable || null;
+    // Collective optical routes are render-only condensed-in-vapor fields.
+    // They never acquire mechanical material-interface authority.
+    const materialInterfaceFieldBatches = fieldBatches.filter((batch) => (
+      batch?.collectiveOpticalRoute !== true
+      && batch?.descriptor?.collectiveOpticalRoute !== true
+    ));
     const policy = scene.userData.sphMaterialInterfaceSurfaceTablePolicy || resolvedMaterialInterfaceSurfaceTablePolicy;
-    const maxResolution = diagnosticRenderFieldResolutionForBudget(fieldBatches.length, {
+    const maxResolution = diagnosticRenderFieldResolutionForBudget(materialInterfaceFieldBatches.length, {
       maxFieldCells: policy.maxFieldCells,
       maxResolution: policy.maxResolution
     });
-    const table = createRenderFieldSurfaceTableForBatches(fieldBatches, { maxResolution });
+    const table = createRenderFieldSurfaceTableForBatches(
+      materialInterfaceFieldBatches,
+      { maxResolution }
+    );
     return {
       ...table,
       status: 'material-interface-coarse-surface-table-ready',
@@ -42692,7 +43184,9 @@ fn main(
       materialInterfaceMaxFieldCells: policy.maxFieldCells,
       materialInterfaceMaxResolution: maxResolution,
       materialInterfaceConfiguredMaxResolution: policy.maxResolution,
-      materialInterfaceCoarseTable: true
+      materialInterfaceCoarseTable: true,
+      collectiveOpticalRouteSurfaceCountExcluded:
+        fieldBatches.length - materialInterfaceFieldBatches.length
     };
   }
 
@@ -42976,7 +43470,8 @@ fn main(
     productEventSurfaceBatches = [],
     materialProperties = null,
     reactionTable = null,
-    smoothingLengthM = null
+    smoothingLengthM = null,
+    collectiveRoutes = collectiveOpticalRouteDescriptors
   } = {}) {
     const batchesByKey = new Map();
     const countByMaterial = new Map();
@@ -43072,6 +43567,92 @@ fn main(
           reactionProductMaterial: productMaterials.has(material),
           source: 'resident-known-phase-surface'
         });
+      }
+    }
+    const descriptorSet = buildResidentCollectiveOpticalRouteDescriptorSet({
+      ordinaryDescriptors: [...batchesByKey.values()].map(
+        (batch) => batch?.descriptor ?? batch
+      ),
+      collectiveRoutes: collectiveRoutes || []
+    });
+    const presentableCollectiveEntries = descriptorSet.collective.filter(
+      ({ descriptor }) => {
+        const material = canonicalMaterialKeyByStableId(
+          descriptor.material,
+          materialProperties,
+          reactionTable
+        );
+        if (!material || !materials.has(material)) return false;
+        return collectiveOpticalDepthIsosurfacePresentation({
+          descriptorOrRow: descriptor,
+          closureTable: sphDispersedMediumOpticalClosureTable
+        }).opticalResponseReady === true;
+      }
+    );
+    const collectiveRouteIds = new Set(
+      presentableCollectiveEntries.map(({ route }) => route.opticalStateId)
+    );
+    for (const { route, descriptor } of presentableCollectiveEntries) {
+      if (batchesByKey.has(route.routeKey)) {
+        throw new RangeError(
+          `resident collective optical route collides with surface ${route.routeKey}`
+        );
+      }
+      const color = colorForResidentSurfaceDescriptor(
+        descriptor,
+        materialProperties
+      );
+      batchesByKey.set(route.routeKey, {
+        surfaceKey: route.routeKey,
+        renderKey: descriptor.renderKey,
+        material: descriptor.material,
+        phase: descriptor.phase,
+        opticalState: descriptor.opticalState,
+        opticalStateKey: descriptor.opticalStateKey,
+        opticalStateId: descriptor.opticalStateId,
+        renderDomainId: 0,
+        renderDomainKey: null,
+        descriptor,
+        positionsM: [],
+        normalizedPositions: [],
+        colorsRgb: [
+          clamp(color[0] ?? 1, 0, 1),
+          clamp(color[1] ?? 1, 0, 1),
+          clamp(color[2] ?? 1, 0, 1)
+        ],
+        bounds: emptyBounds(),
+        count: 1,
+        surfaceRadiusM: radiusByMaterial.get(descriptor.material)
+          ?? ((Number.isFinite(smoothingLengthM) && smoothingLengthM > 0)
+              ? smoothingLengthM
+              : 0.25),
+        representativeParticleRadiusM:
+          representativeRadiusByMaterial.get(descriptor.material) ?? null,
+        smoothingLengthM: smoothingLengthByMaterial.get(descriptor.material)
+          ?? ((Number.isFinite(smoothingLengthM) && smoothingLengthM > 0)
+              ? smoothingLengthM
+              : null),
+        reactionProductMaterial: false,
+        collectiveOpticalRoute: true,
+        collectiveOpticalRouteKey: route.routeKey,
+        collectiveOpticalRouteId: route.routeId,
+        source: 'resident-canonical-collective-optical-route'
+      });
+    }
+    for (const batch of batchesByKey.values()) {
+      const opticalStateId = Number(
+        batch.descriptor?.opticalStateId ?? batch.opticalStateId ?? 0
+      );
+      if (batch.collectiveOpticalRoute === true) {
+        if (!collectiveRouteIds.has(opticalStateId)) {
+          throw new RangeError(
+            'resident collective optical surface lost its canonical route identity'
+          );
+        }
+      } else if (opticalStateId !== 0) {
+        throw new RangeError(
+          'ordinary resident surfaces must use optical state id zero'
+        );
       }
     }
     return [...batchesByKey.values()];
@@ -43294,14 +43875,11 @@ fn main(
       || Boolean(renderFieldExecution?.renderFieldReadback);
     for (const fieldSurface of surfaceFields) {
       scheduleEnvironmentMap();
-      const descriptor = renderDescriptorOf({
-        material: fieldSurface.material,
-        phase: fieldSurface.phase,
-        renderKey: fieldSurface.renderKey,
-        opticalState: fieldSurface.opticalState || null,
-        renderDomainId: fieldSurface.renderDomainId,
-        renderDomainKey: fieldSurface.renderDomainKey
-      });
+      const descriptor = renderDescriptorForSurfaceRecord(
+        fieldSurface,
+        fieldSurface.index ?? 0,
+        { materialProperties, reactionTable: sphReactionTable }
+      );
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
       const baseConfig = surfaceConfigForDescriptor(descriptor.renderKey, descriptor.phase);
       const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, descriptor);
@@ -43600,6 +44178,76 @@ fn main(
       currentThermalEnvironmentAuthority;
     scene.userData.sphWallReservoirAuthority =
       currentWallReservoirAuthority;
+    const collectiveOpticalInputs = measure(
+      'collectiveOpticalStaticInputs',
+      () => sphCollectiveOpticalStaticInputsFromViewState({
+        materialProperties: materialProperties || {},
+        materials: (skipCpuSurfaceGeometry
+          ? residentSeedBatches
+          : batches).map((batch) => batch?.descriptor ?? batch),
+        initialParticleSpacing: {
+          materialPropertyBankGpuWarmInputTable:
+            nextSphGpuParticleState?.materialPropertyBankWarmInputTable ?? null
+        }
+      })
+    );
+    collectiveOpticalRouteDescriptors =
+      collectiveOpticalInputs.collectiveOpticalRouteDescriptors;
+    collectiveOpticalGpuTable =
+      collectiveOpticalInputs.collectiveOpticalGpuTable;
+    sphDispersedMediumOpticalClosureTable =
+      collectiveOpticalInputs.dispersedMediumOpticalClosureTable;
+    const phaseCarrierPlan = nextSphGpuParticleState?.phaseCarrierPlan ?? null;
+    const dispersedMediumProducerTopologyReady = Boolean(
+      phaseCarrierPlan?.schema === 'peercompute.ulg.sph-phase-carrier-plan.v2'
+      && phaseCarrierPlan.status === 'phase-lane-capacity-ready'
+      && Number(phaseCarrierPlan.phaseLaneCount) === 4
+      && phaseCarrierPlan.phaseCompanionLanesRequired === true
+      && sphDispersedMediumOpticalClosureTable?.readyRowCount > 0
+    );
+    const prospectiveDispersedMediumProducerTopologyReady = Boolean(
+      phaseCarrierPlan?.schema === 'peercompute.ulg.sph-phase-carrier-plan.v2'
+      && phaseCarrierPlan.status === 'phase-lane-capacity-ready'
+      && Number(phaseCarrierPlan.phaseLaneCount) === 1
+      && phaseCarrierPlan.phaseCompanionLanesRequired === false
+      && sphDispersedMediumOpticalClosureTable?.readyRowCount > 0
+    );
+    const candidateDispersedMediumOpticsSeedRows =
+      dispersedMediumProducerTopologyReady
+        ? measure('dispersedMediumOpticsSeedRows', () => (
+            buildSphDispersedMediumOpticsProducerSeedRowsFromParticleState({
+              sphParticleState: nextSphGpuParticleState,
+              opticalClosureTable: sphDispersedMediumOpticalClosureTable
+            })
+          ))
+        : null;
+    const candidateProspectiveDispersedMediumOpticsSeedRows =
+      prospectiveDispersedMediumProducerTopologyReady
+        ? measure('prospectiveDispersedMediumOpticsSeedRows', () => (
+            buildSphDispersedMediumOpticsProducerSeedRowsForProspectiveFourLaneMaterialization({
+              sphParticleState: nextSphGpuParticleState,
+              opticalClosureTable: sphDispersedMediumOpticalClosureTable
+            })
+          ))
+        : null;
+    sphDispersedMediumOpticsSeedRows =
+      candidateDispersedMediumOpticsSeedRows?.readyRowCount > 0
+        ? candidateDispersedMediumOpticsSeedRows
+        : null;
+    sphProspectiveFourLaneDispersedMediumOpticsSeedRows =
+      candidateProspectiveDispersedMediumOpticsSeedRows?.readyRowCount > 0
+        ? candidateProspectiveDispersedMediumOpticsSeedRows
+        : null;
+    scene.userData.sphCollectiveOpticalRouteDescriptors =
+      collectiveOpticalRouteDescriptors;
+    scene.userData.sphCollectiveOpticalGpuTable =
+      collectiveOpticalGpuTable;
+    scene.userData.sphDispersedMediumOpticalClosureTable =
+      sphDispersedMediumOpticalClosureTable;
+    scene.userData.sphDispersedMediumOpticsSeedRows =
+      sphDispersedMediumOpticsSeedRows;
+    scene.userData.sphProspectiveFourLaneDispersedMediumOpticsSeedRows =
+      sphProspectiveFourLaneDispersedMediumOpticsSeedRows;
     const liveThermalMaterialTable = measure('thermalMaterialTable', () => (
       materialProperties
         ? buildSphThermalMaterialTable(materialProperties, {
@@ -47846,8 +48494,7 @@ fn main(
       if (hasRenderRowsReadback) {
         decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
           materialProperties: materialProperties || {},
-          reactionTable: sphReactionTable,
-          gasPressureSummary
+          reactionTable: sphReactionTable
         });
         particleBatches = shouldUseResidentRenderRowBridge
           ? []
@@ -47895,10 +48542,7 @@ fn main(
       });
       const fieldBatches = shouldUseResidentRenderRowBridge
         ? []
-        : applyResidentWaterVaporOpticalStateToSurfaceBatches(
-          candidateFieldBatches,
-          renderGasPressureSummary
-        );
+        : candidateFieldBatches;
       const nextResidentSurfaceBatchSignature = residentSurfaceBatchIdentitySignature(fieldBatches);
       const nextResidentSurfaceBatchOpticalSignature = residentSurfaceBatchOpticalSignature(fieldBatches);
       const canReuseResidentSurfaceTable = Boolean(
@@ -48438,8 +49082,7 @@ fn main(
           if (renderRowsExecution.renderRows instanceof Float32Array && renderRowsExecution.renderRows.length > 0) {
             decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
               materialProperties: materialProperties || {},
-              reactionTable: sphReactionTable,
-              gasPressureSummary
+              reactionTable: sphReactionTable
             });
             decodedRenderRowsSummary = summarizeDecodedRenderRows(decoded);
           }
@@ -48551,8 +49194,7 @@ fn main(
               if (renderRowsExecution.renderRows instanceof Float32Array && renderRowsExecution.renderRows.length > 0) {
                 decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
                   materialProperties: materialProperties || {},
-                  reactionTable: sphReactionTable,
-                  gasPressureSummary
+                  reactionTable: sphReactionTable
                 });
                 decodedRenderRowsSummary = summarizeDecodedRenderRows(decoded);
               }
@@ -55808,6 +56450,24 @@ fn main(
     },
     getOpticalGpuTable() {
       return opticalGpuTable;
+    },
+    getCollectiveOpticalRouteDescriptors() {
+      return collectiveOpticalRouteDescriptors;
+    },
+    getCollectiveOpticalGpuTable() {
+      return collectiveOpticalGpuTable;
+    },
+    getDispersedMediumOpticalClosureTable() {
+      return sphDispersedMediumOpticalClosureTable;
+    },
+    getSphDispersedMediumOpticalClosureTable() {
+      return sphDispersedMediumOpticalClosureTable;
+    },
+    getDispersedMediumOpticsSeedRows() {
+      return sphDispersedMediumOpticsSeedRows;
+    },
+    getProspectiveFourLaneDispersedMediumOpticsSeedRows() {
+      return sphProspectiveFourLaneDispersedMediumOpticsSeedRows;
     },
     getOpticalGpuLookup() {
       return opticalGpuLookup;

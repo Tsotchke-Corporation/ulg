@@ -778,6 +778,7 @@ function exactProductHistoryGpuCommit(productHistory) {
 const VISUAL_LIVENESS_WORKER_ROUTE_ACTIVATION_FIELDS = Object.freeze([
   'thermal',
   'reaction',
+  'dispersedMediumOptics',
   'contactSolver',
   'contactSolverRequested',
   'contactSolverEscalatedForDynamicLaws',
@@ -801,6 +802,7 @@ function exactInactiveGasBoundaryActivationReceipt(receipt) {
   const dynamicLawActive = Boolean(
     receipt?.thermal
     || receipt?.reaction
+    || receipt?.dispersedMediumOptics
     || receipt?.lawQueue
     || receipt?.lawNeighborCandidates
     || receipt?.phaseVolumeMigration
@@ -815,7 +817,7 @@ function exactInactiveGasBoundaryActivationReceipt(receipt) {
     !receipt
     || typeof receipt !== 'object'
     || receipt.schema
-      !== 'peercompute.ulg.worker-schedule-law-activation-receipt.v0'
+      !== 'peercompute.ulg.worker-schedule-law-activation-receipt.v1'
     || receipt.activationAuthority
       !== 'schedule-config-static-declaration-no-readback'
     || Object.keys(receipt).length !== exactKeys.length

@@ -203,8 +203,8 @@ test('long-horizon validation checkpoints continue after the visual frame budget
   );
   assert.match(
     appendCapture,
-    /if \(requestedVisualIntervalCaptureRequested\)[\s\S]*?metric\.authoritativeGpuCheckpoint\s*=\s*await captureAuthoritativeGpuCheckpoint\([\s\S]*?const retainedMetric = retainProbeMetric\(metric\);[\s\S]*?metrics\.push\(retainedMetric\);[\s\S]*?await captureFrame\(metric\.batchIndex, metric\.phase, sampleIndex\)/,
-    'requested visual intervals must capture the authoritative checkpoint before retaining the metric or attempting bounded frame capture'
+    /if \(requestedVisualIntervalCaptureRequested\)[\s\S]*?metric\.authoritativeGpuCheckpoint\s*=\s*await captureAuthoritativeGpuCheckpoint\([\s\S]*?metric\.nativeSurfaceValidation\s*=\s*nativeSurfaceValidationSnapshot\(\);[\s\S]*?const retainedMetric = retainProbeMetric\(metric\);[\s\S]*?metrics\.push\(retainedMetric\);[\s\S]*?await captureFrame\(metric\.batchIndex, metric\.phase, sampleIndex\)/,
+    'requested visual intervals must capture the authoritative checkpoint and resnapshot native admission before retaining the metric or attempting bounded frame capture'
   );
 });
 
@@ -1556,6 +1556,8 @@ test('worker offscreen presentation path requires transferred canvas ownership',
   assert.match(benchmarkSource, /peerComputeRenderOwnershipStatePromotionMode/);
   assert.match(benchmarkSource, /peerComputeRenderOwnershipPresentationWorkerRetainedOutputPresentationOnlyRequested/);
   assert.match(benchmarkSource, /workerOffscreenPresentationStatus/);
+  assert.match(benchmarkSource, /workerOffscreenPresentationDisplayOwner/);
+  assert.match(benchmarkSource, /workerOffscreenPresentationDisplayCanvasVisible/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsStatus/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsInputTransferBytes/);
   assert.match(benchmarkSource, /workerOffscreenRenderRowsSourceCacheStatus/);

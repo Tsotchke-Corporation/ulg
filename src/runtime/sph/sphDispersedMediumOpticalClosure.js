@@ -12,6 +12,9 @@ import {
   ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  sphericalParticleOpticalEfficiencies
+} from '../material/opticalClosure.js';
+import {
   COLLECTIVE_DISPERSED_MEDIUM_OPTICAL_ROUTE_SCHEMA,
   COLLECTIVE_OPTICAL_ROUTE_STATUS,
   collectiveOpticalRouteDescriptor
@@ -36,7 +39,11 @@ const CLOSURE_PHYSICAL_FIELDS = Object.freeze([
   'scatteringEfficiencyQsca',
   'absorptionEfficiencyQabs',
   'asymmetryFactorG',
-  'effectiveRadiusM'
+  'effectiveRadiusM',
+  'relativeRefractiveIndexN',
+  'relativeExtinctionCoefficientK',
+  'largeSizeRayAsymmetryFactorG',
+  'referenceWavelengthM'
 ]);
 
 const UNVALIDATED_PROVENANCE_STATUSES = new Set([
@@ -62,6 +69,12 @@ const MORPHOLOGY_MODEL_ID_BY_LABEL = new Map([
   [
     SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS.monodisperseRadius,
     SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL.monodisperseRadius
+  ],
+  [
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+      .singleCompactSphereComplexIndex,
+    SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+      .singleCompactSphereComplexIndex
   ]
 ]);
 
@@ -474,6 +487,9 @@ function canonicalClosureEntry(entry, sourceIndex) {
   if (modelId === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL.blocked) {
     return blockedClosureRow(route, 'missing-or-invalid-morphology-model');
   }
+  if (route.provenance?.status === 'blocked') {
+    return blockedClosureRow(route, 'optical-model-provenance-blocked');
+  }
 
   const condensedDensityKgPerM3 = optionalNonnegativeF32(
     entry,
@@ -482,40 +498,106 @@ function canonicalClosureEntry(entry, sourceIndex) {
     `${prefix}.condensedDensityKgPerM3`,
     prefix
   );
-  const scatteringEfficiencyQsca = optionalNonnegativeF32(
-    entry,
-    closureInput,
-    'scatteringEfficiencyQsca',
-    `${prefix}.scatteringEfficiencyQsca`,
-    prefix
-  );
-  const absorptionEfficiencyQabs = optionalNonnegativeF32(
-    entry,
-    closureInput,
-    'absorptionEfficiencyQabs',
-    `${prefix}.absorptionEfficiencyQabs`,
-    prefix
-  );
-  const asymmetryFactorValue = closureField(
-    entry,
-    closureInput,
-    'asymmetryFactorG',
-    prefix
-  );
-  const asymmetryFactorG = asymmetryFactorValue != null
-    ? finiteF32(asymmetryFactorValue, `${prefix}.asymmetryFactorG`)
-    : null;
-  if (asymmetryFactorG != null && Math.abs(asymmetryFactorG) > 1) {
-    throw new RangeError(`${prefix}.asymmetryFactorG magnitude must not exceed one`);
-  }
-  if (
-    condensedDensityKgPerM3 == null
-    || !(condensedDensityKgPerM3 > 0)
-    || scatteringEfficiencyQsca == null
-    || absorptionEfficiencyQabs == null
-    || asymmetryFactorG == null
-  ) {
+  if (condensedDensityKgPerM3 == null || !(condensedDensityKgPerM3 > 0)) {
     return blockedClosureRow(route, 'missing-or-invalid-optical-morphology-input');
+  }
+
+  const complexIndexModel = modelId
+    === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+      .singleCompactSphereComplexIndex;
+  let opticalParameter0;
+  let opticalParameter1;
+  let opticalParameter2;
+  let referenceWavelengthM = 0;
+  if (complexIndexModel) {
+    opticalParameter0 = optionalNonnegativeF32(
+      entry,
+      closureInput,
+      'relativeRefractiveIndexN',
+      `${prefix}.relativeRefractiveIndexN`,
+      prefix
+    );
+    opticalParameter1 = optionalNonnegativeF32(
+      entry,
+      closureInput,
+      'relativeExtinctionCoefficientK',
+      `${prefix}.relativeExtinctionCoefficientK`,
+      prefix
+    );
+    const rayAsymmetryValue = closureField(
+      entry,
+      closureInput,
+      'largeSizeRayAsymmetryFactorG',
+      prefix
+    );
+    opticalParameter2 = rayAsymmetryValue != null
+      ? finiteF32(
+          rayAsymmetryValue,
+          `${prefix}.largeSizeRayAsymmetryFactorG`
+        )
+      : null;
+    if (opticalParameter2 != null && Math.abs(opticalParameter2) > 1) {
+      throw new RangeError(
+        `${prefix}.largeSizeRayAsymmetryFactorG magnitude must not exceed one`
+      );
+    }
+    referenceWavelengthM = optionalNonnegativeF32(
+      entry,
+      closureInput,
+      'referenceWavelengthM',
+      `${prefix}.referenceWavelengthM`,
+      prefix
+    );
+    if (
+      !(opticalParameter0 > 0)
+      || opticalParameter1 == null
+      || opticalParameter2 == null
+      || !(referenceWavelengthM > 0)
+    ) {
+      return blockedClosureRow(
+        route,
+        'missing-or-invalid-complex-index-sphere-input'
+      );
+    }
+  } else {
+    opticalParameter0 = optionalNonnegativeF32(
+      entry,
+      closureInput,
+      'scatteringEfficiencyQsca',
+      `${prefix}.scatteringEfficiencyQsca`,
+      prefix
+    );
+    opticalParameter1 = optionalNonnegativeF32(
+      entry,
+      closureInput,
+      'absorptionEfficiencyQabs',
+      `${prefix}.absorptionEfficiencyQabs`,
+      prefix
+    );
+    const asymmetryFactorValue = closureField(
+      entry,
+      closureInput,
+      'asymmetryFactorG',
+      prefix
+    );
+    opticalParameter2 = asymmetryFactorValue != null
+      ? finiteF32(asymmetryFactorValue, `${prefix}.asymmetryFactorG`)
+      : null;
+    if (opticalParameter2 != null && Math.abs(opticalParameter2) > 1) {
+      throw new RangeError(
+        `${prefix}.asymmetryFactorG magnitude must not exceed one`
+      );
+    }
+    if (
+      opticalParameter0 == null
+      || opticalParameter1 == null
+      || opticalParameter2 == null
+    ) {
+      return blockedClosureRow(
+        route,
+        'missing-or-invalid-optical-morphology-input'
+      );
+    }
   }
 
   let effectiveRadiusM = 0;
@@ -560,10 +642,11 @@ function canonicalClosureEntry(entry, sourceIndex) {
   values[lanes.morphologyModelId] = modelId;
   values[lanes.status] = SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.ready;
   values[lanes.condensedDensityKgPerM3] = condensedDensityKgPerM3;
-  values[lanes.scatteringEfficiencyQsca] = scatteringEfficiencyQsca;
-  values[lanes.absorptionEfficiencyQabs] = absorptionEfficiencyQabs;
-  values[lanes.asymmetryFactorG] = asymmetryFactorG;
+  values[lanes.scatteringEfficiencyQsca] = opticalParameter0;
+  values[lanes.absorptionEfficiencyQabs] = opticalParameter1;
+  values[lanes.asymmetryFactorG] = opticalParameter2;
   values[lanes.effectiveRadiusM] = effectiveRadiusM;
+  values[lanes.reserved0] = referenceWavelengthM;
   return {
     ...route,
     values,
@@ -582,8 +665,10 @@ function compareClosureRoutes(left, right) {
 
 /**
  * Build a deterministic material-general route table. The table contains only
- * static morphology and dimensionless optical efficiencies. It intentionally
- * has no thermodynamic state and therefore cannot create dispersed mass.
+ * static morphology plus either authored efficiencies or complex-index sphere
+ * inputs. It intentionally has no thermodynamic state and therefore cannot
+ * create dispersed mass; compact-sphere efficiencies are derived later from
+ * the runtime conserved-mass radius.
  */
 export function buildSphDispersedMediumOpticalClosureTable(entries = []) {
   if (!Array.isArray(entries)) {
@@ -702,10 +787,17 @@ function decodedClosureRow(rows, rowIndex) {
       rows[offset + lanes.condensedDensityKgPerM3],
     scatteringEfficiencyQsca:
       rows[offset + lanes.scatteringEfficiencyQsca],
+    relativeRefractiveIndexN:
+      rows[offset + lanes.relativeRefractiveIndexN],
     absorptionEfficiencyQabs:
       rows[offset + lanes.absorptionEfficiencyQabs],
+    relativeExtinctionCoefficientK:
+      rows[offset + lanes.relativeExtinctionCoefficientK],
     asymmetryFactorG: rows[offset + lanes.asymmetryFactorG],
-    effectiveRadiusM: rows[offset + lanes.effectiveRadiusM]
+    largeSizeRayAsymmetryFactorG:
+      rows[offset + lanes.largeSizeRayAsymmetryFactorG],
+    effectiveRadiusM: rows[offset + lanes.effectiveRadiusM],
+    referenceWavelengthM: rows[offset + lanes.referenceWavelengthM]
   });
 }
 
@@ -881,10 +973,6 @@ export function validateSphDispersedMediumOpticalClosureTable(table) {
       `dispersed-medium optical closure metadata row ${rowIndex}.provenance`
     );
 
-    if (table.rows[row.rowOffset
-      + SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.reserved0] !== 0) {
-      throw new RangeError(`closure row ${rowIndex} reserved lane must be zero`);
-    }
     if (!MORPHOLOGY_MODEL_LABEL_BY_ID.has(row.morphologyModelId)) {
       throw new RangeError(`closure row ${rowIndex} has invalid morphology model id`);
     }
@@ -894,7 +982,8 @@ export function validateSphDispersedMediumOpticalClosureTable(table) {
         row.scatteringEfficiencyQsca,
         row.absorptionEfficiencyQabs,
         row.asymmetryFactorG,
-        row.effectiveRadiusM
+        row.effectiveRadiusM,
+        row.referenceWavelengthM
       ]) {
         if (value !== 0) {
           throw new RangeError(
@@ -914,23 +1003,55 @@ export function validateSphDispersedMediumOpticalClosureTable(table) {
           .singleCompactCondensateCarrierLowerBound
       && row.morphologyModelId
         !== SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL.monodisperseRadius
+      && row.morphologyModelId
+        !== SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+          .singleCompactSphereComplexIndex
     ) {
       throw new RangeError(`ready closure row ${rowIndex} has invalid morphology`);
     }
     if (!(row.condensedDensityKgPerM3 > 0)) {
       throw new RangeError(`ready closure row ${rowIndex} requires positive density`);
     }
-    nonnegativeF32(
-      row.scatteringEfficiencyQsca,
-      `closure row ${rowIndex} scatteringEfficiencyQsca`
-    );
-    nonnegativeF32(
-      row.absorptionEfficiencyQabs,
-      `closure row ${rowIndex} absorptionEfficiencyQabs`
-    );
-    if (!Number.isFinite(row.asymmetryFactorG)
-      || Math.abs(row.asymmetryFactorG) > 1) {
-      throw new RangeError(`closure row ${rowIndex} asymmetry must be in [-1, 1]`);
+    const complexIndexModel = row.morphologyModelId
+      === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+        .singleCompactSphereComplexIndex;
+    if (complexIndexModel) {
+      if (!(row.relativeRefractiveIndexN > 0)) {
+        throw new RangeError(
+          `closure row ${rowIndex} relative refractive index must be positive`
+        );
+      }
+      nonnegativeF32(
+        row.relativeExtinctionCoefficientK,
+        `closure row ${rowIndex} relative extinction coefficient`
+      );
+      if (!Number.isFinite(row.largeSizeRayAsymmetryFactorG)
+        || Math.abs(row.largeSizeRayAsymmetryFactorG) > 1) {
+        throw new RangeError(
+          `closure row ${rowIndex} large-size ray asymmetry must be in [-1, 1]`
+        );
+      }
+      if (!(row.referenceWavelengthM > 0)) {
+        throw new RangeError(
+          `closure row ${rowIndex} reference wavelength must be positive`
+        );
+      }
+    } else {
+      nonnegativeF32(
+        row.scatteringEfficiencyQsca,
+        `closure row ${rowIndex} scatteringEfficiencyQsca`
+      );
+      nonnegativeF32(
+        row.absorptionEfficiencyQabs,
+        `closure row ${rowIndex} absorptionEfficiencyQabs`
+      );
+      if (!Number.isFinite(row.asymmetryFactorG)
+        || Math.abs(row.asymmetryFactorG) > 1) {
+        throw new RangeError(`closure row ${rowIndex} asymmetry must be in [-1, 1]`);
+      }
+      if (row.referenceWavelengthM !== 0) {
+        throw new RangeError(`closure row ${rowIndex} reserved lane must be zero`);
+      }
     }
     if (
       row.morphologyModelId
@@ -1066,20 +1187,30 @@ export function deriveSphDispersedMediumOpticalMoments({
   if (!(density > 0)) {
     return blockedOpticalMoments('missing-or-invalid-condensed-density');
   }
-  const qScattering = nonnegativeF32(
-    closureRow.scatteringEfficiencyQsca,
-    'closureRow.scatteringEfficiencyQsca'
-  );
-  const qAbsorption = nonnegativeF32(
-    closureRow.absorptionEfficiencyQabs,
-    'closureRow.absorptionEfficiencyQabs'
-  );
-  const asymmetryFactor = finiteF32(
-    closureRow.asymmetryFactorG,
-    'closureRow.asymmetryFactorG'
-  );
-  if (Math.abs(asymmetryFactor) > 1) {
-    throw new RangeError('closureRow.asymmetryFactorG magnitude must not exceed one');
+  const complexIndexModel = modelId
+    === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+      .singleCompactSphereComplexIndex;
+  let qScattering = 0;
+  let qAbsorption = 0;
+  let asymmetryFactor = 0;
+  if (!complexIndexModel) {
+    qScattering = nonnegativeF32(
+      closureRow.scatteringEfficiencyQsca,
+      'closureRow.scatteringEfficiencyQsca'
+    );
+    qAbsorption = nonnegativeF32(
+      closureRow.absorptionEfficiencyQabs,
+      'closureRow.absorptionEfficiencyQabs'
+    );
+    asymmetryFactor = finiteF32(
+      closureRow.asymmetryFactorG,
+      'closureRow.asymmetryFactorG'
+    );
+    if (Math.abs(asymmetryFactor) > 1) {
+      throw new RangeError(
+        'closureRow.asymmetryFactorG magnitude must not exceed one'
+      );
+    }
   }
 
   let effectiveRadiusM;
@@ -1088,6 +1219,7 @@ export function deriveSphDispersedMediumOpticalMoments({
     modelId
     === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
       .singleCompactCondensateCarrierLowerBound
+    || complexIndexModel
   ) {
     effectiveRadiusM = mass > 0
       ? finiteMomentF32(
@@ -1120,6 +1252,26 @@ export function deriveSphDispersedMediumOpticalMoments({
       : 0;
   } else {
     return blockedOpticalMoments('missing-or-invalid-morphology-model');
+  }
+
+  if (complexIndexModel && mass > 0) {
+    const efficiencies = sphericalParticleOpticalEfficiencies({
+      radiusM: effectiveRadiusM,
+      wavelengthM: closureRow.referenceWavelengthM,
+      relativeRefractiveIndexN: closureRow.relativeRefractiveIndexN,
+      relativeExtinctionCoefficientK:
+        closureRow.relativeExtinctionCoefficientK,
+      largeSizeRayAsymmetryFactorG:
+        closureRow.largeSizeRayAsymmetryFactorG
+    });
+    if (efficiencies.valid !== true) {
+      return blockedOpticalMoments(
+        'sphere-efficiency-model-outside-supported-domain'
+      );
+    }
+    qScattering = efficiencies.scatteringEfficiencyQsca;
+    qAbsorption = efficiencies.absorptionEfficiencyQabs;
+    asymmetryFactor = efficiencies.asymmetryFactorG;
   }
 
   const scatteringCrossSectionM2 = finiteMomentF32(

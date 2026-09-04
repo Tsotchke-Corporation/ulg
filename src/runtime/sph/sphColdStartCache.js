@@ -258,7 +258,7 @@ export function createSphCollectiveOpticalRouteSetAuthority({
   });
 }
 
-function collectiveOpticalRouteSetAuthorityMatches(actual, expected) {
+export function collectiveOpticalRouteSetAuthoritiesExactlyEqual(actual, expected) {
   if (!actual || !expected) return false;
   return [
     'schema',
@@ -440,7 +440,9 @@ export function sphStaticTableInputsFromScene(scene) {
       scene?.getCollectiveOpticalRouteDescriptors?.() || null,
     collectiveOpticalGpuTable: scene?.getCollectiveOpticalGpuTable?.() || null,
     dispersedMediumOpticalClosureTable:
-      scene?.getSphDispersedMediumOpticalClosureTable?.() || null,
+      scene?.getSphDispersedMediumOpticalClosureTable?.()
+      ?? scene?.getDispersedMediumOpticalClosureTable?.()
+      ?? null,
     reactionTable: scene?.getSphReactionTable?.() || null
   };
 }
@@ -1461,11 +1463,11 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
       opticalGpuTable: collectiveOpticalGpuTable,
       closureTable: dispersedMediumOpticalClosureTable
     })
-      || !collectiveOpticalRouteSetAuthorityMatches(
+      || !collectiveOpticalRouteSetAuthoritiesExactlyEqual(
         opticalRecordAuthority,
         recomputedAuthority
       )
-      || !collectiveOpticalRouteSetAuthorityMatches(
+      || !collectiveOpticalRouteSetAuthoritiesExactlyEqual(
         closureRecordAuthority,
         recomputedAuthority
       )) {

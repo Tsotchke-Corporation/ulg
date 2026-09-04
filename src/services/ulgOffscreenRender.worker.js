@@ -62,6 +62,7 @@ const DEFAULT_PARTICLE_TEMPORAL_TARGET_HZ = 60;
 const DEFAULT_PARTICLE_TEMPORAL_MAX_HORIZON_S = 0.25;
 const WORKER_PRESENTATION_DEPTH_FORMAT = 'depth24plus';
 const GAS_PHASE_ID = 3;
+const TEXTURE_BINDING = 0x04;
 const TEXTURE_RENDER_ATTACHMENT = 0x10;
 const BUFFER_USAGE_COPY_DST = 0x08;
 const BUFFER_USAGE_UNIFORM = 0x40;
@@ -2830,7 +2831,10 @@ function ensureWorkerPresentationDepthView() {
     label: 'ulg-offscreen-presentation-depth',
     size: [width, height, 1],
     format: WORKER_PRESENTATION_DEPTH_FORMAT,
-    usage: self.GPUTextureUsage?.RENDER_ATTACHMENT ?? TEXTURE_RENDER_ATTACHMENT
+    usage:
+      (self.GPUTextureUsage?.RENDER_ATTACHMENT
+        ?? TEXTURE_RENDER_ATTACHMENT)
+      | (self.GPUTextureUsage?.TEXTURE_BINDING ?? TEXTURE_BINDING)
   });
   renderDepthView = renderDepthTexture.createView();
   renderDepthTextureWidth = width;
@@ -3769,6 +3773,10 @@ function ensureWorkerOwnedIsosurfacePresenter() {
     format,
     depthFormat: WORKER_PRESENTATION_DEPTH_FORMAT,
     getDepthView: () => ensureWorkerPresentationDepthView(),
+    getViewportSize: () => [
+      Math.max(1, Number(canvas?.width) || 1),
+      Math.max(1, Number(canvas?.height) || 1)
+    ],
     drawOverlay(pass, viewProjection, boxDimsM) {
       drawWorkerPresentationBox(pass, viewProjection, boxDimsM);
     },

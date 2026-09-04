@@ -121,6 +121,10 @@ function dispersedMediumOpticalClosurePropertyPaths(properties) {
     'absorptionEfficiencyQabs',
     'asymmetryFactorG',
     'effectiveRadiusM',
+    'relativeRefractiveIndexN',
+    'relativeExtinctionCoefficientK',
+    'largeSizeRayAsymmetryFactorG',
+    'referenceWavelengthM',
     'provenance',
     'scientificValidation'
   ]) {

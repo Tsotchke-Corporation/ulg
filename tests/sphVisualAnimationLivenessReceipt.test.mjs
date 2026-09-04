@@ -355,9 +355,10 @@ function zeroLiveProductHistory(overrides = {}) {
 
 function inactiveGasBoundaryLawActivation(overrides = {}) {
   return {
-    schema: 'peercompute.ulg.worker-schedule-law-activation-receipt.v0',
+    schema: 'peercompute.ulg.worker-schedule-law-activation-receipt.v1',
     thermal: true,
     reaction: true,
+    dispersedMediumOptics: false,
     contactSolver: true,
     contactSolverRequested: true,
     contactSolverEscalatedForDynamicLaws: false,

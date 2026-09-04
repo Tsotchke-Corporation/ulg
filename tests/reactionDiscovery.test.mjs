@@ -16,10 +16,18 @@ import {
   deriveMaterialProperties
 } from '../src/runtime/material/materialDerivation.js';
 import {
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
+} from '../src/runtime/material/condensedDispersedOpticalReferences.js';
+import {
   materialDerivationSummary,
   PROPERTY_DERIVATION_STATUS,
   provenanceEntriesForPath
 } from '../src/runtime/material/propertyProvenance.js';
+import {
+  sphCollectiveOpticalStaticInputsFromViewState
+} from '../src/runtime/sph/sphStaticTableInputs.js';
 
 test('active metal + water is discovered as exothermic, with a derived hydroxide product', () => {
   const r = discoverReactions('Na', 'h2o');
@@ -74,6 +82,41 @@ test('anchored sodium-water discovery gives reduced NaOH a provenance-marked har
   assert.ok(Number.isFinite(phase.thermalConductivityWPerMK));
   assert.ok(phase.thermalConductivityWPerMK > 0);
   assert.ok(Math.abs(phase.thermalConductivityWPerMK - expected) < 1e-12);
+  const opticalClosure =
+    result.productClosures.naoh.properties.dispersedMediumOpticalClosure;
+  assert.equal(opticalClosure.scientificValidation, false);
+  assert.equal(
+    opticalClosure.morphologyModel,
+    'single-compact-sphere-complex-index'
+  );
+  assert.equal(opticalClosure.condensedDensityKgPerM3, 1736.39704);
+  assert.equal(opticalClosure.relativeRefractiveIndexN, 1.420583768955696);
+  assert.equal(opticalClosure.relativeExtinctionCoefficientK, 0);
+  assert.equal(opticalClosure.largeSizeRayAsymmetryFactorG, 0.7016530763788665);
+  assert.equal(opticalClosure.referenceWavelengthM, 589.4e-9);
+  assert.equal(
+    opticalClosure.provenance.status,
+    PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK
+  );
+  assert.equal(opticalClosure.provenance.source, CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE);
+  assert.equal(
+    opticalClosure.provenance.referenceBankFingerprint,
+    CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT
+  );
+  assert.equal(opticalClosure.provenance.extinctionModel, 'lossless-model-assumption');
+  assert.doesNotMatch(
+    `${opticalClosure.provenance.accuracy} ${opticalClosure.provenance.method}`,
+    /qualitative|presentation|lower.bound|Qsca=2/i
+  );
+  assert.match(
+    opticalClosure.provenance.method,
+    /conserved condensed mass.*density\/complex index/i
+  );
+  assert.notEqual(
+    opticalClosure.condensedDensityKgPerM3,
+    phase.densityKgPerM3,
+    'the optical reference density must not silently replace the reduced mechanical EOS density'
+  );
   const provenance = provenanceEntriesForPath(
     result.productClosures.naoh.properties,
     'phases.liquid.thermalConductivityWPerMK'
@@ -81,6 +124,55 @@ test('anchored sodium-water discovery gives reduced NaOH a provenance-marked har
   assert.equal(provenance.length, 1);
   assert.equal(provenance[0].status, PROPERTY_DERIVATION_STATUS.REDUCED_ESTIMATE);
   assert.match(provenance[0].method, /harmonic-mean representative conductivity/);
+});
+
+test('unreferenced reduced reaction products keep fail-closed dispersed optics', () => {
+  clearReactionDiscoveryCache();
+  const result = discoverReactions('Li', 'h2o', {
+    allowReducedProductProperties: true
+  });
+  const opticalClosure =
+    result.productClosures.lioh.properties.dispersedMediumOpticalClosure;
+
+  assert.equal(
+    opticalClosure.morphologyModel,
+    'blocked-missing-or-invalid-morphology'
+  );
+  assert.equal(opticalClosure.scatteringEfficiencyQsca, 0);
+  assert.equal(opticalClosure.absorptionEfficiencyQabs, 0);
+  assert.equal(opticalClosure.provenance.status, PROPERTY_DERIVATION_STATUS.BLOCKED);
+  assert.match(
+    opticalClosure.provenance.accuracy,
+    /blocked-no-authoritative-size-distribution-or-visible-complex-refractive-index/
+  );
+});
+
+test('reduced NaOH enters the shared collective optical pipeline as a ready compact-sphere row', () => {
+  clearReactionDiscoveryCache();
+  const reaction = discoverReactions('Na', 'h2o', {
+    materialProperties: {
+      Na: createReferenceAnchoredMaterialClosure('Na').properties,
+      h2o: createReferenceAnchoredMaterialClosure('h2o').properties
+    },
+    allowReducedProductProperties: true
+  });
+  const properties = reaction.productClosures.naoh.properties;
+  const staticInputs = sphCollectiveOpticalStaticInputsFromViewState({
+    materialProperties: { naoh: properties },
+    materials: ['naoh']
+  });
+  const table = staticInputs.dispersedMediumOpticalClosureTable;
+
+  assert.equal(staticInputs.collectiveOpticalRouteDescriptors.length, 1);
+  assert.equal(table.rowCount, 1);
+  assert.equal(table.readyRowCount, 1);
+  assert.equal(table.blockedRowCount, 0);
+  assert.equal(table.metadata[0].material, 'naoh');
+  assert.equal(table.metadata[0].condensedPhase, 'liquid');
+  assert.equal(table.metadata[0].vaporPhase, 'gas');
+  assert.equal(table.metadata[0].morphologyModel, 'single-compact-sphere-complex-index');
+  assert.equal(table.metadata[0].statusReason, 'closure-ready');
+  assert.equal(table.metadata[0].scientificValidation, false);
 });
 
 test('reduced product conductivity fails closed when a reactant phase lacks conductivity', () => {
@@ -128,6 +220,33 @@ test('reaction discovery cache identity includes representative phase conductivi
   });
 
   assert.notEqual(first, second);
+});
+
+test('stale cached NaOH product optics cannot bypass the current reference bank', () => {
+  clearReactionDiscoveryCache();
+  const materialProperties = {
+    Na: createReferenceAnchoredMaterialClosure('Na').properties,
+    h2o: createReferenceAnchoredMaterialClosure('h2o').properties
+  };
+  const options = { materialProperties, allowReducedProductProperties: true };
+  const current = discoverReactions('Na', 'h2o', options);
+  const stale = JSON.parse(JSON.stringify(current.productClosures.naoh));
+  stale.properties.dispersedMediumOpticalClosure.provenance.referenceBankFingerprint =
+    'ulg:stale-reference-bank';
+
+  clearReactionDiscoveryCache();
+  const refreshed = discoverReactions('Na', 'h2o', {
+    ...options,
+    cachedProductClosures: { naoh: stale }
+  });
+  const refreshedClosure = refreshed.productClosures.naoh;
+
+  assert.equal(refreshedClosure.cacheReuse, undefined);
+  assert.equal(
+    refreshedClosure.properties.dispersedMediumOpticalClosure.provenance
+      .referenceBankFingerprint,
+    CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT
+  );
 });
 
 test('active metal + water discovery uses the general family in the SPH adapter', () => {
@@ -424,6 +543,14 @@ test('material-property-backed reaction discovery caches memory and persisted re
   const first = discoverReactions('Na', 'h2o', options);
   assert.equal(first.cache.cacheStatus, 'derived-cache-miss');
   assert.equal(first.cache.cacheKey, expectedCacheKey);
+  assert.equal(
+    first.cache.condensedDispersedOpticalReferenceBankFingerprint,
+    CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT
+  );
+  assert.equal(
+    first.cache.condensedDispersedOpticalReferenceMethodRevision,
+    CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION
+  );
   assert.equal(reactionDiscoveryCacheInfo().size, 1);
 
   const second = discoverReactions('h2o', 'Na', options);

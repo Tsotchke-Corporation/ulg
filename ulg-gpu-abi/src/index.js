@@ -624,10 +624,12 @@ export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'pad2:f32'
 ]);
 // Two vec4 lanes per cell: lane 0 = density + palette (unchanged legacy
-// layout), lane 1 = density-weighted mean temperature for per-fragment
-// emission plus reserved padding. WGSL kernels address the buffer as
-// array<vec4<f32>> with two vec4s per cell; JS strides derive from this
-// layout's length.
+// layout), lane 1 = density-weighted mean temperature plus the conserved
+// participating-medium moments written by the render-field producer. Keep
+// the three historical reserved row labels in schema v1; semantic consumers
+// use SPH_GPU_RENDER_FIELD_CELL_ROW_LANES so no ABI/version migration is
+// required. WGSL kernels address the buffer as array<vec4<f32>> with two
+// vec4s per cell; JS strides derive from this layout's length.
 export const SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT = Object.freeze([
   'density:f32',
   'paletteLinearR:f32',
@@ -638,6 +640,20 @@ export const SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT = Object.freeze([
   'reserved1:f32',
   'reserved2:f32'
 ]);
+export const SPH_GPU_RENDER_FIELD_CELL_ROW_LANES = Object.freeze({
+  density: 0,
+  paletteLinearR: 1,
+  paletteLinearG: 2,
+  paletteLinearB: 3,
+  temperatureK: 4,
+  scatteringOpticalDepth: 5,
+  absorptionOpticalDepth: 6,
+  scatteringAsymmetryOpticalDepth: 7,
+  // Backward-compatible aliases for the schema-v1 row labels above.
+  reserved0: 5,
+  reserved1: 6,
+  reserved2: 7
+});
 export const SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT = Object.freeze([
   'surfaceIndex:f32',
   'materialId:f32',

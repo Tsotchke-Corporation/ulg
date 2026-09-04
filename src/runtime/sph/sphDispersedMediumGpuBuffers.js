@@ -20,9 +20,23 @@ const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
 };
 const EXACT_F32_INTEGER_MAX = 0x00ff_ffff;
+const STATIC_ROW_DECLARATION_MODE = 'static-row-prefixes-v0';
+const DYNAMIC_ROUTE_CATALOG_DECLARATION_MODE =
+  'gpu-dynamic-route-catalog-v0';
+const GPU_RESIDENT_ACTIVE_ROUTE_COUNT_AUTHORITY =
+  'gpu-resident-unobserved-no-host-readback';
 const authorityRecords = new WeakMap();
 const uploadRecords = new WeakMap();
 const bufferRecords = new WeakMap();
+const particleTopologyEpochTransitionWitnessRecords = new WeakMap();
+const particleTopologyEpochTransitionsInProgress = new WeakSet();
+
+export const ULG_SPH_DISPERSED_MEDIUM_OPTICS_TOPOLOGY_EPOCH_TRANSITION_SCHEMA =
+  'peercompute.ulg.sph-dispersed-medium-optics-topology-epoch-transition.v0';
+
+function nextParticleTopologyEpochTransitionGeneration() {
+  return Object.freeze({});
+}
 
 function canonicalParticleLineage(lineage, particleCount) {
   if (lineage == null) return null;
@@ -122,6 +136,20 @@ function particleSourceFamilyMatches(record, sourceFamily) {
     && entry.stateBuffer === sourceFamily.stateBuffer
     && entry.thermoBuffer === sourceFamily.thermoBuffer
     && entry.identityBuffer === sourceFamily.identityBuffer
+  );
+}
+
+function exactParticleSourceFamilyFieldsMatch(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.device === right.device
+    && left.particleCount === right.particleCount
+    && left.topologyEpoch === right.topologyEpoch
+    && left.identityRevision === right.identityRevision
+    && left.stateBuffer === right.stateBuffer
+    && left.thermoBuffer === right.thermoBuffer
+    && left.identityBuffer === right.identityBuffer
   );
 }
 
@@ -324,36 +352,120 @@ function validatePackedRows(packed) {
     }
     readyRowCount += 1;
   }
-  if (
-    packed.readyRowCount !== readyRowCount
-    || packed.blockedRowCount !== blockedRowCount
-    || readyRowCount + blockedRowCount !== packed.rowCount
-  ) {
-    throw new RangeError('dispersed-medium optics row status counts are inconsistent');
-  }
   const canonicalReadyOpticalStateIds = [...readyOpticalStateIds]
     .sort((left, right) => left - right);
-  if (
-    !Array.isArray(packed.readyOpticalStateIds)
-    || packed.readyOpticalStateIds.length
-      !== canonicalReadyOpticalStateIds.length
-    || packed.readyOpticalStateIds.some(
-      (value, index) => value !== canonicalReadyOpticalStateIds[index]
-    )
-  ) {
-    throw new RangeError(
-      'dispersed-medium optics ready route identifiers are inconsistent'
-    );
+  const dynamicRouteCatalog = packed.declarationMode
+    === DYNAMIC_ROUTE_CATALOG_DECLARATION_MODE;
+  if (dynamicRouteCatalog) {
+    if (
+      packed.readyRowCount !== null
+      || packed.blockedRowCount !== null
+      || packed.initialReadyRowCount !== readyRowCount
+      || packed.initialBlockedRowCount !== blockedRowCount
+      || readyRowCount + blockedRowCount !== packed.rowCount
+      || !Array.isArray(packed.initialReadyOpticalStateIds)
+      || packed.initialReadyOpticalStateIds.length
+        !== canonicalReadyOpticalStateIds.length
+      || packed.initialReadyOpticalStateIds.some(
+        (value, index) => value !== canonicalReadyOpticalStateIds[index]
+      )
+    ) {
+      throw new RangeError(
+        'dispersed-medium dynamic route catalog initial row metadata is inconsistent'
+      );
+    }
+    const eligibleOpticalStateIds = packed.eligibleOpticalStateIds;
+    if (
+      !Array.isArray(eligibleOpticalStateIds)
+      || eligibleOpticalStateIds.some((value, index) => (
+        nonnegativeIdentifier(
+          value,
+          `eligibleOpticalStateIds[${index}]`,
+          { positive: true }
+        ) !== value
+        || (index > 0 && eligibleOpticalStateIds[index - 1] >= value)
+      ))
+      || canonicalReadyOpticalStateIds.some(
+        (value) => !eligibleOpticalStateIds.includes(value)
+      )
+      || !Array.isArray(packed.readyOpticalStateIds)
+      || packed.readyOpticalStateIds.length !== eligibleOpticalStateIds.length
+      || packed.readyOpticalStateIds.some(
+        (value, index) => value !== eligibleOpticalStateIds[index]
+      )
+      || packed.readyOpticalStateRouteCount
+        !== eligibleOpticalStateIds.length
+      || packed.eligibleOpticalStateRouteCount
+        !== eligibleOpticalStateIds.length
+      || !Number.isSafeInteger(packed.routeCatalogRowCount)
+      || packed.routeCatalogRowCount < eligibleOpticalStateIds.length
+      || typeof packed.routeCatalogSignature !== 'string'
+      || !packed.routeCatalogSignature.startsWith('f32-bits-v0:')
+      || packed.activeRouteCountAuthority
+        !== GPU_RESIDENT_ACTIVE_ROUTE_COUNT_AUTHORITY
+    ) {
+      throw new RangeError(
+        'dispersed-medium dynamic route catalog authority is inconsistent'
+      );
+    }
+  } else {
+    if (
+      packed.declarationMode != null
+      && packed.declarationMode !== STATIC_ROW_DECLARATION_MODE
+    ) {
+      throw new RangeError(
+        'dispersed-medium optics declaration mode is unsupported'
+      );
+    }
+    if (
+      packed.readyRowCount !== readyRowCount
+      || packed.blockedRowCount !== blockedRowCount
+      || readyRowCount + blockedRowCount !== packed.rowCount
+    ) {
+      throw new RangeError(
+        'dispersed-medium optics row status counts are inconsistent'
+      );
+    }
+    if (
+      !Array.isArray(packed.readyOpticalStateIds)
+      || packed.readyOpticalStateIds.length
+        !== canonicalReadyOpticalStateIds.length
+      || packed.readyOpticalStateIds.some(
+        (value, index) => value !== canonicalReadyOpticalStateIds[index]
+      )
+    ) {
+      throw new RangeError(
+        'dispersed-medium optics ready route identifiers are inconsistent'
+      );
+    }
   }
 }
 
-function privatePackedRowsSnapshot(packed) {
+function privatePackedRowsSnapshot(packed, { allowDynamic = false } = {}) {
   validatePackedRows(packed);
+  if (
+    packed.declarationMode === DYNAMIC_ROUTE_CATALOG_DECLARATION_MODE
+    && !allowDynamic
+  ) {
+    throw new TypeError(
+      'dispersed-medium dynamic route catalogs require an authenticated producer adoption'
+    );
+  }
   const snapshot = Object.freeze({
     ...packed,
     readyOpticalStateIds: Object.freeze([
       ...packed.readyOpticalStateIds
     ]),
+    ...(Array.isArray(packed.initialReadyOpticalStateIds) ? {
+      initialReadyOpticalStateIds: Object.freeze([
+        ...packed.initialReadyOpticalStateIds
+      ])
+    } : {}),
+    ...(Array.isArray(packed.eligibleOpticalStateIds) ? {
+      eligibleOpticalStateIds: Object.freeze([
+        ...packed.eligibleOpticalStateIds
+      ])
+    } : {}),
     rowLayout: Object.freeze([
       ...SPH_DISPERSED_MEDIUM_OPTICS_ROW_LAYOUT
     ]),
@@ -428,8 +540,9 @@ export function buildSphDispersedMediumGpuBuffers(particles) {
 }
 
 function retireUploadRecord(record) {
-  if (!record || record.destroyed || record.destroyRequested) return false;
+  if (!record || record.destroyed) return false;
   if (record.activeBorrowCount > 0) {
+    if (record.destroyRequested) return false;
     record.destroyRequested = true;
     record.upload.destroyPending = true;
     return true;
@@ -439,15 +552,19 @@ function retireUploadRecord(record) {
 
 function destroyUploadRecordNow(record) {
   if (!record || record.destroyed) return false;
-  record.active = false;
-  record.destroyed = true;
-  record.destroyRequested = false;
   // Ownership is construction-time authority. `upload` is intentionally a
   // plain descriptor because worker continuation code must be able to attach
   // it to successive particle families, but its public ownsBuffer diagnostic
   // must never be able to suppress retirement of the allocation represented
   // by this module-private record.
+  // Do not publish retirement before the fallible raw destruction call has
+  // completed.  In particular, a deferred destruction that throws during its
+  // final borrow release must retain `destroyRequested` so its exact owner can
+  // retry the same allocation rather than losing retirement authority.
   if (record.ownsBuffer) record.buffer.destroy?.();
+  record.active = false;
+  record.destroyed = true;
+  record.destroyRequested = false;
   record.upload.destroyPending = false;
   record.upload.destroyed = true;
   return true;
@@ -471,6 +588,17 @@ function exactUploadDescriptorMatchesRecord(
     && upload.blockedRowCount === record.blockedRowCount
     && upload.readyOpticalStateIds === record.readyOpticalStateIds
     && upload.readyOpticalStateRouteCount === record.readyOpticalStateRouteCount
+    && upload.declarationMode === record.declarationMode
+    && upload.initialReadyRowCount === record.initialReadyRowCount
+    && upload.initialBlockedRowCount === record.initialBlockedRowCount
+    && upload.initialReadyOpticalStateIds
+      === record.initialReadyOpticalStateIds
+    && upload.eligibleOpticalStateIds === record.eligibleOpticalStateIds
+    && upload.eligibleOpticalStateRouteCount
+      === record.eligibleOpticalStateRouteCount
+    && upload.routeCatalogRowCount === record.routeCatalogRowCount
+    && upload.routeCatalogSignature === record.routeCatalogSignature
+    && upload.activeRouteCountAuthority === record.activeRouteCountAuthority
     && upload.rowStrideFloats === record.rowStrideFloats
     && upload.rowStrideBytes === record.rowStrideBytes
     && upload.bufferByteLength === record.bufferByteLength
@@ -605,6 +733,35 @@ function registerSphDispersedMediumGpuBuffer(
   // the associated allocation was initialized.  Revalidate it here, but do
   // not resnapshot after bytes have already been copied or encoded.
   validatePackedRows(packed);
+  const declarationMode = packed.declarationMode
+    ?? STATIC_ROW_DECLARATION_MODE;
+  const dynamicRouteCatalog = declarationMode
+    === DYNAMIC_ROUTE_CATALOG_DECLARATION_MODE;
+  if (
+    dynamicRouteCatalog
+    && (
+      producerAdoptionDeclaration?.schema
+        !== ULG_SPH_DISPERSED_MEDIUM_OPTICS_SCHEMA
+      || producerAdoptionDeclaration.declarationMode
+        !== DYNAMIC_ROUTE_CATALOG_DECLARATION_MODE
+      || producerAdoptionDeclaration.routeCatalogSignature
+        !== packed.routeCatalogSignature
+      || producerAdoptionDeclaration.routeCatalogRowCount
+        !== packed.routeCatalogRowCount
+      || producerAdoptionDeclaration.eligibleOpticalStateRouteCount
+        !== packed.eligibleOpticalStateRouteCount
+      || !Array.isArray(producerAdoptionDeclaration.eligibleOpticalStateIds)
+      || producerAdoptionDeclaration.eligibleOpticalStateIds.length
+        !== packed.eligibleOpticalStateIds.length
+      || producerAdoptionDeclaration.eligibleOpticalStateIds.some(
+        (value, index) => value !== packed.eligibleOpticalStateIds[index]
+      )
+    )
+  ) {
+    throw new TypeError(
+      'dispersed-medium dynamic route catalogs require the exact authenticated producer declaration'
+    );
+  }
   if (!exactObjectReference(rawBuffer)) {
     throw new TypeError(
       'dispersed-medium buffer registration requires one exact GPU buffer'
@@ -654,6 +811,23 @@ function registerSphDispersedMediumGpuBuffer(
   let upload = null;
   let record = null;
   try {
+    const initialReadyOpticalStateIds = Object.freeze([
+      ...(packed.initialReadyOpticalStateIds ?? packed.readyOpticalStateIds)
+    ]);
+    const eligibleOpticalStateIds = Object.freeze([
+      ...(packed.eligibleOpticalStateIds ?? packed.readyOpticalStateIds)
+    ]);
+    const initialReadyRowCount = packed.initialReadyRowCount
+      ?? packed.readyRowCount;
+    const initialBlockedRowCount = packed.initialBlockedRowCount
+      ?? packed.blockedRowCount;
+    const eligibleOpticalStateRouteCount =
+      packed.eligibleOpticalStateRouteCount
+      ?? eligibleOpticalStateIds.length;
+    const routeCatalogRowCount = packed.routeCatalogRowCount ?? null;
+    const routeCatalogSignature = packed.routeCatalogSignature ?? null;
+    const activeRouteCountAuthority = packed.activeRouteCountAuthority
+      ?? 'exact-static-row-prefix-counts';
     // The child descriptor never exposes a host mutation method. Same-device
     // compute producers may initialize moment lanes before this registration;
     // their serialized dispatch/receipt chain is the semantic content boundary.
@@ -671,7 +845,16 @@ function registerSphDispersedMediumGpuBuffer(
       readyOpticalStateIds: Object.freeze([
         ...packed.readyOpticalStateIds
       ]),
-      readyOpticalStateRouteCount: packed.readyOpticalStateIds.length,
+      readyOpticalStateRouteCount: packed.readyOpticalStateRouteCount,
+      declarationMode,
+      initialReadyRowCount,
+      initialBlockedRowCount,
+      initialReadyOpticalStateIds,
+      eligibleOpticalStateIds,
+      eligibleOpticalStateRouteCount,
+      routeCatalogRowCount,
+      routeCatalogSignature,
+      activeRouteCountAuthority,
       rowStrideFloats: packed.rowStrideFloats,
       rowStrideBytes: packed.rowStrideBytes,
       bufferByteLength: packed.bufferByteLength
@@ -687,6 +870,16 @@ function registerSphDispersedMediumGpuBuffer(
       blockedRowCount: packed.blockedRowCount,
       readyOpticalStateIds: authority.readyOpticalStateIds,
       readyOpticalStateRouteCount: authority.readyOpticalStateRouteCount,
+      declarationMode: authority.declarationMode,
+      initialReadyRowCount: authority.initialReadyRowCount,
+      initialBlockedRowCount: authority.initialBlockedRowCount,
+      initialReadyOpticalStateIds: authority.initialReadyOpticalStateIds,
+      eligibleOpticalStateIds: authority.eligibleOpticalStateIds,
+      eligibleOpticalStateRouteCount:
+        authority.eligibleOpticalStateRouteCount,
+      routeCatalogRowCount: authority.routeCatalogRowCount,
+      routeCatalogSignature: authority.routeCatalogSignature,
+      activeRouteCountAuthority: authority.activeRouteCountAuthority,
       rowStrideFloats: packed.rowStrideFloats,
       rowStrideBytes: packed.rowStrideBytes,
       bufferByteLength: packed.bufferByteLength,
@@ -709,6 +902,16 @@ function registerSphDispersedMediumGpuBuffer(
       blockedRowCount: packed.blockedRowCount,
       readyOpticalStateIds: authority.readyOpticalStateIds,
       readyOpticalStateRouteCount: authority.readyOpticalStateRouteCount,
+      declarationMode: authority.declarationMode,
+      initialReadyRowCount: authority.initialReadyRowCount,
+      initialBlockedRowCount: authority.initialBlockedRowCount,
+      initialReadyOpticalStateIds: authority.initialReadyOpticalStateIds,
+      eligibleOpticalStateIds: authority.eligibleOpticalStateIds,
+      eligibleOpticalStateRouteCount:
+        authority.eligibleOpticalStateRouteCount,
+      routeCatalogRowCount: authority.routeCatalogRowCount,
+      routeCatalogSignature: authority.routeCatalogSignature,
+      activeRouteCountAuthority: authority.activeRouteCountAuthority,
       rowStrideFloats: packed.rowStrideFloats,
       rowStrideBytes: packed.rowStrideBytes,
       bufferByteLength: packed.bufferByteLength,
@@ -717,6 +920,8 @@ function registerSphDispersedMediumGpuBuffer(
       destroyRequested: false,
       activeBorrowCount: 0,
       particleLineage: boundParticleLineage,
+      particleTopologyEpochTransitionGeneration:
+        nextParticleTopologyEpochTransitionGeneration(),
       particleSourceFamilies: new WeakMap(),
       particleSourceFamilyRegistrar:
         boundParticleSourceFamily ? particleSourceFamilyRegistrar : null,
@@ -851,7 +1056,8 @@ export function consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(
           );
         }
         const adoptionDeclaration = privatePackedRowsSnapshot(
-          context.adoptionDeclaration
+          context.adoptionDeclaration,
+          { allowDynamic: true }
         );
         const upload = registerSphDispersedMediumGpuBuffer(
           context.device,
@@ -962,6 +1168,243 @@ export function registerSphDispersedMediumGpuBufferParticleLineage(
   }
   record.particleLineage = next;
   return true;
+}
+
+/**
+ * Advance one live child's particle lineage across an exact conservative
+ * topology-epoch stamp. State, thermo, identity, revision, and particle count
+ * remain byte-for-byte the same; only the epoch may advance, and only by one.
+ * The opaque witness lets downstream producer authority rebase against this
+ * exact private transition without gaining its rollback capability.
+ */
+export function advanceSphDispersedMediumGpuBufferParticleTopologyEpoch(
+  upload,
+  options = null
+) {
+  const record = uploadRecords.get(upload) ?? null;
+  if (
+    !record
+    || record.upload !== upload
+    || record.destroyed
+    || record.destroyRequested
+    || record.deviceLost
+    || record.activeBorrowCount !== 0
+    || !record.particleLineage
+    || !record.particleSourceFamilyRegistrar
+    || particleTopologyEpochTransitionsInProgress.has(upload)
+    || !exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    || !exactLiveUploadRecordStateMatches(record)
+  ) {
+    throw new TypeError(
+      'dispersed-medium topology-epoch transition requires one unborrowed live exact child'
+    );
+  }
+
+  particleTopologyEpochTransitionsInProgress.add(upload);
+  try {
+    const registrar = options?.registrar ?? null;
+    if (registrar !== record.particleSourceFamilyRegistrar) {
+      throw new TypeError(
+        'dispersed-medium topology-epoch transition requires the private child registrar'
+      );
+    }
+    const sourceLineage = record.particleLineage;
+    const requestedSourceFamily = canonicalParticleSourceFamily(
+      options?.sourceFamily ?? null,
+      {
+        particleCount: record.particleCount,
+        device: record.device,
+        particleLineage: sourceLineage
+      }
+    );
+    if (!particleSourceFamilyMatches(record, requestedSourceFamily)) {
+      throw new TypeError(
+        'dispersed-medium topology-epoch transition requires the exact registered source family'
+      );
+    }
+    const sourceFamily = particleSourceFamilyEntry(
+      record,
+      requestedSourceFamily
+    );
+    if (!exactParticleSourceFamilyFieldsMatch(
+      sourceFamily,
+      requestedSourceFamily
+    )) {
+      throw new TypeError(
+        'dispersed-medium topology-epoch transition source registry changed during preflight'
+      );
+    }
+    const targetTopologyEpoch = options?.targetTopologyEpoch;
+    if (
+      !Number.isSafeInteger(targetTopologyEpoch)
+      || targetTopologyEpoch < 1
+      || targetTopologyEpoch > 0xffff_ffff
+      || sourceLineage.topologyEpoch >= 0xffff_ffff
+      || targetTopologyEpoch !== sourceLineage.topologyEpoch + 1
+    ) {
+      throw new RangeError(
+        'dispersed-medium topology epoch must advance by exactly one'
+      );
+    }
+    const targetLineage = canonicalParticleLineage({
+      ...sourceLineage,
+      topologyEpoch: targetTopologyEpoch
+    }, record.particleCount);
+    const targetFamily = canonicalParticleSourceFamily({
+      ...sourceFamily,
+      topologyEpoch: targetTopologyEpoch
+    }, {
+      particleCount: record.particleCount,
+      device: record.device,
+      particleLineage: targetLineage
+    });
+    const byThermo = record.particleSourceFamilies.get(
+      sourceFamily.stateBuffer
+    );
+    const byIdentity = byThermo?.get(sourceFamily.thermoBuffer) ?? null;
+    if (
+      !byIdentity
+      || byIdentity.get(sourceFamily.identityBuffer) !== sourceFamily
+      || sourceFamily.device !== targetFamily.device
+      || sourceFamily.particleCount !== targetFamily.particleCount
+      || sourceFamily.identityRevision !== targetFamily.identityRevision
+      || sourceFamily.stateBuffer !== targetFamily.stateBuffer
+      || sourceFamily.thermoBuffer !== targetFamily.thermoBuffer
+      || sourceFamily.identityBuffer !== targetFamily.identityBuffer
+    ) {
+      throw new TypeError(
+        'dispersed-medium topology-epoch transition source registry changed during preflight'
+      );
+    }
+
+    const targetGeneration = nextParticleTopologyEpochTransitionGeneration();
+    const witness = Object.freeze({
+      schema:
+        ULG_SPH_DISPERSED_MEDIUM_OPTICS_TOPOLOGY_EPOCH_TRANSITION_SCHEMA,
+      status: 'sph-dispersed-medium-optics-topology-epoch-advanced',
+      particleCount: record.particleCount,
+      identityRevision: sourceLineage.identityRevision,
+      sourceTopologyEpoch: sourceLineage.topologyEpoch,
+      targetTopologyEpoch
+    });
+    const transitionRecord = {
+      active: true,
+      witness,
+      upload,
+      record,
+      registrar,
+      sourceLineage,
+      targetLineage,
+      sourceFamily,
+      targetFamily,
+      byIdentity,
+      targetGeneration
+    };
+    const exactTargetStateStillLive = () => Boolean(
+      transitionRecord.active
+      && uploadRecords.get(upload) === record
+      && record.upload === upload
+      && record.destroyed !== true
+      && record.destroyRequested !== true
+      && record.deviceLost !== true
+      && record.activeBorrowCount === 0
+      && record.particleSourceFamilyRegistrar === registrar
+      && record.particleLineage === targetLineage
+      && record.particleTopologyEpochTransitionGeneration === targetGeneration
+      && byIdentity.get(targetFamily.identityBuffer) === targetFamily
+      && exactUploadDescriptorMatchesRecord(
+        record,
+        upload,
+        { requireParticleLineage: true }
+      )
+      && exactLiveUploadRecordStateMatches(record)
+    );
+    transitionRecord.exactTargetStateStillLive = exactTargetStateStillLive;
+
+    byIdentity.set(targetFamily.identityBuffer, targetFamily);
+    record.particleLineage = targetLineage;
+    record.particleTopologyEpochTransitionGeneration = targetGeneration;
+    particleTopologyEpochTransitionWitnessRecords.set(
+      witness,
+      transitionRecord
+    );
+
+    let rolledBack = false;
+    const rollback = () => {
+      if (rolledBack) return true;
+      if (!exactTargetStateStillLive()) return false;
+      byIdentity.set(sourceFamily.identityBuffer, sourceFamily);
+      record.particleLineage = sourceLineage;
+      // Rollback itself is a new private generation. An older transition must
+      // never become reusable merely because a later transition was undone.
+      record.particleTopologyEpochTransitionGeneration =
+        nextParticleTopologyEpochTransitionGeneration();
+      transitionRecord.active = false;
+      rolledBack = true;
+      return true;
+    };
+    return Object.freeze({ witness, rollback });
+  } finally {
+    particleTopologyEpochTransitionsInProgress.delete(upload);
+  }
+}
+
+export function sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches(
+  witness,
+  {
+    upload = null,
+    sourceFamily = null,
+    targetFamily = null
+  } = {}
+) {
+  const transition =
+    particleTopologyEpochTransitionWitnessRecords.get(witness) ?? null;
+  if (
+    !transition
+    || transition.witness !== witness
+    || transition.upload !== upload
+    || !Object.isFrozen(witness)
+    || witness.schema
+      !== ULG_SPH_DISPERSED_MEDIUM_OPTICS_TOPOLOGY_EPOCH_TRANSITION_SCHEMA
+    || witness.status
+      !== 'sph-dispersed-medium-optics-topology-epoch-advanced'
+    || witness.particleCount !== transition.record.particleCount
+    || witness.identityRevision
+      !== transition.sourceLineage.identityRevision
+    || witness.sourceTopologyEpoch
+      !== transition.sourceLineage.topologyEpoch
+    || witness.targetTopologyEpoch
+      !== transition.targetLineage.topologyEpoch
+    || !transition.exactTargetStateStillLive?.()
+  ) return false;
+  try {
+    const canonicalSource = canonicalParticleSourceFamily(sourceFamily, {
+      particleCount: transition.record.particleCount,
+      device: transition.record.device,
+      particleLineage: transition.sourceLineage
+    });
+    const canonicalTarget = canonicalParticleSourceFamily(targetFamily, {
+      particleCount: transition.record.particleCount,
+      device: transition.record.device,
+      particleLineage: transition.targetLineage
+    });
+    return Boolean(
+      exactParticleSourceFamilyFieldsMatch(
+        canonicalSource,
+        transition.sourceFamily
+      )
+      && exactParticleSourceFamilyFieldsMatch(
+        canonicalTarget,
+        transition.targetFamily
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function sphDispersedMediumGpuBufferParticleLineageMatches(
@@ -1092,7 +1535,12 @@ export function registerSphDispersedMediumGpuBufferParticleSourceFamilyContinuat
       'dispersed-medium source-family continuation requires one live child eligible for a new owner'
     );
   }
-  return registerParticleSourceFamily(record, target);
+  const transition = registerParticleSourceFamily(record, target);
+  if (transition.inserted === true) {
+    record.particleTopologyEpochTransitionGeneration =
+      nextParticleTopologyEpochTransitionGeneration();
+  }
+  return transition;
 }
 
 /**
@@ -1152,6 +1600,10 @@ export function beginSphDispersedMediumGpuBufferBorrow(device, upload) {
       'dispersed-medium borrow requires one live exact same-device sidecar'
     );
   }
+  // A consumer may observe the current topology epoch. Permanently stale any
+  // older rollback witness before the borrow becomes externally visible.
+  record.particleTopologyEpochTransitionGeneration =
+    nextParticleTopologyEpochTransitionGeneration();
   record.activeBorrowCount += 1;
   let released = false;
   return () => {
@@ -1188,6 +1640,22 @@ export function validateSphDispersedMediumGpuBufferAuthority(
     && authority.readyOpticalStateIds.every(
       (value, index) => value === record.packed.readyOpticalStateIds[index]
     )
+    && authority.declarationMode === record.declarationMode
+    && authority.initialReadyRowCount === record.initialReadyRowCount
+    && authority.initialBlockedRowCount === record.initialBlockedRowCount
+    && authority.initialReadyOpticalStateIds
+      === record.initialReadyOpticalStateIds
+    && Array.isArray(authority.initialReadyOpticalStateIds)
+    && Object.isFrozen(authority.initialReadyOpticalStateIds)
+    && authority.eligibleOpticalStateIds === record.eligibleOpticalStateIds
+    && Array.isArray(authority.eligibleOpticalStateIds)
+    && Object.isFrozen(authority.eligibleOpticalStateIds)
+    && authority.eligibleOpticalStateRouteCount
+      === record.eligibleOpticalStateRouteCount
+    && authority.routeCatalogRowCount === record.routeCatalogRowCount
+    && authority.routeCatalogSignature === record.routeCatalogSignature
+    && authority.activeRouteCountAuthority
+      === record.activeRouteCountAuthority
     && record.active
     && !record.destroyed
     && !record.deviceLost
@@ -1285,7 +1753,7 @@ export function snapshotSphDispersedMediumGpuBufferDeclaration(
     );
   }
   return Object.freeze({
-    ...privatePackedRowsSnapshot(record.packed),
+    ...privatePackedRowsSnapshot(record.packed, { allowDynamic: true }),
     buffer: record.buffer
   });
 }

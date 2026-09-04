@@ -7,7 +7,9 @@ import { createSphPhaseViewState } from '../runtime/sphPhaseViewState.js';
 import {
   SPH_STATIC_TABLE_CACHE_BUNDLE_SCHEMA,
   SPH_STATIC_TABLE_CACHE_UPDATE_SCHEMA,
+  collectiveOpticalRouteSetAuthoritiesExactlyEqual,
   compactSphStaticTableBundleForTransfer,
+  createSphCollectiveOpticalRouteSetAuthority,
   createSphStaticTableCacheUpdate,
   rehydrateSphStaticTableBundle,
   summarizeSphStaticTableCacheSnapshot
@@ -16,6 +18,7 @@ import {
   buildSphReactionTableFromViewState,
   buildSphThermalMaterialTableFromViewState,
   reactionTablesExactlyEqual,
+  sphCollectiveOpticalStaticInputsFromViewState,
   sphStaticTableInputsFromViewState,
   surfaceDescriptorsFromMaterials,
   thermalMaterialTablesExactlyEqual
@@ -46,6 +49,8 @@ const REQUIRED_STATIC_TABLE_FAMILIES = Object.freeze([
   'thermalClosureGraphSet',
   'thermalPhaseResponseTable',
   'opticalGpuTable',
+  'collectiveOpticalGpuTable',
+  'dispersedMediumOpticalClosureTable',
   'reactionTable'
 ]);
 
@@ -60,12 +65,11 @@ function sameStringSet(a = [], b = []) {
   return left.every((value, index) => value === right[index]);
 }
 
-function opticalCoverageKey(record = {}) {
-  return [
-    record.material,
-    record.phase ?? 'phase-unspecified',
-    record.opticalStateKey || 'default'
-  ].join('|');
+function opticalRecordCoversDescriptor(record = {}, descriptor = {}) {
+  return record.material === descriptor.material
+    && (descriptor.phase == null || record.phase === descriptor.phase)
+    && (record.opticalStateKey || 'default')
+      === (descriptor.opticalStateKey || 'default');
 }
 
 function finiteNumber(value, fallback = 0) {
@@ -103,7 +107,8 @@ function reactionTableContactRadiiCoverViewState(reactionTable = {}, viewState =
 export function staticTableBundleCoversViewState(
   bundle,
   viewState = {},
-  liveThermalMaterialTable = null
+  liveThermalMaterialTable = null,
+  liveCollectiveOpticalInputs = null
 ) {
   if (!bundle?.schema || bundle.hitCount <= 0) return false;
   if (!REQUIRED_STATIC_TABLE_FAMILIES.every((family) => bundle.restoredFamilies?.includes(family))) {
@@ -137,12 +142,42 @@ export function staticTableBundleCoversViewState(
     return false;
   }
 
-  const availableOptics = new Set((bundle.opticalGpuTable?.recordMetadata || []).map(opticalCoverageKey));
-  return surfaceDescriptorsFromMaterials(viewState.materials || []).every((descriptor) => availableOptics.has(opticalCoverageKey({
-    material: descriptor.material,
-    phase: descriptor.phase,
-    opticalStateKey: descriptor.opticalStateKey
-  })));
+  const authoritativeCollectiveOpticalInputs = liveCollectiveOpticalInputs
+    ?? sphCollectiveOpticalStaticInputsFromViewState(viewState);
+  const cachedCollectiveOpticalAuthority =
+    createSphCollectiveOpticalRouteSetAuthority({
+      routeDescriptors: bundle.collectiveOpticalRouteDescriptors,
+      opticalGpuTable: bundle.collectiveOpticalGpuTable,
+      closureTable: bundle.dispersedMediumOpticalClosureTable
+    });
+  const liveCollectiveOpticalAuthority =
+    createSphCollectiveOpticalRouteSetAuthority({
+      routeDescriptors:
+        authoritativeCollectiveOpticalInputs.collectiveOpticalRouteDescriptors,
+      opticalGpuTable:
+        authoritativeCollectiveOpticalInputs.collectiveOpticalGpuTable,
+      closureTable:
+        authoritativeCollectiveOpticalInputs.dispersedMediumOpticalClosureTable
+    });
+  if (
+    !collectiveOpticalRouteSetAuthoritiesExactlyEqual(
+      bundle.collectiveOpticalRouteSetAuthority,
+      cachedCollectiveOpticalAuthority
+    )
+    || !collectiveOpticalRouteSetAuthoritiesExactlyEqual(
+      cachedCollectiveOpticalAuthority,
+      liveCollectiveOpticalAuthority
+    )
+  ) {
+    return false;
+  }
+
+  const opticalRecords = bundle.opticalGpuTable?.recordMetadata || [];
+  return surfaceDescriptorsFromMaterials(viewState.materials || []).every(
+    (descriptor) => opticalRecords.some(
+      (record) => opticalRecordCoversDescriptor(record, descriptor)
+    )
+  );
 }
 
 function reusedStaticTableCacheUpdate({ snapshot, bundle, generatorFingerprint }) {
@@ -446,7 +481,14 @@ async function runSphPhaseRebuildTask(task, record) {
     const previousSnapshot = input.staticTableCache.cacheSnapshot || null;
     const cachedBundle = rehydrateSphStaticTableBundle(previousSnapshot, { generatorFingerprint });
     const liveThermalMaterialTable = buildSphThermalMaterialTableFromViewState(viewState);
-    if (staticTableBundleCoversViewState(cachedBundle, viewState, liveThermalMaterialTable)) {
+    const liveCollectiveOpticalInputs =
+      sphCollectiveOpticalStaticInputsFromViewState(viewState);
+    if (staticTableBundleCoversViewState(
+      cachedBundle,
+      viewState,
+      liveThermalMaterialTable,
+      liveCollectiveOpticalInputs
+    )) {
       staticTableCacheBundle = compactSphStaticTableBundleForTransfer(cachedBundle);
       staticTableCacheUpdate = reusedStaticTableCacheUpdate({
         snapshot: previousSnapshot,

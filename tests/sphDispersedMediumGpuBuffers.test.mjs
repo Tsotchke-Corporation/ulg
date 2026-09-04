@@ -455,6 +455,49 @@ test('dispersed-medium upload defers owner teardown until its exact async borrow
   ), false);
 });
 
+test('dispersed-medium deferred raw teardown preserves exact retry authority after a destroy throw', () => {
+  const packed = buildSphDispersedMediumGpuBuffers([
+    { dispersedMediumOptics: readyOptics() }
+  ]);
+  const { device, destroyed } = fakeDevice();
+  const upload = uploadSphDispersedMediumGpuBuffers(device, packed, {
+    particleLineage: {
+      particleCount: 1,
+      topologyEpoch: 0,
+      identityRevision: 'retry-identity',
+      identityBuffer: {}
+    }
+  });
+  const rawDestroy = upload.buffer.destroy.bind(upload.buffer);
+  let rawDestroyAttemptCount = 0;
+  upload.buffer.destroy = () => {
+    rawDestroyAttemptCount += 1;
+    if (rawDestroyAttemptCount === 1) {
+      throw new Error('synthetic dispersed-medium raw destroy failure');
+    }
+    rawDestroy();
+  };
+  const release = beginSphDispersedMediumGpuBufferBorrow(device, upload);
+
+  assert.equal(destroySphDispersedMediumGpuBuffers(upload), true);
+  assert.equal(upload.destroyPending, true);
+  assert.throws(
+    () => release(),
+    /synthetic dispersed-medium raw destroy failure/
+  );
+  assert.equal(rawDestroyAttemptCount, 1);
+  assert.equal(upload.destroyPending, true);
+  assert.notEqual(upload.destroyed, true);
+  assert.deepEqual(destroyed, []);
+
+  assert.equal(destroySphDispersedMediumGpuBuffers(upload), true);
+  assert.equal(rawDestroyAttemptCount, 2);
+  assert.equal(upload.destroyPending, false);
+  assert.equal(upload.destroyed, true);
+  assert.deepEqual(destroyed, ['ulg-sph-dispersed-medium-optics']);
+  assert.equal(destroySphDispersedMediumGpuBuffers(upload), false);
+});
+
 test('dispersed-medium upload validates mutable packed rows and rolls back failed writes', () => {
   const packed = buildSphDispersedMediumGpuBuffers([
     { dispersedMediumOptics: readyOptics() }
@@ -474,6 +517,69 @@ test('dispersed-medium upload validates mutable packed rows and rolls back faile
     /write failed/
   );
   assert.deepEqual(failing.destroyed, ['ulg-sph-dispersed-medium-optics']);
+});
+
+test('raw dispersed-medium upload rejects a forged GPU-dynamic route catalog before allocation', () => {
+  const built = buildSphDispersedMediumGpuBuffers([
+    { dispersedMediumOptics: readyOptics() },
+    {}
+  ]);
+  const dynamicCatalog = {
+    ...built,
+    status: 'dispersed-medium-optics-producer-dynamic-route-catalog-ready',
+    declarationMode: 'gpu-dynamic-route-catalog-v0',
+    readyRowCount: null,
+    blockedRowCount: null,
+    initialReadyRowCount: built.readyRowCount,
+    initialBlockedRowCount: built.blockedRowCount,
+    initialReadyOpticalStateIds: [...built.readyOpticalStateIds],
+    eligibleOpticalStateIds: [...built.readyOpticalStateIds],
+    eligibleOpticalStateRouteCount: built.readyOpticalStateRouteCount,
+    routeCatalogRowCount: 1,
+    routeCatalogSignature: 'f32-bits-v0:synthetic-forged-catalog',
+    activeRouteCountAuthority: 'gpu-resident-unobserved-no-host-readback'
+  };
+  const { device, writes, destroyed } = fakeDevice();
+
+  assert.throws(
+    () => uploadSphDispersedMediumGpuBuffers(device, dynamicCatalog),
+    /require an authenticated producer adoption/
+  );
+  assert.deepEqual(writes, []);
+  assert.deepEqual(destroyed, []);
+});
+
+test('an empty dynamic route catalog remains a valid optically-thin declaration but still requires producer authority', () => {
+  const built = buildSphDispersedMediumGpuBuffers([
+    {
+      dispersedMediumOptics: {
+        status: SPH_DISPERSED_MEDIUM_OPTICS_STATUS.blocked
+      }
+    }
+  ]);
+  const dynamicCatalog = {
+    ...built,
+    status: 'dispersed-medium-optics-producer-dynamic-route-catalog-ready',
+    declarationMode: 'gpu-dynamic-route-catalog-v0',
+    readyRowCount: null,
+    blockedRowCount: null,
+    initialReadyRowCount: 0,
+    initialBlockedRowCount: 1,
+    initialReadyOpticalStateIds: [],
+    eligibleOpticalStateIds: [],
+    eligibleOpticalStateRouteCount: 0,
+    routeCatalogRowCount: 1,
+    routeCatalogSignature: 'f32-bits-v0:h2-only-blocked-route',
+    activeRouteCountAuthority: 'gpu-resident-unobserved-no-host-readback'
+  };
+  const { device, writes, destroyed } = fakeDevice();
+
+  assert.throws(
+    () => uploadSphDispersedMediumGpuBuffers(device, dynamicCatalog),
+    /require an authenticated producer adoption/
+  );
+  assert.deepEqual(writes, []);
+  assert.deepEqual(destroyed, []);
 });
 
 test('dispersed-medium upload binds resident bytes and authority to one pre-copy snapshot', () => {

@@ -355,6 +355,7 @@ test('compact snapshot materialization preserves explicit Uint32 particle identi
     particleCount,
     step: 7,
     time: 0.125,
+    topologyEpoch: 19,
     identityRequired: true,
     identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
     identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -415,6 +416,8 @@ test('compact snapshot materialization preserves explicit Uint32 particle identi
     hotBuffer.sphPacked.identityRevision,
     compactBufferSnapshot.identityRevision
   );
+  assert.equal(hotBuffer.sphPacked.topologyEpoch, 19);
+  assert.equal(hotBuffer.sphUpload.topologyEpoch, 19);
   assert.deepEqual(
     hotBuffer.sphPacked.renderDomainKeys,
     compactBufferSnapshot.renderDomainKeys
@@ -425,6 +428,11 @@ test('compact snapshot materialization preserves explicit Uint32 particle identi
 
   const createdBufferCount = device.createdBuffers.length;
   const invalidSnapshots = [
+    {
+      label: 'missing topology epoch',
+      patch: { topologyEpoch: undefined },
+      error: /requires an exact u32 topologyEpoch/
+    },
     {
       label: 'Float32 identity rows',
       patch: { sphIdentity: new Float32Array(identity) },
@@ -6302,6 +6310,7 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
     particleCount: graph.stateSeedPayload.state.particles.length,
     step: compactSnapshotStep,
     time: compactSnapshotTime,
+    topologyEpoch: snapshotSphPacked.topologyEpoch,
     phaseCarrierPlan,
     identityRequired: true,
     identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
@@ -6353,6 +6362,10 @@ test('ULG remote seed graph builder executes on a real responder ComputeManager 
   assert.equal(
     compactSnapshotCandidate.compactBufferSnapshot.schema,
     ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA
+  );
+  assert.equal(
+    compactSnapshotCandidate.compactBufferSnapshot.topologyEpoch,
+    snapshotSphPacked.topologyEpoch
   );
   assert.equal(compactSnapshotCandidate.compactBufferSnapshotValidationStatus, 'validated-compact-buffer-snapshot-ready');
   assert.equal(compactSnapshotCandidate.outputBuffers.compactBufferSnapshotAvailable, true);

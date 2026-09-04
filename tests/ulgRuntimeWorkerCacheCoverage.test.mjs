@@ -2,13 +2,18 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import {
+  createSphStaticTableCacheUpdate,
+  rehydrateSphStaticTableBundle
+} from '../src/runtime/sph/sphColdStartCache.js';
+import {
   buildSphReactionTableFromViewState,
   buildSphThermalMaterialTableFromViewState,
   reactionTablesExactlyEqual,
+  sphStaticTableInputsFromViewState,
   thermalMaterialTablesExactlyEqual
 } from '../src/runtime/sph/sphStaticTableInputs.js';
 
-test('ULG runtime worker static table coverage rejects stale thermal content and reaction radius', async () => {
+test('ULG runtime worker static table coverage requires exact live thermal, reaction, and collective optical content', async () => {
   const previousSelf = globalThis.self;
   globalThis.self = {
     addEventListener() {},
@@ -37,27 +42,22 @@ test('ULG runtime worker static table coverage rejects stale thermal content and
     const liveThermalMaterialTable =
       buildSphThermalMaterialTableFromViewState(viewState);
     const liveReactionTable = buildSphReactionTableFromViewState(viewState);
-    const bundle = {
-      schema: 'peercompute.ulg.sph-static-table-cache-bundle.v0',
-      hitCount: 5,
-      restoredFamilies: [
-        'thermalMaterialTable',
-        'thermalClosureGraphSet',
-        'thermalPhaseResponseTable',
-        'opticalGpuTable',
-        'reactionTable'
-      ],
-      thermalMaterialTable: liveThermalMaterialTable,
-      opticalGpuTable: {
-        recordMetadata: [
-          { material: 'h2o', phase: 'phase-unspecified', opticalStateKey: 'default' },
-          { material: 'fe', phase: 'phase-unspecified', opticalStateKey: 'default' }
-        ]
-      },
-      reactionTable: liveReactionTable
-    };
+    const cacheUpdate = createSphStaticTableCacheUpdate({
+      tableInputs: sphStaticTableInputsFromViewState(viewState, {
+        thermalMaterialTable: liveThermalMaterialTable
+      }),
+      generatorFingerprint: 'ulg-runtime-worker-cache-coverage-test'
+    });
+    const bundle = rehydrateSphStaticTableBundle(cacheUpdate.cacheSnapshot, {
+      generatorFingerprint: 'ulg-runtime-worker-cache-coverage-test'
+    });
 
+    assert.equal(bundle.hitCount, 7);
     assert.equal(staticTableBundleCoversViewState(bundle, viewState), true);
+    assert.equal(
+      staticTableBundleCoversViewState(structuredClone(bundle), viewState),
+      true
+    );
     assert.equal(staticTableBundleCoversViewState(bundle, {
       ...viewState,
       sphGpuParticleState: { smoothingLengthM: 0.1, particleCount: 512 }
@@ -112,6 +112,53 @@ test('ULG runtime worker static table coverage rejects stale thermal content and
       }
     };
     assert.equal(staticTableBundleCoversViewState(staleLayoutBundle, viewState), false);
+
+    const staleCollectiveRecordsBundle = structuredClone(bundle);
+    staleCollectiveRecordsBundle.collectiveOpticalGpuTable.records[2] += 0.125;
+    assert.equal(
+      staticTableBundleCoversViewState(staleCollectiveRecordsBundle, viewState),
+      false
+    );
+
+    const staleCollectiveClosureRowsBundle = structuredClone(bundle);
+    staleCollectiveClosureRowsBundle.dispersedMediumOpticalClosureTable.rows[8] += 0.125;
+    assert.equal(
+      staticTableBundleCoversViewState(
+        staleCollectiveClosureRowsBundle,
+        viewState
+      ),
+      false
+    );
+
+    const changedOpticalClosure = {
+      ...materialProperties.h2o.dispersedMediumOpticalClosure,
+      scatteringEfficiencyQsca: 1.5
+    };
+    const changedOpticalClosureViewState = {
+      ...viewState,
+      materialProperties: {
+        ...materialProperties,
+        h2o: {
+          ...materialProperties.h2o,
+          dispersedMediumOpticalClosure: changedOpticalClosure
+        }
+      }
+    };
+    assert.equal(
+      staticTableBundleCoversViewState(bundle, changedOpticalClosureViewState),
+      false
+    );
+
+    const legacyFiveFamilyBundle = structuredClone(bundle);
+    legacyFiveFamilyBundle.restoredFamilies =
+      legacyFiveFamilyBundle.restoredFamilies.filter((family) => (
+        family !== 'collectiveOpticalGpuTable'
+        && family !== 'dispersedMediumOpticalClosureTable'
+      ));
+    assert.equal(
+      staticTableBundleCoversViewState(legacyFiveFamilyBundle, viewState),
+      false
+    );
     assert.equal(
       thermalMaterialTablesExactlyEqual(
         liveThermalMaterialTable,

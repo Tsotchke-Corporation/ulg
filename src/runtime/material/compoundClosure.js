@@ -1,6 +1,6 @@
 // Derived closure for a reaction PRODUCT compound. When two materials react, the product is usually
 // a molecule the demo has no reference closure for (e.g. NaOH, Na2O, MgO). Rather than tabulate it,
-// we derive a minimal renderable closure from first principles + the constituent materials:
+// we derive a minimal simulation closure from first principles + the constituent materials:
 //   - molar mass:        exact, from the atomic masses of the constituent atoms.
 //   - condensed density: volume-additive blend of the reactant condensed densities (the product
 //                        forms out of them) — a derived estimate, documented as such.
@@ -11,7 +11,15 @@
 // One condensed (liquid-like) phase, shear 0 (a reaction-product puddle/melt). Evidence-only: every
 // validation flag stays false (HF/STO-3G + additive estimates are approximations, not validated).
 
+import {
+  SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA
+} from '../../../ulg-gpu-abi/src/index.js';
 import { atomicMassKg } from '../electronicStructure/periodicTable.js';
+import {
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
+  createCondensedDispersedMediumOpticalClosure
+} from './condensedDispersedOpticalReferences.js';
 import { deriveFormulaMaterialProperties } from './materialDerivation.js';
 import {
   PROPERTY_DERIVATION_STATUS as DS,
@@ -27,6 +35,168 @@ const OPEN_TOP_K = 1e6;
 const MIN_CONDENSED_DENSITY_KG_PER_M3 = 500;
 const DEFAULT_REDUCED_PRODUCT_DENSITY_KG_PER_M3 = 1500;
 const DEFAULT_REDUCED_PRODUCT_BULK_MODULUS_PA = 1e9;
+
+export const REACTION_PRODUCT_DISPERSED_MEDIUM_OPTICAL_BLOCKED_SOURCE =
+  'reaction-product-dispersed-optics-blocked-missing-size-and-complex-index';
+
+const REACTION_PRODUCT_DISPERSED_MEDIUM_OPTICAL_BLOCKERS = Object.freeze([
+  'reaction-product-condensate-size-distribution-not-produced',
+  'reaction-product-visible-complex-refractive-index-not-produced',
+  'reaction-product-size-dependent-scattering-efficiency-not-derived'
+]);
+
+function blockedReactionProductDispersedMediumOpticalClosure({
+  densityKgPerM3
+} = {}) {
+  const density = Number(densityKgPerM3);
+  if (!Number.isFinite(density) || !(density > 0)) {
+    throw new RangeError(
+      'Reduced reaction-product optics require positive condensed density'
+    );
+  }
+  return Object.freeze({
+    schema: ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA,
+    morphologyModel:
+      SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+        .blocked,
+    condensedDensityKgPerM3: density,
+    scatteringEfficiencyQsca: 0,
+    absorptionEfficiencyQabs: 0,
+    asymmetryFactorG: 0,
+    provenance: Object.freeze({
+      status: DS.BLOCKED,
+      source: REACTION_PRODUCT_DISPERSED_MEDIUM_OPTICAL_BLOCKED_SOURCE,
+      accuracy:
+        'blocked-no-authoritative-size-distribution-or-visible-complex-refractive-index',
+      method:
+        'fail closed: conserved condensed mass and reduced density determine condensed volume, but neither a particle-size distribution nor wavelength-dependent complex refractive index is derivable for the reduced reaction product, so no optical efficiency is asserted',
+      densitySource: Object.freeze({
+        status: DS.REDUCED_ESTIMATE,
+        source: 'reactant-packed-product-closure',
+        method: 'reuse the reduced reaction-product condensed density without adding optical interpretation'
+      }),
+      blockers: REACTION_PRODUCT_DISPERSED_MEDIUM_OPTICAL_BLOCKERS
+    }),
+    scientificValidation: false
+  });
+}
+
+function reactionProductDispersedMediumOpticalClosure({
+  key,
+  label,
+  atomCounts,
+  densityKgPerM3
+}) {
+  return createCondensedDispersedMediumOpticalClosure({
+    material: key,
+    formula: label,
+    atomCounts,
+    condensedPhase: 'liquid'
+  }) || blockedReactionProductDispersedMediumOpticalClosure({ densityKgPerM3 });
+}
+
+function reactionProductDispersedMediumOpticalProvenanceEntries({
+  key,
+  closure
+}) {
+  const ready = closure?.morphologyModel
+    === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+      .singleCompactSphereComplexIndex;
+  if (ready) {
+    return [
+      propertyProvenanceEntry({
+        paths: [
+          'dispersedMediumOpticalClosure.schema',
+          'dispersedMediumOpticalClosure.scientificValidation'
+        ],
+        status: DS.EXACT_CONSTANT,
+        source: 'ulg-gpu-abi-contract',
+        method:
+          'typed dispersed-medium optical property schema with an explicit false validation claim'
+      }),
+      propertyProvenanceEntry({
+        paths: ['dispersedMediumOpticalClosure.condensedDensityKgPerM3'],
+        status: DS.REFERENCE_FALLBACK,
+        source: CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
+        accuracy: closure.provenance.accuracy,
+        method:
+          'phase- and composition-authenticated condensed density from the optical reference record; this optical density does not replace the reduced mechanical EOS density',
+        inputs: [
+          `product=${key}`,
+          `reference-record=${closure.provenance.referenceRecordId}`,
+          `reference-temperature-k=${closure.provenance.referenceTemperatureK}`,
+          `reference-temperature-range-k=${closure.provenance.referenceTemperatureRangeK.join(':')}`,
+          `runtime-applicability-enforced=${closure.provenance.runtimeApplicabilityEnforced}`
+        ],
+        blockers: closure.provenance.blockers
+      }),
+      propertyProvenanceEntry({
+        paths: [
+          'dispersedMediumOpticalClosure.morphologyModel',
+          'dispersedMediumOpticalClosure.relativeRefractiveIndexN',
+          'dispersedMediumOpticalClosure.relativeExtinctionCoefficientK',
+          'dispersedMediumOpticalClosure.largeSizeRayAsymmetryFactorG',
+          'dispersedMediumOpticalClosure.referenceWavelengthM',
+          'dispersedMediumOpticalClosure.provenance'
+        ],
+        status: DS.REFERENCE_FALLBACK,
+        source: CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
+        accuracy: closure.provenance.accuracy,
+        method: closure.provenance.method,
+        inputs: [
+          `product=${key}`,
+          `reference-record=${closure.provenance.referenceRecordId}`,
+          `reference-bank=${closure.provenance.referenceBankFingerprint}`,
+          `extinction-model=${closure.provenance.extinctionModel}`,
+          `reference-temperature-range-k=${closure.provenance.referenceTemperatureRangeK.join(':')}`,
+          `runtime-applicability-enforced=${closure.provenance.runtimeApplicabilityEnforced}`
+        ],
+        blockers: closure.provenance.blockers
+      })
+    ];
+  }
+  return [
+    propertyProvenanceEntry({
+      paths: [
+        'dispersedMediumOpticalClosure.schema',
+        'dispersedMediumOpticalClosure.scientificValidation'
+      ],
+      status: DS.EXACT_CONSTANT,
+      source: 'ulg-gpu-abi-contract',
+      method:
+        'typed dispersed-medium optical property schema with an explicit false validation claim'
+    }),
+    propertyProvenanceEntry({
+      paths: ['dispersedMediumOpticalClosure.condensedDensityKgPerM3'],
+      status: DS.REDUCED_ESTIMATE,
+      source: 'reactant-packed-product-closure',
+      method:
+        'copy the reduced product condensed density into the optical closure without claiming measured aerosol density',
+      inputs: [`product=${key}`, 'phases.liquid.densityKgPerM3'],
+      blockers: ['reaction-product-condensed-density-not-scientifically-validated']
+    }),
+    propertyProvenanceEntry({
+      paths: [
+        'dispersedMediumOpticalClosure.morphologyModel',
+        'dispersedMediumOpticalClosure.scatteringEfficiencyQsca',
+        'dispersedMediumOpticalClosure.absorptionEfficiencyQabs',
+        'dispersedMediumOpticalClosure.asymmetryFactorG',
+        'dispersedMediumOpticalClosure.provenance'
+      ],
+      status: DS.BLOCKED,
+      source: REACTION_PRODUCT_DISPERSED_MEDIUM_OPTICAL_BLOCKED_SOURCE,
+      accuracy:
+        'blocked-no-authoritative-size-distribution-or-visible-complex-refractive-index',
+      method:
+        'fail closed because conserved reaction-born condensed mass and reduced product density determine volume but not size distribution or wavelength-dependent complex refractive index; zero efficiencies are absence markers, not an opacity model',
+      inputs: [
+        'reaction-born-conserved-condensed-mass',
+        'reduced-product-condensed-density'
+      ],
+      blockers: REACTION_PRODUCT_DISPERSED_MEDIUM_OPTICAL_BLOCKERS
+    })
+  ];
+}
 
 function formulaMolarMassKgPerMol(atomCounts) {
   return Object.entries(atomCounts)
@@ -112,6 +282,13 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
   const bulkModulusPa = reducedReactantBulkModulusPa(reactants);
   const thermalConductivityWPerMK = reducedReactantThermalConductivityWPerMK(reactants);
   const cpJPerKgK = (3 * R * Math.max(1, atomsPerFormula)) / molarMassKgPerMol;
+  const dispersedMediumOpticalClosure =
+    reactionProductDispersedMediumOpticalClosure({
+      key,
+      label,
+      atomCounts,
+      densityKgPerM3
+    });
   return withPropertyProvenance({
     molarMassKgPerMol,
     atomsPerFormula,
@@ -120,6 +297,7 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
     closureBacked: true,
     derivation: 'reduced-reaction-product-closure: exact formula mass; reactant-packed density, bulk, and conductivity estimates',
     intrinsicColorSrgb: [0.78, 0.80, 0.82],
+    dispersedMediumOpticalClosure,
     phases: [{
       name: 'liquid',
       cpJPerKgK,
@@ -163,10 +341,18 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
           ...((reactants || []).map((reactant) => `${reactant?.material || reactant?.formula || 'reactant'}:rho=${reactant?.densityKgPerM3 ?? 'unknown'}:K=${reactant?.bulkModulusPa ?? 'unknown'}:k=${reactant?.thermalConductivityWPerMK ?? 'unknown'}`))
         ],
         blockers: ['reaction-product-first-principles-closure-skipped-for-interactive-runtime']
+      }),
+      ...reactionProductDispersedMediumOpticalProvenanceEntries({
+        key: key || label,
+        closure: dispersedMediumOpticalClosure
       })
     ],
     notes: [
-      `${key || label} uses a reduced reaction-product closure for interactive runtime stability; it is not validated thermochemistry or EOS.`
+      `${key || label} uses a reduced reaction-product closure for interactive runtime stability; it is not validated thermochemistry or EOS.`,
+      dispersedMediumOpticalClosure.provenance.source
+        === CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
+        ? 'Dispersed optics use a phase- and composition-matched reference record; plume hydration, size distribution, and quantitative extinction remain unvalidated.'
+        : 'Dispersed optics remain fail-closed because no phase- and composition-matched reference record is available.'
     ]
   });
 }

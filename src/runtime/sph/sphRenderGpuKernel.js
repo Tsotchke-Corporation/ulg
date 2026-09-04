@@ -196,6 +196,11 @@ export function createSphRenderSurfaceTableLineageSnapshot(surfaceTable) {
       phaseId: surface?.phaseId,
       opticalStateId: surface?.opticalStateId,
       opticalStateKey: surface?.opticalStateKey,
+      surfaceIdentityKey: surface?.surfaceIdentityKey,
+      collectiveOpticalRoute: surface?.collectiveOpticalRoute,
+      collectiveOpticalRouteSchema: surface?.collectiveOpticalRouteSchema,
+      collectiveOpticalRouteKey: surface?.collectiveOpticalRouteKey,
+      collectiveOpticalRouteId: surface?.collectiveOpticalRouteId,
       opticalResponseAuthorityFlag: surface?.opticalResponseAuthorityFlag,
       opticalResponseAuthority: surface?.opticalResponseAuthority,
       opticalResponseReady: surface?.opticalResponseReady,
@@ -277,6 +282,15 @@ export function validateSphRenderSurfaceTableLineageSnapshot(
         && surface?.phaseId === entry.phaseId
         && surface?.opticalStateId === entry.opticalStateId
         && surface?.opticalStateKey === entry.opticalStateKey
+        && surface?.surfaceIdentityKey === entry.surfaceIdentityKey
+        && surface?.collectiveOpticalRoute
+          === entry.collectiveOpticalRoute
+        && surface?.collectiveOpticalRouteSchema
+          === entry.collectiveOpticalRouteSchema
+        && surface?.collectiveOpticalRouteKey
+          === entry.collectiveOpticalRouteKey
+        && surface?.collectiveOpticalRouteId
+          === entry.collectiveOpticalRouteId
         && surface?.opticalResponseAuthorityFlag
           === entry.opticalResponseAuthorityFlag
         && surface?.opticalResponseAuthority === entry.opticalResponseAuthority
@@ -1273,8 +1287,7 @@ export function emissiveByMaterialFromSphRenderRows(rows = []) {
 export function decodeSphRenderRows(renderRows, {
   materialProperties = {},
   reactionTable = null,
-  materialMap = buildSphRenderMaterialMap(materialProperties, reactionTable),
-  gasPressureSummary = null
+  materialMap = buildSphRenderMaterialMap(materialProperties, reactionTable)
 } = {}) {
   if (!(renderRows instanceof Float32Array)) {
     throw new TypeError('decodeSphRenderRows requires Float32Array render rows');
@@ -1304,23 +1317,15 @@ export function decodeSphRenderRows(renderRows, {
     const volumeRatioJ = finiteNumber(renderRows[offset + 14], 1);
     const pressurePa = finiteNumber(renderRows[offset + 15], 0);
     const renderDomainKey = renderDomainKeyForId(renderDomainId);
-    const h2oGas = gasPressureSummary?.bySpecies?.h2o || null;
-    const opticalState = material === 'h2o' && phase === 'gas' && h2oGas
-      ? {
-          temperatureK: Number.isFinite(h2oGas.temperatureK) ? h2oGas.temperatureK : temperatureK,
-          h2oPartialPressurePa: h2oGas.partialPressurePa,
-          pressurePa: gasPressureSummary.totalPressurePa,
-          source: gasPressureSummary.source || gasPressureSummary.status || 'gas-pressure-summary'
-        }
-      : null;
     const rgb = colorFor({ material, phase, temperatureK, materialProperties });
     positionsM.set([renderRows[offset], renderRows[offset + 1], renderRows[offset + 2]], index * 3);
     colorsRgb.set(rgb, index * 3);
     currentVolumesM3[index] = currentVolumeM3;
     particleRadiiM[index] = particleRadiusM;
-    const descriptor = opticalState
-      ? { material, phase, renderKey, opticalState }
-      : { material, phase, renderKey };
+    // Per-particle rows carry thermomechanical state only. Collective visible
+    // condensate authority comes exclusively from the conserved-mass optics
+    // sidecar; aggregate gas pressure can never synthesize an optical state.
+    const descriptor = { material, phase, renderKey };
     if (renderDomainId > 0) {
       descriptor.renderDomainId = renderDomainId;
       descriptor.renderDomainKey = renderDomainKey;
@@ -1345,8 +1350,7 @@ export function decodeSphRenderRows(renderRows, {
       particleRadiusM,
       volumeRatioJ,
       pressurePa,
-      renderKey,
-      opticalState
+      renderKey
     });
   }
 
@@ -2596,6 +2600,26 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       descriptor.opticalStateId ?? stableOpticalStateId(opticalState),
       `surfaceDescriptors[${index}].opticalStateId`
     );
+    const collectiveOpticalRoute = opticalStateId > 0;
+    const explicitCollectiveMarker = Boolean(
+      descriptor.collectiveOpticalRoute === true
+      || descriptor.collectiveOpticalRouteSchema
+    );
+    if (explicitCollectiveMarker && !collectiveOpticalRoute) {
+      throw new RangeError(
+        `surfaceDescriptors[${index}] collective optical route requires a positive opticalStateId`
+      );
+    }
+    for (const [field, value] of [
+      ['collectiveOpticalRouteId', descriptor.collectiveOpticalRouteId],
+      ['routeId', descriptor.routeId]
+    ]) {
+      if (value != null && Number(value) !== opticalStateId) {
+        throw new RangeError(
+          `surfaceDescriptors[${index}].${field} contradicts opticalStateId`
+        );
+      }
+    }
     const opticalStateKey = descriptor.opticalStateKey ?? stableOpticalStateKey(opticalState);
     const offset = index * SPH_GPU_RENDER_SURFACE_ROW_FLOATS;
     records.set([
@@ -2643,6 +2667,23 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       opticalState: opticalState ? { ...opticalState } : null,
       opticalStateKey,
       opticalStateId: encodedRecord[13],
+      surfaceIdentityKey:
+        descriptor.surfaceIdentityKey
+        ?? (collectiveOpticalRoute ? descriptor.surfaceKey ?? null : null),
+      collectiveOpticalRoute,
+      collectiveOpticalRouteSchema: collectiveOpticalRoute
+        ? (descriptor.collectiveOpticalRouteSchema
+            ?? descriptor.schema
+            ?? null)
+        : null,
+      collectiveOpticalRouteKey:
+        descriptor.collectiveOpticalRouteKey
+        ?? descriptor.routeKey
+        ?? descriptor.surfaceIdentityKey
+        ?? (collectiveOpticalRoute ? descriptor.surfaceKey : null)
+        ?? null,
+      collectiveOpticalRouteId:
+        collectiveOpticalRoute ? encodedRecord[13] : null,
       // Renderer-neutral closure result. These values are presentation
       // metadata (not field geometry), so they stay lossless across the
       // worker request without consuming another storage binding or changing
@@ -3110,6 +3151,26 @@ function renderPhaseWeightForSurface(surfacePhaseId, rowPhaseId, gasFraction, so
   return rowPhaseId === surfacePhaseId ? 1 : 0;
 }
 
+// Dispersed condensate is a subset of the conserved carrier mass, not an
+// additional phase. Its optical moments already own its appearance. Remove
+// only the matching component from ordinary geometry, leaving other materials
+// and phases untouched. Divide by total mass before subtracting from the phase
+// fraction so partially transitioned carriers remain correctly partitioned.
+function renderBulkPhaseWeight({
+  phaseWeight, materialId, surfacePhaseId, carrierMassKg, dispersedRows, offset
+}) {
+  if (
+    !dispersedRows
+    || !dispersedMediumRowIsReady(dispersedRows, offset)
+    || dispersedRows[offset] !== materialId
+    || dispersedRows[offset + 1] !== surfacePhaseId
+    || !Number.isFinite(carrierMassKg)
+    || !(carrierMassKg > 0)
+  ) return phaseWeight;
+  const dispersedFraction = Math.min(dispersedRows[offset + 4], carrierMassKg) / carrierMassKg;
+  return Math.max(0, phaseWeight - dispersedFraction);
+}
+
 // Partition one carrier's full-fraction implicit isovolume between phase
 // surfaces. For D(r) = A / (epsilon + r^2) - B, the zero-isosurface radius is
 // proportional to sqrt(A - B*epsilon), so A(f) below gives R(f)=R(1)cbrt(f)
@@ -3224,6 +3285,9 @@ export function buildSphRenderFieldCpu({
       dispersedMediumOpticsRows,
       resolvedParticleCount
     );
+  // Positive IDs are globally reserved for collective dispersed-medium
+  // routes, so duplicate routing is invalid even before a sidecar is present.
+  assertUniqueDispersedMediumSurfaceRoutes(surfaceTable);
   if (dispersedMediumOpticsRows) {
     assertUniqueDispersedMediumSurfaceRoutes(
       surfaceTable,
@@ -3256,13 +3320,12 @@ export function buildSphRenderFieldCpu({
       let palette = [0, 0, 0];
       let temperatureWeighted = 0;
       let temperatureWeight = 0;
-      // Once an authenticated optics sidecar is present, every positive
-      // optical-state surface is an exclusive collective-medium route. An
-      // unmatched or blocked route is intentionally empty; it must not fall
-      // through and duplicate the carrier as legacy material geometry.
-      const dispersedSurfaceActive = Boolean(
-        dispersedMediumOpticsRows && surface.opticalStateId > 0
-      );
+      // Every positive optical-state surface is reserved as an exclusive
+      // collective-medium route, including before its authenticated sidecar is
+      // available. An absent, unmatched, or blocked route is intentionally
+      // empty; it must not fall through and duplicate the carrier as legacy
+      // material geometry. Ordinary material surfaces use opticalStateId 0.
+      const dispersedSurfaceActive = surface.opticalStateId > 0;
       let dispersedScatteringOpticalDepth = 0;
       let dispersedAbsorptionOpticalDepth = 0;
       let dispersedScatteringAsymmetryState = {
@@ -3351,12 +3414,19 @@ export function buildSphRenderFieldCpu({
             materialId !== surface.materialId
             || !renderDomainMatchesSurface(renderDomainId, surface.renderDomainId)
           ) continue;
-          const phaseWeight = renderPhaseWeightForSurface(
-            surface.phaseId,
-            phaseId,
-            renderRows[renderOffset + 9],
-            renderRows[renderOffset + 16]
-          );
+          const phaseWeight = renderBulkPhaseWeight({
+            phaseWeight: renderPhaseWeightForSurface(
+              surface.phaseId,
+              phaseId,
+              renderRows[renderOffset + 9],
+              renderRows[renderOffset + 16]
+            ),
+            materialId,
+            surfacePhaseId: surface.phaseId,
+            carrierMassKg: renderRows[renderOffset + 3],
+            dispersedRows: dispersedMediumOpticsRows,
+            offset: particleIndex * SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS
+          });
           if (phaseWeight <= 0) continue;
           const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
           const particleRadiusM = finiteNumber(renderRows[renderOffset + 13], 0);
@@ -8470,6 +8540,10 @@ export async function buildSphRenderFieldWebGpu({
         ?? resolvedDispersedMediumOpticsAuthority?.readyOpticalStateIds
         ?? []
     );
+  } else {
+    // Preserve the same positive-route uniqueness invariant on the resident
+    // path before a conserved-medium sidecar has produced any ready rows.
+    assertUniqueDispersedMediumSurfaceRoutes(surfaceTable);
   }
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedRenderRowsBuffer = renderRowsBuffer || null;
@@ -8803,7 +8877,7 @@ export async function buildSphRenderFieldWebGpu({
         bindGroupLayout,
         cacheStatus: pipelineCacheStatus
       } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-render-field-v4-conservative-dispersed-optics',
+        cacheKey: 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics',
         label: 'ulg-sph-render-field',
         code: sphRenderFieldWgsl,
         entryPoint: 'main',

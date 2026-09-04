@@ -42836,3 +42836,77 @@ Validation and review:
   heading, exact old/new path checks, `git diff --check`, and production
   `npm run build`. Final PDF SHA-256:
   `7547a878f6c1fb1ab888de1d41f3ec7098720281b7ce16ff6d2fbed6a289fcf2`.
+
+## 2026-09-04 AKDT - Goal 2 conserved optics and volume integration checkpoint
+
+- Connected conserved phase-transfer and reaction-born condensed mass to
+  authenticated resident extensive optical moments and a shared GPU
+  participating-volume pass. Ordinary geometry retains marching cubes; the
+  optical aggregate uses depth-clipped Beer-Lambert/Henyey-Greenstein transport
+  between opaque and transparent passes, with GPU-indirect activity and no
+  particle readback in the presentation loop. Material optical references and
+  compact-sphere morphology retain explicit reduced/unvalidated provenance.
+- Repaired canonical collective-route identity loss in descriptor normalization
+  and surface-record reconstruction, filtered unrelated blocked route entries,
+  and preserved the volume receipt through the display bridge. Six desktop
+  presets passed with all twelve images inspected; bulk water measured
+  54.842 Hz and dam break 57.705 Hz. Evidence and SHA-bound manual review:
+  `/tmp/ulg-goal2-headed-final-PPFhus/`.
+- Full Node suite: 3,525 total, 3,471 passed, 54 expected opt-in skips, zero
+  failures. Subsequent surface-record identity tests: 192 passed. Native
+  producer and participating-volume checks passed, as did the production build.
+- Long-probe diagnosis found query-serialized presets select the explicit
+  main-thread diagnostic renderer. Canonical menu hash routes correctly retain
+  worker isosurfaces. The 72x128-step canonical water run completed 4.608 s;
+  vapor starts at 1.28 s and recondenses after its 3.1168 kg peak. Total mass
+  drift is about -0.0011 kg out of 1,216 kg. The late 55.9 m/s liquid maximum
+  remains open. Captures show liquid chunks, not convincing steam; renderer
+  readiness is not plume proof. Artifact:
+  `/tmp/ulg-goal2-plume-water-canonical-r2-2BQcBo/summary.json`.
+- Found and repaired a second optical ownership error: the same condensed mass
+  contributed to the aggregate and bulk liquid geometry. Ordinary CPU/WGSL
+  phase volume now subtracts matching dispersed mass divided by total carrier
+  mass, including the smear re-pass; unrelated materials and phase components
+  are untouched. Regression reproduced before the fix. Afterward, 256 focused
+  tests and 12 native GPU metamorphic cases passed; native evidence is 192
+  bytes, with no full field or particle readback.
+- Goal 2 remains active: final post-fix desktop matrix, reaction-aerosol
+  capture, and physically derived airborne droplet population/transport still
+  need evidence. No broad steam/transport plan is closed by this checkpoint.
+- Kept trusted HTTPS Vite live as `ulg-vite-https-5173.service` at
+  `https://fastbox.tail5c077c.ts.net:5173/`. Certificate/key files remain ignored
+  runtime artifacts. HTTPS HTTP 200 and TLS verification were checked through
+  the Tailscale address; no terminal browser was used.
+- Post-fix closeout evidence: final six-preset desktop sweep passed, every one
+  of twelve PNGs was inspected, and the owned Chrome session closed. Bulk-water
+  measured 56.704 Hz and water-realtime 56.874 Hz. SHA-bound manual review and
+  summary: `/tmp/ulg-goal2-disjoint-final-six-luT5xm/`.
+- The probe now has an explicit `ULG_PROBE_PRESET` canonical hash selector and
+  a strict worker-isosurface evaluator, separate from explicit main-native
+  diagnostics. Position epochs are independent of mechanics ticks; their
+  equality is not a valid acceptance condition. Regression coverage rejects
+  stale/hidden/uncommitted/mismatched and non-compositor evidence. Water
+  reanalysis retains its speed issue; sodium structural reanalysis passes,
+  without claiming temporal plume quality.
+- Post-fix sodium water completed 2.56 s with 5.873 kg NaOH and 0.148 kg H2;
+  inspected captures do not establish smoke. Its trace is
+  `/tmp/ulg-goal2-sodium-disjoint-TUrO0p/summary.json`.
+- Final Node suite: 3,531 total, 3,476 passed, 55 expected skips, zero failures.
+  The production build and fresh Pages build/asset verification passed. The
+  goal remains the complete seven-item program, not this bounded checkpoint.
+- Sodium temporal follow-up: every decoded crop differs, but consecutive SSIM
+  is about 0.9996 through batch 16; large changes occur afterward. Authoritative
+  Na positions show the same near-stationary interval, then a center jump from
+  about 1.2093 m to 2.5284 m at batch 17. It is not a stale compositor capture.
+  Physics/support versus writer/publication causation remains to be diagnosed
+  before the next microphysics extension; no force or opacity tweak was made.
+- ICC guard-diff passed with zero blocking risks. Three removed-function
+  warnings were inspected: collective-route equality was renamed/exported;
+  cache coverage now uses phase-aware descriptors plus exact route authority;
+  ordinary optical IDs are zero instead of colliding with collective IDs.
+  No law was removed. Pages regeneration replaces obsolete hashed bundles;
+  source/history remains recoverable in Git.
+- Source/staged diff checks pass excluding generated `docs/` bundles. The
+  regenerated Pages entry includes third-party shader-string whitespace that
+  Git flags; its reproducible build output is preserved unchanged rather than
+  hand-editing a content-hashed bundle.

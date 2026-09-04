@@ -302,6 +302,26 @@ function transitionRoutePair(transition = {}) {
   return null;
 }
 
+function typedClosureCarrierRoutePair(properties = null) {
+  if (!typedMaterialClosureModel(properties)) return null;
+  const condensedPhases = new Set();
+  for (const phaseEntry of properties?.phases || []) {
+    const phase = canonicalPhase(phaseEntry?.name ?? '', 'phase.name');
+    const phaseId = gpuPhaseId(phase);
+    if ([GPU_PHASE_IDS.solid, GPU_PHASE_IDS.liquid].includes(phaseId)) {
+      condensedPhases.add(phase);
+    }
+  }
+  if (condensedPhases.size !== 1) return null;
+  return {
+    condensedPhase: [...condensedPhases][0],
+    // This identifies the four-lane gas carrier used by the collective
+    // producer. It is deliberately not a fabricated thermodynamic transition
+    // on the material closure.
+    vaporPhase: 'gas'
+  };
+}
+
 function routePairFromStaticDescriptor(descriptor = {}) {
   if (descriptor.condensedPhase != null && descriptor.vaporPhase != null) {
     return {
@@ -387,6 +407,21 @@ export function collectiveOpticalRouteDescriptorsFromMaterialProperties(
           material,
           canonicalPhase(pair.vaporPhase, 'vaporPhase'),
           canonicalPhase(pair.condensedPhase, 'condensedPhase')
+        )
+      });
+    }
+    const typedCarrierPair = typedClosureCarrierRoutePair(properties);
+    if (typedCarrierPair) {
+      appendRouteDescriptor(result, routeById, routeByKey, {
+        material,
+        properties,
+        ...typedCarrierPair,
+        closureModel: routeClosureModel({ properties }),
+        renderKey: renderKeyForRoute(
+          staticPhaseDescriptors,
+          material,
+          typedCarrierPair.vaporPhase,
+          typedCarrierPair.condensedPhase
         )
       });
     }

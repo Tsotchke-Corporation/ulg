@@ -10,6 +10,9 @@ import {
 import {
   SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS
 } from '../src/visualization/sphPhaseScene.js';
+import {
+  sphPhaseScenarioPresetUrl
+} from '../src/runtime/sphPhaseScenarioPresets.js';
 import { reactionProgressEventCount } from './sph-probe-reaction-evidence.mjs';
 import {
   summarizeNativeSurfaceIndirectArgsReadback
@@ -65,6 +68,44 @@ const NATIVE_SURFACE_DEBUG_MODES = new Set(['none', 'clear-only']);
 const APPROVED_ZERO_GEOMETRY_RETENTION_REASON =
   'a zero-geometry render-field handoff has no native consumer; '
   + 'retain the runtime-admitted prior presentation until a real replacement is ready';
+
+export function resolveProbeScenarioSelection({
+  presetId = process.env.ULG_PROBE_PRESET,
+  scenarioUrl = process.env.ULG_PROBE_URL
+} = {}) {
+  const normalizedPresetId = String(presetId ?? '').trim();
+  const normalizedScenarioUrl = String(scenarioUrl ?? '').trim();
+  if (normalizedPresetId && normalizedScenarioUrl) {
+    throw new Error('ULG_PROBE_PRESET and ULG_PROBE_URL are mutually exclusive');
+  }
+  if (normalizedPresetId) {
+    const serializedPresetUrl = sphPhaseScenarioPresetUrl(normalizedPresetId);
+    if (!serializedPresetUrl) {
+      throw new Error(`unknown SPH phase scenario preset: ${normalizedPresetId}`);
+    }
+    const parsedPresetUrl = new URL(
+      serializedPresetUrl,
+      'http://ulg-probe.local/'
+    );
+    const canonicalPresetHash = parsedPresetUrl.searchParams.toString();
+    return Object.freeze({
+      schema: 'peercompute.ulg.sph-probe-scenario-selection.v0',
+      status: 'preset-canonical-hash-selected',
+      source: 'ULG_PROBE_PRESET',
+      presetId: normalizedPresetId,
+      scenarioUrl: `${parsedPresetUrl.pathname || '/'}#${canonicalPresetHash}`
+    });
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-probe-scenario-selection.v0',
+    status: normalizedScenarioUrl
+      ? 'explicit-url-selected'
+      : 'default-url-selected',
+    source: normalizedScenarioUrl ? 'ULG_PROBE_URL' : 'default',
+    presetId: null,
+    scenarioUrl: normalizedScenarioUrl || DEFAULT_URL
+  });
+}
 
 export const SPH_PROBE_DURABLE_RELEASE_PUBLICATION_ENV =
   'ULG_PROBE_DURABLE_RELEASE_PUBLICATION';
@@ -637,15 +678,16 @@ function normalizedNativeSurfaceDebugMode(value, fallback = 'none') {
 }
 
 function probePageOptions() {
+  const scenarioUrl = resolveProbeScenarioSelection().scenarioUrl;
   const surfaceDrawDiagnosticModeEnv = String(
     process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || ''
   ).toLowerCase();
   const surfaceDrawDiagnosticMode = SURFACE_DRAW_DIAGNOSTIC_MODES.has(surfaceDrawDiagnosticModeEnv)
     ? surfaceDrawDiagnosticModeEnv
-    : surfaceDrawModeFromScenarioUrl(process.env.ULG_PROBE_URL || DEFAULT_URL);
+    : surfaceDrawModeFromScenarioUrl(scenarioUrl);
   const nativeSurfaceFrameValidationViewport =
     surfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer'
-    || scenarioRequestsNativeSurfaceFromRenderer(process.env.ULG_PROBE_URL || DEFAULT_URL);
+    || scenarioRequestsNativeSurfaceFromRenderer(scenarioUrl);
   const viewport = {
     width: positiveInteger(process.env.ULG_PROBE_VIEWPORT_WIDTH, nativeSurfaceFrameValidationViewport ? 320 : 1280),
     height: positiveInteger(process.env.ULG_PROBE_VIEWPORT_HEIGHT, nativeSurfaceFrameValidationViewport ? 240 : 800)
@@ -8396,6 +8438,11 @@ async function runBrowserProbe({
               renderState.surfaceDrawOverlayPolicyStatus ?? null,
             workerOffscreenPresentationStatus:
               renderState.workerOffscreenPresentationStatus ?? null,
+            workerOffscreenPresentationDisplayOwner:
+              renderState.workerOffscreenPresentationDisplayOwner ?? null,
+            workerOffscreenPresentationDisplayCanvasVisible:
+              renderState.workerOffscreenPresentationDisplayCanvasVisible
+                ?? null,
             workerOffscreenRetainedCompactSnapshotStatus:
               renderState.workerOffscreenRetainedCompactSnapshotStatus
                 ?? null,
@@ -9621,6 +9668,11 @@ async function runBrowserProbe({
               phase: metric.phase,
               sampleIndex
             });
+          // The checkpoint await can outlive native presentation admission for
+          // this same resident generation. Snapshot after the fence so the
+          // retained metric cannot pair current pixels with the pre-admission
+          // state observed before the await.
+          metric.nativeSurfaceValidation = nativeSurfaceValidationSnapshot();
         }
         const retainedMetric = retainProbeMetric(metric);
         metrics.push(retainedMetric);
@@ -9730,10 +9782,15 @@ async function runBrowserProbe({
         }
       }
       if (
-        requestedCompactSummaryMode === 'none'
+        !mountedResidentSchedule
+        && requestedCompactSummaryMode === 'none'
         && requestedRenderEvery > 0
         && sceneApi.refreshSphResidentRenderState
       ) {
+        // Mounted schedules own their presentation. An explicit scene refresh
+        // selects the main-thread bridge and hides the worker canvas, which
+        // would make later captures observe a different renderer than the
+        // configured preset. Keep this preparation on the direct probe path.
         markProbeProgress('initial-render-state-started');
         try {
           overlay.__sphGpuParticleUpload = await sceneApi.refreshSphGpuParticleBuffers?.({
@@ -15366,6 +15423,56 @@ export function analyzeTimeline(timeline, {
   const capturedVisualFrames = (Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [])
     .filter((frame) => frame?.status === 'captured');
   const requestedSurfaceDrawMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
+  const presetWorkerPresentationRequested = (metric) => {
+    const selection = metric?.renderModeSelection ?? null;
+    const provenance = selection?.requestProvenance ?? null;
+    const ownership = metric?.peerComputeRenderOwnershipPolicy ?? null;
+    return requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+      && selection?.selectedByUrl === false
+      && provenance?.schema
+        === 'peercompute.ulg.sph-resident-surface-draw-mode-request.v0'
+      && provenance?.status === 'surface-draw-mode-preset-runtime-serialized'
+      && provenance?.requestedMode === requestedSurfaceDrawMode
+      && provenance?.requestedUrlMode === requestedSurfaceDrawMode
+      && provenance?.presetMode === requestedSurfaceDrawMode
+      && provenance?.explicit === false
+      && provenance?.explicitDiagnosticMarker === false
+      && provenance?.presetSerializedRuntime === true
+      && provenance?.hashMatchesSelectedPreset === true
+      && ownership?.schema === 'peercompute.ulg.render-ownership-policy.v0'
+      && ownership?.effectiveMode === 'worker-owned-resident-render-producer'
+      && ownership?.inputTransport === 'worker-owned-resident-render-producer'
+      && ownership?.displayTransport === 'worker-owned-presented-canvas'
+      && ownership?.displayHandoff === 'transferControlToOffscreen'
+      && ownership?.frameCopyBackRejected === true
+      && ownership?.workerOffscreenPresentationRequested === true
+      && ownership?.workerOwnedResidentProducerReady === true;
+  };
+  const explicitNativePresentationRequested = (metric) => {
+    const selection = metric?.renderModeSelection ?? null;
+    const provenance = selection?.requestProvenance ?? null;
+    return requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+      && (
+        selection?.selectedByUrl === true
+        || provenance?.explicit === true
+        || provenance?.explicitDiagnosticMarker === true
+      );
+  };
+  const presetWorkerPresentationRequestSampleCount = metrics
+    .filter(presetWorkerPresentationRequested)
+    .length;
+  const explicitNativePresentationRequestSampleCount = metrics
+    .filter(explicitNativePresentationRequested)
+    .length;
+  const presetWorkerPresentationExpected = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && presetWorkerPresentationRequestSampleCount > 0
+    && explicitNativePresentationRequestSampleCount === 0
+  );
+  const explicitNativePresentationExpected = Boolean(
+    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    && !presetWorkerPresentationExpected
+  );
   const pngAnalyzedVisualFrames = capturedVisualFrames.filter((frame) => frame?.png?.status === 'ready');
   const pngAnalyzedCanvasFrames = pngAnalyzedVisualFrames.filter((frame) => (
     String(frame?.captureSource || '').includes('canvas')
@@ -15419,11 +15526,11 @@ export function analyzeTimeline(timeline, {
       === nativeBrowserFrameActiveGeneration
   );
   const nativeBrowserSurfaceProofAccepted = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && nativeBrowserFramePixelValidated
   );
   const visibleGpuConsumerBrowserPixelValidated =
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
       ? nativeBrowserFramePixelValidated
       : browserCanvasPixelValidated;
   const nextCenterOfMassYSeries = diagnostics
@@ -16149,6 +16256,7 @@ export function analyzeTimeline(timeline, {
         ?? metric?.renderState?.workerOffscreenRenderRowsLastPresentedSphStep
       ),
       sphStep: finiteMetric(workerRows?.sphStep),
+      rows: workerRows,
       presentation: metric?.workerOffscreenPresentation ?? null,
       renderedContent:
         metric?.workerOffscreenPresentation?.displayOwnerLastRenderedContent
@@ -16227,6 +16335,225 @@ export function analyzeTimeline(timeline, {
       && Number(presentation?.readyFrameCount)
         === Number(renderedContent?.readyFrameCount);
   };
+  const workerOffscreenResidentIsosurfaceVisible = (metric) => {
+    if (!presetWorkerPresentationRequested(metric)) return false;
+    const evidence = workerOffscreenRenderRowsEvidence(metric);
+    const rows = evidence.rows;
+    const presentation = evidence.presentation;
+    const renderedContent = evidence.renderedContent;
+    const workerLane = metric?.residentSteps?.workerOwnedResidentLane ?? null;
+    const renderedStep = exactNonNegativeInteger(renderedContent?.sphStep);
+    const rowStep = exactNonNegativeInteger(rows?.sphStep);
+    const frameSerial = exactNonNegativeInteger(
+      presentation?.displayOwnerContentFrameSerial
+    );
+    const frameCount = exactNonNegativeInteger(renderedContent?.frameCount);
+    const readyFrameCount = exactNonNegativeInteger(
+      renderedContent?.readyFrameCount
+    );
+    const particleCount = exactNonNegativeInteger(renderedContent?.particleCount);
+    const requestGeneration = exactNonNegativeInteger(
+      renderedContent?.requestGeneration
+    );
+    const presentationLaneEpoch = exactNonNegativeInteger(
+      renderedContent?.presentationLaneEpoch
+    );
+    const residentExecutionGeneration = exactNonNegativeInteger(
+      renderedContent?.residentExecutionGeneration
+    );
+    const stepOrdinal = exactNonNegativeInteger(renderedContent?.stepOrdinal);
+    const displayOwnerEpoch = exactNonNegativeInteger(
+      renderedContent?.displayOwnerEpoch
+    );
+    const workerFramebufferEpoch = exactNonNegativeInteger(
+      renderedContent?.workerFramebufferEpoch
+    );
+    const indirectDrawCount = exactNonNegativeInteger(
+      renderedContent?.indirectDrawCount
+    );
+    const aggregateDrawCount = exactNonNegativeInteger(
+      renderedContent?.participatingMediumAggregateDrawCount
+        ?? renderedContent?.workerOwnedParticipatingMediumPresentation
+          ?.participatingMediumAggregateDrawCount
+    );
+    const identitiesMatch = ['scheduleId', 'laneId', 'stateKey'].every((key) => (
+      typeof renderedContent?.[key] === 'string'
+      && renderedContent[key].length > 0
+      && rows?.[key] === renderedContent[key]
+      && workerLane?.[key] === renderedContent[key]
+    ));
+    return rows?.schema
+        === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0'
+      && rows?.status
+        === 'worker-offscreen-resident-isosurface-presentation-rendered'
+      && renderedContent?.schema
+        === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0'
+      && renderedContent?.renderRowsSchema
+        === 'peercompute.ulg.worker-offscreen-render-rows.v0'
+      && renderedContent?.status
+        === 'worker-offscreen-resident-isosurface-presentation-rendered'
+      && renderedContent?.presentationGeometry === 'worker-owned-true-isosurface'
+      && rows?.presentationGeometry === 'worker-owned-true-isosurface'
+      && rows?.sameDevicePresentation === true
+      && renderedContent?.sameDevicePresentation === true
+      && renderedStep !== null
+      && rowStep === renderedStep
+      && Number(presentation?.displayOwnerPresentedSphStep) === renderedStep
+      && identitiesMatch
+      && particleCount !== null
+      && particleCount > 0
+      && rows?.particleCount === particleCount
+      && requestGeneration !== null
+      && requestGeneration > 0
+      && rows?.requestGeneration === requestGeneration
+      && presentationLaneEpoch !== null
+      && presentationLaneEpoch > 0
+      && rows?.presentationLaneEpoch === presentationLaneEpoch
+      && residentExecutionGeneration !== null
+      && residentExecutionGeneration > 0
+      && rows?.residentExecutionGeneration === residentExecutionGeneration
+      && stepOrdinal !== null
+      && stepOrdinal > 0
+      && rows?.stepOrdinal === stepOrdinal
+      && evidence.displayHandoff === 'transferControlToOffscreen'
+      && evidence.frameCopyBackRejected === true
+      && evidence.workerReady === true
+      && evidence.contextStatus === 'webgpu-context-ready'
+      && presentation?.canvasTransferred === true
+      && presentation?.requested === true
+      && presentation?.workerReady === true
+      && presentation?.contextStatus === 'webgpu-context-ready'
+      && presentation?.displayOwner === 'worker'
+      && presentation?.displayOwnerContentReady === true
+      && frameSerial !== null
+      && frameSerial > 0
+      && presentation?.displayCanvasVisible === true
+      && metric?.workerOffscreenCanvas?.visible === true
+      && metric?.workerOffscreenCanvas?.visibleCount === 1
+      && metric?.sceneCanvasVisibility?.visibleCount === 1
+      && metric?.sceneCanvasVisibility?.visibleWorkerCount === 1
+      && displayOwnerEpoch !== null
+      && displayOwnerEpoch > 0
+      && presentation?.displayOwnerEpoch === displayOwnerEpoch
+      && workerFramebufferEpoch !== null
+      && workerFramebufferEpoch > 0
+      && presentation?.workerFramebufferEpoch === workerFramebufferEpoch
+      && workerLane?.schema
+        === 'peercompute.ulg.sph-scene-worker-owned-resident-lane-execution.v0'
+      && workerLane?.residentScheduleStatus === 'worker-resident-schedule-completed'
+      && workerLane?.terminalStatus
+        === 'worker-offscreen-resident-schedule-on-presentation-device-completed'
+      && workerLane?.cancelled === false
+      && exactNonNegativeInteger(workerLane?.requestedStepCount) > 0
+      && workerLane?.completedStepCount === workerLane?.requestedStepCount
+      && workerLane?.laneCompletedStepTotal === renderedStep + 1
+      && stepOrdinal === workerLane?.completedStepCount
+      && workerLane?.authority?.status
+        === 'state-manager-committed-worker-schedule'
+      && workerLane?.authority?.computeManagerLeaseStatus === 'completed'
+      && workerLane?.authority?.computeManagerFenceSatisfied === true
+      && workerLane?.authority?.stateManagerCommitStatus === 'committed'
+      && workerLane?.gpuFence?.scope === 'resident-schedule-terminal'
+      && workerLane?.gpuFence?.terminalScheduleFence === true
+      && workerLane?.gpuFence?.fenceSatisfied === true
+      && workerLane?.gpuFence?.queueCompletionStatus === 'queue-work-completed'
+      && workerLane?.gpuFence?.queueCompletionMethod
+        === 'worker-device.queue.onSubmittedWorkDone'
+      && workerLane?.gpuFence?.authorityAdmissionReady === true
+      && workerLane?.finalEpochIdentity?.physicsTick === renderedStep
+      && workerLane?.finalEpochIdentity?.storageGeneration
+        === residentExecutionGeneration
+      && workerLane?.committedPresentation?.status
+        === 'worker-offscreen-resident-isosurface-presentation-enqueued'
+      && ['scheduleId', 'laneId', 'stateKey'].every((key) => (
+        workerLane.committedPresentation[key] === renderedContent[key]
+      ))
+      && workerLane?.committedPresentation?.presentationLaneEpoch
+        === presentationLaneEpoch
+      && workerLane?.committedPresentation?.sphStep === renderedStep
+      && workerLane?.committedPresentation?.residentExecutionGeneration
+        === residentExecutionGeneration
+      && workerLane?.committedPresentation?.stepOrdinal === stepOrdinal
+      && renderedContent?.residentScheduleCandidatePresentation === true
+      && renderedContent?.stateManagerCommittedPresentation === true
+      && renderedContent?.authorityStatus
+        === 'state-manager-committed-worker-schedule'
+      && renderedContent?.computeManagerCompletionSchema
+        === 'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0'
+      && typeof renderedContent?.computeManagerLeaseId === 'string'
+      && renderedContent.computeManagerLeaseId.length > 0
+      && renderedContent?.computeManagerLeaseStatus === 'completed'
+      && renderedContent?.computeManagerFenceSatisfied === true
+      && renderedContent?.stateManagerCommitStatus === 'committed'
+      && renderedContent?.stateManagerCommitAccepted === true
+      && renderedContent?.terminalScheduleFence === true
+      && renderedContent?.terminalFenceScope === 'resident-schedule-terminal'
+      && renderedContent?.terminalFenceSatisfied === true
+      && renderedContent?.terminalFenceAuthorityAdmissionReady === true
+      && renderedContent?.producerSourceKind
+        === 'worker-retained-resident-stage-output'
+      && renderedContent?.producerSourceTransport
+        === 'worker-retained-resident-stage-output'
+      && renderedContent?.sourceStageId === 'schroederSameLevelMechanics'
+      && renderedContent?.retainedParticleStateStatus
+        === 'worker-retained-particle-state-ready'
+      && renderedContent?.presentationFrameSchema
+        === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0'
+      && renderedContent?.presentationFrameStatus
+        === 'worker-owned-isosurface-presentation-opportunity'
+      && renderedContent?.presentationFrameAdmitted === true
+      && renderedContent?.presentationFrameGpuCompleted === true
+      && renderedContent?.presentationFrameGpuCompletionMethod
+        === 'worker-device.queue.onSubmittedWorkDone'
+      && renderedContent?.presentationFramePresentationOpportunity === true
+      && renderedContent?.presentationFramePresentationOpportunityMethod
+        === 'worker-request-animation-frame-after-gpu-completion'
+      && exactNonNegativeInteger(
+        renderedContent?.presentationQueueCompletionCount
+      ) > 0
+      && renderedContent?.presentationQueueCompletionCount
+        === renderedContent?.presentationQueueCompletionSerial
+      && renderedContent?.presentationQueueCompletionMethod
+        === 'worker-device.queue.onSubmittedWorkDone'
+      && renderedContent?.presentationQueueCompletionScope
+        === 'worker-offscreen-shared-device-queue-frame-proof'
+      && rows?.presentationFrameSchema === renderedContent.presentationFrameSchema
+      && rows?.presentationFrameStatus === renderedContent.presentationFrameStatus
+      && rows?.presentationFrameAdmitted === true
+      && rows?.presentationFrameGpuCompleted === true
+      && rows?.presentationFrameGpuCompletionMethod
+        === renderedContent.presentationFrameGpuCompletionMethod
+      && rows?.presentationFramePresentationOpportunity === true
+      && rows?.presentationFramePresentationOpportunityMethod
+        === renderedContent.presentationFramePresentationOpportunityMethod
+      && rows?.presentationQueueCompletionCount
+        === renderedContent.presentationQueueCompletionCount
+      && rows?.presentationQueueCompletionSerial
+        === renderedContent.presentationQueueCompletionSerial
+      && frameCount !== null
+      && frameCount > 0
+      && readyFrameCount !== null
+      && readyFrameCount > 0
+      && presentation?.frameCount === frameCount
+      && presentation?.readyFrameCount === readyFrameCount
+      && (
+        (indirectDrawCount !== null && indirectDrawCount > 0)
+        || (aggregateDrawCount !== null && aggregateDrawCount > 0)
+      );
+  };
+  const workerOffscreenResidentPresentationVisible = (metric) => (
+    workerOffscreenResidentParticleStateVisible(metric)
+    || workerOffscreenResidentIsosurfaceVisible(metric)
+  );
+  const workerIsosurfaceCompositorFrames = pngAnalyzedVisualFrames.filter((frame) => {
+    const sampleIndex = exactNonNegativeInteger(frame?.sampleIndex);
+    return frame?.captureSource === 'playwright-compositor-screenshot'
+      && frame?.visibleCanvasCount === 1
+      && frame?.png?.hasVisiblePixels === true
+      && frame?.png?.hasSurfaceLikeVariation === true
+      && sampleIndex !== null
+      && workerOffscreenResidentIsosurfaceVisible(metrics[sampleIndex]);
+  });
   const renderStateHasH2oEvidence = (renderState = null) => {
     if (!renderState) return false;
     const keys = [
@@ -16237,7 +16564,7 @@ export function analyzeTimeline(timeline, {
     return keys.some((key) => String(key || '').toLowerCase().includes('h2o'));
   };
   const workerOffscreenResidentParticleStateH2oVisible = (metric) => (
-    workerOffscreenResidentParticleStateVisible(metric)
+    workerOffscreenResidentPresentationVisible(metric)
     && (
       expectedLiquidH2oSameMaterial
       || renderStateHasH2oEvidence(metric?.renderState)
@@ -16382,7 +16709,7 @@ export function analyzeTimeline(timeline, {
       )
       && residentSurfaceForegroundProved(metric)
       && (activeSurfaceCount > 0 || vertexCount > 0);
-    return workerOffscreenResidentParticleStateVisible(metric)
+    return workerOffscreenResidentPresentationVisible(metric)
       || webGpuIndirectOverlayVisible
       || threeRenderRowPointsVisible
       || webGpuRenderRowOverlayVisible
@@ -16450,6 +16777,15 @@ export function analyzeTimeline(timeline, {
   )).length;
   const workerOffscreenResidentParticleStateVisibleSampleCount =
     metrics.filter(workerOffscreenResidentParticleStateVisible).length;
+  const workerOffscreenResidentIsosurfaceVisibleSampleCount =
+    metrics.filter(workerOffscreenResidentIsosurfaceVisible).length;
+  const workerIsosurfaceCompositorFrameCount =
+    workerIsosurfaceCompositorFrames.length;
+  const presetWorkerPresentationAccepted = Boolean(
+    presetWorkerPresentationExpected
+    && workerOffscreenResidentIsosurfaceVisibleSampleCount > 0
+    && workerIsosurfaceCompositorFrameCount > 0
+  );
   const workerOffscreenResidentParticleStateReadyFrameCount = metrics
     .map((metric) => workerOffscreenRenderRowsEvidence(metric).readyFrameCount)
     .filter(Number.isFinite)
@@ -16476,7 +16812,7 @@ export function analyzeTimeline(timeline, {
   const residentSurfaceBufferHandoffProbe = Boolean(
     (
       requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
-      || requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+      || explicitNativePresentationExpected
       || requestedSurfaceDrawMode === 'resident-surface-buffers-no-overlay'
       || (
         requestedSurfaceDrawMode === 'auto'
@@ -16505,11 +16841,11 @@ export function analyzeTimeline(timeline, {
   const residentSurfaceVisibleGpuConsumerAccepted =
     residentSurfaceForegroundProofAccepted;
   const nativeWebGpuSurfaceConsumerAccepted = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && residentSurfacePresentationAdmissionAccepted
   );
   const nativeWebGpuSurfaceConsumerRendered = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && metrics.some((metric) => (
       nativeWebGpuSurfaceRenderStatusIsRendered(
         metric?.surfaceDraw?.renderBridgeLastRenderStatus
@@ -16520,7 +16856,7 @@ export function analyzeTimeline(timeline, {
     ))
   );
   const nativeWebGpuSurfaceConsumerTextureReadbackUnavailable = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && metrics.some((metric) => (
       metric?.renderState?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable === true
       || metric?.surfaceDraw?.visibleGpuConsumerNativeTextureReadbackUnavailable === true
@@ -16536,7 +16872,7 @@ export function analyzeTimeline(timeline, {
     ))
   );
   const nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && metrics.some((metric) => (
       residentSurfaceVisibleGpuConsumerNativeValidationBlockerFamily(metric)
         === 'browser-frame-validation-required'
@@ -16556,7 +16892,10 @@ export function analyzeTimeline(timeline, {
     )
     || (
       compactSummaryDisabled
-      && workerOffscreenResidentParticleStateVisibleSampleCount > 0
+      && (
+        workerOffscreenResidentParticleStateVisibleSampleCount > 0
+        || workerOffscreenResidentIsosurfaceVisibleSampleCount > 0
+      )
       && workerOffscreenResidentParticleStateReadyFrameCount > 0
     )
   );
@@ -17441,7 +17780,18 @@ export function analyzeTimeline(timeline, {
     issues.push('resident-surface-buffer-handoff-missing');
   }
   if (
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    presetWorkerPresentationExpected
+    && workerOffscreenResidentIsosurfaceVisibleSampleCount === 0
+  ) {
+    issues.push('worker-isosurface-presentation-not-admitted');
+  } else if (
+    presetWorkerPresentationExpected
+    && workerIsosurfaceCompositorFrameCount === 0
+  ) {
+    issues.push('worker-isosurface-compositor-frame-not-proved');
+  }
+  if (
+    explicitNativePresentationExpected
     && residentSurfaceBufferHandoffSampleCount > 0
     && residentSurfacePresentationAdmissionSampleCount === 0
   ) {
@@ -17456,25 +17806,25 @@ export function analyzeTimeline(timeline, {
     issues.push('resident-surface-visible-gpu-consumer-not-ready');
   }
   if (
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && nativeBrowserFrameValidation?.status === 'failed'
   ) {
     issues.push('native-surface-browser-frame-validation-failed');
   }
   const nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && nativeBrowserFrameValidation?.status === 'unsupported'
     && residentSurfaceForegroundProved(metrics.at(-1) || null)
   );
   if (
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && nativeBrowserFrameValidation?.status === 'unsupported'
     && !nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof
   ) {
     issues.push('native-surface-browser-frame-validation-unsupported');
   }
   if (
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && nativeBrowserFrameValidation?.status === 'passed'
     && !nativeBrowserFramePixelValidated
   ) {
@@ -17487,7 +17837,7 @@ export function analyzeTimeline(timeline, {
     issues.push('visual-frames-all-blank');
   }
   const browserCanvasCaptureUnsupportedByNativeWebGpu = Boolean(
-    requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    explicitNativePresentationExpected
     && nativeWebGpuSurfaceConsumerRendered
     && pngAnalyzedCanvasFrames.length > 0
     && blankCanvasFrameCount === pngAnalyzedCanvasFrames.length
@@ -17508,6 +17858,7 @@ export function analyzeTimeline(timeline, {
     !directResident
     && !residentSurfaceBufferHandoffAccepted
     && !nativeBrowserSurfaceProofAccepted
+    && !presetWorkerPresentationAccepted
     && visibleSurfaceSampleCount === 0
   ) {
     issues.push('no-visible-surface-samples');
@@ -17517,6 +17868,7 @@ export function analyzeTimeline(timeline, {
     && h2oMaterialExpected
     && !residentSurfaceBufferHandoffAccepted
     && !nativeBrowserSurfaceProofAccepted
+    && !presetWorkerPresentationAccepted
     && h2oVisibleSurfaceSampleCount === 0
   ) {
     issues.push('no-visible-h2o-surface-samples');
@@ -17699,6 +18051,13 @@ export function analyzeTimeline(timeline, {
     nativeBrowserFrameCaptureUnsupportedCoveredByCurrentGpuProof,
     browserCanvasCaptureUnsupportedByNativeWebGpu,
     nativeWebGpuSurfaceConsumerBrowserFrameValidationRequired,
+    presetWorkerPresentationRequestSampleCount,
+    explicitNativePresentationRequestSampleCount,
+    presetWorkerPresentationExpected,
+    explicitNativePresentationExpected,
+    presetWorkerPresentationAccepted,
+    workerOffscreenResidentIsosurfaceVisibleSampleCount,
+    workerIsosurfaceCompositorFrameCount,
     visualFrameTimesS,
     visualFrameTimeSpanS,
     meanBatchMs,
@@ -17777,7 +18136,8 @@ async function main() {
   const port = positiveInteger(process.env.ULG_PROBE_PORT, 5177);
   const externalBaseUrl = String(process.env.ULG_PROBE_BASE_URL || '').trim();
   const timeoutMs = positiveInteger(process.env.ULG_PROBE_TIMEOUT_MS, 180_000);
-  const scenarioUrl = process.env.ULG_PROBE_URL || DEFAULT_URL;
+  const scenarioSelection = resolveProbeScenarioSelection();
+  const scenarioUrl = scenarioSelection.scenarioUrl;
   const probeMode = normalizedProbeMode(process.env.ULG_PROBE_MODE);
   const batches = positiveInteger(process.env.ULG_PROBE_BATCHES, 4);
   const batchSteps = positiveInteger(process.env.ULG_PROBE_BATCH_STEPS, 32);
@@ -18238,6 +18598,7 @@ async function main() {
       baseUrl: server.baseUrl,
       browserLaunch: probeChromiumLaunchReport(),
       probeMode,
+      scenarioSelection,
       scenarioUrl: probeMode === 'direct-resident'
         ? scenarioUrl
         : withBrowserProbeParams(scenarioUrl, { contactBinMetadataReadback, reactionBinMetadataReadback }),

@@ -1,4 +1,19 @@
-# Audit status - 2026-07-10 18:13 AKDT
+# Current status - 2026-09-04 AKDT
+
+Branch `main`, Goal 2 worktree based on `5686fa8`. The active seven-goal order
+and evidence are maintained in `plan/todo/README.md` and
+`plan/implementation-status.md`; the July records below are historical.
+
+Goal 1 meets its agreed 54 Hz visual-throughput floor on both large water
+presets. Goal 2's generalized conserved-optics producer and aggregate volume
+renderer pass focused tests and the six-preset desktop rendering check; all
+twelve images were inspected. Visible steam/aerosol at longer horizons remains
+unproven, so Goal 2 and its relevant transport plans are still open. Goals 3-7
+have not been completed.
+
+Live trusted HTTPS: `https://fastbox.tail5c077c.ts.net:5173/`.
+
+# Historical audit status - 2026-07-10 18:13 AKDT
 
 Branch `SS`, reviewed at `d5319c2` plus the standard-scenario audit slice.
 

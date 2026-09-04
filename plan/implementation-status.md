@@ -1,5 +1,69 @@
 # Implementation Status
 
+## Current focus - 2026-09-04 AKDT
+
+The seven-goal program is at Goal 2: conserved steam/aerosol optics and
+participating-volume presentation. Goal 1's agreed visual-throughput scope is
+complete: bulk-water and water-realtime must reach 54 Hz, while every configured
+preset must render advancing physics. Higher true-isosurface cadence remains a
+follow-on. Goals 3-7 remain open, in the order recorded in `plan/todo/README.md`.
+
+The current worktree connects conserved phase-transfer and reaction-born
+condensate moments to one material-general GPU volume pass. Ordinary surfaces
+retain marching cubes; aggregate optical media use depth-clipped Beer-Lambert
+transport between opaque and transparent surfaces. The final integration found
+and repaired shared wiring defects: visible-frame receipt compaction dropped
+the volume proof, and render descriptor normalization dropped canonical route
+identity while unrelated blocked material routes entered the aggregate.
+
+Fresh post-fix desktop evidence is
+`/tmp/ulg-goal2-disjoint-final-six-luT5xm/summary.json` plus
+its SHA-bound `manual-visual-review.json`: six of six presets passed, all twelve
+images were inspected, no control-body preview remained, and each pair showed
+changing physics geometry. Measured visible cadence was 56.704 Hz for bulk water
+and 56.874 Hz for dam break. The final full Node suite passed: 3,531 total,
+3,476 passed, 55 expected opt-in skips, zero failures. Production and Pages
+builds passed; Pages asset/worker verification also passed.
+
+Goal 2 is not closed. Short captures prove rendering integration but do not
+establish a visible transported plume. The canonical menu-route desktop
+water-cycle run completed 72 mounted schedules of 128 steps (4.608 simulated
+seconds): `/tmp/ulg-goal2-plume-water-canonical-r2-2BQcBo/summary.json`.
+Its checkpoints prove vaporization and recondensation with about 0.0011 kg
+total mass drift out of 1,216 kg, but the inspected sequence still shows liquid
+chunks rather than convincing steam. A late liquid-speed maximum of 55.9 m/s
+remains a physics issue; it is not a vapor-production failure. The old probe
+also misclassified canonical worker isosurface presentation as a missing
+main-thread native presentation. The repaired evaluator now correlates exact
+worker schedule/commit identity, GPU completion, sole visible canvas, and
+sample-matched compositor PNGs. Water reanalysis retains the speed issue.
+
+Follow-up inspection found dispersed condensed mass was counted both in the
+optical aggregate and ordinary condensed geometry. The CPU/WGSL render-field
+paths now subtract only the matching dispersed component from ordinary phase
+volume, including the motion-smear pass, without changing simulation mass or
+other phases/materials. Verification: 256 focused tests and a native WebGPU
+12-case same-device metamorphic gate passed; the latter maps only 192 bytes of
+fixed-size evidence. The post-fix desktop sodium/water run completed 2.56 s,
+producing 5.873 kg NaOH and 0.148 kg H2. It passes structural presentation
+reanalysis, but its sparse visible changes and absence of a convincing plume
+are not smoke acceptance. Pixel comparison and authoritative position
+checkpoints agree: sodium is almost stationary through batch 16, followed by
+a large state change at batch 17. This is not a stale screenshot; determine
+whether physics or a state writer causes that transition before extending
+microphysics. Artifact:
+`/tmp/ulg-goal2-sodium-disjoint-TUrO0p/summary.json`.
+
+Condensate morphology currently includes an explicitly
+reduced compact-sphere model; realistic unresolved droplet populations and
+high-temperature NaOH optical calibration are not proven by a ready renderer.
+Broader transport/material-property plans remain active. No plan has been
+archived on the strength of these bounded rendering checks.
+
+The development server remains available over trusted HTTPS at
+`https://fastbox.tail5c077c.ts.net:5173/` through the user service
+`ulg-vite-https-5173.service`. Certificate files are ignored runtime artifacts.
+
 ## Planning archive and current diagram packet - 2026-08-31 AKDT
 
 The obsolete Slice 9 continuation handoff, July SS routing matrix, and legacy

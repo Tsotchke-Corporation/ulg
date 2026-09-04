@@ -733,6 +733,19 @@ function finiteSeedNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function exactCompactSnapshotTopologyEpoch(value) {
+  if (
+    !Number.isSafeInteger(value)
+    || value < 0
+    || value > 0xffff_ffff
+  ) {
+    throw new TypeError(
+      'compact buffer snapshot requires an exact u32 topologyEpoch'
+    );
+  }
+  return value;
+}
+
 function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'phase carrier plan') {
   if (plan == null) return null;
   const count = Number(particleCount);
@@ -990,6 +1003,9 @@ function normalizeMechanicsCompactBufferSnapshot({
     };
   }
   try {
+    const topologyEpoch = exactCompactSnapshotTopologyEpoch(
+      snapshot.topologyEpoch
+    );
     const phaseCarrierPlan = clonePhaseCarrierPlanForParticleCount(
       snapshot.phaseCarrierPlan,
       resolvedParticleCount,
@@ -1054,6 +1070,7 @@ function normalizeMechanicsCompactBufferSnapshot({
         particleCount: resolvedParticleCount,
         step: finiteSeedNumber(snapshot.step, step),
         time: finiteSeedNumber(snapshot.time, time),
+        topologyEpoch,
         dimension: finiteSeedNumber(snapshot.dimension, 3),
         smoothingLengthM: finiteSeedNumber(snapshot.smoothingLengthM, 0),
         phaseCarrierPlan,
@@ -2100,6 +2117,9 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     throw new TypeError('refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot requires a compact buffer snapshot');
   }
   const particleCount = Math.max(0, Math.trunc(finiteSeedNumber(snapshot.particleCount, 0)));
+  const topologyEpoch = exactCompactSnapshotTopologyEpoch(
+    snapshot.topologyEpoch
+  );
   const phaseCarrierPlan = clonePhaseCarrierPlanForParticleCount(
     snapshot.phaseCarrierPlan,
     particleCount,
@@ -2166,6 +2186,7 @@ export function refreshUlgSphMlsMpmHotBuffersFromCompactSnapshot({
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'compact-snapshot-gpu-buffer-ready',
     particleCount,
+    topologyEpoch,
     dimension: finiteSeedNumber(snapshot.dimension, 3),
     step,
     time,

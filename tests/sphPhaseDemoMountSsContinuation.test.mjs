@@ -14,6 +14,7 @@ import {
   resolveSphResidentInterfaceRefreshContinuationPolicy,
   resolveSphMountedWorkerLaneScheduleStepCount,
   resolveSphWorkerLanePostCommitFastContinuation,
+  materializeSphWorkerLaneNativeSurfacePresentationSource,
   residentWorkerLaneContinuationReady,
   residentWorkerLaneIsosurfacePresentationConsumerReady,
   residentWorkerLaneIsosurfacePresentationEnqueued,
@@ -25,6 +26,20 @@ import {
   sphResidentSchedulePublicationIsCurrent,
   sphResidentPlaybackRestartAllowed
 } from '../src/visualization/sphPhaseDemoMount.js';
+import {
+  ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
+import {
+  ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA
+} from '../src/runtime/peercomputeBrowserResidentHost.js';
+import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  SPH_GPU_PARTICLE_STATE_FLOATS,
+  SPH_GPU_PARTICLE_THERMO_FLOATS,
+  mlsMpmGpuParticleUploadMatchesDevice,
+  sphGpuParticleUploadMatchesDevice
+} from '../src/runtime/sph/sphGpuBuffers.js';
 import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
   SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
@@ -353,6 +368,189 @@ test('mounted SS worker playback honors the renderer policy chunk cap', () => {
     residentStepsPerScheduleMax: null,
     workerLaneActive: true
   }), 128);
+});
+
+test('native surface snapshot preserves exact GPU upload authority through queue release', async () => {
+  const particleCount = 2;
+  let submittedFenceCount = 0;
+  const device = {
+    createBuffer({ label, size, usage }) {
+      return {
+        label,
+        size,
+        usage,
+        destroyCount: 0,
+        destroy() {
+          this.destroyCount += 1;
+        }
+      };
+    },
+    queue: {
+      writeBuffer() {},
+      async onSubmittedWorkDone() {
+        submittedFenceCount += 1;
+      }
+    }
+  };
+  const execution = {
+    residentComputeManagerMode: 'worker-owned-resident-lane',
+    workerLaneFallback: null,
+    workerOwnedResidentLane: {
+      laneId: 'lane:native-surface',
+      stateKey: 'state:native-surface',
+      scheduleId: 'schedule:native-surface',
+      residentScheduleStatus: 'worker-resident-schedule-completed',
+      cancelled: false,
+      completedStepCount: 1,
+      laneSimTimeS: 0.125,
+      perStepSummaries: { lastStep: { particleCount } },
+      finalEpochIdentity: { storageGeneration: 8, physicsTick: 3 },
+      retainedBufferRefs: ['worker:state'],
+      committedPresentation: {
+        status: 'worker-offscreen-resident-particle-state-producer-rendered',
+        committedPresentationSchema:
+          'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+        committedPresentationStatus:
+          'state-manager-committed-resident-schedule-presentation-admission',
+        residentScheduleCandidatePresentation: true,
+        stateManagerCommittedPresentation: true,
+        scheduleId: 'schedule:native-surface',
+        laneId: 'lane:native-surface',
+        stateKey: 'state:native-surface',
+        residentExecutionGeneration: 8,
+        sphStep: 3,
+        stepOrdinal: 1,
+        authorityStatus: 'state-manager-committed-worker-schedule',
+        computeManagerCompletionSchema:
+          'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+        computeManagerLeaseId: 'lease:native-surface',
+        computeManagerLeaseStatus: 'completed',
+        computeManagerFenceSatisfied: true,
+        stateManagerCommitStatus: 'committed',
+        stateManagerCommitAccepted: true,
+        terminalScheduleFence: true,
+        terminalFenceScope: 'resident-schedule-terminal',
+        terminalFenceSatisfied: true,
+        terminalFenceAuthorityAdmissionReady: true,
+        producerSourceKind: 'worker-retained-resident-stage-output',
+        producerSourceTransport: 'worker-retained-resident-stage-output',
+        sourceStageId: 'schroederSameLevelMechanics',
+        retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+      }
+    }
+  };
+  let compactSnapshotStatus = null;
+  const sceneApi = {
+    getSphGpuParticleState() {
+      return { particleCount, dimension: 3, smoothingLengthM: 0.2 };
+    },
+    exportWorkerOffscreenRetainedCompactSnapshot(request) {
+      const identity = Uint32Array.from([17, 29]);
+      compactSnapshotStatus = {
+        status: 'presentation-worker-retained-compact-snapshot-exported',
+        portableSnapshotAvailable: true,
+        cacheKey: request.cacheKey,
+        laneId: request.laneId,
+        stateKey: request.stateKey,
+        sourceStageId: request.sourceStageId,
+        compactBufferSnapshot: {
+          schema: ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA,
+          cacheKey: request.cacheKey,
+          laneId: request.laneId,
+          stateKey: request.stateKey,
+          sourceStageId: request.sourceStageId,
+          particleCount,
+          step: request.step,
+          time: request.time,
+          topologyEpoch: 19,
+          slot: 2,
+          sourceSlot: 1,
+          nextSlot: 0,
+          sharedSlotIdentityVerified: true,
+          workerLineageMetadata: {
+            status:
+              'worker-retained-compact-snapshot-lineage-metadata-ready'
+          },
+          identityRequired: true,
+          identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+          identityStrideUints: SPH_GPU_PARTICLE_IDENTITY_UINTS,
+          identityStrideBytes:
+            SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+          sphIdentityByteLength: identity.byteLength,
+          identityRevision: 'ulg:test:native-surface-identity:3',
+          renderDomainKeys: { 17: 'body-seventeen', 29: 'body-twenty-nine' },
+          sphIdentity: identity,
+          sphState: new Float32Array(
+            particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
+          ),
+          sphThermo: new Float32Array(
+            particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
+          ),
+          mlsMpmMechanics: new Float32Array(
+            particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+          )
+        }
+      };
+    },
+    getWorkerOffscreenRetainedCompactSnapshotStatus() {
+      return compactSnapshotStatus;
+    },
+    async requestOpticalGpuDevice() {
+      return { device };
+    }
+  };
+
+  const source = await materializeSphWorkerLaneNativeSurfacePresentationSource({
+    sceneApi,
+    execution,
+    generation: 5,
+    scheduleToken: 7,
+    timeoutMs: 100
+  });
+
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(source.sphParticleUpload, device),
+    true
+  );
+  assert.equal(
+    mlsMpmGpuParticleUploadMatchesDevice(
+      source.mlsMpmParticleUpload,
+      device
+    ),
+    true
+  );
+  assert.equal(Object.isFrozen(source.sphParticleUpload), false);
+  assert.equal(Object.isFrozen(source.mlsMpmParticleUpload), false);
+  assert.equal(source.sphParticleState.slot, 2);
+  assert.equal(source.sphParticleState.sourceSlot, 1);
+  assert.equal(source.sphParticleState.nextSlot, 0);
+  assert.equal(source.sphParticleUpload.topologyEpoch, 19);
+  assert.equal(
+    source.sphParticleUpload.identityRevision,
+    'ulg:test:native-surface-identity:3'
+  );
+
+  const ownedBuffers = [
+    source.sphParticleUpload.stateBuffer,
+    source.sphParticleUpload.thermoBuffer,
+    source.sphParticleUpload.identityBuffer,
+    source.mlsMpmParticleUpload.mechanicsBuffer
+  ];
+  assert.equal(await source.releaseAfterQueue(), true);
+  assert.equal(await source.releaseAfterQueue(), false);
+  assert.equal(submittedFenceCount, 1);
+  assert.deepEqual(ownedBuffers.map((buffer) => buffer.destroyCount), [1, 1, 1, 1]);
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(source.sphParticleUpload, device),
+    false
+  );
+  assert.equal(
+    mlsMpmGpuParticleUploadMatchesDevice(
+      source.mlsMpmParticleUpload,
+      device
+    ),
+    false
+  );
 });
 
 test('worker lane continuation separates exact admission from asynchronous isosurface completion', () => {
@@ -1034,14 +1232,22 @@ test('mounted schedule cadence survives startup deferral and every recursive con
   );
 });
 
-test('mounted material cache fingerprints live H2O optical authority and rejects v4 records', () => {
+test('mounted material cache fingerprints live generic dispersed optics authority and rejects v4 records', () => {
   const source = readFileSync(
     new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),
     'utf8'
   );
   assert.match(
     source,
-    /PEER_CLOSURE_CACHE_METHOD_VERSION\s*=\s*'ulg\.generic-derivation\+reference-bank-anchoring\.v5'/
+    /PEER_CLOSURE_CACHE_METHOD_VERSION\s*=\s*'ulg\.generic-derivation\+reference-bank-anchoring\.v6'/
+  );
+  assert.match(
+    source,
+    /createCondensedDispersedMediumOpticalClosure:\s*createCondensedDispersedMediumOpticalClosure\.toString\(\)/
+  );
+  assert.match(
+    source,
+    /condensedDispersedOpticalConstants:\s*\{[\s\S]*?fingerprint:\s*CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,[\s\S]*?methodRevision:\s*CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION/
   );
   assert.match(
     source,

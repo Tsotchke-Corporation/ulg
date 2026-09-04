@@ -22,6 +22,7 @@ import {
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
+  advanceSphDispersedMediumGpuBufferParticleTopologyEpoch,
   buildSphDispersedMediumGpuBuffers,
   consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer,
   destroySphDispersedMediumGpuBuffers,
@@ -29,6 +30,7 @@ import {
   sphDispersedMediumGpuBufferNewOwnerEligible,
   sphDispersedMediumGpuBufferParticleLineageMatches,
   sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
+  sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches,
   uploadSphDispersedMediumGpuBuffers,
   validateSphDispersedMediumGpuBufferAuthority
 } from './sphDispersedMediumGpuBuffers.js';
@@ -88,6 +90,19 @@ const sphParticleBufferSetLifecycleRecords = new WeakMap();
 const sphDispersedMediumSourceFamilyRegistrars = new WeakMap();
 const sphDispersedMediumOwnershipStates = new WeakMap();
 const sphDispersedMediumSourceFamilyContinuationsInProgress = new WeakSet();
+const sphDispersedMediumParentTopologyEpochTransitionRecords = new WeakMap();
+const SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_ALIAS_FIELDS = Object.freeze([
+  'dispersedMediumOptics',
+  'dispersedMediumOpticsAuthority',
+  'dispersedMediumOpticsBuffer',
+  'dispersedMediumOpticsRowCount',
+  'dispersedMediumOpticsRowStrideFloats',
+  'dispersedMediumOpticsBufferByteLength',
+  'ownsDispersedMediumOpticsBuffer'
+]);
+
+export const ULG_SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_TOPOLOGY_EPOCH_TRANSITION_SCHEMA =
+  'peercompute.ulg.sph-particle-dispersed-medium-optics-topology-epoch-transition.v0';
 
 function nextSphDispersedMediumOwnershipGeneration() {
   return Object.freeze({});
@@ -136,6 +151,26 @@ export function sphGpuParticleUploadAdvertisesDispersedMediumOptics(upload) {
     || scalarAdvertised(upload?.dispersedMediumOpticsBufferByteLength)
     || upload?.ownsDispersedMediumOpticsBuffer === true
   );
+}
+
+/**
+ * Clone only the public core particle-upload family. Dispersed-medium optics
+ * children are privately registered to one exact parent upload object, so a
+ * structural spread must not make the child appear to belong to a different
+ * state/thermo family. A caller that creates a new parent must explicitly
+ * continue or replace the child through the authenticated lifecycle APIs.
+ */
+export function cloneSphGpuParticleUploadWithoutDispersedMediumOptics(upload) {
+  if (!upload || typeof upload !== 'object') {
+    throw new TypeError(
+      'Core SPH particle upload cloning requires one source upload object'
+    );
+  }
+  const coreUpload = { ...upload };
+  for (const field of SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_ALIAS_FIELDS) {
+    delete coreUpload[field];
+  }
+  return coreUpload;
 }
 
 // Render rows store the domain as f32 for the existing surface ABI, so keep
@@ -894,6 +929,46 @@ function exactParentDispersedMediumRecordMatches(upload, record, device = null) 
   );
 }
 
+function exactParentDispersedMediumRecordMatchesExceptTopologyEpoch(
+  upload,
+  record,
+  device = null
+) {
+  const coreFamily = captureExactSphParticleUploadCoreFamily(
+    upload,
+    device ?? record?.device ?? null
+  );
+  const privateSidecar = record?.dispersedMediumOptics ?? null;
+  if (
+    !coreFamily
+    || !privateSidecar
+    || coreFamily.device !== record?.device
+    || coreFamily.stateBuffer !== record.stateBuffer
+    || coreFamily.thermoBuffer !== record.thermoBuffer
+    || coreFamily.identityBuffer !== record.identityBuffer
+    || coreFamily.particleCount !== record.particleCount
+    || coreFamily.identityRevision !== record.identityRevision
+    || privateSidecar.stateBuffer !== record.stateBuffer
+    || privateSidecar.thermoBuffer !== record.thermoBuffer
+    || privateSidecar.identityBuffer !== record.identityBuffer
+    || privateSidecar.particleCount !== record.particleCount
+    || privateSidecar.identityRevision !== record.identityRevision
+    || upload.dispersedMediumOptics !== privateSidecar.upload
+    || upload.dispersedMediumOpticsAuthority !== privateSidecar.authority
+    || upload.dispersedMediumOpticsBuffer !== privateSidecar.buffer
+    || upload.dispersedMediumOpticsRowCount !== privateSidecar.rowCount
+    || upload.dispersedMediumOpticsRowStrideFloats
+      !== privateSidecar.rowStrideFloats
+    || upload.dispersedMediumOpticsBufferByteLength
+      !== privateSidecar.bufferByteLength
+    || upload.ownsDispersedMediumOpticsBuffer !== privateSidecar.ownsBuffer
+  ) return false;
+  return sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+    privateSidecar.upload,
+    privateSidecar
+  );
+}
+
 /**
  * Prove that an exact parent upload and its privately authenticated optics
  * sidecar are being consumed with the same particle-aligned source buffers
@@ -992,6 +1067,39 @@ export function retireSphGpuParticleBufferSetDispersedMediumOptics(
 
 function destroySphGpuParticleBuffersNow(buffers, record = null) {
   if (!buffers || (record ? record.destroyed : buffers.destroyed)) return false;
+  // Retire the privately owned child before any parent allocation.  A false
+  // result means the child module did not accept this retirement request; in
+  // that case the parent must preserve both its ownership record and all of
+  // its still-live core allocations so the exact owner can retry or quarantine
+  // the family without reporting a partial parent destruction as success.
+  if (record?.dispersedMediumOptics) {
+    if (record.dispersedMediumOptics.ownsBuffer) {
+      if (
+        destroySphDispersedMediumGpuBuffers(
+          record.dispersedMediumOptics.upload
+        ) !== true
+      ) {
+        return false;
+      }
+      record.dispersedMediumOptics.ownsBuffer = false;
+      retireSphDispersedMediumOwnershipState(
+        buffers,
+        record.dispersedMediumOptics
+      );
+    }
+  } else if (!record && buffers.ownsDispersedMediumOpticsBuffer !== false) {
+    if (buffers.dispersedMediumOptics) {
+      if (
+        destroySphDispersedMediumGpuBuffers(
+          buffers.dispersedMediumOptics
+        ) !== true
+      ) {
+        return false;
+      }
+    } else {
+      buffers.dispersedMediumOpticsBuffer?.destroy?.();
+    }
+  }
   // Once a parent has entered the private lifecycle, retire the exact core
   // allocations recorded at admission. Mutable public aliases remain useful
   // diagnostics but must not redirect destruction to unrelated buffers.
@@ -1009,24 +1117,6 @@ function destroySphGpuParticleBuffersNow(buffers, record = null) {
   }
   if (buffers.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
     buffers.materialPropertyBankParticleSizeBuffer?.destroy?.();
-  }
-  if (record?.dispersedMediumOptics) {
-    if (record.dispersedMediumOptics.ownsBuffer) {
-      destroySphDispersedMediumGpuBuffers(
-        record.dispersedMediumOptics.upload
-      );
-      record.dispersedMediumOptics.ownsBuffer = false;
-      retireSphDispersedMediumOwnershipState(
-        buffers,
-        record.dispersedMediumOptics
-      );
-    }
-  } else if (!record && buffers.ownsDispersedMediumOpticsBuffer !== false) {
-    if (buffers.dispersedMediumOptics) {
-      destroySphDispersedMediumGpuBuffers(buffers.dispersedMediumOptics);
-    } else {
-      buffers.dispersedMediumOpticsBuffer?.destroy?.();
-    }
   }
   buffers.destroyed = true;
   if (record) {
@@ -1223,19 +1313,12 @@ function attachNewSphGpuParticleDispersedMediumOpticsSidecar(
       'SPH dispersed-medium initial attachment requires one live exact sidecar-free particle source'
     );
   }
-  const aliasFields = [
-    'dispersedMediumOptics',
-    'dispersedMediumOpticsAuthority',
-    'dispersedMediumOpticsBuffer',
-    'dispersedMediumOpticsRowCount',
-    'dispersedMediumOpticsRowStrideFloats',
-    'dispersedMediumOpticsBufferByteLength',
-    'ownsDispersedMediumOpticsBuffer'
-  ];
-  const priorDescriptors = new Map(aliasFields.map((field) => [
-    field,
-    Object.getOwnPropertyDescriptor(sourceSphUpload, field) ?? null
-  ]));
+  const priorDescriptors = new Map(
+    SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_ALIAS_FIELDS.map((field) => [
+      field,
+      Object.getOwnPropertyDescriptor(sourceSphUpload, field) ?? null
+    ])
+  );
   let sidecar = null;
   let lifecycleRecord = null;
   let lifecycleInstalled = false;
@@ -1269,7 +1352,9 @@ function attachNewSphGpuParticleDispersedMediumOpticsSidecar(
     ) {
       complete = false;
     }
-    for (const field of aliasFields) {
+    for (
+      const field of SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_ALIAS_FIELDS
+    ) {
       const prior = priorDescriptors.get(field);
       try {
         if (prior) Object.defineProperty(sourceSphUpload, field, prior);
@@ -1638,6 +1723,296 @@ export function registerTopologyStableSphDispersedMediumOpticsSourceFamilyContin
   }
 }
 
+/**
+ * Atomically advance an adopted optics child and its exact parent through one
+ * conservative topology-epoch publication stamp. The parent object and every
+ * authority-bearing buffer remain identical. The public parent may still
+ * expose the source epoch, or may already expose the exact requested target;
+ * no other partial or inferred transition is accepted.
+ */
+export function advanceExactParentSphDispersedMediumOpticsTopologyEpoch(
+  options = null
+) {
+  const sourceSphUpload = options?.sourceSphUpload ?? null;
+  const sourceRecord =
+    sphParticleBufferSetLifecycleRecords.get(sourceSphUpload) ?? null;
+  const privateSidecar = sourceRecord?.dispersedMediumOptics ?? null;
+  const childUpload = privateSidecar?.upload ?? null;
+  const registrar = childUpload
+    ? sphDispersedMediumSourceFamilyRegistrars.get(childUpload) ?? null
+    : null;
+  const ownershipState = childUpload
+    ? sphDispersedMediumOwnershipStates.get(childUpload) ?? null
+    : null;
+  if (
+    !sourceRecord
+    || sourceRecord.destroyed
+    || sourceRecord.destroyRequested
+    || sourceRecord.activeBorrowCount !== 0
+    || !privateSidecar
+    || !childUpload
+    || !registrar
+    || !ownershipState
+    || ownershipState.owner !== sourceSphUpload
+    || privateSidecar.ownsBuffer !== true
+    || sphDispersedMediumSourceFamilyContinuationsInProgress.has(childUpload)
+  ) {
+    throw new TypeError(
+      'SPH dispersed-medium topology-epoch transition requires one exact unborrowed owning parent and child'
+    );
+  }
+
+  const sourceOwnershipGeneration = ownershipState.generation;
+  sphDispersedMediumSourceFamilyContinuationsInProgress.add(childUpload);
+  let childTransition = null;
+  let parentAdvanced = false;
+  let publicationWindowAdmitted = false;
+  let topologyDescriptor = null;
+  const sourceTopologyEpoch = sourceRecord.topologyEpoch;
+  const sourceFamily = Object.freeze({
+    particleCount: sourceRecord.particleCount,
+    topologyEpoch: sourceTopologyEpoch,
+    identityRevision: sourceRecord.identityRevision,
+    identityBuffer: sourceRecord.identityBuffer,
+    stateBuffer: sourceRecord.stateBuffer,
+    thermoBuffer: sourceRecord.thermoBuffer
+  });
+  try {
+    const device = options?.device ?? null;
+    const targetTopologyEpoch = options?.targetTopologyEpoch;
+    const observedTopologyEpoch = sourceSphUpload?.topologyEpoch;
+    topologyDescriptor = Object.getOwnPropertyDescriptor(
+      sourceSphUpload,
+      'topologyEpoch'
+    ) ?? null;
+    if (
+      device !== sourceRecord.device
+      || !Number.isSafeInteger(sourceTopologyEpoch)
+      || sourceTopologyEpoch < 0
+      || sourceTopologyEpoch >= 0xffff_ffff
+      || !Number.isSafeInteger(targetTopologyEpoch)
+      || targetTopologyEpoch !== sourceTopologyEpoch + 1
+      || (
+        observedTopologyEpoch !== sourceTopologyEpoch
+        && observedTopologyEpoch !== targetTopologyEpoch
+      )
+      || !topologyDescriptor
+      || !Object.prototype.hasOwnProperty.call(topologyDescriptor, 'value')
+      || topologyDescriptor.writable !== true
+      || sphParticleBufferSetLifecycleRecords.get(sourceSphUpload)
+        !== sourceRecord
+      || sourceRecord.activeBorrowCount !== 0
+      || sourceRecord.dispersedMediumOptics !== privateSidecar
+      || sphDispersedMediumSourceFamilyRegistrars.get(childUpload) !== registrar
+      || sphDispersedMediumOwnershipStates.get(childUpload) !== ownershipState
+      || ownershipState.owner !== sourceSphUpload
+      || ownershipState.generation !== sourceOwnershipGeneration
+      || privateSidecar.ownsBuffer !== true
+      || !exactParentDispersedMediumRecordMatchesExceptTopologyEpoch(
+        sourceSphUpload,
+        sourceRecord,
+        device
+      )
+      || !sphDispersedMediumGpuBufferNewOwnerEligible(childUpload)
+    ) {
+      throw new TypeError(
+        'SPH dispersed-medium topology-epoch transition requires exact source or target stamp observation with no other parent drift'
+      );
+    }
+    publicationWindowAdmitted = true;
+
+    childTransition =
+      advanceSphDispersedMediumGpuBufferParticleTopologyEpoch(
+        childUpload,
+        { registrar, sourceFamily, targetTopologyEpoch }
+      );
+    Object.defineProperty(sourceSphUpload, 'topologyEpoch', {
+      ...topologyDescriptor,
+      value: targetTopologyEpoch
+    });
+    sourceRecord.topologyEpoch = targetTopologyEpoch;
+    privateSidecar.topologyEpoch = targetTopologyEpoch;
+    parentAdvanced = true;
+
+    const targetFamily = Object.freeze({
+      ...sourceFamily,
+      topologyEpoch: targetTopologyEpoch
+    });
+    if (
+      !exactParentDispersedMediumRecordMatches(
+        sourceSphUpload,
+        sourceRecord,
+        device
+      )
+      || !sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches(
+        childTransition.witness,
+        { upload: childUpload, sourceFamily, targetFamily }
+      )
+    ) {
+      throw new TypeError(
+        'SPH dispersed-medium topology-epoch transition failed exact post-publication authentication'
+      );
+    }
+
+    const receipt = Object.freeze({
+      schema:
+        ULG_SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_TOPOLOGY_EPOCH_TRANSITION_SCHEMA,
+      status:
+        'sph-particle-dispersed-medium-optics-topology-epoch-advanced',
+      particleCount: sourceRecord.particleCount,
+      identityRevision: sourceRecord.identityRevision,
+      sourceTopologyEpoch,
+      targetTopologyEpoch,
+      childTransitionWitness: childTransition.witness,
+      rollback: null
+    });
+    const transitionRecord = {
+      active: true,
+      receipt,
+      sourceSphUpload,
+      sourceRecord,
+      privateSidecar,
+      childUpload,
+      device,
+      registrar,
+      ownershipState,
+      sourceOwnershipGeneration,
+      sourceFamily,
+      targetFamily,
+      sourceTopologyEpoch,
+      targetTopologyEpoch,
+      topologyDescriptor,
+      childTransition
+    };
+    const exactTargetStateStillLive = () => Boolean(
+      transitionRecord.active
+      && sphParticleBufferSetLifecycleRecords.get(sourceSphUpload)
+        === sourceRecord
+      && sourceRecord.destroyed !== true
+      && sourceRecord.destroyRequested !== true
+      && sourceRecord.activeBorrowCount === 0
+      && sourceRecord.dispersedMediumOptics === privateSidecar
+      && sphDispersedMediumSourceFamilyRegistrars.get(childUpload) === registrar
+      && sphDispersedMediumOwnershipStates.get(childUpload) === ownershipState
+      && ownershipState.owner === sourceSphUpload
+      && ownershipState.generation === sourceOwnershipGeneration
+      && privateSidecar.ownsBuffer === true
+      && sourceSphUpload.topologyEpoch === targetTopologyEpoch
+      && exactParentDispersedMediumRecordMatches(
+        sourceSphUpload,
+        sourceRecord,
+        device
+      )
+      && sphDispersedMediumGpuBufferParticleTopologyEpochTransitionMatches(
+        childTransition.witness,
+        { upload: childUpload, sourceFamily, targetFamily }
+      )
+    );
+    transitionRecord.exactTargetStateStillLive = exactTargetStateStillLive;
+
+    let rolledBack = false;
+    const rollback = () => {
+      if (rolledBack) return true;
+      if (!exactTargetStateStillLive()) return false;
+      Object.defineProperty(sourceSphUpload, 'topologyEpoch', {
+        ...topologyDescriptor,
+        value: sourceTopologyEpoch
+      });
+      sourceRecord.topologyEpoch = sourceTopologyEpoch;
+      privateSidecar.topologyEpoch = sourceTopologyEpoch;
+      if (childTransition.rollback() !== true) {
+        Object.defineProperty(sourceSphUpload, 'topologyEpoch', {
+          ...topologyDescriptor,
+          value: targetTopologyEpoch
+        });
+        sourceRecord.topologyEpoch = targetTopologyEpoch;
+        privateSidecar.topologyEpoch = targetTopologyEpoch;
+        return false;
+      }
+      transitionRecord.active = false;
+      rolledBack = true;
+      return exactParentDispersedMediumRecordMatches(
+        sourceSphUpload,
+        sourceRecord,
+        device
+      );
+    };
+    const publishedReceipt = Object.freeze({
+      ...receipt,
+      rollback
+    });
+    transitionRecord.receipt = publishedReceipt;
+    sphDispersedMediumParentTopologyEpochTransitionRecords.set(
+      publishedReceipt,
+      transitionRecord
+    );
+    return publishedReceipt;
+  } catch (error) {
+    if (parentAdvanced) {
+      try {
+        Object.defineProperty(sourceSphUpload, 'topologyEpoch', {
+          ...topologyDescriptor,
+          value: sourceTopologyEpoch
+        });
+      } catch {}
+      sourceRecord.topologyEpoch = sourceTopologyEpoch;
+      privateSidecar.topologyEpoch = sourceTopologyEpoch;
+    } else if (
+      publicationWindowAdmitted
+      && sourceSphUpload?.topologyEpoch !== sourceTopologyEpoch
+    ) {
+      // An exact target observed before entry is still unauthenticated until
+      // this transaction succeeds; restore the only privately valid epoch.
+      try {
+        Object.defineProperty(sourceSphUpload, 'topologyEpoch', {
+          ...topologyDescriptor,
+          value: sourceTopologyEpoch
+        });
+      } catch {}
+    }
+    try { childTransition?.rollback?.(); } catch {}
+    throw error;
+  } finally {
+    sphDispersedMediumSourceFamilyContinuationsInProgress.delete(childUpload);
+  }
+}
+
+export function exactParentSphDispersedMediumOpticsTopologyEpochTransitionMatches(
+  receipt,
+  {
+    sourceSphUpload = null,
+    device = null,
+    targetTopologyEpoch = null
+  } = {}
+) {
+  const transition =
+    sphDispersedMediumParentTopologyEpochTransitionRecords.get(receipt) ?? null;
+  try {
+    return Boolean(
+      transition
+      && transition.receipt === receipt
+      && transition.sourceSphUpload === sourceSphUpload
+      && transition.device === device
+      && transition.targetTopologyEpoch === targetTopologyEpoch
+      && Object.isFrozen(receipt)
+      && receipt.schema
+        === ULG_SPH_GPU_PARTICLE_DISPERSED_MEDIUM_OPTICS_TOPOLOGY_EPOCH_TRANSITION_SCHEMA
+      && receipt.status
+        === 'sph-particle-dispersed-medium-optics-topology-epoch-advanced'
+      && receipt.particleCount === transition.sourceRecord.particleCount
+      && receipt.identityRevision === transition.sourceRecord.identityRevision
+      && receipt.sourceTopologyEpoch === transition.sourceTopologyEpoch
+      && receipt.targetTopologyEpoch === transition.targetTopologyEpoch
+      && receipt.childTransitionWitness
+        === transition.childTransition.witness
+      && receipt.rollback === transition.receipt.rollback
+      && transition.exactTargetStateStillLive?.()
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
   sourceSphUpload,
   targetSphUpload
@@ -1927,6 +2302,16 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   if (packed?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a packed SPH GPU particle buffer');
   }
+  const topologyEpoch = packed.topologyEpoch;
+  if (
+    !Number.isSafeInteger(topologyEpoch)
+    || topologyEpoch < 0
+    || topologyEpoch > 0xffff_ffff
+  ) {
+    throw new TypeError(
+      'uploadSphGpuParticleBuffers requires an exact u32 topologyEpoch'
+    );
+  }
   if (packed.cpuIdentityStale === true && sphParticleStateRequiresExplicitIdentity(packed)) {
     throw new TypeError(
       'uploadSphGpuParticleBuffers refuses a stale CPU identity mirror for arbitrary render domains'
@@ -1981,7 +2366,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
         {
           particleLineage: {
             particleCount: packed.particleCount,
-            topologyEpoch: packed.topologyEpoch ?? 0,
+            topologyEpoch,
             identityRevision: packed.identityRevision,
             identityBuffer
           },
@@ -2008,7 +2393,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
       ? Number(packed.storageGeneration)
       : null,
     positionEpoch: packed.positionEpoch ?? null,
-    topologyEpoch: packed.topologyEpoch ?? null,
+    topologyEpoch,
     chartEpoch: packed.chartEpoch ?? null,
     levelEpoch: packed.levelEpoch ?? null,
     supportEpoch: packed.supportEpoch ?? null,

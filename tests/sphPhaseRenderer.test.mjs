@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as THREE from 'three';
+import {
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS,
+  SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
 import { blackbodyColorSrgb } from '../src/runtime/material/radiationClosure.js';
 import {
   applySphPresentationCanvasOwnership,
@@ -107,6 +113,7 @@ import {
   resolveSphWorkerLanePolicyAdmission,
   summarizeThreeWebGpuDeviceLimits,
   buildSchroederPressureInterfaceGasCellFieldImportPublicationFromResidentExecution,
+  buildResidentCollectiveOpticalRouteDescriptorSet,
   selectSchroederPressureInterfaceGasCellFieldImportFromResidentExecution,
   inspectExactSphSpatialGasPressureAuthorityImport,
   pressureInterfaceGasCellFieldImportReadyForScene,
@@ -138,6 +145,7 @@ import {
   resolveRenderFieldSurfaceVisibility,
   resolveOpticalSurfaceVisibility,
   closureDerivedSurfaceOpticalPresentation,
+  collectiveOpticalDepthIsosurfacePresentation,
   shouldRetainResidentSurfaceDrawOverlay,
   createSphPhaseScene,
   SPH_SURFACE_INACTIVE_GRACE_FRAMES,
@@ -163,6 +171,12 @@ import {
   workerResidentParticleStateProducerColorRows,
   workerResidentParticleStateProducerSourceCacheDescriptor
 } from '../src/visualization/sphPhaseScene.js';
+import {
+  collectiveOpticalRouteDescriptor
+} from '../src/runtime/sph/sphOpticalRouteIdentity.js';
+import {
+  buildSphRenderFieldSurfaceTable
+} from '../src/runtime/sph/sphRenderGpuKernel.js';
 import {
   createQueueOrderedCleanupClaimIssuer,
   registerQueueOrderedCleanupClaim,
@@ -3331,7 +3345,7 @@ test('resident render surfaces canonicalize fluorine aliases by stable material 
   assert.equal(opticalTable.recordMetadata[0].blocked, false);
 });
 
-test('resident H2O gas summary refreshes steam optical identity without changing fluorine', () => {
+test('resident H2O gas summary remains diagnostic and cannot create condensed optical authority', () => {
   const baselineSummary = {
     schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
     status: 'closure-derived-gas-pressure-diagnostic',
@@ -3408,72 +3422,103 @@ test('resident H2O gas summary refreshes steam optical identity without changing
 
   assert.equal(pressure.source, 'gpu-resident-compact-thermal-phase-single-species');
   assert.equal(pressure.residentThermalGasMassKg, 100);
-  assert.equal(updated[0].descriptor.opticalState.microphysicsStatus, 'supersaturated-condensed-droplets');
-  assert.notEqual(updated[0].descriptor.opticalStateKey, 'default');
+  assert.equal(updated[0].descriptor.opticalState, null);
+  assert.equal(updated[0].descriptor.opticalStateKey, 'default');
   assert.equal(updated[0].surfaceKey, steam.surfaceKey);
   assert.equal(
     residentSurfaceBatchIdentitySignature(updated),
     residentSurfaceBatchIdentitySignature([steam, fluorine])
   );
-  assert.notEqual(
+  assert.equal(
     residentSurfaceBatchOpticalSignature(updated),
     residentSurfaceBatchOpticalSignature([steam, fluorine])
   );
   assert.equal(
-    updated[0].descriptor.opticalStateId,
+    updated[0].descriptor.opticalStateId ?? 0,
     renderDescriptorForSurfaceRecord(steam, 0).opticalStateId
   );
   assert.equal(updated[1], fluorine);
 });
 
-test('SPH phase renderer keeps optical binding layout stable while live values change', () => {
-  const clear = applyResidentWaterVaporOpticalStateToSurfaceBatches([{
-    surfaceKey: 'steam|h2o|gas',
-    renderKey: 'steam',
+test('SPH phase renderer reserves positive optical IDs exclusively for canonical collective routes', () => {
+  const waterRoute = collectiveOpticalRouteDescriptor({
     material: 'h2o',
-    phase: 'gas',
-    descriptor: renderDescriptorForSurfaceRecord({
-      surfaceKey: 'steam|h2o|gas',
-      renderKey: 'steam',
-      material: 'h2o',
-      phase: 'gas'
-    }, 0)
-  }], {
-    totalPressurePa: 101325,
-    bySpecies: {
-      h2o: { temperatureK: 450, partialPressurePa: 100 }
-    }
+    vaporPhase: 'gas',
+    condensedPhase: 'liquid'
   });
-  const dense = applyResidentWaterVaporOpticalStateToSurfaceBatches(clear, {
-    totalPressurePa: 1e6,
-    bySpecies: {
-      h2o: { temperatureK: 300, partialPressurePa: 1e6 }
-    }
+  const carbonRoute = collectiveOpticalRouteDescriptor({
+    material: 'C',
+    vaporPhase: 'gas',
+    condensedPhase: 'solid'
   });
-  const clearTable = createOpticalGpuTableForSurfaceBatches(clear);
-  const denseTable = createOpticalGpuTableForSurfaceBatches(dense);
-
-  assert.equal(clear[0].surfaceKey, dense[0].surfaceKey);
-  assert.equal(clear[0].descriptor.opticalStateId, dense[0].descriptor.opticalStateId);
-  assert.notEqual(clear[0].descriptor.opticalStateKey, dense[0].descriptor.opticalStateKey);
-  assert.equal(
-    opticalGpuTableBindingLayoutSignature(clearTable),
-    opticalGpuTableBindingLayoutSignature(denseTable)
+  const descriptorSet = buildResidentCollectiveOpticalRouteDescriptorSet({
+    ordinaryDescriptors: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'C', phase: 'solid', renderKey: 'carbon' }
+    ],
+    collectiveRoutes: [carbonRoute, waterRoute]
+  });
+  assert.deepEqual(
+    descriptorSet.ordinaryDescriptors.map((entry) => entry.opticalStateId),
+    [0, 0]
   );
-  assert.equal(
-    opticalGpuTableBufferContentsEqual(
-      clearTable,
-      createOpticalGpuTableForSurfaceBatches(clear)
-    ),
-    true,
-    'identical rebuilt tables keep the resident optical buffer pair'
+  assert.deepEqual(
+    new Set(descriptorSet.collective.map(({ route, descriptor }) => {
+      assert.equal(descriptor.surfaceKey, route.routeKey);
+      assert.equal(descriptor.collectiveOpticalRoute, true);
+      assert.equal(descriptor.routeId, route.routeId);
+      assert.equal(descriptor.materialId, route.materialId);
+      assert.equal(descriptor.condensedPhase, route.condensedPhase);
+      assert.equal(descriptor.condensedPhaseId, route.condensedPhaseId);
+      assert.equal(descriptor.vaporPhase, route.vaporPhase);
+      assert.equal(descriptor.vaporPhaseId, route.vaporPhaseId);
+      assert.equal(descriptor.closureModel, route.closureModel);
+      assert.equal(descriptor.closureModelId, route.closureModelId);
+      return descriptor.opticalStateId;
+    })),
+    new Set([waterRoute.routeId, carbonRoute.routeId])
   );
-  assert.equal(
-    opticalGpuTableBufferContentsEqual(clearTable, denseTable),
-    false,
-    'live optical changes use a private replacement buffer pair'
+  const waterDescriptor = descriptorSet.collective.find(
+    ({ route }) => route.material === waterRoute.material
   );
-  assert.notDeepEqual(Array.from(clearTable.records), Array.from(denseTable.records));
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    ...waterDescriptor.descriptor,
+    resolution: 4
+  }]);
+  const reconstructed = renderDescriptorForSurfaceRecord(
+    surfaceTable.metadata[0],
+    0
+  );
+  assert.equal(reconstructed.opticalStateId, waterRoute.opticalStateId);
+  assert.equal(reconstructed.collectiveOpticalRoute, true);
+  assert.equal(
+    reconstructed.collectiveOpticalRouteSchema,
+    waterRoute.schema
+  );
+  assert.equal(reconstructed.collectiveOpticalRouteKey, waterRoute.routeKey);
+  assert.equal(reconstructed.surfaceKey, waterRoute.routeKey);
+  assert.equal(reconstructed.routeId, waterRoute.routeId);
+  assert.equal(reconstructed.materialId, waterRoute.materialId);
+  assert.equal(reconstructed.condensedPhase, waterRoute.condensedPhase);
+  assert.equal(reconstructed.condensedPhaseId, waterRoute.condensedPhaseId);
+  assert.throws(
+    () => buildResidentCollectiveOpticalRouteDescriptorSet({
+      collectiveRoutes: [waterRoute, waterRoute]
+    }),
+    /unique canonical route descriptors/
+  );
+  assert.throws(
+    () => buildResidentCollectiveOpticalRouteDescriptorSet({
+      collectiveRoutes: [{
+        ...waterRoute,
+        routeKey: 'forged',
+        surfaceIdentityKey: 'forged',
+        routeId: 123,
+        opticalStateId: 123
+      }]
+    }),
+    /contradicts the canonical collective route identity/
+  );
 });
 
 test('native surface bridge reuse is independent of optical material identities and capacities', () => {
@@ -3607,7 +3652,7 @@ test('SPH phase renderer derives a packed optical GPU table from surface batches
   assert.match(table.wgslStructs, /OpticalMaterialRecord/);
 });
 
-test('SPH phase renderer keeps clear vapor and droplet steam optical states separate', () => {
+test('SPH phase renderer rejects pressure-derived optical cohorts on an ordinary carrier binding', () => {
   const clearVaporState = {
     temperatureK: 450,
     h2oPartialPressurePa: 100,
@@ -3633,27 +3678,15 @@ test('SPH phase renderer keeps clear vapor and droplet steam optical states sepa
       { material: 'h2o', phase: 'gas', renderKey: 'steam', opticalState: supersaturatedState }
     ]
   });
-  const table = createOpticalGpuTableForSurfaceBatches(batches);
-  const lookup = createOpticalGpuLookupForSurfaceBatches(table, batches);
-
   assert.equal(batches.length, 2);
   assert.ok(new Set(batches.map((batch) => batch.surfaceKey)).size === 2);
-  assert.equal(table.recordCount, 2);
   assert.deepEqual(
-    table.recordMetadata.map((record) => record.renderModel).sort(),
-    ['molecular-condensed-droplet-scattering-pbr', 'molecular-vapor-transparent-spectrum']
+    batches.map((batch) => batch.descriptor.opticalStateId),
+    [0, 0]
   );
-  const clearRecord = table.recordMetadata.find((record) => record.renderModel === 'molecular-vapor-transparent-spectrum');
-  const dropletRecord = table.recordMetadata.find((record) => record.renderModel === 'molecular-condensed-droplet-scattering-pbr');
-  const clearOffset = clearRecord.recordIndex * table.recordStrideFloats;
-  const dropletOffset = dropletRecord.recordIndex * table.recordStrideFloats;
-  assert.equal(table.records[clearOffset + 17], 0);
-  assert.ok(table.records[clearOffset + 20] < 1e-3);
-  assert.ok(table.records[dropletOffset + 17] > 0);
-  assert.ok(table.records[dropletOffset + 20] > 0);
-  assert.deepEqual(
-    lookup.cpuReference.outputs.filter((_, index) => index % lookup.lookup.outputStrideFloats === 11),
-    new Float32Array([0, 1])
+  assert.throws(
+    () => createOpticalGpuTableForSurfaceBatches(batches),
+    /conflicting optical states share GPU binding/
   );
 });
 
@@ -3909,6 +3942,262 @@ test('SPH renderer publishes one closure-derived gas opacity contract for every 
   assert.equal(condensedSteam.opticalProvenanceSource, 'conserved-droplet-scattering');
   assert.equal(unknownGas.opticalResponseAuthority, 'closure-blocked-gas-hidden');
   assert.equal(unknownGas.opticalEffectiveOpacity, 0);
+});
+
+test('SPH collective optical-depth isosurface derives Beer-Lambert opacity only for a ready canonical closure', () => {
+  const route = collectiveOpticalRouteDescriptor({
+    material: 'h2o',
+    vaporPhase: 'gas',
+    condensedPhase: 'liquid'
+  });
+  const descriptor = {
+    ...route,
+    collectiveOpticalRoute: true,
+    collectiveOpticalRouteSchema: route.schema,
+    collectiveOpticalRouteKey: route.routeKey
+  };
+  const closureMetadata = {
+    rowIndex: 0,
+    opticalStateId: route.opticalStateId,
+    routeId: route.routeId,
+    routeSchema: route.schema,
+    routeKey: route.routeKey,
+    dispersedMaterialId: route.materialId,
+    condensedPhaseId: route.condensedPhaseId,
+    status: SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.ready,
+    provenance: { source: 'reference-index-runtime-radius-sphere-optics' }
+  };
+  const closureRows = new Float32Array(12);
+  closureRows[
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.morphologyModelId
+  ] = SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL
+    .singleCompactSphereComplexIndex;
+  closureRows[
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.relativeRefractiveIndexN
+  ] = 1.3326;
+  closureRows[
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LANES.relativeExtinctionCoefficientK
+  ] = 0;
+  const readyClosureTable = {
+    schema: ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA,
+    rows: closureRows,
+    rowStrideFloats: closureRows.length,
+    readyOpticalStateIds: [route.opticalStateId],
+    metadata: [closureMetadata]
+  };
+  const presentation = collectiveOpticalDepthIsosurfacePresentation({
+    // Reproduce the production mismatch: the static condensed-material row
+    // can be optically thin even when the dynamic extinction field reaches
+    // the tau=1 extraction boundary.
+    optics: { opacity: 0, transmission: 1, blocked: false },
+    descriptorOrRow: descriptor,
+    closureTable: readyClosureTable
+  });
+  const expectedTransmission = Math.exp(-1);
+  const expectedOpacity = 1 - expectedTransmission;
+
+  assert.equal(
+    presentation.opticalResponseAuthority,
+    'conserved-dispersed-extinction-optical-depth-isosurface'
+  );
+  assert.equal(presentation.opticalResponseReady, true);
+  const compactSurfaceTable = buildSphRenderFieldSurfaceTable([{
+    ...descriptor,
+    resolution: 4
+  }]);
+  const reconstructedPresentation = collectiveOpticalDepthIsosurfacePresentation({
+    descriptorOrRow: renderDescriptorForSurfaceRecord(
+      compactSurfaceTable.metadata[0],
+      0
+    ),
+    closureTable: readyClosureTable
+  });
+  assert.equal(reconstructedPresentation.opticalResponseReady, true);
+  assert.equal(presentation.opticalDepth, 1);
+  assert.ok(Math.abs(presentation.opticalTransmission - expectedTransmission) < 1e-15);
+  assert.ok(Math.abs(presentation.opticalEffectiveOpacity - expectedOpacity) < 1e-15);
+  assert.equal(presentation.opticalVisibilityFlag, 1);
+  assert.equal(presentation.opticalRoughness, 1);
+  assert.equal(presentation.opticalSingleScatteringAlbedo, 1);
+  assert.equal(presentation.opticalAchromaticScattering, true);
+  assert.deepEqual(presentation.opticalScatteringSourceLinear, [1, 1, 1]);
+  assert.equal(
+    presentation.opticalProvenanceSource,
+    'reference-index-runtime-radius-sphere-optics'
+  );
+
+  const batch = {
+    surfaceKey: route.routeKey,
+    material: route.material,
+    phase: route.phase,
+    renderKey: route.renderKey,
+    opticalState: route.opticalState,
+    opticalStateKey: descriptor.opticalStateKey,
+    opticalStateId: route.opticalStateId,
+    collectiveOpticalRoute: true,
+    collectiveOpticalRouteKey: route.routeKey,
+    descriptor,
+    surfaceRadiusM: 0.05,
+    count: 1
+  };
+  const ordinaryBatch = {
+    surfaceKey: 'h2o|liquid|ordinary',
+    material: 'h2o',
+    phase: 'liquid',
+    renderKey: 'h2o',
+    opticalState: null,
+    opticalStateKey: 'default',
+    opticalStateId: 0,
+    descriptor: {
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      opticalState: null,
+      opticalStateKey: 'default',
+      opticalStateId: 0
+    },
+    surfaceRadiusM: 0.05,
+    count: 1
+  };
+  const nativeTable = createOpticalGpuTableForSurfaceBatches([ordinaryBatch, batch], {
+    dispersedMediumOpticalClosureTable: readyClosureTable
+  });
+  const ordinaryOnlyTable = createOpticalGpuTableForSurfaceBatches([ordinaryBatch], {
+    dispersedMediumOpticalClosureTable: readyClosureTable
+  });
+  const nativeRecord = nativeTable.recordMetadata.find(
+    (record) => record.opticalStateId === route.opticalStateId
+  );
+  const nativeValue = (name) => {
+    const fieldIndex = nativeTable.recordLayout.findIndex(
+      (field) => field.split(':')[0] === name
+    );
+    return nativeTable.records[
+      nativeRecord.recordIndex * nativeTable.recordStrideFloats + fieldIndex
+    ];
+  };
+  assert.equal(nativeTable.collectiveOpticalPresentationReadyCount, 1);
+  assert.equal(nativeTable.collectiveOpticalPresentationBlockedCount, 0);
+  assert.ok(Math.abs(nativeValue('transmission') - expectedTransmission) < 1e-6);
+  assert.ok(Math.abs(nativeValue('opacity') - expectedOpacity) < 1e-6);
+  assert.equal(nativeValue('roughness'), 1);
+  assert.equal(nativeValue('opticalDepth'), 1);
+  assert.equal(nativeValue('blocked'), 0);
+  assert.equal(nativeValue('status'), 1);
+  assert.equal(nativeValue('baseColorLinearR'), 1);
+  assert.equal(nativeValue('baseColorLinearG'), 1);
+  assert.equal(nativeValue('baseColorLinearB'), 1);
+  assert.equal(nativeValue('attenuationLinearR'), 1);
+  assert.equal(nativeValue('attenuationLinearG'), 1);
+  assert.equal(nativeValue('attenuationLinearB'), 1);
+  assert.equal(nativeValue('absorptionCoefficientPerM'), 0);
+  assert.equal(nativeValue('scatteringCoefficientPerM'), 0);
+  assert.equal(nativeRecord.blocked, false);
+  assert.equal(nativeRecord.status, 1);
+  assert.equal(nativeRecord.underlyingMaterialClosureBlocked, false);
+  assert.equal(nativeRecord.collectiveOpticalAchromaticScattering, true);
+  assert.deepEqual(
+    Array.from(nativeTable.records.slice(0, nativeTable.recordStrideFloats)),
+    Array.from(ordinaryOnlyTable.records),
+    'adding a collective route must not rewrite the ordinary state-zero material row'
+  );
+  assert.equal(
+    Object.hasOwn(readyClosureTable.metadata[0], 'collectiveOpticalPresentation'),
+    false,
+    'the source closure table must remain immutable'
+  );
+  const nativeLookup = createOpticalGpuLookupForSurfaceBatches(
+    nativeTable,
+    [ordinaryBatch, batch]
+  );
+  assert.equal(
+    nativeLookup.cpuReference.outputs[
+      nativeLookup.cpuReference.outputStrideFloats + 11
+    ],
+    nativeRecord.recordIndex,
+    'the positive collective binding must resolve its exact row beside a state-zero bulk row'
+  );
+  assert.equal(
+    nativeRecord.collectiveOpticalPresentation.opticalResponseAuthority,
+    'conserved-dispersed-extinction-optical-depth-isosurface'
+  );
+
+  const blockedClosureTable = {
+    ...readyClosureTable,
+    readyOpticalStateIds: [],
+    metadata: [{
+      ...closureMetadata,
+      status: SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.blocked
+    }]
+  };
+  const blocked = collectiveOpticalDepthIsosurfacePresentation({
+    optics: { opacity: 1, transmission: 0 },
+    descriptorOrRow: descriptor,
+    closureTable: blockedClosureTable
+  });
+  assert.equal(blocked.opticalResponseReady, false);
+  assert.equal(blocked.opticalVisibilityFlag, 0);
+  assert.equal(blocked.opticalEffectiveOpacity, 0);
+  assert.equal(blocked.opticalBlockedFlag, 1);
+
+  const blockedNativeTable = createOpticalGpuTableForSurfaceBatches([ordinaryBatch, batch], {
+    dispersedMediumOpticalClosureTable: blockedClosureTable
+  });
+  const blockedRecord = blockedNativeTable.recordMetadata.find(
+    (record) => record.opticalStateId === route.opticalStateId
+  );
+  const blockedValue = (name) => {
+    const fieldIndex = blockedNativeTable.recordLayout.findIndex(
+      (field) => field.split(':')[0] === name
+    );
+    return blockedNativeTable.records[
+      blockedRecord.recordIndex * blockedNativeTable.recordStrideFloats + fieldIndex
+    ];
+  };
+  assert.equal(blockedNativeTable.collectiveOpticalPresentationReadyCount, 0);
+  assert.equal(blockedNativeTable.collectiveOpticalPresentationBlockedCount, 1);
+  assert.equal(blockedValue('transmission'), 0);
+  assert.equal(blockedValue('opacity'), 0);
+  assert.equal(blockedValue('opticalDepth'), 0);
+  assert.equal(blockedValue('blocked'), 1);
+  assert.equal(blockedValue('status'), 255);
+  assert.equal(blockedRecord.blocked, true);
+  assert.equal(blockedRecord.status, 255);
+  assert.equal(blockedRecord.underlyingMaterialClosureBlocked, false);
+
+  const mismatchedRoute = collectiveOpticalDepthIsosurfacePresentation({
+    descriptorOrRow: {
+      ...descriptor,
+      collectiveOpticalRouteKey: `${route.routeKey}|forged`
+    },
+    closureTable: readyClosureTable
+  });
+  assert.equal(mismatchedRoute.opticalResponseReady, false);
+  assert.equal(mismatchedRoute.opticalEffectiveOpacity, 0);
+
+  const forgedMaterial = collectiveOpticalDepthIsosurfacePresentation({
+    descriptorOrRow: {
+      ...descriptor,
+      material: 'naoh',
+      materialId: route.materialId
+    },
+    closureTable: readyClosureTable
+  });
+  assert.equal(forgedMaterial.opticalResponseReady, false);
+  assert.equal(forgedMaterial.opticalEffectiveOpacity, 0);
+
+  const forgedPhase = collectiveOpticalDepthIsosurfacePresentation({
+    descriptorOrRow: {
+      ...descriptor,
+      phase: 'solid',
+      condensedPhase: 'solid',
+      phaseId: route.condensedPhaseId,
+      condensedPhaseId: route.condensedPhaseId
+    },
+    closureTable: readyClosureTable
+  });
+  assert.equal(forgedPhase.opticalResponseReady, false);
+  assert.equal(forgedPhase.opticalEffectiveOpacity, 0);
 });
 
 test('SPH resident render fields use hysteresis around the isosurface threshold', () => {
@@ -4376,6 +4665,7 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /@binding\(2\).*optical_records/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /@binding\(3\).*spectral_samples/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn find_optical_material/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /id_equal\(optical_state_id, 0\.0\) && id_equal\(row5\.w, 0\.0\)/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn spectral_wavelength_rgb/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn spectral_tint_from_samples/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /spectral_tint_weight = 0\.35 \* \(1\.0 - clamp\(row1\.w, 0\.0, 1\.0\)\)/);
@@ -4394,7 +4684,13 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn refracted_path_to_back_plane/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /fn refraction_beer_lambert_transmission_rgb/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /path_m_rgb/);
-  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /var vapor_alpha = clamp\(1\.0 - exp\(-optical_depth\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /round\(in\.phase_id\) == 3\.0 \|\| in\.optical_state_id > 0\.5/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /&& !is_vapor/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /let isotropic_phase = 0\.07957747155/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /let projected_chord_fraction = clamp\(ndotv, 0\.0, 1\.0\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /let projected_optical_depth = optical_depth \* projected_chord_fraction/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /var vapor_alpha = clamp\(1\.0 - exp\(-projected_optical_depth\)/);
+  assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /blocked && is_vapor && in\.optical_state_id < 0\.5/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /return vec4<f32>\(display_lit \* output_alpha, output_alpha\)/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /scattering_coefficient_per_m/);
 });

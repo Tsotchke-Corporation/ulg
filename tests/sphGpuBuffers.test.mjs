@@ -12,6 +12,7 @@ import {
   beginSphDispersedMediumGpuBufferBorrow,
   buildSphDispersedMediumGpuBuffers,
   destroySphDispersedMediumGpuBuffers,
+  snapshotSphDispersedMediumGpuBufferDeclaration,
   sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
   validateSphDispersedMediumGpuBufferAuthority
 } from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
@@ -35,6 +36,7 @@ import {
   destroySphGpuParticleBuffers,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
   mlsMpmGpuParticleUploadMatchesDevice,
+  registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
   sphGpuParticleStateHasGasCandidateIndication,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics,
@@ -51,6 +53,79 @@ function nearlyEqual(actual, expected, tolerance = 1e-3) {
     Math.abs(actual - expected) <= tolerance,
     `expected ${actual} to be within ${tolerance} of ${expected}`
   );
+}
+
+function createTopologyStableOpticsContinuationFixture() {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [{
+      material: 'unknownium',
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0
+    }]
+  });
+  state.particles[0].dispersedMediumOptics = {
+    dispersedMaterialId: 7,
+    dispersedPhaseId: 3,
+    opticalStateId: 11,
+    dispersedMassKg: 0.02,
+    scatteringCrossSectionM2: 0.5,
+    absorptionCrossSectionM2: 0.125,
+    scatteringAsymmetryCrossSectionM2: 0.375
+  };
+  const packed = buildSphGpuParticleBuffers(state, { materialProperties: {} });
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      return {
+        ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroyCount: 0,
+        destroy() { this.destroyCount += 1; }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const sourceSphUpload = uploadSphGpuParticleBuffers(device, packed);
+  const transientBuffer = (label, targetDevice = device) => (
+    tagWebGpuBufferDevice({ label }, targetDevice)
+  );
+  const sourceFamily = (stateBuffer, thermoBuffer) => ({
+    particleCount: sourceSphUpload.particleCount,
+    topologyEpoch: sourceSphUpload.topologyEpoch,
+    identityRevision: sourceSphUpload.identityRevision,
+    identityBuffer: sourceSphUpload.identityBuffer,
+    stateBuffer,
+    thermoBuffer
+  });
+  const register = ({
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    targetStateBuffer,
+    targetThermoBuffer,
+    source = sourceSphUpload,
+    targetDevice = device
+  }) => registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation({
+    sourceSphUpload: source,
+    device: targetDevice,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    targetStateBuffer,
+    targetThermoBuffer
+  });
+  return {
+    device,
+    sourceSphUpload,
+    child: sourceSphUpload.dispersedMediumOptics,
+    transientBuffer,
+    sourceFamily,
+    register
+  };
 }
 
 test('GPU buffer device provenance cannot be relabeled', () => {
@@ -858,6 +933,295 @@ test('new dispersed-medium sidecar upgrades one canonical sidecar-free parent li
     1,
     'the final adopted owner retires the upgraded child exactly once'
   );
+});
+
+test('topology-stable optics source-family continuation accepts exact sequential transient families without moving ownership', () => {
+  const {
+    device,
+    sourceSphUpload,
+    child,
+    transientBuffer,
+    sourceFamily,
+    register
+  } = createTopologyStableOpticsContinuationFixture();
+  const stateB = transientBuffer('continuation-state-b');
+  const thermoB = transientBuffer('continuation-thermo-b');
+  const stateC = transientBuffer('continuation-state-c');
+  const thermoC = transientBuffer('continuation-thermo-c');
+
+  const transitionAB = register({
+    sourceStateBuffer: sourceSphUpload.stateBuffer,
+    sourceThermoBuffer: sourceSphUpload.thermoBuffer,
+    targetStateBuffer: stateB,
+    targetThermoBuffer: thermoB
+  });
+  assert.equal(transitionAB.inserted, true);
+  assert.equal(Object.isFrozen(transitionAB), true);
+  assert.equal(
+    snapshotSphDispersedMediumGpuBufferDeclaration(child, {
+      device,
+      particleSourceFamily: sourceFamily(stateB, thermoB)
+    }).buffer,
+    child.buffer
+  );
+
+  const transitionBC = register({
+    sourceStateBuffer: stateB,
+    sourceThermoBuffer: thermoB,
+    targetStateBuffer: stateC,
+    targetThermoBuffer: thermoC
+  });
+  assert.equal(transitionBC.inserted, true);
+  assert.equal(
+    snapshotSphDispersedMediumGpuBufferDeclaration(child, {
+      device,
+      particleSourceFamily: sourceFamily(stateC, thermoC)
+    }).buffer,
+    child.buffer,
+    'the original parent must authorize a second transient-family continuation'
+  );
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(child.buffer.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+  assert.equal(child.buffer.destroyCount, 1);
+});
+
+test('topology-stable optics source-family continuation returns a scoped rollback authority', () => {
+  const {
+    device,
+    sourceSphUpload,
+    child,
+    transientBuffer,
+    sourceFamily,
+    register
+  } = createTopologyStableOpticsContinuationFixture();
+  const targetStateBuffer = transientBuffer('rollback-target-state');
+  const targetThermoBuffer = transientBuffer('rollback-target-thermo');
+  const transition = register({
+    sourceStateBuffer: sourceSphUpload.stateBuffer,
+    sourceThermoBuffer: sourceSphUpload.thermoBuffer,
+    targetStateBuffer,
+    targetThermoBuffer
+  });
+  assert.equal(
+    snapshotSphDispersedMediumGpuBufferDeclaration(child, {
+      device,
+      particleSourceFamily: sourceFamily(
+        targetStateBuffer,
+        targetThermoBuffer
+      )
+    }).buffer,
+    child.buffer
+  );
+  assert.equal(transition.rollback(), true);
+  assert.equal(transition.rollback(), false);
+  assert.throws(
+    () => snapshotSphDispersedMediumGpuBufferDeclaration(child, {
+      device,
+      particleSourceFamily: sourceFamily(
+        targetStateBuffer,
+        targetThermoBuffer
+      )
+    }),
+    /declaration snapshot requires one exact live sidecar and source family/
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      child,
+      sourceFamily(sourceSphUpload.stateBuffer, sourceSphUpload.thermoBuffer)
+    ),
+    true,
+    'rolling back the target must not disturb its authenticated predecessor'
+  );
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+});
+
+test('topology-stable optics source-family continuation rejects wrong predecessors, parents, and devices', () => {
+  const {
+    device,
+    sourceSphUpload,
+    transientBuffer,
+    register
+  } = createTopologyStableOpticsContinuationFixture();
+  const targetStateBuffer = transientBuffer('exact-target-state');
+  const targetThermoBuffer = transientBuffer('exact-target-thermo');
+  const unregisteredStateBuffer = transientBuffer('unregistered-source-state');
+  const unregisteredThermoBuffer = transientBuffer('unregistered-source-thermo');
+
+  assert.throws(
+    () => register({
+      sourceStateBuffer: unregisteredStateBuffer,
+      sourceThermoBuffer: unregisteredThermoBuffer,
+      targetStateBuffer,
+      targetThermoBuffer
+    }),
+    /authenticated predecessor family/
+  );
+  assert.throws(
+    () => register({
+      source: { ...sourceSphUpload },
+      sourceStateBuffer: sourceSphUpload.stateBuffer,
+      sourceThermoBuffer: sourceSphUpload.thermoBuffer,
+      targetStateBuffer,
+      targetThermoBuffer
+    }),
+    /exact live private parent, child, and registrar/
+  );
+
+  const foreignDevice = {};
+  assert.throws(
+    () => register({
+      sourceStateBuffer: sourceSphUpload.stateBuffer,
+      sourceThermoBuffer: sourceSphUpload.thermoBuffer,
+      targetStateBuffer,
+      targetThermoBuffer,
+      targetDevice: foreignDevice
+    }),
+    /exact live parent device/
+  );
+  assert.throws(
+    () => register({
+      sourceStateBuffer: sourceSphUpload.stateBuffer,
+      sourceThermoBuffer: sourceSphUpload.thermoBuffer,
+      targetStateBuffer: transientBuffer('foreign-target-state', foreignDevice),
+      targetThermoBuffer: transientBuffer('foreign-target-thermo', foreignDevice)
+    }),
+    /exact same-device state, thermo, identity, and lineage/
+  );
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(destroySphGpuParticleBuffers(sourceSphUpload), true);
+});
+
+test('topology-stable optics continuation excludes late-getter reentry and fails closed on teardown', () => {
+  const reentrant = createTopologyStableOpticsContinuationFixture();
+  const outerState = reentrant.transientBuffer('outer-target-state');
+  const outerThermo = reentrant.transientBuffer('outer-target-thermo');
+  const nestedState = reentrant.transientBuffer('nested-target-state');
+  const nestedThermo = reentrant.transientBuffer('nested-target-thermo');
+  let nestedError = null;
+  const reentrantOptions = {
+    sourceSphUpload: reentrant.sourceSphUpload,
+    device: reentrant.device,
+    sourceStateBuffer: reentrant.sourceSphUpload.stateBuffer,
+    sourceThermoBuffer: reentrant.sourceSphUpload.thermoBuffer,
+    get targetStateBuffer() {
+      try {
+        reentrant.register({
+          sourceStateBuffer: reentrant.sourceSphUpload.stateBuffer,
+          sourceThermoBuffer: reentrant.sourceSphUpload.thermoBuffer,
+          targetStateBuffer: nestedState,
+          targetThermoBuffer: nestedThermo
+        });
+      } catch (error) {
+        nestedError = error;
+      }
+      return outerState;
+    },
+    targetThermoBuffer: outerThermo
+  };
+  const outerTransition =
+    registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation(
+      reentrantOptions
+    );
+  assert.equal(outerTransition.inserted, true);
+  assert.match(
+    nestedError?.message ?? '',
+    /exact live private parent, child, and registrar/
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      reentrant.child,
+      reentrant.sourceFamily(outerState, outerThermo)
+    ),
+    true
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      reentrant.child,
+      reentrant.sourceFamily(nestedState, nestedThermo)
+    ),
+    false,
+    'the nested getter call must not win a registry publication'
+  );
+  assert.equal(destroySphGpuParticleBuffers(reentrant.sourceSphUpload), true);
+
+  const tornDown = createTopologyStableOpticsContinuationFixture();
+  const teardownTargetState = tornDown.transientBuffer('teardown-target-state');
+  const teardownTargetThermo = tornDown.transientBuffer('teardown-target-thermo');
+  const release = beginSphDispersedMediumGpuBufferBorrow(
+    tornDown.device,
+    tornDown.child
+  );
+  let retirementRequested = false;
+  assert.throws(
+    () => registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation({
+      sourceSphUpload: tornDown.sourceSphUpload,
+      device: tornDown.device,
+      sourceStateBuffer: tornDown.sourceSphUpload.stateBuffer,
+      sourceThermoBuffer: tornDown.sourceSphUpload.thermoBuffer,
+      targetStateBuffer: teardownTargetState,
+      get targetThermoBuffer() {
+        retirementRequested = destroySphDispersedMediumGpuBuffers(
+          tornDown.child
+        );
+        return teardownTargetThermo;
+      }
+    }),
+    /exact live parent device/
+  );
+  assert.equal(retirementRequested, true);
+  assert.equal(tornDown.child.destroyPending, true);
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      tornDown.child,
+      tornDown.sourceFamily(teardownTargetState, teardownTargetThermo)
+    ),
+    false
+  );
+  assert.equal(release(), true);
+  assert.equal(tornDown.child.buffer.destroyCount, 1);
+  assert.equal(destroySphGpuParticleBuffers(tornDown.sourceSphUpload), true);
+  assert.equal(tornDown.child.buffer.destroyCount, 1);
+});
+
+test('topology-stable optics continuation rejects pre-existing child and parent pending-destroy states', () => {
+  const childPending = createTopologyStableOpticsContinuationFixture();
+  const childRelease = beginSphDispersedMediumGpuBufferBorrow(
+    childPending.device,
+    childPending.child
+  );
+  assert.equal(
+    destroySphDispersedMediumGpuBuffers(childPending.child),
+    true
+  );
+  assert.throws(
+    () => childPending.register({
+      sourceStateBuffer: childPending.sourceSphUpload.stateBuffer,
+      sourceThermoBuffer: childPending.sourceSphUpload.thermoBuffer,
+      targetStateBuffer: childPending.transientBuffer('child-pending-state'),
+      targetThermoBuffer: childPending.transientBuffer('child-pending-thermo')
+    }),
+    /continuation authority is no longer live/
+  );
+  assert.equal(childRelease(), true);
+  assert.equal(destroySphGpuParticleBuffers(childPending.sourceSphUpload), true);
+
+  const parentPending = createTopologyStableOpticsContinuationFixture();
+  parentPending.sourceSphUpload.__ulgActiveBorrowCount = 1;
+  assert.equal(destroySphGpuParticleBuffers(parentPending.sourceSphUpload), false);
+  assert.throws(
+    () => parentPending.register({
+      sourceStateBuffer: parentPending.sourceSphUpload.stateBuffer,
+      sourceThermoBuffer: parentPending.sourceSphUpload.thermoBuffer,
+      targetStateBuffer: parentPending.transientBuffer('parent-pending-state'),
+      targetThermoBuffer: parentPending.transientBuffer('parent-pending-thermo')
+    }),
+    /exact live private parent, child, and registrar/
+  );
+  parentPending.sourceSphUpload.__ulgActiveBorrowCount = 0;
+  assert.equal(parentPending.sourceSphUpload.destroyed, true);
+  assert.equal(parentPending.child.buffer.destroyCount, 1);
 });
 
 test('authenticated transfer can seed a private borrowed continuation without reopening generic registration', () => {

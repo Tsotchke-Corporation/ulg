@@ -87,6 +87,7 @@ const identityValueMaxByBuffer = new WeakMap();
 const sphParticleBufferSetLifecycleRecords = new WeakMap();
 const sphDispersedMediumSourceFamilyRegistrars = new WeakMap();
 const sphDispersedMediumOwnershipStates = new WeakMap();
+const sphDispersedMediumSourceFamilyContinuationsInProgress = new WeakSet();
 
 function nextSphDispersedMediumOwnershipGeneration() {
   return Object.freeze({});
@@ -1527,6 +1528,114 @@ export function ensureSphGpuParticleBufferSetBorrowLifecycle(buffers) {
       dispersedMediumOptics
     )
   );
+}
+
+/**
+ * Extend an existing privately authenticated optics child to one exact
+ * topology-stable particle-buffer successor without creating a new parent or
+ * moving ownership. The original parent remains the authority root even when
+ * `sourceStateBuffer` and `sourceThermoBuffer` name a transient family that a
+ * previous invocation registered.
+ *
+ * The returned object is the lower registry's one-transition rollback
+ * authority: `{ inserted, rollback() }`.
+ */
+export function registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation(
+  options = null
+) {
+  // Resolve only the authority-root object before acquiring the child-local
+  // preflight lock. All remaining caller-controlled fields stay unread until
+  // reentrant continuations for this exact child have been excluded.
+  const sourceSphUpload = options?.sourceSphUpload ?? null;
+  const sourceRecord =
+    sphParticleBufferSetLifecycleRecords.get(sourceSphUpload) ?? null;
+  const privateSidecar = sourceRecord?.dispersedMediumOptics ?? null;
+  const childUpload = privateSidecar?.upload ?? null;
+  const registrar = childUpload
+    ? sphDispersedMediumSourceFamilyRegistrars.get(childUpload) ?? null
+    : null;
+  const ownershipState = childUpload
+    ? sphDispersedMediumOwnershipStates.get(childUpload) ?? null
+    : null;
+  if (
+    !sourceRecord
+    || sourceRecord.destroyed
+    || sourceRecord.destroyRequested
+    || !privateSidecar
+    || !childUpload
+    || !registrar
+    || !ownershipState
+    || sphDispersedMediumSourceFamilyContinuationsInProgress.has(childUpload)
+  ) {
+    throw new TypeError(
+      'SPH dispersed-medium topology-stable continuation requires one exact live private parent, child, and registrar'
+    );
+  }
+
+  const priorOwnershipOwner = ownershipState.owner;
+  const priorOwnershipGeneration = ownershipState.generation;
+  const priorParentOwnsBuffer = privateSidecar.ownsBuffer;
+  sphDispersedMediumSourceFamilyContinuationsInProgress.add(childUpload);
+  const continuationWindowStillOpen = () => Boolean(
+    sphParticleBufferSetLifecycleRecords.get(sourceSphUpload) === sourceRecord
+    && sourceRecord.destroyed !== true
+    && sourceRecord.destroyRequested !== true
+    && sourceRecord.dispersedMediumOptics === privateSidecar
+    && sphDispersedMediumSourceFamilyRegistrars.get(childUpload) === registrar
+    && sphDispersedMediumOwnershipStates.get(childUpload) === ownershipState
+    && ownershipState.owner === priorOwnershipOwner
+    && ownershipState.generation === priorOwnershipGeneration
+    && privateSidecar.ownsBuffer === priorParentOwnsBuffer
+    && exactParentDispersedMediumRecordMatches(
+      sourceSphUpload,
+      sourceRecord,
+      sourceRecord.device
+    )
+    && sphDispersedMediumGpuBufferNewOwnerEligible(childUpload)
+  );
+
+  try {
+    if (!continuationWindowStillOpen()) {
+      throw new TypeError(
+        'SPH dispersed-medium topology-stable continuation authority is no longer live'
+      );
+    }
+    const device = options?.device ?? null;
+    const sourceStateBuffer = options?.sourceStateBuffer ?? null;
+    const sourceThermoBuffer = options?.sourceThermoBuffer ?? null;
+    const targetStateBuffer = options?.targetStateBuffer ?? null;
+    const targetThermoBuffer = options?.targetThermoBuffer ?? null;
+    if (
+      device !== sourceRecord.device
+      || !continuationWindowStillOpen()
+    ) {
+      throw new TypeError(
+        'SPH dispersed-medium topology-stable continuation requires the exact live parent device'
+      );
+    }
+    const lineage = Object.freeze({
+      particleCount: sourceRecord.particleCount,
+      topologyEpoch: sourceRecord.topologyEpoch,
+      identityRevision: sourceRecord.identityRevision,
+      identityBuffer: sourceRecord.identityBuffer
+    });
+    const sourceFamily = Object.freeze({
+      ...lineage,
+      stateBuffer: sourceStateBuffer,
+      thermoBuffer: sourceThermoBuffer
+    });
+    const targetFamily = Object.freeze({
+      ...lineage,
+      stateBuffer: targetStateBuffer,
+      thermoBuffer: targetThermoBuffer
+    });
+    return registerSphDispersedMediumGpuBufferParticleSourceFamilyContinuation(
+      childUpload,
+      Object.freeze({ registrar, sourceFamily, targetFamily })
+    );
+  } finally {
+    sphDispersedMediumSourceFamilyContinuationsInProgress.delete(childUpload);
+  }
 }
 
 export function transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({

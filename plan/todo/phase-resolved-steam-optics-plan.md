@@ -32,6 +32,18 @@ generic 50 m/s speed threshold late, and sodium's nearly stationary batches
 pixels agree with the latter trajectory; distinguish physical support/release
 from a state-writer defect before treating it as an optical/capture problem.
 
+The 2026-09-04 follow-up GPU traces now identify sodium's freeze: one gas cell
+has condensed occupancy 1.149% above geometric volume, so free-volume/EOS
+publication fails and the downstream mechanics transaction restores its input.
+Chemistry still advances. This is not a new-law compilation stall or a renderer
+failure. Before parcel work, reconcile S9 nodal occupied-volume projection with
+the gas cell geometry and the coupled condensed/gas volume constraint. Do not
+increase the overfill tolerance, invent a positive void floor, or drop pressure
+to pass the demo. Require manufactured GPU geometry/volume tests, conservation
+and pressure-work checks, and a long sodium desktop run past 2.56 s without
+rejected/stationary generations or the previous jump. Exact counters and cell
+volumes are in `/tmp/ulg-goal2-sodium-overfill-geometry-W9mURc/summary.json`.
+
 The current four-lane transfer merges each lineage's target-phase mass into
 one position/velocity. A single liquid lane therefore cannot represent both a
 bulk pool and spatially separate airborne fog. Adding a smaller optical radius

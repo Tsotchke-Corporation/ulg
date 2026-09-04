@@ -117,7 +117,12 @@ test('the compact trace retains numeric motion evidence', async () => {
       maxSpeedMPerS: 0.5,
       meanVyMPerS: -0.4,
       minVyMPerS: -0.5,
-      maxVyMPerS: -0.3
+      maxVyMPerS: -0.3,
+      yMinM: 1.1,
+      yMaxM: 1.5,
+      yCenterMassWeightedM: 1.3,
+      maxAbsVelocityDivergencePerS: 4,
+      volumeRatioCapBoundaryContributionCount: 2
     }])
   });
   await tracer.snapshot({
@@ -133,6 +138,11 @@ test('the compact trace retains numeric motion evidence', async () => {
   assert.equal(row.meanVyMPerS, -0.4);
   assert.equal(row.minVyMPerS, -0.5);
   assert.equal(row.maxVyMPerS, -0.3);
+  assert.equal(row.yMinM, 1.1);
+  assert.equal(row.yMaxM, 1.5);
+  assert.equal(row.yCenterMassWeightedM, 1.3);
+  assert.equal(row.maxAbsVelocityDivergencePerS, 4);
+  assert.equal(row.volumeRatioCapBoundaryContributionCount, 2);
 });
 
 test('the summary reads a single lane across stages', async () => {

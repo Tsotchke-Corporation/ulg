@@ -34970,6 +34970,13 @@ async function residentStepEnvelope({
     schema: ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
     stepSchema: ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
     stageMechanicsTrace,
+    // Diagnostic evidence, never an admission token. This envelope does not
+    // spread stage results, so explicitly retain the requested G2P snapshot
+    // for the worker's already-existing canonical trace transport.
+    canonicalSpatialAuthorityTrace:
+      g2pReconstruction?.gpuResult?.canonicalSpatialAuthorityTrace
+      ?? g2pReconstruction?.canonicalSpatialAuthorityTrace
+      ?? null,
     backend,
     status: backend === 'webgpu' ? 'resident-step-webgpu-executed' : 'resident-step-cpu-or-fallback',
     kernelScope: STEP_SCOPE,

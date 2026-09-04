@@ -1,5 +1,9 @@
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS,
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_EXACT_NEAR_QUERY,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
@@ -11,6 +15,7 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_SCHEMA,
   ULG_SCHROEDER_SPATIAL_EPOCH_V2_SCHEMA,
+  ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
   ULG_SCHROEDER_SPATIAL_MECHANICAL_PAIR_GRAPH_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
@@ -33,6 +38,7 @@ import {
   mlsMpmParticleSeparationBinFillCanonicalSpatialUnobservedWgsl,
   mlsMpmParticleSeparationComputeCanonicalSpatialWgsl,
   mlsMpmParticleSeparationComputeCanonicalSpatialUnobservedWgsl,
+  SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_LAYOUT,
   SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_BYTES,
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
 } from '../../../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
@@ -165,6 +171,20 @@ const MOTION_WATCH_U32 = new Uint32Array(MOTION_WATCH_F32.buffer);
 const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.v1';
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
+export const ULG_MLS_MPM_G2P_CANONICAL_SPATIAL_AUTHORITY_TRACE_SCHEMA =
+  'peercompute.ulg.mls-mpm-g2p-canonical-spatial-authority-trace.v0';
+const CANONICAL_SPATIAL_AUTHORITY_TRACE_DENSE_ROLE =
+  'schroeder-spatial-epoch-with-mechanics-evidence';
+const CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_ROLE =
+  'schroeder-spatial-mechanics-field-view-header-and-receipt';
+const CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_SNAPSHOT_WORDS =
+  SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS
+  + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS;
+const CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_SNAPSHOT_BYTES =
+  CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_SNAPSHOT_WORDS
+  * Uint32Array.BYTES_PER_ELEMENT;
+const CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_READBACK_BYTES =
+  2 * CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_SNAPSHOT_BYTES;
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_TRAVERSAL_COUNT = 1;
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_SOLVER_ITERATIONS = 16;
 const SCHROEDER_MECHANICAL_PROPOSAL_V2_STATUS =
@@ -2259,6 +2279,228 @@ function schroederSpatialAuthorityMetadata(binding = null) {
   return metadata;
 }
 
+function decodeCanonicalSpatialAuthorityAbiWords(words, layout) {
+  const signed = new Int32Array(1);
+  const unsigned = new Uint32Array(signed.buffer);
+  const floating = new Float32Array(signed.buffer);
+  return Object.freeze(Object.fromEntries(layout.map((field, index) => {
+    const [name, type = 'u32'] = String(field).split(':');
+    const bits = words?.[index] >>> 0;
+    unsigned[0] = bits;
+    return [
+      name,
+      type === 'i32-bits'
+        ? signed[0]
+        : (type === 'f32-bits' ? floating[0] : bits)
+    ];
+  })));
+}
+
+function createCanonicalSpatialAuthorityTraceContext({
+  sphParticleState,
+  mlsMpmParticleState,
+  schroederSpatialAuthority,
+  schroederSelectedLevel,
+  plan
+}) {
+  const rawSourceStep = sphParticleState?.step ?? mlsMpmParticleState?.step;
+  const numericSourceStep = Number(rawSourceStep);
+  return Object.freeze({
+    schema: ULG_MLS_MPM_G2P_CANONICAL_SPATIAL_AUTHORITY_TRACE_SCHEMA,
+    sourceStep: Number.isFinite(numericSourceStep) ? numericSourceStep : null,
+    generationId: schroederSpatialAuthority?.generationId ?? null,
+    selectedLevel: Number.isInteger(schroederSelectedLevel)
+      ? schroederSelectedLevel
+      : null,
+    bufferRole: plan.bufferRole,
+    bufferSchema: plan.bufferSchema,
+    diagnosticOnly: true,
+    admissionAuthority: false
+  });
+}
+
+function createCanonicalSpatialAuthorityTracePlan({
+  canonicalSpatialAuthority,
+  observeCanonicalSpatialAuthority,
+  fusedG2p,
+  mechanicsFieldRequired,
+  schroederAuthorityBuffer,
+  mechanicsFieldBinding
+}) {
+  if (
+    canonicalSpatialAuthority !== true
+    || observeCanonicalSpatialAuthority !== true
+    || fusedG2p === true
+  ) return null;
+  if (!mechanicsFieldRequired) {
+    const sourceSize = Number(schroederAuthorityBuffer?.size);
+    return Object.freeze({
+      supported: Boolean(
+        schroederAuthorityBuffer
+        && (!Number.isFinite(sourceSize)
+          || sourceSize >= SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES)
+      ),
+      kind: 'dense-canonical-evidence',
+      sourceBuffer: schroederAuthorityBuffer,
+      bufferRole: CANONICAL_SPATIAL_AUTHORITY_TRACE_DENSE_ROLE,
+      bufferSchema: SCHROEDER_SPATIAL_EPOCH_SCHEMA,
+      readbackBytes: SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES,
+      unsupportedReason:
+        'Canonical dense G2P evidence buffer is unavailable or smaller than its fixed 80-byte ABI'
+    });
+  }
+  const sourceBuffer = mechanicsFieldBinding?.mechanicsFieldViewBuffer ?? null;
+  const layout = mechanicsFieldBinding?.mechanicsFieldViewLayout ?? null;
+  const receiptOffsetWords = Number(layout?.receiptControlOffsetWords);
+  const receiptWords = Number(layout?.receiptControlWords);
+  const sourceSize = Number(sourceBuffer?.size);
+  const requiredSourceBytes = (
+    receiptOffsetWords + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+  ) * Uint32Array.BYTES_PER_ELEMENT;
+  const supported = Boolean(
+    sourceBuffer
+    && Number.isSafeInteger(receiptOffsetWords)
+    && receiptOffsetWords >= SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS
+    && receiptWords === SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+    && Number.isSafeInteger(requiredSourceBytes)
+    && requiredSourceBytes > 0
+    && (!Number.isFinite(sourceSize) || sourceSize >= requiredSourceBytes)
+  );
+  return Object.freeze({
+    supported,
+    kind: 'mechanics-field-header-receipt',
+    sourceBuffer,
+    receiptOffsetBytes: Number.isSafeInteger(receiptOffsetWords)
+      ? receiptOffsetWords * Uint32Array.BYTES_PER_ELEMENT
+      : null,
+    bufferRole: CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_ROLE,
+    bufferSchema: ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA,
+    readbackBytes: CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_READBACK_BYTES,
+    unsupportedReason:
+      'Canonical mechanics-field G2P header/receipt descriptor is unavailable or outside its validated source buffer'
+  });
+}
+
+function encodeCanonicalSpatialAuthorityFieldTraceSnapshot(
+  encoder,
+  plan,
+  readbackBuffer,
+  snapshotIndex
+) {
+  const destinationOffset = snapshotIndex
+    * CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_SNAPSHOT_BYTES;
+  encoder.copyBufferToBuffer(
+    plan.sourceBuffer,
+    0,
+    readbackBuffer,
+    destinationOffset,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS
+      * Uint32Array.BYTES_PER_ELEMENT
+  );
+  encoder.copyBufferToBuffer(
+    plan.sourceBuffer,
+    plan.receiptOffsetBytes,
+    readbackBuffer,
+    destinationOffset
+      + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS
+        * Uint32Array.BYTES_PER_ELEMENT,
+    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
+      * Uint32Array.BYTES_PER_ELEMENT
+  );
+}
+
+function decodeCanonicalSpatialAuthorityFieldSnapshot(words, snapshotIndex, stage) {
+  const snapshotStart = snapshotIndex
+    * CANONICAL_SPATIAL_AUTHORITY_TRACE_FIELD_SNAPSHOT_WORDS;
+  const headerStart = snapshotStart;
+  const receiptStart = headerStart
+    + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS;
+  const snapshotEnd = receiptStart
+    + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS;
+  const snapshotWords = words.subarray(snapshotStart, snapshotEnd);
+  const headerWords = words.subarray(headerStart, receiptStart);
+  const receiptWords = words.subarray(receiptStart, snapshotEnd);
+  return Object.freeze({
+    stage,
+    rawWords: Object.freeze(Array.from(snapshotWords)),
+    headerWords: Object.freeze(Array.from(headerWords)),
+    receiptWords: Object.freeze(Array.from(receiptWords)),
+    header: decodeCanonicalSpatialAuthorityAbiWords(
+      headerWords,
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT
+    ),
+    receipt: decodeCanonicalSpatialAuthorityAbiWords(
+      receiptWords,
+      SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT
+    )
+  });
+}
+
+async function readCanonicalSpatialAuthorityTrace(
+  readbackBuffer,
+  plan,
+  context
+) {
+  let mapped = false;
+  try {
+    await readbackBuffer.mapAsync(GPU_MAP_MODE.READ);
+    mapped = true;
+    const words = new Uint32Array(
+      readbackBuffer.getMappedRange(0, plan.readbackBytes)
+    ).slice();
+    if (plan.kind === 'mechanics-field-header-receipt') {
+      const preClaim = decodeCanonicalSpatialAuthorityFieldSnapshot(
+        words,
+        0,
+        'pre-g2p-claim'
+      );
+      const terminal = decodeCanonicalSpatialAuthorityFieldSnapshot(
+        words,
+        1,
+        'post-g2p-contact-receipts-finalize'
+      );
+      return Object.freeze({
+        ...context,
+        status: 'canonical-spatial-authority-trace-observed',
+        observed: true,
+        readbackBytes: plan.readbackBytes,
+        snapshotCount: 2,
+        rawWords: Object.freeze(Array.from(words)),
+        preClaim,
+        terminal
+      });
+    }
+    const rawWords = Object.freeze(Array.from(words));
+    const value = (name) => words[
+      SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_LAYOUT[name]
+    ] >>> 0;
+    return Object.freeze({
+      ...context,
+      status: 'canonical-spatial-authority-trace-observed',
+      observed: true,
+      readbackBytes: plan.readbackBytes,
+      snapshotCount: 1,
+      rawWords,
+      counters: Object.freeze(Object.fromEntries(
+        Object.keys(SCHROEDER_MECHANICS_SPATIAL_AUTHORITY_EVIDENCE_LAYOUT)
+          .map((name) => [name, value(name)])
+      ))
+    });
+  } catch (error) {
+    return Object.freeze({
+      ...context,
+      status: 'canonical-spatial-authority-trace-readback-failed',
+      observed: false,
+      readbackBytes: plan.readbackBytes,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  } finally {
+    if (mapped) {
+      try { readbackBuffer.unmap(); } catch {}
+    }
+  }
+}
+
 function canonicalMechanicalProposalAdmitted({
   proposal,
   generation,
@@ -4021,6 +4263,45 @@ export async function runMlsMpmG2pWebGpu({
       : 0
   };
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const canonicalSpatialAuthorityTracePlan =
+    createCanonicalSpatialAuthorityTracePlan({
+      canonicalSpatialAuthority,
+      observeCanonicalSpatialAuthority,
+      fusedG2p,
+      mechanicsFieldRequired,
+      schroederAuthorityBuffer,
+      mechanicsFieldBinding
+    });
+  const canonicalSpatialAuthorityTraceContext =
+    canonicalSpatialAuthorityTracePlan
+      ? createCanonicalSpatialAuthorityTraceContext({
+          sphParticleState,
+          mlsMpmParticleState,
+          schroederSpatialAuthority,
+          schroederSelectedLevel,
+          plan: canonicalSpatialAuthorityTracePlan
+        })
+      : null;
+  let canonicalSpatialAuthorityTrace =
+    canonicalSpatialAuthorityTracePlan?.supported === false
+      ? Object.freeze({
+          ...canonicalSpatialAuthorityTraceContext,
+          status: 'canonical-spatial-authority-trace-unsupported-buffer-layout',
+          observed: false,
+          readbackBytes: 0,
+          reason: canonicalSpatialAuthorityTracePlan.unsupportedReason
+        })
+      : null;
+  const canonicalSpatialAuthorityTraceReadBuffer =
+    canonicalSpatialAuthorityTracePlan?.supported === true
+      ? ownAllocation(device.createBuffer({
+          label: mechanicsFieldRequired
+            ? 'ulg-mls-mpm-g2p-canonical-field-authority-trace-readback'
+            : 'ulg-mls-mpm-g2p-canonical-authority-trace-readback',
+          size: canonicalSpatialAuthorityTracePlan.readbackBytes,
+          usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+        }))
+      : null;
   const stateReadBuffer = noFullReadback
     ? null
     : ownAllocation(device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-readback', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST }));
@@ -4184,6 +4465,21 @@ export async function runMlsMpmG2pWebGpu({
           })
     );
     encoder = device.createCommandEncoder();
+    if (
+      canonicalSpatialAuthorityTraceReadBuffer
+      && canonicalSpatialAuthorityTracePlan.kind
+        === 'mechanics-field-header-receipt'
+    ) {
+      // Preserve the field header and receipt before the G2P claim can
+      // normalize rejection-sensitive counters. The matching terminal copy
+      // below shares this one fixed-size diagnostic map.
+      encodeCanonicalSpatialAuthorityFieldTraceSnapshot(
+        encoder,
+        canonicalSpatialAuthorityTracePlan,
+        canonicalSpatialAuthorityTraceReadBuffer,
+        0
+      );
+    }
     const groupedMechanicsPass = mechanicsFieldRequired
       && fusedG2p
       && gpuTimestampRecorder?.active !== true
@@ -4341,6 +4637,27 @@ export async function runMlsMpmG2pWebGpu({
       );
     }
     groupedMechanicsPass?.end();
+    if (canonicalSpatialAuthorityTraceReadBuffer) {
+      if (
+        canonicalSpatialAuthorityTracePlan.kind
+          === 'mechanics-field-header-receipt'
+      ) {
+        encodeCanonicalSpatialAuthorityFieldTraceSnapshot(
+          encoder,
+          canonicalSpatialAuthorityTracePlan,
+          canonicalSpatialAuthorityTraceReadBuffer,
+          1
+        );
+      } else {
+        encoder.copyBufferToBuffer(
+          canonicalSpatialAuthorityTracePlan.sourceBuffer,
+          0,
+          canonicalSpatialAuthorityTraceReadBuffer,
+          0,
+          SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
+        );
+      }
+    }
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
@@ -4433,6 +4750,23 @@ export async function runMlsMpmG2pWebGpu({
       stateReadBuffer.unmap();
       mechanicsReadBuffer.unmap();
     }
+    if (canonicalSpatialAuthorityTraceReadBuffer) {
+      canonicalSpatialAuthorityTrace = await readCanonicalSpatialAuthorityTrace(
+        canonicalSpatialAuthorityTraceReadBuffer,
+        canonicalSpatialAuthorityTracePlan,
+        canonicalSpatialAuthorityTraceContext
+      );
+      // mapAsync completion (including rejection) is a sufficient lifetime
+      // boundary for this diagnostic-only destination. Do not delegate it
+      // with resident particle temporaries.
+      destroyOwnedAllocation(canonicalSpatialAuthorityTraceReadBuffer);
+    }
+    const canonicalSpatialAuthorityTraceMapCount =
+      canonicalSpatialAuthorityTraceReadBuffer ? 1 : 0;
+    const canonicalSpatialAuthorityTraceReadbackBytes =
+      canonicalSpatialAuthorityTraceReadBuffer
+        ? canonicalSpatialAuthorityTracePlan.readbackBytes
+        : 0;
     reconstruction = outputEnvelope({
       backend: 'webgpu',
       sphParticleState,
@@ -4452,12 +4786,20 @@ export async function runMlsMpmG2pWebGpu({
         separation.canonicalSpatialAuthorityGate === true,
       readbackTelemetry: createGpuReadbackTelemetry({
         scope: 'mls-mpm-g2p-webgpu',
-        mapAsyncCount: noFullReadback ? 0 : 2,
-        readbackBytes: noFullReadback
+        mapAsyncCount: (noFullReadback ? 0 : 2)
+          + canonicalSpatialAuthorityTraceMapCount,
+        readbackBytes: (noFullReadback
           ? 0
-          : Math.max(4, stateByteLength) + Math.max(4, mechanicsByteLength)
+          : Math.max(4, stateByteLength) + Math.max(4, mechanicsByteLength))
+          + canonicalSpatialAuthorityTraceReadbackBytes,
+        finalDiagnosticMapAsyncCount:
+          canonicalSpatialAuthorityTraceMapCount,
+        finalDiagnosticReadbackBytes:
+          canonicalSpatialAuthorityTraceReadbackBytes
       })
     });
+    reconstruction.canonicalSpatialAuthorityTrace =
+      canonicalSpatialAuthorityTrace;
     reconstruction.mechanicsFieldMode = mechanicsFieldMode;
     reconstruction.activeSourceDenseCompatibilityEnabled =
       activeSourceV2DenseG2pEnabled;
@@ -4824,6 +5166,7 @@ export async function runMlsMpmG2pWebGpu({
       }
       destroyOwnedAllocation(stateReadBuffer);
       destroyOwnedAllocation(mechanicsReadBuffer);
+      destroyOwnedAllocation(canonicalSpatialAuthorityTraceReadBuffer);
       destroyAllocationLedger();
     };
     let singleLevelQueueOrderedCleanupStillExact = false;

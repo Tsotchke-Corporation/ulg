@@ -52,6 +52,15 @@ function compactPhaseRow(row) {
     meanVyMPerS: row.meanVyMPerS ?? null,
     minVyMPerS: row.minVyMPerS ?? null,
     maxVyMPerS: row.maxVyMPerS ?? null,
+    // The existing fixed-size reduction already computes these. Preserve
+    // them so nonzero velocity with stationary positions can be localized
+    // to a writer without mapping particle rows or changing the GPU workload.
+    yMinM: row.yMinM ?? null,
+    yMaxM: row.yMaxM ?? null,
+    yCenterMassWeightedM: row.yCenterMassWeightedM ?? null,
+    maxAbsVelocityDivergencePerS: row.maxAbsVelocityDivergencePerS ?? null,
+    volumeRatioCapBoundaryContributionCount:
+      row.volumeRatioCapBoundaryContributionCount ?? null,
     minVolumeRatioJ: row.minVolumeRatioJ ?? null,
     maxVolumeRatioJ: row.maxVolumeRatioJ ?? null,
     minPressurePa: row.minPressurePa ?? null,

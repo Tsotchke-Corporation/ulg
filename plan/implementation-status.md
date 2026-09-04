@@ -54,6 +54,38 @@ whether physics or a state writer causes that transition before extending
 microphysics. Artifact:
 `/tmp/ulg-goal2-sodium-disjoint-TUrO0p/summary.json`.
 
+The follow-up mounted desktop diagnostic reproduced the freeze after 0.256 s:
+`/tmp/ulg-goal2-sodium-stage-trace-4ARUyX/summary.json` (3 x 128 steps).
+Five compact stage snapshots localize the frozen velocity/deformation/pressure
+to the input of the post-mechanics closure; thermal, reaction, carrier transfer,
+and constitutive refresh are not its source. The missing single-level trace is
+now captured with an opt-in 800-byte pre/post G2P header/receipt map; ordinary
+execution remains zero-map. Position bounds survive stage trace compaction.
+The trace proves rejected mechanics generations restore the previous state.
+Upstream tracing identifies gas EOS producer failure, not a renderer freeze:
+the rejected authority has error bits `0x110` (invalid free volume and invalid
+EOS output), so the gas-pressure boundary rejects and the later ambient
+transport inherits that rejection. Free-volume counters then prove one of
+four cells is overfilled (no invalid source/moment/geometry counters). Cell
+`[6,5,6]` contains 0.01545438 m3 condensed volume in 0.01527888 m3 geometric
+space: 1.149% excess, not rounding noise. Next distinguish nodal/cell projection
+from a missing coupled phase-volume constraint before changing the solver.
+Artifacts: `/tmp/ulg-goal2-sodium-field-trace-3jjj9V/`,
+`/tmp/ulg-goal2-sodium-gas-reject-uh1dqm/`,
+`/tmp/ulg-goal2-sodium-free-volume-reject-soHJrB/`, and
+`/tmp/ulg-goal2-sodium-overfill-geometry-W9mURc/`. Temporary failure markers are
+removed after each experiment; no force law or admission guard is relaxed.
+The separate G2P guard against negative internal-energy changes contradicts
+signed pressure work, but did not trigger this freeze and remains a follow-up.
+
+Diagnostic-slice verification: 3,534 Node tests, 3,479 passed, 55 opt-in skips,
+zero failures; production build passed. A fresh six-default real-desktop sweep
+and manual review of all twelve PNGs passed:
+`/tmp/ulg-goal2-diagnostics-final-six-gigUH7/` (SHA-bound manual receipt).
+Bulk-water measured 57.939 Hz and dam break 57.698 Hz. The owned browser closed.
+This verifies no diagnostic/default-rendering regression, not the outstanding
+long-horizon mechanics or plume acceptance.
+
 Condensate morphology currently includes an explicitly
 reduced compact-sphere model; realistic unresolved droplet populations and
 high-temperature NaOH optical calibration are not proven by a ready renderer.

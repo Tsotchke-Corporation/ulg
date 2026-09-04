@@ -42910,3 +42910,37 @@ Validation and review:
   regenerated Pages entry includes third-party shader-string whitespace that
   Git flags; its reproducible build output is preserved unchanged rather than
   hand-editing a content-hashed bundle.
+
+## 2026-09-04 — Goal 2 mechanics rejection localized
+
+- Added opt-in canonical G2P authority snapshots: 80 bytes for dense evidence,
+  or 800 bytes for pre-claim/post-finalize field headers and receipts. Default
+  execution still maps nothing; these snapshots never authorize state changes.
+  Stage trace compaction now preserves existing y bounds/center, divergence,
+  and volume-cap counters. Successful mock tests cover both real host routing
+  paths, copy ordering, decoding, telemetry, and borrowed-buffer lifetime.
+- Real desktop sodium traces reproduce frozen motion after 0.256 s. Rejected
+  mechanics restores its input while downstream chemistry/time advance.
+  Failure ordering is gas EOS -> gas boundary -> ambient surface lifecycle ->
+  G2P rollback, not a presentation or kernel-discovery problem.
+- GPU gas authority reports `0x110` (free-volume and EOS invalid). Free-volume
+  control reports one overfilled cell out of four; invalid directory, moment,
+  parent, geometry, and nonfinite counters are zero. Cell `[6,5,6]` contains
+  0.01545438 m3 condensed volume versus 0.01527888 m3 geometric volume (1.149%
+  excess). Artifacts: `/tmp/ulg-goal2-sodium-field-trace-3jjj9V/`,
+  `/tmp/ulg-goal2-sodium-gas-reject-uh1dqm/`,
+  `/tmp/ulg-goal2-sodium-free-volume-reject-soHJrB/`, and
+  `/tmp/ulg-goal2-sodium-overfill-geometry-W9mURc/`.
+- Temporary failed-transaction markers isolated these counters and were fully
+  removed. No force law, tolerance, admission guard, or default preset changed.
+  The separate negative internal-energy-delta guard is inconsistent with signed
+  pressure work but did not cause this freeze; keep its regression separate.
+- Goal 2 and the full seven-goal program remain open. The next physics work is
+  general condensed/gas volume compatibility before aerosol parcels, followed
+  by long-horizon mechanics/plume verification. HTTPS Vite remains running.
+- Verification: focused diagnostics 292 passed/3 opt-in skips; full Node suite
+  3,534 total, 3,479 passed, 55 skipped, zero failures; production build passed.
+  Fresh six-default desktop sweep and all twelve manual PNG reviews passed,
+  with bulk-water 57.939 Hz and dam break 57.698 Hz. The SHA-bound review is in
+  `/tmp/ulg-goal2-diagnostics-final-six-gigUH7/`; owned Chrome closed. These
+  short sequences do not erase the diagnosed long-run rejection.

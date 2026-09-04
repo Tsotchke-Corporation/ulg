@@ -6985,6 +6985,29 @@ test('MLS-MPM resident step falls forward through CPU stages after a WebGPU pari
   assert.equal(step.fullPhysicsValidation, false);
 });
 
+test('resident step retains exact optional G2P diagnostics without promoting them to authority', async () => {
+  for (const trace of [null, Object.freeze({
+    schema: 'peercompute.ulg.schroeder-mechanics-spatial-authority-trace.v0',
+    status: 'canonical-spatial-authority-trace-captured',
+    observed: true,
+    diagnosticOnly: true,
+    counters: Object.freeze({ g2pReverseRejected: 1 })
+  })]) {
+    const { options } = noFullReadbackResidentStepFixture();
+    const g2pRunner = options.g2pRunner;
+    const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+      ...options,
+      g2pRunner: async (...args) => ({
+        ...await g2pRunner(...args),
+        canonicalSpatialAuthorityTrace: trace
+      })
+    });
+    assert.equal(step.canonicalSpatialAuthorityTrace, trace);
+    assert.equal(step.fullPhysicsValidation, false);
+    destroyMlsMpmResidentStepBuffers(step);
+  }
+});
+
 test('MLS-MPM resident step can retain buffers without full readback', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

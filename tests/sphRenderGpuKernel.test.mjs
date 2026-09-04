@@ -13,7 +13,12 @@ import {
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
-  registerResidentProductEventCountAuthority
+  productEventLiveCountCopyDescriptor,
+  registerResidentProductEventCountAuthority,
+  resolveResidentProductEventCountAuthority,
+  retireResidentProductEventCountAuthority,
+  revokeResidentProductEventCountAuthority,
+  validateProductEventLiveCountCopyDescriptor
 } from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -2383,12 +2388,37 @@ test('SPH render field GPU-authenticates the full resident product-history commi
     generation: 7,
     seal: 11
   });
+  const preissuedDescriptor = productEventLiveCountCopyDescriptor(
+    productEventSource,
+    device
+  );
+  assert.ok(preissuedDescriptor);
+  assert.equal(
+    retireResidentProductEventCountAuthority(productEventSource),
+    true
+  );
+  assert.equal(
+    resolveResidentProductEventCountAuthority(productEventSource, device),
+    null
+  );
+  assert.equal(
+    productEventLiveCountCopyDescriptor(productEventSource, device),
+    null
+  );
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: productEventSource,
+      device
+    }),
+    true
+  );
 
   const result = await buildSphRenderFieldWebGpu({
     device,
     renderRows: extracted.renderRows,
     productEventBuffer,
     productEventSource,
+    productEventLiveCountDescriptor: preissuedDescriptor,
     surfaceTable,
     particleCount: packed.particleCount,
     productEventCount: rowCapacity,
@@ -2449,6 +2479,17 @@ test('SPH render field GPU-authenticates the full resident product-history commi
   assert.ok(
     !createdBuffers.some((buffer) => /readback/.test(buffer.label)),
     'the direct GPU commit-gate path must not allocate a CPU readback buffer'
+  );
+  assert.equal(
+    revokeResidentProductEventCountAuthority(productEventSource),
+    true
+  );
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: productEventSource,
+      device
+    }),
+    false
   );
 
   await assert.rejects(

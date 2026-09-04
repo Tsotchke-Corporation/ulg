@@ -1708,6 +1708,140 @@ test('presentation worker cancel verb forwards to the W2 cancel entry', async ()
   assert.equal(message.workerOffscreenResidentScheduleCancel.cancelRequested, true);
 });
 
+test('worker true-isosurface admission forwards the exact retained product-history handle', async () => {
+  await ensureFakePresentationReady();
+  const scheduleId = 'ulg:test:worker-isosurface-product-handoff';
+  const laneId = 'ulg:test:worker-isosurface-product-handoff-lane';
+  const stateKey = 'ulg:test:worker-isosurface-product-handoff-state';
+  const terminalFence = {
+    required: true,
+    scope: 'resident-schedule-terminal',
+    terminalScheduleFence: true,
+    fenceSatisfied: true,
+    authorityAdmissionReady: true,
+    scheduleId,
+    laneId,
+    stateKey,
+    completedStepCount: 1,
+    queueCompletionStatus: 'queue-work-completed',
+    queueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone'
+  };
+  const retainedBuffer = { mapAsync() {} };
+  const residentProductMass = { id: 'exact-worker-retained-product-history' };
+  const retained = {
+    status: 'worker-retained-particle-state-ready',
+    sourceStateBuffer: retainedBuffer,
+    sourceThermoBuffer: retainedBuffer,
+    residentProductMass,
+    particleCount: 2,
+    stateStrideFloats: 8,
+    thermoStrideFloats: 12,
+    stateBufferByteLength: 64,
+    thermoBufferByteLength: 96
+  };
+  const fakeRunner = {
+    async runUlgMechanicsResidentStageWorkerSchedulePayload() {
+      return {
+        schema: 'peercompute.ulg.worker-resident-schedule-result.v0',
+        status: 'worker-resident-schedule-completed',
+        scheduleId,
+        laneId,
+        stateKey,
+        requestedStepCount: 1,
+        completedStepCount: 1,
+        cancelled: false,
+        finalEpochIdentity: scheduleEpochIdentity(1, {
+          storageGeneration: 211
+        }),
+        perStepSummaries: {
+          lastStep: { stepOrdinal: 1, particleCount: 2 }
+        },
+        gpuFence: terminalFence
+      };
+    },
+    resolveUlgMechanicsResidentStageWorkerRetainedParticleState() {
+      return retained;
+    }
+  };
+  const enqueueCalls = [];
+  const isosurfacePresenter = {
+    async enqueue(options) {
+      enqueueCalls.push(options);
+      return {
+        status:
+          'worker-offscreen-resident-isosurface-presentation-enqueued',
+        reason: 'unit-product-history-handoff'
+      };
+    }
+  };
+  await workerModule.runResidentScheduleOnPresentationDevice({
+    payload: {
+      schedule: { scheduleId, stepCount: 1 },
+      lease: { laneId, stateKey },
+      context: {
+        ulgMechanicsResidentStageWorker: {
+          common: {
+            presentationWorkerRenderRetainedStageOutput: {
+              enabled: true,
+              sourceStageId: 'schroederSameLevelMechanics',
+              particleCount: 2,
+              stateStrideFloats: 8,
+              thermoStrideFloats: 12,
+              stateByteLength: 64,
+              thermoByteLength: 96,
+              workerOwnedIsosurface: {
+                enabled: true,
+                marker: 'unit-product-history-handoff'
+              }
+            }
+          }
+        }
+      }
+    }
+  }, {
+    runnerModuleOverride: fakeRunner,
+    workerOwnedIsosurfacePresenterOverride: isosurfacePresenter
+  });
+  const candidate =
+    workerModule.presentationResidentScheduleCandidateMailbox.peekLatest();
+  const receipt = await workerModule.presentCommittedResidentScheduleCandidate({
+    schema:
+      'peercompute.ulg.presentation-worker-committed-resident-schedule-presentation.v0',
+    status:
+      'state-manager-committed-resident-schedule-presentation-admission',
+    scheduleId,
+    laneId,
+    stateKey,
+    candidateVersion: candidate.version,
+    authority: {
+      status: 'state-manager-committed-worker-schedule',
+      computeManagerCompletionSchema:
+        'peercompute.ulg.schroeder-worker-lane-compute-manager-completion.v0',
+      computeManagerLeaseId: 'lease:worker-isosurface-product-handoff',
+      computeManagerLeaseStatus: 'completed',
+      computeManagerFenceSatisfied: true,
+      stateManagerCommitStatus: 'committed',
+      stateManagerCommitAccepted: true
+    },
+    terminalFence
+  });
+
+  assert.equal(
+    receipt.status,
+    'worker-offscreen-resident-isosurface-presentation-enqueued'
+  );
+  assert.equal(enqueueCalls.length, 1);
+  assert.equal(enqueueCalls[0].retained, retained);
+  assert.equal(
+    enqueueCalls[0].retained.residentProductMass,
+    residentProductMass
+  );
+  assert.equal(
+    enqueueCalls[0].request.marker,
+    'unit-product-history-handoff'
+  );
+});
+
 test('presentation worker message loop dispatches the schedule and cancel verbs through the real mechanics module', async () => {
   await ensureFakePresentationReady();
   // Cancel with an unknown id: the real W2 cancel entry answers

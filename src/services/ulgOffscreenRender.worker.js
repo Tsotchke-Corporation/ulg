@@ -1408,6 +1408,7 @@ function createResidentScheduleCandidateDrawLoop({
   runner = null,
   schedulePayload = {},
   isScheduleCurrent = () => true,
+  workerOwnedIsosurfacePresenterOverride = null,
   reason = 'run-resident-schedule-on-presentation-device'
 } = {}) {
   const request = retainedStageOutputRenderRequest(schedulePayload);
@@ -1539,7 +1540,10 @@ function createResidentScheduleCandidateDrawLoop({
             residentScheduleCandidatePresentation: true,
             ...candidateReceiptFields(admission, candidate)
           };
-          return ensureWorkerOwnedIsosurfacePresenter().enqueue({
+          const isosurfacePresenter =
+            workerOwnedIsosurfacePresenterOverride
+            ?? ensureWorkerOwnedIsosurfacePresenter();
+          return isosurfacePresenter.enqueue({
             request: workerOwnedIsosurfaceRequest,
             retained,
             sphStep: candidate.version.nextStep,
@@ -2035,7 +2039,8 @@ export function presentCommittedResidentScheduleCandidate(data = {}) {
 // a fake mechanics module; the message path never sets it. Exported for
 // direct-invocation tests.
 export async function runResidentScheduleOnPresentationDevice(data = {}, {
-  runnerModuleOverride = null
+  runnerModuleOverride = null,
+  workerOwnedIsosurfacePresenterOverride = null
 } = {}) {
   const payload = data.payload && typeof data.payload === 'object' ? data.payload : {};
   if (!device || !context) {
@@ -2191,6 +2196,7 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
     isScheduleCurrent: () => residentScheduleCandidateStreamIsCurrent(
       scheduleCandidateStream
     ),
+    workerOwnedIsosurfacePresenterOverride,
     reason: data.reason || 'run-resident-schedule-on-presentation-device'
   });
   // Explicit page opt-in: mid-schedule LIVE PREVIEW draws of the lane's

@@ -3,14 +3,31 @@ import test from 'node:test';
 
 import {
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+  ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS,
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SUPERSEDED_STATUS,
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_REQUEST_SCHEMA,
   buildWorkerOwnedIsosurfaceSurfaceUniformValues,
   createWorkerOwnedIsosurfacePresenter,
   resolveWorkerOwnedIsosurfaceAdmission,
+  resolveWorkerOwnedIsosurfaceProductEventSource,
   summarizeWorkerOwnedIsosurfaceOpticalPresentation
 } from '../src/services/workerOwnedIsosurfacePresenter.js';
+import {
+  SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+} from '../src/runtime/sph/sphRenderGpuKernel.js';
+import {
+  productEventLiveCountCopyDescriptor,
+  registerResidentProductEventCountAuthority,
+  resolveResidentProductEventCountAuthority,
+  retireResidentProductEventCountAuthority,
+  revokeResidentProductEventCountAuthority,
+  validateProductEventLiveCountCopyDescriptor
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
+import {
+  tagWebGpuBufferDevice
+} from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 class GPUBuffer {
   constructor(size = 4096) {
@@ -39,7 +56,9 @@ async function waitFor(predicate, label) {
 function createPresenterRig({
   queueCompletion = Promise.resolve(),
   captureRenderRows = async () => ({ destroyRenderRowsBuffer() {} }),
-  buildPresentationFrame = null
+  buildRenderField = undefined,
+  buildPresentationFrame = null,
+  useBuiltInFrame = false
 } = {}) {
   const terminals = [];
   const submittedFrames = [];
@@ -112,20 +131,24 @@ function createPresenterRig({
     },
     getFramebufferEpoch: () => framebufferEpoch,
     captureRenderRows,
-    buildPresentationFrame: buildPresentationFrame ?? (
-      async (job) => ({
-        generation: job.generation,
-        invalidationEpoch: job.invalidationEpoch,
-        sphStep: job.sphStep,
-        receiptFields: job.receiptFields,
-        viewProjectionMatrix: [...job.admission.viewProjectionMatrix],
-        cameraPositionM: [...job.admission.cameraPositionM],
-        boxDimsM: null,
-        surfaces: []
-      })
-    )
+    buildRenderField,
+    buildPresentationFrame: useBuiltInFrame
+      ? null
+      : (buildPresentationFrame ?? (
+          async (job) => ({
+            generation: job.generation,
+            invalidationEpoch: job.invalidationEpoch,
+            sphStep: job.sphStep,
+            receiptFields: job.receiptFields,
+            viewProjectionMatrix: [...job.admission.viewProjectionMatrix],
+            cameraPositionM: [...job.admission.cameraPositionM],
+            boxDimsM: null,
+            surfaces: []
+          })
+        ))
   });
   return {
+    device,
     presenter,
     terminals,
     submittedFrames,
@@ -187,7 +210,7 @@ function validRequest() {
   };
 }
 
-function validRetained() {
+function validRetained(overrides = {}) {
   return {
     status: 'worker-retained-particle-state-ready',
     sameWorkerPrivateReferences: true,
@@ -201,8 +224,73 @@ function validRetained() {
     sourceStateBuffer: new GPUBuffer(),
     sourceThermoBuffer: new GPUBuffer(),
     sourceMechanicsBuffer: new GPUBuffer(),
-    sourceIdentityBuffer: new GPUBuffer()
+    sourceIdentityBuffer: new GPUBuffer(),
+    ...overrides
   };
+}
+
+function authenticatedResidentProductMass(
+  device,
+  rowCapacity = 4,
+  { borrowTransitions = null } = {}
+) {
+  const productEventBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    size: rowCapacity
+      * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+  }), device);
+  const controlBuffer = tagWebGpuBufferDevice(device.createBuffer({
+    size: 512
+  }), device);
+  const source = {
+    status: 'resident-product-mass-merged-gpu-resident',
+    productEventBuffer,
+    productEventBufferRetained: true,
+    productEventBufferByteLength: productEventBuffer.size,
+    productEventRowCount: rowCapacity,
+    productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    productEventStrideBytes:
+      SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  };
+  let activeBorrowCount = 0;
+  let released = false;
+  Object.defineProperty(source, '__ulgActiveBorrowCount', {
+    configurable: true,
+    enumerable: false,
+    get() {
+      return activeBorrowCount;
+    },
+    set(value) {
+      const nextCount = Math.max(0, Math.floor(Number(value) || 0));
+      if (released && nextCount > activeBorrowCount) return;
+      activeBorrowCount = nextCount;
+      borrowTransitions?.push(activeBorrowCount);
+      if (released && activeBorrowCount === 0) {
+        revokeResidentProductEventCountAuthority(source);
+      }
+    }
+  });
+  registerResidentProductEventCountAuthority(source, {
+    device,
+    controlBuffer,
+    controlOffsetBytes: 256,
+    rowCapacity,
+    rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    generation: 7,
+    seal: 11,
+    zeroTailSealed: true
+  });
+  source.destroyResidentProductMassBuffers = () => {
+    if (released) return false;
+    released = true;
+    if (activeBorrowCount > 0) {
+      retireResidentProductEventCountAuthority(source);
+    } else {
+      revokeResidentProductEventCountAuthority(source);
+    }
+    return true;
+  };
+  return source;
 }
 
 test('worker-owned isosurface uniforms use closure opacity and preserve the legacy fallback', () => {
@@ -299,6 +387,333 @@ test('worker-owned true-isosurface admission requires exact same-worker GPU auth
     assert.equal(blocked.ok, false, `${field} must fail closed`);
     assert.ok(blocked.blockers.includes(blocker));
   }
+});
+
+test('worker-owned true-isosurface hands an authenticated retained product source to the branded field build', async () => {
+  const fieldBuild = deferred();
+  let fieldBuildOptions = null;
+  let capturedReleased = false;
+  const sourceFamily = { id: 'test-successor-family' };
+  const captured = {
+    particleCount: 32,
+    renderRowsBuffer: new GPUBuffer(),
+    schroederSpatialSourceFamily: sourceFamily,
+    destroyRenderRowsBuffer() {
+      capturedReleased = true;
+    }
+  };
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async () => captured,
+    buildRenderField: async (options) => {
+      fieldBuildOptions = options;
+      await fieldBuild.promise;
+      assert.equal(
+        validateProductEventLiveCountCopyDescriptor(
+          options.productEventLiveCountDescriptor,
+          {
+            handle: options.productEventSource,
+            device: rig.device
+          }
+        ),
+        true,
+        'the queued build must retain its pre-issued descriptor through retirement'
+      );
+      return {
+        surfaceTable: { ...options.surfaceTable, metadata: [] },
+        schroederSpatialSourceFamily: options.schroederSpatialSourceFamily,
+        fieldPadding: options.fieldPadding,
+        refEdgeM: options.refEdgeM,
+        destroyRenderFieldBuffers() {}
+      };
+    }
+  });
+  const residentProductMass = authenticatedResidentProductMass(rig.device, 4);
+  const enqueueReceipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({ residentProductMass }),
+    sphStep: 12
+  });
+
+  assert.equal(
+    enqueueReceipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  await waitFor(() => fieldBuildOptions != null, 'the product-aware render-field build');
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 1);
+  assert.equal(fieldBuildOptions.renderRowsSource, captured);
+  assert.equal(fieldBuildOptions.schroederSpatialSourceFamily, sourceFamily);
+  assert.equal(
+    fieldBuildOptions.productEventBuffer,
+    residentProductMass.productEventBuffer
+  );
+  assert.equal(fieldBuildOptions.productEventSource, residentProductMass);
+  assert.equal(fieldBuildOptions.productEventCount, 4);
+  const preissuedDescriptor =
+    fieldBuildOptions.productEventLiveCountDescriptor;
+  assert.ok(preissuedDescriptor);
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: residentProductMass,
+      device: rig.device
+    }),
+    true
+  );
+
+  assert.equal(residentProductMass.destroyResidentProductMassBuffers(), true);
+  assert.equal(
+    residentProductMass.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix-retiring'
+  );
+  assert.equal(
+    resolveResidentProductEventCountAuthority(residentProductMass, rig.device),
+    null
+  );
+  assert.equal(
+    productEventLiveCountCopyDescriptor(residentProductMass, rig.device),
+    null,
+    'retirement must close issuance before the queued consumer submits'
+  );
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: residentProductMass,
+      device: rig.device
+    }),
+    true,
+    'the already-issued descriptor remains valid under the active borrow'
+  );
+
+  fieldBuild.resolve();
+  await waitFor(
+    () => rig.terminals.some((receipt) => (
+      receipt.status
+        === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+    )),
+    'the product-aware isosurface presentation'
+  );
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: residentProductMass,
+      device: rig.device
+    }),
+    false,
+    'the descriptor is revoked when the final presenter borrow drains'
+  );
+  assert.equal(
+    residentProductMass.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix-revoked'
+  );
+  assert.ok(queueSubmissionCount(rig) > 0);
+  await waitFor(() => capturedReleased, 'the product-aware capture cleanup');
+  await rig.presenter.dispose();
+});
+
+test('worker-owned product source and capture release exactly once when field construction rejects', async () => {
+  const borrowTransitions = [];
+  let captureReleaseCount = 0;
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async () => ({
+      particleCount: 32,
+      renderRowsBuffer: new GPUBuffer(),
+      schroederSpatialSourceFamily: { id: 'rejected-field-family' },
+      destroyRenderRowsBuffer() {
+        captureReleaseCount += 1;
+      }
+    }),
+    buildRenderField: async () => {
+      throw new Error('injected authenticated product field rejection');
+    }
+  });
+  const residentProductMass = authenticatedResidentProductMass(
+    rig.device,
+    4,
+    { borrowTransitions }
+  );
+  const receipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({ residentProductMass }),
+    sphStep: 14,
+    receiptFields: { lifecycleCase: 'product-field-rejection' }
+  });
+
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  await waitFor(
+    () => rig.terminals.some(
+      (terminal) => terminal.lifecycleCase === 'product-field-rejection'
+    ),
+    'the rejected authenticated product field terminal'
+  );
+  await waitFor(
+    () => captureReleaseCount === 1,
+    'the rejected authenticated product capture cleanup'
+  );
+
+  const caseTerminals = rig.terminals.filter(
+    (terminal) => terminal.lifecycleCase === 'product-field-rejection'
+  );
+  assert.equal(caseTerminals.length, 1);
+  assert.equal(
+    caseTerminals[0].status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS
+  );
+  assert.match(caseTerminals[0].reason, /injected authenticated product field rejection/);
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+  assert.deepEqual(borrowTransitions, [1, 0]);
+
+  await rig.presenter.dispose();
+  assert.equal(captureReleaseCount, 1);
+  assert.deepEqual(borrowTransitions, [1, 0]);
+  assert.equal(caseTerminals.length, 1);
+});
+
+test('clear releases an authenticated queued product source and capture exactly once before build', async () => {
+  const activeBuild = deferred();
+  const borrowTransitions = [];
+  const captureReleaseCounts = [0, 0];
+  let captureIndex = 0;
+  const buildSteps = [];
+  const rig = createPresenterRig({
+    captureRenderRows: async () => {
+      const index = captureIndex;
+      captureIndex += 1;
+      return {
+        destroyRenderRowsBuffer() {
+          captureReleaseCounts[index] += 1;
+        }
+      };
+    },
+    buildPresentationFrame: async (job) => {
+      buildSteps.push(job.sphStep);
+      if (job.sphStep === 15) await activeBuild.promise;
+      return {
+        generation: job.generation,
+        invalidationEpoch: job.invalidationEpoch,
+        sphStep: job.sphStep,
+        receiptFields: job.receiptFields,
+        viewProjectionMatrix: [...job.admission.viewProjectionMatrix],
+        cameraPositionM: [...job.admission.cameraPositionM],
+        boxDimsM: null,
+        surfaces: []
+      };
+    }
+  });
+  await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained(),
+    sphStep: 15
+  });
+  await waitFor(() => buildSteps.length === 1, 'the active predecessor frame build');
+
+  const residentProductMass = authenticatedResidentProductMass(
+    rig.device,
+    4,
+    { borrowTransitions }
+  );
+  const queuedReceipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({ residentProductMass }),
+    sphStep: 16,
+    receiptFields: { lifecycleCase: 'queued-product-clear' }
+  });
+  assert.equal(
+    queuedReceipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  assert.deepEqual(buildSteps, [15]);
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 1);
+
+  assert.equal(rig.presenter.clear({ reason: 'test-clear-queued-product' }), true);
+  await waitFor(
+    () => captureReleaseCounts[1] === 1,
+    'the cleared queued product capture cleanup'
+  );
+
+  const queuedTerminals = rig.terminals.filter(
+    (terminal) => terminal.lifecycleCase === 'queued-product-clear'
+  );
+  assert.equal(queuedTerminals.length, 1);
+  assert.equal(
+    queuedTerminals[0].status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SUPERSEDED_STATUS
+  );
+  assert.deepEqual(buildSteps, [15]);
+  assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+  assert.deepEqual(borrowTransitions, [1, 0]);
+
+  activeBuild.resolve();
+  await waitFor(
+    () => rig.presenter.getStatus().running === false,
+    'the cleared predecessor build cleanup'
+  );
+  await rig.presenter.dispose();
+  assert.equal(captureReleaseCounts[1], 1);
+  assert.deepEqual(borrowTransitions, [1, 0]);
+  assert.equal(
+    rig.terminals.filter(
+      (terminal) => terminal.lifecycleCase === 'queued-product-clear'
+    ).length,
+    1
+  );
+});
+
+test('worker-owned true-isosurface preserves the branded zero-product field call', async () => {
+  let fieldBuildOptions = null;
+  const sourceFamily = { id: 'test-zero-product-successor-family' };
+  const captured = {
+    particleCount: 32,
+    renderRowsBuffer: new GPUBuffer(),
+    schroederSpatialSourceFamily: sourceFamily,
+    destroyRenderRowsBuffer() {}
+  };
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async () => captured,
+    buildRenderField: async (options) => {
+      fieldBuildOptions = options;
+      return {
+        surfaceTable: { ...options.surfaceTable, metadata: [] },
+        schroederSpatialSourceFamily: options.schroederSpatialSourceFamily,
+        fieldPadding: options.fieldPadding,
+        refEdgeM: options.refEdgeM,
+        destroyRenderFieldBuffers() {}
+      };
+    }
+  });
+  await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained(),
+    sphStep: 13
+  });
+  await waitFor(() => fieldBuildOptions != null, 'the zero-product render-field build');
+
+  assert.equal(fieldBuildOptions.renderRowsSource, captured);
+  assert.equal(fieldBuildOptions.schroederSpatialSourceFamily, sourceFamily);
+  assert.equal(fieldBuildOptions.productEventBuffer, null);
+  assert.equal(fieldBuildOptions.productEventSource, null);
+  assert.equal(fieldBuildOptions.productEventCount, 0);
+  await rig.presenter.dispose();
+});
+
+test('worker-owned true-isosurface rejects a copied product-count authority', async () => {
+  const rig = createPresenterRig();
+  const residentProductMass = authenticatedResidentProductMass(rig.device, 2);
+  const copiedSource = {
+    ...residentProductMass,
+    __ulgActiveBorrowCount: 0
+  };
+  assert.throws(
+    () => resolveWorkerOwnedIsosurfaceProductEventSource({
+      device: rig.device,
+      retained: validRetained({ residentProductMass: copiedSource })
+    }),
+    /authenticated GPU live-count capacity/
+  );
+  await rig.presenter.dispose();
 });
 
 test('worker-owned true-isosurface admission rejects torn tables and camera state', () => {

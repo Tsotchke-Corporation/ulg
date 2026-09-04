@@ -42,6 +42,13 @@ import {
   validateSphRenderRowsSuccessorSourceLineage
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 import {
+  productEventLiveCountCopyDescriptor,
+  registerResidentProductEventCountAuthority,
+  retireResidentProductEventCountAuthority,
+  revokeResidentProductEventCountAuthority,
+  validateProductEventLiveCountCopyDescriptor
+} from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
+import {
   buildSphMaterialInterfaceSourceFieldLocalWebGpu,
   validateSphMaterialInterfaceSourceFieldSuccessorLineage
 } from '../src/runtime/sph/sphMaterialInterfaceSourceFieldLocalGpu.js';
@@ -270,7 +277,7 @@ function taggedBuffer(device, label, size, masses = null) {
   return buffer;
 }
 
-async function successorFixture() {
+async function successorFixture({ productEventRowCapacity = 0 } = {}) {
   const particleCount = 3;
   const sourceMasses = [1, 1, 0];
   const successorMasses = [1, 1, 0];
@@ -391,6 +398,42 @@ async function successorFixture() {
       mechanicsStrideBytes: 128
     }
   };
+  let residentProductMass = null;
+  if (productEventRowCapacity > 0) {
+    const productEventBuffer = taggedBuffer(
+      device,
+      'successor-resident-product-events',
+      productEventRowCapacity
+        * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    );
+    const controlBuffer = taggedBuffer(
+      device,
+      'successor-resident-product-count-control',
+      512
+    );
+    residentProductMass = {
+      status: 'resident-product-mass-merged-gpu-resident',
+      productEventBuffer,
+      productEventBufferRetained: true,
+      productEventBufferByteLength: productEventBuffer.size,
+      productEventRowCount: productEventRowCapacity,
+      productEventStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+      productEventStrideBytes:
+        SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+    };
+    registerResidentProductEventCountAuthority(residentProductMass, {
+      device,
+      controlBuffer,
+      controlOffsetBytes: 256,
+      rowCapacity: productEventRowCapacity,
+      rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+      generation: 23,
+      seal: 29
+    });
+    nextParticleUploads.residentProductMass = residentProductMass;
+  }
   applySchroederSpatialTopologyTransitionReceipt(
     nextParticleUploads,
     topologyTransitionReceipt,
@@ -458,6 +501,7 @@ async function successorFixture() {
   return {
     device,
     sourceFamily,
+    residentProductMass,
     sphParticleState,
     mlsMpmParticleState,
     sphParticleUpload: nextParticleUploads.sphParticleUpload,
@@ -969,6 +1013,126 @@ test('successor render rows require exact module brands and reject swapped or co
     false,
     'destroying the retained handoff buffer must retire its render-row brand'
   );
+});
+
+test('dense successor field preserves exact lineage for its authenticated product-history composite', async () => {
+  const productEventRowCapacity = 4;
+  const fixture = await successorFixture({ productEventRowCapacity });
+  const rows = await retainedSuccessorRows(fixture);
+  const table = surfaceTable();
+  const fieldPool = fixture.device.createBuffer({
+    label: 'pooled-successor-product-render-field',
+    size: table.totalFieldCells
+      * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const preissuedDescriptor = productEventLiveCountCopyDescriptor(
+    fixture.residentProductMass,
+    fixture.device
+  );
+  assert.ok(preissuedDescriptor);
+  assert.equal(
+    retireResidentProductEventCountAuthority(fixture.residentProductMass),
+    true
+  );
+  assert.equal(
+    productEventLiveCountCopyDescriptor(
+      fixture.residentProductMass,
+      fixture.device
+    ),
+    null
+  );
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: fixture.residentProductMass,
+      device: fixture.device
+    }),
+    true
+  );
+  const field = await buildSphRenderFieldWebGpu({
+    device: fixture.device,
+    renderRowsBuffer: rows.renderRowsBuffer,
+    renderRowsSource: rows,
+    schroederSpatialSourceFamily: fixture.sourceFamily,
+    productEventBuffer: fixture.residentProductMass.productEventBuffer,
+    productEventSource: fixture.residentProductMass,
+    productEventLiveCountDescriptor: preissuedDescriptor,
+    productEventCount: productEventRowCapacity,
+    surfaceTable: table,
+    particleCount: fixture.sphParticleState.particleCount,
+    readbackMode: 'no-full-readback',
+    retainFieldRowsBuffer: true,
+    retainSurfaceBuffer: true,
+    waitForQueueCompletion: false,
+    deferCleanup: false,
+    targetFieldRowsBuffer: fieldPool,
+    targetFieldRowsBufferByteLength: fieldPool.size
+  });
+
+  assert.equal(field.schroederSpatialSourceFamily, fixture.sourceFamily);
+  assert.equal(field.schroederSpatialLineageMode, 'authenticated-successor');
+  assert.equal(field.productEventCount, productEventRowCapacity);
+  assert.equal(field.productEventRowCapacity, productEventRowCapacity);
+  assert.equal(field.productEventBufferBound, true);
+  assert.equal(
+    field.productEventCountAuthority,
+    'gpu-authored-filtered-live-prefix'
+  );
+  assert.equal(
+    validateSphRenderFieldSuccessorSourceLineage(
+      field,
+      exactRenderFieldLineage(fixture, field)
+    ),
+    true
+  );
+
+  const alternateProductSource = {
+    ...fixture.residentProductMass,
+    productEventLiveCountAuthority: undefined
+  };
+  const alternateControlBuffer = taggedBuffer(
+    fixture.device,
+    'alternate-successor-product-count-control',
+    512
+  );
+  registerResidentProductEventCountAuthority(alternateProductSource, {
+    device: fixture.device,
+    controlBuffer: alternateControlBuffer,
+    controlOffsetBytes: 256,
+    rowCapacity: productEventRowCapacity,
+    rowStrideFloats: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+    generation: 31,
+    seal: 37
+  });
+  await assert.rejects(
+    buildSphRenderFieldWebGpu({
+      device: fixture.device,
+      renderRowsBuffer: rows.renderRowsBuffer,
+      renderRowsSource: rows,
+      schroederSpatialSourceFamily: fixture.sourceFamily,
+      productEventBuffer: alternateProductSource.productEventBuffer,
+      productEventSource: alternateProductSource,
+      productEventCount: productEventRowCapacity,
+      surfaceTable: table,
+      particleCount: fixture.sphParticleState.particleCount
+    }),
+    /no unauthenticated product-event source/
+  );
+
+  assert.equal(
+    revokeResidentProductEventCountAuthority(fixture.residentProductMass),
+    true
+  );
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: fixture.residentProductMass,
+      device: fixture.device
+    }),
+    false
+  );
+  field.destroyRenderFieldBuffers({ force: true, releaseLeases: true });
+  rows.destroyRenderRowsBuffer();
 });
 
 test('dense and source-local successor fields preserve exact lineage and invalidate pooled overwrites', async () => {

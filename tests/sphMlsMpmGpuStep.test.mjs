@@ -188,8 +188,10 @@ import {
 } from '../src/runtime/sph/sphGpuReadbackTelemetry.js';
 import {
   createResidentProductEventCountControlWords,
+  productEventLiveCountCopyDescriptor,
   registerResidentProductEventCountAuthority,
-  resolveResidentProductEventCountAuthority
+  resolveResidentProductEventCountAuthority,
+  validateProductEventLiveCountCopyDescriptor
 } from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
@@ -19981,6 +19983,66 @@ test('resident product-history revokes released per-view counts before their con
   );
 
   await releaseResidentProductHistoryTestHandles(second, third, seed);
+});
+
+test('resident product-history retirement closes descriptor issuance but preserves a borrowed capability until drain', async () => {
+  const device = fakeSummaryDevice(
+    new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS)
+  );
+  const seed = residentProductMassHandle({
+    label: 'gpu-count-retiring-borrow-seed',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const retained = await mergeResidentProductMassBuffersWebGpu({
+    device,
+    inputResidentProductMass: seed,
+    emittedResidentProductMass: residentProductMassHandle({
+      label: 'gpu-count-retiring-borrow-emitted',
+      rowCount: 1,
+      byteLength: 128
+    }),
+    allowHostCompactionObservation: false
+  });
+  const preissuedDescriptor = productEventLiveCountCopyDescriptor(
+    retained,
+    device
+  );
+  assert.ok(preissuedDescriptor);
+
+  retained.__ulgActiveBorrowCount += 1;
+  retained.destroyResidentProductMassBuffers();
+
+  assert.equal(retained.__ulgActiveBorrowCount, 1);
+  assert.equal(
+    retained.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix-retiring'
+  );
+  assert.equal(resolveResidentProductEventCountAuthority(retained, device), null);
+  assert.equal(productEventLiveCountCopyDescriptor(retained, device), null);
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: retained,
+      device
+    }),
+    true
+  );
+
+  retained.__ulgActiveBorrowCount -= 1;
+
+  assert.equal(retained.__ulgActiveBorrowCount, 0);
+  assert.equal(
+    retained.productEventRowCountAuthority,
+    'gpu-authored-filtered-live-prefix-revoked'
+  );
+  assert.equal(
+    validateProductEventLiveCountCopyDescriptor(preissuedDescriptor, {
+      handle: retained,
+      device
+    }),
+    false
+  );
+  await releaseResidentProductHistoryTestHandles(seed);
 });
 
 test('resident product-history exposes all 128 retained GPU-count records before bounded backpressure', async () => {

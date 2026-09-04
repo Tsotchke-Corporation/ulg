@@ -76,7 +76,8 @@ import {
 import {
   acquireSchroederSpatialSuccessorSourceFamilyLease,
   releaseSchroederSpatialSuccessorSourceFamilyLease,
-  resolveSchroederSpatialSuccessorSourceFamily
+  resolveSchroederSpatialSuccessorSourceFamily,
+  validateSchroederSpatialProductHistoryCommitGate
 } from './schroederSpatialSuccessorSourceFamily.js';
 import {
   SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
@@ -276,6 +277,55 @@ export function validateSphRenderRowsSuccessorSourceLineage(
   );
 }
 
+export function validateSphRenderFieldSuccessorProductEventSourceLineage({
+  device,
+  sourceFamily,
+  productEventRows = null,
+  productEventBuffer = null,
+  productEventSource = null,
+  productEventCount = 0,
+  productEventLiveCountDescriptor = null
+} = {}) {
+  const hasProductEventClaim = Boolean(
+    productEventRows != null
+    || productEventBuffer != null
+    || productEventSource != null
+    || Number(productEventCount) !== 0
+  );
+  if (!hasProductEventClaim) return true;
+  if (
+    productEventRows != null
+    || productEventBuffer == null
+    || productEventSource == null
+    || productEventSource.productEventBuffer !== productEventBuffer
+    || !Number.isSafeInteger(productEventCount)
+    || productEventCount <= 0
+    || !productEventLiveCountDescriptor
+    || !validateProductEventLiveCountCopyDescriptor(
+      productEventLiveCountDescriptor,
+      { handle: productEventSource, device }
+    )
+    || productEventLiveCountDescriptor.hostObserved !== false
+    || productEventLiveCountDescriptor.expectedRowCapacity
+      !== productEventCount
+    || productEventLiveCountDescriptor.rowCapacity !== productEventCount
+    || productEventLiveCountDescriptor.expectedRowStrideVec4
+      !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
+    || productEventLiveCountDescriptor.rowStrideFloats
+      !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    || Number(productEventBuffer.size)
+      < productEventCount
+        * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+        * Float32Array.BYTES_PER_ELEMENT
+  ) {
+    return false;
+  }
+  return validateSchroederSpatialProductHistoryCommitGate(
+    sourceFamily?.productHistoryCommitGate ?? null,
+    { device, residentProductMass: productEventSource }
+  );
+}
+
 function invalidateSphRenderRowsSuccessorSourceLineage(renderRowsSource) {
   const record = schroederRenderRowsLineageRecords.get(renderRowsSource);
   if (!record || record.active !== true) return;
@@ -320,8 +370,16 @@ export function validateSphRenderFieldSuccessorSourceLineage(
       === record.fieldRowsBufferByteLength
     && renderField?.fieldPadding === record.fieldPadding
     && renderField?.refEdgeM === record.refEdgeM
-    && renderField?.productEventCount === 0
-    && renderField?.productEventBufferBound === false
+    && renderField?.productEventCount === record.productEventCount
+    && renderField?.productEventRowCapacity === record.productEventRowCapacity
+    && renderField?.productEventBufferBound
+      === (record.productEventBuffer != null)
+    && renderField?.productEventCountAuthority
+      === record.productEventCountAuthority
+    && renderField?.productEventControlAuthentication
+      === record.productEventControlAuthentication
+    && record.productEventSourceAuthenticated
+      === (record.productEventBuffer != null)
     && validateSphRenderSurfaceTableLineageSnapshot(
       renderField?.surfaceTable,
       record.surfaceTableSnapshot
@@ -6557,6 +6615,7 @@ export async function buildSphRenderFieldWebGpu({
   productEventRows = null,
   productEventBuffer = null,
   productEventSource = null,
+  productEventLiveCountDescriptor = null,
   surfaceTable,
   particleCount = null,
   productEventCount = null,
@@ -6589,15 +6648,63 @@ export async function buildSphRenderFieldWebGpu({
   const resolvedProductEventCount = productEventCount ?? (
     productEventRows?.length ? productEventRows.length / SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 0
   );
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const borrowedRenderRowsBuffer = renderRowsBuffer || null;
+  const borrowedProductEventBuffer = productEventBuffer || null;
+  const resolvedProductEventLiveCountDescriptor =
+    productEventLiveCountDescriptor
+    ?? (
+      borrowedProductEventBuffer && productEventSource
+        ? productEventLiveCountCopyDescriptor(productEventSource, device)
+        : null
+    );
+  if (
+    (
+      productEventSource?.productEventLiveCountAuthority
+      || residentProductEventCountAuthorityRegistered(productEventSource)
+    )
+    && !resolvedProductEventLiveCountDescriptor
+  ) {
+    throw new TypeError(
+      'SPH render field rejected a torn product-event live-count authority'
+    );
+  }
+  if (
+    resolvedProductEventLiveCountDescriptor
+    && (
+      !validateProductEventLiveCountCopyDescriptor(
+        resolvedProductEventLiveCountDescriptor,
+        { handle: productEventSource, device }
+      )
+      || !(Number(borrowedProductEventBuffer?.size)
+        >= resolvedProductEventCount
+          * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+          * Float32Array.BYTES_PER_ELEMENT)
+      || productEventSource.productEventBuffer !== borrowedProductEventBuffer
+      || resolvedProductEventLiveCountDescriptor.controlBuffer == null
+      || resolvedProductEventLiveCountDescriptor.controlPrefixByteLength
+        !== SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+      || resolvedProductEventLiveCountDescriptor.hostObserved !== false
+      || resolvedProductEventLiveCountDescriptor.expectedRowCapacity
+        !== resolvedProductEventCount
+      || resolvedProductEventLiveCountDescriptor.expectedRowStrideVec4
+        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
+      || resolvedProductEventLiveCountDescriptor.rowCapacity
+        !== resolvedProductEventCount
+      || resolvedProductEventLiveCountDescriptor.rowStrideFloats
+        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    )
+  ) {
+    throw new TypeError(
+      'SPH render field GPU live-count authority does not match its product-event buffer capacity and row ABI'
+    );
+  }
   if (schroederSpatialSourceFamily) {
     if (
       renderRowsSource?.schroederSpatialSourceFamily
         !== schroederSpatialSourceFamily
       || renderRowsSource?.particleCount !== resolvedParticleCount
       || renderRowsBuffer == null
-      || resolvedProductEventCount !== 0
-      || productEventBuffer != null
-      || productEventRows != null
     ) {
       throw new TypeError(
         'successor render field requires exact branded render rows and no unauthenticated product-event source'
@@ -6621,54 +6728,19 @@ export async function buildSphRenderFieldWebGpu({
         'successor render field requires module-authenticated render-row derivation'
       );
     }
-  }
-  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
-  const borrowedRenderRowsBuffer = renderRowsBuffer || null;
-  const borrowedProductEventBuffer = productEventBuffer || null;
-  const productEventLiveCountDescriptor = borrowedProductEventBuffer
-    && productEventSource
-    ? productEventLiveCountCopyDescriptor(productEventSource, device)
-    : null;
-  if (
-    (
-      productEventSource?.productEventLiveCountAuthority
-      || residentProductEventCountAuthorityRegistered(productEventSource)
-    )
-    && !productEventLiveCountDescriptor
-  ) {
-    throw new TypeError(
-      'SPH render field rejected a torn product-event live-count authority'
-    );
-  }
-  if (
-    productEventLiveCountDescriptor
-    && (
-      !validateProductEventLiveCountCopyDescriptor(
-        productEventLiveCountDescriptor,
-        { handle: productEventSource, device }
-      )
-      || !(Number(borrowedProductEventBuffer?.size)
-        >= resolvedProductEventCount
-          * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
-          * Float32Array.BYTES_PER_ELEMENT)
-      || productEventSource.productEventBuffer !== borrowedProductEventBuffer
-      || productEventLiveCountDescriptor.controlBuffer == null
-      || productEventLiveCountDescriptor.controlPrefixByteLength
-        !== SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
-      || productEventLiveCountDescriptor.hostObserved !== false
-      || productEventLiveCountDescriptor.expectedRowCapacity
-        !== resolvedProductEventCount
-      || productEventLiveCountDescriptor.expectedRowStrideVec4
-        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
-      || productEventLiveCountDescriptor.rowCapacity
-        !== resolvedProductEventCount
-      || productEventLiveCountDescriptor.rowStrideFloats
-        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
-    )
-  ) {
-    throw new TypeError(
-      'SPH render field GPU live-count authority does not match its product-event buffer capacity and row ABI'
-    );
+    if (!validateSphRenderFieldSuccessorProductEventSourceLineage({
+      device,
+      sourceFamily: schroederSpatialSourceFamily,
+      productEventRows,
+      productEventBuffer: borrowedProductEventBuffer,
+      productEventSource,
+      productEventCount: resolvedProductEventCount,
+      productEventLiveCountDescriptor: resolvedProductEventLiveCountDescriptor
+    })) {
+      throw new TypeError(
+        'successor render field requires exact branded render rows and no unauthenticated product-event source'
+      );
+    }
   }
   const renderFieldInputSource = borrowedRenderRowsBuffer
     ? (borrowedProductEventBuffer ? 'resident-render-rows-and-product-events-buffer' : 'resident-render-rows-buffer')
@@ -6728,8 +6800,10 @@ export async function buildSphRenderFieldWebGpu({
     productEventRows || new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
     GPU_BUFFER_USAGE.COPY_SRC
   );
-  const productHistoryControlBufferOwned = !productEventLiveCountDescriptor;
-  const productHistoryControlBuffer = productEventLiveCountDescriptor?.controlBuffer
+  const productHistoryControlBufferOwned =
+    !resolvedProductEventLiveCountDescriptor;
+  const productHistoryControlBuffer =
+    resolvedProductEventLiveCountDescriptor?.controlBuffer
     || createZeroedStorageBuffer(
       device,
       'ulg-sph-render-field-product-history-control-disabled',
@@ -6743,7 +6817,9 @@ export async function buildSphRenderFieldWebGpu({
   device.queue.writeBuffer(
     productHistoryGateParamsBuffer,
     0,
-    createRenderProductHistoryGateParamsArray(productEventLiveCountDescriptor)
+    createRenderProductHistoryGateParamsArray(
+      resolvedProductEventLiveCountDescriptor
+    )
   );
   const surfaceBuffer = writeStorageBuffer(
     device,
@@ -6804,7 +6880,8 @@ export async function buildSphRenderFieldWebGpu({
         binding: 5,
         resource: {
           buffer: productHistoryControlBuffer,
-          offset: productEventLiveCountDescriptor?.controlOffsetBytes ?? 0,
+          offset:
+            resolvedProductEventLiveCountDescriptor?.controlOffsetBytes ?? 0,
           size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
         }
       },
@@ -6962,16 +7039,17 @@ export async function buildSphRenderFieldWebGpu({
       schroederSpatialSourceFamily?.successorEpochIdentity ?? null,
     particleCount: resolvedParticleCount,
     productEventCount: borrowedProductEventBuffer || productEventRows ? resolvedProductEventCount : 0,
-    productEventCountAuthority: productEventLiveCountDescriptor
+    productEventCountAuthority: resolvedProductEventLiveCountDescriptor
       ? 'gpu-authored-filtered-live-prefix'
       : 'host-exact-or-sparse-scan-bound',
-    productEventControlAuthentication: productEventLiveCountDescriptor
+    productEventControlAuthentication: resolvedProductEventLiveCountDescriptor
       ? 'full-eight-word-gpu-commit-gate'
       : 'not-required-zero-control',
     productEventControlHostObserved:
-      productEventLiveCountDescriptor?.hostObserved ?? false,
-    productEventCountHostKnown: !productEventLiveCountDescriptor,
-    productEventRowCapacity: productEventLiveCountDescriptor?.expectedRowCapacity
+      resolvedProductEventLiveCountDescriptor?.hostObserved ?? false,
+    productEventCountHostKnown: !resolvedProductEventLiveCountDescriptor,
+    productEventRowCapacity:
+      resolvedProductEventLiveCountDescriptor?.expectedRowCapacity
       ?? (borrowedProductEventBuffer || productEventRows
         ? resolvedProductEventCount
         : 0),
@@ -7069,9 +7147,27 @@ export async function buildSphRenderFieldWebGpu({
       renderRowsSource,
       renderRowsBuffer: borrowedRenderRowsBuffer,
       renderRows: borrowedRenderRowsBuffer ? null : renderRows,
-      productEventBuffer: null,
-      productEventRows: null,
-      productEventCount: 0,
+      productEventBuffer: borrowedProductEventBuffer,
+      productEventRows,
+      productEventSource,
+      productEventLiveCountDescriptor: resolvedProductEventLiveCountDescriptor,
+      productEventSourceAuthenticated: Boolean(
+        borrowedProductEventBuffer && resolvedProductEventLiveCountDescriptor
+      ),
+      productEventCount: borrowedProductEventBuffer || productEventRows
+        ? resolvedProductEventCount
+        : 0,
+      productEventRowCapacity:
+        resolvedProductEventLiveCountDescriptor?.expectedRowCapacity
+        ?? (borrowedProductEventBuffer || productEventRows
+          ? resolvedProductEventCount
+          : 0),
+      productEventCountAuthority: resolvedProductEventLiveCountDescriptor
+        ? 'gpu-authored-filtered-live-prefix'
+        : 'host-exact-or-sparse-scan-bound',
+      productEventControlAuthentication: resolvedProductEventLiveCountDescriptor
+        ? 'full-eight-word-gpu-commit-gate'
+        : 'not-required-zero-control',
       surfaceTable,
       surfaceRecords: surfaceTable.records,
       surfaceTableSnapshot:

@@ -1020,13 +1020,13 @@ function fallbackReason({
   // Successor lineage is a provenance requirement rather than field maths: the
   // dense path authenticates that the render rows really came from the named
   // Schroeder spatial source family before it will build a field from them.
-  // The source-local path now performs the same validation (below), so the only
-  // thing it still refuses is the combination the dense path also refuses --
-  // branded successor rows arriving together with an unauthenticated
-  // product-event source.
+  // A composite successor field must preserve the product-history commit gate
+  // in its published lineage. The source-local result still publishes only a
+  // non-Schroeder diagnostic lineage, so route every branded composite through
+  // the dense builder, which authenticates and retains both source families.
   if (schroederSpatialSourceFamily
     && (productEventRows || productEventBuffer || finiteNumber(productEventCount, 0) > 0)) {
-    return 'successor-lineage-forbids-unauthenticated-product-events';
+    return 'successor-composite-product-events-require-dense-authenticated-lineage';
   }
   // Only production publishes into a caller-owned pooled buffer. Shadow builds
   // its own so a comparison against the dense field cannot disturb what the

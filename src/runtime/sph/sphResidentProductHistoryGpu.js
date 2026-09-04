@@ -198,7 +198,7 @@ export function registerResidentProductEventCountAuthority(handle, {
     device,
     productEventBuffer: handle.productEventBuffer,
     authority,
-    state: { revoked: false }
+    state: { retiring: false, revoked: false }
   });
   residentProductEventCountAuthorities.set(handle, record);
   handle.productEventLiveCountAuthority = authority;
@@ -209,15 +209,17 @@ export function registerResidentProductEventCountAuthority(handle, {
   return authority;
 }
 
-export function resolveResidentProductEventCountAuthority(
+function residentProductEventCountAuthorityRecord(
   handle,
-  device = null
+  device = null,
+  { allowRetiring = false } = {}
 ) {
   const record = residentProductEventCountAuthorities.get(handle);
   const authority = record?.authority;
   if (
     !record
     || record.state.revoked
+    || (record.state.retiring && !allowRetiring)
     || record.handle !== handle
     || handle?.productEventLiveCountAuthority !== authority
     || handle?.productEventBuffer !== record.productEventBuffer
@@ -229,7 +231,34 @@ export function resolveResidentProductEventCountAuthority(
   ) {
     return null;
   }
-  return authority;
+  return record;
+}
+
+export function resolveResidentProductEventCountAuthority(
+  handle,
+  device = null
+) {
+  return residentProductEventCountAuthorityRecord(handle, device)?.authority
+    ?? null;
+}
+
+export function retireResidentProductEventCountAuthority(handle) {
+  const record = residentProductEventCountAuthorities.get(handle);
+  if (
+    !record
+    || record.handle !== handle
+    || record.state.revoked
+    || record.state.retiring
+  ) {
+    return false;
+  }
+  record.state.retiring = true;
+  if (handle?.productEventLiveCountAuthority === record.authority) {
+    handle.productEventRowCountAuthority =
+      'gpu-authored-filtered-live-prefix-retiring';
+    handle.productEventRowCountHostKnown = false;
+  }
+  return true;
 }
 
 export function revokeResidentProductEventCountAuthority(handle) {
@@ -310,16 +339,20 @@ export function validateProductEventLiveCountCopyDescriptor(
   } = {}
 ) {
   const record = residentProductEventCountCopyDescriptors.get(descriptor);
+  const authorityRecord = record
+    ? residentProductEventCountAuthorityRecord(
+        record.handle,
+        record.device,
+        { allowRetiring: true }
+      )
+    : null;
   if (
     !record
     || !Object.isFrozen(descriptor)
     || (handle != null && record.handle !== handle)
     || (device != null && record.device !== device)
     || record.handle?.productEventBuffer !== record.productEventBuffer
-    || resolveResidentProductEventCountAuthority(
-      record.handle,
-      record.device
-    ) !== record.authority
+    || authorityRecord?.authority !== record.authority
   ) {
     return false;
   }

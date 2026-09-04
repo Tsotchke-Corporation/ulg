@@ -1,8 +1,14 @@
 import {
+  SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
   buildSphRenderFieldWebGpu,
   extractSphRenderRowsWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
+import {
+  productEventLiveCountCopyDescriptor,
+  residentProductEventCountAuthorityRegistered,
+  validateProductEventLiveCountCopyDescriptor
+} from '../runtime/sph/sphResidentProductHistoryGpu.js';
 import {
   bindUlgWebGpuMarchingCubesVolumeSuccessorLineage,
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
@@ -170,6 +176,108 @@ function isGpuBufferLike(value) {
       || typeof value.getMappedRange === 'function'
     )
   );
+}
+
+export function resolveWorkerOwnedIsosurfaceProductEventSource({
+  device,
+  retained
+} = {}) {
+  const source = retained?.residentProductMass ?? null;
+  if (!source) {
+    return Object.freeze({
+      productEventBuffer: null,
+      productEventSource: null,
+      productEventCount: 0,
+      productEventLiveCountDescriptor: null
+    });
+  }
+  const productEventBuffer = source.productEventBuffer ?? null;
+  const declaredRowCount = Number(source.productEventRowCount);
+  const declaredRowCapacity = Number(
+    source.productEventRowCapacity ?? source.productEventRowCount
+  );
+  const advertisesProductEvents = Boolean(
+    productEventBuffer
+    || source.productEventLiveCountAuthority
+    || residentProductEventCountAuthorityRegistered(source)
+    || (Number.isFinite(declaredRowCount) && declaredRowCount > 0)
+    || (Number.isFinite(declaredRowCapacity) && declaredRowCapacity > 0)
+  );
+  if (!advertisesProductEvents) {
+    return Object.freeze({
+      productEventBuffer: null,
+      productEventSource: null,
+      productEventCount: 0,
+      productEventLiveCountDescriptor: null
+    });
+  }
+  const descriptor = productEventBuffer
+    ? productEventLiveCountCopyDescriptor(source, device)
+    : null;
+  const rowCapacity = descriptor?.expectedRowCapacity ?? 0;
+  const requiredByteLength = rowCapacity
+    * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  if (
+    source.productEventBufferRetained !== true
+    || !productEventBuffer
+    || !descriptor
+    || !validateProductEventLiveCountCopyDescriptor(
+      descriptor,
+      { handle: source, device }
+    )
+    || descriptor.hostObserved !== false
+    || !Number.isSafeInteger(rowCapacity)
+    || rowCapacity <= 0
+    || descriptor.rowCapacity !== rowCapacity
+    || descriptor.expectedRowStrideVec4
+      !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4
+    || descriptor.rowStrideFloats !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+    || !Number.isSafeInteger(declaredRowCount)
+    || declaredRowCount !== rowCapacity
+    || !Number.isSafeInteger(declaredRowCapacity)
+    || declaredRowCapacity !== rowCapacity
+    || !(Number(productEventBuffer.size) >= requiredByteLength)
+  ) {
+    throw new TypeError(
+      'worker-owned isosurface requires an exact retained product-event buffer and authenticated GPU live-count capacity'
+    );
+  }
+  return Object.freeze({
+    productEventBuffer,
+    productEventSource: source,
+    productEventCount: rowCapacity,
+    productEventLiveCountDescriptor: descriptor
+  });
+}
+
+function beginWorkerOwnedIsosurfaceProductEventSourceBorrow(source) {
+  if (!source) return null;
+  if (!Object.hasOwn(source, '__ulgActiveBorrowCount')) {
+    throw new TypeError(
+      'worker-owned isosurface requires a borrowable retained product-event source'
+    );
+  }
+  const previousCount = Math.max(
+    0,
+    Math.floor(Number(source.__ulgActiveBorrowCount) || 0)
+  );
+  source.__ulgActiveBorrowCount = previousCount + 1;
+  if (Number(source.__ulgActiveBorrowCount) !== previousCount + 1) {
+    throw new TypeError(
+      'worker-owned isosurface could not pin its retained product-event source'
+    );
+  }
+  let released = false;
+  return () => {
+    if (released) return false;
+    released = true;
+    source.__ulgActiveBorrowCount = Math.max(
+      0,
+      (Number(source.__ulgActiveBorrowCount) || 0) - 1
+    );
+    return true;
+  };
 }
 
 function finiteVector(value, length) {
@@ -429,6 +537,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   getFramebufferEpoch = null,
   nextPresentationQueueCompletionSerial = null,
   captureRenderRows = extractSphRenderRowsWebGpu,
+  buildRenderField = buildSphRenderFieldWebGpu,
   buildPresentationFrame = null
 } = {}) {
   if (!device?.createBuffer || !device?.queue?.submit) {
@@ -494,6 +603,12 @@ export function createWorkerOwnedIsosurfacePresenter({
         captured.destroyRenderRowsBuffer?.();
       }
     });
+  };
+
+  const releaseProductEventSourceBorrow = (job) => {
+    if (!job || job.productEventSourceBorrowReleased) return false;
+    job.productEventSourceBorrowReleased = true;
+    return job.releaseProductEventSourceBorrow?.() === true;
   };
 
   const releaseFrame = (frame, reason) => {
@@ -909,7 +1024,8 @@ export function createWorkerOwnedIsosurfacePresenter({
       * SPH_GPU_RENDER_FIELD_CELL_FLOATS
       * Float32Array.BYTES_PER_ELEMENT;
     const targetFieldRowsBuffer = await ensureFieldRowsBuffer(requiredFieldBytes);
-    const renderField = await buildSphRenderFieldWebGpu({
+    const productEvents = job.productEvents;
+    const renderField = await buildRenderField({
       device,
       renderRows: captured.renderRows,
       renderRowsBuffer: captured.renderRowsBuffer,
@@ -917,7 +1033,11 @@ export function createWorkerOwnedIsosurfacePresenter({
       schroederSpatialSourceFamily: captured.schroederSpatialSourceFamily,
       surfaceTable: job.request.surfaceTable,
       particleCount: captured.particleCount,
-      productEventCount: 0,
+      productEventBuffer: productEvents.productEventBuffer,
+      productEventSource: productEvents.productEventSource,
+      productEventCount: productEvents.productEventCount,
+      productEventLiveCountDescriptor:
+        productEvents.productEventLiveCountDescriptor,
       fieldPadding: Number(job.request.fieldPadding),
       refEdgeM: Number(job.request.refEdgeM),
       renderSmearDtS: Math.max(0, Number(job.request.renderSmearDtS) || 0),
@@ -929,6 +1049,11 @@ export function createWorkerOwnedIsosurfacePresenter({
       targetFieldRowsBuffer,
       targetFieldRowsBufferByteLength: fieldRowsBufferByteLength
     });
+    // buildRenderField resolves only after its same-device queue submission.
+    // The immutable product source may be recycled by the next continuation
+    // after that ordered consumer boundary, but not while this job is queued
+    // or the render-field submission is still being assembled.
+    releaseProductEventSourceBorrow(job);
     releaseCapturedRows(captured, 'worker-isosurface-render-field-submitted');
     job.capturedReleased = true;
 
@@ -1221,6 +1346,7 @@ export function createWorkerOwnedIsosurfacePresenter({
           if (captured && !job.capturedReleased) {
             releaseCapturedRows(captured, 'worker-isosurface-capture-retired');
           }
+          releaseProductEventSourceBorrow(job);
           activeJob = null;
         }
       }
@@ -1241,6 +1367,7 @@ export function createWorkerOwnedIsosurfacePresenter({
 
   const retireQueuedJob = (job, reason) => {
     if (!job) return;
+    releaseProductEventSourceBorrow(job);
     void job.capturePromise.then((captured) => {
       releaseCapturedRows(captured, 'worker-isosurface-queued-job-superseded');
     }).catch(() => {});
@@ -1382,6 +1509,29 @@ export function createWorkerOwnedIsosurfacePresenter({
       generation += 1;
       const jobGeneration = generation;
       const captureInvalidationEpoch = invalidationEpoch;
+      let productEvents;
+      let releaseProductEventBorrow = null;
+      try {
+        productEvents = resolveWorkerOwnedIsosurfaceProductEventSource({
+          device,
+          retained
+        });
+        releaseProductEventBorrow =
+          beginWorkerOwnedIsosurfaceProductEventSourceBorrow(
+            productEvents.productEventSource
+          );
+      } catch (error) {
+        return presentationReceiptBase({
+          status: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS,
+          reason: error instanceof Error ? error.message : String(error),
+          requestGeneration: jobGeneration,
+          sourceCapturedBeforePhysicsContinuation: false,
+          admission,
+          ...receiptFields,
+          ...compactError(error),
+          updatedAtMs: nowMs()
+        });
+      }
       let captured;
       captureInFlightCount += 1;
       try {
@@ -1401,6 +1551,7 @@ export function createWorkerOwnedIsosurfacePresenter({
         });
       } catch (error) {
         finishCapture();
+        releaseProductEventBorrow?.();
         return presentationReceiptBase({
           status: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS,
           reason: error instanceof Error ? error.message : String(error),
@@ -1430,6 +1581,7 @@ export function createWorkerOwnedIsosurfacePresenter({
         && resizeRetryInvalidationEpoch === invalidationEpoch
       );
       if (captureInvalidated && !resizeRetryAllowed) {
+        releaseProductEventBorrow?.();
         releaseCapturedRows(
           captured,
           'worker-isosurface-capture-invalidated-before-enqueue'
@@ -1453,6 +1605,9 @@ export function createWorkerOwnedIsosurfacePresenter({
         admission,
         sphStep,
         receiptFields,
+        productEvents,
+        releaseProductEventSourceBorrow: releaseProductEventBorrow,
+        productEventSourceBorrowReleased: false,
         capturePromise: Promise.resolve(captured),
         invalidationEpoch: resizeRetryAllowed
           ? invalidationEpoch

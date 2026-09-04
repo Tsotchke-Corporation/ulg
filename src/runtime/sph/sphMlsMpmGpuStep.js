@@ -166,6 +166,7 @@ import {
   registerResidentProductEventCountAuthority,
   residentProductEventCountAuthorityRegistered,
   resolveResidentProductEventCountAuthority,
+  retireResidentProductEventCountAuthority,
   revokeResidentProductEventCountAuthority,
   SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_OFFSETS,
   SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES,
@@ -30566,6 +30567,7 @@ function attachResidentProductHistoryArenaHandle(handle, slot, {
       record.activeBorrowCount = nextCount;
       slot.activeBorrowCount = Math.max(0, slot.activeBorrowCount + delta);
       if (record.released && record.activeBorrowCount === 0) {
+        revokeResidentProductEventCountAuthority(handle);
         releaseResidentProductHistoryGpuCountRecord(record.gpuCountRecord);
       }
       if (slot.activeBorrowCount === 0) {
@@ -30580,7 +30582,11 @@ function releaseResidentProductHistoryArenaHandle(handle) {
   const record = residentProductHistoryArenaHandleRecords.get(handle);
   if (!record || record.released) return;
   record.released = true;
-  revokeResidentProductEventCountAuthority(handle);
+  if (record.activeBorrowCount > 0) {
+    retireResidentProductEventCountAuthority(handle);
+  } else {
+    revokeResidentProductEventCountAuthority(handle);
+  }
   const { slot, token, leaseSerial } = record;
   if (record.activeBorrowCount === 0) {
     releaseResidentProductHistoryGpuCountRecord(record.gpuCountRecord);

@@ -19,7 +19,11 @@ import {
   gasMixtureThermal
 } from './statisticalMechanics.js';
 import { latentHeatOfFusionJPerKg } from './phaseTransitions.js';
-import { createDerivedMaterialClosures } from './materialDerivation.js';
+import {
+  createH2oDispersedMediumOpticalClosure,
+  createDerivedMaterialClosures,
+  h2oDispersedMediumOpticalPropertyProvenanceEntries
+} from './materialDerivation.js';
 import {
   PROPERTY_DERIVATION_STATUS as DS,
   assertNoUnprovenancedMaterialProperties,
@@ -115,6 +119,9 @@ function materialProperties(materialKey) {
   if (materialKey === 'h2o') {
     return withPropertyProvenance({
       molarMassKgPerMol: formulaMolarMassKgPerMol({ 1: 2, 8: 1 }),
+      dispersedMediumOpticalClosure: createH2oDispersedMediumOpticalClosure({
+        condensedDensityKgPerM3: m.densityKgPerM3.liquid
+      }),
       // Elastic moduli (Pa): bulk modulus K sets the sound speed c=√(K/ρ) and the EOS stiffness;
       // shear modulus μ sets a solid's rigidity (a liquid has μ=0 → no shear → flows). Measured
       // reference values (closureBacked, not yet ab-initio — the elastic-tensor-from-DFT track), so
@@ -149,9 +156,18 @@ function materialProperties(materialKey) {
           status: DS.PHYSICAL_LAW,
           source: 'continuum-mechanics',
           method: 'fluids have no static shear modulus'
+        }),
+        ...h2oDispersedMediumOpticalPropertyProvenanceEntries({
+          densitySource: 'reference-material-fixture',
+          densityMethod:
+            'reference-fixture liquid-water density copied into the dispersed-condensate closure',
+          densityInputs: ['REFERENCE_MATERIALS.h2o.densityKgPerM3.liquid']
         })
       ],
-      notes: ['H2O still uses reference phase/EOS constants; the ledger marks these as fallback instead of lower-level-derived.']
+      notes: [
+        'H2O still uses reference phase/EOS constants; the ledger marks these as fallback instead of lower-level-derived.',
+        'Dispersed H2O optics are explicitly unvalidated and resolution-dependent; no droplet radius or size distribution is invented.'
+      ]
     });
   }
   if (materialKey === 'fe') {

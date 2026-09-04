@@ -108,6 +108,29 @@ function transitionPropertyPaths(properties) {
   return paths;
 }
 
+function dispersedMediumOpticalClosurePropertyPaths(properties) {
+  const closure = properties.dispersedMediumOpticalClosure;
+  if (!closure || typeof closure !== 'object' || Array.isArray(closure)) return [];
+  const paths = [];
+  for (const key of [
+    'schema',
+    'morphologyModel',
+    'morphologyModelId',
+    'condensedDensityKgPerM3',
+    'scatteringEfficiencyQsca',
+    'absorptionEfficiencyQabs',
+    'asymmetryFactorG',
+    'effectiveRadiusM',
+    'provenance',
+    'scientificValidation'
+  ]) {
+    if (closure[key] !== undefined && closure[key] !== null) {
+      paths.push(`dispersedMediumOpticalClosure.${key}`);
+    }
+  }
+  return paths;
+}
+
 export function trackedMaterialPropertyPaths(properties = {}) {
   const paths = [];
   for (const key of [
@@ -124,6 +147,7 @@ export function trackedMaterialPropertyPaths(properties = {}) {
   }
   paths.push(...phasePropertyPaths(properties));
   paths.push(...transitionPropertyPaths(properties));
+  paths.push(...dispersedMediumOpticalClosurePropertyPaths(properties));
   return paths;
 }
 

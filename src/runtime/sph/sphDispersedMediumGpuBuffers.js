@@ -12,6 +12,9 @@ import {
   webGpuBufferDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import {
+  consumeSphDispersedMediumOpticsProducerAdoptionClaim
+} from './sphDispersedMediumOpticsProducerGpu.js';
 
 const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
@@ -19,6 +22,7 @@ const GPU_BUFFER_USAGE = {
 const EXACT_F32_INTEGER_MAX = 0x00ff_ffff;
 const authorityRecords = new WeakMap();
 const uploadRecords = new WeakMap();
+const bufferRecords = new WeakMap();
 
 function canonicalParticleLineage(lineage, particleCount) {
   if (lineage == null) return null;
@@ -343,6 +347,22 @@ function validatePackedRows(packed) {
   }
 }
 
+function privatePackedRowsSnapshot(packed) {
+  validatePackedRows(packed);
+  const snapshot = Object.freeze({
+    ...packed,
+    readyOpticalStateIds: Object.freeze([
+      ...packed.readyOpticalStateIds
+    ]),
+    rowLayout: Object.freeze([
+      ...SPH_DISPERSED_MEDIUM_OPTICS_ROW_LAYOUT
+    ]),
+    rows: packed.rows.slice()
+  });
+  validatePackedRows(snapshot);
+  return snapshot;
+}
+
 /**
  * Build the optional dense particle-aligned optics sidecar. A simulation with
  * no advertised dispersedMediumOptics descriptors returns null and allocates
@@ -462,6 +482,22 @@ function exactUploadDescriptorMatchesRecord(
   );
 }
 
+function exactLiveUploadRecordStateMatches(record, device = record?.device) {
+  return Boolean(
+    record
+    && record.active === true
+    && record.destroyed !== true
+    && record.destroyRequested !== true
+    && record.deviceLost !== true
+    && record.ownsBuffer === true
+    && record.device === device
+    && uploadRecords.get(record.upload) === record
+    && authorityRecords.get(record.authority) === record
+    && bufferRecords.get(record.buffer) === record
+    && webGpuBufferDevice(record.buffer) === device
+  );
+}
+
 function exactParticleLineageMatches(record, expectedLineage) {
   if (!record?.particleLineage || expectedLineage == null) return false;
   let expected;
@@ -494,7 +530,100 @@ export function uploadSphDispersedMediumGpuBuffers(
       'uploadSphDispersedMediumGpuBuffers requires a WebGPU-like device'
     );
   }
+  // Capture the declaration exactly once before allocating or copying.  The
+  // same private rows must describe both the resident bytes and the registry
+  // record even if a WebGPU-like unmap hook mutates the caller's source.
+  const packedSnapshot = privatePackedRowsSnapshot(packed);
+  let rawBuffer = null;
+  try {
+    rawBuffer = device.createBuffer({
+      label,
+      size: packedSnapshot.bufferByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE,
+      mappedAtCreation: true
+    });
+    if (
+      typeof rawBuffer?.getMappedRange !== 'function'
+      || typeof rawBuffer?.unmap !== 'function'
+    ) {
+      throw new TypeError(
+        'dispersed-medium upload requires mapped-at-creation buffer initialization'
+      );
+    }
+    const mappedRange = rawBuffer.getMappedRange(
+      0,
+      packedSnapshot.bufferByteLength
+    );
+    if (
+      !(mappedRange instanceof ArrayBuffer)
+      || mappedRange.byteLength < packedSnapshot.bufferByteLength
+    ) {
+      throw new TypeError(
+        'dispersed-medium mapped-at-creation range must cover the exact packed rows'
+      );
+    }
+    new Uint8Array(mappedRange, 0, packedSnapshot.bufferByteLength).set(
+      new Uint8Array(
+        packedSnapshot.rows.buffer,
+        packedSnapshot.rows.byteOffset,
+        packedSnapshot.rows.byteLength
+      )
+    );
+    rawBuffer.unmap();
+    return registerSphDispersedMediumGpuBuffer(
+      device,
+      packedSnapshot,
+      rawBuffer,
+      {
+        particleLineage,
+        particleSourceFamily,
+        particleSourceFamilyRegistrar
+      }
+    );
+  } catch (error) {
+    try {
+      rawBuffer?.destroy?.();
+    } catch {
+      // Preserve the construction error after one best-effort rollback.
+    }
+    throw error;
+  }
+}
+
+function registerSphDispersedMediumGpuBuffer(
+  device,
+  packed,
+  rawBuffer,
+  {
+    particleLineage = null,
+    particleSourceFamily = null,
+    particleSourceFamilyRegistrar = null,
+    producerAdoptionDeclaration = null
+  } = {}
+) {
+  // `packed` is an internal private snapshot captured by the caller before
+  // the associated allocation was initialized.  Revalidate it here, but do
+  // not resnapshot after bytes have already been copied or encoded.
   validatePackedRows(packed);
+  if (!exactObjectReference(rawBuffer)) {
+    throw new TypeError(
+      'dispersed-medium buffer registration requires one exact GPU buffer'
+    );
+  }
+  if (bufferRecords.has(rawBuffer)) {
+    throw new TypeError(
+      'dispersed-medium buffer registration refuses an already registered allocation'
+    );
+  }
+  if (
+    Number(rawBuffer.size) !== packed.bufferByteLength
+    || !Number.isInteger(Number(rawBuffer.usage))
+    || (Number(rawBuffer.usage) & GPU_BUFFER_USAGE.STORAGE) === 0
+  ) {
+    throw new RangeError(
+      'dispersed-medium buffer registration requires exact byte length and STORAGE usage'
+    );
+  }
   const boundParticleLineage = canonicalParticleLineage(
     particleLineage,
     packed.particleCount
@@ -515,47 +644,22 @@ export function uploadSphDispersedMediumGpuBuffers(
       'dispersed-medium particle source family requires an opaque continuation registrar'
     );
   }
-  let rawBuffer = null;
-  try {
-    rawBuffer = device.createBuffer({
-      label,
-      size: packed.bufferByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE,
-      mappedAtCreation: true
-    });
-    if (
-      typeof rawBuffer?.getMappedRange !== 'function'
-      || typeof rawBuffer?.unmap !== 'function'
-    ) {
-      throw new TypeError(
-        'dispersed-medium upload requires mapped-at-creation buffer initialization'
-      );
-    }
-    const mappedRange = rawBuffer.getMappedRange(0, packed.bufferByteLength);
-    if (
-      !(mappedRange instanceof ArrayBuffer)
-      || mappedRange.byteLength < packed.bufferByteLength
-    ) {
-      throw new TypeError(
-        'dispersed-medium mapped-at-creation range must cover the exact packed rows'
-      );
-    }
-    new Uint8Array(mappedRange, 0, packed.bufferByteLength).set(
-      new Uint8Array(
-        packed.rows.buffer,
-        packed.rows.byteOffset,
-        packed.rows.byteLength
-      )
+  const buffer = tagWebGpuBufferDevice(rawBuffer, device);
+  if (webGpuBufferDevice(buffer) !== device) {
+    throw new TypeError(
+      'dispersed-medium buffer registration requires an exact same-device allocation'
     );
-    rawBuffer.unmap();
-    const buffer = tagWebGpuBufferDevice(rawBuffer, device);
-    // The published buffer deliberately has no COPY_DST usage, so host code
-    // cannot rewrite authenticated rows after publication with queue.writeBuffer.
-    // STORAGE remains required for future same-device compute producers. Their
-    // serialized dispatch/receipt chain is the trusted content boundary: this
-    // allocation authority authenticates identity, layout, lineage, and
-    // lifetime, not the semantic result of an arbitrary storage-writing kernel.
-    const authority = Object.freeze({
+  }
+  let authority = null;
+  let upload = null;
+  let record = null;
+  try {
+    // The child descriptor never exposes a host mutation method. Same-device
+    // compute producers may initialize moment lanes before this registration;
+    // their serialized dispatch/receipt chain is the semantic content boundary.
+    // This allocation authority authenticates identity, layout, lineage, and
+    // lifetime rather than blessing an arbitrary storage-writing kernel.
+    authority = Object.freeze({
       schema: ULG_SPH_DISPERSED_MEDIUM_OPTICS_AUTHORITY_SCHEMA,
       status: 'sph-dispersed-medium-optics-authority-ready',
       deviceId: webGpuDeviceId(device),
@@ -572,7 +676,7 @@ export function uploadSphDispersedMediumGpuBuffers(
       rowStrideBytes: packed.rowStrideBytes,
       bufferByteLength: packed.bufferByteLength
     });
-    const upload = {
+    upload = {
       schema: ULG_SPH_DISPERSED_MEDIUM_OPTICS_BUFFER_SET_SCHEMA,
       status: 'webgpu-uploaded',
       sourceSchema: packed.schema,
@@ -591,7 +695,7 @@ export function uploadSphDispersedMediumGpuBuffers(
       ownsBuffer: true,
       hostHotLoopReadback: false
     };
-    const record = {
+    record = {
       authority,
       upload,
       device,
@@ -616,6 +720,7 @@ export function uploadSphDispersedMediumGpuBuffers(
       particleSourceFamilies: new WeakMap(),
       particleSourceFamilyRegistrar:
         boundParticleSourceFamily ? particleSourceFamilyRegistrar : null,
+      producerAdoptionDeclaration,
       deviceLost: false
     };
     if (boundParticleSourceFamily) {
@@ -623,6 +728,7 @@ export function uploadSphDispersedMediumGpuBuffers(
     }
     authorityRecords.set(authority, record);
     uploadRecords.set(upload, record);
+    bufferRecords.set(buffer, record);
     if (device.lost?.then) {
       Promise.resolve(device.lost).then(() => {
         record.deviceLost = true;
@@ -634,13 +740,184 @@ export function uploadSphDispersedMediumGpuBuffers(
     }
     return upload;
   } catch (error) {
-    try {
-      rawBuffer?.destroy?.();
-    } catch {
-      // Preserve the construction error after one best-effort rollback.
-    }
+    if (authority) authorityRecords.delete(authority);
+    if (upload) uploadRecords.delete(upload);
+    bufferRecords.delete(buffer);
     throw error;
   }
+}
+
+function rollbackSphDispersedMediumGpuBufferRegistration(
+  upload,
+  expectedBuffer
+) {
+  const record = uploadRecords.get(upload);
+  if (
+    !record
+    || record.upload !== upload
+    || record.buffer !== expectedBuffer
+    || record.activeBorrowCount !== 0
+    || record.destroyRequested
+    || record.destroyed
+    || record.deviceLost
+    || record.ownsBuffer !== true
+    || !exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    || !exactLiveUploadRecordStateMatches(record)
+  ) return false;
+  authorityRecords.delete(record.authority);
+  uploadRecords.delete(upload);
+  bufferRecords.delete(record.buffer);
+  record.active = false;
+  record.destroyed = true;
+  record.destroyRequested = false;
+  record.ownsBuffer = false;
+  upload.ownsBuffer = false;
+  upload.destroyPending = false;
+  upload.destroyed = true;
+  return true;
+}
+
+/**
+ * Consume one producer-issued claim and register its exact output as a new
+ * dispersed-medium child. There is deliberately no public raw-buffer adoption
+ * path: semantic authority comes from the producer's private one-shot claim,
+ * not from caller-supplied metadata that merely has the right shape.
+ *
+ * `publish` may attach the registered child to a parent lifecycle. It must
+ * register every parent revoker before performing the corresponding mutation;
+ * producer-side failure then runs those revokers before unregistering the
+ * child, without destroying the buffer that the producer still owns.
+ */
+export function consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(
+  claim,
+  options = null
+) {
+  // Do not read caller-owned option fields before the producer has locked its
+  // one-shot claim. An eager destructure here lets a Proxy getter re-enter and
+  // consume the claim while the outer invocation still believes it owns
+  // preflight.
+  const producerOptions = Object.create(null);
+  Object.defineProperties(producerOptions, {
+    device: {
+      enumerable: true,
+      get: () => options?.device
+    },
+    outputBuffer: {
+      enumerable: true,
+      get: () => options?.outputBuffer
+    },
+    particleSourceFamily: {
+      enumerable: true,
+      get: () => options?.particleSourceFamily ?? null
+    },
+    adopt: {
+      enumerable: true,
+      value(context) {
+        // Producer adoption is already in progress before this callback runs,
+        // so a hostile lower-option getter can no longer win a nested consume.
+        // Bind registration to the producer's private post-transfer family,
+        // not to a second read of a mutable caller getter after preflight.
+        const particleSourceFamily = context.particleSourceFamily;
+        const requestedParticleLineage = canonicalParticleLineage(
+          options?.particleLineage,
+          particleSourceFamily?.particleCount
+        );
+        if (
+          !requestedParticleLineage
+          || requestedParticleLineage.particleCount
+            !== particleSourceFamily.particleCount
+          || requestedParticleLineage.topologyEpoch
+            !== particleSourceFamily.topologyEpoch
+          || requestedParticleLineage.identityRevision
+            !== particleSourceFamily.identityRevision
+          || requestedParticleLineage.identityBuffer
+            !== particleSourceFamily.identityBuffer
+        ) {
+          throw new TypeError(
+            'dispersed-medium producer adoption requires the exact post-transfer particle lineage'
+          );
+        }
+        const particleLineage = particleSourceFamily;
+        const particleSourceFamilyRegistrar =
+          options?.particleSourceFamilyRegistrar ?? null;
+        const publish = options?.publish ?? null;
+        if (publish != null && typeof publish !== 'function') {
+          throw new TypeError(
+            'dispersed-medium producer adoption publish hook must be a function'
+          );
+        }
+        const adoptionDeclaration = privatePackedRowsSnapshot(
+          context.adoptionDeclaration
+        );
+        const upload = registerSphDispersedMediumGpuBuffer(
+          context.device,
+          adoptionDeclaration,
+          context.outputBuffer,
+          {
+            particleLineage,
+            particleSourceFamily,
+            particleSourceFamilyRegistrar,
+            producerAdoptionDeclaration: context.adoptionDeclaration
+          }
+        );
+        const publicationRollbacks = [];
+        let rollbackComplete = false;
+        let publicationOpen = true;
+        const rollback = () => {
+          if (rollbackComplete) return true;
+          let complete = true;
+          for (
+            let index = publicationRollbacks.length - 1;
+            index >= 0;
+            index -= 1
+          ) {
+            try {
+              if (publicationRollbacks[index]() !== true) complete = false;
+            } catch {
+              complete = false;
+            }
+          }
+          if (!rollbackSphDispersedMediumGpuBufferRegistration(
+            upload,
+            context.outputBuffer
+          )) complete = false;
+          rollbackComplete = complete;
+          return complete;
+        };
+        context.registerRollback(rollback);
+        const registerPublicationRollback = (revoker) => {
+          if (!publicationOpen || typeof revoker !== 'function') {
+            throw new TypeError(
+              'dispersed-medium parent publication rollback must be registered while publication is open'
+            );
+          }
+          publicationRollbacks.push(revoker);
+          return true;
+        };
+        const published = publish
+          ? publish(Object.freeze({
+            upload,
+            registerPublicationRollback
+          }))
+          : upload;
+        publicationOpen = false;
+        if (published !== upload) {
+          throw new TypeError(
+            'dispersed-medium producer adoption must publish the exact registered child'
+          );
+        }
+        return { adoptedOutput: upload, rollback };
+      }
+    }
+  });
+  return consumeSphDispersedMediumOpticsProducerAdoptionClaim(
+    claim,
+    producerOptions
+  );
 }
 
 export function registerSphDispersedMediumGpuBufferParticleLineage(
@@ -664,6 +941,11 @@ export function registerSphDispersedMediumGpuBufferParticleLineage(
     particleLineage,
     record.particleCount
   );
+  if (!exactLiveUploadRecordStateMatches(record)) {
+    throw new TypeError(
+      'dispersed-medium particle lineage requires one live exact sidecar'
+    );
+  }
   if (record.particleLineage) {
     const prior = record.particleLineage;
     if (
@@ -687,17 +969,23 @@ export function sphDispersedMediumGpuBufferParticleLineageMatches(
   expectedLineage
 ) {
   const record = uploadRecords.get(upload);
+  if (
+    !record
+    || !exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    || !exactLiveUploadRecordStateMatches(record)
+  ) return false;
   return Boolean(
-    record
+    exactParticleLineageMatches(record, expectedLineage)
     && exactUploadDescriptorMatchesRecord(
       record,
       upload,
       { requireParticleLineage: true }
     )
-    && record.active
-    && !record.destroyed
-    && !record.deviceLost
-    && exactParticleLineageMatches(record, expectedLineage)
+    && exactLiveUploadRecordStateMatches(record)
   );
 }
 
@@ -732,7 +1020,15 @@ export function sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
   } catch {
     return false;
   }
-  return particleSourceFamilyMatches(record, sourceFamily);
+  return Boolean(
+    particleSourceFamilyMatches(record, sourceFamily)
+    && exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    && exactLiveUploadRecordStateMatches(record)
+  );
 }
 
 /**
@@ -784,12 +1080,25 @@ export function registerSphDispersedMediumGpuBufferParticleSourceFamilyContinuat
       'dispersed-medium source-family continuation requires an authenticated predecessor family'
     );
   }
+  if (
+    !exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    || !exactLiveUploadRecordStateMatches(record)
+  ) {
+    throw new TypeError(
+      'dispersed-medium source-family continuation requires one live child eligible for a new owner'
+    );
+  }
   return registerParticleSourceFamily(record, target);
 }
 
 /**
- * Ordinary validation remains available while a pinned child drains, but a
- * pending destroy must never acquire another parent or owner.
+ * A pending destroy may only finish work through an already-issued private
+ * borrow. It is no longer generally valid and must never acquire another
+ * borrow, parent, snapshot, or owner.
  */
 export function sphDispersedMediumGpuBufferNewOwnerEligible(upload) {
   const record = uploadRecords.get(upload);
@@ -800,10 +1109,7 @@ export function sphDispersedMediumGpuBufferNewOwnerEligible(upload) {
       upload,
       { requireParticleLineage: true }
     )
-    && record.active
-    && !record.destroyed
-    && !record.destroyRequested
-    && !record.deviceLost
+    && exactLiveUploadRecordStateMatches(record)
   );
 }
 
@@ -835,6 +1141,12 @@ export function beginSphDispersedMediumGpuBufferBorrow(device, upload) {
         requireParticleLineage: true
       }
     )
+    || !exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    || !exactLiveUploadRecordStateMatches(record, device)
   ) {
     throw new TypeError(
       'dispersed-medium borrow requires one live exact same-device sidecar'
@@ -860,8 +1172,9 @@ export function validateSphDispersedMediumGpuBufferAuthority(
 ) {
   const record = authorityRecords.get(authority);
   const has = (key) => Object.prototype.hasOwnProperty.call(expectations, key);
-  return Boolean(
-    record
+  try {
+    return Boolean(
+      record
     && record.authority === authority
     && Object.isFrozen(authority)
     && authority.schema === ULG_SPH_DISPERSED_MEDIUM_OPTICS_AUTHORITY_SCHEMA
@@ -903,7 +1216,78 @@ export function validateSphDispersedMediumGpuBufferAuthority(
       !has('particleLineage')
       || exactParticleLineageMatches(record, expectations.particleLineage)
     )
-  );
+      && (
+        !has('producerAdoptionDeclaration')
+        || expectations.producerAdoptionDeclaration
+          === record.producerAdoptionDeclaration
+      )
+      // Caller-controlled expectation getters and mutable public descriptor
+      // fields have all been observed now. Reprove both the descriptor and
+      // the module-private allocation state as the terminal checks.
+      && exactUploadDescriptorMatchesRecord(record, record.upload, {
+        requireParticleLineage: expectations.requireParticleLineage === true
+      })
+      && exactLiveUploadRecordStateMatches(record, device)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return a defensive host declaration for one exact privately authenticated
+ * resident sidecar. Moment lanes may be stale by design; the GPU allocation is
+ * their authority, while this snapshot carries the exact private allocation
+ * plus the immutable per-row route declaration needed by the next producer
+ * dispatch. Reading the public descriptor's mutable `buffer` field here would
+ * reopen a getter/TOCTOU substitution path after authority validation.
+ */
+export function snapshotSphDispersedMediumGpuBufferDeclaration(
+  upload,
+  {
+    device,
+    particleSourceFamily
+  } = {}
+) {
+  const record = uploadRecords.get(upload);
+  if (
+    !record
+    || record.upload !== upload
+    || !device
+    || !particleSourceFamily
+    || !validateSphDispersedMediumGpuBufferAuthority(
+      device,
+      record.authority,
+      {
+        upload,
+        buffer: record.buffer,
+        particleCount: record.particleCount,
+        rowCount: record.rowCount,
+        rowStrideFloats: record.rowStrideFloats,
+        bufferByteLength: record.bufferByteLength,
+        particleLineage: particleSourceFamily,
+        requireParticleLineage: true
+      }
+    )
+    || !sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      upload,
+      particleSourceFamily
+    )
+    || !exactUploadDescriptorMatchesRecord(
+      record,
+      upload,
+      { requireParticleLineage: true }
+    )
+    || !exactLiveUploadRecordStateMatches(record, device)
+  ) {
+    throw new TypeError(
+      'dispersed-medium declaration snapshot requires one exact live sidecar and source family'
+    );
+  }
+  return Object.freeze({
+    ...privatePackedRowsSnapshot(record.packed),
+    buffer: record.buffer
+  });
 }
 
 export function destroySphDispersedMediumGpuBuffers(upload) {

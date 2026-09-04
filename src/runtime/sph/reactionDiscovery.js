@@ -37,7 +37,12 @@ import {
 } from '../chemistry/standardFormationEnthalpy.js';
 import { deriveElementProperties } from '../material/elementClosures.js';
 import { deriveCompoundClosure } from '../material/compoundClosure.js';
-import { deriveMaterialProperties, formulaMolarMassKgPerMol, formulaUnitGeometry } from '../material/materialDerivation.js';
+import {
+  H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+  deriveMaterialProperties,
+  formulaMolarMassKgPerMol,
+  formulaUnitGeometry
+} from '../material/materialDerivation.js';
 import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from '../material/materialClosures.js';
 import {
   MaterialFirstPrinciplesResolutionError,
@@ -436,7 +441,10 @@ function requireCompositionFirstPrinciples(key, comp, options = {}) {
   requireFirstPrinciplesMaterialProperties(properties, {
     material: key,
     context: 'reactionDiscovery.materialComposition',
-    allowedFallbackSources: ['material-property-reference-bank']
+    allowedFallbackSources: [
+      'material-property-reference-bank',
+      H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE
+    ]
   });
 }
 

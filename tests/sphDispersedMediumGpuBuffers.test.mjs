@@ -7,12 +7,15 @@ import {
   ULG_SPH_DISPERSED_MEDIUM_OPTICS_BUFFER_SET_SCHEMA,
   ULG_SPH_DISPERSED_MEDIUM_OPTICS_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   beginSphDispersedMediumGpuBufferBorrow,
   buildSphDispersedMediumGpuBuffers,
   destroySphDispersedMediumGpuBuffers,
   registerSphDispersedMediumGpuBufferParticleLineage,
+  snapshotSphDispersedMediumGpuBufferDeclaration,
   sphDispersedMediumGpuBufferParticleLineageMatches,
+  sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
   uploadSphDispersedMediumGpuBuffers,
   validateSphDispersedMediumGpuBufferAuthority
 } from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
@@ -30,7 +33,7 @@ function readyOptics(overrides = {}) {
   };
 }
 
-function fakeDevice({ throwOnWrite = false } = {}) {
+function fakeDevice({ throwOnWrite = false, onUnmap = null } = {}) {
   const writes = [];
   const destroyed = [];
   const device = {
@@ -52,6 +55,7 @@ function fakeDevice({ throwOnWrite = false } = {}) {
               values: Array.from(new Float32Array(mappedBytes))
             });
           }
+          onUnmap?.();
         },
         destroy() {
           destroyed.push(descriptor.label);
@@ -72,6 +76,17 @@ function fakeDevice({ throwOnWrite = false } = {}) {
   };
   return { device, writes, destroyed };
 }
+
+test('dispersed-medium registry exposes no raw GPU-buffer adoption bypass', async () => {
+  const module = await import(
+    '../src/runtime/sph/sphDispersedMediumGpuBuffers.js'
+  );
+  assert.equal('adoptSphDispersedMediumGpuBuffer' in module, false);
+  assert.equal(
+    typeof module.consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer,
+    'function'
+  );
+});
 
 test('dispersed-medium builder preserves the allocation-free absent path', () => {
   assert.equal(buildSphDispersedMediumGpuBuffers([]), null);
@@ -337,6 +352,69 @@ test('dispersed-medium particle lineage is private, exact, and one-time bindable
   );
 });
 
+test('resident declaration snapshots require the exact private source family and remain defensive', () => {
+  const packed = buildSphDispersedMediumGpuBuffers([
+    { dispersedMediumOptics: readyOptics() },
+    {}
+  ]);
+  const { device } = fakeDevice();
+  const identityBuffer = tagWebGpuBufferDevice({}, device);
+  const stateBuffer = tagWebGpuBufferDevice({}, device);
+  const thermoBuffer = tagWebGpuBufferDevice({}, device);
+  const lineage = {
+    particleCount: 2,
+    topologyEpoch: 9,
+    identityRevision: 'resident-declaration-a',
+    identityBuffer
+  };
+  const sourceFamily = {
+    ...lineage,
+    stateBuffer,
+    thermoBuffer
+  };
+  const upload = uploadSphDispersedMediumGpuBuffers(device, packed, {
+    particleLineage: lineage,
+    particleSourceFamily: sourceFamily,
+    particleSourceFamilyRegistrar: Object.freeze(Object.create(null))
+  });
+
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      upload,
+      sourceFamily
+    ),
+    true
+  );
+  const first = snapshotSphDispersedMediumGpuBufferDeclaration(upload, {
+    device,
+    particleSourceFamily: sourceFamily
+  });
+  assert.strictEqual(
+    first.buffer,
+    upload.buffer,
+    'the snapshot must expose the registry-owned allocation for producer binding'
+  );
+  assert.notStrictEqual(first.rows, packed.rows);
+  assert.deepEqual(first.rows, packed.rows);
+  first.rows[0] = 999;
+  const second = snapshotSphDispersedMediumGpuBufferDeclaration(upload, {
+    device,
+    particleSourceFamily: sourceFamily
+  });
+  assert.equal(second.rows[0], packed.rows[0]);
+  assert.throws(
+    () => snapshotSphDispersedMediumGpuBufferDeclaration(upload, {
+      device,
+      particleSourceFamily: {
+        ...sourceFamily,
+        stateBuffer: tagWebGpuBufferDevice({}, device)
+      }
+    }),
+    /exact live sidecar and source family/
+  );
+  assert.equal(destroySphDispersedMediumGpuBuffers(upload), true);
+});
+
 test('dispersed-medium upload defers owner teardown until its exact async borrow releases', () => {
   const packed = buildSphDispersedMediumGpuBuffers([
     { dispersedMediumOptics: readyOptics() }
@@ -360,7 +438,7 @@ test('dispersed-medium upload defers owner teardown until its exact async borrow
     device,
     upload.authority,
     { buffer: upload.buffer, particleCount: 1, rowCount: 1 }
-  ), true);
+  ), false);
   assert.throws(
     () => beginSphDispersedMediumGpuBufferBorrow(device, upload),
     /live exact same-device sidecar/
@@ -396,4 +474,115 @@ test('dispersed-medium upload validates mutable packed rows and rolls back faile
     /write failed/
   );
   assert.deepEqual(failing.destroyed, ['ulg-sph-dispersed-medium-optics']);
+});
+
+test('dispersed-medium upload binds resident bytes and authority to one pre-copy snapshot', () => {
+  const built = buildSphDispersedMediumGpuBuffers([
+    { dispersedMediumOptics: readyOptics({ opticalStateId: 19 }) }
+  ]);
+  const packed = {
+    ...built,
+    readyOpticalStateIds: [...built.readyOpticalStateIds],
+    rows: built.rows.slice()
+  };
+  const { device, writes } = fakeDevice({
+    onUnmap() {
+      packed.rows[2] = 23;
+      packed.readyOpticalStateIds[0] = 23;
+    }
+  });
+  const upload = uploadSphDispersedMediumGpuBuffers(device, packed);
+
+  assert.equal(writes[0].values[2], 19);
+  assert.deepEqual(upload.authority.readyOpticalStateIds, [19]);
+  assert.deepEqual(upload.readyOpticalStateIds, [19]);
+  assert.equal(validateSphDispersedMediumGpuBufferAuthority(
+    device,
+    upload.authority,
+    { upload, buffer: upload.buffer, particleCount: 1, rowCount: 1 }
+  ), true);
+  assert.equal(destroySphDispersedMediumGpuBuffers(upload), true);
+});
+
+test('authority, borrow, and declaration snapshot reject teardown from late caller getters', () => {
+  const makeResident = (suffix) => {
+    const packed = buildSphDispersedMediumGpuBuffers([
+      { dispersedMediumOptics: readyOptics() }
+    ]);
+    const { device, destroyed } = fakeDevice();
+    const identityBuffer = tagWebGpuBufferDevice({}, device);
+    const stateBuffer = tagWebGpuBufferDevice({}, device);
+    const thermoBuffer = tagWebGpuBufferDevice({}, device);
+    const lineage = {
+      particleCount: 1,
+      topologyEpoch: 3,
+      identityRevision: `late-getter-${suffix}`,
+      identityBuffer
+    };
+    const sourceFamily = { ...lineage, stateBuffer, thermoBuffer };
+    const upload = uploadSphDispersedMediumGpuBuffers(device, packed, {
+      particleLineage: lineage,
+      particleSourceFamily: sourceFamily,
+      particleSourceFamilyRegistrar: Object.freeze(Object.create(null))
+    });
+    return { device, destroyed, upload, sourceFamily };
+  };
+
+  const validationCase = makeResident('validation');
+  const lateExpectations = new Proxy({}, {
+    getOwnPropertyDescriptor(target, property) {
+      if (property === 'producerAdoptionDeclaration') {
+        destroySphDispersedMediumGpuBuffers(validationCase.upload);
+      }
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    }
+  });
+  assert.equal(validateSphDispersedMediumGpuBufferAuthority(
+    validationCase.device,
+    validationCase.upload.authority,
+    lateExpectations
+  ), false);
+  assert.equal(validationCase.upload.destroyed, true);
+  assert.equal(validationCase.destroyed.length, 1);
+
+  const borrowCase = makeResident('borrow');
+  const borrowBuffer = borrowCase.upload.buffer;
+  Object.defineProperty(borrowCase.upload, 'buffer', {
+    configurable: true,
+    get() {
+      destroySphDispersedMediumGpuBuffers(borrowCase.upload);
+      return borrowBuffer;
+    }
+  });
+  assert.throws(
+    () => beginSphDispersedMediumGpuBufferBorrow(
+      borrowCase.device,
+      borrowCase.upload
+    ),
+    /live exact same-device sidecar/
+  );
+  assert.equal(borrowCase.destroyed.length, 1);
+
+  const snapshotCase = makeResident('snapshot');
+  let identityReads = 0;
+  const lateSourceFamily = new Proxy(snapshotCase.sourceFamily, {
+    get(target, property, receiver) {
+      if (property === 'identityBuffer' && ++identityReads === 2) {
+        destroySphDispersedMediumGpuBuffers(snapshotCase.upload);
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+  assert.throws(
+    () => snapshotSphDispersedMediumGpuBufferDeclaration(
+      snapshotCase.upload,
+      {
+        device: snapshotCase.device,
+        particleSourceFamily: lateSourceFamily
+      }
+    ),
+    /exact live sidecar and source family/
+  );
+  assert.equal(snapshotCase.upload.destroyed, true);
+  assert.equal(snapshotCase.destroyed.length, 1);
 });

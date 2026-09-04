@@ -54,17 +54,24 @@ test('demo default builds with reference-anchored derived material closures', ()
   for (const key of ['fe', 'h2o', 'air']) {
     const properties = demo.materialProperties[key];
     const summary = materialDerivationSummary(properties);
-    // Anchored materials may carry reference fallbacks, but only from the
-    // material reference bank; everything else stays first-principles.
+    // Anchored materials may carry reference fallbacks from the material bank.
+    // H2O additionally carries the explicitly unvalidated, presentation-only
+    // compact-carrier optical fallback.
     const fallbackSources = new Set(
       (properties.propertyProvenance?.entries || [])
         .filter((entry) => ['reference-fallback', 'reduced-estimate', 'blocked'].includes(entry.status))
         .map((entry) => entry.source)
     );
-    for (const source of fallbackSources) {
-      assert.equal(source, 'material-property-reference-bank');
-    }
-    assert.equal(summary.hasReducedEstimates, false);
+    const expectedSources = key === 'h2o'
+      ? new Set([
+          'material-property-reference-bank',
+          'unvalidated-compact-carrier-optical-fallback'
+        ])
+      : key === 'fe'
+        ? new Set(['material-property-reference-bank'])
+        : new Set();
+    assert.deepEqual(fallbackSources, expectedSources);
+    assert.equal(summary.hasReducedEstimates, key === 'h2o');
   }
   // The anchoring must land the known reference boundaries.
   const h2o = demo.materialProperties.h2o;

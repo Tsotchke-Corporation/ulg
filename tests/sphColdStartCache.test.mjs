@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ULG_SPH_GPU_REACTION_TABLE_SCHEMA } from '../ulg-gpu-abi/src/index.js';
 import {
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS,
+  SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA,
+  ULG_SPH_GPU_REACTION_TABLE_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
+import {
+  SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA,
   SPH_STATIC_TABLE_CACHE_REHYDRATE_SCHEMA,
   SPH_STATIC_TABLE_CACHE_UPDATE_SCHEMA,
   createSphStaticTableCacheUpdate,
@@ -9,10 +16,54 @@ import {
   rehydrateSphStaticTableBundle,
   rehydrateSphStaticTableCache
 } from '../src/runtime/sph/sphColdStartCache.js';
+import {
+  buildSphDispersedMediumOpticalClosureTable
+} from '../src/runtime/sph/sphDispersedMediumOpticalClosure.js';
+import {
+  collectiveOpticalRouteDescriptor
+} from '../src/runtime/sph/sphOpticalRouteIdentity.js';
+import {
+  buildOpticalGpuTableForSurfaceDescriptors
+} from '../src/runtime/sph/sphStaticTableInputs.js';
 
 const generatorFingerprint = 'ulg-test-generator-fingerprint';
 
-function fakeTableInputs() {
+function fakeTableInputs({
+  closureScatteringEfficiencyQsca = 2
+} = {}) {
+  const dispersedMediumOpticalClosure = {
+    schema: ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA,
+    morphologyModel:
+      SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS
+        .singleCompactCondensateCarrierLowerBound,
+    condensedDensityKgPerM3: 1_000,
+    scatteringEfficiencyQsca: closureScatteringEfficiencyQsca,
+    absorptionEfficiencyQabs: 0,
+    asymmetryFactorG: 0,
+    provenance: {
+      status: 'reduced-estimate',
+      source: 'focused-cache-test'
+    },
+    scientificValidation: false
+  };
+  const collectiveOpticalRouteDescriptors = Object.freeze([
+    collectiveOpticalRouteDescriptor({
+      material: 'h2o',
+      condensedPhase: 'liquid',
+      vaporPhase: 'gas',
+      renderKey: 'steam',
+      properties: { dispersedMediumOpticalClosure }
+    })
+  ]);
+  const collectiveOpticalGpuTable =
+    buildOpticalGpuTableForSurfaceDescriptors(
+      collectiveOpticalRouteDescriptors,
+      { materialProperties: { h2o: { dispersedMediumOpticalClosure } } }
+    );
+  const dispersedMediumOpticalClosureTable =
+    buildSphDispersedMediumOpticalClosureTable(
+      collectiveOpticalRouteDescriptors
+    );
   return {
     thermalMaterialTable: {
       schema: 'peercompute.ulg.sph-thermal-material-table.v0',
@@ -137,6 +188,9 @@ function fakeTableInputs() {
       materialPropertyBankPbrWarmInputMatchedRecordCount: 1,
       colorSpace: 'srgb'
     },
+    collectiveOpticalRouteDescriptors,
+    collectiveOpticalGpuTable,
+    dispersedMediumOpticalClosureTable,
     reactionTable: {
       schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
       records: new Float32Array([1, 2, 3, 4]),
@@ -186,21 +240,23 @@ test('SPH static table cache update serializes and rehydrates typed arrays off t
 
   assert.equal(update.schema, SPH_STATIC_TABLE_CACHE_UPDATE_SCHEMA);
   assert.equal(update.status, 'stored');
-  assert.equal(update.counts.tables, 5);
+  assert.equal(update.counts.tables, 7);
   assert.equal(update.counts.gpuWarmup, 1);
-  assert.equal(update.tableWriteCount, 5);
+  assert.equal(update.tableWriteCount, 7);
   assert.equal(update.gpuWarmupWriteCount, 1);
   assert.ok(update.cacheSnapshot.length > 1000);
 
   const rehydrated = rehydrateSphStaticTableCache(update.cacheSnapshot, { generatorFingerprint });
   assert.equal(rehydrated.schema, SPH_STATIC_TABLE_CACHE_REHYDRATE_SCHEMA);
   assert.equal(rehydrated.status, 'static-table-cache-hit');
-  assert.equal(rehydrated.hitCount, 5);
+  assert.equal(rehydrated.hitCount, 7);
   assert.deepEqual(new Set(rehydrated.families), new Set([
     'sph-thermal-material-table',
     'sph-thermal-closure-graph-bank',
     'sph-thermal-phase-response-table',
     'optical-pbr-table',
+    'collective-optical-pbr-table',
+    'sph-dispersed-medium-optical-closure-table',
     'sph-reaction-table'
   ]));
   const thermal = rehydrated.records.find((record) => record.family === 'sph-thermal-material-table');
@@ -221,8 +277,8 @@ test('SPH static table cache update detects unchanged warm records', () => {
 
   assert.equal(warm.tableWriteCount, 0);
   assert.equal(warm.gpuWarmupWriteCount, 0);
-  assert.ok(warm.tableUnchangedCount >= 5);
-  assert.equal(warm.counts.tables, 5);
+  assert.ok(warm.tableUnchangedCount >= 7);
+  assert.equal(warm.counts.tables, 7);
   assert.equal(warm.counts.gpuWarmup, 1);
 });
 
@@ -236,19 +292,20 @@ test('SPH static table cache rejects stale generator snapshots', () => {
   });
 
   assert.equal(parsed.status, 'generator-fingerprint-mismatch');
-  assert.equal(parsed.staleEntryCount, 6);
+  assert.equal(parsed.staleEntryCount, 8);
 });
 
 test('SPH static table cache bundle restores scene-consumable table objects', () => {
+  const tableInputs = fakeTableInputs();
   const update = createSphStaticTableCacheUpdate({
-    tableInputs: fakeTableInputs(),
+    tableInputs,
     generatorFingerprint
   });
   const bundle = rehydrateSphStaticTableBundle(update.cacheSnapshot, { generatorFingerprint });
 
   assert.equal(bundle.schema, 'peercompute.ulg.sph-static-table-cache-bundle.v0');
   assert.equal(bundle.status, 'static-table-cache-bundle-hit');
-  assert.equal(bundle.hitCount, 5);
+  assert.equal(bundle.hitCount, 7);
   assert.equal(bundle.thermalMaterialTable.status, 'static-table-cache-hit');
   assert.equal(
     bundle.thermalMaterialTable.materialPropertyBankWarmInputConsumer.status,
@@ -282,6 +339,54 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
   assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputRows.length, 16);
   assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputRowStrideFloats, 16);
   assert.equal(bundle.opticalGpuTable.materialPropertyBankPbrWarmInputMatchedRecordCount, 1);
+  assert.equal(bundle.collectiveOpticalRouteDescriptors.length, 1);
+  assert.equal(bundle.collectiveOpticalGpuTable.recordCount, 1);
+  assert.equal(
+    bundle.collectiveOpticalGpuTable.status,
+    tableInputs.collectiveOpticalGpuTable.status
+  );
+  assert.equal(
+    bundle.collectiveOpticalGpuTable.recordStrideBytes,
+    tableInputs.collectiveOpticalGpuTable.recordStrideBytes
+  );
+  assert.equal(
+    bundle.collectiveOpticalGpuTable.spectralSampleStrideBytes,
+    tableInputs.collectiveOpticalGpuTable.spectralSampleStrideBytes
+  );
+  assert.equal(
+    bundle.collectiveOpticalGpuTable.wgslStructs,
+    tableInputs.collectiveOpticalGpuTable.wgslStructs
+  );
+  assert.equal(
+    bundle.collectiveOpticalRouteSetAuthority.schema,
+    SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA
+  );
+  assert.match(bundle.collectiveOpticalRouteSetAuthority.contentHash, /^ulg:/);
+  assert.equal(bundle.collectiveOpticalRouteSetAuthority.routeCount, 1);
+  assert.equal(bundle.collectiveOpticalRouteSetAuthority.opticalRecordCount, 1);
+  assert.equal(bundle.collectiveOpticalRouteSetAuthority.closureRowCount, 1);
+  assert.equal(
+    bundle.dispersedMediumOpticalClosureTable.schema,
+    ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA
+  );
+  assert.equal(bundle.dispersedMediumOpticalClosureTable.rowCount, 1);
+  assert.equal(bundle.dispersedMediumOpticalClosureTable.readyRowCount, 1);
+  assert.equal(bundle.dispersedMediumOpticalClosureTable.blockedRowCount, 0);
+  assert.equal(
+    bundle.dispersedMediumOpticalClosureTable.metadata[0].status,
+    SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_STATUS.ready
+  );
+  const restoredRoute = bundle.collectiveOpticalRouteDescriptors[0];
+  const restoredOptical = bundle.collectiveOpticalGpuTable.recordMetadata[0];
+  const restoredClosure = bundle.dispersedMediumOpticalClosureTable.metadata[0];
+  assert.equal(restoredRoute.routeId, restoredRoute.opticalStateId);
+  assert.equal(restoredOptical.opticalStateId, restoredRoute.opticalStateId);
+  assert.equal(restoredClosure.opticalStateId, restoredRoute.opticalStateId);
+  assert.equal(restoredClosure.routeKey, restoredRoute.routeKey);
+  assert.equal(
+    restoredClosure.provenance.source,
+    'focused-cache-test'
+  );
   assert.equal(bundle.reactionTable.reactionClosureSchema, null);
   assert.equal(bundle.reactionTable.reactionHeaderCount, 1);
   assert.equal(bundle.reactionTable.reactantTermRecords.length, 24);
@@ -294,8 +399,215 @@ test('SPH static table cache bundle restores scene-consumable table objects', ()
     'thermalClosureGraphSet',
     'thermalPhaseResponseTable',
     'opticalGpuTable',
+    'collectiveOpticalGpuTable',
+    'dispersedMediumOpticalClosureTable',
     'reactionTable'
   ]));
+});
+
+test('SPH static table cache fails closed on incomplete dispersed optical closure metadata', () => {
+  const update = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs(),
+    generatorFingerprint
+  });
+  const incompleteSnapshot = JSON.parse(update.cacheSnapshot);
+  const closureRecord = Object.values(incompleteSnapshot.tables).find(
+    (record) => record.family === 'sph-dispersed-medium-optical-closure-table'
+  );
+  delete closureRecord.metadata.propertySchema;
+
+  const bundle = rehydrateSphStaticTableBundle(
+    JSON.stringify(incompleteSnapshot),
+    { generatorFingerprint }
+  );
+
+  assert.equal(bundle.collectiveOpticalRouteDescriptors, null);
+  assert.equal(bundle.collectiveOpticalRouteSetAuthority, null);
+  assert.equal(bundle.collectiveOpticalGpuTable, null);
+  assert.equal(bundle.dispersedMediumOpticalClosureTable, null);
+  assert.equal(bundle.opticalGpuTable.recordCount, 1);
+  assert.equal(bundle.hitCount, 5);
+  assert.deepEqual(bundle.staleDerivedFamilies, [{
+    family: 'sph-dispersed-medium-optical-static-route-set',
+    reason: 'collective-optical-route-table-parity-mismatch'
+  }]);
+});
+
+test('SPH static table cache fails closed without throwing on malformed collective optical metadata', () => {
+  const update = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs(),
+    generatorFingerprint
+  });
+  const malformedSnapshot = JSON.parse(update.cacheSnapshot);
+  const collectiveRecord = Object.values(malformedSnapshot.tables).find(
+    (record) => record.family === 'collective-optical-pbr-table'
+  );
+  collectiveRecord.metadata.recordMetadata = {};
+
+  let bundle = null;
+  assert.doesNotThrow(() => {
+    bundle = rehydrateSphStaticTableBundle(
+      JSON.stringify(malformedSnapshot),
+      { generatorFingerprint }
+    );
+  });
+  assert.equal(bundle.collectiveOpticalRouteDescriptors, null);
+  assert.equal(bundle.collectiveOpticalRouteSetAuthority, null);
+  assert.equal(bundle.collectiveOpticalGpuTable, null);
+  assert.equal(bundle.dispersedMediumOpticalClosureTable, null);
+  assert.equal(bundle.hitCount, 5);
+  assert.deepEqual(bundle.staleDerivedFamilies, [{
+    family: 'sph-dispersed-medium-optical-static-route-set',
+    reason: 'collective-optical-route-table-parity-mismatch'
+  }]);
+});
+
+test('SPH static table cache rejects noncanonical collective optical schema and ABI', () => {
+  for (const mutate of [
+    (table) => ({
+      ...table,
+      schema: 'peercompute.ulg.optical-gpu-table.v999'
+    }),
+    (table) => ({
+      ...table,
+      recordStrideBytes: table.recordStrideBytes + Float32Array.BYTES_PER_ELEMENT
+    }),
+    (table) => ({
+      ...table,
+      wgslStructs: `${table.wgslStructs}\n// stale`
+    })
+  ]) {
+    const tableInputs = fakeTableInputs();
+    tableInputs.collectiveOpticalGpuTable = mutate(
+      tableInputs.collectiveOpticalGpuTable
+    );
+    const update = createSphStaticTableCacheUpdate({
+      tableInputs,
+      generatorFingerprint
+    });
+    const bundle = rehydrateSphStaticTableBundle(
+      update.cacheSnapshot,
+      { generatorFingerprint }
+    );
+
+    assert.equal(bundle.collectiveOpticalRouteDescriptors, null);
+    assert.equal(bundle.collectiveOpticalRouteSetAuthority, null);
+    assert.equal(bundle.collectiveOpticalGpuTable, null);
+    assert.equal(bundle.dispersedMediumOpticalClosureTable, null);
+    assert.equal(bundle.hitCount, 5);
+  }
+});
+
+test('SPH static table cache keeps legacy five-family snapshots compatible', () => {
+  const update = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs(),
+    generatorFingerprint
+  });
+  const legacySnapshot = JSON.parse(update.cacheSnapshot);
+  for (const [cacheKey, record] of Object.entries(legacySnapshot.tables)) {
+    if (
+      record.family === 'collective-optical-pbr-table'
+      || record.family === 'sph-dispersed-medium-optical-closure-table'
+    ) {
+      delete legacySnapshot.tables[cacheKey];
+    }
+  }
+  const opticalRecord = Object.values(legacySnapshot.tables).find(
+    (record) => record.family === 'optical-pbr-table'
+  );
+  for (const field of [
+    'status',
+    'recordStrideBytes',
+    'spectralSampleStrideBytes',
+    'wgslStructs',
+    'scientificValidation',
+    'fullPhysicsValidation'
+  ]) {
+    delete opticalRecord.metadata[field];
+  }
+
+  const bundle = rehydrateSphStaticTableBundle(
+    JSON.stringify(legacySnapshot),
+    { generatorFingerprint }
+  );
+  assert.equal(bundle.hitCount, 5);
+  assert.deepEqual(new Set(bundle.restoredFamilies), new Set([
+    'thermalMaterialTable',
+    'thermalClosureGraphSet',
+    'thermalPhaseResponseTable',
+    'opticalGpuTable',
+    'reactionTable'
+  ]));
+  assert.equal(bundle.opticalGpuTable.status, 'static-table-cache-hit');
+  assert.equal(bundle.opticalGpuTable.recordStrideBytes, 16);
+  assert.equal(bundle.collectiveOpticalGpuTable, null);
+  assert.equal(bundle.dispersedMediumOpticalClosureTable, null);
+  assert.deepEqual(bundle.staleDerivedFamilies, []);
+});
+
+test('SPH static table cache rejects cross-generation collective optics splicing by row content', () => {
+  const generationA = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs({ closureScatteringEfficiencyQsca: 1.25 }),
+    generatorFingerprint,
+    updatedAt: '2026-09-03T12:00:00.000Z'
+  });
+  const generationB = createSphStaticTableCacheUpdate({
+    tableInputs: fakeTableInputs({ closureScatteringEfficiencyQsca: 1.75 }),
+    generatorFingerprint,
+    updatedAt: '2026-09-03T12:00:01.000Z'
+  });
+  const parsedA = JSON.parse(generationA.cacheSnapshot);
+  const parsedB = JSON.parse(generationB.cacheSnapshot);
+  const recordOf = (snapshot, family) => Object.values(snapshot.tables).find(
+    (record) => record.family === family
+  );
+  const opticalA = recordOf(parsedA, 'collective-optical-pbr-table');
+  const closureA = recordOf(
+    parsedA,
+    'sph-dispersed-medium-optical-closure-table'
+  );
+  const closureB = recordOf(
+    parsedB,
+    'sph-dispersed-medium-optical-closure-table'
+  );
+
+  assert.equal(
+    opticalA.metadata.collectiveOpticalRouteDescriptors[0].opticalStateId,
+    closureB.metadata.tableMetadata[0].opticalStateId
+  );
+  assert.notEqual(closureA.arrays.rows.hash, closureB.arrays.rows.hash);
+  assert.notEqual(
+    opticalA.metadata.collectiveOpticalRouteSetAuthority.contentHash,
+    closureB.metadata.collectiveOpticalRouteSetAuthority.contentHash
+  );
+
+  // Even if stale metadata advertises the matching generation-A authority,
+  // rehydration recomputes it from generation-B's actual closure rows.
+  closureB.metadata.collectiveOpticalRouteSetAuthority = JSON.parse(JSON.stringify(
+    opticalA.metadata.collectiveOpticalRouteSetAuthority
+  ));
+  const splicedSnapshot = {
+    ...parsedA,
+    tables: {
+      [opticalA.cacheKey]: opticalA,
+      [closureB.cacheKey]: closureB
+    },
+    gpuWarmup: {}
+  };
+  const bundle = rehydrateSphStaticTableBundle(
+    JSON.stringify(splicedSnapshot),
+    { generatorFingerprint }
+  );
+
+  assert.equal(bundle.collectiveOpticalRouteDescriptors, null);
+  assert.equal(bundle.collectiveOpticalRouteSetAuthority, null);
+  assert.equal(bundle.collectiveOpticalGpuTable, null);
+  assert.equal(bundle.dispersedMediumOpticalClosureTable, null);
+  assert.equal(bundle.hitCount, 0);
+  assert.deepEqual(bundle.staleDerivedFamilies, [{
+    family: 'sph-dispersed-medium-optical-static-route-set',
+    reason: 'collective-optical-route-table-parity-mismatch'
+  }]);
 });
 
 test('SPH static table cache rejects a thermal response record without conductivity sidecar', () => {
@@ -314,7 +626,7 @@ test('SPH static table cache rejects a thermal response record without conductiv
   });
 
   assert.equal(bundle.thermalPhaseResponseTable, null);
-  assert.equal(bundle.hitCount, 4);
+  assert.equal(bundle.hitCount, 6);
   assert.equal(bundle.staleCount, 1);
   assert.deepEqual(bundle.staleDerivedFamilies, [{
     family: 'sph-thermal-phase-response-table',
@@ -338,7 +650,7 @@ test('SPH static table cache rejects a persisted v0 reaction table after the pha
   });
 
   assert.equal(bundle.reactionTable, null);
-  assert.equal(bundle.hitCount, 4);
+  assert.equal(bundle.hitCount, 6);
   assert.equal(bundle.staleCount, 1);
   assert.deepEqual(bundle.staleDerivedFamilies, [{
     family: 'sph-reaction-table',

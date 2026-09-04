@@ -340,11 +340,12 @@ test('SPH reduced product reuse rejects a stale NaOH closure after water conduct
   );
 });
 
-test('SPH local cache invalidates material and reduced-product records across the v3 to v4 method bump', () => {
-  const oldMethodVersion = 'ulg.generic-derivation+reference-bank-anchoring.v3';
-  const newMethodVersion = 'ulg.generic-derivation+reference-bank-anchoring.v4';
-  const oldGeneratorFingerprint = 'test-generator-v3';
-  const newGeneratorFingerprint = 'test-generator-v4';
+test('SPH local cache invalidates pre-optics material and product records across the v4 to v5 method bump', () => {
+  const oldMethodVersion = 'ulg.generic-derivation+reference-bank-anchoring.v4';
+  const newMethodVersion = 'ulg.generic-derivation+reference-bank-anchoring.v5';
+  const oldGeneratorFingerprint = 'test-generator-v4-pre-optics';
+  const newGeneratorFingerprint = 'test-generator-v5-live-optics';
+  assert.equal(materialProperties.h2o.dispersedMediumOpticalClosure, undefined);
   const oldMaterialWrite = createPeerClosureCacheWrite({
     materialProperties,
     methodVersion: oldMethodVersion,

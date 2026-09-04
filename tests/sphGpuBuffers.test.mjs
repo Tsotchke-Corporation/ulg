@@ -10,6 +10,7 @@ import {
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   beginSphDispersedMediumGpuBufferBorrow,
+  buildSphDispersedMediumGpuBuffers,
   destroySphDispersedMediumGpuBuffers,
   sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
   validateSphDispersedMediumGpuBufferAuthority
@@ -41,7 +42,8 @@ import {
   sphGpuParticleUploadMatchesDevice,
   transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership,
   uploadMlsMpmGpuParticleBuffers,
-  uploadSphGpuParticleBuffers
+  uploadSphGpuParticleBuffers,
+  uploadSphGpuParticleDispersedMediumOpticsSidecar
 } from '../src/runtime/sph/sphGpuBuffers.js';
 
 function nearlyEqual(actual, expected, tolerance = 1e-3) {
@@ -441,6 +443,18 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
     buffers[key] = prior;
   }
 
+  for (const field of ['stateBuffer', 'thermoBuffer', 'identityBuffer']) {
+    const replacement = tagWebGpuBufferDevice({
+      destroy() { destroyed.push(`replacement-${field}`); }
+    }, device);
+    buffers[field] = replacement;
+  }
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(buffers, device),
+    false,
+    'public core aliases may not replace the privately admitted family'
+  );
+
   const borrowDescriptor = Object.getOwnPropertyDescriptor(
     buffers,
     '__ulgActiveBorrowCount'
@@ -682,6 +696,168 @@ test('SPH GPU particle buffers own and authenticate an optional dispersed-medium
     device,
     buffers.dispersedMediumOpticsAuthority
   ), false);
+});
+
+test('new dispersed-medium sidecar upgrades one canonical sidecar-free parent lifecycle', () => {
+  const demo = buildSphPhaseDemoState({
+    dropParticleEdge: 1,
+    baseParticleEdge: 1
+  });
+  const packedParticles = buildSphGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  });
+  const packedOptics = buildSphDispersedMediumGpuBuffers(Array.from(
+    { length: packedParticles.particleCount },
+    (_, index) => index === 0 ? {
+      dispersedMediumOptics: {
+        dispersedMaterialId: 7,
+        dispersedPhaseId: 2,
+        opticalStateId: 19,
+        dispersedMassKg: 0,
+        scatteringCrossSectionM2: 0,
+        absorptionCrossSectionM2: 0,
+        scatteringAsymmetryCrossSectionM2: 0
+      }
+    } : {}
+  ));
+  const destroyed = [];
+  const makeBuffer = (label, size = 64, usage = 128) => ({
+    label,
+    size,
+    usage,
+    destroyCount: 0,
+    destroy() {
+      this.destroyCount += 1;
+      destroyed.push(label);
+    }
+  });
+  const device = {
+    createBuffer(descriptor) {
+      const buffer = makeBuffer(descriptor.label, descriptor.size, descriptor.usage);
+      if (descriptor.mappedAtCreation) {
+        const mapped = new ArrayBuffer(descriptor.size);
+        buffer.getMappedRange = () => mapped;
+        buffer.unmap = () => {};
+      }
+      return buffer;
+    },
+    queue: { writeBuffer() {} }
+  };
+  assert.equal(packedParticles.dispersedMediumOptics, null);
+
+  const reentrantTarget = uploadSphGpuParticleBuffers(device, packedParticles);
+  let reentered = false;
+  const reentrantPackedOptics = new Proxy(packedOptics, {
+    get(object, property, receiver) {
+      if (property === 'schema' && !reentered) {
+        reentered = true;
+        destroySphGpuParticleBuffers(reentrantTarget);
+      }
+      return Reflect.get(object, property, receiver);
+    }
+  });
+  assert.throws(
+    () => uploadSphGpuParticleDispersedMediumOpticsSidecar(
+      device,
+      reentrantPackedOptics,
+      { sourceSphUpload: reentrantTarget }
+    ),
+    /attachment source changed while its child was being created/
+  );
+  assert.equal(reentrantTarget.destroyed, true);
+  assert.equal(
+    destroyed.filter((label) => label === 'ulg-sph-dispersed-medium-optics').length,
+    1,
+    'the child created during reentrant parent teardown must retire exactly once'
+  );
+
+  const target = uploadSphGpuParticleBuffers(device, packedParticles);
+  assert.equal(sphGpuParticleUploadMatchesDevice(target, device), true);
+
+  for (const field of ['stateBuffer', 'thermoBuffer', 'identityBuffer']) {
+    const prior = target[field];
+    target[field] = tagWebGpuBufferDevice(
+      makeBuffer(`hostile-replacement-${field}`, prior.size, prior.usage),
+      device
+    );
+    assert.throws(
+      () => uploadSphGpuParticleDispersedMediumOpticsSidecar(
+        device,
+        packedOptics,
+        { sourceSphUpload: target }
+      ),
+      /live exact sidecar-free particle source/,
+      `canonical lifecycle must reject replaced ${field}`
+    );
+    target[field] = prior;
+  }
+
+  target.__ulgActiveBorrowCount = 1;
+  const child = uploadSphGpuParticleDispersedMediumOpticsSidecar(
+    device,
+    packedOptics,
+    { sourceSphUpload: target }
+  );
+  const produced = child.buffer;
+
+  assert.equal(target.__ulgActiveBorrowCount, 1);
+  target.__ulgActiveBorrowCount = 0;
+  assert.equal(target.dispersedMediumOptics, child);
+  assert.equal(target.dispersedMediumOpticsBuffer, produced);
+  assert.equal(target.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(target, device), true);
+  assert.equal(
+    sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers(target, {
+      device,
+      stateBuffer: target.stateBuffer,
+      thermoBuffer: target.thermoBuffer,
+      identityBuffer: target.identityBuffer
+    }),
+    true
+  );
+
+  const continuation = {
+    ...target,
+    stateBuffer: tagWebGpuBufferDevice(
+      makeBuffer('adopted-continuation-state', target.stateBuffer.size, target.stateBuffer.usage),
+      device
+    ),
+    thermoBuffer: tagWebGpuBufferDevice(
+      makeBuffer('adopted-continuation-thermo', target.thermoBuffer.size, target.thermoBuffer.usage),
+      device
+    ),
+    ownsStateBuffer: true,
+    ownsThermoBuffer: true,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  const ownerTransfer =
+    transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: target,
+      targetSphUpload: continuation
+    });
+  assert.equal(ownerTransfer.transferredOwnedBufferCount, 1);
+  assert.equal(target.ownsDispersedMediumOpticsBuffer, false);
+  assert.equal(continuation.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(continuation, device), true);
+
+  const release = beginSphDispersedMediumGpuBufferBorrow(device, child);
+  target.ownsStateBuffer = false;
+  target.ownsThermoBuffer = false;
+  target.ownsIdentityBuffer = false;
+  assert.equal(destroySphGpuParticleBuffers(target), true);
+  assert.equal(produced.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(continuation), true);
+  assert.equal(produced.destroyCount, 0);
+  assert.equal(release(), true);
+  assert.equal(produced.destroyCount, 1);
+  assert.equal(
+    produced.destroyCount,
+    1,
+    'the final adopted owner retires the upgraded child exactly once'
+  );
 });
 
 test('authenticated transfer can seed a private borrowed continuation without reopening generic registration', () => {
@@ -1025,8 +1201,8 @@ test('pending-destroy SPH sidecar cannot acquire a continuation parent or owner'
       device,
       source.dispersedMediumOpticsAuthority
     ),
-    true,
-    'an already-pinned consumer may finish ordinary validation while draining'
+    false,
+    'only the already-issued private borrow may drain a pending child'
   );
   assert.equal(
     ensureSphGpuParticleBufferSetBorrowLifecycle(target),

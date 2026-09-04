@@ -1,4 +1,10 @@
 import { buildOpticalGpuTable, stableOpticalStateKey } from '../material/opticalGpuBuffers.js';
+import {
+  collectiveOpticalRouteDescriptorsFromMaterialProperties
+} from './sphOpticalRouteIdentity.js';
+import {
+  buildSphDispersedMediumOpticalClosureTable
+} from './sphDispersedMediumOpticalClosure.js';
 import { buildSphReactionTable } from './sphReactionGpuKernel.js';
 import {
   buildSphThermalClosureGraphBuffers,
@@ -16,6 +22,27 @@ function surfaceKeyForDescriptor({ renderKey, material, phase, opticalState = nu
   return opticalStateKey === 'default' ? base : `${base}|opt:${opticalStateKey}`;
 }
 
+const COLLECTIVE_ROUTE_DESCRIPTOR_FIELDS = Object.freeze([
+  'materialId',
+  'condensedPhase',
+  'condensedPhaseId',
+  'vaporPhase',
+  'vaporPhaseId',
+  'closureModel',
+  'closureModelId',
+  'from',
+  'to'
+]);
+
+function collectiveRouteDescriptorFields(value) {
+  if (!value || typeof value !== 'object') return {};
+  return Object.fromEntries(
+    COLLECTIVE_ROUTE_DESCRIPTOR_FIELDS
+      .filter((field) => Object.prototype.hasOwnProperty.call(value, field))
+      .map((field) => [field, value[field]])
+  );
+}
+
 export function renderDescriptorOf(value) {
   if (value && typeof value === 'object') {
     const renderKey = materialKeyOf(value.renderKey ?? value.key ?? value.material);
@@ -28,7 +55,8 @@ export function renderDescriptorOf(value) {
       phase,
       opticalState,
       opticalStateKey: stableOpticalStateKey(opticalState),
-      surfaceKey: surfaceKeyForDescriptor({ renderKey, material, phase, opticalState })
+      surfaceKey: surfaceKeyForDescriptor({ renderKey, material, phase, opticalState }),
+      ...collectiveRouteDescriptorFields(value)
     };
   }
   const renderKey = materialKeyOf(value);
@@ -80,7 +108,11 @@ export function buildOpticalGpuTableForSurfaceDescriptors(descriptors = [], {
     phase: opticalPhaseForDescriptor(descriptor),
     renderKey: descriptor.renderKey,
     opticalState: descriptor.opticalState || null,
-    properties: materialPropertiesForSurfaceDescriptor(descriptor, materialProperties)
+    ...(Number.isFinite(Number(descriptor.opticalStateId))
+      ? { opticalStateId: Number(descriptor.opticalStateId) }
+      : {}),
+    properties: descriptor.properties
+      ?? materialPropertiesForSurfaceDescriptor(descriptor, materialProperties)
   })), {
     materialProperties: materialProperties || {},
     materialPropertyBankGpuWarmInputTable
@@ -199,20 +231,47 @@ export function sphStaticTableInputsFromViewState(viewState = {}, {
     ?? buildSphThermalMaterialTableFromViewState(viewState);
   const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(thermalMaterialTable, thermalClosureGraphSet);
+  const materialDescriptors = Array.isArray(viewState.materials)
+    ? viewState.materials
+    : [];
+  const surfaceDescriptors = surfaceDescriptorsFromMaterials(materialDescriptors);
+  // Surface batches intentionally deduplicate identical draw identities. Route
+  // declarations must not inherit that lossy projection: two explicit phase
+  // pairs can share one draw surface while remaining distinct physics routes.
+  const collectiveStaticPhaseDescriptors = materialDescriptors.map(renderDescriptorOf);
   const opticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(
-    surfaceDescriptorsFromMaterials(viewState.materials || []),
+    surfaceDescriptors,
     {
       materialProperties,
       materialPropertyBankGpuWarmInputTable:
         viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
     }
   );
+  const collectiveOpticalRouteDescriptors =
+    collectiveOpticalRouteDescriptorsFromMaterialProperties(materialProperties, {
+      staticPhaseDescriptors: collectiveStaticPhaseDescriptors
+    });
+  const collectiveOpticalGpuTable = buildOpticalGpuTableForSurfaceDescriptors(
+    collectiveOpticalRouteDescriptors,
+    {
+      materialProperties,
+      materialPropertyBankGpuWarmInputTable:
+        viewState.initialParticleSpacing?.materialPropertyBankGpuWarmInputTable ?? null
+    }
+  );
+  const dispersedMediumOpticalClosureTable =
+    buildSphDispersedMediumOpticalClosureTable(
+      collectiveOpticalRouteDescriptors
+    );
   const reactionTable = buildSphReactionTableFromViewState(viewState);
   return {
     thermalMaterialTable,
     thermalClosureGraphSet,
     thermalPhaseResponseTable,
     opticalGpuTable,
+    collectiveOpticalRouteDescriptors,
+    collectiveOpticalGpuTable,
+    dispersedMediumOpticalClosureTable,
     reactionTable
   };
 }

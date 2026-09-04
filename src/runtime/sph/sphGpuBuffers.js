@@ -23,6 +23,7 @@ import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   buildSphDispersedMediumGpuBuffers,
+  consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer,
   destroySphDispersedMediumGpuBuffers,
   registerSphDispersedMediumGpuBufferParticleSourceFamilyContinuation,
   sphDispersedMediumGpuBufferNewOwnerEligible,
@@ -720,6 +721,33 @@ function exactSphParticleUploadLineage(upload) {
   return { particleCount, topologyEpoch, identityRevision, identityBuffer };
 }
 
+function captureExactSphParticleUploadCoreFamily(upload, device = null) {
+  const lineage = exactSphParticleUploadLineage(upload);
+  const stateBuffer = upload?.stateBuffer ?? null;
+  const thermoBuffer = upload?.thermoBuffer ?? null;
+  const resolvedDevice = device ?? webGpuBufferDevice(stateBuffer);
+  if (
+    upload?.status !== 'webgpu-uploaded'
+    || upload.destroyed === true
+    || !lineage
+    || !stateBuffer
+    || !thermoBuffer
+    || !resolvedDevice
+    || webGpuBufferDevice(stateBuffer) !== resolvedDevice
+    || webGpuBufferDevice(thermoBuffer) !== resolvedDevice
+    || webGpuBufferDevice(lineage.identityBuffer) !== resolvedDevice
+  ) return null;
+  return {
+    device: resolvedDevice,
+    stateBuffer,
+    thermoBuffer,
+    identityBuffer: lineage.identityBuffer,
+    particleCount: lineage.particleCount,
+    topologyEpoch: lineage.topologyEpoch,
+    identityRevision: lineage.identityRevision
+  };
+}
+
 function uploadSphDispersedMediumOpticsWithPrivateSourceFamilyRegistrar(
   device,
   packed,
@@ -829,6 +857,20 @@ function captureExactSphParticleUploadDispersedMediumOptics(
 }
 
 function exactParentDispersedMediumRecordMatches(upload, record, device = null) {
+  const coreFamily = captureExactSphParticleUploadCoreFamily(
+    upload,
+    device ?? record?.device ?? null
+  );
+  if (
+    !coreFamily
+    || coreFamily.device !== record?.device
+    || coreFamily.stateBuffer !== record.stateBuffer
+    || coreFamily.thermoBuffer !== record.thermoBuffer
+    || coreFamily.identityBuffer !== record.identityBuffer
+    || coreFamily.particleCount !== record.particleCount
+    || coreFamily.topologyEpoch !== record.topologyEpoch
+    || coreFamily.identityRevision !== record.identityRevision
+  ) return false;
   const privateSidecar = record?.dispersedMediumOptics ?? null;
   const advertised = sphGpuParticleUploadAdvertisesDispersedMediumOptics(upload);
   if (!privateSidecar) return advertised === false;
@@ -949,9 +991,18 @@ export function retireSphGpuParticleBufferSetDispersedMediumOptics(
 
 function destroySphGpuParticleBuffersNow(buffers, record = null) {
   if (!buffers || (record ? record.destroyed : buffers.destroyed)) return false;
-  if (buffers.ownsStateBuffer !== false) buffers.stateBuffer?.destroy?.();
-  if (buffers.ownsThermoBuffer !== false) buffers.thermoBuffer?.destroy?.();
-  if (buffers.ownsIdentityBuffer !== false) buffers.identityBuffer?.destroy?.();
+  // Once a parent has entered the private lifecycle, retire the exact core
+  // allocations recorded at admission. Mutable public aliases remain useful
+  // diagnostics but must not redirect destruction to unrelated buffers.
+  if (buffers.ownsStateBuffer !== false) {
+    (record?.stateBuffer ?? buffers.stateBuffer)?.destroy?.();
+  }
+  if (buffers.ownsThermoBuffer !== false) {
+    (record?.thermoBuffer ?? buffers.thermoBuffer)?.destroy?.();
+  }
+  if (buffers.ownsIdentityBuffer !== false) {
+    (record?.identityBuffer ?? buffers.identityBuffer)?.destroy?.();
+  }
   if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
     buffers.materialPropertyBankWarmInputBuffer?.destroy?.();
   }
@@ -995,11 +1046,27 @@ function installSphGpuParticleBufferSetBorrowLifecycle(
   // An unregistered accessor cannot prove that this module's destruction
   // paths observe the same private borrow counter.
   if (existingDescriptor || !Object.isExtensible(buffers)) return null;
+  const coreFamily = captureExactSphParticleUploadCoreFamily(buffers);
+  if (
+    !coreFamily
+    || (
+      dispersedMediumOptics
+      && (
+        dispersedMediumOptics.stateBuffer !== coreFamily.stateBuffer
+        || dispersedMediumOptics.thermoBuffer !== coreFamily.thermoBuffer
+        || dispersedMediumOptics.identityBuffer !== coreFamily.identityBuffer
+        || dispersedMediumOptics.particleCount !== coreFamily.particleCount
+        || dispersedMediumOptics.topologyEpoch !== coreFamily.topologyEpoch
+        || dispersedMediumOptics.identityRevision !== coreFamily.identityRevision
+      )
+    )
+  ) return null;
   const record = {
     activeBorrowCount: 0,
     destroyRequested: false,
     destroyed: false,
-    dispersedMediumOptics
+    dispersedMediumOptics,
+    ...coreFamily
   };
   Object.defineProperty(buffers, '__ulgActiveBorrowCount', {
     configurable: true,
@@ -1076,24 +1143,83 @@ function canRollbackSphGpuParticleBufferSetBorrowLifecycleInstall(
  * attachment path: the caller receives the child descriptor, never the opaque
  * registrar that authorizes future topology-stable family transitions.
  */
-export function uploadSphGpuParticleDispersedMediumOpticsSidecar(
+function attachNewSphGpuParticleDispersedMediumOpticsSidecar(
   device,
   packed,
   {
     sourceSphUpload,
-    label = null
+    createSidecar,
+    registerParentRollback = null,
+    destroySidecarOnFailure = true
   } = {}
 ) {
   const particleLineage = exactSphParticleUploadLineage(sourceSphUpload);
+  const initialCoreFamily = captureExactSphParticleUploadCoreFamily(
+    sourceSphUpload,
+    device
+  );
+  const existingLifecycleRecord =
+    sphParticleBufferSetLifecycleRecords.get(sourceSphUpload) ?? null;
+  const exactCoreFamilyStillMatches = () => {
+    const current = captureExactSphParticleUploadCoreFamily(
+      sourceSphUpload,
+      device
+    );
+    return Boolean(
+      initialCoreFamily
+      && current
+      && current.device === initialCoreFamily.device
+      && current.stateBuffer === initialCoreFamily.stateBuffer
+      && current.thermoBuffer === initialCoreFamily.thermoBuffer
+      && current.identityBuffer === initialCoreFamily.identityBuffer
+      && current.particleCount === initialCoreFamily.particleCount
+      && current.topologyEpoch === initialCoreFamily.topologyEpoch
+      && current.identityRevision === initialCoreFamily.identityRevision
+    );
+  };
+  const attachmentWindowStillOpen = ({ requirePublicAbsence = false } = {}) => {
+    const currentLifecycleRecord =
+      sphParticleBufferSetLifecycleRecords.get(sourceSphUpload) ?? null;
+    return Boolean(
+      currentLifecycleRecord === existingLifecycleRecord
+      && exactCoreFamilyStillMatches()
+      && (
+        !currentLifecycleRecord
+        || (
+          currentLifecycleRecord.destroyed !== true
+          && currentLifecycleRecord.destroyRequested !== true
+          && currentLifecycleRecord.dispersedMediumOptics == null
+        )
+      )
+      && (
+        !requirePublicAbsence
+        || !sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+          sourceSphUpload
+        )
+      )
+    );
+  };
+  const existingLifecycleUpgradeable = Boolean(
+    existingLifecycleRecord
+    && existingLifecycleRecord.destroyed !== true
+    && existingLifecycleRecord.destroyRequested !== true
+    && existingLifecycleRecord.dispersedMediumOptics == null
+    && exactParentDispersedMediumRecordMatches(
+      sourceSphUpload,
+      existingLifecycleRecord,
+      device
+    )
+  );
   if (
     !particleLineage
+    || !initialCoreFamily
     || !sourceSphUpload?.stateBuffer
     || !sourceSphUpload?.thermoBuffer
-    || sphParticleBufferSetLifecycleRecords.has(sourceSphUpload)
+    || (existingLifecycleRecord && !existingLifecycleUpgradeable)
     || sphGpuParticleUploadAdvertisesDispersedMediumOptics(sourceSphUpload)
   ) {
     throw new TypeError(
-      'SPH dispersed-medium initial attachment requires one unregistered exact sidecar-free particle source'
+      'SPH dispersed-medium initial attachment requires one live exact sidecar-free particle source'
     );
   }
   const aliasFields = [
@@ -1111,17 +1237,68 @@ export function uploadSphGpuParticleDispersedMediumOpticsSidecar(
   ]));
   let sidecar = null;
   let lifecycleRecord = null;
-  try {
-    sidecar = uploadSphDispersedMediumOpticsWithPrivateSourceFamilyRegistrar(
-      device,
-      packed,
-      {
-        label,
-        particleLineage,
-        stateBuffer: sourceSphUpload.stateBuffer,
-        thermoBuffer: sourceSphUpload.thermoBuffer
+  let lifecycleInstalled = false;
+  let lifecycleUpgraded = false;
+  let ownershipStateInitialized = false;
+  let parentRollbackComplete = false;
+  const rollbackParentPublication = () => {
+    if (parentRollbackComplete) return true;
+    let complete = true;
+    if (ownershipStateInitialized && sidecar) {
+      const ownershipState = sphDispersedMediumOwnershipStates.get(sidecar);
+      if (ownershipState?.owner === sourceSphUpload) {
+        sphDispersedMediumOwnershipStates.delete(sidecar);
+      } else {
+        complete = false;
       }
-    );
+    }
+    if (lifecycleUpgraded && lifecycleRecord) {
+      if (lifecycleRecord.dispersedMediumOptics?.upload === sidecar) {
+        lifecycleRecord.dispersedMediumOptics = null;
+      } else if (lifecycleRecord.dispersedMediumOptics != null) {
+        complete = false;
+      }
+    } else if (
+      lifecycleInstalled
+      && lifecycleRecord
+      && !rollbackSphGpuParticleBufferSetBorrowLifecycleInstall(
+        sourceSphUpload,
+        lifecycleRecord
+      )
+    ) {
+      complete = false;
+    }
+    for (const field of aliasFields) {
+      const prior = priorDescriptors.get(field);
+      try {
+        if (prior) Object.defineProperty(sourceSphUpload, field, prior);
+        else delete sourceSphUpload[field];
+      } catch {
+        complete = false;
+      }
+    }
+    parentRollbackComplete = complete;
+    return complete;
+  };
+  try {
+    sidecar = createSidecar({
+      particleLineage,
+      stateBuffer: sourceSphUpload.stateBuffer,
+      thermoBuffer: sourceSphUpload.thermoBuffer
+    });
+    if (registerParentRollback != null) {
+      if (typeof registerParentRollback !== 'function') {
+        throw new TypeError(
+          'SPH dispersed-medium parent rollback registrar must be a function'
+        );
+      }
+      registerParentRollback(rollbackParentPublication);
+    }
+    if (!attachmentWindowStillOpen({ requirePublicAbsence: true })) {
+      throw new TypeError(
+        'SPH dispersed-medium attachment source changed while its child was being created'
+      );
+    }
     Object.assign(sourceSphUpload, {
       dispersedMediumOptics: sidecar,
       dispersedMediumOpticsAuthority: sidecar.authority,
@@ -1141,15 +1318,29 @@ export function uploadSphGpuParticleDispersedMediumOpticsSidecar(
         'SPH dispersed-medium initial attachment did not authenticate its exact source family'
       );
     }
-    lifecycleRecord = installSphGpuParticleBufferSetBorrowLifecycle(
-      sourceSphUpload,
-      exactSidecar
-    );
+    if (!attachmentWindowStillOpen()) {
+      throw new TypeError(
+        'SPH dispersed-medium attachment source changed before private publication'
+      );
+    }
+    if (existingLifecycleUpgradeable) {
+      lifecycleRecord = existingLifecycleRecord;
+      lifecycleRecord.dispersedMediumOptics = exactSidecar;
+      lifecycleUpgraded = true;
+    } else {
+      lifecycleRecord = installSphGpuParticleBufferSetBorrowLifecycle(
+        sourceSphUpload,
+        exactSidecar
+      );
+      lifecycleInstalled = Boolean(lifecycleRecord);
+    }
     if (!lifecycleRecord) {
       throw new TypeError(
         'SPH dispersed-medium initial attachment could not seed its private parent record'
       );
     }
+    const priorOwnershipState =
+      sphDispersedMediumOwnershipStates.get(sidecar);
     if (!initializeSphDispersedMediumOwnershipState(
       sourceSphUpload,
       exactSidecar
@@ -1158,27 +1349,148 @@ export function uploadSphGpuParticleDispersedMediumOpticsSidecar(
         'SPH dispersed-medium initial attachment conflicts with its private owner state'
       );
     }
+    ownershipStateInitialized = Boolean(
+      !priorOwnershipState
+      && sphDispersedMediumOwnershipStates.get(sidecar)?.owner
+        === sourceSphUpload
+    );
     return sidecar;
   } catch (error) {
-    if (lifecycleRecord) {
-      rollbackSphGpuParticleBufferSetBorrowLifecycleInstall(
-        sourceSphUpload,
-        lifecycleRecord
-      );
+    try { rollbackParentPublication(); } catch {}
+    if (destroySidecarOnFailure) {
+      try { destroySphDispersedMediumGpuBuffers(sidecar); } catch {}
     }
-    for (const field of aliasFields) {
-      const prior = priorDescriptors.get(field);
-      try {
-        if (prior) Object.defineProperty(sourceSphUpload, field, prior);
-        else delete sourceSphUpload[field];
-      } catch {
-        // Preserve the authority error after best-effort public diagnostics
-        // rollback; the private child still retires below.
-      }
-    }
-    try { destroySphDispersedMediumGpuBuffers(sidecar); } catch {}
     throw error;
   }
+}
+
+export function uploadSphGpuParticleDispersedMediumOpticsSidecar(
+  device,
+  packed,
+  {
+    sourceSphUpload,
+    label = null
+  } = {}
+) {
+  return attachNewSphGpuParticleDispersedMediumOpticsSidecar(
+    device,
+    packed,
+    {
+      sourceSphUpload,
+      createSidecar: ({ particleLineage, stateBuffer, thermoBuffer }) => (
+        uploadSphDispersedMediumOpticsWithPrivateSourceFamilyRegistrar(
+          device,
+          packed,
+          {
+            label,
+            particleLineage,
+            stateBuffer,
+            thermoBuffer
+          }
+        )
+      )
+    }
+  );
+}
+
+/**
+ * Consume one producer-issued one-shot claim and atomically attach its exact
+ * output to an exact successor particle family. Arbitrary same-shape buffers
+ * and caller-authored declaration metadata have no path into child authority.
+ */
+export function adoptSphGpuParticleDispersedMediumOpticsSidecar(
+  device,
+  producerAdoptionClaim,
+  outputBuffer,
+  options = null
+) {
+  const registrar = Object.freeze(Object.create(null));
+  let capturedSourceFamily = null;
+  let capturedSourceSphUpload = null;
+  let sourceFamilyCaptured = false;
+  const captureSourceFamily = () => {
+    if (sourceFamilyCaptured) return capturedSourceFamily;
+    // This helper is first invoked by the lower adoption wrapper only after
+    // the producer has locked its one-shot claim. Keeping the public option
+    // and particle-upload reads lazy prevents Proxy/getter re-entry from
+    // consuming the same claim before its outer invocation owns preflight.
+    const sourceSphUpload = options?.sourceSphUpload ?? null;
+    const coreFamily = captureExactSphParticleUploadCoreFamily(
+      sourceSphUpload,
+      device
+    );
+    capturedSourceSphUpload = sourceSphUpload;
+    capturedSourceFamily = coreFamily
+      ? Object.freeze({
+          particleCount: coreFamily.particleCount,
+          topologyEpoch: coreFamily.topologyEpoch,
+          identityRevision: coreFamily.identityRevision,
+          identityBuffer: coreFamily.identityBuffer,
+          stateBuffer: coreFamily.stateBuffer,
+          thermoBuffer: coreFamily.thermoBuffer
+        })
+      : null;
+    sourceFamilyCaptured = true;
+    return capturedSourceFamily;
+  };
+  const lowerOptions = Object.create(null);
+  Object.defineProperties(lowerOptions, {
+    device: { enumerable: true, value: device },
+    outputBuffer: { enumerable: true, value: outputBuffer },
+    particleLineage: {
+      enumerable: true,
+      get: captureSourceFamily
+    },
+    particleSourceFamily: {
+      enumerable: true,
+      get: captureSourceFamily
+    },
+    particleSourceFamilyRegistrar: {
+      enumerable: true,
+      value: registrar
+    },
+    publish: {
+      enumerable: true,
+      value({ upload, registerPublicationRollback }) {
+        const sourceSphUpload = capturedSourceSphUpload;
+        if (!sourceFamilyCaptured || !capturedSourceFamily) {
+          throw new TypeError(
+            'SPH dispersed-medium producer adoption requires one exact live particle source'
+          );
+        }
+        let registrarPublished = false;
+        const rollbackRegistrarPublication = () => {
+          if (!registrarPublished) return true;
+          if (
+            sphDispersedMediumSourceFamilyRegistrars.get(upload)
+              !== registrar
+          ) return false;
+          sphDispersedMediumSourceFamilyRegistrars.delete(upload);
+          registrarPublished = false;
+          return true;
+        };
+        registerPublicationRollback(rollbackRegistrarPublication);
+        sphDispersedMediumSourceFamilyRegistrars.set(upload, registrar);
+        registrarPublished = true;
+        return attachNewSphGpuParticleDispersedMediumOpticsSidecar(
+          device,
+          null,
+          {
+            sourceSphUpload,
+            createSidecar: () => upload,
+            registerParentRollback: registerPublicationRollback,
+            destroySidecarOnFailure: false
+          }
+        );
+      }
+    }
+  });
+  const transaction =
+    consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(
+      producerAdoptionClaim,
+      lowerOptions
+    );
+  return transaction.adoptedOutput;
 }
 
 /**
@@ -1675,7 +1987,15 @@ export function sphGpuParticleUploadMatchesDevice(upload, device) {
   }
   const lifecycleRecord = sphParticleBufferSetLifecycleRecords.get(upload) || null;
   if (!sphGpuParticleUploadAdvertisesDispersedMediumOptics(upload)) {
-    return lifecycleRecord?.dispersedMediumOptics == null;
+    return Boolean(
+      lifecycleRecord
+      && lifecycleRecord.dispersedMediumOptics == null
+      && exactParentDispersedMediumRecordMatches(
+        upload,
+        lifecycleRecord,
+        device
+      )
+    );
   }
   return Boolean(
     lifecycleRecord

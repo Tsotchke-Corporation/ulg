@@ -4,12 +4,30 @@ import {
   CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT,
   CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT,
   CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT,
+  OPTICAL_GPU_RECORD_ROW_LAYOUT,
+  OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_BYTES,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_FLOATS,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LAYOUT,
+  SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION,
   ULG_CLOSURE_LAW_GRAPH_SCHEMA,
+  ULG_OPTICAL_GPU_TABLE_SCHEMA,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA,
+  ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   hashPayload
 } from '../../../ulg-gpu-abi/src/index.js';
+import {
+  OPTICAL_GPU_WGSL_STRUCTS
+} from '../material/opticalGpuBuffers.js';
+import {
+  validateSphDispersedMediumOpticalClosureTable
+} from './sphDispersedMediumOpticalClosure.js';
+import {
+  collectiveOpticalRouteDescriptor
+} from './sphOpticalRouteIdentity.js';
 
 export const SPH_COLD_START_CACHE_STORAGE_KEY = 'peercompute.ulg.sph-cold-start-cache.v1';
 export const SPH_COLD_START_CACHE_SCHEMA = 'peercompute.ulg.sph-cold-start-cache.v0';
@@ -21,6 +39,24 @@ export const SPH_STATIC_TABLE_CACHE_REHYDRATE_SCHEMA = 'peercompute.ulg.sph-stat
 export const SPH_STATIC_TABLE_CACHE_BUNDLE_SCHEMA = 'peercompute.ulg.sph-static-table-cache-bundle.v0';
 export const SPH_TABLE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.sph-static-table-cache.v0';
 export const SPH_GPU_WARMUP_CACHE_SCHEMA = 'peercompute.ulg.sph-gpu-warmup-cache.v0';
+export const SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA =
+  'peercompute.ulg.sph-collective-optical-route-set-authority.v0';
+
+const SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_STATUS =
+  'sph-collective-optical-route-set-authority-ready';
+
+const OPTICAL_GPU_TABLE_CANONICAL_STATUSES = new Set([
+  'cpu-derived-gpu-buffer-ready',
+  'static-table-cache-hit'
+]);
+const OPTICAL_GPU_RECORD_STRIDE_FLOATS = OPTICAL_GPU_RECORD_ROW_LAYOUT.length;
+const OPTICAL_GPU_SPECTRAL_SAMPLE_STRIDE_FLOATS =
+  OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT.length;
+const OPTICAL_GPU_RECORD_STRIDE_BYTES =
+  OPTICAL_GPU_RECORD_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+const OPTICAL_GPU_SPECTRAL_SAMPLE_STRIDE_BYTES =
+  OPTICAL_GPU_SPECTRAL_SAMPLE_STRIDE_FLOATS
+  * Float32Array.BYTES_PER_ELEMENT;
 
 const ARRAY_TYPES = Object.freeze({
   Float32Array,
@@ -46,6 +82,196 @@ function typedArrayCachePayload(value) {
     hash: hashPayload(data),
     data
   };
+}
+
+function jsonStableProjection(value) {
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? null : JSON.parse(encoded);
+}
+
+function typedArrayContent(value) {
+  if (!ArrayBuffer.isView(value)) return null;
+  return {
+    arrayType: value.constructor?.name ?? null,
+    length: value.length,
+    byteLength: value.byteLength,
+    values: Array.from(value)
+  };
+}
+
+function arrayLayoutExactlyMatches(actual, expected) {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && actual.every((field, index) => field === expected[index]);
+}
+
+function opticalGpuTableHasCanonicalAbi(table) {
+  if (
+    table?.schema !== ULG_OPTICAL_GPU_TABLE_SCHEMA
+    || !OPTICAL_GPU_TABLE_CANONICAL_STATUSES.has(table.status)
+    || !(table.records instanceof Float32Array)
+    || !(table.spectralSamples instanceof Float32Array)
+    || !(table.materialPropertyBankPbrWarmInputRows instanceof Float32Array)
+    || !Number.isSafeInteger(table.recordCount)
+    || table.recordCount < 0
+    || !Number.isSafeInteger(table.spectralSampleCount)
+    || table.spectralSampleCount < 0
+    || table.recordStrideFloats !== OPTICAL_GPU_RECORD_STRIDE_FLOATS
+    || table.spectralSampleStrideFloats
+      !== OPTICAL_GPU_SPECTRAL_SAMPLE_STRIDE_FLOATS
+    || table.recordStrideBytes !== OPTICAL_GPU_RECORD_STRIDE_BYTES
+    || table.spectralSampleStrideBytes
+      !== OPTICAL_GPU_SPECTRAL_SAMPLE_STRIDE_BYTES
+    || table.wgslStructs !== OPTICAL_GPU_WGSL_STRUCTS
+    || table.records.length
+      !== table.recordCount * OPTICAL_GPU_RECORD_STRIDE_FLOATS
+    || table.spectralSamples.length
+      !== table.spectralSampleCount
+        * OPTICAL_GPU_SPECTRAL_SAMPLE_STRIDE_FLOATS
+    || !arrayLayoutExactlyMatches(
+      table.recordLayout,
+      OPTICAL_GPU_RECORD_ROW_LAYOUT
+    )
+    || !arrayLayoutExactlyMatches(
+      table.spectralSampleLayout,
+      OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT
+    )
+    || !Array.isArray(table.materialMap)
+    || !Array.isArray(table.recordMetadata)
+    || table.recordMetadata.length !== table.recordCount
+    || table.recordMetadata.some(
+      (record) => !record || typeof record !== 'object' || Array.isArray(record)
+    )
+    || table.scientificValidation !== false
+    || table.fullPhysicsValidation !== false
+  ) return false;
+  return true;
+}
+
+function collectiveOpticalTableAuthorityPayload(table) {
+  if (!opticalGpuTableHasCanonicalAbi(table)) return null;
+  return {
+    schema: table.schema,
+    status: table.status,
+    recordCount: table.recordCount,
+    spectralSampleCount: table.spectralSampleCount,
+    recordStrideFloats: table.recordStrideFloats,
+    spectralSampleStrideFloats: table.spectralSampleStrideFloats,
+    recordStrideBytes: table.recordStrideBytes,
+    spectralSampleStrideBytes: table.spectralSampleStrideBytes,
+    recordLayout: jsonStableProjection(table.recordLayout),
+    spectralSampleLayout: jsonStableProjection(table.spectralSampleLayout),
+    wgslStructs: table.wgslStructs,
+    materialMap: jsonStableProjection(table.materialMap),
+    recordMetadata: jsonStableProjection(table.recordMetadata),
+    materialPropertyBankPbrWarmInputConsumer:
+      jsonStableProjection(table.materialPropertyBankPbrWarmInputConsumer ?? null),
+    materialPropertyBankPbrWarmInputRowCount:
+      table.materialPropertyBankPbrWarmInputRowCount ?? 0,
+    materialPropertyBankPbrWarmInputRowStrideFloats:
+      table.materialPropertyBankPbrWarmInputRowStrideFloats ?? 0,
+    materialPropertyBankPbrWarmInputMatchedRecordCount:
+      table.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
+    colorSpace: table.colorSpace,
+    scientificValidation: table.scientificValidation,
+    fullPhysicsValidation: table.fullPhysicsValidation,
+    records: typedArrayContent(table.records),
+    spectralSamples: typedArrayContent(table.spectralSamples),
+    materialPropertyBankPbrWarmInputRows: typedArrayContent(
+      table.materialPropertyBankPbrWarmInputRows ?? new Float32Array()
+    )
+  };
+}
+
+function dispersedMediumOpticalClosureAuthorityPayload(table) {
+  if (!table?.schema || !(table.rows instanceof Float32Array)) return null;
+  const expectedStatus = table.rowCount === 0
+    ? 'dispersed-medium-optical-closure-table-empty'
+    : 'dispersed-medium-optical-closure-table-ready';
+  if (table.status !== expectedStatus) return null;
+  return {
+    schema: table.schema,
+    status: table.status,
+    propertySchema: table.propertySchema,
+    version: table.version,
+    rowCount: table.rowCount,
+    routeCount: table.routeCount,
+    readyRowCount: table.readyRowCount,
+    blockedRowCount: table.blockedRowCount,
+    readyOpticalStateIds: jsonStableProjection(table.readyOpticalStateIds),
+    rowStrideFloats: table.rowStrideFloats,
+    rowStrideBytes: table.rowStrideBytes,
+    rowLayout: jsonStableProjection(table.rowLayout),
+    bufferByteLength: table.bufferByteLength,
+    metadata: jsonStableProjection(table.metadata),
+    routeLookup: table.routeLookup,
+    massAuthority: table.massAuthority,
+    saturationMassInference: table.saturationMassInference,
+    scientificValidation: table.scientificValidation,
+    rows: typedArrayContent(table.rows)
+  };
+}
+
+/**
+ * Bind the three independently cached collective-optics artifacts to their
+ * complete static content. Cache timestamps are excluded deliberately; source
+ * statuses, every descriptor, and every optical and closure row are
+ * authoritative.
+ */
+export function createSphCollectiveOpticalRouteSetAuthority({
+  routeDescriptors = null,
+  opticalGpuTable = null,
+  closureTable = null
+} = {}) {
+  if (!Array.isArray(routeDescriptors)) return null;
+  const descriptorPayload = jsonStableProjection(routeDescriptors);
+  const opticalTablePayload = collectiveOpticalTableAuthorityPayload(
+    opticalGpuTable
+  );
+  const closureTablePayload = dispersedMediumOpticalClosureAuthorityPayload(
+    closureTable
+  );
+  if (
+    !opticalTablePayload
+    || !closureTablePayload
+    || opticalTablePayload.scientificValidation !== false
+    || opticalTablePayload.fullPhysicsValidation !== false
+    || closureTablePayload.scientificValidation !== false
+  ) return null;
+  const content = {
+    schema: SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA,
+    routeDescriptors: descriptorPayload,
+    opticalGpuTable: opticalTablePayload,
+    dispersedMediumOpticalClosureTable: closureTablePayload
+  };
+  return Object.freeze({
+    schema: SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA,
+    status: SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_STATUS,
+    contentHash: hashPayload(content),
+    routeDescriptorContentHash: hashPayload(descriptorPayload),
+    opticalTableContentHash: hashPayload(opticalTablePayload),
+    closureTableContentHash: hashPayload(closureTablePayload),
+    routeCount: routeDescriptors.length,
+    opticalRecordCount: opticalGpuTable.recordCount,
+    closureRowCount: closureTable.rowCount,
+    scientificValidation: false
+  });
+}
+
+function collectiveOpticalRouteSetAuthorityMatches(actual, expected) {
+  if (!actual || !expected) return false;
+  return [
+    'schema',
+    'status',
+    'contentHash',
+    'routeDescriptorContentHash',
+    'opticalTableContentHash',
+    'closureTableContentHash',
+    'routeCount',
+    'opticalRecordCount',
+    'closureRowCount',
+    'scientificValidation'
+  ].every((field) => actual[field] === expected[field]);
 }
 
 export function decodeTypedArrayCachePayload(payload) {
@@ -210,8 +436,67 @@ export function sphStaticTableInputsFromScene(scene) {
     thermalClosureGraphSet: scene?.getSphThermalClosureGraphBuffers?.() || null,
     thermalPhaseResponseTable: scene?.getSphThermalPhaseResponseTable?.() || null,
     opticalGpuTable: scene?.getOpticalGpuTable?.() || null,
+    collectiveOpticalRouteDescriptors:
+      scene?.getCollectiveOpticalRouteDescriptors?.() || null,
+    collectiveOpticalGpuTable: scene?.getCollectiveOpticalGpuTable?.() || null,
+    dispersedMediumOpticalClosureTable:
+      scene?.getSphDispersedMediumOpticalClosureTable?.() || null,
     reactionTable: scene?.getSphReactionTable?.() || null
   };
+}
+
+function opticalGpuTableCacheRecord({
+  family,
+  table,
+  collectiveOpticalRouteDescriptors = null,
+  collectiveOpticalRouteSetAuthority = null,
+  generatorFingerprint,
+  updatedAt
+}) {
+  if (!table) return null;
+  return tableCacheRecord({
+    family,
+    table,
+    arrays: {
+      records: table.records,
+      spectralSamples: table.spectralSamples,
+      materialPropertyBankPbrWarmInputRows:
+        table.materialPropertyBankPbrWarmInputRows ?? new Float32Array()
+    },
+    metadata: {
+      status: table.status,
+      recordCount: table.recordCount,
+      spectralSampleCount: table.spectralSampleCount,
+      recordStrideFloats: table.recordStrideFloats,
+      spectralSampleStrideFloats: table.spectralSampleStrideFloats,
+      recordStrideBytes: table.recordStrideBytes,
+      spectralSampleStrideBytes: table.spectralSampleStrideBytes,
+      recordLayout: table.recordLayout,
+      spectralSampleLayout: table.spectralSampleLayout,
+      wgslStructs: table.wgslStructs,
+      materialMap: table.materialMap,
+      recordMetadata: table.recordMetadata,
+      materialPropertyBankPbrWarmInputConsumer:
+        table.materialPropertyBankPbrWarmInputConsumer ?? null,
+      materialPropertyBankPbrWarmInputRowCount:
+        table.materialPropertyBankPbrWarmInputRowCount ?? 0,
+      materialPropertyBankPbrWarmInputRowStrideFloats:
+        table.materialPropertyBankPbrWarmInputRowStrideFloats ?? 0,
+      materialPropertyBankPbrWarmInputMatchedRecordCount:
+        table.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
+      colorSpace: table.colorSpace,
+      scientificValidation: table.scientificValidation,
+      fullPhysicsValidation: table.fullPhysicsValidation,
+      ...(Array.isArray(collectiveOpticalRouteDescriptors)
+        ? { collectiveOpticalRouteDescriptors }
+        : {}),
+      ...(collectiveOpticalRouteSetAuthority
+        ? { collectiveOpticalRouteSetAuthority }
+        : {})
+    },
+    generatorFingerprint,
+    updatedAt
+  });
 }
 
 export function createSphStaticTableCacheRecords(tableInputs = {}, {
@@ -223,8 +508,17 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
     thermalClosureGraphSet = null,
     thermalPhaseResponseTable = null,
     opticalGpuTable = null,
+    collectiveOpticalRouteDescriptors = null,
+    collectiveOpticalGpuTable = null,
+    dispersedMediumOpticalClosureTable = null,
     reactionTable = null
   } = tableInputs || {};
+  const collectiveOpticalRouteSetAuthority =
+    createSphCollectiveOpticalRouteSetAuthority({
+      routeDescriptors: collectiveOpticalRouteDescriptors,
+      opticalGpuTable: collectiveOpticalGpuTable,
+      closureTable: dispersedMediumOpticalClosureTable
+    });
   const records = [];
   let thermalMaterialTableRecord = null;
   if (thermalMaterialTable) {
@@ -313,33 +607,53 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
     }));
   }
   if (opticalGpuTable) {
-    records.push(tableCacheRecord({
+    records.push(opticalGpuTableCacheRecord({
       family: 'optical-pbr-table',
       table: opticalGpuTable,
+      generatorFingerprint,
+      updatedAt
+    }));
+  }
+  if (collectiveOpticalGpuTable) {
+    records.push(opticalGpuTableCacheRecord({
+      family: 'collective-optical-pbr-table',
+      table: collectiveOpticalGpuTable,
+      collectiveOpticalRouteDescriptors,
+      collectiveOpticalRouteSetAuthority,
+      generatorFingerprint,
+      updatedAt
+    }));
+  }
+  if (dispersedMediumOpticalClosureTable) {
+    records.push(tableCacheRecord({
+      family: 'sph-dispersed-medium-optical-closure-table',
+      table: dispersedMediumOpticalClosureTable,
       arrays: {
-        records: opticalGpuTable.records,
-        spectralSamples: opticalGpuTable.spectralSamples,
-        materialPropertyBankPbrWarmInputRows:
-          opticalGpuTable.materialPropertyBankPbrWarmInputRows ?? new Float32Array()
+        rows: dispersedMediumOpticalClosureTable.rows
       },
       metadata: {
-        recordCount: opticalGpuTable.recordCount,
-        spectralSampleCount: opticalGpuTable.spectralSampleCount,
-        recordStrideFloats: opticalGpuTable.recordStrideFloats,
-        spectralSampleStrideFloats: opticalGpuTable.spectralSampleStrideFloats,
-        recordLayout: opticalGpuTable.recordLayout,
-        spectralSampleLayout: opticalGpuTable.spectralSampleLayout,
-        materialMap: opticalGpuTable.materialMap,
-        recordMetadata: opticalGpuTable.recordMetadata,
-        materialPropertyBankPbrWarmInputConsumer:
-          opticalGpuTable.materialPropertyBankPbrWarmInputConsumer ?? null,
-        materialPropertyBankPbrWarmInputRowCount:
-          opticalGpuTable.materialPropertyBankPbrWarmInputRowCount ?? 0,
-        materialPropertyBankPbrWarmInputRowStrideFloats:
-          opticalGpuTable.materialPropertyBankPbrWarmInputRowStrideFloats ?? 0,
-        materialPropertyBankPbrWarmInputMatchedRecordCount:
-          opticalGpuTable.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
-        colorSpace: opticalGpuTable.colorSpace
+        propertySchema: dispersedMediumOpticalClosureTable.propertySchema,
+        version: dispersedMediumOpticalClosureTable.version,
+        status: dispersedMediumOpticalClosureTable.status,
+        rowCount: dispersedMediumOpticalClosureTable.rowCount,
+        routeCount: dispersedMediumOpticalClosureTable.routeCount,
+        readyRowCount: dispersedMediumOpticalClosureTable.readyRowCount,
+        blockedRowCount: dispersedMediumOpticalClosureTable.blockedRowCount,
+        readyOpticalStateIds:
+          dispersedMediumOpticalClosureTable.readyOpticalStateIds,
+        rowStrideFloats: dispersedMediumOpticalClosureTable.rowStrideFloats,
+        rowStrideBytes: dispersedMediumOpticalClosureTable.rowStrideBytes,
+        rowLayout: dispersedMediumOpticalClosureTable.rowLayout,
+        bufferByteLength: dispersedMediumOpticalClosureTable.bufferByteLength,
+        tableMetadata: dispersedMediumOpticalClosureTable.metadata,
+        routeLookup: dispersedMediumOpticalClosureTable.routeLookup,
+        massAuthority: dispersedMediumOpticalClosureTable.massAuthority,
+        saturationMassInference:
+          dispersedMediumOpticalClosureTable.saturationMassInference,
+        scientificValidation: false,
+        ...(collectiveOpticalRouteSetAuthority
+          ? { collectiveOpticalRouteSetAuthority }
+          : {})
       },
       generatorFingerprint,
       updatedAt
@@ -416,6 +730,7 @@ export function warmupCacheRecordForTableRecords(records = [], {
       'sph-thermal-step',
       'sph-reaction-step',
       'mls-mpm-resident-step',
+      'sph-dispersed-medium-optics-producer',
       'sph-resident-render-field'
     ],
     generatorFingerprint,
@@ -787,22 +1102,41 @@ function restoreThermalPhaseResponseTable(record) {
   };
 }
 
-function restoreOpticalGpuTable(record) {
-  if (!record?.arrays?.records || !record?.arrays?.spectralSamples) return null;
+function restoreOpticalGpuTable(record, {
+  requireCanonicalAbi = false
+} = {}) {
+  if (
+    !(record?.arrays?.records instanceof Float32Array)
+    || !(record?.arrays?.spectralSamples instanceof Float32Array)
+  ) return null;
   const metadata = record.metadata || {};
-  return {
+  // recordMetadata is consumed as an array before any renderer-side rebuild.
+  // Reject malformed persistent data here instead of allowing a cache hit to
+  // throw while the application is starting.
+  if (!Array.isArray(metadata.recordMetadata)) return null;
+  const recordStrideFloats = metadata.recordStrideFloats || 0;
+  const spectralSampleStrideFloats = metadata.spectralSampleStrideFloats || 0;
+  const restored = {
     schema: record.sourceSchema,
-    status: 'static-table-cache-hit',
+    status: metadata.status || 'static-table-cache-hit',
     records: record.arrays.records,
     spectralSamples: record.arrays.spectralSamples,
     recordCount: metadata.recordCount ?? 0,
     spectralSampleCount: metadata.spectralSampleCount ?? 0,
-    recordStrideFloats: metadata.recordStrideFloats || 0,
-    spectralSampleStrideFloats: metadata.spectralSampleStrideFloats || 0,
+    recordStrideFloats,
+    spectralSampleStrideFloats,
+    recordStrideBytes: metadata.recordStrideBytes
+      ?? (recordStrideFloats * Float32Array.BYTES_PER_ELEMENT),
+    spectralSampleStrideBytes: metadata.spectralSampleStrideBytes
+      ?? (spectralSampleStrideFloats * Float32Array.BYTES_PER_ELEMENT),
     recordLayout: metadata.recordLayout || [],
     spectralSampleLayout: metadata.spectralSampleLayout || [],
+    wgslStructs: metadata.wgslStructs
+      ?? (record.sourceSchema === ULG_OPTICAL_GPU_TABLE_SCHEMA
+        ? OPTICAL_GPU_WGSL_STRUCTS
+        : null),
     materialMap: metadata.materialMap || [],
-    recordMetadata: metadata.recordMetadata || [],
+    recordMetadata: metadata.recordMetadata,
     materialPropertyBankPbrWarmInputConsumer:
       metadata.materialPropertyBankPbrWarmInputConsumer ?? null,
     materialPropertyBankPbrWarmInputRowCount:
@@ -815,9 +1149,172 @@ function restoreOpticalGpuTable(record) {
       metadata.materialPropertyBankPbrWarmInputMatchedRecordCount ?? 0,
     colorSpace: metadata.colorSpace || 'linear-rgb-from-srgb-closure-output',
     cache: cacheMetadata(record),
-    scientificValidation: false,
-    fullPhysicsValidation: false
+    scientificValidation: metadata.scientificValidation ?? false,
+    fullPhysicsValidation: metadata.fullPhysicsValidation ?? false
   };
+  if (requireCanonicalAbi && !opticalGpuTableHasCanonicalAbi(restored)) {
+    return null;
+  }
+  return restored;
+}
+
+function restoreCollectiveOpticalRouteDescriptors(record) {
+  const source = record?.metadata?.collectiveOpticalRouteDescriptors;
+  if (!Array.isArray(source)) return null;
+  try {
+    const restored = source.map((cached) => {
+      const canonical = collectiveOpticalRouteDescriptor(cached);
+      for (const field of [
+        'schema',
+        'routeKey',
+        'routeId',
+        'opticalStateId',
+        'materialId',
+        'condensedPhase',
+        'condensedPhaseId',
+        'vaporPhase',
+        'vaporPhaseId',
+        'closureModel',
+        'closureModelId',
+        'phase',
+        'phaseId',
+        'dispersedPhase',
+        'dispersedPhaseId',
+        'surfaceIdentityKey'
+      ]) {
+        if (cached?.[field] !== canonical[field]) {
+          throw new RangeError(
+            `cached collective optical route ${field} is inconsistent`
+          );
+        }
+      }
+      if (
+        cached?.opticalState?.collectiveOpticalRouteKey
+          !== canonical.opticalState.collectiveOpticalRouteKey
+      ) {
+        throw new RangeError('cached collective optical state key is inconsistent');
+      }
+      return canonical;
+    });
+    const routeIds = new Set(restored.map((route) => route.routeId));
+    if (routeIds.size !== restored.length) {
+      throw new RangeError('cached collective optical route ids are not unique');
+    }
+    return Object.freeze(restored);
+  } catch {
+    return null;
+  }
+}
+
+function restoreDispersedMediumOpticalClosureTable(record) {
+  if (
+    record?.sourceSchema
+      !== ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_TABLE_SCHEMA
+    || !(record?.arrays?.rows instanceof Float32Array)
+  ) return null;
+  const metadata = record.metadata || {};
+  if (
+    metadata.propertySchema
+      !== ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA
+    || metadata.version !== SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_VERSION
+    || metadata.rowStrideFloats
+      !== SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_FLOATS
+    || metadata.rowStrideBytes
+      !== SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_BYTES
+    || !Array.isArray(metadata.rowLayout)
+    || metadata.rowLayout.length
+      !== SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LAYOUT.length
+    || metadata.rowLayout.some(
+      (field, index) => field
+        !== SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_ROW_LAYOUT[index]
+    )
+    || metadata.scientificValidation !== false
+  ) return null;
+  try {
+    const table = Object.freeze({
+      schema: record.sourceSchema,
+      propertySchema: metadata.propertySchema,
+      version: metadata.version,
+      status: metadata.status || 'static-table-cache-hit',
+      rowCount: metadata.rowCount,
+      routeCount: metadata.routeCount,
+      readyRowCount: metadata.readyRowCount,
+      blockedRowCount: metadata.blockedRowCount,
+      readyOpticalStateIds: Object.freeze([
+        ...(metadata.readyOpticalStateIds || [])
+      ]),
+      rowStrideFloats: metadata.rowStrideFloats,
+      rowStrideBytes: metadata.rowStrideBytes,
+      rowLayout: Object.freeze([...(metadata.rowLayout || [])]),
+      bufferByteLength: metadata.bufferByteLength,
+      rows: record.arrays.rows,
+      metadata: Object.freeze((metadata.tableMetadata || []).map((entry) => (
+        Object.freeze({ ...entry })
+      ))),
+      routeLookup: metadata.routeLookup,
+      massAuthority: metadata.massAuthority,
+      saturationMassInference: metadata.saturationMassInference,
+      cache: cacheMetadata(record),
+      scientificValidation: false
+    });
+    validateSphDispersedMediumOpticalClosureTable(table);
+    return table;
+  } catch {
+    return null;
+  }
+}
+
+function collectiveOpticalTablesHaveRouteParity({
+  routeDescriptors,
+  opticalGpuTable,
+  closureTable
+}) {
+  if (
+    !Array.isArray(routeDescriptors)
+    || !opticalGpuTable?.schema
+    || !closureTable?.schema
+    || !Array.isArray(opticalGpuTable.recordMetadata)
+    || !Array.isArray(closureTable.metadata)
+    || opticalGpuTable.recordCount !== routeDescriptors.length
+    || closureTable.rowCount !== routeDescriptors.length
+    || opticalGpuTable.recordMetadata.some(
+      (record) => !record || typeof record !== 'object' || Array.isArray(record)
+    )
+    || closureTable.metadata.some(
+      (record) => !record || typeof record !== 'object' || Array.isArray(record)
+    )
+  ) return false;
+  const opticalByStateId = new Map(
+    (opticalGpuTable.recordMetadata || []).map((record) => [
+      record.opticalStateId,
+      record
+    ])
+  );
+  const closureByStateId = new Map(
+    (closureTable.metadata || []).map((record) => [
+      record.opticalStateId,
+      record
+    ])
+  );
+  if (
+    opticalByStateId.size !== routeDescriptors.length
+    || closureByStateId.size !== routeDescriptors.length
+  ) return false;
+  return routeDescriptors.every((route) => {
+    const optical = opticalByStateId.get(route.opticalStateId);
+    const closure = closureByStateId.get(route.opticalStateId);
+    return Boolean(
+      optical
+      && closure
+      && optical.materialId === route.materialId
+      && optical.phaseId === route.condensedPhaseId
+      && closure.routeKey === route.routeKey
+      && closure.dispersedMaterialId === route.materialId
+      && closure.vaporPhaseId === route.vaporPhaseId
+      && closure.condensedPhaseId === route.condensedPhaseId
+      && closure.morphologyModelId === route.closureModelId
+    );
+  });
 }
 
 function restoreReactionTable(record) {
@@ -930,6 +1427,59 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
     });
   }
   const opticalGpuTable = restoreOpticalGpuTable(byFamily.get('optical-pbr-table'));
+  const collectiveOpticalGpuTableRecord =
+    byFamily.get('collective-optical-pbr-table') || null;
+  let collectiveOpticalGpuTable = restoreOpticalGpuTable(
+    collectiveOpticalGpuTableRecord,
+    { requireCanonicalAbi: true }
+  );
+  let collectiveOpticalRouteDescriptors =
+    restoreCollectiveOpticalRouteDescriptors(collectiveOpticalGpuTableRecord);
+  const dispersedMediumOpticalClosureTableRecord =
+    byFamily.get('sph-dispersed-medium-optical-closure-table') || null;
+  let dispersedMediumOpticalClosureTable =
+    restoreDispersedMediumOpticalClosureTable(
+      dispersedMediumOpticalClosureTableRecord
+    );
+  let collectiveOpticalRouteSetAuthority = null;
+  if (
+    collectiveOpticalGpuTableRecord
+    || dispersedMediumOpticalClosureTableRecord
+  ) {
+    const recomputedAuthority =
+      createSphCollectiveOpticalRouteSetAuthority({
+        routeDescriptors: collectiveOpticalRouteDescriptors,
+        opticalGpuTable: collectiveOpticalGpuTable,
+        closureTable: dispersedMediumOpticalClosureTable
+      });
+    const opticalRecordAuthority = collectiveOpticalGpuTableRecord
+      ?.metadata?.collectiveOpticalRouteSetAuthority ?? null;
+    const closureRecordAuthority = dispersedMediumOpticalClosureTableRecord
+      ?.metadata?.collectiveOpticalRouteSetAuthority ?? null;
+    if (!collectiveOpticalTablesHaveRouteParity({
+      routeDescriptors: collectiveOpticalRouteDescriptors,
+      opticalGpuTable: collectiveOpticalGpuTable,
+      closureTable: dispersedMediumOpticalClosureTable
+    })
+      || !collectiveOpticalRouteSetAuthorityMatches(
+        opticalRecordAuthority,
+        recomputedAuthority
+      )
+      || !collectiveOpticalRouteSetAuthorityMatches(
+        closureRecordAuthority,
+        recomputedAuthority
+      )) {
+      staleDerivedFamilies.push({
+        family: 'sph-dispersed-medium-optical-static-route-set',
+        reason: 'collective-optical-route-table-parity-mismatch'
+      });
+      collectiveOpticalGpuTable = null;
+      collectiveOpticalRouteDescriptors = null;
+      dispersedMediumOpticalClosureTable = null;
+    } else {
+      collectiveOpticalRouteSetAuthority = recomputedAuthority;
+    }
+  }
   const reactionTableRecord = byFamily.get('sph-reaction-table');
   const reactionTable = restoreReactionTable(reactionTableRecord);
   if (reactionTableRecord && !reactionTable) {
@@ -945,6 +1495,8 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
     thermalClosureGraphSet,
     thermalPhaseResponseTable,
     opticalGpuTable,
+    collectiveOpticalGpuTable,
+    dispersedMediumOpticalClosureTable,
     reactionTable
   };
   const restoredFamilies = Object.entries(restored)
@@ -961,6 +1513,8 @@ export function rehydrateSphStaticTableBundle(snapshotOrCache, options = {}) {
     tableCount: rehydrated.tableCount,
     gpuWarmupCount: rehydrated.gpuWarmupCount,
     source: rehydrated,
+    collectiveOpticalRouteDescriptors,
+    collectiveOpticalRouteSetAuthority,
     ...restored,
     scientificValidation: false,
     sphValidation: false,

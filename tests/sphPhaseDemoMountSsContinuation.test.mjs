@@ -1034,6 +1034,25 @@ test('mounted schedule cadence survives startup deferral and every recursive con
   );
 });
 
+test('mounted material cache fingerprints live H2O optical authority and rejects v4 records', () => {
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    source,
+    /PEER_CLOSURE_CACHE_METHOD_VERSION\s*=\s*'ulg\.generic-derivation\+reference-bank-anchoring\.v5'/
+  );
+  assert.match(
+    source,
+    /createH2oDispersedMediumOpticalClosure:\s*createH2oDispersedMediumOpticalClosure\.toString\(\)/
+  );
+  assert.match(
+    source,
+    /createReferenceAnchoredMaterialClosure:\s*createReferenceAnchoredMaterialClosure\.toString\(\)/
+  );
+});
+
 test('same-backend render-mode changes keep the architecture profile truthful', () => {
   const source = readFileSync(
     new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url),

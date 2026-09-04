@@ -8,7 +8,12 @@
 // phase physics. Evidence-only throughout.
 
 import { createReferenceMaterialClosures } from './material/materialClosures.js';
-import { createDerivedMaterialClosure, createReferenceAnchoredMaterialClosure, resolveMaterialSpec } from './material/materialDerivation.js';
+import {
+  H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+  createDerivedMaterialClosure,
+  createReferenceAnchoredMaterialClosure,
+  resolveMaterialSpec
+} from './material/materialDerivation.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -2450,6 +2455,7 @@ function buildSphInitialBodiesDemoState({
         context: 'buildSphPhaseDemoState.initialBodies',
         allowedFallbackSources: [
           'material-property-reference-bank',
+          H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
           ...(allowReducedProductProperties ? ['reactant-packed-product-closure'] : [])
         ]
       });
@@ -2801,6 +2807,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
         context: 'buildSphPhaseDemoState',
         allowedFallbackSources: [
           'material-property-reference-bank',
+          H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
           ...(allowReducedProductProperties ? ['reactant-packed-product-closure'] : [])
         ]
       });
@@ -5906,6 +5913,7 @@ export function createSphPhaseDemo(options = {}) {
       context: 'createSphPhaseDemo.initial-materials',
       allowedFallbackSources: [
         'material-property-reference-bank',
+        H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
         ...(options.allowReducedProductProperties === true ? ['reactant-packed-product-closure'] : [])
       ]
     });
@@ -6317,7 +6325,10 @@ export function createSphPhaseDemo(options = {}) {
       requireFirstPrinciplesMaterialProperties(closure.properties, {
         material: key,
         context: 'createSphPhaseDemo.product-material',
-        allowedFallbackSources: ['material-property-reference-bank']
+        allowedFallbackSources: [
+          'material-property-reference-bank',
+          H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE
+        ]
       });
     }
     demo.materialProperties[key] = closure.properties;

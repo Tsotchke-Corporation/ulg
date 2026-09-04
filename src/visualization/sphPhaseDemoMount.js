@@ -117,6 +117,8 @@ import { deriveCompoundClosure } from '../runtime/material/compoundClosure.js';
 import { CONDUCTOR_OPTICAL_CONSTANTS_BANK } from '../runtime/material/conductorOpticalConstants.js';
 import { deriveElementProperties } from '../runtime/material/elementClosures.js';
 import {
+  createH2oDispersedMediumOpticalClosure,
+  createReferenceAnchoredMaterialClosure,
   deriveFormulaMaterialProperties,
   deriveMaterialProperties,
   resolveMaterialSpec
@@ -253,7 +255,7 @@ const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
 const PEER_CLOSURE_CACHE_GENERATOR_SCHEMA = 'peercompute.ulg.material-closure-generator-fingerprint.v1';
 const PEER_CLOSURE_CACHE_APP_VERSION = '0.1.0';
-const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v4';
+const PEER_CLOSURE_CACHE_METHOD_VERSION = 'ulg.generic-derivation+reference-bank-anchoring.v5';
 const PEER_CLOSURE_CACHE_MAX_RECORDS_PER_MATERIAL = 32;
 const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
   schema: PEER_CLOSURE_CACHE_GENERATOR_SCHEMA,
@@ -261,6 +263,10 @@ const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
   methodVersion: PEER_CLOSURE_CACHE_METHOD_VERSION,
   moduleUrl: import.meta.url,
   generators: {
+    createH2oDispersedMediumOpticalClosure:
+      createH2oDispersedMediumOpticalClosure.toString(),
+    createReferenceAnchoredMaterialClosure:
+      createReferenceAnchoredMaterialClosure.toString(),
     deriveMaterialProperties: deriveMaterialProperties.toString(),
     resolveMaterialSpec: resolveMaterialSpec.toString(),
     deriveFormulaMaterialProperties: deriveFormulaMaterialProperties.toString(),

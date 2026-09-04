@@ -5,11 +5,16 @@ import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import {
+  createReferenceAnchoredMaterialClosure
+} from '../src/runtime/material/materialDerivation.js';
+import {
   PROPERTY_DERIVATION_STATUS as DS,
   MaterialFirstPrinciplesResolutionError,
   assertFullyLowerLevelDerived,
   assertNoUnprovenancedMaterialProperties,
-  materialDerivationSummary
+  materialDerivationSummary,
+  provenanceEntriesForPath,
+  trackedMaterialPropertyPaths
 } from '../src/runtime/material/propertyProvenance.js';
 import { materialComposition, discoverReactions } from '../src/runtime/sph/reactionDiscovery.js';
 
@@ -29,6 +34,86 @@ test('every material closure carries per-property provenance', () => {
     assertNoUnprovenancedMaterialProperties(closure.properties);
     assert.equal(closure.materialDerivation.trackedPropertyCount, materialDerivationSummary(closure.properties).trackedPropertyCount);
   }
+});
+
+test('live and fixture H2O share a completely tracked unvalidated optical closure', () => {
+  const fixture = createReferenceMaterialClosures().h2o.properties;
+  const live = createReferenceAnchoredMaterialClosure('h2o').properties;
+  assert.deepEqual(
+    live.dispersedMediumOpticalClosure,
+    fixture.dispersedMediumOpticalClosure
+  );
+  assert.equal(
+    live.dispersedMediumOpticalClosure.condensedDensityKgPerM3,
+    live.phases.find((phase) => phase.name === 'liquid').densityKgPerM3
+  );
+  assert.equal(live.dispersedMediumOpticalClosure.scientificValidation, false);
+  assert.match(
+    live.dispersedMediumOpticalClosure.provenance.method,
+    /unvalidated.*large-particle asymptotic/i
+  );
+  assert.doesNotMatch(
+    live.dispersedMediumOpticalClosure.provenance.method,
+    /qsca[^;]*lower.bound/i
+  );
+
+  const expectedPaths = [
+    'dispersedMediumOpticalClosure.schema',
+    'dispersedMediumOpticalClosure.morphologyModel',
+    'dispersedMediumOpticalClosure.condensedDensityKgPerM3',
+    'dispersedMediumOpticalClosure.scatteringEfficiencyQsca',
+    'dispersedMediumOpticalClosure.absorptionEfficiencyQabs',
+    'dispersedMediumOpticalClosure.asymmetryFactorG',
+    'dispersedMediumOpticalClosure.provenance',
+    'dispersedMediumOpticalClosure.scientificValidation'
+  ];
+  const tracked = trackedMaterialPropertyPaths(live);
+  for (const path of expectedPaths) assert.ok(tracked.includes(path), path);
+
+  const densityEntries = provenanceEntriesForPath(
+    live,
+    'dispersedMediumOpticalClosure.condensedDensityKgPerM3'
+  );
+  const morphologyEntries = provenanceEntriesForPath(
+    live,
+    'dispersedMediumOpticalClosure.morphologyModel'
+  );
+  assert.equal(densityEntries.at(-1).source, 'material-property-reference-bank');
+  assert.equal(
+    morphologyEntries.at(-1).source,
+    'unvalidated-compact-carrier-optical-fallback'
+  );
+  assert.notEqual(densityEntries.at(-1).source, morphologyEntries.at(-1).source);
+
+  for (const removedPath of expectedPaths) {
+    const mutated = {
+      ...live,
+      propertyProvenance: {
+        ...live.propertyProvenance,
+        entries: live.propertyProvenance.entries.map((entry) => ({
+          ...entry,
+          paths: entry.paths.filter((path) => path !== removedPath)
+        }))
+      }
+    };
+    assert.throws(
+      () => assertNoUnprovenancedMaterialProperties(mutated),
+      /missing provenance/,
+      removedPath
+    );
+  }
+
+  const untrackedRadius = {
+    ...live,
+    dispersedMediumOpticalClosure: {
+      ...live.dispersedMediumOpticalClosure,
+      effectiveRadiusM: 1e-6
+    }
+  };
+  assert.throws(
+    () => assertNoUnprovenancedMaterialProperties(untrackedRadius),
+    /effectiveRadiusM/
+  );
 });
 
 test('reference-backed H2O/Fe remain blocked while production closures are fully derived', () => {

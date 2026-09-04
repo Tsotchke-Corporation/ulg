@@ -1302,8 +1302,7 @@ test('ULG GPU builder retires every partial owned allocation on construction fai
     { failCreateBindGroup: true },
     { failWriteBufferLabel: 'ulg-sph-extension-surface-draw' },
     { failWriteBufferLabel: 'ulg-sph-extension-surface-translation-params' },
-    { failQueueSubmit: true },
-    { failSubmittedWorkDoneSync: true }
+    { failQueueSubmit: true }
   ];
   for (const injectedFailure of failureCases) {
     const { device, createdBuffers } = fakeExtensionSurfaceDevice(
@@ -1330,6 +1329,52 @@ test('ULG GPU builder retires every partial owned allocation on construction fai
       `partial allocation leaked or retired twice: ${JSON.stringify(injectedFailure)}`
     );
   }
+});
+
+test('ULG GPU builder retires transient allocations when cleanup-fence scheduling throws synchronously', async () => {
+  const { device, createdBuffers } = fakeExtensionSurfaceDevice({
+    failSubmittedWorkDoneSync: true
+  });
+  const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: extensionExecution({ vertexCount: 3 }),
+    readbackMode: 'no-full-readback',
+    waitForQueueCompletion: false
+  });
+  const retainedBuffers = new Set([
+    result.surfaceVertices.vertexRowsBuffer,
+    result.surfaceDraw.drawRowsBuffer,
+    result.surfaceDraw.drawIndirectRowsBuffer
+  ]);
+  const ownedBuffers = createdBuffers.filter((buffer) =>
+    buffer.label?.startsWith('ulg-sph-extension-surface-'));
+  const transientBuffers = ownedBuffers.filter((buffer) =>
+    !retainedBuffers.has(buffer));
+  assert.ok(transientBuffers.length > 0);
+  assert.equal(
+    transientBuffers.every((buffer) => (
+      buffer.destroyed === true
+      && buffer.destroyCount === 1
+    )),
+    true
+  );
+  assert.equal(
+    [...retainedBuffers].every((buffer) => buffer.destroyed === false),
+    true
+  );
+
+  result.destroyExtensionSurfaceBuffers({
+    force: true,
+    releaseLeases: true,
+    reason: 'cleanup-fence-scheduling-test'
+  });
+  assert.equal(
+    ownedBuffers.every((buffer) => (
+      buffer.destroyed === true
+      && buffer.destroyCount === 1
+    )),
+    true
+  );
 });
 
 test('ULG GPU builder retires readback staging and outer buffers after map failure', async () => {

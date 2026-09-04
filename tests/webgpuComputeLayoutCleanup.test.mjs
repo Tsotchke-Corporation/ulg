@@ -197,7 +197,7 @@ test('a rejected fence still releases its cleanup', async () => {
   assert.deepEqual(ran, ['released']);
 });
 
-test('a queue that cannot schedule a fence surfaces the failure to its caller', () => {
+test('a queue that cannot schedule a fence still retires cleanup exactly once', () => {
   const device = {
     queue: {
       onSubmittedWorkDone() {
@@ -205,10 +205,12 @@ test('a queue that cannot schedule a fence surfaces the failure to its caller', 
       }
     }
   };
-  assert.throws(
-    () => deferSubmittedWorkCleanup(device, () => {}),
-    /injected fence scheduling failure/
+  let cleanupCount = 0;
+  assert.equal(
+    deferSubmittedWorkCleanup(device, () => { cleanupCount += 1; }),
+    false
   );
+  assert.equal(cleanupCount, 1);
 });
 
 function queueOrderedDevice() {

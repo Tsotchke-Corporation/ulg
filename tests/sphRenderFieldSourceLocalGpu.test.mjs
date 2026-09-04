@@ -464,6 +464,62 @@ test('generic source-local builder routes normal no-readback and product inputs 
   assert.match(productLabels[1], /product-splat/, 'product events splat after the particles');
   assert.ok(!productInput.dispatches.some((entry) => entry.label === 'ulg-sph-render-field'));
 
+  const dispersedSurfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'collective-droplet-route',
+    material: 'H2O',
+    phase: 'gas',
+    renderKey: 'steam',
+    opticalStateId: 99,
+    resolution: 8,
+    isolation: 1,
+    subtract: 1,
+    radiusNorm: 0.05,
+    colorLinear: [0.8, 0.8, 0.8]
+  }]);
+  const dispersedInput = fakeComputeDevice();
+  const dispersedResult = await buildSphRenderFieldSourceLocalWebGpu({
+    device: dispersedInput.device,
+    renderRows: renderRowsForSurface(dispersedSurfaceTable),
+    dispersedMediumOpticsRows: Float32Array.from([
+      1, 2, 99, 1, 0.1, 0.2, 0.1, 0.1
+    ]),
+    surfaceTable: dispersedSurfaceTable,
+    particleCount: 1
+  });
+  assert.equal(dispersedResult.sourceLocalStrategy, 'dense-fallback');
+  assert.equal(
+    dispersedResult.sourceLocalFallbackReason,
+    'dispersed-medium-optics-require-dense-field'
+  );
+  assert.ok(
+    dispersedInput.dispatches.some(
+      (entry) => entry.label === 'ulg-sph-render-field'
+    )
+  );
+  assert.ok(
+    !dispersedInput.dispatches.some((entry) => /source-local/.test(entry.label))
+  );
+
+  const capturedOnlyDispersedInput = fakeComputeDevice();
+  await assert.rejects(
+    () => buildSphRenderFieldSourceLocalWebGpu({
+      device: capturedOnlyDispersedInput.device,
+      renderRows: renderRowsForSurface(dispersedSurfaceTable),
+      renderRowsSource: {
+        dispersedMediumOptics: { status: 'captured-authoritative-child' }
+      },
+      surfaceTable: dispersedSurfaceTable,
+      particleCount: 1
+    }),
+    /exact dispersed-medium sidecar captured with its render rows/
+  );
+  assert.ok(
+    !capturedOnlyDispersedInput.dispatches.some(
+      (entry) => /source-local/.test(entry.label)
+    ),
+    'a child advertised only through the captured render artifact must fail closed through the dense path'
+  );
+
   // With no events the product pass must not be encoded at all.
   const noProductInput = fakeComputeDevice();
   await buildSphRenderFieldSourceLocalWebGpu({

@@ -9,6 +9,12 @@ import {
   webGpuBufferDevice
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  beginSphDispersedMediumGpuBufferBorrow,
+  destroySphDispersedMediumGpuBuffers,
+  sphDispersedMediumGpuBufferParticleSourceFamilyMatches,
+  validateSphDispersedMediumGpuBufferAuthority
+} from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
+import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_STATUS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
@@ -26,10 +32,14 @@ import {
   decodeSphGpuParticleRows,
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
+  ensureSphGpuParticleBufferSetBorrowLifecycle,
   mlsMpmGpuParticleUploadMatchesDevice,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
   sphGpuParticleStateHasGasCandidateIndication,
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics,
+  sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers,
   sphGpuParticleUploadMatchesDevice,
+  transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership,
   uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -65,6 +75,46 @@ test('particle upload device matchers require their primary buffers', () => {
   }, device), false);
 });
 
+test('SPH sidecar presence treats only exact numeric zero scalars as absent', () => {
+  const scalarFields = [
+    'dispersedMediumOpticsRowCount',
+    'dispersedMediumOpticsRowStrideFloats',
+    'dispersedMediumOpticsBufferByteLength'
+  ];
+  for (const field of scalarFields) {
+    for (const absentValue of [0, -0]) {
+      assert.equal(
+        sphGpuParticleUploadAdvertisesDispersedMediumOptics({
+          [field]: absentValue
+        }),
+        false,
+        `${field}=${String(absentValue)} must remain canonical absence`
+      );
+    }
+    for (const advertisedValue of ['0', false, '', Number.NaN, 1]) {
+      assert.equal(
+        sphGpuParticleUploadAdvertisesDispersedMediumOptics({
+          [field]: advertisedValue
+        }),
+        true,
+        `${field}=${String(advertisedValue)} must advertise a malformed singleton`
+      );
+    }
+  }
+  assert.equal(
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics({
+      ownsDispersedMediumOpticsBuffer: false
+    }),
+    false
+  );
+  assert.equal(
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics({
+      ownsDispersedMediumOpticsBuffer: true
+    }),
+    true
+  );
+});
+
 test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   const demo = buildSphPhaseDemoState();
   const packed = buildSphGpuParticleBuffers(demo.state, {
@@ -80,6 +130,7 @@ test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   assert.equal(packed.thermo.length, packed.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
   assert.equal(packed.identitySchema, ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA);
   assert.equal(packed.identity.length, packed.particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS);
+  assert.equal(packed.dispersedMediumOptics, null);
   nearlyEqual(rows[0].positionM[0], first.x[0]);
   nearlyEqual(rows[0].positionM[1], first.x[1]);
   nearlyEqual(rows[0].positionM[2], first.x[2]);
@@ -316,12 +367,26 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
   const destroyed = [];
   const device = {
     createBuffer(descriptor) {
-      return {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      const buffer = {
         ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {
+          if (mappedBytes) {
+            writes.push({
+              label: descriptor.label,
+              offset: 0,
+              byteLength: mappedBytes.byteLength
+            });
+          }
+        },
         destroy() {
           destroyed.push(descriptor.label);
         }
       };
+      return buffer;
     },
     queue: {
       writeBuffer(buffer, offset, data) {
@@ -343,8 +408,38 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
   assert.equal(writes[2].byteLength, packed.identity.byteLength);
   assert.equal((writes[0].usage & 128) !== 0, true);
   assert.equal((writes[0].usage & 8) !== 0, true);
+  assert.equal(buffers.dispersedMediumOptics, null);
+  assert.equal(buffers.dispersedMediumOpticsAuthority, null);
+  assert.equal(buffers.dispersedMediumOpticsBuffer, null);
+  assert.equal(buffers.dispersedMediumOpticsRowCount, 0);
+  assert.equal(buffers.dispersedMediumOpticsRowStrideFloats, 0);
+  assert.equal(buffers.dispersedMediumOpticsBufferByteLength, 0);
+  assert.equal(buffers.ownsDispersedMediumOpticsBuffer, false);
   assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), true);
   assert.equal(sphGpuParticleUploadMatchesDevice(buffers, { ...device }), false);
+  const malformedScalarSingletons = [
+    'dispersedMediumOpticsRowCount',
+    'dispersedMediumOpticsRowStrideFloats',
+    'dispersedMediumOpticsBufferByteLength'
+  ].flatMap((key) => ['0', false, '', Number.NaN, 1].map(
+    (value) => [key, value]
+  ));
+  for (const [key, value] of [
+    ['dispersedMediumOptics', {}],
+    ['dispersedMediumOpticsAuthority', {}],
+    ['dispersedMediumOpticsBuffer', {}],
+    ...malformedScalarSingletons,
+    ['ownsDispersedMediumOpticsBuffer', true]
+  ]) {
+    const prior = buffers[key];
+    buffers[key] = value;
+    assert.equal(
+      sphGpuParticleUploadMatchesDevice(buffers, device),
+      false,
+      `singleton ${key}=${String(value)} must fail closed`
+    );
+    buffers[key] = prior;
+  }
 
   const borrowDescriptor = Object.getOwnPropertyDescriptor(
     buffers,
@@ -376,6 +471,713 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
     'ulg-sph-particle-thermo',
     'ulg-sph-particle-identity'
   ]);
+});
+
+test('SPH GPU particle buffers own and authenticate an optional dispersed-medium sidecar', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [0, 1].map((index) => ({
+      material: 'unknownium',
+      x: [index, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0
+    }))
+  });
+  state.particles[0].dispersedMediumOptics = {
+    dispersedMaterialId: 7,
+    dispersedPhaseId: 3,
+    opticalStateId: 11,
+    dispersedMassKg: 0.02,
+    scatteringCrossSectionM2: 0.5,
+    absorptionCrossSectionM2: 0.125,
+    scatteringAsymmetryCrossSectionM2: 0.375
+  };
+  const packed = buildSphGpuParticleBuffers(state, { materialProperties: {} });
+  assert.equal(packed.dispersedMediumOptics.rowCount, 2);
+  assert.equal(packed.dispersedMediumOptics.readyRowCount, 1);
+  assert.equal(packed.dispersedMediumOptics.blockedRowCount, 1);
+
+  const writes = [];
+  const destroyed = [];
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      const buffer = {
+        ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {
+          if (mappedBytes) {
+            writes.push({
+              label: descriptor.label,
+              offset: 0,
+              byteLength: mappedBytes.byteLength
+            });
+          }
+        },
+        destroy() {
+          destroyed.push(descriptor.label);
+        }
+      };
+      return buffer;
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
+      }
+    }
+  };
+  const buffers = uploadSphGpuParticleBuffers(device, packed);
+  assert.deepEqual(writes.map((entry) => entry.label), [
+    'ulg-sph-particle-state',
+    'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
+    'ulg-sph-dispersed-medium-optics'
+  ]);
+  assert.equal(buffers.dispersedMediumOpticsRowCount, 2);
+  assert.equal(buffers.dispersedMediumOpticsRowStrideFloats, 8);
+  assert.equal(buffers.dispersedMediumOpticsBufferByteLength, 64);
+  assert.equal(buffers.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(
+    buffers.dispersedMediumOpticsBuffer,
+    buffers.dispersedMediumOptics.buffer
+  );
+  assert.equal(
+    buffers.dispersedMediumOpticsAuthority,
+    buffers.dispersedMediumOptics.authority
+  );
+  assert.equal(validateSphDispersedMediumGpuBufferAuthority(
+    device,
+    buffers.dispersedMediumOpticsAuthority,
+    {
+      buffer: buffers.dispersedMediumOpticsBuffer,
+      particleCount: buffers.particleCount,
+      rowCount: buffers.dispersedMediumOpticsRowCount,
+      rowStrideFloats: buffers.dispersedMediumOpticsRowStrideFloats
+    }
+  ), true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), true);
+  const borrowedBuffers = {
+    ...buffers,
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  assert.equal(
+    ensureSphGpuParticleBufferSetBorrowLifecycle(borrowedBuffers),
+    false,
+    'generic ensure must not mint a fresh sidecar parent from public aliases'
+  );
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(borrowedBuffers, device),
+    false
+  );
+  const forgedBuffers = {
+    ...borrowedBuffers,
+    stateBuffer: tagWebGpuBufferDevice({}, device),
+    thermoBuffer: tagWebGpuBufferDevice({}, device)
+  };
+  assert.equal(
+    ensureSphGpuParticleBufferSetBorrowLifecycle(forgedBuffers),
+    false,
+    'first-seen registration must not bless arbitrary same-device state/thermo buffers'
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(forgedBuffers, device), false);
+  assert.equal(
+    sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers(
+      forgedBuffers,
+      {
+        device,
+        stateBuffer: forgedBuffers.stateBuffer,
+        thermoBuffer: forgedBuffers.thermoBuffer,
+        identityBuffer: forgedBuffers.identityBuffer
+      }
+    ),
+    false,
+    'source matching must not become circular through a forged first registration'
+  );
+  assert.deepEqual(destroyed, []);
+  assert.equal(sphGpuParticleUploadMatchesDevice(buffers, device), true);
+  buffers.ownsDispersedMediumOpticsBuffer = false;
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(buffers, device),
+    false,
+    'public ownership mutation without a private transfer must fail closed'
+  );
+  buffers.ownsDispersedMediumOpticsBuffer = true;
+  for (const [key, value] of [
+    ['dispersedMediumOptics', null],
+    ['dispersedMediumOpticsAuthority', null],
+    ['dispersedMediumOpticsBuffer', null],
+    ['dispersedMediumOpticsRowCount', Number.NaN],
+    ['dispersedMediumOpticsRowStrideFloats', Number.NaN],
+    ['dispersedMediumOpticsBufferByteLength', Number.NaN],
+    ['ownsDispersedMediumOpticsBuffer', 'owned']
+  ]) {
+    const prior = buffers[key];
+    buffers[key] = value;
+    assert.equal(
+      sphGpuParticleUploadMatchesDevice(buffers, device),
+      false,
+      `torn ${key} must fail closed`
+    );
+    buffers[key] = prior;
+  }
+  for (const [key, value] of [
+    ['buffer', null],
+    ['authority', null],
+    ['particleCount', null],
+    ['particleCount', 3],
+    ['rowCount', null],
+    ['rowCount', 3],
+    ['rowStrideFloats', null],
+    ['rowStrideFloats', 4],
+    ['bufferByteLength', null],
+    ['bufferByteLength', 32],
+    ['ownsBuffer', false]
+  ]) {
+    const prior = buffers.dispersedMediumOptics[key];
+    buffers.dispersedMediumOptics[key] = value;
+    assert.equal(
+      sphGpuParticleUploadMatchesDevice(buffers, device),
+      false,
+      `mutated private child descriptor ${key} must fail closed`
+    );
+    buffers.dispersedMediumOptics[key] = prior;
+  }
+  for (const [key, value] of [
+    ['particleCount', null],
+    ['particleCount', '2'],
+    ['topologyEpoch', null],
+    ['topologyEpoch', '0'],
+    ['identityRevision', null],
+    ['identityBuffer', null]
+  ]) {
+    const prior = buffers[key];
+    buffers[key] = value;
+    assert.equal(
+      sphGpuParticleUploadMatchesDevice(buffers, device),
+      false,
+      `nullable or coerced parent lineage ${key} must fail closed`
+    );
+    buffers[key] = prior;
+  }
+
+  buffers.__ulgActiveBorrowCount = 1;
+  assert.equal(destroySphGpuParticleBuffers(buffers), false);
+  assert.deepEqual(destroyed, []);
+  buffers.__ulgActiveBorrowCount = 0;
+  assert.deepEqual(destroyed, [
+    'ulg-sph-particle-state',
+    'ulg-sph-particle-thermo',
+    'ulg-sph-particle-identity',
+    'ulg-sph-dispersed-medium-optics'
+  ]);
+  assert.equal(validateSphDispersedMediumGpuBufferAuthority(
+    device,
+    buffers.dispersedMediumOpticsAuthority
+  ), false);
+});
+
+test('authenticated transfer can seed a private borrowed continuation without reopening generic registration', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [{
+      material: 'unknownium',
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0,
+      dispersedMediumOptics: {
+        dispersedMaterialId: 7,
+        dispersedPhaseId: 3,
+        opticalStateId: 11,
+        dispersedMassKg: 0.02,
+        scatteringCrossSectionM2: 0.5,
+        absorptionCrossSectionM2: 0.125,
+        scatteringAsymmetryCrossSectionM2: 0.375
+      }
+    }]
+  });
+  state.particles[0].dispersedMediumOptics = {
+    dispersedMaterialId: 7,
+    dispersedPhaseId: 3,
+    opticalStateId: 11,
+    dispersedMassKg: 0.02,
+    scatteringCrossSectionM2: 0.5,
+    absorptionCrossSectionM2: 0.125,
+    scatteringAsymmetryCrossSectionM2: 0.375
+  };
+  const packed = buildSphGpuParticleBuffers(state, { materialProperties: {} });
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      return {
+        ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroyCount: 0,
+        destroy() { this.destroyCount += 1; }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const source = uploadSphGpuParticleBuffers(device, packed);
+  const rejectedStateBuffer = tagWebGpuBufferDevice({}, device);
+  const rejectedThermoBuffer = tagWebGpuBufferDevice({}, device);
+  let rejectedOwnsSidecar = false;
+  const rejectedContinuation = {
+    ...source,
+    stateBuffer: rejectedStateBuffer,
+    thermoBuffer: rejectedThermoBuffer,
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  Object.defineProperty(
+    rejectedContinuation,
+    'ownsDispersedMediumOpticsBuffer',
+    {
+      configurable: true,
+      enumerable: true,
+      get() { return rejectedOwnsSidecar; },
+      set(value) {
+        if (value === true) throw new Error('injected ownership publication failure');
+        rejectedOwnsSidecar = value;
+      }
+    }
+  );
+  assert.throws(
+    () => transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: source,
+      targetSphUpload: rejectedContinuation
+    }),
+    /injected ownership publication failure/
+  );
+  assert.equal(source.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(rejectedContinuation.ownsDispersedMediumOpticsBuffer, false);
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(rejectedContinuation, device),
+    false,
+    'failed ownership publication must roll back the target private parent record'
+  );
+  assert.equal(
+    sphDispersedMediumGpuBufferParticleSourceFamilyMatches(
+      source.dispersedMediumOptics,
+      {
+        particleCount: source.particleCount,
+        topologyEpoch: source.topologyEpoch,
+        identityRevision: source.identityRevision,
+        stateBuffer: rejectedStateBuffer,
+        thermoBuffer: rejectedThermoBuffer,
+        identityBuffer: source.identityBuffer
+      }
+    ),
+    false,
+    'failed ownership publication must roll back the child source-family registry entry'
+  );
+  const continuation = {
+    ...source,
+    stateBuffer: tagWebGpuBufferDevice({}, device),
+    thermoBuffer: tagWebGpuBufferDevice({}, device),
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  const ownerTransfer =
+    transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: source,
+      targetSphUpload: continuation
+    });
+  assert.equal(ownerTransfer.transferredOwnedBufferCount, 1);
+  assert.equal(source.ownsDispersedMediumOpticsBuffer, false);
+  assert.equal(continuation.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(continuation, device), true);
+
+  const borrowedContinuation = {
+    ...source,
+    stateBuffer: tagWebGpuBufferDevice({}, device),
+    thermoBuffer: tagWebGpuBufferDevice({}, device),
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  const borrowedTransfer =
+    transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: source,
+      targetSphUpload: borrowedContinuation
+    });
+  assert.equal(borrowedTransfer.transferredOwnedBufferCount, 0);
+  assert.equal(borrowedContinuation.ownsDispersedMediumOpticsBuffer, false);
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(borrowedContinuation, device),
+    true,
+    'a complete privately seeded borrowed descriptor remains valid'
+  );
+  assert.equal(destroySphGpuParticleBuffers(borrowedContinuation), true);
+  assert.equal(source.dispersedMediumOpticsBuffer.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(source), true);
+  assert.equal(source.dispersedMediumOpticsBuffer.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(continuation), true);
+  assert.equal(source.dispersedMediumOpticsBuffer.destroyCount, 1);
+});
+
+test('a stale sidecar transfer rollback cannot revive an earlier owner after A to B to C', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [{
+      material: 'unknownium',
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0,
+      dispersedMediumOptics: {
+        dispersedMaterialId: 7,
+        dispersedPhaseId: 3,
+        opticalStateId: 11,
+        dispersedMassKg: 0.02,
+        scatteringCrossSectionM2: 0.5,
+        absorptionCrossSectionM2: 0.125,
+        scatteringAsymmetryCrossSectionM2: 0.375
+      }
+    }]
+  });
+  state.particles[0].dispersedMediumOptics = {
+    dispersedMaterialId: 7,
+    dispersedPhaseId: 3,
+    opticalStateId: 11,
+    dispersedMassKg: 0.02,
+    scatteringCrossSectionM2: 0.5,
+    absorptionCrossSectionM2: 0.125,
+    scatteringAsymmetryCrossSectionM2: 0.375
+  };
+  const packed = buildSphGpuParticleBuffers(state, { materialProperties: {} });
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      return {
+        ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroyCount: 0,
+        destroy() { this.destroyCount += 1; }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const sourceA = uploadSphGpuParticleBuffers(device, packed);
+  const continuationB = {
+    ...sourceA,
+    stateBuffer: tagWebGpuBufferDevice({}, device),
+    thermoBuffer: tagWebGpuBufferDevice({}, device),
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  const transferAB =
+    transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: sourceA,
+      targetSphUpload: continuationB
+    });
+  const continuationC = {
+    ...sourceA,
+    stateBuffer: tagWebGpuBufferDevice({}, device),
+    thermoBuffer: tagWebGpuBufferDevice({}, device),
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  const transferBC =
+    transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: continuationB,
+      targetSphUpload: continuationC
+    });
+
+  assert.equal(transferAB.transferredOwnedBufferCount, 1);
+  assert.equal(transferBC.transferredOwnedBufferCount, 1);
+  assert.deepEqual([
+    sourceA.ownsDispersedMediumOpticsBuffer,
+    continuationB.ownsDispersedMediumOpticsBuffer,
+    continuationC.ownsDispersedMediumOpticsBuffer
+  ], [false, false, true]);
+  assert.deepEqual([
+    sphGpuParticleUploadMatchesDevice(sourceA, device),
+    sphGpuParticleUploadMatchesDevice(continuationB, device),
+    sphGpuParticleUploadMatchesDevice(continuationC, device)
+  ], [true, true, true]);
+
+  assert.equal(
+    transferAB.rollback(),
+    false,
+    'a superseded rollback capability must refuse without mutation'
+  );
+  assert.deepEqual([
+    sourceA.ownsDispersedMediumOpticsBuffer,
+    continuationB.ownsDispersedMediumOpticsBuffer,
+    continuationC.ownsDispersedMediumOpticsBuffer
+  ], [false, false, true]);
+  assert.deepEqual([
+    sphGpuParticleUploadMatchesDevice(sourceA, device),
+    sphGpuParticleUploadMatchesDevice(continuationB, device),
+    sphGpuParticleUploadMatchesDevice(continuationC, device)
+  ], [true, true, true]);
+
+  const sidecarBuffer = sourceA.dispersedMediumOpticsBuffer;
+  assert.equal(destroySphGpuParticleBuffers(sourceA), true);
+  assert.equal(sidecarBuffer.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(continuationB), true);
+  assert.equal(sidecarBuffer.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(continuationC), true);
+  assert.equal(sidecarBuffer.destroyCount, 1);
+});
+
+test('pending-destroy SPH sidecar cannot acquire a continuation parent or owner', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [{
+      material: 'unknownium',
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0,
+      dispersedMediumOptics: {
+        dispersedMaterialId: 7,
+        dispersedPhaseId: 3,
+        opticalStateId: 11,
+        dispersedMassKg: 0.02,
+        scatteringCrossSectionM2: 0.5,
+        absorptionCrossSectionM2: 0.125,
+        scatteringAsymmetryCrossSectionM2: 0.375
+      }
+    }]
+  });
+  state.particles[0].dispersedMediumOptics = {
+    dispersedMaterialId: 7,
+    dispersedPhaseId: 3,
+    opticalStateId: 11,
+    dispersedMassKg: 0.02,
+    scatteringCrossSectionM2: 0.5,
+    absorptionCrossSectionM2: 0.125,
+    scatteringAsymmetryCrossSectionM2: 0.375
+  };
+  const packed = buildSphGpuParticleBuffers(state, { materialProperties: {} });
+  const destroyed = [];
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      return {
+        ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroy() { destroyed.push(descriptor.label); }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const source = uploadSphGpuParticleBuffers(device, packed);
+  const target = {
+    ...source,
+    stateBuffer: tagWebGpuBufferDevice({}, device),
+    thermoBuffer: tagWebGpuBufferDevice({}, device),
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    ownsIdentityBuffer: false,
+    ownsDispersedMediumOpticsBuffer: false,
+    ownsMaterialPropertyBankWarmInputBuffer: false,
+    ownsMaterialPropertyBankParticleSizeBuffer: false
+  };
+  const release = beginSphDispersedMediumGpuBufferBorrow(
+    device,
+    source.dispersedMediumOptics
+  );
+  assert.equal(
+    destroySphDispersedMediumGpuBuffers(source.dispersedMediumOptics),
+    true
+  );
+  assert.equal(source.dispersedMediumOptics.destroyPending, true);
+  assert.equal(
+    validateSphDispersedMediumGpuBufferAuthority(
+      device,
+      source.dispersedMediumOpticsAuthority
+    ),
+    true,
+    'an already-pinned consumer may finish ordinary validation while draining'
+  );
+  assert.equal(
+    ensureSphGpuParticleBufferSetBorrowLifecycle(target),
+    false,
+    'pending destroy must reject a new parent registration'
+  );
+  assert.throws(
+    () => transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+      sourceSphUpload: source,
+      targetSphUpload: target
+    }),
+    /exact live private source parent\/child record/
+  );
+  assert.equal(source.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(target.ownsDispersedMediumOpticsBuffer, false);
+  assert.equal(release(), true);
+  assert.equal(
+    destroyed.filter((label) => label === 'ulg-sph-dispersed-medium-optics').length,
+    1
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(target, device), false);
+  assert.equal(destroySphGpuParticleBuffers(source), true);
+});
+
+test('SPH sidecar private lineage rejects an FNV-colliding child swap and tears down its original child', () => {
+  const makeState = (domainId) => {
+    const state = createSphState({
+      smoothingLengthM: 0.2,
+      particles: [0].map((index) => ({
+        material: 'unknownium',
+        x: [index, 0, 0],
+        v: [0, 0, 0],
+        massKg: 1,
+        specificInternalEnergyJPerKg: 0
+      }))
+    });
+    for (const particle of state.particles) {
+      particle.initialBodyDomainId = domainId;
+      particle.initialBodyId = `body-${domainId}`;
+    }
+    state.particles[0].dispersedMediumOptics = {
+      dispersedMaterialId: 7,
+      dispersedPhaseId: 3,
+      opticalStateId: 11,
+      dispersedMassKg: 0.02,
+      scatteringCrossSectionM2: 0.5,
+      absorptionCrossSectionM2: 0.125,
+      scatteringAsymmetryCrossSectionM2: 0.375
+    };
+    return state;
+  };
+  const packedA = buildSphGpuParticleBuffers(makeState(48_124), {
+    materialProperties: {}
+  });
+  const packedB = buildSphGpuParticleBuffers(makeState(82_709), {
+    materialProperties: {}
+  });
+  assert.equal(packedA.particleCount, packedB.particleCount);
+  assert.equal(packedA.topologyEpoch, packedB.topologyEpoch);
+  assert.equal(packedA.identityRevision, packedB.identityRevision);
+  assert.equal(packedA.identityRevision, 'fnv1a32:1:6e137934');
+
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      return {
+        ...descriptor,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroyCount: 0,
+        destroy() { this.destroyCount += 1; }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const uploadA = uploadSphGpuParticleBuffers(device, packedA);
+  const uploadB = uploadSphGpuParticleBuffers(device, packedB);
+  const privateChildA = uploadA.dispersedMediumOptics;
+  const privateChildB = uploadB.dispersedMediumOptics;
+  assert.equal(sphGpuParticleUploadMatchesDevice(uploadA, device), true);
+  assert.equal(sphGpuParticleUploadMatchesDevice(uploadB, device), true);
+  assert.equal(
+    sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers(uploadA, {
+      device,
+      stateBuffer: uploadA.stateBuffer,
+      thermoBuffer: uploadA.thermoBuffer,
+      identityBuffer: uploadA.identityBuffer
+    }),
+    true
+  );
+  for (const [field, foreignBuffer] of [
+    ['stateBuffer', uploadB.stateBuffer],
+    ['thermoBuffer', uploadB.thermoBuffer],
+    ['identityBuffer', uploadB.identityBuffer]
+  ]) {
+    assert.equal(
+      sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers(uploadA, {
+        device,
+        stateBuffer: uploadA.stateBuffer,
+        thermoBuffer: uploadA.thermoBuffer,
+        identityBuffer: uploadA.identityBuffer,
+        [field]: foreignBuffer
+      }),
+      false,
+      `private parent family must reject a foreign ${field} override`
+    );
+    const priorBuffer = uploadA[field];
+    uploadA[field] = foreignBuffer;
+    assert.equal(
+      sphGpuParticleUploadMatchesDevice(uploadA, device),
+      false,
+      `public ${field} mutation must not rewrite the private parent family`
+    );
+    uploadA[field] = priorBuffer;
+    assert.equal(sphGpuParticleUploadMatchesDevice(uploadA, device), true);
+  }
+
+  const sidecarAliasKeys = [
+    'dispersedMediumOptics',
+    'dispersedMediumOpticsAuthority',
+    'dispersedMediumOpticsBuffer',
+    'dispersedMediumOpticsRowCount',
+    'dispersedMediumOpticsRowStrideFloats',
+    'dispersedMediumOpticsBufferByteLength',
+    'ownsDispersedMediumOpticsBuffer'
+  ];
+  for (const key of sidecarAliasKeys) uploadA[key] = uploadB[key];
+  assert.equal(
+    sphGpuParticleUploadMatchesDevice(uploadA, device),
+    false,
+    'private particle lineage must reject a fully self-consistent public child swap'
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(uploadB, device), true);
+
+  uploadA.destroyed = true;
+  assert.equal(destroySphGpuParticleBuffers(uploadA), true);
+  assert.equal(
+    privateChildA.buffer.destroyCount,
+    1,
+    'parent teardown must retain and destroy its private original child'
+  );
+  assert.equal(
+    privateChildB.buffer.destroyCount,
+    0,
+    'swapped public aliases must not redirect teardown to the foreign child'
+  );
+  assert.equal(sphGpuParticleUploadMatchesDevice(uploadB, device), true);
+  assert.equal(destroySphGpuParticleBuffers(uploadB), true);
+  assert.equal(privateChildB.buffer.destroyCount, 1);
 });
 
 test('SPH and MLS-MPM GPU uploads include material-bank warm and particle-size rows when supplied', () => {

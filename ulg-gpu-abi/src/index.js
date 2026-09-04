@@ -1,4 +1,6 @@
 export * from './sphPhaseContracts.js';
+export * from './sphDispersedMedium.js';
+export * from './sphDispersedMediumWgsl.js';
 export * from './parallelPrimitives.js';
 export * from './schroederSpatialEpoch.js';
 export * from './schroederSpatialEpochWgsl.js';

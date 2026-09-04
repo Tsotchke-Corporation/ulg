@@ -2146,7 +2146,7 @@ test('successor render-field targets reject forged and unknown GPU buffer capaci
         },
         targetFieldRowsBufferByteLength: requiredByteLength
       }),
-      /must expose its actual GPU buffer capacity/
+      /(?:must expose its actual GPU buffer capacity|\.size must be a non-negative safe integer byte length)/
     );
   }
 });

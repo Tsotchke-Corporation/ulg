@@ -31,6 +31,9 @@ import {
   residentProductEventCountAuthorityRegistered,
   validateProductEventLiveCountCopyDescriptor
 } from './sphResidentProductHistoryGpu.js';
+import {
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics
+} from './sphGpuBuffers.js';
 
 /**
  * A deliberately non-production source-local render-field builder.
@@ -983,6 +986,11 @@ function fallbackReason({
   productEventRows,
   productEventBuffer,
   productEventCount,
+  dispersedMediumOptics,
+  dispersedMediumOpticsRows,
+  dispersedMediumOpticsBuffer,
+  dispersedMediumOpticsAuthority,
+  renderRowsSource,
   schroederSpatialSourceFamily,
   targetFieldRowsBuffer,
   retainFieldRowsBuffer,
@@ -1016,6 +1024,19 @@ function fallbackReason({
   // gather's admission rule and contributes to density and palette only.
   if ((productEventRows || productEventBuffer) && !(finiteNumber(productEventCount, 0) >= 0)) {
     return 'product-event-count-required';
+  }
+  // The source-local splat ABI does not yet carry the dense particle-aligned
+  // dispersed-medium moment sidecar. Route the exact original options through
+  // the dense kernel so production never silently substitutes legacy
+  // material/phase metaballs for optical-depth geometry.
+  if (
+    dispersedMediumOptics
+    || dispersedMediumOpticsRows
+    || dispersedMediumOpticsBuffer
+    || dispersedMediumOpticsAuthority
+    || sphGpuParticleUploadAdvertisesDispersedMediumOptics(renderRowsSource)
+  ) {
+    return 'dispersed-medium-optics-require-dense-field';
   }
   // Successor lineage is a provenance requirement rather than field maths: the
   // dense path authenticates that the render rows really came from the named
@@ -1218,6 +1239,10 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     renderRowsBuffer = null,
     renderRowsSource = null,
     schroederSpatialSourceFamily = renderRowsSource?.schroederSpatialSourceFamily ?? null,
+    dispersedMediumOptics = null,
+    dispersedMediumOpticsRows = null,
+    dispersedMediumOpticsBuffer = null,
+    dispersedMediumOpticsAuthority = null,
     productEventRows = null,
     productEventBuffer = null,
     productEventSource = null,
@@ -1314,6 +1339,11 @@ export async function buildSphRenderFieldSourceLocalWebGpu(options = {}) {
     productEventRows,
     productEventBuffer,
     productEventCount: resolvedProductEventCount,
+    dispersedMediumOptics,
+    dispersedMediumOpticsRows,
+    dispersedMediumOpticsBuffer,
+    dispersedMediumOpticsAuthority,
+    renderRowsSource,
     schroederSpatialSourceFamily,
     targetFieldRowsBuffer,
     retainFieldRowsBuffer,

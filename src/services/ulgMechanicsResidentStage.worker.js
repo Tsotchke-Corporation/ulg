@@ -9,6 +9,9 @@ import {
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   retainedContinuationBuffersFromUploads,
+  sphDispersedMediumOpticsRemapRequiredError,
+  sphDispersedMediumOpticsMatchesParticleUpload,
+  transferTopologyStableSphDispersedMediumOpticsOwnership,
   runMlsMpmResidentStepsWithOptionalWebGpu,
   runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
@@ -25,11 +28,17 @@ import {
   isExactQuiescentSphReactionTable
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
+  validateSphDispersedMediumGpuBufferAuthority
+} from '../runtime/sph/sphDispersedMediumGpuBuffers.js';
+import {
   ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
   isExactWorkerTier0PresentationQosBoundaryProof,
   resolveWorkerTier0PresentationQosSubsteps
 } from '../runtime/sph/sphWorkerPresentationQos.js';
 import {
+  destroySphGpuParticleBuffers,
+  ensureSphGpuParticleBufferSetBorrowLifecycle,
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -769,28 +778,74 @@ function getLaneRecord(payload = {}) {
   return record;
 }
 
-function collectLaneOwnedGpuBuffers(value, buffers, seen = new WeakSet()) {
+function collectLaneOwnedGpuBuffers(
+  value,
+  buffers,
+  seen = new WeakSet(),
+  protectedBuffers = null
+) {
   if (!value || typeof value !== 'object' || seen.has(value)) return;
   seen.add(value);
   if (isGpuBufferLike(value)) {
-    buffers.add(value);
+    if (!protectedBuffers?.has(value)) buffers.add(value);
     return;
   }
   if (value instanceof Map) {
     for (const entry of value.values()) {
-      collectLaneOwnedGpuBuffers(entry, buffers, seen);
+      collectLaneOwnedGpuBuffers(entry, buffers, seen, protectedBuffers);
     }
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) collectLaneOwnedGpuBuffers(entry, buffers, seen);
+    for (const entry of value) {
+      collectLaneOwnedGpuBuffers(entry, buffers, seen, protectedBuffers);
+    }
     return;
   }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) return;
   for (const [key, entry] of Object.entries(value)) {
     if (key === 'device' || key === 'queue' || typeof entry === 'function') continue;
-    collectLaneOwnedGpuBuffers(entry, buffers, seen);
+    collectLaneOwnedGpuBuffers(entry, buffers, seen, protectedBuffers);
+  }
+}
+
+const WORKER_SPH_UPLOAD_BUFFER_FIELDS = Object.freeze([
+  'stateBuffer',
+  'thermoBuffer',
+  'identityBuffer',
+  'materialPropertyBankWarmInputBuffer',
+  'materialPropertyBankParticleSizeBuffer',
+  'dispersedMediumOpticsBuffer'
+]);
+
+function workerLaneSphParticleUploads(record) {
+  return new Set([
+    record?.schroederLane?.sphParticleUpload,
+    record?.schroederLane?.residentStep?.nextParticleUploads
+      ?.sphParticleUpload,
+    record?.poisonedCanonicalResidentStep?.nextParticleUploads
+      ?.sphParticleUpload,
+    record?.poisonedTier0Execution?.finalStep?.nextParticleUploads
+      ?.sphParticleUpload
+  ].filter(Boolean));
+}
+
+function protectWorkerSphParticleUploadBuffers(upload, protectedBuffers) {
+  for (const field of WORKER_SPH_UPLOAD_BUFFER_FIELDS) {
+    const buffer = upload?.[field];
+    if (buffer) protectedBuffers.add(buffer);
+  }
+}
+
+function exactWorkerSphParticleUploadBorrowCount(upload) {
+  try {
+    return Math.max(
+      0,
+      Math.floor(Number(upload?.__ulgActiveBorrowCount) || 0)
+    );
+  } catch {
+    return 0;
   }
 }
 
@@ -821,38 +876,45 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       destroyedBufferCount: 0
     };
   }
+  const sphParticleUploads = workerLaneSphParticleUploads(record);
+  const protectedBuffers = new Set();
+  for (const upload of sphParticleUploads) {
+    // Every worker-owned continuation gets the same non-enumerable lifecycle
+    // used by uploaded SPH buffer sets. This is idempotent and preserves the
+    // exact parent/child identities.
+    ensureSphGpuParticleBufferSetBorrowLifecycle(upload);
+    if (exactWorkerSphParticleUploadBorrowCount(upload) > 0) {
+      protectWorkerSphParticleUploadBuffers(upload, protectedBuffers);
+    }
+    // The branded child must always retire through its authority-aware
+    // destructor, never through the generic raw-GPUBuffer safety walk.
+    if (upload.dispersedMediumOpticsBuffer) {
+      protectedBuffers.add(upload.dispersedMediumOpticsBuffer);
+    }
+  }
+  const successfullyRetiredResidentSphUploads = new Set();
+  const retireResidentStep = (step, options) => {
+    if (!step) return;
+    const upload = step.nextParticleUploads?.sphParticleUpload ?? null;
+    try {
+      destroyMlsMpmResidentStepBuffers(step, options);
+      if (upload) successfullyRetiredResidentSphUploads.add(upload);
+    } catch {
+      // The lane is being retired regardless. A borrowed parent is handled
+      // below through destroySphGpuParticleBuffers(), which records a deferred
+      // full-family destroy request on the same lifecycle.
+    }
+  };
   const staticGpuResources = record.schroederLane?.staticGpuResources || null;
-  if (record.schroederLane?.residentStep) {
-    try {
-      destroyMlsMpmResidentStepBuffers(record.schroederLane.residentStep, {
-        destroyInputResidentProductMass: true
-      });
-    } catch {
-      // The lane is being retired regardless; the owned-buffer walk below is
-      // the final best-effort safety net for device resources.
-    }
-  }
-  if (record.poisonedCanonicalResidentStep) {
-    try {
-      destroyMlsMpmResidentStepBuffers(
-        record.poisonedCanonicalResidentStep,
-        { destroyInputResidentProductMass: true }
-      );
-    } catch {
-      // The poisoned successor remains reachable through the record until
-      // the owned-buffer walk below finishes every remaining resource.
-    }
-  }
-  if (record.poisonedTier0Execution?.finalStep) {
-    try {
-      destroyMlsMpmResidentStepBuffers(
-        record.poisonedTier0Execution.finalStep,
-        { destroyInputResidentProductMass: true }
-      );
-    } catch {
-      // The owned-buffer walk below remains the final teardown safety net.
-    }
-  }
+  retireResidentStep(record.schroederLane?.residentStep, {
+    destroyInputResidentProductMass: true
+  });
+  retireResidentStep(record.poisonedCanonicalResidentStep, {
+    destroyInputResidentProductMass: true
+  });
+  retireResidentStep(record.poisonedTier0Execution?.finalStep, {
+    destroyInputResidentProductMass: true
+  });
   for (const cleanupRecord of (
     record.poisonedTier0SubmittedCleanupRecords || []
   )) {
@@ -877,8 +939,24 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
   destroyMlsMpmMechanicsMaterialPhaseUpload(
     staticGpuResources?.mechanicsMaterialPhaseUpload
   );
+  for (const upload of sphParticleUploads) {
+    if (successfullyRetiredResidentSphUploads.has(upload)) continue;
+    try {
+      // This immediate call becomes a deferred exact-family retirement when
+      // a same-worker presenter still holds the parent upload borrow.
+      destroySphGpuParticleBuffers(upload);
+    } catch {
+      // Protected borrowed buffers remain live. Unprotected non-sidecar
+      // resources still reach the best-effort walk below.
+    }
+  }
   const buffers = new Set();
-  collectLaneOwnedGpuBuffers(record, buffers);
+  collectLaneOwnedGpuBuffers(
+    record,
+    buffers,
+    new WeakSet(),
+    protectedBuffers
+  );
   for (const buffer of buffers) {
     try { buffer.destroy?.(); } catch { /* best-effort lane retirement */ }
   }
@@ -2182,6 +2260,36 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
   // consumers (the presentation draw path), never across postMessage.
   const schroederLane = record.schroederLane || null;
   const schroederLaneUpload = schroederLane?.sphParticleUpload || null;
+  const dispersedMediumOptics =
+    schroederLaneUpload?.dispersedMediumOptics ?? null;
+  const dispersedMediumOpticsAdvertised =
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      schroederLaneUpload
+    );
+  const dispersedMediumOpticsReady =
+    sphDispersedMediumOpticsMatchesParticleUpload(schroederLaneUpload)
+    && (
+      !dispersedMediumOpticsAdvertised
+      || validateSphDispersedMediumGpuBufferAuthority(
+        record.workerDevice,
+        dispersedMediumOptics?.authority,
+        {
+          upload: dispersedMediumOptics,
+          buffer: dispersedMediumOptics?.buffer,
+          particleCount: schroederLaneUpload?.particleCount,
+          rowCount: dispersedMediumOptics?.rowCount,
+          rowStrideFloats: dispersedMediumOptics?.rowStrideFloats,
+          bufferByteLength: dispersedMediumOptics?.bufferByteLength,
+          particleLineage: {
+            particleCount: schroederLaneUpload?.particleCount,
+            topologyEpoch: schroederLaneUpload?.topologyEpoch,
+            identityRevision: schroederLaneUpload?.identityRevision,
+            identityBuffer: schroederLaneUpload?.identityBuffer
+          },
+          requireParticleLineage: true
+        }
+      )
+    );
   const schroederLaneSource =
     sourceStageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID
     && schroederLaneUpload?.stateBuffer
@@ -2220,6 +2328,43 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
   const thermoBuffer = record.retainedThermoBuffer || source?.thermoBuffer || null;
   const canonicalSchroederSource =
     sourceStageId === SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID;
+  const particleUploadBorrowLifecycleReady = Boolean(
+    !canonicalSchroederSource
+    || !schroederLaneUpload
+    || ensureSphGpuParticleBufferSetBorrowLifecycle(schroederLaneUpload)
+  );
+  if (
+    canonicalSchroederSource
+    && dispersedMediumOpticsAdvertised
+    && dispersedMediumOpticsReady !== true
+  ) {
+    return {
+      schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA,
+      status:
+        'worker-retained-particle-state-dispersed-medium-remap-required',
+      reason: 'worker-retained-dispersed-medium-authority-mismatch',
+      laneId: normalizeString(laneId, null),
+      stateKey: normalizeString(stateKey, null),
+      sourceStageId,
+      retainedWithinWorker: false,
+      sameWorkerPrivateReferences: false,
+      postMessageTransportAllowed: false
+    };
+  }
+  if (!particleUploadBorrowLifecycleReady) {
+    return {
+      schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RETAINED_PARTICLE_STATE_SCHEMA,
+      status:
+        'worker-retained-particle-state-borrow-lifecycle-unavailable',
+      reason: 'worker-retained-particle-upload-borrow-lifecycle-unavailable',
+      laneId: normalizeString(laneId, null),
+      stateKey: normalizeString(stateKey, null),
+      sourceStageId,
+      retainedWithinWorker: false,
+      sameWorkerPrivateReferences: false,
+      postMessageTransportAllowed: false
+    };
+  }
   const sameWorkerPrivateReferences = Boolean(
     canonicalSchroederSource
     && schroederLane?.sphParticleState
@@ -2331,6 +2476,9 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
       : null,
     mlsMpmParticleUpload: sameWorkerPrivateReferences
       ? schroederLane.mlsMpmParticleUpload
+      : null,
+    dispersedMediumOptics: sameWorkerPrivateReferences
+      ? dispersedMediumOptics
       : null,
     successorSourceFamily: sameWorkerPrivateReferences
       ? schroederLane.successorSourceFamily
@@ -4401,6 +4549,12 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
     ['sphParticleUpload.thermoBuffer', sphUpload.thermoBuffer],
     ...(sphUpload.identityBuffer
       ? [['sphParticleUpload.identityBuffer', sphUpload.identityBuffer]]
+      : []),
+    ...(sphUpload.dispersedMediumOpticsBuffer
+      ? [[
+          'sphParticleUpload.dispersedMediumOpticsBuffer',
+          sphUpload.dispersedMediumOpticsBuffer
+        ]]
       : []),
     ['mlsMpmParticleUpload.mechanicsBuffer', mlsUpload.mechanicsBuffer]
   ];
@@ -6986,11 +7140,17 @@ function restoreWorkerContinuationSidecarOwnership({
     ownsIdentityBuffer: unadoptedSph?.ownsIdentityBuffer,
     identityOwnership: unadoptedSph?.identityOwnership
   };
+  let dispersedMediumOwnershipTransfer = null;
   try {
     auxiliaryOwnershipTransfer =
       transferPhaseCarrierAuxiliaryBufferOwnership({
         sourceUploads: unadoptedUploads,
         terminalUploads: sourceUploads
+      });
+    dispersedMediumOwnershipTransfer =
+      transferTopologyStableSphDispersedMediumOpticsOwnership({
+        sourceSphUpload: unadoptedSph,
+        targetSphUpload: sourceSph
       });
     if (
       unadoptedSph?.identityBuffer
@@ -7014,6 +7174,9 @@ function restoreWorkerContinuationSidecarOwnership({
         unadoptedIdentitySnapshot.ownsIdentityBuffer;
       unadoptedSph.identityOwnership =
         unadoptedIdentitySnapshot.identityOwnership;
+    } catch {}
+    try {
+      dispersedMediumOwnershipTransfer?.rollback?.();
     } catch {}
     try {
       auxiliaryOwnershipTransfer?.rollbackOwnershipTransfer?.();
@@ -10271,6 +10434,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           identityOwnership: nextSphUpload.identityOwnership
         };
         let tier0AuxiliaryOwnershipTransfer = null;
+        let tier0DispersedMediumOwnershipTransfer = null;
         try {
           tier0AuxiliaryOwnershipTransfer =
             transferPhaseCarrierAuxiliaryBufferOwnership({
@@ -10279,6 +10443,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
                 mlsMpmParticleUpload: lane.mlsMpmParticleUpload
               },
               terminalUploads: nextUploads
+            });
+          tier0DispersedMediumOwnershipTransfer =
+            transferTopologyStableSphDispersedMediumOpticsOwnership({
+              sourceSphUpload: lane.sphParticleUpload,
+              targetSphUpload: nextSphUpload
             });
           if (
             nextSphUpload.thermoBuffer
@@ -10313,6 +10482,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               targetOwnershipSnapshot.ownsIdentityBuffer;
             nextSphUpload.identityOwnership =
               targetOwnershipSnapshot.identityOwnership;
+          } catch {}
+          try {
+            tier0DispersedMediumOwnershipTransfer?.rollback?.();
           } catch {}
           try {
             tier0AuxiliaryOwnershipTransfer
@@ -10428,6 +10600,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       } else {
       if (phaseCarrierOneToFourMaterializationRequired) {
         const lane = record.schroederLane;
+        if (sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+          lane?.sphParticleUpload
+        )) {
+          throw sphDispersedMediumOpticsRemapRequiredError(
+            'successor-particle-lineage-changed',
+            {
+              sourceParticleCount:
+                lane.sphParticleUpload.particleCount ?? null,
+              successorParticleCount:
+                tier0PhaseCarrierPlan?.particleCapacity ?? null,
+              sourceTopologyEpoch:
+                lane.sphParticleUpload.topologyEpoch ?? null,
+              successorTopologyEpoch: null,
+              sourceIdentityRevision:
+                lane.sphParticleUpload.identityRevision ?? null,
+              successorIdentityRevision: null
+            }
+          );
+        }
         phaseCarrierOneToFourSourceResidentStep = lane.residentStep || null;
         phaseCarrierOneToFourSourceUploads = {
           sphParticleUpload: lane.sphParticleUpload,

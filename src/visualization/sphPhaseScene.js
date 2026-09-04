@@ -51,6 +51,7 @@ import {
   destroySphGpuParticleBuffers,
   mlsMpmGpuParticleUploadMatchesDevice,
   sphGpuParticleStateHasGasCandidateIndication,
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics,
   sphGpuParticleUploadMatchesDevice,
   sphParticleStateRequiresExplicitIdentity,
   uploadMlsMpmGpuParticleBuffers,
@@ -3809,6 +3810,59 @@ export function resolveSphSurfaceRendererMaterialPolicy({
 
 const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
 const RESIDENT_NO_FULL_READBACK_MODE = 'no-full-readback';
+
+export function rendererOwnedCpuRenderRowsFallbackAllowed({
+  rendererOwnedDevice = false,
+  readbackMode = RESIDENT_FULL_READBACK_MODE,
+  sphParticleUpload = null
+} = {}) {
+  return Boolean(
+    rendererOwnedDevice
+    && readbackMode !== RESIDENT_NO_FULL_READBACK_MODE
+    && !sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      sphParticleUpload
+    )
+  );
+}
+
+export function resolveRenderFieldCpuParityDispersedMediumAdmission(
+  renderRowsExecution
+) {
+  const residentDispersedMedium =
+    sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+      renderRowsExecution
+    );
+  const hostRows = renderRowsExecution?.dispersedMediumOpticsRows ?? null;
+  const authenticatedHostSnapshot =
+    renderRowsExecution?.dispersedMediumOpticsHostReadback === true;
+  if (hostRows != null && !(hostRows instanceof Float32Array)) {
+    return Object.freeze({
+      ok: false,
+      status: 'render-field-cpu-parity-unavailable-dispersed-medium',
+      reason: 'dispersed-medium CPU parity requires exact Float32Array host rows',
+      dispersedMediumOpticsRows: null
+    });
+  }
+  if (
+    residentDispersedMedium
+    && (hostRows == null || !authenticatedHostSnapshot)
+  ) {
+    return Object.freeze({
+      ok: false,
+      status: 'render-field-cpu-parity-unavailable-dispersed-medium',
+      reason:
+        'resident dispersed-medium optics have no authenticated host snapshot; legacy material geometry is not a valid CPU parity reference',
+      dispersedMediumOpticsRows: null
+    });
+  }
+  return Object.freeze({
+    ok: true,
+    status: 'render-field-cpu-parity-admitted',
+    reason: null,
+    dispersedMediumOpticsRows: hostRows
+  });
+}
+
 export const SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT = 'disabled';
 const SPH_THREE_WEBGPU_BINDING_REASON = 'raw WebGPU canvas overlay disabled until it can share Three scene depth; using Three/MarchingCubes render-field readback';
 const SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE = 'three-compact-vertices';
@@ -42850,9 +42904,28 @@ fn main(
     ) {
       return null;
     }
+    const dispersedMediumAdmission =
+      resolveRenderFieldCpuParityDispersedMediumAdmission(
+        renderRowsExecution
+      );
+    if (!dispersedMediumAdmission.ok) {
+      return {
+        schema: 'peercompute.ulg.sph-render-field-cpu-parity-summary.v0',
+        status: dispersedMediumAdmission.status,
+        reason: dispersedMediumAdmission.reason,
+        surfaceCount: surfaceTable.surfaceCount,
+        maxDensityDelta: null,
+        surfaces: [],
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
     const cpuField = buildSphRenderFieldCpu({
       renderRows: renderRowsExecution.renderRows,
       productEventRows: renderFieldExecution.productEventRows || null,
+      dispersedMediumOpticsRows:
+        dispersedMediumAdmission.dispersedMediumOpticsRows,
       surfaceTable,
       particleCount: renderRowsExecution.particleCount,
       productEventCount: renderFieldExecution.productEventCount,
@@ -47470,10 +47543,12 @@ fn main(
         };
       };
       const extractRenderRowsForMode = (readbackMode) => {
-        const fullReadbackOnRendererOwnedDevice = Boolean(
-          resolvedDeviceResult.rendererOwnedDevice
-          && readbackMode !== RESIDENT_NO_FULL_READBACK_MODE
-        );
+        const fullReadbackOnRendererOwnedDevice =
+          rendererOwnedCpuRenderRowsFallbackAllowed({
+            rendererOwnedDevice: resolvedDeviceResult.rendererOwnedDevice,
+            readbackMode,
+            sphParticleUpload: nextSphUpload
+          });
         if (fullReadbackOnRendererOwnedDevice) {
           return Promise.resolve(extractCpuRenderRowsForMode(
             readbackMode,
@@ -48213,8 +48288,13 @@ fn main(
             renderRows: renderRowsExecution.renderRows,
             renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
             renderRowsSource: successorFieldLineageEligible
+              || renderRowsExecution.dispersedMediumOptics
               ? renderRowsExecution
               : null,
+            dispersedMediumOptics:
+              renderRowsExecution.dispersedMediumOptics ?? null,
+            dispersedMediumOpticsRows:
+              renderRowsExecution.dispersedMediumOpticsRows ?? null,
             schroederSpatialSourceFamily: successorFieldLineageEligible
               ? schroederSpatialSourceFamily
               : null,

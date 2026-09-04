@@ -175,13 +175,22 @@ import {
 import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
+  ensureSphGpuParticleBufferSetBorrowLifecycle,
+  retireSphGpuParticleBufferSetDispersedMediumOptics,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
+  sphGpuParticleUploadAdvertisesDispersedMediumOptics,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
-  sphParticleStateRequiresExplicitIdentity
+  sphParticleStateRequiresExplicitIdentity,
+  transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership
 } from './sphGpuBuffers.js';
+import {
+  destroySphDispersedMediumGpuBuffers,
+  sphDispersedMediumGpuBufferParticleLineageMatches,
+  validateSphDispersedMediumGpuBufferAuthority
+} from './sphDispersedMediumGpuBuffers.js';
 import {
   createMlsMpmGridSpec,
   MLS_MPM_MECHANICS_FIELD_MODE_DISABLED,
@@ -15710,6 +15719,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           finalStep.nextParticleUploads.sphParticleUpload.identityOwnership
       };
       let auxiliaryOwnershipTransfer = null;
+      let dispersedMediumOwnershipTransfer = null;
       try {
         auxiliaryOwnershipTransfer =
           transferMaterialPropertyBankAuxiliaryOwnership({
@@ -15718,6 +15728,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
             targetSphUpload: finalStep.nextParticleUploads.sphParticleUpload,
             targetMlsMpmUpload:
               finalStep.nextParticleUploads.mlsMpmParticleUpload
+          });
+        dispersedMediumOwnershipTransfer =
+          transferTopologyStableSphDispersedMediumOpticsOwnership({
+            sourceSphUpload: sphParticleUpload,
+            targetSphUpload:
+              finalStep.nextParticleUploads.sphParticleUpload
           });
         if (
           sphParticleUpload?.identityBuffer
@@ -15746,6 +15762,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           finalStep.nextParticleUploads.sphParticleUpload.identityOwnership =
             targetIdentitySnapshot.identityOwnership;
         } catch {}
+        try { dispersedMediumOwnershipTransfer?.rollback?.(); } catch {}
         try { auxiliaryOwnershipTransfer?.rollback?.(); } catch {}
         throw error;
       }
@@ -17271,6 +17288,7 @@ function retainedBufferRefsFromResidentStep(step) {
   if (step?.nextParticleUploads?.sphParticleUpload?.stateBuffer) refs.push('sph-state-buffer');
   if (step?.nextParticleUploads?.sphParticleUpload?.thermoBuffer) refs.push('sph-thermo-buffer');
   if (step?.nextParticleUploads?.sphParticleUpload?.identityBuffer) refs.push('sph-particle-identity-buffer');
+  if (step?.nextParticleUploads?.sphParticleUpload?.dispersedMediumOpticsBuffer) refs.push('sph-dispersed-medium-optics-buffer');
   if (step?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer) refs.push('mls-mpm-mechanics-buffer');
   if (step?.residentProductMass?.productEventBufferRetained) refs.push('resident-product-mass-buffer');
   if (step?.schroederFarAggregateGasCellImportBufferRetained) refs.push('resident-gas-pressure-cells-buffer');
@@ -32154,6 +32172,275 @@ const MATERIAL_PROPERTY_BANK_AUXILIARY_FIELDS = Object.freeze([
   })
 ]);
 
+export const SPH_DISPERSED_MEDIUM_OPTICS_REMAP_REQUIRED_ERROR_CODE =
+  'ERR_SPH_DISPERSED_MEDIUM_OPTICS_REMAP_REQUIRED';
+export const SPH_DISPERSED_MEDIUM_OPTICS_ROW_STRIDE_FLOATS = 8;
+
+function sphDispersedMediumOpticsAdvertised(sphParticleUpload = null) {
+  return sphGpuParticleUploadAdvertisesDispersedMediumOptics(
+    sphParticleUpload
+  );
+}
+
+export function sphDispersedMediumOpticsMatchesParticleUpload(
+  sphParticleUpload = null
+) {
+  if (!sphDispersedMediumOpticsAdvertised(sphParticleUpload)) return true;
+  const optics = sphParticleUpload?.dispersedMediumOptics ?? null;
+  const particleCount = sphParticleUpload?.particleCount;
+  const storageGeneration =
+    sphParticleUpload?.storageGeneration
+      ?? sphParticleUpload?.bufferFamilyGeneration;
+  const topologyEpoch = sphParticleUpload?.topologyEpoch;
+  return Boolean(
+    optics
+    && typeof optics === 'object'
+    && optics.buffer
+    && optics.authority
+    && optics.ownsBuffer === true
+    && optics.destroyed !== true
+    && Number.isSafeInteger(particleCount)
+    && particleCount > 0
+    && optics.particleCount === particleCount
+    && optics.rowCount === particleCount
+    && optics.rowStrideFloats
+      === SPH_DISPERSED_MEDIUM_OPTICS_ROW_STRIDE_FLOATS
+    && sphParticleUpload.dispersedMediumOpticsAuthority === optics.authority
+    && sphParticleUpload.dispersedMediumOpticsBuffer === optics.buffer
+    && sphParticleUpload.dispersedMediumOpticsRowCount === optics.rowCount
+    && sphParticleUpload.dispersedMediumOpticsRowStrideFloats
+      === optics.rowStrideFloats
+    && sphParticleUpload.dispersedMediumOpticsBufferByteLength
+      === optics.bufferByteLength
+    && Number.isSafeInteger(storageGeneration)
+    && storageGeneration > 0
+    && storageGeneration <= 0xffff_ffff
+    && Number.isSafeInteger(topologyEpoch)
+    && topologyEpoch >= 0
+    && topologyEpoch <= 0xffff_ffff
+    && typeof sphParticleUpload.identityRevision === 'string'
+    && sphParticleUpload.identityRevision.length > 0
+    && sphParticleUpload.identityBuffer
+    && sphDispersedMediumGpuBufferParticleLineageMatches(
+      optics,
+      {
+        particleCount,
+        topologyEpoch,
+        identityRevision: sphParticleUpload.identityRevision,
+        identityBuffer: sphParticleUpload.identityBuffer
+      }
+    )
+    && validateSphDispersedMediumGpuBufferAuthority(
+      webGpuBufferDevice(optics.buffer),
+      optics.authority,
+      {
+        upload: optics,
+        buffer: optics.buffer,
+        particleCount,
+        rowCount: optics.rowCount,
+        rowStrideFloats: optics.rowStrideFloats,
+        bufferByteLength: optics.bufferByteLength,
+        particleLineage: {
+          particleCount,
+          topologyEpoch,
+          identityRevision: sphParticleUpload.identityRevision,
+          identityBuffer: sphParticleUpload.identityBuffer
+        },
+        requireParticleLineage: true
+      }
+    )
+    && typeof sphParticleUpload.ownsDispersedMediumOpticsBuffer === 'boolean'
+  );
+}
+
+export function sphDispersedMediumOpticsRemapRequiredError(
+  reason,
+  details = null
+) {
+  const error = new Error(
+    `SPH dispersed-medium optics sidecar requires remap: ${reason}`
+  );
+  error.code = SPH_DISPERSED_MEDIUM_OPTICS_REMAP_REQUIRED_ERROR_CODE;
+  error.reason = reason;
+  if (details && typeof details === 'object') {
+    error.dispersedMediumRemap = Object.freeze({ ...details });
+  }
+  return error;
+}
+
+function topologyStableSphDispersedMediumOpticsContinuation({
+  sourceSphUpload,
+  device,
+  nextParticleCount,
+  nextStorageGeneration,
+  nextTopologyEpoch,
+  nextIdentityRevision
+}) {
+  if (!sphDispersedMediumOpticsAdvertised(sourceSphUpload)) return null;
+  const sourceOptics = sourceSphUpload.dispersedMediumOptics;
+  const sourceAuthorityLive = Boolean(
+    device
+    && sourceOptics
+    && validateSphDispersedMediumGpuBufferAuthority(
+      device,
+      sourceOptics.authority,
+      {
+        buffer: sourceOptics.buffer,
+        particleCount: sourceSphUpload.particleCount,
+        rowCount: sourceOptics.rowCount,
+        rowStrideFloats: sourceOptics.rowStrideFloats
+      }
+    )
+  );
+  if (
+    !sphDispersedMediumOpticsMatchesParticleUpload(sourceSphUpload)
+    || !sourceAuthorityLive
+  ) {
+    throw sphDispersedMediumOpticsRemapRequiredError(
+      'source-sidecar-authority-mismatch',
+      {
+        sourceParticleCount: sourceSphUpload?.particleCount ?? null,
+        sidecarParticleCount: sourceOptics?.particleCount ?? null,
+        sourceStorageGeneration:
+          sourceSphUpload?.storageGeneration
+            ?? sourceSphUpload?.bufferFamilyGeneration
+            ?? null,
+        sourceTopologyEpoch: sourceSphUpload?.topologyEpoch ?? null,
+        sourceIdentityRevision: sourceSphUpload?.identityRevision ?? null,
+        exactOpticsChildPresent: sourceOptics != null,
+        liveAuthorityValidated: sourceAuthorityLive,
+        exactAuthorityAliased: Boolean(
+          sourceOptics
+          && sourceSphUpload.dispersedMediumOpticsAuthority
+            === sourceOptics.authority
+        )
+      }
+    );
+  }
+  const successorLineageStable = Boolean(
+    nextParticleCount === sourceSphUpload.particleCount
+    && nextTopologyEpoch === sourceSphUpload.topologyEpoch
+    && nextIdentityRevision === sourceSphUpload.identityRevision
+  );
+  if (!successorLineageStable) {
+    throw sphDispersedMediumOpticsRemapRequiredError(
+      'successor-particle-lineage-changed',
+      {
+        sourceParticleCount: sourceSphUpload.particleCount,
+        successorParticleCount: nextParticleCount ?? null,
+        sourceTopologyEpoch: sourceSphUpload.topologyEpoch,
+        successorTopologyEpoch: nextTopologyEpoch ?? null,
+        sourceIdentityRevision: sourceSphUpload.identityRevision,
+        successorIdentityRevision: nextIdentityRevision ?? null
+      }
+    );
+  }
+  if (
+    !Number.isSafeInteger(nextStorageGeneration)
+    || nextStorageGeneration <= 0
+    || nextStorageGeneration > 0xffff_ffff
+  ) {
+    throw sphDispersedMediumOpticsRemapRequiredError(
+      'successor-storage-generation-missing',
+      { successorStorageGeneration: nextStorageGeneration ?? null }
+    );
+  }
+  return {
+    dispersedMediumOptics: sourceOptics,
+    dispersedMediumOpticsAuthority:
+      sourceSphUpload.dispersedMediumOpticsAuthority,
+    dispersedMediumOpticsBuffer:
+      sourceSphUpload.dispersedMediumOpticsBuffer,
+    dispersedMediumOpticsRowCount:
+      sourceSphUpload.dispersedMediumOpticsRowCount,
+    dispersedMediumOpticsRowStrideFloats:
+      sourceSphUpload.dispersedMediumOpticsRowStrideFloats,
+    dispersedMediumOpticsBufferByteLength:
+      sourceSphUpload.dispersedMediumOpticsBufferByteLength,
+    ownsDispersedMediumOpticsBuffer: false
+  };
+}
+
+export function transferTopologyStableSphDispersedMediumOpticsOwnership({
+  sourceSphUpload = null,
+  targetSphUpload = null
+} = {}) {
+  const sourceAdvertised =
+    sphDispersedMediumOpticsAdvertised(sourceSphUpload);
+  const targetAdvertised =
+    sphDispersedMediumOpticsAdvertised(targetSphUpload);
+  if (!sourceAdvertised && !targetAdvertised) {
+    return Object.freeze({
+      transferredOwnedBufferCount: 0,
+      rollback() { return true; }
+    });
+  }
+  if (
+    !sourceAdvertised
+    || !targetAdvertised
+    || !sphDispersedMediumOpticsMatchesParticleUpload(sourceSphUpload)
+    || !sphDispersedMediumOpticsMatchesParticleUpload(targetSphUpload)
+    || targetSphUpload.dispersedMediumOptics
+      !== sourceSphUpload.dispersedMediumOptics
+    || targetSphUpload.dispersedMediumOpticsAuthority
+      !== sourceSphUpload.dispersedMediumOpticsAuthority
+    || targetSphUpload.dispersedMediumOpticsBuffer
+      !== sourceSphUpload.dispersedMediumOpticsBuffer
+    || targetSphUpload.particleCount !== sourceSphUpload.particleCount
+    || targetSphUpload.topologyEpoch !== sourceSphUpload.topologyEpoch
+    || targetSphUpload.identityRevision !== sourceSphUpload.identityRevision
+  ) {
+    throw sphDispersedMediumOpticsRemapRequiredError(
+      'ownership-transfer-descriptor-drift',
+      {
+        sourcePresent: sourceAdvertised,
+        targetPresent: targetAdvertised,
+        opticsChildAliased: Boolean(
+          sourceSphUpload?.dispersedMediumOptics
+          && targetSphUpload?.dispersedMediumOptics
+            === sourceSphUpload.dispersedMediumOptics
+        ),
+        sourceParticleCount: sourceSphUpload?.particleCount ?? null,
+        targetParticleCount: targetSphUpload?.particleCount ?? null,
+        sourceTopologyEpoch: sourceSphUpload?.topologyEpoch ?? null,
+        targetTopologyEpoch: targetSphUpload?.topologyEpoch ?? null,
+        sourceIdentityRevision: sourceSphUpload?.identityRevision ?? null,
+        targetIdentityRevision: targetSphUpload?.identityRevision ?? null
+      }
+    );
+  }
+  if (targetSphUpload.ownsDispersedMediumOpticsBuffer !== false) {
+    throw sphDispersedMediumOpticsRemapRequiredError(
+      'ownership-transfer-target-already-owned',
+      {
+        targetOwnsBuffer:
+          targetSphUpload.ownsDispersedMediumOpticsBuffer
+      }
+    );
+  }
+  const sourceOwned = sourceSphUpload.ownsDispersedMediumOpticsBuffer;
+  const shouldTransfer = sourceOwned === true;
+  if (
+    shouldTransfer
+    && (Object.isFrozen(sourceSphUpload) || Object.isFrozen(targetSphUpload))
+  ) {
+    throw new TypeError(
+      'SPH dispersed-medium optics ownership transfer requires mutable particle upload descriptors'
+    );
+  }
+  if (
+    !ensureSphGpuParticleBufferSetBorrowLifecycle(sourceSphUpload)
+  ) {
+    throw sphDispersedMediumOpticsRemapRequiredError(
+      'ownership-transfer-private-record-missing'
+    );
+  }
+  return transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
+    sourceSphUpload,
+    targetSphUpload
+  });
+}
+
 function transferMaterialPropertyBankAuxiliaryOwnership({
   sourceSphUpload,
   sourceMlsMpmUpload,
@@ -32400,6 +32687,23 @@ function buildNextParticleUploads({
     && explicitSupportEpoch <= 0xffff_ffff
     ? explicitSupportEpoch
     : nextPositionEpoch;
+  const nextIdentityRevision = schroederParticleStorage
+    ? `${schroederParticleStorage.identityRevision
+      || sphParticleUpload?.identityRevision
+      || sphParticleState?.identityRevision
+      || 'particle-identity'}:ss-topology:${particlePingPong.nextStep}`
+    : (sphParticleUpload?.identityRevision
+      || sphParticleState?.identityRevision
+      || null);
+  const nextDispersedMediumOpticsFields =
+    topologyStableSphDispersedMediumOpticsContinuation({
+      sourceSphUpload: sphParticleUpload,
+      device,
+      nextParticleCount,
+      nextStorageGeneration,
+      nextTopologyEpoch,
+      nextIdentityRevision
+    });
   const particleSourceStage = phaseCarrierFamilySelected
     ? 'sph-phase-carrier-transfer'
     : (schroederParticleStorage
@@ -32456,18 +32760,14 @@ function buildNextParticleUploads({
         || (SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT)
       ),
       identityRequired,
-      identityRevision: schroederParticleStorage
-        ? `${schroederParticleStorage.identityRevision
-          || sphParticleUpload?.identityRevision
-          || sphParticleState?.identityRevision
-          || 'particle-identity'}:ss-topology:${particlePingPong.nextStep}`
-        : (sphParticleUpload?.identityRevision || sphParticleState?.identityRevision || null),
+      identityRevision: nextIdentityRevision,
       phaseCarrierPlan: sphParticleUpload?.phaseCarrierPlan
         ? { ...sphParticleUpload.phaseCarrierPlan }
         : (sphParticleState?.phaseCarrierPlan ? { ...sphParticleState.phaseCarrierPlan } : null),
       stateBuffer,
       thermoBuffer,
       identityBuffer,
+      ...(nextDispersedMediumOpticsFields || {}),
       renderDomainKeys: {
         ...(schroederParticleStorage?.renderDomainKeys
           || sphParticleUpload?.renderDomainKeys
@@ -32563,7 +32863,20 @@ function buildNextParticleUploads({
       fullPhysicsValidation: false
     }
   };
+  if (
+    !sphDispersedMediumOpticsAdvertised(
+      nextParticleUploads.sphParticleUpload
+    )
+    && !ensureSphGpuParticleBufferSetBorrowLifecycle(
+      nextParticleUploads.sphParticleUpload
+    )
+  ) {
+    throw new TypeError(
+      'Resident SPH continuation requires the shared particle-upload borrow lifecycle'
+    );
+  }
   let auxiliaryOwnershipTransfer = null;
+  let dispersedMediumOwnershipTransfer = null;
   try {
     if (
       identityOwnershipTransferApplied
@@ -32580,6 +32893,11 @@ function buildNextParticleUploads({
           sourceMlsMpmUpload: mlsMpmParticleUpload,
           targetSphUpload: nextParticleUploads.sphParticleUpload,
           targetMlsMpmUpload: nextParticleUploads.mlsMpmParticleUpload
+        });
+      dispersedMediumOwnershipTransfer =
+        transferTopologyStableSphDispersedMediumOpticsOwnership({
+          sourceSphUpload: sphParticleUpload,
+          targetSphUpload: nextParticleUploads.sphParticleUpload
         });
     }
     if (identityOwnershipTransferApplied) {
@@ -32598,6 +32916,7 @@ function buildNextParticleUploads({
           sourceIdentityOwnershipSnapshot.identityOwnership;
       }
     } catch {}
+    try { dispersedMediumOwnershipTransfer?.rollback?.(); } catch {}
     try { auxiliaryOwnershipTransfer?.rollback?.(); } catch {}
     throw error;
   }
@@ -37125,10 +37444,76 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       throw error;
     }
   };
+  const destroyDispersedMediumOpticsUnlessPreserved = (upload) => {
+    let privateBuffer = null;
+    const privateRetirement =
+      retireSphGpuParticleBufferSetDispersedMediumOptics(upload, {
+        shouldRetire(buffer) {
+          privateBuffer = buffer;
+          if (
+            !buffer
+            || preserved.has(buffer)
+            || released.has(buffer)
+            || ownerManaged.has(buffer)
+            || rawRetirementAttempted.has(buffer)
+          ) return false;
+          if (hierarchyLedgerBlocksRawRetirement(buffer)) {
+            released.add(buffer);
+            return false;
+          }
+          rawRetirementAttempted.add(buffer);
+          return true;
+        }
+      });
+    if (privateRetirement.handled) {
+      if (
+        privateRetirement.status
+          === 'private-sidecar-retirement-rejected'
+      ) {
+        throw new Error(
+          'Resident dispersed-medium optics destruction authority was rejected'
+        );
+      }
+      if (privateRetirement.retirementRequested) {
+        released.add(privateRetirement.buffer ?? privateBuffer);
+      }
+      return;
+    }
+    // Legacy unregistered descriptors retain their pre-authority behavior.
+    // Every production parent/continuation is registered before publication.
+    if (upload?.ownsDispersedMediumOpticsBuffer !== true) return;
+    const buffer = upload.dispersedMediumOpticsBuffer
+      ?? upload.dispersedMediumOptics?.buffer
+      ?? null;
+    if (
+      !buffer
+      || preserved.has(buffer)
+      || released.has(buffer)
+      || ownerManaged.has(buffer)
+      || rawRetirementAttempted.has(buffer)
+    ) return;
+    if (!upload.dispersedMediumOptics) {
+      destroyUnlessPreserved(buffer);
+      return;
+    }
+    if (hierarchyLedgerBlocksRawRetirement(buffer)) {
+      released.add(buffer);
+      return;
+    }
+    rawRetirementAttempted.add(buffer);
+    if (!destroySphDispersedMediumGpuBuffers(upload.dispersedMediumOptics)) {
+      throw new Error(
+        'Resident dispersed-medium optics destruction authority was rejected'
+      );
+    }
+    upload.ownsDispersedMediumOpticsBuffer = false;
+    released.add(buffer);
+  };
   const destroySphUploadComponentsUnlessPreserved = (upload) => {
     if (upload.ownsStateBuffer !== false) destroyUnlessPreserved(upload.stateBuffer);
     if (upload.ownsThermoBuffer !== false) destroyUnlessPreserved(upload.thermoBuffer);
     if (upload.ownsIdentityBuffer !== false) destroyUnlessPreserved(upload.identityBuffer);
+    destroyDispersedMediumOpticsUnlessPreserved(upload);
     if (upload.ownsMaterialPropertyBankWarmInputBuffer !== false) {
       destroyUnlessPreserved(upload.materialPropertyBankWarmInputBuffer);
     }
@@ -37163,6 +37548,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     step?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
     step?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
     step?.nextParticleUploads?.sphParticleUpload?.identityBuffer,
+    step?.nextParticleUploads?.sphParticleUpload?.dispersedMediumOpticsBuffer,
     step?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
     materializedContinuation.stateBuffer,
     materializedContinuation.thermoBuffer,
@@ -37592,6 +37978,7 @@ export function retainedContinuationBuffersFromUploads(nextParticleUploads = nul
     nextParticleUploads?.sphParticleUpload?.stateBuffer,
     nextParticleUploads?.sphParticleUpload?.thermoBuffer,
     nextParticleUploads?.sphParticleUpload?.identityBuffer,
+    nextParticleUploads?.sphParticleUpload?.dispersedMediumOpticsBuffer,
     nextParticleUploads?.sphParticleUpload
       ?.materialPropertyBankWarmInputBuffer,
     nextParticleUploads?.sphParticleUpload

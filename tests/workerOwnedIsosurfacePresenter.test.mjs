@@ -12,6 +12,7 @@ import {
   createWorkerOwnedIsosurfacePresenter,
   resolveWorkerOwnedIsosurfaceAdmission,
   resolveWorkerOwnedIsosurfaceProductEventSource,
+  snapshotWorkerOwnedSurfaceMetadata,
   summarizeWorkerOwnedIsosurfaceOpticalPresentation
 } from '../src/services/workerOwnedIsosurfacePresenter.js';
 import {
@@ -26,14 +27,37 @@ import {
   validateProductEventLiveCountCopyDescriptor
 } from '../src/runtime/sph/sphResidentProductHistoryGpu.js';
 import {
+  buildSphDispersedMediumGpuBuffers,
+  destroySphDispersedMediumGpuBuffers,
+  uploadSphDispersedMediumGpuBuffers
+} from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
+import {
   tagWebGpuBufferDevice
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 class GPUBuffer {
   constructor(size = 4096) {
     this.size = size;
+    this.destroyCount = 0;
+    this.destroyed = false;
+    this.mappedRange = new ArrayBuffer(size);
+  }
+
+  getMappedRange() {
+    return this.mappedRange;
+  }
+
+  unmap() {
+    this.unmapped = true;
+  }
+
+  destroy() {
+    this.destroyCount += 1;
+    this.destroyed = true;
   }
 }
+
+const dispersedIdentityBufferBySidecar = new WeakMap();
 
 function deferred() {
   let resolve;
@@ -292,6 +316,83 @@ function authenticatedResidentProductMass(
   };
   return source;
 }
+
+function authenticatedDispersedMediumOptics(device, particleCount = 32) {
+  const particles = Array.from({ length: particleCount }, (_value, index) => (
+    index === 0
+      ? {
+          dispersedMediumOptics: {
+            dispersedMaterialId: 17,
+            dispersedPhaseId: 2,
+            opticalStateId: 41,
+            dispersedMassKg: 0.125,
+            scatteringCrossSectionM2: 0.75,
+            absorptionCrossSectionM2: 0.25,
+            scatteringAsymmetryCrossSectionM2: 0.5
+          }
+        }
+      : {}
+  ));
+  const packed = buildSphDispersedMediumGpuBuffers(particles);
+  const identityBuffer = device.createBuffer({
+    size: particleCount * Uint32Array.BYTES_PER_ELEMENT
+  });
+  const sidecar = uploadSphDispersedMediumGpuBuffers(device, packed, {
+    particleLineage: {
+      particleCount,
+      topologyEpoch: 3,
+      identityRevision: 'worker-owned-isosurface-sidecar-lineage-v1',
+      identityBuffer
+    }
+  });
+  dispersedIdentityBufferBySidecar.set(sidecar, identityBuffer);
+  return sidecar;
+}
+
+function particleUploadWithDispersedMediumOptics(sidecar, overrides = {}) {
+  return {
+    particleCount: sidecar.particleCount,
+    topologyEpoch: 3,
+    identityRevision: 'worker-owned-isosurface-sidecar-lineage-v1',
+    stateBuffer: new GPUBuffer(),
+    thermoBuffer: new GPUBuffer(),
+    identityBuffer: dispersedIdentityBufferBySidecar.get(sidecar),
+    dispersedMediumOptics: sidecar,
+    dispersedMediumOpticsAuthority: sidecar.authority,
+    dispersedMediumOpticsBuffer: sidecar.buffer,
+    dispersedMediumOpticsRowCount: sidecar.rowCount,
+    dispersedMediumOpticsRowStrideFloats: sidecar.rowStrideFloats,
+    dispersedMediumOpticsBufferByteLength: sidecar.bufferByteLength,
+    ownsDispersedMediumOpticsBuffer: true,
+    ...overrides
+  };
+}
+
+test('worker-owned isosurface snapshots optical surface metadata before asynchronous extraction', () => {
+  const metadata = {
+    surfaceKey: 'steam-route',
+    materialId: 17,
+    phaseId: 2,
+    opticalStateId: 41,
+    opticalEffectiveOpacity: 0.375,
+    opticalRoughness: 0.125,
+    colorLinear: [0.2, 0.4, 0.8],
+    opticalState: { regime: 'condensed-droplet' }
+  };
+  const snapshot = snapshotWorkerOwnedSurfaceMetadata(metadata);
+  metadata.materialId = 99;
+  metadata.opticalEffectiveOpacity = 1;
+  metadata.colorLinear[0] = 1;
+  metadata.opticalState.regime = 'mutated';
+
+  assert.equal(snapshot.materialId, 17);
+  assert.equal(snapshot.opticalEffectiveOpacity, 0.375);
+  assert.deepEqual(snapshot.colorLinear, [0.2, 0.4, 0.8]);
+  assert.equal(snapshot.opticalState.regime, 'condensed-droplet');
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.colorLinear), true);
+  assert.equal(Object.isFrozen(snapshot.opticalState), true);
+});
 
 test('worker-owned isosurface uniforms use closure opacity and preserve the legacy fallback', () => {
   const frame = {
@@ -697,6 +798,482 @@ test('worker-owned true-isosurface preserves the branded zero-product field call
   assert.equal(fieldBuildOptions.productEventSource, null);
   assert.equal(fieldBuildOptions.productEventCount, 0);
   await rig.presenter.dispose();
+});
+
+test('worker-owned true-isosurface rejects every torn dispersed-medium alias singleton', async () => {
+  let captureCount = 0;
+  const rig = createPresenterRig({
+    captureRenderRows: async () => {
+      captureCount += 1;
+      return { destroyRenderRowsBuffer() {} };
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const singletonCases = [
+    ['dispersedMediumOptics', sidecar],
+    ['dispersedMediumOptics', false],
+    ['dispersedMediumOpticsAuthority', sidecar.authority],
+    ['dispersedMediumOpticsAuthority', 0],
+    ['dispersedMediumOpticsBuffer', sidecar.buffer],
+    ['dispersedMediumOpticsBuffer', ''],
+    ['dispersedMediumOpticsRowCount', sidecar.rowCount],
+    ['dispersedMediumOpticsRowCount', false],
+    ['dispersedMediumOpticsRowStrideFloats', sidecar.rowStrideFloats],
+    ['dispersedMediumOpticsRowStrideFloats', ''],
+    ['dispersedMediumOpticsBufferByteLength', sidecar.bufferByteLength],
+    ['dispersedMediumOpticsBufferByteLength', Number.NaN],
+    ['ownsDispersedMediumOpticsBuffer', true]
+  ];
+
+  for (const [field, value] of singletonCases) {
+    const receipt = await rig.presenter.enqueue({
+      request: validRequest(),
+      retained: validRetained({
+        sphParticleUpload: {
+          particleCount: sidecar.particleCount,
+          [field]: value
+        }
+      }),
+      receiptFields: { tornField: field }
+    });
+    assert.equal(
+      receipt.status,
+      ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS,
+      `${field} must not be mistaken for an absent sidecar`
+    );
+    assert.match(receipt.reason, /torn dispersed-medium particle-upload aliases/);
+  }
+
+  assert.equal(captureCount, 0);
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+});
+
+test('worker-owned true-isosurface pre-borrows and forwards the exact dispersed-medium sidecar', async () => {
+  const fieldBuild = deferred();
+  let fieldBuildOptions = null;
+  let captureReleaseCount = 0;
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async ({ sphParticleUpload }) => ({
+      particleCount: sphParticleUpload.particleCount,
+      renderRowsBuffer: new GPUBuffer(),
+      dispersedMediumOptics: sphParticleUpload.dispersedMediumOptics,
+      schroederSpatialSourceFamily: { id: 'dispersed-success-family' },
+      destroyRenderRowsBuffer() {
+        captureReleaseCount += 1;
+      }
+    }),
+    buildRenderField: async (options) => {
+      fieldBuildOptions = options;
+      await fieldBuild.promise;
+      return {
+        surfaceTable: { ...options.surfaceTable, metadata: [] },
+        schroederSpatialSourceFamily: options.schroederSpatialSourceFamily,
+        fieldPadding: options.fieldPadding,
+        refEdgeM: options.refEdgeM,
+        destroyRenderFieldBuffers() {}
+      };
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const sphParticleUpload = particleUploadWithDispersedMediumOptics(sidecar);
+
+  const receipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({ sphParticleUpload }),
+    sphStep: 17,
+    receiptFields: { lifecycleCase: 'dispersed-success' }
+  });
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  await waitFor(() => fieldBuildOptions != null, 'the dispersed render-field build');
+  assert.strictEqual(fieldBuildOptions.dispersedMediumOptics, sidecar);
+
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+  assert.equal(sidecar.buffer.destroyCount, 0);
+  fieldBuild.resolve();
+
+  await waitFor(
+    () => rig.terminals.some((terminal) => (
+      terminal.lifecycleCase === 'dispersed-success'
+      && terminal.status
+        === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
+    )),
+    'the dispersed render-field presentation'
+  );
+  await waitFor(() => sidecar.buffer.destroyCount === 1, 'the dispersed source release');
+  await waitFor(() => captureReleaseCount === 1, 'the dispersed capture release');
+  assert.equal(sidecar.destroyed, true);
+
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  assert.equal(captureReleaseCount, 1);
+});
+
+test('worker-owned true-isosurface rejects a capture that substitutes its dispersed-medium sidecar', async () => {
+  let captureReleaseCount = 0;
+  let fieldBuildCount = 0;
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async () => ({
+      particleCount: 32,
+      renderRowsBuffer: new GPUBuffer(),
+      dispersedMediumOptics: {},
+      destroyRenderRowsBuffer() {
+        captureReleaseCount += 1;
+      }
+    }),
+    buildRenderField: async () => {
+      fieldBuildCount += 1;
+      throw new Error('substituted sidecar reached the field builder');
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const receipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    })
+  });
+
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS
+  );
+  assert.match(receipt.reason, /did not retain its exact dispersed-medium sidecar/);
+  assert.equal(fieldBuildCount, 0);
+  await waitFor(() => captureReleaseCount === 1, 'the substituted capture release');
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  assert.equal(captureReleaseCount, 1);
+});
+
+test('worker-owned true-isosurface releases a pre-borrowed sidecar when source capture rejects', async () => {
+  const capture = deferred();
+  let captureStarted = false;
+  const rig = createPresenterRig({
+    captureRenderRows: async () => {
+      captureStarted = true;
+      return capture.promise;
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const enqueuePromise = rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    }),
+    receiptFields: { lifecycleCase: 'dispersed-capture-rejection' }
+  });
+
+  await waitFor(() => captureStarted, 'the dispersed source capture');
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+  assert.equal(sidecar.buffer.destroyCount, 0);
+  capture.reject(new Error('injected dispersed capture rejection'));
+
+  const receipt = await enqueuePromise;
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS
+  );
+  assert.match(receipt.reason, /injected dispersed capture rejection/);
+  assert.equal(sidecar.destroyed, true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+});
+
+test('worker-owned true-isosurface releases a pre-borrowed sidecar when field construction rejects', async () => {
+  const fieldBuild = deferred();
+  let fieldBuildStarted = false;
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async ({ sphParticleUpload }) => ({
+      particleCount: sphParticleUpload.particleCount,
+      renderRowsBuffer: new GPUBuffer(),
+      dispersedMediumOptics: sphParticleUpload.dispersedMediumOptics,
+      schroederSpatialSourceFamily: { id: 'dispersed-rejection-family' },
+      destroyRenderRowsBuffer() {}
+    }),
+    buildRenderField: async () => {
+      fieldBuildStarted = true;
+      return fieldBuild.promise;
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const receipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    }),
+    receiptFields: { lifecycleCase: 'dispersed-field-rejection' }
+  });
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  await waitFor(() => fieldBuildStarted, 'the rejecting dispersed field build');
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+  fieldBuild.reject(new Error('injected dispersed field rejection'));
+
+  await waitFor(
+    () => rig.terminals.some((terminal) => (
+      terminal.lifecycleCase === 'dispersed-field-rejection'
+    )),
+    'the dispersed field rejection terminal'
+  );
+  assert.equal(sidecar.destroyed, true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+});
+
+test('a synchronous cleanup-fence failure cannot suppress later source retirement', async () => {
+  const fieldBuild = deferred();
+  let fieldBuildStarted = false;
+  let captureReleaseCount = 0;
+  const rig = createPresenterRig({
+    useBuiltInFrame: true,
+    captureRenderRows: async ({ sphParticleUpload }) => ({
+      particleCount: sphParticleUpload.particleCount,
+      renderRowsBuffer: new GPUBuffer(),
+      dispersedMediumOptics: sphParticleUpload.dispersedMediumOptics,
+      schroederSpatialSourceFamily: { id: 'sync-fence-failure-family' },
+      destroyRenderRowsBuffer() {
+        captureReleaseCount += 1;
+      }
+    }),
+    buildRenderField: async () => {
+      fieldBuildStarted = true;
+      return fieldBuild.promise;
+    }
+  });
+  rig.device.queue.onSubmittedWorkDone = () => {
+    throw new Error('injected synchronous fence scheduling failure');
+  };
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    }),
+    receiptFields: { lifecycleCase: 'sync-cleanup-fence-failure' }
+  });
+  await waitFor(() => fieldBuildStarted, 'the synchronous-fence field build');
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+  fieldBuild.reject(new Error('injected field failure before cleanup'));
+
+  await waitFor(
+    () => rig.terminals.some((terminal) => (
+      terminal.lifecycleCase === 'sync-cleanup-fence-failure'
+    )),
+    'the synchronous cleanup-fence terminal'
+  );
+  await waitFor(() => rig.presenter.getStatus().running === false, 'the failed job unwind');
+  assert.equal(captureReleaseCount, 1);
+  assert.equal(sidecar.destroyed, true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+});
+
+test('a newer queued frame releases a superseded dispersed-medium source exactly once', async () => {
+  const activeBuild = deferred();
+  const buildSteps = [];
+  const rig = createPresenterRig({
+    captureRenderRows: async ({ sphParticleUpload }) => ({
+      dispersedMediumOptics: sphParticleUpload.dispersedMediumOptics ?? null,
+      destroyRenderRowsBuffer() {}
+    }),
+    buildPresentationFrame: async (job) => {
+      buildSteps.push(job.sphStep);
+      if (job.sphStep === 51) await activeBuild.promise;
+      return {
+        generation: job.generation,
+        invalidationEpoch: job.invalidationEpoch,
+        sphStep: job.sphStep,
+        receiptFields: job.receiptFields,
+        viewProjectionMatrix: [...job.admission.viewProjectionMatrix],
+        cameraPositionM: [...job.admission.cameraPositionM],
+        boxDimsM: null,
+        surfaces: []
+      };
+    }
+  });
+  await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained(),
+    sphStep: 51
+  });
+  await waitFor(() => buildSteps.length === 1, 'the active predecessor build');
+
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    }),
+    sphStep: 52,
+    receiptFields: { lifecycleCase: 'queued-dispersed-superseded' }
+  });
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+
+  await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained(),
+    sphStep: 53
+  });
+  await waitFor(() => sidecar.buffer.destroyCount === 1, 'the superseded sidecar release');
+  const terminals = rig.terminals.filter((terminal) => (
+    terminal.lifecycleCase === 'queued-dispersed-superseded'
+  ));
+  assert.equal(terminals.length, 1);
+  assert.equal(
+    terminals[0].status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SUPERSEDED_STATUS
+  );
+
+  activeBuild.resolve();
+  await waitFor(() => rig.presenter.getStatus().running === false, 'the queue drain');
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+});
+
+test('worker-owned true-isosurface rolls back a sidecar borrow after synchronous product-source rejection', async () => {
+  let captureCount = 0;
+  const rig = createPresenterRig({
+    captureRenderRows: async () => {
+      captureCount += 1;
+      return { destroyRenderRowsBuffer() {} };
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const receipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar),
+      residentProductMass: {
+        productEventBuffer: new GPUBuffer(),
+        productEventRowCount: 1,
+        productEventRowCapacity: 1
+      }
+    }),
+    receiptFields: { lifecycleCase: 'dispersed-sync-rollback' }
+  });
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FAILED_STATUS
+  );
+  assert.match(receipt.reason, /authenticated GPU live-count capacity/);
+  assert.equal(captureCount, 0);
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+});
+
+test('worker-owned true-isosurface releases a sidecar after an asynchronous presentation fence rejection', async () => {
+  const fence = deferred();
+  const rig = createPresenterRig({
+    queueCompletion: fence.promise,
+    captureRenderRows: async ({ sphParticleUpload }) => ({
+      dispersedMediumOptics: sphParticleUpload.dispersedMediumOptics,
+      destroyRenderRowsBuffer() {}
+    })
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const receipt = await rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    }),
+    sphStep: 54,
+    receiptFields: { lifecycleCase: 'dispersed-fence-rejection' }
+  });
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS
+  );
+  await waitFor(() => queueSubmissionCount(rig) === 1, 'the dispersed frame submission');
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+  fence.reject(new Error('injected dispersed presentation fence rejection'));
+
+  await waitFor(
+    () => rig.terminals.some((terminal) => (
+      terminal.lifecycleCase === 'dispersed-fence-rejection'
+    )),
+    'the dispersed presentation fence rejection terminal'
+  );
+  assert.equal(sidecar.destroyed, true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  await rig.presenter.dispose();
+  assert.equal(sidecar.buffer.destroyCount, 1);
+});
+
+test('dispose waits for an in-flight source capture to release its dispersed sidecar', async () => {
+  const capture = deferred();
+  let captureStarted = false;
+  let capturedRowsReleased = 0;
+  const rig = createPresenterRig({
+    captureRenderRows: async () => {
+      captureStarted = true;
+      return capture.promise;
+    }
+  });
+  const sidecar = authenticatedDispersedMediumOptics(rig.device);
+  const enqueuePromise = rig.presenter.enqueue({
+    request: validRequest(),
+    retained: validRetained({
+      sphParticleUpload: particleUploadWithDispersedMediumOptics(sidecar)
+    }),
+    sphStep: 55,
+    receiptFields: { lifecycleCase: 'dispose-during-dispersed-capture' }
+  });
+  await waitFor(() => captureStarted, 'the deferred dispersed source capture');
+
+  let disposeSettled = false;
+  const disposePromise = rig.presenter.dispose().then(() => {
+    disposeSettled = true;
+  });
+  assert.equal(destroySphDispersedMediumGpuBuffers(sidecar), true);
+  assert.equal(sidecar.destroyPending, true);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    disposeSettled,
+    false,
+    'dispose must retain presenter resources until the source capture unwinds'
+  );
+  assert.notEqual(sidecar.destroyed, true);
+
+  capture.resolve({
+    dispersedMediumOptics: sidecar,
+    destroyRenderRowsBuffer() {
+      capturedRowsReleased += 1;
+    }
+  });
+  const receipt = await enqueuePromise;
+  await disposePromise;
+
+  assert.equal(
+    receipt.status,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SUPERSEDED_STATUS
+  );
+  assert.equal(capturedRowsReleased, 1);
+  assert.equal(sidecar.destroyed, true);
+  assert.equal(sidecar.buffer.destroyCount, 1);
+  assert.equal(disposeSettled, true);
 });
 
 test('worker-owned true-isosurface rejects a copied product-count authority', async () => {

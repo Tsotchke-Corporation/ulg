@@ -49,6 +49,10 @@ import {
   runUlgMechanicsResidentStageWorkerSchedulePayload
 } from '../src/services/ulgMechanicsResidentStage.worker.js';
 import {
+  buildSphDispersedMediumGpuBuffers,
+  validateSphDispersedMediumGpuBufferAuthority
+} from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
+import {
   createSchroederTargetScheduleAuthority,
   createSchroederTargetScheduleConfiguration,
   createSchroederTargetScheduleProviderAuthority,
@@ -102,11 +106,13 @@ import {
   ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA
 } from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
 import {
-  SPH_GPU_PARTICLE_IDENTITY_UINTS
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  uploadSphGpuParticleDispersedMediumOpticsSidecar
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
   mergeResidentProductMassBuffersWebGpu,
-  runMlsMpmResidentStepsWithOptionalWebGpu
+  runMlsMpmResidentStepsWithOptionalWebGpu,
+  transferTopologyStableSphDispersedMediumOpticsOwnership
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
@@ -455,14 +461,20 @@ function payload(stageRecord, context, input = null, {
 }
 
 class FakeGpuBuffer {
-  constructor({ label = null, size = 4, usage = 0 } = {}) {
+  constructor({
+    label = null,
+    size = 4,
+    usage = 0,
+    mappedAtCreation = false
+  } = {}) {
     this.label = label;
     this.size = Math.max(4, Math.round(Number(size) || 4));
     this.usage = usage;
     this.bytes = new Uint8Array(this.size);
     this.destroyed = false;
     this.destroyCount = 0;
-    this.mapState = 'unmapped';
+    this.mapState = mappedAtCreation ? 'mapped' : 'unmapped';
+    this.mappedAtCreation = mappedAtCreation;
   }
 
   mapAsync() {
@@ -475,7 +487,9 @@ class FakeGpuBuffer {
     if (this.destroyed) throw new Error(`${this.label || 'buffer'} was destroyed`);
     const start = Math.max(0, Math.round(Number(offset) || 0));
     const end = Math.min(this.bytes.byteLength, start + Math.max(0, Math.round(Number(size) || 0)));
-    return this.bytes.buffer.slice(start, end);
+    return start === 0 && end === this.bytes.byteLength
+      ? this.bytes.buffer
+      : this.bytes.buffer.slice(start, end);
   }
 
   unmap() { this.mapState = 'unmapped'; }
@@ -4781,6 +4795,51 @@ function writeWorkerTerminalRefluxReceiptTarget(target, {
   };
 }
 
+function uploadWorkerTestDispersedMediumOptics(
+  device,
+  sphParticleUpload,
+  label
+) {
+  const particleCount = sphParticleUpload.particleCount;
+  return uploadSphGpuParticleDispersedMediumOpticsSidecar(
+    device,
+    buildSphDispersedMediumGpuBuffers(
+      Array.from({ length: particleCount }, (_, index) => ({
+        dispersedMediumOptics: {
+          dispersedMaterialId: 3,
+          dispersedPhaseId: 2,
+          opticalStateId: 7,
+          dispersedMassKg: 0.01 + index * 0.001,
+          scatteringCrossSectionM2: 0.2,
+          absorptionCrossSectionM2: 0.03,
+          scatteringAsymmetryCrossSectionM2: 0.05
+        }
+      }))
+    ),
+    {
+      label,
+      sourceSphUpload: sphParticleUpload
+    }
+  );
+}
+
+function attachWorkerTestDispersedMediumOptics(
+  sphParticleUpload,
+  optics,
+  { ownsBuffer }
+) {
+  Object.assign(sphParticleUpload, {
+    dispersedMediumOptics: optics,
+    dispersedMediumOpticsAuthority: optics.authority,
+    dispersedMediumOpticsBuffer: optics.buffer,
+    dispersedMediumOpticsRowCount: optics.rowCount,
+    dispersedMediumOpticsRowStrideFloats: optics.rowStrideFloats,
+    dispersedMediumOpticsBufferByteLength: optics.bufferByteLength,
+    ownsDispersedMediumOpticsBuffer: ownsBuffer
+  });
+  return sphParticleUpload;
+}
+
 function workerScheduleFixture({
   laneSuffix = 'a',
   failAtStep = null,
@@ -5220,11 +5279,49 @@ test('canonical retained particle state exposes the exact private worker lane fa
     status: 'test-successor-source-family-retained',
     sourceGenerationId: 77
   });
+  const sourceSphUpload =
+    fixture.stageOptions.schroederSpatialEpoch.sphParticleUpload;
+  const sourceMlsUpload =
+    fixture.stageOptions.schroederSpatialEpoch.mlsMpmParticleUpload;
+  Object.assign(sourceSphUpload, {
+    storageGeneration: 11,
+    bufferFamilyGeneration: 11,
+    topologyEpoch: 19
+  });
+  Object.assign(sourceMlsUpload, {
+    storageGeneration: 11,
+    bufferFamilyGeneration: 11,
+    topologyEpoch: 19
+  });
+  const dispersedMediumOptics = uploadWorkerTestDispersedMediumOptics(
+    fixture.device,
+    sourceSphUpload,
+    'private-retained-particle-family-dispersed-medium'
+  );
   const mechanicsRunner = fixture.stageOptions.schroederSameLevelMechanics
     .schroederSameLevelMechanicsRunner;
   fixture.stageOptions.schroederSameLevelMechanics
     .schroederSameLevelMechanicsRunner = async (args) => {
       const execution = await mechanicsRunner(args);
+      const nextSphUpload =
+        execution.residentStep.nextParticleUploads.sphParticleUpload;
+      const supersededIdentityBuffer = nextSphUpload.identityBuffer;
+      Object.assign(nextSphUpload, {
+        storageGeneration: 12,
+        bufferFamilyGeneration: 12,
+        topologyEpoch: 19,
+        identityBuffer: args.sphParticleUpload.identityBuffer
+      });
+      attachWorkerTestDispersedMediumOptics(
+        nextSphUpload,
+        args.sphParticleUpload.dispersedMediumOptics,
+        { ownsBuffer: false }
+      );
+      transferTopologyStableSphDispersedMediumOpticsOwnership({
+        sourceSphUpload: args.sphParticleUpload,
+        targetSphUpload: nextSphUpload
+      });
+      supersededIdentityBuffer.destroy();
       execution.residentStep.schroederSpatialSuccessorSourceFamily =
         successorSourceFamily;
       return execution;
@@ -5282,6 +5379,82 @@ test('canonical retained particle state exposes the exact private worker lane fa
       retained.residentProductMass,
       fixture.residentProductMasses[0]
     );
+    assert.strictEqual(
+      retained.dispersedMediumOptics,
+      retained.sphParticleUpload.dispersedMediumOptics
+    );
+    assert.strictEqual(retained.dispersedMediumOptics, dispersedMediumOptics);
+    assert.strictEqual(
+      retained.sphParticleUpload.dispersedMediumOpticsBuffer,
+      dispersedMediumOptics.buffer
+    );
+    assert.equal(
+      retained.sphParticleUpload.ownsDispersedMediumOpticsBuffer,
+      true
+    );
+    assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, false);
+    assert.equal(
+      validateSphDispersedMediumGpuBufferAuthority(
+        fixture.device,
+        retained.dispersedMediumOptics.authority,
+        {
+          buffer: retained.dispersedMediumOptics.buffer,
+          particleCount: retained.particleCount,
+          rowCount: retained.dispersedMediumOptics.rowCount,
+          rowStrideFloats: retained.dispersedMediumOptics.rowStrideFloats
+        }
+      ),
+      true
+    );
+    const sidecarFields = [
+      'dispersedMediumOptics',
+      'dispersedMediumOpticsAuthority',
+      'dispersedMediumOpticsBuffer',
+      'dispersedMediumOpticsRowCount',
+      'dispersedMediumOpticsRowStrideFloats',
+      'dispersedMediumOpticsBufferByteLength',
+      'ownsDispersedMediumOpticsBuffer'
+    ];
+    const exactSidecarDescriptor = Object.fromEntries(
+      sidecarFields.map((field) => [field, retained.sphParticleUpload[field]])
+    );
+    Object.assign(retained.sphParticleUpload, {
+      dispersedMediumOptics: null,
+      dispersedMediumOpticsAuthority: null,
+      dispersedMediumOpticsBuffer: null,
+      dispersedMediumOpticsRowCount: 0,
+      dispersedMediumOpticsRowStrideFloats: 0,
+      dispersedMediumOpticsBufferByteLength: 0,
+      ownsDispersedMediumOpticsBuffer: false
+    });
+    for (const field of [
+      'dispersedMediumOpticsRowCount',
+      'dispersedMediumOpticsRowStrideFloats',
+      'dispersedMediumOpticsBufferByteLength'
+    ]) {
+      for (const malformedValue of ['0', false, '', Number.NaN, 1]) {
+        retained.sphParticleUpload[field] = malformedValue;
+        const rejected =
+          resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+            ...laneOptions,
+            sourceStageId: 'schroederSameLevelMechanics'
+          });
+        assert.equal(
+          rejected.status,
+          'worker-retained-particle-state-dispersed-medium-remap-required',
+          `worker must advertise ${field}=${String(malformedValue)}`
+        );
+        retained.sphParticleUpload[field] = 0;
+      }
+    }
+    Object.assign(retained.sphParticleUpload, exactSidecarDescriptor);
+    assert.equal(
+      resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+        ...laneOptions,
+        sourceStageId: 'schroederSameLevelMechanics'
+      }).status,
+      'worker-retained-particle-state-ready'
+    );
 
     // The schedule's public transport remains clone-safe and never carries
     // any of the raw worker-local aliases returned by the direct resolver.
@@ -5290,6 +5463,7 @@ test('canonical retained particle state exposes the exact private worker lane fa
     assert.equal('successorSourceFamily' in result, false);
     assert.equal('residentProductMass' in result, false);
     assert.equal('advancedStateMetadata' in result, false);
+    assert.equal('dispersedMediumOptics' in result, false);
     assertNoWorkerGpuBuffers(result, 'privateRetainedParticleFamilyResult');
     structuredClone(result);
   } finally {
@@ -5305,6 +5479,142 @@ test('canonical retained particle state exposes the exact private worker lane fa
   assert.equal(released.sameWorkerPrivateReferences, false);
   assert.equal('sphParticleUpload' in released, false);
   assert.equal('advancedStateMetadata' in released, false);
+  assert.equal(dispersedMediumOptics.buffer.destroyed, true);
+  assert.equal(dispersedMediumOptics.destroyed, true);
+  assert.equal(
+    validateSphDispersedMediumGpuBufferAuthority(
+      fixture.device,
+      dispersedMediumOptics.authority
+    ),
+    false
+  );
+});
+
+test('worker lane retirement defers the exact retained dispersed-medium family until its parent borrow drains', async () => {
+  const fixture = workerScheduleFixture({
+    laneSuffix: 'borrowed-dispersed-medium-retirement'
+  });
+  const laneOptions = {
+    laneId: 'ulg:test:borrowed-dispersed-medium-retirement-lane',
+    stateKey: 'ulg:test:borrowed-dispersed-medium-retirement-state'
+  };
+  const sourceSphUpload =
+    fixture.stageOptions.schroederSpatialEpoch.sphParticleUpload;
+  const sourceMlsUpload =
+    fixture.stageOptions.schroederSpatialEpoch.mlsMpmParticleUpload;
+  Object.assign(sourceSphUpload, {
+    storageGeneration: 11,
+    bufferFamilyGeneration: 11,
+    topologyEpoch: 19
+  });
+  Object.assign(sourceMlsUpload, {
+    storageGeneration: 11,
+    bufferFamilyGeneration: 11,
+    topologyEpoch: 19
+  });
+  const dispersedMediumOptics = uploadWorkerTestDispersedMediumOptics(
+    fixture.device,
+    sourceSphUpload,
+    'borrowed-dispersed-medium-retirement'
+  );
+  const mechanicsRunner = fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner;
+  fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner = async (args) => {
+      const execution = await mechanicsRunner(args);
+      const nextSphUpload =
+        execution.residentStep.nextParticleUploads.sphParticleUpload;
+      const supersededIdentityBuffer = nextSphUpload.identityBuffer;
+      Object.assign(nextSphUpload, {
+        storageGeneration: 12,
+        bufferFamilyGeneration: 12,
+        topologyEpoch: 19,
+        identityBuffer: args.sphParticleUpload.identityBuffer
+      });
+      attachWorkerTestDispersedMediumOptics(
+        nextSphUpload,
+        args.sphParticleUpload.dispersedMediumOptics,
+        { ownsBuffer: false }
+      );
+      transferTopologyStableSphDispersedMediumOpticsOwnership({
+        sourceSphUpload: args.sphParticleUpload,
+        targetSphUpload: nextSphUpload
+      });
+      supersededIdentityBuffer.destroy();
+      return execution;
+    };
+
+  let borrowedUpload = null;
+  let borrowedStateBuffer = null;
+  try {
+    await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(
+          fixture.device,
+          fixture.buffers,
+          fixture.stageOptions
+        ),
+        {
+          stepCount: 1,
+          scheduleId:
+            'ulg:test:borrowed-dispersed-medium-retirement-schedule'
+        },
+        laneOptions
+      )
+    );
+    const retained =
+      resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
+        ...laneOptions,
+        sourceStageId: 'schroederSameLevelMechanics'
+      });
+    assert.equal(retained.status, 'worker-retained-particle-state-ready');
+    borrowedUpload = retained.sphParticleUpload;
+    borrowedStateBuffer = borrowedUpload.stateBuffer;
+    assert.strictEqual(
+      borrowedUpload.dispersedMediumOptics,
+      dispersedMediumOptics
+    );
+    assert.equal(borrowedUpload.__ulgActiveBorrowCount, 0);
+
+    borrowedUpload.__ulgActiveBorrowCount += 1;
+    const release = releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+    assert.equal(release.status, 'worker-resident-lane-released');
+    assert.equal(dispersedMediumOptics.buffer.destroyed, false);
+    assert.equal(dispersedMediumOptics.buffer.destroyCount, 0);
+    assert.notEqual(dispersedMediumOptics.destroyed, true);
+    assert.equal(borrowedStateBuffer.destroyed, false);
+    assert.equal(
+      validateSphDispersedMediumGpuBufferAuthority(
+        fixture.device,
+        dispersedMediumOptics.authority,
+        {
+          buffer: dispersedMediumOptics.buffer,
+          particleCount: fixture.particleCount,
+          rowCount: dispersedMediumOptics.rowCount,
+          rowStrideFloats: dispersedMediumOptics.rowStrideFloats
+        }
+      ),
+      true
+    );
+
+    borrowedUpload.__ulgActiveBorrowCount -= 1;
+    assert.equal(dispersedMediumOptics.buffer.destroyed, true);
+    assert.equal(dispersedMediumOptics.buffer.destroyCount, 1);
+    assert.equal(dispersedMediumOptics.destroyed, true);
+    assert.equal(borrowedStateBuffer.destroyed, true);
+    assert.equal(
+      validateSphDispersedMediumGpuBufferAuthority(
+        fixture.device,
+        dispersedMediumOptics.authority
+      ),
+      false
+    );
+  } finally {
+    if (borrowedUpload?.__ulgActiveBorrowCount > 0) {
+      borrowedUpload.__ulgActiveBorrowCount = 0;
+    }
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
 });
 
 test('worker schedule executes the exact enabled and disabled hierarchy policy', async () => {
@@ -7200,6 +7510,57 @@ test('ULG resident schedule rejects hierarchy claims whose cleanup authority did
     withHierarchyCleanupClaims: true,
     ineligibleHierarchyCleanupAtStep: 1
   });
+  const laneOptions = {
+    laneId: 'ulg:test:hierarchy-cleanup-ineligible-lane',
+    stateKey: 'ulg:test:hierarchy-cleanup-ineligible-state'
+  };
+  const sourceSphUpload =
+    fixture.stageOptions.schroederSpatialEpoch.sphParticleUpload;
+  const sourceMlsUpload =
+    fixture.stageOptions.schroederSpatialEpoch.mlsMpmParticleUpload;
+  Object.assign(sourceSphUpload, {
+    storageGeneration: 11,
+    bufferFamilyGeneration: 11,
+    topologyEpoch: 19
+  });
+  Object.assign(sourceMlsUpload, {
+    storageGeneration: 11,
+    bufferFamilyGeneration: 11,
+    topologyEpoch: 19
+  });
+  const dispersedMediumOptics = uploadWorkerTestDispersedMediumOptics(
+    fixture.device,
+    sourceSphUpload,
+    'hierarchy-cleanup-ineligible-dispersed-medium'
+  );
+  let rejectedSphUpload = null;
+  const mechanicsRunner = fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner;
+  fixture.stageOptions.schroederSameLevelMechanics
+    .schroederSameLevelMechanicsRunner = async (args) => {
+      const execution = await mechanicsRunner(args);
+      const nextSphUpload =
+        execution.residentStep.nextParticleUploads.sphParticleUpload;
+      const supersededIdentityBuffer = nextSphUpload.identityBuffer;
+      Object.assign(nextSphUpload, {
+        storageGeneration: 12,
+        bufferFamilyGeneration: 12,
+        topologyEpoch: 19,
+        identityBuffer: args.sphParticleUpload.identityBuffer
+      });
+      rejectedSphUpload = nextSphUpload;
+      attachWorkerTestDispersedMediumOptics(
+        nextSphUpload,
+        args.sphParticleUpload.dispersedMediumOptics,
+        { ownsBuffer: false }
+      );
+      transferTopologyStableSphDispersedMediumOpticsOwnership({
+        sourceSphUpload: args.sphParticleUpload,
+        targetSphUpload: nextSphUpload
+      });
+      supersededIdentityBuffer.destroy();
+      return execution;
+    };
   await assert.rejects(
     runUlgMechanicsResidentStageWorkerSchedulePayload(
       schedulePayload(
@@ -7212,10 +7573,7 @@ test('ULG resident schedule rejects hierarchy claims whose cleanup authority did
           stepCount: 2,
           scheduleId: 'ulg:test:hierarchy-cleanup-ineligible'
         },
-        {
-          laneId: 'ulg:test:hierarchy-cleanup-ineligible-lane',
-          stateKey: 'ulg:test:hierarchy-cleanup-ineligible-state'
-        }
+        laneOptions
       )
     ),
     (error) => {
@@ -7232,6 +7590,19 @@ test('ULG resident schedule rejects hierarchy claims whose cleanup authority did
     }
   );
   assert.equal(fixture.runnerCalls.length, 1);
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(rejectedSphUpload.ownsDispersedMediumOpticsBuffer, false);
+  assert.strictEqual(
+    rejectedSphUpload.dispersedMediumOptics,
+    sourceSphUpload.dispersedMediumOptics
+  );
+  assert.equal(dispersedMediumOptics.buffer.destroyed, false);
+  releaseUlgMechanicsResidentStageWorkerLane({
+    ...laneOptions,
+    reason: 'hierarchy-cleanup-ineligible-test-complete'
+  });
+  assert.equal(dispersedMediumOptics.buffer.destroyed, true);
+  assert.equal(dispersedMediumOptics.destroyed, true);
 });
 
 test('ULG resident schedule retains the adopted sidecar owner when predecessor cleanup throws', async () => {

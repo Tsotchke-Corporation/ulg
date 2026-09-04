@@ -102,6 +102,9 @@ import {
   mergeResidentProductMassBuffersWebGpu,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
+  retainedContinuationBuffersFromUploads,
+  sphDispersedMediumOpticsMatchesParticleUpload,
+  transferTopologyStableSphDispersedMediumOpticsOwnership,
   destroyReactionOutputAfterFailedMechanicsRefresh,
   exactGasPressureMechanicsP2gProductSourceIsolationCertified,
   FUSED_SINGLE_LEVEL_MECHANICS_FIELD_G2P_RECEIPT_ENTRY_POINTS,
@@ -161,6 +164,17 @@ import {
   residentProductMassRequiresProductAwareP2g,
   resolvePhaseVolumeAmbientBuoyancyExecution
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  buildSphDispersedMediumGpuBuffers,
+  validateSphDispersedMediumGpuBufferAuthority
+} from '../src/runtime/sph/sphDispersedMediumGpuBuffers.js';
+import {
+  buildSphGpuParticleBuffers,
+  destroySphGpuParticleBuffers,
+  uploadSphGpuParticleDispersedMediumOpticsSidecar,
+  uploadSphGpuParticleBuffers
+} from '../src/runtime/sph/sphGpuBuffers.js';
+import { createSphState } from '../src/runtime/sph/sphState.js';
 import {
   schroederSpatialPhaseVolumeTransportWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialPhaseVolumeTransportWgsl.js';
@@ -1485,13 +1499,13 @@ function algorithmContactRowsFixture({
   };
 }
 
-function webGpuNavigator() {
+function webGpuNavigator(device = { lost: new Promise(() => {}) }) {
   return {
     gpu: {
       async requestAdapter() {
         return {
           async requestDevice() {
-            return { lost: new Promise(() => {}) };
+            return device;
           }
         };
       }
@@ -5439,14 +5453,51 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
       identityDestroyCount += 1;
     }
   };
+  const dispersedMediumDevice = {
+    lost: new Promise(() => {}),
+    createBuffer({ label, size, usage, mappedAtCreation }) {
+      const mappedBytes = mappedAtCreation ? new ArrayBuffer(size) : null;
+      return {
+        label,
+        size,
+        usage,
+        mappedAtCreation,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroyCount: 0,
+        destroy() { this.destroyCount += 1; }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const dispersedMediumPacked = buildSphDispersedMediumGpuBuffers(
+      Array.from(
+        { length: buffers.sphParticleState.particleCount },
+        (_, index) => ({
+          dispersedMediumOptics: {
+            dispersedMaterialId: 3,
+            dispersedPhaseId: 2,
+            opticalStateId: 7,
+            dispersedMassKg: 0.01 + index * 0.001,
+            scatteringCrossSectionM2: 0.2,
+            absorptionCrossSectionM2: 0.03,
+            scatteringAsymmetryCrossSectionM2: 0.05
+          }
+        })
+      )
+  );
   const sourceSphUpload = {
     status: 'webgpu-uploaded',
+    particleCount: buffers.sphParticleState.particleCount,
+    storageGeneration: 4,
+    topologyEpoch: 9,
     stateBuffer: sourceStateBuffer,
     thermoBuffer: sourceThermoBuffer,
     identityBuffer: sourceIdentityBuffer,
     identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
     identityStrideBytes: Uint32Array.BYTES_PER_ELEMENT,
     identityBufferByteLength: buffers.sphParticleState.particleCount * Uint32Array.BYTES_PER_ELEMENT,
+    identityRevision: 'resident-sidecar-identity-v1',
     ownsIdentityBuffer: true,
     materialPropertyBankWarmInputBuffer: sphWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer: sphParticleSizeBuffer,
@@ -5456,8 +5507,22 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
     ownsMaterialPropertyBankParticleSizeBuffer: true,
     slot: 0
   };
+  for (const buffer of [
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceIdentityBuffer
+  ]) tagWebGpuBufferDevice(buffer, dispersedMediumDevice);
+  const dispersedMediumOptics =
+    uploadSphGpuParticleDispersedMediumOpticsSidecar(
+      dispersedMediumDevice,
+      dispersedMediumPacked,
+      { sourceSphUpload }
+    );
   const sourceMlsUpload = {
     status: 'webgpu-uploaded',
+    particleCount: buffers.mlsMpmParticleState.particleCount,
+    storageGeneration: 4,
+    topologyEpoch: 9,
     mechanicsBuffer: sourceMechanicsBuffer,
     materialPropertyBankWarmInputBuffer: mlsWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer: mlsParticleSizeBuffer,
@@ -5472,7 +5537,7 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
     sphParticleUpload: sourceSphUpload,
     mlsMpmParticleUpload: sourceMlsUpload,
     preferWebGpu: true,
-    navigatorRef: webGpuNavigator(),
+    navigatorRef: webGpuNavigator(dispersedMediumDevice),
     boxDimsM: [3, 3, 3],
     p2gRunner(args) {
       const result = projectMlsMpmP2gGridCpu(args);
@@ -5551,6 +5616,44 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   );
   assert.equal(sourceSphUpload.ownsIdentityBuffer, false);
   assert.equal(sourceSphUpload.identityOwnership, 'transferred-to-next-resident-continuation');
+  const nextSphUpload = step.nextParticleUploads.sphParticleUpload;
+  assert.strictEqual(
+    nextSphUpload.dispersedMediumOptics,
+    dispersedMediumOptics
+  );
+  assert.strictEqual(
+    nextSphUpload.dispersedMediumOpticsAuthority,
+    dispersedMediumOptics.authority
+  );
+  assert.strictEqual(
+    nextSphUpload.dispersedMediumOpticsBuffer,
+    dispersedMediumOptics.buffer
+  );
+  assert.equal(nextSphUpload.dispersedMediumOpticsRowStrideFloats, 8);
+  assert.equal(nextSphUpload.storageGeneration, 5);
+  assert.equal(nextSphUpload.topologyEpoch, 9);
+  assert.equal(nextSphUpload.identityRevision, 'resident-sidecar-identity-v1');
+  assert.equal(nextSphUpload.ownsDispersedMediumOpticsBuffer, true);
+  assert.equal(sourceSphUpload.ownsDispersedMediumOpticsBuffer, false);
+  assert.equal(dispersedMediumOptics.ownsBuffer, true);
+  assert.equal(
+    validateSphDispersedMediumGpuBufferAuthority(
+      dispersedMediumDevice,
+      nextSphUpload.dispersedMediumOpticsAuthority,
+      {
+        buffer: nextSphUpload.dispersedMediumOpticsBuffer,
+        particleCount: nextSphUpload.particleCount,
+        rowCount: nextSphUpload.dispersedMediumOpticsRowCount,
+        rowStrideFloats:
+          nextSphUpload.dispersedMediumOpticsRowStrideFloats
+      }
+    ),
+    true
+  );
+  assert.ok(
+    retainedContinuationBuffersFromUploads(step.nextParticleUploads)
+      .includes(dispersedMediumOptics.buffer)
+  );
   assert.equal(
     step.nextParticleUploads.sphParticleUpload
       .materialPropertyBankWarmInputBuffer,
@@ -5634,6 +5737,15 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 4);
   assert.equal(identityDestroyCount, 1);
+  assert.equal(dispersedMediumOptics.buffer.destroyCount, 1);
+  assert.equal(dispersedMediumOptics.destroyed, true);
+  assert.equal(
+    validateSphDispersedMediumGpuBufferAuthority(
+      dispersedMediumDevice,
+      dispersedMediumOptics.authority
+    ),
+    false
+  );
   for (const buffer of [
     sphWarmInputBuffer,
     sphParticleSizeBuffer,
@@ -5641,6 +5753,191 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
     mlsParticleSizeBuffer
   ]) {
     assert.equal(buffer.destroyCount, 1);
+  }
+});
+
+test('dispersed-medium continuation advertises every malformed scalar singleton', () => {
+  const scalarFields = [
+    'dispersedMediumOpticsRowCount',
+    'dispersedMediumOpticsRowStrideFloats',
+    'dispersedMediumOpticsBufferByteLength'
+  ];
+  for (const field of scalarFields) {
+    for (const absentValue of [0, -0]) {
+      assert.equal(
+        sphDispersedMediumOpticsMatchesParticleUpload({
+          [field]: absentValue,
+          ownsDispersedMediumOpticsBuffer: false
+        }),
+        true,
+        `${field} numeric zero must preserve the absent continuation path`
+      );
+    }
+    for (const advertisedValue of ['0', false, '', Number.NaN, 1]) {
+      assert.equal(
+        sphDispersedMediumOpticsMatchesParticleUpload({
+          [field]: advertisedValue,
+          ownsDispersedMediumOpticsBuffer: false
+        }),
+        false,
+        `${field}=${String(advertisedValue)} must fail closed as a torn descriptor`
+      );
+    }
+  }
+  assert.equal(
+    sphDispersedMediumOpticsMatchesParticleUpload({
+      ownsDispersedMediumOpticsBuffer: true
+    }),
+    false,
+    'positive ownership alone must advertise and fail a torn descriptor'
+  );
+});
+
+test('resident cleanup retires the private sidecar after public ownership suppression and alias swap', () => {
+  const state = createSphState({
+    smoothingLengthM: 0.2,
+    particles: [{
+      material: 'unknownium',
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 1,
+      specificInternalEnergyJPerKg: 0
+    }]
+  });
+  state.particles[0].dispersedMediumOptics = {
+    dispersedMaterialId: 7,
+    dispersedPhaseId: 3,
+    opticalStateId: 11,
+    dispersedMassKg: 0.02,
+    scatteringCrossSectionM2: 0.5,
+    absorptionCrossSectionM2: 0.125,
+    scatteringAsymmetryCrossSectionM2: 0.375
+  };
+  const packed = buildSphGpuParticleBuffers(state, {
+    materialProperties: {}
+  });
+  const device = {
+    createBuffer(descriptor) {
+      const mappedBytes = descriptor.mappedAtCreation
+        ? new ArrayBuffer(descriptor.size)
+        : null;
+      return {
+        ...descriptor,
+        destroyCount: 0,
+        getMappedRange() { return mappedBytes; },
+        unmap() {},
+        destroy() { this.destroyCount += 1; }
+      };
+    },
+    queue: { writeBuffer() {} }
+  };
+  const uploadA = uploadSphGpuParticleBuffers(device, packed);
+  const uploadB = uploadSphGpuParticleBuffers(device, packed);
+  const privateChildA = uploadA.dispersedMediumOptics;
+  const privateChildB = uploadB.dispersedMediumOptics;
+  const sidecarAliasFields = [
+    'dispersedMediumOptics',
+    'dispersedMediumOpticsAuthority',
+    'dispersedMediumOpticsBuffer',
+    'dispersedMediumOpticsRowCount',
+    'dispersedMediumOpticsRowStrideFloats',
+    'dispersedMediumOpticsBufferByteLength'
+  ];
+  for (const field of sidecarAliasFields) uploadA[field] = uploadB[field];
+  uploadA.ownsDispersedMediumOpticsBuffer = false;
+  uploadA.__ulgActiveBorrowCount = 1;
+
+  const step = {
+    nextParticleUploads: { sphParticleUpload: uploadA }
+  };
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(privateChildA.buffer.destroyCount, 0);
+  assert.equal(privateChildB.buffer.destroyCount, 0);
+
+  uploadA.__ulgActiveBorrowCount = 0;
+  assert.equal(
+    privateChildA.buffer.destroyCount,
+    1,
+    'deferred cleanup must retire the private original child'
+  );
+  assert.equal(
+    privateChildB.buffer.destroyCount,
+    0,
+    'foreign public aliases must never redirect resident cleanup'
+  );
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(
+    privateChildA.buffer.destroyCount,
+    1,
+    'private component retirement must be idempotent'
+  );
+  assert.equal(privateChildB.buffer.destroyCount, 0);
+  assert.equal(destroySphGpuParticleBuffers(uploadB), true);
+  assert.equal(privateChildB.buffer.destroyCount, 1);
+});
+
+test('dispersed-medium ownership transfer rejects particle identity or topology drift without moving its owner', () => {
+  const buffer = { label: 'dispersed-medium-remap-required' };
+  const authority = Object.freeze({ status: 'test-optics-authority' });
+  const optics = {
+    buffer,
+    authority,
+    particleCount: 2,
+    rowCount: 2,
+    rowStrideFloats: 8,
+    bufferByteLength: 64,
+    ownsBuffer: true
+  };
+  const source = {
+    particleCount: 2,
+    storageGeneration: 7,
+    topologyEpoch: 3,
+    identityRevision: 'particles-v1',
+    dispersedMediumOptics: optics,
+    dispersedMediumOpticsAuthority: authority,
+    dispersedMediumOpticsBuffer: buffer,
+    dispersedMediumOpticsRowCount: 2,
+    dispersedMediumOpticsRowStrideFloats: 8,
+    dispersedMediumOpticsBufferByteLength: 64,
+    ownsDispersedMediumOpticsBuffer: true
+  };
+  for (const drift of [
+    { particleCount: 3 },
+    { topologyEpoch: 4 },
+    { identityRevision: 'particles-v2' }
+  ]) {
+    const target = {
+      particleCount: drift.particleCount ?? 2,
+      storageGeneration: 8,
+      topologyEpoch: drift.topologyEpoch ?? 3,
+      identityRevision: drift.identityRevision ?? 'particles-v1'
+    };
+    const targetOptics = drift.particleCount == null
+      ? optics
+      : { ...optics, particleCount: target.particleCount, rowCount: target.particleCount };
+    target.dispersedMediumOptics = targetOptics;
+    target.dispersedMediumOpticsAuthority = targetOptics.authority;
+    target.dispersedMediumOpticsBuffer = targetOptics.buffer;
+    target.dispersedMediumOpticsRowCount = targetOptics.rowCount;
+    target.dispersedMediumOpticsRowStrideFloats = targetOptics.rowStrideFloats;
+    target.dispersedMediumOpticsBufferByteLength = targetOptics.bufferByteLength;
+    target.ownsDispersedMediumOpticsBuffer = false;
+    assert.throws(
+      () => transferTopologyStableSphDispersedMediumOpticsOwnership({
+        sourceSphUpload: source,
+        targetSphUpload: target
+      }),
+      (error) => {
+        assert.equal(
+          error.code,
+          'ERR_SPH_DISPERSED_MEDIUM_OPTICS_REMAP_REQUIRED'
+        );
+        return true;
+      }
+    );
+    assert.equal(source.ownsDispersedMediumOpticsBuffer, true);
+    assert.equal(target.ownsDispersedMediumOpticsBuffer, false);
+    assert.equal(optics.ownsBuffer, true);
   }
 });
 

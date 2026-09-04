@@ -9,6 +9,9 @@ import {
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION,
   SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS
 } from './sphReactionProductPlacementReceipt.js';
+import {
+  sphDispersedMediumOpticsWgsl
+} from './sphDispersedMediumWgsl.js';
 
 export {
   sphReactionStrictGateFinalizeWgsl
@@ -7274,6 +7277,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const sphRenderFieldWgsl = `
+${sphDispersedMediumOpticsWgsl}
 struct RenderFieldParams {
 	  particle_count: u32,
 	  surface_count: u32,
@@ -7285,7 +7289,7 @@ struct RenderFieldParams {
   // smears its mass over sigma_v*dt between refreshes; the metaball
   // correction below folds that spread into the sample distance.
   render_smear_dt_s: f32,
-  _pad2: f32,
+  dispersed_medium_enabled: u32,
 };
 
 struct RenderProductHistoryGateParams {
@@ -7306,6 +7310,7 @@ struct RenderProductHistoryGateParams {
 	@group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> product_history_control: array<u32>;
 @group(0) @binding(6) var<uniform> product_history_gate: RenderProductHistoryGateParams;
+@group(0) @binding(7) var<storage, read> dispersed_medium_optics_rows: array<SphDispersedMediumOptics>;
 
 const RENDER_FIELD_RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 
@@ -7424,6 +7429,370 @@ fn metaball_support_norm(strength: f32, subtract: f32) -> f32 {
   return sqrt(max(strength / max(subtract, 1.0e-12) - 0.000001, 0.0));
 }
 
+const RENDER_FIELD_F32_FINITE_MAX: f32 = 3.402823466e+38;
+const RENDER_FIELD_F32_MIN_NORMAL: f32 = 1.175494351e-38;
+
+fn render_field_saturating_nonnegative_add(a: f32, b: f32) -> f32 {
+  if (!(a > 0.0)) { return max(0.0, b); }
+  if (!(b > 0.0)) { return max(0.0, a); }
+  if (a >= RENDER_FIELD_F32_FINITE_MAX - b) {
+    return RENDER_FIELD_F32_FINITE_MAX;
+  }
+  let sum = a + b;
+  return select(0.0, sum, sum >= RENDER_FIELD_F32_MIN_NORMAL);
+}
+
+fn render_field_saturating_nonnegative_product(a: f32, b: f32) -> f32 {
+  if (!(a > 0.0) || !(b > 0.0)) { return 0.0; }
+  let product = a * b;
+  if (!(product <= RENDER_FIELD_F32_FINITE_MAX)) {
+    return RENDER_FIELD_F32_FINITE_MAX;
+  }
+  if (product < RENDER_FIELD_F32_MIN_NORMAL) { return 0.0; }
+  return product;
+}
+
+struct RenderFieldPositiveF32Scale {
+  mantissa: f32,
+  exponent: i32,
+  nonzero: u32,
+  _pad: u32,
+};
+
+fn render_field_decompose_f32_magnitude(
+  value: f32
+) -> RenderFieldPositiveF32Scale {
+  let bits = bitcast<u32>(value) & 0x7fffffffu;
+  let raw_exponent = (bits >> 23u) & 0xffu;
+  let fraction = bits & 0x007fffffu;
+  if (bits == 0u || raw_exponent == 0xffu) {
+    return RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u);
+  }
+  if (raw_exponent == 0u) {
+    let highest = 31u - countLeadingZeros(fraction);
+    let shift = 23u - highest;
+    let normalized = fraction << shift;
+    return RenderFieldPositiveF32Scale(
+      bitcast<f32>(0x3f800000u | (normalized & 0x007fffffu)),
+      i32(highest) - 149,
+      1u,
+      0u
+    );
+  }
+  return RenderFieldPositiveF32Scale(
+    bitcast<f32>(0x3f800000u | fraction),
+    i32(raw_exponent) - 127,
+    1u,
+    0u
+  );
+}
+
+fn render_field_balanced_optical_product(
+  cross_section_m2: f32,
+  cell_weight: f32,
+  inverse_cell_edge_per_m: f32
+) -> f32 {
+  let cross_section =
+    render_field_decompose_f32_magnitude(cross_section_m2);
+  let weight = render_field_decompose_f32_magnitude(cell_weight);
+  let inverse_edge =
+    render_field_decompose_f32_magnitude(inverse_cell_edge_per_m);
+  if (
+    cross_section.nonzero == 0u
+    || weight.nonzero == 0u
+    || inverse_edge.nonzero == 0u
+  ) {
+    return 0.0;
+  }
+  var mantissa = (
+    (cross_section.mantissa * weight.mantissa)
+    * inverse_edge.mantissa
+  ) * inverse_edge.mantissa;
+  var exponent = cross_section.exponent
+    + weight.exponent
+    + 2 * inverse_edge.exponent;
+  for (
+    var iteration = 0u;
+    iteration < 4u && mantissa >= 2.0;
+    iteration = iteration + 1u
+  ) {
+    mantissa = mantissa * 0.5;
+    exponent = exponent + 1;
+  }
+  if (exponent < -126) { return 0.0; }
+  if (exponent > 127) { return RENDER_FIELD_F32_FINITE_MAX; }
+  return bitcast<f32>(
+    (u32(exponent + 127) << 23u)
+    | (bitcast<u32>(mantissa) & 0x007fffffu)
+  );
+}
+
+fn render_field_balanced_signed_optical_product(
+  signed_cross_section_m2: f32,
+  cell_weight: f32,
+  inverse_cell_edge_per_m: f32
+) -> f32 {
+  let magnitude = render_field_balanced_optical_product(
+    signed_cross_section_m2,
+    cell_weight,
+    inverse_cell_edge_per_m
+  );
+  if (magnitude == 0.0) { return 0.0; }
+  let sign_bit = bitcast<u32>(signed_cross_section_m2) & 0x80000000u;
+  return bitcast<f32>(bitcast<u32>(magnitude) | sign_bit);
+}
+
+struct RenderFieldWeightedTemperatureAccumulator {
+  weight: RenderFieldPositiveF32Scale,
+  weighted_temperature: RenderFieldPositiveF32Scale,
+};
+
+struct RenderFieldSignedF32ScaleAccumulator {
+  positive: RenderFieldPositiveF32Scale,
+  negative: RenderFieldPositiveF32Scale,
+};
+
+fn render_field_normalized_mantissa_at_exponent(
+  mantissa: f32,
+  exponent: i32
+) -> f32 {
+  if (exponent < -126) { return 0.0; }
+  return bitcast<f32>(
+    (u32(exponent + 127) << 23u)
+    | (bitcast<u32>(mantissa) & 0x007fffffu)
+  );
+}
+
+fn render_field_add_positive_scales(
+  left: RenderFieldPositiveF32Scale,
+  right: RenderFieldPositiveF32Scale
+) -> RenderFieldPositiveF32Scale {
+  if (left.nonzero == 0u) { return right; }
+  if (right.nonzero == 0u) { return left; }
+  var base_exponent: i32;
+  var mantissa: f32;
+  if (right.exponent >= left.exponent) {
+    let scaled_left = render_field_normalized_mantissa_at_exponent(
+      left.mantissa,
+      left.exponent - right.exponent
+    );
+    base_exponent = right.exponent;
+    mantissa = right.mantissa + scaled_left;
+  } else {
+    let scaled_right = render_field_normalized_mantissa_at_exponent(
+      right.mantissa,
+      right.exponent - left.exponent
+    );
+    base_exponent = left.exponent;
+    mantissa = left.mantissa + scaled_right;
+  }
+  if (mantissa >= 2.0) {
+    mantissa = mantissa * 0.5;
+    base_exponent = base_exponent + 1;
+  }
+  return RenderFieldPositiveF32Scale(
+    mantissa,
+    base_exponent,
+    1u,
+    0u
+  );
+}
+
+fn render_field_compare_positive_scales(
+  left: RenderFieldPositiveF32Scale,
+  right: RenderFieldPositiveF32Scale
+) -> i32 {
+  if (left.nonzero == 0u) {
+    return select(0, -1, right.nonzero != 0u);
+  }
+  if (right.nonzero == 0u) { return 1; }
+  if (left.exponent != right.exponent) {
+    return select(-1, 1, left.exponent > right.exponent);
+  }
+  if (left.mantissa == right.mantissa) { return 0; }
+  return select(-1, 1, left.mantissa > right.mantissa);
+}
+
+fn render_field_subtract_positive_scales(
+  larger: RenderFieldPositiveF32Scale,
+  smaller: RenderFieldPositiveF32Scale
+) -> RenderFieldPositiveF32Scale {
+  if (larger.nonzero == 0u) {
+    return RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u);
+  }
+  if (smaller.nonzero == 0u) { return larger; }
+  let scaled_smaller = render_field_normalized_mantissa_at_exponent(
+    smaller.mantissa,
+    smaller.exponent - larger.exponent
+  );
+  let residual = larger.mantissa - scaled_smaller;
+  let normalized_residual = render_field_decompose_f32_magnitude(residual);
+  if (normalized_residual.nonzero == 0u) {
+    return RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u);
+  }
+  return RenderFieldPositiveF32Scale(
+    normalized_residual.mantissa,
+    larger.exponent + normalized_residual.exponent,
+    1u,
+    0u
+  );
+}
+
+fn render_field_positive_scale_value(
+  scale: RenderFieldPositiveF32Scale
+) -> f32 {
+  if (scale.nonzero == 0u || scale.exponent < -126) { return 0.0; }
+  if (scale.exponent > 127) { return RENDER_FIELD_F32_FINITE_MAX; }
+  return bitcast<f32>(
+    (u32(scale.exponent + 127) << 23u)
+    | (bitcast<u32>(scale.mantissa) & 0x007fffffu)
+  );
+}
+
+fn render_field_accumulate_signed_scale(
+  state: RenderFieldSignedF32ScaleAccumulator,
+  sample: f32
+) -> RenderFieldSignedF32ScaleAccumulator {
+  if (
+    sample == 0.0
+    || !(sample == sample)
+    || abs(sample) > RENDER_FIELD_F32_FINITE_MAX
+  ) {
+    return state;
+  }
+  let sample_scale = render_field_decompose_f32_magnitude(sample);
+  if (sample_scale.nonzero == 0u) { return state; }
+  if ((bitcast<u32>(sample) & 0x80000000u) != 0u) {
+    return RenderFieldSignedF32ScaleAccumulator(
+      state.positive,
+      render_field_add_positive_scales(state.negative, sample_scale)
+    );
+  }
+  return RenderFieldSignedF32ScaleAccumulator(
+    render_field_add_positive_scales(state.positive, sample_scale),
+    state.negative
+  );
+}
+
+fn render_field_signed_scale_sum(
+  state: RenderFieldSignedF32ScaleAccumulator
+) -> f32 {
+  let comparison = render_field_compare_positive_scales(
+    state.positive,
+    state.negative
+  );
+  if (comparison == 0) { return 0.0; }
+  let positive = comparison > 0;
+  var larger = state.negative;
+  var smaller = state.positive;
+  if (positive) {
+    larger = state.positive;
+    smaller = state.negative;
+  }
+  let magnitude = render_field_positive_scale_value(
+    render_field_subtract_positive_scales(larger, smaller)
+  );
+  return select(-magnitude, magnitude, positive);
+}
+
+fn render_field_multiply_positive_scales(
+  left: RenderFieldPositiveF32Scale,
+  right: RenderFieldPositiveF32Scale
+) -> RenderFieldPositiveF32Scale {
+  if (left.nonzero == 0u || right.nonzero == 0u) {
+    return RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u);
+  }
+  var mantissa = left.mantissa * right.mantissa;
+  var exponent = left.exponent + right.exponent;
+  if (mantissa >= 2.0) {
+    mantissa = mantissa * 0.5;
+    exponent = exponent + 1;
+  }
+  return RenderFieldPositiveF32Scale(mantissa, exponent, 1u, 0u);
+}
+
+fn render_field_divide_positive_scales(
+  numerator: RenderFieldPositiveF32Scale,
+  denominator: RenderFieldPositiveF32Scale
+) -> f32 {
+  if (numerator.nonzero == 0u || denominator.nonzero == 0u) {
+    return 0.0;
+  }
+  var mantissa = numerator.mantissa / denominator.mantissa;
+  var exponent = numerator.exponent - denominator.exponent;
+  if (mantissa < 1.0) {
+    mantissa = mantissa * 2.0;
+    exponent = exponent - 1;
+  } else if (mantissa >= 2.0) {
+    mantissa = mantissa * 0.5;
+    exponent = exponent + 1;
+  }
+  if (exponent < -126) { return 0.0; }
+  if (exponent > 127) { return RENDER_FIELD_F32_FINITE_MAX; }
+  return bitcast<f32>(
+    (u32(exponent + 127) << 23u)
+    | (bitcast<u32>(mantissa) & 0x007fffffu)
+  );
+}
+
+// Accumulate numerator (temperature * extinction) and denominator
+// independently as normalized mantissa/exponent scales. This retains both
+// unequal high-dynamic-range weights and tiny weights whose large temperature
+// can still make a representable contribution.
+fn render_field_accumulate_weighted_temperature(
+  state: RenderFieldWeightedTemperatureAccumulator,
+  sample: f32,
+  sample_weight: f32
+) -> RenderFieldWeightedTemperatureAccumulator {
+  if (
+    !(sample_weight > 0.0)
+    || !(sample == sample)
+    || abs(sample) > RENDER_FIELD_F32_FINITE_MAX
+  ) {
+    return state;
+  }
+  let sample_scale = render_field_decompose_f32_magnitude(sample_weight);
+  if (sample_scale.nonzero == 0u) { return state; }
+  let next_weight = render_field_add_positive_scales(
+    state.weight,
+    sample_scale
+  );
+  let finite_sample = clamp(sample, 0.0, RENDER_FIELD_F32_FINITE_MAX);
+  let temperature_scale = render_field_decompose_f32_magnitude(finite_sample);
+  if (temperature_scale.nonzero == 0u) {
+    return RenderFieldWeightedTemperatureAccumulator(
+      next_weight,
+      state.weighted_temperature
+    );
+  }
+  return RenderFieldWeightedTemperatureAccumulator(
+    next_weight,
+    render_field_add_positive_scales(
+      state.weighted_temperature,
+      render_field_multiply_positive_scales(
+        sample_scale,
+        temperature_scale
+      )
+    )
+  );
+}
+
+fn render_field_cic_axis_weight(
+  cell_index: u32,
+  particle_coordinate: f32,
+  resolution: u32
+) -> f32 {
+  let particle_cell = clamp(particle_coordinate, 0.0, 1.0) * f32(resolution);
+  var weight = max(0.0, 1.0 - abs(f32(cell_index) - particle_cell));
+  if (cell_index == 0u) {
+    weight = weight + max(0.0, 1.0 - abs(-1.0 - particle_cell));
+  }
+  if (cell_index + 1u == resolution) {
+    weight = weight + max(0.0, 1.0 - abs(f32(resolution) - particle_cell));
+  }
+  return min(1.0, weight);
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let cell_index = global_id.x;
@@ -7499,6 +7868,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // so treating it as authoritative here could invent visible heat.
   var temperature_weighted = 0.0;
   var temperature_weight = 0.0;
+  // Positive optical-state surfaces become exclusive collective-medium
+  // routes whenever the authenticated sidecar is enabled. No ready match
+  // means an empty surface, never a fallback copy of carrier geometry.
+  let dispersed_surface_active = params.dispersed_medium_enabled != 0u
+    && s3.y > 0.0;
+  var dispersed_scattering_optical_depth = 0.0;
+  var dispersed_absorption_optical_depth = 0.0;
+  var dispersed_scattering_asymmetry = RenderFieldSignedF32ScaleAccumulator(
+    RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u),
+    RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u)
+  );
+  var dispersed_temperature = RenderFieldWeightedTemperatureAccumulator(
+    RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u),
+    RenderFieldPositiveF32Scale(0.0, 0, 0u, 0u)
+  );
   // Velocity moments (weights = the same positive metaball values) for the
   // splash-shard smear correction: cell dispersion sigma_v^2 = E|v|^2-|Ev|^2
   // is zero for a coherently moving or single-particle cell, so only cells
@@ -7510,6 +7894,87 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row1 = render_row1(particle_index);
     let row2 = render_row2(particle_index);
     let row3 = render_row3(particle_index);
+    if (params.dispersed_medium_enabled != 0u) {
+      let dispersed = dispersed_medium_optics_rows[particle_index];
+      if (
+        sph_dispersed_medium_optics_row_is_ready(dispersed)
+        && dispersed.optical_state_id > 0.0
+        && dispersed.optical_state_id == s3.y
+      ) {
+        // optical_state_id is the exact collective-medium surface route.
+        // The constituent material/phase intentionally remain independent of
+        // both this surface and the aligned carrier particle.
+        let dispersed_particle = vec3<f32>(
+          clamp(params.field_padding + (row0.x / ref_edge) * span, 0.001, 0.999),
+          clamp(params.field_padding + (row0.y / ref_edge) * span, 0.001, 0.999),
+          clamp(params.field_padding + (row0.z / ref_edge) * span, 0.001, 0.999)
+        );
+        let cell_weight = render_field_cic_axis_weight(x, dispersed_particle.x, resolution)
+          * render_field_cic_axis_weight(y, dispersed_particle.y, resolution)
+          * render_field_cic_axis_weight(z, dispersed_particle.z, resolution);
+        if (cell_weight > 0.0) {
+          // Deposit each extensive cross-section with a conservative
+          // particle-to-grid cloud-in-cell kernel. Dividing by the physical
+          // cell face area yields dimensionless optical depth through that
+          // cell; the marching-cubes threshold is therefore tau = 1 rather
+          // than a material-specific opacity knob.
+          // Evaluate sigma * weight / edge^2 as two ordered inverse-edge
+          // products. Squaring edge can overflow for a very large domain and
+          // squaring its inverse can underflow before sigma rescales it; this
+          // ordering keeps every representable final optical depth finite.
+          let inverse_cell_edge_per_m = min(
+            RENDER_FIELD_F32_FINITE_MAX,
+            (span * f32(resolution)) / ref_edge
+          );
+          let scattering_optical_depth = render_field_balanced_optical_product(
+            dispersed.scattering_cross_section_m2,
+            cell_weight,
+            inverse_cell_edge_per_m
+          );
+          let absorption_optical_depth = render_field_balanced_optical_product(
+            dispersed.absorption_cross_section_m2,
+            cell_weight,
+            inverse_cell_edge_per_m
+          );
+          let asymmetry_optical_depth = render_field_balanced_signed_optical_product(
+            dispersed.scattering_asymmetry_cross_section_m2,
+            cell_weight,
+            inverse_cell_edge_per_m
+          );
+          dispersed_scattering_optical_depth = render_field_saturating_nonnegative_add(
+            dispersed_scattering_optical_depth,
+            scattering_optical_depth
+          );
+          dispersed_absorption_optical_depth = render_field_saturating_nonnegative_add(
+            dispersed_absorption_optical_depth,
+            absorption_optical_depth
+          );
+          dispersed_scattering_asymmetry = render_field_accumulate_signed_scale(
+            dispersed_scattering_asymmetry,
+            asymmetry_optical_depth
+          );
+          // Keep scattering and absorption as separate extensive weights so
+          // max+max does not clip before the balanced temperature accumulator.
+          dispersed_temperature = render_field_accumulate_weighted_temperature(
+            dispersed_temperature,
+            row1.z,
+            scattering_optical_depth
+          );
+          dispersed_temperature = render_field_accumulate_weighted_temperature(
+            dispersed_temperature,
+            row1.z,
+            absorption_optical_depth
+          );
+        }
+      }
+    }
+    // A positive optical-state surface is an exclusive collective-medium
+    // route. Once the authenticated sidecar path has been considered, do not
+    // also execute legacy carrier metaball/temperature/velocity math that the
+    // CPU reference deliberately bypasses for this surface.
+    if (dispersed_surface_active) {
+      continue;
+    }
     if (
       row1.x != material_id
       || (render_domain_id > 0.0 && row2.w != render_domain_id)
@@ -7558,13 +8023,33 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
 
+  let dispersed_scattering_asymmetry_optical_depth = clamp(
+    render_field_signed_scale_sum(dispersed_scattering_asymmetry),
+    -dispersed_scattering_optical_depth,
+    dispersed_scattering_optical_depth
+  );
+
+  if (dispersed_surface_active) {
+    let dispersed_total_optical_depth = render_field_saturating_nonnegative_add(
+      dispersed_scattering_optical_depth,
+      dispersed_absorption_optical_depth
+    );
+    density = render_field_saturating_nonnegative_product(
+      max(s1.y, 0.0),
+      dispersed_total_optical_depth
+    );
+    palette = select(vec3<f32>(0.0), color, dispersed_total_optical_depth > 0.0);
+    temperature_weighted = 0.0;
+    temperature_weight = f32(dispersed_temperature.weight.nonzero);
+  }
+
   // Splash-shard smear correction: mass in a dispersing cell spreads over
   // L = sigma_v * render_smear_dt between refreshes, so each contribution is
   // re-sampled at the smeared distance (dist2 + L^2, in normalized field
   // units). Coherent cells (sigma_v ~ 0) skip the pass entirely, keeping
   // solids, resting pools, and single-particle cohorts bit-exact; the guard
   // threshold is fp-noise scale (L < 1e-5 of the field edge), not a tunable.
-  if (temperature_weight > 0.0 && params.render_smear_dt_s > 0.0) {
+  if (!dispersed_surface_active && temperature_weight > 0.0 && params.render_smear_dt_s > 0.0) {
     let mean_velocity = velocity_weighted / temperature_weight;
     let dispersion_sq_ms = max(0.0, velocity_sq_weighted / temperature_weight - dot(mean_velocity, mean_velocity));
     let smear_norm = sqrt(dispersion_sq_ms) * params.render_smear_dt_s * span / ref_edge;
@@ -7629,7 +8114,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
 
-	  for (var event_index = 0u; event_index < authenticated_product_event_count; event_index = event_index + 1u) {
+	  for (var event_index = 0u; !dispersed_surface_active && event_index < authenticated_product_event_count; event_index = event_index + 1u) {
 	    let event0 = product_event_row0(event_index);
 	    let event1 = product_event_row1(event_index);
 	    let event2 = product_event_row2(event_index);
@@ -7662,9 +8147,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    }
 	  }
 
-  let mean_temperature_k = select(0.0, temperature_weighted / max(temperature_weight, 1.0e-6), temperature_weight > 0.0);
+  let mean_temperature_k = select(
+    select(0.0, temperature_weighted / max(temperature_weight, 1.0e-6), temperature_weight > 0.0),
+    render_field_divide_positive_scales(
+      dispersed_temperature.weighted_temperature,
+      dispersed_temperature.weight
+    ),
+    dispersed_surface_active
+  );
   render_field_cells[out_index * 2u] = vec4<f32>(density, palette);
-  render_field_cells[out_index * 2u + 1u] = vec4<f32>(mean_temperature_k, 0.0, 0.0, 0.0);
+  render_field_cells[out_index * 2u + 1u] = vec4<f32>(
+    mean_temperature_k,
+    dispersed_scattering_optical_depth,
+    dispersed_absorption_optical_depth,
+    dispersed_scattering_asymmetry_optical_depth
+  );
 }
 `;
 

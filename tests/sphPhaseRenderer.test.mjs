@@ -95,6 +95,8 @@ import {
   resolveSphNativeSurfaceExtractionDeferralPolicy,
   resolveThreeWebGpuRendererRequiredLimits,
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
+  rendererOwnedCpuRenderRowsFallbackAllowed,
+  resolveRenderFieldCpuParityDispersedMediumAdmission,
   resolveResidentExtensionSurfaceRendererCapability,
   resolveResidentSurfaceBufferHandoff,
   resolveResidentSurfaceVisibleGpuConsumer,
@@ -168,6 +170,50 @@ import {
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork
 } from '../src/runtime/webgpuComputeLayout.js';
+
+test('renderer-owned CPU row fallback refuses to discard resident dispersed optics', () => {
+  assert.equal(rendererOwnedCpuRenderRowsFallbackAllowed({
+    rendererOwnedDevice: true,
+    readbackMode: 'full-parity-readback',
+    sphParticleUpload: {}
+  }), true);
+  assert.equal(rendererOwnedCpuRenderRowsFallbackAllowed({
+    rendererOwnedDevice: true,
+    readbackMode: 'full-parity-readback',
+    sphParticleUpload: { dispersedMediumOptics: {} }
+  }), false);
+  assert.equal(rendererOwnedCpuRenderRowsFallbackAllowed({
+    rendererOwnedDevice: true,
+    readbackMode: 'no-full-readback',
+    sphParticleUpload: {}
+  }), false);
+});
+
+test('render-field CPU parity reports resident dispersed optics unavailable without an exact host snapshot', () => {
+  const unavailable = resolveRenderFieldCpuParityDispersedMediumAdmission({
+    dispersedMediumOptics: { status: 'resident' }
+  });
+  assert.equal(unavailable.ok, false);
+  assert.equal(
+    unavailable.status,
+    'render-field-cpu-parity-unavailable-dispersed-medium'
+  );
+
+  const rows = new Float32Array(8);
+  const unauthenticatedRows = resolveRenderFieldCpuParityDispersedMediumAdmission({
+    dispersedMediumOptics: { status: 'resident' },
+    dispersedMediumOpticsRows: rows
+  });
+  assert.equal(unauthenticatedRows.ok, false);
+
+  const admitted = resolveRenderFieldCpuParityDispersedMediumAdmission({
+    dispersedMediumOptics: { status: 'resident' },
+    dispersedMediumOpticsRows: rows,
+    dispersedMediumOpticsHostReadback: true
+  });
+  assert.equal(admitted.ok, true);
+  assert.strictEqual(admitted.dispersedMediumOpticsRows, rows);
+});
 
 test('SS contact admission declares contact-off as the explicit contact-free bulk mode', () => {
   const contactFree = resolveSphSchroederHierarchyContactAdmission({

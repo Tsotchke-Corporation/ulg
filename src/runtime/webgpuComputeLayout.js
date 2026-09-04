@@ -341,7 +341,18 @@ export function deferSubmittedWorkCleanup(device, cleanup) {
     cleanup();
     return false;
   }
-  device.queue.onSubmittedWorkDone()
+  let submittedWorkDone;
+  try {
+    submittedWorkDone = device.queue.onSubmittedWorkDone();
+  } catch {
+    // Some device-loss/mocked implementations fail synchronously while
+    // creating the fence. There is no completion primitive to retain, but we
+    // must still retire caller-owned resources exactly once instead of
+    // replacing the original failure and leaking them.
+    cleanup();
+    return false;
+  }
+  Promise.resolve(submittedWorkDone)
     .catch(() => null)
     .finally(() => {
       cleanup();

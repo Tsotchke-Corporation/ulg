@@ -790,24 +790,30 @@ test('single-level fused mechanics G2P keeps local heat but omits route sampling
     assert.doesNotMatch(singleLevel, /sampled_field_route_internal_energy_delta/);
     assert.doesNotMatch(singleLevel, /sampled_route_internal_energy_delta/);
     assert.match(crossLevel, /fn measure_g2p_energy_receipt\(/);
-    // The particle-side measurement differences stored f32 internal energy,
-    // so it is bounded one-sided against that state per particle. There is no
-    // sound receipt-level measured-vs-expected equality at this conditioning.
+    // Pressure work may legitimately cool a particle. The measurement admits
+    // either finite sign while protecting absolute energy of positive-mass
+    // particles; zero-mass tombstone lanes remain semantically inactive.
+    // It is not a measured-vs-expected equality gate for ill-conditioned f32
+    // state differences. Published-vs-consumed accounting remains separate.
     assert.doesNotMatch(crossLevel, /fn g2p_energy_receipt_close\(/);
-    assert.match(
-      crossLevel,
-      /measure_gamma_n \* mass \* \(abs\(prior\) \+ abs\(next\)\)/
-    );
-    assert.match(crossLevel, /delta_j < -measure_tolerance/);
     for (const source of [crossLevel, singleLevel]) {
       assert.match(
         source,
         /let local_energy_evidence_count = g2p_saturating_add\([\s\S]*params\.particle_count \* 28u[\s\S]*g2p_field_load\(34u\)/
       );
-      assert.match(
+      const measure = sourceSection(
         source,
-        /measure_gamma_n \* mass \* \(abs\(prior\) \+ abs\(next\)\)/
+        'fn measure_g2p_energy_receipt(',
+        'fn consume_g2p_energy_receipt()'
       );
+      assert.match(measure, /mass > 0\.0 && \(prior < 0\.0 \|\| next < 0\.0\)/);
+      for (const value of ['mass', 'prior', 'next', 'delta_j']) {
+        assert.ok(measure.includes(`!g2p_energy_finite(${value})`));
+      }
+      assert.match(source, /bitcast<u32>\(value\) & 0x7f800000u/);
+      assert.doesNotMatch(measure, /delta_j <|measure_tolerance|measure_gamma_n/);
+      // The actual deposition path still protects absolute resulting energy.
+      assert.match(source, /next_internal_energy < 0\.0/);
       assert.match(
         source,
         /g2p_scale_close\([\s\S]*published_field_heat,[\s\S]*consumed_field_heat,[\s\S]*energy_evidence_count[\s\S]*g2p_scale_close\([\s\S]*published_pressure_internal_compensation,[\s\S]*consumed_pressure_internal_compensation,[\s\S]*energy_evidence_count/

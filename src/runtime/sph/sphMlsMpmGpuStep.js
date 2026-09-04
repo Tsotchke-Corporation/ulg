@@ -8117,6 +8117,12 @@ fn g2p_saturating_add(left: u32, right: u32) -> u32 {
   return left + right;
 }
 
+fn g2p_energy_finite(value: f32) -> bool {
+  // Inspect the exponent: floating-point self-comparisons can be optimized
+  // under finite-math assumptions and did not reject a stored NaN on device.
+  return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
+}
+
 @compute @workgroup_size(64)
 fn measure_g2p_energy_receipt(
   @builtin(global_invocation_id) global_id: vec3<u32>
@@ -8130,34 +8136,21 @@ fn measure_g2p_energy_receipt(
   let mass = sph_state[state].w;
   let prior = sph_state[state + 1u].w;
   let next = out_sph_state[state + 1u].w;
-  if (!(mass >= 0.0) || mass != mass || abs(mass) > 3.402823466e+38
-      || prior != prior || next != next
-      || abs(prior) > 3.402823466e+38
-      || abs(next) > 3.402823466e+38) {
+  if (!(mass >= 0.0) || !g2p_energy_finite(mass)
+      || !g2p_energy_finite(prior) || !g2p_energy_finite(next)
+      || (mass > 0.0 && (prior < 0.0 || next < 0.0))) {
     g2p_receipt_reject(false, false, false);
     return;
   }
   let delta_j = mass * (next - prior);
-  // This differences stored f32 specific internal energy, so its error is
-  // about ulp(u) per particle regardless of how small the deposit is. Bound it
-  // against the state it was differenced from, one-sided: a deposit may not
-  // remove internal energy beyond that representation floor. An exact
-  // measured-vs-expected equality is not recoverable at this conditioning and
-  // must not be gated on here; the exact accounting is enforced separately by
-  // the published-vs-consumed heat and pressure-compensation checks.
-  let measure_n_epsilon = min(
-    0.25,
-    f32(max(1u, params.particle_count)) * 5.960464477539063e-8
-  );
-  let measure_gamma_n =
-    measure_n_epsilon / max(1.0e-20, 1.0 - measure_n_epsilon);
-  let measure_tolerance = max(
-    8.0 * 1.175494351e-38,
-    measure_gamma_n * mass * (abs(prior) + abs(next))
-  );
-  if (delta_j < -measure_tolerance
-      || delta_j != delta_j
-      || abs(delta_j) > 3.402823466e+38) {
+  // Pressure compensation is signed: reversible mechanical work can remove
+  // internal energy, even when dissipative heat is nonnegative. Protect the
+  // absolute energies of positive-mass particles above, not the delta's sign.
+  // Finite zero-mass tombstone energy lanes remain irrelevant. This f32 state
+  // difference has ulp(u) conditioning, so it is diagnostic rather than an
+  // exact measured-vs-expected equality gate. Published-vs-consumed heat and
+  // pressure-compensation accounting is enforced separately below.
+  if (!g2p_energy_finite(delta_j)) {
     g2p_receipt_reject(false, false, false);
     return;
   }
@@ -8222,13 +8215,11 @@ fn consume_g2p_energy_receipt() {
   }
   // The exact accounting gates are published-vs-consumed: both sides come from
   // the same well-conditioned accumulators. The particle-side measurement is
-  // a state difference whose error is ulp(u) per particle, so an exact
-  // measured-vs-expected equality is unreachable here and is bounded
-  // one-sided per particle in measure_g2p_energy_receipt instead. Its
-  // finiteness is still required before it is published.
-  if (measured_particle_internal_energy_delta
-        != measured_particle_internal_energy_delta
-      || abs(measured_particle_internal_energy_delta) > 3.402823466e+38
+  // a state difference whose error is ulp(u) per particle, so it is not an
+  // exact measured-vs-expected equality gate. measure_g2p_energy_receipt admits
+  // either finite delta sign while protecting absolute positive-mass energy.
+  // The measured sum must remain finite before this receipt can close.
+  if (!g2p_energy_finite(measured_particle_internal_energy_delta)
       || !g2p_scale_close(
       published_field_heat,
       consumed_field_heat,

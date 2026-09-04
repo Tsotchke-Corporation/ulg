@@ -42944,3 +42944,48 @@ Validation and review:
   with bulk-water 57.939 Hz and dam break 57.698 Hz. The SHA-bound review is in
   `/tmp/ulg-goal2-diagnostics-final-six-gigUH7/`; owned Chrome closed. These
   short sequences do not erase the diagnosed long-run rejection.
+
+## 2026-09-04: signed G2P pressure-work receipts and boundary projection audit
+
+- Pushed the verified diagnostics checkpoint `a1837b3` to `origin/main` and
+  refreshed ICC index, memory and history. The HTTPS-only interruption did not
+  advance the seven-goal implementation; the program remains on Goal 2.
+- Repaired a separate generic receipt defect: reversible pressure work can
+  cool positive internal energy, but `measure_g2p_energy_receipt` rejected a
+  resolvable negative delta. It now admits both finite signs and checks
+  nonnegative absolute energy for positive-mass particles. Finite zero-mass
+  tombstone lanes retain their prior semantics; published/consumed heat and
+  pressure-work equality gates are unchanged.
+- Native RED also exposed a stored NaN escaping the previous floating-point
+  self-comparison. Energy measurement now checks IEEE exponent bits for inputs,
+  delta and the accumulated measured total. Actual exported receipt shaders
+  passed 42 case/variant checks on NVIDIA Blackwell after the fix. A 2 kg
+  manufactured cooling case changed 100 to 75 J/kg and published/consumed/
+  measured -50 J with receipt status 3, terminal phase 6. Negative absolute
+  energy, nonfinite values, overflow, malformed seals, accounting mismatches
+  and replay reject. This tests receipt admission, not independently measured
+  kinetic energy or full G2P output authentication. Logs:
+  `/tmp/ulg-g2p-signed-energy-native-red-headed.log` and
+  `/tmp/ulg-g2p-signed-energy-native-final.log`.
+- Headless adapter acquisition failed on this host, including an unchanged
+  native control test. No shader result was inferred from that failure. The
+  numerical RED/GREEN runs used owned system Chrome on the real desktop and
+  closed it afterward; they are separate from the final visual preset sweep.
+- The sodium overfill repair is still open. Read-only source review rejected
+  naive clipped-dual projection: a particle at x/h=0.1 places weight 0.08 on
+  halo node -1, whose clipped ordinary dual volume is zero. Simple boundary
+  folding is also wrong for a uniform quadratic field, producing 97/96 wall
+  occupancy. An ordered basis-capacity dual is a candidate bounded eight-target
+  node-to-primal mapping, paired with its pressure transpose. A 48-case analytic
+  geometry experiment preserves total volume and uniform density, but GPU f32,
+  authority, pressure-work and actual sodium progression remain to validate.
+  Do not replace current scaled Tait/corotated response with an arbitrary EOS
+  or mistake reaction routing support volume for thermodynamic gas volume.
+- Verification: focused suite 284 passed/4 opt-in skips; full suite 3,535 total,
+  3,479 passed, 56 opt-in skips, zero failures; production build passed. All six
+  real-desktop defaults passed and root inspected all twelve captures.
+  Bulk-water visible cadence was 59.469 Hz; dam break was 56.832 Hz. Evidence:
+  `/tmp/ulg-goal2-signed-energy-final-4NF4Lx/` and its SHA-bound
+  `desktop-six/manual-visual-review.json`. No control-body preview remained.
+  Short geometry progression is not a long-run overfill or steam/smoke pass.
+  All owned browser sessions closed; trusted HTTPS Vite remains up.

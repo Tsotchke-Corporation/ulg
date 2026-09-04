@@ -75,8 +75,23 @@ Artifacts: `/tmp/ulg-goal2-sodium-field-trace-3jjj9V/`,
 `/tmp/ulg-goal2-sodium-free-volume-reject-soHJrB/`, and
 `/tmp/ulg-goal2-sodium-overfill-geometry-W9mURc/`. Temporary failure markers are
 removed after each experiment; no force law or admission guard is relaxed.
-The separate G2P guard against negative internal-energy changes contradicts
-signed pressure work, but did not trigger this freeze and remains a follow-up.
+The separate G2P receipt guard against negative internal-energy changes is
+now repaired: legitimate pressure-driven cooling is admitted while negative
+absolute energy on live particles and nonfinite values still reject. A native
+RED/GREEN test executes the actual receipt shaders in both variants, with 42
+case/variant checks passing on desktop NVIDIA WebGPU. It also caught a NaN that
+the old floating-point self-comparison missed; the receipt check now inspects
+the exponent bits. This is receipt-stage validation, not a full dynamics or
+plume proof, and it does not repair the upstream gas-cell overfill. Final
+verification passed: 3,535 Node tests (3,479 passed, 56 opt-in skips, no
+failures), production build, and all six real-desktop presets with all twelve
+PNG captures inspected. Bulk water measured 59.469 Hz and dam break 56.832 Hz.
+Evidence: `/tmp/ulg-goal2-signed-energy-final-4NF4Lx/`, including the SHA-bound
+`desktop-six/manual-visual-review.json`, plus
+`/tmp/ulg-g2p-signed-energy-native-final.log`. Owned browser sessions closed;
+trusted HTTPS Vite remains running. The next gas-volume projection must also
+handle positive quadratic halo weights and apply the matching pressure
+transpose; naive clipped-dual and nearest-wall-fold mappings are rejected.
 
 Diagnostic-slice verification: 3,534 Node tests, 3,479 passed, 55 opt-in skips,
 zero failures; production build passed. A fresh six-default real-desktop sweep

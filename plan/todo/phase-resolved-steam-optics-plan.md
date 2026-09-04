@@ -44,6 +44,41 @@ and pressure-work checks, and a long sodium desktop run past 2.56 s without
 rejected/stationary generations or the previous jump. Exact counters and cell
 volumes are in `/tmp/ulg-goal2-sodium-overfill-geometry-W9mURc/summary.json`.
 
+Projection repair must cover walls, not just the measured interior cell. The
+actual S9 quadratic weights for a particle at `x/h = 0.1` are `0.08, 0.74,
+0.18` on nodes `-1, 0, 1`. Node `-1` has positive represented volume but its
+node-centered dual cell has zero intersection with a box beginning at zero.
+Consequently, simply averaging eight neighboring primal cells, or normalizing
+by clipped dual-cell volume, can lose volume or divide by zero. A conservative
+projection needs an explicit boundary treatment and the same weights in the
+pressure transpose; do not renormalize weights over only cells containing gas.
+Two candidates remain: a nodal gas authority with capacity integrated against
+the same quadratic basis as S9, or a conservative node-to-primal transfer.
+For the latter, an ordered basis-capacity dual tiles each box axis with nodal
+intervals of length `integral_box N_i(x) dx`. Geometric overlap with primal
+cells then needs at most two targets per axis, preserving constant density
+and assigning positive capacity to supported halo nodes. A 48-case analytic
+experiment passed conservation and uniform-density checks across translations,
+spacings and clipped boxes; this is not yet implemented GPU evidence. See
+`/tmp/ulg-goal2-signed-energy-final-4NF4Lx/quadratic-capacity-analysis.json`.
+The matching pressure transpose, f32 behavior, sparse support, retained-product
+coverage and actual allocation cost must be proven before adoption. Simple
+nearest-boundary folding was also rejected: it introduces a `97/96` occupancy
+ratio at a planar wall for an otherwise uniform quadratic field.
+
+Any subsequent compatibility-pressure solve must use the admitted constitutive
+response, not an unscaled reference bulk modulus or a new arbitrary exponential
+EOS. Current GPU liquid pressure uses Tait stiffness from the reduced acoustic
+speed, while elastic solids use corotated stress; phase-volume pair transport
+consumes the exact published P2G pressure and signed energy compensation.
+The separate gas-boundary path records external work. Reconcile those owners
+before adding pressure or internal-energy work; a finite root alone does not
+prove a conservative coupled update. The independent G2P receipt correction
+for legitimate signed cooling passes 42 native receipt-stage case/variant
+checks, full regression and all six desktop presets. It is not the overfill
+repair; the measured particle energy delta is still diagnostic rather than an
+independent authentication of the full particle update.
+
 The current four-lane transfer merges each lineage's target-phase mass into
 one position/velocity. A single liquid lane therefore cannot represent both a
 bulk pool and spatially separate airborne fog. Adding a smaller optical radius

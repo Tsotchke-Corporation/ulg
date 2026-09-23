@@ -12,6 +12,14 @@ Primary plan:
 
 - `schroeder-tree-and-algorithm-plan.md`
 
+Law derivation and material-closure follow-on (2026-09-22):
+
+- [Eshkol higher-order law and material closures](../eshkol-higher-order-law-closure-plan.md)
+  develops executable law contracts, generated response/derivative artifacts,
+  SS envelope checks, and one local fit/cache/adoption cycle for Goal 6. Neural
+  alternatives and graph-wide/multiscale transformations are later stages.
+  Preserve the superseding seven-goal order and existing spatial/state authority.
+
 Required coherent-solid correction:
 
 - `../sol-critic.md` - preserve solid body/material identity, pose, angular

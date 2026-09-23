@@ -1,5 +1,20 @@
 # ULG Implementation Log
 
+## 2026-09-22 AKDT - Eshkol Higher-Order Law And Material Closure Plan
+
+Added [the new todo plan](todo/eshkol-higher-order-law-closure-plan.md) and linked
+it from Goal 6 and SS routing. The plan covers executable law contracts,
+potential-derived responses, material validity envelopes, local online fitting,
+immutable cache/adoption, GPU-native validation, and later NN and multiscale
+transformations. S0–S2 define one bounded local deliverable; neural backends and
+graph-wide differentiation are follow-ons. Existing Goal 1–7 priorities and
+PeerCompute/SS authority remain intact. This change adds documentation only and
+does not claim compiler, runtime, or scientific validation progress.
+
+Validation: checked the new plan's local references and its four routing/status
+links (14 targets, no missing files), reviewed the staged documentation diff, and
+ran `git diff --check`. Runtime tests are not applicable to this planning change.
+
 ## 2026-07-01 AKDT - SS Far-Aggregate Law Consumers
 
 Status:

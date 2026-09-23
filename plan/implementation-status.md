@@ -1,5 +1,11 @@
 # Implementation Status
 
+Planning update, 2026-09-22 AKDT: added the
+[Eshkol higher-order law and material closure plan](todo/eshkol-higher-order-law-closure-plan.md)
+for the Goal 6 local factory and later neural/composed-law extensions. This is
+planning only; the current focus and seven-goal implementation order below remain
+unchanged.
+
 ## Current focus - 2026-09-04 AKDT
 
 The seven-goal program is at Goal 2: conserved steam/aerosol optics and

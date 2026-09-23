@@ -23,6 +23,8 @@ count as done while the visible physics loop or measured cadence is incoherent.
    existing retained ownership model.
 6. Land one local provenance-bound online closure fit/cache slice with
    envelope invalidation before extending it to remote derivation services.
+   Detailed Eshkol/SS scope and acceptance:
+   [higher-order law and material closures](eshkol-higher-order-law-closure-plan.md).
 7. Add an external fuzzy scientific release audit over immutable, versioned
    database snapshots cached on shitbox. This audit is offline and nonblocking;
    it never becomes runtime authority.

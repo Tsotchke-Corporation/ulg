@@ -1,4 +1,19 @@
-# Current status - 2026-09-04 AKDT
+# Current status - 2026-10-24
+
+Start at [plan/handoff-2026-10-24.md](handoff-2026-10-24.md). Branch `main`
+has local campaign commits through the handoff; nothing is pushed, merged or
+built for Pages (the user's publication hold still stands).
+
+- G1, visible cadence on all six presets: failed acceptance on 2026-09-13.
+  The user has delayed it until architecture work makes it feasible. It is not
+  finished, and the 2026-09-04 two-water result below is not G1 completion.
+- G2, conserved steam/aerosol plumes: active at full scope (user, 2026-10-24).
+  3 of 6 child items are done; the next is `activation-energy-exchange`.
+- G3-G7 and A1-A6: not started. Campaign definitions are in
+  [plan/todo/seven-goal-campaign.md](todo/seven-goal-campaign.md).
+- Verified 2026-10-24: 5,151 pass / 75 opt-in skip / 0 fail; build passes.
+
+# Superseded status - 2026-09-04 AKDT
 
 Branch `main`, Goal 2 worktree based on `5686fa8`. The active seven-goal order
 and evidence are maintained in `plan/todo/README.md` and

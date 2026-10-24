@@ -9,6 +9,13 @@ count as done while the visible physics loop or measured cadence is incoherent.
 
 ## Superseding Immediate Goal Order - 2026-09-04 AKDT
 
+**Update 2026-10-24.** Current entry point:
+[plan/handoff-2026-10-24.md](../handoff-2026-10-24.md). Item 1 below (G1) was
+failed by the user on 2026-09-13 and is delayed until architecture work makes
+it feasible. Item 2 (G2) is active at full scope. Delivery order is G2 through
+G7, then the A1-A6 tracks, then G1 reassessment; see
+[seven-goal-campaign.md](seven-goal-campaign.md).
+
 1. Reopened by user clarification: restore visually advancing presentation
    within 10% of 60 Hz, measured against wall-clock time, across ALL configured
    presets, including true isosurfaces. UI rAF, solver steps/s and simulation

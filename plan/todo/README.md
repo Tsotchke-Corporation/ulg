@@ -9,9 +9,13 @@ count as done while the visible physics loop or measured cadence is incoherent.
 
 ## Superseding Immediate Goal Order - 2026-09-04 AKDT
 
-1. Verified: restore visual presentation within 10% of 60 Hz for bulk-water and
-   water-realtime, with actual advancing physics across all six defaults.
-   Simulation real time and higher true-isosurface cadence are follow-ons.
+1. Reopened by user clarification: restore visually advancing presentation
+   within 10% of 60 Hz, measured against wall-clock time, across ALL configured
+   presets, including true isosurfaces. UI rAF, solver steps/s and simulation
+   time are not visible frame cadence. Report committed source updates and
+   interpolation separately. The prior two-water checkpoint is historical,
+   not completion of this full goal. Restore material/refraction/depth fidelity
+   with the renderer work; faster but degraded materials do not close it.
 2. In progress: complete conserved phase/transport optics and a shared
    participating-volume display for physically derived visible steam and
    aerosol smoke. Final long-horizon plume evidence remains open.
@@ -29,9 +33,182 @@ count as done while the visible physics loop or measured cadence is incoherent.
    database snapshots cached on shitbox. This audit is offline and nonblocking;
    it never becomes runtime authority.
 
-Current verification: the 2026-09-04 desktop sweep passed all six defaults and
-all twelve images were inspected after the optical ownership fix. Bulk-water
-measured 56.704 Hz and water-realtime 56.874 Hz. See
+Latest checkpoint,2026-09-05: the shared autonomous/canonical wait experiment
+is rejected and removed. It safely shared one image but delayed that image
+behind later physics; the original two waits could produce two advancing images.
+Desktop observed crop changes fell to31.335/s; exact pre-experiment source/tests
+were restored and rechecked at53.715/s. This is recovery, not a new performance
+gain or full Goal1 acceptance. Both all-six matrices remain0/6; all28images
+reviewed. Next locate actual empty draw intervals/avoidable GPU dependencies,
+not another same-image wait merger or speculative submission/proof redesign.
+Full seven-goal order stays unchanged. Evidence and test scope distinctions:
+`plan/implementation-status.md`, `/tmp/ulg-goal1-shared-wait-qESi4S/`.
+
+User-approved Goal 1 reset: short reproducible desktop baseline, shared
+true-isosurface motion between source publications, restore existing optics,
+then all-six desktop acceptance. Keep the other six goals and paused mechanics
+work; do not expand measurement infrastructure or make all-preset real-time
+physics speed a prerequisite for presentation throughput. The worker now uses
+the existing native refraction/PBR path with retained mesh motion, same-submit
+GPU temperature samples and nonblocking scenery. Photographic sodium desktop
+checks now show background refraction, metallic reflections and camera motion;
+stale control-preview labels retire across all six defaults. Full Goal1
+acceptance remains open. Cold H2 attenuation-distance Float32 overflow is corrected without
+relaxing admission. The user confirms faint clouds in sodium/water only, possibly smoke;
+do not label them verified steam or infer parcel provenance from appearance.
+Iron/ice remains an explicit plume acceptance case.
+
+The first motion subslice now retains GPU velocity moments from the existing
+render-field pass and deforms the true mesh/normals between source updates.
+No sphere substitution, per-preset branches or authoritative motion changes.
+Desktop sodium fixed-crop recordings improve from 3 changes in 10.088 s to 372
+in 10.091 s (36.86 observed changes/s); longest sampled hold falls from about
+3.01 s to 0.208 s. This is improvement, not a 54 Hz pass or complete scanout
+measurement. Native deformation and field A/B checks pass; the subsequent
+native-optics checkpoint restores refraction rather than the blue/plastic shader.
+Camera redraws now survive source capture/build
+and replacements retain the latest camera. The new isosurface queue seam is
+Tier0-only: default sodium chemistry/thermal/contact settings exclude it. Do not
+credit that change with canonical-route throughput. Native optics and preview
+retirement now have desktop evidence. Canonical between-step opportunities are
+implemented: final sodium recording29.85observed pixel changes/s versus17.41
+before, longest sampled hold0.540s versus1.894s. This is progress, not54Hz or
+complete scanout proof. GPU frame-completion samples now3–14.1ms; remaining
+warm holds align with exhausting the bounded motion horizon before source
+handoff. Next address handoff/pacing and first-source warmup without relaxing
+the motion envelope or expanding physics work. Canonical-checkpoint full regression:
+3605 passed,61 skipped,zero failures; production build passes. Latest canonical
+all-six sweep still0/6 strict acceptance: five advancing pairs, Cs rejects, and
+no full visible-pixel cadence proof. Its stale refraction pass-order validator
+needs a separately guard-approved update; original fail evidence is preserved.
+
+Previous checkpoint: autonomous motion age is now recomputed on the render lane;
+redundant ordinary draws coalesce without submit/proof/publication, preserving
+camera redraws, loop liveness and finite motion bounds. Sodium PNG recording
+34.71 observed changes/s (prior 30.37) has a 0.315 s maximum gap; 35.55 samples/s
+and 42 timestamp regressions cannot prove 54 Hz. Same-runtime JPEG repeat 36.59/s
+has no timestamp regressions but gaps 1.038 s/0.385 s; format differences are
+NOT another application gain. All-six strict acceptance 0/6: all 11 PNGs reviewed,
+five advancing source pairs but only four clearly moving pairs; water-cycle
+silhouette nearly unchanged, Cs rejects, sodium input hold 1.950 s. The transient
+callback loop-exit bug identified here is now repaired below; its role in the
+old JPEG boundary-only pause remains inferred, not proven.
+First-source timing/reset remain follow-ups; do not enlarge the motion envelope.
+Focused 73 tests and build pass. Full direct Node: 3,676 total, 3,615 passed,
+61 skipped, zero failures, exit 0. Evidence: `plan/implementation-status.md`.
+
+Previous: typed callback-timeout recovery stays on the paced display lane and
+stops at the finite wall horizon. Failed waits publish no proof or displayed
+age; GPU/other failures remain strict. All 22 new cases, 95 focused tests and
+build pass. Desktop sodium repeats show 46.875/49.2266 actual cropped changes/s,
+with 0.303/0.108 s maximum gaps, preserved refraction and camera controls. Still
+not 54 Hz/scanout proof. Full Node exits 0: 3,637 passed, 61 skipped, zero failures.
+All-six remains 0/6: cold sodium pause, Cs rejection and water page-load failure.
+The unchanged-code water retry loads; both images inspected, source advances
+with little silhouette change and no cadence pass. Next cold-start motion needs
+a same-authority seed clock, not guessed realtime pacing.
+
+Previous: authenticated seed timing now starts bounded motion on the FIRST
+committed mesh. Desktop source63 moves before127; invalid timing stays static,
+and bootstrap latency never pads real-frame history. 49 new tests; focused144,
+full3686 passed/61 skipped/0 failed and build pass. Warm sodium recording
+52.693 observed crop changes/s is still not54Hz acceptance: committed source383
+misses its presentation callback, leaving319 until447 recovers; warm camera
+orbit remains unverified. Next inspect bounded committed-replacement timeout
+recovery, not more horizon padding. Cold GPU-completion delays up to1.27s
+have separate, unattributed producer cost. All-six remains0/6, all11PNGs
+reviewed: five advancing sources, Cs same physics rejection despite bounded
+motion of its first frame. No physics expansion/commit/push/Pages. Detailed
+artifacts and launch failures: `plan/implementation-status.md`.
+
+Previous: committed replacements now have one exact typed callback-timeout retry,
+with a shared resize budget and strict lifecycle/admission guards.21new tests;
+focused165,full3707passed/61skipped/0failed,build pass. Desktop sodium49.2373
+observed crop changes/s is not an improvement over prior52.693 or54Hz proof.
+Camera orbit, refraction and true mesh are visually verified; retry execution
+is not established by the successful trace. All-six strict0/6, all11PNGs
+inspected: five advancing sources, four visibly moving pairs, Cs still rejected.
+Source255 slow intervals occur below its motion cap with GPU waits up to49.9ms.
+Next inspect actual shared render-lane work/serialization, not more horizon
+padding or speculative retries. All seven goals remain open. Details and
+SHA-bound desktop reviews: `plan/implementation-status.md`.
+
+Previous: warm submit→fence registration no longer yields to later physics;
+the real held-submit wrapper proves the ordering correction. Eight new tests,
+focused173/build pass; full3715passed/61skipped/0failed exits0. Actual desktop cadence is worse at31.9666 observed
+crop changes/s: source191 passes physics admission but fails presentation,
+with a2.37s held-image interval before255 recovery. A separate389ms hold reaches
+source319's motion horizon. This is not a throughput win or54Hz acceptance.
+All-six remains0/6; all11PNGs inspected, five advancing sources, Cs unchanged.
+Next trace the missed callback using native Chrome diagnostics and the existing
+desktop recorder, not another speculative retry/horizon change. Full seven-goal
+scope remains active; evidence in `plan/implementation-status.md`.
+
+Previous: the shared lazy P2G/grid/G2P import cache removes repeated module work
+without changing kernels or authority.12new tests/full3727passed61skipped0failed
+and build pass. Native marked trace identifies one GC-associated recording
+callback stall and seven still-screenshot timeouts. Unprofiled sodium48.5996
+observed crop changes/s is NOT a proven throughput gain or54Hz acceptance.
+All-six remains0/6; all11PNGs inspected, five advancing sources, Cs unchanged.
+Next investigate post-GPU/compositor opportunity scheduling: existing native
+events show added delay both before and after rAF registration, not just GC.
+Do not blindly tune allocation, add retries, pad motion bounds, or expand
+paused mechanics. All seven goals active;
+details and preserved failed trace attempts in `plan/implementation-status.md`.
+
+Previous: shared early-armed browser callbacks retain strict post-GPU observation,
+lifecycle checks and the two-attempt resize budget.193 focused tests and build
+pass; full3,764 passed/61 skipped/zero failed. Desktop sodium repeats51.62 and
+47.61 observed crop changes/s do NOT establish a repeatable rate gain or54Hz.
+All-six remains0/6, with20 total PNGs reviewed across the sweep, two photographic
+runs and one marked native diagnostic. Refraction/mesh motion/orbit remain;
+water-cycle moves little, Cs still rejects and iron/ice plume is unverified.
+The stale optical checker edit was NOT made: its ICC preflight hit the existing
+large-deletion guard. Native trace shows doubled callbacks despite requests
+already registered within2ms; a separate163ms GC pause is only one outlier.
+Next distinguish browser delivery from worker starvation, not more JS early-arm
+or retry/horizon tuning. All seven goals stay
+open; no physics expansion/commit/push/Pages. Exact evidence and limitations:
+`plan/implementation-status.md`.
+
+Latest: native compositor evidence separates expired worker frame deadlines
+from a312ms gap caused by spending the motion interval before physics finishes.
+Pending-source iteration timing now slows only unspent display motion, with
+deferred exact-source binding and finite stopping; no acceleration, bound
+extension, intermediate-state rendering or authority change. Focused221 tests
+and65 related tests pass; full3803pass/61skip/zero failed and build pass. Desktop
+shows actual retiming but50.17 observed cropped changes/s, not a54Hz pass or
+aggregate gain. All-six strict0/6; water retry loads, Cs same rejection, all14
+newPNGs inspected. Next exact-prefix-safe autonomous/canonical wait coalescing
+investigation, not more pacing padding or blanket busy-boundary skipping.
+No seven-goal completion or commit/push/Pages. Details: `plan/implementation-status.md`.
+
+Counter audit: completed batched steps were mislabeled `fps`; UI rAF is only
+callbacks. Even a completed temporal draw with a new motion serial can have
+unchanged pixels when velocity is zero or displacement has saturated. Treat
+admitted render-input transition rates as diagnostics, not verified animation
+FPS. Require actual motion-change evidence before accepting the 54 Hz goal.
+True-isosurface topology still rebuilds per terminal schedule; sodium/water
+schedules contain 64 steps. Bounded display-only mesh deformation now fills
+part of the gap. The bridge and shared observer now preserve temporal fields
+and report source and display-only input cadence separately, without claiming pixel
+proof. The source-local field optimization must
+preserve dispersed-medium and successor/product lineage before replacing the
+current dense worker producer.
+
+Current mechanics checkpoint: five native tests pass, including nine actual
+S9/pressure/G2P tail fixtures; full regression is 3,509 passed/59 skipped and
+build passes. A 327.68 m/s nodal tail can coexist with near-zero COM and positive
+raw J; a deliberately unsafe zero-COM affine case still exposes negative raw J
+despite positive capped J. Next mechanics evidence must gather actual rejected
+Cs contributors, not infer safety from that manufactured test. Cs macro 26 is
+still unresolved. The historical 4/6 sweep and isolated water repeat remain
+evidence, not current acceptance. The new all-six motion sweep shows five
+advancing pairs and Cs stopping after its first frame. All eleven PNGs inspected.
+Bulk-water/dam-break render-input rates are 111.49/113.40 states/s; these do not
+prove pixel cadence. Strict all-preset acceptance is 0/6, with missing motion
+evidence on all six and a physics rejection on Cs. Do not commit this combined
+slice yet. See
 `plan/implementation-status.md` for evidence and
 the remaining Goal 2 acceptance work. The full transport/property and steam
 microphysics plans remain active where their requirements exceed this slice.

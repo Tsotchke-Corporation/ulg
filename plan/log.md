@@ -15,6 +15,1297 @@ Validation: checked the new plan's local references and its four routing/status
 links (14 targets, no missing files), reviewed the staged documentation diff, and
 ran `git diff --check`. Runtime tests are not applicable to this planning change.
 
+## 2026-09-14 UTC — stationary interface-rate reference for G2
+
+Added the explicit half-Maxwellian mass/energy rate reference after the verified
+current-gas source bridge. Multiple actual vapor temperatures share one emitted
+surface flux; every declared inert temperature supplies its own accommodation
+heat. Phase offsets, effusive energy and fixed-N surface internal energy remain
+distinct. Mechanical stress and the aggregate incident-pressure domain are not
+interchanged. No atmosphere, N/radius, cloud alpha or material-specific kernel
+is invented; no finite interval, moving-boundary work or live plume is claimed.
+
+Independent review found premature-product underflow, including nonzero heat
+at zero mass; scaled binary products and explicit unrepresentable-rate refusal
+address it. Independent91 tests and28 related reference tests pass. Retain the
+initial test-fixture failure: decimal coefficients made nominal zero surface
+tension tiny-positive; exact binary coefficients corrected that fixture without
+relaxing strict positivity. Final full suite5,059 PASS/75 SKIP/0 FAIL; normal
+build PASS. Fresh desktop cesium shows15 committed sources15→239 over45.574
+wall seconds; all three original PNGs inspected after owned-browser close.
+No preview-only scene or browser/schedule error. All647 source hashes match;
+no identified plume, material/refraction, all-six or54Hz claim.
+[Verification](/home/cos/.cache/icc/repos/ulg/g2-interface-rates-20260914-5PlfaD/verification.md).
+
+G2 still needs finite-time coupled transport/heat, shared-donor allocation,
+complete numerical inventory, matched adoption and actual transported preset
+lineage. Existing f32 writer gates are unchanged. G1 stays failed/deferred;
+no stage, commit, push, merge, Pages build or terminal-pane browser.
+
+## 2026-09-14 UTC — G2 conservative vapor/aerosol candidate and desktop checks
+
+Implemented the paired-EOS conservative transfer consumer, GPU owner and three
+shared shader stages, preserving actual physical population, residual-only gas
+history and separate surface internal energy. This is prescribed-transfer
+candidate work, not kinetics, live interval/publication or preset enrollment.
+ICC disjoint leases and original fixed baselines bound each edit owner.
+
+Native-v1/v2 fixture failures are retained. Native-v3 found actual false READY
+for1e-25 mass transfer with unchanged stored masses; separate finalization now
+validates stored words, exact bounded debit/credit and stored U/P/surface budgets.
+Both mass endpoints have an explicit factor2 representability domain. No tolerance
+relaxation or automatic timestep/rate clipping. Native-v4 passes15 cases; independent
+review agrees within that bounded scope. Full-v1 exits0:4,936 PASS/74 SKIP/0 FAIL,
+180.461s. Build exits0 in1.91s. Three prior native regression commands also pass.
+
+Source manifest640 SHA19c3a38cc70390aa3a9c01ef682ef81017f0951e9917790ffd22ad63ab9f3b38.
+Fresh desktop cesium/iron-ice/sodium-water checks pass15/18/8 committed sources
+over45.542/45.537/45.112 wall seconds. Root inspected all nine originals after
+owned Chrome closed; no preview-only output or browser/schedule error. Every
+source check passes. Material/refraction, identified transported plumes, all-six
+and54Hz are not accepted. No user browser, terminal layout or publication changed.
+G1 remains failed/deferred, G2 active; next is coupled finite-time growth/heat and
+matched-stage publication, then transported/deposited inventory.
+[Evidence](/home/cos/.cache/icc/repos/ulg/g2-vapor-aerosol-exchange-20260914-n6amVx/implementation-review.md).
+
+## 2026-09-13 AKDT — bounded root restart restores cesium usability; move to G2
+
+The fixed-eight-first failure below is preserved. The replacement keeps the
+four-child attempt and permits one eight-child restart only after authentic
+whole-attempt retirement and unchanged-root checks. Fresh children restart from
+the original state, not a failed prefix. Group capacity is eight, valid winning
+counts are 1/4/8, and all attempted work remains accounted. Thermal/reaction
+publication stays outside the retry loop; physical gates and inner r2 clocks
+are unchanged. Independent source review found no actionable defect.
+
+New genuine restart tests cover failure at every four-child position, exact
+root lineage, forged/repeated refinement, nonphysical failures and device loss
+at every refined child. Intermediate tests 5472: 105 PASS / 5 FAIL due to new
+fixture assertions distinguishing absent optional fields from null; correcting
+those assertions does not alter physical acceptance. Focused 65595 exits 0:
+593 PASS / 0 FAIL / 0 SKIP. Full 8878 exits 0: 4,335 PASS / 62 opt-in SKIP /
+0 FAIL, 177.563 s. Build 53112 exits 0 in 1.46 s; existing chunk/dynamic-import
+warnings remain. Fixed-baseline guards pass for runtime/tests, grid tests,
+three evidence documents and campaign metadata; broader historical guards
+are not waived. Independent review agrees with all three original images and
+notes faceted edges and low shading detail, not validated material fidelity.
+
+Actual desktop 84679 exits 0 after 75.954 seconds: committed sources 15 through
+255, 16 schedules, 45.227 wall-clock seconds after the first source. Source
+manifest `15658abd3f6dd64caa546c4255d38a26086118a81f876725c1057dc927069a74`
+matches all 574 paths before and after; no browser or schedule errors, owned
+browser closed. Root reviewed first-committed, advancing and last-committed PNGs:
+changing orange upper and spreading white/cream lower geometry, no control-only
+preview or stopped-physics banner. Colors do not identify chemical species.
+Probe SHA `77f2b6660e25df07a1868e0e4993b1c7fe7ab393a5c8412facc3630c0d03e73d`.
+Artifacts: `/home/cos/.cache/icc/repos/ulg/cesium-usability-20260913-O5rEHT/desktop-v5`.
+
+The user-requested HTTPS and basic-cesium prerequisites pass; G2 is active.
+Begin with diagnostic-only species saturation on SS gas cells, then conserved
+aerosol population/transport. G1 remains failed/deferred, its unchanged oracle
+now ordered after architecture reassessment. No claim of long-horizon stability,
+54 Hz, scientific material fidelity or any completed campaign milestone.
+Publication holds remain unchanged.
+
+## 2026-09-13 AKDT — user defers failed G1; HTTPS and cesium usability check
+
+User reprioritization: mark G1 failed acceptance, preserve gains and revisit
+after architectural follow-ons. G2 next, conditional on requested HTTPS Vite
+and functioning-cesium real-desktop check. ICC campaign G1 marked skipped with
+explicit failed acceptance gate; generic skipped-as-closed counts are not goal
+delivery. G2 and A1 no longer depend on G1 acceptance. No publication hold lifted.
+
+Service hostname corrected outside repo; active HTTPS fastbox.tail5c077c.ts.net
+port5173 returns200 over100.68.165.52 with certificate verification0. Failed
+diagnostic starts (stale HMR hostname, then no Play progression) preserved.
+Startup-aware original input capture succeeds; complete repeat also captures
+256-byte producer count record for retained4MiB product events: live rows0.
+Fresh baseline99794 reproduces exact tick34 original CFL witness; native eight
+refinement passes all eight unchanged full physical headers, exact predecessor
+borrows,39 endpoint/classifier hashes and owned cleanup. Independent review
+confirms that scope only, not production publication or later stability.
+
+Fixed8 candidate coordinates producer/group target/hierarchy/worker protocol
+and exact dyadic duration coverage; inner r2 clocks and physical gates unchanged.
+Red regression2FAIL, intermediate107PASS/2FAIL (new clock-case expectation,
+not production failure), corrected focused59297:581PASS/0FAIL. The added tick34
+clock case shows private and outer addition may coincide; earlier differing
+cases remain required. Frozen v4-eight manifest6ee6d6a3… retains574 paths.
+
+Real desktop95682 exits1 after98.244s. Source15 presents an actual isosurface;
+then private child5 rejects and physics stops. Root viewed both original PNGs.
+Source-before/after checks PASS, page/console errors empty, owned browser closed.
+This defeats the fixed8-only usability proposal despite its bounded native
+success. No claim of functioning cesium or throughput acceptance.
+Artifacts: `/home/cos/.cache/icc/repos/ulg/cesium-usability-20260913-O5rEHT` and
+`task72-production-interval-20260910-vHr98p/tick34-replay-20260913-VFjY2o`.
+Older v3 decoder24997 is terminal0 (not still running); five rates are recorded
+in the current campaign/status checkpoint. Original failures stay preserved.
+
+## 2026-09-09 AKDT — production interval v3: recovery progress and exact later failure
+
+PROGRESS: clock regression RED→GREEN; private rejected-child diagnostics now
+preserve original/failed raw136-word GPU evidence through the existing worker
+error path. No new readback, numerical tolerance, dt or retry policy. Original
+fixed ICC baselines retained. Frozen574-path manifest6a4f8ec4…; focused17920
+566PASS, full270634,308PASS/62opt-inSKIP/0FAIL184.558s, build43095.70s,
+ordinary headed native10309 r1–r4PASS22.541s. Existing build warnings retained.
+
+Live87954(v2)/85265(v3) fail after real source15→31 progress. Completed schedule2
+admits22 child headers for16 outward steps (two four-child recoveries under the
+authenticated1/4 contract). Schedule3step3child4 rejects: raw C7c704029b,
+fine field667, prior1,006.411m/s above635.239m/s limit at macrodt.000125.
+Original failed interval: C7c7040051 field81,296.217m/s above158.810m/s,
+dt.0005, source step/tick34 at.01700000000000001. These are one claimed
+rejected row per macro, not a global maximum. Zero optional correction ceiling
+means disabled cap, not zero allowed correction; zero phase/full deltas cannot
+bring an already out-of-band prior into the admissible interval. Header words
+125–135 are failure operands, not successful energy/ambient summary aliases.
+Full failure cleanup and owned-browser closure pass; no Cs cadence window.
+
+Root viewed all ten original stills from the other five configured desktop
+captures68704 (terminal0), plus the Cs failure still. Same574 source hashes
+before/after each; decoder24997 is offline/in progress. Independent v2/v3
+failure reviews are retained in external task72-production-interval-20260910-vHr98p.
+Next exact-input capture/replay is preparation only; no cap16/64 or adaptive
+implementation chosen. Preserve all failures, seven goals and publication hold.
+
+## 2026-09-09 AKDT — production interval v1 tested; live step5 seal failure retained
+
+After the status-only NO PROGRESS turn, shared production integration advances:
+the genuine hierarchy one/four-child tests pass209, fused tests pass186, worker
+tests pass167. A live-input review found that fresh worker rematerialization
+omitted step/time/slot. The producer now preserves matching supplied packed
+clocks, initializes its genuinely new local slot0, and rejects retained-clock
+relabeling; private/adopted successors are untouched. Root combined23944 is
+562 PASS/0 FAIL; build19559 passes2.17s. Source freeze574 SHA
+`b594bdc6d121ff570b7ffc3deecd33dc3cf4901f196508d71e6ecf19304358a4`.
+
+Real-desktop configured Cs smoke54766 exits1. Schedule1 completes four original
+macros with admitted raw terminal headers, then step5 fails the new interval
+seal; no live recovery or visible cadence is accepted. Owned Chrome closes,
+all574 pre/post source checks pass, and the original failure is preserved under
+`task72-production-interval-20260910-vHr98p/live-cesium-v1-ACggP3`.
+The private producer accumulates two fine dt additions, unlike the sealer's one
+macro addition: at .002 the results are .0025000000000000005 and .0025.
+Next is a genuine-producer RED/GREEN regression and exact arithmetic alignment,
+not tolerance relaxation, private-clock stamping or another diagnostic dt sweep.
+ICC attempt `production-interval-v1-live-seal-20260910` records FAILED; all goals
+and prior failed gates remain open. No publication operation has occurred.
+
+## 2026-09-09 AKDT — gas lifecycle native proof complete; shared interval integration starts
+
+The repaired gas-enabled native chain (66964, exit 0) advances four complete
+private r2 macros over the original captured interval using exact predecessor
+buffers; all physical gates and reverse cleanup pass. Original-dt baseline7357
+reproduces the original rejection. Raw four-header decoding and all nineteen
+payload hashes match; 259 positive-mass particles move per child and all 1248
+mass words stay unchanged. These are diagnostic runs, not automatic live retry.
+Full repeat12761: 4,197 PASS / 62 SKIP / 0 FAIL; build83079 and ordinary native
+r1–r4 run10187 pass. The original full-suite failure and intermediate fixture
+failure remain preserved; fixture alignment did not weaken production guards.
+
+Desktop loop7626 and decoder77204 both exit 0. Root viewed all twelve originals.
+Full-window scene changes/s: water49.1123, iron50.5580, sodium54.2251,
+Cs1.9670 with terminal stop, bulk55.5448, dam56.1056. Source-before/after checks
+pass; owned desktop browsers close. Fixed scene crop excludes HUD and camera
+changes; incomplete sampling and the full Cs hold remain in the measurements.
+Evidence: `/home/cos/.cache/icc/repos/ulg/task72-private-gas-lifecycle-20260910-3eQ5EO`;
+frozen574 manifestSHA `9e95894e400a852819139ef0cefa8663a437c5b41a57b150bd55719f7e2ad96f`.
+
+Independent reviewer also viewed all twelve originals. Explicit-config G1
+oracle71020 exits 0 with 4 PASS / 5 FAIL, bound to this pre-integration source
+only. The first oracle invocation refused the uncommitted default config;
+that exit-1 artifact is preserved and the corrected command deliberately names
+the existing policy with --oracle-file. No criterion was changed or suppressed.
+
+After the status-only NO PROGRESS turn, the next safe action is shared production
+integration, not another diagnostic timestep sweep. ICC full refresh57176 and
+Git rebuild67160 exit 0, drift0. Four scoped preflights and fixed pre-edit
+baselines pass; disjoint docs/header/hierarchy/worker leases publish successfully.
+Items72a–72c cover private header admission, retained-original same-W1 recovery
+and every-child grouped receipts. New edits are not covered by prior runtime
+proof. All G1–G7/A1–A6 and the publication hold remain open.
+
+## 2026-09-09 AKDT — exact-output native chain exposes gas-source lifecycle gap
+
+Previous status-only turn was NO PROGRESS. This continuation produces new native
+evidence: current-ownership original-dt baseline 51412 exits 0 in 25.581 s and
+exactly reproduces field 973/tag 3338929101 plus all eleven captured witness words.
+Its SHA256 is 0cb008f781ff9784025f6ca12d034d05f9936ed080fb8f246765faa0357f3263.
+Current-source exact-output chain 52881 exits 1 in 26.381 s; probe SHA256
+8455896998bca3d278b0105f10aac5f7f20d33e92536bc961839cd4fb1fae475.
+Both reports live under task72-private-borrow-20260910-1nOH5q in the external ICC
+artifact root. Both bind all 574 frozen source files and fourteen served modules.
+
+The first dt/4 r2 child passes unchanged physical gates. The second genuinely
+classifies its exact predecessor buffers and executes two P2G calls, then the
+real gas EOS producer refuses the missing retained-borrow lifecycle. The current
+producer freezes its final descriptor after cloning away non-enumerable lifecycle
+tracking. No grid update or numerical acceptance for child 2. All authentic
+reverse-order private cleanup, root owner destruction, device destruction and
+owned browser closure succeed; no validation/uncaptured/device-loss errors.
+The failed run is preserved; no cloned or relabelled successor will replace it.
+Next: producer-side lifecycle installation before freeze, with real consumer
+regression and lower-owner lifetime review, then repeat the exact native check.
+
+The six desktop captures 97223 and decoder 46000 are terminal exit 0. Current
+full-wall observed scene changes/s are water 51.1133, iron/ice 50.1212, sodium
+54.0199, Cs 2.4433 then stop, bulk 55.3162, dam 59.5968. Root personally reviewed
+all twelve stills. Every source-before/after check passes and owned browsers
+closed. No current five-preset 54/s claim: water/iron observations are below it.
+These are bounded sampled pixels, not scanout, sustained cadence or fresh solver
+states per frame. Prior v6 rates and sodium controls remain historical evidence.
+All seven goals/six follow-ons and publication holds remain open.
+
+## 2026-09-09 AKDT — private-source ownership frozen; native ordinary path passes
+
+Previous user-requested status turn was NO PROGRESS. This continuation checked
+live source/ICC, reviewed the exact four-path pre-edit-baseline diff and all
+candidate hashes, and ran the existing real-desktop native fused r=1..4 test.
+Handle 15943 exited 0: one test/four ratios PASS in 21.825 s, all per-ratio live
+generation cleanup counts zero. All 574 candidate-source hashes match after the
+run; its owned browser closed. No human browser/server was changed. This is a
+default-path regression, not a new private-chain numerical or throughput result.
+
+The implementation adds exact private-source borrowing, direct lower-owner
+destruction guards, internal queue-fence retirement and failed-successor/loss
+cleanup. Agent's genuine producer tests: 125 PASS/0 FAIL/0 SKIP (37377), two RED
+stages retained, independent review and fixed four-path guard PASS. Root read the
+entire fixed-baseline diff; old broad guard failures remain. Evidence root:
+`/home/cos/.cache/icc/repos/ulg/task72-private-borrow-20260910-1nOH5q`.
+Source manifest SHA256 `51e7b66c1f28786b05393b1b97ec7c5d5e35d4cf272deef3d1c54990ca78dd71`.
+
+ICC full reindex 83350 and Git-history rebuild 73646 both exited 0 before GPU
+work; subsequent content-based drift was zero and derived stores fresh. These
+new doc entries require the next refresh. Full tests 34648 exited 0: 4,193 PASS /
+62 opt-in SKIP / 0 FAIL in 177.296 s. Build 12111 exited 0 in 2.49 s, retaining
+existing import/chunk warnings. Serial six-preset desktop loop 97223 is running;
+no visual pass is inferred before capture and actual image review. External
+current-source baseline/private-chain helpers are preparation only.
+Root docs and helper leases have distinct plan items and
+scopes; the external coordination label does not claim filesystem enforcement.
+
+Read-only item64 review narrows original-source retention to the same awaited
+hierarchy call: W1 retains its prior resident/source owner until the call ends,
+and hierarchy failed-candidate cleanup excludes the original four buffers.
+Fresh classifier/generation/transaction after confirmed cleanup is still needed.
+Do not broaden this into upload-owner redesign or release the outer owner early.
+Full-interval admission, motion/time authority, one public adoption, actual Cs
+continuation and all-six visuals remain open. No campaign goal or release hold
+is cleared; new ownership source is not covered by historical v6 desktop proof.
+
+## 2026-09-09 AKDT — supported r4 rejected; begin zero-copy private-successor ownership
+
+After memory-pressure avg10/60 returned to zero (about 2.4 GiB available RAM),
+root ran exactly one reviewed progress-only repeat. Helper de-instrumentation
+restores the prior numerical core and driver byte-for-byte: 22 synchronous
+console markers, one report/stdout listener, no new awaits/fences or changed
+settings/gates/deadline. No other owned GPU, test, build or index workload ran.
+
+Native handle 5695 is terminal exit 1 in 26.608 s, no watchdog. All 9 P2G/5 grid/
+5 G2P functions return; compact read then proves actual fine-validator rejection.
+Raw 136-word header is structurally valid and fail-closed: one fine commit and
+receipt out of four, no coarse receipt, one captured operation out of five,
+four rollbacks and twelve skipped receipts. Tag 3338929620 identifies field 1492;
+all eleven payload words exactly match `refinement-run-v1`. Prior velocity is
+[0.9232682586, 710.4749755859, 4.6838898659] m/s, speed 710.49101485 versus
+317.6194152832 allowed. The failed-trace tail repurposes header fields; its
+operator-split/ambient aliases are NOT independent work/impulse measurements.
+
+Probe `single-r4-progress-current-v6-run-20260909/probe.json` SHA256
+`6fe65d5002e636ed8e27958a61eb3493b604604c9f0becf173f37bf16b58c7cf`;
+raw-header SHA256 `04e2cbd5a7613243782b538d7b2e8a358a7890527bc6a4b2bb414df175571354`.
+Root and peer verify all fourteen served bodies/URLs, original inputs, exact
+baseline/material binding, dt witnesses and 574 source files. No endpoint was
+copied or public epoch produced. No GPU validation/loss errors; normal private
+retirement, owned device destruction and owned browser closure are confirmed.
+The original timeout is retained; this repeat does not establish its cause.
+
+Existing r4 is now ruled out for this captured state. The accepted four smaller
+r2 macros remain the recovery direction; no further ratio/timestep sweep is
+needed. Begin the existing-owner private-successor borrow implementation with
+same-device/family/replay and deferred cleanup regressions. Direct lower G2P
+retirement must honor the same borrow; unsafe owned-thermo aliases must fail
+closed. Default one-macro behavior and numerical gates remain unchanged.
+Original-source retry authority, full interval receipts/time/motion authority,
+exactly-once publication and real Cs continuation remain unfinished. No goal or
+publication hold is cleared. Last verified runtime/test baseline remains v6.
+
+## 2026-09-09 AKDT — one r4 native trial times out; preserve numerical uncertainty
+
+The preceding user-requested status turn was NO PROGRESS. Resumption revalidated
+ICC/current v6 and independently reviewed a smaller existing-supported option:
+one dt=0.0005 macro, fineSubstepCount=4, expected native invocations 9/5/5 and
+five private operations. This is not equivalent to the proven four dt/4 r2
+macros. The external helper retains original material/CFL/admission gates and
+the fresh baseline `f4054b1e…`; no runtime/test source was edited.
+
+Handle 99736 is terminal exit 1. Its 110-second browser watchdog fired; total
+elapsed including closure was 150.132 s. All fourteen route audits pass and all
+574 source hashes match before/after. No native payload/terminal header returned,
+so there is no physical acceptance/rejection or normal-private-retirement proof.
+Owned browser closure is confirmed. Probe SHA256:
+`77a5923f1d5bda74326646de4c28bf72128bbaa57ea99148624083f5ac238ba5`.
+Original helpers and failed artifacts are preserved under external
+`goal1-actual-cs-premacro-20260907-2A1ScR`.
+
+Read-only post-run checks found about 1.6 GiB available RAM, full 511 MiB swap,
+an existing human Chrome renderer near 9 GiB RSS, and GPU utilization 1%.
+Memory pressure is a possible contributor, not a diagnosed cause. Human Chrome
+PID 2520522 and Vite PID 1772777 remain live; user was asked asynchronously to
+close any ULG tabs. No further native run is authorized until resource review.
+
+Source reviews narrow production recovery: original immutable input buffers
+survive normal candidate cleanup, but the original mutable generation retires
+and must be rebuilt. A genuine pending closure can retain its exact GPU output
+through a successor's last use; public completion receipts cannot be fabricated
+for private children. Root thermo/identity ownership and every child's numerical
+admission need full-interval coverage. Public adaptive-dt retry is not currently
+implemented, and changing initialization dt also changes derived stiffness.
+Next is minimal external progress capture for the unresolved trial, plus the
+existing shared-continuation work. All delivery goals/oracle failures/holds remain.
+
+## 2026-09-09 AKDT — current Cs numerical interval accepted without changing laws
+
+The preceding status-only turn was NO PROGRESS. This continuation closes the
+v6 exact-target oracle (22232 terminal 0, target matched, nine receipts,
+5 PASS / 4 FAIL, no truncation/warnings), saves its attempt/handoff, and completes
+new native evidence. No runtime/test source was edited.
+
+Existing single-particle pressure-tail native test 41467 passes all nine cases
+in 107.05 s with headed system Chrome. Expected tail-node speed growth coexists
+with bounded complete G2P motion; the deliberate raw fold remains visible.
+This is current GPU evidence, not a replacement for coupled admission.
+
+Versioned external helpers retain the original replay/refinement artifacts.
+Current source/module/body pins are explicit; the new original-dt replay 25889
+reproduces field 973/tag 3338929101 and all eleven raw witness words exactly in
+25.934 s. Its probe SHA256 is
+`f4054b1ec4ed52080a9dc1c24f1d74e60aceffa4e05e69cdc7c7d15eb13e6c69`.
+The independently reviewed four-segment trial 34463 then accepts four full r2
+macros of 0.000125 s in 26.990 s, covering 0.0125 to 0.0130 s with zero clock
+addition difference. Probe SHA256:
+`1d95a28c4fa181fe3f6c1e22789d720adbed2a97d2febdb173e121b1c5a05453`.
+Root re-decodes all four raw 136-word terminal headers exactly and verifies
+nineteen endpoint/classifier binary payload hashes and fourteen served bodies.
+Each endpoint retains all six safety statuses, zero rejects/rollback, native
+5/3/3 runner invocations, fixed material records/upload, exact copy fencing,
+fresh diagnostic ownership and normal retirement. Fine CFL maxima are
+0.6492910, 0.5631447, 0.0127927, 0.0127743. No GPU validation/loss errors;
+owned browsers close and 574 pre/post v6 source checks pass.
+
+This demonstrates one actual captured coupled interval can complete by refinement;
+it is not production retry/publication, full outer schedule or a new visual run.
+Original GPU material-byte equality remains unproved. Next existing task 72:
+shared private continuation retaining original outer authority until every child
+is admitted, followed by live Cs desktop verification. All seven immediate and
+six follow-on goals remain open; no commit/push/main/Pages or historical guard
+waiver. See external `goal1-actual-cs-premacro-20260907-2A1ScR` and the v6 oracle
+closeout in `goal1-appearance-controls-20260907-Etxu3E`.
+
+## 2026-09-09 AKDT — v6 shared cache ownership fixes the observed empty Reset
+
+The corrected external v2 GPU-boundary diagnostic completed its captures but
+failed GPU validity: 32 retained plus 544 dropped validation errors name destroyed
+thermal/contact cache buffers. HOST, A and B are byte-identical across four
+particle families (257,792 bytes total); C state/thermo/mechanics are zero while identity
+survives. All checkpoint payloads remain `unverified` in the presence of those
+errors. Fence completion is not proof that invalid commands executed. Both this
+run and the earlier helper-scope failure are preserved, not rewritten as passes.
+
+Implemented exact-device allocation inventories in the private thermal and
+mechanical caches, then composed them with the existing spatial-cache inventory
+before any worker lane retirement. Both the resident destructor and final raw
+walk protect those exact buffer identities. Genuine mechanical and thermal
+producer/cache worker regressions reproduce premature destruction before the
+integration and pass afterward; ordinary lane inputs still retire. Missing owner
+information blocks cleanup before any destruction and permits a safe retry once
+restored. No WGSL, law, material, timestep, conservation or scenario changes.
+
+Verification executed: combined focused 79079 terminal 0, 211 PASS; full suite
+19536 terminal 0, 4,188 PASS / 62 SKIP / 0 FAIL (170.904 s); build 22652 terminal 0.
+The fixed six-path baseline guard passes with 11 raw / 9 policy deletions.
+Historical broad guard failures remain. Runtime source v6 freezes all 574 paths
+under SHA256 `8b46407107e74ea0ef91ef9d4dc3638af77ed59793f15d7dd4e37b1dd517d20d`.
+
+Original uninstrumented sodium control run 66027 terminal 0 passes 27 UI
+assertions, reports zero page/console errors, captures 15 PNGs and closes its owned
+desktop browser. Root personally inspected Reset, reopen and final Play images:
+Reset → Step now visibly renders refracting water and sodium; reopening preserves
+them and Play changes geometry. Source hashes match before and after. This is
+positive bounded lifecycle/visual evidence, not a new cadence gain or proof of
+native numerical invariants. [Reset evidence](/home/cos/.cache/icc/repos/ulg/goal1-appearance-controls-20260907-Etxu3E/control-sodium-v6-20260909-wtNns0/pause.json).
+The six-preset sweep completed on the same frozen source: root personally viewed
+all twelve original stills. Full-wall decoded scene changes/s are water 72.0781,
+iron/ice 56.8324, sodium/water 82.4891, Cs/F 1.9527, bulk 98.2625, dam 96.6188.
+Five pass the bounded observed-rate convention; no scanout, per-second guarantee
+or causal speedup is claimed. Source publication and display interpolation are
+separate. Timestamp exclusions remain 0/4/4/6/0/11 without trimming wall time.
+Cs still stops; its 9.410825 s equal-crop span and terminal error remain failures.
+All browsers close and all 574 pre/post source checks pass. Offline decoding was
+initially serial, then at most three concurrent CPU-only jobs after every capture
+had ended; no capture overlapped decoding, tests, build or indexing.
+All seven goals/six follow-ons remain open;
+no commit, push, main merge or Pages build. The preceding status-only user turn
+was no progress; this continuation implements and verifies a real shared repair.
+
+## 2026-09-09 AKDT — v5 evidence closeout and first Reset boundary attempt
+
+Resumed the unchanged Sep 7 v5 runtime and independently verified its 574-entry
+manifest. Saved checks: 175 focused PASS; full suite 4,177 PASS / 62 SKIP /
+0 FAIL; build PASS. These were not rerun today, and skips do not establish
+native GPU correctness. The four-file spatial-cache ownership repair remains
+implemented, but uninstrumented sodium Reset is still visibly empty.
+
+Completed the missing all-six evidence review: full-wall sampled changes/s
+51.2971 water, 53.4884 iron/ice, 53.8336 sodium/water, 2.5575 Cs/F, 54.2508 bulk,
+56.1601 dam. Root and the independent reviewer inspected all twelve stills.
+Only bulk/dam satisfy the bounded observed-rate convention; source/display
+cadences, full stopped time and timestamp exclusions remain separate. Water's
+observer ceiling is 52.1748/s, not an upper bound on actual display throughput.
+New nine-receipt review: 2 PASS / 7 FAIL, no changed criteria. Evidence:
+[all-six-v5-summary.md](/home/cos/.cache/icc/repos/ulg/goal1-appearance-controls-20260907-Etxu3E/all-six-v5-summary.md).
+
+Prepared an external, exact-source diagnostic with three bounded GPU snapshots
+(773,376 staging bytes total) and no changed laws, parameters or diagnostic
+queue flush. Twelve offline checks passed. Actual owned desktop run 42867 then
+failed in warmup: catch/finally instrumentation referenced the original try-local
+`record` outside its scope. No Reset or particle snapshots were captured. Its
+failure screenshot shows the control preview and terminal error; root inspected
+it. Browser closure and all 574 pre/post hashes passed. Original artifacts:
+`goal1-appearance-controls-20260907-Etxu3E/control-sodium-reset-boundaries-20260909-eWRgpC`.
+Correct the helper with a lexical/execution regression before rerunning; this is
+not a production regression or a demonstrated Reset fix. All thirteen campaign
+milestones, actual-Cs failure, historical guard failures and publication hold remain.
+
+## 2026-09-07 AKDT - Current v4 checkpoint: oracle blocked; actual-Cs pressure diagnostic
+
+Current combined full suite (47948): 4,166 PASS / 62 SKIP / 0 FAIL; focused
+manual-Step tests: 103 PASS; build 77983 PASS in 1.87 s. The 62 opt-in skips are
+not native GPU passes, and these results supersede only earlier pending checks,
+not the preserved historical failures.
+
+Six owned desktop captures and their pixel decoders ran serially, all terminal,
+with 574 frozen inputs matching before/after. Full-wall observations are water
+524/10.464 s = 50.0765/s; iron 515/10.284 = 50.0778/s; sodium 557/10.305 =
+54.0514/s; Cs 26/10.161 = 2.5588/s; bulk 576/10.272 = 56.0748/s; dam
+575/10.266 = 56.0101/s. Nonmonotonic exclusions remain in the original decoder
+reports. Root personally inspected all twelve PNGs: configured geometry retained,
+Cs held at source 15 with terminal field-973 rejection. Water's sampled
+327.741 ms change-start gap / 312.120 ms equal-crop endpoint span is not a proven
+continuous scanout freeze. No HUD/simulation-time substitution, universal 54 Hz
+or new causal gain claim. [Original summary](/home/cos/.cache/icc/repos/ulg/goal1-appearance-controls-20260907-Etxu3E/all-six-v4-summary.md).
+
+Current sodium control 88693 exits 0 and closes its owned browser. Step/reopen
+produces real meshes and Play advances source 63 to 127. All 15 PNGs were reviewed
+by root and the independent visual reviewer. Reset is nevertheless a visual FAIL:
+all eight vertex counters [0,0], indirect commands [0,1,0,0], guards present at
+request 8 / source 63 / lane 2. The 27 UI assertions and three exact paused
+192-byte reads pass only their declared checks. Photo/plain/photo, lighting,
+camera/resize and holds have bounded positive evidence, not all-six optics or
+physical plume acceptance. [Counter review](/home/cos/.cache/icc/repos/ulg/goal1-appearance-controls-20260907-Etxu3E/control-sodium-counters-gbUUu4/visual-counter-review.md)
+preserves instrumentation and timing limitations; v2/v3 failures remain historical.
+
+Successor diagnostic 4558 exits 0, closes its browser and preserves all 574 input
+hashes. Its actual source-383 control copy is valid before Reset. Reset and
+reopened source 63 instead have no history descriptor, gateRequired=0 and eight
+reconstructed expected zero words: actualControlWords=null, copyBytes=0, not a
+GPU read of zeros or a gate-pass claim. This excludes the history gate from the
+observed empty Reset; it does not identify its cause. All eight Reset vertex
+counters remain zero. Root personally reviewed all 15 original screenshots:
+Reset is empty; other checked controls preserve geometry. Next bounded check is
+the complete small render input (1,216 rows / 97,280 bytes) and exact host
+surface/parameter expectations to classify material, domain or phase mismatch.
+Hard limits are 128 KiB/frame, three maps <=384 KiB, and at most 64 retained
+records <=8 MiB staging; no full physics/field arenas, CPU solver or performance
+proof. [Original gate evidence](/home/cos/.cache/icc/repos/ulg/goal1-appearance-controls-20260907-Etxu3E/control-sodium-gate-fquaal/ui-tail-reset-new-source-product-gate.json).
+
+Actual-Cs original-dt replay 29810 reproduces the captured field-973 rejection,
+not recovery. Refinement 49897 runs only half 1: its first fine substep passes,
+then field 1492 rejects at prior y-speed 710.475 > 317.619 m/s. Half 2 is unrun,
+accepted endpoint absent, public epochs zero. The original baseline was not
+reexecuted in this refinement run. All 14 module audits and 574 input hashes
+match; private retirement, device cleanup and owned-browser closure are confirmed.
+Original GPU material-byte equality remains unavailable. [Replay review](/home/cos/.cache/icc/repos/ulg/goal1-actual-cs-premacro-20260907-2A1ScR/replay-run-v1-result-review.md)
+and [failed refinement JSON](/home/cos/.cache/icc/repos/ulg/goal1-actual-cs-premacro-20260907-2A1ScR/refinement-run-v1/probe.json)
+do not establish production retry, publication or successful actual-Cs refinement.
+
+Existing pressure trace 84425 exits 1 on the same selected field-1492 tag and
+11 rejection words as refinement 49897; eight other reduction words differ.
+The diagnostic reports field mass 6.84248e-11 kg, effective gauge 45,539.14 Pa
+and post-gas y-velocity 710.475 m/s. Its sole complete 27-node contributor gathers
+y-velocity 4.466 m/s, raw J 0.999508 and displacement/dx 0.011253. These are
+pre-wall/pre-volume-cap rejected-field diagnostics, not a full coupled endpoint
+or a reason to waive admission. All 14 module audits / 574 input checks and
+cleanup pass; the owned browser is closed. [Original trace](/home/cos/.cache/icc/repos/ulg/goal1-actual-cs-premacro-20260907-2A1ScR/pressure-diagnostic-run-v1/probe.json).
+No new throughput gain; full-suite evidence remains the same 4,166/62 result.
+
+Actual CLI oracle 50969 exits 0 and matches ulg-g1-presentation: 3 PASS / 6 FAIL,
+one evidence item per criterion, overall blocked. External trace eaf0485a adds
+only value.status equal to the unchanged outer verdict. Original malformed
+trace 932ca9b9 and zero-evidence 9-FAIL result remain; YAML/source policy and
+scientific evidence are unchanged. [Corrected oracle result](/home/cos/.cache/icc/repos/ulg/goal1-appearance-controls-20260907-Etxu3E/g1-v4-completion-oracle-status-bound.json).
+All seven immediate goals and six follow-ons remain open. Retain historical
+924/200 selected-scope and 237/200 combined guard failures; no incremental waiver.
+No commit, push, merge or Pages build. Next work remains bounded to the empty
+Reset and actual Cs failure, with real-time physics outside G1's cadence gate.
+
+## 2026-09-07 AKDT - Appearance fix observed; Reset and reopened Step failures preserved
+
+Item 73 changes background appearance without retiring the retained physics
+source and routes optional compact-motion warnings through actual admitted
+presentation. Owned sodium desktop runs 79310 and 22144 retain meshes through
+photo/plain/photo, with visible photographic refraction and lighting A/B/A.
+Camera, resize, paused Step and long hold have bounded positive evidence, not
+whole lifecycle/optics acceptance. Both original runs exit 1 and close their
+owned browser; all reviewed screenshots and failure records remain intact.
+
+Item 74's actual-generation Reset preview binding passes 100 focused tests and
+build 88149. In run 22144 the preview is now inactive with rebuild and particle
+generation 3, but the Reset image contains only the box and photograph, not
+material meshes. The helper's receipt assertions are not visual acceptance.
+That same run records 60 seconds after a real reopened Step with no admitted
+content or deferred intent: URL canonicalization lost residentAuto=0; remount
+then defaulted residentAuto=true while autoStart remained false. All 574 v3
+hashes match (manifest cb5e737a); browser errors are empty and closure confirmed.
+
+Item 75 preserves the residentAuto URL preference and marks actual manual Step
+intent independently of autoplay. Existing force, startup and lifecycle guards
+remain. Final focused `manual-step-green-final.log`: 103 PASS / 0 FAIL / 0 SKIP;
+independent review covers the real click/scheduler/deferred-drain path. No desktop
+run of this patch yet. Current combined full regression is pending. The earlier
+4,161 PASS / 62 SKIP suite is pre-final-item-73 evidence, not a current pass.
+Original reviews/logs: external `goal1-appearance-controls-20260907-Etxu3E`.
+
+Actual Cs run-v2 (52898) exits 0 with eight authentic pre-macro payloads totaling
+438,384 bytes, source-bound to the unchanged field-973 terminal rejection.
+Material CPU fingerprints are verified; original GPU material bytes could not
+be copied because COPY_SRC is absent. This is not numerical replay, refinement,
+recovery or surviving production ownership. The external unchanged-dt replay is
+prepared but not run. Independent binding review and original capture remain in
+`goal1-actual-cs-premacro-20260907-2A1ScR`.
+
+No new throughput gain. The earlier restored all-six pixel sweep (five moving
+presets 49.86–56.47/s, Cs 2.64/s with a long terminal hold) is historical to these
+patches. Next is combined regression and real Reset/reopen confirmation, then
+the bounded actual-Cs replay. All thirteen milestones remain open; no commit,
+push, merge or Pages build. Historical guard failures are not waived.
+
+## 2026-09-07 AKDT - Shared relays verified, numerical refinement passes, cache rejected
+
+Item 69 closes only its bounded callback-isolation slice. Full suite 4,152 PASS /
+62 SKIP/0 FAIL, build and actual heap review pass; 3,072 relay contexts have the
+intended bindings, but 511 retired source families remain. The automated parser's
+complete-isolation count is zero at an unrecognized module boundary; manual
+source-linked review is separate, not a relabeled automated pass. No total-memory
+or causal throughput benefit claimed. All-six serial desktop pixels and twelve
+reviewed stills: water 51.5973/s, iron/ice 49.7152/s, sodium/water 53.3966/s,
+Cs/F 1.7637/s (terminal CFL stop), bulk 55.3992/s, dam 56.0101/s. G1 oracle
+2 PASS/7 FAIL. Original artifacts: external `goal1-shared-loss-relays-20260907-fBN3jY`.
+
+Item 70 adds a same-input numerical refinement check without changing runtime
+physics. Native process 9375 exits 0: the exact manufactured baseline rejection
+is followed by two linked whole r2 half-macros with unchanged material buffers,
+bit-exact four-buffer continuity and exactly the original total elapsed time.
+Both full coupled/conservation checks pass. Default native r1..4 process 50514
+also exits 0. Each is 1 PASS/0 FAIL/0 SKIP. Independent source and original JSON
+reviews distinguish this result from an actual-Cs or production retry claim.
+Next capture must start before the actual Cs macro mutates its inputs; shared
+private child authority and atomic all-child outward admission are still missing.
+Evidence: external `goal1-coupled-refinement-20260907-Ug7q98`.
+
+Item 71's camera-uniform cache was tested, then withdrawn. Candidate suite:
+4,161 PASS/62 SKIP/0 FAIL, build PASS. After full ICC refresh and an exact 574-file
+freeze, four headed iron captures and four decoders ran serially. OFF 1039 changes /
+20.621 s = 50.3855/s; ON 1037/20.609 = 50.3178/s. Pair effects disagree. Root
+reviewed all eight stills and original pixel reports; optional live counters were
+zero/inconclusive. No repeatable benefit warrants retaining this complexity.
+The exact pre-experiment runtime and 455-line test file were restored under a
+scoped ICC lease. Only the nine added cache tests were removed, with full tested
+source/tests and all unfavorable observations preserved externally. Focused
+original tests: 16 PASS. Post-withdrawal full suite also passes: 4,152 PASS /
+62 SKIP / zero failures (188964.455286 ms); refreshed visuals remain pending.
+Evidence: external `goal1-uniform-upload-20260907-Iqz8wE`.
+
+All seven immediate goals and six follow-ons remain open. No commit, push,
+main merge or Pages build. The user-facing status-only turn was no progress;
+this continuation adds native regression, controlled evidence and an explicit
+rejection decision instead of counting an unhelpful cache as a delivered gain.
+
+## 2026-09-07 AKDT - Thermal loss targets detach; all-six desktop evidence refreshed
+
+This continuation makes progress through completed verification, not goal
+closure. Item 68's thermal callback holder keeps live cleanup strongly owned and
+detaches only after successful retirement. Full suite 4,046 PASS / 62 SKIP /
+0 FAIL, ordinary build PASS; nine new regressions bring the focused file to
+38 PASS. Existing cleanup-error behavior is preserved, not represented as fixed.
+
+Actual worker heap source 527: all 528 thermal holders are null, all 1,056 handler
+scopes isolated. A separate G2P/resident-step callback still retains old producer
+26. Exactly six follow-up queries identify that route; no broader rewrite or
+memory/FPS claim follows. The parser exits before desktop warmup.
+
+All six owned desktop captures and decoders finish serially; root reviews all
+twelve stills. Full-window scene-change observations: water 52.2061/s, iron/ice
+49.9903/s, sodium/water 53.8117/s, Cs/F 2.6533/s, bulk water 56.9756/s, dam break
+55.6044/s. Cs reproduces field-973 CFL rejection and stops on source 15; capture
+exit 0 is not physics success. Configured geometry is retained and no control
+preview substitutes for physics. Finite optical tables are not material or
+plume acceptance. Source publications, display interpolation and the UI physics
+clock remain distinct; no exact particle source time is invented.
+
+Artifacts: external `goal1-thermal-loss-retirement-20260907-HRMbDZ`. All 572 frozen
+runtime/test/tool inputs still match after the sweep. Documentation follows
+scoped ICC preflight/lease; all 109 existing dirty paths are preserved. No commit,
+push, merge or Pages build. The existing G1 oracle will record bounded positive
+observations and explicit failures; all seven goals and six follow-ons stay open.
+
+## 2026-09-07 AKDT - Weak callback isolation verified in actual worker heap
+
+Previous goal turn PROGRESS: actual baseline heap proves a retired source26
+family strongly held by the parent scope of an ostensibly weak loss callback.
+Item66 evidence6T8Aaq: source527,527retired/1active, complete3028-edge root path,
+exact private flags/zero leases and producer-domain identity. No thermal-bin
+authority objects in that run; all528 raw G2P authority properties are null.
+Do not conflate successor tick26 with producer tick25, or infer retained bytes,
+leak rate or the cause of the earlier241ms GC from this snapshot.
+
+Scoped ICC preflight/lease precedes the two previously clean source/test edits.
+Separate module-level factories prevent the weak callback from capturing the
+watcher's strong sourceFamily parameter. The weak factory only accepts WeakRef.
+One structural regression plus six live/absent/fallback resolve/reject cases:
+before22PASS/1FAIL(missing isolation), after23PASS. Full suite4037PASS/62SKIP,
+zero failures, exit0; buildexit0 with existing chunk/import warnings. Final
+comment and structural-regex tightening rerun focused23PASS. Independent review
+confirms semantics; regex is a narrow source contract, not an AST or GC proof.
+
+Postpatch POCGUv capture42184 exits0, no errors, owned browser closed; source511,
+resident execution1027 and serial4207 stable before/after. Snapshot301540725bytes
+SHA11545eaf; v3 parser15259 exits0 after21queries. All512 callback instances have
+exactly one WeakRef factory binding before the known module boundary, no direct
+family binding: observed bypass removed. Still511normally retired/1active, all
+zero leases. Different producer counts explain528to512; no collection gain.
+Positive alternative: GPUDevice lossPromise275697 to released thermal proposal
+artifact240825 and producer26 is a2937-edge strong route. The rooted commit
+receipt242525 and module-owned WeakMap conditionally retain family158537.
+Do not promote conservative BFS absence into nonretention. Next thermal loss
+watcher repair must preserve the device-wide lost marker and live authority/
+consumer-lease behavior; no such second production change yet.
+
+Both paused desktop stills reviewed. Code changes are exactly two of581 frozen
+inputs;579 remain unchanged. Actual source/test guard9 policy deletions, no
+violations/warnings, not a waiver of historical combined-candidate failures.
+Documentation preflight initially conflicts at the shared task level with the
+root's own source lease; that lease ends normally and preflight reruns PASS
+before any doc edit. Publication hold, Cs rejection and all13 milestones remain.
+
+Postpatch desktop water f6zL9i capture46943 and original PNG decoder46210 exit0,
+serial and without other heavy work through full browser warmup. Root views both
+stills: actual water mesh changes shape, no control preview. Source511..575,
+528valid monotonic images, no timestamp exclusions,516cropped scene transitions
+over10.287s =50.1603966Hz. Largest observed change interval254.300ms persists;
+no GC/continuous-freeze inference. Ready, focused and visible throughout sampled
+window, zero browser errors and finite optical records. No demonstrated FPS gain,
+controlled WeakRef-only A/B, scanout or all-preset acceptance. Next actual thermal
+loss-target release must keep live record/lease cleanup reachable and mark the
+device lost after retired-target detachment; do not replace it with an unsafe
+weak-only live cleanup target. ICC/handoff keep the overall repair open.
+
+## 2026-09-07 AKDT - Declined-attempt host-task yield rejected after desktop comparison
+
+Previous status-only turn was NO PROGRESS; direct ICC and581 frozen code inputs
+revalidated. Item63 closes its bounded attribution: En5fjx v2 has46 expired frame
+deliveries,32 source-bound abort tasks and an independent241.020ms MajorGC.
+No allocation/retention source is proven. Item65 tests one real MessageChannel
+task after a current actually declined presentation; no solver, shader, timestep,
+deadline, source horizon, queue/lane, proof or admission edit.
+
+External C9QxyZ preserves all harness revisions and pilots. Twelve exact-transform
+VM tests pass in each revision, proving lifecycle/order not browser priority.
+V1 off-a is pilot-only. V2 off-a2 exits1 before recording because two identical
+module fetches were incorrectly treated as two owners. V3 requires one unique
+URL/original/routed SHA identity and one worker owner, preserving both responses.
+
+Final OFF/ON/ON/OFF captures exit0; all eight stills root-viewed, same naturally
+evolved water source511..575 and fixed controls, no browser errors or preview.
+Original decoders exit0:512/10.355=49.4447,509/10.248=49.6682,
+517/10.337=50.0145,523/10.291=50.8211 cropped changes/full-wall-second.
+Timestamp exclusions3/6/0/0 are retained without reordering. First pair+0.4521%
+has fewer ON transitions in a shorter window; clean reverse pair-1.5871%.
+Exploratory pooled49.8421 versus50.1308 is-0.5758%: reject production adoption,
+not a universal claim against yielding. The first OFF long hold does not recur
+in the final OFF; no evidence this candidate eliminated GC or other stalls.
+
+Protocol deviation retained: off-a3 decoder was still live when on-b3 warmup
+started, confirmed terminal0 at09:36:53UTC with ON source127 (target511).
+Overlap bounded by first43s of warmup, no timed-window overlap observed; full
+sequence is not a clean strict ABBA gate. Subsequent decodes wait for final
+browser termination. ON bracket counters61/62 actual host tasks, ports all closed,
+no fallback; async bracket latency unmeasured. No scanout or all-six closure.
+
+Only planning docs change under scoped ICC preflight/lease. Previous full
+4030PASS/62SKIP/build is code-current, not rerun. Next actual worker heap retaining
+path distinguishes device-loss Promise callbacks, explicitly retired live
+generations and current output/cache roots. Source audit alone diagnoses none.
+All13 milestones, separate Cs correctness issue and publication hold remain.
+
+## 2026-09-07 AKDT - Current water delivery trace and GPU pass-cost filter
+
+Previous goal turn was status-only/no progress. This turn executes three serial
+owned desktop water-cycle source511 captures: current native timeline1Gf6Mb,
+browser-only existing GPU pass profiler Te6glf, then original-code compositor
+trace En5fjx. All browser handles and original decoded-PNG runs finish0; all six
+full stills personally viewed, no errors/preview fallback and no trace loss.
+Full-wall cropped changes494/10.290s,528/10.260s,504/10.235s are diagnostic,
+not comparable unprofiled speed trials or all-preset acceptance. All581 frozen
+code/test/script/package inputs still match; no runtime source or shader edit.
+
+The earlier320ms sampled hold does not recur in the first native trace; largest
+image-change interval54.613ms. Current worker re-registration median0.383ms versus
+request-to-delivery18.35ms, with ordinary host GPU completion4.2ms and post-GPU
+callback remainder13.3ms. Slow callbacks occur before PNG recording too, without
+establishing recording-free rate or hardware refresh. The configured desktop
+output reports119.88Hz; no desktop settings were changed. No extra autonomous
+timer, proof wait, hash or graphics-backend tweak is supported by these findings.
+
+Source review considers shared GPU deformation reuse across refractive passes,
+then rejects it as the next G1 priority using actual bounded pass timestamps:
+12 unique completed samples, seven positive finite pass values each, overflow0;
+median summed GPU time0.060016ms,11 totals0.0464..0.197536ms. Keep the0.830176ms
+outlier (opaque0.751328ms), not silently discard it. Backface median0.015584ms
+gives little demonstrated recoverable work. Separate per-draw profilers avoid
+mutable slot reuse; per-surface labels preserve null/missing queries. Same-encoder
+resolve precedes submit; read starts asynchronously after original GPU/opportunity
+waits. Original/routed response sources and independent review are SHA-bound.
+Pass sums exclude texture copies, queue waiting and browser/compositor delivery.
+
+En5fjx adds the previously used compositor categories, without V8 profiling,
+to inspect native pending demand/frame delivery and current worker tasks. Raw
+trace flow s/f endpoints share event names with real X/I callbacks; do not count
+them as extra frames. No host-scheduling change is selected without that review.
+Evidence roots are under the external ICC cache; no runtime artifacts in Git.
+Only planning docs change, so previous4030PASS/62SKIP/build remains code-current,
+not rerun. All13 milestones, separate Cs rejection and publication hold remain.
+
+## 2026-09-07 AKDT - Current preset scene-pixel coverage and static controls
+
+Item62 runs the existing desktop capture/decoder against unchanged item61 code.
+Seven serial owned browser runs exit0: iron, early water, bulk, dam, paused water,
+paused dam, then one predeclared later water-flow window. All14 full stills root
+viewed; no errors/preview fallback, controls untouched, all owned browsers closed.
+Full-wall scene changes/s49.9565/48.9939/55.1004/55.0744/0/0/48.0824; original
+timestamp exclusions and entire windows retained. Iron excludes2 nonmonotonic
+samples, not reordered; the remaining primary/control runs exclude none.
+
+Direct RGB footprint checks match original decoder hashes/counts. Early water
+median34 changed pixels versus iron737 is not a perceptual smoothness certificate.
+Water source15..79 is only0.008..0.040s at metre scale; iron has millimetre bodies.
+The four largest events in each align with source arrivals, but observation lag
+and different physical scales prevent a renderer-defect inference. Paused controls
+show zero crop churn with fixed sources and Play; stopping redraws does not prove
+absence of noise in an actively redrawn static scene. Later source511..575 water
+shows developed shape changes and48.0824 cropped changes/s, not54Hz; median320
+changedRGB pixels per adjacent sample. A320.183ms matching-image endpoint span
+and333.310ms change gap, source543/serial4564 below its age cap and156.7ms main-rAF
+gap make this later window the next existing-native-trace target. Missing samples
+do not prove continuous freeze; GC/GPU starvation is not yet attributed. The fixed crop
+includes the moving upper interface but cuts off the lower body; no favorable
+crop/window replacement or amplified motion. Source/solver clocks remain separate.
+
+Read-only scheduler audit rejects an unsupported timer-removal fix: prearmed
+GPU/presentation waits overlap, and sleep subtracts elapsed iteration time.
+Next current moving-isosurface timing attribution, not another speculative flag
+or hash variant. Separate Cs adaptive-step feasibility finds a private pre-closure
+transaction seam, but no ready numerical retry loop; preserved source, fresh
+authority, retirement and elapsed/envelope proof are prerequisites, not delivered.
+No new runtime source/test/build changes;581 code hashes still match prior
+4030PASS/62SKIP/build. Artifacts `goal1-preset-pixels-20260906-2yKS5i`.
+All thirteen campaign milestones and publication hold remain open.
+
+## 2026-09-06 AKDT - Invocation-local configuration hashes reduce authority CPU work
+
+Item61 retained after source review,21 new regressions and matched desktop checks.
+Fresh serialization and every authority guard/read/catch remain; only identical
+configuration-token hashes are reused privately within a synchronous invocation.
+Encoding counts4/9/24→2; clean v2 authority fixture times14.6–21.1% lower, but
+standalone reaction-transition17.3% slower. V1 timing overlapped full tests and
+is not the primary CPU evidence. No claim the browser80ms task is eliminated.
+
+Sodium OFF/ON/ON/OFF captures and serial decoded-PNG analysis all exit0:
+54.7033/54.0410/54.8852/53.6538 scene changes per full wall second. Same1125 changes
+per arm, mixed direction, pooled+0.5228% only; no demonstrated visual rate gain.
+Eight routed response pairs preserve exact candidate/baseline and dependency URLs.
+All581 frozen code inputs unchanged through desktop execution. All8 A/B stills
+and12 all-six current-candidate stills personally viewed; no preview/gross new
+material regression. UI-only6PASS, existing Cs terminal rejection persists,
+owned browsers closed. This is not scientific optics/plume or all-preset rate proof.
+
+Final focused168PASS/full4030PASS62SKIP0FAIL196.454s/build1.88s. Prior full run's
+sole cycle-getter test expectation failure remains archived, corrected against
+both original and candidate behavior. Evidence: `goal1-authority-hash-20260906-BnINTT`.
+Next actual pixel coverage, not the admitted-input sweep's guaranteed missing-visible
+evidence verdict. No commit/push/merge/Pages; G1-G7/A1-A6 remain open.
+
+## 2026-09-06 AKDT - Native trace localizes presentation-worker CPU starvation
+
+Existing sodium native trace executed on exactly restored code, exit0, no browser
+errors/reported trace loss. Its80.051ms offscreen message task delays renderer
+timer586 from requested4ms to83.811ms after installation. Root checked original
+timer/task events; CPU samples attribute substantial work to repeated authority,
+transition and configuration validation/fingerprinting (stableToken/TextEncoder/
+SHA256). Separate worker major GC38.987ms coincides with another late opportunity.
+These are profiled diagnostic timings, not unprofiled pixel-rate or scanout proof.
+Next candidate is invocation-local reuse of hashes for exact freshly serialized
+strings, retaining all validation/property reads/catches and mutable-input safety.
+No authority-validator implementation change yet; all580 code hashes restored.
+Native artifact: `goal1-initial-batch-20260906-I9AhQS/restored-native-trace`.
+Build passes1.95s with existing warnings; restored focused352PASS. All13 goals open.
+
+## 2026-09-06 AKDT - Initial contact-batching experiment evaluated and not retained
+
+Implemented a strict optional busy-slot query and initial G2P selector opt-in;
+physics, per-boundary waits and proof rules unchanged. Candidate357focusedPASS,
+RED4FAIL/1PASS and independent source review, including correction of a swallowed
+test assertion. Real-desktop sodium OFF/ON/ON/OFF plus existing decoded-PNG
+analyzer all exit0:53.5523/52.8117/54.7163/53.1382 scene changes per full wall second.
+Pooled+0.7955% is inconsistent; largest observed intervals82.628ms ON versus
+68.387ms OFF are sampler-limited, with OFF's worst mostly during teardown.
+All8 response pairs prove only the initial query changed. No activation witness,
+full source interval, browser errors or all-preset cadence acceptance.
+
+Archived candidate four files externally and restored only this slice with
+apply_patch; all580 code-input hashes match the pre-experiment baseline and
+restored focused352PASS. Prior dirty work and physics safety are preserved.
+Independent A/B review supports declining an unproven expansion, not claiming it
+harmful. Next: existing native trace to localize autonomous pre-submit/worker
+callback gaps; no new observer or proof-wait weakening. Total submit-to-opportunity
+timing includes GPU completion, not an extra17–18ms after it. Evidence external:
+`goal1-initial-batch-20260906-I9AhQS`. All13 milestones/publication hold unchanged.
+Restored all-six desktop sanity exits0/UI-only6PASS, all12 PNGs root-reviewed;
+configured geometry/no previews, no page/captured critical console errors, owned
+browser closed. Existing Cs terminal rejection persists. Not rate/plume acceptance.
+
+## 2026-09-06 AKDT - First-fine candidate arithmetic and complete gather isolated
+
+Added test-only production-derived proposal/endpoint and full-particle gather
+WGSL, same-encoder owned clones, and an opt-in native harness boundary capture.
+The passing r2 control matches297/297 non-angular prepared components exactly;
+16 angular components still differ, so full equality remains FAIL. The native
+crossing remains an actual failure at original field22 with zero commits. Its
+unvisited projector cannot be used as an endpoint. Separate counterfactual
+field26 remains702.11389m/s versus625; the complete fine-particle gather is
+0.15292656m/s with rawJ0.99986380 and effective deformation disabled.
+No full coupled or actual-Cs admission follows. Source31PASS, lifecycle5PASS,
+probe-disabled native r1..4 PASS; independent v3 review preserves failures.
+
+Actual-Cs v1 exits134 from Node heap exhaustion exporting full snapshots; its
+failure remains. V2 returns12,592bytes after saving a pre-read terminal checkpoint
+and finishes50.004s/exit2 with the original current Cs973 rejection, default GPU
+dt/r2 and owned browser closed.259active/143fine gathers are complete and finite,
+deformation enabled, rawJ0.99926245..1.00860059 and maxtravel/dx0.02287576.
+Six of2481 nodes still fail nodal CFL. Independent review validates source/identity
+and11witness rows; omitted full rows limit offline recomputation.42 compact
+transport assertions pass, including malformed-data rejection. No coupled
+admission or new throughput proof follows. No more fine-only variants planned.
+
+The current terminal-error warning bug is fixed in the shared mount only, with
+generation/token/error identity and unchanged healthy wording;95 focused tests
+pass, scoped guard passes. Desktop UI checks6/6, all12 PNGs personally reviewed:
+configured geometry/no preview, current Cs terminal-stop warning, no page/captured
+critical console errors, owned browser closed. Not optics/plume/rate acceptance.
+Next presentation-only experiment is initial contact-batching eligibility during
+a valid pending retained draw proof; no deadline or physics changes. Artifacts:
+`goal1-first-fine-candidate-20260906-xSHmEs`. No physics/default changes, goal
+closure or publication.
+
+## 2026-09-06 AKDT - Controlled fixed-material substeps rule out simple Cs settings fixes
+
+Finished the preceding native checkpoint's independent575-path evidence review,
+exact-file G1 oracle (one provenancePASS/eight domainFAIL), attempt and handoff.
+Then executed fresh owned-desktop Cs controls, using an external diagnostic
+instead of weakening the default-preset observer. The first requestedr4 override
+was sealed to r2; an initial separate probe timed out clicking the collapsed
+menu before physics. Both artifacts remain. Corrected v2 actual runs:
+macro0.0005/r2 -> one successful16-step schedule, source15, field973 failure;
+macro0.0005/r4 -> one successful schedule, source15, field2151 failure;
+macro0.00025/r2 -> two successful schedules, source15->31, field377 failure.
+All three terminate2 for runtime rejection, no pending calls/page errors.
+Six captured initial packed buffers match exactly, including mechanics material
+records. Worker CFL/ratio/authority/terminal coverage of successful schedules
+is verified; page-maintained dt/time labels are not GPU dt measurements.
+Half dt final committed time0.008s equals baseline, not a physical-time gain.
+All six actual probe PNGs plus the sealed-override PNG personally inspected.
+
+No runtime/default/physics changes. Stop blind dt sweeps. A rejected workspace
+has no complete prepared candidate to copy; next item52 must explicitly compute
+a diagnostic first-fine counterfactual on owned GPU buffers with full coverage,
+production arithmetic, declared scales, signed energy and raw deformation.
+That is not full coupled-terminal admission proof. All seven immediate goals
+and six follow-ons remain open; no publication. External evidence:
+`goal1-substep-rejection-20260906-oY3rmN/controlled-comparison.json`.
+
+## 2026-09-06 AKDT - Native coupled pressure-tail mechanism isolated
+
+Extended the existing native harness with opt-in manufactured phase/position/dt
+inputs and same-encoder diagnostic snapshots; no runtime/ABI/physics changes.
+Original fine-gas and coarse-tail cases all pass but have zero fine pressure by
+design. Swapping to fine liquid/coarse gas activates the intended pressure load.
+Fine x0.8750000596046448 passes at macro1e-4; at3.2e-4 the first fine validator
+rejects tag0xc7140016/field22 with prior687.41449 versus625m/s. Full interval is
+valid but phase-only is not, distinct from Cs's zero phase/full deltas.
+Complete27-node fine gather yields particle speed~0.20m/s, rawJ1.00000036,
+displacement/dx0.000128027 despite nodal maximum702.11389m/s. Existing fixture
+internalPressureScale0 disables effective deformation; no coupled safety claim.
+Negative pressure work is retained; later failed generations are unvisited.
+
+V3 exposed harness-only diagnostic conflicts: replacing the controller scratch
+destination hid the particle packet, and success-only energy decoding masked
+the rejection. V4 preserves both scratch destinations and the actual fail-closed
+witness. Negative case remains terminal1/oneFAIL, clean GPU errors, zero commits.
+Final loaded control and native r1..4 pass; focused81PASS/2SKIP, build1.73s,
+external buffer lifecycle5PASS and scoped test guard17 all pass. Earlier full
+Node3991/62 is not rerun. Artifacts: external
+`goal1-coupled-pressure-tail-20260906-cFuVDX`; independent exact v4 review retained.
+Next remains complete coupled endpoint/signed-energy evidence before any gate
+change. No Cs fix, throughput gain, goal closure or commit/push/merge/Pages.
+Final real-desktop sweep remains strict0/6. Root viewed all11 screenshots:
+configured physics geometry remains, iron/Na/bulk/dam move, water little, Cs
+initial only. Cs again field973 with both zero deltas. Allsix input proxies are
+51.7741/49.7145/50.5767/0/58.1361/56.5491 per second, not pixel proof. No actionable
+page/critical GPU errors; optics/controls/plumes and fullG1 remain unaccepted.
+
+## 2026-09-06 AKDT - Shared immutable kernel caches remove repeated target creation
+
+Added exact-device/exact-WGSL five-pipeline gas cache and exact-device/ABI
+three-pipeline spatial cache. Complete bundles publish after construction;
+private arenas/bindings/authority and all shader bytes/physics remain unchanged.
+ActiveRank retains capacity-specific compilation. Independent source review
+passes; the spatial growth fixture does not prove multiple eligible ActiveRank
+capacities executed. Current gas 20/spatial 69 focused pass, combined 150 PASS/
+1 opt-in SKIP/0 FAIL; full 3991 PASS/62 opt-in SKIP/0 FAIL (4053, 193.178 s),
+build 1.70 s and native exact-gas 1 PASS/0 SKIP/0 FAIL. Native cross-capacity and
+two-level numerical equivalence are not established by that native test.
+
+GPU-service trace API creations 52 to 4: gas 30/1305.678 ms to zero and generic
+spatial 18/686.314 ms to zero; four other creations remain. These host API durations
+are not GPU time or measured display-stall savings. No trace errors/loss;
+candidate source 63 to 127 advances. Trace lacks dispatch/buffer capacity proof.
+Unprofiled sodium 551/10.322=53.38113 changes/s versus 537/10.276=52.25769;
+first pixel 10.983 versus 632.525 ms, maximum change gap 67.155 versus 49.461 ms.
+Different source phases and worse interior tail prevent a general 54 Hz claim.
+
+Root reviewed all 13 current representative PNGs (two candidate, eleven defaults).
+Configured meshes/spheres remain without control preview; iron/Na deform/drop,
+bulk/dam spread/drop, water little silhouette change, Cs initial only. Final
+all-six strict 0/6; input proxies 48.29375/47.51732/53.71620/.398891/58.03171/
+56.89418 per second are not pixel rates. Current Cs field973 prior y=167.6510
+versus 158.8097 m/s rejects first-fine at ordinal 10/owner 101/gen 26, zero/two
+commits, distinct from historical tbeXGT field621. No actionable page/critical GPU
+errors; no full controls/photographic optics/plume identity acceptance implied.
+
+Artifacts: external `goal1-sodium-scene-stalls-20260906-wjPPPD`; post-sweep 574
+runtime hashes match. Historical wide 237/200 and older failed gates remain.
+Next bounded native 2:1 pressure-tail endpoints and signed energy; field973's
+historical full gather is already done. No physics-bound relaxation or real-time
+physics G1 requirement. All 13 milestones open; no commit/push/merge/Pages.
+
+## 2026-09-06 AKDT - Controlled final-slot comparison complete; retain ON
+
+Independent review of the matched iron OFF/ON/ON/OFF experiment supports keeping
+the final wait. Pooled observed scene-ROI rate 49.3606 to 52.2135/s is +5.7797%,
+with both ON runs above both OFF runs (two short runs/arm). Six complete observed
+source intervals/arm average 2742.20 to 2558.03 ms. Tails are mixed; incomplete
+compositor sampling, non-phase-locked starts and cache/load/thermal uncertainty
+remain. This is a modest measured benefit, not >=54 Hz, scanout, final-wait
+activation attribution or solver-speedup proof. Only the final request boolean
+changed; OFF retained batching and safety. All 574 ON runtime hashes restored.
+
+Current focused tests actually rerun: 352 PASS, zero FAIL/SKIP. Previous identical
+ON runtime full 3977 PASS/62 SKIP, build 1.72 s and native 18/4136-word comparison
+are carried-forward PGc7lA evidence, NOT rerun. Historical inconclusive and failed
+results remain preserved.
+
+Root reviewed all 19 current representative PNGs (eight A/B plus eleven defaults).
+Expected geometry present; iron/sodium deform, bulk/dam move, water little obvious
+displacement and Cs initial only. No optics/plume/control/54 Hz acceptance implied.
+Final all-six strict 0/6; sodium input proxy 31.785/s, maximum gap 686.8 ms, is not
+a scene-pixel rate. Current Cs field 621 y=342.0265 versus 158.8097 m/s rejects
+first-fine at ordinal 10/owner 101/gen 26, phase 1 zero/two commits; preserve the
+previous PGc7lA field 973 witness separately without a causal inference.
+
+Evidence: external `goal1-final-gap-ab-20260906-tbeXGT`, `ab-results.json` and
+`independent-ab-review.md`. Retain ON and close only this bounded experiment.
+Next sodium actual scene-pixel baseline; optional existing Chrome trace only
+after real holds reproduce. Keep the shared pipeline, not a scenario-specific
+fix. Item52, all seven goals/six follow-ons and historical wide failed guards
+remain open. No commit/push/merge/Pages.
+
+## 2026-09-06 AKDT - Final-slot wait correctness verified; controlled comparison next
+
+Item56 adds a final-Jacobi-only wait for the existing retained slot inside the
+unchanged submission deadline. Ordinary initial readiness, one full proof,
+physics operations and sole terminal authority remain intact. Independent source
+review passes; focused presenter 216/216 and integration 136/136 pass. Final full
+Node: 3977 PASS, 62 opt-in SKIP, zero FAIL, 4039 total in 194.2478 s; build passes
+in 1.72 s. Native contact: one PASS, no skips, 18 comparisons and 4,136 exact final
+state words, with intermediate canonical states unchanged.
+
+Iron observes 519 scene-ROI changes/10.374 wall seconds = 50.0289/s versus
+item55's 49.7093/s (+0.643%); this separate, incompletely sampled pair is NOT a
+proven rate win. Largest observed change interval 47.319 versus 56.119 ms;
+mean complete source interval 2671.27 versus 2748.83 ms, only three/run.
+No >=54 Hz, scanout, activation-attribution or solver-speedup claim follows.
+
+Root personally reviewed all 13 current PNGs (two iron plus eleven defaults).
+First four true meshes/two water spheres preserved; iron/Na/bulk/dam change,
+water little, Cs initial only. Final all-six strict 0/6; input proxies only:
+50.2984/47.2432/35.1122/0/57.6260/60.7842 per second. Iron/Na maximum input gaps
+87.6/656.7 ms. Current first-fine Cs witness is field973, ordinal10/owner101/gen26,
+prior [1.3341149,167.6510468,9.2637682] m/s versus158.8097; phase1, zero/two fine
+commits. Item55 field621 stays separate; no causal conclusion from that change.
+Current all-six controls/photographic-background optics acceptance is incomplete.
+
+Evidence: external `goal1-final-contact-gap-20260906-PGc7lA`; 574 runtime hashes
+unchanged across final runs, documentation updated afterward. Eight-file source
+guard PASS159 policy deletions does not waive historical wider237/200 or older
+failures. All owned browser/GPU/test handles terminal; VPN HTTPS200 remains.
+No commit/push/merge/Pages. Correctness is verified, but the performance experiment
+stays in progress: next controlled same-source final-wait OFF/ON using the existing
+desktop helper, before retaining/rejecting it. No speculative scheduling changes;
+item52 and stage-accurate Cs diagnostics stay parked. All goals remain open.
+
+## 2026-09-06 AKDT - Shared contact batching and observed iron cadence gain
+
+Actual GPU timestamp evidence identified roughly23 ms of Jacobi work plus a
+roughly10 ms cleanup-owner block. The initial Tier0 attribution was wrong:
+the real preset route is canonical-Schroeder. No max2-to1 Tier0 edit was made.
+Implemented contact groups of four with unchanged16 iterations/final authority,
+an early submission-only retained-draw acknowledgement and exact-device worker
+registration. One full presentation proof remains in flight; partial failures
+retain resources until the submitted-work fence. Independent review exposed and
+fixed timer-delivery/deadline and strict-readiness mismatches before final freeze.
+
+Native ordinary-versus-batched GPU:18 comparisons,4136 final particle-state words
+and selected flags/counts match exactly; all four intermediate canonical states
+remain unchanged. These serialized diagnostic copies do not prove production
+render interleaving or every-buffer equality. Final full Node3946PASS62SKIP0FAIL,
+4008total165.48s; buildPASS1.89s. Owned desktop iron PNG capture observes49.709
+scene changes/s versus42.095 baseline, +18.09% in one pair; largest observed
+change interval74.40 to56.12ms. Full wall denominator and incomplete compositor
+sampling retained. Mean observed source-publication interval increases11.4%
+(three complete intervals/run); this is not a solver speedup claim.
+
+End-of-slice all-six strict0/6. Root inspected all11 default PNGs and2 candidate
+iron PNGs. Four pairs change shape; water-cycle changes little; Cs only initial
+mesh. Current ordinal10/owner101 rejection reports fine-validator field621,
+outside-physical-audit, not the historical field973 witness. Input proxies
+54.56/48.72/35.96/.20/58.20/59.45 per second are not visible-pixel rates. No
+actionable page/critical GPU errors; application rejection remains real.
+
+Artifacts: external `goal1-active-batch-cadence-20260906-QqSn1G`. Frozen574-path
+runtime manifest matches after runs; docs follow. Wider runtime/docs preflight
+fails237/200 accumulated policy deletions; narrower bookkeeping/source checks
+cannot waive it or earlier failures. Next experiment: bounded wait for the
+existing slot only at final Jacobi boundary before cleanup. Back-to-back declined
+gaps are a source-supported hypothesis, not measured activation attribution.
+Complete coupled-tail evidence, stale paused labels, all7 goals and6 follow-ons
+remain open. Owned browser closed, HTTPS Vite retained, no publishing.
+
+## 2026-09-06 AKDT - Explicit pause and frozen redraw verified
+
+Completed bounded item54 across shared playback plumbing, lazy isosurface pause
+clock and particle active-wall pacing. Pause freezes admitted age, camera/resize
+redraws remain available, Step admits one new source at age zero, and resume does
+not replenish an exhausted motion cap. Independent review drove readiness-cutoff
+and particle resize/retirement/late-receipt race regressions before final freeze.
+
+Final full Node: 3894 pass, 62 opt-in skip, zero fail; build passes with existing
+warnings. Configured sodium and bulk desktop checks pass 11 assertions each,
+including >10-second pause holds, camera/resize, Step and resume (98 fixed-source/
+age samples each). Both explicit timeout recovery variants pass at failed source
+255/generation4 with frozen age zero. All 18 final control/recovery PNGs reviewed.
+The wrong-helper bulk warmup and actual blank-resize RED remain separate history.
+
+Final all-six is strict 0/6 with all 11 PNGs reviewed. Iron/sodium/bulk/dam change
+shape, water-cycle changes little, Cs retains its first mesh and field973 reject.
+Input proxies 52.75/41.58/34.77/0/55.92/55.89 per second are not scene-pixel proof;
+no throughput gain is claimed. Existing wider failed guards and stale paused HUD
+wording remain open. Final runtime hashes (572 paths) match after all runs; docs
+were updated afterward. Evidence: external `goal1-explicit-pause-20260906-liMOpi`.
+Owned desktop browsers closed; HTTPS Vite retained. Next is measured cadence and
+the bounded coupled-tail fixture, with all goals and publishing hold preserved.
+
+## 2026-09-06 AKDT - Desktop camera failure isolated
+
+Final outcome: implemented and independently reviewed same-source recovery in
+the presenter and its tests only. One non-admitted immutable candidate survives
+an exact opportunity timeout, for one fresh proved draw per later explicit
+camera/resize request. Render-lane ownership transfer and source-generation
+retirement cover resize/fatal races. Focused 207/207, full Node 3853 pass/62 skip/
+zero fail, and production build pass. New scoped guard passes at 125 deleted
+lines; existing wider failed gates remain unwaived.
+
+Candidate desktop camera and resize recovery both pass on source255 without a
+new physics step; all six corresponding PNGs reviewed. The first candidate fault
+injection missed a new macrostep and is inconclusive. The corrected probe waits
+for an actual failed newer source before pausing. It additionally exposes real
+paused interpolation drift: admitted motion age 0.012866115 to 0.022295358 over
+three seconds at fixed source255. Explicit shared presentation pause is the next
+item54; do not re-diagnose the now-isolated input or discard successful recovery.
+
+Final all-six: strict 0/6, all 11 PNGs reviewed. Four pairs advance, water-cycle
+changes little, Cs only first frame/same field973 rejection. Input proxies
+53.77/42.45/31.32/48.26/55.67/56.29 per second are not pixel-rate proof; sodium's
+maximum input gap is 659.1 ms. No actionable page/critical GPU errors. Frozen
+runtime/test/script hashes match after all candidate runs; later docs are not
+capture-time source evidence. Owned browsers closed; VPN HTTPS Vite retained.
+Recovery is a real fix, not another throughput result or Goal 1 acceptance.
+
+Direct ICC resumption verifies the preceding d31 source fingerprint and active
+VPN HTTPS Vite. The diagnostic/visual slice made concrete progress; its final
+acknowledgment-only tail introduced no further implementation. Fresh source and
+the previous live handles were checked rather than restarting completed work.
+
+An external owned Wayland Chrome helper initially clicked Play while disabled;
+its explicit 180-second failure is retained. Corrected readiness handling gives
+a normal paused sodium/water orbit PASS: actual canvas hit, interaction events,
+camera-pose change, accepted source255 frames623 to927, and changed box projection.
+Physics resumes to447. Three PNGs personally inspected; no page errors.
+
+Bounded fault injection drops actual worker rAF callbacks until candidate255
+fails its presentation opportunity, without changing GPU fences or physics.
+After restoring callbacks, paused left drag still changes the camera and records
+start/end, but admitted source191/frame318 and box projection stay unchanged.
+Resuming physics supplies a later source and restores the view. Three more PNGs
+personally inspected. Source/test hashes remain unchanged during both runs.
+The renderer's generation high-water correctly prevents an older submitted mesh
+from overwriting a newer one, but discarding the failed new frame strands input
+redraws. A one-slot, non-admitted retained-candidate recovery was then tested
+under a disjoint ICC lease. It must preserve the exact original source and acquire
+fresh GPU/opportunity proof on a later explicit request, never add automatic
+retries or loosen physics/receipt acceptance.
+
+Artifacts: external ICC `goal1-camera-isolation-20260906-aPUWdf`, including
+`corrected-SqvWV0` and `fault-baseline-4sY13N`. This establishes the failure path,
+not a throughput gain. All seven goals, previous combined gates and publishing
+hold remain open.
+
+## 2026-09-06 AKDT - Bounded actual-particle rejection evidence
+
+Resumed the seven-goal campaign through direct ICC. The status/server-only turn
+made no goal progress; HTTPS Vite remains active on fastbox's Tailscale hostname.
+Preserved the broad dirty worktree, including unrelated `plan/greenfield.md`.
+
+Added an opt-in fixed-size GPU gather beside the existing rejected-field packet.
+It reads actual retained pre-G2P state, all 27 stencil samples and input F, with
+deterministic minimum-J/maximum-displacement witnesses and explicit incomplete
+support failures. It cannot mutate state or authorize a physics step. Initial
+native tests exposed a desktop compiler crash from variable unsigned division;
+exact division-free overflow arithmetic resolved it. The first actual Cs probe
+then exposed a self-consistent test/diagnostic ABI mistake (64 receipt words
+instead of production 36). Canonical layout fixtures reproduced RED; corrected
+native 24 cases, preserved field 22 cases and combined CPU 17 tests now pass.
+Production build passes. Corrected actual Cs emits seven complete packets;
+first field 973 has 2/2 complete contributors, minimum raw J 0.99975282 and
+maximum displacement/dx 0.02271429 despite a 167.651 m/s grid y velocity.
+The representative particle y velocity is 4.4941 m/s. The preset still rejects;
+this narrows the diagnosis but does not prove coupled endpoint/energy admission.
+Later packets are post-failure provisional evidence. Thirteen source hashes
+match across the run; its initial screenshot was personally reviewed.
+
+Corrected the sweep's three stale pass-order comparisons using a strict shared
+predicate and new permutation/negative tests. Current native opaque, optional
+refraction, optional ready medium, transparent sequence is accepted; other
+optics/cadence/integrity gates remain. Focused 63/63 pass, with independent
+source review. Preflight's accumulated 773-line deletion guard failure in the
+already-dirty observer scripts remains recorded and unwaived; the disjoint
+published agent leases had no actual scope conflict.
+
+Full Node: 3827 pass/62 opt-in skips/zero failures, 186.1 seconds. Default final
+all-six desktop sweep remains strict 0/6; personally reviewed all 11 PNGs.
+Four pairs visibly advance, water-cycle changes little, and Cs has only its
+initial frame. Stale pass-order errors are gone; no actionable page/critical GPU
+console errors. Input-rate proxies alone cannot pass the six moving-pixel gates.
+
+Observer-only 800x450 JPEG90 experiment keeps the actual renderer at 1600x900.
+Paused control: 32 identical scene crops/10.595 seconds despite HUD updates.
+Moving sodium: 437 crop transitions/10.332 seconds = 42.296/s after excluding
+two non-monotonic timestamps. No 54 Hz acceptance or new runtime speedup.
+Five corresponding PNGs personally reviewed: refraction/deformation persist.
+Camera result is inconclusive/failing, not accepted: candidate 447 lacks its
+post-GPU opportunity, while admitted displayed content remains 383. Left drag
+is the intended gesture; next check must observe camera pose, interaction state
+and pointer hit target, not confuse physics change with camera movement.
+The user noted that 42 Hz is substantially better than the original roughly
+1 Hz experience; preserve that progress without relaxing the agreed target.
+
+All runtime/test/observer hashes match across visual runs. Owned browsers closed,
+VPN HTTPS Vite retained, no commits/push/Pages. The next mechanics investigation
+must use a complete fine/coarse candidate and energy/heat/impulse closure:
+the captured mutation-2 fields precede coupled preparation and cannot prove it.
+
+The exact G1 completion-oracle CLI consumed the corrected baseline envelope:
+one file, nine direct campaign receipts, all nine criteria FAIL with one evidence
+record each. The runtime reader requires top-level `kind`; `event_kind` alone
+had triggered heuristic parsing of the same file, not default-log contamination.
+Keep both original and corrected reports under the external ICC artifact root
+`goal1-rejected-particle-20260906-4RR5Ql`. All seven goals remain open.
+
+## 2026-09-06 AKDT - Seven-goal and architecture campaign setup
+
+Resumed ICC directly against fresh source; preserved the existing Goal 1 task,
+dirty runtime work and failed experiments. Two independent read-only audits
+recovered the agreed scope and checked ICC oracle semantics. Added thirteen
+campaign milestones (seven immediate, six architectural), exact target-specific
+development gates, separate clean-release source binding, and a non-gating
+scientific signal. Kept legacy goals/oracles for traceability. The new plan
+distinguishes delivery order from real dependencies and >=54 visible wall-clock
+Hz from follow-on real-time physics. It preserves representative sampling and
+derived multidimensional property functions as requested architectural work.
+
+ICC currently matches reviewed event attestations, not ULG numeric payloads;
+its quality-campaign CLI does not execute declared oracles. Both limitations
+are explicit, and independent source/artifact review remains mandatory. No
+runtime changes or new visual/performance acceptance claims in this setup.
+No commit/push/merge/Pages; the entire seven-goal objective stays active.
+
+## 2026-09-05 AKDT - Reject shared-wait throughput experiment
+
+Read-only native analysis found122 enclosing waits,121 spanning two post-GPU
+callbacks, median30.191ms. Caller attribution remained source-corroborated
+inference because native timer events lack boundary IDs. A private presenter
+experiment acquired a new real fence after canonical flush, replaced the old
+observer, preserved GPU errors/serial gaps/lifecycle, and published only once.
+Fourteen new tests passed; an unchanged serial-regression test caught a cleanup
+mistake which was corrected without weakening the assertion. Final experimental
+presenter144/144, related118, full3817pass/61skip/zero failures, build pass.
+
+Actual desktop rejected the optimization. Sodium322 cropped pixel changes in
+10.276s=31.335/s; initial88 identical samples span2.249s with failed source191
+presentation. Warm joined proof latency34–35ms versus16–18ms ordinary supports
+the critical-path error: two advancing images were collapsed into one. The
+initial timeout is separately unattributed. Do not promote correct unit-test
+semantics into a performance win.
+
+Removed only this experiment and its14 tests, preserving the entire prior dirty
+worktree. ICC source/index fingerprints exactly matched97bed6c... again before
+documentation edits. Recoverable removal patch and retired test cases are in
+`/tmp/ulg-goal1-shared-wait-qESi4S/`. Restored presenter130/130/build pass; the
+earlier full3803pass/61skip applies to this restored code. Restored sodium553
+changes/10.295s=53.715/s,558samples,two timestamp regressions,max sampling
+gap87.65ms. Sources191→255→319/camera383 and photographic optics preserved.
+
+Experiment and restored six-preset sweeps both remain strict0/6. All28PNGs
+reviewed: four pairs visibly advance in each matrix, water-cycle nearly static,
+Cs initial frame only with existing mechanics rejection. No page/critical-console
+errors; optical checker failures and missing pixel evidence remain unwaived.
+No transported iron/ice plume or cloud identity accepted. No net runtime change
+from this experiment, no commit/push/Pages; all seven goals remain open. Next
+investigate genuinely empty draw intervals or unnecessary dependencies rather
+than coalescing useful advancing frames. Prior combined-attempt guard failure
+also remains explicitly recorded, not silently waived.
+
 ## 2026-07-01 AKDT - SS Far-Aggregate Law Consumers
 
 Status:
@@ -43004,3 +44295,782 @@ Validation and review:
   `desktop-six/manual-visual-review.json`. No control-body preview remained.
   Short geometry progression is not a long-run overfill or steam/smoke pass.
   All owned browser sessions closed; trusted HTTPS Vite remains up.
+
+## 2026-09-04: conservative quadratic projection, final desktop regression
+
+- Implemented shared sealed integer/fraction box geometry, an ordered
+  quadratic basis-capacity nodal-to-primal projection, forward W/WA occupied
+  volume and matching W-transpose/A-transpose gas pressure. Positive halo
+  support, tiny clipped cells and sparse ambient pressure are preserved; no
+  per-preset kernels, void floors, occupancy clamps or new hot readbacks.
+- Versioned free-volume/EOS/pressure authority together. Final regression
+  exposed stale v4 classification, and an independent audit found inherited
+  schema masks in MLS-MPM/browser publication plus a missing worker retirement
+  entry. Descriptor-safe bounded guards and positive/negative publication
+  tests now reject those inputs without invoking getters or writing state.
+- Native desktop NVIDIA WebGPU: 66 shared-geometry invariant cases (64 bytes
+  per case), actual retained five-stage pressure/mechanics route, and four
+  manufactured transpose/malformed-boundary cases (72 bytes each) pass.
+  Full Node suite passes: 3,564 total, 3,507 passed, 57 opt-in skips. Production
+  build passes; no fresh Pages build or commit/push is claimed for this slice.
+- Sodium/water passes 24 x 128 steps, 3.072 simulated seconds, with all 24
+  sampled mechanics receipts admitted and the previous frozen plateau/jump
+  absent from inspected checkpoints/frames. Final products are 1.75143 kg
+  NaOH and 0.04414 kg H2. This does not prove every unsampled substep, total
+  thermodynamic conservation, or a transported scattering plume.
+- The mandatory final desktop sweep is RED: five of six presets pass, but
+  cesium/fluorine rejects before its first committed worker presentation.
+  All ten available PNGs were inspected and a SHA-bound failed review saved.
+  Bulk-water and dam break pass the 54 Hz visible-presentation gate (105.596
+  and 116.641 Hz in this approximately 120 Hz desktop session); source-state
+  cadence is much lower and is not substituted for presentation cadence.
+- A repeated canonical 16-step Cs/F trace rejects schedule ordinal 5 with
+  fine-field prior velocity about -1196 m/s vertically, phase delta zero and
+  a 158.81 m/s bound. One-step diagnostic schedules admit four updates (Cs
+  particle maximum 2.655 m/s), then reject update 5 on another fine-grid
+  sample. The high grid velocity is not evidence of equally fast particles.
+  The later cancelling correction is causal fine/coarse momentum exchange,
+  not a wall correction; its independent energy attenuation prevents using
+  only the corrected endpoint to bypass the current admission proof.
+- Next bracket main grid update, exact pressure and remaining grid stages;
+  capture field key/mass/volume gradient, effective pressure and source gas
+  geometry/inventory. Tiny stencil-tail mass and point-binned gas pressure
+  remain hypotheses. No force scaling, preset retuning or relaxed CFL gate.
+  Keep the QCV slice uncommitted until this all-preset regression is resolved.
+- Evidence: `/tmp/ulg-goal2-qcv-integration-Pd6GTb/`, including
+  `native-all-final.log`, `full-tests-final.log`, `build-final.log`,
+  `desktop-six/summary.json`, `desktop-six/manual-visual-review.json`,
+  `sodium-long/summary.json`, `cesium-trace/summary.json`, and
+  `cesium-single-step/summary.json`. All owned browsers closed. HTTPS Vite
+  stays running. Goal 2 and the complete seven-goal program remain active.
+
+### Follow-up: external gas virtual-work sign correction
+
+- S9 stores the derivative of condensed volume with respect to particle
+  position. Since gas occupies G-WAC, its external force is negative
+  dC/dx times A-transpose/W-transpose gauge pressure. Both boundary paths
+  incorrectly used the internal-pressure sign. The existing external-gauge
+  P2G stress convention independently corroborates the negative sign.
+- Added a native test comparing GPU impulse to a centered finite difference
+  of the fixed-nT gas potential, -nRT log(Vfree) + pAmbient Vfree. Before the
+  correction it measured +88.75 N instead of -88.75 N. The corrected GPU
+  boundary passes, as do the actual five-stage route and all 66 geometry
+  cases. The historical decoded-row formula helpers were corrected too;
+  they remain explicitly outside current geometry acceptance. No CPU mirror
+  solver, pressure magnitude clamp, CFL relaxation or preset change.
+- A post-sign desktop cesium run now publishes its first 16-step schedule
+  and a real physics frame (inspected), then rejects macro generation 26,
+  ordinal 10 of schedule 2. Fine field 973 has velocity
+  [1.334,167.651,9.264] m/s, zero phase/full correction, and bound158.81 m/s.
+  This proves the initial failure changed, not that all-preset safety is
+  restored. Tiny-mass pressure loading/inventory/timestep diagnosis remains.
+- Current evidence: `external-pressure-sign-red.log`,
+  `external-pressure-sign-green.log` (three native tests pass),
+  `external-pressure-sign-unit.log` (14 pass), and
+  `cesium-sign-check/summary.json` under the QCV evidence root above.
+  The prior full regression, build, long sodium and five-of-six visual
+  evidence predates the sign correction and must be repeated before commit.
+
+### Follow-up: compact pressure-tail evidence and post-sign verification
+
+- Added an opt-in GPU-selected rejected-field packet (256 bytes) and removed
+  the prior full-field trace download. Existing fixed headers plus packet total
+  3,424 bytes. A GPU-only scratch copy retains the exact pressure transaction;
+  generation, macro/substep, field key, moment and scratch seals are checked.
+  Capture runs before G2P deliberately clears rejected field counts. Only the
+  bounded opt-in failure packet is logged when a worker schedule cannot publish.
+- Native manufactured selection/identity/range tests cover 22 cases with a
+  one-megabyte input arena and only 256 bytes read per case. An intermediate
+  shader used reserved WGSL identifier `macro`; the native compiler caught it,
+  it was corrected, and the prematurely launched probe was stopped by closing
+  only its owned Chrome. That aborted artifact is not acceptance evidence.
+- Real Cs/F evidence (cesium-field-pressure-v3/summary.json): macro 26, field
+  973, Cs solid, 1.756596e-9 kg, 2.432413e-12 m3 and 45,537.55 Pa effective
+  gauge. Post-gas and rejection-prior velocity agree at [1.334,167.651,9.264]
+  m/s. The pressure formula gives vertical delta 162.639 m/s, implying about
+  5.012 m/s before pressure. This is pressure integration at a tiny quadratic
+  support field, not a late wall force or UI stall. It does not prove actual
+  particles move at that speed, nor that their affine deformation is safe.
+- Next native fixture must exercise actual S9 pressure/G2P at a quadratic-tail
+  crossing with complete support and then 2:1 transfer. Preserve raw C/F/J,
+  phase/full-route endpoint coverage, clipped-support behavior and signed work.
+  Nodal max speed is a sufficient, not necessary particle bound, but small mass
+  does not erase finite nodal work (2.474e-5 J here). Do not bypass the current
+  proof before a valid replacement; no pressure/velocity/mass clamps or tuning.
+- Fresh post-sign verification: four native GPU tests pass (66 geometry cases,
+  22 diagnostic cases, retained boundary and virtual-work checks); npm test
+  passes 3,509 with 58 opt-in skips, zero failures; production build passes.
+  The actual six-default desktop sweep remains five-of-six: Cs first frame
+  renders and then stops. All eleven PNGs inspected and SHA-bound review saved.
+  Bulk-water/dam-break visible rates 114.22/115.49 Hz; true isosurfaces 0.4-0.8 Hz
+  remain explicitly outside that gate. These are presentation, not science,
+  acceptance results.
+- Fresh post-sign sodium/water reaches 3.072 s (24 x 128). All 24 sampled
+  pre/terminal field flags 3, receipt flags 3/phases 4-6; no stale frames or
+  browser GPU errors. Inspected frames 15-18/24 show continuing motion without
+  the old batch-17 jump. Na COM y is 0.519/0.498/0.482/0.494 m at 15-18;
+  final NaOH is 3.65577 kg and H2 is 0.09213 kg. This does not independently
+  validate every unsampled substep or a plume.
+- Evidence remains under /tmp/ulg-goal2-qcv-integration-Pd6GTb/:
+  native-pressure-diagnostic-all.log, full-tests-post-sign-diagnostic.log,
+  build-post-sign-diagnostic.log, desktop-six-post-sign/, sodium-long-post-sign/,
+  and cesium-field-pressure-v3/. Owned browsers closed; HTTPS Vite stays up.
+  QCV remains uncommitted while Cs/F regression is unresolved. Goal 2 and all
+  seven immediate goals remain active; no new Pages build or push is claimed.
+
+### Follow-up: native pressure tails and user-visible renderer regression
+
+- Extracted production's unchanged raw (I + dt C) F arithmetic into a shared
+  WGSL helper. Added nine native single-particle fixtures through actual S9,
+  P2G, gas inventory/EOS, pressure boundary and G2P. All 64 neighboring gas
+  cells are populated on GPU from actual moment volumes; evidence is 256 bytes
+  per case. No runtime admission weakening or CPU dynamics mirror.
+- A positive quadratic tail reaches 327.68 m/s at the grid while COM remains
+  approximately zero and raw J is 0.998081. The adverse zero-COM affine case
+  exposes raw J=-0.021952 despite final capped J=0.95. Actual advection,
+  pressure-ramp C, negative gauge, signed external work and APIC/grid energy
+  separation are asserted. Opposed affine motion has -0.00407404 J work.
+  Raw F is reconstructed with the shared GPU helper from retained C and the
+  fixture's identity F, not a direct pre-cap-local capture. Actual Cs admission
+  and all cross-level endpoints remain unproven; the runtime guard is unchanged.
+- Native final tests: three exact-pressure tests (including nine tail cases)
+  and two geometry/diagnostic tests pass. A geometry rerun accidentally kept its
+  default headless mode and found no adapter; corrected owned-desktop run passes.
+  Full suite: 3568 total, 3509 passed,59 skipped,0 failed. Build passes.
+- All-six desktop sweep is 4/6: Cs cannot advance past its first presentation;
+  bulk-water cadence46.40Hz fails. Isolated two-water repeat reaches112.97 and
+  104.80Hz; keep both observations and do not invent an outlier cause. All15
+  images inspected; SHA-bound reviews reside beside both summaries. Isosurface
+  updates remain0.4-0.6Hz. Owned probe browsers are closed; Vite stays alive.
+- User reports about1Hz updates, missing water refraction and patchy triangular
+  sodium/water surfaces. They then confirm faint clouds, only sodium/water for
+  now, possibly smoke. Record visible clouds, not verified steam identity; iron/
+  ice plume still needs verification. Source audit confirms worker isosurface
+  lacks existing page-native refraction, IOR/transmission/metalness use and
+  matching tone/color output; transparent surfaces do not write depth or cull
+  backfaces. This is a capability regression, not scientific progress.
+- User-visible renderer fidelity and cadence now take priority inside Goal2.
+  Preserve mechanics checkpoint; compare frozen geometry/optical inputs between
+  worker and existing native paths, restore shared rendering without changing
+  authority, then return to read-only actual-Cs particle gathers. No commit,
+  push or Pages build. Evidence root /tmp/ulg-goal2-qcv-integration-Pd6GTb/:
+  pressure-tail-native-advection-final.log, pressure-tail-native-geometry-desktop.log,
+  pressure-tail-full-tests.log, pressure-tail-build.log, desktop-six-pressure-tail/
+  and desktop-water-pressure-tail-repeat/.
+
+User clarification supersedes the narrowed two-water completion claim: Goal1
+is reopened for >=54 visibly advancing presentations per real wall-clock second
+across ALL presets, including true isosurfaces. UI rAF, solver steps/s and sim
+time are not acceptance; disclose source-update versus interpolated-display
+cadence. Restore material/refraction/depth fidelity alongside this renderer
+work. Goal2 remains open/preserved; Goals3-7 pending. Dashboard counter labels
+also need correction so they cannot suggest visible60Hz from physics-step rates.
+
+### Goal 1 wall-clock counter correction and second false-positive audit
+
+- Confirmed `physics fps` / `resident fps` increment by completed batch size
+  and divide by real elapsed time. These are steps/s, not frames/s. Sodium/
+  water uses 64-step schedules: approximately 50 steps/s permits roughly
+  0.78 terminal source updates/s before field construction/presentation costs
+  (source/configuration inference, not a new live measurement).
+- Extracted the sweep's observer and counter into a shared visualization module
+  and wired the live dashboard to it. Keep callbacks/s, completed steps/s,
+  presented/source states/s and simulated seconds/wall second separate. Holds
+  stay in the denominator; batched source jumps count once; unavailable or
+  regressed presentation evidence cannot produce a positive measured rate.
+- Independent source review found that the sphere temporal serial advances
+  with motion age even for zero velocity or displacement-saturated geometry.
+  Time-horizon saturation does stop ages, but spatial saturation does not stop
+  serials. The UI therefore explicitly leaves actual visible-motion rate
+  unavailable. The sweep now blocks acceptance with
+  `visible-motion-change-evidence-missing`, even when its render-input proxy
+  exceeds 54 Hz. Historical water proxy rates are not pixel-cadence proof.
+- Confirmed the true-isosurface path has no temporal motion loop and no retained
+  field velocity; it renders a mesh after terminal schedules. Its worker field
+  builder is dense. The existing source-local producer still falls back for
+  dispersed optical sidecars and some successor/product-history authority.
+  Optimizing it must preserve those inputs and seals, not bypass them. Existing
+  velocity lanes in captured render rows can seed a separate presentation-only
+  motion sidecar; final field lanes already contain optical moments and cannot
+  be repurposed. Mesh topology between source updates and queue opportunities
+  must be handled without changing authoritative physics or switching geometry.
+- Renderer restoration remains a separate pending slice: reuse existing native
+  PBR/refraction/color output and depth/culling, then compare frozen identical
+  geometry/optical inputs in real desktop rendering. No shader change in this
+  counter slice; material fidelity and actual animation speed remain unresolved.
+- Both the seven-goal ICC parent plan and focused Goal 1 task now show the goal
+  open. Preserve the QCV/mechanics checkpoint; no commit/push/Pages build or new
+  GPU probe in this counter slice. The user may still be running sodium/water;
+  do not launch competing GPU checks. HTTPS Vite responds 200 on Tailscale.
+- Evidence directory: /tmp/ulg-goal1-wallclock-dashboard-Ekt0R1/.
+- Follow-up review caught hidden-tab rAF suspension retaining a pre-hide
+  baseline. Visibility/page lifecycle listeners now reset presentation,
+  callbacks, completed-step and simulation-speed windows even with no hidden
+  callbacks, and demo close removes them. The zero-hidden-callback regression
+  includes background step completions and fresh foreground-only rates.
+  Final expanded UI/cadence tests: 144 passed, zero failures/skips; production
+  build and diff check pass. Scoped guard passes with extraction warnings;
+  aggregate guard remains red on the combined deletion-size threshold. No
+  policy relaxation or discarded user work. Runtime desktop verification is
+  still pending; these CPU results do not prove 54 Hz visible animation.
+
+### Goal 1 strategic reset and first measured true-isosurface motion improvement
+
+- User approved a narrower execution sequence: short real-desktop baseline,
+  shared true-isosurface motion between source publications, existing material
+  optics restoration, then all-six acceptance. Preserve the other six goals
+  and paused QCV/mechanics work. Do not replace visible progress with a new
+  measurement framework or more actual-Cs diagnostic expansion.
+- Preserved the unfinished optics presenter draft outside the active path and
+  returned that draft-only code to its known working baseline before recording.
+  Kept the exact shared native shader extraction and all unrelated dirty work.
+  The draft is not active and material/refraction restoration is not claimed.
+- Added an opt-in immutable GPU velocity-moment sidecar to the existing render
+  field pass, written before motion smear without another particle traversal.
+  Its default-off variant preserves density/optical outputs; its ownership is
+  transferred to the retained presentation frame and retired after GPU use.
+- Added shared trilinear velocity sampling and normal transport to the actual
+  isosurface vertex path. Presentation extrapolation is paced by observed
+  source/wall progress, capped at one observed source interval and one field
+  cell edge. No source step, authoritative time, solver state or law changes.
+  Last admitted geometry redraws on the existing serialized render lane while
+  the next field/mesh builds; generation, replacement, resize and clear guards
+  prevent retired frames from publishing again.
+- Real headed system-Chrome sodium recordings use fixed cameras and a fixed
+  simulation crop excluding HUD/controls. Before: 490 compositor samples over
+  10.088 s, only 3 pixel transitions, longest sampled hold about 3.01 s. After:
+  423 samples over 10.091 s, 372 transitions (36.86 observed/s), longest sampled
+  hold 0.208 s, no console/page errors. CDP does not sample every scanout; runs
+  span slightly different source states. This proves substantial visible
+  improvement, not a precise speedup factor or the 54 Hz target. Timestamped
+  VFR videos, raw PNGs and pixel-hold analysis remain outside the repository.
+- One early capture clicked Play before driver initialization (harness error).
+  A later cold baseline failed a queue checkpoint before a mesh. Its cause is
+  unproven; preserve the trace rather than treating later successful runs as a
+  fix. The canonical baseline and after recordings both showed real geometry.
+- Repeated all six configured presets in owned desktop Chrome. All eleven
+  available images inspected and SHA-bound review saved beside the summary.
+  Five pairs change visibly; Cs/F again stops after its first accepted frame,
+  macro 26/ordinal 10 (this run field 621, prior vy 342.03 m/s, bound 158.81).
+  Do not conflate that field with the earlier selected field-973 diagnostic.
+  Bulk-water/dam-break render-input proxies are 111.49/113.40 states/s. The
+  observer omits the new isosurface temporal fields and reports source rates
+  0.80/0.40/0.20 states/s for water/iron/sodium, not current visual motion.
+  All six still fail strict cadence acceptance because pixel-cadence proof is
+  absent; Cs also fails physics. The recordings are separate bounded evidence,
+  not a manufactured green sweep. Materials remain blue/plastic/patchy, and
+  early-horizon screenshots do not establish steam/smoke plume identity.
+- Focused tests: 144 pass. Two opt-in native desktop GPU tests pass: 16
+  analytical deformation fixtures and two production field A/B fixtures,
+  using fixed 512-byte/64-byte evidence reductions. Production build and diff
+  check pass. Independent source review found no new safety/lifetime/stale-
+  generation blocker, but camera redraws still wait behind field construction.
+- Next reduce shared-queue/camera stalls through existing rendering
+  opportunities, retaining a valid no-presentation path for physics. A sampled
+  draw's GPU completion delay is 93.5 ms; the exact interfering workload is not
+  isolated. Forward temporal diagnostics without inventing visible FPS, then
+  restore existing optics while preserving motion. Do not blindly enable the
+  particle-only presentation proof callback for isosurfaces.
+- Queue review clarified that the fused runner already catches failed
+  presentation boundaries and admits exact completed-plus-failed totals. The
+  next experiment can reuse that existing fail-open max-two-substep seam with
+  an honest isosurface completion proof. No second scheduler is needed; a long
+  field/mesh dispatch may still stall independently of solver chunking.
+- The first full Node run exposed one stale source-layout contract left by the
+  earlier counter extraction (3,538 pass, 61 skip, one fail). Updated that test
+  to assert the shared observer import and preserve geometry/lineage checks,
+  while requiring all-preset gating and rejecting missing actual-motion proof.
+  The focused harness/counter rerun passes all 103 tests; final full rerun is
+  recorded separately below.
+- Evidence: /tmp/ulg-goal1-desktop-baseline-qwHaI8/,
+  /tmp/ulg-goal1-desktop-motion-ZTB912/,
+  /tmp/ulg-goal1-motion-all-presets-Sd4sJa/.
+  Owned browsers closed; HTTPS Vite still returns 200 through Tailscale.
+  No commit/push/Pages build; Goal 1 and the seven-goal program remain open.
+- Final cumulative Node rerun is green: 3,600 total, 3,539 pass, 61 opt-in
+  skips, zero failures (`full-tests-final.log`, 161.43 s). The motion-focused
+  rerun is 144/144; production build and diff check pass. Logs live in the
+  after-recording evidence directory. Scoped motion guard passes with no
+  violations; plan guard passes with historical deletion-size warnings.
+
+## 2026-09-04 AKDT - Camera continuity, temporal reporting, and queue-route correction
+
+- Camera requests now copy and retain the latest valid camera independently of
+  captured physics. The last admitted mesh redraws during capture/build, and a
+  replacement reads the newest camera immediately before encoding. Regression
+  tests cover blocked capture/build, mutation of caller inputs, replacement,
+  invalidation, and monotonic display age. An owned desktop mouse-drag check
+  visibly rotates both mesh and box.
+- Isosurface temporal source/time/age fields now survive the durable display
+  bridge and shared observer. Source transitions and display-only temporal
+  inputs are separate diagnostics; visible pixel cadence remains null. Exact
+  raw isosurface attribution is shared by bridge and scheduler proof checks.
+  Independent review caught numeric-string serials reaching a lexicographic
+  replay comparison; strict numeric identities and adversarial tests fix it.
+- Added true-isosurface support to the existing Tier0 max-two-substep
+  presentation seam. Real queue completion plus a following presentation
+  opportunity is required; bootstrap, missing frames, stale sources, repeated
+  ages, replayed identities and mixed geometry receive no presentation credit.
+  Mock driver tests preserve one terminal adoption and zero intermediate
+  physics publications, including failed presentation opportunities.
+- The desktop experiment changed the plan: default sodium runs canonical SS,
+  not eligible Tier0, because its contact/thermal/reaction/law-queue/phase-
+  migration settings exclude that fast route. All 42 nonempty recorded raw/
+  durable observations in the first run are non-attributed autonomous frames.
+  The execution-route conclusion is from recorded settings plus live source,
+  not a route receipt in the capture. The new Tier0 callback does not run on
+  that canonical path; DO NOT call it a sodium speedup. Canonical already has a
+  between-step submit flush/task yield near worker line 12809, but no awaited
+  presentation callback there. No canonical solver edit was made.
+- First desktop record: 438 samples, 305 scene-crop changes in 10.104 s,
+  including a 2.123 s startup hold before a second motion source. Separate
+  warmed record: 442 samples, 415 changes in 10.111 s (41.04 observed/s),
+  maximum changed-sample interval 0.426 s. Identical sampled runs alone omit
+  capture gaps; do not present their smaller span as worst-case latency.
+  Both runs have zero page/console errors, and their before/after PNGs were
+  directly inspected. Neither is full scanout evidence or a 54 Hz pass, and
+  slightly different source intervals prevent a controlled speedup claim.
+  Water remains blue/plastic with triangular patches and poor refraction.
+- Full Node run passes 3,559 of 3,620 tests with 61 opt-in skips, zero failures.
+  After the final numeric-string fix, all 307 focused tests and the production
+  build pass. Earlier native motion/field GPU evidence remains valid; no new
+  Tier0-isosurface native performance result is claimed. Scoped diff guard and
+  whitespace check pass. The frozen all-six desktop sweep runs separately.
+- Next restore the existing native optics surgically, preserving current mesh
+  motion/lifetimes. Forward appearance, keep image failures from blanking
+  physics, preserve the native fragment shader/camera ABI and matching front/
+  rear motion, handle condensed refraction before depth-clipped medium/vapor,
+  and use the actual temperature sidecar or an explicitly declared existing
+  uniform fallback. Do not reactivate the old pre-motion presenter draft.
+  Canonical queue opportunities are a bounded follow-up, not permission for
+  another physics refactor. Cs/QCV and steam lineage remain open/paused.
+- Evidence is outside Git: /tmp/ulg-goal1-camera-queue-dKItyv/ and
+  /tmp/ulg-goal1-camera-queue-warm-EDbWoO/ contain captures, crop analyses and
+  timestamped VFR videos; the former also contains camera-after.png and test/
+  build/ICC logs. No commit, push or Pages build in this slice.
+- Final all-six sweep: /tmp/ulg-goal1-camera-queue-all-six-gcTgJZ/, all eleven
+  PNGs directly inspected with SHA-bound manual review. Five advancing pairs;
+  strict acceptance0/6, no page errors or critical console messages. Mean
+  admitted inputs water57.12/iron36.69/sodium20.78/bulk97.35/dam113.26 states/s
+  are not pixel rates. Cs macro26/ordinal10 rejects field973 at prior vy167.651
+  versus158.810m/s; previous field621 diagnostic remains distinct. Browser
+  closed; Vite remains active and HTTP200 on VPN. Next is optics, not expanding
+  paused mechanics or mistaking the unexercised Tier0 seam for canonical gains.
+
+## 2026-09-04 AKDT — Existing native optics restored on retained moving meshes
+
+- Reused the unchanged compact native fragment/PBR/refraction shader and320B
+  camera ABI. Motion remains vertex-only and shared by front/back depth passes.
+  Same-submit GPU temperature sampling uses the retained marching-cubes field;
+  no physics state/readback or extra temperature submission was introduced.
+  Native opaque, per-surface refraction, depth-clipped medium, vapor and overlay
+  passes share current camera state. Missing draw resources fail admission.
+- Appearance-only updates now survive the worker bridge and asynchronous image
+  loading; cold capped RGBA upload and exact GGX prefilter preserve the existing
+  environment path. Actual desktop isolation found accelerated2D readback
+  supplied zero bytes; willReadFrequently restores the photo without GPU physics
+  readback. The unchanged scene copy stays in place because its pre-existing
+  large shader-extraction diff exceeds ICC's deletion guard.
+- Strict finite optical-table admission exposed derived H2 attenuation distance
+  5.180150523788162e77 overflowing Float32. Cold packing now uses the existing
+  1e20 infinity representation for unrepresentable values. Closure physics and
+  admission strictness remain unchanged. Real H2 and representable material
+  regression fixtures cover this instead of a preset-specific exception.
+- Current committed worker display proof now retires the startup control-body
+  preview. Authority/generation/owner/content/visibility guards remain intact;
+  enqueue alone cannot retire it. Final desktop images show no stale labels.
+- Full Node regression:3651 total,3590 passed,61 opt-in skipped,zero failed.
+  Production build and scoped optics diff guard pass. Evidence:
+  /tmp/ulg-goal1-native-optics-6mpiZZ/full-final.log and build-final-all.log.
+- All six actual desktop defaults run; all11PNGs directly inspected and SHA-bound
+  in /tmp/ulg-goal1-optics-all-six-4A9l3y/manual-visual-review.md. Five advancing
+  pairs; Cs/F still rejects macro26/ordinal10, field973, priorvy167.651 versus
+  158.810m/s. No page/critical console errors. Strict acceptance0/6. Input proxy
+  means water48.29/iron35.55/sodium18.33/bulk57.39/dam60.80 states/s are NOT pixel
+  rates. Long holds remain. No new iron/ice transported-steam acceptance.
+- The sweep's old pass-order contract flags the new refraction pass incorrectly.
+  Its original fail summary remains unchanged, annotated separately. Updating
+  that validator was stopped by ICC preflight's915-deleted-line scoped guard
+  (limit200) in existing dirty scripts/tests; no guard bypass or new edits there.
+  Missing actual pixel cadence, rate/hold failures and Cs rejection remain real.
+- Final photographic sodium/camera capture at
+  /tmp/ulg-goal1-optics-final-photo-qLogXL/ shows pavement bending through moving
+  water, metallic reflections and working camera rotation. All3PNGs inspected
+  and SHA-bound. This is existing-optics restoration, not a54Hz or frozen optical
+  reference acceptance. The earlier failed H2/black-background captures remain
+  archived outside Git rather than relabeled successful.
+- Next is bounded canonical queue/presentation availability using the existing
+  desktop recording, keeping native optics and honest unavailable visible Hz.
+  Do not expand paused Cs/QCV physics or build a new measurement framework.
+  Goal1/seven-goal program stay open. No commit/push/Pages build in this slice.
+
+## 2026-09-04 AKDT — Canonical rendering queue opportunities
+
+- Added a route-general committed-display opportunity after each nonterminal
+  canonical atomic step. The earlier Tier0 seam did not run on default sodium.
+  Shared renderer callbacks, exact GPU+rAF proof,100ms abortable fail-open wait,
+  cancellation and replay checks preserve sole terminal physics admission.
+  Counters stay outside the exact authority receipt schema. No kernel/law or
+  intermediate physics publication changed.
+- Independent review found no-op sources forced unnecessary burst flushing and
+  failed particle boundaries could strand autonomous rendering. A synchronous
+  readiness check now skips before flush; failed boundaries safely resume the
+  unattributed loop. Actual opened-burst mock tests retain original submit counts;
+  late aborted frame proofs are suppressed.95worker+60presenter/bridge tests pass.
+- Initial desktop experiment:341changes/10.832s=31.48observed/s. Final frozen
+  repeat:319/10.688s=29.85 versus prior183/10.514s=17.41; longest sampled change
+  gap0.540s versus1.894s. Incomplete compositor samples/timestamp regressions and
+  different source intervals preclude scanout/54Hz or controlled-factor claims.
+  Sources191->255->319 in the final window, slower publications than before.
+  Actual canonical boundary receipts observed at191/substep18 and319/substep9;
+  GPU completion3–14.1ms, median5.9ms, versus previous maximum284.3ms.
+- Final source191 and255 each reach their0.064s bounded motion horizon during
+  the remaining holds, with11.7/14.1ms GPU completion. This changes the next
+  target to source handoff/pacing and first-source warmup, not more backlog
+  tuning or unbounded extrapolation. No new measurement framework.
+- All11all-six PNGs plus3final photographic/camera PNGs directly inspected and
+  SHA-bound. Five advancing pairs,0/6strict acceptance; Cs macro26/ordinal10
+  field973 priorvy167.651 versus158.810 remains. Cold sodium input gap1.763s;
+  water/iron/sodium/bulk/dam input proxies47.18/39.18/20.58/58.11/56.70 are not
+  pixelHz. Stale optional-refraction validator failure remains annotated under
+  the existing ICC guard restriction, not relaxed. Optics/camera/preview fixes
+  preserved; zero page/critical console errors; no steam lineage acceptance.
+- Full Node3666total,3605pass,61opt-in skips,0fail; production build and scoped
+  guard pass. Evidence /tmp/ulg-goal1-canonical-final-3Xpp21/ and
+  /tmp/ulg-goal1-canonical-all-six-FNhUbc/; initial experiment separately in
+  /tmp/ulg-goal1-canonical-opportunity-89NJn5/. Owned browsers closed, VPN Vite
+  activeHTTP200. Goal1 and all seven goals remain open; no commit/push/Pages.
+
+## 2026-09-04 AKDT — bounded source-arrival pacing experiment
+
+- Changed only the display wall-clock forecast and its tests: normalize the
+  last two raw source intervals by simulation time, budget for the slower rate
+  and positive trend, never feed padded values back. Physical age and spatial
+  displacement caps are unchanged. Focused69tests and build pass; direct full
+  rerun3672total,3611pass,61skip,zero failures exits0. First full report also had
+  zero failures but its wrapper exited143; both logs preserved. ICC task
+  refreshed directly, runtime preflight/lease/guard passed.
+- Desktop sodium:322 cropped transitions/10.603s (30.37observed/s), essentially
+  unchanged overall from29.85. Source191 still saturates at0.064s with0.678s
+  plateau; source255 remains below the cap until source319, avoiding the later
+  plateau. Do not call the slight rate difference a speedup.45capture timestamp
+  regressions and incomplete sampling remain. Root reviewed three photographic
+  PNGs; refraction/metal reflection/camera work. Evidence and SHA-bound review:
+  `/tmp/ulg-goal1-source-pacing-4ggt4j/`.
+- All-six desktop sweep still0/6; all11PNGs reviewed, five source pairs advance,
+  Cs rejects macro26ordinal10field621 priorvy342.03vs158.81m/s. Input proxies
+  water43.88/iron37.77/sodium33.53/bulk57.50/dam57.76 are NOT pixel rates. Cold
+  sodium input gap1.496s. No page/critical errors, no new plume acceptance.
+  Evidence `/tmp/ulg-goal1-source-pacing-all-six-tzTEB2/`; original validator
+  failures preserved and stale refraction-order mismatch separately annotated.
+- Read-only next target: queued ordinary temporal draws can repeat canonical
+  motion ages. Compute age on the render lane, skip duplicate animation submits
+  without proof/publication, preserve camera redraws and keep the loop alive.
+  Use a blocked camera fence with canonical then autonomous queued behind it
+  for a deterministic regression. Not implemented yet. First-source timing,
+  pause reset and transient opportunity retry remain separate follow-ups.
+- Owned browsers closed; VPN HTTPS Vite retained. No commit/push/Pages. All seven
+  goals remain open; this is bounded evidence, not a throughput completion claim.
+
+## 2026-09-04 AKDT — On-lane temporal coalescing checkpoint
+
+- Autonomous draws recompute age on the serialized render lane and coalesce
+  already displayed ages without submit/proof/publication. Camera/appearance
+  redraws and loop liveness remain; physics authority and motion bounds do not
+  change. Focused 73 tests/build pass; full direct Node exits 0: 3,676 total,
+  3,615 passed, 61 opt-in skipped, zero failed, 153.8 s. Ordering/horizon tests pass.
+- Sodium PNG: 370 changes/10.661 s = 34.71 observed/s (prior 30.37), max gap 0.315 s,
+  42 timestamp regressions. Recorder 35.55 samples/s cannot prove 54 Hz. Evidence:
+  `/tmp/ulg-goal1-temporal-coalesce-FBczXX/`. Same-runtime JPEG repeat:
+  375/10.249 s = 36.59 observed/s, zero timestamp regressions, gaps 1.038 s/0.385 s,
+  `/tmp/ulg-goal1-temporal-coalesce-jpeg-Kh2KHt/`. Capture-format comparison
+  is not an additional application speedup or complete scanout measurement.
+- All 11 PNGs reviewed in `/tmp/ulg-goal1-temporal-coalesce-all-six-74Uq10/`:
+  five advancing source pairs, four clearly moving pairs; water-cycle silhouette
+  nearly unchanged. Strict 0/6; sodium input hold 1.950 s. Cs macro 26/ordinal 10,
+  field 973 prior vy 167.651 versus 158.8097 m/s rejects. No page/critical errors;
+  stale refraction-order validator remains separately annotated, not waived.
+- Next: bounded recovery from transient 100 ms presentation-callback misses.
+  Source confirms a miss can end the autonomous loop for its current source;
+  this is only an inferred cause of the JPEG boundary-only pause, not a proven
+  capture diagnosis or implemented fix. First-source timing/reset remain later
+  bounded follow-ups. Goal 1/all seven remain open; no commit/push/Pages.
+
+## 2026-09-05 AKDT — Bounded presentation-opportunity recovery
+
+- Fixed the ordinary animation loop terminating for the rest of a source after
+  a transient 100 ms post-GPU callback timeout. Only exact typed timeouts retry,
+  on the existing paced serialized lane and within actual wall validity.
+  Failed waits publish no proof/displayed-age advance; actual GPU serials
+  remain consumed. Generic/GPU failures and explicit canonical proofs retain
+  strict behavior. No physics or motion-envelope change.
+- Test-first: initial cases exposed absent retries; 22 new deterministic cases
+  now pass, including repeated timeouts, queued/in-flight horizon expiry, and
+  clear/replacement/disposal during an observer wait. Final presenter 66,
+  focused 95, production build and scoped guard pass. Full direct Node exits 0:
+  3,698 total, 3,637 passed, 61 opt-in skipped, zero failed, 184.8 s.
+- Actual headed sodium photographic recordings: 480 changes/10.240 s = 46.875/s
+  and repeat 506/10.279 s = 49.2266/s; maximum gaps 0.303/0.108 s. Both have zero
+  timestamp regressions or page/console errors. All five PNGs inspected and
+  SHA-bound; refraction, reflections, true mesh and repeat camera orbit preserved.
+  Source intervals/recording phase differ: not precise attribution or 54 Hz
+  acceptance. First run omitted optional camera check; repeat supplies it.
+  Evidence: `/tmp/ulg-goal1-opportunity-recovery-UYjmjk/` and
+  `/tmp/ulg-goal1-opportunity-recovery-repeat-WUBEOx/`.
+- All-six `/tmp/ulg-goal1-opportunity-recovery-all-six-vQUleL/` exits 1, strict
+  0/6; nine available PNGs reviewed. Four moving pairs, cold sodium input gap
+  2.068 s; known Cs field973/macro26/ordinal10 rejection. Water-cycle never
+  reached simulation after ERR_CERT_VERIFIER_CHANGED and nine ERR_FAILED loads.
+  Unchanged-code retry `/tmp/ulg-goal1-opportunity-recovery-water-retry-D8kvgB/`
+  loads and advances source15→79; two PNGs inspected, little silhouette motion,
+  input50.92 states/s/maxgap124.6 ms, not pixel proof or acceptance. Original
+  failed sweep preserved; no stale validator failure waived.
+- Next cold-source timing has an existing seed-upload clock and schedule
+  source/target lineage to authenticate it. Snapshot scalar timing/identity,
+  not mutable upload aliases; do not invent an already-presented predecessor,
+  assume equal storage generations or guess realtime pacing. Not implemented.
+  Horizon/pause-reset issues remain. All seven goals stay open; no commit/push/
+  Pages or paused mechanics expansion. Owned browsers closed; VPN Vite retained.
+
+## 2026-09-05 AKDT — Authenticated first-source presentation timing
+
+- First-mesh motion now uses actual private seed-to-terminal timing, bound to
+  exact source/target lineage and the existing committed candidate. No new
+  authority schema, solver clock, fake previous frame or expanded motion cap.
+  Bootstrap history is excluded when two real presentations become available.
+- Review caught a real producer/mocked-fixture mismatch before desktop: seed
+  rematerialization omits upload.time. Only exact paired retained seed-state
+  clocks/steps/counts and source tags may supply that missing clock. Explicit
+  malformed clocks remain invalid; geometry still renders without bootstrap.
+- 49 new tests; focused144/build/scoped guards pass. Full direct Node exits0:
+  3747 total,3686 passed,61 opt-in skipped,0 failed,129.4s. Logs and ICC records:
+  `/tmp/ulg-goal1-first-source-xHyhmQ/`.
+- Cold desktop `/tmp/ulg-goal1-seed-bootstrap-cold-WNKj4h/` proves source63
+  age0.000436→0.015647 before127.305crop changes/10.212s=29.8668observed/s
+  includes environment/background loading; not a warmed comparison. GPU waits
+  445/1270/329ms occur below the motion cap, producer attribution unknown.
+  All3PNGs inspected; after-load refraction and camera orbit remain visible.
+- Warm `/tmp/ulg-goal1-seed-bootstrap-warm-settled-0SjCRO/` has541changes/
+  10.267s=52.6931observed/s,545samples,0timestamp regressions/page errors,
+  sampled GPU3.1–15.1ms. Source383 nonetheless fails its post-GPU callback;
+  admitted319 remains until447 later recovers. Warm camera orbit unverified;
+  all3PNGs inspected.143/101ms gaps and329ms unsampled tail are not continuous
+  frozen-pixel proof. Two earlier warm launch ERR_NETWORK_CHANGED failures
+  are preserved in warm-IxjdY9 and warm-retry-sA7xFT with the same /tmp prefix.
+  A3s browser launch settle, outside capture, allowed the final attempt to load.
+- All-six `/tmp/ulg-goal1-seed-bootstrap-all-six-kGgABE/` exits1,strict0/6.
+  All11PNGs reviewed: five advancing sources, four visibly moving pairs;
+  water-cycle nearly unchanged. Input proxies52.31/48.19/34.74/57.29/57.56
+  (water/iron/sodium/bulk/dam) are not pixels. Cs samefield973/macro26/ordinal10
+  rejection: its51.45input states/s is source15 extrapolation, zero new sources.
+  No new sweep presentation/page/critical errors; stale pass-order guard stays
+  failed. Original artifacts preserved; no acceptance claim.
+- Next bounded existing-path fix: committed replacement callback recovery,
+  with exact immutable-source/admission/lifetime guards. Autonomous retry does
+  not cover that path. Cold queue cost/handoff horizon/pause-reset remain open;
+  no new measurement framework or paused Cs physics expansion. All7 remain
+  open, owned browsers closed, VPN Vite retained; no commit/push/Pages.
+
+## 2026-09-05 AKDT — Bounded committed-replacement presentation retry
+
+- A committed mesh job now retries one exact typed post-GPU callback timeout.
+  Initial and resize draws share the budget; supersession/clear/dispose stop it,
+  while generic errors remain fatal. No fabricated proof or rollback of GPU
+  serial/submitted-generation high-water marks. Old admission is retained until
+  new proof; this does not imply old pixels remain after a failed submitted draw.
+- 21 new cases, presenter100/focused165/build pass. Full direct Node exits0:
+  3768 total,3707 passed,61 opt-in skipped,0 failed,159.4s. Evidence:
+  `/tmp/ulg-goal1-replacement-retry-WAbTDj/`.
+- Desktop photo `/tmp/ulg-goal1-replacement-desktop-3pjh4q/`:510 crop changes
+  over10.358s=49.2373 observed/s,517 samples,0 timestamp regressions/page errors.
+  Not a throughput gain over prior52.693, a controlled comparison, or54Hz proof.
+  Sources191→255→319 then383 during camera check; no sampled presentation
+  failure, but no affirmative retry-execution evidence either. GPU3.5–49.9ms;
+  slow cluster occurs below source255 motion cap, not a known horizon hold.
+  Largest154ms interval is unsampled and cannot prove a continuous freeze.
+  All3PNGs inspected/SHA-bound: true mesh, native refraction/reflection and
+  actual camera orbit remain visible.
+- All-six `/tmp/ulg-goal1-replacement-all-six-sWwN3E/` completed strict0/6,
+  all11PNGs inspected/SHA-bound. Five sources advance; four pairs visibly move,
+  water-cycle silhouette nearly unchanged. Input proxies water51.56/iron45.11/
+  sodium31.58/bulk57.86/dam57.59 states/s, sodium maxgap769ms. Cs54.66 is only
+  bounded extrapolation of source15, zero new sources, samefield973/macro26/
+  ordinal10 rejection. No new recorded renderer/page/critical errors. Three
+  stale optional-refraction pass-order failures preserved; all-six actual pixel
+  cadence missing. No transported iron/ice plume or smoke identity accepted.
+- Previous status reply was no goal progress. Continuation recovered missing
+  handle18409 using terminal sweep-complete plus absent owned process, then
+  completed manual checks/full regression; no duplicate browser launch.
+  Next inspect shared presentation-lane work/serialization, not more horizon
+  padding or speculative retries. All seven goals remain open; no paused physics
+  expansion, new measurement framework, commit/push/Pages. VPN Vite retained.
+
+## 2026-09-05 AKDT — Warm submit/fence ordering experiment
+
+- Removed only the no-op await after warm presentation submit. Actual shared
+  submit-burst wrapper RED shows later physics entering the frame fence;
+  GREEN excludes it. First-draw validation remains awaited, and lifecycle,
+  fence-error, serial and authority safeguards remain strict. Eight new cases,
+  presenter108/focused173/build pass. Full Node exits0:3776 total,3715 passed,
+  61 opt-in skipped,zero failed,139.7s. Logs:
+  `/tmp/ulg-goal1-warm-fence-HEHn9A/`.
+- This ordering correction is NOT a demonstrated throughput improvement.
+  Photo `/tmp/ulg-goal1-warm-fence-desktop-UroozJ/`:430 samples,329 crop changes
+  over10.292s=31.9666 observed/s, below prior49.2373. Source191 passes physics/
+  StateManager admission but fails the post-GPU presentation callback. Admitted
+  display remains127 until255;89 equal images span2.358s,2.372s until a change.
+  Old admission alone cannot identify already-submitted unconfirmed pixels.
+  A separate389ms hold reaches source319's exact motion cap. GPU waits3–83.3ms,
+  median4.9ms; no cause/attempt count/method is proved by the generic stored
+  error. No capture errors/timestamp regressions does not erase this failure.
+  All3PNGs reviewed/SHA-bound; native refraction, mesh motion and camera orbit
+  remain visible. No smoke/steam identity or scientific accuracy acceptance.
+- Final six-preset `/tmp/ulg-goal1-warm-fence-all-six-jbUOZf/` exits1,strict0/6;
+  all11PNGs reviewed/SHA-bound. Five sources advance, four pairs visibly move,
+  water-cycle almost unchanged. Input proxies water52.39/iron42.60/sodium31.74/
+  bulk57.60/dam58.23 are not pixels. Cs52.72 is bounded extrapolation, same
+  field973/macro26/ordinal10 rejection, source15/physics16 unchanged. No new
+  sampled sweep renderer/console error; separate photo failure preserved.
+  Three stale optical validator failures and missing pixel cadence unwaived.
+- Next: native Chrome timeline/CPU profiling through the existing desktop
+  recorder to find the missed callback cause before another runtime change.
+  No new measurement framework, speculative retry-budget/horizon increase,
+  paused Cs physics expansion, commit/push/Pages. All seven goals remain active.
+
+## 2026-09-05 AKDT — Lazy mechanics import cache and native callback evidence
+
+- Shared one lazy, retryable module promise across P2G/grid-update/G2P. Exact
+  awaited admission boundaries remain; no physics/kernel/scenario changes.
+  Twelve new tests and197 existing mechanics tests pass; full Node3,788 total,
+  3,727 passed,61 opt-in skipped,zero failed (143.5s), build passes. Logs:
+  `/tmp/ulg-goal1-mechanics-bundle-cache-p8jgDC/`.
+- Native baseline `native-callback-trace-8mhD7B` and after-cache
+  `mechanics-cache-native-Qm8jmK` (both `/tmp/ulg-goal1-`): complete worker
+  module tasks180,125/874.8ms over14.15s versus81,001/434.3ms over15.80s.
+  This is reduced observed module overhead, not controlled throughput evidence;
+  partial schedule coverage differs. The latter has explicit wall-clock marks:
+  seven rAF timeouts occur during still images, one103.95ms recording timeout
+  overlaps92.952ms V8 incremental marking below the motion cap. A114ms sampled
+  image gap aligns. This does not identify the allocation producer or prove
+  every historical stall had that cause. Profiling overhead remains explicit.
+- Preserved failed marked-baseline fetch (`native-callback-marked-nn8P8j`)
+  and retry trace-export timeout (`native-callback-marked-retry-qVYzhZ`). The
+  retry's images are valid observations but its native trace is absent. Root
+  reviewed all6 available baseline PNGs and3 after-cache native PNGs.
+- Unprofiled `/tmp/ulg-goal1-mechanics-cache-desktop-b95ACK/`:498 crop changes
+  in10.247s=48.5996 observed/s,510 samples,zero timestamp regressions/errors.
+  Source191→255→319, camera383, no sampled rendering/source mismatch. Opening
+  repeat162.5ms; later145/97ms sampling gaps are not proven continuous holds.
+  GPU median6.1/max19.7ms. All3PNGs reviewed; true mesh, refraction, metallic
+  reflection and camera orbit remain. No verified rate gain or54Hz acceptance.
+- Final `/tmp/ulg-goal1-mechanics-cache-all-six-rY7Bwl/` exits1,strict0/6;
+  all11PNGs inspected. Five sources advance, four pairs visibly move, water
+  cycle almost unchanged. Input proxies water54.04/iron43.69/sodium36.36/
+  bulk55.34/dam61.12 are not pixel proof. Cs55.61 extrapolates source15, with
+  physics16 unchanged and field973/ordinal10 rejected. No new renderer/page/
+  critical-console failure, previews inactive. Three stale optical pass-order
+  checks and absent all-six pixel evidence remain unwaived. No plume identity
+  or transported iron/ice steam acceptance. All owned browsers closed.
+- Previous ICC-status reply was no goal progress. This continuation completed
+  cache review/regression/desktop evidence and found a concrete GC-associated
+  missed callback. Final trace review finds34 doubled callback intervals apart
+  from GC:17.33ms before next rAF request plus18.03ms after, versus8.03/10.01ms
+  ordinarily. Next investigate post-GPU/compositor opportunity scheduling;
+  allocation producer is unknown and no presentation leak was found. No blind
+  receipt/cache edits or speculative retries/horizon padding. All goals active;
+  no paused physics expansion, commit/push/Pages. VPN HTTPS Vite retained.
+
+## 2026-09-05 AKDT - Early-armed post-GPU observation, desktop verification
+
+- Shared mesh/particle callbacks register before the exact fence resolves,
+  but only actual post-fence delivery can admit presentation. No pending-GPU
+  callback spin, new retry budget or enlarged physical motion bounds. Review
+  fixed stale resize handling; the unchanged resize quota test then caught
+  a third-attempt path, now fixed. Preserve the original192/193 RED and final
+ 193/193 GREEN logs at `/tmp/ulg-goal1-opportunity-scheduling-yimcN2/`.
+- Full direct Node exits0:3,825 total,3,764 passed,61 opt-in skipped,zero failed,
+ 193.3s. Production build exits0 with existing chunk/import warnings.
+- Unprofiled `/tmp/ulg-goal1-prearmed-opportunity-desktop-yAZnKy/` records
+  529 cropped changes/10.248s=51.6198 observed/s; unchanged-code repeat
+  `prearmed-opportunity-repeat-0VsPto` records488/10.250s=47.6098. No repeatable
+  gain over prior48.5996 or54Hz acceptance. First samples191→255→319, repeat
+  127→191→255→319, both camera383. Largest sampling gaps209/343ms do not
+  prove continuous freezes. Repeat has one−1.12ms CDP timestamp regression
+  and296.7ms sparse GPU wait near startup. Zero reported errors. All6PNGs
+  inspected: retained true mesh, photographic refraction, metal and camera.
+- `/tmp/ulg-goal1-prearmed-opportunity-all-six-qW1UmA/` exits1,strict0/6;
+  all11PNGs inspected. Four pairs visibly move, water-cycle changes little,
+  Cs has only initial image. Input proxies53.68/42.12/34.13/52.39/57.34/56.63
+  states/s are NOT pixels. Five sources advance; Cs remains physics16/source15,
+  rejected field973/ordinal10 with9/16 admitted and GPU fence satisfied.
+  No new renderer/page/critical-console error, previews inactive. No iron/ice
+  transported plume or sodium cloud identity accepted.
+- Read-only review confirms obsolete optical pass-order expectations. A
+  separate checker-edit preflight fails on909 pre-existing deleted lines
+  versus200 allowed. No checker edit or guard bypass; original failures remain
+  separate from real missing cadence evidence. Docs preflight passes.
+- Marked native `/tmp/ulg-goal1-prearmed-opportunity-native-GECBJa/` exports
+  without data loss. Its512 crop changes/10.314s=49.64 observed/s is diagnostic,
+  not acceptance. All3PNGs inspected;20 total PNGs SHA-bound in evidence.
+- Previous status-only exchange was no goal progress. This continuation adds
+  full regression/build and repeat desktop evidence, including a falsified
+  repeatable-rate-gain claim. Keep all seven goals open. No speculative retry,
+  motion-horizon or paused-physics expansion, commit/push/Pages. Owned browsers
+  closed and VPN HTTPS Vite retained. Next selection follows marked trace review.
+- Marked trace follow-up:523 worker callbacks versus583 main animate calls;
+  52 doubled intervals all register within2ms of the preceding worker callback.
+  Same-filter medians: ordinary registration/delivery0.632/17.287ms versus
+  prior5.959/11.094ms; doubled0.804/33.681ms versus prior19.586/16.768ms.
+  This confirms earlier registration but no callback-rate gain. One174ms gap
+  overlaps162.911ms V8 marking; its100ms timer was installed4.582ms after
+  prearming and delivered166.218ms later. GC explains that outlier, not all
+  doubled intervals. Next inspect browser delivery versus worker starvation;
+  no allocating call site or new scheduling fix is established by these events.
+
+## 2026-09-05 AKDT - Goal1 native compositor attribution and pending-source pacing
+
+- `/tmp/ulg-goal1-compositor-native-XjYlsA/` exports without trace loss.18
+  pending-demand worker BeginFrames follow the expired-deadline branch; no
+  pending-canvas gate failure or Viz refusal explains them. Separate312ms gap
+  matches source255 reaching its.064s motion cap while11 canonical yield
+  callbacks finish. No312ms blocking mesh-build task. Exact Chrome152 revision
+  source and native flow/worker events support the distinction; the trace does
+  not serialize the worker wire deadline itself.
+- Same-app system-default graphics experiment `system-backend-FGCb6u` records
+  512 crop changes/10.269s=49.8588 observed/s; ANGLE OpenGL/GaneshGL, NVIDIA,
+  WebGPU Vulkan interop. Not a demonstrated fix or54Hz. Camera orbit is
+  inconclusive, not an accepted pass or confirmed regression. Native run
+  514/10.329s=49.7628 is diagnostic only. All6PNGs inspected.
+- Implemented one-sided remaining-work pacing from private existing iteration
+  counters. Anchor the remaining segment monotonically, preserve raw arrival
+  history and physical bounds, no cap restart. Lazy matching handles physics
+  starting before source mesh publication; bind exact lane/state/epoch/clock
+  once, reject stale/replayed progress and close forwarding on every runner
+  settlement, including synchronous throw. No buffer reads, new authority,
+  draw/proof publication, retry padding or kernel changes from progress.
+- Focused153 motion/presenter and68 forwarding tests pass (39 new),65 related
+  pass/build pass. First full run3864total/3802pass/61skip/1fail: old structural
+  no-progress-except-preview regex; updated to preserve private scalar-only,
+  no-CDP/no-GPU/no-intermediate-publication invariant. Exact regression passes;
+  full rerun3864total/3803pass/61skip/zero failed183.4s exit0; build passes.
+  Evidence root `/tmp/ulg-goal1-source-progress-uu6wYj/`.
+- Photographic desktop `progress-paced-desktop-bvbkmE`:519cropchanges/10.344s
+  =50.174observed/s,524samples. Five CDP timestamp regressions, receive clocks
+  monotonic/no duplicates; maxsamplinggap139.90ms, longest valid equal-crop
+  sampled hold24.17ms. Source191/255 age slopes decrease within source, actual
+  retiming supported; no sampled cap, not proof of none. Sources191→255→319,
+  camera383 explicit redraw;3PNGs inspected, native optics/motion/orbit remain.
+  SparseGPU/opportunity maxima16.9/34.6ms,zeroerrors. NOT54Hz or aggregategain.
+- All-six `progress-paced-all-six-LCe8Eu` strict0/6; water page-load timeout
+  preserved. Unchanged-code `progress-paced-water-retry-Ypz9Xt` loads,15→79;
+  little silhouette change. Four other pairs visibly move;Cs onlyfirstimage,
+  field973/ordinal10,9/16admitted/GPUdone/authorityrejected. Proxies water54.92,
+  iron40.96,sodium35.09,Cs49.56,bulk56.47,dam55.69states/s are not pixels.
+  Sodium input gap536ms remains in cold sweep. All11matrix/retryPNGs inspected;
+  total20SHA-bound including previous native/backend diagnostics. Stale optical
+  checker and missing pixel gates remain unwaived; no transported iron/iceplume.
+- Next inspect source-grounded double wait: canonical draw may queue behind
+  autonomousGPU+rAF then needanotherGPU+rAF. No blanket busy skip or old-fence
+  reuse: exact physics-prefix coverage/queue fairness must remain. Allseven
+  goals open. No physics expansion/commit/push/Pages; owned browsers closed,
+  VPN HTTPS Vite retained.

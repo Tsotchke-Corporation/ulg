@@ -24,6 +24,8 @@ export * from './schroederSpatialPhaseVolumeMoment.js';
 export * from './schroederSpatialPhaseVolumeMomentWgsl.js';
 export * from './schroederSpatialPhaseVolumeReceipt.js';
 export * from './schroederSpatialPhaseVolumeReceiptWgsl.js';
+export * from './schroederQuadraticControlVolumeProjection.js';
+export * from './schroederQuadraticControlVolumeProjectionWgsl.js';
 export * from './schroederSpatialGasPressureBoundaryTransport.js';
 export * from './schroederSpatialGasPressureBoundaryTransportWgsl.js';
 export * from './schroederSpatialPhaseVolumeInterfaceProposal.js';
@@ -482,9 +484,11 @@ export const SPH_GPU_REACTION_RECORD_ROW_LAYOUT = Object.freeze([
   'phaseMaskA:f32',
   'phaseMaskB:f32',
   'status:f32',
-  'pad0:f32',
-  'pad1:f32',
-  'pad2:f32'
+  // Zero is the legacy proxy. Mode 1 points into appended, authenticated
+  // reference-energy/pure-phase graph DATA; row widths/bindings are unchanged.
+  'reactionEnergyMode:f32',
+  'reactionEnergyOffsetVec4:f32',
+  'reactionEnergyVersion:f32'
 ]);
 export const SPH_GPU_REACTION_HEADER_ROW_LAYOUT = Object.freeze([
   'reactionIndex:f32',

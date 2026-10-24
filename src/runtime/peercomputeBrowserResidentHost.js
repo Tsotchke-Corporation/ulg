@@ -44,6 +44,7 @@ import {
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
   describeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource
 } from './sph/sphSpatialGasLedgerEosGpu.js';
@@ -232,12 +233,20 @@ const RETAINED_GAS_CELL_FIELD_SOURCE_GRAPH_KEYS = Object.freeze([
   'gasCellFieldAdmission',
   'admission'
 ]);
+const RETAINED_GAS_CELL_FIELD_PROTECTED_SCHEMAS = new Set([
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
+]);
+const RETAINED_GAS_CELL_FIELD_PROTOTYPE_LIMIT = 64;
 
 function retainedGasCellFieldSourceGraph(...roots) {
   const records = [];
   const pending = [...roots];
   const seen = new Set();
   const descriptorCache = new WeakMap();
+  const prototypeCache = new WeakMap();
   const ownProperty = (record, key) => {
     if (
       !record
@@ -273,6 +282,50 @@ function retainedGasCellFieldSourceGraph(...roots) {
     properties.set(key, property);
     return property;
   };
+  const assertInheritedSchemasSafe = (record) => {
+    const chain = new Set([record]);
+    let cursor = record;
+    for (let depth = 0; depth < RETAINED_GAS_CELL_FIELD_PROTOTYPE_LIMIT; depth += 1) {
+      if (!prototypeCache.has(cursor)) {
+        let prototype;
+        try {
+          prototype = Object.getPrototypeOf(cursor);
+        } catch (cause) {
+          const error = new TypeError(
+            'Retained gas-cell browser prototype could not be inspected'
+          );
+          error.cause = cause;
+          throw error;
+        }
+        prototypeCache.set(cursor, prototype);
+      }
+      const prototype = prototypeCache.get(cursor);
+      if (prototype == null) return;
+      if (chain.has(prototype)) {
+        throw new TypeError(
+          'Retained gas-cell browser prototype chain contains a cycle'
+        );
+      }
+      chain.add(prototype);
+      // Inherited source identities must never turn into ordinary legacy
+      // snapshots/refs. Observe descriptors only: schema getters are rejected
+      // by ownProperty without invocation, including on hostile prototypes.
+      if (
+        isExactSphSpatialGasPressureAuthoritySource(prototype)
+        || RETAINED_GAS_CELL_FIELD_PROTECTED_SCHEMAS.has(
+          ownProperty(prototype, 'schema').value
+        )
+      ) {
+        throw new TypeError(
+          'Retained gas-cell browser publication rejects an inherited protected authority schema'
+        );
+      }
+      cursor = prototype;
+    }
+    throw new TypeError(
+      'Retained gas-cell browser prototype chain exceeds the bounded inspection depth'
+    );
+  };
   while (pending.length > 0) {
     const record = pending.shift();
     if (
@@ -286,6 +339,7 @@ function retainedGasCellFieldSourceGraph(...roots) {
       );
     }
     seen.add(record);
+    assertInheritedSchemasSafe(record);
     records.push(record);
     for (const key of RETAINED_GAS_CELL_FIELD_SOURCE_GRAPH_KEYS) {
       const property = ownProperty(record, key);
@@ -311,6 +365,7 @@ function retainedGasCellFieldSourceFromGraph(graph) {
   )) || null;
   for (const schema of [
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
@@ -356,6 +411,7 @@ function retainedGasCellFieldSourceFromGraph(graph) {
   if (
     candidateSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
     || candidateSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+    || candidateSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
     || candidateSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
     || candidateExact
   ) return candidate;
@@ -546,9 +602,10 @@ function assertExactRetainedGasCellFieldSourceGraphSchemas(graph, source) {
     if (
       schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
       || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+      || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
     ) {
       throw new TypeError(
-        'exact v4 gas-pressure authority rejects retired v2/v3 wrappers'
+        'exact gas-pressure authority rejects retired v2/v3/v4 wrappers'
       );
     }
   }
@@ -5826,9 +5883,10 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
   if (
     retainedGasCellFieldSourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
     || retainedGasCellFieldSourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+    || retainedGasCellFieldSourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
   ) {
     throw new TypeError(
-      'pressure/interface gas-cell field import rejects retired v2/v3 authorities'
+      'pressure/interface gas-cell field import rejects retired v2/v3/v4 authorities'
     );
   }
   if (exactV2RetainedSourceIdentity && !exactV2RetainedSourceReady) {
@@ -6312,9 +6370,10 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
   if (
     retainedGasCellFieldSourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
     || retainedGasCellFieldSourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+    || retainedGasCellFieldSourceSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
   ) {
     throw new TypeError(
-      'pressure/interface gas-cell field admission rejects retired v2/v3 authorities'
+      'pressure/interface gas-cell field admission rejects retired v2/v3/v4 authorities'
     );
   }
   if (exactV2RetainedSourceIdentity && !exactV2RetainedSourceReady) {

@@ -23,6 +23,14 @@ import {
 } from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import {
+  createSphPresentationCadenceTracker,
+  installSphDashboardCadenceLifecycle,
+  readVisiblePresentationObservation,
+  resetSphDashboardFrameCounters,
+  sampleSphDashboardFrameCounters,
+  sphDashboardCadenceText
+} from './sphPresentationCadence.js';
+import {
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_EXECUTION_SCHEMA,
   ULG_SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -3565,6 +3573,52 @@ export function residentWorkerLaneIsosurfacePresentationConsumerReady({
   );
 }
 
+// The asynchronous worker consumer cannot retire a preview at enqueue time.
+// Reuse its exact committed-source proof and the live canvas admission checks,
+// excluding only the preview gates which this action is responsible for clearing.
+export function residentWorkerLaneIsosurfacePendingPreviewRetirementReady({
+  execution = null,
+  presentation = null,
+  observation = null,
+  pendingPresentation = null,
+  currentParticleGeneration = null,
+  currentRebuildGeneration = null,
+  resetRebuildPending = false
+} = {}) {
+  const content = presentation?.displayOwnerLastRenderedContent;
+  return Boolean(
+    !resetRebuildPending
+    && pendingPresentation?.active === true
+    && Number.isSafeInteger(currentParticleGeneration)
+    && currentParticleGeneration > 0
+    && pendingPresentation.particleGeneration === currentParticleGeneration
+    && Number.isSafeInteger(currentRebuildGeneration)
+    && currentRebuildGeneration >= 0
+    && pendingPresentation.generation === currentRebuildGeneration
+    && residentWorkerLaneIsosurfacePresentationConsumerReady({
+      execution,
+      presentation: content
+    })
+    && presentation?.displayOwner === 'worker'
+    && presentation?.displayOwnerContentReady === true
+    && Number.isSafeInteger(presentation?.workerFramebufferEpoch)
+    && presentation.workerFramebufferEpoch > 0
+    && content.workerFramebufferEpoch === presentation.workerFramebufferEpoch
+    && Number.isSafeInteger(presentation?.displayOwnerEpoch)
+    && presentation.displayOwnerEpoch >= 0
+    && content.displayOwnerEpoch === presentation.displayOwnerEpoch
+    && observation?.owner === 'worker'
+    && observation.displayOwnerEpoch === presentation.displayOwnerEpoch
+    && observation.sourceStep === content.sphStep
+    && observation.presentationSerial === content.frameCount
+    && Array.isArray(observation.admissionBlockers)
+    && observation.admissionBlockers.every((blocker) => (
+      blocker === 'control-envelope-retired'
+      || blocker === 'control-envelope-layer-hidden'
+    ))
+  );
+}
+
 // W4b: continuation readiness for the worker-owned resident lane. The lane
 // retains its post-step particle buffers INSIDE the presentation worker, so
 // the page-device continuation evidence (nextParticleUploads with live
@@ -5819,7 +5873,7 @@ function buildOverlayShell() {
       </div>
     </div>
     <div id="sph-warning-bar" aria-live="polite">
-      <span id="sph-fps" class="sph-fps-chip" title="UI requestAnimationFrame callback rate; this is not visible geometry throughput.">ui raf -- | physics fps --</span>
+      <span id="sph-fps" class="sph-fps-chip" title="Presented/source states count admitted render-input transitions, not pixel-verified motion, over up to five wall-clock seconds. Visible motion rate is unavailable. Physics/resident rates count completed steps. UI rAF counts callbacks; simulation speed is simulated time per wall-clock second.">visible unavailable updates/s | presented unavailable states/s | source unavailable states/s | physics unavailable steps/s</span>
     </div>
     <button id="sph-toggle" type="button" aria-label="Toggle controls">☰ menu</button>
     <button id="sph-lighting-toggle" type="button" aria-label="Toggle dark-lab lighting" aria-pressed="false">☾ dark lab</button>
@@ -8741,6 +8795,9 @@ export async function mountSphPhaseDemoOverlay({
     if (currentInitialBodies) {
       q.set('bodies', serializeSphInitialBodies(currentInitialBodies));
     }
+    // Reopening the controls must preserve manual startup, not silently
+    // restore autoplay when this canonical hash replaces the original URL.
+    q.set('residentAuto', initialResidentAutoEnabled ? '1' : '0');
     // These policies have no visible inputs, but they are part of a preset's
     // simulation state. Keep them in the canonical hash when body edits turn
     // a preset into `custom`, otherwise the same body URL runs with different
@@ -9083,6 +9140,7 @@ export async function mountSphPhaseDemoOverlay({
     updatedAtMs: performance.now()
   };
   let cpuClosureTask = null;
+  const presentationCadenceTracker = createSphPresentationCadenceTracker();
   const frameCounters = {
     renderFrames: 0,
     physicsFrames: 0,
@@ -9090,6 +9148,11 @@ export async function mountSphPhaseDemoOverlay({
     renderFps: 0,
     physicsFps: 0,
     residentFps: 0,
+    uiCallbacksPerSecond: null,
+    physicsStepsPerSecond: null,
+    residentStepsPerSecond: null,
+    simulatedSecondsPerWallSecond: null,
+    ...presentationCadenceTracker.sample(),
     residentCompletionThroughputFps: null,
     residentCompletionThroughputEwmaFps: null,
     lastResidentCompletionAtMs: null,
@@ -10707,6 +10770,7 @@ export async function mountSphPhaseDemoOverlay({
   }
   let sceneBoxDimsM = driver?.demo.box.dimensionsM ?? boxDimensionsFromControls();
   let scene = createSphPhaseScene(sceneContainer, {
+    presentationPlaying: false,
     stageMechanicsTraceEnabled: initialStageMechanicsTraceEnabled,
     boxDimsM: sceneBoxDimsM,
     surfaceRadiusScale: blobScaleOf(),
@@ -11273,19 +11337,40 @@ export async function mountSphPhaseDemoOverlay({
 
   function sampleFrameCounters() {
     const now = performance.now();
-    // Legacy `renderFps` storage is kept for receipt compatibility, but this
-    // counter is only the UI requestAnimationFrame heartbeat. It says nothing
-    // about whether a new particle/surface state reached the visible canvas.
-    frameCounters.renderFrames += 1;
-    const elapsedS = (now - frameCounters.lastSampleMs) / 1000;
-    if (elapsedS >= 1) {
-      frameCounters.renderFps = frameCounters.renderFrames / elapsedS;
-      frameCounters.physicsFps = frameCounters.physicsFrames / elapsedS;
-      frameCounters.residentFps = frameCounters.residentFrames / elapsedS;
-      frameCounters.renderFrames = 0;
-      frameCounters.physicsFrames = 0;
-      frameCounters.residentFrames = 0;
-      frameCounters.lastSampleMs = now;
+    // This existing foreground loop delivers a completed worker receipt; its
+    // RAF tick is not presentation evidence and never retires an enqueue-only
+    // or superseded preview. There is no physics wait or new GPU submission.
+    if (overlay.__sphPendingPresentation?.active) {
+      const presentation = scene.getWorkerOffscreenPresentation?.() || null;
+      if (
+        presentation?.displayOwnerContentReady === true
+        && residentWorkerLaneIsosurfacePendingPreviewRetirementReady({
+          execution: scene.getMlsMpmResidentSteps?.()
+            || overlay.__mlsMpmResidentSteps || null,
+          presentation,
+          observation: readVisiblePresentationObservation(now),
+          pendingPresentation: overlay.__sphPendingPresentation,
+          currentParticleGeneration: particleSyncGeneration,
+          currentRebuildGeneration: workerRebuildGeneration,
+          resetRebuildPending
+        })
+      ) {
+        completePendingBodyEnvelopePreview({
+          generation: particleSyncGeneration,
+          reason: 'worker-committed-isosurface-display-ready'
+        });
+        renderStatus();
+        updateWarningBanner();
+      }
+    }
+    const sampled = sampleSphDashboardFrameCounters({
+      frameCounters,
+      presentationTracker: presentationCadenceTracker,
+      observation: readVisiblePresentationObservation(now),
+      simulationTimeS: currentSimulationTimeS(),
+      scopeIdentity: JSON.stringify([particleSyncGeneration, workerRebuildGeneration])
+    });
+    if (sampled) {
       overlay.__sphFrameCounters = frameCounters;
       renderStatus();
       updateWarningBanner();
@@ -11345,6 +11430,12 @@ export async function mountSphPhaseDemoOverlay({
   overlay.__sphAppendResidentStageOrderTrace = publishResidentStageOrderTrace;
 
   function resetResidentPerf(reason) {
+    resetSphDashboardFrameCounters({
+      frameCounters,
+      presentationTracker: presentationCadenceTracker,
+      nowMs: performance.now(),
+      reason
+    });
     residentRenderReadbackSequence = 0;
     residentRenderReadbackCount = 0;
     residentRenderReadbackSkippedCount = 0;
@@ -11477,6 +11568,24 @@ export async function mountSphPhaseDemoOverlay({
       messages.push(`Simulation blocked: ${simulationRuntimeAdmission.reason}`);
       return messages;
     }
+    const residentAutoSchedule = overlay.__mlsMpmResidentAutoSchedule;
+    // Retained execution/motion evidence does not mean the current schedule
+    // is still stepping. A retry or reset retires this stop by token/generation.
+    const terminalExecutionStopped = Boolean(
+      residentAutoSchedule?.schema === 'peercompute.ulg.sph-demo-resident-auto-schedule.v0'
+      && residentAutoSchedule.status === 'resident-auto-schedule-stopped-terminal-error'
+      && Number.isSafeInteger(particleSyncGeneration)
+      && particleSyncGeneration >= 0
+      && residentAutoSchedule.generation === particleSyncGeneration
+      && Number.isSafeInteger(pendingMlsMpmResidentStepsToken)
+      && pendingMlsMpmResidentStepsToken > 0
+      && residentAutoSchedule.scheduleToken === pendingMlsMpmResidentStepsToken
+      && typeof overlay.__mlsMpmResidentStepsError === 'string'
+      && overlay.__mlsMpmResidentStepsError.trim().length > 0
+    );
+    if (terminalExecutionStopped) {
+      messages.push('Resident physics stopped after a terminal execution error.');
+    }
     if (pendingControlEdit) {
       messages.push('Control changes staged — press Apply, Play, Step, or Reset to apply.');
     }
@@ -11569,20 +11678,32 @@ export async function mountSphPhaseDemoOverlay({
     if (renderState?.renderFieldReadback) {
       messages.push('Render field readback is active: MarchingCubes still consumes CPU arrays.');
     }
-    if (overlay.__mlsMpmResidentStepsStale?.status) {
+    if (!terminalExecutionStopped && overlay.__mlsMpmResidentStepsStale?.status) {
       messages.push('Discarded stale resident physics; rescheduling current particle state.');
     }
-    if (overlay.__mlsMpmResidentStepsSlow?.status) {
+    if (!terminalExecutionStopped && overlay.__mlsMpmResidentStepsSlow?.status) {
       messages.push('Resident physics is still deriving a GPU-resident step; waiting for the current batch.');
     }
+    // Compact displacement summaries are optional on the worker-owned route.
+    // Use the dashboard's exact visible-frame admission, not queue submission
+    // or a retained execution result, to recognize either worker geometry.
+    const visiblePresentation = readVisiblePresentationObservation(nowMs());
+    const workerPresentationAdmitted = visiblePresentation.owner === 'worker'
+      && visiblePresentation.admitted === true;
     if (
-      (motion.status === 'motion-unknown-no-compact-summary' || motion.status === 'motion-unknown')
+      !terminalExecutionStopped
+      && (motion.status === 'motion-unknown-no-compact-summary' || motion.status === 'motion-unknown')
       && !particleBridgeLiveReadback
       && !workerLaneNativeSurfacePresentationCurrent
+      && !workerPresentationAdmitted
     ) {
-      messages.push('Resident physics is stepping, but compact motion proof is unavailable.');
-    } else if (motion.status === 'motion-below-visible-threshold') {
-      messages.push('Resident physics is stepping, but displacement is below the visible threshold.');
+      messages.push(playing
+        ? 'Resident physics is stepping, but compact motion proof is unavailable.'
+        : 'Compact motion summary is unavailable.');
+    } else if (!terminalExecutionStopped && motion.status === 'motion-below-visible-threshold') {
+      messages.push(playing
+        ? 'Resident physics is stepping, but displacement is below the visible threshold.'
+        : 'Compact displacement is below the visible threshold.');
     }
     return [...new Set(messages)];
   }
@@ -11590,7 +11711,7 @@ export async function mountSphPhaseDemoOverlay({
   function updateWarningBanner() {
     const simTimeS = currentSimulationTimeS();
     const simText = Number.isFinite(simTimeS) ? ` | sim t ${fmt(simTimeS, 3)}s` : '';
-    fpsEl.textContent = `ui raf ${fmt(frameCounters.renderFps, 1)} | physics fps ${fmt(frameCounters.physicsFps, 1)} | resident fps ${fmt(frameCounters.residentFps, 1)} | resident ${residentCompletionRateStatusText()}${simText}`;
+    fpsEl.textContent = `${sphDashboardCadenceText(frameCounters)}${simText}`;
     const warnings = currentWarningMessages();
     const warningNodes = warnings.map((message) => {
       const chip = document.createElement('span');
@@ -13557,6 +13678,7 @@ export async function mountSphPhaseDemoOverlay({
     continueFromResidentState = false,
     continuationBudget = RESIDENT_CONTINUATION_CHAIN_BUDGET,
     generation = particleSyncGeneration,
+    manualIntent = false,
     force = false
   } = {}) {
     if (!simulationRuntimeAdmission.ready) {
@@ -13593,7 +13715,8 @@ export async function mountSphPhaseDemoOverlay({
       return;
     }
     if (residentStartupPresentationGate?.active) {
-      const deferredManualSchedule = !initialResidentAutoEnabled && !force
+      const deferredManualSchedule = (manualIntent === true || !initialResidentAutoEnabled)
+        && !force && generation === particleSyncGeneration
         && deferResidentStartupPresentationManualIntent({
           kind: 'resident-schedule',
           scheduleOptions: {
@@ -13602,6 +13725,7 @@ export async function mountSphPhaseDemoOverlay({
             readbackMode,
             continueFromResidentState,
             continuationBudget,
+            manualIntent,
             force: false
           },
           reason: 'manual resident schedule arrived before the first native presentation proof'
@@ -15264,7 +15388,7 @@ export async function mountSphPhaseDemoOverlay({
         scheduleContinuation = false;
         scheduleLatestGeneration = false;
         restartPlaybackContinuation = false;
-        playing = false;
+        setPlaying(false);
         const playButton = overlay.querySelector('#sph-play');
         if (playButton) playButton.textContent = 'Play';
         overlay.__mlsMpmResidentAutoSchedule = {
@@ -15932,6 +16056,7 @@ export async function mountSphPhaseDemoOverlay({
     scene.dispose();
     sceneBoxDimsM = nextDims;
     scene = createSphPhaseScene(sceneContainer, {
+      presentationPlaying: playing,
       stageMechanicsTraceEnabled: initialStageMechanicsTraceEnabled,
       boxDimsM: nextDims,
       surfaceRadiusScale: blobScaleOf(),
@@ -16180,7 +16305,7 @@ export async function mountSphPhaseDemoOverlay({
 
   function rebuildDemoFromControls() {
     if (simulationRuntimeBlocked()) return false;
-    playing = false;
+    setPlaying(false);
     overlay.querySelector('#sph-play').textContent = 'Play';
     driver = createDriverFromControls();
     activeViewStatePreflight = null;
@@ -16240,6 +16365,19 @@ export async function mountSphPhaseDemoOverlay({
     if (!simulationRuntimeAdmission.ready) return false;
     const generation = workerRebuildGeneration + 1;
     workerRebuildGeneration = generation;
+    const pendingPreview = overlay.__sphPendingPresentation;
+    if (pendingPreview?.active === true
+      && pendingPreview.generation == null
+      && pendingPreview.particleGeneration == null) {
+      // Reset shows its replacement before a worker task has been allocated.
+      // Bind that exact preview now; particle binding and displayed-source
+      // admission still happen separately after this task's result arrives.
+      overlay.__sphPendingPresentation = Object.freeze({
+        ...pendingPreview,
+        generation,
+        updatedAtMs: performance.now()
+      });
+    }
     const submittedAtMs = performance.now();
     const controlOptions = driverOptionsFromControls();
     const taskOptions = workerRebuildTaskOptions(controlOptions);
@@ -16321,7 +16459,7 @@ export async function mountSphPhaseDemoOverlay({
     pendingControlEdit = false;
     syncUrlFromControls();
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
-    playing = false;
+    setPlaying(false);
     interactiveSimulationStateReady = false;
     syncSphInteractiveControlAvailability();
     overlay.querySelector('#sph-play').textContent = 'Play';
@@ -16934,7 +17072,7 @@ export async function mountSphPhaseDemoOverlay({
         `resident stages  : ${residentStageTimingStatusText(residentStageTiming)}`,
         `scene sync       : ${sceneSyncTimingStatusText(overlay.__sphSetParticlesTiming)}`,
         `worker rebuild   : ${workerRebuildTimingStatusText(workerTiming)}`,
-        `fps              : ui-raf ${fmt(frameCounters.renderFps, 1)} physics ${fmt(frameCounters.physicsFps, 1)} resident ${fmt(frameCounters.residentFps, 1)} ${residentCompletionRateStatusText()}`,
+        `cadence          : ${sphDashboardCadenceText(frameCounters)}`,
         `closure cache    : lookup=${peerClosureCacheLookup?.status || 'pending'} hits=${peerClosureCacheLookup?.hitCount ?? 0} misses=${peerClosureCacheLookup?.missCount ?? 0} stale=${peerClosureCacheLookup?.staleCount ?? 0} stored=${peerClosureCacheWrite?.entryCount ?? 0} consumed=${Boolean(peerClosureCacheConsumed)}`,
         `cold cache       : ${coldStartCacheStatusText()}`,
         `cache clear      : ${cacheClearStatusText()}`,
@@ -17179,7 +17317,7 @@ export async function mountSphPhaseDemoOverlay({
       `cpu step stages  : ${cpuDriverStepTimingStatusText(cpuDriverStepTiming)}`,
       `scene sync       : ${sceneSyncTimingStatusText(overlay.__sphSetParticlesTiming)}`,
       `worker rebuild   : ${workerRebuildTimingStatusText(workerTiming)}`,
-      `fps              : ui-raf ${fmt(frameCounters.renderFps, 1)} physics ${fmt(frameCounters.physicsFps, 1)} resident ${fmt(frameCounters.residentFps, 1)} ${residentCompletionRateStatusText()}`,
+      `cadence          : ${sphDashboardCadenceText(frameCounters)}`,
       `closure cache    : lookup=${peerClosureCacheLookup?.status || 'pending'} hits=${peerClosureCacheLookup?.hitCount ?? 0} misses=${peerClosureCacheLookup?.missCount ?? 0} stale=${peerClosureCacheLookup?.staleCount ?? 0} stored=${peerClosureCacheWrite?.entryCount ?? 0} consumed=${Boolean(peerClosureCacheConsumed)}`,
       `cold cache       : ${coldStartCacheStatusText()}`,
       `cache clear      : ${cacheClearStatusText()}`,
@@ -17196,6 +17334,14 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   let playing = false;
+  // One explicit state drives both scheduling and display interpolation.
+  // Pausing the latter never cancels a legitimate source admission or Step.
+  function setPlaying(nextPlaying) {
+    if (typeof nextPlaying !== 'boolean') return false;
+    playing = nextPlaying;
+    scene?.setPresentationPlaying?.(playing);
+    return true;
+  }
   // Editing a control stages the change instead of rebuilding under the user.
   // A rebuild mid-run discards the state they were watching and, for controls
   // that move geometry, does it while the solver is mid-step. Changes apply on
@@ -17205,7 +17351,7 @@ export async function mountSphPhaseDemoOverlay({
   function stageControlEdit() {
     pendingControlEdit = true;
     if (playing) {
-      playing = false;
+      setPlaying(false);
       const playButton = overlay.querySelector('#sph-play');
       if (playButton) playButton.textContent = 'Play';
     }
@@ -17226,7 +17372,7 @@ export async function mountSphPhaseDemoOverlay({
   }
   let playbackLoopScheduled = false;
   stopPlaybackForInvalidInitialBodyDraft = () => {
-    playing = false;
+    setPlaying(false);
     const playButton = overlay.querySelector('#sph-play');
     if (playButton) playButton.textContent = 'Play';
   };
@@ -17244,7 +17390,7 @@ export async function mountSphPhaseDemoOverlay({
       driver = createDriverFromControls({ preferActiveViewStateCache: true });
       if (!driver) return false;
       syncParticles();
-      playing = true;
+      setPlaying(true);
       overlay.querySelector('#sph-play').textContent = 'Pause';
       requestPlaybackTick();
       renderStatus();
@@ -17252,7 +17398,7 @@ export async function mountSphPhaseDemoOverlay({
       return true;
     }
     if (playing && !force) return true;
-    playing = true;
+    setPlaying(true);
     overlay.querySelector('#sph-play').textContent = 'Pause';
     scheduleMlsMpmResidentSteps({
       continueFromResidentState: residentGpuContinuationReady(),
@@ -17289,7 +17435,7 @@ export async function mountSphPhaseDemoOverlay({
       return false;
     }
     if (startup.mode === 'driver') {
-      playing = true;
+      setPlaying(true);
       overlay.querySelector('#sph-play').textContent = 'Pause';
       requestPlaybackTick();
       renderStatus();
@@ -18144,6 +18290,7 @@ export async function mountSphPhaseDemoOverlay({
       }
       if (activeViewState) {
         scheduleMlsMpmResidentSteps({
+          manualIntent: true,
           continueFromResidentState: residentGpuContinuationReady()
         });
       }
@@ -18152,11 +18299,10 @@ export async function mountSphPhaseDemoOverlay({
       return;
     }
     if (residentStartupPresentationGate?.active) {
-      const deferredManualStep = !initialResidentAutoEnabled
-        && deferResidentStartupPresentationManualIntent({
-          kind: 'cpu-driver-step',
-          reason: 'manual CPU driver step arrived before the first native presentation proof'
-        });
+      const deferredManualStep = deferResidentStartupPresentationManualIntent({
+        kind: 'cpu-driver-step',
+        reason: 'manual CPU driver step arrived before the first native presentation proof'
+      });
       overlay.__mlsMpmResidentAutoSchedule = {
         ...(overlay.__mlsMpmResidentAutoSchedule || {}),
         schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
@@ -18184,11 +18330,11 @@ export async function mountSphPhaseDemoOverlay({
         driver = createDriverFromControls({ preferActiveViewStateCache: true });
         if (driver) {
           syncParticles();
-          playing = !playing;
+          setPlaying(!playing);
           e.target.textContent = playing ? 'Pause' : 'Play';
           if (playing) requestPlaybackTick();
         } else {
-          playing = false;
+          setPlaying(false);
           e.target.textContent = 'Play';
         }
         renderStatus();
@@ -18196,7 +18342,7 @@ export async function mountSphPhaseDemoOverlay({
         return;
       }
       if (activeViewState) {
-        playing = !playing;
+        setPlaying(!playing);
         e.target.textContent = playing ? 'Pause' : 'Play';
         if (playing) {
           scheduleMlsMpmResidentSteps({
@@ -18205,13 +18351,13 @@ export async function mountSphPhaseDemoOverlay({
           requestPlaybackTick();
         }
       } else {
-        playing = false;
+        setPlaying(false);
         e.target.textContent = 'Play';
         renderStatus();
       }
       return;
     }
-    playing = !playing;
+    setPlaying(!playing);
     e.target.textContent = playing ? 'Pause' : 'Play';
     if (playing) requestPlaybackTick();
   });
@@ -18243,6 +18389,15 @@ export async function mountSphPhaseDemoOverlay({
   applyCollapsed();
 
   let fpsLoopRunning = true;
+  const stopDashboardCadenceLifecycle = installSphDashboardCadenceLifecycle({
+    frameCounters,
+    presentationTracker: presentationCadenceTracker,
+    onReset: () => {
+      overlay.__sphFrameCounters = frameCounters;
+      renderStatus();
+      updateWarningBanner();
+    }
+  });
   function fpsLoop() {
     if (!fpsLoopRunning || !overlay.isConnected) return;
     sampleFrameCounters();
@@ -18255,8 +18410,9 @@ export async function mountSphPhaseDemoOverlay({
   }
 
   function close() {
-    playing = false;
+    setPlaying(false);
     fpsLoopRunning = false;
+    stopDashboardCadenceLifecycle();
     staticTableCacheReadGeneration += 1;
     staticTableCacheGeneration += 1;
     if (statusRenderTimer != null) {

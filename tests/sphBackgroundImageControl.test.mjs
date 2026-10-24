@@ -68,3 +68,35 @@ test('native background image failures are fenced to the current pending URL', a
     /image\.onerror = \(\) => \{[\s\S]{0,350}bridge\.envMapPendingUrl !== url[\s\S]{0,180}sceneBackgroundImageUrl !== url[\s\S]{0,180}bridge\.envMapPendingUrl = null;/
   );
 });
+
+test('scene background changes send complete current appearance without a source reset', async () => {
+  const source = await readFile(new URL('../src/visualization/sphPhaseScene.js', import.meta.url), 'utf8');
+  const start = source.indexOf('  function setBackgroundImage(');
+  const end = source.indexOf("  setBackgroundColor(sceneBackgroundColorHex, { reason: 'renderer-initialization'", start);
+  const setters = source.slice(start, end);
+  assert.match(setters, /sceneBackgroundImageUrl = url;[\s\S]*setBackgroundColor\(sceneBackgroundColorHex/);
+  assert.match(setters, /workerOffscreenPresentationBridge\?\.setBackgroundColor\?\.\(sceneBackgroundColorHex, \{\s*reason,\s*nativeSurfaceAppearance: workerOffscreenNativeSurfaceAppearance\(\)/);
+  assert.doesNotMatch(setters, /clearResident|resetPresented|setDisplayOwner/);
+});
+
+test('explicit main-thread bridge suppression still clears worker pixels without claiming main admission', async () => {
+  const source = await readFile(new URL('../src/visualization/sphPhaseScene.js', import.meta.url), 'utf8');
+  const start = source.indexOf('  function submitWorkerOffscreenRenderRows(');
+  const end = source.indexOf('    const positionsM = decoded?.positionsM || null;', start);
+  assert.ok(start > 0 && end > start);
+  const calls = [];
+  const bridge = {
+    drawRenderRows() { throw new Error('suppression must not draw'); },
+    clearPresentation(options) { calls.push(options); },
+    setBackgroundColor() { throw new Error('appearance update is not a clear'); },
+    setDisplayOwner() { throw new Error('suppression is not main presentation admission'); }
+  };
+  const invoke = new Function('workerOffscreenPresentationBridge', 'sceneBackgroundColorHex',
+    'publishWorkerOffscreenRenderRowsStatus', source.slice(start, end) + '\n}\nreturn submitWorkerOffscreenRenderRows;')(
+    bridge, '#112233', status => status);
+  const result = invoke({ suppressWorkerDrawForExplicitMainThreadBridge: true,
+    sphParticleState: { particleCount: 23 }, reason: 'test' });
+  assert.deepEqual(calls, [{ backgroundColor: '#112233', reason: 'explicit-main-thread-bridge:test' }]);
+  assert.equal(result.particleCount, 23);
+  assert.equal(result.status, 'worker-offscreen-render-rows-suppressed-explicit-main-thread-bridge');
+});

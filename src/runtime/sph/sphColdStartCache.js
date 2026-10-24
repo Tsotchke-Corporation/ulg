@@ -661,7 +661,9 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       updatedAt
     }));
   }
-  if (reactionTable) {
+  // Physical reaction-energy capabilities are deliberately process-local and
+  // must be rebuilt from their declared source, never revived from disk.
+  if (reactionTable && !reactionTable.energyAuthority) {
     records.push(tableCacheRecord({
       family: 'sph-reaction-table',
       table: reactionTable,
@@ -672,7 +674,9 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         productTermRecords: reactionTable.productTermRecords,
         gasProductRecords: reactionTable.gasProductRecords,
         atomTermRecords: reactionTable.atomTermRecords,
-        productPhaseRecords: reactionTable.productPhaseRecords
+        productPhaseRecords: reactionTable.productPhaseRecords,
+        combinedRecords: reactionTable.combinedRecords,
+        ...(reactionTable.gasConstitutiveSchema ? { gasConstitutiveRecords: reactionTable.gasConstitutiveRecords } : {})
       },
       metadata: {
         reactionClosureSchema: reactionTable.reactionClosureSchema || null,
@@ -683,6 +687,8 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         gasProductCount: reactionTable.gasProductCount || 0,
         atomTermCount: reactionTable.atomTermCount || 0,
         productPhaseCount: reactionTable.productPhaseCount,
+        gasConstitutiveSchema: reactionTable.gasConstitutiveSchema,
+        gasConstitutiveOffsetVec4: reactionTable.gasConstitutiveOffsetVec4,
         recordStrideFloats: reactionTable.recordStrideFloats,
         reactionHeaderStrideFloats: reactionTable.reactionHeaderStrideFloats || 0,
         reactantTermStrideFloats: reactionTable.reactantTermStrideFloats || 0,
@@ -1337,7 +1343,12 @@ function restoreReactionTable(record) {
     gasProductCount: metadata.gasProductCount ?? 0,
     atomTermCount: metadata.atomTermCount ?? 0,
     productPhaseCount: metadata.productPhaseCount ?? 0,
-    combinedRecordCount: (
+    ...(metadata.gasConstitutiveSchema ? {
+      gasConstitutiveSchema: metadata.gasConstitutiveSchema,
+      gasConstitutiveOffsetVec4: metadata.gasConstitutiveOffsetVec4,
+      gasConstitutiveRecords: record.arrays.gasConstitutiveRecords
+    } : {}),
+    combinedRecordCount: record.arrays.combinedRecords ? record.arrays.combinedRecords.length / 4 : (
       record.arrays.records.length
       + record.arrays.productPhaseRecords.length
       + (record.arrays.reactionHeaders?.length || 0)
@@ -1345,6 +1356,7 @@ function restoreReactionTable(record) {
       + (record.arrays.productTermRecords?.length || 0)
       + (record.arrays.gasProductRecords?.length || 0)
       + (record.arrays.atomTermRecords?.length || 0)
+      + (record.arrays.gasConstitutiveRecords?.length || 0)
     ) / 4,
     recordLayout: metadata.recordLayout || [],
     reactionHeaderLayout: metadata.reactionHeaderLayout || [],
@@ -1367,14 +1379,15 @@ function restoreReactionTable(record) {
     gasProductRecords: record.arrays.gasProductRecords || new Float32Array(0),
     atomTermRecords: record.arrays.atomTermRecords || new Float32Array(0),
     productPhaseRecords: record.arrays.productPhaseRecords,
-    combinedRecords: Float32Array.from([
+    combinedRecords: record.arrays.combinedRecords || Float32Array.from([
       ...record.arrays.records,
       ...record.arrays.productPhaseRecords,
       ...(record.arrays.reactionHeaders || []),
       ...(record.arrays.reactantTermRecords || []),
       ...(record.arrays.productTermRecords || []),
       ...(record.arrays.gasProductRecords || []),
-      ...(record.arrays.atomTermRecords || [])
+      ...(record.arrays.atomTermRecords || []),
+      ...(record.arrays.gasConstitutiveRecords || [])
     ]),
     metadata: metadata.reactionMetadata || [],
     reactantTermMetadata: metadata.reactantTermMetadata || [],

@@ -4022,6 +4022,22 @@ test('pressure/interface never downgrades an exact v4 source accompanied by raw 
     retiredV3WrapperResult.retainedGasPressureRowsStatus,
     'retained-gas-pressure-rows-rejected-v3-pre-opaque-authority'
   );
+  for (const wrapper of [
+    { schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v4' },
+    Object.create({ schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v4' })
+  ]) {
+    wrapper.retainedGasCellFieldSource = source;
+    const retiredV4Result = await runSphPressureInterfaceForceRowsWebGpu(
+      retainedGasPressureRunArgs(device, {
+        retainedGasPressureCellImport: wrapper
+      })
+    );
+    assert.equal(
+      retiredV4Result.retainedGasPressureRowsStatus,
+      'retained-gas-pressure-rows-rejected-v4-missing-projection-authority'
+    );
+    assert.equal(retiredV4Result.gasPressureAuthorityConsumerSubmitted, false);
+  }
   const maskedV1Result = await runSphPressureInterfaceForceRowsWebGpu(
     retainedGasPressureRunArgs(device, {
       retainedGasPressureCellImport: {
@@ -4253,6 +4269,18 @@ test('pressure/interface abandons an opaque v4 receipt when queue.submit fails',
 
 test('pressure/interface rejects unbindable, stale, foreign, and malformed retained gas imports before bind', async () => {
   const cases = [
+    {
+      name: 'legacy v4 authority missing the conservative projection seal',
+      expected:
+        'retained-gas-pressure-rows-rejected-v4-missing-projection-authority',
+      create(device) {
+        return retainedV1GasPressureFixture(device, {
+          sourceOverrides: {
+            schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v4'
+          }
+        });
+      }
+    },
     {
       name: 'telemetry schema disguised as a retained source',
       expected: 'retained-gas-pressure-rows-rejected-telemetry-only',

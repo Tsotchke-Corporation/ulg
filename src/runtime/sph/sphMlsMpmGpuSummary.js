@@ -33,6 +33,11 @@ import {
   isMlsMpmTerminalParticleFamily,
   selectMlsMpmTerminalParticleFamily
 } from './sphMlsMpmPostMechanicsClosure.js';
+import {
+  createSphAerosolCombinedBudgetStage,
+  mergeSphAerosolInventoryIntoResidentSummary
+} from './sphAerosolParcelGpu.js';
+import { SPH_AEROSOL_BUDGET_BYTES } from '../../../ulg-gpu-abi/src/sphAerosolParcel.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -507,6 +512,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
   reactionStep = null,
   mechanicsRefreshStep = null,
   phaseCarrierTransferStep = null,
+  sourceAerosolFamily = null,
+  terminalAerosolFamily = null,
   cohortRanges = null,
   summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
   activeGridDispatchPlan = false,
@@ -534,6 +541,10 @@ export async function runMlsMpmResidentSummaryWebGpu({
     throw new TypeError('runMlsMpmResidentSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  const aerosolInventoryRequested = sourceAerosolFamily != null || terminalAerosolFamily != null;
+  if (aerosolInventoryRequested && (sourceAerosolFamily == null || terminalAerosolFamily == null)) {
+    throw new TypeError('Combined inventory requires both source and terminal aerosol families');
+  }
   const particleCount = sphParticleState.particleCount;
   const selectedTerminalParticleFamily = terminalParticleFamily
     ?? selectMlsMpmTerminalParticleFamily({
@@ -618,8 +629,11 @@ export async function runMlsMpmResidentSummaryWebGpu({
   }
   const sourceMechanicsBuffer = borrowedSourceMechanicsBuffer
     || writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-mechanics', mlsMpmParticleState.mechanics);
-  const summaryByteLength = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const partialsByteLength = partialCount * summaryByteLength;
+  const baseSummaryByteLength = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const summaryByteLength = baseSummaryByteLength + (aerosolInventoryRequested ? 2 * SPH_AEROSOL_BUDGET_BYTES : 0);
+  const partialsByteLength = partialCount * baseSummaryByteLength;
+  let aerosolBudgetStage = null;
+  let aerosolSourceThermoBuffer = null;
   const partialsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-resident-summary-partials',
     size: Math.max(4, partialsByteLength),
@@ -629,6 +643,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
     label: 'ulg-mls-mpm-resident-summary-out',
     size: summaryByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+      | (aerosolInventoryRequested ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const readBuffer = shouldReadCompactSummary
     ? device.createBuffer({
@@ -793,6 +808,15 @@ export async function runMlsMpmResidentSummaryWebGpu({
   };
 
   try {
+    if (aerosolInventoryRequested) {
+      aerosolSourceThermoBuffer = borrowedSourceThermoBuffer
+        || writeStorageBuffer(device, 'ulg-aerosol-summary-source-thermo', sourceThermoArray(sphParticleState));
+      aerosolBudgetStage = createSphAerosolCombinedBudgetStage({
+        device, sourceFamily: sourceAerosolFamily, terminalFamily: terminalAerosolFamily,
+        sourceStateBuffer, sourceThermoBuffer: aerosolSourceThermoBuffer,
+        terminalStateBuffer: nextStateBuffer, terminalThermoBuffer: nextThermoBuffer, particleCount
+      });
+    }
     device.queue.writeBuffer(paramsBuffer, 0, createSummaryParamsArray({
       particleCount,
       gridNodeCount: gridNodeScanCount,
@@ -898,11 +922,21 @@ export async function runMlsMpmResidentSummaryWebGpu({
       activeGridPlanPass.dispatchWorkgroups(1);
       activeGridPlanPass.end();
     }
+    // The active MPM grid remains a carrier-only mechanics domain. Append
+    // the combined inventory after its dispatch plan; this is not permission
+    // to remove aerosol occupied volume from the separate gas-volume owner.
+    if (aerosolBudgetStage) {
+      aerosolBudgetStage.encode(encoder, {
+        copyTargetBuffer: summaryBuffer, copyTargetOffsetBytes: baseSummaryByteLength
+      });
+    }
     if (shouldReadCompactSummary) {
       encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
     }
     const encodeMs = Math.max(0, nowMs() - encodeStartMs);
     const submitStartMs = nowMs();
+    aerosolBudgetStage?.markSubmissionStarted();
+    if (aerosolBudgetStage) deferTemporaryCleanup = true;
     device.queue.submit([encoder.finish()]);
     const submitMs = Math.max(0, nowMs() - submitStartMs);
     if (!shouldReadCompactSummary) {
@@ -915,8 +949,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
         mapAsyncWaitMs: null,
         decodeMs: 0,
         queueFenceAttribution: 'none-no-compact-summary-readback',
-        summaryKernelDispatchCount: activeGridPlanPipeline ? 3 : 2,
-        summaryWorkgroupCount: partialCount + 1 + (activeGridPlanPipeline ? 1 : 0),
+        summaryKernelDispatchCount: (activeGridPlanPipeline ? 3 : 2) + (aerosolBudgetStage?.dispatchCount ?? 0),
+        summaryWorkgroupCount: partialCount + 1 + (activeGridPlanPipeline ? 1 : 0) + (aerosolBudgetStage?.workgroupCount ?? 0),
         compactReadbackByteLength: 0
       };
       compactSummaryResult = {
@@ -995,8 +1029,10 @@ export async function runMlsMpmResidentSummaryWebGpu({
     await readBuffer.mapAsync(GPU_MAP_MODE.READ);
     const mapAsyncWaitMs = Math.max(0, nowMs() - mapAsyncStartMs);
     const decodeStartMs = nowMs();
-    const values = new Float32Array(readBuffer.getMappedRange()).slice(0, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+    const values = new Float32Array(readBuffer.getMappedRange()).slice(0, summaryByteLength / 4);
     readBuffer.unmap();
+    const combinedInventory = aerosolBudgetStage
+      ? aerosolBudgetStage.decode(values, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS) : null;
     const decodeMs = Math.max(0, nowMs() - decodeStartMs);
     const timing = {
       schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
@@ -1007,8 +1043,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
       mapAsyncWaitMs,
       decodeMs,
       queueFenceAttribution: 'mapAsync(readback-buffer)-may-include-prior-queued-resident-work',
-      summaryKernelDispatchCount: activeGridPlanPipeline ? 3 : 2,
-      summaryWorkgroupCount: partialCount + 1 + (activeGridPlanPipeline ? 1 : 0),
+      summaryKernelDispatchCount: (activeGridPlanPipeline ? 3 : 2) + (aerosolBudgetStage?.dispatchCount ?? 0),
+      summaryWorkgroupCount: partialCount + 1 + (activeGridPlanPipeline ? 1 : 0) + (aerosolBudgetStage?.workgroupCount ?? 0),
       compactReadbackByteLength: summaryByteLength
     };
     compactSummaryResult = {
@@ -1029,7 +1065,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
       gridNodeSummaryAuthority: mechanicsFieldViewEnabled
         ? 'schroeder-spatial-mechanics-field-view-v1'
         : 'legacy-dense-grid-v1',
-      compactReadbackFloatCount: MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
+      compactReadbackFloatCount: summaryByteLength / Float32Array.BYTES_PER_ELEMENT,
       compactReadbackByteLength: summaryByteLength,
       compactSummaryReadbackClassification:
         resolvedCompactSummaryReadbackClassification,
@@ -1058,9 +1094,13 @@ export async function runMlsMpmResidentSummaryWebGpu({
         : null,
       ...readbackTelemetry.snapshot()
     };
+    if (aerosolBudgetStage) {
+      compactSummaryResult = mergeSphAerosolInventoryIntoResidentSummary(compactSummaryResult, combinedInventory);
+    }
     return compactSummaryResult;
   } finally {
     const cleanupTemporaryBuffers = () => {
+      if (aerosolSourceThermoBuffer && !borrowedSourceThermoBuffer) aerosolSourceThermoBuffer.destroy?.();
       if (!borrowedSourceStateBuffer) sourceStateBuffer.destroy?.();
       if (nextThermoBufferMode === 'temporary-source-upload') nextThermoBuffer.destroy?.();
       if (!borrowedSourceMechanicsBuffer) sourceMechanicsBuffer.destroy?.();
@@ -1084,7 +1124,16 @@ export async function runMlsMpmResidentSummaryWebGpu({
         activeGridPlanState.destroyActiveGridDispatchPlanBuffers();
       }
     };
-    if (deferTemporaryCleanup) {
+    if (aerosolBudgetStage) {
+      // The exact reader owns joint retirement. A rejected/throwing queue fence
+      // quarantines BOTH budget and summary/source temporaries until confirmed
+      // device loss; the legacy generic helper does not establish that proof.
+      aerosolBudgetStage.dispose(cleanupTemporaryBuffers);
+      if (deferTemporaryCleanup) {
+        readbackTelemetry.recordDeferredCleanupHostQueueFence(1, 'mls-mpm-summary-aerosol-joint-cleanup');
+        if (compactSummaryResult) Object.assign(compactSummaryResult, readbackTelemetry.snapshot());
+      }
+    } else if (deferTemporaryCleanup) {
       const deferredHostQueueFenceScheduled =
         deferSubmittedSummaryCleanup(device, cleanupTemporaryBuffers);
       if (deferredHostQueueFenceScheduled) {

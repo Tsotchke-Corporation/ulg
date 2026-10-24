@@ -60,6 +60,9 @@ import {
   uploadMlsMpmMechanicsMaterialPhaseRecords
 } from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import {
+  releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow,
+  retainClaimedMlsMpmFusedCoarseTerminalOutputBorrow,
+  retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter,
   runMlsMpmG2pWebGpu,
   validateLocallySubmittedMlsMpmFusedG2p
 } from '../src/runtime/sph/sphG2pGpuKernel.js';
@@ -81,6 +84,7 @@ import {
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
+  runSphGpuParticleBufferSetCleanupAfterBorrows,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
@@ -90,6 +94,12 @@ import {
   validateSchroederFusedMechanicsPendingClosure,
   validateSchroederFusedMechanicsPublicationReceipt
 } from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
+import * as fusedPrivateOwnership from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
+import {
+  destroySphSpatialGasLedgerEosGpu,
+  releaseSphSpatialGasLedgerEosAfterQueue,
+  runSphSpatialGasLedgerEosRetainedWebGpu
+} from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
 
 function seededRandom(seed) {
   let state = seed >>> 0;
@@ -300,7 +310,8 @@ function productionM3Fixture({
   phaseVolumeInterfaceTransportEnabled = false,
   surfaceTensionEnabled = false,
   mechanicsFieldPairV2Enabled = true,
-  sourceSphUploadOverrides = null
+  sourceSphUploadOverrides = null,
+  sourceClosure = null
 }) {
   const particleCount = 1;
   const state = new Float32Array([
@@ -346,13 +357,17 @@ function productionM3Fixture({
     device.createBuffer({ label, size, usage: 128 }),
     device
   );
-  const stateBuffer = ownedBuffer('m3-source-state', state.byteLength);
-  const thermoBuffer = ownedBuffer('m3-source-thermo', thermo.byteLength);
-  const identityBuffer = ownedBuffer(
+  const sourceSph = sourceClosure?.finalSphParticleUpload;
+  const sourceMls = sourceClosure?.finalMlsMpmParticleUpload;
+  const stateBuffer = sourceSph?.stateBuffer
+    ?? ownedBuffer('m3-source-state', state.byteLength);
+  const thermoBuffer = sourceSph?.thermoBuffer
+    ?? ownedBuffer('m3-source-thermo', thermo.byteLength);
+  const identityBuffer = sourceSph?.identityBuffer ?? ownedBuffer(
     'm3-source-identity',
     Uint32Array.BYTES_PER_ELEMENT
   );
-  const mechanicsBuffer = ownedBuffer(
+  const mechanicsBuffer = sourceMls?.mechanicsBuffer ?? ownedBuffer(
     'm3-source-mechanics',
     mechanics.byteLength
   );
@@ -372,6 +387,11 @@ function productionM3Fixture({
     levelEpoch: 29,
     supportEpoch: 31
   };
+  if (sourceSph) {
+    for (const key of Object.keys(epochIdentity)) {
+      epochIdentity[key] = sourceSph[key];
+    }
+  }
   const levelAssignment = {
     schema: 'peercompute.ulg.schroeder-level-assignment-execution.v0',
     status: 'schroeder-level-assignment-submitted',
@@ -396,7 +416,7 @@ function productionM3Fixture({
     chartId: 0,
     baseGridSpacingM
   };
-  const sphParticleUpload = {
+  const sphParticleUpload = sourceSph ?? {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
     particleCount,
@@ -424,7 +444,7 @@ function productionM3Fixture({
     time: 0,
     ...(sourceSphUploadOverrides ?? {})
   };
-  const mlsMpmParticleUpload = {
+  const mlsMpmParticleUpload = sourceMls ?? {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
     particleCount,
@@ -2343,6 +2363,438 @@ test('M3 production controller preserves exact field identity for non-binary gri
     { reason: new Error('non-binary grid-spacing fixture cleanup') }
   ), true);
   assert.equal(await fixture.controller.completionPromise(), true);
+});
+
+for (const releaseMode of ['queue', 'rejected-queue-then-loss', 'held-queue-then-loss']) {
+test(`private gas borrow delays actual claimed lower output destruction: ${releaseMode}`, async () => {
+  const lost = deferredPromise();
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 2, device: productionM3Device({ lost: lost.promise })
+  });
+  const closure = (await runProductionM3Fixture(fixture)).result.pendingPostMechanicsClosure;
+  const source = closure.finalSphParticleUpload;
+  const gasFixture = productionM3Fixture({
+    fineSubstepCount: 2, device: fixture.device, sourceClosure: closure,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const coarse = gasFixture.generation.mechanicsLevelViews[1].mechanicsFieldView;
+  const moment = gasFixture.generation.mechanicsLevelViews[0].phaseVolumeMoment;
+  const epochIdentity = Object.fromEntries([
+    'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch',
+    'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch'
+  ].map(key => [key, moment[key]]));
+  const spatialGasGrid = {
+    selectedLevel: 1, gridDims: [...coarse.gridDims],
+    gridNodeCount: coarse.gridNodeCount, gridShift: coarse.gridShift,
+    gridSpacingM: Math.fround(coarse.gridSpacingM), levelCount: 2,
+    source: 'same-generation-selected-mechanics-occupancy-grid'
+  };
+  const gasOptions = {
+    device: fixture.device, residentProductMass: null,
+    sphParticleUpload: source, mlsMpmParticleUpload: closure.finalMlsMpmParticleUpload,
+    schroederLevelAssignment: gasFixture.levelAssignment,
+    schroederSpatialEpochGeneration: gasFixture.generation,
+    epochIdentity, spatialGasGrid, boxMinM: [0, 0, 0], boxMaxM: [1, 1, 1],
+    spatialGasCellSizeM: spatialGasGrid.gridSpacingM,
+    spatialGasSupportVolumeFallbackM3: 0, level: 1, chartId: 0
+  };
+  const gas = await runSphSpatialGasLedgerEosRetainedWebGpu(gasOptions);
+  assert.equal(gas.ready, true, gas.reason);
+  assert.equal(source.__ulgActiveBorrowCount, 1);
+  const fence = deferredPromise();
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  fixture.device.queue.onSubmittedWorkDone = () => fence.promise;
+  assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(gas), true);
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+  let admissionClosureCleanupCount = 0;
+  if (releaseMode === 'queue') {
+    // Re-enter the terminal owner's existing cleanup seam after EOS has
+    // validated this source but before it acquires its retained borrow.
+    // The actual EOS acquisition must reject, not merely its earlier ensure.
+    const acquisitionRaceGrid = {
+      ...spatialGasGrid,
+      get gridSpacingM() {
+        assert.equal(runSphGpuParticleBufferSetCleanupAfterBorrows(source,
+          () => { admissionClosureCleanupCount += 1; },
+          { terminalSourceRetirement: true }
+        ), true);
+        return spatialGasGrid.gridSpacingM;
+      }
+    };
+    const submissionsBeforeRace = fixture.device.submissions.length;
+    const raced = await runSphSpatialGasLedgerEosRetainedWebGpu({
+      ...gasOptions, spatialGasGrid: acquisitionRaceGrid
+    });
+    assert.equal(raced.ready, false);
+    assert.equal(raced.status, 'spatial-gas-ledger-eos-rejected-source-lifecycle');
+    assert.equal(source.__ulgActiveBorrowCount, 1);
+    assert.equal(admissionClosureCleanupCount, 0);
+    assert.equal(fixture.device.submissions.length, submissionsBeforeRace);
+  }
+  let lowerSettled = false;
+  const lower = retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
+    fixture.device, closure.finalG2pReconstruction,
+    { terminalTransaction: closure.terminalTransaction, after: Promise.resolve(true) }
+  );
+  lower.then(() => { lowerSettled = true; });
+  const abandonment = abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, closure);
+  abandonment.catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lowerSettled, false, 'queued cleanup is not completed retirement');
+  assert.equal(source.stateBuffer.destroyCount, 0);
+  assert.equal(closure.finalMlsMpmParticleUpload.mechanicsBuffer.destroyCount, 0);
+  assert.equal(source.__ulgActiveBorrowCount, 1);
+  if (releaseMode === 'queue') {
+    fence.resolve();
+    assert.equal(await gas.releasePromise, true);
+    assert.equal(await lower, true);
+    assert.equal(await abandonment, true);
+  } else {
+    if (releaseMode === 'rejected-queue-then-loss') {
+      fence.reject(new Error('gas consumer fence rejected'));
+      assert.equal(await gas.releasePromise, false);
+      assert.equal(source.__ulgActiveBorrowCount, 1);
+      assert.equal(lowerSettled, false);
+    }
+    lost.resolve({ reason: 'destroyed', message: 'exact retained-gas device loss' });
+    assert.equal(await settleBefore(lower, 750, 'gas loss failed to release lower owner'), true);
+    assert.equal(await abandonment, true);
+    // An old gas fence may settle later, but must not repeat destruction.
+    fence.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(source.__ulgActiveBorrowCount, 0);
+  assert.equal(source.stateBuffer.destroyCount, 1);
+  assert.equal(closure.finalMlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
+  assert.equal(fixture.sphParticleUpload.thermoBuffer.destroyed, false);
+  assert.equal(fixture.sphParticleUpload.identityBuffer.destroyed, false);
+  if (releaseMode === 'queue') {
+    assert.equal(admissionClosureCleanupCount, 1);
+    const submissionsBeforeLateUse = fixture.device.submissions.length;
+    const late = await runSphSpatialGasLedgerEosRetainedWebGpu(gasOptions);
+    assert.equal(late.ready, false, 'retired private output must not admit a late gas producer');
+    assert.equal(late.status, 'spatial-gas-ledger-eos-rejected-particle-source-lifecycle');
+    assert.equal(source.__ulgActiveBorrowCount, 0);
+    assert.equal(fixture.device.submissions.length, submissionsBeforeLateUse);
+  }
+  assert.equal(await gasFixture.controller.abortAllAfter(new Error('unused mechanics fixture'), {
+    mechanicsRetirement: Promise.resolve(true), deviceLost: releaseMode !== 'queue'
+  }), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(gasFixture.mechanicsMaterialPhaseUpload);
+  destroySphSpatialGasLedgerEosGpu(fixture.device);
+});
+}
+
+test('private gas source chaining preserves the producer-installed frozen lifecycle', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 2, phaseVolumeInterfaceTransportEnabled: true
+  });
+  const gasOptions = {
+    gasPressureMechanicsBoundaryEnabled: true,
+    particleGasLedgerActionable: true,
+    retainedProductGasBoundaryActionable: false,
+    residentProductMass: null
+  };
+  const first = (await runProductionM3Fixture(fixture, {
+    overrides: gasOptions
+  })).result;
+  const predecessor = first.pendingPostMechanicsClosure;
+  const source = predecessor.finalSphParticleUpload;
+  const lifecycleAtProducerReturn = Object.getOwnPropertyDescriptor(
+    source, '__ulgActiveBorrowCount'
+  );
+  assert.equal(Object.isFrozen(source), true);
+  const identityBefore = JSON.stringify(source);
+  // The native endpoint inspection already crosses a confirmed queue fence;
+  // allow the first macro's normal prior-epoch retirement callbacks to drain.
+  await fixture.device.queue.onSubmittedWorkDone();
+  await new Promise(resolve => setImmediate(resolve));
+  const successorFixture = productionM3Fixture({
+    fineSubstepCount: 2, device: fixture.device,
+    phaseVolumeInterfaceTransportEnabled: true, sourceClosure: predecessor
+  });
+  const second = await runProductionM3Fixture(successorFixture, {
+    overrides: { ...gasOptions, privateSourceClosure: predecessor }
+  });
+  assert.equal(typeof lifecycleAtProducerReturn?.get, 'function');
+  assert.equal(typeof lifecycleAtProducerReturn?.set, 'function');
+  assert.equal(lifecycleAtProducerReturn.enumerable, false);
+  assert.equal(source.__ulgActiveBorrowCount, 0);
+  assert.equal(JSON.stringify(source), identityBefore);
+  assert.deepEqual(second.counts, { p2g: 5, gridUpdate: 3, g2p: 3 });
+  assert.equal(second.result.exactGasPressureMechanics.producerCount, 3);
+  assert.equal(second.result.exactGasPressureMechanics.boundarySubmissionCount, 3);
+  assert.equal(second.result.hostQueueFenceCount, 0);
+  assert.equal(second.result.mapAsyncCount, 0);
+  const successor = second.result.pendingPostMechanicsClosure;
+  assert.equal(successor.macroAuthority.sourceSphParticleUpload, source);
+  assert.equal(successor.macroAuthority.sourceMlsMpmParticleUpload,
+    predecessor.finalMlsMpmParticleUpload);
+  assert.equal(await fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter(
+    fixture.device, predecessor, { successorClosure: successor }
+  ), true);
+  assert.equal(source.stateBuffer.destroyCount, 1);
+  assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, successor), true);
+  let current = successor;
+  const fixtures = [fixture, successorFixture];
+  for (let ordinal = 3; ordinal <= 4; ordinal++) {
+    const nextFixture = productionM3Fixture({
+      fineSubstepCount: 2, device: fixture.device,
+      phaseVolumeInterfaceTransportEnabled: true, sourceClosure: current
+    });
+    fixtures.push(nextFixture);
+    const next = await runProductionM3Fixture(nextFixture, {
+      overrides: { ...gasOptions, privateSourceClosure: current }
+    });
+    assert.deepEqual(next.counts, { p2g: 5, gridUpdate: 3, g2p: 3 });
+    assert.equal(next.result.exactGasPressureMechanics.producerCount, 3);
+    const nextClosure = next.result.pendingPostMechanicsClosure;
+    assert.equal(nextClosure.macroAuthority.sourceSphParticleUpload,
+      current.finalSphParticleUpload);
+    assert.equal(await fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter(
+      fixture.device, current, { successorClosure: nextClosure }
+    ), true);
+    assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, nextClosure), true);
+    current = nextClosure;
+  }
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(
+    fixture.device, current
+  ), true);
+  for (const owner of fixtures) {
+    assert.equal(await owner.controller.completionPromise(), true);
+    assert.equal(owner.controller.summary().publishedEpochCount, 0);
+    destroyMlsMpmMechanicsMaterialPhaseUpload(owner.mechanicsMaterialPhaseUpload);
+  }
+  assert.equal(fixture.device.createdBuffers.filter(buffer =>
+    /^ulg-schroeder-two-level-frozen-refresh-1-assignments-[0-9]+$/.test(buffer.label)
+  ).length, 3, 'four r2 children reuse exactly three shared frozen-assignment arenas');
+  assert.equal(fixture.sphParticleUpload.thermoBuffer.destroyed, false);
+  assert.equal(fixture.sphParticleUpload.identityBuffer.destroyed, false);
+});
+
+test('private source borrowing retains exact producer outputs until successor owner completion', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 1 });
+  const g2pOptions = [];
+  const first = (await runProductionM3Fixture(fixture, { g2pOptions })).result;
+  const predecessor = first.pendingPostMechanicsClosure;
+  const successorFixture = productionM3Fixture({
+    fineSubstepCount: 1, device: fixture.device, sourceClosure: predecessor
+  });
+  const successor = (await runProductionM3Fixture(successorFixture, {
+    overrides: { privateSourceClosure: predecessor }
+  })).result.pendingPostMechanicsClosure;
+  assert.equal(typeof fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter, 'function');
+  assert.equal(successor.macroAuthority.sourceSphParticleUpload, predecessor.finalSphParticleUpload);
+  assert.equal(successor.macroAuthority.sourceMlsMpmParticleUpload, predecessor.finalMlsMpmParticleUpload);
+  assert.equal(successor.finalSphParticleUpload.thermoBuffer, fixture.sphParticleUpload.thermoBuffer);
+  assert.equal(successor.finalSphParticleUpload.identityBuffer, fixture.sphParticleUpload.identityBuffer);
+  assert.equal(successor.finalSphParticleUpload.physicsTick, predecessor.finalSphParticleUpload.physicsTick);
+  assert.throws(() => publishSchroederFusedMechanicsPendingClosure(fixture.device, successor), /predecessor borrow retired/i);
+  assert.throws(() => completeSchroederFusedMechanicsPendingClosureAfter(fixture.device, successor), /predecessor borrow retired/i);
+  for (const destructiveRoute of [
+    () => publishSchroederFusedMechanicsPendingClosure(fixture.device, predecessor),
+    () => completeSchroederFusedMechanicsPendingClosureAfter(fixture.device, predecessor),
+    () => fusedPrivateOwnership.abortSchroederTwoLevelMacroAuthorityAfter(fixture.device, predecessor.macroAuthority),
+    () => fusedPrivateOwnership.abortSchroederFineMicroepochAfter(fixture.device, predecessor.terminalMicroepochAuthority),
+    () => fusedPrivateOwnership.quarantineSchroederFusedCoarseTerminalTransaction(fixture.device, predecessor.terminalTransaction),
+    () => fusedPrivateOwnership.quarantineSchroederFusedFineSubstepTransaction(fixture.device, g2pOptions[0].fusedFineSubstepTransaction)
+  ]) assert.throws(destructiveRoute, /borrow/i);
+  assert.throws(() => abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, predecessor), /borrow/i);
+  assert.throws(() => retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
+    fixture.device, predecessor.finalG2pReconstruction,
+    { terminalTransaction: predecessor.terminalTransaction, after: Promise.resolve(true) }
+  ), /borrow/i);
+  const extraBorrow = retainClaimedMlsMpmFusedCoarseTerminalOutputBorrow(
+    fixture.device, predecessor.finalG2pReconstruction, {
+      terminalTransaction: predecessor.terminalTransaction,
+      finalSphParticleUpload: predecessor.finalSphParticleUpload,
+      finalMlsMpmParticleUpload: predecessor.finalMlsMpmParticleUpload
+    }
+  );
+  assert.throws(() => releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(fixture.device, { ...extraBorrow }), /stale|foreign|replayed/i);
+  assert.throws(() => releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(productionM3Device(), extraBorrow), /stale|foreign|replayed/i);
+  assert.equal(releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(fixture.device, extraBorrow), true);
+  assert.throws(() => releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(fixture.device, extraBorrow), /stale|foreign|replayed/i);
+  assert.throws(() => retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
+    fixture.device, predecessor.finalG2pReconstruction,
+    { terminalTransaction: predecessor.terminalTransaction, after: Promise.resolve(true) }
+  ), /borrow/i);
+  const fence = deferredPromise();
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  fixture.device.queue.onSubmittedWorkDone = () => fence.promise;
+  const retirement = fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter(
+    fixture.device, predecessor, { successorClosure: successor }
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyed, false);
+  assert.equal(predecessor.finalMlsMpmParticleUpload.mechanicsBuffer.destroyed, false);
+  assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, predecessor), true);
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+  fence.resolve();
+  assert.equal(await retirement, true);
+  assert.equal(await predecessor.completionPromise, false);
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(predecessor.finalMlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
+  assert.equal(successor.finalSphParticleUpload.stateBuffer.destroyed, false);
+  assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, successor), true);
+  assert.equal(fixture.sphParticleUpload.thermoBuffer.destroyed, false);
+  assert.equal(fixture.sphParticleUpload.identityBuffer.destroyed, false);
+  const thirdFixture = productionM3Fixture({
+    fineSubstepCount: 1, device: fixture.device, sourceClosure: successor
+  });
+  const thirdResult = (await runProductionM3Fixture(thirdFixture, {
+    overrides: { privateSourceClosure: successor }
+  })).result;
+  const third = thirdResult.pendingPostMechanicsClosure;
+  assert.equal(third.macroAuthority.sourceSphParticleUpload, successor.finalSphParticleUpload);
+  assert.equal(third.macroAuthority.sourceMlsMpmParticleUpload, successor.finalMlsMpmParticleUpload);
+  assert.equal(third.finalSphParticleUpload.physicsTick, predecessor.finalSphParticleUpload.physicsTick);
+  assert.equal(thirdResult.mapAsyncCount, 0);
+  assert.equal(thirdResult.readbackBytes, 0);
+  assert.equal(thirdResult.hostQueueFenceCount, 0);
+  assert.equal(await fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter(
+    fixture.device, successor, { successorClosure: third }
+  ), true);
+  assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, third), true);
+  assert.equal(third.finalSphParticleUpload.thermoBuffer, fixture.sphParticleUpload.thermoBuffer);
+  assert.equal(third.finalSphParticleUpload.identityBuffer, fixture.sphParticleUpload.identityBuffer);
+  assert.equal(await abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, third), true);
+  assert.equal(successorFixture.controller.summary().publishedEpochCount, 0);
+  assert.equal(thirdFixture.controller.summary().publishedEpochCount, 0);
+});
+
+test('private source borrowing rejects forged, partial, replayed, and foreign authority', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 1 });
+  const predecessor = (await runProductionM3Fixture(fixture)).result.pendingPostMechanicsClosure;
+  const foreignFixture = productionM3Fixture({ fineSubstepCount: 1 });
+  const foreign = (await runProductionM3Fixture(foreignFixture)).result.pendingPostMechanicsClosure;
+  for (const [source, token] of [
+    [predecessor, { ...predecessor }],
+    [predecessor, foreign],
+    [{ ...predecessor, finalSphParticleUpload: { ...predecessor.finalSphParticleUpload } }, predecessor]
+  ]) {
+    const invalidFixture = productionM3Fixture({
+      fineSubstepCount: 1, device: fixture.device, sourceClosure: source
+    });
+    await assert.rejects(runProductionM3Fixture(invalidFixture, {
+      overrides: { privateSourceClosure: token }
+    }), /private source closure/i);
+    assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyed, false);
+  }
+  const successorFixture = productionM3Fixture({
+    fineSubstepCount: 1, device: fixture.device, sourceClosure: predecessor
+  });
+  const successor = (await runProductionM3Fixture(successorFixture, {
+    overrides: { privateSourceClosure: predecessor }
+  })).result.pendingPostMechanicsClosure;
+  const replayFixture = productionM3Fixture({
+    fineSubstepCount: 1, device: fixture.device, sourceClosure: predecessor
+  });
+  await assert.rejects(runProductionM3Fixture(replayFixture, {
+    overrides: { privateSourceClosure: predecessor }
+  }), /private source closure/i);
+  const retire = fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter;
+  for (const [device, source, options] of [
+    [fixture.device, { ...predecessor }, { successorClosure: successor }],
+    [foreignFixture.device, predecessor, { successorClosure: successor }],
+    [fixture.device, predecessor, { successorClosure: { ...successor } }],
+    [fixture.device, predecessor, { successorClosure: foreign }],
+    [fixture.device, predecessor, { successorClosure: successor, after: Promise.resolve(true) }],
+    [fixture.device, predecessor, {}]
+  ]) assert.throws(() => retire(device, source, options), /private source retirement/i);
+  assert.equal(await retire(fixture.device, predecessor, { successorClosure: successor }), true);
+  assert.throws(() => retire(fixture.device, predecessor, { successorClosure: successor }), /replayed/i);
+  await abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, successor);
+  await abandonSchroederFusedMechanicsPendingClosureAfter(foreignFixture.device, foreign);
+});
+
+test('private source borrowing keeps its lower owner on a rejected internal queue fence and retries', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 1 });
+  const predecessor = (await runProductionM3Fixture(fixture)).result.pendingPostMechanicsClosure;
+  const successorFixture = productionM3Fixture({
+    fineSubstepCount: 1, device: fixture.device, sourceClosure: predecessor
+  });
+  const successor = (await runProductionM3Fixture(successorFixture, {
+    overrides: { privateSourceClosure: predecessor }
+  })).result.pendingPostMechanicsClosure;
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  fixture.device.queue.onSubmittedWorkDone = () => Promise.reject(new Error('private fence rejected'));
+  const retire = fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter;
+  await assert.rejects(retire(fixture.device, predecessor, { successorClosure: successor }), /private fence rejected/);
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyed, false);
+  assert.throws(() => retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
+    fixture.device, predecessor.finalG2pReconstruction,
+    { terminalTransaction: predecessor.terminalTransaction, after: Promise.resolve(true) }
+  ), /borrow/i);
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+  assert.equal(await retire(fixture.device, predecessor, { successorClosure: successor }), true);
+  await abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, successor);
+});
+
+test('private source borrowing waits for authentic failed-successor retirement', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 1 });
+  const predecessor = (await runProductionM3Fixture(fixture)).result.pendingPostMechanicsClosure;
+  const successorFixture = productionM3Fixture({
+    fineSubstepCount: 1, device: fixture.device, sourceClosure: predecessor
+  });
+  const entered = deferredPromise();
+  const fail = deferredPromise();
+  const failure = new Error('private successor runner failed');
+  const run = runProductionM3Fixture(successorFixture, {
+    overrides: {
+      privateSourceClosure: predecessor,
+      gridUpdateRunner: async () => {
+        entered.resolve();
+        await fail.promise;
+        throw failure;
+      }
+    }
+  });
+  const rejected = assert.rejects(run, error => error === failure);
+  await settleBefore(entered.promise, 750, 'private successor never entered its runner');
+  const retire = fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter;
+  assert.throws(() => retire(fixture.device, predecessor), /exact successor terminal or completed abort/i);
+  assert.throws(() => abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, predecessor), /borrow/i);
+  fail.resolve();
+  await rejected;
+  assert.equal(await successorFixture.controller.completionPromise(), true);
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyed, false);
+  assert.equal(await retire(fixture.device, predecessor), true);
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(fixture.sphParticleUpload.thermoBuffer.destroyed, false);
+  assert.equal(fixture.sphParticleUpload.identityBuffer.destroyed, false);
+  assert.equal(successorFixture.controller.summary().publishedEpochCount, 0);
+});
+
+test('private source borrowing supersedes a stalled normal fence only after exact successor device loss', async () => {
+  const loss = deferredPromise();
+  const device = productionM3Device({ lost: loss.promise });
+  const fixture = productionM3Fixture({ fineSubstepCount: 1, device });
+  const predecessor = (await runProductionM3Fixture(fixture)).result.pendingPostMechanicsClosure;
+  const successorFixture = productionM3Fixture({ fineSubstepCount: 1, device, sourceClosure: predecessor });
+  const successor = (await runProductionM3Fixture(successorFixture, {
+    overrides: { privateSourceClosure: predecessor }
+  })).result.pendingPostMechanicsClosure;
+  const stalled = deferredPromise();
+  device.queue.onSubmittedWorkDone = () => stalled.promise;
+  const retire = fusedPrivateOwnership.retireSchroederFusedMechanicsPrivateSourceAfter;
+  const normal = retire(device, predecessor, { successorClosure: successor });
+  const successorLoss = abandonSchroederFusedMechanicsPendingClosureAfter(device, successor, { deviceLost: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.throws(() => retire(device, predecessor), /exact successor terminal or completed abort/i);
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyed, false);
+  loss.resolve({ reason: 'destroyed', message: 'private successor exact device loss' });
+  assert.equal(await settleBefore(successorLoss, 750, 'successor loss cleanup did not finish'), true);
+  device.queue.onSubmittedWorkDone = () => { throw new Error('loss must not request a normal fence'); };
+  assert.equal(await settleBefore(retire(device, predecessor), 750, 'private source loss retirement did not finish'), true);
+  stalled.reject(new Error('stale normal private source fence'));
+  assert.equal(await normal, true);
+  assert.equal(predecessor.finalSphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(predecessor.finalMlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
+  assert.equal(fixture.sphParticleUpload.thermoBuffer.destroyed, false);
+  assert.equal(fixture.sphParticleUpload.identityBuffer.destroyed, false);
+  assert.equal(device.createdBuffers.every(buffer => buffer.destroyCount <= 1), true);
 });
 
 test('M4 production controller publishes terminal S* exactly once through a fresh public E*', async () => {

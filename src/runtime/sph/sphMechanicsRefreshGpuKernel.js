@@ -4,6 +4,8 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
+import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
@@ -47,6 +49,68 @@ export const ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA = 'peercompute.u
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const PHASE_CHANGE_REST_VOLUME_RATIO_RESET_THRESHOLD = 2;
+
+// Bookkeeping only: each standard runner's private map is the actual issuer.
+// A seal created directly with this helper cannot authenticate a stage.
+export function createPostMechanicsStageOutputSeal(result, inputs) {
+  const output = Object.freeze(Object.fromEntries([
+    'stateBuffer', 'thermoBuffer', 'mechanicsBuffer', 'residentProductMass'
+  ].map((key) => [key, result[key] ?? null])));
+  const historyFields = ['productEventBuffer', 'productEventBufferByteLength', 'productEventRowCount',
+    'productEventStrideFloats', 'productEventStrideBytes', 'reactionPlacementRolledBack',
+    'reactionPlacementTransactionOutcome'];
+  const history = output.residentProductMass;
+  const historySnapshot = history ? historyFields.map((key) => [key, history[key]]) : [];
+  // These fields select/own the continuation. Protect them as well as the
+  // buffers: a changed summary must not skip a real carrier debit while its
+  // emitted product history survives, and a new .result cannot redirect the
+  // closure's retainedStageSource lookup to a structural copy.
+  const selectors = ['result', 'reactionSummary', 'ownsStateBuffer', 'ownsThermoBuffer',
+    'ownsMechanicsBuffer', 'componentOwnership', 'bufferOwnership'];
+  const selectorSnapshot = selectors.map((key) => [key, result[key]]);
+  const nestedSelectors = ['reactionSummary', 'componentOwnership', 'bufferOwnership']
+    .filter((key) => result[key] && typeof result[key] === 'object')
+    .map((key) => [result[key], Object.entries(result[key])]);
+  let held = true;
+  let retired = false;
+  const guarded = [];
+  for (const [owner, key] of [
+    [result, 'destroyOutputParticleBuffers'],
+    [result, 'destroyOutputParticleBufferComponents'],
+    [output.residentProductMass, 'destroyResidentProductMassBuffers']
+  ]) {
+    if (typeof owner?.[key] !== 'function') continue;
+    const destroy = owner[key];
+    const guard = function (...args) {
+      if (held) throw new Error('Captured post-mechanics output still has an owner read');
+      retired = true;
+      return destroy.apply(this, args);
+    };
+    owner[key] = guard;
+    guarded.push([owner, key, guard]);
+  }
+  const validate = () => {
+    if (retired || Object.entries(output).some(([key, value]) => (result[key] ?? null) !== value)
+        || historySnapshot.some(([key, value]) => history[key] !== value)
+        || selectorSnapshot.some(([key, value]) => result[key] !== value)
+        || nestedSelectors.some(([object, entries]) => Object.keys(object).length !== entries.length
+          || entries.some(([key, value]) => object[key] !== value))
+        || guarded.some(([owner, key, guard]) => owner[key] !== guard)) {
+      throw new Error('Captured post-mechanics producer output was changed or retired');
+    }
+    return true;
+  };
+  return Object.freeze({ result, inputs: Object.freeze({ ...inputs }), output,
+    validate, release() { if (!held) return false; held = false; return true; } });
+}
+
+const mechanicsSourceCaptures = new WeakMap();
+export function resolveMlsMpmMechanicsRefreshSourceCapture(result, token) {
+  const seal = mechanicsSourceCaptures.get(token);
+  if (!seal || seal.result !== result) throw new Error('Unknown mechanics source capture');
+  seal.validate();
+  return seal;
+}
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -149,6 +213,8 @@ function shouldResetMechanicsForPhaseChange(mechanics, mechanicsOffset, phaseMec
 }
 
 function assertRefreshInputs({ sphParticleState, mlsMpmParticleState, mechanicsMaterialTable }) {
+  assertSphMechanicsGasLayout(mechanicsMaterialTable);
+  assertSphCondensableInitializationMatches(sphParticleState, mlsMpmParticleState);
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('MLS-MPM mechanics refresh requires a packed SPH GPU particle buffer');
   }
@@ -259,6 +325,7 @@ function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
 }
 
 export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMaterialTable) {
+  assertSphMechanicsGasLayout(mechanicsMaterialTable);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('uploadMlsMpmMechanicsMaterialPhaseRecords requires a WebGPU-like device');
   }
@@ -314,6 +381,8 @@ export function diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
 ) {
   const buffer = upload?.recordsBuffer || upload?.materialPhaseBuffer || null;
   const sourceDevice = webGpuBufferDevice(buffer);
+  let layoutValid = true;
+  try { assertSphMechanicsGasLayout(mechanicsMaterialTable); } catch { layoutValid = false; }
   const tableFingerprint = typedArrayContentFingerprint(
     mechanicsMaterialTable?.records
   );
@@ -324,7 +393,7 @@ export function diagnoseUploadedMechanicsMaterialPhaseRecordsMatch(
     notDestroyed: upload?.destroyed !== true,
     bufferPresent: Boolean(buffer),
     schemaMatch:
-      upload?.sourceMaterialTableSchema === mechanicsMaterialTable?.schema,
+      layoutValid && upload?.sourceMaterialTableSchema === mechanicsMaterialTable?.schema,
     fingerprintMatch:
       upload?.sourceMaterialTableContentFingerprint === tableFingerprint,
     countMatch:
@@ -373,13 +442,13 @@ export function uploadedMechanicsMaterialPhaseRecordsMatch(
   ).matches;
 }
 
-function createParamsArray({ particleCount, phaseRecordCount, materialBankWarmInputRowCount = 0 }) {
+function createParamsArray({ particleCount, phaseRecordCount, gasConstitutiveOffsetVec4 = 0, materialBankWarmInputRowCount = 0 }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, phaseRecordCount, true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(materialBankWarmInputRowCount, 0))), true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, gasConstitutiveOffsetVec4, true);
   return buffer;
 }
 
@@ -541,7 +610,7 @@ export function refreshMlsMpmMechanicsCpu({
       authorityValidationFailed = true;
       break;
     }
-    const phaseMechanics = findMechanicsMaterialPhaseRecord(mechanicsMaterialTable, materialId, phaseId);
+    const phaseMechanics = findMechanicsMaterialPhaseRecord(mechanicsMaterialTable, materialId, phaseId, thermo[thermoOffset + 2]);
     const phaseMechanicsValues = [
       phaseMechanics.restDensityKgPerM3,
       phaseMechanics.effectiveBulkModulusPa,
@@ -557,6 +626,7 @@ export function refreshMlsMpmMechanicsCpu({
     const restDensity = Number(thermo[thermoOffset + 3]);
     if (
       phaseMechanics.status !== 1
+      || phaseMechanics.soundSpeedMPerS < 0
       || !phaseMechanicsValues.every(Number.isFinite)
       || !Number.isFinite(restDensity)
       || !(restDensity > 0)
@@ -712,6 +782,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     phaseRecordCount: mechanicsMaterialTable.phaseRecordCount,
+    gasConstitutiveOffsetVec4: mechanicsMaterialTable.gasConstitutiveOffsetVec4 ?? 0,
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount
   }));
   const authorityValidationBuffer = device.createBuffer({
@@ -893,6 +964,16 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
 }
 
 export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
+  const token = args.postMechanicsSourceCapture ?? null;
+  if (token) {
+    if (mechanicsSourceCaptures.has(token)) throw new Error('Mechanics source capture cannot replay');
+    mechanicsSourceCaptures.set(token, null);
+    if (args.retainOutputParticleBuffers !== true) throw new Error('Mechanics capture requires retained outputs');
+  }
+  const capturedInputs = token ? { device: args.device, sphParticleState: args.sphParticleState,
+    mechanicsMaterialTable: args.mechanicsMaterialTable,
+    mlsMpmParticleState: args.mlsMpmParticleState, sourceStateBuffer: args.sourceStateBuffer,
+    sourceThermoBuffer: args.sourceThermoBuffer, sourceMechanicsBuffer: args.sourceMechanicsBuffer } : null;
   const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage(args);
   const {
     device,
@@ -1047,6 +1128,8 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   if (!retainOutputParticleBuffers) {
     stage.result.mechanicsBuffer = null;
   }
+  if (token) mechanicsSourceCaptures.set(token,
+    createPostMechanicsStageOutputSeal(stage.result, capturedInputs));
   return stage.result;
 }
 

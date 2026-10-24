@@ -2,8 +2,10 @@ import {
   createResidentRenderCandidateMailbox
 } from './residentRenderCandidateMailbox.js';
 import {
-  isExactWorkerPresentationFrameQueueCompletionProof
+  isExactWorkerPresentationFrameQueueCompletionProof,
+  isExactWorkerIsosurfacePresentationQueueAttributionProof
 } from '../runtime/sph/sphWorkerPresentationQos.js';
+import { readIsosurfaceTemporalInput } from './sphPresentationCadence.js';
 
 export {
   ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA
@@ -301,6 +303,116 @@ function workerParticleTemporalMotionFrameBoundToSource(
   );
 }
 
+function committedParticleSourceIdentity(receipt) {
+  return receipt ? JSON.stringify([
+    'schema', 'scheduleId', 'laneId', 'stateKey', 'presentationLaneEpoch',
+    'residentExecutionGeneration', 'sphStep', 'stepOrdinal', 'requestGeneration',
+    'computeManagerLeaseId'
+  ].map((key) => receipt[key] ?? null)) : null;
+}
+
+function sameCommittedParticleSource(left, right) {
+  return Boolean(left && right
+    && committedParticleSourceIdentity(left) === committedParticleSourceIdentity(right));
+}
+
+function retireParticleResizeSource(bridge) {
+  const receipt = bridge.workerCanvasLastRenderedContent
+    || bridge.workerParticleResizeSource?.receipt;
+  if (receipt) bridge.workerParticleResizeRetiredSourceIdentity =
+    committedParticleSourceIdentity(receipt);
+  bridge.workerParticleResizeSource = null;
+}
+
+function committedParticleSourceIsCurrent(bridge, receipt) {
+  if (committedParticleSourceIdentity(receipt)
+    === bridge.workerParticleResizeRetiredSourceIdentity) return false;
+  if (!sameCommittedParticleSource(
+    receipt, bridge.committedResidentSchedulePresentationStatus
+  )) return false;
+  const stream = bridge.residentRenderCandidateStreamIdentity;
+  if (stream?.presentationLaneEpoch !== receipt.presentationLaneEpoch
+    || stream?.laneId !== receipt.laneId || stream?.stateKey !== receipt.stateKey) return false;
+  // The mailbox high-water survives takeLatest(). A pending successor must
+  // not make its predecessor eligible to repopulate a resized framebuffer.
+  const latest = bridge.residentRenderCandidateMailbox.stats().latestVersion;
+  return !latest || latest.residentExecutionGeneration < receipt.residentExecutionGeneration
+    || (latest.residentExecutionGeneration === receipt.residentExecutionGeneration
+      && latest.nextStep <= receipt.sphStep);
+}
+
+function admittedParticleMotionAge(receipt) {
+  if (workerParticleTemporalMotionFrameSelfProofReady(receipt)) {
+    return typeof receipt.motionAgeS === 'number'
+      && Number.isFinite(receipt.motionAgeS) && receipt.motionAgeS >= 0
+      ? receipt.motionAgeS : null;
+  }
+  return workerParticleKeyframePresentationProofReady(receipt) ? 0 : null;
+}
+
+function particleResizeRedrawSource(bridge, incoming) {
+  const retained = bridge.workerParticleResizeSource;
+  const source = retained?.receipt;
+  if (!source || bridge.workerCanvasLastRenderedContent
+    || bridge.displayOwner !== 'worker'
+    || retained.lifecycleGeneration !== bridge.lifecycleGeneration
+    || retained.targetFramebufferEpoch !== bridge.workerFramebufferEpoch
+    || incoming?.workerFramebufferEpoch !== retained.targetFramebufferEpoch
+    || !(incoming.workerFramebufferEpoch > source.workerFramebufferEpoch)
+    || !committedParticleSourceIsCurrent(bridge, source)
+    || !sameCommittedParticleSource(source, incoming)
+    || !workerParticleTemporalMotionFrameBoundToSource(incoming, source)
+    || incoming.motionAgeSource !== 'explicit-frozen-redraw'
+    || !workerPresentationPhysicsPrefixNotAttributed(incoming)
+    || typeof incoming.motionAgeS !== 'number'
+    || incoming.motionAgeS !== admittedParticleMotionAge(source)
+    || !(incoming.presentationQueueCompletionSerial > source.presentationQueueCompletionSerial)
+    || !(incoming.motionFrameSerial > (source.motionFrameSerial ?? 0))) return null;
+  return source;
+}
+
+function retainLateParticleResizeProof(bridge, incoming, envelope) {
+  const retained = bridge.workerParticleResizeSource;
+  const source = retained?.receipt;
+  if (!source || bridge.displayOwner !== 'worker'
+    || retained.lifecycleGeneration !== bridge.lifecycleGeneration
+    || retained.targetFramebufferEpoch !== bridge.workerFramebufferEpoch
+    || !committedParticleSourceIsCurrent(bridge, source)
+    || !sameCommittedParticleSource(source, incoming)
+    || !Number.isSafeInteger(incoming.workerFramebufferEpoch)
+    || incoming.workerFramebufferEpoch < source.workerFramebufferEpoch
+    || incoming.workerFramebufferEpoch >= retained.targetFramebufferEpoch
+    || incoming.frameCount !== envelope.frameCount
+    || incoming.readyFrameCount !== envelope.readyFrameCount
+    || !Number.isSafeInteger(incoming.frameCount)
+    || incoming.readyFrameCount !== incoming.frameCount
+    || incoming.status !== 'worker-offscreen-resident-particle-state-producer-rendered'
+    || !workerParticleTemporalMotionFrameBoundToSource(incoming, source)
+    || !(incoming.motionFrameSerial > (source.motionFrameSerial ?? 0))
+    || admittedParticleMotionAge(incoming) == null
+    || admittedParticleMotionAge(incoming) < admittedParticleMotionAge(source)
+    || !committedPresentationFramebufferCanAdvance(source, incoming,
+      bridge.workerFramebufferQueueCompletionSerialHighWater)) return false;
+  // The worker may have proved B before handling resize, while the page still
+  // knew A. Retain B's scalar proof only; its old-epoch pixels remain invalid.
+  // No receipt history, readiness publication, or visible serial advances.
+  const proof = Object.freeze({ ...source, ...Object.fromEntries([
+    'frameCount', 'readyFrameCount', 'workerFramebufferEpoch',
+    'motionFrameSchema', 'motionFrameStatus', 'motionFrameAdmitted',
+    'motionFrameGpuCompleted', 'motionFramePresentationOpportunity',
+    'motionFramePresentationOpportunityMethod', 'motionFrameSerial',
+    'motionFrameSubmittedSerial', 'motionSourceFrameCount', 'motionSourceSphStep',
+    'motionAgeS', 'motionAgeSource', 'motionMethod', 'motionVelocityBufferRetained',
+    'presentationQueueCompletionCount', 'presentationQueueCompletionSerial',
+    'presentationQueueCompletionMethod', 'presentationQueueCompletionScope',
+    'physicsQueuePrefixCoverage', 'physicsHostQueueFenceParticipation'
+  ].map((key) => [key, incoming[key]])),
+  motionPresentationQosBoundary: incoming.motionPresentationQosBoundary
+    ? Object.freeze({ ...incoming.motionPresentationQosBoundary }) : null });
+  bridge.workerParticleResizeSource = Object.freeze({ ...retained, receipt: proof });
+  return true;
+}
+
 function workerIsosurfacePresentationProofReady(receipt = null) {
   return Boolean(
     receipt?.presentationFrameSchema
@@ -314,9 +426,21 @@ function workerIsosurfacePresentationProofReady(receipt = null) {
     && receipt?.presentationFramePresentationOpportunity === true
     && receipt?.presentationFramePresentationOpportunityMethod
       === 'worker-request-animation-frame-after-gpu-completion'
-    && isExactWorkerPresentationFrameQueueCompletionProof(receipt)
-    && workerPresentationPhysicsPrefixNotAttributed(receipt)
+    && isExactWorkerIsosurfacePresentationQueueAttributionProof(receipt)
   );
+}
+
+function workerIsosurfaceTemporalInputCanAdvance(previous, incoming) {
+  const next = readIsosurfaceTemporalInput(incoming);
+  if (incoming?.physicsQueuePrefixCoverage === 'physics-queue-prefix-included'
+    && (!next.valid || !(next.ageS > 0))) return false;
+  const prior = readIsosurfaceTemporalInput(previous ?? {});
+  if (!next.claimed) return !prior.valid
+    || JSON.stringify(committedPresentationReceiptVersion(previous))
+      !== JSON.stringify(committedPresentationReceiptVersion(incoming));
+  if (!next.valid) return false;
+  return !prior.valid || prior.sourceIdentity !== next.sourceIdentity
+    || (prior.sourceTimeS === next.sourceTimeS && next.ageS >= prior.ageS);
 }
 
 function committedPresentationReceiptVersion(receipt = null) {
@@ -1170,6 +1294,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
   devicePixelRatio = globalThis.devicePixelRatio,
   backgroundColor = '#000000',
   clearAlpha = 0,
+  presentationPlaying = false,
   workerFactory = null,
   windowRef = globalThis,
   navigatorRef = globalThis.navigator,
@@ -1180,6 +1305,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
   onRetainedCompactSnapshotStatus = null,
   onResidentRenderCandidate = null
 } = {}) {
+  if (typeof presentationPlaying !== 'boolean') {
+    throw new TypeError('presentationPlaying must be a boolean');
+  }
   const documentRef = container?.ownerDocument || windowRef?.document || globalThis.document || null;
   let currentBackgroundColor = backgroundColor;
   const requestedRetainedGpuBufferHandoff = Boolean(retainedGpuBufferHandoffRequested);
@@ -1235,6 +1363,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
     workerErrorHandler: null,
     disposed: false,
     lifecycleGeneration: 1,
+    // Playback has its own ordering, independent of committed physics and
+    // framebuffer authority. In particular, pausing must not clear either.
+    playbackState: Object.freeze({ playing: presentationPlaying, revision: 0 }),
     status: null,
     renderRowsStatus: null,
     retainedGpuBufferHandoffStatus: null,
@@ -1271,6 +1402,12 @@ export function createUlgWorkerOffscreenPresentationBridge({
     // handoff adopt pixels rendered while the native seed still owned display,
     // but only while the framebuffer counters remain unchanged.
     workerCanvasLastRenderedContent: null,
+    // Non-visible source binding only, never evidence that old pixels survived
+    // resize. One exact source can authorize a freshly proved frozen redraw.
+    workerParticleResizeSource: null,
+    // A reset can retire a source while its last pixels are still visible.
+    // Keep just that identity so a later resize cannot re-arm its receipt.
+    workerParticleResizeRetiredSourceIdentity: null,
     // Monotonic bridge-owned identity for the pixels themselves. Unlike the
     // display-owner epoch, every destructive canvas operation advances this
     // even when ownership does not change.
@@ -1292,6 +1429,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
     residentParticleStateProducerColorRowsByteLength: 0,
     clearResidentRenderProducerSourceCache() {
       if (this.disposed) return disposedMutationStatus('clearResidentRenderProducerSourceCache');
+      retireParticleResizeSource(this);
       this.residentRenderProducerSourceCacheKey = null;
       this.residentRenderProducerSourceParticleCount = 0;
       this.residentRenderProducerSourceStrideFloats = 0;
@@ -1299,6 +1437,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
     },
     clearResidentParticleStateProducerCache() {
       if (this.disposed) return disposedMutationStatus('clearResidentParticleStateProducerCache');
+      retireParticleResizeSource(this);
       this.residentParticleStateProducerCacheKey = null;
       this.residentParticleStateProducerParticleCount = 0;
       this.residentParticleStateProducerStateStrideFloats = 0;
@@ -1366,6 +1505,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         });
       }
       const displayOwnerChanged = normalizedOwner !== this.displayOwner;
+      if (displayOwnerChanged && this.displayOwner === 'worker') retireParticleResizeSource(this);
       this.displayOwner = normalizedOwner;
       this.displayOwnerEpoch = requestedEpoch;
       this.displayOwnerReason = reason;
@@ -1374,6 +1514,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       // receipt arrives; hiding on every resident generation creates a blank
       // frame between each simulation update.
       if (displayOwnerChanged) {
+        this.workerParticleResizeSource = null;
         this.displayOwnerContentReady = normalizedOwner === 'main-native';
         this.displayOwnerPresentedSphStep = null;
         this.displayOwnerLastRenderedContent = null;
@@ -1622,7 +1763,19 @@ export function createUlgWorkerOffscreenPresentationBridge({
         // The worker's resize path reconfigures and clears the OffscreenCanvas.
         // Invalidate the exact content receipt before posting that operation;
         // a later positive render receipt is required to reveal it again.
+        const resizeSource = this.workerCanvasLastRenderedContent
+          || (this.workerParticleResizeSource?.lifecycleGeneration === this.lifecycleGeneration
+            && this.workerParticleResizeSource?.targetFramebufferEpoch === this.workerFramebufferEpoch
+            ? this.workerParticleResizeSource.receipt : null);
         this.workerFramebufferEpoch += 1;
+        this.workerParticleResizeSource = this.displayOwner === 'worker'
+          && resizeSource?.schema === ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA
+          && admittedParticleMotionAge(resizeSource) != null
+          && committedParticleSourceIsCurrent(this, resizeSource)
+          ? Object.freeze({ receipt: resizeSource,
+            lifecycleGeneration: this.lifecycleGeneration,
+            targetFramebufferEpoch: this.workerFramebufferEpoch })
+          : null;
         this.workerCanvasLastRenderedContent = null;
         if (this.displayOwner === 'worker') {
           this.displayOwnerContentReady = false;
@@ -1660,9 +1813,28 @@ export function createUlgWorkerOffscreenPresentationBridge({
         displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
       });
     },
+    setPresentationPlaying(playing) {
+      if (this.disposed) return disposedMutationStatus('setPresentationPlaying');
+      if (typeof playing !== 'boolean') return false;
+      if (this.playbackState.playing === playing) return this.playbackState;
+      if (this.playbackState.revision === Number.MAX_SAFE_INTEGER) return false;
+      this.playbackState = Object.freeze({
+        playing,
+        revision: this.playbackState.revision + 1
+      });
+      // Send during initialization as well: the worker applies revisions
+      // before async init work, so a late init continuation cannot resume a
+      // state which the user has already paused.
+      this.worker?.postMessage?.({
+        type: 'set-presentation-playback-state',
+        playbackState: { ...this.playbackState }
+      });
+      return this.playbackState;
+    },
     updatePreviewViewProjection(matrix, {
       reason = 'preview-camera-update',
-      cameraPositionM = null
+      cameraPositionM = null,
+      nativeSurfaceAppearance = null
     } = {}) {
       // Fire-and-forget camera stream for whichever worker-owned geometry is
       // visible; deliberately no page status publication (it can run per
@@ -1676,19 +1848,33 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && Array.from(cameraPositionM, Number).every(Number.isFinite)
           ? Array.from(cameraPositionM, Number)
           : null;
+      // Snapshot the scene producer's appearance independently of resident
+      // source frames. Camera-only updates omit it; a null image URL inside
+      // an appearance is an explicit background-image clear, not an omission.
+      const appearance = nativeSurfaceAppearance == null ? null : structuredClone({
+        lightingProfile: nativeSurfaceAppearance.lightingProfile,
+        backgroundImageUrl: nativeSurfaceAppearance.backgroundImageUrl,
+        backgroundColor: nativeSurfaceAppearance.backgroundColor,
+        backgroundClearValue: nativeSurfaceAppearance.backgroundClearValue
+      });
       this.worker.postMessage?.({
         type: 'update-preview-view-projection',
-        viewProjectionMatrix: matrix,
+        viewProjectionMatrix: Array.from(matrix),
         ...(normalizedCameraPosition
           ? { cameraPositionM: normalizedCameraPosition }
           : {}),
+        ...(appearance ? { nativeSurfaceAppearance: appearance } : {}),
         reason
       });
       return { status: 'worker-offscreen-preview-view-projection-posted', reason };
     },
-    setBackgroundColor(color, { reason = 'background-color' } = {}) {
-      if (this.disposed) return disposedMutationStatus('setBackgroundColor');
-      currentBackgroundColor = color || currentBackgroundColor;
+    clearPresentation({
+      backgroundColor = currentBackgroundColor,
+      reason = 'clear-presentation'
+    } = {}) {
+      if (this.disposed) return disposedMutationStatus('clearPresentation');
+      retireParticleResizeSource(this);
+      currentBackgroundColor = backgroundColor || currentBackgroundColor;
       if (this.worker) {
         this.workerFramebufferEpoch += 1;
         this.workerCanvasLastRenderedContent = null;
@@ -1710,6 +1896,39 @@ export function createUlgWorkerOffscreenPresentationBridge({
       return publish({
         ...(this.status || {}),
         status: this.status?.status || 'worker-offscreen-presentation-clear-posted',
+        reason,
+        backgroundColor: currentBackgroundColor,
+        displayOwnerContentReady: this.displayOwnerContentReady,
+        displayOwnerContentFrameSerial: this.displayOwnerContentFrameSerial,
+        displayOwnerPresentedSphStep: this.displayOwnerPresentedSphStep,
+        displayOwnerLastRenderedContent: this.displayOwnerLastRenderedContent,
+        displayCanvasVisible: this.canvas?.style?.visibility !== 'hidden'
+      });
+    },
+    setBackgroundColor(color, {
+      reason = 'background-color',
+      nativeSurfaceAppearance = null
+    } = {}) {
+      if (this.disposed) return disposedMutationStatus('setBackgroundColor');
+      currentBackgroundColor = color || currentBackgroundColor;
+      if (this.worker) {
+        // Appearance does not clear/reconfigure the framebuffer or retire its
+        // retained source. Keep the last proven pixels until the worker's
+        // ordinary frozen-source redraw supplies a genuinely newer proof.
+        this.worker.postMessage?.({
+          type: 'update-presentation-background',
+          backgroundColor: currentBackgroundColor,
+          clearAlpha,
+          workerFramebufferEpoch: this.workerFramebufferEpoch,
+          ...(nativeSurfaceAppearance != null
+            ? { nativeSurfaceAppearance: structuredClone(nativeSurfaceAppearance) }
+            : {}),
+          reason
+        });
+      }
+      return publish({
+        ...(this.status || {}),
+        status: this.status?.status || 'worker-offscreen-presentation-appearance-posted',
         reason,
         backgroundColor: color,
         displayOwnerContentReady: this.displayOwnerContentReady,
@@ -2262,6 +2481,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
           'presentCommittedResidentScheduleCandidate'
         );
       }
+      retireParticleResizeSource(this);
       const admission =
         buildUlgWorkerOffscreenCommittedResidentSchedulePresentationAdmission({
           workerLaneAuthority,
@@ -2454,6 +2674,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
       this.displayOwnerPresentedSphStep = null;
       this.displayOwnerLastRenderedContent = null;
       this.workerCanvasLastRenderedContent = null;
+      this.workerParticleResizeSource = null;
+      this.workerParticleResizeRetiredSourceIdentity = null;
       this.workerFramebufferQueueCompletionSerialHighWater = 0;
       this.workerFramebufferEpoch = 0;
       this.committedResidentSchedulePresentationStatus = null;
@@ -2503,6 +2725,8 @@ export function createUlgWorkerOffscreenPresentationBridge({
     bridge.residentRenderCandidateMailbox?.reset?.();
     bridge.residentRenderCandidateStreamIdentity = null;
     bridge.committedResidentSchedulePresentationStatus = null;
+    bridge.workerParticleResizeSource = null;
+    bridge.workerParticleResizeRetiredSourceIdentity = null;
     bridge.workerFramebufferQueueCompletionSerialHighWater = 0;
     const workerLifecycleGeneration = bridge.lifecycleGeneration;
     const handleWorkerMessage = (event) => {
@@ -2565,7 +2789,11 @@ export function createUlgWorkerOffscreenPresentationBridge({
               stateKey
             });
           }
-          bridge.residentRenderCandidateMailbox.publish(data.candidate);
+          const publication = bridge.residentRenderCandidateMailbox.publish(data.candidate);
+          if (publication.accepted && bridge.workerParticleResizeSource
+            && !committedParticleSourceIsCurrent(bridge, bridge.workerParticleResizeSource.receipt)) {
+            bridge.workerParticleResizeSource = null;
+          }
         } catch {
           // Fail-closed mailbox rejection (malformed candidate): counted,
           // never silently accepted, never allowed to crash the handler.
@@ -2664,6 +2892,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && contentReceipt?.terminalFenceSatisfied === true
         && contentReceipt?.terminalFenceAuthorityAdmissionReady === true
       );
+      if (committedReceiptAuthorityReady) {
+        retainLateParticleResizeProof(bridge, contentReceipt, data);
+      }
       const keyframePresentationProofReady =
         workerParticleKeyframePresentationProofReady(contentReceipt);
       const temporalMotionFrameClaimed = Boolean(
@@ -2674,11 +2905,12 @@ export function createUlgWorkerOffscreenPresentationBridge({
           && Number.isSafeInteger(Number(contentReceipt.motionFrameSerial))
         )
       );
-      const temporalMotionFrameProofReady =
+      const temporalMotionFrameProofReady = Boolean(
         workerParticleTemporalMotionFrameBoundToSource(
           contentReceipt,
           bridge.workerCanvasLastRenderedContent
-        );
+        ) || particleResizeRedrawSource(bridge, contentReceipt)
+      );
       const legacyParticleCandidateReceiptReady = Boolean(
         exactFramebufferReceipt
         && committedReceiptAuthorityReady
@@ -2771,6 +3003,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && committedReceiptAuthorityReady
         && isosurfaceReceipt
         && workerIsosurfacePresentationProofReady(contentReceipt)
+        && workerIsosurfaceTemporalInputCanAdvance(
+          bridge.workerCanvasLastRenderedContent, contentReceipt
+        )
         && contentReceipt?.status
           === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS
         && contentReceipt?.producerSourceKind
@@ -2818,6 +3053,9 @@ export function createUlgWorkerOffscreenPresentationBridge({
         committedPresentationTerminalReceipt
         && committedPresentationReceiptCurrent
       ) {
+        if (bridge.workerParticleResizeSource && !sameCommittedParticleSource(
+          bridge.workerParticleResizeSource.receipt, contentReceipt
+        )) bridge.workerParticleResizeSource = null;
         bridge.committedResidentSchedulePresentationStatus = Object.freeze({
           ...contentReceipt
         });
@@ -2997,6 +3235,20 @@ export function createUlgWorkerOffscreenPresentationBridge({
             ...(contentReceipt.presentationFrameSchema
               === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA
               ? {
+                  ...(readIsosurfaceTemporalInput(contentReceipt).valid
+                    ? {
+                        isosurfaceTemporalPresentation:
+                          contentReceipt.isosurfaceTemporalPresentation,
+                        isosurfacePresentationMotionAgeS:
+                          contentReceipt.isosurfacePresentationMotionAgeS,
+                        isosurfacePresentationSourceTimeS:
+                          contentReceipt.isosurfacePresentationSourceTimeS,
+                        isosurfacePresentationMotionMethod:
+                          contentReceipt.isosurfacePresentationMotionMethod,
+                        presentationOnly: contentReceipt.presentationOnly,
+                        authoritativeStateMutation: false
+                      }
+                    : {}),
                   presentationFrameSchema:
                     contentReceipt.presentationFrameSchema,
                   presentationFrameStatus:
@@ -3055,6 +3307,26 @@ export function createUlgWorkerOffscreenPresentationBridge({
                       === 'boolean'
                       ? contentReceipt.physicsHostQueueFenceParticipation
                       : null,
+                  ...(contentReceipt.physicsQueuePrefixCoverage
+                    === 'physics-queue-prefix-included'
+                    && workerIsosurfacePresentationProofReady(contentReceipt)
+                    ? {
+                        physicsContinuationBlocked:
+                          contentReceipt.physicsContinuationBlocked,
+                        presentationQosHostQueueFenceCount:
+                          contentReceipt.presentationQosHostQueueFenceCount,
+                        motionPresentationQosBoundary: Object.freeze({
+                          submissionOrdinal:
+                            contentReceipt.motionPresentationQosBoundary.submissionOrdinal,
+                          completedSubstepCount:
+                            contentReceipt.motionPresentationQosBoundary.completedSubstepCount,
+                          totalSubstepCount:
+                            contentReceipt.motionPresentationQosBoundary.totalSubstepCount,
+                          chunkStepCount:
+                            contentReceipt.motionPresentationQosBoundary.chunkStepCount
+                        })
+                      }
+                    : {}),
                   workerOwnedOpticalPresentation:
                     compactWorkerOwnedOpticalPresentation(
                       contentReceipt.workerOwnedOpticalPresentation
@@ -3302,6 +3574,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
           })
         : null;
       if (committedPresentationFramebufferCurrent) {
+        bridge.workerParticleResizeSource = null;
         bridge.workerCanvasLastRenderedContent = compactContentReceipt;
         const acceptedQueueCompletionSerial = Number(
           contentReceipt?.presentationQueueCompletionSerial
@@ -3338,6 +3611,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
         && bridge.displayOwner === 'worker'
       );
       if (contentReceiptReady) {
+        bridge.workerParticleResizeSource = null;
         bridge.displayOwnerContentReady = true;
         bridge.displayOwnerContentFrameSerial += 1;
         bridge.displayOwnerPresentedSphStep = Number.isFinite(Number(contentReceipt.sphStep))
@@ -3426,6 +3700,7 @@ export function createUlgWorkerOffscreenPresentationBridge({
       pixelRatio: size.pixelRatio,
       backgroundColor: currentBackgroundColor,
       clearAlpha,
+      playbackState: { ...bridge.playbackState },
       workerFramebufferEpoch: bridge.workerFramebufferEpoch
     }, [offscreenCanvas]);
     publish({

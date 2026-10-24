@@ -151,6 +151,7 @@ import {
   GPU_PHASE_IDS,
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
+import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   createSphGpuTimestampProfiler,
@@ -163,6 +164,8 @@ import {
 } from './sphGpuReadbackTelemetry.js';
 import {
   createResidentProductEventCountControlWords,
+  productEventLiveCountCopyDescriptor,
+  validateProductEventLiveCountCopyDescriptor,
   registerResidentProductEventCountAuthority,
   residentProductEventCountAuthorityRegistered,
   resolveResidentProductEventCountAuthority,
@@ -231,16 +234,19 @@ import {
 import {
   SPH_SPATIAL_GAS_DIAGNOSTICS_FULL_ORACLE,
   SPH_SPATIAL_GAS_DIAGNOSTICS_NONE,
+  SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS as SPH_RETAINED_SPATIAL_GAS_COMPACT_ROW_FLOATS,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
   ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA as ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT,
   describeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource,
   releaseSphSpatialGasLedgerEosAfterQueue,
   runSphSpatialGasLedgerEosRetainedWebGpu
 } from './sphSpatialGasLedgerEosGpu.js';
+import { SPH_SPATIAL_GAS_MIXTURE_MOMENT_ROW_FLOATS } from './sphSpatialGasMixtureMoments.js';
 import {
   MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO,
   MLS_MPM_G2P_MAX_VOLUME_RATIO_J,
@@ -302,6 +308,8 @@ import {
   retainedSchroederFarForceDeltaFusionOutputBuffers,
   retainedThermalOutputBuffers,
   selectMlsMpmTerminalParticleFamily,
+  claimMlsMpmPostMechanicsContinuation,
+  abandonMlsMpmPostMechanicsCondensate,
   runMlsMpmPostMechanicsClosureWebGpu
 } from './sphMlsMpmPostMechanicsClosure.js';
 import {
@@ -1452,6 +1460,53 @@ function retainedGasCellImportGraph(importValue = null) {
   const scheduled = new Set();
   const records = [];
   const byRecord = new Map();
+  const descriptorCache = new WeakMap();
+  const prototypeCache = new WeakMap();
+  const descriptorFor = (record, key) => {
+    let cache = descriptorCache.get(record);
+    if (!cache) descriptorCache.set(record, cache = new Map());
+    if (!cache.has(key)) {
+      cache.set(key, retainedGasCellImportOwnDescriptor(record, key));
+    }
+    return cache.get(key);
+  };
+  const inheritedSchemasFor = (record) => {
+    const schemas = [];
+    const seen = new Set([record]);
+    let cursor = record;
+    while (cursor != null) {
+      try {
+        if (!prototypeCache.has(cursor)) {
+          prototypeCache.set(cursor, Object.getPrototypeOf(cursor));
+        }
+        cursor = prototypeCache.get(cursor);
+      } catch (cause) {
+        throw retainedGasCellImportGraphError(
+          'ERR_ULG_RETAINED_GAS_CELL_IMPORT_PROTOTYPE_INSPECTION',
+          'retained gas-cell import prototype could not be inspected',
+          cause
+        );
+      }
+      if (cursor == null) break;
+      if (seen.has(cursor) || seen.size >= RETAINED_GAS_CELL_IMPORT_GRAPH_LIMIT) {
+        throw retainedGasCellImportGraphError(
+          'ERR_ULG_RETAINED_GAS_CELL_IMPORT_GRAPH_LIMIT',
+          'retained gas-cell import prototype chain is cyclic or exceeds the bounded depth'
+        );
+      }
+      seen.add(cursor);
+      const descriptor = descriptorFor(cursor, 'schema');
+      if (!descriptor) continue;
+      if (!Object.hasOwn(descriptor, 'value')) {
+        throw retainedGasCellImportGraphError(
+          'ERR_ULG_RETAINED_GAS_CELL_IMPORT_SCHEMA_ACCESSOR',
+          'retained gas-cell import inherited schema must be a data property'
+        );
+      }
+      schemas.push(descriptor.value);
+    }
+    return Object.freeze(schemas);
+  };
   const enqueue = (record) => {
     if (
       !record
@@ -1472,10 +1527,10 @@ function retainedGasCellImportGraph(importValue = null) {
     const record = pending.shift();
     const descriptors = new Map();
     for (const key of RETAINED_GAS_CELL_IMPORT_SNAPSHOT_KEYS) {
-      const descriptor = retainedGasCellImportOwnDescriptor(record, key);
+      const descriptor = descriptorFor(record, key);
       descriptors.set(key, descriptor);
       if (
-        RETAINED_GAS_CELL_IMPORT_GRAPH_KEYS.includes(key)
+        (RETAINED_GAS_CELL_IMPORT_GRAPH_KEYS.includes(key) || key === 'schema')
         && descriptor
         && !Object.hasOwn(descriptor, 'value')
       ) {
@@ -1485,7 +1540,8 @@ function retainedGasCellImportGraph(importValue = null) {
         );
       }
     }
-    const captured = Object.freeze({ record, descriptors });
+    const inheritedSchemas = inheritedSchemasFor(record);
+    const captured = Object.freeze({ record, descriptors, inheritedSchemas });
     records.push(captured);
     byRecord.set(record, captured);
     for (const key of RETAINED_GAS_CELL_IMPORT_GRAPH_KEYS) {
@@ -1530,6 +1586,7 @@ function retainedGasCellSourceFromImportGraph(graph = null) {
   if (exactSource) return exactSource.record;
   for (const schema of [
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
@@ -1563,7 +1620,18 @@ function retainedGasCellImportSchemaObservation(graph = null) {
     if (
       schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
       || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+      || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
     ) retiredAuthoritySchema = true;
+    for (const inheritedSchema of captured.inheritedSchemas) {
+      if (inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA) {
+        forgedV4Authority = true;
+      }
+      if (
+        inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
+        || inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+        || inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
+      ) retiredAuthoritySchema = true;
+    }
   }
   return Object.freeze({
     exactSchemaMutated,
@@ -21472,7 +21540,13 @@ export function createSphSpatialGasLedgerProducerStageComputeTask({
   const readbackMode = taskStageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const estimatedRows = estimatedSpatialGasLedgerProducerRowCount(taskStageOptions);
   const compactReadbackBytes = estimatedRows * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const retainedGpuBytes = compactReadbackBytes
+  // Row-storage estimate only, not the entire SS arena. The full-parity
+  // producer still owns its separate legacy compact format.
+  const retainedCompactAndMomentBytes = readbackMode === NO_FULL_READBACK_MODE
+    ? estimatedRows * (SPH_RETAINED_SPATIAL_GAS_COMPACT_ROW_FLOATS
+      + SPH_SPATIAL_GAS_MIXTURE_MOMENT_ROW_FLOATS) * Float32Array.BYTES_PER_ELEMENT
+    : compactReadbackBytes;
+  const retainedGpuBytes = retainedCompactAndMomentBytes
     + estimatedRows * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const residentProductMass = taskStageOptions.residentProductMass || taskStageOptions.reactionSummary?.residentProductMass || null;
   const retainedProductSourceAdvertised = Boolean(
@@ -21948,6 +22022,13 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
       }
       const retainedExecution = await runSphSpatialGasLedgerEosRetainedWebGpu({
         device,
+        // Only a complete particle + actual retained-history domain may ask
+        // the published owner for a paired read. Standalone subset stages keep
+        // their pressure inventory semantics and cannot admit caloric exchange.
+        authenticateParticleProductSource: stageOptions.authenticateParticleProductSource === true,
+        sourceFamilyConsumerLease: stageOptions.sourceFamilyConsumerLease ?? null,
+        caloricAuthority: stageOptions.spatialGasCaloricAuthority ?? null,
+        caloricThermalMaterialTable: stageOptions.spatialGasCaloricThermalMaterialTable ?? null,
         residentProductMass: retainedProductSourceAdvertised
           ? residentProductMass
           : null,
@@ -22098,7 +22179,8 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
         compactSpatialGasRowCountHostKnown: false,
         compactSpatialGasRowCapacity:
           retainedExecution?.compactSpatialGasRowCapacity || 0,
-        compactSpatialGasRowStrideFloats: SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
+        compactSpatialGasRowStrideFloats:
+          retainedExecution?.compactSpatialGasRowStrideFloats ?? 0,
         compactSpatialGasReadbackByteLength: 0,
         spatialGasSpeciesLedger: null,
         aggregateSpatialGasLedgerFallbackUsed: false,
@@ -31652,12 +31734,76 @@ function submitResidentProductHistoryFilteredAppend({
   };
 }
 
-export async function mergeResidentProductMassBuffersWebGpu({
+const postMechanicsHistoryMergeCaptures = new WeakMap();
+
+export function resolveResidentProductMassMergeSourceCapture(result, token) {
+  const record = postMechanicsHistoryMergeCaptures.get(token);
+  if (!record || record.result !== result) throw new Error('Unknown exact product-history merge capture');
+  for (const source of record.sources) {
+    if (Object.entries(source.snapshot).some(([key, value]) => source.handle?.[key] !== value)) {
+      throw new Error('Captured product-history merge source was changed');
+    }
+  }
+  if ((result?.productEventBuffer ?? null) !== record.outputBuffer
+      || (record.productCountDescriptor && !validateProductEventLiveCountCopyDescriptor(
+        record.productCountDescriptor, { handle: result, device: record.device }))) {
+    throw new Error('Captured product-history merge result was changed or retired');
+  }
+  return record;
+}
+
+export async function mergeResidentProductMassBuffersWebGpu(options = {}) {
+  const token = options.postMechanicsSourceCapture ?? null;
+  if (!token) return mergeResidentProductMassBuffersWebGpuImpl(options);
+  if (postMechanicsHistoryMergeCaptures.has(token)) throw new Error('Product-history capture cannot replay');
+  postMechanicsHistoryMergeCaptures.set(token, null);
+  const { device, inputResidentProductMass = null, emittedResidentProductMass = null } = options;
+  const sources = Object.freeze([inputResidentProductMass, emittedResidentProductMass].map(
+    (handle) => Object.freeze({ handle, snapshot: Object.freeze(Object.fromEntries([
+      'productEventBuffer', 'productEventBufferByteLength', 'productEventRowCount',
+      'productEventStrideFloats', 'productEventStrideBytes', 'reactionPlacementRolledBack',
+      'reactionPlacementTransactionOutcome'
+    ].map((key) => [key, handle?.[key]]))) })));
+  const singleSource = inputResidentProductMass || emittedResidentProductMass;
+  const copyRawSource = Boolean(singleSource && (!inputResidentProductMass || !emittedResidentProductMass)
+    && !residentProductHistoryArenaHandleRecords.has(singleSource));
+  const result = await mergeResidentProductMassBuffersWebGpuImpl({ ...options,
+    forceCapturedSourceCopy: copyRawSource, allowHostCompactionObservation: false });
+  let productCountDescriptor = null;
+  let releaseBorrow;
+  try {
+    productCountDescriptor = result ? productEventLiveCountCopyDescriptor(result, device) : null;
+    if (result && !productCountDescriptor) throw new Error('Captured history requires a complete GPU-counted result');
+    releaseBorrow = beginResidentProductMassHandleBorrow(result, 'captured-current-closure');
+  } catch (error) {
+    if (result && result !== inputResidentProductMass && result !== emittedResidentProductMass) {
+      releaseResidentProductHistoryArenaHandle(result);
+    }
+    throw error;
+  }
+  let held = true;
+  const record = Object.freeze({ device, result, sources, inputResidentProductMass, emittedResidentProductMass,
+    outputBuffer: result?.productEventBuffer ?? null, productCountDescriptor,
+    release() { if (!held) return false; held = false; releaseBorrow(); return true; },
+    retireOwnedOutput() {
+      // Only a newly created arena view belongs to this merger. An exact
+      // carried/emitted source returned unchanged remains its prior owner's.
+      if (!result || result === inputResidentProductMass || result === emittedResidentProductMass) return false;
+      return releaseResidentProductHistoryArenaHandle(result);
+    } });
+  postMechanicsHistoryMergeCaptures.set(token, record);
+  try { resolveResidentProductMassMergeSourceCapture(result, token); }
+  catch (error) { record.release(); record.retireOwnedOutput(); throw error; }
+  return result;
+}
+
+async function mergeResidentProductMassBuffersWebGpuImpl({
   device,
   inputResidentProductMass = null,
   emittedResidentProductMass = null,
   readbackTelemetryAccumulator = null,
-  allowHostCompactionObservation = true
+  allowHostCompactionObservation = true,
+  forceCapturedSourceCopy = false
 } = {}) {
   // SAFE_FROZEN_FALLBACK is an atomic rejection of the current reaction and
   // placement transaction. Its event buffer is deliberately all zeroes and
@@ -31708,7 +31854,7 @@ export async function mergeResidentProductMassBuffersWebGpu({
     }
     if (
       allowHostCompactionObservation === true
-      || singleSourceGpuCountAuthority
+      || (singleSourceGpuCountAuthority && !forceCapturedSourceCopy)
       || !device?.createBuffer
       || !device.queue?.submit
       || !residentProductMassMatchesDevice(
@@ -31752,7 +31898,15 @@ export async function mergeResidentProductMassBuffersWebGpu({
       unplacedProductMassKg: 0,
       unplacedGasProductMassKg: 0
     };
-    emittedResidentProductMass = source;
+    if (forceCapturedSourceCopy && singleSourceGpuCountAuthority) {
+      // Keep the existing GPU-counted history in the parent lane. The normal
+      // append kernel already authenticates that count; an empty raw emitted
+      // lane requests an owned copy without reinterpreting capacity as live.
+      emittedResidentProductMass = inputResidentProductMass;
+      inputResidentProductMass = source;
+    } else {
+      emittedResidentProductMass = source;
+    }
     singleSourceGpuCountPromotion = true;
   }
   const inputArenaRecord = requireRetainedProductHistoryArenaRecord(
@@ -33754,6 +33908,12 @@ function buildNextParticleUploads({
       phaseCarrierPlan: sphParticleUpload?.phaseCarrierPlan
         ? { ...sphParticleUpload.phaseCarrierPlan }
         : (sphParticleState?.phaseCarrierPlan ? { ...sphParticleState.phaseCarrierPlan } : null),
+      // Independent physical reservoir: carrier mechanics must not silently
+      // drop or replace it. SS binds the exact family at source/commit, while
+      // parcel consumers borrow the owner independently of these S/T/M buffers.
+      ...(sphParticleUpload?.aerosolFamily
+        ? { aerosolFamily: sphParticleUpload.aerosolFamily }
+        : {}),
       stateBuffer,
       thermoBuffer,
       identityBuffer,
@@ -34332,6 +34492,10 @@ async function residentStepEnvelope({
   // object rather than spreading its input, so anything not named here is
   // dropped on the way out.
   stageMechanicsTrace = null,
+  postMechanicsContinuation = null,
+  residentProductMergeReadbackTelemetry = createGpuReadbackTelemetryAccumulator({
+    scope: 'mls-mpm-resident-product-merge'
+  }),
   sphParticleState,
   mlsMpmParticleState,
   sphParticleUpload = null,
@@ -34527,18 +34691,21 @@ async function residentStepEnvelope({
         : 'thermal-phase-transition-not-detected')
     : null;
   const emittedResidentProductMass = reactionOutput.residentProductMass || null;
-  const residentProductMergeReadbackTelemetry =
-    createGpuReadbackTelemetryAccumulator({
-      scope: 'mls-mpm-resident-product-merge'
-    });
-  const residentProductMass = await mergeResidentProductMassBuffersWebGpu({
-    device,
-    inputResidentProductMass,
-    emittedResidentProductMass,
-    readbackTelemetryAccumulator: residentProductMergeReadbackTelemetry,
-    allowHostCompactionObservation:
-      !residentStagesRequireNoHostObservation
-  });
+  // The closure selects carriers AND the merged residual history together.
+  // Merging again here would publish a different history from the one sealed
+  // by the closure claim (and can duplicate a one-sided promotion).
+  if (postMechanicsContinuation?.productMassMergeRequired === true) {
+    throw new Error('Resident step requires the closure-selected product history');
+  }
+  // The fused mechanics sequence does not invoke the post-mechanics closure;
+  // it still owns its one merge here. Never rerun it for a supplied closure.
+  const residentProductMass = postMechanicsContinuation
+    ? postMechanicsContinuation.residentProductMass
+    : await mergeResidentProductMassBuffersWebGpu({
+        device, inputResidentProductMass, emittedResidentProductMass,
+        readbackTelemetryAccumulator: residentProductMergeReadbackTelemetry,
+        allowHostCompactionObservation: !residentStagesRequireNoHostObservation
+      });
   const mergeStatus = residentProductMassMergeStatus({
     inputResidentProductMass,
     emittedResidentProductMass,
@@ -35380,6 +35547,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   schroederSpatialEpochGeneration = null,
   schroederSpatialEpochTransaction = null,
   schroederSingleLevelQueueOrderedCleanupCapability = null,
+  sourceFamilyConsumerLease = null,
+  spatialGasCaloricAuthority = null,
+  spatialGasCaloricThermalMaterialTable = null,
   spatialMechanicalProposalRunner = runSchroederSpatialMechanicalProposalWebGpu,
   spatialMechanicalProposalCapture = null,
   // Per-invocation contact-solver knobs. This orchestrator is the
@@ -35469,6 +35639,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   stageMechanicsTraceEnabled = false,
   phaseCarrierTransferRunner = runSphPhaseCarrierTransferWebGpu,
   phaseCarrierTransferOptions = {},
+  condensateExtraction = null,
   dispersedMediumOpticalClosureTable = null,
   dispersedMediumOpticalClosureGpuTable = null,
   dispersedMediumOpticsSeedRows = null,
@@ -35632,7 +35803,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       throw error;
     }
   };
-  let lostInfo = null;
+  const deviceLossState = { info: null };
   let resolvedDeviceResult = deviceResult;
   let spatialMechanicalProposal = null;
   let spatialReactionDiscoveryProposal = null;
@@ -35652,14 +35823,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   let canonicalDispersedMediumOpticsSourceFamilyTransition = null;
   let canonicalFreshDispersedMediumOpticsReplacement = null;
   let canonicalAdoptedDispersedMediumTargetUpload = null;
+  let postMechanicsClosure = null;
   try {
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
         resolvedDeviceResult = await requestOpticalGpuDevice(navigatorRef, {
-          onDeviceLost(info) {
-            lostInfo = info;
-            if (typeof onDeviceLost === 'function') onDeviceLost(info);
-          }
+          onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
         });
       }
     });
@@ -36137,6 +36306,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         () => spatialGasLedgerProducerStageRunner({
           sphParticleState,
           mlsMpmParticleState,
+          authenticateParticleProductSource: exactGasPressureMechanicsParticleRowsAdvertised
+            && (residentProductMass == null || exactGasPressureMechanicsProductRowsAdvertised),
+          sourceFamilyConsumerLease: exactGasPressureMechanicsParticleRowsAdvertised
+            && (residentProductMass == null || exactGasPressureMechanicsProductRowsAdvertised)
+            ? sourceFamilyConsumerLease : null,
+          spatialGasCaloricAuthority,
+          spatialGasCaloricThermalMaterialTable,
           sphParticleUpload: exactGasPressureMechanicsParticleRowsAdvertised
             ? sphParticleUpload
             : null,
@@ -36376,10 +36552,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     readbackMode: requestedReadbackMode,
     p2gBackend,
     webGpuRunner: p2gRunner,
-    onDeviceLost(info) {
-      lostInfo = info;
-      if (typeof onDeviceLost === 'function') onDeviceLost(info);
-    }
+    onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
   }));
 
   if (
@@ -36437,7 +36610,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     gasPressureMechanicsAuthoritySource:
       exactGasPressureMechanicsAuthoritySource,
     gasPressureMechanicsChartId: 0,
-    preferWebGpu: preferWebGpu && p2gGridProjection.backend === 'webgpu' && !lostInfo,
+    preferWebGpu: preferWebGpu && p2gGridProjection.backend === 'webgpu' && !deviceLossState.info,
     navigatorRef,
     device: resolvedDevice,
     deviceResult: sharedDeviceResult,
@@ -36447,10 +36620,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         !== MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED,
     readbackMode: requestedReadbackMode,
     webGpuRunner: gridUpdateRunner,
-    onDeviceLost(info) {
-      lostInfo = info;
-      if (typeof onDeviceLost === 'function') onDeviceLost(info);
-    }
+    onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
   }));
 
   if (exactGasPressureMechanicsBoundaryRequested) {
@@ -36537,7 +36707,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     gpuTimestampRecorder,
     canonicalSpatialRequired,
     observeCanonicalSpatialAuthority,
-    preferWebGpu: preferWebGpu && gridUpdate.backend === 'webgpu' && !lostInfo,
+    preferWebGpu: preferWebGpu && gridUpdate.backend === 'webgpu' && !deviceLossState.info,
     navigatorRef,
     device: resolvedDevice,
     deviceResult: sharedDeviceResult,
@@ -36545,10 +36715,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     retainOutputParticleBuffers: true,
     readbackMode: requestedReadbackMode,
     webGpuRunner: g2pRunner,
-    onDeviceLost(info) {
-      lostInfo = info;
-      if (typeof onDeviceLost === 'function') onDeviceLost(info);
-    }
+    onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
   }));
   const exactSingleLevelQueueOrderedCleanup =
     schroederSingleLevelQueueOrderedCleanupCapability == null
@@ -36624,7 +36791,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     || resolvedDispersedMediumOpticsSeedRows
     || dispersedMediumOpticalClosureTable
   );
-  const postMechanicsClosure = await runMlsMpmPostMechanicsClosureWebGpu({
+  const residentProductMergeReadbackTelemetry =
+    createGpuReadbackTelemetryAccumulator({
+      scope: 'mls-mpm-resident-product-merge'
+    });
+  postMechanicsClosure = await runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
     stageMechanicsTracer: createSphStageMechanicsTracer({
       device: resolvedDevice,
@@ -36651,9 +36822,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     mechanicsRefreshOptions,
     phaseCarrierTransferRunner,
     phaseCarrierTransferOptions,
+    condensateExtraction,
     boxDimsM: dims,
     dtSeconds,
-    preferWebGpu: preferWebGpu && !lostInfo,
+    preferWebGpu: preferWebGpu && !deviceLossState.info,
     readbackMode: requestedReadbackMode,
     thermalResponseGraphUpload:
       spatialProposalThermalResponseGraphUpload,
@@ -36669,6 +36841,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schroederLawQueue,
     schroederLawNeighborCandidates,
     inputResidentProductMass: residentProductMass,
+    residentProductMassMergeRunner: (options) => mergeResidentProductMassBuffersWebGpu({
+      ...options,
+      readbackTelemetryAccumulator: residentProductMergeReadbackTelemetry
+    }),
     gpuTimestampRecorder,
     timedStage,
     async afterThermalStep({
@@ -36892,6 +37068,15 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
               .reactionParticleMutationApplied === true
               ? phaseCarrierTransferFamilyReceipt.preReactionThermoBuffer
               : null,
+          postReactionStateBuffer:
+            phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+              ? phaseCarrierTransferFamilyReceipt.postReactionStateBuffer : null,
+          postReactionThermoBuffer:
+            phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+              ? phaseCarrierTransferFamilyReceipt.postReactionThermoBuffer : null,
+          aerosolCondensateTransition:
+            phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+              ? phaseCarrierTransferFamilyReceipt.aerosolCondensateTransition : null,
           preTransferStateBuffer:
             phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
           preTransferThermoBuffer:
@@ -37283,6 +37468,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   };
 
   const step = await timedStage('residentStepEnvelope', () => residentStepEnvelope({
+    postMechanicsContinuation: postMechanicsClosure.continuation,
+    residentProductMergeReadbackTelemetry,
     sphParticleState,
     mlsMpmParticleState,
     p2gGridProjection,
@@ -37339,6 +37526,14 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       orchestrationReadbackTelemetry:
         orchestrationReadbackTelemetry.snapshot()
     }));
+  if (postMechanicsClosure.aerosolCondensateTransition) {
+    claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, {
+      nextParticleUploads: step.nextParticleUploads
+    });
+    Object.defineProperty(step, 'aerosolPostMechanicsClosure', {
+      value: postMechanicsClosure, enumerable: false
+    });
+  }
   if (canonicalDispersedMediumOpticsProducerStep) {
     const targetSphUpload =
       step.nextParticleUploads?.sphParticleUpload ?? null;
@@ -37996,6 +38191,18 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   }
   return step;
   } catch (error) {
+    if (postMechanicsClosure) abandonMlsMpmPostMechanicsCondensate(postMechanicsClosure);
+    const rejectedHistory = postMechanicsClosure?.continuation?.residentProductMass;
+    if (rejectedHistory
+      && !isSameResidentProductMass(rejectedHistory, residentProductMass)
+      && !isSameResidentProductMass(rejectedHistory,
+        residentProductMassFromReactionStep(postMechanicsClosure.reactionStep))) {
+      // Closure may have successfully merged/promoted history before a later
+      // envelope or diagnostic failure. Retire only its distinct logical view;
+      // the owner defers slot reuse until submitted consumers/borrows release.
+      // Never raw-destroy a shared arena buffer or a borrowed input history.
+      try { rejectedHistory.destroyResidentProductMassBuffers?.(); } catch {}
+    }
     if (canonicalFreshDispersedMediumOpticsReplacement) {
       cleanupRejectedFreshDispersedMediumOpticsReplacement(
         canonicalFreshDispersedMediumOpticsReplacement,
@@ -38246,16 +38453,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       throw error;
     }
   };
-  let lostInfo = null;
+  const deviceLossState = { info: null };
   let resolvedDeviceResult = deviceResult;
   try {
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
         resolvedDeviceResult = await requestOpticalGpuDevice(navigatorRef, {
-          onDeviceLost(info) {
-            lostInfo = info;
-            if (typeof onDeviceLost === 'function') onDeviceLost(info);
-          }
+          onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
         });
       }
     });
@@ -38298,10 +38502,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       retainGridBuffer: !mechanicsFieldRequired,
       readbackMode: requestedReadbackMode,
       webGpuRunner: p2gRunner,
-      onDeviceLost(info) {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      }
+      onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
     };
     const p2gGridProjection = await timedStage('p2gGridProjection', () => (
       typeof p2gStageRunner === 'function'
@@ -38343,7 +38544,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
           : null,
       gasPressureMechanicsChartId,
       gasPressureMechanicsBoundaryRequired,
-      preferWebGpu: preferWebGpu && p2gGridProjection.backend === 'webgpu' && !lostInfo,
+      preferWebGpu: preferWebGpu && p2gGridProjection.backend === 'webgpu' && !deviceLossState.info,
       navigatorRef,
       device: resolvedDevice,
       deviceResult: sharedDeviceResult,
@@ -38352,10 +38553,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         !mechanicsFieldRequired,
       readbackMode: requestedReadbackMode,
       webGpuRunner: gridUpdateRunner,
-      onDeviceLost(info) {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      }
+      onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
     };
     const gridUpdate = await timedStage('gridUpdate', () => (
       typeof gridUpdateStageRunner === 'function'
@@ -38387,7 +38585,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         ? finiteNumber(internalPressureScale, 1)
         : 0,
       gasPressureMechanicsBoundaryRequired,
-      preferWebGpu: preferWebGpu && gridUpdate.backend === 'webgpu' && !lostInfo,
+      preferWebGpu: preferWebGpu && gridUpdate.backend === 'webgpu' && !deviceLossState.info,
       navigatorRef,
       device: resolvedDevice,
       deviceResult: sharedDeviceResult,
@@ -38395,10 +38593,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       retainOutputParticleBuffers: true,
       readbackMode: requestedReadbackMode,
       webGpuRunner: g2pRunner,
-      onDeviceLost(info) {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      }
+      onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
     };
     const g2pReconstruction = await timedStage('g2pReconstruction', () => (
       typeof g2pStageRunner === 'function'
@@ -38616,6 +38811,9 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   preserveBuffers = [],
   queueOrderedFinalConsumer = null
 } = {}) {
+  if (step?.aerosolPostMechanicsClosure) {
+    abandonMlsMpmPostMechanicsCondensate(step.aerosolPostMechanicsClosure);
+  }
   step?.reactionActivationObservationProposal?.destroy?.();
   const preserved = new Set((preserveBuffers || []).filter(Boolean));
   const released = new Set();
@@ -40383,6 +40581,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   const ambientBuoyancyRequired = ambientBuoyancyExecution.required;
   const ambientBuoyancySkipReason = ambientBuoyancyExecution.skipReason;
   const fusedSequenceCustomRunnerBlockers = [
+    args.condensateExtraction != null ? 'condensate-requires-paired-spatial-closure' : null,
     args.p2gRunner ? 'custom-p2g-runner' : null,
     args.gridUpdateRunner ? 'custom-grid-update-runner' : null,
     args.g2pRunner ? 'custom-g2p-runner' : null,
@@ -40713,6 +40912,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
 
   const useSidecarAwareResidentSequence = fusedResidentSequencePreflight.sidecarAwareSequenceCandidate === true;
   const useThermalSidecarDirectRunner = useSidecarAwareResidentSequence
+    && args.condensateExtraction == null
     && sidecarAwareDirectRunnerContract.directRunnerSelected === true;
   if (useSidecarAwareResidentSequence) {
     markSequenceProgress(useThermalSidecarDirectRunner

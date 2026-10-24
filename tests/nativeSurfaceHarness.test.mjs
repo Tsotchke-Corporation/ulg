@@ -4682,9 +4682,19 @@ test('long-horizon SS batches keep diagnostics final-only and do not mirror stag
   );
   assert.match(
     scheduleRunSource,
-    /\.\.\.\(postLivePreviewProgress[\s\S]*?\? \{ postProgress: postLivePreviewProgress \}[\s\S]*?: \{\}\)/,
-    'offscreen schedules must omit their progress consumer unless live preview is active'
+    /\.\.\.\(postLivePreviewProgress \|\| postSourceTimingProgress[\s\S]*?\? \{ postProgress: postLivePreviewProgress \|\| postSourceTimingProgress \}[\s\S]*?: \{\}\)/,
+    'offscreen progress must remain optional: explicit live preview or private source timing only'
   );
+  const privateProgressStart = scheduleRunSource.indexOf('postSourceTimingProgress = (progress) =>');
+  const privateProgressEnd = scheduleRunSource.indexOf('let result;', privateProgressStart);
+  assert.ok(privateProgressStart >= 0 && privateProgressEnd > privateProgressStart);
+  const privateProgressSource = scheduleRunSource.slice(privateProgressStart, privateProgressEnd);
+  assert.match(privateProgressSource,
+    /observe\(\{ scheduleId: progress\?\.scheduleId,\s*stepOrdinal: progress\?\.stepOrdinal,\s*completedStepCount: progress\?\.completedStepCount \}\)/,
+    'private pacing consumes only iteration counters, never the full progress envelope');
+  assert.doesNotMatch(privateProgressSource,
+    /postMessage\(|console\.|postResidentScheduleCandidate\(|publish\w*\(|candidateDrawLoop|flushWorkerQueueSubmitBurst\(|stepSummary|retainedBufferRefs|epochIdentity/,
+    'private work timing must not add CDP traffic, GPU work, intermediate state reads or publication');
   assert.doesNotMatch(
     probeSource,
     /residentScheduleLivePreview:\s*true/,
@@ -5275,29 +5285,36 @@ test('headed cadence sweep gates distinct admitted geometry instead of RAF heart
   );
   assert.ok(sampleStart >= 0 && sampleEnd > sampleStart);
   const sampleSource = sweepSource.slice(sampleStart, sampleEnd);
+  const observerSource = readRepoFile('src/visualization/sphPresentationCadence.js');
 
   assert.match(sampleSource, /visiblePresentationObservations\.push\(/);
   assert.match(sampleSource, /summarizeVisiblePresentationCadence\(/);
   assert.match(
     sampleSource,
+    /const \{ readVisiblePresentationObservation \} = await import\(\s*'\/src\/visualization\/sphPresentationCadence\.js'/,
+    'the headed browser must use the same admission observer as the dashboard'
+  );
+  assert.match(sampleSource, /readVisiblePresentationObservation\(callbackAtMs\)/);
+  assert.match(
+    observerSource,
     /rows\?\.renderRowsSchema\s*=== 'peercompute\.ulg\.worker-offscreen-render-rows\.v0'/
   );
   assert.match(
-    sampleSource,
+    observerSource,
     /rows\?\.sphStep[\s\S]*?frameCount === presentationFrameCount[\s\S]*?readyFrameCount === presentationReadyFrameCount/
   );
   assert.match(
-    sampleSource,
+    observerSource,
     /nativePresentation\?\.sourceStep[\s\S]*?sourceStep === renderStateSourceStep[\s\S]*?drawSourceSteps\.every/
   );
-  assert.match(sampleSource, /!visibleCanvas\(workerCanvas\)/);
+  assert.match(observerSource, /'worker-canvas-visible': workerCanvasVisible/);
   assert.match(
-    sampleSource,
+    observerSource,
     /presentation\?\.displayOwnerLastRenderedContent \|\| latestRows/,
     'cadence must sample the durable admitted framebuffer, with raw rows only as startup fallback'
   );
   assert.match(
-    sampleSource,
+    observerSource,
     /presentationQueueCompletionCount\s*=== presentationQueueCompletionSerial/
   );
   assert.match(
@@ -5310,7 +5327,8 @@ test('headed cadence sweep gates distinct admitted geometry instead of RAF heart
   );
   assert.match(
     sweepSource,
-    /classifyCadenceAcceptanceIssues\(\s*result\.cadenceEvaluation\.issues,\s*\{ throughputRequired: cadenceGatingRequired \}\s*\)/
+    /classifyCadenceAcceptanceIssues\(\s*\[\s*\.\.\.result\.cadenceEvaluation\.issues,\s*\.\.\.visibleMotionCadenceAcceptanceIssues\(result\.cadence\)\s*\],\s*\{ throughputRequired: cadenceGatingRequired \}\s*\)/,
+    'passing render-input cadence must not bypass missing actual-motion evidence'
   );
   assert.match(
     sweepSource,
@@ -5326,11 +5344,13 @@ test('headed cadence sweep gates distinct admitted geometry instead of RAF heart
   );
   assert.match(
     sweepSource,
-    /cadenceGatedPresetIds: \[\.\.\.particlePresentationPresetIds\]/
+    /cadenceGatedPresetIds: SPH_PHASE_SCENARIO_PRESETS\.map\(\(preset\) => preset\.id\)/,
+    'all configured presets require cadence evidence, not only the particle modes'
   );
   assert.match(
     sweepSource,
-    /cadenceGatingRequired\s*\? 'sphere-impostor-depth-fallback'\s*:\s*'worker-owned-true-isosurface'/
+    /const cadenceGatingRequired = true;\s*const expectedWorkerGeometry = particlePresentationPresetIds\.has\(preset\.id\)\s*\? 'sphere-impostor-depth-fallback'\s*:\s*'worker-owned-true-isosurface'/,
+    'geometry selection must not exempt true isosurfaces from the throughput gate'
   );
   assert.match(sweepSource, /rafMetricsDiagnosticOnly: true/);
   assert.match(sweepSource, /visibleStateIdentityRequired: true/);

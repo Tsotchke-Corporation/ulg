@@ -3,13 +3,16 @@ import {
   SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS,
   SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_KEY_WORDS
 } from './schroederSpatialParentFieldView.js';
+import {
+  validateSchroederQuadraticControlVolumeDescriptor
+} from './schroederQuadraticControlVolumeProjection.js';
 
 export const ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA =
-  'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v2';
+  'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v3';
 
-export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_VERSION = 2;
+export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_VERSION = 3;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_WORKGROUP_SIZE = 64;
-export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES = 256;
+export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES = 288;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_MAGIC =
   0x5342_5031;
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_VERSION =
@@ -122,15 +125,23 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_LAYOUT =
     'parentCompletionOrdinal:u32',
     'parentFieldCapacity:u32',
     'parentFieldWordCapacity:u32',
-    'reserved14:u32',
-    'reserved15:u32',
-    'reserved16:u32',
-    'reserved17:u32',
-    'reserved18:u32',
-    'reserved19:u32',
-    'reserved20:u32',
-    'reserved21:u32',
-    'reserved22:u32'
+    'gasControlVolumeProjectionVersion:u32',
+    'gasControlVolumeGeometrySeal:u32',
+    'gasBoxLowerCellX:i32-bits',
+    'gasBoxLowerFractionX:f32-bits',
+    'gasBoxUpperCellX:i32-bits',
+    'gasBoxUpperFractionX:f32-bits',
+    'gasBoxLowerCellY:i32-bits',
+    'gasBoxLowerFractionY:f32-bits',
+    'gasBoxUpperCellY:i32-bits',
+    'gasBoxUpperFractionY:f32-bits',
+    'gasBoxLowerCellZ:i32-bits',
+    'gasBoxLowerFractionZ:f32-bits',
+    'gasBoxUpperCellZ:i32-bits',
+    'gasBoxUpperFractionZ:f32-bits',
+    'reserved0:u32',
+    'reserved1:u32',
+    'reserved2:u32'
   ]);
 
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
@@ -149,7 +160,7 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
     condensedAuthority:
       'exact-s9a-v0-times-j-volume-and-gradient-rows-authenticated-by-s9b;phase-1-and-2-only',
     gasAuthority:
-      'exact-v4-owner-private-pressure-rows-directory-and-control-bindings-3-4-6',
+      'exact-v5-owner-private-pressure-rows-directory-and-v4-projection-sealed-control-bindings-3-4-6',
     parentAuthority:
       'fine-adjoint-only-read-only-parent-field-view-binding-8;exact-v1-header-layout-and-per-fine-field-partitioned-csr-authenticated-on-gpu',
     crossLevelMapping: Object.freeze({
@@ -159,11 +170,11 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
         SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
     }),
     pressureLaw:
-      'same-level:gauge-pa=absolute-v4-pressure-pa-minus-explicit-ambient-pa;node-impulse-ns=pressure-scale-times-gauge-times-summed-condensed-v0j-gradient-m2-times-dt;fine-adjoint:effective-gauge-pa=sum-parent-weight-times-parent-gauge-pa-and-field-impulse-ns=pressure-scale-times-effective-gauge-times-field-v0j-gradient-m2-times-dt',
+      'same-level:effective-gauge-pa=W-transpose-times-absolute-primal-pressure-minus-explicit-ambient;node-impulse-ns=negative-pressure-scale-times-effective-gauge-times-summed-condensed-v0j-gradient-m2-times-dt;fine-adjoint:effective-gauge-pa=A-transpose-times-W-transpose-times-primal-gauge-and-field-impulse-ns=negative-pressure-scale-times-effective-gauge-times-field-v0j-gradient-m2-times-dt;missing-primal-cells-have-zero-gauge-without-renormalization',
     distribution:
       'same-level:each-condensed-field-receives-node-impulse-times-field-v0j-volume-over-node-condensed-v0j-volume;fine-adjoint:each-condensed-fine-field-receives-its-own-parent-transpose-impulse-without-node-redistribution',
     signConvention:
-      'positive-gauge-times-s9-condensed-volume-gradient-matches-existing-schroeder-pressure-drag-condensed-impulse',
+      'external-gas-force-is-negative-particle-position-gradient-of-condensed-volume-times-transposed-gauge;gas-free-volume-is-G-minus-WAC;distinct-from-positive-internal-condensed-pressure-stress',
     missingCellPolicies: Object.freeze({
       noLoad: SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD,
       failClosed:
@@ -172,7 +183,7 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
     transaction:
       'prevalidate-field-prevalidate-source-initialize-stage-validate-commit;only-store-only-commit-mutates-mechanics-field',
     residency:
-      'no-mapAsync-no-host-logical-count-no-all-cell-scan;static-authorities-validated-once-on-gpu;same-level-one-exact-directory-binary-search-per-condensed-node-head;fine-adjoint-one-exact-binary-search-per-authenticated-parent-edge'
+      'no-mapAsync-no-host-logical-count-no-all-cell-scan;static-authorities-validated-once-on-gpu;at-most-eight-exact-directory-binary-searches-per-condensed-node-or-authenticated-parent-edge'
   });
 
 const UINT32_MAX = 0xffff_ffff;
@@ -475,7 +486,8 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
   parentGenerationId,
   parentCompletionOrdinal,
   parentFieldCapacity,
-  parentFieldWordCapacity
+  parentFieldWordCapacity,
+  gasControlVolumeDescriptor
 } = {}) {
   if (transportEnabled !== true && transportEnabled !== false) {
     throw new TypeError('transportEnabled must be a boolean');
@@ -694,6 +706,20 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
       'gas directory offsets and word length must match the exact v1 layout'
     );
   }
+  // The exact EOS owner supplies this immutable descriptor through its private
+  // source binding. Revalidate the entire geometry before encoding; the GPU
+  // independently recomputes its seal and compares the EOS authority receipt.
+  const controlVolume = validateSchroederQuadraticControlVolumeDescriptor(
+    gasControlVolumeDescriptor,
+    {
+      gridSpacingM: gasSpacing,
+      gridCellOrigin: gasOrigin,
+      gridDims: gasDims,
+      gridNodeCount: gasNodes,
+      chartId: integer(chartId, 'chartId', 0, 0x00ff_ffff),
+      selectedLevel: resolvedGasLevel
+    }
+  );
   const words = [
     transportEnabled ? 1 : 0,
     policy,
@@ -752,7 +778,10 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
     resolvedParentGeneration,
     resolvedParentCompletion,
     resolvedParentFieldCapacity,
-    resolvedParentFieldWordCapacity
+    resolvedParentFieldWordCapacity,
+    controlVolume.version,
+    controlVolume.seal,
+    ...controlVolume.boundsWords
   ];
   const buffer = new ArrayBuffer(
     SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES
@@ -815,8 +844,10 @@ function binarySearchGasCell(cells, sought) {
 }
 
 /**
- * Small explicit CPU oracle for law and distribution parity. It consumes
- * decoded rows only; production execution consumes the exact GPU ABI buffers.
+ * Historical decoded-row law/distribution formula utility (pre-v3 geometry).
+ * This retains direct node/cell test fixtures, not the current W transpose;
+ * it is not a CPU dynamics fallback or a GPU projection acceptance oracle.
+ * Current projection correctness requires native manufactured/invariant tests.
  */
 export function computeSchroederSpatialGasPressureBoundaryTransportCpuOracle({
   fields,
@@ -937,7 +968,7 @@ export function computeSchroederSpatialGasPressureBoundaryTransportCpuOracle({
         )));
         const gauge = f32(gasCell.pressurePa - ambient);
         const totalImpulse = sumGradient.map((gradient) => (
-          f32(f32(f32(scale * gauge) * gradient) * step)
+          f32(f32(f32(-scale * gauge) * gradient) * step)
         ));
         const assignedSum = [0, 0, 0];
         for (const row of condensed) {
@@ -990,9 +1021,9 @@ export function computeSchroederSpatialGasPressureBoundaryTransportCpuOracle({
 }
 
 /**
- * Focused CPU oracle for the exact fine-field transpose of the coarse gas
- * pressure samples. Parent topology is supplied in the same published CSR
- * shape consumed by the GPU operator.
+ * Historical decoded-row parent-transpose formula utility (pre-v3 geometry).
+ * It tests A transpose and the field impulse formula only, not current W or
+ * full GPU execution. Parent topology is supplied in the published CSR shape.
  */
 export function computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
   fields,
@@ -1262,7 +1293,7 @@ export function computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjo
     }
     row.effectiveGaugePressurePa = effectiveGauge;
     row.impulseNs = row.volumeGradientM2.map((gradient) => (
-      f32(f32(f32(scale * effectiveGauge) * gradient) * step)
+      f32(f32(f32(-scale * effectiveGauge) * gradient) * step)
     ));
     row.velocityMPerS = row.initialVelocityMPerS.map((velocity, axis) => (
       f32(velocity + f32(row.impulseNs[axis] / row.massKg))

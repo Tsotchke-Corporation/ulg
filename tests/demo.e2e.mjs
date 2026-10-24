@@ -8370,7 +8370,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('worker view-state evidence-only');
   }
   expect(derivedSummary.warningText).toContain('ui raf');
-  expect(derivedSummary.warningText).toContain('physics fps');
+  expect(derivedSummary.warningText).toMatch(/physics (?:[\d.]+|unavailable) steps\/s/);
+  expect(derivedSummary.warningText).toMatch(/resident (?:[\d.]+|unavailable) steps\/s/);
+  expect(derivedSummary.warningText).toContain('visible unavailable updates/s');
+  expect(derivedSummary.warningText).toMatch(/presented (?:[\d.]+|unavailable) states\/s/);
+  expect(derivedSummary.warningText).toMatch(/source (?:[\d.]+|unavailable) states\/s/);
+  expect(derivedSummary.warningText).toMatch(/sim speed (?:[\d.]+|unavailable) sim s\/wall s/);
   expect(derivedSummary.frameCounters).toBeTruthy();
   expect(Number.isFinite(derivedSummary.frameCounters.renderFps)).toBe(true);
   expect(derivedSummary.peerClosureCache?.write?.schema).toBe('peercompute.ulg.local-derived-closure-cache.v2');

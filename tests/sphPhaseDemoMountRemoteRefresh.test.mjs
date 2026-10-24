@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -59,6 +60,7 @@ import {
   createGpuReadbackTelemetry
 } from '../src/runtime/sph/sphGpuReadbackTelemetry.js';
 import { SPH_INITIAL_BODIES_SCHEMA } from '../src/runtime/sphInitialBodies.js';
+import { readVisiblePresentationObservation } from '../src/visualization/sphPresentationCadence.js';
 
 test('mounted canonical SS playback advances one immutable position epoch per schedule', () => {
   // Direct SS route: one sealed epoch per schedule, always.
@@ -238,7 +240,7 @@ test('mounted pressure boundaries contain hostile getters, forged v4 masks, cycl
   assert.equal(forgedTelemetry.pressureInterfaceGasCellFieldImportAvailable, false);
   assert.equal(
     forgedTelemetry.pressureInterfaceGasCellFieldImportStatus,
-    'blocked-forged-v4-gas-pressure-authority'
+    'blocked-retired-v4-gas-pressure-authority'
   );
   assert.equal(getterCalls, 0);
 
@@ -371,6 +373,314 @@ test('mounted resident autoplay stops only for this invocation current-generatio
       signature: 'resident-step:other'
     }
   }), false);
+});
+
+function mountedWarningHarness({
+  overlay = {},
+  motionStatus = 'motion-unknown-no-compact-summary',
+  nativePresentationReady = false,
+  runtimeBlocked = false,
+  pendingControlEdit = false,
+  playing = true,
+  presentationFixture = null,
+  residencyWarning = null
+} = {}) {
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url), 'utf8'
+  );
+  const warningSource = source.match(/^  function currentWarningMessages\(\) \{[\s\S]*?^  \}/m)?.[0];
+  assert.ok(warningSource);
+  // Exercise the actual shared warning builder, not a duplicate predicate or
+  // a second mounted physics driver. Only its scene/telemetry dependencies vary.
+  const bindings = {
+    overlay,
+    scene: presentationFixture?.scene || {},
+    playing,
+    nowMs: () => 1000,
+    readVisiblePresentationObservation: (timestampMs) => readVisiblePresentationObservation(
+      timestampMs, presentationFixture?.dom || { document: null }
+    ),
+    particleSyncGeneration: 4,
+    pendingMlsMpmResidentStepsToken: 7,
+    simulationRuntimeBlocked: () => runtimeBlocked,
+    simulationRuntimeAdmission: { reason: 'fixture prerequisite' },
+    pendingControlEdit,
+    navigator: { gpu: {} },
+    cpuClosureTask: null,
+    frameCounters: {},
+    cacheMissDerivationPending: () => false,
+    residentWorkerLaneNativeSurfacePresentationReady: () => nativePresentationReady,
+    residentMotionDiagnostic: () => ({ status: motionStatus }),
+    statusIndicatesCpuFallback: (status) => status === 'cpu',
+    currentResidentReadbackTelemetryEvidence: () => ({}),
+    currentResidentReadbackTelemetryPending: () => false,
+    currentResidentExecutionEvidenceAvailable: () => false,
+    currentResidentReadbackTelemetrySources: () => [],
+    residentGpuResidencyWarningMessage: () => residencyWarning
+  };
+  const createHarness = new Function(...Object.keys(bindings), `
+    ${warningSource}
+    return {
+      warnings: currentWarningMessages,
+      setPlaying(value) { playing = value; },
+      setIdentity(generation, scheduleToken) {
+        particleSyncGeneration = generation;
+        pendingMlsMpmResidentStepsToken = scheduleToken;
+      }
+    };
+  `);
+  return createHarness(...Object.values(bindings));
+}
+
+function workerWarningPresentationFixture(geometry, overlay = {}) {
+  const isosurface = geometry === 'isosurface';
+  const rows = {
+    schema: isosurface
+      ? 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0'
+      : 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0',
+    status: isosurface
+      ? 'worker-offscreen-resident-isosurface-presentation-rendered'
+      : 'worker-offscreen-resident-particle-state-producer-rendered',
+    presentationGeometry: isosurface
+      ? 'worker-owned-true-isosurface' : 'sphere-impostor-depth-fallback',
+    renderRowsSchema: 'peercompute.ulg.worker-offscreen-render-rows.v0',
+    workerLocalRenderRowsProduced: true, sameDevicePresentation: true,
+    depthAttachmentReady: true, laneId: 'warning-lane', stateKey: 'warning-state',
+    sphStep: 63, particleCount: 16, surfaceCount: 1, indirectDrawCount: 1,
+    displayOwnerEpoch: 1, frameCount: 5, readyFrameCount: 5,
+    presentationFrameSchema: isosurface
+      ? 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0'
+      : 'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0',
+    presentationFrameStatus: isosurface
+      ? 'worker-owned-isosurface-presentation-opportunity'
+      : 'worker-particle-keyframe-presentation-opportunity',
+    presentationFrameAdmitted: true, presentationFrameGpuCompleted: true,
+    presentationFrameGpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+    presentationFramePresentationOpportunity: true,
+    presentationFramePresentationOpportunityMethod: 'worker-request-animation-frame-after-gpu-completion',
+    presentationQueueCompletionCount: 5, presentationQueueCompletionSerial: 5,
+    presentationQueueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+    presentationQueueCompletionScope: 'worker-offscreen-shared-device-queue-frame-proof',
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+    physicsHostQueueFenceParticipation: false
+  };
+  const presentation = {
+    displayOwner: 'worker', lifecycleGeneration: 1, displayOwnerEpoch: 1,
+    displayOwnerContentReady: true, displayOwnerContentFrameSerial: 5,
+    displayOwnerPresentedSphStep: 63, displayCanvasVisible: true,
+    frameCount: 5, readyFrameCount: 5,
+    displayOwnerLastRenderedContent: rows, workerOffscreenRenderRows: rows
+  };
+  const scene = {
+    getWorkerOffscreenPresentation: () => presentation,
+    getMlsMpmResidentSteps: () => ({ workerOwnedResidentLane: {
+      laneId: 'warning-lane', stateKey: 'warning-state'
+    } })
+  };
+  const workerCanvas = {
+    isConnected: true, hidden: false,
+    getBoundingClientRect: () => ({ width: 800, height: 600 })
+  };
+  const mainCanvas = { ...workerCanvas, getAttribute: () => 'worker' };
+  overlay.__sphScene = scene;
+  overlay.querySelector = () => null;
+  const dom = {
+    document: {
+      visibilityState: 'visible',
+      querySelector: selector => selector === '#sph-phase-overlay' ? overlay
+        : selector.startsWith('#sph-scene') ? mainCanvas : workerCanvas
+    },
+    getComputedStyle: element => ({ display: 'block',
+      visibility: element.hidden ? 'hidden' : 'visible',
+      opacity: element === mainCanvas ? '0' : '1' })
+  };
+  return { scene, rows, presentation, workerCanvas, dom, overlay };
+}
+
+test('mounted warning accepts the real admitted worker route for both geometries without inventing compact motion', () => {
+  for (const geometry of ['isosurface', 'particle']) {
+    const fixture = workerWarningPresentationFixture(geometry);
+    assert.equal(readVisiblePresentationObservation(1000, fixture.dom).admitted, true, geometry);
+    for (const playing of [true, false]) {
+      const harness = mountedWarningHarness({ overlay: fixture.overlay,
+        presentationFixture: fixture, playing });
+      assert.deepEqual(harness.warnings(), [], geometry);
+      assert.equal(fixture.overlay.__sphResidentMotionDiagnostic.status,
+        'motion-unknown-no-compact-summary', 'raw optional diagnostic remains available');
+    }
+  }
+});
+
+test('mounted warning does not suppress missing stale hidden or pending worker proof', () => {
+  const changes = [
+    ['missing proof', f => { delete f.rows.presentationFrameSchema; }],
+    ['unadmitted', f => { f.rows.presentationFrameAdmitted = false; }],
+    ['GPU pending', f => { f.rows.presentationFrameGpuCompleted = false; }],
+    ['opportunity pending', f => { f.rows.presentationFramePresentationOpportunity = false; }],
+    ['queue proof missing', f => { f.rows.presentationQueueCompletionSerial = null; }],
+    ['stale owner', f => { f.rows.displayOwnerEpoch = 0; }],
+    ['stale lane', f => { f.rows.laneId = 'retired-lane'; }],
+    ['unready canvas', f => { f.presentation.displayOwnerContentReady = false; }],
+    ['hidden canvas', f => { f.workerCanvas.hidden = true; }],
+    ['hidden document', f => { f.dom.document.visibilityState = 'hidden'; }],
+    ['control preview', f => { f.overlay.__sphPendingPresentation = { active: true }; }]
+  ];
+  for (const geometry of ['isosurface', 'particle']) {
+    for (const [label, change] of changes) {
+      const fixture = workerWarningPresentationFixture(geometry);
+      change(fixture);
+      assert.equal(readVisiblePresentationObservation(1000, fixture.dom).admitted, false, label);
+      const warnings = mountedWarningHarness({ overlay: fixture.overlay,
+        presentationFixture: fixture }).warnings();
+      assert.ok(warnings.includes('Resident physics is stepping, but compact motion proof is unavailable.'), label);
+      if (label === 'control preview') assert.ok(warnings.includes(
+        'Physics pending: showing control-body envelopes, not simulation output.'
+      ));
+    }
+  }
+});
+
+test('mounted paused compact diagnostics are neutral and resume restores ordinary wording', () => {
+  for (const [motionStatus, paused, resumed] of [
+    ['motion-unknown-no-compact-summary', 'Compact motion summary is unavailable.',
+      'Resident physics is stepping, but compact motion proof is unavailable.'],
+    ['motion-unknown', 'Compact motion summary is unavailable.',
+      'Resident physics is stepping, but compact motion proof is unavailable.'],
+    ['motion-below-visible-threshold', 'Compact displacement is below the visible threshold.',
+      'Resident physics is stepping, but displacement is below the visible threshold.']
+  ]) {
+    const harness = mountedWarningHarness({ motionStatus, playing: false });
+    assert.deepEqual(harness.warnings(), [paused]);
+    harness.setPlaying(true);
+    assert.deepEqual(harness.warnings(), [resumed]);
+    harness.setPlaying(false);
+    assert.deepEqual(harness.warnings(), [paused]);
+  }
+});
+
+test('mounted admitted worker proof cannot hide terminal residency or readback warnings', () => {
+  for (const geometry of ['isosurface', 'particle']) {
+    const overlay = terminalWarningOverlay();
+    overlay.__sphResidentRenderState = { renderFieldReadback: true };
+    const fixture = workerWarningPresentationFixture(geometry, overlay);
+    assert.equal(readVisiblePresentationObservation(1000, fixture.dom).admitted, true);
+    const harness = mountedWarningHarness({ overlay, presentationFixture: fixture,
+      playing: false, residencyWarning: 'GPU residency diagnostic remains incomplete.' });
+    assert.deepEqual(harness.warnings(), [
+      'Resident physics stopped after a terminal execution error.',
+      'GPU residency diagnostic remains incomplete.',
+      'Render field readback is active: MarchingCubes still consumes CPU arrays.'
+    ]);
+  }
+});
+
+function terminalWarningOverlay() {
+  return {
+    __mlsMpmResidentAutoSchedule: {
+      schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+      status: 'resident-auto-schedule-stopped-terminal-error',
+      generation: 4,
+      scheduleToken: 7
+    },
+    __mlsMpmResidentStepsError: 'worker-owned resident lane unavailable: terminal rejection',
+    __mlsMpmResidentStepsStale: { status: 'stale' },
+    __mlsMpmResidentStepsSlow: { status: 'slow' }
+  };
+}
+
+test('mounted terminal warning replaces only contradictory stepping and rescheduling claims', () => {
+  for (const motionStatus of [
+    'motion-unknown-no-compact-summary', 'motion-unknown', 'motion-below-visible-threshold'
+  ]) {
+    const overlay = terminalWarningOverlay();
+    overlay.__sphResidentRenderState = { renderFieldReadback: true };
+    const harness = mountedWarningHarness({ overlay, motionStatus, pendingControlEdit: true });
+    assert.deepEqual(harness.warnings(), [
+      'Resident physics stopped after a terminal execution error.',
+      'Control changes staged — press Apply, Play, Step, or Reset to apply.',
+      'Render field readback is active: MarchingCubes still consumes CPU arrays.'
+    ]);
+    assert.equal(overlay.__sphResidentMotionDiagnostic.status, motionStatus);
+  }
+});
+
+test('mounted terminal warning requires the current exact stop generation, token, and error', () => {
+  const ordinaryWarnings = [
+    'Discarded stale resident physics; rescheduling current particle state.',
+    'Resident physics is still deriving a GPU-resident step; waiting for the current batch.',
+    'Resident physics is stepping, but compact motion proof is unavailable.'
+  ];
+  for (const change of [
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule = null; },
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule.schema = 'other'; },
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule.status = 'resident-auto-schedule-enabled'; },
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule.generation = 3; },
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule.generation = '4'; },
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule.scheduleToken = 6; },
+    (overlay) => { overlay.__mlsMpmResidentAutoSchedule.scheduleToken = '7'; },
+    (overlay) => { overlay.__mlsMpmResidentStepsError = null; },
+    (overlay) => { overlay.__mlsMpmResidentStepsError = ''; },
+    (overlay) => { overlay.__mlsMpmResidentStepsError = '  '; },
+    (overlay) => { overlay.__mlsMpmResidentStepsError = new Error('not a stored error string'); }
+  ]) {
+    const overlay = terminalWarningOverlay();
+    change(overlay);
+    assert.deepEqual(mountedWarningHarness({ overlay }).warnings(), ordinaryWarnings);
+  }
+  for (const [generation, scheduleToken] of [
+    [5, 7], [4, 8], [null, 7], ['4', 7], [4, '7'], [-1, 7], [4, 0],
+    [4.5, 7], [4, 7.5], [Number.MAX_SAFE_INTEGER + 1, 7], [4, Number.MAX_SAFE_INTEGER + 1]
+  ]) {
+    const overlay = terminalWarningOverlay();
+    // Matching malformed identities must not manufacture a current stop.
+    if (generation !== 5 && scheduleToken !== 8) {
+      Object.assign(overlay.__mlsMpmResidentAutoSchedule, { generation, scheduleToken });
+    }
+    const harness = mountedWarningHarness({ overlay });
+    harness.setIdentity(generation, scheduleToken);
+    assert.deepEqual(harness.warnings(), ordinaryWarnings);
+  }
+});
+
+test('mounted terminal warning retires across retry, success, and reset lifecycles', () => {
+  const overlay = terminalWarningOverlay();
+  const harness = mountedWarningHarness({ overlay });
+  const stopped = 'Resident physics stopped after a terminal execution error.';
+  assert.equal(harness.warnings().includes(stopped), true);
+  // Play/manual Step admits a newer token before clearing a retained error.
+  overlay.__mlsMpmResidentStepsPending = { generation: 4, scheduleToken: 8 };
+  harness.setIdentity(4, 8);
+  assert.equal(harness.warnings().includes(stopped), false);
+  // A new terminal result is visible; successful completion clears its error.
+  overlay.__mlsMpmResidentAutoSchedule.scheduleToken = 8;
+  overlay.__mlsMpmResidentStepsPending = null;
+  assert.equal(harness.warnings().includes(stopped), true);
+  overlay.__mlsMpmResidentStepsError = null;
+  assert.equal(harness.warnings().includes(stopped), false);
+  overlay.__mlsMpmResidentStepsError = 'late prior-generation error';
+  harness.setIdentity(5, 9);
+  assert.equal(harness.warnings().includes(stopped), false);
+});
+
+test('mounted warning keeps runtime-block precedence and ordinary presentation suppression', () => {
+  const overlay = terminalWarningOverlay();
+  assert.deepEqual(mountedWarningHarness({ overlay, runtimeBlocked: true }).warnings(), [
+    'Simulation blocked: fixture prerequisite'
+  ]);
+  delete overlay.__mlsMpmResidentStepsStale;
+  delete overlay.__mlsMpmResidentStepsSlow;
+  assert.deepEqual(mountedWarningHarness({ overlay, nativePresentationReady: true }).warnings(), [
+    'Resident physics stopped after a terminal execution error.'
+  ]);
+  delete overlay.__mlsMpmResidentAutoSchedule;
+  assert.deepEqual(mountedWarningHarness({ overlay, nativePresentationReady: true }).warnings(), []);
+  overlay.__sphResidentRenderReadbackCadence = {
+    particleRenderModeRefresh: true, skipped: false, renderReadbackCount: 1
+  };
+  assert.deepEqual(mountedWarningHarness({ overlay }).warnings(), []);
+  assert.deepEqual(mountedWarningHarness({ motionStatus: 'motion-below-visible-threshold' }).warnings(), [
+    'Resident physics is stepping, but displacement is below the visible threshold.'
+  ]);
 });
 
 function pendingPreviewInitialBodies(overrides = {}) {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -18,10 +19,12 @@ import {
   SCHROEDER_SPATIAL_POSITION_TRANSITION_STATUS,
   SCHROEDER_SPATIAL_POSITION_TRANSITION_VERSION,
   acquireSchroederSpatialSuccessorSourceFamilyLease,
+  acquireSchroederSpatialSuccessorParticleProductRead,
   abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication,
   allocateSchroederSpatialSuccessorBufferFamilyIdentity,
   applySchroederSpatialPositionTransitionReceipt,
   createSchroederSpatialSuccessorSourceFamily,
+  forkSchroederSpatialSuccessorSourceFamilyLease,
   prepareSchroederSpatialSuccessorSourceFamilyPublication,
   publishPreparedSchroederSpatialSuccessorSourceFamily,
   releaseSchroederSpatialSuccessorSourceFamilyLease,
@@ -32,6 +35,7 @@ import {
   runSchroederSpatialPositionTransitionWebGpu,
   schroederSpatialSuccessorSourceFamilyLiveness,
   validateSchroederSpatialProductHistoryCommitGate,
+  validateSchroederSpatialSuccessorParticleProductRead,
   validateSchroederSpatialSuccessorPublicationReceipt
 } from '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js';
 import {
@@ -72,8 +76,10 @@ function deferred() {
 
 function createFakeDevice() {
   let resolveDeviceLoss;
-  const lost = new Promise((resolve) => {
+  let rejectDeviceLoss;
+  const lost = new Promise((resolve, reject) => {
     resolveDeviceLoss = resolve;
+    rejectDeviceLoss = reject;
   });
   const buffers = [];
   const device = {
@@ -81,6 +87,9 @@ function createFakeDevice() {
     lost,
     lose(info = { reason: 'destroyed', message: 'test device lost' }) {
       resolveDeviceLoss(info);
+    },
+    rejectLoss(info) {
+      rejectDeviceLoss(info);
     },
     limits: { maxComputeWorkgroupsPerDimension: 65_535 },
     createBuffer(descriptor) {
@@ -791,6 +800,425 @@ test('exact successor leases block retirement and release exactly once', async (
   );
   assertBorrowedBuffersSurvive(f.buffers);
 });
+
+test('published particle/product read binds exact uploads and sealed absence, never public labels', async () => {
+  const f = await successorFixture();
+  const args = { device: f.device, ...f.nextParticleUploads, residentProductMass: null };
+  const read = acquireSchroederSpatialSuccessorParticleProductRead(args);
+  assert.equal(Object.isFrozen(read), true);
+  assert.equal(read.sourceFamily, f.sourceFamily);
+  assert.equal(read.epochIdentity, f.sourceFamily.successorEpochIdentity);
+  assert.equal(read.particleCount, f.particleCount);
+  assert.equal(read.residentProductMass, null);
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true);
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead({ ...read }, args), false);
+  const copied = { ...args, sphParticleUpload: { ...args.sphParticleUpload } };
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead(copied), /exact published successor/);
+  assert.equal(acquireSchroederSpatialSuccessorParticleProductRead({ ...copied, required: false }), null);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+    mlsMpmParticleUpload: { ...args.mlsMpmParticleUpload }, required: false }), /exact committed|published inventory/);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+    residentProductMass: { productEventBuffer: {} }, required: false }), /published inventory/);
+  f.nextParticleUploads.residentProductMass = { productEventBuffer: {} };
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args, required: false }),
+    /exact committed/);
+  delete f.nextParticleUploads.residentProductMass;
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true);
+  releaseSchroederSpatialSuccessorSourceFamilyLease(read.sourceFamily, read.ownerReadToken, { device: f.device });
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+});
+
+test('published particle/product read rejects another genuine history, copied history and omission', async () => {
+  const prepared = await preparedProductHistoryGateFixture();
+  const { f, nextParticleUploads, productHistory, plan, tx } = prepared;
+  const publication = publishPreparedSchroederSpatialSuccessorSourceFamily(plan, { commitReceipt: tx.commit() });
+  assert.equal(publication.published, true);
+  const args = { device: f.device, ...nextParticleUploads };
+  const read = acquireSchroederSpatialSuccessorParticleProductRead(args);
+  const other = attachGpuCountProductHistory(f, {}, { generation: 72, seal: 0x725ea1 });
+  for (const history of [null, { ...productHistory.residentProductMass }, other.residentProductMass]) {
+    assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+      residentProductMass: history, required: false }), /published inventory/);
+    assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, { ...args,
+      residentProductMass: history }), false);
+  }
+  delete nextParticleUploads.residentProductMass;
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args, required: false }),
+    /exact committed/);
+  nextParticleUploads.residentProductMass = productHistory.residentProductMass;
+  const originalEventBuffer = productHistory.residentProductMass.productEventBuffer;
+  productHistory.residentProductMass.productEventBuffer = other.productEventBuffer;
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+  productHistory.residentProductMass.productEventBuffer = originalEventBuffer;
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true);
+  releaseSchroederSpatialSuccessorSourceFamilyLease(read.sourceFamily, read.ownerReadToken, { device: f.device });
+});
+
+test('known retiring particle/product source never falls back, but its issued read follows the exact lease', async () => {
+  const f = await successorFixture();
+  const args = { device: f.device, ...f.nextParticleUploads };
+  const read = acquireSchroederSpatialSuccessorParticleProductRead(args);
+  const ownerFence = deferred();
+  const consumerFence = deferred();
+  const retirement = retireSchroederSpatialSuccessorSourceFamilyAfterLeases(f.sourceFamily,
+    { device: f.device, after: ownerFence.promise });
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args, required: false }),
+    { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_RETIREMENT_REQUESTED' });
+  const release = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(read.sourceFamily, read.ownerReadToken,
+    { device: f.device, after: consumerFence.promise });
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false,
+    'release-pending read cannot submit another consumer');
+  ownerFence.resolve(true);
+  consumerFence.resolve(true);
+  await release;
+  await retirement;
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args, required: false }),
+    { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_RETIRED' });
+  assertBorrowedBuffersSurvive(f.buffers);
+});
+
+test('exact parent forks a paired read during retirement that independently retains the assignment and history identity', async () => {
+  const { f, nextParticleUploads, productHistory, classifier, plan, tx } =
+    await preparedProductHistoryGateFixture();
+  const publication = publishPreparedSchroederSpatialSuccessorSourceFamily(
+    plan, { commitReceipt: tx.commit() }
+  );
+  assert.equal(publication.published, true);
+  const family = publication.sourceFamily;
+  const parent = acquireSchroederSpatialSuccessorSourceFamilyLease(family,
+    { device: f.device, consumerStage: 'outer-mechanics-parent' });
+  const ownerFence = deferred();
+  const retirement = retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family,
+    { device: f.device, after: ownerFence.promise });
+  assert.throws(() => acquireSchroederSpatialSuccessorSourceFamilyLease(family,
+    { device: f.device }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_RETIREMENT_REQUESTED' });
+  const args = { device: f.device, ...nextParticleUploads };
+  const read = acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+    consumerLease: parent, required: false });
+  assert.notEqual(read.ownerReadToken, parent);
+  assert.equal(read.residentProductMass, productHistory.residentProductMass);
+  assert.equal(read.epochIdentity, family.successorEpochIdentity);
+  assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(family).leaseCount, 2);
+
+  const parentFence = deferred();
+  const parentRelease = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+    family, parent, { device: f.device, after: parentFence.promise });
+  ownerFence.resolve(true);
+  parentFence.resolve(true);
+  await parentRelease;
+  const live = schroederSpatialSuccessorSourceFamilyLiveness(family);
+  assert.equal(live.retirementFenceSettled, true);
+  assert.equal(live.retired, false);
+  assert.equal(live.leaseCount, 1);
+  assert.equal(classifier.results[0].assignmentBuffer.destroyCount, 0);
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true,
+    'the child uses its own private lease after its original parent drains');
+  assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(family, parent,
+    { device: f.device }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_RELEASED' });
+
+  const childFence = deferred();
+  const childRelease = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+    family, read.ownerReadToken, { device: f.device, after: childFence.promise });
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+  assert.equal(classifier.results[0].assignmentBuffer.destroyCount, 0);
+  childFence.resolve(true);
+  await childRelease;
+  assert.equal((await retirement).retired, true);
+  assert.equal(classifier.results[0].assignmentBuffer.destroyCount, 1);
+  assertBorrowedBuffersSurvive(f.buffers);
+  assert.equal(productHistory.productEventBuffer.destroyCount, 0,
+    'source-family identity leases do not destroy borrowed product history');
+  assert.equal(productHistory.controlBuffer.destroyCount, 0);
+});
+
+test('lease forks and optional paired reads reject copied, foreign, wrong-device and malformed parent authority', async () => {
+  const f = await successorFixture();
+  const other = await successorFixture();
+  const parent = acquireSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily,
+    { device: f.device });
+  const foreign = acquireSchroederSpatialSuccessorSourceFamilyLease(other.sourceFamily,
+    { device: other.device });
+  const args = { device: f.device, ...f.nextParticleUploads, required: false };
+  for (const consumerLease of [{}, Object.freeze({ ...parent }), foreign]) {
+    assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+      f.sourceFamily, consumerLease, { device: f.device }),
+    { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_IDENTITY' });
+    assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({
+      ...args, consumerLease }),
+    { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_IDENTITY' });
+  }
+  for (const absent of [null, undefined]) {
+    assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+      f.sourceFamily, absent, { device: f.device }),
+    { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_IDENTITY' });
+  }
+  assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+    Object.freeze({ ...f.sourceFamily }), parent, { device: f.device }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_IDENTITY' });
+  assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+    f.sourceFamily, parent, { device: other.device }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_IDENTITY' });
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({
+    ...args, device: other.device, consumerLease: parent }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_IDENTITY' });
+  assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+    f.sourceFamily, parent, { device: f.device, consumerStage: ' ' }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_CONTRACT' });
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({
+    ...args, consumerLease: parent, consumerStage: ' ' }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_CONTRACT' });
+  assert.equal(acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+    sphParticleUpload: { ...args.sphParticleUpload }, consumerLease: parent }), null,
+  'a genuine parent token does not authenticate an unpublished or copied carrier');
+  assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily).leaseCount, 1,
+    'failed forks do not mint or leak a child owner');
+  const child = forkSchroederSpatialSuccessorSourceFamilyLease(
+    f.sourceFamily, parent, { device: f.device, consumerStage: ' exact-child ' });
+  assert.equal(Object.isFrozen(child), true);
+  assert.equal(child.readOnly, true);
+  assert.equal(child.consumerStage, 'exact-child');
+  assert.equal(child.leaseOrdinal, parent.leaseOrdinal + 1);
+  releaseSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily, child, { device: f.device });
+  releaseSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily, parent, { device: f.device });
+  releaseSchroederSpatialSuccessorSourceFamilyLease(other.sourceFamily, foreign, { device: other.device });
+});
+
+test('release-pending and released parent tokens cannot fork while an existing child remains independently live', async () => {
+  const f = await successorFixture();
+  const parent = acquireSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily,
+    { device: f.device });
+  const args = { device: f.device, ...f.nextParticleUploads };
+  const read = acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+    consumerLease: parent });
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({ ...args,
+    consumerLease: parent, residentProductMass: {}, required: false }), /published inventory/,
+  'forking preserves the exact published absence of product history');
+  const parentFence = deferred();
+  const release = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+    f.sourceFamily, parent, { device: f.device, after: parentFence.promise });
+  const rejectsParent = (code) => {
+    assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+      f.sourceFamily, parent, { device: f.device }), { code });
+    for (const required of [true, false]) {
+      assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({
+        ...args, consumerLease: parent, required }), { code });
+    }
+    assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true);
+  };
+  rejectsParent('ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_RELEASE_PENDING');
+  assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily).leaseCount, 2);
+  parentFence.resolve(true);
+  await release;
+  rejectsParent('ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_RELEASED');
+  assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily).leaseCount, 1);
+  releaseSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily,
+    read.ownerReadToken, { device: f.device });
+});
+
+test('retirement forks preserve exact raw buffers, upload envelopes and nonempty product history seals', async () => {
+  const { f, nextParticleUploads, productHistory, plan, tx } =
+    await preparedProductHistoryGateFixture();
+  const publication = publishPreparedSchroederSpatialSuccessorSourceFamily(
+    plan, { commitReceipt: tx.commit() });
+  const family = publication.sourceFamily;
+  const parent = acquireSchroederSpatialSuccessorSourceFamilyLease(family, { device: f.device });
+  const ownerFence = deferred();
+  const retirement = retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family,
+    { device: f.device, after: ownerFence.promise });
+  const args = { device: f.device, ...nextParticleUploads, consumerLease: parent, required: false };
+  const read = acquireSchroederSpatialSuccessorParticleProductRead(args);
+  const other = attachGpuCountProductHistory(f, {}, { generation: 72, seal: 0x725ea1 });
+  for (const history of [null, { ...productHistory.residentProductMass }, other.residentProductMass]) {
+    assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead({
+      ...args, residentProductMass: history }), /published inventory/);
+  }
+  const mutations = [
+    [nextParticleUploads.sphParticleUpload, 'stateBuffer', f.generation.source.sourceStateBuffer],
+    [nextParticleUploads.sphParticleUpload, 'thermoBuffer', taggedBuffer(f.device, 'stale-thermo', 144)],
+    [nextParticleUploads.sphParticleUpload, 'identityBuffer', taggedBuffer(f.device, 'stale-identity', 48)],
+    [nextParticleUploads.mlsMpmParticleUpload, 'mechanicsBuffer', taggedBuffer(f.device, 'stale-mechanics', 384)],
+    [nextParticleUploads.sphParticleUpload, 'physicsTick', nextParticleUploads.sphParticleUpload.physicsTick + 1],
+    [nextParticleUploads, 'sphParticleUpload', { ...nextParticleUploads.sphParticleUpload }],
+    [nextParticleUploads, 'residentProductMass', other.residentProductMass],
+    [productHistory.residentProductMass, 'productEventBuffer', other.productEventBuffer]
+  ];
+  for (const [target, key, replacement] of mutations) {
+    const original = target[key];
+    target[key] = replacement;
+    assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+      family, parent, { device: f.device }), /exact committed/);
+    assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead(args), /exact committed/);
+    assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+    assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(family).leaseCount, 2);
+    target[key] = original;
+    assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), true);
+  }
+  assert.equal(revokeResidentProductEventCountAuthority(productHistory.residentProductMass), true);
+  assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+    family, parent, { device: f.device }), /exact committed/);
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead(args), /exact committed/);
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(read, args), false);
+  releaseSchroederSpatialSuccessorSourceFamilyLease(family, parent, { device: f.device });
+  releaseSchroederSpatialSuccessorSourceFamilyLease(family, read.ownerReadToken, { device: f.device });
+  ownerFence.resolve(true);
+  await retirement;
+});
+
+test('failed parent fence preserves private ownership for an explicit fork retry but device loss revokes it', async () => {
+  const f = await successorFixture();
+  const parent = acquireSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily,
+    { device: f.device });
+  const args = { device: f.device, ...f.nextParticleUploads, consumerLease: parent, required: false };
+  const fence = deferred();
+  const release = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+    f.sourceFamily, parent, { device: f.device, after: fence.promise });
+  fence.reject(new Error('parent completion unconfirmed'));
+  await assert.rejects(release, /completion unconfirmed/);
+  assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily).leaseCount, 1);
+  const child = acquireSchroederSpatialSuccessorParticleProductRead(args);
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(child, args), true,
+    'rejected completion did not free the source or consume the parent token');
+  f.device.lose();
+  await f.device.lost;
+  assert.throws(() => forkSchroederSpatialSuccessorSourceFamilyLease(
+    f.sourceFamily, parent, { device: f.device }),
+  { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_DEVICE_LOST' });
+  assert.throws(() => acquireSchroederSpatialSuccessorParticleProductRead(args),
+    { code: 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_DEVICE_LOST' });
+  assert.equal(validateSchroederSpatialSuccessorParticleProductRead(child, args), false);
+  releaseSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily, parent, { device: f.device });
+  releaseSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily, child.ownerReadToken,
+    { device: f.device });
+  assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily).leaseCount, 0);
+  assertBorrowedBuffersSurvive(f.buffers);
+});
+
+test('a public envelope getter cannot release its exact parent during fork or resolver admission', async () => {
+  for (const [pending, resolveOnly] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const f = await successorFixture();
+    const parent = acquireSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily,
+      { device: f.device });
+    const ownerFence = deferred();
+    const retirement = retireSchroederSpatialSuccessorSourceFamilyAfterLeases(f.sourceFamily,
+      { device: f.device, after: ownerFence.promise });
+    ownerFence.resolve(true);
+    await ownerFence.promise;
+    const upload = f.nextParticleUploads.sphParticleUpload;
+    const field = Object.getOwnPropertyDescriptor(upload, 'physicsTick');
+    const childFence = deferred();
+    let parentRelease = null;
+    let observed = false;
+    Object.defineProperty(upload, 'physicsTick', {
+      configurable: true,
+      enumerable: field.enumerable,
+      get() {
+        if (!observed) {
+          observed = true;
+          if (pending) {
+            parentRelease = releaseSchroederSpatialSuccessorSourceFamilyLeaseAfter(
+              f.sourceFamily, parent, { device: f.device, after: childFence.promise });
+          } else {
+            releaseSchroederSpatialSuccessorSourceFamilyLease(f.sourceFamily, parent,
+              { device: f.device });
+          }
+        }
+        return field.value;
+      }
+    });
+    try {
+      assert.throws(() => resolveOnly
+        ? resolveSchroederSpatialSuccessorSourceFamily(f.sourceFamily,
+          { device: f.device, consumerLease: parent, ...f.nextParticleUploads })
+        : forkSchroederSpatialSuccessorSourceFamilyLease(
+          f.sourceFamily, parent, { device: f.device }),
+      { code: pending
+        ? 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_RELEASE_PENDING'
+        : 'ERR_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_LEASE_RELEASED' });
+      assert.equal(observed, true);
+      assert.equal(schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily).leaseCount,
+        pending ? 1 : 0, 'public inspection must not mint a child after parent invalidation');
+    } finally {
+      Object.defineProperty(upload, 'physicsTick', field);
+      childFence.resolve(true);
+      if (parentRelease) await parentRelease;
+    }
+    await retirement;
+    assertBorrowedBuffersSurvive(f.buffers);
+  }
+});
+
+test('weak device-loss callback has no strong-family parent closure', () => {
+  const source = readFileSync(new URL(
+    '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js', import.meta.url
+  ), 'utf8');
+  const moduleFunction = (name) => {
+    const match = source.match(new RegExp(`^function ${name}\\(([^)]*)\\) \\{\\n([\\s\\S]*?)^\\}`, 'm'));
+    assert.ok(match, `${name} must have its own module-level closure scope`);
+    return { parameters: match[1], body: match[2] };
+  };
+  // This is a lexical-isolation contract, not a claim that GC ran. The weak
+  // factory must never receive the raw family, even as an unused parameter.
+  const weak = moduleFunction('createWeakSourceFamilyLossCallback');
+  assert.equal(weak.parameters, 'sourceFamilyRef');
+  assert.doesNotMatch(weak.body, /\b(?:sourceFamily|device|WeakRef)\b/);
+  assert.match(weak.body, /sourceFamilyRef\.deref\(\)/);
+  const strong = moduleFunction('createStrongSourceFamilyLossCallback');
+  assert.equal(strong.parameters, 'sourceFamily');
+  const watcher = moduleFunction('watchSourceFamilyDeviceLoss');
+  assert.doesNotMatch(watcher.body, /=>|\bfunction\s*(?:\w+\s*)?\(/);
+  assert.match(watcher.body, /createWeakSourceFamilyLossCallback\(new WeakRef\(sourceFamily\)\)/);
+  assert.match(watcher.body, /createStrongSourceFamilyLossCallback\(sourceFamily\)/);
+});
+
+for (const weakTarget of ['live', 'absent', 'unavailable']) {
+  for (const lossOutcome of ['resolve', 'reject']) {
+    test(`device loss ${lossOutcome} with ${weakTarget} weak target preserves quarantine semantics`, async () => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'WeakRef');
+      const references = [];
+      class ControlledWeakRef {
+        constructor(target) {
+          this.target = target;
+          this.derefCount = 0;
+          references.push(this);
+        }
+        deref() {
+          this.derefCount += 1;
+          return this.target;
+        }
+      }
+      try {
+        Object.defineProperty(globalThis, 'WeakRef', {
+          ...descriptor,
+          value: weakTarget === 'unavailable' ? undefined : ControlledWeakRef
+        });
+        const f = await successorFixture();
+        const familyRefs = references.filter((ref) => ref.target === f.sourceFamily);
+        assert.equal(familyRefs.length, weakTarget === 'unavailable' ? 0 : 1);
+        const familyRef = familyRefs[0];
+        if (weakTarget === 'absent') familyRef.target = undefined;
+        const info = { message: `${weakTarget} target ${lossOutcome}` };
+        if (lossOutcome === 'resolve') f.device.lose(info);
+        else f.device.rejectLoss(info);
+        await Promise.resolve();
+        await Promise.resolve();
+        if (familyRef) assert.equal(familyRef.derefCount, 1);
+        const liveness = schroederSpatialSuccessorSourceFamilyLiveness(f.sourceFamily);
+        assert.equal(liveness.deviceLost, weakTarget !== 'absent');
+        assert.equal(liveness.active, weakTarget === 'absent');
+        if (weakTarget !== 'absent') assert.equal(liveness.reason, info.message);
+        assertBorrowedBuffersSurvive(f.buffers);
+      } finally {
+        Object.defineProperty(globalThis, 'WeakRef', descriptor);
+      }
+    });
+  }
+}
 
 test('device loss quarantines the family without destroying borrowed buffers', async () => {
   const f = await successorFixture();

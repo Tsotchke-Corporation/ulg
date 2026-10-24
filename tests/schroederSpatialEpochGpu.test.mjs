@@ -90,12 +90,14 @@ import {
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
   resolveSchroederSpatialDirectoryActiveNodeSource,
   schroederSpatialEpochGenerationRetirementCapability,
+  schroederSpatialEpochDeviceRuntimeAllocationOwnership,
   runSchroederSpatialEpochGenerationWebGpu,
   runSchroederSpatialEpochGenerationWithBackpressureWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 import {
   createSchroederSpatialActiveSourceViewGpu
 } from '../src/runtime/sph/schroederSpatialActiveSourceViewGpu.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 function deferred() {
   let resolve;
@@ -110,6 +112,7 @@ function deferred() {
 
 function createFakeDevice(overrides = {}) {
   const buffers = [];
+  const shaderModules = [];
   const pipelines = [];
   const bindGroups = [];
   const writes = [];
@@ -117,6 +120,7 @@ function createFakeDevice(overrides = {}) {
   const commandEncoders = [];
   const device = {
     buffers,
+    shaderModules,
     pipelines,
     bindGroups,
     writes,
@@ -162,6 +166,7 @@ function createFakeDevice(overrides = {}) {
       return buffer;
     },
     createShaderModule(descriptor) {
+      shaderModules.push(descriptor);
       return descriptor;
     },
     createComputePipeline(descriptor) {
@@ -409,6 +414,80 @@ function createFullTwoLevelSpatialGeneration(
     sourceMechanicsBuffer
   };
 }
+
+test('device runtime ownership query includes all cached families and historical capacities without retiring them', async () => {
+  const device = createFakeDevice();
+  assert.deepEqual(schroederSpatialEpochDeviceRuntimeAllocationOwnership(device).buffers, []);
+  const full = createFullTwoLevelSpatialGeneration(device, { phaseVolumeInterfaceProposalEnabled: true });
+  const independent = createFullTwoLevelSpatialGeneration(device, { mechanicsFieldPairV2Enabled: false });
+  assert.equal(full.generation.ready, true, full.generation.reason);
+  assert.equal(independent.generation.ready, true, independent.generation.reason);
+  const entry = full.generation.directRuntimeEntry;
+  const owners = [entry.runtime, entry.activeSourceViewRuntime, entry.aggregateViewRuntime, entry.exactNearCellTreeRuntime,
+    ...entry.mechanicsViewRuntimes.values(), ...entry.mechanicsFieldViewRuntimes.values(),
+    ...entry.mechanicsFieldPairRuntimes.values(), ...entry.phaseVolumeMomentRuntimes.values(),
+    ...entry.phaseVolumeReceiptRuntimes.values(), ...entry.phaseVolumeInterfaceProposalRuntimes.values(),
+    ...entry.hierarchyViewRuntimes.values(), ...entry.parentFieldViewRuntimes.values()];
+  assert.ok(owners.every(Boolean), 'all runtime families are actually populated');
+  const expected = new Set(owners.flatMap((runtime) => runtime.allocationEntries().map(({ buffer }) => buffer)));
+  const oldDirectory = full.generation.execution.directoryBuffer;
+  for (const { generation } of [full, independent]) {
+    assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
+    assert.equal(await generation.releasePromise, true);
+  }
+  const larger = runSchroederSpatialEpochGenerationWebGpu({
+    device, levelAssignment: createDirectSpatialLevelAssignment(device, { particleCount: 4 }), particleCount: 4
+  });
+  assert.equal(larger.ready, true, larger.reason);
+  assert.notEqual(larger.runtime, full.generation.runtime);
+  for (const runtime of [larger.runtime, larger.activeSourceViewRuntime, larger.exactNearCellTreeRuntime].filter(Boolean)) {
+    for (const { buffer } of runtime.allocationEntries()) expected.add(buffer);
+  }
+  const submits = device.submissions.length;
+  const writes = device.writes.length;
+  const actual = schroederSpatialEpochDeviceRuntimeAllocationOwnership(device);
+  assert.equal(actual.status, 'spatial-epoch-runtime-allocation-ownership-complete');
+  assert.equal(Object.isFrozen(actual.buffers), true);
+  assert.deepEqual(new Set(actual.buffers), expected);
+  assert.ok(actual.buffers.includes(oldDirectory), 'retired old-capacity aliases retain their cache owner');
+  assert.ok(actual.buffers.some((buffer) => buffer.label.includes('dummy-read-only')));
+  assert.ok(actual.buffers.some((buffer) => buffer.label.includes('gpu-count')));
+  assert.equal(actual.buffers.includes(full.levelAssignment.sourceStateBuffer), false, 'borrowed particle inputs are not cache allocations');
+  assert.equal(device.submissions.length, submits);
+  assert.equal(device.writes.length, writes);
+  assert.ok(actual.buffers.every((buffer) => !buffer.destroyed));
+  const foreign = createFakeDevice();
+  const foreignGeneration = createFullTwoLevelSpatialGeneration(foreign).generation;
+  const foreignOwnership = schroederSpatialEpochDeviceRuntimeAllocationOwnership(foreign);
+  assert.ok(foreignOwnership.buffers.length > 0);
+  assert.ok(foreignOwnership.buffers.every((buffer) => !expected.has(buffer)), 'same shape on a different device is isolated');
+  for (const [generation, owner] of [[larger, device], [foreignGeneration, foreign]]) {
+    assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, owner), true);
+    assert.equal(await generation.releasePromise, true);
+  }
+});
+
+test('device runtime ownership query fails visibly on incomplete or foreign allocation evidence', async () => {
+  const device = createFakeDevice();
+  const { generation } = createFullTwoLevelSpatialGeneration(device);
+  assert.equal(generation.ready, true, generation.reason);
+  const runtime = generation.runtime;
+  const original = runtime.allocationEntries;
+  const foreign = createFakeDevice();
+  const foreignBuffer = tagWebGpuBufferDevice(foreign.createBuffer({ size: 16, usage: 128 }), foreign);
+  const failure = { code: 'ERR_SCHROEDER_SPATIAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE' };
+  try {
+    for (const malformed of [null, () => null, () => [null], () => [{ buffer: foreignBuffer }], () => { throw new Error('allocation enumeration failed'); }]) {
+      runtime.allocationEntries = malformed;
+      assert.throws(() => schroederSpatialEpochDeviceRuntimeAllocationOwnership(device), failure);
+    }
+    assert.equal(foreignBuffer.destroyCount, 0);
+  } finally {
+    runtime.allocationEntries = original;
+    assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(generation, device), true);
+    assert.equal(await generation.releasePromise, true);
+  }
+});
 
 test('spatial epoch ABI fixes exact keys, identity header, and compact directory offsets', () => {
   assert.equal(SCHROEDER_SPATIAL_EPOCH_HEADER_LAYOUT.length, 48);
@@ -2941,6 +3020,9 @@ test('paired rollover rejects a stale draining sibling and rebuilds from the exa
   assert.equal(drainingRecord.runtime, drainingRuntime);
   assert.equal(drainingRecord.executions.includes(stale.mechanicsFieldPair), true);
   assert.equal(drainingRecord.executions.includes(adjacent.mechanicsFieldPair), true);
+  const drainingOwnership = schroederSpatialEpochDeviceRuntimeAllocationOwnership(device);
+  assert.ok(drainingRuntime.allocationEntries().every(({ buffer }) => drainingOwnership.buffers.includes(buffer)),
+    'a rolled-over runtime remains protected while its exact executions drain');
 
   const rebuilt = build(4, adjacent.mechanicsFieldPair.mechanicsFieldViews);
   assert.equal(rebuilt.ready, true, rebuilt.reason);
@@ -3145,6 +3227,9 @@ test('depleted mechanics-field cache rolls an exact active owner and destroys it
     entry.mechanicsFieldViewDrainingRuntimes;
   assert.equal(drainingRecord.runtime, depletedRuntime);
   assert.deepEqual(drainingRecord.executions, [retained.mechanicsFieldView]);
+  const ownershipWhileDraining = schroederSpatialEpochDeviceRuntimeAllocationOwnership(device);
+  assert.ok(depletedRuntime.allocationEntries().every(({ buffer }) => ownershipWhileDraining.buffers.includes(buffer)),
+    'the independent field draining owner remains protected until retirement completes');
 
   assert.equal(
     releaseSchroederSpatialEpochGenerationAfterQueue(retained, device),
@@ -4586,6 +4671,287 @@ test('exact-near query profile rejects missing, coercible, and out-of-range nume
     assert.equal(source.exactNearQueryProfile[profileField], null, label);
   }
 });
+
+for (const directoryAbiVersion of [
+  SCHROEDER_SPATIAL_EPOCH_VERSION,
+  SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+]) {
+  test(`spatial v${directoryAbiVersion} shares only immutable pipelines across capacity and arena growth`, () => {
+    const device = createFakeDevice();
+    const keyCode = directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      ? schroederSpatialEpochV2KeyWgsl : schroederSpatialEpochKeyWgsl;
+    const assembleCode = directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+      ? schroederSpatialEpochV2AssembleWgsl : schroederSpatialEpochAssembleWgsl;
+    const capacities = [8192, 16384, 32768, 65536, 131072, 262144];
+    const runtimes = [];
+    try {
+      for (const [index, capacity] of capacities.entries()) {
+        runtimes.push(createSchroederSpatialEpochGpu(device, {
+          maxSourceCount: capacity,
+          activeSourceCapacity: capacity / 2,
+          cellCapacity: capacity / 4,
+          directoryAbiVersion,
+          arenaCount: 1 + index % 3,
+          label: `pipeline-growth-v${directoryAbiVersion}-${capacity}`
+        }));
+      }
+      const shared = device.pipelines.filter(({ compute }) => (
+        compute.module.code === keyCode || compute.module.code === assembleCode
+      ));
+      assert.equal(shared.length, 3);
+      assert.deepEqual(shared.map(({ compute }) => compute.entryPoint), [
+        'emit_spatial_keys', 'assemble_directory', 'finalize_directory'
+      ]);
+      assert.equal(device.shaderModules.filter(({ code }) => code === keyCode).length, 1);
+      assert.equal(device.shaderModules.filter(({ code }) => code === assembleCode).length, 1);
+      assert.equal(shared.every(({ layout }) => layout === 'auto'), true);
+      assert.equal(shared[0].compute.module.code === keyCode, true);
+      assert.equal(shared[1].compute.module === shared[2].compute.module, true);
+      assert.equal(shared[1].compute.module.code === assembleCode, true);
+      const owned = runtimes.flatMap(runtime => runtime.allocationEntries().map(x => x.buffer));
+      assert.equal(new Set(owned).size, owned.length);
+      const activeRankPipelines = device.pipelines.filter(({ compute }) => (
+        compute.entryPoint === 'build_active_rank_view'
+      ));
+      const activeRankRuntimes = runtimes.filter(runtime => runtime.activeRankViewAvailable);
+      assert.equal(activeRankPipelines.length, activeRankRuntimes.length);
+      assert.equal(new Set(activeRankPipelines.map(x => x.compute.module.code)).size,
+        activeRankRuntimes.length);
+      for (const [index, runtime] of activeRankRuntimes.entries()) {
+        assert.ok(activeRankPipelines[index].compute.module.code.includes(
+          `const VIEW_SOURCE_CAPACITY: u32 = ${runtime.maxSourceCount}u;`
+        ));
+      }
+    } finally {
+      for (const runtime of runtimes) runtime.destroy();
+    }
+  });
+}
+
+test('spatial shared pipelines retain exact runtime/arena bindings and survive another runtime retirement', () => {
+  const device = createFakeDevice();
+  const firstRuntime = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 8, arenaCount: 1, label: 'shared-small'
+  });
+  const secondRuntime = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 16, arenaCount: 2, label: 'shared-large'
+  });
+  const sourceBuffer = device.createBuffer({
+    label: 'shared-borrowed-source', size: 16 * 16 * 4, usage: 128
+  });
+  const encode = (runtime, generationId) => {
+    const encoder = createFakeEncoder();
+    const pipelineReferences = [];
+    const beginComputePass = encoder.beginComputePass;
+    encoder.beginComputePass = (...args) => {
+      const pass = beginComputePass(...args);
+      const setPipeline = pass.setPipeline;
+      pass.setPipeline = pipeline => {
+        pipelineReferences.push(pipeline);
+        setPipeline(pipeline);
+      };
+      return pass;
+    };
+    const execution = runtime.encode(encoder, {
+      activeNodeBuffer: sourceBuffer, sourceCount: 4, generationId
+    });
+    return {
+      execution,
+      pipelines: pipelineReferences.filter(({ compute }) => (
+        ['emit_spatial_keys', 'assemble_directory', 'finalize_directory']
+          .includes(compute.entryPoint)
+      ))
+    };
+  };
+  const first = encode(firstRuntime, 1);
+  const second = encode(secondRuntime, 2);
+  const third = encode(secondRuntime, 3);
+  assert.equal(first.pipelines.length, 3);
+  for (const candidate of [second, third]) {
+    assert.equal(candidate.pipelines.length, 3);
+    assert.equal(candidate.pipelines.every((pipeline, i) => pipeline === first.pipelines[i]), true);
+    assert.notEqual(candidate.execution.directoryBuffer, first.execution.directoryBuffer);
+    assert.notEqual(candidate.execution.evidenceBuffer, first.execution.evidenceBuffer);
+    assert.equal(firstRuntime.ownsExecution(candidate.execution), false);
+    assert.equal(secondRuntime.ownsExecution(candidate.execution), true);
+  }
+  assert.notEqual(second.execution.directoryBuffer, third.execution.directoryBuffer);
+  assert.notEqual(second.execution.arenaIndex, third.execution.arenaIndex);
+  const keyBindings = device.bindGroups.filter(x => x.label.endsWith('-key-bind-group'));
+  assert.equal(keyBindings.length, 3);
+  assert.equal(new Set(keyBindings).size, 3);
+  assert.equal(keyBindings.every(x => x.entries[0].resource.buffer === sourceBuffer), true);
+  assert.deepEqual(keyBindings.map(x => x.entries[0].resource.size), [8 * 64, 16 * 64, 16 * 64]);
+  for (const binding of keyBindings[0].entries.slice(1)) {
+    assert.equal(keyBindings.slice(1).some(group => group.entries.some(entry => (
+      entry.resource.buffer === binding.resource.buffer
+    ))), false);
+  }
+  const firstOwned = firstRuntime.allocationEntries().map(x => x.buffer);
+  const secondOwned = secondRuntime.allocationEntries().map(x => x.buffer);
+  assert.equal(firstRuntime.releaseExecution(first.execution, { discardedEncoder: true }), true);
+  assert.equal(firstRuntime.destroy(), true);
+  assert.equal(firstOwned.every(buffer => buffer.destroyed), true);
+  assert.equal(secondOwned.every(buffer => !buffer.destroyed), true);
+  assert.equal(sourceBuffer.destroyed, false);
+
+  const replacement = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 32, arenaCount: 1, label: 'shared-replacement'
+  });
+  const fourth = encode(replacement, 4);
+  assert.equal(fourth.pipelines.every((pipeline, i) => pipeline === first.pipelines[i]), true);
+  for (const candidate of [second, third]) {
+    assert.equal(secondRuntime.releaseExecution(candidate.execution, { discardedEncoder: true }), true);
+  }
+  assert.equal(replacement.releaseExecution(fourth.execution, { discardedEncoder: true }), true);
+  secondRuntime.destroy();
+  replacement.destroy();
+  assert.equal(sourceBuffer.destroyed, false);
+});
+
+test('spatial pipeline reuse isolates exact devices and v1/v2 shader identities', () => {
+  const devices = [createFakeDevice(), createFakeDevice()];
+  const runtimes = [];
+  for (const device of devices) {
+    for (const directoryAbiVersion of [1, 2, 1, 2]) {
+      runtimes.push(createSchroederSpatialEpochGpu(device, {
+        maxSourceCount: 8, arenaCount: 1, directoryAbiVersion,
+        label: 'same-label-must-not-identify-shader-or-device'
+      }));
+    }
+  }
+  const codes = [schroederSpatialEpochKeyWgsl, schroederSpatialEpochAssembleWgsl,
+    schroederSpatialEpochV2KeyWgsl, schroederSpatialEpochV2AssembleWgsl];
+  const bundles = devices.map(device => device.pipelines.filter(({ compute }) => codes.includes(compute.module.code)));
+  for (const pipelines of bundles) {
+    assert.equal(pipelines.length, 6);
+    assert.equal(new Set(pipelines).size, 6);
+    for (const code of codes) {
+      assert.equal(pipelines.filter(x => x.compute.module.code === code).length,
+        [schroederSpatialEpochKeyWgsl, schroederSpatialEpochV2KeyWgsl].includes(code) ? 1 : 2);
+    }
+  }
+  assert.equal(bundles[0].some(pipeline => bundles[1].includes(pipeline)), false);
+  for (const runtime of runtimes) runtime.destroy();
+});
+
+test('spatial warm-cache hits still validate each runtime capacity and device limit', () => {
+  const device = createFakeDevice();
+  const warm = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 8, arenaCount: 1
+  });
+  const pipelinesBefore = device.pipelines.length;
+  const buffersBefore = device.buffers.length;
+  device.limits.maxStorageBuffersPerShaderStage = 7;
+  assert.throws(() => createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 8, arenaCount: 1
+  }), /eight storage bindings/);
+  device.limits.maxStorageBuffersPerShaderStage = 8;
+  assert.throws(() => createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 0, arenaCount: 1
+  }), /maxSourceCount/);
+  assert.throws(() => createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 8, arenaCount: 9
+  }), /arenaCount/);
+  assert.throws(() => createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 8, directoryAbiVersion: 3
+  }), /directoryAbiVersion/);
+  assert.equal(device.pipelines.length, pipelinesBefore);
+  assert.equal(device.buffers.length, buffersBefore);
+  warm.destroy();
+});
+
+test('spatial v2 compile failure preserves the already-warm v1 bundle', () => {
+  const device = createFakeDevice();
+  const v1 = createSchroederSpatialEpochGpu(device, { maxSourceCount: 8, arenaCount: 1 });
+  const v1Pipelines = device.pipelines.filter(({ compute }) => (
+    compute.module.code === schroederSpatialEpochKeyWgsl
+    || compute.module.code === schroederSpatialEpochAssembleWgsl
+  ));
+  const createPipeline = device.createComputePipeline.bind(device);
+  let shouldThrow = true;
+  device.createComputePipeline = descriptor => {
+    if (shouldThrow && descriptor.compute.module.code === schroederSpatialEpochV2AssembleWgsl) {
+      shouldThrow = false;
+      throw new Error('injected v2 assemble failure');
+    }
+    return createPipeline(descriptor);
+  };
+  assert.throws(() => createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 16, arenaCount: 1, directoryAbiVersion: 2
+  }), /injected v2 assemble failure/);
+  const v1Again = createSchroederSpatialEpochGpu(device, { maxSourceCount: 16, arenaCount: 1 });
+  const currentV1 = device.pipelines.filter(({ compute }) => (
+    compute.module.code === schroederSpatialEpochKeyWgsl
+    || compute.module.code === schroederSpatialEpochAssembleWgsl
+  ));
+  assert.equal(currentV1.length, 3);
+  assert.equal(currentV1.every((pipeline, i) => pipeline === v1Pipelines[i]), true);
+  const v2 = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 16, arenaCount: 1, directoryAbiVersion: 2
+  });
+  const v2Again = createSchroederSpatialEpochGpu(device, {
+    maxSourceCount: 32, arenaCount: 1, directoryAbiVersion: 2
+  });
+  assert.equal(device.pipelines.filter(({ compute }) => (
+    compute.module.code === schroederSpatialEpochV2KeyWgsl
+  )).length, 2); // One orphan from the failed bundle, one successful retry.
+  assert.equal(device.pipelines.filter(({ compute }) => (
+    compute.module.code === schroederSpatialEpochV2AssembleWgsl
+  )).length, 2); // The successful assemble/finalize pair, shared thereafter.
+  for (const runtime of [v1, v1Again, v2, v2Again]) runtime.destroy();
+});
+
+for (const failedStage of [
+  'key-module', 'assemble-module', 'emit_spatial_keys',
+  'assemble_directory', 'finalize_directory'
+]) {
+  test(`spatial pipeline cache retries the whole immutable bundle after ${failedStage} throws`, () => {
+    const device = createFakeDevice();
+    const createModule = device.createShaderModule.bind(device);
+    const createPipeline = device.createComputePipeline.bind(device);
+    let shouldThrow = true;
+    device.createShaderModule = descriptor => {
+      const stage = descriptor.code === schroederSpatialEpochKeyWgsl ? 'key-module'
+        : descriptor.code === schroederSpatialEpochAssembleWgsl ? 'assemble-module' : null;
+      if (shouldThrow && stage === failedStage) {
+        shouldThrow = false;
+        throw new Error(`injected ${failedStage}`);
+      }
+      return createModule(descriptor);
+    };
+    device.createComputePipeline = descriptor => {
+      if (shouldThrow && descriptor.compute.entryPoint === failedStage) {
+        shouldThrow = false;
+        throw new Error(`injected ${failedStage}`);
+      }
+      return createPipeline(descriptor);
+    };
+    assert.throws(() => createSchroederSpatialEpochGpu(device, {
+      maxSourceCount: 8, arenaCount: 1
+    }), new RegExp(`injected ${failedStage}`));
+    assert.equal(device.buffers.length, 0);
+    const partialPipelines = device.pipelines.slice();
+    const recovered = createSchroederSpatialEpochGpu(device, {
+      maxSourceCount: 16, arenaCount: 1
+    });
+    const warmed = device.pipelines.filter(({ compute }) => (
+      compute.module.code === schroederSpatialEpochKeyWgsl
+      || compute.module.code === schroederSpatialEpochAssembleWgsl
+    ));
+    assert.equal(warmed.length, partialPipelines.length + 3);
+    assert.equal(warmed.slice(-3).some(pipeline => partialPipelines.includes(pipeline)), false);
+    const successor = createSchroederSpatialEpochGpu(device, {
+      maxSourceCount: 32, arenaCount: 2
+    });
+    assert.equal(device.pipelines.filter(({ compute }) => (
+      compute.module.code === schroederSpatialEpochKeyWgsl
+      || compute.module.code === schroederSpatialEpochAssembleWgsl
+    )).length, warmed.length);
+    recovered.destroy();
+    successor.destroy();
+  });
+}
 
 test('caller-owned runtime keeps two complete variable-count arenas resident and GPU-gated', async () => {
   const device = createFakeDevice();

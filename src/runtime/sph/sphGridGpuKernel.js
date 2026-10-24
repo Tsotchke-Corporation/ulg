@@ -28,6 +28,8 @@ import {
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
 } from '../../../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
+import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
+import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
 import {
   appendQueueOrderedSubmissionBatch,
   cancelQueueOrderedCleanupClaim,
@@ -2412,7 +2414,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         'Required mechanics-field P2G needs one selected canonical spatial generation'
       );
     }
-    mechanicsFieldKernelBundle = await import('./sphMlsMpmGpuStep.js');
+    mechanicsFieldKernelBundle = await loadSphMlsMpmKernelBundle();
     mechanicsFieldBinding =
       mechanicsFieldKernelBundle.createFusedSchroederActiveNodeBinding({
         device,
@@ -4381,20 +4383,17 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
     });
   }
   try {
-    let lostInfo = null;
+    const deviceLossState = { info: null };
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || await requestOpticalGpuDevice(navigatorRef, {
-        onDeviceLost(info) {
-          lostInfo = info;
-          if (typeof onDeviceLost === 'function') onDeviceLost(info);
-        }
+        onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(resolvedDeviceResult.device, (info) => {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      });
+      watchDeviceLost(
+        resolvedDeviceResult.device,
+        createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+      );
     }
     if (!resolvedDeviceResult.device) {
       if (canonicalSpatialIntent) {
@@ -4414,12 +4413,12 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       });
     }
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       if (canonicalSpatialIntent) {
         throw canonicalSpatialExecutionError(
           'canonical-spatial-webgpu-device-lost',
-          describeDeviceLost(lostInfo),
-          lostInfo
+          describeDeviceLost(deviceLossState.info),
+          deviceLossState.info
         );
       }
       const reference = getCpuReference();
@@ -4427,7 +4426,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         cpuReference: reference,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });
@@ -4457,12 +4456,12 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       p2gBackend
     });
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       if (canonicalSpatialIntent) {
         throw canonicalSpatialExecutionError(
           'canonical-spatial-webgpu-device-lost',
-          describeDeviceLost(lostInfo),
-          lostInfo
+          describeDeviceLost(deviceLossState.info),
+          deviceLossState.info
         );
       }
       const reference = getCpuReference();
@@ -4471,7 +4470,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         gpuResult,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });

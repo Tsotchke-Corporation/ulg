@@ -10,11 +10,14 @@ import {
   sphPhaseScenarioPresetUrl
 } from '../src/runtime/sphPhaseScenarioPresets.js';
 import {
+  SPH_PRESENTATION_CADENCE_EVIDENCE,
   classifyCadenceAcceptanceIssues,
   classifyHeadedSweepPageErrors,
   evaluateCadenceSample,
+  isWorkerIsosurfacePassOrderValid,
   resolveHeadedSweepAutomatedDisposition,
-  summarizeVisiblePresentationCadence
+  summarizeVisiblePresentationCadence,
+  visibleMotionCadenceAcceptanceIssues
 } from './sph-headed-cadence-metrics.mjs';
 
 export { evaluateCadenceSample } from './sph-headed-cadence-metrics.mjs';
@@ -38,10 +41,10 @@ const minimumRenderHz = Math.max(
     ? requestedMinimumRenderHz
     : nominalRenderHz * 0.9
 );
-// Only the two high-particle-count water fixtures are presentation-cadence
-// acceptance targets. Every canned preset still runs through the headed
-// rendering/progression checks below, but the true-isosurface fixtures are not
-// held to the particle-impostor throughput goal.
+// Geometry selection is independent of acceptance: ALL configured presets
+// require >=54 visibly advancing presentations per wall-clock second. The
+// shared observer measures admitted render-input transitions only; its rate
+// remains diagnostic until independent visible-change evidence is available.
 const particlePresentationPresetIds = new Set(['bulk-water', 'water-realtime']);
 const scenarioSelection = String(
   process.env.ULG_HEADED_SWEEP_SCENARIOS || ''
@@ -935,579 +938,90 @@ function committedPresentationReady(state, { expectWorkerOwner = false } = {}) {
 
 async function sampleRenderCadence(page) {
   await page.waitForTimeout(cadenceWarmupMs);
-  const sample = await page.evaluate(async (durationMs) => new Promise((resolve) => {
-    const callbackTimestamps = [];
-    const rafTimestamps = [];
-    const overlayFpsSamples = [];
-    const visiblePresentationObservations = [];
-    let lastOverlaySampleMs = null;
-    const startedAtMs = performance.now();
-    const resourceEventStartIndex = Array.isArray(
-      globalThis.__ulgGpuResourceCreationEvents
-    ) ? globalThis.__ulgGpuResourceCreationEvents.length : 0;
-    const timelineEventStartIndex = Array.isArray(
-      globalThis.__ulgSphCadenceTimelineEvents
-    ) ? globalThis.__ulgSphCadenceTimelineEvents.length : 0;
-    const documentVisibility = document.visibilityState;
-    const documentHasFocus = document.hasFocus();
-    const visibleCanvas = (candidate) => {
-      if (!candidate?.isConnected) return false;
-      const style = getComputedStyle(candidate);
-      const bounds = candidate.getBoundingClientRect();
-      return Boolean(
-        style.visibility !== 'hidden'
-        && style.display !== 'none'
-        && Number(style.opacity ?? 1) > 0
-        && Number(bounds.width) > 0
-        && Number(bounds.height) > 0
-      );
-    };
-    const safeNonNegativeInteger = (value) => {
-      if (value == null || value === '') return null;
-      const number = Number(value);
-      return Number.isSafeInteger(number) && number >= 0 ? number : null;
-    };
-    const nonEmptyString = (value) => {
-      const text = typeof value === 'string' ? value.trim() : '';
-      return text || null;
-    };
-    const readVisiblePresentationObservation = (timestampMs) => {
-      const overlay = document.querySelector('#sph-phase-overlay');
-      const scene = overlay?.__sphScene || null;
-      const presentation = scene?.getWorkerOffscreenPresentation?.()
-        || overlay?.__sphWorkerOffscreenPresentation
-        || null;
-      const renderState = scene?.getSphResidentRenderState?.()
-        || overlay?.__sphResidentRenderState
-        || null;
-      const surfaceDraw = scene?.getSphResidentSurfaceDraw?.()
-        || overlay?.__sphResidentSurfaceDraw
-        || null;
-      const steps = scene?.getMlsMpmResidentSteps?.()
-        || overlay?.__mlsMpmResidentSteps
-        || null;
-      const workerLane = steps?.workerOwnedResidentLane || null;
-      const owner = presentation?.displayOwner ?? null;
-      const latestRows = presentation?.workerOffscreenRenderRows
-        || renderState?.workerOffscreenRenderRows
-        || null;
-      // Measure the exact admitted framebuffer that still owns the visible
-      // canvas. A newer queue-submitted keyframe is diagnostic state only
-      // until its GPU-completion + presentation-opportunity proof lands.
-      const rows = owner === 'worker'
-        ? (presentation?.displayOwnerLastRenderedContent || latestRows)
-        : latestRows;
-      const durableWorkerFrame = Boolean(
-        owner === 'worker'
-        && presentation?.displayOwnerLastRenderedContent === rows
-      );
-      const workerCanvas = document.querySelector(
-        'canvas[data-ulg-worker-offscreen-presentation="true"]'
-      );
-      const mainCanvas = document.querySelector(
-        '#sph-scene canvas:not([data-ulg-worker-offscreen-presentation="true"])'
-      );
-      const mainCanvasStyle = mainCanvas ? getComputedStyle(mainCanvas) : null;
-      const pendingPresentation = overlay?.__sphPendingPresentation || null;
-      const pendingPresentationLayer = overlay?.querySelector(
-        '#sph-pending-presentation'
-      ) || null;
-      const pendingPresentationVisible = visibleCanvas(pendingPresentationLayer);
-      const laneId = nonEmptyString(workerLane?.laneId);
-      const stateKey = nonEmptyString(workerLane?.stateKey);
-      const lifecycleGeneration = safeNonNegativeInteger(
-        presentation?.lifecycleGeneration
-      );
-      const displayOwnerEpoch = safeNonNegativeInteger(
-        presentation?.displayOwnerEpoch
-      );
-      const cohortIdentity = (
-        laneId
-        && stateKey
-        && lifecycleGeneration > 0
-        && displayOwnerEpoch != null
-      )
-        ? JSON.stringify([
-            laneId,
-            stateKey,
-            lifecycleGeneration,
-            displayOwnerEpoch
-          ])
-        : null;
-      if (owner === 'worker') {
-        const sourceStep = safeNonNegativeInteger(rows?.sphStep);
-        const particleCount = safeNonNegativeInteger(rows?.particleCount);
-        const frameCount = safeNonNegativeInteger(rows?.frameCount);
-        const readyFrameCount = safeNonNegativeInteger(rows?.readyFrameCount);
-        const presentationFrameCount = safeNonNegativeInteger(
-          presentation?.frameCount
+  const sample = await page.evaluate(async (durationMs) => {
+    const { readVisiblePresentationObservation } = await import(
+      '/src/visualization/sphPresentationCadence.js'
+    );
+    return new Promise((resolve) => {
+      const callbackTimestamps = [];
+      const rafTimestamps = [];
+      const overlayFpsSamples = [];
+      const visiblePresentationObservations = [];
+      let lastOverlaySampleMs = null;
+      const startedAtMs = performance.now();
+      const resourceEventStartIndex = Array.isArray(
+        globalThis.__ulgGpuResourceCreationEvents
+      ) ? globalThis.__ulgGpuResourceCreationEvents.length : 0;
+      const timelineEventStartIndex = Array.isArray(
+        globalThis.__ulgSphCadenceTimelineEvents
+      ) ? globalThis.__ulgSphCadenceTimelineEvents.length : 0;
+      const documentVisibility = document.visibilityState;
+      const documentHasFocus = document.hasFocus();
+      const tick = (timestamp) => {
+        const callbackAtMs = performance.now();
+        rafTimestamps.push(timestamp);
+        callbackTimestamps.push(callbackAtMs);
+        visiblePresentationObservations.push(
+          readVisiblePresentationObservation(callbackAtMs)
         );
-        const presentationReadyFrameCount = safeNonNegativeInteger(
-          presentation?.readyFrameCount
+        const overlay = document.querySelector('#sph-phase-overlay');
+        const currentOverlayFps = Number(overlay?.__sphFrameCounters?.renderFps);
+        const currentOverlaySampleMs = Number(
+          overlay?.__sphFrameCounters?.lastSampleMs
         );
-        const rowsDisplayOwnerEpoch = safeNonNegativeInteger(
-          rows?.displayOwnerEpoch
-        );
-        const motionFrameSerial = safeNonNegativeInteger(
-          rows?.motionFrameSerial
-        );
-        const motionFrameSubmittedSerial = safeNonNegativeInteger(
-          rows?.motionFrameSubmittedSerial
-        );
-        const motionSourceFrameCount = safeNonNegativeInteger(
-          rows?.motionSourceFrameCount
-        );
-        const motionSourceSphStep = safeNonNegativeInteger(
-          rows?.motionSourceSphStep
-        );
-        const motionFrameClaimed = Boolean(
-          rows?.motionFrameSchema != null
-          || rows?.motionFrameAdmitted === true
-          || rows?.motionFrameSerial != null
-        );
-        const presentationQueueCompletionCount = safeNonNegativeInteger(
-          rows?.presentationQueueCompletionCount
-        );
-        const presentationQueueCompletionSerial = safeNonNegativeInteger(
-          rows?.presentationQueueCompletionSerial
-        );
-        const physicsQueuePrefixCoverage = rows?.physicsQueuePrefixCoverage;
-        const motionPresentationQosBoundary =
-          rows?.motionPresentationQosBoundary;
-        const exactIncludedPhysicsPrefix = Boolean(
-          physicsQueuePrefixCoverage !== 'physics-queue-prefix-included'
-          || (
-            rows?.physicsHostQueueFenceParticipation === true
-            && Number.isSafeInteger(Number(
-              motionPresentationQosBoundary?.submissionOrdinal
-            ))
-            && Number(motionPresentationQosBoundary.submissionOrdinal) > 0
-            && Number.isSafeInteger(Number(
-              motionPresentationQosBoundary?.completedSubstepCount
-            ))
-            && Number(motionPresentationQosBoundary.completedSubstepCount) > 0
-            && Number.isSafeInteger(Number(
-              motionPresentationQosBoundary?.totalSubstepCount
-            ))
-            && Number(motionPresentationQosBoundary.totalSubstepCount)
-              > Number(motionPresentationQosBoundary.completedSubstepCount)
-            && Number.isSafeInteger(Number(
-              motionPresentationQosBoundary?.chunkStepCount
-            ))
-            && Number(motionPresentationQosBoundary.chunkStepCount) > 0
+        if (
+          Number.isFinite(currentOverlayFps)
+          && currentOverlayFps > 0
+          && Number.isFinite(currentOverlaySampleMs)
+          && currentOverlaySampleMs >= startedAtMs
+          && currentOverlaySampleMs !== lastOverlaySampleMs
+        ) {
+          overlayFpsSamples.push({
+            lastSampleMs: currentOverlaySampleMs,
+            renderFps: currentOverlayFps
+          });
+          lastOverlaySampleMs = currentOverlaySampleMs;
+        }
+        if (callbackAtMs - startedAtMs < durationMs) {
+          requestAnimationFrame(tick);
+          return;
+        }
+        resolve({
+          startedAtMs,
+          endedAtMs: callbackAtMs,
+          documentVisibility,
+          documentHasFocus,
+          finalDocumentVisibility: document.visibilityState,
+          finalDocumentHasFocus: document.hasFocus(),
+          callbackTimestamps,
+          rafTimestamps,
+          overlayFpsSamples,
+          visiblePresentationObservations,
+          gpuResourceCreationEvents: Array.isArray(
+            globalThis.__ulgGpuResourceCreationEvents
           )
-        );
-        const exactUnattributedPhysicsPrefix = Boolean(
-          physicsQueuePrefixCoverage
-            !== 'physics-queue-prefix-not-attributed'
-          || rows?.physicsHostQueueFenceParticipation !== true
-        );
-        const exactPresentationQueueCompletionProof = Boolean(
-          presentationQueueCompletionCount > 0
-          && presentationQueueCompletionSerial > 0
-          && presentationQueueCompletionCount
-            === presentationQueueCompletionSerial
-          && rows?.presentationQueueCompletionMethod
-            === 'worker-device.queue.onSubmittedWorkDone'
-          && rows?.presentationQueueCompletionScope
-            === 'worker-offscreen-shared-device-queue-frame-proof'
-          && (
-            physicsQueuePrefixCoverage
-              === 'physics-queue-prefix-not-attributed'
-            || physicsQueuePrefixCoverage
-              === 'physics-queue-prefix-included'
+            ? globalThis.__ulgGpuResourceCreationEvents
+                .slice(resourceEventStartIndex)
+                .filter((event) => (
+                  Number(event?.startedAtMs) >= startedAtMs
+                  && Number(event?.startedAtMs) <= callbackAtMs
+                ))
+            : [],
+          sphCadenceTimelineEvents: Array.isArray(
+            globalThis.__ulgSphCadenceTimelineEvents
           )
-          && exactIncludedPhysicsPrefix
-          && exactUnattributedPhysicsPrefix
-        );
-        const exactMotionFrameProof = Boolean(
-          rows?.motionFrameSchema
-            === 'peercompute.ulg.worker-offscreen-particle-temporal-motion-frame.v0'
-          && rows?.motionFrameStatus
-            === 'worker-particle-temporal-motion-frame-presentation-opportunity'
-          && rows?.motionFrameAdmitted === true
-          && rows?.motionFrameGpuCompleted === true
-          && rows?.motionFramePresentationOpportunity === true
-          && rows?.motionFramePresentationOpportunityMethod
-            === 'worker-request-animation-frame-after-gpu-completion'
-          && motionFrameSerial > 0
-          && motionFrameSubmittedSerial >= motionFrameSerial
-          && motionSourceSphStep === sourceStep
-          && motionSourceFrameCount > 0
-          && motionSourceFrameCount < frameCount
-          && rows?.motionMethod === 'bounded-keyframe-velocity-extrapolation'
-          && rows?.motionVelocityBufferRetained === true
-          && exactPresentationQueueCompletionProof
-        );
-        const particlePresentation = Boolean(
-          rows?.schema
-            === 'peercompute.ulg.worker-offscreen-resident-particle-state-producer.v0'
-          && rows?.presentationGeometry === 'sphere-impostor-depth-fallback'
-        );
-        const isosurfacePresentation = Boolean(
-          rows?.schema
-            === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation.v0'
-          && rows?.presentationGeometry === 'worker-owned-true-isosurface'
-        );
-        const exactIsosurfaceFrameProof = Boolean(
-          isosurfacePresentation
-          && rows?.status
-            === 'worker-offscreen-resident-isosurface-presentation-rendered'
-          && rows?.presentationFrameSchema
-            === 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0'
-          && rows?.presentationFrameStatus
-            === 'worker-owned-isosurface-presentation-opportunity'
-          && rows?.presentationFrameAdmitted === true
-          && rows?.presentationFrameGpuCompleted === true
-          && rows?.presentationFrameGpuCompletionMethod
-            === 'worker-device.queue.onSubmittedWorkDone'
-          && rows?.presentationFramePresentationOpportunity === true
-          && rows?.presentationFramePresentationOpportunityMethod
-            === 'worker-request-animation-frame-after-gpu-completion'
-          && exactPresentationQueueCompletionProof
-        );
-        const admissionChecks = {
-          'cohort-ready': Boolean(cohortIdentity),
-          'display-owner-epoch-ready': displayOwnerEpoch != null,
-          'render-row-owner-epoch-current':
-            rowsDisplayOwnerEpoch === displayOwnerEpoch,
-          'display-owner-content-ready':
-            presentation?.displayOwnerContentReady === true,
-          'display-owner-content-frame-ready':
-            safeNonNegativeInteger(
-              presentation?.displayOwnerContentFrameSerial
-            ) > 0,
-          'display-owner-content-step-current':
-            safeNonNegativeInteger(
-              presentation?.displayOwnerPresentedSphStep
-            ) === sourceStep,
-          'worker-canvas-status-visible':
-            presentation?.displayCanvasVisible === true,
-          'worker-canvas-visible': visibleCanvas(workerCanvas),
-          'main-canvas-hidden': mainCanvasStyle?.opacity === '0',
-          'compositor-owner-worker':
-            mainCanvas?.getAttribute('data-ulg-presentation-compositor-owner')
-              === 'worker',
-          'control-envelope-retired': pendingPresentation?.active !== true,
-          'control-envelope-layer-hidden': !pendingPresentationVisible,
-          'render-row-abi-ready': rows?.renderRowsSchema
-            === 'peercompute.ulg.worker-offscreen-render-rows.v0',
-          'worker-presentation-geometry-supported':
-            particlePresentation || isosurfacePresentation,
-          'worker-local-render-row-ready':
-            rows?.workerLocalRenderRowsProduced === true,
-          'render-row-lane-current': rows?.laneId == null || rows.laneId === laneId,
-          'render-row-state-current':
-            rows?.stateKey == null || rows.stateKey === stateKey,
-          'particle-count-ready': particleCount > 0,
-          'frame-count-ready': frameCount > 0,
-          'frame-count-current': durableWorkerFrame
-            || frameCount === presentationFrameCount,
-          'ready-frame-count-ready': readyFrameCount > 0,
-          'ready-frame-count-current':
-            durableWorkerFrame
-            || readyFrameCount === presentationReadyFrameCount,
-          'worker-same-device-ready': rows?.sameDevicePresentation === true,
-          'source-step-ready': sourceStep != null,
-          ...(particlePresentation
-            ? {
-                'particle-render-row-status-ready': rows?.status
-                  === 'worker-offscreen-resident-particle-state-producer-rendered',
-                'particle-keyframe-proof-schema-ready':
-                  rows?.presentationFrameSchema
-                    === 'peercompute.ulg.worker-offscreen-particle-keyframe-presentation-frame.v0',
-                'particle-keyframe-proof-status-ready':
-                  rows?.presentationFrameStatus
-                    === 'worker-particle-keyframe-presentation-opportunity',
-                'particle-keyframe-gpu-completed':
-                  rows?.presentationFrameGpuCompleted === true,
-                'particle-keyframe-presentation-opportunity':
-                  rows?.presentationFramePresentationOpportunity === true,
-                'particle-keyframe-admitted':
-                  rows?.presentationFrameAdmitted === true,
-                'particle-keyframe-presentation-opportunity-method-ready':
-                  rows?.presentationFramePresentationOpportunityMethod
-                    === 'worker-request-animation-frame-after-gpu-completion',
-                'particle-keyframe-presentation-queue-proof-ready': Boolean(
-                  exactPresentationQueueCompletionProof
-                ),
-                'particle-motion-frame-proof-ready':
-                  !motionFrameClaimed || exactMotionFrameProof,
-                'particle-depth-ready': rows?.depthAttachmentReady === true
-              }
-            : {}),
-          ...(isosurfacePresentation
-            ? {
-                'isosurface-frame-proof-ready': exactIsosurfaceFrameProof,
-                'isosurface-surface-count-ready':
-                  safeNonNegativeInteger(rows?.surfaceCount) > 0,
-                'isosurface-indirect-draw-ready':
-                  safeNonNegativeInteger(rows?.indirectDrawCount) > 0
-              }
-            : {})
-        };
-        const admissionBlockers = Object.entries(admissionChecks)
-          .filter(([, ready]) => !ready)
-          .map(([name]) => name);
-        const admitted = admissionBlockers.length === 0;
-        return {
-          timestampMs,
-          owner,
-          admitted,
-          sourceStep,
-          cohortIdentity,
-          presentationSerial: frameCount,
-          displayOwnerEpoch,
-          admissionBlockers,
-          // A submit receipt is not display cadence: same-queue motion
-          // commands can sit behind a long fused mechanics dispatch and then
-          // reach the compositor in a burst. Count a temporal frame only once
-          // the producer has proved both GPU completion and a subsequent
-          // presentation opportunity.
-          motionFrameAdmitted: Boolean(
-            exactMotionFrameProof
-          ),
-          motionFrameSerial: exactMotionFrameProof
-            ? motionFrameSerial
-            : null,
-          motionFrameSchema: exactMotionFrameProof
-            ? rows.motionFrameSchema
-            : null,
-          motionSourceFrameCount: exactMotionFrameProof
-            ? motionSourceFrameCount
-            : null,
-          motionSourceSphStep: exactMotionFrameProof
-            ? motionSourceSphStep
-            : null
-        };
-      }
-      if (owner === 'main-native') {
-        const nativePresentation = overlay?.__sphWorkerLaneNativeSurfacePresentation
-          || null;
-        const renderBridge = scene?.getSphResidentSurfaceDrawRenderBridge?.()
-          || null;
-        const nativeCanvas = scene?.scene?.userData?.sphNativeWebGpuSurfaceConsumer
-          ?.canvas
-          || renderBridge?.canvas
-          || null;
-        const presentationProof = overlay?.__sphResidentPresentationProof || null;
-        const renderSource = renderState?.residentRenderSource || null;
-        const handoff = renderSource?.workerLaneNativeSurfaceSnapshotHandoff
-          || null;
-        const committedPresentation = workerLane?.committedPresentation || null;
-        const sourceStep = safeNonNegativeInteger(
-          nativePresentation?.sourceStep
-        );
-        const renderStateSourceStep = safeNonNegativeInteger(
-          renderState?.sourceResidentNextStep
-          ?? renderState?.residentRenderSource?.nextStep
-        );
-        const renderBridgeSourceStep = safeNonNegativeInteger(
-          renderBridge?.sourceResidentNextStep
-        );
-        const surfaceDrawSourceStep = safeNonNegativeInteger(
-          surfaceDraw?.sourceResidentNextStep
-        );
-        const surfaceDrawBridgeSourceStep = safeNonNegativeInteger(
-          surfaceDraw?.renderBridgeSourceResidentNextStep
-        );
-        const drawSourceSteps = [
-          renderBridgeSourceStep,
-          surfaceDrawSourceStep,
-          surfaceDrawBridgeSourceStep
-        ].filter((step) => step != null);
-        const renderBridgeFrameCount = safeNonNegativeInteger(
-          renderBridge?.frameCount
-        );
-        const committedSourceStep = safeNonNegativeInteger(
-          committedPresentation?.sphStep
-        );
-        const sourceTimesReady = Boolean(
-          Number.isFinite(Number(nativePresentation?.sourceTimeS))
-          && Number.isFinite(Number(workerLane?.laneSimTimeS))
-          && Math.abs(
-            Number(nativePresentation.sourceTimeS) - Number(workerLane.laneSimTimeS)
-          ) <= 1e-9
-        );
-        const handoffTimesReady = Boolean(
-          Number.isFinite(Number(handoff?.sourceTimeS))
-          && Number.isFinite(Number(nativePresentation?.sourceTimeS))
-          && Math.abs(
-            Number(handoff.sourceTimeS) - Number(nativePresentation.sourceTimeS)
-          ) <= 1e-9
-        );
-        const admissionChecks = {
-          'cohort-ready': Boolean(cohortIdentity),
-          'display-owner-epoch-ready': displayOwnerEpoch != null,
-          'display-owner-content-ready':
-            presentation?.displayOwnerContentReady === true,
-          'worker-canvas-status-hidden':
-            presentation?.displayCanvasVisible === false,
-          'native-canvas-visible': visibleCanvas(nativeCanvas),
-          'worker-canvas-hidden': !visibleCanvas(workerCanvas),
-          'main-canvas-visible': mainCanvasStyle?.opacity === '1',
-          'compositor-owner-native':
-            mainCanvas?.getAttribute('data-ulg-presentation-compositor-owner')
-              === 'main-native',
-          'control-envelope-retired': pendingPresentation?.active !== true,
-          'control-envelope-layer-hidden': !pendingPresentationVisible,
-          'presentation-proof-bridge-ready':
-            presentationProof?.bridge === 'native-webgpu-surface-consumer',
-          'presentation-proof-admitted': presentationProof?.admitted === true,
-          'presentation-proof-source-current':
-            presentationProof?.sourceCurrent === true,
-          'native-source-schema-ready': nativePresentation?.schema
-            === 'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
-          'native-source-status-ready': nativePresentation?.status
-            === 'worker-lane-native-surface-presentation-source-ready',
-          'native-source-request-ready':
-            Boolean(nonEmptyString(nativePresentation?.requestId)),
-          'native-source-cache-current':
-            nativePresentation?.cacheKey === nativePresentation?.requestId,
-          'native-render-bridge-ready':
-            renderBridge?.rendererBridge === 'native-webgpu-surface-consumer',
-          'native-source-step-ready': sourceStep != null,
-          'committed-source-step-ready': committedSourceStep != null,
-          'native-source-step-current':
-            committedSourceStep != null && sourceStep === committedSourceStep + 1,
-          'native-source-time-current': sourceTimesReady,
-          'render-state-source-current': renderState?.sourceResidentRenderSourceStatus
-            === 'resident-render-source-current',
-          'render-state-generation-current':
-            renderState?.sourceResidentExecutionGenerationMatchesCurrent === true,
-          'render-source-generation-current':
-            renderSource?.residentExecutionGenerationMatchesCurrent === true,
-          'surface-draw-generation-current':
-            surfaceDraw?.sourceResidentExecutionGenerationMatchesCurrent === true,
-          'render-bridge-generation-current':
-            renderBridge?.sourceResidentExecutionGenerationMatchesCurrent === true,
-          'render-state-source-step-current': sourceStep === renderStateSourceStep,
-          'draw-source-step-receipts-ready': drawSourceSteps.length > 0,
-          'draw-source-steps-current':
-            drawSourceSteps.every((step) => step === sourceStep),
-          'native-source-schedule-current':
-            nativePresentation?.scheduleId === workerLane?.scheduleId,
-          'native-source-lane-current': nativePresentation?.laneId === laneId,
-          'native-source-state-current': nativePresentation?.stateKey === stateKey,
-          'native-source-particles-ready':
-            safeNonNegativeInteger(nativePresentation?.particleCount) > 0,
-          'native-handoff-schema-ready': handoff?.schema
-            === 'peercompute.ulg.worker-lane-native-surface-presentation-source.v0',
-          'native-handoff-status-ready': handoff?.status
-            === 'worker-lane-native-surface-presentation-source-admitted',
-          'native-handoff-schedule-current':
-            handoff?.scheduleId === nativePresentation?.scheduleId,
-          'native-handoff-lane-current': handoff?.laneId === laneId,
-          'native-handoff-state-current': handoff?.stateKey === stateKey,
-          'native-handoff-request-current':
-            handoff?.requestId === nativePresentation?.requestId,
-          'native-handoff-cache-current':
-            handoff?.cacheKey === nativePresentation?.cacheKey,
-          'native-handoff-step-current':
-            safeNonNegativeInteger(handoff?.sourceStep) === sourceStep,
-          'native-handoff-time-current': handoffTimesReady,
-          'native-handoff-shared-slot-ready':
-            handoff?.sharedSlotIdentityVerified === true,
-          'native-handoff-lineage-ready': handoff?.workerLineageMetadataStatus
-            === 'worker-retained-compact-snapshot-lineage-metadata-ready',
-          'native-handoff-terminal-readback-ready':
-            handoff?.terminalCompactSnapshotReadback === true,
-          'native-frame-count-ready': renderBridgeFrameCount > 0
-        };
-        const admissionBlockers = Object.entries(admissionChecks)
-          .filter(([, ready]) => !ready)
-          .map(([name]) => name);
-        const admitted = admissionBlockers.length === 0;
-        return {
-          timestampMs,
-          owner,
-          admitted,
-          sourceStep,
-          cohortIdentity,
-          presentationSerial: renderBridgeFrameCount,
-          displayOwnerEpoch,
-          admissionBlockers,
-          motionFrameAdmitted: false,
-          motionFrameSerial: null
-        };
-      }
-      return {
-        timestampMs,
-        owner,
-        admitted: false,
-        sourceStep: null,
-        cohortIdentity,
-        presentationSerial: null,
-        displayOwnerEpoch,
-        admissionBlockers: ['unsupported-display-owner'],
-        motionFrameAdmitted: false,
-        motionFrameSerial: null
-      };
-    };
-    const tick = (timestamp) => {
-      const callbackAtMs = performance.now();
-      rafTimestamps.push(timestamp);
-      callbackTimestamps.push(callbackAtMs);
-      visiblePresentationObservations.push(
-        readVisiblePresentationObservation(callbackAtMs)
-      );
-      const overlay = document.querySelector('#sph-phase-overlay');
-      const currentOverlayFps = Number(overlay?.__sphFrameCounters?.renderFps);
-      const currentOverlaySampleMs = Number(
-        overlay?.__sphFrameCounters?.lastSampleMs
-      );
-      if (
-        Number.isFinite(currentOverlayFps)
-        && currentOverlayFps > 0
-        && Number.isFinite(currentOverlaySampleMs)
-        && currentOverlaySampleMs >= startedAtMs
-        && currentOverlaySampleMs !== lastOverlaySampleMs
-      ) {
-        overlayFpsSamples.push({
-          lastSampleMs: currentOverlaySampleMs,
-          renderFps: currentOverlayFps
+            ? globalThis.__ulgSphCadenceTimelineEvents
+                .slice(timelineEventStartIndex)
+                .filter((event) => (
+                  Number(event?.timestampMs) >= startedAtMs
+                  && Number(event?.timestampMs) <= callbackAtMs
+                ))
+            : []
         });
-        lastOverlaySampleMs = currentOverlaySampleMs;
-      }
-      if (callbackAtMs - startedAtMs < durationMs) {
-        requestAnimationFrame(tick);
-        return;
-      }
-      resolve({
-        startedAtMs,
-        endedAtMs: callbackAtMs,
-        documentVisibility,
-        documentHasFocus,
-        finalDocumentVisibility: document.visibilityState,
-        finalDocumentHasFocus: document.hasFocus(),
-        callbackTimestamps,
-        rafTimestamps,
-        overlayFpsSamples,
-        visiblePresentationObservations,
-        gpuResourceCreationEvents: Array.isArray(
-          globalThis.__ulgGpuResourceCreationEvents
-        )
-          ? globalThis.__ulgGpuResourceCreationEvents
-              .slice(resourceEventStartIndex)
-              .filter((event) => (
-                Number(event?.startedAtMs) >= startedAtMs
-                && Number(event?.startedAtMs) <= callbackAtMs
-              ))
-          : [],
-        sphCadenceTimelineEvents: Array.isArray(
-          globalThis.__ulgSphCadenceTimelineEvents
-        )
-          ? globalThis.__ulgSphCadenceTimelineEvents
-              .slice(timelineEventStartIndex)
-              .filter((event) => (
-                Number(event?.timestampMs) >= startedAtMs
-                && Number(event?.timestampMs) <= callbackAtMs
-              ))
-          : []
-      });
-    };
-    requestAnimationFrame(tick);
-  }), cadenceSampleMs);
+      };
+      requestAnimationFrame(tick);
+    });
+  }, cadenceSampleMs);
   const timestamps = Array.isArray(sample?.callbackTimestamps)
     ? sample.callbackTimestamps
     : [];
@@ -1790,10 +1304,8 @@ try {
           === 'worker-owned-resident-render-producer'
         && preset.runtime?.workerOffscreenPresentation === '1'
       );
-      const cadenceGatingRequired = particlePresentationPresetIds.has(
-        preset.id
-      );
-      const expectedWorkerGeometry = cadenceGatingRequired
+      const cadenceGatingRequired = true;
+      const expectedWorkerGeometry = particlePresentationPresetIds.has(preset.id)
         ? 'sphere-impostor-depth-fallback'
         : 'worker-owned-true-isosurface';
       result.cadenceGatingRequired = cadenceGatingRequired;
@@ -1812,7 +1324,10 @@ try {
       result.cadenceEvaluation = cadenceResult.evaluation;
       result.cadenceAttempts = cadenceResult.attempts;
       result.cadenceIssueClassification = classifyCadenceAcceptanceIssues(
-        result.cadenceEvaluation.issues,
+        [
+          ...result.cadenceEvaluation.issues,
+          ...visibleMotionCadenceAcceptanceIssues(result.cadence)
+        ],
         { throughputRequired: cadenceGatingRequired }
       );
       result.issues.push(
@@ -1889,14 +1404,6 @@ try {
               rows?.participatingMediumAggregateDrawCount
             );
             const passOrder = rows?.presentationPassOrder;
-            const ordinaryPassOrder = [
-              'ordered-isosurface-and-overlay'
-            ];
-            const hybridPassOrder = [
-              'opaque-isosurface',
-              'depth-clipped-participating-medium',
-              'transparent-isosurface-and-overlay'
-            ];
             if (
               !mediumPresentation
               || mediumPresentation.schema
@@ -1981,7 +1488,9 @@ try {
                     `${label}-participating-medium-premultiplied-alpha-missing`
                   );
                 }
-                if (JSON.stringify(passOrder) !== JSON.stringify(hybridPassOrder)) {
+                if (!isWorkerIsosurfacePassOrderValid(passOrder, {
+                  mediumRequired: true
+                })) {
                   result.issues.push(
                     `${label}-participating-medium-pass-order-invalid`
                   );
@@ -1992,7 +1501,9 @@ try {
                     `${label}-empty-participating-medium-drew`
                   );
                 }
-                if (JSON.stringify(passOrder) !== JSON.stringify(ordinaryPassOrder)) {
+                if (!isWorkerIsosurfacePassOrderValid(passOrder, {
+                  mediumRequired: false
+                })) {
                   result.issues.push(
                     `${label}-empty-participating-medium-pass-order-invalid`
                   );
@@ -2017,7 +1528,9 @@ try {
                   `${label}-unrequested-participating-medium-drew`
                 );
               }
-              if (JSON.stringify(passOrder) !== JSON.stringify(ordinaryPassOrder)) {
+              if (!isWorkerIsosurfacePassOrderValid(passOrder, {
+                mediumRequired: false
+              })) {
                 result.issues.push(
                   `${label}-ordinary-presentation-pass-order-invalid`
                 );
@@ -2124,6 +1637,7 @@ const automatedDisposition = resolveHeadedSweepAutomatedDisposition({
   diagnosticOverridesActive
 });
 const summary = {
+  ...SPH_PRESENTATION_CADENCE_EVIDENCE,
   schema: 'peercompute.ulg.headed-all-preset-cadence-sweep.v2',
   status: automatedDisposition.status,
   automatedStatus: automatedDisposition.automatedStatus,
@@ -2131,6 +1645,7 @@ const summary = {
   manualVisualReviewStatus:
     automatedDisposition.manualVisualReviewStatus,
   acceptance: {
+    ...SPH_PRESENTATION_CADENCE_EVIDENCE,
     scope: 'visual-presentation-throughput-and-committed-animation',
     nominalRenderHz,
     minimumMeasuredHz: minimumRenderHz,
@@ -2162,7 +1677,7 @@ const summary = {
       'nonblank-physics-layer',
       'scenario-geometry-changes-across-screenshot-pair'
     ],
-    cadenceGatedPresetIds: [...particlePresentationPresetIds],
+    cadenceGatedPresetIds: SPH_PHASE_SCENARIO_PRESETS.map((preset) => preset.id),
     completeCannedMatrix,
     selectedPresetIds: scenarioPresets.map((preset) => preset.id)
   },

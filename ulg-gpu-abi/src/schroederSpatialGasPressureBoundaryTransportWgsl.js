@@ -72,16 +72,22 @@ import {
 import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_ACCUMULATOR
 } from './schroederSpatialPhaseVolumeTransport.js';
+import {
+  SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION
+} from './schroederQuadraticControlVolumeProjection.js';
+import {
+  schroederQuadraticControlVolumeProjectionWgsl
+} from './schroederQuadraticControlVolumeProjectionWgsl.js';
 
 const u32 = (value) => `${Number(value) >>> 0}u`;
 
 /**
- * Canonical exact-v4 residual-gas pressure boundary transport.
+ * Canonical exact residual-gas pressure boundary transport.
  *
- * Bindings 3, 4, and 6 are deliberately installed only by the exact v4 EOS
+ * Bindings 3, 4, and 6 are deliberately installed only by the exact EOS
  * owner. The public adapter supplies the exact S9/mechanics buffers, scratch,
  * and uniform. No entry point scans gas cells: each condensed node head makes
- * one O(log C) lookup in the authenticated sorted directory.
+ * at most eight O(log C) lookups for the conservative projection transpose.
  */
 export const schroederSpatialGasPressureBoundaryTransportWgsl = /* wgsl */ `
 struct GasPressureBoundaryParams {
@@ -140,16 +146,26 @@ struct GasPressureBoundaryParams {
   parent_completion_ordinal: u32,
   parent_field_capacity: u32,
   parent_field_word_capacity: u32,
-  reserved14: u32,
-  reserved15: u32,
-  reserved16: u32,
-  reserved17: u32,
-  reserved18: u32,
-  reserved19: u32,
-  reserved20: u32,
-  reserved21: u32,
-  reserved22: u32,
+  gas_projection_version: u32,
+  gas_geometry_seal: u32,
+  gas_box_lower_cell_x: i32,
+  gas_box_lower_fraction_x: f32,
+  gas_box_upper_cell_x: i32,
+  gas_box_upper_fraction_x: f32,
+  gas_box_lower_cell_y: i32,
+  gas_box_lower_fraction_y: f32,
+  gas_box_upper_cell_y: i32,
+  gas_box_upper_fraction_y: f32,
+  gas_box_lower_cell_z: i32,
+  gas_box_lower_fraction_z: f32,
+  gas_box_upper_cell_z: i32,
+  gas_box_upper_fraction_z: f32,
+  reserved0: u32,
+  reserved1: u32,
+  reserved2: u32,
 };
+
+${schroederQuadraticControlVolumeProjectionWgsl}
 
 @group(0) @binding(0) var<storage, read_write> field_view: array<atomic<u32>>;
 @group(0) @binding(1) var<storage, read> receipt_control: array<u32>;
@@ -257,7 +273,10 @@ const DIRECTORY_ACTIVE_NODE_ADAPTER: u32 = ${u32(
   SCHROEDER_SPATIAL_SOURCE_ADAPTER_ACTIVE_NODE_ROWS
 )};
 const GAS_AUTHORITY_MAGIC: u32 = 0x53474133u;
-const GAS_AUTHORITY_VERSION: u32 = 3u;
+const GAS_AUTHORITY_VERSION: u32 = 4u;
+const GAS_PROJECTION_VERSION: u32 = ${u32(
+  SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION
+)};
 const GAS_AUTHORITY_REQUIRED_READY: u32 = 31u;
 const GAS_AUTHORITY_EMPTY: u32 = 32u;
 const GAS_AUTHORITY_FAILED: u32 = 0x80000000u;
@@ -384,7 +403,7 @@ const PARENT_FIELD_WORKGROUP_SIZE: u32 = ${u32(
 const PARENT_FIELD_WEIGHT_TOLERANCE: f32 = 9.5367431640625e-7;
 
 fn finite_f32(value: f32) -> bool {
-  return value == value && abs(value) <= 3.402823466e+38;
+  return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
 }
 
 fn finite_vec3(value: vec3<f32>) -> bool {
@@ -633,6 +652,48 @@ fn phase_volume_receipt_admitted() -> bool {
   return receipt_control[59u] == expected_seal;
 }
 
+fn gas_control_volume_bounds() -> array<u32, 12> {
+  return array<u32, 12>(
+    bitcast<u32>(params.gas_box_lower_cell_x),
+    bitcast<u32>(params.gas_box_lower_fraction_x),
+    bitcast<u32>(params.gas_box_upper_cell_x),
+    bitcast<u32>(params.gas_box_upper_fraction_x),
+    bitcast<u32>(params.gas_box_lower_cell_y),
+    bitcast<u32>(params.gas_box_lower_fraction_y),
+    bitcast<u32>(params.gas_box_upper_cell_y),
+    bitcast<u32>(params.gas_box_upper_fraction_y),
+    bitcast<u32>(params.gas_box_lower_cell_z),
+    bitcast<u32>(params.gas_box_lower_fraction_z),
+    bitcast<u32>(params.gas_box_upper_cell_z),
+    bitcast<u32>(params.gas_box_upper_fraction_z)
+  );
+}
+
+fn gas_control_volume_params_admitted() -> bool {
+  if (params.gas_projection_version != GAS_PROJECTION_VERSION) { return false; }
+  let seal = qcv_descriptor_seal(
+    params.gas_projection_version,
+    params.gas_grid_spacing_m,
+    vec3<i32>(params.gas_grid_cell_origin_x,
+      params.gas_grid_cell_origin_y, params.gas_grid_cell_origin_z),
+    vec3<u32>(params.gas_grid_nx, params.gas_grid_ny, params.gas_grid_nz),
+    params.gas_grid_node_count, params.chart_id, params.gas_selected_level,
+    gas_control_volume_bounds()
+  );
+  if (params.gas_geometry_seal != seal) { return false; }
+  let x = qcv_axis_projection(params.gas_box_lower_cell_x,
+    params.gas_box_lower_cell_x, params.gas_box_lower_fraction_x,
+    params.gas_box_upper_cell_x, params.gas_box_upper_fraction_x);
+  let y = qcv_axis_projection(params.gas_box_lower_cell_y,
+    params.gas_box_lower_cell_y, params.gas_box_lower_fraction_y,
+    params.gas_box_upper_cell_y, params.gas_box_upper_fraction_y);
+  let z = qcv_axis_projection(params.gas_box_lower_cell_z,
+    params.gas_box_lower_cell_z, params.gas_box_lower_fraction_z,
+    params.gas_box_upper_cell_z, params.gas_box_upper_fraction_z);
+  return x.valid == 1u && y.valid == 1u && z.valid == 1u
+    && x.capacity > 0.0 && y.capacity > 0.0 && z.capacity > 0.0;
+}
+
 fn cross_level_params_admitted() -> bool {
   if (!exact_grid_shape_for(
       params.gas_grid_node_count,
@@ -710,7 +771,8 @@ fn field_params_admitted() -> bool {
       || !finite_f32(params.pressure_scale)) { return false; }
   return params.grid_spacing_m > 0.0
     && finite_f32(params.grid_spacing_m)
-    && cross_level_params_admitted();
+    && cross_level_params_admitted()
+    && gas_control_volume_params_admitted();
 }
 
 fn field_shape_admitted() -> bool {
@@ -859,7 +921,7 @@ fn field_row_valid(field_index: u32) -> bool {
 }
 
 fn gas_authority_reject_reason() -> u32 {
-  if (arrayLength(&gas_authority_control) < 32u) { return 1u; }
+  if (arrayLength(&gas_authority_control) < 36u) { return 1u; }
   if (params.gas_pressure_cell_capacity > 0x15555555u) { return 2u; }
   if (params.gas_pressure_cell_stride_floats != GAS_PRESSURE_ROW_FLOATS) {
     return 3u;
@@ -904,6 +966,12 @@ fn gas_authority_reject_reason() -> u32 {
   if (!((empty && live_count == 0u && cell_count == 0u)
       || (!empty && live_count > 0u && cell_count > 0u))) {
     return 21u;
+  }
+  if (gas_authority_control[32u] != params.gas_projection_version) {
+    return 22u;
+  }
+  if (gas_authority_control[33u] != params.gas_geometry_seal) {
+    return 23u;
   }
   return 0u;
 }
@@ -1268,6 +1336,58 @@ fn gas_cell_pressure(cell_index: u32, sought: array<u32, 5>) -> vec3<f32> {
   return vec3<f32>(pressure, 1.0, select(0.0, 1.0, valid));
 }
 
+// W^T maps primal-cell gauge pressure to the same basis-capacity nodal
+// control volume used by free-volume's W scatter. Sparse absent cells are
+// ambient: their gauge is zero, and their weights are never redistributed.
+// Return (effective gauge, any cell found, valid).
+fn projected_node_gauge(node_key: array<u32, 5>) -> vec3<f32> {
+  let node_x = bitcast<i32>(node_key[2u] ^ 0x80000000u);
+  let node_y = bitcast<i32>(node_key[3u] ^ 0x80000000u);
+  let node_z = bitcast<i32>(node_key[4u] ^ 0x80000000u);
+  let x = qcv_axis_projection(node_x,
+    params.gas_box_lower_cell_x, params.gas_box_lower_fraction_x,
+    params.gas_box_upper_cell_x, params.gas_box_upper_fraction_x);
+  let y = qcv_axis_projection(node_y,
+    params.gas_box_lower_cell_y, params.gas_box_lower_fraction_y,
+    params.gas_box_upper_cell_y, params.gas_box_upper_fraction_y);
+  let z = qcv_axis_projection(node_z,
+    params.gas_box_lower_cell_z, params.gas_box_lower_fraction_z,
+    params.gas_box_upper_cell_z, params.gas_box_upper_fraction_z);
+  if (x.valid != 1u || y.valid != 1u || z.valid != 1u
+      || !(x.capacity > 0.0) || !(y.capacity > 0.0) || !(z.capacity > 0.0)) {
+    return vec3<f32>(0.0);
+  }
+  var gauge_pa = 0.0;
+  var any_found = 0.0;
+  for (var corner_index = 0u; corner_index < 8u; corner_index = corner_index + 1u) {
+    let upper_x = (corner_index & 1u) != 0u;
+    let upper_y = (corner_index & 2u) != 0u;
+    let upper_z = (corner_index & 4u) != 0u;
+    let weight = select(x.weight0, x.weight1, upper_x)
+      * select(y.weight0, y.weight1, upper_y)
+      * select(z.weight0, z.weight1, upper_z);
+    if (!(weight > 0.0)) { continue; }
+    var sought = node_key;
+    sought[2u] = signed_order_key(select(x.cell0, x.cell1, upper_x));
+    sought[3u] = signed_order_key(select(y.cell0, y.cell1, upper_y));
+    sought[4u] = signed_order_key(select(z.cell0, z.cell1, upper_z));
+    let sample = gas_cell_pressure(find_gas_cell(sought), sought);
+    if (sample.y == 0.0) {
+      if (params.missing_cell_policy != MISSING_NO_LOAD) {
+        return vec3<f32>(0.0);
+      }
+      continue;
+    }
+    if (sample.z == 0.0) { return vec3<f32>(0.0); }
+    let cell_gauge_pa = sample.x - params.ambient_pressure_pa;
+    if (!finite_f32(cell_gauge_pa)) { return vec3<f32>(0.0); }
+    gauge_pa = gauge_pa + weight * cell_gauge_pa;
+    any_found = 1.0;
+  }
+  return vec3<f32>(gauge_pa, any_found,
+    select(0.0, 1.0, finite_f32(gauge_pa)));
+}
+
 fn scratch_row(field_index: u32) -> u32 {
   return SCRATCH_HEADER_WORDS + field_index * SCRATCH_ROW_WORDS;
 }
@@ -1370,19 +1490,18 @@ fn stage_same_level_node(begin: u32, end: u32) -> bool {
     }
     return true;
   }
-  let sought = node_cell_key(node);
-  let gas_cell = find_gas_cell(sought);
-  let pressure_sample = gas_cell_pressure(gas_cell, sought);
+  let pressure_sample = projected_node_gauge(node_cell_key(node));
+  if (pressure_sample.z == 0.0) { return false; }
   if (pressure_sample.y == 0.0) {
-    if (params.missing_cell_policy == MISSING_FAIL_CLOSED) { return false; }
     for (var field_index = begin; field_index < end; field_index = field_index + 1u) {
       finalize_scratch_row(field_index);
     }
-    return params.missing_cell_policy == MISSING_NO_LOAD;
+    return true;
   }
-  if (pressure_sample.z == 0.0) { return false; }
-  let gauge_pa = pressure_sample.x - params.ambient_pressure_pa;
-  let total_impulse_ns = params.pressure_scale
+  let gauge_pa = pressure_sample.x;
+  // S9 stores dC/dx_particle. External gas occupies G - W C, so its
+  // virtual-work force is -dC/dx * W^T(p - p_ambient), not internal +p grad N.
+  let total_impulse_ns = -params.pressure_scale
     * gauge_pa * condensed_gradient * params.dt;
   if (!finite_f32(gauge_pa) || !finite_vec3(total_impulse_ns)) {
     return false;
@@ -1478,17 +1597,10 @@ fn stage_fine_parent_field(field_index: u32) -> bool {
     );
     if (!(weight > 0.0) || !finite_f32(weight)) { return false; }
     weight_sum = weight_sum + weight;
-    let sought = parent_node_cell_key(parent_dense_node);
-    let gas_cell = find_gas_cell(sought);
-    let pressure_sample = gas_cell_pressure(gas_cell, sought);
-    if (pressure_sample.y == 0.0) {
-      if (params.missing_cell_policy == MISSING_FAIL_CLOSED) { return false; }
-      if (params.missing_cell_policy != MISSING_NO_LOAD) { return false; }
-      continue;
-    }
+    let pressure_sample = projected_node_gauge(
+      parent_node_cell_key(parent_dense_node));
     if (pressure_sample.z == 0.0) { return false; }
-    let parent_gauge_pa = pressure_sample.x - params.ambient_pressure_pa;
-    if (!finite_f32(parent_gauge_pa)) { return false; }
+    let parent_gauge_pa = pressure_sample.x;
     effective_gauge_pa = effective_gauge_pa + weight * parent_gauge_pa;
   }
   if (
@@ -1500,7 +1612,9 @@ fn stage_fine_parent_field(field_index: u32) -> bool {
   }
   let row = scratch_row(field_index);
   let mass = bitcast<f32>(scratch_load(row + SCRATCH_MASS));
-  let impulse_ns = params.pressure_scale
+  // The parent transpose changes the pressure sample, not the complementary
+  // gas-volume sign: F = -dC/dx * A^T W^T(p - p_ambient).
+  let impulse_ns = -params.pressure_scale
     * effective_gauge_pa * field_gradient(field_index) * params.dt;
   let initial_velocity = vec3<f32>(
     bitcast<f32>(scratch_load(row + SCRATCH_VELOCITY_X)),

@@ -35,23 +35,37 @@ import {
   validateLocallySubmittedMlsMpmMechanicsFieldP2g
 } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
+  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
+  createSchroederCrossLevelRefluxLedgerHeader,
+  decodeSchroederCrossLevelRefluxTerminalHeader
+} from '../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
+import {
+  abandonSchroederFusedMechanicsPendingClosureAfter,
   abortSchroederTwoLevelMacroAuthorityAfter,
+  bindSchroederFusedTerminalRefluxReceiptGroupOriginal,
+  claimSchroederFusedMechanicsPendingClosure,
   claimSchroederFusedCoarseTerminalOutput,
   createSchroederCanonicalParticleContinuation,
   createSchroederFineMicroepochAuthority,
   createSchroederFusedCoarseTerminalTransaction,
   createSchroederFusedFineSubstepTransaction,
+  createSchroederFusedTerminalRefluxReceiptGroupTarget,
   createSchroederTwoLevelMacroAuthority,
   discardSchroederFusedCoarseTerminalTransaction,
   discardSchroederFusedFineSubstepTransaction,
+  encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy,
+  isSchroederFusedTerminalRefluxHeaderFullyAdmitted,
   markSchroederFusedCoarseTerminalStageSubmissionObserved,
   markSchroederFusedCoarseTerminalStageSubmitted,
+  observeSchroederFusedMechanicsPrivateAdmission,
   quarantineSchroederFusedCoarseTerminalTransaction,
   retireSchroederFineMicroepochAfter,
   schroederFusedCoarseTerminalTransactionState,
   schroederFusedFineSubstepTransactionState,
+  sealSchroederFusedTerminalRefluxReceiptGroup,
   validateSchroederFineMicroepochAuthority,
-  validateSchroederFusedCoarseTerminalTransaction
+  validateSchroederFusedCoarseTerminalTransaction,
+  validateSchroederFusedTerminalRefluxReceiptGroup
 } from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
 import {
   releaseSchroederSpatialEpochGenerationAfterQueue,
@@ -92,8 +106,11 @@ import {
 import {
   SCHROEDER_SPATIAL_EPOCH_READER,
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
+  advanceSchroederSpatialEpochTransactionPrivate,
   admitSchroederSpatialEpochTransactionReader,
-  createSchroederSpatialEpochTransaction
+  createSchroederSpatialEpochTransaction,
+  sealSchroederSpatialEpochTransactionProposals,
+  sealSchroederSpatialEpochTransactionReaders
 } from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
 import {
   buildMlsMpmMechanicsMaterialTable
@@ -106,6 +123,9 @@ import {
   uploadMlsMpmMechanicsMaterialPhaseRecords
 } from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
+import {
+  ensureSphGpuParticleBufferSetBorrowLifecycle
+} from '../src/runtime/sph/sphGpuBuffers.js';
 import {
   createResidentProductEventCountControlWords,
   registerResidentProductEventCountAuthority
@@ -590,6 +610,7 @@ function canonicalSpatialEpochGenerationFixture(device, {
 
 function fusedP2gProducerFixture({
   fineSubstepCount = 1,
+  macroDt = Math.fround(0.005 * fineSubstepCount),
   createMacroAuthority: shouldCreateMacroAuthority = true,
   mechanicsLevelCount = 2,
   phaseVolumeInterfaceProposalEnabled = false
@@ -701,6 +722,7 @@ function fusedP2gProducerFixture({
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
     status: 'webgpu-uploaded',
     particleCount: 1,
+    identityRevision: 'fused-p2g-fixture-identity-v0',
     stateBuffer,
     thermoBuffer,
     identityBuffer,
@@ -767,7 +789,7 @@ function fusedP2gProducerFixture({
       refluxLedger: null,
       fineSubstepCount,
       fineDt: 0.005,
-      macroDt: Math.fround(0.005 * fineSubstepCount),
+      macroDt,
       predictorThetaDt: 0.005
     };
   }
@@ -789,7 +811,7 @@ function fusedP2gProducerFixture({
     fineLevel: 0,
     coarseLevel: 1,
     fineDt: 0.005,
-    macroDt: Math.fround(0.005 * fineSubstepCount)
+    macroDt
   });
   const particleContinuation = createSchroederCanonicalParticleContinuation({
     device,
@@ -830,7 +852,7 @@ function fusedP2gProducerFixture({
     refluxLedger,
     fineSubstepCount,
     fineDt: 0.005,
-    macroDt: Math.fround(0.005 * fineSubstepCount),
+    macroDt,
     predictorThetaDt: 0.005
   };
 }
@@ -2561,8 +2583,8 @@ test('canonical spatial v2 dense P2G rejects a multilevel ActiveSource before al
   assert.equal(fixture.device.submissions.length, submissionCountBefore);
 });
 
-async function fusedCoarseTerminalP2gFixture() {
-  const fixture = fusedP2gProducerFixture();
+async function fusedCoarseTerminalP2gFixture(options = {}) {
+  const fixture = fusedP2gProducerFixture(options);
   const chain = await submittedFusedFineCorrection(fixture);
   const g2p = await runFusedG2pProducer(fixture, chain.correction);
   const uploads = nextParticleUploads(fixture, g2p);
@@ -2738,8 +2760,8 @@ function encodeTerminalWorkspace(
   };
 }
 
-async function terminalWorkspaceInputFixture() {
-  const terminal = await fusedCoarseTerminalP2gFixture();
+async function terminalWorkspaceInputFixture(options = {}) {
+  const terminal = await fusedCoarseTerminalP2gFixture(options);
   const p2gProjection = await runTerminalFixtureP2g(terminal);
   const gridUpdate = await runTerminalFixtureGridUpdate(
     terminal,
@@ -2748,8 +2770,8 @@ async function terminalWorkspaceInputFixture() {
   return { terminal, p2gProjection, gridUpdate };
 }
 
-async function submittedTerminalWorkspaceFixture() {
-  const input = await terminalWorkspaceInputFixture();
+async function submittedTerminalWorkspaceFixture(options = {}) {
+  const input = await terminalWorkspaceInputFixture(options);
   const encoded = encodeTerminalWorkspace(input.terminal, input.gridUpdate);
   input.terminal.fixture.device.queue.submit([encoded.encoder.finish()]);
   encoded.runtime.markTerminalSubmissionObserved(encoded.execution);
@@ -2797,12 +2819,18 @@ function terminalG2pOptions(chain, transaction = chain.terminal.terminalTransact
 }
 
 function terminalFinalParticleUploads(chain, g2p) {
+  const finalSphParticleUpload = {
+    ...chain.terminal.uploads.sphParticleUpload,
+    stateBuffer: g2p.stateBuffer,
+    stateBufferByteLength: g2p.stateBufferByteLength
+  };
+  // Match production: register this exact S* descriptor before freezing it.
+  assert.equal(
+    ensureSphGpuParticleBufferSetBorrowLifecycle(finalSphParticleUpload),
+    true
+  );
   return {
-    finalSphParticleUpload: {
-      ...chain.terminal.uploads.sphParticleUpload,
-      stateBuffer: g2p.stateBuffer,
-      stateBufferByteLength: g2p.stateBufferByteLength
-    },
+    finalSphParticleUpload: Object.freeze(finalSphParticleUpload),
     finalMlsMpmParticleUpload: {
       ...chain.terminal.uploads.mlsMpmParticleUpload,
       mechanicsBuffer: g2p.mechanicsBuffer,
@@ -2819,6 +2847,406 @@ async function releaseTerminalG2pFixture(chain, reason) {
   chain.runtime.destroy();
   await releaseTerminalP2gFixture(chain.terminal, reason);
 }
+
+// Genuine submitted P2G/grid/correction/G2P and terminal producers supply all
+// private capabilities. Only GPU arithmetic bytes are modelled by this CPU
+// fixture; these tests do not claim a native numerical solution.
+async function privateAdmissionFixture({ macroDt = 0.005 } = {}) {
+  // Production coupling uses fineDt = macroDt / fineSubstepCount exactly.
+  // Keep the older shared fixture's f32-rounded macro default unchanged.
+  const chain = await submittedTerminalWorkspaceFixture({ macroDt });
+  const { terminal } = chain;
+  const { fixture } = terminal;
+  const device = fixture.device;
+  Object.assign(fixture.sphParticleUpload, { step: 5, time: 0.25, slot: 0 });
+  Object.assign(fixture.mlsMpmParticleUpload, { step: 5, time: 0.25, slot: 0 });
+  const g2p = await runTerminalG2pProducer(chain);
+  const finalSphParticleUpload = { ...terminal.uploads.sphParticleUpload,
+    stateBuffer: g2p.stateBuffer, stateBufferByteLength: g2p.stateBufferByteLength,
+    step: 5, time: 0.25 + fixture.macroDt, slot: 1 };
+  assert.equal(ensureSphGpuParticleBufferSetBorrowLifecycle(finalSphParticleUpload), true);
+  Object.freeze(finalSphParticleUpload);
+  const finalMlsMpmParticleUpload = Object.freeze({ ...terminal.uploads.mlsMpmParticleUpload,
+    mechanicsBuffer: g2p.mechanicsBuffer, mechanicsBufferByteLength: g2p.mechanicsBufferByteLength,
+    step: 5, time: finalSphParticleUpload.time, slot: 1 });
+  const transaction = createSchroederSpatialEpochTransaction({ device,
+    generation: terminal.successorGeneration, ...terminal.uploads,
+    twoLevelAuthoritative: true, enabledConsumerReaderIds: [], consumerSupportProfileIds: {} });
+  for (const [readerId, phase] of [
+    [SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G, SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION],
+    [SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P, SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT]
+  ]) assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId, phase, generation: terminal.successorGeneration, ...terminal.uploads
+  }), true);
+  sealSchroederSpatialEpochTransactionReaders(transaction);
+  sealSchroederSpatialEpochTransactionProposals(transaction, { legacyConsumerCount: 0 });
+  const terminalPrivateAdvanceReceipt = advanceSchroederSpatialEpochTransactionPrivate(transaction, {
+    nextParticleUploads: { sphParticleUpload: finalSphParticleUpload,
+      mlsMpmParticleUpload: finalMlsMpmParticleUpload }
+  });
+  const closure = claimSchroederFusedMechanicsPendingClosure({ device,
+    terminalTransaction: terminal.terminalTransaction, g2pReconstruction: g2p,
+    finalSphParticleUpload, finalMlsMpmParticleUpload,
+    terminalControllerEpoch: { generation: terminal.successorGeneration,
+      transaction, ...terminal.uploads },
+    terminalSpatialEpochTransaction: transaction, terminalPrivateAdvanceReceipt
+  });
+  const macro = closure.macroAuthority;
+  const words = createSchroederCrossLevelRefluxLedgerHeader({
+    rowCapacity: 1, completionOrdinal: macro.completionOrdinal,
+    fineSubstepCount: macro.fineSubstepCount, fineLevel: macro.fineLevel,
+    coarseLevel: macro.coarseLevel,
+    coarseGridSpacingM: macro.parentFieldView.coarseFieldView.gridSpacingM,
+    macroOwnerId: macro.refluxLedger.macroOwnerId,
+    macroOwnerGeneration: macro.refluxLedger.ownerGeneration
+  });
+  words[2] = 3; words[4] = 1; words[8] = macro.fineSubstepCount;
+  words[9] = 1; words[15] = macro.fineSubstepCount;
+  words[59] = 6; words[80] = 2; words[81] = 1234; words[95] = 1234;
+  words[96] = 1; words[97] = words[98]; words[111] = words[98] + 1;
+  for (const index of [48, 49, 50, 51, 52, 53, 99, 100, 101, 102, 103, 118, 119, 121]) words[index] = 1;
+  words[120] = macro.fineSubstepCount; words[124] = 0xffff_ffff;
+  words[44] = 0;
+  const bytes = new WeakMap([[macro.refluxLedger.buffer, words.buffer]]);
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (descriptor) => {
+    const buffer = createBuffer(descriptor);
+    const destroy = buffer.destroy.bind(buffer);
+    buffer.destroyCount = 0;
+    buffer.destroy = () => { buffer.destroyCount++; destroy(); };
+    bytes.set(buffer, new ArrayBuffer(descriptor.size));
+    buffer.mapState = 'unmapped';
+    buffer.mapAsync = async () => { buffer.mapState = 'mapped'; };
+    buffer.getMappedRange = (offset = 0, size = buffer.size) => bytes.get(buffer).slice(offset, offset + size);
+    buffer.unmap = () => { buffer.mapState = 'unmapped'; };
+    return buffer;
+  };
+  const createEncoder = device.createCommandEncoder.bind(device);
+  device.createCommandEncoder = (...args) => {
+    const encoder = createEncoder(...args), copies = [];
+    const copy = encoder.copyBufferToBuffer.bind(encoder), finish = encoder.finish.bind(encoder);
+    encoder.copyBufferToBuffer = (...copyArgs) => { copy(...copyArgs); copies.push(copyArgs); };
+    encoder.finish = () => ({ ...finish(), privateAdmissionCopies: copies });
+    return encoder;
+  };
+  const submit = device.queue.submit.bind(device.queue);
+  device.queue.submit = (commands) => {
+    submit(commands);
+    for (const command of commands) for (const [source, sourceOffset, destination, destinationOffset, size] of command.privateAdmissionCopies ?? []) {
+      new Uint8Array(bytes.get(destination), destinationOffset, size).set(
+        new Uint8Array(bytes.get(source), sourceOffset, size)
+      );
+    }
+  };
+  const targetOptions = () => ({ device, scheduleId: 'private-admission', laneId: 'lane', stateKey: 'state',
+    stepOrdinal: 1, targetBuffer: tagWebGpuBufferDevice(device.createBuffer({
+      label: 'private-admission-group', size: 8 * 544, usage: 9 }), device),
+    targetOffsetBytes: 0, expectedOuterCompletionOrdinal: macro.completionOrdinal,
+    expectedOuterIdentity: fixture.sphParticleUpload, expectedOuterMacroDt: macro.macroDt,
+    expectedFineSubstepCount: macro.fineSubstepCount,
+    expectedFineLevel: macro.fineLevel, expectedCoarseLevel: macro.coarseLevel });
+  const cleanup = async (options = {}) => {
+    await abandonSchroederFusedMechanicsPendingClosureAfter(device, closure, options);
+    await chain.runtime.releaseExecutionAfter(chain.execution, device.queue.onSubmittedWorkDone());
+    chain.runtime.destroy();
+    await terminal.chain.runtime.releaseExecutionAfter(terminal.chain.execution, device.queue.onSubmittedWorkDone());
+    terminal.chain.runtime.destroy();
+  };
+  return { device, fixture, chain, closure, words, bytes, targetOptions, cleanup };
+}
+
+test('private compact admission authenticates genuine terminal owners and seals one outer receipt', async () => {
+  const f = await privateAdmissionFixture();
+  const beforeCopies = f.device.copies.length;
+  assert.throws(() => observeSchroederFusedMechanicsPrivateAdmission(f.device, { ...f.closure }), /exact live closure/);
+  const pending = observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+  assert.equal(observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure), pending);
+  const observation = await pending;
+  assert.equal(observation.status, 'admitted');
+  assert.equal(observation.retryablePhysicalRejection, false);
+  assert.equal(observation.diagnosticCost.readbackByteLength, 544);
+  assert.equal(f.device.copies.length, beforeCopies + 1);
+  assert.equal(f.device.copies.at(-1).source, f.closure.macroAuthority.refluxLedger.buffer);
+  assert.equal(f.device.copies.at(-1).destination.destroyed, true);
+  const target = createSchroederFusedTerminalRefluxReceiptGroupTarget(f.targetOptions());
+  assert.equal(bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observation), true);
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation: { ...observation }, originalObservation: observation
+  }), /exact original/);
+  assert.throws(() => sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target), /incomplete/);
+  const copy = encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: observation
+  });
+  assert.equal(copy.childOrdinal, 1);
+  assert.equal(copy.macroDt, f.closure.macroAuthority.macroDt);
+  const group = sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target);
+  assert.equal(group.childCount, 1);
+  assert.equal(group.summedMacroDt, group.outerMacroDt);
+  assert.deepEqual(group.publicClock, { step: 6, physicsTick: f.fixture.sphParticleUpload.physicsTick + 1,
+    physicsSubstep: 0, time: 0.25 + group.outerMacroDt, sourceSlot: 0, slot: 1, nextSlot: 1 });
+  assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, group, { finalClosure: f.closure }), true);
+  assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, { ...group }), false);
+  assert.throws(() => sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target), /stale/);
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: observation
+  }), /stale/);
+  await f.cleanup();
+  assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, group), true);
+  assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, group, { finalClosure: f.closure }), false);
+});
+
+test('private compact admission distinguishes completed physical witness from provenance and incomplete headers', async (t) => {
+  for (const mode of ['physical', 'foreign-owner', 'missing-witness', 'interrupted-witness', 'nonfinite-witness', 'authority-reject', 'unknown-status', 'key-status', 'route-status']) {
+    await t.test(mode, async () => {
+      const f = await privateAdmissionFixture();
+      f.words[2] = 551; f.words[8] = 0; f.words[15] = 0;
+      f.words[12] = 3; f.words[122] = 3;
+      f.words[124] = 3338929101;
+      f.words.set([1068155975, 1126672043, 1091844196, 0, 0, 0, 0, 0, 0, 1126092617, 0], 125);
+      if (mode === 'foreign-owner') f.words[83]++;
+      if (mode === 'missing-witness') f.words[124] = 0xffff_ffff;
+      if (mode === 'interrupted-witness') f.words[124] = 0xffff_fffe;
+      if (mode === 'nonfinite-witness') f.words[125] = 0x7fc0_0000;
+      if (mode === 'authority-reject') f.words[104] = 1;
+      if (mode === 'unknown-status') f.words[2] |= 1 << 20;
+      if (mode === 'key-status') f.words[2] |= 1 << 7;
+      if (mode === 'route-status') f.words[2] |= 1 << 8;
+      if (mode === 'physical') {
+        const observed = await observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+        assert.equal(observed.status, 'physical-rejection');
+        assert.equal(observed.retryablePhysicalRejection, true);
+        assert.equal(observed.terminalHeader.cflRejectCount, 0);
+        assert.equal(observed.terminalHeader.mutationRollbackCount, 3);
+        const target = createSchroederFusedTerminalRefluxReceiptGroupTarget(f.targetOptions());
+        assert.equal(bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observed), true);
+      } else await assert.rejects(observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure),
+        /provenance|no complete physical rejection witness/);
+      await f.cleanup();
+    });
+  }
+});
+
+test('private compact predicate requires every physical gate and strict actual counts', async () => {
+  const f = await privateAdmissionFixture();
+  const header = decodeSchroederCrossLevelRefluxTerminalHeader(f.words);
+  const expectedFineSubstepCount = f.closure.macroAuthority.fineSubstepCount;
+  assert.equal(isSchroederFusedTerminalRefluxHeaderFullyAdmitted(header, { expectedFineSubstepCount }), true);
+  assert.equal(isSchroederFusedTerminalRefluxHeaderFullyAdmitted(header, { expectedFineSubstepCount: String(expectedFineSubstepCount) }), false);
+  for (const key of ['positivityStatus', 'cflStatus', 'massComStatus', 'momentumStatus',
+    'angularMomentumStatus', 'energyStatus', 'fineReceiptConsumeCount', 'coarseReceiptConsumeCount']) {
+    assert.equal(isSchroederFusedTerminalRefluxHeaderFullyAdmitted({ ...header, [key]: 0 }, { expectedFineSubstepCount }), false, key);
+  }
+  for (const key of ['operatorSplit', 'phaseVolumeTransport', 'ambientBoundary']) {
+    assert.equal(isSchroederFusedTerminalRefluxHeaderFullyAdmitted({ ...header, [key]: { valid: false } }, { expectedFineSubstepCount }), false, key);
+  }
+  assert.equal(isSchroederFusedTerminalRefluxHeaderFullyAdmitted({ ...header, totalEnergyResidualJ: NaN }, { expectedFineSubstepCount }), false);
+  const options = f.targetOptions();
+  for (const key of ['stepOrdinal', 'targetOffsetBytes', 'expectedOuterCompletionOrdinal', 'expectedOuterMacroDt', 'expectedFineSubstepCount']) {
+    assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({ ...options, [key]: String(options[key]) }), /exact eight-slot/, key);
+  }
+  for (const invalid of [
+    { targetOffsetBytes: -0 },
+    { expectedOuterCompletionOrdinal: 0x1_0000_0000 },
+    { expectedFineLevel: -0x8000_0001, expectedCoarseLevel: -0x8000_0000 },
+    { expectedFineLevel: 0x7fff_ffff, expectedCoarseLevel: 0x8000_0000 }
+  ]) assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({
+    ...options, ...invalid
+  }), /exact eight-slot/);
+  for (const field of ['storageGeneration', 'physicsTick', 'physicsSubstep',
+    'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch']) {
+    assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({
+      ...options, expectedOuterIdentity: { ...options.expectedOuterIdentity, [field]: -0 }
+    }), /exact eight-slot/, field);
+  }
+  assert.equal(f.words.length, SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS);
+  await f.cleanup();
+});
+
+test('private compact group rejects foreign outer bindings without consuming an accepted child', async () => {
+  const f = await privateAdmissionFixture();
+  const observation = await observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+  const options = f.targetOptions();
+  for (const change of [
+    { expectedOuterCompletionOrdinal: options.expectedOuterCompletionOrdinal + 1 },
+    { expectedOuterMacroDt: options.expectedOuterMacroDt / 4 },
+    { expectedFineSubstepCount: 2 },
+    { expectedFineLevel: options.expectedFineLevel + 1, expectedCoarseLevel: options.expectedCoarseLevel + 1 },
+    { expectedOuterIdentity: { ...options.expectedOuterIdentity, physicsTick: options.expectedOuterIdentity.physicsTick + 1 } }
+  ]) {
+    const target = createSchroederFusedTerminalRefluxReceiptGroupTarget({
+      ...f.targetOptions(), ...change
+    });
+    assert.throws(() => bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observation), /exact live original/);
+    assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+      observation, originalObservation: observation
+    }), /exact original/);
+    assert.throws(() => sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target), /incomplete/);
+  }
+  const target = createSchroederFusedTerminalRefluxReceiptGroupTarget(f.targetOptions());
+  const beforeSubmissions = f.device.submissions.length;
+  assert.throws(() => bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, { ...target }, observation), /stale, foreign/);
+  assert.throws(() => bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, { ...observation }), /exact live original/);
+  assert.throws(() => bindSchroederFusedTerminalRefluxReceiptGroupOriginal(fakeP2gDevice(), target, observation), /stale, foreign/);
+  const originalTime = f.fixture.sphParticleUpload.time;
+  f.fixture.sphParticleUpload.time += 1;
+  assert.throws(() => bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observation), /exact live original/);
+  f.fixture.sphParticleUpload.time = originalTime;
+  assert.equal(bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observation), true);
+  assert.equal(bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observation), true);
+  assert.equal(f.device.submissions.length, beforeSubmissions);
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, { ...target }, {
+    observation, originalObservation: observation
+  }), /stale, foreign/);
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: { ...observation }
+  }), /exact original/);
+  encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: observation
+  });
+  const sourceTime = f.fixture.sphParticleUpload.time;
+  f.fixture.sphParticleUpload.time += 1;
+  assert.throws(() => sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target), /clocks/);
+  f.fixture.sphParticleUpload.time = sourceTime;
+  assert.equal(sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target).childCount, 1);
+  await f.cleanup();
+});
+
+test('private compact group cannot seal or replay an uncertain child copy', async () => {
+  const f = await privateAdmissionFixture();
+  const observation = await observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+  const target = createSchroederFusedTerminalRefluxReceiptGroupTarget(f.targetOptions());
+  f.device.queue.submit = () => { throw new Error('uncertain child copy'); };
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: observation
+  }), /uncertain child copy/);
+  assert.throws(() => sealSchroederFusedTerminalRefluxReceiptGroup(f.device, target), /stale, foreign/);
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: observation
+  }), /stale, foreign/);
+  await f.cleanup();
+});
+
+test('private compact group rejects a legacy f32-only dt match', async () => {
+  const f = await privateAdmissionFixture({ macroDt: Math.fround(0.005) });
+  const macro = f.closure.macroAuthority;
+  assert.equal(Math.fround(macro.fineDt * macro.fineSubstepCount), Math.fround(macro.macroDt));
+  assert.notEqual(macro.fineDt, macro.macroDt / macro.fineSubstepCount);
+  const observation = await observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+  const target = createSchroederFusedTerminalRefluxReceiptGroupTarget(f.targetOptions());
+  assert.throws(() => encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(f.device, f.closure, target, {
+    observation, originalObservation: observation
+  }), /exact private interval successor/);
+  assert.throws(() => bindSchroederFusedTerminalRefluxReceiptGroupOriginal(f.device, target, observation), /exact live original/);
+  await f.cleanup();
+});
+
+test('private compact observation rejects invalid source clocks before any diagnostic submission', async () => {
+  const f = await privateAdmissionFixture();
+  const source = f.fixture.sphParticleUpload;
+  const original = { step: source.step, time: source.time, slot: source.slot };
+  const beforeSubmissions = f.device.submissions.length;
+  const beforeBuffers = f.device.createdBuffers.length;
+  for (const change of [{ step: '5' }, { time: NaN }, { time: -1 }, { slot: '0' },
+    { step: 0xffff_ffff }, { step: -0 }, { slot: -0 }]) {
+    Object.assign(source, original, change);
+    assert.throws(() => observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure), /exact source identity and clock/);
+  }
+  Object.assign(source, original);
+  assert.equal(f.device.submissions.length, beforeSubmissions);
+  assert.equal(f.device.createdBuffers.length, beforeBuffers);
+  await f.cleanup();
+});
+
+test('private compact observation retires staging only after a genuine fence or device loss', async (t) => {
+  for (const mode of ['held-fence', 'rejected-fence', 'held-map', 'rejected-map', 'uncertain-submit']) {
+    await t.test(mode, async () => {
+      const f = await privateAdmissionFixture();
+      const normalFence = f.device.queue.onSubmittedWorkDone.bind(f.device.queue);
+      let loseDevice, resolveFence, subscriptions = 0;
+      f.device.lost = new Promise((resolve) => { loseDevice = resolve; });
+      const then = f.device.lost.then.bind(f.device.lost);
+      f.device.lost.then = (...args) => { subscriptions++; return then(...args); };
+      if (mode === 'held-fence') f.device.queue.onSubmittedWorkDone = () => new Promise((resolve) => { resolveFence = resolve; });
+      if (mode === 'rejected-fence') f.device.queue.onSubmittedWorkDone = () => Promise.reject(new Error('unconfirmed observation queue'));
+      if (mode === 'uncertain-submit') f.device.queue.submit = () => { throw new Error('uncertain observation submit'); };
+      const create = f.device.createBuffer.bind(f.device);
+      f.device.createBuffer = (descriptor) => {
+        const buffer = create(descriptor);
+        if (descriptor.label === 'ulg-schroeder-private-terminal-admission') {
+          if (mode === 'held-map') buffer.mapAsync = () => { buffer.mapState = 'pending'; return new Promise(() => {}); };
+          if (mode === 'rejected-map') buffer.mapAsync = () => Promise.reject(new Error('failed compact map'));
+        }
+        return buffer;
+      };
+      const observed = observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+      await new Promise((resolve) => setImmediate(resolve));
+      const target = f.device.createdBuffers.find((buffer) => buffer.label === 'ulg-schroeder-private-terminal-admission');
+      assert.equal(subscriptions, 1);
+      assert.equal(target.destroyed, mode === 'rejected-map');
+      if (['rejected-fence', 'rejected-map', 'uncertain-submit'].includes(mode)) {
+        await assert.rejects(observed, /unconfirmed observation queue|failed compact map|uncertain observation submit/);
+      }
+      if (mode === 'rejected-fence') {
+        await assert.rejects(abandonSchroederFusedMechanicsPendingClosureAfter(f.device, f.closure), /unconfirmed observation queue/);
+        assert.equal(target.destroyed, false);
+      }
+      loseDevice({ reason: 'destroyed', message: 'genuine test device-loss signal' });
+      if (['held-fence', 'held-map'].includes(mode)) await assert.rejects(observed, /lost its device/);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(target.destroyed, true);
+      assert.equal(target.destroyCount, 1);
+      f.device.queue.onSubmittedWorkDone = normalFence;
+      await f.cleanup({ deviceLost: true });
+      resolveFence?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(target.destroyCount, 1);
+    });
+  }
+});
+
+test('private compact device-loss subscription does not retain completed staging work', async () => {
+  const f = await privateAdmissionFixture();
+  let loseDevice, subscriptions = 0;
+  f.device.lost = new Promise((resolve) => { loseDevice = resolve; });
+  const then = f.device.lost.then.bind(f.device.lost);
+  f.device.lost.then = (...args) => { subscriptions++; return then(...args); };
+  const observation = await observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+  assert.equal(await observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure), observation);
+  const target = f.device.createdBuffers.find((buffer) => buffer.label === 'ulg-schroeder-private-terminal-admission');
+  assert.equal(subscriptions, 1);
+  assert.equal(target.destroyCount, 1);
+  // The observer itself must not attach a closure-capturing device.lost.then.
+  assert.doesNotMatch(observeSchroederFusedMechanicsPrivateAdmission.toString(), /device\.lost/);
+  loseDevice({ reason: 'destroyed' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(target.destroyCount, 1);
+  await f.cleanup({ deviceLost: true });
+});
+
+test('private compact held staging abandonment joins genuine loss retirement', async () => {
+  const f = await privateAdmissionFixture();
+  const normalFence = f.device.queue.onSubmittedWorkDone.bind(f.device.queue);
+  let loseDevice;
+  const oldFences = [];
+  f.device.lost = new Promise((resolve) => { loseDevice = resolve; });
+  f.device.queue.onSubmittedWorkDone = () => new Promise((resolve) => { oldFences.push(resolve); });
+  const observation = observeSchroederFusedMechanicsPrivateAdmission(f.device, f.closure);
+  const oldAbandonment = abandonSchroederFusedMechanicsPendingClosureAfter(f.device, f.closure);
+  await new Promise((resolve) => setImmediate(resolve));
+  const target = f.device.createdBuffers.find((buffer) => buffer.label === 'ulg-schroeder-private-terminal-admission');
+  assert.equal(target.destroyed, false);
+  assert.equal(oldFences.length, 2);
+  loseDevice({ reason: 'destroyed', message: 'actual held observation loss' });
+  f.device.queue.onSubmittedWorkDone = normalFence;
+  const retirement = f.cleanup({ deviceLost: true });
+  await assert.rejects(observation, /lost its device/);
+  await retirement;
+  assert.equal(await oldAbandonment, true);
+  assert.equal(target.destroyCount, 1);
+  for (const resolve of oldFences) resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(target.destroyCount, 1);
+});
 
 async function releaseTerminalP2gFixture(terminal, reason) {
   const {
@@ -8414,6 +8842,191 @@ test('CPU MLS-MPM P2G can disable internal material EOS pressure for law isolati
   nearlyEqual(summary.momentum[1], 0, 1e-5);
   nearlyEqual(summary.momentum[2], 0, 1e-5);
   assert.equal(projection.internalPressureScale, 0);
+});
+
+// Notification-only WebGPU sentinels: no CPU reconstruction or numerical parity.
+function p2gLossNotificationFixture(route = 'provided') {
+  let resolveLoss;
+  let rejectLoss;
+  const lost = new Promise((resolve, reject) => { resolveLoss = resolve; rejectLoss = reject; });
+  // deviceResult deliberately adds no wrapper observer; handle that root promise.
+  lost.catch(() => {});
+  const counters = { subscriptions: 0, acquisitions: 0, destroys: 0 };
+  const chains = [];
+  const originalThen = lost.then.bind(lost);
+  lost.then = (...args) => {
+    counters.subscriptions += 1;
+    const notified = originalThen(...args);
+    const originalCatch = notified.catch.bind(notified);
+    notified.catch = (...catchArgs) => {
+      const settled = originalCatch(...catchArgs);
+      chains.push(settled.then(value => ({ value }), error => ({ error })));
+      return settled;
+    };
+    return notified;
+  };
+  const device = { lost };
+  const navigatorRef = { gpu: { async requestAdapter() {
+    return { async requestDevice() { counters.acquisitions += 1; return device; } };
+  } } };
+  const result = {
+    backend: 'webgpu', readbackMode: 'no-full-readback', gridBuffer: {}, retainedGridBuffer: true,
+    destroyGridBuffer() { counters.destroys += 1; return true; }
+  };
+  const runnerCalls = [];
+  const options = {
+    preferWebGpu: true, readbackMode: 'no-full-readback', canonicalSpatialRequired: true, retainGridBuffer: true,
+    navigatorRef,
+    ...(route === 'provided' ? { device }
+      : route === 'deviceResult' ? { deviceResult: { device } } : {}),
+    async webGpuRunner(args) { runnerCalls.push(args); return result; }
+  };
+  return {
+    device, options, result, counters, chains, runnerCalls,
+    settle(outcome, value) { (outcome === 'resolve' ? resolveLoss : rejectLoss)(value); },
+    async flush() { await new Promise(resolve => setImmediate(resolve)); return Promise.all(chains); }
+  };
+}
+
+test('optional P2G device-loss notifications outlive return, error and output destruction', async (t) => {
+  for (const route of ['provided', 'acquired']) {
+    for (const lossOutcome of ['resolve', 'reject']) {
+      for (const terminal of ['success', 'runner-error', 'destroyed-output']) {
+        await t.test(`${route}/${lossOutcome}/${terminal}`, async () => {
+          const f = p2gLossNotificationFixture(route);
+          const calls = [];
+          const runnerError = new Error('injected native runner failure');
+          if (terminal === 'runner-error') {
+            f.options.webGpuRunner = async (args) => { f.runnerCalls.push(args); throw runnerError; };
+          }
+          const completed = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+            ...f.options, onDeviceLost(info) { calls.push({ info, receiver: this }); }
+          }).then(value => ({ value }), error => ({ error }));
+          if (terminal === 'runner-error') {
+            assert.ok(completed.error);
+            assert.match(completed.error.message, /injected native runner failure/);
+          } else {
+            assert.equal(completed.value.backend, 'webgpu');
+            assert.equal(completed.value.cpuReference, null);
+            assert.equal(completed.value.webgpuParity.status, 'not-run-no-full-readback');
+            assert.equal(completed.value.gpuResult, f.result);
+            assert.equal(completed.value.gpuResult.destroyGridBuffer, f.result.destroyGridBuffer);
+            if (terminal === 'destroyed-output') completed.value.gpuResult.destroyGridBuffer();
+          }
+          assert.equal(f.runnerCalls.length, 1);
+          assert.equal(f.runnerCalls[0].device, f.device);
+          assert.equal(f.runnerCalls[0].readbackMode, 'no-full-readback');
+          assert.equal(f.counters.subscriptions, 1);
+          assert.equal(f.counters.acquisitions, route === 'acquired' ? 1 : 0);
+          assert.deepEqual(calls, []);
+          const loss = new Error('late device notification');
+          f.settle(lossOutcome, loss);
+          const chains = await f.flush();
+          assert.deepEqual(calls, [{ info: loss, receiver: undefined }]);
+          assert.deepEqual(chains, [{ value: undefined }]);
+          assert.equal(f.counters.destroys, terminal === 'destroyed-output' ? 1 : 0);
+          assert.equal(f.runnerCalls.length, 1, 'late notification does not rerun work');
+        });
+      }
+    }
+  }
+});
+
+test('optional P2G device-loss subscriptions and in-flight native rejection remain exact', async (t) => {
+  for (const lossOutcome of ['resolve', 'reject']) {
+    await t.test(`deviceResult/${lossOutcome}/no-extra-observer`, async () => {
+      const f = p2gLossNotificationFixture('deviceResult');
+      const calls = [];
+      const result = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+        ...f.options, onDeviceLost(info) { calls.push(info); }
+      });
+      assert.equal(result.backend, 'webgpu');
+      assert.equal(result.cpuReference, null);
+      f.settle(lossOutcome, new Error('externally owned device loss'));
+      await f.flush();
+      assert.deepEqual(calls, []);
+      assert.equal(f.counters.subscriptions, 0);
+      assert.equal(f.counters.acquisitions, 0);
+    });
+    for (const route of ['provided', 'acquired']) {
+      for (const phase of ['already-settled', 'during-runner']) {
+        await t.test(`${route}/${lossOutcome}/${phase}`, async () => {
+          const f = p2gLossNotificationFixture(route);
+          const loss = { reason: 'unknown', message: 'native loss sentinel' };
+          const calls = [];
+          if (phase === 'already-settled') f.settle(lossOutcome, loss);
+          else f.options.webGpuRunner = async (args) => {
+            f.runnerCalls.push(args);
+            f.settle(lossOutcome, loss);
+            await Promise.resolve();
+            return f.result;
+          };
+          const completed = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+            ...f.options, onDeviceLost(info) { calls.push(info); }
+          }).then(value => ({ value }), error => ({ error }));
+          assert.equal(completed.value, undefined, 'required GPU execution never CPU-fallbacks');
+          assert.equal(completed.error?.status, 'canonical-spatial-webgpu-device-lost');
+          await f.flush();
+          assert.deepEqual(calls, [loss]);
+          // The provided-device .catch runs one microtask later than fulfillment:
+          // an already-rejected promise reaches the runner before the loss check.
+          const expectedRunnerCalls = phase === 'during-runner'
+            || (route === 'provided' && lossOutcome === 'reject') ? 1 : 0;
+          assert.equal(f.runnerCalls.length, expectedRunnerCalls);
+          // P2G has never destroyed the returned grid at this loss-check seam.
+          assert.equal(f.counters.destroys, 0);
+          assert.equal(f.counters.subscriptions, 1);
+        });
+      }
+    }
+  }
+  await t.test('provided device takes precedence over deviceResult', async () => {
+    const f = p2gLossNotificationFixture('provided');
+    const ignored = p2gLossNotificationFixture('deviceResult');
+    const result = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+      ...f.options, deviceResult: { device: ignored.device }
+    });
+    assert.equal(result.backend, 'webgpu');
+    assert.equal(f.runnerCalls[0].device, f.device);
+    assert.equal(f.counters.subscriptions, 1);
+    assert.equal(ignored.counters.subscriptions, 0);
+    assert.equal(f.counters.acquisitions, 0);
+  });
+});
+
+test('optional P2G device-loss throw forwarding preserves plain calls and ignores return values', async (t) => {
+  for (const mode of ['fulfilled-first-throws', 'fulfilled-both-throw', 'rejected-callback-throws']) {
+    await t.test(mode, async () => {
+      const f = p2gLossNotificationFixture();
+      const loss = new Error('device loss');
+      const first = new Error('first notification threw');
+      const second = new Error('second notification threw');
+      const calls = [];
+      let adoptions = 0;
+      const returnedThenable = { then(resolve) { adoptions += 1; resolve('must not be adopted'); } };
+      const result = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+        ...f.options,
+        onDeviceLost(info) {
+          calls.push({ info, receiver: this });
+          if (calls.length === 1) throw first;
+          if (mode === 'fulfilled-both-throw') throw second;
+          return returnedThenable;
+        }
+      });
+      assert.equal(result.backend, 'webgpu');
+      f.settle(mode === 'rejected-callback-throws' ? 'reject' : 'resolve', loss);
+      const chains = await f.flush();
+      assert.deepEqual(calls, mode === 'rejected-callback-throws'
+        ? [{ info: loss, receiver: undefined }]
+        : [{ info: loss, receiver: undefined }, { info: first, receiver: undefined }]);
+      assert.deepEqual(chains, mode === 'fulfilled-first-throws'
+        ? [{ value: undefined }]
+        : [{ error: mode === 'fulfilled-both-throw' ? second : first }]);
+      assert.equal(adoptions, 0, 'relay must not return/adopt a notifier thenable');
+      assert.equal(f.counters.destroys, 0);
+      assert.equal(f.runnerCalls.length, 1);
+    });
+  }
 });
 
 test('optional MLS-MPM P2G grid projection returns CPU reference when WebGPU is not requested', async () => {

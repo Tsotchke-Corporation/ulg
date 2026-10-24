@@ -20,10 +20,30 @@ export function classifyHeadedSweepPageErrors(pageErrors = []) {
   });
 }
 
-// These failures describe rate rather than evidence integrity. They are the
-// only cadence failures that the all-preset sweep may waive for presets whose
-// acceptance contract is progression/correctness rather than 54 Hz visual
-// throughput. Unknown issue ids deliberately remain integrity failures.
+// The native worker records the submitted passes after GPU completion. Every
+// frame clears opaque color/depth, optionally renders refraction, optionally
+// composites the ready medium against that depth, then draws vapor/overlays.
+// This validates order only; readiness, optics and visible cadence stay separate.
+export function isWorkerIsosurfacePassOrderValid(passOrder, {
+  mediumRequired
+} = {}) {
+  if (!Array.isArray(passOrder) || typeof mediumRequired !== 'boolean') {
+    return false;
+  }
+  const expected = ['opaque-isosurface'];
+  if (passOrder[1] === 'refractive-isosurface') {
+    expected.push('refractive-isosurface');
+  }
+  if (mediumRequired) expected.push('depth-clipped-participating-medium');
+  expected.push('transparent-isosurface-and-overlay');
+  return passOrder.length === expected.length
+    && expected.every((pass, index) => passOrder[index] === pass);
+}
+
+// Rate failures are separate from evidence-integrity failures for diagnostics.
+// The all-preset acceptance sweep requires BOTH for every renderer; an explicit
+// throughputRequired:false is diagnostic-only, not a passing preset contract.
+// Unknown issue ids deliberately remain integrity failures.
 export const VISIBLE_PRESENTATION_THROUGHPUT_ISSUES = Object.freeze([
   'visible-presentation-transitions-missing',
   'visible-presentation-transition-count-below-target',
@@ -37,7 +57,7 @@ const visiblePresentationThroughputIssueSet = new Set(
 );
 
 export function classifyCadenceAcceptanceIssues(issues, {
-  throughputRequired = false
+  throughputRequired = true
 } = {}) {
   const uniqueIssues = [...new Set(
     (Array.isArray(issues) ? issues : [])
@@ -93,6 +113,19 @@ export function resolveHeadedSweepAutomatedDisposition({
   });
 }
 
+export {
+  SPH_PRESENTATION_CADENCE_EVIDENCE,
+  visiblePresentationIdentity,
+  summarizeVisiblePresentationCadence
+} from '../src/visualization/sphPresentationCadence.js';
+
+// Numerical render-input cadence is useful diagnostic evidence, but cannot
+// certify the requested visible-motion rate without independent change proof.
+export function visibleMotionCadenceAcceptanceIssues(sample) {
+  return sample?.visibleMotionCadenceVerified === true
+    ? [] : ['visible-motion-change-evidence-missing'];
+}
+
 function finiteOrNull(value) {
   if (value == null || value === '') return null;
   const number = Number(value);
@@ -102,394 +135,6 @@ function finiteOrNull(value) {
 function safeIntegerOrNull(value) {
   const number = finiteOrNull(value);
   return Number.isSafeInteger(number) ? number : null;
-}
-
-function median(values) {
-  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
-  if (sorted.length === 0) return null;
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[middle - 1] + sorted[middle]) / 2
-    : sorted[middle];
-}
-
-function percentile(values, fraction) {
-  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
-  if (sorted.length === 0) return null;
-  const index = Math.min(
-    sorted.length - 1,
-    Math.max(0, Math.ceil(sorted.length * fraction) - 1)
-  );
-  return sorted[index];
-}
-
-function nonEmptyString(value) {
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text || null;
-}
-
-export function visiblePresentationIdentity(observation = {}) {
-  const owner = nonEmptyString(observation.owner);
-  const cohortIdentity = nonEmptyString(observation.cohortIdentity);
-  const sourceStep = safeIntegerOrNull(observation.sourceStep);
-  if (
-    !owner
-    || !cohortIdentity
-    || observation.admitted !== true
-    || sourceStep == null
-    || sourceStep < 0
-  ) return null;
-  const motionFrameSerial = safeIntegerOrNull(observation.motionFrameSerial);
-  const admittedMotionFrame = Boolean(
-    observation.motionFrameAdmitted === true
-    && motionFrameSerial != null
-    && motionFrameSerial >= 0
-  );
-  return admittedMotionFrame
-    ? `${owner}|${cohortIdentity}|step:${sourceStep}|motion:${motionFrameSerial}`
-    : `${owner}|${cohortIdentity}|step:${sourceStep}`;
-}
-
-/**
- * Count only distinct, admitted visual states observed on animation frames.
- * A source-step jump of K is one presentation, not K frames. Repeated RAFs,
- * canvas redraws, and presentation serial churn with unchanged visual input
- * are deliberately ignored. A future temporal presentation path may provide
- * an admitted motion-frame identity when it actually advances the geometry.
- */
-export function summarizeVisiblePresentationCadence(observations, {
-  sampleDurationMs,
-  sampleStartedAtMs = null,
-  sampleEndedAtMs = null,
-  sustainedWindowDurationMs = 500
-} = {}) {
-  const durationMs = finiteOrNull(sampleDurationMs);
-  const rows = Array.isArray(observations) ? observations : [];
-  const ownerCohorts = new Set();
-  const presentationCohorts = new Set();
-  const sourceIdentities = new Set();
-  const visualIdentities = new Set();
-  const visualTransitionIntervalsMs = [];
-  const visualTransitionTimestampsMs = [];
-  const sourceTransitionIntervalsMs = [];
-  const admissionBlockerCounts = new Map();
-  let observedPresentationCount = 0;
-  let visualTransitionCount = 0;
-  let sourceTransitionCount = 0;
-  let invalidObservationCount = 0;
-  let presentationSerialRegressionCount = 0;
-  let presentationSerialStallCount = 0;
-  let presentationCohortTransitionCount = 0;
-  let sourceStepRegressionCount = 0;
-  let motionFrameRegressionCount = 0;
-  let timestampRegressionCount = 0;
-  let firstObservedTimestampMs = null;
-  let lastObservedTimestampMs = null;
-  let firstValidPresentationAtMs = null;
-  let lastObservedCohortIdentity = null;
-  let lastValidCohortIdentity = null;
-  let lastSourceStep = null;
-  let lastMotionFrameSerial = null;
-  let lastVisualTransitionAtMs = null;
-  let lastSourceTransitionAtMs = null;
-  let lastPresentationSerial = null;
-
-  for (const observation of rows) {
-    const admissionBlockers = Array.isArray(observation?.admissionBlockers)
-      ? [...new Set(observation.admissionBlockers.filter(nonEmptyString))]
-      : [];
-    for (const blocker of admissionBlockers) {
-      admissionBlockerCounts.set(
-        blocker,
-        (admissionBlockerCounts.get(blocker) || 0) + 1
-      );
-    }
-    const timestampMs = finiteOrNull(observation?.timestampMs);
-    const owner = nonEmptyString(observation?.owner);
-    const cohortIdentity = nonEmptyString(observation?.cohortIdentity);
-    const sourceStep = safeIntegerOrNull(observation?.sourceStep);
-    const presentationSerial = safeIntegerOrNull(
-      observation?.presentationSerial
-    );
-    const visualIdentity = visiblePresentationIdentity(observation);
-    if (
-      timestampMs != null
-      && lastObservedTimestampMs != null
-      && timestampMs < lastObservedTimestampMs
-    ) {
-      timestampRegressionCount += 1;
-    }
-    if (timestampMs != null) lastObservedTimestampMs = timestampMs;
-    if (timestampMs != null && firstObservedTimestampMs == null) {
-      firstObservedTimestampMs = timestampMs;
-    }
-    if (owner) ownerCohorts.add(owner);
-    const fullCohortIdentity = owner && cohortIdentity
-      ? `${owner}|${cohortIdentity}`
-      : null;
-    if (fullCohortIdentity) {
-      presentationCohorts.add(fullCohortIdentity);
-      if (
-        lastObservedCohortIdentity != null
-        && fullCohortIdentity !== lastObservedCohortIdentity
-      ) {
-        presentationCohortTransitionCount += 1;
-      }
-      lastObservedCohortIdentity = fullCohortIdentity;
-    }
-    if (
-      timestampMs == null
-      || !owner
-      || !cohortIdentity
-      || sourceStep == null
-      || sourceStep < 0
-      || presentationSerial == null
-      || presentationSerial < 0
-      || !visualIdentity
-    ) {
-      invalidObservationCount += 1;
-      continue;
-    }
-    observedPresentationCount += 1;
-    if (firstValidPresentationAtMs == null) {
-      firstValidPresentationAtMs = timestampMs;
-    }
-    sourceIdentities.add(`${fullCohortIdentity}|step:${sourceStep}`);
-    visualIdentities.add(visualIdentity);
-
-    if (
-      fullCohortIdentity === lastValidCohortIdentity
-      && presentationSerial != null
-      && lastPresentationSerial != null
-      && presentationSerial < lastPresentationSerial
-    ) {
-      presentationSerialRegressionCount += 1;
-    }
-    const motionFrameSerial = safeIntegerOrNull(observation?.motionFrameSerial);
-    const admittedMotionFrame = Boolean(
-      observation?.motionFrameAdmitted === true
-      && motionFrameSerial != null
-      && motionFrameSerial >= 0
-    );
-    if (lastValidCohortIdentity == null) {
-      lastValidCohortIdentity = fullCohortIdentity;
-      lastSourceStep = sourceStep;
-      lastMotionFrameSerial = admittedMotionFrame ? motionFrameSerial : null;
-      lastVisualTransitionAtMs = timestampMs;
-      lastSourceTransitionAtMs = timestampMs;
-      lastPresentationSerial = presentationSerial;
-      continue;
-    }
-    if (fullCohortIdentity !== lastValidCohortIdentity) {
-      lastValidCohortIdentity = fullCohortIdentity;
-      lastSourceStep = sourceStep;
-      lastMotionFrameSerial = admittedMotionFrame ? motionFrameSerial : null;
-      lastVisualTransitionAtMs = timestampMs;
-      lastSourceTransitionAtMs = timestampMs;
-      lastPresentationSerial = presentationSerial;
-      continue;
-    }
-
-    let sourceAdvanced = false;
-    let motionAdvanced = false;
-    if (sourceStep > lastSourceStep) {
-      sourceAdvanced = true;
-    } else if (sourceStep < lastSourceStep) {
-      sourceStepRegressionCount += 1;
-    } else if (admittedMotionFrame) {
-      if (
-        lastMotionFrameSerial == null
-        || motionFrameSerial > lastMotionFrameSerial
-      ) {
-        motionAdvanced = true;
-      } else if (motionFrameSerial < lastMotionFrameSerial) {
-        motionFrameRegressionCount += 1;
-      }
-    }
-
-    let visualAdvanced = false;
-    if (sourceAdvanced || motionAdvanced) {
-      if (presentationSerial > lastPresentationSerial) {
-        visualAdvanced = true;
-        if (sourceAdvanced) {
-          sourceTransitionCount += 1;
-          const sourceIntervalMs = timestampMs - lastSourceTransitionAtMs;
-          if (Number.isFinite(sourceIntervalMs) && sourceIntervalMs > 0) {
-            sourceTransitionIntervalsMs.push(sourceIntervalMs);
-          }
-          lastSourceTransitionAtMs = timestampMs;
-          lastSourceStep = sourceStep;
-          lastMotionFrameSerial = admittedMotionFrame
-            ? motionFrameSerial
-            : null;
-        } else {
-          lastMotionFrameSerial = motionFrameSerial;
-        }
-      } else {
-        presentationSerialStallCount += 1;
-      }
-    }
-    if (visualAdvanced) {
-      const intervalMs = timestampMs - lastVisualTransitionAtMs;
-      if (Number.isFinite(intervalMs) && intervalMs > 0) {
-        visualTransitionIntervalsMs.push(intervalMs);
-      }
-      visualTransitionCount += 1;
-      visualTransitionTimestampsMs.push(timestampMs);
-      lastVisualTransitionAtMs = timestampMs;
-    }
-    lastPresentationSerial = presentationSerial;
-  }
-
-  const meanVisiblePresentationHz = durationMs > 0
-    ? visualTransitionCount * 1000 / durationMs
-    : null;
-  const medianVisualIntervalMs = median(visualTransitionIntervalsMs);
-  const p95VisualIntervalMs = percentile(visualTransitionIntervalsMs, 0.95);
-  const cadenceSampleStartedAtMs = finiteOrNull(sampleStartedAtMs)
-    ?? firstObservedTimestampMs;
-  const cadenceSampleEndedAtMs = finiteOrNull(sampleEndedAtMs)
-    ?? (
-      cadenceSampleStartedAtMs != null && durationMs > 0
-        ? cadenceSampleStartedAtMs + durationMs
-        : lastObservedTimestampMs
-    );
-  const sampleBoundsReady = Boolean(
-    cadenceSampleStartedAtMs != null
-    && cadenceSampleEndedAtMs != null
-    && cadenceSampleEndedAtMs >= cadenceSampleStartedAtMs
-  );
-  const boundedVisualTransitionTimestampsMs = sampleBoundsReady
-    ? visualTransitionTimestampsMs.filter((timestampMs) => (
-        Number.isFinite(timestampMs)
-        && timestampMs >= cadenceSampleStartedAtMs
-        && timestampMs <= cadenceSampleEndedAtMs
-      ))
-    : [];
-  const boundedVisualProgressTimestampsMs = sampleBoundsReady
-    ? [firstValidPresentationAtMs, ...boundedVisualTransitionTimestampsMs]
-        .filter((timestampMs) => (
-          Number.isFinite(timestampMs)
-          && timestampMs >= cadenceSampleStartedAtMs
-          && timestampMs <= cadenceSampleEndedAtMs
-        ))
-        .sort((left, right) => left - right)
-    : [];
-  // Censor both sample edges. Transition-to-transition intervals alone miss a
-  // producer that presents rapidly and then freezes for the remainder of the
-  // declared measurement window.
-  const visiblePresentationGapsMs = [];
-  if (sampleBoundsReady) {
-    let gapStartMs = cadenceSampleStartedAtMs;
-    for (const timestampMs of boundedVisualProgressTimestampsMs) {
-      visiblePresentationGapsMs.push(Math.max(0, timestampMs - gapStartMs));
-      gapStartMs = timestampMs;
-    }
-    visiblePresentationGapsMs.push(Math.max(
-      0,
-      cadenceSampleEndedAtMs - gapStartMs
-    ));
-  }
-  const leadingVisiblePresentationHoldMs = visiblePresentationGapsMs.length > 0
-    ? visiblePresentationGapsMs[0]
-    : null;
-  const terminalVisiblePresentationHoldMs = visiblePresentationGapsMs.length > 0
-    ? visiblePresentationGapsMs.at(-1)
-    : null;
-  const maximumVisiblePresentationGapMs = visiblePresentationGapsMs.length > 0
-    ? Math.max(...visiblePresentationGapsMs)
-    : null;
-  const requestedSustainedWindowDurationMs = finiteOrNull(
-    sustainedWindowDurationMs
-  );
-  const exactSustainedWindowDurationMs = Boolean(
-    sampleBoundsReady
-    && requestedSustainedWindowDurationMs > 0
-    && requestedSustainedWindowDurationMs
-      <= cadenceSampleEndedAtMs - cadenceSampleStartedAtMs
-  )
-    ? requestedSustainedWindowDurationMs
-    : null;
-  let minimumSustainedWindowTransitionCount = null;
-  let minimumSustainedWindowStartedAtMs = null;
-  if (exactSustainedWindowDurationMs != null) {
-    const latestWindowStartMs =
-      cadenceSampleEndedAtMs - exactSustainedWindowDurationMs;
-    const candidateWindowStartsMs = [
-      cadenceSampleStartedAtMs,
-      latestWindowStartMs,
-      ...boundedVisualTransitionTimestampsMs.filter((timestampMs) => (
-        timestampMs >= cadenceSampleStartedAtMs
-        && timestampMs <= latestWindowStartMs
-      ))
-    ];
-    const epsilonMs = 1e-6;
-    for (const windowStartedAtMs of candidateWindowStartsMs) {
-      const windowEndedAtMs =
-        windowStartedAtMs + exactSustainedWindowDurationMs;
-      const transitionCount = boundedVisualTransitionTimestampsMs.filter(
-        (timestampMs) => (
-          timestampMs - windowStartedAtMs > epsilonMs
-          && timestampMs <= windowEndedAtMs + epsilonMs
-        )
-      ).length;
-      if (
-        minimumSustainedWindowTransitionCount == null
-        || transitionCount < minimumSustainedWindowTransitionCount
-      ) {
-        minimumSustainedWindowTransitionCount = transitionCount;
-        minimumSustainedWindowStartedAtMs = windowStartedAtMs;
-      }
-    }
-  }
-  const meanSourcePresentationHz = durationMs > 0
-    ? sourceTransitionCount * 1000 / durationMs
-    : null;
-  const medianSourceIntervalMs = median(sourceTransitionIntervalsMs);
-  return Object.freeze({
-    observedPresentationCount,
-    invalidObservationCount,
-    admissionBlockerCounts: Object.freeze(Object.fromEntries(
-      [...admissionBlockerCounts.entries()].sort((left, right) => (
-        right[1] - left[1] || left[0].localeCompare(right[0])
-      ))
-    )),
-    presentationOwnerCohortCount: ownerCohorts.size,
-    presentationOwners: Object.freeze([...ownerCohorts]),
-    presentationCohortCount: presentationCohorts.size,
-    presentationCohortTransitionCount,
-    distinctSourceCount: sourceIdentities.size,
-    distinctVisualStateCount: visualIdentities.size,
-    visualTransitionCount,
-    sourceTransitionCount,
-    presentationSerialRegressionCount,
-    presentationSerialStallCount,
-    sourceStepRegressionCount,
-    motionFrameRegressionCount,
-    timestampRegressionCount,
-    meanVisiblePresentationHz,
-    medianVisiblePresentationHz: medianVisualIntervalMs > 0
-      ? 1000 / medianVisualIntervalMs
-      : null,
-    p95VisualIntervalMs,
-    p95VisualIntervalEquivalentHz: p95VisualIntervalMs > 0
-      ? 1000 / p95VisualIntervalMs
-      : null,
-    cadenceSampleStartedAtMs,
-    cadenceSampleEndedAtMs,
-    leadingVisiblePresentationHoldMs,
-    terminalVisiblePresentationHoldMs,
-    maximumVisiblePresentationGapMs,
-    sustainedWindowDurationMs: exactSustainedWindowDurationMs,
-    minimumSustainedWindowTransitionCount,
-    minimumSustainedWindowStartedAtMs,
-    meanSourcePresentationHz,
-    medianSourcePresentationHz: medianSourceIntervalMs > 0
-      ? 1000 / medianSourceIntervalMs
-      : null,
-    visualTransitionIntervalsMs: Object.freeze(visualTransitionIntervalsMs),
-    sourceTransitionIntervalsMs: Object.freeze(sourceTransitionIntervalsMs)
-  });
 }
 
 export function evaluateCadenceSample(sample, {

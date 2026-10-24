@@ -62,6 +62,7 @@ import {
   ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1,
   abandonSphSpatialGasPressureAuthority,
@@ -1298,6 +1299,7 @@ function retainedGasCellFieldSourceFromGraph(graph) {
   // to the borrowed-buffer path.
   for (const schema of [
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
+    ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
     ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V1
@@ -1347,6 +1349,7 @@ function retainedGasCellFieldImportSchemaObservation(graph) {
   const mutatedExact = [];
   const retiredV2 = [];
   const retiredV3 = [];
+  const retiredV4 = [];
   const accessorRecords = [];
   const inheritedProtectedSchema = (record) => {
     const seen = new Set();
@@ -1377,6 +1380,7 @@ function retainedGasCellFieldImportSchemaObservation(graph) {
         schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA
         || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2
         || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+        || schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
       ) return schema;
       try {
         prototype = Object.getPrototypeOf(prototype);
@@ -1416,6 +1420,8 @@ function retainedGasCellFieldImportSchemaObservation(graph) {
       retiredV2.push(captured.record);
     } else if (schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3) {
       retiredV3.push(captured.record);
+    } else if (schema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4) {
+      retiredV4.push(captured.record);
     }
     const inheritedSchema = inheritedProtectedSchema(captured.record);
     if (inheritedSchema === 'accessor') {
@@ -1433,6 +1439,9 @@ function retainedGasCellFieldImportSchemaObservation(graph) {
     ) {
       retiredV3.push(captured.record);
     }
+    if (inheritedSchema === ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4) {
+      retiredV4.push(captured.record);
+    }
   }
   return Object.freeze({
     exactSources: Object.freeze(exactSources),
@@ -1440,6 +1449,7 @@ function retainedGasCellFieldImportSchemaObservation(graph) {
     mutatedExact: Object.freeze(mutatedExact),
     retiredV2: Object.freeze(retiredV2),
     retiredV3: Object.freeze(retiredV3),
+    retiredV4: Object.freeze(retiredV4),
     accessorRecords: Object.freeze(accessorRecords)
   });
 }
@@ -1585,6 +1595,12 @@ function resolveRetainedGasPressureRows({
     return reject(
       'retained-gas-pressure-rows-rejected-v3-pre-opaque-authority',
       'A v3 gas pressure source exposes owner-managed buffers and cannot be consumed as an opaque authority'
+    );
+  }
+  if (schemaObservation.retiredV4.length > 0) {
+    return reject(
+      'retained-gas-pressure-rows-rejected-v4-missing-projection-authority',
+      'A v4 gas pressure source lacks the shared conservative control-volume projection seal'
     );
   }
   if (schemaObservation.retiredV2.length > 0) {

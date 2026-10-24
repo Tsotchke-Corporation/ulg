@@ -172,6 +172,7 @@ function fakeStageFixture(device, primaryCapacity = 3) {
     },
     mechanicsMaterialTable: {
       schema: ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA,
+      phaseRecordCount: 2,
       records: new Float32Array([
         1, 1, 917, 2e6, 7e5, 1e6, 50, 1, 1, 1, 0, 0,
         1, 2, 1000, 2e6, 0, 0, 45, 1, 0, 1, 0.001, 0.07

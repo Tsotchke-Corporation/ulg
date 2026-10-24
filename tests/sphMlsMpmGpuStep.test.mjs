@@ -1932,6 +1932,187 @@ function noFullReadbackResidentStepFixture() {
   return { buffers, tracker, sourceThermoBuffer, options };
 }
 
+for (const [entrypoint, runStep] of [
+  ['full', runMlsMpmResidentStepWithOptionalWebGpu],
+  ['mechanics-only', runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu]
+]) {
+  test(`resident loss relay ${entrypoint} preserves notifications after output destruction`, async () => {
+    const { options } = noFullReadbackResidentStepFixture();
+    const lost = deferredTestPromise();
+    const notifications = [];
+    const step = await runStep({
+      ...options,
+      device: { lost: lost.promise },
+      onDeviceLost(info) { notifications.push([info, this]); }
+    });
+    destroyMlsMpmResidentStepBuffers(step);
+    const info = { reason: 'destroyed', message: 'late loss after step cleanup' };
+    lost.resolve(info);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(notifications.length, 3, 'P2G, grid and G2P registrations remain live');
+    assert.ok(notifications.every(([value, receiver]) => value === info && receiver === undefined));
+  });
+
+  test(`resident loss relay ${entrypoint} preserves notifications after stage configuration rejects`, async () => {
+    const { options } = noFullReadbackResidentStepFixture();
+    const lost = deferredTestPromise();
+    const notifications = [];
+    const failure = new Error('injected resident G2P configuration failure');
+    await assert.rejects(runStep({
+      ...options,
+      device: { lost: lost.promise },
+      parityTolerances: { get g2p() { throw failure; } },
+      onDeviceLost(info) { notifications.push(info); }
+    }), (error) => error === failure);
+    const info = { reason: 'destroyed', message: 'late loss after rejection' };
+    lost.resolve(info);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(notifications.length, 2, 'completed P2G and grid stages keep their loss registrations');
+    assert.ok(notifications.every((value) => value === info));
+  });
+
+  test(`resident loss relay ${entrypoint} preserves the device-acquisition notifier`, async () => {
+    const { options } = noFullReadbackResidentStepFixture();
+    const lost = deferredTestPromise();
+    const notifications = [];
+    const step = await runStep({
+      ...options,
+      navigatorRef: webGpuNavigator({ lost: lost.promise }),
+      onDeviceLost(info) { notifications.push(info); }
+    });
+    destroyMlsMpmResidentStepBuffers(step);
+    const info = { reason: 'destroyed', message: 'loss after acquired-device step' };
+    lost.resolve(info);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(notifications, [info, info, info, info]);
+  });
+
+  test(`resident loss relay ${entrypoint} preserves the throwing notifier catch chain`, async () => {
+    const { options } = noFullReadbackResidentStepFixture();
+    const lost = deferredTestPromise();
+    const info = { reason: 'unknown', message: 'late test loss' };
+    const failure = new Error('external notifier failure');
+    const notifications = [];
+    const step = await runStep({
+      ...options,
+      device: { lost: lost.promise },
+      onDeviceLost(value) {
+        notifications.push(value);
+        if (value === info) throw failure;
+      }
+    });
+    destroyMlsMpmResidentStepBuffers(step);
+    lost.resolve(info);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(notifications, [info, info, info, failure, failure, failure]);
+  });
+
+  test(`resident loss relay ${entrypoint} forwards falsy loss and tolerates nonfunction notifiers`, async () => {
+    for (const notifier of [undefined, null, 7, { notify: true }, false]) {
+      const { options } = noFullReadbackResidentStepFixture();
+      const lost = deferredTestPromise();
+      const step = await runStep({ ...options, device: { lost: lost.promise }, onDeviceLost: notifier });
+      destroyMlsMpmResidentStepBuffers(step);
+      lost.resolve(null);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const { options } = noFullReadbackResidentStepFixture();
+    const lost = deferredTestPromise();
+    const notifications = [];
+    const step = await runStep({
+      ...options,
+      device: { lost: lost.promise },
+      onDeviceLost(info) { notifications.push(info); }
+    });
+    destroyMlsMpmResidentStepBuffers(step);
+    lost.resolve(null);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(notifications, [null, null, null]);
+  });
+}
+
+test('resident loss relay mechanics-only preserves distinct callbacks and shared latest-value gating', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const callbacks = [];
+  const notifications = [];
+  const info = { reason: 'unknown' };
+  const failure = new Error('injected notifier failure');
+  const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
+    ...options,
+    device: { lost: new Promise(() => {}) },
+    onDeviceLost(value) {
+      notifications.push(value);
+      if (value === info) throw failure;
+    },
+    p2gStageRunner(args) {
+      callbacks.push(args.onDeviceLost);
+      assert.equal(args.preferWebGpu, true);
+      assert.throws(() => args.onDeviceLost(info), (error) => error === failure);
+      return options.p2gRunner(args);
+    },
+    gridUpdateStageRunner(args) {
+      callbacks.push(args.onDeviceLost);
+      assert.equal(args.preferWebGpu, false, 'loss assignment precedes the throwing notifier');
+      callbacks[0](0);
+      return options.gridUpdateRunner(args);
+    },
+    g2pStageRunner(args) {
+      callbacks.push(args.onDeviceLost);
+      assert.equal(args.preferWebGpu, true, 'a later falsy notification replaces the shared value');
+      return options.g2pRunner(args);
+    }
+  });
+  assert.equal(new Set(callbacks).size, 3);
+  assert.deepEqual(notifications, [info, 0]);
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
+test('resident loss relay mechanics-only isolates invocations while retaining old notifications', async () => {
+  const allCallbacks = [];
+  const notifications = [[], []];
+  const lateInfo = { reason: 'unknown', message: 'previous invocation only' };
+  for (const index of [0, 1]) {
+    const { options } = noFullReadbackResidentStepFixture();
+    const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
+      ...options,
+      device: { lost: new Promise(() => {}) },
+      onDeviceLost(info) { notifications[index].push(info); },
+      p2gStageRunner(args) {
+        allCallbacks.push(args.onDeviceLost);
+        if (index === 1) allCallbacks[2](lateInfo);
+        return options.p2gRunner(args);
+      },
+      gridUpdateStageRunner(args) {
+        allCallbacks.push(args.onDeviceLost);
+        assert.equal(args.preferWebGpu, true);
+        return options.gridUpdateRunner(args);
+      },
+      g2pStageRunner(args) {
+        allCallbacks.push(args.onDeviceLost);
+        assert.equal(args.preferWebGpu, true);
+        return options.g2pRunner(args);
+      }
+    });
+    destroyMlsMpmResidentStepBuffers(step);
+  }
+  assert.equal(new Set(allCallbacks).size, 6);
+  assert.deepEqual(notifications, [[lateInfo], []]);
+});
+
+test('resident loss relay parent entrypoints create callbacks outside the heavy step scope', async () => {
+  const source = await readFile(new URL('../src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url), 'utf8');
+  for (const [start, end] of [
+    ['export async function runMlsMpmResidentStepWithOptionalWebGpu(', 'export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu('],
+    ['export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu(', 'export function destroyMlsMpmResidentStepBuffers(']
+  ]) {
+    const body = source.slice(source.indexOf(start), source.indexOf(end));
+    assert.ok(body.length > 0);
+    assert.equal((body.match(/createSphDeviceLossRelay\(/g) || []).length, 4,
+      'device acquisition and all three stages require separate factory callbacks');
+    assert.doesNotMatch(body, /onDeviceLost\s*\(info\)\s*\{/);
+  }
+});
+
 function residentSpatialEpochTransactionFixture({
   device,
   tracker,
@@ -12545,7 +12726,8 @@ test('SPH retained spatial-gas EOS v4 stage graph carries only the exact opaque 
 
   for (const retiredSchema of [
     'peercompute.ulg.sph-retained-gas-cell-eos-source.v2',
-    'peercompute.ulg.sph-retained-gas-cell-eos-source.v3'
+    'peercompute.ulg.sph-retained-gas-cell-eos-source.v3',
+    'peercompute.ulg.sph-retained-gas-cell-eos-source.v4'
   ]) {
     const retiredWrapper = {
       schema: retiredSchema,
@@ -12768,6 +12950,7 @@ test('retained spatial-gas producer merges nested Schroeder backpressure telemet
   assert.equal(result.readbackTelemetryComplete, true);
   assert.equal(result.observedHostQueueFenceCount, 1);
   assert.equal(result.awaitedBackpressureHostQueueFenceCount, 1);
+  assert.equal(result.compactSpatialGasRowStrideFloats, 16);
   assert.equal(result.deferredCleanupHostQueueFenceCount, 0);
   assert.equal(Object.hasOwn(result, 'spatialGasLedgerEosExecution'), false);
   assert.ok(result.readbackTelemetrySourceBreakdown.some((entry) => (
@@ -13014,6 +13197,14 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
   assert.deepEqual(task.webgpu.retainedBufferRefs, ['resident-spatial-gas-species-ledger-buffer']);
   assert.equal(task.gpuFence.required, true);
   assert.equal(task.gpuResidentLane.owner, 'ulg-resident-spatial-gas-ledger-law');
+  assert.equal(task.gpuResidentLane.copyBudget.readbackBytes, 2 * 12 * 4);
+  assert.equal(task.gpuResidentLane.copyBudget.retainedBytes, 2 * (12 + 12) * 4);
+  const retainedTask = createSphSpatialGasLedgerProducerStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js', residentProductMass,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(retainedTask.gpuResidentLane.copyBudget.readbackBytes, 0);
+  assert.equal(retainedTask.gpuResidentLane.copyBudget.retainedBytes, 2 * (16 + 8 + 12) * 4);
 
   const result = await runSphSpatialGasLedgerProducerStageComputeTask(task.data);
 
@@ -13025,6 +13216,7 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
   assert.equal(result.fullProductEventReadbackPerformed, false);
   assert.equal(result.compactSpatialGasReadbackPerformed, true);
   assert.equal(result.compactSpatialGasReadbackByteLength, 96);
+  assert.equal(result.compactSpatialGasRowStrideFloats, 12, 'legacy full-parity format is unchanged');
   assert.equal(result.readbackTelemetrySchema, 'peercompute.ulg.gpu-readback-telemetry.v1');
   assert.equal(result.readbackTelemetryComplete, true);
   assert.equal(result.observedMapAsyncCount, 1);
@@ -15649,6 +15841,64 @@ test('SPH pressure interface stage records admitted local gas-cell pressure fiel
   assert.equal(result.pressureInterfaceStageTaskAuthority.pressureInterfaceGasCellFieldAdmissionApproved, true);
 });
 
+test('MLS-MPM gas import never downgrades own or inherited protected schemas to a ready legacy snapshot', () => {
+  const legacyImport = (retainedGasCellFieldSource = {}) => ({
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    retainedGasCellFieldSource,
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    pressureInterfaceGasCellFieldAdmission: {
+      schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+      status: 'pressure-interface-gas-cell-field-consumption-approved',
+      gasCellFieldConsumptionApproved: true
+    },
+    gasCellFieldSnapshot: {
+      localPressureGradientReady: true,
+      cells: [{ pressurePa: 101325 }]
+    }
+  });
+  assert.equal(normalizePressureInterfaceGasCellFieldImport(legacyImport()).importReady, true);
+  for (const version of [2, 3, 4]) {
+    const schema = `peercompute.ulg.sph-retained-gas-cell-eos-source.v${version}`;
+    for (const source of [{ schema }, Object.create({ schema })]) {
+      const result = normalizePressureInterfaceGasCellFieldImport(legacyImport(source));
+      assert.equal(result.importReady, false);
+      assert.equal(result.blocker,
+        'pressure-interface-gas-cell-field-import-retired-source-schema-rejected');
+    }
+  }
+  const forged = normalizePressureInterfaceGasCellFieldImport(legacyImport(
+    Object.create({ schema: ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA })
+  ));
+  assert.equal(forged.importReady, false);
+  assert.equal(forged.blocker,
+    'pressure-interface-gas-cell-field-import-v4-source-identity-invalid');
+  let getterCalls = 0;
+  const accessorPrototype = Object.defineProperty({}, 'schema', {
+    get() { getterCalls += 1; return ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA; }
+  });
+  assert.throws(() => normalizePressureInterfaceGasCellFieldImport(
+    legacyImport(Object.create(accessorPrototype))
+  ), { code: 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_SCHEMA_ACCESSOR' });
+  assert.equal(getterCalls, 0);
+  const trapping = new Proxy({}, {
+    getPrototypeOf() { throw new Error('hostile prototype'); }
+  });
+  assert.throws(() => normalizePressureInterfaceGasCellFieldImport(
+    legacyImport(trapping)
+  ), { code: 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_PROTOTYPE_INSPECTION' });
+  let cyclic;
+  cyclic = new Proxy({}, { getPrototypeOf() { return cyclic; } });
+  assert.throws(() => normalizePressureInterfaceGasCellFieldImport(
+    legacyImport(cyclic)
+  ), { code: 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_GRAPH_LIMIT' });
+  let deep = null;
+  for (let i = 0; i < 65; i += 1) deep = Object.create(deep);
+  assert.throws(() => normalizePressureInterfaceGasCellFieldImport(
+    legacyImport(deep)
+  ), { code: 'ERR_ULG_RETAINED_GAS_CELL_IMPORT_GRAPH_LIMIT' });
+});
+
 test('SPH pressure interface stage consumes an admitted retained gas-cell field import', async () => {
   const materialInterfaceField = {
     schema: 'peercompute.ulg.sph-material-interface-field.v0',
@@ -16859,7 +17109,7 @@ test('resident product history selects product-aware P2G without suppressing can
 
 test('canonical ambient-only resident step keeps product history on authenticated field P2G', async () => {
   const { tracker, options } = noFullReadbackResidentStepFixture();
-  const device = { queue: {}, lost: new Promise(() => {}) };
+  const device = fakeSummaryDevice(new Float32Array(0));
   const { generation, transaction } = residentSpatialEpochTransactionFixture({
     device,
     tracker,
@@ -16872,6 +17122,17 @@ test('canonical ambient-only resident step keeps product history on authenticate
     byteLength: 256,
     unplacedProductMassKg: 1,
     unplacedGasProductMassKg: 0.5
+  });
+  tagResidentProductMassDevice(residentProductMass, device);
+  const historyControl = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'canonical-ambient-product-history-count', size: 256, usage: 128 | 8 | 4
+  }), device);
+  device.queue.writeBuffer(historyControl, 0, createResidentProductEventCountControlWords({
+    liveRowCount: 2, rowCapacity: 2, rowStrideVec4: 8, generation: 17, seal: 29
+  }));
+  registerResidentProductEventCountAuthority(residentProductMass, {
+    device, controlBuffer: historyControl, controlOffsetBytes: 0,
+    rowCapacity: 2, rowStrideFloats: 32, generation: 17, seal: 29
   });
   const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
     h2o: {
@@ -16911,6 +17172,7 @@ test('canonical ambient-only resident step keeps product history on authenticate
     ambientPressurePa: 101325,
     gravityMPerS2: [0, -9.80665, 0],
     residentProductMass,
+    summaryRunner: null,
     p2gRunner(args) {
       observedP2gArgs = args;
       return baseP2gRunner(args);
@@ -16930,6 +17192,7 @@ test('canonical ambient-only resident step keeps product history on authenticate
   assert.equal(step.fullParticleReadbackPerformed, false);
   assert.equal(step.normalHotLoopReadbackFree, true);
   destroyMlsMpmResidentStepBuffers(step);
+  historyControl.destroy();
 });
 
 test('canonical mechanics-only resident step derives ambient buoyancy without a caller flag', async () => {
@@ -20071,6 +20334,8 @@ test('MLS-MPM full-readback diagnostics summarize the terminal phase state and r
 test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(0));
+  let emittedProductEventBuffer;
   const sourceThermoBuffer = tracker.buffer('source-thermo');
   const thermalResponseGraphUpload = {
     schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
@@ -20103,6 +20368,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
       slot: 0
     },
     preferWebGpu: true,
+    device,
     navigatorRef: webGpuNavigator(),
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
@@ -20229,6 +20495,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
       assert.equal(args.reactionParticleBinMetadataReadback, true);
       assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
       const productEventBuffer = tracker.buffer('reaction-product-events-after-thermal');
+      emittedProductEventBuffer = productEventBuffer;
       return {
         schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
         backend: 'webgpu',
@@ -20277,9 +20544,10 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
 	          productEventRowCount: 64,
 	          productEventActiveEventCount: 1,
 	          productEventReadbackByteLength: 0,
-	          productEventBufferByteLength: 4096,
+	          productEventBufferByteLength: 8192,
 	          productEventBufferRetained: true,
 	          productEventBuffer,
+              productEventDevice: device,
 	          destroyProductEventBuffer() {
 	            productEventBuffer.destroy();
 	          },
@@ -20405,16 +20673,20 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
 	  assert.equal(step.diagnostics.reactionProductEventRowCount, 64);
 	  assert.equal(step.diagnostics.reactionProductEventActiveEventCount, 1);
 	  assert.equal(step.diagnostics.reactionProductEventReadbackByteLength, 0);
-	  assert.equal(step.diagnostics.reactionProductEventBufferByteLength, 4096);
+	  assert.equal(step.diagnostics.reactionProductEventBufferByteLength, 8192);
 	  assert.equal(step.diagnostics.reactionProductEventBufferRetained, true);
 	  assert.equal(step.residentProductMass.schema, ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA);
-	  assert.equal(step.residentProductMass.status, 'resident-product-mass-buffer-retained');
-	  assert.equal(step.residentProductMass.productEventBuffer.label, 'reaction-product-events-after-thermal');
+	  assert.equal(step.residentProductMass.status, 'resident-product-mass-merged-gpu-resident');
+  assert.notEqual(step.residentProductMass.productEventBuffer,
+    emittedProductEventBuffer,
+    'raw first emission is promoted once, not published as an unauthenticated history');
+  assert.ok(productEventLiveCountCopyDescriptor(step.residentProductMass, device));
+  assert.equal(step.nextParticleUploads.residentProductMass, step.residentProductMass);
 	  assert.equal(step.residentProductMass.consumeMassPolicy, 'unplaced-product-mass-only');
 	  assert.equal(step.residentProductMassEosCouplingStatus, 'resident-product-mass-p2g-eos-sidecar-ready');
 	  assert.equal(step.diagnostics.reactionResidentProductMassStatus, 'resident-product-mass-buffer-retained');
 	  assert.equal(step.diagnostics.reactionResidentProductMassBufferRetained, true);
-	  assert.equal(step.diagnostics.reactionResidentProductMassBufferByteLength, 4096);
+	  assert.equal(step.diagnostics.reactionResidentProductMassBufferByteLength, 8192);
 	  assert.equal(step.diagnostics.reactionResidentProductMassProductEventRowCount, 64);
 	  assert.equal(step.diagnostics.reactionResidentProductMassUnplacedProductMassKg, 1);
 	  assert.equal(step.diagnostics.reactionResidentProductMassUnplacedGasProductMassKg, 0.5);
@@ -20627,7 +20899,10 @@ test('MLS-MPM resident no-full step skips no-op reaction output buffers for next
   assert.equal(tracker.destroyed, 9);
 });
 
-test('MLS-MPM resident step GPU-filters carried and emitted product history without observing its live count', async () => {
+for (const failAfterClosure of [false, true]) {
+test(failAfterClosure
+  ? 'MLS-MPM post-closure failure retires its new history view without destroying borrowed sources'
+  : 'MLS-MPM resident step GPU-filters carried and emitted product history without observing its live count', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
@@ -20657,11 +20932,14 @@ test('MLS-MPM resident step GPU-filters carried and emitted product history with
   });
   const p2gInputs = [];
   let mergeFenceCount = 0;
+  tagResidentProductMassDevice(carriedResidentProductMass, device);
+  tagResidentProductMassDevice(emittedResidentProductMass, device);
   device.queue.onSubmittedWorkDone = async () => {
     mergeFenceCount += 1;
+    if (failAfterClosure) throw new Error('injected-post-closure-fence-failure');
   };
 
-  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+  const stepPromise = runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
     sphParticleUpload: {
       status: 'webgpu-uploaded',
@@ -20675,6 +20953,7 @@ test('MLS-MPM resident step GPU-filters carried and emitted product history with
       slot: 0
     },
     residentProductMass: carriedResidentProductMass,
+    measureGpuQueueFence: failAfterClosure,
     preferWebGpu: true,
     device,
     boxDimsM: [3, 3, 3],
@@ -20794,6 +21073,31 @@ test('MLS-MPM resident step GPU-filters carried and emitted product history with
     }
   });
 
+  if (failAfterClosure) {
+    await assert.rejects(stepPromise, /injected-post-closure-fence-failure/);
+    assert.equal(mergeFenceCount, 1, 'the fault occurs after the queue-free merge');
+    assert.equal(carriedResidentProductMass.destroyCalls, 0);
+    assert.equal(emittedResidentProductMass.destroyCalls, 0);
+    const rejectedBuffer = device.createdBuffers.find(
+      (buffer) => buffer.label === 'ulg-sph-resident-product-history-arena-1'
+    );
+    assert.ok(rejectedBuffer, 'closure really allocated a history before failing');
+    assert.equal(rejectedBuffer.destroyed, false, 'shared arena is not raw-destroyed');
+    const retry = await mergeResidentProductMassBuffersWebGpu({
+      device, inputResidentProductMass: carriedResidentProductMass,
+      emittedResidentProductMass, allowHostCompactionObservation: false
+    });
+    assert.equal(retry.productEventBuffer, rejectedBuffer,
+      'retiring the failed logical view permits safe same-queue slot reuse');
+    assert.equal(device.createdBuffers.filter((buffer) =>
+      /^ulg-sph-resident-product-history-arena-\d+$/.test(buffer.label)).length, 1,
+      'retry needs no second arena slot');
+    assert.equal(carriedResidentProductMass.productEventBuffer.destroyed, false);
+    assert.equal(emittedResidentProductMass.productEventBuffer.destroyed, false);
+    retry.destroyResidentProductMassBuffers();
+    return;
+  }
+  const step = await stepPromise;
   assert.equal(p2gInputs[0], carriedResidentProductMass);
   assert.equal(step.inputResidentProductMassStatus, 'resident-product-mass-buffer-retained');
   assert.equal(step.emittedResidentProductMassStatus, 'resident-product-mass-buffer-retained');
@@ -20927,6 +21231,7 @@ test('MLS-MPM resident step GPU-filters carried and emitted product history with
   assert.equal(step.residentBufferLeaseCleanupStatus, 'resident-buffer-lease-ledger-cleaned');
   assert.equal(step.residentBufferLeaseCleanup.destroyedResourceCount, 2);
 });
+}
 
 test('resident product-history arena appends 128 warm generations without reallocating or fencing', async () => {
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));

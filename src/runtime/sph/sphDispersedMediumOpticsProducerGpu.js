@@ -32,6 +32,7 @@ import {
   webGpuBufferDevice
 } from './sphGpuDeviceIdentity.js';
 import { createGpuReadbackTelemetry } from './sphGpuReadbackTelemetry.js';
+import { resolveSphAerosolCondensateOpticalExclusion } from './sphAerosolParcelGpu.js';
 import {
   beginSphDispersedMediumGpuBufferBorrow,
   snapshotSphDispersedMediumGpuBufferDeclaration,
@@ -65,7 +66,7 @@ export const SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_VERSION = 0;
 export const SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_WORKGROUP_SIZE = 64;
 export const SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_EVIDENCE_WORDS = 16;
 export const SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_KERNEL_REVISION =
-  'four-lane-reaction-birth-conserved-condensate-ledger-optical-moments-v1';
+  'four-lane-donor-resolved-reaction-birth-conserved-condensate-ledger-optical-moments-v2';
 
 const REQUIRED_PHASE_CARRIER_PLAN_SCHEMA =
   'peercompute.ulg.sph-phase-carrier-plan.v2';
@@ -1658,7 +1659,8 @@ function lineageMaterialPhaseComponentMass({
   topology,
   lineageIndex,
   materialId,
-  phaseId
+  phaseId,
+  excludedDonorMaterialId = null
 }) {
   let totalMassKg = Math.fround(0);
   for (let phaseLane = 1;
@@ -1682,6 +1684,9 @@ function lineageMaterialPhaseComponentMass({
     ) {
       return Object.freeze({ valid: false, massKg: 0 });
     }
+    // Exclude only the selected gas-address donor's liquid component. Its
+    // material is the actual post-reaction material for BOTH reaction sums.
+    if (phaseLane === 3 && phaseId === 2 && materialId === excludedDonorMaterialId) continue;
     totalMassKg = Math.fround(
       totalMassKg + Math.fround(massKg * Math.min(1, Math.max(0, fraction)))
     );
@@ -1696,7 +1701,8 @@ function captureReactionBornDispersedMediumRows({
   postReactionState,
   postReactionThermo,
   priorRows,
-  opticalClosureTable
+  opticalClosureTable,
+  excludedLineages = null
 }) {
   const rows = new Float32Array(priorRows.length);
   for (let particleIndex = 0;
@@ -1720,6 +1726,9 @@ function captureReactionBornDispersedMediumRows({
       particleIndex / topology.phaseLaneStride
     ) + 1;
     const lineageIndex = particleIndex % topology.phaseLaneStride;
+    const excludedDonorMaterialId = excludedLineages?.has(lineageIndex)
+      ? postReactionThermo[(2 * topology.phaseLaneStride + lineageIndex) * THERMO_ROW_FLOATS]
+      : null;
     const candidates = [];
     let candidateInputInvalid = false;
     for (let rowIndex = 0;
@@ -1736,7 +1745,8 @@ function captureReactionBornDispersedMediumRows({
         topology,
         lineageIndex,
         materialId: route.dispersedMaterialId,
-        phaseId: route.condensedPhaseId
+        phaseId: route.condensedPhaseId,
+        excludedDonorMaterialId
       });
       if (!component.valid) {
         candidateInputInvalid = true;
@@ -1773,7 +1783,8 @@ function captureReactionBornDispersedMediumRows({
                 topology,
                 lineageIndex,
                 materialId: priorRoute.dispersedMaterialId,
-                phaseId: priorRoute.condensedPhaseId
+                phaseId: priorRoute.condensedPhaseId,
+                excludedDonorMaterialId
               }).massKg
           }
         : null
@@ -1789,7 +1800,8 @@ function captureReactionBornDispersedMediumRows({
       topology,
       lineageIndex,
       materialId: route.dispersedMaterialId,
-      phaseId: route.condensedPhaseId
+      phaseId: route.condensedPhaseId,
+      excludedDonorMaterialId
     });
     const postReaction = lineageMaterialPhaseComponentMass({
       state: postReactionState,
@@ -1797,7 +1809,8 @@ function captureReactionBornDispersedMediumRows({
       topology,
       lineageIndex,
       materialId: route.dispersedMaterialId,
-      phaseId: route.condensedPhaseId
+      phaseId: route.condensedPhaseId,
+      excludedDonorMaterialId
     });
     const priorIdentityMatches = Boolean(
       priorRoute
@@ -1865,6 +1878,9 @@ export function deriveSphDispersedMediumOpticsProducerReference({
   particleCount = phaseCarrierPlan?.particleCapacity,
   preReactionState = null,
   preReactionThermo = null,
+  postReactionState = null,
+  postReactionThermo = null,
+  extractedCondensateLineages = null,
   preTransferState,
   preTransferThermo,
   postTransferState,
@@ -1887,9 +1903,34 @@ export function deriveSphDispersedMediumOpticsProducerReference({
     );
   }
   const reactionCaptureEnabled = preReactionState != null;
+  if ((postReactionState == null) !== (postReactionThermo == null)
+      || (postReactionState != null && !reactionCaptureEnabled)) {
+    throw new TypeError('Explicit post-reaction optics requires a complete reaction input/output pair');
+  }
+  if (postReactionState != null) {
+    exactFloatRows(postReactionState, stateLength, 'post-reaction state rows');
+    exactFloatRows(postReactionThermo, thermoLength, 'post-reaction thermo rows');
+  }
   if (reactionCaptureEnabled) {
     exactFloatRows(preReactionState, stateLength, 'pre-reaction state rows');
     exactFloatRows(preReactionThermo, thermoLength, 'pre-reaction thermo rows');
+  }
+  // Numerical reference input only. The GPU API instead requires a privately
+  // authenticated pending extraction and cannot accept this caller-authored list.
+  let excludedLineages = null;
+  if (extractedCondensateLineages != null) {
+    if (!reactionCaptureEnabled || postReactionState == null
+        || !Array.isArray(extractedCondensateLineages) || extractedCondensateLineages.length === 0) {
+      throw new TypeError('Extracted donor reference requires complete explicit reaction pairs and a nonempty lineage list');
+    }
+    excludedLineages = new Set();
+    for (const lineage of extractedCondensateLineages) {
+      if (!Number.isSafeInteger(lineage) || lineage < 0 || lineage >= topology.lineageCapacity
+          || excludedLineages.has(lineage)) {
+        throw new RangeError('Extracted donor reference requires distinct bounded lineage indices');
+      }
+      excludedLineages.add(lineage);
+    }
   }
   if (priorOpticsRows && seedOpticsRows) {
     throw new TypeError(
@@ -1913,10 +1954,11 @@ export function deriveSphDispersedMediumOpticsProducerReference({
         topology,
         preReactionState,
         preReactionThermo,
-        postReactionState: preTransferState,
-        postReactionThermo: preTransferThermo,
+        postReactionState: postReactionState ?? preTransferState,
+        postReactionThermo: postReactionThermo ?? preTransferThermo,
         priorRows: sourceRows,
-        opticalClosureTable
+        opticalClosureTable,
+        excludedLineages
       })
     : null;
   const productionInputRows = reactionCapture?.rows ?? sourceRows;
@@ -2088,7 +2130,7 @@ struct ProducerParams {
   evidence_version: u32,
   phase_fraction_tolerance: f32,
   mass_epsilon_kg: f32,
-  reserved0: u32,
+  exclusion_lineage_count: u32,
   reserved1: u32,
 };
 
@@ -2209,6 +2251,13 @@ fn component_mass(
     ) {
       return ComponentMass(0u, 0.0);
     }
+    if (params.exclusion_lineage_count != 0u && phase_lane == 3u && phase_id == 2u) {
+      let selected = atomicLoad(&evidence[16u + lineage_index]);
+      if (selected > 1u) { return ComponentMass(0u, 0.0); }
+      let donor_material = thermo0(&post_reaction_thermo,
+        2u * params.phase_lane_stride + lineage_index).x;
+      if (selected == 1u && donor_material == material_id) { continue; }
+    }
     total_mass_kg += mass_kg * clamp(fraction, 0.0, 1.0);
   }
   return ComponentMass(1u, total_mass_kg);
@@ -2242,6 +2291,10 @@ fn capture_reaction_births(
     || arrayLength(&prior_optics) != params.particle_count * 2u
     || arrayLength(&closure_rows) != params.closure_row_count * 3u
     || arrayLength(&captured_optics) != params.particle_count * 2u
+    || (params.exclusion_lineage_count != 0u
+      && params.exclusion_lineage_count != params.lineage_capacity)
+    || arrayLength(&evidence) != 16u + params.exclusion_lineage_count
+    || params.reserved1 != 0u
   ) {
     atomicOr(&evidence[2u], ERROR_LAYOUT);
     return;
@@ -3029,7 +3082,7 @@ export function sphDispersedMediumOpticsProducerPipelineDescriptors() {
   return Object.freeze([
     Object.freeze({
       cacheKey:
-        'ulg-sph-dispersed-medium-optics-producer.v1.capture-reaction-births',
+        'ulg-sph-dispersed-medium-optics-producer.v2.capture-reaction-births',
       label:
         'ulg-sph-dispersed-medium-optics-producer-capture-reaction-births',
       code: sphDispersedMediumOpticsReactionCaptureWgsl,
@@ -3072,7 +3125,8 @@ function validateDeviceLimits(device, {
   stateBufferByteLength,
   thermoBufferByteLength,
   opticsBufferByteLength,
-  closureBufferByteLength
+  closureBufferByteLength,
+  evidenceScratchByteLength = EVIDENCE_BYTES
 }) {
   const limits = Object.freeze({
     maxStorageBuffersPerShaderStage: exactDeviceLimit(
@@ -3126,7 +3180,7 @@ function validateDeviceLimits(device, {
     ['thermo rows', thermoBufferByteLength],
     ['optics rows', opticsBufferByteLength],
     ['closure rows', closureBufferByteLength],
-    ['producer evidence', EVIDENCE_BYTES]
+    ['producer evidence', evidenceScratchByteLength]
   ]) {
     if (
       byteLength > limits.maxBufferSize
@@ -3171,7 +3225,7 @@ function requireExactStorageBuffer(device, buffer, byteLength, label) {
   return buffer;
 }
 
-function createParamsArray(topology, closureRowCount) {
+function createParamsArray(topology, closureRowCount, exclusionLineageCount = 0) {
   const buffer = new ArrayBuffer(PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, topology.particleCount, true);
@@ -3188,6 +3242,7 @@ function createParamsArray(topology, closureRowCount) {
   view.setUint32(44, EVIDENCE_VERSION, true);
   view.setFloat32(48, PHASE_FRACTION_TOLERANCE, true);
   view.setFloat32(52, MASS_EPSILON_KG, true);
+  view.setUint32(56, exclusionLineageCount, true);
   return buffer;
 }
 
@@ -3237,6 +3292,9 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
   particleLineage,
   preReactionStateBuffer = null,
   preReactionThermoBuffer = null,
+  postReactionStateBuffer = null,
+  postReactionThermoBuffer = null,
+  aerosolCondensateTransition = null,
   preTransferStateBuffer,
   preTransferThermoBuffer,
   postTransferStateBuffer,
@@ -3267,6 +3325,25 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     );
   }
   const reactionCaptureEnabled = preReactionStateBuffer != null;
+  if (aerosolCondensateTransition != null && !reactionCaptureEnabled) {
+    throw new TypeError('Condensate optical exclusion requires complete explicit reaction pairs');
+  }
+  if ((postReactionStateBuffer == null) !== (postReactionThermoBuffer == null)
+      || (postReactionStateBuffer != null && !reactionCaptureEnabled)) {
+    throw new TypeError('Explicit post-reaction optics requires a complete reaction input/output pair');
+  }
+  const capturePostState = postReactionStateBuffer ?? preTransferStateBuffer;
+  const capturePostThermo = postReactionThermoBuffer ?? preTransferThermoBuffer;
+  const validateInputAuthorities = () => reactionCaptureEnabled
+    ? resolveSphAerosolCondensateOpticalExclusion(aerosolCondensateTransition, {
+        device, phaseCarrierPlan, particleLineage,
+        postReactionStateBuffer: capturePostState, postReactionThermoBuffer: capturePostThermo,
+        preTransferStateBuffer, preTransferThermoBuffer
+      })
+    : null;
+  const excludedLineages = validateInputAuthorities();
+  const evidenceScratchByteLength = EVIDENCE_BYTES
+    + (excludedLineages ? topology.lineageCapacity * Uint32Array.BYTES_PER_ELEMENT : 0);
   const requestedOpticalClosureTable =
     snapshotSphDispersedMediumOpticalClosureTable(opticalClosureTable);
   const resolvedOpticalClosureGpuTable = opticalClosureGpuTable
@@ -3314,7 +3391,8 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     stateBufferByteLength,
     thermoBufferByteLength,
     opticsBufferByteLength,
-    closureBufferByteLength
+    closureBufferByteLength,
+    evidenceScratchByteLength
   });
   const sourceBuffers = [
     requireExactStorageBuffer(
@@ -3360,12 +3438,19 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
           preReactionThermoBuffer,
           thermoBufferByteLength,
           'preReactionThermoBuffer'
+        ),
+        requireExactStorageBuffer(
+          device, capturePostState, stateBufferByteLength, 'postReactionStateBuffer'
+        ),
+        requireExactStorageBuffer(
+          device, capturePostThermo, thermoBufferByteLength, 'postReactionThermoBuffer'
         )
       ]
     : [];
   if (
     reactionCaptureEnabled
-    && reactionSourceBuffers[0] === reactionSourceBuffers[1]
+    && (reactionSourceBuffers[0] === reactionSourceBuffers[1]
+      || reactionSourceBuffers[2] === reactionSourceBuffers[3])
   ) {
     throw new RangeError(
       'Dispersed-medium reaction capture requires distinct state and thermo buffers'
@@ -3547,12 +3632,19 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     const evidenceValues = initialEvidence();
     const evidenceBuffer = own(createOwnedBuffer(device, {
       label: `${label}-evidence`,
-      size: EVIDENCE_BYTES,
+      size: evidenceScratchByteLength,
       usage: GPU_BUFFER_USAGE.STORAGE
         | GPU_BUFFER_USAGE.COPY_SRC
         | GPU_BUFFER_USAGE.COPY_DST
     }));
     device.queue.writeBuffer(evidenceBuffer, 0, evidenceValues);
+    if (excludedLineages) {
+      // Cold, privately validated donor addresses. Material, mass and phase
+      // stay in the existing GPU source; no new pass, binding or readback.
+      const flags = new Uint32Array(topology.lineageCapacity);
+      for (const lineage of excludedLineages) flags[lineage] = 1;
+      device.queue.writeBuffer(evidenceBuffer, EVIDENCE_BYTES, flags);
+    }
     const paramsBuffer = own(createOwnedBuffer(device, {
       label: `${label}-params`,
       size: PARAMS_BYTES,
@@ -3561,7 +3653,8 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     device.queue.writeBuffer(
       paramsBuffer,
       0,
-      createParamsArray(topology, resolvedOpticalClosureTable.rowCount)
+      createParamsArray(topology, resolvedOpticalClosureTable.rowCount,
+        excludedLineages ? topology.lineageCapacity : 0)
     );
 
     const pipelineDescriptors =
@@ -3659,14 +3752,14 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
             {
               binding: 2,
               resource: {
-                buffer: preTransferStateBuffer,
+                buffer: capturePostState,
                 size: stateBufferByteLength
               }
             },
             {
               binding: 3,
               resource: {
-                buffer: preTransferThermoBuffer,
+                buffer: capturePostThermo,
                 size: thermoBufferByteLength
               }
             },
@@ -3693,7 +3786,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
             },
             {
               binding: 7,
-              resource: { buffer: evidenceBuffer, size: EVIDENCE_BYTES }
+              resource: { buffer: evidenceBuffer, size: evidenceScratchByteLength }
             },
             {
               binding: 8,
@@ -3883,6 +3976,8 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       adoptionStatus: 'claim-unissued',
       evidenceBuffer,
       evidenceBufferByteLength: EVIDENCE_BYTES,
+      evidenceScratchBufferByteLength: evidenceScratchByteLength,
+      extractedCondensateDonorCount: excludedLineages?.length ?? 0,
       deviceLimits,
       encodedDispatchCount: 0,
       reactionCaptureEnabled,
@@ -3970,6 +4065,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       evidenceBuffer,
       outputBufferByteLength: opticsBufferByteLength,
       evidenceBufferByteLength: EVIDENCE_BYTES,
+      validateInputAuthorities,
       encode(encoder) {
         if (!encoder?.beginComputePass) {
           throw new TypeError(
@@ -3987,6 +4083,9 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
             'Dispersed-medium optics producer stage is no longer eligible for encoding'
           );
         }
+        // The caller still owns the transient S/T inputs through submission;
+        // do not encode a copied, abandoned or already published extraction.
+        validateInputAuthorities();
         encodeState = 'encoding';
         producerOutputAdoptionRecord.encodeState = encodeState;
         setProducerAdoptionDiagnostic(producerOutputAdoptionRecord, encodeState);
@@ -4102,6 +4201,7 @@ export function runSphDispersedMediumOpticsProducerWebGpu(args = {}) {
     });
     stage.encode(encoder);
     const commandBuffer = encoder.finish();
+    stage.validateInputAuthorities();
     const submission = submitQueueOrderedProducerWorkAndCleanup(
       producerSubmittedWorkCleanupClaimIssuer,
       device,

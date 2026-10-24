@@ -621,6 +621,190 @@ test('CPU MLS-MPM grid update leaves the first interior floor row free for liqui
   nearlyEqual(upperInterior.updatedGridNodes[2], 0);
 });
 
+// Notification-only WebGPU sentinels: no CPU reconstruction or numerical parity.
+function gridUpdateLossNotificationFixture(route = 'provided') {
+  let resolveLoss;
+  let rejectLoss;
+  const lost = new Promise((resolve, reject) => { resolveLoss = resolve; rejectLoss = reject; });
+  // deviceResult deliberately adds no wrapper observer; handle that root promise.
+  lost.catch(() => {});
+  const counters = { subscriptions: 0, acquisitions: 0, destroys: 0 };
+  const chains = [];
+  const originalThen = lost.then.bind(lost);
+  lost.then = (...args) => {
+    counters.subscriptions += 1;
+    const notified = originalThen(...args);
+    const originalCatch = notified.catch.bind(notified);
+    notified.catch = (...catchArgs) => {
+      const settled = originalCatch(...catchArgs);
+      chains.push(settled.then(value => ({ value }), error => ({ error })));
+      return settled;
+    };
+    return notified;
+  };
+  const device = { lost };
+  const navigatorRef = { gpu: { async requestAdapter() {
+    return { async requestDevice() { counters.acquisitions += 1; return device; } };
+  } } };
+  const result = {
+    backend: 'webgpu', readbackMode: 'no-full-readback', updatedGridBuffer: {}, retainedUpdatedGridBuffer: true,
+    destroyUpdatedGridBuffer() { counters.destroys += 1; return true; }
+  };
+  const runnerCalls = [];
+  const options = {
+    preferWebGpu: true, readbackMode: 'no-full-readback', mechanicsFieldMode: 'required', retainUpdatedGridBuffer: true,
+    navigatorRef,
+    ...(route === 'provided' ? { device }
+      : route === 'deviceResult' ? { deviceResult: { device } } : {}),
+    async webGpuRunner(args) { runnerCalls.push(args); return result; }
+  };
+  return {
+    device, options, result, counters, chains, runnerCalls,
+    settle(outcome, value) { (outcome === 'resolve' ? resolveLoss : rejectLoss)(value); },
+    async flush() { await new Promise(resolve => setImmediate(resolve)); return Promise.all(chains); }
+  };
+}
+
+test('optional grid update device-loss notifications outlive return, error and output destruction', async (t) => {
+  for (const route of ['provided', 'acquired']) {
+    for (const lossOutcome of ['resolve', 'reject']) {
+      for (const terminal of ['success', 'runner-error', 'destroyed-output']) {
+        await t.test(`${route}/${lossOutcome}/${terminal}`, async () => {
+          const f = gridUpdateLossNotificationFixture(route);
+          const calls = [];
+          const runnerError = new Error('injected native runner failure');
+          if (terminal === 'runner-error') {
+            f.options.webGpuRunner = async (args) => { f.runnerCalls.push(args); throw runnerError; };
+          }
+          const completed = await runMlsMpmGridUpdateWithOptionalWebGpu({
+            ...f.options, onDeviceLost(info) { calls.push({ info, receiver: this }); }
+          }).then(value => ({ value }), error => ({ error }));
+          if (terminal === 'runner-error') {
+            assert.ok(completed.error);
+            assert.match(completed.error.message, /injected native runner failure/);
+          } else {
+            assert.equal(completed.value.backend, 'webgpu');
+            assert.equal(completed.value.cpuReference, null);
+            assert.equal(completed.value.webgpuParity.status, 'not-run-no-full-readback');
+            assert.equal(completed.value.gpuResult, f.result);
+            assert.equal(completed.value.gpuResult.destroyUpdatedGridBuffer, f.result.destroyUpdatedGridBuffer);
+            if (terminal === 'destroyed-output') completed.value.gpuResult.destroyUpdatedGridBuffer();
+          }
+          assert.equal(f.runnerCalls.length, 1);
+          assert.equal(f.runnerCalls[0].device, f.device);
+          assert.equal(f.runnerCalls[0].readbackMode, 'no-full-readback');
+          assert.equal(f.counters.subscriptions, 1);
+          assert.equal(f.counters.acquisitions, route === 'acquired' ? 1 : 0);
+          assert.deepEqual(calls, []);
+          const loss = new Error('late device notification');
+          f.settle(lossOutcome, loss);
+          const chains = await f.flush();
+          assert.deepEqual(calls, [{ info: loss, receiver: undefined }]);
+          assert.deepEqual(chains, [{ value: undefined }]);
+          assert.equal(f.counters.destroys, terminal === 'destroyed-output' ? 1 : 0);
+          assert.equal(f.runnerCalls.length, 1, 'late notification does not rerun work');
+        });
+      }
+    }
+  }
+});
+
+test('optional grid update device-loss subscriptions and in-flight native rejection remain exact', async (t) => {
+  for (const lossOutcome of ['resolve', 'reject']) {
+    await t.test(`deviceResult/${lossOutcome}/no-extra-observer`, async () => {
+      const f = gridUpdateLossNotificationFixture('deviceResult');
+      const calls = [];
+      const result = await runMlsMpmGridUpdateWithOptionalWebGpu({
+        ...f.options, onDeviceLost(info) { calls.push(info); }
+      });
+      assert.equal(result.backend, 'webgpu');
+      assert.equal(result.cpuReference, null);
+      f.settle(lossOutcome, new Error('externally owned device loss'));
+      await f.flush();
+      assert.deepEqual(calls, []);
+      assert.equal(f.counters.subscriptions, 0);
+      assert.equal(f.counters.acquisitions, 0);
+    });
+    for (const route of ['provided', 'acquired']) {
+      for (const phase of ['already-settled', 'during-runner']) {
+        await t.test(`${route}/${lossOutcome}/${phase}`, async () => {
+          const f = gridUpdateLossNotificationFixture(route);
+          const loss = { reason: 'unknown', message: 'native loss sentinel' };
+          const calls = [];
+          if (phase === 'already-settled') f.settle(lossOutcome, loss);
+          else f.options.webGpuRunner = async (args) => {
+            f.runnerCalls.push(args);
+            f.settle(lossOutcome, loss);
+            await Promise.resolve();
+            return f.result;
+          };
+          const completed = await runMlsMpmGridUpdateWithOptionalWebGpu({
+            ...f.options, onDeviceLost(info) { calls.push(info); }
+          }).then(value => ({ value }), error => ({ error }));
+          assert.equal(completed.value, undefined, 'required GPU execution never CPU-fallbacks');
+          assert.match(completed.error?.message ?? '', /Required resident grid update lost its device/);
+          await f.flush();
+          assert.deepEqual(calls, [loss]);
+          // The provided-device .catch runs one microtask later than fulfillment:
+          // an already-rejected promise reaches the runner before the loss check.
+          const expectedRunnerCalls = phase === 'during-runner'
+            || (route === 'provided' && lossOutcome === 'reject') ? 1 : 0;
+          assert.equal(f.runnerCalls.length, expectedRunnerCalls);
+          assert.equal(f.counters.destroys, expectedRunnerCalls * 1);
+          assert.equal(f.counters.subscriptions, 1);
+        });
+      }
+    }
+  }
+  await t.test('provided device takes precedence over deviceResult', async () => {
+    const f = gridUpdateLossNotificationFixture('provided');
+    const ignored = gridUpdateLossNotificationFixture('deviceResult');
+    const result = await runMlsMpmGridUpdateWithOptionalWebGpu({
+      ...f.options, deviceResult: { device: ignored.device }
+    });
+    assert.equal(result.backend, 'webgpu');
+    assert.equal(f.runnerCalls[0].device, f.device);
+    assert.equal(f.counters.subscriptions, 1);
+    assert.equal(ignored.counters.subscriptions, 0);
+    assert.equal(f.counters.acquisitions, 0);
+  });
+});
+
+test('optional grid update device-loss throw forwarding preserves plain calls and ignores return values', async (t) => {
+  for (const mode of ['fulfilled-first-throws', 'fulfilled-both-throw', 'rejected-callback-throws']) {
+    await t.test(mode, async () => {
+      const f = gridUpdateLossNotificationFixture();
+      const loss = new Error('device loss');
+      const first = new Error('first notification threw');
+      const second = new Error('second notification threw');
+      const calls = [];
+      let adoptions = 0;
+      const returnedThenable = { then(resolve) { adoptions += 1; resolve('must not be adopted'); } };
+      const result = await runMlsMpmGridUpdateWithOptionalWebGpu({
+        ...f.options,
+        onDeviceLost(info) {
+          calls.push({ info, receiver: this });
+          if (calls.length === 1) throw first;
+          if (mode === 'fulfilled-both-throw') throw second;
+          return returnedThenable;
+        }
+      });
+      assert.equal(result.backend, 'webgpu');
+      f.settle(mode === 'rejected-callback-throws' ? 'reject' : 'resolve', loss);
+      const chains = await f.flush();
+      assert.deepEqual(calls, mode === 'rejected-callback-throws'
+        ? [{ info: loss, receiver: undefined }]
+        : [{ info: loss, receiver: undefined }, { info: first, receiver: undefined }]);
+      assert.deepEqual(chains, mode === 'fulfilled-first-throws'
+        ? [{ value: undefined }]
+        : [{ error: mode === 'fulfilled-both-throw' ? second : first }]);
+      assert.equal(adoptions, 0, 'relay must not return/adopt a notifier thenable');
+      assert.equal(f.counters.destroys, 0);
+      assert.equal(f.runnerCalls.length, 1);
+    });
+  }
+});
+
 test('optional MLS-MPM grid update returns CPU reference when WebGPU is not requested', async () => {
   const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
     p2gGridProjection: manualP2gProjection(),

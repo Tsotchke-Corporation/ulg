@@ -20,6 +20,7 @@ import {
   buildAlgorithmSurfaceExtractionRows
 } from '../material/algorithmMaterialRows.js';
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
+import { prepareSphCondensableParticleInitialization } from './sphCondensableParticleInitialization.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   advanceSphDispersedMediumGpuBufferParticleTopologyEpoch,
@@ -70,6 +71,7 @@ export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
 const AVOGADRO = 6.02214076e23;
 const R_GAS = 8.314462618;
 import { phaseSoundSpeedScaleFor } from './sphMechanicsMaterialTable.js';
+import { compileSphGasConstitutive, evaluateSphGasSoundSpeed } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 const DEFAULT_SOUND_SPEED_SCALE = 1;
 const DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S = 40;
 const DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA = 0.04;
@@ -295,7 +297,8 @@ function materialPropertiesFor(material, materialProperties) {
     ?? null;
 }
 
-function restDensityFor(properties, phase, particle) {
+function restDensityFor(properties, phase, particle, eq = null) {
+  if (eq?.phaseCaloric === true) return eq.restDensityKgPerM3;
   const particleRestDensity = finiteNumber(particle.restDensityKgPerM3, 0);
   if (particleRestDensity > 0) return particleRestDensity;
   const exact = properties?.phases?.find((candidate) => candidate.name === phase);
@@ -379,6 +382,7 @@ function phasePropertiesFor(properties, phase) {
 
 function mechanicsScaleOptions(state, {
   soundSpeedScale,
+  cflMaxSoundSpeedMPerS,
   minGasSoundSpeedMPerS,
   viscosityEnabled,
   mlsMpmArtificialViscosityAlpha,
@@ -394,7 +398,7 @@ function mechanicsScaleOptions(state, {
       soundSpeedScale ?? stateParams.soundSpeedScale,
       DEFAULT_SOUND_SPEED_SCALE
     ),
-    cflMaxSoundSpeedMPerS: finiteNumber(stateParams.cflMaxSoundSpeedMPerS, 0),
+    cflMaxSoundSpeedMPerS: finiteNumber(cflMaxSoundSpeedMPerS ?? stateParams.cflMaxSoundSpeedMPerS, 0),
     minGasSoundSpeedMPerS: finiteNumber(
       minGasSoundSpeedMPerS ?? stateParams.minGasSoundSpeedMPerS,
       DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
@@ -427,16 +431,6 @@ function mechanicsScaleOptions(state, {
       MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT
     ), 0), 1)
   };
-}
-
-function gasSoundSpeedMPerS(properties, phaseProperties, temperatureK, soundSpeedScale, minGasSoundSpeedMPerS) {
-  const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
-  const cp = finiteNumber(phaseProperties?.cpJPerKgK, 0);
-  if (!(molarMassKgPerMol > 0)) return 0;
-  const specificGasConstant = R_GAS / molarMassKgPerMol;
-  const gamma = cp > specificGasConstant ? cp / (cp - specificGasConstant) : 1.33;
-  const realSoundSpeed = Math.sqrt(Math.max(gamma * specificGasConstant * temperatureK, 0));
-  return Math.max(realSoundSpeed * soundSpeedScale, minGasSoundSpeedMPerS);
 }
 
 function dynamicViscosityPaSForPhase(phase, phaseProperties, {
@@ -491,29 +485,21 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
   const bulkRaw = finiteNumber(ph?.bulkModulusPa, 0);
   const shearRaw = phase === 'solid' ? finiteNumber(ph?.shearModulusPa, 0) : 0;
   if (phase === 'gas') {
+    const soundSpeedMPerS = evaluateSphGasSoundSpeed(
+      compileSphGasConstitutive(properties, ph, options), eq?.temperatureK
+    );
+    if (!(soundSpeedMPerS > 0)) throw new RangeError('Invalid initial gas constitutive temperature');
     return {
       solid: false,
       effectiveBulkModulusPa: 0,
       shearModulusPa: 0,
       lameLambdaPa: 0,
-      soundSpeedMPerS: gasSoundSpeedMPerS(
-        properties,
-        ph,
-        finiteNumber(eq?.temperatureK, 0),
-        soundSpeedScale,
-        finiteNumber(options.minGasSoundSpeedMPerS, DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S)
-      ),
+      soundSpeedMPerS,
       eosModelId: MLS_MPM_EOS_MODEL_IDS.gasLinearized,
       constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready,
       dynamicViscosityPaS: dynamicViscosityPaSForPhase(phase, ph, {
         restDensityKgPerM3: restDensity,
-        soundSpeedMPerS: gasSoundSpeedMPerS(
-          properties,
-          ph,
-          finiteNumber(eq?.temperatureK, 0),
-          soundSpeedScale,
-          finiteNumber(options.minGasSoundSpeedMPerS, DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S)
-        ),
+        soundSpeedMPerS,
         viscosityEnabled: options.viscosityEnabled,
         mlsMpmArtificialViscosityAlpha: options.mlsMpmArtificialViscosityAlpha,
         viscosityLengthM: options.viscosityLengthM
@@ -551,7 +537,8 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
 
 export function buildSphGpuParticleBuffers(state, {
   materialProperties = {},
-  initialParticleSpacing = null
+  initialParticleSpacing = null,
+  condensableThermodynamicsByMaterial = {}
 } = {}) {
   if (!state?.particles || !Array.isArray(state.particles)) {
     throw new TypeError('buildSphGpuParticleBuffers requires a SPH state with particles');
@@ -563,12 +550,15 @@ export function buildSphGpuParticleBuffers(state, {
   const renderDomainKeys = {};
   const metadata = [];
   const smoothingLengthM = finiteNumber(state.smoothingLengthM, 0);
+  const caloricInitialization = prepareSphCondensableParticleInitialization(
+    materialProperties, condensableThermodynamicsByMaterial
+  );
 
   for (let index = 0; index < particleCount; index += 1) {
     const particle = state.particles[index];
     const material = particle.material || 'unknown';
     const properties = materialPropertiesFor(material, materialProperties);
-    const eq = equilibriumForParticle(particle, properties);
+    const eq = caloricInitialization(particle) ?? equilibriumForParticle(particle, properties);
     const phase = eq.stablePhase || 'unknown';
     const phaseFractions = phaseFractionsFor(eq);
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -590,7 +580,7 @@ export function buildSphGpuParticleBuffers(state, {
       properties ? stableOpticalMaterialId(material) : 0,
       gpuPhaseId(phase),
       finiteNumber(eq.temperatureK),
-      restDensityFor(properties, phase, particle),
+      restDensityFor(properties, phase, particle, eq),
       phaseFractions[0],
       phaseFractions[1],
       phaseFractions[2],
@@ -660,6 +650,7 @@ export function buildSphGpuParticleBuffers(state, {
   return {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
+    ...(caloricInitialization.signature ? { phaseCaloricInitializationSignature: caloricInitialization.signature } : {}),
     particleCount,
     dimension: state.dimension ?? 3,
     step: state.step ?? 0,
@@ -1154,6 +1145,7 @@ function installSphGpuParticleBufferSetBorrowLifecycle(
   ) return null;
   const record = {
     activeBorrowCount: 0,
+    admissionClosed: false,
     destroyRequested: false,
     destroyed: false,
     dispersedMediumOptics,
@@ -1166,10 +1158,17 @@ function installSphGpuParticleBufferSetBorrowLifecycle(
       return record.activeBorrowCount;
     },
     set(value) {
-      record.activeBorrowCount = Math.max(
+      const nextCount = Math.max(
         0,
         Math.floor(Number(value) || 0)
       );
+      // An admitted consumer may release after terminal owner retirement has
+      // started, but an async producer that passed ensure earlier cannot
+      // acquire a new borrow after the same source has closed admission.
+      if (record.admissionClosed && nextCount > record.activeBorrowCount) {
+        throw new Error('SPH particle source borrow admission is closed');
+      }
+      record.activeBorrowCount = nextCount;
       if (
         record.activeBorrowCount === 0
         && record.destroyRequested
@@ -1594,6 +1593,7 @@ export function ensureSphGpuParticleBufferSetBorrowLifecycle(buffers) {
   if (existingRecord) {
     return Boolean(
       existingRecord.destroyed !== true
+      && existingRecord.admissionClosed !== true
       && exactParentDispersedMediumRecordMatches(buffers, existingRecord)
     );
   }
@@ -2280,12 +2280,17 @@ export function transferSphGpuParticleBufferSetDispersedMediumOpticsOwnership({
 
 export function runSphGpuParticleBufferSetCleanupAfterBorrows(
   buffers,
-  cleanup
+  cleanup,
+  { terminalSourceRetirement = false } = {}
 ) {
   if (typeof cleanup !== 'function') return false;
   const record = buffers
     && sphParticleBufferSetLifecycleRecords.get(buffers);
   if (!record || record.destroyed || buffers.destroyed === true) return false;
+  // This does not request generic SPH destruction: frozen fused descriptors
+  // retain their actual lower owner, which performs its exact cleanup below.
+  // Keep decrements and repeated cleanup attempts available after closure.
+  if (terminalSourceRetirement === true) record.admissionClosed = true;
   if (record.activeBorrowCount === 0) {
     cleanup();
     return true;
@@ -2498,7 +2503,8 @@ export function sphGpuParticleUploadMatchesDevice(upload, device) {
 }
 
 export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
-  const { materialProperties = {}, initialParticleSpacing = null } = options;
+  const { materialProperties = {}, initialParticleSpacing = null,
+    condensableThermodynamicsByMaterial = {} } = options;
   if (!state?.particles || !Array.isArray(state.particles)) {
     throw new TypeError('buildMlsMpmGpuParticleBuffers requires a SPH state with particles');
   }
@@ -2506,16 +2512,20 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
   const particleCount = state.particles.length;
   const mechanics = new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
   const metadata = [];
+  const caloricInitialization = prepareSphCondensableParticleInitialization(
+    materialProperties, condensableThermodynamicsByMaterial
+  );
   for (let index = 0; index < particleCount; index += 1) {
     const particle = state.particles[index];
     const material = particle.material || 'unknown';
     const properties = materialPropertiesFor(material, materialProperties);
-    const eq = equilibriumForParticle(particle, properties);
+    const eq = caloricInitialization(particle) ?? equilibriumForParticle(particle, properties);
     const constitutive = constitutivePropertiesFor(particle, properties, eq, scaleOptions);
     const F = finiteMatrix9(particle.mpmF, identityF());
     const C = finiteMatrix9(particle.mpmC, zeros9());
-    const restDensity = restDensityFor(properties, eq.stablePhase, particle);
-    const volume0 = finiteNumber(particle.mpmVolume0, restDensity > 0 ? finiteNumber(particle.massKg) / restDensity : 0);
+    const restDensity = restDensityFor(properties, eq.stablePhase, particle, eq);
+    const volume0 = eq.phaseCaloric === true ? eq.referenceVolumeM3
+      : finiteNumber(particle.mpmVolume0, restDensity > 0 ? finiteNumber(particle.massKg) / restDensity : 0);
     const J = finiteNumber(particle.mpmJ, 1);
     const status = statusForParticle(particle, eq, properties);
     const phaseVolumeReferenceMassKg = finiteNumber(
@@ -2588,6 +2598,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
   return {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
+    ...(caloricInitialization.signature ? { phaseCaloricInitializationSignature: caloricInitialization.signature } : {}),
     particleCount,
     step: state.step ?? 0,
     time: state.time ?? 0,

@@ -4,9 +4,17 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
-  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+  SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_CFL_REJECTED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ENERGY_REJECTED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_FAIL_CLOSED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_PHASE_REJECTED,
+  SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY,
+  decodeSchroederCrossLevelRefluxTerminalHeader
 } from '../../../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
 import {
+  tagWebGpuBufferDevice,
   webGpuBufferDevice,
   webGpuBufferMatchesDevice,
   webGpuDeviceId
@@ -25,6 +33,8 @@ import {
 import {
   claimLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput,
   claimLocallySubmittedMlsMpmFusedG2pOutputForContinuation,
+  releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow,
+  retainClaimedMlsMpmFusedCoarseTerminalOutputBorrow,
   retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter,
   validateClaimedLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput,
   validateLocallySubmittedMlsMpmFusedG2p
@@ -33,6 +43,7 @@ import {
   validateSchroederSpatialEpochTransactionCommit,
   validateSchroederSpatialEpochTransactionPrivateAdvance
 } from './schroederSpatialEpochTransaction.js';
+import { runSphGpuParticleBufferSetCleanupAfterBorrows } from './sphGpuBuffers.js';
 
 export const ULG_SCHROEDER_TWO_LEVEL_MACRO_AUTHORITY_SCHEMA =
   'peercompute.ulg.schroeder-two-level-macro-authority.v0';
@@ -52,6 +63,14 @@ export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA =
   'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-copy.v0';
 export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION =
   'schroederFusedTerminalRefluxReceiptTarget';
+export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_TARGET_SCHEMA =
+  'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-group-target.v1';
+export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA =
+  'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-group-copy.v1';
+// One admitted original, four equal retry children, or a fully retired
+// four-child attempt restarted from the original root with eight children.
+// This is independent of the inner fine-substep ratio (r=1..4).
+export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY = 8;
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -70,6 +89,10 @@ const pendingClosureOrigins = new WeakMap();
 const mechanicsFieldPublicationReceiptOrigins = new WeakMap();
 const terminalRefluxReceiptTargetOrigins = new WeakMap();
 const terminalRefluxReceiptTargetBuffers = new WeakMap();
+const privateAdmissionOrigins = new WeakMap();
+const terminalRefluxGroupTargetOrigins = new WeakMap();
+const terminalRefluxGroupReceiptOrigins = new WeakMap();
+const privateAdmissionDeviceLossStates = new WeakMap();
 
 const FINE_STAGE_ORDER = Object.freeze([
   'p2g',
@@ -371,6 +394,42 @@ function macroOriginFor(device, macroAuthority) {
   return macroMatchesOrigin(device, macroAuthority, origin) ? origin : null;
 }
 
+function assertNoPrivateSourceBorrow(origin, microepochAuthority = null) {
+  const borrow = origin?.privateSuccessorBorrow;
+  if (borrow && !borrow.sourceUseComplete
+    && (microepochAuthority == null
+      || microepochAuthority === borrow.sourceClosure.terminalMicroepochAuthority)) {
+    throw new Error('fused owner still has a live private source borrow');
+  }
+}
+
+function assertPrivatePredecessorRetired(origin) {
+  if (origin?.privateSourceBorrow && !origin.privateSourceBorrow.retired) {
+    throw new Error('private successor publication requires its predecessor borrow retired');
+  }
+}
+
+function privateSourceOriginForSuccessor(device, closure, canonicalEpoch) {
+  if (closure == null) return null;
+  const origin = pendingClosureOrigins.get(closure);
+  const sph = canonicalEpoch?.sphParticleUpload;
+  const mls = canonicalEpoch?.mlsMpmParticleUpload;
+  if (!validateSchroederFusedMechanicsPendingClosure(device, closure)
+    || origin.privateSuccessorBorrow != null
+    || origin.macroOrigin.privateSuccessorBorrow != null
+    || canonicalEpoch?.generation === closure.canonicalEpoch.generation
+    || sph !== closure.finalSphParticleUpload
+    || mls !== closure.finalMlsMpmParticleUpload
+    || canonicalEpoch?.generation?.source?.sourceStateBuffer !== sph.stateBuffer
+    || origin.ownedThermoBuffer != null) {
+    throw new Error('private source closure is stale, foreign, replayed, partial, or owns aliased thermo');
+  }
+  // Closure validation includes the immutable exact four-buffer snapshot and
+  // terminal private-advance receipt. This is ownership, NOT GPU admission.
+  // Borrowed root thermo/identity stay with their external interval owner.
+  return origin;
+}
+
 function validateMechanicsFieldPublicationReceipt(
   device,
   receipt,
@@ -418,7 +477,8 @@ export function createSchroederTwoLevelMacroAuthority({
   fineLevel,
   coarseLevel = Number(fineLevel) + 1,
   fineDt,
-  macroDt
+  macroDt,
+  privateSourceClosure = null
 } = {}) {
   if (callerSelectedRefluxLedgerValidator != null) {
     throw new TypeError(
@@ -430,6 +490,9 @@ export function createSchroederTwoLevelMacroAuthority({
   const parentFieldView = generation?.parentFieldView ?? null;
   const sourceSphParticleUpload = canonicalEpoch?.sphParticleUpload ?? null;
   const sourceMlsMpmParticleUpload = canonicalEpoch?.mlsMpmParticleUpload ?? null;
+  const privateSourceOrigin = privateSourceOriginForSuccessor(
+    device, privateSourceClosure, canonicalEpoch
+  );
   const substepCount = positiveInteger(fineSubstepCount, 'fineSubstepCount', 4);
   const resolvedFineLevel = Number(fineLevel);
   const resolvedCoarseLevel = Number(coarseLevel);
@@ -517,14 +580,30 @@ export function createSchroederTwoLevelMacroAuthority({
     schema: 'peercompute.ulg.schroeder-macro-root-publication-owner.v0',
     completionOrdinal
   });
-  const rootPublicationLock = fineFieldRuntime.acquireStatePublicationLock(
-    parentFieldView.fineFieldView,
-    {
-      owner: rootPublicationOwner,
-      publicationReceiptValidator:
-        validateMechanicsFieldPublicationReceipt
+  const privateSourceToken = privateSourceOrigin
+    ? retainClaimedMlsMpmFusedCoarseTerminalOutputBorrow(
+      device, privateSourceClosure.finalG2pReconstruction, {
+        terminalTransaction: privateSourceClosure.terminalTransaction,
+        finalSphParticleUpload: sourceSphParticleUpload,
+        finalMlsMpmParticleUpload: sourceMlsMpmParticleUpload
+      }
+    ) : null;
+  let rootPublicationLock;
+  try {
+    rootPublicationLock = fineFieldRuntime.acquireStatePublicationLock(
+      parentFieldView.fineFieldView,
+      {
+        owner: rootPublicationOwner,
+        publicationReceiptValidator:
+          validateMechanicsFieldPublicationReceipt
+      }
+    );
+  } catch (error) {
+    if (privateSourceToken) {
+      releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(device, privateSourceToken);
     }
-  );
+    throw error;
+  }
   const macroAuthority = {
     schema: ULG_SCHROEDER_TWO_LEVEL_MACRO_AUTHORITY_SCHEMA,
     status: 'macro-frozen-authority-ready',
@@ -619,6 +698,23 @@ export function createSchroederTwoLevelMacroAuthority({
   };
   Object.freeze(macroAuthority);
   macroAuthorityOrigins.set(macroAuthority, origin);
+  if (privateSourceOrigin) {
+    const borrow = {
+      sourceClosure: privateSourceClosure,
+      sourceOrigin: privateSourceOrigin,
+      successorOrigin: origin,
+      lowerToken: privateSourceToken,
+      sourceUseComplete: false,
+      retirementPromise: null,
+      retirementAttempt: null,
+      retired: false
+    };
+    // Single-use latch is module-private; the lower borrow token is never
+    // exposed through either macro, closure, result, or upload descriptor.
+    origin.privateSourceBorrow = borrow;
+    privateSourceOrigin.privateSuccessorBorrow = borrow;
+    privateSourceOrigin.macroOrigin.privateSuccessorBorrow = borrow;
+  }
   return macroAuthority;
 }
 
@@ -1598,6 +1694,9 @@ export function abortSchroederFineMicroepochAfter(
     microepochAuthority,
     { requireLive: false }
   );
+  assertNoPrivateSourceBorrow(
+    macroAuthorityOrigins.get(origin?.macroAuthority), microepochAuthority
+  );
   if (
     !origin
     || origin.status === 'retired'
@@ -1892,6 +1991,26 @@ function retireTerminalParticleOutputAfterFence(device, origin, after) {
   return retirement.promise;
 }
 
+function retireOwnedStorageAfterParticleBorrows(source, cleanup) {
+  return new Promise((resolve, reject) => {
+    const complete = () => {
+      try {
+        cleanup();
+        resolve(true);
+      } catch (error) {
+        // Deferred lifecycle callbacks catch throws, so settle this owner
+        // explicitly only after its actual storage cleanup has succeeded.
+        reject(error);
+      }
+    };
+    if (runSphGpuParticleBufferSetCleanupAfterBorrows(
+      source, complete, { terminalSourceRetirement: true }
+    ) !== true) {
+      reject(new Error('owned terminal storage lost its registered particle borrow lifecycle'));
+    }
+  });
+}
+
 function retireTerminalOwnedThermoAfterFence(origin, after) {
   const retirement = origin?.ownedThermoRetirement;
   const thermoBuffer = origin?.ownedThermoBuffer ?? null;
@@ -1908,9 +2027,10 @@ function retireTerminalOwnedThermoAfterFence(origin, after) {
     if (confirmed !== true) {
       throw new Error('terminal owned thermo owner fence was not confirmed');
     }
-    thermoBuffer.destroy?.();
-    retirement.retired = true;
-    return true;
+    return retireOwnedStorageAfterParticleBorrows(origin.finalSphParticleUpload, () => {
+      thermoBuffer.destroy?.();
+      retirement.retired = true;
+    });
   }).then(
     (retired) => {
       retirement.promise = null;
@@ -1974,6 +2094,7 @@ export function abortSchroederTwoLevelMacroAuthorityAfter(
   } = {}
 ) {
   const origin = macroAuthorityOrigins.get(macroAuthority);
+  assertNoPrivateSourceBorrow(origin);
   if (
     !origin
     || origin.macroAuthority !== macroAuthority
@@ -2098,6 +2219,7 @@ export function abortSchroederTwoLevelMacroAuthorityAfter(
       }
       origin.rootRetired = true;
       origin.terminalStatus = 'mechanics-macro-aborted-retired';
+      origin.abortRetiredAfterDeviceLoss = deviceLost === true;
       return true;
     }
   ).then(
@@ -2754,6 +2876,7 @@ export function quarantineSchroederFusedFineSubstepTransaction(
   reason = null
 ) {
   const origin = rawFineTransactionOriginFor(device, transaction);
+  assertNoPrivateSourceBorrow(macroAuthorityOrigins.get(origin?.macroAuthority));
   if (
     !origin
     || (origin.stageIndex === 0 && origin.submissionObservedStage === null)
@@ -3870,6 +3993,676 @@ export function validateSchroederFusedMechanicsPendingClosure(
   );
 }
 
+/** Complete numerical predicate only; ownership is checked by the caller. */
+export function isSchroederFusedTerminalRefluxHeaderFullyAdmitted(
+  header,
+  { expectedFineSubstepCount } = {}
+) {
+  const count = expectedFineSubstepCount;
+  const zero = ['invalidCount', 'keyMismatchCount', 'routeRejectCount',
+    'boundaryRejectCount', 'chartRejectCount', 'cflRejectCount',
+    'mutationRollbackCount'];
+  const one = ['positivityStatus', 'cflStatus', 'massComStatus',
+    'momentumStatus', 'angularMomentumStatus', 'energyStatus'];
+  const vectors = ['firstMassMomentResidualKgM',
+    'linearMomentumResidualKgMPerS', 'angularMomentumResidualKgM2PerS'];
+  return Boolean(Number.isSafeInteger(count) && count >= 1 && count <= 4
+    && header?.structuralValid === true && header.admitted === true
+    && header.terminalAdmitted === true && header.failClosed === false
+    && zero.every((key) => header[key] === 0)
+    && one.every((key) => header[key] === 1)
+    && ['fineP2g', 'fineG2p', 'finalP2g', 'finalG2p'].every(
+      (key) => header.authorityRejectCount?.[key] === 0
+    )
+    && ['replay', 'skip', 'duplicate'].every(
+      (key) => header.receiptRejectCount?.[key] === 0
+    )
+    && header.fineSubstepCount === count
+    && header.committedFineSubstepCount === count
+    && header.consumedFineSubstepCount === count
+    && header.fineReceiptConsumeCount === count
+    && header.coarseReceiptConsumeCount === 1
+    && header.operatorSplit?.valid === true
+    && header.phaseVolumeTransport?.valid === true
+    && header.ambientBoundary?.valid === true
+    && vectors.every((key) => Array.isArray(header[key])
+      && header[key].length === 3 && header[key].every(Number.isFinite))
+    && [header.massResidualKg, header.totalEnergyResidualJ,
+      header.maxFineCflRatio, header.maxCoarseCflRatio,
+      header.minimumPublishedInternalEnergyJ].every(Number.isFinite));
+}
+
+const INTERVAL_SOURCE_IDENTITY_KEYS = Object.freeze([
+  'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch',
+  'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch'
+]);
+
+function intervalError(message) {
+  const error = new Error(message);
+  error.code = 'ERR_SCHROEDER_FUSED_PRIVATE_INTERVAL_ADMISSION';
+  return error;
+}
+
+// This factory deliberately has no step/closure lexical scope. A device owns
+// one small relay; completed observations unsubscribe all per-attempt work.
+function privateAdmissionLossNotifier(state) {
+  return () => {
+    state.lost = true;
+    const listeners = Array.from(state.listeners);
+    state.listeners.clear();
+    for (const listener of listeners) {
+      // One failed cleanup must not prevent another observer seeing loss.
+      // Its unchanged retirement cell remains available to exact abandonment.
+      try { listener(); } catch {}
+    }
+  };
+}
+
+function privateAdmissionLossState(device) {
+  let state = privateAdmissionDeviceLossStates.get(device);
+  if (!state) {
+    state = { lost: false, listeners: new Set() };
+    privateAdmissionDeviceLossStates.set(device, state);
+    if (device.lost && typeof device.lost.then === 'function') {
+      Promise.resolve(device.lost).then(privateAdmissionLossNotifier(state)).catch(() => {});
+    }
+  }
+  return state;
+}
+
+function subscribePrivateAdmissionLoss(state, listener) {
+  if (state.lost) listener();
+  else state.listeners.add(listener);
+  return () => state.listeners.delete(listener);
+}
+
+function destroyPrivateAdmissionTarget(cell) {
+  if (!cell || cell.retired) return true;
+  if (cell.target.mapState === 'mapped') cell.target.unmap();
+  cell.target.destroy();
+  cell.retired = true;
+  cell.unsubscribe?.();
+  cell.resolve(true);
+  return true;
+}
+
+function privateAdmissionTargetLossRetirement(cell) {
+  // Only this small staging-buffer cell may survive an unconfirmed queue.
+  return () => destroyPrivateAdmissionTarget(cell);
+}
+
+function privateAdmissionTargetCell(target, loss) {
+  let resolve;
+  const completionPromise = new Promise((done) => { resolve = done; });
+  const cell = { target, loss, resolve, completionPromise, submitted: false,
+    fenceConfirmed: false, retired: false, unsubscribe: null };
+  cell.unsubscribe = subscribePrivateAdmissionLoss(loss,
+    privateAdmissionTargetLossRetirement(cell));
+  return cell;
+}
+
+function privateAdmissionFenceConfirmation(cell, retire = false) {
+  // A held native fence may outlive the observer on loss. Its callback retains
+  // only staging retirement, never the originating macro or particle family.
+  return () => {
+    cell.fenceConfirmed = true;
+    return retire ? destroyPrivateAdmissionTarget(cell) : true;
+  };
+}
+
+async function retirePrivateAdmissionTarget(device, origin) {
+  const cell = origin?.privateAdmissionTarget;
+  if (!cell || cell.retired) return true;
+  if (!cell.submitted || cell.fenceConfirmed || cell.loss.lost) {
+    return destroyPrivateAdmissionTarget(cell);
+  }
+  const fence = device.queue?.onSubmittedWorkDone?.();
+  if (!fence || typeof fence.then !== 'function') {
+    throw intervalError('private observation staging retirement requires actual queue completion or device loss');
+  }
+  // A rejected fence is not retirement. Keep the small loss subscription and
+  // let exact abandonment retry this same cell after a later genuine fence.
+  await Promise.race([Promise.resolve(fence).then(
+    privateAdmissionFenceConfirmation(cell, true)
+  ), cell.completionPromise]);
+  return cell.retired;
+}
+
+function intervalIdentity(upload) {
+  return Object.freeze(Object.fromEntries(INTERVAL_SOURCE_IDENTITY_KEYS.map(
+    (key) => [key, upload?.[key]]
+  )));
+}
+
+function intervalIdentityMatches(left, right) {
+  return INTERVAL_SOURCE_IDENTITY_KEYS.every((key) => (
+    Number.isSafeInteger(left?.[key]) && left[key] >= 0
+    && left[key] <= 0xffff_ffff && !Object.is(left[key], -0)
+    && Object.is(left[key], right?.[key])
+  ));
+}
+
+function intervalClock(upload) {
+  return Object.freeze({ step: upload?.step, time: upload?.time,
+    slot: upload?.slot, physicsTick: upload?.physicsTick });
+}
+
+function intervalClockMatches(upload, clock) {
+  return ['step', 'time', 'slot', 'physicsTick'].every(
+    (key) => Object.is(upload?.[key], clock[key])
+  );
+}
+
+function intervalClockIsValid(clock) {
+  return Number.isSafeInteger(clock?.step) && clock.step >= 0
+    && clock.step < 0xffff_ffff && !Object.is(clock.step, -0)
+    && Number.isSafeInteger(clock.physicsTick) && clock.physicsTick >= 0
+    && clock.physicsTick < 0xffff_ffff && !Object.is(clock.physicsTick, -0)
+    && Number.isFinite(clock.time) && clock.time >= 0
+    && (Object.is(clock.slot, 0) || clock.slot === 1);
+}
+
+function freezeHeaderEvidence(value) {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeHeaderEvidence(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function privateHeaderSource(device, closure) {
+  const origin = pendingClosureOrigins.get(closure);
+  const macro = origin?.macroAuthority;
+  const ledger = macro?.refluxLedger;
+  if (!validateSchroederFusedMechanicsPendingClosure(device, closure)
+    || macroOriginFor(device, macro) !== origin?.macroOrigin
+    || ledger?.evidenceBuffer !== ledger?.buffer
+    || ledger?.evidenceOffsetBytes !== 0
+    || ledger?.evidenceByteLength !== SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH
+    || !validateLocallyOwnedSchroederCrossLevelRefluxLedgerGpu(device, ledger, {
+      minimumCoarseFieldCapacity: macro?.parentFieldView?.coarseFieldCapacity,
+      fineSubstepCount: macro?.fineSubstepCount,
+      fineLevel: macro?.fineLevel, coarseLevel: macro?.coarseLevel,
+      coarseGridSpacingM: macro?.parentFieldView?.coarseFieldView?.gridSpacingM
+    })) {
+    throw intervalError('private terminal observation requires its exact live closure and reflux owner');
+  }
+  return origin;
+}
+
+function headerMatchesPrivateOwner(header, origin) {
+  const macro = origin.macroAuthority;
+  return header?.structuralValid === true
+    && header.completionOrdinal === macro.completionOrdinal
+    && header.macroOwnerId === macro.refluxLedger.macroOwnerId
+    && header.macroOwnerGeneration === macro.refluxLedger.ownerGeneration
+    && header.fineSubstepCount === macro.fineSubstepCount
+    && header.fineLevel === macro.fineLevel
+    && header.coarseLevel === macro.coarseLevel
+    && header.coarseGridSpacingM
+      === Math.fround(macro.parentFieldView.coarseFieldView.gridSpacingM);
+}
+
+function hasCompletedPhysicalCflRejection(header, words) {
+  // C7 is published last, only by the physical interval validators after
+  // canonical CFL rejection. Failed words 125..135 are operands, not the
+  // successful energy/transport fields. A missing/interrupted tag is fatal.
+  const tag = header.statusCaptureSentinel;
+  const physicalFlags = SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_READY
+    | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ADMITTED
+    | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_FAIL_CLOSED
+    | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_CFL_REJECTED
+    | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_ENERGY_REJECTED
+    | SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_PHASE_REJECTED;
+  if ((tag >>> 24) !== 0xc7 || header.failClosed !== true
+    || header.admitted !== false || header.terminalAdmitted !== false
+    || (header.statusFlags & SCHROEDER_CROSS_LEVEL_REFLUX_STATUS_CFL_REJECTED) === 0
+    || (header.statusFlags & ~physicalFlags) !== 0
+    || ['keyMismatchCount', 'routeRejectCount', 'boundaryRejectCount',
+      'chartRejectCount'].some((key) => header[key] !== 0)
+    || ['fineP2g', 'fineG2p', 'finalP2g', 'finalG2p'].some(
+      (key) => header.authorityRejectCount?.[key] !== 0
+    )
+    || header.receiptRejectCount?.replay !== 0
+    || header.receiptRejectCount?.duplicate !== 0) return false;
+  const operands = new Float32Array(words.slice(125, 136).buffer);
+  if (!operands.every(Number.isFinite)) return false;
+  const stage = (tag >>> 22) & 3;
+  if (stage === 2) {
+    return tag === 0xc7b6_ffff
+      && operands[0] >= 0 && operands[0] <= 1
+      && operands[1] >= 0 && operands[1] <= 1
+      && operands[0] > operands[1]
+      && operands.slice(2).every((value) => value === 0);
+  }
+  // Stage 3 is the temporal coarse-successor validator, not an unknown tag.
+  return ((tag >>> 17) & 3) !== 3 && operands[9] > 0 && operands[10] >= 0;
+}
+
+/** One private compact observation; never consumes the schedule copy slot. */
+export function observeSchroederFusedMechanicsPrivateAdmission(device, closure) {
+  const origin = privateHeaderSource(device, closure);
+  if (origin.privateAdmissionPromise) return origin.privateAdmissionPromise;
+  const macro = origin.macroAuthority;
+  const sourceSph = origin.macroOrigin.sourceSphParticleUpload;
+  const sourceMls = origin.macroOrigin.sourceMlsMpmParticleUpload;
+  const sourceIdentity = intervalIdentity(sourceSph);
+  const sourceClock = intervalClock(sourceSph);
+  if (!intervalIdentityMatches(sourceIdentity, sourceSph)
+    || !intervalIdentityMatches(sourceIdentity, sourceMls)
+    || !intervalClockIsValid(sourceClock)) {
+    throw intervalError('private terminal observation requires exact source identity and clock');
+  }
+  const byteLength = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+  const loss = privateAdmissionLossState(device);
+  const record = { origin, sourceSph, sourceMls, sourceIdentity, sourceClock,
+    sourceSnapshot: particleUploadSnapshot(sourceSph, sourceMls),
+    get lost() { return loss.lost; },
+    observation: null, target: null };
+  const operation = (async () => {
+    let target = null;
+    let unsubscribe = null;
+    let cell = null;
+    try {
+      if (loss.lost) throw intervalError('private terminal observation lost its device');
+      if (typeof device?.queue?.onSubmittedWorkDone !== 'function'
+        || typeof device?.queue?.submit !== 'function') {
+        throw intervalError('private terminal observation requires its own queue completion');
+      }
+      target = tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-schroeder-private-terminal-admission', size: byteLength,
+        usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+      }), device);
+      record.target = target;
+      cell = privateAdmissionTargetCell(target, loss);
+      origin.privateAdmissionTarget = cell;
+      const encoder = device.createCommandEncoder({
+        label: 'ulg-schroeder-private-terminal-admission-copy'
+      });
+      encoder.copyBufferToBuffer(macro.refluxLedger.evidenceBuffer, 0, target, 0, byteLength);
+      cell.submitted = true;
+      device.queue.submit([encoder.finish()]);
+      const fence = device.queue.onSubmittedWorkDone();
+      if (!fence || typeof fence.then !== 'function') {
+        throw intervalError('private terminal observation queue fence is unavailable');
+      }
+      const lost = new Promise((resolve, reject) => {
+        unsubscribe = subscribePrivateAdmissionLoss(loss, () => {
+          reject(intervalError('private terminal observation lost its device'));
+        });
+      });
+      await Promise.race([Promise.resolve(fence).then(
+        privateAdmissionFenceConfirmation(cell)
+      ), lost]);
+      await Promise.race([target.mapAsync(globalThis.GPUMapMode?.READ ?? 1), lost]);
+      const mapped = target.getMappedRange(0, byteLength);
+      if (mapped.byteLength !== byteLength) throw intervalError('private compact header span is malformed');
+      const words = new Uint32Array(mapped.slice(0));
+      const header = decodeSchroederCrossLevelRefluxTerminalHeader(words);
+      if (record.lost || privateHeaderSource(device, closure) !== origin
+        || !particleUploadsMatchSnapshot(sourceSph, sourceMls, record.sourceSnapshot, device)
+        || !intervalClockMatches(sourceSph, sourceClock)
+        || !headerMatchesPrivateOwner(header, origin)) {
+        throw intervalError('private compact header provenance changed or is malformed');
+      }
+      const admitted = isSchroederFusedTerminalRefluxHeaderFullyAdmitted(header, {
+        expectedFineSubstepCount: macro.fineSubstepCount
+      });
+      const physical = !admitted && hasCompletedPhysicalCflRejection(header, words);
+      if (!admitted && !physical) {
+        const error = intervalError('private compact header is not admitted and has no complete physical rejection witness');
+        error.terminalHeader = freezeHeaderEvidence(header);
+        throw error;
+      }
+      const observation = Object.freeze({
+        schema: 'peercompute.ulg.schroeder-fused-private-admission.v0',
+        status: admitted ? 'admitted' : 'physical-rejection',
+        admitted, retryablePhysicalRejection: physical,
+        completionOrdinal: macro.completionOrdinal,
+        macroOwnerId: macro.refluxLedger.macroOwnerId,
+        ownerGeneration: macro.refluxLedger.ownerGeneration,
+        rootGenerationId: macro.rootGenerationId,
+        macroDt: macro.macroDt, fineDt: macro.fineDt,
+        fineSubstepCount: macro.fineSubstepCount,
+        sourceIdentity, sourceClock,
+        terminalHeader: freezeHeaderEvidence(header),
+        rawHeaderWords: Object.freeze(Array.from(words)),
+        diagnosticCost: Object.freeze({ additionalQueueSubmissionCount: 1,
+          additionalHostQueueFenceCount: 1, mapAsyncCount: 1,
+          readbackByteLength: byteLength, fullParticleReadbackPerformed: false })
+      });
+      record.observation = observation;
+      privateAdmissionOrigins.set(observation, record);
+      return observation;
+    } finally {
+      unsubscribe?.();
+      if (cell && (!cell.submitted || cell.fenceConfirmed || loss.lost)) {
+        destroyPrivateAdmissionTarget(cell);
+      }
+    }
+  })();
+  origin.privateAdmissionPromise = operation;
+  operation.catch(() => {});
+  return operation;
+}
+
+export function createSchroederFusedTerminalRefluxReceiptGroupTarget({
+  device, scheduleId, laneId, stateKey, stepOrdinal, targetBuffer,
+  targetOffsetBytes, expectedOuterCompletionOrdinal, expectedOuterIdentity,
+  expectedOuterMacroDt, expectedFineSubstepCount, expectedFineLevel,
+  expectedCoarseLevel
+} = {}) {
+  const byteLength = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+  const groupBytes = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY * byteLength;
+  if (!device || [scheduleId, laneId, stateKey].some((value) => typeof value !== 'string' || !value)
+    || !Number.isSafeInteger(stepOrdinal) || stepOrdinal < 1
+    || !Number.isSafeInteger(targetOffsetBytes)
+    || Object.is(targetOffsetBytes, -0)
+    || targetOffsetBytes !== (stepOrdinal - 1) * groupBytes
+    || !Number.isSafeInteger(targetOffsetBytes + groupBytes)
+    || webGpuBufferDevice(targetBuffer) !== device
+    || targetBuffer?.destroyed === true || targetBuffer?.mapState !== 'unmapped'
+    || !Number.isSafeInteger(targetBuffer?.usage)
+    || (targetBuffer.usage & (GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST))
+      !== (GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST)
+    || !Number.isSafeInteger(targetBuffer?.size) || targetBuffer.size < targetOffsetBytes + groupBytes
+    || !Number.isSafeInteger(expectedOuterCompletionOrdinal) || expectedOuterCompletionOrdinal < 1
+    || expectedOuterCompletionOrdinal > 0xffff_ffff
+    || !intervalIdentityMatches(expectedOuterIdentity, expectedOuterIdentity)
+    || !Number.isFinite(expectedOuterMacroDt) || expectedOuterMacroDt <= 0
+    || !Number.isSafeInteger(expectedFineSubstepCount) || expectedFineSubstepCount < 1 || expectedFineSubstepCount > 4
+    || !Number.isSafeInteger(expectedFineLevel) || !Number.isSafeInteger(expectedCoarseLevel)
+    || expectedFineLevel < -0x8000_0000 || expectedCoarseLevel > 0x7fff_ffff
+    || expectedCoarseLevel !== expectedFineLevel + 1) {
+    throw intervalError('terminal reflux group requires an exact eight-slot outer interval target');
+  }
+  let bufferOrigin = terminalRefluxReceiptTargetBuffers.get(targetBuffer);
+  if (!bufferOrigin) {
+    bufferOrigin = { deviceId: webGpuDeviceId(device), scheduleId, laneId,
+      stateKey, reservedOffsets: new Set() };
+    terminalRefluxReceiptTargetBuffers.set(targetBuffer, bufferOrigin);
+  }
+  const offsets = Array.from({ length: SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY },
+    (_, index) => targetOffsetBytes + index * byteLength);
+  if (bufferOrigin.deviceId !== webGpuDeviceId(device)
+    || bufferOrigin.scheduleId !== scheduleId || bufferOrigin.laneId !== laneId
+    || bufferOrigin.stateKey !== stateKey
+    || offsets.some((offset) => bufferOrigin.reservedOffsets.has(offset))) {
+    throw intervalError('terminal reflux group ring or child slot is already reserved');
+  }
+  const target = Object.freeze({
+    schema: ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_TARGET_SCHEMA,
+    scheduleId, laneId, stateKey, stepOrdinal, targetBuffer, targetOffsetBytes,
+    targetByteLength: groupBytes, expectedOuterCompletionOrdinal,
+    expectedOuterIdentity: intervalIdentity(expectedOuterIdentity), expectedOuterMacroDt,
+    expectedFineSubstepCount, expectedFineLevel, expectedCoarseLevel
+  });
+  offsets.forEach((offset) => bufferOrigin.reservedOffsets.add(offset));
+  terminalRefluxGroupTargetOrigins.set(target, { device, target, original: null,
+    childCount: null, refinementFailure: null,
+    children: [], sealed: false, failed: false, receipt: null });
+  return target;
+}
+
+function exactGroupTarget(device, target) {
+  const group = terminalRefluxGroupTargetOrigins.get(target);
+  if (!group || group.device !== device || group.target !== target
+    || group.sealed || group.failed || target.targetBuffer.destroyed === true
+    || target.targetBuffer.mapState !== 'unmapped'
+    || webGpuBufferDevice(target.targetBuffer) !== device) {
+    throw intervalError('terminal reflux group target is stale, foreign or unavailable');
+  }
+  return group;
+}
+
+/** Bind the outer owner before a physical rejection can select retry work. */
+export function bindSchroederFusedTerminalRefluxReceiptGroupOriginal(
+  device, groupTarget, originalObservation
+) {
+  const group = exactGroupTarget(device, groupTarget);
+  const original = privateAdmissionOrigins.get(originalObservation);
+  const origin = original?.origin;
+  const macro = origin?.macroAuthority;
+  if (!original || original.observation !== originalObservation || original.lost
+    || origin.deviceId !== webGpuDeviceId(device)
+    || (group.original && group.original !== original)
+    || group.children.length !== 0
+    || privateHeaderSource(device, origin.closure) !== origin
+    || originalObservation.completionOrdinal !== groupTarget.expectedOuterCompletionOrdinal
+    || originalObservation.macroDt !== groupTarget.expectedOuterMacroDt
+    || macro.fineSubstepCount !== groupTarget.expectedFineSubstepCount
+    || macro.fineLevel !== groupTarget.expectedFineLevel
+    || macro.coarseLevel !== groupTarget.expectedCoarseLevel
+    || macro.fineDt !== macro.macroDt / macro.fineSubstepCount
+    || !intervalIdentityMatches(original.sourceIdentity, groupTarget.expectedOuterIdentity)
+    || !intervalIdentityMatches(original.sourceIdentity, original.sourceSph)
+    || !intervalClockIsValid(original.sourceClock)
+    || !intervalClockMatches(original.sourceSph, original.sourceClock)
+    || !particleUploadsMatchSnapshot(original.sourceSph, original.sourceMls,
+      original.sourceSnapshot, device)) {
+    throw intervalError('terminal reflux group requires its exact live original observation and outer interval');
+  }
+  group.original = original;
+  group.childCount = originalObservation.admitted ? 1 : 4;
+  return true;
+}
+
+/** One bounded whole-root restart; a consumed predecessor is never reborrowed. */
+export function refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
+  device, groupTarget, failedObservation
+) {
+  const group = exactGroupTarget(device, groupTarget);
+  const original = group.original;
+  const failed = privateAdmissionOrigins.get(failedObservation);
+  const retired = record => {
+    const origin = record?.origin;
+    return Boolean(record && !record.lost
+      && pendingClosureOrigins.get(origin?.closure) === origin
+      && macroAuthorityOrigins.get(origin.macroAuthority) === origin.macroOrigin
+      && origin.deviceId === webGpuDeviceId(device)
+      && origin.lifecycle.state === 'abandoned-retired'
+      && origin.macroOrigin.rootRetired === true
+      && origin.macroOrigin.terminalStatus === 'mechanics-macro-aborted-retired'
+      && origin.macroOrigin.abortRetiredAfterDeviceLoss !== true
+      && origin.publicationReceipt == null && origin.publicCommitReceipt == null);
+  };
+  if (group.childCount !== 4 || group.refinementFailure != null
+    || group.children.length >= 4 || !retired(original) || !retired(failed)
+    || original.observation.retryablePhysicalRejection !== true
+    || failed.observation !== failedObservation
+    || failedObservation.admitted !== false
+    || failedObservation.retryablePhysicalRejection !== true
+    || groupTarget.expectedFineSubstepCount !== 2
+    || !particleUploadsMatchSnapshot(original.sourceSph, original.sourceMls,
+      original.sourceSnapshot, device)
+    || !intervalClockMatches(original.sourceSph, original.sourceClock)
+    || !intervalIdentityMatches(original.sourceIdentity, original.sourceMls)) {
+    throw intervalError('whole-interval refinement requires the exact fully retired physical four-child attempt');
+  }
+  const attempt = [...group.children.map(child => child.observed), failed];
+  const seen = new Set([original.origin]);
+  for (let index = 0; index < attempt.length; index += 1) {
+    const record = attempt[index], origin = record?.origin;
+    const prior = index === 0 ? null : attempt[index - 1].origin;
+    const snapshot = prior?.finalUploadSnapshot ?? original.sourceSnapshot;
+    const borrow = origin?.macroOrigin.privateSourceBorrow;
+    const macro = origin?.macroAuthority;
+    if (!retired(record) || seen.has(origin)
+      || macro.macroDt !== groupTarget.expectedOuterMacroDt / 4
+      || macro.fineSubstepCount !== 2 || macro.fineDt !== macro.macroDt / 2
+      || macro.fineLevel !== groupTarget.expectedFineLevel
+      || macro.coarseLevel !== groupTarget.expectedCoarseLevel
+      || record.sourceSph !== (prior?.finalSphParticleUpload ?? original.sourceSph)
+      || record.sourceMls !== (prior?.finalMlsMpmParticleUpload ?? original.sourceMls)
+      || !Object.keys(snapshot).every(key => Object.is(record.sourceSnapshot[key], snapshot[key]))
+      || (prior == null ? borrow != null : (
+        borrow !== prior.privateSuccessorBorrow
+        || borrow?.sourceOrigin !== prior || borrow.sourceClosure !== prior.closure
+        || borrow.successorOrigin !== origin.macroOrigin
+        || borrow.sourceUseComplete !== true || borrow.retired !== true
+        || borrow.lowerToken != null || borrow.retirementPromise != null
+      ))
+      || (index < attempt.length - 1
+        ? record.observation.admitted !== true
+        : origin.privateSuccessorBorrow != null || origin.macroOrigin.privateSuccessorBorrow != null)) {
+      throw intervalError('whole-interval refinement lost exact retired child ownership or lineage');
+    }
+    seen.add(origin);
+  }
+  // Every earlier write has completed and the failed attempt is unpublished.
+  // Keep the original binding and all eight reserved offsets; only a new exact
+  // chain can overwrite these private slots before the final group is sealed.
+  group.refinementFailure = failed;
+  group.children = [];
+  group.childCount = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY;
+  return true;
+}
+
+export function encodeSchroederFusedTerminalRefluxReceiptGroupChildCopy(
+  device, closure, groupTarget, { observation, originalObservation } = {}
+) {
+  const group = exactGroupTarget(device, groupTarget);
+  const origin = privateHeaderSource(device, closure);
+  const observed = privateAdmissionOrigins.get(observation);
+  const original = privateAdmissionOrigins.get(originalObservation);
+  const macro = origin.macroAuthority;
+  if (!observed || observed.origin !== origin || observed.lost
+    || observed.observation !== observation || observation.admitted !== true
+    || !original || original.lost || original.observation !== originalObservation
+    || original.origin.deviceId !== webGpuDeviceId(device)
+    || (group.original && group.original !== original)
+    || originalObservation.completionOrdinal !== groupTarget.expectedOuterCompletionOrdinal
+    || originalObservation.macroDt !== groupTarget.expectedOuterMacroDt
+    || !intervalIdentityMatches(original.sourceIdentity, groupTarget.expectedOuterIdentity)
+    || !intervalIdentityMatches(original.sourceIdentity, original.sourceSph)
+    || !intervalClockMatches(original.sourceSph, original.sourceClock)
+    || !particleUploadsMatchSnapshot(original.sourceSph, original.sourceMls,
+      original.sourceSnapshot, device)
+    || macro.fineSubstepCount !== groupTarget.expectedFineSubstepCount
+    || macro.fineLevel !== groupTarget.expectedFineLevel
+    || macro.coarseLevel !== groupTarget.expectedCoarseLevel
+    || groupTarget.targetBuffer === macro.refluxLedger.evidenceBuffer
+    || origin.terminalRefluxReceiptCopy != null) {
+    throw intervalError('terminal reflux child requires exact original and accepted child observations');
+  }
+  const count = originalObservation.admitted ? 1 : (group.childCount ?? 4);
+  const childOrdinal = group.children.length + 1;
+  const previous = group.children.at(-1);
+  if (childOrdinal > count || macro.macroDt !== groupTarget.expectedOuterMacroDt / count
+    || macro.fineDt !== macro.macroDt / macro.fineSubstepCount
+    || (count === 1 && observed !== original)
+    || (count !== 1 && (originalObservation.retryablePhysicalRejection !== true
+      || original.origin.lifecycle.state !== 'abandoned-retired'
+      || original.origin.macroOrigin.terminalStatus !== 'mechanics-macro-aborted-retired'))
+    || (!previous && (observed.sourceSph !== original.sourceSph || observed.sourceMls !== original.sourceMls))
+    || (previous && (origin.macroOrigin.privateSourceBorrow?.sourceClosure !== previous.origin.closure
+      || observed.sourceSph !== previous.origin.finalSphParticleUpload
+      || observed.sourceMls !== previous.origin.finalMlsMpmParticleUpload
+      || !validateSchroederFusedMechanicsPendingClosure(device, previous.origin.closure)))) {
+    throw intervalError('terminal reflux child is skipped, replayed or not the exact private interval successor');
+  }
+  const offset = groupTarget.targetOffsetBytes
+    + (childOrdinal - 1) * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+  const receipt = Object.freeze({
+    schema: ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA,
+    status: 'terminal-reflux-header-copy-submitted-unverified',
+    scheduleId: groupTarget.scheduleId, laneId: groupTarget.laneId,
+    stateKey: groupTarget.stateKey, stepOrdinal: groupTarget.stepOrdinal, childOrdinal,
+    targetOffsetBytes: offset, targetByteLength: SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
+    completionOrdinal: macro.completionOrdinal, macroOwnerId: macro.refluxLedger.macroOwnerId,
+    ownerGeneration: macro.refluxLedger.ownerGeneration, rootGenerationId: macro.rootGenerationId,
+    macroDt: macro.macroDt, fineDt: macro.fineDt,
+    fineSubstepCount: macro.fineSubstepCount, fineLevel: macro.fineLevel,
+    coarseLevel: macro.coarseLevel, sourceIdentity: observed.sourceIdentity,
+    queueSubmissionStatus: 'copy-submitted-unverified'
+  });
+  try {
+    const encoder = device.createCommandEncoder({ label: 'ulg-schroeder-private-interval-child-receipt' });
+    encoder.copyBufferToBuffer(macro.refluxLedger.evidenceBuffer, 0,
+      groupTarget.targetBuffer, offset, SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH);
+    device.queue.submit([encoder.finish()]);
+  } catch (error) {
+    group.failed = true;
+    throw error;
+  }
+  group.original = original;
+  group.childCount = count;
+  group.children.push({ origin, observed, receipt });
+  origin.terminalRefluxReceiptCopy = receipt;
+  return receipt;
+}
+
+export function sealSchroederFusedTerminalRefluxReceiptGroup(device, groupTarget) {
+  const group = exactGroupTarget(device, groupTarget);
+  const original = group.original;
+  const count = group.childCount;
+  const final = group.children.at(-1)?.origin;
+  const clock = original?.sourceClock;
+  const childDt = groupTarget.expectedOuterMacroDt / count;
+  // Equal dyadic coverage is exact; a serial f64 sum of eight equal intervals
+  // need not equal the outer dt. Validate each interval, not a loose tolerance.
+  const summedMacroDt = childDt * count;
+  if (!original || original.lost || group.children.length !== count
+    || !final || !validateSchroederFusedMechanicsPendingClosure(device, final.closure)
+    || summedMacroDt !== groupTarget.expectedOuterMacroDt
+    || group.children.some((child) => child.receipt.macroDt !== childDt)
+    || group.children.some((child) => child.observed.lost)
+    || !intervalClockIsValid(clock)
+    || !intervalClockMatches(original.sourceSph, clock)
+    || !particleUploadsMatchSnapshot(original.sourceSph, original.sourceMls,
+      original.sourceSnapshot, device)
+    || !intervalIdentityMatches(original.sourceIdentity, original.sourceMls)
+    || group.children.slice(0, -1).some((child) => child.origin.privateSuccessorBorrow?.retired !== true)
+    || group.children.some((child, index) => {
+      const priorTime = index === 0 ? clock.time
+        : group.children[index - 1].origin.finalSphParticleUpload.time;
+      const macro = child.origin.macroAuthority;
+      let expectedPrivateTime = priorTime;
+      // The producer advances time once per fine substep; terminal G2P adds
+      // zero. Preserve that exact f64 addition order, not a regrouped macro dt.
+      for (let ordinal = 0; ordinal < macro.fineSubstepCount; ordinal += 1) {
+        expectedPrivateTime += macro.fineDt;
+      }
+      return child.observed.sourceClock.time !== priorTime
+        || child.origin.finalSphParticleUpload.time !== expectedPrivateTime
+        || child.origin.finalMlsMpmParticleUpload.time !== child.origin.finalSphParticleUpload.time
+        || child.origin.finalSphParticleUpload.physicsTick !== clock.physicsTick;
+    })) {
+    throw intervalError('terminal reflux interval cannot seal incomplete children, duration, clocks or retirements');
+  }
+  const publicClock = Object.freeze({ physicsTick: clock.physicsTick + 1,
+    physicsSubstep: 0, step: clock.step + 1, time: clock.time + summedMacroDt,
+    sourceSlot: clock.slot, slot: 1 - clock.slot, nextSlot: 1 - clock.slot });
+  if (!Number.isFinite(publicClock.time)) throw intervalError('outer interval clock overflow');
+  const receipt = Object.freeze({
+    schema: ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA,
+    status: 'terminal-reflux-group-copies-submitted-unverified',
+    scheduleId: groupTarget.scheduleId, laneId: groupTarget.laneId,
+    stateKey: groupTarget.stateKey, stepOrdinal: groupTarget.stepOrdinal,
+    targetOffsetBytes: groupTarget.targetOffsetBytes, targetByteLength: groupTarget.targetByteLength,
+    childCount: count, outerCompletionOrdinal: groupTarget.expectedOuterCompletionOrdinal,
+    outerIdentity: groupTarget.expectedOuterIdentity, outerMacroDt: groupTarget.expectedOuterMacroDt,
+    summedMacroDt, publicClock,
+    children: Object.freeze(group.children.map((child) => child.receipt))
+  });
+  group.sealed = true;
+  group.receipt = receipt;
+  group.final = final;
+  terminalRefluxGroupReceiptOrigins.set(receipt, group);
+  return receipt;
+}
+
+export function validateSchroederFusedTerminalRefluxReceiptGroup(
+  device, receipt, { finalClosure = null } = {}
+) {
+  const group = terminalRefluxGroupReceiptOrigins.get(receipt);
+  return Boolean(group && group.device === device && group.receipt === receipt
+    && group.sealed && !group.failed && !group.original.lost
+    && group.children.every((child) => !child.observed.lost)
+    && (finalClosure == null || (group.final.closure === finalClosure
+      && validateSchroederFusedMechanicsPendingClosure(device, finalClosure))));
+}
+
 export function createSchroederFusedTerminalRefluxReceiptTarget({
   device,
   scheduleId,
@@ -4115,6 +4908,8 @@ export function publishSchroederFusedMechanicsPendingClosure(
   } = {}
 ) {
   const closureOrigin = pendingClosureOrigins.get(closure);
+  assertNoPrivateSourceBorrow(closureOrigin?.macroOrigin);
+  assertPrivatePredecessorRetired(closureOrigin?.macroOrigin);
   const terminalOrigin = closureOrigin?.terminalOrigin;
   const fineOrigin = closureOrigin?.microepochOrigin;
   const publicGeneration = publicSpatialEpochTransaction?.generation ?? null;
@@ -4310,6 +5105,8 @@ export function completeSchroederFusedMechanicsPendingClosureAfter(
   } = {}
 ) {
   const closureOrigin = pendingClosureOrigins.get(closure);
+  assertNoPrivateSourceBorrow(closureOrigin?.macroOrigin);
+  assertPrivatePredecessorRetired(closureOrigin?.macroOrigin);
   const lifecycle = closureOrigin?.lifecycle;
   if (
     !closureOrigin
@@ -4354,7 +5151,7 @@ export function completeSchroederFusedMechanicsPendingClosureAfter(
     closureOrigin.retirementPrerequisitePromise,
     refluxLedgerRetirement,
     terminalContinuationRetirement
-  ]).then((confirmed) => {
+  ]).then(async (confirmed) => {
     if (confirmed.some((value) => value !== true)) {
       throw new Error(
         'positive fused mechanics closure retirement was not fully confirmed'
@@ -4378,18 +5175,20 @@ export function completeSchroederFusedMechanicsPendingClosureAfter(
       && !preserved.has(buffer)
       && !closureOrigin.destroyedOwnedParticleBuffers.has(buffer)
     )));
-    for (const buffer of supersededOwnedBuffers) {
-      try {
-        buffer.destroy?.();
-        closureOrigin.destroyedOwnedParticleBuffers.add(buffer);
-      } catch (error) {
-        if (buffer.destroyed === true) {
+    await retireOwnedStorageAfterParticleBorrows(closureOrigin.finalSphParticleUpload, () => {
+      for (const buffer of supersededOwnedBuffers) {
+        try {
+          buffer.destroy?.();
           closureOrigin.destroyedOwnedParticleBuffers.add(buffer);
-        } else {
-          throw error;
+        } catch (error) {
+          if (buffer.destroyed === true) {
+            closureOrigin.destroyedOwnedParticleBuffers.add(buffer);
+          } else {
+            throw error;
+          }
         }
       }
-    }
+    });
     closureOrigin.terminalOrigin.pendingClosure = null;
     closureOrigin.macroOrigin.pendingClosure = null;
     closureOrigin.terminalOrigin.status = 'terminal-publication-retired';
@@ -4415,6 +5214,91 @@ export function completeSchroederFusedMechanicsPendingClosureAfter(
   return publicationRetirementPromise;
 }
 
+/**
+ * Retire an unpublished predecessor only after its exact successor has no
+ * remaining GPU reads of that source. This certifies ownership/lifetime only;
+ * neither a pending closure nor this retirement is numerical admission.
+ */
+export function retireSchroederFusedMechanicsPrivateSourceAfter(
+  device,
+  sourceClosure,
+  { successorClosure = null, reason = null, after = null } = {}
+) {
+  const sourceOrigin = pendingClosureOrigins.get(sourceClosure);
+  const borrow = sourceOrigin?.privateSuccessorBorrow;
+  const successorOrigin = borrow?.successorOrigin;
+  if (!sourceOrigin || sourceOrigin.deviceId !== webGpuDeviceId(device)
+    || borrow?.sourceClosure !== sourceClosure
+    || successorOrigin?.privateSourceBorrow !== borrow
+    || macroAuthorityOrigins.get(successorOrigin.macroAuthority) !== successorOrigin
+    || borrow.retired || after != null) {
+    throw new Error('private source retirement is stale, foreign, replayed, or uses a caller fence');
+  }
+  const terminalOrigin = pendingClosureOrigins.get(successorClosure);
+  const aborted = successorOrigin.terminalStatus === 'mechanics-macro-aborted-retired';
+  const deviceLost = aborted && successorOrigin.abortRetiredAfterDeviceLoss === true;
+  if ((successorClosure != null && terminalOrigin?.macroOrigin !== successorOrigin)
+    || (!aborted && !borrow.sourceUseComplete && (
+      !validateSchroederFusedMechanicsPendingClosure(device, successorClosure)
+      || terminalOrigin?.macroOrigin !== successorOrigin
+    ))) {
+    throw new Error('private source retirement requires its exact successor terminal or completed abort');
+  }
+  if (borrow.retirementPromise) {
+    if (!deviceLost || borrow.retirementAttempt?.deviceLost) {
+      return borrow.retirementPromise;
+    }
+    // An exact device-loss abort may supersede a stalled normal fence. The
+    // older attempt cannot release this borrow or mutate the newer outcome.
+    borrow.retirementPromise.catch(() => {});
+  }
+  const attempt = { deviceLost };
+  let fence;
+  if (aborted || borrow.sourceUseComplete) {
+    // The module-owned completed abort has already confirmed every owned
+    // consumer/output fence, or exact same-device loss, before this state.
+    fence = Promise.resolve(true);
+  } else {
+    if (!validateSchroederFusedMechanicsPendingClosure(device, sourceClosure)) {
+      throw new Error('private source closure lost its exact retained ownership');
+    }
+    const submitted = device.queue?.onSubmittedWorkDone?.();
+    if (!submitted || typeof submitted.then !== 'function') {
+      throw new TypeError('private source retirement requires the same-device queue completion');
+    }
+    fence = Promise.resolve(submitted).then(() => true);
+  }
+  borrow.retirementAttempt = attempt;
+  const retirement = fence.then(() => {
+    if (borrow.retirementAttempt !== attempt) return borrow.retirementAttempt.promise;
+    // No await between releasing the private lower-owner token and entering
+    // predecessor abandonment. The latter synchronously closes publication.
+    borrow.sourceUseComplete = true;
+    if (borrow.lowerToken) {
+      releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(device, borrow.lowerToken);
+      borrow.lowerToken = null;
+    }
+    return abandonSchroederFusedMechanicsPendingClosureAfter(device, sourceClosure, {
+      reason: reason ?? new Error('private predecessor consumed; never publicly published'),
+      deviceLost
+    });
+  }).then((retired) => {
+    if (borrow.retirementAttempt !== attempt) return borrow.retirementAttempt.promise;
+    if (retired !== true) throw new Error('private source owner retirement was not confirmed');
+    borrow.retired = true;
+    borrow.retirementPromise = null;
+    return true;
+  }).catch((error) => {
+    if (borrow.retirementAttempt !== attempt) return borrow.retirementAttempt.promise;
+    borrow.retirementPromise = null;
+    throw error;
+  });
+  attempt.promise = retirement;
+  borrow.retirementPromise = retirement;
+  retirement.catch(() => {});
+  return retirement;
+}
+
 export function abandonSchroederFusedMechanicsPendingClosureAfter(
   device,
   closure,
@@ -4424,6 +5308,7 @@ export function abandonSchroederFusedMechanicsPendingClosureAfter(
   } = {}
 ) {
   const closureOrigin = pendingClosureOrigins.get(closure);
+  assertNoPrivateSourceBorrow(closureOrigin?.macroOrigin);
   if (
     !closureOrigin
     || closureOrigin.deviceId !== webGpuDeviceId(device)
@@ -4472,9 +5357,10 @@ export function abandonSchroederFusedMechanicsPendingClosureAfter(
         }))
       ))
   );
-  const deviceLossPreflight = deviceLost === true
-    ? retryPrerequisites(false, { deviceLossPreflight: true })
-    : Promise.resolve([]);
+  const deviceLossPreflight = retirePrivateAdmissionTarget(device, closureOrigin)
+    .then(() => deviceLost === true
+      ? retryPrerequisites(false, { deviceLossPreflight: true })
+      : []);
   const prerequisiteRetirement = deviceLossPreflight.then(
     () => retryPrerequisites(false)
   );
@@ -4627,6 +5513,7 @@ export function quarantineSchroederFusedCoarseTerminalTransaction(
   reason = null
 ) {
   const origin = rawCoarseTerminalTransactionOriginFor(device, transaction);
+  assertNoPrivateSourceBorrow(origin?.macroOrigin);
   if (
     !origin
     || (origin.stageIndex === 0 && origin.submissionObservedStage === null)

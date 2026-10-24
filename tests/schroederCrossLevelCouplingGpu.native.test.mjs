@@ -4,6 +4,29 @@ import { test } from 'node:test';
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_CROSS_LEVEL_M3_R1_R4 === '1';
 const RUN_EXACT_GAS_PRESSURE =
   process.env.ULG_CROSS_LEVEL_M3_EXACT_GAS_PRESSURE === '1';
+const RUN_FINE_CANDIDATE = process.env.ULG_CROSS_LEVEL_M3_FINE_CANDIDATE === '1';
+const RUN_COUPLED_REFINEMENT = process.env.ULG_CROSS_LEVEL_M3_COUPLED_REFINEMENT === '1';
+// Manufactured diagnostic inputs, not alternate production physics or assumed
+// pass/reject pairs. Both coarse tails touch wall bands in the existing box.
+const PRESSURE_TAIL_CASE = process.env.ULG_CROSS_LEVEL_M3_PRESSURE_TAIL_CASE || null;
+const PRESSURE_TAIL_CASES = {
+  control: { macroDt: 1e-4, coarseX: 1.1 },
+  'coarse-tail-12': { macroDt: 1e-4, coarseX: 0.7501220703125 },
+  'coarse-tail-22': { macroDt: 1e-4, coarseX: 0.7500001192092896 },
+  'fine-pressure-control': { macroDt: 1e-4, coarseX: 1.1, gasParticleIndex: 1 },
+  'fine-tail-12': {
+    macroDt: 1e-4, fineX: 0.87506103515625, coarseX: 1.1, gasParticleIndex: 1
+  },
+  'fine-tail-22': {
+    macroDt: 1e-4, fineX: 0.8750000596046448, coarseX: 1.1, gasParticleIndex: 1
+  },
+  'fine-tail-22-crossing': {
+    macroDt: 3.2e-4, fineX: 0.8750000596046448, coarseX: 1.1, gasParticleIndex: 1
+  }
+};
+const pressureTailFixture = Object.hasOwn(PRESSURE_TAIL_CASES, PRESSURE_TAIL_CASE)
+  ? PRESSURE_TAIL_CASES[PRESSURE_TAIL_CASE]
+  : null;
 const BASE_URL = process.env.ULG_CROSS_LEVEL_M3_BASE_URL
   || 'https://127.0.0.1:5174/';
 const REQUESTED_RATIOS = process.env.ULG_CROSS_LEVEL_M3_DIAGNOSTIC_RATIOS
@@ -17,6 +40,20 @@ if (
     'ULG_CROSS_LEVEL_M3_DIAGNOSTIC_RATIOS must contain only r=1..4'
   );
 }
+if (PRESSURE_TAIL_CASE && (!pressureTailFixture || !RUN_EXACT_GAS_PRESSURE
+  || REQUESTED_RATIOS.length !== 1 || REQUESTED_RATIOS[0] !== 2)) {
+  throw new RangeError(
+    'pressure-tail diagnostics require a named case, exact gas pressure and only r=2'
+  );
+}
+if (RUN_FINE_CANDIDATE && !pressureTailFixture) {
+  throw new RangeError('first-fine candidate capture requires an explicit pressure-tail fixture');
+}
+if (RUN_COUPLED_REFINEMENT && (PRESSURE_TAIL_CASE !== 'fine-tail-22-crossing'
+  || RUN_FINE_CANDIDATE || !RUN_EXACT_GAS_PRESSURE
+  || REQUESTED_RATIOS.length !== 1 || REQUESTED_RATIOS[0] !== 2)) {
+  throw new RangeError('Coupled refinement requires only the exact-gas r2 crossing case, without fine-only candidates');
+}
 
 test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
   skip: RUN_NATIVE
@@ -28,8 +65,10 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
   const browser = await chromium.launch({
     executablePath: process.env.ULG_CROSS_LEVEL_M3_CHROME
       || '/usr/bin/google-chrome',
-    headless: true,
+    headless: process.env.ULG_CROSS_LEVEL_M3_HEADED !== '1',
     args: [
+      ...(process.env.ULG_CROSS_LEVEL_M3_HEADED === '1'
+        ? ['--ozone-platform=wayland'] : []),
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
@@ -38,15 +77,25 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
   });
 
   let native;
+  const browserDiagnostics = [];
   try {
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    page.on('console', (message) => {
+      if (message.text().startsWith('ULG_REJECTED_FIELD_PRESSURE ')) {
+        browserDiagnostics.push(message.text());
+      }
+    });
     await page.goto(BASE_URL, {
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
     native = await page.evaluate(async ({
       requestedRatios,
-      runExactGasPressure
+      runExactGasPressure,
+      runFineCandidate,
+      runCoupledRefinement,
+      pressureTailFixture,
+      pressureTailCase
     }) => {
       const adapter = await navigator.gpu?.requestAdapter({
         powerPreference: 'high-performance'
@@ -89,6 +138,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           (response) => response.text()
         )
       ]);
+      const tailSnapshotModule = pressureTailFixture
+        ? await import('/tests/fixtures/schroederCoupledPressureTailNative.js')
+        : null;
+      const fineCandidateModule = runFineCandidate
+        ? await import('/tests/fixtures/schroederFineCandidateNative.js')
+        : null;
       const dependencyUrl = (sources, path) => {
         const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         for (const source of sources) {
@@ -182,23 +237,23 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           size,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
         });
-        const encoder = device.createCommandEncoder();
-        encoder.copyBufferToBuffer(buffer, 0, readback, 0, size);
-        device.queue.submit([encoder.finish()]);
         try {
+          const encoder = device.createCommandEncoder();
+          encoder.copyBufferToBuffer(buffer, 0, readback, 0, size);
+          device.queue.submit([encoder.finish()]);
           await readback.mapAsync(GPUMapMode.READ);
+          return readback.getMappedRange().slice(0, Number(byteLength));
         } catch (error) {
           // Name the readback: a device/instance teardown surfaces here as an
           // opaque AbortError with no indication of which stage died.
           throw new Error(
             `readback '${label}' (${size} bytes) failed: `
-              + (error?.message || String(error))
+              + (error?.message || String(error)), { cause: error }
           );
+        } finally {
+          try { readback.unmap(); } catch { /* Preserve the named readback failure. */ }
+          try { readback.destroy(); } catch { /* Preserve the named readback failure. */ }
         }
-        const bytes = readback.getMappedRange().slice(0, Number(byteLength));
-        readback.unmap();
-        readback.destroy();
-        return bytes;
       };
       const readU32Words = async (buffer, wordLength, label) => (
         new Uint32Array(await readBuffer(
@@ -207,6 +262,90 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           label
         ))
       );
+      const readParticleFamilyWords = async (uploads, label) => {
+        const words = {};
+        for (const [name, family, bufferKey, lengthKey] of [
+          ['state', 'sphParticleUpload', 'stateBuffer', 'stateBufferByteLength'],
+          ['thermo', 'sphParticleUpload', 'thermoBuffer', 'thermoBufferByteLength'],
+          ['identity', 'sphParticleUpload', 'identityBuffer', 'identityBufferByteLength'],
+          ['mechanics', 'mlsMpmParticleUpload', 'mechanicsBuffer', 'mechanicsBufferByteLength']
+        ]) {
+          words[name] = [...await readU32Words(uploads[family][bufferKey],
+            uploads[family][lengthKey] / 4, `${label}-${name}`)];
+        }
+        return words;
+      };
+      const sameParticleWords = (left, right) => ['state', 'thermo', 'identity', 'mechanics']
+        .every((name) => left[name].length === right[name].length
+          && left[name].every((word, index) => word === right[name][index]));
+      const everyParticleWordDiffers = (left, right) => ['state', 'thermo', 'identity', 'mechanics']
+        .every((name) => left[name].length === right[name].length
+          && left[name].every((word, index) => word !== right[name][index]));
+      const differentSeedWords = (words) => Object.fromEntries(Object.entries(words).map(([name, rows]) =>
+        [name, rows.map((word) => (word ^ 0x80000000) >>> 0)]));
+      const seedCopyTargets = (uploads, sourceWords) => {
+        const seeds = differentSeedWords(sourceWords);
+        // Allocate with correct identity metadata first: the upload API keeps
+        // an identity-maximum cache. These temporary diagnostic bytes never
+        // reach a classifier/solver; the following GPU copy restores originals.
+        for (const [name, family, key] of [
+          ['state', 'sphParticleUpload', 'stateBuffer'],
+          ['thermo', 'sphParticleUpload', 'thermoBuffer'],
+          ['identity', 'sphParticleUpload', 'identityBuffer'],
+          ['mechanics', 'mlsMpmParticleUpload', 'mechanicsBuffer']
+        ]) device.queue.writeBuffer(uploads[family][key], 0, new Uint32Array(seeds[name]));
+      };
+      const floatsFromWords = (words) => new Float32Array(new Uint32Array(words).buffer);
+      // A detached manufactured source, not an E* publication or retry token.
+      // Physics values arrive exclusively by GPU copy; CPU arrays below are
+      // exact readback metadata for the existing two-row fixture/classifier.
+      const copyNumericSource = async ({ uploads, sphState, mlsState, label }) => {
+        const sourceWords = await readParticleFamilyWords(uploads, `${label}-source`);
+        const sourceSphState = { ...sphState,
+          state: floatsFromWords(sourceWords.state),
+          thermo: floatsFromWords(sourceWords.thermo),
+          identity: new Uint32Array(sourceWords.identity) };
+        const sourceMlsState = { ...mlsState, mechanics: floatsFromWords(sourceWords.mechanics) };
+        const targetUploads = {};
+        const destroy = () => {
+          if (targetUploads.sphParticleUpload) {
+            buffersModule.destroySphGpuParticleBuffers(targetUploads.sphParticleUpload);
+            targetUploads.sphParticleUpload = null;
+          }
+          if (targetUploads.mlsMpmParticleUpload) {
+            buffersModule.destroyMlsMpmGpuParticleBuffers(targetUploads.mlsMpmParticleUpload);
+            targetUploads.mlsMpmParticleUpload = null;
+          }
+        };
+        let submitted = false;
+        try {
+          targetUploads.sphParticleUpload = buffersModule.uploadSphGpuParticleBuffers(device, sourceSphState);
+          targetUploads.mlsMpmParticleUpload = buffersModule.uploadMlsMpmGpuParticleBuffers(device, sourceMlsState);
+          seedCopyTargets(targetUploads, sourceWords);
+          const beforeCopyWords = await readParticleFamilyWords(targetUploads, `${label}-before-copy`);
+          requireTrue(everyParticleWordDiffers(sourceWords, beforeCopyWords),
+            `${label} copy witness was vacuously prefilled with source words`);
+          const encoder = device.createCommandEncoder({ label });
+          const copy = tailSnapshotModule.encodeParticleFamilyCopy(encoder, {
+            sourceUploads: uploads, targetUploads
+          });
+          device.queue.submit([encoder.finish()]);
+          submitted = true;
+          await device.queue.onSubmittedWorkDone();
+          const targetWords = await readParticleFamilyWords(targetUploads, `${label}-target`);
+          requireTrue(sameParticleWords(sourceWords, targetWords), `${label} changed copied particle words`);
+          return { uploads: targetUploads, sphState: sourceSphState, mlsState: sourceMlsState,
+            words: targetWords, destroy,
+            evidence: { ...copy, label, queueFenceConfirmed: true, allWordsExact: true,
+              everyWordDifferentBeforeCopy: true, beforeCopyWords, sourceWords, targetWords } };
+        } catch (error) {
+          if (submitted) {
+            try { await device.queue.onSubmittedWorkDone(); } catch { /* Preserve original failure. */ }
+          }
+          destroy();
+          throw error;
+        }
+      };
       const generationIdentity = (generation) => {
         const execution = generation?.execution ?? null;
         const source = generation?.source ?? null;
@@ -919,14 +1058,15 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         recentEvents: mechanicsFieldEvents.slice(-40)
       });
 
-      const runRatio = async (ratio) => {
+      const runRatio = async (ratio, trial = null) => {
         const ratioStartedAt = performance.now();
         activeDiagnosticRatio = ratio;
         const particleCount = 2;
-        const dt = Math.fround(0.005 * ratio);
-        const storageGeneration = 100 + ratio;
+        const dt = Math.fround(trial?.dt ?? pressureTailFixture?.macroDt ?? (0.005 * ratio));
+        const gasParticleIndex = pressureTailFixture?.gasParticleIndex ?? 0;
+        const storageGeneration = 100 + ratio + (trial?.ordinal ?? 0) * 1000;
         const mechanicsMaterialTable =
-          materialTableModule.buildMlsMpmMechanicsMaterialTable({
+          trial?.materials?.table ?? materialTableModule.buildMlsMpmMechanicsMaterialTable({
             h2o: {
               molarMassKgPerMol: 0.018015,
               phases: [{
@@ -950,8 +1090,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           }, { viscosityEnabled: true });
         const materialId = mechanicsMaterialTable.metadata[0].materialId;
         const state = new Float32Array([
-          0.9, 1, 1, 1, 0.2, 0, 0, 16,
-          1.1, 1, 1, 1, 0, 0.2, 0, 16
+          pressureTailFixture?.fineX ?? 0.9, 1, 1, 1, 0.2, 0, 0, 16,
+          pressureTailFixture?.coarseX ?? 1.1, 1, 1, 1, 0, 0.2, 0, 16
         ]);
         const thermo = new Float32Array(particleCount * 12);
         const identity = new Uint32Array([101, 202]);
@@ -959,11 +1099,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           particleCount * abi.MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length
         );
         for (let index = 0; index < particleCount; index += 1) {
-          const phaseId = index === 0 ? 3 : 2;
-          const restDensity = index === 0 ? 0.6 : 997;
+          const isGas = index === gasParticleIndex;
+          const phaseId = isGas ? 3 : 2;
+          const restDensity = isGas ? 0.6 : 997;
           thermo.set([
-            materialId, phaseId, index === 0 ? 500 : 300, restDensity,
-            0, index === 1 ? 1 : 0, index === 0 ? 1 : 0, 0,
+            materialId, phaseId, isGas ? 500 : 300, restDensity,
+            0, isGas ? 0 : 1, isGas ? 1 : 0, 0,
             0.25, 1, 1, 0.001
           ], index * 12);
           const offset = index
@@ -977,24 +1118,38 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           mechanics[offset + 31] = 1;
         }
 
+        if (trial?.source) {
+          requireTrue(trial.source.words.state.length === state.length
+            && trial.source.words.thermo.length === thermo.length
+            && trial.source.words.identity.length === identity.length
+            && trial.source.words.mechanics.length === mechanics.length,
+          'Refinement input family changed the manufactured particle layout');
+          state.set(floatsFromWords(trial.source.words.state));
+          thermo.set(floatsFromWords(trial.source.words.thermo));
+          identity.set(trial.source.words.identity);
+          mechanics.set(floatsFromWords(trial.source.words.mechanics));
+        }
+
+        const sourceTick = trial?.source?.sphState.step ?? ratio;
+        const sourceTime = trial?.source?.sphState.time ?? 0;
         const epochIdentity = {
           storageGeneration,
           bufferFamilyGeneration: storageGeneration,
-          physicsTick: ratio,
+          physicsTick: sourceTick,
           physicsSubstep: 0,
-          positionEpoch: ratio,
-          topologyEpoch: ratio,
-          chartEpoch: ratio,
-          levelEpoch: ratio,
-          supportEpoch: ratio
+          positionEpoch: sourceTick,
+          topologyEpoch: sourceTick,
+          chartEpoch: sourceTick,
+          levelEpoch: sourceTick,
+          supportEpoch: sourceTick
         };
         const sphParticleState = {
           schema: abi.ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
           status: 'cpu-derived-gpu-buffer-ready',
           particleCount,
           dimension: 3,
-          step: ratio,
-          time: 0,
+          step: sourceTick,
+          time: sourceTime,
           smoothingLengthM: 0.25,
           stateStrideFloats: 8,
           thermoStrideFloats: 12,
@@ -1016,8 +1171,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           schema: abi.ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
           status: 'cpu-derived-gpu-buffer-ready',
           particleCount,
-          step: ratio,
-          time: 0,
+          step: sourceTick,
+          time: sourceTime,
           mechanicsStrideFloats:
             abi.MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length,
           mechanicsStrideBytes:
@@ -1050,8 +1205,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           slot: 0,
           sourceSlot: 0,
           nextSlot: 1,
-          step: ratio,
-          time: 0
+          step: sourceTick,
+          time: sourceTime
         });
         Object.assign(mlsMpmParticleUpload, {
           ...epochIdentity,
@@ -1060,9 +1215,37 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           slot: 0,
           sourceSlot: 0,
           nextSlot: 1,
-          step: ratio,
-          time: 0
+          step: sourceTick,
+          time: sourceTime
         });
+
+        let inputCopyEvidence = null;
+        if (trial?.source) {
+          const uploads = { sphParticleUpload, mlsMpmParticleUpload };
+          try {
+            seedCopyTargets(uploads, trial.source.words);
+            const beforeCopyWords = await readParticleFamilyWords(uploads, `${trial.label}-before-working-copy`);
+            requireTrue(everyParticleWordDiffers(trial.source.words, beforeCopyWords),
+              `${trial.label} working copy was already filled with source words`);
+            const encoder = device.createCommandEncoder({ label: `${trial.label}-working-copy` });
+            const copy = tailSnapshotModule.encodeParticleFamilyCopy(encoder, {
+              sourceUploads: trial.source.uploads, targetUploads: uploads
+            });
+            device.queue.submit([encoder.finish()]);
+            await device.queue.onSubmittedWorkDone();
+            const actualWords = await readParticleFamilyWords(uploads, `${trial.label}-working-copy`);
+            requireTrue(sameParticleWords(trial.source.words, actualWords),
+              `${trial.label} working input differs from its exact preceding source`);
+            inputCopyEvidence = { ...copy, queueFenceConfirmed: true,
+              allWordsExact: true, everyWordDifferentBeforeCopy: true, beforeCopyWords,
+              sourceWords: trial.source.words, targetWords: actualWords };
+          } catch (error) {
+            try { await device.queue.onSubmittedWorkDone(); } catch { /* Original failure remains authoritative. */ }
+            buffersModule.destroySphGpuParticleBuffers(sphParticleUpload);
+            buffersModule.destroyMlsMpmGpuParticleBuffers(mlsMpmParticleUpload);
+            throw error;
+          }
+        }
 
         const assignmentRows = new Float32Array(particleCount * 16);
         for (let index = 0; index < particleCount; index += 1) {
@@ -1070,8 +1253,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           const offset = index * 16;
           assignmentRows.set([
             level, 0.25 * (2 ** level), 1, 0.001,
-            0.001, 0.001, 1, index === 0 ? 0.6 : 997,
-            index === 0 ? 3 : 2, materialId, 1, 0.15,
+            0.001, 0.001, 1, thermo[index * 12 + 3],
+            thermo[index * 12 + 1], thermo[index * 12], 1, 0.15,
             state[index * 8], state[index * 8 + 1], state[index * 8 + 2], 0
           ], offset);
         }
@@ -1167,7 +1350,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             consumerSupportProfileIds: {}
           });
         const mechanicsMaterialPhaseUpload =
-          mechanicsRefreshModule.uploadMlsMpmMechanicsMaterialPhaseRecords(
+          trial?.materials?.upload ?? mechanicsRefreshModule.uploadMlsMpmMechanicsMaterialPhaseRecords(
             device,
             mechanicsMaterialTable
           );
@@ -1321,6 +1504,64 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         const g2pDiagnostics = [];
         let terminalPreWorkspaceLedgerWords = null;
         const workspaceCaptures = [];
+        const tailSnapshots = [];
+        const fineCandidates = [];
+        const preparedFineSnapshots = [];
+        const captureTail = (encoder, execution, stage) => {
+          if (tailSnapshotModule) {
+            tailSnapshots.push(tailSnapshotModule.encodeSnapshot(
+              device, encoder, execution, { stage }
+            ));
+          }
+        };
+        const readTailEvidence = async () => {
+          if (!pressureTailFixture) return null;
+          const snapshots = await Promise.all(tailSnapshots.map((snapshot) => snapshot.read()));
+          const candidateEvidence = await Promise.all(fineCandidates.map((candidate) => candidate.read()));
+          const preparedSnapshots = await Promise.all(preparedFineSnapshots.map(async ({ snapshot, pipelineLabel }) => ({
+            ...await snapshot.read(), pipelineLabel,
+            dispatchBoundaryClaim: 'after exact production projection dispatch; not proof its guarded body admitted inputs'
+          })));
+          const headerLayout = abi.SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_HEADER_LAYOUT;
+          for (const snapshot of [...snapshots, ...preparedSnapshots]) {
+            const header = Object.fromEntries(headerLayout.map((name, index) =>
+              [name.split(':')[0], snapshot.workspaceWords[index]]));
+            const expected = snapshot.identities.execution;
+            snapshot.copiedHeaderIdentityConfirmed = header.magic
+                === abi.SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_MAGIC
+              && header.abiVersion === abi.SCHROEDER_SPATIAL_PARENT_FIELD_MECHANICS_WORKSPACE_VERSION
+              && ['generationId', 'completionOrdinal', 'sourceFamilyId',
+                'storageGeneration', 'deviceOrdinal', 'laneOrdinal', 'leaseToken']
+                .every((name) => header[name] === expected[name]);
+            // Header76 is reused for private transaction staging after
+            // correction preparation (angular impulse, then terminal CFL).
+            snapshot.predictorFineOrdinalConfirmed = snapshot.stage === 'after-predictors'
+                || snapshot.stage === 'before-fine-correction'
+              ? header.fineSubstepOrdinal === expected.fineSubstepOrdinal : null;
+            // An unsubmitted encoder can leave a mappable zero buffer. Such
+            // bytes remain unconfirmed, never an actual zero-valued endpoint.
+            snapshot.boundaryEvidenceStatus = snapshot.copiedHeaderIdentityConfirmed
+              ? 'copied-workspace-identity-confirmed-not-endpoint-admission'
+              : 'unconfirmed-boundary-do-not-interpret-operands';
+          }
+          return {
+          scope: 'manufactured-coupled-operands-not-particle-endpoint-admission',
+          case: pressureTailCase,
+          input: {
+            macroDt: dt, fineDt: dt / ratio, gridCflFactor: 0.4,
+            phaseVolumePressureScale: 0.01, boxDimsM: [2, 2, 2],
+            gasParticleIndex, state: [...state], thermo: [...thermo], mechanics: [...mechanics],
+            assignment: [...assignmentRows]
+          },
+          counts: { ...counts },
+          gridUpdateDiagnostics,
+          g2pDiagnostics,
+          snapshots,
+          preparedFineSnapshots: preparedSnapshots,
+          fineCandidateRequested: runFineCandidate,
+          fineCandidates: candidateEvidence
+          };
+        };
         const workspaceCaptureByExecution = new WeakMap();
         const diagnosticWorkspaceRuntimeFactory = (...factoryArgs) => {
           const runtime =
@@ -1340,12 +1581,64 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             };
             workspaceCaptures.push(capture);
             workspaceCaptureByExecution.set(execution, capture);
+            captureTail(args[0], execution, 'after-predictors');
             return execution;
           };
           runtime.encodeFineCorrection = (encoder, execution, options) => {
-            const update = encodeFineCorrection(encoder, execution, options);
+            captureTail(encoder, execution, 'before-fine-correction');
+            let candidate = null;
+            if (fineCandidateModule && fineCandidates.length === 0
+                && execution.fineSubstepOrdinal === 0) {
+              const projection = options.fineGridUpdate?.sourceProjection;
+              const continuation = projection?.sourceParticleContinuation;
+              const sourceGeneration = projection?.fineMicroepochAuthority?.generation;
+              const activeSource = sourceGeneration?.activeSourceView?.activeSourceViewBuffer
+                ?? sourceGeneration?.execution?.activeSourceView?.activeSourceViewBuffer
+                ?? sourceGeneration?.execution?.activeSourceViewBuffer;
+              requireTrue(projection === execution.fineP2gProjection
+                && projection?.mechanicsFieldViewExecution === execution.fineFieldView
+                && continuation === execution.fusedFineSubstepTransaction?.particleContinuation
+                && continuation?.stateBuffer && continuation?.mechanicsBuffer && activeSource,
+              'first-fine diagnostic lost exact projection/particle continuation lineage');
+              candidate = fineCandidateModule.encodeFineCandidateClone(device, encoder, execution, {
+                particleInputs: {
+                  source: 'exact-first-fine-sourceProjection-and-current-particle-continuation',
+                  activeSourceBuffer: activeSource,
+                  stateBuffer: continuation.stateBuffer,
+                  mechanicsBuffer: continuation.mechanicsBuffer,
+                  particleCount: continuation.sphParticleUpload.particleCount,
+                  stateStrideBytes: continuation.sphParticleUpload.stateStrideBytes,
+                  mechanicsStrideBytes: continuation.mlsMpmParticleUpload.mechanicsStrideBytes,
+                  gridSpacingM: options.fineGridUpdate.gridSpacingM,
+                  dt: options.fineGridUpdate.dt,
+                  pressureScale: options.fineGridUpdate.gasPressureBoundarySubmission?.pressureScale,
+                  internalPressureScale: projection.internalPressureScale,
+                  sourceGenerationId: sourceGeneration.execution.generationId,
+                  continuationOrdinal: continuation.ordinal,
+                  completionOrdinal: execution.completionOrdinal,
+                  fineSubstepOrdinal: execution.fineSubstepOrdinal
+                }
+              });
+            }
+            if (candidate) fineCandidates.push(candidate);
+            const pipelineLabel = `${factoryArgs[1]?.label
+              ?? 'ulg-schroeder-spatial-parent-field-mechanics-workspace'}-project-prepare-fine-rows-pipeline`;
+            const preparedBoundary = candidate
+              ? fineCandidateModule.captureFineProjectionBoundary(encoder, {
+                pipelineLabel,
+                onBoundary: (actualEncoder) => {
+                  preparedFineSnapshots.push({ pipelineLabel,
+                    snapshot: tailSnapshotModule.encodeSnapshot(device, actualEncoder, execution, {
+                      stage: 'after-project-prepare-fine-rows'
+                    }) });
+                }
+              }) : null;
+            const update = encodeFineCorrection(preparedBoundary?.encoder ?? encoder, execution, options);
+            preparedBoundary?.assertCaptured();
+            if (candidate) candidate.encodeCandidate(encoder, execution);
             const capture = workspaceCaptureByExecution.get(execution);
             if (capture) capture.update = update;
+            captureTail(encoder, execution, 'after-fine-correction');
             return update;
           };
           runtime.encodeCoarseTerminal = (...args) => {
@@ -1360,6 +1653,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             };
             workspaceCaptures.push(capture);
             if (execution) workspaceCaptureByExecution.set(execution, capture);
+            if (execution) captureTail(args[0], execution, 'after-coarse-terminal');
             return update;
           };
           return runtime;
@@ -1367,7 +1661,19 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         let result = null;
         let closure = null;
         let cleanupComplete = false;
+        let refinementRejection = null;
+        let trialError = null;
+        let refinementEndpoint = null;
+        let mechanicsStarted = false;
         try {
+          if (trial?.onPreparedSource) {
+            await trial.onPreparedSource({
+              uploads: { sphParticleUpload, mlsMpmParticleUpload },
+              sphState: sphParticleState, mlsState: mlsMpmParticleState,
+              materials: { table: mechanicsMaterialTable, upload: mechanicsMaterialPhaseUpload }
+            });
+          }
+          mechanicsStarted = true;
           result = await couplingModule.runSchroederTwoLevelMechanicsStepWebGpu({
             device,
             sphParticleState,
@@ -1429,13 +1735,33 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
                     })
                   : null;
+              // The controller may also request its own GPU-only failed-field
+              // capture. Preserve that destination; neither its missing
+              // COPY_SRC nor MAP_READ's usage restrictions allow reading it
+              // directly. Fan out one identical staged scratch copy to both.
+              const controllerScratchCapture = options.gasPressureBoundaryScratchCaptureBuffer;
+              const scratchBridge = controllerScratchCapture && gasPressureBoundaryLayout
+                ? device.createBuffer({
+                    label: `native-m3-r${ratio}-${kind}-scratch-fanout`,
+                    size: gasPressureBoundaryLayout.scratchByteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+                  }) : null;
               let update;
               let gasPressureBoundaryScratchWords = null;
               try {
                 update = await updateModule.runMlsMpmGridUpdateWebGpu({
                   ...options,
-                  gasPressureBoundaryScratchCaptureBuffer
+                  gasPressureBoundaryScratchCaptureBuffer:
+                    scratchBridge ?? gasPressureBoundaryScratchCaptureBuffer
                 });
+                if (scratchBridge) {
+                  const encoder = device.createCommandEncoder();
+                  encoder.copyBufferToBuffer(scratchBridge, 0,
+                    controllerScratchCapture, 0, scratchBridge.size);
+                  encoder.copyBufferToBuffer(scratchBridge, 0,
+                    gasPressureBoundaryScratchCaptureBuffer, 0, scratchBridge.size);
+                  device.queue.submit([encoder.finish()]);
+                }
                 if (gasPressureBoundaryScratchCaptureBuffer) {
                   await gasPressureBoundaryScratchCaptureBuffer.mapAsync(
                     GPUMapMode.READ
@@ -1451,6 +1777,7 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
                 }
               } finally {
                 gasPressureBoundaryScratchCaptureBuffer?.destroy();
+                scratchBridge?.destroy();
               }
               if (fieldView?.fieldViewBuffer && ledger?.buffer) {
                 const activeGeneration =
@@ -1661,7 +1988,8 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             retainOutputParticleBuffers: true,
             conservationSummaryReadback: false,
             invariantEvidenceReadback: false,
-            compactSummaryReadback: false
+            compactSummaryReadback: false,
+            canonicalSpatialAuthorityTrace: pressureTailFixture != null
           });
           closure = result.pendingPostMechanicsClosure;
           requireTrue(
@@ -1780,6 +2108,36 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
               ])
           );
           const workspaceDiagnostics = [];
+          // A tagged rejection reuses reflux125..135 as its witness. Do not
+          // feed those words to the successful signed-energy decoder, which
+          // would mask the actual physical rejection with a host schema error.
+          if (!refluxValid && trial) {
+            // The failed tag reuses signed-work header slots. Preserve raw
+            // words and only rejection identity here; never decode those
+            // slots as successfully completed work/energy channels.
+            const tag = refluxWords[124];
+            const payload = new Float32Array(refluxWords.buffer,
+              refluxWords.byteOffset + 125 * 4, 11);
+            refinementRejection = {
+              structuralValid: reflux.structuralValid,
+              admitted: reflux.admitted, terminalAdmitted: reflux.terminalAdmitted,
+              failClosed: reflux.failClosed, statusFlags: reflux.statusFlags,
+              phase: reflux.phase, committedFineSubstepCount: reflux.committedFineSubstepCount,
+              consumedFineSubstepCount: reflux.consumedFineSubstepCount,
+              completionOrdinal: reflux.completionOrdinal,
+              tag, stageCode: (tag >>> 22) & 3, fieldOrdinal: tag & 0xffff,
+              priorRegimeCode: (tag >>> 17) & 3,
+              phaseIntervalValid: (tag & (1 << 21)) !== 0,
+              fullIntervalValid: (tag & (1 << 20)) !== 0,
+              priorVelocity: [...payload.slice(0, 3)],
+              phaseDelta: [...payload.slice(3, 6)], fullDelta: [...payload.slice(6, 9)],
+              maximumVelocity: payload[9],
+              rawHeaderWords: [...refluxWords.slice(0, abi.SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS)]
+            };
+          }
+          requireTrue(refluxValid,
+            `r=${ratio} native coupled reflux not admitted; flags=${reflux.statusFlags}; `
+              + `captureTag=0x${refluxWords[124].toString(16)}`);
           for (let index = 0; index < workspaceCaptures.length; index += 1) {
             const capture = workspaceCaptures[index];
             const execution = capture.execution;
@@ -2126,6 +2484,17 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             transportRows
           };
 
+          if (trial?.onAdmittedEndpoint) {
+            const endpoint = await trial.onAdmittedEndpoint({
+              uploads: {
+                sphParticleUpload: closure.finalSphParticleUpload,
+                mlsMpmParticleUpload: closure.finalMlsMpmParticleUpload
+              },
+              sphState: result.pendingNextSphParticleState,
+              mlsState: result.pendingNextMlsMpmParticleState
+            });
+            refinementEndpoint = endpoint.evidence;
+          }
           requireTrue(
             await fusedModule.abandonSchroederFusedMechanicsPendingClosureAfter(
               device,
@@ -2169,6 +2538,19 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
 
           return {
             ratio,
+            ...(trial ? { refinementTrial: {
+              label: trial.label, ordinal: trial.ordinal, macroDt: dt, fineDt: dt / ratio,
+              inputTimeS: sourceTime, outputTimeS: result.pendingNextSphParticleState.time,
+              mlsOutputTimeS: result.pendingNextMlsMpmParticleState.time,
+              sourceIdentity: { ...epochIdentity },
+              assignmentPolicy: 'fresh manufactured rows; fixed level labels, current GPU-readback position and phase metadata; NOT successor classification',
+              materialRecordsFingerprint: mechanicsMaterialPhaseUpload.sourceMaterialTableContentFingerprint,
+              sharedMaterialTableExact: trial.materials == null || mechanicsMaterialTable === trial.materials.table,
+              sharedMaterialBufferExact: trial.materials == null || mechanicsMaterialPhaseUpload === trial.materials.upload,
+              inputCopy: inputCopyEvidence, endpointCopy: refinementEndpoint,
+              productionRetryOrSuccessorClaim: false
+            } } : {}),
+            pressureTailEvidence: await readTailEvidence(),
             durationMs: performance.now() - ratioStartedAt,
             counts,
             backendCount: backends.length,
@@ -2259,6 +2641,24 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             mechanicsFieldRuntimeLifecycleCheckpoint
           };
         } catch (error) {
+          trialError = error;
+          if (trial) {
+            Object.defineProperty(error, 'nativeRefinementRejection', {
+              value: refinementRejection, enumerable: false
+            });
+          }
+          if (pressureTailFixture) {
+            try {
+              Object.defineProperty(error, 'nativePressureTailEvidence', {
+                value: await readTailEvidence(), enumerable: false
+              });
+            } catch (captureError) {
+              Object.defineProperty(error, 'nativePressureTailCaptureError', {
+                value: captureError?.message || String(captureError),
+                enumerable: false
+              });
+            }
+          }
           Object.defineProperty(error, 'nativeSpatialDiagnostics', {
             value: spatialGenerationDiagnostics(
               generation.directRuntimeEntry,
@@ -2268,23 +2668,53 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           });
           throw error;
         } finally {
+          for (const snapshot of tailSnapshots) snapshot.destroy();
+          for (const { snapshot } of preparedFineSnapshots) snapshot.destroy();
+          await Promise.all(fineCandidates.map((candidate) => candidate.destroy()));
+          if (trial && trialError && !mechanicsStarted) {
+            try {
+              // The source-copy callback failed before a mechanics macro was
+              // invoked. Retire the already submitted initial generation on
+              // the real queue fence, not a fabricated macro-completion token.
+              await controller.abortAllAfter(trialError, {
+                mechanicsRetirement: device.queue.onSubmittedWorkDone().then(() => true)
+              });
+            } catch (cleanupError) {
+              Object.defineProperty(trialError, 'nativeRefinementSetupCleanupError', {
+                value: cleanupError?.message || String(cleanupError), enumerable: false
+              });
+            }
+          }
           if (closure && !cleanupComplete) {
             try {
-              await fusedModule.abandonSchroederFusedMechanicsPendingClosureAfter(
+              const abandoned = await fusedModule.abandonSchroederFusedMechanicsPendingClosureAfter(
                 device,
                 closure,
                 { reason: new Error(`native M3 r=${ratio} failure cleanup`) }
               );
+              if (trial) {
+                cleanupComplete = abandoned === true
+                  && await closure.completionPromise === false
+                  && await controller.completionPromise() === true;
+              }
             } catch {
               // Preserve the original native failure.
             }
           }
+          if (trialError && trial) {
+            Object.defineProperty(trialError, 'nativeRefinementCleanup', {
+              value: { privateClosurePresent: closure != null, confirmed: cleanupComplete },
+              enumerable: false
+            });
+          }
           assignmentBuffer.destroy();
           buffersModule.destroySphGpuParticleBuffers(sphParticleUpload);
           buffersModule.destroyMlsMpmGpuParticleBuffers(mlsMpmParticleUpload);
-          mechanicsRefreshModule.destroyMlsMpmMechanicsMaterialPhaseUpload(
-            mechanicsMaterialPhaseUpload
-          );
+          if (!trial?.materials && !trial?.preserveMaterials) {
+            mechanicsRefreshModule.destroyMlsMpmMechanicsMaterialPhaseUpload(
+              mechanicsMaterialPhaseUpload
+            );
+          }
         }
       };
 
@@ -2303,6 +2733,12 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
             releaseDiagnostics: error.releaseDiagnostics ?? null,
             nativeSpatialDiagnostics: error.nativeSpatialDiagnostics ?? null,
             nativeAllocationBoundary: error.nativeAllocationBoundary ?? null,
+            nativePressureTailEvidence: error.nativePressureTailEvidence ?? null,
+            nativePressureTailCaptureError:
+              error.nativePressureTailCaptureError ?? null,
+            nativeRefinementRejection: error.nativeRefinementRejection ?? null,
+            nativeRefinementCleanup: error.nativeRefinementCleanup ?? null,
+            nativeRefinementSetupCleanupError: error.nativeRefinementSetupCleanupError ?? null,
             refreshCleanupError: error.schroederRefreshCleanupError
               ? {
                   message: error.schroederRefreshCleanupError.message
@@ -2316,16 +2752,119 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
         return chain;
       };
       const ratios = [];
-      for (const ratio of requestedRatios) {
+      let refinement = null;
+      const runRefinement = async () => {
+        const totalDt = Math.fround(pressureTailFixture.macroDt);
+        const halfDt = Math.fround(totalDt / 2);
+        requireTrue(halfDt > 0 && halfDt + halfDt === totalDt,
+          'Fixed two-half refinement must preserve the exact requested interval');
+        let materials = null;
+        let pristine = null;
+        let firstEndpoint = null;
+        let finalEndpoint = null;
+        let baselineError = null;
         try {
-          ratios.push(await runRatio(ratio));
+          try {
+            await runRatio(2, {
+              ordinal: 0, label: 'unrefined-crossing', dt: totalDt,
+              preserveMaterials: true,
+              onPreparedSource: async (source) => {
+                materials = source.materials;
+                pristine = await copyNumericSource({ ...source, label: 'pristine-before-unrefined-macro' });
+              }
+            });
+          } catch (error) {
+            baselineError = error;
+          }
+          const rejected = baselineError?.nativeRefinementRejection;
+          const baselineValidation = await device.popErrorScope();
+          device.pushErrorScope('validation');
+          try {
+            requireTrue(baselineError != null && pristine != null && materials != null
+            && rejected?.structuralValid === true && rejected.failClosed === true
+            && rejected.admitted === false && rejected.terminalAdmitted === false
+            && rejected.tag === 0xc7140016 && rejected.stageCode === 0
+            && rejected.fieldOrdinal === 22 && rejected.priorRegimeCode === 2
+            && rejected.phaseIntervalValid === false && rejected.fullIntervalValid === true
+            && rejected.committedFineSubstepCount === 0 && rejected.consumedFineSubstepCount === 0
+            && rejected.priorVelocity.every(Number.isFinite)
+            && Number.isFinite(rejected.maximumVelocity) && rejected.maximumVelocity > 0
+            && Math.hypot(...rejected.priorVelocity) > rejected.maximumVelocity * 1.000003814697265625
+            && baselineError.nativeRefinementCleanup?.confirmed === true
+            && baselineError.nativePressureTailCaptureError == null
+            && baselineValidation == null && uncapturedErrors.length === 0 && deviceLost.length === 0,
+          `Unrefined baseline did not reproduce the exact clean first-fine physical rejection: ${JSON.stringify({
+            reason: baselineError?.message ?? 'unexpected baseline admission', rejected,
+            cleanup: baselineError?.nativeRefinementCleanup,
+            validation: baselineValidation?.message ?? null, uncapturedErrors, deviceLost
+            })}`);
+          } catch (error) {
+            error.cause = baselineError;
+            throw error;
+          }
+          refinement = {
+            scope: 'two sequential manufactured full-coupled macros; not production retry, successor publication, actual Cs or throughput proof',
+            status: 'baseline-rejected-refined-segments-pending',
+            productionRetryOrSuccessorClaim: false,
+            requestedElapsedDtS: totalDt, segmentDtS: [halfDt, halfDt], fineSubstepCount: 2,
+            materialRecordsFingerprint: materials.upload.sourceMaterialTableContentFingerprint,
+            baseline: { status: 'expected-physical-rejection', simulationAdmitted: false,
+              reason: baselineError.message, rejection: rejected,
+              cleanup: baselineError.nativeRefinementCleanup,
+              validationError: null, uncapturedErrors: [], deviceLost: [],
+              pressureTailEvidence: baselineError.nativePressureTailEvidence,
+              sourceCopy: pristine.evidence }
+          };
+          for (let ordinal = 1; ordinal <= 2; ordinal += 1) {
+            const source = ordinal === 1 ? pristine : firstEndpoint;
+            requireTrue(source != null, 'Refinement is missing the actual preceding GPU endpoint');
+            const row = await runRatio(2, {
+              ordinal, label: `refined-half-${ordinal}`, dt: halfDt,
+              materials, source,
+              onAdmittedEndpoint: async (endpoint) => {
+                const copy = await copyNumericSource({ ...endpoint, label: `refined-half-${ordinal}-endpoint` });
+                if (ordinal === 1) firstEndpoint = copy;
+                else finalEndpoint = copy;
+                return copy;
+              }
+            });
+            ratios.push(row);
+          }
+          requireTrue(ratios.length === 2
+            && ratios[0].refinementTrial.inputTimeS === 0
+            && ratios[0].refinementTrial.outputTimeS === halfDt
+            && ratios[1].refinementTrial.inputTimeS === halfDt
+            && ratios[1].refinementTrial.outputTimeS === totalDt
+            && ratios.every((row) => row.refinementTrial.mlsOutputTimeS === row.refinementTrial.outputTimeS)
+            && sameParticleWords(pristine.words, ratios[0].refinementTrial.inputCopy.targetWords)
+            && sameParticleWords(firstEndpoint.words, ratios[1].refinementTrial.inputCopy.targetWords),
+          'Refinement did not advance the exact preceding state over the full requested interval');
+          refinement.status = 'numeric-segments-completed-pending-host-assertions';
+          refinement.completedElapsedDtS = ratios[1].refinementTrial.outputTimeS;
+          refinement.finalEndpointCopy = finalEndpoint.evidence;
+          refinement.materialUploadStillLive = materials.upload.destroyed !== true;
+        } finally {
+          for (const source of [finalEndpoint, firstEndpoint, pristine]) source?.destroy();
+          if (materials) {
+            mechanicsRefreshModule.destroyMlsMpmMechanicsMaterialPhaseUpload(materials.upload);
+          }
+        }
+      };
+      for (const ratio of runCoupledRefinement ? [2] : requestedRatios) {
+        try {
+          if (runCoupledRefinement) await runRefinement();
+          else ratios.push(await runRatio(ratio));
         } catch (error) {
-          throw new Error(
-            `native M3 r=${ratio} failed: ${error?.message || String(error)}; `
-              + `deviceLost=${JSON.stringify(deviceLost)}; `
-              + `diagnostics=${JSON.stringify(diagnosticErrorChain(error))}`,
-            { cause: error }
-          );
+          // Preserve native failures as failures, including GPU validation and
+          // unavailable captures. A generic exception is never a tail oracle.
+          const validationError = await device.popErrorScope();
+          return {
+            status: 'failed', ratio,
+            reason: error?.message || String(error),
+            deviceLost, validationError: validationError?.message || null,
+            uncapturedErrors, diagnostics: diagnosticErrorChain(error),
+            ...(runCoupledRefinement ? { refinement, ratios } : {})
+          };
         }
       }
       await device.queue.onSubmittedWorkDone();
@@ -2362,16 +2901,29 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
           description: adapter.info?.description || null
         },
         ratios,
+        ...(runCoupledRefinement ? { refinement } : {}),
         mechanicsFieldRuntimeLifecycle,
         validationError: validationError?.message || null,
         uncapturedErrors
       };
     }, {
       requestedRatios: REQUESTED_RATIOS,
-      runExactGasPressure: RUN_EXACT_GAS_PRESSURE
+      runExactGasPressure: RUN_EXACT_GAS_PRESSURE,
+      runFineCandidate: RUN_FINE_CANDIDATE,
+      runCoupledRefinement: RUN_COUPLED_REFINEMENT,
+      pressureTailFixture,
+      pressureTailCase: PRESSURE_TAIL_CASE
     });
   } finally {
     await browser.close();
+  }
+
+  // Optional generated test evidence lives at the caller's explicit external
+  // artifact path. It does not change the test verdict or publish physics.
+  if (process.env.ULG_CROSS_LEVEL_M3_EVIDENCE_PATH) {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(process.env.ULG_CROSS_LEVEL_M3_EVIDENCE_PATH,
+      JSON.stringify({ ...native, browserDiagnostics }, null, 2));
   }
 
   assert.equal(native.status, 'complete', native.reason || JSON.stringify(native));
@@ -2379,8 +2931,28 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
   assert.deepEqual(native.uncapturedErrors, [], JSON.stringify(native, null, 2));
   assert.deepEqual(
     native.ratios.map(({ ratio }) => ratio),
-    REQUESTED_RATIOS
+    RUN_COUPLED_REFINEMENT ? [2, 2] : REQUESTED_RATIOS
   );
+  if (RUN_COUPLED_REFINEMENT) {
+    assert.equal(native.refinement.baseline.simulationAdmitted, false);
+    assert.equal(native.refinement.baseline.rejection.tag, 0xc7140016);
+    assert.equal(native.refinement.baseline.cleanup.confirmed, true);
+    assert.equal(native.refinement.productionRetryOrSuccessorClaim, false);
+    assert.equal(native.refinement.completedElapsedDtS, native.refinement.requestedElapsedDtS);
+    assert.equal(native.refinement.materialUploadStillLive, true);
+    for (const row of native.ratios) {
+      assert.equal(row.refinementTrial.sharedMaterialTableExact, true);
+      assert.equal(row.refinementTrial.sharedMaterialBufferExact, true);
+      assert.equal(row.refinementTrial.materialRecordsFingerprint, native.refinement.materialRecordsFingerprint);
+      assert.equal(row.refinementTrial.inputCopy.allWordsExact, true);
+      assert.equal(row.refinementTrial.endpointCopy.allWordsExact, true);
+      assert.equal(row.refinementTrial.inputCopy.everyWordDifferentBeforeCopy, true);
+      assert.equal(row.refinementTrial.endpointCopy.everyWordDifferentBeforeCopy, true);
+      assert.equal(row.refinementTrial.productionRetryOrSuccessorClaim, false);
+    }
+    assert.notEqual(native.ratios[0].refinementTrial.sourceIdentity.storageGeneration,
+      native.ratios[1].refinementTrial.sourceIdentity.storageGeneration);
+  }
   console.log('native M3 strict evidence', JSON.stringify({
     adapter: native.adapter,
     ratios: native.ratios.map((result) => ({
@@ -2520,6 +3092,30 @@ test('native M3 canonical controller executes authentic Vulkan WebGPU r=1..4', {
   }
   for (const result of native.ratios) {
     const ratio = result.ratio;
+    if (pressureTailFixture) {
+      const evidence = result.pressureTailEvidence;
+      assert.equal(evidence.snapshots.length, ratio * 3 + 1);
+      assert.ok(evidence.snapshots.every((snapshot) =>
+        snapshot.copiedHeaderIdentityConfirmed === true
+        && snapshot.predictorFineOrdinalConfirmed !== false),
+      'Native diagnostic boundary identities were not confirmed');
+      if (pressureTailFixture.gasParticleIndex === 1) {
+        for (const diagnostic of evidence.gridUpdateDiagnostics.filter((entry) =>
+          entry.kind === 'fine-pre-correction')) {
+          const words = diagnostic.gasPressureBoundaryScratchWords;
+          const floats = new Float32Array(new Uint32Array(words).buffer);
+          let loadedRows = 0;
+          for (let row = 0; row < words[8]; row += 1) {
+            const offset = 12 + row * 12;
+            if (Math.abs(floats[offset + 9]) > 0
+                && Math.hypot(...floats.slice(offset + 3, offset + 6)) > 0) {
+              loadedRows += 1;
+            }
+          }
+          assert.ok(loadedRows > 0, 'Fine condensed pressure fixture had no pressure load');
+        }
+      }
+    }
     const expectedTopologySuccessors = Array.from(
       { length: ratio + 1 },
       () => 0

@@ -37,7 +37,8 @@ import {
 import {
   ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
   isExactWorkerTier0PresentationQosBoundaryProof,
-  resolveWorkerTier0PresentationQosSubsteps
+  resolveWorkerTier0PresentationQosSubsteps,
+  workerTier0PresentationQosBoundaryFrameSerials
 } from '../runtime/sph/sphWorkerPresentationQos.js';
 import {
   destroySphGpuParticleBuffers,
@@ -69,6 +70,7 @@ import {
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
   describeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource
 } from '../runtime/sph/sphSpatialGasLedgerEosGpu.js';
@@ -82,7 +84,9 @@ import {
   canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
   releaseSchroederSpatialEpochGenerationAfterQueue,
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
-  runSchroederSpatialEpochGenerationWebGpu
+  runSchroederSpatialEpochGenerationWebGpu,
+  schroederSpatialEpochDeviceRuntimeAllocationOwnership,
+  schroederSpatialEpochGenerationRetirementCapability
 } from '../runtime/sph/schroederSpatialEpochGpu.js';
 import {
   createSchroederSameLevelMechanicsSpatialEpochTransaction,
@@ -105,8 +109,12 @@ import {
   webGpuDeviceId
 } from '../runtime/sph/sphGpuDeviceIdentity.js';
 import {
-  enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors
+  enumerateSchroederSpatialMechanicalPrewarmPipelineDescriptors,
+  schroederSpatialMechanicalDeviceRuntimeAllocationOwnership
 } from '../runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
+import {
+  schroederSpatialThermalDeviceRuntimeAllocationOwnership
+} from '../runtime/sph/schroederSpatialThermalProposalsGpu.js';
 import {
   SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION,
   ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
@@ -199,9 +207,12 @@ import {
 } from '../runtime/sph/sphReactionGpuSummary.js';
 import {
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
   ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA,
-  createSchroederFusedTerminalRefluxReceiptTarget
+  ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA,
+  createSchroederFusedTerminalRefluxReceiptGroupTarget,
+  isSchroederFusedTerminalRefluxHeaderFullyAdmitted
 } from '../runtime/sph/schroederFusedFineSubstepGpu.js';
 import {
   SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION,
@@ -308,6 +319,9 @@ export const ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT = 128;
 // never authority-admission receipts: StateManager still admits only the
 // schedule's final terminal fence.
 export const ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS = 16;
+// A stalled renderer must not become a new physics completion requirement.
+// This is a wall-clock failure bound, not a claimed presentation cadence.
+export const ULG_WORKER_CANONICAL_PRESENTATION_BOUNDARY_TIMEOUT_MS = 100;
 // A presentation-coupled Tier0 lane must return to the compositor often
 // enough to sustain the 54 Hz interactive floor. This cap is route-generic:
 // materials and scenarios still run the same kernels and differ only in their
@@ -474,7 +488,8 @@ const WORKER_LOCAL_PRESSURE_AUTHORITY_KEYS = new Set([
 ]);
 const EXACT_GAS_PRESSURE_TRANSPORT_RETIRED_SCHEMA_KEYS = new Set([
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
-  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4
 ]);
 const EXACT_GAS_PRESSURE_TRANSPORT_GRAPH_KEYS = Object.freeze([
   'retainedGasCellFieldSource',
@@ -540,6 +555,10 @@ const STAGE_RUNNERS = {
 };
 
 const retainedLanes = new Map();
+// Keep exact cleanup references on failure without replaying successful owners.
+// A throwing whole-step destructor exposes no partial receipt, so it is not
+// automatically retried and must never fall through to raw buffer destruction.
+const laneRetirementProgress = new WeakMap();
 const workerLaneAssignmentOnlyScheduleProviders = new WeakSet();
 const workerLaneScheduleProviderAuthority = new WeakMap();
 const exactGasPressureTransportGraphByStageData = new WeakMap();
@@ -803,6 +822,12 @@ function getLaneRecord(payload = {}) {
     };
     retainedLanes.set(key, record);
   }
+  if (laneRetirementProgress.has(record)) {
+    const error = new Error(`Worker lane ${key} has started retirement and cannot accept new stage work`);
+    error.code = 'ERR_ULG_WORKER_LANE_RETIRING';
+    error.reason = 'lane-retirement-started';
+    throw error;
+  }
   return record;
 }
 
@@ -910,6 +935,126 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       destroyedBufferCount: 0
     };
   }
+  let progress = laneRetirementProgress.get(record);
+  const blockedRetirement = (status, error) => ({
+    status,
+    laneId: normalizeString(laneId, null),
+    stateKey: normalizeString(stateKey, null),
+    reason,
+    released: false,
+    destroyedBufferCount: 0,
+    retirementError: error instanceof Error ? error.message : String(error),
+    completedResidentStepCount: progress?.completedSteps.size ?? 0
+  });
+  if (progress?.failure) {
+    return blockedRetirement(
+      'worker-resident-lane-release-blocked-owner-retirement-incomplete',
+      progress.failure.error
+    );
+  }
+  let runtimeOwnedBuffers = [];
+  try {
+    if (record.workerDevice) {
+      // Released proposals still alias allocations retained by their device
+      // caches. Resolve every cache owner before either the resident-step
+      // destructor or the final raw lane walk can touch those allocations.
+      const owners = [
+        schroederSpatialEpochDeviceRuntimeAllocationOwnership(record.workerDevice),
+        schroederSpatialThermalDeviceRuntimeAllocationOwnership(record.workerDevice),
+        schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(record.workerDevice)
+      ];
+      runtimeOwnedBuffers = [...new Set(owners.flatMap(({ buffers }) => buffers))];
+    }
+  } catch (error) {
+    return blockedRetirement(
+      'worker-resident-lane-release-blocked-runtime-ownership-incomplete',
+      error
+    );
+  }
+  if (!progress) {
+    progress = {
+      protectedBuffers: new Set(),
+      completedSteps: new Map(),
+      pendingSteps: new Set(),
+      sphParticleUploads: new Set(),
+      failure: null
+    };
+    laneRetirementProgress.set(record, progress);
+  }
+  for (const buffer of runtimeOwnedBuffers) progress.protectedBuffers.add(buffer);
+  const lane = record.schroederLane;
+  if (lane?.epochGeneration && lane.epochConsumed !== true) {
+    if (!progress.epochRetirement) {
+      const retirement = {
+        generation: lane.epochGeneration,
+        consumption: lane.successorConsumption,
+        confirmed: false,
+        error: null,
+        promise: null
+      };
+      progress.epochRetirement = retirement;
+      try {
+        // Observe the exact attempt, not the stable completion promise: a
+        // rejected fence can leave that stable promise pending for a retry.
+        const attempt = schroederSpatialEpochGenerationRetirementCapability(
+          retirement.generation,
+          lane.device
+        ).retry();
+        const epochComplete = Promise.resolve(attempt).then((confirmed) => {
+          if (confirmed !== true) throw new Error('Exact epoch retirement was not confirmed');
+          return true;
+        });
+        epochComplete.catch(() => {});
+        const consumption = retirement.consumption;
+        const leaseComplete = consumption
+          ? consumption.releaseAfter(epochComplete).then((receipt) => {
+              if (
+                receipt?.released !== true
+                || receipt.queueFenceSettled !== true
+                || receipt.sourceGenerationId !== consumption.sourceFamily.sourceGenerationId
+              ) throw new Error('Exact successor-source lease retirement was not confirmed');
+              return consumption.retirementPromise;
+            }).then((receipt) => {
+              if (
+                receipt?.retired !== true || receipt.remainingLeaseCount !== 0
+                || receipt.sourceGenerationId !== consumption.sourceFamily.sourceGenerationId
+              ) throw new Error('Exact successor-source family retirement was not confirmed');
+              return true;
+            })
+          : Promise.resolve(true);
+        retirement.promise = Promise.all([epochComplete, leaseComplete]).then(
+          () => { retirement.confirmed = true; return true; },
+          (error) => { retirement.error = error; return false; }
+        );
+      } catch (error) {
+        retirement.error = error;
+      }
+    }
+    const retirement = progress.epochRetirement;
+    if (retirement.error) {
+      return blockedRetirement(
+        'worker-resident-lane-release-blocked-epoch-retirement-incomplete',
+        retirement.error
+      );
+    }
+    if (!retirement.confirmed) {
+      return {
+        status: 'worker-resident-lane-release-pending-epoch-retirement',
+        laneId: normalizeString(laneId, null),
+        stateKey: normalizeString(stateKey, null),
+        reason,
+        released: false,
+        destroyedBufferCount: 0
+      };
+    }
+  }
+  const retainCleanOpticsQuarantine = (quarantine) => {
+    const step = quarantine.finalStep;
+    if (step && !progress.completedSteps.has(step)) progress.pendingSteps.add(step);
+    for (const upload of [quarantine.sourceSphUpload, quarantine.targetSphUpload]) {
+      if (upload) progress.sphParticleUploads.add(upload);
+    }
+  };
   const freshOpticsCommitQuarantine =
     record.poisonedFreshDispersedMediumOpticsCommit ?? null;
   let cleanlyCommittedFreshOpticsQuarantine = null;
@@ -955,6 +1100,7 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       // mutable public diagnostic fields accepting the retry receipt.
     }
     cleanlyCommittedFreshOpticsQuarantine = freshOpticsCommitQuarantine;
+    retainCleanOpticsQuarantine(freshOpticsCommitQuarantine);
     record.poisonedFreshDispersedMediumOpticsCommit = null;
   }
   const freshOpticsRejectionQuarantine =
@@ -995,9 +1141,11 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     }
     cleanlyRejectedFreshOpticsQuarantine =
       freshOpticsRejectionQuarantine;
+    retainCleanOpticsQuarantine(freshOpticsRejectionQuarantine);
     record.poisonedFreshDispersedMediumOpticsReplacement = null;
   }
-  const sphParticleUploads = workerLaneSphParticleUploads(record);
+  const sphParticleUploads = progress.sphParticleUploads;
+  for (const upload of workerLaneSphParticleUploads(record)) sphParticleUploads.add(upload);
   if (cleanlyRejectedFreshOpticsQuarantine) {
     if (cleanlyRejectedFreshOpticsQuarantine.sourceSphUpload) {
       sphParticleUploads.add(
@@ -1022,7 +1170,7 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       );
     }
   }
-  const protectedBuffers = new Set();
+  const protectedBuffers = progress.protectedBuffers;
   for (const upload of sphParticleUploads) {
     // Every worker-owned continuation gets the same non-enumerable lifecycle
     // used by uploaded SPH buffer sets. This is idempotent and preserves the
@@ -1038,36 +1186,62 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     }
   }
   const successfullyRetiredResidentSphUploads = new Set();
-  const retiredResidentSteps = new Set();
   const retireResidentStep = (step, options) => {
-    if (!step || retiredResidentSteps.has(step)) return;
-    retiredResidentSteps.add(step);
+    if (!step) return;
     const upload = step.nextParticleUploads?.sphParticleUpload ?? null;
-    try {
-      destroyMlsMpmResidentStepBuffers(step, options);
+    if (progress.completedSteps.has(step)) {
       if (upload) successfullyRetiredResidentSphUploads.add(upload);
-    } catch {
-      // The lane is being retired regardless. A borrowed parent is handled
-      // below through destroySphGpuParticleBuffers(), which records a deferred
-      // full-family destroy request on the same lifecycle.
+      return;
+    }
+    try {
+      const evidence = destroyMlsMpmResidentStepBuffers(step, options);
+      if (
+        evidence?.schema !== 'peercompute.ulg.mls-mpm-resident-buffer-retirement-evidence.v0'
+        || !(evidence.retiredBuffers instanceof Set)
+        || !(evidence.ownerManagedBuffers instanceof Set)
+      ) throw new Error('Resident step did not return exact retirement ownership evidence');
+      for (const buffer of evidence.retiredBuffers) protectedBuffers.add(buffer);
+      for (const buffer of evidence.ownerManagedBuffers) protectedBuffers.add(buffer);
+      progress.completedSteps.set(step, evidence);
+      progress.pendingSteps.delete(step);
+      if (upload) successfullyRetiredResidentSphUploads.add(upload);
+    } catch (error) {
+      progress.failure = { step, error };
+      throw error;
     }
   };
   const staticGpuResources = record.schroederLane?.staticGpuResources || null;
-  retireResidentStep(record.schroederLane?.residentStep, {
-    destroyInputResidentProductMass: true
-  });
-  retireResidentStep(record.poisonedCanonicalResidentStep, {
-    destroyInputResidentProductMass: true
-  });
-  retireResidentStep(record.poisonedTier0Execution?.finalStep, {
-    destroyInputResidentProductMass: true
-  });
-  retireResidentStep(cleanlyCommittedFreshOpticsQuarantine?.finalStep, {
-    destroyInputResidentProductMass: true
-  });
-  retireResidentStep(cleanlyRejectedFreshOpticsQuarantine?.finalStep, {
-    destroyInputResidentProductMass: true
-  });
+  // Capture every step before invoking the first owner: clean optics
+  // quarantines above have already been cleared from their old record slots.
+  for (const step of [
+    record.schroederLane?.residentStep,
+    record.poisonedCanonicalResidentStep,
+    record.poisonedTier0Execution?.finalStep,
+    cleanlyCommittedFreshOpticsQuarantine?.finalStep,
+    cleanlyRejectedFreshOpticsQuarantine?.finalStep
+  ]) {
+    if (step && !progress.completedSteps.has(step)) progress.pendingSteps.add(step);
+  }
+  try {
+    for (const step of progress.pendingSteps) {
+      retireResidentStep(step, {
+        destroyInputResidentProductMass: true,
+        // The destructor has direct raw-buffer paths before the generic lane
+        // walk too. Spatial cache owners, already retired above or by normal
+        // mechanics completion, retain authority over these exact allocations.
+        preserveBuffers: runtimeOwnedBuffers
+      });
+    }
+    for (const step of progress.completedSteps.keys()) {
+      const upload = step.nextParticleUploads?.sphParticleUpload;
+      if (upload) successfullyRetiredResidentSphUploads.add(upload);
+    }
+  } catch (error) {
+    return blockedRetirement(
+      'worker-resident-lane-release-blocked-owner-retirement-incomplete',
+      error
+    );
+  }
   for (const cleanupRecord of (
     record.poisonedTier0SubmittedCleanupRecords || []
   )) {
@@ -1117,6 +1291,7 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     try { buffer.destroy?.(); } catch { /* best-effort lane retirement */ }
   }
   retainedLanes.delete(key);
+  laneRetirementProgress.delete(record);
   return {
     status: 'worker-resident-lane-released',
     laneId: normalizeString(laneId, null),
@@ -3939,6 +4114,26 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
       hotBufferKey
     };
   }
+  const sourceStep = data?.sphParticleState?.step;
+  const sourceTime = data?.sphParticleState?.time;
+  if (
+    !Number.isSafeInteger(sourceStep)
+    || sourceStep < 0
+    || sourceStep >= 0xffff_ffff
+    || Object.is(sourceStep, -0)
+    || !Number.isFinite(sourceTime)
+    || sourceTime < 0
+    || Object.is(sourceTime, -0)
+    || !Object.is(data?.mlsMpmParticleState?.step, sourceStep)
+    || !Object.is(data?.mlsMpmParticleState?.time, sourceTime)
+  ) {
+    return {
+      status: 'blocked-worker-adopted-storage-rematerialization-source-clock-invalid',
+      requested: true,
+      applied: false,
+      hotBufferKey
+    };
+  }
   let retained = record.adoptedStorageRematerialization || null;
   let reused = false;
   const identityRequired = seed.identityRequired === true;
@@ -3987,6 +4182,17 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     && (!identityRequired || retained.identityRevision === identityRevision)
     && phaseCarrierPlansEqual(retained.phaseCarrierPlan, phaseCarrierPlan)
   ) {
+    if (
+      !Object.is(retained.sourceStep, sourceStep)
+      || !Object.is(retained.sourceTime, sourceTime)
+    ) {
+      return {
+        status: 'blocked-worker-adopted-storage-rematerialization-retained-clock-mismatch',
+        requested: true,
+        applied: false,
+        hotBufferKey
+      };
+    }
     reused = true;
   } else {
     const state = data?.sphParticleState?.state;
@@ -4038,6 +4244,8 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     }
     retained = {
       hotBufferKey,
+      sourceStep,
+      sourceTime,
       seedSchema: seed.schema || null,
       materializationMode: seed.materializationMode || 'peer-local-gpu-rematerialization-from-descriptor-seed',
       particleCount: packedParticleCount,
@@ -4090,6 +4298,14 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     status: 'webgpu-uploaded',
     workerRetained: true,
     sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
+    // These newly allocated local buffers begin at logical slot zero, just
+    // like the scene's fresh CPU upload pair. Preserve the packed clock;
+    // neither physicsTick nor a later private successor can supply it.
+    step: retained.sourceStep,
+    time: retained.sourceTime,
+    slot: 0,
+    sourceSlot: 0,
+    nextSlot: 0,
     particleCount: retained.particleCount,
     stateStrideBytes:
       SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
@@ -4113,6 +4329,11 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     status: 'webgpu-uploaded',
     workerRetained: true,
     sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
+    step: retained.sourceStep,
+    time: retained.sourceTime,
+    slot: 0,
+    sourceSlot: 0,
+    nextSlot: 0,
     particleCount: retained.particleCount,
     mechanicsStrideBytes:
       MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
@@ -4625,6 +4846,18 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
         stateKey: retiredLane.stateKey,
         reason: 'superseded-by-fresh-worker-lane-seed'
       });
+      if (retiredLaneReceipt.status === 'worker-resident-lane-release-pending-epoch-retirement') {
+        const retiredRecord = retainedLanes.get(retiredKey);
+        const attempt = retiredRecord
+          ? laneRetirementProgress.get(retiredRecord)?.epochRetirement?.promise
+          : null;
+        if (attempt) await attempt;
+        retiredLaneReceipt = releaseUlgMechanicsResidentStageWorkerLane({
+          laneId: retiredLane.laneId,
+          stateKey: retiredLane.stateKey,
+          reason: 'superseded-by-fresh-worker-lane-seed'
+        });
+      }
       if (
         retiredLaneReceipt.status
         === 'worker-resident-lane-release-blocked-schedule-active'
@@ -4633,6 +4866,17 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
           stageId,
           'retired-lane-schedule-active',
           `the superseded lane ${retiredKey} still owns an active schedule`
+        );
+      }
+      if (
+        !(retiredLaneReceipt.status === 'worker-resident-lane-released'
+          && retiredLaneReceipt.released === true)
+        && retiredLaneReceipt.status !== 'worker-resident-lane-release-noop-missing'
+      ) {
+        throw workerSchroederStageError(
+          stageId,
+          'retired-lane-retirement-incomplete',
+          `the superseded lane ${retiredKey} did not retire: ${retiredLaneReceipt.status}`
         );
       }
     }
@@ -5872,6 +6116,8 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           generation,
           sphParticleUpload,
           mlsMpmParticleUpload,
+          aerosolSourceFamilyConsumerLease:
+            successorConsumption?.sourceFamilyLease ?? null,
           residentStepOptions,
           twoLevelAuthoritative: Boolean(
             enableTwoLevelMechanics
@@ -6582,7 +6828,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   const rawTerminalRefluxReceiptCopy =
     residentStep.twoLevelTerminalRefluxReceiptCopy ?? null;
   const terminalRefluxReceiptCopy = rawTerminalRefluxReceiptCopy
-    ? { ...rawTerminalRefluxReceiptCopy }
+    ? cloneWorkerTerminalRefluxReceiptGroup(rawTerminalRefluxReceiptCopy)
     : null;
   const twoLevelCflFactorCandidate =
     kernelResult?.twoLevelMechanics?.cflFactor
@@ -6648,7 +6894,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     twoLevelAuthoritativeCommitVerified:
       residentStep.twoLevelAuthoritativeCommitVerified === true,
     terminalRefluxReceiptCopy: terminalRefluxReceiptCopy
-      ? { ...terminalRefluxReceiptCopy }
+      ? cloneWorkerTerminalRefluxReceiptGroup(terminalRefluxReceiptCopy)
       : null,
     // The hierarchy result owns this bounded clone-safe diagnostic receipt.
     // Whitelist it explicitly: the worker stage summary intentionally omits
@@ -6810,7 +7056,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       twoLevelAuthoritativeCommitVerified:
         residentStep.twoLevelAuthoritativeCommitVerified === true,
       terminalRefluxReceiptCopy: terminalRefluxReceiptCopy
-        ? { ...terminalRefluxReceiptCopy }
+        ? cloneWorkerTerminalRefluxReceiptGroup(terminalRefluxReceiptCopy)
         : null,
       phaseVolumeSurfaceStressRequired:
         hierarchyStageSummary.phaseVolumeSurfaceStressRequired,
@@ -8887,6 +9133,132 @@ function terminalRefluxReceiptDiagnostic(decoded = null, words = null) {
       };
 }
 
+const WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH =
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY
+  * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+
+function cloneWorkerTerminalRefluxReceiptGroup(group) {
+  const scalars = (source, fields) => Object.fromEntries(fields.map(
+    (field) => [field, source?.[field] ?? null]
+  ));
+  return {
+    ...scalars(group, [
+      'schema', 'status', 'scheduleId', 'laneId', 'stateKey', 'stepOrdinal',
+      'targetOffsetBytes', 'targetByteLength', 'childCount',
+      'outerCompletionOrdinal', 'outerMacroDt', 'summedMacroDt'
+    ]),
+    outerIdentity: scalars(group?.outerIdentity,
+      SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS),
+    publicClock: scalars(group?.publicClock, [
+      'physicsTick', 'physicsSubstep', 'step', 'time',
+      'sourceSlot', 'slot', 'nextSlot'
+    ]),
+    children: Array.isArray(group?.children)
+      && group.children.length <= SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY
+      ? group.children.map((child) => ({
+          ...scalars(child, [
+            'schema', 'status', 'scheduleId', 'laneId', 'stateKey',
+            'stepOrdinal', 'childOrdinal', 'targetOffsetBytes',
+            'targetByteLength', 'completionOrdinal', 'macroOwnerId',
+            'ownerGeneration', 'rootGenerationId', 'macroDt', 'fineDt',
+            'fineSubstepCount', 'fineLevel', 'coarseLevel',
+            'queueSubmissionStatus'
+          ]),
+          sourceIdentity: scalars(child?.sourceIdentity,
+            SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS)
+        }))
+      : null
+  };
+}
+
+// Private closure/group authentication belongs to the canonical hierarchy
+// producer before publication. This boundary independently pins the returned
+// scalar interval to the exact outward epoch, then checks every copied GPU
+// header after the schedule fence. A child never inherits the outer owner's ID.
+function workerTerminalRefluxGroupMatchesExpectation(group, expectation) {
+  const count = group?.childCount;
+  const outerDt = expectation?.expectedOuterMacroDt;
+  const baseOffset = (expectation?.stepOrdinal - 1)
+    * WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH;
+  const positiveFinite = (value) => typeof value === 'number'
+    && Number.isFinite(value) && value > 0;
+  const u32 = (value, minimum = 0) => Number.isSafeInteger(value)
+    && value >= minimum && value <= 0xffff_ffff && !Object.is(value, -0);
+  const identityValid = (identity) => SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.every(
+    (field) => u32(identity?.[field])
+  );
+  const clock = group?.publicClock;
+  if (
+    group?.schema !== ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA
+    || group.status !== 'terminal-reflux-group-copies-submitted-unverified'
+    || group.scheduleId !== expectation?.scheduleId
+    || group.laneId !== expectation?.laneId
+    || group.stateKey !== expectation?.stateKey
+    || group.stepOrdinal !== expectation?.stepOrdinal
+    || group.targetOffsetBytes !== baseOffset
+    || group.targetByteLength !== WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH
+    || (count !== 1 && count !== 4 && count !== SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY)
+    || !Array.isArray(group.children) || group.children.length !== count
+    || !u32(group.outerCompletionOrdinal, 1)
+    || group.outerCompletionOrdinal !== expectation.expectedOuterCompletionOrdinal
+    || !identityValid(group.outerIdentity)
+    || !SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.every((field) => (
+      group.outerIdentity[field] === expectation.expectedOuterIdentity?.[field]
+    ))
+    || !positiveFinite(outerDt)
+    || !Object.is(group.outerMacroDt, outerDt)
+    || !Object.is(group.summedMacroDt, outerDt)
+    || !u32(clock?.physicsTick, 1)
+    || clock.physicsTick !== group.outerIdentity.physicsTick + 1
+    || !Object.is(clock.physicsSubstep, 0)
+    || !u32(clock.step, 1)
+    || typeof clock.time !== 'number' || !Number.isFinite(clock.time) || clock.time < 0
+    || (clock.sourceSlot !== 0 && clock.sourceSlot !== 1)
+    || clock.slot !== (clock.sourceSlot ^ 1)
+    || clock.nextSlot !== clock.slot
+    || !Object.keys(clock).every((field) => (
+      Object.is(clock[field], expectation.expectedPublicClock?.[field])
+    ))
+  ) return false;
+  const owners = new Set();
+  for (let index = 0; index < count; index += 1) {
+    const child = group.children[index];
+    const ownerKey = `${child?.macroOwnerId}:${child?.ownerGeneration}`;
+    if (
+      child?.schema !== ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA
+      || child.status !== 'terminal-reflux-header-copy-submitted-unverified'
+      || child.queueSubmissionStatus !== 'copy-submitted-unverified'
+      || child.scheduleId !== group.scheduleId || child.laneId !== group.laneId
+      || child.stateKey !== group.stateKey || child.stepOrdinal !== group.stepOrdinal
+      || child.childOrdinal !== index + 1
+      || child.targetOffsetBytes !== baseOffset
+        + index * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH
+      || child.targetByteLength !== SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH
+      || !['completionOrdinal', 'macroOwnerId', 'ownerGeneration', 'rootGenerationId']
+        .every((field) => u32(child[field], 1))
+      || child.rootGenerationId !== child.completionOrdinal
+      || owners.has(ownerKey)
+      || (count === 1 && child.completionOrdinal !== group.outerCompletionOrdinal)
+      || (count !== 1 && child.completionOrdinal === group.outerCompletionOrdinal)
+      || child.fineSubstepCount !== expectation.expectedFineSubstepCount
+      || child.fineLevel !== expectation.expectedFineLevel
+      || child.coarseLevel !== expectation.expectedCoarseLevel
+      || !positiveFinite(child.macroDt) || !positiveFinite(child.fineDt)
+      || !Object.is(child.macroDt, outerDt / count)
+      || !Object.is(child.fineDt, child.macroDt / child.fineSubstepCount)
+      || !identityValid(child.sourceIdentity)
+      || child.sourceIdentity.physicsTick !== group.outerIdentity.physicsTick
+      || (index === 0 && !SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.every((field) => (
+        child.sourceIdentity[field] === group.outerIdentity[field]
+      )))
+    ) return false;
+    owners.add(ownerKey);
+  }
+  // Every child above has the exact equal dt. Preserve dyadic coverage without
+  // introducing serial-addition rounding into the separate public outer clock.
+  return Object.is((outerDt / count) * count, outerDt);
+}
+
 async function readWorkerResidentScheduleTerminalRefluxReceipt({
   required = false,
   buffer = null,
@@ -8920,7 +9292,7 @@ async function readWorkerResidentScheduleTerminalRefluxReceipt({
     };
   }
   const expectedByteLength = expectedStepCount
-    * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+    * WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH;
   const expectationCount = Array.isArray(expectations)
     ? expectations.length
     : 0;
@@ -8962,59 +9334,66 @@ async function readWorkerResidentScheduleTerminalRefluxReceipt({
     try { buffer.unmap?.(); } catch { /* terminal rejection remains sealed */ }
   }
   let admittedStepCount = 0;
+  let observedChildCount = 0;
+  let admittedChildCount = 0;
   let firstRejectedStepOrdinal = null;
+  let firstRejectedChildOrdinal = null;
   let firstRejectedDiagnostic = null;
   for (let index = 0; index < expectations.length; index += 1) {
     const expectation = expectations[index] ?? null;
     const stepOrdinal = index + 1;
-    const offset = index
-      * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
-    const words = new Uint32Array(
-      copiedBytes.buffer,
-      copiedBytes.byteOffset + offset,
-      SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
-    );
-    const decoded = decodeSchroederCrossLevelRefluxTerminalHeader(words);
-    const copyReceipt = expectation?.copyReceipt ?? null;
-    const admitted = Boolean(
-      expectation?.stepOrdinal === stepOrdinal
-      && copyReceipt?.schema
-        === ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA
-      && copyReceipt.status
-        === 'terminal-reflux-header-copy-submitted-unverified'
-      && copyReceipt.scheduleId === scheduleId
-      && copyReceipt.laneId === laneId
-      && copyReceipt.stateKey === stateKey
-      && copyReceipt.stepOrdinal === stepOrdinal
-      && copyReceipt.targetOffsetBytes === offset
-      && copyReceipt.targetByteLength
-        === SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH
-      && decoded?.structuralValid === true
-      && decoded.terminalAdmitted === true
-      && decoded.failClosed !== true
-      && decoded.mutationRollbackCount === 0
-      && decoded.completionOrdinal
-        === expectation.expectedCompletionOrdinal
-      && decoded.fineSubstepCount
-        === expectation.expectedFineSubstepCount
-      && decoded.fineLevel === expectation.expectedFineLevel
-      && decoded.coarseLevel === expectation.expectedCoarseLevel
-      && decoded.macroOwnerId === expectation.expectedCompletionOrdinal
-      && copyReceipt.completionOrdinal === decoded.completionOrdinal
-      && copyReceipt.macroOwnerId === decoded.macroOwnerId
-      && copyReceipt.ownerGeneration === decoded.macroOwnerGeneration
-      && copyReceipt.fineSubstepCount === decoded.fineSubstepCount
-      && copyReceipt.fineLevel === decoded.fineLevel
-      && copyReceipt.coarseLevel === decoded.coarseLevel
-    );
+    const group = expectation?.copyReceipt ?? null;
+    let admitted = expectation?.stepOrdinal === stepOrdinal
+      && workerTerminalRefluxGroupMatchesExpectation(group, {
+        ...expectation, scheduleId, laneId, stateKey
+      });
+    const children = Array.isArray(group?.children)
+      && group.children.length <= SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY
+      ? group.children : [];
+    for (let childIndex = 0; childIndex < children.length; childIndex += 1) {
+      const child = children[childIndex];
+      const offset = index * WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH
+        + childIndex * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+      const words = new Uint32Array(
+        copiedBytes.buffer,
+        copiedBytes.byteOffset + offset,
+        SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS
+      );
+      const decoded = decodeSchroederCrossLevelRefluxTerminalHeader(words);
+      observedChildCount += 1;
+      const childAdmitted = Boolean(
+        isSchroederFusedTerminalRefluxHeaderFullyAdmitted(decoded, {
+          expectedFineSubstepCount: expectation.expectedFineSubstepCount
+        })
+        && decoded.completionOrdinal === child.completionOrdinal
+        && decoded.macroOwnerId === child.macroOwnerId
+        && decoded.macroOwnerGeneration === child.ownerGeneration
+        && decoded.fineSubstepCount === child.fineSubstepCount
+        && decoded.fineLevel === child.fineLevel
+        && decoded.coarseLevel === child.coarseLevel
+      );
+      if (childAdmitted) admittedChildCount += 1;
+      else {
+        admitted = false;
+        if (firstRejectedStepOrdinal == null) {
+          firstRejectedStepOrdinal = stepOrdinal;
+          firstRejectedChildOrdinal = childIndex + 1;
+          firstRejectedDiagnostic = {
+            ...terminalRefluxReceiptDiagnostic(decoded, words),
+            childOrdinal: childIndex + 1,
+            childCount: group.childCount,
+            macroDt: child.macroDt,
+            fineDt: child.fineDt,
+            rootGenerationId: child.rootGenerationId
+          };
+        }
+      }
+    }
     if (admitted) {
       admittedStepCount += 1;
     } else if (firstRejectedStepOrdinal == null) {
       firstRejectedStepOrdinal = stepOrdinal;
-      firstRejectedDiagnostic = terminalRefluxReceiptDiagnostic(
-        decoded,
-        words
-      );
+      firstRejectedDiagnostic = { reason: 'terminal-reflux-group-invalid' };
     }
   }
   const allStepsAdmitted = admittedStepCount === expectedStepCount
@@ -9029,7 +9408,10 @@ async function readWorkerResidentScheduleTerminalRefluxReceipt({
       : 'one-or-more-terminal-reflux-headers-rejected',
     observedStepCount: expectations.length,
     admittedStepCount,
+    observedChildCount,
+    admittedChildCount,
     firstRejectedStepOrdinal,
+    firstRejectedChildOrdinal,
     firstRejectedDiagnostic,
     allStepsAdmitted
   };
@@ -9560,6 +9942,9 @@ export function cancelUlgMechanicsResidentStageWorkerSchedule(id) {
     };
   }
   state.cancelRequested = true;
+  state.canonicalPresentationAbortController?.abort(
+    new Error('canonical presentation opportunity cancelled')
+  );
   return {
     status: 'resident-schedule-cancel-requested',
     scheduleId: state.scheduleId,
@@ -9573,6 +9958,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     id = null,
     postProgress = null,
     onTier0PresentationSubmissionBoundary = null,
+    onCanonicalPresentationSubmissionBoundary = null,
+    canPresentCanonicalSubmissionBoundary = null,
     runTier0FusedResidentSequence =
       runMlsMpmResidentStepsWithOptionalWebGpu
   } = {}
@@ -9695,6 +10082,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   let spatialKeyChurnFineSubstepCount = 0;
   let scheduleControlPlaneTaskYielder = null;
   const terminalRefluxExpectations = [];
+  const terminalRefluxTargetsByStep = new Map();
   const spatialKeyChurnExpectations = [];
   const spatialKeyChurnTargetsByStep = new Map();
   try {
@@ -10037,6 +10425,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       ];
       let terminalRefluxReceiptTarget = null;
       if (terminalRefluxReceiptRequired) {
+        // Match the stage's common-then-specific option merge and retained
+        // metadata preference exactly, including a fresh, unseeded lane.
+        const mechanicsStageInput = { ...commonOptions, ...continuationOptions };
         const levels = Array.isArray(epochSeal?.mechanicsLevels)
           ? epochSeal.mechanicsLevels
           : [];
@@ -10052,7 +10443,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           );
         }
         terminalRefluxReceiptTarget =
-          createSchroederFusedTerminalRefluxReceiptTarget({
+          createSchroederFusedTerminalRefluxReceiptGroupTarget({
           device: state.workerDevice,
           scheduleId,
           laneId,
@@ -10060,13 +10451,36 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           stepOrdinal,
           targetBuffer: terminalRefluxRingBuffer,
           targetOffsetBytes: (stepOrdinal - 1)
-            * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
-          targetByteLength:
-            SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
-          expectedCompletionOrdinal: epochSeal.generationId,
+            * WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH,
+          expectedOuterCompletionOrdinal: epochSeal.generationId,
+          expectedOuterIdentity: Object.fromEntries(
+            SCHROEDER_EPOCH_IDENTITY_WORD_FIELDS.map((field) => [field, epochSeal[field]])
+          ),
+          expectedOuterMacroDt: mechanicsStageInput.dt
+            ?? (record.schroederLane?.mlsMpmParticleState
+              ?? mechanicsStageInput.mlsMpmParticleState)?.mechanicsDtS
+            ?? 0,
           expectedFineSubstepCount: twoLevelFineSubstepCountRequested,
           expectedFineLevel: levels[0],
           expectedCoarseLevel: levels[1]
+        });
+        const sourceUpload = record.schroederLane?.sphParticleUpload
+          ?? mechanicsStageInput.sphParticleUpload;
+        const sourceState = record.schroederLane?.sphParticleState
+          ?? mechanicsStageInput.sphParticleState;
+        const sourceSlot = sourceUpload?.slot ?? sourceState?.slot ?? 0;
+        terminalRefluxTargetsByStep.set(stepOrdinal, {
+          target: terminalRefluxReceiptTarget,
+          expectedPublicClock: {
+            physicsTick: epochSeal.physicsTick + 1,
+            physicsSubstep: 0,
+            step: (sourceUpload?.step ?? sourceState?.step) + 1,
+            time: (sourceUpload?.time ?? sourceState?.time)
+              + terminalRefluxReceiptTarget.expectedOuterMacroDt,
+            sourceSlot,
+            slot: 1 - sourceSlot,
+            nextSlot: 1 - sourceSlot
+          }
         });
       }
       let spatialKeyChurnTargets = null;
@@ -11286,6 +11700,110 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let twoLevelMechanicsFirstIncompleteStepOrdinal = null;
     let twoLevelMechanicsLastStep = null;
     const queueDrainCheckpoints = [];
+    const canonicalPresentationRequested = !tier0RouteSelected
+      && typeof onCanonicalPresentationSubmissionBoundary === 'function';
+    const canonicalPresentationAudit = {
+      requested: canonicalPresentationRequested,
+      maxWaitMs: ULG_WORKER_CANONICAL_PRESENTATION_BOUNDARY_TIMEOUT_MS,
+      boundaryCount: 0,
+      completedCount: 0,
+      failureCount: 0,
+      timeoutCount: 0,
+      skippedUnavailableCount: 0,
+      disabledAfterTimeout: false,
+      lastFailureReason: null,
+      intermediateAuthorityPublicationCount: 0
+    };
+    let canonicalPresentationProofStatus = null;
+    let canonicalPresentationLastSubmittedSerial = 0;
+    let canonicalPresentationLastCompletedSerial = 0;
+    let canonicalPresentationLastQueueSerial = 0;
+    const canonicalPresentationSourceReady = () => {
+      if (typeof canPresentCanonicalSubmissionBoundary !== 'function') {
+        return true;
+      }
+      // This pure synchronous query must run before the presentation-only
+      // flush. An absent/exhausted source must not defeat a physics burst.
+      try {
+        if (canPresentCanonicalSubmissionBoundary() === true) return true;
+      } catch {
+        // Readiness is presentation policy, never a physics admission gate.
+      }
+      canonicalPresentationAudit.skippedUnavailableCount += 1;
+      return false;
+    };
+    const presentCanonicalSubmissionBoundary = async (stepOrdinal) => {
+      const boundary = Object.freeze({
+        submissionOrdinal: stepOrdinal,
+        completedSubstepCount: stepOrdinal,
+        totalSubstepCount: stepCount,
+        chunkStepCount: 1
+      });
+      const controller = new AbortController();
+      state.canonicalPresentationAbortController = controller;
+      canonicalPresentationAudit.boundaryCount += 1;
+      let timer = null;
+      let timedOut = false;
+      const aborted = new Promise((resolve, reject) => {
+        controller.signal.addEventListener('abort', () => {
+          reject(controller.signal.reason);
+        }, { once: true });
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort(
+            new Error('canonical presentation opportunity timed out')
+          );
+        }, ULG_WORKER_CANONICAL_PRESENTATION_BOUNDARY_TIMEOUT_MS);
+      });
+      try {
+        const receipt = await Promise.race([
+          Promise.resolve().then(() =>
+            onCanonicalPresentationSubmissionBoundary(boundary, {
+              signal: controller.signal
+            })),
+          aborted
+        ]);
+        if (!isExactWorkerTier0PresentationQosBoundaryProof(receipt, boundary)) {
+          throw new Error(
+            'canonical presentation opportunity lacked exact GPU/presentation proof'
+          );
+        }
+        const serials = workerTier0PresentationQosBoundaryFrameSerials(receipt);
+        if (
+          (canonicalPresentationProofStatus != null
+            && receipt.status !== canonicalPresentationProofStatus)
+          || serials.submitted <= canonicalPresentationLastSubmittedSerial
+          || serials.completed <= canonicalPresentationLastCompletedSerial
+          || receipt.presentationQueueCompletionSerial
+            <= canonicalPresentationLastQueueSerial
+        ) {
+          throw new Error(
+            'canonical presentation opportunity replayed a completed frame proof or changed geometry'
+          );
+        }
+        canonicalPresentationProofStatus = receipt.status;
+        canonicalPresentationLastSubmittedSerial = serials.submitted;
+        canonicalPresentationLastCompletedSerial = serials.completed;
+        canonicalPresentationLastQueueSerial =
+          receipt.presentationQueueCompletionSerial;
+        canonicalPresentationAudit.completedCount += 1;
+      } catch (error) {
+        // A presentation miss does not reject physics. The existing queue
+        // drains and sole terminal fence still decide physics admission.
+        canonicalPresentationAudit.failureCount += 1;
+        canonicalPresentationAudit.lastFailureReason =
+          String(error?.message || error);
+        if (timedOut) {
+          canonicalPresentationAudit.timeoutCount += 1;
+          // Do not accumulate pending render work when the consumer ignores
+          // abort. Its signal also revokes late host-blocked attribution.
+          canonicalPresentationAudit.disabledAfterTimeout = true;
+        }
+      } finally {
+        clearTimeout(timer);
+        state.canonicalPresentationAbortController = null;
+      }
+    };
     let failedQueueDrainCheckpoint = null;
     let scheduleLoopError = null;
     let scheduleGpuWorkMayHaveBeenSubmitted = false;
@@ -11353,8 +11871,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           invocations: [],
           completedCount: 0,
           failureCount: 0,
-          lastMotionFrameSubmittedSerial: 0,
-          lastMotionFrameSerial: 0,
+          frameProofStatus: null,
+          lastSubmittedFrameSerial: 0,
+          lastCompletedFrameSerial: 0,
           lastPresentationQueueCompletionSerial: 0
         };
         const tier0PresentationSubmissionBoundary =
@@ -11374,25 +11893,31 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
                     'Tier0 presentation QoS boundary lacked exact GPU/presentation proof'
                   );
                 }
+                const frameSerials =
+                  workerTier0PresentationQosBoundaryFrameSerials(receipt);
                 if (
-                  receipt.motionFrameSubmittedSerial
+                  (tier0PresentationBoundaryAudit.frameProofStatus != null
+                    && receipt.status
+                      !== tier0PresentationBoundaryAudit.frameProofStatus)
+                  || frameSerials.submitted
                     <= tier0PresentationBoundaryAudit
-                      .lastMotionFrameSubmittedSerial
-                  || receipt.motionFrameSerial
-                    <= tier0PresentationBoundaryAudit.lastMotionFrameSerial
+                      .lastSubmittedFrameSerial
+                  || frameSerials.completed
+                    <= tier0PresentationBoundaryAudit.lastCompletedFrameSerial
                   || receipt.presentationQueueCompletionSerial
                     <= tier0PresentationBoundaryAudit
                       .lastPresentationQueueCompletionSerial
                 ) {
                   throw new Error(
-                    'Tier0 presentation QoS boundary replayed a completed frame proof'
+                    'Tier0 presentation QoS boundary replayed a completed frame proof or changed geometry'
                   );
                 }
-                tier0PresentationBoundaryAudit
-                  .lastMotionFrameSubmittedSerial =
-                    receipt.motionFrameSubmittedSerial;
-                tier0PresentationBoundaryAudit.lastMotionFrameSerial =
-                  receipt.motionFrameSerial;
+                tier0PresentationBoundaryAudit.frameProofStatus =
+                  receipt.status;
+                tier0PresentationBoundaryAudit.lastSubmittedFrameSerial =
+                  frameSerials.submitted;
+                tier0PresentationBoundaryAudit.lastCompletedFrameSerial =
+                  frameSerials.completed;
                 tier0PresentationBoundaryAudit
                   .lastPresentationQueueCompletionSerial =
                     receipt.presentationQueueCompletionSerial;
@@ -12232,11 +12757,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           pendingQueueDrainFencePromise = startLaggedQueueDrainFence();
         }
         if (terminalRefluxReceiptRequired && !terminalRefluxRingBuffer) {
+          const terminalRefluxRingByteLength = stepCount
+            * WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH;
+          const maxBufferSize = Number(state.workerDevice?.limits?.maxBufferSize);
+          if (
+            !Number.isSafeInteger(terminalRefluxRingByteLength)
+            || terminalRefluxRingByteLength < 1
+            || (Number.isFinite(maxBufferSize) && maxBufferSize > 0
+              && terminalRefluxRingByteLength > maxBufferSize)
+          ) {
+            throw workerResidentScheduleError(
+              'schedule-terminal-reflux-ring-capacity-invalid',
+              'terminal reflux groups require a bounded eight-child ring within device capacity',
+              { scheduleId, stepCount, terminalRefluxRingByteLength }
+            );
+          }
           terminalRefluxRingBuffer = tagWebGpuBufferDevice(
             state.workerDevice.createBuffer({
               label: `ulg-worker-terminal-reflux-ring-${scheduleId}`,
-              size: stepCount
-                * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
+              size: terminalRefluxRingByteLength,
               usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
             }),
             state.workerDevice
@@ -12467,29 +13006,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         const levels = Array.isArray(currentStepSeal?.mechanicsLevels)
           ? currentStepSeal.mechanicsLevels
           : [];
-        const expectedOffset = (stepOrdinal - 1)
-          * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH;
+        const targetEntry = terminalRefluxTargetsByStep.get(stepOrdinal);
+        const target = targetEntry?.target;
+        const expectation = {
+          scheduleId, laneId, stateKey, stepOrdinal,
+          expectedOuterCompletionOrdinal: currentStepSeal.generationId,
+          expectedOuterIdentity: workerResidentScheduleEpochIdentity(currentStepSeal),
+          expectedOuterMacroDt: target?.expectedOuterMacroDt,
+          expectedPublicClock: targetEntry?.expectedPublicClock,
+          expectedFineSubstepCount: twoLevelFineSubstepCountRequested,
+          expectedFineLevel: levels[0],
+          expectedCoarseLevel: levels[1]
+        };
         if (
-          copyReceipt?.schema
-            !== ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA
-          || copyReceipt.status
-            !== 'terminal-reflux-header-copy-submitted-unverified'
-          || copyReceipt.scheduleId !== scheduleId
-          || copyReceipt.laneId !== laneId
-          || copyReceipt.stateKey !== stateKey
-          || copyReceipt.stepOrdinal !== stepOrdinal
-          || copyReceipt.targetOffsetBytes !== expectedOffset
-          || copyReceipt.targetByteLength
-            !== SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH
-          || copyReceipt.completionOrdinal !== currentStepSeal.generationId
-          || copyReceipt.fineSubstepCount
-            !== twoLevelFineSubstepCountRequested
-          || copyReceipt.fineLevel !== levels[0]
-          || copyReceipt.coarseLevel !== levels[1]
+          !target
+          || !workerTerminalRefluxGroupMatchesExpectation(copyReceipt, expectation)
         ) {
           throw workerResidentScheduleError(
             'schedule-terminal-reflux-copy-receipt-invalid',
-            'the authoritative step did not return its exact terminal reflux copy receipt',
+            'the authoritative step did not return its exact one-four-or-eight-child terminal reflux group',
             {
               scheduleId,
               stepOrdinal,
@@ -12502,13 +13037,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           );
         }
         terminalRefluxExpectations.push({
-          stepOrdinal,
-          expectedCompletionOrdinal: currentStepSeal.generationId,
-          expectedFineSubstepCount: twoLevelFineSubstepCountRequested,
-          expectedFineLevel: levels[0],
-          expectedCoarseLevel: levels[1],
-          copyReceipt
+          ...expectation,
+          copyReceipt: cloneWorkerTerminalRefluxReceiptGroup(copyReceipt)
         });
+        terminalRefluxTargetsByStep.delete(stepOrdinal);
       }
       completedStepCount = stepOrdinal;
       previousEpochSeal = currentStepSeal;
@@ -12797,6 +13329,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // Cadence bound: even if no fence request forced a flush this
         // window, held work never spans more than K steps.
         flushWorkerQueueSubmitBurst(state.workerDevice, 'step-cadence');
+      }
+      if (
+        canonicalPresentationRequested
+        && !canonicalPresentationAudit.disabledAfterTimeout
+        && !state.cancelRequested
+        && stepOrdinal < stepCount
+        && canonicalPresentationSourceReady()
+      ) {
+        // The complete canonical step is queued before rendering the last
+        // committed mesh. Never expose these internal retained physics rows
+        // or replace the schedule's terminal authority/adoption boundary.
+        // A held burst must reach the real queue before a render can cover
+        // its prefix (or acquire a swapchain texture for that submission).
+        if (submitBurstOpened) {
+          flushWorkerQueueSubmitBurst(
+            state.workerDevice, 'canonical-presentation-boundary'
+          );
+        }
+        await presentCanonicalSubmissionBoundary(stepOrdinal);
       }
       if (
         stepSummaryRing.length
@@ -14281,6 +14832,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       completedStepCount,
       cancelled,
       controlPlaneYieldReceipt,
+      canonicalPresentationOpportunities: tier0RouteSelected
+        ? null
+        : Object.freeze({ ...canonicalPresentationAudit }),
       // Worker-clock phase stamps (see declaration): consecutive schedule
       // results on one lane share this clock, so the inter-schedule
       // turnaround is directly computable from them.

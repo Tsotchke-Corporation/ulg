@@ -1,14 +1,24 @@
+import {
+  createSchroederQuadraticControlVolumeDescriptor,
+  schroederQuadraticControlVolumePrimalAxisExtent,
+  validateSchroederQuadraticControlVolumeDescriptor
+} from './schroederQuadraticControlVolumeProjection.js';
+
 export const ULG_SPH_SPATIAL_GAS_FREE_VOLUME_SOURCE_SCHEMA =
-  'peercompute.ulg.sph-spatial-gas-free-volume-source.v2';
+  'peercompute.ulg.sph-spatial-gas-free-volume-source.v3';
 export const ULG_SPH_SPATIAL_GAS_FREE_VOLUME_EXECUTION_SCHEMA =
-  'peercompute.ulg.sph-spatial-gas-free-volume-execution.v2';
+  'peercompute.ulg.sph-spatial-gas-free-volume-execution.v3';
 
 export const SPH_SPATIAL_GAS_FREE_VOLUME_MAGIC = 0x5347_4631;
-export const SPH_SPATIAL_GAS_FREE_VOLUME_VERSION = 2;
+export const SPH_SPATIAL_GAS_FREE_VOLUME_VERSION = 3;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE = 64;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_WORDS = 64;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS = 4;
-export const SPH_SPATIAL_GAS_FREE_VOLUME_PARAMS_BYTES = 256;
+export const SPH_SPATIAL_GAS_FREE_VOLUME_PARAMS_BYTES = 288;
+// Optional same-build extension in previously reserved words. Absence keeps
+// every extension word zero and does not add an allocation or dispatch.
+export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION = 1;
+export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES = 16;
 
 export const SPH_SPATIAL_GAS_FREE_VOLUME_STATUS = Object.freeze({
   READY: 1 << 0,
@@ -20,7 +30,8 @@ export const SPH_SPATIAL_GAS_FREE_VOLUME_STATUS = Object.freeze({
   INVALID_GEOMETRY: 1 << 6,
   OVERFILLED: 1 << 7,
   NONFINITE_VOLUME: 1 << 8,
-  COUNT_MISMATCH: 1 << 9
+  COUNT_MISMATCH: 1 << 9,
+  INVALID_AEROSOL: 1 << 10
 });
 
 export const SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_OFFSETS = Object.freeze({
@@ -56,7 +67,18 @@ export const SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_OFFSETS = Object.freeze({
   FINE_SCATTER_DISPATCH_Y: 29,
   COARSE_SCATTER_DISPATCH_X: 30,
   COARSE_SCATTER_DISPATCH_Y: 31,
-  KEYED_LOOKUP_MAX_STEPS: 32
+  KEYED_LOOKUP_MAX_STEPS: 32,
+  PROJECTION_VERSION: 33,
+  CONTROL_VOLUME_GEOMETRY_SEAL: 34,
+  AEROSOL_ENABLED: 35,
+  AEROSOL_FAMILY_ID: 36,
+  AEROSOL_GENERATION: 37,
+  AEROSOL_CAPACITY: 38,
+  AEROSOL_VISITED_COUNT: 39,
+  AEROSOL_LIVE_COUNT: 40,
+  INVALID_AEROSOL_COUNT: 41,
+  AEROSOL_VERSION: 42,
+  AEROSOL_COMPLETION_GENERATION: 43
 });
 
 export const SPH_SPATIAL_GAS_FREE_VOLUME_ROW_LAYOUT = Object.freeze([
@@ -80,6 +102,14 @@ function finiteF32(value, label) {
   const number = Math.fround(Number(value));
   if (!Number.isFinite(number)) {
     throw new RangeError(`${label} must be a finite f32`);
+  }
+  return number;
+}
+
+function finiteNumber(value, label) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new RangeError(`${label} must be finite`);
   }
   return number;
 }
@@ -149,6 +179,7 @@ export function createSphSpatialGasFreeVolumePlan({
   grid,
   boxMinM,
   boxMaxM,
+  gasControlVolumeDescriptor,
   gasFreeVolumeGeneration,
   sourceGeneration,
   directoryGeneration,
@@ -162,11 +193,22 @@ export function createSphSpatialGasFreeVolumePlan({
 } = {}) {
   const levels = integer(exactLevelCount, 'exactLevelCount', 1, 2);
   const resolvedGrid = gridDescriptor(grid);
-  const lower = vec3(boxMinM, 'boxMinM');
-  const upper = vec3(boxMaxM, 'boxMaxM');
+  const lower = vec3(boxMinM, 'boxMinM', finiteNumber);
+  const upper = vec3(boxMaxM, 'boxMaxM', finiteNumber);
   if (upper.some((entry, axis) => !(entry > lower[axis]))) {
     throw new RangeError('boxMaxM must be strictly greater than boxMinM');
   }
+  // Decompose the original world bounds before any f32 rounding. The sealed
+  // grid-coordinate fractions retain thin/translated geometry that absolute
+  // f32 box endpoints cannot represent.
+  const controlVolume = gasControlVolumeDescriptor == null
+    ? createSchroederQuadraticControlVolumeDescriptor({
+      grid: resolvedGrid, boxMinM, boxMaxM
+    })
+    : validateSchroederQuadraticControlVolumeDescriptor(
+      gasControlVolumeDescriptor,
+      { ...resolvedGrid, boxMinM, boxMaxM }
+    );
   const relative = finiteF32(overfillToleranceRelative, 'overfillToleranceRelative');
   const absolute = finiteF32(
     overfillToleranceAbsoluteM3,
@@ -191,6 +233,7 @@ export function createSphSpatialGasFreeVolumePlan({
     grid: resolvedGrid,
     boxMinM: lower,
     boxMaxM: upper,
+    gasControlVolumeDescriptor: controlVolume,
     gasFreeVolumeGeneration: integer(
       gasFreeVolumeGeneration,
       'gasFreeVolumeGeneration',
@@ -221,9 +264,9 @@ export function createSphSpatialGasFreeVolumePlan({
     ),
     overfillToleranceRelative: relative,
     overfillToleranceAbsoluteM3: absolute,
-    reductionVersion: 2,
+    reductionVersion: 3,
     reductionAlgorithm:
-      'directory-keyed-binary-lookup-atomic-f32-scatter',
+      'quadratic-capacity-overlap-keyed-atomic-f32-scatter',
     reductionWorkComplexity: 'O(C + (F + E + K) log C)',
     readbackRequired: false,
     mutationPolicy: 'sidecar-only-no-particle-grid-or-source-mutation'
@@ -239,9 +282,16 @@ export function computeSphSpatialGasFreeVolumeCpuOracle({
   overfillToleranceRelative = 1e-5,
   overfillToleranceAbsoluteM3 = 1e-12
 } = {}) {
-  const lower = vec3(boxMinM, 'boxMinM');
-  const upper = vec3(boxMaxM, 'boxMaxM');
   const spacing = positiveF32(gridSpacingM, 'gridSpacingM');
+  // This existing formula oracle receives already projected occupancy; it is
+  // not a CPU dynamics or deposition path. Share canonical cell geometry with
+  // the GPU instead of rebuilding it from world-absolute rounded endpoints.
+  const descriptor = createSchroederQuadraticControlVolumeDescriptor({
+    gridDims: [1, 1, 1], gridNodeCount: 1, gridShift: 0,
+    gridSpacingM: spacing, chartId: 0, selectedLevel: 0,
+    boxMinM, boxMaxM
+  });
+  const bounds = new DataView(new Uint32Array(descriptor.boundsWords).buffer);
   const contributions = Array.from(
     condensedContributions ?? [],
     (value, index) => {
@@ -262,9 +312,12 @@ export function computeSphSpatialGasFreeVolumeCpuOracle({
       integer(value, name, -0x8000_0000, 0x7fff_ffff)
     ));
     const overlap = coordinate.map((value, axis) => {
-      const cellMin = value * spacing;
-      const cellMax = cellMin + spacing;
-      return Math.max(0, Math.min(cellMax, upper[axis]) - Math.max(cellMin, lower[axis]));
+      const offset = axis * 16;
+      return schroederQuadraticControlVolumePrimalAxisExtent(
+        value,
+        bounds.getInt32(offset, true), bounds.getFloat32(offset + 4, true),
+        bounds.getInt32(offset + 8, true), bounds.getFloat32(offset + 12, true)
+      ) * spacing;
     });
     const geometricVolumeM3 = Math.fround(overlap[0] * overlap[1] * overlap[2]);
     const condensedVolumeM3 = Math.fround(contributions[index] ?? 0);
@@ -354,9 +407,9 @@ export const SPH_SPATIAL_GAS_FREE_VOLUME_ABI = Object.freeze({
   condensedFamilies: Object.freeze([1, 2]),
   pressureDenominator: 'box-clipped-geometric-volume-minus-solid-liquid-v0j',
   twoLevelProjection:
-    'fine-moment-parent-csr-plus-coarse-native-parent-map',
+    'quadratic-capacity-overlap-after-fine-parent-csr-or-coarse-native-parent-map',
   condensedReduction:
-    'directory-keyed-binary-lookup-atomic-f32-scatter',
+    'quadratic-capacity-overlap-keyed-atomic-f32-scatter',
   workComplexity: 'O(C + (F + E + K) log C)',
   failureCounterSemantics:
     'invalid-source-records-plus-invalid-output-cells',

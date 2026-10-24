@@ -257,6 +257,7 @@ function writeStorageBuffer(device, label, data) {
 }
 
 function createSummaryParamsArray({
+  gasConstitutiveOffsetVec4 = 0,
   particleCount,
   reactionCount,
   productPhaseCount,
@@ -282,7 +283,7 @@ function createSummaryParamsArray({
   // Interface-flux extent law substep duration (f32 in the _pad1 lane); must
   // match the apply kernel's dt so ledger and application agree.
   view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
-  view.setUint32(40, 0, true);
+  view.setUint32(40, gasConstitutiveOffsetVec4, true);
   view.setUint32(44, 0, true);
   return buffer;
 }
@@ -2147,6 +2148,11 @@ export function enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors({
   return [...descriptors.values()];
 }
 
+// Summary is imported by the SS proposal graph. Loading the thermal-backed
+// reaction authority eagerly here re-enters thermal WGSL initialization before
+// its proposal constants exist. Validate at execution through one cached module.
+let reactionEnergyAuthorityModule;
+
 export async function runSphReactionSummaryWebGpu({
   device,
   sphParticleState,
@@ -2179,6 +2185,8 @@ export async function runSphReactionSummaryWebGpu({
   const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
     scope: 'sph-reaction-gpu-summary'
   });
+  const authority = await (reactionEnergyAuthorityModule ??= import('./sphReactionEnergyAuthority.js'));
+  authority.assertSphReactionEnergyAuthority(reactionTable);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -2739,6 +2747,7 @@ export async function runSphReactionSummaryWebGpu({
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSummaryParamsArray({
+      gasConstitutiveOffsetVec4: reactionTable.gasConstitutiveOffsetVec4 ?? 0,
       particleCount,
       reactionCount: reactionTable.reactionCount ?? 0,
       productPhaseCount: reactionTable.productPhaseCount ?? 0,
@@ -3246,7 +3255,9 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(2, 'read-only-storage'),
           computeBufferBinding(3, 'read-only-storage'),
           computeBufferBinding(4, 'storage'),
-          computeBufferBinding(5, 'uniform')
+          computeBufferBinding(5, 'uniform'),
+          computeBufferBinding(6, 'read-only-storage'),
+          computeBufferBinding(7, 'read-only-storage')
         ]
       });
       atomResidualPipeline = pipeline;
@@ -3258,7 +3269,9 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 2, resource: { buffer: recordsBuffer } },
           { binding: 3, resource: { buffer: proposalsBuffer } },
           { binding: 4, resource: { buffer: atomResidualBuffer } },
-          { binding: 5, resource: { buffer: paramsBuffer } }
+          { binding: 5, resource: { buffer: paramsBuffer } },
+          { binding: 6, resource: { buffer: nextStateBuffer } },
+          { binding: 7, resource: { buffer: nextThermoBuffer } }
         ]
       });
     }

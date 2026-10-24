@@ -165,6 +165,9 @@ export function reactionTablesExactlyEqual(cachedTable, liveTable) {
     'gasProductCount',
     'atomTermCount',
     'productPhaseCount',
+    'combinedRecordCount',
+    'gasConstitutiveSchema',
+    'gasConstitutiveOffsetVec4',
     'recordStrideFloats',
     'reactionHeaderStrideFloats',
     'reactantTermStrideFloats',
@@ -195,8 +198,12 @@ export function reactionTablesExactlyEqual(cachedTable, liveTable) {
     'productTermRecords',
     'gasProductRecords',
     'atomTermRecords',
-    'productPhaseRecords'
-  ].every((field) => typedArrayBytesExactlyEqual(cachedTable[field], liveTable[field]));
+    'productPhaseRecords',
+    'combinedRecords',
+    'gasConstitutiveRecords'
+  ].every((field) => (['gasConstitutiveRecords', 'combinedRecords'].includes(field)
+      && cachedTable[field] == null && liveTable[field] == null)
+    || typedArrayBytesExactlyEqual(cachedTable[field], liveTable[field]));
 }
 
 export function buildSphThermalMaterialTableFromViewState(viewState = {}) {

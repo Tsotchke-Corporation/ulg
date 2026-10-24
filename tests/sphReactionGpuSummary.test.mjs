@@ -228,7 +228,7 @@ function fakeSummaryDevice(
 }
 
 function reactionTable() {
-  return {
+  const table = {
     schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
     reactionCount: 1,
     productPhaseCount: 1,
@@ -236,7 +236,14 @@ function reactionTable() {
     productTermCount: 2,
     gasProductCount: 1,
     atomTermCount: 4,
-    combinedRecords: new Float32Array(120),
+    // Mock reductions supply their own output, but the upload must still have
+    // every ABI section, including the 16-float reaction header.
+    records: new Float32Array(12),
+    productPhaseRecords: new Float32Array(12),
+    reactionHeaders: new Float32Array(16),
+    reactantTermRecords: new Float32Array(24),
+    productTermRecords: new Float32Array(32),
+    gasProductRecords: new Float32Array(8),
     atomTermStrideFloats: SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length,
     atomTermLayout: [...SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT],
     atomTermRecords: new Float32Array([
@@ -351,6 +358,13 @@ function reactionTable() {
       }
     ]
   };
+  table.combinedRecords = new Float32Array([
+    ...table.records, ...table.productPhaseRecords, ...table.reactionHeaders,
+    ...table.reactantTermRecords, ...table.productTermRecords,
+    ...table.gasProductRecords, ...table.atomTermRecords
+  ]);
+  table.combinedRecordCount = table.combinedRecords.length / 4;
+  return table;
 }
 
 function wgslEntrySource(source, entryPoint) {
@@ -2841,7 +2855,11 @@ test('SPH reaction compact summary runs a two-pass WebGPU reduction without part
   assert.equal(summary.ledgerUnplacedGasProductMassKg, 0.375);
   assert.equal(summary.sealedBoxGasProductMoles, 93.75);
   assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [2, 1, 2, 3, 4, 1]);
-  assert.deepEqual(device.bindGroups.map((group) => group.entries.length), [8, 3, 8, 9, 6, 8]);
+  // Atom evidence also consumes committed next-state/thermo so a rejected
+  // physical reaction proposal cannot become a fictitious atom event.
+  assert.deepEqual(device.bindGroups.map((group) => group.entries.length), [8, 3, 8, 9, 8, 8]);
+  assert.equal(device.bindGroups[4].entries[6].resource.buffer, device.bindGroups[0].entries[2].resource.buffer);
+  assert.equal(device.bindGroups[4].entries[7].resource.buffer, device.bindGroups[0].entries[3].resource.buffer);
   assert.equal(device.copies.length, 5);
   assert.equal(device.copies[0].size, 128);
   assert.equal(device.copies[1].size, 65 * 2 * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT);
@@ -2850,7 +2868,7 @@ test('SPH reaction compact summary runs a two-pass WebGPU reduction without part
   assert.equal(device.copies[4].size, 128);
   assert.equal(device.submissions.length, 1);
   assert.equal(device.shaderModules.length, 6);
-  assert.ok(device.writes.some((write) => write.label === 'ulg-sph-reaction-summary-records' && write.byteLength === 120 * 4));
+  assert.ok(device.writes.some((write) => write.label === 'ulg-sph-reaction-summary-records' && write.byteLength === 136 * 4));
   assert.ok(device.writes.some((write) => write.label === 'ulg-sph-reaction-summary-params' && write.byteLength === 48));
   assert.equal(device.createdBuffers.filter((created) => created.destroyed).length, device.createdBuffers.length);
 });

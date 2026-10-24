@@ -12,6 +12,8 @@ import {
 import {
   sphDispersedMediumOpticsWgsl
 } from './sphDispersedMediumWgsl.js';
+import { sphReactionEnergyWgsl, sphReactionAppliedPairWgsl } from './sphReactionEnergyWgsl.js';
+import { sphGasConstitutiveWgsl } from './sphGasConstitutiveWgsl.js';
 
 export {
   sphReactionStrictGateFinalizeWgsl
@@ -721,12 +723,127 @@ fn thermal_carrier_phase_classification(
   return vec2<u32>(pure_phase, select(0u, 1u, valid && positive_count >= 2u));
 }
 
+// Type3 is a phase-specific caloric response, not a global equilibrium curve.
+// Return (response index, Umin, Umax, status): 0=legacy, 1=ready, -1=rejected.
+// Both branches remain present even when their U domains overlap. All
+// sensible-heat consumers must use the same exact one-hot phase selection.
+fn thermal_phase_caloric_selection(
+  material_id: f32,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
+) -> vec4<f32> {
+  let rejected = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+  if (params.material_count > arrayLength(&phase_response_records) / 2u) { return rejected; }
+  var matching_records = 0u;
+  for (var index = 0u; index < params.material_count; index = index + 1u) {
+    if (phase_response_records[index * 2u].x == material_id) {
+      matching_records = matching_records + 1u;
+    }
+  }
+  if (matching_records > 1u) { return rejected; }
+  for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
+    if (record_index * 2u + 1u >= arrayLength(&phase_response_records)) { return rejected; }
+    let record = phase_response_records[record_index * 2u];
+    if (record.x != material_id) { continue; }
+    if (record.y < 0.0 || floor(record.y) != record.y
+      || record.z <= 0.0 || floor(record.z) != record.z
+      || !thermal_value_finite(record.y) || !thermal_value_finite(record.z)
+      || record.y + record.z > f32(params.response_count)
+      || record.y + record.z > f32(arrayLength(&phase_responses) / 4u)) { return rejected; }
+    let start = u32(record.y);
+    let count = u32(record.z);
+    var explicit_caloric = false;
+    for (var local = 0u; local < count; local = local + 1u) {
+      let kind = response_row0(start + local).y;
+      if (kind != 1.0 && kind != 2.0) { explicit_caloric = true; }
+    }
+    if (!explicit_caloric) { return vec4<f32>(0.0); }
+    var expected_fractions = vec4<f32>(0.0);
+    if (phase_id == 2.0) { expected_fractions.y = 1.0; }
+    else if (phase_id == 3.0) { expected_fractions.z = 1.0; }
+    else { return rejected; }
+    if (record.w != 1.0 || count != 2u
+      || !thermal_value_finite(material_id) || material_id < 1.0
+      || material_id > 16777215.0 || floor(material_id) != material_id
+      || !thermal_value_finite(specific_internal_energy)
+      || !all(phase_fractions == expected_fractions)) { return rejected; }
+    var selected = rejected;
+    var seen_phases = 0u;
+    for (var local = 0u; local < count; local = local + 1u) {
+      let index = start + local;
+      let r0 = response_row0(index);
+      let r1 = response_row1(index);
+      let r2 = response_row2(index);
+      let r3 = response_row3(index);
+      if (r0.x != material_id || r0.y != 3.0 || r0.w != 1.0
+        || !thermal_value_finite(r0.z) || r0.z < 0.0 || floor(r0.z) != r0.z
+        || (r1.z != 2.0 && r1.z != 3.0) || r1.z != r1.w
+        || !thermal_value_finite(r1.x) || !thermal_value_finite(r1.y) || r1.x >= r1.y
+        || !thermal_value_finite(r2.x) || r2.x <= 0.0 || r2.x != r2.y
+        || r2.z != 1.0 || r2.w != 1.0
+        || !all(r3 == vec4<f32>(0.0, 1.0, 0.0, 0.0))) { return rejected; }
+      let phase_bit = 1u << u32(r1.z);
+      if ((seen_phases & phase_bit) != 0u) { return rejected; }
+      seen_phases = seen_phases | phase_bit;
+      let node_count = arrayLength(&thermal_graph_nodes);
+      if (r0.z >= f32(node_count / 4u)) { return rejected; }
+      let node0 = thermal_graph_nodes[u32(r0.z) * 4u];
+      let node = graph_node_row1(u32(r0.z));
+      let node2 = thermal_graph_nodes[u32(r0.z) * 4u + 2u];
+      let node3 = thermal_graph_nodes[u32(r0.z) * 4u + 3u];
+      if (!all(node0 == vec4<f32>(1.0, 0.0, 1.0, 2.0))
+        || node2.y != 0.0 || node2.z != 1.0
+        || node3.y != material_id || node3.z != r1.z) { return rejected; }
+      let sample_count = arrayLength(&thermal_graph_samples);
+      if (sample_count < 2u || !thermal_value_finite(node.x)
+        || node.x < 0.0 || floor(node.x) != node.x || node.y != 2.0
+        || node.x > f32(sample_count - 2u) || node.z != r1.x || node.w != r1.y) { return rejected; }
+      let first = thermal_graph_samples[u32(node.x)];
+      let last = thermal_graph_samples[u32(node.x) + 1u];
+      let energy_span = last.x - first.x;
+      let slope = (last.y - first.y) / energy_span;
+      if (first.x != r1.x || last.x != r1.y
+        || !thermal_value_finite(first.y) || !thermal_value_finite(last.y)
+        || first.y <= 0.0 || first.y >= last.y
+        || !thermal_value_finite(energy_span) || energy_span <= 0.0
+        || !thermal_value_finite(slope) || slope <= 0.0) { return rejected; }
+      if (r1.z == phase_id && specific_internal_energy >= r1.x && specific_internal_energy <= r1.y) {
+        selected = vec4<f32>(f32(index), r1.x, r1.y, 1.0);
+      }
+    }
+    return selected;
+  }
+  return vec4<f32>(0.0);
+}
+
+fn thermal_carrier_temperature(
+  material_id: f32, specific_internal_energy: f32,
+  phase_id: f32, phase_fractions: vec4<f32>, cached_temperature: f32
+) -> f32 {
+  let caloric = thermal_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.w < 0.0) { return -1.0; }
+  if (caloric.w == 1.0) {
+    return sample_temperature_from_graph(u32(response_row0(u32(caloric.x)).z), specific_internal_energy);
+  }
+  return cached_temperature;
+}
+
 fn thermal_temperature_slope(
   material_id: f32,
   specific_internal_energy: f32,
   phase_id: f32,
   phase_fractions: vec4<f32>
 ) -> f32 {
+  let caloric = thermal_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.w < 0.0) { return 0.0; }
+  if (caloric.w == 1.0) {
+    return temperature_slope_from_graph(u32(response_row0(u32(caloric.x)).z), specific_internal_energy);
+  }
   var material_response_offset = 0u;
   var material_response_count = 0u;
   var found_material = false;
@@ -800,8 +917,15 @@ fn thermal_value_finite(value: f32) -> bool {
 // closed with status 0.
 fn thermal_carrier_energy_domain(
   material_id: f32,
-  specific_internal_energy: f32
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
 ) -> vec4<f32> {
+  let caloric = thermal_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.w < 0.0) { return vec4<f32>(specific_internal_energy, specific_internal_energy, 0.0, 0.0); }
+  if (caloric.w == 1.0) { return vec4<f32>(caloric.y, caloric.z, 1.0, 1.0); }
   if (!thermal_value_finite(specific_internal_energy)) {
     return vec4<f32>(0.0);
   }
@@ -1009,6 +1133,15 @@ fn phase_fraction(phase_id: f32, solid: f32, liquid: f32, gas: f32, plasma: f32)
 }
 
 fn write_thermal_state(index: u32, material_id: f32, next_u: f32, source_row1: vec4<f32>, source_row2: vec4<f32>) {
+  let caloric = thermal_phase_caloric_selection(
+    material_id, next_u, thermo_row0(index).y, source_row1
+  );
+  if (caloric.w < 0.0) {
+    out_sph_thermo[index * 3u] = vec4<f32>(material_id, 0.0, 0.0, 0.0);
+    out_sph_thermo[index * 3u + 1u] = vec4<f32>(0.0);
+    out_sph_thermo[index * 3u + 2u] = vec4<f32>(source_row2.x, source_row2.y, 255.0, source_row2.w);
+    return;
+  }
   var material_response_offset = 0u;
   var material_response_count = 0u;
   var found_material = false;
@@ -1038,6 +1171,8 @@ fn write_thermal_state(index: u32, material_id: f32, next_u: f32, source_row1: v
       break;
     }
   }
+
+  if (caloric.w == 1.0) { selected = u32(caloric.x); }
 
   let response0 = response_row0(selected);
   let response1 = response_row1(selected);
@@ -1116,8 +1251,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
   let position = vec3<f32>(pos_mass.x, pos_mass.y, pos_mass.z);
   let mass = max(pos_mass.w, 1.0e-30);
-  let temperature = row0.z;
-	  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w);
+  let caloric = thermal_phase_caloric_selection(row0.x, vel_u.w, row0.y, row1);
+  var temperature = row0.z;
+  if (caloric.w == 1.0) {
+    temperature = sample_temperature_from_graph(u32(response_row0(u32(caloric.x)).z), vel_u.w);
+  }
+	  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w, row0.y, row1);
 	  let carrier_domain_ready = carrier_domain.z == 1.0;
 	  var carrier_u_lo = vel_u.w;
 	  var carrier_u_hi = vel_u.w;
@@ -1176,7 +1315,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	            let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
 	            if (distance < max(pair_support, radiation_support)) {
 	              let other_vel_u = state_vel_u(other);
-	              let other_temperature = other_row0.z;
+	              let other_temperature = thermal_carrier_temperature(
+	                other_row0.x, other_vel_u.w, other_row0.y, other_row1, other_row0.z
+	              );
+	              if (other_temperature < 0.0) { continue; }
 	              neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	              neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
 	              let other_temperature_slope = thermal_temperature_slope(
@@ -1243,7 +1385,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    let radiation_support = RADIATION_PAIR_RANGE_RADII * pair_radii_m;
 	    if (distance < max(pair_support, radiation_support)) {
 	      let other_vel_u = state_vel_u(other);
-	      let other_temperature = other_row0.z;
+	      let other_temperature = thermal_carrier_temperature(
+	        other_row0.x, other_vel_u.w, other_row0.y, other_row1, other_row0.z
+	      );
+	      if (other_temperature < 0.0) { continue; }
 	      neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
 	      neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
 	      let other_temperature_slope = thermal_temperature_slope(
@@ -1369,6 +1514,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const sphReactionStepWgsl = `
+${sphReactionEnergyWgsl}
+${sphGasConstitutiveWgsl}
 struct ReactionParams {
   particle_count: u32,
   reaction_count: u32,
@@ -1385,7 +1532,7 @@ struct ReactionParams {
   // 1 when the host authenticated header/reactant/product rows. Only 0 with
   // every extended section absent is the distinguishable legacy schema.
   reaction_table_mode: u32,
-  _pad2: u32,
+  gas_constitutive_offset: u32,
 };
 
 struct ReactionParticleBinParams {
@@ -1460,6 +1607,7 @@ struct ProductTerm {
   molar_mass: f32,
   routing_id: f32,
   status: f32,
+  term_index: u32,
 };
 
 @group(0) @binding(0) var<storage, read> particle_records: array<vec4<f32>>;
@@ -1680,7 +1828,7 @@ fn phase_fraction(phase_id: f32, solid: f32, liquid: f32, gas: f32, plasma: f32)
   return 0.0;
 }
 
-fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -> ThermalRows {
+fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>, target_phase: f32) -> ThermalRows {
   var material_response_offset = 0u;
   var material_response_count = 0u;
   var found_material = false;
@@ -1703,9 +1851,19 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
   }
 
   var selected = material_response_offset;
+  var selected_phase = target_phase == 0.0;
   for (var local = 0u; local < material_response_count; local = local + 1u) {
     let candidate = material_response_offset + local;
     let row1 = response_row1(candidate);
+    if (target_phase > 0.0) {
+      if (row1.z == target_phase && row1.w == target_phase
+        && response_row0(candidate).y != 2.0 && next_u >= row1.x && next_u <= row1.y) {
+        selected = candidate;
+        selected_phase = true;
+        break;
+      }
+      continue;
+    }
     selected = candidate;
     if (next_u <= row1.y || local + 1u == material_response_count) {
       break;
@@ -1716,7 +1874,7 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
   let response1 = response_row1(selected);
   let response2 = response_row2(selected);
   let response3 = response_row3(selected);
-  if (response0.w != 1.0 || response0.z < 0.0) {
+  if (!selected_phase || response0.w != 1.0 || response0.z < 0.0) {
     return ThermalRows(
       vec4<f32>(material_id, 0.0, 0.0, 0.0),
       vec4<f32>(0.0, 0.0, 0.0, 0.0),
@@ -1752,13 +1910,17 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
   );
 }
 
-fn find_product_mechanics(material_id: f32, phase_id: f32) -> ProductMechanics {
+fn find_product_mechanics(material_id: f32, phase_id: f32, temperature_k: f32) -> ProductMechanics {
   for (var record_index = 0u; record_index < params.product_phase_count; record_index = record_index + 1u) {
     let row0 = product_phase_row0(record_index);
     if (row0.x == material_id && row0.y == phase_id) {
       let row1 = product_phase_row1(record_index);
       let row2 = product_phase_row2(record_index);
-      return ProductMechanics(row0.z, row0.w, row1.x, row1.y, row1.z, row1.w, row2.x, row2.y);
+      var c = row1.z;
+      if (row1.w == 2.0 && params.gas_constitutive_offset > 0u) {
+        c = gas_constitutive_sound_speed(reaction_records[params.gas_constitutive_offset + record_index], temperature_k);
+      }
+      return ProductMechanics(row0.z, row0.w, row1.x, row1.y, c, row1.w, row2.x, row2.y);
     }
   }
   return ProductMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 255.0);
@@ -1770,7 +1932,8 @@ fn product_output_ready(
   mass_kg: f32,
   source_support_volume_m3: f32,
   next_u: f32,
-  velocity: vec3<f32>
+  velocity: vec3<f32>,
+  target_phase: f32
 ) -> bool {
   if (
     !reaction_value_finite(material_id)
@@ -1785,8 +1948,8 @@ fn product_output_ready(
   ) {
     return false;
   }
-  let resolved = resolve_thermal_rows(material_id, next_u, thermo_row2(index));
-  let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y);
+  let resolved = resolve_thermal_rows(material_id, next_u, thermo_row2(index), target_phase);
+  let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y, resolved.row0.z);
   let resolved_finite = all(resolved.row0 == resolved.row0)
     && all(resolved.row1 == resolved.row1)
     && all(resolved.row2 == resolved.row2)
@@ -1810,6 +1973,7 @@ fn product_output_ready(
     || !(resolved.row0.w > 0.0)
     || resolved.row2.z != 1.0
     || mechanics.status != 1.0
+    || mechanics.sound_speed < 0.0
     || !(mechanics.rest_density > 0.0)
   ) {
     return false;
@@ -1846,7 +2010,7 @@ fn particle_current_volume(index: u32) -> f32 {
   );
 }
 
-fn copy_particle_with_mass(index: u32, mass_kg: f32) {
+fn copy_particle_with_mass(index: u32, mass_kg: f32, physical: bool) {
   copy_particle(index);
   let base = index * REACTION_PARTICLE_RECORD_VEC4S;
   let pos_mass = particle_records[base];
@@ -1862,6 +2026,10 @@ fn copy_particle_with_mass(index: u32, mass_kg: f32) {
     // composition makes represented entities proportional to the same mass
     // fraction.
     let surviving_fraction = clamp(next_mass / pos_mass.w, 0.0, 1.0);
+    if (physical) {
+      let reference_row = out_particle_records[mechanics_base + 7u];
+      out_particle_records[mechanics_base + 7u] = vec4<f32>(reference_row.xyz, reference_row.w * surviving_fraction);
+    }
     let thermo2 = out_particle_records[base + 4u];
     out_particle_records[base + 4u] = vec4<f32>(
       thermo2.x,
@@ -1881,7 +2049,7 @@ fn copy_particle_with_mass(index: u32, mass_kg: f32) {
 }
 
 fn write_reacted_mechanics(index: u32, mass_kg: f32, _source_support_volume_m3: f32, resolved: ThermalRows) {
-  let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y);
+  let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y, resolved.row0.z);
   var rest_density = resolved.row0.w;
   if (rest_density <= 0.0) {
     rest_density = mechanics.rest_density;
@@ -1916,7 +2084,8 @@ fn write_product_particle(
   current_volume_m3: f32,
   next_u: f32,
   velocity: vec3<f32>,
-  represented_entity_count: f32
+  represented_entity_count: f32,
+  target_phase: f32
 ) -> bool {
   if (
     !reaction_value_finite(represented_entity_count)
@@ -1927,14 +2096,15 @@ fn write_product_particle(
     mass_kg,
     current_volume_m3,
     next_u,
-    velocity
+    velocity,
+    target_phase
     )
   ) {
     return false;
   }
   let pos_mass = state_pos_mass(index);
   let source_row2 = thermo_row2(index);
-  let resolved = resolve_thermal_rows(material_id, next_u, source_row2);
+  let resolved = resolve_thermal_rows(material_id, next_u, source_row2, target_phase);
   let out_base = index * REACTION_PARTICLE_RECORD_VEC4S;
   out_particle_records[out_base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
   out_particle_records[out_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, next_u);
@@ -1948,6 +2118,9 @@ fn write_product_particle(
   );
   if (params.reset_mechanics != 0u) {
     write_reacted_mechanics(index, max(mass_kg, 0.0), current_volume_m3, resolved);
+    if (target_phase > 0.0) {
+      out_particle_records[out_base + 12u] = vec4<f32>(0.0, 0.0, 0.0, mass_kg);
+    }
   } else {
     let mechanics_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
     for (var row = 0u; row < 8u; row = row + 1u) {
@@ -2131,14 +2304,14 @@ fn product_term_for_local_slot(reaction_index: u32, local_slot: u32) -> ProductT
   let product_term_count = u32(max(header1.x, 0.0));
   if (product_term_count == 0u) {
     let rx0 = reaction_row0(reaction_index);
-    return ProductTerm(rx0.z, 1.0, 0.0, 0.0, 1.0);
+    return ProductTerm(rx0.z, 1.0, 0.0, 0.0, 1.0, 0u);
   }
   let product_term_offset = u32(max(header0.w, 0.0));
   let local = min(local_slot, product_term_count - 1u);
   let term_index = product_term_offset + local;
   let term0 = product_term_row0(term_index);
   let term1 = product_term_row1(term_index);
-  return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
+  return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w, term_index);
 }
 
 fn product_term_for_visible_slot(reaction_index: u32, visible_slot: u32) -> ProductTerm {
@@ -2154,12 +2327,12 @@ fn product_term_for_visible_slot(reaction_index: u32, visible_slot: u32) -> Prod
     let condensed = term1.y < 0.5;
     if (term1.w == 1.0 && condensed) {
       if (visible_index == visible_slot) {
-        return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
+        return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w, term_index);
       }
       visible_index = visible_index + 1u;
     }
   }
-  return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+  return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0, 0u);
 }
 
 fn product_visible_term_count(reaction_index: u32) -> u32 {
@@ -2193,7 +2366,7 @@ fn product_term_for_gas_slot(reaction_index: u32, gas_slot: u32) -> ProductTerm 
     }
   }
   if (gas_count == 0u) {
-    return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+    return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0, 0u);
   }
   let target_slot = min(gas_slot, gas_count - 1u);
   var gas_index = 0u;
@@ -2203,12 +2376,12 @@ fn product_term_for_gas_slot(reaction_index: u32, gas_slot: u32) -> ProductTerm 
     let term1 = product_term_row1(term_index);
     if (term1.w == 1.0 && term1.y >= 0.5) {
       if (gas_index == target_slot) {
-        return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
+        return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w, term_index);
       }
       gas_index = gas_index + 1u;
     }
   }
-  return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0);
+  return ProductTerm(0.0, 0.0, 0.0, 0.0, 0.0, 0u);
 }
 
 fn product_term_for_parent_slot(reaction_index: u32, parent_slot: u32) -> ProductTerm {
@@ -2818,7 +2991,8 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       legacy_current_volume,
       legacy_next_u,
       vel_u.xyz,
-      legacy_represented_entity_count
+      legacy_represented_entity_count,
+      0.0
     );
     if (!legacy_written) {
       copy_particle(particle_index);
@@ -2826,6 +3000,20 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
+  let physical_energy = reaction_energy_enabled(reaction_index);
+  if (physical_energy) {
+    for (var slot = 0u; slot < 2u; slot = slot + 1u) {
+      let source = select(particle_index, partner_index, slot == 1u);
+      let m = source * REACTION_PARTICLE_RECORD_VEC4S + 5u;
+      if (!energy_source_ready(reaction_index, thermo_row0(source), thermo_row1(source),
+          thermo_row2(source), state_vel_u(source))
+        || !energy_relaxed_mechanics(particle_records[m], particle_records[m + 1u],
+          particle_records[m + 2u], particle_records[m + 3u], particle_records[m + 4u])) {
+        copy_particle(particle_index);
+        return;
+      }
+    }
+  }
   let self_limiting_extent = pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
   let partner_limiting_extent = partner_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
   // Stoichiometric availability is the CAP; the interface flux sets the rate.
@@ -2838,8 +3026,13 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     params.dt_s
   );
   let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
-  let self_consumed = min(pos_mass.w, extent_mol * self_term.coefficient * self_term.molar_mass);
-  let partner_consumed = min(partner_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+  let self_consumed = reaction_consumed_mass(reaction_index, pos_mass.w, extent_mol, self_term.coefficient, self_term.molar_mass);
+  let partner_consumed = reaction_consumed_mass(reaction_index, partner_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
+  if (physical_energy && (pos_mass.w - self_consumed >= pos_mass.w
+    || partner_pos_mass.w - partner_consumed >= partner_pos_mass.w)) {
+    copy_particle(particle_index);
+    return;
+  }
   let consumed_mass = self_consumed + partner_consumed;
   let raw_product_mass = product_raw_mass_sum(reaction_index, extent_mol);
   if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
@@ -2857,8 +3050,8 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let source1_term = reactant_term_for_material(reaction_index, source1_thermo.x);
   let source0_current_volume = particle_current_volume(source0_index);
   let source1_current_volume = particle_current_volume(source1_index);
-  let source0_consumed = min(source0_pos_mass.w, extent_mol * source0_term.coefficient * source0_term.molar_mass);
-  let source1_consumed = min(source1_pos_mass.w, extent_mol * source1_term.coefficient * source1_term.molar_mass);
+  let source0_consumed = reaction_consumed_mass(reaction_index, source0_pos_mass.w, extent_mol, source0_term.coefficient, source0_term.molar_mass);
+  let source1_consumed = reaction_consumed_mass(reaction_index, source1_pos_mass.w, extent_mol, source1_term.coefficient, source1_term.molar_mass);
   let consumed_current_volume =
     source0_current_volume * source0_consumed
       / max(source0_pos_mass.w, 1.0e-20)
@@ -2866,8 +3059,8 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       / max(source1_pos_mass.w, 1.0e-20);
   let source0_remaining = max(source0_pos_mass.w - source0_consumed, 0.0);
   let source1_remaining = max(source1_pos_mass.w - source1_consumed, 0.0);
-  let source0_free = source0_remaining <= max(source0_pos_mass.w, 1.0) * 1.0e-7;
-  let source1_free = source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7;
+  let source0_free = select(source0_remaining <= max(source0_pos_mass.w, 1.0) * 1.0e-7, source0_remaining == 0.0, physical_energy);
+  let source1_free = select(source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7, source1_remaining == 0.0, physical_energy);
   let product_mass_scale = consumed_mass / raw_product_mass;
 
   // Products are born at the consumed pair's mass-weighted COM velocity.
@@ -2895,6 +3088,15 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     - rx1.x * consumed_mass
     - 0.5 * consumed_mass * dot(product_com_velocity, product_com_velocity)
   ) / max(consumed_mass, 1.0e-20);
+  var product_temperature = vec2<f32>(0.0);
+  if (physical_energy) {
+    product_temperature = energy_product_temperature(reaction_index, source0_thermo.x, source1_thermo.x,
+      source0_consumed, source1_consumed, source0_vel_u, source1_vel_u, extent_mol, product_mass_scale, product_com_velocity);
+    if (product_temperature.y != 1.0) {
+      copy_particle(particle_index);
+      return;
+    }
+  }
   // Validate every product lane against one deterministic source row before
   // either reacting invocation mutates. A corrupt phase/mechanics record
   // therefore rejects the pair atomically rather than publishing one product.
@@ -2906,15 +3108,22 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       * product_mass_scale;
     let product_current_volume = consumed_current_volume
       * product_mass / max(consumed_mass, 1.0e-20);
+    var product_energy_state = vec4<f32>(product_u, 0.0, 1.0, 0.0);
+    if (physical_energy) {
+      product_energy_state = energy_product_state(reaction_index, product_term_index, product_temperature.x);
+    }
     if (
       product_term1.w != 1.0
+      || product_energy_state.z != 1.0
+      || (physical_energy && !reaction_value_finite(represented_entity_count_from_mass(product_mass, product_term0.w)))
       || !product_output_ready(
         source0_index,
         product_term0.y,
         product_mass,
         product_current_volume,
-        product_u,
-        product_com_velocity
+        product_energy_state.x,
+        product_com_velocity,
+        product_energy_state.w
       )
     ) {
       copy_particle(particle_index);
@@ -2958,17 +3167,22 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (product_term.status == 1.0 && product_term.material_id > 0.0 && emitted_product_mass > 0.0) {
       let emitted_product_current_volume = consumed_current_volume
         * emitted_product_mass / max(consumed_mass, 1.0e-20);
+      var product_energy_state = vec4<f32>(product_u, 0.0, 1.0, 0.0);
+      if (physical_energy) {
+        product_energy_state = energy_product_state(reaction_index, product_term.term_index, product_temperature.x);
+      }
       let product_written = write_product_particle(
         particle_index,
         product_term.material_id,
         emitted_product_mass,
         emitted_product_current_volume,
-        product_u,
+        product_energy_state.x,
         product_com_velocity,
         represented_entity_count_from_mass(
           emitted_product_mass,
           product_term.molar_mass
-        )
+        ),
+        product_energy_state.w
       );
       if (product_written) {
         return;
@@ -2979,7 +3193,7 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let self_remaining = max(pos_mass.w - self_consumed, 0.0);
-  copy_particle_with_mass(particle_index, self_remaining);
+  copy_particle_with_mass(particle_index, self_remaining, physical_energy);
 }
 
 @compute @workgroup_size(64)
@@ -5096,6 +5310,8 @@ export const sphReactionProductEventPlacementWgsl =
     .replaceAll('// ULG_PRODUCT_PLACEMENT_COMMIT_END\n', '');
 
 export const sphReactionSummaryPartialsWgsl = `
+${sphReactionEnergyWgsl}
+${sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -5465,7 +5681,7 @@ fn main(
               && self_term.molar_mass > 0.0
               && partner_term.molar_mass > 0.0
               && product_term_count > 0u;
-            if (has_stoichiometry) {
+            if (has_stoichiometry && physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) {
               let self_extent = source_pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
               let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
               // Mirror of the apply kernel's flux-capped extent so ledger and
@@ -5479,8 +5695,8 @@ fn main(
                 params.dt_s
               );
               let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
-              let self_consumed = min(source_pos_mass.w, extent_mol * self_term.coefficient * self_term.molar_mass);
-              let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+              let self_consumed = reaction_consumed_mass(reaction_index, source_pos_mass.w, extent_mol, self_term.coefficient, self_term.molar_mass);
+              let partner_consumed = reaction_consumed_mass(reaction_index, partner_source_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
               let consumed_mass = self_consumed + partner_consumed;
               let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
               if (extent_mol > 0.0 && consumed_mass > 0.0 && raw_product_mass > 0.0) {
@@ -5756,6 +5972,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const sphReactionProductInventoryWgsl = `
+${sphReactionEnergyWgsl}
+${sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -5977,6 +6195,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
         continue;
       }
+      if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { continue; }
       let source_pos_mass = source_state[particle_index * 2u];
       let partner_source_pos_mass = source_state[partner_index * 2u];
       let source_row0 = source_thermo[particle_index * 3u];
@@ -6005,8 +6224,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         params.dt_s
       );
       let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
-      let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
-      let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+      let source_consumed = reaction_consumed_mass(reaction_index, source_pos_mass.w, extent_mol, source_term.coefficient, source_term.molar_mass);
+      let partner_consumed = reaction_consumed_mass(reaction_index, partner_source_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
       let consumed_mass = source_consumed + partner_consumed;
       let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
       if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
@@ -6042,6 +6261,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const sphReactionProductEventWgsl = `
+${sphReactionEnergyWgsl}
+${sphReactionAppliedPairWgsl}
+${sphGasConstitutiveWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -6055,7 +6277,7 @@ struct ReactionSummaryParams {
   // Interface-flux extent law substep duration (offset 36 in the shared
   // summary params packer); must match the apply kernel's dt_s.
   dt_s: f32,
-  _pad2: u32,
+  gas_constitutive_offset: u32,
   _pad3: u32,
 };
 
@@ -6230,18 +6452,22 @@ fn product_term_index_for_parent_slot(reaction_index: u32, parent_slot: u32) -> 
   return 0xffffffffu;
 }
 
-fn product_mechanics_for(material_id: f32, phase_id: f32) -> ProductMechanics {
+fn product_mechanics_for(material_id: f32, phase_id: f32, temperature_k: f32) -> ProductMechanics {
   for (var phase_index = 0u; phase_index < params.product_phase_count; phase_index = phase_index + 1u) {
     let row0 = product_phase_row0(phase_index);
     let row1 = product_phase_row1(phase_index);
     let row2 = product_phase_row2(phase_index);
     if (row0.x == material_id && row0.y == phase_id && row2.y == 1.0) {
+      var c = row1.z;
+      if (row1.w == 2.0 && params.gas_constitutive_offset > 0u) {
+        c = gas_constitutive_sound_speed(reaction_records[params.gas_constitutive_offset + phase_index], temperature_k);
+      }
       return ProductMechanics(
         row0.z,
         row0.w,
         row1.x,
         row1.y,
-        row1.z,
+        c,
         row1.w,
         row2.x,
         row2.y
@@ -6388,6 +6614,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
+  if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { return; }
+
   let source_pos_mass = source_state[particle_index * 2u];
   let partner_source_pos_mass = source_state[partner_index * 2u];
   let source_row0 = source_thermo[particle_index * 3u];
@@ -6416,8 +6644,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     params.dt_s
   );
   let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
-  let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
-  let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+  let source_consumed = reaction_consumed_mass(reaction_index, source_pos_mass.w, extent_mol, source_term.coefficient, source_term.molar_mass);
+  let partner_consumed = reaction_consumed_mass(reaction_index, partner_source_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
   let consumed_mass = source_consumed + partner_consumed;
   let source_volume_row = source_mechanics[particle_index * 8u + 4u];
   let partner_volume_row = source_mechanics[partner_index * 8u + 4u];
@@ -6477,8 +6705,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  }
 	  let source_remaining = max(source_pos_mass.w - source_consumed, 0.0);
 	  let partner_remaining = max(partner_source_pos_mass.w - partner_consumed, 0.0);
-	  let source_free = source_remaining <= max(source_pos_mass.w, 1.0) * 1.0e-7;
-	  let partner_free = partner_remaining <= max(partner_source_pos_mass.w, 1.0) * 1.0e-7;
+	  let source_free = source_remaining <= select(max(source_pos_mass.w, 1.0) * 1.0e-7, 0.0, reaction_energy_enabled(reaction_index));
+	  let partner_free = partner_remaining <= select(max(partner_source_pos_mass.w, 1.0) * 1.0e-7, 0.0, reaction_energy_enabled(reaction_index));
 	  let reaction_product_term_count = u32(max(reaction_header_row1(reaction_index).x, 0.0));
 	  var direct_placed_mass_kg = 0.0;
 	  if (source_free && product_term_index_for_parent_slot(reaction_index, 0u) == product_term_index) {
@@ -6498,12 +6726,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  }
 	  direct_placed_mass_kg = min(max(direct_placed_mass_kg, 0.0), row_mass);
 	  let unplaced_mass_kg = max(row_mass - direct_placed_mass_kg, 0.0);
-	  let product_mechanics = product_mechanics_for(material_id, phase_id);
-	  rest_density_kg_per_m3 = select(
-	    rest_density_kg_per_m3,
-	    product_mechanics.rest_density,
-	    rest_density_kg_per_m3 <= 0.0 && product_mechanics.rest_density > 0.0
-	  );
 	  let source_velocity = source_state[particle_index * 2u + 1u].xyz;
 	  let partner_velocity = source_state[partner_index * 2u + 1u].xyz;
 	  let product_velocity = (source_velocity * source_consumed + partner_velocity * partner_consumed)
@@ -6517,18 +6739,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let consumed_total_energy =
 	    source_consumed * (source_u + 0.5 * dot(source_velocity, source_velocity))
 	    + partner_consumed * (partner_u + 0.5 * dot(partner_velocity, partner_velocity));
-	  let product_u = (
+	  var product_u = (
 	    consumed_total_energy
 	    - rx1.x * consumed_mass
 	    - 0.5 * consumed_mass * dot(product_velocity, product_velocity)
 	  ) / max(consumed_mass, 1.0e-20);
+	  if (reaction_energy_enabled(reaction_index)) {
+	    let temperature = energy_product_temperature(reaction_index, source_row0.x, partner_source_row0.x,
+	      source_consumed, partner_consumed, source_state[particle_index * 2u + 1u],
+	      source_state[partner_index * 2u + 1u], extent_mol, mass_scale, product_velocity);
+	    if (temperature.y != 1.0) { return; }
+	    let energy_state = energy_product_state(reaction_index, product_term_index, temperature.x);
+	    if (energy_state.z != 1.0 || energy_state.w != phase_id) { return; }
+	    product_u = energy_state.x;
+	    temperature_k = temperature.x;
+	    rest_density_kg_per_m3 = energy_state.y;
+	  }
+	  let product_mechanics = product_mechanics_for(material_id, phase_id, temperature_k);
+	  rest_density_kg_per_m3 = select(rest_density_kg_per_m3, product_mechanics.rest_density,
+	    rest_density_kg_per_m3 <= 0.0 && product_mechanics.rest_density > 0.0);
 	  let support_volume_m3 = row_current_volume
 	    * unplaced_mass_kg / max(row_mass, 1.0e-20);
 	  let event_ready = phase_id > 0.0
+	    && energy_finite(product_u) && energy_finite(temperature_k) && temperature_k > 0.0
+	    && all(abs(product_velocity) <= vec3<f32>(3.402823e38))
 	    && rest_density_kg_per_m3 > 0.0
 	    && product_mechanics.status == 1.0
+	    && product_mechanics.sound_speed >= 0.0
 	    && (unplaced_mass_kg <= 0.0 || support_volume_m3 > 0.0);
-	  let midpoint = 0.5 * (source_pos_mass.xyz + partner_source_pos_mass.xyz);
+	  var midpoint = 0.5 * (source_pos_mass.xyz + partner_source_pos_mass.xyz);
+	  if (reaction_energy_enabled(reaction_index)) {
+	    midpoint = (source_pos_mass.xyz * source_consumed + partner_source_pos_mass.xyz * partner_consumed) / consumed_mass;
+	  }
 	  product_events[out_base] = vec4<f32>(midpoint.x, midpoint.y, midpoint.z, row_mass);
 	  product_events[out_base + 1u] = vec4<f32>(material_id, f32(product_term_index), f32(reaction_index), f32(particle_index));
 	  product_events[out_base + 2u] = vec4<f32>(f32(partner_index), row_moles, routing_id, phase_id);
@@ -6556,6 +6798,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const sphReactionAtomResidualWgsl = `
+${sphReactionEnergyWgsl}
+${sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -6590,6 +6834,8 @@ struct ReactantTerm {
 @group(0) @binding(3) var<storage, read> proposals: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> atom_residuals: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> params: ReactionSummaryParams;
+@group(0) @binding(6) var<storage, read> next_state: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> next_thermo: array<vec4<f32>>;
 
 fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
   let base = (params.reaction_count + params.product_phase_count) * 3u;
@@ -6772,6 +7018,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
         continue;
       }
+      if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { continue; }
       let source_pos_mass = source_state[particle_index * 2u];
       let partner_source_pos_mass = source_state[partner_index * 2u];
       let source_row0 = source_thermo[particle_index * 3u];
@@ -6800,8 +7047,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         params.dt_s
       );
       let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
-      let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
-      let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+      let source_consumed = reaction_consumed_mass(reaction_index, source_pos_mass.w, extent_mol, source_term.coefficient, source_term.molar_mass);
+      let partner_consumed = reaction_consumed_mass(reaction_index, partner_source_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
       let consumed_mass = source_consumed + partner_consumed;
       let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
       if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
@@ -6824,6 +7071,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const sphReactionGasSpeciesSummaryWgsl = `
+${sphReactionEnergyWgsl}
+${sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -7042,6 +7291,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
         continue;
       }
+      if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { continue; }
       let source_pos_mass = source_state[particle_index * 2u];
       let partner_source_pos_mass = source_state[partner_index * 2u];
       let source_row0 = source_thermo[particle_index * 3u];
@@ -7070,8 +7320,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         params.dt_s
       );
       let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
-      let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
-      let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+      let source_consumed = reaction_consumed_mass(reaction_index, source_pos_mass.w, extent_mol, source_term.coefficient, source_term.molar_mass);
+      let partner_consumed = reaction_consumed_mass(reaction_index, partner_source_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
       let consumed_mass = source_consumed + partner_consumed;
       let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
       if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
@@ -7276,7 +7526,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-export const sphRenderFieldWgsl = `
+// Both material-agnostic variants use this exact gather. The optional output
+// retains moments already computed for smear; it does not change field lanes
+// or add a second traversal of the particle source.
+function createSphRenderFieldWgsl({ motionField = false } = {}) {
+  return `
 ${sphDispersedMediumOpticsWgsl}
 struct RenderFieldParams {
 	  particle_count: u32,
@@ -7311,6 +7565,7 @@ struct RenderProductHistoryGateParams {
 @group(0) @binding(5) var<storage, read> product_history_control: array<u32>;
 @group(0) @binding(6) var<uniform> product_history_gate: RenderProductHistoryGateParams;
 @group(0) @binding(7) var<storage, read> dispersed_medium_optics_rows: array<SphDispersedMediumOptics>;
+${motionField ? '@group(0) @binding(8) var<storage, read_write> render_motion_field: array<vec4<f32>>;' : ''}
 
 const RENDER_FIELD_RENDER_ROW_VEC4_STRIDE: u32 = 5u;
 
@@ -7845,6 +8100,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (!render_product_history_ready()) {
     render_field_cells[out_index * 2u] = vec4<f32>(0.0);
     render_field_cells[out_index * 2u + 1u] = vec4<f32>(0.0);
+${motionField ? '    render_motion_field[out_index] = vec4<f32>(0.0);' : ''}
     return;
   }
   let authenticated_product_event_count = render_product_event_count();
@@ -8050,6 +8306,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
 
+${motionField ? `  // Snapshot the matching, pre-smear particle moments. Product events have
+  // no retained velocity; exclusive collective optical routes bypass the
+  // particle gather and therefore remain zero here. Empty cells are zero too.
+  // Interpolate all four lanes together, then divide xyz by the valid weight.
+  render_motion_field[out_index] = vec4<f32>(velocity_weighted, temperature_weight);
+` : ''}
   let dispersed_scattering_asymmetry_optical_depth = clamp(
     render_field_signed_scale_sum(dispersed_scattering_asymmetry),
     -dispersed_scattering_optical_depth,
@@ -8194,6 +8456,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   );
 }
 `;
+
+}
+
+export const sphRenderFieldWgsl = createSphRenderFieldWgsl();
+export const sphRenderFieldMotionWgsl = createSphRenderFieldWgsl({ motionField: true });
 
 export const sphMaterialInterfaceCandidatesWgsl = `
 struct InterfaceCandidateParams {
@@ -10462,7 +10729,7 @@ struct PressureInterfaceParams {
 @group(0) @binding(6) var<storage, read> gas_authority_control: array<u32>;
 
 const GAS_AUTHORITY_MAGIC: u32 = 0x53474133u;
-const GAS_AUTHORITY_VERSION: u32 = 3u;
+const GAS_AUTHORITY_VERSION: u32 = 4u;
 const GAS_AUTHORITY_REQUIRED_READY: u32 = 31u;
 const GAS_AUTHORITY_EMPTY: u32 = 32u;
 const GAS_AUTHORITY_FAILED: u32 = 0x80000000u;
@@ -10473,7 +10740,7 @@ const GAS_AUTHORITY_F32_MAX: f32 = 3.402823466e38;
 fn authenticated_gas_pressure_cell_count() -> u32 {
   if (
     params.pressure_model_id != 2u
-    || arrayLength(&gas_authority_control) < 32u
+    || arrayLength(&gas_authority_control) < 36u
     || gas_authority_control[0u] != GAS_AUTHORITY_MAGIC
     || gas_authority_control[1u] != GAS_AUTHORITY_VERSION
     || (gas_authority_control[2u] & GAS_AUTHORITY_REQUIRED_READY)
@@ -11497,7 +11764,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+// Shared by the live G2P update and compact GPU diagnostics. This is the raw
+// (I + dt C) F trial, before any constitutive projection or volume bounds.
+export const mlsMpmTrialDeformationWgsl = `
+fn g2p_trial_deformation(
+  f0: vec3<f32>, f1: vec3<f32>, f2: vec3<f32>,
+  c0: vec3<f32>, c1: vec3<f32>, c2: vec3<f32>, dt: f32
+) -> array<vec3<f32>, 3> {
+  let g00 = 1.0 + dt * c0.x; let g01 = dt * c0.y; let g02 = dt * c0.z;
+  let g10 = dt * c1.x; let g11 = 1.0 + dt * c1.y; let g12 = dt * c1.z;
+  let g20 = dt * c2.x; let g21 = dt * c2.y; let g22 = 1.0 + dt * c2.z;
+  return array<vec3<f32>, 3>(
+    g00 * f0 + g01 * f1 + g02 * f2,
+    g10 * f0 + g11 * f1 + g12 * f2,
+    g20 * f0 + g21 * f1 + g22 * f2
+  );
+}
+`;
+
 export const mlsMpmG2pReconstructWgsl = `
+${mlsMpmTrialDeformationWgsl}
 struct G2pParams {
   particle_count: u32,
   grid_node_count: u32,
@@ -11762,19 +12048,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     c10 = 0.0; c11 = 0.0; c12 = 0.0;
     c20 = 0.0; c21 = 0.0; c22 = 0.0;
   }
-  let g00 = 1.0 + params.dt * c00; let g01 = params.dt * c01; let g02 = params.dt * c02;
-  let g10 = params.dt * c10; let g11 = 1.0 + params.dt * c11; let g12 = params.dt * c12;
-  let g20 = params.dt * c20; let g21 = params.dt * c21; let g22 = 1.0 + params.dt * c22;
-
-  var nf00 = g00 * f00 + g01 * f10 + g02 * f20;
-  var nf01 = g00 * f01 + g01 * f11 + g02 * f21;
-  var nf02 = g00 * f02 + g01 * f12 + g02 * f22;
-  var nf10 = g10 * f00 + g11 * f10 + g12 * f20;
-  var nf11 = g10 * f01 + g11 * f11 + g12 * f21;
-  var nf12 = g10 * f02 + g11 * f12 + g12 * f22;
-  var nf20 = g20 * f00 + g21 * f10 + g22 * f20;
-  var nf21 = g20 * f01 + g21 * f11 + g22 * f21;
-  var nf22 = g20 * f02 + g21 * f12 + g22 * f22;
+  let trial = g2p_trial_deformation(
+    vec3<f32>(f00, f01, f02), vec3<f32>(f10, f11, f12), vec3<f32>(f20, f21, f22),
+    vec3<f32>(c00, c01, c02), vec3<f32>(c10, c11, c12), vec3<f32>(c20, c21, c22), params.dt
+  );
+  var nf00 = trial[0].x; var nf01 = trial[0].y; var nf02 = trial[0].z;
+  var nf10 = trial[1].x; var nf11 = trial[1].y; var nf12 = trial[1].z;
+  var nf20 = trial[2].x; var nf21 = trial[2].y; var nf22 = trial[2].z;
   var next_j = g2p_det3(nf00, nf01, nf02, nf10, nf11, nf12, nf20, nf21, nf22);
   if (deformation_disabled) {
     nf00 = f00; nf01 = f01; nf02 = f02;
@@ -12142,11 +12422,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const mlsMpmMechanicsRefreshWgsl = `
+${sphGasConstitutiveWgsl}
 struct MechanicsRefreshParams {
   particle_count: u32,
   phase_record_count: u32,
   material_bank_warm_input_row_count: u32,
-  pad1: u32,
+  gas_constitutive_offset: u32,
 };
 
 struct PhaseMechanics {
@@ -12229,13 +12510,17 @@ fn phase_record_row2(record_index: u32) -> vec4<f32> {
   return material_phase_records[record_index * 3u + 2u];
 }
 
-fn find_phase_mechanics(material_id: f32, phase_id: f32) -> PhaseMechanics {
+fn find_phase_mechanics(material_id: f32, phase_id: f32, temperature_k: f32) -> PhaseMechanics {
   for (var record_index = 0u; record_index < params.phase_record_count; record_index = record_index + 1u) {
     let row0 = phase_record_row0(record_index);
     if (row0.x == material_id && row0.y == phase_id) {
       let row1 = phase_record_row1(record_index);
       let row2 = phase_record_row2(record_index);
-      return PhaseMechanics(row0.z, row0.w, row1.x, row1.y, row1.z, row1.w, row2.x, row2.y, row2.z, row2.w);
+      var c = row1.z;
+      if (row1.w == 2.0 && params.gas_constitutive_offset > 0u) {
+        c = gas_constitutive_sound_speed(material_phase_records[params.gas_constitutive_offset + record_index], temperature_k);
+      }
+      return PhaseMechanics(row0.z, row0.w, row1.x, row1.y, c, row1.w, row2.x, row2.y, row2.z, row2.w);
     }
   }
   return PhaseMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 255.0, 0.0, 0.0);
@@ -12287,7 +12572,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     mechanics_refresh_fail();
     return;
   }
-  let phase_mechanics = find_phase_mechanics(thermo0.x, thermo0.y);
+  let phase_mechanics = find_phase_mechanics(thermo0.x, thermo0.y, thermo0.z);
   let phase_mechanics_finite =
     mechanics_refresh_finite(phase_mechanics.rest_density)
     && mechanics_refresh_finite(phase_mechanics.bulk)
@@ -12301,6 +12586,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     && mechanics_refresh_finite(phase_mechanics.surface_tension);
   if (
     phase_mechanics.status != 1.0
+    || phase_mechanics.sound_speed < 0.0
     || !phase_mechanics_finite
     || !(phase_mechanics.rest_density > 0.0)
   ) {

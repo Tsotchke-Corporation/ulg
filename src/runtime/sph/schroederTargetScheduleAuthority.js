@@ -2,6 +2,7 @@ import {
   schroederAuthorityTextFingerprint,
   schroederAuthorityTypedArrayFingerprint
 } from './schroederAuthorityFingerprint.js';
+import { assertSphReactionGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import {
   SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT,
   assertSphReactionMotionEnvelopeRulePrefix,
@@ -363,17 +364,19 @@ function exactPredecessorDynamicLawObservation(value) {
 
 function predecessorObservationMatchesAuthority(
   observation,
-  authority
+  authority,
+  configurationHashes
 ) {
   if (observation == null) return true;
   const exactObservation = exactPredecessorDynamicLawObservation(observation);
   const predecessorTransition = authority.predecessorDynamicLawTransition == null
     ? null
-    : exactSchroederProspectiveDynamicLawTransition(
-        authority.predecessorDynamicLawTransition
+    : validateProspectiveDynamicLawTransition(
+        authority.predecessorDynamicLawTransition,
+        configurationHashes
       );
   const observedConfiguration = predecessorTransition?.sourceConfiguration
-    ?? targetScheduleConfigurationFromAuthority(authority);
+    ?? targetScheduleConfigurationFromAuthority(authority, configurationHashes);
   return Boolean(
     exactObservation
     && exactObservation.sourceScheduleId !== authority.sourceScheduleId
@@ -389,7 +392,8 @@ function predecessorObservationMatchesAuthority(
     && observationMatchesConfiguration(
       exactObservation,
       observedConfiguration,
-      { allowUnmeasuredUncertainty: Boolean(predecessorTransition) }
+      { allowUnmeasuredUncertainty: Boolean(predecessorTransition) },
+      configurationHashes
     )
     && (
       predecessorTransition === null
@@ -402,11 +406,12 @@ function predecessorObservationMatchesAuthority(
         && predecessorTransition.stateKey === authority.stateKey
         && observationAuthorizesProspectiveTransition(
           exactObservation,
-          predecessorTransition
+          predecessorTransition,
+          configurationHashes
         )
         && valuesEqual(
           predecessorTransition.targetConfiguration,
-          targetScheduleConfigurationFromAuthority(authority)
+          targetScheduleConfigurationFromAuthority(authority, configurationHashes)
         )
       )
     )
@@ -965,6 +970,19 @@ function authorizedWatchReactionTable(
     }
     combinedOffset += expectedLength;
   }
+  // Admit only the typed, exact phase-law tail; the legacy sections remain
+  // byte-identical and arbitrary trailing bytes are still rejected below.
+  try {
+    assertSphReactionGasLayout(reactionTable);
+  } catch (error) {
+    throw new RangeError(`the authorized reaction watch gas layout is inconsistent: ${error.message}`, { cause: error });
+  }
+  if (reactionTable.gasConstitutiveSchema != null) {
+    if (reactionTable.gasConstitutiveOffsetVec4 * 4 !== combinedOffset) {
+      throw new RangeError('the authorized reaction watch gas tail offset is inconsistent');
+    }
+    combinedOffset += reactionTable.gasConstitutiveRecords.length;
+  }
   if (
     combinedOffset !== combined.length
     || combinedOffset % 4 !== 0
@@ -1190,15 +1208,23 @@ export function exactSchroederTargetScheduleTableFingerprints(value) {
   return value;
 }
 
-function targetScheduleConfigurationFingerprint(value) {
+function targetScheduleConfigurationFingerprint(value, configurationHashes) {
   const {
     configurationFingerprint: ignoredFingerprint,
     ...content
   } = value;
-  return textFingerprint(
-    stableToken(content),
+  // This private memo is scoped to one synchronous validation and this one
+  // fingerprint label. Rebuild the token on EVERY visit: getters, proxies and
+  // mutable nested values must never inherit an object's earlier validation.
+  const token = stableToken(content);
+  const cached = configurationHashes?.get(token);
+  if (cached !== undefined) return cached;
+  const fingerprint = textFingerprint(
+    token,
     'schroeder-target-schedule-configuration-v1'
   );
+  configurationHashes?.set(token, fingerprint);
+  return fingerprint;
 }
 
 function targetScheduleConfigurationFromParts({
@@ -1206,7 +1232,7 @@ function targetScheduleConfigurationFromParts({
   writerSet,
   scheduleStepOptionsProvider,
   tableFingerprints
-}) {
+}, configurationHashes) {
   const configuration = {
     schema: ULG_SCHROEDER_TARGET_SCHEDULE_CONFIGURATION_SCHEMA,
     status: writerSet.complete
@@ -1219,7 +1245,7 @@ function targetScheduleConfigurationFromParts({
     configurationFingerprint: null
   };
   configuration.configurationFingerprint =
-    targetScheduleConfigurationFingerprint(configuration);
+    targetScheduleConfigurationFingerprint(configuration, configurationHashes);
   return deepFreeze(configuration);
 }
 
@@ -1275,6 +1301,10 @@ export function createSchroederTargetScheduleConfiguration({
 }
 
 export function exactSchroederTargetScheduleConfiguration(value) {
+  return validateTargetScheduleConfiguration(value, new Map());
+}
+
+function validateTargetScheduleConfiguration(value, configurationHashes) {
   if (
     !objectHasExactKeys(value, TARGET_CONFIGURATION_KEYS)
     || value.schema !== ULG_SCHROEDER_TARGET_SCHEDULE_CONFIGURATION_SCHEMA
@@ -1310,7 +1340,7 @@ export function exactSchroederTargetScheduleConfiguration(value) {
     )
   ) return null;
   try {
-    return targetScheduleConfigurationFingerprint(value)
+    return targetScheduleConfigurationFingerprint(value, configurationHashes)
       === value.configurationFingerprint
       ? value
       : null;
@@ -1331,13 +1361,16 @@ function valuesEqualExcept(left, right, ignoredKeys) {
 
 function exactDormantReactionWatchToExecutingReactionTransition(
   sourceConfiguration,
-  targetConfiguration
+  targetConfiguration,
+  configurationHashes
 ) {
-  const source = exactSchroederTargetScheduleConfiguration(
-    sourceConfiguration
+  const source = validateTargetScheduleConfiguration(
+    sourceConfiguration,
+    configurationHashes
   );
-  const target = exactSchroederTargetScheduleConfiguration(
-    targetConfiguration
+  const target = validateTargetScheduleConfiguration(
+    targetConfiguration,
+    configurationHashes
   );
   if (
     !source
@@ -1448,13 +1481,16 @@ function exactDormantReactionWatchToExecutingReactionTransition(
 
 function exactRetainedProductGasBoundaryTransition(
   sourceConfiguration,
-  targetConfiguration
+  targetConfiguration,
+  configurationHashes
 ) {
-  const source = exactSchroederTargetScheduleConfiguration(
-    sourceConfiguration
+  const source = validateTargetScheduleConfiguration(
+    sourceConfiguration,
+    configurationHashes
   );
-  const target = exactSchroederTargetScheduleConfiguration(
-    targetConfiguration
+  const target = validateTargetScheduleConfiguration(
+    targetConfiguration,
+    configurationHashes
   );
   if (
     !source
@@ -1578,6 +1614,13 @@ export function createSchroederProspectiveDynamicLawTransition({
 }
 
 export function exactSchroederProspectiveDynamicLawTransition(value) {
+  return validateProspectiveDynamicLawTransition(value, new Map());
+}
+
+function validateProspectiveDynamicLawTransition(
+  value,
+  configurationHashes = new Map()
+) {
   const reactionTransition = Boolean(
     value?.kind === SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND
     && value?.lawFamily === 'reaction'
@@ -1585,7 +1628,8 @@ export function exactSchroederProspectiveDynamicLawTransition(value) {
       === SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_POLICY
     && exactDormantReactionWatchToExecutingReactionTransition(
       value?.sourceConfiguration,
-      value?.targetConfiguration
+      value?.targetConfiguration,
+      configurationHashes
     )
   );
   const retainedProductGasTransition = Boolean(
@@ -1596,7 +1640,8 @@ export function exactSchroederProspectiveDynamicLawTransition(value) {
       === SCHROEDER_PROSPECTIVE_RETAINED_PRODUCT_GAS_TRANSITION_POLICY
     && exactRetainedProductGasBoundaryTransition(
       value?.sourceConfiguration,
-      value?.targetConfiguration
+      value?.targetConfiguration,
+      configurationHashes
     )
   );
   if (
@@ -1611,8 +1656,14 @@ export function exactSchroederProspectiveDynamicLawTransition(value) {
     || value.sourceScheduleId === value.targetScheduleRequestId
     || !nonEmptyString(value.laneId)
     || !nonEmptyString(value.stateKey)
-    || !exactSchroederTargetScheduleConfiguration(value.sourceConfiguration)
-    || !exactSchroederTargetScheduleConfiguration(value.targetConfiguration)
+    || !validateTargetScheduleConfiguration(
+      value.sourceConfiguration,
+      configurationHashes
+    )
+    || !validateTargetScheduleConfiguration(
+      value.targetConfiguration,
+      configurationHashes
+    )
     || !nonEmptyString(value.transitionFingerprint)
     || value.shadowOnly !== SCHROEDER_DYNAMIC_LAW_ROUTING_SHADOW_ONLY
     || value.routingAuthority !== SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY
@@ -1628,18 +1679,19 @@ export function exactSchroederProspectiveDynamicLawTransition(value) {
   }
 }
 
-function targetScheduleConfigurationFromAuthority(authority) {
+function targetScheduleConfigurationFromAuthority(authority, configurationHashes) {
   return targetScheduleConfigurationFromParts({
     motionEnvelope: authority.motionEnvelope,
     writerSet: authority.writerSet,
     scheduleStepOptionsProvider: authority.scheduleStepOptionsProvider,
     tableFingerprints: authority.tableFingerprints
-  });
+  }, configurationHashes);
 }
 
 function observationAuthorizesProspectiveTransition(
   observation,
-  transition = null
+  transition = null,
+  configurationHashes
 ) {
   const writerEvidence = observation?.prospectiveWriterEvidence;
   const terminalScheduleStructurallyAdmitted = Boolean(
@@ -1648,7 +1700,7 @@ function observationAuthorizesProspectiveTransition(
   );
   const exactTransition = transition == null
     ? null
-    : exactSchroederProspectiveDynamicLawTransition(transition);
+    : validateProspectiveDynamicLawTransition(transition, configurationHashes);
   if (
     exactTransition?.kind
       === SCHROEDER_PROSPECTIVE_RETAINED_PRODUCT_GAS_TRANSITION_KIND
@@ -1732,11 +1784,13 @@ function observationBindsTargetScheduleAuthorityExecution(
 function observationMatchesConfiguration(
   observation,
   configuration,
-  { allowUnmeasuredUncertainty = false } = {}
+  { allowUnmeasuredUncertainty = false } = {},
+  configurationHashes
 ) {
   const exactObservation = exactPredecessorDynamicLawObservation(observation);
-  const exactConfiguration = exactSchroederTargetScheduleConfiguration(
-    configuration
+  const exactConfiguration = validateTargetScheduleConfiguration(
+    configuration,
+    configurationHashes
   );
   if (!exactObservation || !exactConfiguration) return false;
   const tables = exactConfiguration.tableFingerprints;
@@ -1860,10 +1914,15 @@ export function schroederTargetScheduleSuccessorReactionExecutionRequired({
   );
 }
 
-function prospectiveTransitionMatchesAuthoritySource(transition, authority) {
+function prospectiveTransitionMatchesAuthoritySource(
+  transition,
+  authority,
+  configurationHashes
+) {
   if (transition == null) return true;
-  const exactTransition = exactSchroederProspectiveDynamicLawTransition(
-    transition
+  const exactTransition = validateProspectiveDynamicLawTransition(
+    transition,
+    configurationHashes
   );
   return Boolean(
     exactTransition
@@ -1874,15 +1933,20 @@ function prospectiveTransitionMatchesAuthoritySource(transition, authority) {
     && exactTransition.stateKey === authority.stateKey
     && valuesEqual(
       exactTransition.sourceConfiguration,
-      targetScheduleConfigurationFromAuthority(authority)
+      targetScheduleConfigurationFromAuthority(authority, configurationHashes)
     )
   );
 }
 
-function predecessorTransitionMatchesAuthorityTarget(transition, authority) {
+function predecessorTransitionMatchesAuthorityTarget(
+  transition,
+  authority,
+  configurationHashes
+) {
   if (transition == null) return true;
-  const exactTransition = exactSchroederProspectiveDynamicLawTransition(
-    transition
+  const exactTransition = validateProspectiveDynamicLawTransition(
+    transition,
+    configurationHashes
   );
   const observation = exactPredecessorDynamicLawObservation(
     authority.predecessorDynamicLawObservation
@@ -1898,16 +1962,18 @@ function predecessorTransitionMatchesAuthorityTarget(transition, authority) {
     && exactTransition.stateKey === authority.stateKey
     && observationAuthorizesProspectiveTransition(
       observation,
-      exactTransition
+      exactTransition,
+      configurationHashes
     )
     && observationMatchesConfiguration(
       observation,
       exactTransition.sourceConfiguration,
-      { allowUnmeasuredUncertainty: true }
+      { allowUnmeasuredUncertainty: true },
+      configurationHashes
     )
     && valuesEqual(
       exactTransition.targetConfiguration,
-      targetScheduleConfigurationFromAuthority(authority)
+      targetScheduleConfigurationFromAuthority(authority, configurationHashes)
     )
   );
 }
@@ -2180,6 +2246,9 @@ export function createSchroederTargetScheduleAuthority({
 }
 
 export function exactSchroederTargetScheduleAuthority(value) {
+  // Keep this context private and invocation-local, including for public calls
+  // re-entered from getters. No validation result or object identity is cached.
+  const configurationHashes = new Map();
   if (
     !objectHasExactKeys(value, TARGET_AUTHORITY_KEYS)
     || value.schema !== ULG_SCHROEDER_TARGET_SCHEDULE_AUTHORITY_SCHEMA
@@ -2207,14 +2276,16 @@ export function exactSchroederTargetScheduleAuthority(value) {
     )
     || !(
       value.predecessorDynamicLawTransition === null
-      || exactSchroederProspectiveDynamicLawTransition(
-        value.predecessorDynamicLawTransition
+      || validateProspectiveDynamicLawTransition(
+        value.predecessorDynamicLawTransition,
+        configurationHashes
       )
     )
     || !(
       value.prospectiveDynamicLawTransition === null
-      || exactSchroederProspectiveDynamicLawTransition(
-        value.prospectiveDynamicLawTransition
+      || validateProspectiveDynamicLawTransition(
+        value.prospectiveDynamicLawTransition,
+        configurationHashes
       )
     )
     || !isSphReactionMotionEnvelopeReceipt(value.motionEnvelope)
@@ -2248,15 +2319,18 @@ export function exactSchroederTargetScheduleAuthority(value) {
     )
     || !prospectiveTransitionMatchesAuthoritySource(
       value.prospectiveDynamicLawTransition,
-      value
+      value,
+      configurationHashes
     )
     || !predecessorTransitionMatchesAuthorityTarget(
       value.predecessorDynamicLawTransition,
-      value
+      value,
+      configurationHashes
     )
     || !predecessorObservationMatchesAuthority(
       value.predecessorDynamicLawObservation,
-      value
+      value,
+      configurationHashes
     )
   ) return null;
   try {

@@ -1,14 +1,21 @@
 import {
+  SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION,
   SPH_SPATIAL_GAS_FREE_VOLUME_MAGIC,
   SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS,
   SPH_SPATIAL_GAS_FREE_VOLUME_STATUS,
   SPH_SPATIAL_GAS_FREE_VOLUME_VERSION,
   SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE
 } from './sphSpatialGasFreeVolume.js';
+import {
+  schroederQuadraticControlVolumeProjectionWgsl
+} from './schroederQuadraticControlVolumeProjectionWgsl.js';
+import {
+  SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION
+} from './schroederQuadraticControlVolumeProjection.js';
 
 const u32 = (value) => `${Number(value) >>> 0}u`;
 
-export function createSphSpatialGasFreeVolumeWgsl(layout) {
+export function createSphSpatialGasFreeVolumeWgsl(layout, { aerosols = false } = {}) {
   if (
     !layout
     || layout.rowWords !== SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS
@@ -72,16 +79,25 @@ struct GasFreeVolumeParams {
   coarse_scatter_dispatch_x: u32,
   coarse_scatter_dispatch_y: u32,
   keyed_lookup_max_steps: u32,
-  reserved22: u32,
-  reserved23: u32,
-  reserved24: u32,
-  reserved25: u32,
-  reserved26: u32,
-  reserved27: u32,
-  reserved28: u32,
-  reserved29: u32,
-  reserved30: u32,
-  reserved31: u32,
+  projection_version: u32,
+  control_volume_geometry_seal: u32,
+  lower_x_cell: i32,
+  lower_x_fraction: f32,
+  upper_x_cell: i32,
+  upper_x_fraction: f32,
+  lower_y_cell: i32,
+  lower_y_fraction: f32,
+  upper_y_cell: i32,
+  upper_y_fraction: f32,
+  lower_z_cell: i32,
+  lower_z_fraction: f32,
+  upper_z_cell: i32,
+  upper_z_fraction: f32,
+  aerosol_enabled: u32,
+  aerosol_family_id: u32,
+  aerosol_generation: u32,
+  aerosol_capacity: u32,
+  aerosol_version: u32,
 };
 
 @group(0) @binding(0) var<storage, read> gas_directory: array<u32>;
@@ -93,12 +109,25 @@ struct GasFreeVolumeParams {
 @group(0) @binding(6) var<storage, read_write> output_control: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> output_rows: array<atomic<u32>>;
 @group(0) @binding(8) var<uniform> params: GasFreeVolumeParams;
+${aerosols ? /* wgsl */ `
+struct AerosolGeometry {
+  fine_nx: u32,
+  fine_ny: u32,
+  fine_nz: u32,
+  fine_grid_shift: i32,
+};
+@group(0) @binding(9) var<storage, read> aerosol_parcels: array<u32>;
+@group(0) @binding(10) var<uniform> aerosol_geometry: AerosolGeometry;
+` : ''}
 
 const OUTPUT_MAGIC: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_MAGIC)};
 const OUTPUT_VERSION: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_VERSION)};
-const REDUCTION_VERSION: u32 = 2u;
+const REDUCTION_VERSION: u32 = 3u;
+const PROJECTION_VERSION: u32 = ${u32(SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION)};
 const ROW_WORDS: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS)};
 const WORKGROUP_SIZE: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE)};
+const AEROSOL_VERSION: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION)};
+const INVALID_AEROSOL: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.INVALID_AEROSOL)};
 const READY: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.READY)};
 const ADMITTED: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.ADMITTED)};
 const FAIL_CLOSED: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.FAIL_CLOSED)};
@@ -121,27 +150,48 @@ const MOMENT_ROW_WORDS: u32 = 12u;
 const CONDENSED_SOLID: u32 = 1u;
 const CONDENSED_LIQUID: u32 = 2u;
 
+${schroederQuadraticControlVolumeProjectionWgsl}
+
 fn finite_f32(value: f32) -> bool {
-  return value == value && abs(value) <= bitcast<f32>(0x7f7fffffu);
+  return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+fn control_volume_geometry_ready() -> bool {
+  if (params.projection_version != PROJECTION_VERSION
+    || !finite_f32(params.grid_spacing_m) || !(params.grid_spacing_m > 0.0)) {
+    return false;
+  }
+  let bounds = array<u32, 12>(
+    bitcast<u32>(params.lower_x_cell), bitcast<u32>(params.lower_x_fraction),
+    bitcast<u32>(params.upper_x_cell), bitcast<u32>(params.upper_x_fraction),
+    bitcast<u32>(params.lower_y_cell), bitcast<u32>(params.lower_y_fraction),
+    bitcast<u32>(params.upper_y_cell), bitcast<u32>(params.upper_y_fraction),
+    bitcast<u32>(params.lower_z_cell), bitcast<u32>(params.lower_z_fraction),
+    bitcast<u32>(params.upper_z_cell), bitcast<u32>(params.upper_z_fraction));
+  return params.control_volume_geometry_seal == qcv_descriptor_seal(
+      params.projection_version, params.grid_spacing_m,
+      vec3<i32>(-params.grid_shift), vec3<u32>(params.nx, params.ny, params.nz),
+      params.nx * params.ny * params.nz, params.chart_id, params.selected_level,
+      bounds)
+    && qcv_primal_axis_extent(params.lower_x_cell, params.lower_x_cell,
+      params.lower_x_fraction, params.upper_x_cell, params.upper_x_fraction) > 0.0
+    && qcv_primal_axis_extent(params.lower_y_cell, params.lower_y_cell,
+      params.lower_y_fraction, params.upper_y_cell, params.upper_y_fraction) > 0.0
+    && qcv_primal_axis_extent(params.lower_z_cell, params.lower_z_cell,
+      params.lower_z_fraction, params.upper_z_cell, params.upper_z_fraction) > 0.0;
 }
 
 fn decoded_order_key(value: u32) -> i32 {
   return bitcast<i32>(value ^ 0x80000000u);
 }
 
-fn dense_node_for_cell(x: i32, y: i32, z: i32) -> u32 {
-  let dx = x + params.grid_shift;
-  let dy = y + params.grid_shift;
-  let dz = z + params.grid_shift;
-  if (
-    dx < 0 || dy < 0 || dz < 0
-    || dx >= i32(params.nx)
-    || dy >= i32(params.ny)
-    || dz >= i32(params.nz)
-  ) {
-    return 0xffffffffu;
-  }
-  return u32(dx) * params.ny * params.nz + u32(dy) * params.nz + u32(dz);
+fn coordinate_for_dense_node(dense: u32) -> vec3<i32> {
+  let yz = params.ny * params.nz;
+  let x = dense / yz;
+  let remainder = dense - x * yz;
+  let y = remainder / params.nz;
+  let z = remainder - y * params.nz;
+  return vec3<i32>(i32(x), i32(y), i32(z)) - vec3<i32>(params.grid_shift);
 }
 
 fn directory_ready() -> bool {
@@ -255,7 +305,7 @@ fn fail(flag: u32, counter_word: u32) {
   atomicAdd(&output_control[counter_word], 1u);
 }
 
-fn directory_cell_order(cell: u32, target_dense: u32) -> i32 {
+fn directory_cell_order(cell: u32, sought_cell: vec3<i32>) -> i32 {
   let base = params.directory_key_offset_words + cell * 5u;
   let chart = gas_directory[base];
   if (chart < params.chart_id) { return -1; }
@@ -263,34 +313,26 @@ fn directory_cell_order(cell: u32, target_dense: u32) -> i32 {
   let level = decoded_order_key(gas_directory[base + 1u]);
   if (level < params.selected_level) { return -1; }
   if (level > params.selected_level) { return 1; }
-  let yz = params.ny * params.nz;
-  let dense_x = target_dense / yz;
-  let dense_yz = target_dense - dense_x * yz;
-  let dense_y = dense_yz / params.nz;
-  let dense_z = dense_yz - dense_y * params.nz;
-  let target_x = i32(dense_x) - params.grid_shift;
-  let target_y = i32(dense_y) - params.grid_shift;
-  let target_z = i32(dense_z) - params.grid_shift;
   let x = decoded_order_key(gas_directory[base + 2u]);
-  if (x < target_x) { return -1; }
-  if (x > target_x) { return 1; }
+  if (x < sought_cell.x) { return -1; }
+  if (x > sought_cell.x) { return 1; }
   let y = decoded_order_key(gas_directory[base + 3u]);
-  if (y < target_y) { return -1; }
-  if (y > target_y) { return 1; }
+  if (y < sought_cell.y) { return -1; }
+  if (y > sought_cell.y) { return 1; }
   let z = decoded_order_key(gas_directory[base + 4u]);
-  if (z < target_z) { return -1; }
-  if (z > target_z) { return 1; }
+  if (z < sought_cell.z) { return -1; }
+  if (z > sought_cell.z) { return 1; }
   return 0;
 }
 
-fn find_gas_cell(target_dense: u32) -> u32 {
+fn find_gas_cell(sought_cell: vec3<i32>) -> u32 {
   var low = 0u;
   var high = gas_directory[18u];
   var steps = 0u;
   loop {
     if (low >= high || steps >= params.keyed_lookup_max_steps) { break; }
     let middle = low + (high - low) / 2u;
-    if (directory_cell_order(middle, target_dense) < 0) {
+    if (directory_cell_order(middle, sought_cell) < 0) {
       low = middle + 1u;
     } else {
       high = middle;
@@ -299,7 +341,7 @@ fn find_gas_cell(target_dense: u32) -> u32 {
   }
   if (
     low < gas_directory[18u]
-    && directory_cell_order(low, target_dense) == 0
+    && directory_cell_order(low, sought_cell) == 0
   ) {
     return low;
   }
@@ -327,12 +369,60 @@ fn atomic_add_condensed(cell: u32, contribution: f32) -> bool {
 }
 
 fn scatter_to_gas_cell(target_dense: u32, contribution: f32) -> bool {
-  let cell = find_gas_cell(target_dense);
-  return cell == 0xffffffffu || atomic_add_condensed(cell, contribution);
+  if (!finite_f32(contribution) || contribution < 0.0) { return false; }
+  if (contribution == 0.0) { return true; }
+  let node = coordinate_for_dense_node(target_dense);
+  let x = qcv_axis_projection(node.x, params.lower_x_cell,
+    params.lower_x_fraction, params.upper_x_cell, params.upper_x_fraction);
+  let y = qcv_axis_projection(node.y, params.lower_y_cell,
+    params.lower_y_fraction, params.upper_y_cell, params.upper_y_fraction);
+  let z = qcv_axis_projection(node.z, params.lower_z_cell,
+    params.lower_z_fraction, params.upper_z_cell, params.upper_z_fraction);
+  if (x.valid == 0u || y.valid == 0u || z.valid == 0u
+    || !(x.capacity > 0.0) || !(y.capacity > 0.0) || !(z.capacity > 0.0)) {
+    fail(INVALID_GEOMETRY, 19u);
+    return false;
+  }
+  // W is conservative over every primal target. Absent sparse gas keys are
+  // ambient support: omit them without renormalizing the remaining weights.
+  for (var ix = 0u; ix < 2u; ix = ix + 1u) {
+    let wx = select(x.weight0, x.weight1, ix == 1u);
+    if (wx == 0.0) { continue; }
+    for (var iy = 0u; iy < 2u; iy = iy + 1u) {
+      let wy = select(y.weight0, y.weight1, iy == 1u);
+      if (wy == 0.0) { continue; }
+      for (var iz = 0u; iz < 2u; iz = iz + 1u) {
+        let wz = select(z.weight0, z.weight1, iz == 1u);
+        if (wz == 0.0) { continue; }
+        let sought_cell = vec3<i32>(select(x.cell0, x.cell1, ix == 1u),
+          select(y.cell0, y.cell1, iy == 1u),
+          select(z.cell0, z.cell1, iz == 1u));
+        let cell = find_gas_cell(sought_cell);
+        if (cell != 0xffffffffu
+          && !atomic_add_condensed(cell, contribution * wx * wy * wz)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 @compute @workgroup_size(1)
 fn validate_gas_free_volume_authority() {
+  if ((params.aerosol_enabled == 0u && (params.aerosol_family_id != 0u
+      || params.aerosol_generation != 0u || params.aerosol_capacity != 0u
+      || params.aerosol_version != 0u))
+    || (params.aerosol_enabled != 0u && (params.aerosol_enabled != 1u
+      || params.aerosol_family_id == 0u || params.aerosol_capacity == 0u
+      || params.aerosol_version != AEROSOL_VERSION))) {
+    fail(INVALID_AEROSOL, 41u);
+    return;
+  }
+  if (!control_volume_geometry_ready()) {
+    fail(INVALID_GEOMETRY, 19u);
+    return;
+  }
   if (!directory_ready()) {
     fail(INVALID_DIRECTORY, 16u);
     return;
@@ -486,6 +576,153 @@ fn scatter_coarse_condensed_volume(
   }
 }
 
+${aerosols ? /* wgsl */ `
+// This is the same quadratic B used by the phase-volume moment producer.
+// Independent droplets are not mechanics fields: project their occupied
+// m/rho directly through B, geometric adjacent-level A (when present), and W.
+fn aerosol_quadratic_weight(fraction: f32, ordinal: u32) -> f32 {
+  if (ordinal == 0u) {
+    let value = 1.5 - fraction;
+    return 0.5 * value * value;
+  }
+  if (ordinal == 1u) {
+    let value = fraction - 1.0;
+    return 0.75 - value * value;
+  }
+  let value = fraction - 0.5;
+  return 0.5 * value * value;
+}
+
+fn aerosol_project_fine_node(node: vec3<i32>, volume: f32) -> bool {
+  let indexed = node + vec3<i32>(aerosol_geometry.fine_grid_shift);
+  if (any(indexed < vec3<i32>(0))
+    || any(indexed >= vec3<i32>(i32(aerosol_geometry.fine_nx),
+      i32(aerosol_geometry.fine_ny), i32(aerosol_geometry.fine_nz)))) {
+    return false;
+  }
+  if (params.exact_level_count == 1u) {
+    let dense = (u32(indexed.x) * params.ny + u32(indexed.y))
+      * params.nz + u32(indexed.z);
+    return scatter_to_gas_cell(dense, volume);
+  }
+  // Exact geometric A from the canonical 2:1 hierarchy. No invented material
+  // key or CSR field is needed. Positive support outside the admitted coarse
+  // grid is rejected, not clipped and redistributed among surviving nodes.
+  let coarse_indexed = vec3<f32>(node) * 0.5 + f32(params.grid_shift);
+  let base_f = floor(coarse_indexed);
+  let base = vec3<i32>(base_f);
+  let fraction = coarse_indexed - base_f;
+  for (var corner = 0u; corner < 8u; corner = corner + 1u) {
+    let offset = vec3<u32>((corner >> 2u) & 1u, (corner >> 1u) & 1u, corner & 1u);
+    let weights = select(vec3<f32>(1.0) - fraction, fraction,
+      offset == vec3<u32>(1u));
+    let weight = weights.x * weights.y * weights.z;
+    if (weight == 0.0) { continue; }
+    let coarse = base + vec3<i32>(offset);
+    if (any(coarse < vec3<i32>(0))
+      || any(coarse >= vec3<i32>(i32(params.nx), i32(params.ny), i32(params.nz)))) {
+      return false;
+    }
+    let dense = (u32(coarse.x) * params.ny + u32(coarse.y))
+      * params.nz + u32(coarse.z);
+    if (!scatter_to_gas_cell(dense, volume * weight)) { return false; }
+  }
+  return true;
+}
+
+@compute @workgroup_size(${SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE})
+fn scatter_aerosol_condensed_volume(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) groups: vec3<u32>
+) {
+  let slot = (workgroup_id.x + workgroup_id.y * groups.x
+    + workgroup_id.z * groups.x * groups.y) * WORKGROUP_SIZE + local_id.x;
+  if (slot >= params.aerosol_capacity) { return; }
+  // Count every sparse slot once, including holes and failures. No invocation
+  // resets counters; the producing encoder clears them before any dispatch.
+  atomicAdd(&output_control[39u], 1u);
+  if (atomicLoad(&output_control[3u]) != 0u) { return; }
+  if (params.aerosol_enabled != 1u || params.aerosol_version != AEROSOL_VERSION
+    || params.aerosol_capacity > arrayLength(&aerosol_parcels) / 24u
+    || aerosol_geometry.fine_nx * aerosol_geometry.fine_ny * aerosol_geometry.fine_nz
+      != params.fine_grid_node_count
+    || !finite_f32(params.fine_grid_spacing_m) || !(params.fine_grid_spacing_m > 0.0)
+    || (params.exact_level_count == 1u && (aerosol_geometry.fine_nx != params.nx
+      || aerosol_geometry.fine_ny != params.ny || aerosol_geometry.fine_nz != params.nz
+      || aerosol_geometry.fine_grid_shift != params.grid_shift))
+    || (params.exact_level_count == 2u
+      && params.grid_spacing_m != 2.0 * params.fine_grid_spacing_m)) {
+    fail(INVALID_AEROSOL, 41u);
+    return;
+  }
+  let row = slot * 24u;
+  let status = aerosol_parcels[row + 22u];
+  if (status == 0u) {
+    for (var lane = 0u; lane < 24u; lane = lane + 1u) {
+      if (aerosol_parcels[row + lane] != 0u) {
+        fail(INVALID_AEROSOL, 41u);
+        return;
+      }
+    }
+    return;
+  }
+  let mass = bitcast<f32>(aerosol_parcels[row + 3u]);
+  let density = bitcast<f32>(aerosol_parcels[row + 9u]);
+  let phase = aerosol_parcels[row + 13u];
+  let source_kind = aerosol_parcels[row + 23u];
+  let position = vec3<f32>(bitcast<f32>(aerosol_parcels[row]),
+    bitcast<f32>(aerosol_parcels[row + 1u]), bitcast<f32>(aerosol_parcels[row + 2u]));
+  if (status != 1u || !condensed_family(phase)
+    || aerosol_parcels[row + 12u] == 0u || aerosol_parcels[row + 12u] > 0xffffffu
+    || aerosol_parcels[row + 11u] != 0u
+    || (source_kind != 1u && source_kind != 2u)
+    || (source_kind == 1u && (aerosol_parcels[row + 18u] != 0xffffffffu
+      || aerosol_parcels[row + 19u] != 0u))
+    || (source_kind == 2u && aerosol_parcels[row + 18u] == 0xffffffffu)
+    || (aerosol_parcels[row + 14u] | aerosol_parcels[row + 15u]) == 0u
+    || (aerosol_parcels[row + 16u] | aerosol_parcels[row + 17u]) == 0u
+    || (aerosol_parcels[row + 20u] | aerosol_parcels[row + 21u]) == 0u
+    || !finite_f32(mass) || !(mass > 0.0)
+    || !finite_f32(density) || !(density > 0.0)
+    || !finite_f32(position.x) || !finite_f32(position.y) || !finite_f32(position.z)) {
+    fail(INVALID_AEROSOL, 41u);
+    return;
+  }
+  for (var lane = 4u; lane <= 10u; lane = lane + 1u) {
+    let value = bitcast<f32>(aerosol_parcels[row + lane]);
+    // Signed internal energy is reference-dependent and remains admissible.
+    if (!finite_f32(value) || (lane >= 8u && !(value > 0.0))) {
+      fail(INVALID_AEROSOL, 41u);
+      return;
+    }
+  }
+  let volume = mass / density;
+  let grid_position = position * (1.0 / params.fine_grid_spacing_m);
+  if (!finite_f32(volume) || !(volume > 0.0)
+    || !finite_f32(grid_position.x) || !finite_f32(grid_position.y) || !finite_f32(grid_position.z)
+    || any(abs(grid_position) > vec3<f32>(2147483000.0))) {
+    fail(INVALID_AEROSOL, 41u);
+    return;
+  }
+  let base_f = floor(grid_position - vec3<f32>(0.5));
+  let base = vec3<i32>(base_f);
+  let fraction = grid_position - base_f;
+  atomicAdd(&output_control[40u], 1u);
+  for (var stencil = 0u; stencil < 27u; stencil = stencil + 1u) {
+    let offset = vec3<u32>(stencil / 9u, (stencil % 9u) / 3u, stencil % 3u);
+    let weight = aerosol_quadratic_weight(fraction.x, offset.x)
+      * aerosol_quadratic_weight(fraction.y, offset.y)
+      * aerosol_quadratic_weight(fraction.z, offset.z);
+    if (weight == 0.0) { continue; }
+    if (!aerosol_project_fine_node(base + vec3<i32>(offset), volume * weight)) {
+      fail(INVALID_AEROSOL, 41u);
+      return;
+    }
+  }
+}
+` : ''}
+
 @compute @workgroup_size(${SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE})
 fn build_gas_free_volume(
   @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -499,6 +736,10 @@ fn build_gas_free_volume(
   }
   if (cell >= gas_directory[18u]) { return; }
   let output = cell * ROW_WORDS;
+  if (params.aerosol_enabled != 0u
+    && atomicLoad(&output_control[39u]) != params.aerosol_capacity) {
+    fail(INVALID_AEROSOL | COUNT_MISMATCH, 41u);
+  }
   let authority_errors = atomicLoad(&output_control[3u]);
   if (authority_errors != 0u) {
     atomicStore(
@@ -513,11 +754,9 @@ fn build_gas_free_volume(
   let x = decoded_order_key(gas_directory[key + 2u]);
   let y = decoded_order_key(gas_directory[key + 3u]);
   let z = decoded_order_key(gas_directory[key + 4u]);
-  let target_dense = dense_node_for_cell(x, y, z);
   if (
     chart != params.chart_id
     || level != params.selected_level
-    || target_dense == 0xffffffffu
   ) {
     atomicStore(
       &output_rows[output + 3u],
@@ -526,16 +765,14 @@ fn build_gas_free_volume(
     fail(INVALID_GEOMETRY, 19u);
     return;
   }
-  let cell_min = vec3<f32>(f32(x), f32(y), f32(z)) * params.grid_spacing_m;
-  let cell_max = cell_min + vec3<f32>(params.grid_spacing_m);
-  let overlap = max(
-    vec3<f32>(0.0),
-    min(cell_max, vec3<f32>(
-      params.box_max_x, params.box_max_y, params.box_max_z
-    )) - max(cell_min, vec3<f32>(
-      params.box_min_x, params.box_min_y, params.box_min_z
-    ))
-  );
+  let overlap = vec3<f32>(
+    qcv_primal_axis_extent(x, params.lower_x_cell,
+      params.lower_x_fraction, params.upper_x_cell, params.upper_x_fraction),
+    qcv_primal_axis_extent(y, params.lower_y_cell,
+      params.lower_y_fraction, params.upper_y_cell, params.upper_y_fraction),
+    qcv_primal_axis_extent(z, params.lower_z_cell,
+      params.lower_z_fraction, params.upper_z_cell, params.upper_z_fraction)
+  ) * params.grid_spacing_m;
   let geometric = overlap.x * overlap.y * overlap.z;
   let condensed = bitcast<f32>(atomicLoad(&output_rows[output + 1u]));
   if (!finite_f32(geometric) || !finite_f32(condensed) || condensed < 0.0) {
@@ -602,6 +839,17 @@ fn finalize_gas_free_volume() {
   atomicStore(&output_control[30u], params.coarse_scatter_dispatch_x);
   atomicStore(&output_control[31u], params.coarse_scatter_dispatch_y);
   atomicStore(&output_control[32u], params.keyed_lookup_max_steps);
+  atomicStore(&output_control[33u], params.projection_version);
+  atomicStore(&output_control[34u], params.control_volume_geometry_seal);
+  atomicStore(&output_control[35u], params.aerosol_enabled);
+  atomicStore(&output_control[36u], params.aerosol_family_id);
+  atomicStore(&output_control[37u], params.aerosol_generation);
+  atomicStore(&output_control[38u], params.aerosol_capacity);
+  atomicStore(&output_control[42u], params.aerosol_version);
+  if (params.aerosol_enabled != 0u
+    && atomicLoad(&output_control[39u]) != params.aerosol_capacity) {
+    fail(INVALID_AEROSOL | COUNT_MISMATCH, 41u);
+  }
   if (!directory_ok || completed != cell_count || atomicLoad(&output_control[3u]) != 0u) {
     if (completed != cell_count) {
       atomicOr(&output_control[3u], COUNT_MISMATCH);
@@ -609,6 +857,9 @@ fn finalize_gas_free_volume() {
     atomicStore(&output_control[2u], FAIL_CLOSED | atomicLoad(&output_control[3u]));
   } else {
     atomicStore(&output_control[2u], READY | ADMITTED);
+    if (params.aerosol_enabled == 1u) {
+      atomicStore(&output_control[43u], params.generation_id);
+    }
   }
 }
 `;

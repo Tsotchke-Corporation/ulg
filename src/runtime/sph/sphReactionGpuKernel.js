@@ -1,3 +1,4 @@
+import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
@@ -26,6 +27,16 @@ import {
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { assertNoCondensableCaloricReactionTable } from './sphCondensableCaloricTable.js';
+import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
+import {
+  attachSphReactionEnergyAuthority,
+  assertSphReactionEnergyAuthority,
+  sphReactionEnergyEntry,
+  sphReactionEnergySourceState,
+  sphReactionInterfaceFluxExtentCpu,
+  solveSphReactionProductEnergyCpu
+} from './sphReactionEnergyAuthority.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import {
   computeBufferBinding,
@@ -45,6 +56,8 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import { phaseSoundSpeedScaleFor } from './sphMechanicsMaterialTable.js';
+import { compileSphGasConstitutive, evaluateSphGasSoundSpeed,
+  SPH_GAS_CONSTITUTIVE_SCHEMA } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { describeChemicalFormula } from '../chemistry/formula.js';
 import {
   buildSphThermalClosureGraphBank,
@@ -52,6 +65,8 @@ import {
   buildSphThermalPhaseResponseTable,
   destroySphThermalResponseGraphBuffers,
   resolveThermalStateFromGraphPhaseResponseCpu,
+  resolveThermalResponseGraphArtifacts,
+  thermalResponseGraphUploadMatchesDevice,
   uploadSphThermalResponseGraphBuffers,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
@@ -298,11 +313,22 @@ function assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionT
   if (thermalMaterialTable?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('SPH reaction step requires a packed thermal material table');
   }
+  const physical = assertSphReactionEnergyAuthority(reactionTable, thermalMaterialTable);
+  // A caloric table cannot opt an unconverted legacy heat-proxy row in by
+  // association. Mixed tables remain outside this first physical domain.
+  if (!physical || reactionTable.energyAuthority.reactionCount !== reactionTable.reactionCount) {
+    assertNoCondensableCaloricReactionTable(thermalMaterialTable);
+  }
+  if (physical) assertSphCondensableInitializationMatches(sphParticleState, mlsMpmParticleState, thermalMaterialTable);
 }
 
-function assertOptionalThermalPhaseResponseTable(table) {
+function assertOptionalThermalPhaseResponseTable(table, reactionTable) {
   if (table && table.schema !== ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA) {
     throw new TypeError('SPH reaction step requires a packed thermal phase-response table');
+  }
+  if (!assertSphReactionEnergyAuthority(reactionTable)
+    || reactionTable.energyAuthority.reactionCount !== reactionTable.reactionCount) {
+    assertNoCondensableCaloricReactionTable(table);
   }
 }
 
@@ -673,21 +699,6 @@ function phaseTemperatureK(phase) {
   return 293.15;
 }
 
-function gasSoundSpeedMPerS(properties, phase, {
-  soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
-  minGasSoundSpeedMPerS = DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
-} = {}) {
-  const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
-  if (!(molarMassKgPerMol > 0)) return 0;
-  const specificGasConstant = R_GAS / molarMassKgPerMol;
-  const cp = finiteNumber(phase?.cpJPerKgK, 0);
-  const gamma = cp > specificGasConstant ? cp / (cp - specificGasConstant) : 1.33;
-  return Math.max(
-    Math.sqrt(Math.max(gamma * specificGasConstant * phaseTemperatureK(phase), 0)) * soundSpeedScale,
-    minGasSoundSpeedMPerS
-  );
-}
-
 function phaseMechanicsRecord(material, properties, phase, options) {
   const materialId = stableOpticalMaterialId(material);
   const phaseId = gpuPhaseId(phase?.name);
@@ -704,7 +715,7 @@ function phaseMechanicsRecord(material, properties, phase, options) {
   const lambda = phase?.name === 'solid' ? Math.max((bulkRaw - (2 / 3) * shearRaw) * modulusScale, 0) : 0;
   const gas = phase?.name === 'gas';
   const soundSpeed = gas
-    ? gasSoundSpeedMPerS(properties, phase, options)
+    ? evaluateSphGasSoundSpeed(compileSphGasConstitutive(properties, phase, options), phaseTemperatureK(phase))
     : (restDensity > 0 && bulk > 0 ? Math.sqrt(bulk / restDensity) : 0);
   const viscosityEnabled = Boolean(options.viscosityEnabled);
   const dynamicViscosityPaS = viscosityEnabled
@@ -737,6 +748,7 @@ function appendProductPhaseRecords({
   materialProperties,
   productPhaseKeys,
   productPhaseRecords,
+  gasConstitutiveRecords,
   metadata,
   options
 }) {
@@ -755,6 +767,7 @@ function appendProductPhaseRecords({
   const phaseNames = [];
   for (const phase of properties.phases) {
     productPhaseRecords.push(...phaseMechanicsRecord(product, properties, phase, options));
+    gasConstitutiveRecords.push(...compileSphGasConstitutive(properties, phase, options));
     phaseNames.push(phase.name);
   }
   metadata.push({
@@ -768,6 +781,7 @@ function appendProductPhaseRecords({
 
 export function buildSphReactionTable(reactions = [], {
   materialProperties = {},
+  thermalMaterialTable = null,
   contactRadiusM = 0,
   soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
   cflMaxSoundSpeedMPerS = 0,
@@ -785,6 +799,7 @@ export function buildSphReactionTable(reactions = [], {
   const gasProductMetadata = [];
   const atomTermMetadata = [];
   const productPhaseRecords = [];
+  const gasConstitutiveRecords = [];
   const productPhaseMetadata = [];
   const productPhaseKeys = new Set();
   const options = {
@@ -816,6 +831,7 @@ export function buildSphReactionTable(reactions = [], {
         materialProperties,
         productPhaseKeys,
         productPhaseRecords,
+        gasConstitutiveRecords,
         metadata: productPhaseMetadata,
         options
       });
@@ -1076,7 +1092,7 @@ export function buildSphReactionTable(reactions = [], {
     });
   }
 
-  return {
+  const table = {
     schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
     reactionClosureSchema: ULG_REACTION_CLOSURE_SCHEMA,
     status: records.length ? 'derived-reaction-table-ready' : 'no-derived-reactions',
@@ -1095,6 +1111,7 @@ export function buildSphReactionTable(reactions = [], {
       + productTermRecords.length
       + gasProductRecords.length
       + atomTermRecords.length
+      + gasConstitutiveRecords.length
     ) / 4,
     recordLayout: [...SPH_GPU_REACTION_RECORD_ROW_LAYOUT],
     reactionHeaderLayout: [...SPH_GPU_REACTION_HEADER_ROW_LAYOUT],
@@ -1117,6 +1134,10 @@ export function buildSphReactionTable(reactions = [], {
     gasProductRecords: new Float32Array(gasProductRecords),
     atomTermRecords: new Float32Array(atomTermRecords),
     productPhaseRecords: new Float32Array(productPhaseRecords),
+    gasConstitutiveSchema: SPH_GAS_CONSTITUTIVE_SCHEMA,
+    gasConstitutiveOffsetVec4: (records.length + productPhaseRecords.length + reactionHeaders.length
+      + reactantTermRecords.length + productTermRecords.length + gasProductRecords.length + atomTermRecords.length) / 4,
+    gasConstitutiveRecords: new Float32Array(gasConstitutiveRecords),
     combinedRecords: new Float32Array([
       ...records,
       ...productPhaseRecords,
@@ -1124,7 +1145,8 @@ export function buildSphReactionTable(reactions = [], {
       ...reactantTermRecords,
       ...productTermRecords,
       ...gasProductRecords,
-      ...atomTermRecords
+      ...atomTermRecords,
+      ...gasConstitutiveRecords
     ]),
     metadata,
     reactantTermMetadata,
@@ -1138,6 +1160,7 @@ export function buildSphReactionTable(reactions = [], {
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+  return attachSphReactionEnergyAuthority(table, reactions || [], thermalMaterialTable);
 }
 
 function reactionRecord(table, index) {
@@ -1433,7 +1456,8 @@ function reactantTermRecord(table, termIndex) {
     stoichiometricMoles: table.reactantTermRecords[offset + 7],
     materialKeyHash: table.reactantTermRecords[offset + 8],
     formulaHash: table.reactantTermRecords[offset + 9],
-    status: table.reactantTermRecords[offset + 10]
+    status: table.reactantTermRecords[offset + 10],
+    interfaceFluxKgPerM2S: table.reactantTermRecords[offset + 11]
   };
 }
 
@@ -1530,6 +1554,7 @@ export function inspectSphReactionStoichiometryContract(
   table,
   { refresh = false } = {}
 ) {
+  assertSphReactionEnergyAuthority(table);
   if (!refresh && table && REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE.has(table)) {
     return REACTION_STOICHIOMETRY_DIAGNOSTIC_CACHE.get(table);
   }
@@ -1832,6 +1857,8 @@ function sourceInfoForReaction({
     term,
     materialId,
     massKg,
+    temperatureK: sphParticleState.thermo[thermoOffset + 2],
+    restDensityKgPerM3: sphParticleState.thermo[thermoOffset + 3],
     position: [
       sphParticleState.state[stateOffset],
       sphParticleState.state[stateOffset + 1],
@@ -1877,7 +1904,8 @@ function planStoichiometricFixedBufferEvent({
   reactionIndex,
   sourceIndices,
   sphParticleState,
-  mlsMpmParticleState
+  mlsMpmParticleState,
+  dtSeconds = 0
 }) {
   const reactantTerms = reactantTermsForReactionTableRecord(table, reactionIndex);
   const productTerms = productTermsForReactionTableRecord(table, reactionIndex)
@@ -1890,10 +1918,15 @@ function planStoichiometricFixedBufferEvent({
     reactantTerms
   }));
   if (sources.some((source) => !source || !(source.limitingExtentMol > 0))) return null;
-  const extentMol = Math.min(...sources.map((source) => source.limitingExtentMol));
+  const physical = sphReactionEnergyEntry(table, reactionIndex);
+  if (physical && sourceIndices.some((index) => !sphReactionEnergySourceState(
+    table, reactionIndex, sphParticleState, mlsMpmParticleState, index
+  ))) return null;
+  const extentMol = Math.min(...sources.map((source) => source.limitingExtentMol),
+    physical ? sphReactionInterfaceFluxExtentCpu(sources, dtSeconds) : Infinity);
   if (!(extentMol > 0)) return null;
   const consumed = sources.map((source) => {
-    const consumedMassKg = Math.min(
+    const consumedMassKg = physical && extentMol >= source.limitingExtentMol ? source.massKg : Math.min(
       source.massKg,
       extentMol * source.term.coefficient * source.term.molarMassKgPerMol
     );
@@ -1906,6 +1939,8 @@ function planStoichiometricFixedBufferEvent({
     };
   });
   const consumedMassKg = consumed.reduce((sum, source) => sum + source.consumedMassKg, 0);
+  // A positive ledger cannot be backed by a debit that disappears on store.
+  if (physical && consumed.some((source) => Math.fround(source.remainingMassKg) >= source.massKg)) return null;
   if (!(consumedMassKg > 0)) return null;
   const { products, rawProductMassKg } = normalizedProductRecords({
     table,
@@ -1914,6 +1949,11 @@ function planStoichiometricFixedBufferEvent({
     consumedMassKg
   });
   if (!products.length) return null;
+  if (physical && products.some((product) => !Number.isFinite(Math.fround(
+    product.massKg / product.term.molarMassKgPerMol * 6.02214076e23
+  )))) return null;
+  const energy = physical ? solveSphReactionProductEnergyCpu(table, reactionIndex, consumed, products, extentMol) : null;
+  if (physical && !energy) return null;
   const rx = reactionRecord(table, reactionIndex);
   const consumedMomentum = [0, 0, 0];
   const consumedCenter = [0, 0, 0];
@@ -1948,16 +1988,21 @@ function planStoichiometricFixedBufferEvent({
     0
   );
   const freeSlots = consumed.filter((source) => {
+    if (physical) return source.remainingMassKg === 0;
     const epsilon = Math.max(source.massKg, 1) * 1e-7;
     return source.remainingMassKg <= epsilon;
   }).sort((left, right) => left.index - right.index);
   const visibleByIndex = new Map();
-  const productVisibility = products.map((product) => ({
+  const productVisibility = products.map((product, index) => ({
     ...product,
+    resolved: energy?.states[index] ?? null,
     visibleMassKg: 0,
     unplacedMassKg: product.massKg
   }));
-  const visibleProductCandidates = productVisibility.filter((product) => product.routing !== 'gas');
+  const visibleProductCandidates = [
+    ...productVisibility.filter((product) => product.routing !== 'gas'),
+    ...(physical ? productVisibility.filter((product) => product.routing === 'gas') : [])
+  ];
   if (productVisibility.length === 1 && visibleProductCandidates.length === 1) {
     for (const source of freeSlots) {
       const massKg = freeSlots.length === 1
@@ -1970,9 +2015,9 @@ function planStoichiometricFixedBufferEvent({
         massKg,
         currentVolumeM3:
           consumedCurrentVolumeM3 * massKg / consumedMassKg,
-        position: productPosition,
+        position: physical ? source.position : productPosition,
         velocity: productVelocity,
-        specificInternalEnergyJPerKg: productSpecificInternalEnergyJPerKg
+        specificInternalEnergyJPerKg: energy?.states[0].specificInternalEnergyJPerKg ?? productSpecificInternalEnergyJPerKg
       });
       productVisibility[0].visibleMassKg += massKg;
       productVisibility[0].unplacedMassKg = Math.max(0, productVisibility[0].unplacedMassKg - massKg);
@@ -1987,9 +2032,9 @@ function planStoichiometricFixedBufferEvent({
         massKg: product.massKg,
         currentVolumeM3:
           consumedCurrentVolumeM3 * product.massKg / consumedMassKg,
-        position: productPosition,
+        position: physical ? freeSlots[slot].position : productPosition,
         velocity: productVelocity,
-        specificInternalEnergyJPerKg: productSpecificInternalEnergyJPerKg
+        specificInternalEnergyJPerKg: product.resolved?.specificInternalEnergyJPerKg ?? productSpecificInternalEnergyJPerKg
       });
       product.visibleMassKg += product.massKg;
       product.unplacedMassKg = 0;
@@ -2015,6 +2060,9 @@ function planStoichiometricFixedBufferEvent({
     rawProductMassKg,
     heatJ,
     productSpecificInternalEnergyJPerKg,
+    energy,
+    products: productVisibility,
+    consumedCurrentVolumeM3,
     outputs,
     event: {
       schema: 'peercompute.ulg.sph-gpu-reaction-ledger-event.v0',
@@ -2025,6 +2073,7 @@ function planStoichiometricFixedBufferEvent({
       productMassKg: consumedMassKg,
       massResidualKg: rawProductMassKg - consumedMassKg,
       heatJ,
+      ...(energy ? { energy: { ...energy, states: undefined } } : {}),
       fixedParticleBuffer: true,
       unplacedProductMassKg: productVisibility.reduce((sum, product) => sum + product.unplacedMassKg, 0),
       reactants: consumed.map((source) => ({
@@ -2042,13 +2091,22 @@ function planStoichiometricFixedBufferEvent({
         rawMassKg: product.rawMassKg,
         visibleMassKg: product.visibleMassKg,
         unplacedMassKg: product.unplacedMassKg,
-        routing: product.routing
+        routing: product.routing,
+        ...(energy ? {
+          specificInternalEnergyJPerKg: product.resolved.specificInternalEnergyJPerKg,
+          temperatureK: product.resolved.temperatureK,
+          phaseId: product.resolved.phaseId,
+          velocity: [...productVelocity],
+          position: [...productPosition],
+          supportVolumeM3: consumedCurrentVolumeM3 * product.unplacedMassKg / consumedMassKg,
+          currentVolumeM3: consumedCurrentVolumeM3 * product.massKg / consumedMassKg
+        } : {})
       }))
     }
   };
 }
 
-function productPhaseRecord(table, materialId, phaseId) {
+function productPhaseRecord(table, materialId, phaseId, temperatureK) {
   for (let index = 0; index < table.productPhaseCount; index += 1) {
     const offset = index * SPH_REACTION_PRODUCT_PHASE_FLOATS;
     if (table.productPhaseRecords[offset] === materialId && table.productPhaseRecords[offset + 1] === phaseId) {
@@ -2057,7 +2115,10 @@ function productPhaseRecord(table, materialId, phaseId) {
         effectiveBulkModulusPa: table.productPhaseRecords[offset + 3],
         shearModulusPa: table.productPhaseRecords[offset + 4],
         lameLambdaPa: table.productPhaseRecords[offset + 5],
-        soundSpeedMPerS: table.productPhaseRecords[offset + 6],
+        soundSpeedMPerS: table.productPhaseRecords[offset + 7] === 2
+          && table.gasConstitutiveSchema === SPH_GAS_CONSTITUTIVE_SCHEMA
+          ? evaluateSphGasSoundSpeed(table.gasConstitutiveRecords.subarray(index * 4, index * 4 + 4), temperatureK)
+          : table.productPhaseRecords[offset + 6],
         eosModelId: table.productPhaseRecords[offset + 7],
         solidFlag: table.productPhaseRecords[offset + 8],
         status: table.productPhaseRecords[offset + 9]
@@ -2123,6 +2184,8 @@ function resetMechanicsForProduct(
     || !(sourceSupportVolumeM3 > 0)
     || !(restVolumeM3 > 0)
     || !Number.isFinite(sourceSupportVolumeM3)
+    || !Number.isFinite(productMechanics.soundSpeedMPerS)
+    || productMechanics.soundSpeedMPerS < 0
     || Math.round(productMechanics.status) !== 1
   ) {
     return false;
@@ -2534,15 +2597,18 @@ export function runSphReactionStepCpu({
   thermalMaterialTable,
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
-  thermalPhaseResponseTable = null
+  thermalPhaseResponseTable = null,
+  dtSeconds = 0
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   const reactionStoichiometryDiagnostic =
     inspectSphReactionStoichiometryContract(reactionTable);
-  assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
-  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
-  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
-  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
+  assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable, reactionTable);
+  const { thermalClosureGraphSet: resolvedGraphSet, thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable } = resolveThermalResponseGraphArtifacts({
+    thermalMaterialTable, thermalClosureGraphSet, thermalClosureGraphBank, thermalPhaseResponseTable,
+    requireExactContent: Boolean(reactionTable.energyAuthority)
+  });
   const state = new Float32Array(sphParticleState.state);
   const thermo = new Float32Array(sphParticleState.thermo);
   const mechanics = new Float32Array(mlsMpmParticleState.mechanics);
@@ -2580,17 +2646,27 @@ export function runSphReactionStepCpu({
       reactionIndex: Math.round(reactionIndex),
       sourceIndices,
       sphParticleState,
-      mlsMpmParticleState
+      mlsMpmParticleState,
+      dtSeconds
     });
     if (fixedBufferPlan) {
       const preparedProducts = new Map();
       let fixedBufferPlanReady = true;
+      // All products must be admissible before consuming either parent, even
+      // when no parent slot is free. An unplaced ledger carries full state.
+      if (fixedBufferPlan.energy) {
+        fixedBufferPlanReady = fixedBufferPlan.products.every((product) => resetMechanicsForProduct(
+          new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS), 0, product.massKg,
+          fixedBufferPlan.consumedCurrentVolumeM3 * product.massKg / fixedBufferPlan.consumedMassKg,
+          product.resolved, productPhaseRecord(reactionTable, product.term.materialId, product.resolved.phaseId, product.resolved.temperatureK)
+        ));
+      }
       for (const sourceIndex of sourceIndices) {
         const output = fixedBufferPlan.outputs.get(sourceIndex);
         if (!output || output.kind !== 'product') continue;
         const materialId = output.product?.term?.materialId || rx.productMaterialId;
         const nextMass = Math.max(output.massKg, 0);
-        const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
+        const resolved = output.product.resolved ?? resolveThermalStateFromGraphPhaseResponseCpu({
           graphSet: resolvedGraphSet,
           responseTable: resolvedPhaseResponseTable,
           materialId,
@@ -2599,7 +2675,8 @@ export function runSphReactionStepCpu({
         const productMechanics = productPhaseRecord(
           reactionTable,
           materialId,
-          resolved.phaseId
+          resolved.phaseId,
+          resolved.temperatureK
         );
         const mechanicsProbe = new Float32Array(
           MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
@@ -2639,6 +2716,11 @@ export function runSphReactionStepCpu({
         if (output.kind === 'reactant') {
           state[stateOffset + 3] = Math.max(output.massKg, 0);
           updateMechanicsRestVolumeForMass(mechanics, thermo, sourceIndex, state[stateOffset + 3]);
+          if (fixedBufferPlan.energy) {
+            const remainingFraction = state[stateOffset + 3] / sphParticleState.state[stateOffset + 3];
+            thermo[thermoOffset + 9] *= remainingFraction;
+            mechanics[sourceIndex * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 31] *= remainingFraction;
+          }
           continue;
         }
         const prepared = preparedProducts.get(sourceIndex);
@@ -2671,6 +2753,10 @@ export function runSphReactionStepCpu({
           resolved,
           productMechanics
         );
+        if (fixedBufferPlan.energy) {
+          mechanics[sourceIndex * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 31] = nextMass;
+          thermo[thermoOffset + 9] = nextMass / output.product.term.molarMassKgPerMol * 6.02214076e23;
+        }
         conversionCount += 1;
       }
       appendReactionLedgerEvent(reactionLedger, fixedBufferPlan.event);
@@ -2727,7 +2813,8 @@ export function runSphReactionStepCpu({
       const productMechanics = productPhaseRecord(
         reactionTable,
         materialId,
-        resolved.phaseId
+        resolved.phaseId,
+        resolved.temperatureK
       );
       const mechanicsProbe = new Float32Array(
         MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
@@ -3257,6 +3344,7 @@ function createParamsArray({
   segmentCount,
   resetMechanics,
   reactionTableMode = 0,
+  gasConstitutiveOffsetVec4 = 0,
   dtSeconds = 0
 }) {
   const buffer = new ArrayBuffer(48);
@@ -3274,7 +3362,7 @@ function createParamsArray({
   // 0 keeps the legacy availability-only extent bound.
   view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
   view.setUint32(40, reactionTableMode === 1 ? 1 : 0, true);
-  view.setUint32(44, 0, true);
+  view.setUint32(44, gasConstitutiveOffsetVec4, true);
   return buffer;
 }
 
@@ -3399,6 +3487,14 @@ export function enumerateSphReactionStepPrewarmPipelineDescriptors() {
   ];
 }
 
+const reactionSourceCaptures = new WeakMap();
+export function resolveSphReactionSourceCapture(result, token) {
+  const seal = reactionSourceCaptures.get(token);
+  if (!seal || seal.result !== result) throw new Error('Unknown reaction source capture');
+  seal.validate();
+  return seal;
+}
+
 export async function runSphReactionStepWebGpu({
   device,
   sphParticleState,
@@ -3444,13 +3540,38 @@ export async function runSphReactionStepWebGpu({
   reactionWarmArenaAcquireRunner =
     acquireSphReactionWarmArenaWithBackpressureWebGpu,
   reactionWarmArenaResolveRunner = resolveSphReactionWarmArenaLease,
-  reactionWarmArenaReleaseRunner = releaseSphReactionWarmArenaAfterQueue
+  reactionWarmArenaReleaseRunner = releaseSphReactionWarmArenaAfterQueue,
+  postMechanicsSourceCapture = null
 } = {}) {
+  if (postMechanicsSourceCapture) {
+    if (reactionSourceCaptures.has(postMechanicsSourceCapture)) throw new Error('Reaction source capture cannot replay');
+    reactionSourceCaptures.set(postMechanicsSourceCapture, null);
+    if (retainOutputParticleBuffers !== true
+        || reactionPlacementEpochRunner !== runSchroederSpatialReactionPlacementEpochWebGpu
+        || canonicalReactionDiscoveryResolver !== resolveSchroederSpatialReactionDiscoveryProposalForConsumer
+        || reactionWarmArenaAcquireRunner !== acquireSphReactionWarmArenaWithBackpressureWebGpu
+        || reactionWarmArenaResolveRunner !== resolveSphReactionWarmArenaLease
+        || reactionWarmArenaReleaseRunner !== releaseSphReactionWarmArenaAfterQueue) {
+      throw new Error('Reaction source capture requires the standard retained producer and nested owners');
+    }
+  }
+  const capturedInputs = postMechanicsSourceCapture ? { device, sphParticleState, mlsMpmParticleState,
+    reactionTable, thermalMaterialTable, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer, dtSeconds } : null;
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   const reactionStoichiometryDiagnostic =
     inspectSphReactionStoichiometryContract(reactionTable);
-  assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
+  assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable, reactionTable);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
+  // Authenticate all supplied caloric artifacts before any GPU allocation or
+  // submission; this is cold data validation, not a per-reaction kernel.
+  const { thermalClosureGraphSet: resolvedGraphSet, thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable } = resolveThermalResponseGraphArtifacts({
+    thermalMaterialTable, thermalClosureGraphSet, thermalClosureGraphBank, thermalPhaseResponseTable,
+    requireExactContent: Boolean(reactionTable.energyAuthority)
+  });
+  if (reactionTable.energyAuthority && resetMechanics !== true) {
+    throw new TypeError('Physical reaction energy requires product mechanics initialization');
+  }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionStepWebGpu requires a WebGPU-like device');
   }
@@ -3669,10 +3790,11 @@ export async function runSphReactionStepWebGpu({
   const packSourceStateBuffer = borrowedStateBuffer || localSourceStateBuffer;
   const packSourceThermoBuffer = borrowedThermoBuffer || localSourceThermoBuffer;
   const packSourceMechanicsBuffer = borrowedMechanicsBuffer || localSourceMechanicsBuffer;
-  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
-  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
-  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
-  const borrowedResponseGraphUpload = thermalResponseGraphUpload?.status === 'webgpu-uploaded'
+  const borrowedResponseGraphUpload = thermalResponseGraphUploadMatchesDevice(
+    thermalResponseGraphUpload,
+    device,
+    { thermalClosureGraphBank: resolvedGraphBank, thermalPhaseResponseTable: resolvedPhaseResponseTable }
+  )
     ? { ...thermalResponseGraphUpload, borrowed: true }
     : null;
   localResponseGraphUpload = borrowedResponseGraphUpload
@@ -3828,6 +3950,7 @@ export async function runSphReactionStepWebGpu({
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   }));
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
+    gasConstitutiveOffsetVec4: reactionTable.gasConstitutiveOffsetVec4 ?? 0,
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
     productPhaseCount: reactionTable.productPhaseCount,
@@ -4794,6 +4917,8 @@ export async function runSphReactionStepWebGpu({
       }
     );
   }
+  if (postMechanicsSourceCapture) reactionSourceCaptures.set(postMechanicsSourceCapture,
+    createPostMechanicsStageOutputSeal(result, capturedInputs));
   return result;
   } catch (error) {
     const cleanupCompletions = [scheduleReactionResourceRegistryDrain()];

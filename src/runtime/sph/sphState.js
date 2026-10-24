@@ -29,15 +29,26 @@ export function createSphState({ particles = [], smoothingLengthM, dimension = 3
       x: assertVector(p.x, dimension, `particles[${index}].x`),
       v: assertVector(p.v ?? new Array(dimension).fill(0), dimension, `particles[${index}].v`),
       massKg: Number(p.massKg),
-      specificInternalEnergyJPerKg: Number(p.specificInternalEnergyJPerKg ?? 0)
+      specificInternalEnergyJPerKg: Object.hasOwn(p, 'phaseCaloric')
+        ? p.specificInternalEnergyJPerKg : Number(p.specificInternalEnergyJPerKg ?? 0),
+      ...(Object.hasOwn(p, 'phaseCaloric') ? { phaseCaloric: clonePhaseCaloric(p.phaseCaloric) } : {})
     }))
   };
+}
+
+function clonePhaseCaloric(value) {
+  // Preserve an explicit initializer declaration; validation belongs to the
+  // material/model-aware packers. Never silently drop it into the old ladder.
+  return value && typeof value === 'object'
+    ? { ...value, phaseFractions: value.phaseFractions == null ? value.phaseFractions : Array.from(value.phaseFractions) }
+    : value;
 }
 
 export function cloneSphState(state) {
   return {
     ...state,
-    particles: state.particles.map((p) => ({ ...p, x: [...p.x], v: [...p.v] }))
+    particles: state.particles.map((p) => ({ ...p, x: [...p.x], v: [...p.v],
+      ...(Object.hasOwn(p, 'phaseCaloric') ? { phaseCaloric: clonePhaseCaloric(p.phaseCaloric) } : {}) }))
   };
 }
 

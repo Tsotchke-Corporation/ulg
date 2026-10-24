@@ -59,7 +59,8 @@ import {
   classifyHeadedSweepPageErrors,
   evaluateCadenceSample,
   resolveHeadedSweepAutomatedDisposition,
-  summarizeVisiblePresentationCadence
+  summarizeVisiblePresentationCadence,
+  visibleMotionCadenceAcceptanceIssues
 } from '../scripts/sph-headed-cadence-metrics.mjs';
 import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_AUTHORITY,
@@ -1094,7 +1095,7 @@ test('preset-entry runner observes self-start before any pause/resume capture co
   assert.doesNotMatch(entryBranch, /initialPlayClickPerformed = true/);
 });
 
-test('headed sweep gates integrity for every preset and rate only for particle targets', () => {
+test('headed sweep gates wall-clock visible rate for all geometries without changing their renderer', async () => {
   const issues = [
     'mean-visible-presentation-below-target',
     'visible-presentation-stall-exceeds-budget',
@@ -1102,9 +1103,11 @@ test('headed sweep gates integrity for every preset and rate only for particle t
     'presentation-source-step-regressed',
     'future-unclassified-integrity-failure'
   ];
-  const isosurface = classifyCadenceAcceptanceIssues(issues, {
-    throughputRequired: false
-  });
+  const source = await readFile(path.join(repoDir, 'scripts/sph-headed-all-preset-cadence-sweep.mjs'), 'utf8');
+  assert.match(source, /const cadenceGatingRequired = true;/);
+  assert.match(source, /const expectedWorkerGeometry = particlePresentationPresetIds\.has\(preset\.id\)/);
+  assert.match(source, /cadenceGatedPresetIds: SPH_PHASE_SCENARIO_PRESETS\.map/);
+  const isosurface = classifyCadenceAcceptanceIssues(issues);
   assert.deepEqual(isosurface.throughputIssues, [
     'mean-visible-presentation-below-target',
     'visible-presentation-stall-exceeds-budget'
@@ -1112,7 +1115,9 @@ test('headed sweep gates integrity for every preset and rate only for particle t
   assert.deepEqual(isosurface.acceptanceIssues, [
     'presentation-owner-unstable',
     'presentation-source-step-regressed',
-    'future-unclassified-integrity-failure'
+    'future-unclassified-integrity-failure',
+    'mean-visible-presentation-below-target',
+    'visible-presentation-stall-exceeds-budget'
   ]);
 
   const particle = classifyCadenceAcceptanceIssues(issues, {
@@ -1174,6 +1179,36 @@ test('headed sweep automated success remains pending review and overrides stay d
     completeCannedMatrix: true,
     diagnosticOverridesActive: false
   }).status, 'fail');
+});
+
+test('fast render-input serials cannot certify all-preset visible animation', async () => {
+  const observations = Array.from({ length: 601 }, (_, index) => (
+    visibleCadenceObservation({
+      timestampMs: index * 5_000 / 600,
+      sourceStep: 9,
+      presentationSerial: index + 1,
+      motionFrameAdmitted: true,
+      motionFrameSerial: index
+    })
+  ));
+  const { cadence, evaluation } = evaluatedVisibleCadence(observations);
+  assert.equal(evaluation.status, 'pass', 'numerical render-input cadence is diagnostic');
+  assert.equal(cadence.meanVisiblePresentationHz, 120);
+  assert.equal(cadence.visibleMotionCadenceVerified, false);
+  assert.equal(cadence.measurementSemantics, 'admitted-render-input-transitions-not-pixel-motion');
+  const classification = classifyCadenceAcceptanceIssues([
+    ...evaluation.issues, ...visibleMotionCadenceAcceptanceIssues(cadence)
+  ]);
+  assert.deepEqual(classification.acceptanceIssues, ['visible-motion-change-evidence-missing']);
+  assert.deepEqual(classification.integrityIssues, ['visible-motion-change-evidence-missing']);
+  assert.equal(resolveHeadedSweepAutomatedDisposition({
+    automatedFailureCount: classification.acceptanceIssues.length,
+    completeCannedMatrix: true
+  }).status, 'fail');
+  const source = await readFile(path.join(repoDir, 'scripts/sph-headed-all-preset-cadence-sweep.mjs'), 'utf8');
+  assert.match(source, /visibleMotionCadenceAcceptanceIssues\(result\.cadence\)/);
+  assert.match(source, /result\.issues\.push\(\s*\.\.\.result\.cadenceIssueClassification\.acceptanceIssues/);
+  assert.match(source, /const summary = \{\s*\.\.\.SPH_PRESENTATION_CADENCE_EVIDENCE/);
 });
 
 test('headed cadence accepts 60 Hz distinct admitted geometry states', () => {

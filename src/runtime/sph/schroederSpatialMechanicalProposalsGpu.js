@@ -19874,9 +19874,8 @@ function prepareMechanicalProposalCapture({
   });
 }
 
-function destroyMechanicalProposalPoolSlot(slot) {
-  if (!slot || slot.destroyed === true) return false;
-  for (const buffer of [
+function mechanicalProposalPoolSlotOwnedBuffers(slot) {
+  return [
     slot.proposalBuffer,
     slot.evidenceBuffer,
     slot.matchingCleanupControlBuffer,
@@ -19896,7 +19895,14 @@ function destroyMechanicalProposalPoolSlot(slot) {
     slot.paramsBuffer,
     slot.solverIterationParamsBuffer,
     slot.identityDisabledBuffer
-  ]) buffer?.destroy?.();
+  ];
+}
+
+function destroyMechanicalProposalPoolSlot(slot) {
+  if (!slot || slot.destroyed === true) return false;
+  for (const buffer of mechanicalProposalPoolSlotOwnedBuffers(slot)) {
+    buffer?.destroy?.();
+  }
   slot.sourceCountScan?.destroy?.();
   slot.destroyed = true;
   slot.inUseGenerationId = null;
@@ -20287,6 +20293,68 @@ function mechanicalProposalPoolSlot(
     devicePools.set(key, slot);
   }
   return { slot, cacheHit };
+}
+
+/**
+ * Enumerate the exact device's private arena owners, including released leases.
+ * This is physical allocation ownership, not a proposal-liveness receipt: the
+ * cache keeps these buffers until replacement or explicit runtime destruction.
+ * No allocations, queue operations, releases, or cache changes occur here.
+ */
+export function schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(device) {
+  const incomplete = (message, cause) => {
+    const error = new Error(message, cause == null ? undefined : { cause });
+    error.code =
+      'ERR_SCHROEDER_SPATIAL_MECHANICAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE';
+    return error;
+  };
+  if (!device || typeof device !== 'object') {
+    throw incomplete('mechanical runtime allocation ownership requires the exact device');
+  }
+  const buffers = new Set();
+  let runtimeCount = 0;
+  const collect = (buffer) => {
+    // Nested scan allocations may be untagged; their exact private cache owner
+    // is authoritative. Reject positively branded foreign buffers, never retag.
+    if (
+      !buffer || typeof buffer !== 'object'
+      || typeof buffer.destroy !== 'function'
+      || !webGpuBufferMatchesDevice(buffer, device)
+    ) throw incomplete('mechanical runtime allocation ownership does not match its device');
+    buffers.add(buffer);
+  };
+  try {
+    for (const slot of mechanicalProposalPools.get(device)?.values() ?? []) {
+      if (!slot || typeof slot !== 'object') {
+        throw incomplete('mechanical runtime owner slot is unavailable');
+      }
+      // A failed replacement can leave the old, already destroyed slot cached.
+      if (slot.destroyed === true) continue;
+      runtimeCount += 1;
+      for (const buffer of mechanicalProposalPoolSlotOwnedBuffers(slot)) collect(buffer);
+      if (typeof slot.sourceCountScan?.allocationEntries !== 'function') {
+        throw incomplete('mechanical runtime scan cannot enumerate its owned allocations');
+      }
+      const allocations = slot.sourceCountScan.allocationEntries();
+      if (!Array.isArray(allocations) || allocations.length === 0) {
+        throw incomplete('mechanical runtime scan allocation list is invalid');
+      }
+      for (const allocation of allocations) collect(allocation?.buffer);
+    }
+  } catch (error) {
+    if (
+      error?.code
+        === 'ERR_SCHROEDER_SPATIAL_MECHANICAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE'
+    ) throw error;
+    throw incomplete('mechanical runtime allocation enumeration failed', error);
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-runtime-allocation-ownership.v0',
+    status: 'mechanical-proposal-runtime-allocation-ownership-complete',
+    runtimeCount,
+    allocationCount: buffers.size,
+    buffers: Object.freeze([...buffers])
+  });
 }
 
 export function destroySchroederSpatialMechanicalProposalRuntime(device) {
@@ -20967,6 +21035,12 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   // instrument is live.
   const contactPassSplitActive = contactTimestampActive
     || contactPassProfiler.enabled === true;
+  // Diagnostic captures and timing spans retain their original, uninterrupted
+  // encoder contract. Presentation gaps are an explicit production-only option.
+  const supportsSubmissionGaps = !resolvedDiagnosticTrace
+    && !captureRequest
+    && gpuTimestampRecorder?.active !== true
+    && gpuPassTimestampProfilingRequested !== true;
   const beginContactTimestamp = (encoder, stage) => (
     contactTimestampActive
       ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
@@ -21039,6 +21113,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   };
   const releaseAfterSubmittedWork = () => {
     if (releaseScheduled || released) return false;
+    const statusBeforeRelease = lifecycleStatus;
     releaseScheduled = true;
     lifecycleStatus = 'submission-observed';
     pool.releaseScheduled = true;
@@ -21055,9 +21130,9 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       },
       (error) => {
         releaseScheduled = false;
-        lifecycleStatus = submissionObserved
-          ? 'submitted'
-          : (encodeAttempted ? 'encoded' : 'prepared');
+        // A partially encoded batch is not a terminal proposal, even when its
+        // retirement fence fails. Preserve its exact pre-retirement state.
+        lifecycleStatus = statusBeforeRelease;
         pool.releaseScheduled = false;
         releasePromise = null;
         throw error;
@@ -21377,10 +21452,20 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     bufferOwnership: 'device-arena-runtime-cache',
     ownsProposalBuffer: false,
     ownsEvidenceBuffer: false,
-    encodeApply(encoder, {
+    supportsSubmissionGaps,
+    encodeApply(encoder, options = {}) {
+      // Preserve the existing synchronous, single-encoder API even when a
+      // caller accidentally forwards the opt-in batching flag to this method.
+      return artifact.encodeApplyBatches(encoder, {
+        ...options,
+        submissionGaps: false
+      }).next().value;
+    },
+    *encodeApplyBatches(encoder, {
       stateBuffer,
       mechanicsBuffer = authority.mechanicsBuffer,
-      selectedLevel: requestedSelectedLevel = null
+      selectedLevel: requestedSelectedLevel = null,
+      submissionGaps = false
     } = {}) {
       if (released || releaseScheduled) {
         throw new Error('mechanical proposal cannot apply after arena release begins');
@@ -21388,15 +21473,18 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       if (encodeAttempted) {
         throw new Error('mechanical contact graph encodeApply is single-use');
       }
-      if (
-        !encoder?.clearBuffer
-        || !encoder?.copyBufferToBuffer
-        || !encoder?.beginComputePass
-      ) {
-        throw new TypeError(
-          'mechanical contact graph encodeApply requires a GPUCommandEncoder-like object'
-        );
-      }
+      const requireEncoder = (value) => {
+        if (
+          typeof value?.clearBuffer !== 'function'
+          || typeof value?.copyBufferToBuffer !== 'function'
+          || typeof value?.beginComputePass !== 'function'
+        ) {
+          throw new TypeError(
+            'mechanical contact graph encodeApply requires a GPUCommandEncoder-like object'
+          );
+        }
+      };
+      requireEncoder(encoder);
       const canonicalStateBuffer = requireBuffer(
         device,
         stateBuffer,
@@ -21438,6 +21526,10 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
       });
       encodeAttempted = true;
       lifecycleStatus = 'encoding';
+      const submissionGapsEnabled = submissionGaps === true
+        && supportsSubmissionGaps;
+      let encoderExposed = false;
+      let encodeCompleted = false;
       try {
         encoder.clearBuffer(supportBuffer);
         encoder.clearBuffer(pool.sourceCountBuffer);
@@ -22027,7 +22119,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
           verificationPass.end();
           endContactTimestamp(encoder, verificationTimestamp);
         } else {
-          const secondPass = encoder.beginComputePass({
+          let secondPass = encoder.beginComputePass({
             label: 'ulg-schroeder-spatial-mechanical-contact-graph-solve'
           });
           encodeScatterAndValidation(secondPass);
@@ -22043,12 +22135,43 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
               outputStateBuffer
             );
             advanceSolverState(iteration);
+            if (submissionGapsEnabled && (
+              (iteration + 1) % 4 === 0
+              || iteration + 1 === solverBudget.jacobiIterations
+            )) {
+              secondPass.end();
+              // The caller can submit as soon as this generator yields. Even
+              // throw()/return() before resumption must therefore retain the
+              // scan lease until the caller's submitted-work retirement fence.
+              encoderExposed = true;
+              const previousEncoder = encoder;
+              encoder = yield Object.freeze({
+                stage: 'jacobi-iterations',
+                completedJacobiIterations: iteration + 1
+              });
+              if (released || releaseScheduled) {
+                throw new Error(
+                  'mechanical proposal cannot resume after arena release begins'
+                );
+              }
+              requireEncoder(encoder);
+              if (encoder === previousEncoder) {
+                throw new TypeError(
+                  'mechanical contact batch requires a fresh GPUCommandEncoder'
+                );
+              }
+              if (iteration + 1 < solverBudget.jacobiIterations) {
+                secondPass = encoder.beginComputePass({
+                  label: 'ulg-schroeder-spatial-mechanical-contact-graph-solve'
+                });
+              }
+            }
           }
           if (legacyMatchingCleanupActive) {
             // Graph zero-edge completion uses conditionalDispatchBuffer as
             // indirect arguments in secondPass. Diagnostic cleanup binds that
             // buffer writable, so WebGPU requires a distinct usage scope.
-            secondPass.end();
+            if (!submissionGapsEnabled) secondPass.end();
             const diagnosticCleanupPass = encoder.beginComputePass({
               label:
                 'ulg-schroeder-spatial-mechanical-matching-cleanup-diagnostic'
@@ -22080,7 +22203,7 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
             // as indirect arguments above. WebGPU forbids binding that same
             // buffer writable in one compute-pass usage scope, so the owner
             // gets a distinct pass before it writes its compact workspace.
-            secondPass.end();
+            if (!submissionGapsEnabled) secondPass.end();
             const cleanupPass = encoder.beginComputePass({
               label:
                 'ulg-schroeder-spatial-mechanical-matching-cleanup-global-owner'
@@ -22235,23 +22358,27 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
                 ? solverBudget.cleanupPassBudget
                 : 1
             )
-          : 7;
+          : (submissionGapsEnabled
+              ? 6 + Math.ceil(solverBudget.jacobiIterations / 4)
+              : 7);
         if (capturePlan) {
           capturePlan.record.lastProposal = artifact;
           capturePlan.record.nextSequenceIndex += 1;
         }
         contactPassProfiler.resolve(encoder);
         lifecycleStatus = 'encoded';
+        encodeCompleted = true;
         return true;
-      } catch (error) {
-        if (preparedScan) {
-          pool.sourceCountScan.releasePrepared(preparedScan, {
-            discardedEncoder: true
-          });
-          preparedScan = null;
+      } finally {
+        if (!encodeCompleted) {
+          if (preparedScan && !encoderExposed) {
+            pool.sourceCountScan.releasePrepared(preparedScan, {
+              discardedEncoder: true
+            });
+            preparedScan = null;
+          }
+          if (!released && !releaseScheduled) lifecycleStatus = 'encode-failed';
         }
-        lifecycleStatus = 'encode-failed';
-        throw error;
       }
     },
     cleanupTemporaryBuffersAfterSubmittedWork() {

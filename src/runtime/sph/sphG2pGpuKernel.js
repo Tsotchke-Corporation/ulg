@@ -46,6 +46,12 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
+import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
+import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
+import {
+  hasResidentPresentationSubmissionGap,
+  requestResidentPresentationSubmissionGap
+} from './residentPresentationSubmissionGap.js';
 import {
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
@@ -64,7 +70,8 @@ import {
   MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
-  SPH_GPU_PARTICLE_THERMO_FLOATS
+  SPH_GPU_PARTICLE_THERMO_FLOATS,
+  runSphGpuParticleBufferSetCleanupAfterBorrows
 } from './sphGpuBuffers.js';
 import {
   tagWebGpuBufferDevice,
@@ -197,6 +204,8 @@ const refluxDummyBuffers = new WeakMap();
 const g2pPipelineBundles = new WeakMap();
 const fusedG2pClaims = new WeakMap();
 const fusedG2pOrigins = new WeakMap();
+const claimedCoarseOutputBorrowOrigins = new WeakMap();
+const claimedCoarseOutputBorrows = new WeakMap();
 const postSeparationMotionWatchBinCandidateRecords = new WeakMap();
 const g2pSubmittedTemporaryCleanupClaimIssuer =
   createQueueOrderedCleanupClaimIssuer({
@@ -1018,6 +1027,48 @@ export function validateClaimedLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutpu
   );
 }
 
+// The opaque token remains with the borrowing owner, never on the public
+// reconstruction/upload. A caller cannot release another owner's borrow by
+// supplying a copied token, owner flag, label, or arbitrary completion promise.
+export function retainClaimedMlsMpmFusedCoarseTerminalOutputBorrow(
+  device,
+  reconstruction,
+  options = {}
+) {
+  if (!validateClaimedLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput(
+    device, reconstruction, options
+  )) {
+    throw new Error('private output borrow requires an exact live claimed terminal output');
+  }
+  const token = Object.freeze({
+    schema: 'peercompute.ulg.fused-coarse-output-private-borrow.v0'
+  });
+  let borrows = claimedCoarseOutputBorrows.get(reconstruction);
+  if (!borrows) {
+    borrows = new Set();
+    claimedCoarseOutputBorrows.set(reconstruction, borrows);
+  }
+  claimedCoarseOutputBorrowOrigins.set(token, {
+    deviceId: webGpuDeviceId(device), reconstruction, borrows
+  });
+  borrows.add(token);
+  return token;
+}
+
+export function releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(
+  device,
+  token
+) {
+  const origin = claimedCoarseOutputBorrowOrigins.get(token);
+  if (!origin || origin.deviceId !== webGpuDeviceId(device)
+    || !origin.borrows.has(token)) {
+    throw new Error('private output borrow release is stale, foreign, or replayed');
+  }
+  origin.borrows.delete(token);
+  claimedCoarseOutputBorrowOrigins.delete(token);
+  return true;
+}
+
 export function retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
   device,
   reconstruction,
@@ -1027,6 +1078,9 @@ export function retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
   } = {}
 ) {
   const origin = reconstruction && fusedG2pOrigins.get(reconstruction);
+  if (claimedCoarseOutputBorrows.get(reconstruction)?.size > 0) {
+    throw new Error('claimed terminal output still has a live private source borrow');
+  }
   if (
     origin?.deviceId !== webGpuDeviceId(device)
     || origin.transactionMode !== 'coarse-terminal'
@@ -1079,48 +1133,68 @@ export function retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
     if (confirmed !== true) {
       throw new Error('coarse-terminal G2P output owner fence was not confirmed');
     }
-    const errors = [];
-    if (producerOwned) {
-      try {
-        if (reconstruction.destroyOutputParticleBuffers?.() !== true) {
-          throw new Error(
-            'coarse-terminal producer did not confirm output destruction'
-          );
-        }
-        origin.outputStateRetired = true;
-        origin.outputMechanicsRetired = true;
-      } catch (error) {
-        errors.push(error);
-      }
-    } else {
-      if (!origin.outputStateRetired) {
+    return new Promise((resolve, reject) => {
+      const destroyRetainedOutput = () => {
         try {
-          origin.outputStateBuffer?.destroy?.();
-          origin.outputStateRetired = true;
+          const errors = [];
+          if (producerOwned) {
+            try {
+              if (reconstruction.destroyOutputParticleBuffers?.() !== true) {
+                throw new Error(
+                  'coarse-terminal producer did not confirm output destruction'
+                );
+              }
+              origin.outputStateRetired = true;
+              origin.outputMechanicsRetired = true;
+            } catch (error) {
+              errors.push(error);
+            }
+          } else {
+            if (!origin.outputStateRetired) {
+              try {
+                origin.outputStateBuffer?.destroy?.();
+                origin.outputStateRetired = true;
+              } catch (error) {
+                errors.push(error);
+              }
+            }
+            if (!origin.outputMechanicsRetired) {
+              try {
+                origin.outputMechanicsBuffer?.destroy?.();
+                origin.outputMechanicsRetired = true;
+              } catch (error) {
+                errors.push(error);
+              }
+            }
+          }
+          if (errors.length > 0) {
+            throw errors.length === 1
+              ? errors[0]
+              : new AggregateError(
+                errors,
+                'coarse-terminal G2P output retirement was incomplete'
+              );
+          }
+          origin.destroyed = true;
+          origin.outputOwnership = 'coarse-terminal-output-retired';
+          resolve(true);
         } catch (error) {
-          errors.push(error);
+          // Deferred lifecycle callbacks catch throws; settle this owner.
+          reject(error);
         }
+      };
+      if (producerOwned) {
+        destroyRetainedOutput();
+      } else if (runSphGpuParticleBufferSetCleanupAfterBorrows(
+        origin.claimedFinalSphParticleUpload,
+        destroyRetainedOutput,
+        { terminalSourceRetirement: true }
+      ) !== true) {
+        reject(new Error(
+          'claimed terminal output lost its registered particle borrow lifecycle'
+        ));
       }
-      if (!origin.outputMechanicsRetired) {
-        try {
-          origin.outputMechanicsBuffer?.destroy?.();
-          origin.outputMechanicsRetired = true;
-        } catch (error) {
-          errors.push(error);
-        }
-      }
-    }
-    if (errors.length > 0) {
-      throw errors.length === 1
-        ? errors[0]
-        : new AggregateError(
-          errors,
-          'coarse-terminal G2P output retirement was incomplete'
-        );
-    }
-    origin.destroyed = true;
-    origin.outputOwnership = 'coarse-terminal-output-retired';
-    return true;
+    });
   }).then(
     (retired) => {
       origin.outputRetirementPromise = null;
@@ -3873,6 +3947,7 @@ export async function runMlsMpmG2pWebGpu({
   let returnedRetainedOutputBuffers = false;
   let separationTransientBuffers = [];
   let fusedG2pQueueSubmitted = false;
+  let submissionGapWorkSubmitted = false;
   let fusedG2pCommitted = false;
   let fusedG2pArtifact = null;
   let reconstruction = null;
@@ -3926,7 +4001,7 @@ export async function runMlsMpmG2pWebGpu({
   let activeSourceV2G2pEnabled = false;
   let activeSourceV2DenseG2pEnabled = false;
   if (mechanicsFieldRequired || canonicalSpatialV2) {
-    mechanicsFieldKernelBundle = await import('./sphMlsMpmGpuStep.js');
+    mechanicsFieldKernelBundle = await loadSphMlsMpmKernelBundle();
     if (!fusedInputsRemainAdmitted()) {
       throw canonicalSpatialExecutionError(
         'fused-g2p-provenance-lost-after-import',
@@ -4547,7 +4622,12 @@ export async function runMlsMpmG2pWebGpu({
             'Canonical G2P requires an authenticated deferred post-G2P contact/separation residual solver'
           );
         }
-        const mechanicalApplyTimestamp = gpuTimestampRecorder?.active === true
+        const useSubmissionGaps = gpuTimestampRecorder?.active !== true
+          && schroederSpatialMechanicalProposal.supportsSubmissionGaps === true
+          && typeof schroederSpatialMechanicalProposal.encodeApplyBatches === 'function'
+          && hasResidentPresentationSubmissionGap(device);
+        const mechanicalApplyTimestamp = !useSubmissionGaps
+          && gpuTimestampRecorder?.active === true
           && typeof gpuTimestampRecorder.beginEncoderSpan === 'function'
           && typeof gpuTimestampRecorder.endEncoderSpan === 'function'
           ? gpuTimestampRecorder.beginEncoderSpan(encoder, {
@@ -4558,11 +4638,49 @@ export async function runMlsMpmG2pWebGpu({
               coarseStage: true
             })
           : null;
-        schroederSpatialMechanicalProposal.encodeApply(encoder, {
+        const mechanicalApplyOptions = {
           stateBuffer: outStateBuffer,
           mechanicsBuffer,
           selectedLevel: schroederSelectedLevel
-        });
+        };
+        if (useSubmissionGaps) {
+          const batches = schroederSpatialMechanicalProposal.encodeApplyBatches(
+            encoder, { ...mechanicalApplyOptions, submissionGaps: true }
+          );
+          try {
+            let batch = batches.next();
+            while (!batch.done) {
+              // Every yielded pass is ended. Submit unchanged physics work
+              // before offering the same queue a retained display frame; no
+              // intermediate state or receipt leaves this private producer.
+              assertQueueOrderedCleanupClaimsRegistered(device, queueOrderedProducerClaims);
+              submitQueueOrderedWork(device, [encoder.finish()]);
+              fusedG2pQueueSubmitted = true;
+              submissionGapWorkSubmitted = true;
+              const waitForPendingSlot = batch.value?.stage === 'jacobi-iterations'
+                && Number.isSafeInteger(batch.value.completedJacobiIterations)
+                && batch.value.completedJacobiIterations > 0
+                && Number.isSafeInteger(schroederSpatialMechanicalProposal.solverIterationCount)
+                && schroederSpatialMechanicalProposal.solverIterationCount > 0
+                && batch.value.completedJacobiIterations
+                  === schroederSpatialMechanicalProposal.solverIterationCount;
+              await requestResidentPresentationSubmissionGap(device, { waitForPendingSlot });
+              encoder = device.createCommandEncoder();
+              batch = batches.next(encoder);
+            }
+            if (batch.value !== true) {
+              throw new Error('Canonical G2P mechanical batches did not finish encoding');
+            }
+          } catch (error) {
+            try {
+              if (typeof batches.throw === 'function') batches.throw(error);
+              else batches.return?.();
+            } catch { /* Preserve the originating submit/resume error. */ }
+            throw error;
+          }
+        } else {
+          schroederSpatialMechanicalProposal.encodeApply(encoder, mechanicalApplyOptions);
+        }
         if (mechanicalApplyTimestamp) {
           gpuTimestampRecorder.endEncoderSpan(
             encoder,
@@ -5274,7 +5392,7 @@ export async function runMlsMpmG2pWebGpu({
           cleanup();
         }
       }
-    } else if (noFullReadback && fusedG2pQueueSubmitted) {
+    } else if ((noFullReadback || submissionGapWorkSubmitted) && fusedG2pQueueSubmitted) {
       if (
         fusedG2pCommitted === true
         && fusedG2pArtifact
@@ -5721,20 +5839,17 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
     return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'not-requested', reason: 'WebGPU MLS-MPM G2P path not requested' } });
   }
   try {
-    let lostInfo = null;
+    const deviceLossState = { info: null };
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || await requestOpticalGpuDevice(navigatorRef, {
-        onDeviceLost(info) {
-          lostInfo = info;
-          if (typeof onDeviceLost === 'function') onDeviceLost(info);
-        }
+        onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(resolvedDeviceResult.device, (info) => {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      });
+      watchDeviceLost(
+        resolvedDeviceResult.device,
+        createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+      );
     }
     if (!resolvedDeviceResult.device) {
       if (canonicalSpatialIntent) {
@@ -5747,15 +5862,15 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: resolvedDeviceResult.status, reason: resolvedDeviceResult.reason, fallback: 'cpu-reference' } });
     }
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       if (canonicalSpatialIntent) {
         throw canonicalSpatialExecutionError(
           'canonical-spatial-webgpu-device-lost',
-          describeDeviceLost(lostInfo)
+          describeDeviceLost(deviceLossState.info)
         );
       }
       const reference = getCpuReference();
-      return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
+      return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(deviceLossState.info), fallback: 'cpu-reference' } });
     }
     const gpuResult = await webGpuRunner({
       device: resolvedDeviceResult.device,
@@ -5788,16 +5903,16 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       gpuResult.destroyOutputParticleBuffers?.();
       if (canonicalSpatialIntent) {
         throw canonicalSpatialExecutionError(
           'canonical-spatial-webgpu-device-lost',
-          describeDeviceLost(lostInfo)
+          describeDeviceLost(deviceLossState.info)
         );
       }
       const reference = getCpuReference();
-      return executionFromReconstruction(reference, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
+      return executionFromReconstruction(reference, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(deviceLossState.info), fallback: 'cpu-reference' } });
     }
     if (noFullReadback) {
       return executionFromReconstruction(gpuResult, {

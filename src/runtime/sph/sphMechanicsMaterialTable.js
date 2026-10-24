@@ -3,6 +3,9 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_TABLE_SCHEMA } from '../material/materialPropertyBank.js';
 import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import {
+  compileSphGasConstitutive, evaluateSphGasSoundSpeed, SPH_GAS_CONSTITUTIVE_SCHEMA
+} from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-table.v0';
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA =
@@ -82,21 +85,6 @@ function phaseTemperatureK(phase) {
   return 293.15;
 }
 
-function gasSoundSpeedMPerS(properties, phase, {
-  soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
-  minGasSoundSpeedMPerS = DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
-} = {}) {
-  const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
-  if (!(molarMassKgPerMol > 0)) return 0;
-  const specificGasConstant = AVOGADRO_R / molarMassKgPerMol;
-  const cp = finiteNumber(phase?.cpJPerKgK, 0);
-  const gamma = cp > specificGasConstant ? cp / (cp - specificGasConstant) : 1.33;
-  return Math.max(
-    Math.sqrt(Math.max(gamma * specificGasConstant * phaseTemperatureK(phase), 0)) * soundSpeedScale,
-    minGasSoundSpeedMPerS
-  );
-}
-
 // Real (unscaled) sound speed of a phase: p-wave speed for condensed phases
 // (bulk + 4/3 shear), ideal-gas speed for gases.
 export function realPhaseSoundSpeedMPerS(properties, phase) {
@@ -154,7 +142,9 @@ export function mechanicsMaterialPhaseRecord(material, properties, phase, {
   const lambda = phaseName === 'solid' ? Math.max((bulkRaw - (2 / 3) * shearRaw) * modulusScale, 0) : 0;
   const gas = phaseName === 'gas';
   const soundSpeed = gas
-    ? gasSoundSpeedMPerS(properties, phase, { soundSpeedScale: soundScale, minGasSoundSpeedMPerS })
+    ? evaluateSphGasSoundSpeed(compileSphGasConstitutive(properties, phase, {
+      soundSpeedScale, cflMaxSoundSpeedMPerS, minGasSoundSpeedMPerS
+    }), phaseTemperatureK(phase))
     : (restDensity > 0 && bulk > 0 ? Math.sqrt(bulk / restDensity) : 0);
   const closureViscosityPaS = Math.max(finiteNumber(phase?.dynamicViscosityPaS, 0), 0);
   // Physical shear viscosity only. The artificial alpha*rho*c*h term used to be
@@ -198,6 +188,7 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
   materialPropertyBankGpuWarmInputTable = null
 } = {}) {
   const records = [];
+  const gasConstitutiveRecords = [];
   const metadata = [];
   let positiveSurfaceTensionPhaseRecordCount = 0;
   const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
@@ -226,6 +217,7 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
       );
       if (record[11] > 0) positiveSurfaceTensionPhaseRecordCount += 1;
       records.push(...record);
+      gasConstitutiveRecords.push(...compileSphGasConstitutive(properties, phase, options));
       phases.push(phase.name);
     }
     metadata.push({
@@ -257,7 +249,11 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     phaseRecordCount: records.length / MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,
     recordLayout: [...SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT],
     recordStrideFloats: MLS_MPM_MECHANICS_MATERIAL_PHASE_FLOATS,
-    records: new Float32Array(records),
+    // Keep all legacy phase rows at their existing offsets. The tail carries
+    // unclamped gas laws; readers without live T still see the representative c.
+    gasConstitutiveSchema: SPH_GAS_CONSTITUTIVE_SCHEMA,
+    gasConstitutiveOffsetVec4: records.length / 4,
+    records: new Float32Array([...records, ...gasConstitutiveRecords]),
     metadata,
     soundSpeedScale,
     cflMaxSoundSpeedMPerS,
@@ -279,7 +275,7 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
   };
 }
 
-export function findMechanicsMaterialPhaseRecord(table, materialId, phaseId) {
+export function findMechanicsMaterialPhaseRecord(table, materialId, phaseId, temperatureK = null) {
   if (table?.schema !== ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('Expected an MLS-MPM mechanics material table');
   }
@@ -291,7 +287,13 @@ export function findMechanicsMaterialPhaseRecord(table, materialId, phaseId) {
         effectiveBulkModulusPa: table.records[offset + 3],
         shearModulusPa: table.records[offset + 4],
         lameLambdaPa: table.records[offset + 5],
-        soundSpeedMPerS: table.records[offset + 6],
+        soundSpeedMPerS: temperatureK !== null && table.records[offset + 7] === 2
+          && table.gasConstitutiveSchema === SPH_GAS_CONSTITUTIVE_SCHEMA
+          ? evaluateSphGasSoundSpeed(table.records.subarray(
+            table.gasConstitutiveOffsetVec4 * 4 + index * 4,
+            table.gasConstitutiveOffsetVec4 * 4 + index * 4 + 4
+          ), temperatureK)
+          : table.records[offset + 6],
         eosModelId: table.records[offset + 7],
         solidFlag: table.records[offset + 8],
         status: table.records[offset + 9],

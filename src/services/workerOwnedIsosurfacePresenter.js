@@ -31,8 +31,18 @@ import {
   encodeSphParticipatingMediumRender
 } from '../runtime/sph/sphParticipatingMediumGpu.js';
 import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
+import { ISOSURFACE_MOTION_WGSL } from '../visualization/isosurfaceMotionWgsl.js';
+import { encodeNativeSurfaceTemperatureRowsWebGpu } from '../visualization/nativeSurfaceTemperatureWgsl.js';
+import { createIsosurfaceMotionPacing, createPresentationPauseClock, isosurfaceMotionAge, resumeIsosurfaceMotionPacing, slowIsosurfaceMotionPacing, snapshotIsosurfaceSourceTimingBootstrap } from './workerOwnedIsosurfaceMotion.js';
+import {
+  createWorkerOwnedNativeSurfaceMaterial,
+  snapshotWorkerNativeSurfaceMaterial,
+  workerNativeSurfaceKind,
+  WORKER_NATIVE_SURFACE_UNIFORM_BYTES
+} from './workerOwnedNativeSurfaceMaterial.js';
 import {
   ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
+  ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED,
   ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED
 } from '../runtime/sph/sphWorkerPresentationQos.js';
 import {
@@ -84,6 +94,10 @@ const BUFFER_USAGE_COPY_DST = 0x08;
 const BUFFER_USAGE_UNIFORM = 0x40;
 const BUFFER_USAGE_STORAGE = 0x80;
 
+// Only a completed GPU draw whose browser callback timed out is retryable.
+// GPU errors, absent observers and arbitrary callback failures stay fatal.
+class PresentationOpportunityTimeoutError extends Error {}
+
 const workerOwnedIsosurfaceWgsl = /* wgsl */`
 struct SurfaceUniforms {
   view_projection: mat4x4<f32>,
@@ -92,9 +106,14 @@ struct SurfaceUniforms {
   color_roughness: vec4<f32>,
   camera_emissive: vec4<f32>,
   optical: vec4<f32>,
+  motion_grid: vec4<u32>,
+  motion: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: SurfaceUniforms;
+@group(0) @binding(1) var<storage, read> isosurface_motion_rows: array<vec4<f32>>;
+
+${ISOSURFACE_MOTION_WGSL}
 
 struct VertexInput {
   @location(0) grid_position: vec4<f32>,
@@ -129,9 +148,15 @@ fn decode_octahedral_normal(packed: u32) -> vec3<f32> {
 
 @vertex
 fn vertex_main(input: VertexInput) -> VertexOutput {
+  let motion = sample_isosurface_motion(
+    input.grid_position.xyz + uniforms.grid_bias_alpha.xyz,
+    uniforms.origin_scale.w, decode_octahedral_normal(input.packed_normal),
+    uniforms.motion.x, uniforms.motion.y,
+    uniforms.motion_grid.x, uniforms.motion_grid.y, uniforms.motion_grid.z
+  );
   let world_position = uniforms.origin_scale.xyz
     + (input.grid_position.xyz + uniforms.grid_bias_alpha.xyz)
-      * uniforms.origin_scale.w;
+      * uniforms.origin_scale.w + motion.displacement;
   var output: VertexOutput;
   var clip = uniforms.view_projection * vec4<f32>(world_position, 1.0);
   clip.z = clip.z * 0.5 + clip.w * 0.5;
@@ -140,7 +165,7 @@ fn vertex_main(input: VertexInput) -> VertexOutput {
   }
   output.clip_position = clip;
   output.world_position = world_position;
-  output.world_normal = decode_octahedral_normal(input.packed_normal);
+  output.world_normal = motion.normal;
   return output;
 }
 
@@ -369,6 +394,9 @@ export function snapshotWorkerOwnedSurfaceMetadata(metadata) {
     );
   }
   const snapshot = { ...metadata };
+  if (Array.isArray(metadata.boundsCenterM) || ArrayBuffer.isView(metadata.boundsCenterM)) {
+    snapshot.boundsCenterM = Object.freeze(Array.from(metadata.boundsCenterM));
+  }
   if (
     Array.isArray(metadata.colorLinear)
     || ArrayBuffer.isView(metadata.colorLinear)
@@ -476,9 +504,9 @@ function workerOwnedParticipatingMediumPresentation(frame) {
     collectiveOpticalShellFallbackCount: 0,
     participatingMediumDepthClipped: ready,
     participatingMediumPremultipliedAlpha: ready,
-    presentationPassOrder: ready
+    presentationPassOrder: frame?.presentationPassOrder ?? (ready
       ? HYBRID_PRESENTATION_PASS_ORDER
-      : ORDINARY_PRESENTATION_PASS_ORDER
+      : ORDINARY_PRESENTATION_PASS_ORDER)
   });
 }
 
@@ -490,7 +518,7 @@ export function buildWorkerOwnedIsosurfaceSurfaceUniformValues(
   const transform = surface.translation?.positionTransform
     || surface.descriptor?.positionTransform
     || {};
-  const values = new Float32Array(36);
+  const values = new Float32Array(44);
   const viewProjectionMatrix = finiteVector(frame.viewProjectionMatrix, 16) || [
     1, 0, 0, 0,
     0, 1, 0, 0,
@@ -532,6 +560,16 @@ export function buildWorkerOwnedIsosurfaceSurfaceUniformValues(
   values[33] = phaseId;
   values[34] = Number(metadata.depthWriteFlag) === 0 ? 0 : 1;
   values[35] = closureOpticsAuthoritative ? 1 : 0;
+  if (frame.motionField?.buffer) {
+    const words = new Uint32Array(values.buffer);
+    words[36] = surface.descriptor?.fieldOffset ?? 0;
+    words[37] = surface.metadata?.resolution ?? 0;
+    words[38] = frame.motionField.rowCount;
+    values[40] = Math.max(0, Number(frame.drawMotionAgeS) || 0);
+    // One field-cell edge bounds presentation deformation. It is not a
+    // mechanics displacement clamp and never changes the captured source.
+    values[41] = Math.abs(values[19]);
+  }
   return values;
 }
 
@@ -606,6 +644,12 @@ export function resolveWorkerOwnedIsosurfaceAdmission({
   const viewProjectionMatrix = finiteVector(request?.viewProjectionMatrix, 16);
   const cameraPositionM = finiteVector(request?.cameraPositionM, 3);
   const reasons = [];
+  let nativeSurfaceMaterial = null;
+  try {
+    nativeSurfaceMaterial = snapshotWorkerNativeSurfaceMaterial(request?.nativeSurfaceMaterial);
+  } catch {
+    reasons.push('native-surface-material');
+  }
   if (request?.schema !== ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_REQUEST_SCHEMA) {
     reasons.push('request-schema');
   }
@@ -659,7 +703,8 @@ export function resolveWorkerOwnedIsosurfaceAdmission({
     totalFieldCells: Math.max(0, Math.floor(Number(surfaceTable?.totalFieldCells) || 0)),
     particleCount: Math.max(0, Math.floor(Number(retained?.particleCount) || 0)),
     viewProjectionMatrix,
-    cameraPositionM
+    cameraPositionM,
+    nativeSurfaceMaterial
   });
 }
 
@@ -697,6 +742,7 @@ function rawExtensionExecution(wrapped) {
 }
 
 function releaseExtensionFrameSurface(surface, reason) {
+  try { surface?.releaseTemperatureRows?.(); } catch { /* Continue independent mesh retirement. */ }
   try {
     surface?.translation?.destroyExtensionSurfaceBuffers?.({
       force: true,
@@ -731,9 +777,13 @@ export function createWorkerOwnedIsosurfacePresenter({
   waitForPresentationOpportunity = null,
   getFramebufferEpoch = null,
   nextPresentationQueueCompletionSerial = null,
+  temporalNowMs = nowMs,
+  // The worker supplies its pre-creation history when this presenter is lazy.
+  presentationPauseClock = createPresentationPauseClock(),
   captureRenderRows = extractSphRenderRowsWebGpu,
   buildRenderField = buildSphRenderFieldWebGpu,
   buildPresentationFrame = null,
+  createNativeSurfaceMaterial = createWorkerOwnedNativeSurfaceMaterial,
   createParticipatingMediumDescriptor = createSphParticipatingMediumDescriptor,
   createParticipatingMediumGpu = createSphParticipatingMediumGpu,
   encodeParticipatingMediumPack = encodeSphParticipatingMediumPack,
@@ -764,7 +814,27 @@ export function createWorkerOwnedIsosurfacePresenter({
   let activeJob = null;
   let latestJob = null;
   let currentFrame = null;
+  let recoveryCandidate = null;
+  let redrawRequestSequence = 0;
+  let presentationPlaying = true;
+  let presentationPlaybackRevision = 0;
+  let presentationMotionController = new AbortController();
+  let latestViewProjectionMatrix = null;
+  let latestCameraPositionM = null;
+  let latestNativeSurfaceAppearance = null;
+  let nativeMaterial = null;
+  let mostRecentSubmittedGeneration = 0;
+  let temporalLoopToken = 0;
+  let temporalDelayHandle = null;
+  let releaseTemporalDelay = null;
+  let emptyMotionBuffer = null;
   let renderLaneTail = Promise.resolve();
+  let retainedSubmissionGap = null;
+  let retainedSubmissionGapWaiter = null;
+  const retireRetainedSubmissionGap = () => {
+    retainedSubmissionGap?.abort();
+    retainedSubmissionGapWaiter?.abort();
+  };
   let redrawPumpPromise = null;
   let pendingRedraw = null;
   let captureInFlightCount = 0;
@@ -833,6 +903,12 @@ export function createWorkerOwnedIsosurfacePresenter({
 
   const releaseFrame = (frame, reason) => {
     if (!frame) return;
+    nativeMaterial?.releaseFrame(frame);
+    if (frame.motionField) {
+      const motionField = frame.motionField;
+      frame.motionField = null;
+      deferSubmittedWorkCleanup(device, () => motionField.destroy());
+    }
     for (const surface of frame.surfaces || []) {
       releaseExtensionFrameSurface(surface, reason);
     }
@@ -847,12 +923,40 @@ export function createWorkerOwnedIsosurfacePresenter({
     }
   };
 
+  const retireRecoveryCandidate = (reason) => {
+    const candidate = recoveryCandidate;
+    recoveryCandidate = null;
+    if (candidate) {
+      // A preparation await can still create frame-owned material resources
+      // after its GPU fence. Retire only after that whole render-lane user.
+      void onRenderLane(() => {
+        deferSubmittedWorkCleanup(device, () => releaseFrame(candidate.frame, reason));
+      }).catch(() => {});
+    }
+  };
+
+  const retireTemperatureRows = (rows) => {
+    if (!rows) return;
+    try { deferSubmittedWorkCleanup(device, () => rows.destroy()); }
+    catch { rows.destroy(); } // Device teardown may not provide a completion promise.
+  };
+
   const ensureParticipatingMediumRuntime = () => {
     participatingMediumRuntime ||= createParticipatingMediumGpu(device, {
       colorFormat: format,
       depthFormat
     });
     return participatingMediumRuntime;
+  };
+
+  const ensureNativeMaterial = () => {
+    nativeMaterial ||= createNativeSurfaceMaterial({
+      device, format, depthFormat,
+      onAppearanceReady() {
+        if (!disposed) void scheduleRedraw({ reason: 'worker-native-appearance-ready' }).catch(() => {});
+      }
+    });
+    return nativeMaterial;
   };
 
   const releaseAdapterEntry = async (entry) => {
@@ -928,6 +1032,10 @@ export function createWorkerOwnedIsosurfacePresenter({
     if (opaquePipeline && transparentPipeline) return;
     if (pipelinePromise) return pipelinePromise;
     pipelinePromise = (async () => {
+    emptyMotionBuffer ||= device.createBuffer({
+      label: 'ulg-worker-isosurface-empty-motion', size: 16,
+      usage: gpuBufferUsage('STORAGE', BUFFER_USAGE_STORAGE)
+    });
     shaderModule ||= device.createShaderModule({
       label: 'ulg-worker-owned-isosurface-shader',
       code: workerOwnedIsosurfaceWgsl
@@ -1030,13 +1138,19 @@ export function createWorkerOwnedIsosurfacePresenter({
 
   const orderedFrameSurfaces = (frame) => [...(frame.surfaces || [])].sort(
     (left, right) => {
-      const leftTransparent =
-        Number(left.metadata?.transparencyClassId) > 0 ? 1 : 0;
-      const rightTransparent =
-        Number(right.metadata?.transparencyClassId) > 0 ? 1 : 0;
-      return leftTransparent - rightTransparent
-        || Number(left.metadata?.renderOrder || 0)
-          - Number(right.metadata?.renderOrder || 0);
+      const draw = surface => surface.translation?.surfaceDraw?.surfaces?.[0] || surface.metadata || {};
+      const layer = surface => Number.isFinite(Number(draw(surface).renderOrder))
+        ? Number(draw(surface).renderOrder) : Number(draw(surface).transparencyClassId) || 0;
+      const depth = surface => {
+        const center = finiteVector(draw(surface).boundsCenterM, 3);
+        const camera = finiteVector(frame.cameraPositionM, 3);
+        return center && camera ? center.reduce((sum, value, i) => sum + (value - camera[i]) ** 2, 0) : 0;
+      };
+      // Match native page ordering: authored layer first, then current-camera
+      // depth within that layer. No hot geometry readback or fabricated bounds.
+      return layer(left) - layer(right)
+        || (workerNativeSurfaceKind(left) === 'opaque'
+          ? depth(left) - depth(right) : depth(right) - depth(left));
     }
   );
 
@@ -1060,7 +1174,10 @@ export function createWorkerOwnedIsosurfacePresenter({
         label:
           `ulg-worker-owned-isosurface-bind-group-${surface.descriptor.surfaceIndex}`,
         layout: pipeline.getBindGroupLayout(0),
-        entries: [{ binding: 0, resource: { buffer: surface.uniformBuffer } }]
+        entries: [
+          { binding: 0, resource: { buffer: surface.uniformBuffer } },
+          { binding: 1, resource: { buffer: frame.motionField?.buffer || emptyMotionBuffer } }
+        ]
       }));
     }
     pass.setPipeline(pipeline);
@@ -1075,21 +1192,39 @@ export function createWorkerOwnedIsosurfacePresenter({
     viewProjectionMatrix = frame.viewProjectionMatrix,
     cameraPositionM = frame.cameraPositionM,
     reason = 'worker-owned-isosurface-frame',
-    allowLaggedGeneration = false
+    allowLaggedGeneration = false,
+    requiresVisibleFrame = false,
+    requiresRecoverableFrame = false,
+    playbackRevision = null,
+    motionOnly = false,
+    submissionBoundary = null,
+    onSubmissionQueued = null,
+    submissionDeadlineMs = null,
+    expectedFramebufferEpoch = null,
+    signal = null,
+    motionAgeS = frame.lastDisplayedMotionAgeS || 0
   } = {}) => {
+    let submissionQueued = false;
     const frameIsCurrent = () => Boolean(
       !disposed
+      && signal?.aborted !== true
+      && (submissionQueued || submissionDeadlineMs == null
+        || (Number.isFinite(submissionDeadlineMs)
+          && temporalNowMs() <= submissionDeadlineMs))
+      && (playbackRevision == null || playbackRevision === presentationPlaybackRevision)
+      && (!motionOnly || presentationPlaying)
       && frame?.invalidationEpoch === invalidationEpoch
+      && (expectedFramebufferEpoch == null
+        || Number(getFramebufferEpoch()) === expectedFramebufferEpoch)
+      && frame.generation >= mostRecentSubmittedGeneration
+      && (!requiresVisibleFrame || currentFrame === frame)
+      && (!requiresRecoverableFrame || recoveryCandidate?.frame === frame)
       && (
         generation === frame.generation
         || allowLaggedGeneration === true
       )
     );
     if (!frameIsCurrent()) return false;
-    const nextViewProjection = finiteVector(viewProjectionMatrix, 16);
-    const nextCameraPosition = finiteVector(cameraPositionM, 3);
-    if (nextViewProjection) frame.viewProjectionMatrix = nextViewProjection;
-    if (nextCameraPosition) frame.cameraPositionM = nextCameraPosition;
     const packedMedium = frame.participatingMedium?.status
       === PARTICIPATING_MEDIUM_READY_STATUS
       ? frame.participatingMedium.packedFrame
@@ -1098,10 +1233,41 @@ export function createWorkerOwnedIsosurfacePresenter({
       ? ensureParticipatingMediumRuntime()
       : null;
     await Promise.all([
-      ensurePipelines(),
+      ensureNativeMaterial().ready,
       readyParticipatingMediumRuntime?.ready
     ]);
     if (!frameIsCurrent()) return false;
+    // Camera state is independent of captured physics. Read it immediately
+    // before encoding so neither a slow field build nor pipeline setup can
+    // restore the camera snapshot carried by an older source request.
+    const nextViewProjection = latestViewProjectionMatrix
+      || finiteVector(viewProjectionMatrix, 16);
+    const nextCameraPosition = latestCameraPositionM
+      || finiteVector(cameraPositionM, 3);
+    if (nextViewProjection) frame.viewProjectionMatrix = [...nextViewProjection];
+    if (nextCameraPosition) frame.cameraPositionM = [...nextCameraPosition];
+    const material = ensureNativeMaterial();
+    const sizeTexture = typeof getViewportSize === 'function' ? null : context.getCurrentTexture();
+    const viewportSize = finiteVector(typeof getViewportSize === 'function'
+      ? getViewportSize() : [sizeTexture?.width, sizeTexture?.height], 2);
+    if (!viewportSize || viewportSize.some(value => !(value > 0))) {
+      throw new Error('native material presentation requires a positive viewport');
+    }
+    let preparedAppearance;
+    do {
+      preparedAppearance = latestNativeSurfaceAppearance;
+      frame.nativeSurfaceAppearance = preparedAppearance || frame.request.nativeSurfaceMaterial;
+      await material.prepare(frame, viewportSize);
+      if (!frameIsCurrent()) return false;
+    } while (preparedAppearance !== latestNativeSurfaceAppearance);
+    // Preparation may yield; the camera that wins that wait must also govern
+    // the replacement, refraction reconstruction, and retained motion.
+    if (latestViewProjectionMatrix) frame.viewProjectionMatrix = [...latestViewProjectionMatrix];
+    if (latestCameraPositionM) frame.cameraPositionM = [...latestCameraPositionM];
+    const inverseViewProjectionMatrix = invertMatrix4(frame.viewProjectionMatrix);
+    if (!inverseViewProjectionMatrix) throw new Error('native material requires an invertible camera');
+    motionAgeS = Math.max(motionAgeS, frame.lastDisplayedMotionAgeS || 0);
+    frame.drawMotionAgeS = motionAgeS;
     const validateThisDraw = !firstDrawValidated
       && typeof device.pushErrorScope === 'function'
       && typeof device.popErrorScope === 'function';
@@ -1113,6 +1279,7 @@ export function createWorkerOwnedIsosurfacePresenter({
     };
     let submittedFramebufferEpoch;
     let submittedAtMs;
+    let submittedPassOrder;
     if (validateThisDraw) {
       device.pushErrorScope('validation');
       validationScopeOpen = true;
@@ -1125,132 +1292,89 @@ export function createWorkerOwnedIsosurfacePresenter({
       const colorView = colorTexture.createView();
       const depthView = getDepthView();
       const orderedSurfaces = orderedFrameSurfaces(frame);
-      if (!packedMedium) {
-        // Preserve the established single-pass marching-cubes path when no
-        // participating medium is ready to composite.
-        const pass = encoder.beginRenderPass({
-          colorAttachments: [{
-            view: colorView,
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: 'store'
-          }],
+      const passOrder = ['opaque-isosurface'];
+      const drawNative = (pass, surface, options = {}) => {
+        if (material.draw(pass, frame, surface, {
+          inverse: inverseViewProjectionMatrix, ...options
+        }) !== true) throw new Error('native isosurface draw is missing mandatory GPU buffers');
+      };
+      const opaquePass = encoder.beginRenderPass({
+        label: 'ulg-worker-owned-isosurface-opaque-pass',
+        colorAttachments: [{
+          view: colorView, clearValue: material.clearValue(frame),
+          loadOp: 'clear', storeOp: 'store'
+        }],
+        depthStencilAttachment: {
+          view: depthView, depthClearValue: 1,
+          depthLoadOp: 'clear', depthStoreOp: 'store'
+        }
+      });
+      try {
+        material.drawBackground(opaquePass, frame);
+        for (const surface of orderedSurfaces) {
+          if (workerNativeSurfaceKind(surface) === 'opaque') drawNative(opaquePass, surface);
+        }
+      } finally { opaquePass.end(); }
+
+      // Each condensed surface gets its own rear-depth map and scene-color
+      // snapshot. Front and rear passes use the same camera and motion age.
+      // The native fragment writes alpha one with depth, not an alpha shell.
+      const refractiveSurfaces = orderedSurfaces.filter(surface =>
+        workerNativeSurfaceKind(surface) === 'refractive');
+      if (refractiveSurfaces.length) passOrder.push('refractive-isosurface');
+      for (const surface of refractiveSurfaces) {
+        material.copySceneColor(encoder, colorTexture);
+        const backPass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-refractive-backface-pass',
+          colorAttachments: [],
           depthStencilAttachment: {
-            view: depthView,
-            depthClearValue: 1,
-            depthLoadOp: 'clear',
-            depthStoreOp: 'discard'
+            view: material.backDepthView(), depthClearValue: 1,
+            depthLoadOp: 'clear', depthStoreOp: 'store'
           }
         });
-        try {
-          for (const surface of orderedSurfaces) {
-            drawIsosurface(pass, frame, surface);
-          }
-          drawOverlay?.(pass, frame.viewProjectionMatrix, frame.boxDimsM);
-        } finally {
-          pass.end();
-        }
-      } else {
-        const inverseViewProjectionMatrix = invertMatrix4(
-          frame.viewProjectionMatrix
-        );
-        if (!inverseViewProjectionMatrix) {
-          throw new Error(
-            'participating-medium presentation requires an invertible view-projection matrix'
-          );
-        }
-        const viewportSize = finiteVector(
-          typeof getViewportSize === 'function'
-            ? getViewportSize()
-            : [colorTexture.width, colorTexture.height],
-          2
-        );
-        if (
-          !viewportSize
-          || !(viewportSize[0] > 0)
-          || !(viewportSize[1] > 0)
-        ) {
-          throw new Error(
-            'participating-medium presentation requires a positive viewport size'
-          );
-        }
-
-        const opaquePass = encoder.beginRenderPass({
-          label: 'ulg-worker-owned-isosurface-opaque-pass',
-          colorAttachments: [{
-            view: colorView,
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: 'store'
-          }],
+        try { drawNative(backPass, surface, { backface: true }); }
+        finally { backPass.end(); }
+        const frontPass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-refractive-pass',
+          colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
           depthStencilAttachment: {
-            view: depthView,
-            depthClearValue: 1,
-            depthLoadOp: 'clear',
-            depthStoreOp: 'store'
+            view: depthView, depthLoadOp: 'load', depthStoreOp: 'store'
           }
         });
-        try {
-          for (const surface of orderedSurfaces) {
-            if (Number(surface.metadata?.transparencyClassId) > 0) continue;
-            drawIsosurface(opaquePass, frame, surface);
-          }
-        } finally {
-          opaquePass.end();
-        }
-
+        try { drawNative(frontPass, surface, { refractive: true }); }
+        finally { frontPass.end(); }
+      }
+      if (packedMedium) {
+        passOrder.push('depth-clipped-participating-medium');
         const volumePass = encoder.beginRenderPass({
           label: 'ulg-worker-owned-participating-medium-pass',
-          colorAttachments: [{
-            view: colorView,
-            loadOp: 'load',
-            storeOp: 'store'
-          }]
+          colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }]
         });
         try {
           await encodeParticipatingMediumRender(
-            readyParticipatingMediumRuntime,
-            volumePass,
-            {
-              packedFrame: packedMedium,
-              inverseViewProjectionMatrix,
-              cameraPositionM: frame.cameraPositionM,
-              viewportSize,
-              depthTextureView: depthView,
-              lightDirection: [0.38, 0.82, 0.42]
+            readyParticipatingMediumRuntime, volumePass, {
+              packedFrame: packedMedium, inverseViewProjectionMatrix,
+              cameraPositionM: frame.cameraPositionM, viewportSize,
+              depthTextureView: depthView, lightDirection: [0.38, 0.82, 0.42]
             }
           );
-        } finally {
-          volumePass.end();
-        }
-
-        const transparentPass = encoder.beginRenderPass({
-          label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
-          colorAttachments: [{
-            view: colorView,
-            loadOp: 'load',
-            storeOp: 'store'
-          }],
-          depthStencilAttachment: {
-            view: depthView,
-            depthLoadOp: 'load',
-            depthStoreOp: 'discard'
-          }
-        });
-        try {
-          for (const surface of orderedSurfaces) {
-            if (!(Number(surface.metadata?.transparencyClassId) > 0)) continue;
-            drawIsosurface(transparentPass, frame, surface);
-          }
-          drawOverlay?.(
-            transparentPass,
-            frame.viewProjectionMatrix,
-            frame.boxDimsM
-          );
-        } finally {
-          transparentPass.end();
-        }
+        } finally { volumePass.end(); }
       }
+      passOrder.push('transparent-isosurface-and-overlay');
+      const vaporPass = encoder.beginRenderPass({
+        label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
+        colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+        depthStencilAttachment: {
+          view: depthView, depthLoadOp: 'load', depthStoreOp: 'discard'
+        }
+      });
+      try {
+        for (const surface of orderedSurfaces) {
+          if (workerNativeSurfaceKind(surface) === 'vapor') drawNative(vaporPass, surface);
+        }
+        drawOverlay?.(vaporPass, frame.viewProjectionMatrix, frame.boxDimsM);
+      } finally { vaporPass.end(); }
+      submittedPassOrder = Object.freeze(passOrder);
       if (!frameIsCurrent()) {
         await closeValidationScope();
         return false;
@@ -1264,9 +1388,22 @@ export function createWorkerOwnedIsosurfacePresenter({
           'worker-owned isosurface framebuffer epoch is unavailable'
         );
       }
+      const commandBuffer = encoder.finish();
       submittedAtMs = nowMs();
-      device.queue.submit([encoder.finish()]);
-      const validationError = await closeValidationScope();
+      // Timer tasks can be overdue behind preparation/encoding microtasks.
+      // Check the monotonic deadline at the actual submission boundary too.
+      if (Number(getFramebufferEpoch()) !== submittedFramebufferEpoch || !frameIsCurrent()) {
+        await closeValidationScope();
+        return false;
+      }
+      device.queue.submit([commandBuffer]);
+      submissionQueued = true;
+      frame.lastSubmittedMotionAgeS = motionAgeS;
+      mostRecentSubmittedGeneration = Math.max(mostRecentSubmittedGeneration, frame.generation);
+      // Once validated, install the queue fence without yielding: a later
+      // physics microtask could otherwise join the shared submit burst and
+      // unnecessarily extend this presentation's completion wait.
+      const validationError = validationScopeOpen ? await closeValidationScope() : null;
       if (validationError) {
         throw new Error(
           validationError.message || String(validationError)
@@ -1303,27 +1440,66 @@ export function createWorkerOwnedIsosurfacePresenter({
       );
     }
     presentationQueueCompletionCount = presentationQueueCompletionSerial;
-    await device.queue.onSubmittedWorkDone();
+    const queueCompletion = device.queue.onSubmittedWorkDone();
+    let gpuCompletionObserved = false;
+    void Promise.resolve(queueCompletion).then(
+      () => { gpuCompletionObserved = true; },
+      () => {} // The original fence is still awaited below for its exact error.
+    );
+    const opportunityCompletion = (() => {
+      try {
+        if (typeof waitForPresentationOpportunity !== 'function') {
+          throw new Error(
+            'worker-owned isosurface presentation opportunity observer is unavailable'
+          );
+        }
+        return Promise.resolve(waitForPresentationOpportunity({
+          afterGpuCompletion: queueCompletion,
+          isCurrent: () => frameIsCurrent()
+            && Number(getFramebufferEpoch()) === submittedFramebufferEpoch,
+          signal
+        })).then(opportunity => {
+          if (opportunity?.available === true && !gpuCompletionObserved) {
+            throw new Error(
+              'worker-owned isosurface presentation opportunity preceded GPU completion'
+            );
+          }
+          return opportunity;
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    })();
+    // An injected observer may reject before the GPU fence settles. Retain
+    // that rejection for the normal await, without an unhandled early error.
+    void opportunityCompletion.catch(() => {});
+    // Private scheduling acknowledgement, NOT a frame or physics proof. A
+    // caller may queue later physics now; this lane still owns the draw until
+    // its exact fence and post-GPU opportunity have both completed below.
+    onSubmissionQueued?.();
+    await queueCompletion;
     if (
       !frameIsCurrent()
       || Number(getFramebufferEpoch()) !== submittedFramebufferEpoch
     ) return false;
     const gpuCompletedAtMs = nowMs();
-    if (typeof waitForPresentationOpportunity !== 'function') {
-      throw new Error(
-        'worker-owned isosurface presentation opportunity observer is unavailable'
-      );
-    }
-    const opportunity = await waitForPresentationOpportunity();
+    const opportunity = await opportunityCompletion;
+    const opportunityTimedOut = opportunity?.available === false
+      && opportunity.method === 'worker-request-animation-frame-timeout';
+    if (
+      !opportunityTimedOut
+      && (!frameIsCurrent()
+        || Number(getFramebufferEpoch()) !== submittedFramebufferEpoch)
+    ) return false;
     if (opportunity?.available !== true) {
-      throw new Error(
+      // Preserve a real timeout through resize so it still spends the
+      // committed job's existing retry budget; stale outcomes are not misses.
+      const OpportunityError = opportunityTimedOut
+        ? PresentationOpportunityTimeoutError : Error;
+      throw new OpportunityError(
         'worker-owned isosurface lacked a post-GPU presentation opportunity'
       );
     }
-    if (
-      !frameIsCurrent()
-      || Number(getFramebufferEpoch()) !== submittedFramebufferEpoch
-    ) return false;
     const presentedAtMs = Number.isFinite(Number(opportunity.observedAtMs))
       ? Number(opportunity.observedAtMs)
       : nowMs();
@@ -1331,6 +1507,7 @@ export function createWorkerOwnedIsosurfacePresenter({
       summarizeWorkerOwnedIsosurfaceOpticalPresentation(
         frame.opticalMetadataSnapshots || frame.surfaces
       );
+    frame.presentationPassOrder = submittedPassOrder;
     const participatingMediumPresentation =
       workerOwnedParticipatingMediumPresentation(frame);
     const proof = Object.freeze({
@@ -1339,6 +1516,18 @@ export function createWorkerOwnedIsosurfacePresenter({
       presentationFrameStatus:
         'worker-owned-isosurface-presentation-opportunity',
       presentationFrameAdmitted: true,
+      nativeMaterialShader: 'existing-native-compact-surface-with-retained-motion',
+      condensedDepthTestEnabled: true,
+      condensedDepthWriteEnabled: true,
+      vaporDepthTestEnabled: true,
+      vaporDepthWriteEnabled: false,
+      isosurfaceTemporalPresentation: motionAgeS > 0,
+      isosurfacePresentationMotionAgeS: motionAgeS,
+      isosurfacePresentationSourceTimeS: frame.sourceTimeS ?? null,
+      isosurfacePresentationMotionMethod: motionAgeS > 0
+        ? 'bounded-gpu-field-velocity-extrapolation' : 'committed-source-mesh',
+      presentationOnly: motionAgeS > 0,
+      authoritativeStateMutation: false,
       presentationFrameGpuCompleted: true,
       presentationFrameGpuCompletionMethod:
         'worker-device.queue.onSubmittedWorkDone',
@@ -1360,8 +1549,15 @@ export function createWorkerOwnedIsosurfacePresenter({
       presentationQueueCompletionScope:
         ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
       physicsQueuePrefixCoverage:
-        ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
-      physicsHostQueueFenceParticipation: null,
+        submissionBoundary
+          ? ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED
+          : ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+      physicsHostQueueFenceParticipation: submissionBoundary ? true : null,
+      ...(submissionBoundary ? {
+        physicsContinuationBlocked: true,
+        presentationQosHostQueueFenceCount: 1,
+        motionPresentationQosBoundary: submissionBoundary
+      } : {}),
       workerFramebufferEpoch: submittedFramebufferEpoch,
       workerOwnedOpticalPresentation: opticalPresentation,
       workerOwnedParticipatingMediumPresentation:
@@ -1384,6 +1580,7 @@ export function createWorkerOwnedIsosurfacePresenter({
       presentationPassOrder:
         participatingMediumPresentation.presentationPassOrder
     });
+    frame.lastDisplayedMotionAgeS = motionAgeS;
     try {
       onFrameSubmitted?.({
         reason,
@@ -1398,10 +1595,115 @@ export function createWorkerOwnedIsosurfacePresenter({
     return proof;
   };
 
-  const scheduleRenderFrame = (frame, options) => {
-    const scheduled = renderLaneTail.then(() => renderFrame(frame, options));
+  let pendingSourceProgressToken = 0;
+  const onRenderLane = (render) => {
+    const scheduled = renderLaneTail.then(render);
     renderLaneTail = scheduled.catch(() => {});
     return scheduled;
+  };
+  const scheduleRenderFrame = (frame, options) =>
+    onRenderLane(() => renderFrame(frame, options));
+
+  const retainedSubmissionGapEligible = (frame) => {
+    if (disposed || !presentationPlaying || currentFrame !== frame
+      || !frame?.motionField?.buffer || !frame.motionPacing
+      || frame.invalidationEpoch !== invalidationEpoch
+      || frame.generation < mostRecentSubmittedGeneration) return false;
+    const ageS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+    return ageS > (frame.lastDisplayedMotionAgeS || 0)
+      && ageS < frame.motionPacing.maxSimulationAgeS;
+  };
+  const hasRetainedSubmissionGapOpportunity = ({ waitForPendingSlot = false } = {}) =>
+    typeof waitForPendingSlot === 'boolean' && !retainedSubmissionGapWaiter
+      && (waitForPendingSlot || !retainedSubmissionGap)
+      && retainedSubmissionGapEligible(currentFrame);
+
+  const stopTemporalPresentation = () => {
+    temporalLoopToken += 1;
+    if (temporalDelayHandle != null) globalThis.clearTimeout(temporalDelayHandle);
+    temporalDelayHandle = null;
+    releaseTemporalDelay?.();
+    releaseTemporalDelay = null;
+  };
+
+  const startTemporalPresentation = (frame) => {
+    stopTemporalPresentation();
+    if (!presentationPlaying || !frame?.motionField?.buffer || !frame.motionPacing) return;
+    const token = temporalLoopToken;
+    const playbackRevision = presentationPlaybackRevision;
+    const signal = presentationMotionController.signal;
+    const current = () => !disposed && currentFrame === frame
+      && presentationPlaying && playbackRevision === presentationPlaybackRevision
+      && frame.invalidationEpoch === invalidationEpoch && temporalLoopToken === token;
+    const coalesced = Symbol('coalesced-isosurface-temporal-frame');
+    let retryingOpportunity = false;
+    // One outstanding draw on the same render lane. Queue completion and its
+    // post-GPU presentation opportunity already pace the loop; do not add a
+    // second rAF wait, which would halve cadence on a 60 Hz display.
+    void (async () => {
+      while (current()) {
+        const startedAtMs = temporalNowMs();
+        const ageS = isosurfaceMotionAge(frame.motionPacing, startedAtMs);
+        if (ageS == null || (retryingOpportunity
+          && ageS >= frame.motionPacing.maxSimulationAgeS)) return;
+        if (ageS > (frame.lastDisplayedMotionAgeS || 0)) {
+          let proof;
+          try {
+            proof = await onRenderLane(() => {
+              if (!current()) return false;
+              // A canonical boundary ahead on this lane may already have
+              // displayed the age sampled above. Re-sample after waiting;
+              // never clamp a queued animation job into a duplicate draw.
+              const freshAgeS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+              if (freshAgeS == null || (retryingOpportunity
+                && freshAgeS >= frame.motionPacing.maxSimulationAgeS)) return false;
+              if (!(freshAgeS > (frame.lastDisplayedMotionAgeS || 0))) return coalesced;
+              return renderFrame(frame, {
+                reason: 'worker-owned-isosurface-temporal-presentation',
+                allowLaggedGeneration: true,
+                requiresVisibleFrame: true,
+                playbackRevision, motionOnly: true, signal,
+                motionAgeS: freshAgeS
+              });
+            });
+          } catch (error) {
+            if (!(error instanceof PresentationOpportunityTimeoutError)) throw error;
+            if (!current()) return;
+            frame.temporalPresentationError = error.message;
+            const retryAgeS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+            // Failed waits never advance displayed age. Bound retries by the
+            // actual wall horizon, including time spent waiting on the lane.
+            if (!Number.isFinite(retryAgeS)
+              || retryAgeS >= frame.motionPacing.maxSimulationAgeS) return;
+            retryingOpportunity = true;
+            proof = coalesced;
+          }
+          if (!proof || !current()) return;
+          // A skip is private scheduling state, not a rendered-frame proof.
+          // Keep the loop paced and alive for the next advancing age.
+          if (proof !== coalesced) {
+            retryingOpportunity = false;
+            frame.temporalPresentationError = null;
+            publishRenderedTerminal(frame, 'presentation-only retained GPU field motion', proof);
+          }
+        }
+        if ((frame.lastDisplayedMotionAgeS || 0) >= frame.motionPacing.maxSimulationAgeS) return;
+        const remainingMs = 1000 / frame.motionPacing.targetHz - (temporalNowMs() - startedAtMs);
+        if (remainingMs > 0 && current()) {
+          await new Promise(resolve => {
+            releaseTemporalDelay = resolve;
+            temporalDelayHandle = globalThis.setTimeout(() => {
+              temporalDelayHandle = null;
+              releaseTemporalDelay = null;
+              resolve();
+            }, remainingMs);
+          });
+        }
+      }
+    })().catch(error => {
+      // A presentation failure must not become a physics schedule failure.
+      if (current()) frame.temporalPresentationError = String(error?.message || error);
+    });
   };
 
   const publishRenderedTerminal = (frame, reason, proof) => {
@@ -1466,6 +1768,7 @@ export function createWorkerOwnedIsosurfacePresenter({
       renderSmearDtS: Math.max(0, Number(job.request.renderSmearDtS) || 0),
       readbackMode: NO_FULL_READBACK_MODE,
       retainFieldRowsBuffer: true,
+      retainMotionFieldBuffer: true,
       retainSurfaceBuffer: false,
       waitForQueueCompletion: false,
       deferCleanup: true,
@@ -1611,7 +1914,35 @@ export function createWorkerOwnedIsosurfacePresenter({
             || 'worker-owned marching-cubes extraction failed'
           );
         }
-        extracted.push({ descriptor, wrapped, rawExecution });
+        const item = { descriptor, wrapped, rawExecution, temperatureRows: null };
+        extracted.push(item);
+        const result = rawExecution.result;
+        const position = result.outputDescriptors?.rows?.position || result.rowMetadata?.position;
+        const positionBuffer = position?.buffer || result.outputDescriptors?.retainedBuffers?.position || result.buffer;
+        const counterBuffer = result.actualVertexCounterBuffer || result.vertexCounterBuffer;
+        // Same encoder, exact extraction generations, and the still-retained
+        // scalar field. The actual vertex prefix stays entirely GPU-owned.
+        item.temperatureRows = encodeNativeSurfaceTemperatureRowsWebGpu({
+          device, commandEncoder: encoder,
+          compactPositions: {
+            buffer: positionBuffer,
+            byteLength: position?.bufferByteLength ?? result.bufferByteLength ?? positionBuffer?.size,
+            rowCount: position?.rowCount ?? result.vertexCount,
+            strideFloats: position?.rowStrideFloats ?? result.vertexStrideFloats,
+            surfaceGenerationId: result.surfaceGenerationId,
+            volumeGenerationId: result.volumeGenerationId
+          },
+          actualVertexCounter: {
+            buffer: counterBuffer,
+            byteLength: result.actualVertexCounterBufferByteLength ?? result.vertexCounterBufferByteLength ?? counterBuffer?.size
+          },
+          renderField: {
+            buffer: descriptor.scalarBuffer, byteLength: descriptor.scalarBufferByteLength,
+            dims: descriptor.dims, scalarStrides: descriptor.scalarStrides,
+            scalarOffsetFloats: descriptor.scalarOffset, volumeGenerationId: result.volumeGenerationId
+          },
+          generation: { surfaceGenerationId: result.surfaceGenerationId, volumeGenerationId: result.volumeGenerationId }
+        });
       }
       if (
         participatingMediumDescriptor?.status
@@ -1680,10 +2011,30 @@ export function createWorkerOwnedIsosurfacePresenter({
         });
         const uniformBuffer = device.createBuffer({
           label: `ulg-worker-owned-isosurface-uniform-${descriptor.surfaceIndex}`,
-          size: 36 * Float32Array.BYTES_PER_ELEMENT,
+          size: WORKER_NATIVE_SURFACE_UNIFORM_BYTES,
           usage:
             gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
             | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
+        });
+        const temperature = item.temperatureRows;
+        translation.nativeSurfaceTemperatureRows = temperature;
+        Object.assign(translation.surfaceDraw, {
+          compactTemperatureRowsBuffer: temperature.temperatureRowsBuffer,
+          compactTemperatureRowsBufferRetained: true,
+          compactTemperatureRowsBufferByteLength: temperature.temperatureRowsBufferByteLength,
+          compactTemperatureRowsBufferRowCount: temperature.temperatureRowsBufferRowCount,
+          compactTemperatureRowsStrideFloats: temperature.temperatureRowsStrideFloats,
+          compactTemperatureRowsSchema: temperature.temperatureRowsSchema,
+          compactTemperatureRowsLayoutName: temperature.temperatureRowsLayoutName,
+          compactTemperatureRowsEncoding: temperature.encoding,
+          compactTemperatureRowsSemantic: temperature.semantic,
+          compactTemperatureRowsSurfaceGenerationId: temperature.surfaceGenerationId,
+          compactTemperatureRowsVolumeGenerationId: temperature.volumeGenerationId,
+          compactTemperatureRowsCoverageSchema: temperature.coverage.schema,
+          compactTemperatureRowsCoverageComplete: temperature.coverage.complete,
+          compactTemperatureRowsCoverageRowCount: temperature.coverage.rowCount,
+          compactTemperatureRowsOwnership: temperature.temperatureRowsOwnership,
+          compactTemperatureRowsAdditionalSubmitCount: 0
         });
         surfaces.push({
           descriptor,
@@ -1691,10 +2042,12 @@ export function createWorkerOwnedIsosurfacePresenter({
           translation,
           rawExecution: item.rawExecution,
           uniformBuffer,
+          releaseTemperatureRows: () => retireTemperatureRows(temperature),
           bindGroups: new Map()
         });
         translatedSurfaces.push(surfaces[surfaces.length - 1]);
       }
+      const motionField = renderField.takeMotionField?.() || null;
       renderField.destroyRenderFieldBuffers?.({
         force: true,
         releaseLeases: true,
@@ -1704,6 +2057,8 @@ export function createWorkerOwnedIsosurfacePresenter({
         generation: job.generation,
         invalidationEpoch: job.invalidationEpoch,
         sphStep: job.sphStep,
+        sourceTimeS: job.sourceTimeS,
+        motionField,
         request: job.request,
         receiptFields: job.receiptFields,
         viewProjectionMatrix: [...job.admission.viewProjectionMatrix],
@@ -1741,6 +2096,9 @@ export function createWorkerOwnedIsosurfacePresenter({
       );
       for (const item of extracted) {
         if (translatedExecutions.has(item.rawExecution)) continue;
+        if (item.temperatureRows) {
+          retireTemperatureRows(item.temperatureRows);
+        }
         try {
           item.rawExecution?.result?.release?.();
         } catch {
@@ -1758,6 +2116,28 @@ export function createWorkerOwnedIsosurfacePresenter({
       }
       throw error;
     }
+  };
+
+  const admitCommittedFrame = (frame, sourceTimingBootstrap, reason, proof) => {
+    const previousFrame = currentFrame;
+    currentFrame = frame;
+    currentFrame.sourcePresentedAtMs = temporalNowMs();
+    currentFrame.sourcePresentationPausedWallMs = presentationPauseClock.pausedAt(currentFrame.sourcePresentedAtMs);
+    const previousPausedWallMs = previousFrame
+      ? previousFrame.sourcePresentationPausedWallMs : frame.sourceTimingPausedWallMs;
+    currentFrame.motionPacing = createIsosurfaceMotionPacing(
+      currentFrame, previousFrame, currentFrame.sourcePresentedAtMs,
+      sourceTimingBootstrap,
+      { pausedWallDeltaMs: previousPausedWallMs == null ? NaN
+        : currentFrame.sourcePresentationPausedWallMs - previousPausedWallMs }
+    );
+    startTemporalPresentation(currentFrame);
+    if (previousFrame) {
+      deferSubmittedWorkCleanup(device, () => {
+        releaseFrame(previousFrame, 'worker-isosurface-replaced');
+      });
+    }
+    publishRenderedTerminal(currentFrame, reason, proof);
   };
 
   const processJobs = async () => {
@@ -1781,6 +2161,9 @@ export function createWorkerOwnedIsosurfacePresenter({
             continue;
           }
           frame = await (buildPresentationFrame ?? buildFrame)(job, captured);
+          frame.request = job.request;
+          frame.sourceTimeS = job.sourceTimeS;
+          frame.sourceTimingPausedWallMs = job.sourceTimingPausedWallMs;
           if (job.invalidationEpoch !== invalidationEpoch || disposed) {
             const resizeRebaseAllowed = Boolean(
               !disposed
@@ -1822,10 +2205,35 @@ export function createWorkerOwnedIsosurfacePresenter({
             );
             continue;
           }
-          let presentationProof = await scheduleRenderFrame(frame, {
-            reason: 'committed-worker-isosurface',
-            allowLaggedGeneration: true
-          });
+          // Retry only the exact post-GPU callback timeout, once per immutable
+          // committed job (including its resize rebases). The failed wait has
+          // already paced this retry. It produced no proof, but its GPU serial
+          // and submitted-generation high-water mark must remain consumed:
+          // retaining the old admission does not imply its pixels stayed up.
+          let opportunityRetryUsed = false;
+          const retryJobIsCurrent = () => !disposed
+            && activeJob === job && generation === job.generation;
+          const drawCommittedFrame = async (reason) => {
+            for (;;) {
+              try {
+                return await onRenderLane(() => {
+                  if (opportunityRetryUsed && !retryJobIsCurrent()) return false;
+                  return renderFrame(frame, {
+                    reason,
+                    allowLaggedGeneration: !opportunityRetryUsed
+                  });
+                });
+              } catch (error) {
+                if (!(error instanceof PresentationOpportunityTimeoutError)) throw error;
+                // A cancellation is supersession even if it coincides with
+                // the final allowed wait. Never resurrect it via a resize.
+                if (!retryJobIsCurrent()) return false;
+                if (opportunityRetryUsed) throw error;
+                opportunityRetryUsed = true;
+              }
+            }
+          };
+          let presentationProof = await drawCommittedFrame('committed-worker-isosurface');
           while (
             !presentationProof?.presentationFrameAdmitted
             && frame.invalidationEpoch !== invalidationEpoch
@@ -1844,13 +2252,11 @@ export function createWorkerOwnedIsosurfacePresenter({
             const nextInvalidationEpoch = invalidationEpoch;
             job.invalidationEpoch = nextInvalidationEpoch;
             frame.invalidationEpoch = nextInvalidationEpoch;
-            presentationProof = await scheduleRenderFrame(frame, {
-              reason: 'committed-worker-isosurface-after-resize',
-              allowLaggedGeneration: true
-            });
+            presentationProof = await drawCommittedFrame('committed-worker-isosurface-after-resize');
           }
           if (!presentationProof?.presentationFrameAdmitted) {
-            if (frame.invalidationEpoch !== invalidationEpoch || disposed) {
+            if (frame.invalidationEpoch !== invalidationEpoch || disposed
+              || generation !== job.generation) {
               releaseFrame(
                 frame,
                 'worker-isosurface-invalidated-during-presentation'
@@ -1868,20 +2274,31 @@ export function createWorkerOwnedIsosurfacePresenter({
             }
             throw new Error('worker-owned isosurface frame was not current at submit');
           }
-          const previousFrame = currentFrame;
-          currentFrame = frame;
-          frame = null;
-          if (previousFrame) {
-            deferSubmittedWorkCleanup(device, () => {
-              releaseFrame(previousFrame, 'worker-isosurface-replaced');
-            });
-          }
-          publishRenderedTerminal(
-            currentFrame,
+          admitCommittedFrame(
+            frame, job.sourceTimingBootstrap,
             'same-device retained state rendered as true isosurface',
             presentationProof
           );
+          frame = null;
         } catch (error) {
+          if (error instanceof PresentationOpportunityTimeoutError
+            && frame && !disposed
+            && frame.generation === generation
+            && frame.generation === mostRecentSubmittedGeneration
+            && frame.invalidationEpoch === invalidationEpoch) {
+            // Both automatic attempts are spent. Keep just this immutable
+            // source's owned presentation resources, never its physics job.
+            // No timer/proof is created; only a later explicit input can try
+            // a new draw. Inputs already queued during those waits cannot
+            // turn the failed job into an automatic third attempt.
+            retireRecoveryCandidate('worker-isosurface-recovery-replaced');
+            recoveryCandidate = Object.freeze({
+              frame,
+              sourceTimingBootstrap: job.sourceTimingBootstrap,
+              parkedAfterRedrawSequence: redrawRequestSequence
+            });
+            frame = null;
+          }
           if (frame) releaseFrame(frame, 'worker-isosurface-build-failed');
           terminal(
             job,
@@ -1952,22 +2369,32 @@ export function createWorkerOwnedIsosurfacePresenter({
 
   const pumpRedraws = async () => {
     while (pendingRedraw && !disposed) {
-      if (captureInFlightCount > 0) {
-        await waitForCaptureQuiescence();
-        continue;
-      }
-      if (activeJob || latestJob) {
-        const committedPump = pumpPromise;
-        if (committedPump) await committedPump.catch(() => {});
-        else await Promise.resolve();
-        continue;
+      const recovery = pendingRedraw.allowCandidateRecovery
+        && pendingRedraw.requestSequence > (recoveryCandidate?.parkedAfterRedrawSequence ?? Infinity)
+        && recoveryCandidate?.frame.generation === generation
+        && recoveryCandidate.frame.generation === mostRecentSubmittedGeneration
+        && recoveryCandidate.frame.invalidationEpoch === invalidationEpoch
+        ? recoveryCandidate : null;
+      const visibleFrameReady = recovery || currentFrame
+        && currentFrame.invalidationEpoch === invalidationEpoch
+        && currentFrame.generation >= mostRecentSubmittedGeneration;
+      if (!visibleFrameReady) {
+        // Wait only when no admitted frame can be drawn. A replacement that
+        // already submitted owns the render lane; never repaint its old mesh.
+        if (pumpPromise) {
+          await pumpPromise.catch(() => {});
+          continue;
+        }
+        if (captureInFlightCount > 0) {
+          await waitForCaptureQuiescence();
+          continue;
+        }
       }
       const redraw = pendingRedraw;
       pendingRedraw = null;
-      const redrawFrame = currentFrame;
+      const redrawFrame = recovery?.frame || currentFrame;
       if (
-        !redrawFrame
-        || redrawFrame.generation !== generation
+        !visibleFrameReady
       ) {
         redraw.resolve(false);
         continue;
@@ -1975,13 +2402,26 @@ export function createWorkerOwnedIsosurfacePresenter({
       try {
         const presentationProof = await scheduleRenderFrame(redrawFrame, {
           ...redraw.options,
-          allowLaggedGeneration: false
+          allowLaggedGeneration: !recovery,
+          requiresVisibleFrame: !recovery,
+          requiresRecoverableFrame: Boolean(recovery)
         });
+        if (recovery && presentationProof && recoveryCandidate === recovery
+          && redrawFrame.generation === generation
+          && redrawFrame.invalidationEpoch === invalidationEpoch && !disposed) {
+          recoveryCandidate = null;
+          admitCommittedFrame(redrawFrame, recovery.sourceTimingBootstrap,
+            redraw.options.reason, presentationProof);
+          redraw.resolve(true);
+          continue;
+        }
         const redrawFrameStillVisible = Boolean(
+          !recovery
+          &&
           presentationProof
           && currentFrame === redrawFrame
           && redrawFrame.invalidationEpoch === invalidationEpoch
-          && redrawFrame.generation === generation
+          && redrawFrame.generation >= mostRecentSubmittedGeneration
           && !disposed
         );
         if (redrawFrameStillVisible) {
@@ -1990,9 +2430,20 @@ export function createWorkerOwnedIsosurfacePresenter({
             redraw.options.reason,
             presentationProof
           );
+        } else if (!disposed && !pendingRedraw
+          && (activeJob || latestJob || captureInFlightCount > 0)) {
+          // A replacement may have won the lane after this redraw was queued.
+          // Carry the request once through that replacement instead of losing
+          // the camera update or publishing the retired frame.
+          pendingRedraw = redraw;
+          continue;
         }
         redraw.resolve(redrawFrameStillVisible);
       } catch (error) {
+        if (recovery && recoveryCandidate?.frame.generation === recovery.frame.generation
+          && !(error instanceof PresentationOpportunityTimeoutError)) {
+          retireRecoveryCandidate('worker-isosurface-recovery-failed');
+        }
         redraw.reject(error);
       }
     }
@@ -2008,11 +2459,21 @@ export function createWorkerOwnedIsosurfacePresenter({
     });
   };
 
-  const scheduleRedraw = (options) => {
+  const scheduleRedraw = (options, { allowCandidateRecovery = false } = {}) => {
+    if (disposed) return Promise.resolve(false);
+    const requestSequence = ++redrawRequestSequence;
+    const viewProjection = finiteVector(options?.viewProjectionMatrix, 16);
+    const cameraPosition = finiteVector(options?.cameraPositionM, 3);
+    if (viewProjection) latestViewProjectionMatrix = [...viewProjection];
+    if (cameraPosition) latestCameraPositionM = [...cameraPosition];
+    if (options?.nativeSurfaceAppearance != null) {
+      latestNativeSurfaceAppearance = structuredClone(options.nativeSurfaceAppearance);
+    }
     if (
       disposed
       || (
         !currentFrame
+        && !recoveryCandidate
         && captureInFlightCount === 0
         && !activeJob
         && !latestJob
@@ -2027,6 +2488,8 @@ export function createWorkerOwnedIsosurfacePresenter({
     retirePendingRedraw();
     pendingRedraw = {
       options,
+      allowCandidateRecovery,
+      requestSequence,
       resolve: resolveRedraw,
       reject: rejectRedraw
     };
@@ -2039,7 +2502,8 @@ export function createWorkerOwnedIsosurfacePresenter({
       request,
       retained,
       sphStep = null,
-      receiptFields = {}
+      receiptFields = {},
+      sourceTimingBootstrap = null
     } = {}) {
       if (disposed) {
         return presentationReceiptBase({
@@ -2057,8 +2521,18 @@ export function createWorkerOwnedIsosurfacePresenter({
           ...receiptFields
         });
       }
+      // Cold material records belong to this source admission, not the mutable
+      // caller request or a later camera/appearance update.
+      request = { ...request, nativeSurfaceMaterial: admission.nativeSurfaceMaterial };
       generation += 1;
+      retireRecoveryCandidate('worker-isosurface-recovery-superseded');
       const jobGeneration = generation;
+      const retainedTime = retained.sphParticleUpload?.time;
+      const sourceTimeS = typeof retainedTime === 'number' && Number.isFinite(retainedTime)
+        ? retainedTime : null;
+      sourceTimingBootstrap = snapshotIsosurfaceSourceTimingBootstrap(sourceTimingBootstrap);
+      const sourceTimingPausedWallMs = sourceTimingBootstrap
+        ? presentationPauseClock.pausedAt(sourceTimingBootstrap.sourceObservedAtMs) : null;
       const captureInvalidationEpoch = invalidationEpoch;
       let productEvents;
       let releaseProductEventBorrow = null;
@@ -2184,6 +2658,9 @@ export function createWorkerOwnedIsosurfacePresenter({
         });
       }
       const job = {
+        sourceTimeS,
+        sourceTimingBootstrap,
+        sourceTimingPausedWallMs,
         generation: jobGeneration,
         request,
         retained,
@@ -2223,15 +2700,238 @@ export function createWorkerOwnedIsosurfacePresenter({
         updatedAtMs: nowMs()
       });
     },
+    setPresentationPlaying(value) {
+      if (typeof value !== 'boolean') throw new TypeError('presentation playing must be a boolean');
+      if (disposed || value === presentationPlaying) return false;
+      const atMs = temporalNowMs();
+      presentationPauseClock.setPlaying(value, atMs);
+      presentationPlaying = value;
+      presentationPlaybackRevision += 1;
+      presentationMotionController.abort();
+      presentationMotionController = new AbortController();
+      stopTemporalPresentation();
+      if (value) {
+        if (currentFrame?.motionPacing) {
+          currentFrame.motionPacing = resumeIsosurfaceMotionPacing(
+            currentFrame.motionPacing, atMs, currentFrame.lastDisplayedMotionAgeS || 0);
+          startTemporalPresentation(currentFrame);
+        }
+      } else if (currentFrame && currentFrame.lastSubmittedMotionAgeS
+        > (currentFrame.lastDisplayedMotionAgeS || 0)) {
+        // Revoking a pending proof cannot undo its submitted pixels. Repaint
+        // the admitted age after that lane drains, without admitting a parked
+        // source or granting another committed callback-timeout attempt.
+        void scheduleRedraw({ reason: 'worker-isosurface-pause-frozen-redraw',
+          playbackRevision: presentationPlaybackRevision }).catch(() => {});
+      }
+      return true;
+    },
     async redraw({
       viewProjectionMatrix = null,
       cameraPositionM = null,
+      nativeSurfaceAppearance = null,
       reason = 'worker-owned-isosurface-camera-redraw'
     } = {}) {
       return scheduleRedraw({
         viewProjectionMatrix,
         cameraPositionM,
+        nativeSurfaceAppearance,
         reason
+      }, { allowCandidateRecovery: true });
+    },
+    beginPendingSourceProgress({ scheduleId, laneId, stateKey, presentationLaneEpoch,
+      sourceTimeS, totalStepCount } = {}) {
+      const token = ++pendingSourceProgressToken;
+      const epoch = invalidationEpoch;
+      const startedAtMs = temporalNowMs();
+      const startedPausedWallMs = presentationPauseClock.pausedAt(startedAtMs);
+      if (disposed
+        || typeof scheduleId !== 'string' || !scheduleId.trim()
+        || typeof laneId !== 'string' || !laneId.trim()
+        || typeof stateKey !== 'string' || !stateKey.trim()
+        || !Number.isSafeInteger(presentationLaneEpoch) || presentationLaneEpoch <= 0
+        || typeof sourceTimeS !== 'number' || !Number.isFinite(sourceTimeS) || sourceTimeS < 0
+        || !Number.isSafeInteger(totalStepCount) || totalStepCount <= 1
+        || !Number.isFinite(startedAtMs) || startedAtMs < 0) return null;
+      let frame = null;
+      let lastStep = 0;
+      let lastObservedAtMs = startedAtMs;
+      let closed = false;
+      return (progress) => {
+        if (closed || disposed || !presentationPlaying
+          || token !== pendingSourceProgressToken || epoch !== invalidationEpoch
+          || (frame && currentFrame !== frame)
+          || progress?.scheduleId !== scheduleId) return false;
+        const step = progress.stepOrdinal;
+        const atMs = temporalNowMs();
+        if (!Number.isSafeInteger(step) || step <= lastStep || step > totalStepCount
+          || progress.completedStepCount !== step
+          || !Number.isFinite(atMs) || atMs < lastObservedAtMs) return false;
+        lastStep = step;
+        lastObservedAtMs = atMs;
+        if (step === totalStepCount) { closed = true; return false; }
+        // Physics may resume once source capture is safe, before the new mesh
+        // reaches the screen. Bind lazily to that exact source, never to the
+        // predecessor still visible when the schedule began.
+        if (!frame) {
+          const candidate = currentFrame;
+          if (!candidate?.motionField?.buffer || !candidate.motionPacing
+            || candidate.invalidationEpoch !== epoch
+            || candidate.sourceTimeS !== sourceTimeS
+            || candidate.receiptFields?.laneId !== laneId
+            || candidate.receiptFields?.stateKey !== stateKey
+            || candidate.receiptFields?.presentationLaneEpoch !== presentationLaneEpoch) return false;
+          frame = candidate;
+        }
+        const activeWallMs = atMs - startedAtMs
+          - (presentationPauseClock.pausedAt(atMs) - startedPausedWallMs);
+        const remainingWallS = activeWallMs / 1000 * (totalStepCount - step) / step;
+        const pacing = slowIsosurfaceMotionPacing(frame.motionPacing, atMs,
+          remainingWallS, frame.lastDisplayedMotionAgeS || 0);
+        if (pacing === frame.motionPacing) return false;
+        frame.motionPacing = pacing;
+        // No draw, restart, GPU read, or proof publication here. The existing
+        // autonomous and boundary paths sample the new monotonic segment.
+        return true;
+      };
+    },
+    hasSubmissionBoundaryOpportunity() {
+      const frame = currentFrame;
+      if (disposed || !presentationPlaying || !frame?.motionField?.buffer || !frame.motionPacing
+        || frame.invalidationEpoch !== invalidationEpoch) return false;
+      return isosurfaceMotionAge(frame.motionPacing, temporalNowMs())
+        > (frame.lastDisplayedMotionAgeS || 0);
+    },
+    hasRetainedSubmissionGapOpportunity,
+    presentRetainedSubmissionGap({ signal = null, waitForPendingSlot = false } = {}) {
+      if (signal?.aborted || !hasRetainedSubmissionGapOpportunity({ waitForPendingSlot })) {
+        return Promise.resolve(false);
+      }
+      const frame = currentFrame;
+      const requestEpoch = invalidationEpoch;
+      const expectedFramebufferEpoch = Number(getFramebufferEpoch());
+      if (!Number.isSafeInteger(expectedFramebufferEpoch) || expectedFramebufferEpoch <= 0) {
+        return Promise.resolve(false);
+      }
+      // One entry deadline includes a prospective slot wait, render-lane wait,
+      // appearance preparation and encoding. Slot release never renews it.
+      const submissionDeadlineMs = temporalNowMs() + 1000 / 60;
+      const predecessor = retainedSubmissionGap;
+      const controller = new AbortController();
+      const motionSignal = AbortSignal.any([
+        controller.signal, presentationMotionController.signal,
+        ...(signal ? [signal] : [])
+      ]);
+      const playbackRevision = presentationPlaybackRevision;
+      let acknowledge;
+      let acknowledged = false;
+      const queued = new Promise(resolve => { acknowledge = resolve; });
+      let resolveAborted;
+      const aborted = new Promise(resolve => { resolveAborted = resolve; });
+      let resolveCompleted;
+      const gap = { abort: () => controller.abort(),
+        completed: new Promise(resolve => { resolveCompleted = resolve; }) };
+      let timer = null;
+      const settle = value => {
+        if (acknowledged) return;
+        acknowledged = true;
+        globalThis.clearTimeout(timer);
+        acknowledge(value);
+      };
+      const onAbort = () => {
+        settle(false);
+        resolveAborted(false);
+      };
+      motionSignal.addEventListener('abort', onAbort, { once: true });
+      const finish = succeeded => {
+        settle(false);
+        motionSignal.removeEventListener('abort', onAbort);
+        if (retainedSubmissionGap === gap) retainedSubmissionGap = null;
+        if (retainedSubmissionGapWaiter === gap) retainedSubmissionGapWaiter = null;
+        // Separate from the early ack: only a drained, successful full proof
+        // allows a prospective waiter to claim the now-vacant slot.
+        resolveCompleted(succeeded === true && !motionSignal.aborted);
+      };
+      const requestIsCurrent = () => !motionSignal.aborted && !disposed
+        && presentationPlaying && playbackRevision === presentationPlaybackRevision
+        && invalidationEpoch === requestEpoch && currentFrame === frame
+        && frame.invalidationEpoch === requestEpoch
+        && Number(getFramebufferEpoch()) === expectedFramebufferEpoch
+        && temporalNowMs() <= submissionDeadlineMs;
+      // Waiting for an older render or a cold appearance must not hold up
+      // physics indefinitely. Abort revokes a late submit; a successful ack
+      // cancels only this timer, never the still-pending presentation proof.
+      timer = globalThis.setTimeout(() => controller.abort(), 1000 / 60);
+      const claimAndRender = () => {
+        try {
+          if (!requestIsCurrent() || retainedSubmissionGap
+            || !retainedSubmissionGapEligible(frame)) {
+            finish(false);
+            return;
+          }
+          // Atomically exchange the single prospective waiter for the single
+          // active slot, then join the existing FIFO lane without another await.
+          if (retainedSubmissionGapWaiter === gap) retainedSubmissionGapWaiter = null;
+          retainedSubmissionGap = gap;
+          void onRenderLane(async () => {
+            if (!requestIsCurrent() || !retainedSubmissionGapEligible(frame)) return false;
+            const ageS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+            const proof = await renderFrame(frame, {
+              reason: 'worker-owned-isosurface-retained-submission-gap',
+              allowLaggedGeneration: true, requiresVisibleFrame: true,
+              playbackRevision, motionOnly: true, signal: motionSignal,
+              motionAgeS: ageS, submissionDeadlineMs, expectedFramebufferEpoch,
+              onSubmissionQueued: () => settle(true)
+            });
+            if (proof) publishRenderedTerminal(frame,
+              'presentation-only retained mesh between physics submissions', proof);
+            return proof;
+          }).then(proof => finish(Boolean(proof)), () => finish(false));
+        } catch {
+          // Provider rechecks may throw before the lane owns this request,
+          // including after an older proof releases the prospective waiter.
+          finish(false);
+        }
+      };
+      if (predecessor) {
+        retainedSubmissionGapWaiter = gap;
+        // Never occupy the render lane while waiting for its predecessor.
+        // Timeout/cancellation affects only this request, not the older proof.
+        void Promise.race([predecessor.completed, aborted]).then(succeeded => {
+          if (succeeded === true) claimAndRender();
+          else finish(false);
+        }, () => finish(false));
+      } else claimAndRender();
+      return queued;
+    },
+    presentSubmissionBoundary(boundary, { signal = null } = {}) {
+      if (signal?.aborted || disposed || !presentationPlaying || !boundary
+        || !['submissionOrdinal', 'completedSubstepCount', 'totalSubstepCount', 'chunkStepCount']
+          .every(key => Number.isSafeInteger(boundary[key]) && boundary[key] > 0)
+        || boundary.completedSubstepCount >= boundary.totalSubstepCount
+        || boundary.chunkStepCount > boundary.completedSubstepCount) return Promise.resolve(false);
+      const submissionBoundary = Object.freeze({ ...boundary });
+      const playbackRevision = presentationPlaybackRevision;
+      const motionSignal = signal
+        ? AbortSignal.any([signal, presentationMotionController.signal])
+        : presentationMotionController.signal;
+      return onRenderLane(async () => {
+        if (motionSignal.aborted || playbackRevision !== presentationPlaybackRevision) return false;
+        const frame = currentFrame;
+        if (!frame?.motionField?.buffer || !frame.motionPacing) return false;
+        // Select source and age on the lane, not when the callback was queued:
+        // the autonomous loop or a replacement may have progressed meanwhile.
+        const ageS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+        if (!(ageS > (frame.lastDisplayedMotionAgeS || 0))) return false;
+        const proof = await renderFrame(frame, {
+          reason: 'worker-owned-isosurface-submission-boundary',
+          allowLaggedGeneration: true, requiresVisibleFrame: true,
+          motionAgeS: ageS, submissionBoundary, signal: motionSignal,
+          playbackRevision, motionOnly: true
+        });
+        if (!proof) return false;
+        publishRenderedTerminal(frame, 'presentation-only retained mesh at submission boundary', proof);
+        return proof;
       });
     },
     async resize({
@@ -2240,12 +2940,42 @@ export function createWorkerOwnedIsosurfacePresenter({
       reason = 'worker-owned-isosurface-presentation-resize'
     } = {}) {
       if (disposed) return false;
+      retireRetainedSubmissionGap();
+      stopTemporalPresentation();
+      const previousInvalidationEpoch = invalidationEpoch;
       invalidationEpoch += 1;
       resizeRetryInvalidationEpoch = invalidationEpoch;
+      if (recoveryCandidate) {
+        const candidate = recoveryCandidate;
+        const invalidatedFrame = candidate.frame;
+        if (invalidatedFrame.generation === generation
+          && invalidatedFrame.invalidationEpoch === previousInvalidationEpoch) {
+          // A later framebuffer resize preserves this source, not its failed
+          // proof. Move ownership exactly once and require a new epoch/fence.
+          const rebasedFrame = { ...invalidatedFrame, invalidationEpoch };
+          recoveryCandidate = Object.freeze({ ...candidate, frame: rebasedFrame });
+          // Keep the logical rebase synchronous (including input ordering),
+          // but move resources after any old-wrapper prepare/submit finishes.
+          // Each resize queues its transfer before the corresponding redraw.
+          void onRenderLane(() => {
+            nativeMaterial?.transferFrame(invalidatedFrame, rebasedFrame);
+            invalidatedFrame.surfaces = [];
+            invalidatedFrame.participatingMedium = null;
+            invalidatedFrame.motionField = null;
+          }).catch(() => {
+            if (recoveryCandidate?.frame.generation === rebasedFrame.generation) {
+              retireRecoveryCandidate('worker-isosurface-recovery-resize-transfer-failed');
+            }
+          });
+        } else {
+          retireRecoveryCandidate('worker-isosurface-recovery-resize-invalidated');
+        }
+      }
       const replacementPending = Boolean(
         captureInFlightCount > 0
         || activeJob
         || latestJob
+        || recoveryCandidate
       );
       if (currentFrame && !replacementPending) {
         const invalidatedFrame = currentFrame;
@@ -2254,20 +2984,30 @@ export function createWorkerOwnedIsosurfacePresenter({
           invalidationEpoch,
           surfaces: invalidatedFrame.surfaces
         };
+        nativeMaterial?.transferFrame(invalidatedFrame, currentFrame);
         invalidatedFrame.surfaces = [];
         invalidatedFrame.participatingMedium = null;
+        invalidatedFrame.motionField = null;
       }
-      return scheduleRedraw({
+      const redrawn = await scheduleRedraw({
         viewProjectionMatrix,
         cameraPositionM,
         reason
-      });
+      }, { allowCandidateRecovery: true });
+      if (redrawn) startTemporalPresentation(currentFrame);
+      return redrawn;
     },
     clear({ reason = 'worker-owned-isosurface-presentation-clear' } = {}) {
       if (disposed) return false;
+      retireRetainedSubmissionGap();
+      stopTemporalPresentation();
       invalidationEpoch += 1;
       resizeRetryInvalidationEpoch = null;
       generation += 1;
+      retireRecoveryCandidate(reason);
+      latestViewProjectionMatrix = null;
+      latestCameraPositionM = null;
+      latestNativeSurfaceAppearance = null;
       retirePendingRedraw();
       retireQueuedJob(latestJob, reason);
       latestJob = null;
@@ -2289,11 +3029,19 @@ export function createWorkerOwnedIsosurfacePresenter({
           ? 'worker-owned-isosurface-presenter-disposed'
           : 'worker-owned-isosurface-presenter-ready',
         generation,
+        presentationPlaying,
+        presentationPlaybackRevision,
         running,
         activeGeneration: activeJob?.generation ?? null,
         queuedGeneration: latestJob?.generation ?? null,
         visibleGeneration: currentFrame?.generation ?? null,
+        recoverableGeneration: recoveryCandidate?.frame.generation ?? null,
+        recoverableSphStep: recoveryCandidate?.frame.sphStep ?? null,
         visibleSphStep: currentFrame?.sphStep ?? null,
+        visibleSourceTimeS: currentFrame?.sourceTimeS ?? null,
+        temporalMotionReady: Boolean(currentFrame?.motionField?.buffer && currentFrame?.motionPacing),
+        temporalMotionAgeS: currentFrame?.lastDisplayedMotionAgeS || 0,
+        temporalPresentationError: currentFrame?.temporalPresentationError || null,
         visibleSurfaceCount:
           currentFrame?.totalSurfaceCount
           ?? currentFrame?.surfaces?.length
@@ -2316,10 +3064,13 @@ export function createWorkerOwnedIsosurfacePresenter({
     },
     async dispose() {
       if (disposed) return;
+      retireRetainedSubmissionGap();
+      stopTemporalPresentation();
       disposed = true;
       invalidationEpoch += 1;
       resizeRetryInvalidationEpoch = null;
       generation += 1;
+      retireRecoveryCandidate('worker-isosurface-recovery-dispose');
       retirePendingRedraw();
       wakeCaptureQuiescenceWaiters();
       retireQueuedJob(latestJob, 'worker-owned isosurface presenter disposed');
@@ -2333,9 +3084,13 @@ export function createWorkerOwnedIsosurfacePresenter({
       releaseFrame(currentFrame, 'worker-isosurface-presenter-dispose');
       currentFrame = null;
       await releaseAdapterCache();
+      nativeMaterial?.dispose();
+      nativeMaterial = null;
       fieldRowsBuffer?.destroy?.();
       fieldRowsBuffer = null;
       fieldRowsBufferByteLength = 0;
+      emptyMotionBuffer?.destroy?.();
+      emptyMotionBuffer = null;
       try {
         participatingMediumRuntime?.destroy?.();
       } catch {

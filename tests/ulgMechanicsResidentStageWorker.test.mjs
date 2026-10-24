@@ -8,8 +8,11 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_REACTION_CLOSURE_SCHEMA,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1,
+  SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT,
@@ -30,6 +33,7 @@ import {
   ULG_WORKER_RESIDENT_SCHEDULE_MAX_STEP_COUNT,
   ULG_WORKER_RESIDENT_SCHEDULE_CONTROL_PLANE_YIELD_RECEIPT_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_QUEUE_DRAIN_INTERVAL_STEPS,
+  ULG_WORKER_CANONICAL_PRESENTATION_BOUNDARY_TIMEOUT_MS,
   ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY,
   ULG_WORKER_RESIDENT_SCHEDULE_PROGRESS_SCHEMA,
   ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
@@ -76,6 +80,18 @@ import {
   validateSchroederSpatialEpochGenerationLevelAssignment
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 import {
+  SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET,
+  destroySchroederSpatialMechanicalProposalRuntime,
+  runSchroederSpatialMechanicalProposalWebGpu
+} from '../src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
+import {
+  destroySchroederSpatialThermalProposalRuntime,
+  runSchroederSpatialThermalProposalWebGpu
+} from '../src/runtime/sph/schroederSpatialThermalProposalsGpu.js';
+import {
+  createSchroederSpatialEpochTransaction
+} from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
+import {
   createSchroederSameLevelMechanicsSpatialEpochTransaction,
   runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu
@@ -106,8 +122,11 @@ import {
   publishUlgPressureInterfaceGasCellFieldImportSource
 } from '../src/runtime/peercomputeBrowserResidentHost.js';
 import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
-  ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA
+  ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_COPY_SCHEMA,
+  ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA
 } from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
 import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -124,6 +143,7 @@ import {
 import {
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+  ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
   ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
   createWorkerTier0PresentationQosPlan,
   resolveWorkerTier0PresentationQosSubsteps
@@ -1842,11 +1862,15 @@ test('ULG resident worker keeps exact v4 gas authority internal and exports non-
               ],
               [
                 'peercompute.ulg.sph-retained-gas-cell-eos-source.v2',
-                /retired v2\/v3 wrappers/
+                /retired v2\/v3\/v4 wrappers/
               ],
               [
                 'peercompute.ulg.sph-retained-gas-cell-eos-source.v3',
-                /retired v2\/v3 wrappers/
+                /retired v2\/v3\/v4 wrappers/
+              ],
+              [
+                'peercompute.ulg.sph-retained-gas-cell-eos-source.v4',
+                /retired v2\/v3\/v4 wrappers/
               ]
             ]) {
               assert.throws(
@@ -2532,6 +2556,11 @@ test('ULG resident worker keeps exact v4 gas authority internal and exports non-
       'retired-v3',
       'peercompute.ulg.sph-retained-gas-cell-eos-source.v3',
       'blocked-retired-gas-pressure-authority-schema'
+    ],
+    [
+      'retired-v4',
+      'peercompute.ulg.sph-retained-gas-cell-eos-source.v4',
+      'blocked-retired-gas-pressure-authority-schema'
     ]
   ]) {
     const protectedSchemaRejected = await runHostileExactWorkerImport(
@@ -2704,32 +2733,20 @@ test('ULG resident worker keeps exact v4 gas authority internal and exports non-
       .workerRetainedGasCellFieldImportInputStatus,
     'blocked-forged-exact-v4-gas-pressure-authority-schema'
   );
-  const retiredSchemaPrototype = {
-    schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v3'
-  };
-  const inheritedRetiredSchemaWrapper = Object.create(
-    retiredSchemaPrototype
-  );
-  Object.defineProperty(
-    inheritedRetiredSchemaWrapper,
-    'retainedGasCellFieldSource',
-    {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: legacyRawSource
-    }
-  );
-  const inheritedRetiredSchemaRejected =
-    await runHostileExactWorkerImport(
-      'inherited-retired-schema',
-      inheritedRetiredSchemaWrapper
+  for (const version of [3, 4]) {
+    const inheritedRetiredSchemaWrapper = Object.create({
+      schema: `peercompute.ulg.sph-retained-gas-cell-eos-source.v${version}`
+    });
+    inheritedRetiredSchemaWrapper.retainedGasCellFieldSource = legacyRawSource;
+    const inheritedRetiredSchemaRejected = await runHostileExactWorkerImport(
+      `inherited-retired-schema-v${version}`, inheritedRetiredSchemaWrapper
     );
-  assert.equal(
-    inheritedRetiredSchemaRejected.value.workerResidentStage
-      .workerRetainedGasCellFieldImportInputStatus,
-    'blocked-retired-gas-pressure-authority-schema'
-  );
+    assert.equal(
+      inheritedRetiredSchemaRejected.value.workerResidentStage
+        .workerRetainedGasCellFieldImportInputStatus,
+      'blocked-retired-gas-pressure-authority-schema'
+    );
+  }
 
   let prototypeSchemaGetterCount = 0;
   const accessorSchemaPrototype = {};
@@ -3505,6 +3522,42 @@ test('ULG resident stage worker rematerializes adopted storage from a descriptor
   assert.equal(
     second.value.workerResidentStage.workerAdoptedStorageRematerialization.reusedRetainedBuffers,
     true
+  );
+
+  // A new clock cannot relabel the already retained source buffers, even
+  // when both incoming packed descriptors agree on that different clock.
+  for (const changedClock of [{ step: 7 }, { time: 0.375 }]) {
+    const changedContext = {
+      ...context,
+      common: {
+        ...context.common,
+        sphParticleState: { ...buffers.sphParticleState, ...changedClock },
+        mlsMpmParticleState: { ...buffers.mlsMpmParticleState, ...changedClock }
+      },
+      stageOptions: {
+        schroederLaneSeed: {
+          schroederLaneSeed: { lineage: WORKER_LANE_SEED_DEFAULT_LINEAGE }
+        }
+      }
+    };
+    await assert.rejects(
+      runUlgMechanicsResidentStageWorkerPayload(payload(
+        workerLaneSeedStage(), changedContext, null, laneOptions
+      )),
+      (error) => {
+        assert.equal(error.reason, 'seed-particle-storage-rematerialization-blocked');
+        assert.match(error.message, /rematerialization-retained-clock-mismatch/);
+        return true;
+      }
+    );
+  }
+  const unchanged = await runUlgMechanicsResidentStageWorkerPayload(
+    payload(p2gStage, context, null, laneOptions)
+  );
+  assert.equal(
+    unchanged.value.workerResidentStage.workerAdoptedStorageRematerialization.reusedRetainedBuffers,
+    true,
+    'rejected relabeling leaves the original retained clock reusable'
   );
 
   // A seed whose authoritative count does not match the packed rows must
@@ -4711,7 +4764,8 @@ test('ULG resident stage worker SS stages fail closed on missing epoch and ident
 function writeWorkerTerminalRefluxReceiptTarget(target, {
   rolledBack = false,
   ownerGeneration = 1,
-  cflIntervalRejectTrace = null
+  cflIntervalRejectTrace = null,
+  mutateHeader = null
 } = {}) {
   const words = createSchroederCrossLevelRefluxLedgerHeader({
     rowCapacity: 1,
@@ -4729,6 +4783,9 @@ function writeWorkerTerminalRefluxReceiptTarget(target, {
   words[8] = target.expectedFineSubstepCount;
   words[9] = 1;
   words[15] = target.expectedFineSubstepCount;
+  // The allocator's +Infinity sentinel is not terminal physical evidence.
+  new Float32Array(words.buffer)[44] = 0;
+  words.fill(1, 48, 54);
   words[59] = SCHROEDER_CROSS_LEVEL_REFLUX_PHASE_CONSUMED;
   words[80] = SCHROEDER_CROSS_LEVEL_REFLUX_TERMINAL_RECEIPT_CONSUMED;
   words[81] = 0x12340000 + target.stepOrdinal;
@@ -4788,6 +4845,7 @@ function writeWorkerTerminalRefluxReceiptTarget(target, {
         ];
     new Float32Array(words.buffer).set(payload, 125);
   }
+  mutateHeader?.(words);
   target.targetBuffer.bytes.set(
     new Uint8Array(words.buffer, words.byteOffset, words.byteLength),
     target.targetOffsetBytes
@@ -4809,6 +4867,76 @@ function writeWorkerTerminalRefluxReceiptTarget(target, {
     coarseLevel: target.expectedCoarseLevel,
     queueSubmissionStatus: 'copy-submitted-unverified'
   };
+}
+
+// Explicit synthetic canonical-runner seam: this writes physical header bytes
+// to test worker orchestration only. It does not mint fused private ownership
+// or establish native numerical admission; those are covered by fused/hierarchy
+// fixtures that construct real registered closures and observations.
+function writeWorkerTerminalRefluxReceiptGroupTarget(target, {
+  childCount = 1,
+  rolledBack = false,
+  rejectedChildOrdinal = childCount,
+  ownerGeneration = 1,
+  cflIntervalRejectTrace = null,
+  sourceClock = { step: 0, time: 0, slot: 0 },
+  mutateReceipt = null,
+  mutateHeader = null
+} = {}) {
+  const children = Array.from({ length: childCount }, (_, index) => {
+    const completionOrdinal = childCount === 1
+      ? target.expectedOuterCompletionOrdinal
+      : target.expectedOuterCompletionOrdinal * 8 + index + 1;
+    const childTarget = {
+      ...target,
+      expectedCompletionOrdinal: completionOrdinal,
+      targetOffsetBytes: target.targetOffsetBytes
+        + index * SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
+      targetByteLength: SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH
+    };
+    const macroDt = target.expectedOuterMacroDt / childCount;
+    return {
+      ...writeWorkerTerminalRefluxReceiptTarget(childTarget, {
+        rolledBack: rolledBack && index + 1 === rejectedChildOrdinal,
+        ownerGeneration: ownerGeneration + index,
+        cflIntervalRejectTrace: index + 1 === rejectedChildOrdinal
+          ? cflIntervalRejectTrace : null,
+        mutateHeader: mutateHeader ? (words) => mutateHeader(words, index + 1) : null
+      }),
+      childOrdinal: index + 1,
+      rootGenerationId: completionOrdinal,
+      macroDt,
+      fineDt: macroDt / target.expectedFineSubstepCount,
+      sourceIdentity: { ...target.expectedOuterIdentity }
+    };
+  });
+  const group = {
+    schema: ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA,
+    status: 'terminal-reflux-group-copies-submitted-unverified',
+    scheduleId: target.scheduleId,
+    laneId: target.laneId,
+    stateKey: target.stateKey,
+    stepOrdinal: target.stepOrdinal,
+    targetOffsetBytes: target.targetOffsetBytes,
+    targetByteLength: target.targetByteLength,
+    childCount,
+    outerCompletionOrdinal: target.expectedOuterCompletionOrdinal,
+    outerIdentity: { ...target.expectedOuterIdentity },
+    outerMacroDt: target.expectedOuterMacroDt,
+    summedMacroDt: children[0].macroDt * childCount,
+    publicClock: {
+      physicsTick: target.expectedOuterIdentity.physicsTick + 1,
+      physicsSubstep: 0,
+      step: sourceClock.step + 1,
+      time: sourceClock.time + target.expectedOuterMacroDt,
+      sourceSlot: sourceClock.slot,
+      slot: 1 - sourceClock.slot,
+      nextSlot: 1 - sourceClock.slot
+    },
+    children
+  };
+  mutateReceipt?.(group);
+  return group;
 }
 
 function uploadWorkerTestDispersedMediumOptics(
@@ -4870,7 +4998,11 @@ function workerScheduleFixture({
   invalidTwoLevelCommitAtStep = null,
   invalidTwoLevelCflFactorAtStep = null,
   cflIntervalRejectTraceAtStep = null,
-  cflIntervalRejectTrace = null
+  cflIntervalRejectTrace = null,
+  terminalRefluxChildCount = 1,
+  terminalRefluxRejectedChildOrdinal = null,
+  mutateTerminalRefluxReceipt = null,
+  mutateTerminalRefluxHeader = null
 } = {}) {
   const device = createFakeGpuDevice();
   const buffers = exactFourLanePhaseCarrier
@@ -5077,18 +5209,31 @@ function workerScheduleFixture({
         })
       : null;
     const terminalRefluxReceiptCopy = withTwoLevelEvidence
-      ? writeWorkerTerminalRefluxReceiptTarget(
+      ? writeWorkerTerminalRefluxReceiptGroupTarget(
           args.residentStepOptions?.[
             SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
           ],
           {
+            childCount: terminalRefluxChildCount,
+            rejectedChildOrdinal: terminalRefluxRejectedChildOrdinal
+              ?? terminalRefluxChildCount,
             rolledBack: ordinal === invalidTwoLevelCommitAtStep
               || ordinal === cflIntervalRejectTraceAtStep,
             ownerGeneration: 1000 + ordinal,
             cflIntervalRejectTrace:
               ordinal === cflIntervalRejectTraceAtStep
                 ? cflIntervalRejectTrace
-                : null
+                : null,
+            sourceClock: {
+              step: args.sphParticleUpload?.step ?? args.sphParticleState?.step ?? 0,
+              time: args.sphParticleUpload?.time ?? args.sphParticleState?.time ?? 0,
+              slot: args.sphParticleUpload?.slot ?? args.sphParticleState?.slot ?? 0
+            },
+            mutateReceipt: mutateTerminalRefluxReceipt
+              ? (group) => mutateTerminalRefluxReceipt(group, ordinal) : null,
+            mutateHeader: mutateTerminalRefluxHeader
+              ? (words, childOrdinal) => mutateTerminalRefluxHeader(words, childOrdinal, ordinal)
+              : null
           }
         )
       : null;
@@ -5843,7 +5988,7 @@ test('ULG resident stage worker runs a batched resident schedule with a fresh se
     mechanicsMaterialTable: {
       schema: 'peercompute.ulg.mls-mpm-mechanics-material-table.v0',
       phaseRecordCount: 1,
-      records: new Float32Array([1, 2, 3, 4])
+      records: new Float32Array([1, 2, 3, 4, 0, 0, 40, 1, 0, 1, 0, 0])
     }
   };
   fixture.stageOptions.schroederSameLevelMechanics
@@ -6234,6 +6379,254 @@ test('ULG resident stage worker runs a batched resident schedule with a fresh se
   );
 });
 
+function canonicalIsosurfaceBoundaryProof(boundary, serial) {
+  const common = {
+    presentationQueueCompletionCount: serial,
+    presentationQueueCompletionSerial: serial,
+    presentationQueueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+    presentationQueueCompletionScope: 'worker-offscreen-shared-device-queue-frame-proof',
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-included',
+    physicsContinuationBlocked: true,
+    presentationQosHostQueueFenceCount: 1
+  };
+  return {
+    schema: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
+    status: ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+    ...boundary,
+    ...common,
+    gpuCompleted: true,
+    gpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+    presentationOpportunity: true,
+    presentationOpportunityMethod: 'worker-request-animation-frame-after-gpu-completion',
+    queuePrefixCoveredPhysics: true,
+    isosurfaceFrameProof: {
+      ...common,
+      physicsHostQueueFenceParticipation: true,
+      presentationFrameSchema: 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0',
+      presentationFrameStatus: 'worker-owned-isosurface-presentation-opportunity',
+      presentationFrameAdmitted: true,
+      presentationFrameGpuCompleted: true,
+      presentationFrameGpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+      presentationFramePresentationOpportunity: true,
+      presentationFramePresentationOpportunityMethod: 'worker-request-animation-frame-after-gpu-completion',
+      isosurfaceTemporalPresentation: true,
+      isosurfacePresentationMotionAgeS: boundary.submissionOrdinal * 0.001,
+      isosurfacePresentationSourceTimeS: 0.016,
+      isosurfacePresentationMotionMethod: 'bounded-gpu-field-velocity-extrapolation',
+      presentationOnly: true,
+      authoritativeStateMutation: false,
+      motionPresentationQosBoundary: { ...boundary }
+    }
+  };
+}
+
+test('ULG canonical presentation opportunities are bounded and preserve sole terminal admission', async (t) => {
+  for (const mode of [
+    'no-callback', 'one-step', 'completed', 'rejected', 'invalid-proof',
+    'replayed-proof', 'hung', 'cancelled', 'not-ready', 'readiness-throws'
+  ]) {
+    await t.test(mode, { timeout: 2000 }, async () => {
+      const fixture = workerScheduleFixture({ laneSuffix: `canonical-qos-${mode}` });
+      const laneOptions = {
+        laneId: `ulg:test:canonical-qos-${mode}-lane`,
+        stateKey: `ulg:test:canonical-qos-${mode}-state`
+      };
+      const scheduleId = `ulg:test:canonical-qos-${mode}`;
+      const stepCount = mode === 'one-step' ? 1 : 4;
+      const boundaries = [];
+      const signals = [];
+      const progress = [];
+      let boundaryFenceCount = 0;
+      let readinessCheckCount = 0;
+      let resolveHung = null;
+      let settled = false;
+      try {
+        const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+          schedulePayload(workerSchroederStageContext(
+            fixture.device, fixture.buffers, fixture.stageOptions
+          ), { stepCount, scheduleId }, laneOptions),
+          {
+            postProgress: (entry) => progress.push(entry),
+            onTier0PresentationSubmissionBoundary: () => {
+              assert.fail('canonical work must not invoke the Tier0 callback');
+            },
+            ...(['not-ready', 'readiness-throws'].includes(mode) ? {
+              canPresentCanonicalSubmissionBoundary: () => {
+                readinessCheckCount += 1;
+                if (mode === 'readiness-throws') throw new Error('source unavailable');
+                return false;
+              }
+            } : {}),
+            ...(mode === 'no-callback' ? {} : {
+              onCanonicalPresentationSubmissionBoundary: async (boundary, { signal }) => {
+                boundaries.push(boundary);
+                signals.push(signal);
+                assert.equal(settled, false);
+                assert.equal(fixture.runnerCalls.length, boundary.completedSubstepCount);
+                assert.equal(signal.aborted, false);
+                assert.deepEqual(boundary, {
+                  submissionOrdinal: boundaries.length,
+                  completedSubstepCount: boundaries.length,
+                  totalSubstepCount: stepCount,
+                  chunkStepCount: 1
+                });
+                if (mode === 'rejected') throw new Error('renderer unavailable');
+                if (mode === 'hung') return new Promise((resolve) => { resolveHung = resolve; });
+                if (mode === 'cancelled') {
+                  setTimeout(() => cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId), 0);
+                  return new Promise(() => {});
+                }
+                await fixture.device.queue.onSubmittedWorkDone();
+                boundaryFenceCount += 1;
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                assert.equal(fixture.runnerCalls.length, boundary.completedSubstepCount,
+                  'next canonical physics step cannot overtake the awaited presentation');
+                const receipt = canonicalIsosurfaceBoundaryProof(
+                  boundary, mode === 'replayed-proof' ? 1 : boundaries.length
+                );
+                if (mode === 'invalid-proof') receipt.isosurfaceFrameProof.authoritativeStateMutation = true;
+                return receipt;
+              }
+            })
+          }
+        );
+        settled = true;
+        const cancelled = mode === 'cancelled';
+        const expectedSteps = cancelled ? 1 : stepCount;
+        const unavailable = mode === 'not-ready' || mode === 'readiness-throws';
+        const expectedBoundaries = mode === 'no-callback' || mode === 'one-step' || unavailable
+          ? 0 : mode === 'hung' || cancelled ? 1 : 3;
+        const expectedCompleted = mode === 'completed' ? 3 : mode === 'replayed-proof' ? 1 : 0;
+        const audit = result.canonicalPresentationOpportunities;
+        assert.equal(result.completedStepCount, expectedSteps);
+        assert.equal(result.cancelled, cancelled);
+        assert.equal(fixture.runnerCalls.length, expectedSteps);
+        assert.equal(progress.length, expectedSteps);
+        assert.equal(boundaries.length, expectedBoundaries);
+        assert.equal(audit.requested, mode !== 'no-callback');
+        assert.equal(audit.boundaryCount, expectedBoundaries);
+        assert.equal(audit.completedCount, expectedCompleted);
+        assert.equal(audit.failureCount, expectedBoundaries - expectedCompleted);
+        assert.equal(audit.timeoutCount, mode === 'hung' ? 1 : 0);
+        assert.equal(readinessCheckCount, unavailable ? 3 : 0);
+        assert.equal(audit.skippedUnavailableCount, unavailable ? 3 : 0);
+        assert.equal(audit.disabledAfterTimeout, mode === 'hung');
+        assert.equal(audit.maxWaitMs, ULG_WORKER_CANONICAL_PRESENTATION_BOUNDARY_TIMEOUT_MS);
+        assert.equal(audit.intermediateAuthorityPublicationCount, 0);
+        assert.equal(result.gpuFence.terminalScheduleFence, true);
+        assert.equal(result.gpuFence.authorityAdmissionReady, true);
+        assert.equal(result.gpuFence.completedStepCount, expectedSteps);
+        assert.equal(fixture.device.queue.submittedWorkDoneCount, boundaryFenceCount + 1,
+          'presentation fences supplement exactly one terminal authority fence');
+        if (mode === 'hung' || cancelled) assert.equal(signals[0].aborted, true);
+        if (resolveHung) {
+          resolveHung(canonicalIsosurfaceBoundaryProof(boundaries[0], 1));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          assert.equal(audit.completedCount, 0, 'a late renderer response cannot become accepted boundary proof');
+        }
+        assertNoWorkerGpuBuffers(result, 'canonicalPresentationScheduleResult');
+        structuredClone(result);
+      } finally {
+        releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+      }
+    });
+  }
+});
+
+test('ULG unavailable canonical presentation preserves an opened submit burst', async () => {
+  let baselineCounts = null;
+  for (const mode of ['no-callback', 'not-ready', 'readiness-throws']) {
+    const fixture = workerScheduleFixture({ laneSuffix: `canonical-burst-${mode}` });
+    fixture.stageOptions.schroederSameLevelMechanics.residentStepOptions = {
+      mechanicsSubmitBurstSteps: 4
+    };
+    const laneOptions = {
+      laneId: `ulg:test:canonical-burst-${mode}-lane`,
+      stateKey: `ulg:test:canonical-burst-${mode}-state`
+    };
+    const context = () => workerSchroederStageContext(
+      fixture.device, fixture.buffers, fixture.stageOptions
+    );
+    let readinessChecks = 0;
+    try {
+      // The burst policy is lane-lifetime state, established by the first
+      // ordinary schedule before the next schedule can request its burst.
+      await runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+        context(), { stepCount: 1, scheduleId: `ulg:test:canonical-burst-${mode}-seed` }, laneOptions
+      ));
+      const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+        schedulePayload(context(), {
+          stepCount: 4, scheduleId: `ulg:test:canonical-burst-${mode}-run`
+        }, laneOptions),
+        mode === 'no-callback' ? {} : {
+          canPresentCanonicalSubmissionBoundary: () => {
+            readinessChecks += 1;
+            if (mode === 'readiness-throws') throw new Error('no retained source');
+            return false;
+          },
+          onCanonicalPresentationSubmissionBoundary: () => {
+            assert.fail('unavailable source must not invoke presentation');
+          }
+        }
+      );
+      assert.equal(result.submitBurstObservation.eligible, true);
+      assert.equal(result.submitBurstObservation.opened, true);
+      assert.equal(result.completedStepCount, 4);
+      assert.equal(result.gpuFence.authorityAdmissionReady, true);
+      assert.equal(readinessChecks, mode === 'no-callback' ? 0 : 3);
+      assert.equal(result.canonicalPresentationOpportunities.boundaryCount, 0);
+      const stats = result.submitBurstObservation.stats;
+      const counts = {
+        heldSubmitTotal: stats.heldSubmitTotal,
+        flushCount: stats.flushCount,
+        cadenceFlushCount: stats.cadenceFlushCount,
+        fenceFlushCount: stats.fenceFlushCount,
+        nativeSubmitCount: fixture.device.queue.submitCalls.length
+      };
+      assert.ok(counts.heldSubmitTotal > 0);
+      if (baselineCounts == null) baselineCounts = counts;
+      else assert.deepEqual(counts, baselineCounts,
+        'readiness misses must leave the ordinary physics submit/flush pattern unchanged');
+    } finally {
+      releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+    }
+  }
+});
+
+test('ULG canonical presentation success cannot replace a failed terminal physics fence', async () => {
+  const fixture = workerScheduleFixture({ laneSuffix: 'canonical-qos-terminal-reject' });
+  const laneOptions = {
+    laneId: 'ulg:test:canonical-qos-terminal-reject-lane',
+    stateKey: 'ulg:test:canonical-qos-terminal-reject-state'
+  };
+  const fence = fixture.device.queue.onSubmittedWorkDone.bind(fixture.device.queue);
+  fixture.device.queue.onSubmittedWorkDone = () => fixture.runnerCalls.length === 3
+    ? Promise.reject(new Error('terminal physics fence rejected')) : fence();
+  let completedPresentations = 0;
+  try {
+    await assert.rejects(runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(workerSchroederStageContext(
+        fixture.device, fixture.buffers, fixture.stageOptions
+      ), { stepCount: 3, scheduleId: 'ulg:test:canonical-qos-terminal-reject' }, laneOptions),
+      {
+        onCanonicalPresentationSubmissionBoundary: async (boundary) => {
+          await fixture.device.queue.onSubmittedWorkDone();
+          completedPresentations += 1;
+          return canonicalIsosurfaceBoundaryProof(boundary, completedPresentations);
+        }
+      }
+    ), (error) => {
+      assert.equal(error.residentScheduleError.terminalGpuFence.fenceSatisfied, false);
+      assert.equal(error.residentScheduleError.terminalGpuFence.authorityAdmissionReady, false);
+      return true;
+    });
+    assert.equal(completedPresentations, 2);
+    assert.equal(fixture.runnerCalls.length, 3);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+  }
+});
+
 test('ULG one-step canonical resident schedule has no control-plane yield boundary', async (t) => {
   const messageChannelStats = instrumentResidentScheduleMessageChannels(t);
   const fixture = workerScheduleFixture({ laneSuffix: 'one-step-no-yield' });
@@ -6545,7 +6938,7 @@ test('ULG resident schedules preserve one exact static mechanics table across co
   const mechanicsMaterialTable = {
     schema: 'peercompute.ulg.mls-mpm-mechanics-material-table.v0',
     phaseRecordCount: 1,
-    records: new Float32Array([1, 2, 3, 4])
+    records: new Float32Array([1, 2, 3, 4, 0, 0, 40, 1, 0, 1, 0, 0])
   };
   const laneOptions = {
     laneId: 'ulg:test:static-mechanics-table-continuation-lane',
@@ -6849,7 +7242,7 @@ test('ULG resident schedule aggregates exact surface-stress evidence without ret
         positiveSurfaceTensionPhaseRecordCount: 1,
         surfaceTensionCoefficientStatus:
           'positive-surface-tension-coefficient-ready',
-        records: new Float32Array([1, 2, 3, 4])
+        records: new Float32Array([1, 2, 3, 4, 0, 0, 40, 1, 0, 1, 0, 0.07])
       }
     };
     return runUlgMechanicsResidentStageWorkerSchedulePayload(
@@ -7234,6 +7627,158 @@ test('ULG resident schedule two-level evidence remains complete beyond the summa
     }
   );
   assert.equal(invalidFixture.runnerCalls.length, 0);
+});
+
+test('ULG resident schedule admits exactly one, four or eight owned child headers per outward interval', async (t) => {
+  let fixtureOrdinal = 0;
+  const run = async ({ stepCount = 2, ...options } = {}) => {
+    const laneSuffix = `terminal-group-${++fixtureOrdinal}`;
+    const fixture = workerScheduleFixture({
+      laneSuffix, withTwoLevelEvidence: true, ...options
+    });
+    for (const stageId of ['schroederSpatialEpoch', 'schroederSameLevelMechanics']) {
+      Object.assign(fixture.stageOptions[stageId], {
+        enableTwoLevelMechanics: true,
+        twoLevelMechanicsAuthority: 'authoritative',
+        twoLevelFineSubstepCount: 2
+      });
+    }
+    fixture.stageOptions.schroederSameLevelMechanics.dt = 0.1;
+    const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(workerSchroederStageContext(
+        fixture.device, fixture.buffers, fixture.stageOptions
+      ), { stepCount, scheduleId: `ulg:test:${laneSuffix}` }, {
+        laneId: `ulg:test:${laneSuffix}-lane`, stateKey: `ulg:test:${laneSuffix}-state`
+      })
+    );
+    return { result, fixture };
+  };
+  assert.equal(SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY, 8);
+  for (const childCount of [1, 4, 8]) {
+    await t.test(`${childCount} children count as one public admission`, async () => {
+      const stepCount = ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1;
+      const { result, fixture } = await run({ stepCount, terminalRefluxChildCount: childCount });
+      const receipt = result.perStepSummaries.twoLevelMechanics.terminalRefluxReceipt;
+      assert.equal(receipt.admittedStepCount, stepCount);
+      assert.equal(receipt.observedChildCount, stepCount * childCount);
+      assert.equal(receipt.admittedChildCount, stepCount * childCount);
+      assert.equal(receipt.firstRejectedChildOrdinal, null);
+      assert.equal(result.perStepSummaries.droppedStepCount, 1);
+      const target = fixture.runnerCalls.at(-1).residentStepOptions[
+        SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
+      ];
+      assert.equal(target.targetBuffer.size, stepCount * 8 * 544);
+      assert.equal(target.targetOffsetBytes, (stepCount - 1) * 8 * 544);
+      assert.equal(target.targetByteLength, 8 * 544);
+      if (childCount === 8) {
+        const group = fixture.runnerCalls.at(-1).residentStepOptions[
+          SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
+        ];
+        assert.notEqual(Array(8).fill(group.expectedOuterMacroDt / 8)
+          .reduce((sum, dt) => sum + dt, 0), group.expectedOuterMacroDt,
+        'coverage must use eight exact equal intervals, not serial f64 sum rounding');
+      }
+      assertNoWorkerGpuBuffers(result, `terminalGroup${childCount}`);
+      structuredClone(result);
+    });
+  }
+  for (const childOrdinal of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    await t.test(`child ${childOrdinal} physical rejection rejects the entire outward step`, async () => {
+      await assert.rejects(run({
+        terminalRefluxChildCount: 8,
+        invalidTwoLevelCommitAtStep: 2,
+        terminalRefluxRejectedChildOrdinal: childOrdinal
+      }), (error) => {
+        assert.equal(error.residentScheduleError.reason, 'schedule-terminal-reflux-receipt-rejected');
+        const receipt = error.residentScheduleError.terminalGpuFence.terminalRefluxReceipt;
+        assert.equal(receipt.admittedStepCount, 1);
+        assert.equal(receipt.observedChildCount, 16);
+        assert.equal(receipt.admittedChildCount, 15);
+        assert.equal(receipt.firstRejectedStepOrdinal, 2);
+        assert.equal(receipt.firstRejectedChildOrdinal, childOrdinal);
+        assert.equal(receipt.firstRejectedDiagnostic.mutationRollbackCount, 1);
+        assertNoWorkerGpuBuffers(error.residentScheduleError);
+        structuredClone(error.residentScheduleError);
+        return true;
+      });
+    });
+  }
+  const invalidGroups = [
+    ['missing group', (group) => { group.schema = null; }],
+    ['wrong count', (group) => { group.childCount = 2; }],
+    ['eight-child prefix relabeled as a complete four-child interval', (group) => { group.childCount = 4; group.children.length = 4; }],
+    ['serially rounded sum dt', (group) => {
+      group.summedMacroDt = group.children.reduce((sum, child) => sum + child.macroDt, 0);
+    }],
+    ['missing child', (group) => { group.children.pop(); }],
+    ['duplicate child', (group) => { group.children[2] = { ...group.children[1] }; }],
+    ['rejected original substituted', (group) => {
+      group.children[0].completionOrdinal = group.outerCompletionOrdinal;
+    }],
+    ['wrong outer generation', (group) => { group.outerCompletionOrdinal += 1; }],
+    ['wrong child root generation', (group) => { group.children[2].rootGenerationId += 1; }],
+    ['wrong outer tick', (group) => { group.outerIdentity.physicsTick += 1; }],
+    ['wrong outward clock', (group) => { group.publicClock.time += 0.1; }],
+    ['wrong child dt', (group) => { group.children[2].macroDt *= 2; }],
+    ['wrong child fine dt', (group) => { group.children[2].fineDt *= 2; }],
+    ['numeric string child dt', (group) => { group.children[2].macroDt = String(group.children[2].macroDt); }],
+    ['wrong sum dt', (group) => { group.summedMacroDt *= 2; }],
+    ['wrong child offset', (group) => { group.children[2].targetOffsetBytes += 544; }],
+    ['wrong child source identity', (group) => { group.children[2].sourceIdentity.physicsTick = '0'; }]
+  ];
+  for (const field of ['completionOrdinal', 'macroOwnerId', 'ownerGeneration', 'rootGenerationId']) {
+    for (const value of [0, -0, 0x1_0000_0000]) {
+      invalidGroups.push([`${field} rejects ${Object.is(value, -0) ? '-0' : value}`, (group) => {
+        group.children[2][field] = value;
+      }]);
+    }
+  }
+  for (const identityField of ['outerIdentity', 'sourceIdentity']) {
+    for (const value of [-0, 0x1_0000_0000]) {
+      invalidGroups.push([`${identityField} rejects ${Object.is(value, -0) ? '-0' : value}`, (group) => {
+        const identity = identityField === 'outerIdentity'
+          ? group.outerIdentity : group.children[2].sourceIdentity;
+        identity.physicsSubstep = value;
+      }]);
+    }
+  }
+  for (const [name, mutate] of invalidGroups) {
+    await t.test(name, async () => {
+      await assert.rejects(run({
+        terminalRefluxChildCount: 8, mutateTerminalRefluxReceipt: mutate
+      }), (error) => {
+        assert.equal(error.residentScheduleError.reason, 'schedule-terminal-reflux-copy-receipt-invalid');
+        return true;
+      });
+    });
+  }
+  const forgedHeaders = [
+    ['forged owner', (group) => { group.children[2].macroOwnerId += 100; }, null],
+    ['forged owner generation', (group) => { group.children[2].ownerGeneration += 100; }, null],
+    ['forged completion', (group) => {
+      group.children[2].completionOrdinal += 100;
+      group.children[2].rootGenerationId += 100;
+    }, null],
+    ['physical status missing', null, (words, childOrdinal) => { if (childOrdinal === 3) words[48] = 0; }],
+    ['authority reject hidden by admitted flag', null, (words, childOrdinal) => { if (childOrdinal === 3) words[104] = 1; }],
+    ['nonfinite residual', null, (words, childOrdinal) => { if (childOrdinal === 3) words[32] = 0x7fc00000; }]
+  ];
+  for (const [name, mutateReceipt, mutateHeader] of forgedHeaders) {
+    await t.test(name, async () => {
+      await assert.rejects(run({
+        terminalRefluxChildCount: 8,
+        mutateTerminalRefluxReceipt: mutateReceipt,
+        mutateTerminalRefluxHeader: mutateHeader
+      }), (error) => {
+        assert.equal(error.residentScheduleError.reason, 'schedule-terminal-reflux-receipt-rejected');
+        const receipt = error.residentScheduleError.terminalGpuFence.terminalRefluxReceipt;
+        assert.equal(receipt.admittedStepCount, 0);
+        assert.equal(receipt.firstRejectedStepOrdinal, 1);
+        assert.equal(receipt.firstRejectedChildOrdinal, 3);
+        return true;
+      });
+    });
+  }
 });
 
 test('ULG resident schedule preserves dynamic product history while reapplying seed-time static options', async () => {
@@ -9981,6 +10526,12 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
   ]);
   const device = createFakeGpuDevice();
   const buffers = manualBuffers();
+  // The real rematerialization/seed path must preserve this clock, not infer
+  // step from the deliberately different source physicsTick (13).
+  for (const packed of [buffers.sphParticleState, buffers.mlsMpmParticleState]) {
+    packed.step = 7;
+    packed.time = 0.375;
+  }
   const particleCount = 1;
   const laneOptions = {
     laneId: 'ulg:test:schroeder-seed-schedule-lane',
@@ -10061,6 +10612,23 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
     labelPrefix: 'worker-ss-seeded-schedule',
     particleCount
   });
+  const returnedUploads = [];
+  const mechanicsRunner = async (args) => {
+    const result = await mechanicsFixture.runner(args);
+    const nextUploads = result.residentStep.nextParticleUploads;
+    const source = args.sphParticleUpload;
+    for (const upload of [nextUploads.sphParticleUpload, nextUploads.mlsMpmParticleUpload]) {
+      Object.assign(upload, {
+        step: source.step + 1,
+        time: source.time + 0.125,
+        sourceSlot: source.slot,
+        slot: 1 - source.slot,
+        nextSlot: 1 - source.slot
+      });
+    }
+    returnedUploads.push(nextUploads);
+    return result;
+  };
   const progressEnvelopes = [];
   const scheduleResult = await runUlgMechanicsResidentStageWorkerSchedulePayload(
     schedulePayload(
@@ -10074,7 +10642,7 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
           })
         },
         schroederSameLevelMechanics: {
-          schroederSameLevelMechanicsRunner: mechanicsFixture.runner
+          schroederSameLevelMechanicsRunner: mechanicsRunner
         }
       }),
       { stepCount: 2, scheduleId: 'ulg:test:seeded-schedule' },
@@ -10150,6 +10718,14 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
   // Step 1's mechanics consumed the seed-stamped rematerialized uploads and
   // the seeded execution itself; step 2 consumed step 1's post-step buffers.
   const stepOneArgs = mechanicsFixture.runnerCalls[0];
+  for (const upload of [stepOneArgs.sphParticleUpload, stepOneArgs.mlsMpmParticleUpload]) {
+    assert.equal(upload.step, 7);
+    assert.equal(upload.time, 0.375);
+    assert.equal(upload.physicsTick, 13);
+    assert.equal(upload.slot, 0);
+    assert.equal(upload.sourceSlot, 0);
+    assert.equal(upload.nextSlot, 0);
+  }
   assert.equal(
     stepOneArgs.sphParticleUpload.stateBuffer.label,
     'ulg-worker-adopted-storage-state'
@@ -10171,6 +10747,14 @@ test('ULG resident stage worker seeds a fresh SS lane from a cloneable descripto
     seedLineage.storageGeneration
   );
   const stepTwoArgs = mechanicsFixture.runnerCalls[1];
+  for (const key of ['sphParticleUpload', 'mlsMpmParticleUpload']) {
+    assert.strictEqual(stepTwoArgs[key], returnedUploads[0][key]);
+    assert.equal(stepTwoArgs[key].step, 8);
+    assert.equal(stepTwoArgs[key].time, 0.5);
+    assert.equal(stepTwoArgs[key].slot, 1);
+    assert.equal(stepTwoArgs[key].sourceSlot, 0);
+    assert.equal(stepTwoArgs[key].nextSlot, 1);
+  }
   assert.equal(
     stepTwoArgs.sphParticleUpload.stateBuffer.label,
     'worker-ss-seeded-schedule-next-state-1'
@@ -11353,6 +11937,123 @@ test('Tier0 forwards a reaction motion envelope only when a dormant watch is req
     tier0Call,
     /reactionActivationMotionEnvelope:\s*scheduleReactionActivationWatchRequested\s*\? scheduleReactionActivationMotionEnvelope\s*:\s*null/
   );
+});
+
+test('Tier0 isosurface queue opportunities preserve one terminal adoption across unavailable and replayed frames', async (t) => {
+  for (const mode of ['completed', 'unavailable-and-replay', 'changed-geometry']) {
+    await t.test(mode, async () => {
+      const device = createFakeGpuDevice();
+      const buffers = lawsQuiescentSingleLaneBuffers();
+      const laneOptions = {
+        laneId: `ulg:test:tier0-isosurface-qos-${mode}-lane`,
+        stateKey: `ulg:test:tier0-isosurface-qos-${mode}-state`
+      };
+      try {
+        await runUlgMechanicsResidentStageWorkerPayload(payload(
+          workerLaneSeedStage(),
+          workerSchroederStageContext(device, buffers, {
+            schroederLaneSeed: workerLaneSeedStageOptions({
+              hotBufferKey: `ulg:sph-resident:tier0-isosurface-qos-${mode}`,
+              particleCount: 1,
+              rematerializationSeedOverrides: {
+                identityRequired: true,
+                identityRevision: `tier0-isosurface-qos-${mode}-identity`,
+                identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+                identityStrideBytes: SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+                particleIdentityMutationApproved: true,
+                requiresAuthoritativeFourBufferRows: true,
+                outputParticleCapacity: 1
+              }
+            })
+          }), null, laneOptions
+        ));
+        const residentStepOptions = {
+          contactSolverEnabled: false, ambientPressurePa: 0, activeGridSafetyCells: 1
+        };
+        const boundaries = [];
+        const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+          schedulePayload(workerSchroederStageContext(device, buffers, {
+            schroederSpatialEpoch: { selectedLevel: 0, mechanicsFieldViewsRequired: false },
+            schroederSameLevelMechanics: { residentStepOptions }
+          }), {
+            stepCount: 7,
+            scheduleId: `ulg:test:tier0-isosurface-qos-${mode}-schedule`
+          }, laneOptions),
+          {
+            onTier0PresentationSubmissionBoundary: async (boundary) => {
+              boundaries.push(boundary);
+              if (mode === 'unavailable-and-replay' && boundary.submissionOrdinal === 1) {
+                throw new Error('retained mesh motion is not ready');
+              }
+              await device.queue.onSubmittedWorkDone();
+              const serial = mode === 'unavailable-and-replay' ? 2 : boundary.submissionOrdinal;
+              const common = {
+                presentationQueueCompletionCount: serial,
+                presentationQueueCompletionSerial: serial,
+                presentationQueueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+                presentationQueueCompletionScope: 'worker-offscreen-shared-device-queue-frame-proof',
+                physicsQueuePrefixCoverage: 'physics-queue-prefix-included',
+                physicsContinuationBlocked: true,
+                presentationQosHostQueueFenceCount: 1
+              };
+              const receipt = {
+                schema: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
+                status: ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
+                ...boundary, ...common,
+                gpuCompleted: true,
+                gpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+                presentationOpportunity: true,
+                presentationOpportunityMethod: 'worker-request-animation-frame-after-gpu-completion',
+                queuePrefixCoveredPhysics: true,
+                isosurfaceFrameProof: {
+                  ...common,
+                  physicsHostQueueFenceParticipation: true,
+                  presentationFrameSchema: 'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0',
+                  presentationFrameStatus: 'worker-owned-isosurface-presentation-opportunity',
+                  presentationFrameAdmitted: true,
+                  presentationFrameGpuCompleted: true,
+                  presentationFrameGpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+                  presentationFramePresentationOpportunity: true,
+                  presentationFramePresentationOpportunityMethod: 'worker-request-animation-frame-after-gpu-completion',
+                  isosurfaceTemporalPresentation: true,
+                  isosurfacePresentationMotionAgeS: boundary.submissionOrdinal * 0.001,
+                  isosurfacePresentationSourceTimeS: 0.016,
+                  isosurfacePresentationMotionMethod: 'bounded-gpu-field-velocity-extrapolation',
+                  presentationOnly: true,
+                  authoritativeStateMutation: false,
+                  motionPresentationQosBoundary: { ...boundary }
+                }
+              };
+              if (mode === 'changed-geometry' && boundary.submissionOrdinal === 2) {
+                receipt.status = ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS;
+                receipt.motionFrameSubmittedSerial = serial;
+                receipt.motionFrameSerial = serial;
+                delete receipt.isosurfaceFrameProof;
+              }
+              return receipt;
+            }
+          }
+        );
+        assert.equal(result.status, 'worker-resident-schedule-completed');
+        assert.equal(result.completedStepCount, 7);
+        assert.deepEqual(boundaries.map((boundary) => boundary.completedSubstepCount), [2, 4, 6]);
+        const execution = result.executionRouteReceipt.execution;
+        assert.equal(execution.submissionMode, 'queue-ordered-presentation-qos-chunks');
+        assert.deepEqual(execution.submissionStepCounts, [2, 2, 2, 1]);
+        assert.equal(execution.presentationBoundaryCount, 3);
+        const completed = mode === 'completed' ? 3 : mode === 'changed-geometry' ? 2 : 1;
+        assert.equal(execution.presentationBoundaryCompletedCount, completed);
+        assert.equal(execution.presentationBoundaryFailureCount, 3 - completed);
+        assert.equal(execution.presentationQosHostQueueFenceCount, completed);
+        assert.equal(execution.logicalAuthorityPublicationCount, 1);
+        assert.equal(execution.intermediateAuthorityPublicationCount, 0);
+        assert.equal(result.finalEpochIdentity.physicsTick, WORKER_LANE_SEED_DEFAULT_LINEAGE.physicsTick + 7);
+        assert.equal(result.finalEpochIdentity.storageGeneration, WORKER_LANE_SEED_DEFAULT_LINEAGE.storageGeneration + 1);
+      } finally {
+        releaseUlgMechanicsResidentStageWorkerLane({ ...laneOptions, reason: 'isosurface-qos-test-complete' });
+      }
+    });
+  }
 });
 
 test('ULG worker rejects malformed multi-submit Tier0 authority before terminal adoption', async () => {
@@ -14107,6 +14808,476 @@ test('ULG resident stage worker retires superseded lanes and their GPU buffers b
     'worker-resident-lane-released'
   );
 });
+
+async function completedCachedEpochLaneFixture(device, label) {
+  const buffers = manualBuffers();
+  const laneOptions = { laneId: `ulg:test:${label}`, stateKey: `ulg:test:${label}:state` };
+  const seed = (options = laneOptions, retireLane = null) =>
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(device, buffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: `ulg:sph-resident:${options.laneId}`,
+          seedOptionOverrides: { retireLane }
+        })
+      }),
+      null,
+      options
+    ));
+  const epoch = async (options = laneOptions, extra = {}) =>
+    runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage('schroederSpatialEpoch', ['schroeder-level-assignment'], ['schroeder-spatial-epoch']),
+      workerSchroederStageContext(device, buffers, {
+        schroederSpatialEpoch: {
+          selectedLevel: 0,
+          mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+          exactNearCellTreeEnabled: false,
+          ...extra
+        }
+      }),
+      null,
+      options
+    ));
+  const advance = async (options = laneOptions, wrapRunner = (runner) => runner) => {
+    const epochResult = await epoch(options);
+    const fixture = workerSeededMechanicsRunnerFixture(device, { labelPrefix: label });
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage('schroederSameLevelMechanics', ['schroeder-spatial-epoch', 'sph-particle-state', 'mls-mpm-mechanics'], ['sph-particle-state', 'mls-mpm-mechanics']),
+      workerSchroederStageContext(device, buffers, {
+        schroederSameLevelMechanics: {
+          expectedSpatialEpochSeal: epochResult.value.epochSeal,
+          schroederSameLevelMechanicsRunner: wrapRunner(fixture.runner)
+        }
+      }),
+      epochResult.value,
+      options
+    ));
+    const generation = fixture.runnerCalls[0].spatialEpochGeneration;
+    await generation.releasePromise;
+    assert.equal(generation.execution.released, true, 'normal epoch owner retirement completed');
+    return { generation, fixture };
+  };
+  await seed();
+  return { laneOptions, seed, epoch, advance };
+}
+
+test('worker lane retirement preserves normally retired cached epoch allocations for same-device reuse', async () => {
+  const device = createFakeGpuDevice();
+  const fixture = await completedCachedEpochLaneFixture(device, 'cached-epoch-retirement');
+  const { generation } = await fixture.advance();
+  const allocations = generation.runtime.allocationEntries().map(({ buffer }) => buffer);
+  assert.ok(allocations.length > 0);
+  const replacement = { laneId: `${fixture.laneOptions.laneId}:new`, stateKey: `${fixture.laneOptions.stateKey}:new` };
+  try {
+    const seeded = await fixture.seed(replacement, fixture.laneOptions);
+    assert.equal(seeded.value.retiredLaneReceipt.released, true);
+    assert.ok(seeded.value.retiredLaneReceipt.destroyedBufferCount > 0, 'ordinary lane-owned residue still retires');
+    assert.ok(allocations.every((buffer) => buffer.destroyCount === 0), 'cached runtime allocations must not be raw-destroyed with the retired lane');
+    const next = await fixture.advance(replacement);
+    assert.equal(next.generation.runtime, generation.runtime, 'the same device/capacity reuses its real cached runtime');
+    assert.deepEqual(next.generation.runtime.allocationEntries().map(({ buffer }) => buffer), allocations);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+    releaseUlgMechanicsResidentStageWorkerLane(replacement);
+  }
+});
+
+test('worker Reset preserves released mechanical proposal cache aliases and actually reuses them', async () => {
+  const device = createFakeGpuDevice();
+  const fixture = await completedCachedEpochLaneFixture(device, 'cached-contact-retirement');
+  const replacement = { laneId: `${fixture.laneOptions.laneId}:new`, stateKey: `${fixture.laneOptions.stateKey}:new` };
+  const proposals = [];
+  const advance = (laneOptions) => fixture.advance(laneOptions, (runner) => async (args) => {
+    // Real producer/cache and real worker retirement, with a mock GPU. This
+    // tests ownership and reuse, not the numerical execution of its shaders.
+    const proposal = runSchroederSpatialMechanicalProposalWebGpu({
+      ...args,
+      generation: args.spatialEpochGeneration,
+      gridSpacingM: WORKER_SEED_MECHANICS_GRID.gridSpacingM,
+      cleanupPassBudget: SCHROEDER_SPATIAL_MECHANICAL_BATCH_CLEANUP_PASS_BUDGET
+    });
+    proposals.push(proposal);
+    assert.equal(proposal.destroy(), true);
+    assert.equal(await proposal.releasePromise, true);
+    const result = await runner(args);
+    result.residentStep.borrowedContactProposal = {
+      proposalBuffer: proposal.proposalBuffer,
+      evidence: proposal.evidence
+    };
+    // An alias through a direct destructor field must not gain ownership.
+    result.residentStep.p2gGridProjection = { gridBuffer: proposal.graphControlBuffer };
+    return result;
+  });
+  try {
+    const first = await advance(fixture.laneOptions);
+    const cached = [proposals[0].proposalBuffer, proposals[0].evidence.buffer, proposals[0].graphControlBuffer];
+    const ordinary = first.fixture.runnerCalls[0].sphParticleUpload.stateBuffer;
+    assert.ok(cached.every(Boolean));
+    const destroyCached = cached[0].destroy;
+    try {
+      cached[0].destroy = null;
+      const blocked = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+      assert.equal(blocked.status, 'worker-resident-lane-release-blocked-runtime-ownership-incomplete');
+      assert.equal(blocked.released, false);
+      assert.equal(ordinary.destroyCount, 0, 'incomplete mechanical ownership blocks all lane cleanup');
+    } finally {
+      cached[0].destroy = destroyCached;
+    }
+    const seeded = await fixture.seed(replacement, fixture.laneOptions);
+    assert.equal(seeded.value.retiredLaneReceipt.released, true);
+    assert.ok(cached.every((buffer) => buffer.destroyCount === 0), 'released contact cache allocations must survive Reset');
+    assert.ok(ordinary.destroyCount > 0, 'ordinary retired lane inputs still have their owner cleanup');
+    await advance(replacement);
+    assert.equal(proposals[1].proposalBuffer, proposals[0].proposalBuffer, 'same-device next lane actually reuses the live proposal allocation');
+    assert.equal(proposals[1].evidence.buffer, proposals[0].evidence.buffer);
+    assert.equal(proposals[1].graphControlBuffer, proposals[0].graphControlBuffer);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+    releaseUlgMechanicsResidentStageWorkerLane(replacement);
+    destroySchroederSpatialMechanicalProposalRuntime(device);
+  }
+});
+
+test('worker Reset preserves released thermal proposal cache aliases and actually reuses them', async () => {
+  const device = createFakeGpuDevice();
+  const fixture = await completedCachedEpochLaneFixture(device, 'cached-thermal-retirement');
+  const replacement = { laneId: `${fixture.laneOptions.laneId}:new`, stateKey: `${fixture.laneOptions.stateKey}:new` };
+  const proposals = [];
+  const responseBuffers = [];
+  const responseBuffer = (label, size) => {
+    const buffer = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage: 128 }), device);
+    responseBuffers.push(buffer);
+    return buffer;
+  };
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    destroyed: false,
+    materialCount: 2,
+    responseCount: 2,
+    graphCount: 1,
+    nodeCount: 8,
+    sampleCount: 8,
+    contentFingerprint: 'worker-reset-thermal-response-fixture',
+    responseRecordBuffer: responseBuffer('reset-thermal-records', 64),
+    responseBuffer: responseBuffer('reset-thermal-responses', 128),
+    responseThermalConductivityBuffer: responseBuffer('reset-thermal-conductivity', 8),
+    graphNodeBuffer: responseBuffer('reset-thermal-nodes', 128),
+    graphSampleBuffer: responseBuffer('reset-thermal-samples', 128)
+  };
+  const advance = (laneOptions) => fixture.advance(laneOptions, (runner) => async (args) => {
+    const generation = args.spatialEpochGeneration;
+    const schroederSpatialEpochTransaction = createSchroederSpatialEpochTransaction({
+      device,
+      generation,
+      sphParticleUpload: args.sphParticleUpload,
+      mlsMpmParticleUpload: args.mlsMpmParticleUpload,
+      requiredReaderIds: [],
+      enabledConsumerReaderIds: ['thermal-conduction', 'thermal-radiation'],
+      consumerSupportProfileIds: {
+        'thermal-conduction': SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1,
+        'thermal-radiation': SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1
+      }
+    });
+    // Use the real prepared producer and its release operation. Mock GPU
+    // kernels do not establish thermal numerical correctness.
+    const proposal = runSchroederSpatialThermalProposalWebGpu({
+      ...args,
+      generation,
+      schroederSpatialEpochTransaction,
+      thermalResponseGraphUpload,
+      dtS: 0.001
+    });
+    proposals.push(proposal);
+    assert.equal(proposal.abandonPreparedWork('worker-reset-cache-regression'), true);
+    const result = await runner(args);
+    result.residentStep.borrowedThermalProposal = { proposal };
+    result.residentStep.p2gGridProjection = { gridBuffer: proposal.thermalDerivedBudgetBuffer };
+    return result;
+  });
+  try {
+    const first = await advance(fixture.laneOptions);
+    const cached = [
+      proposals[0].proposalBuffer,
+      proposals[0].thermalDerivedBudgetBuffer,
+      proposals[0].thermalConductivitySidecarBuffer
+    ];
+    const ordinary = first.fixture.runnerCalls[0].sphParticleUpload.stateBuffer;
+    assert.ok(cached.every(Boolean));
+    const destroyCached = cached[0].destroy;
+    try {
+      cached[0].destroy = null;
+      const blocked = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+      assert.equal(blocked.status, 'worker-resident-lane-release-blocked-runtime-ownership-incomplete');
+      assert.equal(blocked.released, false);
+      assert.equal(ordinary.destroyCount, 0, 'incomplete thermal ownership blocks all lane cleanup');
+    } finally {
+      cached[0].destroy = destroyCached;
+    }
+    const seeded = await fixture.seed(replacement, fixture.laneOptions);
+    assert.equal(seeded.value.retiredLaneReceipt.released, true);
+    assert.ok(cached.every((buffer) => buffer.destroyCount === 0), 'released thermal cache allocations must survive Reset');
+    assert.ok(ordinary.destroyCount > 0, 'ordinary retired lane inputs still have their owner cleanup');
+    await advance(replacement);
+    assert.equal(proposals[1].proposalBuffer, proposals[0].proposalBuffer);
+    assert.equal(proposals[1].thermalDerivedBudgetBuffer, proposals[0].thermalDerivedBudgetBuffer);
+    assert.equal(proposals[1].thermalConductivitySidecarBuffer, proposals[0].thermalConductivitySidecarBuffer);
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+    releaseUlgMechanicsResidentStageWorkerLane(replacement);
+    destroySchroederSpatialThermalProposalRuntime(device);
+    for (const buffer of responseBuffers) buffer.destroy();
+  }
+});
+
+test('worker lane retirement blocks incomplete cached ownership before cleanup and fresh seeding', async () => {
+  const device = createFakeGpuDevice();
+  const fixture = await completedCachedEpochLaneFixture(device, 'cache-owner-query-failure');
+  const { generation } = await fixture.advance();
+  const runtime = generation.runtime;
+  const enumerate = runtime.allocationEntries;
+  const owned = enumerate();
+  const replacement = { laneId: `${fixture.laneOptions.laneId}:new`, stateKey: `${fixture.laneOptions.stateKey}:new` };
+  try {
+    runtime.allocationEntries = null;
+    const blocked = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+    assert.equal(blocked.status, 'worker-resident-lane-release-blocked-runtime-ownership-incomplete');
+    assert.equal(blocked.released, false);
+    assert.equal(blocked.destroyedBufferCount, 0);
+    assert.ok(owned.every(({ buffer }) => buffer.destroyCount === 0));
+    await assert.rejects(fixture.seed(replacement, fixture.laneOptions), { reason: 'retired-lane-retirement-incomplete' });
+  } finally {
+    runtime.allocationEntries = enumerate;
+    assert.equal(releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions).released, true);
+    releaseUlgMechanicsResidentStageWorkerLane(replacement);
+  }
+});
+
+test('worker lane retirement protects cached aliases reached by the resident destructor itself', async () => {
+  const device = createFakeGpuDevice();
+  const fixture = await completedCachedEpochLaneFixture(device, 'resident-cache-alias');
+  let step;
+  const { generation } = await fixture.advance(fixture.laneOptions, (runner) => async (args) => {
+    const result = await runner(args);
+    step = result.residentStep;
+    return result;
+  });
+  const cached = generation.execution.directoryBuffer;
+  // The safety distinction is allocation identity, not which descriptor path
+  // happens to expose it. Exercise the destructor's earlier direct raw path.
+  step.p2gGridProjection = { gridBuffer: cached };
+  const release = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+  assert.equal(release.released, true);
+  assert.equal(cached.destroyCount, 0);
+});
+
+for (const outcome of ['confirmed', 'rejected']) {
+  test(`worker lane retirement fences an unconsumed epoch before input cleanup: ${outcome}`, async () => {
+    const device = createFakeGpuDevice();
+    const fixture = await completedCachedEpochLaneFixture(device, `unconsumed-epoch-${outcome}`);
+    let generation;
+    await fixture.epoch(fixture.laneOptions, {
+      schroederSpatialEpochGenerationRunner(args) {
+        generation = runSchroederSpatialEpochGenerationWebGpu(args);
+        return generation;
+      }
+    });
+    assert.equal(generation.execution.released, false);
+    const source = generation.source.sourceStateBuffer;
+    const allocations = generation.runtime.allocationEntries().map(({ buffer }) => buffer);
+    let resolveFence;
+    let rejectFence;
+    const fence = new Promise((resolve, reject) => { resolveFence = resolve; rejectFence = reject; });
+    fence.catch(() => {});
+    device.queue.onSubmittedWorkDone = () => fence;
+    const pending = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+    assert.equal(pending.status, 'worker-resident-lane-release-pending-epoch-retirement');
+    assert.equal(pending.released, false);
+    assert.equal(pending.destroyedBufferCount, 0);
+    assert.equal(source.destroyCount, 0);
+    assert.ok(allocations.every((buffer) => buffer.destroyCount === 0));
+    structuredClone(pending);
+    const submissionsWhileRetiring = device.queue.submitCalls.length;
+    await assert.rejects(runUlgMechanicsResidentStageWorkerPayload(payload(
+      stage('schroederSameLevelMechanics', ['schroeder-spatial-epoch'], ['sph-particle-state']),
+      workerSchroederStageContext(device, manualBuffers()),
+      null,
+      fixture.laneOptions
+    )), { code: 'ERR_ULG_WORKER_LANE_RETIRING' });
+    assert.equal(device.queue.submitCalls.length, submissionsWhileRetiring, 'no new reader may race the retirement fence');
+    const replacement = { laneId: `${fixture.laneOptions.laneId}:new`, stateKey: `${fixture.laneOptions.stateKey}:new` };
+    if (outcome === 'confirmed') {
+      let seeded = false;
+      const nextSeed = fixture.seed(replacement, fixture.laneOptions).then((result) => { seeded = true; return result; });
+      await Promise.resolve();
+      assert.equal(seeded, false);
+      assert.equal(source.destroyCount, 0);
+      resolveFence();
+      const result = await nextSeed;
+      assert.equal(result.value.retiredLaneReceipt.released, true);
+      assert.equal(generation.execution.released, true);
+      assert.equal(generation.runtime.ownsExecution(generation.execution), false);
+      assert.ok(source.destroyCount > 0, 'inputs retire only after exact epoch completion');
+      assert.ok(allocations.every((buffer) => buffer.destroyCount === 0));
+      const next = await fixture.advance(replacement);
+      assert.equal(next.generation.runtime, generation.runtime);
+    } else {
+      rejectFence(new Error('final consumer fence rejected'));
+      assert.equal(await generation.releasePromise, false, 'failed attempt settles without completing the stable capability');
+      await assert.rejects(fixture.seed(replacement, fixture.laneOptions), { reason: 'retired-lane-retirement-incomplete' });
+      const blocked = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+      assert.equal(blocked.status, 'worker-resident-lane-release-blocked-epoch-retirement-incomplete');
+      assert.equal(source.destroyCount, 0);
+      assert.ok(allocations.every((buffer) => buffer.destroyCount === 0));
+    }
+    device.queue.onSubmittedWorkDone = () => Promise.resolve();
+    releaseUlgMechanicsResidentStageWorkerLane(replacement);
+  });
+}
+
+test('worker lane retirement retains a failed exact step and never replays its partial owner cleanup', async () => {
+  const device = createFakeGpuDevice();
+  const fixture = await completedCachedEpochLaneFixture(device, 'partial-owner-cleanup-failure');
+  let residentStep;
+  let firstOwnerCalls = 0;
+  let throwingOwnerCalls = 0;
+  const { generation } = await fixture.advance(fixture.laneOptions, (runner) => async (args) => {
+    const result = await runner(args);
+    residentStep = result.residentStep;
+    return result;
+  });
+  const continuation = residentStep.nextParticleUploads.sphParticleUpload.stateBuffer;
+  // Install the failure after successful normal stepping, only at retirement.
+  residentStep.reactionActivationObservationProposal = { destroy() { firstOwnerCalls += 1; } };
+  residentStep.releaseSchroederHierarchyArtifactTransfers = () => {
+    throwingOwnerCalls += 1;
+    throw new Error('exact owner cannot confirm cleanup');
+  };
+  const submissions = device.queue.submitCalls.length;
+  const first = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+  const repeated = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+  assert.equal(first.status, 'worker-resident-lane-release-blocked-owner-retirement-incomplete');
+  assert.equal(first.released, false);
+  assert.equal(repeated.status, first.status);
+  assert.equal(firstOwnerCalls, 1, 'successful callback inside a failed whole-step cleanup is not replayed');
+  assert.equal(throwingOwnerCalls, 1, 'no unproven retry of the throwing whole-step destructor');
+  assert.equal(continuation.destroyCount, 0, 'unknown ownership never falls through to raw destruction');
+  assert.ok(generation.runtime.allocationEntries().every(({ buffer }) => buffer.destroyCount === 0));
+  assert.equal(device.queue.submitCalls.length, submissions);
+  const replacement = { laneId: `${fixture.laneOptions.laneId}:new`, stateKey: `${fixture.laneOptions.stateKey}:new` };
+  await assert.rejects(fixture.seed(replacement, fixture.laneOptions), { reason: 'retired-lane-retirement-incomplete' });
+  assert.equal(firstOwnerCalls, 1);
+  assert.equal(throwingOwnerCalls, 1);
+  releaseUlgMechanicsResidentStageWorkerLane(replacement);
+  // The failed lane intentionally remains quarantined with exact owner refs.
+});
+
+for (const mode of ['refused', 'deferred', 'confirmed']) {
+  test(`worker lane retirement honors ${mode} output ownership without raw fallback or duplicate cleanup`, async () => {
+    const device = createFakeGpuDevice();
+    const fixture = await completedCachedEpochLaneFixture(device, `retained-owner-${mode}`);
+    let residentStep;
+    let ownerCalls = 0;
+    let resolveRelease;
+    const pending = new Promise((resolve) => { resolveRelease = resolve; });
+    const output = tagWebGpuBufferDevice(device.createBuffer({ label: `${mode}-owner-output`, size: 32, usage: 128 }), device);
+    const { generation } = await fixture.advance(fixture.laneOptions, (runner) => async (args) => {
+      const result = await runner(args);
+      residentStep = result.residentStep;
+      return result;
+    });
+    residentStep.thermalStep = {
+      stateBuffer: output,
+      ownsStateBuffer: true,
+      destroyOutputParticleBuffers() {
+        ownerCalls += 1;
+        if (mode === 'refused') return false;
+        if (mode === 'deferred') return pending.then(() => { output.destroy(); return true; });
+        output.destroy();
+        return true;
+      }
+    };
+    const release = releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions);
+    assert.equal(release.released, true, 'the lane record is retired; deferred GPU ownership is not claimed complete');
+    assert.equal(ownerCalls, 1);
+    assert.equal(output.destroyCount, mode === 'confirmed' ? 1 : 0);
+    assert.ok(generation.runtime.allocationEntries().every(({ buffer }) => buffer.destroyCount === 0));
+    assert.equal(releaseUlgMechanicsResidentStageWorkerLane(fixture.laneOptions).status, 'worker-resident-lane-release-noop-missing');
+    assert.equal(ownerCalls, 1);
+    if (mode === 'deferred') {
+      assert.equal(residentStep.residentOutputOwnerReleaseReceipt.status, 'owner-release-pending');
+      resolveRelease(true);
+      await residentStep.residentCleanupCompletion;
+      assert.equal(output.destroyCount, 1);
+      assert.equal(residentStep.residentOutputOwnerReleaseReceipt.status, 'owner-release-confirmed');
+    }
+  });
+}
+
+for (const [caseName, field, value, peer] of [
+  ['missing-step', 'step', undefined],
+  ['string-step', 'step', '7'],
+  ['fractional-step', 'step', 0.5],
+  ['negative-step', 'step', -1],
+  ['negative-zero-step', 'step', -0],
+  ['exhausted-u32-step', 'step', 0xffff_ffff],
+  ['overflow-step', 'step', 0x1_0000_0000],
+  ['missing-time', 'time', undefined],
+  ['string-time', 'time', '0.375'],
+  ['nonfinite-time', 'time', Infinity],
+  ['nan-time', 'time', NaN],
+  ['negative-time', 'time', -0.375],
+  ['negative-zero-time', 'time', -0],
+  ['mismatched-step', 'step', 8, 'mlsMpmParticleState'],
+  ['mismatched-time', 'time', 0.5, 'mlsMpmParticleState'],
+  ['missing-mls-step', 'step', undefined, 'mlsMpmParticleState'],
+  ['string-mls-time', 'time', '0.375', 'mlsMpmParticleState']
+]) {
+  test(`ULG worker fresh lane seed refuses ${caseName} before allocating source storage`, async () => {
+    const device = createFakeGpuDevice();
+    const buffers = manualBuffers();
+    for (const packed of [buffers.sphParticleState, buffers.mlsMpmParticleState]) {
+      packed.step = 7;
+      packed.time = 0.375;
+    }
+    if (peer) buffers[peer][field] = value;
+    else {
+      buffers.sphParticleState[field] = value;
+      buffers.mlsMpmParticleState[field] = value;
+    }
+    const createdLabels = [];
+    const createBuffer = device.createBuffer.bind(device);
+    device.createBuffer = (descriptor) => {
+      createdLabels.push(descriptor.label);
+      return createBuffer(descriptor);
+    };
+    const laneOptions = {
+      laneId: `ulg:test:seed-clock-${caseName}`,
+      stateKey: `ulg:test:seed-clock-state-${caseName}`
+    };
+    try {
+      await assert.rejects(
+        runUlgMechanicsResidentStageWorkerPayload(payload(
+          workerLaneSeedStage(),
+          workerSchroederStageContext(device, buffers, {
+            schroederLaneSeed: workerLaneSeedStageOptions()
+          }),
+          null,
+          laneOptions
+        )),
+        (error) => {
+          assert.equal(error.reason, 'seed-particle-storage-rematerialization-blocked');
+          assert.match(error.message, /rematerialization-source-clock-invalid/);
+          return true;
+        }
+      );
+      assert.equal(createdLabels.some((label) =>
+        label?.startsWith('ulg-worker-adopted-storage-')), false);
+    } finally {
+      releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+    }
+  });
+}
 
 test('ULG resident stage worker lane seed fails closed on missing lineage words and never invents them', async () => {
   const device = createFakeGpuDevice();

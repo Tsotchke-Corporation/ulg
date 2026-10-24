@@ -9,18 +9,15 @@ const BASE_URL =
 const CHROME =
   process.env.ULG_EXACT_GAS_PRESSURE_MECHANICS_CHROME
   || '/usr/bin/google-chrome';
+const HEADLESS = process.env.ULG_EXACT_GAS_PRESSURE_MECHANICS_HEADLESS !== '0';
 
-test('native exact-v4 gas pressure executes the readback-free five-stage standalone mechanics route', {
-  skip: RUN_NATIVE
-    ? false
-    : 'set ULG_RUN_NATIVE_EXACT_GAS_PRESSURE_MECHANICS=1 for native Vulkan WebGPU',
-  timeout: 180_000
-}, async () => {
+async function runNativeExactRoute(fixture = null) {
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({
     executablePath: CHROME,
-    headless: true,
+    headless: HEADLESS,
     args: [
+      ...(!HEADLESS ? ['--ozone-platform=wayland'] : []),
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
@@ -31,11 +28,11 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
   let native;
   try {
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
-    await page.goto(BASE_URL, {
+    await page.goto(new URL('/package.json', BASE_URL).href, {
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
-    native = await page.evaluate(async () => {
+    native = await page.evaluate(async (fixture) => {
       const adapter = await navigator.gpu?.requestAdapter({
         powerPreference: 'high-performance'
       });
@@ -150,6 +147,10 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
       let laneContract = null;
       let exactSourceBeforeGrid = false;
       let boundaryCompilationMessages = [];
+      let particleEvidence = null;
+      const fixtureModule = fixture
+        ? await import('/tests/fixtures/exactGasPressureMechanicsNative.js')
+        : null;
 
       try {
         const boundaryShaderModule = device.createShaderModule({
@@ -198,12 +199,12 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
           }
         }
 
-        const particleCount = 4;
+        const particleCount = fixture ? 1 : 4;
         const state = new Float32Array(particleCount * 8);
         const thermo = new Float32Array(particleCount * 12);
         const identity = new Uint32Array(particleCount);
         const mechanics = new Float32Array(particleCount * 32);
-        const positions = [
+        const positions = fixture ? [fixture.position] : [
           [0.75, 0.75, 0.75],
           [1.00, 0.75, 0.75],
           [0.75, 1.00, 0.75],
@@ -221,6 +222,9 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
           mechanics[offset] = 1;
           mechanics[offset + 4] = 1;
           mechanics[offset + 8] = 1;
+          mechanics[offset + 9] = fixture?.initialDiagonalC ?? 0;
+          mechanics[offset + 13] = fixture?.initialDiagonalC ?? 0;
+          mechanics[offset + 17] = fixture?.initialDiagonalC ?? 0;
           mechanics[offset + 18] = 1;
           mechanics[offset + 19] = 0.001;
           mechanics[offset + 20] = 1;
@@ -266,7 +270,7 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
           storageGeneration: 1,
           mechanicsStrideFloats: 32,
           mechanicsStrideBytes: 128,
-          mechanicsDtS: 0.001,
+          mechanicsDtS: fixture?.dt ?? 0.001,
           mechanicalSubsteps: 1,
           gridCflFactor: 0.4,
           gravityMPerS2: [0, -9.80665, 0],
@@ -380,7 +384,8 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
               }
             );
 
-        const productRows = new Float32Array(4 * 32);
+        const productCapacity = fixture ? 64 : 4;
+        const productRows = new Float32Array(productCapacity * 32);
         const setProduct = (row, {
           position,
           massKg,
@@ -449,7 +454,7 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
           productEventBuffer,
           productEventBufferRetained: true,
           productEventBufferByteLength: productRows.byteLength,
-          productEventRowCount: 4,
+          productEventRowCount: productCapacity,
           productEventStrideFloats: 32,
           productEventDevice: device
         };
@@ -478,8 +483,8 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
           productCountControlBuffer,
           0,
           productHistoryModule.createResidentProductEventCountControlWords({
-            liveRowCount: 3,
-            rowCapacity: 4,
+            liveRowCount: fixture ? 64 : 3,
+            rowCapacity: productCapacity,
             rowStrideVec4: 8,
             generation: 37,
             seal: 0x5a17c0de
@@ -491,7 +496,7 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
             device,
             controlBuffer: productCountControlBuffer,
             controlOffsetBytes: 0,
-            rowCapacity: 4,
+            rowCapacity: productCapacity,
             rowStrideFloats: 32,
             generation: 37,
             seal: 0x5a17c0de
@@ -505,6 +510,11 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
               ...task.data,
               device
             });
+            if (fixture && task.exportName === 'runMlsMpmMechanicsP2gStageComputeTask') {
+              await fixtureModule.populatePressureTailInventory({
+                device, generation, gridSpec, productEventBuffer, fixture
+              });
+            }
             const stageTaskEvidence =
               result?.mechanicsP2gStageTaskEvidence
               || result?.spatialGasLedgerProducerStageTaskEvidence
@@ -658,14 +668,19 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
             mlsMpmParticleUpload,
             gridSpacingM: 0.25,
             boxDimsM: [2, 2, 2],
-            dt: 0.001,
-            gravityMPerS2: [0, -9.80665, 0],
+            dt: fixture?.dt ?? 0.001,
+            gravityMPerS2: fixture ? [0, 0, 0] : [0, -9.80665, 0],
             cflFactor: 0.4,
-            internalPressureScale: 0.75,
+            internalPressureScale: fixture ? 1 : 0.75,
             ambientPressurePa: 101325,
             includePressureInterfaceStage: false,
             device
           });
+        if (fixture) {
+          particleEvidence = await fixtureModule.gatherPressureTailEvidence({
+            device, generation, step, fixture
+          });
+        }
       } catch (error) {
         routeError = {
           message: error instanceof Error ? error.message : String(error),
@@ -774,7 +789,8 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
         outOfMemoryError: outOfMemoryError?.message || null,
         uncapturedErrors,
         deviceLostInfo,
-        cleanupErrors
+        cleanupErrors,
+        particleEvidence
       };
 
       try {
@@ -808,10 +824,20 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
         );
       }
       return result;
-    });
+    }, fixture);
   } finally {
     await browser.close();
   }
+  return native;
+}
+
+test('native exact gas pressure executes the readback-free five-stage standalone mechanics route', {
+  skip: RUN_NATIVE
+    ? false
+    : 'set ULG_RUN_NATIVE_EXACT_GAS_PRESSURE_MECHANICS=1 for native Vulkan WebGPU',
+  timeout: 180_000
+}, async () => {
+  const native = await runNativeExactRoute();
 
   assert.equal(
     native.status,
@@ -919,7 +945,87 @@ test('native exact-v4 gas pressure executes the readback-free five-stage standal
   assert.deepEqual(native.cleanupErrors, []);
 });
 
-test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-coarse parent-adjoint weights', {
+test('native single-particle pressure tails preserve full G2P motion and expose raw deformation folds', {
+  skip: RUN_NATIVE ? false : 'set ULG_RUN_NATIVE_EXACT_GAS_PRESSURE_MECHANICS=1 for native Vulkan WebGPU',
+  timeout: 180_000
+}, async (t) => {
+  const cases = [
+    ...[2 ** -2, 2 ** -5, 2 ** -8, 2 ** -10, 2 ** -12].map((epsilon) => ({
+      name: `uniform-tail-${epsilon}`, epsilon, gauge: 10000, gradient: [0, 0, 0]
+    })),
+    { name: 'linear-pressure-tail', epsilon: 2 ** -10, gauge: 10000, gradient: [100000, -50000, 25000] },
+    { name: 'negative-gauge-expansion', epsilon: 2 ** -10, gauge: -10000, gradient: [0, 0, 0] },
+    { name: 'pressure-removes-affine-energy', epsilon: 2 ** -5, gauge: 10000, gradient: [0, 0, 0], initialDiagonalC: 0.5 },
+    { name: 'zero-COM-but-folded-affine', epsilon: 2 ** -5, gauge: 20000000, gradient: [0, 0, 0], folded: true }
+  ];
+  let firstTailSpeed = null;
+  for (const testCase of cases) {
+    const fixture = { ...testCase, position: [0.25 * (3.5 + testCase.epsilon), 1, 1], dt: 0.001 };
+    const native = await runNativeExactRoute(fixture);
+    assert.equal(native.status, 'complete', `${testCase.name}: ${JSON.stringify(native)}`);
+    assert.equal(native.validationError, null, JSON.stringify(native));
+    assert.equal(native.internalError, null, JSON.stringify(native));
+    assert.equal(native.outOfMemoryError, null, JSON.stringify(native));
+    assert.equal(native.deviceLostInfo, null, JSON.stringify(native));
+    assert.deepEqual(native.uncapturedErrors, [], JSON.stringify(native));
+    assert.deepEqual(native.cleanupErrors, [], JSON.stringify(native));
+    assert.equal(native.exactSourceBeforeGrid, true);
+    assert.equal(native.chain.gridBoundarySubmitted, true);
+    assert.equal(native.chain.normalHotLoopReadbackFree, true);
+    assert.ok(native.taskEvidence.every((stage) => stage.evidencePassed), JSON.stringify(native.taskEvidence));
+    assert.equal(native.particleEvidence.mappedBytes, 256);
+    const v = native.particleEvidence.values;
+    t.diagnostic(JSON.stringify({ name: testCase.name, evidence: v.slice(0, 38) }));
+    assert.ok(v.every(Number.isFinite), testCase.name);
+    assert.equal(v[29], 27, `${testCase.name}: complete field stencil`);
+    assert.equal(v[30], 3, `${testCase.name}: admitted field`);
+    assert.ok(Math.abs(v[33] - 1) < 2e-6, `${testCase.name}: partition-of-unity mass`);
+    const alpha = fixture.dt * 0.001; // dt * represented particle volume / mass
+    const qAtParticle = fixture.gauge + fixture.gradient.reduce((sum, g, i) => sum + g * fixture.position[i], 0);
+    const expectedC = (fixture.initialDiagonalC ?? 0) - 4 * alpha * qAtParticle / (0.25 ** 2);
+    const velocityTolerance = 2e-5 * Math.max(1, alpha * Math.abs(qAtParticle) / 0.25);
+    for (let i = 0; i < 3; i++) {
+      assert.ok(Math.abs(v[4 + i] + alpha * fixture.gradient[i]) < velocityTolerance,
+        `${testCase.name}: COM ${i}: ${v[4 + i]}`);
+      // The ramp moves by hundreds of f32 coordinate ULPs, so a frozen
+      // position cannot pass merely because velocity and C were updated.
+      const expectedPosition = fixture.position[i] - fixture.dt * alpha * fixture.gradient[i];
+      assert.ok(Math.abs(v[i] - expectedPosition) < 4 * 2 ** -23 * Math.max(1, Math.abs(expectedPosition)),
+        `${testCase.name}: advected coordinate ${i}: ${v[i]} vs ${expectedPosition}`);
+      for (let j = 0; j < 3; j++) {
+        const expected = i === j ? expectedC : 0;
+        assert.ok(Math.abs(v[8 + i * 3 + j] - expected) < 2e-5 * Math.max(1, Math.abs(expectedC)),
+          `${testCase.name}: C[${i},${j}] ${v[8 + i * 3 + j]} vs ${expected}`);
+      }
+    }
+    const expectedRawJ = (1 + fixture.dt * expectedC) ** 3;
+    assert.ok(Math.abs(v[26] - expectedRawJ) < 5e-5, `${testCase.name}: raw J ${v[26]} vs ${expectedRawJ}`);
+    assert.ok(v[28] <= v[32] + 2e-5 * Math.max(1, v[32]), `${testCase.name}: APIC energy exceeds grid energy`);
+    const initialGridEnergy = 0.5 * 3 * (0.25 ** 2 / 4) * (fixture.initialDiagonalC ?? 0) ** 2;
+    assert.ok(Math.abs(v[32] - initialGridEnergy - v[34]) < 2e-5 * Math.max(1, v[32]),
+      `${testCase.name}: grid kinetic change disagrees with signed external work`);
+    for (let i = 0; i < 3; i++) {
+      assert.ok(Math.abs(v[35 + i] + alpha * fixture.gradient[i]) < velocityTolerance,
+        `${testCase.name}: total external impulse ${i}`);
+    }
+    if (fixture.initialDiagonalC) assert.ok(v[34] < 0, 'pressure opposing affine expansion must remove kinetic energy');
+    if (testCase.folded) {
+      assert.ok(v[26] < 0, 'raw affine fold must remain visible despite zero COM');
+      assert.ok(v[27] > 0, 'published volume projection must not be mistaken for raw deformation safety');
+    } else {
+      assert.ok(v[26] > 0, testCase.name);
+    }
+    if (testCase.name.startsWith('uniform-tail')) {
+      firstTailSpeed ??= v[31];
+      if (testCase.epsilon === 2 ** -12) {
+        assert.ok(v[31] > 100 * firstTailSpeed, 'tail velocity grows while particle motion remains bounded');
+        assert.ok(v[31] > 0.4 * 0.25 / fixture.dt, 'tail crosses existing nodal CFL bound');
+      }
+    }
+  }
+});
+
+test('native exact gas boundary satisfies manufactured W transpose and asymmetric parent-adjoint work identities', {
   skip: RUN_NATIVE
     ? false
     : 'set ULG_RUN_NATIVE_EXACT_GAS_PRESSURE_MECHANICS=1 for native Vulkan WebGPU',
@@ -928,8 +1034,9 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({
     executablePath: CHROME,
-    headless: true,
+    headless: HEADLESS,
     args: [
+      ...(!HEADLESS ? ['--ozone-platform=wayland'] : []),
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
@@ -940,7 +1047,7 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
   let native;
   try {
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
-    await page.goto(BASE_URL, {
+    await page.goto(new URL('/package.json', BASE_URL).href, {
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
@@ -1043,24 +1150,21 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
       const fineEdgeOffsets = [0, 2, 4];
       const fineEdgeParentIndices = [0, 2, 1, 3];
       const fineEdgeWeights = [0.125, 0.875, 0.625, 0.375];
-      const gasCells = [
-        { cell: [0, 0, 0], absolutePressurePa: 140 },
-        { cell: [1, 0, 0], absolutePressurePa: 340 }
-      ];
-      const oracle = abi
-        .computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
-          fields,
-          parentFieldKeys,
-          fineEdgeOffsets,
-          fineEdgeParentIndices,
-          fineEdgeWeights,
-          gasCells,
-          gasGridDimensions: [2, 1, 1],
-          gasGridCellOrigin: [0, 0, 0],
-          dt,
-          ambientPressurePa,
-          pressureScale
-        });
+      const gasControlVolumeDescriptor = abi.createSchroederQuadraticControlVolumeDescriptor({
+        gridSpacingM: gasGridSpacingM,
+        gridShift: 0,
+        gridDims: [2, 1, 1],
+        gridNodeCount: 2,
+        chartId,
+        selectedLevel: 1,
+        boxMinM: [0, 0, 0],
+        boxMaxM: [2, 1, 1]
+      });
+      // Independently manufactured two-column operator, not a CPU dynamics
+      // solver: I_0=[1/48,25/48], I_1=[25/48,71/48] on x in [0,2].
+      // Thus W^T[40,240]=[40,140]. The y/z intervals each stay in cell0.
+      // Existing asymmetric A then yields [127.5,77.5] at the fine fields.
+      const expectedGauges = [127.5, 77.5];
 
       const fieldLayout =
         abi.createSchroederSpatialMechanicsFieldViewLayout({
@@ -1440,6 +1544,8 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
       gasControl[gasAt.PRESSURE_STRIDE] =
         gasRuntime.SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS;
       gasControl[gasAt.FREE_VOLUME_READY_COUNT] = 2;
+      gasControl[gasAt.PROJECTION_VERSION] = gasControlVolumeDescriptor.version;
+      gasControl[gasAt.CONTROL_VOLUME_GEOMETRY_SEAL] = gasControlVolumeDescriptor.seal;
 
       const boundaryLayout =
         abi.createSchroederSpatialGasPressureBoundaryTransportLayout({
@@ -1495,6 +1601,7 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
           gasGridDimensions: [2, 1, 1],
           gasGridCellOrigin: [0, 0, 0],
           gasGridSpacingM,
+          gasControlVolumeDescriptor,
           parentGenerationId: identity.generationId,
           parentCompletionOrdinal,
           parentFieldCapacity: parentLayout.parentFieldCapacity,
@@ -1598,12 +1705,20 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
           resource: { buffer: buffers[name] }
         }))
       });
-      const fieldReadback = device.createBuffer({
-        size: fieldWords.byteLength,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-      });
-      const scratchReadback = device.createBuffer({
-        size: scratchWords.byteLength,
+      const executeCase = async (name, mutate = () => {}) => {
+      const caseParams = new Uint32Array(params.buffer.slice(
+        params.byteOffset, params.byteOffset + params.byteLength
+      ));
+      const caseControl = gasControl.slice();
+      mutate(caseParams, caseControl);
+      device.queue.writeBuffer(buffers.field, 0, fieldWords);
+      device.queue.writeBuffer(buffers.scratch, 0, scratchWords);
+      device.queue.writeBuffer(buffers.params, 0, caseParams);
+      device.queue.writeBuffer(buffers.gasControl, 0, caseControl);
+      // Fixed 72-byte record: failure/count, then v/impulse/work/gauge for
+      // these two manufactured fields. Never map the dynamic field arena.
+      const evidenceReadback = device.createBuffer({
+        size: 72,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
       });
       const encoder = device.createCommandEncoder();
@@ -1614,63 +1729,54 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
         pass.dispatchWorkgroups(...boundaryLayout.dispatchWorkgroups);
       }
       pass.end();
-      encoder.copyBufferToBuffer(
-        buffers.field,
-        0,
-        fieldReadback,
-        0,
-        fieldWords.byteLength
-      );
-      encoder.copyBufferToBuffer(
-        buffers.scratch,
-        0,
-        scratchReadback,
-        0,
-        scratchWords.byteLength
-      );
+      encoder.copyBufferToBuffer(buffers.scratch, 2 * 4, evidenceReadback, 0, 4);
+      encoder.copyBufferToBuffer(buffers.scratch, 8 * 4, evidenceReadback, 4, 4);
+      for (let fieldIndex = 0; fieldIndex < 2; fieldIndex += 1) {
+        const output = 2 + fieldIndex * 8;
+        const state = fieldLayout.stateOffsetWords + fieldIndex * fieldLayout.stateWords;
+        const accumulator = fieldLayout.accumulatorOffsetWords + fieldIndex * fieldLayout.accumulatorWords;
+        const scratchRow = abi.SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_HEADER_WORDS
+          + fieldIndex * abi.SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_ROW_WORDS;
+        encoder.copyBufferToBuffer(buffers.field, (state + 1) * 4,
+          evidenceReadback, output * 4, 12);
+        encoder.copyBufferToBuffer(buffers.field, (accumulator + 4) * 4,
+          evidenceReadback, (output + 3) * 4, 16);
+        encoder.copyBufferToBuffer(buffers.scratch, (scratchRow + 9) * 4,
+          evidenceReadback, (output + 7) * 4, 4);
+      }
       device.queue.submit([encoder.finish()]);
-      await Promise.all([
-        fieldReadback.mapAsync(GPUMapMode.READ),
-        scratchReadback.mapAsync(GPUMapMode.READ)
-      ]);
-      const fieldOutput = new Uint32Array(
-        fieldReadback.getMappedRange().slice(0)
+      await evidenceReadback.mapAsync(GPUMapMode.READ);
+      const evidence = new Uint32Array(
+        evidenceReadback.getMappedRange().slice(0)
       );
-      const scratchOutput = new Uint32Array(
-        scratchReadback.getMappedRange().slice(0)
-      );
-      fieldReadback.unmap();
-      scratchReadback.unmap();
+      evidenceReadback.unmap();
       const actual = fields.map((unused, fieldIndex) => {
-        const state = fieldLayout.stateOffsetWords
-          + fieldIndex * fieldLayout.stateWords;
-        const accumulator = fieldLayout.accumulatorOffsetWords
-          + fieldIndex * fieldLayout.accumulatorWords;
-        const scratchRow =
-          abi.SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_HEADER_WORDS
-          + fieldIndex
-            * abi.SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCRATCH_ROW_WORDS;
+        const output = 2 + fieldIndex * 8;
         return {
-          velocityMPerS: [1, 2, 3].map((word) => (
-            bitsF32(fieldOutput[state + word])
+          velocityMPerS: [0, 1, 2].map((word) => (
+            bitsF32(evidence[output + word])
           )),
-          impulseNs: [4, 5, 6].map((word) => (
-            bitsF32(fieldOutput[accumulator + word])
+          impulseNs: [3, 4, 5].map((word) => (
+            bitsF32(evidence[output + word])
           )),
-          externalWorkJ: bitsF32(fieldOutput[accumulator + 7]),
-          effectiveGaugePressurePa:
-            bitsF32(scratchOutput[scratchRow + 9])
+          externalWorkJ: bitsF32(evidence[output + 6]),
+          effectiveGaugePressurePa: bitsF32(evidence[output + 7])
         };
       });
+      evidenceReadback.destroy();
+      return { name, actual, scratchFailure: evidence[0], scratchValidatedFieldCount: evidence[1] };
+      };
+      const accepted = await executeCase('manufactured-transpose');
+      const rejectedCases = [
+        await executeCase('torn-bound', (words) => { words[60] ^= 0x3e000000; }),
+        await executeCase('stale-projection-version', (words) => { words[55] += 1; }),
+        await executeCase('stale-authority-seal', (unused, words) => {
+          words[gasAt.CONTROL_VOLUME_GEOMETRY_SEAL] ^= 1;
+        })
+      ];
       await device.queue.onSubmittedWorkDone();
       const validationError = await device.popErrorScope();
-      const scratchFailure = scratchOutput[2];
-      const scratchValidatedFieldCount = scratchOutput[8];
-      for (const buffer of [
-        ...Object.values(buffers),
-        fieldReadback,
-        scratchReadback
-      ]) {
+      for (const buffer of Object.values(buffers)) {
         buffer.destroy();
       }
       device.destroy();
@@ -1678,15 +1784,13 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
         status: 'executed',
         fineEdgeParentIndices,
         fineEdgeWeights,
-        oracle: {
-          admitted: oracle.admitted,
-          appliedFieldCount: oracle.appliedFieldCount,
-          missingCellCount: oracle.missingCellCount,
-          rows: oracle.rows
-        },
-        actual,
-        scratchFailure,
-        scratchValidatedFieldCount,
+        fields,
+        expectedGauges,
+        dt,
+        pressureScale,
+        compactReadbackBytes: 4 * 72,
+        ...accepted,
+        rejectedCases,
         validationError: validationError?.message || null,
         uncapturedErrors
       };
@@ -1709,13 +1813,16 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
     native.fineEdgeWeights,
     [0.125, 0.875, 0.625, 0.375]
   );
-  assert.equal(native.oracle.admitted, true);
-  assert.equal(native.oracle.appliedFieldCount, 2);
-  assert.equal(native.oracle.missingCellCount, 0);
-  assert.deepEqual(
-    native.oracle.rows.map((row) => row.effectiveGaugePressurePa),
-    [215, 115]
-  );
+  assert.equal(native.compactReadbackBytes, 4 * 72);
+  for (const rejected of native.rejectedCases) {
+    assert.notEqual(rejected.scratchFailure, 0, rejected.name);
+    for (const [index, actual] of rejected.actual.entries()) {
+      assert.deepEqual(actual.velocityMPerS, native.fields[index].velocityMPerS, rejected.name);
+      assert.deepEqual(actual.impulseNs, [0, 0, 0], rejected.name);
+      assert.equal(actual.externalWorkJ, 0, rejected.name);
+    }
+  }
+  assert.deepEqual(native.expectedGauges, [127.5, 77.5]);
   const assertClose = (actual, expected, label) => {
     const tolerance = 2e-5 * Math.max(1, Math.abs(expected));
     assert.ok(
@@ -1723,8 +1830,46 @@ test('native exact gas boundary matches the CPU oracle for asymmetric fine-to-co
       `${label}: expected ${expected}, received ${actual}`
     );
   };
+  // Independent external-pressure sign check: the gas occupies G - W A C,
+  // not the condensed material's C. At fixed nT its potential relative to
+  // ambient is -nRT log(Vfree) + pAmbient Vfree. Rigidly displace both fields
+  // along x; GPU impulse must equal minus this potential's derivative.
+  // This scalar thermodynamic finite difference is not a CPU dynamics solver
+  // and does not reuse the boundary's force formula or its impulse oracle.
+  const projectionColumns = [[0.5625, 0.4375], [0.8125, 0.1875]];
+  const initialFreeVolumes = [5, 7];
+  const gaugePressures = [40, 240];
+  const ambient = 100;
+  const gasPotential = (displacement) => initialFreeVolumes.reduce((sum, volume, cell) => {
+    const occupiedChange = native.fields.reduce((change, field, index) => (
+      change + projectionColumns[index][cell] * field.volumeGradientM2[0] * displacement
+    ), 0);
+    const freeVolume = volume - occupiedChange;
+    const nRT = (gaugePressures[cell] + ambient) * volume;
+    return sum + native.pressureScale * (-nRT * Math.log(freeVolume) + ambient * freeVolume);
+  }, 0);
+  const epsilon = 1e-5;
+  const potentialDerivative = (gasPotential(epsilon) - gasPotential(-epsilon)) / (2 * epsilon);
+  const measuredForce = native.actual.reduce((sum, field) => sum + field.impulseNs[0], 0) / native.dt;
+  assertClose(measuredForce, -potentialDerivative,
+    'external gas virtual work must oppose the complementary free-volume potential gradient');
   for (const [fieldIndex, actual] of native.actual.entries()) {
-    const expected = native.oracle.rows[fieldIndex];
+    const initial = native.fields[fieldIndex];
+    const impulseNs = initial.volumeGradientM2.map((gradient) => (
+      -native.pressureScale * native.expectedGauges[fieldIndex] * gradient * native.dt
+    ));
+    const velocityMPerS = initial.velocityMPerS.map((value, axis) => (
+      value + impulseNs[axis] / initial.massKg
+    ));
+    const expected = {
+      impulseNs,
+      velocityMPerS,
+      externalWorkJ: 0.5 * initial.massKg * (
+        velocityMPerS.reduce((sum, value) => sum + value * value, 0)
+        - initial.velocityMPerS.reduce((sum, value) => sum + value * value, 0)
+      ),
+      effectiveGaugePressurePa: native.expectedGauges[fieldIndex]
+    };
     for (const [axis, value] of actual.velocityMPerS.entries()) {
       assertClose(
         value,

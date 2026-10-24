@@ -18,6 +18,7 @@ import {
   residentWorkerLaneContinuationReady,
   residentWorkerLaneIsosurfacePresentationConsumerReady,
   residentWorkerLaneIsosurfacePresentationEnqueued,
+  residentWorkerLaneIsosurfacePendingPreviewRetirementReady,
   shouldSkipSphResidentPressureInterfaceForRenderRefresh,
   sphResidentChainedContinuationAllowed,
   sphResidentInterfaceRefreshPublicationIsCurrent,
@@ -26,6 +27,7 @@ import {
   sphResidentSchedulePublicationIsCurrent,
   sphResidentPlaybackRestartAllowed
 } from '../src/visualization/sphPhaseDemoMount.js';
+import { observeSphPresentation } from '../src/visualization/sphPresentationCadence.js';
 import {
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -45,6 +47,232 @@ import {
   SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
   SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_SHADOW
 } from '../src/runtime/sph/schroederDynamicLawRoutingContract.js';
+
+test('canonical control URLs preserve the normalized resident autoplay preference on remount', () => {
+  const source = readFileSync(new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url), 'utf8');
+  const parseStart = source.indexOf('  const initialResidentAutoParam =');
+  const parseEnd = source.indexOf('  function booleanUrlParam(', parseStart);
+  const syncStart = source.indexOf('  function syncUrlFromControls() {');
+  const syncEnd = source.indexOf('    if (initialSimDtS != null)', syncStart);
+  assert.ok(parseStart > 0 && parseEnd > parseStart && syncStart > 0 && syncEnd > syncStart);
+  // Execute the real parser and canonicalization prefix: the rest serializes
+  // unrelated material/solver controls and is not needed for this URL policy.
+  const sync = new Function('initialHash', 'initialQuery', `
+    const mountedRuntimeControlReloadPending = false;
+    const urlControls = {};
+    const currentInitialBodies = null;
+    ${source.slice(parseStart, parseEnd)}
+    ${source.slice(syncStart, syncEnd)}
+      return q;
+    }
+    return syncUrlFromControls();
+  `);
+  assert.ok(SPH_PHASE_URL_PARAM_KEYS.includes('residentAuto'));
+  for (const [hash, query, expected] of [
+    ['residentAuto=0', '', '0'], ['residentAuto=manual', 'residentAuto=1', '0'],
+    ['', 'residentAuto=off', '0'], ['residentAuto=1', 'residentAuto=0', '1'],
+    ['', '', '1']
+  ]) {
+    const canonical = sync(new URLSearchParams(hash), new URLSearchParams(query));
+    assert.equal(canonical.get('residentAuto'), expected);
+    assert.equal(sync(canonical, new URLSearchParams(query)).get('residentAuto'), expected);
+  }
+});
+
+function createMountedStartupStepHarness({ residentAuto = true, cpuDriver = false } = {}) {
+  const source = readFileSync(new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url), 'utf8');
+  const helper = (name) => {
+    const match = source.match(new RegExp(`^  function ${name}\\([\\s\\S]*?^  \\}$`, 'm'))?.[0];
+    assert.ok(match, name);
+    return match;
+  };
+  const scheduler = helper('scheduleMlsMpmResidentSteps');
+  const boundary = scheduler.indexOf('    const requestedStepCount =');
+  assert.ok(boundary > 0);
+  const stepStart = source.indexOf("  overlay.querySelector('#sph-step').addEventListener('click'");
+  const stepEnd = source.indexOf("  overlay.querySelector('#sph-play').addEventListener('click'", stepStart);
+  assert.ok(stepStart > 0 && stepEnd > stepStart);
+  // The real click handler, startup deferral, and one-shot drain execute here.
+  // Stop the actual scheduler before solver submission; this is a UI test.
+  return new Function('initialResidentAutoEnabled', 'cpuDriver', `
+    let click;
+    const scheduled = [], callbacks = [], cpuSteps = [];
+    const overlay = { isConnected: true, querySelector: () => ({ addEventListener: (type, fn) => { click = fn; } }) };
+    const performance = { now: () => 10 };
+    const window = { requestAnimationFrame: fn => callbacks.push(fn) };
+    const simulationRuntimeAdmission = { ready: true };
+    const simulationRuntimeBlocked = () => false;
+    const mechanicsModeFromControls = () => 'mlsmpm';
+    const currentResidentStepsPerSchedule = () => 64;
+    const SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT = 'none';
+    const RESIDENT_CONTINUATION_CHAIN_BUDGET = 4;
+    const activeViewState = { gpuMechanics: { integrator: 'mlsmpm' } };
+    const applyPendingControlEditIfAny = () => false;
+    const residentGpuContinuationReady = () => false;
+    const renderStatus = () => {};
+    const updateWarningBanner = () => {};
+    const recordPhysicsFrame = () => {};
+    const syncParticles = () => {};
+    const stepDemoForVisualTest = n => cpuSteps.push(n);
+    let driver = cpuDriver ? { step: () => cpuSteps.push(1) } : null;
+    let particleSyncGeneration = 3;
+    let residentPostStepPresentationGate = null;
+    let residentStartupPresentationGate = { active: true, generation: 3, status: 'pending' };
+    let residentStartupPresentationDeferredManualIntent = null;
+    ${helper('deferResidentStartupPresentationManualIntent')}
+    ${helper('drainResidentStartupPresentationDeferredManualIntent')}
+    ${helper('clearResidentStartupPresentationDeferredManualIntent')}
+    ${scheduler.slice(0, boundary)}
+      scheduled.push(arguments[0] || {});
+    }
+    ${source.slice(stepStart, stepEnd)}
+    return {
+      click, scheduled, cpuSteps, overlay, schedule: scheduleMlsMpmResidentSteps,
+      drain: drainResidentStartupPresentationDeferredManualIntent,
+      clear: clearResidentStartupPresentationDeferredManualIntent,
+      release() { residentStartupPresentationGate = { ...residentStartupPresentationGate, active: false }; },
+      advance() { particleSyncGeneration += 1; },
+      runCallbacks() { for (const fn of callbacks.splice(0)) fn(); }
+    };
+  `)(residentAuto, cpuDriver);
+}
+
+test('real Step click queues once through native startup for either autoplay preference', () => {
+  for (const residentAuto of [false, true]) for (const cpuDriver of [false, true]) {
+    const h = createMountedStartupStepHarness({ residentAuto, cpuDriver });
+    h.click();
+    h.click(); // Repeated clicks during startup coalesce in the existing slot.
+    const intent = h.overlay.__sphResidentStartupDeferredManualIntent;
+    assert.equal(intent?.generation, 3);
+    assert.equal(intent.kind, cpuDriver ? 'cpu-driver-step' : 'resident-schedule');
+    assert.ok(Object.isFrozen(intent));
+    assert.equal(h.scheduled.length + h.cpuSteps.length, 0, 'startup gate remains enforced');
+    assert.equal(h.drain({ generation: 2 }), false);
+    assert.equal(h.overlay.__sphResidentStartupDeferredManualIntent, intent,
+      'a stale drain must not consume the current intent');
+    h.release();
+    assert.equal(h.drain(), true);
+    assert.equal(h.drain(), false, 'the same click can only drain once');
+    h.runCallbacks();
+    if (cpuDriver) assert.deepEqual(h.cpuSteps, [1]);
+    else {
+      assert.equal(h.scheduled.length, 1);
+      assert.equal(h.scheduled[0].generation, 3);
+      assert.equal(h.scheduled[0].stepCount, 64);
+      assert.equal(h.scheduled[0].force, false);
+      assert.equal(h.scheduled[0].manualIntent, true);
+    }
+  }
+});
+
+test('startup manual Step cannot bypass force, stale generation, disconnect or gate guards', () => {
+  for (const options of [{}, { manualIntent: true, force: true }, { manualIntent: true, generation: 2 },
+    { manualIntent: 1 }, { manualIntent: 'true' }, { manualIntent: {} }]) {
+    const h = createMountedStartupStepHarness();
+    h.schedule(options);
+    assert.equal(h.overlay.__sphResidentStartupDeferredManualIntent, undefined);
+    assert.equal(h.scheduled.length, 0);
+  }
+  for (const transition of ['disconnect', 'advance', 'gate-pending', 'clear']) {
+    const h = createMountedStartupStepHarness();
+    h.click();
+    if (transition === 'clear') h.clear('replacement');
+    else if (transition !== 'gate-pending') h.release();
+    assert.equal(h.drain(), transition !== 'clear');
+    if (transition === 'disconnect') h.overlay.isConnected = false;
+    if (transition === 'advance') h.advance();
+    h.runCallbacks();
+    assert.equal(h.scheduled.length + h.cpuSteps.length, 0, transition);
+  }
+});
+
+test('every mounted playback transition shares explicit presentation state, including scene replacement', () => {
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url), 'utf8'
+  );
+  const setterSource = source.match(/^  function setPlaying\(nextPlaying\) \{[\s\S]*?^  \}/m)?.[0];
+  assert.ok(setterSource);
+  // Execute the actual mount helper with only its scheduling/UI closure
+  // dependencies replaced. This does not construct a second physics driver.
+  const makeController = new Function('initialScene', `
+    let scene = initialScene;
+    let playing = false;
+    ${setterSource}
+    return {
+      setPlaying,
+      get playing() { return playing; },
+      replaceScene(nextScene) { scene = nextScene; }
+    };
+  `);
+  const first = [];
+  const second = [];
+  const controller = makeController({ setPresentationPlaying: (value) => first.push(value) });
+  assert.equal(controller.setPlaying(true), true);
+  assert.equal(controller.playing, true);
+  assert.equal(controller.setPlaying(false), true);
+  for (const malformed of [undefined, null, 0, 'false', {}]) {
+    assert.equal(controller.setPlaying(malformed), false);
+  }
+  assert.equal(controller.playing, false);
+  assert.deepEqual(first, [true, false]);
+  controller.replaceScene({ setPresentationPlaying: (value) => second.push(value) });
+  controller.setPlaying(true);
+  controller.setPlaying(false);
+  assert.deepEqual(first, [true, false], 'old scenes receive no later playback intent');
+  assert.deepEqual(second, [true, false]);
+
+  assert.deepEqual(
+    source.match(/^\s*(?:let )?playing\s*=(?!=).*;$/gm)?.map((line) => line.trim()),
+    ['let playing = false;', 'playing = nextPlaying;'],
+    'all mounted start/stop routes must use the shared setter'
+  );
+  assert.match(source, /let scene = createSphPhaseScene\(sceneContainer, \{\s*presentationPlaying: false,/);
+  assert.match(source, /scene = createSphPhaseScene\(sceneContainer, \{\s*presentationPlaying: playing,/);
+  for (const route of [
+    /if \(terminalCurrentError\) \{[\s\S]*?setPlaying\(false\);/,
+    /function rebuildDemoFromControls\([\s\S]*?setPlaying\(false\);/,
+    /function scheduleDemoRebuild\([\s\S]*?setPlaying\(false\);/,
+    /function stageControlEdit\([\s\S]*?setPlaying\(false\);/,
+    /stopPlaybackForInvalidInitialBodyDraft = \(\) => \{\s*setPlaying\(false\);/,
+    /function startWorkerResidentPlayback\([\s\S]*?setPlaying\(true\);/,
+    /function startConfiguredResidentAutoplay\([\s\S]*?setPlaying\(true\);/,
+    /function close\(\) \{\s*setPlaying\(false\);/
+  ]) assert.match(source, route);
+  const stepStart = source.indexOf("overlay.querySelector('#sph-step').addEventListener('click'");
+  const playStart = source.indexOf("overlay.querySelector('#sph-play').addEventListener('click'", stepStart);
+  assert.ok(stepStart > 0 && playStart > stepStart);
+  assert.doesNotMatch(source.slice(stepStart, playStart), /setPlaying\(true\)/,
+    'manual Step must not enable autonomous interpolation');
+});
+
+test('scene presentation setter forwards valid intent but rejects a disposed scene', () => {
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseScene.js', import.meta.url), 'utf8'
+  );
+  const setterSource = source.match(/^  function setPresentationPlaying\(playing\) \{[\s\S]*?^  \}/m)?.[0];
+  assert.ok(setterSource);
+  const calls = [];
+  const controller = new Function('workerOffscreenPresentationBridge', `
+    let running = true;
+    let scenePresentationPlaying = false;
+    ${setterSource}
+    return {
+      setPresentationPlaying,
+      get playing() { return scenePresentationPlaying; },
+      dispose() { running = false; }
+    };
+  `)({ setPresentationPlaying: (value) => { calls.push(value); return { playing: value }; } });
+  assert.equal(controller.setPresentationPlaying(true), true);
+  assert.equal(controller.playing, true);
+  assert.equal(controller.setPresentationPlaying('false'), false);
+  assert.equal(controller.playing, true);
+  assert.equal(controller.setPresentationPlaying(false), true);
+  controller.dispose();
+  assert.equal(controller.setPresentationPlaying(true), false);
+  assert.equal(controller.playing, false);
+  assert.deepEqual(calls, [true, false]);
+  assert.match(source, /createUlgWorkerOffscreenPresentationBridge\(\{[\s\S]*?presentationPlaying: scenePresentationPlaying,/);
+});
 
 test('reaction activation defaults to shadow without conflating the reactions checkbox', () => {
   assert.deepEqual(resolveSphReactionActivationConfiguration(), {
@@ -553,8 +781,8 @@ test('native surface snapshot preserves exact GPU upload authority through queue
   );
 });
 
-test('worker lane continuation separates exact admission from asynchronous isosurface completion', () => {
-  const execution = {
+function workerLaneContinuationExecution() {
+  return {
     residentComputeManagerMode: 'worker-owned-resident-lane',
     workerLaneFallback: null,
     workerOwnedResidentLane: {
@@ -599,6 +827,10 @@ test('worker lane continuation separates exact admission from asynchronous isosu
       }
     }
   };
+}
+
+test('worker lane continuation separates exact admission from asynchronous isosurface completion', () => {
+  const execution = workerLaneContinuationExecution();
   assert.equal(residentWorkerLaneContinuationReady(execution), true);
   assert.equal(residentWorkerLaneContinuationReady({
     ...execution,
@@ -849,6 +1081,199 @@ test('worker lane continuation separates exact admission from asynchronous isosu
   });
   assert.equal(readback.eligible, false);
   assert.ok(readback.blockers.includes('tier0-readback-contract-incomplete'));
+});
+
+test('worker rebuild allocation binds only its unbound replacement preview without retiring it', () => {
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url), 'utf8'
+  );
+  const scheduler = source.match(/^  function scheduleWorkerDemoRebuild\([\s\S]*?^  \}/m)?.[0];
+  assert.ok(scheduler);
+  const boundary = scheduler.indexOf('    const submittedAtMs = performance.now();');
+  assert.ok(boundary > 0);
+  // Execute the actual synchronous allocation prefix, before runtime task
+  // submission. A replacement has no particle owner until syncParticles.
+  const create = new Function('preview', 'ready', `
+    const overlay = { __sphPendingPresentation: preview };
+    const simulationRuntimeAdmission = { ready };
+    const performance = { now: () => 10 };
+    let workerRebuildGeneration = 2;
+    ${scheduler.slice(0, boundary)}
+      return generation;
+    }
+    return {
+      run: scheduleWorkerDemoRebuild,
+      get preview() { return overlay.__sphPendingPresentation; },
+      get generation() { return workerRebuildGeneration; }
+    };
+  `);
+  const original = Object.freeze({
+    active: true, generation: null, particleGeneration: null,
+    previewSerial: 7, createdAtMs: 1, bodies: Object.freeze([{ id: 'base' }])
+  });
+  const current = create(original, true);
+  assert.equal(current.run(), 3);
+  assert.deepEqual(current.preview, { ...original, generation: 3, updatedAtMs: 10 });
+  assert.equal(current.preview.active, true, 'allocation alone never retires a preview');
+  assert.equal(current.preview.particleGeneration, null, 'no particle admission is fabricated');
+  assert.equal(current.preview.bodies, original.bodies);
+  assert.ok(Object.isFrozen(current.preview));
+  assert.equal(original.generation, null, 'previous immutable record remains unchanged');
+  const firstAllocated = current.preview;
+  assert.equal(current.run(), 4);
+  assert.equal(current.preview, firstAllocated, 'another allocation cannot relabel an already bound preview');
+  for (const preview of [null, { ...original, active: false },
+    { ...original, generation: 1 }, { ...original, particleGeneration: 1 }]) {
+    const skipped = create(preview, true);
+    assert.equal(skipped.run(), 3);
+    assert.equal(skipped.preview, preview, 'only a wholly unbound active replacement can be bound');
+  }
+  const blocked = create(original, false);
+  assert.equal(blocked.run(), false);
+  assert.equal(blocked.generation, 2);
+  assert.equal(blocked.preview, original, 'runtime rejection allocates no preview owner');
+});
+
+test('pending preview retires only after the delayed current worker isosurface is displayed', () => {
+  const execution = workerLaneContinuationExecution();
+  const enqueued = {
+    ...execution.workerOwnedResidentLane.committedPresentation,
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
+    status: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+    presentationGeometry: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+    sourceCapturedBeforePhysicsContinuation: true
+  };
+  execution.workerOwnedResidentLane.committedPresentation = enqueued;
+  const content = {
+    ...enqueued,
+    status: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
+    renderRowsSchema: 'peercompute.ulg.worker-offscreen-render-rows.v0',
+    workerLocalRenderRowsProduced: true,
+    sameDevicePresentation: true,
+    particleCount: 16,
+    surfaceCount: 1,
+    indirectDrawCount: 1,
+    frameCount: 4,
+    readyFrameCount: 4,
+    workerFramebufferEpoch: 2,
+    displayOwnerEpoch: 2,
+    presentationFrameSchema:
+      'peercompute.ulg.worker-offscreen-resident-isosurface-presentation-frame.v0',
+    presentationFrameStatus: 'worker-owned-isosurface-presentation-opportunity',
+    presentationFrameAdmitted: true,
+    presentationFrameGpuCompleted: true,
+    presentationFrameGpuCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+    presentationFramePresentationOpportunity: true,
+    presentationFramePresentationOpportunityMethod:
+      'worker-request-animation-frame-after-gpu-completion',
+    presentationQueueCompletionCount: 4,
+    presentationQueueCompletionSerial: 4,
+    presentationQueueCompletionMethod: 'worker-device.queue.onSubmittedWorkDone',
+    presentationQueueCompletionScope: 'worker-offscreen-shared-device-queue-frame-proof',
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-not-attributed',
+    physicsHostQueueFenceParticipation: null
+  };
+  const presentation = {
+    displayOwner: 'worker',
+    lifecycleGeneration: 1,
+    displayOwnerEpoch: 2,
+    workerFramebufferEpoch: 2,
+    displayOwnerContentReady: true,
+    displayOwnerContentFrameSerial: 4,
+    displayOwnerPresentedSphStep: 3,
+    displayCanvasVisible: true,
+    frameCount: 4,
+    readyFrameCount: 4,
+    displayOwnerLastRenderedContent: content,
+    workerOffscreenRenderRows: content
+  };
+  const pendingPresentation = {
+    active: true, generation: 1, particleGeneration: 1, previewSerial: 1
+  };
+  const observationInputs = {
+    timestampMs: 5000,
+    presentation,
+    steps: execution,
+    workerCanvasVisible: true,
+    mainCanvasOpacity: '0',
+    compositorOwner: 'worker',
+    pendingPresentation,
+    pendingPresentationVisible: true
+  };
+  const observation = observeSphPresentation(observationInputs);
+  assert.equal(observation.admitted, false);
+  assert.deepEqual(observation.admissionBlockers, [
+    'control-envelope-retired', 'control-envelope-layer-hidden'
+  ]);
+  const input = {
+    execution, presentation, observation, pendingPresentation,
+    currentParticleGeneration: 1, currentRebuildGeneration: 1,
+    resetRebuildPending: false
+  };
+  const ready = residentWorkerLaneIsosurfacePendingPreviewRetirementReady;
+  assert.equal(ready(), false);
+  assert.equal(ready({
+    ...input, presentation: { ...presentation, displayOwnerLastRenderedContent: null }
+  }), false, 'no displayed content yet');
+  assert.equal(ready({
+    ...input, presentation: { ...presentation, displayOwnerLastRenderedContent: enqueued }
+  }), false, 'enqueue is not a completed displayed frame');
+  assert.equal(ready(input), true, 'delayed exact displayed receipt retires the bound preview');
+
+  for (const [field, value] of [
+    ['active', false], ['generation', null], ['generation', 2], ['particleGeneration', 2],
+    ['particleGeneration', null], ['particleGeneration', '1']
+  ]) {
+    assert.equal(ready({
+      ...input, pendingPresentation: { ...pendingPresentation, [field]: value }
+    }), false, `superseded/unbound preview ${field}=${value}`);
+  }
+  for (const [field, value] of [
+    ['currentParticleGeneration', 2], ['currentParticleGeneration', null],
+    ['currentRebuildGeneration', 2], ['resetRebuildPending', true],
+    ['observation', null]
+  ]) assert.equal(ready({ ...input, [field]: value }), false, field);
+  for (const [field, value] of [
+    ['displayOwner', 'main-native'], ['displayOwnerEpoch', 3],
+    ['workerFramebufferEpoch', 3], ['workerFramebufferEpoch', null],
+    ['displayOwnerContentReady', false]
+  ]) assert.equal(ready({
+    ...input, presentation: { ...presentation, [field]: value }
+  }), false, `stale display ${field}`);
+  for (const [field, value] of [
+    ['scheduleId', 'schedule:old'], ['laneId', 'lane:old'],
+    ['residentExecutionGeneration', 7], ['stateManagerCommitAccepted', false],
+    ['workerFramebufferEpoch', 1], ['displayOwnerEpoch', 1],
+    ['presentationFrameAdmitted', false], ['presentationFrameGpuCompleted', false],
+    ['presentationFramePresentationOpportunity', false],
+    ['presentationQueueCompletionScope', 'unproved'], ['surfaceCount', 0]
+  ]) {
+    const changedPresentation = {
+      ...presentation, displayOwnerLastRenderedContent: { ...content, [field]: value }
+    };
+    assert.equal(ready({
+      ...input, presentation: changedPresentation,
+      observation: observeSphPresentation({
+        ...observationInputs, presentation: changedPresentation
+      })
+    }), false, `unadmitted/stale displayed content ${field}`);
+  }
+  for (const [field, value] of [
+    ['workerCanvasVisible', false], ['mainCanvasOpacity', '1'],
+    ['compositorOwner', 'main-native']
+  ]) assert.equal(ready({
+    ...input, observation: observeSphPresentation({ ...observationInputs, [field]: value })
+  }), false, `display visibility ${field}`);
+  assert.equal(ready({
+    ...input, observation: { ...observation, admissionBlockers: ['unknown-new-proof-gate'] }
+  }), false, 'only the two preview gates can be cleared by retirement');
+  assert.equal(ready(input), true, 'rejected attempts do not consume the delayed valid receipt');
+  assert.equal(pendingPresentation.active, true, 'pure proof does not mutate the preview');
+
+  const source = readFileSync(
+    new URL('../src/visualization/sphPhaseDemoMount.js', import.meta.url), 'utf8'
+  );
+  assert.match(source, /function sampleFrameCounters\(\)[\s\S]*?residentWorkerLaneIsosurfacePendingPreviewRetirementReady\([\s\S]*?completePendingBodyEnvelopePreview\(\{[\s\S]*?reason: 'worker-committed-isosurface-display-ready'/);
 });
 
 test('canonical direct SS continuation excludes legacy post-step interface readback from the hot loop', () => {

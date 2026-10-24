@@ -2,6 +2,9 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import { captureSphAerosolSpatialGeneration,
+  assertSphAerosolSpatialContinuation, releaseSphAerosolSpatialTransaction,
+  sphAerosolSourceFamily, sphAerosolCondensateTransitionForUploads } from './sphAerosolSpatialBinding.js';
 import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
@@ -293,6 +296,7 @@ function resolveSourceBuffers({
   mlsMpmParticleUpload
 }) {
   return Object.freeze({
+    aerosolFamily: sphAerosolSourceFamily(sphParticleUpload),
     stateBuffer: requireBuffer(
       sphParticleUpload?.stateBuffer,
       'sphParticleUpload.stateBuffer',
@@ -332,7 +336,8 @@ function sourceBuffersMatch(expected, actual) {
   return expected.stateBuffer === actual.stateBuffer
     && expected.thermoBuffer === actual.thermoBuffer
     && expected.identityBuffer === actual.identityBuffer
-    && expected.mechanicsBuffer === actual.mechanicsBuffer;
+    && expected.mechanicsBuffer === actual.mechanicsBuffer
+    && expected.aerosolFamily === actual.aerosolFamily;
 }
 
 function runtimeOwnsSubmittedExecution(runtime, execution) {
@@ -2360,6 +2365,7 @@ export function createSchroederSpatialEpochTransaction({
   generation,
   sphParticleUpload,
   mlsMpmParticleUpload,
+  aerosolSourceFamilyConsumerLease = null,
   twoLevelAuthoritative = false,
   phaseVolumeInterfaceProposalAuthoritative = false,
   requiredReaderIds = DEFAULT_REQUIRED_READERS,
@@ -2875,6 +2881,13 @@ export function createSchroederSpatialEpochTransaction({
     }
   });
   TRANSACTION_AUTHORITY.set(transaction, authority);
+  try {
+    captureSphAerosolSpatialGeneration({ device, transaction, generation,
+      sphParticleUpload, mlsMpmParticleUpload, aerosolSourceFamilyConsumerLease });
+  } catch (error) {
+    TRANSACTION_AUTHORITY.delete(transaction);
+    throw error;
+  }
   return transaction;
 }
 
@@ -3341,6 +3354,10 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
     sphParticleUpload: nextSphParticleUpload,
     mlsMpmParticleUpload: nextMlsMpmParticleUpload
   });
+  assertSphAerosolSpatialContinuation({ device: authority.device,
+    transaction, generation: authority.generation,
+    sourceFamily: authority.sourceBuffers.aerosolFamily,
+    nextFamily: nextSourceBuffers.aerosolFamily, nextParticleUploads });
   if (
     authority.sourceBuffers.identityBuffer != null
     && nextSourceBuffers.identityBuffer == null
@@ -3365,7 +3382,9 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
     nextStateBuffer: nextSourceBuffers.stateBuffer,
     nextThermoBuffer: nextSourceBuffers.thermoBuffer,
     nextIdentityBuffer: nextSourceBuffers.identityBuffer,
-    nextMechanicsBuffer: nextSourceBuffers.mechanicsBuffer
+    nextMechanicsBuffer: nextSourceBuffers.mechanicsBuffer,
+    nextAerosolFamily: nextSourceBuffers.aerosolFamily,
+    aerosolCondensateTransition: sphAerosolCondensateTransitionForUploads(nextParticleUploads)
   });
   authority.counters.commitCount += 1;
   return authority.commit;
@@ -3419,6 +3438,9 @@ export function validateSchroederSpatialEpochTransactionCommit(
       && commitReceipt.nextThermoBuffer === nextSourceBuffers.thermoBuffer
       && commitReceipt.nextIdentityBuffer === nextSourceBuffers.identityBuffer
       && commitReceipt.nextMechanicsBuffer === nextSourceBuffers.mechanicsBuffer
+      && commitReceipt.nextAerosolFamily === nextSourceBuffers.aerosolFamily
+      && commitReceipt.aerosolCondensateTransition
+        === sphAerosolCondensateTransitionForUploads(nextParticleUploads)
       && authority.counters.commitCount === 1
       && authority.counters.privateAdvanceCount === 0
       && sourceBuffersMatch(authority.sourceBuffers, expectedSourceBuffers)
@@ -3470,6 +3492,14 @@ export function advanceSchroederSpatialEpochTransactionPrivate(transaction, {
     sphParticleUpload: nextSphParticleUpload,
     mlsMpmParticleUpload: nextMlsMpmParticleUpload
   });
+  assertSphAerosolSpatialContinuation({ device: authority.device,
+    transaction, generation: authority.generation,
+    sourceFamily: authority.sourceBuffers.aerosolFamily,
+    nextFamily: nextSourceBuffers.aerosolFamily });
+  if (sphAerosolCondensateTransitionForUploads(nextParticleUploads) != null) {
+    throw transactionError('Private mechanics advance cannot publish a condensate transition',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_PRIVATE_ADVANCE_AUTHORITY');
+  }
   if (
     authority.sourceBuffers.identityBuffer != null
     && nextSourceBuffers.identityBuffer == null
@@ -3489,7 +3519,8 @@ export function advanceSchroederSpatialEpochTransactionPrivate(transaction, {
     successorStateBuffer: nextSourceBuffers.stateBuffer,
     successorThermoBuffer: nextSourceBuffers.thermoBuffer,
     successorIdentityBuffer: nextSourceBuffers.identityBuffer,
-    successorMechanicsBuffer: nextSourceBuffers.mechanicsBuffer
+    successorMechanicsBuffer: nextSourceBuffers.mechanicsBuffer,
+    successorAerosolFamily: nextSourceBuffers.aerosolFamily
   });
   authority.counters.privateAdvanceCount += 1;
   return authority.privateAdvance;
@@ -3540,6 +3571,8 @@ export function validateSchroederSpatialEpochTransactionPrivateAdvance(
         === nextSourceBuffers.identityBuffer
       && privateAdvanceReceipt?.successorMechanicsBuffer
         === nextSourceBuffers.mechanicsBuffer
+      && privateAdvanceReceipt?.successorAerosolFamily
+        === nextSourceBuffers.aerosolFamily
       && authority.counters.privateAdvanceCount === 1
       && authority.counters.commitCount === 0
       && authority.sourceBuffers.stateBuffer === expectedSourceBuffers.stateBuffer
@@ -3548,6 +3581,8 @@ export function validateSchroederSpatialEpochTransactionPrivateAdvance(
         === expectedSourceBuffers.identityBuffer
       && authority.sourceBuffers.mechanicsBuffer
         === expectedSourceBuffers.mechanicsBuffer
+      && authority.sourceBuffers.aerosolFamily
+        === expectedSourceBuffers.aerosolFamily
     );
   } catch {
     return false;
@@ -3607,6 +3642,7 @@ export function scheduleSchroederSpatialEpochTransactionRelease(transaction, {
       ) {
         authority.state = SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.RELEASED;
       }
+      releaseSphAerosolSpatialTransaction(transaction, authority.generation);
       return true;
     },
     (error) => {
@@ -3634,6 +3670,7 @@ export function abortSchroederSpatialEpochTransaction(transaction, reason = null
   ) return false;
   authority.state = SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.ABORTED;
   authority.abortReason = reason instanceof Error ? reason.message : (reason == null ? null : String(reason));
+  releaseSphAerosolSpatialTransaction(transaction, authority.generation);
   return true;
 }
 

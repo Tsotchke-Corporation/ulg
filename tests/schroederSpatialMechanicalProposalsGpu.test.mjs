@@ -76,6 +76,7 @@ import {
   isLiveSchroederSpatialMechanicalProposal,
   runSchroederSpatialMechanicalProposalWebGpu,
   resolveSchroederSpatialMechanicalSolverBudget,
+  schroederSpatialMechanicalDeviceRuntimeAllocationOwnership,
   schroederSpatialMechanicalPairRequiresUnilateralContact,
   schroederSpatialMechanicalPairSharesPhaseLineage,
   schroederSpatialMechanicalSolverBudgetWgsl,
@@ -134,11 +135,12 @@ test('canonical solver and dynamic-law watcher share one contact trust contract'
 });
 
 function createFakeEncoder(device, descriptor = {}) {
-  const event = { descriptor, clears: [], passes: [], copies: [] };
+  const event = { descriptor, clears: [], passes: [], copies: [], operations: [] };
   device.encoders.push(event);
   return {
     clearBuffer(buffer, offset = 0, size = null) {
       event.clears.push({ buffer, offset, size });
+      event.operations.push({ clear: { buffer, offset, size } });
     },
     beginComputePass(passDescriptor = {}) {
       const pass = { descriptor: passDescriptor, commands: [] };
@@ -156,6 +158,11 @@ function createFakeEncoder(device, descriptor = {}) {
             bindGroup: pass.bindGroup?.bindGroup,
             ...command
           });
+          event.operations.push({
+            pipeline: pass.pipeline,
+            bindGroup: pass.bindGroup?.bindGroup,
+            ...command
+          });
         },
         dispatchWorkgroupsIndirect(buffer, offset) {
           const command = { dispatchIndirect: { buffer, offset } };
@@ -167,12 +174,20 @@ function createFakeEncoder(device, descriptor = {}) {
             bindGroup: pass.bindGroup?.bindGroup,
             ...command
           });
+          event.operations.push({
+            pipeline: pass.pipeline,
+            bindGroup: pass.bindGroup?.bindGroup,
+            ...command
+          });
         },
         end() { pass.ended = true; }
       };
     },
     copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
       event.copies.push({ source, sourceOffset, destination, destinationOffset, size });
+      event.operations.push({
+        copy: { source, sourceOffset, destination, destinationOffset, size }
+      });
     },
     finish() { return event; }
   };
@@ -431,6 +446,188 @@ async function settleDeferredCleanup(device) {
   await device.queue.onSubmittedWorkDone();
   await new Promise((resolve) => setImmediate(resolve));
 }
+
+test('mechanical runtime allocation ownership is empty for an unrelated exact device', () => {
+  const device = createFakeDevice();
+  const unrelatedBuffer = taggedBuffer(device, 'not-owned-by-mechanical-runtime', 16);
+  const ownership = schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(device);
+  assert.deepEqual(ownership, {
+    schema: 'peercompute.ulg.schroeder-spatial-mechanical-runtime-allocation-ownership.v0',
+    status: 'mechanical-proposal-runtime-allocation-ownership-complete',
+    runtimeCount: 0,
+    allocationCount: 0,
+    buffers: []
+  });
+  assert.equal(Object.isFrozen(ownership), true);
+  assert.equal(Object.isFrozen(ownership.buffers), true);
+  assert.equal(unrelatedBuffer.destroyCount, 0);
+  for (const invalidDevice of [null, undefined, false, 1, 'device']) {
+    assert.throws(
+      () => schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(invalidDevice),
+      { code: 'ERR_SCHROEDER_SPATIAL_MECHANICAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE' }
+    );
+  }
+});
+
+test('mechanical runtime allocation ownership covers every direct and nested scan allocation without side effects', async () => {
+  const fixture = liveFixture(2048);
+  const before = fixture.device.buffers.length;
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  const allocated = fixture.device.buffers.slice(before);
+  const unrelatedFixture = liveFixture();
+  const unrelatedBefore = unrelatedFixture.device.buffers.length;
+  const unrelatedProposal = runSchroederSpatialMechanicalProposalWebGpu(unrelatedFixture);
+  const unrelatedAllocated = unrelatedFixture.device.buffers.slice(unrelatedBefore);
+  try {
+    const snapshot = {
+      allocations: fixture.device.buffers.length,
+      writes: fixture.device.writes.length,
+      submissions: fixture.device.submissions.length,
+      encoders: fixture.device.encoders.length,
+      lifecycle: proposal.lifecycleStatus
+    };
+    const ownership = schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device);
+    assert.equal(ownership.runtimeCount, 1);
+    assert.equal(ownership.allocationCount, allocated.length);
+    assert.ok(allocated.length > 21, 'multi-level scan adds retained parameters and scratch allocations');
+    assert.deepEqual(new Set(ownership.buffers), new Set(allocated));
+    assert.equal(new Set(ownership.buffers).size, ownership.buffers.length);
+    assert.ok(ownership.buffers.includes(proposal.proposalBuffer));
+    assert.ok(ownership.buffers.includes(proposal.evidence.buffer));
+    assert.ok(ownership.buffers.includes(proposal.graphControlBuffer));
+    assert.equal(ownership.buffers.includes(fixture.sphParticleUpload.stateBuffer), false);
+    assert.equal(ownership.buffers.some((buffer) => unrelatedAllocated.includes(buffer)), false);
+    assert.deepEqual(
+      new Set(schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(unrelatedFixture.device).buffers),
+      new Set(unrelatedAllocated)
+    );
+    assert.deepEqual(schroederSpatialMechanicalDeviceRuntimeAllocationOwnership({
+      ...fixture.device,
+      owned: true,
+      buffers: ownership.buffers,
+      owner: 'schroeder-spatial-mechanical-device-arena-cache'
+    }).buffers, [], 'copied device fields and owner descriptions do not confer private ownership');
+    assert.deepEqual({
+      allocations: fixture.device.buffers.length,
+      writes: fixture.device.writes.length,
+      submissions: fixture.device.submissions.length,
+      encoders: fixture.device.encoders.length,
+      lifecycle: proposal.lifecycleStatus
+    }, snapshot);
+    assert.ok(allocated.every((buffer) => buffer.destroyCount === 0));
+    assert.equal(Object.isFrozen(ownership), true);
+    assert.equal(Object.isFrozen(ownership.buffers), true);
+    assert.throws(() => ownership.buffers.push(proposal.proposalBuffer), TypeError);
+  } finally {
+    proposal.releaseAfterSubmittedWork();
+    unrelatedProposal.releaseAfterSubmittedWork();
+    await Promise.all([proposal.releasePromise, unrelatedProposal.releasePromise]);
+    destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+    destroySchroederSpatialMechanicalProposalRuntime(unrelatedFixture.device);
+  }
+  assert.ok(allocated.every((buffer) => buffer.destroyCount === 1));
+  assert.equal(schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device).allocationCount, 0);
+});
+
+test('mechanical runtime allocation ownership survives pending and released proposal leases and exact cache reuse', async () => {
+  const fixture = liveFixture();
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  const ownership = schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device);
+  const originalFence = fixture.device.queue.onSubmittedWorkDone;
+  let finishFence;
+  fixture.device.queue.onSubmittedWorkDone = () => new Promise((resolve) => {
+    finishFence = resolve;
+  });
+  assert.equal(proposal.releaseAfterSubmittedWork(), true);
+  const pendingLifecycle = proposal.lifecycleStatus;
+  assert.deepEqual(
+    schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device).buffers,
+    ownership.buffers
+  );
+  assert.equal(proposal.lifecycleStatus, pendingLifecycle);
+  assert.ok(ownership.buffers.every((buffer) => buffer.destroyCount === 0));
+  finishFence();
+  assert.equal(await proposal.releasePromise, true);
+  fixture.device.queue.onSubmittedWorkDone = originalFence;
+  assert.equal(proposal.lifecycleStatus, 'released');
+  assert.deepEqual(
+    schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device).buffers,
+    ownership.buffers
+  );
+  const allocationCount = fixture.device.buffers.length;
+  const reused = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  try {
+    assert.equal(reused.proposalPoolCacheHit, true);
+    assert.equal(reused.proposalBuffer, proposal.proposalBuffer);
+    assert.equal(reused.evidence.buffer, proposal.evidence.buffer);
+    assert.equal(fixture.device.buffers.length, allocationCount);
+    assert.deepEqual(
+      schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device).buffers,
+      ownership.buffers
+    );
+    assert.ok(ownership.buffers.every((buffer) => buffer.destroyCount === 0));
+  } finally {
+    reused.releaseAfterSubmittedWork();
+    await reused.releasePromise;
+    destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+  }
+  assert.ok(ownership.buffers.every((buffer) => buffer.destroyCount === 1));
+});
+
+test('mechanical runtime allocation ownership fails closed on malformed direct and foreign nested allocations', async () => {
+  const fixture = liveFixture();
+  const before = fixture.device.buffers.length;
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  const allocated = fixture.device.buffers.slice(before);
+  const expectedError = {
+    code: 'ERR_SCHROEDER_SPATIAL_MECHANICAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE'
+  };
+  const originalDestroy = proposal.proposalBuffer.destroy;
+  try {
+    proposal.proposalBuffer.destroy = null;
+    assert.throws(
+      () => schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device),
+      expectedError
+    );
+    proposal.proposalBuffer.destroy = originalDestroy;
+    const readFailure = new Error('injected allocation owner read failure');
+    Object.defineProperty(proposal.proposalBuffer, 'destroy', {
+      configurable: true,
+      get() { throw readFailure; }
+    });
+    assert.throws(
+      () => schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device),
+      (error) => error.code === expectedError.code && error.cause === readFailure
+    );
+    Object.defineProperty(proposal.proposalBuffer, 'destroy', {
+      configurable: true,
+      writable: true,
+      value: originalDestroy
+    });
+    // The first arena allocation is the scan's untagged retained-parameter
+    // buffer. Positively brand it foreign to exercise nested owner validation.
+    const nestedScanBuffer = allocated[0];
+    assert.notEqual(nestedScanBuffer, proposal.proposalBuffer);
+    const foreignDevice = createFakeDevice();
+    tagWebGpuBufferDevice(nestedScanBuffer, foreignDevice);
+    assert.equal(webGpuBufferMatchesDevice(nestedScanBuffer, fixture.device), false);
+    assert.throws(
+      () => schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(fixture.device),
+      expectedError
+    );
+    assert.equal(webGpuBufferMatchesDevice(nestedScanBuffer, foreignDevice), true);
+    assert.ok(allocated.every((buffer) => buffer.destroyCount === 0));
+  } finally {
+    Object.defineProperty(proposal.proposalBuffer, 'destroy', {
+      configurable: true,
+      writable: true,
+      value: originalDestroy
+    });
+    proposal.releaseAfterSubmittedWork();
+    await proposal.releasePromise;
+    destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+  }
+});
 
 function assertVectorNearZero(vector, tolerance = 1e-12) {
   for (const value of vector) assert.ok(Math.abs(value) <= tolerance, String(vector));
@@ -4804,6 +5001,232 @@ test('fixed-count mechanical proposal scan retires in same-queue order without a
     () => proposal.releaseQueueOrdered(),
     /requires an exact submitted idle proposal/
   );
+  destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+});
+
+for (const jacobiIterations of [1, 5, 16]) {
+  test(`contact submission batches preserve all ordered operations for ${jacobiIterations} Jacobi iterations`, () => {
+    const fixture = liveFixture(2);
+    const options = {
+      stateBuffer: fixture.sphParticleUpload.stateBuffer,
+      mechanicsBuffer: fixture.mlsMpmParticleUpload.mechanicsBuffer
+    };
+    const ordinary = runSchroederSpatialMechanicalProposalWebGpu({
+      ...fixture, jacobiIterations
+    });
+    const ordinaryEncoder = fixture.device.createCommandEncoder();
+    assert.equal(ordinary.encodeApply(ordinaryEncoder, options), true);
+    const ordinaryCommands = ordinaryEncoder.finish();
+    fixture.device.queue.submit([ordinaryCommands]);
+    assert.equal(ordinary.markSubmittedWork(), true);
+    assert.equal(ordinary.releaseQueueOrdered(), true);
+
+    const batched = runSchroederSpatialMechanicalProposalWebGpu({
+      ...fixture, jacobiIterations
+    });
+    assert.equal(batched.supportsSubmissionGaps, true);
+    let encoder = fixture.device.createCommandEncoder();
+    const iterator = batched.encodeApplyBatches(encoder, {
+      ...options, submissionGaps: true
+    });
+    const commandBuffers = [];
+    const completedIterations = [];
+    let next = iterator.next();
+    while (!next.done) {
+      assert.ok(Object.isFrozen(next.value));
+      assert.equal(next.value.stage, 'jacobi-iterations');
+      completedIterations.push(next.value.completedJacobiIterations);
+      const commands = encoder.finish();
+      assert.ok(commands.passes.every(({ ended }) => ended === true));
+      assert.ok(commands.operations.every(({ pipeline }) => (
+        !/matching-cleanup|proposal-publish|proposal-seal|proposal-commit|interface-receipt-seal/
+          .test(pipeline?.label ?? '')
+      )), 'no cleanup, proposal publication, or canonical commit before the final gap');
+      assert.equal(batched.lifecycleStatus, 'encoding');
+      assert.equal(batched.submissionObserved, false);
+      assert.equal(batched.markSubmittedWork(), false);
+      assert.equal(batched.canReleaseQueueOrdered(), false);
+      commandBuffers.push(commands);
+      fixture.device.queue.submit([commands]);
+      encoder = fixture.device.createCommandEncoder();
+      next = iterator.next(encoder);
+    }
+    assert.equal(next.value, true);
+    assert.deepEqual(completedIterations, Array.from(
+      { length: Math.ceil(jacobiIterations / 4) },
+      (_, index) => Math.min((index + 1) * 4, jacobiIterations)
+    ));
+    const terminal = encoder.finish();
+    assert.ok(terminal.passes.every(({ ended }) => ended === true));
+    assert.ok(terminal.operations.some(({ pipeline }) => (
+      /proposal-commit/.test(pipeline?.label ?? '')
+    )));
+    commandBuffers.push(terminal);
+    assert.deepEqual(
+      commandBuffers.flatMap(({ operations }) => operations),
+      ordinaryCommands.operations,
+      'same exact pipelines, bind groups/buffers, dispatch counts/order, clears and copies'
+    );
+    assert.equal(batched.encodedDispatchCount, ordinary.encodedDispatchCount);
+    assert.equal(
+      batched.encodedComputePassCount,
+      commandBuffers.reduce((sum, { passes }) => sum + passes.length, 0)
+    );
+    assert.equal(batched.encodedComputePassCount, 6 + Math.ceil(jacobiIterations / 4));
+    assert.equal(batched.lifecycleStatus, 'encoded');
+    fixture.device.queue.submit([terminal]);
+    assert.equal(batched.markSubmittedWork(), true);
+    assert.equal(batched.markSubmittedWork(), false);
+    assert.equal(batched.releaseQueueOrdered(), true);
+    destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+  });
+}
+
+test('contact submission batches remain opt-in and encodeApply stays synchronous', () => {
+  const fixture = liveFixture(2);
+  const options = { stateBuffer: fixture.sphParticleUpload.stateBuffer };
+  for (const submissionGaps of [undefined, false, 1, 'true']) {
+    const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+    const encoder = fixture.device.createCommandEncoder();
+    assert.deepEqual(proposal.encodeApplyBatches(encoder, {
+      ...options, submissionGaps
+    }).next(), { done: true, value: true });
+    fixture.device.queue.submit([encoder.finish()]);
+    assert.equal(proposal.markSubmittedWork(), true);
+    assert.equal(proposal.releaseQueueOrdered(), true);
+  }
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  const encoder = fixture.device.createCommandEncoder();
+  assert.equal(proposal.encodeApply(encoder, {
+    ...options, submissionGaps: true
+  }), true);
+  assert.equal(proposal.encodedComputePassCount, 7);
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(proposal.markSubmittedWork(), true);
+  assert.equal(proposal.releaseQueueOrdered(), true);
+  destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+});
+
+for (const mode of ['trace', 'capture', 'recorder', 'pass-profile']) {
+  test(`contact submission batches preserve same-encoder ${mode} diagnostics`, async () => {
+    const fixture = liveFixture(2);
+    const capture = mode === 'capture'
+      ? createSchroederSpatialMechanicalProposalCapture({ sequenceStepCount: 1 })
+      : null;
+    const extra = mode === 'trace' ? {
+      diagnosticTrace: {
+        buffer: taggedBuffer(fixture.device, 'trace',
+          SCHROEDER_SPATIAL_MECHANICAL_DIAGNOSTIC_TRACE_BYTES, 0x4 | 0x8 | 0x80),
+        materialAId: 1, materialBId: 2
+      }
+    } : mode === 'capture' ? { capture, sequenceIndex: 0, sequenceStepCount: 1 }
+      : mode === 'recorder' ? {
+        gpuTimestampRecorder: {
+          active: true,
+          beginEncoderSpan() { return null; },
+          endEncoderSpan() {}
+        }
+      } : { gpuPassTimestampProfilingRequested: true };
+    const proposal = runSchroederSpatialMechanicalProposalWebGpu({ ...fixture, ...extra });
+    assert.equal(proposal.supportsSubmissionGaps, false);
+    const encoder = fixture.device.createCommandEncoder();
+    assert.deepEqual(proposal.encodeApplyBatches(encoder, {
+      stateBuffer: fixture.sphParticleUpload.stateBuffer,
+      submissionGaps: true
+    }).next(), { done: true, value: true });
+    assert.ok(encoder.finish().passes.every(({ ended }) => ended === true));
+    assert.equal(proposal.releaseAfterSubmittedWork(), true);
+    assert.equal(await proposal.releasePromise, true);
+    if (capture) destroySchroederSpatialMechanicalProposalCapture(capture);
+    destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+  });
+}
+
+for (const failure of ['throw', 'return', 'invalid-encoder', 'same-encoder', 'encoding-error', 'release']) {
+  test(`contact submission batches retain partial work through ${failure} until a queue fence`, async () => {
+    const fixture = liveFixture(2);
+    const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+    const encoder = fixture.device.createCommandEncoder();
+    const iterator = proposal.encodeApplyBatches(encoder, {
+      stateBuffer: fixture.sphParticleUpload.stateBuffer, submissionGaps: true
+    });
+    assert.equal(iterator.next().done, false);
+    fixture.device.queue.submit([encoder.finish()]);
+    const failureError = new Error('injected partial submission failure');
+    let completeFence;
+    let fenceCalls = 0;
+    fixture.device.queue.onSubmittedWorkDone = () => {
+      fenceCalls += 1;
+      return new Promise((resolve) => { completeFence = resolve; });
+    };
+    if (failure === 'throw') {
+      assert.throws(() => iterator.throw(failureError), (error) => error === failureError);
+    } else if (failure === 'return') {
+      assert.deepEqual(iterator.return(), { done: true, value: undefined });
+    } else if (failure === 'invalid-encoder') {
+      assert.throws(() => iterator.next({}), /GPUCommandEncoder/);
+    } else if (failure === 'same-encoder') {
+      assert.throws(() => iterator.next(encoder), /fresh GPUCommandEncoder/);
+    } else if (failure === 'encoding-error') {
+      const nextEncoder = fixture.device.createCommandEncoder();
+      nextEncoder.beginComputePass = () => { throw failureError; };
+      assert.throws(() => iterator.next(nextEncoder), (error) => error === failureError);
+    } else {
+      assert.equal(proposal.releaseAfterSubmittedWork(), true);
+      assert.throws(() => iterator.next(fixture.device.createCommandEncoder()), /release/);
+    }
+    assert.deepEqual(iterator.next(), { done: true, value: undefined });
+    assert.equal(proposal.submissionObserved, false);
+    assert.equal(proposal.markSubmittedWork(), false);
+    assert.equal(proposal.canReleaseQueueOrdered(), false);
+    if (failure !== 'release') {
+      assert.equal(proposal.lifecycleStatus, 'encode-failed');
+      assert.equal(fenceCalls, 0, 'the generator does not invent submission proof or an automatic fence');
+      assert.equal(proposal.releaseAfterSubmittedWork(), true);
+    }
+    assert.equal(proposal.releaseAfterSubmittedWork(), false);
+    assert.equal(proposal.released, false);
+    assert.equal(fenceCalls, 1);
+    assert.throws(() => runSchroederSpatialMechanicalProposalWebGpu(fixture), /still leased/);
+    assert.ok(fixture.device.buffers.every(({ destroyCount }) => destroyCount === 0));
+    completeFence();
+    assert.equal(await proposal.releasePromise, true);
+    assert.equal(proposal.lifecycleStatus, 'released');
+    const replacement = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+    const replacementEncoder = fixture.device.createCommandEncoder();
+    assert.equal(replacement.encodeApply(replacementEncoder, {
+      stateBuffer: fixture.sphParticleUpload.stateBuffer
+    }), true, 'the retained scan and arena become reusable after completion');
+    fixture.device.queue.submit([replacementEncoder.finish()]);
+    assert.equal(replacement.markSubmittedWork(), true);
+    assert.equal(replacement.releaseQueueOrdered(), true);
+    destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+  });
+}
+
+test('contact submission batches never gain terminal authority after a rejected retirement fence', async () => {
+  const fixture = liveFixture(2);
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu(fixture);
+  const encoder = fixture.device.createCommandEncoder();
+  const iterator = proposal.encodeApplyBatches(encoder, {
+    stateBuffer: fixture.sphParticleUpload.stateBuffer, submissionGaps: true
+  });
+  assert.equal(iterator.next().done, false);
+  fixture.device.queue.submit([encoder.finish()]);
+  iterator.return();
+  const fenceError = new Error('partial retirement fence rejected');
+  fixture.device.queue.onSubmittedWorkDone = () => Promise.reject(fenceError);
+  assert.equal(proposal.releaseAfterSubmittedWork(), true);
+  await assert.rejects(proposal.releasePromise, (error) => error === fenceError);
+  assert.equal(proposal.released, false);
+  assert.equal(proposal.releaseScheduled, false);
+  assert.equal(proposal.lifecycleStatus, 'encode-failed');
+  assert.equal(proposal.markSubmittedWork(), false);
+  assert.equal(proposal.canReleaseQueueOrdered(), false);
+  assert.throws(() => runSchroederSpatialMechanicalProposalWebGpu(fixture), /still leased/);
+  fixture.device.queue.onSubmittedWorkDone = () => Promise.resolve();
+  assert.equal(proposal.releaseAfterSubmittedWork(), true);
+  assert.equal(await proposal.releasePromise, true);
   destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
 });
 

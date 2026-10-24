@@ -59,6 +59,9 @@ import {
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
+  registerResidentPresentationSubmissionGap
+} from '../src/runtime/sph/residentPresentationSubmissionGap.js';
+import {
   runSchroederSpatialMechanicalProposalWebGpu
 } from '../src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js';
 import {
@@ -1415,6 +1418,190 @@ test('CPU MLS-MPM G2P caps non-condensed particle scale before render extraction
   nearlyEqual(result.mechanics[8], MLS_MPM_G2P_MAX_RADIUS_GROWTH_RATIO, 1e-5);
 });
 
+// Notification-only WebGPU sentinels: no CPU reconstruction or numerical parity.
+function g2pLossNotificationFixture(route = 'provided') {
+  let resolveLoss;
+  let rejectLoss;
+  const lost = new Promise((resolve, reject) => { resolveLoss = resolve; rejectLoss = reject; });
+  // deviceResult deliberately adds no wrapper observer; handle that root promise.
+  lost.catch(() => {});
+  const counters = { subscriptions: 0, acquisitions: 0, destroys: 0 };
+  const chains = [];
+  const originalThen = lost.then.bind(lost);
+  lost.then = (...args) => {
+    counters.subscriptions += 1;
+    const notified = originalThen(...args);
+    const originalCatch = notified.catch.bind(notified);
+    notified.catch = (...catchArgs) => {
+      const settled = originalCatch(...catchArgs);
+      chains.push(settled.then(value => ({ value }), error => ({ error })));
+      return settled;
+    };
+    return notified;
+  };
+  const device = { lost };
+  const navigatorRef = { gpu: { async requestAdapter() {
+    return { async requestDevice() { counters.acquisitions += 1; return device; } };
+  } } };
+  const result = {
+    backend: 'webgpu', readbackMode: 'no-full-readback', stateBuffer: {}, mechanicsBuffer: {}, retainedOutputParticleBuffers: true,
+    destroyOutputParticleBuffers() { counters.destroys += 1; return true; }
+  };
+  const runnerCalls = [];
+  const options = {
+    preferWebGpu: true, readbackMode: 'no-full-readback', canonicalSpatialRequired: true, retainOutputParticleBuffers: true,
+    navigatorRef,
+    ...(route === 'provided' ? { device }
+      : route === 'deviceResult' ? { deviceResult: { device } } : {}),
+    async webGpuRunner(args) { runnerCalls.push(args); return result; }
+  };
+  return {
+    device, options, result, counters, chains, runnerCalls,
+    settle(outcome, value) { (outcome === 'resolve' ? resolveLoss : rejectLoss)(value); },
+    async flush() { await new Promise(resolve => setImmediate(resolve)); return Promise.all(chains); }
+  };
+}
+
+test('optional G2P device-loss notifications outlive return, error and output destruction', async (t) => {
+  for (const route of ['provided', 'acquired']) {
+    for (const lossOutcome of ['resolve', 'reject']) {
+      for (const terminal of ['success', 'runner-error', 'destroyed-output']) {
+        await t.test(`${route}/${lossOutcome}/${terminal}`, async () => {
+          const f = g2pLossNotificationFixture(route);
+          const calls = [];
+          const runnerError = new Error('injected native runner failure');
+          if (terminal === 'runner-error') {
+            f.options.webGpuRunner = async (args) => { f.runnerCalls.push(args); throw runnerError; };
+          }
+          const completed = await runMlsMpmG2pWithOptionalWebGpu({
+            ...f.options, onDeviceLost(info) { calls.push({ info, receiver: this }); }
+          }).then(value => ({ value }), error => ({ error }));
+          if (terminal === 'runner-error') {
+            assert.ok(completed.error);
+            assert.match(completed.error.message, /injected native runner failure/);
+          } else {
+            assert.equal(completed.value.backend, 'webgpu');
+            assert.equal(completed.value.cpuReference, null);
+            assert.equal(completed.value.webgpuParity.status, 'not-run-no-full-readback');
+            assert.equal(completed.value.gpuResult, f.result);
+            assert.equal(completed.value.gpuResult.destroyOutputParticleBuffers, f.result.destroyOutputParticleBuffers);
+            if (terminal === 'destroyed-output') completed.value.gpuResult.destroyOutputParticleBuffers();
+          }
+          assert.equal(f.runnerCalls.length, 1);
+          assert.equal(f.runnerCalls[0].device, f.device);
+          assert.equal(f.runnerCalls[0].readbackMode, 'no-full-readback');
+          assert.equal(f.counters.subscriptions, 1);
+          assert.equal(f.counters.acquisitions, route === 'acquired' ? 1 : 0);
+          assert.deepEqual(calls, []);
+          const loss = new Error('late device notification');
+          f.settle(lossOutcome, loss);
+          const chains = await f.flush();
+          assert.deepEqual(calls, [{ info: loss, receiver: undefined }]);
+          assert.deepEqual(chains, [{ value: undefined }]);
+          assert.equal(f.counters.destroys, terminal === 'destroyed-output' ? 1 : 0);
+          assert.equal(f.runnerCalls.length, 1, 'late notification does not rerun work');
+        });
+      }
+    }
+  }
+});
+
+test('optional G2P device-loss subscriptions and in-flight native rejection remain exact', async (t) => {
+  for (const lossOutcome of ['resolve', 'reject']) {
+    await t.test(`deviceResult/${lossOutcome}/no-extra-observer`, async () => {
+      const f = g2pLossNotificationFixture('deviceResult');
+      const calls = [];
+      const result = await runMlsMpmG2pWithOptionalWebGpu({
+        ...f.options, onDeviceLost(info) { calls.push(info); }
+      });
+      assert.equal(result.backend, 'webgpu');
+      assert.equal(result.cpuReference, null);
+      f.settle(lossOutcome, new Error('externally owned device loss'));
+      await f.flush();
+      assert.deepEqual(calls, []);
+      assert.equal(f.counters.subscriptions, 0);
+      assert.equal(f.counters.acquisitions, 0);
+    });
+    for (const route of ['provided', 'acquired']) {
+      for (const phase of ['already-settled', 'during-runner']) {
+        await t.test(`${route}/${lossOutcome}/${phase}`, async () => {
+          const f = g2pLossNotificationFixture(route);
+          const loss = { reason: 'unknown', message: 'native loss sentinel' };
+          const calls = [];
+          if (phase === 'already-settled') f.settle(lossOutcome, loss);
+          else f.options.webGpuRunner = async (args) => {
+            f.runnerCalls.push(args);
+            f.settle(lossOutcome, loss);
+            await Promise.resolve();
+            return f.result;
+          };
+          const completed = await runMlsMpmG2pWithOptionalWebGpu({
+            ...f.options, onDeviceLost(info) { calls.push(info); }
+          }).then(value => ({ value }), error => ({ error }));
+          assert.equal(completed.value, undefined, 'required GPU execution never CPU-fallbacks');
+          assert.equal(completed.error?.status, 'canonical-spatial-webgpu-device-lost');
+          await f.flush();
+          assert.deepEqual(calls, [loss]);
+          // The provided-device .catch runs one microtask later than fulfillment:
+          // an already-rejected promise reaches the runner before the loss check.
+          const expectedRunnerCalls = phase === 'during-runner'
+            || (route === 'provided' && lossOutcome === 'reject') ? 1 : 0;
+          assert.equal(f.runnerCalls.length, expectedRunnerCalls);
+          assert.equal(f.counters.destroys, expectedRunnerCalls * 1);
+          assert.equal(f.counters.subscriptions, 1);
+        });
+      }
+    }
+  }
+  await t.test('provided device takes precedence over deviceResult', async () => {
+    const f = g2pLossNotificationFixture('provided');
+    const ignored = g2pLossNotificationFixture('deviceResult');
+    const result = await runMlsMpmG2pWithOptionalWebGpu({
+      ...f.options, deviceResult: { device: ignored.device }
+    });
+    assert.equal(result.backend, 'webgpu');
+    assert.equal(f.runnerCalls[0].device, f.device);
+    assert.equal(f.counters.subscriptions, 1);
+    assert.equal(ignored.counters.subscriptions, 0);
+    assert.equal(f.counters.acquisitions, 0);
+  });
+});
+
+test('optional G2P device-loss throw forwarding preserves plain calls and ignores return values', async (t) => {
+  for (const mode of ['fulfilled-first-throws', 'fulfilled-both-throw', 'rejected-callback-throws']) {
+    await t.test(mode, async () => {
+      const f = g2pLossNotificationFixture();
+      const loss = new Error('device loss');
+      const first = new Error('first notification threw');
+      const second = new Error('second notification threw');
+      const calls = [];
+      let adoptions = 0;
+      const returnedThenable = { then(resolve) { adoptions += 1; resolve('must not be adopted'); } };
+      const result = await runMlsMpmG2pWithOptionalWebGpu({
+        ...f.options,
+        onDeviceLost(info) {
+          calls.push({ info, receiver: this });
+          if (calls.length === 1) throw first;
+          if (mode === 'fulfilled-both-throw') throw second;
+          return returnedThenable;
+        }
+      });
+      assert.equal(result.backend, 'webgpu');
+      f.settle(mode === 'rejected-callback-throws' ? 'reject' : 'resolve', loss);
+      const chains = await f.flush();
+      assert.deepEqual(calls, mode === 'rejected-callback-throws'
+        ? [{ info: loss, receiver: undefined }]
+        : [{ info: loss, receiver: undefined }, { info: first, receiver: undefined }]);
+      assert.deepEqual(chains, mode === 'fulfilled-first-throws'
+        ? [{ value: undefined }]
+        : [{ error: mode === 'fulfilled-both-throw' ? second : first }]);
+      assert.equal(adoptions, 0, 'relay must not return/adopt a notifier thenable');
+      assert.equal(f.counters.destroys, 0);
+      assert.equal(f.runnerCalls.length, 1);
+    });
+  }
+});
+
 test('optional MLS-MPM G2P returns CPU reference when WebGPU is not requested', async () => {
   const args = fixture();
   const execution = await runMlsMpmG2pWithOptionalWebGpu({
@@ -2226,4 +2413,178 @@ test('WebGPU MLS-MPM G2P rejects the compacted active-node list as a particle fi
     }),
     /no longer accepts schroederActiveNodeList/
   );
+});
+
+function canonicalSubmissionGapFixture() {
+  const base = canonicalDenseTraceRuntimeFixture();
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu({
+    ...base, cleanupPassBudget: 1024,
+    boxDimsM: [3, 3, 3], gridSpacingM: 0.25,
+    relaxation: 0.5, normalVelocityDamping: 0.1, selectedLevel: 0
+  });
+  assert.equal(proposal.ready, true, proposal.reason ?? proposal.status);
+  return {
+    ...base, proposal,
+    options: {
+      ...base, dt: 0.001, boxDimsM: [3, 3, 3],
+      schroederSelectedLevel: 0, schroederSpatialEpochGeneration: base.generation,
+      schroederSpatialMechanicalProposal: proposal, canonicalSpatialRequired: true,
+      retainOutputParticleBuffers: true, readbackMode: 'no-full-readback'
+    }
+  };
+}
+
+test('canonical G2P submits unchanged contact passes around private retained-frame gaps with one final authority', async () => {
+  const streams = [];
+  for (const ready of [false, true]) {
+    const { device, proposal, options } = canonicalSubmissionGapFixture();
+    assert.equal(proposal.supportsSubmissionGaps, true);
+    const start = device.submissions.length;
+    const boundaryCounts = [];
+    const boundaryWaitOptions = [];
+    const unregister = registerResidentPresentationSubmissionGap(device, {
+      isCurrent: () => true, isReady: () => ready,
+      async present({ waitForPendingSlot }) {
+        boundaryCounts.push(device.submissions.length - start);
+        boundaryWaitOptions.push(waitForPendingSlot);
+        assert.equal(proposal.lifecycleStatus, 'encoding', 'prefix work is not final proposal authority');
+        return true;
+      }
+    });
+    try {
+      const result = await runMlsMpmG2pWebGpu(options);
+      const commands = device.submissions.slice(start).flat();
+      streams.push(commands.flatMap(command => command.events).map(event => ({
+        kind: event.kind, entryPoint: event.pipeline?.compute?.entryPoint,
+        count: event.count, indirect: event.indirect, offset: event.offset,
+        size: event.size
+      })));
+      assert.deepEqual(boundaryCounts, ready ? [1, 2, 3, 4] : []);
+      assert.deepEqual(boundaryWaitOptions, ready ? [false, false, false, true] : []);
+      assert.equal(commands.length, ready ? 5 : 1);
+      assert.equal(proposal.lifecycleStatus, 'submitted');
+      assert.equal(device.mapAsyncCalls.length, 0);
+      assert.equal(result.backend, 'webgpu');
+      assert.ok(result.stateBuffer);
+      result.destroyOutputParticleBuffers();
+    } finally {
+      unregister();
+      proposal.releaseAfterSubmittedWork();
+      await proposal.releasePromise;
+    }
+  }
+  assert.deepEqual(streams[1], streams[0], 'batching must preserve every dispatch/copy and its order');
+});
+
+for (const readbackMode of ['no-full-readback', 'full']) {
+  test(`G2P ${readbackMode} prefix submission failure fences outputs and leaves proposal unpublished`, async () => {
+    const { device, proposal, options } = canonicalSubmissionGapFixture();
+    let releaseFence;
+    const fence = new Promise(resolve => { releaseFence = resolve; });
+    device.queue.onSubmittedWorkDone = () => fence;
+    const before = device.submissions.length;
+    const createEncoder = device.createCommandEncoder;
+    const failure = new Error('injected next-encoder failure after submitted contact prefix');
+    const unregister = registerResidentPresentationSubmissionGap(device, {
+      isCurrent: () => true, isReady: () => true,
+      async present() {
+        device.createCommandEncoder = () => { throw failure; };
+        return true;
+      }
+    });
+    try {
+      await assert.rejects(runMlsMpmG2pWebGpu({ ...options, readbackMode }), error => error === failure);
+      assert.equal(device.submissions.length - before, 1);
+      assert.notEqual(proposal.lifecycleStatus, 'submitted');
+      assert.equal(proposal.markSubmittedWork(), false);
+      const outputs = device.createdBuffers.filter(buffer =>
+        ['ulg-mls-mpm-g2p-state-out', 'ulg-mls-mpm-g2p-mechanics-out'].includes(buffer.label));
+      assert.equal(outputs.length, 2);
+      assert.equal(outputs.every(buffer => !buffer.destroyed), true, 'submitted prefix buffers must survive until its fence');
+      releaseFence();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(outputs.every(buffer => buffer.destroyed), true);
+    } finally {
+      device.createCommandEncoder = createEncoder;
+      unregister();
+      releaseFence();
+      proposal.releaseAfterSubmittedWork();
+      await proposal.releasePromise;
+    }
+  });
+}
+
+for (const failSubmitOrdinal of [2, 5]) {
+  test(`G2P failed submission ${failSubmitOrdinal} after contact prefixes retains outputs until queue completion`, async () => {
+    const { device, proposal, options } = canonicalSubmissionGapFixture();
+    let releaseFence;
+    const fence = new Promise(resolve => { releaseFence = resolve; });
+    device.queue.onSubmittedWorkDone = () => fence;
+    const submit = device.queue.submit;
+    let attempts = 0;
+    const failure = Error(`injected submit ${failSubmitOrdinal} failure`);
+    device.queue.submit = commands => {
+      if (++attempts === failSubmitOrdinal) throw failure;
+      submit(commands);
+    };
+    const before = device.submissions.length;
+    const unregister = registerResidentPresentationSubmissionGap(device, {
+      isCurrent: () => true, isReady: () => true, present: async () => false
+    });
+    try {
+      await assert.rejects(runMlsMpmG2pWebGpu(options), error => error === failure);
+      assert.equal(device.submissions.length - before, failSubmitOrdinal - 1);
+      assert.notEqual(proposal.lifecycleStatus, 'submitted', 'only the final successful submit may acknowledge the proposal');
+      const outputs = device.createdBuffers.filter(buffer =>
+        ['ulg-mls-mpm-g2p-state-out', 'ulg-mls-mpm-g2p-mechanics-out'].includes(buffer.label));
+      assert.equal(outputs.length, 2);
+      assert.equal(outputs.every(buffer => !buffer.destroyed), true);
+      releaseFence();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(outputs.every(buffer => buffer.destroyed), true);
+    } finally {
+      device.queue.submit = submit;
+      unregister();
+      releaseFence();
+      proposal.releaseAfterSubmittedWork();
+      await proposal.releasePromise;
+    }
+  });
+}
+
+test('only the final Jacobi boundary may await busy-slot readiness; unregister still lets physics finish', async () => {
+  const { device, proposal, options } = canonicalSubmissionGapFixture();
+  let busy = false;
+  let enteredFinal;
+  const finalEntered = new Promise(resolve => { enteredFinal = resolve; });
+  const waits = [];
+  const before = device.submissions.length;
+  const unregister = registerResidentPresentationSubmissionGap(device, {
+    isCurrent: () => true,
+    isReady: (request) => !busy || request?.waitForPendingSlot === true,
+    present({ signal, waitForPendingSlot }) {
+      waits.push(waitForPendingSlot);
+      if (!busy) { busy = true; return Promise.resolve(true); }
+      enteredFinal();
+      return new Promise(resolve => signal.addEventListener('abort', () => resolve(false), { once: true }));
+    }
+  });
+  const execution = runMlsMpmG2pWebGpu(options);
+  try {
+    await Promise.race([finalEntered, execution.then(() => {
+      assert.fail('physics finished before reaching the final waiting request');
+    })]);
+    assert.deepEqual(waits, [false, true]);
+    assert.equal(device.submissions.length - before, 4);
+    assert.equal(proposal.lifecycleStatus, 'encoding', 'final waiting is not physics publication');
+    unregister();
+    const result = await execution;
+    assert.equal(proposal.lifecycleStatus, 'submitted');
+    assert.equal(device.submissions.length - before, 5);
+    result.destroyOutputParticleBuffers();
+  } finally {
+    unregister();
+    proposal.releaseAfterSubmittedWork();
+    await proposal.releasePromise;
+  }
 });

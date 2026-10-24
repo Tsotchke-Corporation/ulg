@@ -9,6 +9,8 @@ const NATIVE_BASE_URL =
 const NATIVE_CHROME =
   process.env.ULG_DISPERSED_MEDIUM_OPTICS_PRODUCER_CHROME
   || '/usr/bin/google-chrome';
+const NATIVE_HEADED =
+  process.env.ULG_DISPERSED_MEDIUM_OPTICS_PRODUCER_HEADED === '1';
 
 function assertFloatRowsClose(actual, expected, label) {
   assert.equal(actual.length, expected.length, `${label}: row length`);
@@ -31,7 +33,7 @@ test('native dispersed-medium optics producer executes generalized WebGPU stages
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({
     executablePath: NATIVE_CHROME,
-    headless: true,
+    headless: !NATIVE_HEADED,
     args: [
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',

@@ -36,6 +36,7 @@ import {
 } from '../src/visualization/sphPhaseScene.js';
 import {
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
+  SPH_GPU_RENDER_FIELD_MOTION_FLOATS,
   SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS,
   SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
@@ -54,6 +55,7 @@ import {
   SPH_GPU_RENDER_SURFACE_ROW_FLOATS,
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_MOTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
@@ -102,6 +104,7 @@ import {
   summarizeSphRenderFieldSurfacesWithOptionalWebGpu,
   validateSphRenderSurfaceTableLineageSnapshot,
   sphRenderFieldWgsl,
+  sphRenderFieldMotionWgsl,
   sphRenderRowsWgsl
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 
@@ -4386,6 +4389,167 @@ test('SPH render field WebGPU no-full handoff can avoid a CPU queue fence', asyn
   assert.equal(result.surfaceBuffer.destroyed, false);
 });
 
+test('SPH render field optional motion keeps the default shader and bindings unchanged', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'motion-default', material: 'Au', phase: 'solid', resolution: 4
+  }]);
+  const rig = fakeSurfaceDrawDevice({});
+  const result = await buildSphRenderFieldWebGpu({
+    device: rig.device, renderRows: extracted.renderRows, surfaceTable,
+    readbackMode: 'no-full-readback', waitForQueueCompletion: false
+  });
+  assert.equal(result.motionField, null);
+  assert.equal(result.takeMotionField(), null);
+  assert.equal(result.motionFieldReadback, false);
+  assert.ok(!rig.createdBuffers.some((buffer) => buffer.label === 'ulg-sph-render-field-motion'));
+  assert.ok(!rig.bindGroups.some((group) => group.entries.some((entry) => entry.binding === 8)));
+  assert.equal(rig.shaderModules[0].code, sphRenderFieldWgsl);
+  assert.doesNotMatch(sphRenderFieldWgsl, /render_motion_field/);
+  assert.match(sphRenderFieldMotionWgsl,
+    /@binding\(8\) var<storage, read_write> render_motion_field: array<vec4<f32>>/);
+  assert.match(sphRenderFieldMotionWgsl,
+    /!render_product_history_ready\(\)[\s\S]*?render_motion_field\[out_index\] = vec4<f32>\(0\.0\);[\s\S]*?return;/);
+  const momentStore = sphRenderFieldMotionWgsl.indexOf(
+    'render_motion_field[out_index] = vec4<f32>(velocity_weighted, temperature_weight);'
+  );
+  assert.ok(momentStore > 0);
+  assert.ok(momentStore < sphRenderFieldMotionWgsl.indexOf('temperature_weight = f32(dispersed_temperature.weight.nonzero)'));
+  assert.ok(momentStore < sphRenderFieldMotionWgsl.indexOf('var corrected_density'));
+  assert.equal((sphRenderFieldMotionWgsl.match(/for \(var particle_index/g) || []).length,
+    (sphRenderFieldWgsl.match(/for \(var particle_index/g) || []).length,
+    'the optional output must not add a particle traversal');
+});
+
+test('SPH render field motion is an immutable allocation per result and transfers ownership once', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'motion-owned', material: 'Au', phase: 'solid', resolution: 4
+  }]);
+  const rig = fakeSurfaceDrawDevice({});
+  let fenceCount = 0;
+  rig.device.queue.onSubmittedWorkDone = async () => { fenceCount += 1; };
+  const target = rig.device.createBuffer({
+    label: 'borrowed-field-target',
+    size: surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * 4,
+    usage: 0x80 | 0x04 | 0x08
+  });
+  const options = {
+    device: rig.device, renderRows: extracted.renderRows, surfaceTable,
+    readbackMode: 'no-full-readback', waitForQueueCompletion: false,
+    useQueueFenceForCleanup: false, retainFieldRowsBuffer: true,
+    retainMotionFieldBuffer: true, targetFieldRowsBuffer: target
+  };
+  const first = await buildSphRenderFieldWebGpu(options);
+  const second = await buildSphRenderFieldWebGpu(options);
+  const firstMotion = first.motionField;
+  const secondMotion = second.motionField;
+  assert.equal(first.fieldRowsBuffer, second.fieldRowsBuffer);
+  assert.notEqual(firstMotion.buffer, secondMotion.buffer,
+    'a pooled density target must not alias motion belonging to another mesh');
+  assert.equal(firstMotion.schema, ULG_SPH_GPU_RENDER_FIELD_MOTION_SCHEMA);
+  assert.equal(firstMotion.rowCount, surfaceTable.totalFieldCells);
+  assert.equal(firstMotion.rowStrideFloats, SPH_GPU_RENDER_FIELD_MOTION_FLOATS);
+  assert.equal(firstMotion.rowStrideFloats, 4);
+  assert.equal(firstMotion.byteLength, surfaceTable.totalFieldCells * 16);
+  assert.equal(firstMotion.buffer.size, firstMotion.byteLength);
+  assert.equal(firstMotion.fieldPadding, Math.fround(0.22));
+  assert.equal(firstMotion.refEdgeM, 10);
+  assert.deepEqual(firstMotion.sourceVelocityLanes, [17, 18, 19]);
+  assert.equal(firstMotion.immutable, true);
+  assert.equal(firstMotion.authoritativeStateMutation, false);
+  assert.equal(firstMotion.readback, false);
+  assert.equal(Object.isFrozen(firstMotion), true);
+  assert.equal(fenceCount, 0);
+  assert.equal(rig.copies.length, 0);
+  assert.ok(!rig.createdBuffers.some((buffer) => buffer.label.includes('readback')));
+  const binding = rig.bindGroups[0].entries.find((entry) => entry.binding === 8);
+  assert.equal(binding.resource.buffer, firstMotion.buffer);
+  assert.equal(binding.resource.size, firstMotion.byteLength);
+  assert.equal(rig.shaderModules[0].code, sphRenderFieldMotionWgsl);
+  assert.equal(rig.shaderModules.length, 1, 'motion pipeline is cached across publications');
+
+  let firstDestroyCount = 0;
+  const destroy = firstMotion.buffer.destroy.bind(firstMotion.buffer);
+  firstMotion.buffer.destroy = () => { firstDestroyCount += 1; destroy(); };
+  assert.equal(first.takeMotionField(), firstMotion);
+  assert.equal(first.motionField, null);
+  assert.equal(first.takeMotionField(), null);
+  first.destroyRenderFieldBuffers({ force: true, releaseLeases: true });
+  assert.equal(firstMotion.buffer.destroyed, false,
+    'density/mesh extraction cleanup cannot retire a transferred motion field');
+  second.destroyRenderFieldBuffers({ force: true, releaseLeases: true });
+  assert.equal(secondMotion.destroyed, true);
+  assert.equal(second.takeMotionField(), null);
+  assert.equal(target.destroyed, false);
+  assert.equal(firstMotion.destroy(), true);
+  assert.equal(firstMotion.destroy(), false);
+  first.destroyRenderFieldBuffers({ force: true, releaseLeases: true });
+  assert.equal(firstDestroyCount, 1);
+});
+
+test('SPH render field motion-only retention has explicit cleanup without retaining density', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'motion-only', material: 'Au', phase: 'solid', resolution: 4
+  }]);
+  const rig = fakeSurfaceDrawDevice({});
+  const result = await buildSphRenderFieldWebGpu({
+    device: rig.device, renderRows: extracted.renderRows, surfaceTable,
+    readbackMode: 'no-full-readback', waitForQueueCompletion: false,
+    retainMotionFieldBuffer: true
+  });
+  const motion = result.motionField;
+  assert.equal(result.fieldRowsBufferRetained, false);
+  assert.equal(motion.destroyed, false);
+  result.destroyRenderFieldBuffers();
+  result.destroyRenderFieldBuffers();
+  assert.equal(motion.destroyed, true);
+  assert.equal(result.takeMotionField(), null);
+});
+
+test('SPH render field motion output rolls back on setup and submitted queue failures', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([{
+    surfaceKey: 'motion-rollback', material: 'Au', phase: 'solid', resolution: 4
+  }]);
+  for (const failure of ['after-motion-allocation', 'bind-group', 'submit', 'queue-fence']) {
+    const rig = fakeSurfaceDrawDevice({});
+    if (failure === 'after-motion-allocation') {
+      const create = rig.device.createBuffer.bind(rig.device);
+      rig.device.createBuffer = (descriptor) => {
+        if (descriptor.label === 'ulg-sph-render-field-params') throw new Error(failure);
+        return create(descriptor);
+      };
+    } else if (failure === 'bind-group') {
+      rig.device.createBindGroup = () => { throw new Error(failure); };
+    } else if (failure === 'submit') {
+      rig.device.queue.submit = () => { throw new Error(failure); };
+    } else {
+      rig.device.queue.onSubmittedWorkDone = async () => { throw new Error(failure); };
+    }
+    await assert.rejects(buildSphRenderFieldWebGpu({
+      device: rig.device, renderRows: extracted.renderRows, surfaceTable,
+      readbackMode: 'no-full-readback', retainMotionFieldBuffer: true
+    }), new RegExp(failure));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(rig.createdBuffers.some((buffer) => buffer.label === 'ulg-sph-render-field-motion'));
+    assert.ok(rig.createdBuffers.every((buffer) => buffer.destroyed), failure);
+  }
+});
+
+test('SPH render field rejects ambiguous motion opt-in before GPU allocation', async () => {
+  const rig = fakeSurfaceDrawDevice({});
+  await assert.rejects(buildSphRenderFieldWebGpu({
+    device: rig.device, retainMotionFieldBuffer: 'true'
+  }), /retainMotionFieldBuffer must be a boolean/);
+  assert.equal(rig.createdBuffers.length, 0);
+});
+
 test('SPH render field setup rolls back every owned buffer on allocation and encoder failures', async () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
@@ -4465,6 +4629,7 @@ test('SPH render field rejects surface-table mutation while a GPU submission is 
     readbackMode: 'no-full-readback',
     waitForQueueCompletion: true,
     retainFieldRowsBuffer: true,
+    retainMotionFieldBuffer: true,
     retainSurfaceBuffer: true
   });
   assert.equal(typeof resolveFirstFence, 'function');
@@ -4483,6 +4648,11 @@ test('SPH render field rejects surface-table mutation while a GPU submission is 
   assert.equal(
     createdBuffers.find((buffer) => buffer.label === 'ulg-sph-render-field-cells')?.destroyed,
     true
+  );
+  assert.equal(
+    createdBuffers.find((buffer) => buffer.label === 'ulg-sph-render-field-motion')?.destroyed,
+    true,
+    'a rejected source table must not leave an unpublishable motion sidecar alive'
   );
 });
 

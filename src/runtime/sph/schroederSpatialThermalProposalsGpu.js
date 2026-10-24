@@ -334,6 +334,42 @@ const thermalProposalArtifacts = new WeakMap();
 const matchedTimeThermalEncoderStages = new WeakMap();
 const lostThermalProposalDevices = new WeakSet();
 
+// The device-loss promise can outlive every proposal made on its device. Keep
+// live cleanup strongly owned, but let successful retirement detach its heavy
+// target. This factory must not share the producer's artifact/authority scope.
+function createThermalProposalDeviceLossCallbacks(device, lossTargetHolder) {
+  return {
+    fulfilled: function thermalProposalDeviceLost(info) {
+      lostThermalProposalDevices.add(device);
+      const target = lossTargetHolder.target;
+      if (!target || target.artifactRecord.released) return;
+      target.artifactRecord.terminalDisposition = 'device-lost-quarantined';
+      target.artifactRecord.terminalReason = String(
+        info?.message || info?.reason || 'webgpu-device-lost'
+      );
+      const sourceAuthorityRecord = thermalProposalSourceAuthorities.get(
+        target.thermalProposalSourceAuthority
+      );
+      if (sourceAuthorityRecord) sourceAuthorityRecord.active = false;
+      target.releaseLease();
+    },
+    rejected: function thermalProposalDeviceLossRejected(error) {
+      lostThermalProposalDevices.add(device);
+      const target = lossTargetHolder.target;
+      if (!target || target.artifactRecord.released) return;
+      target.artifactRecord.terminalDisposition = 'device-loss-observation-rejected';
+      target.artifactRecord.terminalReason = String(
+        error?.message || error || 'webgpu-device-loss-observation-rejected'
+      );
+      const sourceAuthorityRecord = thermalProposalSourceAuthorities.get(
+        target.thermalProposalSourceAuthority
+      );
+      if (sourceAuthorityRecord) sourceAuthorityRecord.active = false;
+      target.releaseLease();
+    }
+  };
+}
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -1225,6 +1261,7 @@ function createRuntimeEntry(
     capacity,
     thermalCsrDummyBindingAlignment,
     buffers,
+    ownedBuffers: new Set(Object.values(buffers)),
     destroyers: Object.values(buffers).map(destroyOnce),
     inUseGenerationId: null,
     releaseScheduled: false
@@ -1295,6 +1332,8 @@ function ensureThermalCandidateCsrRuntime(device, entry) {
       })
     });
     entry.thermalCandidateCsr = candidateCsr;
+    entry.ownedBuffers.add(sourceRowStateBuffer);
+    entry.ownedBuffers.add(replayBuffer);
     entry.destroyers.push(
       destroyOnce(sourceRowStateBuffer),
       destroyOnce(replayBuffer)
@@ -1398,6 +1437,8 @@ function createClassicThermalRuntimeEntry(device, arenaIndex, capacity) {
   );
   entry.buffers.lookupPlaceholderBuffer = lookupPlaceholderBuffer;
   entry.buffers.candidateDirectoryBuffer = candidateDirectoryBuffer;
+  entry.ownedBuffers.add(lookupPlaceholderBuffer);
+  entry.ownedBuffers.add(candidateDirectoryBuffer);
   entry.candidateCapacity = candidateCapacity;
   entry.destroyers.push(destroyOnce(lookupPlaceholderBuffer));
   entry.destroyers.push(destroyOnce(candidateDirectoryBuffer));
@@ -1472,6 +1513,64 @@ export function destroyClassicThermalProposalRuntime(device, {
   }
   classicThermalRuntimeByDevice.delete(device);
   return true;
+}
+
+/**
+ * Enumerate the exact device's spatial and classic thermal cache allocations.
+ * Lane aliases borrow these buffers even after their generation lease ends.
+ * This retirement-only query covers every retained arena/capacity and optional
+ * CSR allocation without releasing leases, destroying buffers, or doing GPU work.
+ */
+export function schroederSpatialThermalDeviceRuntimeAllocationOwnership(device) {
+  const incomplete = (message, cause) => {
+    const error = new Error(message, cause == null ? undefined : { cause });
+    error.code = 'ERR_SCHROEDER_SPATIAL_THERMAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE';
+    return error;
+  };
+  if (!device || typeof device !== 'object') {
+    throw incomplete('thermal runtime allocation ownership requires the exact device');
+  }
+  const entries = new Set();
+  const buffers = new Set();
+  let runtimeCount = 0;
+  try {
+    const spatial = thermalRuntimeByDevice.get(device);
+    const classic = classicThermalRuntimeByDevice.get(device);
+    if (spatial) {
+      runtimeCount++;
+      if (!(spatial.entries instanceof Map)) throw incomplete('spatial thermal owner map is unavailable');
+      for (const entry of spatial.entries.values()) entries.add(entry);
+    }
+    if (classic) {
+      runtimeCount++;
+      if (!Array.isArray(classic.entries)) throw incomplete('classic thermal owner list is unavailable');
+      for (const entry of classic.entries) entries.add(entry);
+    }
+    for (const entry of entries) {
+      if (!(entry?.ownedBuffers instanceof Set) || entry.ownedBuffers.size === 0) {
+        throw incomplete('thermal runtime allocation inventory is unavailable');
+      }
+      for (const buffer of entry.ownedBuffers) {
+        if (
+          !buffer || typeof buffer !== 'object'
+          || typeof buffer.destroy !== 'function'
+          || !webGpuBufferMatchesDevice(buffer, device)
+        ) throw incomplete('thermal runtime allocation ownership does not match its device');
+        buffers.add(buffer);
+      }
+    }
+  } catch (error) {
+    if (error?.code === 'ERR_SCHROEDER_SPATIAL_THERMAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE') throw error;
+    throw incomplete('thermal runtime allocation enumeration failed', error);
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-thermal-runtime-allocation-ownership.v0',
+    status: 'spatial-thermal-runtime-allocation-ownership-complete',
+    runtimeCount,
+    entryCount: entries.size,
+    allocationCount: buffers.size,
+    buffers: Object.freeze([...buffers])
+  });
 }
 
 export const schroederSpatialThermalDerivedPrepassWgsl = /* wgsl */ `
@@ -2511,6 +2610,142 @@ struct ThermalReachableEnergyDomain {
   segment_count: u32,
 };
 
+struct ThermalPhaseCaloricSelection {
+  enabled: u32,
+  selection: ThermalCarrierSelection,
+};
+
+// Type 3 is explicit phase-specific caloric enrollment, not another segment
+// in the legacy equilibrium ladder. Its two phase domains can overlap in U;
+// neither their order nor energy alone may select or connect these branches.
+fn thermal_prepass_phase_caloric_selection(
+  material_id: f32,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
+) -> ThermalPhaseCaloricSelection {
+  let rejected = ThermalCarrierSelection(0u, 0u, 0.0, 0.0);
+  let invalid = ThermalPhaseCaloricSelection(1u, rejected);
+  let legacy = ThermalPhaseCaloricSelection(0u, rejected);
+  if (
+    thermal_params.material_count > arrayLength(&phase_response_records) / 2u
+  ) { return invalid; }
+  var record = vec4<f32>(0.0);
+  var matching_records = 0u;
+  for (var index = 0u; index < thermal_params.material_count; index = index + 1u) {
+    let candidate = phase_response_records[index * 2u];
+    if (candidate.x == material_id) {
+      record = candidate;
+      matching_records = matching_records + 1u;
+    }
+  }
+  if (matching_records == 0u) { return legacy; }
+  if (matching_records != 1u) { return invalid; }
+  if (
+    !thermal_prepass_finite(record.y) || !thermal_prepass_finite(record.z)
+    || record.y < 0.0 || record.z < 0.0
+    || floor(record.y) != record.y || floor(record.z) != record.z
+    || record.y > 16777215.0 || record.z > 16777215.0
+  ) { return invalid; }
+  let response_offset = u32(record.y);
+  let response_count = u32(record.z);
+  let response_capacity = arrayLength(&phase_responses) / 4u;
+  if (
+    response_offset > thermal_params.response_count
+    || response_count > thermal_params.response_count - response_offset
+    || response_offset > response_capacity
+    || response_count > response_capacity - response_offset
+  ) { return invalid; }
+  var explicit_caloric = false;
+  for (var local = 0u; local < response_count; local = local + 1u) {
+    let response0 = thermal_prepass_response_row0(response_offset + local);
+    // Unknown types cannot smuggle a malformed enrolled row into the legacy
+    // fallback. Valid type 1/2 material arithmetic below remains unchanged.
+    explicit_caloric = explicit_caloric
+      || (response0.y != 1.0 && response0.y != 2.0);
+  }
+  if (!explicit_caloric) { return legacy; }
+  if (
+    record.w != 1.0 || response_count != 2u
+    || !thermal_prepass_finite(material_id)
+    || material_id < 1.0 || material_id > 16777215.0
+    || floor(material_id) != material_id
+    || !thermal_prepass_finite(specific_internal_energy)
+    || (phase_id != 2.0 && phase_id != 3.0)
+    || !all(phase_fractions == vec4<f32>(
+      0.0, select(0.0, 1.0, phase_id == 2.0),
+      select(0.0, 1.0, phase_id == 3.0), 0.0
+    ))
+  ) { return invalid; }
+  var phase_mask = 0u;
+  var selected = rejected;
+  for (var local = 0u; local < response_count; local = local + 1u) {
+    let response_index = response_offset + local;
+    let row0 = thermal_prepass_response_row0(response_index);
+    let row1 = thermal_prepass_response_row1(response_index);
+    let row2 = phase_responses[response_index * 4u + 2u];
+    let row3 = phase_responses[response_index * 4u + 3u];
+    if (
+      row0.x != material_id || row0.y != 3.0 || row0.w != 1.0
+      || !thermal_prepass_finite(row0.z) || row0.z < 0.0
+      || row0.z > 16777215.0 || floor(row0.z) != row0.z
+      || !thermal_prepass_finite(row1.x) || !thermal_prepass_finite(row1.y)
+      || !(row1.x < row1.y) || row1.z != row1.w
+      || (row1.z != 2.0 && row1.z != 3.0)
+      || !thermal_prepass_finite(row2.x) || !(row2.x > 0.0)
+      || row2.x != row2.y || row2.z != 1.0 || row2.w != 1.0
+      || !all(row3 == vec4<f32>(0.0, 1.0, 0.0, 0.0))
+    ) { return invalid; }
+    let phase_bit = select(1u, 2u, row1.z == 3.0);
+    if ((phase_mask & phase_bit) != 0u) { return invalid; }
+    phase_mask = phase_mask | phase_bit;
+    let graph_index = u32(row0.z);
+    if (graph_index >= arrayLength(&thermal_graph_nodes) / 4u) {
+      return invalid;
+    }
+    let node0 = thermal_graph_nodes[graph_index * 4u];
+    let node1 = thermal_prepass_graph_node_row1(graph_index);
+    let node2 = thermal_graph_nodes[graph_index * 4u + 2u];
+    let node3 = thermal_graph_nodes[graph_index * 4u + 3u];
+    if (
+      !all(node0 == vec4<f32>(1.0, 0.0, 1.0, 2.0))
+      || node2.y != 0.0 || node2.z != 1.0
+      || node3.y != material_id || node3.z != row1.z
+      || !thermal_prepass_finite(node1.x) || node1.x < 0.0
+      || node1.x > 16777215.0 || floor(node1.x) != node1.x
+      || node1.y != 2.0 || node1.z != row1.x || node1.w != row1.y
+    ) { return invalid; }
+    let sample_offset = u32(node1.x);
+    if (
+      sample_offset > arrayLength(&thermal_graph_samples)
+      || 2u > arrayLength(&thermal_graph_samples) - sample_offset
+    ) { return invalid; }
+    let first = thermal_graph_samples[sample_offset];
+    let last = thermal_graph_samples[sample_offset + 1u];
+    let energy_span = last.x - first.x;
+    let temperature_span = last.y - first.y;
+    let temperature_slope = temperature_span / energy_span;
+    if (
+      first.x != row1.x || last.x != row1.y
+      || !thermal_prepass_finite(first.y) || !thermal_prepass_finite(last.y)
+      || !(first.y > 0.0) || !(first.y < last.y)
+      || !thermal_prepass_finite(energy_span) || !(energy_span > 0.0)
+      || !thermal_prepass_finite(temperature_span)
+      || !thermal_prepass_finite(temperature_slope)
+      || !(temperature_slope > 0.0)
+    ) { return invalid; }
+    if (row1.z == phase_id) {
+      if (
+        specific_internal_energy < row1.x
+        || specific_internal_energy > row1.y
+      ) { return invalid; }
+      selected = ThermalCarrierSelection(response_index, 1u, row1.x, row1.y);
+    }
+  }
+  if (phase_mask != 3u || selected.ready != 1u) { return invalid; }
+  return ThermalPhaseCaloricSelection(1u, selected);
+}
+
 fn thermal_prepass_carrier_phase_classification(
   phase_id: f32,
   phase_fractions: vec4<f32>
@@ -2548,6 +2783,10 @@ fn thermal_prepass_carrier_selection(
   phase_id: f32,
   phase_fractions: vec4<f32>
 ) -> ThermalCarrierSelection {
+  let caloric = thermal_prepass_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.enabled == 1u) { return caloric.selection; }
   var rejected = ThermalCarrierSelection(0u, 0u, 0.0, 0.0);
   var response_offset = 0u;
   var response_count = 0u;
@@ -2620,8 +2859,19 @@ fn thermal_prepass_carrier_selection(
 // zero-slope latent segment from becoming an artificial transport boundary.
 fn thermal_prepass_reachable_energy_domain(
   material_id: f32,
-  specific_internal_energy: f32
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
 ) -> ThermalReachableEnergyDomain {
+  let caloric = thermal_prepass_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.enabled == 1u) {
+    return ThermalReachableEnergyDomain(
+      caloric.selection.energy_lo, caloric.selection.energy_hi,
+      caloric.selection.ready, caloric.selection.ready
+    );
+  }
   var rejected = ThermalReachableEnergyDomain(
     specific_internal_energy,
     specific_internal_energy,
@@ -2743,10 +2993,35 @@ fn thermal_prepass_reachable_energy_domain(
 fn thermal_prepass_energy_inverse_for_temperature(
   material_id: f32,
   target_temperature_k: f32,
-  upper_inverse: bool
+  upper_inverse: bool,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
 ) -> ThermalEnergyInverse {
   var rejected = ThermalEnergyInverse(0.0, 0u);
   if (!thermal_prepass_finite(target_temperature_k)) { return rejected; }
+  let caloric = thermal_prepass_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.enabled == 1u) {
+    if (caloric.selection.ready != 1u) { return rejected; }
+    let row0 = thermal_prepass_response_row0(caloric.selection.response_index);
+    let node1 = thermal_prepass_graph_node_row1(u32(row0.z));
+    let first = thermal_graph_samples[u32(node1.x)];
+    let last = thermal_graph_samples[u32(node1.x) + 1u];
+    if (target_temperature_k <= first.y) {
+      return ThermalEnergyInverse(first.x, 1u);
+    }
+    if (target_temperature_k >= last.y) {
+      return ThermalEnergyInverse(last.x, 1u);
+    }
+    // A strictly increasing single-phase graph has one inverse: lower and
+    // upper agree. In particular, never take the other phase's U at this T.
+    let alpha = (target_temperature_k - first.y) / (last.y - first.y);
+    let energy = first.x + alpha * (last.x - first.x);
+    if (!thermal_prepass_finite(energy)) { return rejected; }
+    return ThermalEnergyInverse(clamp(energy, first.x, last.x), 1u);
+  }
   var response_offset = 0u;
   var response_count = 0u;
   var found_material = false;
@@ -3568,7 +3843,9 @@ fn resolve_budget(
   );
   let reachable_domain = thermal_prepass_reachable_energy_domain(
     thermo0.x,
-    vel_u.w
+    vel_u.w,
+    thermo0.y,
+    thermo1
   );
   let neighbor_min_temperature = bitcast<f32>(
     atomicLoad(&thermal_derived[row_offset + 6u])
@@ -3579,12 +3856,18 @@ fn resolve_budget(
   let lower_inverse = thermal_prepass_energy_inverse_for_temperature(
     thermo0.x,
     neighbor_min_temperature,
-    false
+    false,
+    vel_u.w,
+    thermo0.y,
+    thermo1
   );
   let upper_inverse = thermal_prepass_energy_inverse_for_temperature(
     thermo0.x,
     neighbor_max_temperature,
-    true
+    true,
+    vel_u.w,
+    thermo0.y,
+    thermo1
   );
   if (
     selection.ready != 1u
@@ -10518,7 +10801,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     : schroederSpatialThermalProposalWgsl;
   const derivedPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-derived-prepass.v12.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-derived-prepass.v13.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-derived-prepass',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'derive',
@@ -10622,7 +10905,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     : null;
   const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-budget-resolve.v12.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-budget-resolve.v13.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-budget-resolve',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'resolve_budget',
@@ -11121,6 +11404,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     workgroups,
     artifact: null
   };
+  const lossTargetHolder = { target: null };
   const releaseLease = ({ queueOrdered = false } = {}) => {
     if (artifactRecord.released) return false;
     artifactRecord.released = true;
@@ -11214,6 +11498,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
     }
     entry.inUseGenerationId = null;
     entry.releaseScheduled = false;
+    // Detach only after cleanup succeeds. Deferred/in-flight work and throwing
+    // cleanup must not lose their strongly owned device-loss target early.
+    lossTargetHolder.target = null;
     return true;
   };
   const authorizeQueueOrderedCanonicalApplyRetirement = ({
@@ -11508,34 +11795,19 @@ export function runSchroederSpatialThermalProposalWebGpu({
   });
   artifactRecord.artifact = artifact;
   thermalProposalArtifacts.set(artifact, artifactRecord);
+  lossTargetHolder.target = {
+    artifactRecord,
+    thermalProposalSourceAuthority,
+    releaseLease
+  };
   if (device?.lost?.then) {
+    const lossCallbacks = createThermalProposalDeviceLossCallbacks(
+      device,
+      lossTargetHolder
+    );
     Promise.resolve(device.lost).then(
-      (info) => {
-        lostThermalProposalDevices.add(device);
-        if (artifactRecord.released) return;
-        artifactRecord.terminalDisposition = 'device-lost-quarantined';
-        artifactRecord.terminalReason = String(
-          info?.message || info?.reason || 'webgpu-device-lost'
-        );
-        const sourceAuthorityRecord = thermalProposalSourceAuthorities.get(
-          thermalProposalSourceAuthority
-        );
-        if (sourceAuthorityRecord) sourceAuthorityRecord.active = false;
-        releaseLease();
-      },
-      (error) => {
-        lostThermalProposalDevices.add(device);
-        if (artifactRecord.released) return;
-        artifactRecord.terminalDisposition = 'device-loss-observation-rejected';
-        artifactRecord.terminalReason = String(
-          error?.message || error || 'webgpu-device-loss-observation-rejected'
-        );
-        const sourceAuthorityRecord = thermalProposalSourceAuthorities.get(
-          thermalProposalSourceAuthority
-        );
-        if (sourceAuthorityRecord) sourceAuthorityRecord.active = false;
-        releaseLease();
-      }
+      lossCallbacks.fulfilled,
+      lossCallbacks.rejected
     );
   }
   return artifact;
@@ -13009,7 +13281,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     }));
 
     const derivedPipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v8',
+      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v9',
       label: 'ulg-classic-thermal-v2-derived-prepass',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'derive',
@@ -13041,7 +13313,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       ]
     });
     const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v8',
+      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v9',
       label: 'ulg-classic-thermal-v2-budget-resolve',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'resolve_budget',

@@ -1170,6 +1170,9 @@ test('SPH reaction whole-parent conversion remains available only for a distingu
     ])
   };
   legacyTable.combinedRecordCount = legacyTable.combinedRecords.length / 4;
+  delete legacyTable.gasConstitutiveSchema;
+  delete legacyTable.gasConstitutiveOffsetVec4;
+  delete legacyTable.gasConstitutiveRecords;
   const packed = packedThreeParticles();
   const result = runSphReactionStepCpu({
     ...packed,

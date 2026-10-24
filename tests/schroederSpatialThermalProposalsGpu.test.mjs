@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 import {
   SCHROEDER_SPATIAL_EPOCH_V2_VERSION,
@@ -72,7 +74,9 @@ import {
   destroyClassicThermalProposalRuntime,
   destroySchroederSpatialThermalProposalRuntime,
   evaluateSchroederSpatialThermalPairProposal,
+  isLiveThermalProposalSourceAuthority,
   runSchroederSpatialThermalProposalWebGpu,
+  schroederSpatialThermalDeviceRuntimeAllocationOwnership,
   schroederSpatialThermalDerivedPrepassWgsl,
   schroederSpatialThermalProposalV2Wgsl,
   schroederSpatialThermalProposalWgsl
@@ -2565,6 +2569,248 @@ test('native-only thermal tree shadow revalidates after binding before encoder m
   await fixture.device.queue.onSubmittedWorkDone();
 });
 
+function controlledThermalDeviceLoss(device) {
+  let resolve;
+  let reject;
+  const registrations = [];
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  const originalThen = promise.then.bind(promise);
+  promise.then = (fulfilled, rejected) => {
+    registrations.push({ fulfilled, rejected });
+    return originalThen(fulfilled, rejected);
+  };
+  device.lost = promise;
+  return { promise, resolve, reject, registrations };
+}
+
+function submitThermalLossProposal(fixture, result, { queueOrdered = false } = {}) {
+  if (queueOrdered) {
+    assert.equal(result.authorizeQueueOrderedCanonicalApplyRetirement({
+      generation: fixture.generation,
+      execution: fixture.generation.execution
+    }), true);
+  }
+  const stage = createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
+    device: fixture.device,
+    currentStateBuffer: fixture.sphParticleUpload.stateBuffer,
+    currentThermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+    thermalResponseGraphUpload: fixture.thermalResponseGraphUpload,
+    ...result.preparedLawConfig,
+    schroederSpatialThermalProposal: result
+  });
+  const encoder = fixture.device.createCommandEncoder({ label: 'thermal-loss-target-test' });
+  stage.encode(encoder);
+  fixture.device.queue.submit([encoder.finish()]);
+  assert.equal(stage.markSubmittedWork(), true);
+}
+
+test('thermal loss target factory isolates holder scope and retirement detaches only after cleanup', () => {
+  const source = readFileSync(new URL(
+    '../src/runtime/sph/schroederSpatialThermalProposalsGpu.js', import.meta.url
+  ), 'utf8');
+  const match = source.match(
+    /^function createThermalProposalDeviceLossCallbacks\(([^)]*)\) \{\n([\s\S]*?)^\}/m
+  );
+  assert.ok(match, 'loss factory must be a separate module-level declaration');
+  assert.equal(match[1], 'device, lossTargetHolder');
+  assert.doesNotMatch(match[2], /\bWeakRef\b/,
+    'a live lease must not depend on weak reachability');
+  const releaseStart = source.indexOf('const releaseLease = (');
+  const releaseEnd = source.indexOf('const authorizeQueueOrderedCanonicalApplyRetirement', releaseStart);
+  assert.ok(releaseStart >= 0 && releaseEnd > releaseStart);
+  const releaseBody = source.slice(releaseStart, releaseEnd);
+  const detach = releaseBody.indexOf('lossTargetHolder.target = null');
+  const clearGeneration = releaseBody.indexOf('entry.inUseGenerationId = null');
+  const clearScheduled = releaseBody.indexOf('entry.releaseScheduled = false');
+  assert.ok(clearGeneration >= 0 && clearScheduled >= 0);
+  assert.ok(detach > clearGeneration && detach > clearScheduled);
+  assert.equal(releaseBody.match(/lossTargetHolder\.target\s*=\s*null/g)?.length, 1);
+  assert.doesNotMatch(releaseBody.slice(detach), /\b(?:release|destroy)\w*\(/,
+    'the target is detached after owned cleanup, not before it');
+  assert.match(source, /Promise\.resolve\(device\.lost\)\.then\(\s*lossCallbacks\.fulfilled,\s*lossCallbacks\.rejected\s*\)/);
+
+  // Exercise the actual retirement body too, including a synchronous cleanup
+  // failure. No private export or collection timing is needed for this seam.
+  const releaseExpression = releaseBody.trim()
+    .replace(/^const releaseLease = /, '').replace(/;$/, '');
+  for (const failCleanup of [false, true]) {
+    const authorities = new WeakMap();
+    const authority = {};
+    const authorityRecord = { active: true };
+    authorities.set(authority, authorityRecord);
+    const artifactRecord = { released: false, lifecycleStatus: 'prepared' };
+    const holder = { target: { artifactRecord } };
+    const retainedTarget = holder.target;
+    const entry = { inUseGenerationId: 26, releaseScheduled: true };
+    const cleanupError = new Error('injected thermal loss cleanup failure');
+    if (failCleanup) {
+      artifactRecord.nativeTestTreeShadow = {
+        diagnosticBuffer: { destroy() { throw cleanupError; } }
+      };
+    }
+    const release = runInNewContext(`(${releaseExpression})`, {
+      artifactRecord,
+      thermalProposalSourceAuthorities: authorities,
+      thermalProposalSourceAuthority: authority,
+      entry,
+      lossTargetHolder: holder
+    });
+    if (failCleanup) {
+      assert.throws(() => release(), (error) => error === cleanupError);
+      assert.equal(holder.target, retainedTarget, 'throw must not detach unfinished cleanup');
+      assert.equal(entry.inUseGenerationId, 26);
+      assert.equal(entry.releaseScheduled, true);
+    } else {
+      assert.equal(release(), true);
+      assert.equal(holder.target, null);
+      assert.equal(entry.inUseGenerationId, null);
+      assert.equal(entry.releaseScheduled, false);
+      assert.equal(release(), false, 'completed cleanup stays idempotent');
+    }
+    assert.equal(artifactRecord.released, true);
+    assert.equal(authorityRecord.active, false);
+  }
+
+  // Execute the exact extracted helper with controlled owners. This checks
+  // holder lifetime and callback behavior deterministically, not GC timing.
+  for (const outcome of ['fulfilled', 'rejected']) {
+    const lostDevices = new WeakSet();
+    const authorities = new WeakMap();
+    const factory = runInNewContext(`(${match[0]})`, {
+      lostThermalProposalDevices: lostDevices,
+      thermalProposalSourceAuthorities: authorities
+    });
+    const device = {};
+    const authority = {};
+    const authorityRecord = { active: true };
+    authorities.set(authority, authorityRecord);
+    const artifactRecord = { released: false };
+    const holder = { target: null };
+    const calls = [];
+    const releaseLease = () => {
+      calls.push({ markedLost: lostDevices.has(device), active: authorityRecord.active });
+      artifactRecord.released = true;
+      holder.target = null;
+      return true;
+    };
+    const target = { artifactRecord, thermalProposalSourceAuthority: authority, releaseLease };
+    holder.target = target;
+    const callbacks = factory(device, holder);
+    assert.equal(holder.target, target, 'live cleanup remains strongly owned');
+    callbacks[outcome]({ message: `controlled ${outcome}` });
+    assert.deepEqual(calls, [{ markedLost: true, active: false }]);
+    assert.equal(artifactRecord.terminalDisposition, outcome === 'fulfilled'
+      ? 'device-lost-quarantined' : 'device-loss-observation-rejected');
+    assert.equal(artifactRecord.terminalReason, `controlled ${outcome}`);
+    assert.equal(holder.target, null);
+    const disposition = artifactRecord.terminalDisposition;
+    lostDevices.delete(device);
+    callbacks[outcome]({ message: 'late detached callback' });
+    assert.equal(lostDevices.has(device), true, 'retired target still marks its device lost');
+    assert.equal(calls.length, 1);
+    assert.equal(artifactRecord.terminalDisposition, disposition);
+  }
+});
+
+for (const phase of ['prepared', 'submitted', 'deferred-retirement']) {
+  for (const outcome of ['resolve', 'reject']) {
+    test(`thermal loss target ${phase} ${outcome} revokes live owners exactly once`, async () => {
+      const fixture = liveFixture(2);
+      const loss = controlledThermalDeviceLoss(fixture.device);
+      const result = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+      const shadow = armSchroederSpatialThermalSourceCellTreeShadowForNativeTest({
+        device: fixture.device,
+        schroederSpatialThermalProposal: result
+      });
+      if (phase !== 'prepared') submitThermalLossProposal(fixture, result);
+      let finishFence = null;
+      if (phase === 'deferred-retirement') {
+        const fence = new Promise((resolve) => { finishFence = resolve; });
+        fixture.device.queue.onSubmittedWorkDone = () => fence;
+        assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
+        assert.equal(result.released, false, 'a scheduled release still needs loss cleanup');
+      }
+      assert.equal(isLiveThermalProposalSourceAuthority(result.thermalProposalSourceAuthority), true);
+      const before = {
+        submissions: fixture.device.submissions.length,
+        encoders: fixture.device.encoders.length,
+        bindGroups: fixture.device.bindGroups.length
+      };
+      // Observe rejection without independently quarantining the generation:
+      // that other owner would force-release its leases and mask whether the
+      // thermal callback released its own exact consumers.
+      const observedLoss = loss.promise.then(() => 'resolve', () => 'reject');
+      loss[outcome]({ message: `loss during ${phase}` });
+      assert.equal(await observedLoss, outcome);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(result.released, true);
+      assert.equal(result.lifecycleStatus, 'released');
+      assert.equal(isLiveThermalProposalSourceAuthority(result.thermalProposalSourceAuthority), false);
+      assert.equal(result.terminalDisposition, outcome === 'resolve'
+        ? 'device-lost-quarantined' : 'device-loss-observation-rejected');
+      assert.equal(result.terminalReason, `loss during ${phase}`);
+      assert.equal(shadow.treeConsumerLease.released, true);
+      assert.equal(shadow.generationConsumerLease.released, true);
+      assert.equal(shadow.batchBuffer.destroyCount, 1);
+      assert.equal(shadow.dispatchBuffer.destroyCount, 1);
+      assert.equal(result.abandonPreparedWork('duplicate after loss'), false);
+      finishFence?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(shadow.batchBuffer.destroyCount, 1, 'late owner fence cannot destroy twice');
+      assert.equal(shadow.dispatchBuffer.destroyCount, 1);
+      assert.throws(() => runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 }),
+        /device is already lost/);
+      assert.deepEqual({
+        submissions: fixture.device.submissions.length,
+        encoders: fixture.device.encoders.length,
+        bindGroups: fixture.device.bindGroups.length
+      }, before, 'loss and late cleanup encode and submit no new work');
+    });
+  }
+}
+
+for (const outcome of ['fulfilled', 'rejected']) {
+  test(`thermal loss target retired ${outcome} keeps device marker without releasing a reused arena`, async () => {
+    const fixture = liveFixture(2);
+    const loss = controlledThermalDeviceLoss(fixture.device);
+    const first = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+    const firstHandlers = loss.registrations[0];
+    assert.equal(typeof firstHandlers?.[outcome], 'function');
+    submitThermalLossProposal(fixture, first, { queueOrdered: true });
+    assert.equal(first.releaseAfterCanonicalApplySubmittedWork(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(first.released, true);
+    const retiredDisposition = first.terminalDisposition;
+    const second = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+    assert.equal(second.runtimeCacheHit, true);
+    assert.equal(second.proposalBuffer, first.proposalBuffer);
+    const secondHandlers = loss.registrations[1];
+    const beforeSubmissions = fixture.device.submissions.length;
+    const beforeDestroy = second.proposalBuffer.destroyCount;
+    // Deliver only the old subscription first; the current owner still has
+    // its own loss callback to release its exact lease.
+    firstHandlers[outcome]({ message: 'old retired target' });
+    assert.equal(first.terminalDisposition, retiredDisposition);
+    assert.equal(second.released, false);
+    assert.equal(second.lifecycleStatus, 'prepared');
+    assert.throws(() => runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 }),
+      /device is already lost/);
+    secondHandlers[outcome]({ message: 'current target' });
+    assert.equal(second.released, true);
+    assert.equal(second.terminalDisposition, outcome === 'fulfilled'
+      ? 'device-lost-quarantined' : 'device-loss-observation-rejected');
+    firstHandlers[outcome]({ message: 'old callback replay' });
+    assert.equal(first.terminalDisposition, retiredDisposition);
+    assert.equal(second.proposalBuffer.destroyCount, beforeDestroy,
+      'arena-cached proposal buffers are not owned by the loss subscription');
+    assert.equal(fixture.device.submissions.length, beforeSubmissions);
+    assert.equal(second.abandonPreparedWork('duplicate'), false);
+  });
+}
+
 test('native-only thermal tree shadow is quarantined and released on device loss', async () => {
   const fixture = liveFixture(2);
   let reportDeviceLoss;
@@ -3248,6 +3494,194 @@ test('classic thermal v2 stage rejects unauthenticated bins and reuses its exhau
   assert.equal(second.cleanupSubmittedWork(), true);
   assert.equal(destroyClassicThermalProposalRuntime(fixture.device), true);
   assert.ok(first.proposalBuffer.destroyCount >= 1);
+});
+
+test('thermal cache ownership covers real optional allocations without changing leases or GPU work', async () => {
+  const fixture = liveFixture();
+  const device = fixture.device;
+  const empty = schroederSpatialThermalDeviceRuntimeAllocationOwnership(device);
+  assert.equal(empty.allocationCount, 0);
+  const before = device.buffers.length;
+  const proposal = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+  const allocated = device.buffers.slice(before);
+  assert.equal(allocated.length, 13, 'base arena plus two actual optional CSR allocations');
+  const activity = () => [device.buffers.length, device.writes.length,
+    device.submissions.length, device.encoders.length, device.queueFenceCalls.length];
+  const beforeQuery = activity();
+  const owner = schroederSpatialThermalDeviceRuntimeAllocationOwnership(device);
+  assert.equal(owner.status, 'spatial-thermal-runtime-allocation-ownership-complete');
+  assert.equal(owner.runtimeCount, 1);
+  assert.equal(owner.entryCount, 1);
+  assert.equal(owner.allocationCount, allocated.length);
+  assert.deepEqual(new Set(owner.buffers), new Set(allocated));
+  assert.ok(!owner.buffers.includes(fixture.sphParticleUpload.stateBuffer));
+  assert.ok(!owner.buffers.includes(fixture.thermalResponseGraphUpload.responseBuffer));
+  assert.ok(Object.isFrozen(owner) && Object.isFrozen(owner.buffers));
+  assert.deepEqual(activity(), beforeQuery, 'retirement query performs no GPU work or allocation');
+  assert.throws(() => destroySchroederSpatialThermalProposalRuntime(device), /active generation leases/);
+  assert.equal(proposal.abandonPreparedWork('ownership-test-release'), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(new Set(schroederSpatialThermalDeviceRuntimeAllocationOwnership(device).buffers), new Set(allocated));
+  assert.ok(allocated.every(buffer => buffer.destroyCount === 0), 'returning a lease preserves owner allocations');
+  const countBeforeReuse = device.buffers.length;
+  const reused = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+  assert.equal(reused.runtimeCacheHit, true);
+  assert.equal(reused.proposalBuffer, proposal.proposalBuffer);
+  assert.equal(device.buffers.length, countBeforeReuse);
+  reused.abandonPreparedWork('ownership-test-final-release');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(destroySchroederSpatialThermalProposalRuntime(device), true);
+  assert.ok(allocated.every(buffer => buffer.destroyCount === 1), 'only owner teardown destroys cached buffers');
+  assert.equal(schroederSpatialThermalDeviceRuntimeAllocationOwnership(device).allocationCount, 0);
+});
+
+test('thermal cache ownership tracks late CSR allocation and excludes destroyed failed allocation', async () => {
+  const fixture = liveFixture();
+  const state = new Float32Array(16);
+  state[3] = 1;
+  state[11] = 1;
+  const uniform = { ...fixture, sphParticleState: {
+    ...fixture.sphParticleState, state, thermo: new Float32Array(24)
+  }, dtS: 0.001 };
+  const first = runSchroederSpatialThermalProposalWebGpu(uniform);
+  assert.equal(first.thermalCandidateCsr, null);
+  const ownerBeforeCsr = schroederSpatialThermalDeviceRuntimeAllocationOwnership(fixture.device);
+  assert.equal(ownerBeforeCsr.allocationCount, 11);
+  first.abandonPreparedWork('before-csr-release');
+  await new Promise(resolve => setImmediate(resolve));
+  const beforeLateCsr = fixture.device.buffers.length;
+  const later = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+  assert.equal(later.runtimeCacheHit, true);
+  const lateCsr = fixture.device.buffers.slice(beforeLateCsr);
+  assert.equal(lateCsr.length, 2);
+  assert.deepEqual(new Set(schroederSpatialThermalDeviceRuntimeAllocationOwnership(fixture.device).buffers),
+    new Set([...ownerBeforeCsr.buffers, ...lateCsr]));
+  later.abandonPreparedWork('after-csr-release');
+  await new Promise(resolve => setImmediate(resolve));
+  destroySchroederSpatialThermalProposalRuntime(fixture.device);
+  assert.ok(lateCsr.every(buffer => buffer.destroyCount === 1));
+
+  const failed = liveFixture();
+  const create = failed.device.createBuffer;
+  const before = failed.device.buffers.length;
+  let allocationCount = 0;
+  failed.device.createBuffer = function (descriptor) {
+    allocationCount++;
+    if (allocationCount === 13) throw new Error('second optional CSR allocation failed');
+    return create.call(this, descriptor);
+  };
+  const fallback = runSchroederSpatialThermalProposalWebGpu({ ...failed, dtS: 0.001 });
+  assert.equal(fallback.thermalCandidateCsr, null);
+  const allocated = failed.device.buffers.slice(before);
+  assert.equal(allocated.length, 12);
+  assert.equal(allocated[11].destroyCount, 1, 'failed optional allocation was destroyed by its owner');
+  const owner = schroederSpatialThermalDeviceRuntimeAllocationOwnership(failed.device);
+  assert.deepEqual(new Set(owner.buffers), new Set(allocated.slice(0, 11)));
+  fallback.abandonPreparedWork('csr-failure-release');
+  await new Promise(resolve => setImmediate(resolve));
+  destroySchroederSpatialThermalProposalRuntime(failed.device);
+  assert.equal(allocated[11].destroyCount, 1, 'discarded optional buffer is not retained for later teardown');
+});
+
+test('thermal cache ownership includes historical spatial capacities and isolates exact devices', async () => {
+  const small = liveFixture(2);
+  const firstStart = small.device.buffers.length;
+  const first = runSchroederSpatialThermalProposalWebGpu({ ...small, dtS: 0.001 });
+  const firstBuffers = small.device.buffers.slice(firstStart);
+  first.abandonPreparedWork('small-capacity-release');
+  await new Promise(resolve => setImmediate(resolve));
+  const large = liveFixture(17, small.device);
+  const largeStart = large.device.buffers.length;
+  const second = runSchroederSpatialThermalProposalWebGpu({ ...large, dtS: 0.001 });
+  const secondBuffers = large.device.buffers.slice(largeStart);
+  const foreign = liveFixture(2);
+  const foreignStart = foreign.device.buffers.length;
+  const third = runSchroederSpatialThermalProposalWebGpu({ ...foreign, dtS: 0.001 });
+  const foreignBuffers = foreign.device.buffers.slice(foreignStart);
+  const owner = schroederSpatialThermalDeviceRuntimeAllocationOwnership(small.device);
+  assert.equal(owner.entryCount, 2);
+  assert.deepEqual(new Set(owner.buffers), new Set([...firstBuffers, ...secondBuffers]));
+  assert.ok(firstBuffers.every(buffer => buffer.destroyCount === 0));
+  assert.ok(foreignBuffers.every(buffer => !owner.buffers.includes(buffer)));
+  assert.deepEqual(new Set(schroederSpatialThermalDeviceRuntimeAllocationOwnership(foreign.device).buffers), new Set(foreignBuffers));
+  second.abandonPreparedWork('large-capacity-release');
+  third.abandonPreparedWork('foreign-release');
+  await new Promise(resolve => setImmediate(resolve));
+  destroySchroederSpatialThermalProposalRuntime(small.device);
+  assert.ok(foreignBuffers.every(buffer => buffer.destroyCount === 0));
+  destroySchroederSpatialThermalProposalRuntime(foreign.device);
+});
+
+test('thermal cache ownership covers both caches and all live classic arenas', async () => {
+  const fixture = liveFixture();
+  const device = fixture.device;
+  const start = device.buffers.length;
+  const spatial = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+  const args = { device, sphParticleState: fixture.sphParticleState,
+    stateBuffer: fixture.sphParticleUpload.stateBuffer, thermoBuffer: fixture.sphParticleUpload.thermoBuffer,
+    thermalResponseGraphUpload: fixture.thermalResponseGraphUpload, dtS: 0.001 };
+  const classicFirst = createClassicThermalProposalWebGpuEncoderStage(args);
+  const classicSecond = createClassicThermalProposalWebGpuEncoderStage(args);
+  const allocated = device.buffers.slice(start);
+  assert.equal(allocated.length, 39, '13 spatial and two 13-buffer classic arenas');
+  const beforeQuery = [device.writes.length, device.submissions.length, device.queueFenceCalls.length];
+  const owner = schroederSpatialThermalDeviceRuntimeAllocationOwnership(device);
+  assert.equal(owner.runtimeCount, 2);
+  assert.equal(owner.entryCount, 3);
+  assert.deepEqual(new Set(owner.buffers), new Set(allocated));
+  assert.deepEqual([device.writes.length, device.submissions.length, device.queueFenceCalls.length], beforeQuery);
+  assert.throws(() => destroyClassicThermalProposalRuntime(device), /active leases/);
+  assert.equal(classicFirst.cleanupSubmittedWork(), true);
+  assert.equal(classicSecond.cleanupSubmittedWork(), true);
+  const reused = createClassicThermalProposalWebGpuEncoderStage(args);
+  assert.equal(reused.runtimeCacheHit, true);
+  assert.equal(reused.proposalBuffer, classicFirst.proposalBuffer);
+  reused.cleanupSubmittedWork();
+  destroyClassicThermalProposalRuntime(device);
+  const remaining = schroederSpatialThermalDeviceRuntimeAllocationOwnership(device);
+  assert.equal(remaining.runtimeCount, 1);
+  assert.deepEqual(new Set(remaining.buffers), new Set(allocated.slice(0, 13)));
+  spatial.abandonPreparedWork('combined-cache-release');
+  await new Promise(resolve => setImmediate(resolve));
+  destroySchroederSpatialThermalProposalRuntime(device);
+});
+
+test('thermal cache ownership fails closed for invalid allocations and never trusts labels or borrower flags', async () => {
+  const code = 'ERR_SCHROEDER_SPATIAL_THERMAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE';
+  for (const device of [null, undefined, 1, 'device']) {
+    assert.throws(() => schroederSpatialThermalDeviceRuntimeAllocationOwnership(device), { code });
+  }
+  const fixture = liveFixture();
+  const proposal = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
+  const unrelated = fixture.device.createBuffer({ label: proposal.proposalBuffer.label, size: 64, usage: 128 });
+  unrelated.owned = false;
+  unrelated.owner = 'schroeder-spatial-thermal-device-arena-cache';
+  assert.ok(!schroederSpatialThermalDeviceRuntimeAllocationOwnership(fixture.device).buffers.includes(unrelated));
+  const destroy = proposal.proposalBuffer.destroy;
+  proposal.proposalBuffer.destroy = null;
+  assert.throws(() => schroederSpatialThermalDeviceRuntimeAllocationOwnership(fixture.device), { code });
+  Object.defineProperty(proposal.proposalBuffer, 'destroy', { configurable: true, get() { throw new Error('broken owner allocation'); } });
+  assert.throws(() => schroederSpatialThermalDeviceRuntimeAllocationOwnership(fixture.device), error => error.code === code
+    && error.cause?.message === 'broken owner allocation');
+  Object.defineProperty(proposal.proposalBuffer, 'destroy', { configurable: true, writable: true, value: destroy });
+  proposal.abandonPreparedWork('invalid-allocation-release');
+  await new Promise(resolve => setImmediate(resolve));
+  destroySchroederSpatialThermalProposalRuntime(fixture.device);
+
+  const injected = liveFixture();
+  const foreignDevice = createFakeDevice();
+  const create = injected.device.createBuffer;
+  let first = true;
+  injected.device.createBuffer = function (descriptor) {
+    const buffer = create.call(this, descriptor);
+    if (first) { first = false; tagWebGpuBufferDevice(buffer, foreignDevice); }
+    return buffer;
+  };
+  const foreignAllocation = runSchroederSpatialThermalProposalWebGpu({ ...injected, dtS: 0.001 });
+  assert.throws(() => schroederSpatialThermalDeviceRuntimeAllocationOwnership(injected.device), { code });
+  foreignAllocation.abandonPreparedWork('foreign-allocation-release');
+  await new Promise(resolve => setImmediate(resolve));
+  destroySchroederSpatialThermalProposalRuntime(injected.device);
 });
 
 test('classic thermal v2 consumes only a runtime-issued post-separation bin authority', async () => {

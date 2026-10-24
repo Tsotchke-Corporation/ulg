@@ -738,7 +738,7 @@ test('prospective seed builder declares the exact four-lane Tier0 transition fro
 test('WGSL producer is numeric/table-driven and writes only moment lanes after copying identity', () => {
   assert.equal(
     SPH_DISPERSED_MEDIUM_OPTICS_PRODUCER_KERNEL_REVISION,
-    'four-lane-reaction-birth-conserved-condensate-ledger-optical-moments-v1'
+    'four-lane-donor-resolved-reaction-birth-conserved-condensate-ledger-optical-moments-v2'
   );
   assert.doesNotMatch(
     sphDispersedMediumOpticsProducerWgsl,

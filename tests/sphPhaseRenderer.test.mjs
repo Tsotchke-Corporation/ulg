@@ -658,6 +658,7 @@ import {
   markSphSpatialGasPressureAuthoritySubmitted,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2,
   ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3,
+  ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4,
   releaseSphSpatialGasLedgerEosAfterQueue,
   runSphSpatialGasLedgerEosRetainedWebGpu
 } from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
@@ -8425,7 +8426,8 @@ test('SPH scene exact v4 readiness ignores legacy masks and hostile accessors wh
 
     for (const [retiredSchema, observedField] of [
       [ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V2, 'retiredV2AuthorityObserved'],
-      [ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3, 'retiredV3AuthorityObserved']
+      [ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V3, 'retiredV3AuthorityObserved'],
+      [ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4, 'retiredV4AuthorityObserved']
     ]) {
       const retired = makeExactWrapper({
         extra: {
@@ -8441,6 +8443,23 @@ test('SPH scene exact v4 readiness ignores legacy masks and hostile accessors wh
       assert.equal(retiredInspection.exactAuthorityObserved, true);
       assert.equal(retiredInspection.exactAuthorityReady, false);
       assert.equal(retiredInspection[observedField], true);
+      assert.equal(retiredInspection.graphSafeForLegacyFallback, false);
+
+      const inheritedRetired = makeExactWrapper({
+        extra: {
+          pressureInterfaceGasCellFieldImport: {
+            retainedGasCellFieldSource: Object.create({ schema: retiredSchema })
+          }
+        }
+      });
+      const inheritedInspection = inspectExactSphSpatialGasPressureAuthorityImport(
+        inheritedRetired.wrapper,
+        expected
+      );
+      assert.equal(inheritedInspection.exactAuthorityReady, false);
+      assert.equal(inheritedInspection.inheritedProtectedSchemaObserved, true);
+      assert.equal(inheritedInspection[observedField], true);
+      assert.equal(inheritedInspection.graphSafeForLegacyFallback, false);
     }
 
     const inheritedRetiredSource = Object.create({
@@ -8477,7 +8496,7 @@ test('SPH scene exact v4 readiness ignores legacy masks and hostile accessors wh
         expected
       );
     assert.equal(forgedNestedInspection.exactAuthorityReady, false);
-    assert.equal(forgedNestedInspection.forgedV4AuthorityObserved, true);
+    assert.equal(forgedNestedInspection.retiredV4AuthorityObserved, true);
 
     const secondFixture = await opaqueScenePressureAuthorityFixture();
     try {
@@ -8545,7 +8564,7 @@ test('SPH scene exact v4 readiness ignores legacy masks and hostile accessors wh
       false
     );
     const forgedV4 = {
-      schema: 'peercompute.ulg.sph-retained-gas-cell-eos-source.v4',
+      schema: fixture.source.schema,
       status: 'retained-gas-cell-eos-source-submitted',
       ready: true,
       pressureInterfaceGasPressureCellRowCapacity: description.pressureCellCapacity,

@@ -139,6 +139,7 @@ const DIRECT_MECHANICS_FIELD_VIEW_RUNTIME_READY =
 const DIRECT_MECHANICS_FIELD_PAIR_RUNTIME_READY =
   'schroeder-spatial-mechanics-field-pair-gpu-runtime-ready';
 const directSpatialEpochRuntimeCache = new WeakMap();
+const spatialEpochDevicePipelines = new WeakMap();
 const exactNearConsumerAuthentications = new WeakMap();
 const finalizedExactNearConsumerReceipts = new WeakSet();
 const residentExactNearConsumerBindingReceipts = new WeakSet();
@@ -240,6 +241,7 @@ export const SCHROEDER_SPATIAL_EXACT_NEAR_RESIDENT_BINDING_STATUS =
 const ownedSpatialEpochGenerations = new WeakSet();
 const spatialEpochGenerationLineages = new WeakMap();
 const postSubmitCleanupGenerationOrigins = new WeakMap();
+const unsubmittedSpatialEpochGenerationDevices = new WeakMap();
 const spatialEpochGenerationRetirements = new WeakMap();
 const spatialEpochGenerationConsumerLeases = new WeakMap();
 const spatialEpochGenerationConsumerLeaseOwnership = new WeakMap();
@@ -1277,6 +1279,51 @@ function bindGroupForActiveRankView(
   return bindGroup;
 }
 
+function sharedSpatialEpochPipelines(device, directoryAbiVersion, label) {
+  const cachedByVersion = spatialEpochDevicePipelines.get(device);
+  const cached = cachedByVersion?.get(directoryAbiVersion);
+  if (cached) return cached;
+  // These two ABI variants have fixed shader bytes. Capacity and arena state
+  // live in the existing bindings/uniforms, not in these three pipelines.
+  // ActiveRank embeds layout constants and remains outside this cache.
+  const directoryV2 = directoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION;
+  const keyModule = device.createShaderModule({
+    label: `${label}-key-shader`,
+    code: directoryV2
+      ? schroederSpatialEpochV2KeyWgsl
+      : schroederSpatialEpochKeyWgsl
+  });
+  const assembleModule = device.createShaderModule({
+    label: `${label}-assemble-shader`,
+    code: directoryV2
+      ? schroederSpatialEpochV2AssembleWgsl
+      : schroederSpatialEpochAssembleWgsl
+  });
+  const pipelines = Object.freeze({
+    keyPipeline: device.createComputePipeline({
+      label: `${label}-key-pipeline`,
+      layout: 'auto',
+      compute: { module: keyModule, entryPoint: 'emit_spatial_keys' }
+    }),
+    assemblePipeline: device.createComputePipeline({
+      label: `${label}-assemble-pipeline`,
+      layout: 'auto',
+      compute: { module: assembleModule, entryPoint: 'assemble_directory' }
+    }),
+    finalizePipeline: device.createComputePipeline({
+      label: `${label}-finalize-pipeline`,
+      layout: 'auto',
+      compute: { module: assembleModule, entryPoint: 'finalize_directory' }
+    })
+  });
+  // Publish only the complete immutable bundle. A construction throw leaves
+  // no partial entry; runtime destruction retires buffers, never this bundle.
+  const byVersion = cachedByVersion ?? new Map();
+  byVersion.set(directoryAbiVersion, pipelines);
+  if (!cachedByVersion) spatialEpochDevicePipelines.set(device, byVersion);
+  return pipelines;
+}
+
 export function createSchroederSpatialEpochGpu(device, {
   maxSourceCount,
   cellCapacity = maxSourceCount,
@@ -1398,39 +1445,14 @@ export function createSchroederSpatialEpochGpu(device, {
     }
   }
 
-  const keyModule = device.createShaderModule({
-    label: `${label}-key-shader`,
-    code: directoryV2
-      ? schroederSpatialEpochV2KeyWgsl
-      : schroederSpatialEpochKeyWgsl
-  });
-  const assembleModule = device.createShaderModule({
-    label: `${label}-assemble-shader`,
-    code: directoryV2
-      ? schroederSpatialEpochV2AssembleWgsl
-      : schroederSpatialEpochAssembleWgsl
-  });
+  const { keyPipeline, assemblePipeline, finalizePipeline } =
+    sharedSpatialEpochPipelines(device, resolvedDirectoryAbiVersion, label);
   const activeRankViewModule = activeRankViewLayout
     ? device.createShaderModule({
         label: `${label}-active-rank-view-shader`,
         code: createSchroederSpatialActiveRankViewBuildWgsl(activeRankViewLayout)
       })
     : null;
-  const keyPipeline = device.createComputePipeline({
-    label: `${label}-key-pipeline`,
-    layout: 'auto',
-    compute: { module: keyModule, entryPoint: 'emit_spatial_keys' }
-  });
-  const assemblePipeline = device.createComputePipeline({
-    label: `${label}-assemble-pipeline`,
-    layout: 'auto',
-    compute: { module: assembleModule, entryPoint: 'assemble_directory' }
-  });
-  const finalizePipeline = device.createComputePipeline({
-    label: `${label}-finalize-pipeline`,
-    layout: 'auto',
-    compute: { module: assembleModule, entryPoint: 'finalize_directory' }
-  });
   const activeRankViewPipeline = activeRankViewModule
     ? device.createComputePipeline({
         label: `${label}-active-rank-view-pipeline`,
@@ -3061,6 +3083,86 @@ function directActiveSourceViewRuntime(device, entry) {
   return entry.activeSourceViewRuntime;
 }
 
+/**
+ * Enumerate allocations owned by the exact device's cached spatial runtimes.
+ * Lane retirement must not raw-destroy these through old execution aliases:
+ * releasing an execution returns its arena to this cache, not to the lane.
+ * This read-only, retirement-only query includes historical capacities and
+ * draining owners; it neither retires executions nor clears any cache.
+ */
+export function schroederSpatialEpochDeviceRuntimeAllocationOwnership(device) {
+  const incomplete = (message, cause) => {
+    const error = new Error(message, cause == null ? undefined : { cause });
+    error.code = 'ERR_SCHROEDER_SPATIAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE';
+    return error;
+  };
+  if (!device || typeof device !== 'object') {
+    throw incomplete('spatial runtime allocation ownership requires the exact device');
+  }
+  const runtimes = new Set();
+  const buffers = new Set();
+  try {
+    for (const entry of directSpatialEpochRuntimeCache.get(device)?.values() ?? []) {
+      runtimes.add(entry.runtime);
+      for (const runtime of [
+        entry.activeSourceViewRuntime,
+        entry.aggregateViewRuntime,
+        entry.exactNearCellTreeRuntime
+      ]) {
+        if (runtime) runtimes.add(runtime);
+      }
+      for (const map of [
+        entry.mechanicsViewRuntimes,
+        entry.mechanicsFieldViewRuntimes,
+        entry.mechanicsFieldPairRuntimes,
+        entry.phaseVolumeMomentRuntimes,
+        entry.phaseVolumeReceiptRuntimes,
+        entry.phaseVolumeInterfaceProposalRuntimes,
+        entry.hierarchyViewRuntimes,
+        entry.parentFieldViewRuntimes
+      ]) {
+        if (!(map instanceof Map)) throw incomplete('spatial runtime owner map is unavailable');
+        for (const runtime of map.values()) runtimes.add(runtime);
+      }
+      for (const draining of [
+        entry.mechanicsFieldViewDrainingRuntimes,
+        entry.mechanicsFieldPairDrainingRuntimes
+      ]) {
+        if (!(draining instanceof Set)) throw incomplete('spatial draining owner set is unavailable');
+        for (const record of draining) runtimes.add(record?.runtime);
+      }
+    }
+    for (const runtime of runtimes) {
+      if (typeof runtime?.allocationEntries !== 'function') {
+        throw incomplete('cached spatial runtime cannot enumerate its owned allocations');
+      }
+      const allocations = runtime.allocationEntries();
+      if (!Array.isArray(allocations)) throw incomplete('spatial runtime allocation list is invalid');
+      for (const { buffer } of allocations) {
+        // Nested radix allocations may be untagged. Their owner is this exact
+        // cached runtime; preserve the existing device matcher and reject any
+        // positively branded foreign-device allocation without relabelling it.
+        if (
+          !buffer || typeof buffer !== 'object'
+          || typeof buffer.destroy !== 'function'
+          || !webGpuBufferMatchesDevice(buffer, device)
+        ) throw incomplete('spatial runtime allocation ownership does not match its device');
+        buffers.add(buffer);
+      }
+    }
+  } catch (error) {
+    if (error?.code === 'ERR_SCHROEDER_SPATIAL_RUNTIME_ALLOCATION_OWNERSHIP_INCOMPLETE') throw error;
+    throw incomplete('spatial runtime allocation enumeration failed', error);
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-runtime-allocation-ownership.v0',
+    status: 'spatial-epoch-runtime-allocation-ownership-complete',
+    runtimeCount: runtimes.size,
+    allocationCount: buffers.size,
+    buffers: Object.freeze([...buffers])
+  });
+}
+
 function mechanicsFieldViewCacheBackpressure(message) {
   const error = new Error(message);
   error.code = 'ERR_SCHROEDER_MECHANICS_FIELD_VIEW_CACHE_BACKPRESSURE';
@@ -4116,6 +4218,10 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       'runSchroederSpatialEpochGenerationWebGpu requires a WebGPU-like device and queue'
     );
   }
+  const unsubmitted = (result) => {
+    unsubmittedSpatialEpochGenerationDevices.set(result, device);
+    return result;
+  };
   if (typeof phaseVolumeReceiptEnabled !== 'boolean') {
     throw new TypeError(
       'phaseVolumeReceiptEnabled must be a boolean when collecting diagnostic A/B evidence'
@@ -4210,7 +4316,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     );
   }
   if (source.ready !== true) {
-    return {
+    return unsubmitted({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: source.status,
       reason: source.reason,
@@ -4223,7 +4329,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
-    };
+    });
   }
   let mechanicsLevelSpecs;
   try {
@@ -4233,7 +4339,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       mechanicsLevels
     });
   } catch (error) {
-    return {
+    return unsubmitted({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-mechanics-view-rejected-level-contract',
       reason: error instanceof Error ? error.message : String(error),
@@ -4246,10 +4352,10 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
-    };
+    });
   }
   if (mechanicsLevelSpecs.length > 0 && source.exactNearQueryProfile?.ready !== true) {
-    return {
+    return unsubmitted({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-mechanics-view-rejected-query-profile',
       reason: 'compact mechanics requires an admitted exact-near query profile',
@@ -4262,7 +4368,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
-    };
+    });
   }
   if (
     phaseVolumeInterfaceProposalEnabled
@@ -4273,7 +4379,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       || mechanicsLevelSpecs.length !== 2
     )
   ) {
-    return {
+    return unsubmitted({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-phase-volume-interface-proposal-rejected-level-contract',
       reason: 'read-only S9-C interface topology requires enabled S9-A/S9-B sidecars on exactly two mechanics levels',
@@ -4287,7 +4393,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
-    };
+    });
   }
   if (
     mechanicsLevelSpecs.length > 0
@@ -4296,7 +4402,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       || source.sourceStateBufferBorrowed !== true
     )
   ) {
-    return {
+    return unsubmitted({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-mechanics-view-rejected-state-provenance',
       reason: 'compact mechanics requires the exact borrowed retained source-state buffer used by level assignment',
@@ -4309,7 +4415,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
-    };
+    });
   }
   const phaseVolumeMomentSourceAdmitted = Boolean(
     source.sourceRowLayoutId
@@ -4325,7 +4431,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
     && webGpuBufferMatchesDevice(source.sourceMechanicsBuffer, device)
   );
   if (phaseVolumeInterfaceProposalEnabled && !phaseVolumeMomentSourceAdmitted) {
-    return {
+    return unsubmitted({
       schema: ULG_SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA,
       status: 'schroeder-spatial-phase-volume-interface-proposal-rejected-source-provenance',
       reason: 'read-only S9-C interface topology requires the exact borrowed V0J mechanics source used by S9-A/S9-B',
@@ -4339,7 +4445,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
       directoryBuildCount: 0,
       privateLookupBuildCount: 0,
       releaseScheduled: false
-    };
+    });
   }
   let cache = null;
   let execution = null;
@@ -5728,7 +5834,7 @@ export function runSchroederSpatialEpochGenerationWebGpu({
         postSubmitCleanupGeneration
       );
     }
-    return rejectedGeneration;
+    return submissionPerformed ? rejectedGeneration : unsubmitted(rejectedGeneration);
   }
 }
 
@@ -6648,6 +6754,14 @@ function generationOwnedArtifacts(generation) {
     execution: generation.hierarchyView,
     runtime: generation.hierarchyViewRuntime
   }] : [])];
+}
+
+/** Exact producer evidence that this build submitted no generation commands.
+ * This is not retirement authority, nor a fence for the source classifier.
+ * It only distinguishes a real pre-submit rejection from a retained owner
+ * when a caller recovers its own source holds after confirmed device loss. */
+export function isUnsubmittedSchroederSpatialEpochGeneration(generation, device) {
+  return device != null && unsubmittedSpatialEpochGenerationDevices.get(generation) === device;
 }
 
 function exactOwnedSpatialEpochGeneration(generation) {

@@ -23,6 +23,16 @@ import {
   residentProductEventCountAuthorityRegistered,
   validateProductEventLiveCountCopyDescriptor
 } from './sphResidentProductHistoryGpu.js';
+import {
+  forkSphAerosolParcelRead, releaseSphAerosolParcelRead, validateSphAerosolParcelRead,
+  releaseSphAerosolParcelFamily, finalizeSphAerosolCondensateTransition,
+  discardSphAerosolCondensateTransition
+} from './sphAerosolParcelGpu.js';
+import {
+  sphAerosolSourceFamily, sphAerosolCondensateTransitionForUploads,
+  assertSphAerosolSpatialContinuation, validateSphAerosolSpatialContinuation,
+  acquireSphAerosolSpatialParcelRead
+} from './sphAerosolSpatialBinding.js';
 
 export const ULG_SCHROEDER_SPATIAL_SUCCESSOR_SOURCE_FAMILY_SCHEMA =
   'peercompute.ulg.schroeder-committed-successor-source-family.v1';
@@ -68,6 +78,7 @@ const EPOCH_FIELDS = Object.freeze([
 ]);
 
 const sourceFamilyRecords = new WeakMap();
+const pendingSourceFamilyRecords = new WeakMap();
 const finalizedSourceFamilies = new WeakSet();
 const sourceFamilyByCommitReceipt = new WeakMap();
 const sourceFamilyLeaseRecords = new WeakMap();
@@ -80,6 +91,9 @@ const successorLevelAssignmentSealRecords = new WeakMap();
 const positionTransitionReceiptRecords = new WeakMap();
 const finalizedPositionTransitionReceipts = new WeakSet();
 const productHistoryCommitGateRecords = new WeakMap();
+const sourceFamilyBySphUpload = new WeakMap();
+const particleProductReadRecords = new WeakMap();
+const aerosolSuccessorOwners = new WeakMap();
 let nextPositionTransitionSubmissionNonce = 0;
 
 const POSITION_TRANSITION_WORKGROUP_SIZE = 64;
@@ -944,8 +958,23 @@ function normalizedReason(value, fallback) {
   return fallback;
 }
 
+function successorEnvelopeProductMass(nextParticleUploads) {
+  const descriptor = Object.getOwnPropertyDescriptor(nextParticleUploads, 'residentProductMass');
+  if ((!descriptor && 'residentProductMass' in nextParticleUploads)
+      || (descriptor && !Object.hasOwn(descriptor, 'value'))) {
+    throw sourceFamilyError('successor product history must be an own data property', 'PRODUCT_HISTORY_COMMIT_GATE');
+  }
+  return descriptor?.value ?? null;
+}
+
+function snapshotSuccessorProductHistory(nextParticleUploads) {
+  const residentProductMass = successorEnvelopeProductMass(nextParticleUploads);
+  return Object.freeze({ residentProductMass,
+    productEventBuffer: residentProductMass?.productEventBuffer ?? null });
+}
+
 function createProductHistoryCommitGate(nextParticleUploads, device) {
-  const residentProductMass = nextParticleUploads?.residentProductMass ?? null;
+  const residentProductMass = successorEnvelopeProductMass(nextParticleUploads);
   if (!residentProductMass) return null;
   const descriptor = productEventLiveCountCopyDescriptor(
     residentProductMass,
@@ -1067,8 +1096,10 @@ function sourceFamilyProductHistoryCommitGatePreserved(
   record
 ) {
   const gate = sourceFamily?.productHistoryCommitGate ?? null;
-  const residentProductMass =
-    record?.nextParticleUploads?.residentProductMass ?? null;
+  const residentProductMass = successorEnvelopeProductMass(record.nextParticleUploads);
+  const sealed = record.productHistorySnapshot;
+  if (sealed && (sealed.residentProductMass !== residentProductMass
+      || sealed.productEventBuffer !== (residentProductMass?.productEventBuffer ?? null))) return false;
   if (!gate) {
     return record?.productHistoryCommitGate == null
       && (
@@ -1148,6 +1179,7 @@ function sourceFamilyLivenessSummary(sourceFamily, record) {
 }
 
 function destroyOwnedSuccessorLevelAssignment(record) {
+  retireSuccessorAerosol(record);
   if (
     record.ownsSuccessorLevelAssignment !== true
     || record.successorLevelAssignmentDestroyed === true
@@ -1183,6 +1215,112 @@ function requireActiveSourceFamily(record) {
       'RETIRED'
     );
   }
+  if (!successorAerosolReadLive(record)) {
+    throw sourceFamilyError('successor aerosol owner is no longer live', 'AEROSOL_OWNER');
+  }
+}
+
+function successorAerosolReadLive(record) {
+  return record.aerosolFamily == null || validateSphAerosolParcelRead(record.aerosolParcelRead, {
+    device: record.device, family: record.aerosolFamily,
+    expectedGeneration: record.aerosolFamily.generation
+  });
+}
+
+function retainPublishedAerosol(record) {
+  if (!record.aerosolFamily) return;
+  const owner = aerosolSuccessorOwners.get(record.aerosolFamily) ?? { count: 0, ownsFamily: false };
+  owner.count++;
+  owner.ownsFamily ||= record.aerosolCondensateTransition != null;
+  aerosolSuccessorOwners.set(record.aerosolFamily, owner);
+  record.aerosolSharedOwner = owner;
+}
+
+function retireSuccessorAerosol(record) {
+  if (record.aerosolRetired) return;
+  record.aerosolRetired = true;
+  if (record.aerosolCondensateTransition) {
+    discardSphAerosolCondensateTransition(record.aerosolCondensateTransition);
+  }
+  const owner = record.aerosolSharedOwner;
+  if (owner && --owner.count === 0 && owner.ownsFamily) {
+    releaseSphAerosolParcelFamily(record.aerosolFamily);
+  }
+  if (record.aerosolParcelRead) releaseSphAerosolParcelRead(record.aerosolParcelRead);
+}
+
+/** Capture may use only the published exact upload envelope and, once its
+ * retirement begins, the already-issued exact consumer lease. This is not a
+ * raw-family resurrection or an admission through matching public labels.
+ */
+export function acquireSchroederSpatialSuccessorAerosolRead({ device,
+  sphParticleUpload, mlsMpmParticleUpload, consumerLease = null } = {}) {
+  const family = sourceFamilyBySphUpload.get(sphParticleUpload);
+  if (!family) return null;
+  const record = sourceFamilyRecords.get(family);
+  if (!record?.aerosolFamily) return null;
+  resolveSchroederSpatialSuccessorSourceFamily(family, {
+    device, sphParticleUpload, mlsMpmParticleUpload, consumerLease
+  });
+  return forkSphAerosolParcelRead(record.aerosolParcelRead, {
+    device, family: record.aerosolFamily, expectedGeneration: record.aerosolFamily.generation
+  });
+}
+
+/** Bind the current published carrier/history pair through its private owner.
+ * This is inventory/source identity, not a caloric model or exchange interval.
+ * Cold/intermediate callers may explicitly permit absence of a published owner;
+ * a known stale or mismatched owner never falls back to that unpaired domain.
+ * An existing exact consumerLease may fork this read through requested
+ * retirement; it does not authenticate changed/private successor uploads.
+ */
+export function acquireSchroederSpatialSuccessorParticleProductRead({ device,
+  sphParticleUpload, mlsMpmParticleUpload, residentProductMass = null,
+  consumerStage = 'successor-particle-product-read', consumerLease = null,
+  required = true } = {}) {
+  if (required !== true && required !== false) {
+    throw sourceFamilyError('particle/product read required must be boolean', 'CONTRACT');
+  }
+  const sourceFamily = sourceFamilyBySphUpload.get(sphParticleUpload);
+  if (!sourceFamily) {
+    if (!required) return null;
+    throw sourceFamilyError('particle/product read requires an exact published successor', 'PARTICLE_PRODUCT_READ');
+  }
+  const resolution = resolveSchroederSpatialSuccessorSourceFamily(sourceFamily,
+    { device, sphParticleUpload, mlsMpmParticleUpload, consumerLease });
+  const record = sourceFamilyRecords.get(sourceFamily);
+  if (record.mlsUpload !== mlsMpmParticleUpload
+      || record.productHistorySnapshot.residentProductMass !== residentProductMass) {
+    throw sourceFamilyError('particle/product read does not match the exact published inventory', 'PARTICLE_PRODUCT_READ');
+  }
+  const ownerReadToken = consumerLease == null
+    ? acquireSchroederSpatialSuccessorSourceFamilyLease(sourceFamily,
+      { device, consumerStage })
+    : forkSchroederSpatialSuccessorSourceFamilyLease(sourceFamily, consumerLease,
+      { device, consumerStage });
+  const read = Object.freeze({ sourceFamily, epochIdentity: resolution.epochIdentity,
+    particleCount: sourceFamily.particleCount, residentProductMass, ownerReadToken });
+  particleProductReadRecords.set(read, { device, sourceFamily, record,
+    sphParticleUpload, mlsMpmParticleUpload, residentProductMass, ownerReadToken });
+  return read;
+}
+
+/** An existing read can finish through requested retirement using its own exact
+ * lease. Release it with the ordinary source-family lease / After functions.
+ */
+export function validateSchroederSpatialSuccessorParticleProductRead(read, { device,
+  sphParticleUpload, mlsMpmParticleUpload, residentProductMass = null } = {}) {
+  try {
+    const issued = particleProductReadRecords.get(read);
+    if (!issued || issued.device !== device || issued.sphParticleUpload !== sphParticleUpload
+        || issued.mlsMpmParticleUpload !== mlsMpmParticleUpload
+        || issued.residentProductMass !== residentProductMass
+        || issued.record !== sourceFamilyRecords.get(issued.sourceFamily)
+        || issued.record.productHistorySnapshot.residentProductMass !== residentProductMass) return false;
+    resolveSchroederSpatialSuccessorSourceFamily(issued.sourceFamily, { device,
+      sphParticleUpload, mlsMpmParticleUpload, consumerLease: issued.ownerReadToken });
+    return true;
+  } catch { return false; }
 }
 
 function requireResolvableSourceFamilyLease(
@@ -1288,36 +1426,40 @@ function quarantineSourceFamilyAfterDeviceLoss(sourceFamily, record, info) {
   settleRequestedRetirement(sourceFamily, record);
 }
 
+// Keep these as separate module-level factories. A callback created inside
+// the watcher can share the fallback's strong sourceFamily context even when
+// its own body only uses a WeakRef, retaining every retired family until loss.
+function createWeakSourceFamilyLossCallback(sourceFamilyRef) {
+  return function quarantineAfterLoss(info) {
+    const liveSourceFamily = sourceFamilyRef.deref();
+    const liveRecord = liveSourceFamily
+      ? (sourceFamilyRecords.get(liveSourceFamily) ?? pendingSourceFamilyRecords.get(liveSourceFamily))
+      : null;
+    if (liveRecord) {
+      quarantineSourceFamilyAfterDeviceLoss(liveSourceFamily, liveRecord, info);
+    }
+  };
+}
+
+function createStrongSourceFamilyLossCallback(sourceFamily) {
+  return function quarantineAfterLoss(info) {
+    const liveRecord = sourceFamilyRecords.get(sourceFamily) ?? pendingSourceFamilyRecords.get(sourceFamily);
+    if (liveRecord) quarantineSourceFamilyAfterDeviceLoss(sourceFamily, liveRecord, info);
+  };
+}
+
 function watchSourceFamilyDeviceLoss(sourceFamily, device) {
-  let deviceLoss;
   try {
-    deviceLoss = device?.lost;
+    const deviceLoss = device?.lost;
+    if (!deviceLoss || typeof deviceLoss.then !== 'function') return false;
+    const quarantineAfterLoss = typeof WeakRef === 'function'
+      ? createWeakSourceFamilyLossCallback(new WeakRef(sourceFamily))
+      : createStrongSourceFamilyLossCallback(sourceFamily);
+    Promise.resolve(deviceLoss).then(quarantineAfterLoss, quarantineAfterLoss);
+    return true;
   } catch {
-    return;
+    return false;
   }
-  if (!deviceLoss || typeof deviceLoss.then !== 'function') return;
-  let quarantineAfterLoss;
-  if (typeof WeakRef === 'function') {
-    const sourceFamilyRef = new WeakRef(sourceFamily);
-    quarantineAfterLoss = (info) => {
-      const liveSourceFamily = sourceFamilyRef.deref();
-      const liveRecord = liveSourceFamily
-        ? sourceFamilyRecords.get(liveSourceFamily)
-        : null;
-      if (liveRecord) {
-        quarantineSourceFamilyAfterDeviceLoss(liveSourceFamily, liveRecord, info);
-      }
-    };
-  } else {
-    quarantineAfterLoss = (info) => {
-      const liveRecord = sourceFamilyRecords.get(sourceFamily);
-      if (liveRecord) quarantineSourceFamilyAfterDeviceLoss(sourceFamily, liveRecord, info);
-    };
-  }
-  Promise.resolve(deviceLoss).then(
-    quarantineAfterLoss,
-    quarantineAfterLoss
-  );
 }
 
 function reserveSuccessorPublicationSlot(nextParticleUploads) {
@@ -1409,6 +1551,7 @@ const SPH_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS = Object.freeze([
   'identityStrideBytes',
   'identitySchema',
   'identityRequired',
+  'aerosolFamily',
   'bufferFamilyGeneration',
   'bufferFamilyGenerationStatus'
 ]);
@@ -1470,7 +1613,7 @@ function successorUploadEnvelopePreserved(sourceFamily, record) {
   return sourceFamilyProductHistoryCommitGatePreserved(
     sourceFamily,
     record
-  );
+  ) && successorAerosolReadLive(record);
 }
 
 function newSourceFamilyRecord({
@@ -1507,6 +1650,12 @@ function newSourceFamilyRecord({
     successorLevelAssignment,
     successorLevelAssignmentSeal,
     productHistoryCommitGate,
+    productHistorySnapshot: snapshotSuccessorProductHistory(nextParticleUploads),
+    aerosolFamily: sphAerosolSourceFamily(sphUpload),
+    aerosolCondensateTransition: sphAerosolCondensateTransitionForUploads(nextParticleUploads),
+    aerosolParcelRead: null,
+    aerosolSharedOwner: null,
+    aerosolRetired: false,
     ownsSuccessorLevelAssignment:
       typeof successorLevelAssignment?.destroyAssignmentBuffer === 'function',
     successorLevelAssignmentRetirementScheduled: false,
@@ -1554,6 +1703,14 @@ function retireUnpublishedSuccessorLevelAssignment(record) {
     || record.successorLevelAssignmentRetirementScheduled === true
   ) return;
   record.successorLevelAssignmentRetirementScheduled = true;
+  // Invalidate an unpublishable pair now. Its private owner already fences
+  // every residual consumer; delaying discard until the classifier's fence
+  // would create a second, later reservation-release fence invisible to a
+  // caller awaiting the rejection's queue prefix. Shared reads and classifier
+  // ownership still retire through the existing path below.
+  if (record.aerosolCondensateTransition) {
+    discardSphAerosolCondensateTransition(record.aerosolCondensateTransition);
+  }
   let fence = null;
   try {
     fence = record.device?.queue?.onSubmittedWorkDone?.();
@@ -1627,6 +1784,9 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       'successor preflight requires exact transaction and source generation'
     );
   }
+  assertSphAerosolSpatialContinuation({ device, transaction, generation,
+    sourceFamily: transaction.sourceBuffers?.aerosolFamily ?? null,
+    nextFamily: sphAerosolSourceFamily(sphUpload), nextParticleUploads });
   if (
     !lookupLevelAssignment
     || typeof successorLevelAssignmentRunner !== 'function'
@@ -1989,6 +2149,27 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     storageAllocation: allocation,
     productHistoryCommitGate
   });
+  try {
+    pendingSourceFamilyRecords.set(sourceFamily, sourceFamilyRecord);
+    const lossWatchInstalled = watchSourceFamilyDeviceLoss(sourceFamily, device);
+    if (sourceFamilyRecord.aerosolFamily && !lossWatchInstalled) {
+      throw sourceFamilyError('paired source family requires preinstalled loss retirement', 'AEROSOL_OWNER');
+    }
+    if (sourceFamilyRecord.aerosolFamily && !sourceFamilyRecord.aerosolCondensateTransition) {
+      sourceFamilyRecord.aerosolParcelRead = acquireSphAerosolSpatialParcelRead({
+        device, transaction, generation, family: sourceFamilyRecord.aerosolFamily
+      });
+    }
+    if (sourceFamilyRecord.aerosolCondensateTransition
+        && !validateSphAerosolSpatialContinuation(sourceFamilyRecord.aerosolCondensateTransition,
+          { device, transaction, generation, nextParticleUploads })) {
+      throw sourceFamilyError('pending aerosol transition changed during successor preflight', 'AEROSOL_TRANSITION');
+    }
+  } catch (error) {
+    detachUnpublishedProductHistoryCommitGate(sourceFamilyRecord);
+    retireUnpublishedSuccessorLevelAssignment(sourceFamilyRecord);
+    throw error;
+  }
   successorPublicationPlanRecords.set(plan, {
     transaction,
     generation,
@@ -2001,10 +2182,30 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     successorLevelAssignmentSeal,
     productHistoryCommitGate,
     sourceFamilyRecord,
+    aerosolPublicationWindow: false,
     attempted: false
   });
   preparedSuccessorPublicationPlans.add(plan);
   return plan;
+}
+
+/** An instantaneous private publication window, never a caller-supplied
+ * boolean or a substitute for the actual outer commit. The parcel owner uses
+ * this gate before its synchronous activation/claim-consumption state change.
+ */
+export function validateSchroederSpatialAerosolPublicationWindow({
+  plan, transition, commitReceipt
+} = {}) {
+  const prepared = successorPublicationPlanRecords.get(plan);
+  if (!prepared || prepared.aerosolPublicationWindow !== true
+      || prepared.sourceFamilyRecord.aerosolCondensateTransition !== transition
+      || prepared.aerosolCommitReceipt !== commitReceipt) return false;
+  return validateSchroederSpatialEpochTransactionCommit(prepared.transaction, commitReceipt, {
+    nextParticleUploads: prepared.nextParticleUploads, expectedGeneration: prepared.generation
+  }) && validateSphAerosolSpatialContinuation(transition, {
+    device: prepared.sourceFamilyRecord.device, transaction: prepared.transaction,
+    generation: prepared.generation, nextParticleUploads: prepared.nextParticleUploads
+  });
 }
 
 /**
@@ -2127,6 +2328,9 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
     } = prepared;
     if (
       sourceFamilyByCommitReceipt.has(commitReceipt)
+      || sourceFamilyRecord.deviceLost === true
+      || sourceFamilyRecord.aerosolRetired === true
+      || !sourceFamilyProductHistoryCommitGatePreserved(sourceFamily, sourceFamilyRecord)
       || !validateSchroederSpatialEpochTransactionCommit(
         transaction,
         commitReceipt,
@@ -2140,6 +2344,10 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         )
       )
       || topologyAuthority?.generationId !== sourceFamily.sourceGenerationId
+      || (sourceFamilyRecord.aerosolCondensateTransition
+        ? !validateSphAerosolSpatialContinuation(sourceFamilyRecord.aerosolCondensateTransition,
+          { device: sourceFamilyRecord.device, transaction, generation, nextParticleUploads })
+        : !successorAerosolReadLive(sourceFamilyRecord))
       || !preparedUploadFamilyPreserved(
         nextParticleUploads,
         sourceFamily,
@@ -2208,11 +2416,25 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         reason: 'commit or reserved publication slot did not preserve exact identity'
       });
     }
+    if (sourceFamilyRecord.aerosolCondensateTransition) {
+      prepared.aerosolCommitReceipt = commitReceipt;
+      prepared.aerosolPublicationWindow = true;
+      try {
+        sourceFamilyRecord.aerosolParcelRead = finalizeSphAerosolCondensateTransition(
+          sourceFamilyRecord.aerosolCondensateTransition, { plan, commitReceipt });
+      } finally {
+        prepared.aerosolPublicationWindow = false;
+      }
+      if (!sourceFamilyRecord.aerosolParcelRead) {
+        throw sourceFamilyError('paired aerosol publication rejected before activation', 'AEROSOL_TRANSITION');
+      }
+    }
+    retainPublishedAerosol(sourceFamilyRecord);
     sourceFamilyRecord.commitReceipt = commitReceipt;
     sourceFamilyRecords.set(sourceFamily, sourceFamilyRecord);
+    sourceFamilyBySphUpload.set(sourceFamilyRecord.sphUpload, sourceFamily);
     finalizedSourceFamilies.add(sourceFamily);
     sourceFamilyByCommitReceipt.set(commitReceipt, sourceFamily);
-    watchSourceFamilyDeviceLoss(sourceFamily, sourceFamilyRecord.device);
     return publicationReceipt({
       status: 'schroeder-successor-source-family-published',
       published: true,
@@ -2241,6 +2463,18 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
       preparedForFailure?.attempted === true
       && !sourceFamilyRecords.has(preparedForFailure.sourceFamily)
     ) {
+      const { nextParticleUploads, sourceFamily, successorLevelAssignment } = preparedForFailure;
+      for (const [key, value] of [
+        ['schroederSpatialSuccessorSourceFamily', sourceFamily],
+        ['schroederSpatialSuccessorLevelAssignment', successorLevelAssignment]
+      ]) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(nextParticleUploads, key);
+          if (descriptor?.value === value && descriptor.writable === true) {
+            Reflect.set(nextParticleUploads, key, null);
+          }
+        } catch { /* Rejected publication must stay total, even for hostile envelopes. */ }
+      }
       detachUnpublishedProductHistoryCommitGate(
         preparedForFailure.sourceFamilyRecord
       );
@@ -2328,6 +2562,10 @@ export function createSchroederSpatialSuccessorSourceFamily({
 } = {}) {
   const sphUpload = nextParticleUploads?.sphParticleUpload ?? null;
   const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  if (sphAerosolSourceFamily(sphUpload) != null
+      || sphAerosolCondensateTransitionForUploads(nextParticleUploads) != null) {
+    throw sourceFamilyError('aerosol continuation requires prepared paired-capable publication', 'AEROSOL_TRANSITION');
+  }
   if (
     !validateSchroederSpatialEpochTransactionCommit(
       transaction,
@@ -2503,6 +2741,7 @@ export function createSchroederSpatialSuccessorSourceFamily({
     uploadEnvelope: snapshotSuccessorUploadEnvelope(sphUpload, mlsUpload),
     buffers,
     productHistoryCommitGate,
+    productHistorySnapshot: snapshotSuccessorProductHistory(nextParticleUploads),
     active: true,
     retired: false,
     deviceLost: false,
@@ -2516,6 +2755,7 @@ export function createSchroederSpatialSuccessorSourceFamily({
     resolveRetirement: null
   };
   sourceFamilyRecords.set(sourceFamily, sourceFamilyRecord);
+  sourceFamilyBySphUpload.set(sphUpload, sourceFamily);
   finalizedSourceFamilies.add(sourceFamily);
   sourceFamilyByCommitReceipt.set(commitReceipt, sourceFamily);
   nextParticleUploads.schroederSpatialSuccessorSourceFamily = sourceFamily;
@@ -2553,6 +2793,44 @@ export function acquireSchroederSpatialSuccessorSourceFamilyLease(
     requireDevice: true
   });
   requireActiveSourceFamily(record);
+  return issueSourceFamilyLease(sourceFamily, record, consumerStage);
+}
+
+/**
+ * Fork an exact live read lease, including while retirement is requested.
+ * The parent must still admit reads; a copied, released, or release-pending
+ * token cannot extend ownership. The child has its own release obligation and
+ * remains live after its parent drains. This grants neither new source-pair
+ * authority nor permission to retire queued GPU reads without their covering
+ * completion/lifetime authority.
+ */
+export function forkSchroederSpatialSuccessorSourceFamilyLease(
+  sourceFamily,
+  consumerLease,
+  {
+    device,
+    consumerStage = 'forked-successor-source-family-consumer'
+  } = {}
+) {
+  const record = exactSourceFamilyRecord(sourceFamily, {
+    device,
+    requireDevice: true
+  });
+  // Never turn an omitted fork parent into a fresh active-family acquisition.
+  requireResolvableSourceFamilyLease(sourceFamily, record, consumerLease);
+  // Lease identity alone does not excuse mutation of the published envelope,
+  // its underlying buffers, history seal, assignment, or aerosol owner.
+  resolveSchroederSpatialSuccessorSourceFamily(sourceFamily, {
+    device,
+    consumerLease
+  });
+  // Public envelope inspection may synchronously invoke a getter. Recheck the
+  // private parent after that inspection, immediately before minting a child.
+  requireResolvableSourceFamilyLease(sourceFamily, record, consumerLease);
+  return issueSourceFamilyLease(sourceFamily, record, consumerStage);
+}
+
+function issueSourceFamilyLease(sourceFamily, record, consumerStage) {
   const normalizedConsumerStage = typeof consumerStage === 'string'
     ? consumerStage.trim()
     : null;
@@ -2917,6 +3195,11 @@ export function resolveSchroederSpatialSuccessorSourceFamily(
     throw sourceFamilyError(
       'source family does not identify the exact committed same-device continuation'
     );
+  }
+  // Public envelope or provenance accessors above can run synchronously. Do
+  // not return admission if they ended the private lease while being read.
+  if (consumerLease != null) {
+    requireResolvableSourceFamilyLease(sourceFamily, record, consumerLease);
   }
   return Object.freeze({
     admitted: true,

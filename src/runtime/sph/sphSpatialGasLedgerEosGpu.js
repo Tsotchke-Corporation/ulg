@@ -1,9 +1,25 @@
+import { sphAerosolSourceFamily } from './sphAerosolSpatialBinding.js';
+import {
+  acquireSchroederSpatialSuccessorParticleProductRead,
+  acquireSchroederSpatialSuccessorAerosolRead,
+  validateSchroederSpatialSuccessorParticleProductRead,
+  resolveSchroederSpatialSuccessorSourceFamily,
+  releaseSchroederSpatialSuccessorSourceFamilyLease
+} from './schroederSpatialSuccessorSourceFamily.js';
+import {
+  SPH_SPATIAL_GAS_MIXTURE_MOMENT_ROW_FLOATS,
+  decodeSphSpatialGasMixtureMomentRows,
+  sphSpatialGasMixtureMomentsWgsl
+} from './sphSpatialGasMixtureMoments.js';
 import {
   SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS,
   SCHROEDER_SPATIAL_EPOCH_MAGIC,
   SCHROEDER_SPATIAL_EPOCH_VERSION,
   SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_FLOATS,
   SPH_SPATIAL_GAS_FREE_VOLUME_VERSION,
+  SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION,
+  createSchroederQuadraticControlVolumeDescriptor,
+  schroederQuadraticControlVolumeProjectionWgsl,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
@@ -79,6 +95,11 @@ import {
   createGpuReadbackTelemetryAccumulator,
   mergeGpuReadbackTelemetry
 } from './sphGpuReadbackTelemetry.js';
+import {
+  normalizeSphSpatialGasSpeciesDiagnostics,
+  encodeSphSpatialGasSpeciesDiagnostics,
+  decodeSphSpatialGasSpeciesDiagnosticPacket
+} from './sphSpatialGasSpeciesDiagnostics.js';
 
 export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V1 =
   'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v1';
@@ -102,18 +123,24 @@ export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V4 =
   'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v4';
 export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA_V4 =
   'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v4';
-export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA =
+export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_V5 =
   'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v5';
-export const ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA =
+export const ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA_V4 =
   'peercompute.ulg.sph-retained-gas-cell-eos-source.v4';
-export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA =
+export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA_V5 =
   'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v5';
+export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA =
+  'peercompute.ulg.sph-retained-spatial-gas-ledger-source.v7';
+export const ULG_SPH_RETAINED_GAS_CELL_EOS_SOURCE_SCHEMA =
+  'peercompute.ulg.sph-retained-gas-cell-eos-source.v5';
+export const ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA =
+  'peercompute.ulg.sph-spatial-gas-ledger-eos-execution.v7';
 export const ULG_SPH_GAS_PRESSURE_AUTHORITY_TELEMETRY_SCHEMA =
   'peercompute.ulg.sph-gas-pressure-authority-telemetry.v1';
 export const ULG_SPH_GAS_PRESSURE_CONSUMER_RECEIPT_SCHEMA =
   'peercompute.ulg.sph-gas-pressure-consumer-receipt.v1';
 export const ULG_SPH_GAS_PRESSURE_MECHANICS_BINDING_SCHEMA =
-  'peercompute.ulg.sph-gas-pressure-mechanics-binding.v1';
+  'peercompute.ulg.sph-gas-pressure-mechanics-binding.v2';
 
 export const SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS =
   SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_FLOATS;
@@ -122,8 +149,8 @@ export const SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS = 12;
 export const SPH_SPATIAL_GAS_LEDGER_EOS_WORKGROUP_SIZE = 64;
 export const SPH_SPATIAL_GAS_LEDGER_EOS_ARENA_COUNT = 3;
 export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_MAGIC = 0x5347_4133;
-export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION = 3;
-export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_WORDS = 32;
+export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION = 4;
+export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_WORDS = 36;
 export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_BYTES =
   SPH_SPATIAL_GAS_AUTHORITY_CONTROL_WORDS * Uint32Array.BYTES_PER_ELEMENT;
 
@@ -180,7 +207,9 @@ export const SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS = Object.freeze({
   COMPACT_STRIDE: 28,
   ACTIVE_NODE_STRIDE: 29,
   PRESSURE_STRIDE: 30,
-  FREE_VOLUME_READY_COUNT: 31
+  FREE_VOLUME_READY_COUNT: 31,
+  PROJECTION_VERSION: 32,
+  CONTROL_VOLUME_GEOMETRY_SEAL: 33
 });
 
 export const SPH_SPATIAL_GAS_DIAGNOSTICS_NONE = 'none';
@@ -224,8 +253,15 @@ const retainedPressureConsumerReceipts = new WeakMap();
 const retainedPressureMechanicsBindings = new WeakMap();
 const retainedSourceBorrowAccounting = new WeakMap();
 const lostDevices = new WeakSet();
+const vaporAerosolCandidates = new WeakMap();
+// The optional caloric compiler consumes the existing thermal graph builder.
+// Load it only after retaining the source; an eager EOS -> thermal import
+// would reintroduce the thermal/reaction entry-order cycle.
+let caloricAdmissionModulePromise = null;
+const caloricAdmissionModule = () => (caloricAdmissionModulePromise
+  ??= import('./sphSpatialGasCaloricAdmission.js'));
 const GAS_PRESSURE_QUEUE_ORDERED_PRODUCER_FAMILY =
-  'sph-spatial-gas-ledger-eos-v4-pressure-authority';
+  'sph-spatial-gas-ledger-eos-v5-pressure-authority';
 const gasPressureQueueOrderedCleanupClaimIssuer =
   createQueueOrderedCleanupClaimIssuer({
     producerFamily: GAS_PRESSURE_QUEUE_ORDERED_PRODUCER_FAMILY
@@ -358,10 +394,13 @@ function destroySlot(slot) {
     slot.compactRowsBuffer,
     slot.activeNodeBuffer,
     slot.gasPressureCellsBuffer,
+    slot.gasMixtureMomentsBuffer,
+    ...slot.caloricBuffers,
     slot.candidateFlagsBuffer,
     slot.candidateOffsetsBuffer,
     slot.controlBuffer,
-    slot.paramsBuffer
+    slot.paramsBuffer,
+    ...slot.speciesDiagnosticBuffers
   ]) {
     try {
       destroyBufferOnce(slot, buffer);
@@ -437,7 +476,16 @@ function createArenaSlot(device, capacity, arenaIndex) {
     compactRowsBuffer: null,
     activeNodeBuffer: null,
     gasPressureCellsBuffer: null,
-    paramsBuffer: null
+    gasMixtureMomentsBuffer: null,
+    caloricBuffers: [],
+    caloricRowsBuffer: null,
+    caloricTableBuffer: null,
+    caloricTableByteLength: 0,
+    paramsBuffer: null,
+    speciesDiagnosticBuffers: [],
+    speciesDiagnosticParamsBuffer: null,
+    speciesDiagnosticRowsBuffer: null,
+    speciesDiagnosticClosureBuffer: null
   };
   const allocatedBuffers = [];
   const allocateBuffer = (descriptor) => {
@@ -502,6 +550,11 @@ function createArenaSlot(device, capacity, arenaIndex) {
       usage: GPU_BUFFER_USAGE.STORAGE
         | GPU_BUFFER_USAGE.COPY_SRC
         | GPU_BUFFER_USAGE.COPY_DST
+    });
+    slot.gasMixtureMomentsBuffer = allocateBuffer({
+      label: `${label}-gas-mixture-moments`,
+      size: alignedBytes(capacity * SPH_SPATIAL_GAS_MIXTURE_MOMENT_ROW_FLOATS * FLOAT32_BYTES),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
     });
     slot.paramsBuffer = allocateBuffer({
       label: `${label}-params`,
@@ -917,6 +970,98 @@ function sourceBorrowSetFor(sources) {
     0
   );
   return releaseAll;
+}
+
+// A published pair is stronger than two independently borrowed buffers. Cold,
+// partial and private fine-step inventories remain usable by legacy pressure,
+// but cannot silently become complete caloric-mixture sources.
+function retainParticleProductSourcePair({ device, sphParticleUpload,
+  mlsMpmParticleUpload, residentProductMass, consumerLease, epochIdentity, required, particleCount }) {
+  const read = acquireSchroederSpatialSuccessorParticleProductRead({ device,
+    sphParticleUpload, mlsMpmParticleUpload, residentProductMass, consumerLease,
+    consumerStage: 'retained-spatial-gas-mixture', required });
+  if (!read) return null;
+  let released = false;
+  const release = () => {
+    if (released) return false;
+    const receipt = releaseSchroederSpatialSuccessorSourceFamilyLease(
+      read.sourceFamily, read.ownerReadToken, { device });
+    released = receipt.released === true;
+    return released;
+  };
+  const validate = () => {
+    if (released || read.particleCount !== particleCount || !validateSchroederSpatialSuccessorParticleProductRead(read, {
+      device, sphParticleUpload, mlsMpmParticleUpload, residentProductMass
+    }) || Object.keys(epochIdentity).some((field) => read.epochIdentity[field] !== epochIdentity[field])) {
+      throw new TypeError('Gas mixture lost its exact published particle/product source epoch');
+    }
+  };
+  // A queue-ordered EOS drain must not become the last hold behind the older
+  // retirement fence. The original parent remains live until its existing
+  // outer-step fence covers these submissions. Without it, use confirmed-fence
+  // cleanup, never interpret a bare submit as completed source-family reads.
+  const canReleaseQueueOrdered = () => {
+    if (released || !consumerLease) return false;
+    try {
+      validate();
+      resolveSchroederSpatialSuccessorSourceFamily(read.sourceFamily, { device,
+        sphParticleUpload, mlsMpmParticleUpload, consumerLease });
+      return true;
+    } catch { return false; }
+  };
+  try { validate(); } catch (error) { release(); throw error; }
+  const acquireAerosolRead = () => {
+    validate();
+    return acquireSchroederSpatialSuccessorAerosolRead({ device,
+      sphParticleUpload, mlsMpmParticleUpload, consumerLease: read.ownerReadToken });
+  };
+  return { validate, release, canReleaseQueueOrdered, acquireAerosolRead, isReleased: () => released,
+    read, sphParticleUpload, mlsMpmParticleUpload, residentProductMass };
+}
+
+function withParticleProductSourceBorrow(sourceBorrow, pair) {
+  if (!pair) return sourceBorrow;
+  const release = () => {
+    // Drain the private token before invoking public source-borrow accessors.
+    const pairReleased = pair.isReleased() || pair.release();
+    const buffersReleased = sourceBorrow.isReleased() || sourceBorrow();
+    return pairReleased && buffersReleased;
+  };
+  release.canRelease = () => sourceBorrow.canRelease() && pair.canReleaseQueueOrdered();
+  release.releaseQueueOrdered = () => {
+    // Other cleanup operations may invoke public setters. Recheck at the
+    // actual child drain, not only at the earlier retirement preflight.
+    if (!release.canRelease()) return false;
+    return release();
+  };
+  release.isReleased = () => sourceBorrow.isReleased() && pair.isReleased();
+  release.activeCount = () => sourceBorrow.activeCount() + (pair.isReleased() ? 0 : 1);
+  return release;
+}
+
+function prepareCaloricBuffers(device, slot, records) {
+  if (!slot.caloricRowsBuffer) {
+    const raw = device.createBuffer({ label: `${slot.label}-caloric-cells`,
+      size: alignedBytes(slot.capacity * 8 * FLOAT32_BYTES),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST });
+    slot.caloricBuffers.push(raw);
+    slot.caloricRowsBuffer = tagWebGpuBufferDevice(raw, device);
+  }
+  if (!slot.caloricTableBuffer || slot.caloricTableByteLength !== records.byteLength) {
+    // This slot has no previous live consumer. Register the new allocation
+    // before tagging and retain any failed setup for the same arena cleanup.
+    const raw = device.createBuffer({ label: `${slot.label}-caloric-materials`,
+      size: records.byteLength, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+    slot.caloricBuffers.push(raw);
+    const buffer = tagWebGpuBufferDevice(raw, device);
+    if (slot.caloricTableBuffer) {
+      destroyBufferOnce(slot, slot.caloricTableBuffer);
+      slot.caloricBuffers = slot.caloricBuffers.filter((entry) => entry !== slot.caloricTableBuffer);
+    }
+    slot.caloricTableBuffer = buffer;
+    slot.caloricTableByteLength = records.byteLength;
+  }
+  device.queue.writeBuffer(slot.caloricTableBuffer, 0, records);
 }
 
 function rejectedExecution(status, reason, extra = {}) {
@@ -1503,7 +1648,8 @@ function adapterParams({
   level,
   executionGeneration,
   fallbackTemperatureK,
-  liveCountDescriptor = null
+  liveCountDescriptor = null,
+  requireCompleteOccupancy = false
 }) {
   const expectedMagic = liveCountDescriptor?.expectedMagic
     ?? SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_MAGIC;
@@ -1555,13 +1701,15 @@ function adapterParams({
   view.setUint32(112, particleStateStrideFloats, true);
   view.setUint32(116, particleThermoStrideFloats, true);
   view.setUint32(120, candidateCount, true);
+  view.setUint32(124, requireCompleteOccupancy ? 1 : 0, true);
   return new Uint8Array(data);
 }
 
 function initialAuthorityControl({
   executionGeneration,
   storageGeneration,
-  sourceCapacity
+  sourceCapacity,
+  gasControlVolumeDescriptor
 }) {
   const words = new Uint32Array(SPH_SPATIAL_GAS_AUTHORITY_CONTROL_WORDS);
   words[SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS.MAGIC] =
@@ -1582,6 +1730,10 @@ function initialAuthorityControl({
     SPH_SPATIAL_GAS_ACTIVE_NODE_ROW_FLOATS;
   words[SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS.PRESSURE_STRIDE] =
     SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS;
+  words[SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS.PROJECTION_VERSION] =
+    gasControlVolumeDescriptor.version;
+  words[SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS.CONTROL_VOLUME_GEOMETRY_SEAL] =
+    gasControlVolumeDescriptor.seal;
   return words;
 }
 
@@ -1595,12 +1747,11 @@ function eosParams({
   fallbackTemperatureK,
   chartId,
   level,
-  boxMinM,
-  boxMaxM
+  gasControlVolumeDescriptor
 }) {
   const execution = generation.execution;
   const layout = execution.layout;
-  const data = new ArrayBuffer(128);
+  const data = new ArrayBuffer(PARAMS_BUFFER_BYTES);
   const view = new DataView(data);
   view.setUint32(0, sourceCapacity, true);
   view.setUint32(4, SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS, true);
@@ -1624,9 +1775,22 @@ function eosParams({
   view.setUint32(76, gasFreeVolume.storageGeneration, true);
   view.setUint32(80, gasFreeVolume.gasFreeVolumeCellCapacity, true);
   view.setUint32(84, gasFreeVolume.gasFreeVolumeRowStrideFloats, true);
-  for (let axis = 0; axis < 3; axis += 1) {
-    view.setFloat32(88 + axis * 4, boxMinM[axis], true);
-    view.setFloat32(100 + axis * 4, boxMaxM[axis], true);
+  gasControlVolumeDescriptor.boundsWords.forEach((word, index) => {
+    view.setUint32(88 + index * 4, word, true);
+  });
+  view.setUint32(136, gasControlVolumeDescriptor.version, true);
+  view.setUint32(140, gasControlVolumeDescriptor.seal, true);
+  view.setInt32(144, gasControlVolumeDescriptor.gridShift, true);
+  gasControlVolumeDescriptor.gridDims.forEach((dimension, axis) => {
+    view.setUint32(148 + axis * 4, dimension, true);
+  });
+  view.setUint32(160, gasControlVolumeDescriptor.gridNodeCount, true);
+  if (gasFreeVolume.aerosol) {
+    view.setUint32(164, 1, true);
+    view.setUint32(168, gasFreeVolume.aerosol.familyId, true);
+    view.setUint32(172, gasFreeVolume.aerosol.generation, true);
+    view.setUint32(176, gasFreeVolume.aerosol.capacity, true);
+    view.setUint32(180, gasFreeVolume.aerosol.version, true);
   }
   return new Uint8Array(data);
 }
@@ -1664,6 +1828,7 @@ struct SpatialGasAdapterParams {
   particle_state_stride: u32,
   particle_thermo_stride: u32,
   candidate_count: u32,
+  require_complete_occupancy: u32,
 };
 
 @group(0) @binding(0) var<storage, read> product_events: array<f32>;
@@ -1677,7 +1842,7 @@ struct SpatialGasAdapterParams {
 @group(0) @binding(8) var<storage, read> particle_thermo: array<f32>;
 
 const CONTROL_MAGIC: u32 = 0x53474133u;
-const CONTROL_VERSION: u32 = 3u;
+const CONTROL_VERSION: u32 = ${SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION}u;
 const STATUS_INITIALIZED: u32 = 1u;
 const STATUS_COMPACT_READY: u32 = 2u;
 const STATUS_EMPTY: u32 = 32u;
@@ -1691,7 +1856,7 @@ const PARTICLE_PHASE_GAS: f32 = 3.0;
 const PARTICLE_PHASE_FRACTION_TOLERANCE: f32 = 1.0e-5;
 
 fn finite_f32(value: f32) -> bool {
-  return value == value && abs(value) <= 3.402823e38;
+  return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
 }
 
 fn product_history_authority_ready() -> bool {
@@ -1820,7 +1985,19 @@ fn classify_gas_candidates(@builtin(global_invocation_id) global_id: vec3<u32>) 
   let gas_routed_ready = finite_f32(routing)
     && routing > 0.5 && routing < 1.5
     && finite_f32(source_status) && source_status > 0.5;
-  if (!gas_routed_ready) { return; }
+  if (!gas_routed_ready) {
+    // Current-stage free volume includes carrier V0*J and retained parcels,
+    // but not independent unplaced condensed products. Reject that domain;
+    // silently omitting its occupied volume would overstate the gas space.
+    if (params.require_complete_occupancy != 0u) {
+      let residual_mass = product_events[source + 13u];
+      if (!finite_f32(residual_mass) || residual_mass != 0.0) {
+        atomicOr(&authority[3u], ERROR_INVALID_CANDIDATE);
+        atomicAdd(&authority[12u], 1u);
+      }
+    }
+    return;
+  }
 
   let total_mass = product_events[source + 3u];
   let total_moles = product_events[source + 9u];
@@ -1984,6 +2161,9 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var source_discriminant = -1.0;
   var source_row_index = 0.0;
   var routing = 1.0;
+  var source_specific_u = 0.0;
+  var source_temperature_k = 0.0;
+  var source_phase_id = 0.0;
   if (source_index < params.product_candidate_capacity) {
     let source = source_index * params.product_event_stride;
     let total_mass = product_events[source + 3u];
@@ -2020,6 +2200,9 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
     source_discriminant = product_events[source + 5u];
     source_row_index = f32(source_index);
     routing = product_events[source + 10u];
+    source_specific_u = product_events[source + 19u];
+    source_temperature_k = source_temperature;
+    source_phase_id = product_events[source + 11u];
   } else {
     let particle_index = source_index - params.product_candidate_capacity;
     let state = particle_index * params.particle_state_stride;
@@ -2037,6 +2220,9 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
     source_discriminant = -1.0;
     source_row_index = f32(particle_index);
     routing = 1.0;
+    source_specific_u = particle_state[state + 7u];
+    source_temperature_k = temperature_k;
+    source_phase_id = particle_thermo[thermo + 1u];
     if (
       !finite_f32(moles) || !(moles > 0.0)
       || !finite_f32(support_volume_m3) || !(support_volume_m3 > 0.0)
@@ -2060,6 +2246,9 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
   compact_rows[compact + 9u] = source_row_index;
   compact_rows[compact + 10u] = 1.0;
   compact_rows[compact + 11u] = routing;
+  compact_rows[compact + 12u] = source_specific_u;
+  compact_rows[compact + 13u] = source_temperature_k;
+  compact_rows[compact + 14u] = source_phase_id;
 
   active_nodes[active_base + 0u] = f32(params.level);
   active_nodes[active_base + 8u] = params.cell_size_m;
@@ -2077,7 +2266,9 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
 export const sphSpatialGasLedgerProductEventAdapterWgsl =
   sphSpatialGasLedgerCandidateUnionAdapterWgsl;
 
-export const sphSpatialGasLedgerEosWgsl = /* wgsl */ `
+function gasLedgerEosWgsl(caloricModule = null) { return /* wgsl */ `
+${schroederQuadraticControlVolumeProjectionWgsl}
+
 struct SpatialGasEosParams {
   source_capacity: u32,
   compact_stride: u32,
@@ -2101,12 +2292,30 @@ struct SpatialGasEosParams {
   free_volume_storage_generation: u32,
   free_volume_cell_capacity: u32,
   free_volume_row_words: u32,
-  box_min_x: f32,
-  box_min_y: f32,
-  box_min_z: f32,
-  box_max_x: f32,
-  box_max_y: f32,
-  box_max_z: f32,
+  lower_cell_x: i32,
+  lower_fraction_x: f32,
+  upper_cell_x: i32,
+  upper_fraction_x: f32,
+  lower_cell_y: i32,
+  lower_fraction_y: f32,
+  upper_cell_y: i32,
+  upper_fraction_y: f32,
+  lower_cell_z: i32,
+  lower_fraction_z: f32,
+  upper_cell_z: i32,
+  upper_fraction_z: f32,
+  projection_version: u32,
+  geometry_seal: u32,
+  grid_shift: i32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  grid_node_count: u32,
+  aerosol_enabled: u32,
+  aerosol_family_id: u32,
+  aerosol_generation: u32,
+  aerosol_capacity: u32,
+  aerosol_version: u32,
 };
 
 @group(0) @binding(0) var<storage, read> compact_rows: array<f32>;
@@ -2117,6 +2326,9 @@ struct SpatialGasEosParams {
 @group(0) @binding(5) var<storage, read> gas_free_volume: array<u32>;
 @group(0) @binding(6) var<storage, read> gas_free_volume_control: array<u32>;
 
+${sphSpatialGasMixtureMomentsWgsl}
+${caloricModule?.sphSpatialGasCaloricAdmissionWgsl ?? ''}
+
 const SPATIAL_MAGIC: u32 = 0x53534531u;
 const SPATIAL_VERSION: u32 = 1u;
 const SPATIAL_STATUS_READY: u32 = 1u;
@@ -2125,7 +2337,7 @@ const SPATIAL_STATUS_REJECT_MASK: u32 = 28u;
 const SPATIAL_SORT_LEXICOGRAPHIC: u32 = 2u;
 const SPATIAL_ACTIVE_NODE_ADAPTER: u32 = 1u;
 const CONTROL_MAGIC: u32 = 0x53474133u;
-const CONTROL_VERSION: u32 = 3u;
+const CONTROL_VERSION: u32 = ${SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION}u;
 const CONTROL_STATUS_INITIALIZED: u32 = 1u;
 const CONTROL_STATUS_COMPACT_READY: u32 = 2u;
 const CONTROL_STATUS_DIRECTORY_READY: u32 = 4u;
@@ -2146,7 +2358,31 @@ const FREE_VOLUME_MAGIC: u32 = 0x53474631u;
 const FREE_VOLUME_VERSION: u32 = ${SPH_SPATIAL_GAS_FREE_VOLUME_VERSION}u;
 
 fn finite_f32(value: f32) -> bool {
-  return value == value && abs(value) <= 3.402823e38;
+  return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+fn control_volume_projection_ready() -> bool {
+  let bounds = array<u32, 12>(
+    bitcast<u32>(params.lower_cell_x), bitcast<u32>(params.lower_fraction_x),
+    bitcast<u32>(params.upper_cell_x), bitcast<u32>(params.upper_fraction_x),
+    bitcast<u32>(params.lower_cell_y), bitcast<u32>(params.lower_fraction_y),
+    bitcast<u32>(params.upper_cell_y), bitcast<u32>(params.upper_fraction_y),
+    bitcast<u32>(params.lower_cell_z), bitcast<u32>(params.lower_fraction_z),
+    bitcast<u32>(params.upper_cell_z), bitcast<u32>(params.upper_fraction_z)
+  );
+  return params.projection_version == ${SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION}u
+    && atomicLoad(&authority[32u]) == params.projection_version
+    && atomicLoad(&authority[33u]) == params.geometry_seal
+    && qcv_descriptor_seal(
+      params.projection_version,
+      params.cell_size_m,
+      vec3<i32>(-params.grid_shift),
+      vec3<u32>(params.grid_nx, params.grid_ny, params.grid_nz),
+      params.grid_node_count,
+      params.chart_id,
+      bitcast<i32>(params.level_order_key ^ 0x80000000u),
+      bounds
+    ) == params.geometry_seal;
 }
 
 fn authority_identity_ready() -> bool {
@@ -2158,6 +2394,7 @@ fn authority_identity_ready() -> bool {
     && atomicLoad(&authority[8u]) <= params.source_capacity
     && atomicLoad(&authority[28u]) == params.compact_stride
     && atomicLoad(&authority[30u]) == params.pressure_stride
+    && control_volume_projection_ready()
     && (control_status & (
       CONTROL_STATUS_INITIALIZED | CONTROL_STATUS_COMPACT_READY
     )) == (CONTROL_STATUS_INITIALIZED | CONTROL_STATUS_COMPACT_READY)
@@ -2213,18 +2450,41 @@ fn directory_ready() -> bool {
 
 fn free_volume_contract_ready() -> bool {
   let status = gas_free_volume_control[2u];
+  // Absence is part of the exact source contract too: an enabled volume
+  // header cannot be consumed by an EOS call which omitted that reservoir.
+  let aerosol_matches = gas_free_volume_control[35u] == params.aerosol_enabled
+    && gas_free_volume_control[36u] == params.aerosol_family_id
+    && gas_free_volume_control[37u] == params.aerosol_generation
+    && gas_free_volume_control[38u] == params.aerosol_capacity
+    && gas_free_volume_control[42u] == params.aerosol_version;
+  let aerosol_ready = select(
+    params.aerosol_enabled == 0u && params.aerosol_family_id == 0u
+      && params.aerosol_generation == 0u && params.aerosol_capacity == 0u
+      && params.aerosol_version == 0u && gas_free_volume_control[39u] == 0u
+      && gas_free_volume_control[40u] == 0u && gas_free_volume_control[43u] == 0u,
+    params.aerosol_enabled == 1u && params.aerosol_family_id != 0u
+      && params.aerosol_capacity > 0u && params.aerosol_version == 1u
+      && gas_free_volume_control[39u] == params.aerosol_capacity
+      && gas_free_volume_control[40u] <= params.aerosol_capacity
+      && gas_free_volume_control[43u] == params.free_volume_generation,
+    params.aerosol_enabled != 0u);
   return gas_free_volume_control[0u] == FREE_VOLUME_MAGIC
     && gas_free_volume_control[1u] == FREE_VOLUME_VERSION
     && (status & (
       FREE_VOLUME_STATUS_READY | FREE_VOLUME_STATUS_ADMITTED
     )) == (FREE_VOLUME_STATUS_READY | FREE_VOLUME_STATUS_ADMITTED)
     && (status & FREE_VOLUME_STATUS_FAIL_CLOSED) == 0u
+    && gas_free_volume_control[3u] == 0u
+    && gas_free_volume_control[41u] == 0u
+    && aerosol_matches && aerosol_ready
     && gas_free_volume_control[4u] == params.free_volume_generation
     && gas_free_volume_control[5u] == params.free_volume_source_generation
     && gas_free_volume_control[6u] == params.free_volume_directory_generation
     && gas_free_volume_control[7u] == params.free_volume_storage_generation
     && gas_free_volume_control[8u] == params.free_volume_cell_capacity
     && gas_free_volume_control[9u] == params.free_volume_row_words
+    && gas_free_volume_control[33u] == params.projection_version
+    && gas_free_volume_control[34u] == params.geometry_seal
     && gas_free_volume_control[15u] == directory[18u]
     && gas_free_volume_control[22u] == directory[18u];
 }
@@ -2319,6 +2579,8 @@ fn aggregate_cells(
   var total_moles = 0.0;
   var total_mass_kg = 0.0;
   var mole_temperature_k = 0.0;
+  var mixture = gas_mixture_empty();
+  ${caloricModule ? 'var caloric = gas_caloric_empty();' : ''}
   for (var member = member_begin; member < member_end; member = member + 1u) {
     let source_index = directory[params.cell_members_offset_words + member];
     if (source_index >= live_count) {
@@ -2358,6 +2620,8 @@ fn aggregate_cells(
     total_moles = total_moles + moles;
     total_mass_kg = total_mass_kg + source_mass_kg;
     mole_temperature_k = mole_temperature_k + moles * temperature_k;
+    mixture = gas_mixture_add(mixture, row);
+    ${caloricModule ? 'caloric = gas_caloric_add(caloric, row);' : ''}
   }
   let free_volume_row = cell_index * FREE_VOLUME_ROW_STRIDE;
   let geometric_volume_m3 = bitcast<f32>(
@@ -2395,31 +2659,37 @@ fn aggregate_cells(
   }
   let pressure_pa = mole_temperature_k
     * params.gas_constant_j_per_mol_k / free_volume_m3;
-  let cell_min_m = vec3<f32>(
-    f32(decoded_signed_order_key(key_word(cell_index, 2u))),
-    f32(decoded_signed_order_key(key_word(cell_index, 3u))),
-    f32(decoded_signed_order_key(key_word(cell_index, 4u)))
+  let cell = vec3<i32>(
+    decoded_signed_order_key(key_word(cell_index, 2u)),
+    decoded_signed_order_key(key_word(cell_index, 3u)),
+    decoded_signed_order_key(key_word(cell_index, 4u))
+  );
+  let extent = vec3<f32>(
+    qcv_primal_axis_extent(cell.x, params.lower_cell_x, params.lower_fraction_x,
+      params.upper_cell_x, params.upper_fraction_x),
+    qcv_primal_axis_extent(cell.y, params.lower_cell_y, params.lower_fraction_y,
+      params.upper_cell_y, params.upper_fraction_y),
+    qcv_primal_axis_extent(cell.z, params.lower_cell_z, params.lower_fraction_z,
+      params.upper_cell_z, params.upper_fraction_z)
   ) * params.cell_size_m;
-  let cell_max_m = cell_min_m + vec3<f32>(params.cell_size_m);
-  let overlap_min_m = max(cell_min_m, vec3<f32>(
-    params.box_min_x,
-    params.box_min_y,
-    params.box_min_z
-  ));
-  let overlap_max_m = min(cell_max_m, vec3<f32>(
-    params.box_max_x,
-    params.box_max_y,
-    params.box_max_z
-  ));
-  var center_m = (overlap_min_m + overlap_max_m) * 0.5;
-  let lattice_center_m = vec3<f32>(
-    f32(decoded_signed_order_key(key_word(cell_index, 2u))) + 0.5,
-    f32(decoded_signed_order_key(key_word(cell_index, 3u))) + 0.5,
-    f32(decoded_signed_order_key(key_word(cell_index, 4u))) + 0.5
-  ) * params.cell_size_m;
-  if (any(overlap_max_m <= overlap_min_m)) {
-    center_m = lattice_center_m;
+  let descriptor_volume_m3 = extent.x * extent.y * extent.z;
+  if (any(extent <= vec3<f32>(0.0))
+    || !finite_f32(descriptor_volume_m3)
+    || bitcast<u32>(descriptor_volume_m3) != gas_free_volume[free_volume_row]) {
+    record_eos_error(CONTROL_ERROR_FREE_VOLUME_INVALID);
+    return;
   }
+  // Only the final display/gradient position is world f32. Clipping and
+  // volume arithmetic above remain in canonical cell-local coordinates.
+  let center_fraction = vec3<f32>(
+    qcv_primal_axis_center_fraction(cell.x, params.lower_cell_x, params.lower_fraction_x,
+      params.upper_cell_x, params.upper_fraction_x),
+    qcv_primal_axis_center_fraction(cell.y, params.lower_cell_y, params.lower_fraction_y,
+      params.upper_cell_y, params.upper_fraction_y),
+    qcv_primal_axis_center_fraction(cell.z, params.lower_cell_z, params.lower_fraction_z,
+      params.upper_cell_z, params.upper_fraction_z)
+  );
+  let center_m = (vec3<f32>(cell) + center_fraction) * params.cell_size_m;
   if (
     !finite_f32(pressure_pa)
     || pressure_pa < 0.0
@@ -2444,6 +2714,8 @@ fn aggregate_cells(
   pressure_cells[output + 9u] = 0.0;
   pressure_cells[output + 10u] = 0.0;
   pressure_cells[output + 11u] = free_volume_m3;
+  gas_mixture_write(cell_index, mixture);
+  ${caloricModule ? 'gas_caloric_write(cell_index, caloric);' : ''}
   atomicAdd(&authority[11u], 1u);
   atomicAdd(&authority[31u], 1u);
 }
@@ -2591,10 +2863,13 @@ fn finalize_eos() {
 }
 `;
 
+}
+export const sphSpatialGasLedgerEosWgsl = gasLedgerEosWgsl();
+
 function adapterPipelines(device) {
   return {
     classify: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-classify.v5',
+      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-classify.v6',
       label: 'ulg-sph-spatial-gas-ledger-candidate-union-classify',
       code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
       entryPoint: 'classify_gas_candidates',
@@ -2608,7 +2883,7 @@ function adapterPipelines(device) {
       ]
     }),
     finalize: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize.v5',
+      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize.v6',
       label: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize',
       code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
       entryPoint: 'finalize_compaction',
@@ -2620,7 +2895,7 @@ function adapterPipelines(device) {
       ]
     }),
     scatter: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter.v5',
+      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter.v6',
       label: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter',
       code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
       entryPoint: 'scatter_compact_rows',
@@ -2639,7 +2914,10 @@ function adapterPipelines(device) {
   };
 }
 
-function eosPipelines(device) {
+function eosPipelines(device, caloricModule = null) {
+  // Two material-general layouts, not kernels compiled per material/reaction.
+  const code = caloricModule ? gasLedgerEosWgsl(caloricModule) : sphSpatialGasLedgerEosWgsl;
+  const variant = caloricModule ? 'caloric.v1' : 'v4';
   const bindings = [
     computeBufferBinding(0, 'read-only-storage'),
     computeBufferBinding(1, 'read-only-storage'),
@@ -2647,27 +2925,30 @@ function eosPipelines(device) {
     computeBufferBinding(3, 'uniform'),
     computeBufferBinding(4, 'storage'),
     computeBufferBinding(5, 'read-only-storage'),
-    computeBufferBinding(6, 'read-only-storage')
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(11, 'storage')
   ];
+  if (caloricModule) bindings.push(computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'storage'));
   return {
     aggregate: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-eos-aggregate.v3',
+      cacheKey: `ulg-sph-spatial-gas-ledger-eos-aggregate.${variant}`,
       label: 'ulg-sph-spatial-gas-ledger-eos-aggregate',
-      code: sphSpatialGasLedgerEosWgsl,
+      code,
       entryPoint: 'aggregate_cells',
       bindings
     }),
     gradient: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-eos-gradient.v3',
+      cacheKey: `ulg-sph-spatial-gas-ledger-eos-gradient.${variant}`,
       label: 'ulg-sph-spatial-gas-ledger-eos-gradient',
-      code: sphSpatialGasLedgerEosWgsl,
+      code,
       entryPoint: 'derive_gradients',
       bindings
     }),
     finalize: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-eos-finalize.v3',
+      cacheKey: `ulg-sph-spatial-gas-ledger-eos-finalize.${variant}`,
       label: 'ulg-sph-spatial-gas-ledger-eos-finalize',
-      code: sphSpatialGasLedgerEosWgsl,
+      code,
       entryPoint: 'finalize_eos',
       bindings
     })
@@ -3060,6 +3341,7 @@ function queueOrderedPressureRetirementContext(record) {
     || record.releasePromise
     || record.releaseAttempted
     || record.pressureConsumerSubmitted
+    || record.activeExchangeOperation
     || record.execution !== record.slot.retainedExecution
     || record.slot.ownerToken !== record.ownerToken
     || record.slot.terminal
@@ -3205,7 +3487,8 @@ function releaseGasPressureOwnerQueueOrdered(record) {
     ),
     gasPressureQueueOrderedCleanupOperation(
       'retained-product-source-borrow',
-      () => record.releaseSourceBorrow(),
+      () => record.releaseSourceBorrow.releaseQueueOrdered
+        ? record.releaseSourceBorrow.releaseQueueOrdered() : record.releaseSourceBorrow(),
       () => record.releaseSourceBorrow.isReleased?.() === true
     )
   ];
@@ -3325,7 +3608,7 @@ function livePressureSourceRecord(source) {
       'Gas pressure authority no longer matches its live arena generation'
     );
   }
-  if (record.activePressureConsumerReceipt) {
+  if (record.activePressureConsumerReceipt || record.activeExchangeOperation) {
     throw pressureAuthorityError(
       'ERR_SPH_GAS_PRESSURE_AUTHORITY_BORROWED',
       'Gas pressure authority already has an outstanding consumer receipt'
@@ -4109,6 +4392,7 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       gasGridSpacingM: record.spatialGasGrid.gridSpacingM,
       gasGridOriginM: record.boxMinM,
       gasGridMaxM: record.boxMaxM,
+      gasControlVolumeDescriptor: record.gasControlVolumeDescriptor,
       targetGridDims: Object.freeze([
         ...Array.from(mapping.targetField.gridDims || [])
       ]),
@@ -4346,6 +4630,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   schroederLevelAssignment = null,
   epochIdentity = null,
   schroederSpatialEpochGeneration = null,
+  aerosolFamily = undefined,
   spatialGasGrid = null,
   boxMinM = [0, 0, 0],
   boxMaxM = null,
@@ -4356,7 +4641,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   chartId = 0,
   level = 0,
   laneId = 'sph-spatial-gas-ledger-eos',
-  diagnosticsMode = SPH_SPATIAL_GAS_DIAGNOSTICS_NONE
+  diagnosticsMode = SPH_SPATIAL_GAS_DIAGNOSTICS_NONE,
+  speciesDiagnostics = null,
+  authenticateParticleProductSource = false,
+  sourceFamilyConsumerLease = null,
+  postMechanicsGasSource = null,
+  caloricAuthority = null,
+  caloricThermalMaterialTable = null
 } = {}) {
   if (
     !device?.createBuffer
@@ -4389,6 +4680,21 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     ...rejectedExecution(status, reason, extra),
     ...retainedReadbackTelemetrySnapshot()
   });
+  let expectedAerosolFamily = aerosolFamily;
+  try {
+    if (sphParticleUpload != null) {
+      const uploadFamily = sphAerosolSourceFamily(sphParticleUpload);
+      if (aerosolFamily !== undefined && aerosolFamily !== uploadFamily) {
+        throw new TypeError('EOS aerosol input conflicts with the supplied particle upload family');
+      }
+      // A supplied upload declares absence explicitly too. Do not let an
+      // unsealed legacy generation hide its known aerosol inventory, or let
+      // an upload which omitted the reservoir consume a nonempty SS source.
+      expectedAerosolFamily = uploadFamily;
+    }
+  } catch (error) {
+    return rejectedExecutionWithTelemetry('spatial-gas-ledger-eos-rejected-aerosol-source', error.message);
+  }
   if (
     diagnosticsMode !== SPH_SPATIAL_GAS_DIAGNOSTICS_NONE
     && diagnosticsMode !== SPH_SPATIAL_GAS_DIAGNOSTICS_FULL_ORACLE
@@ -4487,6 +4793,16 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     );
   }
   const compactCapacityRowBound = candidateCount;
+  let normalizedSpeciesDiagnostics;
+  try {
+    normalizedSpeciesDiagnostics = normalizeSphSpatialGasSpeciesDiagnostics(
+      speciesDiagnostics, device, nextPowerOfTwo(compactCapacityRowBound)
+    );
+  } catch (error) {
+    return rejectedExecutionWithTelemetry(
+      'spatial-gas-ledger-eos-rejected-species-diagnostic', error.message
+    );
+  }
   const normalizedGrid = normalizeAuthoritativeSpatialGasGrid(
     spatialGasGrid,
     schroederSpatialEpochGeneration
@@ -4505,6 +4821,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   let resolvedLevel;
   let resolvedBoxMinM;
   let resolvedBoxMaxM;
+  let gasControlVolumeDescriptor;
   let capacityDispatchCount;
   try {
     supportVolumeFallbackM3 = nonNegativeFiniteF32(
@@ -4555,11 +4872,17 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     }
     resolvedBoxMinM = Object.freeze(Array.from(
       boxMinM,
-      (value, axis) => finiteF32(value, `boxMinM[${axis}]`)
+      (value, axis) => {
+        finiteF32(value, `boxMinM[${axis}]`);
+        return Number(value);
+      }
     ));
     resolvedBoxMaxM = Object.freeze(Array.from(
       boxMaxM,
-      (value, axis) => finiteF32(value, `boxMaxM[${axis}]`)
+      (value, axis) => {
+        finiteF32(value, `boxMaxM[${axis}]`);
+        return Number(value);
+      }
     ));
     if (
       resolvedBoxMaxM.some((value, axis) => (
@@ -4570,6 +4893,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         'boxMaxM must be strictly greater than boxMinM on every axis'
       );
     }
+    gasControlVolumeDescriptor = createSchroederQuadraticControlVolumeDescriptor({
+      ...normalizedGrid,
+      chartId: resolvedChartId,
+      selectedLevel: resolvedLevel,
+      boxMinM: resolvedBoxMinM,
+      boxMaxM: resolvedBoxMaxM
+    });
     capacityDispatchCount = sphSpatialGasLedgerEosDispatchWorkgroups(
       device,
       nextPowerOfTwo(compactCapacityRowBound)
@@ -4591,7 +4921,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     );
   }
 
-  const releaseSourceBorrow = sourceBorrowSetFor([
+  let releaseSourceBorrow = sourceBorrowSetFor([
     ...(normalizedProductSource.present === true
       ? [normalizedProductSource.source]
       : []),
@@ -4604,6 +4934,47 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       'spatial-gas-ledger-eos-rejected-source-lifecycle',
       'Unable to acquire every exact retained gas-candidate source borrow'
     );
+  }
+  let particleProductSourcePair = null;
+  try {
+    if (typeof authenticateParticleProductSource !== 'boolean'
+      || (sourceFamilyConsumerLease != null && !authenticateParticleProductSource && !caloricAuthority)) {
+      throw new TypeError('Gas source-pair admission requires an explicit complete-source request');
+    }
+    if (authenticateParticleProductSource || caloricAuthority != null || postMechanicsGasSource != null) {
+      if (!normalizedParticleSource.present) {
+        throw new TypeError('A complete gas mixture must include its exact particle source');
+      }
+      if (normalizedProductSource.present && (
+        normalizedProductSource.rowCount !== normalizedProductSource.source.productEventRowCount
+        || normalizedProductSource.strideFloats !== normalizedProductSource.source.productEventStrideFloats
+        || normalizedProductSource.buffer !== normalizedProductSource.source.productEventBuffer
+      )) {
+        throw new TypeError('A complete gas mixture cannot truncate or substitute its retained product history');
+      }
+      const pairOptions = { device,
+        sphParticleUpload, mlsMpmParticleUpload,
+        residentProductMass: normalizedProductSource.source,
+        consumerLease: sourceFamilyConsumerLease, epochIdentity: normalizedEpoch,
+        required: caloricAuthority != null, particleCount: normalizedParticleSource.particleCount };
+      if (postMechanicsGasSource != null) {
+        if (sourceFamilyConsumerLease != null) {
+          throw new TypeError('A current private gas source cannot use a published source-family lease');
+        }
+        const current = await import('./sphPostMechanicsGasStateGpu.js');
+        particleProductSourcePair = current.retainSphPostMechanicsGasSourcePair(postMechanicsGasSource, {
+          ...pairOptions, generation: schroederSpatialEpochGeneration,
+          levelAssignment: schroederLevelAssignment
+        });
+      } else {
+        particleProductSourcePair = retainParticleProductSourcePair(pairOptions);
+      }
+      releaseSourceBorrow = withParticleProductSourceBorrow(releaseSourceBorrow, particleProductSourcePair);
+    }
+  } catch (error) {
+    releaseSourceBorrow();
+    return rejectedExecutionWithTelemetry('spatial-gas-ledger-eos-rejected-particle-product-pair',
+      error.message, { errorCode: error.code ?? null });
   }
   let generationConsumerLease;
   try {
@@ -4664,7 +5035,17 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   let gasFreeVolumeEosReceipt = null;
   let adapterScanDispatchCount = 0;
   let queueOrderedPressureRecord = null;
+  let caloricModule = null;
+  let caloricData = null;
   try {
+    particleProductSourcePair?.validate();
+    if (caloricAuthority != null) {
+      caloricModule = await caloricAdmissionModule();
+      particleProductSourcePair.validate();
+      caloricData = caloricModule.resolveSphSpatialGasCaloricAuthority(caloricAuthority,
+        { thermalMaterialTable: caloricThermalMaterialTable });
+      prepareCaloricBuffers(device, slot, caloricData.records);
+    }
     const adapter = adapterPipelines(device);
     const productBindingBuffer = normalizedProductSource.present === true
       ? normalizedProductSource.buffer
@@ -4687,7 +5068,8 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     device.queue.writeBuffer(slot.controlBuffer, 0, initialAuthorityControl({
       executionGeneration,
       storageGeneration: normalizedEpoch.storageGeneration,
-      sourceCapacity: capacity
+      sourceCapacity: capacity,
+      gasControlVolumeDescriptor
     }));
     device.queue.writeBuffer(slot.paramsBuffer, 0, adapterParams({
       rowCount: normalizedProductSource.rowCount,
@@ -4706,7 +5088,8 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       level: resolvedLevel,
       executionGeneration,
       fallbackTemperatureK: resolvedFallbackTemperatureK,
-      liveCountDescriptor: normalizedProductSource.liveCountDescriptor
+      liveCountDescriptor: normalizedProductSource.liveCountDescriptor,
+      requireCompleteOccupancy: postMechanicsGasSource != null
     }));
     const classifyBindGroup = makeBindGroup(
       device,
@@ -4864,6 +5247,11 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       sourceFamily: SPATIAL_GAS_UNION_SOURCE_FAMILY,
       allowPhaseVolumeOverlay: false
     });
+    particleProductSourcePair?.validate();
+    if (caloricModule && !caloricModule.validateSphSpatialGasCaloricAuthority(caloricAuthority,
+      { thermalMaterialTable: caloricThermalMaterialTable })) {
+      throw new TypeError('Gas caloric table changed during retained source construction');
+    }
     if (
       spatialGeneration?.ready !== true
       || spatialGeneration?.selected !== true
@@ -4926,16 +5314,18 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       {
       gasDirectory: spatialGeneration.execution,
       generationReadFamily: generationConsumerLease,
+      aerosolFamily: expectedAerosolFamily,
       grid: {
         ...normalizedGrid,
         chartId: resolvedChartId
       },
       chartId: resolvedChartId,
       boxMinM: resolvedBoxMinM,
-      boxMaxM: resolvedBoxMaxM
+      boxMaxM: resolvedBoxMaxM,
+      gasControlVolumeDescriptor
       }
     );
-    const pipelines = eosPipelines(device);
+    const pipelines = eosPipelines(device, caloricModule);
     device.queue.writeBuffer(slot.paramsBuffer, 0, eosParams({
       sourceCapacity: capacity,
       executionGeneration,
@@ -4946,8 +5336,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       fallbackTemperatureK: resolvedFallbackTemperatureK,
       chartId: resolvedChartId,
       level: resolvedLevel,
-      boxMinM: resolvedBoxMinM,
-      boxMaxM: resolvedBoxMaxM
+      gasControlVolumeDescriptor
     }));
     const eosEntries = [
       { binding: 0, resource: { buffer: slot.compactRowsBuffer } },
@@ -4957,8 +5346,12 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       },
       { binding: 2, resource: { buffer: slot.gasPressureCellsBuffer } },
       { binding: 3, resource: { buffer: slot.paramsBuffer } },
-      { binding: 4, resource: { buffer: slot.controlBuffer } }
+      { binding: 4, resource: { buffer: slot.controlBuffer } },
+      { binding: 11, resource: { buffer: slot.gasMixtureMomentsBuffer } }
     ];
+    if (caloricModule) eosEntries.push(
+      { binding: 12, resource: { buffer: slot.caloricTableBuffer } },
+      { binding: 13, resource: { buffer: slot.caloricRowsBuffer } });
     eosEncoder.copyBufferToBuffer(
       spatialGeneration.execution.consumerDispatchBuffer,
       0,
@@ -5038,6 +5431,16 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     );
     finalizerPass.dispatchWorkgroups(1);
     finalizerPass.end();
+    const speciesDiagnosticDescriptor = encodeSphSpatialGasSpeciesDiagnostics({
+      device, slot, allocate: createOwnedBuffer, encoder: eosEncoder,
+      eosEntries: eosEntries.filter((entry) => entry.binding < 11),
+      eosWgsl: sphSpatialGasLedgerEosWgsl, options: normalizedSpeciesDiagnostics,
+      productBuffer: productBindingBuffer, productByteLength: productBindingByteLength,
+      productCapacity: productCandidateCapacity,
+      productStride: normalizedProductSource.strideFloats,
+      particleCount: normalizedParticleSource.particleCount,
+      dispatch: capacityDispatchCount
+    });
     if (
       submitSphSpatialGasFreeVolumeEosAuthority(
         gasFreeVolumeEosReceipt,
@@ -5067,6 +5470,9 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       deviceId,
       sourceFamily: SPATIAL_GAS_UNION_SOURCE_FAMILY,
       sourceMode,
+      particleProductSourcePaired: particleProductSourcePair != null,
+      caloricMemberAdmissionEnabled: caloricModule != null,
+      exchangeIntervalAdmitted: false,
       positionAuthority: SPATIAL_GAS_UNION_POSITION_AUTHORITY,
       sourceProductEventRowCount: normalizedProductSource.rowCount,
       sourceProductEventCandidateCapacity: productCandidateCapacity,
@@ -5087,16 +5493,18 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       activeNodeRowCapacity: capacity,
       activeNodeRowStrideFloats: SPH_SPATIAL_GAS_ACTIVE_NODE_ROW_FLOATS,
       gasAuthorityControlSchema:
-        'peercompute.ulg.sph-spatial-gas-authority-control.v3',
+        'peercompute.ulg.sph-spatial-gas-authority-control.v4',
       gasAuthorityControlByteLength: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_BYTES,
       gasAuthorityControlMagic: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_MAGIC,
       gasAuthorityControlVersion: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION,
       gasAuthorityControlOffsets: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS,
+      gasControlVolumeDescriptor,
       executionGeneration,
       storageGeneration: normalizedEpoch.storageGeneration,
       spatialEpochGenerationId: spatialGeneration.execution.generationId,
       spatialEpochDirectoryByteLength: spatialGeneration.execution.layout.byteLength,
       gasFreeVolumeSchema: gasFreeVolumeExecution.gasFreeVolumeSchema,
+      gasFreeVolumeAerosol: gasFreeVolumeExecution.aerosol,
       gasFreeVolumeGeneration:
         gasFreeVolumeExecution.gasFreeVolumeGeneration,
       gasFreeVolumeCellCapacity:
@@ -5109,7 +5517,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       sourceValidityAuthority:
         'gpu-compacted-logical-prefix-inside-authenticated-capacity-allocation',
       consumerAccessProtocol:
-        'same-device-exact-opaque-retained-gpu-authority.v5',
+        'same-device-exact-opaque-retained-gpu-authority.v6',
       lifecycleOwner: 'spatial-gas-ledger-eos-final-consumer-owner',
       finalConsumerReleaseRequired: true,
       diagnosticsMode
@@ -5127,13 +5535,14 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       pressureInterfaceGasPressureCellRowsBufferRetained: true,
       gasPressureCellRowsBufferBorrowed: false,
       gasAuthorityControlSchema:
-        'peercompute.ulg.sph-spatial-gas-authority-control.v3',
+        'peercompute.ulg.sph-spatial-gas-authority-control.v4',
       gasAuthorityControlByteLength: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_BYTES,
       gasAuthorityControlMagic: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_MAGIC,
       gasAuthorityControlVersion: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION,
       gasAuthorityControlOffsets: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS,
       gasPressureCellLogicalCountAuthority:
         'gas-authority-control-ready-pressure-count-u32',
+      gasControlVolumeDescriptor,
       executionGeneration,
       storageGeneration: normalizedEpoch.storageGeneration,
       epochIdentity: frozenEpochIdentity,
@@ -5150,6 +5559,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         gasFreeVolumeExecution.storageGeneration,
       gasFreeVolumePressureDenominatorAuthority:
         'same-generation-condensed-occupancy-free-volume-sidecar',
+      gasFreeVolumeAerosol: gasFreeVolumeExecution.aerosol,
       pressureInterfaceGasPressureCellVolumeWord11Authority:
         'free-volume-m3-not-parcel-represented-volume',
       pressureFieldMode: 'local-gas-cell-pressure-gradient',
@@ -5165,7 +5575,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       gasValidation: false,
       fullPhysicsValidation: false,
       consumerAccessProtocol:
-        'same-device-exact-opaque-retained-gpu-authority.v5',
+        'same-device-exact-opaque-retained-gpu-authority.v6',
       finalConsumerReleaseRequired: true
     };
     const execution = {
@@ -5177,6 +5587,9 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       backend: 'webgpu-retained-same-device',
       deviceId,
       sourceMode,
+      particleProductSourcePaired: particleProductSourcePair != null,
+      caloricMemberAdmissionEnabled: caloricModule != null,
+      exchangeIntervalAdmitted: false,
       productEventRowCount: normalizedProductSource.rowCount,
       productEventCandidateCapacity: productCandidateCapacity,
       productEventStrideFloats: normalizedProductSource.strideFloats,
@@ -5199,7 +5612,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       pressureInterfaceGasPressureCellRowByteLength: pressureRowByteLength,
       pressureInterfaceGasPressureCellRowsBufferRetained: true,
       gasAuthorityControlSchema:
-        'peercompute.ulg.sph-spatial-gas-authority-control.v3',
+        'peercompute.ulg.sph-spatial-gas-authority-control.v4',
       gasAuthorityControlByteLength: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_BYTES,
       gasAuthorityControlMagic: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_MAGIC,
       gasAuthorityControlVersion: SPH_SPATIAL_GAS_AUTHORITY_CONTROL_VERSION,
@@ -5219,6 +5632,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       retainedGasCellFieldSourceReady: true,
       retainedGasCellFieldSource,
       spatialGasSpeciesLedger: null,
+      speciesDiagnostics: speciesDiagnosticDescriptor,
       gasCellFieldSnapshot: null,
       normalHotLoopReadbackFree: true,
       compactSpatialGasReadbackPerformed: false,
@@ -5235,8 +5649,10 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       adapterScanDispatchCount,
       spatialDirectoryBuildCount: 1,
       gasFreeVolumeBuildCount: 1,
+      gasFreeVolumeAerosol: gasFreeVolumeExecution.aerosol,
+      gasControlVolumeDescriptor,
       gasFreeVolumeProjectionScaling:
-        'reference-cell-driven-field-projection-pending-keyed-stable-reduction',
+        'quadratic-capacity-node-scatter-at-most-eight-primal-cell-targets',
       privateSpatialLookupBuildCount: 0,
       exhaustiveSpatialScanCount: 0,
       eosDispatchCount: 3,
@@ -5279,12 +5695,20 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       spatialGasGrid: normalizedGrid,
       boxMinM: resolvedBoxMinM,
       boxMaxM: resolvedBoxMaxM,
+      gasControlVolumeDescriptor,
       productSource: normalizedProductSource.source,
       particleSource: normalizedParticleSource.source,
       selectedMechanicsFieldView:
         mechanicsLevelViews[mechanicsLevelViews.length - 1].mechanicsFieldView,
       releaseSourceBorrow,
       deferredCleanupReadbackTelemetry,
+      particleProductSourcePair,
+      caloricModule,
+      caloricAuthority,
+      caloricThermalMaterialTable,
+      productEventLiveCountDescriptor: normalizedProductSource.liveCountDescriptor ?? null,
+      activeExchangeOperation: null,
+      exchangeCandidateIssued: false,
       releaseAttempted: false,
       releaseError: null,
       queueOrderedRetirementOperationResults: Object.freeze([]),
@@ -5293,6 +5717,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       quarantined: false,
       terminal: false,
       oracleDiagnostics: null,
+      speciesDiagnostics: speciesDiagnosticDescriptor,
       activePressureConsumerReceipt: null,
       pressureConsumerSubmitted: false,
       pressureConsumerBindCount: 0,
@@ -5385,6 +5810,151 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   }
 }
 
+/** Prescribed, conservative existing-droplet transfer on an exact retained
+ * particle/history/aerosol family. This is deliberately NOT a law-discovery,
+ * kinetic-rate, timestep or publication API. No public output buffers or live
+ * aerosol family are issued. A later real stage must seal its interval and join
+ * the existing shared debit/outer-publication gate before any adoption.
+ */
+export async function runSphSpatialVaporAerosolExchangeCandidate(execution, options = {}) {
+  const record = retainedExecutions.get(execution);
+  if (!record || record.execution !== execution || !record.particleProductSourcePair
+      || !record.caloricModule || record.exchangeCandidateIssued) {
+    throw new TypeError('Vapor/aerosol exchange requires an unused exact paired caloric EOS');
+  }
+  // Reserve before any caller-controlled properties or async module loading.
+  // This is a separate consumer, never a fabricated pressure receipt.
+  livePressureSourceRecord(record.gasCellSource);
+  const operation = Object.freeze({});
+  record.activeExchangeOperation = operation;
+  let aerosolRead = null, releaseAerosolRead = null, owner = null;
+  const validate = () => {
+    if (record.activeExchangeOperation !== operation || record.terminal || record.released
+        || record.releaseAttempted || record.releasePromise || record.slot.destroyed
+        || record.slot.terminal || record.slot.ownerToken !== record.ownerToken
+        || record.slot.retainedExecution !== execution || record.pressureConsumerSubmitted
+        || record.activePressureConsumerReceipt || record.spatialGeneration?.releaseScheduled
+        || record.spatialGeneration?.released) {
+      throw new TypeError('Vapor/aerosol exchange lost its retained EOS owner');
+    }
+    record.particleProductSourcePair.validate();
+    record.caloricModule.validateSphSpatialGasCaloricAuthority(record.caloricAuthority,
+      { thermalMaterialTable: record.caloricThermalMaterialTable });
+  };
+  try {
+    validate();
+    if (!options || Object.getPrototypeOf(options) !== Object.prototype
+        || Reflect.ownKeys(options).some((key) => key !== 'surfaceModels' && key !== 'edges')) {
+      throw new TypeError('Exchange accepts only explicit surfaceModels and prescribed edges');
+    }
+    const data = (key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(options, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+        throw new TypeError('Exchange inputs must be own data properties');
+      }
+      return descriptor.value;
+    };
+    const materialData = record.caloricModule.resolveSphSpatialGasExchangeMaterials(
+      record.caloricAuthority, { thermalMaterialTable: record.caloricThermalMaterialTable,
+        surfaceModels: data('surfaceModels') });
+    const edges = data('edges');
+    // The lower encoder snapshots/validates edges before its first await.
+    // Keep the exact data identity, not accessors that can retire a source.
+    if (!Array.isArray(edges) || Object.getPrototypeOf(edges) !== Array.prototype) {
+      throw new TypeError('Exchange requires an ordinary explicit edge array');
+    }
+    const fields = ['gasKind', 'gasIndex', 'parcelIndex', 'materialRow', 'deltaMassKg',
+      'transportEnthalpyCorrectionJ', 'conductiveHeatJ', 'pressureWorkIntoLiquidJ'];
+    const edgeCopy = [];
+    for (let i = 0; i < edges.length; i++) {
+      const descriptor = Object.getOwnPropertyDescriptor(edges, String(i));
+      const edge = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null;
+      if (!edge || Object.getPrototypeOf(edge) !== Object.prototype
+          || Reflect.ownKeys(edge).some((key) => !fields.includes(key))) {
+        throw new TypeError('Exchange edges must be complete ordinary data, without accessors');
+      }
+      const copy = {};
+      for (const field of fields) {
+        const lane = Object.getOwnPropertyDescriptor(edge, field);
+        if (!lane || !Object.hasOwn(lane, 'value') || typeof lane.value !== 'number') {
+          throw new TypeError('Exchange edge lanes must be own numeric data');
+        }
+        copy[field] = lane.value;
+      }
+      edgeCopy.push(Object.freeze(copy));
+    }
+    const [encoder, parcels] = await Promise.all([
+      import('./sphVaporAerosolExchangeGpu.js'), import('./sphAerosolParcelGpu.js')
+    ]);
+    validate();
+    const pair = record.particleProductSourcePair;
+    releaseAerosolRead = parcels.releaseSphAerosolParcelRead;
+    aerosolRead = pair.acquireAerosolRead();
+    if (!aerosolRead) throw new TypeError('Exchange requires an existing exact retained aerosol population');
+    validate();
+    owner = await encoder.runSphVaporAerosolExchangeCandidateGpu({ device: record.device,
+      sourceStateBuffer: pair.sphParticleUpload.stateBuffer,
+      sourceThermoBuffer: pair.sphParticleUpload.thermoBuffer,
+      sourceMechanicsBuffer: pair.mlsMpmParticleUpload.mechanicsBuffer,
+      particleCount: pair.read.particleCount, residentProductMass: pair.residentProductMass,
+      productEventLiveCountDescriptor: record.productEventLiveCountDescriptor,
+      aerosolRead, eosControlBuffer: record.slot.controlBuffer,
+      compactRowsBuffer: record.slot.compactRowsBuffer, caloricRowsBuffer: record.slot.caloricRowsBuffer,
+      compactCapacity: record.capacity, cellCapacity: record.capacity,
+      executionGeneration: record.executionGeneration, materialRows: materialData.records,
+      edges: edgeCopy });
+    validate();
+    if (!owner.ready) {
+      const diagnostic = Object.freeze({ ready: false, status: owner.status,
+        receipt: owner.receipt, kineticAuthorization: false, exchangeIntervalAdmitted: false,
+        outerPublicationAdmitted: false, sourceMutation: false });
+      await owner.release(); owner = null;
+      return diagnostic;
+    }
+    const candidate = Object.freeze({ schema: 'peercompute.ulg.spatial-vapor-aerosol-candidate.v1',
+      ready: true, status: 'conservative-candidate-only', conservativeTransferAdmitted: true,
+      kineticAuthorization: false, exchangeIntervalAdmitted: false, outerPublicationAdmitted: false,
+      mechanicsContinuationAdmitted: false, pressureRequiresRefresh: true,
+      scientificValidation: false, sourceMutation: false, epochIdentity: record.epochIdentity,
+      executionGeneration: record.executionGeneration, sourceFamily: pair.read.sourceFamily,
+      materialNames: materialData.materials, receipt: owner.receipt });
+    vaporAerosolCandidates.set(candidate, { owner, busy: false, releaseRequested: false,
+      releasePromise: null });
+    record.exchangeCandidateIssued = true;
+    owner = null;
+    return candidate;
+  } finally {
+    // The encoder completes its LAST source read fence (or confirmed device
+    // loss) before settling, including failure. Never reuse a predecessor's
+    // retirement fence for this consumer.
+    try { if (owner) await owner.release(); }
+    finally {
+      if (aerosolRead) releaseAerosolRead(aerosolRead);
+      if (record.activeExchangeOperation === operation) record.activeExchangeOperation = null;
+    }
+  }
+}
+
+/** Explicit native numerical oracle only; never a simulation readback loop. */
+export async function observeSphSpatialVaporAerosolExchangeCandidate(candidate) {
+  const record = vaporAerosolCandidates.get(candidate);
+  if (!record || record.busy || record.releaseRequested) {
+    throw new TypeError('Unissued, busy or retiring vapor/aerosol candidate');
+  }
+  record.busy = true;
+  try { return await record.owner.observe(); }
+  finally { record.busy = false; }
+}
+
+export function releaseSphSpatialVaporAerosolExchangeCandidate(candidate) {
+  const record = vaporAerosolCandidates.get(candidate);
+  if (!record || record.busy) return false;
+  if (record.releaseRequested) return record.releasePromise;
+  record.releaseRequested = true;
+  record.releasePromise = record.owner.release();
+  return record.releasePromise;
+}
+
 /** Schedule the one generation-owner fence after the final queue consumer. */
 export function releaseSphSpatialGasLedgerEosAfterQueue(execution) {
   const record = retainedExecutions.get(execution);
@@ -5397,7 +5967,7 @@ export function releaseSphSpatialGasLedgerEosAfterQueue(execution) {
   ) {
     return false;
   }
-  if (record.activePressureConsumerReceipt) {
+  if (record.activePressureConsumerReceipt || record.activeExchangeOperation) {
     record.status =
       'spatial-gas-ledger-eos-release-blocked-active-pressure-consumer';
     return false;
@@ -5522,7 +6092,7 @@ export function releaseSphSpatialGasLedgerEosAfterQueue(execution) {
   return true;
 }
 
-async function mappedBufferCopy(device, sourceBuffer, byteLength, label) {
+async function mappedBufferCopy(device, sourceBuffer, byteLength, label, sourceOffset = 0) {
   const size = alignedBytes(byteLength);
   const readback = createOwnedBuffer(device, {
     label,
@@ -5531,7 +6101,7 @@ async function mappedBufferCopy(device, sourceBuffer, byteLength, label) {
   });
   try {
     const encoder = device.createCommandEncoder({ label: `${label}-encoder` });
-    encoder.copyBufferToBuffer(sourceBuffer, 0, readback, 0, size);
+    encoder.copyBufferToBuffer(sourceBuffer, sourceOffset, readback, 0, size);
     device.queue.submit([encoder.finish()]);
     await readback.mapAsync(GPU_MAP_MODE.READ, 0, size);
     const copy = readback.getMappedRange(0, size).slice(0, byteLength);
@@ -5565,7 +6135,10 @@ function decodeCompactOracle(values) {
       particleIndex: particleSource ? values[offset + 9] : null,
       sourceRowIndex: values[offset + 9],
       status: values[offset + 10],
-      routingId: values[offset + 11]
+      routingId: values[offset + 11],
+      sourceSpecificInternalEnergyJPerKg: values[offset + 12],
+      sourceTemperatureK: values[offset + 13],
+      sourcePhaseId: values[offset + 14]
     });
   }
   return rows;
@@ -5612,6 +6185,8 @@ function decodeAuthorityControlOracle(copy, record) {
     || words[at.COMPACT_STRIDE] !== SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
     || words[at.ACTIVE_NODE_STRIDE] !== SPH_SPATIAL_GAS_ACTIVE_NODE_ROW_FLOATS
     || words[at.PRESSURE_STRIDE] !== SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS
+    || words[at.PROJECTION_VERSION] !== record.gasControlVolumeDescriptor.version
+    || words[at.CONTROL_VOLUME_GEOMETRY_SEAL] !== record.gasControlVolumeDescriptor.seal
     || errors !== 0
     || (status & SPH_SPATIAL_GAS_AUTHORITY_STATUS.FAILED) !== 0
     || (status & requiredReady) !== requiredReady
@@ -5645,8 +6220,8 @@ function decodeAuthorityControlOracle(copy, record) {
 }
 
 /**
- * Explicit O(N) diagnostic oracle. This is the only module path that maps or
- * materializes compact/EOS rows on the host.
+ * Explicit O(N) diagnostic oracle. Only this path materializes compact/EOS
+ * rows on the host; the separate species diagnostic copies one fixed packet.
  */
 export async function observeSphSpatialGasLedgerEosOracle(execution) {
   const record = retainedExecutions.get(execution);
@@ -5668,6 +6243,14 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
     'ulg-sph-spatial-gas-ledger-full-oracle-control'
   );
   const control = decodeAuthorityControlOracle(controlCopy, record);
+  // Control observation yields. Do not copy a new arena occupant's rows if
+  // the original final pressure consumer retired this owner in that gap.
+  if (record.terminal || record.released || record.releasePromise || record.releaseAttempted
+    || record.quarantined || record.slot.ownerToken !== record.ownerToken
+    || record.slot.retainedExecution !== execution) {
+    throw new Error('spatial gas ledger/EOS oracle lost its retained owner during control observation');
+  }
+  record.particleProductSourcePair?.validate();
   const compactByteLength = control.liveResidualCount
     * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
     * FLOAT32_BYTES;
@@ -5675,7 +6258,10 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
     * SPH_SPATIAL_GAS_PRESSURE_CELL_ROW_FLOATS
     * FLOAT32_BYTES;
   const headerByteLength = SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS * UINT32_BYTES;
-  const [compactCopy, pressureCopy, directoryHeaderCopy] = await Promise.all([
+  const mixtureByteLength = control.readyPressureCount
+    * SPH_SPATIAL_GAS_MIXTURE_MOMENT_ROW_FLOATS * FLOAT32_BYTES;
+  const caloricByteLength = record.caloricModule ? control.readyPressureCount * 8 * FLOAT32_BYTES : 0;
+  const [compactCopy, pressureCopy, directoryHeaderCopy, mixtureCopy, caloricCopy] = await Promise.all([
     mappedBufferCopy(
       record.device,
       record.slot.compactRowsBuffer,
@@ -5693,8 +6279,13 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
       record.spatialGeneration.execution.directoryBuffer,
       headerByteLength,
       'ulg-sph-spatial-gas-ledger-full-oracle-directory-header'
-    )
+    ),
+    mappedBufferCopy(record.device, record.slot.gasMixtureMomentsBuffer,
+      mixtureByteLength, 'ulg-sph-spatial-gas-ledger-full-oracle-mixture'),
+    record.caloricModule ? mappedBufferCopy(record.device, record.slot.caloricRowsBuffer,
+      caloricByteLength, 'ulg-sph-spatial-gas-ledger-full-oracle-caloric') : null
   ]);
+  record.particleProductSourcePair?.validate();
   const compactValues = new Float32Array(compactCopy);
   const pressureValues = new Float32Array(pressureCopy);
   const directoryHeader = new Uint32Array(directoryHeaderCopy);
@@ -5715,16 +6306,24 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
   }
   const compactRows = decodeCompactOracle(compactValues);
   const pressureCells = decodePressureOracle(pressureValues);
+  const caloricCells = record.caloricModule
+    ? record.caloricModule.decodeSphSpatialGasCaloricAdmissionRows(new Float32Array(caloricCopy)) : null;
   return {
-    schema: 'peercompute.ulg.sph-spatial-gas-ledger-eos-oracle.v3',
+    schema: 'peercompute.ulg.sph-spatial-gas-ledger-eos-oracle.v4',
     status: 'spatial-gas-ledger-eos-full-oracle-observed',
     explicitDiagnostic: true,
     diagnosticsMode: SPH_SPATIAL_GAS_DIAGNOSTICS_FULL_ORACLE,
-    mapAsyncCount: 4,
+    mapAsyncCount: record.caloricModule ? 6 : 5,
     readbackByteLength:
       SPH_SPATIAL_GAS_AUTHORITY_CONTROL_BYTES
-      + compactByteLength + pressureByteLength + headerByteLength,
-    hostMaterializedRowCount: compactRows.length + pressureCells.length,
+      + compactByteLength + pressureByteLength + headerByteLength + mixtureByteLength + caloricByteLength,
+    hostMaterializedRowCount: compactRows.length + pressureCells.length + control.readyPressureCount
+      + (caloricCells?.length ?? 0),
+    mixtureMoments: decodeSphSpatialGasMixtureMomentRows(new Float32Array(mixtureCopy)),
+    caloricCells,
+    particleProductSourcePaired: record.particleProductSourcePair != null,
+    mixtureCaloricClosureAdmitted: Boolean(caloricCells?.length && caloricCells.every((cell) => cell.ready)),
+    exchangeIntervalAdmitted: false,
     compactValues,
     compactRows,
     pressureValues,
@@ -5745,6 +6344,28 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
     gasValidation: false,
     fullPhysicsValidation: false
   };
+}
+
+/** Copy one diagnostic packet while the exact EOS owner is still live. */
+export async function observeSphSpatialGasSpeciesDiagnostics(execution, { cellIndex = 0 } = {}) {
+  const record = retainedExecutions.get(execution);
+  if (!record || !record.speciesDiagnostics || record.terminal || record.released
+    || record.releasePromise || record.releaseAttempted || record.quarantined
+    || record.slot.ownerToken !== record.ownerToken
+    || record.slot.retainedExecution !== execution || record.execution !== execution) {
+    throw new Error('Species diagnostic requires an enabled live retained EOS execution');
+  }
+  if (!Number.isInteger(cellIndex) || cellIndex < 0 || cellIndex >= record.capacity) {
+    throw new RangeError('Species diagnostic cellIndex exceeds the retained capacity');
+  }
+  const rowBytes = record.speciesDiagnostics.rowWords * UINT32_BYTES;
+  // Copy is submitted synchronously before mapAsync yields. Later same-queue
+  // retirement/reuse cannot change the captured diagnostic packet.
+  const packet = await mappedBufferCopy(
+    record.device, record.slot.speciesDiagnosticRowsBuffer, rowBytes,
+    'ulg-sph-spatial-gas-species-diagnostic-packet', cellIndex * rowBytes
+  );
+  return decodeSphSpatialGasSpeciesDiagnosticPacket(packet, record, cellIndex);
 }
 
 export function sphSpatialGasLedgerEosArenaStats(device) {
@@ -5771,7 +6392,7 @@ export function sphSpatialGasLedgerEosArenaStats(device) {
     capacities: Object.freeze(runtimes.map((runtime) => runtime.capacity)),
     retainedBufferCount: runtimes.reduce(
       (sum, runtime) => sum + runtime.slots.reduce(
-        (slotSum, slot) => slotSum + 7
+        (slotSum, slot) => slotSum + 8 + slot.speciesDiagnosticBuffers.length + slot.caloricBuffers.length
           + slot.compactionScan.allocationEntries().length,
         0
       ),
@@ -5783,10 +6404,13 @@ export function sphSpatialGasLedgerEosArenaStats(device) {
           slot.compactRowsBuffer,
           slot.activeNodeBuffer,
           slot.gasPressureCellsBuffer,
+          slot.gasMixtureMomentsBuffer,
+          ...slot.caloricBuffers,
           slot.candidateFlagsBuffer,
           slot.candidateOffsetsBuffer,
           slot.controlBuffer,
-          slot.paramsBuffer
+          slot.paramsBuffer,
+          ...slot.speciesDiagnosticBuffers
         ];
         const scan = slot.compactionScan.allocationEntries()
           .map((entry) => entry.buffer);

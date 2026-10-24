@@ -1,3 +1,4 @@
+import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
 import {
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -20,6 +21,16 @@ import {
   createClosureLawGraphBuffers
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphThermalStepWgsl as sphThermalStepLegacyWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import {
+  SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE,
+  condensableCaloricSegments,
+  hasCondensableCaloricRows,
+  selectCondensableCaloricRow
+} from './sphCondensableCaloricTable.js';
+import {
+  assertSphCondensableInitializationMatches,
+  condensableInitializationProperties
+} from './sphCondensableParticleInitialization.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
@@ -98,7 +109,9 @@ function createCanonicalThermalProposalApplyWgsl(legacyWgsl) {
     .toString(16).padStart(8, '0')}u`;
   const reachableEnergyDomainWgsl = `fn canonical_thermal_reachable_energy_domain(
   material_id: f32,
-  specific_internal_energy: f32
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
 ) -> vec4<f32> {
   let rejected = vec4<f32>(
     specific_internal_energy,
@@ -109,6 +122,11 @@ function createCanonicalThermalProposalApplyWgsl(legacyWgsl) {
   if (!canonical_thermal_proposal_finite(specific_internal_energy)) {
     return rejected;
   }
+  let caloric = thermal_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.w < 0.0) { return rejected; }
+  if (caloric.w == 1.0) { return vec4<f32>(caloric.y, caloric.z, 1.0, 1.0); }
   var response_offset = 0u;
   var response_count = 0u;
   var found_material = false;
@@ -313,8 +331,8 @@ fn canonical_thermal_open_reservoir_delta(
   );
   code = replaceThermalWgslSection(
     code,
-    `\t  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w);\n\t  let carrier_domain_ready = carrier_domain.z == 1.0;`,
-    `\t  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w);\n\t  let canonical_reachable_domain = canonical_thermal_reachable_energy_domain(\n\t    row0.x,\n\t    vel_u.w\n\t  );\n\t  let canonical_reachable_domain_ready = canonical_reachable_domain.z == 1.0;\n\t  let carrier_domain_ready = carrier_domain.z == 1.0;`,
+    `\t  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w, row0.y, row1);\n\t  let carrier_domain_ready = carrier_domain.z == 1.0;`,
+    `\t  let carrier_domain = thermal_carrier_energy_domain(row0.x, vel_u.w, row0.y, row1);\n\t  let canonical_reachable_domain = canonical_thermal_reachable_energy_domain(\n\t    row0.x,\n\t    vel_u.w,\n\t    row0.y,\n\t    row1\n\t  );\n\t  let canonical_reachable_domain_ready = canonical_reachable_domain.z == 1.0;\n\t  let carrier_domain_ready = carrier_domain.z == 1.0;`,
     'current constitutive and reachable transport domains'
   );
   code = replaceThermalWgslSection(
@@ -690,7 +708,10 @@ function derivePressureCarrierLanes(properties, materialSegments) {
 }
 
 export function buildSphThermalMaterialTable(materialProperties = {}, {
-  materialPropertyBankGpuWarmInputTable = null
+  materialPropertyBankGpuWarmInputTable = null,
+  // Cold, explicit enrollment only. Callers must initialize phase/U from the
+  // same declared model; this does not adapt or rebase existing legacy state.
+  condensableThermodynamicsByMaterial = {}
 } = {}) {
   const records = [];
   const segments = [];
@@ -698,9 +719,22 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
   const segmentMetadata = [];
   const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
   let materialBankWarmInputMatchedMaterialCount = 0;
+  for (const material of Object.keys(condensableThermodynamicsByMaterial)) {
+    if (!Object.hasOwn(materialProperties, material) || !materialProperties[material]?.phases?.length) {
+      throw new TypeError(`Unknown or unpackable explicit caloric material: ${material}`);
+    }
+  }
+  const materialIds = new Set();
   for (const [material, properties] of sortedMaterialEntries(materialProperties)) {
     const materialId = stableOpticalMaterialId(material);
-    const materialSegments = orderedSegments(properties);
+    if (Object.keys(condensableThermodynamicsByMaterial).length && materialIds.has(materialId)) {
+      throw new TypeError('Explicit caloric enrollment requires unambiguous material IDs');
+    }
+    materialIds.add(materialId);
+    const hasCaloricModel = Object.hasOwn(condensableThermodynamicsByMaterial, material);
+    const caloricModel = hasCaloricModel ? condensableThermodynamicsByMaterial[material] : null;
+    const materialSegments = hasCaloricModel
+      ? condensableCaloricSegments(caloricModel) : orderedSegments(properties);
     const segmentOffset = segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS;
     const materialBankWarmInput = materialBankWarmInputs.get(String(material).toLowerCase()) || null;
     if (materialBankWarmInput) materialBankWarmInputMatchedMaterialCount += 1;
@@ -719,15 +753,15 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
         const phaseId = gpuPhaseId(segment.phase);
         segments.push(
           materialId,
-          THERMAL_SEGMENT_TYPES.phase,
+          segment.phaseCaloric ? SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE : THERMAL_SEGMENT_TYPES.phase,
           phaseId,
           phaseId,
           finiteNumber(segment.eStart),
           finiteNumber(segment.eEnd),
           finiteNumber(segment.tLo),
           finiteNumber(segment.tHi),
-          phaseDensity(properties, segment.phase),
-          phaseDensity(properties, segment.phase),
+          segment.restDensityKgPerM3 ?? phaseDensity(properties, segment.phase),
+          segment.restDensityKgPerM3 ?? phaseDensity(properties, segment.phase),
           THERMAL_STATUS.ready,
           conductivity.value
         );
@@ -768,6 +802,12 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
       emissivityGray,
       ...carrier,
       phaseNames: [...new Set(materialSegments.map(phaseNameOfSegment))],
+      ...(caloricModel ? {
+        phaseCaloric: true,
+        caloricInitializationProperties: condensableInitializationProperties(caloricModel),
+        caloricEnergyBasis: caloricModel.energyBasis,
+        caloricProvenance: caloricModel.provenance
+      } : {}),
       materialPropertyBankWarmInput: materialBankWarmInput,
       materialPropertyBankWarmInputStatus: materialBankWarmInput
         ? 'material-bank-warm-input-attached'
@@ -827,7 +867,10 @@ function graphSamplesForThermalSegment(segment, sourceSegment = null) {
   const energyEnd = finiteNumber(segment.energyEndJPerKg);
   const temperatureStart = finiteNumber(segment.temperatureStartK);
   const temperatureEnd = finiteNumber(segment.temperatureEndK);
-  const fallbackSlope = (temperatureEnd - temperatureStart) / Math.max(1e-30, energyEnd - energyStart);
+  const fallbackSlope = (temperatureEnd - temperatureStart) / (
+    segment.segmentType === SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE
+      ? energyEnd - energyStart : Math.max(1e-30, energyEnd - energyStart)
+  );
   if (
     sourceSegment?.type !== 'phase'
     || !sourceSegment.debyeTemperatureK
@@ -1273,14 +1316,20 @@ export function thermalEmissivityFromTable(table, materialId) {
 export function resolveThermalConductivityFromTable(
   table,
   materialId,
-  specificInternalEnergyJPerKg
+  specificInternalEnergyJPerKg,
+  phaseId,
+  phaseFractions
 ) {
   assertPackedSphThermalMaterialTable(table);
+  const caloricRow = selectCondensableCaloricRow(
+    table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+  );
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
     if (table.records[recordOffset] !== materialId) continue;
     const segmentOffset = table.records[recordOffset + 1];
     const segmentCount = table.records[recordOffset + 2];
+    if (caloricRow === -1) break;
     let selected = segmentOffset;
     for (let local = 0; local < segmentCount; local += 1) {
       const candidate = segmentOffset + local;
@@ -1291,6 +1340,7 @@ export function resolveThermalConductivityFromTable(
         || local + 1 === segmentCount
       ) break;
     }
+    if (caloricRow !== null) selected = caloricRow;
     const segment = segmentRows(table, selected);
     const value = finiteNumber(segment.thermalConductivityWPerMK, 0);
     return {
@@ -1373,13 +1423,19 @@ function radiativeViewAreaM2(rI, rJ, distanceM) {
   return Math.min(geometric, Math.PI * rMin * rMin);
 }
 
-export function resolveThermalPhaseResponseFromTable(table, materialId, specificInternalEnergyJPerKg) {
+export function resolveThermalPhaseResponseFromTable(
+  table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+) {
   assertPackedSphThermalPhaseResponseTable(table);
+  const caloricRow = selectCondensableCaloricRow(
+    table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+  );
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_PHASE_RESPONSE_RECORD_FLOATS;
     if (table.records[recordOffset] !== materialId) continue;
     const responseOffset = table.records[recordOffset + 1];
     const responseCount = table.records[recordOffset + 2];
+    if (caloricRow === -1) break;
     let selected = responseOffset;
     for (let local = 0; local < responseCount; local += 1) {
       const candidate = responseOffset + local;
@@ -1387,10 +1443,13 @@ export function resolveThermalPhaseResponseFromTable(table, materialId, specific
       selected = candidate;
       if (specificInternalEnergyJPerKg <= response.energyEndJPerKg || local + 1 === responseCount) break;
     }
+    if (caloricRow !== null) selected = caloricRow;
     const response = responseRows(table, selected);
     const rawAlpha = (
       specificInternalEnergyJPerKg - response.energyStartJPerKg
-    ) / Math.max(1e-12, response.energyEndJPerKg - response.energyStartJPerKg);
+    ) / (response.segmentType === SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE
+      ? response.energyEndJPerKg - response.energyStartJPerKg
+      : Math.max(1e-12, response.energyEndJPerKg - response.energyStartJPerKg));
     const alpha = Math.min(1, Math.max(0, rawAlpha));
     const isPlateau = Math.round(response.segmentType) === THERMAL_SEGMENT_TYPES.plateau;
     const dominantTo = isPlateau && alpha >= 0.5;
@@ -1451,7 +1510,9 @@ function temperatureFromPackedSegmentEnergy(table, segmentIndex, segment, specif
   }
   const alpha = Math.min(1, Math.max(0, (
     specificInternalEnergyJPerKg - segment.energyStartJPerKg
-  ) / Math.max(1e-12, segment.energyEndJPerKg - segment.energyStartJPerKg)));
+  ) / (segment.segmentType === SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE
+    ? segment.energyEndJPerKg - segment.energyStartJPerKg
+    : Math.max(1e-12, segment.energyEndJPerKg - segment.energyStartJPerKg))));
   return segment.temperatureStartK + alpha * (segment.temperatureEndK - segment.temperatureStartK);
 }
 
@@ -1472,13 +1533,19 @@ function temperatureSlopeFromPackedSegmentEnergy(table, segmentIndex, segment, s
   return (tHi - tLo) / (hi - lo);
 }
 
-export function resolveThermalStateFromTable(table, materialId, specificInternalEnergyJPerKg) {
+export function resolveThermalStateFromTable(
+  table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+) {
   assertPackedSphThermalMaterialTable(table);
+  const caloricRow = selectCondensableCaloricRow(
+    table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+  );
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
     if (table.records[recordOffset] !== materialId) continue;
     const segmentOffset = table.records[recordOffset + 1];
     const segmentCount = table.records[recordOffset + 2];
+    if (caloricRow === -1) break;
     let selected = segmentOffset;
     for (let local = 0; local < segmentCount; local += 1) {
       const candidate = segmentOffset + local;
@@ -1486,6 +1553,7 @@ export function resolveThermalStateFromTable(table, materialId, specificInternal
       selected = candidate;
       if (specificInternalEnergyJPerKg <= segment.energyEndJPerKg || local + 1 === segmentCount) break;
     }
+    if (caloricRow !== null) selected = caloricRow;
     const segment = segmentRows(table, selected);
     const alpha = Math.min(1, Math.max(0, (
       specificInternalEnergyJPerKg - segment.energyStartJPerKg
@@ -1522,12 +1590,16 @@ export function resolveThermalStateFromGraphPhaseResponseCpu({
   graphSet,
   responseTable,
   materialId,
-  specificInternalEnergyJPerKg
+  specificInternalEnergyJPerKg,
+  phaseId,
+  phaseFractions
 } = {}) {
   if (graphSet?.schema !== ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA) {
     throw new TypeError('resolveThermalStateFromGraphPhaseResponseCpu requires an SPH thermal closure graph set');
   }
-  const response = resolveThermalPhaseResponseFromTable(responseTable, materialId, specificInternalEnergyJPerKg);
+  const response = resolveThermalPhaseResponseFromTable(
+    responseTable, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+  );
   if (response.status !== THERMAL_STATUS.ready || response.temperatureGraphIndex < 0) {
     return {
       temperatureK: 0,
@@ -1610,6 +1682,14 @@ export function resolveThermalCarrierTemperatureSlopeFromTable(
   phaseFractions
 ) {
   assertPackedSphThermalMaterialTable(table);
+  const caloricRow = selectCondensableCaloricRow(
+    table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+  );
+  if (caloricRow !== null) {
+    return caloricRow < 0 ? 0 : temperatureSlopeFromPackedSegmentEnergy(
+      table, caloricRow, segmentRows(table, caloricRow), specificInternalEnergyJPerKg
+    );
+  }
   const classification = classifyThermalCarrierPhase(phaseId, phaseFractions);
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
@@ -1666,7 +1746,9 @@ export function resolveThermalCarrierTemperatureSlopeFromTable(
 export function resolveThermalCarrierEnergyDomainFromTable(
   table,
   materialId,
-  specificInternalEnergyJPerKg
+  specificInternalEnergyJPerKg,
+  phaseId,
+  phaseFractions
 ) {
   assertPackedSphThermalMaterialTable(table);
   const specificEnergy = Number(specificInternalEnergyJPerKg);
@@ -1679,6 +1761,19 @@ export function resolveThermalCarrierEnergyDomainFromTable(
     containingSegmentCount: 0
   });
   if (!Number.isFinite(specificEnergy)) return failClosed('non-finite-specific-energy');
+  const caloricRow = selectCondensableCaloricRow(
+    table, materialId, specificEnergy, phaseId, phaseFractions
+  );
+  if (caloricRow !== null) {
+    if (caloricRow < 0) return failClosed('invalid-phase-specific-caloric-state', true);
+    const segment = segmentRows(table, caloricRow);
+    return {
+      ready: true, status: 'ready-phase-specific-caloric-domain', materialFound: true,
+      energyMinJPerKg: segment.energyStartJPerKg,
+      energyMaxJPerKg: segment.energyEndJPerKg,
+      containingSegmentCount: 1
+    };
+  }
 
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
@@ -1744,9 +1839,19 @@ export function resolveThermalCarrierEnergyDomainFromTable(
 export function resolveThermalCarrierReachableEnergyDomainFromTable(
   table,
   materialId,
-  specificInternalEnergyJPerKg
+  specificInternalEnergyJPerKg,
+  phaseId,
+  phaseFractions
 ) {
   assertPackedSphThermalMaterialTable(table);
+  if (selectCondensableCaloricRow(
+    table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+  ) !== null) {
+    const domain = resolveThermalCarrierEnergyDomainFromTable(
+      table, materialId, specificInternalEnergyJPerKg, phaseId, phaseFractions
+    );
+    return { ...domain, reachableSegmentCount: domain.ready ? 1 : 0 };
+  }
   const specificEnergy = Number(specificInternalEnergyJPerKg);
   const failClosed = (status, materialFound = false) => ({
     ready: false,
@@ -1836,12 +1941,16 @@ export function resolveThermalCarrierEnergyDomainForTemperatureRangeFromTable(
   materialId,
   specificInternalEnergyJPerKg,
   minTemperatureK,
-  maxTemperatureK
+  maxTemperatureK,
+  phaseId,
+  phaseFractions
 ) {
   const responseDomain = resolveThermalCarrierReachableEnergyDomainFromTable(
     table,
     materialId,
-    specificInternalEnergyJPerKg
+    specificInternalEnergyJPerKg,
+    phaseId,
+    phaseFractions
   );
   const specificEnergy = Number(specificInternalEnergyJPerKg);
   const minTemperature = Number(minTemperatureK);
@@ -1865,7 +1974,9 @@ export function resolveThermalCarrierEnergyDomainForTemperatureRangeFromTable(
   const temperatureAt = (energyJPerKg) => resolveThermalStateFromTable(
     table,
     materialId,
-    energyJPerKg
+    energyJPerKg,
+    phaseId,
+    phaseFractions
   ).temperatureK;
   const domainLo = responseDomain.energyMinJPerKg;
   const domainHi = responseDomain.energyMaxJPerKg;
@@ -2325,6 +2436,7 @@ export function runSphThermalStepCpu({
   wallLayerM = sphParticleState?.smoothingLengthM
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
+  assertSphCondensableInitializationMatches(sphParticleState, null, thermalMaterialTable);
   if (thermalMaterialTable?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('runSphThermalStepCpu requires a packed thermal material table');
   }
@@ -2369,15 +2481,21 @@ export function runSphThermalStepCpu({
     const massKg = Math.max(sourceMass, 1e-30);
     const materialId = sphParticleState.thermo[thermoOffset];
     const specificEnergyJPerKg = Number(sphParticleState.state[stateOffset + 7]);
+    const phaseId = sphParticleState.thermo[thermoOffset + 1];
+    const phaseFractions = sphParticleState.thermo.subarray(thermoOffset + 4, thermoOffset + 8);
     const resolvedSourceThermalState = resolveThermalStateFromTable(
       thermalMaterialTable,
       materialId,
-      specificEnergyJPerKg
+      specificEnergyJPerKg,
+      phaseId,
+      phaseFractions
     );
     const resolvedThermalConductivity = resolveThermalConductivityFromTable(
       thermalMaterialTable,
       materialId,
-      specificEnergyJPerKg
+      specificEnergyJPerKg,
+      phaseId,
+      phaseFractions
     );
     return {
       index,
@@ -2386,6 +2504,8 @@ export function runSphThermalStepCpu({
       massKg,
       materialId,
       specificEnergyJPerKg,
+      phaseId,
+      phaseFractions,
       // Temperature is a derived law input. Resolve it from authoritative
       // (material,U); the cached thermo row may lag a phase transfer or source
       // family publication by one dispatch.
@@ -2400,12 +2520,16 @@ export function runSphThermalStepCpu({
       energyDomain: resolveThermalCarrierEnergyDomainFromTable(
         thermalMaterialTable,
         materialId,
-        specificEnergyJPerKg
+        specificEnergyJPerKg,
+        phaseId,
+        phaseFractions
       ),
       reachableEnergyDomain: resolveThermalCarrierReachableEnergyDomainFromTable(
         thermalMaterialTable,
         materialId,
-        specificEnergyJPerKg
+        specificEnergyJPerKg,
+        phaseId,
+        phaseFractions
       ),
       radiusM: particleNominalRadiusM(
         massKg,
@@ -2542,7 +2666,9 @@ export function runSphThermalStepCpu({
         carrier.materialId,
         carrier.specificEnergyJPerKg,
         neighborMinTemperatureK[index],
-        neighborMaxTemperatureK[index]
+        neighborMaxTemperatureK[index],
+        carrier.phaseId,
+        carrier.phaseFractions
       );
   }
 
@@ -2606,7 +2732,9 @@ export function runSphThermalStepCpu({
       const currentThermalState = resolveThermalStateFromTable(
         thermalMaterialTable,
         carrier.materialId,
-        currentSpecificEnergyJPerKg
+        currentSpecificEnergyJPerKg,
+        carrier.phaseId,
+        carrier.phaseFractions
       );
       const currentTemperatureK = currentThermalState.temperatureK;
       const currentTemperatureSlope = resolveThermalCarrierTemperatureSlopeFromTable(
@@ -2657,7 +2785,9 @@ export function runSphThermalStepCpu({
       const currentThermalState = resolveThermalStateFromTable(
         thermalMaterialTable,
         carrier.materialId,
-        currentSpecificEnergyJPerKg
+        currentSpecificEnergyJPerKg,
+        carrier.phaseId,
+        carrier.phaseFractions
       );
       const currentTemperatureK = currentThermalState.temperatureK;
       const currentTemperatureSlope = resolveThermalCarrierTemperatureSlopeFromTable(
@@ -2712,7 +2842,9 @@ export function runSphThermalStepCpu({
       )
       : (Number.isFinite(carrier.specificEnergyJPerKg) ? carrier.specificEnergyJPerKg : 0);
     const materialId = sphParticleState.thermo[thermoOffset];
-    const resolved = resolveThermalStateFromTable(thermalMaterialTable, materialId, state[stateOffset + 7]);
+    const resolved = resolveThermalStateFromTable(
+      thermalMaterialTable, materialId, state[stateOffset + 7], carrier.phaseId, carrier.phaseFractions
+    );
     writeResolvedThermoRow(thermo, i, materialId, resolved, [
       sphParticleState.thermo[thermoOffset + 8],
       sphParticleState.thermo[thermoOffset + 9],
@@ -2819,11 +2951,12 @@ function createOutputStorageBuffer(device, label, byteLength, extraUsage = 0) {
   }), device);
 }
 
-function resolveThermalResponseGraphArtifacts({
+export function resolveThermalResponseGraphArtifacts({
   thermalMaterialTable,
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
-  thermalPhaseResponseTable = null
+  thermalPhaseResponseTable = null,
+  requireExactContent = false
 } = {}) {
   if (thermalMaterialTable?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('Expected a packed SPH thermal material table');
@@ -2838,6 +2971,41 @@ function resolveThermalResponseGraphArtifacts({
     throw new TypeError('Expected an SPH thermal closure graph bank');
   }
   assertPackedSphThermalPhaseResponseTable(resolvedPhaseResponseTable);
+  if (requireExactContent || hasCondensableCaloricRows(thermalMaterialTable)
+    || hasCondensableCaloricRows(resolvedPhaseResponseTable)) {
+    // Explicit energy-basis enrollment must not run an unrelated cached graph
+    // merely because its schema is compatible. Rebuild this small cold table's
+    // expected artifacts and compare every consumed array, without rebasing U.
+    // Default legacy execution does not pay this compilation/comparison cost.
+    const expectedGraphs = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+    const expectedResponses = buildSphThermalPhaseResponseTable(thermalMaterialTable, expectedGraphs);
+    const same = (actual, expected) => ArrayBuffer.isView(actual) && ArrayBuffer.isView(expected)
+      && actual.constructor === expected.constructor && actual.length === expected.length
+      && typedArrayContentFingerprint(actual) === typedArrayContentFingerprint(expected);
+    const bankMatches = (bank) => same(bank?.nodeRows, expectedGraphs.graphBank.nodeRows)
+      && same(bank?.sampleRows, expectedGraphs.graphBank.sampleRows);
+    const individualGraphsMatch = resolvedGraphSet.graphs?.length === expectedGraphs.graphs.length
+      && resolvedGraphSet.graphs.every((graph, index) => (
+        same(graph.nodeRows, expectedGraphs.graphs[index].nodeRows)
+        && same(graph.sampleRows, expectedGraphs.graphs[index].sampleRows)
+        && ['edgeRows', 'slotRows', 'statusRows'].every((key) => (
+          same(graph[key], expectedGraphs.graphs[index][key])
+        ))
+        && ['nodeCount', 'edgeCount', 'sampleCount', 'slotCount', 'statusCount'].every((key) => (
+          graph[key] === expectedGraphs.graphs[index][key]
+        ))
+      ));
+    if (!bankMatches(resolvedGraphBank) || !bankMatches(resolvedGraphSet.graphBank)
+      || !individualGraphsMatch
+      || resolvedPhaseResponseTable.materialCount !== expectedResponses.materialCount
+      || resolvedPhaseResponseTable.responseCount !== expectedResponses.responseCount
+      || !same(resolvedPhaseResponseTable.records, expectedResponses.records)
+      || !same(resolvedPhaseResponseTable.responses, expectedResponses.responses)
+      || !same(resolvedPhaseResponseTable.responseThermalConductivities,
+        expectedResponses.responseThermalConductivities)) {
+      throw new TypeError('Inconsistent phase-specific caloric thermal artifacts');
+    }
+  }
   return {
     thermalClosureGraphSet: resolvedGraphSet,
     thermalClosureGraphBank: resolvedGraphBank,
@@ -3405,6 +3573,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   neighborBins = null
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
+  assertSphCondensableInitializationMatches(sphParticleState, null, thermalMaterialTable);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphThermalStepWebGpu requires a WebGPU-like device');
@@ -3503,9 +3672,13 @@ export function createSphThermalStepWebGpuEncoderStage({
     proposalStateBuffer: thermalProposalStateBuffer,
     proposalThermoBuffer: thermalProposalThermoBuffer
   });
-  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
-  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
-  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
+  const {
+    thermalClosureGraphSet: resolvedGraphSet,
+    thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable
+  } = resolveThermalResponseGraphArtifacts({
+    thermalMaterialTable, thermalClosureGraphSet, thermalClosureGraphBank, thermalPhaseResponseTable
+  });
   const borrowedResponseGraphUpload = thermalResponseGraphUploadMatchesDevice(
     thermalResponseGraphUpload,
     device,
@@ -3664,7 +3837,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   }
 
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-thermal-step.v6',
+    cacheKey: 'ulg-sph-thermal-step.v7',
     label: 'ulg-sph-thermal-step',
     code: sphThermalStepWgsl,
     entryPoint: 'main',
@@ -3983,7 +4156,25 @@ export function createSphThermalStepWebGpuEncoderStage({
   }
 }
 
+const thermalSourceCaptures = new WeakMap();
+export function resolveSphThermalSourceCapture(result, token) {
+  const seal = thermalSourceCaptures.get(token);
+  if (!seal || seal.result !== result) throw new Error('Unknown thermal source capture');
+  seal.validate();
+  return seal;
+}
+
 export async function runSphThermalStepWebGpu(args = {}) {
+  const token = args.postMechanicsSourceCapture ?? null;
+  if (token) {
+    if (thermalSourceCaptures.has(token)) throw new Error('Thermal source capture cannot replay');
+    thermalSourceCaptures.set(token, null);
+    if (args.retainOutputParticleBuffers !== true) throw new Error('Thermal capture requires retained outputs');
+  }
+  const capturedInputs = token ? { device: args.device, sphParticleState: args.sphParticleState,
+    thermalMaterialTable: args.thermalMaterialTable,
+    sourceStateBuffer: args.sourceStateBuffer, sourceThermoBuffer: args.sourceThermoBuffer,
+    dtSeconds: args.dtS } : null;
   const stage = createSphThermalStepWebGpuEncoderStage(args);
   const { device, sphParticleState, retainOutputParticleBuffers = false } = args;
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
@@ -4042,6 +4233,8 @@ export async function runSphThermalStepWebGpu(args = {}) {
       stage.result.stateBuffer = null;
       stage.result.thermoBuffer = null;
     }
+    if (token) thermalSourceCaptures.set(token,
+      createPostMechanicsStageOutputSeal(stage.result, capturedInputs));
     return stage.result;
   } catch (error) {
     if (submitted) {

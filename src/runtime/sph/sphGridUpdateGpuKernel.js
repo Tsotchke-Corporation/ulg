@@ -29,6 +29,8 @@ import {
   schroederSpatialPhaseVolumeSurfaceStressTransportWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeSurfaceStressTransportWgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
+import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
+import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
 import {
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
@@ -2799,9 +2801,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         phaseVolumeStandaloneLifecycleRequired
       })
     );
-    const { mlsMpmMechanicsFieldGridUpdateWgsl } = await import(
-      './sphMlsMpmGpuStep.js'
-    );
+    const { mlsMpmMechanicsFieldGridUpdateWgsl } = await loadSphMlsMpmKernelBundle();
     if (fusedTransaction != null && !fusedMechanicsFieldGridUpdateAdmission(
       device,
       {
@@ -2981,6 +2981,8 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           gasGridDimensions: gasPressureBoundaryBinding.gasGridDims,
           gasGridCellOrigin: gasPressureBoundaryGasGridCellOrigin,
           gasGridSpacingM: gasPressureBoundaryBinding.gasGridSpacingM,
+          gasControlVolumeDescriptor:
+            gasPressureBoundaryBinding.gasControlVolumeDescriptor,
           parentGenerationId:
             gasPressureBoundaryBinding.parentGenerationId,
           parentCompletionOrdinal:
@@ -4725,20 +4727,17 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
     });
   }
   try {
-    let lostInfo = null;
+    const deviceLossState = { info: null };
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || await requestOpticalGpuDevice(navigatorRef, {
-        onDeviceLost(info) {
-          lostInfo = info;
-          if (typeof onDeviceLost === 'function') onDeviceLost(info);
-        }
+        onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(resolvedDeviceResult.device, (info) => {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      });
+      watchDeviceLost(
+        resolvedDeviceResult.device,
+        createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+      );
     }
     if (!resolvedDeviceResult.device) {
       if (residentWebGpuRequired) {
@@ -4758,10 +4757,10 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       });
     }
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       if (residentWebGpuRequired) {
         throw new Error(
-          `Required resident grid update lost its device: ${describeDeviceLost(lostInfo)}`
+          `Required resident grid update lost its device: ${describeDeviceLost(deviceLossState.info)}`
         );
       }
       const reference = getCpuReference();
@@ -4769,7 +4768,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         cpuReference: reference,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });
@@ -4813,11 +4812,11 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       gpuResult.destroyUpdatedGridBuffer?.();
       if (residentWebGpuRequired) {
         throw new Error(
-          `Required resident grid update lost its device: ${describeDeviceLost(lostInfo)}`
+          `Required resident grid update lost its device: ${describeDeviceLost(deviceLossState.info)}`
         );
       }
       const reference = getCpuReference();
@@ -4826,7 +4825,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         gpuResult,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });

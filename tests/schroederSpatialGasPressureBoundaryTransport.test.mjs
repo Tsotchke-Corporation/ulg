@@ -25,8 +25,26 @@ import {
   schroederSpatialGasPressureBoundaryTransportWgsl
 } from '../ulg-gpu-abi/src/schroederSpatialGasPressureBoundaryTransportWgsl.js';
 import * as publicAbi from '../ulg-gpu-abi/src/index.js';
+import {
+  SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION,
+  createSchroederQuadraticControlVolumeDescriptor,
+  schroederQuadraticControlVolumeAxisProjection
+} from '../ulg-gpu-abi/src/schroederQuadraticControlVolumeProjection.js';
 
 function params(overrides = {}) {
+  const dims = overrides.gasGridDimensions ?? overrides.gridDimensions ?? [2, 2, 2];
+  const origin = overrides.gasGridCellOrigin ?? overrides.gridCellOrigin ?? [-2, 3, 5];
+  const spacing = Math.fround(overrides.gasGridSpacingM ?? overrides.gridSpacingM ?? 0.01);
+  const descriptor = createSchroederQuadraticControlVolumeDescriptor({
+    gridSpacingM: spacing,
+    gridDims: dims,
+    gridCellOrigin: origin,
+    gridNodeCount: dims.reduce((product, dim) => product * dim, 1),
+    chartId: overrides.chartId ?? 67,
+    selectedLevel: overrides.gasSelectedLevel ?? overrides.selectedLevel ?? -1,
+    boxMinM: origin.map((cell) => cell * spacing),
+    boxMaxM: origin.map((cell, axis) => (cell + dims[axis]) * spacing)
+  });
   return createSchroederSpatialGasPressureBoundaryTransportParams({
     fieldCapacity: 129,
     maxComputeWorkgroupsPerDimension: 2,
@@ -61,18 +79,23 @@ function params(overrides = {}) {
     gasDirectoryCellOffsetsOffsetWords: 128,
     gasDirectoryCellMembersOffsetWords: 145,
     gasDirectoryParticleToCellOffsetWords: 161,
+    gasControlVolumeDescriptor: descriptor,
     ...overrides
   });
 }
 
 test('v4 gas boundary ABI reserves the exact owner and parent bindings', () => {
+  assert.match(SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI.signConvention,
+    /external-gas-force-is-negative-particle-position-gradient/);
+  assert.equal(SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI.pressureLaw
+    .match(/impulse-ns=negative-pressure-scale/g)?.length, 2);
   assert.equal(
     ULG_SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_SCHEMA,
-    'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v2'
+    'peercompute.ulg.schroeder-spatial-gas-pressure-boundary-transport.v3'
   );
   assert.equal(
     SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES,
-    256
+    288
   );
   assert.deepEqual(
     SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_BINDINGS,
@@ -163,7 +186,7 @@ test('v4 gas boundary scratch identity is sealed and reusable without row upload
 
 test('v4 gas boundary params encode exact field, gas, directory, and dispatch identity', () => {
   const bytes = params();
-  assert.equal(bytes.byteLength, 256);
+  assert.equal(bytes.byteLength, 288);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   assert.equal(view.getUint32(0, true), 1);
   assert.equal(view.getUint32(4, true), 0);
@@ -303,7 +326,125 @@ test('v2 params encode and reject malformed exact fine-to-coarse parent identity
   );
 });
 
-test('CPU oracle applies one node impulse and distributes it by exact V0J volume', () => {
+test('v3 boundary params encode all canonical bound bits and reject changed authority geometry', () => {
+  const descriptor = createSchroederQuadraticControlVolumeDescriptor({
+    gridSpacingM: 0.01,
+    gridDims: [2, 2, 2],
+    gridCellOrigin: [-2, 3, 5],
+    gridNodeCount: 8,
+    chartId: 67,
+    selectedLevel: -1,
+    boxMinM: [-0.019, 0.032, 0.053],
+    boxMaxM: [-0.001, 0.049, 0.069]
+  });
+  const bytes = params({ gasControlVolumeDescriptor: descriptor });
+  const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  assert.equal(words[55], SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION);
+  assert.equal(words[56], descriptor.seal);
+  assert.deepEqual([...words.slice(57, 69)], [...descriptor.boundsWords]);
+  assert.deepEqual([...words.slice(69)], [0, 0, 0]);
+  assert.equal(
+    SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI.paramsLayout.length,
+    words.length
+  );
+  assert.throws(() => params({ gasControlVolumeDescriptor: null }), /descriptor/i);
+  assert.throws(() => params({
+    gasControlVolumeDescriptor: { ...descriptor, seal: descriptor.seal ^ 1 }
+  }), /seal|descriptor/i);
+  const changedBounds = [...descriptor.boundsWords];
+  changedBounds[1] ^= 1;
+  assert.throws(() => params({
+    gasControlVolumeDescriptor: { ...descriptor, boundsWords: changedBounds }
+  }), /seal|descriptor/i);
+  for (const changed of [
+    { chartId: 68 },
+    { selectedLevel: 0 },
+    { gridSpacingM: 0.02 },
+    { gridCellOrigin: [-1, 3, 5] },
+    { gridDims: [1, 2, 4] }
+  ]) {
+    const incompatible = createSchroederQuadraticControlVolumeDescriptor({
+      gridSpacingM: 0.01,
+      gridDims: [2, 2, 2],
+      gridCellOrigin: [-2, 3, 5],
+      gridNodeCount: 8,
+      chartId: 67,
+      selectedLevel: -1,
+      boxMinM: [-0.019, 0.032, 0.053],
+      boxMaxM: [-0.001, 0.049, 0.069],
+      ...changed
+    });
+    assert.throws(() => params({ gasControlVolumeDescriptor: incompatible }),
+      /match|descriptor|grid|chart|level/i);
+  }
+});
+
+test('v3 WGSL applies the identical bounded W transpose before parent A transpose', () => {
+  const source = schroederSpatialGasPressureBoundaryTransportWgsl;
+  const sample = source.match(/fn projected_node_gauge\([\s\S]*?\n\}/)?.[0] ?? '';
+  assert.equal((sample.match(/qcv_axis_projection\(/g) ?? []).length, 3);
+  assert.match(sample, /corner_index < 8u/);
+  assert.doesNotMatch(sample, /\b(?:let|var)\s+target\b/);
+  assert.match(sample, /gauge_pa = gauge_pa \+ weight \* cell_gauge_pa/);
+  assert.match(sample, /sample\.y == 0\.0[\s\S]*missing_cell_policy != MISSING_NO_LOAD[\s\S]*continue/);
+  assert.doesNotMatch(sample, /weight_sum|found_weight|gauge_pa\s*\/|weight\s*\//);
+  const same = source.match(/fn stage_same_level_node\([\s\S]*?\n\}/)?.[0] ?? '';
+  const parent = source.match(/fn stage_fine_parent_field\([\s\S]*?\n\}/)?.[0] ?? '';
+  assert.match(same, /projected_node_gauge\(node_cell_key\(node\)\)/);
+  assert.match(parent, /projected_node_gauge\([\s\S]*parent_node_cell_key\(parent_dense_node\)/);
+  assert.match(parent, /effective_gauge_pa = effective_gauge_pa \+ weight \* parent_gauge_pa/);
+  assert.doesNotMatch(same + parent, /find_gas_cell\(/);
+});
+
+test('v3 WGSL seals canonical geometry through params and v4 gas authority', () => {
+  const source = schroederSpatialGasPressureBoundaryTransportWgsl;
+  assert.match(source, /const GAS_AUTHORITY_VERSION: u32 = 4u/);
+  assert.match(source, /arrayLength\(&gas_authority_control\) < 36u/);
+  assert.match(source, /gas_authority_control\[32u\] != params\.gas_projection_version/);
+  assert.match(source, /gas_authority_control\[33u\] != params\.gas_geometry_seal/);
+  assert.match(source, /fn gas_control_volume_params_admitted\([\s\S]*qcv_descriptor_seal\([\s\S]*gas_control_volume_bounds\(\)[\s\S]*params\.gas_geometry_seal != seal/);
+  assert.match(source, /fn field_params_admitted\([\s\S]*gas_control_volume_params_admitted\(\)/);
+  assert.match(source, /fn finite_f32\([\s\S]*bitcast<u32>\(value\) & 0x7f800000u/);
+});
+
+test('small mathematical W and A/W transpose identities preserve sparse ambient weights', () => {
+  // Formula-only geometry evidence, not a CPU dynamics solver/parity gate.
+  // Native manufactured executions are the acceptance test for GPU W and W^T.
+  const nodes = [0, 1, 2];
+  const near = (actual, expected) => assert.ok(
+    Math.abs(actual - expected) <= 16 * Number.EPSILON * Math.max(1, Math.abs(expected)),
+    `${actual} differs from mathematical value ${expected}`
+  );
+  const columns = nodes.map((node) => {
+    const p = schroederQuadraticControlVolumeAxisProjection(node, 0, 0, 2, 0);
+    assert.equal(p.valid, 1);
+    const column = [0, 0];
+    for (const [cell, weight] of [[p.cell0, p.weight0], [p.cell1, p.weight1]]) {
+      if (weight > 0) column[cell] += weight;
+    }
+    return column;
+  });
+  [[1, 0], [0.5, 0.5], [0, 1]].forEach((expected, node) =>
+    expected.forEach((weight, cell) => near(columns[node][cell], weight)));
+  const dot = (a, b) => a.reduce((sum, x, i) => sum + x * b[i], 0);
+  const forward = (values) => [0, 1].map((cell) =>
+    values.reduce((sum, v, node) => sum + v * columns[node][cell], 0));
+  const transpose = (pressure) => columns.map((column) => dot(column, pressure));
+  const volume = [0.125, 0.25, 0.5];
+  const pressure = [40, 240];
+  near(dot(forward(volume), pressure), dot(volume, transpose(pressure)));
+  const parentColumns = [[0.125, 0.875, 0], [0.5, 0.25, 0.25]];
+  const fineVolume = [0.0625, 0.125];
+  const parentVolume = nodes.map((node) =>
+    fineVolume.reduce((sum, v, fine) => sum + v * parentColumns[fine][node], 0));
+  const finePressure = parentColumns.map((column) => dot(column, transpose(pressure)));
+  near(dot(forward(parentVolume), pressure), dot(fineVolume, finePressure));
+  // The absent second primal cell is ambient (zero gauge): node1 retains half
+  // of the first cell's gauge. Normalizing over found cells would wrongly give40.
+  transpose([40, 0]).forEach((value, node) => near(value, [40, 20, 0][node]));
+});
+
+test('historical law utility (not W acceptance) distributes impulse by exact V0J volume', () => {
   const result =
     computeSchroederSpatialGasPressureBoundaryTransportCpuOracle({
       gridDimensions: [1, 1, 1],
@@ -341,16 +482,16 @@ test('CPU oracle applies one node impulse and distributes it by exact V0J volume
   assert.equal(result.appliedNodeCount, 1);
   assert.equal(result.missingCellCount, 0);
   assert.equal(result.rows[0].gaugePressurePa, 100);
-  assert.deepEqual(result.rows[0].impulseNs, [10, 0, 0]);
-  assert.deepEqual(result.rows[1].impulseNs, [20, 0, 0]);
-  assert.deepEqual(result.rows[0].velocityMPerS, [5, 0, 0]);
-  assert.deepEqual(result.rows[1].velocityMPerS, [5, 0, 0]);
+  assert.deepEqual(result.rows[0].impulseNs, [-10, 0, 0]);
+  assert.deepEqual(result.rows[1].impulseNs, [-20, 0, 0]);
+  assert.deepEqual(result.rows[0].velocityMPerS, [-5, 0, 0]);
+  assert.deepEqual(result.rows[1].velocityMPerS, [-5, 0, 0]);
   assert.deepEqual(result.rows[2].impulseNs, [0, 0, 0]);
   assert.deepEqual(result.rows[2].velocityMPerS, [7, 0, 0]);
   assert.ok(result.maximumDistributionResidualNs <= 2e-6);
 });
 
-test('CPU oracle preserves signed gauge and makes missing-cell policy explicit', () => {
+test('historical law utility (not W acceptance) preserves signed gauge and missing-cell policy', () => {
   const input = {
     gridDimensions: [1, 1, 1],
     fields: [{
@@ -370,8 +511,8 @@ test('CPU oracle preserves signed gauge and makes missing-cell policy explicit',
       gasCells: [{ cell: [0, 0, 0], pressurePa: 60 }]
     });
   assert.equal(signed.rows[0].gaugePressurePa, -40);
-  assert.deepEqual(signed.rows[0].impulseNs, [-20, 0, 0]);
-  assert.deepEqual(signed.rows[0].velocityMPerS, [-10, 0, 0]);
+  assert.deepEqual(signed.rows[0].impulseNs, [20, 0, 0]);
+  assert.deepEqual(signed.rows[0].velocityMPerS, [10, 0, 0]);
 
   const noLoad =
     computeSchroederSpatialGasPressureBoundaryTransportCpuOracle({
@@ -395,7 +536,7 @@ test('CPU oracle preserves signed gauge and makes missing-cell policy explicit',
   assert.match(failClosed.status, /fail-closed-missing-cell/);
 });
 
-test('fine parent-adjoint oracle gathers each field CSR before its own S9 force', () => {
+test('historical A-transpose utility (not W acceptance) gathers CSR before its S9 force', () => {
   const input = {
     gasGridDimensions: [2, 1, 1],
     fields: [
@@ -445,10 +586,10 @@ test('fine parent-adjoint oracle gathers each field CSR before its own S9 force'
   assert.equal(result.missingCellCount, 0);
   assert.equal(result.rows[0].effectiveGaugePressurePa, 150);
   assert.equal(result.rows[1].effectiveGaugePressurePa, 100);
-  assert.deepEqual(result.rows[0].impulseNs, [30, 0, 0]);
-  assert.deepEqual(result.rows[1].impulseNs, [10, 0, 0]);
-  assert.deepEqual(result.rows[0].velocityMPerS, [15, 0, 0]);
-  assert.deepEqual(result.rows[1].velocityMPerS, [2.5, 0, 0]);
+  assert.deepEqual(result.rows[0].impulseNs, [-30, 0, 0]);
+  assert.deepEqual(result.rows[1].impulseNs, [-10, 0, 0]);
+  assert.deepEqual(result.rows[0].velocityMPerS, [-15, 0, 0]);
+  assert.deepEqual(result.rows[1].velocityMPerS, [-2.5, 0, 0]);
 
   const partialNoLoad =
     computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
@@ -459,8 +600,8 @@ test('fine parent-adjoint oracle gathers each field CSR before its own S9 force'
   assert.equal(partialNoLoad.missingCellCount, 2);
   assert.equal(partialNoLoad.rows[0].effectiveGaugePressurePa, 25);
   assert.equal(partialNoLoad.rows[1].effectiveGaugePressurePa, 50);
-  assert.deepEqual(partialNoLoad.rows[0].impulseNs, [5, 0, 0]);
-  assert.deepEqual(partialNoLoad.rows[1].impulseNs, [5, 0, 0]);
+  assert.deepEqual(partialNoLoad.rows[0].impulseNs, [-5, 0, 0]);
+  assert.deepEqual(partialNoLoad.rows[1].impulseNs, [-5, 0, 0]);
 
   const failClosed =
     computeSchroederSpatialGasPressureBoundaryFineToCoarseParentAdjointCpuOracle({
@@ -510,7 +651,7 @@ test('WGSL is an eight-storage transactional exact parent-adjoint operator', () 
   assert.match(source, /fn find_gas_cell\([\s\S]*while|fn find_gas_cell\([\s\S]*loop/);
   assert.match(
     source,
-    /pressure_sample\.x - params\.ambient_pressure_pa/
+    /sample\.x - params\.ambient_pressure_pa/
   );
   assert.match(
     source,
@@ -530,8 +671,9 @@ test('WGSL is an eight-storage transactional exact parent-adjoint operator', () 
   );
   assert.match(
     source,
-    /let impulse_ns = params\.pressure_scale[\s\S]*effective_gauge_pa \* field_gradient\(field_index\) \* params\.dt/
+    /let impulse_ns = -params\.pressure_scale[\s\S]*effective_gauge_pa \* field_gradient\(field_index\) \* params\.dt/
   );
+  assert.match(source, /let total_impulse_ns = -params\.pressure_scale/);
   assert.doesNotMatch(
     source.match(/fn stage_fine_parent_field\([\s\S]*?\n\}/)?.[0] ?? '',
     /share/

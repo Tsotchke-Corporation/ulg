@@ -103,7 +103,13 @@ import {
   registerQueueOrderedCleanupClaim,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
-import { webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
+import { tagWebGpuBufferDevice, webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
+import { createSchroederSpatialGasPressureBoundaryTransportLayout } from '../../../ulg-gpu-abi/src/schroederSpatialGasPressureBoundaryTransport.js';
+import {
+  SCHROEDER_REJECTED_FIELD_DIAGNOSTIC_WORDS,
+  decodeSchroederRejectedFieldDiagnostic,
+  encodeSchroederRejectedFieldDiagnostic
+} from './schroederRejectedFieldDiagnosticGpu.js';
 import {
   createSchroederCrossLevelRefluxLedgerGpu,
   directSchroederSpatialParentFieldMechanicsWorkspaceGpu
@@ -148,6 +154,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
+  ensureSphGpuParticleBufferSetBorrowLifecycle,
   sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
 import {
@@ -268,156 +275,6 @@ function decodeGpuAbiWords(words, layout) {
   }));
 }
 
-function summarizeMechanicsFieldTraceWords(words) {
-  const header = decodeGpuAbiWords(
-    words.subarray(0, SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_WORDS),
-    SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_HEADER_LAYOUT
-  );
-  const receiptOffset = Number(header.stateOffsetWords)
-    - SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS;
-  if (
-    !Number.isSafeInteger(receiptOffset)
-    || receiptOffset < 0
-    || receiptOffset + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
-      > words.length
-  ) {
-    return Object.freeze({
-      status: 'mechanics-field-row-summary-unavailable',
-      reason: 'receipt-out-of-bounds'
-    });
-  }
-  const receipt = decodeGpuAbiWords(
-    words.subarray(
-      receiptOffset,
-      receiptOffset + SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_RECEIPT_WORDS
-    ),
-    SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT
-  );
-  const fieldCount = Math.min(
-    Number(receipt.fieldCount) >>> 0,
-    Number(header.fieldCapacity) >>> 0
-  );
-  const keyOffset = Number(header.keyOffsetWords) >>> 0;
-  const keyWords = Number(header.keyWords) >>> 0;
-  const accumulatorOffset = Number(header.accumulatorOffsetWords) >>> 0;
-  const accumulatorWords = Number(header.accumulatorWords) >>> 0;
-  const stateOffset = Number(header.stateOffsetWords) >>> 0;
-  const stateWords = Number(header.stateWords) >>> 0;
-  const floatWord = new Uint32Array(1);
-  const floatValue = new Float32Array(floatWord.buffer);
-  const asFloat = (bits) => {
-    floatWord[0] = bits >>> 0;
-    return floatValue[0];
-  };
-  let invalidKeyCount = 0;
-  let firstInvalidKey = null;
-  let nonfiniteStateValueCount = 0;
-  let firstNonfiniteStateValue = null;
-  let nonfiniteAccumulatorValueCount = 0;
-  let firstNonfiniteAccumulatorValue = null;
-  let negativeMassCount = 0;
-  let zeroMassCount = 0;
-  let negativeHeatCount = 0;
-  let nonzeroHeatRowCount = 0;
-  let maxAbsStateValue = 0;
-  let maxAbsAccumulatorValue = 0;
-  const phaseFieldCounts = {};
-  for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
-    const key = keyOffset + fieldIndex * keyWords;
-    const accumulator = accumulatorOffset + fieldIndex * accumulatorWords;
-    const state = stateOffset + fieldIndex * stateWords;
-    if (
-      keyWords < 4
-      || accumulatorWords < 8
-      || stateWords < 8
-      || key + keyWords > words.length
-      || accumulator + accumulatorWords > words.length
-      || state + stateWords > words.length
-    ) {
-      return Object.freeze({
-        status: 'mechanics-field-row-summary-unavailable',
-        reason: 'field-row-out-of-bounds',
-        fieldIndex,
-        fieldCount
-      });
-    }
-    const nodeIndex = words[key] >>> 0;
-    const phaseId = words[key + 1] >>> 0;
-    const materialId = words[key + 2] >>> 0;
-    const continuityDomainId = words[key + 3] >>> 0;
-    const keyAdmitted = nodeIndex < (Number(header.gridNodeCount) >>> 0)
-      && phaseId >= 1
-      && phaseId <= 4
-      && materialId !== 0
-      && (phaseId === 1
-        ? continuityDomainId !== 0
-        : continuityDomainId === 0);
-    if (!keyAdmitted) {
-      invalidKeyCount += 1;
-      firstInvalidKey ??= Object.freeze({
-        fieldIndex,
-        nodeIndex,
-        phaseId,
-        materialId,
-        continuityDomainId
-      });
-    }
-    phaseFieldCounts[phaseId] = (phaseFieldCounts[phaseId] ?? 0) + 1;
-    for (let component = 0; component < 7; component += 1) {
-      const value = asFloat(words[state + component]);
-      if (!Number.isFinite(value)) {
-        nonfiniteStateValueCount += 1;
-        firstNonfiniteStateValue ??= Object.freeze({
-          fieldIndex,
-          component,
-          bits: words[state + component] >>> 0
-        });
-      } else {
-        maxAbsStateValue = Math.max(maxAbsStateValue, Math.abs(value));
-      }
-    }
-    const mass = asFloat(words[state]);
-    if (mass < 0) negativeMassCount += 1;
-    if (mass === 0) zeroMassCount += 1;
-    for (const component of [0, 2, 3, 4, 5, 6, 7]) {
-      const value = asFloat(words[accumulator + component]);
-      if (!Number.isFinite(value)) {
-        nonfiniteAccumulatorValueCount += 1;
-        firstNonfiniteAccumulatorValue ??= Object.freeze({
-          fieldIndex,
-          component,
-          bits: words[accumulator + component] >>> 0
-        });
-      } else {
-        maxAbsAccumulatorValue = Math.max(
-          maxAbsAccumulatorValue,
-          Math.abs(value)
-        );
-      }
-    }
-    const heat = asFloat(words[accumulator]);
-    if (heat < 0) negativeHeatCount += 1;
-    if (heat !== 0) nonzeroHeatRowCount += 1;
-  }
-  return Object.freeze({
-    status: 'mechanics-field-row-summary-ready',
-    fieldCount,
-    invalidKeyCount,
-    firstInvalidKey,
-    nonfiniteStateValueCount,
-    firstNonfiniteStateValue,
-    nonfiniteAccumulatorValueCount,
-    firstNonfiniteAccumulatorValue,
-    negativeMassCount,
-    zeroMassCount,
-    negativeHeatCount,
-    nonzeroHeatRowCount,
-    maxAbsStateValue,
-    maxAbsAccumulatorValue,
-    phaseFieldCounts: Object.freeze({ ...phaseFieldCounts })
-  });
-}
-
 function compactAuthorityHeaderStatus(
   statusFlags,
   { readyFlag, admittedFlag, failClosedFlag }
@@ -444,6 +301,8 @@ async function readTwoLevelCanonicalAuthorityTrace({
   selectedLevel = null,
   refluxLedger = null,
   workspaceExecution = null,
+  scratchCapture = null,
+  particleCapture = null,
   readbackTelemetry = null
 } = {}) {
   const activeSourceView = generation?.activeSourceView
@@ -684,18 +543,11 @@ async function readTwoLevelCanonicalAuthorityTrace({
   ) ?? null;
   const selectedFieldBuffer = selectedLevelView?.mechanicsFieldView
     ?.fieldViewBuffer ?? null;
-  const fixedSourceCount = sources.length;
-  addSource({
-    id: `level-${Number(selectedLevel)}-mechanics-field-row-summary`,
-    buffer: selectedFieldBuffer,
-    wordCount: Math.floor(Number(selectedFieldBuffer?.size) / 4),
-    decode: summarizeMechanicsFieldTraceWords
-  });
   if (
     !activeSourceBuffer
     || levelViews.length !== 2
-    || fixedSourceCount !== 12
-    || sources.length !== 13
+    || sources.length !== 12
+    || !selectedFieldBuffer
   ) {
     return Object.freeze({
       schema: 'peercompute.ulg.schroeder-two-level-canonical-authority-trace.v0',
@@ -703,24 +555,71 @@ async function readTwoLevelCanonicalAuthorityTrace({
       selectedLevel,
       generationId: generation?.execution?.generationId ?? null,
       status: 'canonical-authority-trace-unavailable',
-      expectedSourceCount: 13,
+      expectedSourceCount: 12,
       availableSourceCount: sources.length
     });
   }
-  let targetOffsetBytes = 0;
-  for (const source of sources) {
-    source.targetOffsetBytes = targetOffsetBytes;
-    targetOffsetBytes += source.byteLength;
-  }
-  const readbackBuffer = device.createBuffer({
-    label: `ulg-schroeder-two-level-authority-trace-${String(stage ?? 'stage')}`,
-    size: targetOffsetBytes,
-    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
-  });
+  let diagnostic = null;
+  let particleDiagnostic = null;
+  let readbackBuffer = null;
   let mapped = false;
   try {
     const encoder = device.createCommandEncoder({
       label: 'ulg-schroeder-two-level-authority-trace-copy'
+    });
+    diagnostic = encodeSchroederRejectedFieldDiagnostic({
+      device, encoder, fieldBuffer: selectedFieldBuffer,
+      refluxBuffer: refluxLedger.buffer,
+      refluxIdentity: refluxLedger,
+      phaseVolumeMoment: selectedLevelView.phaseVolumeMoment,
+      selectedLevel, generationId: generation.execution.generationId,
+      scratchCapture
+    });
+    addSource({
+      id: `level-${Number(selectedLevel)}-rejected-field-pressure`,
+      buffer: diagnostic.buffer,
+      wordCount: SCHROEDER_REJECTED_FIELD_DIAGNOSTIC_WORDS,
+      decode: decodeSchroederRejectedFieldDiagnostic
+    });
+    if (scratchCapture && particleCapture) {
+      // Opt-in evidence only. These are the exact retained inputs that the
+      // immediately following G2P would consume. The awaited trace finishes
+      // before that step can mutate or retire them; never copy the hot arenas.
+      const {
+        SCHROEDER_REJECTED_PARTICLE_DIAGNOSTIC_WORDS,
+        encodeSchroederRejectedParticleDiagnostic,
+        decodeSchroederRejectedParticleDiagnostic
+      } = await import('./schroederRejectedParticleDiagnosticGpu.js');
+      const { sphParticleUpload, mlsMpmParticleUpload } = particleCapture;
+      particleDiagnostic = encodeSchroederRejectedParticleDiagnostic({
+        device, encoder, fieldBuffer: selectedFieldBuffer,
+        fieldDiagnosticBuffer: diagnostic.buffer, activeSourceBuffer,
+        stateBuffer: sphParticleUpload.stateBuffer,
+        mechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
+        particleCount: sphParticleUpload.particleCount,
+        stateStrideBytes: sphParticleUpload.stateStrideBytes,
+        mechanicsStrideBytes: mlsMpmParticleUpload.mechanicsStrideBytes,
+        gridSpacingM: particleCapture.gridSpacingM,
+        dtS: scratchCapture.dtS,
+        pressureScale: scratchCapture.pressureScale,
+        internalPressureScale: particleCapture.internalPressureScale
+      });
+      addSource({
+        id: `level-${Number(selectedLevel)}-rejected-field-particles`,
+        buffer: particleDiagnostic.buffer,
+        wordCount: SCHROEDER_REJECTED_PARTICLE_DIAGNOSTIC_WORDS,
+        decode: decodeSchroederRejectedParticleDiagnostic
+      });
+    }
+    let targetOffsetBytes = 0;
+    for (const source of sources) {
+      source.targetOffsetBytes = targetOffsetBytes;
+      targetOffsetBytes += source.byteLength;
+    }
+    readbackBuffer = device.createBuffer({
+      label: `ulg-schroeder-two-level-authority-trace-${String(stage ?? 'stage')}`,
+      size: targetOffsetBytes,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
     });
     for (const source of sources) {
       encoder.copyBufferToBuffer(
@@ -772,7 +671,9 @@ async function readTwoLevelCanonicalAuthorityTrace({
     });
   } finally {
     if (mapped) readbackBuffer.unmap();
-    readbackBuffer.destroy?.();
+    readbackBuffer?.destroy?.();
+    particleDiagnostic?.destroy();
+    diagnostic?.destroy();
   }
 }
 
@@ -2456,6 +2357,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     directSchroederSpatialParentFieldMechanicsWorkspaceGpu,
   gpuTimestampRecorder = null,
   canonicalEpochController = null,
+  privateSourceClosure = null,
   postMechanicsConsumerReaderIds = [],
   postMechanicsConsumerSupportProfileIds = {},
   retainOutputParticleBuffers = true,
@@ -2516,6 +2418,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     }
   }
   let activeCanonicalEpoch = canonicalEpochController?.initialEpoch ?? null;
+  if (privateSourceClosure != null && !activeCanonicalEpoch) {
+    throw new TypeError('privateSourceClosure requires a fresh fused-private canonical epoch');
+  }
   if (canonicalEpochController && (
     !activeCanonicalEpoch
     || typeof canonicalEpochController.admitP2g !== 'function'
@@ -2548,7 +2453,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     selectedLevel,
     generation = epochGeneration(),
     refluxLedger = null,
-    workspaceExecution = null
+    workspaceExecution = null,
+    scratchCapture = null,
+    particleCapture = null
   } = {}) => {
     if (canonicalSpatialAuthorityTrace !== true || !generation) return null;
     const trace = await readTwoLevelCanonicalAuthorityTrace({
@@ -2558,9 +2465,26 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       selectedLevel,
       refluxLedger,
       workspaceExecution,
+      scratchCapture,
+      particleCapture,
       readbackTelemetry
     });
     canonicalSpatialAuthorityTraceStages.push(trace);
+    const rejectedField = trace.sources?.[`level-${Number(selectedLevel)}-rejected-field-pressure`];
+    if (scratchCapture && rejectedField
+        && rejectedField.status !== 'no-cfl-rejection'
+        && rejectedField.status !== 'unsupported-or-stale-rejection') {
+      // An unsuccessful worker schedule does not publish its per-step trace.
+      // Preserve only this bounded opt-in failure packet in the diagnostic
+      // console stream; it is never a simulation receipt or admission input.
+      console.info('ULG_REJECTED_FIELD_PRESSURE', JSON.stringify({
+        stage, macroOwnerId: refluxLedger.macroOwnerId,
+        macroOwnerGeneration: refluxLedger.ownerGeneration,
+        fineSubstepOrdinal: scratchCapture.fineSubstepOrdinal,
+        evidence: rejectedField,
+        particles: trace.sources?.[`level-${Number(selectedLevel)}-rejected-field-particles`] ?? null
+      }));
+    }
     return trace;
   };
   if (activeCanonicalEpoch && (
@@ -3865,7 +3789,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       fineLevel: resolvedFineLevel,
       coarseLevel,
       fineDt: dtFine,
-      macroDt: dtSeconds
+      macroDt: dtSeconds,
+      privateSourceClosure
     });
     // The authenticated macro authority is now the sole H7 ledger owner. Its
     // close/abort path must retire the ledger exactly once after its GPU fence.
@@ -3969,6 +3894,26 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         }),
         { fineSubstepOrdinal: substep }
       );
+      // Opt-in GPU-only capture preserves the exact boundary scratch until the
+      // rejected-field gather. The full arena is never mapped to the host.
+      const fineScratchCapture = canonicalSpatialAuthorityTrace === true && fineGasBoundary
+        ? (() => {
+            const moment = priorCanonicalEpoch.generation.mechanicsLevelViews
+              .find((view) => Number(view.selectedLevel) === Number(resolvedFineLevel))
+              ?.phaseVolumeMoment;
+            const layout = createSchroederSpatialGasPressureBoundaryTransportLayout({
+              fieldCapacity: moment.fieldCapacity
+            });
+            const buffer = tagWebGpuBufferDevice(device.createBuffer({
+              label: 'ulg-fine-pressure-diagnostic-gpu-only-capture',
+              size: layout.scratchByteLength,
+              usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+            }), device);
+            trackCleanup(buffer, () => buffer.destroy());
+            return { buffer, gasExecutionGeneration: fineGasBoundary.description.executionGeneration,
+              fineSubstepOrdinal: substep, dtS: dtFine, pressureScale: phaseVolumePressureScale };
+          })()
+        : null;
       const fineGridUpdate = await runGpuQueueStage(
         `fine-${substep}-grid-update`,
         () => gridUpdateRunner({
@@ -4000,6 +3945,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           gasPressureMechanicsAuthoritySource:
             fineGasBoundary?.source ?? null,
           gasPressureMechanicsChartId: 0,
+          ...(fineScratchCapture ? { gasPressureBoundaryScratchCaptureBuffer: fineScratchCapture.buffer } : {}),
           mechanicsFieldEnergyReceipt: { deferSeal: true },
           retainUpdatedGridBuffer: false,
           readbackMode: SCHROEDER_NO_FULL_READBACK_MODE
@@ -4026,6 +3972,22 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         { fineSubstepOrdinal: substep }
       );
       lastFineGridUpdate = correctedFineGridUpdate;
+      // Capture before G2P: its fail-closed path deliberately clears the live
+      // field count, which must not erase the rejected-row diagnostic evidence.
+      await captureCanonicalSpatialAuthorityTrace({
+        stage: `fine-${substep}-post-correction`,
+        selectedLevel: resolvedFineLevel,
+        generation: priorCanonicalEpoch.generation,
+        refluxLedger: macroRefluxLedger,
+        workspaceExecution: workspace.execution,
+        scratchCapture: fineScratchCapture,
+        particleCapture: fineScratchCapture ? {
+          sphParticleUpload: currentSphUpload,
+          mlsMpmParticleUpload: currentMlsUpload,
+          gridSpacingM: correctedFineGridUpdate.gridSpacingM,
+          internalPressureScale
+        } : null
+      });
       canonicalEpochController.admitG2p(priorCanonicalEpoch);
       const fineG2p = await runGpuQueueStage(
         `fine-${substep}-g2p`,
@@ -4059,14 +4021,6 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         () => fineG2p.mechanicsBuffer?.destroy?.()
       );
       lastFineG2p = fineG2p;
-      await captureCanonicalSpatialAuthorityTrace({
-        stage: `fine-${substep}-post-g2p`,
-        selectedLevel: resolvedFineLevel,
-        generation: priorCanonicalEpoch.generation,
-        refluxLedger: macroRefluxLedger,
-        workspaceExecution: workspace.execution
-      });
-
       const nextUploads = createCanonicalTwoLevelSubstepUploads({
         sphParticleState,
         mlsMpmParticleState,
@@ -4513,19 +4467,26 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     const nextChartEpoch = currentSphUpload?.chartEpoch
       ?? sphParticleState.chartEpoch
       ?? 0;
+    const finalSphParticleUpload = {
+      ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
+        rawFinalCanonicalUploads.sphParticleUpload
+      ),
+      // S* is still the terminal private state of macro tick N. The
+      // hierarchy owner performs one fresh full classification before it
+      // may publish the same buffers as E* at N+1/substep 0.
+      sourceStage: 'schroeder-two-level-private-terminal-s-star',
+      ownsStateBuffer: true,
+      ownsThermoBuffer: transferThermoOwnership
+        || rawFinalCanonicalUploads.sphParticleUpload.ownsThermoBuffer === true
+    };
+    // Gas EOS retains this exact private descriptor in a later macro. Install
+    // its registered non-enumerable lifecycle before freezing it; spreading
+    // an earlier upload cannot carry that private registration forward.
+    if (!ensureSphGpuParticleBufferSetBorrowLifecycle(finalSphParticleUpload)) {
+      throw new Error('Private terminal SPH output cannot install its exact borrow lifecycle');
+    }
     const finalCanonicalUploads = Object.freeze({
-      sphParticleUpload: Object.freeze({
-        ...cloneSphGpuParticleUploadWithoutDispersedMediumOptics(
-          rawFinalCanonicalUploads.sphParticleUpload
-        ),
-        // S* is still the terminal private state of macro tick N. The
-        // hierarchy owner performs one fresh full classification before it
-        // may publish the same buffers as E* at N+1/substep 0.
-        sourceStage: 'schroeder-two-level-private-terminal-s-star',
-        ownsStateBuffer: true,
-        ownsThermoBuffer: transferThermoOwnership
-          || rawFinalCanonicalUploads.sphParticleUpload.ownsThermoBuffer === true
-      }),
+      sphParticleUpload: Object.freeze(finalSphParticleUpload),
       mlsMpmParticleUpload: Object.freeze({
         ...rawFinalCanonicalUploads.mlsMpmParticleUpload,
         sourceStage: 'schroeder-two-level-private-terminal-s-star',

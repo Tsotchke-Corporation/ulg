@@ -112,6 +112,113 @@ function minimalClosureInputs({
   };
 }
 
+for (const stage of ['thermal', 'reaction', 'phase', 'refresh']) {
+  test(`shared closure owns ${stage} source and interval inputs despite stage options`, async () => {
+    const inputs = minimalClosureInputs();
+    const plan = { status: 'phase-lane-capacity-ready' };
+    inputs.sphParticleUpload.phaseCarrierPlan = plan;
+    const thermalTable = { materialCount: 1 };
+    const reactionTable = { reactionCount: 1 };
+    const mechanicsTable = { materialCount: 1 };
+    const output = Object.fromEntries(['thermal', 'reaction', 'phase', 'refresh'].map((name) => [
+      name, Object.fromEntries(['state', 'thermo', 'mechanics'].map((component) => [
+        `${component}Buffer`, buffer(`${name}-${component}`)
+      ]))
+    ]));
+    const captured = {};
+    const runner = (name) => async (options) => {
+      captured[name] = options;
+      return output[name];
+    };
+    const closureQueue = { owner: 'closure' };
+    const selectedQueue = { owner: 'before-reaction' };
+    const selectedNeighbors = { owner: 'before-reaction' };
+    const selectedGraph = { owner: 'closure' };
+    const timing = { owner: 'stage-timing-option' };
+    const common = {
+      device: inputs.device,
+      sphParticleState: inputs.sphParticleState,
+      retainOutputParticleBuffers: true,
+      readbackMode: inputs.readbackMode
+    };
+    const expected = {
+      thermal: {
+        ...common, thermalMaterialTable: thermalTable, sphParticleUpload: inputs.sphParticleUpload,
+        sourceStateBuffer: inputs.postMechanicsParticleBuffers.stateBuffer,
+        sourceThermoBuffer: inputs.sphParticleUpload.thermoBuffer,
+        proposalStateBuffer: inputs.postMechanicsParticleBuffers.stateBuffer,
+        proposalThermoBuffer: inputs.sphParticleUpload.thermoBuffer,
+        boxDimsM: inputs.boxDimsM, dtS: inputs.dtSeconds, neighborBins: null,
+        thermalResponseGraphUpload: selectedGraph, schroederSpatialEpochGeneration: null,
+        schroederSpatialThermalProposal: null
+      },
+      reaction: {
+        ...common, mlsMpmParticleState: inputs.mlsMpmParticleState,
+        reactionTable, thermalMaterialTable: thermalTable,
+        sphParticleUpload: inputs.sphParticleUpload, mlsMpmParticleUpload: inputs.mlsMpmParticleUpload,
+        sourceStateBuffer: output.thermal.stateBuffer, sourceThermoBuffer: output.thermal.thermoBuffer,
+        sourceMechanicsBuffer: inputs.postMechanicsParticleBuffers.mechanicsBuffer,
+        boxDimsM: inputs.boxDimsM, dtSeconds: inputs.dtSeconds,
+        schroederLawQueue: selectedQueue, schroederLawNeighborCandidates: selectedNeighbors,
+        thermalResponseGraphUpload: selectedGraph, schroederSpatialEpochGeneration: null,
+        schroederSpatialReactionDiscoveryProposal: null, requestQueueOrderedCleanupClaim: false
+      },
+      phase: {
+        ...common, mlsMpmParticleState: inputs.mlsMpmParticleState,
+        thermalMaterialTable: thermalTable, mechanicsMaterialTable: mechanicsTable, phaseCarrierPlan: plan,
+        ...Object.fromEntries(Object.entries(output.reaction).map(([key, value]) => [
+          `source${key[0].toUpperCase()}${key.slice(1)}`, value
+        ])),
+        queueOrderedProducerClaims: []
+      },
+      refresh: {
+        ...common, mlsMpmParticleState: inputs.mlsMpmParticleState,
+        mechanicsMaterialTable: mechanicsTable, sphParticleUpload: inputs.sphParticleUpload,
+        mlsMpmParticleUpload: inputs.mlsMpmParticleUpload,
+        ...Object.fromEntries(Object.entries(output.phase).map(([key, value]) => [
+          `source${key[0].toUpperCase()}${key.slice(1)}`, value
+        ])),
+        preferWebGpu: true, queueOrderedProducerClaims: []
+      }
+    };
+    // Wrong values for EVERY closure-owned key, including the real interval,
+    // still cannot replace the preceding stage. Non-owned tuning/diagnostic
+    // fields remain ordinary options, not a reason to disable all options.
+    const options = Object.fromEntries(Object.keys(expected[stage]).map((key) => [
+      key, { incorrectStageOverride: key }
+    ]));
+    Object.assign(options, {
+      gpuTimestampRecorder: timing, readCompactReactionSummary: true,
+      reactionParticleBinCapacity: 96, readReactionGasSpeciesSummary: true,
+      absolutePressureAuthority: true, resetDeformation: false
+    });
+    const optionsKey = { thermal: 'thermalStepOptions', reaction: 'reactionStepOptions',
+      phase: 'phaseCarrierTransferOptions', refresh: 'mechanicsRefreshOptions' }[stage];
+    const closure = await runMlsMpmPostMechanicsClosureWebGpu({
+      ...inputs, thermalMaterialTable: thermalTable, reactionTable, mechanicsMaterialTable: mechanicsTable,
+      thermalStepRunner: runner('thermal'), reactionStepRunner: runner('reaction'),
+      phaseCarrierTransferRunner: runner('phase'), mechanicsRefreshRunner: runner('refresh'),
+      preferWebGpu: true, schroederLawQueue: closureQueue, thermalResponseGraphUpload: selectedGraph,
+      beforeReactionStep: () => ({ schroederLawQueue: selectedQueue,
+        schroederLawNeighborCandidates: selectedNeighbors }),
+      [optionsKey]: options
+    });
+    for (const [key, value] of Object.entries(expected[stage])) {
+      if (key === 'queueOrderedProducerClaims') assert.deepEqual(captured[stage][key], value, key);
+      else assert.equal(captured[stage][key], value, `${stage}.${key}`);
+    }
+    assert.equal(captured[stage].gpuTimestampRecorder, timing);
+    assert.equal(captured[stage].readCompactReactionSummary, true);
+    assert.equal(captured[stage].reactionParticleBinCapacity, 96);
+    assert.equal(captured[stage].absolutePressureAuthority, true);
+    assert.equal(captured[stage].resetDeformation, false);
+    assert.equal(closure.continuation.stateBuffer, output.phase.stateBuffer);
+    assert.equal(closure.continuation.thermoBuffer, output.phase.thermoBuffer);
+    assert.equal(closure.continuation.mechanicsBuffer, output.refresh.mechanicsBuffer);
+    assert.equal(options.device.incorrectStageOverride, 'device', 'caller options are not rewritten');
+  });
+}
+
 test('shared post-mechanics closure preserves the post-thermal discovery lineage', async () => {
   const sourceState = buffer('mechanics-state');
   const sourceThermo = buffer('source-thermo');
@@ -1107,6 +1214,115 @@ test('zero-sidecar closure publishes one exact borrowed continuation and replay-
   assert.equal(inputs.sphParticleUpload.stateBuffer.destroyCount, 0);
   assert.equal(inputs.sphParticleUpload.thermoBuffer.destroyCount, 0);
   assert.equal(inputs.mlsMpmParticleUpload.mechanicsBuffer.destroyCount, 0);
+});
+
+test('closure envelope claim seals the exact selected history, including absence and replay', async () => {
+  const device = productHistoryDevice();
+  const history = authenticateProductHistorySource({ productEventBuffer: trackedBuffer('pair-history') }, device);
+  const other = authenticateProductHistorySource({ productEventBuffer: trackedBuffer('other-history') }, device);
+  const mismatch = { code: 'ERR_MLS_MPM_POST_MECHANICS_CLAIM_MISMATCH' };
+  for (const residentProductMass of [null, history]) {
+    const inputs = minimalClosureInputs({ device });
+    const closure = await runMlsMpmPostMechanicsClosureWebGpu({ ...inputs,
+      inputResidentProductMass: residentProductMass });
+    const next = { residentProductMass,
+      sphParticleUpload: { ...inputs.sphParticleUpload },
+      mlsMpmParticleUpload: { ...inputs.mlsMpmParticleUpload } };
+    const claim = () => claimMlsMpmPostMechanicsContinuation(closure, { nextParticleUploads: next });
+    for (const invalid of residentProductMass ? [null, { ...history }, other] : [history]) {
+      next.residentProductMass = invalid;
+      assert.throws(claim, mismatch);
+    }
+    delete next.residentProductMass;
+    if (residentProductMass) assert.throws(claim, mismatch, 'nonempty history cannot be omitted');
+    next.residentProductMass = residentProductMass;
+    const receipt = claim();
+    assert.equal(receipt.residentProductMass, residentProductMass);
+    assert.equal(receipt.carrierProductPairAuthenticated, true);
+    assert.equal(claim(), receipt);
+    const valid = () => validateMlsMpmPostMechanicsContinuationClaim(closure, receipt,
+      { nextParticleUploads: next });
+    assert.equal(valid(), true);
+    next.residentProductMass = residentProductMass ? other : history;
+    assert.equal(valid(), false);
+    assert.throws(claim, mismatch);
+    next.residentProductMass = residentProductMass;
+    assert.equal(claim(), receipt);
+    const originalSph = next.sphParticleUpload;
+    next.sphParticleUpload = { ...originalSph };
+    assert.equal(valid(), false);
+    assert.throws(claim, mismatch);
+    next.sphParticleUpload = originalSph;
+    const originalStateBuffer = originalSph.stateBuffer;
+    delete originalSph.stateBuffer;
+    assert.equal(validateMlsMpmPostMechanicsContinuationClaim(closure, receipt,
+      { nextParticleUploads: next, stateBuffer: originalStateBuffer }), false,
+      'explicit raw fallback cannot conceal mutation of a sealed envelope');
+    originalSph.stateBuffer = originalStateBuffer;
+    if (residentProductMass) {
+      const originalProductBuffer = residentProductMass.productEventBuffer;
+      residentProductMass.productEventBuffer = other.productEventBuffer;
+      assert.equal(valid(), false);
+      assert.throws(claim, mismatch);
+      residentProductMass.productEventBuffer = originalProductBuffer;
+    }
+    assert.throws(() => claimMlsMpmPostMechanicsContinuation(closure,
+      { nextParticleUploads: { ...next } }), mismatch);
+    assert.equal(validateMlsMpmPostMechanicsContinuationClaim(closure, receipt,
+      { nextParticleUploads: { ...next } }), false);
+    const originalContinuation = closure.continuation;
+    closure.continuation = Object.freeze({ ...originalContinuation });
+    assert.equal(valid(), false);
+    assert.throws(claim, mismatch);
+    closure.continuation = originalContinuation;
+    assert.equal(claim(), receipt);
+  }
+});
+
+test('closure history pairing does not invoke accessors or promote legacy raw-buffer claims', async () => {
+  const device = productHistoryDevice();
+  const history = authenticateProductHistorySource({ productEventBuffer: trackedBuffer('raw-claim-history') }, device);
+  const inputs = minimalClosureInputs({ device });
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({ ...inputs, inputResidentProductMass: history });
+  const next = { sphParticleUpload: inputs.sphParticleUpload, mlsMpmParticleUpload: inputs.mlsMpmParticleUpload };
+  let getterCalls = 0;
+  Object.defineProperty(next, 'residentProductMass', { configurable: true,
+    get() { getterCalls++; return history; } });
+  assert.throws(() => claimMlsMpmPostMechanicsContinuation(closure, { nextParticleUploads: next }),
+    { code: 'ERR_MLS_MPM_POST_MECHANICS_CLAIM_MISMATCH' });
+  assert.equal(getterCalls, 0);
+  Object.defineProperty(next, 'residentProductMass', { configurable: true, value: history });
+  const inherited = Object.assign(Object.create({ residentProductMass: history }), {
+    sphParticleUpload: next.sphParticleUpload, mlsMpmParticleUpload: next.mlsMpmParticleUpload });
+  assert.throws(() => claimMlsMpmPostMechanicsContinuation(closure, { nextParticleUploads: inherited }),
+    { code: 'ERR_MLS_MPM_POST_MECHANICS_CLAIM_MISMATCH' });
+  const raw = { stateBuffer: closure.continuation.stateBuffer,
+    thermoBuffer: closure.continuation.thermoBuffer, mechanicsBuffer: closure.continuation.mechanicsBuffer };
+  const claim = claimMlsMpmPostMechanicsContinuation(closure, raw);
+  assert.equal(claim.carrierProductPairAuthenticated, false);
+  assert.equal(claimMlsMpmPostMechanicsContinuation(closure, raw), claim);
+  assert.equal(validateMlsMpmPostMechanicsContinuationClaim(closure, claim, raw), true);
+  assert.equal(validateMlsMpmPostMechanicsContinuationClaim(closure, claim,
+    { nextParticleUploads: next }), false);
+  assert.throws(() => claimMlsMpmPostMechanicsContinuation(closure, { nextParticleUploads: next }),
+    { code: 'ERR_MLS_MPM_POST_MECHANICS_CLAIM_MISMATCH' });
+});
+
+test('closure cannot authenticate a missing history while a real two-source merge is pending', async () => {
+  const device = productHistoryDevice();
+  const first = authenticateProductHistorySource({ productEventBuffer: trackedBuffer('unmerged-first') }, device);
+  const second = authenticateProductHistorySource({ productEventBuffer: trackedBuffer('unmerged-second') }, device);
+  const inputs = minimalClosureInputs({ device });
+  const closure = await runMlsMpmPostMechanicsClosureWebGpu({ ...inputs,
+    inputResidentProductMass: first, thermalMaterialTable: { materialCount: 1 },
+    thermalStepRunner: async () => ({ stateBuffer: inputs.sphParticleUpload.stateBuffer,
+      thermoBuffer: inputs.sphParticleUpload.thermoBuffer }),
+    reactionTable: { reactionCount: 1 }, reactionStepRunner: async () => ({ residentProductMass: second }) });
+  assert.equal(closure.continuation.productMassMergeRequired, true);
+  assert.equal(closure.continuation.residentProductMass, null);
+  const next = { sphParticleUpload: inputs.sphParticleUpload, mlsMpmParticleUpload: inputs.mlsMpmParticleUpload };
+  assert.throws(() => claimMlsMpmPostMechanicsContinuation(closure, { nextParticleUploads: next }),
+    { code: 'ERR_MLS_MPM_POST_MECHANICS_CLAIM_MISMATCH' });
 });
 
 test('thermal-only closure transfers state and thermo while retaining borrowed mechanics', async () => {

@@ -42,6 +42,7 @@ import {
   sphMaterialInterfaceCandidatesWgsl,
   sphMaterialInterfaceCompactCandidatesWgsl,
   sphRenderFieldWgsl,
+  sphRenderFieldMotionWgsl,
   sphRenderRowsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
@@ -121,12 +122,16 @@ export {
   sphMaterialInterfaceCandidatesWgsl,
   sphMaterialInterfaceCompactCandidatesWgsl,
   sphRenderFieldWgsl,
+  sphRenderFieldMotionWgsl,
   sphRenderRowsWgsl
 };
 
 export const SPH_GPU_RENDER_ROW_FLOATS = SPH_GPU_RENDER_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_ROW_FLOATS = SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_FIELD_CELL_FLOATS = SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT.length;
+export const SPH_GPU_RENDER_FIELD_MOTION_FLOATS = 4;
+export const ULG_SPH_GPU_RENDER_FIELD_MOTION_SCHEMA =
+  'peercompute.ulg.sph-render-field-motion.v0';
 export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS = SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS = SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT.length;
@@ -8367,6 +8372,7 @@ export async function buildSphRenderFieldWebGpu({
   renderSmearDtS = 0,
   readbackMode = FULL_READBACK_MODE,
   retainFieldRowsBuffer = false,
+  retainMotionFieldBuffer = false,
   retainSurfaceBuffer = false,
   waitForQueueCompletion = true,
   deferCleanup = true,
@@ -8376,6 +8382,9 @@ export async function buildSphRenderFieldWebGpu({
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderFieldWebGpu requires a WebGPU-like device');
+  }
+  if (typeof retainMotionFieldBuffer !== 'boolean') {
+    throw new TypeError('retainMotionFieldBuffer must be a boolean');
   }
   if (!renderRowsBuffer && !(renderRows instanceof Float32Array)) {
     throw new TypeError('buildSphRenderFieldWebGpu requires renderRows or renderRowsBuffer');
@@ -8697,6 +8706,17 @@ export async function buildSphRenderFieldWebGpu({
   const fieldRowByteLength = surfaceTable.totalFieldCells
     * SPH_GPU_RENDER_FIELD_CELL_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const motionFieldByteLength = retainMotionFieldBuffer
+    ? surfaceTable.totalFieldCells
+      * SPH_GPU_RENDER_FIELD_MOTION_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT
+    : 0;
+  if (retainMotionFieldBuffer) {
+    assertWebGpuBufferSizeFitsDevice(device, 'render field motion', motionFieldByteLength);
+    assertWebGpuStorageBufferBindingSizeFitsDevice(
+      device, 'render field motion', motionFieldByteLength
+    );
+  }
   assertWebGpuBufferSizeFitsDevice(
     device,
     'render field cells',
@@ -8854,6 +8874,16 @@ export async function buildSphRenderFieldWebGpu({
           GPU_BUFFER_USAGE.COPY_SRC
         )
       );
+      // Unlike the pooled density target, this sidecar belongs to one exact
+      // field publication. A later build must never overwrite visible motion.
+      const motionFieldBuffer = retainMotionFieldBuffer
+        ? ownUnpublishedBuffer(createZeroedStorageBuffer(
+            device,
+            'ulg-sph-render-field-motion',
+            motionFieldByteLength,
+            GPU_BUFFER_USAGE.COPY_SRC
+          ))
+        : null;
       const paramsBuffer = ownUnpublishedBuffer(device.createBuffer({
         label: 'ulg-sph-render-field-params',
         size: 32,
@@ -8877,9 +8907,11 @@ export async function buildSphRenderFieldWebGpu({
         bindGroupLayout,
         cacheStatus: pipelineCacheStatus
       } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics',
+        cacheKey: retainMotionFieldBuffer
+          ? 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics-motion-v0'
+          : 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics',
         label: 'ulg-sph-render-field',
-        code: sphRenderFieldWgsl,
+        code: retainMotionFieldBuffer ? sphRenderFieldMotionWgsl : sphRenderFieldWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -8889,7 +8921,8 @@ export async function buildSphRenderFieldWebGpu({
           computeBufferBinding(4, 'read-only-storage'),
           computeBufferBinding(5, 'read-only-storage'),
           computeBufferBinding(6, 'uniform'),
-          computeBufferBinding(7, 'read-only-storage')
+          computeBufferBinding(7, 'read-only-storage'),
+          ...(retainMotionFieldBuffer ? [computeBufferBinding(8, 'storage')] : [])
         ]
       });
       const bindGroup = device.createBindGroup({
@@ -8949,7 +8982,15 @@ export async function buildSphRenderFieldWebGpu({
               boundDispersedMediumOpticsByteLength,
               { label: 'render field dispersed-medium optics' }
             )
-          }
+          },
+          ...(motionFieldBuffer ? [{
+            binding: 8,
+            resource: webGpuStorageBufferBindingResource(
+              motionFieldBuffer,
+              motionFieldByteLength,
+              { label: 'render field motion' }
+            )
+          }] : [])
         ]
       });
       const encoder = device.createCommandEncoder();
@@ -8968,6 +9009,7 @@ export async function buildSphRenderFieldWebGpu({
         surfaceBuffer,
         fieldRowsBufferBorrowed,
         fieldRowsBuffer,
+        motionFieldBuffer,
         paramsBuffer,
         pipelineCacheStatus,
         encoder
@@ -8987,6 +9029,7 @@ export async function buildSphRenderFieldWebGpu({
     surfaceBuffer,
     fieldRowsBufferBorrowed,
     fieldRowsBuffer,
+    motionFieldBuffer,
     paramsBuffer,
     pipelineCacheStatus,
     encoder
@@ -9009,6 +9052,7 @@ export async function buildSphRenderFieldWebGpu({
     productHistoryGateParamsBuffer.destroy?.();
     surfaceBuffer.destroy?.();
     if (!fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
+    motionFieldBuffer?.destroy?.();
     paramsBuffer.destroy?.();
   };
   const retireSubmittedTargetPublication = () => {
@@ -9073,6 +9117,33 @@ export async function buildSphRenderFieldWebGpu({
       'render surface table mutated while its GPU field submission was in flight'
     );
   }
+
+  let motionFieldDestroyed = false;
+  let ownedMotionField = motionFieldBuffer ? Object.freeze({
+    schema: ULG_SPH_GPU_RENDER_FIELD_MOTION_SCHEMA,
+    buffer: motionFieldBuffer,
+    byteLength: motionFieldByteLength,
+    rowCount: surfaceTable.totalFieldCells,
+    rowStrideFloats: SPH_GPU_RENDER_FIELD_MOTION_FLOATS,
+    rowStrideBytes: SPH_GPU_RENDER_FIELD_MOTION_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    fieldPadding,
+    refEdgeM,
+    sourceGenerationId: schroederSpatialSourceFamily?.sourceGenerationId ?? null,
+    sourceVelocityLanes: Object.freeze([17, 18, 19]),
+    momentWeight: 'pre-smear-positive-particle-metaball-value',
+    immutable: true,
+    readback: false,
+    authoritativeStateMutation: false,
+    get destroyed() { return motionFieldDestroyed; },
+    // The owner retires this only after its last submitted GPU consumer. No
+    // fence is inserted here: presentation already owns that queue boundary.
+    destroy() {
+      if (motionFieldDestroyed) return false;
+      motionFieldDestroyed = true;
+      motionFieldBuffer.destroy?.();
+      return true;
+    }
+  }) : null;
 
   let cleanupDone = false;
   const cleanup = () => {
@@ -9230,6 +9301,8 @@ export async function buildSphRenderFieldWebGpu({
     fieldRowsBufferBorrowed,
     fieldRowsBufferReused: fieldRowsBufferBorrowed,
     fieldRowsBufferOwnedByResult: !fieldRowsBufferBorrowed,
+    motionField: ownedMotionField,
+    motionFieldReadback: false,
     surfaceBufferRetained: Boolean(retainSurfaceBuffer),
     surfaceBufferByteLength: retainSurfaceBuffer ? surfaceTable.records.byteLength : 0,
     residentBufferLeaseLedger: renderFieldLeaseLedger,
@@ -9244,7 +9317,13 @@ export async function buildSphRenderFieldWebGpu({
   };
   if (retainFieldRowsBuffer) result.fieldRowsBuffer = fieldRowsBuffer;
   if (retainSurfaceBuffer) result.surfaceBuffer = surfaceBuffer;
-  if (retainFieldRowsBuffer || retainSurfaceBuffer) {
+  result.takeMotionField = () => {
+    const transferred = ownedMotionField;
+    ownedMotionField = null;
+    result.motionField = null;
+    return transferred?.destroyed ? null : transferred;
+  };
+  if (retainFieldRowsBuffer || retainSurfaceBuffer || retainMotionFieldBuffer) {
     const destroyedRenderFieldResourceKeys = new Set();
     const refreshRenderFieldLeaseSummary = () => {
       result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(renderFieldLeaseLedger);
@@ -9271,6 +9350,9 @@ export async function buildSphRenderFieldWebGpu({
     } = {}) => {
       invalidateSphRenderFieldSuccessorSourceLineage(result);
       cleanup();
+      ownedMotionField?.destroy();
+      ownedMotionField = null;
+      result.motionField = null;
       if (releaseLeases) result.releaseRenderFieldBufferLeases();
       if (retainFieldRowsBuffer) {
         destroyResidentBufferWithLease(renderFieldLeaseLedger, fieldRowsResourceKey, () => {

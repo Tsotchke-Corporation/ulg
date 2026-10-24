@@ -104,6 +104,15 @@ const ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS = Object.freeze({
   workerLocalRenderRowsProduced: true
 });
 
+const ISOSURFACE_SOURCE_INPUT_FIELDS = Object.freeze({
+  isosurfaceTemporalPresentation: false,
+  isosurfacePresentationMotionAgeS: 0,
+  isosurfacePresentationSourceTimeS: 0.011,
+  isosurfacePresentationMotionMethod: 'committed-source-mesh',
+  presentationOnly: false,
+  authoritativeStateMutation: false
+});
+
 test('worker offscreen presentation capability is fail-closed around transferred canvas ownership', () => {
   const notRequested = resolveUlgWorkerOffscreenPresentationCapability({
     requested: false,
@@ -938,6 +947,550 @@ test('worker offscreen display ownership hides native non-owner and reveals only
   assert.equal(worker.messages.length, disposedMessageCount);
 });
 
+function presentationPlaybackBridgeFixture(presentationPlaying = false) {
+  let worker;
+  class FakeWorker {
+    constructor() { worker = this; this.messages = []; this.listeners = []; }
+    postMessage(data) { this.messages.push(data); }
+    addEventListener(type, listener) {
+      if (type === 'message') this.listeners.push(listener);
+    }
+    removeEventListener(type, listener) {
+      this.listeners = this.listeners.filter((candidate) => candidate !== listener);
+    }
+    terminate() {}
+  }
+  const canvas = {
+    style: {}, setAttribute() {},
+    transferControlToOffscreen: () => ({})
+  };
+  const container = {
+    clientWidth: 64, clientHeight: 64,
+    appendChild(child) { child.parentNode = this; },
+    removeChild(child) { child.parentNode = null; },
+    ownerDocument: { createElement: () => canvas }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true, presentationPlaying, container, width: 64, height: 64,
+    workerFactory: FakeWorker, navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+  return { bridge, worker, canvas };
+}
+
+test('presentation playback is explicitly paused at init and revision-ordered before worker readiness', () => {
+  const { bridge, worker } = presentationPlaybackBridgeFixture();
+  const init = worker.messages[0];
+  assert.equal(init.type, 'init-offscreen-presentation');
+  assert.deepEqual(init.playbackState, { playing: false, revision: 0 });
+  assert.equal(bridge.status.workerReady, false);
+  const statusBefore = bridge.status;
+  const authorityBefore = {
+    lifecycle: bridge.lifecycleGeneration,
+    framebuffer: bridge.workerFramebufferEpoch,
+    owner: bridge.displayOwnerEpoch,
+    serial: bridge.workerFramebufferQueueCompletionSerialHighWater,
+    candidateMailbox: bridge.residentRenderCandidateMailbox
+  };
+  const playing = bridge.setPresentationPlaying(true);
+  assert.deepEqual(playing, { playing: true, revision: 1 });
+  const paused = bridge.setPresentationPlaying(false);
+  assert.deepEqual(paused, { playing: false, revision: 2 });
+  assert.equal(Object.isFrozen(paused), true);
+  assert.deepEqual(worker.messages.slice(1), [
+    { type: 'set-presentation-playback-state', playbackState: { playing: true, revision: 1 } },
+    { type: 'set-presentation-playback-state', playbackState: { playing: false, revision: 2 } }
+  ]);
+  assert.deepEqual(init.playbackState, { playing: false, revision: 0 });
+  assert.equal(bridge.setPresentationPlaying(false), paused);
+  assert.equal(worker.messages.length, 3, 'duplicate state is not another revision');
+  for (const malformed of [undefined, null, 'false', 0, 1, {}, { playing: false }]) {
+    assert.equal(bridge.setPresentationPlaying(malformed), false);
+  }
+  assert.equal(worker.messages.length, 3);
+  assert.equal(bridge.playbackState, paused);
+  assert.equal(bridge.status, statusBefore, 'playback cannot replace a source status');
+  assert.deepEqual({
+    lifecycle: bridge.lifecycleGeneration,
+    framebuffer: bridge.workerFramebufferEpoch,
+    owner: bridge.displayOwnerEpoch,
+    serial: bridge.workerFramebufferQueueCompletionSerialHighWater,
+    candidateMailbox: bridge.residentRenderCandidateMailbox
+  }, authorityBefore, 'playback is not a source/frame/authority reset');
+  bridge.dispose();
+});
+
+test('scene replacement seeds current playback and stale disposed bridge events cannot resume it', () => {
+  const old = presentationPlaybackBridgeFixture();
+  old.bridge.setPresentationPlaying(true);
+  const lateHandler = old.worker.listeners[0];
+  const replacement = presentationPlaybackBridgeFixture(old.bridge.playbackState.playing);
+  assert.deepEqual(replacement.worker.messages[0].playbackState, {
+    playing: true, revision: 0
+  }, 'new worker has its own revision namespace and current intent');
+  replacement.bridge.setPresentationPlaying(false);
+  const replacementPaused = replacement.bridge.playbackState;
+  old.bridge.dispose();
+  const oldMessageCount = old.worker.messages.length;
+  assert.equal(old.bridge.setPresentationPlaying(false).disposed, true);
+  lateHandler({ data: {
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    status: 'worker-offscreen-presentation-ready',
+    playbackState: { playing: true, revision: 9 }
+  } });
+  assert.equal(old.worker.messages.length, oldMessageCount);
+  assert.equal(old.bridge.status.status, 'worker-offscreen-presentation-disposed');
+  assert.equal(replacement.bridge.playbackState, replacementPaused);
+  assert.deepEqual(replacementPaused, { playing: false, revision: 1 });
+  replacement.bridge.dispose();
+});
+
+test('presentation playback caches without a worker and rejects invalid constructor state', () => {
+  const bridge = createUlgWorkerOffscreenPresentationBridge();
+  assert.deepEqual(bridge.setPresentationPlaying(true), { playing: true, revision: 1 });
+  assert.deepEqual(bridge.setPresentationPlaying(false), { playing: false, revision: 2 });
+  for (const malformed of [null, 0, 'true']) {
+    assert.throws(() => createUlgWorkerOffscreenPresentationBridge({
+      presentationPlaying: malformed
+    }), /presentationPlaying must be a boolean/);
+  }
+  bridge.dispose();
+});
+
+function particleResizeBridgeFixture({ motionAgeS = 0.025, keyframeOnly = false, resizeOnSetup = true } = {}) {
+  const fixture = presentationPlaybackBridgeFixture();
+  const { bridge, worker } = fixture;
+  const emit = (receipt) => {
+    for (const listener of worker.listeners) listener({ data: {
+      schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+      frameCount: receipt.frameCount, readyFrameCount: receipt.readyFrameCount,
+      workerOffscreenRenderRows: receipt
+    } });
+  };
+  const keyframe = {
+    ...COMMITTED_CANDIDATE_RECEIPT_FIELDS,
+    ...ADMITTED_KEYFRAME_PRESENTATION_RECEIPT_FIELDS,
+    ...IMPOSTOR_PRESENTATION_RECEIPT_FIELDS,
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_STATE_PRODUCER_SCHEMA,
+    renderRowsSchema: ULG_WORKER_OFFSCREEN_RENDER_ROWS_SCHEMA,
+    status: 'worker-offscreen-resident-particle-state-producer-rendered',
+    sphStep: 64, particleCount: 1, frameCount: 1, readyFrameCount: 1,
+    workerFramebufferEpoch: bridge.workerFramebufferEpoch,
+    displayOwnerEpoch: bridge.displayOwnerEpoch,
+    residentScheduleCandidatePresentation: true,
+    producerSourceKind: 'worker-retained-resident-stage-output',
+    producerSourceTransport: 'worker-retained-resident-stage-output',
+    sourceStageId: 'schroederSameLevelMechanics',
+    retainedParticleStateStatus: 'worker-retained-particle-state-ready'
+  };
+  emit(keyframe);
+  assert.equal(bridge.displayOwnerContentReady, true, 'keyframe fixture admitted');
+  const motion = {
+    ...keyframe,
+    frameCount: 2, readyFrameCount: 2,
+    motionFrameSchema: ULG_WORKER_OFFSCREEN_RESIDENT_PARTICLE_TEMPORAL_MOTION_FRAME_SCHEMA,
+    motionFrameStatus: 'worker-particle-temporal-motion-frame-presentation-opportunity',
+    motionFrameAdmitted: true, motionFrameGpuCompleted: true,
+    motionFramePresentationOpportunity: true,
+    motionFramePresentationOpportunityMethod: 'worker-request-animation-frame-after-gpu-completion',
+    motionFrameSerial: 1, motionFrameSubmittedSerial: 1,
+    motionSourceFrameCount: 1, motionSourceSphStep: 64,
+    motionAgeS, motionAgeSource: 'bounded-wall-clock',
+    motionMethod: 'bounded-keyframe-velocity-extrapolation',
+    motionVelocityBufferRetained: true,
+    presentationQueueCompletionCount: 4, presentationQueueCompletionSerial: 4
+  };
+  if (!keyframeOnly) {
+    emit(motion);
+    assert.equal(bridge.displayOwnerLastRenderedContent.motionAgeS, motionAgeS);
+  }
+  const before = bridge.displayOwnerLastRenderedContent;
+  if (resizeOnSetup) bridge.resize({ width: 80, height: 72, devicePixelRatio: 1 });
+  const redraw = {
+    ...motion,
+    workerFramebufferEpoch: bridge.workerFramebufferEpoch,
+    frameCount: 3, readyFrameCount: 3,
+    motionFrameSerial: 2, motionFrameSubmittedSerial: 2,
+    motionAgeS: keyframeOnly ? 0 : motionAgeS,
+    motionAgeSource: 'explicit-frozen-redraw',
+    presentationQueueCompletionCount: 5, presentationQueueCompletionSerial: 5
+  };
+  return { ...fixture, emit, keyframe, before, redraw };
+}
+
+for (const keyframeOnly of [false, true]) {
+  test(`particle resize admits a fresh frozen redraw from the exact ${keyframeOnly ? 'keyframe age zero' : 'last admitted motion age'}`, () => {
+    const { bridge, canvas, emit, before, redraw } = particleResizeBridgeFixture({ keyframeOnly });
+    assert.equal(bridge.workerCanvasLastRenderedContent, null);
+    assert.equal(bridge.displayOwnerLastRenderedContent, null);
+    assert.equal(bridge.displayOwnerContentReady, false);
+    assert.equal(canvas.style.visibility, 'hidden', 'old pixels stay invalidated');
+    emit(redraw);
+    assert.equal(bridge.displayOwnerContentReady, true, 'new-epoch frozen redraw is admitted');
+    assert.equal(canvas.style.visibility, 'visible');
+    assert.equal(bridge.displayOwnerLastRenderedContent.sphStep, before.sphStep);
+    assert.equal(bridge.displayOwnerLastRenderedContent.motionAgeS, keyframeOnly ? 0 : before.motionAgeS);
+    assert.equal(bridge.displayOwnerLastRenderedContent.workerFramebufferEpoch, redraw.workerFramebufferEpoch);
+    assert.ok(bridge.workerFramebufferQueueCompletionSerialHighWater > before.presentationQueueCompletionSerial);
+    bridge.dispose();
+  });
+}
+
+test('particle resize rapid viewport changes accept only the newest epoch and preserve replay high-water', () => {
+  const { bridge, canvas, emit, redraw } = particleResizeBridgeFixture();
+  const firstResizeEpoch = bridge.workerFramebufferEpoch;
+  bridge.resize({ width: 96, height: 80, devicePixelRatio: 1 });
+  assert.equal(bridge.workerFramebufferEpoch, firstResizeEpoch + 1);
+  emit(redraw);
+  assert.equal(bridge.displayOwnerContentReady, false, 'intermediate-epoch draw is stale');
+  assert.equal(canvas.style.visibility, 'hidden');
+  const current = {
+    ...redraw, workerFramebufferEpoch: bridge.workerFramebufferEpoch,
+    frameCount: 4, readyFrameCount: 4,
+    motionFrameSerial: 3, motionFrameSubmittedSerial: 3,
+    presentationQueueCompletionCount: 6, presentationQueueCompletionSerial: 6
+  };
+  emit({ ...current, presentationQueueCompletionCount: 4, presentationQueueCompletionSerial: 4 });
+  assert.equal(bridge.displayOwnerContentReady, false, 'resize cannot reset worker queue serial floor');
+  emit(current);
+  assert.equal(bridge.displayOwnerContentReady, true);
+  assert.equal(bridge.workerParticleResizeSource, null, 'binding consumed after true admission');
+  const admitted = bridge.displayOwnerLastRenderedContent;
+  emit(current);
+  assert.equal(bridge.displayOwnerLastRenderedContent, admitted, 'exact receipt replay is rejected');
+  bridge.resize({ width: 104, height: 88, devicePixelRatio: 1 });
+  emit({ ...current, workerFramebufferEpoch: bridge.workerFramebufferEpoch,
+    frameCount: 5, readyFrameCount: 5, motionFrameSerial: 4, motionFrameSubmittedSerial: 4,
+    presentationQueueCompletionCount: 7, presentationQueueCompletionSerial: 7 });
+  assert.equal(bridge.displayOwnerContentReady, true, 'subsequent resize binds the newly admitted frozen frame');
+  assert.equal(bridge.displayOwnerLastRenderedContent.motionAgeS, 0.025);
+  bridge.dispose();
+});
+
+test('particle resize recovery rejects mismatched source age authority and incomplete framebuffer proofs', () => {
+  const cases = [
+    ['schedule', { scheduleId: 'schedule:other' }],
+    ['source generation', { residentExecutionGeneration: 8 }],
+    ['source step', { sphStep: 65, motionSourceSphStep: 65 }],
+    ['source keyframe', { motionSourceFrameCount: 9 }],
+    ['source lane', { laneId: 'lane:other' }],
+    ['source state', { stateKey: 'state:other' }],
+    ['source ordinal', { stepOrdinal: 2 }],
+    ['authority lease', { computeManagerLeaseId: 'lease:other' }],
+    ['advanced age', { motionAgeS: 0.026 }],
+    ['rewound age', { motionAgeS: 0 }],
+    ['missing age', { motionAgeS: null }],
+    ['string age', { motionAgeS: '0.025' }],
+    ['unbounded method', { motionAgeSource: 'bounded-wall-clock' }],
+    ['motion serial replay', { motionFrameSerial: 1 }],
+    ['GPU incomplete', { motionFrameGpuCompleted: false }],
+    ['no opportunity', { motionFramePresentationOpportunity: false }],
+    ['wrong queue method', { presentationQueueCompletionMethod: 'unproved' }],
+    ['queue replay', { presentationQueueCompletionCount: 4, presentationQueueCompletionSerial: 4 }],
+    ['authority incomplete', { stateManagerCommitAccepted: false }],
+    ['terminal fence incomplete', { terminalFenceSatisfied: false }],
+    ['old framebuffer epoch', { workerFramebufferEpoch: 1 }],
+    ['unsolicited future framebuffer epoch', { workerFramebufferEpoch: 3 }],
+    ['old framebuffer counters', { frameCount: 2, readyFrameCount: 2 }],
+    ['QOS is not frozen redraw', { physicsQueuePrefixCoverage: 'physics-queue-prefix-included',
+      physicsHostQueueFenceParticipation: true,
+      motionPresentationQosBoundary: { submissionOrdinal: 1, completedSubstepCount: 2,
+        totalSubstepCount: 64, chunkStepCount: 2 } }]
+  ];
+  for (const [label, changes] of cases) {
+    const { bridge, canvas, emit, redraw } = particleResizeBridgeFixture();
+    emit({ ...redraw, ...changes });
+    assert.equal(bridge.displayOwnerContentReady, false, label);
+    assert.equal(bridge.workerCanvasLastRenderedContent, null, label);
+    assert.equal(canvas.style.visibility, 'hidden', label);
+    assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 4, label);
+    bridge.dispose();
+  }
+});
+
+for (const resizeOnSetup of [false, true]) {
+  test(`background appearance preserves the exact ${resizeOnSetup ? 'resizing' : 'visible'} particle source`, () => {
+    const { bridge, worker, canvas, emit, redraw } = particleResizeBridgeFixture({ resizeOnSetup });
+    const before = {
+      epoch: bridge.workerFramebufferEpoch, ownerEpoch: bridge.displayOwnerEpoch,
+      serial: bridge.workerFramebufferQueueCompletionSerialHighWater,
+      content: bridge.workerCanvasLastRenderedContent,
+      ready: bridge.displayOwnerContentReady,
+      resizeSource: bridge.workerParticleResizeSource,
+      visibility: canvas.style.visibility
+    };
+    const appearance = { backgroundImageUrl: null, backgroundColor: '#112233',
+      lightingProfile: { mode: 'normal' }, backgroundClearValue: { r: 1 / 15, g: 2 / 15, b: 3 / 15, a: 1 } };
+    const original = structuredClone(appearance);
+    bridge.setBackgroundColor('#112233', { nativeSurfaceAppearance: appearance });
+    const message = worker.messages.at(-1);
+    assert.equal(message.type, 'update-presentation-background');
+    assert.equal(message.workerFramebufferEpoch, before.epoch);
+    assert.deepEqual(message.nativeSurfaceAppearance, original);
+    appearance.lightingProfile.mode = 'dark-lab';
+    assert.deepEqual(message.nativeSurfaceAppearance, original, 'snapshot is independent of later UI mutation');
+    assert.equal(bridge.workerFramebufferEpoch, before.epoch);
+    assert.equal(bridge.displayOwnerEpoch, before.ownerEpoch);
+    assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, before.serial);
+    assert.equal(bridge.workerCanvasLastRenderedContent, before.content);
+    assert.equal(bridge.displayOwnerContentReady, before.ready);
+    assert.equal(bridge.workerParticleResizeSource, before.resizeSource);
+    assert.equal(canvas.style.visibility, before.visibility, 'message neither hides nor reveals unproved content');
+    emit(redraw);
+    assert.equal(bridge.displayOwnerContentReady, true);
+    assert.equal(bridge.displayOwnerLastRenderedContent.sphStep, 64);
+    assert.equal(bridge.displayOwnerLastRenderedContent.motionAgeS, 0.025);
+    assert.ok(bridge.workerFramebufferQueueCompletionSerialHighWater > before.serial);
+    const count = worker.messages.length;
+    bridge.dispose();
+    assert.equal(bridge.setBackgroundColor('#ffffff').disposed, true);
+    assert.equal(worker.messages.length, count + 1, 'disposed appearance cannot post after dispose');
+  });
+}
+
+test('particle resize binding retires on ownership reset disposal or replacement', () => {
+  const cases = [
+    ['explicit presentation clear', (bridge) => bridge.clearPresentation({ backgroundColor: '#112233' })],
+    ['ownership retirement', (bridge) => {
+      bridge.setDisplayOwner({ owner: 'none' });
+      bridge.setDisplayOwner({ owner: 'worker' });
+    }],
+    ['native ownership clear', (bridge) => {
+      bridge.setDisplayOwner({ owner: 'main-native' });
+      bridge.setDisplayOwner({ owner: 'worker' });
+    }],
+    ['particle source reset', (bridge) => bridge.clearResidentParticleStateProducerCache()],
+    ['render producer reset', (bridge) => bridge.clearResidentRenderProducerSourceCache()],
+    ['pending authority handoff', (bridge) => bridge.presentCommittedResidentScheduleCandidate()],
+    ['dispose', (bridge) => bridge.dispose()]
+  ];
+  for (const [label, retire] of cases) {
+    const { bridge, emit, redraw } = particleResizeBridgeFixture();
+    assert.ok(bridge.workerParticleResizeSource, label);
+    retire(bridge);
+    assert.equal(bridge.workerParticleResizeSource, null, label);
+    emit({ ...redraw, workerFramebufferEpoch: 1,
+      motionAgeS: 0.03, motionAgeSource: 'bounded-wall-clock' });
+    assert.equal(bridge.workerParticleResizeSource, null,
+      label + ' cannot be undone by a late old-frame proof');
+    emit({ ...redraw, workerFramebufferEpoch: bridge.workerFramebufferEpoch });
+    assert.equal(bridge.displayOwnerContentReady, false, label);
+    bridge.dispose();
+  }
+  const old = particleResizeBridgeFixture();
+  const lateHandler = old.worker.listeners[0];
+  old.bridge.dispose();
+  const replacement = presentationPlaybackBridgeFixture();
+  const lateReceipt = { ...old.redraw, workerFramebufferEpoch: replacement.bridge.workerFramebufferEpoch };
+  lateHandler({ data: { schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3, readyFrameCount: 3, workerOffscreenRenderRows: lateReceipt } });
+  for (const listener of replacement.worker.listeners) listener({ data: {
+    schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 3, readyFrameCount: 3, workerOffscreenRenderRows: lateReceipt
+  } });
+  assert.equal(replacement.bridge.displayOwnerContentReady, false,
+    'a new worker lifecycle never inherits an old resize source');
+  replacement.bridge.dispose();
+});
+
+test('particle resize pending successor keyframe cannot resurrect the old source before its own proof', () => {
+  const { bridge, emit, redraw, keyframe } = particleResizeBridgeFixture();
+  const pending = {
+    ...keyframe, residentExecutionGeneration: 8, sphStep: 128,
+    scheduleId: 'schedule:successor', workerFramebufferEpoch: bridge.workerFramebufferEpoch,
+    frameCount: 3, readyFrameCount: 3,
+    presentationFrameAdmitted: false, presentationFrameGpuCompleted: false,
+    presentationFramePresentationOpportunity: false,
+    presentationQueueCompletionCount: 5, presentationQueueCompletionSerial: 5
+  };
+  emit(pending);
+  assert.equal(bridge.workerParticleResizeSource, null);
+  emit(redraw);
+  assert.equal(bridge.displayOwnerContentReady, false,
+    'last admitted predecessor cannot bypass a pending newer keyframe');
+  emit({ ...pending, presentationFrameAdmitted: true, presentationFrameGpuCompleted: true,
+    presentationFramePresentationOpportunity: true, frameCount: 4, readyFrameCount: 4,
+    presentationQueueCompletionCount: 6, presentationQueueCompletionSerial: 6 });
+  assert.equal(bridge.displayOwnerContentReady, true, 'new keyframe still admits by its own proof');
+  assert.equal(bridge.displayOwnerLastRenderedContent.sphStep, 128);
+  bridge.dispose();
+});
+
+test('particle resize source cannot outlive a newer candidate even after mailbox takeLatest', () => {
+  const { bridge, worker, emit, redraw, keyframe } = particleResizeBridgeFixture();
+  const candidate = {
+    schema: ULG_RESIDENT_RENDER_CANDIDATE_SCHEMA,
+    presentationLaneEpoch: keyframe.presentationLaneEpoch,
+    laneId: keyframe.laneId, stateKey: keyframe.stateKey,
+    version: { residentExecutionGeneration: 8, nextStep: 128,
+      scheduleId: 'schedule:new-candidate', stepOrdinal: 1 },
+    epochIdentity: { storageGeneration: 8, physicsTick: 128, physicsSubstep: 0,
+      positionEpoch: 1, topologyEpoch: 1, chartEpoch: 1, levelEpoch: 1, supportEpoch: 1 }
+  };
+  for (const listener of worker.listeners) listener({ data: {
+    type: 'resident-schedule-candidate', candidate
+  } });
+  assert.equal(bridge.workerParticleResizeSource, null);
+  assert.ok(bridge.residentRenderCandidateMailbox.takeLatest());
+  bridge.resize({ width: 96, height: 88, devicePixelRatio: 1 });
+  emit({ ...redraw, workerFramebufferEpoch: bridge.workerFramebufferEpoch });
+  assert.equal(bridge.displayOwnerContentReady, false);
+  bridge.dispose();
+});
+
+test('particle resize cannot rearm an explicitly retired source from its still-visible receipt', () => {
+  for (const method of ['clearResidentParticleStateProducerCache', 'clearResidentRenderProducerSourceCache']) {
+    const { bridge, emit, redraw } = particleResizeBridgeFixture({ resizeOnSetup: false });
+    bridge[method]();
+    assert.equal(bridge.displayOwnerContentReady, true, 'retiring source does not itself erase visible pixels');
+    bridge.resize({ width: 80, height: 72, devicePixelRatio: 1 });
+    emit({ ...redraw, workerFramebufferEpoch: bridge.workerFramebufferEpoch });
+    assert.equal(bridge.displayOwnerContentReady, false, method + ' must remain retired on later resize');
+    bridge.dispose();
+  }
+});
+
+test('particle resize binds a late proved old-epoch motion frame without admitting its invalidated pixels', () => {
+  const { bridge, canvas, emit, redraw, before } = particleResizeBridgeFixture();
+  const late = { ...redraw, workerFramebufferEpoch: before.workerFramebufferEpoch,
+    motionAgeS: 0.03, motionAgeSource: 'bounded-wall-clock' };
+  emit(late);
+  assert.equal(bridge.displayOwnerContentReady, false);
+  assert.equal(bridge.workerCanvasLastRenderedContent, null);
+  assert.equal(bridge.displayOwnerLastRenderedContent, null);
+  assert.equal(canvas.style.visibility, 'hidden');
+  assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 4,
+    'retired pixels are not an admitted current framebuffer');
+  emit({ ...redraw, motionAgeS: late.motionAgeS, frameCount: 4, readyFrameCount: 4,
+    motionFrameSerial: 3, motionFrameSubmittedSerial: 3 });
+  assert.equal(bridge.displayOwnerContentReady, false,
+    'new framebuffer serial must exceed non-visible late proof B as well as visible A');
+  emit({ ...redraw, motionAgeS: late.motionAgeS, frameCount: 4, readyFrameCount: 4,
+    motionFrameSerial: 3, motionFrameSubmittedSerial: 3,
+    presentationQueueCompletionCount: 6, presentationQueueCompletionSerial: 6 });
+  assert.equal(bridge.displayOwnerContentReady, true,
+    'fresh frozen redraw matches the exact worker-admitted old-epoch age');
+  assert.equal(bridge.displayOwnerLastRenderedContent.motionAgeS, 0.03);
+  bridge.dispose();
+});
+
+test('particle resize non-visible late proof remains exact-source ordered and cannot regress age', () => {
+  const cases = [
+    ['regressed age', { motionAgeS: 0.024 }],
+    ['missing age', { motionAgeS: null }],
+    ['wrong source', { sphStep: 65, motionSourceSphStep: 65 }],
+    ['wrong source keyframe', { motionSourceFrameCount: 9 }],
+    ['wrong lease', { computeManagerLeaseId: 'lease:other' }],
+    ['no authority', { stateManagerCommitAccepted: false }],
+    ['no GPU proof', { motionFrameGpuCompleted: false }],
+    ['no presentation opportunity', { motionFramePresentationOpportunity: false }],
+    ['serial replay', { presentationQueueCompletionCount: 4, presentationQueueCompletionSerial: 4 }],
+    ['motion replay', { motionFrameSerial: 1 }],
+    ['before original framebuffer', { workerFramebufferEpoch: 0 }],
+    ['unrequested future framebuffer', { workerFramebufferEpoch: 3 }]
+  ];
+  for (const [label, changes] of cases) {
+    const { bridge, emit, before, redraw } = particleResizeBridgeFixture();
+    emit({ ...redraw, workerFramebufferEpoch: before.workerFramebufferEpoch,
+      motionAgeS: 0.03, motionAgeSource: 'bounded-wall-clock', ...changes });
+    assert.equal(bridge.displayOwnerContentReady, false, label);
+    assert.equal(bridge.workerParticleResizeSource.receipt.motionAgeS, 0.025, label);
+    assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 4, label);
+    emit(redraw);
+    assert.equal(bridge.displayOwnerContentReady, true,
+      label + ': valid original frozen source remains eligible');
+    bridge.dispose();
+  }
+});
+
+test('preview camera stream snapshots appearance and forwards the latest appearance without a source frame', () => {
+  let worker;
+  class FakeWorker {
+    constructor() { worker = this; this.messages = []; }
+    postMessage(data) { this.messages.push(data); }
+    addEventListener() {}
+    terminate() {}
+  }
+  const canvas = {
+    style: {}, setAttribute() {},
+    transferControlToOffscreen: () => ({})
+  };
+  const container = {
+    clientWidth: 64, clientHeight: 64,
+    appendChild(child) { child.parentNode = this; },
+    removeChild(child) { child.parentNode = null; },
+    ownerDocument: { createElement: () => canvas }
+  };
+  const bridge = createUlgWorkerOffscreenPresentationBridge({
+    requested: true, container, width: 64, height: 64,
+    workerFactory: FakeWorker, navigatorRef: { gpu: {} },
+    windowRef: { document: container.ownerDocument }
+  });
+  const matrix = new Float32Array(16);
+  for (const index of [0, 5, 10, 15]) matrix[index] = 1;
+  const cameraPositionM = new Float32Array([1, 2, 3]);
+  const appearance = {
+    lightingProfile: {
+      mode: 'normal', ambientIntensity: 1.4, hemisphereIntensity: 0.9,
+      keyIntensity: 1.1, fillIntensity: 0.5, environmentIntensity: 1,
+      nativeAmbientSuppression: 0, nativeDirectSuppression: 0,
+      nativeEnvironmentSuppression: 0, containerWireOpacity: 0.6,
+      containerGridOpacity: 1, nativeContainerWireOpacity: 0.42
+    },
+    backgroundImageUrl: '/background.webp',
+    backgroundColor: '#18222b',
+    backgroundClearValue: { r: 0, g: 0, b: 0, a: 1 }
+  };
+  const originalAppearance = structuredClone(appearance);
+  const initialStatus = bridge.status;
+  const initialEpoch = bridge.workerFramebufferEpoch;
+  bridge.updatePreviewViewProjection(matrix, {
+    cameraPositionM, nativeSurfaceAppearance: appearance
+  });
+  const first = worker.messages.at(-1);
+  assert.deepEqual(first.nativeSurfaceAppearance, originalAppearance);
+  assert.notEqual(first.nativeSurfaceAppearance, appearance);
+  assert.notEqual(first.nativeSurfaceAppearance.lightingProfile, appearance.lightingProfile);
+  assert.notEqual(first.nativeSurfaceAppearance.backgroundClearValue, appearance.backgroundClearValue);
+  matrix[0] = 2;
+  cameraPositionM[0] = 9;
+  appearance.lightingProfile.mode = 'dark-lab';
+  appearance.lightingProfile.keyIntensity = 0;
+  appearance.backgroundImageUrl = null;
+  appearance.backgroundClearValue.r = 0.25;
+  assert.equal(first.viewProjectionMatrix[0], 1);
+  assert.deepEqual(first.cameraPositionM, [1, 2, 3]);
+  assert.deepEqual(first.nativeSurfaceAppearance, originalAppearance);
+
+  // Two appearance changes at exactly the same camera must both reach the
+  // worker; its redraw coalescer, not this bridge, selects the latest view.
+  const beforeChanges = worker.messages.length;
+  bridge.updatePreviewViewProjection(matrix, { nativeSurfaceAppearance: appearance });
+  appearance.backgroundClearValue.r = 0.5;
+  bridge.updatePreviewViewProjection(matrix, { nativeSurfaceAppearance: appearance });
+  assert.equal(worker.messages.length, beforeChanges + 2);
+  assert.equal(worker.messages.at(-2).nativeSurfaceAppearance.backgroundClearValue.r, 0.25);
+  assert.equal(worker.messages.at(-1).nativeSurfaceAppearance.backgroundClearValue.r, 0.5);
+  assert.equal(worker.messages.at(-1).nativeSurfaceAppearance.backgroundImageUrl, null);
+  assert.equal(worker.messages.at(-1).nativeSurfaceAppearance.lightingProfile.keyIntensity, 0);
+  bridge.updatePreviewViewProjection(matrix, { cameraPositionM });
+  assert.equal(Object.hasOwn(worker.messages.at(-1), 'nativeSurfaceAppearance'), false);
+  assert.equal(Object.hasOwn(worker.messages.at(-1), 'sphStep'), false);
+  assert.equal(bridge.workerCanvasLastRenderedContent, null);
+  assert.equal(bridge.committedResidentSchedulePresentationStatus, null);
+  assert.equal(bridge.workerFramebufferEpoch, initialEpoch);
+  assert.equal(bridge.status, initialStatus, 'camera/appearance stream does not publish source state');
+
+  const messageCount = worker.messages.length;
+  assert.throws(() => bridge.updatePreviewViewProjection(matrix, {
+    nativeSurfaceAppearance: {
+      ...appearance, lightingProfile: { mode: 'normal', invalid: () => {} }
+    }
+  }), /clone/i);
+  assert.equal(worker.messages.length, messageCount);
+  bridge.dispose();
+});
+
 test('worker true-isosurface enqueue advances continuation without claiming pixels', () => {
   let worker = null;
   class FakeWorker {
@@ -1096,6 +1649,7 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
           'water-droplet-scattering'
         ]
       },
+      ...ISOSURFACE_SOURCE_INPUT_FIELDS,
       workerOwnedParticipatingMediumPresentation: {
         schema:
           'peercompute.ulg.worker-participating-medium-presentation.v0',
@@ -1133,6 +1687,9 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
   assert.equal(canvas.style.visibility, 'visible');
   assert.equal(bridge.displayOwnerContentReady, true);
   assert.equal(bridge.displayOwnerPresentedSphStep, 11);
+  for (const [field, value] of Object.entries(ISOSURFACE_SOURCE_INPUT_FIELDS)) {
+    assert.equal(bridge.workerCanvasLastRenderedContent[field], value, field);
+  }
   assert.equal(
     bridge.workerCanvasLastRenderedContent.presentationGeometry,
     ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
@@ -1194,6 +1751,11 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
 
   const redrawReceipt = {
     ...common,
+    ...ISOSURFACE_SOURCE_INPUT_FIELDS,
+    isosurfaceTemporalPresentation: true,
+    isosurfacePresentationMotionAgeS: 0.02,
+    isosurfacePresentationMotionMethod: 'bounded-gpu-field-velocity-extrapolation',
+    presentationOnly: true,
     status:
       ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_RENDERED_STATUS,
     frameCount: 2,
@@ -1229,6 +1791,29 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
   });
   assert.equal(bridge.workerCanvasLastRenderedContent.frameCount, 2);
   assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 2);
+  assert.equal(bridge.workerCanvasLastRenderedContent.isosurfacePresentationMotionAgeS, 0.02);
+  for (const [field, value] of [
+    ['isosurfacePresentationMotionAgeS', 0.01],
+    ['isosurfacePresentationMotionAgeS', NaN],
+    ['isosurfacePresentationMotionAgeS', null],
+    ['isosurfacePresentationSourceTimeS', 0.012],
+    ['isosurfaceTemporalPresentation', false],
+    ['isosurfacePresentationMotionMethod', 'camera-redraw'],
+    ['presentationOnly', false], ['authoritativeStateMutation', true],
+    ['requestGeneration', 0]
+  ]) {
+    worker.emit({
+      schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+      frameCount: 3, readyFrameCount: 3,
+      workerOffscreenRenderRows: {
+        ...redrawReceipt, frameCount: 3, readyFrameCount: 3,
+        presentationQueueCompletionCount: 3, presentationQueueCompletionSerial: 3,
+        [field]: value
+      }
+    });
+    assert.equal(bridge.workerCanvasLastRenderedContent.frameCount, 2, field);
+    assert.equal(bridge.workerCanvasLastRenderedContent.isosurfacePresentationMotionAgeS, 0.02, field);
+  }
 
   worker.emit({
     schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
@@ -1376,6 +1961,50 @@ test('worker true-isosurface enqueue advances continuation without claiming pixe
   assert.equal(bridge.workerCanvasLastRenderedContent.workerFramebufferEpoch, 2);
   assert.equal(bridge.workerFramebufferQueueCompletionSerialHighWater, 4);
   assert.equal(canvas.style.visibility, 'visible');
+  const boundaryReceipt = {
+    ...unseenQueueSerialAfterResize,
+    frameCount: 5, readyFrameCount: 5, workerFramebufferEpoch: 2,
+    presentationQueueCompletionCount: 5, presentationQueueCompletionSerial: 5,
+    isosurfacePresentationMotionAgeS: 0.03,
+    physicsQueuePrefixCoverage: 'physics-queue-prefix-included',
+    physicsHostQueueFenceParticipation: true,
+    physicsContinuationBlocked: true,
+    presentationQosHostQueueFenceCount: 1,
+    motionPresentationQosBoundary: {
+      submissionOrdinal: 1, completedSubstepCount: 2,
+      totalSubstepCount: 64, chunkStepCount: 2
+    }
+  };
+  for (const mutate of [
+    (row) => {
+      for (const field of Object.keys(ISOSURFACE_SOURCE_INPUT_FIELDS)) delete row[field];
+    },
+    (row) => { Object.assign(row, ISOSURFACE_SOURCE_INPUT_FIELDS); },
+    (row) => { row.motionPresentationQosBoundary = null; },
+    (row) => { row.motionPresentationQosBoundary.completedSubstepCount = 64; },
+    (row) => { row.motionPresentationQosBoundary.chunkStepCount = 3; },
+    (row) => { row.physicsHostQueueFenceParticipation = false; },
+    (row) => { row.physicsContinuationBlocked = false; },
+    (row) => { row.presentationQosHostQueueFenceCount = 0; },
+    (row) => { row.presentationQueueCompletionSerial = 4; }
+  ]) {
+    const row = structuredClone(boundaryReceipt);
+    mutate(row);
+    worker.emit({ schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+      frameCount: 5, readyFrameCount: 5, workerOffscreenRenderRows: row });
+    assert.equal(bridge.workerCanvasLastRenderedContent.frameCount, 4);
+  }
+  worker.emit({ schema: ULG_WORKER_OFFSCREEN_PRESENTATION_SCHEMA,
+    frameCount: 5, readyFrameCount: 5, workerOffscreenRenderRows: boundaryReceipt });
+  const compactBoundary = bridge.workerCanvasLastRenderedContent;
+  assert.equal(compactBoundary.frameCount, 5);
+  assert.equal(compactBoundary.isosurfacePresentationMotionAgeS, 0.03);
+  assert.equal(compactBoundary.physicsQueuePrefixCoverage, 'physics-queue-prefix-included');
+  assert.equal(compactBoundary.physicsHostQueueFenceParticipation, true);
+  assert.equal(compactBoundary.physicsContinuationBlocked, true);
+  assert.equal(compactBoundary.presentationQosHostQueueFenceCount, 1);
+  assert.deepEqual(compactBoundary.motionPresentationQosBoundary, boundaryReceipt.motionPresentationQosBoundary);
+  assert.equal(Object.isFrozen(compactBoundary.motionPresentationQosBoundary), true);
   bridge.dispose();
 });
 

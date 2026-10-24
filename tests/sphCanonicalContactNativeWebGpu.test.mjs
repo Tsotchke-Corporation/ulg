@@ -4,6 +4,8 @@ import { test } from 'node:test';
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_CONTACT === '1';
 const RUN_NATIVE_TIMESTAMPS =
   process.env.ULG_RUN_NATIVE_CONTACT_TIMESTAMPS === '1';
+const RUN_SUBMISSION_BATCH_COMPARISON =
+  process.env.ULG_RUN_NATIVE_CONTACT_SUBMISSION_BATCHES === '1';
 const BASE_URL = process.env.ULG_CONTACT_BASE_URL
   || 'https://127.0.0.1:5174/';
 const CHROME = process.env.ULG_CONTACT_CHROME
@@ -34,7 +36,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
-    native = await page.evaluate(async (runMaterializeTimestampCampaign) => {
+    native = await page.evaluate(async ({ runMaterializeTimestampCampaign, runSubmissionBatchComparison }) => {
       const fail = (message) => {
         throw new Error(message);
       };
@@ -386,7 +388,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
       );
       let epochOrdinal = 0;
 
-      const runFixture = async ({
+      const runFixtureMode = async ({
         name,
         particles,
         postPositions,
@@ -406,6 +408,8 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
         useAggregateHierarchy = false,
         useLevelAssignmentSource = false,
         phaseLineageCapacity = 0,
+        submissionBatches = false,
+        captureBatchComparison = false,
         verify
       }) => {
         epochOrdinal += 1;
@@ -840,15 +844,49 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
           const applyStartedAtMs = measureApplyDuration
             ? performance.now()
             : null;
-          const encoder = device.createCommandEncoder({
+          let encoder = device.createCommandEncoder({
             label: `ulg-native-contact-${name}-deferred-apply`
           });
           device.pushErrorScope('validation');
-          proposal.encodeApply(encoder, {
+          const applyOptions = {
             stateBuffer: postStateBuffer,
             mechanicsBuffer: mlsUpload.mechanicsBuffer,
             selectedLevel: 0
-          });
+          };
+          const batchBoundaries = [];
+          if (submissionBatches) {
+            requireTrue(proposal.supportsSubmissionGaps === true,
+              `${name}: real unprofiled proposal did not support submission gaps`);
+            const batches = proposal.encodeApplyBatches(encoder, {
+              ...applyOptions, submissionGaps: true
+            });
+            let batch = batches.next();
+            while (!batch.done) {
+              batchBoundaries.push(batch.value.completedJacobiIterations);
+              device.queue.submit([encoder.finish()]);
+              // A different GPU command between solver batches must not
+              // expose an unsealed candidate in the canonical destination.
+              const intermediate = new Uint32Array(await readBuffer(
+                postStateBuffer, postState.byteLength,
+                `ulg-native-contact-${name}-precommit-${batchBoundaries.length}`
+              ));
+              const expected = new Uint32Array(postStateBeforeApply.buffer);
+              requireTrue(intermediate.every((word, index) => word === expected[index]),
+                `${name}: partial contact batch mutated the canonical destination`);
+              requireTrue(proposal.submissionObserved === false
+                && proposal.canReleaseQueueOrdered() === false,
+              `${name}: partial batch fabricated terminal submission or cleanup authority`);
+              encoder = device.createCommandEncoder({
+                label: `ulg-native-contact-${name}-batch-${batchBoundaries.length}`
+              });
+              batch = batches.next(encoder);
+            }
+            requireTrue(batch.value === true, `${name}: batched contact did not complete encoding`);
+            requireTrue(JSON.stringify(batchBoundaries) === '[4,8,12,16]',
+              `${name}: contact iteration submission boundaries changed`);
+          } else {
+            proposal.encodeApply(encoder, applyOptions);
+          }
           device.queue.submit([encoder.finish()]);
           await device.queue.onSubmittedWorkDone();
           if (materializeTimestampRecorder) {
@@ -1570,6 +1608,14 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
             }, {}),
             stateMutationCount
           };
+          const batchComparisonInput = captureBatchComparison ? {
+            finalStateWords: Array.from(new Uint32Array(finalStateBytes)),
+            evidenceStatus: evidence[evidenceWord.statusFlags],
+            failureMask, stageMask,
+            rowCounts: graphDiagnostic.rowCounts,
+            batchBoundaries,
+            encodedDispatchCount: proposal.encodedDispatchCount
+          } : null;
 
           if (inspectGraphOutcome) {
             requireTrue(
@@ -1587,6 +1633,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
               );
               return {
                 name,
+                ...(batchComparisonInput ? { batchComparisonInput } : {}),
                 particleCount: packed.particleCount,
                 ...(measureApplyDuration ? { applyDurationMs } : {}),
                 ...(materializeTimestampEvidence
@@ -1629,6 +1676,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
             );
             return {
               name,
+              ...(batchComparisonInput ? { batchComparisonInput } : {}),
               particleCount: packed.particleCount,
               evidenceStatus: evidence[2],
               graphFailureMask: graphControl[14],
@@ -1938,6 +1986,7 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
           });
           return {
             name,
+            ...(batchComparisonInput ? { batchComparisonInput } : {}),
             particleCount: packed.particleCount,
             aggregateHierarchyEnabled:
               proposal.aggregateHierarchyEnabled === true,
@@ -2012,6 +2061,30 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
           activeNodeBuffer.destroy();
           levelAssignmentBuffer?.destroy();
         }
+      };
+
+      const submissionBatchComparisons = [];
+      const runFixture = async (options) => {
+        const compare = runSubmissionBatchComparison
+          && !options.measureApplyDuration && !options.captureMaterializeTimestamp;
+        const ordinary = await runFixtureMode({ ...options, captureBatchComparison: compare });
+        if (!compare) return ordinary;
+        const batched = await runFixtureMode({ ...options,
+          submissionBatches: true, captureBatchComparison: true });
+        const { batchBoundaries: ordinaryBoundaries, ...expected } = ordinary.batchComparisonInput;
+        const { batchBoundaries, ...actual } = batched.batchComparisonInput;
+        requireTrue(ordinaryBoundaries.length === 0
+          && JSON.stringify(batchBoundaries) === '[4,8,12,16]',
+        `${options.name}: comparison did not exercise both submission routes`);
+        requireTrue(JSON.stringify(actual) === JSON.stringify(expected),
+          `${options.name}: batching changed exact GPU output words, terminal flags or dispatch counts`);
+        submissionBatchComparisons.push({ name: options.name,
+          particleCount: ordinary.particleCount, batchBoundaries,
+          comparedStateWordCount: actual.finalStateWords.length,
+          encodedDispatchCount: actual.encodedDispatchCount,
+          exactGpuOutputMatch: true, intermediateCanonicalStateUnchanged: true });
+        delete ordinary.batchComparisonInput;
+        return ordinary;
       };
 
       const cases = [];
@@ -4412,9 +4485,11 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
         allDormantPhaseContact,
         denseIntegratedRotatedContact,
         denseContactPerformance,
+        submissionBatchComparisons,
         mechanicalMaterializeTimestampCampaign
       };
-    }, RUN_NATIVE_TIMESTAMPS);
+    }, { runMaterializeTimestampCampaign: RUN_NATIVE_TIMESTAMPS,
+      runSubmissionBatchComparison: RUN_SUBMISSION_BATCH_COMPARISON });
   } finally {
     await browser.close();
   }
@@ -4426,6 +4501,15 @@ test('native Vulkan canonical contact applies deferred swept nonpenetration with
   assert.equal(native.status, 'passed', native.reason || JSON.stringify(native));
   assert.deepEqual(native.uncapturedErrors, []);
   assert.deepEqual(native.scopeErrors, []);
+  if (RUN_SUBMISSION_BATCH_COMPARISON) {
+    assert.ok(native.submissionBatchComparisons.length >= 12);
+    assert.ok(native.submissionBatchComparisons.every(row => row.exactGpuOutputMatch
+      && row.intermediateCanonicalStateUnchanged && row.comparedStateWordCount > 0));
+    t.diagnostic(JSON.stringify({ adapter: native.adapterInfo,
+      submissionBatchComparisons: native.submissionBatchComparisons }));
+  } else {
+    assert.deepEqual(native.submissionBatchComparisons, []);
+  }
   assert.deepEqual(
     native.cases.map(({ name }) => name),
     [

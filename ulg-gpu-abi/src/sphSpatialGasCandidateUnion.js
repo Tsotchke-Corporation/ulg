@@ -5,7 +5,7 @@ import {
 } from './index.js';
 
 export const ULG_SPH_SPATIAL_GAS_CANDIDATE_UNION_SCHEMA =
-  'peercompute.ulg.sph-spatial-gas-candidate-union.v0';
+  'peercompute.ulg.sph-spatial-gas-candidate-union.v1';
 
 export const SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_LAYOUT = Object.freeze([
   'positionXM:f32',
@@ -23,7 +23,13 @@ export const SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_LAYOUT = Object.freeze([
   'productTermIndexOrNegativeOne:f32',
   'sourceIndex:f32',
   'status:f32',
-  'routingId:f32'
+  'routingId:f32',
+  // Preserve original caloric inputs, including invalid values. Pressure's
+  // legacy fallback temperature must not become an energy-exchange input.
+  'sourceSpecificInternalEnergyJPerKg:f32',
+  'sourceTemperatureK:f32',
+  'sourcePhaseId:f32',
+  'reserved:f32'
 ]);
 
 export const SPH_SPATIAL_GAS_CANDIDATE_COMPACT_ROW_FLOATS =
@@ -108,7 +114,8 @@ function sourceOffsets() {
       x: layoutOffset(state, 'positionXM', 'particle state layout'),
       y: layoutOffset(state, 'positionYM', 'particle state layout'),
       z: layoutOffset(state, 'positionZM', 'particle state layout'),
-      mass: layoutOffset(state, 'massKg', 'particle state layout')
+      mass: layoutOffset(state, 'massKg', 'particle state layout'),
+      energy: layoutOffset(state, 'specificInternalEnergyJPerKg', 'particle state layout')
     }),
     thermo: Object.freeze({
       material: layoutOffset(thermo, 'materialId', 'particle thermo layout'),
@@ -159,7 +166,9 @@ function sourceOffsets() {
         'restDensityKgPerM3',
         'reaction product event layout'
       ),
-      status: layoutOffset(product, 'status', 'reaction product event layout')
+      status: layoutOffset(product, 'status', 'reaction product event layout'),
+      energy: layoutOffset(product, 'specificInternalEnergyJPerKg', 'reaction product event layout'),
+      phase: layoutOffset(product, 'phaseId', 'reaction product event layout')
     })
   });
   return sourceOffsetsCache;
@@ -225,7 +234,10 @@ function compactRowObject(values, sourceKind) {
     sourceIndex: values[9],
     sourceKind,
     status: values[10],
-    routingId: values[11]
+    routingId: values[11],
+    sourceSpecificInternalEnergyJPerKg: values[12],
+    sourceTemperatureK: values[13],
+    sourcePhaseId: values[14]
   });
 }
 
@@ -463,7 +475,11 @@ export function computeSphSpatialGasCandidateUnionCpuOracle({
       productTerm,
       f32(sourceIndex),
       READY_STATUS,
-      routing
+      routing,
+      f32(products[base + offsets.product.energy]),
+      sourceTemperature,
+      f32(products[base + offsets.product.phase]),
+      0
     ]);
     candidateKinds.push(SPH_SPATIAL_GAS_CANDIDATE_SOURCE.PRODUCT_EVENT);
     productCandidateCount += 1;
@@ -583,7 +599,11 @@ export function computeSphSpatialGasCandidateUnionCpuOracle({
       SPH_SPATIAL_GAS_CANDIDATE_PARTICLE_PRODUCT_TERM_SENTINEL,
       f32(sourceIndex),
       READY_STATUS,
-      PRODUCT_GAS_ROUTING_ID
+      PRODUCT_GAS_ROUTING_ID,
+      f32(states[stateBase + offsets.state.energy]),
+      temperature,
+      phase,
+      0
     ]);
     candidateKinds.push(SPH_SPATIAL_GAS_CANDIDATE_SOURCE.PARTICLE);
     particleCandidateCount += 1;

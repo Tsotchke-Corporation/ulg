@@ -1,4 +1,21 @@
 import assert from 'node:assert/strict';
+import {
+  createSchroederCrossLevelRefluxLedgerHeader,
+  decodeSchroederCrossLevelRefluxTerminalHeader
+} from '../ulg-gpu-abi/src/index.js';
+import {
+  runSchroederTwoLevelMechanicsStepWebGpu
+} from '../src/runtime/sph/schroederCrossLevelCouplingGpu.js';
+import {
+  uploadMlsMpmMechanicsMaterialPhaseRecords
+} from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
+import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
+  createSchroederFusedTerminalRefluxReceiptGroupTarget,
+  observeSchroederFusedMechanicsPrivateAdmission,
+  refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement,
+  validateSchroederFusedTerminalRefluxReceiptGroup
+} from '../src/runtime/sph/schroederFusedFineSubstepGpu.js';
 import { test } from 'node:test';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
@@ -361,7 +378,8 @@ import {
   runSphThermalStepWebGpu
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import {
-  buildSphReactionTable
+  buildSphReactionTable,
+  runSphReactionStepWebGpu
 } from '../src/runtime/sph/sphReactionGpuKernel.js';
 import {
   createSphReactionMotionEnvelope
@@ -15267,4 +15285,587 @@ test('an unbound arena honours the full candidate budget', () => {
   assert.equal(plan.candidateArenaBound, false);
   assert.equal(plan.droppedCandidateCount, 0);
   assert.equal(plan.admittedCandidateBudget, plan.candidateBudget);
+});
+
+// CPU orchestration fixture: all classifiers, transactions, fused producers,
+// ownership capabilities and publication paths are real. Only terminal GPU
+// arithmetic bytes are modelled; this is not native numerical evidence.
+function privateHierarchyIntervalFixture({ rejectOriginal = false, failChild = 0, refineAtChild = 0,
+  sourceStep = 25, rootTime = 0.0125, afterMacro = null, mutateHeader = null, mutateTarget = null,
+  failProducerChild = 0, targetOptionsOverrides = {} } = {}) {
+  const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
+  let loseDevice;
+  device.lost = new Promise(resolve => { loseDevice = resolve; });
+  const byteStore = new WeakMap();
+  const copies = [];
+  const copySourceStates = [];
+  const createBuffer = device.createBuffer.bind(device);
+  device.createBuffer = descriptor => {
+    const buffer = createBuffer(descriptor);
+    byteStore.set(buffer, new ArrayBuffer(descriptor.size));
+    buffer.mapState = 'unmapped';
+    buffer.mapAsync = async () => { buffer.mapState = 'mapped'; };
+    buffer.getMappedRange = () => buffer._mappedData?.buffer ?? byteStore.get(buffer);
+    buffer.unmap = () => { buffer.mapState = 'unmapped'; };
+    return buffer;
+  };
+  const createEncoder = device.createCommandEncoder.bind(device);
+  device.createCommandEncoder = (...args) => {
+    const encoder = createEncoder(...args);
+    const copy = encoder.copyBufferToBuffer.bind(encoder);
+    const finish = encoder.finish.bind(encoder);
+    const pending = [];
+    encoder.copyBufferToBuffer = (...copyArgs) => {
+      copy(...copyArgs);
+      pending.push(copyArgs);
+      copies.push(copyArgs);
+      copySourceStates.push({ source: copyArgs[0], destination: copyArgs[2],
+        destroyed: copyArgs[0]?.destroyed === true });
+    };
+    encoder.finish = () => ({ ...finish(), intervalCopies: pending });
+    return encoder;
+  };
+  const submit = device.queue.submit.bind(device.queue);
+  device.queue.submit = commands => {
+    submit(commands);
+    for (const command of commands) {
+      for (const [source, sourceOffset, destination, destinationOffset, size] of command.intervalCopies ?? []) {
+        if (byteStore.has(source) && byteStore.has(destination)) {
+          new Uint8Array(byteStore.get(destination), destinationOffset, size).set(
+            new Uint8Array(byteStore.get(source), sourceOffset, size)
+          );
+        }
+      }
+    }
+  };
+  const buffers = manualBuffers({ particleCount: 1, smoothingLengthM: 0.25 });
+  const uploads = authoritativeUploadFamily(device, { particleCount: 1, physicsTick: 25 });
+  for (const value of Object.values(buffers)) Object.assign(value, { step: sourceStep, time: rootTime });
+  for (const value of Object.values(uploads)) Object.assign(value, { step: sourceStep, time: rootTime,
+    identityRevision: 'private-hierarchy-interval-fixture' });
+  const options = { mechanicsMaterialTable: canonicalSidecarMechanicsMaterialTable,
+    mechanicsRefreshOptions: { mechanicsMaterialPhaseUpload:
+      uploadMlsMpmMechanicsMaterialPhaseRecords(device, canonicalSidecarMechanicsMaterialTable) } };
+  const generations = [], macros = [], macroCalls = [], classifications = [];
+  let targetBuffer;
+  const generationRunner = async args => {
+    const generation = await runSchroederSpatialEpochGenerationWithBackpressureWebGpu(args);
+    generations.push(generation);
+    if (generations.length === 1) {
+      targetBuffer = tagWebGpuBufferDevice(device.createBuffer({
+        label: 'hierarchy-private-interval-ring', size: 8 * 544, usage: 9
+      }), device);
+      options[SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION] =
+        createSchroederFusedTerminalRefluxReceiptGroupTarget({ device,
+          scheduleId: 'hierarchy-private-interval', laneId: 'lane', stateKey: 'state',
+          stepOrdinal: 1, targetBuffer, targetOffsetBytes: 0,
+          expectedOuterCompletionOrdinal: generation.execution.generationId,
+          expectedOuterIdentity: uploads.sphParticleUpload, expectedOuterMacroDt: 0.0005,
+          expectedFineSubstepCount: 2, expectedFineLevel: 0, expectedCoarseLevel: 1,
+          ...targetOptionsOverrides });
+      if (mutateTarget) options[SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION] =
+        mutateTarget(options[SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION]);
+    }
+    return generation;
+  };
+  const runner = async args => {
+    macroCalls.push(args);
+    const result = await runSchroederTwoLevelMechanicsStepWebGpu(
+      failProducerChild && macroCalls.length === failProducerChild + 1
+        ? { ...args, p2gRunner: async () => {
+            throw new Error('injected actual child P2G producer failure');
+          } }
+        : args
+    );
+    const closure = result.pendingPostMechanicsClosure;
+    const macro = closure.macroAuthority;
+    macros.push({ args, result, closure });
+    const words = createSchroederCrossLevelRefluxLedgerHeader({ rowCapacity: 1,
+      completionOrdinal: macro.completionOrdinal, fineSubstepCount: macro.fineSubstepCount,
+      fineLevel: macro.fineLevel, coarseLevel: macro.coarseLevel,
+      coarseGridSpacingM: macro.parentFieldView.coarseFieldView.gridSpacingM,
+      macroOwnerId: macro.refluxLedger.macroOwnerId,
+      macroOwnerGeneration: macro.refluxLedger.ownerGeneration });
+    words[2] = 3; words[4] = 1; words[8] = 2; words[9] = 1; words[15] = 2;
+    words[59] = 6; words[80] = 2; words[81] = 1234; words[95] = 1234;
+    words[96] = 1; words[97] = words[98]; words[111] = words[98] + 1;
+    for (const index of [48, 49, 50, 51, 52, 53, 99, 100, 101, 102, 103, 118, 119, 121]) words[index] = 1;
+    words[120] = 2; words[124] = 0xffff_ffff; words[44] = 0;
+    if ((rejectOriginal && macros.length === 1)
+      || (refineAtChild && macros.length === refineAtChild + 1)
+      || (failChild && (macros.length === 2 || macros.length === failChild + 2))) {
+      words[2] = 551; words[8] = 0; words[15] = 0; words[12] = 3; words[122] = 3;
+      words[124] = 3338929101;
+      words.set([1068155975, 1126672043, 1091844196, 0, 0, 0, 0, 0, 0, 1126092617, 0], 125);
+    }
+    mutateHeader?.(words, macros.length);
+    byteStore.set(macro.refluxLedger.buffer, words.buffer);
+    await afterMacro?.({ device, macros, generations, uploads, loseDevice });
+    return result;
+  };
+  runner.schroederSpatialTopologyTransitionAware = true;
+  const run = () => runSchroederSameLevelMechanicsWebGpu({ device, ...buffers, ...uploads,
+    selectedLevel: 0, minLevel: 0, maxLevel: 1, baseGridSpacingM: 0.25,
+    boxDimsM: [1, 1, 1], dt: 0.0005,
+    enableTwoLevelMechanics: true, twoLevelMechanicsAuthority: 'authoritative',
+    twoLevelFineSubstepCount: 2, enablePortableSummary: true,
+    successorLevelAssignmentRunner: async args => {
+      classifications.push(args);
+      return runSchroederLevelAssignmentWebGpu(args);
+    },
+    twoLevelMechanicsRunner: runner, spatialEpochGenerationRunner: generationRunner,
+    residentStepOptions: options });
+  return { device, buffers, uploads, options, macros, macroCalls, generations, copies, copySourceStates,
+    byteStore, classifications, run, loseDevice,
+    targetBuffer: () => targetBuffer };
+}
+
+test('private hierarchy interval publishes one authentic original full macro receipt', async () => {
+  const f = privateHierarchyIntervalFixture();
+  const result = await f.run();
+  const group = result.residentStep.twoLevelTerminalRefluxReceiptCopy;
+  assert.equal(group.childCount, 1);
+  assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, group), true);
+  assert.equal(f.macros.length, 1);
+  assert.equal(result.residentStep.nextSphParticleState.step, 26);
+  assert.equal(result.residentStep.nextSphParticleState.time, 0.0125 + 0.0005);
+});
+
+test('private hierarchy interval retries the immutable original through four genuine private children and one public E star', async () => {
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true });
+  const result = await f.run();
+  const group = result.residentStep.twoLevelTerminalRefluxReceiptCopy;
+  assert.equal(group.childCount, 4);
+  assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, group), true);
+  assert.deepEqual(f.macros.map(({ args }) => args.dt), [0.0005, ...Array(4).fill(0.000125)]);
+  assert.equal(f.macros[1].args.sphParticleUpload, f.uploads.sphParticleUpload);
+  assert.equal(f.macros[1].args.mlsMpmParticleUpload, f.uploads.mlsMpmParticleUpload);
+  assert.notEqual(f.macros[1].args.canonicalEpochController, f.macros[0].args.canonicalEpochController);
+  for (let index = 2; index < 5; index++) {
+    assert.equal(f.macros[index].args.privateSourceClosure, f.macros[index - 1].closure);
+    assert.equal(f.macros[index].args.sphParticleUpload, f.macros[index - 1].closure.finalSphParticleUpload);
+    assert.equal(f.macros[index].args.mlsMpmParticleUpload, f.macros[index - 1].closure.finalMlsMpmParticleUpload);
+  }
+  assert.deepEqual(f.macros.slice(1).map(({ closure }) => closure.finalSphParticleUpload.physicsTick), Array(4).fill(25));
+  assert.deepEqual(f.macros.slice(1).map(({ closure }) => closure.finalSphParticleUpload.physicsSubstep), [3, 6, 9, 12]);
+  assert.equal(group.outerMacroDt, 0.0005);
+  assert.equal(group.summedMacroDt, 0.0005);
+  assert.equal(result.residentStep.nextSphParticleState.step, 26);
+  assert.equal(result.residentStep.nextSphParticleState.time, 0.0125 + 0.0005);
+  assert.equal(result.residentStep.nextParticleUploads.sphParticleUpload.physicsTick, 26);
+  const copies = f.copies.filter(copy => copy[2] === f.targetBuffer());
+  assert.equal(copies.length, 4);
+  assert.deepEqual(copies.map(copy => copy[3]), [0, 544, 1088, 1632]);
+  assert.equal(f.copySourceStates.filter(copy => copy.destination === f.targetBuffer())
+    .every(copy => copy.destroyed === false), true);
+  for (let ordinal = 0; ordinal < 4; ordinal++) {
+    const child = f.macros[ordinal + 1];
+    const words = new Uint32Array(f.byteStore.get(f.targetBuffer()), ordinal * 544, 136);
+    const decoded = decodeSchroederCrossLevelRefluxTerminalHeader(words);
+    assert.equal(decoded.macroOwnerId, child.closure.macroAuthority.refluxLedger.macroOwnerId);
+    assert.equal(decoded.completionOrdinal, group.children[ordinal].completionOrdinal);
+    assert.equal(group.children[ordinal].macroDt, 0.000125);
+    assert.equal(group.children[ordinal].fineDt, 0.0000625);
+  }
+  assert.equal(await result.schroederTwoLevelPositiveCompletionPromise, true);
+  for (const { args, closure } of f.macros.slice(0, -1)) {
+    assert.equal(await closure.completionPromise, false);
+    assert.equal(await args.canonicalEpochController.completionPromise(), true);
+  }
+  for (const { args } of f.macros.slice(1)) {
+    assert.equal(args.levelAssignment.assignmentBuffer.destroyed, true);
+  }
+  assert.equal(await f.macros.at(-1).closure.completionPromise, true);
+});
+
+test('private hierarchy interval fully retires a failed four-child attempt before one fresh eight-child interval', async t => {
+  for (const refineAtChild of [1, 2, 3, 4]) await t.test(`first failure at child ${refineAtChild}`, async () => {
+    const rootTime = 0.01700000000000001;
+    const f = privateHierarchyIntervalFixture({ rejectOriginal: true, refineAtChild, rootTime });
+    const result = await f.run();
+    const group = result.residentStep.twoLevelTerminalRefluxReceiptCopy;
+    assert.equal(group.childCount, 8);
+    assert.equal(group.summedMacroDt, 0.0005);
+    const retry = f.macros.slice(refineAtChild + 1);
+    assert.equal(retry.length, 8);
+    assert.deepEqual(retry.map(({ args }) => args.dt), Array(8).fill(0.0000625));
+    assert.equal(retry[0].args.sphParticleUpload, f.uploads.sphParticleUpload);
+    assert.equal(retry[0].args.mlsMpmParticleUpload, f.uploads.mlsMpmParticleUpload);
+    assert.equal(retry[0].args.privateSourceClosure ?? null, null);
+    for (let i = 1; i < retry.length; i++) {
+      assert.equal(retry[i].args.privateSourceClosure, retry[i - 1].closure);
+      assert.equal(retry[i].args.sphParticleUpload, retry[i - 1].closure.finalSphParticleUpload);
+    }
+    let privateTime = rootTime;
+    for (let i = 0; i < 8; i++) {
+      privateTime += 0.00003125; privateTime += 0.00003125;
+      assert.equal(retry[i].closure.finalSphParticleUpload.time, privateTime);
+      const header = decodeSchroederCrossLevelRefluxTerminalHeader(new Uint32Array(
+        f.byteStore.get(f.targetBuffer()), i * 544, 136
+      ));
+      assert.equal(header.macroOwnerId, retry[i].closure.macroAuthority.refluxLedger.macroOwnerId);
+      assert.equal(header.completionOrdinal, group.children[i].completionOrdinal);
+    }
+    assert.equal(group.publicClock.time, rootTime + 0.0005);
+    assert.equal(result.residentStep.nextParticleUploads.sphParticleUpload.physicsTick, 26);
+    assert.equal(result.residentStep.nextSphParticleState.step, 26);
+    assert.equal(f.copies.filter(copy => copy[2] === f.targetBuffer()).length, refineAtChild - 1 + 8);
+    for (const { closure, args } of f.macros.slice(0, -1)) {
+      assert.equal(await closure.completionPromise, false);
+      assert.equal(await args.canonicalEpochController.completionPromise(), true);
+    }
+    assert.equal(await result.schroederTwoLevelPositiveCompletionPromise, true);
+  });
+});
+
+test('private hierarchy interval refinement refuses early, cloned and replayed failure capabilities', async () => {
+  let failedObservation;
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true, refineAtChild: 2,
+    async afterMacro({ device, macros }) {
+      const target = f.options[SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION];
+      if (macros.length === 3) {
+        failedObservation = await observeSchroederFusedMechanicsPrivateAdmission(device, macros.at(-1).closure);
+        assert.equal(failedObservation.retryablePhysicalRejection, true);
+        assert.throws(() => refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
+          device, target, failedObservation
+        ), /fully retired/);
+        assert.throws(() => refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
+          device, target, { ...failedObservation }
+        ), /fully retired/);
+      }
+      if (macros.length === 4) {
+        assert.throws(() => refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
+          device, target, failedObservation
+        ), /fully retired/);
+        assert.throws(() => refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
+          device, { ...target }, failedObservation
+        ), /stale, foreign/);
+      }
+    } });
+  const result = await f.run();
+  assert.equal(result.residentStep.twoLevelTerminalRefluxReceiptCopy.childCount, 8);
+  assert.equal(await result.schroederTwoLevelPositiveCompletionPromise, true);
+});
+
+test('private hierarchy interval does not retry an authority failure in the four-child attempt', async () => {
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true,
+    mutateHeader(words, ordinal) { if (ordinal === 3) words[104] = 1; } });
+  await assert.rejects(f.run(), /provenance|no complete physical rejection witness/);
+  assert.equal(f.macros.length, 3);
+  for (const { closure } of f.macros) assert.equal(await closure.completionPromise, false);
+});
+
+test('private hierarchy interval handles loss in every refined child without another retry or publication', async t => {
+  for (const child of [1, 2, 3, 4, 5, 6, 7, 8]) await t.test(`refined child ${child}`, async () => {
+    let reached;
+    const observationReached = new Promise(resolve => { reached = resolve; });
+    const f = privateHierarchyIntervalFixture({ rejectOriginal: true, refineAtChild: 1,
+      afterMacro({ device, macros }) {
+        if (macros.length !== child + 2) return;
+        device.queue.onSubmittedWorkDone = () => { reached(); return new Promise(() => {}); };
+      } });
+    const execution = f.run();
+    execution.catch(() => {});
+    await observationReached;
+    assert.equal(f.uploads.sphParticleUpload.stateBuffer.destroyed, false);
+    f.loseDevice({ reason: 'destroyed', message: 'refined child authentic device loss' });
+    await assert.rejects(execution, /lost/);
+    assert.equal(f.macros.length, child + 2);
+    for (const { closure, args } of f.macros) {
+      assert.equal(await closure.completionPromise, false);
+      assert.equal(await args.canonicalEpochController.completionPromise(), true);
+    }
+  });
+});
+
+test('private hierarchy interval keeps public step distinct from physics tick', async () => {
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true, sourceStep: 71 });
+  const result = await f.run();
+  const step = result.residentStep;
+  assert.equal(step.nextSphParticleState.step, 72);
+  assert.equal(step.nextMlsMpmParticleState.step, 72);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.step, 72);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.step, 72);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.physicsTick, 26);
+  assert.equal(step.twoLevelTerminalRefluxReceiptCopy.publicClock.step, 72);
+  assert.deepEqual(f.macros.slice(1).map(({ result: macro }) => macro.pendingNextSphParticleState.step),
+    [72, 73, 74, 75]);
+  assert.equal(f.classifications.at(-1).sphParticleState.step, 72);
+  assert.equal(f.classifications.at(-1).mlsMpmParticleState.step, 72);
+});
+
+test('private hierarchy interval stops at every rejected child and retires all private owners without public E star', async t => {
+  for (const failChild of [1, 2, 3, 4, 5, 6, 7, 8]) await t.test(`child ${failChild}`, async () => {
+    const f = privateHierarchyIntervalFixture({ rejectOriginal: true, failChild });
+    let rejection;
+    await assert.rejects(f.run(), error => {
+      rejection = error;
+      assert.match(error.message, new RegExp(`child ${failChild} failed full terminal admission`));
+      return true;
+    });
+    const diagnostics = rejection.authorityDiagnostics;
+    assert.equal(diagnostics?.schema, 'peercompute.ulg.schroeder-private-interval-rejection.v0');
+    assert.equal(diagnostics.stage, 'private-child-terminal-admission');
+    assert.equal(diagnostics.childOrdinal, failChild);
+    assert.equal(diagnostics.completedChildCount, failChild - 1);
+    for (const [evidence, entry] of [
+      [diagnostics.originalObservation, f.macros[0]],
+      [diagnostics.failedObservation, f.macros.at(-1)]
+    ]) {
+      const macro = entry.closure.macroAuthority;
+      const words = new Uint32Array(f.byteStore.get(macro.refluxLedger.buffer));
+      assert.equal(evidence.status, 'physical-rejection');
+      assert.equal(evidence.admitted, false);
+      assert.equal(evidence.retryablePhysicalRejection, true);
+      assert.equal(evidence.completionOrdinal, macro.completionOrdinal);
+      assert.equal(evidence.macroOwnerId, macro.refluxLedger.macroOwnerId);
+      assert.equal(evidence.ownerGeneration, macro.refluxLedger.ownerGeneration);
+      assert.equal(evidence.rootGenerationId, macro.rootGenerationId);
+      assert.equal(evidence.macroDt, macro.macroDt);
+      assert.equal(evidence.fineDt, macro.fineDt);
+      assert.equal(evidence.fineSubstepCount, 2);
+      assert.equal(evidence.sourceClock.time, entry.args.sphParticleUpload.time);
+      assert.equal(evidence.sourceClock.step, entry.args.sphParticleUpload.step);
+      for (const [key, value] of Object.entries(evidence.sourceIdentity)) {
+        assert.equal(value, entry.args.sphParticleUpload[key]);
+      }
+      assert.equal(evidence.rawHeaderWords.length, 136);
+      assert.deepEqual(evidence.rawHeaderWords, Array.from(words));
+      assert.deepEqual(evidence.terminalHeader, decodeSchroederCrossLevelRefluxTerminalHeader(words));
+      assert.equal(evidence.rawHeaderWords[124], 3338929101);
+    }
+    const assertFrozenScalarsOnly = value => {
+      if (value === null || typeof value !== 'object') {
+        assert.ok(['string', 'number', 'boolean'].includes(typeof value) || value === null);
+        return;
+      }
+      assert.ok(Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype);
+      assert.equal(Object.isFrozen(value), true);
+      for (const child of Object.values(value)) assertFrozenScalarsOnly(child);
+    };
+    assertFrozenScalarsOnly(diagnostics);
+    assert.deepEqual(structuredClone(diagnostics), diagnostics);
+    assert.ok(JSON.stringify(diagnostics).length < 32768);
+    assert.equal(f.copies.filter(copy => copy[2] === f.targetBuffer()).length, failChild - 1);
+    assert.equal(f.macros.length, failChild + 2);
+    assert.equal(f.generations.every(generation => generation.mechanicsLevelCount === 2), true);
+    for (const { closure, args } of f.macros) {
+      assert.equal(await closure.completionPromise, false);
+      assert.equal(await args.canonicalEpochController.completionPromise(), true);
+    }
+    for (const buffer of [f.uploads.sphParticleUpload.stateBuffer,
+      f.uploads.sphParticleUpload.thermoBuffer, f.uploads.sphParticleUpload.identityBuffer,
+      f.uploads.mlsMpmParticleUpload.mechanicsBuffer]) assert.equal(buffer.destroyed, false);
+    assert.equal(f.uploads.sphParticleUpload.physicsTick, 25);
+    assert.equal(f.uploads.sphParticleUpload.time, 0.0125);
+  });
+});
+
+test('private hierarchy interval rejects nonphysical original evidence without refinement', async () => {
+  const f = privateHierarchyIntervalFixture({ mutateHeader(words) { words[104] = 1; } });
+  await assert.rejects(f.run(), /provenance|no complete physical rejection witness/);
+  assert.equal(f.macros.length, 1);
+  assert.equal(await f.macros[0].closure.completionPromise, false);
+});
+
+test('private hierarchy interval refuses expansion under a dormant reaction watch', async () => {
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true });
+  f.options.reactionActivationWatchTable = canonicalSidecarReactionTable();
+  await assert.rejects(f.run(), /cannot expand a dormant reaction motion-watch budget/);
+  assert.equal(f.macros.length, 1);
+  assert.equal(await f.macros[0].closure.completionPromise, false);
+});
+
+test('private hierarchy interval holds original source until delayed rejection retirement permits a fresh child', async () => {
+  let releaseFence, fenceReached;
+  const reached = new Promise(resolve => { fenceReached = resolve; });
+  const held = new Promise(resolve => { releaseFence = resolve; });
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true,
+    afterMacro({ device, macros }) {
+      if (macros.length !== 1) return;
+      const originalFence = device.queue.onSubmittedWorkDone.bind(device.queue);
+      let count = 0;
+      device.queue.onSubmittedWorkDone = () => {
+        if (++count === 1) return originalFence(); // Authentic compact observation.
+        fenceReached();
+        return held.then(() => originalFence());
+      };
+    } });
+  let settled = false;
+  const execution = f.run().finally(() => { settled = true; });
+  await reached;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(f.macros.length, 1);
+  assert.equal(f.uploads.sphParticleUpload.stateBuffer.destroyed, false);
+  releaseFence();
+  const result = await execution;
+  assert.equal(result.residentStep.twoLevelTerminalRefluxReceiptCopy.childCount, 4);
+});
+
+test('private hierarchy interval retains the awaited source through rejected fences until authentic device loss', async () => {
+  let fenceReached;
+  const reached = new Promise(resolve => { fenceReached = resolve; });
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true,
+    afterMacro({ device, macros }) {
+      if (macros.length !== 1) return;
+      const originalFence = device.queue.onSubmittedWorkDone.bind(device.queue);
+      let count = 0;
+      device.queue.onSubmittedWorkDone = () => {
+        if (++count === 1) return originalFence();
+        fenceReached();
+        return Promise.reject(new Error('injected unconfirmed queue retirement'));
+      };
+    } });
+  let settled = false;
+  const execution = f.run().finally(() => { settled = true; });
+  execution.catch(() => {});
+  await reached;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(f.macros.length, 1);
+  assert.equal(f.uploads.sphParticleUpload.stateBuffer.destroyed, false);
+  f.loseDevice({ reason: 'destroyed', message: 'test authoritative loss' });
+  await assert.rejects(execution, error => {
+    const messages = current => [current?.message,
+      ...(current?.errors ?? []).flatMap(messages), ...(current?.causes ?? []).flatMap(messages)];
+    assert.match(messages(error).join('\n'), /injected unconfirmed queue retirement|device was lost/);
+    return true;
+  });
+  assert.equal(await f.macros[0].closure.completionPromise, false);
+  assert.equal(await f.macros[0].args.canonicalEpochController.completionPromise(), true);
+  assert.equal(f.macros.length, 1);
+});
+
+test('private hierarchy interval handles actual loss at each child without publication or root release before loss', async t => {
+  for (const child of [1, 2, 3, 4]) await t.test(`loss at child ${child}`, async () => {
+    let reached;
+    const observationReached = new Promise(resolve => { reached = resolve; });
+    const f = privateHierarchyIntervalFixture({ rejectOriginal: true,
+      afterMacro({ device, macros }) {
+        if (macros.length !== child + 1) return;
+        device.queue.onSubmittedWorkDone = () => {
+          reached();
+          return new Promise(() => {});
+        };
+      } });
+    let settled = false;
+    const execution = f.run().finally(() => { settled = true; });
+    execution.catch(() => {});
+    await observationReached;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    assert.equal(f.macros.length, child + 1);
+    assert.equal(f.uploads.sphParticleUpload.stateBuffer.destroyed, false);
+    f.loseDevice({ reason: 'destroyed', message: 'authentic test device loss' });
+    await assert.rejects(execution, /lost/);
+    for (const { closure, args } of f.macros) {
+      assert.equal(await closure.completionPromise, false);
+      assert.equal(await args.canonicalEpochController.completionPromise(), true);
+    }
+    assert.equal(f.generations.every(generation => generation.mechanicsLevelCount === 2), true);
+    assert.equal(f.macros.length, child + 1);
+  });
+});
+
+test('private hierarchy interval applies real thermal and reaction sidecars once at the outer duration', async () => {
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true, sourceStep: 71 });
+  const thermalCalls = [], reactionCalls = [];
+  f.options.thermalMaterialTable = canonicalSidecarThermalMaterialTable;
+  f.options.reactionTable = canonicalSidecarReactionTable();
+  f.options.reactionActivationWatchTable = canonicalSidecarReactionTable();
+  f.options.thermalStepRunner = async options => {
+    thermalCalls.push(options);
+    return runSphThermalStepWebGpu(options);
+  };
+  f.options.reactionStepRunner = async options => {
+    reactionCalls.push(options);
+    return runSphReactionStepWebGpu(options);
+  };
+  const result = await f.run();
+  assert.equal(result.residentStep.twoLevelTerminalRefluxReceiptCopy.childCount, 4);
+  assert.equal(thermalCalls.length, 1);
+  assert.equal(reactionCalls.length, 1);
+  assert.equal(thermalCalls[0].dtS, 0.0005);
+  assert.equal(reactionCalls[0].dtSeconds, 0.0005);
+  assert.equal(result.residentStep.nextSphParticleState.step, 72);
+  assert.equal(result.residentStep.nextSphParticleState.time, 0.0125 + 0.0005);
+  assert.equal(f.generations.filter(generation => generation.mechanicsLevelCount === 0).length, 1);
+});
+
+test('private hierarchy interval retires the real failed producer before releasing its borrowed predecessor', async () => {
+  const f = privateHierarchyIntervalFixture({ rejectOriginal: true, failProducerChild: 2 });
+  await assert.rejects(f.run(), /injected actual child P2G producer failure/);
+  assert.equal(f.macroCalls.length, 3);
+  assert.equal(f.macros.length, 2);
+  for (const args of f.macroCalls) {
+    assert.equal(await args.canonicalEpochController.completionPromise(), true);
+  }
+  for (const { closure } of f.macros) assert.equal(await closure.completionPromise, false);
+  assert.equal(f.uploads.sphParticleUpload.stateBuffer.destroyed, false);
+  assert.equal(f.generations.every(generation => generation.mechanicsLevelCount === 2), true);
+});
+
+test('private hierarchy interval authenticates its exact original target before any retry child', async t => {
+  for (const [name, options] of [
+    ['cloned target', { mutateTarget: target => ({ ...target }) }],
+    ['foreign duration', { targetOptionsOverrides: { expectedOuterMacroDt: 0.001 } }]
+  ]) await t.test(name, async () => {
+    const f = privateHierarchyIntervalFixture({ rejectOriginal: true, ...options });
+    await assert.rejects(f.run(), /target|original/);
+    assert.equal(f.macros.length, 1, 'setup mismatch must not run a retry child');
+    assert.equal(await f.macros[0].closure.completionPromise, false);
+    assert.equal(f.uploads.sphParticleUpload.stateBuffer.destroyed, false);
+  });
+});
+
+test('private hierarchy interval preserves actual r2 fine-addition clocks and one exact outer clock', async t => {
+  for (const { name, rootTime, rejectOriginal } of [
+    { name: 'original accepted at live step5 time', rootTime: 0.002, rejectOriginal: false },
+    { name: 'four children at live step5 time', rootTime: 0.002, rejectOriginal: true },
+    { name: 'four children with per-child rounding difference', rootTime: 0.0005, rejectOriginal: true }
+  ]) await t.test(name, async () => {
+    const clockWitnesses = [];
+    const f = privateHierarchyIntervalFixture({ rootTime, rejectOriginal,
+      afterMacro({ macros }) {
+        const { args, closure } = macros.at(-1);
+        const macro = closure.macroAuthority;
+        let exactPrivateTime = args.sphParticleUpload.time;
+        for (let ordinal = 0; ordinal < macro.fineSubstepCount; ordinal++) {
+          exactPrivateTime += macro.fineDt;
+        }
+        assert.equal(closure.finalSphParticleUpload.time, exactPrivateTime);
+        assert.equal(closure.finalMlsMpmParticleUpload.time, exactPrivateTime);
+        clockWitnesses.push({ sourceTime: args.sphParticleUpload.time,
+          macroDt: macro.macroDt, fineDt: macro.fineDt,
+          actualPrivateTime: exactPrivateTime,
+          singleMacroAddition: args.sphParticleUpload.time + macro.macroDt });
+      } });
+    let result;
+    try { result = await f.run(); }
+    catch (error) {
+      error.clockWitnesses = clockWitnesses;
+      throw error;
+    }
+    const group = result.residentStep.twoLevelTerminalRefluxReceiptCopy;
+    const count = rejectOriginal ? 4 : 1;
+    assert.equal(group.childCount, count);
+    assert.equal(group.summedMacroDt, 0.0005);
+    assert.equal(group.publicClock.time, rootTime + 0.0005);
+    assert.equal(result.residentStep.nextSphParticleState.time, rootTime + 0.0005);
+    assert.equal(result.residentStep.nextParticleUploads.sphParticleUpload.time, rootTime + 0.0005);
+    assert.equal(result.residentStep.nextParticleUploads.mlsMpmParticleUpload.time, rootTime + 0.0005);
+    assert.equal(f.macros.at(-1).closure.finalSphParticleUpload.time,
+      clockWitnesses.at(-1).actualPrivateTime);
+    assert.notEqual(clockWitnesses.at(-1).actualPrivateTime, group.publicClock.time,
+      'private operation-order clock must not be restamped to the outer clock');
+    const accepted = f.macros.slice(rejectOriginal ? 1 : 0);
+    for (let ordinal = 1; ordinal < accepted.length; ordinal++) {
+      assert.equal(accepted[ordinal].args.sphParticleUpload,
+        accepted[ordinal - 1].closure.finalSphParticleUpload);
+      assert.equal(accepted[ordinal].args.sphParticleUpload.time,
+        accepted[ordinal - 1].closure.finalSphParticleUpload.time);
+    }
+    assert.equal(await result.schroederTwoLevelPositiveCompletionPromise, true);
+  });
 });

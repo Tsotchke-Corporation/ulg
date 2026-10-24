@@ -6,6 +6,7 @@ import {
   SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_OFFSETS,
   SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_WORDS,
   SPH_SPATIAL_GAS_FREE_VOLUME_MAGIC,
+  SPH_SPATIAL_GAS_FREE_VOLUME_PARAMS_BYTES,
   SPH_SPATIAL_GAS_FREE_VOLUME_ROW_LAYOUT,
   SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS,
   SPH_SPATIAL_GAS_FREE_VOLUME_STATUS,
@@ -20,6 +21,9 @@ import {
 import {
   createSphSpatialGasFreeVolumeWgsl
 } from '../ulg-gpu-abi/src/sphSpatialGasFreeVolumeWgsl.js';
+import {
+  schroederQuadraticControlVolumeAxisProjection
+} from '../ulg-gpu-abi/src/schroederQuadraticControlVolumeProjection.js';
 import {
   abandonSphSpatialGasFreeVolumeEosAuthority,
   activeSphSpatialGasFreeVolumeExecutionCount,
@@ -44,6 +48,15 @@ import {
   releaseSchroederSpatialEpochGenerationConsumerLease,
   runSchroederSpatialEpochGenerationWebGpu
 } from '../src/runtime/sph/schroederSpatialEpochGpu.js';
+import {
+  createSphAerosolParcelFamilyWebGpu,
+  releaseSphAerosolParcelFamily
+} from '../src/runtime/sph/sphAerosolParcelGpu.js';
+import {
+  createSchroederSpatialEpochTransaction,
+  abortSchroederSpatialEpochTransaction
+} from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
+import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
 function deferred() {
   let resolve;
@@ -205,6 +218,8 @@ function createFakeDevice({
       shaderModules.push(module);
       return module;
     },
+    createBindGroupLayout: (descriptor) => descriptor,
+    createPipelineLayout: (descriptor) => descriptor,
     createComputePipeline(descriptor) {
       createComputePipelineCount += 1;
       if (createComputePipelineCount === failComputePipelineAt) {
@@ -294,7 +309,7 @@ function createDirectLevelAssignment(device) {
   };
 }
 
-function createLiveGasFreeVolumeAuthority(fake) {
+function createLiveGasFreeVolumeAuthority(fake, { phaseVolumeReceiptEnabled = false } = {}) {
   const { device } = fake;
   const levelAssignment = createDirectLevelAssignment(device);
   const particleIdentityBuffer = device.createBuffer({
@@ -322,7 +337,7 @@ function createLiveGasFreeVolumeAuthority(fake) {
     selectedLevel: 0,
     mechanicsGrid: grid,
     exactNearCellTreeEnabled: false,
-    phaseVolumeReceiptEnabled: false,
+    phaseVolumeReceiptEnabled,
     nativeTestLegacyLevelAssignmentDirectoryV1Arm
   });
   assert.equal(generation.ready, true, generation.reason);
@@ -335,8 +350,29 @@ function createLiveGasFreeVolumeAuthority(fake) {
   return {
     generation,
     generationReadFamily,
+    levelAssignment,
+    particleIdentityBuffer,
     grid
   };
+}
+
+function createLiveAerosolVolumeAuthority(fake, { capacity = 130 } = {}) {
+  const authority = createLiveGasFreeVolumeAuthority(fake, { phaseVolumeReceiptEnabled: true });
+  const family = createSphAerosolParcelFamilyWebGpu({ device: fake.device, capacity,
+    parcels: [], provenance: { kind: 'initial-conditions', reference: 'explicit empty sparse inventory' } });
+  const level = authority.levelAssignment;
+  const thermo = tagWebGpuBufferDevice(fake.device.createBuffer({
+    size: 2 * 48, usage: 128 | 4 | 8, label: 'aerosol-volume-transaction-thermo'
+  }), fake.device);
+  const epochs = Object.fromEntries(['storageGeneration', 'physicsTick', 'physicsSubstep',
+    'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch'].map((key) => [key, level[key]]));
+  const sphParticleUpload = { particleCount: 2, stateBuffer: level.sourceStateBuffer,
+    thermoBuffer: thermo, identityBuffer: authority.particleIdentityBuffer,
+    aerosolFamily: family, ...epochs };
+  const mlsMpmParticleUpload = { particleCount: 2, mechanicsBuffer: level.sourceMechanicsBuffer, ...epochs };
+  const transaction = createSchroederSpatialEpochTransaction({ device: fake.device,
+    generation: authority.generation, sphParticleUpload, mlsMpmParticleUpload });
+  return { ...authority, family, transaction, sphParticleUpload, mlsMpmParticleUpload };
 }
 
 const gasFreeVolumeEncoders = new WeakMap();
@@ -450,9 +486,10 @@ test('gas free-volume ABI is public, exact, and plans one or two levels only', (
     ULG_SPH_SPATIAL_GAS_FREE_VOLUME_EXECUTION_SCHEMA
   );
   assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_MAGIC, 0x5347_4631);
-  assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_VERSION, 2);
-  assert.match(ULG_SPH_SPATIAL_GAS_FREE_VOLUME_SOURCE_SCHEMA, /\.v2$/);
-  assert.match(ULG_SPH_SPATIAL_GAS_FREE_VOLUME_EXECUTION_SCHEMA, /\.v2$/);
+  assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_VERSION, 3);
+  assert.match(ULG_SPH_SPATIAL_GAS_FREE_VOLUME_SOURCE_SCHEMA, /\.v3$/);
+  assert.match(ULG_SPH_SPATIAL_GAS_FREE_VOLUME_EXECUTION_SCHEMA, /\.v3$/);
+  assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_PARAMS_BYTES, 288);
   assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_WORDS, 64);
   assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS, 4);
   assert.deepEqual(SPH_SPATIAL_GAS_FREE_VOLUME_ROW_LAYOUT, [
@@ -471,6 +508,11 @@ test('gas free-volume ABI is public, exact, and plans one or two levels only', (
   assert.equal(
     SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_OFFSETS.REDUCTION_VERSION,
     27
+  );
+  assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_OFFSETS.PROJECTION_VERSION, 33);
+  assert.equal(
+    SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_OFFSETS.CONTROL_VOLUME_GEOMETRY_SEAL,
+    34
   );
   const layout = createSphSpatialGasFreeVolumeLayout({ cellCapacity: 128 });
   assert.equal(layout.rowsWordLength, 512);
@@ -501,13 +543,39 @@ test('gas free-volume ABI is public, exact, and plans one or two levels only', (
   });
   assert.equal(plan.exactLevelCount, 2);
   assert.equal(plan.parentCapacityWords, 1024);
-  assert.equal(plan.reductionVersion, 2);
+  assert.equal(plan.reductionVersion, 3);
   assert.equal(
     plan.reductionAlgorithm,
-    'directory-keyed-binary-lookup-atomic-f32-scatter'
+    'quadratic-capacity-overlap-keyed-atomic-f32-scatter'
   );
   assert.equal(plan.reductionWorkComplexity, 'O(C + (F + E + K) log C)');
   assert.equal(plan.readbackRequired, false);
+  assert.ok(Object.isFrozen(plan.gasControlVolumeDescriptor));
+  assert.ok(Object.isFrozen(plan.gasControlVolumeDescriptor.boundsWords));
+  assert.equal(plan.gasControlVolumeDescriptor.version, 1);
+  assert.equal(plan.gasControlVolumeDescriptor.boundsWords.length, 12);
+  assert.equal(
+    createSphSpatialGasFreeVolumePlan(plan).gasControlVolumeDescriptor,
+    plan.gasControlVolumeDescriptor,
+    'provided canonical descriptor must retain its exact metadata identity'
+  );
+  assert.throws(() => createSphSpatialGasFreeVolumePlan({
+    ...plan, boxMinM: [-0.9, -1, -1]
+  }), /bound|descriptor|mismatch/i);
+  assert.throws(() => createSphSpatialGasFreeVolumePlan({
+    ...plan, gasControlVolumeDescriptor: {
+      ...plan.gasControlVolumeDescriptor,
+      seal: plan.gasControlVolumeDescriptor.seal ^ 1
+    }
+  }), /seal|descriptor/i);
+  const translated = createSphSpatialGasFreeVolumePlan({
+    ...plan,
+    gasControlVolumeDescriptor: undefined,
+    boxMinM: [1_000_000, 0, 0],
+    boxMaxM: [1_000_000.015625, 1, 1]
+  });
+  assert.equal(translated.boxMaxM[0] - translated.boxMinM[0], 0.015625);
+  assert.notEqual(translated.gasControlVolumeDescriptor.boundsWords[3], 0);
   assert.throws(
     () => createSphSpatialGasFreeVolumePlan({
       ...plan,
@@ -532,6 +600,15 @@ test('gas free-volume CPU oracle clips boundary cells and subtracts only supplie
   assert.equal(rows[1].condensedVolumeM3, 0.5);
   assert.equal(rows[1].freeVolumeM3, 0.5);
   assert.equal(rows[1].statusFlags, 3);
+  const translated = computeSphSpatialGasFreeVolumeCpuOracle({
+    cells: [[1_000_000, 0, 0]],
+    condensedContributions: [0.00390625],
+    boxMinM: [1_000_000, 0, 0],
+    boxMaxM: [1_000_000.015625, 1, 1],
+    gridSpacingM: 1
+  });
+  assert.equal(translated[0].geometricVolumeM3, 0.015625);
+  assert.equal(translated[0].freeVolumeM3, 0.01171875);
   assert.throws(
     () => computeSphSpatialGasFreeVolumeCpuOracle({
       cells: [[0, 0, 0]],
@@ -544,6 +621,30 @@ test('gas free-volume CPU oracle clips boundary cells and subtracts only supplie
   );
 });
 
+test('gas free-volume shared overlap accounts for wall halos and does not renormalize sparse support', () => {
+  // Mathematical geometry fixtures only; native GPU forward/transpose checks
+  // provide execution acceptance. Node -1 has positive quadratic wall support
+  // despite having no clipped conventional dual cell.
+  const halo = schroederQuadraticControlVolumeAxisProjection(-1, 0, 0, 4, 0);
+  assert.equal(halo.valid, 1);
+  assert.ok(Math.abs(halo.capacity - 1 / 48) < 1e-15);
+  assert.equal(halo.cell0, 0);
+  assert.equal(halo.weight0, 1);
+  const wall = schroederQuadraticControlVolumeAxisProjection(0, 0, 0, 4, 0);
+  assert.equal(wall.capacity, 0.5);
+  const interior = schroederQuadraticControlVolumeAxisProjection(2, 0, 0, 4, 0);
+  assert.deepEqual([interior.cell0, interior.cell1], [1, 2]);
+  assert.deepEqual([interior.weight0, interior.weight1], [0.5, 0.5]);
+  const wgsl = createSphSpatialGasFreeVolumeWgsl(
+    createSphSpatialGasFreeVolumeLayout({ cellCapacity: 8 })
+  );
+  assert.match(wgsl, /cell != 0xffffffffu\s*&& !atomic_add_condensed\(cell, contribution \* wx \* wy \* wz\)/);
+  assert.doesNotMatch(wgsl, /present_weight|weight_sum|renormaliz(?:e|ation)_/);
+  // If only primal key [1,1,1] is resident, one-eighth of an interior node's
+  // volume is relevant to that cell. Missing seven cells do not multiply it.
+  assert.equal(interior.weight0 ** 3, 0.125);
+});
+
 test('gas free-volume WGSL keeps eight storage bindings and uses keyed scatter instead of per-cell field scans', () => {
   const layout = createSphSpatialGasFreeVolumeLayout({ cellCapacity: 64 });
   const wgsl = createSphSpatialGasFreeVolumeWgsl(layout);
@@ -553,6 +654,15 @@ test('gas free-volume WGSL keeps eight storage bindings and uses keyed scatter i
     '0,1,2,3,4,5,6,7'
   );
   assert.match(wgsl, /fn find_gas_cell/);
+  assert.match(wgsl, /fn find_gas_cell\(sought_cell: vec3<i32>\)/);
+  assert.doesNotMatch(wgsl, /\b(?:let|var) target\b|\btarget: vec3/);
+  assert.match(wgsl, /qcv_axis_projection\(node\.x/);
+  assert.match(wgsl, /qcv_primal_axis_extent\(x/);
+  assert.match(wgsl, /contribution \* wx \* wy \* wz/);
+  assert.match(wgsl, /params\.control_volume_geometry_seal == qcv_descriptor_seal/);
+  assert.match(wgsl, /output_control\[33u\], params\.projection_version/);
+  assert.match(wgsl, /output_control\[34u\], params\.control_volume_geometry_seal/);
+  assert.doesNotMatch(wgsl, /dense_node_for_cell/);
   assert.match(wgsl, /fn scatter_fine_condensed_volume/);
   assert.match(wgsl, /fn scatter_coarse_condensed_volume/);
   assert.match(wgsl, /atomicCompareExchangeWeak/);
@@ -579,7 +689,7 @@ test('gas free-volume runtime retains fixed arenas and fails closed before encod
     arenaCount: 2
   });
   assert.equal(runtime.pipelineCount, 5);
-  assert.equal(runtime.reductionVersion, 2);
+  assert.equal(runtime.reductionVersion, 3);
   assert.equal(
     runtime.reductionWorkComplexity,
     'O(C + (F + E + K) log C)'
@@ -632,6 +742,123 @@ test('gas free-volume runtime retains fixed arenas and fails closed before encod
   assert.equal(destroySphSpatialGasFreeVolumeGpu(runtime), true);
   assert.equal(destroySphSpatialGasFreeVolumeGpu(runtime), false);
   assert.ok(fake.createdBuffers.every((buffer) => buffer.destroyCount === 1));
+});
+
+test('gas free-volume shares unchanged kernels across capacities and labels, not device or arena state', () => {
+  const fake = createFakeDevice();
+  const code = createSphSpatialGasFreeVolumeWgsl(
+    createSphSpatialGasFreeVolumeLayout({ cellCapacity: 1 })
+  );
+  const runtimes = [];
+  for (const cellCapacity of [1, 8192, 16384, 32768, 65536, 131072, 262144]) {
+    assert.equal(createSphSpatialGasFreeVolumeWgsl(
+      createSphSpatialGasFreeVolumeLayout({ cellCapacity })
+    ), code);
+    runtimes.push(createSphSpatialGasFreeVolumeGpu(fake.device, {
+      cellCapacity, fineFieldCapacity: cellCapacity * 2,
+      coarseFieldCapacity: cellCapacity, arenaCount: 2,
+      label: `independent-runtime-${cellCapacity}`
+    }));
+  }
+  assert.equal(fake.shaderModules.length, 1);
+  assert.equal(fake.shaderModules[0].descriptor.code, code);
+  assert.equal(fake.pipelines.length, 5);
+  assert.equal(fake.createdBuffers.length, runtimes.length * 6);
+  assert.equal(new Set(fake.createdBuffers).size, fake.createdBuffers.length);
+  for (const [index, runtime] of runtimes.entries()) {
+    assert.equal(destroySphSpatialGasFreeVolumeGpu(runtime), true);
+    assert.ok(fake.createdBuffers.slice(0, (index + 1) * 6)
+      .every(buffer => buffer.destroyCount === 1));
+    assert.ok(fake.createdBuffers.slice((index + 1) * 6)
+      .every(buffer => buffer.destroyCount === 0));
+  }
+  // Warm pipelines remain useful after all buffer-owning runtimes retire.
+  const replacement = createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: 8, fineFieldCapacity: 16, arenaCount: 1
+  });
+  assert.equal(fake.shaderModules.length, 1);
+  assert.equal(fake.pipelines.length, 5);
+  destroySphSpatialGasFreeVolumeGpu(replacement);
+  const other = createFakeDevice();
+  const foreign = createSphSpatialGasFreeVolumeGpu(other.device, {
+    cellCapacity: 8, fineFieldCapacity: 16, arenaCount: 1
+  });
+  assert.equal(other.shaderModules.length, 1);
+  assert.equal(other.pipelines.length, 5);
+  assert.ok(other.pipelines.every(pipeline => !fake.pipelines.includes(pipeline)));
+  destroySphSpatialGasFreeVolumeGpu(foreign);
+  // Cache hits must not bypass the original device/capacity validation.
+  fake.device.limits.maxStorageBuffersPerShaderStage = 7;
+  assert.throws(() => createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: 8, fineFieldCapacity: 16
+  }), /eight storage bindings/);
+});
+
+test('gas free-volume shared pipelines encode independent bindings after another runtime retires', () => {
+  const fake = createFakeDevice();
+  const authority = createLiveGasFreeVolumeAuthority(fake);
+  const options = {
+    cellCapacity: authority.generation.execution.cellCapacity,
+    fineFieldCapacity: authority.generation.phaseVolumeMoment.fieldCapacity,
+    arenaCount: 1
+  };
+  const first = createSphSpatialGasFreeVolumeGpu(fake.device, { ...options, label: 'first' });
+  const second = createSphSpatialGasFreeVolumeGpu(fake.device, { ...options, label: 'second' });
+  const firstExecution = encodeGasFreeVolume(first, authority);
+  const secondExecution = encodeGasFreeVolume(second, authority);
+  const commands = execution => gasFreeVolumeEncoders.get(execution).events
+    .filter(event => event.kind === 'pass').flatMap(event => event.commands);
+  const firstCommands = commands(firstExecution);
+  const secondCommands = commands(secondExecution);
+  const selected = list => list.filter(command => command.kind === 'pipeline');
+  assert.equal(selected(firstCommands).length, 4);
+  selected(firstCommands).forEach((command, index) => {
+    assert.equal(command.pipeline, selected(secondCommands)[index].pipeline);
+  });
+  const firstGroups = firstCommands.filter(command => command.kind === 'bind-group');
+  const secondGroups = secondCommands.filter(command => command.kind === 'bind-group');
+  firstGroups.forEach((command, index) => {
+    assert.notEqual(command.bindGroup, secondGroups[index].bindGroup);
+    for (const binding of [6, 7, 8]) {
+      const buffer = group => group.descriptor.entries
+        .find(entry => entry.binding === binding)?.resource.buffer;
+      if (buffer(command.bindGroup)) {
+        assert.notEqual(buffer(command.bindGroup), buffer(secondGroups[index].bindGroup));
+      }
+    }
+  });
+  releaseSphSpatialGasFreeVolumeExecution(first, firstExecution, { discardedEncoder: true });
+  assert.equal(destroySphSpatialGasFreeVolumeGpu(first), true);
+  assert.equal(ownsSphSpatialGasFreeVolumeExecution(second, secondExecution), true);
+  const action = encodeAllGasFreeVolumeEosPasses(fake, secondExecution);
+  assert.equal(abandonSphSpatialGasFreeVolumeEosAuthority(action.receipt), true);
+  releaseSphSpatialGasFreeVolumeExecution(second, secondExecution, { discardedEncoder: true });
+  const thirdExecution = encodeGasFreeVolume(second, authority);
+  selected(commands(thirdExecution)).forEach((command, index) => {
+    assert.equal(command.pipeline, selected(firstCommands)[index].pipeline);
+  });
+  releaseSphSpatialGasFreeVolumeExecution(second, thirdExecution, { discardedEncoder: true });
+  destroySphSpatialGasFreeVolumeGpu(second);
+  releaseSchroederSpatialEpochGenerationConsumerLease(
+    authority.generationReadFamily, { discardedEncoder: true });
+});
+
+test('gas free-volume retries a failed pipeline bundle without caching partial construction', () => {
+  for (const failComputePipelineAt of [1, 2, 3, 4, 5]) {
+    const fake = createFakeDevice({ failComputePipelineAt });
+    const options = { cellCapacity: 8, fineFieldCapacity: 16, arenaCount: 1 };
+    assert.throws(() => createSphSpatialGasFreeVolumeGpu(fake.device, options),
+      /injected compute-pipeline failure/);
+    assert.equal(fake.createdBuffers.length, 0);
+    const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, options);
+    assert.equal(fake.shaderModules.length, 2);
+    assert.equal(fake.pipelines.length, failComputePipelineAt - 1 + 5);
+    const warm = createSphSpatialGasFreeVolumeGpu(fake.device, { ...options, cellCapacity: 16 });
+    assert.equal(fake.shaderModules.length, 2);
+    assert.equal(fake.pipelines.length, failComputePipelineAt - 1 + 5);
+    destroySphSpatialGasFreeVolumeGpu(runtime);
+    destroySphSpatialGasFreeVolumeGpu(warm);
+  }
 });
 
 test('gas free-volume rejects devices below the portable eight-storage-binding floor', () => {
@@ -773,6 +1000,19 @@ test('gas free-volume execution and EOS receipt are exact opaque authorities wit
   assert.equal(arenaBuffers.length, 3);
   const execution = encodeGasFreeVolume(runtime, authority);
   assert.equal(Object.isFrozen(execution), true);
+  assert.equal(Object.isFrozen(execution.gasControlVolumeDescriptor), true);
+  const paramsWrite = fake.writes.findLast((entry) => (
+    entry.buffer.label === 'ulg-sph-spatial-gas-free-volume-arena-0-params'
+  ));
+  assert.ok(paramsWrite, 'the retained uniform must carry the sealed projection');
+  const paramsWords = new Uint32Array(paramsWrite.data);
+  assert.equal(paramsWords.byteLength, 288);
+  assert.equal(paramsWords[53], execution.gasControlVolumeDescriptor.version);
+  assert.equal(paramsWords[54], execution.gasControlVolumeDescriptor.seal);
+  assert.deepEqual(
+    [...paramsWords.slice(55, 67)],
+    execution.gasControlVolumeDescriptor.boundsWords
+  );
   assert.equal(isExactSphSpatialGasFreeVolumeExecution(execution), true);
   assert.equal(
     ownsSphSpatialGasFreeVolumeExecution(runtime, execution),
@@ -1232,6 +1472,142 @@ test('gas free-volume queue release is single-flight and a refused stale fence c
   ), true);
   assert.equal(destroySphSpatialGasFreeVolumeGpu(runtime), true);
   assert.equal(ownedBuffers.every((buffer) => buffer.destroyCount === 1), true);
+});
+
+test('aerosol free-volume derives the sealed family, spans sparse capacity and keeps its EOS receipt private', async () => {
+  const fake = createFakeDevice();
+  const authority = createLiveAerosolVolumeAuthority(fake);
+  const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: authority.generation.execution.layout.cellCapacity,
+    fineFieldCapacity: authority.generation.phaseVolumeMoment.fieldCapacity, arenaCount: 1
+  });
+  const count = fake.createdBuffers.length;
+  const execution = encodeGasFreeVolume(runtime, authority);
+  assert.deepEqual(execution.aerosol, { version: 1, familyId: authority.family.familyId,
+    generation: 0, capacity: 130, projection: 'quadratic-B-QCV-W', dispatchCount: 1 });
+  assert.equal(execution.encodedDispatchCount, 5);
+  assert.equal(execution.gpuBufferCreationCountDuringEncode, 1);
+  assert.equal(fake.createdBuffers.length, count + 1);
+  assert.equal(reachableCreatedBuffers([execution, execution.aerosol], fake.createdBuffers).length, 0);
+  const params = fake.writes.filter((write) => write.buffer.label?.endsWith('-params')).at(-1);
+  assert.deepEqual(Array.from(new Uint32Array(params.data).slice(67)),
+    [1, authority.family.familyId, 0, 130, 1]);
+  const encoder = gasFreeVolumeEncoders.get(execution);
+  const passes = encoder.events.filter((event) => event.kind === 'pass');
+  assert.match(passes[2].descriptor.label, /ScatterAerosol$/);
+  const scatter = passes[2].commands.find((command) => command.kind === 'dispatch');
+  assert.deepEqual([scatter.x, scatter.y, scatter.z], [3, 1, 1]);
+  const group = fake.bindGroups.find((entry) => entry.descriptor.label?.endsWith('-scatter-aerosol-bindings'));
+  assert.deepEqual(group.descriptor.entries.map((entry) => entry.binding).sort((a, b) => a - b), [0, 6, 7, 8, 9, 10]);
+  const parcelBuffer = group.descriptor.entries.find((entry) => entry.binding === 9).resource.buffer;
+  const action = encodeAllGasFreeVolumeEosPasses(fake, execution);
+  assert.equal(action.aerosol, execution.aerosol);
+  assert.equal(action.receipt.aerosol, execution.aerosol);
+  assert.equal(reachableCreatedBuffers([action], fake.createdBuffers).length, 0);
+  releaseSphAerosolParcelFamily(authority.family);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(parcelBuffer.destroyCount, 0, 'encoded volume still borrows the original parcel source');
+  assert.equal(submitSphSpatialGasFreeVolumeEosAuthority(action.receipt, fake.device), true);
+  assert.equal(releaseSphSpatialGasFreeVolumeExecutionQueueOrdered(runtime, execution), true);
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(parcelBuffer.destroyCount, 0, 'source transaction independently retains its captured reservoir');
+  abortSchroederSpatialEpochTransaction(authority.transaction, 'volume test completed');
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(parcelBuffer.destroyCount, 1);
+  destroySphSpatialGasFreeVolumeGpu(runtime);
+});
+
+test('aerosol volume rejects explicit omission/replacement without consuming an arena or mutating its encoder', () => {
+  const fake = createFakeDevice(), authority = createLiveAerosolVolumeAuthority(fake);
+  const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: authority.generation.execution.layout.cellCapacity,
+    fineFieldCapacity: authority.generation.phaseVolumeMoment.fieldCapacity, arenaCount: 1
+  });
+  for (const aerosolFamily of [null, { ...authority.family }]) {
+    const encoder = createFakeCommandEncoder();
+    assert.throws(() => encodeSphSpatialGasFreeVolumeGpu(runtime, encoder, {
+      gasDirectory: authority.generation.execution, generationReadFamily: authority.generationReadFamily,
+      grid: authority.grid, boxMinM: [0, 0, 0], boxMaxM: [2, 2, 2], aerosolFamily
+    }), /omitted or replaced/);
+    assert.deepEqual(encoder.events, []);
+    assert.equal(activeSphSpatialGasFreeVolumeExecutionCount(runtime), 0);
+  }
+  const execution = encodeGasFreeVolume(runtime, authority);
+  assert.equal(releaseSphSpatialGasFreeVolumeExecution(runtime, execution, { discardedEncoder: true }), true);
+  destroySphSpatialGasFreeVolumeGpu(runtime); releaseSphAerosolParcelFamily(authority.family);
+  abortSchroederSpatialEpochTransaction(authority.transaction, 'volume omission test completed');
+});
+
+test('aerosol source mutation rejects binding and submission but does not prevent exact cleanup', async () => {
+  for (const atSubmit of [false, true]) {
+    const fake = createFakeDevice(), authority = createLiveAerosolVolumeAuthority(fake);
+    const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, {
+      cellCapacity: authority.generation.execution.layout.cellCapacity,
+      fineFieldCapacity: authority.generation.phaseVolumeMoment.fieldCapacity, arenaCount: 1
+    });
+    const execution = encodeGasFreeVolume(runtime, authority);
+    const action = atSubmit ? encodeAllGasFreeVolumeEosPasses(fake, execution) : null;
+    delete authority.sphParticleUpload.aerosolFamily;
+    assert.throws(() => atSubmit
+      ? submitSphSpatialGasFreeVolumeEosAuthority(action.receipt, fake.device)
+      : encodeAllGasFreeVolumeEosPasses(fake, execution), { code: 'ERR_SPH_GAS_FREE_VOLUME_AEROSOL_SOURCE_STALE' });
+    if (action) abandonSphSpatialGasFreeVolumeEosAuthority(action.receipt);
+    assert.equal(releaseSphSpatialGasFreeVolumeExecution(runtime, execution, { discardedEncoder: true }), true);
+    releaseSphAerosolParcelFamily(authority.family);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    const buffer = fake.createdBuffers.find((entry) => entry.label === 'ulg-aerosol-initial-population');
+    assert.equal(buffer.destroyCount, 0, 'stale consumer cleanup cannot retire the transaction capture');
+    abortSchroederSpatialEpochTransaction(authority.transaction, 'stale source fixture discarded');
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(buffer.destroyCount, 1);
+    destroySphSpatialGasFreeVolumeGpu(runtime);
+  }
+});
+
+test('aerosol borrowed volume survives a rejected fence until exact device loss', async () => {
+  const fake = createFakeDevice(), authority = createLiveAerosolVolumeAuthority(fake);
+  const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: authority.generation.execution.layout.cellCapacity,
+    fineFieldCapacity: authority.generation.phaseVolumeMoment.fieldCapacity, arenaCount: 1
+  });
+  const execution = encodeGasFreeVolume(runtime, authority);
+  submitGasFreeVolumeExecution(fake, execution);
+  const parcel = fake.createdBuffers.find((buffer) => buffer.label === 'ulg-aerosol-initial-population');
+  releaseSphAerosolParcelFamily(authority.family);
+  await assert.rejects(releaseSphSpatialGasFreeVolumeExecutionAfter(runtime, execution,
+    Promise.reject(new Error('unconfirmed queue fence'))), /unconfirmed/);
+  assert.equal(ownsSphSpatialGasFreeVolumeExecution(runtime, execution), true);
+  assert.equal(parcel.destroyCount, 0);
+  const release = releaseSphSpatialGasFreeVolumeExecutionAfterDeviceLoss(runtime, execution, fake.device.lost);
+  fake.resolveLost({ reason: 'destroyed' });
+  assert.equal(await release, true);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(parcel.destroyCount, 1);
+  destroySphSpatialGasFreeVolumeGpu(runtime);
+});
+
+test('aerosol scatter allocation is retained across executions; absence still dispatches only the original passes', () => {
+  const fake = createFakeDevice(), aerosol = createLiveAerosolVolumeAuthority(fake);
+  const absent = createLiveGasFreeVolumeAuthority(fake);
+  const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: aerosol.generation.execution.layout.cellCapacity,
+    fineFieldCapacity: aerosol.generation.phaseVolumeMoment.fieldCapacity, arenaCount: 1
+  });
+  const first = encodeGasFreeVolume(runtime, aerosol);
+  releaseSphSpatialGasFreeVolumeExecution(runtime, first, { discardedEncoder: true });
+  const count = fake.createdBuffers.length, pipelines = fake.pipelines.length;
+  const second = encodeGasFreeVolume(runtime, aerosol);
+  assert.equal(second.gpuBufferCreationCountDuringEncode, 0);
+  assert.equal(fake.createdBuffers.length, count); assert.equal(fake.pipelines.length, pipelines);
+  releaseSphSpatialGasFreeVolumeExecution(runtime, second, { discardedEncoder: true });
+  const third = encodeGasFreeVolume(runtime, absent);
+  assert.equal(third.aerosol, null); assert.equal(third.encodedDispatchCount, 4);
+  assert.equal(fake.createdBuffers.length, count); assert.equal(fake.pipelines.length, pipelines);
+  const write = fake.writes.filter((entry) => entry.buffer.label?.endsWith('-params')).at(-1);
+  assert.deepEqual(Array.from(new Uint32Array(write.data).slice(67)), [0, 0, 0, 0, 0]);
+  releaseSphSpatialGasFreeVolumeExecution(runtime, third, { discardedEncoder: true });
+  destroySphSpatialGasFreeVolumeGpu(runtime); releaseSphAerosolParcelFamily(aerosol.family);
+  abortSchroederSpatialEpochTransaction(aerosol.transaction, 'retained arena fixture completed');
 });
 
 test('gas free-volume rejected queue fence leaves ownership intact for an exact retry', async () => {

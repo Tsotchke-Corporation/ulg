@@ -128,7 +128,10 @@ function finiteNumber(value, fallback = 0) {
 
 function finiteGpuNumber(value, fallback = 0) {
   const number = Number(value);
-  if (Number.isFinite(number)) return number;
+  // A finite closure distance can still overflow the f32 storage ABI (for
+  // example, H2's visible absorption tail). Use the same finite sentinel as
+  // an explicitly infinite distance without changing the closure itself.
+  if (Number.isFinite(Math.fround(number))) return number;
   return fallback;
 }
 

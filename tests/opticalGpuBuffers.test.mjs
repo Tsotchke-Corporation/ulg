@@ -257,6 +257,52 @@ test('optical GPU table applies descriptor-specific Beer-Lambert path lengths', 
   assert.ok(Math.abs((longDepth / shortDepth) - 4) < 1e-5);
 });
 
+test('optical GPU packing maps real hydrogen f32-overflow attenuation distance to the existing infinity sentinel', async () => {
+  const { deriveMaterialProperties } = await import('../src/runtime/material/materialDerivation.js');
+  const { anchorDerivedMaterialProperties } = await import('../src/runtime/material/referenceBankAnchoring.js');
+  const { opticalRenderParams } = await import('../src/runtime/material/opticalClosure.js');
+  const properties = anchorDerivedMaterialProperties(deriveMaterialProperties('H2'), 'H2').properties;
+  const descriptor = { material: 'H2', phase: 'gas', properties };
+  const closure = opticalRenderParams(descriptor);
+  // Desktop failure: this positive ~5.18e77 m closure packed as +Infinity in
+  // record lane15, rejecting the entire scene's otherwise valid optical table.
+  assert.ok(Number.isFinite(closure.attenuationDistanceM));
+  assert.ok(closure.attenuationDistanceM > 0);
+  assert.equal(Math.fround(closure.attenuationDistanceM), Infinity);
+  assert.equal(closure.renderModel, 'molecular-gas-electronic-band-absorption-pbr');
+  const originalDistance = closure.attenuationDistanceM;
+  const table = buildOpticalGpuTable([descriptor]);
+  assert.equal(opticalRecordField(table, table.recordMetadata[0], 'attenuationDistanceM'), Math.fround(1e20));
+  assert.ok(table.records.every(Number.isFinite));
+  assert.ok(table.spectralSamples.every(Number.isFinite));
+  assert.equal(opticalRenderParams(descriptor).attenuationDistanceM, originalDistance, 'packing does not mutate the closure');
+});
+
+test('optical GPU attenuation packing preserves representable distances and the explicit infinity sentinel', async () => {
+  const { opticalRenderParams } = await import('../src/runtime/material/opticalClosure.js');
+  for (const descriptor of [
+    { material: 'air', phase: 'gas' },
+    { material: 'h2o', phase: 'liquid' },
+    { material: 'Au', phase: 'solid', properties: {
+      conductionElectronDensityPerM3: 5.9e28, opticalInterbandOscillators: []
+    } }
+  ]) {
+    const closure = opticalRenderParams(descriptor);
+    const table = buildOpticalGpuTable([descriptor]);
+    const distance = opticalRecordField(table, table.recordMetadata[0], 'attenuationDistanceM');
+    if (descriptor.material === 'air') {
+      assert.equal(closure.attenuationDistanceM, Infinity);
+      assert.equal(distance, Math.fround(1e20));
+    } else {
+      assert.ok(Number.isFinite(Math.fround(closure.attenuationDistanceM)));
+      assert.equal(distance, Math.fround(closure.attenuationDistanceM));
+      if (descriptor.material === 'Au') assert.ok(distance > 0 && distance < 1e-6);
+    }
+    assert.ok(table.records.every(Number.isFinite));
+    assert.ok(table.spectralSamples.every(Number.isFinite));
+  }
+});
+
 test('optical GPU table keeps material-bank PBR warm inputs as metadata only', () => {
   const warmInputTable = sodiumWarmInputTable();
   const table = buildOpticalGpuTable([

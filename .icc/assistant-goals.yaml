@@ -2,6 +2,139 @@
 # commands when available, and by human/agent handoff readers today.
 
 goals:
+  - id: g1-presentation
+    task_id: goal1-all-preset-wallclock-rendering-20260904
+    priority: high
+    status: skipped
+    goal: "FAILED acceptance; shared54Hz presentation deferred to architectural follow-ons"
+    oracle: ulg-g1-presentation
+    depends_on: []
+    reason: "User2026-09-13 ends current G1 effort as failed. Skipped means execution deferred, not accepted delivery; preserve gains and failed oracle evidence. Reassess after architecture work."
+    tags: [ulg-campaign, deferred]
+
+  - id: g2-plumes
+    task_id: ulg-g2-conserved-plumes
+    priority: high
+    status: in_progress
+    goal: "Conserved steam and aerosol transport"
+    oracle: ulg-g2-plumes
+    depends_on: []
+    reason: "Active after the 2026-09-13 HTTPS and cesium desktop usability checks. Begin with diagnostic-only species saturation on SS gas cells, then conserved aerosol transport. G1 throughput is not a prerequisite."
+    tags: [ulg-campaign, immediate]
+
+  - id: g3-solids
+    task_id: ulg-g3-solids
+    priority: high
+    status: todo
+    goal: "Minimum coherent solids SOL-0 and SOL-1"
+    oracle: ulg-g3-solids
+    depends_on: []
+    reason: "Immediate delivery priority 3; see seven-goal-campaign.md for acceptance and ordering."
+    tags: [ulg-campaign, immediate]
+
+  - id: g4-dynamic-laws
+    task_id: ulg-g4-dynamic-laws
+    priority: high
+    status: todo
+    goal: "Generalized per-node warm dynamic laws"
+    oracle: ulg-g4-dynamic-laws
+    depends_on: []
+    reason: "Immediate delivery priority 4; see seven-goal-campaign.md for acceptance and ordering."
+    tags: [ulg-campaign, immediate]
+
+  - id: g5-reservation
+    task_id: ulg-g5-reservation
+    priority: high
+    status: todo
+    goal: "Bounded CAS multi-consumer reservation"
+    oracle: ulg-g5-reservation
+    depends_on: []
+    reason: "Immediate delivery priority 5; see seven-goal-campaign.md for acceptance and ordering."
+    tags: [ulg-campaign, immediate]
+
+  - id: g6-local-fit
+    task_id: ulg-g6-local-fit
+    priority: high
+    status: todo
+    goal: "One local provenance-bound online closure fit and cache"
+    oracle: ulg-g6-local-fit
+    depends_on: [g4-dynamic-laws]
+    reason: "Immediate delivery priority 6; see seven-goal-campaign.md for acceptance and ordering."
+    tags: [ulg-campaign, immediate]
+
+  - id: g7-release-audit
+    task_id: ulg-g7-release-audit
+    priority: high
+    status: todo
+    goal: "External advisory scientific release audit"
+    oracle: ulg-g7-release-audit
+    depends_on: []
+    reason: "Immediate delivery priority 7; see seven-goal-campaign.md for acceptance and ordering."
+    tags: [ulg-campaign, immediate]
+
+  - id: a1-realtime-substrate
+    task_id: ulg-a1-realtime-substrate
+    priority: medium
+    status: todo
+    goal: "Follow-on real-time physics and bulk execution"
+    oracle: ulg-a1-realtime-substrate
+    depends_on: [g4-dynamic-laws]
+    reason: "Architectural follow-on; G1 failed acceptance is deferred, not a prerequisite for researching its remedy. Reassess visual throughput after architecture evidence."
+    tags: [ulg-campaign, follow-on]
+
+  - id: a2-incremental-spatial
+    task_id: ulg-a2-incremental-spatial
+    priority: medium
+    status: todo
+    goal: "Follow-on incremental spatial membership and particle migration"
+    oracle: ulg-a2-incremental-spatial
+    depends_on: []
+    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
+    tags: [ulg-campaign, follow-on]
+
+  - id: a3-representative-sampling
+    task_id: ulg-a3-representative-sampling
+    priority: medium
+    status: todo
+    goal: "Follow-on representative sampling and envelope expansion"
+    oracle: ulg-a3-representative-sampling
+    depends_on: [g4-dynamic-laws, g6-local-fit]
+    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
+    tags: [ulg-campaign, follow-on]
+
+  - id: a4-material-functions
+    task_id: ulg-a4-material-functions
+    priority: medium
+    status: todo
+    goal: "Follow-on multidimensional derived material-property functions"
+    oracle: ulg-a4-material-functions
+    depends_on: [g6-local-fit]
+    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
+    tags: [ulg-campaign, follow-on]
+
+  - id: a5-solids-and-levels
+    task_id: ulg-a5-solids-and-levels
+    priority: medium
+    status: todo
+    goal: "Follow-on dependency-gated solid mechanics and tree levels"
+    oracle: ulg-a5-solids-and-levels
+    depends_on: [g3-solids]
+    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
+    tags: [ulg-campaign, follow-on]
+
+  - id: a6-remote-derivation
+    task_id: ulg-a6-remote-derivation
+    priority: medium
+    status: todo
+    goal: "Follow-on PeerCompute warm remote derivation"
+    oracle: ulg-a6-remote-derivation
+    depends_on: [g5-reservation, g6-local-fit]
+    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
+    tags: [ulg-campaign, follow-on]
+
+# Preserved historical cross-cutting goals; mapped in seven-goal-campaign.md.
+# ICC reads only goals above, so these do not create duplicate active work.
+legacy_goals:
   - id: resident-physics-continuity
     priority: high
     goal: Keep resident MLS-MPM/SPH physics advancing from GPU-resident state across reset, play, and repeated continuation paths

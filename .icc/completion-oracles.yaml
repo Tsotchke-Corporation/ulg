@@ -1,11 +1,305 @@
 # ICC completion oracles for ULG.
 #
 # These targets describe ULG-specific browser, resident WebGPU, material
-# closure, reaction, and handoff evidence. The current local ICC checkout may
-# not expose `completion-oracle`; this file is still the durable ULG policy
-# surface for newer ICC builds and handoff readers.
+# closure, reaction, and handoff evidence. ICC executes these targets today.
+# Campaign development gates match reviewed receipts, not numeric predicates:
+# actual source/artifact review and domain measurements remain mandatory.
+# Keep FAIL visible instead of filtering for PASS-only history. Unproven
+# required checks must be FAIL with a reason, never WARN/UNKNOWN acceptance.
+# Use one explicit current-run trace bundle; see seven-goal-campaign.md.
 
 oracles:
+  - name: ulg-g1-presentation
+    criteria:
+      - &ulg_campaign_receipt
+        kind: runtime_event
+        severity: high
+        event_kinds: [ulg_campaign_receipt]
+        event_schemas: [ulg.campaign.receipt.v1]
+        event_statuses: [PASS, FAIL]
+        event_lanes: [development-review]
+        id: g1-presentation-candidate-review
+        label: "Candidate source, exact artifacts, commands and independent review agree; no numerical or visual claim inferred from a receipt label"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-visible-wallclock-water-cycle
+        label: "water-cycle: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
+        event_names: [visible-wallclock-water-cycle]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-visible-wallclock-iron-ice-quench
+        label: "iron-ice-quench: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
+        event_names: [visible-wallclock-iron-ice-quench]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-visible-wallclock-sodium-water
+        label: "sodium-water: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
+        event_names: [visible-wallclock-sodium-water]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-visible-wallclock-cesium-fluorine
+        label: "cesium-fluorine: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
+        event_names: [visible-wallclock-cesium-fluorine]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-visible-wallclock-bulk-water
+        label: "bulk-water: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
+        event_names: [visible-wallclock-bulk-water]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-visible-wallclock-water-realtime
+        label: "water-realtime: at least 54 visibly advancing scene presentations per wall-clock second in the configured geometry; raw measurement and limitations reviewed"
+        event_names: [visible-wallclock-water-realtime]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-shared-optics-and-lifecycle
+        label: "All six use the shared pipeline; true isosurfaces remain true meshes, water refraction, metal, depth, camera and lifecycle checks pass"
+        event_names: [shared-optics-and-lifecycle]
+        event_contract_ids: [ulg.g1-presentation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g1-presentation-gpu-native-regressions
+        label: "Exact candidate passes relevant native GPU invariants, full Node suite and build; source updates and display interpolation reported separately"
+        event_names: [gpu-native-regressions]
+        event_contract_ids: [ulg.g1-presentation.v1]
+
+  - name: ulg-g2-plumes
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: g2-plumes-candidate-review
+        label: "Exact source and artifact review; species and phase lineage, not cloud appearance, establishes identity"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g2-plumes.v1]
+      - <<: *ulg_campaign_receipt
+        id: g2-plumes-conserved-phase-transport
+        label: "GPU mass, species, enthalpy and parcel ownership tests pass through evaporation, condensation, transport and deposition"
+        event_names: [conserved-phase-transport]
+        event_contract_ids: [ulg.g2-plumes.v1]
+      - <<: *ulg_campaign_receipt
+        id: g2-plumes-iron-ice-and-reaction-plumes
+        label: "Desktop iron/ice sequence shows transported condensate plume; sodium/water gas/aerosol identity is traced to admitted inventory, without scripted clouds"
+        event_names: [iron-ice-and-reaction-plumes]
+        event_contract_ids: [ulg.g2-plumes.v1]
+
+  - name: ulg-g3-solids
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: g3-solids-candidate-review
+        label: "Exact source, GPU fixtures and desktop sequence reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g3-solids.v1]
+      - <<: *ulg_campaign_receipt
+        id: g3-solids-sol0-sol1-invariants
+        label: "Body/member/contact/shape contracts, coherent rigid frame, rest mesh and phase-transition ownership pass GPU-native invariants"
+        event_names: [sol0-sol1-invariants]
+        event_contract_ids: [ulg.g3-solids.v1]
+      - <<: *ulg_campaign_receipt
+        id: g3-solids-solid-fluid-visual-sequence
+        label: "Desktop rest, fall, contact and phase-transition sequences show coherent solid behavior without renderer-authored physics"
+        event_names: [solid-fluid-visual-sequence]
+        event_contract_ids: [ulg.g3-solids.v1]
+
+  - name: ulg-g4-dynamic-laws
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: g4-dynamic-laws-candidate-review
+        label: "Exact source, activation lineage and random reaction-family evidence reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g4-dynamic-laws.v1]
+      - <<: *ulg_campaign_receipt
+        id: g4-dynamic-laws-generic-warm-activation
+        label: "Beyond the reaction seed: conservative per-node envelope tests route relevant generalized warm kernels, with no material/scenario compilation or second scheduler"
+        event_names: [generic-warm-activation]
+        event_contract_ids: [ulg.g4-dynamic-laws.v1]
+      - <<: *ulg_campaign_receipt
+        id: g4-dynamic-laws-scoped-law-invariants
+        label: "Dormant, breach, activation, recovery and zero-work paths pass GPU A/B and conservation tests; configured presets and scientifically grounded random pairs use the same pipeline"
+        event_names: [scoped-law-invariants]
+        event_contract_ids: [ulg.g4-dynamic-laws.v1]
+
+  - name: ulg-g5-reservation
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: g5-reservation-candidate-review
+        label: "Exact source and bounded multi-consumer contention evidence reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g5-reservation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g5-reservation-reservation-invariants
+        label: "Concurrent consumers preserve single-winner ownership, epoch fencing and exactly-once admission within the declared bounded model"
+        event_names: [reservation-invariants]
+        event_contract_ids: [ulg.g5-reservation.v1]
+      - <<: *ulg_campaign_receipt
+        id: g5-reservation-reservation-lifecycle
+        label: "Replay, loser retry, cancellation, stale epoch, retirement and resource lifetime tests pass; no distributed claim inferred from one serialized lane"
+        event_names: [reservation-lifecycle]
+        event_contract_ids: [ulg.g5-reservation.v1]
+
+  - name: ulg-g6-local-fit
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: g6-local-fit-candidate-review
+        label: "Exact source, sample provenance, held-out residuals and invalidation/adoption logs reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g6-local-fit.v1]
+      - <<: *ulg_campaign_receipt
+        id: g6-local-fit-local-fit-cache
+        label: "One bounded local sample-fit-cache path has explicit units, regime/domain keys, generator/ABI/schema provenance and residual bounds"
+        event_names: [local-fit-cache]
+        event_contract_ids: [ulg.g6-local-fit.v1]
+      - <<: *ulg_campaign_receipt
+        id: g6-local-fit-envelope-invalidation
+        label: "Domain exit or source change invalidates the fit; strict use stays in-domain; adoption is schedule-bound and any permitted async debt remains explicit"
+        event_names: [envelope-invalidation]
+        event_contract_ids: [ulg.g6-local-fit.v1]
+
+  - name: ulg-g7-release-audit
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: g7-release-audit-candidate-review
+        label: "Audit code, snapshot hashes, manifests and offline report reviewed; scientific disagreement is not a failing admission criterion"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.g7-release-audit.v1]
+      - <<: *ulg_campaign_receipt
+        id: g7-release-audit-offline-audit-capability
+        label: "Operator can run release or major-change comparisons using immutable versioned real scientific database snapshots cached on shitbox without live network access"
+        event_names: [offline-audit-capability]
+        event_contract_ids: [ulg.g7-release-audit.v1]
+      - <<: *ulg_campaign_receipt
+        id: g7-release-audit-audit-integrity-and-advisory-policy
+        label: "Tests detect cache/provenance/unit/missing-data faults and expose uncertainty and deviations in a report; scientific agreement is not required and no runtime authority or automatic workflow blocker is added"
+        event_names: [audit-integrity-and-advisory-policy]
+        event_contract_ids: [ulg.g7-release-audit.v1]
+
+  - name: ulg-a1-realtime-substrate
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: a1-realtime-substrate-candidate-review
+        label: "Same-device equal-physics baseline, wall-clock physics measurements and visual matrix reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.a1-realtime-substrate.v1]
+      - <<: *ulg_campaign_receipt
+        id: a1-realtime-substrate-bulk-real-time
+        label: "At least 100000 live quiescent carriers sustain real-time physics and the declared 60 Hz target on recorded hardware, with fused/batched resident execution"
+        event_names: [bulk-real-time]
+        event_contract_ids: [ulg.a1-realtime-substrate.v1]
+      - <<: *ulg_campaign_receipt
+        id: a1-realtime-substrate-all-preset-physics
+        label: "All configured presets meet explicitly measured simulation-time per wall-time targets without disabling relevant laws or using display interpolation as solver throughput"
+        event_names: [all-preset-physics]
+        event_contract_ids: [ulg.a1-realtime-substrate.v1]
+
+  - name: ulg-a2-incremental-spatial
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: a2-incremental-spatial-candidate-review
+        label: "Bounded membership-repair experiment and same-device cost/correctness evidence reviewed; implementation remains contingent on evidence"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.a2-incremental-spatial.v1]
+      - <<: *ulg_campaign_receipt
+        id: a2-incremental-spatial-membership-equivalence
+        label: "Moved-member flags or adjacent-node migration agree with the trusted GPU rebuild under crossings, capacity changes and adversarial motion"
+        event_names: [membership-equivalence]
+        event_contract_ids: [ulg.a2-incremental-spatial.v1]
+      - <<: *ulg_campaign_receipt
+        id: a2-incremental-spatial-epoch-safety-and-benefit
+        label: "Immutable admitted generations, conservative displacement certificates and exact consumer coverage survive; scaling and workload benefit are measured before adoption"
+        event_names: [epoch-safety-and-benefit]
+        event_contract_ids: [ulg.a2-incremental-spatial.v1]
+
+  - name: ulg-a3-representative-sampling
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: a3-representative-sampling-candidate-review
+        label: "Homogeneity, sample selection, uncertainty, conservation and fallback evidence reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.a3-representative-sampling.v1]
+      - <<: *ulg_campaign_receipt
+        id: a3-representative-sampling-sample-expand-region
+        label: "Expensive laws run on representative homogeneous-region samples and expand accepted envelopes for bounded regional interpolation/lookup"
+        event_names: [sample-expand-region]
+        event_contract_ids: [ulg.a3-representative-sampling.v1]
+      - <<: *ulg_campaign_receipt
+        id: a3-representative-sampling-debt-and-fallback
+        label: "Heterogeneity or invalid residuals trigger scoped direct work; strict mode never extrapolates; async debt and boundary adoption are explicit and replayable"
+        event_names: [debt-and-fallback]
+        event_contract_ids: [ulg.a3-representative-sampling.v1]
+
+  - name: ulg-a4-material-functions
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: a4-material-functions-candidate-review
+        label: "Derived sample provenance and held-out boundary/interior residuals reviewed across declared domains"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.a4-material-functions.v1]
+      - <<: *ulg_campaign_receipt
+        id: a4-material-functions-derived-property-functions
+        label: "Broader material/compound/property domains use deterministic first-principles sample-derived response functions with explicit axes, units and validity regions"
+        event_names: [derived-property-functions]
+        event_contract_ids: [ulg.a4-material-functions.v1]
+      - <<: *ulg_campaign_receipt
+        id: a4-material-functions-function-invalidation
+        label: "Compact evaluators preserve physical sign/order and declared error bounds; phase/domain transitions and source changes invalidate stale artifacts"
+        event_names: [function-invalidation]
+        event_contract_ids: [ulg.a4-material-functions.v1]
+
+  - name: ulg-a5-solids-and-levels
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: a5-solids-and-levels-candidate-review
+        label: "Each SOL and added tree-level milestone has separate reviewed GPU and visual evidence; no monolithic pass assertion"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.a5-solids-and-levels.v1]
+      - <<: *ulg_campaign_receipt
+        id: a5-solids-and-levels-later-solid-slices
+        label: "SOL-2/3 contact and coupling precede SOL-4 deformation and SOL-5 topology; SOL-6 advances only after its prerequisites"
+        event_names: [later-solid-slices]
+        event_contract_ids: [ulg.a5-solids-and-levels.v1]
+      - <<: *ulg_campaign_receipt
+        id: a5-solids-and-levels-additional-tree-levels
+        label: "Additional SS levels pass conservation, scale coupling, ownership and manufactured/metamorphic GPU tests plus representative desktop sequences"
+        event_names: [additional-tree-levels]
+        event_contract_ids: [ulg.a5-solids-and-levels.v1]
+
+  - name: ulg-a6-remote-derivation
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: a6-remote-derivation-candidate-review
+        label: "Actual remote service execution, lineage, failure and cache evidence reviewed"
+        event_names: [candidate-review]
+        event_contract_ids: [ulg.a6-remote-derivation.v1]
+      - <<: *ulg_campaign_receipt
+        id: a6-remote-derivation-remote-warm-derivation
+        label: "PeerCompute leases warm Eshkol/MoonLab-compatible derivation services and admits provenance-bound artifacts at schedule boundaries without a second scheduler"
+        event_names: [remote-warm-derivation]
+        event_contract_ids: [ulg.a6-remote-derivation.v1]
+      - <<: *ulg_campaign_receipt
+        id: a6-remote-derivation-remote-failure-recovery
+        label: "Stale results, cancellation, owner loss, retry and cache invalidation preserve authority and visible debt; no silent CPU hot-state fallback"
+        event_names: [remote-failure-recovery]
+        event_contract_ids: [ulg.a6-remote-derivation.v1]
+
+  - name: ulg-campaign-clean-release
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: ulg-clean-release-source
+        label: Clean-current release source and inspected release evidence agree; separate from pre-commit development acceptance
+        event_names: [release-source-and-artifacts-reviewed]
+        event_contract_ids: [ulg.release.v1]
+        event_lanes: [release-review]
+        event_source_policy: exact_clean_current
+
+  # Not a required campaign stage or assistant-goal dependency.
+  - name: ulg-science-advisory-signal
+    criteria:
+      - <<: *ulg_campaign_receipt
+        id: ulg-science-advisory-signal
+        severity: low
+        label: Scientific comparison deviations and uncertainty are visible advisory information, never a release or runtime authority blocker
+        event_names: [scientific-comparison-signal]
+        event_contract_ids: [ulg.science-signal.v1]
+        event_lanes: [operator-science-audit]
+
   - name: sph-phase-demo-ready
     aliases: [sph-demo, phase-demo, demo]
     requires:

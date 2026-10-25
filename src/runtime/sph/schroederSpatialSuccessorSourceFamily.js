@@ -1850,7 +1850,7 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     if (capture.transaction !== transaction || capture.generation !== generation
         || capture.sourceRead.read.family !== transaction.sourceBuffers?.exactMassInventory
         || !validateSchroederSpatialEpochTransactionSourceFamily(transaction, { generation,
-          sphParticleUpload: capture.sourceRead.sourceSphUpload,
+          sphParticleUpload: capture.sourceSphUpload,
           mlsMpmParticleUpload: capture.sourceMlsUpload })) {
       throw sourceFamilyError('exact publication requires its genuine transaction and closure source', 'EXACT_MASS_OWNER');
     }

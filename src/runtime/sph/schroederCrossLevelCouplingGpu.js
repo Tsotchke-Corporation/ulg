@@ -154,6 +154,8 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
+  bindSphExactMassFusedTerminalContinuation,
+  sphGpuParticleUploadAdvertisesExactMass,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
   sphParticleStateRequiresExplicitIdentity
 } from './sphGpuBuffers.js';
@@ -2325,7 +2327,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
   baseGridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = [4, 4, 4],
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
-  cflFactor = mlsMpmParticleState?.gridCflFactor ?? DEFAULT_CFL_FACTOR,
+  cflFactor = mlsMpmParticleState?.gridCflFactor || DEFAULT_CFL_FACTOR,
   gravityMPerS2 = [0, -9.80665, 0],
   internalPressureScale = 1,
   ambientPressurePa = 0,
@@ -4011,6 +4013,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
           ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
           ...canonicalMechanicsArgs(),
+          schroederSpatialEpochTransaction: priorCanonicalEpoch.transaction,
           schroederSpatialMechanicalProposal: null
         }),
         { fineSubstepOrdinal: substep }
@@ -4036,6 +4039,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       });
       canonicalEpochController.commitAndRelease(priorCanonicalEpoch, {
         nextParticleUploads: nextUploads,
+        g2pReconstruction: fineG2p,
         terminal: false,
         status: `two-level-fused-fine-substep-${substep}-submitted-unverified`
       });
@@ -4377,6 +4381,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
         ...(gpuTimestampRecorder == null ? {} : { gpuTimestampRecorder }),
         ...canonicalMechanicsArgs(),
+        schroederSpatialEpochTransaction: activeCanonicalEpoch.transaction,
         schroederSpatialMechanicalProposal: null
       })
     );
@@ -4482,17 +4487,21 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     // Gas EOS retains this exact private descriptor in a later macro. Install
     // its registered non-enumerable lifecycle before freezing it; spreading
     // an earlier upload cannot carry that private registration forward.
-    if (!ensureSphGpuParticleBufferSetBorrowLifecycle(finalSphParticleUpload)) {
+    const exactTerminal = sphGpuParticleUploadAdvertisesExactMass(finalSphParticleUpload);
+    if (!exactTerminal && !ensureSphGpuParticleBufferSetBorrowLifecycle(finalSphParticleUpload)) {
       throw new Error('Private terminal SPH output cannot install its exact borrow lifecycle');
     }
     const finalCanonicalUploads = Object.freeze({
-      sphParticleUpload: Object.freeze(finalSphParticleUpload),
-      mlsMpmParticleUpload: Object.freeze({
+      sphParticleUpload: exactTerminal ? finalSphParticleUpload : Object.freeze(finalSphParticleUpload),
+      mlsMpmParticleUpload: {
         ...rawFinalCanonicalUploads.mlsMpmParticleUpload,
         sourceStage: 'schroeder-two-level-private-terminal-s-star',
-        ownsMechanicsBuffer: true
-      })
+        ownsMechanicsBuffer: true,
+        ...(exactTerminal ? { ownsMaterialPropertyBankWarmInputBuffer: false,
+          ownsMaterialPropertyBankParticleSizeBuffer: false } : {})
+      }
     });
+    if (!exactTerminal) Object.freeze(finalCanonicalUploads.mlsMpmParticleUpload);
     markHostPoint('final-canonical-uploads-created');
     // Every workspace already owns a stable completion/retry record. Keep the
     // terminal record live until the synchronous S* claim below: merely
@@ -4566,6 +4575,7 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     const terminalControllerReceipt =
       canonicalEpochController.commitAndRelease(activeCanonicalEpoch, {
         nextParticleUploads: finalCanonicalUploads,
+        g2pReconstruction: coarseG2p,
         terminal: true,
         status: 'two-level-fused-terminal-s-star-private-advanced-pending-closure'
       });
@@ -4606,6 +4616,13 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
         ]
       });
     markHostPoint('pending-closure-created');
+    if (exactTerminal) {
+      // The pending closure already owns the genuine output and therefore
+      // also owns rollback if exact physical-owner installation fails.
+      await bindSphExactMassFusedTerminalContinuation(fusedPendingClosure);
+      Object.freeze(finalCanonicalUploads.sphParticleUpload);
+      Object.freeze(finalCanonicalUploads.mlsMpmParticleUpload);
+    }
     // S* is now owned by the authenticated pending token, so the terminal
     // workspace can begin queue-fenced retirement without invalidating claim
     // provenance. A scheduling failure is recovered through that same token.

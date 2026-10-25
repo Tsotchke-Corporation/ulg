@@ -1,7 +1,8 @@
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
   acquireSphParticleExactMassRead, releaseSphParticleExactMassRead,
   validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
-import { acquireSchroederSpatialEpochExactMassRead } from './schroederSpatialEpochTransaction.js';
+import { acquireSchroederSpatialEpochExactMassRead,
+  validateSchroederSpatialEpochTransactionSourceFamily } from './schroederSpatialEpochTransaction.js';
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
@@ -111,6 +112,8 @@ import {
   validateSchroederCrossLevelRefluxLedgerGpuOwnership
 } from './schroederSpatialParentFieldMechanicsWorkspaceGpu.js';
 import {
+  acquireSchroederCanonicalParticleExactMassRead,
+  acquireSchroederFusedPublicMechanicsExactMassCapture,
   claimSchroederFusedCoarseTerminalStageProducer,
   claimSchroederFusedFineSubstepStageProducer,
   markSchroederFusedCoarseTerminalStageSubmissionObserved,
@@ -392,6 +395,7 @@ function captureFusedG2pInputSnapshot({
   sphParticleUpload,
   mlsMpmParticleUpload,
   schroederSpatialEpochGeneration,
+  schroederSpatialEpochTransaction,
   schroederSelectedLevel,
   dt,
   boxDimsM,
@@ -433,11 +437,13 @@ function captureFusedG2pInputSnapshot({
     liquidWallDampingAlpha: Number(liquidWallDampingAlpha),
     liquidWallDampingDistanceM: Number(liquidWallDampingDistanceM),
     schroederSpatialEpochGeneration,
+    schroederSpatialEpochTransaction,
     schroederSelectedLevel,
     dt,
     boxDimsM: Object.freeze([...boxDimsM]),
     sphParticleUpload,
     mlsMpmParticleUpload,
+    exactMassInventory: sphParticleUpload.exactMassInventory ?? null,
     particleCount: sphParticleUpload.particleCount,
     stateBuffer: sphParticleUpload.stateBuffer,
     thermoBuffer: sphParticleUpload.thermoBuffer,
@@ -477,6 +483,7 @@ function fusedG2pInputSnapshotMatches(device, snapshot, current) {
     snapshot
     && transaction === snapshot.transaction
     && transactionMode === snapshot.transactionMode
+    && current.schroederSpatialEpochTransaction === snapshot.schroederSpatialEpochTransaction
     && transaction?.particleContinuation === snapshot.continuation
     && gridUpdate === snapshot.gridUpdate
     && gridUpdate?.sourceProjection === snapshot.sourceProjection
@@ -504,6 +511,7 @@ function fusedG2pInputSnapshotMatches(device, snapshot, current) {
     && gridUpdate?.sourceProjection?.mechanicsFieldMutationOutputOrdinal
       === snapshot.sourcePressureMutationOrdinal
     && sphParticleUpload === snapshot.sphParticleUpload
+    && (sphParticleUpload?.exactMassInventory ?? null) === snapshot.exactMassInventory
     && mlsMpmParticleUpload === snapshot.mlsMpmParticleUpload
     && sphParticleUpload?.stateBuffer === snapshot.stateBuffer
     && sphParticleUpload?.thermoBuffer === snapshot.thermoBuffer
@@ -661,6 +669,7 @@ function fusedG2pMatchesOrigin(reconstruction, origin, {
     && origin.sphParticleUpload?.identityBuffer === origin.identityBuffer
     && origin.mlsMpmParticleUpload?.mechanicsBuffer === origin.inputMechanicsBuffer
     && origin.sphParticleUpload?.particleCount === origin.particleCount
+    && (origin.sphParticleUpload?.exactMassInventory ?? null) === origin.exactMassInventory
     && origin.mlsMpmParticleUpload?.particleCount === origin.particleCount
     && origin.sphParticleUpload?.stateStrideBytes === origin.stateStrideBytes
     && origin.sphParticleUpload?.thermoStrideBytes === origin.thermoStrideBytes
@@ -880,6 +889,7 @@ function fusedG2pOutputUploadsMatchOrigin(
     && sphParticleUpload?.stateBuffer === origin?.outputStateBuffer
     && sphParticleUpload?.thermoBuffer === origin?.thermoBuffer
     && sphParticleUpload?.identityBuffer === origin?.identityBuffer
+    && (sphParticleUpload?.exactMassInventory ?? null) === origin?.exactMassInventory
     && mlsMpmParticleUpload?.mechanicsBuffer === origin?.outputMechanicsBuffer
     && fusedParticleUploadAbiMatches(
       device,
@@ -918,6 +928,29 @@ export function claimLocallySubmittedMlsMpmFusedG2pOutputForContinuation(
   }
   origin.outputOwnership = 'canonical-continuation';
   return true;
+}
+
+// Private spatial advance precedes the fine-continuation/terminal S* claim.
+// Attest only the actual submitted producer while it still owns its output;
+// this read-only check neither registers aliases nor transfers ownership.
+export function validateMlsMpmFusedExactMassPrivateAdvance(device, reconstruction, {
+  transaction, generation, sphParticleUpload, mlsMpmParticleUpload, nextParticleUploads
+} = {}) {
+  const origin = fusedG2pOrigins.get(reconstruction);
+  return Boolean(origin && origin.device === device && origin.exactMassInventory != null
+    && origin.outputOwnership === 'producer' && origin.canonicalGeneration === generation
+    && origin.spatialTransaction === transaction
+    && origin.sphParticleUpload === sphParticleUpload
+    && origin.mlsMpmParticleUpload === mlsMpmParticleUpload
+    && fusedG2pMatchesOrigin(reconstruction, origin, {
+      ...(origin.transactionMode === 'coarse-terminal'
+        ? { terminalTransaction: origin.transaction } : { transaction: origin.transaction }),
+      macroAuthority: origin.macroAuthority, microepochAuthority: origin.microepochAuthority,
+      particleContinuation: origin.particleContinuation, fieldExecution: origin.fieldExecution,
+      priorArtifact: origin.sourceGridUpdate, proposalMode: origin.proposalMode
+    })
+    && fusedG2pOutputUploadsMatchOrigin(device, origin,
+      nextParticleUploads?.sphParticleUpload, nextParticleUploads?.mlsMpmParticleUpload));
 }
 
 export function claimLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutput(
@@ -1218,6 +1251,7 @@ export function retireLocallySubmittedMlsMpmFusedCoarseTerminalG2pOutputAfter(
 function registerSubmittedFusedG2p(device, reconstruction, {
   transaction,
   transactionMode,
+  spatialTransaction,
   sourceGridUpdate,
   sphParticleUpload,
   mlsMpmParticleUpload,
@@ -1240,6 +1274,7 @@ function registerSubmittedFusedG2p(device, reconstruction, {
     reconstruction,
     transaction,
     transactionMode,
+    spatialTransaction,
     sourceGridUpdate,
     outputStateBuffer,
     outputMechanicsBuffer,
@@ -1258,6 +1293,7 @@ function registerSubmittedFusedG2p(device, reconstruction, {
     reconstruction,
     transaction,
     transactionMode,
+    spatialTransaction,
     macroAuthority: transaction.macroAuthority,
     microepochAuthority: transaction.microepochAuthority,
     particleContinuation: transaction.particleContinuation,
@@ -1272,6 +1308,7 @@ function registerSubmittedFusedG2p(device, reconstruction, {
     sphParticleUpload,
     mlsMpmParticleUpload,
     canonicalGeneration,
+    exactMassInventory: sphParticleUpload.exactMassInventory ?? null,
     selectedLevel,
     inputStateBuffer,
     thermoBuffer,
@@ -3655,10 +3692,13 @@ const exactMassG2pOutputs = new WeakMap();
 // Keep the fused implementation behind the existing lazy module boundary.
 // Each producer alone registers its original outputs; this lookup cannot mint
 // provenance for caller-supplied buffers or copied result envelopes.
-export async function acquireMlsMpmMechanicsExactMassCapture(result, { device, sphParticleUpload } = {}) {
+export async function acquireMlsMpmMechanicsExactMassCapture(result, options = {}) {
+  const { device, sphParticleUpload } = options;
   if (exactMassG2pOutputs.has(result)) {
     return acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUpload });
   }
+  const publicCapture = acquireSchroederFusedPublicMechanicsExactMassCapture(result, options);
+  if (publicCapture) return publicCapture;
   const { acquireFusedMlsMpmMechanicsExactMassCapture } = await loadSphMlsMpmKernelBundle();
   return acquireFusedMlsMpmMechanicsExactMassCapture(result, { device, sphParticleUpload });
 }
@@ -3694,9 +3734,29 @@ export async function runMlsMpmG2pWebGpu(args = {}) {
   args = { ...args };
   const exact = sphGpuParticleUploadAdvertisesExactMass(args.sphParticleUpload);
   if (!exact) return runMlsMpmG2pWebGpuImpl(args);
-  if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE
-      || args.fusedFineSubstepTransaction || args.fusedCoarseTerminalTransaction) {
-    throw new TypeError('G2P requires an authenticated exact-inventory continuation with retained, non-fused GPU outputs');
+  if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE) {
+    throw new TypeError('G2P requires an authenticated exact-inventory continuation with retained GPU outputs');
+  }
+  const fusedTransaction = args.fusedFineSubstepTransaction ?? args.fusedCoarseTerminalTransaction;
+  if (fusedTransaction) {
+    const capture = acquireSchroederCanonicalParticleExactMassRead(args.device,
+      fusedTransaction.particleContinuation, args);
+    if (!capture) throw new TypeError('Exact fused G2P has no original inventory source');
+    try {
+      if (args.sphParticleState?.particleCount !== capture.sourceRead.particleCount
+          || args.mlsMpmParticleState?.particleCount !== capture.sourceRead.particleCount) {
+        throw new TypeError('Exact fused G2P row count mismatch');
+      }
+      const result = await runMlsMpmG2pWebGpuImpl(args, capture.sourceRead);
+      capture.validate();
+      markSphExactMassDerivedBuffers(capture.sourceRead, [result.stateBuffer],
+        { mechanicsBuffers: [result.mechanicsBuffer] });
+      return result;
+    } finally {
+      // Releasing the input also holds the private S/M allocation until its
+      // actual queue fence (or confirmed loss), even when dispatch failed.
+      void capture.release();
+    }
   }
   const sourceRead = args.schroederSpatialEpochTransaction
     ? acquireSchroederSpatialEpochExactMassRead(args.schroederSpatialEpochTransaction, {
@@ -3891,6 +3951,11 @@ async function runMlsMpmG2pWebGpuImpl({
   const fusedTransaction = fusedFineSubstepTransaction
     ?? fusedCoarseTerminalTransaction;
   const fusedG2p = fusedTransaction != null;
+  if (exactMassRead && fusedG2p && !validateSchroederSpatialEpochTransactionSourceFamily(
+    schroederSpatialEpochTransaction, { generation: schroederSpatialEpochGeneration,
+      sphParticleUpload, mlsMpmParticleUpload })) {
+    throw new TypeError('Exact fused G2P requires its genuine spatial transaction source');
+  }
   const singleLevelQueueOrderedCleanupRequested =
     schroederSingleLevelQueueOrderedCleanupCapability != null;
   const singleLevelQueueOrderedCleanup = Boolean(
@@ -3945,6 +4010,7 @@ async function runMlsMpmG2pWebGpuImpl({
     sphParticleUpload,
     mlsMpmParticleUpload,
     schroederSpatialEpochGeneration,
+    schroederSpatialEpochTransaction,
     schroederSelectedLevel,
     schroederSpatialMechanicalProposal,
     dt: dtSeconds,
@@ -5215,6 +5281,7 @@ async function runMlsMpmG2pWebGpuImpl({
         registerSubmittedFusedG2p(device, reconstruction, {
           transaction: fusedTransaction,
           transactionMode: fusedTransactionMode,
+          spatialTransaction: schroederSpatialEpochTransaction,
           sourceGridUpdate: gridUpdate,
           sphParticleUpload,
           mlsMpmParticleUpload,

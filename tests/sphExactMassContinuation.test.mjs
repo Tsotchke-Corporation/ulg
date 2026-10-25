@@ -3,6 +3,7 @@ import test from 'node:test';
 import * as buffers from '../src/runtime/sph/sphGpuBuffers.js';
 import * as steps from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import * as thermal from '../src/runtime/sph/sphThermalGpuKernel.js';
+import * as refresh from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import * as mechanics from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import * as closure from '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js';
 import * as hierarchy from '../src/runtime/sph/schroederHierarchyGpu.js';
@@ -270,6 +271,98 @@ function runSpatial(f, extra = {}, useFused = false) {
       fuseNoFullResidentMechanics: useFused,
       mechanicsMaterialTable: f.mechanicsTable, thermalStepOptions: { conductionRate: 0 },
       gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null }, ...extra });
+}
+
+function runTwoLevel(f, materialUpload, extra = {}) {
+  return runSpatial(f, { enableTwoLevelMechanics: true, enableCrossLevelCoupling: true,
+    minLevel: 0, maxLevel: 1, baseGridSpacingM: .25, supportRadiusScale: 15, targetSupportCells: 4,
+    twoLevelMechanicsAuthority: 'authoritative', twoLevelFineSubstepCount: 2, spatialEpochArenaCount: 4,
+    residentStepOptions: { thermalMaterialTable: f.thermalTable, mechanicsMaterialTable: f.mechanicsTable,
+      mechanicsRefreshOptions: { mechanicsMaterialPhaseUpload: materialUpload },
+      thermalStepOptions: { conductionRate: 0 }, gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null },
+    ...extra });
+}
+
+test('exact two-level hierarchy publishes the real terminal thermal continuation', async () => {
+  const f = fixture();
+  const materialUpload = refresh.uploadMlsMpmMechanicsMaterialPhaseRecords(f.device, f.mechanicsTable);
+  let step;
+  try {
+    const result = await runTwoLevel(f, materialUpload);
+    step = result.residentStep;
+    assert.equal(step.nextParticleUploads.sphParticleUpload.exactMassInventory, f.sphUpload.exactMassInventory);
+    assert.ok(step.nextParticleUploads.schroederSpatialSuccessorSourceFamily);
+  } finally {
+    if (step) await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(
+      step.nextParticleUploads.schroederSpatialSuccessorSourceFamily, { device: f.device });
+    await retire(f, step); refresh.destroyMlsMpmMechanicsMaterialPhaseUpload(materialUpload);
+  }
+});
+
+for (const publication of ['success', 'reject', 'publish-then-throw']) {
+  test(`exact two-level auxiliary ownership survives ${publication} and predecessor retirement`, async () => {
+    const f = fixture();
+    buffers.destroyMlsMpmGpuParticleBuffers(f.mlsUpload);
+    f.mlsUpload = buffers.uploadMlsMpmGpuParticleBuffers(f.device, { ...f.packedMls,
+      materialPropertyBankWarmInputTable: { rowCount: 1, rows: new Float32Array(16) } });
+    const bank = f.mlsUpload.materialPropertyBankWarmInputBuffer;
+    const materialUpload = refresh.uploadMlsMpmMechanicsMaterialPhaseRecords(f.device, f.mechanicsTable);
+    let step, published, failure;
+    try {
+      const result = await runTwoLevel(f, materialUpload, {
+        async successorLevelAssignmentRunner(args) {
+          const assignment = await hierarchy.runSchroederLevelAssignmentWebGpu(args);
+          if (publication === 'success') buffers.destroyMlsMpmGpuParticleBuffers(f.mlsUpload);
+          return assignment;
+        },
+        spatialSuccessorPublicationRunner(plan, inputs) {
+          if (publication === 'reject') throw new Error('injected pre-publication failure');
+          const receipt = spatial.publishPreparedSchroederSpatialSuccessorSourceFamily(plan, inputs);
+          if (publication === 'publish-then-throw') throw new Error('injected post-publication failure');
+          return receipt;
+        }
+      });
+      step = result.residentStep;
+      published = step.nextParticleUploads;
+      await result.schroederTwoLevelPositiveCompletionPromise;
+    } catch (error) {
+      failure = error;
+      published = error.schroederSpatialSuccessorPublicationWitness?.nextParticleUploads;
+    }
+    try {
+      if (publication === 'success') assert.equal(failure, undefined);
+      else assert.match(failure?.message ?? '', /injected .*publication failure/);
+      await settle();
+      if (publication === 'reject') {
+        assert.equal(published, undefined);
+        assert.equal(f.mlsUpload.ownsMaterialPropertyBankWarmInputBuffer, true);
+        assert.equal(bank.destroyed, false, 'rollback restores the still-live original owner');
+      } else {
+        assert.ok(published);
+        assert.ok([published.sphParticleUpload.stateBuffer, published.sphParticleUpload.thermoBuffer,
+          published.mlsMpmParticleUpload.mechanicsBuffer].every(buffer => !buffer.destroyed),
+        'published components survive even when the publisher throws after exposing them');
+        assert.equal(published.mlsMpmParticleUpload.materialPropertyBankWarmInputBuffer, bank);
+        assert.equal(published.mlsMpmParticleUpload.ownsMaterialPropertyBankWarmInputBuffer, true);
+        buffers.destroyMlsMpmGpuParticleBuffers(f.mlsUpload);
+        await settle();
+        assert.equal(bank.destroyed, false, 'original retirement cannot free the published auxiliary');
+        const read = buffers.acquireSphParticleExactMassRead(published.sphParticleUpload, f.device,
+          { mlsMpmParticleUpload: published.mlsMpmParticleUpload });
+        await buffers.releaseSphParticleExactMassRead(read);
+      }
+    } finally {
+      if (published) {
+        await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(
+          published.schroederSpatialSuccessorSourceFamily, { device: f.device });
+        buffers.destroySphGpuParticleBuffers(published.sphParticleUpload);
+        buffers.destroyMlsMpmGpuParticleBuffers(published.mlsMpmParticleUpload);
+      }
+      await retire(f, step);
+      refresh.destroyMlsMpmMechanicsMaterialPhaseUpload(materialUpload);
+    }
+    assert.equal(bank.destroyed, true, 'the eventual owner retires its auxiliary');
+  });
 }
 
 test('spatial continuation admits only the genuine publication and its final epochs', async () => {

@@ -9,6 +9,9 @@ import { sphGpuParticleUploadAdvertisesExactMass, acquireSphParticleExactMassRea
   validateSphParticleExactMassRead, forkSphParticleExactMassRead, releaseSphParticleExactMassRead,
   validateSphExactMassSpatialCommit } from './sphGpuBuffers.js';
 import { acquireSchroederSpatialSuccessorExactMassRead } from './schroederSpatialSuccessorSourceFamily.js';
+import { acquireSchroederPrivateParticleExactMassAssociation,
+  acquireSchroederPublicParticleExactMassAssociation } from './schroederFusedFineSubstepGpu.js';
+import { validateMlsMpmFusedExactMassPrivateAdvance } from './sphG2pGpuKernel.js';
 import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
@@ -355,14 +358,17 @@ function exactMassSourceObjectsMatch(authority, sphUpload, mlsUpload) {
 function exactMassSourceLive(authority) {
   const source = authority.exactMassSource;
   return source == null || (!source.released && validateSphParticleExactMassRead(source.read, {
-    device: authority.device, sourceSphUpload: source.sphUpload })
+    device: authority.device, sourceSphUpload: source.read.sourceSphUpload })
+    && (!source.privateCapture || source.privateCapture.validate())
     && source.mlsFields.every(([key, value]) => source.mlsUpload[key] === value));
 }
 
 function releaseExactMassSource(authority) {
   if (authority.exactMassSource && !authority.exactMassSource.released) {
     authority.exactMassSource.released = true;
-    void releaseSphParticleExactMassRead(authority.exactMassSource.read);
+    if (authority.exactMassSource.privateCapture) void authority.exactMassSource.privateCapture.release();
+    else void releaseSphParticleExactMassRead(authority.exactMassSource.read);
+    authority.exactMassSource.privateCapture = null;
     authority.exactMassSource.read = null;
     authority.exactMassSource.sphUpload = null;
     authority.exactMassSource.mlsUpload = null;
@@ -376,6 +382,7 @@ export function acquireSchroederSpatialEpochExactMassRead(transaction, {
   const authority = authorityFor(transaction);
   if (authority.device !== device || authority.generation !== generation
       || !authority.exactMassSource || authority.exactMassSource.released
+      || authority.exactMassSource.privateCapture
       || !validateSchroederSpatialEpochTransactionSourceFamily(transaction, {
         generation, sphParticleUpload, mlsMpmParticleUpload })) {
     throw transactionError('Exact inventory reader requires the original live transaction source',
@@ -2929,16 +2936,28 @@ export function createSchroederSpatialEpochTransaction({
   TRANSACTION_AUTHORITY.set(transaction, authority);
   try {
     if (sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)) {
-      const read = acquireSchroederSpatialSuccessorExactMassRead({ device, sphParticleUpload,
+      const mlsFields = ['schema', 'sourceSchema', 'status', 'particleCount',
+        'mechanicsBuffer', 'mechanicsStrideBytes', 'mechanicsBufferByteLength',
+        'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch', 'topologyEpoch',
+        'chartEpoch', 'levelEpoch', 'supportEpoch'].map(key => {
+        const descriptor = Object.getOwnPropertyDescriptor(mlsMpmParticleUpload, key);
+        if (descriptor && !Object.hasOwn(descriptor, 'value')) throw new TypeError('Exact spatial source rejects MLS accessors');
+        return [key, descriptor?.value];
+      });
+      const privateCapture = acquireSchroederPublicParticleExactMassAssociation(device,
+        { sphParticleUpload, mlsMpmParticleUpload }) ?? (twoLevel && enabledConsumerReaders.size === 0
+        && requiredReaders.size === 2
+        && requiredReaders.has(SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G)
+        && requiredReaders.has(SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P)
+        ? acquireSchroederPrivateParticleExactMassAssociation(device,
+          { sphParticleUpload, mlsMpmParticleUpload }) : null);
+      const read = privateCapture?.sourceRead ?? acquireSchroederSpatialSuccessorExactMassRead({ device, sphParticleUpload,
         mlsMpmParticleUpload, consumerLease: aerosolSourceFamilyConsumerLease })
         ?? acquireSphParticleExactMassRead(sphParticleUpload, device);
       authority.exactMassSourceIdentity = { sphUpload: new WeakRef(sphParticleUpload),
         mlsUpload: new WeakRef(mlsMpmParticleUpload) };
-      authority.exactMassSource = { read, sphUpload: sphParticleUpload, mlsUpload: mlsMpmParticleUpload,
-        released: false, mlsFields: ['schema', 'sourceSchema', 'status', 'particleCount',
-          'mechanicsBuffer', 'mechanicsStrideBytes', 'mechanicsBufferByteLength',
-          'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch', 'topologyEpoch',
-          'chartEpoch', 'levelEpoch', 'supportEpoch'].map(key => [key, mlsMpmParticleUpload[key]]) };
+      authority.exactMassSource = { read, privateCapture, sphUpload: sphParticleUpload, mlsUpload: mlsMpmParticleUpload,
+        released: false, mlsFields };
     }
     captureSphAerosolSpatialGeneration({ device, transaction, generation,
       sphParticleUpload, mlsMpmParticleUpload, aerosolSourceFamilyConsumerLease });
@@ -3532,12 +3551,19 @@ export function validateSchroederSpatialEpochTransactionCommit(
 
 export function advanceSchroederSpatialEpochTransactionPrivate(transaction, {
   nextParticleUploads = null,
+  g2pReconstruction = null,
   status = 'private-next-state-advanced'
 } = {}) {
   const authority = authorityFor(transaction);
   if (authority.exactMassSource || sphGpuParticleUploadAdvertisesExactMass(nextParticleUploads?.sphParticleUpload)) {
-    throw transactionError('Exact inventory requires prepared spatial publication; private advances are not integrated',
-      'ERR_SCHROEDER_SPATIAL_EPOCH_EXACT_MASS_COMMIT');
+    if (!authority.exactMassSource || !exactMassSourceLive(authority)
+        || !validateMlsMpmFusedExactMassPrivateAdvance(authority.device, g2pReconstruction,
+          { transaction, generation: authority.generation, nextParticleUploads,
+            sphParticleUpload: authority.exactMassSource.sphUpload,
+            mlsMpmParticleUpload: authority.exactMassSource.mlsUpload })) {
+      throw transactionError('Exact private advance requires its original submitted G2P output',
+        'ERR_SCHROEDER_SPATIAL_EPOCH_EXACT_MASS_COMMIT');
+    }
   }
   if (
     authority.twoLevelAuthoritative !== true

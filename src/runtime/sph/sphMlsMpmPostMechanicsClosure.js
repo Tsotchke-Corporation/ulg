@@ -131,6 +131,7 @@ export function resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, 
   }
   const capture = validateCapturedExactMass(authority);
   return Object.freeze({ sourceRead: capture.g2p.sourceRead,
+    sourceSphUpload: capture.g2p.sourceSphUpload ?? capture.g2p.sourceRead.sourceSphUpload,
     sourceMlsUpload: capture.g2p.sourceMlsUpload,
     transaction: authority.transaction, generation: authority.generation });
 }
@@ -2139,7 +2140,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   try {
   if (massCapture) {
     const { acquireMlsMpmMechanicsExactMassCapture } = await import('./sphG2pGpuKernel.js');
-    massCapture.g2p = await acquireMlsMpmMechanicsExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload });
+    massCapture.g2p = await acquireMlsMpmMechanicsExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload,
+      transaction: schroederSpatialEpochTransaction, generation: schroederSpatialEpochGeneration, dt: dtSeconds });
     if (massCapture.g2p.transaction !== schroederSpatialEpochTransaction
         || massCapture.g2p.generation !== schroederSpatialEpochGeneration
         || massCapture.g2p.dt !== dtSeconds) {
@@ -2204,7 +2206,9 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   ) {
     thermalStep = await capturedStage('thermalStep', thermalStepRunner, () => ({
       ...thermalStepOptions,
-      ...(massCapture ? { exactMassG2pResult: postMechanicsG2pResult } : {}),
+      ...(massCapture ? { exactMassG2pResult: postMechanicsG2pResult,
+        exactMassSpatialEpochTransaction: schroederSpatialEpochTransaction,
+        exactMassSpatialEpochGeneration: schroederSpatialEpochGeneration } : {}),
       device,
       sphParticleState,
       thermalMaterialTable,

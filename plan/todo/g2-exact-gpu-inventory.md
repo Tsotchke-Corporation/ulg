@@ -67,8 +67,8 @@ live enrollment. A numerical owner is not a replacement source-authority layer.
 ## Consumer integration map
 
 Cold carrier ownership, standard and fused G2P/thermal/refresh continuation,
-dense multi-step fused terminal ownership, and single-level SS publication/next-generation
-continuation are implemented.
+dense multi-step fused terminal ownership, actual two-level fine/coarse terminal
+ownership, and SS publication/next-generation continuation are implemented.
 The remaining integrations below are still pending. Preserve the existing current-gas source
 and outer-publication machinery; extend its actual owned families.
 
@@ -77,7 +77,7 @@ and outer-publication machinery; extend its actual owned families.
 | Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initial exact mass, private owner and full SPH/MLS epoch initialization implemented. Complete mass/mole/volume projections remain pending. |
 | Product history | `sphResidentProductHistoryGpu.js`, H[3]/H[12]/H[13] and H[9] | Bind exact placed/unplaced partitions to live row membership, generation and count ownership. |
 | Aerosol | `sphAerosolParcelGpu.js`, parcel word 3 | Bind exact mass to family lifetime; retain separate dry-core and condensed-water components for nuclei. |
-| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard and single-step fused dense/canonical preserving continuation implemented, including shared identity lifetime and predecessor retirement. Dense fused multi-step terminal ownership is implemented with an owned cold thermo copy or genuine final thermal/refresh outputs. Two-level branches and carrier topology changes remain pending. |
+| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard and single-step fused dense/canonical preserving continuation implemented, including shared identity lifetime and predecessor retirement. Dense fused multi-step terminal ownership is implemented with an owned cold thermo copy or genuine final thermal/refresh outputs. Two-level fine/coarse preserving continuation is implemented; carrier topology changes remain pending. |
 | Current closure | `sphMlsMpmPostMechanicsClosure.js` retained stages and final tuple | Genuine G2P plus existing thermal/refresh seals authenticate the preserving S/T/M chain and original continuation claim. Product history and mass-changing stages remain pending. |
 | Publication | `schroederSpatialSuccessorSourceFamily.js` | Existing transaction/closure/preparation/commit records now authenticate one exact preserving successor, sealed after final epochs and activated only in the original publication window. Existing SS leases retain the physical read through retirement. |
 | Vapor/aerosol exchange | `sphVaporAerosolExchange*`, `sphSpatialGasLedgerEosGpu.js` | Use one executed integer packet, with complete mass/energy/momentum coupling and refreshed successor volume/EOS. |
@@ -114,7 +114,7 @@ CPU tests separately cover original-record authentication, shared identity
 lifetime, successive owners and failure cleanup. No injected producer substitutes
 for the native sequence.
 
-Migration guards still reject unintegrated two-level entry, phase transfer,
+Migration guards still reject unauthenticated/diagnostic two-level entry, phase transfer,
 materialization, reaction/placement, extraction, product history, gas-pressure
 coupling and compaction when an exact source is supplied. Direct raw-buffer
 thermal entry and CPU fallback also reject. Real presets remain unchanged.
@@ -137,8 +137,8 @@ Native follow-up proves two moving/heating SS steps with final epoch agreement,
 exact mass words, predecessor retirement and final held-lease retirement.
 Evidence: `/home/cos/.cache/icc/repos/ulg/g2-ss-exact-20261025-0guXN6/`.
 
-Next integrate the two-level physical continuation, product residuals,
-aerosol and all mass-changing consumers through their existing owners.
+Next integrate product residuals, aerosol and all mass-changing consumers
+through their existing owners.
 Product exact inventory is the **unplaced residual**, not historical total plus
 placed plus unplaced (which double-counts).
 
@@ -157,6 +157,36 @@ adds eight cold/heated batches with K=2/3 (20 real substeps) to the previous
 single-step matrix. Every exact word, motion/heating and terminal epoch delta
 passes after predecessor retirement. This does not prove complete low-part
 mechanics/thermal coupling, mass-changing consumers or preset enrollment.
+
+The actual authoritative two-level hierarchy now authenticates private fine and
+coarse producers through the public thermal/refresh closure and final SS
+publication. Original frozen S* descriptors delegate retirement to their fused
+owner; physical output pins are distinct from transaction metadata associations.
+Final auxiliary ownership transfers from the original source and rolls back only
+before genuine publication. Publisher-then-throw preserves the published family.
+
+Native `g2-two-level-exact-20261025-slMrmx/native-r4.json` adds two actual
+macrosteps with both classifier levels, two fine substeps each, admitted terminal
+reflux, motion/heating, all exact words and predecessor/final-lease retirement.
+This is preserving-inventory evidence, not low-part energy/momentum or full G2
+acceptance. The full mass-changing consumer map above remains required.
+
+The next product seam is `createResidentProductMassHandle` in
+`sphReactionGpuSummary.js`, plus actual append/compaction and continuation
+ownership in `sphMlsMpmGpuStep.js`. `sphResidentProductHistoryGpu.js` supplies
+GPU count authority; it does not itself own the history allocation. Existing
+vapor/aerosol exchange candidates are not yet production interval/publication
+authority. Exact product residuals must originate with the real reaction debit
+and placement partition, never an f32 reconstruction of historical mass.
+
+The current numeric transfer API accepts one immutable source with a fixed row
+count. Cross-family carrier/history/aerosol transfers therefore also require
+authenticated GPU join/remap or multi-read support: retain every original read,
+validate one common format, preserve row ownership and use one atomic candidate
+for both debit and credit. Appended rows begin at exact zero; compaction must
+use exact nonzero and move limbs with the existing logical rows/count seal.
+Positive inventory with invalid metadata must reject instead of disappearing.
+This extends numeric capability without granting physical publication authority.
 
 ## Implementation order and acceptance
 

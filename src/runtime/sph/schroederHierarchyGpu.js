@@ -209,6 +209,7 @@ import {
   sphDispersedMediumOpticsMatchesParticleUpload,
   sphDispersedMediumOpticsRemapRequiredError,
   summarizeGpuTimestampRecorderQueueStages,
+  transferMaterialPropertyBankAuxiliaryOwnership,
   ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA
 } from './sphMlsMpmGpuStep.js';
 import {
@@ -328,6 +329,7 @@ import {
   retireSchroederFusedMechanicsPrivateSourceAfter,
   sealSchroederFusedTerminalRefluxReceiptGroup,
   validateSchroederFusedMechanicsPendingClosure,
+  createSchroederFusedPublicExactMassSource,
   validateSchroederFusedMechanicsPublicationReceipt,
   validateSchroederFusedTerminalRefluxReceiptGroup
 } from './schroederFusedFineSubstepGpu.js';
@@ -15730,6 +15732,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
 
     commitAndRelease(epoch, {
       nextParticleUploads,
+      g2pReconstruction = null,
       terminal = false,
       status = 'two-level-substep-next-state-submitted'
     } = {}) {
@@ -15755,6 +15758,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
         owned.privateAdvanceReceipt =
           advanceSchroederSpatialEpochTransactionPrivate(owned.transaction, {
           nextParticleUploads,
+          g2pReconstruction,
           status: terminal === true
             ? 'fused-private-terminal-s-star-pending-closure'
             : 'fused-private-intermediate-continuation-advanced'
@@ -15799,6 +15803,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
       epochKind = 'mechanics',
       enabledConsumerReaderIds = null,
       consumerSupportProfileIds = null,
+      exactMassPendingClosure = null,
       privateIntervalReceipt = null,
       privateIntervalClosure = null
     } = {}) {
@@ -15997,6 +16002,12 @@ export function createSchroederTwoLevelCanonicalEpochController({
           ?? initialSphParticleUpload?.slot ?? 0;
         const publicNextSlot = publicIntervalClock?.nextSlot
           ?? (publicSourceSlot === 0 ? 1 : 0);
+        if (sphGpuParticleUploadAdvertisesExactMass(currentSphParticleUpload)) {
+          const publicUploads = createSchroederFusedPublicExactMassSource(device, exactMassPendingClosure,
+            { privateIntervalReceipt });
+          refreshedSphParticleUpload = publicUploads.sphParticleUpload;
+          refreshedMlsMpmParticleUpload = publicUploads.mlsMpmParticleUpload;
+        } else {
         refreshedSphParticleUpload = Object.freeze({
           ...currentSphParticleUpload,
           ...publicIdentity,
@@ -16024,6 +16035,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
           step: publicIntervalClock?.step ?? refreshPhysicsTick,
           ...(publicIntervalClock ? { time: publicIntervalClock.time } : {})
         });
+        }
       }
       for (;;) {
         refreshedAssignment = null;
@@ -16617,6 +16629,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
       currentMlsMpmParticleUpload,
       enabledConsumerReaderIds,
       consumerSupportProfileIds,
+      exactMassPendingClosure = null,
       privateIntervalReceipt = null,
       privateIntervalClosure = null
     } = {}) {
@@ -16627,6 +16640,7 @@ export function createSchroederTwoLevelCanonicalEpochController({
         epochKind: 'post-mechanics',
         enabledConsumerReaderIds,
         consumerSupportProfileIds,
+        exactMassPendingClosure,
         privateIntervalReceipt,
         privateIntervalClosure
       });
@@ -17520,7 +17534,8 @@ export async function runSchroederSameLevelMechanicsWebGpu(args = {}) {
     device: args.device, sphParticleUpload: args.sphParticleUpload,
     mlsMpmParticleUpload: args.mlsMpmParticleUpload,
     consumerLease: args.levelAssignmentSourceFamilyLease })
-    ?? acquireSphParticleExactMassRead(args.sphParticleUpload, args.device);
+    ?? acquireSphParticleExactMassRead(args.sphParticleUpload, args.device,
+      { mlsMpmParticleUpload: args.mlsMpmParticleUpload });
   try { return await runSchroederSameLevelMechanicsWebGpuImpl(args, sourceRead); }
   finally { void releaseSphParticleExactMassRead(sourceRead); }
 }
@@ -17783,13 +17798,15 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   gpuTimestampRecorder = null,
   residentStepOptions = {}
 } = {}, exactMassSourceRead = null) {
-  if (exactMassSourceRead && (enableTwoLevelMechanics || enableCrossLevelCoupling
-      || enableParticleStorageCompaction || enableParticleStorageMaterialization
+  if (exactMassSourceRead && (enableParticleStorageCompaction || enableParticleStorageMaterialization
+      || (enableTwoLevelMechanics && twoLevelMechanicsAuthority !== 'authoritative')
+      || (enableCrossLevelCoupling && !enableTwoLevelMechanics)
       || particleStorageMaterialization || enableFarAggregateForceApplication
       || !enableSpatialEpochGeneration
       || residentStepRunner !== runMlsMpmResidentStepWithOptionalWebGpu
+      || twoLevelMechanicsRunner !== runSchroederTwoLevelMechanicsStepWebGpu
       || spatialTopologyTransitionRunner !== runSchroederSpatialTopologyTransitionWebGpu)) {
-    throw new TypeError('Exact inventory spatial mechanics requires the preserving single-level resident route');
+    throw new TypeError('Exact inventory spatial mechanics requires the preserving resident producers');
   }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -19059,6 +19076,9 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   let pendingTwoLevelPostMechanicsClosure = null;
   let twoLevelTerminalRefluxReceiptCopy = null;
   let twoLevelMechanicsPublicationReceipt = null;
+  let twoLevelPublicCommit = null;
+  let twoLevelPostMechanicsEpoch = null;
+  let twoLevelPostMechanicsCanonicalUploads = null;
   let twoLevelMechanicsPositiveCompletionPromise = null;
   let spatialTopologyTransitionReceipt = null;
   let spatialPositionTransitionReceipt = null;
@@ -19068,6 +19088,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   let spatialSuccessorPublicationReceipt = null;
   let spatialSuccessorPublicationStampTransaction = null;
   let spatialSuccessorPublicationWitness = null;
+  let twoLevelAuxiliaryOwnershipTransfer = null;
   let resolvedFinalRenderLevelAssignment = null;
   let resolvedFinalRenderActiveNodeList = null;
   let ownsResolvedFinalRenderLevelAssignment = false;
@@ -19224,6 +19245,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         sourceFamily,
         nextParticleUploads
       });
+      twoLevelAuxiliaryOwnershipTransfer = null;
       // The module-authenticated family, rather than the caller-controlled
       // returned receipt, is the irreversible outward-publication witness.
       // Drop rollback authority immediately; all following finalization is
@@ -20337,11 +20359,56 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     twoLevelSpatialAggregateTraversalReleasePromise = completionPromise;
     return true;
   };
+  const completePublishedTwoLevelMechanics = (publicCommit) => {
+    if (!pendingTwoLevelPostMechanicsClosure || twoLevelMechanicsPositiveCompletionPromise) return;
+    twoLevelMechanicsPublicationReceipt ??=
+      publishSchroederFusedMechanicsPendingClosure(
+        device,
+        pendingTwoLevelPostMechanicsClosure,
+        {
+          publicSpatialEpochTransaction: publicCommit.spatialEpochTransaction,
+          publicCommitReceipt: publicCommit.commitReceipt,
+          publicSphParticleUpload:
+            twoLevelPostMechanicsCanonicalUploads.sphParticleUpload,
+          publicMlsMpmParticleUpload:
+            twoLevelPostMechanicsCanonicalUploads.mlsMpmParticleUpload,
+          publishedSphParticleUpload:
+            finalTwoLevelContinuationUploads.sphParticleUpload,
+          publishedMlsMpmParticleUpload:
+            finalTwoLevelContinuationUploads.mlsMpmParticleUpload,
+          nextParticleUploads: finalTwoLevelContinuationUploads
+        }
+      );
+    const controllerClosePromise = twoLevelCanonicalEpochController.closeAfter({
+      terminalPrivateEpoch:
+        pendingTwoLevelPostMechanicsClosure.canonicalEpoch,
+      publicPostMechanicsEpoch: twoLevelPostMechanicsEpoch,
+      publicationReceipt: twoLevelMechanicsPublicationReceipt
+    });
+    twoLevelMechanicsPositiveCompletionPromise =
+      completeSchroederFusedMechanicsPendingClosureAfter(
+        device,
+        pendingTwoLevelPostMechanicsClosure,
+        {
+          publicationReceipt: twoLevelMechanicsPublicationReceipt,
+          after: Promise.all([
+            controllerClosePromise,
+            twoLevelPrivateInterval?.initialAssignmentRetirement
+              ?? Promise.resolve(true),
+            twoLevelSpatialAggregateTraversalReleasePromise
+              ?? Promise.resolve(true)
+          ]).then(() => true)
+        }
+      );
+    twoLevelMechanicsPositiveCompletionPromise.catch(() => {});
+    resolvedTwoLevelMechanics.fusedLifecycleStatus =
+      'published-public-e-star-retirement-pending';
+  };
   const scheduleTwoLevelPostMechanicsClosureAbandonment = () => {
     if (
       !twoLevelPostMechanicsClosure
     ) return false;
-    abandonMlsMpmPostMechanicsCondensate(twoLevelPostMechanicsClosure);
+    if (!spatialSuccessorPublicationWitness) abandonMlsMpmPostMechanicsCondensate(twoLevelPostMechanicsClosure);
     if (twoLevelPostMechanicsClosureRetirementPromise) return true;
     const ownerFence = device?.queue?.onSubmittedWorkDone?.();
     if (!ownerFence?.then) return false;
@@ -20350,7 +20417,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         twoLevelPostMechanicsClosure,
         {
           after: Promise.resolve(ownerFence).then(() => true),
-          abandon: true
+          abandon: !spatialSuccessorPublicationWitness
         }
       );
     twoLevelPostMechanicsClosureRetirementPromise.catch(() => {});
@@ -20498,6 +20565,10 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   } = {}) => {
     const preserved = new Set([
       sphParticleUpload?.stateBuffer,
+      spatialSuccessorPublicationWitness?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
+      spatialSuccessorPublicationWitness?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
+      spatialSuccessorPublicationWitness?.nextParticleUploads?.sphParticleUpload?.identityBuffer,
+      spatialSuccessorPublicationWitness?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
       sphParticleUpload?.thermoBuffer,
       sphParticleUpload?.identityBuffer,
       mlsMpmParticleUpload?.mechanicsBuffer
@@ -20537,7 +20608,9 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       const destroyedProductMassHandles = [];
       for (const residentProductMass of residentProductMassHandles) {
         if (
-          isSameResidentProductMass(
+          isSameResidentProductMass(residentProductMass,
+            spatialSuccessorPublicationWitness?.nextParticleUploads?.residentProductMass)
+          || isSameResidentProductMass(
             residentProductMass,
             inputResidentProductMass
           )
@@ -22006,9 +22079,9 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       }
     }
     : rawTwoLevelCoupledUploads;
-  let twoLevelPostMechanicsEpoch =
+  twoLevelPostMechanicsEpoch =
     resolvedTwoLevelMechanics?.postMechanicsEpoch ?? null;
-  let twoLevelPostMechanicsCanonicalUploads =
+  twoLevelPostMechanicsCanonicalUploads =
     resolvedTwoLevelMechanics?.postMechanicsCanonicalUploads ?? null;
   if (twoLevelAuthoritative && pendingTwoLevelPostMechanicsClosure) {
     if (twoLevelPostMechanicsEpoch || twoLevelPostMechanicsCanonicalUploads) {
@@ -22026,6 +22099,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         enabledConsumerReaderIds: twoLevelPostMechanicsConsumerReaderIds,
         consumerSupportProfileIds:
           twoLevelPostMechanicsConsumerSupportProfileIds,
+        exactMassPendingClosure: pendingTwoLevelPostMechanicsClosure,
         privateIntervalReceipt: twoLevelPrivateInterval?.receipt ?? null,
         privateIntervalClosure: twoLevelPrivateInterval
           ? pendingTwoLevelPostMechanicsClosure : null
@@ -22306,6 +22380,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
               .mechanicsBufferByteLength ?? 0
         },
         postMechanicsBackend: resolvedTwoLevelMechanics?.backend ?? 'webgpu',
+        postMechanicsG2pResult: exactMassSourceRead ? pendingTwoLevelPostMechanicsClosure : null,
         // The legacy artifact was built from pre-mechanics positions. It is
         // deliberately quarantined until the compact aggregate view has an
         // exact-generation far-force consumer.
@@ -22962,6 +23037,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         generation: twoLevelPostMechanicsEpoch.generation,
         lookupLevelAssignment: twoLevelPostMechanicsEpoch.levelAssignment,
         nextParticleUploads: finalTwoLevelContinuationUploads,
+        postMechanicsClosure: twoLevelPostMechanicsClosure,
         successorLevelAssignmentRunner: async () => {
           const topologyRebase = rebaseDispersedMediumOpticsTopologyEpoch({
             targetSphUpload:
@@ -23009,6 +23085,14 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   }
   if (twoLevelPostMechanicsEpoch) {
     validateDispersedMediumOpticsTopologyRebases();
+    if (exactMassSourceRead) {
+      twoLevelAuxiliaryOwnershipTransfer = transferMaterialPropertyBankAuxiliaryOwnership({
+        sourceSphUpload: sphParticleUpload,
+        sourceMlsMpmUpload: mlsMpmParticleUpload,
+        targetSphUpload: finalTwoLevelContinuationUploads.sphParticleUpload,
+        targetMlsMpmUpload: finalTwoLevelContinuationUploads.mlsMpmParticleUpload
+      });
+    }
     const publicCommit = twoLevelCanonicalEpochController.commitPostMechanics(
       twoLevelPostMechanicsEpoch,
       {
@@ -23016,6 +23100,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         status: 'two-level-final-sidecar-state-submitted'
       }
     );
+    twoLevelPublicCommit = publicCommit;
     if (
       !topologyTransitionRunnerExplicitlyInjected
       && spatialSuccessorPublicationPlan
@@ -23069,49 +23154,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       'public-e-star-transaction-committed';
     resolvedTwoLevelMechanics.terminalRefluxReceiptPending =
       terminalRefluxReceiptTarget != null;
-    if (pendingTwoLevelPostMechanicsClosure) {
-      twoLevelMechanicsPublicationReceipt =
-        publishSchroederFusedMechanicsPendingClosure(
-          device,
-          pendingTwoLevelPostMechanicsClosure,
-          {
-            publicSpatialEpochTransaction: publicCommit.spatialEpochTransaction,
-            publicCommitReceipt: publicCommit.commitReceipt,
-            publicSphParticleUpload:
-              twoLevelPostMechanicsCanonicalUploads.sphParticleUpload,
-            publicMlsMpmParticleUpload:
-              twoLevelPostMechanicsCanonicalUploads.mlsMpmParticleUpload,
-            publishedSphParticleUpload:
-              finalTwoLevelContinuationUploads.sphParticleUpload,
-            publishedMlsMpmParticleUpload:
-              finalTwoLevelContinuationUploads.mlsMpmParticleUpload
-          }
-        );
-      const controllerClosePromise = twoLevelCanonicalEpochController.closeAfter({
-        terminalPrivateEpoch:
-          pendingTwoLevelPostMechanicsClosure.canonicalEpoch,
-        publicPostMechanicsEpoch: twoLevelPostMechanicsEpoch,
-        publicationReceipt: twoLevelMechanicsPublicationReceipt
-      });
-      twoLevelMechanicsPositiveCompletionPromise =
-        completeSchroederFusedMechanicsPendingClosureAfter(
-          device,
-          pendingTwoLevelPostMechanicsClosure,
-          {
-            publicationReceipt: twoLevelMechanicsPublicationReceipt,
-            after: Promise.all([
-              controllerClosePromise,
-              twoLevelPrivateInterval?.initialAssignmentRetirement
-                ?? Promise.resolve(true),
-              twoLevelSpatialAggregateTraversalReleasePromise
-                ?? Promise.resolve(true)
-            ]).then(() => true)
-          }
-        );
-      twoLevelMechanicsPositiveCompletionPromise.catch(() => {});
-      resolvedTwoLevelMechanics.fusedLifecycleStatus =
-        'published-public-e-star-retirement-pending';
-    }
+    completePublishedTwoLevelMechanics(publicCommit);
     if (twoLevelPostMechanicsClosure) {
       twoLevelPostMechanicsClosureRetirementPromise =
         retireMlsMpmPostMechanicsClosureOutputsAfter(
@@ -26539,6 +26582,16 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   spatialSuccessorPublicationStampTransaction?.commit();
   return result;
   } catch (error) {
+    if (spatialSuccessorPublicationWitness && twoLevelPublicCommit) {
+      // An injected publisher may expose the real family and then throw.
+      // Complete its authenticated lower ownership before retiring anything.
+      try { completePublishedTwoLevelMechanics(twoLevelPublicCommit); }
+      catch (cleanupError) { error.schroederPublishedMechanicsRetirementError = cleanupError; }
+    }
+    if (!spatialSuccessorPublicationWitness && twoLevelAuxiliaryOwnershipTransfer) {
+      try { twoLevelAuxiliaryOwnershipTransfer.rollback(); }
+      catch (cleanupError) { error.schroederAuxiliaryOwnershipRollbackError = cleanupError; }
+    }
     if (exactMassSourceRead && residentStep?.exactMassPostMechanicsClosure
         && !retainPublishedSpatialSuccessorOnFailure(error)) {
       releaseMlsMpmPostMechanicsExactMassCapture(residentStep.exactMassPostMechanicsClosure);
@@ -26588,6 +26641,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     if (
       pendingTwoLevelPostMechanicsClosure
       && !twoLevelMechanicsPublicationReceipt
+      && !spatialSuccessorPublicationWitness
     ) {
       try {
         const abandonment =

@@ -19,6 +19,8 @@ sourcePaths.push('tests/fixtures/sphExactMassContinuationNative.js', 'src/runtim
   'src/runtime/sph/schroederSpatialSuccessorSourceFamily.js',
   'src/runtime/sph/sphMlsMpmGpuStep.js', 'src/runtime/sph/sphMlsMpmPostMechanicsClosure.js',
   'src/runtime/sph/sphThermalGpuKernel.js', 'src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
+sourcePaths.push('src/runtime/sph/schroederFusedFineSubstepGpu.js',
+  'src/runtime/sph/schroederCrossLevelCouplingGpu.js', 'src/runtime/sph/sphGpuParticleRowSizes.js');
 
 function fixtures(format) {
   const mask = (1n << BigInt(format.wordCount * 32)) - 1n;
@@ -129,6 +131,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       let spatialContinuation = null;
       let fusedContinuation = null;
       let fusedSpatialContinuation = null;
+      let twoLevelContinuation = null;
       const sequenceContinuations = [];
       device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       for (const type of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(type);
@@ -337,6 +340,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
           for (const thermal of [false, true]) for (const count of [2, 3]) {
             sequenceContinuations.push(await fixture.runExactMassContinuationNative(device, format, false, false, false, { count, thermal }));
           }
+          twoLevelContinuation = await fixture.runExactMassContinuationNative(device, format, 'two-level');
         } finally {
           await Promise.all(reads.map(read => owner.releaseSphExactMassRead(read)));
           families.forEach(family => owner.releaseSphExactMassInventory(family));
@@ -350,7 +354,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         device.destroy();
       }
       return { results, transfers, coldOwnership, continuation, spatialContinuation,
-        fusedContinuation, fusedSpatialContinuation, sequenceContinuations, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
+        fusedContinuation, fusedSpatialContinuation, sequenceContinuations, twoLevelContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
       formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
@@ -494,6 +498,32 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
       assert.equal(sequence.successorUsableAfterOriginalRetirement, true);
     }
     evidence.fusedSequenceContinuationsPassed = true;
+    const twoLevel = evidence.result.twoLevelContinuation;
+    assert.equal(twoLevel.runs.length, 2);
+    const exactWords = twoLevel.masses.flatMap(mass => Array.from(encodeSphExactMass(mass, format)));
+    assert.notDeepEqual(exactWords, twoLevel.masses.flatMap(mass => Array.from(encodeSphExactMass(Math.fround(mass), format))));
+    let previousState = twoLevel.initialState, previousThermo = twoLevel.initialThermo;
+    for (const run of twoLevel.runs) {
+      assert.equal(run.twoLevelAuthority, 'authoritative');
+      assert.equal(run.twoLevelFineSubstepCount, 2);
+      assert.equal(run.twoLevelCommitVerified, true);
+      assert.ok(run.refluxHeader, 'actual terminal reflux header was read and admitted');
+      assert.equal(run.physicsTick, run.cycle);
+      assert.deepEqual(run.exact, exactWords);
+      assert.deepEqual([run.assignment[0], run.assignment[16]], [0, 1], 'both real classifier levels remain present');
+      assert.ok(run.state.every(Number.isFinite));
+      assert.ok(run.thermo.every(Number.isFinite));
+      for (let row = 0; row < 2; row++) {
+        assert.ok(run.state[row * 8] > previousState[row * 8], 'fine and coarse particles actually move');
+        assert.ok(run.thermo[row * 12 + 2] > previousThermo[row * 12 + 2], 'fine and coarse particles actually heat');
+      }
+      previousState = run.state; previousThermo = run.thermo;
+    }
+    assert.equal(twoLevel.successorUsableAfterOriginalRetirement, true);
+    assert.equal(twoLevel.finalLeaseRetainedOwner, true);
+    assert.equal(twoLevel.finalOwnerRetired, true);
+    assert.deepEqual(twoLevel.exactAfterRetirementRequested, exactWords);
+    evidence.twoLevelContinuationsPassed = true;
   } catch (error) { failure ??= error; evidence.failure = String(error.stack || error); }
   finally {
     clearTimeout(watchdog);

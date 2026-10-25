@@ -41,9 +41,17 @@ import {
 } from './sphG2pGpuKernel.js';
 import {
   validateSchroederSpatialEpochTransactionCommit,
+  validateSchroederSpatialEpochTransactionSourceFamily,
   validateSchroederSpatialEpochTransactionPrivateAdvance
 } from './schroederSpatialEpochTransaction.js';
-import { runSphGpuParticleBufferSetCleanupAfterBorrows } from './sphGpuBuffers.js';
+import {
+  runSphGpuParticleBufferSetCleanupAfterBorrows,
+  sphGpuParticleUploadAdvertisesExactMass,
+  acquireSphParticleExactMassRead,
+  forkSphParticleExactMassRead,
+  validateSphParticleExactMassRead,
+  releaseSphParticleExactMassRead
+} from './sphGpuBuffers.js';
 
 export const ULG_SCHROEDER_TWO_LEVEL_MACRO_AUTHORITY_SCHEMA =
   'peercompute.ulg.schroeder-two-level-macro-authority.v0';
@@ -82,6 +90,8 @@ export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH =
 
 const macroAuthorityOrigins = new WeakMap();
 const particleContinuationOrigins = new WeakMap();
+const exactContinuationSources = new WeakMap();
+const exactPublicSources = new WeakMap();
 const fineMicroepochOrigins = new WeakMap();
 const fineTransactionOrigins = new WeakMap();
 const coarseTerminalTransactionOrigins = new WeakMap();
@@ -314,6 +324,10 @@ function macroMatchesOrigin(device, macroAuthority, origin) {
     && macroAuthority.schema === ULG_SCHROEDER_TWO_LEVEL_MACRO_AUTHORITY_SCHEMA
     && macroAuthority.status === 'macro-frozen-authority-ready'
     && origin.terminalStatus === LIVE_MACRO_STATUS
+    && (!origin.exactMassSourceRead || validateSphParticleExactMassRead(
+      origin.exactMassSourceRead,
+      { device, sourceSphUpload: origin.exactMassSourceRead.sourceSphUpload }
+    ))
     && macroAuthority.generation === origin.generation
     && macroAuthority.parentFieldView === parent
     && macroAuthority.refluxLedger === origin.refluxLedger
@@ -589,7 +603,15 @@ export function createSchroederTwoLevelMacroAuthority({
       }
     ) : null;
   let rootPublicationLock;
+  let exactMassSourceRead = null;
   try {
+    if (sphGpuParticleUploadAdvertisesExactMass(sourceSphParticleUpload)) {
+      exactMassSourceRead = privateSourceOrigin
+        ? forkSphParticleExactMassRead(privateSourceOrigin.macroOrigin.exactMassSourceRead,
+          { device, sourceSphUpload: privateSourceOrigin.macroOrigin.exactMassSourceRead?.sourceSphUpload })
+        : acquireSphParticleExactMassRead(sourceSphParticleUpload, device,
+          { mlsMpmParticleUpload: sourceMlsMpmParticleUpload });
+    }
     rootPublicationLock = fineFieldRuntime.acquireStatePublicationLock(
       parentFieldView.fineFieldView,
       {
@@ -598,12 +620,6 @@ export function createSchroederTwoLevelMacroAuthority({
           validateMechanicsFieldPublicationReceipt
       }
     );
-  } catch (error) {
-    if (privateSourceToken) {
-      releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(device, privateSourceToken);
-    }
-    throw error;
-  }
   const macroAuthority = {
     schema: ULG_SCHROEDER_TWO_LEVEL_MACRO_AUTHORITY_SCHEMA,
     status: 'macro-frozen-authority-ready',
@@ -631,6 +647,8 @@ export function createSchroederTwoLevelMacroAuthority({
     generation,
     execution,
     source: generation.source,
+    exactMassSourceRead,
+    exactMassRetirementPromise: null,
     parentFieldView,
     fineFieldView: parentFieldView.fineFieldView,
     coarseFieldView: parentFieldView.coarseFieldView,
@@ -697,6 +715,9 @@ export function createSchroederTwoLevelMacroAuthority({
     coarseGridDims: exactArraySnapshot(parentFieldView.coarseFieldView.gridDims)
   };
   Object.freeze(macroAuthority);
+  if (!macroMatchesOrigin(device, macroAuthority, origin)) {
+    throw new TypeError('Macro source changed during publication-lock acquisition');
+  }
   macroAuthorityOrigins.set(macroAuthority, origin);
   if (privateSourceOrigin) {
     const borrow = {
@@ -716,6 +737,15 @@ export function createSchroederTwoLevelMacroAuthority({
     privateSourceOrigin.macroOrigin.privateSuccessorBorrow = borrow;
   }
   return macroAuthority;
+  } catch (error) {
+    if (rootPublicationLock) {
+      try { fineFieldRuntime.discardStatePublicationLock(parentFieldView.fineFieldView, rootPublicationLock); }
+      catch { /* The runtime retains a rejected/quarantined lock for its owner. */ }
+    }
+    if (exactMassSourceRead) void releaseSphParticleExactMassRead(exactMassSourceRead);
+    if (privateSourceToken) releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(device, privateSourceToken);
+    throw error;
+  }
 }
 
 export function validateSchroederTwoLevelMacroAuthority(
@@ -744,6 +774,7 @@ function particleUploadSnapshot(sphParticleUpload, mlsMpmParticleUpload) {
     sphSchema: sphParticleUpload?.schema,
     mlsStatus: mlsMpmParticleUpload?.status,
     mlsSchema: mlsMpmParticleUpload?.schema,
+    exactMassInventory: sphParticleUpload?.exactMassInventory ?? null,
     particleCount: sphParticleUpload?.particleCount,
     mlsParticleCount: mlsMpmParticleUpload?.particleCount,
     stateBuffer: sphParticleUpload?.stateBuffer ?? null,
@@ -782,6 +813,7 @@ function particleUploadsMatchSnapshot(sph, mls, snapshot, device = null) {
     && sph?.schema === snapshot.sphSchema
     && mls?.status === snapshot.mlsStatus
     && mls?.schema === snapshot.mlsSchema
+    && (sph?.exactMassInventory ?? null) === snapshot.exactMassInventory
     && sph?.particleCount === snapshot.particleCount
     && mls?.particleCount === snapshot.mlsParticleCount
     && sph?.stateBuffer === snapshot.stateBuffer
@@ -910,12 +942,14 @@ export function createSchroederCanonicalParticleContinuation({
     && mechanicsBuffer === g2pReconstruction?.mechanicsBuffer
     && thermoBuffer === priorOrigin.snapshot.thermoBuffer
     && identityBuffer === priorOrigin.snapshot.identityBuffer;
+  const exactMassFamily = macroOrigin.exactMassSourceRead?.sourceSphUpload.exactMassInventory ?? null;
   if (
     sphParticleUpload?.status !== 'webgpu-uploaded'
     || mlsMpmParticleUpload?.status !== 'webgpu-uploaded'
     || !stateBuffer
     || !thermoBuffer
     || !mechanicsBuffer
+    || (sphParticleUpload?.exactMassInventory ?? null) !== exactMassFamily
     || !(exactInitialFamily || exactChainedFamily)
   ) {
     throw new TypeError(
@@ -952,6 +986,9 @@ export function createSchroederCanonicalParticleContinuation({
     priorContinuation,
     sourceTransaction,
     consumedByTransaction: null,
+    exactMassReaders: 0,
+    exactMassReadersDrained: null,
+    closeExactMassReaders: null,
     outputRetirement: {
       required: !initial,
       stateRetired: initial,
@@ -981,9 +1018,93 @@ export function createSchroederCanonicalParticleContinuation({
     );
   }
   particleContinuationOrigins.set(continuation, origin);
+  if (!initial && macroOrigin.exactMassSourceRead) exactContinuationSources.set(sphParticleUpload, continuation);
   macroOrigin.continuationByOrdinal.set(resolvedOrdinal, continuation);
   macroOrigin.nextContinuationOrdinal += 1;
   return continuation;
+}
+
+// A private fine/coarse source is not a newly uploaded particle owner. Its
+// row association comes from the original macro input and its physical S/M
+// allocations remain owned by the actual continuation. Only this registry can
+// join those lifetimes; copied descriptors or continuation tokens cannot do so.
+export function acquireSchroederCanonicalParticleExactMassRead(device, continuation, {
+  sphParticleUpload, mlsMpmParticleUpload
+} = {}) {
+  return acquireCanonicalExactMassSource(device, continuation,
+    { sphParticleUpload, mlsMpmParticleUpload }, true);
+}
+
+function acquireCanonicalExactMassSource(device, continuation, {
+  sphParticleUpload, mlsMpmParticleUpload
+}, retainPhysicalOutput) {
+  const origin = continuationOriginFor(device, continuation);
+  const macro = origin && macroAuthorityOrigins.get(origin.macroAuthority);
+  if (!origin || sphParticleUpload !== origin.sphParticleUpload
+      || mlsMpmParticleUpload !== origin.mlsMpmParticleUpload
+      || origin.outputRetirement.promise
+      || (origin.outputRetirement.required && (origin.outputRetirement.stateRetired
+        || origin.outputRetirement.mechanicsRetired))) {
+    throw new TypeError('Exact private source requires the original live particle continuation');
+  }
+  if (!macro.exactMassSourceRead) {
+    if (sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)) {
+      throw new TypeError('Private continuation cannot introduce an exact inventory');
+    }
+    return null;
+  }
+  if (origin.snapshot.exactMassInventory !== macro.exactMassSourceRead.sourceSphUpload.exactMassInventory) {
+    throw new TypeError('Private continuation changed its exact inventory family');
+  }
+  const sourceRead = forkSphParticleExactMassRead(macro.exactMassSourceRead,
+    { device, sourceSphUpload: macro.exactMassSourceRead.sourceSphUpload });
+  if (retainPhysicalOutput) origin.exactMassReaders++;
+  let released = false;
+  let completion = null;
+  return Object.freeze({ sourceRead,
+    sphParticleUpload: origin.sphParticleUpload,
+    mlsMpmParticleUpload: origin.mlsMpmParticleUpload,
+    validate() {
+      if (released || !particleUploadsMatchSnapshot(origin.sphParticleUpload,
+        origin.mlsMpmParticleUpload, origin.snapshot, device)
+        || !validateSphParticleExactMassRead(sourceRead,
+          { device, sourceSphUpload: sourceRead.sourceSphUpload })) {
+        throw new TypeError('Exact private source was changed or released');
+      }
+      return true;
+    },
+    release() {
+      if (released) return completion;
+      released = true;
+      completion = releaseSphParticleExactMassRead(sourceRead).then(() => {
+        if (retainPhysicalOutput) {
+          origin.exactMassReaders--;
+          if (origin.exactMassReaders === 0) origin.closeExactMassReaders?.();
+        }
+        return true;
+      });
+      return completion;
+    }
+  });
+}
+
+function retireMacroExactMassSource(origin) {
+  if (!origin.exactMassSourceRead) return Promise.resolve(true);
+  origin.exactMassRetirementPromise ??= releaseSphParticleExactMassRead(origin.exactMassSourceRead);
+  return origin.exactMassRetirementPromise;
+}
+
+// Transactions retain the row association, not an additional fine-output
+// consumer. The macro/controller already own generation retirement; an output
+// pin here would make macro abort wait for a transaction it must itself close.
+// GPU consumers use acquireSchroederCanonicalParticleExactMassRead above.
+export function acquireSchroederPrivateParticleExactMassAssociation(device, {
+  sphParticleUpload, mlsMpmParticleUpload
+} = {}) {
+  const continuation = exactContinuationSources.get(sphParticleUpload);
+  if (!continuation) return null;
+  return acquireCanonicalExactMassSource(device, continuation,
+    { sphParticleUpload, mlsMpmParticleUpload }, false);
 }
 
 export function validateSchroederCanonicalParticleContinuation(
@@ -1031,11 +1152,15 @@ function retireContinuationOutputAfterFence(origin, after) {
     ));
   }
   retirement.failureReason = null;
-  retirement.promise = Promise.resolve(after).then((confirmed) => {
+  retirement.promise = Promise.resolve(after).then(async (confirmed) => {
     if (confirmed !== true) {
       throw new Error(
         'canonical continuation output owner fence was not confirmed'
       );
+    }
+    if (origin.exactMassReaders > 0) {
+      origin.exactMassReadersDrained ??= new Promise(resolve => { origin.closeExactMassReaders = resolve; });
+      await origin.exactMassReadersDrained;
     }
     if (!retirement.stateRetired) {
       origin.snapshot.stateBuffer?.destroy?.();
@@ -2218,6 +2343,7 @@ export function abortSchroederTwoLevelMacroAuthorityAfter(
         throw new Error('macro abort did not retire every owned particle output');
       }
       origin.rootRetired = true;
+      await retireMacroExactMassSource(origin);
       origin.terminalStatus = 'mechanics-macro-aborted-retired';
       origin.abortRetiredAfterDeviceLoss = deviceLost === true;
       return true;
@@ -3859,6 +3985,147 @@ export function claimSchroederFusedMechanicsPendingClosure({
 export const createSchroederFusedMechanicsPendingClosure =
   claimSchroederFusedMechanicsPendingClosure;
 
+// Only the original already-claimed S* can become a physical exact owner.
+// This resolver cannot register a caller's replacement descriptor or output.
+export function resolveSchroederFusedTerminalExactMassContinuation(closure) {
+  const origin = pendingClosureOrigins.get(closure);
+  const read = origin?.macroOrigin.exactMassSourceRead;
+  const device = read?.read.device;
+  if (!read || !validateSchroederFusedMechanicsPendingClosure(device, closure)) {
+    throw new TypeError('Exact terminal continuation requires its genuine pending S* owner');
+  }
+  return Object.freeze({ sourceRead: read,
+    retireOwner() {
+      const lifecycle = origin.lifecycle;
+      if (['published-pending-retirement', 'publication-retiring',
+        'publication-retirement-blocked', 'published-retired', 'abandoned-retired'].includes(lifecycle.state)) {
+        return lifecycle.completionPromise;
+      }
+      // The genuine owner checks private successor borrows synchronously.
+      // Rejection must leave the source's admission and storage untouched.
+      return abandonSchroederFusedMechanicsPendingClosureAfter(device, closure);
+    },
+    nextParticleUploads: Object.freeze({ sphParticleUpload: origin.finalSphParticleUpload,
+      mlsMpmParticleUpload: origin.finalMlsMpmParticleUpload }),
+    stateBuffer: origin.finalUploadSnapshot.stateBuffer,
+    thermoBuffer: origin.finalUploadSnapshot.thermoBuffer });
+}
+
+// Build the public E* aliases from the genuine claimed terminal, never from a
+// caller-provided upload pair. The aliases borrow S*; final SS publication will
+// install its own physical exact owner after thermal/refresh and epoch stamps.
+export function createSchroederFusedPublicExactMassSource(device, closure, {
+  privateIntervalReceipt = null
+} = {}) {
+  const origin = pendingClosureOrigins.get(closure);
+  if (!origin?.macroOrigin.exactMassSourceRead
+      || !validateSchroederFusedMechanicsPendingClosure(device, closure)
+      || (privateIntervalReceipt != null && !validateSchroederFusedTerminalRefluxReceiptGroup(
+        device, privateIntervalReceipt, { finalClosure: closure }))) {
+    throw new TypeError('Exact public epoch requires the original private terminal closure');
+  }
+  if (origin.exactPublicSource) {
+    if (origin.exactPublicSource.privateIntervalReceipt !== privateIntervalReceipt) {
+      throw new TypeError('Exact public epoch interval was replaced');
+    }
+    return origin.exactPublicSource.uploads;
+  }
+  const sph = origin.finalSphParticleUpload, mls = origin.finalMlsMpmParticleUpload;
+  const clock = privateIntervalReceipt?.publicClock;
+  const sourceSlot = clock?.sourceSlot ?? origin.macroOrigin.sourceSphParticleUpload.slot ?? 0;
+  const nextSlot = clock?.nextSlot ?? (sourceSlot === 0 ? 1 : 0);
+  const tick = clock?.physicsTick ?? exactU32(sph.physicsTick + 1, 'public physicsTick');
+  const identity = { physicsTick: tick, physicsSubstep: 0,
+    positionEpoch: sph.positionEpoch, topologyEpoch: sph.topologyEpoch, chartEpoch: sph.chartEpoch,
+    levelEpoch: exactU32(sph.levelEpoch + 1, 'public levelEpoch'),
+    supportEpoch: exactU32(sph.supportEpoch + 1, 'public supportEpoch'),
+    sourceStage: 'schroeder-two-level-public-post-mechanics-epoch',
+    slot: nextSlot, sourceSlot, nextSlot, step: clock?.step ?? tick,
+    ...(clock ? { time: clock.time } : {}) };
+  const uploads = Object.freeze({
+    sphParticleUpload: Object.freeze({ ...sph, ...identity,
+      ownsStateBuffer: false, ownsThermoBuffer: false, ownsIdentityBuffer: false }),
+    mlsMpmParticleUpload: Object.freeze({ ...mls, ...identity, ownsMechanicsBuffer: false })
+  });
+  const record = { origin, uploads, privateIntervalReceipt,
+    dt: privateIntervalReceipt?.outerMacroDt ?? origin.macroAuthority.macroDt,
+    snapshot: particleUploadSnapshot(uploads.sphParticleUpload, uploads.mlsMpmParticleUpload) };
+  exactPublicSources.set(uploads.sphParticleUpload, record);
+  origin.exactPublicSource = record;
+  return uploads;
+}
+
+export function acquireSchroederPublicParticleExactMassSource(device, {
+  sphParticleUpload, mlsMpmParticleUpload
+} = {}) {
+  return acquirePublicExactMassSource(device, { sphParticleUpload, mlsMpmParticleUpload }, true);
+}
+
+export function acquireSchroederPublicParticleExactMassAssociation(device, {
+  sphParticleUpload, mlsMpmParticleUpload
+} = {}) {
+  return acquirePublicExactMassSource(device, { sphParticleUpload, mlsMpmParticleUpload }, false);
+}
+
+function acquirePublicExactMassSource(device, {
+  sphParticleUpload, mlsMpmParticleUpload
+}, retainPhysicalOutput) {
+  const record = exactPublicSources.get(sphParticleUpload);
+  if (!record) return null;
+  const origin = record.origin;
+  if (record.uploads.mlsMpmParticleUpload !== mlsMpmParticleUpload
+      || !validateSchroederFusedMechanicsPendingClosure(device, origin.closure)
+      || !particleUploadsMatchSnapshot(sphParticleUpload, mlsMpmParticleUpload, record.snapshot, device)) {
+    throw new TypeError('Exact public epoch requires its original live source aliases');
+  }
+  // The transaction owns metadata and its generation. Holding S* here would
+  // make abandonment wait for the transaction that closes after macro abort.
+  // Actual closure and thermal consumers each hold an independent S* read.
+  const sourceRead = retainPhysicalOutput
+    ? acquireSphParticleExactMassRead(origin.finalSphParticleUpload, device,
+      { mlsMpmParticleUpload: origin.finalMlsMpmParticleUpload })
+    : forkSphParticleExactMassRead(origin.macroOrigin.exactMassSourceRead,
+      { device, sourceSphUpload: origin.macroOrigin.exactMassSourceRead.sourceSphUpload });
+  let released = false;
+  let completion;
+  return Object.freeze({ sourceRead,
+    validate() {
+      if (released || !particleUploadsMatchSnapshot(sphParticleUpload, mlsMpmParticleUpload, record.snapshot, device)
+          || !validateSphParticleExactMassRead(sourceRead,
+            { device, sourceSphUpload: sourceRead.sourceSphUpload })) {
+        throw new TypeError('Exact public source was changed or released');
+      }
+      return true;
+    },
+    release() {
+      if (released) return completion;
+      released = true;
+      completion = releaseSphParticleExactMassRead(sourceRead);
+      return completion;
+    }
+  });
+}
+
+export function acquireSchroederFusedPublicMechanicsExactMassCapture(closure, {
+  device, sphParticleUpload, transaction, generation, dt
+} = {}) {
+  const origin = pendingClosureOrigins.get(closure);
+  if (!origin) return null;
+  const record = exactPublicSources.get(sphParticleUpload);
+  const mls = record?.uploads.mlsMpmParticleUpload;
+  if (!record || record.origin !== origin || record.dt !== dt
+      || !validateSchroederSpatialEpochTransactionSourceFamily(transaction,
+        { generation, sphParticleUpload, mlsMpmParticleUpload: mls })) {
+    throw new TypeError('Exact terminal capture requires the genuine public epoch transaction and interval');
+  }
+  const source = acquireSchroederPublicParticleExactMassSource(device,
+    { sphParticleUpload, mlsMpmParticleUpload: mls });
+  return Object.freeze({ ...source, sourceSphUpload: sphParticleUpload, sourceMlsUpload: mls,
+    transaction, generation, dt,
+    stateBuffer: record.snapshot.stateBuffer, thermoBuffer: record.snapshot.thermoBuffer,
+    mechanicsBuffer: record.snapshot.mechanicsBuffer, particleCount: record.snapshot.particleCount });
+}
+
 export function validateSchroederFusedMechanicsPendingClosure(
   device,
   closure,
@@ -4904,7 +5171,8 @@ export function publishSchroederFusedMechanicsPendingClosure(
     publicSphParticleUpload,
     publicMlsMpmParticleUpload,
     publishedSphParticleUpload,
-    publishedMlsMpmParticleUpload
+    publishedMlsMpmParticleUpload,
+    nextParticleUploads = null
   } = {}
 ) {
   const closureOrigin = pendingClosureOrigins.get(closure);
@@ -4919,6 +5187,10 @@ export function publishSchroederFusedMechanicsPendingClosure(
   if (
     !validateSchroederFusedMechanicsPendingClosure(device, closure)
     || closureOrigin.lifecycle.state !== 'pending-publication'
+    || (nextParticleUploads != null && (
+      publishedSphParticleUpload !== nextParticleUploads.sphParticleUpload
+      || publishedMlsMpmParticleUpload !== nextParticleUploads.mlsMpmParticleUpload
+    ))
     || !Number.isSafeInteger(nextTick)
     || nextTick > 0xffff_ffff
     || publicSphParticleUpload?.physicsTick !== nextTick
@@ -4940,7 +5212,7 @@ export function publishSchroederFusedMechanicsPendingClosure(
       publicSpatialEpochTransaction,
       publicCommitReceipt,
       {
-        nextParticleUploads: {
+        nextParticleUploads: nextParticleUploads ?? {
           sphParticleUpload: publishedSphParticleUpload,
           mlsMpmParticleUpload: publishedMlsMpmParticleUpload
         },
@@ -5194,6 +5466,7 @@ export function completeSchroederFusedMechanicsPendingClosureAfter(
     closureOrigin.terminalOrigin.status = 'terminal-publication-retired';
     closureOrigin.microepochOrigin.status = 'terminal-publication-retired';
     closureOrigin.macroOrigin.rootRetired = true;
+    await retireMacroExactMassSource(closureOrigin.macroOrigin);
     closureOrigin.macroOrigin.terminalStatus =
       'mechanics-macro-published-retired';
     lifecycle.state = 'published-retired';

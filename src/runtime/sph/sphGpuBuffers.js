@@ -1,4 +1,16 @@
 import {
+  SPH_GPU_PARTICLE_STATE_FLOATS,
+  SPH_GPU_PARTICLE_THERMO_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+} from './sphGpuParticleRowSizes.js';
+export {
+  SPH_GPU_PARTICLE_STATE_FLOATS,
+  SPH_GPU_PARTICLE_THERMO_FLOATS,
+  SPH_GPU_PARTICLE_IDENTITY_UINTS,
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+} from './sphGpuParticleRowSizes.js';
+import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
@@ -57,10 +69,6 @@ export {
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 };
 
-export const SPH_GPU_PARTICLE_STATE_FLOATS = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
-export const SPH_GPU_PARTICLE_THERMO_FLOATS = SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
-export const SPH_GPU_PARTICLE_IDENTITY_UINTS = SPH_GPU_PARTICLE_IDENTITY_ROW_LAYOUT.length;
-export const MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
 // PBD-style relaxation for the excluded-volume pair separation projection in
 // G2P post-processing; 0 disables the pass.
 export const MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT = 0.5;
@@ -2617,12 +2625,16 @@ export function validateSphParticleExactMassRead(handle, { device, sourceSphUplo
 }
 
 /** Marking can only forbid legacy mutation; it does not authorize a successor. */
-export function markSphExactMassDerivedBuffers(handle, buffers) {
+export function markSphExactMassDerivedBuffers(handle, buffers, { mechanicsBuffers = [] } = {}) {
   if (!validateSphParticleExactMassRead(handle, { device: handle?.read?.device,
     sourceSphUpload: handle?.sourceSphUpload })) throw new TypeError('Invalid exact particle read');
   for (const buffer of buffers) {
     if (webGpuBufferDevice(buffer) !== handle.read.device) throw new TypeError('Exact derived buffer has a foreign device');
     exactMassParticleBuffers.add(buffer);
+  }
+  for (const buffer of mechanicsBuffers) {
+    if (webGpuBufferDevice(buffer) !== handle.read.device) throw new TypeError('Exact derived mechanics has a foreign device');
+    exactMassMechanicsBuffers.add(buffer);
   }
 }
 
@@ -2661,6 +2673,28 @@ export async function bindSphExactMassPostMechanicsContinuation({ closure, claim
 
 const exactMassMechanicsOwners = new WeakMap();
 const exactMassMechanicsBuffers = new WeakSet();
+
+export async function bindSphExactMassFusedTerminalContinuation(closure) {
+  const module = await import('./schroederFusedFineSubstepGpu.js');
+  const capture = module.resolveSchroederFusedTerminalExactMassContinuation(closure);
+  const target = capture.nextParticleUploads.sphParticleUpload;
+  const existing = sphParticleBufferSetLifecycleRecords.get(target);
+  if (existing?.exactMass) {
+    if (exactMassContinuationBindings.get(closure)?.target !== target
+        || !exactParticleMassOwnerMatches(target, existing)) throw new TypeError('Exact private terminal owner was replaced');
+    return existing.exactMass.family;
+  }
+  const family = installExactMassContinuationOwner({ target, existing, capture,
+    stateBuffer: capture.stateBuffer, thermoBuffer: capture.thermoBuffer });
+  registerExactMassMechanicsOwner(capture.nextParticleUploads.mlsMpmParticleUpload,
+    target, capture.sourceRead.read.device);
+  sphParticleBufferSetLifecycleRecords.get(target).exactMass.retireOwner = capture.retireOwner;
+  exactMassContinuationBindings.set(closure, { target });
+  // Cold retirement entrances must also wait for the already-submitted G2P.
+  const submittedRead = acquireSphParticleExactMassRead(target, capture.sourceRead.read.device);
+  void releaseSphParticleExactMassRead(submittedRead);
+  return family;
+}
 
 /** Only the actual sequence producer can supply this original terminal record. */
 export async function bindSphExactMassFusedSequenceContinuation(step) {
@@ -2710,6 +2744,8 @@ export function runMlsMpmGpuParticleBufferSetCleanupAfterBorrows(upload, cleanup
     return false;
   }
   if (upload.mechanicsBuffer !== owner.physical.mechanicsBuffer) throw new TypeError('Exact mechanics owner was replaced');
+  const targetRecord = sphParticleBufferSetLifecycleRecords.get(owner.target);
+  if (requestExactMassProducerRetirement(targetRecord)) return true;
   // Snapshot ownership at the request, after any legitimate auxiliary transfer;
   // delayed cleanup never rereads mutable buffer fields or ownership flags.
   const physical = Object.freeze({ ...owner.physical,
@@ -3126,6 +3162,7 @@ export function destroySphGpuParticleBuffers(buffers) {
     throw new TypeError('Exact particle retirement requires the original private upload owner');
   }
   if (record ? record.destroyed : buffers.destroyed) return false;
+  if (requestExactMassProducerRetirement(record)) return false;
   let activeBorrowCount = record ? record.activeBorrowCount + record.exactMassActiveReadCount : 0;
   if (!record) {
     try {
@@ -3142,6 +3179,18 @@ export function destroySphGpuParticleBuffers(buffers) {
     return false;
   }
   return destroySphGpuParticleBuffersNow(buffers, record);
+}
+
+function requestExactMassProducerRetirement(record) {
+  const owner = record?.exactMass;
+  if (!owner?.retireOwner) return false;
+  // Only the original fused owner may destroy its frozen S* descriptors.
+  // A failed preflight (for example a live private successor) must not close
+  // admission. The owner retains queue/device-loss retry authority on failure.
+  const completion = owner.retireOwner();
+  record.admissionClosed = true;
+  completion.catch(error => { owner.retirementError = error; });
+  return true;
 }
 
 export function decodeSphGpuParticleRows(packed) {

@@ -6,6 +6,7 @@ import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT
 } from '../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  acquireSchroederCanonicalParticleExactMassRead,
   abortSchroederFineMicroepochAfter,
   abortSchroederTwoLevelMacroAuthorityAfter,
   createSchroederCanonicalParticleContinuation,
@@ -26,6 +27,13 @@ import {
 import {
   createSchroederCrossLevelRefluxLedgerGpu
 } from '../src/runtime/sph/schroederSpatialParentFieldMechanicsWorkspaceGpu.js';
+import { buildSphGpuParticleBuffers, buildMlsMpmGpuParticleBuffers,
+  uploadSphGpuParticleBuffers, uploadMlsMpmGpuParticleBuffers,
+  destroySphGpuParticleBuffers, destroyMlsMpmGpuParticleBuffers
+} from '../src/runtime/sph/sphGpuBuffers.js';
+import { createSphExactMassFormat } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
+import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 
 const TEST_STAGE_PRODUCER_VALIDATORS = Object.freeze(Object.fromEntries(
   ['p2g', 'grid-update', 'fine-correction', 'g2p'].map(
@@ -238,7 +246,7 @@ function sequenceRuntime({ retireFailureCount = 0 } = {}) {
   };
 }
 
-function fixture({ fineSubstepCount = 4, fineRuntime = sequenceRuntime() } = {}) {
+function fixture({ fineSubstepCount = 4, fineRuntime = sequenceRuntime(), exactMass = false } = {}) {
   const device = {
     limits: {
       maxBufferSize: 256 * 1024 * 1024,
@@ -246,22 +254,41 @@ function fixture({ fineSubstepCount = 4, fineRuntime = sequenceRuntime() } = {})
     },
     queue: {
       writeBuffer() {},
+      submit() {},
       async onSubmittedWorkDone() {}
     },
+    createCommandEncoder() { throw new Error('macro ownership tests must not encode GPU work'); },
     createBuffer(desc) {
       return {
         ...desc,
         destroyed: false,
+        destroyCount: 0,
         destroy() {
           this.destroyed = true;
+          this.destroyCount++;
         }
       };
     }
   };
-  const stateBuffer = { label: 'state-0' };
-  const thermoBuffer = { label: 'thermo-0' };
-  const identityBuffer = { label: 'identity-0' };
-  const mechanicsBuffer = { label: 'mechanics-0' };
+  let loseDevice;
+  device.lost = new Promise(resolve => { loseDevice = resolve; });
+  let exactSph, exactMls;
+  if (exactMass) {
+    const materialProperties = { fe: createReferenceMaterialClosures().fe.properties };
+    const initial = { smoothingLengthM: .5, dimension: 3, storageGeneration: 1,
+      particles: [0, 1].map(index => ({ id: `carrier-${index}`, material: 'fe',
+        initialBodyDomainId: index + 1, initialBodyId: `body-${index}`,
+        massKg: .001 * (1 + 2 ** -30), x: [.15 + index, 1, 1], v: [.1, 0, 0],
+        specificInternalEnergyJPerKg: specificInternalEnergyJPerKg(materialProperties.fe, 300) })) };
+    exactSph = uploadSphGpuParticleBuffers(device, buildSphGpuParticleBuffers(initial,
+      { materialProperties, exactMass: { format: createSphExactMassFormat(), reference: 'private macro ownership regression' } }));
+    exactMls = uploadMlsMpmGpuParticleBuffers(device, buildMlsMpmGpuParticleBuffers(initial,
+      { materialProperties, particleSeparationRelaxation: 0 }));
+  }
+  const stateBuffer = exactSph?.stateBuffer ?? { label: 'state-0' };
+  const thermoBuffer = exactSph?.thermoBuffer ?? { label: 'thermo-0' };
+  const identityBuffer = exactSph?.identityBuffer ?? { label: 'identity-0' };
+  const mechanicsBuffer = exactMls?.mechanicsBuffer ?? { label: 'mechanics-0' };
   const fineFieldView = {
     identityBuffer,
     fieldViewBuffer: { label: 'fine-field' },
@@ -288,14 +315,14 @@ function fixture({ fineSubstepCount = 4, fineRuntime = sequenceRuntime() } = {})
     fineFieldView,
     coarseFieldView
   };
-  const sphParticleUpload = {
+  const sphParticleUpload = exactSph ?? {
     status: 'webgpu-uploaded',
     particleCount: 2,
     stateBuffer,
     thermoBuffer,
     identityBuffer
   };
-  const mlsMpmParticleUpload = {
+  const mlsMpmParticleUpload = exactMls ?? {
     status: 'webgpu-uploaded',
     particleCount: 2,
     mechanicsBuffer
@@ -362,6 +389,7 @@ function fixture({ fineSubstepCount = 4, fineRuntime = sequenceRuntime() } = {})
   });
   return {
     device,
+    loseDevice,
     parentFieldView,
     canonicalEpoch,
     refluxLedger,
@@ -373,6 +401,82 @@ function fixture({ fineSubstepCount = 4, fineRuntime = sequenceRuntime() } = {})
     mlsMpmParticleUpload
   };
 }
+
+const settleExact = async () => { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+test('exact macro and private read retain original SPH and MLS owners through requested destruction', async () => {
+  const f = fixture({ exactMass: true });
+  assert.equal('exactMassSourceRead' in f.macroAuthority, false);
+  const capture = acquireSchroederCanonicalParticleExactMassRead(f.device, f.continuation, f);
+  assert.equal(capture.sourceRead.sourceSphUpload, f.sphParticleUpload);
+  const owned = [f.sphParticleUpload.stateBuffer, f.sphParticleUpload.thermoBuffer,
+    f.sphParticleUpload.identityBuffer, f.mlsMpmParticleUpload.mechanicsBuffer];
+  destroySphGpuParticleBuffers(f.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(f.mlsMpmParticleUpload);
+  await settleExact();
+  assert.ok(owned.every(buffer => !buffer.destroyed));
+  assert.equal(capture.validate(), true);
+  assert.equal(await abortSchroederTwoLevelMacroAuthorityAfter(f.device, f.macroAuthority), true);
+  assert.ok(owned.every(buffer => !buffer.destroyed), 'independent held read survives macro retirement');
+  assert.throws(() => acquireSchroederCanonicalParticleExactMassRead(f.device, f.continuation, f), /original live/);
+  const release = capture.release();
+  assert.equal(capture.release(), release);
+  await release;
+  await settleExact();
+  assert.ok(owned.every(buffer => buffer.destroyCount === 1));
+  assert.throws(() => capture.validate(), /changed or released/);
+});
+
+test('exact macro input and private capability reject copied identities without leaking source reads', async () => {
+  const f = fixture({ exactMass: true });
+  assert.throws(() => acquireSchroederCanonicalParticleExactMassRead(f.device, { ...f.continuation }, f), /original live/);
+  assert.throws(() => acquireSchroederCanonicalParticleExactMassRead(f.device, f.continuation,
+    { ...f, sphParticleUpload: { ...f.sphParticleUpload } }), /original live/);
+  assert.throws(() => acquireSchroederCanonicalParticleExactMassRead(f.device, f.continuation,
+    { ...f, mlsMpmParticleUpload: { ...f.mlsMpmParticleUpload } }), /original live/);
+  const args = { device: f.device, canonicalEpoch: f.canonicalEpoch, refluxLedger: f.refluxLedger,
+    fineSubstepCount: 4, fineLevel: 0, coarseLevel: 1, fineDt: .01, macroDt: .04 };
+  assert.throws(() => createSchroederTwoLevelMacroAuthority({ ...args,
+    canonicalEpoch: { ...f.canonicalEpoch, sphParticleUpload: { ...f.sphParticleUpload } } }), /original live upload/);
+  assert.throws(() => createSchroederTwoLevelMacroAuthority({ ...args,
+    canonicalEpoch: { ...f.canonicalEpoch, mlsMpmParticleUpload: { ...f.mlsMpmParticleUpload } } }), /original live MLS/);
+  const acquireLock = f.fineRuntime.acquireStatePublicationLock;
+  f.fineRuntime.acquireStatePublicationLock = () => { throw new Error('root lock rejected'); };
+  assert.throws(() => createSchroederTwoLevelMacroAuthority(args), /root lock rejected/);
+  const originalSource = f.canonicalEpoch.generation.source;
+  f.fineRuntime.acquireStatePublicationLock = () => {
+    f.canonicalEpoch.generation.source = null;
+    return Object.freeze({ testLock: true });
+  };
+  assert.throws(() => createSchroederTwoLevelMacroAuthority(args), /assignmentBuffer/);
+  f.canonicalEpoch.generation.source = originalSource;
+  f.fineRuntime.acquireStatePublicationLock = acquireLock;
+  await abortSchroederTwoLevelMacroAuthorityAfter(f.device, f.macroAuthority);
+  destroySphGpuParticleBuffers(f.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(f.mlsMpmParticleUpload);
+  await settleExact();
+  assert.equal(f.sphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(f.mlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
+});
+
+test('exact macro cannot retire physical storage on a caller loss hint or a rejected queue fence', async () => {
+  const f = fixture({ exactMass: true });
+  f.device.queue.onSubmittedWorkDone = () => Promise.reject(new Error('queue completion unavailable'));
+  destroySphGpuParticleBuffers(f.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(f.mlsMpmParticleUpload);
+  let retired = false;
+  const completion = abortSchroederTwoLevelMacroAuthorityAfter(f.device, f.macroAuthority, { deviceLost: true })
+    .then(result => { retired = true; return result; });
+  await settleExact();
+  assert.equal(retired, false);
+  assert.equal(f.sphParticleUpload.stateBuffer.destroyed, false);
+  assert.equal(f.mlsMpmParticleUpload.mechanicsBuffer.destroyed, false);
+  f.loseDevice({ reason: 'destroyed', message: 'confirmed test device loss' });
+  assert.equal(await completion, true);
+  await settleExact();
+  assert.equal(f.sphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(f.mlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
+});
 
 test('fused fine-substep mutation plans reserve local 0→1→2→3 chains on every fresh E_j', () => {
   for (let ratio = 1; ratio <= 4; ratio += 1) {

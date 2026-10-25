@@ -12,6 +12,12 @@ export async function preloadExactMassContinuationNative() {
   const bufferUrl = await dependency(stepUrl, 'sphGpuBuffers.js');
   const thermalUrl = await dependency(stepUrl, 'sphThermalGpuKernel.js');
   const mechanicsUrl = await dependency(bufferUrl, 'sphMechanicsMaterialTable.js');
+  const couplingUrl = await dependency(hierarchyUrl, 'schroederCrossLevelCouplingGpu.js');
+  const fusedUrl = await dependency(couplingUrl, 'schroederFusedFineSubstepGpu.js');
+  const refreshUrl = await dependency(stepUrl, 'sphMechanicsRefreshGpuKernel.js');
+  const identityUrl = await dependency(bufferUrl, 'sphGpuDeviceIdentity.js');
+  const refluxUrl = await dependency(fusedUrl, 'schroederCrossLevelRefluxLedger.js');
+  const epochUrl = await dependency(hierarchyUrl, 'schroederSpatialEpochGpu.js');
   const [steps, buffers, thermal, mechanics, materials, energy] = await Promise.all([
     import(/* @vite-ignore */ stepUrl), import(/* @vite-ignore */ bufferUrl),
     import(/* @vite-ignore */ thermalUrl), import(/* @vite-ignore */ mechanicsUrl),
@@ -25,17 +31,28 @@ export async function preloadExactMassContinuationNative() {
   }
   const [hierarchy, spatial] = await Promise.all([
     import(/* @vite-ignore */ hierarchyUrl), import(/* @vite-ignore */ spatialUrl)]);
-  return { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial };
+  const [refresh, , fused, identity, reflux, epoch] = await Promise.all([import(/* @vite-ignore */ refreshUrl),
+    import(/* @vite-ignore */ couplingUrl), import(/* @vite-ignore */ fusedUrl),
+    import(/* @vite-ignore */ identityUrl), import(/* @vite-ignore */ refluxUrl), import(/* @vite-ignore */ epochUrl)]);
+  return { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial, refresh, fused, identity, reflux, epoch };
 }
 
 export async function runExactMassContinuationNative(device, format, useSpatial = false, useFused = false, observeAuthority = false, sequence = null) {
-  const { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial } = await preloadExactMassContinuationNative();
+  const { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial, refresh, fused, identity, reflux, epoch } = await preloadExactMassContinuationNative();
+  const twoLevel = useSpatial === 'two-level';
   const materialProperties = { fe: materials.createReferenceMaterialClosures().fe.properties };
   const mass = 0.001 * (1 + 2 ** -30);
   const initial = { smoothingLengthM: .5, dimension: 3, step: 0, time: 0, storageGeneration: 1,
     particles: [{ id: 'exact-carrier', material: 'fe', initialBodyDomainId: 1, initialBodyId: 'exact-carrier-body',
       massKg: mass, x: [.15, 1, 1], v: [.1, 0, 0],
       specificInternalEnergyJPerKg: energy.specificInternalEnergyJPerKg(materialProperties.fe, 300) }] };
+  if (twoLevel) {
+    const density = materialProperties.fe.phases.find(phase => phase.name === 'solid').densityKgPerM3;
+    initial.particles = [.001, .008].map((volume, index) => ({ id: `exact-level-${index}`, material: 'fe',
+      initialBodyDomainId: index + 1, initialBodyId: `exact-body-${index}`,
+      massKg: density * volume * (1 + 2 ** -30), x: [1.3 + .8 * index, 2, 2], v: [.1, 0, 0],
+      specificInternalEnergyJPerKg: energy.specificInternalEnergyJPerKg(materialProperties.fe, 300) }));
+  }
   let packed = buffers.buildSphGpuParticleBuffers(initial, { materialProperties,
     exactMass: { format, reference: 'native two-step preserving solver fixture' } });
   if (packed.identity[0] !== 1) throw new Error('Solid fixture requires its authored nonzero continuity domain');
@@ -47,6 +64,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
   const table = thermal.buildSphThermalMaterialTable(materialProperties);
   for (let i = 4; i < table.records.length; i += 8) table.records[i] = 0;
   const mechanicsTable = mechanics.buildMlsMpmMechanicsMaterialTable(materialProperties);
+  const materialUpload = twoLevel ? refresh.uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsTable) : null;
   const observe = async (buffer, integer = false) => {
     const copy = device.createBuffer({ size: buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     try {
@@ -57,8 +75,10 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
     } finally { copy.destroy(); }
   };
   const result = { initialState: Array.from(packed.state), initialThermo: Array.from(packed.thermo),
-    mass, runs: [], fullG2Acceptance: false, spatialPublicationAdmitted: useSpatial, fusedMechanicsRequested: useFused, sequence };
+    mass, masses: initial.particles.map(particle => particle.massKg), twoLevel,
+    runs: [], fullG2Acceptance: false, spatialPublicationAdmitted: Boolean(useSpatial), fusedMechanicsRequested: useFused, sequence };
   let previousStep = null;
+  const receiptBuffers = [];
   let sourceFamily = null, sourceLease = null, successorAssignment = null;
   try {
     for (let cycle = 1; cycle <= 2; cycle++) {
@@ -72,12 +92,39 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         observeCanonicalSpatialAuthority: observeAuthority,
         gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null, fuseNoFullResidentMechanics: useFused };
       if (sequence?.thermal) options.thermalStepOptions.wallRate = 26;
+      if (twoLevel) {
+        options.boxDimsM = [4, 4, 4];
+        // This broad layer reaches all six walls. Unspecified legacy faces
+        // are 0 K reservoirs, so declare the complete heating environment.
+        options.thermalStepOptions.wallTemperaturesK = Object.fromEntries(
+          ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'].map(face => [face, 350]));
+        options.thermalStepOptions.wallLayerM = 4;
+        options.thermalStepOptions.wallRate = 26000;
+        options.mechanicsRefreshOptions = { mechanicsMaterialPhaseUpload: materialUpload };
+      }
       if (sequence && !sequence.thermal) {
         delete options.thermalMaterialTable;
         delete options.mechanicsMaterialTable;
         delete options.thermalStepOptions;
       }
       if (sourceFamily) sourceLease = spatial.acquireSchroederSpatialSuccessorSourceFamilyLease(sourceFamily, { device });
+      let receiptBuffer = null;
+      const generationRunner = async args => {
+        const generation = await epoch.runSchroederSpatialEpochGenerationWithBackpressureWebGpu(args);
+        if (!receiptBuffer) {
+          receiptBuffer = identity.tagWebGpuBufferDevice(device.createBuffer({
+            size: fused.SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), device);
+          receiptBuffers.push(receiptBuffer);
+          options[fused.SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION] =
+            fused.createSchroederFusedTerminalRefluxReceiptTarget({ device,
+              scheduleId: `exact-native-two-level-${cycle}`, laneId: 'native', stateKey: 'exact',
+              stepOrdinal: 1, targetBuffer: receiptBuffer, targetOffsetBytes: 0,
+              expectedCompletionOrdinal: generation.execution.generationId,
+              expectedFineSubstepCount: 2, expectedFineLevel: 0, expectedCoarseLevel: 1 });
+        }
+        return generation;
+      };
       const execution = useSpatial ? await hierarchy.runSchroederSameLevelMechanicsWebGpu({
         device, sphParticleState: packed, mlsMpmParticleState: packedMls,
         sphParticleUpload: sphUpload, mlsMpmParticleUpload: mlsUpload,
@@ -89,6 +136,11 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         observeCanonicalSpatialAuthority: observeAuthority,
         enableLawQueue: false, enableLawNeighborCandidates: false,
         enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
+        ...(twoLevel ? { maxLevel: 1, baseGridSpacingM: .25, targetSupportCells: 4, supportRadiusScale: 15,
+          boxDimsM: [4, 4, 4], enablePressureInterfaceOwnerScope: false,
+          enableTwoLevelMechanics: true, twoLevelMechanicsAuthority: 'authoritative',
+          twoLevelFineSubstepCount: 2, spatialEpochArenaCount: 4,
+          spatialEpochGenerationRunner: generationRunner } : {}),
         residentStepOptions: options }) : null;
       const step = sequence
         ? (await steps.runMlsMpmResidentStepsWithOptionalWebGpu({ ...options,
@@ -98,8 +150,24 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         if (step.stageTiming.fusedResidentSequence !== true || step.fusedResidentSequence.stepCount !== sequence.count) {
           throw new Error('Actual fused K-step sequence was not selected');
         }
+      } else if (twoLevel) {
+        if (step.twoLevelMechanicsAuthority !== 'authoritative' || step.twoLevelFineSubstepCount !== 2
+            || !step.twoLevelAuthoritativeCommitVerified || !step.thermalStep || !step.mechanicsRefreshStep) {
+          throw new Error('Actual authoritative two-level thermal continuation was not selected');
+        }
       } else if (step.stageTiming.fusedResidentMechanics !== useFused) throw new Error('Actual mechanics route differs from requested fused execution');
       const next = step.nextParticleUploads;
+      let refluxHeader = null;
+      if (twoLevel) {
+        if (!receiptBuffer || !step.twoLevelTerminalRefluxReceiptCopy) throw new Error('Missing actual terminal reflux copy');
+        await receiptBuffer.mapAsync(GPUMapMode.READ);
+        refluxHeader = reflux.decodeSchroederCrossLevelRefluxTerminalHeader(new Uint32Array(receiptBuffer.getMappedRange().slice(0)));
+        receiptBuffer.unmap();
+        if (!fused.isSchroederFusedTerminalRefluxHeaderFullyAdmitted(refluxHeader, { expectedFineSubstepCount: 2 })
+            || refluxHeader.completionOrdinal !== step.twoLevelTerminalRefluxReceiptCopy.completionOrdinal) {
+          throw new Error('Native two-level terminal reflux was not admitted: ' + JSON.stringify(refluxHeader));
+        }
+      }
       if (!next || next.sphParticleUpload.exactMassInventory !== family) throw new Error('Exact inventory did not reach the actual step continuation');
       const nextFamily = next.schroederSpatialSuccessorSourceFamily ?? null;
       if (useSpatial) {
@@ -135,18 +203,23 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
                 'levelEpoch', 'supportEpoch', 'completionOrdinal', 'gridSpacingM'].map(key => [key, field[key]])) };
           } finally { capture.release(); }
         }
-        result.runs.push({ cycle, backend: step.backend, fusedResidentMechanics: step.stageTiming.fusedResidentMechanics,
-          fieldEvidence, fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? false,
+        result.runs.push({ cycle, backend: step.backend, fusedResidentMechanics: step.stageTiming?.fusedResidentMechanics ?? false,
+          fieldEvidence, fusedResidentSequence: step.stageTiming?.fusedResidentSequence ?? false,
+          twoLevelAuthority: step.twoLevelMechanicsAuthority ?? null,
+          twoLevelFineSubstepCount: step.twoLevelFineSubstepCount ?? null,
+          twoLevelCommitVerified: step.twoLevelAuthoritativeCommitVerified ?? false,
+          refluxHeader,
+          assignment: twoLevel ? await observe(next.schroederSpatialSuccessorLevelAssignment.assignmentBuffer) : null,
           physicsTick: next.sphParticleUpload.physicsTick, positionEpoch: next.sphParticleUpload.positionEpoch,
           exact: await observe(held.read.buffer, true),
           state: await observe(next.sphParticleUpload.stateBuffer), thermo: await observe(next.sphParticleUpload.thermoBuffer),
-          g2pState: await observe(step.g2pReconstruction.gpuResult.stateBuffer),
+          g2pState: step.g2pReconstruction ? await observe(step.g2pReconstruction.gpuResult.stateBuffer) : null,
           p2gGrid: step.p2gGridProjection?.gpuResult?.gridBuffer
             ? await observe(step.p2gGridProjection.gpuResult.gridBuffer) : null,
           updatedGrid: step.gridUpdate?.gpuResult?.updatedGridBuffer
             ? await observe(step.gridUpdate.gpuResult.updatedGridBuffer) : null,
           p2gMode: step.p2gGridProjection?.gpuResult?.canonicalSpatialAuthorityMode ?? null,
-          spatialAuthorityEvidence: step.g2pReconstruction.schroederSpatialAuthorityEvidence ?? null,
+          spatialAuthorityEvidence: step.g2pReconstruction?.schroederSpatialAuthorityEvidence ?? null,
           storageGeneration: next.sphParticleUpload.storageGeneration, inventoryGeneration: held.read.generation,
           spatialFamilyStatus: nextFamily?.status ?? null,
           finalEpochs: nextFamily?.successorEpochIdentity ?? null });
@@ -168,6 +241,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
       await device.queue.onSubmittedWorkDone();
       await new Promise(resolve => setTimeout(resolve, 0));
       if (sphUpload.destroyed !== true) throw new Error('Original particle owner did not retire before the next step');
+      if (mlsUpload.destroyed !== true) throw new Error('Original mechanics owner did not retire before the next step');
       sphUpload = next.sphParticleUpload; mlsUpload = next.mlsMpmParticleUpload;
       packed = nextPacked; packedMls = nextMls; previousStep = step;
       sourceFamily = nextFamily;
@@ -205,5 +279,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
     if (previousStep) steps.destroyMlsMpmResidentStepBuffers(previousStep);
     buffers.destroySphGpuParticleBuffers(sphUpload);
     buffers.destroyMlsMpmGpuParticleBuffers(mlsUpload);
+    if (materialUpload) refresh.destroyMlsMpmMechanicsMaterialPhaseUpload(materialUpload);
+    for (const buffer of receiptBuffers) buffer.destroy();
   }
 }

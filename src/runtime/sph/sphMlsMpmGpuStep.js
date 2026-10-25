@@ -33941,7 +33941,7 @@ export function transferTopologyStableSphDispersedMediumOpticsOwnership({
   });
 }
 
-function transferMaterialPropertyBankAuxiliaryOwnership({
+export function transferMaterialPropertyBankAuxiliaryOwnership({
   sourceSphUpload,
   sourceMlsMpmUpload,
   targetSphUpload,
@@ -34003,11 +34003,11 @@ function transferMaterialPropertyBankAuxiliaryOwnership({
   let rolledBack = false;
   const rollback = () => {
     if (rolledBack) return true;
+    mechanicsRetirementTransfer?.rollback();
     for (const mutation of [...applied].reverse()) {
       mutation.source[mutation.fields.owns] = mutation.sourceOwned;
       mutation.target[mutation.fields.owns] = mutation.targetOwned;
     }
-    mechanicsRetirementTransfer?.rollback();
     rolledBack = true;
     return true;
   };

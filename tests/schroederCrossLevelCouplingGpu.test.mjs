@@ -84,9 +84,16 @@ import {
 } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import {
   cloneSphGpuParticleUploadWithoutDispersedMediumOptics,
+  buildSphGpuParticleBuffers, buildMlsMpmGpuParticleBuffers,
+  uploadSphGpuParticleBuffers, uploadMlsMpmGpuParticleBuffers,
+  destroySphGpuParticleBuffers, destroyMlsMpmGpuParticleBuffers,
+  acquireSphParticleExactMassRead, releaseSphParticleExactMassRead,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics
 } from '../src/runtime/sph/sphGpuBuffers.js';
+import { createSphExactMassFormat } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
+import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import {
   abandonSchroederFusedMechanicsPendingClosureAfter,
   completeSchroederFusedMechanicsPendingClosureAfter,
@@ -311,9 +318,27 @@ function productionM3Fixture({
   surfaceTensionEnabled = false,
   mechanicsFieldPairV2Enabled = true,
   sourceSphUploadOverrides = null,
-  sourceClosure = null
+  sourceClosure = null,
+  exactMass = false
 }) {
   const particleCount = 1;
+  let exactSource = null;
+  if (exactMass) {
+    const materialProperties = { fe: createReferenceMaterialClosures().fe.properties };
+    const initial = { smoothingLengthM: baseGridSpacingM, dimension: 3, step: 0, time: 0,
+      storageGeneration: 11, physicsTick: 13, physicsSubstep: 0,
+      positionEpoch: 17, topologyEpoch: 19, chartEpoch: 23, levelEpoch: 29, supportEpoch: 31,
+      particles: [{ id: 'exact-source', material: 'fe', initialBodyDomainId: 1,
+        initialBodyId: 'exact-body', massKg: .001 * (1 + 2 ** -30), x: [.5, .5, .5], v: [.1, 0, 0],
+        specificInternalEnergyJPerKg: specificInternalEnergyJPerKg(materialProperties.fe, 300) }] };
+    const packed = buildSphGpuParticleBuffers(initial, { materialProperties,
+      exactMass: { format: createSphExactMassFormat(), reference: 'exact two-level private chain regression' } });
+    const packedMls = buildMlsMpmGpuParticleBuffers(initial,
+      { materialProperties, particleSeparationRelaxation: 0, soundSpeedScale: .01 });
+    exactSource = { packed, packedMls,
+      sph: uploadSphGpuParticleBuffers(device, packed),
+      mls: uploadMlsMpmGpuParticleBuffers(device, packedMls) };
+  }
   const state = new Float32Array([
     0.5, 0.5, 0.5, 1,
     0, 0, 0, 0
@@ -331,7 +356,7 @@ function productionM3Fixture({
   mechanics[20] = 1;
   mechanics[21] = 1;
   mechanics[27] = 1;
-  const sphParticleState = {
+  const sphParticleState = exactSource?.packed ?? {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
     particleCount,
     smoothingLengthM: baseGridSpacingM,
@@ -342,7 +367,7 @@ function productionM3Fixture({
     state,
     thermo
   };
-  const mlsMpmParticleState = {
+  const mlsMpmParticleState = exactSource?.packedMls ?? {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
     particleCount,
     mechanicsStrideBytes:
@@ -357,8 +382,8 @@ function productionM3Fixture({
     device.createBuffer({ label, size, usage: 128 }),
     device
   );
-  const sourceSph = sourceClosure?.finalSphParticleUpload;
-  const sourceMls = sourceClosure?.finalMlsMpmParticleUpload;
+  const sourceSph = sourceClosure?.finalSphParticleUpload ?? exactSource?.sph;
+  const sourceMls = sourceClosure?.finalMlsMpmParticleUpload ?? exactSource?.mls;
   const stateBuffer = sourceSph?.stateBuffer
     ?? ownedBuffer('m3-source-state', state.byteLength);
   const thermoBuffer = sourceSph?.thermoBuffer
@@ -1238,6 +1263,77 @@ test('two-level continuation fails closed when arbitrary domains lack resident i
     }),
     /requires resident identity for arbitrary render domains/
   );
+});
+
+test('exact inventory follows genuine fine/coarse producers into the claimed private terminal owner', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 2, exactMass: true });
+  const counts = { p2g: 0, gridUpdate: 0, g2p: 0 };
+  const seen = [];
+  const { result } = await settleBefore(runProductionM3Fixture(fixture, {
+    counts, g2pOptions: seen, overrides: { cflFactor: .75 }
+  }), 10000, () => `exact private execution stalled: ${JSON.stringify(counts)}`);
+  assert.deepEqual(counts, { p2g: 5, gridUpdate: 3, g2p: 3 });
+  assert.equal(seen[0].sphParticleUpload, fixture.sphParticleUpload);
+  assert.ok(seen.every(options => options.sphParticleUpload.exactMassInventory === fixture.sphParticleUpload.exactMassInventory));
+  const pending = result.pendingPostMechanicsClosure;
+  assert.equal(pending.finalSphParticleUpload.exactMassInventory, fixture.sphParticleUpload.exactMassInventory);
+  assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, pending), true);
+  assert.equal(await settleBefore(abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, pending),
+    10000, 'exact private terminal abandonment stalled'), true);
+  assert.equal(seen[1].schroederSpatialEpochTransaction.state, 'released');
+  destroySphGpuParticleBuffers(fixture.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(fixture.mlsMpmParticleUpload);
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.sphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(fixture.mlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
+});
+
+for (const component of ['sph', 'mls']) test(`exact frozen S* ${component} retirement joins its original owner and waits for held reads`, async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 2, exactMass: true });
+  const { result } = await runProductionM3Fixture(fixture);
+  const pending = result.pendingPostMechanicsClosure;
+  const sph = pending.finalSphParticleUpload, mls = pending.finalMlsMpmParticleUpload;
+  assert.equal(Object.isFrozen(sph), true);
+  assert.equal(Object.isFrozen(mls), true);
+  const read = acquireSphParticleExactMassRead(sph, fixture.device, { mlsMpmParticleUpload: mls });
+  assert.throws(() => destroySphGpuParticleBuffers({ ...sph }), /original private upload/);
+  assert.throws(() => destroyMlsMpmGpuParticleBuffers({ ...mls }), /original upload/);
+  if (component === 'sph') destroySphGpuParticleBuffers(sph);
+  else destroyMlsMpmGpuParticleBuffers(mls);
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sph.stateBuffer.destroyCount, 0);
+  assert.equal(mls.mechanicsBuffer.destroyCount, 0);
+  assert.throws(() => acquireSphParticleExactMassRead(sph, fixture.device), /original live/);
+  await releaseSphParticleExactMassRead(read);
+  assert.equal(await settleBefore(pending.completionPromise, 1000, 'delegated terminal retirement stalled'), false);
+  destroySphGpuParticleBuffers(sph);
+  destroyMlsMpmGpuParticleBuffers(mls);
+  assert.equal(sph.stateBuffer.destroyCount, 1);
+  assert.equal(mls.mechanicsBuffer.destroyCount, 1);
+  destroySphGpuParticleBuffers(fixture.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(fixture.mlsMpmParticleUpload);
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.device.createdBuffers.every(buffer => buffer.destroyCount <= 1), true);
+});
+
+test('exact public epoch metadata cannot deadlock pending terminal abandonment', async () => {
+  const fixture = productionM3Fixture({ fineSubstepCount: 2, exactMass: true });
+  const { result } = await runProductionM3Fixture(fixture);
+  const pending = result.pendingPostMechanicsClosure;
+  await fixture.controller.refreshForPostMechanics({
+    priorEpoch: pending.canonicalEpoch,
+    currentSphParticleUpload: pending.finalSphParticleUpload,
+    currentMlsMpmParticleUpload: pending.finalMlsMpmParticleUpload,
+    enabledConsumerReaderIds: [], consumerSupportProfileIds: {}, exactMassPendingClosure: pending
+  });
+  assert.equal(await settleBefore(abandonSchroederFusedMechanicsPendingClosureAfter(fixture.device, pending),
+    1000, 'public transaction association pinned terminal abandonment'), true);
+  assert.equal(await fixture.controller.completionPromise(), true);
+  destroySphGpuParticleBuffers(fixture.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(fixture.mlsMpmParticleUpload);
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.sphParticleUpload.stateBuffer.destroyCount, 1);
+  assert.equal(fixture.mlsMpmParticleUpload.mechanicsBuffer.destroyCount, 1);
 });
 
 test('M3 production controller executes authenticated r=1..4 fused chains without public S*', async () => {
@@ -2875,6 +2971,18 @@ test('M4 production controller publishes terminal S* exactly once through a fres
     nextParticleUploads: publishedUploads,
     status: 'test-public-e-star-committed'
   });
+  for (const substituted of ['sph', 'mls']) {
+    assert.throws(() => publishSchroederFusedMechanicsPendingClosure(fixture.device, closure, {
+      publicSpatialEpochTransaction: publicCommit.spatialEpochTransaction,
+      publicCommitReceipt: publicCommit.commitReceipt,
+      publicSphParticleUpload: publicEpoch.sphParticleUpload,
+      publicMlsMpmParticleUpload: publicEpoch.mlsMpmParticleUpload,
+      publishedSphParticleUpload: substituted === 'sph' ? { ...publishedUploads.sphParticleUpload } : publishedUploads.sphParticleUpload,
+      publishedMlsMpmParticleUpload: substituted === 'mls' ? { ...publishedUploads.mlsMpmParticleUpload } : publishedUploads.mlsMpmParticleUpload,
+      nextParticleUploads: publishedUploads
+    }), /exact committed public E\*/);
+    assert.equal(validateSchroederFusedMechanicsPendingClosure(fixture.device, closure), true);
+  }
   const publicationReceipt = publishSchroederFusedMechanicsPendingClosure(
     fixture.device,
     closure,

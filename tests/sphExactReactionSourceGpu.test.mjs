@@ -215,6 +215,18 @@ test('exact preparation admits genuine canonical inputs and keeps numerical evid
     const result = await runSphExactReactionSourceSelectionWebGpu(args);
     assert.equal(result.physicalPublicationAdmitted, false);
     const admitted = resolveSphExactReactionSourceSelection(result, { device: args.device });
+    const selectedDispatches = args.device.dispatches.filter(event => event.pipeline.compute.entryPoint.includes('exact_reaction'));
+    assert.deepEqual(selectedDispatches.map(event => event.pipeline.compute.entryPoint), [
+      'prepare_exact_reaction_sources', 'select_exact_reaction_debits', 'partition_exact_reaction_products',
+      'prepare_exact_reaction_extensives', 'project_exact_reaction_momentum'
+    ]);
+    for (const event of selectedDispatches) {
+      assert.equal(event.bindGroup.entries[0].resource.buffer, args.thermalResult.stateBuffer);
+      assert.equal(event.bindGroup.entries[6].resource.buffer, result.outputBuffer);
+    }
+    assert.equal(result.extensiveWordCount, result.format.wordCount + 18);
+    assert.equal(result.extensiveQuantumExponent, result.format.quantumExponent - 299);
+    assert.equal(result.recordWords, result.extensiveOffsetWords + 4 + 12 * (result.extensiveWordCount + 2));
     assert.equal(admitted.source.stateBuffer, args.thermalResult.stateBuffer);
     assert.equal(admitted.source.mechanicsBuffer, args.g2pResult.mechanicsBuffer);
     assert.equal(admitted.source.generation, args.generation);
@@ -264,7 +276,8 @@ test('genuine source and discovery holds survive all asynchronous pipeline compi
     const pending = runSphExactReactionSourceSelectionWebGpu(args);
     await new Promise(resolve => setImmediate(resolve));
     args.reactionDiscoveryProposal.destroy();
-    for (let index = 0; index < 3; index++) {
+    // Drive every cold pipeline await, including the extensive and COM passes.
+    for (let index = 0; index < 5; index++) {
       assert.equal(compilations.length, index + 1);
       assert.throws(() => args.thermalResult.destroyOutputParticleBuffers(), /owner read/);
       const { descriptor, resolve } = compilations[index];

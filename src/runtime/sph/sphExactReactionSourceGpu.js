@@ -2,6 +2,8 @@ import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { compileSphExactReactionAllocation, resolveSphExactReactionAllocation,
   encodeSphExactReactionAllocationWeights } from './sphExactReactionAllocation.js';
 import { createSphExactReactionAllocationWgsl } from './sphExactReactionAllocationWgsl.js';
+import { createSphExactExtensiveWgsl } from './sphExactExtensiveWgsl.js';
+import { sphReactionEnergyEntry } from './sphReactionEnergyAuthority.js';
 import { encodeSphExactReactionKineticScale, createSphExactReactionKineticCapWgsl }
   from './sphExactReactionKineticCap.js';
 import { acquireSphThermalExactMassSourceCapture } from './sphThermalGpuKernel.js';
@@ -11,11 +13,18 @@ import { computeBufferBinding, prewarmCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
-export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v1';
+export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v2';
 const RECORDS = new WeakMap();
 const RULE_WORDS = 24;
 export const SPH_EXACT_REACTION_SOURCE_HEADER_WORDS = 12;
 const HEADER_WORDS = SPH_EXACT_REACTION_SOURCE_HEADER_WORDS;
+// Signed extensive fields at quantum massQuantum-299. The final field is a
+// bookkeeping balance before formation energy, not an accepted caloric solve.
+export const SPH_EXACT_REACTION_EXTENSIVE_FIELDS = Object.freeze([
+  'momentumX', 'momentumY', 'momentumZ', 'internalEnergy', 'kineticEnergy',
+  'referenceEnergy', 'sensibleTotalEnergy', 'momentumResidualX', 'momentumResidualY',
+  'momentumResidualZ', 'projectedComKineticEnergy', 'preFormationEnergyBalance'
+]);
 
 // Use the actual production kinetic law, including its existing f32 geometry.
 // This preparation is not admission of the unresolved low-part caloric/volume
@@ -39,12 +48,15 @@ if (!phaseLaw) throw new Error('Missing production reaction phase predicate');
 
 export function createSphExactReactionSourceSelectionWgsl(format) {
   return createSphExactReactionAllocationWgsl(format)
+    + createSphExactExtensiveWgsl(format)
     + createSphExactReactionKineticCapWgsl(format) + taggedKineticLaw + phaseLaw + /* wgsl */ `
 struct ExactSourceParams {
   count: u32, reaction_count: u32, inventory_word_offset: u32, record_words: u32,
   dt_bits: u32, generation_id: u32, support_epoch: u32, support_profile: u32
 }
-@group(0) @binding(0) var<storage, read> es_state: array<vec4<f32>>;
+// Integer storage preserves every admitted velocity/U bit, including subnormal
+// encodings. Only the existing geometry/kinetics path reads f32 projections.
+@group(0) @binding(0) var<storage, read> es_state: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> es_thermo: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> es_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> es_inventory: array<u32>;
@@ -109,7 +121,7 @@ fn prepare_exact_reaction_sources(@builtin(global_invocation_id) id: vec3<u32>) 
   if (!es_finite(reciprocal) || reciprocal.x != f32(row)
       || reciprocal.y != proposal.y || reciprocal.w < 0.0) { return; }
   let rx = u32(proposal.y); let rule = rx * ${RULE_WORDS}u;
-  let s0 = es_state[row * 2u]; let s1 = es_state[peer * 2u];
+  let s0 = bitcast<vec4<f32>>(es_state[row * 2u]); let s1 = bitcast<vec4<f32>>(es_state[peer * 2u]);
   let t0 = es_thermo[row * 3u]; let t1 = es_thermo[peer * 3u];
   let original_a = t0.x == es_float(rule + 20u) && t1.x == es_float(rule + 21u)
     && phase_mask_satisfied(es_float(rule + 16u), t0.y) && phase_mask_satisfied(es_float(rule + 17u), t1.y);
@@ -133,7 +145,7 @@ fn prepare_exact_reaction_sources(@builtin(global_invocation_id) id: vec3<u32>) 
   let ma = es_mass(a); let mb = es_mass(b);
   let total = em_add(ma, mb); let pa = em_project_f32_bits(ma); let pb = em_project_f32_bits(mb);
   var error = total.error | pa.error | pb.error;
-  if (pa.bits != bitcast<u32>(es_state[a * 2u].w) || pb.bits != bitcast<u32>(es_state[b * 2u].w)
+  if (pa.bits != es_state[a * 2u].w || pb.bits != es_state[b * 2u].w
       || !es_volume_ready(a) || !es_volume_ready(b)
       || !(ta.w > 0.0) || !(tb.w > 0.0)) { error |= 1048576u; }
   es_output[out + 2u] = a; es_output[out + 3u] = b; es_output[out + 4u] = rx;
@@ -203,6 +215,82 @@ fn partition_exact_reaction_products(@builtin(global_invocation_id) id: vec3<u32
   // PREPARED only. No accepted reaction marker or physical owner is issued.
   es_output[out] = select(0u, selected.executed, error == 0u);
 }
+
+// Appended after the maximum product capacity, independently of the active
+// reaction's product count: [COM xyz bits, projection error], then twelve
+// [negative, arithmetic error, magnitude[EE_WORDS]] records.
+fn es_extensive_start(out: u32) -> u32 {
+  return out + es_params.record_words - (4u + 12u * (EE_WORDS + 2u));
+}
+fn es_store_extensive(out: u32, field: u32, value: ExactExtensive) {
+  let at = es_extensive_start(out) + 4u + field * (EE_WORDS + 2u);
+  es_output[at] = value.negative; es_output[at + 1u] = value.error;
+  for (var word = 0u; word < EE_WORDS; word++) { es_output[at + 2u + word] = value.words[word]; }
+}
+fn es_load_extensive(out: u32, field: u32) -> ExactExtensive {
+  let at = es_extensive_start(out) + 4u + field * (EE_WORDS + 2u);
+  var value: ExactExtensive;
+  value.negative = es_output[at]; value.error = es_output[at + 1u];
+  for (var word = 0u; word < EE_WORDS; word++) { value.words[word] = es_output[at + 2u + word]; }
+  return value;
+}
+@compute @workgroup_size(1)
+fn prepare_exact_reaction_extensives(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= es_params.count) { return; }
+  let out = id.x * es_params.record_words;
+  if (es_output[out] != 1u || es_output[out + 1u] != 0u) { return; }
+  let amounts = out + ${HEADER_WORDS}u;
+  let a = es_load_output(amounts + EM_WORDS); let b = es_load_output(amounts + 2u * EM_WORDS);
+  let va = es_state[es_output[out + 2u] * 2u + 1u];
+  let vb = es_state[es_output[out + 3u] * 2u + 1u];
+  var kinetic: ExactExtensive;
+  var error = 0u;
+  for (var axis = 0u; axis < 3u; axis++) {
+    let momentum = ee_add(ee_mass_scaled(a, va[axis]), ee_mass_scaled(b, vb[axis]));
+    es_store_extensive(out, axis, momentum); error |= momentum.error;
+    kinetic = ee_add(kinetic, ee_mass_product(a, va[axis], va[axis], true));
+    kinetic = ee_add(kinetic, ee_mass_product(b, vb[axis], vb[axis], true));
+  }
+  let internal = ee_add(ee_mass_scaled(a, va.w), ee_mass_scaled(b, vb.w));
+  let rule = es_output[out + 4u] * ${RULE_WORDS}u;
+  let reference = ee_add(ee_mass_scaled(a, es_metadata[rule + 22u]),
+    ee_mass_scaled(b, es_metadata[rule + 23u]));
+  // Do not round (u-u_ref) before multiplication: distinct tiny contributions
+  // and cancellation across arbitrarily separated binades remain represented.
+  let sensible = ee_subtract(ee_add(internal, kinetic), reference);
+  es_store_extensive(out, 3u, internal); es_store_extensive(out, 4u, kinetic);
+  es_store_extensive(out, 5u, reference); es_store_extensive(out, 6u, sensible);
+  error |= internal.error | kinetic.error | reference.error | sensible.error;
+  es_output[out + 10u] = error;
+  es_output[out + 9u] = select(0u, 2u, error == 0u);
+}
+@compute @workgroup_size(1)
+fn project_exact_reaction_momentum(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= es_params.count) { return; }
+  let out = id.x * es_params.record_words;
+  if (es_output[out + 9u] != 2u) { return; }
+  let total = es_load_output(out + ${HEADER_WORDS}u);
+  var kinetic: ExactExtensive;
+  var error = 0u;
+  for (var axis = 0u; axis < 3u; axis++) {
+    let momentum = es_load_extensive(out, axis);
+    let projected = ee_ratio_f32_bits(momentum, total);
+    es_output[es_extensive_start(out) + axis] = projected.bits;
+    error |= projected.error;
+    let residual = ee_subtract(momentum, ee_mass_scaled(total, projected.bits));
+    es_store_extensive(out, 7u + axis, residual); error |= residual.error;
+    kinetic = ee_add(kinetic, ee_mass_product(total, projected.bits, projected.bits, true));
+  }
+  es_output[es_extensive_start(out) + 3u] = error;
+  let balance = ee_subtract(es_load_extensive(out, 6u), kinetic);
+  es_store_extensive(out, 10u, kinetic); es_store_extensive(out, 11u, balance);
+  error |= kinetic.error | balance.error;
+  es_output[out + 10u] = error;
+  // Prepared extensives only: a nonzero momentum remainder still needs a
+  // genuine terminal owner. Formation, caloric acceptance and volume/entities
+  // are unresolved, and header[11] stays zero (no physical acceptance).
+  es_output[out + 9u] = select(0u, 1u, error == 0u);
+}
 `;
 }
 
@@ -222,15 +310,19 @@ function metadataFor(compiled, table) {
       table.reactantTermRecords[br + 2], table.reactantTermRecords[br + 3], table.reactantTermRecords[br + 11],
       table.records[rx + 3], table.records[rx + 5], table.records[rx + 6], table.records[rx + 7], table.records[rx + 8]], rule + 8);
     floats.set([table.records[rx], table.records[rx + 1]], rule + 20);
+    const energy = sphReactionEnergyEntry(table, index);
+    floats.set(energy.reactants.map(term => term.uRef), rule + 22);
   });
   return words;
 }
 
 export function sphExactReactionSourcePipelineDescriptors(format) {
   const code = createSphExactReactionSourceSelectionWgsl(format);
-  return ['prepare_exact_reaction_sources', 'select_exact_reaction_debits', 'partition_exact_reaction_products']
+  return ['prepare_exact_reaction_sources', 'select_exact_reaction_debits', 'partition_exact_reaction_products',
+    'prepare_exact_reaction_extensives', 'project_exact_reaction_momentum']
     .map(entryPoint => ({
-      label: 'ulg-exact-reaction-source-selection', cacheKey: `exact-reaction-source-${format.wordCount}-${format.quantumExponent}`,
+      label: 'ulg-exact-reaction-source-selection',
+      cacheKey: `${SPH_EXACT_REACTION_SOURCE_SCHEMA}-${format.wordCount}-${format.quantumExponent}`,
       code, entryPoint, bindings: Array.from({ length: 9 }, (_, index) => computeBufferBinding(index,
         index === 8 ? 'uniform' : index === 6 ? 'storage' : 'read-only-storage'))
     }));
@@ -291,7 +383,9 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       compileSphExactReactionAllocation({ reactionTable, thermalMaterialTable, reactionIndex, format }));
     if (!compiled.length) throw new TypeError('Exact reaction source selection requires reaction rules');
     const maxProducts = Math.max(...compiled.map(token => token.products.length));
-    const recordWords = HEADER_WORDS + 7 * format.wordCount + maxProducts * (4 + 3 * format.wordCount);
+    const extensiveWordCount = format.wordCount + 18;
+    const extensiveOffsetWords = HEADER_WORDS + 7 * format.wordCount + maxProducts * (4 + 3 * format.wordCount);
+    const recordWords = extensiveOffsetWords + 4 + SPH_EXACT_REACTION_EXTENSIVE_FIELDS.length * (extensiveWordCount + 2);
     const outputByteLength = source.particleCount * recordWords * 4;
     if (!Number.isSafeInteger(outputByteLength) || outputByteLength < 4
         || outputByteLength > device.limits.maxStorageBufferBindingSize
@@ -341,6 +435,8 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
     submitted = true; device.queue.submit([command]);
     result = Object.freeze({ schema: SPH_EXACT_REACTION_SOURCE_SCHEMA,
       outputBuffer, outputByteLength, particleCount: source.particleCount, recordWords, headerWords: HEADER_WORDS,
+      extensiveOffsetWords, extensiveWordCount, extensiveQuantumExponent: format.quantumExponent - 299,
+      extensiveFields: SPH_EXACT_REACTION_EXTENSIVE_FIELDS,
       format, physicalPublicationAdmitted: false, kineticGeometry: 'current-production-f32-law',
       encodedDtBits: source.encodedDtBits, release });
     RECORDS.set(result, { result, device, source, discovery, compiled, validate });

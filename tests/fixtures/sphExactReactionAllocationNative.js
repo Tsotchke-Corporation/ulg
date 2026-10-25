@@ -9,14 +9,15 @@ import { compileSphExactReactionAllocation, encodeSphExactReactionAllocationWeig
 
 // Manufactured data for arithmetic/authority checks; no scientific acceptance.
 export function createExactReactionAllocationFixture({ reactionCount = 1, identity = false,
-  coefficients = [3, 2], molarMasses = {}, repeatedProducts = true } = {}) {
+  coefficients = [3, 2], molarMasses = {}, referenceEnthalpies = {}, repeatedProducts = true } = {}) {
   const definitions = { h2: ['H2', 0.002], o2: ['O2', 0.032], h2o: ['H2O', 0.018], h2o2: ['H2O2', 0.034] };
   const materialProperties = {}, models = {};
   for (const [material, [formula, defaultMolarMass]] of Object.entries(definitions)) {
     const molarMass = molarMasses[material] ?? defaultMolarMass;
     const parameters = { schema: CONDENSABLE_THERMODYNAMICS_SCHEMA,
       energyBasis: 'specific-enthalpy-at-reference-pressure', referenceTemperatureK: 300,
-      referencePressurePa: 3000, liquidReferenceEnthalpyJPerKg: -50000 + 3,
+      referencePressurePa: 3000,
+      liquidReferenceEnthalpyJPerKg: referenceEnthalpies[material] ?? -50000 + 3,
       vaporizationReferenceEnthalpyJPerKg: 2e6, liquidCpJPerKgK: 4000,
       vaporCpJPerKgK: 3000 + 8.314462618 / molarMass, liquidDensityKgPerM3: 1000,
       molarMassKgPerMol: molarMass, minTemperatureK: 200, maxTemperatureK: 500,

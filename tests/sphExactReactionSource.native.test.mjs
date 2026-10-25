@@ -55,6 +55,7 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
           await old.preloadExactMassContinuationNative();
           await import('/tests/fixtures/sphExactReactionSourceNative.js');
           await import('/tests/fixtures/sphExactReactionKineticCapNative.js');
+          await import('/tests/fixtures/sphExactExtensiveNative.js');
         });
         break;
       } catch (error) {
@@ -65,6 +66,7 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
     evidence.result = await page.evaluate(async () => {
       const source = await import('/tests/fixtures/sphExactReactionSourceNative.js');
       const kinetics = await import('/tests/fixtures/sphExactReactionKineticCapNative.js');
+      const extensives = await import('/tests/fixtures/sphExactExtensiveNative.js');
       const transformed = await (await fetch('/src/runtime/sph/sphExactMassWgsl.js')).text();
       const formatUrl = [...transformed.matchAll(/from\s+['"]([^'"]+)['"]/g)]
         .map(match => match[1]).find(path => path.split('?')[0].endsWith('/sphExactMassInventory.js'));
@@ -78,14 +80,20 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
       const errors = []; device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       device.pushErrorScope('validation');
       const result = { status: 'running', adapter: { vendor: adapter.info.vendor, architecture: adapter.info.architecture },
-        kinetics: [], sources: [], errors, timeline: [] };
+        kinetics: [], extensives: [], sources: [], errors, timeline: [] };
       void device.lost.then(info => { result.deviceLost = { reason: info.reason, message: info.message }; });
       try {
         for (const wordCount of [1, 9, 66]) {
           const format = createSphExactMassFormat({ wordCount, quantumExponent: wordCount === 1 ? 0 : wordCount === 66 ? -1074 : -149 });
           result.kinetics.push(await kinetics.runExactReactionKineticCapNative(device, format));
+          result.extensives.push(await extensives.runExactExtensiveNative(device, format, {
+            onProgress: event => { result.timeline.push(event); console.log('exact-extensive-progress', JSON.stringify(event)); }
+          }));
         }
-        for (const options of [{}, { reverse: true }, { dtSeconds: .000000001 }, { wordCount: 66 }]) {
+        const velocities = [[.25, -.5, .125], [-.375, .25, -.125]];
+        for (const options of [{}, { reverse: true }, { dtSeconds: .000000001 }, { wordCount: 66 },
+          { velocities }, { wordCount: 66, reverse: true, velocities },
+          { reverse: true, velocities, fixtureOptions: { referenceEnthalpies: { h2: 450003, o2: -949997 } } }]) {
           result.sources.push(await source.runExactReactionSourceNative(device, { ...options,
             onProgress: event => { result.timeline.push(event); console.log('exact-source-progress', JSON.stringify(event)); } }));
         }
@@ -100,11 +108,21 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
     assert.deepEqual(evidence.result.errors, []);
     assert.equal(evidence.result.kinetics.length, 3);
     for (const result of evidence.result.kinetics) assert.equal(result.pass, true, JSON.stringify(result));
-    assert.equal(evidence.result.sources.length, 4);
+    assert.equal(evidence.result.extensives.length, 3);
+    for (const result of evidence.result.extensives) assert.equal(result.pass, true, JSON.stringify(result));
+    assert.equal(evidence.result.sources.length, 7);
     for (const result of evidence.result.sources) {
       assert.equal(result.pass, true, JSON.stringify(result));
       assert.equal(result.sourceUnchanged, true);
       assert.equal(result.physicalPublicationAdmitted, false);
+      if (result.velocities.some(vector => vector.some(value => value !== 0))) {
+        assert.ok(result.rows.some(row => row.extensives.nonzeroMomentumResidual), 'moving sources exercise retained low momentum');
+      }
+      if (result.fixtureOptions.referenceEnthalpies) {
+        assert.deepEqual(result.rows[0].extensives.referenceBits,
+          Array.from(new Uint32Array(new Float32Array([450000, -950000]).buffer)),
+          'the reversed source case really uses distinct positive/negative reference energies');
+      }
     }
     assert.deepEqual(evidence.errors, []);
   } catch (error) { failure ??= error; evidence.failure = String(error.stack ?? error); }

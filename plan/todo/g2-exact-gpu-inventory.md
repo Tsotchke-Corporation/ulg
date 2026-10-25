@@ -399,6 +399,48 @@ genuine producer chain described above.
 
 ## Implementation order and acceptance
 
+### Exact reaction source extensives — 2026-10-25
+
+The original exact reaction source owner now follows its debit/product passes
+with exact source extensive accumulation and COM projection. The numeric ABI is
+sign-magnitude `N+18` words at quantum `massQuantum-299`: every finite admitted
+f32 velocity/internal-energy/reference bit and the smallest `v*v/2` contribution
+can enter integer products without FTZ or f32 mass projection. Checked selected
+total bounds all twelve fields below `2^(32N+557)` accumulator units, within
+the `32N+576` bits provided. Arithmetic errors propagate; exact zero is canonical.
+
+The twelve fields are three momenta, source U, source KE, reference U,
+`U+KE-Uref`, three exact remainders after projected COM, projected-COM KE and
+`U+KE-Uref-KE(projectedCOM)`. The last is a pre-formation bookkeeping balance,
+not exact rest-frame energy: rounded COM generally leaves nonzero momentum.
+Direct full-integer rational-to-f32 rounding retains that remainder and reports
+projection underflow/overflow. Underflow currently prevents extensive readiness
+without erasing the integer packet. All fields share the original source owner's
+independent holds and confirmed retirement; schema v2 exposes their offsets.
+Header 9 is the separate extensive-prepared marker, 10 is its error union,
+and 11 remains zero. No physical acceptance or terminal owner is issued.
+
+Native evidence `g2-exact-reaction-caloric-20261025-nPGK0S/native-final-r2.json` passes
+393 signed arithmetic/projection cases at 1/9/66 words, 174 kinetic-cap cases,
+and seven genuine canonical G2P/thermal/discovery/selection chains. The moving
+cases retain nonzero momentum residuals; reversed compiler roles and distinct
+positive/negative material reference energies are checked. GPU errors are empty,
+sources remain unchanged and the owned browser closes. Primitive subnormal
+coverage does not claim actual producer input-subnormal or nonzero-window proof.
+
+The next physical solve must derive extent from the *selected* integer total
+divided by the original exact admitted mass-per-extent scale. Its formation
+energy is generally rational; the raw kinetic cap extent is not executed extent.
+Weight actual graph U and reference U separately by selected product integers,
+compare the complete energy balance and retain residuals after actual endpoint
+projection. Arbitrary integer weight partitioning does not alone prove exact
+element/charge accounting. Common moles/entities/volume, terminal carrier and
+unplaced residual owners, placement rollback, history and closure/SS adoption
+remain required. Current mechanics/thermal continuation still consumes f32
+projections and does not propagate these new extensive residuals.
+
+### Remaining integration sequence
+
 1. Numeric ABI, private resident owner, and native adversarial conservation
    proof (current foundation).
 2. Actual source-family propagation and retention, then exact exchange and

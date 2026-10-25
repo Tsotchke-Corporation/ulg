@@ -1,3 +1,4 @@
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
@@ -16273,6 +16274,7 @@ function assertResidentCpuMirrorGuards({
   preferWebGpu = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'Resident solver continuation');
   const residentNoFullWebGpu = preferWebGpu && readbackMode === NO_FULL_READBACK_MODE;
   if (sphParticleState?.cpuStateStale && sphParticleUpload?.status !== 'webgpu-uploaded') {
     throw new Error('Stale SPH CPU mirror cannot drive an MLS-MPM resident step without the retained SPH GPU upload or an admitted readback');

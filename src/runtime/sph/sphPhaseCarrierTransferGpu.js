@@ -14,6 +14,7 @@ import {
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import {
+  assertSphLegacyMassPathAllowed,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -888,6 +889,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   retainOutputParticleBuffers = false,
   readbackMode = NO_FULL_READBACK_MODE
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sphParticleState, sourceStateBuffer, sourceThermoBuffer }, 'Phase-carrier transfer');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('Phase-carrier transfer requires a WebGPU-like device');
   }

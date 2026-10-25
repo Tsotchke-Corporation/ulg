@@ -51,6 +51,7 @@ import {
 } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
+  assertSphLegacyMassPathAllowed,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -290,6 +291,7 @@ function vector3From(value, fallback = [0, 0, 0]) {
 }
 
 function assertPackedSphParticleState(sphParticleState) {
+  assertSphLegacyMassPathAllowed({ sphParticleState }, 'Reaction CPU fallback');
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('SPH reaction GPU step requires a packed SPH GPU particle buffer');
   }
@@ -3543,6 +3545,7 @@ export async function runSphReactionStepWebGpu({
   reactionWarmArenaReleaseRunner = releaseSphReactionWarmArenaAfterQueue,
   postMechanicsSourceCapture = null
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Reaction and placement');
   if (postMechanicsSourceCapture) {
     if (reactionSourceCaptures.has(postMechanicsSourceCapture)) throw new Error('Reaction source capture cannot replay');
     reactionSourceCaptures.set(postMechanicsSourceCapture, null);

@@ -21,6 +21,15 @@ import {
 } from '../material/algorithmMaterialRows.js';
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 import { prepareSphCondensableParticleInitialization } from './sphCondensableParticleInitialization.js';
+import {
+  prepareSphExactParticleMassSeed, bindSphExactParticleMassSeed,
+  sphExactParticleSeedMass, resolveSphExactParticleMassSeed,
+  sphPackedParticleAdvertisesExactMass
+} from './sphExactMassParticleSeed.js';
+import {
+  createSphExactMassInventoryWebGpu, acquireSphExactMassRead,
+  validateSphExactMassRead, releaseSphExactMassRead, releaseSphExactMassInventory
+} from './sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   advanceSphDispersedMediumGpuBufferParticleTopologyEpoch,
@@ -89,6 +98,13 @@ const GPU_BUFFER_USAGE = {
 };
 const identityValueMaxByBuffer = new WeakMap();
 const sphParticleBufferSetLifecycleRecords = new WeakMap();
+// Buffer identity also catches descriptors that drop the advertised field.
+const exactMassParticleBuffers = new WeakSet();
+const exactMassParticleReads = new WeakMap();
+const EXACT_MASS_PARTICLE_SOURCE_FIELDS = ['status', 'sourceSchema', 'particleCount',
+  'storageGeneration', 'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch',
+  'stateStrideBytes', 'thermoStrideBytes', 'identityStrideBytes', 'identitySchema', 'identityRevision',
+  'stateBufferByteLength', 'thermoBufferByteLength', 'identityBufferByteLength'];
 const sphDispersedMediumSourceFamilyRegistrars = new WeakMap();
 const sphDispersedMediumOwnershipStates = new WeakMap();
 const sphDispersedMediumSourceFamilyContinuationsInProgress = new WeakSet();
@@ -538,12 +554,14 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
 export function buildSphGpuParticleBuffers(state, {
   materialProperties = {},
   initialParticleSpacing = null,
-  condensableThermodynamicsByMaterial = {}
+  condensableThermodynamicsByMaterial = {},
+  exactMass = null
 } = {}) {
   if (!state?.particles || !Array.isArray(state.particles)) {
     throw new TypeError('buildSphGpuParticleBuffers requires a SPH state with particles');
   }
   const particleCount = state.particles.length;
+  const exactMassSeed = prepareSphExactParticleMassSeed(state, exactMass);
   const stateValues = new Float32Array(particleCount * SPH_GPU_PARTICLE_STATE_FLOATS);
   const thermoValues = new Float32Array(particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
   const identityValues = new Uint32Array(particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS);
@@ -555,7 +573,9 @@ export function buildSphGpuParticleBuffers(state, {
   );
 
   for (let index = 0; index < particleCount; index += 1) {
-    const particle = state.particles[index];
+    const particle = exactMassSeed
+      ? { ...state.particles[index], massKg: sphExactParticleSeedMass(exactMassSeed, index) }
+      : state.particles[index];
     const material = particle.material || 'unknown';
     const properties = materialPropertiesFor(material, materialProperties);
     const eq = caloricInitialization(particle) ?? equilibriumForParticle(particle, properties);
@@ -569,7 +589,7 @@ export function buildSphGpuParticleBuffers(state, {
       finiteNumber(particle.x?.[0]),
       finiteNumber(particle.x?.[1]),
       finiteNumber(particle.x?.[2]),
-      finiteNumber(particle.massKg),
+      exactMassSeed ? sphExactParticleSeedMass(exactMassSeed, index) : finiteNumber(particle.massKg),
       finiteNumber(particle.v?.[0]),
       finiteNumber(particle.v?.[1]),
       finiteNumber(particle.v?.[2]),
@@ -647,7 +667,7 @@ export function buildSphGpuParticleBuffers(state, {
   );
   const dispersedMediumOptics = buildSphDispersedMediumGpuBuffers(state.particles);
 
-  return {
+  return bindSphExactParticleMassSeed({
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
     ...(caloricInitialization.signature ? { phaseCaloricInitializationSignature: caloricInitialization.signature } : {}),
@@ -706,7 +726,7 @@ export function buildSphGpuParticleBuffers(state, {
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
-  };
+  }, exactMassSeed);
 }
 
 function writeStorageBuffer(device, label, data, { copySource = false } = {}) {
@@ -1091,6 +1111,7 @@ function destroySphGpuParticleBuffersNow(buffers, record = null) {
       buffers.dispersedMediumOpticsBuffer?.destroy?.();
     }
   }
+  retireExactParticleMassOwner(record);
   // Once a parent has entered the private lifecycle, retire the exact core
   // allocations recorded at admission. Mutable public aliases remain useful
   // diagnostics but must not redirect destruction to unrelated buffers.
@@ -1145,22 +1166,24 @@ function installSphGpuParticleBufferSetBorrowLifecycle(
   ) return null;
   const record = {
     activeBorrowCount: 0,
+    exactMassActiveReadCount: 0,
     admissionClosed: false,
     destroyRequested: false,
     destroyed: false,
     dispersedMediumOptics,
+    exactMass: null,
     ...coreFamily
   };
   Object.defineProperty(buffers, '__ulgActiveBorrowCount', {
     configurable: true,
     enumerable: false,
     get() {
-      return record.activeBorrowCount;
+      return record.activeBorrowCount + record.exactMassActiveReadCount;
     },
     set(value) {
       const nextCount = Math.max(
         0,
-        Math.floor(Number(value) || 0)
+        Math.floor(Number(value) || 0) - record.exactMassActiveReadCount
       );
       // An admitted consumer may release after terminal owner retirement has
       // started, but an async producer that passed ensure earlier cannot
@@ -1169,32 +1192,26 @@ function installSphGpuParticleBufferSetBorrowLifecycle(
         throw new Error('SPH particle source borrow admission is closed');
       }
       record.activeBorrowCount = nextCount;
-      if (
-        record.activeBorrowCount === 0
-        && record.destroyRequested
-        && !record.destroyed
-      ) {
-        destroySphGpuParticleBuffersNow(buffers, record);
-        record.deferredCleanups?.clear();
-      } else if (
-        record.activeBorrowCount === 0
-        && !record.destroyed
-        && record.deferredCleanups?.size > 0
-      ) {
-        const pending = [...record.deferredCleanups];
-        record.deferredCleanups.clear();
-        for (const cleanup of pending) {
-          try {
-            cleanup();
-          } catch (error) {
-            record.deferredCleanupError = error;
-          }
-        }
-      }
+      finishSphGpuParticleBorrowRelease(buffers, record);
     }
   });
+  record.borrowAccessors = Object.getOwnPropertyDescriptor(buffers, '__ulgActiveBorrowCount');
   sphParticleBufferSetLifecycleRecords.set(buffers, record);
   return record;
+}
+
+function finishSphGpuParticleBorrowRelease(buffers, record) {
+  if (record.activeBorrowCount + record.exactMassActiveReadCount !== 0 || record.destroyed) return;
+  if (record.destroyRequested) {
+    destroySphGpuParticleBuffersNow(buffers, record);
+    record.deferredCleanups?.clear();
+  } else if (record.deferredCleanups?.size > 0) {
+    const pending = [...record.deferredCleanups];
+    record.deferredCleanups.clear();
+    for (const cleanup of pending) {
+      try { cleanup(); } catch (error) { record.deferredCleanupError = error; }
+    }
+  }
 }
 
 function rollbackSphGpuParticleBufferSetBorrowLifecycleInstall(
@@ -1221,6 +1238,7 @@ function canRollbackSphGpuParticleBufferSetBorrowLifecycleInstall(
     record
     && sphParticleBufferSetLifecycleRecords.get(buffers) === record
     && record.activeBorrowCount === 0
+    && record.exactMassActiveReadCount === 0
     && !record.destroyRequested
     && !record.destroyed
     && !(record.deferredCleanups?.size > 0)
@@ -1594,9 +1612,11 @@ export function ensureSphGpuParticleBufferSetBorrowLifecycle(buffers) {
     return Boolean(
       existingRecord.destroyed !== true
       && existingRecord.admissionClosed !== true
+      && exactParticleMassOwnerMatches(buffers, existingRecord)
       && exactParentDispersedMediumRecordMatches(buffers, existingRecord)
     );
   }
+  if (sphGpuParticleUploadAdvertisesExactMass(buffers)) return false;
   if (sphGpuParticleUploadAdvertisesDispersedMediumOptics(buffers)) {
     return false;
   }
@@ -2290,8 +2310,15 @@ export function runSphGpuParticleBufferSetCleanupAfterBorrows(
   // This does not request generic SPH destruction: frozen fused descriptors
   // retain their actual lower owner, which performs its exact cleanup below.
   // Keep decrements and repeated cleanup attempts available after closure.
-  if (terminalSourceRetirement === true) record.admissionClosed = true;
-  if (record.activeBorrowCount === 0) {
+  if (terminalSourceRetirement === true) {
+    record.admissionClosed = true;
+    const ownerCleanup = cleanup;
+    cleanup = () => {
+      ownerCleanup();
+      retireExactParticleMassOwner(record);
+    };
+  }
+  if (record.activeBorrowCount + record.exactMassActiveReadCount === 0) {
     cleanup();
     return true;
   }
@@ -2307,6 +2334,8 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   if (packed?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a packed SPH GPU particle buffer');
   }
+  const exactSeed = resolveSphExactParticleMassSeed(packed);
+  if (exactSeed) packed = exactSeed.packed;
   const topologyEpoch = packed.topologyEpoch;
   if (
     !Number.isSafeInteger(topologyEpoch)
@@ -2465,7 +2494,90 @@ export function uploadSphGpuParticleBuffers(device, packed) {
       'SPH particle upload could not bind its private dispersed-medium owner state'
     );
   }
+  if (exactSeed) {
+    let family = null;
+    try {
+      family = createSphExactMassInventoryWebGpu({ device, format: exactSeed.format,
+        massesKg: exactSeed.massesKg,
+        provenance: { kind: 'initial-conditions', reference: exactSeed.reference } });
+      const read = acquireSphExactMassRead({ family, device });
+      lifecycleRecord.exactMass = { family, read, owners: { count: 1 }, retired: false,
+        sourceFields: EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, upload[key]]) };
+      Object.defineProperty(upload, 'exactMassInventory', { value: family, enumerable: true });
+      for (const buffer of [stateBuffer, thermoBuffer, identityBuffer]) exactMassParticleBuffers.add(buffer);
+    } catch (error) {
+      if (family) releaseSphExactMassInventory(family);
+      destroySphGpuParticleBuffersNow(upload, lifecycleRecord);
+      throw error;
+    }
+  }
   return upload;
+}
+
+export function sphGpuParticleUploadAdvertisesExactMass(upload) {
+  return Boolean(upload && (sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass
+    || 'exactMassInventory' in upload || ['stateBuffer', 'thermoBuffer', 'identityBuffer']
+      .some(key => exactMassParticleBuffers.has(upload[key]))));
+}
+
+function exactParticleMassOwnerMatches(upload, record) {
+  const owner = record?.exactMass;
+  if (!owner) return !sphGpuParticleUploadAdvertisesExactMass(upload);
+  const borrowDescriptor = Object.getOwnPropertyDescriptor(upload, '__ulgActiveBorrowCount');
+  return !owner.retired && !record.destroyRequested && upload.exactMassInventory === owner.family
+    && borrowDescriptor?.get === record.borrowAccessors.get && borrowDescriptor?.set === record.borrowAccessors.set
+    && owner.sourceFields.every(([key, value]) => upload[key] === value)
+    && upload.stateBuffer === record.stateBuffer && upload.thermoBuffer === record.thermoBuffer
+    && upload.identityBuffer === record.identityBuffer && upload.particleCount === record.particleCount
+    && upload.topologyEpoch === record.topologyEpoch && upload.identityRevision === record.identityRevision
+    && validateSphExactMassRead(owner.read, { device: record.device, family: owner.family,
+      format: owner.family.format, expectedGeneration: owner.family.generation });
+}
+
+function retireExactParticleMassOwner(record) {
+  const owner = record?.exactMass;
+  if (!owner || owner.retired) return;
+  owner.retired = true;
+  void releaseSphExactMassRead(owner.read);
+  if (--owner.owners.count === 0) releaseSphExactMassInventory(owner.family);
+}
+
+/** A physical owner read pins both the row association and numeric storage. */
+export function acquireSphParticleExactMassRead(upload, device) {
+  const record = sphParticleBufferSetLifecycleRecords.get(upload);
+  if (!record?.exactMass || record.device !== device || record.destroyRequested
+      || !ensureSphGpuParticleBufferSetBorrowLifecycle(upload)) {
+    throw new TypeError('Exact particle inventory requires its original live upload and row association');
+  }
+  const read = acquireSphExactMassRead({ family: record.exactMass.family, device });
+  record.exactMassActiveReadCount++;
+  const handle = Object.freeze({ read, sourceSphUpload: upload, particleCount: record.particleCount,
+    topologyEpoch: record.topologyEpoch, identityRevision: record.identityRevision });
+  exactMassParticleReads.set(handle, { record, upload, released: false });
+  return handle;
+}
+
+export async function releaseSphParticleExactMassRead(handle) {
+  const held = exactMassParticleReads.get(handle);
+  if (!held) throw new TypeError('Exact particle read retirement requires the original handle');
+  if (held.released) return held.completion;
+  held.released = true;
+  held.completion = releaseSphExactMassRead(handle.read).then(() => {
+    held.record.exactMassActiveReadCount--;
+    finishSphGpuParticleBorrowRelease(held.upload, held.record);
+    return true;
+  });
+  return held.completion;
+}
+
+/** Temporary all-consumer migration boundary; never silently discard exact mass. */
+export function assertSphLegacyMassPathAllowed(inputs, stage) {
+  if (sphPackedParticleAdvertisesExactMass(inputs?.sphParticleState)
+      || sphGpuParticleUploadAdvertisesExactMass(inputs?.sphParticleUpload)
+      || ['sourceStateBuffer', 'sourceThermoBuffer', 'stateBuffer', 'thermoBuffer', 'identityBuffer']
+        .some(key => exactMassParticleBuffers.has(inputs?.[key]))) {
+    throw new TypeError(`${stage} requires an authenticated exact-inventory continuation; legacy mass path is not admitted`);
+  }
 }
 
 export function sphGpuParticleUploadMatchesDevice(upload, device) {
@@ -2485,6 +2597,7 @@ export function sphGpuParticleUploadMatchesDevice(upload, device) {
     return false;
   }
   const lifecycleRecord = sphParticleBufferSetLifecycleRecords.get(upload) || null;
+  if (!exactParticleMassOwnerMatches(upload, lifecycleRecord)) return false;
   if (!sphGpuParticleUploadAdvertisesDispersedMediumOptics(upload)) {
     return Boolean(
       lifecycleRecord
@@ -2713,8 +2826,11 @@ export function destroyMlsMpmGpuParticleBuffers(buffers) {
 export function destroySphGpuParticleBuffers(buffers) {
   if (!buffers) return false;
   const record = sphParticleBufferSetLifecycleRecords.get(buffers) || null;
+  if (!record && sphGpuParticleUploadAdvertisesExactMass(buffers)) {
+    throw new TypeError('Exact particle retirement requires the original private upload owner');
+  }
   if (record ? record.destroyed : buffers.destroyed) return false;
-  let activeBorrowCount = record?.activeBorrowCount ?? 0;
+  let activeBorrowCount = record ? record.activeBorrowCount + record.exactMassActiveReadCount : 0;
   if (!record) {
     try {
       activeBorrowCount = Math.max(

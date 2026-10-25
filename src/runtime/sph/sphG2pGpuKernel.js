@@ -1,3 +1,4 @@
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
@@ -1532,6 +1533,7 @@ function particleWallClearanceM(restVolumeM3, boxDimsM = DEFAULT_BOX_DIMS_M, gri
 }
 
 function assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate, requireUpdatedGridNodes = true }) {
+  assertSphLegacyMassPathAllowed({ sphParticleState }, 'G2P CPU fallback');
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('MLS-MPM G2P requires a packed SPH GPU particle buffer');
   }
@@ -3680,6 +3682,7 @@ export async function runMlsMpmG2pWebGpu({
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'G2P continuation');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }

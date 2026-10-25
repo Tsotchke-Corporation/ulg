@@ -1,4 +1,5 @@
 import { cachedWebGpuBindGroup } from '../webgpuBindGroupCache.js';
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
@@ -1466,6 +1467,11 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   gpuTimestampRecorder = null,
   diagnosticReadbackRequested = false
 } = {}) {
+  for (const [stateBuffer, thermoBuffer] of [[nextStateBuffer, nextThermoBuffer],
+    [frozenSourceStateBuffer, frozenSourceThermoBuffer],
+    [transactionRollbackStateBuffer, transactionRollbackThermoBuffer]]) {
+    assertSphLegacyMassPathAllowed({ stateBuffer, thermoBuffer }, 'Product placement');
+  }
   if (!encoder?.beginComputePass || !encoder?.finish) {
     throw new TypeError('segmented product placement requires a live command encoder');
   }
@@ -2276,6 +2282,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   sourceThermoBuffer,
   sourceMechanicsBuffer
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Product placement source');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('reaction product placement authority requires a WebGPU-like device');
   }

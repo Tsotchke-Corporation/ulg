@@ -1,3 +1,4 @@
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
@@ -719,6 +720,7 @@ export function createSphPhaseCarrierOneToFourMaterializationWebGpuEncoderStage(
     ?? sphParticleState?.phaseCarrierPlan
     ?? null
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'Phase-carrier materialization');
   if (
     !device?.createBuffer
     || !device?.createBindGroup

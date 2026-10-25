@@ -1,3 +1,4 @@
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   ULG_SPH_AEROSOL_PARCEL_SCHEMA,
   ULG_SPH_AEROSOL_BUDGET_SCHEMA,
@@ -322,6 +323,7 @@ export async function runSphAerosolCondensateExtractionWebGpu({ device, sourceFa
   expectedGeneration, sourceLineage, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
   thermalMaterialTable, mechanicsMaterialTable, declarations, provenance, targetCapacity,
   absolutePressureAuthority = false } = {}) {
+  assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Condensate extraction');
   requireDevice(device);
   // A generation-held capability may outlive the original public owner. Take
   // our own fork below, so the caller can retire its read during the dispatch.

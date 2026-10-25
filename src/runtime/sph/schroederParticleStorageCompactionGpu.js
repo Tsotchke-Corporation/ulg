@@ -1,3 +1,4 @@
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   SCHROEDER_PARTICLE_STORAGE_COMPACTION_SUMMARY_ROW_LAYOUT,
   ULG_SCHROEDER_PARTICLE_STORAGE_COMPACTION_EXECUTION_SCHEMA,
@@ -148,6 +149,7 @@ export async function runSchroederParticleStorageCompactionWebGpu({
   retainParticleBuffers = true,
   flags = 0
 } = {}) {
+  assertSphLegacyMassPathAllowed({ stateBuffer, thermoBuffer, identityBuffer }, 'Particle storage compaction');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederParticleStorageCompactionWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }

@@ -47,6 +47,15 @@ permit subnormal flushing, including intermediate bit reinterpretations.
   gather, separate stored-state validation and terminal verdict. Outgoing
   reservations cannot spend incoming packets from the same interval. Invalid
   edges, aliases, overspending or overflow reject the entire candidate family.
+- `src/runtime/sph/sphExactMassParticleSeed.js` and the existing
+  `sphGpuBuffers.js` owner: optional cold carrier initialization through
+  `buildSphGpuParticleBuffers(state, { exactMass: { format, reference } })`.
+  Capture binary64 masses once, use that capture for initial packing, validate
+  private packed bytes and row bindings, then upload private snapshots.
+  Inventory reads pin both the existing particle owner and numeric storage.
+  Copied descriptors, substituted arrays/strides/epochs, stale mirrors, and
+  unauthenticated raw-buffer mutation paths reject. Legacy initialization adds
+  no exact allocation.
 
 These are **mass-only numeric candidates**. They do not authorize a physical
 interval, material/phase conversion, coupled momentum/energy, preset enrollment,
@@ -56,12 +65,13 @@ live enrollment. A numerical owner is not a replacement source-authority layer.
 
 ## Consumer integration map
 
-Every integration below is still pending. Preserve the existing current-gas
-source and outer-publication machinery; extend its actual owned families.
+Cold carrier ownership is implemented; its live propagation and all remaining
+integrations below are still pending. Preserve the existing current-gas source
+and outer-publication machinery; extend its actual owned families.
 
 | Path | Existing source/writer | Required exact-inventory integration |
 |---|---|---|
-| Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initialize once from declared physical input; derive mass, moles and volume from the same inventory. |
+| Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initial exact mass and private owner implemented. Shared SPH/MLS cold provenance and complete mass/mole/volume projections remain pending. |
 | Product history | `sphResidentProductHistoryGpu.js`, H[3]/H[12]/H[13] and H[9] | Bind exact placed/unplaced partitions to live row membership, generation and count ownership. |
 | Aerosol | `sphAerosolParcelGpu.js`, parcel word 3 | Bind exact mass to family lifetime; retain separate dry-core and condensed-water components for nuclei. |
 | Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Preserve the exact family through explicit constructors, copies, branches, retirement and topology changes. |
@@ -82,6 +92,23 @@ Such a rejection is a temporary migration boundary, not G2 acceptance. A
 mass-preserving stage may explicitly retain its immutable inventory; a mass
 writer must issue the matched successor. Public feature booleans do not prove
 that the underlying family or writer is compatible.
+
+The cold uploader does not yet admit G2P/thermal/closure continuation. Its
+migration guards reject the main resident route, G2P, thermal, phase transfer,
+phase materialization, reaction/placement, extraction and compaction when an
+exact source is supplied, including the tested direct encoder/raw-buffer and
+CPU fallback paths. This is temporary rejection evidence, not a substitute for
+implementing those routes. Real presets remain unchanged.
+
+Next integrate the existing genuine producer and closure records. The current
+closure claim authenticates S/T/M ownership but does not yet attest unchanged
+mass through injected runners. Ordinary G2P needs a private genuine-producer
+capture; reuse thermal/refresh captures and the closure's existing authority.
+Reserve a source hold before asynchronous execution, bind the successor before
+releasing that hold, and close a shared numeric family only after its final
+physical owner retires. Do not mint a parallel physical-source authority or
+admit public `massUnchanged` flags. Product exact inventory is the **unplaced
+residual**, not historical total plus placed plus unplaced (which double-counts).
 
 ## Implementation order and acceptance
 

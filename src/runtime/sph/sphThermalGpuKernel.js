@@ -1,4 +1,5 @@
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
+import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -517,6 +518,7 @@ function finiteVector3(value, fallback) {
 }
 
 function assertPackedSphParticleState(sphParticleState) {
+  assertSphLegacyMassPathAllowed({ sphParticleState }, 'Thermal CPU fallback');
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('SPH thermal GPU step requires a packed SPH GPU particle buffer');
   }
@@ -3572,6 +3574,7 @@ export function createSphThermalStepWebGpuEncoderStage({
   // overflow or unsupported support radii fall back inside the proposal pass.
   neighborBins = null
 } = {}) {
+  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Thermal continuation');
   assertPackedSphParticleState(sphParticleState);
   assertSphCondensableInitializationMatches(sphParticleState, null, thermalMaterialTable);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);

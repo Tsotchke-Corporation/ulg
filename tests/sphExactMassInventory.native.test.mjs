@@ -12,7 +12,8 @@ const baseUrl = process.env.ULG_EXACT_MASS_BASE_URL || 'https://fastbox.tail5c07
 const sha = value => createHash('sha256').update(value).digest('hex');
 const sourcePaths = ['ulg-gpu-abi/src/sphExactMassInventory.js',
   'src/runtime/sph/sphExactMassWgsl.js', 'src/runtime/sph/sphExactMassTransferWgsl.js',
-  'src/runtime/sph/sphExactMassInventoryGpu.js', 'tests/sphExactMassInventory.native.test.mjs'];
+  'src/runtime/sph/sphExactMassInventoryGpu.js', 'src/runtime/sph/sphExactMassParticleSeed.js',
+  'src/runtime/sph/sphGpuBuffers.js', 'tests/sphExactMassInventory.native.test.mjs'];
 
 function fixtures(format) {
   const mask = (1n << BigInt(format.wordCount * 32)) - 1n;
@@ -91,6 +92,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       if (!adapter) throw new Error('Native WebGPU adapter unavailable');
       const device = await adapter.requestDevice();
       const errors = [], results = [], transfers = [];
+      let coldOwnership = null;
       device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       for (const type of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(type);
       try {
@@ -150,7 +152,14 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             await device.queue.onSubmittedWorkDone();
           } finally { source.destroy(); output.destroy(); readback.destroy(); }
         }
-        const owner = await import('/src/runtime/sph/sphExactMassInventoryGpu.js');
+        const particleUrl = '/src/runtime/sph/sphGpuBuffers.js';
+        const particleSource = await (await fetch(particleUrl)).text();
+        const ownerUrl = [...particleSource.matchAll(/from\s+['"]([^'"]+)['"]/g)]
+          .map(match => match[1]).find(path => path.split('?')[0].endsWith('/sphExactMassInventoryGpu.js'));
+        if (!ownerUrl) throw new Error('Missing transformed particle numeric-owner dependency');
+        // Follow Vite's exact URL, including its invalidation query. A bare
+        // second import would create another private WeakMap authority.
+        const owner = await import(ownerUrl);
         const identity = await import('/src/runtime/sph/sphGpuDeviceIdentity.js');
         const format = abi.createSphExactMassFormat();
         const initial = [1.5, 2 ** -10 + 2 ** -33, 0, 0];
@@ -258,6 +267,31 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             chain = await transfer('continuation-' + i, chain, [[i % 2, 1 - i % 2, 2 ** -110]]);
             await owner.releaseSphExactMassRead(prior); owner.releaseSphExactMassInventory(prior.family);
           }
+          // Real cold particle uploader: the binary64 seed is captured before
+          // S[3] rounding, and a physical-owner read pins both allocations.
+          const particles = await import('/src/runtime/sph/sphGpuBuffers.js');
+          const masses = [1 + 2 ** -30, 2 ** -10 + 2 ** -50, 0];
+          const packed = particles.buildSphGpuParticleBuffers({ smoothingLengthM: .1, step: 0, time: 0,
+            particles: masses.map((massKg, index) => ({ id: `cold-${index}`, material: 'unknown',
+              massKg, x: [.1 * index, 0, 0], v: [0, 0, 0], specificInternalEnergyJPerKg: 0 }))
+          }, { exactMass: { format, reference: 'native explicit initial particles' } });
+          const upload = particles.uploadSphGpuParticleBuffers(device, packed);
+          const held = particles.acquireSphParticleExactMassRead(upload, device);
+          try {
+            const source = await observe(held.read);
+            const retirementDeferred = particles.destroySphGpuParticleBuffers(upload) === false;
+            let newReadRejected = false;
+            try { particles.acquireSphParticleExactMassRead(upload, device); }
+            catch { newReadRejected = true; }
+            await transfer('cold-uploader-hidden-packet', held.read, [[0, 2, 2 ** -30]]);
+            coldOwnership = { masses, source, projections: masses.map((_, i) => packed.state[i * 8 + 3]),
+              retirementDeferred, newReadRejected, physicalContinuationAdmitted: false };
+          } finally {
+            await particles.releaseSphParticleExactMassRead(held);
+            await device.queue.onSubmittedWorkDone();
+            coldOwnership && (coldOwnership.parentRetired = upload.destroyed === true);
+            particles.destroySphGpuParticleBuffers(upload);
+          }
         } finally {
           await Promise.all(reads.map(read => owner.releaseSphExactMassRead(read)));
           families.forEach(family => owner.releaseSphExactMassInventory(family));
@@ -270,7 +304,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
+      return { results, transfers, coldOwnership, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
       inputs: cases.map(fixture => [...fixture.input]) });
@@ -318,7 +352,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
       return values;
     };
     const successful = new Set(['cross-binade', 'successor-spends-preserved-low-bit', 'shared-cancellation',
-      'shared-permuted', 'complete-depletion-and-birth', 'zero-packet']);
+      'shared-permuted', 'complete-depletion-and-birth', 'zero-packet', 'cold-uploader-hidden-packet']);
     for (const run of evidence.result.transfers) {
       assert.deepEqual(run.sourceAfter, run.before, run.name + ' source immutable');
       assert.equal(run.ready, successful.has(run.name) || run.name.startsWith('continuation-'), run.name);
@@ -341,6 +375,12 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
     assert.deepEqual(evidence.result.transfers.find(run => run.name === 'shared-cancellation').after,
       evidence.result.transfers.find(run => run.name === 'shared-permuted').after);
     evidence.passedTransferCases = evidence.result.transfers.length;
+    const cold = evidence.result.coldOwnership;
+    assert.deepEqual(units(cold.source), cold.masses.map(mass => decodeSphExactMass(encodeSphExactMass(mass, format), format).coefficient));
+    assert.deepEqual(cold.projections, cold.masses.map(Math.fround));
+    assert.equal(cold.retirementDeferred, true); assert.equal(cold.newReadRejected, true);
+    assert.equal(cold.parentRetired, true); assert.equal(cold.physicalContinuationAdmitted, false);
+    evidence.coldParticleOwnershipPassed = true;
   } catch (error) { failure ??= error; evidence.failure = String(error.stack || error); }
   finally {
     clearTimeout(watchdog);

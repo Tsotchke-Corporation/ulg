@@ -1,5 +1,6 @@
 import { createExactReactionAllocationFixture } from './sphExactReactionAllocationNative.js';
 import { inspectExactCaloricSource } from './sphExactCaloricSourceInspection.js';
+import { inspectExactReactionPacket } from './sphExactReactionPacketInspection.js';
 import * as buffers from '../../src/runtime/sph/sphGpuBuffers.js';
 import * as steps from '../../src/runtime/sph/sphMlsMpmGpuStep.js';
 import * as hierarchy from '../../src/runtime/sph/schroederHierarchyGpu.js';
@@ -195,11 +196,14 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
               const caloric = inspectExactCaloricSource({ words, selected, base, stateWords,
                 entry: sphReactionEnergyEntry(reactionTable, header[4]), token, allocation: expected,
                 expectedError: expectedCaloricError });
-              rows.push({ header, amounts: amounts.map(String), products, extensives, caloric, matches: header[1] === expected.error
+              const packet = inspectExactReactionPacket({ words, selected, base, stateWords, mechanicsWords, thermoWords,
+                entry: sphReactionEnergyEntry(reactionTable, header[4]), token, allocation: expected,
+                reactionTable, expectedCaloricError });
+              rows.push({ header, amounts: amounts.map(String), products, extensives, caloric, packet, matches: header[1] === expected.error
                 && header[0] === Number(expected.active)
                 && amounts.every((value, index) => value === [expected.total, expected.debitA, expected.debitB,
                   expected.remainderA, expected.remainderB, cap, availableA + availableB][index])
-                && products.every(product => product.matches) && extensives.matches && caloric.matches });
+                && products.every(product => product.matches) && extensives.matches && caloric.matches && packet.matches });
             }
             observed = { reverse, dtSeconds, wordCount, velocities, fixtureOptions, expectedCaloricError,
               internalPressureScale, g2pInternalPressureScale: g2pResult.internalPressureScale, visits, rows,

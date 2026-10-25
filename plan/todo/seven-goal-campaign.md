@@ -1,5 +1,28 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+## G2 checkpoint — exact product energy and species preparation — 2026-10-25 UTC
+
+The genuine source pipeline now retains the rounded-COM kinetic correction,
+physical energy residual and product total energy, plus actual selected and
+surviving moles/entities, signed element/charge residuals and original rational
+volume bases. Its metadata is bound to original sealed tables; checked widths
+and capacity limits reject rather than truncate. Numeric readiness grants no
+physical ownership or chemical admission.
+
+Final native verification passes 999 arithmetic cases and twelve genuine source
+chains; all 650 frozen paths match. The earlier completed run exposed loop-local
+carryover in product survivors and element residuals; explicit initialization
+fixes it with unchanged numerical checks. Full regression passes 5,503 tests
+(77 opt-in skips), focused tests pass and the normal external build passes.
+Failures, one console404, independent reviews and exact evidence are retained
+in the [current handoff](../handoff-2026-10-24.md).
+
+Next is actual carrier/history ownership through placement, rollback, compaction
+and closure/SS publication, preserving each rational basis across repeated
+evolution. Full G2 phase/environment/nuclei/transport/plume requirements remain.
+G2 stays active at 3/6 original child items; G3–G6 pending, G1 deferred. Local
+commits only; push, merge and Pages build remain held.
+
 ## G2 checkpoint — exact rational caloric preparation — 2026-10-25 UTC
 
 The genuine mechanics/thermal/discovery source owner now compares exact

@@ -220,7 +220,8 @@ test('exact preparation admits genuine canonical inputs and keeps numerical evid
       'prepare_exact_reaction_sources', 'select_exact_reaction_debits', 'partition_exact_reaction_products',
       'prepare_exact_reaction_extensives', 'project_exact_reaction_momentum',
       'prepare_exact_reaction_caloric_target', 'initialize_exact_reaction_caloric_bracket',
-      ...Array(31).fill('refine_exact_reaction_caloric_bracket'), 'finalize_exact_reaction_caloric_state'
+      ...Array(31).fill('refine_exact_reaction_caloric_bracket'), 'finalize_exact_reaction_caloric_state',
+      'prepare_exact_reaction_product_energy', 'prepare_exact_reaction_species_quantity'
     ]);
     for (const event of selectedDispatches) {
       assert.equal(event.bindGroup.entries[0].resource.buffer, args.thermalResult.stateBuffer);
@@ -229,7 +230,9 @@ test('exact preparation admits genuine canonical inputs and keeps numerical evid
     assert.equal(result.extensiveWordCount, result.format.wordCount + 18);
     assert.equal(result.extensiveQuantumExponent, result.format.quantumExponent - 299);
     assert.equal(result.caloricOffsetWords, result.extensiveOffsetWords + 4 + 12 * (result.extensiveWordCount + 2));
-    assert.equal(result.recordWords, result.caloricOffsetWords + result.caloricRecordWords);
+    assert.equal(result.productEnergyOffsetWords, result.caloricOffsetWords + result.caloricRecordWords);
+    assert.equal(result.speciesOffsetWords, result.productEnergyOffsetWords + result.productEnergyRecordWords);
+    assert.equal(result.recordWords, result.speciesOffsetWords + result.speciesRecordWords);
     assert.equal(result.caloricWordCount, 3 * result.format.wordCount + 26);
     assert.equal(result.caloricRecordWords, result.caloricProductOffsetWords
       + 3 * result.caloricProductCapacity * result.caloricProductStrideWords);
@@ -264,6 +267,33 @@ test('exact preparation rejects replaced producer, interval, table and upload in
   });
 });
 
+test('expanded packet parameters reject device capacity without leaking original producer reads', async () => {
+  await withSource(async args => {
+    const oldLimit = args.device.limits.maxUniformBufferBindingSize;
+    const submissionCount = args.device.submissions.length;
+    const bufferCount = args.device.createdBuffers.length;
+    args.device.limits.maxUniformBufferBindingSize = 48;
+    try {
+      let failure;
+      await assert.rejects(runSphExactReactionSourceSelectionWebGpu(args), error => {
+        failure = error;
+        return /params exceeds exact reaction device capacity/.test(error.message);
+      });
+      await failure.exactReactionSourceCleanupCompletion;
+      assert.equal(args.device.submissions.length, submissionCount);
+      const owned = args.device.createdBuffers.slice(bufferCount)
+        .filter(buffer => buffer.label?.startsWith('ulg-exact-reaction-source-'));
+      assert.equal(owned.length, 2);
+      assert.ok(owned.every(buffer => buffer.destroyed));
+    } finally { args.device.limits.maxUniformBufferBindingSize = oldLimit; }
+    // Reacquisition and successful retirement prove that the rejected attempt
+    // did not retire or strand the original genuine source tuple.
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    await selected.release();
+    return true;
+  });
+});
+
 test('started preparation independently holds discovery across its first asynchronous source acquisition', async () => {
   await withSource(async args => {
     const pending = runSphExactReactionSourceSelectionWebGpu(args);
@@ -283,7 +313,7 @@ test('genuine source and discovery holds survive all asynchronous pipeline compi
     await new Promise(resolve => setImmediate(resolve));
     args.reactionDiscoveryProposal.destroy();
     // Drive every cold pipeline await, including the extensive and COM passes.
-    for (let index = 0; index < 9; index++) {
+    for (let index = 0; index < 11; index++) {
       assert.equal(compilations.length, index + 1);
       assert.throws(() => args.thermalResult.destroyOutputParticleBuffers(), /owner read/);
       const { descriptor, resolve } = compilations[index];

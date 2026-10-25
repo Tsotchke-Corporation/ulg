@@ -44,8 +44,8 @@ fn es_caloric_source_ready(rx: u32, row: u32) -> bool {
   let m = row * 8u;
   return energy_source_ready(rx, es_thermo[row * 3u], es_thermo[row * 3u + 1u],
     es_thermo[row * 3u + 2u], bitcast<vec4<f32>>(es_state[row * 2u + 1u]))
-    && energy_relaxed_mechanics(es_mechanics[m], es_mechanics[m + 1u], es_mechanics[m + 2u],
-      es_mechanics[m + 3u], es_mechanics[m + 4u]);
+    && energy_relaxed_mechanics(es_mechanics_value(m), es_mechanics_value(m + 1u), es_mechanics_value(m + 2u),
+      es_mechanics_value(m + 3u), es_mechanics_value(m + 4u));
 }
 @compute @workgroup_size(1)
 fn prepare_exact_reaction_caloric_target(@builtin(global_invocation_id) id: vec3<u32>) {

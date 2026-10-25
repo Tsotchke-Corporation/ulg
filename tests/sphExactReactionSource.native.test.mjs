@@ -34,7 +34,10 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
     watchdog = setTimeout(() => { failure ??= new Error('Owned exact reaction source browser timeout'); void browser.close(); }, 240000);
     const page = await browser.newPage();
     page.on('pageerror', error => evidence.errors.push(String(error)));
-    evidence.console = []; page.on('console', message => evidence.console.push({ type: message.type(), text: message.text() }));
+    evidence.console = []; page.on('console', message => {
+      const text = message.text(); evidence.console.push({ type: message.type(), text });
+      if (message.type() === 'log' && /^exact-.*-progress /.test(text)) console.log(text);
+    });
     evidence.setupRetries = [];
     const navigate = async () => {
       for (let attempt = 0; ; attempt++) {
@@ -59,6 +62,7 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
           await import('/tests/fixtures/sphExactReactionKineticCapNative.js');
           await import('/tests/fixtures/sphExactExtensiveNative.js');
           await import('/tests/fixtures/sphExactCaloricNative.js');
+          await import('/tests/fixtures/sphExactProductEnergyNative.js');
         });
         break;
       } catch (error) {
@@ -71,6 +75,7 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
       const kinetics = await import('/tests/fixtures/sphExactReactionKineticCapNative.js');
       const extensives = await import('/tests/fixtures/sphExactExtensiveNative.js');
       const caloric = await import('/tests/fixtures/sphExactCaloricNative.js');
+      const productEnergy = await import('/tests/fixtures/sphExactProductEnergyNative.js');
       const transformed = await (await fetch('/src/runtime/sph/sphExactMassWgsl.js')).text();
       const formatUrl = [...transformed.matchAll(/from\s+['"]([^'"]+)['"]/g)]
         .map(match => match[1]).find(path => path.split('?')[0].endsWith('/sphExactMassInventory.js'));
@@ -84,7 +89,7 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
       const errors = []; device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       device.pushErrorScope('validation');
       const result = { status: 'running', adapter: { vendor: adapter.info.vendor, architecture: adapter.info.architecture },
-        kinetics: [], extensives: [], caloric: [], sources: [], errors, timeline: [] };
+        kinetics: [], extensives: [], caloric: [], productEnergy: [], sources: [], errors, timeline: [] };
       void device.lost.then(info => { result.deviceLost = { reason: info.reason, message: info.message }; });
       try {
         for (const wordCount of [1, 9, 66]) {
@@ -95,6 +100,9 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
           }));
           result.caloric.push(await caloric.runExactCaloricNative(device, format, {
             onProgress: event => { result.timeline.push(event); console.log('exact-caloric-progress', JSON.stringify(event)); }
+          }));
+          result.productEnergy.push(await productEnergy.runExactProductEnergyNative(device, format, {
+            onProgress: event => { result.timeline.push(event); console.log('exact-product-energy-progress', JSON.stringify(event)); }
           }));
         }
         const velocities = [[.25, -.5, .125], [-.375, .25, -.125]];
@@ -125,6 +133,8 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
     for (const result of evidence.result.extensives) assert.equal(result.pass, true, JSON.stringify(result));
     assert.equal(evidence.result.caloric.length, 3);
     for (const result of evidence.result.caloric) assert.equal(result.pass, true, JSON.stringify(result));
+    assert.equal(evidence.result.productEnergy.length, 3);
+    for (const result of evidence.result.productEnergy) assert.equal(result.pass, true, JSON.stringify(result));
     assert.equal(evidence.result.sources.length, 12);
     for (const result of evidence.result.sources) {
       assert.equal(result.pass, true, JSON.stringify(result));
@@ -150,6 +160,10 @@ test('genuine canonical thermal/mechanics sources drive exact reaction preparati
     }
     assert.ok(evidence.result.sources.some(result => result.rows.some(row => row.caloric.nonzeroResidual)),
       'accepted graph states retain a nonzero exact caloric endpoint remainder');
+    assert.ok(evidence.result.sources.some(result => result.rows.some(row => row.packet.nonzeroComKineticCorrection)),
+      'real moving sources exercise the stored-velocity kinetic correction');
+    assert.ok(evidence.result.sources.some(result => result.rows.some(row => row.packet.hasNonzeroSpeciesResidual)),
+      'actual selected allocations retain nonzero chemical residuals instead of nominal-extent zeroes');
     assert.deepEqual(evidence.errors, []);
   } catch (error) { failure ??= error; evidence.failure = String(error.stack ?? error); }
   finally {

@@ -6,6 +6,11 @@ import { createSphExactExtensiveWgsl } from './sphExactExtensiveWgsl.js';
 import { createSphExactReactionCaloricGpuWgsl, SPH_EXACT_REACTION_CALORIC_FIELDS,
   SPH_EXACT_REACTION_CALORIC_HEADER_WORDS, SPH_EXACT_REACTION_CALORIC_PRODUCT_WORDS }
   from './sphExactReactionCaloricGpuWgsl.js';
+import { createSphExactReactionPacketGpuWgsl, SPH_EXACT_REACTION_PRODUCT_ENERGY_FIELDS,
+  SPH_EXACT_REACTION_PRODUCT_ENERGY_HEADER_WORDS } from './sphExactReactionPacketGpuWgsl.js';
+import { encodeSphExactReactionPacketMetadata } from './sphExactReactionPacketMetadata.js';
+import { createSphExactReactionSpeciesWgsl, sphExactReactionSpeciesLayout }
+  from './sphExactReactionSpeciesWgsl.js';
 import { sphReactionEnergyEntry } from './sphReactionEnergyAuthority.js';
 import { encodeSphExactReactionKineticScale, createSphExactReactionKineticCapWgsl }
   from './sphExactReactionKineticCap.js';
@@ -16,7 +21,7 @@ import { computeBufferBinding, prewarmCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
-export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v3';
+export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v4';
 const RECORDS = new WeakMap();
 const RULE_WORDS = 24;
 export const SPH_EXACT_REACTION_SOURCE_HEADER_WORDS = 12;
@@ -56,13 +61,14 @@ export function createSphExactReactionSourceSelectionWgsl(format) {
 struct ExactSourceParams {
   count: u32, reaction_count: u32, inventory_word_offset: u32, record_words: u32,
   dt_bits: u32, generation_id: u32, support_epoch: u32, support_profile: u32,
-  extensive_offset_words: u32, caloric_offset_words: u32, caloric_record_words: u32, reaction_table_offset: u32
+  extensive_offset_words: u32, caloric_offset_words: u32, caloric_record_words: u32, reaction_table_offset: u32,
+  species_offset_words: u32, species_record_words: u32, species_term_capacity: u32, species_element_capacity: u32
 }
 // Integer storage preserves every admitted velocity/U bit, including subnormal
 // encodings. Only the existing geometry/kinetics path reads f32 projections.
 @group(0) @binding(0) var<storage, read> es_state: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> es_thermo: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> es_mechanics: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> es_mechanics_storage: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> es_inventory: array<u32>;
 @group(0) @binding(4) var<storage, read> es_proposals: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> es_metadata: array<u32>;
@@ -70,6 +76,8 @@ struct ExactSourceParams {
 @group(0) @binding(7) var<storage, read> es_evidence: array<u32>;
 @group(0) @binding(8) var<uniform> es_params: ExactSourceParams;
 fn ek_scale_word(index: u32) -> u32 { return es_metadata[index]; }
+fn es_mechanics_bits(index: u32) -> vec4<u32> { return es_mechanics_storage[index]; }
+fn es_mechanics_value(index: u32) -> vec4<f32> { return bitcast<vec4<f32>>(es_mechanics_bits(index)); }
 fn es_finite(v: vec4<f32>) -> bool { return all(abs(v) <= vec4<f32>(3.402823e38)); }
 fn es_float(index: u32) -> f32 { return bitcast<f32>(es_metadata[index]); }
 fn es_weight(offset: u32) -> ExactMass {
@@ -93,11 +101,11 @@ fn es_load_output(offset: u32) -> ExactMass {
   return value;
 }
 fn es_volume_ready(row: u32) -> bool {
-  let volume = es_mechanics[row * 8u + 4u];
+  let volume = es_mechanics_value(row * 8u + 4u);
   let current = volume.z * volume.w;
   return volume.z > 0.0 && volume.w > 0.0 && current > 0.0
     && volume.z <= 3.402823e38 && volume.w <= 3.402823e38 && current <= 3.402823e38
-    && es_mechanics[row * 8u + 5u].y == 1.0 && es_mechanics[row * 8u + 6u].w == 1.0;
+    && es_mechanics_value(row * 8u + 5u).y == 1.0 && es_mechanics_value(row * 8u + 6u).w == 1.0;
 }
 @compute @workgroup_size(1)
 fn prepare_exact_reaction_sources(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -299,14 +307,18 @@ fn project_exact_reaction_momentum(@builtin(global_invocation_id) id: vec3<u32>)
   // are unresolved, and header[11] stays zero (no physical acceptance).
   es_output[out + 9u] = select(0u, 1u, error == 0u);
 }
-` + createSphExactReactionCaloricGpuWgsl(format);
+` + createSphExactReactionCaloricGpuWgsl(format) + createSphExactReactionPacketGpuWgsl(format)
+    + createSphExactReactionSpeciesWgsl(format);
 }
 
-function metadataFor(compiled, table) {
+function metadataFor(compiled, table, thermalMaterialTable) {
   const blocks = compiled.map(token => [encodeSphExactReactionAllocationWeights(token), encodeSphExactReactionKineticScale(token)]);
+  const species = compiled.map(token => encodeSphExactReactionPacketMetadata(token,
+    { reactionTable: table, thermalMaterialTable }));
   const headerSize = compiled.length * RULE_WORDS;
   const reactionTableOffsetWords = headerSize + blocks.reduce((sum, pair) => sum + pair[0].length + pair[1].length, 0);
-  const words = new Uint32Array(reactionTableOffsetWords + table.combinedRecords.length);
+  const speciesOffsetWords = reactionTableOffsetWords + table.combinedRecords.length;
+  const words = new Uint32Array(speciesOffsetWords + species.reduce((sum, item) => sum + item.words.length, 0));
   const floats = new Float32Array(words.buffer); let offset = headerSize;
   compiled.forEach((token, index) => {
     const rule = index * RULE_WORDS, [a, b] = token.reactants;
@@ -324,7 +336,11 @@ function metadataFor(compiled, table) {
   });
   words.set(new Uint32Array(table.combinedRecords.buffer, table.combinedRecords.byteOffset,
     table.combinedRecords.length), reactionTableOffsetWords);
-  return { words, reactionTableOffsetWords };
+  offset = speciesOffsetWords;
+  species.forEach((item, index) => {
+    words[index * RULE_WORDS + 3] = offset; words.set(item.words, offset); offset += item.words.length;
+  });
+  return { words, reactionTableOffsetWords, maxElements: Math.max(...species.map(item => item.elementCount)) };
 }
 
 export function sphExactReactionSourcePipelineDescriptors(format) {
@@ -332,7 +348,8 @@ export function sphExactReactionSourcePipelineDescriptors(format) {
   return ['prepare_exact_reaction_sources', 'select_exact_reaction_debits', 'partition_exact_reaction_products',
     'prepare_exact_reaction_extensives', 'project_exact_reaction_momentum',
     'prepare_exact_reaction_caloric_target', 'initialize_exact_reaction_caloric_bracket',
-    'refine_exact_reaction_caloric_bracket', 'finalize_exact_reaction_caloric_state']
+    'refine_exact_reaction_caloric_bracket', 'finalize_exact_reaction_caloric_state',
+    'prepare_exact_reaction_product_energy', 'prepare_exact_reaction_species_quantity']
     .map(entryPoint => ({
       label: 'ulg-exact-reaction-source-selection',
       cacheKey: `${SPH_EXACT_REACTION_SOURCE_SCHEMA}-${format.wordCount}-${format.quantumExponent}`,
@@ -396,6 +413,7 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       compileSphExactReactionAllocation({ reactionTable, thermalMaterialTable, reactionIndex, format }));
     if (!compiled.length) throw new TypeError('Exact reaction source selection requires reaction rules');
     const maxProducts = Math.max(...compiled.map(token => token.products.length));
+    const { words: metadata, reactionTableOffsetWords, maxElements } = metadataFor(compiled, reactionTable, thermalMaterialTable);
     const extensiveWordCount = format.wordCount + 18;
     const extensiveOffsetWords = HEADER_WORDS + 7 * format.wordCount + maxProducts * (4 + 3 * format.wordCount);
     const caloricOffsetWords = extensiveOffsetWords + 4 + SPH_EXACT_REACTION_EXTENSIVE_FIELDS.length * (extensiveWordCount + 2);
@@ -403,19 +421,30 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
     const caloricProductOffsetWords = SPH_EXACT_REACTION_CALORIC_HEADER_WORDS
       + SPH_EXACT_REACTION_CALORIC_FIELDS.length * (caloricWordCount + 2);
     const caloricRecordWords = caloricProductOffsetWords + 3 * maxProducts * SPH_EXACT_REACTION_CALORIC_PRODUCT_WORDS;
-    const recordWords = caloricOffsetWords + caloricRecordWords;
+    const productEnergyOffsetWords = caloricOffsetWords + caloricRecordWords;
+    const productEnergyRecordWords = SPH_EXACT_REACTION_PRODUCT_ENERGY_HEADER_WORDS
+      + SPH_EXACT_REACTION_PRODUCT_ENERGY_FIELDS.length * (caloricWordCount + 2);
+    const speciesOffsetWords = productEnergyOffsetWords + productEnergyRecordWords;
+    const speciesLayout = sphExactReactionSpeciesLayout(format,
+      { termCapacity: maxProducts + 2, elementCapacity: maxElements });
+    const recordWords = speciesOffsetWords + speciesLayout.recordWords;
     const outputByteLength = source.particleCount * recordWords * 4;
     if (!Number.isSafeInteger(outputByteLength) || outputByteLength < 4
         || outputByteLength > device.limits.maxStorageBufferBindingSize
         || source.particleCount > device.limits.maxComputeWorkgroupsPerDimension) {
       throw new RangeError('Exact reaction selection exceeds device capacity');
     }
-    const { words: metadata, reactionTableOffsetWords } = metadataFor(compiled, reactionTable);
     const params = new Uint32Array([source.particleCount, compiled.length, numeric.rowOffset * format.wordCount,
       recordWords, source.encodedDtBits, discovery.view.generationId, discovery.view.epochIdentity.supportEpoch,
       reactionDiscoveryProposal.supportProfileId, extensiveOffsetWords, caloricOffsetWords,
-      caloricRecordWords, reactionTableOffsetWords]);
+      caloricRecordWords, reactionTableOffsetWords, speciesOffsetWords, speciesLayout.recordWords,
+      speciesLayout.termCapacity, speciesLayout.elementCapacity]);
     const allocate = (label, size, usage) => {
+      const bindingLimit = usage & 128 ? device.limits.maxStorageBufferBindingSize : device.limits.maxUniformBufferBindingSize;
+      if (!Number.isSafeInteger(size) || size < 4 || size % 4 !== 0
+          || size > Math.min(device.limits.maxBufferSize, bindingLimit)) {
+        throw new RangeError(`${label} exceeds exact reaction device capacity`);
+      }
       const buffer = device.createBuffer({ label, size, usage }); owned.push(buffer);
       tagWebGpuBufferDevice(buffer, device); return buffer;
     };
@@ -464,6 +493,10 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       caloricOffsetWords, caloricWordCount, caloricRecordWords, caloricProductOffsetWords,
       caloricProductCapacity: maxProducts, caloricStateSlots: 3,
       caloricFields: SPH_EXACT_REACTION_CALORIC_FIELDS, caloricProductStrideWords: SPH_EXACT_REACTION_CALORIC_PRODUCT_WORDS,
+      productEnergyOffsetWords, productEnergyRecordWords, productEnergyWordCount: caloricWordCount,
+      productEnergyHeaderWords: SPH_EXACT_REACTION_PRODUCT_ENERGY_HEADER_WORDS,
+      productEnergyFields: SPH_EXACT_REACTION_PRODUCT_ENERGY_FIELDS,
+      speciesOffsetWords, speciesRecordWords: speciesLayout.recordWords, speciesLayout,
       format, physicalPublicationAdmitted: false, kineticGeometry: 'current-production-f32-law',
       encodedDtBits: source.encodedDtBits, release });
     RECORDS.set(result, { result, device, source, discovery, compiled, validate });

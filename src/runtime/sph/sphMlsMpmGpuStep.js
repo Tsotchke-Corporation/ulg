@@ -1,5 +1,7 @@
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
-  bindSphExactMassPostMechanicsContinuation, acquireSphParticleExactMassRead,
+  bindSphExactMassPostMechanicsContinuation, bindSphExactMassFusedSequenceContinuation,
+  runMlsMpmGpuParticleBufferSetCleanupAfterBorrows, transferMlsMpmGpuAuxiliaryRetirementOwnership,
+  acquireSphParticleExactMassRead,
   releaseSphParticleExactMassRead, forkSphParticleExactMassRead,
   validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import { releaseMlsMpmPostMechanicsExactMassCapture,
@@ -278,6 +280,7 @@ import {
 } from './sphMlsMpmGpuSummary.js';
 import {
   createSphThermalStepWebGpuEncoderStage,
+  createSphThermalStepExactSequenceWebGpuEncoderStage,
   destroySphThermalResponseGraphBuffers,
   runSphThermalStepWithOptionalWebGpu,
   runSphThermalStepWebGpu,
@@ -14260,7 +14263,149 @@ function deferFailedFusedResidentSequenceCleanup(
   return true;
 }
 
-async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
+// Sequence authority is minted only by the actual K-step producer. In
+// particular, spread descriptors used by its diagnostic envelope are not sources.
+const exactMassSequenceTerminals = new WeakMap();
+const exactMassSequenceThermalInputs = new WeakMap();
+const sequenceMlsKeys = ['schema', 'status', 'mechanicsBuffer', 'particleCount',
+  'mechanicsStrideBytes', 'storageGeneration', 'bufferFamilyGeneration', 'physicsTick',
+  'physicsSubstep', 'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch'];
+const snapshotSequenceFields = (object, keys) => keys.map(key => {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (descriptor && !Object.hasOwn(descriptor, 'value')) throw new TypeError('Exact sequence source fields must be data properties');
+  return [key, descriptor?.value];
+});
+const sequenceFieldsMatch = (object, fields) => fields.every(([key, value]) => {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  return (!descriptor || Object.hasOwn(descriptor, 'value')) && descriptor?.value === value;
+});
+function validateExactSequenceSource(record) {
+  if (!record || record.closed || !validateSphParticleExactMassRead(record.sourceRead,
+    { device: record.device, sourceSphUpload: record.sourceSphUpload })
+      || !sequenceFieldsMatch(record.sourceMlsUpload, record.mlsFields)) {
+    throw new TypeError('Exact fused sequence source association changed');
+  }
+}
+
+// A one-use capability for the actual encoder/input tuple, not an upload alias.
+export function claimMlsMpmFusedSequenceExactThermalInput(token, args) {
+  const input = exactMassSequenceThermalInputs.get(token);
+  if (!input || input.claimed) throw new TypeError('Unknown or consumed exact sequence thermal input');
+  validateExactSequenceSource(input.record);
+  if (input.keys.some(key => args[key] !== input.args[key])) {
+    throw new TypeError('Exact sequence thermal input tuple changed');
+  }
+  input.claimed = true;
+  return Object.freeze({ sourceRead: input.record.sourceRead,
+    validateEncoder(encoder) {
+      validateExactSequenceSource(input.record);
+      if (input.encoded || encoder !== input.encoder) throw new TypeError('Exact thermal encoder cannot replay or move');
+      input.encoded = true;
+    } });
+}
+
+export function resolveMlsMpmFusedSequenceExactMassContinuation(step) {
+  const record = exactMassSequenceTerminals.get(step);
+  validateExactSequenceSource(record);
+  const next = record.nextParticleUploads;
+  if (!record.bindingOpen || step.nextParticleUploads !== next
+      || next.sphParticleUpload !== record.targetSph || next.mlsMpmParticleUpload !== record.targetMls
+      || !sequenceFieldsMatch(record.targetSph, record.targetSphFields)
+      || !sequenceFieldsMatch(record.targetMls, record.targetMlsFields)
+      || record.targetSph.stateBuffer !== record.stateBuffer
+      || record.targetSph.thermoBuffer !== record.thermoBuffer
+      || record.targetMls.mechanicsBuffer !== record.mechanicsBuffer
+      || record.submittedSteps !== record.count) {
+    throw new TypeError('Exact fused sequence requires its original submitted terminal envelope');
+  }
+  return Object.freeze({ sourceRead: record.sourceRead, nextParticleUploads: next,
+    stateBuffer: record.stateBuffer, thermoBuffer: record.thermoBuffer, completion: record.completion });
+}
+
+// Every exposed destructor shares the sequence owner. No alias can retire a
+// terminal component while a physical consumer still holds the terminal family.
+function guardExactSequenceOutput(record, aliases, components) {
+  const retire = (selection) => {
+    if (!record.published) throw new TypeError('Exact sequence output has not been published');
+    const selected = Object.entries(components).filter(([key]) => selection[key]).map(([, buffer]) => buffer);
+    if (!selected.length) return false;
+    return record.completion.then(() => new Promise(resolve => {
+      const cleanup = () => {
+        for (const buffer of selected) {
+          if (!record.retired.has(buffer)) { buffer.destroy(); record.retired.add(buffer); }
+        }
+        resolve(true);
+      };
+      const terminal = selected.some(buffer => record.terminalBuffers.has(buffer));
+      if (!runSphGpuParticleBufferSetCleanupAfterBorrows(record.targetSph, cleanup,
+        { terminalSourceRetirement: terminal })) cleanup();
+    }));
+  };
+  const destroyAll = () => retire(Object.fromEntries(Object.keys(components).map(key => [key, true])));
+  for (const output of aliases.filter(Boolean)) {
+    output.destroyOutputParticleBuffers = destroyAll;
+    output.destroyOutputParticleBufferComponents = retire;
+  }
+}
+
+async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu(args) {
+  if (!sphGpuParticleUploadAdvertisesExactMass(args.sphParticleUpload)) {
+    assertSphLegacyMassPathAllowed(args, 'Fused resident sequence');
+    return runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl(args);
+  }
+  const mlsFields = snapshotSequenceFields(args.mlsMpmParticleUpload, sequenceMlsKeys);
+  const sourceRead = acquireSphParticleExactMassRead(args.sphParticleUpload, args.device,
+    { mlsMpmParticleUpload: args.mlsMpmParticleUpload });
+  const record = { device: args.device, sourceRead, sourceSphUpload: args.sphParticleUpload,
+    sourceMlsUpload: args.mlsMpmParticleUpload,
+    mlsFields,
+    buffers: new Set(), stages: [], abortCleanups: [], retired: new Set(), terminalBuffers: new Set(),
+    submittedSteps: 0, published: false, closed: false, bindingOpen: false };
+  let finish;
+  const settled = new Promise(resolve => { finish = resolve; });
+  record.completion = settled.then(() => releaseSphParticleExactMassRead(sourceRead));
+  const register = args.registerSubmittedCleanup;
+  let requestedCleanup = null;
+  record.cleanup = () => record.cleanupPromise ??= record.completion.then(() => {
+    if (record.published) {
+      requestedCleanup?.();
+    } else {
+      for (const cleanup of record.abortCleanups) { try { cleanup(); } catch {} }
+      for (const stage of record.stages) { try { stage.cleanupSubmittedWork?.(); } catch {} }
+      const cleanup = () => {
+        for (const buffer of record.buffers) {
+          if (!record.retired.has(buffer)) { buffer.destroy(); record.retired.add(buffer); }
+        }
+      };
+      if (!record.targetSph?.exactMassInventory
+          || !runSphGpuParticleBufferSetCleanupAfterBorrows(record.targetSph, cleanup,
+            { terminalSourceRetirement: true })) cleanup();
+    }
+  });
+  try {
+    const step = await runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({ ...args,
+      registerSubmittedCleanup(registration) {
+        requestedCleanup = registration.cleanup;
+        const guarded = Object.freeze({ ...registration, cleanup: () => record.cleanup() });
+        if (typeof register === 'function') return register(guarded);
+        void record.cleanup();
+        return true;
+      }
+    }, record);
+    record.published = true;
+    return step;
+  } catch (error) {
+    const retirement = record.cleanup();
+    try { Object.defineProperty(error, 'exactMassSequenceRetirement', { value: retirement }); } catch {}
+    throw error;
+  } finally {
+    record.closed = true;
+    record.bindingOpen = false;
+    finish();
+  }
+}
+
+async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   device,
   sphParticleState,
   mlsMpmParticleState,
@@ -14313,12 +14458,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   // created with the 'timestamp-query' feature, and resolving them costs a
   // small readback that the hot loop should not pay unprofiled.
   residentGpuTimestampProfilingRequested = false
-}) {
-  // This producer owns its terminal ping-pong lineage separately from the
-  // single-step fused producer. Until that lineage carries exact inventory,
-  // reject before allocation/submission or source identity ownership changes.
-  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'Fused resident sequence');
+}, exactSequence = null) {
+  if (exactSequence) validateExactSequenceSource(exactSequence);
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  if (exactSequence) exactSequence.count = count;
+  const own = buffer => { if (exactSequence && buffer) exactSequence.buffers.add(buffer); return buffer; };
+  const createSequenceBuffer = descriptor => own(device.createBuffer(descriptor));
+  const writeSequenceBuffer = (ownerDevice, label, data, usage) => {
+    const buffer = own(ownerDevice.createBuffer({ label, size: Math.max(4, data?.byteLength ?? 0), usage }));
+    if (data?.byteLength > 0) ownerDevice.queue.writeBuffer(buffer, 0, data);
+    return buffer;
+  };
   const normalizedMaxSubstepsPerSubmission = Math.min(
     count,
     Math.max(
@@ -14370,6 +14520,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       mlsMpmParticleUpload,
       stepCount: count
     });
+  if (exactSequence && !terminalLineageIdentity) {
+    throw new TypeError('Exact fused sequence requires matching source epochs at a complete physics tick');
+  }
   const orchestrationReadbackTelemetry =
     createGpuReadbackTelemetryAccumulator({
       scope: 'mls-mpm-fused-resident-sequence-orchestration'
@@ -14525,6 +14678,10 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     error.status = 'fused-phase-carrier-plan-family-rejected';
     throw error;
   }
+  if (exactSequence && (usePhaseCarrierTransferSidecarFusion || sourceDispersedMediumOpticsAdvertised
+      || sphParticleUpload.aerosolFamily || reactionActivationWatchTable)) {
+    throw new TypeError('Exact fused sequence mass-changing and auxiliary consumers are not integrated');
+  }
   let sidecarFusionDispatchCount = 0;
   const separationMaxPairRestDistanceM = maxSeparationRestDistanceM(
     mlsMpmParticleState?.mechanics,
@@ -14560,6 +14717,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       dt: dtSeconds
     }
   );
+  if (activeGridIndirectDispatchArgs?.ownsBuffer !== false) own(activeGridIndirectDispatchArgs?.buffer);
   const dispatchTopology = createResidentDispatchTopology({
     particleCount,
     gridSpec,
@@ -14574,6 +14732,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     schroederSelectedLevel,
     labelPrefix: 'ulg-mls-mpm-fused-sequence'
   });
+  if (schroederLevelFilter.ownsAssignmentBuffer) own(schroederLevelFilter.assignmentBuffer);
   const schroederActiveNodeFilter = createFusedSchroederActiveNodeBinding({
     device,
     schroederSpatialEpochGeneration: count === 1
@@ -14586,6 +14745,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     particleIdentityBuffer: sphParticleUpload.identityBuffer,
     labelPrefix: 'ulg-mls-mpm-fused-sequence'
   });
+  if (schroederActiveNodeFilter.ownsActiveNodeBuffer) own(schroederActiveNodeFilter.activeNodeBuffer);
   const stageTimingStartMs = nowMs();
   const stageMs = {
     deviceAcquire: 0,
@@ -14601,7 +14761,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     compactSummary: 0
   };
   const sequenceEncodeStartMs = nowMs();
-  const gridBuffer = device.createBuffer({
+  const gridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
     size: Math.max(4, gridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
@@ -14609,41 +14769,41 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   // Previous-substep finalized grid ([mass, momentum] rows): the spatial
   // density source for the liquid EOS. Zeroed at sequence start, refreshed by
   // a copy after every substep's finalize pass.
-  const p2gAccumulatorBuffer = device.createBuffer({
+  const p2gAccumulatorBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
     size: Math.max(4, p2gAccumulatorByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
-  const updatedGridBuffer = device.createBuffer({
+  const updatedGridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
     size: Math.max(4, updatedGridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const statePingBuffers = [
-    tagWebGpuBufferDevice(device.createBuffer({
+    tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
     }), device),
-    tagWebGpuBufferDevice(device.createBuffer({
+    tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
     }), device)
   ];
   const mechanicsPingBuffers = [
-    tagWebGpuBufferDevice(device.createBuffer({
+    tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
     }), device),
-    tagWebGpuBufferDevice(device.createBuffer({
+    tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
     }), device)
   ];
-  const p2gParamsBuffer = writeGpuBuffer(
+  const p2gParamsBuffer = writeSequenceBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-p2g-params',
     activeGridDispatch.useActiveGrid
@@ -14674,7 +14834,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         ),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
-  const gridUpdateParamsBuffer = writeGpuBuffer(
+  const gridUpdateParamsBuffer = writeSequenceBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-grid-update-params',
     activeGridDispatch.useActiveGrid
@@ -14697,7 +14857,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
-  const g2pParamsBuffer = writeGpuBuffer(
+  const g2pParamsBuffer = writeSequenceBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-g2p-params',
     createFusedG2pParamsArray({
@@ -14712,7 +14872,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
-  const productEventBuffer = writeGpuBuffer(
+  const productEventBuffer = writeSequenceBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-empty-product-events',
     new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
@@ -14720,7 +14880,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   );
   const schroederAssignmentBuffer = schroederLevelFilter.assignmentBuffer;
   const schroederActiveNodeBuffer = schroederActiveNodeFilter.activeNodeBuffer;
-  const pressureRowsBuffer = writeGpuBuffer(
+  const pressureRowsBuffer = writeSequenceBuffer(
     device,
     'ulg-mls-mpm-fused-sequence-empty-pressure-force-rows',
     new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
@@ -14907,6 +15067,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     const submitCurrentSequenceEncoder = (submittedStepCount) => {
       device.queue.submit([encoder.finish()]);
       commandSubmitted = true;
+      if (exactSequence) exactSequence.submittedSteps += submittedStepCount;
       commandSubmissionCount += 1;
       submissionStepCounts.push(submittedStepCount);
       // A sidecar stage owns resources referenced by the command buffer that
@@ -14929,6 +15090,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       capacity: Math.min(2000, Math.max(8, count * 5 + 8)),
       label: 'ulg-mls-mpm-fused-sequence'
     });
+    if (exactSequence) exactSequence.abortCleanups.push(() => gpuTimestampProfiler.destroy());
     let currentStateBuffer = sphParticleUpload.stateBuffer;
     let currentThermoBuffer = sphParticleUpload.thermoBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
@@ -15151,14 +15313,18 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       terminalSeparationBinCandidate = index === count - 1
         ? separation.postSeparationThermalBinCandidate ?? null
         : terminalSeparationBinCandidate;
-      if (separationScratch) separationScratchSets.add(separationScratch);
+      if (separationScratch) {
+        separationScratchSets.add(separationScratch);
+        for (const buffer of separationScratch.transientBuffers || []) own(buffer);
+      }
+      if (exactSequence) markSphExactMassDerivedBuffers(exactSequence.sourceRead, [outStateBuffer]);
       currentStateBuffer = outStateBuffer;
       currentMechanicsBuffer = outMechanicsBuffer;
       finalStateBuffer = outStateBuffer;
       finalMechanicsBuffer = outMechanicsBuffer;
       if (useThermalSidecarFusion) {
         const thermalStartMs = nowMs();
-        const thermalStage = createSphThermalStepWebGpuEncoderStage({
+        const thermalArgs = {
           ...thermalStepOptions,
           device,
           sphParticleState,
@@ -15170,8 +15336,19 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           dtS: dtSeconds,
           retainOutputParticleBuffers: true,
           readbackMode: NO_FULL_READBACK_MODE
-        });
+        };
+        let thermalToken = null;
+        if (exactSequence) {
+          thermalToken = Object.freeze({});
+          exactMassSequenceThermalInputs.set(thermalToken, { record: exactSequence, args: thermalArgs,
+            keys: Object.keys(thermalArgs), encoder, claimed: false, encoded: false });
+        }
+        const thermalStage = exactSequence
+          ? await createSphThermalStepExactSequenceWebGpuEncoderStage(thermalArgs, thermalToken)
+          : createSphThermalStepWebGpuEncoderStage(thermalArgs);
         sidecarEncoderStages.push(thermalStage);
+        if (exactSequence) exactSequence.stages.push(thermalStage);
+        own(thermalStage.stateBuffer); own(thermalStage.thermoBuffer);
         sidecarOutputBuffers.push(
           thermalStage.stateBuffer,
           thermalStage.thermoBuffer
@@ -15378,6 +15555,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           readbackMode: NO_FULL_READBACK_MODE
         });
         sidecarEncoderStages.push(mechanicsRefreshStage);
+        if (exactSequence) exactSequence.stages.push(mechanicsRefreshStage);
+        own(mechanicsRefreshStage.mechanicsBuffer);
         sidecarOutputBuffers.push(mechanicsRefreshStage.mechanicsBuffer);
         recordSidecarFusionDispatches(
           mechanicsRefreshStage,
@@ -15452,6 +15631,26 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     }
     // Must be encoded on this encoder, after the profiled passes and before
     // finish(). No-op when profiling is inert.
+    // A cold sequence owns one real terminal thermo copy, so retiring its
+    // predecessor cannot invalidate the next batch or accumulate ancestor pins.
+    let exactTerminalThermoCopy = null;
+    if (exactSequence && !useThermalSidecarFusion) {
+      exactTerminalThermoCopy = tagWebGpuBufferDevice(createSequenceBuffer({
+        label: 'ulg-mls-mpm-fused-sequence-exact-terminal-thermo',
+        size: sphParticleUpload.thermoBufferByteLength,
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+      }), device);
+      encoder.copyBufferToBuffer(currentThermoBuffer, 0, exactTerminalThermoCopy, 0,
+        sphParticleUpload.thermoBufferByteLength);
+      currentThermoBuffer = exactTerminalThermoCopy;
+      finalThermoBuffer = exactTerminalThermoCopy;
+    }
+    if (exactSequence) {
+      validateExactSequenceSource(exactSequence);
+      Object.assign(exactSequence, { stateBuffer: currentStateBuffer, thermoBuffer: currentThermoBuffer,
+        mechanicsBuffer: currentMechanicsBuffer });
+      markSphExactMassDerivedBuffers(exactSequence.sourceRead, [currentStateBuffer, currentThermoBuffer]);
+    }
     gpuTimestampProfiler.resolve(encoder);
     submitCurrentSequenceEncoder(currentSubmissionStepCount);
     if (
@@ -15678,6 +15877,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       schroederActiveNodeFilter: null,
       schroederActiveNodeFilterEnabled: false
     };
+    if (exactSequence) {
+      guardExactSequenceOutput(exactSequence, [g2pReconstruction, g2pReconstruction.gpuResult],
+        { state: finalStateBuffer, mechanics: finalMechanicsBuffer });
+      if (finalThermalStep) guardExactSequenceOutput(exactSequence, [finalThermalStep],
+        { state: finalThermalStep.stateBuffer, thermo: finalThermalStep.thermoBuffer });
+      if (finalMechanicsRefreshStep) guardExactSequenceOutput(exactSequence, [finalMechanicsRefreshStep],
+        { mechanics: finalMechanicsRefreshStep.mechanicsBuffer });
+    }
     const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
     const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
     const finalSourceStep = sourceStep + count - 1;
@@ -15906,6 +16113,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     };
+    if (exactTerminalThermoCopy) finalSourceSphParticleUpload.thermoBuffer = exactTerminalThermoCopy;
     const finalStep = await residentStepEnvelope({
       sphParticleState: finalSourceSphParticleState,
       mlsMpmParticleState: finalSourceMlsMpmParticleState,
@@ -16194,6 +16402,20 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         : null
     );
     submittedCleanupRegistered = true;
+    if (exactSequence) {
+      validateExactSequenceSource(exactSequence);
+      const next = finalStep.nextParticleUploads;
+      if (exactTerminalThermoCopy) next.sphParticleUpload.ownsThermoBuffer = true;
+      Object.assign(exactSequence, { nextParticleUploads: next,
+        targetSph: next.sphParticleUpload, targetMls: next.mlsMpmParticleUpload,
+        targetSphFields: snapshotSequenceFields(next.sphParticleUpload,
+          [...sequenceMlsKeys.filter(key => key !== 'mechanicsBuffer'), 'stateBuffer', 'thermoBuffer', 'identityBuffer', 'identityRevision']),
+        targetMlsFields: snapshotSequenceFields(next.mlsMpmParticleUpload, sequenceMlsKeys), bindingOpen: true });
+      exactSequence.terminalBuffers = new Set([exactSequence.stateBuffer, exactSequence.thermoBuffer, exactSequence.mechanicsBuffer]);
+      exactMassSequenceTerminals.set(finalStep, exactSequence);
+      await bindSphExactMassFusedSequenceContinuation(finalStep);
+      exactSequence.bindingOpen = false;
+    }
     if (pendingDispersedMediumOpticsProducer) {
       const targetSphUpload =
         finalStep.nextParticleUploads?.sphParticleUpload ?? null;
@@ -16307,8 +16529,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         throw error;
       }
     }
-    finalStep.fusedResidentSequence.submittedCleanupOwnership =
-      submittedCleanup.ownership;
+    finalStep.fusedResidentSequence.submittedCleanupOwnership = exactSequence
+      ? 'exact-source-confirmed-fence'
+      : submittedCleanup.ownership;
     finalStep.fusedResidentSequence.submittedCleanupRegistrationCount = 1;
     // Attached rather than threaded through residentStepEnvelope: the envelope
     // has a wide signature already, and this is diagnostic evidence rather than
@@ -16321,7 +16544,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     returned = true;
     return finalStep;
   } finally {
-    if (!returned) {
+    if (!returned && !exactSequence) {
       reactionActivationObservationProposal?.destroy?.();
       const failureSeparationTransientBuffers = new Set([
         ...submittedSeparationTransientBuffers,
@@ -33719,6 +33942,8 @@ function transferMaterialPropertyBankAuxiliaryOwnership({
   targetSphUpload,
   targetMlsMpmUpload
 }) {
+  const exactOwnership = sphGpuParticleUploadAdvertisesExactMass(sourceSphUpload)
+    || sphGpuParticleUploadAdvertisesExactMass(targetSphUpload);
   const descriptorPairs = [
     [sourceSphUpload, targetSphUpload],
     [sourceMlsMpmUpload, targetMlsMpmUpload]
@@ -33732,6 +33957,12 @@ function transferMaterialPropertyBankAuxiliaryOwnership({
       );
     }
     for (const fields of MATERIAL_PROPERTY_BANK_AUXILIARY_FIELDS) {
+      if (exactOwnership) for (const object of [source, target]) for (const key of [fields.buffer, fields.rowCount, fields.owns]) {
+        const descriptor = Object.getOwnPropertyDescriptor(object, key);
+        if (descriptor && !Object.hasOwn(descriptor, 'value')) {
+          throw new TypeError('Material-property auxiliary ownership requires data properties');
+        }
+      }
       const sourceBuffer = source[fields.buffer] ?? null;
       if (
         target[fields.buffer] !== sourceBuffer
@@ -33752,14 +33983,17 @@ function transferMaterialPropertyBankAuxiliaryOwnership({
     }
   }
   if (
-    mutations.some(({ source, target, owned }) => (
-      owned && (Object.isFrozen(source) || Object.isFrozen(target))
-    ))
+    mutations.some(({ source, target, owned, fields }) => owned && [source, target].some(object => {
+      if (!exactOwnership) return Object.isFrozen(object);
+      const descriptor = Object.getOwnPropertyDescriptor(object, fields.owns);
+      return descriptor ? descriptor.writable !== true : !Object.isExtensible(object);
+    }))
   ) {
     throw new TypeError(
       'Material-property auxiliary ownership transfer requires mutable owner descriptors'
     );
   }
+  const mechanicsRetirementTransfer = transferMlsMpmGpuAuxiliaryRetirementOwnership(sourceMlsMpmUpload, targetMlsMpmUpload);
   const applied = [];
   let rolledBack = false;
   const rollback = () => {
@@ -33768,6 +34002,7 @@ function transferMaterialPropertyBankAuxiliaryOwnership({
       mutation.source[mutation.fields.owns] = mutation.sourceOwned;
       mutation.target[mutation.fields.owns] = mutation.targetOwned;
     }
+    mechanicsRetirementTransfer?.rollback();
     rolledBack = true;
     return true;
   };
@@ -39287,8 +39522,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     )) return;
     destroySphUploadComponentsUnlessPreserved(upload);
   };
-  const destroyMlsUploadUnlessPreserved = (upload) => {
-    if (!upload) return;
+  const destroyMlsUploadComponentsUnlessPreserved = (upload) => {
     if (upload.ownsMechanicsBuffer !== false) {
       destroyUnlessPreserved(upload.mechanicsBuffer);
     }
@@ -39298,6 +39532,13 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     if (upload.ownsMaterialPropertyBankParticleSizeBuffer !== false) {
       destroyUnlessPreserved(upload.materialPropertyBankParticleSizeBuffer);
     }
+  };
+  const destroyMlsUploadUnlessPreserved = (upload) => {
+    if (!upload) return;
+    if (!preserved.has(upload.mechanicsBuffer)
+        && runMlsMpmGpuParticleBufferSetCleanupAfterBorrows(upload,
+          physical => destroyMlsUploadComponentsUnlessPreserved(physical))) return;
+    destroyMlsUploadComponentsUnlessPreserved(upload);
   };
   const materializedContinuation = retainedSchroederParticleStorageMaterializationBuffers(
     step?.schroederParticleStorageMaterialization

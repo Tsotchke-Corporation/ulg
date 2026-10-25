@@ -3544,6 +3544,29 @@ export function createSphThermalStepWebGpuEncoderStage(args = {}) {
   return createSphThermalStepWebGpuEncoderStageImpl(args);
 }
 
+/** Only a real, currently encoding fused substep may admit exact inputs. */
+export async function createSphThermalStepExactSequenceWebGpuEncoderStage(args, token) {
+  args = { ...args };
+  const { claimMlsMpmFusedSequenceExactThermalInput } = await import('./sphMlsMpmGpuStep.js');
+  const capture = claimMlsMpmFusedSequenceExactThermalInput(token, args);
+  if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE) {
+    throw new TypeError('Exact sequence thermal encoding requires retained GPU outputs');
+  }
+  const stage = createSphThermalStepWebGpuEncoderStageImpl(args, capture);
+  try {
+    markSphExactMassDerivedBuffers(capture.sourceRead, [stage.stateBuffer, stage.thermoBuffer]);
+    const encode = stage.encode;
+    stage.encode = encoder => {
+      capture.validateEncoder(encoder);
+      return encode(encoder);
+    };
+    return stage;
+  } catch (error) {
+    stage.cleanupAbortedWork();
+    throw error;
+  }
+}
+
 function createSphThermalStepWebGpuEncoderStageImpl({
   device,
   sphParticleState,

@@ -129,6 +129,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       let spatialContinuation = null;
       let fusedContinuation = null;
       let fusedSpatialContinuation = null;
+      const sequenceContinuations = [];
       device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       for (const type of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(type);
       try {
@@ -333,6 +334,9 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
           spatialContinuation = await fixture.runExactMassContinuationNative(device, format, true);
           fusedContinuation = await fixture.runExactMassContinuationNative(device, format, false, true);
           fusedSpatialContinuation = await fixture.runExactMassContinuationNative(device, format, true, true, observeAuthority);
+          for (const thermal of [false, true]) for (const count of [2, 3]) {
+            sequenceContinuations.push(await fixture.runExactMassContinuationNative(device, format, false, false, false, { count, thermal }));
+          }
         } finally {
           await Promise.all(reads.map(read => owner.releaseSphExactMassRead(read)));
           families.forEach(family => owner.releaseSphExactMassInventory(family));
@@ -346,7 +350,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         device.destroy();
       }
       return { results, transfers, coldOwnership, continuation, spatialContinuation,
-        fusedContinuation, fusedSpatialContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
+        fusedContinuation, fusedSpatialContinuation, sequenceContinuations, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
       formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
@@ -471,6 +475,25 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
       }
     }
     evidence.twoStepFusedContinuationsPassed = true;
+    assert.equal(evidence.result.sequenceContinuations.length, 4);
+    for (const sequence of evidence.result.sequenceContinuations) {
+      let previousState = sequence.initialState, previousThermo = sequence.initialThermo;
+      assert.equal(sequence.runs.length, 2);
+      for (const run of sequence.runs) {
+        assert.equal(run.fusedResidentSequence, true);
+        assert.deepEqual(run.exact, Array.from(encodeSphExactMass(sequence.mass, format)));
+        assert.equal(run.backend, 'webgpu');
+        assert.equal(run.physicsTick, run.cycle * sequence.sequence.count);
+        assert.equal(run.positionEpoch, run.cycle);
+        assert.equal(run.storageGeneration, run.cycle + 1);
+        assert.ok(run.state[0] > previousState[0], 'actual K-step motion');
+        if (sequence.sequence.thermal) assert.ok(run.thermo[2] > previousThermo[2], 'actual K-step heating');
+        else assert.deepEqual(run.thermo, sequence.initialThermo, 'cold terminal copy retains the original thermo rows');
+        previousState = run.state; previousThermo = run.thermo;
+      }
+      assert.equal(sequence.successorUsableAfterOriginalRetirement, true);
+    }
+    evidence.fusedSequenceContinuationsPassed = true;
   } catch (error) { failure ??= error; evidence.failure = String(error.stack || error); }
   finally {
     clearTimeout(watchdog);

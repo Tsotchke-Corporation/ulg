@@ -28,7 +28,7 @@ export async function preloadExactMassContinuationNative() {
   return { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial };
 }
 
-export async function runExactMassContinuationNative(device, format, useSpatial = false, useFused = false, observeAuthority = false) {
+export async function runExactMassContinuationNative(device, format, useSpatial = false, useFused = false, observeAuthority = false, sequence = null) {
   const { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial } = await preloadExactMassContinuationNative();
   const materialProperties = { fe: materials.createReferenceMaterialClosures().fe.properties };
   const mass = 0.001 * (1 + 2 ** -30);
@@ -57,7 +57,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
     } finally { copy.destroy(); }
   };
   const result = { initialState: Array.from(packed.state), initialThermo: Array.from(packed.thermo),
-    mass, runs: [], fullG2Acceptance: false, spatialPublicationAdmitted: useSpatial, fusedMechanicsRequested: useFused };
+    mass, runs: [], fullG2Acceptance: false, spatialPublicationAdmitted: useSpatial, fusedMechanicsRequested: useFused, sequence };
   let previousStep = null;
   let sourceFamily = null, sourceLease = null, successorAssignment = null;
   try {
@@ -71,6 +71,12 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         preferWebGpu: true, readbackMode: 'no-full-readback', contactSolverEnabled: useSpatial,
         observeCanonicalSpatialAuthority: observeAuthority,
         gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null, fuseNoFullResidentMechanics: useFused };
+      if (sequence?.thermal) options.thermalStepOptions.wallRate = 26;
+      if (sequence && !sequence.thermal) {
+        delete options.thermalMaterialTable;
+        delete options.mechanicsMaterialTable;
+        delete options.thermalStepOptions;
+      }
       if (sourceFamily) sourceLease = spatial.acquireSchroederSpatialSuccessorSourceFamilyLease(sourceFamily, { device });
       const execution = useSpatial ? await hierarchy.runSchroederSameLevelMechanicsWebGpu({
         device, sphParticleState: packed, mlsMpmParticleState: packedMls,
@@ -84,8 +90,15 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         enableLawQueue: false, enableLawNeighborCandidates: false,
         enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
         residentStepOptions: options }) : null;
-      const step = execution?.residentStep ?? await steps.runMlsMpmResidentStepWithOptionalWebGpu(options);
-      if (step.stageTiming.fusedResidentMechanics !== useFused) throw new Error('Actual mechanics route differs from requested fused execution');
+      const step = sequence
+        ? (await steps.runMlsMpmResidentStepsWithOptionalWebGpu({ ...options,
+          stepCount: sequence.count, fuseNoFullResidentMechanicsSequence: true, compactSummaryMode: 'none' })).finalStep
+        : execution?.residentStep ?? await steps.runMlsMpmResidentStepWithOptionalWebGpu(options);
+      if (sequence) {
+        if (step.stageTiming.fusedResidentSequence !== true || step.fusedResidentSequence.stepCount !== sequence.count) {
+          throw new Error('Actual fused K-step sequence was not selected');
+        }
+      } else if (step.stageTiming.fusedResidentMechanics !== useFused) throw new Error('Actual mechanics route differs from requested fused execution');
       const next = step.nextParticleUploads;
       if (!next || next.sphParticleUpload.exactMassInventory !== family) throw new Error('Exact inventory did not reach the actual step continuation');
       const nextFamily = next.schroederSpatialSuccessorSourceFamily ?? null;
@@ -123,7 +136,8 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
           } finally { capture.release(); }
         }
         result.runs.push({ cycle, backend: step.backend, fusedResidentMechanics: step.stageTiming.fusedResidentMechanics,
-          fieldEvidence,
+          fieldEvidence, fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? false,
+          physicsTick: next.sphParticleUpload.physicsTick, positionEpoch: next.sphParticleUpload.positionEpoch,
           exact: await observe(held.read.buffer, true),
           state: await observe(next.sphParticleUpload.stateBuffer), thermo: await observe(next.sphParticleUpload.thermoBuffer),
           g2pState: await observe(step.g2pReconstruction.gpuResult.stateBuffer),

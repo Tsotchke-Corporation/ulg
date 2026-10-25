@@ -60,14 +60,15 @@ permit subnormal flushing, including intermediate bit reinterpretations.
 These are **mass-only numeric candidates**. They do not authorize a physical
 interval, material/phase conversion, coupled momentum/energy, preset enrollment,
 or outer publication. No default preset enrolls this family yet; the explicitly initialized standard
-and single-step fused solvers can preserve it through the authenticated continuation below. The current
+and single-step/multi-step fused solvers can preserve it through the authenticated continuation below. The current
 gather costs `O(rows * edges)` and needs physical cell batching before large
 live enrollment. A numerical owner is not a replacement source-authority layer.
 
 ## Consumer integration map
 
-Cold carrier ownership, standard and single-step fused G2P/thermal/refresh
-continuation, and single-level SS publication/next-generation continuation are implemented.
+Cold carrier ownership, standard and fused G2P/thermal/refresh continuation,
+dense multi-step fused terminal ownership, and single-level SS publication/next-generation
+continuation are implemented.
 The remaining integrations below are still pending. Preserve the existing current-gas source
 and outer-publication machinery; extend its actual owned families.
 
@@ -76,7 +77,7 @@ and outer-publication machinery; extend its actual owned families.
 | Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initial exact mass, private owner and full SPH/MLS epoch initialization implemented. Complete mass/mole/volume projections remain pending. |
 | Product history | `sphResidentProductHistoryGpu.js`, H[3]/H[12]/H[13] and H[9] | Bind exact placed/unplaced partitions to live row membership, generation and count ownership. |
 | Aerosol | `sphAerosolParcelGpu.js`, parcel word 3 | Bind exact mass to family lifetime; retain separate dry-core and condensed-water components for nuclei. |
-| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard and single-step fused dense/canonical preserving continuation implemented, including shared identity lifetime and predecessor retirement. Fused multi-step sequences, two-level branches and carrier topology changes remain pending. |
+| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard and single-step fused dense/canonical preserving continuation implemented, including shared identity lifetime and predecessor retirement. Dense fused multi-step terminal ownership is implemented with an owned cold thermo copy or genuine final thermal/refresh outputs. Two-level branches and carrier topology changes remain pending. |
 | Current closure | `sphMlsMpmPostMechanicsClosure.js` retained stages and final tuple | Genuine G2P plus existing thermal/refresh seals authenticate the preserving S/T/M chain and original continuation claim. Product history and mass-changing stages remain pending. |
 | Publication | `schroederSpatialSuccessorSourceFamily.js` | Existing transaction/closure/preparation/commit records now authenticate one exact preserving successor, sealed after final epochs and activated only in the original publication window. Existing SS leases retain the physical read through retirement. |
 | Vapor/aerosol exchange | `sphVaporAerosolExchange*`, `sphSpatialGasLedgerEosGpu.js` | Use one executed integer packet, with complete mass/energy/momentum coupling and refreshed successor volume/EOS. |
@@ -113,7 +114,7 @@ CPU tests separately cover original-record authentication, shared identity
 lifetime, successive owners and failure cleanup. No injected producer substitutes
 for the native sequence.
 
-Migration guards still reject fused multi-step/two-level entry, phase transfer,
+Migration guards still reject unintegrated two-level entry, phase transfer,
 materialization, reaction/placement, extraction, product history, gas-pressure
 coupling and compaction when an exact source is supplied. Direct raw-buffer
 thermal entry and CPU fallback also reject. Real presets remain unchanged.
@@ -136,10 +137,26 @@ Native follow-up proves two moving/heating SS steps with final epoch agreement,
 exact mass words, predecessor retirement and final held-lease retirement.
 Evidence: `/home/cos/.cache/icc/repos/ulg/g2-ss-exact-20261025-0guXN6/`.
 
-Next integrate the fused/two-level physical continuation, product residuals,
+Next integrate the two-level physical continuation, product residuals,
 aerosol and all mass-changing consumers through their existing owners.
 Product exact inventory is the **unplaced residual**, not historical total plus
 placed plus unplaced (which double-counts).
+
+The actual dense fused sequence now carries exact inventory across K real
+mechanics substeps and optional thermal/refresh stages. Private one-use thermal
+capabilities bind actual encoders and inputs; terminal ownership binds the
+selected outputs after cleanup registration. Genuine cold and continuation MLS
+owners support paired physical reads, with shared terminal retirement and safe
+auxiliary ownership transfer. The cold terminal owns a GPU thermo copy, so
+predecessor retirement does not leave a dangling allocation. Source epochs must
+match at a complete tick; canonical immutable-generation restrictions remain.
+
+Native evidence in
+`/home/cos/.cache/icc/repos/ulg/g2-fused-sequence-20261025-8oFazV/native-final.json`
+adds eight cold/heated batches with K=2/3 (20 real substeps) to the previous
+single-step matrix. Every exact word, motion/heating and terminal epoch delta
+passes after predecessor retirement. This does not prove complete low-part
+mechanics/thermal coupling, mass-changing consumers or preset enrollment.
 
 ## Implementation order and acceptance
 

@@ -5,6 +5,9 @@ import * as steps from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import * as thermal from '../src/runtime/sph/sphThermalGpuKernel.js';
 import * as mechanics from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import * as closure from '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js';
+import * as hierarchy from '../src/runtime/sph/schroederHierarchyGpu.js';
+import * as spatial from '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js';
+import { validateSchroederSpatialEpochTransactionCommit } from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
 import { acquireMlsMpmG2pExactMassCapture } from '../src/runtime/sph/sphG2pGpuKernel.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
@@ -251,6 +254,156 @@ function advance(f, step) {
     sphUpload: step.nextParticleUploads.sphParticleUpload,
     mlsUpload: step.nextParticleUploads.mlsMpmParticleUpload };
 }
+
+function runSpatial(f, extra = {}) {
+  return hierarchy.runSchroederSameLevelMechanicsWebGpu({ device: f.device,
+    sphParticleState: f.packed, mlsMpmParticleState: f.packedMls,
+    sphParticleUpload: f.sphUpload, mlsMpmParticleUpload: f.mlsUpload,
+    selectedLevel: 0, minLevel: 0, maxLevel: 0, baseGridSpacingM: .5,
+    boxDimsM: [2, 2, 2], dt: .001, gravityMPerS2: [0, 0, 0],
+    enableTwoLevelMechanics: false, enableCrossLevelCoupling: false,
+    enableLawQueue: false, enableLawNeighborCandidates: false,
+    enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
+    residentStepOptions: { thermalMaterialTable: f.thermalTable,
+      mechanicsMaterialTable: f.mechanicsTable, thermalStepOptions: { conductionRate: 0 },
+      gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null }, ...extra });
+}
+
+test('spatial continuation admits only the genuine publication and its final epochs', async () => {
+  const f = fixture(); let step, family, commitReceipt;
+  try {
+    const result = await runSpatial(f, { async successorLevelAssignmentRunner(args) {
+      const assignment = await hierarchy.runSchroederLevelAssignmentWebGpu(args);
+      buffers.destroySphGpuParticleBuffers(f.sphUpload);
+      assert.notEqual(f.sphUpload.destroyed, true, 'existing transaction and producer reads pin the retiring source');
+      return assignment;
+    }, spatialSuccessorPublicationRunner(plan, inputs) {
+      commitReceipt = inputs.commitReceipt;
+      return spatial.publishPreparedSchroederSpatialSuccessorSourceFamily(plan, inputs);
+    } });
+    step = result.residentStep;
+    assert.equal(f.packedMls.gridCflFactor, 0);
+    assert.equal(step.gridUpdate.cflFactor, .6, 'unspecified packed CFL uses the actual resident default');
+    const next = step.nextParticleUploads;
+    family = next.schroederSpatialSuccessorSourceFamily;
+    assert.ok(family);
+    const producer = acquireMlsMpmG2pExactMassCapture(step.g2pReconstruction.gpuResult,
+      { device: f.device, sphParticleUpload: f.sphUpload });
+    try {
+      const validates = nextParticleUploads => validateSchroederSpatialEpochTransactionCommit(
+        producer.transaction, commitReceipt, { nextParticleUploads, expectedGeneration: producer.generation });
+      assert.equal(validates(next), true);
+      assert.equal(validates({ ...next }), false);
+      const originalSph = next.sphParticleUpload, originalMls = next.mlsMpmParticleUpload;
+      try {
+        next.sphParticleUpload = { ...originalSph };
+        assert.equal(validates(next), false);
+        next.sphParticleUpload = originalSph;
+        next.mlsMpmParticleUpload = { ...originalMls };
+        assert.equal(validates(next), false);
+      } finally { next.sphParticleUpload = originalSph; next.mlsMpmParticleUpload = originalMls; }
+    } finally { producer.release(); }
+    assert.equal(next.sphParticleUpload.exactMassInventory, f.sphUpload.exactMassInventory);
+    const read = buffers.acquireSphParticleExactMassRead(next.sphParticleUpload, f.device);
+    await buffers.releaseSphParticleExactMassRead(read);
+    for (const key of ['storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch',
+      'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch']) {
+      assert.equal(next.sphParticleUpload[key], family[key]);
+      assert.equal(next.mlsMpmParticleUpload[key], family[key]);
+    }
+    assert.throws(() => spatial.resolveSchroederSpatialSuccessorSourceFamily(family, {
+      device: f.device, sphParticleUpload: { ...next.sphParticleUpload },
+      mlsMpmParticleUpload: next.mlsMpmParticleUpload }), /successor|exact/i);
+    assert.throws(() => buffers.activateSphExactMassSpatialContinuation({ plan: {},
+      commitReceipt: {}, nextParticleUploads: next }), /genuine SS publication/);
+    await assert.rejects(buffers.bindSphExactMassPostMechanicsContinuation({
+      closure: step.exactMassPostMechanicsClosure,
+      claim: closure.claimMlsMpmPostMechanicsContinuation(step.exactMassPostMechanicsClosure, { nextParticleUploads: next }),
+      nextParticleUploads: next, spatialPublicationPlan: {} }), /replaced/);
+  } finally {
+    if (family) await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family, { device: f.device });
+    await retire(f, step);
+  }
+});
+
+test('an exception after genuine spatial publication retains the published exact owner for recovery', async () => {
+  const f = fixture(); let witness;
+  try {
+    await assert.rejects(runSpatial(f, { spatialSuccessorPublicationRunner(plan, inputs) {
+      assert.equal(spatial.publishPreparedSchroederSpatialSuccessorSourceFamily(plan, inputs).published, true);
+      throw new Error('failure after real publication');
+    } }), error => {
+      assert.match(error.message, /failure after real publication/);
+      witness = error.schroederSpatialSuccessorPublicationWitness;
+      assert.ok(witness); return true;
+    });
+    const next = witness.nextParticleUploads;
+    spatial.resolveSchroederSpatialSuccessorSourceFamily(witness.sourceFamily, { device: f.device,
+      sphParticleUpload: next.sphParticleUpload, mlsMpmParticleUpload: next.mlsMpmParticleUpload });
+    const held = buffers.acquireSphParticleExactMassRead(next.sphParticleUpload, f.device);
+    await buffers.releaseSphParticleExactMassRead(held);
+  } finally {
+    if (witness) {
+      await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(witness.sourceFamily, { device: f.device });
+      buffers.destroySphGpuParticleBuffers(witness.nextParticleUploads.sphParticleUpload);
+      buffers.destroyMlsMpmGpuParticleBuffers(witness.nextParticleUploads.mlsMpmParticleUpload);
+    }
+    await retire(f);
+  }
+});
+
+test('pending spatial owner rejects reads and copied commit publication retires it without stranding the source', async () => {
+  const f = fixture(); let target;
+  const originalRead = buffers.acquireSphParticleExactMassRead(f.sphUpload, f.device);
+  const numeric = originalRead.read.buffer;
+  await buffers.releaseSphParticleExactMassRead(originalRead);
+  try {
+    await assert.rejects(runSpatial(f, {
+      async successorLevelAssignmentRunner(args) {
+        target = args.sphParticleUpload;
+        return hierarchy.runSchroederLevelAssignmentWebGpu(args);
+      },
+      spatialSuccessorPublicationRunner(plan, { commitReceipt }) {
+        assert.ok(target.exactMassInventory);
+        assert.throws(() => buffers.acquireSphParticleExactMassRead(target, f.device), /original live upload/);
+        assert.equal(spatial.publishPreparedSchroederSpatialSuccessorSourceFamily({ ...plan }, { commitReceipt }).published, false);
+        return spatial.publishPreparedSchroederSpatialSuccessorSourceFamily(plan, { commitReceipt: { ...commitReceipt } });
+      }
+    }), /publication|successor/i);
+    await settle();
+    assert.throws(() => buffers.acquireSphParticleExactMassRead(target, f.device), /original live upload/);
+    assert.equal(f.sphUpload.__ulgActiveBorrowCount, 0, 'source producer and transaction reads drain');
+  } finally { await retire(f); }
+  assert.equal(numeric.destroyed, true);
+  assert.equal(f.sphUpload.identityBuffer.destroyed, true);
+});
+
+test('async retirement joins an exact physical read already released by synchronous SS retirement', async () => {
+  const f = fixture(); let step, family, releaseFence;
+  try {
+    step = (await runSpatial(f)).residentStep;
+    const next = step.nextParticleUploads;
+    family = next.schroederSpatialSuccessorSourceFamily;
+    steps.destroyMlsMpmResidentStepBuffers(step, { preserveBuffers: steps.retainedContinuationBuffersFromUploads(next) });
+    await settle();
+    const fence = new Promise(resolve => { releaseFence = resolve; });
+    f.device.queue.onSubmittedWorkDone = () => fence;
+    buffers.destroySphGpuParticleBuffers(next.sphParticleUpload);
+    spatial.retireSchroederSpatialSuccessorSourceFamily(family, { device: f.device });
+    let settled = false;
+    const completion = spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family, { device: f.device })
+      .then(() => { settled = true; });
+    await settle();
+    assert.equal(settled, false, 'SS retirement cannot finish before the exact held read');
+    assert.notEqual(next.sphParticleUpload.destroyed, true);
+    releaseFence(); await completion; await settle();
+    assert.equal(next.sphParticleUpload.destroyed, true);
+  } finally {
+    releaseFence?.();
+    if (family) await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family, { device: f.device });
+    await retire(f, step);
+  }
+});
 
 test('successor retirement cannot destroy identity pinned by an original physical read', async () => {
   const f = fixture(); const held = buffers.acquireSphParticleExactMassRead(f.sphUpload, f.device);

@@ -1,6 +1,7 @@
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
   acquireSphParticleExactMassRead, releaseSphParticleExactMassRead,
   validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
+import { acquireSchroederSpatialEpochExactMassRead } from './schroederSpatialEpochTransaction.js';
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
@@ -3661,6 +3662,8 @@ export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUp
   record.pins++;
   let released = false;
   return Object.freeze({ sourceRead: record.sourceRead,
+    sourceMlsUpload: record.sourceMlsUpload,
+    transaction: record.transaction, generation: record.generation, dt: record.dt,
     stateBuffer: record.stateBuffer, thermoBuffer: record.thermoBuffer,
     mechanicsBuffer: record.mechanicsBuffer, particleCount: record.sourceRead.particleCount,
     validate() {
@@ -3675,13 +3678,20 @@ export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUp
 }
 
 export async function runMlsMpmG2pWebGpu(args = {}) {
+  // Use the same captured inputs for dispatch and producer provenance across
+  // awaits; callers retain no mutable argument-envelope authority.
+  args = { ...args };
   const exact = sphGpuParticleUploadAdvertisesExactMass(args.sphParticleUpload);
   if (!exact) return runMlsMpmG2pWebGpuImpl(args);
   if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE
       || args.fusedFineSubstepTransaction || args.fusedCoarseTerminalTransaction) {
     throw new TypeError('G2P requires an authenticated exact-inventory continuation with retained, non-fused GPU outputs');
   }
-  const sourceRead = acquireSphParticleExactMassRead(args.sphParticleUpload, args.device);
+  const sourceRead = args.schroederSpatialEpochTransaction
+    ? acquireSchroederSpatialEpochExactMassRead(args.schroederSpatialEpochTransaction, {
+      device: args.device, generation: args.schroederSpatialEpochGeneration,
+      sphParticleUpload: args.sphParticleUpload, mlsMpmParticleUpload: args.mlsMpmParticleUpload })
+    : acquireSphParticleExactMassRead(args.sphParticleUpload, args.device);
   let result = null;
   try {
     if (args.sphParticleState?.particleCount !== sourceRead.particleCount
@@ -3692,6 +3702,9 @@ export async function runMlsMpmG2pWebGpu(args = {}) {
     }
     markSphExactMassDerivedBuffers(sourceRead, [result.stateBuffer]);
     const record = { device: args.device, sourceRead, sourceSphUpload: args.sphParticleUpload,
+      sourceMlsUpload: args.mlsMpmParticleUpload,
+      transaction: args.schroederSpatialEpochTransaction ?? null,
+      generation: args.schroederSpatialEpochGeneration ?? null, dt: result.dt,
       stateBuffer: result.stateBuffer, thermoBuffer: args.sphParticleUpload.thermoBuffer,
       mechanicsBuffer: result.mechanicsBuffer, pins: 0, retired: false, fields: [] };
     for (const key of ['destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']) {

@@ -130,7 +130,9 @@ export function resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, 
     throw new TypeError('Exact inventory requires the original claimed continuation');
   }
   const capture = validateCapturedExactMass(authority);
-  return Object.freeze({ sourceRead: capture.g2p.sourceRead });
+  return Object.freeze({ sourceRead: capture.g2p.sourceRead,
+    sourceMlsUpload: capture.g2p.sourceMlsUpload,
+    transaction: authority.transaction, generation: authority.generation });
 }
 
 function releaseExactMassCapture(capture) {
@@ -2138,6 +2140,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   if (massCapture) {
     const { acquireMlsMpmG2pExactMassCapture } = await import('./sphG2pGpuKernel.js');
     massCapture.g2p = acquireMlsMpmG2pExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload });
+    if (massCapture.g2p.transaction !== schroederSpatialEpochTransaction
+        || massCapture.g2p.generation !== schroederSpatialEpochGeneration
+        || massCapture.g2p.dt !== dtSeconds) {
+      throw new TypeError('Exact closure requires G2P from its original spatial transaction, generation and duration');
+    }
     if (postMechanicsParticleBuffers.stateBuffer !== massCapture.g2p.stateBuffer
         || postMechanicsParticleBuffers.mechanicsBuffer !== massCapture.g2p.mechanicsBuffer) {
       throw new TypeError('Exact closure input differs from its genuine G2P output');

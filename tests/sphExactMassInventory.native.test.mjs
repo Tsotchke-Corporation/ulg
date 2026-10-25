@@ -15,6 +15,8 @@ const sourcePaths = ['ulg-gpu-abi/src/sphExactMassInventory.js',
   'src/runtime/sph/sphExactMassInventoryGpu.js', 'src/runtime/sph/sphExactMassParticleSeed.js',
   'src/runtime/sph/sphGpuBuffers.js', 'tests/sphExactMassInventory.native.test.mjs'];
 sourcePaths.push('tests/fixtures/sphExactMassContinuationNative.js', 'src/runtime/sph/sphG2pGpuKernel.js',
+  'src/runtime/sph/schroederHierarchyGpu.js', 'src/runtime/sph/schroederSpatialEpochTransaction.js',
+  'src/runtime/sph/schroederSpatialSuccessorSourceFamily.js',
   'src/runtime/sph/sphMlsMpmGpuStep.js', 'src/runtime/sph/sphMlsMpmPostMechanicsClosure.js',
   'src/runtime/sph/sphThermalGpuKernel.js', 'src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
 
@@ -124,6 +126,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       const errors = [], results = [], transfers = [];
       let coldOwnership = null;
       let continuation = null;
+      let spatialContinuation = null;
       device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       for (const type of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(type);
       try {
@@ -325,6 +328,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
           }
           const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
           continuation = await fixture.runExactMassContinuationNative(device, format);
+          spatialContinuation = await fixture.runExactMassContinuationNative(device, format, true);
         } finally {
           await Promise.all(reads.map(read => owner.releaseSphExactMassRead(read)));
           families.forEach(family => owner.releaseSphExactMassInventory(family));
@@ -337,7 +341,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, coldOwnership, continuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
+      return { results, transfers, coldOwnership, continuation, spatialContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
       inputs: cases.map(fixture => [...fixture.input]) });
@@ -424,6 +428,20 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     assert.equal(continuation.successorUsableAfterOriginalRetirement, true);
     evidence.twoStepPreservingContinuationPassed = true;
+    const spatial = evidence.result.spatialContinuation;
+    assert.equal(spatial.runs.length, 2);
+    for (const run of spatial.runs) {
+      assert.deepEqual(run.exact, Array.from(encodeSphExactMass(spatial.mass, format)));
+      assert.ok(run.spatialFamilyStatus);
+      assert.ok(run.finalEpochs);
+      assert.ok(run.state[0] > spatial.initialState[0], 'actual SS G2P motion');
+      assert.notEqual(run.thermo[2], spatial.initialThermo[2], 'actual SS thermal change');
+    }
+    assert.equal(spatial.successorUsableAfterOriginalRetirement, true);
+    assert.equal(spatial.finalLeaseRetainedOwner, true);
+    assert.equal(spatial.finalOwnerRetired, true);
+    assert.deepEqual(spatial.exactAfterRetirementRequested, Array.from(encodeSphExactMass(spatial.mass, format)));
+    evidence.twoStepSpatialContinuationPassed = true;
   } catch (error) { failure ??= error; evidence.failure = String(error.stack || error); }
   finally {
     clearTimeout(watchdog);

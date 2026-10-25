@@ -66,19 +66,19 @@ live enrollment. A numerical owner is not a replacement source-authority layer.
 
 ## Consumer integration map
 
-Cold carrier ownership and the standard non-fused, mass-preserving
-G2P/thermal/refresh continuation are implemented. SS publication and the
-remaining integrations below are still pending. Preserve the existing current-gas source
+Cold carrier ownership, standard non-fused G2P/thermal/refresh continuation,
+and its single-level SS publication/next-generation continuation are implemented.
+The remaining integrations below are still pending. Preserve the existing current-gas source
 and outer-publication machinery; extend its actual owned families.
 
 | Path | Existing source/writer | Required exact-inventory integration |
 |---|---|---|
-| Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initial exact mass and private owner implemented. Shared SPH/MLS cold provenance and complete mass/mole/volume projections remain pending. |
+| Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initial exact mass, private owner and full SPH/MLS epoch initialization implemented. Complete mass/mole/volume projections remain pending. |
 | Product history | `sphResidentProductHistoryGpu.js`, H[3]/H[12]/H[13] and H[9] | Bind exact placed/unplaced partitions to live row membership, generation and count ownership. |
 | Aerosol | `sphAerosolParcelGpu.js`, parcel word 3 | Bind exact mass to family lifetime; retain separate dry-core and condensed-water components for nuclei. |
-| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard non-fused preserving continuation implemented, including shared identity lifetime and predecessor retirement. Canonical/fused branches and topology changes remain pending. |
+| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard and canonical single-level non-fused preserving continuation implemented, including shared identity lifetime and predecessor retirement. Fused/two-level branches and carrier topology changes remain pending. |
 | Current closure | `sphMlsMpmPostMechanicsClosure.js` retained stages and final tuple | Genuine G2P plus existing thermal/refresh seals authenticate the preserving S/T/M chain and original continuation claim. Product history and mass-changing stages remain pending. |
-| Publication | `schroederSpatialSuccessorSourceFamily.js` | Authenticate exact inventory and format in source comparisons and the one terminal successor commit. |
+| Publication | `schroederSpatialSuccessorSourceFamily.js` | Existing transaction/closure/preparation/commit records now authenticate one exact preserving successor, sealed after final epochs and activated only in the original publication window. Existing SS leases retain the physical read through retirement. |
 | Vapor/aerosol exchange | `sphVaporAerosolExchange*`, `sphSpatialGasLedgerEosGpu.js` | Use one executed integer packet, with complete mass/energy/momentum coupling and refreshed successor volume/EOS. |
 | EOS | `sphSpatialGasLedgerEosGpu.js` carrier entity count and residual-product mole scaling | Replace independently rounded mass/mole coordinates with common inventory/material projections. |
 | Occupancy | `schroederSpatialPhaseVolumeMomentWgsl.js`, `sphSpatialGasFreeVolumeWgsl.js` | Compute volume from complete successor inventory with matched generation and exact activity. |
@@ -112,17 +112,31 @@ CPU tests separately cover original-record authentication, shared identity
 lifetime, successive owners and failure cleanup. No injected producer substitutes
 for the native sequence.
 
-Migration guards still reject canonical/SS/fused entry, phase transfer,
+Migration guards still reject fused/two-level entry, phase transfer,
 materialization, reaction/placement, extraction, product history, gas-pressure
 coupling and compaction when an exact source is supplied. Direct raw-buffer
 thermal entry and CPU fallback also reject. Real presets remain unchanged.
 These guards are temporary migration boundaries, not all-consumer acceptance.
 
-Next extend the existing SS publication record and terminal commit. Its epoch
-stamping must agree with the private particle-owner snapshot, and exact reads
-must stay pinned through preparation, publication, source leases and retirement.
-Reuse the existing authority rather than adding a parallel source certificate.
-Then migrate product residuals, aerosol and all mass-changing consumers.
+The SS path uses the actual classifier, selected generation, mechanical contact
+and thermal proposals, G2P, refresh, commit and publication. It preserves the
+original continuation envelope and both upload objects. G2P provenance binds
+the actual transaction, generation and duration. Private weak predecessor
+identities preserve historical validation without retaining the ancestor chain.
+Prepared owners reject reads; copied plans, claims, receipts and descriptors
+reject. Pending failure drains ownership, while exceptions after authenticated
+publication preserve the published successor for recovery. Synchronous and
+lease-based SS retirement both join the physical read's queue fence.
+
+The first native SS run exposed an unspecified cold CFL sentinel being passed
+as an explicit zero, which stopped motion. The hierarchy now delegates that
+absence to the resident default; an explicitly supplied outer zero is unchanged.
+Native follow-up proves two moving/heating SS steps with final epoch agreement,
+exact mass words, predecessor retirement and final held-lease retirement.
+Evidence: `/home/cos/.cache/icc/repos/ulg/g2-ss-exact-20261025-0guXN6/`.
+
+Next integrate the fused/two-level physical continuation, product residuals,
+aerosol and all mass-changing consumers through their existing owners.
 Product exact inventory is the **unplaced residual**, not historical total plus
 placed plus unplaced (which double-counts).
 

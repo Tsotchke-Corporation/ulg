@@ -157,6 +157,14 @@ export function validateSphExactMassRead(read, { device, family, format, expecte
     return record.family === family && record.format === format && record.generation === expectedGeneration;
   } catch { return false; }
 }
+/** Existing readers may delegate their held inventory while retirement drains. */
+export function forkSphExactMassRead(read, { device, family = read?.family,
+  format = read?.format, expectedGeneration = read?.generation } = {}) {
+  if (!validateSphExactMassRead(read, { device, family, format, expectedGeneration })) {
+    throw new TypeError('Exact mass read fork requires its original live retained read');
+  }
+  return mintRead(liveRead(read, device));
+}
 export function releaseSphExactMassRead(read) {
   const held = READS.get(read);
   if (!held) throw new TypeError('Exact mass retirement requires the original read');

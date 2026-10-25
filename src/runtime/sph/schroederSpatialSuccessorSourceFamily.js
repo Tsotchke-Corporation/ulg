@@ -2,8 +2,13 @@ import {
   validateSchroederSpatialTopologyTransitionReceipt
 } from './schroederSpatialTopologyTransitionGpu.js';
 import {
-  validateSchroederSpatialEpochTransactionCommit
+  validateSchroederSpatialEpochTransactionCommit,
+  validateSchroederSpatialEpochTransactionSourceFamily
 } from './schroederSpatialEpochTransaction.js';
+import { sphGpuParticleUploadAdvertisesExactMass, bindSphExactMassPostMechanicsContinuation,
+  activateSphExactMassSpatialContinuation, abandonSphExactMassSpatialContinuation,
+  validateSphParticleExactMassRead, forkSphParticleExactMassRead,
+  releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
 import {
   admitSchroederPostClosureLevelAssignment,
   validateSchroederPostClosureLevelAssignment
@@ -1179,6 +1184,12 @@ function sourceFamilyLivenessSummary(sourceFamily, record) {
 }
 
 function destroyOwnedSuccessorLevelAssignment(record) {
+  if (!record.exactMassRetired) {
+    record.exactMassRetired = true;
+    if (record.exactMassRead) record.exactMassRetirementPromise = releaseSphParticleExactMassRead(record.exactMassRead);
+    else if (record.exactMassPlan) abandonSphExactMassSpatialContinuation(record.exactMassPlan, record.sphUpload);
+    record.exactMassPlan = null;
+  }
   retireSuccessorAerosol(record);
   if (
     record.ownsSuccessorLevelAssignment !== true
@@ -1218,6 +1229,33 @@ function requireActiveSourceFamily(record) {
   if (!successorAerosolReadLive(record)) {
     throw sourceFamilyError('successor aerosol owner is no longer live', 'AEROSOL_OWNER');
   }
+  if (!successorExactMassReadLive(record)) {
+    throw sourceFamilyError('successor exact particle inventory is no longer live', 'EXACT_MASS_OWNER');
+  }
+}
+
+function successorExactMassReadLive(record) {
+  return record.exactMassFamily == null || (!record.exactMassRetired
+    && validateSphParticleExactMassRead(record.exactMassRead,
+      { device: record.device, sourceSphUpload: record.sphUpload }));
+}
+
+/** A published source lease delegates its existing physical read, including
+ * while a requested retirement drains. It cannot reopen a fresh source. */
+export function acquireSchroederSpatialSuccessorExactMassRead({ device,
+  sphParticleUpload, mlsMpmParticleUpload, consumerLease = null } = {}) {
+  const family = sourceFamilyBySphUpload.get(sphParticleUpload);
+  if (!family) return null;
+  const record = sourceFamilyRecords.get(family);
+  resolveSchroederSpatialSuccessorSourceFamily(family, {
+    device, sphParticleUpload, mlsMpmParticleUpload, consumerLease });
+  if (!record.exactMassFamily) {
+    if (sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)) {
+      throw sourceFamilyError('published source acquired an unbound exact inventory', 'EXACT_MASS_OWNER');
+    }
+    return null;
+  }
+  return forkSphParticleExactMassRead(record.exactMassRead, { device, sourceSphUpload: sphParticleUpload });
 }
 
 function successorAerosolReadLive(record) {
@@ -1409,6 +1447,20 @@ function settleRequestedRetirement(sourceFamily, record) {
   record.active = false;
   record.retired = true;
   destroyOwnedSuccessorLevelAssignment(record);
+  if (record.exactMassRetirementPromise && !record.exactMassRetirementSettled) {
+    if (!record.exactMassRetirementWaiting) {
+      record.exactMassRetirementWaiting = true;
+      record.exactMassRetirementPromise.then(() => {
+        record.exactMassRetirementSettled = true;
+        settleRequestedRetirement(sourceFamily, record);
+      }, error => {
+        record.reason = normalizedReason(error, 'exact particle read retirement rejected');
+        record.resolveRetirement?.(retirementReceipt(sourceFamily, record,
+          'schroeder-successor-source-family-retirement-fence-rejected'));
+      });
+    }
+    return false;
+  }
   record.retirementSettled = true;
   record.resolveRetirement?.(retirementReceipt(
     sourceFamily,
@@ -1552,6 +1604,7 @@ const SPH_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS = Object.freeze([
   'identitySchema',
   'identityRequired',
   'aerosolFamily',
+  'exactMassInventory',
   'bufferFamilyGeneration',
   'bufferFamilyGenerationStatus'
 ]);
@@ -1613,7 +1666,7 @@ function successorUploadEnvelopePreserved(sourceFamily, record) {
   return sourceFamilyProductHistoryCommitGatePreserved(
     sourceFamily,
     record
-  ) && successorAerosolReadLive(record);
+  ) && successorAerosolReadLive(record) && successorExactMassReadLive(record);
 }
 
 function newSourceFamilyRecord({
@@ -1656,6 +1709,10 @@ function newSourceFamilyRecord({
     aerosolParcelRead: null,
     aerosolSharedOwner: null,
     aerosolRetired: false,
+    exactMassFamily: null,
+    exactMassRead: null,
+    exactMassPlan: null,
+    exactMassRetired: false,
     ownsSuccessorLevelAssignment:
       typeof successorLevelAssignment?.destroyAssignmentBuffer === 'function',
     successorLevelAssignmentRetirementScheduled: false,
@@ -1768,7 +1825,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     nextParticleUploads?.schroederSpatialReactionPlacementPositionEpochFloorReceipt
       ?? null,
   forcePositionAdvance = false,
-  componentOwnerStages = null
+  componentOwnerStages = null,
+  postMechanicsClosure = null
 } = {}) {
   const uploadFamily = validateSuccessorUploadFamily(nextParticleUploads);
   const {
@@ -1783,6 +1841,21 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     throw sourceFamilyError(
       'successor preflight requires exact transaction and source generation'
     );
+  }
+  let exactMassClosure = null;
+  if (transaction.sourceBuffers?.exactMassInventory != null || sphGpuParticleUploadAdvertisesExactMass(sphUpload)) {
+    const module = await import('./sphMlsMpmPostMechanicsClosure.js');
+    const claim = module.claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, { nextParticleUploads });
+    const capture = module.resolveMlsMpmPostMechanicsExactMassContinuation(postMechanicsClosure, claim, nextParticleUploads);
+    if (capture.transaction !== transaction || capture.generation !== generation
+        || capture.sourceRead.read.family !== transaction.sourceBuffers?.exactMassInventory
+        || !validateSchroederSpatialEpochTransactionSourceFamily(transaction, { generation,
+          sphParticleUpload: capture.sourceRead.sourceSphUpload,
+          mlsMpmParticleUpload: capture.sourceMlsUpload })) {
+      throw sourceFamilyError('exact publication requires its genuine transaction and closure source', 'EXACT_MASS_OWNER');
+    }
+    exactMassClosure = { closure: postMechanicsClosure, claim,
+      validateClaim: module.validateMlsMpmPostMechanicsContinuationClaim };
   }
   assertSphAerosolSpatialContinuation({ device, transaction, generation,
     sourceFamily: transaction.sourceBuffers?.aerosolFamily ?? null,
@@ -2104,6 +2177,7 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     particleCount,
     sourceEpochIdentity,
     successorEpochIdentity,
+    exactMassInventory: transaction.sourceBuffers?.exactMassInventory ?? null,
     ...successorEpochIdentity,
     ...strides,
     sourceTopologyEpoch: topologyAuthority.sourceTopologyEpoch,
@@ -2182,11 +2256,58 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     successorLevelAssignmentSeal,
     productHistoryCommitGate,
     sourceFamilyRecord,
+    exactMassClosure,
+    exactMassPrepared: false,
+    exactMassPublicationWindow: false,
     aerosolPublicationWindow: false,
     attempted: false
   });
   preparedSuccessorPublicationPlans.add(plan);
+  if (exactMassClosure) {
+    const prepared = successorPublicationPlanRecords.get(plan);
+    sourceFamilyRecord.exactMassPlan = plan;
+    try {
+      sourceFamilyRecord.exactMassFamily = await bindSphExactMassPostMechanicsContinuation({
+        ...exactMassClosure, nextParticleUploads, spatialPublicationPlan: plan });
+      sourceFamilyRecord.uploadEnvelope = snapshotSuccessorUploadEnvelope(sphUpload, mlsUpload);
+      prepared.exactMassPrepared = true;
+    } catch (error) {
+      abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(plan, { reason: error });
+      throw error;
+    }
+  }
   return plan;
+}
+
+export function validateSchroederSpatialExactMassPreparation(plan, { closure, claim,
+  nextParticleUploads, transaction, generation } = {}) {
+  const prepared = successorPublicationPlanRecords.get(plan);
+  return Boolean(prepared && !prepared.attempted && preparedSuccessorPublicationPlans.has(plan)
+    && prepared.transaction === transaction && prepared.generation === generation
+    && prepared.nextParticleUploads === nextParticleUploads
+    && prepared.exactMassClosure?.closure === closure && prepared.exactMassClosure?.claim === claim
+    && prepared.exactMassClosure.validateClaim(closure, claim, { nextParticleUploads })
+    && preparedUploadFamilyPreserved(nextParticleUploads, prepared.sourceFamily,
+      prepared.sourceFamilyRecord.buffers, prepared.successorLevelAssignment, prepared.productHistoryCommitGate));
+}
+
+export function validateSchroederSpatialExactMassCommitPlan(plan, { transaction, generation, nextParticleUploads } = {}) {
+  const prepared = successorPublicationPlanRecords.get(plan);
+  return Boolean(prepared?.exactMassPrepared && validateSchroederSpatialExactMassPreparation(plan, {
+    ...prepared.exactMassClosure, transaction, generation, nextParticleUploads }));
+}
+
+export function validateSchroederSpatialExactMassPublicationWindow(plan, { commitReceipt, nextParticleUploads } = {}) {
+  const prepared = successorPublicationPlanRecords.get(plan);
+  return Boolean(prepared?.exactMassPublicationWindow && prepared.exactMassPrepared
+    && prepared.nextParticleUploads === nextParticleUploads
+    && prepared.exactMassCommitReceipt === commitReceipt
+    && prepared.exactMassClosure?.validateClaim(prepared.exactMassClosure.closure,
+      prepared.exactMassClosure.claim, { nextParticleUploads })
+    && preparedUploadFamilyPreserved(nextParticleUploads, prepared.sourceFamily,
+      prepared.sourceFamilyRecord.buffers, prepared.successorLevelAssignment, prepared.productHistoryCommitGate)
+    && validateSchroederSpatialEpochTransactionCommit(prepared.transaction, commitReceipt,
+      { nextParticleUploads, expectedGeneration: prepared.generation }));
 }
 
 /** An instantaneous private publication window, never a caller-supplied
@@ -2429,6 +2550,15 @@ export function publishPreparedSchroederSpatialSuccessorSourceFamily(
         throw sourceFamilyError('paired aerosol publication rejected before activation', 'AEROSOL_TRANSITION');
       }
     }
+    if (sourceFamilyRecord.exactMassFamily) {
+      prepared.exactMassCommitReceipt = commitReceipt;
+      prepared.exactMassPublicationWindow = true;
+      try {
+        sourceFamilyRecord.exactMassRead = activateSphExactMassSpatialContinuation({ plan, commitReceipt, nextParticleUploads });
+      } finally { prepared.exactMassPublicationWindow = false; }
+      sourceFamilyRecord.exactMassPlan = null;
+      prepared.exactMassClosure = null;
+    }
     retainPublishedAerosol(sourceFamilyRecord);
     sourceFamilyRecord.commitReceipt = commitReceipt;
     sourceFamilyRecords.set(sourceFamily, sourceFamilyRecord);
@@ -2562,6 +2692,9 @@ export function createSchroederSpatialSuccessorSourceFamily({
 } = {}) {
   const sphUpload = nextParticleUploads?.sphParticleUpload ?? null;
   const mlsUpload = nextParticleUploads?.mlsMpmParticleUpload ?? null;
+  if (sphGpuParticleUploadAdvertisesExactMass(sphUpload) || transaction?.sourceBuffers?.exactMassInventory != null) {
+    throw sourceFamilyError('exact inventory requires prepared atomic publication', 'EXACT_MASS_OWNER');
+  }
   if (sphAerosolSourceFamily(sphUpload) != null
       || sphAerosolCondensateTransitionForUploads(nextParticleUploads) != null) {
     throw sourceFamilyError('aerosol continuation requires prepared paired-capable publication', 'AEROSOL_TRANSITION');
@@ -3066,7 +3199,7 @@ export function retireSchroederSpatialSuccessorSourceFamilyAfterLeases(
     ));
   }
   if (record.retired) {
-    return Promise.resolve(retirementReceipt(
+    return Promise.resolve(record.exactMassRetirementPromise).then(() => retirementReceipt(
       sourceFamily,
       record,
       'schroeder-successor-source-family-retired'

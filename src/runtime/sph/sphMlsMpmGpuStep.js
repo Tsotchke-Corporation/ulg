@@ -384,6 +384,7 @@ import {
 } from './schroederSpatialThermalProposalsGpu.js';
 import {
   SCHROEDER_SPATIAL_EPOCH_READER,
+  acquireSchroederSpatialEpochExactMassRead,
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE,
   admitSchroederSpatialEpochTransactionLateConsumer,
   admitSchroederSpatialEpochTransactionReader,
@@ -35694,7 +35695,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       || !thermalMaterialTable || !mechanicsMaterialTable || reactionTable || reactionActivationWatchTable
       || residentProductMass || condensateExtraction || sphParticleState?.phaseCarrierPlan || sphParticleUpload.phaseCarrierPlan
       || schroederParticleStorageMaterialization || schroederFarAggregateForceApplication
-      || schroederSpatialEpochGeneration || schroederSpatialEpochTransaction || canonicalSpatialRequired
+      || (Boolean(schroederSpatialEpochGeneration) !== Boolean(schroederSpatialEpochTransaction))
+      || (canonicalSpatialRequired && !schroederSpatialEpochTransaction)
       || gasPressureMechanicsBoundaryEnabled || particleGasLedgerActionable
       || fuseNoFullResidentMechanics || fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
       || p2gRunner || gridUpdateRunner || g2pRunner || p2gStageRunner || gridUpdateStageRunner || g2pStageRunner
@@ -35852,7 +35854,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   try {
     // Authenticate and pin before the first await, P2G or grid submission.
     // G2P's producer capture later owns a separate read for its own lifetime.
-    if (exactMassContinuation) exactMassSourceRead = acquireSphParticleExactMassRead(sphParticleUpload, device);
+    if (exactMassContinuation) exactMassSourceRead = schroederSpatialEpochTransaction
+      ? acquireSchroederSpatialEpochExactMassRead(schroederSpatialEpochTransaction, {
+        device, generation: schroederSpatialEpochGeneration, sphParticleUpload, mlsMpmParticleUpload })
+      : acquireSphParticleExactMassRead(sphParticleUpload, device);
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
         resolvedDeviceResult = await requestOpticalGpuDevice(navigatorRef, {
@@ -37570,9 +37575,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       nextParticleUploads: step.nextParticleUploads
     });
     if (exactMassContinuation) {
-      await bindSphExactMassPostMechanicsContinuation({ closure: postMechanicsClosure, claim,
-        nextParticleUploads: step.nextParticleUploads });
-      exactMassBoundUpload = step.nextParticleUploads.sphParticleUpload;
+      if (!schroederSpatialEpochTransaction) {
+        await bindSphExactMassPostMechanicsContinuation({ closure: postMechanicsClosure, claim,
+          nextParticleUploads: step.nextParticleUploads });
+        exactMassBoundUpload = step.nextParticleUploads.sphParticleUpload;
+      }
       Object.defineProperty(step, 'exactMassPostMechanicsClosure', { value: postMechanicsClosure });
     }
     Object.defineProperty(step, 'aerosolPostMechanicsClosure', {

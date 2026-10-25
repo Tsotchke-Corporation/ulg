@@ -5,6 +5,10 @@ import {
 import { captureSphAerosolSpatialGeneration,
   assertSphAerosolSpatialContinuation, releaseSphAerosolSpatialTransaction,
   sphAerosolSourceFamily, sphAerosolCondensateTransitionForUploads } from './sphAerosolSpatialBinding.js';
+import { sphGpuParticleUploadAdvertisesExactMass, acquireSphParticleExactMassRead,
+  validateSphParticleExactMassRead, forkSphParticleExactMassRead, releaseSphParticleExactMassRead,
+  validateSphExactMassSpatialCommit } from './sphGpuBuffers.js';
+import { acquireSchroederSpatialSuccessorExactMassRead } from './schroederSpatialSuccessorSourceFamily.js';
 import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_MATERIAL_INTERFACE_LOCAL_V1,
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_PRESSURE_CONTACT_V1,
@@ -296,6 +300,7 @@ function resolveSourceBuffers({
   mlsMpmParticleUpload
 }) {
   return Object.freeze({
+    exactMassInventory: sphParticleUpload?.exactMassInventory ?? null,
     aerosolFamily: sphAerosolSourceFamily(sphParticleUpload),
     stateBuffer: requireBuffer(
       sphParticleUpload?.stateBuffer,
@@ -337,7 +342,47 @@ function sourceBuffersMatch(expected, actual) {
     && expected.thermoBuffer === actual.thermoBuffer
     && expected.identityBuffer === actual.identityBuffer
     && expected.mechanicsBuffer === actual.mechanicsBuffer
-    && expected.aerosolFamily === actual.aerosolFamily;
+    && expected.aerosolFamily === actual.aerosolFamily
+    && expected.exactMassInventory === actual.exactMassInventory;
+}
+
+function exactMassSourceObjectsMatch(authority, sphUpload, mlsUpload) {
+  const identity = authority.exactMassSourceIdentity;
+  return identity == null || (identity.sphUpload.deref() === sphUpload
+    && identity.mlsUpload.deref() === mlsUpload);
+}
+
+function exactMassSourceLive(authority) {
+  const source = authority.exactMassSource;
+  return source == null || (!source.released && validateSphParticleExactMassRead(source.read, {
+    device: authority.device, sourceSphUpload: source.sphUpload })
+    && source.mlsFields.every(([key, value]) => source.mlsUpload[key] === value));
+}
+
+function releaseExactMassSource(authority) {
+  if (authority.exactMassSource && !authority.exactMassSource.released) {
+    authority.exactMassSource.released = true;
+    void releaseSphParticleExactMassRead(authority.exactMassSource.read);
+    authority.exactMassSource.read = null;
+    authority.exactMassSource.sphUpload = null;
+    authority.exactMassSource.mlsUpload = null;
+    authority.exactMassSource.mlsFields = null;
+  }
+}
+
+export function acquireSchroederSpatialEpochExactMassRead(transaction, {
+  device, generation, sphParticleUpload, mlsMpmParticleUpload
+} = {}) {
+  const authority = authorityFor(transaction);
+  if (authority.device !== device || authority.generation !== generation
+      || !authority.exactMassSource || authority.exactMassSource.released
+      || !validateSchroederSpatialEpochTransactionSourceFamily(transaction, {
+        generation, sphParticleUpload, mlsMpmParticleUpload })) {
+    throw transactionError('Exact inventory reader requires the original live transaction source',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_EXACT_MASS_SOURCE');
+  }
+  return forkSphParticleExactMassRead(authority.exactMassSource.read,
+    { device, sourceSphUpload: sphParticleUpload });
 }
 
 function runtimeOwnsSubmittedExecution(runtime, execution) {
@@ -524,7 +569,8 @@ export function validateSchroederSpatialEpochTransactionSourceFamily(
       sphParticleUpload,
       mlsMpmParticleUpload
     });
-    return sourceBuffersMatch(authority.sourceBuffers, sourceBuffers);
+    return sourceBuffersMatch(authority.sourceBuffers, sourceBuffers) && exactMassSourceLive(authority)
+      && exactMassSourceObjectsMatch(authority, sphParticleUpload, mlsMpmParticleUpload);
   } catch {
     return false;
   }
@@ -2882,9 +2928,22 @@ export function createSchroederSpatialEpochTransaction({
   });
   TRANSACTION_AUTHORITY.set(transaction, authority);
   try {
+    if (sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)) {
+      const read = acquireSchroederSpatialSuccessorExactMassRead({ device, sphParticleUpload,
+        mlsMpmParticleUpload, consumerLease: aerosolSourceFamilyConsumerLease })
+        ?? acquireSphParticleExactMassRead(sphParticleUpload, device);
+      authority.exactMassSourceIdentity = { sphUpload: new WeakRef(sphParticleUpload),
+        mlsUpload: new WeakRef(mlsMpmParticleUpload) };
+      authority.exactMassSource = { read, sphUpload: sphParticleUpload, mlsUpload: mlsMpmParticleUpload,
+        released: false, mlsFields: ['schema', 'sourceSchema', 'status', 'particleCount',
+          'mechanicsBuffer', 'mechanicsStrideBytes', 'mechanicsBufferByteLength',
+          'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch', 'topologyEpoch',
+          'chartEpoch', 'levelEpoch', 'supportEpoch'].map(key => [key, mlsMpmParticleUpload[key]]) };
+    }
     captureSphAerosolSpatialGeneration({ device, transaction, generation,
       sphParticleUpload, mlsMpmParticleUpload, aerosolSourceFamilyConsumerLease });
   } catch (error) {
+    releaseExactMassSource(authority);
     TRANSACTION_AUTHORITY.delete(transaction);
     throw error;
   }
@@ -3000,7 +3059,8 @@ function admitSchroederSpatialEpochTransactionReaderInternal(transaction, {
         : 'ERR_SCHROEDER_SPATIAL_EPOCH_STALE_READER'
     );
   }
-  if (!sourceBuffersMatch(authority.sourceBuffers, readerBuffers)) {
+  if (!sourceBuffersMatch(authority.sourceBuffers, readerBuffers) || !exactMassSourceLive(authority)
+      || !exactMassSourceObjectsMatch(authority, sphParticleUpload, mlsMpmParticleUpload)) {
     rejectReader(
       authority,
       `Spatial epoch reader ${readerId} did not bind the frozen x_n source family`,
@@ -3354,6 +3414,18 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
     sphParticleUpload: nextSphParticleUpload,
     mlsMpmParticleUpload: nextMlsMpmParticleUpload
   });
+  if (authority.exactMassSource || sphGpuParticleUploadAdvertisesExactMass(nextSphParticleUpload)) {
+    if (!authority.exactMassSource || !exactMassSourceLive(authority)
+        || nextSourceBuffers.exactMassInventory !== authority.sourceBuffers.exactMassInventory
+        || !validateSphExactMassSpatialCommit(nextSphParticleUpload, {
+          transaction, generation: authority.generation, nextParticleUploads })) {
+      throw transactionError('Exact inventory commit requires its prepared original physical continuation',
+        'ERR_SCHROEDER_SPATIAL_EPOCH_EXACT_MASS_COMMIT');
+    }
+    authority.exactMassCommitUploads = nextParticleUploads;
+    authority.exactMassCommitSphUpload = nextSphParticleUpload;
+    authority.exactMassCommitMlsUpload = nextMlsMpmParticleUpload;
+  }
   assertSphAerosolSpatialContinuation({ device: authority.device,
     transaction, generation: authority.generation,
     sourceFamily: authority.sourceBuffers.aerosolFamily,
@@ -3383,6 +3455,7 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
     nextThermoBuffer: nextSourceBuffers.thermoBuffer,
     nextIdentityBuffer: nextSourceBuffers.identityBuffer,
     nextMechanicsBuffer: nextSourceBuffers.mechanicsBuffer,
+    nextExactMassInventory: nextSourceBuffers.exactMassInventory,
     nextAerosolFamily: nextSourceBuffers.aerosolFamily,
     aerosolCondensateTransition: sphAerosolCondensateTransitionForUploads(nextParticleUploads)
   });
@@ -3438,12 +3511,19 @@ export function validateSchroederSpatialEpochTransactionCommit(
       && commitReceipt.nextThermoBuffer === nextSourceBuffers.thermoBuffer
       && commitReceipt.nextIdentityBuffer === nextSourceBuffers.identityBuffer
       && commitReceipt.nextMechanicsBuffer === nextSourceBuffers.mechanicsBuffer
+      && commitReceipt.nextExactMassInventory === nextSourceBuffers.exactMassInventory
+      && (!authority.exactMassSource || (
+        authority.exactMassCommitUploads === nextParticleUploads
+        && authority.exactMassCommitSphUpload === nextSphParticleUpload
+        && authority.exactMassCommitMlsUpload === nextMlsMpmParticleUpload))
       && commitReceipt.nextAerosolFamily === nextSourceBuffers.aerosolFamily
       && commitReceipt.aerosolCondensateTransition
         === sphAerosolCondensateTransitionForUploads(nextParticleUploads)
       && authority.counters.commitCount === 1
       && authority.counters.privateAdvanceCount === 0
       && sourceBuffersMatch(authority.sourceBuffers, expectedSourceBuffers)
+      && (sourceParticleUploads == null || exactMassSourceObjectsMatch(authority,
+        sourceParticleUploads.sphParticleUpload, sourceParticleUploads.mlsMpmParticleUpload))
     );
   } catch {
     return false;
@@ -3455,6 +3535,10 @@ export function advanceSchroederSpatialEpochTransactionPrivate(transaction, {
   status = 'private-next-state-advanced'
 } = {}) {
   const authority = authorityFor(transaction);
+  if (authority.exactMassSource || sphGpuParticleUploadAdvertisesExactMass(nextParticleUploads?.sphParticleUpload)) {
+    throw transactionError('Exact inventory requires prepared spatial publication; private advances are not integrated',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_EXACT_MASS_COMMIT');
+  }
   if (
     authority.twoLevelAuthoritative !== true
     || authority.enabledConsumerReaders.size !== 0
@@ -3643,6 +3727,7 @@ export function scheduleSchroederSpatialEpochTransactionRelease(transaction, {
         authority.state = SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.RELEASED;
       }
       releaseSphAerosolSpatialTransaction(transaction, authority.generation);
+      releaseExactMassSource(authority);
       return true;
     },
     (error) => {
@@ -3671,6 +3756,7 @@ export function abortSchroederSpatialEpochTransaction(transaction, reason = null
   authority.state = SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.ABORTED;
   authority.abortReason = reason instanceof Error ? reason.message : (reason == null ? null : String(reason));
   releaseSphAerosolSpatialTransaction(transaction, authority.generation);
+  releaseExactMassSource(authority);
   return true;
 }
 

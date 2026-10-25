@@ -1,3 +1,5 @@
+import { sphGpuParticleUploadAdvertisesExactMass, assertSphLegacyMassPathAllowed,
+  acquireSphParticleExactMassRead, releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_ACTIVE_NODE_SORTED_BUCKET_RANGE_ROW_LAYOUT,
@@ -191,6 +193,7 @@ import {
 import {
   cloneMlsMpmParticleStateForNext,
   cloneSphParticleStateForNext,
+  destroyMlsMpmResidentStepBuffers,
   commitFreshSphDispersedMediumOpticsReplacement,
   createSchroederParticleStorageAdoption,
   isFreshSphDispersedMediumOpticsReplacementPending,
@@ -217,6 +220,7 @@ import {
 import {
   claimMlsMpmPostMechanicsContinuation,
   abandonMlsMpmPostMechanicsCondensate,
+  releaseMlsMpmPostMechanicsExactMassCapture,
   retireMlsMpmPostMechanicsClosureOutputsAfter,
   runMlsMpmPostMechanicsClosureWebGpu
 } from './sphMlsMpmPostMechanicsClosure.js';
@@ -259,6 +263,7 @@ import {
 } from './schroederSpatialTopologyTransitionGpu.js';
 import {
   abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication,
+  acquireSchroederSpatialSuccessorExactMassRead,
   applySchroederSpatialPositionTransitionReceipt,
   prepareSchroederSpatialSuccessorSourceFamilyPublication,
   publishPreparedSchroederSpatialSuccessorSourceFamily,
@@ -17506,7 +17511,21 @@ async function runSchroederPrivateTwoLevelInterval({
   }
 }
 
-export async function runSchroederSameLevelMechanicsWebGpu({
+export async function runSchroederSameLevelMechanicsWebGpu(args = {}) {
+  if (!sphGpuParticleUploadAdvertisesExactMass(args.sphParticleUpload)) {
+    assertSphLegacyMassPathAllowed(args, 'Spatial mechanics');
+    return runSchroederSameLevelMechanicsWebGpuImpl(args);
+  }
+  const sourceRead = acquireSchroederSpatialSuccessorExactMassRead({
+    device: args.device, sphParticleUpload: args.sphParticleUpload,
+    mlsMpmParticleUpload: args.mlsMpmParticleUpload,
+    consumerLease: args.levelAssignmentSourceFamilyLease })
+    ?? acquireSphParticleExactMassRead(args.sphParticleUpload, args.device);
+  try { return await runSchroederSameLevelMechanicsWebGpuImpl(args, sourceRead); }
+  finally { void releaseSphParticleExactMassRead(sourceRead); }
+}
+
+async function runSchroederSameLevelMechanicsWebGpuImpl({
   device,
   sphParticleState,
   mlsMpmParticleState,
@@ -17704,7 +17723,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   boxDimsM = [5, 5, 5],
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2,
-  cflFactor = mlsMpmParticleState?.gridCflFactor,
+  // Cold packing uses zero for an unspecified CFL. Delegate that absence to
+  // the resident runner's default, as direct resident execution does.
+  cflFactor = mlsMpmParticleState?.gridCflFactor || undefined,
   readbackMode = SCHROEDER_NO_FULL_READBACK_MODE,
   queueOrderedProducerClaims = [],
   activeNodeIndexRunner = runSchroederActiveNodeIndexWebGpu,
@@ -17761,7 +17782,15 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     publishPreparedSchroederSpatialSuccessorSourceFamily,
   gpuTimestampRecorder = null,
   residentStepOptions = {}
-} = {}) {
+} = {}, exactMassSourceRead = null) {
+  if (exactMassSourceRead && (enableTwoLevelMechanics || enableCrossLevelCoupling
+      || enableParticleStorageCompaction || enableParticleStorageMaterialization
+      || particleStorageMaterialization || enableFarAggregateForceApplication
+      || !enableSpatialEpochGeneration
+      || residentStepRunner !== runMlsMpmResidentStepWithOptionalWebGpu
+      || spatialTopologyTransitionRunner !== runSchroederSpatialTopologyTransitionWebGpu)) {
+    throw new TypeError('Exact inventory spatial mechanics requires the preserving single-level resident route');
+  }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -19035,6 +19064,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   let spatialPositionTransitionReceipt = null;
   let spatialSuccessorSourceFamily = null;
   let spatialSuccessorPublicationPlan = null;
+  let residentStep = null;
   let spatialSuccessorPublicationReceipt = null;
   let spatialSuccessorPublicationStampTransaction = null;
   let spatialSuccessorPublicationWitness = null;
@@ -23542,7 +23572,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   // synthesized resident-step-shaped envelope built from the coupled-step
   // outputs, so the scene sequence loop (nextParticleUploads, ping-pong,
   // clone-for-next) continues unchanged.
-  const residentStep = twoLevelAuthoritative
+  residentStep = twoLevelAuthoritative
     ? {
       schema: 'peercompute.ulg.schroeder-two-level-authoritative-step.v0',
       status: 'schroeder-two-level-authoritative-step-executed',
@@ -23721,9 +23751,9 @@ export async function runSchroederSameLevelMechanicsWebGpu({
     schroederPhaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
     schroederPortableSummary: resolvedPortableSummary,
     gpuTimestampRecorder,
-    fuseNoFullResidentMechanics: true,
-    fuseNoFullResidentMechanicsActiveGrid: true,
-    fuseNoFullResidentActiveGrid: true
+    fuseNoFullResidentMechanics: !exactMassSourceRead,
+    fuseNoFullResidentMechanicsActiveGrid: !exactMassSourceRead,
+    fuseNoFullResidentActiveGrid: !exactMassSourceRead
   });
   if (twoLevelAuthoritative && twoLevelDispersedMediumOpticsProducerStep) {
     twoLevelDispersedMediumOpticsFinalStep = residentStep;
@@ -23782,7 +23812,7 @@ export async function runSchroederSameLevelMechanicsWebGpu({
       || residentStepRunner?.schroederSpatialTopologyTransitionAware === true
     )
   );
-  if (singleLevelFinalAuthorityEligible) {
+  if (singleLevelFinalAuthorityEligible && !exactMassSourceRead) {
     const terminalSphUpload =
       residentStep.nextParticleUploads.sphParticleUpload;
     const preserveExactDispersedMediumOpticsParent =
@@ -23947,7 +23977,8 @@ export async function runSchroederSameLevelMechanicsWebGpu({
           singleLevelPlacementPositionEpochFloorCandidate,
         forcePositionAdvance:
           conservativelyAdvanceFinalTransitions,
-        componentOwnerStages: singleLevelComponentOwnerStages
+        componentOwnerStages: singleLevelComponentOwnerStages,
+        postMechanicsClosure: residentStep.exactMassPostMechanicsClosure
       });
   }
   const exactNearConsumerArtifactFamilyByReader = {
@@ -26508,6 +26539,13 @@ export async function runSchroederSameLevelMechanicsWebGpu({
   spatialSuccessorPublicationStampTransaction?.commit();
   return result;
   } catch (error) {
+    if (exactMassSourceRead && residentStep?.exactMassPostMechanicsClosure
+        && !retainPublishedSpatialSuccessorOnFailure(error)) {
+      releaseMlsMpmPostMechanicsExactMassCapture(residentStep.exactMassPostMechanicsClosure);
+      // Actual producer output owners fence their buffers. Drop the closure's
+      // pins and retire before metadata rollback invalidates a pending owner.
+      destroyMlsMpmResidentStepBuffers(residentStep);
+    }
     cleanupTwoLevelDispersedMediumOptics(error);
     cleanupSingleLevelPendingDispersedMediumOptics(error);
     if (terminalReactionActivationObservationProposal) {

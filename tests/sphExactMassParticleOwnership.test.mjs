@@ -6,6 +6,8 @@ import {
   ensureSphGpuParticleBufferSetBorrowLifecycle, sphGpuParticleUploadMatchesDevice,
   sphGpuParticleUploadAdvertisesExactMass, acquireSphParticleExactMassRead,
   releaseSphParticleExactMassRead, runSphGpuParticleBufferSetCleanupAfterBorrows,
+  forkSphParticleExactMassRead, validateSphParticleExactMassRead,
+  buildMlsMpmGpuParticleBuffers, uploadMlsMpmGpuParticleBuffers, destroyMlsMpmGpuParticleBuffers,
   assertSphLegacyMassPathAllowed
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import { createSphPhaseCarrierTransferWebGpuEncoderStage } from '../src/runtime/sph/sphPhaseCarrierTransferGpu.js';
@@ -69,6 +71,46 @@ test('legacy packing and upload allocate no exact inventory', async () => {
   assert.equal(f.device.allocated.length, 3); assert.equal(sphGpuParticleUploadMatchesDevice(upload, f.device), true);
   assertSphLegacyMassPathAllowed({ sphParticleState: f.packed, sphParticleUpload: upload }, 'legacy');
   destroySphGpuParticleBuffers(upload); await f.device.drain();
+});
+
+test('cold SPH and MLS owners carry the same complete epoch tuple before sealing', async () => {
+  const f = fixture();
+  const epochs = { storageGeneration: 2, physicsTick: 3, physicsSubstep: 1,
+    positionEpoch: 4, topologyEpoch: 5, chartEpoch: 6, levelEpoch: 7, supportEpoch: 8 };
+  const state = { ...f.state, ...epochs };
+  const packed = buildSphGpuParticleBuffers(state, f.options);
+  const mls = buildMlsMpmGpuParticleBuffers(state);
+  const upload = uploadSphGpuParticleBuffers(f.device, packed);
+  const mlsUpload = uploadMlsMpmGpuParticleBuffers(f.device, mls);
+  for (const [key, value] of Object.entries(epochs)) {
+    assert.equal(packed[key], value); assert.equal(mls[key], value);
+    assert.equal(upload[key], value); assert.equal(mlsUpload[key], value);
+  }
+  const held = acquireSphParticleExactMassRead(upload, f.device);
+  upload.physicsSubstep++;
+  assert.equal(validateSphParticleExactMassRead(held, { device: f.device, sourceSphUpload: upload }), false);
+  upload.physicsSubstep--;
+  await releaseSphParticleExactMassRead(held);
+  destroySphGpuParticleBuffers(upload); destroyMlsMpmGpuParticleBuffers(mlsUpload);
+  await f.device.drain();
+});
+
+test('a live held physical read can fork during retirement without reopening fresh admission', async () => {
+  const f = fixture(), upload = uploadSphGpuParticleBuffers(f.device, f.packed);
+  const held = acquireSphParticleExactMassRead(upload, f.device);
+  destroySphGpuParticleBuffers(upload);
+  assert.throws(() => acquireSphParticleExactMassRead(upload, f.device), /original live upload/);
+  const args = { device: f.device, sourceSphUpload: upload };
+  assert.throws(() => forkSphParticleExactMassRead({ ...held }, args), /original held/);
+  assert.throws(() => forkSphParticleExactMassRead(held, { ...args, sourceSphUpload: { ...upload } }), /original held/);
+  const fork = forkSphParticleExactMassRead(held, args);
+  await releaseSphParticleExactMassRead(held); await f.device.drain();
+  assert.notEqual(upload.destroyed, true);
+  assert.equal(validateSphParticleExactMassRead(fork, args), true);
+  assert.throws(() => forkSphParticleExactMassRead(held, args), /original held/);
+  await releaseSphParticleExactMassRead(fork); await f.device.drain();
+  assert.equal(upload.destroyed, true);
+  assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
 });
 
 test('cold capture refuses sparse, accessor, nonnumeric, negative and unprojectable masses', () => {

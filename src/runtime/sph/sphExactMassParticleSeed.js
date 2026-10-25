@@ -8,7 +8,7 @@ const ROW_KEYS = ['id', 'material', 'materialId', 'phaseId', 'renderDomainId',
   'phaseCarrierCompanionIndex', 'phaseCarrierLineageIndex', 'phaseCarrierLane', 'phaseCarrierTargetPhaseId'];
 const PACKED_KEYS = ['particleCount', 'step', 'time', 'topologyEpoch', 'identityRevision',
   'stateStrideBytes', 'thermoStrideBytes', 'identityStrideBytes', 'positionEpoch',
-  'storageGeneration', 'chartEpoch', 'levelEpoch', 'supportEpoch', 'dimension', 'status'];
+  'storageGeneration', 'physicsTick', 'physicsSubstep', 'chartEpoch', 'levelEpoch', 'supportEpoch', 'dimension', 'status'];
 
 function bytes(array) {
   return new Uint8Array(array.buffer, array.byteOffset, array.byteLength);

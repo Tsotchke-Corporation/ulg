@@ -1,6 +1,7 @@
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
   bindSphExactMassPostMechanicsContinuation, acquireSphParticleExactMassRead,
-  releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
+  releaseSphParticleExactMassRead, forkSphParticleExactMassRead,
+  validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import { releaseMlsMpmPostMechanicsExactMassCapture,
   retireMlsMpmPostMechanicsClosureOutputsAfter } from './sphMlsMpmPostMechanicsClosure.js';
 import {
@@ -12094,6 +12095,110 @@ function canUseFusedNoFullMechanicsPath({
   return Object.values(verdict).every(Boolean);
 }
 
+const exactMassFusedMechanicsOutputs = new WeakMap();
+
+export function acquireFusedMlsMpmMechanicsExactMassCapture(output, { device, sphParticleUpload } = {}) {
+  const record = exactMassFusedMechanicsOutputs.get(output);
+  const validate = () => {
+    if (!record || record.closed || record.device !== device || record.sourceSphUpload !== sphParticleUpload
+        || record.snapshots.some(([object, fields]) => fields.some(([key, value]) => {
+          const descriptor = Object.getOwnPropertyDescriptor(object, key);
+          return (descriptor && !Object.hasOwn(descriptor, 'value')) || descriptor?.value !== value;
+        }))
+        || !validateSphParticleExactMassRead(record.sourceRead, { device, sourceSphUpload: sphParticleUpload })
+        || record.closed) {
+      throw new TypeError('Exact mass requires the genuine live G2P producer output (fused mechanics)');
+    }
+    return true;
+  };
+  validate();
+  if (record.admissionClosed) throw new TypeError('Exact fused mechanics output is retiring');
+  record.pins++;
+  let released = false;
+  return Object.freeze({ sourceRead: record.sourceRead, sourceMlsUpload: record.sourceMlsUpload,
+    transaction: record.transaction, generation: record.generation, dt: record.dt,
+    stateBuffer: record.stateBuffer, thermoBuffer: record.thermoBuffer,
+    mechanicsBuffer: record.mechanicsBuffer, particleCount: record.sourceRead.particleCount,
+    validate() {
+      if (released) throw new TypeError('Exact fused mechanics capture was released');
+      return validate();
+    },
+    release() {
+      if (released) return false;
+      released = true; record.pins--;
+      if (!record.pins) record.drain?.();
+      return true;
+    }
+  });
+}
+
+// Called only by the actual fused producer after successful submission and
+// mutation finalization. No exported registrar can bless arbitrary outputs.
+function retainFusedMechanicsExactMassOutput(result, {
+  device, sourceRead, sphParticleUpload, mlsMpmParticleUpload, mlsFields,
+  transaction, generation, dt
+}) {
+  if (mlsFields.some(([key, value]) => mlsMpmParticleUpload[key] !== value)) {
+    throw new TypeError('Exact fused mechanics source changed during execution');
+  }
+  const held = forkSphParticleExactMassRead(sourceRead, { device, sourceSphUpload: sphParticleUpload });
+  let mechanicsRead = null;
+  try {
+    mechanicsRead = forkSphParticleExactMassRead(held, { device, sourceSphUpload: sphParticleUpload });
+    const reconstruction = result.g2pReconstruction, output = reconstruction.gpuResult;
+    markSphExactMassDerivedBuffers(held, [output.stateBuffer]);
+    const record = { device, sourceRead: held, sourceSphUpload: sphParticleUpload,
+      sourceMlsUpload: mlsMpmParticleUpload, transaction, generation, dt,
+      stateBuffer: output.stateBuffer, mechanicsBuffer: output.mechanicsBuffer,
+      thermoBuffer: sphParticleUpload.thermoBuffer, pins: 0, closed: false, snapshots: [] };
+    const retirements = new Map();
+    const componentReads = { state: held, mechanics: mechanicsRead };
+    const destroyComponents = ({ state = false, mechanics = false } = {}) => {
+      const selected = [state && 'state', mechanics && 'mechanics'].filter(Boolean);
+      if (!selected.length) return false;
+      if (record.pins) throw new Error('Exact fused G2P output is retained by a consumer');
+      const pending = selected.filter(key => !retirements.has(key));
+      if (pending.length) {
+        // A physical read's release supplies a confirmed fence (or confirmed
+        // device loss). A rejected fence alone must never trigger destruction.
+        record.closed = true;
+        const completion = Promise.all(pending.map(key => releaseSphParticleExactMassRead(componentReads[key]))).then(() => {
+          for (const key of pending) record[`${key}Buffer`].destroy();
+          return true;
+        });
+        for (const key of pending) retirements.set(key, completion);
+      }
+      return Promise.all(selected.map(key => retirements.get(key))).then(() => true);
+    };
+    const destroyAll = () => destroyComponents({ state: true, mechanics: true });
+    record.retireAfterConsumers = () => {
+      record.admissionClosed = true;
+      record.failureRetirement ??= new Promise(resolve => {
+        record.drain = resolve;
+        if (!record.pins) resolve();
+      }).then(destroyAll);
+      return record.failureRetirement;
+    };
+    for (const alias of [reconstruction, output]) {
+      alias.destroyOutputParticleBuffers = destroyAll;
+      alias.destroyOutputParticleBufferComponents = destroyComponents;
+    }
+    const keys = ['stateBuffer', 'mechanicsBuffer', 'stateBufferByteLength', 'mechanicsBufferByteLength',
+      'retainedOutputParticleBuffers', 'destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents'];
+    record.snapshots = [
+      [result, [['g2pReconstruction', reconstruction]]],
+      [reconstruction, [...keys, 'gpuResult', 'dt', 'particleCount'].map(key => [key, reconstruction[key]])],
+      [output, keys.map(key => [key, output[key]])],
+      [mlsMpmParticleUpload, mlsFields]
+    ];
+    exactMassFusedMechanicsOutputs.set(output, record);
+  } catch (error) {
+    void releaseSphParticleExactMassRead(held);
+    if (mechanicsRead) void releaseSphParticleExactMassRead(mechanicsRead);
+    throw error;
+  }
+}
+
 async function runFusedNoFullMlsMpmMechanicsWebGpu({
   // Diagnostic pass-level GPU bracket around this runner's whole encoder
   // (empty marker passes; production pass descriptors untouched).
@@ -12103,6 +12208,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   mlsMpmParticleState,
   sphParticleUpload,
   mlsMpmParticleUpload,
+  exactMassSourceRead = null,
+  schroederSpatialEpochTransaction = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
@@ -12128,6 +12235,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   consumeCompactMechanicsView = true,
   observeCanonicalSpatialAuthority = false
 }) {
+  const exactMassMlsFields = exactMassSourceRead ? ['schema', 'status', 'mechanicsBuffer',
+    'mechanicsBufferByteLength', 'mechanicsStrideBytes', 'particleCount', 'storageGeneration',
+    'physicsTick', 'physicsSubstep', 'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch']
+    .map(key => [key, mlsMpmParticleUpload[key]]) : null;
+  if (exactMassSourceRead && !validateSphParticleExactMassRead(exactMassSourceRead,
+    { device, sourceSphUpload: sphParticleUpload })) throw new TypeError('Invalid exact fused mechanics source');
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
@@ -13274,7 +13387,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       if (canonicalSpatialAuthority && schroederActiveNodeFilter.activeNodeBuffer) {
         directoryHeaderReadbackBuffer = device.createBuffer({
           label: 'ulg-mls-mpm-fused-directory-header-readback',
-          size: 64 * Uint32Array.BYTES_PER_ELEMENT,
+          size: 48 * Uint32Array.BYTES_PER_ELEMENT,
           usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
         });
         encoder.copyBufferToBuffer(
@@ -13282,7 +13395,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           0,
           directoryHeaderReadbackBuffer,
           0,
-          64 * Uint32Array.BYTES_PER_ELEMENT
+          48 * Uint32Array.BYTES_PER_ELEMENT
         );
       }
     }
@@ -13533,8 +13646,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         directoryHeaderMismatches.word17sourceCapacity = header[17];
         directoryHeaderMismatches.word45 = header[45];
         try {
-          const tailWords = 48;
-          const queryOffsetWords = Math.max(0, (header[47] >>> 0) - tailWords + 6);
+          const tailWords = 6;
+          const queryOffsetWords = header[32] + (header[1] === SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+            ? header[17] : header[16]);
           const queryReadback = device.createBuffer({
             label: 'ulg-mls-mpm-fused-query-geometry-readback',
             size: tailWords * Uint32Array.BYTES_PER_ELEMENT,
@@ -13923,6 +14037,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       );
       mechanicsFieldMutationCommitted = true;
     }
+    if (exactMassSourceRead) {
+      retainFusedMechanicsExactMassOutput(result, { device, sourceRead: exactMassSourceRead,
+        sphParticleUpload, mlsMpmParticleUpload, mlsFields: exactMassMlsFields,
+        transaction: schroederSpatialEpochTransaction, generation: schroederSpatialEpochGeneration, dt: dtSeconds });
+    }
     retained = true;
     return result;
   } finally {
@@ -14195,6 +14314,10 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   // small readback that the hot loop should not pay unprofiled.
   residentGpuTimestampProfilingRequested = false
 }) {
+  // This producer owns its terminal ping-pong lineage separately from the
+  // single-step fused producer. Until that lineage carries exact inventory,
+  // reject before allocation/submission or source identity ownership changes.
+  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'Fused resident sequence');
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedMaxSubstepsPerSubmission = Math.min(
     count,
@@ -35698,12 +35821,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       || (Boolean(schroederSpatialEpochGeneration) !== Boolean(schroederSpatialEpochTransaction))
       || (canonicalSpatialRequired && !schroederSpatialEpochTransaction)
       || gasPressureMechanicsBoundaryEnabled || particleGasLedgerActionable
-      || fuseNoFullResidentMechanics || fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
       || p2gRunner || gridUpdateRunner || g2pRunner || p2gStageRunner || gridUpdateStageRunner || g2pStageRunner
       || thermalStepRunner !== runSphThermalStepWebGpu || mechanicsRefreshRunner !== runMlsMpmMechanicsRefreshWithOptionalWebGpu
       || sphParticleUpload.aerosolFamily || sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload)
       || dispersedMediumOpticsSeedRows || dispersedMediumOpticalClosureTable)) {
-    throw new TypeError('Resident exact-inventory continuation requires standard non-fused preserving stages; unsupported consumers remain gated');
+    throw new TypeError('Resident exact-inventory continuation requires authenticated preserving stages; unsupported consumers remain gated');
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   assertResidentCpuMirrorGuards({
@@ -35849,6 +35971,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   let canonicalAdoptedDispersedMediumTargetUpload = null;
   let postMechanicsClosure = null;
   let exactMassG2pOutput = null;
+  let exactMassFusedOutput = null;
+  let exactMassFusedCleanup = null;
   let exactMassBoundUpload = null;
   let exactMassSourceRead = null;
   try {
@@ -36510,6 +36634,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         mlsMpmParticleState,
         sphParticleUpload,
         mlsMpmParticleUpload,
+        exactMassSourceRead,
+        schroederSpatialEpochTransaction,
         gridSpacingM,
         boxDimsM: dims,
         dt: dtSeconds,
@@ -36531,7 +36657,23 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         canonicalContactFreeExplicit,
         consumeCompactMechanicsView,
         observeCanonicalSpatialAuthority
+      }).then(result => {
+        if (exactMassContinuation) {
+          exactMassFusedOutput = result;
+          exactMassG2pOutput = result.g2pReconstruction.gpuResult;
+          const destroyParticles = exactMassFusedMechanicsOutputs.get(exactMassG2pOutput).retireAfterConsumers;
+          const grids = [result.p2gGridProjection.gridBuffer, result.gridUpdate.updatedGridBuffer].filter(Boolean);
+          exactMassFusedCleanup = () => destroyParticles().then(() => {
+            for (const buffer of grids) buffer.destroy();
+            return true;
+          });
+        }
+        return result;
       }));
+      if (exactMassContinuation && (fusedMechanics !== exactMassFusedOutput
+          || fusedMechanics?.g2pReconstruction?.gpuResult !== exactMassG2pOutput)) {
+        throw new TypeError('Exact fused mechanics diagnostic wrapper replaced the genuine stage');
+      }
       markStageProgress('resident-stage-dispatch-topology', {
         stage: 'fusedMechanics',
         particleCount: sphParticleState.particleCount,
@@ -36757,7 +36899,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     }
     return result;
   }));
-  if (exactMassContinuation && g2pReconstruction !== exactG2pStage) {
+  if (exactMassContinuation && g2pReconstruction !== (exactMassFusedOutput?.g2pReconstruction ?? exactG2pStage)) {
     throw new TypeError('Exact G2P diagnostic wrapper replaced the genuine stage');
   }
   const exactSingleLevelQueueOrderedCleanup =
@@ -38245,9 +38387,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   } catch (error) {
     if (postMechanicsClosure) abandonMlsMpmPostMechanicsCondensate(postMechanicsClosure);
     if (postMechanicsClosure) releaseMlsMpmPostMechanicsExactMassCapture(postMechanicsClosure);
+    if (exactMassFusedCleanup) {
+      // Retain original owner methods and buffers before diagnostic wrappers
+      // can replace fields. Their release also fences the genuine grid outputs.
+      const retirement = exactMassFusedCleanup();
+      retirement.catch(() => {});
+      try { Object.defineProperty(error, 'exactMassFusedRetirement', { value: retirement }); } catch {}
+    }
     if (exactMassG2pOutput || exactMassBoundUpload) {
       deferSubmittedWorkCleanup(device, () => {
-        exactMassG2pOutput?.destroyOutputParticleBuffers?.();
+        if (!exactMassFusedCleanup) exactMassG2pOutput?.destroyOutputParticleBuffers?.();
         const retireClosure = () => {
           if (postMechanicsClosure) {
             // A successful closure may still fail during envelope/binding.
@@ -38933,7 +39082,8 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   };
   const releaseRetainedOutputBuffers = (output, buffers, {
     preserveOutputResidentProductMass = false,
-    residentProductMass = null
+    residentProductMass = null,
+    retireOutput = null
   } = {}) => {
     const retainedBuffers = (buffers || []).filter(Boolean);
     if (!retainedBuffers.length || typeof output?.destroyOutputParticleBuffers !== 'function') return false;
@@ -38962,7 +39112,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       const retainedOutputFinalConsumer =
         output.queueOrderedRetainedOutputFinalConsumerCapability
         ?? null;
-      release = output.destroyOutputParticleBuffers({
+      release = (retireOutput ?? output.destroyOutputParticleBuffers).call(output, {
         preserveResidentProductMass: preserveOutputResidentProductMass,
         ...(retainedOutputFinalConsumer == null
           ? {}
@@ -39325,14 +39475,12 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       && !preserved.has(g2pOutput.mechanicsBuffer)
     );
     const componentRetirementConfirmed = (retireG2pState || retireG2pMechanics)
-      && destroyRetainedMlsMpmG2pOutputComponents(
-        step.g2pReconstruction,
-        { state: retireG2pState, mechanics: retireG2pMechanics }
-      ) === true;
-    if (componentRetirementConfirmed) {
-      if (retireG2pState) released.add(g2pOutput.stateBuffer);
-      if (retireG2pMechanics) released.add(g2pOutput.mechanicsBuffer);
-    }
+      && typeof g2pOutput.destroyOutputParticleBufferComponents === 'function'
+      && releaseRetainedOutputBuffers(g2pOutput,
+        [retireG2pState && g2pOutput.stateBuffer, retireG2pMechanics && g2pOutput.mechanicsBuffer], {
+          retireOutput: () => destroyRetainedMlsMpmG2pOutputComponents(step.g2pReconstruction,
+            { state: retireG2pState, mechanics: retireG2pMechanics })
+        });
     if (
       retireG2pState
       && !componentRetirementConfirmed

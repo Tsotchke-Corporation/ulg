@@ -2138,8 +2138,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   };
   try {
   if (massCapture) {
-    const { acquireMlsMpmG2pExactMassCapture } = await import('./sphG2pGpuKernel.js');
-    massCapture.g2p = acquireMlsMpmG2pExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload });
+    const { acquireMlsMpmMechanicsExactMassCapture } = await import('./sphG2pGpuKernel.js');
+    massCapture.g2p = await acquireMlsMpmMechanicsExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload });
     if (massCapture.g2p.transaction !== schroederSpatialEpochTransaction
         || massCapture.g2p.generation !== schroederSpatialEpochGeneration
         || massCapture.g2p.dt !== dtSeconds) {

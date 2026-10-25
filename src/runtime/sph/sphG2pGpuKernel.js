@@ -3652,6 +3652,17 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
 
 const exactMassG2pOutputs = new WeakMap();
 
+// Keep the fused implementation behind the existing lazy module boundary.
+// Each producer alone registers its original outputs; this lookup cannot mint
+// provenance for caller-supplied buffers or copied result envelopes.
+export async function acquireMlsMpmMechanicsExactMassCapture(result, { device, sphParticleUpload } = {}) {
+  if (exactMassG2pOutputs.has(result)) {
+    return acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUpload });
+  }
+  const { acquireFusedMlsMpmMechanicsExactMassCapture } = await loadSphMlsMpmKernelBundle();
+  return acquireFusedMlsMpmMechanicsExactMassCapture(result, { device, sphParticleUpload });
+}
+
 export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUpload } = {}) {
   const record = exactMassG2pOutputs.get(result);
   if (!record || record.retired || record.device !== device || record.sourceSphUpload !== sphParticleUpload

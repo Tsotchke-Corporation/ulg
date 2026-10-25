@@ -28,15 +28,17 @@ export async function preloadExactMassContinuationNative() {
   return { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial };
 }
 
-export async function runExactMassContinuationNative(device, format, useSpatial = false) {
+export async function runExactMassContinuationNative(device, format, useSpatial = false, useFused = false, observeAuthority = false) {
   const { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial } = await preloadExactMassContinuationNative();
   const materialProperties = { fe: materials.createReferenceMaterialClosures().fe.properties };
   const mass = 0.001 * (1 + 2 ** -30);
   const initial = { smoothingLengthM: .5, dimension: 3, step: 0, time: 0, storageGeneration: 1,
-    particles: [{ id: 'exact-carrier', material: 'fe', massKg: mass, x: [.15, 1, 1], v: [.1, 0, 0],
+    particles: [{ id: 'exact-carrier', material: 'fe', initialBodyDomainId: 1, initialBodyId: 'exact-carrier-body',
+      massKg: mass, x: [.15, 1, 1], v: [.1, 0, 0],
       specificInternalEnergyJPerKg: energy.specificInternalEnergyJPerKg(materialProperties.fe, 300) }] };
   let packed = buffers.buildSphGpuParticleBuffers(initial, { materialProperties,
     exactMass: { format, reference: 'native two-step preserving solver fixture' } });
+  if (packed.identity[0] !== 1) throw new Error('Solid fixture requires its authored nonzero continuity domain');
   let packedMls = buffers.buildMlsMpmGpuParticleBuffers(initial, { materialProperties,
     particleSeparationRelaxation: 0, soundSpeedScale: .01 });
   let sphUpload = buffers.uploadSphGpuParticleBuffers(device, packed);
@@ -55,7 +57,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
     } finally { copy.destroy(); }
   };
   const result = { initialState: Array.from(packed.state), initialThermo: Array.from(packed.thermo),
-    mass, runs: [], fullG2Acceptance: false, spatialPublicationAdmitted: useSpatial };
+    mass, runs: [], fullG2Acceptance: false, spatialPublicationAdmitted: useSpatial, fusedMechanicsRequested: useFused };
   let previousStep = null;
   let sourceFamily = null, sourceLease = null, successorAssignment = null;
   try {
@@ -67,7 +69,8 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         thermalStepOptions: { conductionRate: 0, wallTemperaturesK: { xMin: 350 }, wallLayerM: .5, wallRate: 2600 },
         gridSpacingM: .5, boxDimsM: [2, 2, 2], dt: .001, gravityMPerS2: [0, 0, 0],
         preferWebGpu: true, readbackMode: 'no-full-readback', contactSolverEnabled: useSpatial,
-        gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null, fuseNoFullResidentMechanics: false };
+        observeCanonicalSpatialAuthority: observeAuthority,
+        gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null, fuseNoFullResidentMechanics: useFused };
       if (sourceFamily) sourceLease = spatial.acquireSchroederSpatialSuccessorSourceFamilyLease(sourceFamily, { device });
       const execution = useSpatial ? await hierarchy.runSchroederSameLevelMechanicsWebGpu({
         device, sphParticleState: packed, mlsMpmParticleState: packedMls,
@@ -77,10 +80,12 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         selectedLevel: 0, minLevel: 0, maxLevel: 0, baseGridSpacingM: .5,
         boxDimsM: [2, 2, 2], dt: .001, gravityMPerS2: [0, 0, 0], readbackMode: 'no-full-readback',
         enableTwoLevelMechanics: false, enableCrossLevelCoupling: false,
+        observeCanonicalSpatialAuthority: observeAuthority,
         enableLawQueue: false, enableLawNeighborCandidates: false,
         enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
         residentStepOptions: options }) : null;
       const step = execution?.residentStep ?? await steps.runMlsMpmResidentStepWithOptionalWebGpu(options);
+      if (step.stageTiming.fusedResidentMechanics !== useFused) throw new Error('Actual mechanics route differs from requested fused execution');
       const next = step.nextParticleUploads;
       if (!next || next.sphParticleUpload.exactMassInventory !== family) throw new Error('Exact inventory did not reach the actual step continuation');
       const nextFamily = next.schroederSpatialSuccessorSourceFamily ?? null;
@@ -97,7 +102,29 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
       }
       const held = buffers.acquireSphParticleExactMassRead(next.sphParticleUpload, device);
       try {
-        result.runs.push({ cycle, backend: step.backend, exact: await observe(held.read.buffer, true),
+        let fieldEvidence = null;
+        if (observeAuthority && useSpatial && useFused) {
+          const capture = steps.acquireFusedMlsMpmMechanicsExactMassCapture(step.g2pReconstruction.gpuResult,
+            { device, sphParticleUpload: sphUpload });
+          try {
+            const field = capture.generation.mechanicsFieldView;
+            const words = await observe(field.fieldViewBuffer, true);
+            const offset = field.layout.receiptControlOffsetWords;
+            fieldEvidence = { header: words.slice(0, 64), receipt: words.slice(offset, offset + field.layout.receiptControlWords),
+              layout: field.layout, state: words.slice(field.layout.stateOffsetWords),
+              parent: (await observe(field.parentMechanicsView.mechanicsViewBuffer, true)).slice(0, 64),
+              activeSource: (await observe(field.activeSourceViewBuffer, true)).slice(0, 64),
+              identity: await observe(field.identityBuffer, true),
+              plan: Object.fromEntries(['sourceCount', 'sourceCapacity', 'sourceRowStrideFloats', 'sourceRowLayoutId',
+                'identityStrideWords', 'selectedLevel', 'gridNodeCount', 'gridDims', 'gridShift', 'candidateCapacity',
+                'fieldCapacity', 'generationId', 'deviceOrdinal', 'laneOrdinal', 'leaseToken', 'sourceFamilyId',
+                'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch', 'topologyEpoch', 'chartEpoch',
+                'levelEpoch', 'supportEpoch', 'completionOrdinal', 'gridSpacingM'].map(key => [key, field[key]])) };
+          } finally { capture.release(); }
+        }
+        result.runs.push({ cycle, backend: step.backend, fusedResidentMechanics: step.stageTiming.fusedResidentMechanics,
+          fieldEvidence,
+          exact: await observe(held.read.buffer, true),
           state: await observe(next.sphParticleUpload.stateBuffer), thermo: await observe(next.sphParticleUpload.thermoBuffer),
           g2pState: await observe(step.g2pReconstruction.gpuResult.stateBuffer),
           p2gGrid: step.p2gGridProjection?.gpuResult?.gridBuffer
@@ -105,6 +132,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
           updatedGrid: step.gridUpdate?.gpuResult?.updatedGridBuffer
             ? await observe(step.gridUpdate.gpuResult.updatedGridBuffer) : null,
           p2gMode: step.p2gGridProjection?.gpuResult?.canonicalSpatialAuthorityMode ?? null,
+          spatialAuthorityEvidence: step.g2pReconstruction.schroederSpatialAuthorityEvidence ?? null,
           storageGeneration: next.sphParticleUpload.storageGeneration, inventoryGeneration: held.read.generation,
           spatialFamilyStatus: nextFamily?.status ?? null,
           finalEpochs: nextFamily?.successorEpochIdentity ?? null });

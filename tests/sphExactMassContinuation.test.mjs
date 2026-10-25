@@ -8,7 +8,7 @@ import * as closure from '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js';
 import * as hierarchy from '../src/runtime/sph/schroederHierarchyGpu.js';
 import * as spatial from '../src/runtime/sph/schroederSpatialSuccessorSourceFamily.js';
 import { validateSchroederSpatialEpochTransactionCommit } from '../src/runtime/sph/schroederSpatialEpochTransaction.js';
-import { acquireMlsMpmG2pExactMassCapture } from '../src/runtime/sph/sphG2pGpuKernel.js';
+import { acquireMlsMpmG2pExactMassCapture, acquireMlsMpmMechanicsExactMassCapture } from '../src/runtime/sph/sphG2pGpuKernel.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { createSphExactMassFormat } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
@@ -218,16 +218,18 @@ function fakeG2pDevice() {
 
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); };
 function fixture() {
-  const device = fakeG2pDevice(); device.lost = new Promise(() => {});
+  const device = fakeG2pDevice(); let loseDevice;
+  device.lost = new Promise(resolve => { loseDevice = resolve; });
   const materialProperties = { fe: createReferenceMaterialClosures().fe.properties };
   const initial = { smoothingLengthM: .5, dimension: 3, step: 0, time: 0, storageGeneration: 1,
-    particles: [{ id: 'carrier', material: 'fe', massKg: .001 * (1 + 2 ** -30), x: [.15, 1, 1], v: [.1, 0, 0],
+    particles: [{ id: 'carrier', material: 'fe', initialBodyDomainId: 1, initialBodyId: 'exact-carrier-body',
+      massKg: .001 * (1 + 2 ** -30), x: [.15, 1, 1], v: [.1, 0, 0],
       specificInternalEnergyJPerKg: specificInternalEnergyJPerKg(materialProperties.fe, 300) }] };
   const packed = buffers.buildSphGpuParticleBuffers(initial, { materialProperties,
     exactMass: { format: createSphExactMassFormat(), reference: 'exact continuation ownership regression' } });
   const packedMls = buffers.buildMlsMpmGpuParticleBuffers(initial, { materialProperties,
     particleSeparationRelaxation: 0, soundSpeedScale: .01 });
-  return { device, packed, packedMls,
+  return { device, loseDevice, packed, packedMls,
     sphUpload: buffers.uploadSphGpuParticleBuffers(device, packed),
     mlsUpload: buffers.uploadMlsMpmGpuParticleBuffers(device, packedMls),
     thermalTable: thermal.buildSphThermalMaterialTable(materialProperties),
@@ -255,7 +257,7 @@ function advance(f, step) {
     mlsUpload: step.nextParticleUploads.mlsMpmParticleUpload };
 }
 
-function runSpatial(f, extra = {}) {
+function runSpatial(f, extra = {}, useFused = false) {
   return hierarchy.runSchroederSameLevelMechanicsWebGpu({ device: f.device,
     sphParticleState: f.packed, mlsMpmParticleState: f.packedMls,
     sphParticleUpload: f.sphUpload, mlsMpmParticleUpload: f.mlsUpload,
@@ -265,6 +267,7 @@ function runSpatial(f, extra = {}) {
     enableLawQueue: false, enableLawNeighborCandidates: false,
     enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
     residentStepOptions: { thermalMaterialTable: f.thermalTable,
+      fuseNoFullResidentMechanics: useFused,
       mechanicsMaterialTable: f.mechanicsTable, thermalStepOptions: { conductionRate: 0 },
       gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null }, ...extra });
 }
@@ -574,4 +577,210 @@ for (const stage of ['g2pReconstruction', 'thermalStep', 'mechanicsRefresh']) {
       assert.equal(f.sphUpload.destroyed, true, 'all producer source reads must release');
     });
   }
+}
+
+for (const useSpatial of [false, true]) {
+  const route = useSpatial ? 'canonical' : 'dense';
+  const runFused = async (f, extra = {}) => useSpatial
+    ? (await runSpatial(f, { gpuTimestampRecorder: extra.gpuTimestampRecorder, residentStepOptions: {
+      thermalMaterialTable: f.thermalTable, mechanicsMaterialTable: f.mechanicsTable,
+      thermalStepOptions: { conductionRate: 0 }, gasPressureMechanicsBoundaryEnabled: false,
+      summaryRunner: null, fuseNoFullResidentMechanics: true, ...extra } }, true)).residentStep
+    : run(f, { fuseNoFullResidentMechanics: true, ...extra });
+
+  test(`${route} fused capture authenticates both aliases and holds both destructor entrances`, async () => {
+    const f = fixture(); let step, capture;
+    try {
+      step = await runFused(f);
+      assert.equal(step.stageTiming.fusedResidentMechanics, true);
+      const outer = step.g2pReconstruction, output = outer.gpuResult;
+      const args = { device: f.device, sphParticleUpload: f.sphUpload };
+      capture = await acquireMlsMpmMechanicsExactMassCapture(output, args);
+      assert.equal(capture.dt, .001);
+      assert.equal(Boolean(capture.transaction), useSpatial);
+      assert.equal(outer.destroyOutputParticleBuffers, output.destroyOutputParticleBuffers);
+      assert.equal(outer.destroyOutputParticleBufferComponents, output.destroyOutputParticleBufferComponents);
+      assert.equal(outer.destroyOutputParticleBufferComponents({}), false);
+      assert.equal(capture.validate(), true);
+      for (const alias of [outer, output]) {
+        assert.throws(() => alias.destroyOutputParticleBuffers(), /retained by a consumer/);
+        assert.throws(() => alias.destroyOutputParticleBufferComponents({ state: true }), /retained by a consumer/);
+        for (const key of ['stateBuffer', 'mechanicsBuffer', 'stateBufferByteLength', 'destroyOutputParticleBuffers']) {
+          const original = alias[key]; alias[key] = null;
+          try { assert.throws(() => capture.validate(), /genuine live G2P/); }
+          finally { alias[key] = original; }
+        }
+      }
+      const stateDescriptor = Object.getOwnPropertyDescriptor(output, 'stateBuffer');
+      let getterInvoked = false;
+      Object.defineProperty(output, 'stateBuffer', { configurable: true, get() {
+        getterInvoked = true;
+        output.destroyOutputParticleBufferComponents({ mechanics: true });
+        return stateDescriptor.value;
+      } });
+      try { await assert.rejects(acquireMlsMpmMechanicsExactMassCapture(output, args), /genuine live G2P/); }
+      finally { Object.defineProperty(output, 'stateBuffer', stateDescriptor); }
+      assert.equal(getterInvoked, false, 'accessor substitution must not execute during authentication');
+      await assert.rejects(acquireMlsMpmMechanicsExactMassCapture({ ...output }, args), /genuine live G2P/);
+      await assert.rejects(acquireMlsMpmMechanicsExactMassCapture({ gpuResult: output }, args), /genuine live G2P/);
+      await assert.rejects(acquireMlsMpmMechanicsExactMassCapture(output,
+        { ...args, sphParticleUpload: { ...f.sphUpload } }), /genuine live G2P/);
+    } finally {
+      capture?.release();
+      const family = step?.nextParticleUploads.schroederSpatialSuccessorSourceFamily;
+      if (family) await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family, { device: f.device });
+      await retire(f, step);
+    }
+    assert.equal(f.sphUpload.destroyed, true);
+  });
+
+  for (const outcome of ['replace', 'throw', 'replace-inner', 'mutate-destructor']) {
+    test(`${route} fused diagnostic ${outcome} retires original particle and grid outputs`, async () => {
+      const f = fixture(); let genuine, owned = [], retired;
+      try {
+        await assert.rejects(runFused(f, { gpuTimestampRecorder: { active: true,
+          async measureQueueStage(meta, work) {
+            const result = await work();
+            if (meta.stage !== 'fusedMechanics') return result;
+            genuine = result;
+            owned = [result.g2pReconstruction.stateBuffer, result.g2pReconstruction.mechanicsBuffer,
+              result.p2gGridProjection.gridBuffer, result.gridUpdate.updatedGridBuffer].filter(Boolean);
+            if (outcome === 'throw') throw new Error('diagnostic wrapper failed');
+            if (outcome === 'replace') return { ...result };
+            if (outcome === 'replace-inner') result.g2pReconstruction.gpuResult = { ...result.g2pReconstruction.gpuResult };
+            else result.g2pReconstruction.gpuResult.destroyOutputParticleBuffers = () => { throw new Error('substituted destructor invoked'); };
+            return result;
+          }
+        } }), error => {
+          assert.match(error.message, /replaced|diagnostic wrapper failed|genuine live G2P/);
+          retired = error.exactMassFusedRetirement;
+          return true;
+        });
+        if (retired) await retired;
+      } finally { await retire(f); }
+      assert.ok(genuine, 'real fused producer completed');
+      assert.equal(owned.length, useSpatial ? 2 : 4);
+      assert.ok(owned.every(buffer => buffer.destroyed), 'every genuine retained output retired');
+      assert.equal(f.sphUpload.destroyed, true, 'original physical owner has no stranded producer reads');
+    });
+  }
+}
+
+test('failed fused execution waits for an existing consumer and preserves the original error', async () => {
+  const f = fixture(); let held, owned = [], completion;
+  try {
+    await assert.rejects(run(f, { fuseNoFullResidentMechanics: true, gpuTimestampRecorder: {
+      active: true, async measureQueueStage(meta, work) {
+        const result = await work();
+        if (meta.stage === 'fusedMechanics') {
+          const output = result.g2pReconstruction.gpuResult;
+          owned = [output.stateBuffer, output.mechanicsBuffer, result.p2gGridProjection.gridBuffer,
+            result.gridUpdate.updatedGridBuffer];
+          held = await acquireMlsMpmMechanicsExactMassCapture(output,
+            { device: f.device, sphParticleUpload: f.sphUpload });
+          throw new Error('original diagnostic failure with a held reader');
+        }
+        return result;
+      }
+    } }), error => {
+      assert.match(error.message, /^original diagnostic failure/);
+      completion = error.exactMassFusedRetirement;
+      return true;
+    });
+    assert.ok(completion?.then);
+    await settle();
+    assert.equal(held.validate(), true, 'existing consumer remains usable while failure retirement waits');
+    assert.ok(owned.every(buffer => !buffer.destroyed));
+    held.release();
+    assert.equal(await completion, true);
+    assert.ok(owned.every(buffer => buffer.destroyed));
+  } finally { held?.release(); await retire(f); }
+  assert.equal(f.sphUpload.destroyed, true);
+});
+
+test('fused component retirement preserves its sibling and waits for the physical queue fence', async () => {
+  const f = fixture(); let step, releaseFence;
+  try {
+    step = await run(f, { fuseNoFullResidentMechanics: true });
+    const outer = step.g2pReconstruction, output = outer.gpuResult;
+    await settle();
+    const fence = new Promise(resolve => { releaseFence = resolve; });
+    f.device.queue.onSubmittedWorkDone = () => fence;
+    const retirement = outer.destroyOutputParticleBufferComponents({ state: true });
+    await settle();
+    assert.equal(output.stateBuffer.destroyed, false);
+    assert.equal(output.mechanicsBuffer.destroyed, false);
+    await assert.rejects(acquireMlsMpmMechanicsExactMassCapture(output,
+      { device: f.device, sphParticleUpload: f.sphUpload }), /genuine live G2P/);
+    releaseFence(); assert.equal(await retirement, true);
+    assert.equal(output.stateBuffer.destroyed, true);
+    assert.equal(output.mechanicsBuffer.destroyed, false, 'unselected sibling remains owned');
+    assert.equal(await output.destroyOutputParticleBuffers(), true);
+    assert.equal(output.mechanicsBuffer.destroyed, true);
+  } finally { releaseFence?.(); await retire(f, step); }
+  assert.equal(f.sphUpload.destroyed, true);
+});
+
+test('resident cleanup accepts asynchronous fused component ownership without raw destruction', async () => {
+  const f = fixture(); let step, releaseFence;
+  try {
+    step = await run(f, { fuseNoFullResidentMechanics: true });
+    await settle();
+    const output = step.g2pReconstruction.gpuResult;
+    const fence = new Promise(resolve => { releaseFence = resolve; });
+    f.device.queue.onSubmittedWorkDone = () => fence;
+    steps.destroyMlsMpmResidentStepBuffers(step,
+      { preserveBuffers: steps.retainedContinuationBuffersFromUploads(step.nextParticleUploads) });
+    await settle();
+    assert.equal(output.stateBuffer.destroyed, false);
+    assert.equal(output.mechanicsBuffer.destroyed, false);
+    releaseFence(); await settle();
+    assert.equal(output.stateBuffer.destroyed, true);
+    assert.equal(output.mechanicsBuffer.destroyed, true);
+  } finally { releaseFence?.(); await retire(f, step); }
+});
+
+test('a rejected fused retirement fence quarantines outputs until confirmed device loss', async () => {
+  const f = fixture(); let step;
+  try {
+    step = await run(f, { fuseNoFullResidentMechanics: true });
+    await settle();
+    const output = step.g2pReconstruction.gpuResult;
+    f.device.queue.onSubmittedWorkDone = () => Promise.reject(new Error('unconfirmed queue failure'));
+    let completed = false;
+    const retirement = output.destroyOutputParticleBuffers().then(() => { completed = true; });
+    await settle();
+    assert.equal(completed, false);
+    assert.equal(output.stateBuffer.destroyed, false);
+    assert.equal(output.mechanicsBuffer.destroyed, false);
+    f.loseDevice({ reason: 'destroyed' }); await retirement;
+    assert.equal(output.stateBuffer.destroyed, true);
+    assert.equal(output.mechanicsBuffer.destroyed, true);
+  } finally {
+    f.loseDevice({ reason: 'destroyed' });
+    f.device.queue.onSubmittedWorkDone = async () => {};
+    await retire(f, step);
+  }
+});
+
+for (const withThermal of [false, true]) {
+  test(`unintegrated fused sequence rejects exact inventory before dispatch (thermal=${withThermal})`, async () => {
+    const f = fixture();
+    const originalOwnership = f.sphUpload.ownsIdentityBuffer;
+    const originalAllocations = f.device.createdBuffers.length;
+    try {
+      await assert.rejects(steps.runMlsMpmResidentStepsWithOptionalWebGpu({ device: f.device,
+        sphParticleState: f.packed, mlsMpmParticleState: f.packedMls,
+        sphParticleUpload: f.sphUpload, mlsMpmParticleUpload: f.mlsUpload,
+        preferWebGpu: true, readbackMode: 'no-full-readback', stepCount: 2,
+        fuseNoFullResidentMechanicsSequence: true, compactSummaryMode: 'none',
+        gridSpacingM: .5, boxDimsM: [2, 2, 2], dt: .001, gravityMPerS2: [0, 0, 0],
+        summaryRunner: null, contactSolverEnabled: false,
+        ...(withThermal ? { thermalMaterialTable: f.thermalTable, mechanicsMaterialTable: f.mechanicsTable } : {})
+      }), /exact|Exact/);
+      assert.equal(f.device.submissions.length, 0);
+      assert.equal(f.device.createdBuffers.length, originalAllocations);
+      assert.equal(f.sphUpload.ownsIdentityBuffer, originalOwnership);
+    } finally { await retire(f); }
+  });
 }

@@ -4172,11 +4172,12 @@ export function resolveSphThermalSourceCapture(result, token) {
 }
 
 export async function runSphThermalStepWebGpu(args = {}) {
+  args = { ...args };
   if (args.exactMassG2pResult == null) return runSphThermalStepWebGpuImpl(args);
   if (!args.postMechanicsSourceCapture || args.retainOutputParticleBuffers !== true
       || args.readbackMode !== NO_FULL_READBACK_MODE) throw new TypeError('Exact thermal continuation requires retained producer capture');
-  const { acquireMlsMpmG2pExactMassCapture } = await import('./sphG2pGpuKernel.js');
-  const capture = acquireMlsMpmG2pExactMassCapture(args.exactMassG2pResult,
+  const { acquireMlsMpmMechanicsExactMassCapture } = await import('./sphG2pGpuKernel.js');
+  const capture = await acquireMlsMpmMechanicsExactMassCapture(args.exactMassG2pResult,
     { device: args.device, sphParticleUpload: args.sphParticleUpload });
   let result = null;
   try {

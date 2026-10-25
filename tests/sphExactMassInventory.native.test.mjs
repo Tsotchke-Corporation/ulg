@@ -112,7 +112,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
         await page.goto(new URL('package.json', baseUrl).href, { waitUntil: 'networkidle', timeout: 60_000 });
       }
     }
-    evidence.result = await page.evaluate(async ({ formats, inputs }) => {
+    evidence.result = await page.evaluate(async ({ formats, inputs, observeAuthority }) => {
       const url = '/src/runtime/sph/sphExactMassWgsl.js';
       const transformed = await (await fetch(url)).text();
       const dependency = [...transformed.matchAll(/from\s+['"]([^'"]+)['"]/g)]
@@ -127,6 +127,8 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       let coldOwnership = null;
       let continuation = null;
       let spatialContinuation = null;
+      let fusedContinuation = null;
+      let fusedSpatialContinuation = null;
       device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       for (const type of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(type);
       try {
@@ -329,6 +331,8 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
           const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
           continuation = await fixture.runExactMassContinuationNative(device, format);
           spatialContinuation = await fixture.runExactMassContinuationNative(device, format, true);
+          fusedContinuation = await fixture.runExactMassContinuationNative(device, format, false, true);
+          fusedSpatialContinuation = await fixture.runExactMassContinuationNative(device, format, true, true, observeAuthority);
         } finally {
           await Promise.all(reads.map(read => owner.releaseSphExactMassRead(read)));
           families.forEach(family => owner.releaseSphExactMassInventory(family));
@@ -341,9 +345,11 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, coldOwnership, continuation, spatialContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
+      return { results, transfers, coldOwnership, continuation, spatialContinuation,
+        fusedContinuation, fusedSpatialContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
-    }, { formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
+    }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
+      formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
       inputs: cases.map(fixture => [...fixture.input]) });
     assert.deepEqual(evidence.result.errors, []);
     assert.deepEqual(evidence.errors, []);
@@ -442,6 +448,29 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
     assert.equal(spatial.finalOwnerRetired, true);
     assert.deepEqual(spatial.exactAfterRetirementRequested, Array.from(encodeSphExactMass(spatial.mass, format)));
     evidence.twoStepSpatialContinuationPassed = true;
+    for (const key of ['fusedContinuation', 'fusedSpatialContinuation']) {
+      const fused = evidence.result[key];
+      assert.equal(fused.runs.length, 2);
+      let previousState = fused.initialState, previousThermo = fused.initialThermo;
+      for (const run of fused.runs) {
+        assert.equal(run.fusedResidentMechanics, true, 'must execute the genuine fused producer');
+        assert.deepEqual(run.exact, Array.from(encodeSphExactMass(fused.mass, format)));
+        assert.equal(run.backend, 'webgpu');
+        assert.ok(run.state[0] > previousState[0], key + ' actual advancing motion');
+        assert.notEqual(run.thermo[2], previousThermo[2], key + ' actual heating');
+        previousState = run.state; previousThermo = run.thermo;
+        if (fused.spatialPublicationAdmitted) {
+          assert.ok(run.spatialFamilyStatus); assert.ok(run.finalEpochs);
+        }
+      }
+      assert.equal(fused.successorUsableAfterOriginalRetirement, true);
+      if (fused.spatialPublicationAdmitted) {
+        assert.equal(fused.finalLeaseRetainedOwner, true);
+        assert.equal(fused.finalOwnerRetired, true);
+        assert.deepEqual(fused.exactAfterRetirementRequested, Array.from(encodeSphExactMass(fused.mass, format)));
+      }
+    }
+    evidence.twoStepFusedContinuationsPassed = true;
   } catch (error) { failure ??= error; evidence.failure = String(error.stack || error); }
   finally {
     clearTimeout(watchdog);

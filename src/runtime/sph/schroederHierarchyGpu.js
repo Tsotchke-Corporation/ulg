@@ -23751,9 +23751,9 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     schroederPhaseVolumeDiagnosticSummary: resolvedPhaseVolumeDiagnosticSummary,
     schroederPortableSummary: resolvedPortableSummary,
     gpuTimestampRecorder,
-    fuseNoFullResidentMechanics: !exactMassSourceRead,
-    fuseNoFullResidentMechanicsActiveGrid: !exactMassSourceRead,
-    fuseNoFullResidentActiveGrid: !exactMassSourceRead
+    fuseNoFullResidentMechanics: residentStepOptions?.fuseNoFullResidentMechanics ?? true,
+    fuseNoFullResidentMechanicsActiveGrid: residentStepOptions?.fuseNoFullResidentMechanicsActiveGrid ?? true,
+    fuseNoFullResidentActiveGrid: residentStepOptions?.fuseNoFullResidentActiveGrid ?? true
   });
   if (twoLevelAuthoritative && twoLevelDispersedMediumOpticsProducerStep) {
     twoLevelDispersedMediumOpticsFinalStep = residentStep;

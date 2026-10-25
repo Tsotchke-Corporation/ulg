@@ -178,10 +178,15 @@ for (const [file, firstAfterAwait, admissionFailure] of [
   test(`mechanics bundle ${file} retains awaited loading and its post-await admission boundary`, () => {
     const source = readFileSync(new URL(`../src/runtime/sph/${file}`, import.meta.url), 'utf8');
     assert.match(source, /import\s*\{\s*loadSphMlsMpmKernelBundle\s*\}\s*from\s*['"]\.\/sphMlsMpmKernelBundleLoader\.js['"]/);
-    const calls = [...source.matchAll(/await\s+loadSphMlsMpmKernelBundle\(\)/g)];
+    // G2P also exposes a read-only fused-capture lookup through this loader.
+    // The execution-stage admission boundary remains independently required.
+    const stagedSource = file === 'sphG2pGpuKernel.js'
+      ? source.slice(source.indexOf('async function runMlsMpmG2pWebGpuImpl('))
+      : source;
+    const calls = [...stagedSource.matchAll(/await\s+loadSphMlsMpmKernelBundle\(\)/g)];
     assert.equal(calls.length, 1, 'one retained async boundary per staged consumer');
     assert.doesNotMatch(source, /import\(\s*['"]\.\/sphMlsMpmGpuStep\.js['"]/);
-    const continuation = source.slice(calls[0].index + calls[0][0].length).replace(/^;\s*/, '');
+    const continuation = stagedSource.slice(calls[0].index + calls[0][0].length).replace(/^;\s*/, '');
     assert.equal(continuation.search(firstAfterAwait), 0,
       'the existing binding/admission check still immediately follows the await');
     assert.ok(continuation.indexOf(admissionFailure) >= 0,

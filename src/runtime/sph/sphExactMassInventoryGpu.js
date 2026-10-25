@@ -229,6 +229,24 @@ export function runSphExactMassPartitionCandidateWebGpu({ device, sourceReads,
     edgeBuffer, edgeCount, edgeFormat, partition: true });
 }
 
+/** Conservative cumulative-ratio allocation over remapped immutable rows.
+ * Each GPU edge is [donor, receiver, lower[W], upper[W], denominator[W]]. The
+ * selected packet is floor(available*upper/denominator) minus
+ * floor(available*lower/denominator), with all operands unsigned integers.
+ * Adjacent intervals covering [0, denominator) allocate the entire donor;
+ * incomplete coverage retains the exact remainder. Denominators are positive
+ * dimensionless integers in W limbs, independent of the mass quantum.
+ *
+ * This selects numerical packets only. The actual reaction/phase producer
+ * must bind product terms, validate chemistry/energy, choose rollback and
+ * publish matched physical owners. Ratios cannot authorize those actions.
+ */
+export function runSphExactMassAllocationCandidateWebGpu({ device, sourceReads,
+  outputRowCount, destinationBuffer, edgeBuffer = null, edgeCount = 0, edgeFormat } = {}) {
+  return runExactMassCandidate({ device, sourceReads, outputRowCount, destinationBuffer,
+    edgeBuffer, edgeCount, edgeFormat, partition: true, allocation: true });
+}
+
 async function reserveSourceReads(device, sourceReads) {
   const held = [], records = [], known = new Map();
   try {
@@ -260,7 +278,7 @@ async function reserveSourceReads(device, sourceReads) {
 }
 
 async function runExactMassCandidate({ device, sourceReads, outputRowCount, destinationBuffer,
-  edgeBuffer, edgeCount, edgeFormat, partition = false }) {
+  edgeBuffer, edgeCount, edgeFormat, partition = false, allocation = false }) {
   const { held, records } = await reserveSourceReads(device, sourceReads);
   const source = records[0], format = source.format;
   let output = null, temporary = null, mapBuffer = null;
@@ -273,7 +291,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     const sourceGeneration = records.reduce((generation, record) => Math.max(generation, record.generation), 0);
     const generation = uint(sourceGeneration + 1, 'candidate generation', true);
     uint(edgeCount, 'edge count', !partition);
-    const edgeBytes = edgeCount * (format.wordCount + 2) * 4;
+    const edgeBytes = edgeCount * (format.wordCount * (allocation ? 3 : 1) + 2) * 4;
     if (edgeCount > 0 && (!edgeBuffer || webGpuBufferDevice(edgeBuffer) !== device || edgeBuffer.destroyed
         || edgeBuffer.size !== edgeBytes || !(edgeBuffer.usage & COPY_SRC))) {
       throw new TypeError('Exact mass graph requires the complete same-device COPY_SRC proposal buffer');
@@ -299,12 +317,13 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     const destinations = partition ? allocate(device, temporary.resources, 'ulg-exact-mass-destinations', sourceRows * 4) : null;
     const control = allocate(device, temporary.resources, 'ulg-exact-mass-control', 64);
     const verdict = allocate(device, temporary.resources, 'ulg-exact-mass-verdict', 64, MAP_READ | COPY_DST);
-    const code = createSphExactMassTransferWgsl(format, { partition });
+    const version = allocation ? 3 : partition ? 2 : 1;
+    const code = createSphExactMassTransferWgsl(format, { partition, allocation });
     const bindings = ['uniform', 'read-only-storage', 'read-only-storage', 'storage', 'storage'];
     if (partition) bindings.push('read-only-storage');
     const stages = ['exact_mass_gather', 'exact_mass_validate', 'exact_mass_finalize'].map(entryPoint => {
       const info = createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-${entryPoint}.v${partition ? 2 : 1}.${format.wordCount}.${format.quantumExponent}`,
+        cacheKey: `ulg-${entryPoint}.v${version}.${format.wordCount}.${format.quantumExponent}`,
         label: entryPoint, entryPoint, code,
         bindings: bindings.map((type, binding) => computeBufferBinding(binding, type))
       });
@@ -316,7 +335,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     });
     for (const read of held) liveRead(read, device);
     const words = [rowCount, edgeCount, sourceGeneration, generation];
-    if (partition) words.push(sourceRows, records.length, 0, 0);
+    if (partition) words.push(sourceRows, records.length, allocation ? 1 : 0, 0);
     device.queue.writeBuffer(params, 0, new Uint32Array(words));
     const encoder = device.createCommandEncoder();
     if (snapshotSource) {
@@ -347,7 +366,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     verdict.unmap(); mapBuffer = null;
     if (!await fence) throw new Error('Exact mass device lost before confirmed retirement');
     for (const read of held) liveRead(read, device);
-    if (header[0] !== SPH_EXACT_MASS_TRANSFER_MAGIC || header[1] !== (partition ? 2 : 1) || ![1, 2].includes(header[2])
+    if (header[0] !== SPH_EXACT_MASS_TRANSFER_MAGIC || header[1] !== version || ![1, 2].includes(header[2])
         || header[4] !== rowCount || header[5] !== edgeCount || header[6] !== rowCount
         || header[7] !== generation || header[8] !== sourceGeneration
         || (partition && (header[9] !== sourceRows || header[10] !== records.length))
@@ -356,8 +375,9 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     }
     const receipt = Object.freeze({ ready: header[2] === 1, errorBits: header[3], rowCount,
       edgeCount, sourceGeneration, generation, ...(partition ? { sourceRowCount: sourceRows, sourceCount: records.length } : {}),
-      observedBytes: 64, scope: 'mass-only', physicalPublicationAdmitted: false });
-    const provenance = partition ? Object.freeze({ kind: 'mass-partition-transfer-candidate',
+      observedBytes: 64, scope: 'mass-only', physicalPublicationAdmitted: false,
+      ...(allocation ? { packetSelection: 'cumulative-integer-ratio' } : {}) });
+    const provenance = partition ? Object.freeze({ kind: allocation ? 'mass-allocation-candidate' : 'mass-partition-transfer-candidate',
       sources: Object.freeze(held.map(read => Object.freeze({ familyId: read.family.familyId,
         generation: read.generation, rowOffset: read.rowOffset, rowCount: read.rowCount }))) })
       : Object.freeze({ kind: 'mass-transfer-candidate', sourceFamilyId: source.family.familyId, sourceGeneration,

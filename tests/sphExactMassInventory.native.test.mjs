@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { exactMassRatioCases } from './fixtures/sphExactMassAllocationNative.js';
 import {
   createSphExactMassFormat, encodeSphExactMass, encodeSphExactMassUnits,
   decodeSphExactMass, projectSphExactMassF32Bits, SPH_EXACT_MASS_ERROR as E
@@ -21,6 +22,7 @@ sourcePaths.push('tests/fixtures/sphExactMassContinuationNative.js', 'src/runtim
   'src/runtime/sph/sphThermalGpuKernel.js', 'src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
 sourcePaths.push('src/runtime/sph/schroederFusedFineSubstepGpu.js',
   'src/runtime/sph/schroederCrossLevelCouplingGpu.js', 'src/runtime/sph/sphGpuParticleRowSizes.js');
+sourcePaths.push('tests/fixtures/sphExactMassAllocationNative.js');
 
 function fixtures(format) {
   const mask = (1n << BigInt(format.wordCount * 32)) - 1n;
@@ -74,6 +76,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
     createSphExactMassFormat({ wordCount: 1, quantumExponent: 0 }),
     createSphExactMassFormat({ wordCount: 66, quantumExponent: -1074 })];
   const cases = formats.map(fixtures);
+  const ratioCases = formats.map(format => exactMassRatioCases(format.wordCount));
   const sources = await Promise.all(sourcePaths.map(async path => ({ path,
     sha256: sha(await readFile(new URL('../' + path, import.meta.url))) })));
   const evidence = { schema: 'ulg.native-exact-mass-arithmetic.v1', sources, started: new Date().toISOString(),
@@ -114,7 +117,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
         await page.goto(new URL('package.json', baseUrl).href, { waitUntil: 'networkidle', timeout: 60_000 });
       }
     }
-    evidence.result = await page.evaluate(async ({ formats, inputs, observeAuthority }) => {
+    evidence.result = await page.evaluate(async ({ formats, inputs, ratioInputs, observeAuthority }) => {
       const url = '/src/runtime/sph/sphExactMassWgsl.js';
       const transformed = await (await fetch(url)).text();
       const dependency = [...transformed.matchAll(/from\s+['"]([^'"]+)['"]/g)]
@@ -125,7 +128,9 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       if (!adapter) throw new Error('Native WebGPU adapter unavailable');
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter) || {});
-      const errors = [], results = [], transfers = [], partitions = [], windows = [];
+      const errors = [], results = [], transfers = [], partitions = [], windows = [], ratios = [];
+      let allocations = [];
+      const allocationFixture = await import('/tests/fixtures/sphExactMassAllocationNative.js');
       let coldOwnership = null;
       let continuation = null;
       let spatialContinuation = null;
@@ -138,6 +143,8 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       try {
         for (let f = 0; f < formats.length; f++) {
           const format = abi.createSphExactMassFormat(formats[f]), n = format.wordCount;
+          ratios.push(await allocationFixture.runExactMassRatioNative(device, format,
+            shader.createSphExactMassWgsl(format), ratioInputs[f]));
           const input = new Uint32Array(inputs[f]), count = input.length / (3 * n + 1), stride = 5 * n + 7;
           const code = shader.createSphExactMassWgsl(format) + `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
@@ -202,6 +209,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         const owner = await import(ownerUrl);
         const identity = await import('/src/runtime/sph/sphGpuDeviceIdentity.js');
         const format = abi.createSphExactMassFormat();
+        allocations = await allocationFixture.runExactMassAllocationNative({ device, abi, owner, identity, format });
         const initial = [1.5, 2 ** -10 + 2 ** -33, 0, 0];
         const families = [], reads = [];
         const create = (massesKg, inventoryFormat = format) => {
@@ -518,14 +526,39 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, partitions, windows, coldOwnership, continuation, spatialContinuation,
+      return { results, ratios, allocations, transfers, partitions, windows, coldOwnership, continuation, spatialContinuation,
         fusedContinuation, fusedSpatialContinuation, sequenceContinuations, twoLevelContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
       formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
-      inputs: cases.map(fixture => [...fixture.input]) });
+      inputs: cases.map(fixture => [...fixture.input]),
+      ratioInputs: ratioCases.map((rows, i) => rows.flatMap(row => [row.a, row.lower, row.upper, row.denominator]
+        .flatMap(value => Array.from(encodeSphExactMassUnits(value, formats[i]))))) });
     assert.deepEqual(evidence.result.errors, []);
     assert.deepEqual(evidence.errors, []);
+    for (const [index, format] of formats.entries()) {
+      const result = evidence.result.ratios[index], n = format.wordCount, stride = 3 * n + 2;
+      assert.equal(result.sourceUnchanged, true);
+      const partitions = new Map();
+      for (const [i, row] of ratioCases[index].entries()) {
+        const words = new Uint32Array(result.words.slice(i * stride, (i + 1) * stride));
+        const value = offset => decodeSphExactMass(words.subarray(offset, offset + n), format).coefficient;
+        const ratioError = row.denominator === 0n ? E.DIVISION_BY_ZERO : row.upper > row.denominator ? E.INVALID_RATIO : 0;
+        const shareError = row.lower > row.upper ? E.INVALID_RATIO : ratioError;
+        assert.equal(words[3 * n], ratioError, row.name);
+        assert.equal(words[3 * n + 1], shareError, row.name);
+        assert.equal(value(0), ratioError ? row.a : row.a * row.upper / row.denominator, row.name);
+        assert.equal(value(n), ratioError ? 0n : row.a * row.upper % row.denominator, row.name);
+        assert.equal(value(2 * n), shareError ? row.a : row.a * row.upper / row.denominator - row.a * row.lower / row.denominator, row.name);
+        if (!ratioError) {
+          assert.equal(value(0) * row.denominator + value(n), row.a * row.upper, row.name + ' exact quotient identity');
+          assert.ok(value(n) < row.denominator, row.name + ' reduced remainder');
+        }
+        if (row.name.startsWith('partition-')) partitions.set(row.a, (partitions.get(row.a) ?? 0n) + value(2 * n));
+      }
+      for (const [source, total] of partitions) assert.equal(total, source, 'complete product allocation telescopes');
+    }
+    evidence.passedRatioCases = ratioCases.reduce((count, rows) => count + rows.length, 0);
     for (const [index, format] of formats.entries()) {
       const { rows, mask } = cases[index], result = evidence.result.results[index], n = format.wordCount;
       assert.equal(result.sourceUnchanged, true);
@@ -567,6 +600,33 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
       for (let i = 0; i < words.length; i += n) values.push(decodeSphExactMass(new Uint32Array(words.slice(i, i + n)), format).coefficient);
       return values;
     };
+    const allocationFailures = new Set(['zero-denominator', 'reversed-interval', 'outside-interval',
+      'gross-overspend', 'invalid-endpoint', 'self-edge', 'missing-allocation-validation']);
+    for (const run of evidence.result.allocations) {
+      assert.deepEqual(run.sourceAfter, run.before, run.name + ' source immutable');
+      assert.equal(run.ready, !allocationFailures.has(run.name), run.name + ': ' + run.failure);
+      assert.equal(run.physicalPublicationAdmitted, false);
+      if (run.name === 'missing-allocation-validation') {
+        assert.match(run.failure, /Malformed exact-mass transfer verdict/); continue;
+      }
+      assert.equal(run.failure, null, run.name); assert.equal(run.observedBytes, 64);
+      assert.equal(run.packetSelection, 'cumulative-integer-ratio');
+      if (!run.ready) { assert.notEqual(run.errorBits, 0); assert.equal(run.after, null); continue; }
+      assert.equal(run.provenanceKind, 'mass-allocation-candidate');
+      const before = run.before.flatMap(units), initial = Array(run.outputRowCount).fill(0n);
+      before.forEach((value, row) => { initial[run.mapping[row]] += value; });
+      const expected = [...initial];
+      for (const [donor, receiver, lo, hi, den] of run.edges) {
+        const packet = initial[donor] * BigInt(hi) / BigInt(den) - initial[donor] * BigInt(lo) / BigInt(den);
+        expected[donor] -= packet; expected[receiver] += packet;
+      }
+      assert.deepEqual(units(run.after), expected, run.name);
+      assert.equal(expected.reduce((a, b) => a + b, 0n), before.reduce((a, b) => a + b, 0n));
+    }
+    assert.deepEqual(evidence.result.allocations.find(run => run.name === 'joined-reactant-product-thirds').after,
+      evidence.result.allocations.find(run => run.name === 'permuted-product-edges').after);
+    assert.deepEqual(units(evidence.result.allocations.find(run => run.name === 'one-quantum-three-products').after), [0n, 0n, 0n, 1n]);
+    evidence.passedAllocationCases = evidence.result.allocations.length;
     const successful = new Set(['cross-binade', 'successor-spends-preserved-low-bit', 'shared-cancellation',
       'shared-permuted', 'complete-depletion-and-birth', 'zero-packet', 'cold-uploader-hidden-packet',
       'window-local-transfer-hidden-bit', 'window-prefix-transfer', 'window-after-root-retirement',

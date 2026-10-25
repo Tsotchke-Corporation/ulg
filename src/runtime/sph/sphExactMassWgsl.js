@@ -13,6 +13,7 @@ struct ExactMass { words: array<u32, ${format.wordCount}> }
 struct ExactMassResult { value: ExactMass, error: u32 }
 struct ExactMassProjection { bits: u32, error: u32 }
 struct ExactMassTransfer { donor: ExactMass, receiver: ExactMass, error: u32 }
+struct ExactMassRatio { value: ExactMass, remainder: ExactMass, error: u32 }
 
 fn em_zero(a: ExactMass) -> bool {
   var bits = 0u;
@@ -77,6 +78,74 @@ fn em_top(a: ExactMass) -> i32 {
     if (word != 0u) { return i * 32 + 31 - i32(countLeadingZeros(word)); }
   }
   return -1;
+}
+// floor(a * numerator / denominator), including the exact division remainder.
+// A bounded ratio needs no double-width product. At each source bit, reduce
+// 2*r and then r+numerator before either addition can overflow. The quotient
+// stays <= the processed prefix of a, even when a occupies every limb.
+// This is integer packet selection, not floating-point mass reconstruction.
+fn em_multiply_ratio(a: ExactMass, numerator: ExactMass, denominator: ExactMass) -> ExactMassRatio {
+  if (em_zero(denominator)) {
+    return ExactMassRatio(a, ExactMass(), ${ERROR.DIVISION_BY_ZERO}u);
+  }
+  if (em_compare(numerator, denominator) > 0) {
+    return ExactMassRatio(a, ExactMass(), ${ERROR.INVALID_RATIO}u);
+  }
+  var quotient: ExactMass;
+  var remainder: ExactMass;
+  let denominator_minus_numerator = em_subtract(denominator, numerator).value;
+  for (var bit = em_top(a); bit >= 0; bit--) {
+    var increment = 0u;
+    let complement = em_subtract(denominator, remainder).value;
+    if (em_compare(remainder, complement) >= 0) {
+      remainder = em_subtract(remainder, complement).value;
+      increment = 1u;
+    } else {
+      remainder = em_add(remainder, remainder).value;
+    }
+    if (em_bit(a, bit) != 0u) {
+      if (em_compare(remainder, denominator_minus_numerator) >= 0) {
+        remainder = em_subtract(remainder, denominator_minus_numerator).value;
+        increment++;
+      } else {
+        remainder = em_add(remainder, numerator).value;
+      }
+    }
+    // q' = 2*q + increment, where increment can be two. Propagate that
+    // extra unit explicitly; bitwise OR would lose it at a low-word carry.
+    var shift_carry = 0u;
+    for (var word = 0u; word < EM_WORDS; word++) {
+      let next_carry = quotient.words[word] >> 31u;
+      quotient.words[word] = (quotient.words[word] << 1u) | shift_carry;
+      shift_carry = next_carry;
+    }
+    var add_carry = increment;
+    for (var word = 0u; word < EM_WORDS; word++) {
+      let before = quotient.words[word];
+      quotient.words[word] += add_carry;
+      add_carry = select(0u, 1u, quotient.words[word] < before);
+    }
+    if (shift_carry != 0u || add_carry != 0u) {
+      return ExactMassRatio(a, ExactMass(), ${ERROR.OVERFLOW}u);
+    }
+  }
+  return ExactMassRatio(quotient, remainder, 0u);
+}
+
+// An ordered product term owns [lower, upper) in an exact cumulative weight
+// partition. Adjacent terms telescope; [0, denominator) allocates all of a,
+// including its last low bit. A zero share is an exact result, not permission
+// to erase a positive physical owner. Material/phase gates remain separate.
+fn em_partition_share(a: ExactMass, lower: ExactMass, upper: ExactMass,
+  denominator: ExactMass) -> ExactMassResult {
+  if (em_compare(lower, upper) > 0) {
+    return ExactMassResult(a, ${ERROR.INVALID_RATIO}u);
+  }
+  let start = em_multiply_ratio(a, lower, denominator);
+  let end = em_multiply_ratio(a, upper, denominator);
+  let error = start.error | end.error;
+  if (error != 0u) { return ExactMassResult(a, error); }
+  return em_subtract(end.value, start.value);
 }
 // Caller establishes that the rounded result has at most 25 significant bits.
 fn em_rounded_shift(a: ExactMass, shift: i32) -> u32 {

@@ -252,6 +252,55 @@ carrier and unplaced-residual windows from one validated terminal allocation.
 
 ## Pair-owned physical reaction allocation
 
+### Exact cumulative allocation arithmetic — 2026-10-25
+
+`em_multiply_ratio` now computes `floor(a*numerator/denominator)` and the
+exact division remainder with integer limbs. The bounded ratio never forms
+an overflowing double-width product: each source bit reduces the doubled
+remainder and its numerator addition before accumulation. The quotient
+increment can be two and propagates across every limb. Zero denominators and
+ratios greater than one reject explicitly.
+
+`em_partition_share` subtracts cumulative floors at two ordered integer
+weights. Adjacent intervals covering the complete denominator telescope to
+the entire original amount, including its last quantum. The weights are
+dimensionless integers; their scale is independent of the mass quantum.
+The producer must construct checked cumulative sums and preserve actual term
+identity. A zero selected term is a numerical result, not evidence of missing
+or invalid chemistry metadata.
+
+`runSphExactMassAllocationCandidateWebGpu` executes these selected packets over
+the existing joined/remapped immutable source domain. It reuses the private
+numeric owner, source-window reservation, independent stored-state validation,
+64-byte verdict and confirmed-queue/loss retirement. A distinct version-3
+verdict authenticates the three-weight edge layout. Unallocated inventory
+remains at the donor; gross outgoing allocation cannot spend incoming packets.
+This operation establishes mass conservation only, not the physical meaning
+or disjointness of supplied weight intervals.
+
+Native evidence in
+`/home/cos/.cache/icc/repos/ulg/g2-reaction-integer-allocation-20261025-X0Fme7/native-r1.json`
+passes **414 ratio cases and 15 allocation cases**, plus the existing 6,176
+arithmetic cases, 54 transfers, 32 partitions and actual preserving continuation
+matrix. The checks include full-width quotients/remainders, uneven and zero
+shares, one-quantum allocation, remapped joined donors, shared destinations,
+edge permutation, retained residual-window reuse after parent retirement,
+invalid ratios, overspending and missing validation. Every source remains
+unchanged. Host checks reject wrong graph widths and substituted verdict
+versions and cover confirmed-loss cleanup. All 616 frozen source hashes match.
+
+**Physical reaction integration remains pending.** Select the two donor
+debits from one executed total and exact reactant weight partition, capped by
+both exact availabilities and the kinetics proposal. Product allocation must
+be chosen before the caloric solve; that solve, COM motion, volume and entity
+projections must consume the selected amounts. The existing table accepts
+rounded molar-mass balance within its documented tolerance; exact kg accounting
+alone does not prove exact element amounts. Preserve the existing element and
+charge acceptance checks on executed allocations. Do not relax them or infer
+depletion from f32 subtraction. Actual placement, residual history and outer
+publication still need matching producer-owned numeric roles. The migration
+guards stay closed until that chain is complete.
+
 The existing physical-energy reaction producer now chooses one accepted
 allocation per mutual pair. A separate initialization dispatch copies every
 source row and clears every allocation record; the lower endpoint then stages

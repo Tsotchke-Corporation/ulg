@@ -4,7 +4,8 @@ import { createSphExactMassFormat, encodeSphExactMass }
   from '../ulg-gpu-abi/src/sphExactMassInventory.js';
 import { createSphExactMassInventoryWebGpu, acquireSphExactMassRead, validateSphExactMassRead,
   releaseSphExactMassRead, releaseSphExactMassInventory, runSphExactMassTransferCandidateWebGpu,
-  runSphExactMassPartitionCandidateWebGpu, forkSphExactMassRead, sliceSphExactMassRead }
+  runSphExactMassPartitionCandidateWebGpu, runSphExactMassAllocationCandidateWebGpu,
+  forkSphExactMassRead, sliceSphExactMassRead }
   from '../src/runtime/sph/sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
@@ -253,7 +254,7 @@ function installSyntheticVerdict(device, mutate = () => {}) {
     buffer.getMappedRange = () => {
       const params = new Uint32Array(device.allocated.findLast(value => value.label === 'ulg-exact-mass-params').bytes);
       const header = new Uint32Array(16);
-      header.set([0x454d5431, params.length === 8 ? 2 : 1, 1, 0, params[0], params[1], params[0], params[3], params[2]]);
+      header.set([0x454d5431, params.length === 8 ? (params[6] === 1 ? 3 : 2) : 1, 1, 0, params[0], params[1], params[0], params[3], params[2]]);
       if (params.length === 8) { header[9] = params[4]; header[10] = params[5]; }
       mutate(header);
       return header.buffer;
@@ -276,7 +277,8 @@ for (const word of [1, 7, 8, 9, 10, 11]) test(`partition rejects malformed verdi
   await f.device.drain(); assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
 });
 
-for (const partition of [false, true]) test(`loss during final ${partition ? 'partition' : 'transfer'} cleanup cannot deliver a dead successful family`, async () => {
+for (const mode of ['transfer', 'partition', 'allocation']) test(`loss during final ${mode} cleanup cannot deliver a dead successful family`, async () => {
+  const partition = mode !== 'transfer';
   const f = fixture(), first = acquireSphExactMassRead(f.expected), second = partition ? secondSource(f) : null;
   installSyntheticVerdict(f.device);
   let fences = 0;
@@ -285,7 +287,7 @@ for (const partition of [false, true]) test(`loss during final ${partition ? 'pa
     return Promise.resolve();
   };
   const candidate = partition
-    ? runSphExactMassPartitionCandidateWebGpu({ device: f.device, sourceReads: [first, second.read],
+    ? (mode === 'allocation' ? runSphExactMassAllocationCandidateWebGpu : runSphExactMassPartitionCandidateWebGpu)({ device: f.device, sourceReads: [first, second.read],
       outputRowCount: 4, destinationBuffer: tagWebGpuBufferDevice({ size: 12, usage: 4 }, f.device), edgeFormat: f.format })
     : runSphExactMassTransferCandidateWebGpu({ device: f.device, sourceRead: first, edgeCount: 1,
       edgeBuffer: tagWebGpuBufferDevice({ size: 44, usage: 4 }, f.device), edgeFormat: f.format });
@@ -372,4 +374,38 @@ test('a rejected window-release fence quarantines its whole shared root until co
   await f.device.lose(); await pending;
   await releaseSphExactMassRead(root); await releaseSphExactMassRead(second);
   assert.equal(root.buffer.destroyed, 1);
+});
+
+for (const version of [1, 2, 4]) test(`allocation rejects a substituted version-${version} verdict`, async () => {
+  const f = fixture(), read = acquireSphExactMassRead(f.expected);
+  installSyntheticVerdict(f.device, words => { words[1] = version; });
+  await assert.rejects(runSphExactMassAllocationCandidateWebGpu({ device: f.device, sourceReads: [read],
+    outputRowCount: 3, destinationBuffer: tagWebGpuBufferDevice({ size: 8, usage: 4 }, f.device), edgeFormat: f.format }),
+  /Malformed exact-mass transfer verdict/);
+  releaseSphExactMassInventory(f.family); await releaseSphExactMassRead(read); await f.device.drain();
+  assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
+});
+
+test('allocation snapshots three complete integer weight records and marks its numeric provenance', async () => {
+  const f = fixture(), read = acquireSphExactMassRead(f.expected);
+  const options = { device: f.device, sourceReads: [read], outputRowCount: 3,
+    destinationBuffer: tagWebGpuBufferDevice({ size: 8, usage: 4 }, f.device), edgeCount: 1, edgeFormat: f.format };
+  for (const size of [44, 112, 120]) {
+    const count = f.device.allocated.length;
+    await assert.rejects(runSphExactMassAllocationCandidateWebGpu({ ...options,
+      edgeBuffer: tagWebGpuBufferDevice({ size, usage: 4 }, f.device) }), /complete same-device COPY_SRC proposal/);
+    assert.equal(f.device.allocated.length, count);
+  }
+  installSyntheticVerdict(f.device);
+  const graph = tagWebGpuBufferDevice({ size: 116, usage: 4 }, f.device);
+  const result = await runSphExactMassAllocationCandidateWebGpu({ ...options, edgeBuffer: graph });
+  assert.equal(result.packetSelection, 'cumulative-integer-ratio');
+  assert.equal(result.family.provenance.kind, 'mass-allocation-candidate');
+  assert.equal(result.physicalPublicationAdmitted, false);
+  assert.equal(f.device.copies.find(copy => copy[0] === graph)[4], 116);
+  assert.deepEqual([...new Uint32Array(f.device.allocated.find(buffer => buffer.label === 'ulg-exact-mass-params').bytes)],
+    [3, 1, 0, 1, 2, 1, 1, 0]);
+  releaseSphExactMassInventory(result.family); releaseSphExactMassInventory(f.family);
+  await releaseSphExactMassRead(read); await f.device.drain();
+  assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
 });

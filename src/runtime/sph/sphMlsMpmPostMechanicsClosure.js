@@ -41,7 +41,8 @@ import {
   acquireSphAerosolSpatialParcelRead,
   bindSphAerosolSpatialContinuation
 } from './sphAerosolSpatialBinding.js';
-import { ensureSphGpuParticleBufferSetBorrowLifecycle } from './sphGpuBuffers.js';
+import { ensureSphGpuParticleBufferSetBorrowLifecycle,
+  sphGpuParticleUploadAdvertisesExactMass, sphGpuParticleUploadAdvertisesDispersedMediumOptics } from './sphGpuBuffers.js';
 import { validateSchroederSpatialEpochGenerationLevelAssignment } from './schroederSpatialEpochGpu.js';
 
 // SS source authentication imports this closure through the aerosol binding.
@@ -99,6 +100,49 @@ const GAS_SOURCE_EPOCH_FIELDS = Object.freeze(['storageGeneration', 'physicsTick
 
 function gasSourceError(message) {
   return postMechanicsClosureError(message, 'ERR_MLS_MPM_POST_MECHANICS_GAS_SOURCE');
+}
+
+function validateCapturedExactMass(authority) {
+  const capture = authority.exactMassCapture;
+  if (!capture || capture.released) throw new TypeError('Closure has no live exact inventory capture');
+  capture.g2p.validate();
+  for (const seal of capture.seals) seal.validate();
+  const [thermal, refresh] = capture.seals;
+  if (capture.seals.length !== 2 || capture.stageNames.join(',') !== 'thermalStep,mechanicsRefresh'
+      || thermal.inputs.sourceStateBuffer !== capture.g2p.stateBuffer
+      || thermal.inputs.sourceThermoBuffer !== capture.g2p.thermoBuffer
+      || refresh.inputs.sourceStateBuffer !== thermal.output.stateBuffer
+      || refresh.inputs.sourceThermoBuffer !== thermal.output.thermoBuffer
+      || refresh.inputs.sourceMechanicsBuffer !== capture.g2p.mechanicsBuffer
+      || authority.closure.continuation !== authority.continuation
+      || authority.continuation.stateBuffer !== thermal.output.stateBuffer
+      || authority.continuation.thermoBuffer !== thermal.output.thermoBuffer
+      || authority.continuation.mechanicsBuffer !== refresh.output.mechanicsBuffer
+      || authority.continuation.residentProductMass != null) {
+    throw new TypeError('Exact inventory requires the unchanged genuine G2P/thermal/refresh chain');
+  }
+  return capture;
+}
+
+export function resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, nextParticleUploads) {
+  const authority = closureAuthorityFor(closure);
+  if (!validateMlsMpmPostMechanicsContinuationClaim(closure, claim, { nextParticleUploads })) {
+    throw new TypeError('Exact inventory requires the original claimed continuation');
+  }
+  const capture = validateCapturedExactMass(authority);
+  return Object.freeze({ sourceRead: capture.g2p.sourceRead });
+}
+
+function releaseExactMassCapture(capture) {
+  if (!capture || capture.released) return false;
+  capture.released = true;
+  for (const seal of capture.seals) seal.release();
+  capture.g2p?.release();
+  return true;
+}
+
+export function releaseMlsMpmPostMechanicsExactMassCapture(closure) {
+  return releaseExactMassCapture(closureAuthorityFor(closure).exactMassCapture);
 }
 
 function validateCapturedGasSource(authority) {
@@ -1486,6 +1530,10 @@ export function claimMlsMpmPostMechanicsContinuation(
   } = {}
 ) {
   const authority = closureAuthorityFor(closure);
+  if (authority.exactMassCapture && !authority.claimReceipt) {
+    if (!nextParticleUploads) throw new TypeError('Exact inventory requires a complete continuation envelope');
+    validateCapturedExactMass(authority);
+  }
   if (authority.gasSourceCapture?.activeReads > 0) {
     throw gasSourceError('A current closure source read still pins the continuation');
   }
@@ -1670,6 +1718,7 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
       );
     }
     releaseGasCapturePins(authority);
+    releaseExactMassCapture(authority.exactMassCapture);
     const failures = [];
     if (requestedAbandon && authority.gasSourceCapture?.mergeRetire
         && !authority.gasSourceCapture.mergeRetired) {
@@ -1874,6 +1923,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   sphParticleUpload,
   mlsMpmParticleUpload,
   postMechanicsParticleBuffers,
+  postMechanicsG2pResult = null,
   postMechanicsBackend = 'webgpu',
   schroederFarAggregateForceApplication = null,
   schroederFarForceDeltaFusionRunner = null,
@@ -1946,6 +1996,17 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   }
   const stageEligible = postMechanicsBackend === 'webgpu'
     && sphParticleUpload?.status === 'webgpu-uploaded';
+  const exactMassRequested = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
+  if (exactMassRequested && (!stageEligible || !preferWebGpu || readbackMode !== NO_FULL_READBACK_MODE
+      || !thermalMaterialTable || !mechanicsMaterialTable || !postMechanicsG2pResult
+      || reactionTable || inputResidentProductMass || condensateExtraction || captureGasSource
+      || sphParticleState?.phaseCarrierPlan || sphParticleUpload.phaseCarrierPlan
+      || mlsMpmParticleState?.phaseCarrierPlan || phaseCarrierTransferOptions.phaseCarrierPlan
+      || schroederFarAggregateForceApplication || sphAerosolSourceFamily(sphParticleUpload)
+      || sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload))) {
+    throw new TypeError('Exact inventory closure requires the preserving standard GPU chain; mass writers remain unadmitted');
+  }
+  const massCapture = exactMassRequested ? { seals: [], stageNames: [], g2p: null, released: false } : null;
   let gasCapture = null;
   if (captureGasSource === true) {
     if (condensateExtraction || (schroederFarAggregateForceApplication
@@ -1998,8 +2059,10 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         sourceTransaction: schroederSpatialEpochTransaction, aerosolFamily,
         kineticsAdmitted: false, exchangeIntervalAdmitted: false, outerPublicationAdmitted: false } };
   }
+  const completedCapturedStages = new Map();
   const capturedStage = async (name, runner, optionsForStage) => {
-    if (!gasCapture) return timedStage(name, () => runner(optionsForStage()));
+    const capture = gasCapture ?? massCapture;
+    if (!capture) return timedStage(name, () => runner(optionsForStage()));
     let standard;
     let resolve;
     if (name === 'thermalStep') {
@@ -2026,8 +2089,12 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       if (calls !== 1) throw gasSourceError(`Captured ${name} cannot be repeated`);
       const inputs = Object.freeze({ ...optionsForStage(), postMechanicsSourceCapture: token });
       actual = await runner(inputs);
+      // Timing/diagnostic wrappers can reject after a genuine producer has
+      // returned. Keep its cleanup owner before validating or returning it.
+      completedCapturedStages.set(name, actual);
       const seal = resolve(actual, token);
-      gasCapture.seals.push(seal);
+      capture.seals.push(seal);
+      capture.stageNames?.push(name);
       for (const [key, value] of Object.entries(seal.inputs)) {
         const expected = key === 'dtSeconds' && name === 'thermalStep' ? inputs.dtS : inputs[key];
         if (value !== expected) throw gasSourceError(`Captured ${name} effective ${key} mismatch`);
@@ -2068,6 +2135,14 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     return postSeparationThermalBinReleaseScheduled;
   };
   try {
+  if (massCapture) {
+    const { acquireMlsMpmG2pExactMassCapture } = await import('./sphG2pGpuKernel.js');
+    massCapture.g2p = acquireMlsMpmG2pExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload });
+    if (postMechanicsParticleBuffers.stateBuffer !== massCapture.g2p.stateBuffer
+        || postMechanicsParticleBuffers.mechanicsBuffer !== massCapture.g2p.mechanicsBuffer) {
+      throw new TypeError('Exact closure input differs from its genuine G2P output');
+    }
+  }
   if (gasCapture) {
     if (!ensureSphGpuParticleBufferSetBorrowLifecycle(sphParticleUpload)) {
       throw gasSourceError('Original identity upload has no live borrow owner');
@@ -2122,6 +2197,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   ) {
     thermalStep = await capturedStage('thermalStep', thermalStepRunner, () => ({
       ...thermalStepOptions,
+      ...(massCapture ? { exactMassG2pResult: postMechanicsG2pResult } : {}),
       device,
       sphParticleState,
       thermalMaterialTable,
@@ -3015,6 +3091,10 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     transaction: schroederSpatialEpochTransaction,
     generation: schroederSpatialEpochGeneration
   });
+  if (massCapture) {
+    closureAuthority.exactMassCapture = massCapture;
+    validateCapturedExactMass(closureAuthority);
+  }
   if (gasCapture) {
     for (const key of ['stateBuffer', 'thermoBuffer', 'mechanicsBuffer']) {
       if (!continuation[key] || !gasCapture.seals.some((seal) => seal.output[key] === continuation[key])) {
@@ -3060,6 +3140,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   }
   return closure;
   } catch (error) {
+    releaseExactMassCapture(massCapture);
     if (gasCapture) {
       for (const seal of gasCapture.seals) seal.release();
       gasCapture.mergeRelease?.();
@@ -3138,10 +3219,10 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         sphParticleUpload,
         mlsMpmParticleUpload,
         schroederFarForceDeltaFusion,
-        thermalStep,
-        reactionStep,
-        mechanicsRefreshStep,
-        phaseCarrierTransferStep,
+        thermalStep: thermalStep ?? completedCapturedStages.get('thermalStep'),
+        reactionStep: reactionStep ?? completedCapturedStages.get('reactionStep'),
+        mechanicsRefreshStep: mechanicsRefreshStep ?? completedCapturedStages.get('mechanicsRefresh'),
+        phaseCarrierTransferStep: phaseCarrierTransferStep ?? completedCapturedStages.get('phaseCarrierTransfer'),
         inputResidentProductMass,
         replacementResidentProductMass
       });

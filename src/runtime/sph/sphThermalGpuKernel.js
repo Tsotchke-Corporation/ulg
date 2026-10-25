@@ -1,5 +1,5 @@
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
-import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
+import { assertSphLegacyMassPathAllowed, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import {
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -517,8 +517,8 @@ function finiteVector3(value, fallback) {
   ];
 }
 
-function assertPackedSphParticleState(sphParticleState) {
-  assertSphLegacyMassPathAllowed({ sphParticleState }, 'Thermal CPU fallback');
+function assertPackedSphParticleState(sphParticleState, exactCapture = null) {
+  if (!exactCapture) assertSphLegacyMassPathAllowed({ sphParticleState }, 'Thermal CPU fallback');
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('SPH thermal GPU step requires a packed SPH GPU particle buffer');
   }
@@ -3540,7 +3540,11 @@ async function readBuffer(device, sourceBuffer, byteLength) {
   }
 }
 
-export function createSphThermalStepWebGpuEncoderStage({
+export function createSphThermalStepWebGpuEncoderStage(args = {}) {
+  return createSphThermalStepWebGpuEncoderStageImpl(args);
+}
+
+function createSphThermalStepWebGpuEncoderStageImpl({
   device,
   sphParticleState,
   thermalMaterialTable,
@@ -3573,9 +3577,9 @@ export function createSphThermalStepWebGpuEncoderStage({
   // Classic execution uses them only to enumerate the common v2 pair law;
   // overflow or unsupported support radii fall back inside the proposal pass.
   neighborBins = null
-} = {}) {
-  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Thermal continuation');
-  assertPackedSphParticleState(sphParticleState);
+} = {}, exactCapture = null) {
+  if (!exactCapture) assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Thermal continuation');
+  assertPackedSphParticleState(sphParticleState, exactCapture);
   assertSphCondensableInitializationMatches(sphParticleState, null, thermalMaterialTable);
   assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -4168,6 +4172,32 @@ export function resolveSphThermalSourceCapture(result, token) {
 }
 
 export async function runSphThermalStepWebGpu(args = {}) {
+  if (args.exactMassG2pResult == null) return runSphThermalStepWebGpuImpl(args);
+  if (!args.postMechanicsSourceCapture || args.retainOutputParticleBuffers !== true
+      || args.readbackMode !== NO_FULL_READBACK_MODE) throw new TypeError('Exact thermal continuation requires retained producer capture');
+  const { acquireMlsMpmG2pExactMassCapture } = await import('./sphG2pGpuKernel.js');
+  const capture = acquireMlsMpmG2pExactMassCapture(args.exactMassG2pResult,
+    { device: args.device, sphParticleUpload: args.sphParticleUpload });
+  let result = null;
+  try {
+    if (args.sourceStateBuffer !== capture.stateBuffer || args.sourceThermoBuffer !== capture.thermoBuffer
+        || args.sphParticleState?.particleCount !== capture.particleCount) {
+      throw new TypeError('Exact thermal input differs from its genuine G2P source');
+    }
+    result = await runSphThermalStepWebGpuImpl(args, capture);
+    capture.validate();
+    markSphExactMassDerivedBuffers(capture.sourceRead, [result.stateBuffer, result.thermoBuffer]);
+    return result;
+  } catch (error) {
+    if (result) {
+      thermalSourceCaptures.get(args.postMechanicsSourceCapture)?.release();
+      deferSubmittedWorkCleanup(args.device, () => result.destroyOutputParticleBuffers?.());
+    }
+    throw error;
+  } finally { capture.release(); }
+}
+
+async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null) {
   const token = args.postMechanicsSourceCapture ?? null;
   if (token) {
     if (thermalSourceCaptures.has(token)) throw new Error('Thermal source capture cannot replay');
@@ -4178,7 +4208,7 @@ export async function runSphThermalStepWebGpu(args = {}) {
     thermalMaterialTable: args.thermalMaterialTable,
     sourceStateBuffer: args.sourceStateBuffer, sourceThermoBuffer: args.sourceThermoBuffer,
     dtSeconds: args.dtS } : null;
-  const stage = createSphThermalStepWebGpuEncoderStage(args);
+  const stage = createSphThermalStepWebGpuEncoderStageImpl(args, exactCapture);
   const { device, sphParticleState, retainOutputParticleBuffers = false } = args;
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
   let submitted = false;

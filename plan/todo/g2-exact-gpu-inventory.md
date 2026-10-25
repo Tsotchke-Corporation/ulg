@@ -59,14 +59,16 @@ permit subnormal flushing, including intermediate bit reinterpretations.
 
 These are **mass-only numeric candidates**. They do not authorize a physical
 interval, material/phase conversion, coupled momentum/energy, preset enrollment,
-or outer publication. No default solver path uses this family yet. The current
+or outer publication. No default preset enrolls this family yet; the explicitly initialized standard
+non-fused solver can preserve it through the authenticated continuation below. The current
 gather costs `O(rows * edges)` and needs physical cell batching before large
 live enrollment. A numerical owner is not a replacement source-authority layer.
 
 ## Consumer integration map
 
-Cold carrier ownership is implemented; its live propagation and all remaining
-integrations below are still pending. Preserve the existing current-gas source
+Cold carrier ownership and the standard non-fused, mass-preserving
+G2P/thermal/refresh continuation are implemented. SS publication and the
+remaining integrations below are still pending. Preserve the existing current-gas source
 and outer-publication machinery; extend its actual owned families.
 
 | Path | Existing source/writer | Required exact-inventory integration |
@@ -74,8 +76,8 @@ and outer-publication machinery; extend its actual owned families.
 | Cold carrier | `sphGpuBuffers.js`, S[3], T[9], M[19]/M[31] | Initial exact mass and private owner implemented. Shared SPH/MLS cold provenance and complete mass/mole/volume projections remain pending. |
 | Product history | `sphResidentProductHistoryGpu.js`, H[3]/H[12]/H[13] and H[9] | Bind exact placed/unplaced partitions to live row membership, generation and count ownership. |
 | Aerosol | `sphAerosolParcelGpu.js`, parcel word 3 | Bind exact mass to family lifetime; retain separate dry-core and condensed-water components for nuclei. |
-| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Preserve the exact family through explicit constructors, copies, branches, retirement and topology changes. |
-| Current closure | `sphMlsMpmPostMechanicsClosure.js` retained stages and final tuple | Select matching exact inventory alongside the actual S/T/M and merged product history. |
+| Source propagation | `sphMlsMpmGpuStep.js` successor upload constructors and retained-buffer lists | Standard non-fused preserving continuation implemented, including shared identity lifetime and predecessor retirement. Canonical/fused branches and topology changes remain pending. |
+| Current closure | `sphMlsMpmPostMechanicsClosure.js` retained stages and final tuple | Genuine G2P plus existing thermal/refresh seals authenticate the preserving S/T/M chain and original continuation claim. Product history and mass-changing stages remain pending. |
 | Publication | `schroederSpatialSuccessorSourceFamily.js` | Authenticate exact inventory and format in source comparisons and the one terminal successor commit. |
 | Vapor/aerosol exchange | `sphVaporAerosolExchange*`, `sphSpatialGasLedgerEosGpu.js` | Use one executed integer packet, with complete mass/energy/momentum coupling and refreshed successor volume/EOS. |
 | EOS | `sphSpatialGasLedgerEosGpu.js` carrier entity count and residual-product mole scaling | Replace independently rounded mass/mole coordinates with common inventory/material projections. |
@@ -93,22 +95,36 @@ mass-preserving stage may explicitly retain its immutable inventory; a mass
 writer must issue the matched successor. Public feature booleans do not prove
 that the underlying family or writer is compatible.
 
-The cold uploader does not yet admit G2P/thermal/closure continuation. Its
-migration guards reject the main resident route, G2P, thermal, phase transfer,
-phase materialization, reaction/placement, extraction and compaction when an
-exact source is supplied, including the tested direct encoder/raw-buffer and
-CPU fallback paths. This is temporary rejection evidence, not a substitute for
-implementing those routes. Real presets remain unchanged.
+The admitted continuation executes real G2P, thermal and mechanics-refresh
+producers, captures their original private records, and binds the same inventory
+to the existing particle owner through the original closure claim and complete
+envelope. Source reads are reserved before asynchronous G2P execution and held
+until successor binding. Shared numeric storage and identity retire only after
+the final physical owner. The successor retains neither the previous closure
+nor an unbounded ancestor chain. Failed thermal execution and late rejected
+binding retire submitted outputs behind the queue fence.
 
-Next integrate the existing genuine producer and closure records. The current
-closure claim authenticates S/T/M ownership but does not yet attest unchanged
-mass through injected runners. Ordinary G2P needs a private genuine-producer
-capture; reuse thermal/refresh captures and the closure's existing authority.
-Reserve a source hold before asynchronous execution, bind the successor before
-releasing that hold, and close a shared numeric family only after its final
-physical owner retires. Do not mint a parallel physical-source authority or
-admit public `massUnchanged` flags. Product exact inventory is the **unplaced
-residual**, not historical total plus placed plus unplaced (which double-counts).
+Native evidence runs two actual moving/heating GPU steps, with each predecessor
+retired before the next step, and verifies every exact word survives. This
+proves inventory preservation. Mechanics and thermal response still consume f32
+projections; it does not prove complete low-part momentum/energy coupling.
+CPU tests separately cover original-record authentication, shared identity
+lifetime, successive owners and failure cleanup. No injected producer substitutes
+for the native sequence.
+
+Migration guards still reject canonical/SS/fused entry, phase transfer,
+materialization, reaction/placement, extraction, product history, gas-pressure
+coupling and compaction when an exact source is supplied. Direct raw-buffer
+thermal entry and CPU fallback also reject. Real presets remain unchanged.
+These guards are temporary migration boundaries, not all-consumer acceptance.
+
+Next extend the existing SS publication record and terminal commit. Its epoch
+stamping must agree with the private particle-owner snapshot, and exact reads
+must stay pinned through preparation, publication, source leases and retirement.
+Reuse the existing authority rather than adding a parallel source certificate.
+Then migrate product residuals, aerosol and all mass-changing consumers.
+Product exact inventory is the **unplaced residual**, not historical total plus
+placed plus unplaced (which double-counts).
 
 ## Implementation order and acceptance
 

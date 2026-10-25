@@ -101,6 +101,7 @@ const sphParticleBufferSetLifecycleRecords = new WeakMap();
 // Buffer identity also catches descriptors that drop the advertised field.
 const exactMassParticleBuffers = new WeakSet();
 const exactMassParticleReads = new WeakMap();
+const exactMassContinuationBindings = new WeakMap();
 const EXACT_MASS_PARTICLE_SOURCE_FIELDS = ['status', 'sourceSchema', 'particleCount',
   'storageGeneration', 'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch',
   'stateStrideBytes', 'thermoStrideBytes', 'identityStrideBytes', 'identitySchema', 'identityRevision',
@@ -670,6 +671,7 @@ export function buildSphGpuParticleBuffers(state, {
   return bindSphExactParticleMassSeed({
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
+    ...(state.storageGeneration == null ? {} : { storageGeneration: state.storageGeneration }),
     ...(caloricInitialization.signature ? { phaseCaloricInitializationSignature: caloricInitialization.signature } : {}),
     particleCount,
     dimension: state.dimension ?? 3,
@@ -1121,7 +1123,7 @@ function destroySphGpuParticleBuffersNow(buffers, record = null) {
   if (buffers.ownsThermoBuffer !== false) {
     (record?.thermoBuffer ?? buffers.thermoBuffer)?.destroy?.();
   }
-  if (buffers.ownsIdentityBuffer !== false) {
+  if (buffers.ownsIdentityBuffer !== false && !record?.exactMass) {
     (record?.identityBuffer ?? buffers.identityBuffer)?.destroy?.();
   }
   if (buffers.ownsMaterialPropertyBankWarmInputBuffer !== false) {
@@ -2501,7 +2503,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
         massesKg: exactSeed.massesKg,
         provenance: { kind: 'initial-conditions', reference: exactSeed.reference } });
       const read = acquireSphExactMassRead({ family, device });
-      lifecycleRecord.exactMass = { family, read, owners: { count: 1 }, retired: false,
+      lifecycleRecord.exactMass = { family, read, owners: { count: 1, identityBuffer }, retired: false,
         sourceFields: EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, upload[key]]) };
       Object.defineProperty(upload, 'exactMassInventory', { value: family, enumerable: true });
       for (const buffer of [stateBuffer, thermoBuffer, identityBuffer]) exactMassParticleBuffers.add(buffer);
@@ -2524,7 +2526,7 @@ function exactParticleMassOwnerMatches(upload, record) {
   const owner = record?.exactMass;
   if (!owner) return !sphGpuParticleUploadAdvertisesExactMass(upload);
   const borrowDescriptor = Object.getOwnPropertyDescriptor(upload, '__ulgActiveBorrowCount');
-  return !owner.retired && !record.destroyRequested && upload.exactMassInventory === owner.family
+  return !owner.retired && upload.exactMassInventory === owner.family
     && borrowDescriptor?.get === record.borrowAccessors.get && borrowDescriptor?.set === record.borrowAccessors.set
     && owner.sourceFields.every(([key, value]) => upload[key] === value)
     && upload.stateBuffer === record.stateBuffer && upload.thermoBuffer === record.thermoBuffer
@@ -2539,7 +2541,10 @@ function retireExactParticleMassOwner(record) {
   if (!owner || owner.retired) return;
   owner.retired = true;
   void releaseSphExactMassRead(owner.read);
-  if (--owner.owners.count === 0) releaseSphExactMassInventory(owner.family);
+  if (--owner.owners.count === 0) {
+    releaseSphExactMassInventory(owner.family);
+    owner.owners.identityBuffer.destroy();
+  }
 }
 
 /** A physical owner read pins both the row association and numeric storage. */
@@ -2568,6 +2573,77 @@ export async function releaseSphParticleExactMassRead(handle) {
     return true;
   });
   return held.completion;
+}
+
+export function validateSphParticleExactMassRead(handle, { device, sourceSphUpload } = {}) {
+  const held = exactMassParticleReads.get(handle);
+  return Boolean(held && !held.released && held.record.device === device && held.upload === sourceSphUpload
+    && !held.record.destroyed && exactParticleMassOwnerMatches(held.upload, held.record)
+    && validateSphExactMassRead(handle.read, { device, family: held.record.exactMass.family,
+      format: handle.read.format, expectedGeneration: handle.read.generation }));
+}
+
+/** Marking can only forbid legacy mutation; it does not authorize a successor. */
+export function markSphExactMassDerivedBuffers(handle, buffers) {
+  if (!validateSphParticleExactMassRead(handle, { device: handle?.read?.device,
+    sourceSphUpload: handle?.sourceSphUpload })) throw new TypeError('Invalid exact particle read');
+  for (const buffer of buffers) {
+    if (webGpuBufferDevice(buffer) !== handle.read.device) throw new TypeError('Exact derived buffer has a foreign device');
+    exactMassParticleBuffers.add(buffer);
+  }
+}
+
+/** Extend the existing particle owner only through a genuine claimed closure. */
+export async function bindSphExactMassPostMechanicsContinuation({ closure, claim, nextParticleUploads } = {}) {
+  const module = await import('./sphMlsMpmPostMechanicsClosure.js');
+  if (!module.validateMlsMpmPostMechanicsContinuationClaim(closure, claim, { nextParticleUploads })) {
+    throw new TypeError('Exact inventory continuation requires the original closure claim and envelope');
+  }
+  const target = nextParticleUploads.sphParticleUpload;
+  const existing = sphParticleBufferSetLifecycleRecords.get(target);
+  if (existing?.exactMass) {
+    const binding = exactMassContinuationBindings.get(closure);
+    if (binding?.target !== target || binding?.claim !== claim
+        || !exactParticleMassOwnerMatches(target, existing)) throw new TypeError('Exact continuation was replaced');
+    return target.exactMassInventory;
+  }
+  const capture = module.resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, nextParticleUploads);
+  const held = exactMassParticleReads.get(capture.sourceRead);
+  const source = held?.record;
+  if (!source || !validateSphParticleExactMassRead(capture.sourceRead, {
+    device: source.device, sourceSphUpload: held.upload })
+      || target.particleCount !== source.particleCount || target.identityBuffer !== source.identityBuffer
+      || target.identityRevision !== source.identityRevision || target.topologyEpoch !== source.topologyEpoch
+      || target.stateStrideBytes !== held.upload.stateStrideBytes || target.thermoStrideBytes !== held.upload.thermoStrideBytes
+      || target.identityStrideBytes !== held.upload.identityStrideBytes
+      || sphGpuParticleUploadAdvertisesDispersedMediumOptics(target)) {
+    throw new TypeError('Exact inventory continuation changed its retained row association');
+  }
+  const family = source.exactMass.family;
+  const read = acquireSphExactMassRead({ family, device: source.device });
+  let record = existing;
+  try {
+    if (!record) record = installSphGpuParticleBufferSetBorrowLifecycle(target, null);
+    if (!record || record.destroyed || record.admissionClosed || record.destroyRequested
+        || record.stateBuffer !== claim.stateBuffer || record.thermoBuffer !== claim.thermoBuffer
+        || ('exactMassInventory' in target && target.exactMassInventory !== family)) {
+      throw new TypeError('Exact inventory successor has no compatible private particle lifecycle');
+    }
+    Object.defineProperty(target, 'exactMassInventory', { value: family, enumerable: true });
+    record.exactMass = { family, read, owners: source.exactMass.owners, retired: false,
+      sourceFields: EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, target[key]]) };
+    record.exactMass.owners.count++;
+    markSphExactMassDerivedBuffers(capture.sourceRead, [target.stateBuffer, target.thermoBuffer, target.identityBuffer]);
+    exactMassContinuationBindings.set(closure, { target, claim });
+    module.releaseMlsMpmPostMechanicsExactMassCapture(closure);
+    return family;
+  } catch (error) {
+    if (record?.exactMass?.read === read) {
+      record.exactMass.owners.count--; record.exactMass = null;
+    }
+    void releaseSphExactMassRead(read);
+    throw error;
+  }
 }
 
 /** Temporary all-consumer migration boundary; never silently discard exact mass. */
@@ -2711,6 +2787,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
   return {
     schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
     status: 'cpu-derived-gpu-buffer-ready',
+    ...(state.storageGeneration == null ? {} : { storageGeneration: state.storageGeneration }),
     ...(caloricInitialization.signature ? { phaseCaloricInitializationSignature: caloricInitialization.signature } : {}),
     particleCount,
     step: state.step ?? 0,

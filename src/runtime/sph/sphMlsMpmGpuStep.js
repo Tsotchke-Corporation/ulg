@@ -1,4 +1,8 @@
-import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
+import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
+  bindSphExactMassPostMechanicsContinuation, acquireSphParticleExactMassRead,
+  releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
+import { releaseMlsMpmPostMechanicsExactMassCapture,
+  retireMlsMpmPostMechanicsClosureOutputsAfter } from './sphMlsMpmPostMechanicsClosure.js';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
@@ -16272,9 +16276,10 @@ function assertResidentCpuMirrorGuards({
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
   preferWebGpu = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  exactMassContinuation = false
 } = {}) {
-  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'Resident solver continuation');
+  if (!exactMassContinuation) assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'Resident solver continuation');
   const residentNoFullWebGpu = preferWebGpu && readbackMode === NO_FULL_READBACK_MODE;
   if (sphParticleState?.cpuStateStale && sphParticleUpload?.status !== 'webgpu-uploaded') {
     throw new Error('Stale SPH CPU mirror cannot drive an MLS-MPM resident step without the retained SPH GPU upload or an admitted readback');
@@ -35684,6 +35689,20 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   gpuTimestampRecorder = null,
   onResidentStageProgress = null
 } = {}) {
+  const exactMassContinuation = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
+  if (exactMassContinuation && (!preferWebGpu || !device || readbackMode !== NO_FULL_READBACK_MODE
+      || !thermalMaterialTable || !mechanicsMaterialTable || reactionTable || reactionActivationWatchTable
+      || residentProductMass || condensateExtraction || sphParticleState?.phaseCarrierPlan || sphParticleUpload.phaseCarrierPlan
+      || schroederParticleStorageMaterialization || schroederFarAggregateForceApplication
+      || schroederSpatialEpochGeneration || schroederSpatialEpochTransaction || canonicalSpatialRequired
+      || gasPressureMechanicsBoundaryEnabled || particleGasLedgerActionable
+      || fuseNoFullResidentMechanics || fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
+      || p2gRunner || gridUpdateRunner || g2pRunner || p2gStageRunner || gridUpdateStageRunner || g2pStageRunner
+      || thermalStepRunner !== runSphThermalStepWebGpu || mechanicsRefreshRunner !== runMlsMpmMechanicsRefreshWithOptionalWebGpu
+      || sphParticleUpload.aerosolFamily || sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload)
+      || dispersedMediumOpticsSeedRows || dispersedMediumOpticalClosureTable)) {
+    throw new TypeError('Resident exact-inventory continuation requires standard non-fused preserving stages; unsupported consumers remain gated');
+  }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   assertResidentCpuMirrorGuards({
     sphParticleState,
@@ -35691,7 +35710,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     sphParticleUpload,
     mlsMpmParticleUpload,
     preferWebGpu,
-    readbackMode
+    readbackMode,
+    exactMassContinuation
   });
   if (schroederFarAggregateGasStateDelta) {
     assertSchroederFarAggregateGasStateDeltaInput(schroederFarAggregateGasStateDelta);
@@ -35826,7 +35846,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   let canonicalFreshDispersedMediumOpticsReplacement = null;
   let canonicalAdoptedDispersedMediumTargetUpload = null;
   let postMechanicsClosure = null;
+  let exactMassG2pOutput = null;
+  let exactMassBoundUpload = null;
+  let exactMassSourceRead = null;
   try {
+    // Authenticate and pin before the first await, P2G or grid submission.
+    // G2P's producer capture later owns a separate read for its own lifetime.
+    if (exactMassContinuation) exactMassSourceRead = acquireSphParticleExactMassRead(sphParticleUpload, device);
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
         resolvedDeviceResult = await requestOpticalGpuDevice(navigatorRef, {
@@ -36690,6 +36716,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT
     );
   }
+  let exactG2pStage = null;
   const g2pReconstruction = fusedMechanics?.g2pReconstruction || await timedStage('g2pReconstruction', () => runMlsMpmG2pWithOptionalWebGpu({
     sphParticleState,
     mlsMpmParticleState,
@@ -36718,7 +36745,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     readbackMode: requestedReadbackMode,
     webGpuRunner: g2pRunner,
     onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+  }).then(result => {
+    if (exactMassContinuation) {
+      exactG2pStage = result;
+      exactMassG2pOutput = result.gpuResult;
+    }
+    return result;
   }));
+  if (exactMassContinuation && g2pReconstruction !== exactG2pStage) {
+    throw new TypeError('Exact G2P diagnostic wrapper replaced the genuine stage');
+  }
   const exactSingleLevelQueueOrderedCleanup =
     schroederSingleLevelQueueOrderedCleanupCapability == null
       ? false
@@ -36809,6 +36845,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     sphParticleUpload,
     mlsMpmParticleUpload,
     postMechanicsParticleBuffers: retainedG2pOutputBuffers(g2pReconstruction),
+    postMechanicsG2pResult: exactMassContinuation ? g2pReconstruction.gpuResult : null,
     postMechanicsBackend: g2pReconstruction?.backend,
     schroederFarAggregateForceApplication,
     schroederFarForceDeltaFusionRunner,
@@ -37528,10 +37565,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       orchestrationReadbackTelemetry:
         orchestrationReadbackTelemetry.snapshot()
     }));
-  if (postMechanicsClosure.aerosolCondensateTransition) {
-    claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, {
+  if (postMechanicsClosure.aerosolCondensateTransition || exactMassContinuation) {
+    const claim = claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, {
       nextParticleUploads: step.nextParticleUploads
     });
+    if (exactMassContinuation) {
+      await bindSphExactMassPostMechanicsContinuation({ closure: postMechanicsClosure, claim,
+        nextParticleUploads: step.nextParticleUploads });
+      exactMassBoundUpload = step.nextParticleUploads.sphParticleUpload;
+      Object.defineProperty(step, 'exactMassPostMechanicsClosure', { value: postMechanicsClosure });
+    }
     Object.defineProperty(step, 'aerosolPostMechanicsClosure', {
       value: postMechanicsClosure, enumerable: false
     });
@@ -38194,6 +38237,27 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   return step;
   } catch (error) {
     if (postMechanicsClosure) abandonMlsMpmPostMechanicsCondensate(postMechanicsClosure);
+    if (postMechanicsClosure) releaseMlsMpmPostMechanicsExactMassCapture(postMechanicsClosure);
+    if (exactMassG2pOutput || exactMassBoundUpload) {
+      deferSubmittedWorkCleanup(device, () => {
+        exactMassG2pOutput?.destroyOutputParticleBuffers?.();
+        const retireClosure = () => {
+          if (postMechanicsClosure) {
+            // A successful closure may still fail during envelope/binding.
+            // Its private owners retain the selected outputs until this
+            // confirmed fence, even when no successor was returned.
+            const retirement = retireMlsMpmPostMechanicsClosureOutputsAfter(postMechanicsClosure,
+              { after: Promise.resolve(true), abandon: true });
+            retirement.catch(() => {});
+            try { Object.defineProperty(error, 'exactMassClosureRetirement', { value: retirement }); } catch {}
+          }
+        };
+        if (exactMassBoundUpload) {
+          runSphGpuParticleBufferSetCleanupAfterBorrows(exactMassBoundUpload, retireClosure,
+            { terminalSourceRetirement: true });
+        } else retireClosure();
+      });
+    }
     const rejectedHistory = postMechanicsClosure?.continuation?.residentProductMass;
     if (rejectedHistory
       && !isSameResidentProductMass(rejectedHistory, residentProductMass)
@@ -38294,6 +38358,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       rejectResidentGpuLaneLease(gpuResidentLaneManager, gpuResidentLaneLease.leaseId, 'resident-step-error');
     }
     throw error;
+  } finally {
+    if (exactMassSourceRead) void releaseSphParticleExactMassRead(exactMassSourceRead);
   }
 }
 
@@ -39043,7 +39109,9 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   const destroySphUploadComponentsUnlessPreserved = (upload) => {
     if (upload.ownsStateBuffer !== false) destroyUnlessPreserved(upload.stateBuffer);
     if (upload.ownsThermoBuffer !== false) destroyUnlessPreserved(upload.thermoBuffer);
-    if (upload.ownsIdentityBuffer !== false) destroyUnlessPreserved(upload.identityBuffer);
+    if (upload.ownsIdentityBuffer !== false && !sphGpuParticleUploadAdvertisesExactMass(upload)) {
+      destroyUnlessPreserved(upload.identityBuffer);
+    }
     destroyDispersedMediumOpticsUnlessPreserved(upload);
     if (upload.ownsMaterialPropertyBankWarmInputBuffer !== false) {
       destroyUnlessPreserved(upload.materialPropertyBankWarmInputBuffer);
@@ -39056,7 +39124,9 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     if (!upload) return;
     if (runSphGpuParticleBufferSetCleanupAfterBorrows(
       upload,
-      () => destroySphUploadComponentsUnlessPreserved(upload)
+      () => destroySphUploadComponentsUnlessPreserved(upload),
+      { terminalSourceRetirement: sphGpuParticleUploadAdvertisesExactMass(upload)
+        && !preserved.has(upload.stateBuffer) && !preserved.has(upload.thermoBuffer) }
     )) return;
     destroySphUploadComponentsUnlessPreserved(upload);
   };

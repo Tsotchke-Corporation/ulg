@@ -14,6 +14,9 @@ const sourcePaths = ['ulg-gpu-abi/src/sphExactMassInventory.js',
   'src/runtime/sph/sphExactMassWgsl.js', 'src/runtime/sph/sphExactMassTransferWgsl.js',
   'src/runtime/sph/sphExactMassInventoryGpu.js', 'src/runtime/sph/sphExactMassParticleSeed.js',
   'src/runtime/sph/sphGpuBuffers.js', 'tests/sphExactMassInventory.native.test.mjs'];
+sourcePaths.push('tests/fixtures/sphExactMassContinuationNative.js', 'src/runtime/sph/sphG2pGpuKernel.js',
+  'src/runtime/sph/sphMlsMpmGpuStep.js', 'src/runtime/sph/sphMlsMpmPostMechanicsClosure.js',
+  'src/runtime/sph/sphThermalGpuKernel.js', 'src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
 
 function fixtures(format) {
   const mask = (1n << BigInt(format.wordCount * 32)) - 1n;
@@ -80,7 +83,33 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
     watchdog = setTimeout(() => { failure ??= new Error('Owned exact-mass browser timeout'); void browser.close(); }, 150_000);
     const page = await browser.newPage();
     page.on('pageerror', error => evidence.errors.push(String(error)));
+    evidence.browserConsole = []; evidence.navigations = [];
+    evidence.hotReloadMessages = []; evidence.failedRequests = [];
+    page.on('websocket', socket => socket.on('framereceived', frame => evidence.hotReloadMessages.push(String(frame.payload))));
+    page.on('response', response => { if (response.status() >= 400) evidence.failedRequests.push({ url: response.url(), status: response.status() }); });
+    page.on('console', message => evidence.browserConsole.push({ type: message.type(), text: message.text() }));
+    page.on('framenavigated', frame => { if (frame === page.mainFrame()) evidence.navigations.push(frame.url()); });
     await page.goto(new URL('package.json', baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    // Development-server invalidations may reload the empty harness when a
+    // newly imported cyclic module becomes reachable. Warm imports without a
+    // GPU device; only the subsequent uninterrupted evaluation is evidence.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await page.evaluate(async () => {
+          const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
+          await fixture.preloadExactMassContinuationNative();
+        });
+        break;
+      } catch (error) {
+        const observedReload = evidence.hotReloadMessages.some(message => message.includes('"type":"full-reload"'));
+        if (attempt >= 1 || (!String(error).includes('Execution context was destroyed')
+            && !(observedReload && String(error).includes('Failed to fetch')))) throw error;
+        // Start a fresh document after the observed invalidation. Waiting for
+        // the old document's load state can return before Vite navigates and
+        // leave rejected module imports cached in the retry context.
+        await page.goto(new URL('package.json', baseUrl).href, { waitUntil: 'networkidle', timeout: 60_000 });
+      }
+    }
     evidence.result = await page.evaluate(async ({ formats, inputs }) => {
       const url = '/src/runtime/sph/sphExactMassWgsl.js';
       const transformed = await (await fetch(url)).text();
@@ -90,9 +119,11 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       const [shader, abi] = await Promise.all([import(url), import(dependency)]);
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) throw new Error('Native WebGPU adapter unavailable');
-      const device = await adapter.requestDevice();
+      const limits = await import('/src/runtime/webgpuDeviceLimits.js');
+      const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter) || {});
       const errors = [], results = [], transfers = [];
       let coldOwnership = null;
+      let continuation = null;
       device.addEventListener('uncapturederror', event => errors.push(event.error.message));
       for (const type of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(type);
       try {
@@ -292,6 +323,8 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             coldOwnership && (coldOwnership.parentRetired = upload.destroyed === true);
             particles.destroySphGpuParticleBuffers(upload);
           }
+          const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
+          continuation = await fixture.runExactMassContinuationNative(device, format);
         } finally {
           await Promise.all(reads.map(read => owner.releaseSphExactMassRead(read)));
           families.forEach(family => owner.releaseSphExactMassInventory(family));
@@ -304,7 +337,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, coldOwnership, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
+      return { results, transfers, coldOwnership, continuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { formats: formats.map(({ wordCount, quantumExponent }) => ({ wordCount, quantumExponent })),
       inputs: cases.map(fixture => [...fixture.input]) });
@@ -381,6 +414,16 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
     assert.equal(cold.retirementDeferred, true); assert.equal(cold.newReadRejected, true);
     assert.equal(cold.parentRetired, true); assert.equal(cold.physicalContinuationAdmitted, false);
     evidence.coldParticleOwnershipPassed = true;
+    const continuation = evidence.result.continuation;
+    assert.equal(continuation.runs.length, 2);
+    for (const run of continuation.runs) {
+      assert.deepEqual(run.exact, Array.from(encodeSphExactMass(continuation.mass, format)));
+      assert.equal(run.backend, 'webgpu'); assert.equal(run.inventoryGeneration, 0);
+      assert.ok(run.state[0] > continuation.initialState[0], 'genuine G2P motion');
+      assert.notEqual(run.thermo[2], continuation.initialThermo[2], 'genuine thermal change');
+    }
+    assert.equal(continuation.successorUsableAfterOriginalRetirement, true);
+    evidence.twoStepPreservingContinuationPassed = true;
   } catch (error) { failure ??= error; evidence.failure = String(error.stack || error); }
   finally {
     clearTimeout(watchdog);

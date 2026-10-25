@@ -1,4 +1,6 @@
-import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
+import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
+  acquireSphParticleExactMassRead, releaseSphParticleExactMassRead,
+  validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import {
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_RECEIPT_LAYOUT,
@@ -1532,8 +1534,8 @@ function particleWallClearanceM(restVolumeM3, boxDimsM = DEFAULT_BOX_DIMS_M, gri
     : clearance;
 }
 
-function assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate, requireUpdatedGridNodes = true }) {
-  assertSphLegacyMassPathAllowed({ sphParticleState }, 'G2P CPU fallback');
+function assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate, requireUpdatedGridNodes = true }, exactMassRead = null) {
+  if (!exactMassRead) assertSphLegacyMassPathAllowed({ sphParticleState }, 'G2P CPU fallback');
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('MLS-MPM G2P requires a packed SPH GPU particle buffer');
   }
@@ -3647,7 +3649,76 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   };
 }
 
-export async function runMlsMpmG2pWebGpu({
+const exactMassG2pOutputs = new WeakMap();
+
+export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUpload } = {}) {
+  const record = exactMassG2pOutputs.get(result);
+  if (!record || record.retired || record.device !== device || record.sourceSphUpload !== sphParticleUpload
+      || !validateSphParticleExactMassRead(record.sourceRead, { device, sourceSphUpload: sphParticleUpload })
+      || record.fields.some(([key, value]) => result[key] !== value)) {
+    throw new TypeError('Exact mass requires the genuine live G2P producer output');
+  }
+  record.pins++;
+  let released = false;
+  return Object.freeze({ sourceRead: record.sourceRead,
+    stateBuffer: record.stateBuffer, thermoBuffer: record.thermoBuffer,
+    mechanicsBuffer: record.mechanicsBuffer, particleCount: record.sourceRead.particleCount,
+    validate() {
+      if (released || record.retired || record.fields.some(([key, value]) => result[key] !== value)
+          || !validateSphParticleExactMassRead(record.sourceRead, { device, sourceSphUpload: sphParticleUpload })) {
+        throw new TypeError('Exact G2P capture was changed or released');
+      }
+      return true;
+    },
+    release() { if (released) return false; released = true; record.pins--; return true; }
+  });
+}
+
+export async function runMlsMpmG2pWebGpu(args = {}) {
+  const exact = sphGpuParticleUploadAdvertisesExactMass(args.sphParticleUpload);
+  if (!exact) return runMlsMpmG2pWebGpuImpl(args);
+  if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE
+      || args.fusedFineSubstepTransaction || args.fusedCoarseTerminalTransaction) {
+    throw new TypeError('G2P requires an authenticated exact-inventory continuation with retained, non-fused GPU outputs');
+  }
+  const sourceRead = acquireSphParticleExactMassRead(args.sphParticleUpload, args.device);
+  let result = null;
+  try {
+    if (args.sphParticleState?.particleCount !== sourceRead.particleCount
+        || args.mlsMpmParticleState?.particleCount !== sourceRead.particleCount) throw new TypeError('Exact G2P row count mismatch');
+    result = await runMlsMpmG2pWebGpuImpl(args, sourceRead);
+    if (!validateSphParticleExactMassRead(sourceRead, { device: args.device, sourceSphUpload: args.sphParticleUpload })) {
+      throw new TypeError('Exact G2P source changed during execution');
+    }
+    markSphExactMassDerivedBuffers(sourceRead, [result.stateBuffer]);
+    const record = { device: args.device, sourceRead, sourceSphUpload: args.sphParticleUpload,
+      stateBuffer: result.stateBuffer, thermoBuffer: args.sphParticleUpload.thermoBuffer,
+      mechanicsBuffer: result.mechanicsBuffer, pins: 0, retired: false, fields: [] };
+    for (const key of ['destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']) {
+      const destroy = result[key];
+      result[key] = function (...inputs) {
+        if (record.pins) throw new Error('Exact G2P output is retained by a consumer');
+        let completed;
+        try { completed = destroy.apply(this, inputs); }
+        finally {
+          if (completed !== false) { record.retired = true; void releaseSphParticleExactMassRead(sourceRead); }
+        }
+        return completed;
+      };
+    }
+    record.fields = ['stateBuffer', 'mechanicsBuffer', 'stateBufferByteLength', 'mechanicsBufferByteLength',
+      'retainedOutputParticleBuffers', 'destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']
+      .map(key => [key, result[key]]);
+    exactMassG2pOutputs.set(result, record);
+    return result;
+  } catch (error) {
+    result?.destroyOutputParticleBuffers?.();
+    void releaseSphParticleExactMassRead(sourceRead);
+    throw error;
+  }
+}
+
+async function runMlsMpmG2pWebGpuImpl({
   device,
   sphParticleState,
   mlsMpmParticleState,
@@ -3681,8 +3752,8 @@ export async function runMlsMpmG2pWebGpu({
   queueOrderedProducerClaims = [],
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
-} = {}) {
-  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'G2P continuation');
+} = {}, exactMassRead = null) {
+  if (!exactMassRead) assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'G2P continuation');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -3729,7 +3800,7 @@ export async function runMlsMpmG2pWebGpu({
       `mechanicsFieldMode must be '${MLS_MPM_MECHANICS_FIELD_MODE_DISABLED}' or '${MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED}'`
     );
   }
-  assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate });
+  assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate }, exactMassRead);
   // A selected generation is the sole mechanics authority. Resolve and
   // authenticate it before allocating transient outputs, and never inspect a
   // legacy assignment payload in canonical mode.
@@ -4249,7 +4320,7 @@ export async function runMlsMpmG2pWebGpu({
     mlsMpmParticleState,
     gridUpdate,
     requireUpdatedGridNodes: !borrowedGridBuffer
-  });
+  }, exactMassRead);
   const stateBuffer = borrowedStateBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-state-in', sphParticleState.state));
   const thermoBuffer = borrowedThermoBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-thermo-in', sphParticleState.thermo));
   const mechanicsBuffer = borrowedMechanicsBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-mechanics-in', mlsMpmParticleState.mechanics));

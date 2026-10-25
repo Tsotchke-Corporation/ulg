@@ -275,6 +275,58 @@ test('native reaction reference energy, full unplaced state, no-op gating and re
               atoms: summary.atomResidualSummary,
               canonicalEventCount: summary.canonicalReactionEventCount, cycles: [] };
             observed.allocationRetired = allocationDestroyed === 1;
+            if (config.name === 'full') {
+              // Exercise the actual selected-mass caloric function with a
+              // diagnostic copy of this producer's allocation. Changing only
+              // selected term masses must change its sensible-energy sum;
+              // extent/normalization reconstruction would give the old value.
+              const code = reaction.sphReactionStepPipelineDescriptors({ sharedAllocation: true }).allocatePairs.code + `
+@group(0) @binding(26) var<storage, read_write> selected_energy_observation: array<f32>;
+@compute @workgroup_size(1)
+fn observe_selected_energy() {
+  let result = energy_product_sensible(0u, 0u, 310.0);
+  selected_energy_observation[0] = result.x;
+  selected_energy_observation[1] = result.y;
+}`;
+              const module = device.createShaderModule({ code });
+              const bad = (await module.getCompilationInfo()).messages.filter(message => message.type === 'error');
+              if (bad.length) throw new Error(bad.map(message => `${message.lineNum}:${message.message}`).join('\n'));
+              const pipeline = await device.createComputePipelineAsync({ layout: 'auto',
+                compute: { module, entryPoint: 'observe_selected_energy' } });
+              const records = device.createBuffer({ size: reactions.combinedRecords.byteLength, usage: 128 | 8 });
+              const chosen = device.createBuffer({ size: allocationCopy.size, usage: 128 | 8 });
+              const params = device.createBuffer({ size: 48, usage: 64 | 8 });
+              const output = device.createBuffer({ size: 8, usage: 128 | 4 });
+              try {
+                const parameters = new Uint32Array([sph.particleCount, reactions.reactionCount, reactions.productPhaseCount,
+                  0, 0, 1, reactions.reactantTermCount, reactions.productTermCount, reactions.gasProductCount,
+                  0, 1, reactions.gasConstitutiveOffsetVec4]);
+                device.queue.writeBuffer(records, 0, reactions.combinedRecords);
+                device.queue.writeBuffer(params, 0, parameters);
+                const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+                  { binding: 3, resource: { buffer: records } }, { binding: 11, resource: { buffer: params } },
+                  { binding: 25, resource: { buffer: chosen } }, { binding: 26, resource: { buffer: output } }
+                ] });
+                observed.selectedEnergy = [];
+                for (const mode of ['original', 'changed-selected-masses', 'unprepared']) {
+                  const allocation = new Float32Array(observed.gpu.allocation);
+                  if (mode === 'changed-selected-masses') {
+                    allocation[32 + 3] *= 1.25;
+                    allocation[64 + 3] *= .75;
+                  }
+                  if (mode === 'unprepared') allocation[20] = 0;
+                  device.queue.writeBuffer(chosen, 0, allocation);
+                  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+                  pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1); pass.end();
+                  device.queue.submit([encoder.finish()]);
+                  observed.selectedEnergy.push({ mode, selectedMasses: [allocation[35], allocation[67]],
+                    result: await read(output, 2) });
+                }
+              } finally {
+                await device.queue.onSubmittedWorkDone();
+                records.destroy(); chosen.destroy(); params.destroy(); output.destroy();
+              }
+            }
             device.createBuffer = createBuffer; device.queue.submit = submit;
             runs.push(observed);
             if (config.name === 'full' || config.invalidRemainder) {
@@ -363,6 +415,24 @@ test('native reaction reference energy, full unplaced state, no-op gating and re
     }
     const stride = 32 + run.productTermCount * 32;
     const accepted = Array.from({ length: run.particleCount }, (_, i) => run.gpu.allocation[i * stride] === 1);
+    for (let i = 0; i < run.particleCount; i++) {
+      assert.equal(run.gpu.allocation[i * stride + 20], accepted[i] ? 1 : 0,
+        'prepared allocations cannot survive a rejected physical pair');
+    }
+    if (run.selectedEnergy) {
+      for (const probe of run.selectedEnergy) {
+        if (probe.mode === 'unprepared') {
+          assert.equal(probe.result[1], 0, 'unprepared product masses cannot enter the caloric solve');
+        } else {
+          assert.equal(probe.result[1], 1);
+          // Independent constant-Cv manufactured graphs: liquid water 4000,
+          // gas peroxide 3000 J/kg/K, with a 10 K offset from reference.
+          const expected = 10 * (4000 * probe.selectedMasses[0] + 3000 * probe.selectedMasses[1]);
+          near(probe.result[0], expected, .035, 'caloric sum uses actual selected term masses');
+        }
+      }
+      assert.notEqual(run.selectedEnergy[0].result[0], run.selectedEnergy[1].result[0]);
+    }
     const events = [];
     for (let row = 0; row < run.particleCount * run.productTermCount; row += 1) {
       const r = run.gpu.events.slice(row * 32, (row + 1) * 32);

@@ -23,6 +23,9 @@ sourcePaths.push('tests/fixtures/sphExactMassContinuationNative.js', 'src/runtim
 sourcePaths.push('src/runtime/sph/schroederFusedFineSubstepGpu.js',
   'src/runtime/sph/schroederCrossLevelCouplingGpu.js', 'src/runtime/sph/sphGpuParticleRowSizes.js');
 sourcePaths.push('tests/fixtures/sphExactMassAllocationNative.js');
+sourcePaths.push('src/runtime/sph/sphExactReactionAllocation.js',
+  'src/runtime/sph/sphExactReactionAllocationWgsl.js',
+  'tests/fixtures/sphExactReactionAllocationNative.js');
 
 function fixtures(format) {
   const mask = (1n << BigInt(format.wordCount * 32)) - 1n;
@@ -105,6 +108,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
         await page.evaluate(async () => {
           const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
           await fixture.preloadExactMassContinuationNative();
+          await import('/tests/fixtures/sphExactReactionAllocationNative.js');
         });
         break;
       } catch (error) {
@@ -128,9 +132,10 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       if (!adapter) throw new Error('Native WebGPU adapter unavailable');
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter) || {});
-      const errors = [], results = [], transfers = [], partitions = [], windows = [], ratios = [];
+      const errors = [], results = [], transfers = [], partitions = [], windows = [], ratios = [], reactionAllocations = [];
       let allocations = [];
       const allocationFixture = await import('/tests/fixtures/sphExactMassAllocationNative.js');
+      const reactionFixture = await import('/tests/fixtures/sphExactReactionAllocationNative.js');
       let coldOwnership = null;
       let continuation = null;
       let spatialContinuation = null;
@@ -145,6 +150,15 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
           const format = abi.createSphExactMassFormat(formats[f]), n = format.wordCount;
           ratios.push(await allocationFixture.runExactMassRatioNative(device, format,
             shader.createSphExactMassWgsl(format), ratioInputs[f]));
+          if (n !== 12) {
+            const options = {};
+            if (n === 1) options.fixture = reactionFixture.createExactReactionAllocationFixture({
+              molarMasses: { h2: 1 / 32, o2: 1 / 2, h2o: 9 / 32, h2o2: 17 / 32 }
+            });
+            console.info('exact reaction allocation started: ' + n + ' words');
+            reactionAllocations.push(await reactionFixture.runExactReactionAllocationNative(device, format, options));
+            console.info('exact reaction allocation finished: ' + n + ' words');
+          }
           const input = new Uint32Array(inputs[f]), count = input.length / (3 * n + 1), stride = 5 * n + 7;
           const code = shader.createSphExactMassWgsl(format) + `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
@@ -526,7 +540,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, ratios, allocations, transfers, partitions, windows, coldOwnership, continuation, spatialContinuation,
+      return { results, ratios, allocations, reactionAllocations, transfers, partitions, windows, coldOwnership, continuation, spatialContinuation,
         fusedContinuation, fusedSpatialContinuation, sequenceContinuations, twoLevelContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
@@ -536,6 +550,40 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         .flatMap(value => Array.from(encodeSphExactMassUnits(value, formats[i]))))) });
     assert.deepEqual(evidence.result.errors, []);
     assert.deepEqual(evidence.errors, []);
+    for (const run of evidence.result.reactionAllocations) {
+      assert.equal(run.physicalPublicationAdmitted, false);
+      assert.equal(run.sourceUnchanged, true); assert.equal(run.weightsUnchanged, true);
+      const n = run.wordCount, maximum = (1n << BigInt(32 * n)) - 1n;
+      for (const row of run.cases) {
+        const value = offset => row.words.slice(offset, offset + n)
+          .reduceRight((total, word) => (total << 32n) | BigInt(word), 0n);
+        const expected = row.expected;
+        for (const [i, key] of ['total', 'debitA', 'debitB', 'remainderA', 'remainderB'].entries()) {
+          assert.equal(value(i * n), BigInt(expected[key]), `${n} words ${row.name}: ${key}`);
+        }
+        const sourceSum = BigInt(row.availableA) + BigInt(row.availableB);
+        assert.equal(value(5 * n), sourceSum > maximum ? BigInt(row.availableA) : sourceSum,
+          'checked addition preserves its original value on overflow');
+        assert.equal(row.words[6 * n], expected.error, row.name);
+        assert.equal(row.words[6 * n + 1], Number(expected.active), row.name);
+        let massSum = 0n, fromASum = 0n, fromBSum = 0n;
+        for (const [term, product] of expected.products.entries()) {
+          const base = 6 * n + 2 + term * (3 * n + 1);
+          const mass = value(base), fromA = value(base + n), fromB = value(base + 2 * n);
+          assert.equal(mass, BigInt(product.mass), row.name);
+          assert.equal(fromA, BigInt(product.fromA), row.name);
+          assert.equal(fromB, BigInt(product.fromB), row.name);
+          assert.equal(row.words[base + 3 * n], expected.error, row.name);
+          assert.equal(fromA + fromB, mass, 'complete donor contribution');
+          massSum += mass; fromASum += fromA; fromBSum += fromB;
+        }
+        assert.equal(massSum, value(0), 'complete product partition');
+        assert.equal(fromASum, value(n)); assert.equal(fromBSum, value(2 * n));
+        assert.equal(value(n) + value(3 * n), BigInt(row.availableA));
+        assert.equal(value(2 * n) + value(4 * n), BigInt(row.availableB));
+      }
+    }
+    evidence.passedReactionAllocationCases = evidence.result.reactionAllocations.reduce((sum, run) => sum + run.cases.length, 0);
     for (const [index, format] of formats.entries()) {
       const result = evidence.result.ratios[index], n = format.wordCount, stride = 3 * n + 2;
       assert.equal(result.sourceUnchanged, true);

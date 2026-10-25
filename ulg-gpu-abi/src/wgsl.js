@@ -12,7 +12,7 @@ import {
 import {
   sphDispersedMediumOpticsWgsl
 } from './sphDispersedMediumWgsl.js';
-import { sphReactionEnergyWgsl, sphReactionAppliedPairWgsl } from './sphReactionEnergyWgsl.js';
+import { createSphReactionEnergyWgsl, sphReactionEnergyWgsl, sphReactionAppliedPairWgsl } from './sphReactionEnergyWgsl.js';
 import { sphReactionPairWriterWgsl, sphReactionPairReaderWgsl } from './sphReactionPairAllocationWgsl.js';
 import { sphGasConstitutiveWgsl } from './sphGasConstitutiveWgsl.js';
 
@@ -1516,7 +1516,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 export function createSphReactionStepWgsl({ sharedAllocation = false } = {}) {
   return `
-${sphReactionEnergyWgsl}
+${createSphReactionEnergyWgsl({ selectedAllocation: sharedAllocation })}
 ${sphGasConstitutiveWgsl}
 ${sharedAllocation ? sphReactionPairWriterWgsl : ''}
 struct ReactionParams {
@@ -3033,7 +3033,7 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
     partner_term.coefficient, partner_term.molar_mass, partner_term.interface_flux,
     params.dt_s
   );
-  let extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
+  ${sharedAllocation ? 'var' : 'let'} extent_mol = min(extent_availability_mol, extent_flux_cap_mol);
   let self_consumed = reaction_consumed_mass(reaction_index, pos_mass.w, extent_mol, self_term.coefficient, self_term.molar_mass);
   let partner_consumed = reaction_consumed_mass(reaction_index, partner_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
   if (physical_energy && (pos_mass.w - self_consumed >= pos_mass.w
@@ -3041,8 +3041,8 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
     copy_particle(particle_index);
     return;
   }
-  let consumed_mass = self_consumed + partner_consumed;
-  let raw_product_mass = product_raw_mass_sum(reaction_index, extent_mol);
+  ${sharedAllocation ? 'var' : 'let'} consumed_mass = self_consumed + partner_consumed;
+  ${sharedAllocation ? 'var' : 'let'} raw_product_mass = product_raw_mass_sum(reaction_index, extent_mol);
   if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
     copy_particle(particle_index);
     return;
@@ -3058,18 +3058,46 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
   let source1_term = reactant_term_for_material(reaction_index, source1_thermo.x);
   let source0_current_volume = particle_current_volume(source0_index);
   let source1_current_volume = particle_current_volume(source1_index);
-  let source0_consumed = reaction_consumed_mass(reaction_index, source0_pos_mass.w, extent_mol, source0_term.coefficient, source0_term.molar_mass);
-  let source1_consumed = reaction_consumed_mass(reaction_index, source1_pos_mass.w, extent_mol, source1_term.coefficient, source1_term.molar_mass);
-  let consumed_current_volume =
+  ${sharedAllocation ? `var source0_consumed = select(partner_consumed, self_consumed, source0_index == particle_index);
+  var source1_consumed = select(self_consumed, partner_consumed, source0_index == particle_index);`
+    : `let source0_consumed = reaction_consumed_mass(reaction_index, source0_pos_mass.w, extent_mol, source0_term.coefficient, source0_term.molar_mass);
+  let source1_consumed = reaction_consumed_mass(reaction_index, source1_pos_mass.w, extent_mol, source1_term.coefficient, source1_term.molar_mass);`}
+  ${sharedAllocation ? 'var' : 'let'} consumed_current_volume =
     source0_current_volume * source0_consumed
       / max(source0_pos_mass.w, 1.0e-20)
     + source1_current_volume * source1_consumed
       / max(source1_pos_mass.w, 1.0e-20);
-  let source0_remaining = max(source0_pos_mass.w - source0_consumed, 0.0);
+  ${sharedAllocation ? `var source0_remaining = 0.0;
+  var source1_remaining = 0.0;
+  var product_mass_scale = 0.0;
+  if (pair_only) {
+    if (!prepare_allocated_pair(source0_index, source1_index, reaction_index, extent_mol,
+        source0_consumed, source1_consumed, raw_product_mass, consumed_current_volume)) {
+      reject_allocated_pair(source0_index, source1_index, 4u);
+      return;
+    }
+    let base = pair_allocation_base(source0_index);
+    let selected = pair_allocations[base + 1u];
+    let allocation = pair_allocations[base + 2u];
+    let remaining = pair_selected_remainder(source0_index, source1_index);
+    extent_mol = selected.x;
+    source0_consumed = selected.y;
+    source1_consumed = selected.z;
+    raw_product_mass = selected.w;
+    consumed_mass = allocation.x;
+    product_mass_scale = allocation.y;
+    consumed_current_volume = allocation.z;
+    source0_remaining = remaining.x;
+    source1_remaining = remaining.y;
+  } else {
+    source0_remaining = max(source0_pos_mass.w - source0_consumed, 0.0);
+    source1_remaining = max(source1_pos_mass.w - source1_consumed, 0.0);
+    product_mass_scale = consumed_mass / raw_product_mass;
+  }` : `let source0_remaining = max(source0_pos_mass.w - source0_consumed, 0.0);
   let source1_remaining = max(source1_pos_mass.w - source1_consumed, 0.0);
+  let product_mass_scale = consumed_mass / raw_product_mass;`}
   let source0_free = select(source0_remaining <= max(source0_pos_mass.w, 1.0) * 1.0e-7, source0_remaining == 0.0, physical_energy);
   let source1_free = select(source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7, source1_remaining == 0.0, physical_energy);
-  let product_mass_scale = consumed_mass / raw_product_mass;
 
   // Products are born at the consumed pair's mass-weighted COM velocity.
   // Momentum accounting: unconsumed remainders keep their own velocities, so
@@ -3098,9 +3126,13 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
   ) / max(consumed_mass, 1.0e-20);
   var product_temperature = vec2<f32>(0.0);
   if (physical_energy) {
-    product_temperature = energy_product_temperature(reaction_index, source0_thermo.x, source1_thermo.x,
-      source0_consumed, source1_consumed, source0_vel_u, source1_vel_u, extent_mol, product_mass_scale, product_com_velocity);
+    product_temperature = energy_product_temperature(reaction_index, ${sharedAllocation ? 'source0_index, ' : ''}source0_thermo.x, source1_thermo.x,
+      source0_consumed, source1_consumed, source0_vel_u, source1_vel_u, extent_mol, ${sharedAllocation ? '' : 'product_mass_scale, '}product_com_velocity);
     if (product_temperature.y != 1.0) {
+      ${sharedAllocation ? `if (pair_only) {
+        reject_allocated_pair(source0_index, source1_index, 5u);
+        return;
+      }` : ''}
       copy_particle(particle_index);
       return;
     }
@@ -3112,8 +3144,13 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
     let product_term_index = u32(max(header0.w, 0.0)) + product_local;
     let product_term0 = product_term_row0(product_term_index);
     let product_term1 = product_term_row1(product_term_index);
-    let product_mass = extent_mol * product_term0.z * product_term0.w
-      * product_mass_scale;
+    ${sharedAllocation ? `var product_mass = 0.0;
+    if (pair_only) {
+      product_mass = pair_selected_product_mass(source0_index, reaction_index, product_term_index);
+    } else {
+      product_mass = extent_mol * product_term0.z * product_term0.w * product_mass_scale;
+    }` : `let product_mass = extent_mol * product_term0.z * product_term0.w
+      * product_mass_scale;`}
     let product_current_volume = consumed_current_volume
       * product_mass / max(consumed_mass, 1.0e-20);
     var product_energy_state = vec4<f32>(product_u, 0.0, 1.0, 0.0);
@@ -3134,14 +3171,17 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
         product_energy_state.w
       )
     ) {
+      ${sharedAllocation ? `if (pair_only) {
+        reject_allocated_pair(source0_index, source1_index, 6u);
+        return;
+      }` : ''}
       copy_particle(particle_index);
       return;
     }
   }
 
   ${sharedAllocation ? `if (pair_only) {
-    commit_allocated_pair(source0_index, source1_index, reaction_index, extent_mol,
-      source0_consumed, source1_consumed, raw_product_mass, consumed_current_volume,
+    commit_allocated_pair(source0_index, source1_index, reaction_index,
       product_temperature.x, product_com_velocity);
     return;
   }` : ''}

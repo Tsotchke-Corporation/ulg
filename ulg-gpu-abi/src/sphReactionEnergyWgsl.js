@@ -1,7 +1,9 @@
 // Fixed, material/scenario-agnostic functions. The cold table appends exact
 // existing thermal graph samples and reference-state DATA to reaction_records.
-// Used verbatim by apply and unplaced-product events: no separate energy law.
-export const sphReactionEnergyWgsl = `
+// The paired producer uses its stored selected masses in the same energy law.
+// This factory only composes shader code; it does not authorize a physical owner.
+export function createSphReactionEnergyWgsl({ selectedAllocation = false } = {}) {
+  return `
 fn energy_finite(x: f32) -> bool {
   return x == x && abs(x) <= 3.402823e38;
 }
@@ -106,7 +108,7 @@ fn energy_product_state(rx: u32, product_term_index: u32, temperature: f32) -> v
 
 // Returns [sum of m*(u(T,phase)-u_ref), ready]. Actual mass normalization
 // matters: replacing m by extent*nu*M leaks independently shifted U zeros.
-fn energy_product_sensible(rx: u32, temperature: f32, extent: f32, mass_scale: f32) -> vec2<f32> {
+fn energy_product_sensible(rx: u32, ${selectedAllocation ? 'pair_source: u32, ' : ''}temperature: f32${selectedAllocation ? '' : ', extent: f32, mass_scale: f32'}) -> vec2<f32> {
   let lists = reaction_records[energy_header(rx) + 1u];
   var total = 0.0;
   for (var i = 0u; i < u32(lists.w); i = i + 1u) {
@@ -114,7 +116,12 @@ fn energy_product_sensible(rx: u32, temperature: f32, extent: f32, mass_scale: f
     let term = reaction_records[descriptor];
     let state = energy_phase_value(descriptor, reaction_records[descriptor + 1u].w, temperature, true);
     if (state.z != 1.0) { return vec2<f32>(0.0); }
-    let mass = extent * term.y * term.z * mass_scale;
+    ${selectedAllocation ? `let term_key = reaction_records[descriptor + 2u].x;
+    if (!energy_finite(term_key) || term_key < 0.0 || term_key != floor(term_key)
+      || term_key >= f32(params.product_term_count)) { return vec2<f32>(0.0); }
+    let mass = pair_selected_product_mass(pair_source, rx, u32(term_key));
+    if (!(mass > 0.0) || !energy_finite(mass)) { return vec2<f32>(0.0); }`
+      : 'let mass = extent * term.y * term.z * mass_scale;'}
     total = total + mass * (state.x - term.w);
   }
   return vec2<f32>(total, select(0.0, 1.0, energy_finite(total)));
@@ -124,9 +131,9 @@ fn energy_product_sensible(rx: u32, temperature: f32, extent: f32, mass_scale: f
 // sum p*(u_p-u_p_ref) = sum c*(u_r-u_r_ref + relative KE) - extent*DeltaU_ref.
 // Formation and latent offsets already in the caloric graphs count ONCE.
 // The external heat source is zero. Return [common product T, ready].
-fn energy_product_temperature(rx: u32, material0: f32, material1: f32,
+fn energy_product_temperature(rx: u32, ${selectedAllocation ? 'pair_source: u32, ' : ''}material0: f32, material1: f32,
   mass0: f32, mass1: f32, vel_u0: vec4<f32>, vel_u1: vec4<f32>,
-  extent: f32, mass_scale: f32, velocity: vec3<f32>) -> vec2<f32> {
+  extent: f32, ${selectedAllocation ? '' : 'mass_scale: f32, '}velocity: vec3<f32>) -> vec2<f32> {
   let ref0 = energy_term(rx, 0u, material0);
   let ref1 = energy_term(rx, 0u, material1);
   if (ref0 == 0u || ref1 == 0u || !(mass0 > 0.0) || !(mass1 > 0.0)) {
@@ -140,19 +147,22 @@ fn energy_product_temperature(rx: u32, material0: f32, material1: f32,
     - extent * reaction_records[header].y;
   var lo = reaction_records[header + 2u].x;
   var hi = reaction_records[header + 2u].y;
-  let lower = energy_product_sensible(rx, lo, extent, mass_scale);
-  let upper = energy_product_sensible(rx, hi, extent, mass_scale);
+  let lower = energy_product_sensible(rx, ${selectedAllocation ? 'pair_source, lo' : 'lo, extent, mass_scale'});
+  let upper = energy_product_sensible(rx, ${selectedAllocation ? 'pair_source, hi' : 'hi, extent, mass_scale'});
   if (!energy_finite(target_sensible) || lower.y != 1.0 || upper.y != 1.0
     || target_sensible < lower.x || target_sensible > upper.x) { return vec2<f32>(0.0); }
   for (var i = 0u; i < 32u; i = i + 1u) {
     let mid = lo + 0.5 * (hi - lo);
-    let value = energy_product_sensible(rx, mid, extent, mass_scale);
+    let value = energy_product_sensible(rx, ${selectedAllocation ? 'pair_source, mid' : 'mid, extent, mass_scale'});
     if (value.y != 1.0) { return vec2<f32>(0.0); }
     if (value.x < target_sensible) { lo = mid; } else { hi = mid; }
   }
   return vec2<f32>(lo + 0.5 * (hi - lo), 1.0);
 }
 `;
+}
+
+export const sphReactionEnergyWgsl = createSphReactionEnergyWgsl();
 
 // Diagnostic/sidecar consumers must not turn a rejected proposal into product
 // mass. Apply commits a pair atomically; unchanged current buffers are no-op

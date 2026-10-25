@@ -798,15 +798,25 @@ for (const [name, pairAllocationCapture, expectedError] of [
   });
 }
 
-test('physical summary failure rejects the candidate and retains allocation until the submitted work settles', async () => {
+for (const fenceMode of ['pending', 'reject', 'throw', 'missing', 'loss-while-pending', 'submit-throws']) {
+test(`physical reaction failure retains allocation until confirmed retirement (${fenceMode})`, async () => {
   const f = fixture({ masses: [.012, .064] });
   const originalState = f.sphParticleState.state.slice();
   const buffers = [], dispatches = [];
-  let submitted = 0, settle;
+  let submitted = 0, settle, lose;
   const fence = new Promise(resolve => { settle = resolve; });
   const device = {
+    lost: new Promise(resolve => { lose = resolve; }),
     limits: { maxBufferSize: 1 << 28, maxStorageBufferBindingSize: 1 << 28 },
-    queue: { writeBuffer() {}, submit() { submitted++; }, onSubmittedWorkDone() { return fence; } },
+    queue: { writeBuffer() {}, submit() {
+      submitted++;
+      if (fenceMode === 'submit-throws') throw new Error('injected submission failure after delegation');
+    }, onSubmittedWorkDone() {
+      if (fenceMode === 'reject') return Promise.reject(new Error('unconfirmed queue rejection'));
+      if (fenceMode === 'throw') throw new Error('unconfirmed queue throw');
+      if (fenceMode === 'missing') return undefined;
+      return fence;
+    } },
     createBuffer({ label, size }) {
       if (label === 'ulg-sph-reaction-summary-partials') throw new Error('injected physical summary failure');
       const buffer = { label, size, mapState: 'unmapped', destroyCount: 0,
@@ -829,15 +839,25 @@ test('physical summary failure rejects the candidate and retains allocation unti
       thermalMaterialTable: f.thermalMaterialTable, dtSeconds: .00001,
       readbackMode: 'no-full-readback', readCompactReactionSummary: true, retainOutputParticleBuffers: true });
   } catch (error) { failure = error; }
-  assert.match(failure?.message ?? '', /injected physical summary failure/);
+  assert.match(failure?.message ?? '', fenceMode === 'submit-throws'
+    ? /injected submission failure after delegation/ : /injected physical summary failure/);
   assert.equal(submitted, 1, 'failure follows the actual primary submission');
   assert.ok(dispatches.indexOf('ulg-sph-reaction-initialize-pairs') < dispatches.indexOf('ulg-sph-reaction-allocate-pairs'));
   assert.ok(dispatches.indexOf('ulg-sph-reaction-allocate-pairs') < dispatches.indexOf('ulg-sph-reaction-resolve'));
   const allocation = buffers.find(buffer => buffer.label === 'ulg-sph-reaction-pair-allocation');
   assert.ok(allocation);
+  let retired = false;
+  failure.reactionResourceCleanupCompletion.then(() => { retired = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(retired, false, 'an unconfirmed fence cannot retire the failed producer');
   assert.ok(buffers.every(buffer => buffer.destroyCount === 0), 'pending submitted work still owns every local buffer');
   assert.deepEqual(f.sphParticleState.state, originalState, 'failure leaves the original source available');
-  settle();
+  if (fenceMode === 'pending' || fenceMode === 'submit-throws') settle();
+  else lose({ reason: 'destroyed' });
   assert.equal(await failure.reactionResourceCleanupCompletion, true);
   assert.ok(buffers.every(buffer => buffer.destroyCount === 1), 'failed candidate is retired exactly once');
+  settle(); lose({ reason: 'destroyed' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(buffers.every(buffer => buffer.destroyCount === 1), 'late fence/loss cannot retire a second time');
 });
+}

@@ -154,6 +154,36 @@ const DEFAULT_REACTION_PARTICLE_BIN_CAPACITY = 64;
 const REACTION_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER = 4;
 const REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
 const REACTION_TRANSFERRED_DESTINATION_RELEASES = new WeakMap();
+const REACTION_QUEUE_RETIREMENTS = new WeakMap();
+
+// A rejected/missing fence does not establish that submitted commands have
+// stopped using their buffers. Keep the failed producer's registry quarantined
+// until a successful queue fence or confirmed device loss. One loss observer
+// per device avoids retaining every successful reaction through device.lost.
+function confirmReactionQueueRetirement(device) {
+  let state = REACTION_QUEUE_RETIREMENTS.get(device);
+  if (!state) {
+    state = { lost: false, waiters: new Set() };
+    REACTION_QUEUE_RETIREMENTS.set(device, state);
+    if (device.lost?.then) Promise.resolve(device.lost).then(() => {
+      state.lost = true;
+      for (const waiter of [...state.waiters]) waiter(false);
+      state.waiters.clear();
+    }, () => {});
+  }
+  if (state.lost) return Promise.resolve(false);
+  let fence = null;
+  try { fence = device.queue?.onSubmittedWorkDone?.(); } catch { /* Quarantine. */ }
+  return new Promise(resolve => {
+    let completed = false;
+    const finish = confirmed => {
+      if (completed) return;
+      completed = true; state.waiters.delete(finish); resolve(confirmed);
+    };
+    state.waiters.add(finish);
+    if (fence?.then) Promise.resolve(fence).then(() => finish(true), () => {});
+  });
+}
 
 /**
  * Settle every destination-owner fence before applying the non-arena terminal
@@ -3445,43 +3475,43 @@ export function sphReactionStepPipelineDescriptors({ sharedAllocation = false } 
   return Object.freeze({
     schema: 'peercompute.ulg.sph-reaction-step-pipeline-descriptors.v0',
     ...(sharedAllocation ? {
-      initializePairs: Object.freeze({ cacheKey: 'ulg-sph-reaction-paired-v1',
+      initializePairs: Object.freeze({ cacheKey: 'ulg-sph-reaction-paired-v2',
         label: 'ulg-sph-reaction-initialize-pairs', code, entryPoint: 'initialize_pairs',
         bindings: [computeBufferBinding(0, 'read-only-storage'), computeBufferBinding(8, 'storage'),
           computeBufferBinding(11, 'uniform'), computeBufferBinding(25, 'storage')] }),
-      allocatePairs: Object.freeze({ cacheKey: 'ulg-sph-reaction-paired-v1',
+      allocatePairs: Object.freeze({ cacheKey: 'ulg-sph-reaction-paired-v2',
         label: 'ulg-sph-reaction-allocate-pairs', code, entryPoint: 'allocate_pairs', bindings: reactionResolveBindings })
     } : {}),
     pack: Object.freeze({
-      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v2' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-pack-source',
       code,
       entryPoint: 'pack_source',
       bindings: packBindings
     }),
     particleBins: Object.freeze({
-      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v2' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-particle-bins',
       code,
       entryPoint: 'bin_particles',
       bindings: reactionParticleBinBindings
     }),
     propose: Object.freeze({
-      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v2' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-propose',
       code,
       entryPoint: 'propose',
       bindings: reactionBindings
     }),
     resolve: Object.freeze({
-      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v2' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-resolve',
       code,
       entryPoint: 'resolve',
       bindings: reactionResolveBindings
     }),
     unpack: Object.freeze({
-      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v2' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-unpack',
       code,
       entryPoint: 'unpack',
@@ -3716,15 +3746,8 @@ export async function runSphReactionStepWebGpu({
     if (reactionResourceRegistryDrainCompletion) {
       return reactionResourceRegistryDrainCompletion;
     }
-    const queueFence = reactionPrimarySubmissionObserved
-      && typeof device.queue?.onSubmittedWorkDone === 'function'
-      ? device.queue.onSubmittedWorkDone()
-      : null;
-    reactionResourceRegistryDrainCompletion = queueFence?.then
-      ? Promise.resolve(queueFence).then(
-          drainReactionResourceRegistry,
-          drainReactionResourceRegistry
-        )
+    reactionResourceRegistryDrainCompletion = reactionPrimarySubmissionObserved
+      ? confirmReactionQueueRetirement(device).then(drainReactionResourceRegistry)
       : Promise.resolve(drainReactionResourceRegistry());
     return reactionResourceRegistryDrainCompletion;
   };
@@ -4172,12 +4195,14 @@ export async function runSphReactionStepWebGpu({
     noFullReadback
     && requestQueueOrderedCleanupClaim === true;
   const primaryCommandBuffer = encoder.finish();
+  // A submission that throws after delegation still requires retirement
+  // confirmation. Mark the attempt before calling the queue, not afterward.
+  reactionPrimarySubmissionObserved = true;
   const reactionPrimarySubmissionReceipt =
     authenticatedScratchCleanupRoute
       && !reactionSummaryWillConsumeScratch
       ? submitQueueOrderedWork(device, [primaryCommandBuffer])
       : (device.queue.submit([primaryCommandBuffer]), null);
-  reactionPrimarySubmissionObserved = true;
 
   let reactionParticleBinOverflowStatus = reactionParticleBins.overflowMetadataStatus ?? null;
   let reactionParticleBinOverflowCount = null;

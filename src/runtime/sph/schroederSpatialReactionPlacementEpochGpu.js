@@ -19,6 +19,7 @@ import {
 import {
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
+  deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
@@ -321,12 +322,60 @@ function destroyReactionWarmArenaRecord(record, { force = false } = {}) {
   return true;
 }
 
+function retirementFence(device, supplied = null) {
+  if (supplied != null) return supplied;
+  try { return device?.queue?.onSubmittedWorkDone?.() ?? null; }
+  catch (error) { return Promise.reject(error); }
+}
+
+// A rejected/missing fence and a false owner result are absence of proof.
+// Keep the owner and its buffers live until a complete proof or fulfilled loss.
+function confirmedRetirement(record, fence, onUnconfirmed = () => {}) {
+  if (record.deviceLost) return Promise.resolve(false);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = confirmed => {
+      if (settled) return;
+      settled = true;
+      record.retirementWaiters.delete(finish);
+      resolve(confirmed);
+    };
+    const unconfirmed = error => { if (!settled) onUnconfirmed(error); };
+    record.retirementWaiters.add(finish);
+    try {
+      if (!fence || typeof fence.then !== 'function') {
+        unconfirmed(new Error('queue completion fence unavailable'));
+        return;
+      }
+      Promise.resolve(fence).then(value => {
+        if (value === false) {
+          unconfirmed(new Error('owner did not confirm retirement'));
+          return;
+        }
+        finish(true);
+      }, unconfirmed);
+    } catch (error) { unconfirmed(error); }
+  });
+}
+
+function settleRetirementAfterLoss(record) {
+  for (const finish of [...record.retirementWaiters]) finish(false);
+  record.retirementWaiters.clear();
+}
+
 function armReactionWarmArenaDeviceLoss(record) {
-  const lost = record.device?.lost;
-  if (!lost || typeof lost.then !== 'function') {
-    record.deviceLossStatus = 'device-loss-promise-unavailable';
-    return;
-  }
+  const observerFailed = error => {
+    record.deviceLossStatus = 'device-loss-observer-error';
+    record.deviceLossReason = error instanceof Error ? error.message : String(error);
+  };
+  let lost;
+  try {
+    lost = record.device?.lost;
+    if (!lost || typeof lost.then !== 'function') {
+      record.deviceLossStatus = 'device-loss-promise-unavailable';
+      return;
+    }
+  } catch (error) { observerFailed(error); return; }
   record.deviceLossStatus = 'device-loss-quarantine-armed';
   Promise.resolve(lost).then((info) => {
     record.deviceLost = true;
@@ -334,15 +383,8 @@ function armReactionWarmArenaDeviceLoss(record) {
     record.deviceLossStatus = 'device-loss-quarantined';
     record.deviceLossReason = info?.message ?? String(info || 'device lost');
     destroyReactionWarmArenaRecord(record, { force: true });
-  }, (error) => {
-    record.deviceLost = true;
-    record.terminal = true;
-    record.deviceLossStatus = 'device-loss-quarantined-after-rejection';
-    record.deviceLossReason = error instanceof Error
-      ? error.message
-      : String(error);
-    destroyReactionWarmArenaRecord(record, { force: true });
-  });
+    settleRetirementAfterLoss(record);
+  }, observerFailed);
 }
 
 function createReactionWarmArena(device, descriptor, slotIndex) {
@@ -504,6 +546,7 @@ function createReactionWarmArena(device, descriptor, slotIndex) {
       phase: 'idle',
       terminal: false,
       deviceLost: false,
+      retirementWaiters: new Set(),
       destroyed: false,
       deviceLossStatus: 'device-loss-quarantine-not-armed',
       deviceLossReason: null,
@@ -809,6 +852,11 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     );
   }
   if (record.destinationReturnScheduled) return false;
+  if (record.deviceLost) {
+    record.destinationReturnScheduled = true;
+    record.destinationReturnPromise = Promise.resolve(false);
+    return record.destinationReturnPromise;
+  }
   if (record.destinationCleanupClaim != null) {
     if (typeof record.destinationCleanup !== 'function') {
       throw placementEpochError(
@@ -835,33 +883,17 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
       );
     }
   }
-  const queueFence = completionFence
-    ?? (typeof record.device.queue?.onSubmittedWorkDone === 'function'
-      ? record.device.queue.onSubmittedWorkDone()
-      : null);
-  if (!queueFence?.then) {
-    throw placementEpochError(
-      'transferred placement destination release requires a queue fence',
-      'OWNERSHIP_TRANSFER_FENCE'
-    );
-  }
+  const queueFence = retirementFence(record.device, completionFence);
   const sourceReleaseFence = record.lifecycle.releasePromise?.then
-    ? record.lifecycle.releasePromise
-    : Promise.resolve(true);
-  const combinedFence = Promise.all([sourceReleaseFence, queueFence]).then(
-    ([sourceReleased]) => {
-      if (sourceReleased !== true) {
-        throw placementEpochError(
-          'placement source retirement was not confirmed before destination return',
-          'OWNERSHIP_TRANSFER_FENCE'
-        );
-      }
-      return true;
-    }
-  );
+    ? Promise.resolve(record.lifecycle.releasePromise).then(released => released === true)
+    : null;
+  const sourceConfirmed = confirmedRetirement(record, sourceReleaseFence);
+  const destinationConfirmed = confirmedRetirement(record, queueFence);
+  const combinedFence = Promise.all([sourceConfirmed, destinationConfirmed])
+    .then(([sourceReleased, destinationReleased]) => sourceReleased && destinationReleased);
   record.destinationReturnScheduled = true;
   if (record.reactionWarmArenaLease) {
-    record.destinationReturnPromise = releaseSphReactionWarmArenaAfterQueue(
+    record.destinationReturnPromise = record.warmArenaReleasePromise ?? releaseSphReactionWarmArenaAfterQueue(
       record.reactionWarmArenaLease,
       {
         device: record.device,
@@ -871,23 +903,10 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     );
     return record.destinationReturnPromise;
   }
-  record.destinationReturnPromise = combinedFence.then(() => {
-    destroyOnce(
-      record,
-      'placed-state',
-      record.family.placedDestinationStateBuffer
-    );
-    destroyOnce(
-      record,
-      'placed-thermo',
-      record.family.placedDestinationThermoBuffer
-    );
-    destroyOnce(
-      record,
-      'placed-mechanics',
-      record.family.placedDestinationMechanicsBuffer
-    );
-    return true;
+  record.destinationReturnPromise = combinedFence.then(confirmed => {
+    // A false result is possible only after this owner's fulfilled loss path.
+    if (confirmed || record.deviceLost) destroyPlacedDestinations(record, { includeTransferred: true });
+    return confirmed && !record.deviceLost;
   });
   return record.destinationReturnPromise;
 }
@@ -919,17 +938,26 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
   }
   if (record.destinationReturnScheduled) return false;
   record.destinationReturnScheduled = true;
-  const cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
-    record.device,
-    record.destinationCleanup,
-    {
-      queueOrderedFinalConsumer,
-      producerClaim: record.destinationCleanupClaim,
-      producerOutput: sourceFamily,
-      producerFamily:
-        'schroeder-reaction-placement-transferred-destination'
-    }
-  );
+  let cleanupReceipt;
+  try {
+    cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
+      record.device,
+      record.destinationCleanup,
+      {
+        queueOrderedFinalConsumer,
+        producerClaim: record.destinationCleanupClaim,
+        producerOutput: sourceFamily,
+        producerFamily:
+          'schroeder-reaction-placement-transferred-destination'
+      }
+    );
+  } catch (error) {
+    // Failed capability admission consumes no claim and must not prevent its
+    // genuine owner from retrying. Once cleanup starts, the claim is consumed
+    // even if a destructor throws; never reopen that one-shot handoff.
+    if (!record.destinationCleanupStarted) record.destinationReturnScheduled = false;
+    throw error;
+  }
   record.destinationReturnPromise =
     Promise.resolve(cleanupReceipt).then(() => true);
   return record.destinationReturnPromise;
@@ -958,39 +986,25 @@ export function releaseSphReactionWarmArenaAfterQueue(
       'WARM_ARENA_OWNERSHIP'
     );
   }
-  const fence = completionFence
-    ?? (typeof device?.queue?.onSubmittedWorkDone === 'function'
-      ? device.queue.onSubmittedWorkDone()
-      : null);
-  if (!fence || typeof fence.then !== 'function') {
-    throw placementEpochError(
-      'reaction warm arena release requires a genuine queue completion fence',
-      'WARM_ARENA_FENCE'
-    );
-  }
   leaseRecord.releaseScheduled = true;
   record.phase = 'retiring';
-  record.releaseFence = Promise.resolve(fence).then(() => {
+  const fence = retirementFence(record.device, completionFence);
+  record.releaseFence = confirmedRetirement(record, fence, error => {
+    record.terminal = true;
+    record.phase = 'quarantined';
+    record.deviceLossStatus = 'queue-fence-unconfirmed-arena-quarantined';
+    record.deviceLossReason = error instanceof Error ? error.message : String(error);
+  }).then(confirmed => {
     leaseRecord.released = true;
     record.inFlight = false;
     record.boundSourceFamily = null;
     record.destinationOwnershipTransferred = false;
-    if (destroy || record.terminal || record.deviceLost) {
+    if (!confirmed || destroy || record.terminal || record.deviceLost) {
       destroyReactionWarmArenaRecord(record, { force: true });
       return false;
     }
     record.phase = 'idle';
     return true;
-  }, (error) => {
-    leaseRecord.released = true;
-    record.inFlight = false;
-    record.terminal = true;
-    record.deviceLossStatus = 'queue-fence-rejected-arena-quarantined';
-    record.deviceLossReason = error instanceof Error
-      ? error.message
-      : String(error);
-    destroyReactionWarmArenaRecord(record, { force: true });
-    return false;
   });
   return record.releaseFence;
 }
@@ -1134,7 +1148,7 @@ function submitFrozenFamilyCopy(device, family) {
 function destroyOnce(record, key, value) {
   if (record.destroyed.has(key)) return;
   record.destroyed.add(key);
-  value?.destroy?.();
+  try { value?.destroy?.(); } catch { /* Siblings still receive their one terminal attempt. */ }
 }
 
 function destroyPlacementAuxiliaryResources(record) {
@@ -1160,8 +1174,8 @@ function destroyPlacementAuxiliaryResources(record) {
   }
 }
 
-function destroyPlacedDestinations(record) {
-  if (record.destinationOwnershipTransferred || record.reactionWarmArenaLease) return;
+function destroyPlacedDestinations(record, { includeTransferred = false } = {}) {
+  if ((record.destinationOwnershipTransferred && !includeTransferred) || record.reactionWarmArenaLease) return;
   if (!record.callerOwnedDestinations.state) {
     destroyOnce(
       record,
@@ -1186,16 +1200,20 @@ function destroyPlacedDestinations(record) {
 }
 
 function armDeviceLoss(record) {
-  const lost = record.device?.lost;
-  if (!lost || typeof lost.then !== 'function') {
-    record.lifecycle.deviceLossStatus = 'device-loss-promise-unavailable';
-    return;
-  }
-  record.lifecycle.deviceLossStatus = 'device-loss-quarantine-armed';
-  Promise.resolve(lost).then((info) => {
-    if (record.lifecycle.releaseStatus === 'released-after-final-consumer') {
+  const observerFailed = error => {
+    record.lifecycle.deviceLossStatus = 'device-loss-observer-error';
+    record.lifecycle.deviceLossReason = error instanceof Error ? error.message : String(error);
+  };
+  let lost;
+  try {
+    lost = record.device?.lost;
+    if (!lost || typeof lost.then !== 'function') {
+      record.lifecycle.deviceLossStatus = 'device-loss-promise-unavailable';
       return;
     }
+  } catch (error) { observerFailed(error); return; }
+  record.lifecycle.deviceLossStatus = 'device-loss-quarantine-armed';
+  Promise.resolve(lost).then((info) => {
     record.lifecycle.deviceLossStatus = 'device-loss-cleanup-running';
     record.deviceLost = true;
     record.lifecycle.deviceLossReason = info?.message ?? String(info || 'device lost');
@@ -1204,20 +1222,17 @@ function armDeviceLoss(record) {
       // transaction. Device loss only retires this family's own frozen and
       // destination resources; it must never quarantine the ancestor owner.
       destroyPlacementAuxiliaryResources(record);
-      destroyPlacedDestinations(record);
+      destroyPlacedDestinations(record, { includeTransferred: true });
       record.lifecycle.deviceLossStatus = 'device-loss-cleanup-completed';
     } catch (error) {
       record.lifecycle.deviceLossStatus = 'device-loss-cleanup-error';
       record.lifecycle.deviceLossReason = error instanceof Error
         ? error.message
         : String(error);
+    } finally {
+      settleRetirementAfterLoss(record);
     }
-  }).catch((error) => {
-    record.lifecycle.deviceLossStatus = 'device-loss-observer-error';
-    record.lifecycle.deviceLossReason = error instanceof Error
-      ? error.message
-      : String(error);
-  });
+  }, observerFailed);
 }
 
 /**
@@ -1865,6 +1880,11 @@ export function transferSchroederSpatialReactionPlacementDestinationOwnership(
   }
   const destinationCleanup = record.reactionWarmArenaLease
     ? () => {
+        record.destinationCleanupStarted = true;
+        if (record.destinationCleanupCompleted) return;
+        // Loss has already retired the original arena. A late sealed claim
+        // must not re-enter its stale lease or touch any successor lease.
+        if (record.deviceLost) { record.destinationCleanupCompleted = true; return; }
         const { leaseRecord, record: warmRecord } =
           requireReactionWarmArenaLease(
             record.reactionWarmArenaLease,
@@ -1880,23 +1900,13 @@ export function transferSchroederSpatialReactionPlacementDestinationOwnership(
         } else {
           warmRecord.phase = 'idle';
         }
+        record.destinationCleanupCompleted = true;
       }
     : () => {
-        destroyOnce(
-          record,
-          'placed-state',
-          record.family.placedDestinationStateBuffer
-        );
-        destroyOnce(
-          record,
-          'placed-thermo',
-          record.family.placedDestinationThermoBuffer
-        );
-        destroyOnce(
-          record,
-          'placed-mechanics',
-          record.family.placedDestinationMechanicsBuffer
-        );
+        record.destinationCleanupStarted = true;
+        if (record.destinationCleanupCompleted) return;
+        destroyPlacedDestinations(record, { includeTransferred: true });
+        record.destinationCleanupCompleted = true;
       };
   if (requestQueueOrderedCleanupClaim === true) {
     record.destinationCleanup = destinationCleanup;
@@ -1962,8 +1972,7 @@ function finalizeQueueOrderedPlacementSourceRelease(
         record.reactionWarmArenaLease,
         {
           device: record.device,
-          completionFence:
-            record.device.queue?.onSubmittedWorkDone?.(),
+          completionFence: retirementFence(record.device),
           abandon: true,
           destroy: true
         }
@@ -2062,19 +2071,16 @@ export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
   const completionFence = placementArtifact?.queueFence
     ?? (
       initializationSubmission?.submissionObserved === true
-        ? record.device.queue?.onSubmittedWorkDone?.()
+        ? retirementFence(record.device)
         : initializationSubmission
     )
     ?? null;
   if (
-    !completionFence?.then
-    || (
-      placementArtifact
+    placementArtifact
       && (
         placementArtifact.queueFenceStatus !== 'exact-queue-submission-fence'
         || placementArtifact.arenaReuseAllowed !== true
       )
-    )
   ) {
     record.lifecycle.releaseStatus = 'retained-without-exact-queue-fence';
     record.lifecycle.releaseReason =
@@ -2084,8 +2090,23 @@ export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
   record.lifecycle.releaseScheduled = true;
   record.lifecycle.releaseStatus =
     'borrowed-directory-family-cleanup-scheduled-after-placement-consumer';
-  record.lifecycle.releasePromise = Promise.resolve(completionFence)
-    .then(() => {
+  record.lifecycle.releasePromise = confirmedRetirement(record, completionFence, error => {
+    record.lifecycle.releaseStatus = 'retained-cleanup-fence-error';
+    record.lifecycle.releaseReason = error instanceof Error ? error.message : String(error);
+    if (record.reactionWarmArenaLease && !record.warmArenaReleasePromise) {
+      // Close the shared arena lease too: a second release call must not
+      // recycle buffers while this source owner still lacks retirement proof.
+      try {
+        record.warmArenaReleasePromise = releaseSphReactionWarmArenaAfterQueue(record.reactionWarmArenaLease, {
+          device: record.device, completionFence: Promise.resolve(false), abandon: true
+        });
+      } catch { /* An already scheduled destination return owns the same lease. */ }
+    }
+  }).then(confirmed => {
+      if (!confirmed || record.deviceLost) {
+        record.lifecycle.releaseStatus = 'released-after-device-loss';
+        return false;
+      }
       destroyPlacementAuxiliaryResources(record);
       destroyPlacedDestinations(record);
       if (
@@ -2106,31 +2127,6 @@ export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
       record.lifecycle.releaseReason = null;
       record.completion.status = 'placement-consumer-completed';
       return true;
-    })
-    .catch((error) => {
-      record.lifecycle.releaseScheduled = false;
-      record.lifecycle.releaseStatus = 'retained-cleanup-fence-error';
-      record.lifecycle.releaseReason = error instanceof Error
-        ? error.message
-        : String(error);
-      if (record.reactionWarmArenaLease) {
-        try {
-          const rejectedFence = Promise.reject(error);
-          record.warmArenaReleasePromise =
-            releaseSphReactionWarmArenaAfterQueue(
-              record.reactionWarmArenaLease,
-              {
-                device: record.device,
-                completionFence: rejectedFence,
-                abandon: true
-              }
-            );
-        } catch {
-          // Preserve the exact queue-fence failure. Device loss is
-          // still armed as the terminal arena fallback.
-        }
-      }
-      return false;
     });
   return true;
 }
@@ -2553,12 +2549,15 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       completion,
       lifecycle,
       deviceLost: false,
+      retirementWaiters: new Set(),
       callerOwnedDestinations,
       arenaOwnedDestinations,
       reactionWarmArenaLease,
       destinationOwnershipTransferred: false,
       destinationReturnScheduled: false,
       destinationReturnPromise: null,
+      destinationCleanupStarted: false,
+      destinationCleanupCompleted: false,
       warmArenaReleasePromise: null,
       auxiliaryDestroyed: false,
       retireDestinationsOnSourceCleanup: false,
@@ -2615,38 +2614,25 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     return family;
   } catch (error) {
     const cleanup = () => {
-      if (!callerOwnedDestinations.state && !arenaOwnedDestinations.state) {
-        destinationState.destroy?.();
-      }
-      if (!callerOwnedDestinations.thermo && !arenaOwnedDestinations.thermo) {
-        destinationThermo.destroy?.();
-      }
-      if (!callerOwnedDestinations.mechanics && !arenaOwnedDestinations.mechanics) {
-        destinationMechanics.destroy?.();
+      for (const [key, buffer] of [['state', destinationState], ['thermo', destinationThermo], ['mechanics', destinationMechanics]]) {
+        if (!callerOwnedDestinations[key] && !arenaOwnedDestinations[key]) {
+          try { buffer.destroy?.(); } catch { /* Retire every sibling once. */ }
+        }
       }
     };
-    const cleanupFence = initializationFence?.submissionObserved === true
-      ? device.queue?.onSubmittedWorkDone?.()
-      : (
-          initializationFence
-          ?? device.queue?.onSubmittedWorkDone?.()
-        );
-    // The frozen-family initialization may already be submitted. Without a
-    // genuine completion fence, leaking destination storage is safer than
-    // destroying buffers that submitted GPU work may still reference.
-    if (cleanupFence?.then) {
-      Promise.resolve(cleanupFence).then(cleanup, () => {});
-      if (reactionWarmArenaLease) {
-        try {
-          releaseSphReactionWarmArenaAfterQueue(reactionWarmArenaLease, {
-            device,
-            completionFence: cleanupFence,
-            abandon: true
-          });
-        } catch {
-          // A previously bound family owns the only legal release path. Its
-          // device-loss observer remains armed if that path cannot schedule.
-        }
+    // Submission can throw after delegation. Only a confirmed fence or loss
+    // may retire the original candidate allocations, even before family minting.
+    const cleanupFence = deferConfirmedSubmittedWorkCleanup(device, cleanup);
+    if (reactionWarmArenaLease) {
+      try {
+        releaseSphReactionWarmArenaAfterQueue(reactionWarmArenaLease, {
+          device,
+          completionFence: cleanupFence,
+          abandon: true
+        });
+      } catch {
+        // A previously bound family owns the only legal release path. Its
+        // device-loss observer remains armed if that path cannot schedule.
       }
     }
     throw error;

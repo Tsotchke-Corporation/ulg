@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { writeFile } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 
 import {
   planSphReactionProductPlacementDispatchWorkgroups
@@ -11,6 +13,9 @@ const BASE_URL = process.env.ULG_REACTION_PRODUCT_PLACEMENT_BASE_URL
   || 'https://127.0.0.1:5174/';
 const CHROME = process.env.ULG_REACTION_PRODUCT_PLACEMENT_CHROME
   || '/usr/bin/google-chrome';
+const HEADED = process.env.ULG_REACTION_PRODUCT_PLACEMENT_HEADED === '1';
+const STRICT_TLS = process.env.ULG_REACTION_PRODUCT_PLACEMENT_STRICT_TLS === '1';
+const EVIDENCE = process.env.ULG_REACTION_PRODUCT_PLACEMENT_EVIDENCE;
 
 test('segmented placement rejects explicit 1-D dispatches beyond the device limit', () => {
   const device = { limits: { maxComputeWorkgroupsPerDimension: 2 } };
@@ -53,11 +58,14 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
     : 'set ULG_RUN_NATIVE_REACTION_PRODUCT_PLACEMENT=1 for native Vulkan WebGPU',
   timeout: 900_000
 }, async () => {
+  if (EVIDENCE) assert.ok(isAbsolute(EVIDENCE), 'native placement evidence requires an absolute external path');
+  const started = new Date().toISOString();
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({
     executablePath: CHROME,
-    headless: true,
+    headless: !HEADED,
     args: [
+      ...(HEADED ? ['--ozone-platform=wayland'] : []),
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
@@ -67,7 +75,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
 
   let native;
   try {
-    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    const page = await browser.newPage({ ignoreHTTPSErrors: !STRICT_TLS });
     await page.goto(BASE_URL, {
       waitUntil: 'domcontentloaded',
       timeout: 60_000
@@ -2744,8 +2752,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     });
   } finally {
     await browser.close();
+    if (EVIDENCE) await writeFile(EVIDENCE, JSON.stringify({
+      started, finished: new Date().toISOString(), baseUrl: BASE_URL,
+      headed: HEADED, ignoreHTTPSErrors: !STRICT_TLS,
+      ownedBrowserClosed: !browser.isConnected(), native
+    }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   }
 
+  assert.equal(native.status, 'complete', native.reason || JSON.stringify(native));
   console.log('native segmented placement report', JSON.stringify({
     adapterInfo: native.adapterInfo,
     reactionEntityCountProof: native.reactionEntityCountProof,
@@ -2760,7 +2774,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     instrumentation: native.instrumentation,
     errorCounts: native.errorCounts
   }));
-  assert.equal(native.status, 'complete', native.reason || JSON.stringify(native));
   assert.equal(native.moduleIdentityShared, true);
   assert.equal(native.timestampQueryEnabled, true);
   assert.equal(native.validationError, null);

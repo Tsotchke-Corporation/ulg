@@ -547,6 +547,11 @@ function acquireReactionDiscoveryArenaResources({
   let entry = cache.get(arenaKey) || null;
   if (entry?.inUse === true) {
     if (entry.generation?.execution?.released === true) {
+      if (entry.sourceReadLease === entry.lease) {
+        throw new Error(
+          `reaction discovery arena ${arenaIndex} remains pinned by a retained consumer read`
+        );
+      }
       if (entry.activationObservationLease === entry.lease) {
         throw new Error(
           `reaction discovery arena ${arenaIndex} remains pinned by a pending activation observation`
@@ -592,6 +597,7 @@ function acquireReactionDiscoveryArenaResources({
       generationId: null,
       inUse: false,
       lease: null,
+      sourceReadLease: null,
       activationObservationLease: null,
       destroyed: false,
       totalBufferCreationCount: 0,
@@ -735,6 +741,7 @@ function acquireReactionDiscoveryArenaResources({
   entry.generation = generation;
   entry.generationId = generation.execution.generationId;
   entry.lease = lease;
+  entry.sourceReadLease = null;
   entry.activationObservationLease = captureActivationObservation === true
     ? lease
     : null;
@@ -743,10 +750,20 @@ function acquireReactionDiscoveryArenaResources({
 
 function releaseReactionDiscoveryArenaResources(entry, lease) {
   if (!entry || entry.lease !== lease || entry.inUse !== true) return false;
+  if (entry.sourceReadLease === lease) return false;
   entry.inUse = false;
   entry.lease = null;
   entry.activationObservationLease = null;
   return true;
+}
+
+function releaseReactionDiscoveryProposalIfRequested(record) {
+  if (
+    record.releaseRequested !== true
+    || record.sourceReadCount > 0
+    || record.activationObservationInFlight === true
+  ) return false;
+  return releaseReactionDiscoveryArenaResources(record.arenaEntry, record.arenaLease);
 }
 
 /** Destroy idle per-arena buffers, normally only when the owning device exits. */
@@ -775,9 +792,17 @@ export function destroySchroederSpatialReactionDiscoveryProposalCache(device) {
  * Validate the narrow handoff consumed by the canonical reaction resolver.
  * Receipt authenticity, generation identity, device ownership, row shape, and
  * live buffer capacity are all checked here so the chemistry kernel need not
- * duplicate spatial-control-plane rules.
+ * duplicate spatial-control-plane rules. An expected mechanics buffer, when
+ * supplied, must be the original buffer retained by the proposal issuer.
  */
 export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
+  proposal,
+  options = {}
+) {
+  return resolveReactionDiscoveryProposalForConsumer(proposal, options);
+}
+
+function resolveReactionDiscoveryProposalForConsumer(
   proposal,
   {
     device,
@@ -786,8 +811,10 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     reactionCount = proposal?.reactionCount,
     reactionTable = null,
     sourceStateBuffer = null,
-    sourceThermoBuffer = null
-  } = {}
+    sourceThermoBuffer = null,
+    sourceMechanicsBuffer = undefined
+  } = {},
+  retainedRecord = null
 ) {
   const reject = (status, reason) => Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_SCHEMA,
@@ -797,6 +824,7 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     admitted: false
   });
   const authenticRecord = reactionDiscoveryProposalRecords.get(proposal);
+  const retained = authenticRecord != null && retainedRecord === authenticRecord;
   let currentReactionFingerprint = null;
   try {
     currentReactionFingerprint = reactionTable
@@ -829,6 +857,7 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
         ?? generation?.source?.exactNearQueryProfile?.sourceStateBuffer)
     || authenticRecord.sourceCurrentStateBuffer !== proposal?.sourceCurrentStateBuffer
     || authenticRecord.sourceThermoBuffer !== proposal?.sourceThermoBuffer
+    || authenticRecord.sourceMechanicsBuffer !== proposal?.sourceMechanicsBuffer
     || !reactionTable
     || authenticRecord.reactionTable !== reactionTable
     || authenticRecord.reactionTableFingerprint !== currentReactionFingerprint
@@ -842,6 +871,10 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     || !sourceThermoBuffer
     || authenticRecord.sourceCurrentStateBuffer !== sourceStateBuffer
     || authenticRecord.sourceThermoBuffer !== sourceThermoBuffer
+    || (
+      sourceMechanicsBuffer !== undefined
+      && authenticRecord.sourceMechanicsBuffer !== sourceMechanicsBuffer
+    )
     || authenticRecord.expectationBuffer !== proposal?.expectationBuffer
     || authenticRecord.receipt !== proposal?.receipt
   ) {
@@ -853,7 +886,7 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
   if (
     proposal?.schema !== ULG_SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_SCHEMA
     || proposal.ready !== true
-    || proposal.released === true
+    || (!retained && proposal.released === true)
   ) {
     return reject(
       'schroeder-spatial-reaction-discovery-proposal-rejected-contract',
@@ -887,8 +920,8 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
   if (
     proposal.generation !== generation
     || proposal.generationId !== generation?.execution?.generationId
-    || generation?.execution?.released === true
-    || generation?.releaseScheduled === true
+    || (!retained && generation?.execution?.released === true)
+    || (!retained && generation?.releaseScheduled === true)
   ) {
     return reject(
       'schroeder-spatial-reaction-discovery-proposal-rejected-generation',
@@ -938,7 +971,7 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     || !webGpuBufferMatchesDevice(proposal.reactionRecordBuffer, device)
     || !webGpuBufferMatchesDevice(proposal.directoryBuffer, device)
     || proposal.exactNearCellTree !== generation?.exactNearCellTree
-    || proposal.exactNearCellTree?.released === true
+    || (!retained && proposal.exactNearCellTree?.released === true)
     || proposal.exactNearCellTreeBuffer
       !== proposal.exactNearCellTree?.treeBuffer
     || !webGpuBufferMatchesDevice(proposal.exactNearCellTreeBuffer, device)
@@ -983,12 +1016,73 @@ export function resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
     positionAuthorityStateBuffer: proposal.positionAuthorityStateBuffer,
     sourceCurrentStateBuffer: proposal.sourceCurrentStateBuffer,
     sourceThermoBuffer: proposal.sourceThermoBuffer,
+    sourceMechanicsBuffer: proposal.sourceMechanicsBuffer,
     displacementCertificateBuffer: proposal.displacementCertificateBuffer,
     particleCount,
     reactionCount,
     generationId: proposal.generationId,
     epochIdentity: proposal.epochIdentity,
     receipt: proposal.receipt
+  });
+}
+
+function reactionDiscoveryReadError(reason) {
+  const error = new TypeError(`reaction discovery read rejected: ${reason}`);
+  error.code = 'ERR_SCHROEDER_SPATIAL_REACTION_DISCOVERY_READ_REJECTED';
+  return error;
+}
+
+/**
+ * Hold an authentic discovery arena independently of proposal destruction or
+ * generation retirement. The owner must release after the consuming submitted
+ * work has completed or the device is terminal. Each acquisition owns one hold.
+ */
+export function acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, options = {}) {
+  const view = resolveReactionDiscoveryProposalForConsumer(proposal, options);
+  if (view.admitted !== true) throw reactionDiscoveryReadError(view.reason);
+  const record = reactionDiscoveryProposalRecords.get(proposal);
+  const entry = record.arenaEntry;
+  const leaseMatches = () => entry.inUse === true
+    && entry.destroyed !== true
+    && entry.lease === record.arenaLease
+    && entry.generation === record.generation;
+  if (!leaseMatches()) throw reactionDiscoveryReadError('the original arena lease is no longer live');
+  record.sourceReadCount += 1;
+  entry.sourceReadLease = record.arenaLease;
+  // Snapshot the admitted identities; later edits to caller options cannot
+  // substitute a different source into an already-held read.
+  const expected = {
+    device: record.device,
+    generation: record.generation,
+    particleCount: view.particleCount,
+    reactionCount: view.reactionCount,
+    reactionTable: record.reactionTable,
+    sourceStateBuffer: view.sourceCurrentStateBuffer,
+    sourceThermoBuffer: view.sourceThermoBuffer,
+    sourceMechanicsBuffer: view.sourceMechanicsBuffer
+  };
+  let released = false;
+  return Object.freeze({
+    view,
+    validate() {
+      if (released || !leaseMatches() || entry.sourceReadLease !== record.arenaLease) {
+        throw reactionDiscoveryReadError('the retained read has been released or lost its arena lease');
+      }
+      const current = resolveReactionDiscoveryProposalForConsumer(proposal, expected, record);
+      if (current.admitted !== true) throw reactionDiscoveryReadError(current.reason);
+      return view;
+    },
+    release() {
+      if (released) return false;
+      released = true;
+      record.sourceReadCount -= 1;
+      if (record.sourceReadCount === 0 && entry.sourceReadLease === record.arenaLease) {
+        entry.sourceReadLease = null;
+      }
+      releaseReactionDiscoveryProposalIfRequested(record);
+      return true;
+    },
+    get released() { return released; }
   });
 }
 
@@ -3305,7 +3399,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     sourceThermoBuffer || sphParticleUpload?.thermoBuffer,
     'reaction discovery sourceThermoBuffer'
   );
-  const mechanicsBuffer = reactionMotionEnvelope
+  const mechanicsBuffer = reactionMotionEnvelope || sourceMechanicsBuffer != null
     ? requireBuffer(
         device,
         sourceMechanicsBuffer,
@@ -4002,8 +4096,11 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   const destroy = () => {
     if (destroyed) return false;
     destroyed = true;
-    if (proposalRecord?.activationObservationInFlight === true) {
-      proposalRecord.releaseAfterActivationObservation = true;
+    if (proposalRecord) proposalRecord.releaseRequested = true;
+    if (
+      proposalRecord?.activationObservationInFlight === true
+      || proposalRecord?.sourceReadCount > 0
+    ) {
       return true;
     }
     return releaseReactionDiscoveryArenaResources(arenaEntry, arenaLease);
@@ -4175,7 +4272,8 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     activationObservationReadbackBuffer,
     activationObservationConsumed: false,
     activationObservationInFlight: false,
-    releaseAfterActivationObservation: false,
+    sourceReadCount: 0,
+    releaseRequested: false,
     activationObservationDeviceTerminalSignal:
       captureActivationObservation === true
         ? reactionObservationDeviceTerminalSignalFor(device)
@@ -4384,12 +4482,7 @@ export async function observeSchroederSpatialReactionDiscoveryActivation(
       if (mapped) readbackBuffer.unmap();
     } finally {
       record.activationObservationInFlight = false;
-      if (record.releaseAfterActivationObservation === true) {
-        releaseReactionDiscoveryArenaResources(
-          record.arenaEntry,
-          record.arenaLease
-        );
-      }
+      releaseReactionDiscoveryProposalIfRequested(record);
     }
   }
 

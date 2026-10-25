@@ -552,6 +552,48 @@ test('genuine captures reject copied outputs, source descriptors and claims with
   } finally { await retire(f, step); }
 });
 
+test('ordinary genuine G2P authentication never invokes substituted getters that attempt retirement', async () => {
+  const f = fixture(); let step, held;
+  try {
+    step = await run(f);
+    const result = step.g2pReconstruction.gpuResult;
+    const args = { device: f.device, sphParticleUpload: f.sphUpload };
+    const originalDestroy = result.destroyOutputParticleBuffers;
+    const sourceBuffers = [result.stateBuffer, result.mechanicsBuffer];
+    let getterCalls = 0;
+    for (const key of ['stateBuffer', 'mechanicsBuffer', 'stateBufferByteLength',
+      'mechanicsBufferByteLength', 'retainedOutputParticleBuffers',
+      'destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']) {
+      const descriptor = Object.getOwnPropertyDescriptor(result, key);
+      Object.defineProperty(result, key, { configurable: true, get() {
+        getterCalls++;
+        originalDestroy.call(result);
+        return descriptor.value;
+      } });
+      try {
+        assert.throws(() => acquireMlsMpmG2pExactMassCapture(result, args), /genuine live G2P/);
+        await assert.rejects(acquireMlsMpmMechanicsExactMassCapture(result, args), /genuine live G2P/);
+      } finally { Object.defineProperty(result, key, descriptor); }
+    }
+    assert.equal(getterCalls, 0);
+    assert.ok(sourceBuffers.every(buffer => !buffer.destroyed));
+    held = acquireMlsMpmG2pExactMassCapture(result, args);
+    const descriptor = Object.getOwnPropertyDescriptor(result, 'stateBuffer');
+    Object.defineProperty(result, 'stateBuffer', { configurable: true, get() {
+      getterCalls++;
+      held.release();
+      originalDestroy.call(result);
+      return descriptor.value;
+    } });
+    try { assert.throws(() => held.validate(), /changed or released/); }
+    finally { Object.defineProperty(result, 'stateBuffer', descriptor); }
+    assert.equal(getterCalls, 0, 'validation also rejects accessors without executing them');
+    assert.equal(held.validate(), true);
+    assert.ok(sourceBuffers.every(buffer => !buffer.destroyed));
+  } finally { held?.release(); await retire(f, step); }
+  assert.equal(f.sphUpload.destroyed, true);
+});
+
 test('two genuine continuations retain one numeric family after each predecessor retires', async () => {
   const f = fixture(); let current = f; let step = null;
   const family = f.sphUpload.exactMassInventory;

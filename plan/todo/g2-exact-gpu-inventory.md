@@ -250,6 +250,35 @@ ranges; the nonzero-offset proofs exercise actual numeric candidates. The
 original reaction/placement/closure producer must next install complementary
 carrier and unplaced-residual windows from one validated terminal allocation.
 
+## Genuine current reaction source preparation
+
+The exact source selector now consumes actual canonical G2P and thermal producer
+captures, the original current discovery proposal, original table compilers and
+the held physical inventory window. Thermal and discovery consumers have
+independent reads; ordinary G2P accessors cannot execute during authentication.
+All source lifetimes span asynchronous compilation and confirmed retirement.
+
+The current production interface-flux law supplies a tagged extent, including an
+explicit no-cap branch. Its finite f32 extent is decoded and multiplied by the
+exact admitted stoichiometric mass scale using integer limbs, then floored once
+and capped by checked exact availability. Three ordered GPU passes produce cap,
+debits/remainders and complete term/donor partitions. The feasible-cap shortcut
+preserves every selected bit and retains the prior availability-limited search.
+
+Native evidence in `g2-exact-reaction-source-20261025-VTyXtC/source-native-final-r2.json`
+passes 174 cap cases plus four genuine canonical source cases at 9/66 words,
+including reversed endpoints and smaller dt, with unchanged source inventory.
+The production runner now awaits cold compilation while holding its original
+sources. Preserve the earlier device-loss and browser setup failures.
+
+This is **numeric preparation, not physical reaction publication**. Geometry
+still follows the current f32 kinetic law; original authored binary64 chemistry
+parameters are not recovered from already packed table entries. Caloric/COM,
+low-part energy/momentum, moles/entities/volume and actual carrier/residual
+placement/history publication must consume these same selected integers before
+the existing exact mass-changing guard can be removed. No full G2 criterion is
+closed by this checkpoint.
+
 ## Pair-owned physical reaction allocation
 
 ### Exact cumulative allocation arithmetic — 2026-10-25
@@ -346,6 +375,27 @@ initialize from rounded H[13] or duplicate an empty-parent arena alias as a
 second numeric source. Positive inventory with invalid metadata must reject
 instead of disappearing. The existing unsupported-path guards remain until
 those genuine producers and their outer publication are integrated.
+
+## Reaction retirement prerequisite — 2026-10-25
+
+The existing physical producer's scratch, summary, retained event and placement
+owners now require confirmed queue completion or fulfilled device loss before
+ordinary retirement. Failed fences do not release or recycle warm storage.
+Only the original placement owner can destroy transferred destinations; public
+buffer fields confer no fallback authority. Private event cleanup claims keep
+authenticated final-consumer retirement free of host fences, including history
+preserved after carrier retirement. Aggregate borrows, capability retry and
+per-buffer destructor retry retain their actual owner lifetimes.
+
+Evidence in `g2-reaction-retirement-20261025-ro9i3vdz` includes 317 focused
+checks, 15 native physical reaction executions plus mixed-table rejection,
+and nine native placement cases with 65,536-event conflict and warm-reuse
+checks. Actual submitted copies of state, thermo, mechanics and events remain
+identical after authenticated retirement; cleanup adds zero host fences.
+GPU errors are empty and the owned desktop browser sessions are closed.
+This proves retirement in the existing physical domain. Exact mass-changing
+source, carrier/residual and outer publication admission still requires the
+genuine producer chain described above.
 
 ## Implementation order and acceptance
 

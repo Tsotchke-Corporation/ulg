@@ -7,6 +7,7 @@ import {
   closeWorkerQueueSubmitBurst,
   workerQueueSubmitBurstStats,
   withWorkerQueueSubmitBurstWriteThrough,
+  deferConfirmedSubmittedWorkCleanup,
   deferSubmittedWorkCleanup
 } from '../src/runtime/webgpuComputeLayout.js';
 
@@ -402,6 +403,133 @@ test('deferSubmittedWorkCleanup parks cleanups on the open burst', async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(ran, ['cleanup']);
   assert.equal(ops[0].op, 'submit');
+});
+
+function confirmedBurstDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('confirmed cleanup stays behind held commands with one raw fence per registration', async () => {
+  const { device, ops } = createFakeDevice();
+  const fences = [];
+  let fenceRequests = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    const fence = confirmedBurstDeferred(); fences.push(fence); ops.push({ op: 'fence' });
+    return fence.promise;
+  };
+  armWorkerQueueSubmitBurst(device);
+  const first = device.createBuffer({ label: 'first-owned' });
+  const second = device.createBuffer({ label: 'second-owned' });
+  openWorkerQueueSubmitBurst(device);
+  device.queue.submit(['uses-both']);
+  const completions = [first, second].map(buffer => deferConfirmedSubmittedWorkCleanup(device, () => buffer.destroy(), {
+    onQueueFenceRequested() { fenceRequests++; }
+  }));
+  assert.deepEqual(ops, []); assert.equal(fences.length, 0);
+  assert.equal(fenceRequests, 0, 'parking a cleanup is not a fence request');
+  assert.equal(workerQueueSubmitBurstStats(device).fenceFlushCount, 0);
+  flushWorkerQueueSubmitBurst(device);
+  assert.deepEqual(ops.map(op => op.op), ['submit', 'fence', 'fence']);
+  assert.equal(fenceRequests, 2, 'observers run when flush requests the real fences');
+  fences[1].resolve(); assert.equal(await completions[1], true);
+  assert.deepEqual(ops.filter(op => op.op === 'destroy').map(op => op.buffer), [second]);
+  fences[0].resolve(); assert.equal(await completions[0], true);
+  assert.equal(ops.filter(op => op.op === 'destroy').length, 2);
+  const stats = closeWorkerQueueSubmitBurst(device);
+  assert.equal(stats.deferredCleanupTotal, 2); assert.equal(stats.fenceFlushCount, 0);
+  assert.equal(fences.length, 2, 'closing an empty burst adds no cleanup fence');
+  assert.equal(fenceRequests, 2);
+});
+
+test('confirmed retirement does not re-park destruction behind later held work', async () => {
+  const { device, ops } = createFakeDevice();
+  const fences = [];
+  device.queue.onSubmittedWorkDone = () => {
+    const fence = confirmedBurstDeferred(); fences.push(fence); ops.push({ op: 'fence' });
+    return fence.promise;
+  };
+  armWorkerQueueSubmitBurst(device);
+  const retired = device.createBuffer({ label: 'earlier-owned' });
+  const later = device.createBuffer({ label: 'later-owned' });
+  openWorkerQueueSubmitBurst(device);
+  device.queue.submit(['uses-earlier']);
+  const completion = deferConfirmedSubmittedWorkCleanup(device, () => retired.destroy());
+  flushWorkerQueueSubmitBurst(device);
+  device.queue.submit(['uses-later']);
+  fences[0].resolve();
+  assert.equal(await completion, true);
+  assert.deepEqual(ops.map(op => op.op), ['submit', 'fence', 'destroy']);
+  assert.equal(ops.at(-1).buffer, retired);
+  assert.equal(workerQueueSubmitBurstStats(device).deferredDestroyTotal, 0);
+  assert.equal(fences.length, 1, 'confirmed destruction does not add a second fence');
+  later.destroy();
+  assert.equal(workerQueueSubmitBurstStats(device).deferredDestroyTotal, 1,
+    'ordinary destruction outside the confirmed callback remains protected');
+  closeWorkerQueueSubmitBurst(device);
+  assert.equal(fences.length, 2, 'only the unrelated ordinary cleanup adds a fence');
+  fences[1].resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ops.filter(op => op.op === 'destroy').length, 2);
+});
+
+for (const mode of ['reject', 'throw', 'missing', 'submit-throws']) {
+  test(`confirmed burst cleanup retains resources through ${mode}`, async () => {
+    const { device, ops } = createFakeDevice();
+    const loss = confirmedBurstDeferred(), fence = confirmedBurstDeferred();
+    device.lost = loss.promise;
+    if (mode === 'missing') delete device.queue.onSubmittedWorkDone;
+    else device.queue.onSubmittedWorkDone = () => {
+      ops.push({ op: 'fence' });
+      if (mode === 'throw') throw new Error('fence creation failed');
+      if (mode === 'reject') return Promise.reject(new Error('fence rejected'));
+      return fence.promise;
+    };
+    if (mode === 'submit-throws') device.queue.submit = commandBuffers => {
+      ops.push({ op: 'submit', commandBuffers: [...commandBuffers] });
+      throw new Error('submit failed after delegation');
+    };
+    armWorkerQueueSubmitBurst(device);
+    const buffer = device.createBuffer({ label: 'owned' });
+    openWorkerQueueSubmitBurst(device); device.queue.submit(['uses-owned']);
+    let completed = false;
+    const completion = deferConfirmedSubmittedWorkCleanup(device, () => buffer.destroy());
+    completion.then(() => { completed = true; });
+    if (mode === 'submit-throws') assert.throws(() => closeWorkerQueueSubmitBurst(device), /after delegation/);
+    else closeWorkerQueueSubmitBurst(device);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(completed, false); assert.equal(ops.filter(op => op.op === 'destroy').length, 0);
+    if (mode === 'submit-throws') {
+      fence.resolve(); assert.equal(await completion, true);
+    } else {
+      loss.resolve({ reason: 'destroyed' }); assert.equal(await completion, false);
+    }
+    loss.resolve({ reason: 'destroyed' }); fence.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(ops.filter(op => op.op === 'destroy').length, 1);
+  });
+}
+
+test('confirmed loss retires held cleanup immediately and late burst flush cannot retire twice', async () => {
+  const { device, ops } = createFakeDevice();
+  const loss = confirmedBurstDeferred(); device.lost = loss.promise;
+  armWorkerQueueSubmitBurst(device);
+  const buffer = device.createBuffer({ label: 'held-owner' });
+  openWorkerQueueSubmitBurst(device); device.queue.submit(['uses-owner']);
+  let fenceRequests = 0;
+  const completion = deferConfirmedSubmittedWorkCleanup(device, () => buffer.destroy(), {
+    onQueueFenceRequested() { fenceRequests++; }
+  });
+  loss.resolve({ reason: 'destroyed' });
+  assert.equal(await completion, false);
+  assert.deepEqual(ops.map(op => op.op), ['destroy'], 'loss retirement does not re-park destruction on the burst');
+  assert.equal(workerQueueSubmitBurstStats(device).deferredDestroyTotal, 0);
+  closeWorkerQueueSubmitBurst(device);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ops.filter(op => op.op === 'destroy').length, 1);
+  assert.equal(ops.filter(op => op.op === 'fence').length, 0, 'terminal ticket does not request a late fence');
+  assert.equal(fenceRequests, 0, 'loss before flush never reports a fence request');
 });
 
 test('close flushes, reports stats, and restores direct submits', () => {

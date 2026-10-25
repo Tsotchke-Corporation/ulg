@@ -15,6 +15,7 @@ import {
   SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_ROW_LAYOUT,
   ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
   ULG_SCHROEDER_SPATIAL_REACTION_DISCOVERY_PROPOSAL_SCHEMA,
+  acquireSchroederSpatialReactionDiscoveryProposalRead,
   destroySchroederSpatialReactionDiscoveryProposalCache,
   maxReactionContactRadiusM,
   observeSchroederSpatialReactionDiscoveryActivation,
@@ -1526,6 +1527,221 @@ test('reaction discovery keeps exact proposals uninflated while a separate motio
   await generation.releasePromise;
   assert.equal(destroySchroederSpatialReactionDiscoveryProposalCache(device), true);
 });
+
+test('reaction discovery consumer binds the original mechanics source of a genuine proposal', async () => {
+  const device = createFakeDevice();
+  const particleCount = 2;
+  const activeNodeList = createActiveNodeList(device, particleCount);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device, activeNodeList, particleCount
+  });
+  const sourceStateBuffer = activeNodeList.sourceStateBuffer;
+  const sourceThermoBuffer = device.createBuffer({
+    label: 'reaction-discovery-consumer-thermo',
+    size: particleCount * 3 * 4 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const sourceMechanicsBuffer = device.createBuffer({
+    label: 'reaction-discovery-consumer-mechanics',
+    size: particleCount * 8 * 4 * Float32Array.BYTES_PER_ELEMENT,
+    usage: 128
+  });
+  const substitutedMechanics = device.createBuffer({
+    label: 'reaction-discovery-substituted-mechanics',
+    size: sourceMechanicsBuffer.size,
+    usage: 128
+  });
+  const reactionTable = createReactionTable();
+  const proposal = await runSchroederSpatialReactionDiscoveryProposalWebGpu({
+    device,
+    generation,
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer,
+    reactionTable,
+    reactionMotionEnvelope: createSphReactionMotionEnvelope({
+      maxFutureSubsteps: 4,
+      dtS: 1 / 120,
+      gridSpacingM: 0.05,
+      cflFactor: 0.4,
+      boxDimsM: [5, 5, 5],
+      separationDisplacementEnabled: false,
+      contactCorrectionEnabled: true,
+      thermalPhaseEvolutionEnabled: true
+    }),
+    boxDimsM: [5, 5, 5],
+    captureActivationObservation: true
+  });
+  const consumerOptions = {
+    device, generation, particleCount, reactionCount: reactionTable.reactionCount,
+    reactionTable, sourceStateBuffer, sourceThermoBuffer
+  };
+  const resolve = (artifact = proposal, expected = consumerOptions) =>
+    resolveSchroederSpatialReactionDiscoveryProposalForConsumer(artifact, expected);
+  const original = resolve(proposal, { ...consumerOptions, sourceMechanicsBuffer });
+  assert.equal(original.admitted, true);
+  assert.equal(original.sourceMechanicsBuffer, sourceMechanicsBuffer);
+  assert.equal(resolve().admitted, true, 'legacy callers may omit expected mechanics');
+  for (const rejected of [
+    resolve(proposal, { ...consumerOptions, sourceMechanicsBuffer: substitutedMechanics }),
+    resolve(proposal, { ...consumerOptions, sourceMechanicsBuffer: null }),
+    resolve({ ...proposal }, { ...consumerOptions, sourceMechanicsBuffer }),
+    resolve({ ...proposal, sourceMechanicsBuffer: substitutedMechanics }, {
+      ...consumerOptions, sourceMechanicsBuffer: substitutedMechanics
+    })
+  ]) {
+    assert.equal(rejected.admitted, false);
+    assert.equal(rejected.status,
+      'schroeder-spatial-reaction-discovery-proposal-rejected-authenticity');
+  }
+  assert.throws(() => { proposal.sourceMechanicsBuffer = substitutedMechanics; }, TypeError,
+    'the genuine public mechanics identity is immutable');
+  assert.equal(proposal.sourceMechanicsBuffer, sourceMechanicsBuffer);
+  assert.equal(resolve(proposal, { ...consumerOptions, sourceMechanicsBuffer }).admitted, true);
+  proposal.destroy();
+  releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);
+  await generation.releasePromise;
+  assert.equal(destroySchroederSpatialReactionDiscoveryProposalCache(device), true);
+});
+
+async function createRetainedDiscoveryFixture({ captureActivationObservation = false } = {}) {
+  const device = createFakeDevice();
+  const bindings = [];
+  device.createBindGroup = descriptor => { bindings.push(descriptor); return descriptor; };
+  const activeNodeList = createActiveNodeList(device, 2);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({ device, activeNodeList, particleCount: 2 });
+  const sourceThermoBuffer = device.createBuffer({ label: 'read-thermo', size: 96, usage: 128 });
+  const sourceMechanicsBuffer = device.createBuffer({ label: 'read-mechanics', size: 256, usage: 128 });
+  const expected = {
+    device, generation, particleCount: 2, reactionCount: 3,
+    reactionTable: createReactionTable(),
+    sourceStateBuffer: activeNodeList.sourceStateBuffer,
+    sourceThermoBuffer, sourceMechanicsBuffer
+  };
+  const issue = nextGeneration => runSchroederSpatialReactionDiscoveryProposalWebGpu({
+    ...expected, generation: nextGeneration || generation, captureActivationObservation
+  });
+  const proposal = await issue();
+  return { device, activeNodeList, generation, expected, proposal, issue, bindings };
+}
+
+test('retained discovery reads preserve no-envelope mechanics and independently pin destruction and reuse', async () => {
+  const { device, activeNodeList, generation, expected, proposal, issue, bindings } =
+    await createRetainedDiscoveryFixture();
+  assert.equal(proposal.sourceMechanicsBuffer, expected.sourceMechanicsBuffer);
+  assert.equal(proposal.activationMotionEnvelopeEnabled, false);
+  assert.equal(bindings.some(group => group.entries.some(entry =>
+    entry.resource?.buffer === expected.sourceMechanicsBuffer)), false,
+  'unused mechanics provenance adds no shader binding');
+  const first = acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, expected);
+  const second = acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, expected);
+  assert.equal(first.view.admitted, true);
+  assert.equal(first.view.proposalBuffer, proposal.proposalBuffer);
+  assert.equal(first.view.sourceMechanicsBuffer, expected.sourceMechanicsBuffer);
+  assert.equal(first.validate(), first.view);
+  assert.throws(() => acquireSchroederSpatialReactionDiscoveryProposalRead({ ...proposal }, expected), {
+    code: 'ERR_SCHROEDER_SPATIAL_REACTION_DISCOVERY_READ_REJECTED'
+  });
+  assert.throws(() => acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, {
+    ...expected, sourceMechanicsBuffer: device.createBuffer({ size: 256, usage: 128 })
+  }), { code: 'ERR_SCHROEDER_SPATIAL_REACTION_DISCOVERY_READ_REJECTED' });
+  const originalValue = expected.reactionTable.combinedRecords[0];
+  expected.reactionTable.combinedRecords[0] += 1;
+  assert.throws(() => first.validate(), /exact generation and buffer family/);
+  expected.reactionTable.combinedRecords[0] = originalValue;
+  const originalCapacity = proposal.proposalBuffer.size;
+  proposal.proposalBuffer.size = 0;
+  assert.throws(() => first.validate(), /smaller than its authenticated row set/);
+  proposal.proposalBuffer.size = originalCapacity;
+  assert.equal(first.validate(), first.view);
+  assert.equal(proposal.destroy(), true);
+  assert.equal(proposal.destroy(), false);
+  assert.equal(first.validate(), first.view, 'an existing hold survives owner destruction');
+  assert.throws(() => acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, expected), {
+    code: 'ERR_SCHROEDER_SPATIAL_REACTION_DISCOVERY_READ_REJECTED'
+  });
+  releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);
+  assert.equal(second.validate(), second.view, 'release scheduling does not invalidate the existing hold');
+  await generation.releasePromise;
+  assert.equal(second.validate(), second.view);
+  assert.throws(() => destroySchroederSpatialReactionDiscoveryProposalCache(device), /leased reaction discovery arena/);
+  const nextGeneration = runSchroederSpatialEpochGenerationWebGpu({ device, activeNodeList, particleCount: 2 });
+  await assert.rejects(issue(nextGeneration), /pinned by a retained consumer read/);
+  assert.equal(first.release(), true);
+  assert.equal(first.release(), false);
+  assert.equal(first.released, true);
+  assert.throws(() => first.validate(), /released or lost its arena lease/);
+  assert.equal(second.validate(), second.view);
+  await assert.rejects(issue(nextGeneration), /pinned by a retained consumer read/);
+  assert.equal(second.release(), true);
+  const nextProposal = await issue(nextGeneration);
+  assert.equal(nextProposal.arenaWarmReuse, true);
+  assert.equal(nextProposal.proposalBuffer, proposal.proposalBuffer);
+  nextProposal.destroy();
+  releaseSchroederSpatialEpochGenerationAfterQueue(nextGeneration, device);
+  await nextGeneration.releasePromise;
+  assert.equal(destroySchroederSpatialReactionDiscoveryProposalCache(device), true);
+});
+
+test('retained discovery reads prevent automatic generation recycling until the final release', async () => {
+  const { device, activeNodeList, generation, expected, proposal, issue } =
+    await createRetainedDiscoveryFixture();
+  const read = acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, expected);
+  releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);
+  await generation.releasePromise;
+  const nextGeneration = runSchroederSpatialEpochGenerationWebGpu({ device, activeNodeList, particleCount: 2 });
+  await assert.rejects(issue(nextGeneration), /pinned by a retained consumer read/);
+  assert.equal(read.validate(), read.view);
+  read.release();
+  const nextProposal = await issue(nextGeneration);
+  assert.equal(nextProposal.proposalBuffer, proposal.proposalBuffer);
+  const nextRead = acquireSchroederSpatialReactionDiscoveryProposalRead(nextProposal, {
+    ...expected, generation: nextGeneration
+  });
+  assert.equal(proposal.destroy(), false, 'the old owner cannot release the reused arena');
+  assert.equal(nextRead.validate(), nextRead.view);
+  nextRead.release();
+  nextProposal.destroy();
+  releaseSchroederSpatialEpochGenerationAfterQueue(nextGeneration, device);
+  await nextGeneration.releasePromise;
+  assert.equal(destroySchroederSpatialReactionDiscoveryProposalCache(device), true);
+});
+
+for (const firstRelease of ['read', 'observation']) {
+  test(`discovery read and pending activation map each retain the arena (${firstRelease} finishes first)`, async () => {
+    const { device, activeNodeList, generation, expected, proposal, issue } =
+      await createRetainedDiscoveryFixture({ captureActivationObservation: true });
+    const read = acquireSchroederSpatialReactionDiscoveryProposalRead(proposal, expected);
+    const readback = device.buffers.find(buffer => buffer.label.includes('reaction-activation-readback'));
+    const originalMap = readback.mapAsync.bind(readback);
+    let finishMap;
+    const gate = new Promise(resolve => { finishMap = resolve; });
+    readback.mapAsync = async (...args) => { await gate; return originalMap(...args); };
+    const observation = observeSchroederSpatialReactionDiscoveryActivation(proposal, { device });
+    proposal.destroy();
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);
+    await generation.releasePromise;
+    const nextGeneration = runSchroederSpatialEpochGenerationWebGpu({ device, activeNodeList, particleCount: 2 });
+    if (firstRelease === 'read') {
+      read.release();
+      await assert.rejects(issue(nextGeneration), /pinned by a pending activation observation/);
+      finishMap();
+      await observation;
+    } else {
+      finishMap();
+      await observation;
+      assert.equal(read.validate(), read.view);
+      await assert.rejects(issue(nextGeneration), /pinned by a retained consumer read/);
+      read.release();
+    }
+    const nextProposal = await issue(nextGeneration);
+    assert.equal(nextProposal.proposalBuffer, proposal.proposalBuffer);
+    nextProposal.destroy();
+    releaseSchroederSpatialEpochGenerationAfterQueue(nextGeneration, device);
+    await nextGeneration.releasePromise;
+    assert.equal(destroySchroederSpatialReactionDiscoveryProposalCache(device), true);
+  });
+}
 
 test('reaction discovery activation observation treats the GPU sentinel as fail-closed', async () => {
   const device = createFakeDevice();

@@ -30,6 +30,7 @@ import {
   isSchroederSpatialReactionPlacementEpochArtifact,
   releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue,
   releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue,
+  releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered,
   releaseSphReactionWarmArenaAfterQueue,
   resolveSphReactionWarmArenaLease,
   resolveSchroederSpatialReactionPlacementSourceFamily,
@@ -2435,7 +2436,7 @@ test('reaction warm arena allocation exception rolls back every partial buffer',
   assert.deepEqual(fx.buffers.map((resource) => resource.destroyCount), [1, 1, 1, 1]);
 });
 
-test('reaction warm arena fence rejection quarantines and destroys the slot', async () => {
+test('reaction warm arena fence rejection retains the quarantined slot until fulfilled loss', async () => {
   const fx = fakeDevice();
   const lease = acquireReactionWarmArena(fx.device);
   const fence = deferred();
@@ -2444,14 +2445,67 @@ test('reaction warm arena fence rejection quarantines and destroys the slot', as
     completionFence: fence.promise
   });
   fence.reject(new Error('intentional reaction warm fence rejection'));
-  assert.equal(await releasePromise, false);
+  await new Promise(resolve => setImmediate(resolve));
+  let settled = false; releasePromise.then(() => { settled = true; });
   const stats = sphReactionWarmArenaStats(lease.arena);
-  assert.equal(stats.status, 'destroyed');
+  assert.equal(stats.status, 'quarantined');
   assert.equal(stats.terminal, true);
+  assert.equal(stats.inFlight, true);
+  assert.equal(settled, false);
+  for (const resource of Object.values(lease.arena.buffers)) assert.equal(resource.destroyCount, 0);
+  assert.throws(() => destroySphReactionWarmArenaWebGpu(lease.arena), /in-flight/);
+  const other = acquireReactionWarmArena(fx.device);
+  assert.notEqual(other.arena, lease.arena);
+  discardSphReactionWarmArenaLease(other, { device: fx.device });
+  fx.lost.resolve({ message: 'confirmed after rejected fence' });
+  assert.equal(await releasePromise, false);
+  assert.equal(sphReactionWarmArenaStats(lease.arena).status, 'destroyed');
   for (const resource of Object.values(lease.arena.buffers)) {
     assert.equal(resource.destroyCount, 1);
   }
 });
+
+const retirementTick = () => new Promise(resolve => setImmediate(resolve));
+
+for (const mode of ['pending', 'false', 'throw', 'missing']) {
+  test(`warm retirement keeps unconfirmed ${mode} fence buffers until loss and ignores late completion`, async () => {
+    const fx = fakeDevice(), lease = acquireReactionWarmArena(fx.device), fence = deferred();
+    if (mode === 'throw') fx.device.queue.onSubmittedWorkDone = () => { throw new Error('fence unavailable'); };
+    if (mode === 'missing') fx.device.queue.onSubmittedWorkDone = undefined;
+    const promise = releaseSphReactionWarmArenaAfterQueue(lease, { device: fx.device,
+      ...(['pending', 'false'].includes(mode) ? { completionFence: fence.promise } : {}) });
+    if (mode === 'false') fence.resolve(false);
+    let finished = false; promise.then(() => { finished = true; });
+    await retirementTick();
+    assert.equal(finished, false);
+    assert.equal(sphReactionWarmArenaStats(lease.arena).inFlight, true);
+    assert.ok(Object.values(lease.arena.buffers).every(resource => resource.destroyCount === 0));
+    fx.lost.resolve({ message: 'fulfilled loss' });
+    assert.equal(await promise, false);
+    fence.resolve(); await retirementTick();
+    assert.ok(Object.values(lease.arena.buffers).every(resource => resource.destroyCount === 1));
+  });
+}
+
+for (const mode of ['reject', 'throw', 'missing']) {
+  test(`unconfirmed ${mode} device-loss observer never destroys an arena`, async () => {
+    const fx = fakeDevice();
+    if (mode === 'throw') Object.defineProperty(fx.device, 'lost', { get() { throw new Error('loss observer unavailable'); } });
+    if (mode === 'missing') fx.device.lost = undefined;
+    const lease = acquireReactionWarmArena(fx.device), fence = deferred();
+    const promise = releaseSphReactionWarmArenaAfterQueue(lease, { device: fx.device, completionFence: fence.promise });
+    if (mode === 'reject') fx.lost.reject(new Error('unconfirmed loss rejection'));
+    let finished = false; promise.then(() => { finished = true; });
+    await retirementTick();
+    assert.equal(finished, false);
+    assert.equal(sphReactionWarmArenaStats(lease.arena).deviceLost, false);
+    assert.ok(Object.values(lease.arena.buffers).every(resource => resource.destroyCount === 0));
+    fence.resolve(); assert.equal(await promise, true);
+    assert.equal(sphReactionWarmArenaStats(lease.arena).status, 'idle');
+    assert.equal(destroySphReactionWarmArenaWebGpu(lease.arena), true);
+    assert.ok(Object.values(lease.arena.buffers).every(resource => resource.destroyCount === 1));
+  });
+}
 
 test('reaction warm arena device loss quarantines in-flight buffers exactly once', async () => {
   const fx = fakeDevice();
@@ -2577,3 +2631,249 @@ test('shared-directory placement transfers warm destinations and returns them on
   assert.equal(discardSphReactionWarmArenaLease(warm, { device: fx.device }), true);
   assert.equal(destroySphReactionWarmArenaWebGpu(arena), true);
 });
+
+async function genuineRetirementFamily({ warm = false, callerOwned = false } = {}) {
+  const fx = fixture(), lease = warm ? acquireReactionWarmArena(fx.device) : null;
+  const arena = lease ? resolveSphReactionWarmArenaLease(lease, { device: fx.device }) : null;
+  const state = arena?.buffers.resolvedState ?? fx.frozenState;
+  const thermo = arena?.buffers.resolvedThermo ?? fx.frozenThermo;
+  const mechanics = arena?.buffers.resolvedMechanics ?? fx.frozenMechanics;
+  const positionInvariantCertificate = createSphReactionResolvePositionInvariantCertificate({
+    device: fx.device, ancestorGeneration: fx.ancestor,
+    reactionInputStateBuffer: fx.reactionInputState, reactionInputThermoBuffer: fx.reactionInputThermo,
+    reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+    transactionRollbackThermoBuffer: fx.reactionInputThermo,
+    transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
+    frozenResolvedStateBuffer: state, particleCount: fx.particleCount
+  });
+  const runners = injectedRunners(fx);
+  const family = await runSchroederSpatialReactionPlacementEpochWebGpu({
+    device: fx.device, ancestorPublicGeneration: fx.ancestor,
+    sphParticleState: fx.sphParticleState, mlsMpmParticleState: fx.mlsMpmParticleState,
+    sphParticleUpload: fx.sphParticleUpload, frozenSourceStateBuffer: state,
+    frozenSourceThermoBuffer: thermo, frozenSourceMechanicsBuffer: mechanics,
+    positionInvariantCertificate, reactionWarmArenaLease: lease,
+    ...(callerOwned ? {
+      placedDestinationStateBuffer: buffer(fx.device, 'caller-destination-state', fx.stateBytes),
+      placedDestinationThermoBuffer: buffer(fx.device, 'caller-destination-thermo', fx.thermoBytes),
+      placedDestinationMechanicsBuffer: buffer(fx.device, 'caller-destination-mechanics', fx.mechanicsBytes)
+    } : {}), ...runners
+  });
+  const { placementArtifact } = submitGenuineResidentPlacement(fx, family, {
+    sourceStateBuffer: family.transactionRollbackStateBuffer,
+    sourceThermoBuffer: family.transactionRollbackThermoBuffer,
+    sourceMechanicsBuffer: family.transactionRollbackMechanicsBuffer,
+    labelPrefix: 'genuine-retirement-placement'
+  });
+  await finalizeSchroederSpatialReactionPlacementPositionEpochFloor(family, { placementArtifact });
+  return { fx, family, placementArtifact, lease, arena, runners,
+    destinations: [family.placedDestinationStateBuffer, family.placedDestinationThermoBuffer, family.placedDestinationMechanicsBuffer] };
+}
+
+for (const warm of [false, true]) for (const mode of ['pending', 'reject', 'false', 'throw', 'missing']) {
+  test(`genuine ${warm ? 'warm' : 'cold'} transferred destination retains ${mode} fence ownership until fulfilled loss`, async () => {
+    const { fx, family, destinations, arena } = await genuineRetirementFamily({ warm });
+    const sourceFence = deferred(), destinationFence = deferred();
+    fx.device.queue.onSubmittedWorkDone = () => sourceFence.promise;
+    assert.equal(releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { abandon: true }), true);
+    assert.equal(transferSchroederSpatialReactionPlacementDestinationOwnership(family), true);
+    sourceFence.resolve(); await retirementTick();
+    assert.equal(schroederSpatialReactionPlacementSourceFamilyLiveness(family).releaseStatus, 'released-after-final-consumer');
+    if (mode === 'throw') fx.device.queue.onSubmittedWorkDone = () => { throw new Error('destination fence throw'); };
+    if (mode === 'missing') fx.device.queue.onSubmittedWorkDone = undefined;
+    const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+      ['throw', 'missing'].includes(mode) ? {} : { completionFence: destinationFence.promise });
+    if (mode === 'reject') destinationFence.reject(new Error('destination fence rejection'));
+    if (mode === 'false') destinationFence.resolve(false);
+    let settled = false; completion.then(() => { settled = true; });
+    await retirementTick();
+    assert.equal(settled, false);
+    assert.ok(destinations.every(resource => resource.destroyCount === 0));
+    if (warm) assert.equal(sphReactionWarmArenaStats(arena).inFlight, true);
+    fx.lost.resolve({ message: 'fulfilled loss after source retirement' });
+    assert.equal(await completion, false);
+    destinationFence.resolve(); await retirementTick();
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+    assert.equal(fx.reactionInputState.destroyCount, 0, 'borrowed original state remains caller owned');
+  });
+}
+
+for (const warm of [false, true]) for (const mode of ['pending', 'reject', 'false', 'throw', 'missing']) {
+  test(`genuine ${warm ? 'warm' : 'cold'} source ${mode} fence cannot be overridden by a fulfilled destination fence`, async () => {
+    const { fx, family, destinations, lease, arena } = await genuineRetirementFamily({ warm });
+    const sourceFence = deferred();
+    fx.device.queue.onSubmittedWorkDone = () => sourceFence.promise;
+    if (mode === 'throw') fx.device.queue.onSubmittedWorkDone = () => { throw new Error('source fence throw'); };
+    if (mode === 'missing') fx.device.queue.onSubmittedWorkDone = undefined;
+    assert.equal(releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { abandon: true }), true);
+    // Missing proof closes a warm lease synchronously; it must not transfer.
+    if (warm && mode === 'missing') {
+      assert.throws(() => transferSchroederSpatialReactionPlacementDestinationOwnership(family), /stale, terminal, or foreign/);
+      fx.lost.resolve({ message: 'fulfilled loss of quarantined source' }); await retirementTick();
+      assert.ok(destinations.every(resource => resource.destroyCount === 1));
+      return;
+    }
+    assert.equal(transferSchroederSpatialReactionPlacementDestinationOwnership(family), true);
+    if (mode === 'reject') sourceFence.reject(new Error('source fence rejected'));
+    if (mode === 'false') sourceFence.resolve(false);
+    await retirementTick();
+    const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+      { completionFence: Promise.resolve(true) });
+    let settled = false; completion.then(() => { settled = true; });
+    await retirementTick();
+    assert.equal(settled, false);
+    assert.ok(destinations.every(resource => resource.destroyCount === 0));
+    if (warm) {
+      assert.equal(sphReactionWarmArenaStats(arena).inFlight, true);
+      assert.throws(() => releaseSphReactionWarmArenaAfterQueue(lease, { device: fx.device,
+        completionFence: Promise.resolve(true), abandon: true }), /stale, terminal, or foreign/);
+    }
+    fx.lost.resolve({ message: 'fulfilled loss of source' });
+    assert.equal(await completion, false);
+    sourceFence.resolve(); await retirementTick();
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+  });
+}
+
+for (const warm of [false, true]) {
+  test(`genuine ${warm ? 'warm' : 'cold'} transferred owner admits its sealed capability after rejecting a forged capability`, async () => {
+    const { fx, family, placementArtifact, destinations, arena } = await genuineRetirementFamily({ warm });
+    const before = fx.getQueueFenceCount();
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family, { requestQueueOrderedCleanupClaim: true });
+    const claim = schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(family);
+    const submission = submitQueueOrderedWork(fx.device, [Object.freeze({ label: 'genuine-destination-retry-consumer' })]);
+    const consumer = sealQueueOrderedFinalConsumerCapability(submission, fx.device,
+      { finalConsumerOwner: {}, producerClaims: [claim] });
+    assert.throws(() => releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family,
+      { queueOrderedFinalConsumer: {} }), { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+    assert.ok(destinations.every(resource => resource.destroyCount === 0));
+    if (warm) assert.equal(sphReactionWarmArenaStats(arena).inFlight, true);
+    const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family,
+      { queueOrderedFinalConsumer: consumer });
+    assert.equal(await completion, true);
+    assert.equal(releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family,
+      { queueOrderedFinalConsumer: consumer }), false, 'successful handoff remains one-shot');
+    assert.equal(fx.getQueueFenceCount(), before, 'capability retry adds no host queue fence');
+    assert.ok(destinations.every(resource => resource.destroyCount === (warm ? 0 : 1)));
+    if (warm) {
+      assert.equal(sphReactionWarmArenaStats(arena).inFlight, false);
+      assert.equal(destroySphReactionWarmArenaWebGpu(arena), true);
+    }
+    fx.lost.resolve({ message: 'late fulfilled loss after capability retry' }); await retirementTick();
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+  });
+
+  test(`fulfilled loss retires ${warm ? 'warm' : 'cold'} transferred destinations once before a late sealed claim`, async () => {
+    const { fx, family, placementArtifact, destinations } = await genuineRetirementFamily({ warm });
+    const before = fx.getQueueFenceCount();
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family, { requestQueueOrderedCleanupClaim: true });
+    const claim = schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(family);
+    const submission = submitQueueOrderedWork(fx.device, [Object.freeze({ label: 'genuine-final-destination-consumer' })]);
+    const consumer = sealQueueOrderedFinalConsumerCapability(submission, fx.device,
+      { finalConsumerOwner: {}, producerClaims: [claim] });
+    assert.equal(fx.getQueueFenceCount(), before, 'normal queue-ordered handoff adds no fence');
+    fx.lost.resolve({ message: 'fulfilled loss before sealed callback' }); await retirementTick();
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+    assert.equal(await releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family,
+      { queueOrderedFinalConsumer: consumer }), true);
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+  });
+}
+
+test('rejected device loss does not retire a genuine transferred owner or settle its pending queue fence', async () => {
+  const { fx, family, placementArtifact, destinations } = await genuineRetirementFamily();
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+  const fence = deferred();
+  const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+    { completionFence: fence.promise });
+  let settled = false; completion.then(() => { settled = true; });
+  fx.lost.reject(new Error('loss observer rejection is not loss'));
+  await retirementTick();
+  assert.equal(settled, false);
+  assert.ok(destinations.every(resource => resource.destroyCount === 0));
+  fence.resolve(); assert.equal(await completion, true);
+  assert.ok(destinations.every(resource => resource.destroyCount === 1));
+});
+
+test('genuine transferred owner preserves explicitly caller-owned destination buffers on fulfilled loss', async () => {
+  const { fx, family, placementArtifact, destinations, runners } = await genuineRetirementFamily({ callerOwned: true });
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+  const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+    { completionFence: new Promise(() => {}) });
+  fx.lost.resolve({ message: 'confirmed loss with caller destinations' });
+  assert.equal(await completion, false);
+  assert.ok(destinations.every(resource => resource.destroyCount === 0));
+  assert.equal(runners.calls.filter(([kind]) => kind === 'quarantine' || kind === 'release').length, 0);
+});
+
+for (const warm of [false, true]) for (const mode of ['pending', 'reject', 'throw', 'missing']) {
+  test(`failed ${warm ? 'warm' : 'cold'} initialization retains submitted allocations with a ${mode} fence`, async () => {
+    const fx = fixture(), lease = warm ? acquireReactionWarmArena(fx.device) : null;
+    const arena = lease ? resolveSphReactionWarmArenaLease(lease, { device: fx.device }) : null;
+    const state = arena?.buffers.resolvedState ?? fx.frozenState;
+    const certificate = createSphReactionResolvePositionInvariantCertificate({
+      device: fx.device, ancestorGeneration: fx.ancestor,
+      reactionInputStateBuffer: fx.reactionInputState, reactionInputThermoBuffer: fx.reactionInputThermo,
+      reactionInputMechanicsBuffer: fx.reactionInputMechanics,
+      transactionRollbackThermoBuffer: fx.reactionInputThermo,
+      transactionRollbackMechanicsBuffer: fx.reactionInputMechanics,
+      frozenResolvedStateBuffer: state, particleCount: fx.particleCount
+    });
+    const submit = fx.device.queue.submit, fence = deferred();
+    fx.device.queue.submit = commands => { submit(commands); throw new Error('injected failure after initialization submission'); };
+    fx.device.queue.onSubmittedWorkDone = () => fence.promise;
+    if (mode === 'throw') fx.device.queue.onSubmittedWorkDone = () => { throw new Error('unconfirmed initialization fence'); };
+    if (mode === 'missing') fx.device.queue.onSubmittedWorkDone = undefined;
+    await assert.rejects(runSchroederSpatialReactionPlacementEpochWebGpu({
+      device: fx.device, ancestorPublicGeneration: fx.ancestor,
+      sphParticleState: fx.sphParticleState, mlsMpmParticleState: fx.mlsMpmParticleState,
+      sphParticleUpload: fx.sphParticleUpload, frozenSourceStateBuffer: state,
+      frozenSourceThermoBuffer: arena?.buffers.resolvedThermo ?? fx.frozenThermo,
+      frozenSourceMechanicsBuffer: arena?.buffers.resolvedMechanics ?? fx.frozenMechanics,
+      positionInvariantCertificate: certificate, reactionWarmArenaLease: lease
+    }), /injected failure after initialization submission/);
+    if (mode === 'reject') fence.reject(new Error('unconfirmed initialization fence rejection'));
+    await retirementTick();
+    const resources = arena ? Object.values(arena.buffers)
+      : fx.buffers.filter(resource => /^ulg-schroeder-reaction-placement-(state|thermo|mechanics)-destination$/.test(resource.label));
+    assert.equal(resources.length, warm ? 15 : 3);
+    assert.ok(resources.every(resource => resource.destroyCount === 0));
+    fx.lost.resolve({ message: 'confirmed initialization loss' }); await retirementTick();
+    assert.ok(resources.every(resource => resource.destroyCount === 1));
+    fence.resolve(); await retirementTick();
+    assert.ok(resources.every(resource => resource.destroyCount === 1));
+  });
+}
+
+test('warm source retirement tolerates queue completion and device loss in the same microtask turn', async () => {
+  const { fx, family, arena } = await genuineRetirementFamily({ warm: true });
+  const fence = deferred(); fx.device.queue.onSubmittedWorkDone = () => fence.promise;
+  assert.equal(releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { abandon: true }), true);
+  fence.resolve(); fx.lost.resolve({ message: 'loss after completion delivery' });
+  await retirementTick();
+  assert.equal(schroederSpatialReactionPlacementSourceFamilyLiveness(family).releaseStatus, 'released-after-device-loss');
+  assert.ok(Object.values(arena.buffers).every(resource => resource.destroyCount === 1));
+});
+
+for (const warm of [false, true]) {
+  test(`late rejected fences cannot reopen ${warm ? 'warm' : 'cold'} retirement after fulfilled loss`, async () => {
+    const { fx, family, destinations, arena } = await genuineRetirementFamily({ warm });
+    const source = deferred(), destination = deferred();
+    fx.device.queue.onSubmittedWorkDone = () => source.promise;
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { abandon: true });
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+    const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+      { completionFence: destination.promise });
+    fx.lost.resolve({ message: 'terminal before rejection' });
+    assert.equal(await completion, false);
+    source.reject(new Error('late source rejection')); destination.reject(new Error('late destination rejection'));
+    await retirementTick();
+    assert.equal(schroederSpatialReactionPlacementSourceFamilyLiveness(family).releaseStatus, 'released-after-device-loss');
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+    if (warm) assert.equal(sphReactionWarmArenaStats(arena).deviceLossStatus, 'device-loss-quarantined');
+  });
+}

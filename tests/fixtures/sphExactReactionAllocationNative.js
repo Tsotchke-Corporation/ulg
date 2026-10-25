@@ -49,7 +49,7 @@ export function createExactReactionAllocationFixture({ reactionCount = 1, identi
   const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties, { condensableThermodynamicsByMaterial: models });
   const reactionTable = buildSphReactionTable(Array.from({ length: reactionCount }, () => structuredClone(reaction)),
     { materialProperties, thermalMaterialTable });
-  return { reactionTable, thermalMaterialTable };
+  return { reactionTable, thermalMaterialTable, materialProperties, models };
 }
 
 export function exactReactionAllocationCases(format, compiled) {
@@ -61,11 +61,17 @@ export function exactReactionAllocationCases(format, compiled) {
     { name: 'partial-hidden-remainders', availableA: 101n, availableB: 1003n, kineticCap: 101n },
     { name: 'availability-a', availableA: 3n, availableB: 1000n, kineticCap: 1003n },
     { name: 'availability-b', availableA: 1000n, availableB: 3n, kineticCap: 1003n },
+    { name: 'availability-b-active', availableA: 1000n, availableB: 32n, kineticCap: 1032n },
     { name: 'full-width-cap', availableA: maximum / 3n, availableB: maximum - maximum / 3n, kineticCap: maximum },
     { name: 'aggregate-overflow', availableA: maximum, availableB: 1n, kineticCap: 1n }
   ];
   const wa = compiled.reactants[0].weight, wb = compiled.reactants[1].weight;
   if (wa + wb <= maximum) cases.push({ name: 'exact-depletion', availableA: wa, availableB: wb, kineticCap: wa + wb });
+  // A deterministic full-width feasible cap exercises the direct-cap path.
+  // Its last unit deliberately survives without any f32 representation.
+  const fullDebitA = maximum * wa / (wa + wb);
+  cases.push({ name: 'full-width-feasible-cap', availableA: fullDebitA,
+    availableB: maximum - fullDebitA, kineticCap: maximum });
   let seed = 0x91f3ad7;
   const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return BigInt(seed >>> 0); };
   const integer = () => { let value = 0n; for (let i = 0; i < format.wordCount; i++) value = (value << 32n) | random(); return value; };

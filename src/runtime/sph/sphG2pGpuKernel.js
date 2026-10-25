@@ -3689,6 +3689,13 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
 
 const exactMassG2pOutputs = new WeakMap();
 
+function exactMassG2pOutputFieldsMatch(result, record) {
+  return record.fields.every(([key, value]) => {
+    const descriptor = Object.getOwnPropertyDescriptor(result, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') && descriptor.value === value;
+  });
+}
+
 // Keep the fused implementation behind the existing lazy module boundary.
 // Each producer alone registers its original outputs; this lookup cannot mint
 // provenance for caller-supplied buffers or copied result envelopes.
@@ -3706,10 +3713,13 @@ export async function acquireMlsMpmMechanicsExactMassCapture(result, options = {
 export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUpload } = {}) {
   const record = exactMassG2pOutputs.get(result);
   if (!record || record.retired || record.device !== device || record.sourceSphUpload !== sphParticleUpload
+      || !exactMassG2pOutputFieldsMatch(result, record)
       || !validateSphParticleExactMassRead(record.sourceRead, { device, sourceSphUpload: sphParticleUpload })
-      || record.fields.some(([key, value]) => result[key] !== value)) {
+      || record.retired) {
     throw new TypeError('Exact mass requires the genuine live G2P producer output');
   }
+  // Physical-source validation can observe caller-owned state. Check terminal
+  // retirement after those reads, immediately before creating the new pin.
   record.pins++;
   let released = false;
   return Object.freeze({ sourceRead: record.sourceRead,
@@ -3718,8 +3728,9 @@ export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUp
     stateBuffer: record.stateBuffer, thermoBuffer: record.thermoBuffer,
     mechanicsBuffer: record.mechanicsBuffer, particleCount: record.sourceRead.particleCount,
     validate() {
-      if (released || record.retired || record.fields.some(([key, value]) => result[key] !== value)
-          || !validateSphParticleExactMassRead(record.sourceRead, { device, sourceSphUpload: sphParticleUpload })) {
+      if (released || record.retired || !exactMassG2pOutputFieldsMatch(result, record)
+          || !validateSphParticleExactMassRead(record.sourceRead, { device, sourceSphUpload: sphParticleUpload })
+          || released || record.retired) {
         throw new TypeError('Exact G2P capture was changed or released');
       }
       return true;

@@ -12,6 +12,7 @@ import {
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   createQueueOrderedSubmissionBatch,
+  deferConfirmedSubmittedWorkCleanup,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   releaseSubmittedWorkCleanupQueueOrdered,
@@ -211,6 +212,147 @@ test('a queue that cannot schedule a fence still retires cleanup exactly once', 
     false
   );
   assert.equal(cleanupCount, 1);
+});
+
+function retirementDeferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('confirmed cleanup validates its callback before observing a fence', () => {
+  const fake = fenceDevice();
+  assert.throws(() => deferConfirmedSubmittedWorkCleanup(fake.device, null), TypeError);
+  assert.throws(() => deferConfirmedSubmittedWorkCleanup(null, () => {}), TypeError);
+  assert.equal(fake.fencesCreated(), 0);
+});
+
+test('confirmed cleanups retire independently on their own fences with one loss observer', async () => {
+  const loss = retirementDeferred(), fences = [];
+  let subscriptions = 0, fenceRequests = 0;
+  const device = {
+    lost: { then(resolve, reject) { subscriptions++; loss.promise.then(resolve, reject); } },
+    queue: { onSubmittedWorkDone() {
+      const fence = retirementDeferred(); fences.push(fence); return fence.promise;
+    } }
+  };
+  const ran = [];
+  const completions = ['first', 'second', 'third'].map(name =>
+    deferConfirmedSubmittedWorkCleanup(device, () => ran.push(name), {
+      onQueueFenceRequested() { fenceRequests++; }
+    }));
+  assert.equal(fenceRequests, 3, 'actual fence requests are observed immediately');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fences.length, 3); assert.equal(subscriptions, 1);
+  fences[1].resolve();
+  assert.equal(await completions[1], true);
+  assert.deepEqual(ran, ['second'], 'a later cleanup does not wait for another fence');
+  fences[0].resolve();
+  assert.equal(await completions[0], true);
+  loss.resolve({ reason: 'destroyed' });
+  assert.equal(await completions[2], false);
+  assert.deepEqual(ran, ['second', 'first', 'third']);
+  fences[2].resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(ran, ['second', 'first', 'third'], 'late queue and loss observations cannot rerun cleanup');
+  assert.equal(await deferConfirmedSubmittedWorkCleanup(device, () => ran.push('after-loss'), {
+    onQueueFenceRequested() { fenceRequests++; }
+  }), false);
+  assert.equal(fences.length, 3, 'confirmed loss requires no additional queue fence');
+  assert.equal(fenceRequests, 3, 'already-lost cleanup does not report a phantom fence');
+  assert.equal(subscriptions, 1);
+});
+
+for (const mode of ['pending', 'reject', 'throw', 'missing', 'non-promise', 'getter-throws']) {
+  test(`confirmed cleanup quarantines an unconfirmed queue fence (${mode})`, async () => {
+    const loss = retirementDeferred(), fence = retirementDeferred();
+    const device = { lost: loss.promise, queue: {} };
+    if (mode !== 'missing') device.queue.onSubmittedWorkDone = () => {
+      if (mode === 'throw') throw new Error('unconfirmed scheduling failure');
+      if (mode === 'reject') return Promise.reject(new Error('unconfirmed queue rejection'));
+      if (mode === 'non-promise') return undefined;
+      return fence.promise;
+    };
+    if (mode === 'getter-throws') Object.defineProperty(device.queue, 'onSubmittedWorkDone', {
+      get() { throw new Error('unconfirmed queue getter failure'); }
+    });
+    let count = 0, completed = false, fenceRequests = 0;
+    const completion = deferConfirmedSubmittedWorkCleanup(device, () => { count++; }, {
+      onQueueFenceRequested() { fenceRequests++; }
+    });
+    assert.equal(fenceRequests, ['missing', 'getter-throws'].includes(mode) ? 0 : 1,
+      'telemetry counts actual calls, including throwing or unusable requests');
+    completion.then(() => { completed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(count, 0); assert.equal(completed, false);
+    loss.resolve({ reason: 'destroyed' });
+    assert.equal(await completion, false); assert.equal(count, 1);
+    fence.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(count, 1);
+  });
+}
+
+test('rejected or throwing device-loss observation does not confirm retirement', async () => {
+  for (const mode of ['reject', 'throw', 'missing']) {
+    const loss = retirementDeferred(), fence = retirementDeferred();
+    const device = { queue: { onSubmittedWorkDone: () => fence.promise } };
+    if (mode === 'reject') device.lost = loss.promise;
+    if (mode === 'throw') Object.defineProperty(device, 'lost', {
+      get() { throw new Error('observer setup failed'); }
+    });
+    let count = 0, completed = false;
+    const completion = deferConfirmedSubmittedWorkCleanup(device, () => { count++; });
+    completion.then(() => { completed = true; });
+    if (mode === 'reject') loss.reject(new Error('observer rejected'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(count, 0); assert.equal(completed, false);
+    fence.resolve();
+    assert.equal(await completion, true); assert.equal(count, 1);
+  }
+});
+
+test('fence-observer failures cannot prevent the real fence or confirm retirement', async () => {
+  for (const mode of ['throw', 'reject', 'getter-throws']) {
+    const fence = retirementDeferred();
+    let fenceRequests = 0, cleanups = 0;
+    const device = { queue: { onSubmittedWorkDone() {
+      fenceRequests++; return fence.promise;
+    } } };
+    const options = { onQueueFenceRequested() {
+      if (mode === 'reject') return Promise.reject(new Error('observer rejected'));
+      throw new Error('observer threw');
+    } };
+    if (mode === 'getter-throws') Object.defineProperty(options, 'onQueueFenceRequested', {
+      get() { throw new Error('observer accessor threw'); }
+    });
+    const completion = deferConfirmedSubmittedWorkCleanup(device, () => { cleanups++; }, options);
+    assert.equal(fenceRequests, 1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(cleanups, 0);
+    fence.resolve();
+    assert.equal(await completion, true);
+    assert.equal(cleanups, 1);
+  }
+});
+
+test('confirmed cleanup exceptions reject without making retirement repeatable', async () => {
+  for (const asynchronous of [false, true]) {
+    const loss = retirementDeferred(), fence = retirementDeferred();
+    const device = { lost: loss.promise, queue: { onSubmittedWorkDone: () => fence.promise } };
+    let count = 0;
+    const failure = new Error('cleanup failed');
+    const completion = deferConfirmedSubmittedWorkCleanup(device, () => {
+      count++;
+      if (asynchronous) return Promise.reject(failure);
+      throw failure;
+    });
+    const rejected = assert.rejects(completion, error => error === failure);
+    fence.resolve(); await rejected;
+    loss.resolve({ reason: 'destroyed' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(count, 1);
+  }
 });
 
 function queueOrderedDevice() {

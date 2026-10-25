@@ -1,5 +1,7 @@
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
-import { assertSphLegacyMassPathAllowed, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
+import { assertSphLegacyMassPathAllowed, markSphExactMassDerivedBuffers,
+  forkSphParticleExactMassRead, releaseSphParticleExactMassRead,
+  validateSphParticleExactMassRead } from './sphGpuBuffers.js';
 import {
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -53,6 +55,7 @@ import {
   computeBufferBinding,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
+  deferConfirmedSubmittedWorkCleanup,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   releaseSubmittedWorkCleanupQueueOrdered
@@ -4187,6 +4190,138 @@ function createSphThermalStepWebGpuEncoderStageImpl({
 }
 
 const thermalSourceCaptures = new WeakMap();
+const exactThermalSourceCaptures = new WeakMap();
+
+function exactThermalDuration(value) {
+  const packed = new Float32Array(1);
+  if (!Number.isFinite(value) || value < 0) throw new TypeError('Exact thermal duration must be finite and nonnegative');
+  packed[0] = value;
+  if (!Number.isFinite(packed[0]) || (value > 0 && packed[0] === 0)) {
+    throw new TypeError('Exact thermal duration is outside its encoded f32 domain');
+  }
+  return Object.freeze({ requestedDtSeconds: value, encodedDtSeconds: packed[0],
+    encodedDtBits: new Uint32Array(packed.buffer)[0] });
+}
+
+function exactThermalDataSnapshot(object, keys, label) {
+  if (!object || typeof object !== 'object') throw new TypeError(`Exact thermal source requires ${label}`);
+  const fields = keys.map(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (descriptor && !Object.hasOwn(descriptor, 'value')) throw new TypeError(`Exact thermal ${label}.${key} must be data`);
+    return [key, descriptor?.value];
+  });
+  return () => {
+    if (fields.some(([key, value]) => {
+      const descriptor = Object.getOwnPropertyDescriptor(object, key);
+      return (descriptor && !Object.hasOwn(descriptor, 'value')) || !Object.is(descriptor?.value, value);
+    })) throw new TypeError(`Exact thermal ${label} changed`);
+  };
+}
+
+function exactThermalTableSnapshot(table) {
+  const validateFields = exactThermalDataSnapshot(table, Object.keys(table), 'material table');
+  const arrays = Object.keys(table).flatMap(key => {
+    const value = Object.getOwnPropertyDescriptor(table, key)?.value;
+    if (!ArrayBuffer.isView(value)) return [];
+    if (typeof SharedArrayBuffer === 'function' && value.buffer instanceof SharedArrayBuffer) {
+      throw new TypeError('Exact thermal material table cannot use shared mutable storage');
+    }
+    return [[value, new Uint8Array(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))]];
+  });
+  return () => {
+    validateFields();
+    for (const [array, bytes] of arrays) {
+      const current = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+      if (current.length !== bytes.length || bytes.some((byte, index) => current[index] !== byte)) {
+        throw new TypeError('Exact thermal material table contents changed');
+      }
+    }
+  };
+}
+
+/** Read-only acquisition from the original exact thermal producer. A public
+ * stage seal, marked buffer, copied result or caller-created token is no origin.
+ * The independent physical read supplies confirmed queue/loss retirement for
+ * the separately held thermal output and G2P mechanics pins. */
+export async function acquireSphThermalExactMassSourceCapture(result, token, expected = {}) {
+  const record = exactThermalSourceCaptures.get(token);
+  if (!record || record.result !== result) throw new TypeError('Exact thermal source requires its original producer and token');
+  const required = { device: record.device, sphParticleUpload: record.sphParticleUpload,
+    mlsMpmParticleUpload: record.mlsMpmParticleUpload, sphParticleState: record.sphParticleState,
+    thermalMaterialTable: record.thermalMaterialTable, transaction: record.transaction,
+    generation: record.generation, dtSeconds: record.requestedDtSeconds };
+  for (const [key, value] of Object.entries(required)) {
+    const descriptor = Object.getOwnPropertyDescriptor(expected, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || !Object.is(descriptor.value, value)) {
+      throw new TypeError(`Exact thermal source requires original expected ${key}`);
+    }
+  }
+  if (Object.hasOwn(expected, 'g2pResult')
+      && Object.getOwnPropertyDescriptor(expected, 'g2pResult')?.value !== record.g2pResult) {
+    throw new TypeError('Exact thermal source requires its original G2P result');
+  }
+  record.validate();
+  const thermalRead = record.seal.retain();
+  let sourceRead = null, g2p = null;
+  const releasePins = async () => {
+    try { await g2p?.release(); } finally { thermalRead.release(); }
+  };
+  try {
+    // Reserve the known physical and thermal owners before lazy module loading.
+    sourceRead = forkSphParticleExactMassRead(record.sourceRead,
+      { device: record.device, sourceSphUpload: record.sourceRead.sourceSphUpload });
+    const { acquireMlsMpmMechanicsExactMassCapture } = await import('./sphG2pGpuKernel.js');
+    g2p = await acquireMlsMpmMechanicsExactMassCapture(record.g2pResult, {
+      device: record.device, sphParticleUpload: record.sphParticleUpload,
+      transaction: record.transaction, generation: record.generation, dt: record.requestedDtSeconds
+    });
+    let released = false, completion = null;
+    const validate = () => {
+      if (released) throw new TypeError('Exact thermal source read was released');
+      record.validate(); thermalRead.validate(); g2p.validate();
+      if (g2p.sourceMlsUpload !== record.mlsMpmParticleUpload || g2p.transaction !== record.transaction
+          || g2p.generation !== record.generation || !Object.is(g2p.dt, record.requestedDtSeconds)
+          || g2p.stateBuffer !== record.inputStateBuffer || g2p.thermoBuffer !== record.inputThermoBuffer
+          || g2p.mechanicsBuffer !== record.mechanicsBuffer
+          || !validateSphParticleExactMassRead(sourceRead,
+            { device: record.device, sourceSphUpload: sourceRead.sourceSphUpload })) {
+        throw new TypeError('Exact thermal source no longer matches its genuine mechanics and inventory');
+      }
+      return true;
+    };
+    validate();
+    return Object.freeze({ device: record.device, sourceRead,
+      sphParticleUpload: record.sphParticleUpload, mlsMpmParticleUpload: record.mlsMpmParticleUpload,
+      sourceSphUpload: record.sphParticleUpload, sourceMlsUpload: record.mlsMpmParticleUpload,
+      sphParticleState: record.sphParticleState, thermalMaterialTable: record.thermalMaterialTable,
+      transaction: record.transaction, generation: record.generation,
+      stateBuffer: record.seal.output.stateBuffer, thermoBuffer: record.seal.output.thermoBuffer,
+      mechanicsBuffer: record.mechanicsBuffer, particleCount: sourceRead.particleCount,
+      format: sourceRead.read.format, inventoryGeneration: sourceRead.read.generation,
+      rowOffset: sourceRead.read.rowOffset, rowCount: sourceRead.read.rowCount,
+      byteOffset: sourceRead.read.byteOffset, byteLength: sourceRead.read.byteLength,
+      requestedDtSeconds: record.requestedDtSeconds, encodedDtSeconds: record.encodedDtSeconds,
+      encodedDtBits: record.encodedDtBits, physicalPublicationAdmitted: false,
+      validate,
+      release() {
+        if (completion) return completion;
+        released = true;
+        completion = releaseSphParticleExactMassRead(sourceRead).then(async () => { await releasePins(); return true; });
+        return completion;
+      }
+    });
+  } catch (error) {
+    const cleanup = sourceRead
+      ? releaseSphParticleExactMassRead(sourceRead).then(async () => { await releasePins(); return true; })
+      : Promise.resolve(releasePins());
+    // Report failed admission immediately while retaining all submitted-work
+    // pins until confirmed retirement, even if that proof never arrives.
+    Object.defineProperty(error, 'exactThermalSourceCleanupCompletion', { value: cleanup });
+    void cleanup.catch(() => {});
+    throw error;
+  }
+}
+
 export function resolveSphThermalSourceCapture(result, token) {
   const seal = thermalSourceCaptures.get(token);
   if (!seal || seal.result !== result) throw new Error('Unknown thermal source capture');
@@ -4195,35 +4330,92 @@ export function resolveSphThermalSourceCapture(result, token) {
 }
 
 export async function runSphThermalStepWebGpu(args = {}) {
+  const exactDescriptor = Object.getOwnPropertyDescriptor(args, 'exactMassG2pResult');
+  if (exactDescriptor && !Object.hasOwn(exactDescriptor, 'value')) throw new TypeError('Exact thermal G2P input must be data');
+  if (exactDescriptor?.value != null) {
+    for (const key of Object.keys(args)) {
+      if (!Object.hasOwn(Object.getOwnPropertyDescriptor(args, key), 'value')) {
+        throw new TypeError('Exact thermal arguments must be own data');
+      }
+    }
+  }
   args = { ...args };
   if (args.exactMassG2pResult == null) return runSphThermalStepWebGpuImpl(args);
   if (!args.postMechanicsSourceCapture || args.retainOutputParticleBuffers !== true
       || args.readbackMode !== NO_FULL_READBACK_MODE) throw new TypeError('Exact thermal continuation requires retained producer capture');
+  let duration, validateTable, validateState, preparationError;
+  try {
+    duration = exactThermalDuration(args.dtS);
+    validateTable = exactThermalTableSnapshot(args.thermalMaterialTable);
+    validateState = exactThermalDataSnapshot(args.sphParticleState,
+      ['particleCount', 'state', 'thermo', 'stateStrideBytes', 'thermoStrideBytes'], 'particle state');
+  } catch (error) { preparationError = error; }
   const { acquireMlsMpmMechanicsExactMassCapture } = await import('./sphG2pGpuKernel.js');
   const capture = await acquireMlsMpmMechanicsExactMassCapture(args.exactMassG2pResult,
     { device: args.device, sphParticleUpload: args.sphParticleUpload,
       transaction: args.exactMassSpatialEpochTransaction, generation: args.exactMassSpatialEpochGeneration,
       dt: args.dtS });
-  let result = null;
+  let result = null, physicalRead = null, sourceRetirement = null, provenanceIssued = false;
+  const releaseSource = () => {
+    if (!sourceRetirement) sourceRetirement = physicalRead
+      ? releaseSphParticleExactMassRead(physicalRead).then(() => capture.release())
+      : Promise.resolve(capture.release());
+    return sourceRetirement;
+  };
   try {
+    if (preparationError) throw preparationError;
+    validateTable(); validateState();
     if (args.sourceStateBuffer !== capture.stateBuffer || args.sourceThermoBuffer !== capture.thermoBuffer
-        || args.sphParticleState?.particleCount !== capture.particleCount) {
+        || args.sphParticleState?.particleCount !== capture.particleCount
+        || capture.transaction !== (args.exactMassSpatialEpochTransaction ?? null)
+        || capture.generation !== (args.exactMassSpatialEpochGeneration ?? null)
+        || !Object.is(capture.dt, args.dtS)) {
       throw new TypeError('Exact thermal input differs from its genuine G2P source');
     }
-    result = await runSphThermalStepWebGpuImpl(args, capture);
-    capture.validate();
+    physicalRead = forkSphParticleExactMassRead(capture.sourceRead,
+      { device: args.device, sourceSphUpload: capture.sourceRead.sourceSphUpload });
+    result = await runSphThermalStepWebGpuImpl(args, capture, () => {
+      // A retained old token must not keep original physical ancestors alive
+      // after the last independently sealed read closes admission.
+      exactThermalSourceCaptures.delete(args.postMechanicsSourceCapture);
+      void releaseSource().catch(() => {});
+    });
+    capture.validate(); validateTable(); validateState();
+    if (!Object.is(result.dtS, duration.requestedDtSeconds)) throw new TypeError('Exact thermal effective duration changed');
     markSphExactMassDerivedBuffers(capture.sourceRead, [result.stateBuffer, result.thermoBuffer]);
+    const seal = resolveSphThermalSourceCapture(result, args.postMechanicsSourceCapture);
+    exactThermalSourceCaptures.set(args.postMechanicsSourceCapture, {
+      result, seal, device: args.device, sourceRead: physicalRead,
+      sphParticleUpload: args.sphParticleUpload, mlsMpmParticleUpload: capture.sourceMlsUpload,
+      sphParticleState: args.sphParticleState, thermalMaterialTable: args.thermalMaterialTable,
+      g2pResult: args.exactMassG2pResult, transaction: capture.transaction, generation: capture.generation,
+      inputStateBuffer: capture.stateBuffer, inputThermoBuffer: capture.thermoBuffer,
+      mechanicsBuffer: capture.mechanicsBuffer, ...duration,
+      validate() { seal.validate(); validateTable(); validateState(); return true; }
+    });
+    provenanceIssued = true;
     return result;
   } catch (error) {
     if (result) {
       thermalSourceCaptures.get(args.postMechanicsSourceCapture)?.release();
-      deferSubmittedWorkCleanup(args.device, () => result.destroyOutputParticleBuffers?.());
+      void releaseSource().then(() => result.destroyOutputParticleBuffers?.()).catch(() => {});
     }
+    const cleanup = Promise.all([releaseSource(), error.exactThermalOutputCleanupCompletion]);
+    Object.defineProperty(error, 'exactThermalSourceCleanupCompletion', { value: cleanup });
+    void cleanup.catch(() => {});
     throw error;
-  } finally { capture.release(); }
+  } finally {
+    if (!provenanceIssued) void releaseSource().catch(() => {});
+    // Successful thermal submission no longer consumes mechanics. Preserve
+    // the normal producer's pin lifecycle; a later reaction read acquires its
+    // own genuine G2P pin and rejects if mechanics retired in the meantime.
+    // The independent physical fork remains with the thermal seal, including
+    // public two-level aliases whose original capture owns a private read.
+    else void Promise.resolve(capture.release()).catch(() => {});
+  }
 }
 
-async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null) {
+async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null, onLastSourceRelease = null) {
   const token = args.postMechanicsSourceCapture ?? null;
   if (token) {
     if (thermalSourceCaptures.has(token)) throw new Error('Thermal source capture cannot replay');
@@ -4237,11 +4429,13 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null) {
   const stage = createSphThermalStepWebGpuEncoderStageImpl(args, exactCapture);
   const { device, sphParticleState, retainOutputParticleBuffers = false } = args;
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
-  let submitted = false;
+  let submitted = false, submitAttempted = false;
   try {
     const encoder = device.createCommandEncoder();
     stage.encode(encoder);
-    device.queue.submit([encoder.finish()]);
+    const command = encoder.finish();
+    submitAttempted = true;
+    device.queue.submit([command]);
     submitted = true;
     stage.markSubmittedWork?.();
     if (!noFullReadback) {
@@ -4269,7 +4463,7 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null) {
       // queue order without asking the host to observe device idle.
       stage.cleanupSubmittedWork();
     } else if (noFullReadback) {
-      const scheduled = deferSubmittedWorkCleanup(
+      const scheduled = (exactCapture ? deferConfirmedSubmittedWorkCleanup : deferSubmittedWorkCleanup)(
         device,
         stage.cleanupSubmittedWork
       );
@@ -4293,10 +4487,14 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null) {
       stage.result.thermoBuffer = null;
     }
     if (token) thermalSourceCaptures.set(token,
-      createPostMechanicsStageOutputSeal(stage.result, capturedInputs));
+      createPostMechanicsStageOutputSeal(stage.result, capturedInputs, { onLastRelease: onLastSourceRelease }));
     return stage.result;
   } catch (error) {
-    if (submitted) {
+    if (exactCapture && submitAttempted) {
+      const cleanup = deferConfirmedSubmittedWorkCleanup(device, stage.cleanupAbortedWork);
+      Object.defineProperty(error, 'exactThermalOutputCleanupCompletion', { value: cleanup });
+      void cleanup.catch(() => {});
+    } else if (submitted) {
       deferSubmittedWorkCleanup(device, stage.cleanupAbortedWork);
     } else {
       stage.cleanupAbortedWork();

@@ -7,6 +7,7 @@ import { isAbsolute, resolve } from 'node:path';
 const REQUIRED = [
   'tests/sphReactionEnergyAuthority.native.test.mjs', 'tests/sphReactionEnergyAuthority.test.mjs',
   'src/runtime/sph/sphReactionGpuKernel.js', 'src/runtime/sph/sphReactionEnergyAuthority.js',
+  'src/runtime/webgpuComputeLayout.js',
   'src/runtime/sph/sphReactionGpuSummary.js', 'src/runtime/sph/sphThermalGpuKernel.js',
   'src/runtime/sph/sphGpuBuffers.js', 'src/runtime/sph/sphCondensableParticleInitialization.js',
   'src/runtime/sph/sphCondensableCaloricTable.js', 'src/runtime/material/condensableThermodynamics.js',
@@ -89,9 +90,11 @@ test('native reaction reference energy, full unplaced state, no-op gating and re
       const modelUrl = await dependency(caloricUrl, 'condensableThermodynamics.js');
       const authorityUrl = await dependency(reactionUrl, 'sphReactionEnergyAuthority.js');
       if (await dependency(authorityUrl, 'sphThermalGpuKernel.js') !== thermalUrl) throw new Error('thermal module identity mismatch');
-      const [reaction, thermal, buffers, models, stateModule, limits] = await Promise.all([
+      const layoutUrl = await dependency(reactionUrl, 'webgpuComputeLayout.js');
+      if (await dependency(summaryUrl, 'webgpuComputeLayout.js') !== layoutUrl) throw new Error('cleanup issuer module identity mismatch');
+      const [reaction, thermal, buffers, models, stateModule, limits, layout] = await Promise.all([
         import(reactionUrl), import(thermalUrl), import(bufferUrl), import(modelUrl),
-        import('/src/runtime/sph/sphState.js'), import('/src/runtime/webgpuDeviceLimits.js')
+        import('/src/runtime/sph/sphState.js'), import('/src/runtime/webgpuDeviceLimits.js'), import(layoutUrl)
       ]);
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) throw new Error('native adapter unavailable');
@@ -256,6 +259,7 @@ test('native reaction reference energy, full unplaced state, no-op gating and re
             result = await reaction.runSphReactionStepWebGpu({ device, sphParticleState: sph, mlsMpmParticleState: mls,
               sphParticleUpload: upload, mlsMpmParticleUpload: mlsUpload, reactionTable: reactions, thermalMaterialTable: table,
               dtSeconds: config.dt, boxDimsM: [100, 3, 3], retainOutputParticleBuffers: true,
+              requestQueueOrderedCleanupClaim: true,
               readbackMode: 'no-full-readback', readCompactReactionSummary: true, readReactionGasSpeciesSummary: true,
               readReactionProductInventory: true, readReactionAtomResidual: true });
             const summary = result.reactionSummary;
@@ -352,6 +356,53 @@ fn observe_selected_energy() {
                 prior = next;
               }
             }
+            // Copy every retained owner in an actual final GPU submission,
+            // retire the originals without a host fence, then map the copies.
+            // This proves commands already submitted retain valid resources.
+            const finalCopies = [];
+            const retirementEncoder = device.createCommandEncoder();
+            for (const [key, buffer, values] of [
+              ['state', result.stateBuffer, observed.gpu.state],
+              ['thermo', result.thermoBuffer, observed.gpu.thermo],
+              ['mechanics', result.mechanicsBuffer, observed.gpu.mechanics],
+              ['events', summary.productEventBuffer, observed.gpu.events]
+            ]) {
+              const copy = device.createBuffer({ size: values.length * 4,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+              retirementEncoder.copyBufferToBuffer(buffer, 0, copy, 0, values.length * 4);
+              finalCopies.push({ key, copy });
+            }
+            const receipt = layout.submitQueueOrderedWork(device, [retirementEncoder.finish()]);
+            const finalConsumer = layout.sealQueueOrderedFinalConsumerCapability(receipt, device, {
+              finalConsumerOwner: retirementEncoder, producerClaims: result.queueOrderedCleanupClaims
+            });
+            const originalFence = device.queue.onSubmittedWorkDone;
+            let cleanupFenceRequests = 0;
+            device.queue.onSubmittedWorkDone = function () {
+              cleanupFenceRequests++;
+              return originalFence.call(this);
+            };
+            try {
+              if (config.name === 'full') {
+                await result.destroyOutputParticleBuffers({ preserveResidentProductMass: true,
+                  queueOrderedFinalConsumer: finalConsumer });
+                observed.historyPreservedAfterCarrierRetirement = summary.productEventBufferDestroyed !== true;
+                await result.residentProductMass.destroyResidentProductMassBuffers({
+                  queueOrderedFinalConsumer: finalConsumer });
+              } else await result.destroyOutputParticleBuffers({ queueOrderedFinalConsumer: finalConsumer });
+              observed.retirement = { cleanupFenceRequests, copies: {},
+                eventRetired: summary.productEventBufferDestroyed === true,
+                eventReceipt: summary.productEventBufferCleanupReceipt,
+                carrierReceipt: result.outputParticleBufferCleanupReceipt };
+              for (const { key, copy } of finalCopies) {
+                await copy.mapAsync(GPUMapMode.READ);
+                observed.retirement.copies[key] = Array.from(new Float32Array(copy.getMappedRange()));
+                copy.unmap();
+              }
+            } finally {
+              device.queue.onSubmittedWorkDone = originalFence;
+              for (const { copy } of finalCopies) { copy.unmap(); copy.destroy(); }
+            }
           } finally {
             device.createBuffer = createBuffer; device.queue.submit = submit;
             await device.queue.onSubmittedWorkDone();
@@ -407,6 +458,16 @@ fn observe_selected_energy() {
     assert.equal(run.sourcePack, 'gpu-pack-source-buffers');
     assert.equal(run.allocationMode, 'pair-owned-physical-energy');
     assert.equal(run.allocationRetired, true);
+    assert.equal(run.retirement.cleanupFenceRequests, 0);
+    assert.equal(run.retirement.eventRetired, true);
+    assert.equal(run.retirement.eventReceipt.completed, true);
+    assert.equal(run.retirement.carrierReceipt.completed, true);
+    const finalReceipt = run.name === 'full' ? run.retirement.eventReceipt : run.retirement.carrierReceipt;
+    assert.equal(finalReceipt.remainingCapabilityClaimCount, 0);
+    if (run.name === 'full') assert.equal(run.historyPreservedAfterCarrierRetirement, true);
+    for (const key of ['state', 'thermo', 'mechanics', 'events']) {
+      assert.deepEqual(run.retirement.copies[key], run.gpu[key], `${run.name}: submitted ${key} copy survives owner retirement`);
+    }
     if (run.fullReadback) {
       assert.deepEqual(run.fullReadback.state, run.gpu.state);
       assert.deepEqual(run.fullReadback.thermo, run.gpu.thermo);

@@ -20702,6 +20702,8 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
   assert.deepEqual(step.diagnostics.reactionStrictGateBlockers, []);
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
+  const cleanup = await step.residentCleanupCompletion;
+  assert.equal(cleanup.status, 'resident-cleanup-complete');
   assert.equal(thermalDestroyCalls, 1);
 	  assert.equal(tracker.destroyed, 11);
 });

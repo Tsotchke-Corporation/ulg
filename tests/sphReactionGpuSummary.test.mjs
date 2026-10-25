@@ -50,7 +50,11 @@ import {
 } from '../src/runtime/sph/sphReactionGpuSummary.js';
 import {
   createQueueOrderedCleanupClaimIssuer,
+  openWorkerQueueSubmitBurst,
+  closeWorkerQueueSubmitBurst,
+  flushWorkerQueueSubmitBurst,
   registerQueueOrderedCleanupClaim,
+  submitQueueOrderedFinalConsumerWork,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../src/runtime/webgpuComputeLayout.js';
 import {
@@ -146,6 +150,7 @@ function fakeSummaryDevice(
         size,
         usage,
         destroyed: false,
+        destroyCount: 0,
         async mapAsync() {},
         getMappedRange() {
           const source = label.includes('product-placement')
@@ -165,6 +170,7 @@ function fakeSummaryDevice(
           this.unmapped = true;
         },
         destroy() {
+          this.destroyCount += 1;
           if (
             label === throwDestroyOnceLabel
             && !destroyThrowConsumed
@@ -365,6 +371,43 @@ function reactionTable() {
   ]);
   table.combinedRecordCount = table.combinedRecords.length / 4;
   return table;
+}
+
+function deferredSummaryCompletion() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const flushSummaryCallbacks = () => new Promise(resolve => setImmediate(resolve));
+
+function residentSummaryRequest(device, overrides = {}) {
+  const buffer = label => ({ label });
+  return {
+    device,
+    sphParticleState: { schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, particleCount: 65 },
+    reactionTable: reactionTable(),
+    sourceStateBuffer: buffer('source-state'), sourceThermoBuffer: buffer('source-thermo'),
+    sourceMechanicsBuffer: buffer('source-mechanics'), nextStateBuffer: buffer('next-state'),
+    nextThermoBuffer: buffer('next-thermo'), proposalBuffer: buffer('reaction-proposals'),
+    retainProductEventBuffer: true,
+    readCompactSummary: false, readGasSpeciesSummary: false,
+    readProductInventory: false, readAtomResidual: false,
+    ...overrides
+  };
+}
+
+function submitResidentEventConsumer(device, summary) {
+  const destination = device.createBuffer({ label: 'test-history-consumer-copy',
+    size: summary.productEventBufferByteLength, usage: 8 });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(summary.productEventBuffer, 0, destination, 0, destination.size);
+  const capability = submitQueueOrderedFinalConsumerWork(device, [encoder.finish()], {
+    finalConsumerOwner: destination,
+    producerClaims: [summary.productEventQueueOrderedCleanupClaim]
+  });
+  destination.destroy();
+  return capability;
 }
 
 function wgslEntrySource(source, entryPoint) {
@@ -1302,6 +1345,303 @@ test('resident product mass retirement waits for an active pre-submit borrow to 
   assert.equal(sourceDestroyCount, 1);
   assert.equal(await handle.destroyResidentProductMassBuffers(), true);
   assert.equal(sourceDestroyCount, 1);
+});
+
+for (const outcome of ['fulfilled', 'false', 'rejected', 'throws']) {
+  test(`resident history preserves the original destructor receiver and ${outcome} completion`, async () => {
+    const completion = deferredSummaryCompletion();
+    const failure = new Error('source owner retirement failed');
+    let calls = 0;
+    const summary = {
+      productEventBufferRetained: true,
+      productEventBuffer: { label: 'externally-owned-history' },
+      productEventRowCount: 1,
+      // Public fields cannot claim the actual producer's arena delegation.
+      delegatedToArena: true,
+      productEventRetirementDelegatedToArena: true,
+      destroyProductEventBuffer() {
+        assert.equal(this, summary);
+        calls++;
+        if (outcome === 'throws') throw failure;
+        return completion.promise;
+      }
+    };
+    const handle = createResidentProductMassHandle(summary);
+    summary.destroyProductEventBuffer = () => { throw new Error('replacement destructor must not run'); };
+    const retirement = handle.destroyResidentProductMassBuffers();
+    assert.equal(handle.destroyResidentProductMassBuffers(), retirement);
+    assert.throws(() => { handle.__ulgActiveBorrowCount++; }, /closed consumer admission/);
+    let settled = false;
+    retirement.then(() => { settled = true; }, () => { settled = true; });
+    await flushSummaryCallbacks();
+    assert.equal(calls, 1);
+    if (outcome === 'throws') {
+      await assert.rejects(retirement, error => error === failure);
+    } else {
+      assert.equal(settled, false);
+      assert.notEqual(summary.productEventBufferDestroyed, true);
+      if (outcome === 'rejected') {
+        completion.reject(failure);
+        await assert.rejects(retirement, error => error === failure);
+      } else {
+        completion.resolve(outcome !== 'false');
+        assert.equal(await retirement, outcome !== 'false');
+      }
+    }
+    assert.equal(handle.destroyResidentProductMassBuffers(), retirement);
+    assert.equal(calls, 1);
+    assert.equal(summary.productEventBufferDestroyed === true, outcome === 'fulfilled');
+  });
+}
+
+test('actual resident event owner waits for all handle borrows before its one retirement fence', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+  const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device));
+  await summary.localBufferCleanupCompletion;
+  const retained = summary.productEventBuffer;
+  const completion = deferredSummaryCompletion();
+  let fences = 0;
+  device.queue.onSubmittedWorkDone = () => { fences++; return completion.promise; };
+  const first = createResidentProductMassHandle(summary);
+  const second = createResidentProductMassHandle(summary);
+  first.__ulgActiveBorrowCount++;
+  second.__ulgActiveBorrowCount++;
+  const retirement = first.destroyResidentProductMassBuffers();
+  const directRetirement = summary.destroyProductEventBuffer();
+  assert.equal(summary.destroyProductEventBuffer(), directRetirement);
+  assert.throws(() => { second.__ulgActiveBorrowCount++; }, /closed consumer admission/);
+  await flushSummaryCallbacks();
+  assert.equal(fences, 0);
+  assert.equal(retained.destroyed, false);
+  first.__ulgActiveBorrowCount--;
+  await flushSummaryCallbacks();
+  assert.equal(fences, 0);
+  second.__ulgActiveBorrowCount--;
+  await flushSummaryCallbacks();
+  assert.equal(fences, 1);
+  assert.equal(retained.destroyed, false);
+  completion.resolve();
+  assert.equal(await directRetirement, true);
+  assert.equal(await retirement, true);
+  assert.equal(first.destroyResidentProductMassBuffers(), retirement);
+  assert.equal(retained.destroyCount, 1);
+  assert.equal(retained.destroyed, true);
+});
+
+for (const mode of ['pending', 'rejected', 'throws', 'missing']) {
+  test(`actual summary and retained events remain owned after a ${mode} queue fence until fulfilled loss`, async () => {
+    const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+    const fence = deferredSummaryCompletion(), loss = deferredSummaryCompletion();
+    device.lost = loss.promise;
+    let fences = 0;
+    device.queue.onSubmittedWorkDone = mode === 'missing' ? undefined : () => {
+      fences++;
+      if (mode === 'throws') throw new Error('queue observer failed');
+      return fence.promise;
+    };
+    const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device));
+    const retirement = summary.destroyProductEventBuffer();
+    assert.equal(summary.destroyProductEventBuffer(), retirement);
+    if (mode === 'rejected') fence.reject(new Error('queue observer rejected'));
+    let settled = false;
+    retirement.then(() => { settled = true; });
+    await flushSummaryCallbacks();
+    assert.equal(settled, false);
+    assert.ok(device.createdBuffers.every(buffer => !buffer.destroyed));
+    assert.equal(fences, mode === 'missing' ? 0 : 2);
+    loss.resolve({ reason: 'destroyed' });
+    assert.equal(await summary.localBufferCleanupCompletion, false);
+    assert.equal(await retirement, true);
+    assert.equal(summary.productEventBufferQueueCompletionMethod, 'gpu-device-loss');
+    assert.equal(summary.productEventCleanupHostQueueFenceCount, mode === 'missing' ? 0 : 1);
+    assert.ok(device.createdBuffers.every(buffer => buffer.destroyed && buffer.destroyCount === 1));
+    if (mode === 'pending') fence.resolve();
+    await flushSummaryCallbacks();
+    assert.ok(device.createdBuffers.every(buffer => buffer.destroyCount === 1));
+  });
+}
+
+test('rejected device loss cannot retire actual summary/event storage before a successful fence', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+  const fence = deferredSummaryCompletion(), loss = deferredSummaryCompletion();
+  device.lost = loss.promise;
+  device.queue.onSubmittedWorkDone = () => fence.promise;
+  const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device));
+  const retirement = summary.destroyProductEventBuffer();
+  loss.reject(new Error('loss observer rejected'));
+  await flushSummaryCallbacks();
+  assert.ok(device.createdBuffers.every(buffer => !buffer.destroyed));
+  fence.resolve();
+  assert.equal(await summary.localBufferCleanupCompletion, true);
+  assert.equal(await retirement, true);
+  assert.ok(device.createdBuffers.every(buffer => buffer.destroyed && buffer.destroyCount === 1));
+});
+
+for (const failureStage of ['submit', 'readback']) {
+  test(`actual summary ${failureStage} failure retains all local/event allocations until confirmed retirement`, async () => {
+    const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+    const fence = deferredSummaryCompletion();
+    const failure = new Error(`injected ${failureStage} failure`);
+    device.queue.onSubmittedWorkDone = () => fence.promise;
+    if (failureStage === 'submit') device.queue.submit = () => { throw failure; };
+    else {
+      const create = device.createBuffer.bind(device);
+      device.createBuffer = options => {
+        const buffer = create(options);
+        if (options.label === 'ulg-sph-reaction-summary-readback') buffer.mapAsync = async () => { throw failure; };
+        return buffer;
+      };
+    }
+    let caught;
+    try {
+      await runSphReactionSummaryWebGpu(residentSummaryRequest(device, { readCompactSummary: failureStage === 'readback' }));
+      assert.fail('actual producer should fail');
+    } catch (error) { caught = error; }
+    assert.equal(caught, failure);
+    assert.equal(typeof caught.localBufferCleanupCompletion?.then, 'function');
+    assert.ok(device.createdBuffers.every(buffer => !buffer.destroyed));
+    fence.resolve();
+    assert.equal(await caught.localBufferCleanupCompletion, true);
+    assert.ok(device.createdBuffers.every(buffer => buffer.destroyed && buffer.destroyCount === 1));
+  });
+}
+
+test('actual retained event destructor reports its cleanup failure and does not claim completed history retirement', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS),
+    undefined, undefined, undefined, undefined, undefined,
+    { throwDestroyOnceLabel: 'ulg-sph-reaction-product-event-out' });
+  const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device));
+  await summary.localBufferCleanupCompletion;
+  const handle = createResidentProductMassHandle(summary);
+  const retirement = handle.destroyResidentProductMassBuffers();
+  await assert.rejects(retirement, /injected one-shot destroy failure/);
+  assert.equal(handle.destroyResidentProductMassBuffers(), retirement);
+  assert.notEqual(summary.productEventBufferDestroyed, true);
+  assert.equal(summary.productEventBuffer.destroyed, false);
+  assert.equal(summary.productEventBuffer.destroyCount, 1);
+});
+
+test('genuine retained-event claim retires after aggregate borrow drain without another host fence', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+  const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device, {
+    requestQueueOrderedProductEventCleanupClaim: true
+  }));
+  await summary.localBufferCleanupCompletion;
+  assert.ok(summary.productEventQueueOrderedCleanupClaim);
+  const fenceCount = device.queueFenceCount;
+  const first = createResidentProductMassHandle(summary), second = createResidentProductMassHandle(summary);
+  first.__ulgActiveBorrowCount++;
+  second.__ulgActiveBorrowCount++;
+  const capability = submitResidentEventConsumer(device, summary);
+  const options = { queueOrderedFinalConsumer: capability };
+  const retirement = first.destroyResidentProductMassBuffers(options);
+  options.queueOrderedFinalConsumer = {};
+  assert.equal(first.destroyResidentProductMassBuffers({ queueOrderedFinalConsumer: capability }), retirement);
+  first.__ulgActiveBorrowCount--;
+  await flushSummaryCallbacks();
+  assert.equal(summary.productEventBuffer.destroyed, false);
+  assert.equal(device.queueFenceCount, fenceCount);
+  second.__ulgActiveBorrowCount--;
+  assert.equal(await retirement, true);
+  assert.equal(summary.productEventBuffer.destroyCount, 1);
+  assert.equal(device.queueFenceCount, fenceCount);
+  assert.equal(summary.productEventCleanupHostQueueFenceCount, 0);
+  assert.equal(summary.productEventBufferCleanupReceipt.completed, true);
+  assert.equal(summary.productEventBufferCleanupReceipt.remainingCapabilityClaimCount, 0);
+  assert.equal(summary.productEventBufferQueueCompletionMethod, 'same-gpu-queue-submission-order');
+});
+
+for (const claimState of ['absent', 'unsealed', 'sealed']) {
+  test(`forged retained-event capability rejects with ${claimState} claim and preserves real-owner recovery`, async () => {
+    const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+    const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device, {
+      requestQueueOrderedProductEventCleanupClaim: claimState !== 'absent'
+    }));
+    await summary.localBufferCleanupCompletion;
+    const capability = claimState === 'sealed' ? submitResidentEventConsumer(device, summary) : null;
+    const fenceCount = device.queueFenceCount;
+    const handle = createResidentProductMassHandle(summary);
+    await assert.rejects(handle.destroyResidentProductMassBuffers({ queueOrderedFinalConsumer: {} }),
+      { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+    assert.equal(summary.productEventBuffer.destroyed, false);
+    assert.equal(device.queueFenceCount, fenceCount);
+    assert.equal(summary.productEventCleanupHostQueueFenceCount, 0);
+    const retirement = handle.destroyResidentProductMassBuffers(capability ? { queueOrderedFinalConsumer: capability } : {});
+    assert.equal(await retirement, true);
+    assert.equal(summary.productEventBuffer.destroyCount, 1);
+    assert.equal(device.queueFenceCount, fenceCount + (capability ? 0 : 1));
+    assert.equal(summary.productEventCleanupHostQueueFenceCount, capability ? 0 : 1);
+    if (claimState === 'unsealed') {
+      assert.throws(() => submitResidentEventConsumer(device, summary), { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+    }
+  });
+}
+
+test('a sealed event claim rejects missing capability and replay from another producer without losing its own capability', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+  const first = await runSphReactionSummaryWebGpu(residentSummaryRequest(device, { requestQueueOrderedProductEventCleanupClaim: true }));
+  const second = await runSphReactionSummaryWebGpu(residentSummaryRequest(device, { requestQueueOrderedProductEventCleanupClaim: true }));
+  await Promise.all([first.localBufferCleanupCompletion, second.localBufferCleanupCompletion]);
+  const firstCapability = submitResidentEventConsumer(device, first);
+  const secondCapability = submitResidentEventConsumer(device, second);
+  const fenceCount = device.queueFenceCount;
+  await assert.rejects(first.destroyProductEventBuffer(), { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+  await assert.rejects(second.destroyProductEventBuffer({ queueOrderedFinalConsumer: firstCapability }),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+  assert.equal(first.productEventBuffer.destroyed, false);
+  assert.equal(second.productEventBuffer.destroyed, false);
+  assert.equal(device.queueFenceCount, fenceCount);
+  const firstRetirement = first.destroyProductEventBuffer({ queueOrderedFinalConsumer: firstCapability });
+  assert.equal(await firstRetirement, true);
+  assert.equal(first.destroyProductEventBuffer({ queueOrderedFinalConsumer: firstCapability }), firstRetirement);
+  await assert.rejects(second.destroyProductEventBuffer({ queueOrderedFinalConsumer: firstCapability }),
+    { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+  assert.equal(await second.destroyProductEventBuffer({ queueOrderedFinalConsumer: secondCapability }), true);
+  assert.equal(device.queueFenceCount, fenceCount);
+  assert.equal(first.productEventBuffer.destroyCount, 1);
+  assert.equal(second.productEventBuffer.destroyCount, 1);
+});
+
+test('observed device loss retires remaining event storage without a fictitious additional fence', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+  const loss = deferredSummaryCompletion();
+  device.lost = loss.promise;
+  let fences = 0;
+  device.queue.onSubmittedWorkDone = () => { fences++; return Promise.reject(new Error('queue failed')); };
+  const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device));
+  loss.resolve({ reason: 'destroyed' });
+  assert.equal(await summary.localBufferCleanupCompletion, false);
+  const fenceCount = fences;
+  assert.equal(await summary.destroyProductEventBuffer(), true);
+  assert.equal(fences, fenceCount);
+  assert.equal(summary.productEventCleanupHostQueueFenceCount, 0);
+  assert.equal(summary.productEventBufferQueueCompletionMethod, 'gpu-device-loss');
+  assert.equal(summary.productEventBuffer.destroyCount, 1);
+});
+
+test('summary and event fallback cleanup remain parked through a submit burst until its actual flush', async () => {
+  const device = fakeSummaryDevice(new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS));
+  openWorkerQueueSubmitBurst(device);
+  try {
+    const summary = await runSphReactionSummaryWebGpu(residentSummaryRequest(device));
+    const retirement = summary.destroyProductEventBuffer();
+    await flushSummaryCallbacks();
+    assert.equal(device.submissions.length, 0);
+    assert.equal(device.queueFenceCount, 0);
+    assert.equal(summary.hostQueueFenceCount, 0);
+    assert.equal(summary.productEventCleanupHostQueueFenceCount, 0);
+    assert.ok(device.createdBuffers.every(buffer => !buffer.destroyed));
+    flushWorkerQueueSubmitBurst(device);
+    assert.equal(await summary.localBufferCleanupCompletion, true);
+    assert.equal(await retirement, true);
+    assert.equal(device.submissions.length, 1);
+    assert.equal(device.queueFenceCount, 2);
+    assert.equal(summary.hostQueueFenceCount, 2);
+    assert.equal(summary.productEventCleanupHostQueueFenceCount, 1);
+    assert.ok(device.createdBuffers.every(buffer => buffer.destroyed));
+  } finally {
+    closeWorkerQueueSubmitBurst(device);
+  }
 });
 
 test('resident product mass handle carries only classified strict reaction gates', () => {
@@ -2943,7 +3283,7 @@ test('SPH reaction product events can remain GPU-resident without product-event 
   const retained = device.createdBuffers.find((created) => created.label === 'ulg-sph-reaction-product-event-out');
   assert.equal(retained.destroyed, false);
   assert.equal(device.createdBuffers.filter((created) => created.destroyed).length, device.createdBuffers.length - 1);
-  summary.destroyProductEventBuffer();
+  await summary.destroyProductEventBuffer();
   assert.equal(retained.destroyed, true);
 });
 
@@ -3002,11 +3342,12 @@ test('SPH reaction resident product-event mode skips compact summary readbacks',
   assert.equal(device.createdBuffers.some((created) => created.label.includes('product-inventory-readback')), false);
   const retained = device.createdBuffers.find((created) => created.label === 'ulg-sph-reaction-product-event-out');
   assert.equal(retained.destroyed, false);
-  summary.destroyProductEventBuffer();
+  await summary.destroyProductEventBuffer();
   assert.equal(retained.destroyed, true);
 });
 
-test('SPH reaction exact summary cleanup falls back to one fence and retries a one-shot destructor failure', async () => {
+for (const failedLabel of ['ulg-sph-reaction-summary-records', 'ulg-sph-reaction-summary-params']) {
+test(`SPH reaction exact summary cleanup retries only the failed buffer (${failedLabel}) behind one fence`, async () => {
   const device = fakeSummaryDevice(
     new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS),
     new Float32Array(),
@@ -3015,7 +3356,7 @@ test('SPH reaction exact summary cleanup falls back to one fence and retries a o
     new Float32Array(),
     new Float32Array(),
     {
-      throwDestroyOnceLabel: 'ulg-sph-reaction-summary-records'
+      throwDestroyOnceLabel: failedLabel
     }
   );
   const producerOutput = {};
@@ -3062,8 +3403,7 @@ test('SPH reaction exact summary cleanup falls back to one fence and retries a o
   assert.equal(summary.unclassifiedHostQueueFenceCount, 0);
   assert.equal(summary.normalHotLoopReadbackFree, false);
   assert.equal(summary.productionHotLoopHostDependencyFree, true);
-  await Promise.resolve();
-  await Promise.resolve();
+  await summary.localBufferCleanupCompletion;
   const recordsBuffer = device.createdBuffers.find(
     ({ label }) => label === 'ulg-sph-reaction-summary-records'
   );
@@ -3081,8 +3421,13 @@ test('SPH reaction exact summary cleanup falls back to one fence and retries a o
   );
   assert.equal(externalCleanupCount, 1);
   assert.equal(device.queueFenceCount, 1);
-  summary.destroyProductEventBuffer();
+  await summary.destroyProductEventBuffer();
+  for (const buffer of device.createdBuffers) {
+    assert.equal(buffer.destroyed, true, buffer.label);
+    assert.equal(buffer.destroyCount, buffer.label === failedLabel ? 2 : 1, buffer.label);
+  }
 });
+}
 
 test('SPH reaction host refuses product placement without the canonical spatial placement authority', async () => {
   // Reference-state birth (F = I, J = 1) is only one part of placement. The

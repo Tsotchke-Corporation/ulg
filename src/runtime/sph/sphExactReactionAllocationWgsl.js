@@ -49,6 +49,25 @@ fn er_select_debits(available_a: ExactMass, available_b: ExactMass,
   let cap = er_min(kinetic_cap, available.value);
   let highest = em_top(cap);
   if (highest < 0) { return er_inactive(available_a, available_b, 0u); }
+  // A feasible cap is already the greatest allowed total. Most kinetic-law
+  // packets are smaller than both donor inventories, so one exact ratio can
+  // avoid the bitwise availability search without changing the selected bits.
+  let capped_a = em_multiply_ratio(cap, weight_a, denominator.value);
+  let capped_b = em_subtract(cap, capped_a.value);
+  error = capped_a.error | capped_b.error;
+  if (error != 0u) { return er_inactive(available_a, available_b, error); }
+  if (em_compare(capped_a.value, available_a) <= 0
+      && em_compare(capped_b.value, available_b) <= 0) {
+    if (em_zero(capped_a.value) || em_zero(capped_b.value)) {
+      return er_inactive(available_a, available_b, 0u);
+    }
+    let remaining_a = em_subtract(available_a, capped_a.value);
+    let remaining_b = em_subtract(available_b, capped_b.value);
+    error = remaining_a.error | remaining_b.error;
+    if (error != 0u) { return er_inactive(available_a, available_b, error); }
+    return ExactReactionDebits(cap, capped_a.value, capped_b.value,
+      remaining_a.value, remaining_b.value, 0u, 1u);
+  }
   var power: ExactMass;
   power.words[u32(highest) / 32u] = 1u << (u32(highest) % 32u);
   let initial = em_multiply_ratio(power, weight_a, denominator.value);
@@ -62,7 +81,8 @@ fn er_select_debits(available_a: ExactMass, available_b: ExactMass,
   // Build the maximal feasible total from its high bit down. Both donor debits
   // are monotone, so a rejected bit cannot be recovered by any smaller suffix.
   // Carry the exact quotient/remainder for each power instead of dividing anew
-  // inside every search iteration. There is only one full ratio evaluation.
+  // inside every search iteration. The fallback adds one full ratio evaluation
+  // after the cap feasibility check; each greedy iteration remains division-free.
   for (var bit = highest; bit >= 0; bit--) {
     let candidate = em_add(total, power);
     if (candidate.error != 0u) {

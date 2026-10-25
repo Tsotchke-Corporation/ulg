@@ -43,7 +43,7 @@ import {
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
   createCachedExplicitComputePipeline,
-  deferSubmittedWorkCleanup,
+  deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
@@ -154,49 +154,27 @@ const DEFAULT_REACTION_PARTICLE_BIN_CAPACITY = 64;
 const REACTION_PARTICLE_BIN_CAPACITY_OCCUPANCY_MULTIPLIER = 4;
 const REACTION_PARTICLE_BIN_INDEX_BUFFER_BUDGET_BYTES = 128 * 1024 * 1024;
 const REACTION_TRANSFERRED_DESTINATION_RELEASES = new WeakMap();
-const REACTION_QUEUE_RETIREMENTS = new WeakMap();
 
-// A rejected/missing fence does not establish that submitted commands have
-// stopped using their buffers. Keep the failed producer's registry quarantined
-// until a successful queue fence or confirmed device loss. One loss observer
-// per device avoids retaining every successful reaction through device.lost.
-function confirmReactionQueueRetirement(device) {
-  let state = REACTION_QUEUE_RETIREMENTS.get(device);
-  if (!state) {
-    state = { lost: false, waiters: new Set() };
-    REACTION_QUEUE_RETIREMENTS.set(device, state);
-    if (device.lost?.then) Promise.resolve(device.lost).then(() => {
-      state.lost = true;
-      for (const waiter of [...state.waiters]) waiter(false);
-      state.waiters.clear();
-    }, () => {});
+function reactionQueueFence(device) {
+  try {
+    const fence = device?.queue?.onSubmittedWorkDone?.();
+    return fence?.then ? Promise.resolve(fence)
+      : Promise.reject(new Error('Reaction retirement requires a queue completion fence'));
+  } catch (error) {
+    return Promise.reject(error);
   }
-  if (state.lost) return Promise.resolve(false);
-  let fence = null;
-  try { fence = device.queue?.onSubmittedWorkDone?.(); } catch { /* Quarantine. */ }
-  return new Promise(resolve => {
-    let completed = false;
-    const finish = confirmed => {
-      if (completed) return;
-      completed = true; state.waiters.delete(finish); resolve(confirmed);
-    };
-    state.waiters.add(finish);
-    if (fence?.then) Promise.resolve(fence).then(() => finish(true), () => {});
-  });
 }
 
 /**
- * Settle every destination-owner fence before applying the non-arena terminal
- * fallback. The placement-family owner remains authoritative on success; raw
- * destination destruction is used only after that owner has failed and the
- * device queue has nevertheless reached a terminal observation point.
+ * Join all consumer retirement barriers before handing them to the original
+ * placement owner. Only that private owner may retire its buffers, including
+ * after device loss; public buffer fields and failed claims confer no authority.
  */
 export function releaseSphReactionTransferredDestinationAfterSettledFences({
   device,
   sourceFamily,
   completionFence = null,
   settlementFences = [],
-  reactionWarmArenaLease = null,
   releaseRunner =
     releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue
 } = {}) {
@@ -207,15 +185,21 @@ export function releaseSphReactionTransferredDestinationAfterSettledFences({
   }
   const replay = REACTION_TRANSFERRED_DESTINATION_RELEASES.get(sourceFamily);
   if (replay) return replay;
-  const queueFence = typeof device?.queue?.onSubmittedWorkDone === 'function'
-    ? device.queue.onSubmittedWorkDone()
-    : null;
-  if (!queueFence?.then) {
-    throw new Error(
-      'Reaction destination release requires a queue completion fence'
-    );
-  }
-  const ownerFence = completionFence?.then ? completionFence : queueFence;
+  if (!Array.isArray(settlementFences)) throw new TypeError('Reaction retirement barriers must be an array');
+  const requireFence = (fence) => fence?.then ? Promise.resolve(fence)
+    : Promise.reject(new Error('Reaction consumer retirement requires a completion promise'));
+  const queueFence = reactionQueueFence(device);
+  const fences = [queueFence];
+  if (completionFence != null) fences.push(requireFence(completionFence));
+  fences.push(...settlementFences.map(requireFence));
+  const ownerFence = Promise.allSettled(fences).then((settled) => {
+    const failed = settled.find((result) => result.status !== 'fulfilled' || result.value === false);
+    if (failed) throw failed.reason ?? new Error('Reaction consumer retirement was not confirmed');
+    return true;
+  });
+  // A rejected/forged owner may throw before attaching its own fence observer.
+  // Keep the barrier rejection observed without converting it into retirement.
+  void ownerFence.catch(() => {});
   let ownerRelease = null;
   try {
     ownerRelease = releaseRunner(sourceFamily, {
@@ -224,35 +208,14 @@ export function releaseSphReactionTransferredDestinationAfterSettledFences({
   } catch (error) {
     ownerRelease = Promise.reject(error);
   }
-  const completion = Promise.allSettled([
-    Promise.resolve(ownerRelease),
-    Promise.resolve(queueFence),
-    Promise.resolve(ownerFence),
-    ...settlementFences
-      .filter((fence) => fence?.then)
-      .map((fence) => Promise.resolve(fence))
-  ]).then((settled) => {
-    const owner = settled[0];
-    const queue = settled[1];
-    const ownerConfirmed = owner.status === 'fulfilled'
-      && owner.value === true;
-    const queueSettledCleanly = queue.status === 'fulfilled';
-    if (ownerConfirmed && queueSettledCleanly) return true;
-    if (!reactionWarmArenaLease) {
-      const destinations = new Set([
-        sourceFamily.placedDestinationStateBuffer,
-        sourceFamily.placedDestinationThermoBuffer,
-        sourceFamily.placedDestinationMechanicsBuffer
-      ].filter(Boolean));
-      for (const buffer of destinations) {
-        try {
-          buffer.destroy?.();
-        } catch {
-          // All destination siblings still receive their one terminal attempt.
-        }
-      }
+  const completion = Promise.resolve(ownerRelease).then(
+    (released) => released === true ? ownerFence.then(() => true, () => false) : false,
+    () => false
+  ).then(released => {
+    if (!released && REACTION_TRANSFERRED_DESTINATION_RELEASES.get(sourceFamily) === completion) {
+      REACTION_TRANSFERRED_DESTINATION_RELEASES.delete(sourceFamily);
     }
-    return false;
+    return released;
   });
   REACTION_TRANSFERRED_DESTINATION_RELEASES.set(sourceFamily, completion);
   return completion;
@@ -3747,7 +3710,7 @@ export async function runSphReactionStepWebGpu({
       return reactionResourceRegistryDrainCompletion;
     }
     reactionResourceRegistryDrainCompletion = reactionPrimarySubmissionObserved
-      ? confirmReactionQueueRetirement(device).then(drainReactionResourceRegistry)
+      ? deferConfirmedSubmittedWorkCleanup(device, drainReactionResourceRegistry).then(() => true)
       : Promise.resolve(drainReactionResourceRegistry());
     return reactionResourceRegistryDrainCompletion;
   };
@@ -4387,6 +4350,8 @@ export async function runSphReactionStepWebGpu({
         gpuTimestampRecorder,
         canonicalReactionProductPlacementAuthority,
         reactionWarmArenaLease,
+        requestQueueOrderedProductEventCleanupClaim:
+          requestQueueOrderedCleanupClaim === true,
         queueOrderedProducerClaims:
           scratchCleanupClaim ? [scratchCleanupClaim] : []
       });
@@ -4534,6 +4499,7 @@ export async function runSphReactionStepWebGpu({
   if (reactionSummary) {
     readbackTelemetry.merge(reactionSummary, 'reaction-summary');
   }
+  let recordedSummaryCleanupFenceCount = reactionSummary?.deferredCleanupHostQueueFenceCount ?? 0;
 
   let state = new Float32Array();
   let thermo = new Float32Array();
@@ -4542,6 +4508,16 @@ export async function runSphReactionStepWebGpu({
   let queueCompletionStatus = 'queue-submitted';
   let queueCompletionMethod = 'queue.submit';
   let scratchBufferCleanupStatus = 'pending';
+  let result = null;
+  const recordScratchCleanupFence = () => {
+    readbackTelemetry.recordDeferredCleanupHostQueueFence(1, 'reaction-scratch-buffer-cleanup');
+    if (result) {
+      appendGpuReadbackTelemetryObservation(result, {
+        hostQueueFenceCount: 1,
+        deferredCleanupHostQueueFenceCount: 1
+      }, { source: 'reaction-scratch-buffer-cleanup' });
+    }
+  };
   if (!noFullReadback) {
     const proposalReadbackByteLength =
       sphParticleState.particleCount
@@ -4648,11 +4624,9 @@ export async function runSphReactionStepWebGpu({
           cleanup: destroyScratchBuffers
         }
       );
-      deferSubmittedWorkCleanup(device, destroyScratchBuffers);
-      readbackTelemetry.recordDeferredCleanupHostQueueFence(
-        1,
-        'reaction-scratch-buffer-cleanup'
-      );
+      deferConfirmedSubmittedWorkCleanup(device, destroyScratchBuffers, {
+        onQueueFenceRequested: recordScratchCleanupFence
+      });
       scratchBufferCleanupStatus =
         'submitted-work-cleanup-deferred-after-host-queue-fence';
       queueCompletionStatus =
@@ -4660,11 +4634,9 @@ export async function runSphReactionStepWebGpu({
       queueCompletionMethod =
         'gpu-queue-on-submitted-work-done';
     } else {
-      deferSubmittedWorkCleanup(device, destroyScratchBuffers);
-      readbackTelemetry.recordDeferredCleanupHostQueueFence(
-        1,
-        'reaction-scratch-buffer-cleanup'
-      );
+      deferConfirmedSubmittedWorkCleanup(device, destroyScratchBuffers, {
+        onQueueFenceRequested: recordScratchCleanupFence
+      });
       scratchBufferCleanupStatus =
         'submitted-work-cleanup-deferred-after-host-queue-fence';
       queueCompletionStatus =
@@ -4696,8 +4668,31 @@ export async function runSphReactionStepWebGpu({
   let outputParticleBuffersReleaseConfirmed = false;
   let outputParticleBuffersReleasePromise = null;
   let automaticDestinationReturnCompletion = null;
-  let result = null;
   let outputParticleBuffersCleanupClaim = null;
+  let residentProductMassReleasePromise = null;
+  const releaseRetainedProductMass = (queueOrderedFinalConsumer) => {
+    if (residentProductMassReleasePromise) return residentProductMassReleasePromise;
+    residentProductMassReleasePromise = Promise.resolve()
+      .then(() => destroyRetainedResidentProductMassBuffers?.({ queueOrderedFinalConsumer }) ?? true)
+      .finally(() => {
+        const addedFences = (reactionSummary?.deferredCleanupHostQueueFenceCount ?? 0)
+          - recordedSummaryCleanupFenceCount;
+        if (result && addedFences > 0) {
+          appendGpuReadbackTelemetryObservation(result, {
+            hostQueueFenceCount: addedFences,
+            deferredCleanupHostQueueFenceCount: addedFences
+          }, { source: 'reaction-summary-post-return-cleanup' });
+          recordedSummaryCleanupFenceCount += addedFences;
+        }
+      })
+      .catch(error => {
+        // A rejected capability cannot revoke the original owner's right to
+        // retry with its authentic final consumer or a confirmed queue fence.
+        residentProductMassReleasePromise = null;
+        throw error;
+      });
+    return residentProductMassReleasePromise;
+  };
   const destroyContinuation = () => {
     destroyReactionOwnedBuffer(continuationStateBuffer);
     destroyReactionOwnedBuffer(continuationThermoBuffer);
@@ -4712,9 +4707,14 @@ export async function runSphReactionStepWebGpu({
         preserveResidentProductMass = false,
         queueOrderedFinalConsumer = null
       } = {}) => {
-      if (outputParticleBuffersReleaseConfirmed) return true;
+      if (outputParticleBuffersReleaseConfirmed) {
+        return preserveResidentProductMass === true
+          ? true : releaseRetainedProductMass(queueOrderedFinalConsumer);
+      }
       if (outputParticleBuffersReleasePromise) {
-        return outputParticleBuffersReleasePromise;
+        return preserveResidentProductMass === true
+          ? outputParticleBuffersReleasePromise
+          : outputParticleBuffersReleasePromise.then(() => releaseRetainedProductMass(queueOrderedFinalConsumer));
       }
       if (
         preserveResidentProductMass === true
@@ -4728,10 +4728,7 @@ export async function runSphReactionStepWebGpu({
       }
       const residentProductMassRelease = preserveResidentProductMass === true
         ? Promise.resolve(true)
-        : (
-            destroyRetainedResidentProductMassBuffers?.()
-            ?? Promise.resolve(true)
-          );
+        : releaseRetainedProductMass(queueOrderedFinalConsumer);
       const queueOrderedRequested =
         queueOrderedFinalConsumer != null;
       if (
@@ -4813,24 +4810,25 @@ export async function runSphReactionStepWebGpu({
             }
             return true;
           }
-          const cleanupFence =
-            device.queue?.onSubmittedWorkDone?.();
-          if (!cleanupFence?.then) return false;
           if (result) {
-            appendGpuReadbackTelemetryObservation(result, {
-              hostQueueFenceCount: 1,
-              deferredCleanupHostQueueFenceCount: 1
-            }, {
-              source: 'reaction-output-buffer-cleanup'
-            });
             result.outputParticleBufferCleanupStatus =
               'submitted-output-cleanup-deferred-after-host-queue-fence';
             result.outputParticleBufferQueueCompletionMethod =
               'gpu-queue-on-submitted-work-done';
           }
-          return Promise.resolve(cleanupFence).then(
-            () => {
-              destroyContinuation();
+          return deferConfirmedSubmittedWorkCleanup(device, destroyContinuation, {
+            onQueueFenceRequested() {
+              if (result) appendGpuReadbackTelemetryObservation(result, {
+                hostQueueFenceCount: 1,
+                deferredCleanupHostQueueFenceCount: 1
+              }, { source: 'reaction-output-buffer-cleanup' });
+            }
+          }).then(
+            (queueCompleted) => {
+              if (!queueCompleted && result) {
+                result.outputParticleBufferCleanupStatus = 'retired-after-confirmed-device-loss';
+                result.outputParticleBufferQueueCompletionMethod = 'fulfilled-device-lost';
+              }
               return true;
             }
           );
@@ -4846,6 +4844,9 @@ export async function runSphReactionStepWebGpu({
         }
         outputParticleBuffersReleaseConfirmed = true;
         return true;
+      }).catch(error => {
+        outputParticleBuffersReleasePromise = null;
+        throw error;
       });
       return outputParticleBuffersReleasePromise;
     }
@@ -5006,6 +5007,7 @@ export async function runSphReactionStepWebGpu({
       {
         value: Object.freeze([
           outputParticleBuffersCleanupClaim,
+          reactionSummary?.productEventQueueOrderedCleanupClaim,
           destinationCleanupClaim
         ].filter(Boolean)),
         enumerable: false
@@ -5017,6 +5019,9 @@ export async function runSphReactionStepWebGpu({
   return result;
   } catch (error) {
     const cleanupCompletions = [scheduleReactionResourceRegistryDrain()];
+    if (error?.localBufferCleanupCompletion?.then) {
+      cleanupCompletions.push(error.localBufferCleanupCompletion);
+    }
     try {
       if (reactionPlacementSourceFamily) {
         if (
@@ -5043,36 +5048,39 @@ export async function runSphReactionStepWebGpu({
             );
           if (sourceReturn?.then) {
             cleanupCompletions.push(sourceReturn);
+          } else if (sourceReturn === false) {
+            cleanupCompletions.push(Promise.resolve(false));
           }
         }
       } else if (
         reactionWarmArenaLease
         && !reactionWarmArenaReleaseOwnedByOutput
       ) {
-        const completionFence = typeof device.queue?.onSubmittedWorkDone === 'function'
-          ? device.queue.onSubmittedWorkDone()
-          : null;
-        if (completionFence?.then) {
-          const warmArenaReturn = reactionWarmArenaReleaseRunner(
-            reactionWarmArenaLease,
-            {
+        const completionFence = reactionQueueFence(device);
+        void completionFence.catch(() => {});
+        const warmArenaReturn = reactionWarmArenaReleaseRunner(
+          reactionWarmArenaLease,
+          {
             device,
             completionFence,
             abandon: true
-            }
-          );
-          if (warmArenaReturn?.then) {
-            cleanupCompletions.push(warmArenaReturn);
           }
+        );
+        if (warmArenaReturn?.then) {
+          cleanupCompletions.push(warmArenaReturn);
+        } else if (warmArenaReturn === false) {
+          cleanupCompletions.push(Promise.resolve(false));
         }
       }
     } catch {
       // A deeper placement failure may already own exact arena rollback.
+      // Its failed release is not evidence that every resource was retired.
+      cleanupCompletions.push(Promise.resolve(false));
     }
     const reactionResourceCleanupCompletion = Promise.allSettled(
       cleanupCompletions.map((completion) => Promise.resolve(completion))
     ).then((settled) => settled.every(
-      (result) => result.status === 'fulfilled'
+      (result) => result.status === 'fulfilled' && result.value !== false
     ));
     if (error && (typeof error === 'object' || typeof error === 'function')) {
       Object.defineProperty(error, 'reactionResourceCleanupCompletion', {

@@ -841,10 +841,6 @@ test('SPH reaction product placement borrows the canonical directory and publish
   );
   assert.match(
     sphReactionGpuKernelSource,
-    /device\.queue\?\.onSubmittedWorkDone\?\.\(\)[\s\S]*?appendGpuReadbackTelemetryObservation\(result,[\s\S]*?deferredCleanupHostQueueFenceCount:\s*1/
-  );
-  assert.match(
-    sphReactionGpuKernelSource,
     /onHostQueueFenceAwait\(\)[\s\S]*?recordAwaitedBackpressureHostQueueFence\(/
   );
   assert.match(
@@ -1459,8 +1455,8 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
   assert.equal(fallback.result.canonicalSpatialReactionDiscovery, false);
   const fallbackFenceCountBeforeRelease =
     fallback.device.getQueueFenceCount();
-  // The live sidecar summary has its own deferred local-buffer cleanup fence;
-  // the retained particle output remains the second unauthenticated owner.
+  // Summary locals and reaction scratch have retired separately. Event history
+  // and particle output each still belong to their original retained owner.
   assert.equal(fallback.result.observedHostQueueFenceCount, 2);
   assert.equal(fallback.result.hostQueueFenceCount, 2);
   assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 2);
@@ -1470,11 +1466,11 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
   assert.equal(await fallback.result.destroyOutputParticleBuffers(), true);
   assert.equal(
     fallback.device.getQueueFenceCount(),
-    fallbackFenceCountBeforeRelease + 1
+    fallbackFenceCountBeforeRelease + 2
   );
-  assert.equal(fallback.result.observedHostQueueFenceCount, 3);
-  assert.equal(fallback.result.hostQueueFenceCount, 3);
-  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 3);
+  assert.equal(fallback.result.observedHostQueueFenceCount, 4);
+  assert.equal(fallback.result.hostQueueFenceCount, 4);
+  assert.equal(fallback.result.deferredCleanupHostQueueFenceCount, 4);
   assert.equal(fallback.result.unclassifiedHostQueueFenceCount, 0);
   assert.equal(fallback.result.normalHotLoopReadbackFree, false);
   assert.equal(fallback.result.productionHotLoopHostDependencyFree, true);
@@ -1501,6 +1497,9 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
     forged.device.getQueueFenceCount(),
     forgedFenceCountBeforeRelease
   );
+  assert.equal(await forged.result.destroyOutputParticleBuffers(), true,
+    'a rejected capability does not revoke the original fallback owner');
+  assert.equal(forged.device.getQueueFenceCount(), forgedFenceCountBeforeRelease + 2);
 
   const cancelled = await runRetainedStep(undefined, true);
   assert.equal(
@@ -1541,9 +1540,7 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
       authenticated.device,
       {
         finalConsumerOwner: ownerAuthority,
-        producerClaims: [
-          authenticated.result.queueOrderedCleanupClaim
-        ]
+        producerClaims: authenticated.result.queueOrderedCleanupClaims
       }
     );
   assert.equal(
@@ -1581,6 +1578,57 @@ test('SPH retained reaction output fences only the unauthenticated fallback', as
       ?.remainingCapabilityClaimCount,
     0
   );
+  assert.equal(authenticated.result.residentProductMass.productEventBuffer.destroyCount, 1);
+
+  for (const queueOrdered of [false, true]) {
+    const preserved = await runRetainedStep(undefined, queueOrdered);
+    const before = preserved.device.getQueueFenceCount();
+    const eventBuffer = preserved.result.residentProductMass.productEventBuffer;
+    const submission = queueOrdered ? submitQueueOrderedWork(preserved.device,
+      [Object.freeze({ label: 'preserved-history-consumer' })]) : null;
+    const capability = queueOrdered ? sealQueueOrderedFinalConsumerCapability(submission, preserved.device, {
+      finalConsumerOwner: Object.freeze({}), producerClaims: preserved.result.queueOrderedCleanupClaims
+    }) : null;
+    assert.equal(await preserved.result.destroyOutputParticleBuffers({
+      preserveResidentProductMass: true, queueOrderedFinalConsumer: capability
+    }), true);
+    assert.equal(eventBuffer.destroyCount, 0, 'preserved history survives carrier retirement');
+    assert.equal(preserved.result.stateBuffer.destroyCount, 1);
+    assert.equal(preserved.device.getQueueFenceCount(), before + (queueOrdered ? 0 : 1));
+    assert.equal(await preserved.result.residentProductMass.destroyResidentProductMassBuffers({
+      queueOrderedFinalConsumer: capability
+    }), true);
+    assert.equal(eventBuffer.destroyCount, 1, 'the retained handle still releases its own history');
+    assert.equal(preserved.device.getQueueFenceCount(), before + (queueOrdered ? 0 : 2));
+    assert.equal(preserved.result.hostQueueFenceCount, preserved.device.getQueueFenceCount());
+    assert.equal(await preserved.result.destroyOutputParticleBuffers(), true);
+    assert.equal(eventBuffer.destroyCount, 1);
+  }
+
+  let confirmLoss;
+  const lossDevice = fakeReactionFailureDevice();
+  lossDevice.lost = new Promise(resolve => { confirmLoss = resolve; });
+  const lost = await runRetainedStep(lossDevice);
+  const beforeLossFences = lossDevice.getQueueFenceCount();
+  const realFence = lossDevice.queue.onSubmittedWorkDone;
+  lossDevice.queue.onSubmittedWorkDone = () => {
+    realFence(); // Preserve the mock's request counter.
+    return Promise.reject(new Error('unconfirmed retained event fence'));
+  };
+  let settledAfterLoss = false;
+  const lossRetirement = lost.result.destroyOutputParticleBuffers();
+  lossRetirement.then(() => { settledAfterLoss = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settledAfterLoss, false);
+  assert.equal(lost.result.residentProductMass.productEventBuffer.destroyCount, 0);
+  assert.equal(lost.result.stateBuffer.destroyCount, 0);
+  confirmLoss({ message: 'confirmed native-device terminal state' });
+  assert.equal(await lossRetirement, true);
+  assert.equal(lost.result.residentProductMass.productEventBuffer.destroyCount, 1);
+  assert.equal(lost.result.stateBuffer.destroyCount, 1);
+  assert.equal(lossDevice.getQueueFenceCount(), beforeLossFences + 1);
+  assert.equal(lost.result.hostQueueFenceCount, lossDevice.getQueueFenceCount());
+  assert.equal(lost.result.outputParticleBufferQueueCompletionMethod, 'fulfilled-device-lost');
 
   const replay = await runRetainedStep(authenticated.device);
   const replayFenceCountBeforeRelease =
@@ -1729,7 +1777,7 @@ test('SPH reaction parity rejects reaction output drift', () => {
   assert.ok(parity.maxMechanicsAbs > 1);
 });
 
-test('SPH non-warm destination fallback waits all settled fences and retires exactly once', async () => {
+test('SPH failed destination owner never authorizes raw public-buffer destruction', async () => {
   let resolveQueue;
   const queueFence = new Promise((resolve) => {
     resolveQueue = resolve;
@@ -1777,8 +1825,67 @@ test('SPH non-warm destination fallback waits all settled fences and retires exa
 
   resolveQueue(true);
   assert.equal(await completion, false);
-  assert.deepEqual(destroyed.sort(), ['mechanics', 'state', 'thermo']);
+  assert.deepEqual(destroyed, []);
   assert.equal(ownerReleaseCount, 1);
   assert.equal(await replay, false);
-  assert.equal(destroyed.length, 3);
+  assert.equal(destroyed.length, 0);
+});
+
+for (const mode of ['success', 'reject-consumer', 'false-consumer', 'reject-queue', 'throw-queue', 'missing-queue', 'invalid-consumer']) {
+  test(`SPH destination retirement forwards all barriers to its original owner (${mode})`, async () => {
+    let queueResolve, queueReject, firstResolve, secondResolve, secondReject;
+    const queue = new Promise((resolve, reject) => { queueResolve = resolve; queueReject = reject; });
+    const first = new Promise(resolve => { firstResolve = resolve; });
+    const second = new Promise((resolve, reject) => { secondResolve = resolve; secondReject = reject; });
+    let ownerCalls = 0, ownerDestructions = 0, rawDestructions = 0, finished = false;
+    const sourceFamily = { placedDestinationStateBuffer: { destroy() { rawDestructions++; } } };
+    const device = { queue: { onSubmittedWorkDone() {
+      if (mode === 'throw-queue') throw new Error('queue unavailable');
+      if (mode === 'missing-queue') return undefined;
+      return queue;
+    } } };
+    const completion = releaseSphReactionTransferredDestinationAfterSettledFences({
+      device, sourceFamily, completionFence: first,
+      settlementFences: [second, ...(mode === 'invalid-consumer' ? [true] : [])],
+      releaseRunner(family, { completionFence }) {
+        assert.equal(family, sourceFamily); ownerCalls++;
+        return completionFence.then(() => { ownerDestructions++; return true; });
+      }
+    });
+    completion.then(() => { finished = true; });
+    const turn = () => new Promise(resolve => setImmediate(resolve));
+    if (mode === 'reject-queue') queueReject(new Error('queue failed'));
+    else queueResolve();
+    firstResolve(true);
+    await turn();
+    assert.equal(finished, false, 'an unresolved consumer still holds the barrier');
+    assert.equal(ownerDestructions, 0); assert.equal(rawDestructions, 0);
+    if (mode === 'reject-consumer') secondReject(new Error('consumer failed'));
+    else secondResolve(mode === 'false-consumer' ? false : true);
+    assert.equal(await completion, mode === 'success');
+    assert.equal(ownerDestructions, mode === 'success' ? 1 : 0);
+    assert.equal(rawDestructions, 0, 'only the original owner can retire destinations');
+    assert.equal(ownerCalls, 1);
+    if (mode === 'success') {
+      assert.equal(releaseSphReactionTransferredDestinationAfterSettledFences({ device, sourceFamily }), completion);
+    }
+  });
+}
+
+test('SPH rejected destination-owner admission can retry through the original owner', async () => {
+  const sourceFamily = {};
+  const device = { queue: { onSubmittedWorkDone: () => Promise.resolve() } };
+  let calls = 0;
+  const rejected = releaseSphReactionTransferredDestinationAfterSettledFences({ device, sourceFamily,
+    releaseRunner() { calls++; throw new Error('owner admission not yet available'); } });
+  assert.equal(await rejected, false);
+  const accepted = releaseSphReactionTransferredDestinationAfterSettledFences({ device, sourceFamily,
+    releaseRunner(family, { completionFence }) {
+      calls++; assert.equal(family, sourceFamily);
+      return completionFence.then(() => true);
+    } });
+  assert.notEqual(accepted, rejected);
+  assert.equal(await accepted, true);
+  assert.equal(calls, 2);
+  assert.equal(releaseSphReactionTransferredDestinationAfterSettledFences({ device, sourceFamily }), accepted);
 });

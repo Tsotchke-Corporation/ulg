@@ -83,9 +83,10 @@ import {
 } from './sphGpuBuffers.js';
 import {
   computeBufferBinding,
+  cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
   createCachedExplicitComputePipeline,
-  deferSubmittedWorkCleanup,
+  deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   submitQueueOrderedFinalConsumerWork,
   releaseSubmittedWorkCleanupQueueOrdered
@@ -185,6 +186,10 @@ const SUMMARY_SCOPE = 'sph-reaction-visible-product-gas-compact-summary';
 const reactionSummaryLocalCleanupClaimIssuer =
   createQueueOrderedCleanupClaimIssuer({
     producerFamily: 'sph-reaction-summary-local-buffers'
+  });
+const reactionSummaryProductEventCleanupClaimIssuer =
+  createQueueOrderedCleanupClaimIssuer({
+    producerFamily: 'sph-reaction-summary-product-event'
   });
 export const ULG_SPH_REACTION_STRICT_GATE_SCHEMA = 'peercompute.ulg.sph-reaction-strict-gate.v0';
 export const ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA = 'peercompute.ulg.sph-resident-product-mass.v0';
@@ -528,6 +533,100 @@ export function mergeResidentGasSpeciesLedgers(...ledgers) {
   };
 }
 
+// Only the actual summary producer creates these retirement records. Public
+// handle construction can borrow a known owner but cannot declare an arena
+// delegation or confer physical source/publication authority.
+const productEventRetirementOwners = new WeakMap();
+
+function createProductEventBufferDestructor(device, buffer, delegatedToArena) {
+  const owner = { device, buffer, delegatedToArena, requested: false, completed: false,
+    activeBorrowCount: 0, borrowDrainWaiters: new Set(), completion: null,
+    claim: null, output: null, capability: null, storageDestroyed: false,
+    fenceCount: 0, method: null, status: null, receipt: null, update: null, recordFence: null };
+  const cleanup = () => {
+    if (owner.storageDestroyed) return;
+    buffer.destroy?.();
+    owner.storageDestroyed = true;
+  };
+  owner.cleanup = cleanup;
+  const destroy = ({ queueOrderedFinalConsumer = null } = {}) => {
+    if (owner.completion) {
+      if (!delegatedToArena && queueOrderedFinalConsumer != null
+          && owner.capability !== queueOrderedFinalConsumer) {
+        const error = new Error('Product event retirement changed its final-consumer capability');
+        error.code = 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED';
+        return Promise.reject(error);
+      }
+      return owner.completion;
+    }
+    owner.requested = true;
+    owner.capability = queueOrderedFinalConsumer;
+    const drained = owner.activeBorrowCount === 0
+      ? Promise.resolve()
+      : new Promise(resolve => owner.borrowDrainWaiters.add(resolve));
+    owner.completion = drained.then(async () => {
+      if (delegatedToArena) {
+        // The containing arena owns physical retirement. Leave its capability
+        // untouched and report only logical drain, without a separate fence.
+        owner.completed = true;
+        owner.status = 'product-event-consumers-drained-to-arena-owner';
+        owner.method = 'delegated-to-reaction-arena';
+        owner.update?.();
+        return false;
+      }
+      if (queueOrderedFinalConsumer != null) {
+        owner.receipt = releaseSubmittedWorkCleanupQueueOrdered(device, cleanup, {
+          queueOrderedFinalConsumer, producerClaim: owner.claim,
+          producerOutput: owner.output, producerFamily: 'sph-reaction-summary-product-event'
+        });
+        owner.completed = true;
+        owner.status = 'product-event-retired-after-authenticated-submission';
+        owner.method = 'same-gpu-queue-submission-order';
+      } else {
+        // A sealed claim still belongs to its exact final consumer. Only an
+        // unsealed claim may be cancelled for ordinary confirmed retirement.
+        if (owner.claim) cancelQueueOrderedCleanupClaim(owner.claim, device, {
+          producerOutput: owner.output, cleanup
+        });
+        owner.status = 'product-event-retirement-pending-confirmation';
+        owner.update?.();
+        const queueCompleted = await deferConfirmedSubmittedWorkCleanup(device, cleanup, {
+          onQueueFenceRequested() {
+            owner.fenceCount++;
+            owner.recordFence?.();
+            owner.method = 'gpu-queue-on-submitted-work-done';
+            owner.update?.();
+          }
+        });
+        owner.completed = true;
+        owner.status = queueCompleted
+          ? 'product-event-retired-after-queue-completion'
+          : 'product-event-retired-after-confirmed-device-loss';
+        owner.method = queueCompleted ? 'gpu-queue-on-submitted-work-done' : 'gpu-device-loss';
+      }
+      owner.update?.();
+      // Both successful queue completion and fulfilled device loss execute
+      // the actual destructor. False here must not strand sibling owners.
+      return true;
+    }).catch(error => {
+      if (error?.code === 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' && !owner.storageDestroyed) {
+        // A forged capability is not a retirement request. Preserve the live
+        // owner/claim for a subsequent call from its real final consumer.
+        owner.completion = null;
+        owner.requested = false;
+        owner.capability = null;
+      }
+      throw error;
+    });
+    // Fire-and-forget callers must not create unhandled rejections. Keep the
+    // original rejecting promise for every caller that observes retirement.
+    void owner.completion.catch(() => {});
+    return owner.completion;
+  };
+  productEventRetirementOwners.set(destroy, owner);
+  return destroy;
+}
+
 export function createResidentProductMassHandle(reactionSummary = null) {
   if (!reactionSummary) return null;
   const retainedProductEventBuffer = Boolean(reactionSummary.productEventBufferRetained && reactionSummary.productEventBuffer);
@@ -539,34 +638,63 @@ export function createResidentProductMassHandle(reactionSummary = null) {
   const sourceDestroy = typeof reactionSummary.destroyProductEventBuffer === 'function'
     ? reactionSummary.destroyProductEventBuffer
     : null;
-  let destroyed = Boolean(reactionSummary.productEventBufferDestroyed);
+  const candidateOwner = sourceDestroy ? productEventRetirementOwners.get(sourceDestroy) : null;
+  const sourceOwner = candidateOwner?.buffer === reactionSummary.productEventBuffer
+    && candidateOwner?.device === reactionSummary.productEventDevice ? candidateOwner : null;
+  let destroyed = sourceOwner ? sourceOwner.completed : Boolean(reactionSummary.productEventBufferDestroyed);
+  let destroyRequested = false;
   let destroyPromise = null;
+  let destroyCapability = null;
   let activeBorrowCount = 0;
   const borrowDrainWaiters = new Set();
   const waitForBorrowDrain = () => activeBorrowCount === 0
     ? Promise.resolve(true)
     : new Promise((resolve) => borrowDrainWaiters.add(resolve));
   const destroyResidentProductMassBuffers = retainedProductEventBuffer && sourceDestroy
-    ? () => {
-        if (destroyPromise) return destroyPromise;
-        if (destroyed || reactionSummary.productEventBufferDestroyed) {
-          return Promise.resolve(true);
+    ? (options = {}) => {
+        const queueOrderedFinalConsumer = options?.queueOrderedFinalConsumer ?? null;
+        if (destroyPromise) {
+          if (sourceOwner && !sourceOwner.delegatedToArena && queueOrderedFinalConsumer != null
+              && queueOrderedFinalConsumer !== destroyCapability) {
+            const error = new Error('Resident history retirement changed its final-consumer capability');
+            error.code = 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED';
+            return Promise.reject(error);
+          }
+          return destroyPromise;
         }
-        destroyed = true;
-        reactionSummary.productEventBufferDestroyed = true;
+        if (!sourceOwner && (destroyed || reactionSummary.productEventBufferDestroyed)) {
+          destroyPromise = Promise.resolve(true);
+          return destroyPromise;
+        }
+        destroyCapability = queueOrderedFinalConsumer;
+        destroyRequested = true;
+        if (sourceOwner) sourceOwner.requested = true;
         // A warm product-event buffer is part of the same exact arena as the
         // reaction destinations. Return a completion promise so the arena
         // owner cannot recycle that buffer while an asynchronous consumer is
         // pinned before its eventual submit.
-        if (activeBorrowCount === 0) {
-          sourceDestroy();
-          destroyPromise = Promise.resolve(true);
-        } else {
-          destroyPromise = waitForBorrowDrain().then(() => {
-            sourceDestroy();
-            return true;
+        destroyPromise = waitForBorrowDrain()
+          .then(() => sourceDestroy.call(reactionSummary, { queueOrderedFinalConsumer }))
+          .then(result => {
+            // False is logical delegation only for the original producer's
+            // bound arena callback. Arbitrary failed retirement stays false;
+            // a genuine storage destructor reports confirmed loss separately.
+            const delegated = sourceOwner?.delegatedToArena === true;
+            if (delegated || sourceOwner?.completed || result !== false) {
+              destroyed = true;
+              reactionSummary.productEventBufferDestroyed = true;
+            }
+            return delegated || result !== false;
+          }).catch(error => {
+            if (sourceOwner && error?.code === 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED'
+                && !sourceOwner.completed) {
+              destroyPromise = null;
+              destroyRequested = false;
+              destroyCapability = null;
+            }
+            throw error;
           });
-        }
+        void destroyPromise.catch(() => {});
         return destroyPromise;
       }
     : null;
@@ -677,7 +805,18 @@ export function createResidentProductMassHandle(reactionSummary = null) {
       return activeBorrowCount;
     },
     set(value) {
-      activeBorrowCount = Math.max(0, Math.trunc(Number(value) || 0));
+      const next = Math.max(0, Math.trunc(Number(value) || 0));
+      if (next > activeBorrowCount && (destroyRequested || destroyed || sourceOwner?.requested || sourceOwner?.completed)) {
+        throw new Error('Resident product mass retirement has closed consumer admission');
+      }
+      if (sourceOwner) {
+        sourceOwner.activeBorrowCount += next - activeBorrowCount;
+        if (sourceOwner.activeBorrowCount === 0) {
+          for (const resolve of sourceOwner.borrowDrainWaiters) resolve();
+          sourceOwner.borrowDrainWaiters.clear();
+        }
+      }
+      activeBorrowCount = next;
       if (activeBorrowCount !== 0) return;
       for (const resolve of borrowDrainWaiters) resolve(true);
       borrowDrainWaiters.clear();
@@ -2185,6 +2324,7 @@ export async function runSphReactionSummaryWebGpu({
   gpuTimestampRecorder = null,
   canonicalReactionProductPlacementAuthority = null,
   reactionWarmArenaLease = null,
+  requestQueueOrderedProductEventCleanupClaim = false,
   queueOrderedProducerClaims = []
 } = {}) {
   const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
@@ -2676,9 +2816,35 @@ export async function runSphReactionSummaryWebGpu({
   let localCleanupClaim = null;
   let localCleanupFinalConsumer = null;
   let localCleanupTelemetryTarget = null;
+  let localCleanupCompletion = null;
+  let localCleanupFenceCount = 0;
+  let localSubmissionAttempted = false;
   const localCleanupOutput = {};
   const attachQueueOrderedFinalConsumer = (result) => {
     localCleanupTelemetryTarget = result;
+    const eventOwner = productEventRetirementOwners.get(result.destroyProductEventBuffer);
+    if (eventOwner) {
+      eventOwner.output = result;
+      eventOwner.update = () => Object.assign(result, readbackTelemetry.snapshot(), {
+        productEventBufferDestroyed: eventOwner.storageDestroyed,
+        productEventCleanupHostQueueFenceCount: eventOwner.fenceCount,
+        productEventCleanupStatus: eventOwner.status,
+        productEventCleanupMethod: eventOwner.method,
+        productEventBufferCleanupReceipt: eventOwner.receipt,
+        productEventBufferQueueCompletionMethod: eventOwner.method
+      });
+      eventOwner.recordFence = () => readbackTelemetry.recordDeferredCleanupHostQueueFence(
+        1, 'reaction-summary-product-event-cleanup'
+      );
+      if (requestQueueOrderedProductEventCleanupClaim === true && !eventOwner.delegatedToArena) {
+        eventOwner.claim = registerQueueOrderedCleanupClaim(reactionSummaryProductEventCleanupClaimIssuer,
+          device, { producerOutput: result, cleanup: eventOwner.cleanup });
+        Object.defineProperty(result, 'productEventQueueOrderedCleanupClaim', {
+          value: eventOwner.claim, enumerable: false
+        });
+      }
+      eventOwner.update();
+    }
     if (localCleanupFinalConsumer) {
       Object.defineProperty(
         result,
@@ -2699,23 +2865,29 @@ export async function runSphReactionSummaryWebGpu({
       ...Object.values(reactionWarmBuffers ?? {})
     ].filter(Boolean)
   );
+  const destroyedLocalBuffers = new Set();
+  const destroyLocalBuffer = (buffer) => {
+    if (!buffer || destroyedLocalBuffers.has(buffer)) return;
+    buffer.destroy?.();
+    destroyedLocalBuffers.add(buffer);
+  };
   const destroyLocalPlacementBuffer = (buffer) => {
     if (buffer && !productPlacementWarmBufferSet.has(buffer)) {
-      buffer.destroy?.();
+      destroyLocalBuffer(buffer);
     }
   };
   const destroyLocalBuffers = () => {
     if (localBuffersDestroyed) return;
     destroyLocalPlacementBuffer(productEventPlacementParamsBuffer);
-    if (!borrowedReactionRecordBuffer) recordsBuffer.destroy?.();
-    if (!borrowedProposalBuffer) proposalsBuffer.destroy?.();
-    partialsBuffer?.destroy?.();
-    summaryBuffer?.destroy?.();
-    readBuffer?.destroy?.();
-    gasSpeciesBuffer?.destroy?.();
-    gasSpeciesReadBuffer?.destroy?.();
-    productInventoryBuffer?.destroy?.();
-    productInventoryReadBuffer?.destroy?.();
+    if (!borrowedReactionRecordBuffer) destroyLocalBuffer(recordsBuffer);
+    if (!borrowedProposalBuffer) destroyLocalBuffer(proposalsBuffer);
+    destroyLocalBuffer(partialsBuffer);
+    destroyLocalBuffer(summaryBuffer);
+    destroyLocalBuffer(readBuffer);
+    destroyLocalBuffer(gasSpeciesBuffer);
+    destroyLocalBuffer(gasSpeciesReadBuffer);
+    destroyLocalBuffer(productInventoryBuffer);
+    destroyLocalBuffer(productInventoryReadBuffer);
     if (productEventEmissionBuffer !== productEventBuffer) {
       destroyLocalPlacementBuffer(productEventEmissionBuffer);
     }
@@ -2738,30 +2910,61 @@ export async function runSphReactionSummaryWebGpu({
     destroyLocalPlacementBuffer(productPlacementSpareParticleScanParamsBuffer);
     destroyLocalPlacementBuffer(productPlacementSpareEventScanParamsBuffer);
     if (!canonicalSpatialPlacementEnabled) {
-      productEventPlacementCompletionReceiptBuffer?.destroy?.();
+      destroyLocalBuffer(productEventPlacementCompletionReceiptBuffer);
     }
     destroyLocalPlacementBuffer(productEventPlacementCompletionReadBuffer);
     if (
       !retainedProductEventBuffer
       && productEventBuffer !== reactionWarmBuffers?.productEvent
     ) {
-      productEventBuffer?.destroy?.();
+      destroyLocalBuffer(productEventBuffer);
     }
-    productEventReadBuffer?.destroy?.();
+    destroyLocalBuffer(productEventReadBuffer);
     if (
       !borrowedProductPlacementAccumulatorBuffer
       && placementAccumulatorBuffer
         !== reactionWarmBuffers?.productPlacementSummary
     ) {
-      placementAccumulatorBuffer?.destroy?.();
+      destroyLocalBuffer(placementAccumulatorBuffer);
     }
-    productPlacementReadBuffer?.destroy?.();
-    atomResidualBuffer?.destroy?.();
-    atomResidualReadBuffer?.destroy?.();
+    destroyLocalBuffer(productPlacementReadBuffer);
+    destroyLocalBuffer(atomResidualBuffer);
+    destroyLocalBuffer(atomResidualReadBuffer);
     if (paramsBuffer !== reactionWarmBuffers?.summaryParams) {
-      paramsBuffer.destroy?.();
+      destroyLocalBuffer(paramsBuffer);
     }
     localBuffersDestroyed = true;
+  };
+  const scheduleConfirmedLocalCleanup = (source = 'reaction-summary-local-buffer-cleanup') => {
+    if (!localCleanupCompletion) {
+      localCleanupCompletion = deferConfirmedSubmittedWorkCleanup(device, destroyLocalBuffers, {
+        onQueueFenceRequested() {
+          localCleanupFenceCount++;
+          readbackTelemetry.recordDeferredCleanupHostQueueFence(1, source);
+          if (localCleanupTelemetryTarget) Object.assign(localCleanupTelemetryTarget,
+            readbackTelemetry.snapshot(), {
+              localBufferCleanupHostQueueFenceCount: localCleanupFenceCount,
+              localBufferCleanupMethod: 'gpu-queue-on-submitted-work-done'
+            });
+        }
+      }).then(queueCompleted => {
+        if (!queueCompleted && localCleanupTelemetryTarget) {
+          Object.assign(localCleanupTelemetryTarget, readbackTelemetry.snapshot(), {
+            localBufferCleanupHostQueueFenceCount: localCleanupFenceCount,
+            localBufferCleanupStatus: 'destroyed-after-confirmed-device-loss',
+            localBufferCleanupMethod: 'gpu-device-loss'
+          });
+        }
+        return queueCompleted;
+      });
+      void localCleanupCompletion.catch(() => {});
+      if (localCleanupTelemetryTarget) {
+        Object.defineProperty(localCleanupTelemetryTarget, 'localBufferCleanupCompletion', {
+          value: localCleanupCompletion, enumerable: false
+        });
+      }
+    }
+    return localCleanupCompletion;
   };
 
   try {
@@ -3634,6 +3837,7 @@ export async function runSphReactionSummaryWebGpu({
               productEventPlacementCompletionReadBuffer
           }
         );
+      localSubmissionAttempted = true;
       reactionProductPlacementSubmissionArtifact =
         submitSchroederSpatialReactionProductPlacementWebGpu({
           authority: canonicalReactionProductPlacementAuthority,
@@ -3647,22 +3851,24 @@ export async function runSphReactionSummaryWebGpu({
         reactionProductPlacementSubmissionArtifact
           .queueOrderedFinalConsumerCapability ?? null;
     } else {
+      const commandBuffer = encoder.finish();
       const submittedClaims = [
         ...exactConsumerClaims,
         ...(localCleanupClaim ? [localCleanupClaim] : [])
       ];
+      localSubmissionAttempted = true;
       if (submittedClaims.length > 0) {
         localCleanupFinalConsumer =
           submitQueueOrderedFinalConsumerWork(
             device,
-            [encoder.finish()],
+            [commandBuffer],
             {
               finalConsumerOwner: localCleanupOutput,
               producerClaims: submittedClaims
             }
           );
       } else {
-        device.queue.submit([encoder.finish()]);
+        device.queue.submit([commandBuffer]);
       }
     }
     if (canonicalSpatialPlacementEnabled) {
@@ -3707,11 +3913,8 @@ export async function runSphReactionSummaryWebGpu({
     }
     retainedProductEventBuffer = retainProductEventBuffer && Boolean(productEventBuffer);
     const destroyProductEventBuffer = retainedProductEventBuffer
-      ? (
-          productEventBuffer === reactionWarmBuffers?.productEvent
-            ? () => false
-            : () => productEventBuffer.destroy?.()
-        )
+      ? createProductEventBufferDestructor(device, productEventBuffer,
+          productEventBuffer === reactionWarmBuffers?.productEvent)
       : null;
     const reactionPlacementRolledBack = Boolean(
       reactionProductPlacementArtifact?.fallbackObserved === true
@@ -3864,12 +4067,6 @@ export async function runSphReactionSummaryWebGpu({
         residentGasSpeciesLedger = decodeSphReactionGasSpeciesSummaryValues(residentGasValues, reactionTable);
         residentGasSpeciesFloatCount = residentGasValues.length;
       }
-      if (!localCleanupFinalConsumer) {
-        readbackTelemetry.recordDeferredCleanupHostQueueFence(
-          1,
-          'reaction-summary-local-buffer-cleanup'
-        );
-      }
       return attachQueueOrderedFinalConsumer({
         schema: ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
         executionSchema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -3924,7 +4121,7 @@ export async function runSphReactionSummaryWebGpu({
             ? 'queue-ordered-after-authenticated-submission'
             : 'submitted-work-cleanup-deferred-after-host-queue-fence',
         localBufferCleanupHostQueueFenceCount:
-          localCleanupFinalConsumer ? 0 : 1,
+          localCleanupFenceCount,
         localBufferCleanupMethod:
           localCleanupFinalConsumer
             ? 'same-gpu-queue-submission-order'
@@ -4225,6 +4422,10 @@ export async function runSphReactionSummaryWebGpu({
     });
   } catch (error) {
     localCleanupTelemetryTarget = error;
+    // No retained result escaped this failed producer. Its event allocation
+    // belongs to the same deferred drain as the other submitted locals.
+    retainedProductEventBuffer = false;
+    if (localSubmissionAttempted) deferLocalBufferCleanup = true;
     if (localCleanupFinalConsumer) {
       Object.defineProperty(
         error,
@@ -4255,26 +4456,10 @@ export async function runSphReactionSummaryWebGpu({
           // (or error) before exact local cleanup. The local claim is already
           // consumed, so retry its idempotent destructor behind the ordinary
           // queue fence while preserving external claim recovery.
-          readbackTelemetry.recordDeferredCleanupHostQueueFence(
-            1,
-            'reaction-summary-local-buffer-cleanup-fallback'
-          );
-          if (localCleanupTelemetryTarget) {
-            Object.assign(
-              localCleanupTelemetryTarget,
-              readbackTelemetry.snapshot()
-            );
-          }
-          deferSubmittedWorkCleanup(device, destroyLocalBuffers);
+          scheduleConfirmedLocalCleanup('reaction-summary-local-buffer-cleanup-fallback');
         }
       } else {
-        const cleanupFence =
-          typeof device.queue?.onSubmittedWorkDone === 'function'
-            ? device.queue.onSubmittedWorkDone()
-            : null;
-        if (cleanupFence?.then) {
-          cleanupFence.then(destroyLocalBuffers, destroyLocalBuffers);
-        }
+        scheduleConfirmedLocalCleanup();
       }
     } else {
       destroyLocalBuffers();

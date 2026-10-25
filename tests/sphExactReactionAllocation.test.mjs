@@ -117,6 +117,55 @@ test('all chosen products and donor contributions sum exactly for the native mat
   }
 });
 
+test('native vectors distinguish feasible caps, zero-required inactivity and unchanged availability fallback', () => {
+  for (const wordCount of [1, 9, 66]) {
+    const { compiled, format } = compile({}, createSphExactMassFormat({ wordCount,
+      quantumExponent: wordCount === 66 ? -1074 : -149 }));
+    const cases = exactReactionAllocationCases(format, compiled);
+    const evaluate = name => {
+      const input = cases.find(row => row.name === name);
+      assert.ok(input, name);
+      return { input, result: selectSphExactReactionAllocation(compiled, input) };
+    };
+    for (const name of ['partial-hidden-remainders', 'full-width-feasible-cap']) {
+      const { input, result } = evaluate(name);
+      assert.equal(result.error, 0); assert.equal(result.active, true);
+      assert.equal(result.total, input.kineticCap);
+      assert.equal(result.debitA + result.remainderA, input.availableA);
+      assert.equal(result.debitB + result.remainderB, input.availableB);
+    }
+    const wide = evaluate('full-width-feasible-cap').result;
+    assert.equal(wide.total, (1n << BigInt(wordCount * 32)) - 1n);
+    assert.equal(wide.remainderA, 0n); assert.equal(wide.remainderB, 0n);
+    for (const name of ['zero-cap', 'one-quantum-no-event', 'availability-b']) {
+      const { input, result } = evaluate(name);
+      assert.equal(result.active, false); assert.equal(result.total, 0n);
+      assert.equal(result.remainderA, input.availableA); assert.equal(result.remainderB, input.availableB);
+    }
+    for (const name of ['availability-a', 'availability-b-active']) {
+      const { input, result } = evaluate(name);
+      assert.equal(result.active, true); assert.ok(result.total < input.kineticCap);
+      const next = result.total + 1n, nextA = next * compiled.reactants[0].weight / compiled.reactantWeightSum;
+      assert.ok(nextA > input.availableA || next - nextA > input.availableB, 'next total is infeasible');
+    }
+    assert.equal(evaluate('aggregate-overflow').result.error, 1, 'small cap cannot bypass source aggregate overflow');
+  }
+});
+
+test('WGSL cap shortcut follows aggregate/weight validation and precedes the original greedy fallback', () => {
+  const code = createSphExactReactionAllocationWgsl(createSphExactMassFormat(), { includeMassLibrary: false });
+  const start = code.indexOf('fn er_select_debits('), fast = code.indexOf('let capped_a = em_multiply_ratio(cap,');
+  const greedy = code.indexOf('var power: ExactMass;');
+  assert.ok(start < fast && fast < greedy);
+  const checks = code.slice(start, fast), direct = code.slice(fast, greedy);
+  assert.ok(checks.includes('available.error | denominator.error') && checks.includes('em_zero(weight_a) || em_zero(weight_b)'));
+  assert.ok(direct.includes('em_compare(capped_a.value, available_a) <= 0')
+    && direct.includes('em_compare(capped_b.value, available_b) <= 0'));
+  assert.ok(direct.includes('em_zero(capped_a.value) || em_zero(capped_b.value)'));
+  assert.ok(direct.includes('return ExactReactionDebits(cap, capped_a.value, capped_b.value,'));
+  assert.ok(code.slice(greedy).includes('for (var bit = highest; bit >= 0; bit--)'));
+});
+
 test('WGSL composes with the original mass library without declaring public bindings', () => {
   const format = createSphExactMassFormat(), full = createSphExactReactionAllocationWgsl(format);
   const helpers = createSphExactReactionAllocationWgsl(format, { includeMassLibrary: false });

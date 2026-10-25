@@ -52,7 +52,7 @@ const PHASE_CHANGE_REST_VOLUME_RATIO_RESET_THRESHOLD = 2;
 
 // Bookkeeping only: each standard runner's private map is the actual issuer.
 // A seal created directly with this helper cannot authenticate a stage.
-export function createPostMechanicsStageOutputSeal(result, inputs) {
+export function createPostMechanicsStageOutputSeal(result, inputs, { onLastRelease = null } = {}) {
   const output = Object.freeze(Object.fromEntries([
     'stateBuffer', 'thermoBuffer', 'mechanicsBuffer', 'residentProductMass'
   ].map((key) => [key, result[key] ?? null])));
@@ -72,6 +72,13 @@ export function createPostMechanicsStageOutputSeal(result, inputs) {
     .filter((key) => result[key] && typeof result[key] === 'object')
     .map((key) => [result[key], Object.entries(result[key])]);
   let held = true;
+  let holdCount = 1;
+  const releaseHold = () => {
+    if (--holdCount !== 0) return;
+    const callback = onLastRelease;
+    onLastRelease = null;
+    callback?.();
+  };
   let retired = false;
   const guarded = [];
   for (const [owner, key] of [
@@ -82,7 +89,7 @@ export function createPostMechanicsStageOutputSeal(result, inputs) {
     if (typeof owner?.[key] !== 'function') continue;
     const destroy = owner[key];
     const guard = function (...args) {
-      if (held) throw new Error('Captured post-mechanics output still has an owner read');
+      if (holdCount) throw new Error('Captured post-mechanics output still has an owner read');
       retired = true;
       return destroy.apply(this, args);
     };
@@ -101,7 +108,21 @@ export function createPostMechanicsStageOutputSeal(result, inputs) {
     return true;
   };
   return Object.freeze({ result, inputs: Object.freeze({ ...inputs }), output,
-    validate, release() { if (!held) return false; held = false; return true; } });
+    validate,
+    retain() {
+      validate();
+      if (!held) throw new Error('Captured post-mechanics owner has closed read admission');
+      holdCount++;
+      let active = true;
+      return Object.freeze({
+        validate() {
+          if (!active) throw new Error('Captured post-mechanics read was released');
+          return validate();
+        },
+        release() { if (!active) return false; active = false; releaseHold(); return true; }
+      });
+    },
+    release() { if (!held) return false; held = false; releaseHold(); return true; } });
 }
 
 const mechanicsSourceCaptures = new WeakMap();

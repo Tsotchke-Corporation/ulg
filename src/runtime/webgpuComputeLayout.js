@@ -360,6 +360,121 @@ export function deferSubmittedWorkCleanup(device, cleanup) {
   return true;
 }
 
+const confirmedCleanupDeviceStates = new WeakMap();
+const confirmedCleanupTickets = new WeakSet();
+
+function confirmedCleanupDeviceState(device) {
+  let state = confirmedCleanupDeviceStates.get(device);
+  if (state) return state;
+  state = { lost: false, cleanupDepth: 0, waiters: new Set() };
+  confirmedCleanupDeviceStates.set(device, state);
+  try {
+    const loss = device.lost;
+    if (loss && typeof loss.then === 'function') {
+      Promise.resolve(loss).then(() => {
+        state.lost = true;
+        for (const ticket of [...state.waiters]) ticket.finish(false);
+      }, () => {
+        // An observer failure is not confirmation that the device stopped.
+      });
+    }
+  } catch {
+    // Without a usable loss observer, only a successful queue fence can retire.
+  }
+  return state;
+}
+
+function fenceConfirmedCleanup(ticket, requestFence, queue = null) {
+  const observer = ticket.onQueueFenceRequested;
+  ticket.onQueueFenceRequested = null;
+  if (ticket.finished || typeof requestFence !== 'function') return;
+  try {
+    const observed = observer?.();
+    if (observed && typeof observed.then === 'function') {
+      Promise.resolve(observed).catch(() => {});
+    }
+  } catch {
+    // Telemetry must never prevent the real fence or authorize retirement.
+  }
+  try {
+    const fence = requestFence.call(queue);
+    if (fence && typeof fence.then === 'function') {
+      Promise.resolve(fence).then(() => ticket.finish(true), () => {
+        // Keep the cleanup quarantined until fulfilled device loss.
+      });
+    }
+  } catch {
+    // A missing, throwing or rejected fence never authorizes cleanup.
+  }
+}
+
+/**
+ * Retire owned resources only after a successful queue fence or fulfilled
+ * device loss. The result distinguishes queue completion (true) from terminal
+ * loss (false); both execute cleanup once. Cleanup failures reject the promise.
+ * One loss observer per device holds only pending cleanup tickets.
+ * Optional onQueueFenceRequested observes actual fence attempts, including
+ * throwing requests; held bursts notify only when the real fence is requested.
+ */
+export function deferConfirmedSubmittedWorkCleanup(device, cleanup, options = null) {
+  if ((typeof device !== 'object' && typeof device !== 'function') || device === null
+      || typeof cleanup !== 'function') {
+    throw new TypeError('Confirmed cleanup requires a device and cleanup function');
+  }
+  const state = confirmedCleanupDeviceState(device);
+  const ticket = { cleanup, onQueueFenceRequested: null, finished: false, finish: null };
+  try {
+    const observer = options?.onQueueFenceRequested;
+    if (typeof observer === 'function') ticket.onQueueFenceRequested = observer;
+  } catch {
+    // A telemetry accessor failure must not change cleanup behavior.
+  }
+  cleanup = null;
+  options = null;
+  confirmedCleanupTickets.add(ticket);
+  const completion = new Promise((resolve, reject) => {
+    ticket.finish = (queueCompleted) => {
+      if (ticket.finished) return;
+      ticket.finished = true;
+      state.waiters.delete(ticket);
+      const callback = ticket.cleanup;
+      ticket.cleanup = null;
+      ticket.onQueueFenceRequested = null;
+      // These owned resources already have retirement proof. A newer burst
+      // must not re-park their synchronous destroy calls behind another fence.
+      state.cleanupDepth += 1;
+      try {
+        Promise.resolve(callback()).then(() => resolve(queueCompleted), reject);
+      } catch (error) {
+        reject(error);
+      } finally {
+        state.cleanupDepth -= 1;
+      }
+    };
+  });
+  if (state.lost) {
+    ticket.finish(false);
+    return completion;
+  }
+  state.waiters.add(ticket);
+  const burst = workerQueueSubmitBurstRecords.get(device);
+  if (burst?.open) {
+    // A fence taken now would flush held work early. Preserve registration
+    // order with ordinary cleanups; the flush starts this ticket's real fence.
+    burst.deferredCleanups.push(ticket);
+    burst.stats.deferredCleanupTotal += 1;
+  } else {
+    try {
+      const queue = device.queue;
+      fenceConfirmedCleanup(ticket, queue?.onSubmittedWorkDone, queue);
+    } catch {
+      ticket.onQueueFenceRequested = null;
+      // A throwing queue accessor did not request a fence or prove retirement.
+    }
+  }
+  return completion;
+}
+
 // --- Worker queue submit burst -------------------------------------------
 //
 // One queue.submit costs a fixed GPU-process CPU slice regardless of how
@@ -625,9 +740,12 @@ export function armWorkerQueueSubmitBurst(device) {
         if (destroyed) return undefined;
         destroyed = true;
         const stamp = record.bufferStamps.get(buffer);
+        const confirmedCleanup = confirmedCleanupDeviceStates.get(device);
         if (
           record.open
           && record.heldCommandBuffers.length > 0
+          && confirmedCleanup?.lost !== true
+          && !(confirmedCleanup?.cleanupDepth > 0)
           && !(typeof stamp === 'number' && stamp > record.heldSubmitStamp)
         ) {
           record.deferredCleanups.push(realDestroy);
@@ -694,10 +812,15 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
     }
   }
   // One real fence per cleanup, matching deferSubmittedWorkCleanup's
-  // documented no-coalescing contract. If the submit failed or the fence API
-  // is unavailable the cleanups still run so buffers are not leaked on a
-  // poisoned lane.
+  // documented no-coalescing contract. Legacy cleanups still run if submit
+  // failed or the fence API is unavailable; confirmed tickets require proof.
   for (const cleanup of cleanups) {
+    if (confirmedCleanupTickets.has(cleanup)) {
+      // Even a submit that throws may have delegated commands. Only this
+      // ticket's real fence or confirmed device loss can retire its resources.
+      fenceConfirmedCleanup(cleanup, record.realOnSubmittedWorkDone);
+      continue;
+    }
     if (record.realOnSubmittedWorkDone && submitError == null) {
       record.realOnSubmittedWorkDone()
         .catch(() => null)

@@ -219,8 +219,9 @@ source row and clears every allocation record; the lower endpoint then stages
 both endpoint writes and full product-term payloads before publishing a shared
 acceptance marker. Late endpoint/event validation failure restores both source
 rows. The later resolver cannot overwrite either physical endpoint. Legacy
-calls retain their existing program; mixed legacy/physical caloric tables remain
-rejected by the existing admission guard.
+calls retain their existing program. The existing admission guard still rejects
+mixed tables containing phase-specific condensable caloric rows; this does not
+exclude every mixed table using legacy pure-phase graphs.
 
 Product events copy those stored payloads. Product inventory, compact summary,
 gas and atom diagnostics read the same allocation. Distinct repeated-material

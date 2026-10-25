@@ -3488,6 +3488,143 @@ fn scatter_placement_rows(
 }
 `;
 
+/** Exact event companions use the SAME stable prefix as projected events.
+ * The legacy export above remains byte-identical. Exact variants require an
+ * 8-byte compact count [live,error], the existing 16-byte params with stride8
+ * and reserved0, and bindings8/9 for aligned companion subranges. */
+export function createSphReactionProductEventCompactWgsl({ exactCompanion = null } = {}) {
+  if (exactCompanion == null) return sphReactionProductEventCompactWgsl;
+  const n = exactCompanion.massWordCount;
+  if (!Number.isSafeInteger(n) || n < 1 || n > 66) throw new RangeError('Exact event companion mass word count must be in [1,66]');
+  return /* wgsl */ `
+struct ProductEventCompactParams { row_count: u32, row_stride_vec4: u32, group_count: u32, reserved0: u32 }
+// Preserve projected f32 bits, including signed zero/subnormals, without f32 evaluation.
+@group(0) @binding(0) var<storage, read> source_events: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read_write> compact_events: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read_write> compact_counts: array<u32>;
+@group(0) @binding(3) var<uniform> params: ProductEventCompactParams;
+@group(0) @binding(4) var<storage, read_write> placement_completion_receipt: array<u32>;
+@group(0) @binding(5) var<storage, read_write> compact_local_prefix_flags: array<u32>;
+@group(0) @binding(6) var<storage, read_write> compact_group_counts: array<u32>;
+@group(0) @binding(7) var<storage, read_write> compact_group_offsets: array<u32>;
+@group(0) @binding(8) var<storage, read> source_companions: array<u32>;
+@group(0) @binding(9) var<storage, read_write> compact_companions: array<u32>;
+const ECMP_MASS_WORDS: u32 = ${n}u;
+const ECMP_STRIDE: u32 = ${8 + 3 * n}u;
+var<workgroup> exact_compact_scan: array<u32,64>;
+var<workgroup> exact_compact_error: atomic<u32>;
+fn exact_compact_layout_ready() -> bool {
+  let expected_groups = params.row_count / 64u + select(0u,1u,params.row_count % 64u != 0u);
+  return params.row_stride_vec4 == 8u && params.reserved0 == 0u
+    && params.group_count == expected_groups
+    && arrayLength(&compact_counts) >= 2u
+    && arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u
+    && arrayLength(&source_events) % 8u == 0u && arrayLength(&compact_events) % 8u == 0u
+    && arrayLength(&source_companions) % ECMP_STRIDE == 0u
+    && arrayLength(&compact_companions) % ECMP_STRIDE == 0u
+    && arrayLength(&source_events) / 8u == arrayLength(&source_companions) / ECMP_STRIDE
+    && arrayLength(&compact_events) / 8u == arrayLength(&compact_companions) / ECMP_STRIDE
+    && params.row_count <= arrayLength(&source_events) / 8u
+    && params.row_count <= arrayLength(&compact_local_prefix_flags)
+    && params.group_count <= arrayLength(&compact_group_counts)
+    && params.group_count <= arrayLength(&compact_group_offsets);
+}
+// 0=inactive,1=live,2=malformed. Activity never depends on projected f32 mass.
+fn exact_compact_row_status(row: u32) -> u32 {
+  let at = row * ECMP_STRIDE;
+  let activity = source_companions[at + 4u]; let ready = source_companions[at + 5u];
+  if (activity > 1u || ready > 1u || source_companions[at + 6u] != 0u || source_companions[at + 7u] != 0u) { return 2u; }
+  if (ready == 0u && (source_companions[at] != 0u || source_companions[at + 1u] != 0u
+      || source_companions[at + 2u] != 0u || source_companions[at + 3u] != 0u || activity != 0u)) { return 2u; }
+  if (ready == 1u && (source_companions[at] == 0xffffffffu || source_companions[at + 1u] == 0xffffffffu
+      || source_companions[at + 2u] < 2u || source_companions[at + 2u] == 0xffffffffu
+      || source_companions[at + 3u] == 0u || source_companions[at + 3u] == 0xffffffffu)) { return 2u; }
+  var nonzero = 0u; var carry = 0u;
+  for (var word = 0u; word < ECMP_MASS_WORDS; word++) {
+    let mass = source_companions[at + 8u + word]; nonzero |= mass;
+    let direct = source_companions[at + 8u + ECMP_MASS_WORDS + word];
+    let residual = source_companions[at + 8u + 2u * ECMP_MASS_WORDS + word];
+    let first = direct + residual; let second = first + carry;
+    carry = select(0u,1u,first < direct || second < first);
+    if (second != mass) { return 2u; }
+  }
+  if (carry != 0u || activity != select(0u,1u,nonzero != 0u) || (activity != 0u && ready != 1u)) { return 2u; }
+  return activity;
+}
+@compute @workgroup_size(64)
+fn count_placement_rows(@builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>, @builtin(workgroup_id) group_id: vec3<u32>) {
+  let row = global_id.x; let lane = local_id.x;
+  if (lane == 0u) { atomicStore(&exact_compact_error,0u); }
+  workgroupBarrier();
+  let layout_ready = exact_compact_layout_ready(); var live = 0u;
+  if (!layout_ready) { atomicOr(&exact_compact_error,1u); }
+  else if (row < params.row_count) {
+    let status = exact_compact_row_status(row);
+    if (status == 2u) { atomicOr(&exact_compact_error,1u); } else { live = status; }
+  }
+  exact_compact_scan[lane] = live; workgroupBarrier();
+  var offset = 1u;
+  loop {
+    if (offset >= 64u) { break; }
+    var preceding = 0u; if (lane >= offset) { preceding = exact_compact_scan[lane-offset]; }
+    workgroupBarrier(); let current = exact_compact_scan[lane]; workgroupBarrier();
+    exact_compact_scan[lane] = current + preceding; workgroupBarrier(); offset *= 2u;
+  }
+  if (row < params.row_count && row < arrayLength(&compact_local_prefix_flags)) {
+    compact_local_prefix_flags[row] = (exact_compact_scan[lane]-live) | select(0u,0x80000000u,live != 0u);
+  }
+  if (lane == 63u && group_id.x < arrayLength(&compact_group_counts)) {
+    compact_group_counts[group_id.x] = exact_compact_scan[63u] | select(0u,0x80000000u,atomicLoad(&exact_compact_error) != 0u);
+  }
+  if (row == 0u && arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactCountPassCount}u] = 1u;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionInputVisitCount}u] = params.row_count;
+  }
+}
+@compute @workgroup_size(1)
+fn scan_placement_row_groups(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x != 0u) { return; }
+  var error = select(1u,0u,exact_compact_layout_ready()); var total = 0u;
+  if (error == 0u) {
+    for (var group = 0u; group < params.group_count; group++) {
+      let packed = compact_group_counts[group]; let count = packed & 0x7fffffffu;
+      let remaining = params.row_count - group * 64u;
+      if ((packed & 0x80000000u) != 0u || count > min(64u,remaining)) { error = 1u; }
+      compact_group_offsets[group] = total;
+      let next = total + count; if (next < total || next > params.row_count) { error = 1u; }
+      total = next;
+    }
+    if (total > arrayLength(&compact_events) / 8u) { error = 1u; }
+  }
+  if (arrayLength(&compact_counts) > 0u) { compact_counts[0u] = select(total,0u,error != 0u); }
+  if (arrayLength(&compact_counts) > 1u) { compact_counts[1u] = error; }
+  if (arrayLength(&placement_completion_receipt) >= ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_WORDS}u) {
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScanPassCount}u] = 1u;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.activeEventCount}u] = select(total,0u,error != 0u);
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionLiveFlagCount}u] = total;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactionOverflowCount}u] = error;
+    placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScatterPassCount}u] = 0u;
+  }
+}
+@compute @workgroup_size(64)
+fn scatter_placement_rows(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group_id: vec3<u32>) {
+  if (!exact_compact_layout_ready() || compact_counts[1u] != 0u) { return; }
+  if (id.x == 0u) { placement_completion_receipt[${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.compactScatterPassCount}u] = 1u; }
+  if (id.x >= params.row_count) { return; }
+  let prefix = compact_local_prefix_flags[id.x]; if ((prefix & 0x80000000u) == 0u) { return; }
+  let dest = compact_group_offsets[group_id.x] + (prefix & 0x7fffffffu);
+  if (dest >= compact_counts[0u]) { return; }
+  for (var component = 0u; component < 8u; component++) {
+    compact_events[dest*8u+component] = source_events[id.x*8u+component];
+  }
+  for (var word = 0u; word < ECMP_STRIDE; word++) {
+    compact_companions[dest*ECMP_STRIDE+word] = source_companions[id.x*ECMP_STRIDE+word];
+  }
+}
+`;
+}
+
 // Resident product history is append-only after product placement. This
 // kernel filters each new source before appending it to a stable live prefix,
 // so the hot loop never needs to map a compacted count. Each published logical

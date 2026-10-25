@@ -78,6 +78,7 @@ import {
   SCHROEDER_SPATIAL_EPOCH_V2_VERSION
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
+  assertSphLegacyMassPathAllowed,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
@@ -629,7 +630,9 @@ function createProductEventBufferDestructor(device, buffer, delegatedToArena) {
 
 export function createResidentProductMassHandle(reactionSummary = null) {
   if (!reactionSummary) return null;
-  const retainedProductEventBuffer = Boolean(reactionSummary.productEventBufferRetained && reactionSummary.productEventBuffer);
+  const productEventBuffer = reactionSummary.productEventBuffer;
+  assertSphLegacyMassPathAllowed({ productEventBuffer }, 'Resident product history');
+  const retainedProductEventBuffer = Boolean(reactionSummary.productEventBufferRetained && productEventBuffer);
   const hasInventory = Boolean(reactionSummary.productInventory?.schema);
   const hasEventRows = Boolean(reactionSummary.productEvents?.schema || reactionSummary.productEventRowCount);
   if (!retainedProductEventBuffer && !hasInventory && !hasEventRows) return null;
@@ -639,7 +642,7 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     ? reactionSummary.destroyProductEventBuffer
     : null;
   const candidateOwner = sourceDestroy ? productEventRetirementOwners.get(sourceDestroy) : null;
-  const sourceOwner = candidateOwner?.buffer === reactionSummary.productEventBuffer
+  const sourceOwner = candidateOwner?.buffer === productEventBuffer
     && candidateOwner?.device === reactionSummary.productEventDevice ? candidateOwner : null;
   let destroyed = sourceOwner ? sourceOwner.completed : Boolean(reactionSummary.productEventBufferDestroyed);
   let destroyRequested = false;
@@ -731,7 +734,7 @@ export function createResidentProductMassHandle(reactionSummary = null) {
       ? 'resident-product-mass-buffer-retained'
       : 'resident-product-mass-summary-only',
     source: 'reaction-summary-product-events-and-inventory',
-    productEventBuffer: retainedProductEventBuffer ? reactionSummary.productEventBuffer : null,
+    productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
     productEventBufferRetained: retainedProductEventBuffer,
     reactionPlacementRolledBack:
       reactionSummary.reactionPlacementRolledBack === true,

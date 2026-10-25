@@ -2899,7 +2899,7 @@ export function abandonSphExactMassSpatialContinuation(plan, upload) {
 export function assertSphLegacyMassPathAllowed(inputs, stage) {
   if (sphPackedParticleAdvertisesExactMass(inputs?.sphParticleState)
       || sphGpuParticleUploadAdvertisesExactMass(inputs?.sphParticleUpload)
-      || ['sourceStateBuffer', 'sourceThermoBuffer', 'stateBuffer', 'thermoBuffer', 'identityBuffer']
+      || ['sourceStateBuffer', 'sourceThermoBuffer', 'stateBuffer', 'thermoBuffer', 'identityBuffer', 'productEventBuffer']
         .some(key => exactMassParticleBuffers.has(inputs?.[key]))) {
     throw new TypeError(`${stage} requires an authenticated exact-inventory continuation; legacy mass path is not admitted`);
   }

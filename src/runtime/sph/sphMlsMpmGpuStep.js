@@ -31871,8 +31871,27 @@ export async function compactResidentProductEventBufferWebGpu({
   }
 }
 
-function residentProductMassMergeSourceDescriptor(handle, role) {
-  if (!handle?.productEventBuffer) {
+function residentProductMassMergeBuffer(handle) {
+  // Do not invoke an accessor that can conceal an exact buffer for the first
+  // check and expose it to a later copy. Preserve the original handle itself
+  // for private count/arena ownership and borrowing.
+  let object = handle;
+  while (object != null) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, 'productEventBuffer');
+    if (descriptor) {
+      if (!Object.hasOwn(descriptor, 'value')) {
+        throw new TypeError('Resident product history merge requires a data productEventBuffer property');
+      }
+      assertSphLegacyMassPathAllowed({ productEventBuffer: descriptor.value }, 'Resident product history merge');
+      return descriptor.value;
+    }
+    object = Object.getPrototypeOf(object);
+  }
+  return undefined;
+}
+
+function residentProductMassMergeSourceDescriptor(handle, role, buffer) {
+  if (!buffer) {
     throw new TypeError(`${role} requires a retained product-event buffer`);
   }
   const rowCount = exactResidentProductHistoryInteger(
@@ -31900,11 +31919,11 @@ function residentProductMassMergeSourceDescriptor(handle, role) {
   if (!Number.isSafeInteger(logicalByteLength) || logicalByteLength > declaredByteLength) {
     throw new RangeError(`${role} product-event logical byte length exceeds its declaration`);
   }
-  const bufferSize = Number(handle.productEventBuffer.size);
+  const bufferSize = Number(buffer.size);
   if (Number.isFinite(bufferSize) && bufferSize >= 0 && logicalByteLength > bufferSize) {
     throw new RangeError(`${role} product-event logical byte length exceeds GPUBuffer.size`);
   }
-  const bufferUsage = Number(handle.productEventBuffer.usage);
+  const bufferUsage = Number(buffer.usage);
   if (
     Number.isFinite(bufferUsage)
     && bufferUsage >= 0
@@ -31912,7 +31931,7 @@ function residentProductMassMergeSourceDescriptor(handle, role) {
   ) {
     throw new RangeError(`${role} product-event buffer is missing COPY_SRC usage`);
   }
-  if (handle.productEventBuffer.destroyed === true) {
+  if (buffer.destroyed === true) {
     throw residentProductHistoryArenaError(
       `${role} product-event buffer is already destroyed`,
       'ERR_SPH_PRODUCT_HISTORY_SOURCE_DESTROYED',
@@ -31921,6 +31940,7 @@ function residentProductMassMergeSourceDescriptor(handle, role) {
   }
   return {
     handle,
+    buffer,
     role,
     rowCount,
     strideFloats,
@@ -32122,7 +32142,8 @@ export async function mergeResidentProductMassBuffersWebGpu(options = {}) {
       'productEventBuffer', 'productEventBufferByteLength', 'productEventRowCount',
       'productEventStrideFloats', 'productEventStrideBytes', 'reactionPlacementRolledBack',
       'reactionPlacementTransactionOutcome'
-    ].map((key) => [key, handle?.[key]]))) })));
+    ].map((key) => [key, key === 'productEventBuffer'
+      ? residentProductMassMergeBuffer(handle) : handle?.[key]]))) })));
   const singleSource = inputResidentProductMass || emittedResidentProductMass;
   const copyRawSource = Boolean(singleSource && (!inputResidentProductMass || !emittedResidentProductMass)
     && !residentProductHistoryArenaHandleRecords.has(singleSource));
@@ -32164,6 +32185,20 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
   allowHostCompactionObservation = true,
   forceCapturedSourceCopy = false
 } = {}) {
+  const sourceBuffers = new Map();
+  for (const source of [inputResidentProductMass, emittedResidentProductMass]) {
+    if (source && !sourceBuffers.has(source)) sourceBuffers.set(source, residentProductMassMergeBuffer(source));
+  }
+  const validateSourceBuffers = () => {
+    for (const [source, buffer] of sourceBuffers) {
+      if (residentProductMassMergeBuffer(source) !== buffer) {
+        throw residentProductHistoryArenaError(
+          'resident product-history source buffer changed while merge was pending',
+          'ERR_SPH_PRODUCT_HISTORY_SOURCE_BUFFER_CHANGED'
+        );
+      }
+    }
+  };
   // SAFE_FROZEN_FALLBACK is an atomic rejection of the current reaction and
   // placement transaction. Its event buffer is deliberately all zeroes and
   // must not become a new logical history generation: doing so would grow the
@@ -32237,7 +32272,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       schema: source.schema,
       status: 'resident-product-mass-empty-parent',
       source: 'resident-product-history-empty-parent',
-      productEventBuffer: source.productEventBuffer,
+      productEventBuffer: sourceBuffers.get(source),
       productEventBufferRetained: true,
       productEventBufferByteLength: 0,
       productEventRowCount: 0,
@@ -32257,6 +32292,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       unplacedProductMassKg: 0,
       unplacedGasProductMassKg: 0
     };
+    sourceBuffers.set(inputResidentProductMass, sourceBuffers.get(source));
     if (forceCapturedSourceCopy && singleSourceGpuCountAuthority) {
       // Keep the existing GPU-counted history in the parent lane. The normal
       // append kernel already authenticates that count; an empty raw emitted
@@ -32303,11 +32339,13 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
   }
   const inputSource = residentProductMassMergeSourceDescriptor(
     inputResidentProductMass,
-    'input resident product mass'
+    'input resident product mass',
+    sourceBuffers.get(inputResidentProductMass)
   );
   const emittedSource = residentProductMassMergeSourceDescriptor(
     emittedResidentProductMass,
-    'emitted resident product mass'
+    'emitted resident product mass',
+    sourceBuffers.get(emittedResidentProductMass)
   );
   if (
     inputSource.strideFloats !== emittedSource.strideFloats
@@ -32373,7 +32411,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
     const authorityByteLength =
       inputGpuCountAuthority.rowCapacity * inputSource.strideBytes;
     const sourceBufferSize = Number(
-      inputResidentProductMass.productEventBuffer.size
+      inputSource.buffer.size
     );
     if (
       inputGpuCountAuthority.rowCapacity !== inputSource.rowCount
@@ -32406,7 +32444,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
     hostCompactionObservationRequested && !gpuCountFilteredAppendEnabled;
   if (gpuCountFilteredAppendEnabled) {
     for (const source of [inputSource, emittedSource]) {
-      const usage = Number(source.handle.productEventBuffer?.usage);
+      const usage = Number(source.buffer?.usage);
       if (
         Number.isFinite(usage)
         && usage >= 0
@@ -32641,6 +32679,10 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       );
     }
 
+    // Arena acquisition may await. Raw legacy handles have no private arena
+    // record, so they need the same identity recheck as registered histories.
+    // Every bind/copy below uses the admitted snapshots, never a fresh read.
+    validateSourceBuffers();
     const mergedBuffer = mergedSlot.buffer;
     if (gpuCountFilteredAppendEnabled) {
       const rowCapacity = Math.floor(mergedSlot.capacityBytes / strideBytes);
@@ -32691,12 +32733,12 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
         parentAuthority,
         nextRecord: finalGpuCountRecord,
         sourceABuffer: appendReusesInputArena
-          ? emittedResidentProductMass.productEventBuffer
-          : inputResidentProductMass.productEventBuffer,
+          ? emittedSource.buffer
+          : inputSource.buffer,
         sourceARowCount: appendReusesInputArena
           ? emittedSource.rowCount
           : inputSource.rowCount,
-        sourceBBuffer: emittedResidentProductMass.productEventBuffer,
+        sourceBBuffer: emittedSource.buffer,
         sourceBRowCount: appendReusesInputArena
           ? 0
           : emittedSource.rowCount,
@@ -32733,7 +32775,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       const encoder = device.createCommandEncoder();
       if (!appendReusesInputArena && inputByteLength > 0) {
         encoder.copyBufferToBuffer(
-          inputResidentProductMass.productEventBuffer,
+          inputSource.buffer,
           0,
           mergedBuffer,
           0,
@@ -32744,7 +32786,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       }
       if (emittedByteLength > 0) {
         encoder.copyBufferToBuffer(
-          emittedResidentProductMass.productEventBuffer,
+          emittedSource.buffer,
           0,
           mergedBuffer,
           inputByteLength,

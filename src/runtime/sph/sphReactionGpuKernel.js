@@ -3562,7 +3562,7 @@ export async function runSphReactionStepWebGpu({
 } = {}) {
   if (exactReactionSourceSelection != null) {
     // This explicit branch consumes the genuine source packet, without
-    // presenting a routing candidate as the legacy physical stage output.
+    // presenting speculative rows and exact companions as a stage seal.
     // The normal exact-inventory and closure/publication guards remain below.
     if (retainOutputParticleBuffers !== true || readbackMode !== NO_FULL_READBACK_MODE
         || resetMechanics !== true || postMechanicsSourceCapture != null

@@ -4,6 +4,7 @@ import { createSphExactReactionRoutingWgsl, sphExactReactionRoutingLayout }
 import { computeBufferBinding, prewarmCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import { runSphExactReactionOutputCandidateWebGpu } from './sphExactReactionOutputGpu.js';
 
 export const SPH_EXACT_REACTION_ROUTING_SCHEMA = 'peercompute.ulg.exact-reaction-routing-candidate.v1';
 const RECORDS = new WeakMap();
@@ -90,10 +91,14 @@ export async function runSphExactReactionRoutingCandidateWebGpu({ selection, exp
     const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroups(selected.particleCount); pass.end();
     const command = encoder.finish(); validate(); submitted = true; device.queue.submit([command]);
+    const physicalOutput = await runSphExactReactionOutputCandidateWebGpu({
+      parent, routingBuffer: outputBuffer, routingLayout: layout, allocate, validate,
+      markSubmitted: () => { submitted = true; }
+    });
     result = Object.freeze({ schema: SPH_EXACT_REACTION_ROUTING_SCHEMA,
       status: 'webgpu-exact-reaction-routing-candidate', outputBuffer, outputByteLength,
       particleCount: selected.particleCount, format, layout, sourceSelection: selected,
-      physicalPublicationAdmitted: false, release });
+      physicalOutput, physicalPublicationAdmitted: false, release });
     RECORDS.set(result, { result, parent, validate });
     return result;
   } catch (error) {

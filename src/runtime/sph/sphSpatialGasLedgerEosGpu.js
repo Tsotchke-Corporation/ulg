@@ -80,6 +80,7 @@ import {
   webGpuDeviceMismatchInfo
 } from './sphGpuDeviceIdentity.js';
 import {
+  assertSphLegacyMassPathAllowed,
   ensureSphGpuParticleBufferSetBorrowLifecycle
 } from './sphGpuBuffers.js';
 import {
@@ -1197,6 +1198,7 @@ function normalizeProductEventSource({
 }) {
   const source = retainedProductEventSource || residentProductMass || null;
   const buffer = productEventBuffer || source?.productEventBuffer || null;
+  assertSphLegacyMassPathAllowed({ productEventBuffer: buffer }, 'Spatial gas product events');
   const advertised = Boolean(
     source
     || productEventBuffer

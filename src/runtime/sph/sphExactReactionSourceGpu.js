@@ -20,6 +20,7 @@ import { acquireSchroederSpatialReactionDiscoveryProposalRead }
 import { computeBufferBinding, prewarmCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import { markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 
 export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v4';
 const RECORDS = new WeakMap();
@@ -569,12 +570,21 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
         }
       };
       reads.add(read);
+      const validateRead = () => {
+        if (released) throw new TypeError('Exact reaction packet read was released');
+        validateRetained();
+        if (released) throw new TypeError('Exact reaction packet read was released');
+        return view;
+      };
       return Object.freeze({ view,
-        validate() {
-          if (released) throw new TypeError('Exact reaction packet read was released');
-          validateRetained();
-          if (released) throw new TypeError('Exact reaction packet read was released');
-          return view;
+        validate: validateRead,
+        // Deny-only buffer identity marking prevents projected aliases from
+        // entering a legacy mass path. It grants no successor or publication
+        // authority and never exposes the shared source read or its release.
+        markDerivedBuffers(buffers, { mechanicsBuffers = [] } = {}) {
+          validateRead();
+          markSphExactMassDerivedBuffers(source.sourceRead, buffers, { mechanicsBuffers });
+          validateRead();
         },
         release() {
           if (retirement) return retirement;

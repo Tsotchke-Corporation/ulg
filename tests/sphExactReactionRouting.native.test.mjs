@@ -8,8 +8,8 @@ const baseUrl = process.env.ULG_EXACT_REACTION_ROUTING_BASE_URL || 'https://fast
 const evidencePath = process.env.ULG_EXACT_REACTION_ROUTING_EVIDENCE;
 const manifestPath = process.env.ULG_EXACT_REACTION_ROUTING_MANIFEST;
 
-test('actual reaction runner retains genuine packets and routes exact endpoints and residuals on native WebGPU', {
-  skip: !enabled && 'set ULG_RUN_NATIVE_EXACT_REACTION_ROUTING=1 for owned desktop WebGPU', timeout: 300000
+test('actual reaction runner stages physical endpoints and stably compacts exact event companions on native WebGPU', {
+  skip: !enabled && 'set ULG_RUN_NATIVE_EXACT_REACTION_ROUTING=1 for owned desktop WebGPU', timeout: 600000
 }, async () => {
   assert.ok(evidencePath && manifestPath, 'native routing requires evidence and a frozen full source manifest');
   const manifest = (await readFile(manifestPath, 'utf8')).trim().split('\n').map(line => {
@@ -19,7 +19,7 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
     for (const source of manifest) assert.equal(createHash('sha256').update(await readFile(source.path)).digest('hex'), source.sha256, source.path);
   };
   await verify();
-  const evidence = { schema: 'ulg.native-exact-reaction-routing.v1', started: new Date().toISOString(),
+  const evidence = { schema: 'ulg.native-exact-reaction-outputs.v1', started: new Date().toISOString(),
     sources: manifest, headed: true, physicalPublicationAdmitted: false, fullG2Acceptance: false, errors: [], console: [] };
   let browser, watchdog, failure;
   try {
@@ -27,7 +27,7 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
     browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: false,
       args: ['--ozone-platform=wayland', '--use-angle=vulkan', '--enable-features=Vulkan,UseSkiaRenderer',
         '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
-    watchdog = setTimeout(() => { failure ??= new Error('Owned exact routing browser timeout'); void browser.close(); }, 240000);
+    watchdog = setTimeout(() => { failure ??= new Error('Owned exact output browser timeout'); void browser.close(); }, 540000);
     const page = await browser.newPage();
     page.on('pageerror', error => evidence.errors.push(String(error)));
     page.on('console', message => {
@@ -51,6 +51,9 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
           await (await import('/tests/fixtures/sphExactMassContinuationNative.js')).preloadExactMassContinuationNative();
           await import('/tests/fixtures/sphExactReactionSourceNative.js');
           await import('/tests/fixtures/sphExactReactionRoutingInspection.js');
+          await import('/tests/fixtures/sphExactReactionOutputInspection.js');
+          await import('/tests/fixtures/sphExactRationalProjectionNative.js');
+          await import('/tests/fixtures/sphExactReactionEventCompactionNative.js');
           await import('/src/runtime/sph/sphExactReactionRoutingGpu.js');
         });
         break;
@@ -63,13 +66,17 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
       const fixture = await import('/tests/fixtures/sphExactReactionSourceNative.js');
       const selectionModule = fixture, reaction = fixture, routing = fixture;
       const inspection = await import('/tests/fixtures/sphExactReactionRoutingInspection.js');
+      const outputInspection = await import('/tests/fixtures/sphExactReactionOutputInspection.js');
+      const projection = await import('/tests/fixtures/sphExactRationalProjectionNative.js');
+      const compaction = await import('/tests/fixtures/sphExactReactionEventCompactionNative.js');
       const allocation = fixture, kinetics = fixture, massAbi = fixture;
       const adapter = await navigator.gpu?.requestAdapter();
       if (!adapter) return { status: 'no-adapter' };
       const device = await adapter.requestDevice({ requiredLimits: {
         maxStorageBuffersPerShaderStage: Math.min(adapter.limits.maxStorageBuffersPerShaderStage, 16)
       } });
-      const result = { status: 'running', adapter: { vendor: adapter.info.vendor, architecture: adapter.info.architecture }, cases: [], errors: [] };
+      const result = { status: 'running', adapter: { vendor: adapter.info.vendor, architecture: adapter.info.architecture },
+        projections: [], compactions: [], cases: [], errors: [] };
       device.addEventListener('uncapturederror', event => result.errors.push(event.error.message));
       device.pushErrorScope('validation');
       const read = async buffer => {
@@ -99,10 +106,28 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
           massesKg: [2 * Math.fround(.002), Math.fround(.032)], reverse: true },
         { name: 'one-word-real-source', wordCount: 1, quantumExponent: -16, massesKg: [1 / 256, 1 / 128],
           fixtureOptions: { mobileReactants: false } },
+        { name: 'product-volume-projection-underflow', expectedPhysicalError: 32, internalPressureScale: 0,
+          fixtureOptions: { mobileReactants: false, singleProduct: true, coefficients: [2, 1],
+            liquidDensities: { h2o: 1e38 } },
+          massesKg: [2 * Math.fround(.002) * 1e-6, Math.fround(.032) * 1e-6] },
         { name: 'nonrelaxed-rejection', velocities, expectedError: 4194304 },
         { name: 'caloric-domain-rejection', fixtureOptions: { reactionInternalEnergyChangeJPerMolExtent: 1e9 }, expectedError: 8388608 }
       ];
       try {
+        for (const wordCount of [1, 9, 66]) {
+          const format = projection.createSphExactMassFormat({ wordCount, quantumExponent: wordCount === 66 ? -1074 : -149 });
+          const observed = await projection.runExactRationalProjectionNative(device, format);
+          result.projections.push(observed);
+          console.log('exact-routing-progress', JSON.stringify({ phase: 'rational-projection', wordCount,
+            caseCount: observed.caseCount, pass: observed.pass, failures: observed.cases.filter(row => !row.matches) }));
+          if (!observed.pass) throw new Error(`Exact rational projection failed at ${wordCount} words`);
+          const compacted = await compaction.runExactReactionEventCompactionNative(device, format);
+          result.compactions.push(compacted);
+          console.log('exact-routing-progress', JSON.stringify({ phase: 'event-compaction', wordCount,
+            caseCount: compacted.caseCount, pass: compacted.pass,
+            failures: compacted.cases.filter(row => !row.matches).map(row => ({ name: row.name, control: row.control })) }));
+          if (!compacted.pass) throw new Error(`Exact event compaction failed at ${wordCount} words`);
+        }
         for (const options of cases) {
           const observed = await fixture.runExactReactionSourceNative(device, { ...options, inspect: async args => {
             let selected, candidate, sourceClosing;
@@ -110,6 +135,8 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
               selected = await selectionModule.runSphExactReactionSourceSelectionWebGpu(args);
               const issued = selectionModule.resolveSphExactReactionSourceSelection(selected, { device });
               const before = await read(issued.source.sourceRead.read.buffer);
+              const beforePhysical = await Promise.all([issued.source.stateBuffer, issued.source.thermoBuffer,
+                issued.source.mechanicsBuffer].map(read));
               const pending = reaction.runSphReactionStepWebGpu({ ...args,
                 sourceStateBuffer: args.thermalResult.stateBuffer, sourceThermoBuffer: args.thermalResult.thermoBuffer,
                 sourceMechanicsBuffer: args.g2pResult.mechanicsBuffer,
@@ -124,6 +151,33 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
               const [sourceWords, routingWords, after] = await Promise.all([
                 read(selected.outputBuffer), read(candidate.outputBuffer), read(held.source.source.inventory.buffer)
               ]);
+              const physical = candidate.physicalOutput;
+              const [sourcePackedWords, packedWords, eventWords, auxiliaryWords, compactEventWords,
+                compactCompanionWords, compactCountWords, stateWords, thermoWords, mechanicsWords,
+                originalStateWords, originalThermoWords, originalMechanicsWords] = await Promise.all([
+                physical.sourcePackedBuffer, physical.packedBuffer, physical.eventBuffer, physical.auxiliaryBuffer,
+                physical.compactEventBuffer, physical.compactCompanionBuffer, physical.compactCountBuffer,
+                physical.stateBuffer, physical.thermoBuffer, physical.mechanicsBuffer,
+                held.source.source.stateBuffer, held.source.source.thermoBuffer, held.source.source.mechanicsBuffer
+              ].map(read));
+              const output = outputInspection.inspectExactReactionOutputs({ sourceWords, routingWords, selected,
+                routingLayout: candidate.layout, layout: physical.layout, sourcePackedWords, packedWords,
+                originalInventoryWords: before, inventoryRowOffset: held.source.source.inventory.rowOffset,
+                eventWords, auxiliaryWords, compactEventWords, compactCompanionWords, compactCountWords,
+                stateWords, thermoWords, mechanicsWords,
+                reactionTable: args.reactionTable,
+                expectedPairErrors: options.expectedPhysicalError == null ? null : { 0: options.expectedPhysicalError } });
+              let rawCopiesMatch = true;
+              for (let row = 0; row < selected.particleCount; row++) {
+                for (const [words, original, initial, stride, offset] of [[stateWords, originalStateWords, beforePhysical[0], 8, 0],
+                  [thermoWords, originalThermoWords, beforePhysical[1], 12, 8], [mechanicsWords, originalMechanicsWords, beforePhysical[2], 32, 20]]) {
+                  for (let i = 0; i < stride; i++) {
+                    rawCopiesMatch &&= words[row * stride + i] === packedWords[row * 52 + offset + i]
+                      && original[row * stride + i] === sourcePackedWords[row * 52 + offset + i]
+                      && original[row * stride + i] === initial[row * stride + i];
+                  }
+                }
+              }
               const orderWords = new Uint32Array(issued.compiled.length * (1 + candidate.layout.productCapacity)).fill(0xffffffff);
               issued.compiled.forEach((token, index) => {
                 const order = token.products.map((term, ordinal) => ({ ordinal, gas: term.targetPhase === 3 }))
@@ -152,14 +206,15 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
                 rows.push(row);
               }
               return { name: options.name, options, wordCount: selected.format.wordCount,
-                rows, sourceUnchanged: before.every((word, i) => word === after[i]),
+                rows, output, rawCopiesMatch, sourceUnchanged: before.every((word, i) => word === after[i]),
                 parentClosedDuringCompile: true, physicalPublicationAdmitted: candidate.physicalPublicationAdmitted,
-                pass: rows.length === 1 && rows.every(row => row.matches) };
+                pass: rows.length === 1 && rows.every(row => row.matches) && output.matches && rawCopiesMatch };
             } catch (error) { await error.exactReactionRoutingCleanupCompletion; await error.exactReactionSourceCleanupCompletion; throw error; }
             finally { if (candidate) await candidate.release(); if (selected) await (sourceClosing ?? selected.release()); }
           } });
           result.cases.push(observed);
-          console.log('exact-routing-progress', JSON.stringify({ name: options.name, pass: observed.pass, rows: observed.rows }));
+          console.log('exact-routing-progress', JSON.stringify({ name: options.name, pass: observed.pass,
+            routeFailures: observed.rows.flatMap(row => row.failures), outputFailures: observed.output.failures }));
         }
         await device.queue.onSubmittedWorkDone();
         const validation = await device.popErrorScope(); if (validation) result.errors.push(validation.message);
@@ -169,9 +224,19 @@ test('actual reaction runner retains genuine packets and routes exact endpoints 
       return result;
     });
     assert.equal(evidence.result.status, 'completed', evidence.result.failure);
-    assert.deepEqual(evidence.result.errors, []); assert.equal(evidence.result.cases.length, 14);
+    assert.deepEqual(evidence.result.errors, []); assert.equal(evidence.result.cases.length, 15);
+    assert.equal(evidence.result.projections.length, 3);
+    for (const projection of evidence.result.projections) {
+      assert.equal(projection.pass, true); assert.equal(projection.sourceUnchanged, true); assert.equal(projection.caseCount, 138);
+    }
+    assert.equal(evidence.result.compactions.length, 3);
+    for (const compaction of evidence.result.compactions) {
+      assert.equal(compaction.pass, true); assert.equal(compaction.caseCount, 24);
+      assert.ok(compaction.cases.every(row => row.sourceUnchanged && row.matches));
+    }
     for (const result of evidence.result.cases) {
       assert.equal(result.pass, true, JSON.stringify(result)); assert.equal(result.sourceUnchanged, true);
+      assert.equal(result.output.matches, true); assert.equal(result.rawCopiesMatch, true);
       assert.equal(result.physicalPublicationAdmitted, false); assert.equal(result.parentClosedDuringCompile, true);
       const row = result.rows[0];
       if (result.name === 'hidden-survivors') assert.ok(row.hiddenSurvivors > 0, 'exact debit remains hidden in a surviving f32 projection');

@@ -5,6 +5,11 @@ import { runSphExactReactionSourceSelectionWebGpu, resolveSphExactReactionSource
   acquireSphExactReactionSourceSelectionRead } from '../src/runtime/sph/sphExactReactionSourceGpu.js';
 import { runSphReactionStepWebGpu } from '../src/runtime/sph/sphReactionGpuKernel.js';
 import { resolveSphExactReactionRoutingCandidate } from '../src/runtime/sph/sphExactReactionRoutingGpu.js';
+import { assertSphLegacyMassPathAllowed } from '../src/runtime/sph/sphGpuBuffers.js';
+import { createResidentProductMassHandle } from '../src/runtime/sph/sphReactionGpuSummary.js';
+import { runMlsMpmP2gGridProjectionWebGpu } from '../src/runtime/sph/sphGridGpuKernel.js';
+import { mergeResidentProductMassBuffersWebGpu } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import { runSphSpatialGasLedgerEosRetainedWebGpu } from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
 
 // Command recorder: genuine JavaScript producers, no WGSL arithmetic claims.
 function fakeG2pDevice() {
@@ -658,7 +663,8 @@ function routingArgs(args, selection) {
     schroederSpatialReactionDiscoveryProposal: args.reactionDiscoveryProposal,
     exactReactionSourceSelection: selection, retainOutputParticleBuffers: true, readbackMode: 'no-full-readback' };
 }
-const routingBuffers = device => device.createdBuffers.filter(buffer => buffer.label?.startsWith('ulg-exact-reaction-routing'));
+const routingBuffers = device => device.createdBuffers.filter(buffer =>
+  buffer.label?.startsWith('ulg-exact-reaction-routing') || buffer.label?.startsWith('ulg-exact-reaction-output'));
 
 test('actual reaction routing retains the original packet through cold compilation and producer close', async () => {
   await withSource(async args => {
@@ -675,6 +681,12 @@ test('actual reaction routing retains the original packet through cold compilati
     assert.equal(selected.outputBuffer.destroyed, false);
     assert.throws(() => args.thermalResult.destroyOutputParticleBuffers(), /owner read/);
     compilations[0].resolve(args.device.createComputePipeline(compilations[0].descriptor));
+    await nextTurn();
+    assert.equal(compilations.length, 8, 'physical copy, output and stable compaction compile under the same retained read');
+    assert.equal(selected.outputBuffer.destroyed, false);
+    for (const compilation of compilations.slice(1)) {
+      compilation.resolve(args.device.createComputePipeline(compilation.descriptor));
+    }
     const routed = await pending;
     const events = args.device.dispatches.filter(event => event.pipeline.compute.entryPoint === 'prepare_exact_reaction_endpoint_routes');
     assert.equal(events.length, 1);
@@ -682,7 +694,27 @@ test('actual reaction routing retains the original packet through cold compilati
     assert.equal(events[0].bindGroup.entries[2].resource.buffer, routed.outputBuffer);
     assert.equal(routed.sourceSelection, selected);
     assert.equal(routed.physicalPublicationAdmitted, false);
-    assert.equal(routed.stateBuffer, undefined, 'numeric candidate is not a physical stage output');
+    assert.equal(routed.stateBuffer, undefined, 'speculative physical rows are not a sealed physical stage output');
+    assert.equal(routed.physicalOutput.physicalPublicationAdmitted, false);
+    assert.ok(routed.physicalOutput.stateBuffer);
+    assert.ok(routed.physicalOutput.compactCompanionBuffer);
+    for (const key of ['stateBuffer', 'thermoBuffer', 'sourcePackedBuffer', 'packedBuffer']) {
+      assert.throws(() => assertSphLegacyMassPathAllowed({ sourceStateBuffer: routed.physicalOutput[key] }, 'alias'),
+        /legacy mass path is not admitted/, key);
+      assert.throws(() => assertSphLegacyMassPathAllowed({ sourceThermoBuffer: routed.physicalOutput[key] }, 'alias'),
+        /legacy mass path is not admitted/, key);
+    }
+    for (const key of ['eventBuffer', 'compactEventBuffer']) {
+      const summary = { productEventBufferRetained: true, productEventBuffer: routed.physicalOutput[key],
+        productEventDevice: args.device, productEventRowCount: routed.physicalOutput.denseEventCount,
+        productEventStrideFloats: 32 };
+      assert.throws(() => assertSphLegacyMassPathAllowed(summary, 'history alias'), /legacy mass path is not admitted/, key);
+      assert.throws(() => createResidentProductMassHandle(summary), /legacy mass path is not admitted/, key);
+    }
+    assert.deepEqual(args.device.dispatches.slice(-7).map(event => event.pipeline.compute.entryPoint), [
+      'pack_exact_reaction_physical_rows', 'initialize_exact_reaction_outputs', 'stage_exact_reaction_outputs',
+      'unpack_exact_reaction_physical_rows', 'count_placement_rows', 'scan_placement_row_groups', 'scatter_placement_rows'
+    ]);
     const inspected = resolveSphExactReactionRoutingCandidate(routed, { device: args.device });
     assert.equal(inspected.source.result, selected);
     assert.equal(inspected.source.source.stateBuffer, args.thermalResult.stateBuffer);
@@ -822,4 +854,204 @@ test('device loss during actual reaction routing compilation retires without rou
     assert.ok(routingBuffers(args.device).every(buffer => buffer.destroyed));
     return true;
   }, { lost: loss.promise, stopAfterInspect: true });
+});
+
+test('physical output compilation revalidates the original tables before its writes and submission', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const original = args.reactionTable.records[3], submissions = args.device.submissions.length;
+    args.device.createComputePipelineAsync = async descriptor => {
+      if (descriptor.compute.entryPoint === 'stage_exact_reaction_outputs') args.reactionTable.records[3] = original + 1;
+      return args.device.createComputePipeline(descriptor);
+    };
+    let failure;
+    try {
+      await assert.rejects(runSphReactionStepWebGpu(routingArgs(args, selected)), error => {
+        failure = error; return /snapshot|changed|stale/.test(error.message);
+      });
+      assert.equal(await failure.exactReactionRoutingCleanupCompletion, true);
+      assert.equal(args.device.submissions.length, submissions + 1, 'only the preceding integer routing pass submitted');
+      assert.equal(args.device.writes.filter(write => write.label?.startsWith('ulg-exact-reaction-output')).length, 0);
+      assert.ok(routingBuffers(args.device).every(buffer => buffer.destroyed));
+    } finally { args.reactionTable.records[3] = original; }
+    await selected.release();
+    return true;
+  });
+});
+
+test('throwing physical output submission retains its complete candidate and parent until the latest fence', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const submit = args.device.queue.submit, originalFence = args.device.queue.onSubmittedWorkDone;
+    const fence = deferred();
+    args.device.queue.onSubmittedWorkDone = () => fence.promise;
+    args.device.queue.submit = commands => {
+      submit(commands);
+      if (commands.some(command => command.events?.some(event => event.pipeline?.compute.entryPoint === 'stage_exact_reaction_outputs'))) {
+        throw new Error('physical output submission failed after delegation');
+      }
+    };
+    let failure;
+    await assert.rejects(runSphReactionStepWebGpu(routingArgs(args, selected)), error => {
+      failure = error; return /physical output submission failed/.test(error.message);
+    });
+    const parentClosing = selected.release();
+    await nextTurn();
+    assert.ok(args.device.dispatches.some(event => event.pipeline.compute.entryPoint === 'scatter_placement_rows'));
+    assert.ok(routingBuffers(args.device).every(buffer => !buffer.destroyed));
+    assert.equal(selected.outputBuffer.destroyed, false);
+    args.device.queue.submit = submit; args.device.queue.onSubmittedWorkDone = originalFence;
+    fence.resolve();
+    assert.equal(await failure.exactReactionRoutingCleanupCompletion, true);
+    await parentClosing;
+    assert.ok(routingBuffers(args.device).every(buffer => buffer.destroyed));
+    assert.equal(selected.outputBuffer.destroyed, true);
+    return true;
+  });
+});
+
+test('device loss during physical output compilation cannot issue physical output or publication', async () => {
+  const loss = deferred();
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const submissions = args.device.submissions.length, compilations = [];
+    args.device.createComputePipelineAsync = descriptor => {
+      if (descriptor.compute.entryPoint === 'prepare_exact_reaction_endpoint_routes') {
+        return Promise.resolve(args.device.createComputePipeline(descriptor));
+      }
+      return new Promise(resolve => compilations.push({ descriptor, resolve }));
+    };
+    const pending = runSphReactionStepWebGpu(routingArgs(args, selected));
+    await nextTurn();
+    assert.equal(compilations.length, 7);
+    const parentClosing = selected.release();
+    loss.resolve({ reason: 'destroyed', message: 'lost while compiling physical output' });
+    await nextTurn();
+    for (const item of compilations) item.resolve(args.device.createComputePipeline(item.descriptor));
+    let failure;
+    await assert.rejects(pending, error => { failure = error; return /released|lost/.test(error.message); });
+    assert.equal(await failure.exactReactionRoutingCleanupCompletion, false);
+    await parentClosing;
+    assert.equal(args.device.submissions.length, submissions + 1);
+    assert.ok(routingBuffers(args.device).every(buffer => buffer.destroyed));
+    assert.equal(selected.outputBuffer.destroyed, true);
+    return true;
+  }, { lost: loss.promise, stopAfterInspect: true });
+});
+
+test('insufficient companion binding capacity rejects without a physical candidate or stranded source read', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const capacity = args.device.limits.maxStorageBuffersPerShaderStage;
+    args.device.limits.maxStorageBuffersPerShaderStage = 8;
+    let failure;
+    try {
+      await assert.rejects(runSphReactionStepWebGpu(routingArgs(args, selected)), error => {
+        failure = error; return /compaction exceed device capacity/.test(error.message);
+      });
+      assert.equal(await failure.exactReactionRoutingCleanupCompletion, true);
+      assert.equal(args.device.createdBuffers.filter(buffer => buffer.label?.startsWith('ulg-exact-reaction-output')).length, 0);
+    } finally { args.device.limits.maxStorageBuffersPerShaderStage = capacity; }
+    await selected.release();
+    assert.equal(selected.outputBuffer.destroyed, true);
+    return true;
+  });
+});
+
+test('actual speculative event aliases cannot enter legacy P2G, history merge or gas EOS', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const routed = await runSphReactionStepWebGpu(routingArgs(args, selected));
+    const allocations = args.device.createdBuffers.length, submissions = args.device.submissions.length;
+    try {
+      for (const productEventBuffer of [routed.physicalOutput.eventBuffer, routed.physicalOutput.compactEventBuffer]) {
+        const residentProductMass = { productEventBuffer, productEventBufferRetained: true, productEventDevice: args.device,
+          productEventRowCount: 1, productEventStrideFloats: 32, __ulgActiveBorrowCount: 0 };
+        await assert.rejects(runMlsMpmP2gGridProjectionWebGpu({ device: args.device, residentProductMass }),
+          /legacy mass path is not admitted/);
+        for (const inputs of [{ inputResidentProductMass: residentProductMass },
+          { emittedResidentProductMass: residentProductMass },
+          { inputResidentProductMass: residentProductMass, emittedResidentProductMass: residentProductMass }]) {
+          await assert.rejects(mergeResidentProductMassBuffersWebGpu({ device: args.device, ...inputs }),
+            /legacy mass path is not admitted/);
+        }
+        await assert.rejects(runSphSpatialGasLedgerEosRetainedWebGpu({ device: args.device, residentProductMass,
+          epochIdentity: { storageGeneration: 1, physicsTick: 0, physicsSubstep: 0, positionEpoch: 0,
+            topologyEpoch: 0, chartEpoch: 0, levelEpoch: 0, supportEpoch: 0 } }), /legacy mass path is not admitted/);
+        assert.equal(residentProductMass.__ulgActiveBorrowCount, 0);
+      }
+      assert.equal(args.device.createdBuffers.length, allocations);
+      assert.equal(args.device.submissions.length, submissions);
+    } finally { await routed.release(); await selected.release(); }
+    return true;
+  });
+});
+
+test('history merge rejects changing event-buffer accessors without invoking them', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const routed = await runSphReactionStepWebGpu(routingArgs(args, selected));
+    const benign = args.device.createBuffer({ label: 'history-accessor-benign', size: 128, usage: 140 });
+    const allocations = args.device.createdBuffers.length, submissions = args.device.submissions.length;
+    let reads = 0;
+    const source = { productEventBufferRetained: true, __ulgActiveBorrowCount: 0 };
+    Object.defineProperty(source, 'productEventBuffer', { get() {
+      return ++reads === 1 ? benign : routed.physicalOutput.compactEventBuffer;
+    } });
+    try {
+      for (const handle of [source, Object.create(source)]) {
+        for (const postMechanicsSourceCapture of [null, {}]) {
+          await assert.rejects(mergeResidentProductMassBuffersWebGpu({ device: args.device,
+            inputResidentProductMass: handle, postMechanicsSourceCapture }), /data productEventBuffer property/);
+        }
+      }
+      assert.equal(reads, 0);
+      assert.equal(source.__ulgActiveBorrowCount, 0);
+      assert.equal(args.device.createdBuffers.length, allocations);
+      assert.equal(args.device.submissions.length, submissions);
+    } finally { await routed.release(); await selected.release(); benign.destroy(); }
+    return true;
+  });
+});
+
+test('history merge rejects raw source replacement during arena acquisition before copy or append', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const routed = await runSphReactionStepWebGpu(routingArgs(args, selected));
+    const benign = args.device.createBuffer({ label: 'history-mutation-benign', size: 128, usage: 140 });
+    const other = args.device.createBuffer({ label: 'history-mutation-other', size: 128, usage: 140 });
+    const handle = buffer => ({ productEventBuffer: buffer, productEventBufferRetained: true,
+      productEventDevice: args.device, productEventBufferByteLength: 128, productEventRowCount: 1,
+      productEventStrideFloats: 32, productEventStrideBytes: 128, __ulgActiveBorrowCount: 0 });
+    try {
+      for (const allowHostCompactionObservation of [true, false]) {
+        const input = handle(benign), emitted = handle(other);
+        const submissions = args.device.submissions.length;
+        const pending = mergeResidentProductMassBuffersWebGpu({ device: args.device,
+          inputResidentProductMass: input, emittedResidentProductMass: emitted, allowHostCompactionObservation });
+        assert.equal(input.__ulgActiveBorrowCount, 1);
+        assert.equal(emitted.__ulgActiveBorrowCount, 1);
+        emitted.productEventBuffer = routed.physicalOutput.compactEventBuffer;
+        await assert.rejects(pending, /legacy mass path is not admitted/);
+        assert.equal(args.device.submissions.length, submissions);
+        assert.equal(input.__ulgActiveBorrowCount, 0);
+        assert.equal(emitted.__ulgActiveBorrowCount, 0);
+        emitted.productEventBuffer = other;
+        const recovered = await mergeResidentProductMassBuffersWebGpu({ device: args.device,
+          inputResidentProductMass: input, emittedResidentProductMass: emitted, allowHostCompactionObservation });
+        const appended = args.device.submissions.slice(submissions).flat().flatMap(command => command.events ?? []);
+        assert.ok(appended.length > 0);
+        for (const event of appended) {
+          if (event.kind === 'copy') assert.notEqual(event.source, routed.physicalOutput.compactEventBuffer);
+          if (event.kind === 'dispatch') {
+            for (const binding of event.bindGroup?.entries ?? []) {
+              assert.notEqual(binding.resource.buffer, routed.physicalOutput.compactEventBuffer);
+            }
+          }
+        }
+        await recovered.destroyResidentProductMassBuffers();
+      }
+    } finally { await routed.release(); await selected.release(); benign.destroy(); other.destroy(); }
+    return true;
+  });
 });

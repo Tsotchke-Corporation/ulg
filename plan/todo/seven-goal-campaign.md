@@ -1,5 +1,33 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+## G2 checkpoint — physical reaction staging and exact event companions — 2026-10-25 UTC
+
+The actual reaction runner now stages physical endpoints and product events
+from retained exact routes, and compacts events with their exact integer
+companions. Required projection failure restores both endpoints and clears
+pair events; exact mass controls event activity. Buffer-identity guards prevent
+speculative aliases from entering legacy consumers. The result still grants no
+placement, history, closure or SS publication authority.
+
+Final native verification passes 414 rational projections, 72 compaction cases
+and 15 genuine reaction chains, including complete product-volume underflow
+rollback. All 662 frozen paths matched during that run; the owned browser closed.
+Post-native review then caught and fixed a mutable history-handle alias hole:
+host copy/append now retains and rechecks admitted buffer identities. Only the
+host merge and CPU tests changed afterward; native numerical/physical code is
+unchanged. Final regression passes 5,566 tests with 78 opt-in skips; 357 focused/
+compatibility tests pass with 3 skips, and normal build passes. Original negative-
+zero and alias reproductions, rejected fixture constructions and one console404
+are preserved in the [current handoff](../handoff-2026-10-24.md).
+
+Next: carry current exact receiver and incoming quantities through the existing
+segmented placement and terminal rollback selector, then genuine durable
+history/closure/SS publication and repeated evolution. Chemical discrepancy
+accounting and species-specific product energy remain physical-admission work.
+Full G2 phase/environment/UI/nuclei/transport/plume scope remains; G2 stays at
+3/6 original child items, G3–G6 pending, G1 deferred. Local commits only; no
+push, merge or Pages build.
+
 ## G2 checkpoint — retained reaction packet routing — 2026-10-25 UTC
 
 The actual reaction runner now consumes independently retained exact packets

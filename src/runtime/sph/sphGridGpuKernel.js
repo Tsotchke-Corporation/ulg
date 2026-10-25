@@ -42,6 +42,7 @@ import {
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import {
+  assertSphLegacyMassPathAllowed,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -2073,6 +2074,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   queueOrderedSubmissionBatch = null,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
+  const rawBorrowedProductEventBuffer = residentProductMass?.productEventBuffer || null;
+  assertSphLegacyMassPathAllowed({ productEventBuffer: rawBorrowedProductEventBuffer }, 'P2G product events');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmP2gGridProjectionWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -2682,7 +2685,6 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     );
     schroederSpatialDirectory.ownsBuffer = true;
   }
-  const rawBorrowedProductEventBuffer = residentProductMass?.productEventBuffer || null;
   const productEventBufferMismatch = rawBorrowedProductEventBuffer && !(productEventRows instanceof Float32Array)
     ? webGpuDeviceMismatchInfo({
         buffer: rawBorrowedProductEventBuffer,

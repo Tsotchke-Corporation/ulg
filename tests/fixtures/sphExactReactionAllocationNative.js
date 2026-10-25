@@ -10,7 +10,8 @@ import { compileSphExactReactionAllocation, encodeSphExactReactionAllocationWeig
 // Manufactured data for arithmetic/authority checks; no scientific acceptance.
 export function createExactReactionAllocationFixture({ reactionCount = 1, identity = false,
   coefficients = [3, 2], molarMasses = {}, referenceEnthalpies = {}, repeatedProducts = true,
-  reactionInternalEnergyChangeJPerMolExtent = 0, singleProduct = false, mobileReactants = true } = {}) {
+  reactionInternalEnergyChangeJPerMolExtent = 0, singleProduct = false, mobileReactants = true,
+  liquidDensities = {} } = {}) {
   const definitions = { h2: ['H2', 0.002], o2: ['O2', 0.032], h2o: ['H2O', 0.018], h2o2: ['H2O2', 0.034] };
   const materialProperties = {}, models = {};
   for (const [material, [formula, defaultMolarMass]] of Object.entries(definitions)) {
@@ -20,13 +21,13 @@ export function createExactReactionAllocationFixture({ reactionCount = 1, identi
       referencePressurePa: 3000,
       liquidReferenceEnthalpyJPerKg: referenceEnthalpies[material] ?? -50000 + 3,
       vaporizationReferenceEnthalpyJPerKg: 2e6, liquidCpJPerKgK: 4000,
-      vaporCpJPerKgK: 3000 + 8.314462618 / molarMass, liquidDensityKgPerM3: 1000,
+      vaporCpJPerKgK: 3000 + 8.314462618 / molarMass, liquidDensityKgPerM3: liquidDensities[material] ?? 1000,
       molarMassKgPerMol: molarMass, minTemperatureK: 200, maxTemperatureK: 500,
       maxPressurePa: 2e6, provenance: 'manufactured exact reaction integer fixture' };
     models[material] = createCondensableThermodynamics(parameters);
     materialProperties[material] = { formula, molarMassKgPerMol: molarMass,
       phases: [{ name: 'liquid', temperatureRange: [0, 400], cpJPerKgK: 4000,
-        densityKgPerM3: 1000, bulkModulusPa: 1e8, shearModulusPa: 0 },
+        densityKgPerM3: parameters.liquidDensityKgPerM3, bulkModulusPa: 1e8, shearModulusPa: 0 },
       { name: 'gas', temperatureRange: [400, 1000], cpJPerKgK: parameters.vaporCpJPerKgK,
         densityKgPerM3: 3000 * molarMass / (8.314462618 * 300), bulkModulusPa: null, shearModulusPa: 0 }],
       transitions: mobileReactants || !['h2', 'o2'].includes(material)

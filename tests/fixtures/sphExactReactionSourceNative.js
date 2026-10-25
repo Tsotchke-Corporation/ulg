@@ -1,6 +1,15 @@
 import { createExactReactionAllocationFixture } from './sphExactReactionAllocationNative.js';
 import { inspectExactCaloricSource } from './sphExactCaloricSourceInspection.js';
 import { inspectExactReactionPacket } from './sphExactReactionPacketInspection.js';
+// Native consumers must share the producer's actual module instances. A bare
+// browser import of a Vite HMR alias would create a different private registry.
+export { runSphExactReactionSourceSelectionWebGpu, resolveSphExactReactionSourceSelection }
+  from '../../src/runtime/sph/sphExactReactionSourceGpu.js';
+export { runSphReactionStepWebGpu } from '../../src/runtime/sph/sphReactionGpuKernel.js';
+export { resolveSphExactReactionRoutingCandidate } from '../../src/runtime/sph/sphExactReactionRoutingGpu.js';
+export { selectSphExactReactionAllocation } from '../../src/runtime/sph/sphExactReactionAllocation.js';
+export { selectSphExactReactionKineticCap } from '../../src/runtime/sph/sphExactReactionKineticCap.js';
+export { encodeSphExactMassUnits, projectSphExactMassF32Bits } from '../../ulg-gpu-abi/src/sphExactMassInventory.js';
 import * as buffers from '../../src/runtime/sph/sphGpuBuffers.js';
 import * as steps from '../../src/runtime/sph/sphMlsMpmGpuStep.js';
 import * as hierarchy from '../../src/runtime/sph/schroederHierarchyGpu.js';
@@ -90,11 +99,12 @@ async function readWords(device, source) {
  * not register public buffers as producers or inject a fake proposal. */
 export async function runExactReactionSourceNative(device, { reverse = false, dtSeconds = .000001,
   wordCount = 9, velocities = [[0, 0, 0], [0, 0, 0]], fixtureOptions = {},
+  massesKg = [.006 + 2 ** -35, .064 + 2 ** -33], quantumExponent = wordCount === 66 ? -1074 : -149,
   internalPressureScale = 1, expectedCaloricError = 0, inspect = null, prewarm = false, onProgress = null } = {}) {
   const progress = (stage, extra = {}) => onProgress?.({ stage, wordCount, dtSeconds, reverse, timeMs: performance.now(), ...extra });
   const fixture = createExactReactionAllocationFixture(fixtureOptions);
   const { materialProperties, models, thermalMaterialTable, reactionTable } = fixture;
-  const format = createSphExactMassFormat({ wordCount, quantumExponent: wordCount === 66 ? -1074 : -149 });
+  const format = createSphExactMassFormat({ wordCount, quantumExponent });
   if (prewarm) {
     for (const descriptor of sphExactReactionSourcePipelineDescriptors(format)) {
       progress('prewarm-start', { entryPoint: descriptor.entryPoint });
@@ -105,7 +115,7 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
   }
   const particles = ['h2', 'o2'].map((material, index) => ({ material,
     id: `source-${material}`, x: [1 + index * .02, 1, 1], v: velocities[index],
-    massKg: [.006 + 2 ** -35, .064 + 2 ** -33][index],
+    massKg: massesKg[index],
     specificInternalEnergyJPerKg: models[material].liquidReferenceInternalEnergyJPerKg,
     phaseCaloric: { phaseId: 2, phaseFractions: [0, 1, 0, 0] } }));
   if (reverse) particles.reverse();
@@ -156,7 +166,7 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
               sourceMechanicsBuffer: capture.mechanicsBuffer });
             progress('discovery-complete');
             const args = { device, thermalResult, thermalSourceCapture, g2pResult, transaction, generation,
-              sphParticleState, sphParticleUpload, mlsMpmParticleUpload, thermalMaterialTable, reactionTable,
+              sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload, thermalMaterialTable, reactionTable,
               dtSeconds, reactionDiscoveryProposal: proposal };
             if (inspect) { observed = await inspect(args); return original; }
             const before = await readWords(device, capture.sourceRead.read.buffer);

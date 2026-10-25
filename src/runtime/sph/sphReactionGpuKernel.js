@@ -1,4 +1,5 @@
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
+import { runSphExactReactionRoutingCandidateWebGpu } from './sphExactReactionRoutingGpu.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
@@ -3556,8 +3557,29 @@ export async function runSphReactionStepWebGpu({
     acquireSphReactionWarmArenaWithBackpressureWebGpu,
   reactionWarmArenaResolveRunner = resolveSphReactionWarmArenaLease,
   reactionWarmArenaReleaseRunner = releaseSphReactionWarmArenaAfterQueue,
-  postMechanicsSourceCapture = null
+  postMechanicsSourceCapture = null,
+  exactReactionSourceSelection = null
 } = {}) {
+  if (exactReactionSourceSelection != null) {
+    // This explicit branch consumes the genuine source packet, without
+    // presenting a routing candidate as the legacy physical stage output.
+    // The normal exact-inventory and closure/publication guards remain below.
+    if (retainOutputParticleBuffers !== true || readbackMode !== NO_FULL_READBACK_MODE
+        || resetMechanics !== true || postMechanicsSourceCapture != null
+        || !schroederSpatialEpochGeneration || !schroederSpatialReactionDiscoveryProposal
+        || reactionPlacementEpochRunner !== runSchroederSpatialReactionPlacementEpochWebGpu
+        || canonicalReactionDiscoveryResolver !== resolveSchroederSpatialReactionDiscoveryProposalForConsumer
+        || reactionWarmArenaAcquireRunner !== acquireSphReactionWarmArenaWithBackpressureWebGpu
+        || reactionWarmArenaResolveRunner !== resolveSphReactionWarmArenaLease
+        || reactionWarmArenaReleaseRunner !== releaseSphReactionWarmArenaAfterQueue) {
+      throw new TypeError('Exact reaction routing requires the original retained canonical producer; physical publication remains unadmitted');
+    }
+    return runSphExactReactionRoutingCandidateWebGpu({ selection: exactReactionSourceSelection,
+      expected: { device, sphParticleState, sphParticleUpload, mlsMpmParticleUpload,
+        reactionTable, thermalMaterialTable, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
+        generation: schroederSpatialEpochGeneration,
+        reactionDiscoveryProposal: schroederSpatialReactionDiscoveryProposal, dtSeconds } });
+  }
   assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Reaction and placement');
   if (postMechanicsSourceCapture) {
     if (reactionSourceCaptures.has(postMechanicsSourceCapture)) throw new Error('Reaction source capture cannot replay');

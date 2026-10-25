@@ -1,5 +1,27 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+## G2 checkpoint — retained reaction packet routing — 2026-10-25 UTC
+
+The actual reaction runner now consumes independently retained exact packets
+and prepares integer endpoint/residual routes. Exact zero controls vacancy;
+physical row order, condensed-product priority and single-product splitting
+are verified. Quantity bases survive source-owner close and child compilation;
+device loss retires without granting publication. The result is a distinct
+candidate, with physical S/T/M writes, placement/history and closure adoption
+still unadmitted.
+
+Fourteen genuine native routing chains pass at 1/9/66 words, alongside the
+previous 999 arithmetic cases and twelve source chains. All 654 frozen paths
+match; original failed harness module-alias runs are retained. Full regression
+passes 5,520 tests (78 opt-in skips), focused tests and normal build pass.
+See the [current handoff](../handoff-2026-10-24.md) for evidence and scope.
+
+Next: couple exact routes to physical endpoint/event writes, compaction and
+terminal placement rollback, then genuine history/closure/SS publication and
+current exact quantities through repeated evolution. G2 stays at 3/6 original
+child items; G3–G6 pending and G1 deferred. All original plume requirements and
+the push/merge/Pages hold remain.
+
 ## G2 checkpoint — exact product energy and species preparation — 2026-10-25 UTC
 
 The genuine source pipeline now retains the rounded-COM kinetic correction,

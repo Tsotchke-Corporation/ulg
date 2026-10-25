@@ -10,7 +10,7 @@ import { compileSphExactReactionAllocation, encodeSphExactReactionAllocationWeig
 // Manufactured data for arithmetic/authority checks; no scientific acceptance.
 export function createExactReactionAllocationFixture({ reactionCount = 1, identity = false,
   coefficients = [3, 2], molarMasses = {}, referenceEnthalpies = {}, repeatedProducts = true,
-  reactionInternalEnergyChangeJPerMolExtent = 0 } = {}) {
+  reactionInternalEnergyChangeJPerMolExtent = 0, singleProduct = false, mobileReactants = true } = {}) {
   const definitions = { h2: ['H2', 0.002], o2: ['O2', 0.032], h2o: ['H2O', 0.018], h2o2: ['H2O2', 0.034] };
   const materialProperties = {}, models = {};
   for (const [material, [formula, defaultMolarMass]] of Object.entries(definitions)) {
@@ -29,12 +29,13 @@ export function createExactReactionAllocationFixture({ reactionCount = 1, identi
         densityKgPerM3: 1000, bulkModulusPa: 1e8, shearModulusPa: 0 },
       { name: 'gas', temperatureRange: [400, 1000], cpJPerKgK: parameters.vaporCpJPerKgK,
         densityKgPerM3: 3000 * molarMass / (8.314462618 * 300), bulkModulusPa: null, shearModulusPa: 0 }],
-      transitions: [{ from: 'liquid', to: 'gas', temperatureK: 400, latentHeatJPerKg: 2e6 }] };
+      transitions: mobileReactants || !['h2', 'o2'].includes(material)
+        ? [{ from: 'liquid', to: 'gas', temperatureK: 400, latentHeatJPerKg: 2e6 }] : [] };
   }
   const reactants = [{ material: 'h2', coefficient: coefficients[0], phaseId: 2 },
     { material: 'o2', coefficient: coefficients[1], phaseId: 2 }];
   const products = identity ? reactants : [{ material: 'h2o', coefficient: 2, phaseId: 2 },
-    ...(repeatedProducts ? [{ material: 'h2o2', coefficient: 0.5, phaseId: 3 },
+    ...(singleProduct ? [] : repeatedProducts ? [{ material: 'h2o2', coefficient: 0.5, phaseId: 3 },
       { material: 'h2o2', coefficient: 0.5, phaseId: 3 }] : [{ material: 'h2o2', coefficient: 1, phaseId: 3 }])];
   const term = item => ({ material: item.material, coefficient: item.coefficient,
     formula: definitions[item.material][0], phase: item.phaseId === 3 ? 'gas' : 'liquid' });

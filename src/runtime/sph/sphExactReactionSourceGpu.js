@@ -23,6 +23,22 @@ import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
 export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v4';
 const RECORDS = new WeakMap();
+const READ_DEVICES = new WeakMap();
+
+function reactionPacketDeviceState(device) {
+  let state = READ_DEVICES.get(device);
+  if (state) return state;
+  state = { lost: false, owners: new Set() };
+  READ_DEVICES.set(device, state);
+  // One observer per device; completed owners are removed so ordinary
+  // retirement does not retain every packet until eventual device loss.
+  if (device.lost?.then) Promise.resolve(device.lost).then(() => {
+    state.lost = true;
+    for (const retire of [...state.owners]) retire();
+    state.owners.clear();
+  }, () => {});
+  return state;
+}
 const RULE_WORDS = 24;
 export const SPH_EXACT_REACTION_SOURCE_HEADER_WORDS = 12;
 const HEADER_WORDS = SPH_EXACT_REACTION_SOURCE_HEADER_WORDS;
@@ -369,6 +385,17 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
   let source, discovery, result, completion = null, submitted = false, closed = false, confirmed = false;
   const owned = [];
   const destroyed = new Set();
+  const deviceState = reactionPacketDeviceState(device);
+  const reads = new Set(), drainWaiters = new Set();
+  const drainReads = () => reads.size === 0 || deviceState.lost ? Promise.resolve()
+    : new Promise(resolve => drainWaiters.add(resolve));
+  const dropRead = read => {
+    if (!reads.delete(read)) return;
+    if (!reads.size) {
+      for (const resolve of drainWaiters) resolve();
+      drainWaiters.clear();
+    }
+  };
   const release = () => {
     if (completion) return completion;
     closed = true;
@@ -382,14 +409,23 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       discovery?.release();
       if (errors.length) throw new AggregateError(errors, 'Exact reaction source cleanup failed');
     };
-    const retired = submitted && !confirmed ? deferConfirmedSubmittedWorkCleanup(device, cleanup)
-      : Promise.resolve().then(cleanup);
-    completion = Promise.all([retired, source?.release()]).then(() => {
+    completion = drainReads().then(() => {
+      const retired = submitted && !confirmed && !deviceState.lost
+        ? deferConfirmedSubmittedWorkCleanup(device, cleanup) : Promise.resolve().then(cleanup);
+      return Promise.all([retired, source?.release()]);
+    }).then(() => {
       if (result) RECORDS.delete(result);
+      deviceState.owners.delete(retireAfterLoss);
       source = null; discovery = null; owned.length = 0; destroyed.clear();
       return true;
     }, error => { completion = null; throw error; });
     return completion;
+  };
+  const retireAfterLoss = () => {
+    for (const read of [...reads]) read.retireAfterLoss();
+    // Fulfilled loss closes admission and retires even an abandoned read. It
+    // cannot issue a successful consumer or physical publication receipt.
+    void release().catch(() => {});
   };
   try {
     const data = (object, key) => {
@@ -461,10 +497,17 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Exact reaction pipeline unavailable: ${descriptor.entryPoint}`);
       pipelines.push({ ...pipeline, entryPoint: descriptor.entryPoint });
     }
-    const validate = () => {
-      if (closed) throw new TypeError('Exact reaction source selection was released');
+    const validateRetained = () => {
+      if (deviceState.lost || !source) throw new TypeError('Exact reaction packet device was lost or retired');
       source.validate(); discovery.validate();
       for (const token of compiled) resolveSphExactReactionAllocation(token, { reactionTable, thermalMaterialTable, format });
+      if (deviceState.lost || !source) throw new TypeError('Exact reaction packet device was lost or retired');
+      return true;
+    };
+    const validate = () => {
+      if (closed) throw new TypeError('Exact reaction source selection was released');
+      validateRetained();
+      if (closed) throw new TypeError('Exact reaction source selection was released');
       return true;
     };
     validate();
@@ -499,7 +542,54 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       speciesOffsetWords, speciesRecordWords: speciesLayout.recordWords, speciesLayout,
       format, physicalPublicationAdmitted: false, kineticGeometry: 'current-production-f32-law',
       encodedDtBits: source.encodedDtBits, release });
-    RECORDS.set(result, { result, device, source, discovery, compiled, validate });
+    const expected = Object.freeze({ device, reactionTable, thermalMaterialTable, reactionDiscoveryProposal,
+      sphParticleUpload, mlsMpmParticleUpload, sphParticleState, g2pResult, thermalResult, thermalSourceCapture,
+      sourceSphUpload: sphParticleUpload, sourceMlsUpload: mlsMpmParticleUpload,
+      transaction, generation, dtSeconds, encodedDtBits: source.encodedDtBits, particleCount: source.particleCount, format,
+      stateBuffer: source.stateBuffer, thermoBuffer: source.thermoBuffer, mechanicsBuffer: source.mechanicsBuffer,
+      sourceStateBuffer: source.stateBuffer, sourceThermoBuffer: source.thermoBuffer,
+      sourceMechanicsBuffer: source.mechanicsBuffer });
+    const inventory = Object.freeze(Object.fromEntries([
+      'buffer', 'format', 'generation', 'rowOffset', 'rowCount', 'byteOffset', 'byteLength'
+    ].map(key => [key, numeric[key]])));
+    const sourceView = Object.freeze({ device, particleCount: source.particleCount,
+      stateBuffer: source.stateBuffer, thermoBuffer: source.thermoBuffer, mechanicsBuffer: source.mechanicsBuffer,
+      sourceSphUpload: sphParticleUpload, sourceMlsUpload: mlsMpmParticleUpload,
+      transaction, generation, dtSeconds, encodedDtBits: source.encodedDtBits, inventory });
+    const view = Object.freeze({ result, source: sourceView, reactionTable, thermalMaterialTable,
+      compiled: Object.freeze([...compiled]) });
+    const acquireRead = () => {
+      validate();
+      let released = false, retirement = null;
+      const read = {
+        retireAfterLoss() {
+          released = true;
+          retirement ??= Promise.resolve(false);
+          dropRead(read);
+        }
+      };
+      reads.add(read);
+      return Object.freeze({ view,
+        validate() {
+          if (released) throw new TypeError('Exact reaction packet read was released');
+          validateRetained();
+          if (released) throw new TypeError('Exact reaction packet read was released');
+          return view;
+        },
+        release() {
+          if (retirement) return retirement;
+          released = true;
+          retirement = deviceState.lost
+            ? Promise.resolve().then(() => { dropRead(read); return false; })
+            : deferConfirmedSubmittedWorkCleanup(device, () => dropRead(read))
+              .then(completed => completed && !deviceState.lost);
+          return retirement;
+        },
+        get released() { return released || deviceState.lost; }
+      });
+    };
+    RECORDS.set(result, { result, device, source, discovery, compiled, validate, expected, acquireRead });
+    deviceState.owners.add(retireAfterLoss);
     return result;
   } catch (error) {
     error.exactReactionSourceCleanupCompletion = Promise.all([
@@ -514,4 +604,26 @@ export function resolveSphExactReactionSourceSelection(result, { device } = {}) 
   if (!record || record.device !== device) throw new TypeError('Original exact reaction selection required');
   record.validate();
   return Object.freeze({ source: record.source, compiled: Object.freeze([...record.compiled]), result });
+}
+
+/** Retain one genuine packet before a consumer's first await. Expected fields
+ * are original data identities, never accessors. Owner close stops new reads;
+ * an existing read remains valid until its own retirement or device loss.
+ * release() reports confirmed queue completion (true) or fulfilled loss
+ * (false), solely for retirement. Neither outcome grants physical authority. */
+export function acquireSphExactReactionSourceSelectionRead(result, expected = {}) {
+  const record = RECORDS.get(result);
+  if (!record) throw new TypeError('Original exact reaction selection required');
+  const descriptors = Object.getOwnPropertyDescriptors(expected);
+  if (!Object.hasOwn(descriptors.device ?? {}, 'value') || descriptors.device.value !== record.device) {
+    throw new TypeError('Exact reaction packet read requires the original device');
+  }
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key];
+    if (!Object.hasOwn(record.expected, key) || !Object.hasOwn(descriptor, 'value')
+        || !Object.is(descriptor.value, record.expected[key])) {
+      throw new TypeError(`Exact reaction packet read changed original ${String(key)}`);
+    }
+  }
+  return record.acquireRead();
 }

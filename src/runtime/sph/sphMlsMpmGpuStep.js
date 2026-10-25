@@ -14372,14 +14372,19 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu(args) {
     } else {
       for (const cleanup of record.abortCleanups) { try { cleanup(); } catch {} }
       for (const stage of record.stages) { try { stage.cleanupSubmittedWork?.(); } catch {} }
-      const cleanup = () => {
-        for (const buffer of record.buffers) {
-          if (!record.retired.has(buffer)) { buffer.destroy(); record.retired.add(buffer); }
-        }
-      };
-      if (!record.targetSph?.exactMassInventory
-          || !runSphGpuParticleBufferSetCleanupAfterBorrows(record.targetSph, cleanup,
-            { terminalSourceRetirement: true })) cleanup();
+      return new Promise((resolve, reject) => {
+        const cleanup = () => {
+          try {
+            for (const buffer of record.buffers) {
+              if (!record.retired.has(buffer)) { buffer.destroy(); record.retired.add(buffer); }
+            }
+            resolve(true);
+          } catch (error) { reject(error); }
+        };
+        if (!record.targetSph?.exactMassInventory
+            || !runSphGpuParticleBufferSetCleanupAfterBorrows(record.targetSph, cleanup,
+              { terminalSourceRetirement: true })) cleanup();
+      });
     }
   });
   try {

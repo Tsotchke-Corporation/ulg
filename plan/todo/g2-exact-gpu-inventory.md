@@ -152,7 +152,7 @@ predecessor retirement does not leave a dangling allocation. Source epochs must
 match at a complete tick; canonical immutable-generation restrictions remain.
 
 Native evidence in
-`/home/cos/.cache/icc/repos/ulg/g2-fused-sequence-20261025-8oFazV/native-final.json`
+`/home/cos/.cache/icc/repos/ulg/g2-fused-sequence-20261025-8oFazV/native-final-r3.json`
 adds eight cold/heated batches with K=2/3 (20 real substeps) to the previous
 single-step matrix. Every exact word, motion/heating and terminal epoch delta
 passes after predecessor retirement. This does not prove complete low-part

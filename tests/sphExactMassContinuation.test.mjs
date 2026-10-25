@@ -1069,3 +1069,30 @@ test('pending source mechanics retirement preserves a bank transferred to the te
     assert.equal(bank.destroyed, true);
   } finally { await retire(f, step); }
 });
+
+test('late bound sequence failure resolves retirement only after terminal reads finish', async () => {
+  const f = fixture(), fences = []; let retirement;
+  f.device.queue.onSubmittedWorkDone = () => new Promise(resolve => fences.push(resolve));
+  try {
+    await assert.rejects(runSequence(f, false, { registerFusedSubmittedCleanup() {
+      Object.defineProperty(f.sphUpload, 'ownsIdentityBuffer', { value: true, writable: false });
+      return true;
+    } }), error => { retirement = error.exactMassSequenceRetirement; return error instanceof TypeError; });
+    let complete = false;
+    retirement.then(() => { complete = true; });
+    await settle();
+    fences.shift()(); await settle();
+    assert.ok(fences.length > 0, 'bound terminal producer read has its own confirmed retirement');
+    const outputs = f.device.createdBuffers.filter(buffer => buffer.label.includes('g2p-state-ping'));
+    assert.equal(complete, false);
+    assert.ok(outputs.every(buffer => !buffer.destroyed));
+    f.device.queue.onSubmittedWorkDone = async () => {};
+    for (const release of fences) release();
+    await retirement;
+    assert.ok(outputs.every(buffer => buffer.destroyed));
+  } finally {
+    f.device.queue.onSubmittedWorkDone = async () => {};
+    for (const release of fences) release();
+    await retire(f);
+  }
+});

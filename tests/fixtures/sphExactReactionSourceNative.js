@@ -1,4 +1,5 @@
 import { createExactReactionAllocationFixture } from './sphExactReactionAllocationNative.js';
+import { inspectExactCaloricSource } from './sphExactCaloricSourceInspection.js';
 import * as buffers from '../../src/runtime/sph/sphGpuBuffers.js';
 import * as steps from '../../src/runtime/sph/sphMlsMpmGpuStep.js';
 import * as hierarchy from '../../src/runtime/sph/schroederHierarchyGpu.js';
@@ -88,7 +89,7 @@ async function readWords(device, source) {
  * not register public buffers as producers or inject a fake proposal. */
 export async function runExactReactionSourceNative(device, { reverse = false, dtSeconds = .000001,
   wordCount = 9, velocities = [[0, 0, 0], [0, 0, 0]], fixtureOptions = {},
-  inspect = null, prewarm = false, onProgress = null } = {}) {
+  internalPressureScale = 1, expectedCaloricError = 0, inspect = null, prewarm = false, onProgress = null } = {}) {
   const progress = (stage, extra = {}) => onProgress?.({ stage, wordCount, dtSeconds, reverse, timeMs: performance.now(), ...extra });
   const fixture = createExactReactionAllocationFixture(fixtureOptions);
   const { materialProperties, models, thermalMaterialTable, reactionTable } = fixture;
@@ -126,6 +127,7 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
       enableLawQueue: false, enableLawNeighborCandidates: false,
       enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
       residentStepOptions: { thermalMaterialTable, mechanicsMaterialTable,
+        internalPressureScale,
         thermalStepOptions: { conductionRate: 0 },
         fuseNoFullResidentMechanics: false, gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null,
         gpuTimestampRecorder: { active: true, async measureQueueStage(meta, work) {
@@ -161,10 +163,11 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
             selected = await runSphExactReactionSourceSelectionWebGpu(args);
             progress('selection-submitted');
             const issued = resolveSphExactReactionSourceSelection(selected, { device });
-            const [words, after, proposals, evidence, stateWords, thermoWords] = await Promise.all([
+            const [words, after, proposals, evidence, stateWords, thermoWords, mechanicsWords] = await Promise.all([
               readWords(device, selected.outputBuffer), readWords(device, capture.sourceRead.read.buffer),
               readWords(device, proposal.proposalBuffer), readWords(device, proposal.evidenceBuffer),
-              readWords(device, thermalResult.stateBuffer), readWords(device, thermalResult.thermoBuffer)
+              readWords(device, thermalResult.stateBuffer), readWords(device, thermalResult.thermoBuffer),
+              readWords(device, capture.mechanicsBuffer)
             ]);
             progress('selection-read-complete');
             const rows = [];
@@ -189,17 +192,29 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
               });
               const extensives = inspectExtensives(words, selected, base, stateWords,
                 sphReactionEnergyEntry(reactionTable, header[4]), expected);
-              rows.push({ header, amounts: amounts.map(String), products, extensives, matches: header[1] === expected.error
+              const caloric = inspectExactCaloricSource({ words, selected, base, stateWords,
+                entry: sphReactionEnergyEntry(reactionTable, header[4]), token, allocation: expected,
+                expectedError: expectedCaloricError });
+              rows.push({ header, amounts: amounts.map(String), products, extensives, caloric, matches: header[1] === expected.error
                 && header[0] === Number(expected.active)
                 && amounts.every((value, index) => value === [expected.total, expected.debitA, expected.debitB,
                   expected.remainderA, expected.remainderB, cap, availableA + availableB][index])
-                && products.every(product => product.matches) && extensives.matches });
+                && products.every(product => product.matches) && extensives.matches && caloric.matches });
             }
-            observed = { reverse, dtSeconds, wordCount, velocities, fixtureOptions, visits, rows, proposals: Array.from(new Float32Array(proposals.buffer)),
+            observed = { reverse, dtSeconds, wordCount, velocities, fixtureOptions, expectedCaloricError,
+              internalPressureScale, g2pInternalPressureScale: g2pResult.internalPressureScale, visits, rows,
+              proposals: Array.from(new Float32Array(proposals.buffer)),
               discoveryEvidence: Array.from(evidence), state: Array.from(new Float32Array(stateWords.buffer)),
               thermo: Array.from(new Float32Array(thermoWords.buffer)), sourceUnchanged: before.every((value, index) => value === after[index]),
+              mechanics: Array.from(new Float32Array(mechanicsWords.buffer)),
               physicalPublicationAdmitted: selected.physicalPublicationAdmitted,
               pass: rows.length === 1 && rows.every(row => row.matches && row.header[0] === 1 && row.header[1] === 0) };
+          } catch (error) {
+            // A failed asynchronous preparation still owns its source reads
+            // until its explicit cleanup receipt settles. Retire those reads
+            // before releasing the original producer and preserve the cause.
+            await error.exactReactionSourceCleanupCompletion;
+            throw error;
           } finally {
             if (selected) await selected.release();
             proposal?.destroy();

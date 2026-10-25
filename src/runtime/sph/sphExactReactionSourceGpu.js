@@ -3,6 +3,9 @@ import { compileSphExactReactionAllocation, resolveSphExactReactionAllocation,
   encodeSphExactReactionAllocationWeights } from './sphExactReactionAllocation.js';
 import { createSphExactReactionAllocationWgsl } from './sphExactReactionAllocationWgsl.js';
 import { createSphExactExtensiveWgsl } from './sphExactExtensiveWgsl.js';
+import { createSphExactReactionCaloricGpuWgsl, SPH_EXACT_REACTION_CALORIC_FIELDS,
+  SPH_EXACT_REACTION_CALORIC_HEADER_WORDS, SPH_EXACT_REACTION_CALORIC_PRODUCT_WORDS }
+  from './sphExactReactionCaloricGpuWgsl.js';
 import { sphReactionEnergyEntry } from './sphReactionEnergyAuthority.js';
 import { encodeSphExactReactionKineticScale, createSphExactReactionKineticCapWgsl }
   from './sphExactReactionKineticCap.js';
@@ -13,7 +16,7 @@ import { computeBufferBinding, prewarmCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
-export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v2';
+export const SPH_EXACT_REACTION_SOURCE_SCHEMA = 'peercompute.ulg.exact-reaction-source-selection.v3';
 const RECORDS = new WeakMap();
 const RULE_WORDS = 24;
 export const SPH_EXACT_REACTION_SOURCE_HEADER_WORDS = 12;
@@ -52,7 +55,8 @@ export function createSphExactReactionSourceSelectionWgsl(format) {
     + createSphExactReactionKineticCapWgsl(format) + taggedKineticLaw + phaseLaw + /* wgsl */ `
 struct ExactSourceParams {
   count: u32, reaction_count: u32, inventory_word_offset: u32, record_words: u32,
-  dt_bits: u32, generation_id: u32, support_epoch: u32, support_profile: u32
+  dt_bits: u32, generation_id: u32, support_epoch: u32, support_profile: u32,
+  extensive_offset_words: u32, caloric_offset_words: u32, caloric_record_words: u32, reaction_table_offset: u32
 }
 // Integer storage preserves every admitted velocity/U bit, including subnormal
 // encodings. Only the existing geometry/kinetics path reads f32 projections.
@@ -220,7 +224,7 @@ fn partition_exact_reaction_products(@builtin(global_invocation_id) id: vec3<u32
 // reaction's product count: [COM xyz bits, projection error], then twelve
 // [negative, arithmetic error, magnitude[EE_WORDS]] records.
 fn es_extensive_start(out: u32) -> u32 {
-  return out + es_params.record_words - (4u + 12u * (EE_WORDS + 2u));
+  return out + es_params.extensive_offset_words;
 }
 fn es_store_extensive(out: u32, field: u32, value: ExactExtensive) {
   let at = es_extensive_start(out) + 4u + field * (EE_WORDS + 2u);
@@ -263,6 +267,10 @@ fn prepare_exact_reaction_extensives(@builtin(global_invocation_id) id: vec3<u32
   error |= internal.error | kinetic.error | reference.error | sensible.error;
   es_output[out + 10u] = error;
   es_output[out + 9u] = select(0u, 2u, error == 0u);
+  // Exact source packets have their own receipt, independent of the subsequent
+  // derived COM projection. Caloric math may use a positive subnormal momentum
+  // even when projecting its velocity reports underflow.
+  es_output[es_caloric_start(out) + 8u] = select(0u, 1u, error == 0u);
 }
 @compute @workgroup_size(1)
 fn project_exact_reaction_momentum(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -291,13 +299,14 @@ fn project_exact_reaction_momentum(@builtin(global_invocation_id) id: vec3<u32>)
   // are unresolved, and header[11] stays zero (no physical acceptance).
   es_output[out + 9u] = select(0u, 1u, error == 0u);
 }
-`;
+` + createSphExactReactionCaloricGpuWgsl(format);
 }
 
 function metadataFor(compiled, table) {
   const blocks = compiled.map(token => [encodeSphExactReactionAllocationWeights(token), encodeSphExactReactionKineticScale(token)]);
   const headerSize = compiled.length * RULE_WORDS;
-  const words = new Uint32Array(headerSize + blocks.reduce((sum, pair) => sum + pair[0].length + pair[1].length, 0));
+  const reactionTableOffsetWords = headerSize + blocks.reduce((sum, pair) => sum + pair[0].length + pair[1].length, 0);
+  const words = new Uint32Array(reactionTableOffsetWords + table.combinedRecords.length);
   const floats = new Float32Array(words.buffer); let offset = headerSize;
   compiled.forEach((token, index) => {
     const rule = index * RULE_WORDS, [a, b] = token.reactants;
@@ -313,13 +322,17 @@ function metadataFor(compiled, table) {
     const energy = sphReactionEnergyEntry(table, index);
     floats.set(energy.reactants.map(term => term.uRef), rule + 22);
   });
-  return words;
+  words.set(new Uint32Array(table.combinedRecords.buffer, table.combinedRecords.byteOffset,
+    table.combinedRecords.length), reactionTableOffsetWords);
+  return { words, reactionTableOffsetWords };
 }
 
 export function sphExactReactionSourcePipelineDescriptors(format) {
   const code = createSphExactReactionSourceSelectionWgsl(format);
   return ['prepare_exact_reaction_sources', 'select_exact_reaction_debits', 'partition_exact_reaction_products',
-    'prepare_exact_reaction_extensives', 'project_exact_reaction_momentum']
+    'prepare_exact_reaction_extensives', 'project_exact_reaction_momentum',
+    'prepare_exact_reaction_caloric_target', 'initialize_exact_reaction_caloric_bracket',
+    'refine_exact_reaction_caloric_bracket', 'finalize_exact_reaction_caloric_state']
     .map(entryPoint => ({
       label: 'ulg-exact-reaction-source-selection',
       cacheKey: `${SPH_EXACT_REACTION_SOURCE_SCHEMA}-${format.wordCount}-${format.quantumExponent}`,
@@ -385,24 +398,30 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
     const maxProducts = Math.max(...compiled.map(token => token.products.length));
     const extensiveWordCount = format.wordCount + 18;
     const extensiveOffsetWords = HEADER_WORDS + 7 * format.wordCount + maxProducts * (4 + 3 * format.wordCount);
-    const recordWords = extensiveOffsetWords + 4 + SPH_EXACT_REACTION_EXTENSIVE_FIELDS.length * (extensiveWordCount + 2);
+    const caloricOffsetWords = extensiveOffsetWords + 4 + SPH_EXACT_REACTION_EXTENSIVE_FIELDS.length * (extensiveWordCount + 2);
+    const caloricWordCount = 3 * format.wordCount + 26;
+    const caloricProductOffsetWords = SPH_EXACT_REACTION_CALORIC_HEADER_WORDS
+      + SPH_EXACT_REACTION_CALORIC_FIELDS.length * (caloricWordCount + 2);
+    const caloricRecordWords = caloricProductOffsetWords + 3 * maxProducts * SPH_EXACT_REACTION_CALORIC_PRODUCT_WORDS;
+    const recordWords = caloricOffsetWords + caloricRecordWords;
     const outputByteLength = source.particleCount * recordWords * 4;
     if (!Number.isSafeInteger(outputByteLength) || outputByteLength < 4
         || outputByteLength > device.limits.maxStorageBufferBindingSize
         || source.particleCount > device.limits.maxComputeWorkgroupsPerDimension) {
       throw new RangeError('Exact reaction selection exceeds device capacity');
     }
-    const metadata = metadataFor(compiled, reactionTable);
+    const { words: metadata, reactionTableOffsetWords } = metadataFor(compiled, reactionTable);
     const params = new Uint32Array([source.particleCount, compiled.length, numeric.rowOffset * format.wordCount,
       recordWords, source.encodedDtBits, discovery.view.generationId, discovery.view.epochIdentity.supportEpoch,
-      reactionDiscoveryProposal.supportProfileId]);
+      reactionDiscoveryProposal.supportProfileId, extensiveOffsetWords, caloricOffsetWords,
+      caloricRecordWords, reactionTableOffsetWords]);
     const allocate = (label, size, usage) => {
       const buffer = device.createBuffer({ label, size, usage }); owned.push(buffer);
       tagWebGpuBufferDevice(buffer, device); return buffer;
     };
     const outputBuffer = allocate('ulg-exact-reaction-source-selection', outputByteLength, 128 | 8 | 4);
     const metadataBuffer = allocate('ulg-exact-reaction-source-metadata', metadata.byteLength, 128 | 8);
-    const paramsBuffer = allocate('ulg-exact-reaction-source-params', 32, 64 | 8);
+    const paramsBuffer = allocate('ulg-exact-reaction-source-params', params.byteLength, 64 | 8);
     // Cold compilation must finish before submitting the numerical work. In
     // particular, large exact formats must not queue synchronous compilation
     // behind the same submission that needs those pipelines. Producer reads
@@ -411,7 +430,7 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
     for (const descriptor of sphExactReactionSourcePipelineDescriptors(format)) {
       const pipeline = await prewarmCachedExplicitComputePipeline(device, descriptor);
       if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Exact reaction pipeline unavailable: ${descriptor.entryPoint}`);
-      pipelines.push(pipeline);
+      pipelines.push({ ...pipeline, entryPoint: descriptor.entryPoint });
     }
     const validate = () => {
       if (closed) throw new TypeError('Exact reaction source selection was released');
@@ -426,10 +445,15 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       metadataBuffer, outputBuffer, discovery.view.evidenceBuffer, paramsBuffer]
       .map((buffer, binding) => ({ binding, resource: { buffer } }));
     const encoder = device.createCommandEncoder(); encoder.clearBuffer(outputBuffer);
-    for (const { pipeline, bindGroupLayout } of pipelines) {
+    for (const { pipeline, bindGroupLayout, entryPoint } of pipelines) {
       const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });
-      const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup);
-      pass.dispatchWorkgroups(source.particleCount); pass.end();
+      // Positive finite f32 temperatures occupy fewer than 2^31 ordered bit
+      // encodings. Thirty-one exact bit bisections reach equal/adjacent states.
+      const repeats = entryPoint === 'refine_exact_reaction_caloric_bracket' ? 31 : 1;
+      for (let iteration = 0; iteration < repeats; iteration++) {
+        const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(source.particleCount); pass.end();
+      }
     }
     const command = encoder.finish(); validate();
     submitted = true; device.queue.submit([command]);
@@ -437,6 +461,9 @@ export async function runSphExactReactionSourceSelectionWebGpu(options = {}) {
       outputBuffer, outputByteLength, particleCount: source.particleCount, recordWords, headerWords: HEADER_WORDS,
       extensiveOffsetWords, extensiveWordCount, extensiveQuantumExponent: format.quantumExponent - 299,
       extensiveFields: SPH_EXACT_REACTION_EXTENSIVE_FIELDS,
+      caloricOffsetWords, caloricWordCount, caloricRecordWords, caloricProductOffsetWords,
+      caloricProductCapacity: maxProducts, caloricStateSlots: 3,
+      caloricFields: SPH_EXACT_REACTION_CALORIC_FIELDS, caloricProductStrideWords: SPH_EXACT_REACTION_CALORIC_PRODUCT_WORDS,
       format, physicalPublicationAdmitted: false, kineticGeometry: 'current-production-f32-law',
       encodedDtBits: source.encodedDtBits, release });
     RECORDS.set(result, { result, device, source, discovery, compiled, validate });

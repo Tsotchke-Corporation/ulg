@@ -9,7 +9,8 @@ import { compileSphExactReactionAllocation, encodeSphExactReactionAllocationWeig
 
 // Manufactured data for arithmetic/authority checks; no scientific acceptance.
 export function createExactReactionAllocationFixture({ reactionCount = 1, identity = false,
-  coefficients = [3, 2], molarMasses = {}, referenceEnthalpies = {}, repeatedProducts = true } = {}) {
+  coefficients = [3, 2], molarMasses = {}, referenceEnthalpies = {}, repeatedProducts = true,
+  reactionInternalEnergyChangeJPerMolExtent = 0 } = {}) {
   const definitions = { h2: ['H2', 0.002], o2: ['O2', 0.032], h2o: ['H2O', 0.018], h2o2: ['H2O2', 0.034] };
   const materialProperties = {}, models = {};
   for (const [material, [formula, defaultMolarMass]] of Object.entries(definitions)) {
@@ -43,7 +44,7 @@ export function createExactReactionAllocationFixture({ reactionCount = 1, identi
     stoichiometry: { reactants: reactants.map(term), products: products.map(term),
       atomBalance: { balanced: true }, chargeBalance: { balanced: true } },
     energyReference: { schema: 'peercompute.ulg.reaction-energy-reference.v1',
-      referenceTemperatureK: 300, referencePressurePa: 3000, reactionInternalEnergyChangeJPerMolExtent: 0,
+      referenceTemperatureK: 300, referencePressurePa: 3000, reactionInternalEnergyChangeJPerMolExtent,
       reactantPhases: reactants, productPhases: products,
       source: { kind: 'manufactured-analytic', provenance: 'exact shared debit arithmetic fixture',
         fingerprint: 'exact-reaction-allocation-fixture-v1', provisional: false, phaseApplicable: true } } };

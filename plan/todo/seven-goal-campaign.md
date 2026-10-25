@@ -1,5 +1,20 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+## G2 checkpoint — exact rational caloric preparation — 2026-10-25 UTC
+
+The genuine mechanics/thermal/discovery source owner now compares exact
+selected product masses through the shared caloric graph, retaining formation
+energy's denominator and nonzero endpoint remainders. Native verification
+passes 240 caloric, 393 extensive and 174 kinetic-cap cases plus twelve source
+chains, including accepted relaxed motion and rejected affine/deformed sources.
+Full regression passes 5,472 tests (77 opt-in skips); normal build passes.
+Physical publication is still false. Durable carrier/history ownership,
+rounded-velocity energy correction, actual executed element/charge accounting,
+entities/volume and the full remaining plume scope are next. See the
+[current handoff](../handoff-2026-10-24.md) for exact evidence and preserved
+failures. G2 stays active at 3/6 original child items; G3–G6 pending, G1 deferred.
+Local commits are authorized; push, merge and Pages build remain held.
+
 ## G2 input decision accepted — 2026-09-14 UTC
 
 The operator approved documented room air and background condensation nuclei

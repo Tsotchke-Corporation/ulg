@@ -1,15 +1,17 @@
 // Fixed, material/scenario-agnostic functions. The cold table appends exact
 // existing thermal graph samples and reference-state DATA to reaction_records.
-// The paired producer uses its stored selected masses in the same energy law.
-// This factory only composes shader code; it does not authorize a physical owner.
-export function createSphReactionEnergyWgsl({ selectedAllocation = false } = {}) {
+// The accessor composes a record expression for the same authoritative graph
+// and readiness functions. It does not authorize table data or a physical owner.
+export function createSphReactionEnergyGraphWgsl({
+  record = index => `reaction_records[${index}]`
+} = {}) {
   return `
 fn energy_finite(x: f32) -> bool {
   return x == x && abs(x) <= 3.402823e38;
 }
 
 fn reaction_energy_enabled(rx: u32) -> bool {
-  let mode = reaction_records[rx * 3u + 2u];
+  let mode = ${record('rx * 3u + 2u')};
   return mode.y == 1.0 && mode.w == 1.0 && mode.z > 0.0;
 }
 
@@ -21,18 +23,18 @@ fn reaction_consumed_mass(rx: u32, mass: f32, extent: f32, coefficient: f32, mol
 }
 
 fn energy_header(rx: u32) -> u32 {
-  return u32(reaction_records[rx * 3u + 2u].z);
+  return u32(${record('rx * 3u + 2u')}.z);
 }
 
 // kind=0 reactant, keyed by material; kind=1 product, keyed by exact term ID.
 fn energy_term(rx: u32, kind: u32, key: f32) -> u32 {
-  let lists = reaction_records[energy_header(rx) + 1u];
+  let lists = ${record('energy_header(rx) + 1u')};
   let start = u32(select(lists.x, lists.z, kind == 1u));
   let count = u32(select(lists.y, lists.w, kind == 1u));
   for (var i = 0u; i < count; i = i + 1u) {
-    let descriptor = u32(reaction_records[start + i].x);
-    let term_key = select(reaction_records[descriptor].x,
-      reaction_records[descriptor + 2u].x, kind == 1u);
+    let descriptor = u32(${record('start + i')}.x);
+    let term_key = select(${record('descriptor')}.x,
+      ${record('descriptor + 2u')}.x, kind == 1u);
     if (term_key == key) { return descriptor; }
   }
   return 0u;
@@ -43,19 +45,19 @@ fn energy_term(rx: u32, kind: u32, key: f32) -> u32 {
 // a different phase. Ambiguous shared-T latent discontinuities also reject.
 fn energy_phase_value(descriptor: u32, phase: f32, value: f32, inverse: bool) -> vec4<f32> {
   if (descriptor == 0u || !energy_finite(value)) { return vec4<f32>(0.0); }
-  let list = reaction_records[descriptor + 1u];
+  let list = ${record('descriptor + 1u')};
   var result = vec4<f32>(0.0);
   for (var i = 0u; i < u32(list.y); i = i + 1u) {
-    let curve = reaction_records[u32(list.x) + i * 2u];
-    let domain = reaction_records[u32(list.x) + i * 2u + 1u];
+    let curve = ${record('u32(list.x) + i * 2u')};
+    let domain = ${record('u32(list.x) + i * 2u + 1u')};
     if (curve.x != phase) { continue; }
     let lo = select(domain.z, domain.x, inverse);
     let hi = select(domain.w, domain.y, inverse);
     if (value < lo || value > hi) { continue; }
     let start = u32(curve.y);
     for (var s = 1u; s < u32(curve.z); s = s + 1u) {
-      let a = reaction_records[start + s - 1u];
-      let b = reaction_records[start + s];
+      let a = ${record('start + s - 1u')};
+      let b = ${record('start + s')};
       let ax = select(a.x, a.y, inverse);
       let bx = select(b.x, b.y, inverse);
       if (value <= bx) {
@@ -103,9 +105,15 @@ fn energy_relaxed_mechanics(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>,
 fn energy_product_state(rx: u32, product_term_index: u32, temperature: f32) -> vec4<f32> {
   let descriptor = energy_term(rx, 1u, f32(product_term_index));
   if (descriptor == 0u) { return vec4<f32>(0.0); }
-  return energy_phase_value(descriptor, reaction_records[descriptor + 1u].w, temperature, true);
+  return energy_phase_value(descriptor, ${record('descriptor + 1u')}.w, temperature, true);
+}
+`;
 }
 
+// The paired producer uses its stored selected masses in the same energy law.
+// This factory only composes shader code; it does not authorize a physical owner.
+export function createSphReactionEnergyWgsl({ selectedAllocation = false } = {}) {
+  return createSphReactionEnergyGraphWgsl() + `
 // Returns [sum of m*(u(T,phase)-u_ref), ready]. Actual mass normalization
 // matters: replacing m by extent*nu*M leaks independently shifted U zeros.
 fn energy_product_sensible(rx: u32, ${selectedAllocation ? 'pair_source: u32, ' : ''}temperature: f32${selectedAllocation ? '' : ', extent: f32, mass_scale: f32'}) -> vec2<f32> {

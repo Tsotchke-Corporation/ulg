@@ -304,6 +304,7 @@ function resolveSourceBuffers({
 }) {
   return Object.freeze({
     exactMassInventory: sphParticleUpload?.exactMassInventory ?? null,
+    exactMassInventoryRange: sphParticleUpload?.exactMassInventoryRange ?? null,
     aerosolFamily: sphAerosolSourceFamily(sphParticleUpload),
     stateBuffer: requireBuffer(
       sphParticleUpload?.stateBuffer,
@@ -346,7 +347,8 @@ function sourceBuffersMatch(expected, actual) {
     && expected.identityBuffer === actual.identityBuffer
     && expected.mechanicsBuffer === actual.mechanicsBuffer
     && expected.aerosolFamily === actual.aerosolFamily
-    && expected.exactMassInventory === actual.exactMassInventory;
+    && expected.exactMassInventory === actual.exactMassInventory
+    && expected.exactMassInventoryRange === actual.exactMassInventoryRange;
 }
 
 function exactMassSourceObjectsMatch(authority, sphUpload, mlsUpload) {
@@ -3436,6 +3438,7 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
   if (authority.exactMassSource || sphGpuParticleUploadAdvertisesExactMass(nextSphParticleUpload)) {
     if (!authority.exactMassSource || !exactMassSourceLive(authority)
         || nextSourceBuffers.exactMassInventory !== authority.sourceBuffers.exactMassInventory
+        || nextSourceBuffers.exactMassInventoryRange !== authority.sourceBuffers.exactMassInventoryRange
         || !validateSphExactMassSpatialCommit(nextSphParticleUpload, {
           transaction, generation: authority.generation, nextParticleUploads })) {
       throw transactionError('Exact inventory commit requires its prepared original physical continuation',
@@ -3475,6 +3478,7 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
     nextIdentityBuffer: nextSourceBuffers.identityBuffer,
     nextMechanicsBuffer: nextSourceBuffers.mechanicsBuffer,
     nextExactMassInventory: nextSourceBuffers.exactMassInventory,
+    nextExactMassInventoryRange: nextSourceBuffers.exactMassInventoryRange,
     nextAerosolFamily: nextSourceBuffers.aerosolFamily,
     aerosolCondensateTransition: sphAerosolCondensateTransitionForUploads(nextParticleUploads)
   });
@@ -3531,6 +3535,7 @@ export function validateSchroederSpatialEpochTransactionCommit(
       && commitReceipt.nextIdentityBuffer === nextSourceBuffers.identityBuffer
       && commitReceipt.nextMechanicsBuffer === nextSourceBuffers.mechanicsBuffer
       && commitReceipt.nextExactMassInventory === nextSourceBuffers.exactMassInventory
+      && commitReceipt.nextExactMassInventoryRange === nextSourceBuffers.exactMassInventoryRange
       && (!authority.exactMassSource || (
         authority.exactMassCommitUploads === nextParticleUploads
         && authority.exactMassCommitSphUpload === nextSphParticleUpload

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSphExactMassFormat, encodeSphExactMass } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { acquireSphExactMassRead, forkSphExactMassRead, sliceSphExactMassRead,
+  releaseSphExactMassRead, releaseSphExactMassInventory } from '../src/runtime/sph/sphExactMassInventoryGpu.js';
 import {
   buildSphGpuParticleBuffers, uploadSphGpuParticleBuffers, destroySphGpuParticleBuffers,
   ensureSphGpuParticleBufferSetBorrowLifecycle, sphGpuParticleUploadMatchesDevice,
@@ -283,4 +285,49 @@ test('unsupported raw-buffer writers and CPU fallbacks reject before any allocat
     assert.equal(f.device.allocated.length, allocated); assert.equal(f.device.submissions, 0);
   }
   destroySphGpuParticleBuffers(upload); await f.device.drain();
+});
+
+for (const numericFirst of [false, true]) test(`numeric-only window and carrier retire independently (${numericFirst ? 'numeric' : 'carrier'} first)`, async () => {
+  const f = fixture(), upload = uploadSphGpuParticleBuffers(f.device, f.packed);
+  const physical = acquireSphParticleExactMassRead(upload, f.device);
+  const window = sliceSphExactMassRead(physical.read, { device: f.device, rowOffset: 1, rowCount: 1 });
+  assert.deepEqual(upload.exactMassInventoryRange, { rowOffset: 0, rowCount: 3 });
+  assert.equal(Object.isFrozen(upload.exactMassInventoryRange), true);
+  assert.throws(() => { upload.exactMassInventoryRange = { rowOffset: 1, rowCount: 2 }; }, TypeError);
+  await releaseSphParticleExactMassRead(physical);
+  if (numericFirst) {
+    await releaseSphExactMassRead(window);
+    assert.equal(window.buffer.destroyed, 0);
+    assert.equal(upload.identityBuffer.destroyed, 0);
+    const again = acquireSphParticleExactMassRead(upload, f.device);
+    await releaseSphParticleExactMassRead(again);
+  }
+  destroySphGpuParticleBuffers(upload); await f.device.drain();
+  assert.equal(upload.stateBuffer.destroyed, 1);
+  assert.equal(upload.thermoBuffer.destroyed, 1);
+  assert.equal(upload.identityBuffer.destroyed, 1, 'numeric-only reader does not pin carrier identity');
+  if (!numericFirst) {
+    assert.equal(window.buffer.destroyed, 0);
+    assert.throws(() => acquireSphExactMassRead({ family: window.family, device: f.device }), /live original/);
+    const fork = forkSphExactMassRead(window, { device: f.device });
+    assert.deepEqual([fork.rowOffset, fork.rowCount], [1, 1]);
+    await releaseSphExactMassRead(window);
+    assert.equal(fork.buffer.destroyed, 0);
+    f.device.defer = true;
+    const release = releaseSphExactMassRead(fork);
+    assert.equal(fork.buffer.destroyed, 0);
+    await f.device.drain(); await release;
+  }
+  await f.device.drain();
+  assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
+});
+
+test('closing root admission does not prevent genuine physical owner reads from forking their retained range', async () => {
+  const f = fixture(), upload = uploadSphGpuParticleBuffers(f.device, f.packed);
+  releaseSphExactMassInventory(upload.exactMassInventory);
+  assert.throws(() => acquireSphExactMassRead({ family: upload.exactMassInventory, device: f.device }), /live original/);
+  const physical = acquireSphParticleExactMassRead(upload, f.device);
+  assert.deepEqual([physical.read.rowOffset, physical.read.rowCount], [0, f.packed.particleCount]);
+  await releaseSphParticleExactMassRead(physical); destroySphGpuParticleBuffers(upload); await f.device.drain();
+  assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
 });

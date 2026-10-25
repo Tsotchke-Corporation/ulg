@@ -4,7 +4,7 @@ import { createSphExactMassFormat, encodeSphExactMass }
   from '../ulg-gpu-abi/src/sphExactMassInventory.js';
 import { createSphExactMassInventoryWebGpu, acquireSphExactMassRead, validateSphExactMassRead,
   releaseSphExactMassRead, releaseSphExactMassInventory, runSphExactMassTransferCandidateWebGpu,
-  runSphExactMassPartitionCandidateWebGpu, forkSphExactMassRead }
+  runSphExactMassPartitionCandidateWebGpu, forkSphExactMassRead, sliceSphExactMassRead }
   from '../src/runtime/sph/sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
@@ -238,11 +238,12 @@ test('partial partition admission awaits all reserved-source retirement after a 
 // These synthetic verdicts test host lifetime/control validation only; native
 // tests independently execute WGSL and compare every limb against BigInt.
 function installSyntheticVerdict(device, mutate = () => {}) {
+  device.copies = [];
   device.createShaderModule = args => args;
   device.createComputePipeline = () => ({ getBindGroupLayout() { return {}; } });
   device.createBindGroup = args => args;
   device.createCommandEncoder = () => ({
-    clearBuffer() {}, copyBufferToBuffer() {}, finish() { return {}; },
+    clearBuffer() {}, copyBufferToBuffer(...args) { device.copies.push(args); }, finish() { return {}; },
     beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }
   });
   const create = device.createBuffer;
@@ -250,7 +251,7 @@ function installSyntheticVerdict(device, mutate = () => {}) {
     const buffer = create(args);
     buffer.mapAsync = async () => {};
     buffer.getMappedRange = () => {
-      const params = new Uint32Array(device.allocated.find(value => value.label === 'ulg-exact-mass-params').bytes);
+      const params = new Uint32Array(device.allocated.findLast(value => value.label === 'ulg-exact-mass-params').bytes);
       const header = new Uint32Array(16);
       header.set([0x454d5431, params.length === 8 ? 2 : 1, 1, 0, params[0], params[1], params[0], params[3], params[2]]);
       if (params.length === 8) { header[9] = params[4]; header[10] = params[5]; }
@@ -291,4 +292,84 @@ for (const partition of [false, true]) test(`loss during final ${partition ? 'pa
   await assert.rejects(candidate, /device lost before candidate delivery/);
   for (const read of [first, second?.read].filter(Boolean)) await releaseSphExactMassRead(read);
   await f.device.drain(); assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
+});
+
+test('numeric windows are original bounded relative slices, and forks cannot widen them', async () => {
+  const f = fixture(), root = acquireSphExactMassRead(f.expected);
+  const window = sliceSphExactMassRead(root, { device: f.device, rowOffset: 1, rowCount: 1 });
+  assert.deepEqual([window.rowOffset, window.rowCount, window.byteOffset, window.byteLength], [1, 1, 36, 36]);
+  assert.equal(window.buffer, root.buffer);
+  assert.equal(Object.isFrozen(window), true);
+  for (const [rowOffset, rowCount] of [[-0, 1], [-1, 1], [0, 0], [0, -0], [0, 1.5], [0, '1'], [0, 3], [1, 2], [2, 1], [0xffffffff, 1]]) {
+    assert.throws(() => sliceSphExactMassRead(root, { device: f.device, rowOffset, rowCount }), /exact|range/);
+  }
+  assert.throws(() => sliceSphExactMassRead(window, { device: f.device, rowOffset: 1, rowCount: 1 }), /outside/);
+  assert.throws(() => sliceSphExactMassRead({ ...window }, { device: f.device, rowOffset: 0, rowCount: 1 }), /original/);
+  assert.throws(() => sliceSphExactMassRead(window, { device: fakeDevice(), rowOffset: 0, rowCount: 1 }), /original/);
+  assert.throws(() => forkSphExactMassRead(window, { device: f.device, rowOffset: 0, rowCount: 2 }), /original/);
+  releaseSphExactMassInventory(f.family);
+  await releaseSphExactMassRead(root);
+  assert.throws(() => acquireSphExactMassRead(f.expected), /live original/);
+  const nested = sliceSphExactMassRead(window, { device: f.device, rowOffset: 0, rowCount: 1 });
+  const fork = forkSphExactMassRead(nested, { device: f.device });
+  assert.equal(validateSphExactMassRead(fork, { ...f.expected, rowOffset: 1, rowCount: 1 }), true);
+  assert.equal(validateSphExactMassRead(fork, { ...f.expected, rowOffset: 0, rowCount: 2 }), false);
+  await releaseSphExactMassRead(window); await releaseSphExactMassRead(nested);
+  assert.equal(root.buffer.destroyed, 0);
+  await releaseSphExactMassRead(fork); await f.device.drain();
+  assert.equal(root.buffer.destroyed, 1);
+});
+
+test('same-root joins copy only disjoint selected byte ranges in requested order', async () => {
+  const f = fixture(), root = acquireSphExactMassRead(f.expected);
+  const left = sliceSphExactMassRead(root, { device: f.device, rowOffset: 0, rowCount: 1 });
+  const right = sliceSphExactMassRead(root, { device: f.device, rowOffset: 1, rowCount: 1 });
+  const fork = forkSphExactMassRead(right, { device: f.device });
+  const count = f.device.allocated.length;
+  for (const sourceReads of [[root, left], [right, root], [right, fork], [left, right, left]]) {
+    await assert.rejects(runSphExactMassPartitionCandidateWebGpu({ device: f.device, sourceReads,
+      edgeFormat: f.format, outputRowCount: 2 }), /repeat or overlap/);
+    assert.equal(f.device.allocated.length, count);
+  }
+  installSyntheticVerdict(f.device);
+  const result = await runSphExactMassPartitionCandidateWebGpu({ device: f.device, sourceReads: [right, left],
+    outputRowCount: 2, destinationBuffer: tagWebGpuBufferDevice({ size: 8, usage: 4 }, f.device), edgeFormat: f.format });
+  const copies = f.device.copies.filter(copy => copy[0] === root.buffer);
+  assert.deepEqual(copies.map(copy => [copy[1], copy[3], copy[4]]), [[36, 0, 36], [0, 36, 36]]);
+  assert.equal(result.sourceRowCount, 2); assert.equal(result.sourceCount, 2);
+  assert.deepEqual(result.family.provenance.sources.map(source => [source.rowOffset, source.rowCount]), [[1, 1], [0, 1]]);
+  releaseSphExactMassInventory(result.family); releaseSphExactMassInventory(f.family);
+  for (const read of [root, left, right, fork]) await releaseSphExactMassRead(read);
+  await f.device.drain(); assert.ok(f.device.allocated.every(buffer => buffer.destroyed === 1));
+});
+
+test('ordinary transfer snapshots the selected window instead of binding the entire unaligned root', async () => {
+  const f = fixture(), root = acquireSphExactMassRead(f.expected);
+  const window = sliceSphExactMassRead(root, { device: f.device, rowOffset: 1, rowCount: 1 });
+  installSyntheticVerdict(f.device);
+  const result = await runSphExactMassTransferCandidateWebGpu({ device: f.device, sourceRead: window,
+    edgeBuffer: tagWebGpuBufferDevice({ size: 44, usage: 4 }, f.device), edgeCount: 1, edgeFormat: f.format });
+  assert.equal(result.rowCount, 1);
+  const copy = f.device.copies.find(copy => copy[0] === root.buffer);
+  assert.deepEqual([copy[1], copy[2].size, copy[3], copy[4]], [36, 36, 0, 36]);
+  assert.equal(result.family.provenance.sourceRowOffset, 1);
+  assert.equal(result.family.provenance.sourceRowCount, 1);
+  releaseSphExactMassInventory(result.family); releaseSphExactMassInventory(f.family);
+  await releaseSphExactMassRead(window); await releaseSphExactMassRead(root); await f.device.drain();
+});
+
+test('a rejected window-release fence quarantines its whole shared root until confirmed loss', async () => {
+  const f = fixture(), root = acquireSphExactMassRead(f.expected);
+  const first = sliceSphExactMassRead(root, { device: f.device, rowOffset: 0, rowCount: 1 });
+  const second = sliceSphExactMassRead(root, { device: f.device, rowOffset: 1, rowCount: 1 });
+  f.device.failFence = 'reject';
+  let settled = false;
+  const pending = releaseSphExactMassRead(first).then(() => { settled = true; });
+  await tick();
+  assert.equal(settled, false); assert.equal(root.buffer.destroyed, 0);
+  assert.throws(() => forkSphExactMassRead(second, { device: f.device }), /original/);
+  assert.throws(() => sliceSphExactMassRead(root, { device: f.device, rowOffset: 0, rowCount: 1 }), /original/);
+  await f.device.lose(); await pending;
+  await releaseSphExactMassRead(root); await releaseSphExactMassRead(second);
+  assert.equal(root.buffer.destroyed, 1);
 });

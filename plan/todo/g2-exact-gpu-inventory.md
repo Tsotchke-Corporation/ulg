@@ -40,7 +40,7 @@ permit subnormal flushing, including intermediate bit reinterpretations.
 - `src/runtime/sph/sphExactMassWgsl.js`: integer comparison, addition,
   subtraction, paired transfer, f32-bit ingress and projection.
 - `src/runtime/sph/sphExactMassInventoryGpu.js`: private resident ownership,
-  same-format/device/generation reads, fenced retirement, explicit initial
+  same-format/device/generation bounded reads, fenced retirement, explicit initial
   inventory and GPU-buffer transfer candidates, including joined sources and
   conservative row remapping. Success observes only a
   64-byte verdict. Diagnostic tests read inventory separately.
@@ -184,12 +184,12 @@ and placement partition, never an f32 reconstruction of historical mass.
 numeric reads with one common format/device, copies their complete rows and a
 source-to-destination map, and executes one checked remap/transfer candidate.
 Different source generations are allowed; the output generation is
-`max(source generations) + 1`, not a physical tick. Repeating the same numeric
-owner through another read rejects. Multiple rows may merge with checked
+`max(source generations) + 1`, not a physical tick. Repeating or overlapping
+rows from one numeric owner rejects; disjoint original windows may join. Multiple rows may merge with checked
 addition, unreferenced destinations start at exact zero, and `0xffffffff`
 drops only exact-zero input. A nonzero inventory whose f32 projection underflows
 still rejects deletion. Immutable scalar provenance records each source family,
-generation and row count without retaining predecessor owners.
+generation, absolute row offset and row count without retaining predecessor owners.
 
 Remapping precedes the transfer graph. An incoming packet cannot fund an
 outgoing packet in that graph, and a row made empty by that graph cannot also
@@ -210,6 +210,45 @@ also cover partial source admission, rejected fences and device loss during
 final cleanup; neither API can deliver a successful family destroyed during
 those cleanup fences. The first native attempt stopped at a Vite-triggered
 navigation race before GPU execution; the unchanged retry passed.
+
+## Bounded numeric reads and independent carrier identity
+
+`sliceSphExactMassRead` delegates a nonempty subrange relative to an original
+held read; nested slices accumulate the root row offset. The original private
+read record authenticates the range. Forks preserve offset/count, and copied,
+released, foreign, quarantined or out-of-bounds inputs reject. Full-family
+acquisition remains a separate operation and is unavailable after root
+retirement has been requested.
+
+Join/remap can combine disjoint windows of the same root. Half-open interval
+checks reject overlaps and whole-root-plus-subview duplication. An ordinary
+transfer snapshots any partial window, including an offset-zero prefix, before
+executing its locally indexed graph. Copy offsets and lengths come from the
+original read, not the whole buffer size. Thus a 36-byte row offset in the
+nine-limb format never becomes an invalid storage-binding offset. Output
+families retain scalar source-range provenance without retaining ancestors.
+
+Physical carrier acquisition and preserving continuation now fork their held
+numeric range. Carrier identity owners have their own count. Each retiring
+carrier closes fresh root admission and releases its numeric read; other
+original held windows can continue to fork after that closure. Numeric-only
+readers can survive all carrier identities, and identity retirement does not
+wait for unrelated numeric ranges. Frozen `exactMassInventoryRange` accompanies
+the original upload and SS source/prepare/commit provenance. The existing
+preserving commit still requires the same numeric family and range.
+
+Native `g2-exact-windows-20261025-miubE0/native-r1.json` passes 6,176 arithmetic,
+54 transfer and 32 partition cases, plus nested/adjacent/disjoint/overlapping
+window checks, root/carrier retirement and the prior real preserving solver
+matrix. A real cold uploader's numeric child transfers its preserved low bit
+after the physical parent and identity buffer have retired. Host tests also
+cover partial spans, rejected fences and confirmed-loss quarantine.
+
+This does not bind a product-history role or authorize a mass-changing
+physical transition. Current physical preserving fixtures keep full carrier
+ranges; the nonzero-offset proofs exercise actual numeric candidates. The
+original reaction/placement/closure producer must next install complementary
+carrier and unplaced-residual windows from one validated terminal allocation.
 
 ## Pair-owned physical reaction allocation
 
@@ -243,10 +282,10 @@ thermal continuations. All 27 step/canonical-summary pipeline variants compile
 on the native GPU (`prewarm-r1.json`). No plume or exact-mass admission follows.
 
 Next connect one executed integer debit and exact product/residual partition
-to this actual pair producer. Carrier and residual history must hold disjoint
-authenticated read windows over the same numeric candidate without duplicating
-its mass or retaining unrelated particle buffers. Extend original numeric
-ownership and existing physical owners, not a public registration shortcut.
+to this actual pair producer. The bounded numeric reads above are available;
+carrier and residual history still need their genuine producer-bound roles
+over the same candidate. Extend the existing physical owners, not a public
+registration shortcut.
 Preserve element/charge and coupled energy/momentum acceptance. The current
 f32 no-op guard remains until an actual exact output and residual owner can
 represent a packet whose f32 mass projection is unchanged.

@@ -1605,6 +1605,7 @@ const SPH_SUCCESSOR_UPLOAD_ENVELOPE_FIELDS = Object.freeze([
   'identityRequired',
   'aerosolFamily',
   'exactMassInventory',
+  'exactMassInventoryRange',
   'bufferFamilyGeneration',
   'bufferFamilyGenerationStatus'
 ]);
@@ -1849,6 +1850,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     const capture = module.resolveMlsMpmPostMechanicsExactMassContinuation(postMechanicsClosure, claim, nextParticleUploads);
     if (capture.transaction !== transaction || capture.generation !== generation
         || capture.sourceRead.read.family !== transaction.sourceBuffers?.exactMassInventory
+        || capture.sourceRead.read.rowOffset !== transaction.sourceBuffers?.exactMassInventoryRange?.rowOffset
+        || capture.sourceRead.read.rowCount !== transaction.sourceBuffers?.exactMassInventoryRange?.rowCount
         || !validateSchroederSpatialEpochTransactionSourceFamily(transaction, { generation,
           sphParticleUpload: capture.sourceSphUpload,
           mlsMpmParticleUpload: capture.sourceMlsUpload })) {
@@ -2178,6 +2181,7 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     sourceEpochIdentity,
     successorEpochIdentity,
     exactMassInventory: transaction.sourceBuffers?.exactMassInventory ?? null,
+    exactMassInventoryRange: transaction.sourceBuffers?.exactMassInventoryRange ?? null,
     ...successorEpochIdentity,
     ...strides,
     sourceTopologyEpoch: topologyAuthority.sourceTopologyEpoch,

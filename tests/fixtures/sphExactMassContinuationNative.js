@@ -65,10 +65,10 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
   for (let i = 4; i < table.records.length; i += 8) table.records[i] = 0;
   const mechanicsTable = mechanics.buildMlsMpmMechanicsMaterialTable(materialProperties);
   const materialUpload = twoLevel ? refresh.uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsTable) : null;
-  const observe = async (buffer, integer = false) => {
-    const copy = device.createBuffer({ size: buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const observe = async (buffer, integer = false, offset = 0, byteLength = buffer.size) => {
+    const copy = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     try {
-      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(buffer, 0, copy, 0, copy.size);
+      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(buffer, offset, copy, 0, copy.size);
       device.queue.submit([encoder.finish()]); await copy.mapAsync(GPUMapMode.READ);
       const values = Array.from(integer ? new Uint32Array(copy.getMappedRange()) : new Float32Array(copy.getMappedRange()));
       copy.unmap(); return values;
@@ -211,7 +211,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
           refluxHeader,
           assignment: twoLevel ? await observe(next.schroederSpatialSuccessorLevelAssignment.assignmentBuffer) : null,
           physicsTick: next.sphParticleUpload.physicsTick, positionEpoch: next.sphParticleUpload.positionEpoch,
-          exact: await observe(held.read.buffer, true),
+          exact: await observe(held.read.buffer, true, held.read.byteOffset, held.read.byteLength),
           state: await observe(next.sphParticleUpload.stateBuffer), thermo: await observe(next.sphParticleUpload.thermoBuffer),
           g2pState: step.g2pReconstruction ? await observe(step.g2pReconstruction.gpuResult.stateBuffer) : null,
           p2gGrid: step.p2gGridProjection?.gpuResult?.gridBuffer
@@ -258,7 +258,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
       if (sphUpload.destroyed === true) throw new Error('SS lease did not retain the physical owner');
       const heldByLease = spatial.acquireSchroederSpatialSuccessorExactMassRead({ device,
         sphParticleUpload: sphUpload, mlsMpmParticleUpload: mlsUpload, consumerLease: sourceLease });
-      result.exactAfterRetirementRequested = await observe(heldByLease.read.buffer, true);
+      result.exactAfterRetirementRequested = await observe(heldByLease.read.buffer, true, heldByLease.read.byteOffset, heldByLease.read.byteLength);
       await buffers.releaseSphParticleExactMassRead(heldByLease);
       spatial.releaseSchroederSpatialSuccessorSourceFamilyLease(sourceFamily, sourceLease, { device });
       sourceLease = null;

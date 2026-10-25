@@ -125,7 +125,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       if (!adapter) throw new Error('Native WebGPU adapter unavailable');
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter) || {});
-      const errors = [], results = [], transfers = [], partitions = [];
+      const errors = [], results = [], transfers = [], partitions = [], windows = [];
       let coldOwnership = null;
       let continuation = null;
       let spatialContinuation = null;
@@ -212,11 +212,15 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         const borrow = family => {
           const read = owner.acquireSphExactMassRead({ family, device }); reads.push(read); return read;
         };
+        const slice = (read, rowOffset, rowCount) => {
+          const window = owner.sliceSphExactMassRead(read, { device, rowOffset, rowCount });
+          reads.push(window); return window;
+        };
         async function observe(read) {
-          const result = device.createBuffer({ size: read.buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+          const result = device.createBuffer({ size: read.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
           try {
             const encoder = device.createCommandEncoder();
-            encoder.copyBufferToBuffer(read.buffer, 0, result, 0, result.size);
+            encoder.copyBufferToBuffer(read.buffer, read.byteOffset, result, 0, result.size);
             device.queue.submit([encoder.finish()]); await result.mapAsync(GPUMapMode.READ);
             const words = Array.from(new Uint32Array(result.getMappedRange()));
             result.unmap(); await device.queue.onSubmittedWorkDone(); return words;
@@ -319,7 +323,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             let next = null;
             if (result.family) {
               const provenance = result.family.provenance;
-              if (provenance.sources.some(source => Object.keys(source).some(key => !['familyId', 'generation', 'rowCount'].includes(key)))) {
+              if (provenance.sources.some(source => Object.keys(source).some(key => !['familyId', 'generation', 'rowOffset', 'rowCount'].includes(key)))) {
                 throw new Error('Partition retained unbounded predecessor lineage');
               }
               families.push(result.family); next = borrow(result.family);
@@ -408,6 +412,53 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             await owner.releaseSphExactMassRead(prior); owner.releaseSphExactMassInventory(prior.family);
             await owner.releaseSphExactMassRead(fresh); owner.releaseSphExactMassInventory(fresh.family);
           }
+          // Window coordinates are relative to the supplied read, including
+          // ordinary transfer graphs. Nonzero sentinels outside a window must
+          // neither enter the result nor disappear from the original root.
+          const root = borrow(create([19, 1 + 2 ** -30, 2 ** -10 + 2 ** -50, 0, 23]));
+          const rootBefore = await observe(root), middle = slice(root, 1, 3);
+          await transfer('window-local-transfer-hidden-bit', middle, [[0, 2, 2 ** -30]]);
+          await transfer('window-local-endpoint-reject', middle, [[0, 3, 2 ** -30]]);
+          await transfer('window-prefix-transfer', slice(root, 0, 2), [[0, 1, 2 ** -30]]);
+          await partition('window-prefix-only', [slice(root, 0, 2)], [1, 0], 2);
+          const nested = slice(slice(root, 1, 4), 1, 2);
+          await partition('window-nested-relative', [nested], [0, 1], 2, [[0, 1, 2 ** -50]]);
+          const leftWindow = slice(root, 1, 1), rightWindow = slice(root, 2, 2);
+          await partition('window-adjacent-same-root', [leftWindow, rightWindow], [0, 1, 2], 4, [[0, 3, 2 ** -30]]);
+          await partition('window-adjacent-permuted', [rightWindow, leftWindow], [1, 2, 0], 4, [[0, 3, 2 ** -30]]);
+          await partition('window-disjoint-gap', [slice(root, 0, 1), slice(root, 4, 1)], [0, 0], 1);
+          const fineRoot = borrow(create([1, 2 ** -200, 0, 2], fineFormat));
+          await partition('window-fine-hidden-bit', [slice(fineRoot, 1, 2)], [0, 1], 2, [[0, 1, 2 ** -201]]);
+          for (const [name, sourceReads] of [
+            ['whole-plus-window', [root, middle]], ['duplicate-window', [leftWindow, leftWindow]],
+            ['partial-overlap', [middle, rightWindow]]
+          ]) {
+            let error = null, allocations = 0;
+            const originalCreate = device.createBuffer;
+            device.createBuffer = function(args) { allocations++; return originalCreate.call(this, args); };
+            try { await owner.runSphExactMassPartitionCandidateWebGpu({ device, sourceReads,
+              outputRowCount: 3, edgeFormat: format }); }
+            catch (failure) { error = String(failure.message); }
+            finally { device.createBuffer = originalCreate; }
+            windows.push({ name, expectedAdmissionRejection: true, error, allocations });
+          }
+          windows.push({ name: 'root-sentinels', before: rootBefore, after: await observe(root),
+            nestedOffset: nested.rowOffset, nestedCount: nested.rowCount });
+          // Original root admission closes, but sibling numeric readers retain
+          // their own windows and can delegate them after parent release.
+          const retiringRoot = borrow(create([31, 1, 0, 37]));
+          const retained = slice(retiringRoot, 1, 2), sibling = slice(retiringRoot, 3, 1);
+          let destroys = 0; const destroy = retiringRoot.buffer.destroy;
+          retiringRoot.buffer.destroy = function() { destroys++; return destroy.call(this); };
+          owner.releaseSphExactMassInventory(retiringRoot.family);
+          await owner.releaseSphExactMassRead(retiringRoot); await owner.releaseSphExactMassRead(sibling);
+          const fork = owner.forkSphExactMassRead(retained, { device }); reads.push(fork);
+          await owner.releaseSphExactMassRead(retained);
+          const beforeRetirement = destroys;
+          await transfer('window-after-root-retirement', fork, [[0, 1, 2 ** -100]]);
+          await owner.releaseSphExactMassRead(fork); await device.queue.onSubmittedWorkDone();
+          windows.push({ name: 'retained-window-lifetime', beforeRetirement, destroys,
+            rowOffset: fork.rowOffset, rowCount: fork.rowCount });
           // Real cold particle uploader: the binary64 seed is captured before
           // S[3] rounding, and a physical-owner read pins both allocations.
           const particles = await import('/src/runtime/sph/sphGpuBuffers.js');
@@ -418,6 +469,11 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
           }, { exactMass: { format, reference: 'native explicit initial particles' } });
           const upload = particles.uploadSphGpuParticleBuffers(device, packed);
           const held = particles.acquireSphParticleExactMassRead(upload, device);
+          const numericChild = slice(held.read, 1, 2);
+          let identityDestroys = 0, numericDestroys = 0;
+          const destroyIdentity = upload.identityBuffer.destroy, destroyNumeric = held.read.buffer.destroy;
+          upload.identityBuffer.destroy = function() { identityDestroys++; return destroyIdentity.call(this); };
+          held.read.buffer.destroy = function() { numericDestroys++; return destroyNumeric.call(this); };
           try {
             const source = await observe(held.read);
             const retirementDeferred = particles.destroySphGpuParticleBuffers(upload) === false;
@@ -430,7 +486,15 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
           } finally {
             await particles.releaseSphParticleExactMassRead(held);
             await device.queue.onSubmittedWorkDone();
-            coldOwnership && (coldOwnership.parentRetired = upload.destroyed === true);
+            if (coldOwnership) {
+              coldOwnership.parentRetired = upload.destroyed === true;
+              coldOwnership.identityDestroysWhileNumericHeld = identityDestroys;
+              coldOwnership.numericDestroysWhileHeld = numericDestroys;
+              coldOwnership.numericRange = [numericChild.rowOffset, numericChild.rowCount];
+              await transfer('numeric-child-after-carrier-retirement', numericChild, [[0, 1, 2 ** -50]]);
+            }
+            await owner.releaseSphExactMassRead(numericChild); await device.queue.onSubmittedWorkDone();
+            if (coldOwnership) coldOwnership.finalNumericDestroys = numericDestroys;
             particles.destroySphGpuParticleBuffers(upload);
           }
           const fixture = await import('/tests/fixtures/sphExactMassContinuationNative.js');
@@ -454,7 +518,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, partitions, coldOwnership, continuation, spatialContinuation,
+      return { results, transfers, partitions, windows, coldOwnership, continuation, spatialContinuation,
         fusedContinuation, fusedSpatialContinuation, sequenceContinuations, twoLevelContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
@@ -504,7 +568,9 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
       return values;
     };
     const successful = new Set(['cross-binade', 'successor-spends-preserved-low-bit', 'shared-cancellation',
-      'shared-permuted', 'complete-depletion-and-birth', 'zero-packet', 'cold-uploader-hidden-packet']);
+      'shared-permuted', 'complete-depletion-and-birth', 'zero-packet', 'cold-uploader-hidden-packet',
+      'window-local-transfer-hidden-bit', 'window-prefix-transfer', 'window-after-root-retirement',
+      'numeric-child-after-carrier-retirement']);
     for (const run of evidence.result.transfers) {
       assert.deepEqual(run.sourceAfter, run.before, run.name + ' source immutable');
       assert.equal(run.ready, successful.has(run.name) || run.name.startsWith('continuation-'), run.name);
@@ -562,7 +628,28 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
     assert.deepEqual(evidence.result.partitions.find(run => run.name === 'join-birth-hidden-packet').after,
       evidence.result.partitions.find(run => run.name === 'permuted-inputs').after);
     evidence.passedPartitionCases = evidence.result.partitions.length;
+    assert.deepEqual(evidence.result.partitions.find(run => run.name === 'window-adjacent-same-root').after,
+      evidence.result.partitions.find(run => run.name === 'window-adjacent-permuted').after);
+    assert.equal(evidence.result.windows.length, 5);
+    for (const window of evidence.result.windows) {
+      if (window.expectedAdmissionRejection) {
+        assert.match(window.error, /repeat or overlap/);
+        assert.equal(window.allocations, 0);
+      } else if (window.name === 'root-sentinels') {
+        assert.deepEqual(window.after, window.before);
+        assert.equal(window.nestedOffset, 2);
+        assert.equal(window.nestedCount, 2);
+      } else {
+        assert.equal(window.beforeRetirement, 0);
+        assert.equal(window.destroys, 1);
+        assert.deepEqual([window.rowOffset, window.rowCount], [1, 2]);
+      }
+    }
     const cold = evidence.result.coldOwnership;
+    assert.equal(cold.identityDestroysWhileNumericHeld, 1);
+    assert.equal(cold.numericDestroysWhileHeld, 0);
+    assert.deepEqual(cold.numericRange, [1, 2]);
+    assert.equal(cold.finalNumericDestroys, 1);
     assert.deepEqual(units(cold.source), cold.masses.map(mass => decodeSphExactMass(encodeSphExactMass(mass, format), format).coefficient));
     assert.deepEqual(cold.projections, cold.masses.map(Math.fround));
     assert.equal(cold.retirementDeferred, true); assert.equal(cold.newReadRejected, true);

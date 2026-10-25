@@ -138,32 +138,54 @@ export function acquireSphExactMassRead({ family, device, format = family?.forma
   }
   return mintRead(record);
 }
-function mintRead(record) {
+function mintRead(record, rowOffset = 0, rowCount = record.rowCount) {
+  const byteOffset = rowOffset * record.format.wordCount * 4;
+  const byteLength = rowCount * record.format.wordCount * 4;
   const read = Object.freeze({ family: record.family, device: record.device, format: record.format,
-    buffer: record.buffer, rowCount: record.rowCount, generation: record.generation });
-  READS.set(read, { record, released: false }); record.borrows++; return read;
+    buffer: record.buffer, rowOffset, rowCount, byteOffset, byteLength, generation: record.generation });
+  READS.set(read, { record, rowOffset, rowCount, released: false }); record.borrows++; return read;
 }
 function liveRead(read, device) {
   const held = READS.get(read), record = held?.record;
   if (!held || held.released || record.device !== device || record.destroyed || record.quarantined
-      || record.deviceState.lost || read.buffer !== record.buffer || read.format !== record.format) {
+      || record.deviceState.lost || read.buffer !== record.buffer || read.format !== record.format
+      || read.rowOffset !== held.rowOffset || read.rowCount !== held.rowCount) {
     throw new TypeError('Exact mass requires an original live retained read');
   }
   return record;
 }
-export function validateSphExactMassRead(read, { device, family, format, expectedGeneration } = {}) {
+export function validateSphExactMassRead(read, { device, family, format, expectedGeneration,
+  rowOffset, rowCount } = {}) {
   try {
     const record = liveRead(read, device);
-    return record.family === family && record.format === format && record.generation === expectedGeneration;
+    return record.family === family && record.format === format && record.generation === expectedGeneration
+      && (rowOffset === undefined || (Object.is(read.rowOffset, rowOffset)))
+      && (rowCount === undefined || (Object.is(read.rowCount, rowCount)));
   } catch { return false; }
 }
 /** Existing readers may delegate their held inventory while retirement drains. */
 export function forkSphExactMassRead(read, { device, family = read?.family,
-  format = read?.format, expectedGeneration = read?.generation } = {}) {
-  if (!validateSphExactMassRead(read, { device, family, format, expectedGeneration })) {
+  format = read?.format, expectedGeneration = read?.generation,
+  rowOffset = read?.rowOffset, rowCount = read?.rowCount } = {}) {
+  if (!validateSphExactMassRead(read, { device, family, format, expectedGeneration, rowOffset, rowCount })) {
     throw new TypeError('Exact mass read fork requires its original live retained read');
   }
-  return mintRead(liveRead(read, device));
+  return mintRead(liveRead(read, device), read.rowOffset, read.rowCount);
+}
+
+/** Retain a nonempty subrange relative to an original read. This delegates
+ * numeric storage only: physical carrier/history roles require their producer.
+ * Offsets need not satisfy storage-binding alignment; consumers must copy the
+ * exact byte span or use an explicit row offset in their program.
+ */
+export function sliceSphExactMassRead(read, { device, rowOffset, rowCount } = {}) {
+  const record = liveRead(read, device);
+  uint(rowOffset, 'relative inventory row offset');
+  uint(rowCount, 'inventory window row count', true);
+  if (rowOffset + rowCount > read.rowCount) {
+    throw new RangeError('Exact mass window cannot extend outside its retained source range');
+  }
+  return mintRead(record, read.rowOffset + rowOffset, rowCount);
 }
 export function releaseSphExactMassRead(read) {
   const held = READS.get(read);
@@ -208,7 +230,7 @@ export function runSphExactMassPartitionCandidateWebGpu({ device, sourceReads,
 }
 
 async function reserveSourceReads(device, sourceReads) {
-  const held = [], records = [], known = new Set();
+  const held = [], records = [], known = new Map();
   try {
     const length = Object.getOwnPropertyDescriptor(sourceReads ?? {}, 'length')?.value;
     if (!Array.isArray(sourceReads) || !Number.isSafeInteger(length) || length < 1) {
@@ -219,9 +241,14 @@ async function reserveSourceReads(device, sourceReads) {
       if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
         throw new TypeError('Exact inventory sources require explicit own data reads');
       }
-      const source = liveRead(descriptor.value, device);
-      if (known.has(source)) throw new TypeError('Exact inventory sources cannot repeat a numeric owner');
-      known.add(source); records.push(source); held.push(mintRead(source));
+      const read = descriptor.value, source = liveRead(read, device);
+      const ranges = known.get(source) ?? [];
+      if (ranges.some(range => read.rowOffset < range.rowOffset + range.rowCount
+          && range.rowOffset < read.rowOffset + read.rowCount)) {
+        throw new TypeError('Exact inventory sources cannot repeat or overlap rows from a numeric owner');
+      }
+      ranges.push(read); known.set(source, ranges); records.push(source);
+      held.push(mintRead(source, read.rowOffset, read.rowCount));
     }
     return { held, records };
   } catch (error) {
@@ -241,7 +268,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     if (edgeFormat !== format || records.some(record => record.format !== format)) {
       throw new TypeError('Proposal and sources require the same original exact-mass format');
     }
-    const sourceRows = uint(records.reduce((count, record) => count + record.rowCount, 0), 'joined source row count', true);
+    const sourceRows = uint(held.reduce((count, read) => count + read.rowCount, 0), 'joined source row count', true);
     const rowCount = partition ? uint(outputRowCount, 'output row count', true) : sourceRows;
     const sourceGeneration = records.reduce((generation, record) => Math.max(generation, record.generation), 0);
     const generation = uint(sourceGeneration + 1, 'candidate generation', true);
@@ -265,7 +292,10 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     output.buffer = allocate(device, output.resources, 'ulg-exact-mass-candidate', rowCount * format.wordCount * 4);
     const params = allocate(device, temporary.resources, 'ulg-exact-mass-params', partition ? 32 : 16, UNIFORM | COPY_DST);
     const edges = allocate(device, temporary.resources, 'ulg-exact-mass-edges', Math.max(4, edgeBytes));
-    const joined = partition ? allocate(device, temporary.resources, 'ulg-exact-mass-joined-source', sourceRows * format.wordCount * 4) : source.buffer;
+    const snapshotSource = partition || held[0].rowOffset !== 0 || held[0].rowCount !== source.rowCount;
+    const joined = snapshotSource
+      ? allocate(device, temporary.resources, 'ulg-exact-mass-joined-source', sourceRows * format.wordCount * 4)
+      : source.buffer;
     const destinations = partition ? allocate(device, temporary.resources, 'ulg-exact-mass-destinations', sourceRows * 4) : null;
     const control = allocate(device, temporary.resources, 'ulg-exact-mass-control', 64);
     const verdict = allocate(device, temporary.resources, 'ulg-exact-mass-verdict', 64, MAP_READ | COPY_DST);
@@ -289,12 +319,14 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     if (partition) words.push(sourceRows, records.length, 0, 0);
     device.queue.writeBuffer(params, 0, new Uint32Array(words));
     const encoder = device.createCommandEncoder();
-    if (partition) {
+    if (snapshotSource) {
       let offset = 0;
-      for (const record of records) {
-        encoder.copyBufferToBuffer(record.buffer, 0, joined, offset, record.buffer.size);
-        offset += record.buffer.size;
+      for (const read of held) {
+        encoder.copyBufferToBuffer(read.buffer, read.byteOffset, joined, offset, read.byteLength);
+        offset += read.byteLength;
       }
+    }
+    if (partition) {
       encoder.copyBufferToBuffer(destinationBuffer, 0, destinations, 0, sourceRows * 4);
     }
     if (edgeCount) encoder.copyBufferToBuffer(edgeBuffer, 0, edges, 0, edgeBytes);
@@ -326,9 +358,10 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
       edgeCount, sourceGeneration, generation, ...(partition ? { sourceRowCount: sourceRows, sourceCount: records.length } : {}),
       observedBytes: 64, scope: 'mass-only', physicalPublicationAdmitted: false });
     const provenance = partition ? Object.freeze({ kind: 'mass-partition-transfer-candidate',
-      sources: Object.freeze(records.map(record => Object.freeze({ familyId: record.family.familyId,
-        generation: record.generation, rowCount: record.rowCount }))) })
-      : Object.freeze({ kind: 'mass-transfer-candidate', sourceFamilyId: source.family.familyId, sourceGeneration });
+      sources: Object.freeze(held.map(read => Object.freeze({ familyId: read.family.familyId,
+        generation: read.generation, rowOffset: read.rowOffset, rowCount: read.rowCount }))) })
+      : Object.freeze({ kind: 'mass-transfer-candidate', sourceFamilyId: source.family.familyId, sourceGeneration,
+        sourceRowOffset: held[0].rowOffset, sourceRowCount: held[0].rowCount });
     const family = receipt.ready ? mintFamily(output, provenance) : null;
     if (!family) destroy(output);
     return Object.freeze({ ...receipt, family });

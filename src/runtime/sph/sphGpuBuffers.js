@@ -2513,9 +2513,11 @@ export function uploadSphGpuParticleBuffers(device, packed) {
         massesKg: exactSeed.massesKg,
         provenance: { kind: 'initial-conditions', reference: exactSeed.reference } });
       const read = acquireSphExactMassRead({ family, device });
-      lifecycleRecord.exactMass = { family, read, owners: { count: 1, identityBuffer }, retired: false,
+      const range = Object.freeze({ rowOffset: read.rowOffset, rowCount: read.rowCount });
+      lifecycleRecord.exactMass = { family, read, range, identityOwners: { count: 1, identityBuffer }, retired: false,
         sourceFields: EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, upload[key]]) };
       Object.defineProperty(upload, 'exactMassInventory', { value: family, enumerable: true });
+      Object.defineProperty(upload, 'exactMassInventoryRange', { value: range, enumerable: true });
       for (const buffer of [stateBuffer, thermoBuffer, identityBuffer]) exactMassParticleBuffers.add(buffer);
     } catch (error) {
       if (family) releaseSphExactMassInventory(family);
@@ -2528,7 +2530,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
 
 export function sphGpuParticleUploadAdvertisesExactMass(upload) {
   return Boolean(upload && (sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass
-    || 'exactMassInventory' in upload || ['stateBuffer', 'thermoBuffer', 'identityBuffer']
+    || 'exactMassInventory' in upload || 'exactMassInventoryRange' in upload || ['stateBuffer', 'thermoBuffer', 'identityBuffer']
       .some(key => exactMassParticleBuffers.has(upload[key]))));
 }
 
@@ -2537,23 +2539,27 @@ function exactParticleMassOwnerMatches(upload, record) {
   if (!owner) return !sphGpuParticleUploadAdvertisesExactMass(upload);
   const borrowDescriptor = Object.getOwnPropertyDescriptor(upload, '__ulgActiveBorrowCount');
   return !owner.retired && upload.exactMassInventory === owner.family
+    && upload.exactMassInventoryRange === owner.range
     && borrowDescriptor?.get === record.borrowAccessors.get && borrowDescriptor?.set === record.borrowAccessors.set
     && owner.sourceFields.every(([key, value]) => upload[key] === value)
     && upload.stateBuffer === record.stateBuffer && upload.thermoBuffer === record.thermoBuffer
     && upload.identityBuffer === record.identityBuffer && upload.particleCount === record.particleCount
     && upload.topologyEpoch === record.topologyEpoch && upload.identityRevision === record.identityRevision
     && validateSphExactMassRead(owner.read, { device: record.device, family: owner.family,
-      format: owner.family.format, expectedGeneration: owner.family.generation });
+      format: owner.family.format, expectedGeneration: owner.family.generation,
+      rowOffset: owner.range.rowOffset, rowCount: record.particleCount });
 }
 
 function retireExactParticleMassOwner(record) {
   const owner = record?.exactMass;
   if (!owner || owner.retired) return;
   owner.retired = true;
+  // Numeric windows retain their root independently of carrier identity. Close
+  // fresh root admission; other original owners continue through held forks.
+  releaseSphExactMassInventory(owner.family);
   void releaseSphExactMassRead(owner.read);
-  if (--owner.owners.count === 0) {
-    releaseSphExactMassInventory(owner.family);
-    owner.owners.identityBuffer.destroy();
+  if (--owner.identityOwners.count === 0) {
+    owner.identityOwners.identityBuffer.destroy();
   }
 }
 
@@ -2571,7 +2577,7 @@ export function acquireSphParticleExactMassRead(upload, device, { mlsMpmParticle
       || !exactMassMechanicsOwnerMatches(mlsMpmParticleUpload, mlsOwner))) {
     throw new TypeError('Exact particle mechanics read requires its original live MLS owner');
   }
-  const read = acquireSphExactMassRead({ family: record.exactMass.family, device });
+  const read = forkSphExactMassRead(record.exactMass.read, { device });
   record.exactMassActiveReadCount++;
   if (mlsOwner) {
     mlsOwner.readCount++;
@@ -2621,7 +2627,8 @@ export function validateSphParticleExactMassRead(handle, { device, sourceSphUplo
     && !held.record.destroyed && exactParticleMassOwnerMatches(held.upload, held.record)
     && (!held.mlsOwner || exactMassMechanicsOwnerMatches(held.mlsOwner.upload, held.mlsOwner))
     && validateSphExactMassRead(handle.read, { device, family: held.record.exactMass.family,
-      format: handle.read.format, expectedGeneration: handle.read.generation }));
+      format: handle.read.format, expectedGeneration: handle.read.generation,
+      rowOffset: held.record.exactMass.read.rowOffset, rowCount: held.record.particleCount }));
 }
 
 /** Marking can only forbid legacy mutation; it does not authorize a successor. */
@@ -2821,27 +2828,30 @@ function installExactMassContinuationOwner({ target, existing, capture,
     throw new TypeError('Exact inventory continuation changed its retained row association');
   }
   const family = source.exactMass.family;
-  const read = acquireSphExactMassRead({ family, device: source.device });
+  const read = forkSphExactMassRead(capture.sourceRead.read, { device: source.device });
   let record = existing;
   try {
     if (!record) record = installSphGpuParticleBufferSetBorrowLifecycle(target, null);
     if (!record || record.destroyed || record.admissionClosed || record.destroyRequested
         || record.stateBuffer !== stateBuffer || record.thermoBuffer !== thermoBuffer
-        || ('exactMassInventory' in target && target.exactMassInventory !== family)) {
+        || ('exactMassInventory' in target && target.exactMassInventory !== family)
+        || ('exactMassInventoryRange' in target && target.exactMassInventoryRange !== source.exactMass.range)) {
       throw new TypeError('Exact inventory successor has no compatible private particle lifecycle');
     }
     const sourceFields = EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, target[key]]);
     markSphExactMassDerivedBuffers(capture.sourceRead, [target.stateBuffer, target.thermoBuffer, target.identityBuffer]);
     Object.defineProperty(target, 'exactMassInventory', { value: family, enumerable: true });
-    record.exactMass = { family, read, owners: source.exactMass.owners, retired: false, sourceFields,
+    Object.defineProperty(target, 'exactMassInventoryRange', { value: source.exactMass.range, enumerable: true });
+    record.exactMass = { family, read, range: source.exactMass.range,
+      identityOwners: source.exactMass.identityOwners, retired: false, sourceFields,
       active: !spatial, spatialPublicationPlan,
       validateSpatialCommit: spatial?.validateSchroederSpatialExactMassCommitPlan,
       validateSpatialPublication: spatial?.validateSchroederSpatialExactMassPublicationWindow };
-    record.exactMass.owners.count++;
+    record.exactMass.identityOwners.count++;
     return family;
   } catch (error) {
     if (record?.exactMass?.read === read) {
-      record.exactMass.owners.count--; record.exactMass = null;
+      record.exactMass.identityOwners.count--; record.exactMass = null;
     }
     void releaseSphExactMassRead(read);
     throw error;

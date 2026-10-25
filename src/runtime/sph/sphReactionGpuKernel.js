@@ -26,7 +26,7 @@ import {
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
-import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { sphReactionStepWgsl, createSphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { assertNoCondensableCaloricReactionTable } from './sphCondensableCaloricTable.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
@@ -2310,6 +2310,7 @@ function outputEnvelope({
   destroyOutputParticleBuffers = null,
   readbackMode = FULL_READBACK_MODE,
   sourceParticlePackMode = null,
+  reactionAllocationMode = null,
   reactionProposalNeighborMode = null,
   reactionParticleBinGrid = null,
   reactionParticleBins = null,
@@ -2465,6 +2466,7 @@ function outputEnvelope({
     gpuTimestampInstrumentation,
     readbackMode,
     sourceParticlePackMode,
+    reactionAllocationMode,
     reactionProposalNeighborMode,
     canonicalSpatialReactionDiscovery: canonicalReactionDiscovery?.admitted === true,
     canonicalSpatialReactionDiscoveryStatus: canonicalReactionDiscovery?.status ?? null,
@@ -3390,7 +3392,8 @@ async function readBuffer(device, sourceBuffer, byteLength, label) {
 // path and worker-lane prewarm both use this one descriptor factory so a warm
 // cache entry can never drift from the pipeline requested after a dynamic-law
 // envelope transition.
-export function sphReactionStepPipelineDescriptors() {
+export function sphReactionStepPipelineDescriptors({ sharedAllocation = false } = {}) {
+  const code = sharedAllocation ? createSphReactionStepWgsl({ sharedAllocation }) : sphReactionStepWgsl;
   const packBindings = [
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(4, 'read-only-storage'),
@@ -3429,7 +3432,8 @@ export function sphReactionStepPipelineDescriptors() {
     computeBufferBinding(8, 'storage'),
     computeBufferBinding(11, 'uniform'),
     computeBufferBinding(12, 'read-only-storage'),
-    computeBufferBinding(13, 'read-only-storage')
+    computeBufferBinding(13, 'read-only-storage'),
+    ...(sharedAllocation ? [computeBufferBinding(25, 'storage')] : [])
   ];
   const unpackBindings = [
     computeBufferBinding(2, 'storage'),
@@ -3440,38 +3444,46 @@ export function sphReactionStepPipelineDescriptors() {
   ];
   return Object.freeze({
     schema: 'peercompute.ulg.sph-reaction-step-pipeline-descriptors.v0',
+    ...(sharedAllocation ? {
+      initializePairs: Object.freeze({ cacheKey: 'ulg-sph-reaction-paired-v1',
+        label: 'ulg-sph-reaction-initialize-pairs', code, entryPoint: 'initialize_pairs',
+        bindings: [computeBufferBinding(0, 'read-only-storage'), computeBufferBinding(8, 'storage'),
+          computeBufferBinding(11, 'uniform'), computeBufferBinding(25, 'storage')] }),
+      allocatePairs: Object.freeze({ cacheKey: 'ulg-sph-reaction-paired-v1',
+        label: 'ulg-sph-reaction-allocate-pairs', code, entryPoint: 'allocate_pairs', bindings: reactionResolveBindings })
+    } : {}),
     pack: Object.freeze({
-      cacheKey: 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-pack-source',
-      code: sphReactionStepWgsl,
+      code,
       entryPoint: 'pack_source',
       bindings: packBindings
     }),
     particleBins: Object.freeze({
-      cacheKey: 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-particle-bins',
-      code: sphReactionStepWgsl,
+      code,
       entryPoint: 'bin_particles',
       bindings: reactionParticleBinBindings
     }),
     propose: Object.freeze({
-      cacheKey: 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-propose',
-      code: sphReactionStepWgsl,
+      code,
       entryPoint: 'propose',
       bindings: reactionBindings
     }),
     resolve: Object.freeze({
-      cacheKey: 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-resolve',
-      code: sphReactionStepWgsl,
+      code,
       entryPoint: 'resolve',
       bindings: reactionResolveBindings
     }),
     unpack: Object.freeze({
-      cacheKey: 'ulg-sph-reaction-step',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-step-paired-v1' : 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-unpack',
-      code: sphReactionStepWgsl,
+      code,
       entryPoint: 'unpack',
       bindings: unpackBindings
     })
@@ -3479,14 +3491,22 @@ export function sphReactionStepPipelineDescriptors() {
 }
 
 export function enumerateSphReactionStepPrewarmPipelineDescriptors() {
-  const table = sphReactionStepPipelineDescriptors();
-  return [
-    table.pack,
-    table.particleBins,
-    table.propose,
-    table.resolve,
-    table.unpack
-  ];
+  return [false, true].flatMap(sharedAllocation => {
+    const table = sphReactionStepPipelineDescriptors({ sharedAllocation });
+    return [table.pack, table.particleBins, table.propose,
+      table.initializePairs, table.allocatePairs, table.resolve, table.unpack].filter(Boolean);
+  });
+}
+
+const reactionPairAllocations = new WeakMap();
+/** Only the genuine reaction producer issues this short-lived summary read. */
+export function resolveSphReactionPairAllocationCapture(token, expected) {
+  const record = reactionPairAllocations.get(token);
+  if (!record) throw new TypeError('Reaction pair allocation requires its original producer token');
+  if (!record.live()) throw new TypeError('Reaction pair allocation producer has retired');
+  const changed = Object.entries(record.expected).filter(([key, value]) => expected[key] !== value).map(([key]) => key);
+  if (changed.length) throw new TypeError('Reaction pair allocation changed its summary tuple: ' + changed.join(', '));
+  return record.buffer;
 }
 
 const reactionSourceCaptures = new WeakMap();
@@ -3649,6 +3669,8 @@ export async function runSphReactionStepWebGpu({
   let reactionPlacementDestinationReturnScheduled = false;
   let reactionWarmArenaReleaseOwnedByOutput = false;
   const reactionOwnedBufferRegistry = new Set();
+  let pairAllocationBuffer = null, pairAllocationCapture = null;
+  const sharedAllocation = Boolean(reactionTable.energyAuthority);
   let localResponseGraphUpload = null;
   let reactionPrimarySubmissionObserved = false;
   let reactionResourceRegistryDrainCompletion = null;
@@ -3663,6 +3685,7 @@ export async function runSphReactionStepWebGpu({
   };
   const destroyReactionOwnedBuffer = (buffer) => {
     if (!buffer || !reactionOwnedBufferRegistry.delete(buffer)) return false;
+    if (buffer === pairAllocationBuffer && pairAllocationCapture) reactionPairAllocations.delete(pairAllocationCapture);
     try {
       if (buffer.mapState === 'mapped') buffer.unmap?.();
     } catch {
@@ -3970,7 +3993,22 @@ export async function runSphReactionStepWebGpu({
     dtSeconds
   }));
 
-  const pipelineDescriptors = sphReactionStepPipelineDescriptors();
+  if (sharedAllocation) {
+    const bytes = sphParticleState.particleCount * (8 + reactionTable.productTermCount * 8) * 16;
+    if (!Number.isSafeInteger(bytes) || bytes <= 0
+        || bytes > (device.limits?.maxStorageBufferBindingSize ?? 134217728)
+        || bytes > (device.limits?.maxBufferSize ?? 268435456)) {
+      throw new RangeError('Reaction pair allocation exceeds resident storage limits');
+    }
+    pairAllocationBuffer = registerReactionOwnedBuffer(device.createBuffer({
+      label: 'ulg-sph-reaction-pair-allocation', size: bytes,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    }));
+    tagWebGpuBufferDevice(pairAllocationBuffer, device);
+  }
+  const pipelineDescriptors = sphReactionStepPipelineDescriptors({ sharedAllocation });
+  const initializePairsInfo = sharedAllocation ? createCachedExplicitComputePipeline(device, pipelineDescriptors.initializePairs) : null;
+  const allocatePairsInfo = sharedAllocation ? createCachedExplicitComputePipeline(device, pipelineDescriptors.allocatePairs) : null;
   const packPipelineInfo = sourceUsesBorrowedGpuBuffers
     ? createCachedExplicitComputePipeline(device, pipelineDescriptors.pack)
     : null;
@@ -4019,7 +4057,8 @@ export async function runSphReactionStepWebGpu({
       { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
       { binding: 11, resource: { buffer: paramsBuffer } },
       { binding: 12, resource: { buffer: graphNodeBuffer } },
-      { binding: 13, resource: { buffer: graphSampleBuffer } }
+      { binding: 13, resource: { buffer: graphSampleBuffer } },
+      ...(sharedAllocation ? [{ binding: 25, resource: { buffer: pairAllocationBuffer } }] : [])
     ]
   });
   const unpackBindEntries = (layout) => ({
@@ -4060,6 +4099,12 @@ export async function runSphReactionStepWebGpu({
   const proposeBindGroup = proposePipelineInfo
     ? device.createBindGroup(proposeBindEntries(proposePipelineInfo.bindGroupLayout))
     : null;
+  const initializePairsGroup = sharedAllocation ? device.createBindGroup({ layout: initializePairsInfo.bindGroupLayout,
+    entries: [{ binding: 0, resource: { buffer: packedParticleRecordBuffer } },
+      { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
+      { binding: 11, resource: { buffer: paramsBuffer } },
+      { binding: 25, resource: { buffer: pairAllocationBuffer } }] }) : null;
+  const allocatePairsGroup = sharedAllocation ? device.createBindGroup(resolveBindEntries(allocatePairsInfo.bindGroupLayout)) : null;
   const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
   const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
   const encoder = device.createCommandEncoder();
@@ -4098,6 +4143,12 @@ export async function runSphReactionStepWebGpu({
   if (proposePipelineInfo && proposeBindGroup) {
     pass.setPipeline(proposePipelineInfo.pipeline);
     pass.setBindGroup(0, proposeBindGroup);
+    pass.dispatchWorkgroups(particleWorkgroups);
+  }
+  if (sharedAllocation) {
+    pass.setPipeline(initializePairsInfo.pipeline); pass.setBindGroup(0, initializePairsGroup);
+    pass.dispatchWorkgroups(particleWorkgroups);
+    pass.setPipeline(allocatePairsInfo.pipeline); pass.setBindGroup(0, allocatePairsGroup);
     pass.dispatchWorkgroups(particleWorkgroups);
   }
   pass.setPipeline(resolvePipeline);
@@ -4260,7 +4311,19 @@ export async function runSphReactionStepWebGpu({
               sourceMechanicsBuffer: summarySourceMechanicsBuffer
             })
           : null;
+      if (sharedAllocation) {
+        pairAllocationCapture = Object.freeze({ schema: 'peercompute.ulg.reaction-pair-allocation-capture.v1' });
+        reactionPairAllocations.set(pairAllocationCapture, { buffer: pairAllocationBuffer,
+          live: () => reactionOwnedBufferRegistry.has(pairAllocationBuffer),
+          expected: { device, reactionTable, proposalBuffer, dtSeconds,
+            particleCount: sphParticleState.particleCount,
+            sourceStateBuffer: summarySourceStateBuffer, sourceThermoBuffer: summarySourceThermoBuffer,
+            sourceMechanicsBuffer: summarySourceMechanicsBuffer,
+            nextStateBuffer: continuationStateBuffer, nextThermoBuffer: continuationThermoBuffer,
+            nextMechanicsBuffer: canonicalReactionProductPlacementAuthority ? continuationMechanicsBuffer : null } });
+      }
       reactionSummary = await runSphReactionSummaryWebGpu({
+        pairAllocationCapture,
         device,
         sphParticleState,
         reactionTable,
@@ -4353,7 +4416,9 @@ export async function runSphReactionStepWebGpu({
         scratchFinalConsumer
         ?? error?.queueOrderedFinalConsumerCapability
         ?? null;
-      if (canonicalReactionDiscoveryEnabled) {
+      // A physical reaction can leave products entirely in the event history.
+      // Returning its debited carriers without that history would lose mass.
+      if (canonicalReactionDiscoveryEnabled || sharedAllocation) {
         if (scratchFinalConsumer && scratchCleanupClaim) {
           try {
             releaseSubmittedWorkCleanupQueueOrdered(
@@ -4495,6 +4560,7 @@ export async function runSphReactionStepWebGpu({
         continuationMechanicsBuffer
       ];
   scratchBuffers.push(
+    pairAllocationBuffer,
     packedParticleRecordBuffer,
     outPackedParticleRecordBuffer,
     localReactionRecordBuffer,
@@ -4854,6 +4920,7 @@ export async function runSphReactionStepWebGpu({
     reactionWarmArenaLease,
     reactionWarmArena,
     readbackTelemetry: readbackTelemetry.snapshot(),
+    reactionAllocationMode: sharedAllocation ? 'pair-owned-physical-energy' : 'legacy-endpoint-resolve',
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays',
     gpuTimestampInstrumentation: timestampProfilingActive

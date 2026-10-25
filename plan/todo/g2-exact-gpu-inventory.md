@@ -211,16 +211,44 @@ final cleanup; neither API can deliver a successful family destroyed during
 those cleanup fences. The first native attempt stopped at a Vite-triggered
 navigation race before GPU execution; the unchanged retry passed.
 
-The next physical producer change is one accepted reaction allocation owned by
-the mutual pair. `wgsl.js` currently recomputes extent/debits in both `resolve`
-invocations and again in product emission; the changed-projection helper in
-`sphReactionEnergyWgsl.js` is not a complete paired commit receipt. Choose the
-executed debit once, retain exact reactant remainders, partition products by
-exact term identity with an explicit residual, validate both endpoint writes,
-and have events, gas/atom diagnostics and placement consume that same record.
-The existing physical-energy f32 no-op check must not veto an admitted exact
-packet merely because its projection is unchanged. Mass accounting alone does
-not replace element/charge or coupled energy/momentum acceptance.
+## Pair-owned physical reaction allocation
+
+The existing physical-energy reaction producer now chooses one accepted
+allocation per mutual pair. A separate initialization dispatch copies every
+source row and clears every allocation record; the lower endpoint then stages
+both endpoint writes and full product-term payloads before publishing a shared
+acceptance marker. Late endpoint/event validation failure restores both source
+rows. The later resolver cannot overwrite either physical endpoint. Legacy
+calls retain their existing program; mixed legacy/physical caloric tables remain
+rejected by the existing admission guard.
+
+Product events copy those stored payloads. Product inventory, compact summary,
+gas and atom diagnostics read the same allocation. Distinct repeated-material
+terms retain their global term indices; gas rows do not double count a species.
+Single-product reactions can fill both freed parent slots. A failed physical
+summary rejects the candidate, preserving the original source instead of
+returning debited particles without their residual products. The private
+allocation capability is tied to the producer's exact source/destination tuple
+and original scratch lifetime; copied or missing capabilities reject before
+allocation. Both program variants are included in prewarm enumeration.
+
+This is still the existing **f32 physical-energy domain**, not exact reaction
+inventory. Native `g2-reaction-allocation-20261025-djvxUT/native-r7.json` passes
+15 execution cases plus mixed-table admission rejection. It covers partial and
+full consumption, one/two freed slots, repeated gas terms, swapped particles,
+reference-energy shifts, late joint rollback, an actual pair spanning indices
+63/64, full/no-full output equality, term-ledger equality and two retained
+thermal continuations. All 27 step/canonical-summary pipeline variants compile
+on the native GPU (`prewarm-r1.json`). No plume or exact-mass admission follows.
+
+Next connect one executed integer debit and exact product/residual partition
+to this actual pair producer. Carrier and residual history must hold disjoint
+authenticated read windows over the same numeric candidate without duplicating
+its mass or retaining unrelated particle buffers. Extend original numeric
+ownership and existing physical owners, not a public registration shortcut.
+Preserve element/charge and coupled energy/momentum acceptance. The current
+f32 no-op guard remains until an actual exact output and residual owner can
+represent a packet whose f32 mass projection is unchanged.
 
 Product history must carry only the remaining unplaced partition after actual
 placement. Its existing retained owner, append/compaction permutation, logical

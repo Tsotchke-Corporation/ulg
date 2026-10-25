@@ -269,20 +269,21 @@ test('reaction-step prewarm covers one fixed material-agnostic pipeline family',
     'peercompute.ulg.sph-reaction-step-pipeline-descriptors.v0'
   );
   const descriptors = enumerateSphReactionStepPrewarmPipelineDescriptors();
-  assert.equal(descriptors.length, 5);
-  assert.deepEqual(
-    descriptors.map((descriptor) => descriptor.entryPoint),
-    ['pack_source', 'bin_particles', 'propose', 'resolve', 'unpack']
-  );
-  assert.equal(
-    new Set(descriptors.map((descriptor) => descriptor.code)).size,
-    1,
-    'all reaction-table passes share the same generic WGSL module'
-  );
+  assert.equal(descriptors.length, 12);
+  assert.deepEqual(descriptors.map((descriptor) => descriptor.entryPoint), [
+    'pack_source', 'bin_particles', 'propose', 'resolve', 'unpack',
+    'pack_source', 'bin_particles', 'propose', 'initialize_pairs', 'allocate_pairs', 'resolve', 'unpack'
+  ]);
+  assert.equal(new Set(descriptors.map((descriptor) => descriptor.code)).size, 2,
+    'legacy and pair-owned physical reactions each share a generic module');
   for (const descriptor of descriptors) {
     assertCompleteDescriptor(descriptor, descriptor.entryPoint);
-    assert.equal(descriptor.cacheKey, 'ulg-sph-reaction-step');
   }
+  const paired = sphReactionStepPipelineDescriptors({ sharedAllocation: true });
+  assert.deepEqual(descriptors.slice(5), [paired.pack, paired.particleBins, paired.propose,
+    paired.initializePairs, paired.allocatePairs, paired.resolve, paired.unpack]);
+  assert.ok(paired.allocatePairs.bindings.some(binding => binding.binding === 25));
+
 });
 
 test('reaction-discovery prewarm covers both envelope routes for both live directory ABIs', () => {
@@ -348,7 +349,7 @@ test('segmented reaction placement exposes one fixed 22-pass generic warm set', 
   }
 });
 
-test('canonical reaction summary shares twelve passes and warms both ABI classifiers', () => {
+test('canonical reaction summary warms both allocation modes and ABI classifiers', () => {
   const v1 = sphReactionCanonicalSummaryPipelineDescriptors({
     directoryAbiVersion: 1
   });
@@ -361,10 +362,13 @@ test('canonical reaction summary shares twelve passes and warms both ABI classif
   );
   const descriptors =
     enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors();
-  assert.equal(descriptors.length, 14);
+  assert.equal(descriptors.length, 15);
   const cacheKeys = new Set(descriptors.map((descriptor) => descriptor.cacheKey));
   assert.ok(cacheKeys.has(v1.placementClassification.cacheKey));
   assert.ok(cacheKeys.has(v2.placementClassification.cacheKey));
+  const paired = sphReactionCanonicalSummaryPipelineDescriptors({ sharedAllocation: true });
+  assert.ok(descriptors.some(descriptor => descriptor.code === paired.productEvent.code
+    && descriptor.cacheKey === paired.productEvent.cacheKey));
   for (const descriptor of descriptors) {
     assertCompleteDescriptor(descriptor, descriptor.entryPoint);
     assert.doesNotMatch(

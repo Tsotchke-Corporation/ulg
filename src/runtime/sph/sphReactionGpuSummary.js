@@ -63,6 +63,7 @@ import {
   sphReactionSummaryFinalizeWgsl,
   sphReactionSummaryPartialsWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { createSphReactionSummaryPartialsWgsl, createSphReactionProductInventoryWgsl, createSphReactionProductEventWgsl, createSphReactionAtomResidualWgsl, createSphReactionGasSpeciesSummaryWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
   sphReactionProductEventSpatialClassificationV2Wgsl,
   sphReactionProductEventSpatialClassificationWgsl,
@@ -1927,7 +1928,7 @@ export function resolveSphReactionProductPlacementClassificationProgram(
 // chemistry and scenario identity remain resident table rows. The live path
 // and lane prewarm both consume this exact descriptor table.
 export function sphReactionCanonicalSummaryPipelineDescriptors({
-  directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_V2_VERSION
+  directoryAbiVersion = SCHROEDER_SPATIAL_EPOCH_V2_VERSION, sharedAllocation = false
 } = {}) {
   const classificationProgram =
     reactionProductPlacementClassificationProgramForDirectoryAbiVersion(
@@ -1981,9 +1982,9 @@ export function sphReactionCanonicalSummaryPipelineDescriptors({
       'peercompute.ulg.sph-reaction-canonical-summary-pipeline-descriptors.v0',
     directoryAbiVersion,
     productEvent: descriptor({
-      cacheKey: 'ulg-sph-reaction-product-event-v2-current-volume',
+      cacheKey: sharedAllocation ? 'ulg-sph-reaction-product-event-paired-v1' : 'ulg-sph-reaction-product-event-v2-current-volume',
       label: 'ulg-sph-reaction-product-event',
-      code: sphReactionProductEventWgsl,
+      code: sharedAllocation ? createSphReactionProductEventWgsl({ sharedAllocation }) : sphReactionProductEventWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -1994,7 +1995,8 @@ export function sphReactionCanonicalSummaryPipelineDescriptors({
         computeBufferBinding(5, 'read-only-storage'),
         computeBufferBinding(6, 'storage'),
         computeBufferBinding(7, 'uniform'),
-        computeBufferBinding(8, 'read-only-storage')
+        computeBufferBinding(8, 'read-only-storage'),
+        ...(sharedAllocation ? [computeBufferBinding(9, 'read-only-storage')] : [])
       ]
     }),
     compactCount: descriptor({
@@ -2127,22 +2129,24 @@ export function enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors({
 } = {}) {
   const descriptors = new Map();
   for (const directoryAbiVersion of directoryAbiVersions) {
-    const table = sphReactionCanonicalSummaryPipelineDescriptors({
-      directoryAbiVersion
-    });
-    for (const [field, descriptor] of Object.entries(table)) {
-      if (
-        field === 'schema'
-        || field === 'directoryAbiVersion'
-        || !descriptor?.cacheKey
-      ) continue;
-      const identity = JSON.stringify([
-        descriptor.cacheKey,
-        descriptor.label,
-        descriptor.entryPoint,
-        descriptor.bindings
-      ]);
-      if (!descriptors.has(identity)) descriptors.set(identity, descriptor);
+    for (const sharedAllocation of [false, true]) {
+      const table = sphReactionCanonicalSummaryPipelineDescriptors({
+        directoryAbiVersion, sharedAllocation
+      });
+      for (const [field, descriptor] of Object.entries(table)) {
+        if (
+          field === 'schema'
+          || field === 'directoryAbiVersion'
+          || !descriptor?.cacheKey
+        ) continue;
+        const identity = JSON.stringify([
+          descriptor.cacheKey,
+          descriptor.label,
+          descriptor.entryPoint,
+          descriptor.bindings
+        ]);
+        if (!descriptors.has(identity)) descriptors.set(identity, descriptor);
+      }
     }
   }
   return [...descriptors.values()];
@@ -2151,7 +2155,7 @@ export function enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors({
 // Summary is imported by the SS proposal graph. Loading the thermal-backed
 // reaction authority eagerly here re-enters thermal WGSL initialization before
 // its proposal constants exist. Validate at execution through one cached module.
-let reactionEnergyAuthorityModule;
+let reactionEnergyAuthorityModule, reactionPairProducerModule;
 
 export async function runSphReactionSummaryWebGpu({
   device,
@@ -2165,6 +2169,7 @@ export async function runSphReactionSummaryWebGpu({
   nextMechanicsBuffer = null,
   reactionRecordBuffer = null,
   proposalBuffer = null,
+  pairAllocationCapture = null,
   boxDimsM = null,
   dtSeconds = 0,
   readProductEvents = false,
@@ -2196,6 +2201,19 @@ export async function runSphReactionSummaryWebGpu({
   }
 
   const particleCount = sphParticleState.particleCount;
+  const sharedAllocation = pairAllocationCapture !== null;
+  if (reactionTable.energyAuthority && !sharedAllocation) {
+    throw new TypeError('Physical reaction summaries require the genuine pair allocation');
+  }
+  const pairAllocationBuffer = sharedAllocation
+    ? (await (reactionPairProducerModule ??= import('./sphReactionGpuKernel.js')))
+      .resolveSphReactionPairAllocationCapture(pairAllocationCapture, { device, reactionTable, proposalBuffer,
+        dtSeconds, particleCount, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
+        nextStateBuffer, nextThermoBuffer, nextMechanicsBuffer })
+    : null;
+  const pairBindings = sharedAllocation ? [computeBufferBinding(9, 'read-only-storage')] : [];
+  const pairEntries = sharedAllocation ? [{ binding: 9, resource: { buffer: pairAllocationBuffer } }] : [];
+
   const exactConsumerClaims =
     Array.isArray(queueOrderedProducerClaims)
       ? queueOrderedProducerClaims
@@ -2326,7 +2344,8 @@ export async function runSphReactionSummaryWebGpu({
     placementClassificationProgram
       ? sphReactionCanonicalSummaryPipelineDescriptors({
           directoryAbiVersion:
-            placementClassificationProgram.directoryAbiVersion
+            placementClassificationProgram.directoryAbiVersion,
+          sharedAllocation
         })
       : null;
   const reactionWarmArena = reactionWarmArenaLease
@@ -2765,9 +2784,9 @@ export async function runSphReactionSummaryWebGpu({
     let finalizeBindGroup = null;
     if (shouldReadCompactSummary) {
       const partialsInfo = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-summary-partials',
+        cacheKey: sharedAllocation ? 'ulg-sph-reaction-summary-partials-paired-v1' : 'ulg-sph-reaction-summary-partials',
         label: 'ulg-sph-reaction-summary-partials',
-        code: sphReactionSummaryPartialsWgsl,
+        code: sharedAllocation ? createSphReactionSummaryPartialsWgsl({ sharedAllocation }) : sphReactionSummaryPartialsWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -2777,7 +2796,8 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(4, 'read-only-storage'),
           computeBufferBinding(5, 'storage'),
           computeBufferBinding(6, 'uniform'),
-          computeBufferBinding(7, 'read-only-storage')
+          computeBufferBinding(7, 'read-only-storage'),
+          ...pairBindings
         ]
       });
       partialsPipeline = partialsInfo.pipeline;
@@ -2791,7 +2811,8 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 4, resource: { buffer: recordsBuffer } },
           { binding: 5, resource: { buffer: partialsBuffer } },
           { binding: 6, resource: { buffer: paramsBuffer } },
-          { binding: 7, resource: { buffer: proposalsBuffer } }
+          { binding: 7, resource: { buffer: proposalsBuffer } },
+          ...pairEntries
         ]
       });
       const finalizeInfo = createCachedExplicitComputePipeline(device, {
@@ -2825,9 +2846,9 @@ export async function runSphReactionSummaryWebGpu({
     let atomResidualBindGroup = null;
     if (shouldRunProductInventory) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-product-inventory',
+        cacheKey: sharedAllocation ? 'ulg-sph-reaction-product-inventory-paired-v1' : 'ulg-sph-reaction-product-inventory',
         label: 'ulg-sph-reaction-product-inventory',
-        code: sphReactionProductInventoryWgsl,
+        code: sharedAllocation ? createSphReactionProductInventoryWgsl({ sharedAllocation }) : sphReactionProductInventoryWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -2837,7 +2858,8 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(4, 'read-only-storage'),
           computeBufferBinding(5, 'read-only-storage'),
           computeBufferBinding(6, 'storage'),
-          computeBufferBinding(7, 'uniform')
+          computeBufferBinding(7, 'uniform'),
+          ...pairBindings
         ]
       });
       productInventoryPipeline = pipeline;
@@ -2851,14 +2873,15 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 4, resource: { buffer: recordsBuffer } },
           { binding: 5, resource: { buffer: proposalsBuffer } },
           { binding: 6, resource: { buffer: productInventoryBuffer } },
-          { binding: 7, resource: { buffer: paramsBuffer } }
+          { binding: 7, resource: { buffer: paramsBuffer } },
+          ...pairEntries
         ]
       });
     }
     if (useProductEventBuffer) {
       const productEventDescriptor =
         canonicalSummaryPipelineDescriptors?.productEvent
-        ?? sphReactionCanonicalSummaryPipelineDescriptors().productEvent;
+        ?? sphReactionCanonicalSummaryPipelineDescriptors({ sharedAllocation }).productEvent;
       const { pipeline, bindGroupLayout } =
         createCachedExplicitComputePipeline(device, productEventDescriptor);
       productEventPipeline = pipeline;
@@ -2873,7 +2896,8 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 5, resource: { buffer: proposalsBuffer } },
           { binding: 6, resource: { buffer: productEventEmissionBuffer } },
           { binding: 7, resource: { buffer: paramsBuffer } },
-          { binding: 8, resource: { buffer: sourceMechanicsBuffer } }
+          { binding: 8, resource: { buffer: sourceMechanicsBuffer } },
+          ...pairEntries
         ]
       });
     }
@@ -3245,9 +3269,9 @@ export async function runSphReactionSummaryWebGpu({
     }
     if (shouldRunAtomResidual) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-atom-residual',
+        cacheKey: sharedAllocation ? 'ulg-sph-reaction-atom-residual-paired-v1' : 'ulg-sph-reaction-atom-residual',
         label: 'ulg-sph-reaction-atom-residual',
-        code: sphReactionAtomResidualWgsl,
+        code: sharedAllocation ? createSphReactionAtomResidualWgsl({ sharedAllocation }) : sphReactionAtomResidualWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -3257,7 +3281,8 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(4, 'storage'),
           computeBufferBinding(5, 'uniform'),
           computeBufferBinding(6, 'read-only-storage'),
-          computeBufferBinding(7, 'read-only-storage')
+          computeBufferBinding(7, 'read-only-storage'),
+          ...pairBindings
         ]
       });
       atomResidualPipeline = pipeline;
@@ -3271,15 +3296,16 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 4, resource: { buffer: atomResidualBuffer } },
           { binding: 5, resource: { buffer: paramsBuffer } },
           { binding: 6, resource: { buffer: nextStateBuffer } },
-          { binding: 7, resource: { buffer: nextThermoBuffer } }
+          { binding: 7, resource: { buffer: nextThermoBuffer } },
+          ...pairEntries
         ]
       });
     }
     if (shouldRunGasSpecies) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-reaction-gas-species-summary',
+        cacheKey: sharedAllocation ? 'ulg-sph-reaction-gas-species-summary-paired-v1' : 'ulg-sph-reaction-gas-species-summary',
         label: 'ulg-sph-reaction-gas-species-summary',
-        code: sphReactionGasSpeciesSummaryWgsl,
+        code: sharedAllocation ? createSphReactionGasSpeciesSummaryWgsl({ sharedAllocation }) : sphReactionGasSpeciesSummaryWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -3289,7 +3315,8 @@ export async function runSphReactionSummaryWebGpu({
           computeBufferBinding(4, 'read-only-storage'),
           computeBufferBinding(5, 'read-only-storage'),
           computeBufferBinding(6, 'storage'),
-          computeBufferBinding(7, 'uniform')
+          computeBufferBinding(7, 'uniform'),
+          ...pairBindings
         ]
       });
       gasSpeciesPipeline = pipeline;
@@ -3303,7 +3330,8 @@ export async function runSphReactionSummaryWebGpu({
           { binding: 4, resource: { buffer: recordsBuffer } },
           { binding: 5, resource: { buffer: proposalsBuffer } },
           { binding: 6, resource: { buffer: gasSpeciesBuffer } },
-          { binding: 7, resource: { buffer: paramsBuffer } }
+          { binding: 7, resource: { buffer: paramsBuffer } },
+          ...pairEntries
         ]
       });
     }

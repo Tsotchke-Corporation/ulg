@@ -10,6 +10,7 @@ import { createSphState } from '../src/runtime/sph/sphState.js';
 import { buildSphThermalClosureGraphBuffers, buildSphThermalMaterialTable,
   buildSphThermalPhaseResponseTable, runSphThermalStepCpu } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable, runSphReactionStepCpu, runSphReactionStepWebGpu } from '../src/runtime/sph/sphReactionGpuKernel.js';
+import { runSphReactionSummaryWebGpu } from '../src/runtime/sph/sphReactionGpuSummary.js';
 
 // Manufactured atom/mass-balanced chemistry, NOT reference measurements or a
 // water/peroxide fit. The oracle below independently evaluates constant-Cv
@@ -777,3 +778,66 @@ for (const [name, prepare, expectedError] of [
     assert.deepEqual(calls, [], 'untrusted cold artifacts never touch any GPU operation');
   });
 }
+
+for (const [name, pairAllocationCapture, expectedError] of [
+  ['missing allocation', null, /require the genuine pair allocation/],
+  ['unissued allocation', {}, /requires its original producer token/],
+  ['copied-looking allocation', Object.freeze({ schema: 'peercompute.ulg.reaction-pair-allocation-capture.v1' }),
+    /requires its original producer token/]
+]) {
+  test(`physical GPU summary rejects ${name} before allocations or submissions`, async () => {
+    const f = fixture();
+    const calls = [];
+    const touched = (name) => () => { calls.push(name); throw new Error(`unexpected GPU ${name}`); };
+    const device = { createBuffer: touched('allocation'), createShaderModule: touched('shader'),
+      createCommandEncoder: touched('encoder'), queue: { writeBuffer: touched('upload'), submit: touched('submission') } };
+    await assert.rejects(runSphReactionSummaryWebGpu({ device, sphParticleState: f.sphParticleState,
+      reactionTable: f.reactionTable, sourceStateBuffer: {}, sourceThermoBuffer: {}, sourceMechanicsBuffer: {},
+      nextStateBuffer: {}, nextThermoBuffer: {}, proposalBuffer: {}, pairAllocationCapture }), expectedError);
+    assert.deepEqual(calls, []);
+  });
+}
+
+test('physical summary failure rejects the candidate and retains allocation until the submitted work settles', async () => {
+  const f = fixture({ masses: [.012, .064] });
+  const originalState = f.sphParticleState.state.slice();
+  const buffers = [], dispatches = [];
+  let submitted = 0, settle;
+  const fence = new Promise(resolve => { settle = resolve; });
+  const device = {
+    limits: { maxBufferSize: 1 << 28, maxStorageBufferBindingSize: 1 << 28 },
+    queue: { writeBuffer() {}, submit() { submitted++; }, onSubmittedWorkDone() { return fence; } },
+    createBuffer({ label, size }) {
+      if (label === 'ulg-sph-reaction-summary-partials') throw new Error('injected physical summary failure');
+      const buffer = { label, size, mapState: 'unmapped', destroyCount: 0,
+        destroy() { this.destroyCount++; } };
+      buffers.push(buffer); return buffer;
+    },
+    createShaderModule() { return {}; }, createBindGroupLayout() { return {}; },
+    createPipelineLayout() { return {}; }, createComputePipeline(descriptor) { return { label: descriptor.label }; },
+    createBindGroup() { return {}; },
+    createCommandEncoder() { return {
+      beginComputePass() { return { setPipeline(pipeline) { dispatches.push(pipeline.label); },
+        setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; },
+      copyBufferToBuffer() {}, finish() { return {}; }
+    }; }
+  };
+  let failure;
+  try {
+    await runSphReactionStepWebGpu({ device, sphParticleState: f.sphParticleState,
+      mlsMpmParticleState: f.mlsMpmParticleState, reactionTable: f.reactionTable,
+      thermalMaterialTable: f.thermalMaterialTable, dtSeconds: .00001,
+      readbackMode: 'no-full-readback', readCompactReactionSummary: true, retainOutputParticleBuffers: true });
+  } catch (error) { failure = error; }
+  assert.match(failure?.message ?? '', /injected physical summary failure/);
+  assert.equal(submitted, 1, 'failure follows the actual primary submission');
+  assert.ok(dispatches.indexOf('ulg-sph-reaction-initialize-pairs') < dispatches.indexOf('ulg-sph-reaction-allocate-pairs'));
+  assert.ok(dispatches.indexOf('ulg-sph-reaction-allocate-pairs') < dispatches.indexOf('ulg-sph-reaction-resolve'));
+  const allocation = buffers.find(buffer => buffer.label === 'ulg-sph-reaction-pair-allocation');
+  assert.ok(allocation);
+  assert.ok(buffers.every(buffer => buffer.destroyCount === 0), 'pending submitted work still owns every local buffer');
+  assert.deepEqual(f.sphParticleState.state, originalState, 'failure leaves the original source available');
+  settle();
+  assert.equal(await failure.reactionResourceCleanupCompletion, true);
+  assert.ok(buffers.every(buffer => buffer.destroyCount === 1), 'failed candidate is retired exactly once');
+});

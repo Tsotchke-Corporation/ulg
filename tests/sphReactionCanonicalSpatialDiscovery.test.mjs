@@ -327,7 +327,7 @@ function createActiveNodeList(device) {
 
 test('canonical reaction resolve fail-closes every post-thermal mutation precondition', () => {
   const resolveStart = sphReactionStepWgsl.indexOf(
-    'fn resolve(@builtin(global_invocation_id)'
+    'fn resolve_particle('
   );
   const resolveEnd = sphReactionStepWgsl.indexOf(
     'fn unpack(@builtin(global_invocation_id)',

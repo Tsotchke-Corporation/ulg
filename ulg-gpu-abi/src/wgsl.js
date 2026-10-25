@@ -13,6 +13,7 @@ import {
   sphDispersedMediumOpticsWgsl
 } from './sphDispersedMediumWgsl.js';
 import { sphReactionEnergyWgsl, sphReactionAppliedPairWgsl } from './sphReactionEnergyWgsl.js';
+import { sphReactionPairWriterWgsl, sphReactionPairReaderWgsl } from './sphReactionPairAllocationWgsl.js';
 import { sphGasConstitutiveWgsl } from './sphGasConstitutiveWgsl.js';
 
 export {
@@ -1513,9 +1514,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-export const sphReactionStepWgsl = `
+export function createSphReactionStepWgsl({ sharedAllocation = false } = {}) {
+  return `
 ${sphReactionEnergyWgsl}
 ${sphGasConstitutiveWgsl}
+${sharedAllocation ? sphReactionPairWriterWgsl : ''}
 struct ReactionParams {
   particle_count: u32,
   reaction_count: u32,
@@ -2804,14 +2807,19 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   proposals[particle_index] = best;
 }
 
-@compute @workgroup_size(64)
-fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let particle_index = global_id.x;
+fn resolve_particle(particle_index: u32, pair_only: bool) {
   if (particle_index >= params.particle_count) {
     return;
   }
 
   let proposal = proposals[particle_index];
+  ${sharedAllocation ? `if (pair_only) {
+    if (!all(abs(proposal) <= vec4<f32>(3.402823e38))
+      || proposal.x <= f32(particle_index) || proposal.x >= f32(params.particle_count)
+      || proposal.x != floor(proposal.x) || proposal.y < 0.0
+      || proposal.y >= f32(params.reaction_count) || proposal.y != floor(proposal.y)) { return; }
+    if (!reaction_energy_enabled(u32(proposal.y))) { return; }
+  }` : ''}
   if (
     !all(vec4<bool>(
       reaction_value_finite(proposal.x),
@@ -3131,6 +3139,13 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
   }
 
+  ${sharedAllocation ? `if (pair_only) {
+    commit_allocated_pair(source0_index, source1_index, reaction_index, extent_mol,
+      source0_consumed, source1_consumed, raw_product_mass, consumed_current_volume,
+      product_temperature.x, product_com_velocity);
+    return;
+  }` : ''}
+
   var emits_product = false;
   var local_product_slot = 0u;
   var emitted_product_mass = 0.0;
@@ -3197,6 +3212,24 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
+fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.particle_count) { return; }
+  ${sharedAllocation ? `let proposal = proposals[id.x];
+  if (proposal.y >= 0.0 && proposal.y < f32(params.reaction_count)
+    && proposal.y == floor(proposal.y) && reaction_energy_enabled(u32(proposal.y))) {
+    // The pair dispatch already selected BOTH physical outputs, including
+    // rejection. Do not overwrite either endpoint with an independent result.
+    return;
+  }` : ''}
+  resolve_particle(id.x, false);
+}
+${sharedAllocation ? `
+@compute @workgroup_size(64)
+fn allocate_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
+  resolve_particle(id.x, true);
+}` : ''}
+
+@compute @workgroup_size(64)
 fn unpack(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let particle_index = global_id.x;
   if (particle_index >= params.particle_count) {
@@ -3214,6 +3247,9 @@ fn unpack(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 }
 `;
+
+}
+export const sphReactionStepWgsl = createSphReactionStepWgsl();
 
 export const sphReactionProductEventCompactWgsl = `
 struct ProductEventCompactParams {
@@ -5309,9 +5345,14 @@ export const sphReactionProductEventPlacementWgsl =
     .replaceAll('// ULG_PRODUCT_PLACEMENT_COMMIT_BEGIN\n', '')
     .replaceAll('// ULG_PRODUCT_PLACEMENT_COMMIT_END\n', '');
 
-export const sphReactionSummaryPartialsWgsl = `
+export function createSphReactionSummaryPartialsWgsl({ sharedAllocation = false } = {}) {
+  return `
 ${sphReactionEnergyWgsl}
-${sphReactionAppliedPairWgsl}
+${sharedAllocation ? sphReactionPairReaderWgsl + `
+fn physical_reaction_pair_applied(rx: u32, a: u32, b: u32) -> bool {
+  if (!reaction_energy_enabled(rx)) { return true; }
+  return pair_allocation_ready(rx, a, b);
+}` : sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -5682,6 +5723,25 @@ fn main(
               && partner_term.molar_mass > 0.0
               && product_term_count > 0u;
             if (has_stoichiometry && physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) {
+${sharedAllocation ? `              if (reaction_energy_enabled(reaction_index)) {
+                let base = pair_allocation_base(particle_index);
+                let chosen = pair_allocations[base + 1u];
+                let products = pair_product_totals(particle_index, reaction_index, 0.0, false);
+                let gas = pair_product_totals(particle_index, reaction_index, 0.0, true);
+                wg_canonical_events[local] = 1.0;
+                wg_consumed_reactant_mass[local] = chosen.y + chosen.z;
+                wg_expected_product_mass[local] = products.x;
+                wg_raw_product_mass[local] = chosen.w;
+                wg_ledger_visible_product_mass[local] = products.z;
+                wg_ledger_unplaced_product_mass[local] = products.w;
+                wg_ledger_gas_product_mass[local] = gas.x;
+                wg_ledger_visible_gas_product_mass[local] = gas.z;
+                wg_ledger_unplaced_gas_product_mass[local] = gas.w;
+                wg_sealed_box_gas_product_moles[local] = gas.y;
+                wg_reaction_heat[local] = -reaction_row1(reaction_index).x * (chosen.y + chosen.z);
+                wg_ledger_mass_residual[local] = chosen.w - products.x;
+                wg_ledger_ready_events[local] = 1.0;
+              } else {` : ''}
               let self_extent = source_pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
               let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
               // Mirror of the apply kernel's flux-capped extent so ledger and
@@ -5736,6 +5796,7 @@ fn main(
               } else {
                 wg_ledger_problem_events[local] = 1.0;
               }
+${sharedAllocation ? '}' : ''}
             } else {
               wg_ledger_problem_events[local] = 1.0;
             }
@@ -5830,6 +5891,9 @@ fn main(
   }
 }
 `;
+
+}
+export const sphReactionSummaryPartialsWgsl = createSphReactionSummaryPartialsWgsl();
 
 export const sphReactionSummaryFinalizeWgsl = `
 struct ReactionSummaryParams {
@@ -5971,9 +6035,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-export const sphReactionProductInventoryWgsl = `
+export function createSphReactionProductInventoryWgsl({ sharedAllocation = false } = {}) {
+  return `
 ${sphReactionEnergyWgsl}
-${sphReactionAppliedPairWgsl}
+${sharedAllocation ? sphReactionPairReaderWgsl + `
+fn physical_reaction_pair_applied(rx: u32, a: u32, b: u32) -> bool {
+  if (!reaction_energy_enabled(rx)) { return true; }
+  return pair_allocation_ready(rx, a, b);
+}` : sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -6196,6 +6265,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         continue;
       }
       if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { continue; }
+${sharedAllocation ? `      if (reaction_energy_enabled(reaction_index)) {
+        let base = pair_event_base(particle_index, product_term_index);
+        let chosen_mass = pair_allocations[base].w;
+        let chosen_moles = pair_allocations[base + 2u].y;
+        let chosen_direct = pair_allocations[base + 3u].x;
+        let chosen_pair = pair_allocations[pair_allocation_base(particle_index) + 1u];
+        raw_mass_kg += chosen_pair.x * coefficient * molar_mass;
+        mass_kg += chosen_mass; moles += chosen_moles; visible_mass_kg += chosen_direct;
+        mass_scale_acc += pair_allocations[pair_allocation_base(particle_index) + 2u].y;
+        event_count += 1.0; continue;
+      }` : ''}
       let source_pos_mass = source_state[particle_index * 2u];
       let partner_source_pos_mass = source_state[partner_index * 2u];
       let source_row0 = source_thermo[particle_index * 3u];
@@ -6260,9 +6340,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-export const sphReactionProductEventWgsl = `
+}
+export const sphReactionProductInventoryWgsl = createSphReactionProductInventoryWgsl();
+
+export function createSphReactionProductEventWgsl({ sharedAllocation = false } = {}) {
+  return `
 ${sphReactionEnergyWgsl}
-${sphReactionAppliedPairWgsl}
+${sharedAllocation ? sphReactionPairReaderWgsl + `
+fn physical_reaction_pair_applied(rx: u32, a: u32, b: u32) -> bool {
+  if (!reaction_energy_enabled(rx)) { return true; }
+  return pair_allocation_ready(rx, a, b);
+}` : sphReactionAppliedPairWgsl}
 ${sphGasConstitutiveWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
@@ -6615,6 +6703,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { return; }
+  ${sharedAllocation ? `if (reaction_energy_enabled(reaction_index)) {
+    let chosen = pair_event_base(particle_index, product_term_index);
+    for (var row = 0u; row < 8u; row++) { product_events[out_base + row] = pair_allocations[chosen + row]; }
+    return;
+  }` : ''}
 
   let source_pos_mass = source_state[particle_index * 2u];
   let partner_source_pos_mass = source_state[partner_index * 2u];
@@ -6797,9 +6890,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	}
 `;
 
-export const sphReactionAtomResidualWgsl = `
+}
+export const sphReactionProductEventWgsl = createSphReactionProductEventWgsl();
+
+export function createSphReactionAtomResidualWgsl({ sharedAllocation = false } = {}) {
+  return `
 ${sphReactionEnergyWgsl}
-${sphReactionAppliedPairWgsl}
+${sharedAllocation ? sphReactionPairReaderWgsl + `
+fn physical_reaction_pair_applied(rx: u32, a: u32, b: u32) -> bool {
+  if (!reaction_energy_enabled(rx)) { return true; }
+  return pair_allocation_ready(rx, a, b);
+}` : sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -7019,6 +7120,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         continue;
       }
       if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { continue; }
+${sharedAllocation ? `      if (reaction_energy_enabled(reaction_index)) {
+        var chosen_moles = 0.0;
+        if (term_kind_id == 2.0) {
+          chosen_moles = pair_allocations[pair_event_base(particle_index, u32(source_term_index)) + 2u].y;
+        } else {
+          let term = reactant_term_row0(u32(source_term_index));
+          let chosen = pair_allocations[pair_allocation_base(particle_index) + 1u];
+          chosen_moles = select(chosen.z, chosen.y, source_thermo[particle_index * 3u].x == term.y) / term.w;
+        }
+        let sign = select(-1.0, 1.0, term_kind_id == 2.0);
+        atom_residual_mol += sign * chosen_moles * atoms_per_formula;
+        charge_residual_mol += sign * chosen_moles * charge;
+        event_count += 1.0; continue;
+      }` : ''}
       let source_pos_mass = source_state[particle_index * 2u];
       let partner_source_pos_mass = source_state[partner_index * 2u];
       let source_row0 = source_thermo[particle_index * 3u];
@@ -7070,9 +7185,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-export const sphReactionGasSpeciesSummaryWgsl = `
+}
+export const sphReactionAtomResidualWgsl = createSphReactionAtomResidualWgsl();
+
+export function createSphReactionGasSpeciesSummaryWgsl({ sharedAllocation = false } = {}) {
+  return `
 ${sphReactionEnergyWgsl}
-${sphReactionAppliedPairWgsl}
+${sharedAllocation ? sphReactionPairReaderWgsl + `
+fn physical_reaction_pair_applied(rx: u32, a: u32, b: u32) -> bool {
+  if (!reaction_energy_enabled(rx)) { return true; }
+  return pair_allocation_ready(rx, a, b);
+}` : sphReactionAppliedPairWgsl}
 struct ReactionSummaryParams {
   particle_count: u32,
   reaction_count: u32,
@@ -7292,6 +7415,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         continue;
       }
       if (!physical_reaction_pair_applied(reaction_index, particle_index, partner_index)) { continue; }
+${sharedAllocation ? `      if (reaction_energy_enabled(reaction_index)) {
+        // The gas ABI has one row per product term, even for repeated species.
+        let base = pair_event_base(particle_index, u32(gas0.y));
+        mass_kg += pair_allocations[base].w;
+        moles += pair_allocations[base + 2u].y;
+        visible_mass_kg += pair_allocations[base + 3u].x;
+        event_count += 1.0; continue;
+      }` : ''}
       let source_pos_mass = source_state[particle_index * 2u];
       let partner_source_pos_mass = source_state[partner_index * 2u];
       let source_row0 = source_thermo[particle_index * 3u];
@@ -7351,6 +7482,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   gas_species_summaries[out_base + 1u] = vec4<f32>(max(mass_kg - visible_mass_kg, 0.0), event_count, f32(gas_index), status);
 }
 `;
+
+}
+export const sphReactionGasSpeciesSummaryWgsl = createSphReactionGasSpeciesSummaryWgsl();
 
 export const sphRenderRowsWgsl = `
 struct RenderRowsParams {

@@ -2,39 +2,75 @@ import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 
 export const SPH_EXACT_MASS_TRANSFER_MAGIC = 0x454d5431;
 export const SPH_EXACT_MASS_TRANSFER_ERROR = Object.freeze({
-  LAYOUT: 64, ENDPOINT: 128, ALIAS: 256, COMPLETION: 512, STORED_STATE: 1024
+  LAYOUT: 64, ENDPOINT: 128, ALIAS: 256, COMPLETION: 512, STORED_STATE: 1024,
+  NONZERO_DROP: 2048
 });
 
 // Prescribed mass-only graph. Each row has one writer and gathers from immutable
 // source. Incoming packets cannot finance outgoing packets in this interval.
 // This initial gather is O(rows * edges); physical cell batching is a separate
 // integration concern. It has no phase, energy, kinetic or publication authority.
-export function createSphExactMassTransferWgsl(format) {
+export function createSphExactMassTransferWgsl(format, { partition = false } = {}) {
   const E = SPH_EXACT_MASS_TRANSFER_ERROR;
   return createSphExactMassWgsl(format) + /* wgsl */ `
-@group(0) @binding(0) var<uniform> params: vec4<u32>;
+${partition ? `struct PartitionParams {
+  x: u32, y: u32, z: u32, w: u32,
+  sourceRows: u32, sourceCount: u32, reserved: vec2<u32>
+}
+@group(0) @binding(0) var<uniform> params: PartitionParams;`
+  : '@group(0) @binding(0) var<uniform> params: vec4<u32>;'}
 @group(0) @binding(1) var<storage, read> source: array<u32>;
 @group(0) @binding(2) var<storage, read> edges: array<u32>;
 @group(0) @binding(3) var<storage, read_write> candidate: array<u32>;
 @group(0) @binding(4) var<storage, read_write> control: array<atomic<u32>>;
+${partition ? '@group(0) @binding(5) var<storage, read> destinations: array<u32>;' : ''}
 
 fn em_layout() -> bool {
+  ${partition ? `return arrayLength(&control) == 16u && params.x > 0u
+    && params.sourceRows > 0u && params.sourceCount > 0u
+    && params.sourceRows <= arrayLength(&source) / EM_WORDS
+    && arrayLength(&source) == params.sourceRows * EM_WORDS
+    && arrayLength(&destinations) == params.sourceRows
+    && params.x <= arrayLength(&candidate) / EM_WORDS
+    && arrayLength(&candidate) == params.x * EM_WORDS
+    && params.y <= arrayLength(&edges) / (EM_WORDS + 2u)
+    && arrayLength(&edges) == select(params.y * (EM_WORDS + 2u), 1u, params.y == 0u)
+    && all(params.reserved == vec2<u32>(0u));` : `
   return arrayLength(&control) == 16u && params.x > 0u && params.y > 0u
     && params.x <= arrayLength(&source) / EM_WORDS
     && arrayLength(&source) == params.x * EM_WORDS
     && arrayLength(&candidate) == arrayLength(&source)
     && params.y <= arrayLength(&edges) / (EM_WORDS + 2u)
-    && arrayLength(&edges) == params.y * (EM_WORDS + 2u);
+    && arrayLength(&edges) == params.y * (EM_WORDS + 2u);`}
 }
 fn em_source_row(row: u32) -> ExactMass {
   var value: ExactMass;
   for (var i = 0u; i < EM_WORDS; i++) { value.words[i] = source[row * EM_WORDS + i]; }
   return value;
 }
-fn em_expected_row(row: u32) -> ExactMassResult {
-  let original = em_source_row(row);
-  var outgoing: ExactMass; var incoming: ExactMass;
+fn em_initial_row(row: u32) -> ExactMassResult {
+  ${partition ? `var value: ExactMass;
   var errors = 0u;
+  for (var sourceRow = 0u; sourceRow < params.sourceRows; sourceRow++) {
+    let destination = destinations[sourceRow];
+    let sourceValue = em_source_row(sourceRow);
+    if (destination == 0xffffffffu) {
+      var nonzero = 0u;
+      for (var i = 0u; i < EM_WORDS; i++) { nonzero |= sourceValue.words[i]; }
+      if (nonzero != 0u) { errors |= ${E.NONZERO_DROP}u; }
+    } else if (destination >= params.x) {
+      errors |= ${E.ENDPOINT}u;
+    } else if (destination == row) {
+      let sum = em_add(value, sourceValue); value = sum.value; errors |= sum.error;
+    }
+  }
+  return ExactMassResult(value, errors);` : 'return ExactMassResult(em_source_row(row), 0u);'}
+}
+fn em_expected_row(row: u32) -> ExactMassResult {
+  let initial = em_initial_row(row);
+  let original = initial.value;
+  var outgoing: ExactMass; var incoming: ExactMass;
+  var errors = initial.error;
   for (var edge = 0u; edge < params.y; edge++) {
     let base = edge * (EM_WORDS + 2u);
     let donor = edges[base]; let receiver = edges[base + 1u];
@@ -83,10 +119,11 @@ fn exact_mass_finalize() {
   if (!em_layout()) { atomicOr(&control[3], ${E.LAYOUT}u); }
   if (atomicLoad(&control[6]) != params.x) { atomicOr(&control[3], ${E.COMPLETION}u); }
   atomicStore(&control[0], ${SPH_EXACT_MASS_TRANSFER_MAGIC}u);
-  atomicStore(&control[1], 1u);
+  atomicStore(&control[1], ${partition ? 2 : 1}u);
   atomicStore(&control[2], select(2u, 1u, atomicLoad(&control[3]) == 0u));
   atomicStore(&control[4], params.x); atomicStore(&control[5], params.y);
   atomicStore(&control[7], params.w); atomicStore(&control[8], params.z);
+  ${partition ? 'atomicStore(&control[9], params.sourceRows); atomicStore(&control[10], params.sourceCount);' : ''}
 }
 `;
 }

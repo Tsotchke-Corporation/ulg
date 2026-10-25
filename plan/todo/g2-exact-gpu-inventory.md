@@ -41,7 +41,8 @@ permit subnormal flushing, including intermediate bit reinterpretations.
   subtraction, paired transfer, f32-bit ingress and projection.
 - `src/runtime/sph/sphExactMassInventoryGpu.js`: private resident ownership,
   same-format/device/generation reads, fenced retirement, explicit initial
-  inventory and GPU-buffer transfer candidates. Success observes only a
+  inventory and GPU-buffer transfer candidates, including joined sources and
+  conservative row remapping. Success observes only a
   64-byte verdict. Diagnostic tests read inventory separately.
 - `src/runtime/sph/sphExactMassTransferWgsl.js`: immutable-source shared-endpoint
   gather, separate stored-state validation and terminal verdict. Outgoing
@@ -179,14 +180,55 @@ vapor/aerosol exchange candidates are not yet production interval/publication
 authority. Exact product residuals must originate with the real reaction debit
 and placement partition, never an f32 reconstruction of historical mass.
 
-The current numeric transfer API accepts one immutable source with a fixed row
-count. Cross-family carrier/history/aerosol transfers therefore also require
-authenticated GPU join/remap or multi-read support: retain every original read,
-validate one common format, preserve row ownership and use one atomic candidate
-for both debit and credit. Appended rows begin at exact zero; compaction must
-use exact nonzero and move limbs with the existing logical rows/count seal.
-Positive inventory with invalid metadata must reject instead of disappearing.
-This extends numeric capability without granting physical publication authority.
+`runSphExactMassPartitionCandidateWebGpu` now retains an ordered set of original
+numeric reads with one common format/device, copies their complete rows and a
+source-to-destination map, and executes one checked remap/transfer candidate.
+Different source generations are allowed; the output generation is
+`max(source generations) + 1`, not a physical tick. Repeating the same numeric
+owner through another read rejects. Multiple rows may merge with checked
+addition, unreferenced destinations start at exact zero, and `0xffffffff`
+drops only exact-zero input. A nonzero inventory whose f32 projection underflows
+still rejects deletion. Immutable scalar provenance records each source family,
+generation and row count without retaining predecessor owners.
+
+Remapping precedes the transfer graph. An incoming packet cannot fund an
+outgoing packet in that graph, and a row made empty by that graph cannot also
+be dropped by its initial remap. A reaction/placement/history transaction must
+either route donors directly to final destinations or use ordered provisional
+candidates and publish only its complete terminal physical branch. Distinct
+numeric families can still represent overlapping physical inventory: the real
+producer must authenticate disjoint current carrier/product/aerosol roles.
+The numeric operation itself grants no physical publication authority.
+
+Native `g2-exact-product-20261025-IvPeS9/native-r2.json` proves 26 additional
+join/remap cases against exact BigInt results, alongside the prior 6,176
+arithmetic cases, 49 transfers and actual preserving solver matrix. Cases cover
+birth, merging, permutation, exact-zero removal, invalid/nonzero drops, capacity
+overflow, gross overspend, corrupted final limbs, missing validation, dispatch
+boundaries and eight successor joins with predecessor retirement. Host tests
+also cover partial source admission, rejected fences and device loss during
+final cleanup; neither API can deliver a successful family destroyed during
+those cleanup fences. The first native attempt stopped at a Vite-triggered
+navigation race before GPU execution; the unchanged retry passed.
+
+The next physical producer change is one accepted reaction allocation owned by
+the mutual pair. `wgsl.js` currently recomputes extent/debits in both `resolve`
+invocations and again in product emission; the changed-projection helper in
+`sphReactionEnergyWgsl.js` is not a complete paired commit receipt. Choose the
+executed debit once, retain exact reactant remainders, partition products by
+exact term identity with an explicit residual, validate both endpoint writes,
+and have events, gas/atom diagnostics and placement consume that same record.
+The existing physical-energy f32 no-op check must not veto an admitted exact
+packet merely because its projection is unchanged. Mass accounting alone does
+not replace element/charge or coupled energy/momentum acceptance.
+
+Product history must carry only the remaining unplaced partition after actual
+placement. Its existing retained owner, append/compaction permutation, logical
+row count and terminal placement rollback all need matching exact rows. Do not
+initialize from rounded H[13] or duplicate an empty-parent arena alias as a
+second numeric source. Positive inventory with invalid metadata must reject
+instead of disappearing. The existing unsupported-path guards remain until
+those genuine producers and their outer publication are integrated.
 
 ## Implementation order and acceptance
 

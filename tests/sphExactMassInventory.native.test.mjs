@@ -125,7 +125,7 @@ test('native integer mass arithmetic, exact transfers and projection preserve fu
       if (!adapter) throw new Error('Native WebGPU adapter unavailable');
       const limits = await import('/src/runtime/webgpuDeviceLimits.js');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter) || {});
-      const errors = [], results = [], transfers = [];
+      const errors = [], results = [], transfers = [], partitions = [];
       let coldOwnership = null;
       let continuation = null;
       let spatialContinuation = null;
@@ -204,8 +204,8 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         const format = abi.createSphExactMassFormat();
         const initial = [1.5, 2 ** -10 + 2 ** -33, 0, 0];
         const families = [], reads = [];
-        const create = massesKg => {
-          const family = owner.createSphExactMassInventoryWebGpu({ device, format, massesKg,
+        const create = (massesKg, inventoryFormat = format) => {
+          const family = owner.createSphExactMassInventoryWebGpu({ device, format: inventoryFormat, massesKg,
             provenance: { kind: 'initial-conditions', reference: 'manufactured-native-exact-mass' } });
           families.push(family); return family;
         };
@@ -277,6 +277,71 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             await device.queue.onSubmittedWorkDone(); corrupt?.destroy(); edgeBuffer.destroy();
           }
         }
+        async function partition(name, sourceReads, destinations, outputRowCount, graph = [], fault = null) {
+          const partitionFormat = sourceReads[0].format;
+          const mapping = device.createBuffer({ size: destinations.length * 4, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+          identity.tagWebGpuBufferDevice(mapping, device);
+          device.queue.writeBuffer(mapping, 0, new Uint32Array(destinations));
+          const words = new Uint32Array(graph.length * (partitionFormat.wordCount + 2));
+          graph.forEach(([donor, receiver, packet], i) => {
+            const offset = i * (partitionFormat.wordCount + 2);
+            words.set([donor, receiver], offset); words.set(abi.encodeSphExactMass(packet, partitionFormat), offset + 2);
+          });
+          const edgeBuffer = words.length ? device.createBuffer({ size: words.byteLength, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }) : null;
+          if (edgeBuffer) { identity.tagWebGpuBufferDevice(edgeBuffer, device); device.queue.writeBuffer(edgeBuffer, 0, words); }
+          const before = await Promise.all(sourceReads.map(observe));
+          const createBuffer = device.createBuffer, createEncoder = device.createCommandEncoder;
+          let corrupt = null, candidate = null;
+          if (fault) {
+            corrupt = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+            device.queue.writeBuffer(corrupt, 0, new Uint32Array([0x12345678]));
+            device.createBuffer = function (args) {
+              const buffer = createBuffer.call(this, args);
+              if (args.label === 'ulg-exact-mass-candidate') candidate = buffer;
+              return buffer;
+            };
+            device.createCommandEncoder = function (...args) {
+              const encoder = createEncoder.apply(this, args), begin = encoder.beginComputePass;
+              let dispatch = 0;
+              encoder.beginComputePass = function (...args) {
+                dispatch++;
+                if (dispatch === 2 && fault === 'stored-last-limb') this.copyBufferToBuffer(corrupt, 0, candidate, candidate.size - 4, 4);
+                const pass = begin.apply(this, args);
+                if (dispatch === 2 && fault === 'missing-validation') pass.dispatchWorkgroups = () => {};
+                return pass;
+              };
+              return encoder;
+            };
+          }
+          try {
+            const result = await owner.runSphExactMassPartitionCandidateWebGpu({ device, sourceReads,
+              destinationBuffer: mapping, outputRowCount, edgeBuffer, edgeCount: graph.length, edgeFormat: partitionFormat });
+            let next = null;
+            if (result.family) {
+              const provenance = result.family.provenance;
+              if (provenance.sources.some(source => Object.keys(source).some(key => !['familyId', 'generation', 'rowCount'].includes(key)))) {
+                throw new Error('Partition retained unbounded predecessor lineage');
+              }
+              families.push(result.family); next = borrow(result.family);
+            }
+            partitions.push({ name, format: partitionFormat, destinations, outputRowCount, graph, before,
+              sourceAfter: await Promise.all(sourceReads.map(observe)), after: next && await observe(next),
+              sourceGenerations: sourceReads.map(read => read.generation), generation: result.generation,
+              sourceRowCount: result.sourceRowCount, sourceCount: result.sourceCount,
+              ready: result.ready, errorBits: result.errorBits, observedBytes: result.observedBytes,
+              physicalPublicationAdmitted: result.physicalPublicationAdmitted });
+            return next;
+          } catch (error) {
+            if (fault !== 'missing-validation') throw error;
+            partitions.push({ name, format: partitionFormat, destinations, outputRowCount, graph, before,
+              sourceAfter: await Promise.all(sourceReads.map(observe)), after: null,
+              ready: false, failure: String(error), observedBytes: 64, physicalPublicationAdmitted: false });
+            return null;
+          } finally {
+            device.createBuffer = createBuffer; device.createCommandEncoder = createEncoder;
+            await device.queue.onSubmittedWorkDone(); corrupt?.destroy(); edgeBuffer?.destroy(); mapping.destroy();
+          }
+        }
         try {
           const firstFamily = create(initial), first = borrow(firstFamily);
           // A held read remains usable after its original owner requests retirement.
@@ -306,6 +371,42 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
             const prior = chain;
             chain = await transfer('continuation-' + i, chain, [[i % 2, 1 - i % 2, 2 ** -110]]);
             await owner.releaseSphExactMassRead(prior); owner.releaseSphExactMassInventory(prior.family);
+          }
+          const left = borrow(create([1 + 2 ** -30, 0])), right = borrow(create([2 ** -10 + 2 ** -50]));
+          owner.releaseSphExactMassInventory(left.family);
+          const joined = await partition('join-birth-hidden-packet', [left, right], [0, 3, 1], 4, [[0, 2, 2 ** -30]]);
+          await partition('merge-and-zero-append', [left, right], [1, 0, 1], 3);
+          await partition('permuted-inputs', [right, left], [1, 0, 3], 4, [[0, 2, 2 ** -30]]);
+          await partition('drop-only-exact-zero', [joined], [0, 1, 2, 0xffffffff], 3);
+          await partition('reject-dropped-positive', [left, right], [0, 1, 0xffffffff], 2);
+          await partition('reject-invalid-map', [left, right], [0, 4, 1], 4);
+          const fineFormat = abi.createSphExactMassFormat({ wordCount: 12, quantumExponent: -256 });
+          const invisible = borrow(create([2 ** -200], fineFormat));
+          await partition('reject-dropped-underflow-projection', [invisible], [0xffffffff], 1);
+          const maxFormat = abi.createSphExactMassFormat({ wordCount: 1, quantumExponent: 0 });
+          const maxLeft = borrow(create([0xfffffffe], maxFormat)), one = borrow(create([1], maxFormat));
+          await partition('merge-exact-capacity', [maxLeft, one], [0, 0], 1);
+          const tooLarge = borrow(create([2], maxFormat));
+          await partition('reject-merge-overflow-before-outgoing', [maxLeft, tooLarge], [0, 0], 2, [[0, 1, 1]]);
+          const zero = borrow(create([0])), rich = borrow(create([1]));
+          await partition('reject-incoming-spent-again', [zero, rich], [0, 1], 3, [[1, 0, 1], [0, 2, 1]]);
+          await partition('reject-reciprocal-overspend', [rich, borrow(create([1]))], [0, 1], 2, [[0, 1, 2], [1, 0, 2]]);
+          await partition('all-zero-empty-ledger', [zero], [0xffffffff], 1);
+          await partition('partition-stored-last-limb-corruption', [left, right], [0, 1, 2], 3, [], 'stored-last-limb');
+          await partition('partition-missing-validation', [left, right], [0, 1, 2], 3, [], 'missing-validation');
+          for (const count of [1, 63, 64, 65]) {
+            const rows = Array.from({ length: count }, (_, i) => i % 3 ? 1 + 2 ** -30 : 0);
+            const inputReads = count === 1 ? [borrow(create(rows))]
+              : [borrow(create(rows.slice(0, 1))), borrow(create(rows.slice(1)))];
+            await partition('row-boundary-' + count, inputReads, rows.map((_, i) => count - i - 1), count);
+          }
+          let partitionChain = joined;
+          for (let i = 0; i < 8; i++) {
+            const prior = partitionChain, fresh = borrow(create([2 ** -100]));
+            partitionChain = await partition('partition-chain-' + i, [prior, fresh], [0, 1, 2, 3, 3], 4,
+              [[0, 1, 2 ** -110]]);
+            await owner.releaseSphExactMassRead(prior); owner.releaseSphExactMassInventory(prior.family);
+            await owner.releaseSphExactMassRead(fresh); owner.releaseSphExactMassInventory(fresh.family);
           }
           // Real cold particle uploader: the binary64 seed is captured before
           // S[3] rounding, and a physical-owner read pins both allocations.
@@ -353,7 +454,7 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         device.destroy();
       }
-      return { results, transfers, coldOwnership, continuation, spatialContinuation,
+      return { results, transfers, partitions, coldOwnership, continuation, spatialContinuation,
         fusedContinuation, fusedSpatialContinuation, sequenceContinuations, twoLevelContinuation, errors, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description } };
     }, { observeAuthority: process.env.ULG_EXACT_MASS_OBSERVE_AUTHORITY === '1',
@@ -426,6 +527,41 @@ fn exercise(@builtin(global_invocation_id) id: vec3<u32>) {
     assert.deepEqual(evidence.result.transfers.find(run => run.name === 'shared-cancellation').after,
       evidence.result.transfers.find(run => run.name === 'shared-permuted').after);
     evidence.passedTransferCases = evidence.result.transfers.length;
+    const failedPartitions = new Set(['reject-dropped-positive', 'reject-invalid-map',
+      'reject-dropped-underflow-projection', 'reject-merge-overflow-before-outgoing', 'reject-incoming-spent-again',
+      'reject-reciprocal-overspend', 'partition-stored-last-limb-corruption', 'partition-missing-validation']);
+    for (const run of evidence.result.partitions) {
+      const partitionFormat = createSphExactMassFormat(run.format), width = partitionFormat.wordCount;
+      const decode = words => Array.from({ length: words.length / width }, (_, row) =>
+        decodeSphExactMass(new Uint32Array(words.slice(row * width, (row + 1) * width)), partitionFormat).coefficient);
+      assert.deepEqual(run.sourceAfter, run.before, run.name + ' all source words immutable');
+      assert.equal(run.observedBytes, 64); assert.equal(run.physicalPublicationAdmitted, false);
+      assert.equal(run.ready, !failedPartitions.has(run.name), run.name);
+      if (!run.ready) {
+        assert.equal(run.after, null);
+        if (run.name === 'partition-missing-validation') assert.match(run.failure, /Malformed exact-mass transfer verdict/);
+        else assert.notEqual(run.errorBits, 0);
+        if (run.name.includes('dropped-')) assert.equal(run.errorBits & 2048, 2048);
+        if (run.name === 'partition-stored-last-limb-corruption') assert.equal(run.errorBits & 1024, 1024);
+        continue;
+      }
+      const source = run.before.flatMap(decode), expected = Array(run.outputRowCount).fill(0n);
+      for (const [row, destination] of run.destinations.entries()) {
+        if (destination === 0xffffffff) assert.equal(source[row], 0n);
+        else expected[destination] += source[row];
+      }
+      for (const [donor, receiver, packet] of run.graph) {
+        const amount = decodeSphExactMass(encodeSphExactMass(packet, partitionFormat), partitionFormat).coefficient;
+        expected[donor] -= amount; expected[receiver] += amount;
+      }
+      assert.equal(run.sourceRowCount, source.length); assert.equal(run.sourceCount, run.before.length);
+      assert.equal(run.generation, Math.max(...run.sourceGenerations) + 1);
+      assert.deepEqual(decode(run.after), expected, run.name);
+      assert.equal(expected.reduce((a, b) => a + b, 0n), source.reduce((a, b) => a + b, 0n), run.name + ' exact conservation');
+    }
+    assert.deepEqual(evidence.result.partitions.find(run => run.name === 'join-birth-hidden-packet').after,
+      evidence.result.partitions.find(run => run.name === 'permuted-inputs').after);
+    evidence.passedPartitionCases = evidence.result.partitions.length;
     const cold = evidence.result.coldOwnership;
     assert.deepEqual(units(cold.source), cold.masses.map(mass => decodeSphExactMass(encodeSphExactMass(mass, format), format).coefficient));
     assert.deepEqual(cold.projections, cold.masses.map(Math.fround));

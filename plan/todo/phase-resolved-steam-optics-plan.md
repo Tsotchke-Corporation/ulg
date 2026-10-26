@@ -1,5 +1,39 @@
 # Phase-Resolved Steam Optics Plan
 
+## Environment initialization implementation — 2026-10-26 UTC
+
+`src/runtime/sphEnvironmentInitialization.js` now defines the shared cold input
+and compiles gas species from an explicit physical free volume. The room-air
+factory implements the accepted T/P/RH/flow values with zero nuclei for the
+first control; a positive population requires explicit dry material, density,
+physical radius bins with number fractions, hydration history and activation
+model/domain provenance. These are input declarations, not an implemented or
+validated seed activation model. No dry cores or water droplets are created yet.
+
+The dry mixture retains N2, O2, Ar and CO2 from
+[CIPM-2007 table 1](https://www.nist.gov/system/files/documents/calibrations/CIPM-2007.pdf),
+renormalized from their sum 0.999970. Ne, He, CH4, Kr, H2, N2O, CO and Xe are
+explicitly omitted. This composition choice does not adopt the CIPM nonideal
+EOS or claim measured room air. Oxygen is a separate material with no inert
+exemption. Material molar masses and caloric domains must be supplied by the
+actual material models; the composition reference does not silently supply them.
+
+RH means vapor partial pressure divided by the declared water exchange model's
+planar liquid equilibrium pressure, including that model's finite-liquid-volume
+pressure correction. The compiler uses the same model's vapor internal energy;
+it never borrows the optical saturation fit or infers gas phase from the legacy
+energy ladder. Every dry species requires explicit Cv, reference U/T, molar
+mass, domain and provenance. These are cold binary64 inputs, not an exact GPU
+inventory or a CPU hot-state fallback. Exact resident mass/energy enrollment
+and evolution remain separate required work.
+
+The new cold-input tests prove physical-volume scaling, summed species pressure
+and moles, independent manufactured caloric values, clone/JSON round trips,
+same-air zero-nuclei equality, vacuum and rejection of malformed/domain-invalid
+inputs. No preset, live control, worker lane or native acceptance is changed.
+Next is shared ice/gas-only caloric enrollment and actual atmosphere allocation;
+ship the T/P/RH controls with those consumers. Full G2 acceptance remains open.
+
 ## Accepted environment decision — 2026-09-14 UTC
 
 The operator explicitly approved: **"Yes—use documented room-air and nuclei

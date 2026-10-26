@@ -1,5 +1,25 @@
 # ULG Implementation Log
 
+## 2026-10-26 UTC — shared G2 environment initialization inputs
+
+After the user's cost concern, stopped expanding the exact-reaction diagnostic
+ladder and inspected the preset path. Initial particles contain bodies and
+reserve rows, while the old diagnostic air reservoir is not moving gas
+inventory. Humidity enrollment also needs phase-specific caloric support for
+ice and the dry gas species; adding UI controls alone would not meet the handoff.
+
+Implemented `sphEnvironmentInitialization.js`: strict clone-safe physical
+inputs, declared CIPM-based major-species composition, model-consistent RH,
+free-volume species masses/internal energies, vacuum, and independent dry seed
+metadata. No positive seed population or calibrated material model is invented.
+Focused tests cover composition, independent manufactured thermodynamics,
+volume scaling, same-air zero-nuclei equality, cloning, vacuum and invalid inputs.
+This adds the handoff's cold-input preparation step, not live preset enrollment
+or G2 completion. The original G2–G6 acceptance and publication hold remain.
+
+Validation: 22/22 environment/thermodynamics tests, syntax checks and normal
+Vite build pass. Build retains the existing mixed static/dynamic import warnings.
+
 ## 2026-09-22 AKDT - Eshkol Higher-Order Law And Material Closure Plan
 
 Added [the new todo plan](todo/eshkol-higher-order-law-closure-plan.md) and linked

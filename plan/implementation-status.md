@@ -1,5 +1,27 @@
 # Implementation Status
 
+## Current focus — G2 environment initialization — 2026-10-26 UTC
+
+G2 remains incomplete; G3–G6 have not started. The exact-reaction native
+diagnostic ladder is stopped following the user's cost concern. Existing
+reaction work is preserved, with no new native acceptance claimed.
+
+The shared cold environment input and gas-inventory compiler now implement
+declared T/P/RH/flow, explicit dry seed metadata, a same-air zero-nuclei control,
+and vacuum. Species mass and internal energy come from actual free volume and
+explicit caloric inputs; humidity uses the exchange model's equilibrium
+pressure. This is input preparation only: presets, GPU enrollment, controls,
+seed activation and visible plumes are still pending. See the
+[environment checkpoint](todo/phase-resolved-steam-optics-plan.md#environment-initialization-implementation--2026-10-26-utc).
+
+Validation: 22 focused input/thermodynamics tests pass; normal Vite build passes.
+No native or visual acceptance is claimed for this cold-input change.
+
+Next: extend shared phase-specific caloric enrollment to ice and gas-only
+species, then enroll the air/humidity inventory and its restart-applied controls.
+The unresolved exact mass writers, coupled finite-time exchange, transport,
+deposition and traced desktop plumes remain required. No push/merge/Pages.
+
 Planning update, 2026-09-22 AKDT: added the
 [Eshkol higher-order law and material closure plan](todo/eshkol-higher-order-law-closure-plan.md)
 for the Goal 6 local factory and later neural/composed-law extensions. This is

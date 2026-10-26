@@ -1,8 +1,10 @@
 import {
   CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
   evaluateCondensableThermodynamics,
-  isCondensableThermodynamics
+  isCondensableThermodynamics,
+  isIdealGasCaloricThermodynamics
 } from './material/condensableThermodynamics.js';
+import { resolveSphPhaseCaloricModels } from './sph/sphCondensableParticleInitialization.js';
 
 // Cold physical inputs only. This module neither advances a CPU solver nor
 // grants admission to a resident GPU writer. In particular, pressure is not
@@ -154,6 +156,16 @@ export function createSphRoomAirInitialization(overrides = {}) {
 }
 
 function dryGasCaloricState(record, material, temperatureK, totalPressurePa) {
+  if (isIdealGasCaloricThermodynamics(record)) {
+    if (temperatureK < record.minTemperatureK || temperatureK > record.maxTemperatureK
+      || totalPressurePa > record.maxPressurePa) {
+      throw new RangeError(`${material} initialization is outside its declared ideal-gas caloric domain`);
+    }
+    return { molarMassKgPerMol: record.molarMassKgPerMol,
+      specificInternalEnergyJPerKg: finite(record.vaporReferenceInternalEnergyJPerKg
+        + record.vaporCvJPerKgK * (temperatureK - record.referenceTemperatureK), `${material} U`),
+      caloricProvenance: record.provenance };
+  }
   fields(record, ['molarMassKgPerMol', 'cvJPerKgK', 'referenceTemperatureK',
     'referenceSpecificInternalEnergyJPerKg', 'minTemperatureK', 'maxTemperatureK',
     'maxPressurePa', 'provenance'], `dry gas ${material}`);
@@ -180,12 +192,25 @@ function dryGasCaloricState(record, material, temperatureK, totalPressurePa) {
  * RH uses the SAME Gibbs/caloric model as subsequent water exchange.
  */
 export function buildSphEnvironmentGasInputs({ environment, freeVolumeM3,
-  waterThermodynamics = null, dryGasCaloricModels = null } = {}) {
+  waterThermodynamics = null, dryGasCaloricModels = null, materialProperties = null } = {}) {
   const init = normalizeSphEnvironmentInitialization(environment);
   nonnegative(freeVolumeM3, 'physical freeVolumeM3');
   if (init.mode === 'vacuum') return Object.freeze({ environment: init, freeVolumeM3,
     gasSpecies: Object.freeze([]), totalGasMassKg: 0, totalGasInternalEnergyJ: 0 });
   positive(freeVolumeM3, 'air physical freeVolumeM3');
+  if (materialProperties !== null) {
+    if (waterThermodynamics !== null || dryGasCaloricModels !== null) {
+      throw new TypeError('Environment calorics require one source: material inputs or explicit models');
+    }
+    const models = resolveSphPhaseCaloricModels(materialProperties);
+    waterThermodynamics = models.h2o ?? null;
+    dryGasCaloricModels = Object.fromEntries(SPH_ENVIRONMENT_DRY_AIR.species.map(({ material }) => {
+      if (!isIdealGasCaloricThermodynamics(models[material])) {
+        throw new TypeError(`Environment ${material} requires its declared gas-only material model`);
+      }
+      return [material, models[material]];
+    }));
+  }
   const { temperatureK, totalPressurePa, relativeHumidity } = init;
   // RH=0 is exact dry air and requires no condensable model or zero-mass
   // water row. Humid initialization cannot borrow an optical saturation fit.

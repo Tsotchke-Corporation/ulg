@@ -1,5 +1,31 @@
 # ULG Implementation Log
 
+## 2026-10-26 UTC — caloric inputs cross the worker boundary
+
+Added strict reconstruction from authored caloric records, carried in the
+existing material-properties payload as `phaseCaloricModel`. Shared packers and
+thermal-table compilation resolve this input automatically; explicit models
+must agree with it. Derived model copies are not accepted as authored inputs.
+Environment compilation can now use those same material records, eliminating
+an independently specified dry-gas energy zero. Cold view phase/temperature,
+render descriptors, phase mass and gas-pressure summaries use the same selector.
+
+Validation: 186 focused tests, full 5,718 pass / 78 opt-in skips / zero failures,
+normal build, and the native initialization/worker test pass. A dedicated worker
+receives the plain payload via postMessage, calls the real remote-seed receiver,
+and performs actual GPU thermal execution with results equal to the independent
+page execution. All 744 source paths match, error scopes are empty, and owned
+resources close. An initial new host assertion used a nonexistent gas-summary
+field; corrected it to assert the actual species mass/temperature records.
+
+This is input and consumer integration, not live atmosphere allocation or plume
+acceptance. Preserve latent phase activation when enrolling the models; sensible
+branches alone cannot replace the existing melting/evaporation behavior. Exact
+inventory, finite-time exchange, real model domains, nuclei, controls and
+transport/deposition remain in the original G2 scope. The reaction diagnostic
+ladder remains stopped. Evidence:
+`/home/cos/.cache/icc/repos/ulg/g2-caloric-inputs-20261026/`.
+
 ## 2026-10-26 UTC — solid and gas-only caloric GPU consumers
 
 Extended the existing phase-specific model roster, cold packers, thermal tables,

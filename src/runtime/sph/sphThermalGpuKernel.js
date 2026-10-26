@@ -32,7 +32,8 @@ import {
 } from './sphCondensableCaloricTable.js';
 import {
   assertSphCondensableInitializationMatches,
-  condensableInitializationProperties
+  condensableInitializationProperties,
+  resolveSphPhaseCaloricModels
 } from './sphCondensableParticleInitialization.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
@@ -722,6 +723,8 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
   const segments = [];
   const metadata = [];
   const segmentMetadata = [];
+  condensableThermodynamicsByMaterial = resolveSphPhaseCaloricModels(materialProperties,
+    condensableThermodynamicsByMaterial);
   const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
   let materialBankWarmInputMatchedMaterialCount = 0;
   for (const material of Object.keys(condensableThermodynamicsByMaterial)) {

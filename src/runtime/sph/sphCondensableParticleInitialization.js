@@ -1,10 +1,34 @@
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, phaseCaloricBranches }
+import { CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, phaseCaloricBranches,
+  createPhaseCaloricThermodynamics, isPhaseCaloricThermodynamics }
   from '../material/condensableThermodynamics.js';
 import { condensableCaloricSegments, isPhaseCaloricSegmentType, SPH_CALORIC_PHASE_IDS }
   from './sphCondensableCaloricTable.js';
 
 const PHASES = ['solid', 'liquid', 'gas', 'plasma'];
+
+// Material properties already travel through the scene/worker cold payload.
+// Keep the model's authored input there, so every packer and thermal compiler
+// reconstructs the same energy basis without transferring private objects.
+export function resolveSphPhaseCaloricModels(materialProperties, explicitModels = {}) {
+  if (!explicitModels || typeof explicitModels !== 'object' || Array.isArray(explicitModels)) {
+    throw new TypeError('Expected explicit condensable models by material');
+  }
+  const resolved = Object.create(null);
+  for (const [material, properties] of Object.entries(materialProperties)) {
+    if (properties && Object.hasOwn(properties, 'phaseCaloricModel')) {
+      resolved[material] = createPhaseCaloricThermodynamics(properties.phaseCaloricModel);
+    }
+  }
+  for (const [material, model] of Object.entries(explicitModels)) {
+    if (!isPhaseCaloricThermodynamics(model)) throw new TypeError('Original created phase caloric model required');
+    if (Object.hasOwn(resolved, material) && JSON.stringify(resolved[material]) !== JSON.stringify(model)) {
+      throw new TypeError('Explicit caloric model differs from material phaseCaloricModel input');
+    }
+    resolved[material] = model;
+  }
+  return Object.freeze(resolved);
+}
 
 export function condensableInitializationProperties(model) {
   return [model.molarMassKgPerMol, ...phaseCaloricBranches(model).map((branch) => branch.cpJPerKgK)].map(Math.fround);
@@ -70,9 +94,7 @@ function samePackedPositive(actual, expected, label) {
 // GPU continuation consumes its phase directly and does not call this helper.
 // Keep both particle and mechanics initialization on this single selector.
 export function prepareSphCondensableParticleInitialization(materialProperties, models = {}) {
-  if (!models || typeof models !== 'object' || Array.isArray(models)) {
-    throw new TypeError('Expected explicit condensable models by material');
-  }
+  models = resolveSphPhaseCaloricModels(materialProperties, models);
   const byId = new Map();
   const signatureEntries = [];
   const entries = Object.entries(models);

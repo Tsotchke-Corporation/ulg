@@ -35,6 +35,7 @@ import {
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import { createSphState } from './sph/sphState.js';
+import { prepareSphCondensableParticleInitialization } from './sph/sphCondensableParticleInitialization.js';
 import {
   SPH_GPU_RENDER_DOMAIN_ID_MAX,
   renderDomainIdentityForSphParticle
@@ -3189,9 +3190,10 @@ export function buildSphPhaseDemoState(options = {}) {
  * closure (the same map the carrier uses). Drives the cold->hot render colour.
  */
 export function particleThermalState(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   return demo.state.particles.map((p) => {
     const props = demo.materialProperties[p.material];
-    const eq = cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
+    const eq = caloricState(p) ?? cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
     return { material: p.material, temperatureK: eq.temperatureK, phase: eq.stablePhase };
   });
 }
@@ -3203,9 +3205,10 @@ export function particleThermalState(demo) {
  * colours remain.
  */
 export function particleColors(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   return demo.state.particles.map((p) => {
     const props = demo.materialProperties[p.material];
-    const eq = cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
+    const eq = caloricState(p) ?? cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
     const inc = incandescentColor(eq.temperatureK);
     if (inc.visible) {
       return { rgb: [...inc.srgb], closureBacked: true, source: 'radiation-closure' };
@@ -3295,9 +3298,10 @@ export function waterVaporOpticalStateFromGasSummary(summary) {
  * not get forced through a renderer-side liquid default.
  */
 export function particleRenderDescriptors(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   return demo.state.particles.map((p) => {
     const props = demo.materialProperties[p.material];
-    const phase = stablePhaseFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
+    const phase = caloricState(p)?.stablePhase ?? stablePhaseFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
     let renderKey = p.material;
     if (p.material === 'h2o') {
       if (phase === 'gas') {
@@ -3345,10 +3349,11 @@ function emissiveRenderDomainIdForParticle(particle) {
 }
 
 export function surfaceEmissiveTemperature(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   const acc = {};
   for (const p of demo.state.particles) {
     const props = demo.materialProperties[p.material];
-    const eq = cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
+    const eq = caloricState(p) ?? cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
     const inc = incandescentColor(eq.temperatureK);
     if (!inc.visible) continue;
     const lum = 0.2126 * inc.srgb[0] + 0.7152 * inc.srgb[1] + 0.0722 * inc.srgb[2];
@@ -3371,10 +3376,11 @@ export function surfaceEmissiveTemperature(demo) {
 }
 
 export function surfaceEmissive(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   const acc = {};
   for (const p of demo.state.particles) {
     const props = demo.materialProperties[p.material];
-    const eq = cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
+    const eq = caloricState(p) ?? cachedParticleEquilibriumFromSpecificEnergy(props, p, p.specificInternalEnergyJPerKg);
     const inc = incandescentColor(eq.temperatureK);
     if (!inc.visible) continue;
     const lum = 0.2126 * inc.srgb[0] + 0.7152 * inc.srgb[1] + 0.0722 * inc.srgb[2];
@@ -3402,6 +3408,7 @@ export function surfaceEmissive(demo) {
  * Phase mass summary for the status rows.
  */
 export function phaseMassSummary(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   const byMaterialPhase = {};
   let feSolidMass = 0;
   let feTotalMass = 0;
@@ -3409,7 +3416,7 @@ export function phaseMassSummary(demo) {
   const solidMassByMaterial = {};
   demo.state.particles.forEach((p) => {
     const props = demo.materialProperties[p.material];
-    const phase = stablePhaseFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
+    const phase = caloricState(p)?.stablePhase ?? stablePhaseFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
     byMaterialPhase[p.material] = byMaterialPhase[p.material] || {};
     byMaterialPhase[p.material][phase] = (byMaterialPhase[p.material][phase] || 0) + p.massKg;
     totalMassByMaterial[p.material] = (totalMassByMaterial[p.material] || 0) + p.massKg;
@@ -5394,6 +5401,7 @@ export function gasPressureSummaryFromResidentThermalPhase({
  * This is a diagnostic ledger only until the resident gas EOS consumes the same species inventory.
  */
 export function gasPressureSummary(demo) {
+  const caloricState = prepareSphCondensableParticleInitialization(demo.materialProperties);
   const boxVolumeM3 = demo.scenario?.box?.volumeM3
     ?? ((demo.box?.dimensionsM?.[0] ?? demo.box?.edgeM ?? 0)
       * (demo.box?.dimensionsM?.[1] ?? demo.box?.edgeM ?? 0)
@@ -5403,9 +5411,10 @@ export function gasPressureSummary(demo) {
   for (const particle of demo.state.particles) {
     const props = demo.materialProperties[particle.material];
     if (!props) continue;
-    const stablePhase = stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg);
+    const explicit = caloricState(particle);
+    const stablePhase = explicit?.stablePhase ?? stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg);
     if (stablePhase === 'gas') {
-      const eq = cachedParticleEquilibriumFromSpecificEnergy(props, particle, particle.specificInternalEnergyJPerKg);
+      const eq = explicit ?? cachedParticleEquilibriumFromSpecificEnergy(props, particle, particle.specificInternalEnergyJPerKg);
       const moles = props.molarMassKgPerMol > 0 ? particle.massKg / props.molarMassKgPerMol : 0;
       addGasSpecies(species, particle.material, {
         massKg: particle.massKg,

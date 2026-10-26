@@ -1,5 +1,27 @@
 # Phase-Resolved Steam Optics Plan
 
+## Shared cold material inputs and worker integration — 2026-10-26 UTC
+
+Material properties may now explicitly carry `phaseCaloricModel`, an authored
+condensable or gas-only input record. Cold SPH/MLS packers, thermal compilation
+and `buildSphEnvironmentGasInputs({materialProperties, ...})` reconstruct the
+same model after serialization. Conflicting model declarations reject; an empty
+explicit map cannot silently disable a material's declared input. Cold view
+phase, temperature and pressure summaries use the shared phase selector.
+
+The real dedicated-worker remote-seed receiver and GPU thermal execution pass,
+including equality with independent page execution and correct resource cleanup.
+Host tests cover both clone formats, model conflicts, malformed/derived copies,
+changed energy-reference invalidation and environment/particle energy agreement.
+Focused186/full5718 pass, 78 opt-in skips, build pass; 744 source paths match.
+Evidence: `/home/cos/.cache/icc/repos/ulg/g2-caloric-inputs-20261026/`.
+
+Actual atmosphere allocation, physical gas density/J and free volume, real model
+choices/domains and latent activation remain unfinished. Preserve melting and
+evaporation when enrolling these sensible caloric branches. Controls must still
+land with real consumers; exact writers, coupled finite-time exchange, nuclei,
+transport/deposition and traced preset plumes remain required.
+
 ## Shared solid and gas-only caloric consumers — 2026-10-26 UTC
 
 The cold model compiler, SPH/MLS packers, ordinary and canonical spatial thermal

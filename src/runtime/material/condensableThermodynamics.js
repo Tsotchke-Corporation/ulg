@@ -23,6 +23,43 @@ export const IDEAL_GAS_CALORIC_ENERGY_BASIS = 'specific-internal-energy-at-refer
 
 const models = new WeakSet();
 
+const commonInputFields = ['schema', 'energyBasis', 'provenance', 'molarMassKgPerMol',
+  'referenceTemperatureK', 'referencePressurePa', 'minTemperatureK', 'maxTemperatureK', 'maxPressurePa'];
+function caloricInputFields(record, fields) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(record))) {
+    throw new TypeError('Phase caloric input must be a plain data record');
+  }
+  for (const key of Reflect.ownKeys(record)) {
+    if (!fields.includes(key) || !Object.hasOwn(Object.getOwnPropertyDescriptor(record, key), 'value')) {
+      throw new TypeError('Unsupported phase caloric input field: ' + String(key));
+    }
+  }
+}
+
+// Cold reconstruction after JSON/structured clone. Only the authored inputs
+// cross the worker boundary; derived fields and private model identity do not.
+// This is a new local model declaration, never a retained-state capability.
+export function createPhaseCaloricThermodynamics(record) {
+  caloricInputFields(record, [...commonInputFields, 'liquidReferenceEnthalpyJPerKg',
+    'vaporizationReferenceEnthalpyJPerKg', 'liquidCpJPerKgK', 'vaporCpJPerKgK',
+    'liquidDensityKgPerM3', 'solidCaloric', 'cvJPerKgK', 'referenceSpecificInternalEnergyJPerKg']);
+  if (record?.schema === CONDENSABLE_THERMODYNAMICS_SCHEMA) {
+    caloricInputFields(record, [...commonInputFields, 'liquidReferenceEnthalpyJPerKg',
+      'vaporizationReferenceEnthalpyJPerKg', 'liquidCpJPerKgK', 'vaporCpJPerKgK',
+      'liquidDensityKgPerM3', 'solidCaloric']);
+    if (record.solidCaloric !== undefined) caloricInputFields(record.solidCaloric,
+      ['referenceTemperatureK', 'referencePressurePa', 'fusionEnthalpyJPerKg', 'cpJPerKgK',
+        'densityKgPerM3', 'minTemperatureK', 'maxTemperatureK', 'provenance']);
+    return createCondensableThermodynamics(record);
+  }
+  if (record?.schema === IDEAL_GAS_CALORIC_SCHEMA) {
+    caloricInputFields(record, [...commonInputFields, 'cvJPerKgK', 'referenceSpecificInternalEnergyJPerKg']);
+    return createIdealGasCaloricThermodynamics(record);
+  }
+  throw new TypeError('Unsupported phase caloric input schema');
+}
+
 function finite(value, name) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new TypeError(`${name} must be a finite number`);

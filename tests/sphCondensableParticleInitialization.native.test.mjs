@@ -8,6 +8,9 @@ const REQUIRED_SOURCES = [
   'tests/sphCondensableParticleInitialization.test.mjs',
   'tests/sphCondensableParticleInitialization.native.test.mjs',
   'tests/fixtures/sphExtendedPhaseCaloric.js',
+  'tests/fixtures/sphPhaseCaloricWorker.js',
+  'src/runtime/peercomputeBrowserResidentHost.js',
+  'src/runtime/sph/sphStaticTableInputs.js',
   'src/runtime/sph/sphState.js',
   'src/runtime/sph/sphGpuBuffers.js',
   'src/runtime/sph/sphCondensableParticleInitialization.js',
@@ -252,6 +255,30 @@ test('native cold particle/mechanics packers preserve explicit phase and U throu
       initial, runs, legacyControl, extended, errors, fatalError };
     }, { sources: REQUIRED_SOURCES.map((path) => ({ path,
       hash: manifest.rows.find((row) => resolve(row.path) === resolve(path)).hash })) });
+    // The first device was destroyed above. Now exercise an actual dedicated
+    // worker and production remote-seed receiver with structured-cloned inputs.
+    evidence.worker = await page.evaluate(async () => {
+      const [thermodynamics, fixtureModule, stateModule] = await Promise.all([
+        import('/src/runtime/material/condensableThermodynamics.js'),
+        import('/tests/fixtures/sphExtendedPhaseCaloric.js'), import('/src/runtime/sph/sphState.js')
+      ]);
+      const fixture = fixtureModule.createExtendedPhaseCaloricFixture(thermodynamics);
+      const payload = { state: stateModule.createSphState({ smoothingLengthM: 1, particles: fixture.particles }),
+        materialProperties: {
+          'three-phase': { ...fixture.materialProperties['three-phase'], phaseCaloricModel: fixture.waterInput },
+          'gas-only': { ...fixture.materialProperties['gas-only'], phaseCaloricModel: fixture.gasInput }
+        } };
+      const worker = new Worker('/tests/fixtures/sphPhaseCaloricWorker.js', { type: 'module' });
+      let timeout;
+      try {
+        return await new Promise((resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error('Caloric worker check exceeded 60 seconds')), 60000);
+          worker.onerror = (event) => reject(new Error('Caloric worker: ' + event.message));
+          worker.onmessage = ({ data }) => resolve(data);
+          worker.postMessage(payload);
+        });
+      } finally { clearTimeout(timeout); worker.terminate(); }
+    });
   } catch (error) { failure ??= error; evidence.harnessError = String(error?.stack || error); }
   finally {
     clearTimeout(watchdog);
@@ -322,6 +349,20 @@ test('native cold particle/mechanics packers preserve explicit phase and U throu
   // Independent phase U references include the fusion pressure-volume term.
   const referenceU = [-70002.4, -50003, 120000, 100000];
   const expectedU = [-50000, -50000, -50000, 50000];
+  const worker = evidence.worker;
+  assert.equal(worker.fatalError, null);
+  assert.deepEqual(worker.errors, []);
+  assert.equal(worker.deviceDestroyed, true);
+  assert.equal(worker.receiverStatus, 'ulg-sph-mls-mpm-hot-buffer-refresh-executed');
+  assert.equal(worker.backend, 'webgpu');
+  assert.equal(worker.sphSignature, worker.mlsSignature);
+  assert.ok(worker.sphSignature);
+  assert.deepEqual(worker.initial, {
+    state: observed.extended.initial.state, thermo: observed.extended.initial.thermo,
+    mechanics: observed.extended.initial.mechanics
+  });
+  assert.deepEqual(worker.state, observed.extended.runs[0].state, 'worker thermal output matches independent page execution');
+  assert.deepEqual(worker.thermo, observed.extended.runs[0].thermo);
   for (const [cycle, run] of [observed.extended.initial, ...observed.extended.runs].entries()) {
     if (cycle) {
       assert.equal(run.backend, 'webgpu');

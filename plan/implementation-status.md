@@ -1,28 +1,30 @@
 # Implementation Status
 
-## Current focus — G2 phase calorics and environment enrollment — 2026-10-26 UTC
+## Current focus — shared caloric inputs reach the worker — 2026-10-26 UTC
 
 G2 remains incomplete; G3–G6 have not started. The exact-reaction diagnostic
-ladder remains stopped after the user's cost concern; its dirty work is preserved.
+ladder is stopped and its 52 dirty paths are preserved.
 
-Shared caloric packing and GPU consumers now accept an explicit solid/liquid/gas
-model or a gas-only model. Ice's energy reference includes fusion enthalpy and
-pressure-volume work. Dry gases participate in conserved heat exchange with
-liquid droplets without an invented liquid branch. This is sensible caloric
-support, not a melting, nucleation or kinetic exchange law.
+Material properties now carry plain `phaseCaloricModel` input records. Cold
+SPH/MLS packers, thermal tables and environment compilation reconstruct the same
+model after JSON or structured clone. Conflicting declarations and malformed
+records reject. Initial view descriptors, phase masses, pressure diagnostics
+and emission use the explicit phase instead of the old energy ladder.
 
-Validation: 203 focused host tests; native initialization through two thermal /
-mechanics cycles; 28 classic/canonical thermal cases; 32 actual EOS/exchange
-cases; full suite 5,712 pass / 78 opt-in skips / zero failures; normal build pass.
-The ABI field-name follow-up passed its focused tests and the 32 native exchange
-cases again. All owned browsers closed without GPU errors. Native evidence is
-manufactured-state integration, not real-material calibration or plume acceptance.
+Validation: 186 focused tests and a real dedicated-worker check pass. The worker
+receives only plain inputs, uses the production remote-seed receiver to upload
+GPU buffers, and matches the page-side thermal result. Full suite: 5,718 pass,
+78 opt-in skips, zero failures. Normal build passes. All 744 frozen paths match;
+owned worker/device/browser resources are closed. Evidence:
+`/home/cos/.cache/icc/repos/ulg/g2-caloric-inputs-20261026/`.
 
-Next: use these same models for cold air/humidity inputs and worker enrollment,
-then connect restart-applied controls. Iron Ice still uses its old initialization
-path. Exact mass/energy writers, finite-time activation/exchange, transport,
-deposition and traced desktop plumes remain required. No push/merge/Pages.
-Evidence: `/home/cos/.cache/icc/repos/ulg/g2-phase-caloric-20261026/`.
+Next: actual atmosphere allocation with consistent physical free volume,
+gas density/J and caloric energy bases, integrated with latent phase activation.
+Do not switch Iron Ice to sensible-only phase branches and thereby stop melting
+or evaporation. Real model/domain declarations, exact inventory writers,
+coupled finite-time exchange, nuclei, restart-applied controls, transport,
+deposition and traced plumes remain required. Presets have no newly enrolled
+air or nuclei; no plume acceptance is claimed. No push/merge/Pages.
 
 Planning update, 2026-09-22 AKDT: added the
 [Eshkol higher-order law and material closure plan](todo/eshkol-higher-order-law-closure-plan.md)

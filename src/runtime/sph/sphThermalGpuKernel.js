@@ -25,7 +25,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphThermalStepWgsl as sphThermalStepLegacyWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
-  SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE,
+  isPhaseCaloricSegmentType,
   condensableCaloricSegments,
   hasCondensableCaloricRows,
   selectCondensableCaloricRow
@@ -758,7 +758,7 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
         const phaseId = gpuPhaseId(segment.phase);
         segments.push(
           materialId,
-          segment.phaseCaloric ? SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE : THERMAL_SEGMENT_TYPES.phase,
+          segment.phaseCaloric ? segment.caloricSegmentType : THERMAL_SEGMENT_TYPES.phase,
           phaseId,
           phaseId,
           finiteNumber(segment.eStart),
@@ -873,7 +873,7 @@ function graphSamplesForThermalSegment(segment, sourceSegment = null) {
   const temperatureStart = finiteNumber(segment.temperatureStartK);
   const temperatureEnd = finiteNumber(segment.temperatureEndK);
   const fallbackSlope = (temperatureEnd - temperatureStart) / (
-    segment.segmentType === SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE
+    isPhaseCaloricSegmentType(segment.segmentType)
       ? energyEnd - energyStart : Math.max(1e-30, energyEnd - energyStart)
   );
   if (
@@ -1452,7 +1452,7 @@ export function resolveThermalPhaseResponseFromTable(
     const response = responseRows(table, selected);
     const rawAlpha = (
       specificInternalEnergyJPerKg - response.energyStartJPerKg
-    ) / (response.segmentType === SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE
+    ) / (isPhaseCaloricSegmentType(response.segmentType)
       ? response.energyEndJPerKg - response.energyStartJPerKg
       : Math.max(1e-12, response.energyEndJPerKg - response.energyStartJPerKg));
     const alpha = Math.min(1, Math.max(0, rawAlpha));
@@ -1515,7 +1515,7 @@ function temperatureFromPackedSegmentEnergy(table, segmentIndex, segment, specif
   }
   const alpha = Math.min(1, Math.max(0, (
     specificInternalEnergyJPerKg - segment.energyStartJPerKg
-  ) / (segment.segmentType === SPH_THERMAL_PHASE_CALORIC_SEGMENT_TYPE
+  ) / (isPhaseCaloricSegmentType(segment.segmentType)
     ? segment.energyEndJPerKg - segment.energyStartJPerKg
     : Math.max(1e-12, segment.energyEndJPerKg - segment.energyStartJPerKg))));
   return segment.temperatureStartK + alpha * (segment.temperatureEndK - segment.temperatureStartK);

@@ -1,5 +1,31 @@
 # ULG Implementation Log
 
+## 2026-10-26 UTC — solid and gas-only caloric GPU consumers
+
+Extended the existing phase-specific model roster, cold packers, thermal tables,
+classic and canonical spatial selectors, gas EOS admission and vapor/droplet
+heat writer. Distinct table tags require the complete declared phase roster;
+truncating an old liquid/gas table cannot impersonate a gas-only model. Solid U
+shares the liquid energy reference through fusion enthalpy and pressure-volume
+work. Gas-only rows explicitly lack liquid and surface data; mass-transfer
+admission remains unavailable for those rows.
+
+Three owned desktop GPU checks pass: initial packing through two retained
+thermal/mechanics cycles, 28 thermal cases including canonical spatial prepass,
+and 32 EOS/exchange cases including gas-only heat, order invariance and energy
+reference shifts. Existing liquid/vapor and legacy iron controls still pass.
+The 742-path source freeze stayed unchanged during each check; error scopes are
+empty and all owned browsers closed. The ABI field-name/documentation correction
+then passed focused host checks and all 32 exchange cases again under freeze r2.
+Full Node suite: 5,712 pass, 78 opt-in skips, zero failures. Normal build passes
+with existing mixed static/dynamic import warnings.
+
+These are manufactured model checks, not calibrated air/ice, latent phase
+activation or a transported plume. Live preset initialization and UI remain
+unchanged. Keep original G2–G6 scope, the stopped diagnostic ladder and the
+publication hold. Evidence lives under
+`/home/cos/.cache/icc/repos/ulg/g2-phase-caloric-20261026/`.
+
 ## 2026-10-26 UTC — shared G2 environment initialization inputs
 
 After the user's cost concern, stopped expanding the exact-reaction diagnostic

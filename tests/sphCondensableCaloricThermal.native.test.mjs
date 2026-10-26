@@ -32,6 +32,7 @@ const NEGATIVES = Object.freeze([
 const REQUIRED_SOURCES = [
   'tests/sphCondensableCaloricThermal.test.mjs',
   'tests/sphCondensableCaloricThermal.native.test.mjs',
+  'tests/fixtures/sphExtendedPhaseCaloric.js',
   'src/runtime/material/condensableThermodynamics.js',
   'src/runtime/sph/sphCondensableCaloricTable.js',
   'src/runtime/sph/sphThermalGpuKernel.js',
@@ -167,7 +168,7 @@ test('native explicit-phase caloric thermal uses live GPU phase/Cv and survives 
       const runs = [];
       let fatalError = null;
       let ordinal = 0;
-      const phaseFractions = (phase) => [0, phase === 2 ? 1 : 0, phase === 3 ? 1 : 0, 0];
+      const phaseFractions = (phase) => [phase === 1 ? 1 : 0, phase === 2 ? 1 : 0, phase === 3 ? 1 : 0, 0];
       const specificEnergy = (phase, temperature) => (phase === 2 ? -50_003 : 120_000)
         + (phase === 2 ? 4000 : 3900) * (temperature - 300);
       const materialId = optics.stableOpticalMaterialId('h2o');
@@ -189,6 +190,9 @@ test('native explicit-phase caloric thermal uses live GPU phase/Cv and survives 
         segments: new Float32Array([...table.segments.slice(12), ...table.segments.slice(0, 12)]),
         segmentMetadata: [...table.segmentMetadata].reverse() };
       const legacyTable = noRadiation(thermal.buildSphThermalMaterialTable(properties));
+      const { createExtendedPhaseCaloricFixture } = await import('/tests/fixtures/sphExtendedPhaseCaloric.js');
+      const extendedInputs = createExtendedPhaseCaloricFixture(thermodynamics);
+      const extendedTable = noRadiation(thermal.buildSphThermalMaterialTable(extendedInputs.materialProperties, extendedInputs));
       const mechanicsTable = {
         schema: 'peercompute.ulg.mls-mpm-mechanics-material-table.v0',
         status: 'mechanics-material-table-ready', phaseRecordCount: 2, recordStrideFloats: 12,
@@ -235,13 +239,13 @@ test('native explicit-phase caloric thermal uses live GPU phase/Cv and survives 
           // Invalid phase fixtures still occupy a declared gas address; they
           // only run thermal rejection, never claim a valid transfer lineage.
           const phase = body.phaseId ?? 3;
-          const index = ((phase === 2 ? 2 : 3) - 1) * capacity + lineage;
+          const index = (([1, 2, 3].includes(phase) ? phase : 3) - 1) * capacity + lineage;
           active.push(index);
           const temperature = body.temperature ?? 278;
           const energy = body.energy ?? specificEnergy(phase, temperature);
-          const density = phase === 2 ? 1000 : 0.1;
+          const density = body.density ?? (phase === 2 ? 1000 : 0.1);
           state.set([...(body.position || [2, 2, 2]), 1, 0, 0, 0, energy], index * 8);
-          thermo.set([materialId, phase, body.cachedTemperature ?? temperature, density,
+          thermo.set([body.materialId ?? materialId, phase, body.cachedTemperature ?? temperature, density,
             ...(body.fractions || phaseFractions(phase)), 1, 10, 1, 0.1], index * 12);
           mechanics[index * 32] = 1;
           mechanics[index * 32 + 4] = 1;
@@ -423,6 +427,13 @@ test('native explicit-phase caloric thermal uses live GPU phase/Cv and survives 
         }
         for (const canonical of [false, true]) {
           const route = canonical ? 'canonical' : 'classic';
+          const extended = fixture(route + '-extended-phases', extendedInputs.particles.map((particle, index) => ({
+            phaseId: particle.phaseCaloric.phaseId, fractions: particle.phaseCaloric.phaseFractions,
+            energy: particle.specificInternalEnergyJPerKg, position: particle.x,
+            materialId: optics.stableOpticalMaterialId(particle.material),
+            density: [1250, 1000, .1, .1][index], cachedTemperature: 999
+          })));
+          runs.push((await thermalRun(extended, { canonical, wall: true, materialTable: extendedTable })).out);
           const pulse = fixture(route + '-wall-pulse', [{ position: [0.25, 2, 2], cachedTemperature: 999 }]);
           runs.push((await thermalRun(pulse, { canonical, wall: true })).out);
           for (const phaseId of [2, 3]) {
@@ -490,7 +501,7 @@ test('native explicit-phase caloric thermal uses live GPU phase/Cv and survives 
   assert.equal(observed.fatalError, null);
   assert.deepEqual(observed.errors, []);
   assert.equal(observed.servedSources.length, REQUIRED_SOURCES.length);
-  assert.equal(observed.runs.length, 26);
+  assert.equal(observed.runs.length, 28);
   const near = (actual, expected, tolerance, label) => assert.ok(Number.isFinite(actual)
     && Math.abs(actual - expected) <= tolerance, `${label}: ${actual} != ${expected} +/- ${tolerance}`);
   for (const run of observed.runs) {
@@ -596,7 +607,22 @@ test('native explicit-phase caloric thermal uses live GPU phase/Cv and survives 
       assert.equal(run.refreshedMechanics[i * 32 + 31], 1);
       continue;
     }
-    if (run.name.includes('wall-pulse')) {
+    if (run.name.endsWith('-extended-phases')) {
+      const phases = [1, 2, 3, 3], cvs = [2000, 4000, 3900, 800];
+      const initialU = [-50000, -50000, -50000, 50000], referenceU = [-70002.4, -50003, 120000, 100000];
+      for (const [ordinal, index] of run.active.entries()) {
+        const initialT = 300 + (initialU[ordinal] - referenceU[ordinal]) / cvs[ordinal];
+        const q = ordinal === 0 || ordinal === 3 ? 2600 * (298 - initialT) * .75 * .1 : 0;
+        near(run.state[index * 8 + 7], initialU[ordinal] + q, .05, run.name + ': extended wall heat');
+        near(run.thermo[index * 12 + 2], initialT + q / cvs[ordinal], 8e-5, run.name + ': extended phase inverse');
+        assert.equal(run.thermo[index * 12 + 1], phases[ordinal]);
+        assert.deepEqual(run.thermo.slice(index * 12 + 4, index * 12 + 8), [1, 2, 3, 4].map((p) => Number(p === phases[ordinal])));
+        if (run.derivedRows) {
+          near(run.derivedRows[ordinal][0], initialT, 8e-5, run.name + ': actual extended prepass T');
+          near(run.derivedRows[ordinal][1], 1 / cvs[ordinal], 1e-10, run.name + ': actual extended prepass Cv');
+        }
+      }
+    } else if (run.name.includes('wall-pulse')) {
       // Qwall=2600*(298-278)*(1-.25/1)*.1=3900 J for mass1kg.
       near(run.state[i * 8 + 7], U(3, 278) + 3900, 0.05, run.name + ': independent wall Q');
       near(run.thermo[i * 12 + 2], 279, 4e-5, run.name + ': dT=Q/Cv, not Q/Cp');

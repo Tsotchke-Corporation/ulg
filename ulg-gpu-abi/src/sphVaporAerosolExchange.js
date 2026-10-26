@@ -94,8 +94,12 @@ export const SPH_VAPOR_AEROSOL_EXCHANGE_MATERIAL_OFFSETS = Object.freeze({
   LIQUID_U_LO: 4, LIQUID_U_HI: 5, TEMPERATURE_MIN: 6,
   TEMPERATURE_MAX: 7, LIQUID_DENSITY: 8, SIGMA_INTERCEPT: 9,
   SIGMA_SLOPE: 10, SURFACE_READY: 11, GAS_CV: 12, GAMMA: 13,
-  MAX_PRESSURE: 14, RESERVED: 15
+  MAX_PRESSURE: 14, GAS_ONLY: 15
 });
+// GAS_ONLY=1 admits a gas sensible-heat participant with no condensed branch.
+// Its liquid interval, liquid density, surface coefficients and SURFACE_READY
+// must all be zero. GAS_ONLY=0 retains the liquid+gas material contract.
+// A gas-only row cannot supply a parcel model or a mass-transfer edge.
 export const SPH_VAPOR_AEROSOL_EXCHANGE_SURFACE_OFFSETS = Object.freeze({
   OLD_AREA: 0, OLD_INTERNAL_ENERGY: 1, NEW_AREA: 2,
   NEW_INTERNAL_ENERGY: 3

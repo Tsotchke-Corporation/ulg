@@ -153,6 +153,9 @@ test('native exact EOS vapor/aerosol writer conserves real candidate buffers wit
           { name: 'heat-mixture-graph', heatGraph: true, heatPass: true },
           { name: 'heat-mixture-permuted', heatGraph: true, heatPass: true, reverse: true },
           { name: 'heat-mixture-gauges', heatGraph: true, heatPass: true, shifts: [500000, -1000000] },
+          { name: 'heat-gas-only-graph', gasOnly: true, heatGraph: true, heatPass: true },
+          { name: 'heat-gas-only-permuted', gasOnly: true, heatGraph: true, heatPass: true, reverse: true },
+          { name: 'heat-gas-only-gauges', gasOnly: true, heatGraph: true, heatPass: true, shifts: [500000, -1000000] },
           { name: 'heat-exact-cancellation', heatGraph: true, heatPass: true, packets: [2 ** 100, 1, -(2 ** 100)] },
           { name: 'heat-exact-cancellation-permuted', heatGraph: true, heatPass: true, packets: [2 ** 100, -(2 ** 100), 1] },
           { name: 'heat-zero-net', heatGraph: true, heatPass: true, packets: [64, -64] },
@@ -174,8 +177,15 @@ test('native exact EOS vapor/aerosol writer conserves real candidate buffers wit
               vaporizationReferenceEnthalpyJPerKg: 200000, liquidCpJPerKgK: Cp, vaporCpJPerKgK: Cp,
               liquidDensityKgPerM3: 1000, molarMassKgPerMol: 8.314462618 / Rs, minTemperatureK: 200,
               maxTemperatureK: 450, maxPressurePa: 2000000, provenance: 'manufactured conservative writer model' });
+            if (i === 1 && config.gasOnly) models[material] = modelModule.createIdealGasCaloricThermodynamics({
+              schema: modelModule.IDEAL_GAS_CALORIC_SCHEMA, energyBasis: modelModule.IDEAL_GAS_CALORIC_ENERGY_BASIS,
+              referenceTemperatureK: 300, referencePressurePa: 3000,
+              referenceSpecificInternalEnergyJPerKg: 90000 + shifts[i], cvJPerKgK: 1800,
+              molarMassKgPerMol: 8.314462618 / Rs, minTemperatureK: 200, maxTemperatureK: 450,
+              maxPressurePa: 2000000, provenance: 'manufactured gas-only conservative heat writer model' });
             properties[material] = { ...reference, molarMassKgPerMol: 8.314462618 / Rs,
-              phases: reference.phases.map((phase) => ({ ...phase,
+              ...(i === 1 && config.gasOnly ? { transitions: [] } : {}),
+              phases: reference.phases.filter((phase) => !(i === 1 && config.gasOnly) || phase.name === 'gas').map((phase) => ({ ...phase,
                 ...(phase.name === 'liquid' ? { cpJPerKgK: Cp, densityKgPerM3: 1000 } : {}),
                 ...(phase.name === 'gas' ? { cpJPerKgK: Cp, densityKgPerM3: 3000 / (Rs * 300),
                   bulkModulusPa: null, shearModulusPa: 0, surfaceTensionNPerM: 0 } : {}) })) };
@@ -336,6 +346,8 @@ test('native exact EOS vapor/aerosol writer conserves real candidate buffers wit
           const coldTransactionReleased = await tx.scheduleSchroederSpatialEpochTransactionRelease(transaction,
             { after: coldSs.generation.releasePromise });
           cases.push({ name: config.name, shifts, edges, heatPass: config.heatPass ?? false,
+            gasOnly: config.gasOnly ?? false, inertModelSchema: models.nh3.schema,
+            inertPhases: properties.nh3.phases.map((phase) => phase.name),
             numericFailure: config.numericFailure ?? false, sourceUnchanged, eosReleased, parentRelease, retired, sourceReleases,
             blockedRelease, replayRejected, copiedRejected, thrown, candidateReleased, coldTransactionReleased,
             candidate: candidate ? { ready: candidate.ready, status: candidate.status, receipt: candidate.receipt,
@@ -379,8 +391,12 @@ test('native exact EOS vapor/aerosol writer conserves real candidate buffers wit
   assert.equal(evidence.ownedBrowserClosed, true);
   assert.equal(evidence.observed.fatalError, null);
   assert.deepEqual(evidence.observed.errors, []);
-  assert.equal(evidence.observed.cases.length, 29);
+  assert.equal(evidence.observed.cases.length, 32);
   for (const c of evidence.observed.cases) {
+    if (c.gasOnly) {
+      assert.equal(c.inertModelSchema, 'peercompute.ulg.ideal-gas-caloric.v1');
+      assert.deepEqual(c.inertPhases, ['gas']);
+    }
     assert.equal(c.sourceUnchanged, true, c.name);
     assert.equal(c.blockedRelease, true, c.name);
     assert.equal(c.eosReleased, true, c.name);
@@ -413,12 +429,19 @@ test('native exact EOS vapor/aerosol writer conserves real candidate buffers wit
   for (let p = 0; p < 2; p++) near(floats(shifted.parcelWords)[p * 24 + 8], floats(ordinary.parcelWords)[p * 24 + 8],
     'liquid gauge invariance', 0, .0005);
   for (const [left, right] of [['heat-mixture-graph', 'heat-mixture-permuted'],
+    ['heat-gas-only-graph', 'heat-gas-only-permuted'],
     ['heat-exact-cancellation', 'heat-exact-cancellation-permuted']]) {
     const a = evidence.observed.cases.find((c) => c.name === left).result;
     const b = evidence.observed.cases.find((c) => c.name === right).result;
     for (const key of ['stateValues', 'thermoValues', 'mechanicsValues', 'productEventValues', 'parcelWords', 'surfaceValues']) {
       assert.deepEqual(a[key], b[key], `${left}: ${key} edge-order invariance`);
     }
+  }
+  const dry = evidence.observed.cases.find((c) => c.name === 'heat-gas-only-graph').result;
+  const dryShifted = evidence.observed.cases.find((c) => c.name === 'heat-gas-only-gauges').result;
+  for (let i = 0; i < 2; i++) {
+    near(dryShifted.thermoValues[i * 12 + 2], dry.thermoValues[i * 12 + 2], 'gas-only gauge invariance', 0, .0005);
+    near(floats(dryShifted.parcelWords)[i * 24 + 8], floats(dry.parcelWords)[i * 24 + 8], 'droplet gauge invariance', 0, .0005);
   }
 });
 

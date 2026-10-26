@@ -90,9 +90,13 @@ fn xmaterial_valid(row: u32) -> bool {
   let id = materials[m]; let min_t = materials[m + 6u]; let max_t = materials[m + 7u];
   if (!(id >= 1.0 && id <= 16777215.0 && floor(id) == id)
       || !xpos(materials[m + 1u]) || !xpos(materials[m + 3u] - materials[m + 2u])
-      || !xpos(materials[m + 5u] - materials[m + 4u]) || !xpos(min_t) || !xpos(max_t - min_t)
-      || !xpos(materials[m + 8u]) || !xpos(materials[m + 12u])
-      || !(materials[m + 13u] > 1.0) || !xpos(materials[m + 14u]) || materials[m + 15u] != 0.0) { return false; }
+      || !xpos(min_t) || !xpos(max_t - min_t) || !xpos(materials[m + 12u])
+      || !(materials[m + 13u] > 1.0) || !xpos(materials[m + 14u])) { return false; }
+  if (materials[m + 15u] == 1.0) {
+    if (materials[m + 4u] != 0.0 || materials[m + 5u] != 0.0 || materials[m + 8u] != 0.0
+      || materials[m + 9u] != 0.0 || materials[m + 10u] != 0.0 || materials[m + 11u] != 0.0) { return false; }
+  } else if (materials[m + 15u] != 0.0 || !xpos(materials[m + 5u] - materials[m + 4u])
+    || !xpos(materials[m + 8u])) { return false; }
   // Ordinary inert gas members need caloric authority, not an invented
   // liquid-surface law. Only a parcel/selected transfer needs surfaceReady1.
   if (materials[m + 11u] == 1.0) {
@@ -110,6 +114,7 @@ fn xmaterial_for(id: u32) -> u32 {
 }
 fn xphase_t(row: u32, u: f32, liquid: bool) -> f32 {
   let m = row * 16u; let offset = select(2u, 4u, liquid);
+  if (liquid && materials[m + 15u] == 1.0) { return -1.0; }
   let lo = materials[m + offset]; let hi = materials[m + offset + 1u];
   if (!xfinite(u) || u < lo || u > hi) { return -1.0; }
   let t = materials[m + 6u] + ((u - lo) / (hi - lo)) * (materials[m + 7u] - materials[m + 6u]);

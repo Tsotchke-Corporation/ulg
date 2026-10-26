@@ -2615,8 +2615,8 @@ struct ThermalPhaseCaloricSelection {
   selection: ThermalCarrierSelection,
 };
 
-// Type 3 is explicit phase-specific caloric enrollment, not another segment
-// in the legacy equilibrium ladder. Its two phase domains can overlap in U;
+// Types 3/4/5 are explicit liquid+gas / solid+liquid+gas / gas-only rosters,
+// not segments in the legacy equilibrium ladder. Phase domains can overlap in U;
 // neither their order nor energy alone may select or connect these branches.
 fn thermal_prepass_phase_caloric_selection(
   material_id: f32,
@@ -2665,15 +2665,22 @@ fn thermal_prepass_phase_caloric_selection(
       || (response0.y != 1.0 && response0.y != 2.0);
   }
   if (!explicit_caloric) { return legacy; }
+  let caloric_kind = thermal_prepass_response_row0(response_offset).y;
+  var expected_count = 0u;
+  var expected_mask = 0u;
+  if (caloric_kind == 3.0) { expected_count = 2u; expected_mask = 12u; }
+  else if (caloric_kind == 4.0) { expected_count = 3u; expected_mask = 14u; }
+  else if (caloric_kind == 5.0) { expected_count = 1u; expected_mask = 8u; }
+  else { return invalid; }
   if (
-    record.w != 1.0 || response_count != 2u
+    record.w != 1.0 || response_count != expected_count
     || !thermal_prepass_finite(material_id)
     || material_id < 1.0 || material_id > 16777215.0
     || floor(material_id) != material_id
     || !thermal_prepass_finite(specific_internal_energy)
-    || (phase_id != 2.0 && phase_id != 3.0)
+    || (phase_id != 1.0 && phase_id != 2.0 && phase_id != 3.0)
     || !all(phase_fractions == vec4<f32>(
-      0.0, select(0.0, 1.0, phase_id == 2.0),
+      select(0.0, 1.0, phase_id == 1.0), select(0.0, 1.0, phase_id == 2.0),
       select(0.0, 1.0, phase_id == 3.0), 0.0
     ))
   ) { return invalid; }
@@ -2686,18 +2693,18 @@ fn thermal_prepass_phase_caloric_selection(
     let row2 = phase_responses[response_index * 4u + 2u];
     let row3 = phase_responses[response_index * 4u + 3u];
     if (
-      row0.x != material_id || row0.y != 3.0 || row0.w != 1.0
+      row0.x != material_id || row0.y != caloric_kind || row0.w != 1.0
       || !thermal_prepass_finite(row0.z) || row0.z < 0.0
       || row0.z > 16777215.0 || floor(row0.z) != row0.z
       || !thermal_prepass_finite(row1.x) || !thermal_prepass_finite(row1.y)
       || !(row1.x < row1.y) || row1.z != row1.w
-      || (row1.z != 2.0 && row1.z != 3.0)
+      || (row1.z != 1.0 && row1.z != 2.0 && row1.z != 3.0)
       || !thermal_prepass_finite(row2.x) || !(row2.x > 0.0)
       || row2.x != row2.y || row2.z != 1.0 || row2.w != 1.0
       || !all(row3 == vec4<f32>(0.0, 1.0, 0.0, 0.0))
     ) { return invalid; }
-    let phase_bit = select(1u, 2u, row1.z == 3.0);
-    if ((phase_mask & phase_bit) != 0u) { return invalid; }
+    let phase_bit = 1u << u32(row1.z);
+    if ((expected_mask & phase_bit) == 0u || (phase_mask & phase_bit) != 0u) { return invalid; }
     phase_mask = phase_mask | phase_bit;
     let graph_index = u32(row0.z);
     if (graph_index >= arrayLength(&thermal_graph_nodes) / 4u) {
@@ -2742,7 +2749,7 @@ fn thermal_prepass_phase_caloric_selection(
       selected = ThermalCarrierSelection(response_index, 1u, row1.x, row1.y);
     }
   }
-  if (phase_mask != 3u || selected.ready != 1u) { return invalid; }
+  if (phase_mask != expected_mask || selected.ready != 1u) { return invalid; }
   return ThermalPhaseCaloricSelection(1u, selected);
 }
 

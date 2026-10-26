@@ -9,13 +9,17 @@
 // Constant-Cp integration: https://cantera.org/3.1/reference/thermo/species-thermo.html
 // Parameters and their validity limits are explicit inputs, not calibrated
 // material data or a claim of IAPWS accuracy. This model omits curved/solute
-// interfaces, nonideal gas interactions, ice and surface energy.
+// interfaces, nonideal gas interactions and surface energy. An optional solid
+// caloric branch shares the liquid energy zero through a declared fusion
+// enthalpy; this does not supply a melting/sublimation equilibrium or rate law.
 
 export const CONDENSABLE_THERMODYNAMICS_SCHEMA =
   'peercompute.ulg.condensable-thermodynamics.v1';
 export const CONDENSABLE_ENTHALPY_REFERENCE_BASIS =
   'specific-enthalpy-at-reference-pressure';
 export const CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K = 8.314462618;
+export const IDEAL_GAS_CALORIC_SCHEMA = 'peercompute.ulg.ideal-gas-caloric.v1';
+export const IDEAL_GAS_CALORIC_ENERGY_BASIS = 'specific-internal-energy-at-reference-temperature';
 
 const models = new WeakSet();
 
@@ -110,6 +114,38 @@ export function createCondensableThermodynamics(record) {
     model[`${phase}EnergyMinJPerKg`] = lo;
     model[`${phase}EnergyMaxJPerKg`] = hi;
   }
+  if (record.solidCaloric !== undefined) {
+    const input = record.solidCaloric;
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || typeof input.provenance !== 'string' || !input.provenance.trim()) {
+      throw new TypeError('Explicit solid caloric inputs and provenance required');
+    }
+    const solid = { phase: 'solid', provenance: input.provenance };
+    for (const key of ['referenceTemperatureK', 'referencePressurePa', 'fusionEnthalpyJPerKg',
+      'cpJPerKgK', 'densityKgPerM3', 'minTemperatureK', 'maxTemperatureK']) {
+      solid[key] = positive(input[key], `solidCaloric.${key}`);
+    }
+    if (!(solid.minTemperatureK < solid.maxTemperatureK)
+      || solid.referenceTemperatureK < solid.minTemperatureK || solid.referenceTemperatureK > solid.maxTemperatureK
+      || solid.referenceTemperatureK < model.minTemperatureK || solid.referenceTemperatureK > model.maxTemperatureK
+      || solid.referencePressurePa > model.maxPressurePa) {
+      throw new RangeError('Fusion reference must be inside both declared phase domains');
+    }
+    // h_s(Tm,Pm) = h_l(Tm,Pm) - L_f; u_s = h_s - Pm/rho_s.
+    // Do not mistake enthalpy of fusion for an internal-energy jump.
+    const liquidU = model.liquidReferenceInternalEnergyJPerKg
+      + model.liquidCvJPerKgK * (solid.referenceTemperatureK - model.referenceTemperatureK);
+    solid.referenceInternalEnergyJPerKg = finite(liquidU
+      + solid.referencePressurePa * (model.liquidSpecificVolumeM3PerKg - 1 / solid.densityKgPerM3)
+      - solid.fusionEnthalpyJPerKg, 'solid reference internal energy');
+    solid.cvJPerKgK = solid.cpJPerKgK;
+    solid.energyMinJPerKg = finite(solid.referenceInternalEnergyJPerKg
+      + solid.cvJPerKgK * (solid.minTemperatureK - solid.referenceTemperatureK), 'solid minimum U');
+    solid.energyMaxJPerKg = finite(solid.referenceInternalEnergyJPerKg
+      + solid.cvJPerKgK * (solid.maxTemperatureK - solid.referenceTemperatureK), 'solid maximum U');
+    if (!(solid.energyMinJPerKg < solid.energyMaxJPerKg)) throw new RangeError('Collapsed solid caloric domain');
+    model.solidCaloric = Object.freeze(solid);
+  }
   models.add(model);
   // Positive latent H makes log(Peq) monotone in T and P in this domain.
   // Preflight its corners, and both caloric endpoints, before publishing the
@@ -128,7 +164,62 @@ export function createCondensableThermodynamics(record) {
 }
 
 export function isCondensableThermodynamics(model) {
-  return models.has(model);
+  return models.has(model) && model.schema === CONDENSABLE_THERMODYNAMICS_SCHEMA;
+}
+
+/** A gas-only caloric model has no fictitious liquid branch or latent heat. */
+export function createIdealGasCaloricThermodynamics(record) {
+  if (record?.schema !== IDEAL_GAS_CALORIC_SCHEMA || record.energyBasis !== IDEAL_GAS_CALORIC_ENERGY_BASIS
+    || typeof record.provenance !== 'string' || !record.provenance.trim()) {
+    throw new TypeError('Explicit ideal-gas caloric schema, energy basis and provenance required');
+  }
+  const model = { schema: IDEAL_GAS_CALORIC_SCHEMA, energyBasis: record.energyBasis,
+    model: 'constant-cv-ideal-gas-only', provenance: record.provenance,
+    scientificValidation: false, liveStateEnrollment: false };
+  for (const key of ['molarMassKgPerMol', 'referenceTemperatureK', 'referencePressurePa',
+    'minTemperatureK', 'maxTemperatureK', 'maxPressurePa']) model[key] = positive(record[key], key);
+  model.vaporCvJPerKgK = positive(record.cvJPerKgK, 'cvJPerKgK');
+  model.vaporReferenceInternalEnergyJPerKg = finite(record.referenceSpecificInternalEnergyJPerKg,
+    'referenceSpecificInternalEnergyJPerKg');
+  if (!(model.minTemperatureK < model.maxTemperatureK)
+    || model.referenceTemperatureK < model.minTemperatureK || model.referenceTemperatureK > model.maxTemperatureK
+    || model.referencePressurePa > model.maxPressurePa) throw new RangeError('Gas reference must be inside its declared domain');
+  model.specificGasConstantJPerKgK = positive(CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+    / model.molarMassKgPerMol, 'gas specific R');
+  model.vaporCpJPerKgK = positive(model.vaporCvJPerKgK + model.specificGasConstantJPerKgK, 'gas Cp');
+  for (const [bound, temperatureK] of [['Min', model.minTemperatureK], ['Max', model.maxTemperatureK]]) {
+    model[`vaporEnergy${bound}JPerKg`] = finite(model.vaporReferenceInternalEnergyJPerKg
+      + model.vaporCvJPerKgK * (temperatureK - model.referenceTemperatureK), `gas ${bound} U`);
+  }
+  if (!(model.vaporEnergyMinJPerKg < model.vaporEnergyMaxJPerKg)) throw new RangeError('Collapsed gas caloric domain');
+  positive(model.referencePressurePa / (model.specificGasConstantJPerKgK * model.referenceTemperatureK), 'gas reference density');
+  models.add(model);
+  return Object.freeze(model);
+}
+
+export function isPhaseCaloricThermodynamics(model) { return models.has(model); }
+export function isIdealGasCaloricThermodynamics(model) {
+  return models.has(model) && model.schema === IDEAL_GAS_CALORIC_SCHEMA;
+}
+
+// One phase roster drives cold packing, thermal graphs, and gas admission.
+// Phase is selected explicitly even when two energy intervals overlap.
+export function phaseCaloricBranches(model) {
+  if (!models.has(model)) throw new TypeError('Original created phase caloric model required');
+  const phases = isCondensableThermodynamics(model) ? ['liquid', 'gas'] : ['gas'];
+  const rows = phases.map((phase) => {
+    const prefix = phase === 'gas' ? 'vapor' : 'liquid';
+    return Object.freeze({ phase, referenceTemperatureK: model.referenceTemperatureK,
+      referenceInternalEnergyJPerKg: model[`${prefix}ReferenceInternalEnergyJPerKg`],
+      cpJPerKgK: model[`${prefix}CpJPerKgK`], cvJPerKgK: model[`${prefix}CvJPerKgK`],
+      energyMinJPerKg: model[`${prefix}EnergyMinJPerKg`], energyMaxJPerKg: model[`${prefix}EnergyMaxJPerKg`],
+      minTemperatureK: model.minTemperatureK, maxTemperatureK: model.maxTemperatureK,
+      densityKgPerM3: phase === 'gas'
+        ? model.referencePressurePa / (model.specificGasConstantJPerKgK * model.referenceTemperatureK)
+        : model.liquidDensityKgPerM3 });
+  });
+  if (model.solidCaloric) rows.unshift(model.solidCaloric);
+  return Object.freeze(rows);
 }
 
 // Sensible-energy continuation on an explicitly selected phase branch. Energy
@@ -139,6 +230,21 @@ export function resolveCondensableCaloricState(model, {
   phase, specificInternalEnergyJPerKg, totalPressurePa
 } = {}) {
   if (!models.has(model)) throw new TypeError('Created condensable thermodynamic model required');
+  if (isIdealGasCaloricThermodynamics(model) || phase === 'solid') {
+    const branch = phaseCaloricBranches(model).find((row) => row.phase === phase);
+    if (!branch) throw new TypeError('Explicit enrolled caloric phase required');
+    finite(specificInternalEnergyJPerKg, 'specificInternalEnergyJPerKg');
+    finite(totalPressurePa, 'totalPressurePa');
+    if (specificInternalEnergyJPerKg < branch.energyMinJPerKg || specificInternalEnergyJPerKg > branch.energyMaxJPerKg
+      || totalPressurePa < 0 || totalPressurePa > model.maxPressurePa) throw new RangeError('State outside declared caloric domain');
+    const temperatureK = specificInternalEnergyJPerKg === branch.energyMinJPerKg ? branch.minTemperatureK
+      : specificInternalEnergyJPerKg === branch.energyMaxJPerKg ? branch.maxTemperatureK
+        : branch.referenceTemperatureK + (specificInternalEnergyJPerKg - branch.referenceInternalEnergyJPerKg) / branch.cvJPerKgK;
+    return Object.freeze({ phase, temperatureK, specificInternalEnergyJPerKg, cvJPerKgK: branch.cvJPerKgK,
+      energyMinJPerKg: branch.energyMinJPerKg, energyMaxJPerKg: branch.energyMaxJPerKg,
+      specificEnthalpyJPerKg: finite(specificInternalEnergyJPerKg + (phase === 'gas'
+        ? model.specificGasConstantJPerKgK * temperatureK : totalPressurePa / branch.densityKgPerM3), 'specific enthalpy') });
+  }
   if (phase !== 'liquid' && phase !== 'gas') {
     throw new TypeError('Explicit liquid or gas phase required; no phase inference from energy');
   }
@@ -168,7 +274,7 @@ export function resolveCondensableCaloricState(model, {
 export function evaluateCondensableThermodynamics(model, {
   temperatureK, totalPressurePa
 } = {}) {
-  if (!models.has(model)) throw new TypeError('Created condensable thermodynamic model required');
+  if (!isCondensableThermodynamics(model)) throw new TypeError('Created condensable thermodynamic model required');
   finite(temperatureK, 'temperatureK');
   finite(totalPressurePa, 'totalPressurePa');
   if (temperatureK < model.minTemperatureK || temperatureK > model.maxTemperatureK

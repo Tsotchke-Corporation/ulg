@@ -1,6 +1,6 @@
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { isCondensableThermodynamics } from '../material/condensableThermodynamics.js';
-import { condensableCaloricSegments } from './sphCondensableCaloricTable.js';
+import { isPhaseCaloricThermodynamics } from '../material/condensableThermodynamics.js';
+import { condensableCaloricSegments, SPH_CALORIC_PHASE_IDS } from './sphCondensableCaloricTable.js';
 import { condensableInitializationProperties } from './sphCondensableParticleInitialization.js';
 import { resolveThermalResponseGraphArtifacts, ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA }
   from './sphThermalGpuKernel.js';
@@ -101,7 +101,7 @@ function validatePhaseGraph(artifacts, segmentIndex, id, phaseId, segment) {
     const row = responses.responses.subarray(i * 16, i * 16 + 16);
     if (row[0] === id && row[6] === phaseId) responseMatches.push(row);
   }
-  const expected = [id, 3, index, 1, segment.eStart, segment.eEnd,
+  const expected = [id, segment.caloricSegmentType, index, 1, segment.eStart, segment.eEnd,
     phaseId, phaseId, segment.restDensityKgPerM3, segment.restDensityKgPerM3, 1, 1, 0, 1, 0, 0];
   if (responseMatches.length !== 1 || !rowMatches(responseMatches[0], expected)
     || graph?.nodeCount !== 1 || graph.sampleCount !== 2 || graph.sampleRows?.length !== 8
@@ -127,7 +127,7 @@ export function createSphSpatialGasCaloricAuthority({
   const artifacts = resolveThermalResponseGraphArtifacts({ thermalMaterialTable, requireExactContent: true });
   const rows = [], admittedIds = new Set();
   for (const [material, model] of entries.sort(([a], [b]) => a.localeCompare(b))) {
-    if (!isCondensableThermodynamics(model)) fail('original created explicit model required');
+    if (!isPhaseCaloricThermodynamics(model)) fail('original created explicit model required');
     const id = stableOpticalMaterialId(material);
     if (admittedIds.has(id)) fail('duplicate enrolled material identity');
     admittedIds.add(id);
@@ -144,16 +144,16 @@ export function createSphSpatialGasCaloricAuthority({
     }
     const record = thermalMaterialTable.records.subarray(recordIndices[0] * 8, recordIndices[0] * 8 + 8);
     const start = record[1];
-    if (record[2] !== 2 || record[3] !== 1 || record[5] !== 0 || record[6] !== 0 || record[7] !== 0
-      || metadata[0].segmentOffset !== start || metadata[0].segmentCount !== 2) {
-      fail('enrolled material must contain exactly two pure type-3 branches');
-    }
     const segments = condensableCaloricSegments(model);
-    for (let local = 0; local < 2; local += 1) {
-      const s = segments[local], phaseId = local + 2, index = start + local;
+    if (record[2] !== segments.length || record[3] !== 1 || record[5] !== 0 || record[6] !== 0 || record[7] !== 0
+      || metadata[0].segmentOffset !== start || metadata[0].segmentCount !== segments.length) {
+      fail('enrolled material must contain its complete declared pure-phase roster');
+    }
+    for (let local = 0; local < segments.length; local += 1) {
+      const s = segments[local], phaseId = SPH_CALORIC_PHASE_IDS[s.phase], index = start + local;
       const row = thermalMaterialTable.segments.subarray(index * 12, index * 12 + 12);
       const metadataRow = thermalMaterialTable.segmentMetadata[index];
-      if (!rowMatches(row, [id, 3, phaseId, phaseId, s.eStart, s.eEnd,
+      if (!rowMatches(row, [id, s.caloricSegmentType, phaseId, phaseId, s.eStart, s.eEnd,
         s.tLo, s.tHi, s.restDensityKgPerM3, s.restDensityKgPerM3, 1])
         || !Number.isFinite(row[11]) || row[11] < 0
         || metadataRow?.material !== material || metadataRow.materialId !== id
@@ -162,7 +162,7 @@ export function createSphSpatialGasCaloricAuthority({
         || metadataRow.debyeTemperatureK) fail('actual phase rows differ from the declared model');
       validatePhaseGraph(artifacts, index, id, phaseId, s);
     }
-    const gas = segments[1];
+    const gas = segments.find((segment) => segment.phase === 'gas');
     const mass = Math.fround(model.molarMassKgPerMol);
     const cv = Math.fround((gas.eEnd - gas.eStart) / (gas.tHi - gas.tLo));
     if (!f32Positive(mass) || !f32Positive(cv)) fail('unrepresentable material M or Cv');
@@ -218,10 +218,13 @@ export function resolveSphSpatialGasExchangeMaterials(authority, {
   }
   const rows = [], materials = [];
   for (const [material, model] of record.models) {
-    const [liquid, gas] = condensableCaloricSegments(model);
+    const segments = condensableCaloricSegments(model);
+    const liquid = segments.find((segment) => segment.phase === 'liquid');
+    const gas = segments.find((segment) => segment.phase === 'gas');
     const surface = Object.hasOwn(surfaceModels, material) ? surfaceModels[material] : null;
     let a = 0, b = 0, ready = 0;
     if (surface != null) {
+      if (!liquid) fail('gas-only material cannot declare a liquid surface or mass-exchange law');
       const keys = ['schema', 'provenance', 'interceptNPerM', 'slopeNPerMK',
         'minTemperatureK', 'maxTemperatureK'];
       if (surface.schema !== 'peercompute.ulg.linear-pure-interface.v1'
@@ -243,9 +246,11 @@ export function resolveSphSpatialGasExchangeMaterials(authority, {
     }
     const cv = Math.fround((gas.eEnd - gas.eStart) / (gas.tHi - gas.tLo));
     const gamma = Math.fround(1 + model.specificGasConstantJPerKgK / cv);
+    // Lane 15 distinguishes a genuinely gas-only heat participant. Its liquid
+    // interval/density are absent (zero), never a fabricated condensed phase.
     const row = [stableOpticalMaterialId(material), Math.fround(model.molarMassKgPerMol),
-      gas.eStart, gas.eEnd, liquid.eStart, liquid.eEnd, liquid.tLo, liquid.tHi,
-      liquid.restDensityKgPerM3, a, b, ready, cv, gamma, Math.fround(model.maxPressurePa), 0];
+      gas.eStart, gas.eEnd, liquid?.eStart ?? 0, liquid?.eEnd ?? 0, gas.tLo, gas.tHi,
+      liquid?.restDensityKgPerM3 ?? 0, a, b, ready, cv, gamma, Math.fround(model.maxPressurePa), liquid ? 0 : 1];
     if (!row.every(Number.isFinite) || !(gamma > 1) || !(row[14] > 0)) {
       fail('unrepresentable exchange material coefficients');
     }

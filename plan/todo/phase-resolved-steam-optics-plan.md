@@ -1,5 +1,29 @@
 # Phase-Resolved Steam Optics Plan
 
+## Shared solid and gas-only caloric consumers — 2026-10-26 UTC
+
+The cold model compiler, SPH/MLS packers, ordinary and canonical spatial thermal
+selectors and gas EOS admission now support solid/liquid/gas and gas-only phase
+rosters. Complete rosters remain mandatory. An optional solid branch shares the
+liquid reference through declared fusion enthalpy plus pressure-volume work;
+it does not define melting/sublimation equilibrium or kinetics. Gas-only models
+supply Cp/Cv, a reference U/T and a validity domain without fabricated condensed
+phases. The existing GPU heat writer accepts them only as gas participants.
+
+Native manufactured-state checks pass for solid and gas-only wall heating over
+two retained thermal/mechanics cycles, 28 classic/canonical thermal cases and
+32 EOS/exchange cases. Dry-gas heat conservation, transfer-order invariance and
+energy-gauge invariance pass. Focused host tests 203 pass; full suite 5,712 pass,
+78 opt-in skips; normal build passes. The follow-up ABI field name/documentation
+change passes focused checks and a second 32-case native exchange run.
+
+This completes that consumer extension only. The environment compiler still
+needs to share these original models with worker initialization; no preset has
+enrolled moving air or dry nuclei. Real material/domain choices, latent phase
+activation, exact inventory writers, coupled finite-time exchange, controls,
+transport/deposition and native traced plumes remain required. Evidence:
+`/home/cos/.cache/icc/repos/ulg/g2-phase-caloric-20261026/`.
+
 ## Environment initialization implementation — 2026-10-26 UTC
 
 `src/runtime/sphEnvironmentInitialization.js` now defines the shared cold input

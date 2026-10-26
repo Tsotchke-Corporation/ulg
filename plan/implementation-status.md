@@ -1,26 +1,28 @@
 # Implementation Status
 
-## Current focus — G2 environment initialization — 2026-10-26 UTC
+## Current focus — G2 phase calorics and environment enrollment — 2026-10-26 UTC
 
-G2 remains incomplete; G3–G6 have not started. The exact-reaction native
-diagnostic ladder is stopped following the user's cost concern. Existing
-reaction work is preserved, with no new native acceptance claimed.
+G2 remains incomplete; G3–G6 have not started. The exact-reaction diagnostic
+ladder remains stopped after the user's cost concern; its dirty work is preserved.
 
-The shared cold environment input and gas-inventory compiler now implement
-declared T/P/RH/flow, explicit dry seed metadata, a same-air zero-nuclei control,
-and vacuum. Species mass and internal energy come from actual free volume and
-explicit caloric inputs; humidity uses the exchange model's equilibrium
-pressure. This is input preparation only: presets, GPU enrollment, controls,
-seed activation and visible plumes are still pending. See the
-[environment checkpoint](todo/phase-resolved-steam-optics-plan.md#environment-initialization-implementation--2026-10-26-utc).
+Shared caloric packing and GPU consumers now accept an explicit solid/liquid/gas
+model or a gas-only model. Ice's energy reference includes fusion enthalpy and
+pressure-volume work. Dry gases participate in conserved heat exchange with
+liquid droplets without an invented liquid branch. This is sensible caloric
+support, not a melting, nucleation or kinetic exchange law.
 
-Validation: 22 focused input/thermodynamics tests pass; normal Vite build passes.
-No native or visual acceptance is claimed for this cold-input change.
+Validation: 203 focused host tests; native initialization through two thermal /
+mechanics cycles; 28 classic/canonical thermal cases; 32 actual EOS/exchange
+cases; full suite 5,712 pass / 78 opt-in skips / zero failures; normal build pass.
+The ABI field-name follow-up passed its focused tests and the 32 native exchange
+cases again. All owned browsers closed without GPU errors. Native evidence is
+manufactured-state integration, not real-material calibration or plume acceptance.
 
-Next: extend shared phase-specific caloric enrollment to ice and gas-only
-species, then enroll the air/humidity inventory and its restart-applied controls.
-The unresolved exact mass writers, coupled finite-time exchange, transport,
+Next: use these same models for cold air/humidity inputs and worker enrollment,
+then connect restart-applied controls. Iron Ice still uses its old initialization
+path. Exact mass/energy writers, finite-time activation/exchange, transport,
 deposition and traced desktop plumes remain required. No push/merge/Pages.
+Evidence: `/home/cos/.cache/icc/repos/ulg/g2-phase-caloric-20261026/`.
 
 Planning update, 2026-09-22 AKDT: added the
 [Eshkol higher-order law and material closure plan](todo/eshkol-higher-order-law-closure-plan.md)

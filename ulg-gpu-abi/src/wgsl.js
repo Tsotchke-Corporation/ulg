@@ -724,9 +724,9 @@ fn thermal_carrier_phase_classification(
   return vec2<u32>(pure_phase, select(0u, 1u, valid && positive_count >= 2u));
 }
 
-// Type3 is a phase-specific caloric response, not a global equilibrium curve.
+// Types 3/4/5 declare liquid+gas / solid+liquid+gas / gas-only caloric rosters.
 // Return (response index, Umin, Umax, status): 0=legacy, 1=ready, -1=rejected.
-// Both branches remain present even when their U domains overlap. All
+// All declared branches remain present even when their U domains overlap. All
 // sensible-heat consumers must use the same exact one-hot phase selection.
 fn thermal_phase_caloric_selection(
   material_id: f32,
@@ -760,11 +760,20 @@ fn thermal_phase_caloric_selection(
       if (kind != 1.0 && kind != 2.0) { explicit_caloric = true; }
     }
     if (!explicit_caloric) { return vec4<f32>(0.0); }
+    let caloric_kind = response_row0(start).y;
+    var expected_count = 0u;
+    var expected_mask = 0u;
+    if (caloric_kind == 3.0) { expected_count = 2u; expected_mask = 12u; }
+    else if (caloric_kind == 4.0) { expected_count = 3u; expected_mask = 14u; }
+    else if (caloric_kind == 5.0) { expected_count = 1u; expected_mask = 8u; }
+    else { return rejected; }
     var expected_fractions = vec4<f32>(0.0);
-    if (phase_id == 2.0) { expected_fractions.y = 1.0; }
+    if (phase_id == 1.0) { expected_fractions.x = 1.0; }
+    else if (phase_id == 2.0) { expected_fractions.y = 1.0; }
     else if (phase_id == 3.0) { expected_fractions.z = 1.0; }
     else { return rejected; }
-    if (record.w != 1.0 || count != 2u
+    if (record.w != 1.0 || count != expected_count
+      || (expected_mask & (1u << u32(phase_id))) == 0u
       || !thermal_value_finite(material_id) || material_id < 1.0
       || material_id > 16777215.0 || floor(material_id) != material_id
       || !thermal_value_finite(specific_internal_energy)
@@ -777,15 +786,15 @@ fn thermal_phase_caloric_selection(
       let r1 = response_row1(index);
       let r2 = response_row2(index);
       let r3 = response_row3(index);
-      if (r0.x != material_id || r0.y != 3.0 || r0.w != 1.0
+      if (r0.x != material_id || r0.y != caloric_kind || r0.w != 1.0
         || !thermal_value_finite(r0.z) || r0.z < 0.0 || floor(r0.z) != r0.z
-        || (r1.z != 2.0 && r1.z != 3.0) || r1.z != r1.w
+        || (r1.z != 1.0 && r1.z != 2.0 && r1.z != 3.0) || r1.z != r1.w
         || !thermal_value_finite(r1.x) || !thermal_value_finite(r1.y) || r1.x >= r1.y
         || !thermal_value_finite(r2.x) || r2.x <= 0.0 || r2.x != r2.y
         || r2.z != 1.0 || r2.w != 1.0
         || !all(r3 == vec4<f32>(0.0, 1.0, 0.0, 0.0))) { return rejected; }
       let phase_bit = 1u << u32(r1.z);
-      if ((seen_phases & phase_bit) != 0u) { return rejected; }
+      if ((expected_mask & phase_bit) == 0u || (seen_phases & phase_bit) != 0u) { return rejected; }
       seen_phases = seen_phases | phase_bit;
       let node_count = arrayLength(&thermal_graph_nodes);
       if (r0.z >= f32(node_count / 4u)) { return rejected; }
@@ -813,6 +822,7 @@ fn thermal_phase_caloric_selection(
         selected = vec4<f32>(f32(index), r1.x, r1.y, 1.0);
       }
     }
+    if (seen_phases != expected_mask) { return rejected; }
     return selected;
   }
   return vec4<f32>(0.0);

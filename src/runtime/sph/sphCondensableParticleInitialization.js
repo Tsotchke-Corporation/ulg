@@ -1,18 +1,19 @@
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K }
+import { CONDENSABLE_UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K, phaseCaloricBranches }
   from '../material/condensableThermodynamics.js';
-import { condensableCaloricSegments } from './sphCondensableCaloricTable.js';
+import { condensableCaloricSegments, isPhaseCaloricSegmentType, SPH_CALORIC_PHASE_IDS }
+  from './sphCondensableCaloricTable.js';
 
 const PHASES = ['solid', 'liquid', 'gas', 'plasma'];
 
 export function condensableInitializationProperties(model) {
-  return [model.molarMassKgPerMol, model.liquidCpJPerKgK, model.vaporCpJPerKgK].map(Math.fround);
+  return [model.molarMassKgPerMol, ...phaseCaloricBranches(model).map((branch) => branch.cpJPerKgK)].map(Math.fround);
 }
 
 const signature = (entries) => JSON.stringify(entries.sort((a, b) => a[0] - b[0]));
 const caloricRow = (id, segment) => {
-  const phase = segment.phase === 'liquid' ? 2 : 3;
-  return [id, 3, phase, phase, segment.eStart, segment.eEnd, segment.tLo, segment.tHi,
+  const phase = SPH_CALORIC_PHASE_IDS[segment.phase];
+  return [id, segment.caloricSegmentType, phase, phase, segment.eStart, segment.eEnd, segment.tLo, segment.tHi,
     segment.restDensityKgPerM3, segment.restDensityKgPerM3, 1];
 };
 
@@ -45,7 +46,7 @@ export function assertSphCondensableInitializationMatches(sph, mls = null, table
       const offset = (start + local) * 12;
       rows.push(Array.from(table.segments.slice(offset, offset + 11)));
     }
-    if (!rows.some((row) => row[1] === 3)) continue;
+    if (!rows.some((row) => isPhaseCaloricSegmentType(row[1]))) continue;
     const metadata = table.metadata?.filter((entry) => entry.materialId === id);
     if (table.records[base + 3] !== 1 || metadata?.length !== 1) {
       throw new TypeError('Thermal table lacks unique explicit caloric initialization metadata');
@@ -88,12 +89,14 @@ export function prepareSphCondensableParticleInitialization(materialProperties, 
     if (!properties?.phases?.length) throw new TypeError(`Unknown explicit caloric material: ${material}`);
     // Reuse the thermal table's model and f32 representability preflight.
     const segments = condensableCaloricSegments(model);
+    const branches = phaseCaloricBranches(model);
     samePackedPositive(properties.molarMassKgPerMol, model.molarMassKgPerMol, 'molar mass');
     for (const segment of segments) {
       const phases = properties.phases.filter((phase) => phase.name === segment.phase);
       if (phases.length !== 1) throw new TypeError('Exactly one property record per caloric phase required');
+      const branch = branches.find((entry) => entry.phase === segment.phase);
       samePackedPositive(phases[0].cpJPerKgK,
-        segment.phase === 'gas' ? model.vaporCpJPerKgK : model.liquidCpJPerKgK, 'phase Cp');
+        branch.cpJPerKgK, 'phase Cp');
       if (segment.phase === 'gas') {
         // Equal rounded Cp/M alone is insufficient near Cp=R_s: subtraction
         // can change Cv's sign or magnitude and trigger the legacy gamma
@@ -123,11 +126,13 @@ export function prepareSphCondensableParticleInitialization(materialProperties, 
       return null;
     }
     const { phaseId, phaseFractions } = particle.phaseCaloric || {};
-    if ((phaseId !== 2 && phaseId !== 3) || phaseFractions?.length !== 4
+    const segment = segments.find((entry) => SPH_CALORIC_PHASE_IDS[entry.phase] === phaseId);
+    if (!segment || ![1, 2, 3].includes(phaseId) || phaseFractions?.length !== 4
       || !Array.from(phaseFractions).every((value, lane) => value === (lane === phaseId - 1 ? 1 : 0))) {
-      throw new TypeError('Explicit caloric particle requires an exact pure liquid/gas phase and fractions');
+      throw new TypeError(segments.length === 2
+        ? 'Explicit caloric particle requires an exact pure liquid/gas phase and fractions'
+        : 'Explicit caloric particle requires an exact enrolled pure phase and fractions');
     }
-    const segment = segments[phaseId - 2];
     const sourceU = particle.specificInternalEnergyJPerKg;
     const u = Math.fround(sourceU);
     if (typeof sourceU !== 'number' || !Number.isFinite(sourceU) || !Number.isFinite(u)

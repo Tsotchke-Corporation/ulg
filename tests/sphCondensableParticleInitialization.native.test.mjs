@@ -7,6 +7,7 @@ import { isAbsolute, resolve } from 'node:path';
 const REQUIRED_SOURCES = [
   'tests/sphCondensableParticleInitialization.test.mjs',
   'tests/sphCondensableParticleInitialization.native.test.mjs',
+  'tests/fixtures/sphExtendedPhaseCaloric.js',
   'src/runtime/sph/sphState.js',
   'src/runtime/sph/sphGpuBuffers.js',
   'src/runtime/sph/sphCondensableParticleInitialization.js',
@@ -97,7 +98,8 @@ test('native cold particle/mechanics packers preserve explicit phase and U throu
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) throw new Error('native adapter unavailable');
       const device = await adapter.requestDevice(limits.webGpuDeviceDescriptorForResidentSph(adapter) || {});
-      const errors = [], outputs = [], runs = [], legacyControl = [];
+      const errors = [], outputs = [], runs = [], legacyControl = [], extendedUploads = [];
+      const extended = { runs: [] };
       let sphUpload, mlsUpload, fatalError = null, initial;
       device.addEventListener('uncapturederror', (event) => errors.push(String(event.error?.message || event.error)));
       for (const kind of ['validation', 'internal', 'out-of-memory']) device.pushErrorScope(kind);
@@ -191,10 +193,52 @@ test('native cold particle/mechanics packers preserve explicit phase and U throu
           sourceStateBuffer = result.stateBuffer; sourceThermoBuffer = result.thermoBuffer;
           sourceMechanicsBuffer = refreshed.mechanicsBuffer;
         }
+        const { createExtendedPhaseCaloricFixture } = await import('/tests/fixtures/sphExtendedPhaseCaloric.js');
+        const extendedInputs = createExtendedPhaseCaloricFixture(thermodynamics);
+        const extendedState = stateModule.createSphState({ smoothingLengthM: 1, particles: extendedInputs.particles });
+        const extendedBefore = JSON.stringify(extendedState);
+        const extendedPacked = buffers.buildSphGpuParticleBuffers(extendedState, extendedInputs);
+        const extendedMls = buffers.buildMlsMpmGpuParticleBuffers(extendedState, extendedInputs);
+        extended.initial = { state: [...extendedPacked.state], thermo: [...extendedPacked.thermo],
+          mechanics: [...extendedMls.mechanics], sourceUnchanged: JSON.stringify(extendedState) === extendedBefore };
+        const extendedTable = thermal.buildSphThermalMaterialTable(extendedInputs.materialProperties, extendedInputs);
+        for (let i = 4; i < extendedTable.records.length; i += 8) extendedTable.records[i] = 0;
+        const extendedMechanicsTable = mechanics.buildMlsMpmMechanicsMaterialTable(extendedInputs.materialProperties);
+        const extendedSphUpload = buffers.uploadSphGpuParticleBuffers(device, extendedPacked);
+        const extendedMlsUpload = buffers.uploadMlsMpmGpuParticleBuffers(device, extendedMls);
+        extendedUploads.push({ sph: extendedSphUpload, mls: extendedMlsUpload });
+        let prior = { stateBuffer: extendedSphUpload.stateBuffer, thermoBuffer: extendedSphUpload.thermoBuffer,
+          mechanicsBuffer: extendedMlsUpload.mechanicsBuffer };
+        for (let cycle = 1; cycle <= 2; cycle += 1) {
+          const result = await thermal.runSphThermalStepWebGpu({ device, sphParticleState: extendedPacked,
+            sphParticleUpload: extendedSphUpload, thermalMaterialTable: extendedTable,
+            sourceStateBuffer: prior.stateBuffer, sourceThermoBuffer: prior.thermoBuffer,
+            proposalStateBuffer: prior.stateBuffer, proposalThermoBuffer: prior.thermoBuffer,
+            wallTemperaturesK: { xMin: 320 }, wallLayerM: 1, wallRate: 2000, dtS: 0.1,
+            conductionRate: 0, boxDimsM: [4, 4, 4], retainOutputParticleBuffers: true,
+            readbackMode: 'full-parity-readback' });
+          outputs.push(result);
+          const refreshed = await refresh.runMlsMpmMechanicsRefreshWebGpu({ device,
+            sphParticleState: extendedPacked, mlsMpmParticleState: extendedMls,
+            mechanicsMaterialTable: extendedMechanicsTable,
+            sourceStateBuffer: result.stateBuffer, sourceThermoBuffer: result.thermoBuffer,
+            sourceMechanicsBuffer: prior.mechanicsBuffer,
+            retainOutputParticleBuffers: true, readbackMode: 'full-parity-readback' });
+          outputs.push(refreshed);
+          extended.runs.push({ cycle, backend: result.backend, state: [...result.state], thermo: [...result.thermo],
+            mechanics: [...refreshed.mechanics], refreshStatus: refreshed.authorityValidationStatus,
+            refreshFailureCount: refreshed.authorityValidationFailureCount });
+          prior = { stateBuffer: result.stateBuffer, thermoBuffer: result.thermoBuffer,
+            mechanicsBuffer: refreshed.mechanicsBuffer };
+        }
       } catch (error) { fatalError = String(error?.stack || error); }
       finally {
         try { await device.queue.onSubmittedWorkDone(); } catch (error) { errors.push(String(error)); }
         for (const output of outputs.reverse()) output.destroyOutputParticleBuffers?.();
+        for (const upload of extendedUploads) {
+          buffers.destroyMlsMpmGpuParticleBuffers(upload.mls);
+          buffers.destroySphGpuParticleBuffers(upload.sph);
+        }
         if (mlsUpload) buffers.destroyMlsMpmGpuParticleBuffers(mlsUpload);
         if (sphUpload) buffers.destroySphGpuParticleBuffers(sphUpload);
         for (const kind of ['out-of-memory', 'internal', 'validation']) {
@@ -205,7 +249,7 @@ test('native cold particle/mechanics packers preserve explicit phase and U throu
       }
       return { servedSources, adapter: { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture,
         device: adapter.info?.device, description: adapter.info?.description },
-      initial, runs, legacyControl, errors, fatalError };
+      initial, runs, legacyControl, extended, errors, fatalError };
     }, { sources: REQUIRED_SOURCES.map((path) => ({ path,
       hash: manifest.rows.find((row) => resolve(row.path) === resolve(path)).hash })) });
   } catch (error) { failure ??= error; evidence.harnessError = String(error?.stack || error); }
@@ -271,5 +315,28 @@ test('native cold particle/mechanics packers preserve explicit phase and U throu
     near(run.state[15], run.cycle === 1 ? 38_100 : 41_805, 0.05);
     near(run.thermo[14], run.cycle === 1 ? 279 : 279.95, 8e-5);
     assert.equal(run.exactPriorGpuBuffersReused, true);
+  }
+  assert.equal(observed.extended.initial.sourceUnchanged, true);
+  assert.equal(observed.extended.runs.length, 2);
+  const phaseIds = [1, 2, 3, 3], cvs = [2000, 4000, 3900, 800];
+  // Independent phase U references include the fusion pressure-volume term.
+  const referenceU = [-70002.4, -50003, 120000, 100000];
+  const expectedU = [-50000, -50000, -50000, 50000];
+  for (const [cycle, run] of [observed.extended.initial, ...observed.extended.runs].entries()) {
+    if (cycle) {
+      assert.equal(run.backend, 'webgpu');
+      assert.equal(run.refreshStatus, 'mechanics-refresh-authority-accepted');
+      assert.equal(run.refreshFailureCount, 0);
+      for (const i of [0, 3]) expectedU[i] += 2000 * (320 - (300 + (expectedU[i] - referenceU[i]) / cvs[i])) * .75 * .1;
+    }
+    for (const [i, phaseId] of phaseIds.entries()) {
+      near(run.state[i * 8 + 7], expectedU[i], .05);
+      near(run.thermo[i * 12 + 2], 300 + (expectedU[i] - referenceU[i]) / cvs[i], 8e-5);
+      assert.equal(run.thermo[i * 12 + 1], phaseId);
+      assert.deepEqual(run.thermo.slice(i * 12 + 4, i * 12 + 8), [1, 2, 3, 4].map((id) => Number(id === phaseId)));
+      assert.equal(run.thermo[i * 12 + 10], 1);
+      assert.equal(run.state[i * 8 + 3], 1);
+      assert.deepEqual(run.state.slice(i * 8 + 4, i * 8 + 7), [.5, -.25, .125]);
+    }
   }
 });

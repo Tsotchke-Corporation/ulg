@@ -1,9 +1,11 @@
 # G2 proposal — exact integer ledgers instead of exact rationals
 
-Status: **proposal for user review, 2026-10-27. Nothing here is built.**
-The user paused G2 code changes until this is reviewed ("Stop and review
-first", 2026-10-27). Codex's work through R327 is committed locally as
-`1ee78bf` (WIP checkpoint, not a milestone). G2 remains 3/6.
+Status: **proposal under user review, 2026-10-27.** The user paused G2 code
+changes for this review ("Stop and review first"), then approved Phase 0 and
+the pass budget in 2.5 ("yes add it, then start phase 0"). Phases 1–6 and the
+questions in section 5 still wait on the user. Codex's work through R327 is
+committed locally as `1ee78bf` (WIP checkpoint, not a milestone). G2 remains
+3/6.
 
 ## 1. Evidence: why the R2xx–R327 path cannot deliver G2
 
@@ -151,8 +153,14 @@ This is the GPU conservation test: an integer comparison with no tolerance.
   integer operations.
 - A projection is one 9-limb scan plus one rounding.
 - No GCD, no wide multiply and no private arrays.
-- Each stage gains a few passes, not thousands.
-- Phase 0 below measures this before anything else is built.
+- Most ledger work fuses into passes the solver already runs. Thermal,
+  contact, phase transfer, reaction and exchange compute their packets in an
+  existing kernel, and each endpoint applies its own side, so every row keeps
+  one writer.
+- Only order-independent scatter needs passes of its own: one carry pass that
+  also rewrites the f32 projections, plus the opt-in budget check.
+- **Pass budget: the ledgers add at most 2 compute passes per step to the f32
+  path.** Phases 0 and 1 gate on it (section 4).
 
 ### 2.6 Integration map
 
@@ -281,8 +289,8 @@ failed gate.
 
 | Phase | Work | Gate |
 |---|---|---|
-| 0 | Feasibility probe. Signed energy ledger, pairwise packet kernel, chunked-atomic scatter and projection, at Iron Ice capacity (6,784 rows), inside the actual app while it presents. | No Xid in `journalctl -k`. Measured GPU time per stage. Bit-exact sums over 1,000 random transfers. |
-| 1 | Energy ledger through the existing exact-mass continuation (G2P → thermal → refresh → closure → SS publication). Thermal conduction as pairwise integer packets. | GPU test: over N steps, sum U(t) equals sum U(0) plus recorded sources, bit-exact. Host suite and build green. |
+| 0 | Feasibility probe. Signed energy ledger, pairwise packet kernel, chunked-atomic scatter and projection, at Iron Ice capacity (6,784 rows), inside the actual app while it presents. | No Xid in `journalctl -k`. Measured GPU time per stage. Bit-exact sums over 1,000 random transfers. At most 2 ledger passes per step that cannot fuse into an existing solver pass. |
+| 1 | Energy ledger through the existing exact-mass continuation (G2P → thermal → refresh → closure → SS publication). Thermal conduction as pairwise integer packets. | GPU test: over N steps, sum U(t) equals sum U(0) plus recorded sources, bit-exact. Measured compute passes per step at most the f32 baseline plus 2. Host suite and build green. |
 | 2 | One phase rule (the type3 caloric model replaces the legacy fixed-boiling writer). Phase change as described in 2.6. | GPU test: mass and energy budgets bit-exact through melt and boil. The actual Iron Ice step runs past vapor onset (~2.2 s simulated). |
 | 3 | Reactions: the committed integer allocation plus reaction energy as packets, with lineage ids. | Sodium-water: element and mass budgets, product lineage traced to the admitted reactants. |
 | 4 | Room air plus nuclei (dry core and condensed water). Activation and growth/evaporation as exact packet exchange between gas vapor and parcel water. | GPU test: vapor plus parcel water and energy bit-exact. Growth rate checked against an independent CPU reference of the same law. |

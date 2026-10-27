@@ -529,7 +529,8 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       table: thermalMaterialTable,
       arrays: {
         records: thermalMaterialTable.records,
-        segments: thermalMaterialTable.segments
+        segments: thermalMaterialTable.segments,
+        ...(thermalMaterialTable.molarMassIdentities ? { molarMassIdentities: thermalMaterialTable.molarMassIdentities } : {})
       },
       metadata: {
         materialCount: thermalMaterialTable.materialCount,
@@ -539,6 +540,7 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         recordLayout: thermalMaterialTable.recordLayout,
         segmentLayout: thermalMaterialTable.segmentLayout,
         materials: thermalMaterialTable.metadata,
+        segmentMetadata: thermalMaterialTable.segmentMetadata,
         materialPropertyBankWarmInputConsumer:
           thermalMaterialTable.materialPropertyBankWarmInputConsumer ?? null,
         materialPropertyBankWarmInputRowCount:
@@ -944,7 +946,10 @@ function restoreThermalMaterialTable(record) {
     segmentStrideFloats: metadata.segmentStrideFloats || 12,
     records: record.arrays.records,
     segments: record.arrays.segments,
+    ...(record.arrays.molarMassIdentities
+      ? { molarMassIdentities: record.arrays.molarMassIdentities } : {}),
     metadata: metadata.materials || [],
+    segmentMetadata: metadata.segmentMetadata || [],
     materialPropertyBankWarmInputConsumer:
       metadata.materialPropertyBankWarmInputConsumer ?? null,
     materialPropertyBankWarmInputRowCount:

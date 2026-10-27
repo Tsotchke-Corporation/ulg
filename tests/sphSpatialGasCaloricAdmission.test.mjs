@@ -9,7 +9,7 @@ import {
   validateSphSpatialGasCaloricAuthority, decodeSphSpatialGasCaloricAdmissionRows,
   sphSpatialGasCaloricAdmissionWgsl, SPH_SPATIAL_GAS_CALORIC_MATERIAL_LAYOUT,
   SPH_SPATIAL_GAS_CALORIC_MOLAR_MASS_RELATIVE_BUDGET,
-  resolveSphSpatialGasExchangeMaterials
+  resolveSphSpatialGasExchangeMaterials, resolveSphSpatialGasExchangeRates
 } from '../src/runtime/sph/sphSpatialGasCaloricAdmission.js';
 
 const R = 8.314462618;
@@ -60,6 +60,42 @@ const surface = () => ({ schema: 'peercompute.ulg.linear-pure-interface.v1',
   interceptNPerM: 0.2, slopeNPerMK: -0.0002, minTemperatureK: 200, maxTemperatureK: 500 });
 const exchange = (f, authority, surfaceModels = { h2o: surface() }) =>
   resolveSphSpatialGasExchangeMaterials(authority, { thermalMaterialTable: f.table, surfaceModels });
+
+const rateModel = () => ({ schema: 'peercompute.ulg.near-equilibrium-onsager.v1',
+  provenance: 'manufactured near-equilibrium model', massMobilityPerAreaKg2KPerJsM2: 1e-6,
+  maxAbsAffinityJPerKgK: 100, maxTemperatureDifferenceK: 1,
+  heatTransferCoefficientsWPerM2K: { h2: 2, h2o: 3 } });
+const rates = (f, authority, model = rateModel()) => resolveSphSpatialGasExchangeRates(authority,
+  { thermalMaterialTable: f.table, surfaceModels: { h2o: surface() }, rateModels: { h2o: model } });
+
+test('rate coefficients retain original coexistence, latent enthalpy and energy gauge', () => {
+  for (const shift of [0, 123456]) {
+    const f = fixture({ h2o: shift }), authority = create(f), result = rates(f, authority);
+    const names = exchange(f, authority).materials, i = names.indexOf('h2o'), row = result.records.slice(i * 16, i * 16 + 16);
+    assert.equal(row[1], Math.fround(f.models.h2o.referenceTemperatureK));
+    assert.equal(row[2], Math.fround(f.models.h2o.referencePressurePa));
+    assert.equal(row[3], Math.fround(f.models.h2o.vaporizationReferenceEnthalpyJPerKg));
+    assert.equal(row[8], Math.fround(f.models.h2o.vaporReferenceInternalEnergyJPerKg));
+    assert.equal(result.records[names.length * 16 + i * names.length + names.indexOf('h2')], 2);
+    assert.equal(result.scientificValidation, false);
+    const original = result.records.slice(); result.records.fill(-1);
+    assert.deepEqual(rates(f, authority).records, original);
+  }
+});
+
+for (const [name, alter] of [
+  ['negative mobility', m => { m.massMobilityPerAreaKg2KPerJsM2 = -1; }],
+  ['flushed mobility', m => { m.massMobilityPerAreaKg2KPerJsM2 = 1e-50; }],
+  ['unbounded affinity', m => { m.maxAbsAffinityJPerKgK = Infinity; }],
+  ['missing gas heat model', m => { delete m.heatTransferCoefficientsWPerM2K.h2; }],
+  ['replacement latent heat', m => { m.latentHeatJPerKg = 1; }],
+  ['missing provenance', m => { m.provenance = ''; }],
+  ['hot-state input', m => { m.gasTemperatureK = 300; }],
+  ['accessor', m => { Object.defineProperty(m, 'maxTemperatureDifferenceK', { get() { throw Error('must not execute'); } }); }]
+]) test(`rate admission rejects ${name}`, () => {
+  const f = fixture(), model = rateModel(); alter(model);
+  assert.throws(() => rates(f, create(f), model), /Gas caloric authority/);
+});
 
 test('exchange material rows preserve both phase gauges and explicit surface internal energy', () => {
   const f = fixture(), authority = create(f), result = exchange(f, authority);

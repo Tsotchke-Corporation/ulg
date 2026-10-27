@@ -203,6 +203,7 @@ export function summarizeResidentStateAuthorityLedger(ledger) {
 }
 
 export function buildMlsMpmResidentStepAuthorityLedger({
+  nextUsesVaporAerosolExchange = false,
   step = null,
   time = null,
   readbackMode = null,
@@ -257,6 +258,18 @@ export function buildMlsMpmResidentStepAuthorityLedger({
   }
 
   const add = (family, ownerStage, options = {}) => {
+    // Exchange is the final writer of this already-admitted closure. Earlier
+    // thermal/reaction outputs are inputs, not the published particle tuple.
+    if (nextUsesVaporAerosolExchange && [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+      RESIDENT_STATE_FAMILIES.THERMO_PHASE, RESIDENT_STATE_FAMILIES.MECHANICS].includes(family)) {
+      ownerStage = family === RESIDENT_STATE_FAMILIES.MECHANICS
+        ? 'exchange-mechanics-refresh' : 'vapor-aerosol-exchange';
+      options = { ...options, backend,
+        status: `${ownerStage}-drives-next-particles`,
+        reads: [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+          RESIDENT_STATE_FAMILIES.THERMO_PHASE, RESIDENT_STATE_FAMILIES.MECHANICS,
+          RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS] };
+    }
     entries.push({
       family,
       ownerStage,

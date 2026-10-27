@@ -2,6 +2,7 @@
 // retro-terminal control panel (six wall temperatures + reduced-resolution controls), and live
 // status rows. Also exposes a headless API on window.__ulgDemo for e2e/status checks.
 
+import { SPH_ENVIRONMENT_CONTROL_DEFAULTS, sphEnvironmentOptionsFromControls } from '../runtime/sphEnvironmentControls.js';
 import {
   SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
   SPH_SCENE_LIGHTING_MODE_DARK_LAB,
@@ -1177,6 +1178,7 @@ export const SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA =
 export const SPH_RESIDENT_STAGE_ORDER_TRACE_SCHEMA =
   'peercompute.ulg.sph-demo-resident-stage-order-trace.v0';
 export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
+  ...Object.keys(SPH_ENVIRONMENT_CONTROL_DEFAULTS),
   'sph',
   'sphPhase',
   'scenario',
@@ -6319,6 +6321,34 @@ export async function mountSphPhaseDemoOverlay({
     wallInputs[face] = input;
   }
 
+  const environmentPanel = document.createElement('details');
+  environmentPanel.id = 'sph-environment';
+  const environmentTitle = document.createElement('summary');
+  environmentTitle.textContent = 'Atmosphere';
+  environmentPanel.appendChild(environmentTitle);
+  wallsEl.after(environmentPanel);
+  const environmentInputs = {};
+  for (const [key, label] of [
+    ['environmentMode', 'Surroundings'], ['environmentTemperatureK', 'Temperature (K)'],
+    ['environmentPressurePa', 'Pressure (Pa)'], ['environmentHumidityPercent', 'Relative humidity (%)'],
+    ['environmentCellsPerAxis', 'Gas cells per axis']
+  ]) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;margin:4px 0;';
+    wrap.textContent = label;
+    const input = document.createElement(key === 'environmentMode' ? 'select' : 'input');
+    if (key === 'environmentMode') {
+      for (const [value, text] of [['vacuum', 'Vacuum'], ['air', 'Humid air']]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = text;
+        input.appendChild(option);
+      }
+    } else { input.type = 'number'; input.step = key === 'environmentCellsPerAxis' ? '1' : 'any'; }
+    input.value = SPH_ENVIRONMENT_CONTROL_DEFAULTS[key];
+    input.setAttribute('aria-label', label);
+    input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    wrap.appendChild(input); environmentPanel.appendChild(wrap); environmentInputs[key] = input;
+  }
+
   const heightsEl = overlay.querySelector('#sph-heights');
   const heightInputs = {};
   for (const [key, label, value] of [['ice', 'ice base', ICE_BASE_DEFAULT_M], ['iron', 'iron base', IRON_BASE_DEFAULT_M]]) {
@@ -6939,6 +6969,7 @@ export async function mountSphPhaseDemoOverlay({
   // URL state: every control is encoded in the location hash so a refresh restores the full setup.
   // Query params are also accepted for direct links, then normalized into the hash on first sync.
   const urlControls = {
+    ...environmentInputs,
     scenario: scenarioPresetSelect,
     wxmin: wallInputs.xMin, wxmax: wallInputs.xMax, wymin: wallInputs.yMin, wymax: wallInputs.yMax, wzmin: wallInputs.zMin, wzmax: wallInputs.zMax,
     drop: elementSelects.drop, base: elementSelects.base,
@@ -7014,6 +7045,12 @@ export async function mountSphPhaseDemoOverlay({
     // consumers treat as a real (empty) material/mode and hang or fail
     // silently. Unknown URL values keep the control's default instead.
     if (el.tagName === 'SELECT' && el.value === '' && previous !== '') {
+      if (Object.hasOwn(environmentInputs, key)) {
+        const invalid = document.createElement('option');
+        invalid.value = String(value); invalid.textContent = `Invalid atmosphere: ${value}`;
+        el.appendChild(invalid); el.value = String(value);
+        return;
+      }
       el.value = previous;
     }
   }
@@ -7033,7 +7070,7 @@ export async function mountSphPhaseDemoOverlay({
     }
     for (const [key, el] of Object.entries(urlControls)) {
       const v = hash.get(key) ?? query.get(key) ?? requestedPreset?.runtime?.[key];
-      if (v != null && v !== '') applyUrlValueToControl(key, el, v);
+      if (v != null && (v !== '' || Object.hasOwn(environmentInputs, key))) applyUrlValueToControl(key, el, v);
     }
     const legacyInitialBodies = legacyInitialBodiesFromProxyControls();
     const serializedInitialBodies = hash.get('bodies')
@@ -9066,6 +9103,7 @@ export async function mountSphPhaseDemoOverlay({
     const baseEdge = Math.round(Number(countInputs.base.value));
     return {
       scenario: scenarioFromControls(),
+      ...sphEnvironmentOptionsFromControls(Object.fromEntries(Object.entries(environmentInputs).map(([key, el]) => [key, el.value]))),
       initialBodies: currentInitialBodies,
       dropMaterial: elementSelects.drop.value,
       baseMaterial: elementSelects.base.value,
@@ -16246,6 +16284,7 @@ export async function mountSphPhaseDemoOverlay({
           validationStatus: artifact?.validation?.status ?? null,
           updatedAtMs: performance.now()
         };
+        blockSphSimulationRuntime(String(outputError), { source: 'worker-rebuild-error-artifact' });
         renderStatus();
         updateWarningBanner();
       }

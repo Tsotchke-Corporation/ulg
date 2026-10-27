@@ -1,6 +1,7 @@
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { assertSphReactionGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { resolveThermalResponseGraphArtifacts } from './sphThermalGpuKernel.js';
+import { isPhaseCaloricSegmentType } from './sphCondensableCaloricTable.js';
 
 export const SPH_REACTION_ENERGY_REFERENCE_SCHEMA = 'peercompute.ulg.reaction-energy-reference.v1';
 export const SPH_REACTION_ENERGY_AUTHORITY_SCHEMA = 'peercompute.ulg.reaction-energy-authority.v1';
@@ -38,7 +39,9 @@ function phaseCurves(artifacts, materialId) {
   const curves = [];
   for (let i = 0; i < responses.responseCount; i += 1) {
     const row = responses.responses.subarray(i * 16, i * 16 + 16);
-    if (row[0] !== materialId || ![1, 3].includes(row[1]) || row[6] !== row[7]) continue;
+    // Pure legacy, condensable and ideal-gas branches all use the same exact
+    // monotone graph ABI. Latent plateaus remain excluded.
+    if (row[0] !== materialId || (row[1] !== 1 && !isPhaseCaloricSegmentType(row[1])) || row[6] !== row[7]) continue;
     const graph = graphs.graphs[row[2]];
     const node = graph?.nodeRows;
     if (row[3] !== 1 || !graph || graph.nodeCount !== 1 || node[0] !== 1 || node[10] !== 1

@@ -6,8 +6,9 @@ import { SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES }
   from '../../../ulg-gpu-abi/src/sphReactionProductPlacementReceipt.js';
 import { computeBufferBinding, prewarmCachedExplicitComputePipeline }
   from '../webgpuComputeLayout.js';
+import { runSphExactPlacementQuantityPrimitivesCandidateWebGpu } from './sphExactPlacementQuantityPrimitivesGpu.js';
 
-const SCHEMA = 'peercompute.ulg.exact-reaction-physical-output-candidate.v1';
+const SCHEMA = 'peercompute.ulg.exact-reaction-physical-output-candidate.v2';
 
 // Copy raw words. In particular a representable subnormal view is not passed
 // through a floating-point arithmetic instruction merely to pack its lanes.
@@ -84,7 +85,7 @@ export async function runSphExactReactionOutputCandidateWebGpu({
   const compactGroupOffsetBuffer = storage('compact-group-offset', groupCount);
   // Deny-only taint follows the actual GPU buffers, including aliases that
   // omit exact-inventory fields. It is not a physical continuation owner.
-  parent.markDerivedBuffers([stateBuffer, thermoBuffer, sourcePackedBuffer, packedBuffer, eventBuffer, compactEventBuffer],
+  parent.markDerivedBuffers([stateBuffer, thermoBuffer, sourcePackedBuffer, packedBuffer, eventBuffer, compactEventBuffer, auxiliaryBuffer],
     { mechanicsBuffers: [mechanicsBuffer] });
   const companionOffset = layout.eventCompanionOffsetWords * 4;
   if (companionOffset % (device.limits.minStorageBufferOffsetAlignment ?? 256) !== 0) {
@@ -145,9 +146,14 @@ export async function runSphExactReactionOutputCandidateWebGpu({
     pass.dispatchWorkgroups(dispatches[i]); pass.end();
   }
   const command = encoder.finish(); validate(); markSubmitted(); device.queue.submit([command]);
-  return Object.freeze({ schema: SCHEMA, physicalPublicationAdmitted: false, layout,
+  const physicalOutput = { schema: SCHEMA, physicalPublicationAdmitted: false, layout,
     sourcePackedBuffer, packedBuffer, stateBuffer, thermoBuffer, mechanicsBuffer,
     eventBuffer, auxiliaryBuffer, compactEventBuffer, compactCompanionBuffer, compactCountBuffer,
     compactReceiptBuffer, denseEventCount: layout.denseEventCount,
-    eventCompanionByteOffset: companionOffset, eventCompanionStrideWords: layout.eventCompanionStrideWords });
+    eventCompanionByteOffset: companionOffset, eventCompanionStrideWords: layout.eventCompanionStrideWords,
+    residualParticleByteOffset: layout.eventParticleOffsetWords * 4,
+    residualParticleStrideWords: layout.eventParticleStrideWords };
+  const quantities = await runSphExactPlacementQuantityPrimitivesCandidateWebGpu({ parent, physicalOutput,
+    allocate, validate, markSubmitted });
+  return Object.freeze({ ...physicalOutput, quantities });
 }

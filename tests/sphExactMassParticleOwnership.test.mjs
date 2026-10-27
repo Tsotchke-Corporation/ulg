@@ -75,6 +75,62 @@ test('legacy packing and upload allocate no exact inventory', async () => {
   destroySphGpuParticleBuffers(upload); await f.device.drain();
 });
 
+async function coldQuantityFixture() {
+  const { createReferenceMaterialClosures } = await import('../src/runtime/material/materialClosures.js');
+  const { specificInternalEnergyJPerKg } = await import('../src/runtime/material/thermoState.js');
+  const f = fixture(), materialProperties = { fe: createReferenceMaterialClosures().fe.properties };
+  for (const particle of f.state.particles) {
+    particle.material = 'fe'; particle.v = [.1, -.2, .3];
+    particle.specificInternalEnergyJPerKg = specificInternalEnergyJPerKg(materialProperties.fe, 300);
+  }
+  f.packed = buildSphGpuParticleBuffers(f.state, { ...f.options,
+    exactMass: { ...f.options.exactMass, initialQuantities: true }, materialProperties });
+  f.packedMls = buildMlsMpmGpuParticleBuffers(f.state, { materialProperties });
+  f.upload = uploadSphGpuParticleBuffers(f.device, f.packed);
+  f.mls = uploadMlsMpmGpuParticleBuffers(f.device, f.packedMls);
+  return f;
+}
+
+test('the original cold pair seeds one conserved quantity owner before its first mechanics read', async () => {
+  const f = await coldQuantityFixture();
+  const originalMolar = f.packed.metadata[0].molarMassBits;
+  // Upload snapshots, rather than later CPU edits, define the initial family.
+  f.packed.metadata[0].molarMassBits = 0; f.packed.state[4] = 100;
+  f.packedMls.mechanics[19] = 0;
+  const options = { mlsMpmParticleUpload: f.mls };
+  const a = acquireSphParticleExactMassRead(f.upload, f.device, options);
+  const b = acquireSphParticleExactMassRead(f.upload, f.device, options);
+  assert.ok(a.quantities);
+  assert.equal(a.quantities, b.quantities);
+  assert.equal(f.device.allocated.filter(buffer => buffer.label === 'ulg-exact-particle-initial-quantities').length, 1);
+  const q = a.quantities.quantityBuffer, words = new Uint32Array(q.bytes);
+  assert.equal(words[4], originalMolar);
+  assert.equal(words[0], 1); assert.equal(words[1], 0);
+  assert.throws(() => assertSphLegacyMassPathAllowed({ sourceStateBuffer: q }, 'initial quantity alias'), /legacy mass path/);
+  destroySphGpuParticleBuffers(f.upload); destroyMlsMpmGpuParticleBuffers(f.mls);
+  await releaseSphParticleExactMassRead(a); await f.device.drain();
+  assert.equal(q.destroyed, 0);
+  await releaseSphParticleExactMassRead(b); await f.device.drain();
+  assert.equal(q.destroyed, 1);
+  assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
+});
+
+test('a failed cold quantity upload frees its candidate and does not acquire a reader', async () => {
+  const f = await coldQuantityFixture(), options = { mlsMpmParticleUpload: f.mls };
+  f.device.beforeWrite = buffer => {
+    if (buffer.label === 'ulg-exact-particle-initial-quantities') throw new Error('quantity write failed');
+  };
+  assert.throws(() => acquireSphParticleExactMassRead(f.upload, f.device, options), /quantity write failed/);
+  assert.equal(f.device.allocated.at(-1).destroyed, 1);
+  f.device.beforeWrite = null;
+  const held = acquireSphParticleExactMassRead(f.upload, f.device, options);
+  assert.ok(held.quantities);
+  await releaseSphParticleExactMassRead(held);
+  destroySphGpuParticleBuffers(f.upload); destroyMlsMpmGpuParticleBuffers(f.mls);
+  await f.device.drain();
+  assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
+});
+
 test('cold SPH and MLS owners carry the same complete epoch tuple before sealing', async () => {
   const f = fixture();
   const epochs = { storageGeneration: 2, physicsTick: 3, physicsSubstep: 1,
@@ -95,6 +151,35 @@ test('cold SPH and MLS owners carry the same complete epoch tuple before sealing
   await releaseSphParticleExactMassRead(held);
   destroySphGpuParticleBuffers(upload); destroyMlsMpmGpuParticleBuffers(mlsUpload);
   await f.device.drain();
+});
+
+test('scene-issued cold generation seals original SPH and MLS ownership before reads', async () => {
+  const f = fixture(), options = { initialStorageGeneration: 7 };
+  const packedMls = buildMlsMpmGpuParticleBuffers(f.state);
+  const sph = uploadSphGpuParticleBuffers(f.device, f.packed, options);
+  const mls = uploadMlsMpmGpuParticleBuffers(f.device, packedMls, options);
+  assert.equal(sph.storageGeneration, 7);
+  assert.equal(mls.storageGeneration, 7);
+  assert.equal(mls.bufferFamilyGeneration, 7);
+  const held = acquireSphParticleExactMassRead(sph, f.device, { mlsMpmParticleUpload: mls });
+  assert.throws(() => acquireSphParticleExactMassRead(sph, f.device,
+    { mlsMpmParticleUpload: { ...mls } }), /original live MLS owner/);
+  mls.bufferFamilyGeneration = 8;
+  assert.equal(validateSphParticleExactMassRead(held, { device: f.device, sourceSphUpload: sph }), false);
+  mls.bufferFamilyGeneration = 7;
+  assert.equal(validateSphParticleExactMassRead(held, { device: f.device, sourceSphUpload: sph }), true);
+  await releaseSphParticleExactMassRead(held);
+  destroySphGpuParticleBuffers(sph); destroyMlsMpmGpuParticleBuffers(mls);
+  await f.device.drain();
+  assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
+  const allocations = f.device.allocated.length;
+  for (const initialStorageGeneration of [0, -1, 1.5, 2 ** 32]) {
+    assert.throws(() => uploadMlsMpmGpuParticleBuffers(f.device, packedMls,
+      { initialStorageGeneration }), /Initial upload generation/);
+  }
+  const declared = buildMlsMpmGpuParticleBuffers({ ...f.state, storageGeneration: 3 });
+  assert.throws(() => uploadMlsMpmGpuParticleBuffers(f.device, declared, options), /Initial upload generation/);
+  assert.equal(f.device.allocated.length, allocations);
 });
 
 test('a live held physical read can fork during retirement without reopening fresh admission', async () => {

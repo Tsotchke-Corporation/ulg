@@ -29,11 +29,14 @@ export function sphExactReactionOutputLayout(format, { particleCount, productCap
   const carrierOffsetWords = particleCount * 16, carrierStrideWords = 8 + format.wordCount;
   const eventCompanionOffsetWords = Math.ceil((carrierOffsetWords + particleCount * carrierStrideWords) / 64) * 64;
   const eventCompanionStrideWords = 8 + 3 * format.wordCount, denseEventCount = particleCount * productCapacity;
-  const auxWords = eventCompanionOffsetWords + denseEventCount * eventCompanionStrideWords;
-  for (const [name, value] of Object.entries({ carrierOffsetWords, eventCompanionOffsetWords, denseEventCount, auxWords,
+  const eventParticleOffsetWords = Math.ceil((eventCompanionOffsetWords + denseEventCount * eventCompanionStrideWords) / 64) * 64;
+  const eventParticleStrideWords = 64;
+  const auxWords = eventParticleOffsetWords + denseEventCount * eventParticleStrideWords;
+  for (const [name, value] of Object.entries({ carrierOffsetWords, eventCompanionOffsetWords, eventParticleOffsetWords, denseEventCount, auxWords,
     packedWords: particleCount * 52, denseEventWords: denseEventCount * 32 })) u32(value, name);
   return Object.freeze({ particleCount, productCapacity, pairHeaderWords: 16, pairHeaderOffsetWords: 0,
     carrierOffsetWords, carrierStrideWords, eventCompanionOffsetWords, eventCompanionStrideWords,
+    eventParticleOffsetWords, eventParticleStrideWords,
     auxWords, packedParticleWords: 52, eventWords: 32, denseEventCount, massWordCount: format.wordCount });
 }
 
@@ -197,10 +200,18 @@ fn eo_restore(row: u32) {
   eo_aux[at + 4u] = 0xffffffffu; eo_aux[at + 5u] = u32(bitcast<f32>(eo_original[row * 13u + 2u].x));
   eo_aux[at + 6u] = select(1u, 0u, em_zero(mass)); eo_store_mass(at + 8u, mass);
 }
+// Same producer owns full residual-product templates: header12 + packed52.
+// No physical authority is conferred; pair rollback clears every template.
+fn eo_event_particle_at(event: u32) -> u32 {
+  let end = eo_params.event_offset + eo_params.count * eo_params.product_capacity * eo_params.event_stride;
+  return ((end + 63u) / 64u) * 64u + event * 64u;
+}
 fn eo_clear_pair_events(pair: u32) {
   for (var local = 0u; local < eo_params.product_capacity; local++) {
     let event = pair * eo_params.product_capacity + local;
     for (var i = 0u; i < 8u; i++) { eo_events[event * 8u + i] = vec4<u32>(0u); }
+    let template_at = eo_event_particle_at(event);
+    for (var i = 0u; i < 64u; i++) { eo_aux[template_at + i] = 0u; }
     let at = eo_params.event_offset + event * eo_params.event_stride;
     for (var i = 0u; i < eo_params.event_stride; i++) { eo_aux[at + i] = 0u; }
   }
@@ -264,6 +275,42 @@ fn eo_product_state(src: u32, local: u32) -> ExactOutputProduct {
       || !eo_finite(value.sound) || (value.sound >> 31u) != 0u
       || !eo_finite(value.eos) || !eo_finite(value.solid)) { value.error |= ${ERROR.INVALID_FLOAT}u; }
   return value;
+}
+fn eo_prepare_residual_particle(pair: u32, src: u32, local: u32, mass: ExactMass,
+  product: ExactOutputProduct, projected_mass: ExactMassProjection) -> u32 {
+  if (em_zero(mass)) { return 0u; }
+  let entities = eo_required(eo_quantity(mass, product.molar, true));
+  let volume = eo_required(eo_quantity(mass, product.rho, false));
+  let error = product.error | projected_mass.error | entities.error | volume.error;
+  if (error != 0u) { return error; }
+  let event = pair * eo_params.product_capacity + local;
+  let at = eo_event_particle_at(event); let packed = at + 12u;
+  let extensive = src + eo_params.extensive_offset;
+  let phase = u32(bitcast<f32>(product.phase));
+  // Routed position and spatial support are supplied by the actual event plan.
+  // Every mass/volume/entity/mechanics lane originates here from exact mass
+  // and the original selected product state, never projected event mass.
+  eo_aux[packed + 3u] = projected_mass.bits;
+  for (var axis = 0u; axis < 3u; axis++) { eo_aux[packed + 4u + axis] = eo_packet[extensive + axis]; }
+  eo_aux[packed + 7u] = product.u_bits;
+  eo_aux[packed + 8u] = product.material; eo_aux[packed + 9u] = product.phase;
+  eo_aux[packed + 10u] = product.temperature; eo_aux[packed + 11u] = product.rho;
+  eo_aux[packed + 12u] = select(0u, 0x3f800000u, phase == 1u);
+  eo_aux[packed + 13u] = select(0u, 0x3f800000u, phase == 2u);
+  eo_aux[packed + 14u] = select(0u, 0x3f800000u, phase == 3u);
+  eo_aux[packed + 17u] = entities.bits; eo_aux[packed + 18u] = 0x3f800000u;
+  eo_aux[packed + 20u] = 0x3f800000u; eo_aux[packed + 24u] = 0x3f800000u; eo_aux[packed + 28u] = 0x3f800000u;
+  eo_aux[packed + 38u] = 0x3f800000u; eo_aux[packed + 39u] = volume.bits;
+  eo_aux[packed + 40u] = product.solid; eo_aux[packed + 41u] = 0x3f800000u;
+  eo_aux[packed + 42u] = product.bulk; eo_aux[packed + 43u] = product.shear;
+  eo_aux[packed + 44u] = product.lambda; eo_aux[packed + 45u] = product.sound;
+  eo_aux[packed + 46u] = product.eos; eo_aux[packed + 47u] = 0x3f800000u;
+  eo_aux[packed + 51u] = projected_mass.bits;
+  eo_aux[at + 2u] = pair; eo_aux[at + 3u] = local + 2u;
+  eo_aux[at + 4u] = eo_packet[src + 12u + 7u * EM_WORDS + local * (4u + 3u * EM_WORDS)];
+  eo_aux[at + 5u] = u32(bitcast<f32>(product.material)); eo_aux[at + 6u] = phase;
+  eo_aux[at + 7u] = product.molar; eo_aux[at + 8u] = EM_WORDS; eo_aux[at + 9u] = 1u;
+  eo_aux[at] = 1u; return 0u;
 }
 fn eo_stage_endpoint(pair: u32, src: u32, route: u32, slot: u32,
   support: ExactOutputSupport, total: ExactMass) -> u32 {
@@ -407,6 +454,8 @@ fn stage_exact_reaction_outputs(@builtin(global_invocation_id) id: vec3<u32>) {
     let source_index = eo_index(pair); let peer_index = eo_index(peer);
     error |= product.error | projected_mass.error | projected_direct.error | projected_residual.error
       | moles.error | fragment_support.error | global_term.error | rx.error | source_index.error | peer_index.error;
+    if (error != 0u) { eo_reject(pair, peer, error); return; }
+    error |= eo_prepare_residual_particle(pair, src, local, residual, product, projected_residual);
     if (error != 0u) { eo_reject(pair, peer, error); return; }
     let output = event * 8u; let extensive = src + eo_params.extensive_offset;
     eo_events[output] = vec4<u32>(midpoint, projected_mass.bits);

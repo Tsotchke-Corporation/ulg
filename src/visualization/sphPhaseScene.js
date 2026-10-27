@@ -35288,7 +35288,8 @@ fn main(
         scene.userData.sphGpuParticleUpload = upload;
         return upload;
       }
-      const upload = uploadSphGpuParticleBuffers(resolvedDevice, sourceSphGpuParticleState);
+      const upload = uploadSphGpuParticleBuffers(resolvedDevice, sourceSphGpuParticleState,
+        { initialStorageGeneration: Math.max(1, uploadGeneration + 1) });
       const sourcePhysicsTick = residentSpatialEpochU32(
         sourceSphGpuParticleState.physicsTick
           ?? sourceSphGpuParticleState.step
@@ -35466,7 +35467,8 @@ fn main(
         scene.userData.mlsMpmGpuParticleUpload = upload;
         return upload;
       }
-      const upload = uploadMlsMpmGpuParticleBuffers(resolvedDevice, sourceMlsMpmGpuParticleState);
+      const upload = uploadMlsMpmGpuParticleBuffers(resolvedDevice, sourceMlsMpmGpuParticleState,
+        { initialStorageGeneration: Math.max(1, uploadGeneration + 1) });
       const sourcePhysicsTick = residentSpatialEpochU32(
         sourceMlsMpmGpuParticleState.physicsTick
           ?? sourceMlsMpmGpuParticleState.step
@@ -43367,7 +43369,7 @@ fn main(
             reactionContactRadiusM,
             sphGpuParticleState: nextSphGpuParticleState,
             mlsMpmGpuParticleState: nextMlsMpmGpuParticleState
-          })
+          }, { thermalMaterialTable: sphThermalMaterialTable })
         : null
     ));
     const staticReactionTableAdmitted = Boolean(
@@ -53684,7 +53686,16 @@ fn main(
         `target request ${predecessorTargetScheduleRequestId} was already consumed`
       );
     }
-    const scheduleTimeoutMs = Math.max(60000, requestedStepCount * 4000);
+    // The first exact inventory schedule compiles its integer arithmetic on
+    // this worker's device. Native traces show a single cold pipeline taking
+    // 33 s; the former 60 s whole-schedule deadline killed valid compilation.
+    // Only a newly seeded exact lane gets the cold-start allowance. Continuing
+    // physics keeps its existing deadline and must still publish a real result.
+    const coldExactCompilation = laneSeededThisSchedule && Boolean(sphParticleState?.exactMass);
+    const scheduleTimeoutMs = Math.max(coldExactCompilation ? 600000 : 60000, requestedStepCount * 4000);
+    if (coldExactCompilation) markResidentStepsProgress('resident-steps-cold-exact-pipelines', {
+      laneId, stateKey, timeoutMs: scheduleTimeoutMs
+    });
     const laneContinuationClassifierOptions = {
       ...(workerHierarchyConfig.baseGridSpacingM != null
         ? { baseGridSpacingM: workerHierarchyConfig.baseGridSpacingM }

@@ -355,11 +355,13 @@ test('strict energetics accepts phase-explicit reference rows and rejects uncove
   assert.equal(reactionDiscoveryProvesEmptyCatalog(salt), false);
 });
 
-test('heavy-element oxygen reactions switch to the all-element molecular solver while Fe water is blocked', () => {
+test('iron oxidation uses its phase-explicit JANAF energy while Fe water is blocked', () => {
   const oxide = discoverReactions('fe', 'o2');
   assert.equal(oxide.reactions.length, 1);
   assert.equal(oxide.reactions[0].product, 'feo');
-  assert.equal(oxide.reactions[0].energyModel, 'atomic-kohn-sham-tight-binding-v0');
+  assert.equal(oxide.reactions[0].energyModel, 'nist-janaf-standard-formation-enthalpy-298.15k-v0');
+  assert.equal(oxide.reactions[0].stoichiometry.thermochemicalReference.reactionEnthalpyJPerBalancedEquation, -544088);
+  assert.equal(oxide.reactions[0].stoichiometry.thermochemicalReference.simulationPhaseApplicabilityValidation, false);
   assert.ok(oxide.reactions[0].specificEnthalpyJPerKg < 0);
   assert.doesNotMatch(oxide.note, /basis|Z/);
   assert.equal(materialDerivationSummary(oxide.productClosures.feo.properties).fullyLowerLevelDerived, true);

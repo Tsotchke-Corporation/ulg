@@ -8,7 +8,7 @@ export const STANDARD_FORMATION_ENTHALPY_REFERENCE_SCHEMA =
 export const STANDARD_REACTION_ENTHALPY_REFERENCE_SCHEMA =
   'peercompute.ulg.standard-reaction-enthalpy-reference.v0';
 export const STANDARD_FORMATION_ENTHALPY_FINGERPRINT =
-  'nist-srd69-janaf-298.15k-na-h2o-naoh-h2-v0';
+  'nist-srd69-janaf-298.15k-na-h2o-naoh-h2-fe-o2-feo-v1';
 
 const NIST_WEBBOOK = 'NIST Chemistry WebBook, SRD 69';
 const CHASE_1998 = 'Chase, 1998; NIST-JANAF Thermochemical Tables, Fourth Edition';
@@ -42,6 +42,21 @@ const STANDARD_FORMATION_ENTHALPY_BY_FORMULA = Object.freeze({
     sourceRecord: CHASE_1998,
     sourceUrl: 'https://webbook.nist.gov/cgi/cbook.cgi?ID=C1310732&Mask=2&Units=SI'
   }),
+  Fe: Object.freeze({
+    formula: 'Fe', phase: 'solid', standardFormationEnthalpyJPerMol: 0,
+    source: 'NIST-JANAF Thermochemical Tables', sourceRecord: CHASE_1998,
+    sourceUrl: 'https://janaf.nist.gov/tables/Fe-003.html'
+  }),
+  O2: Object.freeze({
+    formula: 'O2', phase: 'gas', standardFormationEnthalpyJPerMol: 0,
+    source: 'NIST-JANAF Thermochemical Tables', sourceRecord: CHASE_1998,
+    sourceUrl: 'https://janaf.nist.gov/tables/O-029.html'
+  }),
+  FeO: Object.freeze({
+    formula: 'FeO', phase: 'solid', standardFormationEnthalpyJPerMol: -272_044,
+    source: 'NIST-JANAF Thermochemical Tables', sourceRecord: CHASE_1998,
+    sourceUrl: 'https://janaf.nist.gov/tables/Fe-018.html'
+  }),
   H2: Object.freeze({
     formula: 'H2',
     phase: 'gas',
@@ -52,12 +67,27 @@ const STANDARD_FORMATION_ENTHALPY_BY_FORMULA = Object.freeze({
   })
 });
 
+// The liquid table's 298.15 K datum is the metastable/glass reference branch.
+// It supplies a common energy zero for a liquid product, not evidence that
+// liquid FeO is stable at room temperature or a validation of a reduced EOS.
+const PHASE_REFERENCES = Object.freeze({
+  'FeO:liquid': Object.freeze({
+    formula: 'FeO', phase: 'liquid', standardFormationEnthalpyJPerMol: -249_532,
+    source: 'NIST-JANAF Thermochemical Tables', sourceRecord: CHASE_1998,
+    sourceUrl: 'https://janaf.nist.gov/tables/Fe-019.html',
+    referenceBranch: 'metastable-liquid/glass; not stable room-temperature liquid'
+  })
+});
+
 function normalizedFormula(formula) {
   return String(formula || '').replace(/\s+/g, '');
 }
 
-export function standardFormationEnthalpyReference(formula) {
-  const record = STANDARD_FORMATION_ENTHALPY_BY_FORMULA[normalizedFormula(formula)] || null;
+export function standardFormationEnthalpyReference(formula, phase = null) {
+  const key = normalizedFormula(formula);
+  const standard = STANDARD_FORMATION_ENTHALPY_BY_FORMULA[key] || null;
+  const record = phase == null || standard?.phase === phase
+    ? standard : PHASE_REFERENCES[`${key}:${phase}`] || null;
   return record
     ? {
         schema: STANDARD_FORMATION_ENTHALPY_REFERENCE_SCHEMA,
@@ -73,7 +103,7 @@ function referencedSide(terms = []) {
   const records = [];
   for (const term of terms) {
     const coefficient = Number(term?.coefficient);
-    const reference = standardFormationEnthalpyReference(term?.formula);
+    const reference = standardFormationEnthalpyReference(term?.formula, term?.phase);
     if (!(coefficient > 0) || !reference) return null;
     records.push({
       coefficient,

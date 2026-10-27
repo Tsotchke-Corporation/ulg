@@ -97,6 +97,12 @@ import {
 import {
   createGpuReadbackTelemetry
 } from './sphGpuReadbackTelemetry.js';
+import {
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+} from '../../../ulg-gpu-abi/src/schroederSpatialThermalProposalConstants.js';
 
 export const ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-thermal-proposal.v3';
@@ -135,10 +141,12 @@ export const SCHROEDER_SPATIAL_THERMAL_CONSUMERS = Object.freeze([
   })
 ]);
 
-export const SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC = 0x5450_4831;
-export const SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION = 2;
-export const SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS = 16;
-export const SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS = 4;
+export {
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+};
 export const SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_FLOATS = 4;
 export const SCHROEDER_SPATIAL_THERMAL_EVIDENCE_WORDS = 16;
 export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_MEMBER_PROJECTION_ADMISSION_WORD = 5;
@@ -2793,6 +2801,18 @@ fn thermal_prepass_carrier_selection(
   let caloric = thermal_prepass_phase_caloric_selection(
     material_id, specific_internal_energy, phase_id, phase_fractions
   );
+  return thermal_prepass_carrier_selection_checked(
+    material_id, specific_internal_energy, phase_id, phase_fractions, caloric
+  );
+}
+
+fn thermal_prepass_carrier_selection_checked(
+  material_id: f32,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>,
+  caloric: ThermalPhaseCaloricSelection
+) -> ThermalCarrierSelection {
   if (caloric.enabled == 1u) { return caloric.selection; }
   var rejected = ThermalCarrierSelection(0u, 0u, 0.0, 0.0);
   var response_offset = 0u;
@@ -2868,11 +2888,9 @@ fn thermal_prepass_reachable_energy_domain(
   material_id: f32,
   specific_internal_energy: f32,
   phase_id: f32,
-  phase_fractions: vec4<f32>
+  phase_fractions: vec4<f32>,
+  caloric: ThermalPhaseCaloricSelection
 ) -> ThermalReachableEnergyDomain {
-  let caloric = thermal_prepass_phase_caloric_selection(
-    material_id, specific_internal_energy, phase_id, phase_fractions
-  );
   if (caloric.enabled == 1u) {
     return ThermalReachableEnergyDomain(
       caloric.selection.energy_lo, caloric.selection.energy_hi,
@@ -3003,13 +3021,11 @@ fn thermal_prepass_energy_inverse_for_temperature(
   upper_inverse: bool,
   specific_internal_energy: f32,
   phase_id: f32,
-  phase_fractions: vec4<f32>
+  phase_fractions: vec4<f32>,
+  caloric: ThermalPhaseCaloricSelection
 ) -> ThermalEnergyInverse {
   var rejected = ThermalEnergyInverse(0.0, 0u);
   if (!thermal_prepass_finite(target_temperature_k)) { return rejected; }
-  let caloric = thermal_prepass_phase_caloric_selection(
-    material_id, specific_internal_energy, phase_id, phase_fractions
-  );
   if (caloric.enabled == 1u) {
     if (caloric.selection.ready != 1u) { return rejected; }
     let row0 = thermal_prepass_response_row0(caloric.selection.response_index);
@@ -3842,17 +3858,22 @@ fn resolve_budget(
   let vel_u = source_state[particle_index * 2u + 1u];
   let thermo0 = source_thermo[particle_index * 3u];
   let thermo1 = source_thermo[particle_index * 3u + 1u];
-  let selection = thermal_prepass_carrier_selection(
+  let caloric = thermal_prepass_phase_caloric_selection(
+    thermo0.x, vel_u.w, thermo0.y, thermo1
+  );
+  let selection = thermal_prepass_carrier_selection_checked(
     thermo0.x,
     vel_u.w,
     thermo0.y,
-    thermo1
+    thermo1,
+    caloric
   );
   let reachable_domain = thermal_prepass_reachable_energy_domain(
     thermo0.x,
     vel_u.w,
     thermo0.y,
-    thermo1
+    thermo1,
+    caloric
   );
   let neighbor_min_temperature = bitcast<f32>(
     atomicLoad(&thermal_derived[row_offset + 6u])
@@ -3866,7 +3887,8 @@ fn resolve_budget(
     false,
     vel_u.w,
     thermo0.y,
-    thermo1
+    thermo1,
+    caloric
   );
   let upper_inverse = thermal_prepass_energy_inverse_for_temperature(
     thermo0.x,
@@ -3874,7 +3896,8 @@ fn resolve_budget(
     true,
     vel_u.w,
     thermo0.y,
-    thermo1
+    thermo1,
+    caloric
   );
   if (
     selection.ready != 1u
@@ -10912,7 +10935,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     : null;
   const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-budget-resolve.v13.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-budget-resolve.v14.${directoryAbiCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-budget-resolve',
     code: schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'resolve_budget',
@@ -13320,7 +13343,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       ]
     });
     const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v9',
+      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v10',
       label: 'ulg-classic-thermal-v2-budget-resolve',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'resolve_budget',

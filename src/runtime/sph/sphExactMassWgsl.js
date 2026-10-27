@@ -88,8 +88,18 @@ fn em_multiply_ratio(a: ExactMass, numerator: ExactMass, denominator: ExactMass)
   if (em_zero(denominator)) {
     return ExactMassRatio(a, ExactMass(), ${ERROR.DIVISION_BY_ZERO}u);
   }
-  if (em_compare(numerator, denominator) > 0) {
+  let ratio_order = em_compare(numerator, denominator);
+  if (ratio_order > 0) {
     return ExactMassRatio(a, ExactMass(), ${ERROR.INVALID_RATIO}u);
+  }
+  // Keep invalid denominator/ratio checks above these exact endpoints. Pure
+  // phase transfers spend the entire integer packet, including its low bit;
+  // zero-weight terms spend none. Neither case needs bitwise long division.
+  if (em_zero(numerator)) {
+    return ExactMassRatio(ExactMass(), ExactMass(), 0u);
+  }
+  if (ratio_order == 0) {
+    return ExactMassRatio(a, ExactMass(), 0u);
   }
   var quotient: ExactMass;
   var remainder: ExactMass;

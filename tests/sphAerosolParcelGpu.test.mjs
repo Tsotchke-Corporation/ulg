@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   createSphAerosolParcelFamilyWebGpu,
+  acquireSphAerosolParcelRead, forkSphAerosolParcelRead, releaseSphAerosolParcelRead,
+  validateSphAerosolParcelRead,
   releaseSphAerosolParcelFamily,
   createSphAerosolCombinedBudgetStage
 } from '../src/runtime/sph/sphAerosolParcelGpu.js';
@@ -10,6 +12,7 @@ import {
 } from '../ulg-gpu-abi/src/sphAerosolParcel.js';
 import { runMlsMpmResidentSummaryWebGpu } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
 import { ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA } from '../ulg-gpu-abi/src/index.js';
+import { createSphExactMassFormat, decodeSphExactMass } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
 
 function fakeDevice({ failAllocation = 0, failSubmit = false } = {}) {
   const buffers = [], writes = [], fences = [], passes = [], copies = [];
@@ -63,6 +66,85 @@ const parcel = (overrides = {}) => ({ slot: 2, parcelId: 1n, nucleusPopulationId
 const create = (device, overrides = {}) => createSphAerosolParcelFamilyWebGpu({ device,
   capacity: 4, parcels: [parcel()], provenance: { kind: 'initial-conditions', reference: 'manufactured population' },
   ...overrides });
+
+for (const wordCount of [9, 66]) test(`original aerosol owner preserves cold mass and extensive quantities at width ${wordCount}`, async () => {
+  const device = fakeDevice(), format = createSphExactMassFormat({ wordCount,
+    quantumExponent: wordCount === 66 ? -1074 : -149 });
+  const mass = .125 + 2 ** -54;
+  const family = create(device, { exactMass: { format }, parcels: [parcel({ massKg: mass })] });
+  const read = acquireSphAerosolParcelRead({ device, family, expectedGeneration: 0 });
+  const { quantityBuffer, quantityLayout: l } = read.exactQuantities;
+  const uploaded = device.writes.find(w => w.buffer === quantityBuffer).bytes;
+  const words = new Uint32Array(uploaded.buffer), at = 2 * l.recordWords;
+  assert.equal(new Float32Array(device.writes[0].bytes.buffer)[2 * 24 + 3], .125);
+  const m = decodeSphExactMass(words.slice(at + l.massOffsetWords, at + l.massOffsetWords + format.wordCount), format);
+  const expected = ((1n << 51n) + 1n) << BigInt(-54 - format.quantumExponent);
+  assert.equal(m.coefficient, expected, 'cold binary64 remainder survives the physical f32 projection');
+  const integer = (a, start, n) => Array.from(a.slice(start, start + n)).reverse()
+    .reduce((v, w) => (v << 32n) | BigInt(w), 0n);
+  const expect = (field, numerator, denominator = 1n) => {
+    const s = at + l.scalarOffsetWords + field * l.scalar.recordWords;
+    const n = integer(words, s + 4, l.scalar.wordCount) * (words[s] ? -1n : 1n);
+    const d = integer(words, s + 4 + l.scalar.wordCount, l.scalar.wordCount), e = words[s + 2] | 0;
+    const common = Math.min(e, format.quantumExponent);
+    assert.equal(words[s + 1], 0); assert.equal(words[s + 3], 0);
+    assert.equal((n * denominator) << BigInt(e - common),
+      (numerator * d) << BigInt(format.quantumExponent - common), `extensive field ${field}`);
+  };
+  expect(0, 0n); expect(1, expected); expect(2, -expected); expect(3, -9n * expected);
+  expect(4, expected, 1000n); expect(5, expected, 1000n); expect(6, expected);
+  assert.ok(words.slice(0, at).every(v => v === 0));
+  assert.ok(words.slice(at + l.recordWords).every(v => v === 0));
+  assert.equal(family.exactMassFormat, format); assert.ok(Object.isFrozen(read.exactQuantities));
+  assert.equal(validateSphAerosolParcelRead({ ...read }, { device, family, expectedGeneration: 0 }), false);
+  const fork = forkSphAerosolParcelRead(read, { device, family, expectedGeneration: 0 });
+  assert.equal(fork.exactQuantities, read.exactQuantities);
+  releaseSphAerosolParcelFamily(family); releaseSphAerosolParcelRead(read);
+  await device.finishQueue();
+  assert.equal(quantityBuffer.destroyed, 0); assert.equal(fork.buffer.destroyed, 0);
+  assert.equal(validateSphAerosolParcelRead(fork, { device, family, expectedGeneration: 0 }), true);
+  releaseSphAerosolParcelRead(fork); await device.finishQueue();
+  assert.ok(device.buffers.every(b => b.destroyed === 1), 'original owner retires both exact and physical storage once');
+});
+
+test('exact aerosol admission rejects copied formats, getters, quantum loss and oversized quantity storage before GPU allocation', () => {
+  const format = createSphExactMassFormat();
+  const accessor = parcel();
+  Object.defineProperty(accessor, 'massKg', { get() { throw new Error('getter ran'); } });
+  for (const options of [
+    { exactMass: { format: { ...format } } },
+    { exactMass: { format: createSphExactMassFormat({ wordCount: 1, quantumExponent: -3 }) }, parcels: [parcel({ massKg: .125 + 2 ** -54 })] },
+    { exactMass: { format }, parcels: [accessor] }
+  ]) {
+    const device = fakeDevice();
+    assert.throws(() => create(device, options), error => !error.message.includes('getter ran'));
+    assert.equal(device.buffers.length, 0);
+  }
+  const device = fakeDevice(); device.limits.maxStorageBufferBindingSize = 1024;
+  assert.throws(() => create(device, { exactMass: { format } }), /quantities exceed/);
+  assert.equal(device.buffers.length, 0);
+});
+
+test('exact aerosol allocation/submit failure and unconfirmed retirement keep complete original-owner cleanup', async () => {
+  const format = createSphExactMassFormat();
+  for (const failAllocation of [1, 2, 3]) {
+    const device = fakeDevice({ failAllocation });
+    assert.throws(() => create(device, { exactMass: { format } }), /allocation failure/);
+    await device.finishQueue(); assert.ok(device.buffers.every(b => b.destroyed === 1));
+  }
+  const failed = fakeDevice({ failSubmit: true });
+  assert.throws(() => create(failed, { exactMass: { format } }), /submit failure/);
+  assert.ok(failed.buffers.every(b => b.destroyed === 0));
+  await failed.finishQueue(); assert.ok(failed.buffers.every(b => b.destroyed === 1));
+  const device = fakeDevice(), family = create(device, { exactMass: { format } });
+  await device.finishQueue();
+  const read = acquireSphAerosolParcelRead({ device, family, expectedGeneration: 0 });
+  device.fenceFailure = 'reject'; releaseSphAerosolParcelFamily(family); releaseSphAerosolParcelRead(read);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(read.buffer.destroyed, 0); assert.equal(read.exactQuantities.quantityBuffer.destroyed, 0);
+  await device.lose();
+  assert.ok(device.buffers.every(b => b.destroyed === 1));
+});
 
 function stageInputs(device, family) {
   const storage = (size) => device.createBuffer({ size, usage: 128 });

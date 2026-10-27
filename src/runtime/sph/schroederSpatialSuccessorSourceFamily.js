@@ -1858,6 +1858,7 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       throw sourceFamilyError('exact publication requires its genuine transaction and closure source', 'EXACT_MASS_OWNER');
     }
     exactMassClosure = { closure: postMechanicsClosure, claim,
+      carrierMassRead: capture.carrierMassRead ?? capture.sourceRead.read,
       validateClaim: module.validateMlsMpmPostMechanicsContinuationClaim };
   }
   assertSphAerosolSpatialContinuation({ device, transaction, generation,
@@ -2180,8 +2181,11 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     particleCount,
     sourceEpochIdentity,
     successorEpochIdentity,
-    exactMassInventory: transaction.sourceBuffers?.exactMassInventory ?? null,
-    exactMassInventoryRange: transaction.sourceBuffers?.exactMassInventoryRange ?? null,
+    exactMassInventory: exactMassClosure?.carrierMassRead.family ?? null,
+    exactMassInventoryRange: exactMassClosure ? Object.freeze({
+      rowOffset: exactMassClosure.carrierMassRead.rowOffset,
+      rowCount: exactMassClosure.carrierMassRead.rowCount
+    }) : null,
     ...successorEpochIdentity,
     ...strides,
     sourceTopologyEpoch: topologyAuthority.sourceTopologyEpoch,

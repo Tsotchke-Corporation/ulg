@@ -6,6 +6,7 @@ import {
   buildSphDispersedMediumOpticalClosureTable
 } from './sphDispersedMediumOpticalClosure.js';
 import { buildSphReactionTable } from './sphReactionGpuKernel.js';
+import { buildSphReferenceReactionTable } from './sphReferenceReactionTable.js';
 import {
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
@@ -150,6 +151,9 @@ export function thermalMaterialTablesExactlyEqual(cachedTable, liveTable) {
   return (
     typedArrayBytesExactlyEqual(cachedTable.records, liveTable.records)
     && typedArrayBytesExactlyEqual(cachedTable.segments, liveTable.segments)
+    && ((cachedTable.molarMassIdentities == null && liveTable.molarMassIdentities == null)
+      || typedArrayBytesExactlyEqual(cachedTable.molarMassIdentities, liveTable.molarMassIdentities))
+    && JSON.stringify(cachedTable.segmentMetadata ?? []) === JSON.stringify(liveTable.segmentMetadata ?? [])
   );
 }
 
@@ -214,12 +218,17 @@ export function buildSphThermalMaterialTableFromViewState(viewState = {}) {
   });
 }
 
-export function buildSphReactionTableFromViewState(viewState = {}) {
+export function buildSphReactionTableFromViewState(viewState = {}, {
+  thermalMaterialTable = null
+} = {}) {
   const mechanicsProfile = viewState.mlsMpmGpuParticleState
     ?? viewState.gpuMechanics
     ?? {};
-  return buildSphReactionTable(viewState.reactions || [], {
+  const builder = viewState.sphGpuParticleState?.exactMass
+    ? buildSphReferenceReactionTable : buildSphReactionTable;
+  return builder(viewState.reactions || [], {
     materialProperties: viewState.materialProperties || {},
+    thermalMaterialTable: thermalMaterialTable ?? buildSphThermalMaterialTableFromViewState(viewState),
     contactRadiusM:
       viewState.reactionContactRadiusM
       ?? viewState.sphGpuParticleState?.smoothingLengthM
@@ -291,7 +300,7 @@ export function sphStaticTableInputsFromViewState(viewState = {}, {
   );
   const collectiveOpticalInputs =
     sphCollectiveOpticalStaticInputsFromViewState(viewState);
-  const reactionTable = buildSphReactionTableFromViewState(viewState);
+  const reactionTable = buildSphReactionTableFromViewState(viewState, { thermalMaterialTable });
   return {
     thermalMaterialTable,
     thermalClosureGraphSet,

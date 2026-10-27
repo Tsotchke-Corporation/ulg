@@ -13,6 +13,9 @@ import { acquireMlsMpmG2pExactMassCapture, acquireMlsMpmMechanicsExactMassCaptur
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { createSphExactMassFormat } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { buildSphDispersedMediumOpticalClosureTable } from '../src/runtime/sph/sphDispersedMediumOpticalClosure.js';
+import { buildSphDispersedMediumOpticsProducerSeedRows } from '../src/runtime/sph/sphDispersedMediumOpticsProducerGpu.js';
+import { SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL } from '../ulg-gpu-abi/src/index.js';
 
 // Fake command recorder copied from existing sphG2pGpuKernel.test.mjs.
 // These are ownership/authentication tests; no WGSL is executed.
@@ -48,7 +51,10 @@ function fakeG2pDevice() {
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxUniformBufferBindingSize: 64 * 1024,
       maxStorageBuffersPerShaderStage: 16,
+      maxBindingsPerBindGroup: 1000,
       maxComputeWorkgroupsPerDimension: 65535,
+      maxComputeInvocationsPerWorkgroup: 256,
+      maxComputeWorkgroupSizeX: 256,
       minUniformBufferOffsetAlignment: 256
     },
     queue: {
@@ -281,6 +287,57 @@ function runTwoLevel(f, materialUpload, extra = {}) {
       mechanicsRefreshOptions: { mechanicsMaterialPhaseUpload: materialUpload },
       thermalStepOptions: { conductionRate: 0 }, gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null },
     ...extra });
+}
+
+for (const spatialStep of [false, true]) {
+  test(`exact continuation adopts fresh optics with ${spatialStep ? 'spatial publication' : 'ordinary binding'}`, async () => {
+    const particle = { id: 'optical-carrier', material: 'fe', initialBodyDomainId: 1,
+      initialBodyId: 'optical-body', massKg: .001, x: [1, 1, 1], v: [0, 0, 0],
+      specificInternalEnergyJPerKg: specificInternalEnergyJPerKg(createReferenceMaterialClosures().fe.properties, 300) };
+    const phaseCarrierPlan = { schema: 'peercompute.ulg.sph-phase-carrier-plan.v2', status: 'phase-lane-capacity-ready',
+      lineageCapacity: 1, primaryCapacity: 1, phaseLaneCount: 4, phaseLaneStride: 1,
+      companionStart: 1, companionCapacity: 3, particleCapacity: 4,
+      stableLaneAddress: 'phaseLane*phaseLaneStride+lineageIndex', phaseCompanionLanesRequired: true };
+    const f = fixture({ phaseCarrierPlan, particles: [particle, ...[1, 2, 3].map(lane => ({ ...particle,
+      id: `optical-companion-${lane}`, massKg: 0, phaseCompanionSlot: true,
+      phaseCarrierPrimaryIndex: 0, phaseCarrierLineageIndex: 0, phaseCarrierLane: lane,
+      phaseCarrierTargetPhaseId: lane + 1, phaseVolumeReferenceMassKg: 0, mpmVolume0: 0, visualRestParticleRadiusM: 0 }))] });
+    const opticalTable = buildSphDispersedMediumOpticalClosureTable([{ dispersedMaterialId: f.packed.thermo[0],
+      vaporPhaseId: 3, condensedPhaseId: 2, opticalStateId: 101,
+      morphologyModelId: SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL.monodisperseRadius,
+      condensedDensityKgPerM3: 1000, scatteringEfficiencyQsca: 2,
+      absorptionEfficiencyQabs: .1, asymmetryFactorG: .85, effectiveRadiusM: 1e-6 }]);
+    const opticalOptions = { dispersedMediumOpticalClosureTable: opticalTable,
+      dispersedMediumOpticsSeedRows: buildSphDispersedMediumOpticsProducerSeedRows({ phaseCarrierPlan,
+        lineageMaterialIds: new Float32Array([f.packed.thermo[0]]), opticalClosureTable: opticalTable }) };
+    let step, read, family;
+    try {
+      step = spatialStep ? (await runSpatial(f, { residentStepOptions: {
+        thermalMaterialTable: f.thermalTable, mechanicsMaterialTable: f.mechanicsTable,
+        thermalStepOptions: { conductionRate: 0 }, gasPressureMechanicsBoundaryEnabled: false,
+        fuseNoFullResidentMechanics: false, summaryRunner: null, ...opticalOptions } })).residentStep
+        : await run(f, opticalOptions);
+      const next = step.nextParticleUploads, target = next.sphParticleUpload;
+      family = next.schroederSpatialSuccessorSourceFamily;
+      assert.equal(step.dispersedMediumOpticsProducerStep.outputOwnershipTransferred, true);
+      assert.equal(buffers.ensureSphGpuParticleBufferSetBorrowLifecycle(target), true);
+      assert.equal(buffers.sphGpuParticleUploadMatchesDevice(target, f.device), true);
+      assert.equal(buffers.ensureSphGpuParticleBufferSetBorrowLifecycle({ ...target }), false);
+      const original = target.dispersedMediumOptics;
+      target.dispersedMediumOptics = { ...original };
+      try { assert.equal(buffers.ensureSphGpuParticleBufferSetBorrowLifecycle(target), false); }
+      finally { target.dispersedMediumOptics = original; }
+      read = buffers.acquireSphParticleExactMassRead(target, f.device, { mlsMpmParticleUpload: next.mlsMpmParticleUpload });
+      buffers.destroySphGpuParticleBuffers(f.sphUpload);
+      await settle();
+      assert.equal(buffers.validateSphParticleExactMassRead(read, { device: f.device, sourceSphUpload: target }), true);
+      assert.notEqual(original.buffer.destroyed, true);
+    } finally {
+      if (read) await buffers.releaseSphParticleExactMassRead(read);
+      if (family) await spatial.retireSchroederSpatialSuccessorSourceFamilyAfterLeases(family, { device: f.device });
+      await retire(f, step);
+    }
+  });
 }
 
 test('exact two-level hierarchy publishes the real terminal thermal continuation', async () => {

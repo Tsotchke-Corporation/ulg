@@ -12,9 +12,9 @@ export const SPH_EXACT_REACTION_CALORIC_ERROR = Object.freeze({
 
 // Composed into the genuine source producer. Every quantity is preparation;
 // endpoint writes, element accounting and terminal physical ownership follow.
-export function createSphExactReactionCaloricGpuWgsl(format) {
+export function createSphExactReactionCaloricGpuWgsl(format, options) {
   const E = SPH_EXACT_REACTION_CALORIC_ERROR;
-  return createSphExactCaloricWgsl(format)
+  return createSphExactCaloricWgsl(format, options)
     + createSphReactionEnergyGraphWgsl({ record: index => `es_energy_record(${index})` }) + /* wgsl */ `
 fn es_energy_record(index: u32) -> vec4<f32> {
   let at = es_params.reaction_table_offset + index * 4u;

@@ -1,3 +1,4 @@
+import { SPH_ENVIRONMENT_CONTROL_DEFAULTS } from './sphEnvironmentControls.js';
 import {
   serializeSphInitialBodies,
   sphInitialBodiesFromLegacyDropBase
@@ -12,6 +13,7 @@ export const SPH_PHASE_SCENARIO_PRESET_SCHEMA =
   'peercompute.ulg.sph-phase-scenario-preset.v0';
 
 const COMMON_CONTROLS = Object.freeze({
+  ...SPH_ENVIRONMENT_CONTROL_DEFAULTS,
   mech: 'mlsmpm',
   wxmin: '293.15',
   wxmax: '293.15',

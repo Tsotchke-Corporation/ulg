@@ -1,3 +1,7 @@
+import { locallySubmittedMlsMpmActiveSourceDenseP2gHistory } from './sphGridGpuKernel.js';
+import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
+import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from './sphMechanicsMaterialTable.js';
+import { typedArrayContentFingerprint } from './sphGpuDeviceIdentity.js';
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
   acquireSphParticleExactMassRead, releaseSphParticleExactMassRead,
   validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
@@ -225,7 +229,8 @@ function cachedG2pPipelineBundle(device, {
   bindings,
   canonicalSpatialAuthority,
   mechanicsFieldRequired,
-  refluxReceiptStage
+  refluxReceiptStage,
+  exactQuantities = false
 }) {
   let deviceBundles = g2pPipelineBundles.get(device);
   if (!deviceBundles) {
@@ -243,12 +248,12 @@ function cachedG2pPipelineBundle(device, {
     entryPoint: 'main',
     bindings
   });
-  const canonicalFinalize = canonicalSpatialAuthority
+  const canonicalFinalize = canonicalSpatialAuthority || exactQuantities
     ? createCachedExplicitComputePipeline(device, {
         cacheKey: `ulg-mls-mpm-g2p-reconstruct.finalize-authority.${variant}`,
         label: 'ulg-mls-mpm-g2p-finalize-spatial-authority',
         code: shader,
-        entryPoint: 'finalize_canonical_spatial_authority',
+        entryPoint: exactQuantities ? 'finalize_exact_g2p_authority' : 'finalize_canonical_spatial_authority',
         bindings
       })
     : null;
@@ -3687,7 +3692,44 @@ export function encodeMlsMpmParticleSeparationPasses(device, encoder, {
   };
 }
 
+
+// Optional provenance from the actual mechanics producer. Missing data keeps
+// existing continuations working, but cannot authorize receiver preparation.
+function snapshotExactG2pMechanicsTable(table) {
+  if (table == null) return null;
+  const keys = ['schema', 'records', 'phaseRecordCount', 'gasConstitutiveSchema', 'gasConstitutiveOffsetVec4'];
+  const fields = keys.map(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(table, key);
+    if (descriptor && !Object.hasOwn(descriptor, 'value')) throw new TypeError('Exact mechanics table must contain data fields');
+    return [key, descriptor?.value, Boolean(descriptor)];
+  });
+  if (fields[0][1] !== ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA) throw new TypeError('Original mechanics material table required');
+  const records = fields[1][1];
+  if (!(records instanceof Float32Array) || (typeof SharedArrayBuffer !== 'undefined' && records.buffer instanceof SharedArrayBuffer)) {
+    throw new TypeError('Original mechanics table requires immutable ordinary float storage');
+  }
+  const bytes = new Uint32Array(records.buffer, records.byteOffset, records.length).slice();
+  const fingerprint = typedArrayContentFingerprint(records);
+  const validate = () => {
+    for (const [key, value, present] of fields) {
+      const descriptor = Object.getOwnPropertyDescriptor(table, key);
+      if (Boolean(descriptor) !== present || (descriptor && (!Object.hasOwn(descriptor, 'value') || descriptor.value !== value))) {
+        throw new TypeError('Original mechanics material table identity changed');
+      }
+    }
+    if (records.byteLength !== bytes.byteLength || typedArrayContentFingerprint(records) !== fingerprint) throw new TypeError('Original mechanics material table content changed');
+    const current = new Uint32Array(records.buffer, records.byteOffset, records.length);
+    if (current.some((value, index) => value !== bytes[index])) throw new TypeError('Original mechanics material table content changed');
+    assertSphMechanicsGasLayout(table);
+    return true;
+  };
+  validate();
+  return Object.freeze({ table, validate });
+}
+
 const exactMassG2pOutputs = new WeakMap();
+const exactG2pQuantityOutputs = new WeakMap();
+const exactG2pHistoryOutputs = new WeakMap();
 
 function exactMassG2pOutputFieldsMatch(result, record) {
   return record.fields.every(([key, value]) => {
@@ -3718,11 +3760,16 @@ export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUp
       || record.retired) {
     throw new TypeError('Exact mass requires the genuine live G2P producer output');
   }
+  record.mechanicsTableCapture?.validate();
+  record.history?.source.validate();
+  if (record.retired) throw new TypeError('Exact G2P retired during material validation');
   // Physical-source validation can observe caller-owned state. Check terminal
   // retirement after those reads, immediately before creating the new pin.
   record.pins++;
   let released = false;
   return Object.freeze({ sourceRead: record.sourceRead,
+    quantities: record.quantities, history: record.history,
+    mechanicsMaterialTable: record.mechanicsTableCapture?.table ?? null,
     sourceMlsUpload: record.sourceMlsUpload,
     transaction: record.transaction, generation: record.generation, dt: record.dt,
     stateBuffer: record.stateBuffer, thermoBuffer: record.thermoBuffer,
@@ -3733,6 +3780,9 @@ export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUp
           || released || record.retired) {
         throw new TypeError('Exact G2P capture was changed or released');
       }
+      record.mechanicsTableCapture?.validate();
+      record.history?.source.validate();
+      if (released || record.retired) throw new TypeError('Exact G2P capture retired during material validation');
       return true;
     },
     release() { if (released) return false; released = true; record.pins--; return true; }
@@ -3748,6 +3798,7 @@ export async function runMlsMpmG2pWebGpu(args = {}) {
   if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE) {
     throw new TypeError('G2P requires an authenticated exact-inventory continuation with retained GPU outputs');
   }
+  const mechanicsTableCapture = snapshotExactG2pMechanicsTable(args.mechanicsMaterialTable);
   const fusedTransaction = args.fusedFineSubstepTransaction ?? args.fusedCoarseTerminalTransaction;
   if (fusedTransaction) {
     const capture = acquireSchroederCanonicalParticleExactMassRead(args.device,
@@ -3773,17 +3824,21 @@ export async function runMlsMpmG2pWebGpu(args = {}) {
     ? acquireSchroederSpatialEpochExactMassRead(args.schroederSpatialEpochTransaction, {
       device: args.device, generation: args.schroederSpatialEpochGeneration,
       sphParticleUpload: args.sphParticleUpload, mlsMpmParticleUpload: args.mlsMpmParticleUpload })
-    : acquireSphParticleExactMassRead(args.sphParticleUpload, args.device);
+    : acquireSphParticleExactMassRead(args.sphParticleUpload, args.device,
+      { mlsMpmParticleUpload: args.mlsMpmParticleUpload });
   let result = null;
   try {
     if (args.sphParticleState?.particleCount !== sourceRead.particleCount
         || args.mlsMpmParticleState?.particleCount !== sourceRead.particleCount) throw new TypeError('Exact G2P row count mismatch');
     result = await runMlsMpmG2pWebGpuImpl(args, sourceRead);
+    mechanicsTableCapture?.validate();
     if (!validateSphParticleExactMassRead(sourceRead, { device: args.device, sourceSphUpload: args.sphParticleUpload })) {
       throw new TypeError('Exact G2P source changed during execution');
     }
     markSphExactMassDerivedBuffers(sourceRead, [result.stateBuffer]);
-    const record = { device: args.device, sourceRead, sourceSphUpload: args.sphParticleUpload,
+    const record = { device: args.device, mechanicsTableCapture, sourceRead, sourceSphUpload: args.sphParticleUpload,
+      quantities: exactG2pQuantityOutputs.get(result) ?? null,
+      history: exactG2pHistoryOutputs.get(result) ?? null,
       sourceMlsUpload: args.mlsMpmParticleUpload,
       transaction: args.schroederSpatialEpochTransaction ?? null,
       generation: args.schroederSpatialEpochGeneration ?? null, dt: result.dt,
@@ -3849,6 +3904,9 @@ async function runMlsMpmG2pWebGpuImpl({
   readbackMode = FULL_READBACK_MODE
 } = {}, exactMassRead = null) {
   if (!exactMassRead) assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload }, 'G2P continuation');
+  if (exactMassRead?.quantities && (fusedFineSubstepTransaction || fusedCoarseTerminalTransaction)) {
+    throw new TypeError('Fused G2P must propagate its updated quantity owner before continuing an exact reaction owner');
+  }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -4135,6 +4193,8 @@ async function runMlsMpmG2pWebGpuImpl({
   let outputParticleBuffersDestroyed = false;
   let outputStateBufferDestroyed = false;
   let outputMechanicsBufferDestroyed = false;
+  let exactQuantities = null, exactHistory = null, exactHistorySource = null, exactHistoryPin = null;
+  let exactHistoryHandle = null;
   try {
   // Never size GPU output buffers from the CPU arrays alone: under
   // GPU-resident continuation the CPU copies can be stale or detached
@@ -4268,6 +4328,15 @@ async function runMlsMpmG2pWebGpuImpl({
         'active-source-v2-dense-grid-update-provenance-rejected',
         'Canonical spatial v2 dense G2P requires the exact locally submitted ActiveSource P2G/grid-update chain'
       );
+    }
+  }
+  if (activeSourceV2DenseG2pEnabled && exactMassRead?.quantities) {
+    exactHistoryHandle = locallySubmittedMlsMpmActiveSourceDenseP2gHistory(device, gridUpdate.sourceProjection,
+      { schroederSpatialEpochGeneration, selectedLevel: schroederSelectedLevel, requireNoFullReadback: true });
+    if (exactHistoryHandle) {
+      exactHistorySource = mechanicsFieldKernelBundle.acquireResidentProductExactHistoryRead(exactHistoryHandle,
+        { device, identityBuffer: sphParticleUpload.identityBuffer });
+      exactHistoryPin = ownAllocation({ destroy: exactHistorySource.release });
     }
   }
   if (mechanicsFieldRequired) {
@@ -4606,7 +4675,7 @@ async function runMlsMpmG2pWebGpuImpl({
         'Fused G2P lost its frozen input family or exact producer claim after parameter upload'
       );
     }
-    const g2pShader = canonicalSpatialAuthority
+    let g2pShader = canonicalSpatialAuthority
       ? (observeCanonicalSpatialAuthority === true
           ? (mechanicsFieldRequired
               ? (activeSourceV2G2pEnabled
@@ -4627,7 +4696,20 @@ async function runMlsMpmG2pWebGpuImpl({
                   ? mlsMpmG2pReconstructCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl
                   : mlsMpmG2pReconstructCanonicalSpatialUnobservedWgsl)))
       : mlsMpmG2pReconstructWgsl;
-    const g2pVariant = canonicalSpatialAuthority
+    if (exactMassRead?.quantities) {
+      const { prepareSphExactG2pQuantities } = await import('./sphExactG2pQuantityGpu.js');
+      const { appendSphExactG2pFinalizerWgsl } = await import('./sphExactG2pQuantityWgsl.js');
+      exactQuantities = await prepareSphExactG2pQuantities({ device, sourceRead: exactMassRead, allocate: createOwnedTaggedBuffer });
+      if (exactHistorySource) {
+        const { prepareSphExactHistoryG2p } = await import('./sphExactHistoryG2pGpu.js');
+        exactHistory = await prepareSphExactHistoryG2p({ device, source: exactHistorySource,
+          allocate: createOwnedTaggedBuffer, gridBuffer,
+          paramsData: createParamsArray({ ...paramsOptions, particleCount: exactHistorySource.descriptor.rowCapacity,
+            schroederActiveNodeFilterEnabled: false, schroederLevelFilterEnabled: false }) });
+      }
+      g2pShader = appendSphExactG2pFinalizerWgsl(g2pShader, exactQuantities.quantityLayout, canonicalSpatialAuthority, Boolean(exactHistory));
+    }
+    let g2pVariant = canonicalSpatialAuthority
       ? `canonical-spatial-epoch.${mechanicsFieldRequired ? 'field.v3-reflux' : 'v7'}.${observeCanonicalSpatialAuthority === true
           ? 'observed'
           : 'unobserved'}${activeSourceV2G2pEnabled
@@ -4636,6 +4718,8 @@ async function runMlsMpmG2pWebGpuImpl({
           ? '.active-source-v2-dense-single-level'
           : ''}`
       : 'precanonical-level-assignment.v5';
+    if (exactQuantities) g2pVariant += `.exact-quantities-v1-${exactQuantities.format.wordCount}-${exactQuantities.quantityLayout.recordWords}`;
+    if (exactHistory) g2pVariant += '.exact-history-v1';
     const g2pBindings = [
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, mechanicsFieldRequired
@@ -4654,7 +4738,10 @@ async function runMlsMpmG2pWebGpuImpl({
           ? 'storage'
           : 'read-only-storage'
       ),
-      ...(canonicalSpatialAuthority ? [computeBufferBinding(8, 'read-only-storage')] : [])
+      ...(canonicalSpatialAuthority ? [computeBufferBinding(8, 'read-only-storage')] : []),
+      ...(exactQuantities ? [computeBufferBinding(9, 'read-only-storage'),
+        computeBufferBinding(10, 'read-only-storage'), computeBufferBinding(11, 'storage')] : []),
+      ...(exactHistory ? [computeBufferBinding(12, 'storage')] : [])
     ];
     const refluxReceiptStage = parentFieldWorkspace?.refluxLedger == null
       ? null
@@ -4673,7 +4760,8 @@ async function runMlsMpmG2pWebGpuImpl({
       bindings: g2pBindings,
       canonicalSpatialAuthority,
       mechanicsFieldRequired,
-      refluxReceiptStage
+      refluxReceiptStage,
+      exactQuantities: Boolean(exactQuantities)
     });
     const g2pEntries = [
       { binding: 0, resource: { buffer: stateBuffer } },
@@ -4692,7 +4780,13 @@ async function runMlsMpmG2pWebGpuImpl({
         )
           ? mechanicsFieldBinding.activeSourceBuffer
           : schroederSpatialAuthority.directoryBuffer } }]
-        : [])
+        : []),
+      ...(exactQuantities ? [
+        { binding: 9, resource: { buffer: exactQuantities.validationBuffer } },
+        { binding: 10, resource: { buffer: exactQuantities.original } },
+        { binding: 11, resource: { buffer: exactQuantities.quantityBuffer } }
+      ] : []),
+      ...(exactHistory ? [{ binding: 12, resource: { buffer: exactHistory.validationBuffer } }] : [])
     ];
     const bindGroup = device.createBindGroup({
       layout: bindGroupLayout,
@@ -4903,6 +4997,8 @@ async function runMlsMpmG2pWebGpuImpl({
     for (const transientBuffer of separationTransientBuffers) {
       ownAllocation(transientBuffer);
     }
+    exactHistory?.encodeCandidate(encoder);
+    exactQuantities?.encode(encoder, { stateBuffer, mechanicsBuffer, outStateBuffer, outMechanicsBuffer });
     if (mechanicsFieldRequired) {
       encodeComputeDispatch(
         energyReceiptPipelines[1].pipeline,
@@ -4922,7 +5018,7 @@ async function runMlsMpmG2pWebGpuImpl({
     // Receipt consumption can reject a candidate after the particle pass.
     // Restore from the canonical input only after every receipt stage so the
     // caller can never observe a failed transaction's output buffers.
-    if (canonicalFinalize && separation.canonicalAuthorityRestoreFolded !== true) {
+    if (canonicalFinalize && (exactQuantities || separation.canonicalAuthorityRestoreFolded !== true)) {
       encodeComputeDispatch(
         canonicalFinalize.pipeline,
         canonicalFinalizeBindGroup,
@@ -4930,6 +5026,7 @@ async function runMlsMpmG2pWebGpuImpl({
       );
     }
     groupedMechanicsPass?.end();
+    exactHistory?.encodeSelection(encoder);
     if (canonicalSpatialAuthorityTraceReadBuffer) {
       if (
         canonicalSpatialAuthorityTracePlan.kind
@@ -5108,6 +5205,21 @@ async function runMlsMpmG2pWebGpuImpl({
     reconstruction.postSeparationThermalBinAuthority =
       postSeparationThermalBinAuthority;
     if (retainOutputParticleBuffers) {
+      if (exactHistory) exactG2pHistoryOutputs.set(reconstruction, Object.freeze({
+        source: exactHistorySource, sourceHandle: exactHistoryHandle, buffer: exactHistory.outputBuffer,
+        layout: exactHistorySource.layout, descriptor: exactHistorySource.descriptor,
+        validationBuffer: exactHistory.validationBuffer, quantityLayout: exactHistory.quantityLayout,
+        quantities: Object.freeze({ quantityBuffer: exactHistory.quantities.quantityBuffer,
+          original: exactHistory.quantities.original, validationBuffer: exactHistory.quantities.validationBuffer,
+          projectionBuffer: exactHistory.quantities.projectionBuffer }), stateBuffer: exactHistory.stateBuffer,
+        thermoBuffer: exactHistory.thermoBuffer, mechanicsBuffer: exactHistory.mechanicsBuffer,
+        outStateBuffer: exactHistory.outStateBuffer, outMechanicsBuffer: exactHistory.outMechanicsBuffer
+      }));
+      if (exactQuantities) exactG2pQuantityOutputs.set(reconstruction, Object.freeze({
+        quantityBuffer: exactQuantities.quantityBuffer, quantityLayout: exactQuantities.quantityLayout,
+        format: exactQuantities.format, validationBuffer: exactQuantities.validationBuffer,
+        projectionBuffer: exactQuantities.projectionBuffer
+      }));
       reconstruction.stateBuffer = outStateBuffer;
       reconstruction.mechanicsBuffer = outMechanicsBuffer;
       reconstruction.stateBufferByteLength = stateByteLength;
@@ -5118,6 +5230,15 @@ async function runMlsMpmG2pWebGpuImpl({
         mechanics = false
       } = {}) => {
         if (state !== true && mechanics !== true) return false;
+        if (exactHistory) {
+          for (const buffer of exactHistory.retainedBuffers) buffer.destroy();
+          exactHistorySource.release();
+        }
+        if (exactQuantities) {
+          exactQuantities.quantityBuffer.destroy();
+          exactQuantities.validationBuffer.destroy();
+          exactQuantities.projectionBuffer.destroy();
+        }
         const origin = fusedG2pOrigins.get(reconstruction);
         if (origin && ![
           'producer',
@@ -5450,6 +5571,15 @@ async function runMlsMpmG2pWebGpuImpl({
       } else {
         allocationLedger.delete(outStateBuffer);
         allocationLedger.delete(outMechanicsBuffer);
+        if (exactHistory) {
+          for (const buffer of exactHistory.retainedBuffers) allocationLedger.delete(buffer);
+          allocationLedger.delete(exactHistoryPin);
+        }
+        if (exactQuantities) {
+          allocationLedger.delete(exactQuantities.quantityBuffer);
+          allocationLedger.delete(exactQuantities.validationBuffer);
+          allocationLedger.delete(exactQuantities.projectionBuffer);
+        }
       }
       if (ownsSchroederAuthorityBuffer) {
         destroyOwnedAllocation(schroederAuthorityBuffer);
@@ -5935,6 +6065,7 @@ function watchDeviceLost(device, onDeviceLost) {
 }
 
 export async function runMlsMpmG2pWithOptionalWebGpu({
+  mechanicsMaterialTable = null,
   sphParticleState,
   mlsMpmParticleState,
   gridUpdate,
@@ -5973,6 +6104,8 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   webGpuRunner = runMlsMpmG2pWebGpu,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
+  const mechanicsProvenance = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload)
+    ? snapshotExactG2pMechanicsTable(mechanicsMaterialTable) : null;
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const canonicalSpatialIntent = canonicalSpatialRequired === true
     || schroederSpatialEpochGeneration?.selected === true;
@@ -6048,7 +6181,9 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       const reference = getCpuReference();
       return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(deviceLossState.info), fallback: 'cpu-reference' } });
     }
+    mechanicsProvenance?.validate();
     const gpuResult = await webGpuRunner({
+      mechanicsMaterialTable,
       device: resolvedDeviceResult.device,
       sphParticleState,
       mlsMpmParticleState,

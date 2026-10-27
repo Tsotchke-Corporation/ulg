@@ -1,3 +1,6 @@
+import { deriveSphReactionStrictGateStaticBlockerFlags } from './sphReactionGpuSummary.js';
+import { createSphReactionStrictGateFinalizeParams, SPH_REACTION_STRICT_GATE_PARAMS_INDEX as EXACT_POLICY_INDEX }
+  from '../../../ulg-gpu-abi/src/sphReactionStrictGate.js';
 import { acquireSphExactReactionSourceSelectionRead } from './sphExactReactionSourceGpu.js';
 import { createSphExactReactionRoutingWgsl, sphExactReactionRoutingLayout }
   from './sphExactReactionRoutingWgsl.js';
@@ -8,6 +11,23 @@ import { runSphExactReactionOutputCandidateWebGpu } from './sphExactReactionOutp
 
 export const SPH_EXACT_REACTION_ROUTING_SCHEMA = 'peercompute.ulg.exact-reaction-routing-candidate.v1';
 const RECORDS = new WeakMap();
+const DEVICE_STATES = new WeakMap();
+
+function routingDeviceState(device) {
+  let state = DEVICE_STATES.get(device);
+  if (state) return state;
+  state = { lost: false, owners: new Set() };
+  DEVICE_STATES.set(device, state);
+  try {
+    const lost = device.lost;
+    if (lost?.then) Promise.resolve(lost).then(() => {
+      state.lost = true;
+      for (const retire of [...state.owners]) retire();
+      state.owners.clear();
+    }, () => {});
+  } catch { /* A failed observer does not confirm retirement. */ }
+  return state;
+}
 
 /** The reaction runner's exact routing branch. It holds the original packet
  * before any compilation await. Rows retain their parent/term quantity bases;
@@ -17,7 +37,31 @@ export async function runSphExactReactionRoutingCandidateWebGpu({ selection, exp
   const parent = acquireSphExactReactionSourceSelectionRead(selection, expected);
   const { result: selected, source, compiled } = parent.view;
   const device = source.device, format = selected.format;
+  let strictGatePolicy;
+  const originalExpected = Object.freeze({ ...Object.fromEntries(Object.entries(
+    Object.getOwnPropertyDescriptors(expected)).map(([key, descriptor]) => [key, descriptor.value])),
+    device, sourceSelection: selected, particleCount: source.particleCount, format,
+    reactionTable: parent.view.reactionTable, thermalMaterialTable: parent.view.thermalMaterialTable,
+    reactionDiscoveryProposal: parent.view.reactionDiscoveryProposal,
+    sourceSphUpload: source.sourceSphUpload, sourceMlsUpload: source.sourceMlsUpload,
+    sphParticleUpload: source.sourceSphUpload, mlsMpmParticleUpload: source.sourceMlsUpload,
+    transaction: source.transaction, generation: source.generation,
+    dtSeconds: source.dtSeconds, encodedDtBits: source.encodedDtBits,
+    stateBuffer: source.stateBuffer, thermoBuffer: source.thermoBuffer, mechanicsBuffer: source.mechanicsBuffer,
+    sourceStateBuffer: source.stateBuffer, sourceThermoBuffer: source.thermoBuffer,
+    sourceMechanicsBuffer: source.mechanicsBuffer });
+  const deviceState = routingDeviceState(device);
   const owned = new Set();
+  const reads = new Set(), drainWaiters = new Set();
+  const dropRead = read => {
+    if (!reads.delete(read)) return;
+    if (!reads.size) {
+      for (const resolve of drainWaiters) resolve();
+      drainWaiters.clear();
+    }
+  };
+  const drainReads = () => !reads.size || deviceState.lost ? Promise.resolve()
+    : new Promise(resolve => drainWaiters.add(resolve));
   let result, closed = false, submitted = false, confirmed = false, completion = null;
   const release = () => {
     if (completion) return completion;
@@ -30,22 +74,53 @@ export async function runSphExactReactionRoutingCandidateWebGpu({ selection, exp
       }
       if (errors.length) throw new AggregateError(errors, 'Exact reaction routing cleanup failed');
     };
-    const retired = submitted && !confirmed ? deferConfirmedSubmittedWorkCleanup(device, cleanup)
-      : Promise.resolve().then(() => { cleanup(); return true; });
-    completion = retired.then(async queueCompleted => {
+    completion = drainReads().then(() => submitted && !confirmed && !deviceState.lost
+      ? deferConfirmedSubmittedWorkCleanup(device, cleanup)
+      : Promise.resolve().then(() => { cleanup(); return !deviceState.lost; }))
+    .then(async queueCompleted => {
       const sourceCompleted = await parent.release();
       if (result) RECORDS.delete(result);
-      return queueCompleted && sourceCompleted;
+      deviceState.owners.delete(retireAfterLoss);
+      return queueCompleted && sourceCompleted && !deviceState.lost;
     }).catch(error => { completion = null; throw error; });
     return completion;
   };
+  const retireAfterLoss = () => {
+    for (const read of [...reads]) read.retireAfterLoss();
+    void release().catch(() => {});
+  };
+  const validateRetained = () => {
+    if (deviceState.lost) throw new TypeError('Exact reaction routing device was lost');
+    parent.validate();
+    if (deviceState.lost) throw new TypeError('Exact reaction routing device was lost');
+    return true;
+  };
   const validate = () => {
     if (closed) throw new TypeError('Exact reaction routing candidate was released');
-    parent.validate();
+    validateRetained();
     if (closed) throw new TypeError('Exact reaction routing candidate was released');
     return true;
   };
   try {
+  // Current reaction entry has no tolerance option. Capture its ORIGINAL default
+  // policy before the first await; this is policy data, not a completed gate.
+  // Caller-customizable future policy must be owned by that original entry.
+  parent.validate();
+  const originalPolicyWords = createSphReactionStrictGateFinalizeParams({
+    reactionCount: parent.view.reactionTable.reactionCount,
+    atomTermCount: parent.view.reactionTable.atomTermCount,
+    staticBlockerFlags: deriveSphReactionStrictGateStaticBlockerFlags(parent.view.reactionTable)
+  });
+  parent.validate();
+  strictGatePolicy = Object.freeze({
+    schema: 'peercompute.ulg.exact-reaction-original-default-policy.v1',
+    reactionTable: parent.view.reactionTable,
+    atomToleranceBits: originalPolicyWords[EXACT_POLICY_INDEX.atomResidualToleranceMol],
+    chargeToleranceBits: originalPolicyWords[EXACT_POLICY_INDEX.chargeResidualToleranceMol],
+    staticBlockerFlags: originalPolicyWords[EXACT_POLICY_INDEX.staticBlockerFlags],
+    gateCompleted: false,
+    get paramsWords() { return originalPolicyWords.slice(); }
+  });
     const layout = sphExactReactionRoutingLayout(format, { productCapacity: selected.caloricProductCapacity });
     const metadataStride = 1 + layout.productCapacity;
     const orderWords = new Uint32Array(compiled.length * metadataStride).fill(0xffffffff);
@@ -99,7 +174,38 @@ export async function runSphExactReactionRoutingCandidateWebGpu({ selection, exp
       status: 'webgpu-exact-reaction-routing-candidate', outputBuffer, outputByteLength,
       particleCount: selected.particleCount, format, layout, sourceSelection: selected,
       physicalOutput, physicalPublicationAdmitted: false, release });
-    RECORDS.set(result, { result, parent, validate });
+    const view = Object.freeze({ result, source: parent.view, strictGatePolicy });
+    const acquireRead = () => {
+      validate();
+      let released = false, retirement = null;
+      const read = { retireAfterLoss() {
+        released = true; retirement ??= Promise.resolve(false); dropRead(read);
+      } };
+      reads.add(read);
+      const validateRead = () => {
+        if (released) throw new TypeError('Exact reaction routing read was released');
+        validateRetained();
+        if (released) throw new TypeError('Exact reaction routing read was released');
+        return view;
+      };
+      return Object.freeze({ view, validate: validateRead,
+        markDerivedBuffers(buffers, options) {
+          validateRead(); parent.markDerivedBuffers(buffers, options); validateRead();
+        },
+        release() {
+          if (retirement) return retirement;
+          released = true;
+          retirement = deviceState.lost
+            ? Promise.resolve().then(() => { dropRead(read); return false; })
+            : deferConfirmedSubmittedWorkCleanup(device, () => dropRead(read))
+              .then(completed => completed && !deviceState.lost);
+          return retirement;
+        },
+        get released() { return released || deviceState.lost; }
+      });
+    };
+    RECORDS.set(result, { result, parent, validate, originalExpected, acquireRead });
+    deviceState.owners.add(retireAfterLoss);
     return result;
   } catch (error) {
     error.exactReactionRoutingCleanupCompletion = release();
@@ -116,4 +222,24 @@ export function resolveSphExactReactionRoutingCandidate(result, { device } = {})
   }
   record.validate();
   return Object.freeze({ result, source: record.parent.view });
+}
+
+/** Retain the original routing and physical-output allocations across consumer
+ * awaits and owner close. This read grants no placement or publication right. */
+export function acquireSphExactReactionRoutingRead(result, expected = {}) {
+  const record = RECORDS.get(result);
+  if (!record) throw new TypeError('Original exact reaction routing candidate required');
+  const descriptors = Object.getOwnPropertyDescriptors(expected);
+  if (!Object.hasOwn(descriptors.device ?? {}, 'value')
+      || descriptors.device.value !== record.originalExpected.device) {
+    throw new TypeError('Exact reaction routing read requires the original device');
+  }
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key];
+    if (!Object.hasOwn(record.originalExpected, key) || !Object.hasOwn(descriptor, 'value')
+        || !Object.is(descriptor.value, record.originalExpected[key])) {
+      throw new TypeError(`Exact reaction routing read changed original ${String(key)}`);
+    }
+  }
+  return record.acquireRead();
 }

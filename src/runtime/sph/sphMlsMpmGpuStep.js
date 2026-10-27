@@ -3,9 +3,12 @@ import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass
   runMlsMpmGpuParticleBufferSetCleanupAfterBorrows, transferMlsMpmGpuAuxiliaryRetirementOwnership,
   acquireSphParticleExactMassRead,
   releaseSphParticleExactMassRead, forkSphParticleExactMassRead,
-  validateSphParticleExactMassRead, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
+  validateSphParticleExactMassRead, markSphExactMassDerivedBuffers,
+  markSphExactMassHistoryDerivedBuffers } from './sphGpuBuffers.js';
 import { releaseMlsMpmPostMechanicsExactMassCapture,
   retireMlsMpmPostMechanicsClosureOutputsAfter } from './sphMlsMpmPostMechanicsClosure.js';
+import { acquireSphAerosolSpatialParcelRead } from './sphAerosolSpatialBinding.js';
+import { releaseSphAerosolParcelRead } from './sphAerosolParcelGpu.js';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
@@ -160,7 +163,7 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   createSphGpuTimestampProfiler,
   encodeSphGpuTimestampMarkerPass
@@ -251,6 +254,9 @@ import {
   ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA as ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA_EXACT,
   describeSphSpatialGasPressureAuthority,
   isExactSphSpatialGasPressureAuthoritySource,
+  resolveSphSpatialVaporAerosolProducerRead,
+  forkSphSpatialVaporAerosolProducerRead,
+  releaseSphSpatialVaporAerosolProducerRead,
   releaseSphSpatialGasLedgerEosAfterQueue,
   runSphSpatialGasLedgerEosRetainedWebGpu
 } from './sphSpatialGasLedgerEosGpu.js';
@@ -261,6 +267,7 @@ import {
   MLS_MPM_PARTICLE_SEPARATION_RELAXATION_DEFAULT,
   MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT,
   ULG_MLS_MPM_G2P_PARTICLE_SCALE_STABILITY_SCHEMA,
+  acquireMlsMpmG2pExactMassCapture,
   destroyRetainedMlsMpmG2pOutputComponents,
   encodeMlsMpmParticleSeparationPasses,
   maxSeparationRestDistanceM,
@@ -323,10 +330,13 @@ import {
 } from './sphMlsMpmPostMechanicsClosure.js';
 import {
   createResidentProductMassHandle,
+  resolveResidentProductMassExactHistory,
+  resolveResidentProductMassExactHistoryProvenance,
   mergeResidentGasSpeciesLedgers,
   SPH_GPU_REACTION_PRODUCT_PLACEMENT_SUMMARY_FLOATS,
   strictReactionGateIsClassified
 } from './sphReactionGpuSummary.js';
+import { createSphExactResidentProductHistoryAppendWgsl } from './sphExactResidentProductHistoryWgsl.js';
 import {
   residentProductMassDevice,
   residentProductMassMatchesDevice,
@@ -381,7 +391,8 @@ import {
   isSubmittedSchroederSpatialReactionProductPlacementArtifact
 } from './schroederSpatialReactionProductPlacementGpu.js';
 import {
-  validateSchroederSpatialReactionPlacementPositionEpochFloor
+  validateSchroederSpatialReactionPlacementPositionEpochFloor,
+  schroederSpatialReactionPlacementInventoryLineageMatches
 } from './schroederSpatialReactionPlacementEpochGpu.js';
 import {
   runSchroederSpatialThermalProposalWebGpu
@@ -30694,6 +30705,33 @@ const RESIDENT_PRODUCT_HISTORY_GPU_COUNT_RECORDS_PER_BANK =
 const residentProductHistoryArenaPools = new WeakMap();
 const residentProductHistoryArenaHandleRecords = new WeakMap();
 
+function exactHistoryLayoutKey(layout) {
+  return layout ? [layout.schema,layout.format.wordCount,layout.format.quantumExponent,layout.rationalWordCount,
+    layout.rowWords].join(':') : null;
+}
+
+export function resolveResidentProductExactHistoryLayout(handle, { device } = {}) {
+  const record = residentProductHistoryArenaHandleRecords.get(handle);
+  if (record?.exactHistoryLayout) {
+    if (!residentProductHistoryArenaRecordMatchesHandle(record,handle,device)
+        || handle.exactProductHistoryLayout !== record.exactHistoryLayout
+        || handle.exactProductHistoryProvenance !== record.exactHistoryProvenance
+        || !resolveResidentProductEventCountAuthority(handle,device)) {
+      throw new TypeError('Exact history arena requires its original live view and count authority');
+    }
+    return record.exactHistoryLayout;
+  }
+  const layout = resolveResidentProductMassExactHistory(handle,{device});
+  if (layout) return layout;
+  if (handle && 'exactProductHistoryLayout' in handle) throw new TypeError('Exact history requires an original producer or arena owner');
+  return null;
+}
+
+function exactHistoryProvenanceForMerge(handle,device) {
+  return residentProductHistoryArenaHandleRecords.get(handle)?.exactHistoryProvenance
+    ?? resolveResidentProductMassExactHistoryProvenance(handle,{device});
+}
+
 function residentProductHistoryArenaError(message, code, extra = {}) {
   const error = new Error(message);
   error.code = code;
@@ -30871,7 +30909,7 @@ function residentProductHistoryArenaPool(device) {
   if (device?.lost && typeof device.lost.then === 'function') {
     Promise.resolve(device.lost)
       .then(() => destroyResidentProductHistoryArenaPool(pool))
-      .catch(() => destroyResidentProductHistoryArenaPool(pool));
+      .catch(() => {}); // A rejected notification is not confirmed device loss.
   }
   return pool;
 }
@@ -30961,7 +30999,7 @@ function ensureResidentProductHistoryGpuCountRecords(slot, {
         slot.pool.device.createBuffer({
           label:
             `ulg-sph-resident-product-history-arena-${slot.slotId}-append-params`,
-          size: 48,
+          size: 80,
           usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
         }),
         slot.pool.device
@@ -31107,7 +31145,8 @@ function releaseResidentProductHistoryGpuCountRecord(record) {
 
 function beginResidentProductHistoryArenaSlotLease(slot, strideBytes, {
   bufferCreated = false,
-  bufferResized = false
+  bufferResized = false,
+  exactHistoryLayout = null
 } = {}) {
   if (!slot || slot.destroyed || slot.leased || slot.pool.destroyed) {
     throw residentProductHistoryArenaError(
@@ -31118,6 +31157,7 @@ function beginResidentProductHistoryArenaSlotLease(slot, strideBytes, {
   slot.leased = true;
   slot.leaseSerial += 1;
   slot.strideBytes = strideBytes;
+  slot.exactHistoryLayout = exactHistoryLayout;
   slot.viewCount = 0;
   slot.activeBorrowCount = 0;
   slot.activeOperationCount = 0;
@@ -31183,7 +31223,8 @@ function scheduleResidentProductHistoryArenaSlotRelease(slot) {
 async function acquireResidentProductHistoryArenaSlot(device, {
   requiredBytes,
   strideBytes,
-  excludeSlots = []
+  excludeSlots = [],
+  exactHistoryLayout = null
 } = {}) {
   const pool = residentProductHistoryArenaPool(device);
   if (pool.destroyed) {
@@ -31200,9 +31241,10 @@ async function acquireResidentProductHistoryArenaSlot(device, {
   const reusable = pool.slots
     .filter((slot) => !excluded.has(slot) && !slot.leased)
     .sort((left, right) => left.capacityBytes - right.capacityBytes)
-    .find((slot) => slot.capacityBytes >= capacityBytes);
+    .find((slot) => slot.capacityBytes >= capacityBytes
+      && exactHistoryLayoutKey(slot.exactHistoryLayout) === exactHistoryLayoutKey(exactHistoryLayout));
   if (reusable) {
-    return beginResidentProductHistoryArenaSlotLease(reusable, strideBytes);
+    return beginResidentProductHistoryArenaSlotLease(reusable, strideBytes, { exactHistoryLayout });
   }
 
   const resizeable = pool.slots.find(
@@ -31220,7 +31262,8 @@ async function acquireResidentProductHistoryArenaSlot(device, {
     destroyResidentProductHistoryBufferOnce(pool, previousBuffer);
     return beginResidentProductHistoryArenaSlotLease(resizeable, strideBytes, {
       bufferCreated: true,
-      bufferResized: true
+      bufferResized: true,
+      exactHistoryLayout
     });
   }
 
@@ -31254,7 +31297,8 @@ async function acquireResidentProductHistoryArenaSlot(device, {
     };
     pool.slots.push(slot);
     return beginResidentProductHistoryArenaSlotLease(slot, strideBytes, {
-      bufferCreated: true
+      bufferCreated: true,
+      exactHistoryLayout
     });
   }
 
@@ -31460,7 +31504,9 @@ function attachResidentProductHistoryArenaHandle(handle, slot, {
   liveRowCountUpperBound = rowCount,
   sourceRowCounts = [],
   sourceByteLengths = [],
-  gpuCountRecord = null
+  gpuCountRecord = null,
+  exactHistoryLayout = null,
+  exactHistoryProvenance = null
 } = {}) {
   slot.nextViewOrdinal += 1;
   const token = Object.freeze({
@@ -31487,6 +31533,14 @@ function attachResidentProductHistoryArenaHandle(handle, slot, {
     sourceByteLengths: Object.freeze([...sourceByteLengths]),
     gpuCountRecord
   };
+  record.exactHistoryLayout = exactHistoryLayout;
+  record.exactHistoryProvenance = exactHistoryProvenance;
+  if (exactHistoryLayout) Object.defineProperty(handle,'exactProductHistoryLayout',{
+    value:exactHistoryLayout,enumerable:true
+  });
+  if (exactHistoryLayout) Object.defineProperty(handle,'exactProductHistoryProvenance',{
+    value:exactHistoryProvenance,enumerable:true
+  });
   if (
     record.liveRowCountUpperBound > record.logicalRowCount
     || (
@@ -31871,7 +31925,8 @@ export async function compactResidentProductEventBufferWebGpu({
   }
 }
 
-function residentProductMassMergeBuffer(handle) {
+function residentProductMassMergeBuffer(handle, device) {
+  const exactLayout = resolveResidentProductExactHistoryLayout(handle,{device});
   // Do not invoke an accessor that can conceal an exact buffer for the first
   // check and expose it to a later copy. Preserve the original handle itself
   // for private count/arena ownership and borrowing.
@@ -31882,7 +31937,7 @@ function residentProductMassMergeBuffer(handle) {
       if (!Object.hasOwn(descriptor, 'value')) {
         throw new TypeError('Resident product history merge requires a data productEventBuffer property');
       }
-      assertSphLegacyMassPathAllowed({ productEventBuffer: descriptor.value }, 'Resident product history merge');
+      if (!exactLayout) assertSphLegacyMassPathAllowed({ productEventBuffer: descriptor.value }, 'Resident product history merge');
       return descriptor.value;
     }
     object = Object.getPrototypeOf(object);
@@ -31973,6 +32028,40 @@ function beginResidentProductMassHandleBorrow(handle, role) {
   };
 }
 
+/** Read an original exact history owner without manufacturing a legacy event
+ * handle. The consuming producer must release this pin only after its final
+ * submitted read completes (or before submission on an encoding failure). */
+export function acquireResidentProductExactHistoryRead(handle, { device, identityBuffer = null } = {}) {
+  const layout = resolveResidentProductExactHistoryLayout(handle, { device });
+  if (!layout) throw new TypeError('Exact history consumption requires its original owner');
+  const buffer = residentProductMassMergeBuffer(handle, device);
+  const descriptor = productEventLiveCountCopyDescriptor(handle, device);
+  const provenance = exactHistoryProvenanceForMerge(handle, device);
+  if (!descriptor || descriptor.rowStrideFloats !== layout.rowWords
+      || descriptor.rowCapacity * layout.rowBytes > buffer.size
+      || (identityBuffer && !schroederSpatialReactionPlacementInventoryLineageMatches(provenance?.lineage, identityBuffer))
+      || !Object.hasOwn(handle, '__ulgActiveBorrowCount')) {
+    throw new TypeError('Exact history consumption requires its complete count, storage and borrow owner');
+  }
+  const drop = beginResidentProductMassHandleBorrow(handle, 'exact history consumer');
+  let released = false;
+  const validate = () => {
+    if (released || resolveResidentProductExactHistoryLayout(handle, { device }) !== layout
+        || residentProductMassMergeBuffer(handle, device) !== buffer
+        || exactHistoryProvenanceForMerge(handle, device) !== provenance
+        || resolveResidentProductEventCountAuthority(handle, device) !== descriptor.authority) {
+      throw new TypeError('Exact history source changed or retired during consumption');
+    }
+    return true;
+  };
+  return Object.freeze({ layout, buffer, descriptor, validate,
+    async markDerivedBuffers(buffers) {
+      validate(); await markSphExactMassHistoryDerivedBuffers(handle, buffers, { device }); validate();
+    },
+    release() { if (released) return false; released = true; return drop(); }
+  });
+}
+
 function residentProductHistoryAppendParams({
   sourceARowCount,
   sourceBRowCount,
@@ -31985,9 +32074,11 @@ function residentProductHistoryAppendParams({
   parentRowCapacity,
   parentRowStrideVec4,
   nextGeneration,
-  nextSeal
+  nextSeal,
+  emittedAuthority = null,
+  emittedSourceKind = 1
 } = {}) {
-  const data = new ArrayBuffer(48);
+  const data = new ArrayBuffer(emittedAuthority ? 80 : 48);
   const view = new DataView(data);
   view.setUint32(0, sourceARowCount, true);
   view.setUint32(4, sourceBRowCount, true);
@@ -32001,6 +32092,13 @@ function residentProductHistoryAppendParams({
   view.setUint32(36, nextSeal, true);
   view.setUint32(40, parentRowCapacity, true);
   view.setUint32(44, parentRowStrideVec4, true);
+  if (emittedAuthority) {
+    view.setUint32(48,emittedAuthority.generation,true);
+    view.setUint32(52,emittedAuthority.seal,true);
+    view.setUint32(56,emittedAuthority.rowCapacity,true);
+    view.setUint32(60,emittedAuthority.rowStrideFloats/4,true);
+    view.setUint32(64,emittedSourceKind,true);
+  }
   return new Uint8Array(data);
 }
 
@@ -32017,7 +32115,10 @@ function submitResidentProductHistoryFilteredAppend({
   rowStrideFloats,
   reuseParentPrefix = false,
   sourceAUsesParentCount = false,
-  clearDestination = false
+  clearDestination = false,
+  exactHistoryLayout = null,
+  emittedAuthority = null,
+  emittedSourceKind = 1
 } = {}) {
   if (
     !slot?.gpuCountControlBuffers?.length
@@ -32048,15 +32149,17 @@ function submitResidentProductHistoryFilteredAppend({
       parentRowCapacity: parentAuthority.rowCapacity,
       parentRowStrideVec4: parentAuthority.rowStrideFloats / 4,
       nextGeneration: nextRecord.generation,
-      nextSeal: nextRecord.seal
+      nextSeal: nextRecord.seal,
+      emittedAuthority,
+      emittedSourceKind
     })
   );
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(
     device,
     {
-      cacheKey: 'ulg-sph-resident-product-history-filtered-append-v1',
+      cacheKey: 'ulg-sph-resident-product-history-filtered-append-v1'+(exactHistoryLayout?':exact:'+exactHistoryLayoutKey(exactHistoryLayout):''),
       label: 'ulg-sph-resident-product-history-filtered-append',
-      code: sphResidentProductHistoryFilteredAppendWgsl,
+      code: exactHistoryLayout ? createSphExactResidentProductHistoryAppendWgsl(exactHistoryLayout) : sphResidentProductHistoryFilteredAppendWgsl,
       entryPoint: 'append_filtered_sources',
       bindings: [
         computeBufferBinding(0, 'storage'),
@@ -32064,7 +32167,8 @@ function submitResidentProductHistoryFilteredAppend({
         computeBufferBinding(2, 'read-only-storage'),
         computeBufferBinding(3, 'read-only-storage'),
         computeBufferBinding(4, 'storage'),
-        computeBufferBinding(5, 'uniform')
+        computeBufferBinding(5, 'uniform'),
+        ...(exactHistoryLayout ? [computeBufferBinding(6,'read-only-storage')] : [])
       ]
     }
   );
@@ -32090,7 +32194,9 @@ function submitResidentProductHistoryFilteredAppend({
           size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES
         }
       },
-      { binding: 5, resource: { buffer: slot.gpuCountParamsBuffer } }
+      { binding: 5, resource: { buffer: slot.gpuCountParamsBuffer } },
+      ...(exactHistoryLayout ? [{ binding:6,resource:{buffer:emittedAuthority.controlBuffer,
+        offset:emittedAuthority.controlOffsetBytes,size:SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES}}] : [])
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -32111,6 +32217,169 @@ function submitResidentProductHistoryFilteredAppend({
       + (sourceBRowCount > 0 ? 1 : 0),
     destinationCleared: clearDestination === true
   };
+}
+
+const residentProductG2pHistoryPublications = new WeakMap();
+const residentProductVaporHistoryPublications = new WeakMap();
+
+export function resolveResidentProductG2pHistoryPublication(handle, { device, g2pResult, inputResidentProductMass } = {}) {
+  const origin = residentProductG2pHistoryPublications.get(handle);
+  if (!origin || origin.device !== device || origin.g2pResult !== g2pResult
+      || origin.inputResidentProductMass !== inputResidentProductMass
+      || resolveResidentProductExactHistoryLayout(handle, { device }) !== origin.layout
+      || exactHistoryProvenanceForMerge(handle, device) !== origin.provenance) {
+    throw new TypeError('History motion publication requires its original G2P producer and arena owner');
+  }
+  return origin;
+}
+
+// Motion replaces the physical/quantity records of the same reaction lineage.
+// Reuse the original arena's authenticated prefix-copy/count transaction with
+// no emitted rows; never register a caller-supplied buffer as a history owner.
+export async function publishResidentProductG2pHistoryWebGpu({ device, g2pResult,
+  sphParticleUpload, inputResidentProductMass } = {}) {
+  const capture = acquireMlsMpmG2pExactMassCapture(g2pResult, { device, sphParticleUpload });
+  return publishResidentProductUpdatedHistoryWebGpu({ device, capture, publicationKind: 'g2p',
+    origins: residentProductG2pHistoryPublications, origin: { g2pResult },
+    resolveHistory() {
+      const history = capture.history;
+      if (!history || history.sourceHandle !== inputResidentProductMass) {
+        throw new TypeError('History motion publication must consume G2P for its exact original input history');
+      }
+      return history;
+    } });
+}
+
+export function resolveResidentProductVaporHistoryPublication(handle, { device, producerRead,
+  inputResidentProductMass } = {}) {
+  const producer = resolveSphSpatialVaporAerosolProducerRead(producerRead, { device });
+  const origin = residentProductVaporHistoryPublications.get(handle);
+  if (!origin || origin.device !== device || origin.producer !== producer
+      || origin.inputResidentProductMass !== inputResidentProductMass
+      || producer.sourceHistory !== inputResidentProductMass
+      || resolveResidentProductExactHistoryLayout(handle, { device }) !== origin.layout
+      || exactHistoryProvenanceForMerge(handle, device) !== origin.provenance) {
+    throw new TypeError('History exchange publication requires its original producer and arena owner');
+  }
+  return origin;
+}
+
+/** The existing arena issues the new count for the same reaction lineage.
+ * The exchange supplies updated complete rows, never a replacement count or
+ * caller-authored provenance. This does not commit the enclosing continuation.
+ */
+export async function publishResidentProductVaporHistoryWebGpu({ device, producerRead,
+  inputResidentProductMass } = {}) {
+  const held = forkSphSpatialVaporAerosolProducerRead(producerRead, { device });
+  let historyRead = null;
+  const capture = {
+    validate() { return resolveSphSpatialVaporAerosolProducerRead(held, { device }); },
+    release() { historyRead?.release(); releaseSphSpatialVaporAerosolProducerRead(held); }
+  };
+  return publishResidentProductUpdatedHistoryWebGpu({ device, capture, publicationKind: 'vapor-exchange',
+    origins: residentProductVaporHistoryPublications, origin: { producer: capture.validate() },
+    resolveHistory() {
+      const producer = capture.validate();
+      if (!inputResidentProductMass || producer.sourceHistory !== inputResidentProductMass) {
+        throw new TypeError('History exchange publication requires the complete original input history');
+      }
+      historyRead = acquireResidentProductExactHistoryRead(inputResidentProductMass, { device });
+      if (producer.endpoints.historyLayout !== historyRead.layout
+          || producer.endpoints.historyBuffer?.size !== historyRead.descriptor.rowCapacity * historyRead.layout.rowBytes) {
+        throw new TypeError('History exchange output must cover the complete original history');
+      }
+      return { sourceHandle: inputResidentProductMass, source: historyRead,
+        layout: historyRead.layout, descriptor: historyRead.descriptor, buffer: producer.endpoints.historyBuffer };
+    } });
+}
+
+// Shared original arena/count transaction for an authenticated updated producer.
+// Only the wrappers above construct this private input; no buffer registration
+// entry point is exposed to a caller.
+async function publishResidentProductUpdatedHistoryWebGpu({ device, capture, resolveHistory,
+  publicationKind, origins, origin }) {
+  let slot = null, countRecord = null, operationHeld = false, submitted = false, published = false;
+  let resolveCleanup;
+  const cleanupCompletion = new Promise(resolve => { resolveCleanup = resolve; });
+  try {
+    const history = resolveHistory();
+    const source = history.sourceHandle, layout = history.layout, descriptor = history.descriptor;
+    const sourceRecord = requireRetainedProductHistoryArenaRecord(source, device, `${publicationKind} history source`);
+    const provenance = exactHistoryProvenanceForMerge(source, device);
+    const validate = () => {
+      capture.validate(); history.source.validate();
+      if (exactHistoryProvenanceForMerge(source, device) !== provenance
+          || resolveResidentProductExactHistoryLayout(source, { device }) !== layout) {
+        throw new TypeError('Updated history lineage changed during publication');
+      }
+    };
+    validate();
+    slot = await acquireResidentProductHistoryArenaSlot(device, {
+      requiredBytes: descriptor.rowCapacity * layout.rowBytes, strideBytes: layout.rowBytes,
+      excludeSlots: sourceRecord ? [sourceRecord.slot] : [], exactHistoryLayout: layout });
+    slot.activeOperationCount++; operationHeld = true;
+    validate();
+    await history.source.markDerivedBuffers([slot.buffer]); validate();
+    const rowCapacity = slot.capacityBytes / layout.rowBytes;
+    countRecord = reserveResidentProductHistoryGpuCountRecord(slot, {
+      rowCapacity, rowStrideFloats: layout.rowWords, avoidControlBuffer: descriptor.controlBuffer });
+    validate();
+    submitted = true; // A throwing submit may already have queued the copy.
+    submitResidentProductHistoryFilteredAppend({ device, slot, parentAuthority: descriptor,
+      nextRecord: countRecord, sourceABuffer: history.buffer, sourceARowCount: descriptor.rowCapacity,
+      sourceBBuffer: history.buffer, sourceBRowCount: 0, rowCapacity, rowStrideFloats: layout.rowWords,
+      sourceAUsesParentCount: true, clearDestination: true, exactHistoryLayout: layout,
+      emittedAuthority: descriptor, emittedSourceKind: 0 });
+    validate();
+    const sourceRowCounts = sourceRecord?.sourceRowCounts ?? residentProductMassSourceRowCounts(source);
+    const sourceByteLengths = sourceRecord?.sourceByteLengths ?? residentProductMassSourceByteLengths(source);
+    const liveBound = Math.min(sourceRecord?.liveRowCountUpperBound ?? descriptor.rowCapacity, rowCapacity);
+    // Preserve only enumerable data properties; never invoke caller-added
+    // accessors while constructing a successor from the authentic source.
+    const metadata = Object.fromEntries(Object.entries(Object.getOwnPropertyDescriptors(source))
+      .filter(([, d]) => d.enumerable && Object.hasOwn(d, 'value')).map(([key, d]) => [key, d.value]));
+    let destroyed = false;
+    const handle = tagResidentProductMassDevice({ ...metadata,
+      status: `resident-product-mass-${publicationKind}-updated-gpu-resident`,
+      source: `original-${publicationKind}-history-arena-publication`,
+      productEventBuffer: slot.buffer, productEventBufferRetained: true,
+      productEventBufferByteLength: slot.capacityBytes, productEventBufferCapacityByteLength: slot.capacityBytes,
+      productEventRowCount: rowCapacity, productEventLiveRowCountUpperBound: liveBound,
+      productEventStrideFloats: layout.rowWords, productEventStrideBytes: layout.rowBytes,
+      productEventActiveEventCount: null,
+      productEventHistoryArenaSlotId: slot.slotId, productEventHistoryArenaCapacityByteLength: slot.capacityBytes,
+      productEventHistoryArenaSlotCount: slot.pool.slots.filter(value => !value.destroyed).length,
+      productEventHistoryArenaStatus: 'resident-product-history-arena-gpu-commit-pending',
+      productEventGpuCommitStatus: 'gpu-conditioned-publication-commit-pending',
+      productEventGpuFilteredAppend: true, productEventGpuFilteredAppendPassCount: 1,
+      productEventGpuFilteredAppendDestinationCleared: true,
+      productEventHistoryArenaWarmReuse: false,
+      productEventMergeQueueCompletionStatus: 'queue-submitted-same-device-ordering',
+      productEventMergeQueueCompletionMethod: 'queue.submit-same-queue-ordering',
+      productEventMergeHostFenceAwaited: false,
+      destroyResidentProductMassBuffers() {
+        if (destroyed) return false; destroyed = true;
+        return releaseResidentProductHistoryArenaHandle(handle);
+      }
+    }, device);
+    attachResidentProductHistoryArenaHandle(handle, slot, { rowCount: rowCapacity, byteLength: slot.capacityBytes,
+      strideFloats: layout.rowWords, strideBytes: layout.rowBytes, liveRowCountUpperBound: liveBound,
+      sourceRowCounts, sourceByteLengths, gpuCountRecord: countRecord,
+      exactHistoryLayout: layout, exactHistoryProvenance: provenance });
+    published = true;
+    origins.set(handle, Object.freeze({ device, ...origin,
+      inputResidentProductMass: source, layout, provenance, cleanupCompletion }));
+    return handle;
+  } catch (error) {
+    Object.defineProperty(error, 'exactHistoryPublicationCleanupCompletion', { value: cleanupCompletion, configurable: true });
+    throw error;
+  } finally {
+    if (!published && countRecord) releaseResidentProductHistoryGpuCountRecord(countRecord);
+    if (operationHeld) releaseResidentProductHistoryArenaSlotOperation(slot);
+    const cleanup = () => { capture.release(); resolveCleanup(true); };
+    if (submitted) void deferConfirmedSubmittedWorkCleanup(device, cleanup).catch(() => {});
+    else cleanup();
+  }
 }
 
 const postMechanicsHistoryMergeCaptures = new WeakMap();
@@ -32143,7 +32412,7 @@ export async function mergeResidentProductMassBuffersWebGpu(options = {}) {
       'productEventStrideFloats', 'productEventStrideBytes', 'reactionPlacementRolledBack',
       'reactionPlacementTransactionOutcome'
     ].map((key) => [key, key === 'productEventBuffer'
-      ? residentProductMassMergeBuffer(handle) : handle?.[key]]))) })));
+      ? residentProductMassMergeBuffer(handle,device) : handle?.[key]]))) })));
   const singleSource = inputResidentProductMass || emittedResidentProductMass;
   const copyRawSource = Boolean(singleSource && (!inputResidentProductMass || !emittedResidentProductMass)
     && !residentProductHistoryArenaHandleRecords.has(singleSource));
@@ -32185,13 +32454,33 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
   allowHostCompactionObservation = true,
   forceCapturedSourceCopy = false
 } = {}) {
+  const exactLayouts = [inputResidentProductMass,emittedResidentProductMass].map(handle =>
+    resolveResidentProductExactHistoryLayout(handle,{device}));
+  const exactHistoryLayout = exactLayouts.find(Boolean) ?? null;
+  const exactHistorySource = exactLayouts[0] ? inputResidentProductMass : emittedResidentProductMass;
+  let exactHistoryProvenance = null;
+  if (exactHistoryLayout) {
+    if ([inputResidentProductMass,emittedResidentProductMass].some((handle,i)=>handle
+      && exactHistoryLayoutKey(exactLayouts[i]) !== exactHistoryLayoutKey(exactHistoryLayout))) {
+      throw new TypeError('Exact product history cannot merge with legacy or differently formatted inventory');
+    }
+    const input = inputResidentProductMass ? exactHistoryProvenanceForMerge(inputResidentProductMass,device) : null;
+    const emitted = emittedResidentProductMass ? exactHistoryProvenanceForMerge(emittedResidentProductMass,device) : null;
+    if (input && emitted && inputResidentProductMass !== emittedResidentProductMass
+        && (input.lineage !== emitted.lineage || input.last >= emitted.first)) {
+      throw new TypeError('Exact product history cannot double-count overlapping or unrelated placement lineages');
+    }
+    exactHistoryProvenance = input && emitted ? Object.freeze({lineage:input.lineage,first:input.first,last:emitted.last}) : (input ?? emitted);
+    allowHostCompactionObservation = false;
+  }
+  let emptyInternalSource = null;
   const sourceBuffers = new Map();
   for (const source of [inputResidentProductMass, emittedResidentProductMass]) {
-    if (source && !sourceBuffers.has(source)) sourceBuffers.set(source, residentProductMassMergeBuffer(source));
+    if (source && !sourceBuffers.has(source)) sourceBuffers.set(source, residentProductMassMergeBuffer(source,device));
   }
   const validateSourceBuffers = () => {
     for (const [source, buffer] of sourceBuffers) {
-      if (residentProductMassMergeBuffer(source) !== buffer) {
+      if (source !== emptyInternalSource && residentProductMassMergeBuffer(source,device) !== buffer) {
         throw residentProductHistoryArenaError(
           'resident product-history source buffer changed while merge was pending',
           'ERR_SPH_PRODUCT_HISTORY_SOURCE_BUFFER_CHANGED'
@@ -32292,6 +32581,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       unplacedProductMassKg: 0,
       unplacedGasProductMassKg: 0
     };
+    emptyInternalSource = inputResidentProductMass;
     sourceBuffers.set(inputResidentProductMass, sourceBuffers.get(source));
     if (forceCapturedSourceCopy && singleSourceGpuCountAuthority) {
       // Keep the existing GPU-counted history in the parent lane. The normal
@@ -32401,7 +32691,7 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       'ERR_SPH_PRODUCT_HISTORY_GPU_COUNT_AUTHORITY_INVALID'
     );
   }
-  if (emittedGpuCountAuthority) {
+  if (emittedGpuCountAuthority && !exactHistoryLayout) {
     throw residentProductHistoryArenaError(
       'resident product-history merge does not yet accept a GPU-count history as its emitted generation',
       'ERR_SPH_PRODUCT_HISTORY_GPU_COUNT_EMITTED_SOURCE_UNSUPPORTED'
@@ -32649,7 +32939,8 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
       mergedSlot = await acquireResidentProductHistoryArenaSlot(device, {
         requiredBytes: arenaRequiredBytes,
         strideBytes,
-        excludeSlots: inputArenaRecord ? [inputArenaRecord.slot] : []
+        excludeSlots: inputArenaRecord ? [inputArenaRecord.slot] : [],
+        exactHistoryLayout
       });
       mergedSlot.activeOperationCount += 1;
       mergedSlotOperationHeld = true;
@@ -32682,6 +32973,9 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
     // Arena acquisition may await. Raw legacy handles have no private arena
     // record, so they need the same identity recheck as registered histories.
     // Every bind/copy below uses the admitted snapshots, never a fresh read.
+    if (exactHistoryLayout) {
+      await markSphExactMassHistoryDerivedBuffers(exactHistorySource,[mergedSlot.buffer],{device});
+    }
     validateSourceBuffers();
     const mergedBuffer = mergedSlot.buffer;
     if (gpuCountFilteredAppendEnabled) {
@@ -32747,7 +33041,10 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
         reuseParentPrefix: appendReusesInputArena,
         sourceAUsesParentCount:
           !appendReusesInputArena && Boolean(inputGpuCountAuthority),
-        clearDestination: !appendReusesInputArena
+        clearDestination: !appendReusesInputArena,
+        exactHistoryLayout,
+        emittedAuthority: exactHistoryLayout ? (emittedGpuCountAuthority ?? inputGpuCountAuthority) : null,
+        emittedSourceKind: emittedGpuCountAuthority && !appendReusesInputArena ? 1 : 0
       });
       mergeSubmitted = true;
       finalSlot = mergedSlot;
@@ -33025,7 +33322,9 @@ async function mergeResidentProductMassBuffersWebGpuImpl({
           : finalRowCount,
       sourceRowCounts: finalSourceRowCounts,
       sourceByteLengths: finalSourceByteLengths,
-      gpuCountRecord: finalGpuCountRecord
+      gpuCountRecord: finalGpuCountRecord,
+      exactHistoryLayout,
+      exactHistoryProvenance
     });
     published = true;
     return taggedHandle;
@@ -34075,6 +34374,7 @@ export function transferMaterialPropertyBankAuxiliaryOwnership({
 }
 
 function buildNextParticleUploads({
+  postMechanicsClosure = null,
   sphParticleState,
   mlsMpmParticleState,
   sphParticleUpload,
@@ -34105,6 +34405,7 @@ function buildNextParticleUploads({
   const mechanicsRefresh = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const phaseCarrierTransfer = retainedPhaseCarrierTransferOutputBuffers(phaseCarrierTransferStep);
   const terminalParticleFamily = selectMlsMpmTerminalParticleFamily({
+    postMechanicsClosure,
     sphParticleState,
     sphParticleUpload,
     g2pReconstruction,
@@ -34261,12 +34562,16 @@ function buildNextParticleUploads({
           nextTopologyEpoch,
           nextIdentityRevision
         });
-  const particleSourceStage = phaseCarrierFamilySelected
+  const particleSourceStage = terminalParticleFamily.vaporAerosolExchangeSelected
+    ? 'vapor-aerosol-exchange'
+    : phaseCarrierFamilySelected
     ? 'sph-phase-carrier-transfer'
     : (schroederParticleStorage
       ? 'schroeder-particle-storage-materialization'
       : null);
-  const mechanicsSourceStage = schroederParticleStorage
+  const mechanicsSourceStage = terminalParticleFamily.vaporAerosolExchangeSelected
+    ? 'exchange-mechanics-refresh'
+    : schroederParticleStorage
     ? 'schroeder-particle-storage-materialization'
     : (mechanicsRefresh.mechanicsBuffer
         ? 'mechanics-constitutive-refresh'
@@ -34426,26 +34731,15 @@ function buildNextParticleUploads({
       fullPhysicsValidation: false
     }
   };
-  if (!sphDispersedMediumOpticsAdvertised(
+  if (replaceDispersedMediumOptics !== true && !sphDispersedMediumOpticsAdvertised(
     nextParticleUploads.sphParticleUpload
   )) {
-    const lifecycleInstalled =
-      ensureSphGpuParticleBufferSetBorrowLifecycle(
-        nextParticleUploads.sphParticleUpload
-      );
-    // A sidecar-free legacy continuation has no child to borrow, transfer, or
-    // retire. It may remain lifecycle-inert. A fresh producer replacement is
-    // different: adoption requires this exact terminal parent lifecycle, so
-    // fail before issuing the one-shot producer claim if it was unavailable.
-    if (
-      replaceDispersedMediumOptics === true
-      && lifecycleInstalled !== true
-    ) {
-      throw new TypeError(
-        'Resident SPH optics replacement requires the shared particle-upload borrow lifecycle'
-      );
-    }
+    ensureSphGpuParticleBufferSetBorrowLifecycle(nextParticleUploads.sphParticleUpload);
   }
+  // A fresh optics producer claim installs its authenticated parent lifecycle
+  // during adoption. Generic lifecycle registration cannot admit these new
+  // exact-mass buffers before their original closure is bound; spatial binding
+  // additionally waits for the final topology publication plan.
   let auxiliaryOwnershipTransfer = null;
   let dispersedMediumOwnershipTransfer = null;
   try {
@@ -34905,7 +35199,7 @@ async function residentStepEnvelope({
   // object rather than spreading its input, so anything not named here is
   // dropped on the way out.
   stageMechanicsTrace = null,
-  postMechanicsContinuation = null,
+  postMechanicsClosure = null,
   residentProductMergeReadbackTelemetry = createGpuReadbackTelemetryAccumulator({
     scope: 'mls-mpm-resident-product-merge'
   }),
@@ -34957,6 +35251,7 @@ async function residentStepEnvelope({
     hostQueueFenceCount: 0
   })
 }) {
+  const postMechanicsContinuation = postMechanicsClosure?.continuation ?? null;
   const optionalStages = [
     schroederFarForceDeltaFusion,
     schroederFarAggregateGasStateDelta,
@@ -35020,6 +35315,12 @@ async function residentStepEnvelope({
           sphParticleState,
           mlsMpmParticleState
         });
+  const terminalParticleFamily = selectMlsMpmTerminalParticleFamily({
+    postMechanicsClosure, sphParticleState, sphParticleUpload, g2pReconstruction,
+    schroederFarForceDeltaFusion, schroederParticleStorageAdoption,
+    thermalStep, reactionStep, mechanicsRefreshStep, phaseCarrierTransferStep
+  });
+  const nextUsesVaporAerosolExchange = terminalParticleFamily.vaporAerosolExchangeSelected;
   const reactionComponentMutations =
     reactionOutputComponentMutations(reactionStep);
   const reactionOutputParticleMutation = reactionComponentMutations.any;
@@ -35032,16 +35333,17 @@ async function residentStepEnvelope({
     !nextUsesPhaseCarrierTransfer
     && schroederParticleStorageAdoption?.adopted === true
   );
-  const nextUsesSchroederFarForceState = Boolean(schroederFarForceOutput.stateBuffer);
+  const nextUsesSchroederFarForceState = !nextUsesVaporAerosolExchange
+    && Boolean(schroederFarForceOutput.stateBuffer);
   const nextUsesReactionState = Boolean(
-    !nextUsesPhaseCarrierTransfer
+    !nextUsesVaporAerosolExchange && !nextUsesPhaseCarrierTransfer
     &&
     !nextUsesSchroederParticleStorageMaterialization
     && reactionComponentMutations.state
     && reactionOutput.stateBuffer
   );
   const nextUsesReactionThermo = Boolean(
-    !nextUsesPhaseCarrierTransfer
+    !nextUsesVaporAerosolExchange && !nextUsesPhaseCarrierTransfer
     &&
     !nextUsesSchroederParticleStorageMaterialization
     && reactionComponentMutations.thermo
@@ -35049,10 +35351,10 @@ async function residentStepEnvelope({
   );
   const nextUsesMechanicsRefresh = Boolean(
     !nextUsesSchroederParticleStorageMaterialization
-    && mechanicsRefreshOutput.mechanicsBuffer
+    && (nextUsesVaporAerosolExchange || mechanicsRefreshOutput.mechanicsBuffer)
   );
   const nextUsesReactionMechanics = Boolean(
-    !nextUsesPhaseCarrierTransfer
+    !nextUsesVaporAerosolExchange && !nextUsesPhaseCarrierTransfer
     &&
     !nextUsesSchroederParticleStorageMaterialization
     && !nextUsesMechanicsRefresh
@@ -35060,14 +35362,14 @@ async function residentStepEnvelope({
     && reactionOutput.mechanicsBuffer
   );
   const nextUsesThermalState = Boolean(
-    !nextUsesPhaseCarrierTransfer
+    !nextUsesVaporAerosolExchange && !nextUsesPhaseCarrierTransfer
     &&
     !nextUsesSchroederParticleStorageMaterialization
     && !nextUsesReactionState
     && thermalOutput.stateBuffer
   );
   const nextUsesThermalThermo = Boolean(
-    !nextUsesPhaseCarrierTransfer
+    !nextUsesVaporAerosolExchange && !nextUsesPhaseCarrierTransfer
     &&
     !nextUsesSchroederParticleStorageMaterialization
     && !nextUsesReactionThermo
@@ -35076,7 +35378,9 @@ async function residentStepEnvelope({
   const mechanicsRefreshTrigger = reactionOutputParticleMutation
     ? 'reaction'
     : (thermalStep ? 'thermal' : null);
-  const thermalMechanicsRefreshStatus = mechanicsRefreshTrigger
+  const thermalMechanicsRefreshStatus = nextUsesVaporAerosolExchange
+    ? 'mechanics-constitutive-refreshed-after-vapor-aerosol-exchange'
+    : mechanicsRefreshTrigger
     ? (nextUsesPhaseCarrierTransfer
         ? (nextUsesMechanicsRefresh
             ? 'mechanics-constitutive-refreshed-and-phase-carriers-materialized'
@@ -35216,6 +35520,7 @@ async function residentStepEnvelope({
     nextTime: sourceTime + dt
   };
   const nextParticleUploads = buildNextParticleUploads({
+    postMechanicsClosure,
     sphParticleState,
     mlsMpmParticleState,
     sphParticleUpload,
@@ -35258,6 +35563,7 @@ async function residentStepEnvelope({
     ['reaction', reactionStep?.result || reactionStep],
     ['mechanics-refresh', mechanicsRefreshStep?.result || mechanicsRefreshStep],
     ['phase-carrier-transfer', phaseCarrierTransferStep?.result || phaseCarrierTransferStep],
+    ['vapor-aerosol-exchange', postMechanicsClosure?.vaporAerosolExchangeStep],
     ['dispersed-medium-optics', dispersedMediumOpticsProducerStep?.result || dispersedMediumOpticsProducerStep]
   ]
     .filter(([, stage]) => Boolean(stage))
@@ -35370,6 +35676,7 @@ async function residentStepEnvelope({
     mechanicsRefreshOutput
   });
   const residentAuthorityLedger = buildMlsMpmResidentStepAuthorityLedger({
+    nextUsesVaporAerosolExchange,
     step: particlePingPong.nextStep,
     time: particlePingPong.nextTime,
     readbackMode,
@@ -35846,8 +36153,11 @@ async function residentStepEnvelope({
     residentActiveGridDispatchPlanHintDispatchArgsBufferByteLength: activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
     residentActiveGridDispatchPlanHintMetadataBufferByteLength: activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
     nextParticleUploads,
+    nextUsesVaporAerosolExchange,
     nextParticleBufferMode: nextParticleUploads
-      ? (nextUsesPhaseCarrierTransfer
+      ? nextUsesVaporAerosolExchange
+        ? 'retained-vapor-aerosol-exchange-and-refreshed-mechanics-buffers'
+        : (nextUsesPhaseCarrierTransfer
           ? (nextUsesMechanicsRefresh
               ? 'retained-phase-pure-carrier-state-thermo-and-refreshed-mechanics-buffers'
               : 'retained-phase-pure-carrier-transfer-buffers')
@@ -35864,6 +36174,7 @@ async function residentStepEnvelope({
                   : 'retained-g2p-output-buffers')))))
       : 'not-available',
     nextParticleStateBufferByteLength:
+      (nextUsesVaporAerosolExchange ? nextParticleUploads?.sphParticleUpload?.stateBufferByteLength : 0) ||
       (nextUsesPhaseCarrierTransfer
         ? phaseCarrierTransferOutput.stateBufferByteLength
         : 0)
@@ -35876,6 +36187,7 @@ async function residentStepEnvelope({
       || (nextUsesSchroederFarForceState ? schroederFarForceOutput.stateBufferByteLength : 0)
       || g2pOutput.stateBufferByteLength,
     nextParticleThermoBufferByteLength:
+      (nextUsesVaporAerosolExchange ? nextParticleUploads?.sphParticleUpload?.thermoBufferByteLength : 0) ||
       (nextUsesPhaseCarrierTransfer
         ? phaseCarrierTransferOutput.thermoBufferByteLength
         : 0)
@@ -35886,6 +36198,7 @@ async function residentStepEnvelope({
       || (nextUsesReactionThermo ? reactionOutput.thermoBufferByteLength : 0)
       || thermalOutput.thermoBufferByteLength,
     nextParticleMechanicsBufferByteLength:
+      (nextUsesVaporAerosolExchange ? nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBufferByteLength : 0) ||
       (nextUsesMechanicsRefresh
         ? mechanicsRefreshOutput.mechanicsBufferByteLength
         : 0)
@@ -35922,7 +36235,9 @@ async function residentStepEnvelope({
     g2pMechanicsBufferReplacedByReactionStep: nextUsesReactionMechanics,
     reactionOutputParticleMutation,
     reactionOutputBufferHandoffStatus: reactionStep
-      ? (reactionOutputParticleMutation
+      ? nextUsesVaporAerosolExchange
+        ? 'reaction-output-evolved-by-vapor-aerosol-exchange'
+        : (reactionOutputParticleMutation
         ? (nextUsesMechanicsRefresh
             ? 'reaction-state-thermo-and-refreshed-mechanics-drive-next-particles'
             : 'reaction-output-buffers-drive-next-particles')
@@ -36053,6 +36368,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   phaseCarrierTransferRunner = runSphPhaseCarrierTransferWebGpu,
   phaseCarrierTransferOptions = {},
   condensateExtraction = null,
+  vaporAerosolExchange = null,
+  capturePostMechanicsGasSource = false,
   dispersedMediumOpticalClosureTable = null,
   dispersedMediumOpticalClosureGpuTable = null,
   dispersedMediumOpticsSeedRows = null,
@@ -36097,17 +36414,37 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
 } = {}) {
   const exactMassContinuation = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
   if (exactMassContinuation && (!preferWebGpu || !device || readbackMode !== NO_FULL_READBACK_MODE
-      || !thermalMaterialTable || !mechanicsMaterialTable || reactionTable || reactionActivationWatchTable
-      || residentProductMass || condensateExtraction || sphParticleState?.phaseCarrierPlan || sphParticleUpload.phaseCarrierPlan
+      || !thermalMaterialTable || !mechanicsMaterialTable || reactionActivationWatchTable
+      || (reactionTable?.reactionCount > 0 && (!schroederSpatialEpochTransaction || reactionStepRunner !== runSphReactionStepWebGpu))
+      || condensateExtraction
       || schroederParticleStorageMaterialization || schroederFarAggregateForceApplication
       || (Boolean(schroederSpatialEpochGeneration) !== Boolean(schroederSpatialEpochTransaction))
       || (canonicalSpatialRequired && !schroederSpatialEpochTransaction)
-      || gasPressureMechanicsBoundaryEnabled || particleGasLedgerActionable
+      || ((gasPressureMechanicsBoundaryEnabled || particleGasLedgerActionable)
+        && spatialGasLedgerProducerStageRunner !== runSphSpatialGasLedgerProducerStageComputeTask)
       || p2gRunner || gridUpdateRunner || g2pRunner || p2gStageRunner || gridUpdateStageRunner || g2pStageRunner
       || thermalStepRunner !== runSphThermalStepWebGpu || mechanicsRefreshRunner !== runMlsMpmMechanicsRefreshWithOptionalWebGpu
-      || sphParticleUpload.aerosolFamily || sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload)
-      || dispersedMediumOpticsSeedRows || dispersedMediumOpticalClosureTable)) {
-    throw new TypeError('Resident exact-inventory continuation requires authenticated preserving stages; unsupported consumers remain gated');
+      || (sphParticleUpload.aerosolFamily && !schroederSpatialEpochTransaction)
+      || ((sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload)
+          || dispersedMediumOpticsSeedRows || dispersedMediumOpticalClosureTable)
+        && dispersedMediumOpticsProducerRunner !== runSphDispersedMediumOpticsProducerWebGpu))) {
+    const requested = Object.entries({
+      preferWebGpu, readbackMode, thermalTable: Boolean(thermalMaterialTable),
+      mechanicsTable: Boolean(mechanicsMaterialTable),
+      reactionActivationWatch: Boolean(reactionActivationWatchTable),
+      reactionCount: reactionTable?.reactionCount ?? 0,
+      spatialTransaction: Boolean(schroederSpatialEpochTransaction),
+      spatialGeneration: Boolean(schroederSpatialEpochGeneration),
+      condensateExtraction: Boolean(condensateExtraction),
+      phaseCarrierPlan: Boolean(sphParticleState?.phaseCarrierPlan || sphParticleUpload.phaseCarrierPlan),
+      storageMaterialization: Boolean(schroederParticleStorageMaterialization),
+      farForceApplication: Boolean(schroederFarAggregateForceApplication),
+      gasPressureMechanicsBoundaryEnabled, particleGasLedgerActionable,
+      dispersedOptics: sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload),
+      opticsSeeds: Boolean(dispersedMediumOpticsSeedRows),
+      opticsTable: Boolean(dispersedMediumOpticalClosureTable)
+    }).map(([key, value]) => `${key}=${value}`).join(', ');
+    throw new TypeError('Resident exact-inventory continuation requires authenticated preserving stages; unsupported consumers remain gated: ' + requested);
   }
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   assertResidentCpuMirrorGuards({
@@ -36264,6 +36601,16 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       ? acquireSchroederSpatialEpochExactMassRead(schroederSpatialEpochTransaction, {
         device, generation: schroederSpatialEpochGeneration, sphParticleUpload, mlsMpmParticleUpload })
       : acquireSphParticleExactMassRead(sphParticleUpload, device);
+    if (exactMassContinuation && sphParticleUpload.aerosolFamily) {
+      const parcels = acquireSphAerosolSpatialParcelRead({ device,
+        transaction: schroederSpatialEpochTransaction, generation: schroederSpatialEpochGeneration,
+        family: sphParticleUpload.aerosolFamily });
+      try {
+        if (!parcels?.exactQuantities || parcels.exactQuantities.format !== exactMassSourceRead.read.format) {
+          throw new TypeError('Exact resident continuation requires the original aerosol quantities in the same run format');
+        }
+      } finally { if (parcels) releaseSphAerosolParcelRead(parcels); }
+    }
     await timedStage('deviceAcquire', async () => {
       if (preferWebGpu && !device && !deviceResult) {
         resolvedDeviceResult = await requestOpticalGpuDevice(navigatorRef, {
@@ -37147,6 +37494,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   }
   let exactG2pStage = null;
   const g2pReconstruction = fusedMechanics?.g2pReconstruction || await timedStage('g2pReconstruction', () => runMlsMpmG2pWithOptionalWebGpu({
+    mechanicsMaterialTable,
     sphParticleState,
     mlsMpmParticleState,
     gridUpdate,
@@ -37262,7 +37610,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     createGpuReadbackTelemetryAccumulator({
       scope: 'mls-mpm-resident-product-merge'
     });
-  postMechanicsClosure = await runMlsMpmPostMechanicsClosureWebGpu({
+  postMechanicsClosure = await timedStage('postMechanicsClosure', () => runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
     stageMechanicsTracer: createSphStageMechanicsTracer({
       device: resolvedDevice,
@@ -37291,6 +37639,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     phaseCarrierTransferRunner,
     phaseCarrierTransferOptions,
     condensateExtraction,
+    vaporAerosolExchange,
+    captureGasSource: capturePostMechanicsGasSource,
+    gasSourceLevelAssignment: schroederLevelAssignment,
     boxDimsM: dims,
     dtSeconds,
     preferWebGpu: preferWebGpu && !deviceLossState.info,
@@ -37309,7 +37660,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     schroederLawQueue,
     schroederLawNeighborCandidates,
     inputResidentProductMass: residentProductMass,
-    residentProductMassMergeRunner: (options) => mergeResidentProductMassBuffersWebGpu({
+    residentProductMassMergeRunner: exactMassContinuation ? mergeResidentProductMassBuffersWebGpu : (options) => mergeResidentProductMassBuffersWebGpu({
       ...options,
       readbackTelemetryAccumulator: residentProductMergeReadbackTelemetry
     }),
@@ -37567,7 +37918,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         })
       );
     }
-  });
+  }));
   const {
     schroederFarForceDeltaFusion,
     thermalStep,
@@ -37583,6 +37934,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       mlsMpmParticleState
     });
   const terminalParticleFamily = selectMlsMpmTerminalParticleFamily({
+    postMechanicsClosure,
     sphParticleState,
     sphParticleUpload,
     g2pReconstruction,
@@ -37936,7 +38288,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   };
 
   const step = await timedStage('residentStepEnvelope', () => residentStepEnvelope({
-    postMechanicsContinuation: postMechanicsClosure.continuation,
+    postMechanicsClosure,
     residentProductMergeReadbackTelemetry,
     sphParticleState,
     mlsMpmParticleState,
@@ -38677,7 +39029,14 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       try { Object.defineProperty(error, 'exactMassFusedRetirement', { value: retirement }); } catch {}
     }
     if (exactMassG2pOutput || exactMassBoundUpload) {
-      deferSubmittedWorkCleanup(device, () => {
+      const retirement = deferConfirmedSubmittedWorkCleanup(device, async () => {
+        // A rejected closure releases its thermal/reaction readers through
+        // their own queue fences. The outer fence alone does not drain those
+        // readers, even when all numerical work has completed.
+        const cleanup = await error.postMechanicsCleanupCompletion;
+        if (cleanup && cleanup.status !== 'post-mechanics-failure-cleanup-complete') {
+          throw new Error('Exact G2P retirement requires completed post-mechanics cleanup');
+        }
         if (!exactMassFusedCleanup) exactMassG2pOutput?.destroyOutputParticleBuffers?.();
         const retireClosure = () => {
           if (postMechanicsClosure) {
@@ -38695,6 +39054,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
             { terminalSourceRetirement: true });
         } else retireClosure();
       });
+      retirement.catch(() => {});
+      try { Object.defineProperty(error, 'exactMassG2pRetirement', { value: retirement }); } catch {}
     }
     const rejectedHistory = postMechanicsClosure?.continuation?.residentProductMass;
     if (rejectedHistory
@@ -39072,6 +39433,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
     ));
 
     const g2pStageOptions = {
+      mechanicsMaterialTable,
       sphParticleState,
       mlsMpmParticleState,
       gridUpdate,

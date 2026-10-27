@@ -34,7 +34,7 @@ import {
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 import { prepareSphCondensableParticleInitialization } from './sphCondensableParticleInitialization.js';
 import {
-  prepareSphExactParticleMassSeed, bindSphExactParticleMassSeed,
+  prepareSphExactParticleMassSeed, bindSphExactParticleMassSeed, sphExactMassOptionsFromColdState,
   sphExactParticleSeedMass, resolveSphExactParticleMassSeed,
   sphPackedParticleAdvertisesExactMass
 } from './sphExactMassParticleSeed.js';
@@ -43,6 +43,7 @@ import {
   validateSphExactMassRead, forkSphExactMassRead, releaseSphExactMassRead, releaseSphExactMassInventory
 } from './sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import { encodeSphExactParticleInitialQuantities } from './sphExactParticleInitialQuantities.js';
 import {
   advanceSphDispersedMediumGpuBufferParticleTopologyEpoch,
   buildSphDispersedMediumGpuBuffers,
@@ -582,7 +583,21 @@ export function buildSphGpuParticleBuffers(state, {
     throw new TypeError('buildSphGpuParticleBuffers requires a SPH state with particles');
   }
   const particleCount = state.particles.length;
-  const exactMassSeed = prepareSphExactParticleMassSeed(state, exactMass);
+  const declaredExactMass = sphExactMassOptionsFromColdState(state);
+  if (exactMass && declaredExactMass && (exactMass.format.wordCount !== declaredExactMass.format.wordCount
+      || exactMass.format.quantumExponent !== declaredExactMass.format.quantumExponent
+      || (exactMass.initialQuantities ?? false) !== declaredExactMass.initialQuantities
+      || exactMass.reference !== declaredExactMass.reference)) {
+    throw new TypeError('Exact mass options conflict with the cold scene declaration');
+  }
+  if (exactMass?.massWords !== undefined && declaredExactMass?.massWords !== undefined
+      && (exactMass.massWords.length !== declaredExactMass.massWords.length
+        || Array.from(exactMass.massWords).some((word, i) => word !== declaredExactMass.massWords[i]))) {
+    throw new TypeError('Exact mass options conflict with the cold scene word inventory');
+  }
+  const exactMassSeed = prepareSphExactParticleMassSeed(state, declaredExactMass?.massWords !== undefined
+    ? { ...(exactMass ?? declaredExactMass), massWords: declaredExactMass.massWords }
+    : exactMass ?? declaredExactMass);
   const stateValues = new Float32Array(particleCount * SPH_GPU_PARTICLE_STATE_FLOATS);
   const thermoValues = new Float32Array(particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
   const identityValues = new Uint32Array(particleCount * SPH_GPU_PARTICLE_IDENTITY_UINTS);
@@ -652,6 +667,11 @@ export function buildSphGpuParticleBuffers(state, {
       id: particle.id ?? `p${index}`,
       material,
       materialId: properties ? stableOpticalMaterialId(material) : 0,
+      ...(exactMassSeed?.initialQuantities ? {
+        molarMassBits: new Uint32Array(new Float32Array([properties?.molarMassKgPerMol ?? 0]).buffer)[0],
+        initialPhaseReferenceMatchesMass: particle.phaseVolumeReferenceMassKg == null
+          || particle.phaseVolumeReferenceMassKg === particle.massKg
+      } : {}),
       phase,
       phaseId: gpuPhaseId(phase),
       status,
@@ -2337,7 +2357,7 @@ export function runSphGpuParticleBufferSetCleanupAfterBorrows(
   return true;
 }
 
-export function uploadSphGpuParticleBuffers(device, packed) {
+export function uploadSphGpuParticleBuffers(device, packed, { initialStorageGeneration = null } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('uploadSphGpuParticleBuffers requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -2346,6 +2366,11 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   }
   const exactSeed = resolveSphExactParticleMassSeed(packed);
   if (exactSeed) packed = exactSeed.packed;
+  if (initialStorageGeneration !== null && (!Number.isInteger(initialStorageGeneration)
+      || initialStorageGeneration < 1 || initialStorageGeneration > 0xffffffff
+      || (packed.storageGeneration != null && packed.storageGeneration !== initialStorageGeneration))) {
+    throw new TypeError('Initial upload generation must agree with the cold source when declared');
+  }
   const topologyEpoch = packed.topologyEpoch;
   if (
     !Number.isSafeInteger(topologyEpoch)
@@ -2432,10 +2457,10 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     status: 'webgpu-uploaded',
     sourceSchema: packed.schema,
     particleCount: packed.particleCount,
-    storageGeneration: Number.isInteger(Number(packed.storageGeneration))
+    storageGeneration: initialStorageGeneration ?? (Number.isInteger(Number(packed.storageGeneration))
       && Number(packed.storageGeneration) > 0
       ? Number(packed.storageGeneration)
-      : null,
+      : null),
     physicsTick: packed.physicsTick ?? null,
     physicsSubstep: packed.physicsSubstep ?? null,
     positionEpoch: packed.positionEpoch ?? null,
@@ -2510,11 +2535,12 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     let family = null;
     try {
       family = createSphExactMassInventoryWebGpu({ device, format: exactSeed.format,
-        massesKg: exactSeed.massesKg,
+        ...(exactSeed.massWords ? { massWords: exactSeed.massWords } : { massesKg: exactSeed.massesKg }),
         provenance: { kind: 'initial-conditions', reference: exactSeed.reference } });
       const read = acquireSphExactMassRead({ family, device });
       const range = Object.freeze({ rowOffset: read.rowOffset, rowCount: read.rowCount });
       lifecycleRecord.exactMass = { family, read, range, identityOwners: { count: 1, identityBuffer }, retired: false,
+        coldQuantitySeed: exactSeed.initialQuantities ? exactSeed : null,
         sourceFields: EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, upload[key]]) };
       Object.defineProperty(upload, 'exactMassInventory', { value: family, enumerable: true });
       Object.defineProperty(upload, 'exactMassInventoryRange', { value: range, enumerable: true });
@@ -2558,6 +2584,7 @@ function retireExactParticleMassOwner(record) {
   // fresh root admission; other original owners continue through held forks.
   releaseSphExactMassInventory(owner.family);
   void releaseSphExactMassRead(owner.read);
+  if (owner.quantities && --owner.quantities.owners === 0) owner.quantities.value.quantityBuffer.destroy();
   if (--owner.identityOwners.count === 0) {
     owner.identityOwners.identityBuffer.destroy();
   }
@@ -2577,6 +2604,28 @@ export function acquireSphParticleExactMassRead(upload, device, { mlsMpmParticle
       || !exactMassMechanicsOwnerMatches(mlsMpmParticleUpload, mlsOwner))) {
     throw new TypeError('Exact particle mechanics read requires its original live MLS owner');
   }
+  // Only the original cold uploader retains these CPU bytes. Seed once before
+  // the first G2P update; continuing families always carry their owned plane.
+  const owner = record.exactMass;
+  if (!owner.quantities && owner.coldQuantitySeed && mlsOwner?.coldMechanics) {
+    const initial = encodeSphExactParticleInitialQuantities(owner.coldQuantitySeed, mlsOwner.coldMechanics);
+    if (initial) {
+      if (initial.words.byteLength > (device.limits?.maxBufferSize ?? Infinity)
+          || initial.words.byteLength > (device.limits?.maxStorageBufferBindingSize ?? Infinity)) {
+        throw new RangeError('Initial exact particle quantities exceed device capacity');
+      }
+      const quantityBuffer = tagWebGpuBufferDevice(device.createBuffer({
+        label: 'ulg-exact-particle-initial-quantities', size: initial.words.byteLength,
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+      }), device);
+      try { device.queue.writeBuffer(quantityBuffer, 0, initial.words); }
+      catch (error) { quantityBuffer.destroy(); throw error; }
+      owner.quantities = { owners: 1, value: Object.freeze({ quantityBuffer,
+        quantityLayout: initial.layout, format: initial.format }) };
+      exactMassParticleBuffers.add(quantityBuffer);
+      owner.coldQuantitySeed = null;
+    }
+  }
   const read = forkSphExactMassRead(record.exactMass.read, { device });
   record.exactMassActiveReadCount++;
   if (mlsOwner) {
@@ -2584,7 +2633,8 @@ export function acquireSphParticleExactMassRead(upload, device, { mlsMpmParticle
     exactMassMechanicsBuffers.add(mlsOwner.physical.mechanicsBuffer);
   }
   const handle = Object.freeze({ read, sourceSphUpload: upload, particleCount: record.particleCount,
-    topologyEpoch: record.topologyEpoch, identityRevision: record.identityRevision });
+    topologyEpoch: record.topologyEpoch, identityRevision: record.identityRevision,
+    quantities: record.exactMass.quantities?.value ?? null });
   exactMassParticleReads.set(handle, { record, upload, mlsOwner, released: false });
   return handle;
 }
@@ -2643,6 +2693,28 @@ export function markSphExactMassDerivedBuffers(handle, buffers, { mechanicsBuffe
     if (webGpuBufferDevice(buffer) !== handle.read.device) throw new TypeError('Exact derived mechanics has a foreign device');
     exactMassMechanicsBuffers.add(buffer);
   }
+}
+
+/** A retained placement owner may derive new exact history storage after its
+ * original particle source has retired. This marking only forbids legacy
+ * mutation; the original destination read supplies the lifetime authority. */
+export async function markSphExactMassPlacementDerivedBuffers(placementRead, buffers, { device } = {}) {
+  const { resolveSchroederSpatialReactionPlacementDestinationRead } =
+    await import('./schroederSpatialReactionPlacementEpochGpu.js');
+  resolveSchroederSpatialReactionPlacementDestinationRead(placementRead, { device });
+  for (const buffer of buffers) {
+    if (webGpuBufferDevice(buffer) !== device) throw new TypeError('Exact placement derived buffer has a foreign device');
+  }
+  for (const buffer of buffers) exactMassParticleBuffers.add(buffer);
+}
+
+export async function markSphExactMassHistoryDerivedBuffers(history, buffers, { device } = {}) {
+  const { resolveResidentProductExactHistoryLayout } = await import('./sphMlsMpmGpuStep.js');
+  if (!resolveResidentProductExactHistoryLayout(history,{device})) throw new TypeError('Exact history derivation requires its original live owner');
+  for (const buffer of buffers) {
+    if (webGpuBufferDevice(buffer) !== device) throw new TypeError('Exact history derived buffer has a foreign device');
+  }
+  for (const buffer of buffers) exactMassParticleBuffers.add(buffer);
 }
 
 /** Extend the existing particle owner only through a genuine claimed closure. */
@@ -2824,30 +2896,49 @@ function installExactMassContinuationOwner({ target, existing, capture,
       || (!spatial && target.topologyEpoch !== source.topologyEpoch)
       || target.stateStrideBytes !== held.upload.stateStrideBytes || target.thermoStrideBytes !== held.upload.thermoStrideBytes
       || target.identityStrideBytes !== held.upload.identityStrideBytes
-      || sphGpuParticleUploadAdvertisesDispersedMediumOptics(target)) {
+      || (existing && !exactParentDispersedMediumRecordMatches(target, existing, source.device))
+      || (!existing && sphGpuParticleUploadAdvertisesDispersedMediumOptics(target))) {
     throw new TypeError('Exact inventory continuation changed its retained row association');
   }
-  const family = source.exactMass.family;
-  const read = forkSphExactMassRead(capture.sourceRead.read, { device: source.device });
+  const massRead = capture.carrierMassRead ?? capture.sourceRead.read;
+  const family = massRead.family;
+  const range = capture.carrierMassRead
+    ? Object.freeze({ rowOffset: massRead.rowOffset, rowCount: massRead.rowCount }) : source.exactMass.range;
+  const exact = capture.exactQuantities;
+  if (massRead.rowCount !== target.particleCount || (exact && (
+      typeof capture.transferExactQuantities !== 'function'
+      || exact.quantityLayout.rowCount !== target.particleCount || exact.format !== massRead.format
+      || exact.quantityBuffer.size !== exact.quantityLayout.wordLength * 4
+      || webGpuBufferDevice(exact.quantityBuffer) !== source.device))) {
+    throw new TypeError('Exact continuation requires complete carrier-only mass and quantity records');
+  }
+  const quantities = exact ? { owners: 0, value: Object.freeze({ quantityBuffer: exact.quantityBuffer,
+    quantityLayout: exact.quantityLayout, format: exact.format }) } : source.exactMass.quantities;
+  const read = forkSphExactMassRead(massRead, { device: source.device });
   let record = existing;
   try {
+    // Optics adoption may have installed this same private parent before the
+    // spatial plan was ready. Only its original registered child may coexist
+    // with the mass owner authenticated by the original closure above.
     if (!record) record = installSphGpuParticleBufferSetBorrowLifecycle(target, null);
     if (!record || record.destroyed || record.admissionClosed || record.destroyRequested
         || record.stateBuffer !== stateBuffer || record.thermoBuffer !== thermoBuffer
         || ('exactMassInventory' in target && target.exactMassInventory !== family)
-        || ('exactMassInventoryRange' in target && target.exactMassInventoryRange !== source.exactMass.range)) {
+        || ('exactMassInventoryRange' in target && target.exactMassInventoryRange !== range)) {
       throw new TypeError('Exact inventory successor has no compatible private particle lifecycle');
     }
     const sourceFields = EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, target[key]]);
     markSphExactMassDerivedBuffers(capture.sourceRead, [target.stateBuffer, target.thermoBuffer, target.identityBuffer]);
     Object.defineProperty(target, 'exactMassInventory', { value: family, enumerable: true });
-    Object.defineProperty(target, 'exactMassInventoryRange', { value: source.exactMass.range, enumerable: true });
-    record.exactMass = { family, read, range: source.exactMass.range,
+    Object.defineProperty(target, 'exactMassInventoryRange', { value: range, enumerable: true });
+    if (exact) capture.transferExactQuantities();
+    record.exactMass = { family, read, range, quantities,
       identityOwners: source.exactMass.identityOwners, retired: false, sourceFields,
       active: !spatial, spatialPublicationPlan,
       validateSpatialCommit: spatial?.validateSchroederSpatialExactMassCommitPlan,
       validateSpatialPublication: spatial?.validateSchroederSpatialExactMassPublicationWindow };
     record.exactMass.identityOwners.count++;
+    if (quantities) quantities.owners++;
     return family;
   } catch (error) {
     if (record?.exactMass?.read === read) {
@@ -3075,13 +3166,20 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
   };
 }
 
-export function uploadMlsMpmGpuParticleBuffers(device, packed) {
+export function uploadMlsMpmGpuParticleBuffers(device, packed, { initialStorageGeneration = null } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('uploadMlsMpmGpuParticleBuffers requires a WebGPU-like device with queue.writeBuffer');
   }
   if (packed?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('uploadMlsMpmGpuParticleBuffers requires a packed MLS-MPM GPU particle buffer');
   }
+  if (initialStorageGeneration !== null && (!Number.isInteger(initialStorageGeneration)
+      || initialStorageGeneration < 1 || initialStorageGeneration > 0xffffffff
+      || (packed.storageGeneration != null && packed.storageGeneration !== initialStorageGeneration))) {
+    throw new TypeError('Initial upload generation must agree with the cold source when declared');
+  }
+  const coldMechanics = (packed.step ?? 0) === 0 && (packed.time ?? 0) === 0
+    ? packed.mechanics.slice() : null;
   const materialPropertyBankWarmInputBuffer = optionalStorageBuffer(
     device,
     'ulg-mls-mpm-material-bank-warm-input-rows',
@@ -3104,16 +3202,17 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
     chartEpoch: packed.chartEpoch ?? null,
     levelEpoch: packed.levelEpoch ?? null,
     supportEpoch: packed.supportEpoch ?? null,
-    storageGeneration: Number.isInteger(Number(packed.storageGeneration))
+    storageGeneration: initialStorageGeneration ?? (Number.isInteger(Number(packed.storageGeneration))
       && Number(packed.storageGeneration) > 0
       ? Number(packed.storageGeneration)
-      : null,
+      : null),
+    bufferFamilyGeneration: initialStorageGeneration ?? packed.storageGeneration ?? null,
     mechanicsStrideBytes: packed.mechanicsStrideBytes,
     mechanicsBufferByteLength: Math.max(4, packed.mechanics.byteLength),
     mechanicsBuffer: writeStorageBuffer(
       device,
       'ulg-mls-mpm-particle-mechanics',
-      packed.mechanics,
+      coldMechanics ?? packed.mechanics,
       { copySource: true }
     ),
     phaseCarrierPlan: packed.phaseCarrierPlan ? { ...packed.phaseCarrierPlan } : null,
@@ -3130,6 +3229,7 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
     fullPhysicsValidation: false
   };
   registerExactMassMechanicsOwner(upload, null, device);
+  exactMassMechanicsOwners.get(upload).coldMechanics = coldMechanics;
   return upload;
 }
 

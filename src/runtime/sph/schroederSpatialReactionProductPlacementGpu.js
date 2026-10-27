@@ -1,3 +1,26 @@
+import {sphExactPlacementEventDispositionLayout,sphExactPlacementEventPipelineDescriptors,createSphExactPlacementPrivateCompanionRecoveryWgsl} from './sphExactPlacementEventDispositionWgsl.js';
+import { sphExactPlacementPhysicalEvidenceLayout, planSphExactPlacementPhysicalEvidenceDispatch,
+  createSphExactPlacementPhysicalEvidenceWgsl } from './sphExactPlacementPhysicalEvidenceWgsl.js';
+import { encodeSphExactPlacementCaloricMetadata } from './sphExactPlacementCaloricMetadata.js';
+import { sphExactPlacementReceiverCaloricLayout, encodeSphExactPlacementReceiverCaloricParams,
+  createSphExactPlacementReceiverCaloricWgsl, SPH_EXACT_RECEIVER_PREPARATION_STAGES } from './sphExactPlacementReceiverCaloricWgsl.js';
+import { sphExactPlacementPhysicalApplyLayout, assertSphExactPlacementPhysicalApplyDeviceLimits,
+  encodeSphExactPlacementPhysicalApplyParams, planSphExactPlacementPhysicalApplyDispatches,
+  createSphExactPlacementPhysicalApplyWgsl, SPH_EXACT_PHYSICAL_PREPARATION_STAGES } from './sphExactPlacementPhysicalApplyWgsl.js';
+import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
+import { encodeSphExactReactionChemistryMetadata } from './sphExactReactionChemistryBudgetMetadata.js';
+import { sphExactReactionChemistryBudgetLayout, planSphExactReactionChemistryBudgetDispatch,
+  sphExactReactionChemistryBudgetPipelineDescriptors } from './sphExactReactionChemistryBudgetWgsl.js';
+import { createSphExactPlacementChemistryConsumeWgsl } from './sphExactPlacementChemistryConsumeWgsl.js';
+import { createSphExactPlacementPhysicalTerminalWgsl, createSphExactPlacementQuantityTerminalWgsl,
+  createSphExactPlacementMassTerminalWgsl, createSphExactPlacementResidualPhysicalTerminalWgsl,
+  createSphExactPlacementLedgerTerminalWgsl, planSphExactPlacementTerminalWorkgroups }
+  from './sphExactPlacementTerminalWgsl.js';
+import { sphExactPlacementCaptureLayout, sphExactPlacementCapturePipelineDescriptors,
+  planSphExactPlacementCaptureWorkgroups } from './sphExactPlacementCaptureWgsl.js';
+import { sphExactPlacementCaptureMergeLayout, createSphExactPlacementCaptureMergeWgsl }
+  from './sphExactPlacementCaptureMergeWgsl.js';
+import { createSphReactionProductEventCompactWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { cachedWebGpuBindGroup } from '../webgpuBindGroupCache.js';
 import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
 import {
@@ -32,7 +55,9 @@ import {
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
 import {
+  isSchroederSpatialReactionPlacementSourceFamily,
   resolveSchroederSpatialReactionPlacementSourceFamily,
+  resolveSchroederSpatialReactionPlacementExactSource,
   schroederSpatialReactionPlacementSourceFamilyLiveness
 } from './schroederSpatialReactionPlacementEpochGpu.js';
 import {
@@ -63,6 +88,7 @@ import {
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
   createCachedExplicitComputePipeline,
+  prewarmCachedExplicitComputePipeline,
   registerQueueOrderedCleanupClaim,
   submitQueueOrderedFinalConsumerWork,
   releaseSubmittedWorkCleanupQueueOrdered
@@ -140,7 +166,7 @@ function armPlacementAuthorityDeviceLoss(record) {
 
 function requireLivePlacementAuthority(
   authority,
-  { device = null, operation = 'placement operation' } = {}
+  { device = null, operation = 'placement operation', validateContents = true } = {}
 ) {
   const record = authorityRecords.get(authority);
   if (!record || authority?.schema
@@ -176,10 +202,12 @@ function requireLivePlacementAuthority(
   }
   let sourceLiveness;
   try {
-    resolveSchroederSpatialReactionPlacementSourceFamily(
-      record.placementSourceFamily,
-      { device: record.device }
-    );
+    if (validateContents) {
+      resolveSchroederSpatialReactionPlacementSourceFamily(
+        record.placementSourceFamily,
+        { device: record.device }
+      );
+    }
     sourceLiveness = schroederSpatialReactionPlacementSourceFamilyLiveness(
       record.placementSourceFamily,
       { device: record.device }
@@ -200,6 +228,12 @@ function requireLivePlacementAuthority(
       `${operation} rejected because its placement source family is terminal`,
       sourceLiveness?.deviceLost ? 'DEVICE_LOSS' : 'RETIRED'
     );
+  }
+  if (validateContents && record.exactQuantityContext) {
+    const exactBindings = record.exactQuantityContext.validate();
+    if (Object.entries(exactBindings).some(([key, value]) => authority[key] !== value || record.bindings[key] !== value)) {
+      throw placementError(`${operation} lost its original exact quantity bindings`, 'EXACT_QUANTITY_IDENTITY');
+    }
   }
   const expectation = record.expectationEntry;
   if (
@@ -270,6 +304,94 @@ function requireMinimumBytes(buffer, byteLength, label) {
   return buffer;
 }
 
+// Private additions to the ORIGINAL placement authority module. No registry,
+// public admission switch, independent owner or terminal selector is added.
+const EXACT_PLACEMENT_QUANTITY_BINDING_FIELDS = Object.freeze([
+  'frozenSourceQuantityBuffer', 'frozenSourceQuantityLayout', 'frozenSourceResidualCountBuffer',
+  'placedDestinationQuantityBuffer', 'placedDestinationQuantityLayout',
+  'placedDestinationMassBuffer', 'placedDestinationMassByteLength', 'placedDestinationMassSourceGeneration',
+  'placedDestinationQuantityFormat', 'placedDestinationQuantityByteLength',
+  'placedDestinationResidualCountBuffer', 'placedDestinationResidualEventBuffer',
+  'placedDestinationResidualCompanionBuffer', 'placedDestinationResidualPhysicalBuffer', 'placedDestinationResidualLayout'
+]);
+
+function capturePlacementExactQuantityContext(family, device, particleCount, eventCapacity) {
+  const read = resolveSchroederSpatialReactionPlacementExactSource(family, { device });
+  if (!read) return null;
+  const original = read.validate();
+  const physical = original.result.physicalOutput;
+  const quantities = physical.quantities;
+  const layout = quantities.layout;
+  const destinationLayout = family.placedDestinationQuantityLayout;
+  const format = original.source.result.format;
+  const bindings = Object.freeze(Object.fromEntries(EXACT_PLACEMENT_QUANTITY_BINDING_FIELDS
+    .map(key => [key, family[key]])));
+  const bytes = (particleCount + eventCapacity) * layout.recordWords * 4;
+  const residualLayout = bindings.placedDestinationResidualLayout;
+  if (physical.denseEventCount !== eventCapacity
+      || original.result.particleCount !== particleCount
+      || original.source.result.particleCount !== particleCount
+      || eventCapacity !== particleCount * original.source.result.caloricProductCapacity
+      || layout.particleCount !== particleCount || layout.eventCapacity !== eventCapacity
+      || layout.originalRowOffset !== 0 || layout.currentRowOffset !== particleCount
+      || layout.eventRowOffset !== 2 * particleCount
+      || bindings.frozenSourceQuantityBuffer !== quantities.outputBuffer
+      || bindings.frozenSourceQuantityLayout !== layout
+      || bindings.frozenSourceResidualCountBuffer !== physical.compactCountBuffer
+      || bindings.placedDestinationQuantityFormat !== format
+      || bindings.placedDestinationMassByteLength !== (particleCount + eventCapacity) * format.wordCount * 4
+      || bindings.placedDestinationMassSourceGeneration !== original.source.source.inventory.generation
+      || !Object.isFrozen(residualLayout)
+      || residualLayout.schema !== 'peercompute.ulg.exact-placement-residual-storage.v2'
+      || residualLayout.particleCount !== particleCount || residualLayout.eventCapacity !== eventCapacity
+      || residualLayout.eventStrideWords !== 32 || residualLayout.companionStrideWords !== 8 + 3 * format.wordCount
+      || residualLayout.eventByteLength !== eventCapacity * 128
+      || residualLayout.companionByteLength !== eventCapacity * (8 + 3 * format.wordCount) * 4
+      || residualLayout.physicalStrideWords !== 52 || residualLayout.physicalByteLength !== eventCapacity * 208
+      || residualLayout.countByteLength !== 8 || residualLayout.quantityLayout !== destinationLayout
+      || residualLayout.format !== format || residualLayout.historyTransferAdmitted !== false
+      || residualLayout.physicalPublicationAdmitted !== false
+      || !Object.isFrozen(destinationLayout)
+      || destinationLayout.currentRowOffset !== 0 || destinationLayout.eventRowOffset !== particleCount
+      || destinationLayout.rowCount !== particleCount + eventCapacity
+      || destinationLayout.recordWords !== layout.recordWords
+      || destinationLayout.scalar !== layout.scalar
+      || destinationLayout.wordLength * 4 !== bytes
+      || bindings.placedDestinationQuantityByteLength !== bytes
+      || !Number.isSafeInteger(bytes) || bytes < 4 || bytes > 0xffff_fffc) {
+    throw placementError('exact placement authority does not match its original quantity owner and capacity', 'EXACT_QUANTITY_IDENTITY');
+  }
+  const extents = [
+    ['frozenSourceQuantityBuffer', layout.wordLength * 4],
+    ['frozenSourceResidualCountBuffer', 8],
+    ['placedDestinationQuantityBuffer', bytes],
+    ['placedDestinationMassBuffer', (particleCount + eventCapacity) * format.wordCount * 4],
+    ['placedDestinationResidualCountBuffer', 8],
+    ['placedDestinationResidualEventBuffer', residualLayout.eventByteLength],
+    ['placedDestinationResidualCompanionBuffer', residualLayout.companionByteLength],
+    ['placedDestinationResidualPhysicalBuffer', residualLayout.physicalByteLength]
+  ];
+  const validate = () => {
+    const current = read.validate();
+    if (current.result !== original.result || current.source !== original.source
+        || current.source.result !== original.source.result || current.result.physicalOutput !== physical
+        || physical.quantities !== quantities
+        || Object.entries(bindings).some(([key, value]) => family[key] !== value)) {
+      throw placementError('exact placement authority lost its original quantity tuple', 'EXACT_QUANTITY_IDENTITY');
+    }
+    for (const [key, extent] of extents) {
+      const buffer = requireBuffer(device, bindings[key], key);
+      if (!Number.isSafeInteger(buffer.size) || buffer.size < extent
+          || (buffer.usage & GPU_BUFFER_USAGE.STORAGE) === 0) {
+        throw placementError(`exact placement ${key} has insufficient storage`, 'EXACT_QUANTITY_CAPACITY');
+      }
+    }
+    return bindings;
+  };
+  validate();
+  return Object.freeze({ read, original, physical, quantities, bindings, validate });
+}
+
 function placementArenaError(message, suffix = 'ARENA') {
   const error = placementError(message, suffix);
   error.arena = true;
@@ -338,14 +460,21 @@ function createSegmentedPlacementArena(device, {
   particleCapacity,
   eventCapacity,
   productTermCapacity,
-  eventStrideVec4
+  eventStrideVec4,
+  exactCompactionMassWordCount = 0,
+  exactCaptureConfiguration = null,
+  exactPhysicalConfiguration = null,
+  exactEventConfiguration = null,
+  exactChemistryConfiguration = null
 }) {
   const maxStorageBindings = Number(
     device.limits?.maxStorageBuffersPerShaderStage ?? 8
   );
-  if (!Number.isInteger(maxStorageBindings) || maxStorageBindings < 8) {
+  const exactCompanionStrideWords = exactCompactionMassWordCount ? 8 + 3 * exactCompactionMassWordCount : 0;
+  const requiredStorageBindings = exactPhysicalConfiguration ? 12 : exactCompactionMassWordCount ? 9 : 8;
+  if (!Number.isInteger(maxStorageBindings) || maxStorageBindings < requiredStorageBindings) {
     throw placementArenaError(
-      'segmented placement requires the WebGPU baseline of 8 storage buffers per shader stage',
+      `segmented placement requires ${requiredStorageBindings} storage buffers per shader stage for its actual compactor`,
       'CAPABILITY'
     );
   }
@@ -383,6 +512,12 @@ function createSegmentedPlacementArena(device, {
       size: byteLength,
       usage
     }), device);
+    if ((exactCaptureConfiguration && exactCaptureConfiguration.protectedBuffers.includes(buffer))
+        || (exactChemistryConfiguration && exactChemistryConfiguration.protectedBuffers.includes(buffer))
+        || (exactEventConfiguration && exactEventConfiguration.protectedBuffers.includes(buffer))
+        || (exactCaptureConfiguration && createdBuffers.includes(buffer))) {
+      throw placementError('exact arena allocation aliases a held source or sibling', 'SOURCE_DESTINATION_ALIAS');
+    }
     createdBuffers.push(buffer);
     return buffer;
   };
@@ -416,9 +551,14 @@ function createSegmentedPlacementArena(device, {
       ),
       compactCount: makeBuffer(
         `${prefix}-compact-count`,
-        Uint32Array.BYTES_PER_ELEMENT,
+        (exactCompactionMassWordCount ? 2 : 1) * Uint32Array.BYTES_PER_ELEMENT,
         GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
       ),
+      ...(exactCompactionMassWordCount ? { exactCompactCompanion: makeBuffer(
+        `${prefix}-exact-compact-companion`,
+        eventCapacity * exactCompanionStrideWords * Uint32Array.BYTES_PER_ELEMENT,
+        GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      ) } : {}),
       compactParams: makeBuffer(
         `${prefix}-compact-params`,
         16,
@@ -426,15 +566,18 @@ function createSegmentedPlacementArena(device, {
       ),
       compactLocalPrefix: makeBuffer(
         `${prefix}-compact-local-prefix`,
-        eventCapacity * Uint32Array.BYTES_PER_ELEMENT
+        eventCapacity * Uint32Array.BYTES_PER_ELEMENT,
+        GPU_BUFFER_USAGE.STORAGE | (exactCompactionMassWordCount ? GPU_BUFFER_USAGE.COPY_DST : 0)
       ),
       compactGroupCount: makeBuffer(
         `${prefix}-compact-group-count`,
-        eventGroups * Uint32Array.BYTES_PER_ELEMENT
+        eventGroups * Uint32Array.BYTES_PER_ELEMENT,
+        GPU_BUFFER_USAGE.STORAGE | (exactCompactionMassWordCount ? GPU_BUFFER_USAGE.COPY_DST : 0)
       ),
       compactGroupOffset: makeBuffer(
         `${prefix}-compact-group-offset`,
-        eventGroups * Uint32Array.BYTES_PER_ELEMENT
+        eventGroups * Uint32Array.BYTES_PER_ELEMENT,
+        GPU_BUFFER_USAGE.STORAGE | (exactCompactionMassWordCount ? GPU_BUFFER_USAGE.COPY_DST : 0)
       ),
       decisions: makeBuffer(
         `${prefix}-decisions`,
@@ -493,6 +636,30 @@ function createSegmentedPlacementArena(device, {
         64,
         GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       ),
+      ...(exactChemistryConfiguration ? {
+        exactChemistryA: makeBuffer(`${prefix}-exact-chemistry-a`, exactChemistryConfiguration.layout.scratchWordLength*4),
+        exactChemistryB: makeBuffer(`${prefix}-exact-chemistry-b`, exactChemistryConfiguration.layout.scratchWordLength*4),
+        exactChemistryControl: makeBuffer(`${prefix}-exact-chemistry-control`, exactChemistryConfiguration.layout.controlWordLength*4),
+        exactChemistryEvidence: makeBuffer(`${prefix}-exact-chemistry-evidence`, exactChemistryConfiguration.layout.outputWordLength*4),
+        exactChemistryMetadata: makeBuffer(`${prefix}-exact-chemistry-metadata`, exactChemistryConfiguration.layout.metadataWordLength*4,
+          GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_DST),
+        exactChemistryParams: makeBuffer(`${prefix}-exact-chemistry-params`, exactChemistryConfiguration.uniformBytes,
+          GPU_BUFFER_USAGE.UNIFORM|GPU_BUFFER_USAGE.COPY_DST)
+      } : {}),
+      ...(exactCaptureConfiguration ? {
+        exactCaptureA: makeBuffer(`${prefix}-exact-capture-a`, exactCaptureConfiguration.capture.byteLength),
+        exactCaptureB: makeBuffer(`${prefix}-exact-capture-b`, exactCaptureConfiguration.capture.byteLength),
+        exactCaptureMerged: makeBuffer(`${prefix}-exact-capture-merged`, exactCaptureConfiguration.merge.mergedByteLength),
+        exactCaptureMap: makeBuffer(`${prefix}-exact-capture-map`, exactCaptureConfiguration.merge.mapByteLength)
+      } : {}),
+      ...(exactPhysicalConfiguration ? Object.fromEntries(Object.entries(exactPhysicalConfiguration.sizes)
+        .map(([key, bytes]) => [key, makeBuffer(`${prefix}-${key}`, bytes,
+          (key.endsWith('Params') ? GPU_BUFFER_USAGE.UNIFORM : GPU_BUFFER_USAGE.STORAGE)
+            | GPU_BUFFER_USAGE.COPY_DST)])) : {}),
+      ...(exactEventConfiguration ? Object.fromEntries(Object.entries(exactEventConfiguration.sizes)
+        .map(([key,bytes])=>[key,makeBuffer(`${prefix}-${key}`,bytes,
+          (key.endsWith('Params')?GPU_BUFFER_USAGE.UNIFORM:GPU_BUFFER_USAGE.STORAGE)|GPU_BUFFER_USAGE.COPY_DST
+            |(key==='exactEventHistoryCompanions'?GPU_BUFFER_USAGE.COPY_SRC:0))])) : {}),
       captureKeys: makeBuffer(
         `${prefix}-capture-keys`,
         eventCapacity * Uint32Array.BYTES_PER_ELEMENT
@@ -661,6 +828,15 @@ function createSegmentedPlacementArena(device, {
       eventCapacity,
       productTermCapacity,
       eventStrideVec4,
+      exactCompactionMassWordCount,
+      exactCompanionStrideWords,
+      exactChemistrySignature: exactChemistryConfiguration?.signature ?? null,
+      exactChemistryLayout: exactChemistryConfiguration?.layout ?? null,
+      exactCaptureSignature: exactCaptureConfiguration?.signature ?? null,
+      exactPhysicalSignature: exactPhysicalConfiguration?.signature ?? null,
+      exactEventSignature: exactEventConfiguration?.signature ?? null,
+      exactCaptureLayout: exactCaptureConfiguration?.capture ?? null,
+      exactCaptureMergeLayout: exactCaptureConfiguration?.merge ?? null,
       captureReductionLevelCount: captureLevels,
       directReductionLevelCount: directLevels,
       summaryReductionLevelCount: summaryLevels,
@@ -696,6 +872,18 @@ function createSegmentedPlacementArena(device, {
       destroyed: false,
       diagnosticObservationGate: null
     };
+    if(exactChemistryConfiguration){
+      exactChemistryConfiguration.context.validate();
+      exactChemistryConfiguration.context.read.markDerivedBuffers(Object.entries(buffers)
+        .filter(([key])=>key.startsWith('exactChemistry')).map(([,buffer])=>buffer));
+      exactChemistryConfiguration.context.validate();
+    }
+    if(exactEventConfiguration){
+      exactEventConfiguration.context.validate();
+      exactEventConfiguration.context.read.markDerivedBuffers(Object.entries(buffers)
+        .filter(([key])=>key.startsWith('exactEvent')).map(([,buffer])=>buffer));
+      exactEventConfiguration.context.validate();
+    }
     segmentedPlacementArenaRecords.set(arena, record);
     const quarantineAfterDeviceLoss = (info) => {
       record.deviceLost = true;
@@ -764,10 +952,23 @@ export function acquireSphReactionProductPlacementSegmentedArenaWebGpu({
     device,
     operation: 'segmented placement arena acquisition'
   });
+  // Representation derives only from the original authority's held producer.
+  const exactCompaction = resolveSphReactionProductPlacementExactCompactionSource(authority, { device });
+  const exactCompactionMassWordCount = exactCompaction?.massWordCount ?? 0;
+  const exactCaptureConfiguration = exactCaptureConfigurationForAuthority(authority, device);
+  const exactPhysicalConfiguration = exactPhysicalConfigurationForAuthority(authority, device);
+  const exactEventConfiguration = exactEventConfigurationForAuthority(authority, device);
+  const exactChemistryConfiguration = exactChemistryConfigurationForAuthority(authority, device);
+  if (Boolean(exactCaptureConfiguration) !== Boolean(exactCompaction)) {
+    throw placementError('exact arena lost its held quantity source', 'EXACT_CAPTURE_IDENTITY');
+  }
   const particles = exactPositiveU32(particleCapacity, 'particleCapacity');
   const events = exactPositiveU32(eventCapacity, 'eventCapacity');
   const terms = exactPositiveU32(productTermCapacity, 'productTermCapacity');
   const stride = exactPositiveU32(eventStrideVec4, 'eventStrideVec4');
+  if (exactCaptureConfiguration) planSphReactionProductPlacementDispatchWorkgroups({
+    device, eventCount: events, particleCount: particles, productTermCount: terms
+  });
   if (particles !== authority.particleCount || events !== authority.productEventCapacity) {
     throw placementArenaError('placement arena capacity does not match its authority', 'IDENTITY');
   }
@@ -785,6 +986,11 @@ export function acquireSphReactionProductPlacementSegmentedArenaWebGpu({
     && arena.eventCapacity === events
     && arena.productTermCapacity === terms
     && arena.eventStrideVec4 === stride
+    && arena.exactCompactionMassWordCount === exactCompactionMassWordCount
+    && arena.exactChemistrySignature === (exactChemistryConfiguration?.signature ?? null)
+    && arena.exactCaptureSignature === (exactCaptureConfiguration?.signature ?? null)
+    && arena.exactPhysicalSignature === (exactPhysicalConfiguration?.signature ?? null)
+    && arena.exactEventSignature === (exactEventConfiguration?.signature ?? null)
   );
   if (record?.inFlight) {
     const error = placementArenaError(
@@ -807,7 +1013,12 @@ export function acquireSphReactionProductPlacementSegmentedArenaWebGpu({
       particleCapacity: particles,
       eventCapacity: events,
       productTermCapacity: terms,
-      eventStrideVec4: stride
+      eventStrideVec4: stride,
+      exactCompactionMassWordCount,
+      exactCaptureConfiguration,
+      exactPhysicalConfiguration,
+      exactEventConfiguration,
+      exactChemistryConfiguration
     });
     cache.set(spatialArenaIndex, arena);
     record = segmentedPlacementArenaRecords.get(arena);
@@ -822,6 +1033,17 @@ export function acquireSphReactionProductPlacementSegmentedArenaWebGpu({
     bufferCreationCount += 1;
   }
   record.inFlight = true;
+  record.exactCompactionEncoding = null;
+  record.exactCapturePreparation = null;
+  record.exactEventRecord = null;
+  record.exactEventPreparation = null;
+  record.exactPhysicalPreparation = null;
+  record.exactPhysicalConsumptionRecord = null;
+  record.exactPhysicalConsumption = null;
+  record.exactChemistryRecord = null;
+  record.exactChemistryPreparation = null;
+  record.exactTerminalRecord = null;
+  record.exactTerminalEncoding = null;
   record.acquisitionCount += 1;
   record.leaseOrdinal += 1;
   record.authority = authority;
@@ -895,6 +1117,16 @@ function createSegmentedPlacementQueueOrderedCleanup(record, encoding) {
       }
     }
     record.activeEncoding = null;
+    record.exactCapturePreparation = null;
+  record.exactEventRecord = null;
+  record.exactEventPreparation = null;
+  record.exactPhysicalPreparation = null;
+  record.exactPhysicalConsumptionRecord = null;
+  record.exactPhysicalConsumption = null;
+  record.exactChemistryRecord = null;
+  record.exactChemistryPreparation = null;
+  record.exactTerminalRecord = null;
+  record.exactTerminalEncoding = null;
     record.inFlight = false;
     record.authority = null;
     record.diagnosticObservationGate = null;
@@ -1076,6 +1308,20 @@ export function discardSphReactionProductPlacementSegmentedArenaLease(
   }
   if (!record.inFlight) return false;
   const encoding = record.activeEncoding;
+  const preparedCapture = record.exactCapturePreparation?.captureRadixExecution;
+  if (preparedCapture && preparedCapture !== encoding?.captureRadixExecution) {
+    record.captureRadix.releaseExecution(preparedCapture, { discardedEncoder: true });
+  }
+  record.exactCapturePreparation = null;
+  record.exactEventRecord = null;
+  record.exactEventPreparation = null;
+  record.exactPhysicalPreparation = null;
+  record.exactPhysicalConsumptionRecord = null;
+  record.exactPhysicalConsumption = null;
+  record.exactChemistryRecord = null;
+  record.exactChemistryPreparation = null;
+  record.exactTerminalRecord = null;
+  record.exactTerminalEncoding = null;
   if (encoding) {
     for (const [runtime, execution] of [
       [record.captureRadix, encoding.captureRadixExecution],
@@ -1434,6 +1680,1491 @@ function placementBindGroup(device, pipelineInfo, label, entries) {
   });
 }
 
+// Numeric descriptors are public; preparation stays inside the original
+// placement authority and cannot independently admit physical publication.
+function exactCaptureConfigurationForAuthority(authority, device) {
+  const owner = requireLivePlacementAuthority(authority, { device, operation: 'exact capture configuration' });
+  const context = owner.exactQuantityContext;
+  if (!context) return null;
+  const bindings = context.validate();
+  const format = bindings.placedDestinationQuantityFormat;
+  const quantityLayout = bindings.placedDestinationQuantityLayout;
+  const capture = sphExactPlacementCaptureLayout(format, quantityLayout);
+  const merge = sphExactPlacementCaptureMergeLayout(format, quantityLayout);
+  if (quantityLayout.currentRowOffset !== 0 || quantityLayout.eventRowOffset !== authority.particleCount
+      || capture.particleCount !== authority.particleCount || capture.eventCapacity !== authority.productEventCapacity) {
+    throw placementError('exact capture must read the authenticated persistent current quantity layout', 'EXACT_CAPTURE_IDENTITY');
+  }
+  const signature = JSON.stringify([capture.schema, merge.schema, format.wordCount, format.quantumExponent,
+    capture.scalar.wordCount, capture.scalar.recordWords, capture.particleCount, capture.eventCapacity,
+    capture.quantityRecordWords, capture.quantityWordLength, capture.quantityCurrentRowOffset,
+    capture.quantityEventRowOffset, capture.recordWords, merge.mergedWordLength, merge.mapWordLength]);
+  const limit = device.limits?.maxComputeWorkgroupsPerDimension ?? 65535;
+  const dispatch = planSphExactPlacementCaptureWorkgroups(capture.eventCapacity, limit);
+  const initializeMergeDispatch = planSphExactPlacementCaptureWorkgroups(Math.max(capture.particleCount, capture.eventCapacity), limit);
+  const sizes = [capture.byteLength, merge.mergedByteLength, merge.mapByteLength,
+    capture.quantityWordLength * 4, SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES];
+  for (const size of sizes) {
+    if (!Number.isSafeInteger(size) || size < 4 || size > 0xffff_fffc
+        || size > (device.limits?.maxBufferSize ?? Number.MAX_SAFE_INTEGER)
+        || size > (device.limits?.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER)) {
+      throw placementError('exact capture scratch/current quantity exceeds device capacity', 'EXACT_CAPTURE_CAPACITY');
+    }
+  }
+  context.validate();
+  const protectedBuffers = Object.freeze([
+    ...Object.values(owner.bindings), ...Object.values(context.physical), context.quantities.outputBuffer
+  ].filter(value => value && Number.isSafeInteger(value.size)));
+  return Object.freeze({ format, quantityLayout, capture, merge, signature, dispatch, initializeMergeDispatch, protectedBuffers });
+}
+
+// Same generators/layouts for prewarm and actual encoding. These code-generation
+// descriptors confer no authority; the private encoder derives their arguments.
+export function sphReactionProductPlacementExactCapturePipelineDescriptors(format, quantityLayout) {
+  const capture = sphExactPlacementCapturePipelineDescriptors(format, quantityLayout);
+  const merge = sphExactPlacementCaptureMergeLayout(format, quantityLayout);
+  const code = createSphExactPlacementCaptureMergeWgsl(format, quantityLayout);
+  const suffix = [format.wordCount, format.quantumExponent, merge.capture.scalar.wordCount,
+    merge.particleCount, merge.eventCapacity, merge.recordWords, merge.capture.quantityCurrentRowOffset,
+    merge.capture.quantityEventRowOffset, merge.capture.quantityWordLength, merge.mergedWordLength, merge.mapWordLength].join('-');
+  const bindings = Array.from({ length: 8 }, (_, binding) =>
+    computeBufferBinding(binding, binding < 5 ? 'read-only-storage' : 'storage'));
+  const descriptor = (label, entryPoint) => Object.freeze({
+    cacheKey: `ulg-exact-capture-merge-v1-${label}-${suffix}`, label: `ulg-exact-capture-merge-${label}`,
+    code, entryPoint, bindings, workgroupSize: 1
+  });
+  return Object.freeze({ layout: capture.layout, mergeLayout: merge,
+    initialize: capture.initialize, reduce: capture.reduce,
+    mergeInitialize: descriptor('initialize', 'initialize_exact_capture_merge'),
+    merge: descriptor('tails', 'merge_exact_capture_segment_tails') });
+}
+
+/** PRIVATE scratch preparation in the original owner. No arbitrary keys, sort,
+ * source quantities, receipt or destination arguments are accepted. It records
+ * the original preflight/key producer and original radix sequence, then exact
+ * gather/reduce/merge. No S/T/M/current/history writes or publication occur. */
+function encodeExactPlacementCapturePreparation({ device, encoder, authority, arenaLease,
+  boxDimsM = [0, 0, 0], gpuTimestampRecorder = null } = {}) {
+  const owner = requireLivePlacementAuthority(authority, { device, operation: 'exact capture preparation' });
+  const arenaRecord = requireSegmentedPlacementArenaLease(arenaLease, { device, authority });
+  const compact = owner.exactCompactionEncoding;
+  if (!owner.exactQuantityContext || !compact || compact !== arenaRecord.exactCompactionEncoding
+      || compact.encoder !== encoder || compact.arenaLease !== arenaLease
+      || compact.authority !== authority || compact.completionReceiptBuffer !== owner.bindings.completionReceiptBuffer
+      || compact.sourcePhysicalOutput !== owner.exactQuantityContext.physical) {
+    throw placementError('exact capture requires its original compaction, encoder and lease', 'EXACT_CAPTURE_IDENTITY');
+  }
+  if (!encoder?.copyBufferToBuffer || !encoder?.beginComputePass || !encoder?.finish
+      || owner.exactCapturePreparation || arenaRecord.exactCapturePreparation
+      || owner.segmentedEncoding || owner.encodedPlacement || arenaRecord.activeEncoding) {
+    throw placementError('exact capture preparation is one-shot in a live original encoder', 'SUBMISSION');
+  }
+  const config = exactCaptureConfigurationForAuthority(authority, device);
+  const arena = arenaLease.arena, buffers = arena.buffers;
+  if (!config || arena.exactCaptureSignature !== config.signature
+      || arena.exactCaptureLayout?.recordWords !== config.capture.recordWords
+      || arena.exactCaptureMergeLayout?.mergedWordLength !== config.merge.mergedWordLength) {
+    throw placementError('exact capture arena layout differs from its private source', 'EXACT_CAPTURE_IDENTITY');
+  }
+  const bindings = owner.exactQuantityContext.validate();
+  const quantities = bindings.placedDestinationQuantityBuffer;
+  const state = bindings.placedDestinationStateBuffer ?? owner.bindings.placedDestinationStateBuffer;
+  const frozenState = owner.bindings.frozenSourceStateBuffer;
+  const frozenMechanics = owner.bindings.frozenSourceMechanicsBuffer;
+  const receipt = owner.bindings.completionReceiptBuffer;
+  const p = arena.particleCapacity, e = arena.eventCapacity;
+  const four = [buffers.exactCaptureA, buffers.exactCaptureB, buffers.exactCaptureMerged, buffers.exactCaptureMap];
+  const immutable = [quantities, state, frozenState, frozenMechanics, compact.productEventBuffer,
+    ...Object.values(owner.bindings).filter(value => value && Number.isSafeInteger(value.size)),
+    ...Object.values(owner.exactQuantityContext.physical).filter(value => value && Number.isSafeInteger(value.size)),
+    owner.exactQuantityContext.quantities.outputBuffer,
+    ...Object.values(buffers).filter(buffer => !four.includes(buffer)),
+    ...arenaRecord.captureRadix.allocationEntries().map(entry => entry.buffer)];
+  if (new Set(four).size !== 4 || four.some(buffer => immutable.includes(buffer))
+      || new Set([buffers.captureKeys, buffers.captureValues, buffers.eventPlan, buffers.control,
+        buffers.denseEmission, buffers.placementParams, receipt]).size !== 7) {
+    throw placementError('exact capture scratch aliases current/source/original arena roles', 'SOURCE_DESTINATION_ALIAS');
+  }
+  const bounded = (buffer, size, label, usage = GPU_BUFFER_USAGE.STORAGE, offset = 0) => {
+    requireBuffer(device, buffer, label);
+    if (!Number.isSafeInteger(size) || size < 4 || size > 0xffff_fffc
+        || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(offset + size)
+        || !Number.isSafeInteger(buffer.size) || offset + size > buffer.size
+        || (buffer.usage & usage) !== usage
+        || size > (usage === GPU_BUFFER_USAGE.UNIFORM
+          ? (device.limits?.maxUniformBufferBindingSize ?? 65536)
+          : (device.limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024))) {
+      throw placementError(`exact capture ${label} does not fit its owned range`, 'EXACT_CAPTURE_CAPACITY');
+    }
+    return { buffer, offset, size };
+  };
+  const radixIndices = arenaRecord.captureRadix.allocationEntries()
+    .filter(entry => /^radix-sorted-indices-[ab]$/.test(entry.role));
+  if (radixIndices.length !== 2 || radixIndices[0].buffer === radixIndices[1].buffer) {
+    throw placementError('exact capture lost its original radix index pair', 'EXACT_CAPTURE_IDENTITY');
+  }
+  for (const entry of radixIndices) bounded(entry.buffer, e * 4, entry.role);
+  const q = bounded(quantities, config.capture.quantityWordLength * 4, 'persistent current quantities');
+  const stateRange = bounded(state, p * 32, 'original current physical positions');
+  const keys = bounded(buffers.captureKeys, e * 4, 'original capture keys');
+  const geometry = bounded(buffers.captureValues, e * 24 * 4, 'original routed geometry');
+  const count = bounded(buffers.compactCount, 8, 'original compact count and error');
+  const receiptRange = bounded(receipt, SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES, 'original receipt');
+  const captureRanges = four.slice(0, 2).map((buffer, i) => bounded(buffer, config.capture.byteLength, `capture ping-pong ${i}`));
+  const merged = bounded(four[2], config.merge.mergedByteLength, 'merged quantity scratch');
+  const map = bounded(four[3], config.merge.mapByteLength, 'receiver tail and projected position map');
+  const params = bounded(buffers.placementParams, 64, 'original placement params', GPU_BUFFER_USAGE.UNIFORM);
+  const eventRange = bounded(buffers.denseEmission, e * 128, 'original candidate event plane');
+  const publishedEvents = bounded(compact.productEventBuffer, e * 128, 'original compact events');
+  const control = bounded(buffers.control, 32, 'original control');
+  const decisions = bounded(buffers.decisions, e * 16, 'original classifier decisions');
+  const eventPlan = bounded(buffers.eventPlan, e * SPH_REACTION_PRODUCT_PLACEMENT_EVENT_PLAN_ROWS * 16, 'original event plan');
+  const frozenS = bounded(frozenState, p * 32, 'frozen placement state');
+  const frozenM = bounded(frozenMechanics, p * 128, 'frozen placement mechanics');
+  const reduction = arenaRecord.reductionOffsets.capture;
+  const offsets = [reduction.initOffset, ...reduction.levelOffsets];
+  if (reduction.levelOffsets.length !== arena.captureReductionLevelCount
+      || arena.captureReductionLevelCount !== reductionLevelCount(e)) {
+    throw placementError('exact capture requires every original Hillis-Steele level', 'EXACT_CAPTURE_IDENTITY');
+  }
+  const uniformAlignment = device.limits?.minUniformBufferOffsetAlignment ?? 256;
+  const reductions = offsets.map(offset => {
+    if (offset % uniformAlignment !== 0) throw placementError('exact capture reduction offset is not aligned', 'EXACT_CAPTURE_CAPACITY');
+    return bounded(buffers.reductionParams, 16, 'original reduction params', GPU_BUFFER_USAGE.UNIFORM, offset);
+  });
+  if ((buffers.placementParams.usage & GPU_BUFFER_USAGE.COPY_DST) === 0
+      || (buffers.denseEmission.usage & GPU_BUFFER_USAGE.COPY_DST) === 0
+      || (compact.productEventBuffer.usage & GPU_BUFFER_USAGE.COPY_SRC) === 0) {
+    throw placementError('exact capture original copy/parameter usage is incomplete', 'EXACT_CAPTURE_CAPACITY');
+  }
+  const { eventWorkgroups } = planSphReactionProductPlacementDispatchWorkgroups({ device,
+    eventCount: e, particleCount: p, productTermCount: arena.productTermCapacity });
+  const descriptors = sphReactionProductPlacementExactCapturePipelineDescriptors(config.format, config.quantityLayout);
+  const original = sphReactionProductPlacementSegmentedPipelineDescriptors();
+  const pipelines = Object.fromEntries(['initialize', 'reduce', 'mergeInitialize', 'merge']
+    .map(key => [key, explicitPlacementPipeline(device, descriptors[key])]));
+  const preflight = explicitPlacementPipeline(device, original.preflight);
+  const plan = explicitPlacementPipeline(device, original.plan);
+  const group = (pipeline, label, resources) => placementBindGroup(device, pipeline, label,
+    resources.map(([binding, resource]) => ({ binding, resource })));
+  const preflightGroup = group(preflight, 'exact-capture-original-preflight', [[0, count], [1, control], [2, params], [3, receiptRange]]);
+  const planGroup = group(plan, 'exact-capture-original-plan', [[0, eventRange], [1, frozenS], [2, frozenM], [4, decisions],
+    [5, keys], [6, geometry], [7, eventPlan], [8, control], [9, params]]);
+  const validate = () => {
+    if (requireLivePlacementAuthority(authority, { device, operation: 'exact capture recording' }) !== owner
+        || requireSegmentedPlacementArenaLease(arenaLease, { device, authority }) !== arenaRecord
+        || owner.exactCompactionEncoding !== compact || arenaRecord.exactCompactionEncoding !== compact
+        || exactCaptureConfigurationForAuthority(authority, device).signature !== config.signature) {
+      throw placementError('exact capture lost its original transaction identities', 'EXACT_CAPTURE_IDENTITY');
+    }
+    owner.exactQuantityContext.validate();
+  };
+  validate();
+  owner.exactQuantityContext.read.markDerivedBuffers(four); validate();
+  const preparation = { encoder, authority, arenaLease, sourceQuantityBuffer: quantities,
+    sourceQuantityLayout: config.quantityLayout, sourceStateBuffer: state, receiptBuffer: receipt,
+    captureKeysBuffer: buffers.captureKeys, captureGeometryBuffer: buffers.captureValues,
+    captureRadixExecution: null, status: 'recording', physicalPublicationAdmitted: false };
+  owner.exactCapturePreparation = preparation; arenaRecord.exactCapturePreparation = preparation;
+  const dimensions = [0, 1, 2].map(axis => {
+    const value = Number(boxDimsM?.[axis]); return Number.isFinite(value) && value > 0 ? value : 0;
+  });
+  const capturedPlacementParams = placementParamsData({ particleCount: p, eventCount: e,
+    eventStrideVec4: 8, productTermCount: arena.productTermCapacity, boxDimsM: dimensions,
+    generationId: authority.generationId, supportProfileId: authority.supportProfileId });
+  preparation.placementParamsWords = Object.freeze(Array.from(new Uint32Array(capturedPlacementParams)));
+  device.queue.writeBuffer(buffers.placementParams, 0, capturedPlacementParams);
+  validate();
+  encoder.copyBufferToBuffer(compact.productEventBuffer, 0, buffers.denseEmission, 0, e * 128);
+  const metadata = { generationId: authority.generationId, particleCount: p, eventCapacity: e,
+    productTermCount: arena.productTermCapacity };
+  let explicitDispatchCount = 0;
+  const encodeOriginal = (pipeline, bindGroup, workgroupCount, label) => {
+    validate(); encodePlacementPass({ encoder, pipeline: pipeline.pipeline, bindGroup, workgroupCount,
+      label, producerId: `sph-reaction-summary:product-event-placement:${label}`, gpuTimestampRecorder, metadata });
+    explicitDispatchCount++;
+  };
+  encodeOriginal(preflight, preflightGroup, 1, 'preflight');
+  encodeOriginal(plan, planGroup, eventWorkgroups, 'plan');
+  // Actual original classifier/envelope/spare evidence is consumed by the
+  // original preflight above. No host success counter or fake decision is set.
+  validate();
+  const radixSpan = placementTimestampBegin(gpuTimestampRecorder, encoder,
+    { producerId: 'sph-reaction-summary:product-event-placement:capture-radix', stage: 'capture-radix',
+      spanClass: 'same-grouped-production-compute-pass', ...metadata });
+  const captureRadixExecution = arenaRecord.captureRadix.encodeSort(encoder, {
+    keyBuffer: buffers.captureKeys, elementCount: e, keyWordCount: 1, keyStrideWords: 1,
+    generationId: authority.generationId });
+  preparation.captureRadixExecution = captureRadixExecution;
+  placementTimestampEnd(gpuTimestampRecorder, encoder, radixSpan);
+  const sorted = bounded(captureRadixExecution.sortedIndicesBuffer, e * 4, 'original capture sorted indices');
+  if (four.includes(sorted.buffer) || !radixIndices.some(entry => entry.buffer === sorted.buffer)) {
+    throw placementError('exact capture sort is outside its original radix arena', 'EXACT_CAPTURE_IDENTITY');
+  }
+  const encodeExact = (pipeline, bindGroup, workgroups, label) => {
+    validate();
+    const span = placementTimestampBegin(gpuTimestampRecorder, encoder,
+      { producerId: `sph-reaction-summary:product-event-placement:${label}`, stage: label,
+        spanClass: 'same-production-command-encoder-profiled-pass', ...metadata });
+    const pass = encoder.beginComputePass({ label }); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroups.x, workgroups.y, workgroups.z); pass.end();
+    placementTimestampEnd(gpuTimestampRecorder, encoder, span); explicitDispatchCount++;
+  };
+  const reduceGroup = (pipeline, input, output, paramsRange, label) => group(pipeline, label,
+    [[0, keys], [1, sorted], [2, q], [3, geometry], [4, count], [5, input], [6, output], [7, receiptRange], [8, paramsRange]]);
+  encodeExact(pipelines.initialize, reduceGroup(pipelines.initialize, captureRanges[1], captureRanges[0], reductions[0],
+    'exact-capture-initialize'), config.dispatch, 'exact-capture-initialize');
+  let input = captureRanges[0], output = captureRanges[1];
+  reduction.levelOffsets.forEach((offset, level) => {
+    encodeExact(pipelines.reduce, reduceGroup(pipelines.reduce, input, output, reductions[level + 1],
+      `exact-capture-reduce-${level}`), config.dispatch, `exact-capture-reduce-${level}`);
+    [input, output] = [output, input];
+  });
+  const mergeResources = [[0, keys], [1, sorted], [2, input], [3, q], [4, stateRange], [5, merged], [6, map], [7, receiptRange]];
+  encodeExact(pipelines.mergeInitialize, group(pipelines.mergeInitialize, 'exact-capture-merge-initialize', mergeResources),
+    config.initializeMergeDispatch, 'exact-capture-merge-initialize');
+  encodeExact(pipelines.merge, group(pipelines.merge, 'exact-capture-merge-tails', mergeResources),
+    config.dispatch, 'exact-capture-merge-tails');
+  validate();
+  Object.assign(preparation, { status: 'scratch-prepared', captureSortedBuffer: sorted.buffer,
+    captureReducedValuesBuffer: input.buffer, mergedQuantityBuffer: merged.buffer, receiverMapBuffer: map.buffer,
+    captureLayout: config.capture, mergeLayout: config.merge, explicitDispatchCount,
+    encodedDispatchCount: explicitDispatchCount + captureRadixExecution.encodedDispatchCount,
+    reductionOffsets: Object.freeze([...offsets]), dispatch: config.dispatch, initializeMergeDispatch: config.initializeMergeDispatch });
+  return Object.freeze(preparation);
+}
+
+// PRIVATE: layout/data derived from the same held reaction source. No caller
+// table, count, scratch, success status, or source registrar is accepted.
+function exactPhysicalConfigurationForAuthority(authority, device) {
+  const owner = requireLivePlacementAuthority(authority, { device, operation: 'exact receiver configuration' });
+  const context = owner.exactQuantityContext;
+  if (!context) return null;
+  const bindings = context.validate(), original = context.original.source;
+  const mechanicsTable = original.source.mechanicsMaterialTable;
+  // Older/fused captures with no table provenance remain usable by the old
+  // numerical prefix, but cannot enter this physical preparation helper.
+  if (!mechanicsTable) return null;
+  const reactionTable = original.reactionTable, thermalMaterialTable = original.thermalMaterialTable;
+  const caloricMetadata = encodeSphExactPlacementCaloricMetadata(original.compiled, { reactionTable, thermalMaterialTable });
+  const format = bindings.placedDestinationQuantityFormat, quantityLayout = bindings.placedDestinationQuantityLayout;
+  const capture = sphExactPlacementCaptureLayout(format, quantityLayout);
+  let maxIntervals = 0;
+  for (let i = 0; i < caloricMetadata.materialCount; i++) maxIntervals = Math.max(maxIntervals, caloricMetadata.words[8 + i * 8 + 5]);
+  const caloric = sphExactPlacementReceiverCaloricLayout(format, quantityLayout,
+    { receiverCapacity: authority.productEventCapacity, maxIntervals });
+  const physical = sphExactPlacementPhysicalApplyLayout(format, quantityLayout, caloric, capture);
+  const graph = reactionTable.combinedRecords, mechanics = mechanicsTable.records;
+  if (!(graph instanceof Float32Array) || !(mechanics instanceof Float32Array)
+      || graph.length % 4 || mechanics.length % 4 || graph.byteLength === 0 || mechanics.byteLength === 0) {
+    throw placementError('original caloric/mechanics tables are incomplete', 'EXACT_PHYSICAL_IDENTITY');
+  }
+  const gasConstitutiveOffset = assertSphMechanicsGasLayout(mechanicsTable);
+  const graphRecordCount = graph.length / 4, mechanicsRecordCount = mechanics.length / 4;
+  assertSphExactPlacementPhysicalApplyDeviceLimits(physical, device.limits, { graphRecordCount, mechanicsRecordCount });
+  if (!Number.isSafeInteger(device.limits?.maxUniformBuffersPerShaderStage) || device.limits.maxUniformBuffersPerShaderStage < 1) {
+    throw placementError('exact receiver requires the actual uniform-binding capacity', 'EXACT_PHYSICAL_CAPACITY');
+  }
+  const intervalDispatchCount = caloric.receiverCapacity * caloric.maxIntervals;
+  const limit = device.limits.maxComputeWorkgroupsPerDimension;
+  // The reviewed caloric kernel uses id.x; never silently truncate or send a
+  // second dimension that it would ignore.
+  if (!Number.isSafeInteger(limit) || limit < 1 || intervalDispatchCount > limit) {
+    throw placementError('complete original caloric interval dispatch exceeds device capacity', 'EXACT_PHYSICAL_CAPACITY');
+  }
+  const sizes = Object.freeze({
+    exactPhysicalPacked: physical.packedPhysicalWordLength * 4,
+    exactCaloricMetadata: caloricMetadata.words.byteLength,
+    exactCaloricGraph: graph.byteLength,
+    exactMechanicsRecords: mechanics.byteLength,
+    exactCaloricReceiver: caloric.receiverWordLength * 4,
+    exactCaloricIntervals: caloric.intervalWordLength * 4,
+    exactCaloricParams: caloric.uniformBytes,
+    exactPhysicalCandidate: physical.candidateWordLength * 4,
+    exactPhysicalEvidence: physical.evidenceWordLength * 4,
+    exactPhysicalParams: physical.uniformBytes
+  });
+  for (const [key, bytes] of Object.entries(sizes)) {
+    const uniform = key.endsWith('Params');
+    if (!Number.isSafeInteger(bytes) || bytes < 4 || bytes > 0xffff_fffc || bytes > device.limits.maxBufferSize
+        || bytes > (uniform ? device.limits.maxUniformBufferBindingSize : device.limits.maxStorageBufferBindingSize)) {
+      throw placementError(`${key} exceeds original device capacity`, 'EXACT_PHYSICAL_CAPACITY');
+    }
+  }
+  const signature = JSON.stringify([format.wordCount, format.quantumExponent, quantityLayout.recordWords,
+    quantityLayout.scalar.wordCount, quantityLayout.currentRowOffset, authority.particleCount,
+    authority.productEventCapacity, maxIntervals, graphRecordCount, mechanicsRecordCount,
+    mechanicsTable.phaseRecordCount, gasConstitutiveOffset, sizes]);
+  context.validate();
+  return Object.freeze({ format, quantityLayout, capture, caloric, physical, caloricMetadata,
+    graph, mechanics, reactionTable, thermalMaterialTable, mechanicsTable,
+    graphRecordCount, mechanicsRecordCount, gasConstitutiveOffset,
+    phaseRecordCount: mechanicsTable.phaseRecordCount, intervalDispatchCount, sizes, signature,
+    physicalDispatches: planSphExactPlacementPhysicalApplyDispatches(physical, device.limits) });
+}
+
+// Pure numeric descriptor factory for cold prewarming. It cannot admit a
+// source, allocate an owner, record commands, or mint a publication capability.
+export function sphReactionProductPlacementExactPhysicalPipelineDescriptors(format, quantityLayout, { maxIntervals } = {}) {
+  const capture = sphExactPlacementCaptureLayout(format, quantityLayout);
+  const caloric = sphExactPlacementReceiverCaloricLayout(format, quantityLayout,
+    { receiverCapacity: quantityLayout.eventCapacity, maxIntervals });
+  const physical = sphExactPlacementPhysicalApplyLayout(format, quantityLayout, caloric, capture);
+  return exactPhysicalPipelineDescriptors({ format, quantityLayout, caloric, capture, physical });
+}
+
+function exactPhysicalPipelineDescriptors(config) {
+  const { format, quantityLayout: q, caloric, capture, physical: p } = config;
+  const key = [format.wordCount, format.quantumExponent, q.scalar.wordCount, q.recordWords,
+    q.currentRowOffset, p.particleCount, p.eventCapacity, caloric.maxIntervals,
+    caloric.receiverRecordWords, caloric.intervalRecordWords, p.evidenceRecordWords].join('-');
+  const descriptor = (stage, code, entryPoint, types) => Object.freeze({
+    label: `ulg-exact-placement-${stage}`, cacheKey: `ulg-exact-placement-private-v8-${stage}-${key}`,
+    code, entryPoint, bindings: types.map((type, binding) => computeBufferBinding(binding, type))
+  });
+  const packedCode = `
+@group(0) @binding(0) var<storage,read> state:array<u32>;
+@group(0) @binding(1) var<storage,read> thermo:array<u32>;
+@group(0) @binding(2) var<storage,read> mechanics:array<u32>;
+@group(0) @binding(3) var<storage,read_write> packed:array<u32>;
+@compute @workgroup_size(1)
+fn pack_original_receiver_physical(@builtin(global_invocation_id) id:vec3<u32>, @builtin(num_workgroups) groups:vec3<u32>) {
+  let row=id.x+id.y*groups.x; if(row>=${p.particleCount}u){return;}
+  for(var i=0u;i<8u;i++){packed[row*52u+i]=state[row*8u+i];}
+  for(var i=0u;i<12u;i++){packed[row*52u+8u+i]=thermo[row*12u+i];}
+  for(var i=0u;i<32u;i++){packed[row*52u+20u+i]=mechanics[row*32u+i];}
+}`;
+  const ro='read-only-storage',rw='storage',u='uniform';
+  const caloricCode = createSphExactPlacementReceiverCaloricWgsl(format,q,caloric);
+  const prepareCode = createSphExactPlacementPhysicalApplyWgsl(format,q,caloric,capture,{stage:'prepare',currentRowOffset:q.currentRowOffset});
+  const applyCode = createSphExactPlacementPhysicalApplyWgsl(format,q,caloric,capture,{stage:'apply',currentRowOffset:q.currentRowOffset});
+  return Object.freeze({
+    pack:descriptor('pack-current',packedCode,'pack_original_receiver_physical',[ro,ro,ro,rw]),
+    caloricPrepare:descriptor('caloric-prepare',caloricCode,'prepare_exact_receiver_caloric',[ro,ro,ro,ro,ro,rw,rw,u]),
+    ...Object.fromEntries(SPH_EXACT_RECEIVER_PREPARATION_STAGES.map(({key,label,entryPoint}) =>
+      [key,descriptor(label,caloricCode,entryPoint,[ro,ro,ro,ro,ro,rw,rw,u])])),
+    caloricInitialize:descriptor('caloric-initialize',caloricCode,'initialize_exact_receiver_caloric_intervals',[ro,ro,ro,ro,ro,rw,rw,u]),
+    caloricRefine:descriptor('caloric-refine',caloricCode,'refine_exact_receiver_caloric_intervals',[ro,ro,ro,ro,ro,rw,rw,u]),
+    caloricSelect:descriptor('caloric-select',caloricCode,'select_exact_receiver_caloric',[ro,ro,ro,ro,ro,rw,rw,u]),
+    caloricViewEnergy:descriptor('caloric-view-energy',caloricCode,'prepare_exact_receiver_caloric_view_energy',[ro,ro,ro,ro,ro,rw,rw,u]),
+    caloricFinalize:descriptor('caloric-finalize',caloricCode,'finalize_exact_receiver_caloric',[ro,ro,ro,ro,ro,rw,rw,u]),
+    physicalInitialize:descriptor('physical-initialize',prepareCode,'initialize_exact_receiver_physical_apply',[ro,ro,ro,ro,ro,ro,ro,ro,ro,rw,rw,rw,u]),
+    ...Object.fromEntries(SPH_EXACT_PHYSICAL_PREPARATION_STAGES.map(({key,label,entryPoint}) =>
+      [key,descriptor(label,prepareCode,entryPoint,[ro,ro,ro,ro,ro,ro,ro,ro,ro,rw,rw,rw,u])])),
+    physicalApply:descriptor('physical-raw-apply',applyCode,'apply_exact_receiver_physical_segment_tails',[ro,ro,rw,rw,rw,rw,rw,rw,rw])
+  });
+}
+
+/** Compile the exact family's arithmetic before recording its transaction.
+ * Keep large integer compilation off the synchronous recording path.
+ * Every descriptor here is also consumed by the encoder; this
+ * allocates no destination, records no command, and grants no publication.
+ */
+export async function prewarmSphReactionProductPlacementExactWebGpu({ device, authority } = {}) {
+  const owner = requireLivePlacementAuthority(authority, { device, operation: 'exact placement prewarm' });
+  if (!owner.exactQuantityContext) return Object.freeze({ pipelineCount: 0, prewarmedCount: 0 });
+  const capture = exactCaptureConfigurationForAuthority(authority, device);
+  const physical = exactPhysicalConfigurationForAuthority(authority, device);
+  const chemistry = exactChemistryConfigurationForAuthority(authority, device);
+  const events = exactEventConfigurationForAuthority(authority, device);
+  if (!capture || !physical || !chemistry || !events) {
+    throw placementError('exact placement prewarm requires complete original material and quantity inputs', 'EXACT_PHYSICAL_IDENTITY');
+  }
+  const descriptors = [
+    ...Object.values(sphReactionProductPlacementExactCapturePipelineDescriptors(capture.format, capture.quantityLayout)),
+    ...Object.values(exactPhysicalPipelineDescriptors(physical)),
+    ...Object.values(sphExactPlacementEventPipelineDescriptors(events.format, events.layout)),
+    ...sphExactReactionChemistryBudgetPipelineDescriptors(chemistry.format, chemistry.layout)
+  ].filter(value => value?.entryPoint);
+  let prewarmedCount = 0;
+  for (const descriptor of descriptors) {
+    requireLivePlacementAuthority(authority, { device, operation: 'exact placement prewarm' });
+    const result = await prewarmCachedExplicitComputePipeline(device, descriptor);
+    if (!result.pipeline) throw result.error ?? placementError(`exact placement pipeline failed: ${descriptor.entryPoint}`, 'EXACT_PIPELINE');
+    requireLivePlacementAuthority(authority, { device, operation: 'exact placement prewarm' });
+    prewarmedCount += Number(result.prewarmed);
+  }
+  return Object.freeze({ pipelineCount: descriptors.length, prewarmedCount });
+}
+
+/** PRIVATE original-owner continuation. It records into the SAME encoder and
+ * receipt. GPU failures stay in original receipt flags; this returns command
+ * metadata only, never a success/readiness claim or publication authority. */
+function encodeExactPlacementCaloricPhysicalPreparation({device,encoder,authority,arenaLease,
+  boxDimsM=[0,0,0],gpuTimestampRecorder=null}={}) {
+  const owner=requireLivePlacementAuthority(authority,{device,operation:'exact caloric/physical preparation'});
+  const arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+  const capture=owner.exactCapturePreparation,arena=arenaLease.arena,b=arena.buffers;
+  if(!capture || capture!==arenaRecord.exactCapturePreparation || capture.encoder!==encoder
+      || capture.authority!==authority || capture.arenaLease!==arenaLease || capture.status!=='scratch-prepared') {
+    throw placementError('exact physical preparation requires the original completed capture prefix','EXACT_PHYSICAL_IDENTITY');
+  }
+  if(owner.exactPhysicalPreparation || arenaRecord.exactPhysicalPreparation || arenaRecord.segmentedEncoding
+      || arenaRecord.encodedPlacement || arenaRecord.activeEncoding) throw placementError('exact physical preparation is one-shot','EXACT_PHYSICAL_REPLAY');
+  const config=exactPhysicalConfigurationForAuthority(authority,device);
+  if(!config || arena.exactPhysicalSignature!==config.signature) throw placementError('original mechanics provenance or matching physical arena unavailable','EXACT_PHYSICAL_IDENTITY');
+  const p=authority.particleCount,e=authority.productEventCapacity,l=config.physical;
+  const current=owner.bindings.placedDestinationQuantityBuffer;
+  const state=owner.bindings.placedDestinationStateBuffer,thermo=owner.bindings.placedDestinationThermoBuffer;
+  const mechanics=owner.bindings.placedDestinationMechanicsBuffer,receipt=owner.bindings.completionReceiptBuffer;
+  if(capture.sourceQuantityBuffer!==current || capture.sourceStateBuffer!==state
+      || capture.receiptBuffer!==receipt || capture.mergedQuantityBuffer!==b.exactCaptureMerged
+      || capture.receiverMapBuffer!==b.exactCaptureMap) throw placementError('exact physical capture tuple changed','EXACT_PHYSICAL_IDENTITY');
+  const scratch=Object.keys(config.sizes).map(key=>b[key]);
+  const protectedBuffers=[...Object.values(owner.bindings),...Object.values(owner.exactQuantityContext.physical),
+    owner.exactQuantityContext.quantities.outputBuffer,...Object.values(b).filter(buffer=>!scratch.includes(buffer)),
+    ...arenaRecord.captureRadix.allocationEntries().map(entry=>entry.buffer),
+    ...arenaRecord.directRadix.allocationEntries().map(entry=>entry.buffer),
+    ...arenaRecord.summaryRadix.allocationEntries().map(entry=>entry.buffer)];
+  if(new Set(scratch).size!==scratch.length || scratch.some(buffer=>protectedBuffers.includes(buffer))
+      || new Set([state,thermo,mechanics,current,receipt,b.summaryValues]).size!==6) {
+    throw placementError('exact physical scratch/output aliases an original role','SOURCE_DESTINATION_ALIAS');
+  }
+  const range=(buffer,size,label,usage=GPU_BUFFER_USAGE.STORAGE,offset=0)=>{
+    requireBuffer(device,buffer,label);
+    if(!Number.isSafeInteger(size)||size<4||size%4||!Number.isSafeInteger(offset)||offset<0||offset%4
+        ||!Number.isSafeInteger(buffer.size)||!Number.isSafeInteger(offset+size)||offset+size>buffer.size
+        ||(buffer.usage&usage)!==usage||size>device.limits.maxBufferSize
+        ||size>(usage===GPU_BUFFER_USAGE.UNIFORM?device.limits.maxUniformBufferBindingSize:device.limits.maxStorageBufferBindingSize)) {
+      throw placementError(`${label} does not fit original owned range`,'EXACT_PHYSICAL_CAPACITY');
+    }
+    return {buffer,offset,size};
+  };
+  const r=Object.fromEntries(Object.entries(config.sizes).map(([key,size])=>[key,range(b[key],size,key,
+    key.endsWith('Params')?GPU_BUFFER_USAGE.UNIFORM:GPU_BUFFER_USAGE.STORAGE)]));
+  const s=range(state,p*32,'original current state'),t=range(thermo,p*48,'original current thermo'),m=range(mechanics,p*128,'original current mechanics');
+  const q=range(current,l.currentWordLength*4,'original persistent current quantities');
+  const merged=range(capture.mergedQuantityBuffer,l.outputQuantityWordLength*4,'original merged exact quantities');
+  const map=range(capture.receiverMapBuffer,l.mapWordLength*4,'original receiver map');
+  const exactReduced=range(capture.captureReducedValuesBuffer,l.captureWordLength*4,'original exact reduced capture');
+  const receiptRange=range(receipt,SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,'original receipt');
+  const summary=range(b.summaryValues,e*9*16,'original summary rows');
+  const keys=range(b.captureKeys,e*4,'original capture keys'),sorted=range(capture.captureSortedBuffer,e*4,'original capture sorted indices');
+  const geometry=range(b.captureValues,e*6*16,'original capture geometry');
+  const projected=[range(b.captureReduceA,e*6*16,'original projected capture A'),range(b.captureReduceB,e*6*16,'original projected capture B')];
+  const offsets=capture.reductionOffsets;
+  if(offsets.length!==1+arena.captureReductionLevelCount || offsets.length!==1+reductionLevelCount(e)) throw placementError('exact physical requires full original projected reduction','EXACT_PHYSICAL_IDENTITY');
+  const alignment=device.limits.minUniformBufferOffsetAlignment;
+  if(!Number.isSafeInteger(alignment)||alignment<1) throw placementError('original uniform alignment unavailable','EXACT_PHYSICAL_CAPACITY');
+  const reductions=offsets.map(offset=>{
+    if(offset%alignment)throw placementError('original reduction uniform misalignment','EXACT_PHYSICAL_CAPACITY');
+    return range(b.reductionParams,16,'original reduction parameter',GPU_BUFFER_USAGE.UNIFORM,offset);
+  });
+  const writeKeys=['exactCaloricMetadata','exactCaloricGraph','exactMechanicsRecords','exactCaloricParams','exactPhysicalParams'];
+  for(const key of [...writeKeys,'exactPhysicalCandidate','exactPhysicalEvidence']) {
+    if((b[key].usage&GPU_BUFFER_USAGE.COPY_DST)===0)throw placementError('original receiver upload/clear usage unavailable','EXACT_PHYSICAL_CAPACITY');
+  }
+  if(!Object.isFrozen(capture.placementParamsWords)||capture.placementParamsWords.length!==16) {
+    throw placementError('exact physical preparation lost original immutable placement parameters','EXACT_PHYSICAL_IDENTITY');
+  }
+  const placementWords=Uint32Array.from(capture.placementParamsWords);
+  const caloricWords=encodeSphExactPlacementReceiverCaloricParams(config.caloric,{receiverCount:e,quantityCount:p,
+    physicalCount:p,graphRecordCount:config.graphRecordCount,caloricMetadata:config.caloricMetadata});
+  const physicalWords=encodeSphExactPlacementPhysicalApplyParams(l,placementWords,{phaseRecordCount:config.phaseRecordCount,
+    gasConstitutiveOffset:config.gasConstitutiveOffset,graphRecordCount:config.graphRecordCount});
+  const graphWords=new Uint32Array(config.graph.buffer,config.graph.byteOffset,config.graph.length).slice();
+  const mechanicsWords=new Uint32Array(config.mechanics.buffer,config.mechanics.byteOffset,config.mechanics.length).slice();
+  const descriptors=exactPhysicalPipelineDescriptors(config);
+  const pipelines=Object.fromEntries(Object.entries(descriptors).map(([key,value])=>[key,explicitPlacementPipeline(device,value)]));
+  const legacy=sphReactionProductPlacementSegmentedPipelineDescriptors();
+  const projectedInitialize=explicitPlacementPipeline(device,legacy.captureInitialize),projectedReduce=explicitPlacementPipeline(device,legacy.captureReduce);
+  const group=(pipeline,label,resources)=>placementBindGroup(device,pipeline,label,resources.map((resource,binding)=>({binding,resource})));
+  const groups={pack:group(pipelines.pack,'exact-original-physical-pack',[s,t,m,r.exactPhysicalPacked])};
+  const caloricResources=[merged,map,r.exactPhysicalPacked,r.exactCaloricMetadata,r.exactCaloricGraph,r.exactCaloricReceiver,r.exactCaloricIntervals,r.exactCaloricParams];
+  for(const key of ['caloricPrepare',...SPH_EXACT_RECEIVER_PREPARATION_STAGES.map(stage=>stage.key),'caloricInitialize','caloricRefine','caloricSelect','caloricViewEnergy','caloricFinalize'])groups[key]=group(pipelines[key],key,caloricResources);
+  const projectedGroups=[];let input=projected[0],output=projected[1];
+  projectedGroups.push([projectedInitialize,group(projectedInitialize,'original-projected-capture-init',[keys,sorted,geometry,output,input,reductions[0]])]);
+  for(let level=1;level<reductions.length;level++){
+    projectedGroups.push([projectedReduce,group(projectedReduce,`original-projected-capture-${level}`,[keys,sorted,geometry,input,output,reductions[level]])]);
+    [input,output]=[output,input];
+  }
+  const prepResources=[r.exactPhysicalPacked,q,merged,map,r.exactCaloricReceiver,r.exactMechanicsRecords,r.exactCaloricGraph,
+    exactReduced,input,r.exactPhysicalCandidate,receiptRange,r.exactPhysicalEvidence,r.exactPhysicalParams];
+  for(const key of ['physicalInitialize',...SPH_EXACT_PHYSICAL_PREPARATION_STAGES.map(stage=>stage.key)])groups[key]=group(pipelines[key],key,prepResources);
+  groups.physicalApply=group(pipelines.physicalApply,'physicalApply',[r.exactPhysicalCandidate,merged,r.exactPhysicalEvidence,s,t,m,q,summary,receiptRange]);
+  const validate=()=>{
+    if(requireLivePlacementAuthority(authority,{device,operation:'exact caloric/physical recording'})!==owner
+        || requireSegmentedPlacementArenaLease(arenaLease,{device,authority})!==arenaRecord
+        || owner.exactCapturePreparation!==capture || arenaRecord.exactCapturePreparation!==capture
+        || exactPhysicalConfigurationForAuthority(authority,device)?.signature!==config.signature) {
+      throw placementError('exact receiver lost original owner/source/layout','EXACT_PHYSICAL_IDENTITY');
+    }
+    owner.exactQuantityContext.validate();
+  };
+  validate();owner.exactQuantityContext.read.markDerivedBuffers(scratch);validate();
+  const preparation={encoder,authority,arenaLease,capturePreparation:capture,sourceQuantityBuffer:current,
+    sourceStateBuffer:state,sourceThermoBuffer:thermo,sourceMechanicsBuffer:mechanics,receiptBuffer:receipt,
+    caloricLayout:config.caloric,physicalLayout:l,caloricBuffer:b.exactCaloricReceiver,
+    intervalBuffer:b.exactCaloricIntervals,physicalCandidateBuffer:b.exactPhysicalCandidate,
+    physicalEvidenceBuffer:b.exactPhysicalEvidence,packedPhysicalBuffer:b.exactPhysicalPacked,
+    projectedCaptureReducedValuesBuffer:input.buffer,status:'recording',physicalPublicationAdmitted:false,quantityAdmission:false,
+    validate() {
+      validate();
+      if(owner.exactPhysicalPreparation!==preparation || arenaRecord.exactPhysicalPreparation!==preparation
+          || preparation.status!=='commands-recorded') throw placementError('exact physical preparation lost original completed recording','EXACT_PHYSICAL_IDENTITY');
+      return preparation;
+    }};
+  owner.exactPhysicalPreparation=preparation;arenaRecord.exactPhysicalPreparation=preparation;
+  // No later write mutates these owned parameter/table slots in this one-shot
+  // encoder. Warm reuse requires the original arena's confirmed release fence.
+  for(const [key,words] of [['exactCaloricMetadata',config.caloricMetadata.words],['exactCaloricGraph',graphWords],
+    ['exactMechanicsRecords',mechanicsWords],['exactCaloricParams',caloricWords],['exactPhysicalParams',physicalWords]]) {
+    validate();device.queue.writeBuffer(b[key],0,words);
+  }
+  validate();encoder.clearBuffer(b.exactPhysicalCandidate,0,config.sizes.exactPhysicalCandidate);
+  validate();encoder.clearBuffer(b.exactPhysicalEvidence,0,config.sizes.exactPhysicalEvidence);
+  let explicitDispatchCount=0;
+  const dispatch=(pipeline,bindGroup,groupsCount,label)=>{
+    validate();const span=placementTimestampBegin(gpuTimestampRecorder,encoder,{producerId:`sph-reaction-summary:product-event-placement:${label}`,
+      stage:label,spanClass:'same-production-command-encoder-profiled-pass',generationId:authority.generationId,particleCount:p,eventCapacity:e});
+    const pass=encoder.beginComputePass({label});pass.setPipeline(pipeline.pipeline);pass.setBindGroup(0,bindGroup);
+    pass.dispatchWorkgroups(...groupsCount);pass.end();placementTimestampEnd(gpuTimestampRecorder,encoder,span);explicitDispatchCount++;
+  };
+  const particleGroups=config.physicalDispatches[0].groups,eventGroups=config.physicalDispatches[1].groups;
+  const oldEventGroups=planSphReactionProductPlacementDispatchWorkgroups({device,eventCount:e,particleCount:p,productTermCount:arena.productTermCapacity}).eventWorkgroups;
+  projectedGroups.forEach(([pipeline,bindGroup],i)=>dispatch(pipeline,bindGroup,[oldEventGroups,1,1],`exact-original-projected-reduce-${i}`));
+  dispatch(pipelines.pack,groups.pack,particleGroups,'exact-pack-original-current');
+  dispatch(pipelines.caloricPrepare,groups.caloricPrepare,[e,1,1],'exact-caloric-prepare');
+  for(const {key,label} of SPH_EXACT_RECEIVER_PREPARATION_STAGES)dispatch(pipelines[key],groups[key],[e,1,1],`exact-${label}`);
+  dispatch(pipelines.caloricInitialize,groups.caloricInitialize,[config.intervalDispatchCount,1,1],'exact-caloric-interval-init');
+  for(let i=0;i<config.caloric.refinementDispatchCount;i++)dispatch(pipelines.caloricRefine,groups.caloricRefine,[config.intervalDispatchCount,1,1],`exact-caloric-refine-${i}`);
+  dispatch(pipelines.caloricSelect,groups.caloricSelect,[e,1,1],'exact-caloric-select');
+  dispatch(pipelines.caloricViewEnergy,groups.caloricViewEnergy,[e,1,1],'exact-caloric-view-energy');
+  dispatch(pipelines.caloricFinalize,groups.caloricFinalize,[e,1,1],'exact-caloric-finalize');
+  dispatch(pipelines.physicalInitialize,groups.physicalInitialize,particleGroups,'exact-physical-initialize');
+  for(const {key,label} of SPH_EXACT_PHYSICAL_PREPARATION_STAGES)dispatch(pipelines[key],groups[key],eventGroups,`exact-${label}`);
+  dispatch(pipelines.physicalApply,groups.physicalApply,particleGroups,'exact-physical-raw-apply');
+  validate();Object.assign(preparation,{status:'commands-recorded',explicitDispatchCount,encodedDispatchCount:explicitDispatchCount});
+  return Object.freeze(preparation);
+}
+
+/** Resolve the one exact source already held by the ORIGINAL placement family.
+ * A descriptor returned here is a view, not an admission capability or registrar.
+ * The family owns the read and is the only party that may release it. */
+export function resolveSphReactionProductPlacementExactCompactionSource(authority, { device } = {}) {
+  const record = requireLivePlacementAuthority(authority, {
+    device, operation: 'exact placement compaction source resolution'
+  });
+  const family = record.placementSourceFamily;
+  const read = resolveSchroederSpatialReactionPlacementExactSource(family, { device });
+  if (!read) return null;
+  const original = read.validate();
+  const physical = original.result.physicalOutput;
+  const selected = original.source.result;
+  const n = selected.format.wordCount;
+  const count = physical.denseEventCount;
+  const stride = 8 + 3 * n;
+  const quantities = physical.quantities;
+  const layout = quantities?.layout;
+  const safePositive = x => Number.isSafeInteger(x) && x > 0;
+  if (!Number.isSafeInteger(n) || n < 1 || n > 66
+      || !safePositive(count) || count > 0x7fffffff
+      || count !== authority.productEventCapacity
+      || count !== authority.particleCount * selected.caloricProductCapacity
+      || physical.layout.particleCount !== authority.particleCount
+      || physical.layout.denseEventCount !== count
+      || physical.eventCompanionStrideWords !== stride
+      || physical.layout.eventCompanionStrideWords !== stride
+      || physical.eventCompanionByteOffset !== physical.layout.eventCompanionOffsetWords * 4
+      || !layout || layout.particleCount !== authority.particleCount
+      || layout.massWordCount !== n || layout.eventCapacity !== count
+      || layout.eventRowOffset !== 2 * authority.particleCount
+      || family.frozenSourceQuantityBuffer !== quantities.outputBuffer
+      || family.frozenSourceQuantityLayout !== layout
+      || family.frozenSourceResidualCountBuffer !== physical.compactCountBuffer) {
+    throw placementError('exact compaction source/capacity differs from its held producer and quantity rows', 'EXACT_COMPACTION_IDENTITY');
+  }
+  const validate = () => {
+    const live = requireLivePlacementAuthority(authority, {
+      device, operation: 'exact placement compaction encoding'
+    });
+    const current = read.validate();
+    if (live !== record || current.result !== original.result
+        || current.source !== original.source || current.result.physicalOutput !== physical
+        || current.source.result !== selected
+        || family.frozenSourceQuantityBuffer !== quantities.outputBuffer
+        || family.frozenSourceQuantityLayout !== layout
+        || family.frozenSourceResidualCountBuffer !== physical.compactCountBuffer) {
+      throw placementError('exact compaction lost its original retained source', 'EXACT_COMPACTION_IDENTITY');
+    }
+    return current;
+  };
+  validate();
+  return Object.freeze({ massWordCount: n, eventCapacity: count,
+    companionStrideWords: stride, companionByteOffset: physical.eventCompanionByteOffset,
+    physical, quantities, sourceRead: read, validate });
+}
+
+/** Code-generation descriptors only: actual bindings are resolved privately at
+ * encode time. Prewarm the SAME descriptors for a held exact source's N. */
+export function sphReactionProductPlacementExactCompactionPipelineDescriptors({ massWordCount } = {}) {
+  const code = createSphReactionProductEventCompactWgsl({ exactCompanion: { massWordCount } });
+  const bindings = ['read-only-storage', 'storage', 'storage', 'uniform',
+    'storage', 'storage', 'storage', 'storage', 'read-only-storage', 'storage']
+    .map((type, binding) => computeBufferBinding(binding, type));
+  return Object.freeze(['count_placement_rows', 'scan_placement_row_groups', 'scatter_placement_rows']
+    .map(entryPoint => Object.freeze({
+      cacheKey: `ulg-sph-reaction-placement-exact-compaction-v1-n${massWordCount}-${entryPoint}`,
+      label: `ulg-sph-reaction-placement-exact-${entryPoint}`, code, entryPoint, bindings
+    })));
+}
+
+/** Encode the genuine stable compactor INTO the original placement transaction.
+ * No queue submit/fence/readback; no physical continuation or publication seal.
+ * The three passes write the original receipt and arena [count,error]. The
+ * exact source family retains the immutable dense inputs and quantity rows. */
+export function encodeSphReactionProductPlacementExactCompactionWebGpu({
+  device, encoder, authority, arenaLease, productEventBuffer, gpuTimestampRecorder = null
+} = {}) {
+  if (!encoder?.beginComputePass || !encoder?.clearBuffer || !encoder?.finish) {
+    throw new TypeError('exact compaction requires the original live placement encoder');
+  }
+  const owner = requireLivePlacementAuthority(authority, { device, operation: 'exact compaction' });
+  const arenaRecord = requireSegmentedPlacementArenaLease(arenaLease, { device, authority });
+  const source = resolveSphReactionProductPlacementExactCompactionSource(authority, { device });
+  if (!source) throw placementError('exact compaction requires the original held exact producer', 'EXACT_COMPACTION_IDENTITY');
+  if (owner.exactCompactionEncoding || arenaRecord.exactCompactionEncoding
+      || owner.segmentedEncoding || owner.encodedPlacement || arenaRecord.activeEncoding) {
+    throw placementError('exact compaction already encoded or placement has started', 'SUBMISSION');
+  }
+  const arena = arenaLease.arena;
+  const buffers = arena.buffers;
+  const { physical, quantities, eventCapacity: count, massWordCount: n } = source;
+  const groups = Math.ceil(count / 64);
+  const alignment = device.limits?.minStorageBufferOffsetAlignment ?? 256;
+  if (arena.eventCapacity !== count || arena.particleCapacity !== authority.particleCount
+      || arena.eventStrideVec4 !== 8 || arena.exactCompactionMassWordCount !== n
+      || arena.exactCompanionStrideWords !== source.companionStrideWords
+      || !Number.isSafeInteger(alignment) || alignment < 1
+      || !Number.isSafeInteger(source.companionByteOffset) || source.companionByteOffset < 0
+      || source.companionByteOffset % alignment !== 0
+      || groups > (device.limits?.maxComputeWorkgroupsPerDimension ?? 65535)
+      || (device.limits?.maxStorageBuffersPerShaderStage ?? 8) < 9) {
+    throw placementError('exact compaction arena/capacity/offset does not match its source', 'EXACT_COMPACTION_CAPACITY');
+  }
+  const eventsBytes = count * 128;
+  const companionBytes = count * source.companionStrideWords * 4;
+  const bounded = (buffer, size, label, offset = 0, usage = GPU_BUFFER_USAGE.STORAGE) => {
+    requireBuffer(device, buffer, label);
+    if (!Number.isSafeInteger(size) || size < 4 || size > 0xffff_fffc
+        || !Number.isSafeInteger(offset + size) || offset + size > buffer.size
+        || !Number.isSafeInteger(buffer.size) || (buffer.usage & usage) !== usage
+        || size > (device.limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024)) {
+      throw placementError(`${label} does not fit its exact bound range`, 'EXACT_COMPACTION_CAPACITY');
+    }
+    return { buffer, offset, size };
+  };
+  const receipt = owner.bindings.completionReceiptBuffer;
+  if (receipt !== authority.completionReceiptBuffer) {
+    throw placementError('exact compaction receipt differs from the original authority', 'EXACT_COMPACTION_IDENTITY');
+  }
+  const family = owner.placementSourceFamily;
+  const familyParticleRoles = ['sourceStateBuffer', 'sourceThermoBuffer', 'sourceMechanicsBuffer',
+    'frozenSourceStateBuffer', 'frozenSourceThermoBuffer', 'frozenSourceMechanicsBuffer',
+    'placedDestinationStateBuffer', 'placedDestinationThermoBuffer', 'placedDestinationMechanicsBuffer',
+    'placedDestinationQuantityBuffer', 'placedDestinationResidualCountBuffer',
+    'placedDestinationResidualEventBuffer', 'placedDestinationResidualCompanionBuffer', 'placedDestinationResidualPhysicalBuffer'];
+  const sources = [
+    // The completion receipt is the one authenticated writable authority role.
+    // Every other original authority binding, including spatial lookup and
+    // expectation storage, must remain disjoint from all compact destinations.
+    ...Object.entries(owner.bindings).filter(([key]) => key !== 'completionReceiptBuffer').map(([, value]) => value),
+    family.directorySourceBuffer,
+    ...familyParticleRoles.flatMap(key => [family[key], owner.bindings[key]]).filter(Boolean),
+    physical.eventBuffer, physical.auxiliaryBuffer,
+    physical.compactEventBuffer, physical.compactCompanionBuffer, physical.compactCountBuffer,
+    physical.compactReceiptBuffer, quantities.outputBuffer,
+    ...['sourcePackedBuffer', 'packedBuffer', 'stateBuffer', 'thermoBuffer', 'mechanicsBuffer'].map(key => physical[key]),
+    source.validate().result.outputBuffer, source.validate().source.result.outputBuffer,
+    source.validate().source.source.inventory.buffer];
+  const targets = [productEventBuffer, buffers.compactCount, receipt, buffers.compactLocalPrefix,
+    buffers.compactGroupCount, buffers.compactGroupOffset, buffers.exactCompactCompanion];
+  if (new Set(targets).size !== targets.length || targets.some(buffer => sources.includes(buffer))
+      || targets.includes(buffers.compactParams) || sources.includes(buffers.compactParams)
+      || Object.values(buffers).includes(productEventBuffer)) {
+    throw placementError('exact compaction writable ranges alias a held source or one another', 'SOURCE_DESTINATION_ALIAS');
+  }
+  const resources = [
+    bounded(physical.eventBuffer, eventsBytes, 'held exact dense events'),
+    bounded(productEventBuffer, eventsBytes, 'original placement compact events'),
+    bounded(buffers.compactCount, 8, 'original placement count and error'),
+    bounded(buffers.compactParams, 16, 'original placement compact params', 0, GPU_BUFFER_USAGE.UNIFORM),
+    bounded(receipt, SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES, 'original placement receipt'),
+    bounded(buffers.compactLocalPrefix, count * 4, 'original stable local prefixes'),
+    bounded(buffers.compactGroupCount, groups * 4, 'original stable group counts'),
+    bounded(buffers.compactGroupOffset, groups * 4, 'original stable group offsets'),
+    bounded(physical.auxiliaryBuffer, companionBytes, 'held exact dense companions', source.companionByteOffset),
+    bounded(buffers.exactCompactCompanion, companionBytes, 'original placement compact companions')
+  ];
+  const descriptors = sphReactionProductPlacementExactCompactionPipelineDescriptors({ massWordCount: n });
+  const pipelines = descriptors.map(descriptor => createCachedExplicitComputePipeline(device, descriptor));
+  const entries = resources.map((resource, binding) => ({ binding, resource }));
+  const bindGroups = pipelines.map((pipeline, index) => placementBindGroup(device, pipeline,
+    descriptors[index].label, entries));
+  source.validate();
+  requireSegmentedPlacementArenaLease(arenaLease, { device, authority });
+  source.sourceRead.markDerivedBuffers([productEventBuffer, buffers.exactCompactCompanion, buffers.compactCount]);
+  source.validate();
+  // Do not reset the original receipt; its generation/identity and other stages
+  // belong to the original transaction. No held source/count/quantity is cleared.
+  const clearRanges = [resources[1], resources[9], resources[2], resources[5], resources[6], resources[7]];
+  for (const { buffer } of [...clearRanges, resources[3]]) {
+    if ((buffer.usage & GPU_BUFFER_USAGE.COPY_DST) === 0) {
+      throw placementError('exact compaction reset requires COPY_DST on original arena scratch', 'EXACT_COMPACTION_CAPACITY');
+    }
+  }
+  const encoding = Object.freeze({ encoder, authority, arenaLease,
+    productEventBuffer, compactCountBuffer: buffers.compactCount,
+    compactCompanionBuffer: buffers.exactCompactCompanion,
+    completionReceiptBuffer: receipt, sourcePhysicalOutput: physical,
+    sourceQuantityBuffer: quantities.outputBuffer, sourceQuantityLayout: quantities.layout,
+    eventCapacity: count, companionStrideWords: source.companionStrideWords,
+    physicalPublicationAdmitted: false });
+  // Set before recording the first command: a throwing encoder cannot retry the
+  // same authority and later combine two partial command streams.
+  owner.exactCompactionEncoding = encoding;
+  arenaRecord.exactCompactionEncoding = encoding;
+  device.queue.writeBuffer(buffers.compactParams, 0, new Uint32Array([count, 8, groups, 0]));
+  source.validate();
+  for (const { buffer, offset, size } of clearRanges) encoder.clearBuffer(buffer, offset, size);
+  const dispatches = [groups, 1, groups];
+  for (let i = 0; i < pipelines.length; i++) {
+    encodePlacementPass({ encoder, pipeline: pipelines[i].pipeline, bindGroup: bindGroups[i],
+      workgroupCount: dispatches[i], label: descriptors[i].label,
+      producerId: `sph-reaction-summary:exact-${descriptors[i].entryPoint}`,
+      gpuTimestampRecorder, metadata: { particleCount: authority.particleCount, productEventCount: count } });
+  }
+  source.validate();
+  return encoding;
+}
+
+// Private original-owner chemistry preparation. No supplied tolerance, packet,
+// route, auxiliary buffer, numeric result or publication boolean is accepted.
+function exactChemistryConfigurationForAuthority(authority,device) {
+  const owner=requireLivePlacementAuthority(authority,{device,operation:'exact chemistry configuration'});
+  const context=owner.exactQuantityContext;
+  if(!context)return null;
+  context.validate();
+  const original=context.original,source=original.source,selected=source.result,routing=original.result;
+  const policy=original.strictGatePolicy;
+  if(!policy || policy.schema!=='peercompute.ulg.exact-reaction-original-default-policy.v1'
+      || policy.reactionTable!==source.reactionTable || policy.gateCompleted!==false) {
+    throw placementError('exact chemistry requires the original retained reaction default-policy snapshot','EXACT_CHEMISTRY_POLICY');
+  }
+  const metadata=encodeSphExactReactionChemistryMetadata(source.compiled,
+    {reactionTable:source.reactionTable,thermalMaterialTable:source.thermalMaterialTable});
+  if(metadata.atomToleranceBits!==policy.atomToleranceBits || metadata.chargeToleranceBits!==policy.chargeToleranceBits
+      || metadata.staticBlockerFlags!==policy.staticBlockerFlags) {
+    throw placementError('exact chemistry original default policy changed','EXACT_CHEMISTRY_POLICY');
+  }
+  const layout=sphExactReactionChemistryBudgetLayout(selected.format,{pairCapacity:authority.particleCount,
+    reactionCount:source.reactionTable.reactionCount,sourceRecordWords:selected.recordWords,
+    speciesOffsetWords:selected.speciesOffsetWords,speciesLayout:selected.speciesLayout,
+    routingLayout:routing.layout,metadataWordLength:metadata.totalWords,deviceLimits:device.limits});
+  if(context.physical.auxiliaryBuffer!==routing.physicalOutput.auxiliaryBuffer
+      || selected.particleCount!==authority.particleCount || routing.particleCount!==authority.particleCount
+      || context.physical.layout.pairHeaderWords!==16 || context.physical.layout.pairHeaderOffsetWords!==0
+      || context.physical.layout.particleCount!==authority.particleCount) {
+    throw placementError('exact chemistry lost original staged pair header layout','EXACT_CHEMISTRY_IDENTITY');
+  }
+  const alignment=device.limits?.minUniformBufferOffsetAlignment;
+  const limits=device.limits;
+  if(!Number.isSafeInteger(alignment)||alignment<16||(alignment&(alignment-1))!==0
+      ||!Number.isSafeInteger(limits.maxUniformBufferBindingSize)||limits.maxUniformBufferBindingSize<64
+      ||!Number.isSafeInteger(limits.maxUniformBuffersPerShaderStage)||limits.maxUniformBuffersPerShaderStage<1
+      ||!Number.isSafeInteger(limits.maxBindingsPerBindGroup)||limits.maxBindingsPerBindGroup<9) {
+    throw placementError('exact chemistry uniform/binding limits unavailable','EXACT_CHEMISTRY_CAPACITY');
+  }
+  const uniformStride=Math.ceil(layout.uniformBytes/alignment)*alignment;
+  // This immutable plan can contain tens of thousands of batches. Rebuilding
+  // it inside each before/after-dispatch validation made recording quadratic.
+  // Cache only the pure plan; source, policy, metadata and buffer validation
+  // above and below still run on every call. Every planner input participates
+  // in the key, including limits that may change on a diagnostic device.
+  const dispatchLimits={maxComputeWorkgroupsPerDimension:limits.maxComputeWorkgroupsPerDimension,
+    maxStorageBufferBindingSize:limits.maxStorageBufferBindingSize,maxBufferSize:limits.maxBufferSize,
+    maxStorageBuffersPerShaderStage:limits.maxStorageBuffersPerShaderStage};
+  const dispatchSignature=JSON.stringify([layout,dispatchLimits]);
+  const cachedDispatch=owner.exactChemistryDispatchCache;
+  const dispatch=cachedDispatch?.signature===dispatchSignature ? cachedDispatch.dispatch
+    : planSphExactReactionChemistryBudgetDispatch(layout,dispatchLimits);
+  const uniformRecordCount=dispatch.uniformRecordCount;
+  const uniformBytes=uniformRecordCount*uniformStride;
+  if(!Number.isSafeInteger(uniformBytes)||uniformBytes>limits.maxBufferSize||uniformBytes>0xffff_fffc) {
+    throw placementError('exact chemistry immutable reduction params exceed capacity','EXACT_CHEMISTRY_CAPACITY');
+  }
+  if(cachedDispatch?.signature!==dispatchSignature) {
+    owner.exactChemistryDispatchCache=Object.freeze({signature:dispatchSignature,dispatch});
+  }
+  const metadataWords=Object.freeze(Array.from(metadata.words));
+  const signature=JSON.stringify([selected.format.wordCount,selected.format.quantumExponent,layout,
+    alignment,uniformStride,metadataWords]);
+  const protectedBuffers=Object.freeze([...Object.values(owner.bindings),...Object.values(context.physical),
+    context.quantities.outputBuffer,selected.outputBuffer,routing.outputBuffer,
+    owner.placementSourceFamily.directorySourceBuffer].filter(v=>v&&Number.isSafeInteger(v.size)));
+  context.validate();
+  return Object.freeze({context,policy,format:selected.format,layout,metadata,metadataWords,signature,
+    dispatch,alignment,uniformStride,uniformBytes,protectedBuffers,packetBuffer:selected.outputBuffer,
+    routeBuffer:routing.outputBuffer,auxiliaryBuffer:context.physical.auxiliaryBuffer});
+}
+function encodeExactPlacementChemistryPreparation({device,encoder,authority,arenaLease,gpuTimestampRecorder=null}={}) {
+  const owner=requireLivePlacementAuthority(authority,{device,operation:'exact chemistry preparation'});
+  const arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+  const compact=owner.exactCompactionEncoding;
+  if(!compact || compact!==arenaRecord.exactCompactionEncoding || compact.authority!==authority
+      ||compact.encoder!==encoder||compact.arenaLease!==arenaLease
+      ||!encoder?.beginComputePass||!encoder?.finish||owner.exactChemistryRecord||arenaRecord.exactChemistryRecord
+      ||owner.segmentedEncoding||owner.encodedPlacement||arenaRecord.activeEncoding) {
+    throw placementError('exact chemistry requires unused original compaction, encoder and arena','EXACT_CHEMISTRY_IDENTITY');
+  }
+  const config=exactChemistryConfigurationForAuthority(authority,device),arena=arenaLease.arena,b=arena.buffers;
+  if(!config||arena.exactChemistrySignature!==config.signature)throw placementError('exact chemistry arena changed','EXACT_CHEMISTRY_IDENTITY');
+  const l=config.layout;
+  const specs={packet:[config.packetBuffer,l.sourceWordLength*4],routes:[config.routeBuffer,l.routeWordLength*4],
+    auxiliary:[config.auxiliaryBuffer,l.auxiliaryHeaderWordLength*4],metadata:[b.exactChemistryMetadata,l.metadataWordLength*4],
+    control:[b.exactChemistryControl,l.controlWordLength*4],a:[b.exactChemistryA,l.scratchWordLength*4],
+    c:[b.exactChemistryB,l.scratchWordLength*4],evidence:[b.exactChemistryEvidence,l.outputWordLength*4],
+    params:[b.exactChemistryParams,config.uniformBytes],placementParams:[b.placementParams,64],
+    receipt:[owner.bindings.completionReceiptBuffer,SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES]};
+  const uniformNames=new Set(['params','placementParams']);
+  const ranges=Object.freeze(Object.fromEntries(Object.entries(specs).map(([name,[buffer,size]])=>{
+    requireBuffer(device,buffer,`exact chemistry ${name}`);
+    const usage=uniformNames.has(name)?GPU_BUFFER_USAGE.UNIFORM:GPU_BUFFER_USAGE.STORAGE;
+    if(!Number.isSafeInteger(buffer.size)||buffer.size<size||buffer.size>device.limits.maxBufferSize
+        ||(buffer.usage&usage)!==usage||(!uniformNames.has(name)&&size>device.limits.maxStorageBufferBindingSize)) {
+      throw placementError(`exact chemistry ${name} range is invalid`,'EXACT_CHEMISTRY_CAPACITY');
+    }
+    return[name,Object.freeze({buffer,offset:0,size})];
+  })));
+  const ownNames=['metadata','control','a','c','evidence','params'];
+  const radixBuffers=[arenaRecord.captureRadix,arenaRecord.directRadix,arenaRecord.summaryRadix]
+    .flatMap(runtime=>runtime.allocationEntries().map(entry=>entry.buffer));
+  if(new Set(Object.values(ranges).map(r=>r.buffer)).size!==Object.keys(ranges).length
+      ||ownNames.some(name=>config.protectedBuffers.includes(ranges[name].buffer)||radixBuffers.includes(ranges[name].buffer))
+      ||Object.entries(b).some(([name,buffer])=>!name.startsWith('exactChemistry')&&ownNames.some(key=>ranges[key].buffer===buffer))) {
+    throw placementError('exact chemistry scratch aliases an original source or sibling','SOURCE_DESTINATION_ALIAS');
+  }
+  const metadataUpload=Uint32Array.from(config.metadataWords);
+  const parameterUpload=new Uint32Array(config.uniformBytes/4);
+  // Every encoded stage owns an immutable aligned 32-byte parameter slice.
+  // Upload the complete array once; no inter-dispatch queue writes alias it.
+  const descriptors=sphExactReactionChemistryBudgetPipelineDescriptors(config.format,l);
+  const immutablePipeline=descriptor=>{const value=explicitPlacementPipeline(device,descriptor);
+    if(!value.pipeline)throw value.error??placementError('exact chemistry pipeline unavailable','EXACT_CHEMISTRY_PIPELINE');
+    return Object.freeze({...value});};
+  const pipelines=descriptors.map(immutablePipeline);
+  const stages=[];
+  const add=(index,input,output,dispatch,params=config.dispatch.initialParams)=>{
+    const slot=stages.length;
+    if(params.length!==8 || slot>=config.dispatch.uniformRecordCount)throw placementError('exact chemistry immutable parameter plan changed','EXACT_CHEMISTRY_CAPACITY');
+    parameterUpload.set(params,slot*config.uniformStride/4);
+    const resources=[ranges.packet,ranges.routes,ranges.auxiliary,ranges.metadata,ranges.control,input,output,ranges.evidence,
+      Object.freeze({buffer:ranges.params.buffer,offset:slot*config.uniformStride,size:l.uniformBytes})];
+    const entries=Object.freeze(resources.map((resource,binding)=>Object.freeze({binding,resource})));
+    const descriptor=descriptors[index],pipeline=pipelines[index];
+    stages.push(Object.freeze({descriptor,pipeline,entries,bindGroup:placementBindGroup(device,pipeline,descriptor.entryPoint,entries),dispatch}));
+  };
+  add(0,ranges.c,ranges.a,config.dispatch.reset);add(1,ranges.c,ranges.a,config.dispatch.validate);
+  let input=ranges.a,output=ranges.c;
+  for(const tile of config.dispatch.tiles){
+    add(2,ranges.c,ranges.a,tile.initialize,tile.initialParams);
+    tile.normalizations.forEach(batch=>add(3,ranges.a,ranges.c,batch.dispatch,batch.params));
+    input=ranges.c;output=ranges.a;
+    tile.reductions.forEach(level=>{
+      level.batches.forEach(batch=>add(4,input,output,batch.dispatch,batch.params));
+      [input,output]=[output,input];
+    });
+    tile.comparisons.forEach(batch=>add(5,input,output,batch.dispatch,batch.params));
+    add(6,input,output,tile.commit,tile.initialParams);
+  }
+  add(7,input,output,config.dispatch.finish);
+  if(stages.length!==config.dispatch.uniformRecordCount)throw placementError('exact chemistry immutable parameter coverage changed','EXACT_CHEMISTRY_IDENTITY');
+  const consumptionDescriptor=Object.freeze({label:'ulg-exact-placement-chemistry-consume',
+    cacheKey:`ulg-exact-placement-chemistry-consume-v2:${[l.pairCapacity,l.reactionCount,l.channelCount,l.channelTileCapacity,l.tileCount,l.outputWordLength,l.metadataWordLength,l.controlWordLength].join(':')}`,entryPoint:'consume_exact_chemistry_placement_evidence',
+    code:createSphExactPlacementChemistryConsumeWgsl(l),bindings:Object.freeze([
+      computeBufferBinding(0,'read-only-storage'),computeBufferBinding(1,'read-only-storage'),
+      computeBufferBinding(2,'storage'),computeBufferBinding(3,'storage'),computeBufferBinding(4,'uniform')])});
+  const consumptionPipeline=immutablePipeline(consumptionDescriptor);
+  const consumptionEntries=Object.freeze([ranges.evidence,ranges.metadata,ranges.control,ranges.receipt,ranges.placementParams]
+    .map((resource,binding)=>Object.freeze({binding,resource})));
+  const consumption=Object.freeze({descriptor:consumptionDescriptor,pipeline:consumptionPipeline,entries:consumptionEntries,
+    bindGroup:placementBindGroup(device,consumptionPipeline,consumptionDescriptor.label,consumptionEntries),dispatch:Object.freeze({x:1,y:1,z:1})});
+  const recordingLimitNames=['maxComputeWorkgroupsPerDimension','maxStorageBufferBindingSize',
+    'maxBufferSize','maxStorageBuffersPerShaderStage','minUniformBufferOffsetAlignment',
+    'maxUniformBufferBindingSize','maxUniformBuffersPerShaderStage','maxBindingsPerBindGroup'];
+  const recordingLimits=recordingLimitNames.map(name=>device.limits[name]);
+  const validate=(contents=true)=>{
+    if(requireLivePlacementAuthority(authority,{device,operation:'exact chemistry binding validation',validateContents:contents})!==owner
+        ||requireSegmentedPlacementArenaLease(arenaLease,{device,authority})!==arenaRecord
+        ||owner.exactCompactionEncoding!==compact||arenaRecord.exactCompactionEncoding!==compact
+        ||(contents&&exactChemistryConfigurationForAuthority(authority,device).signature!==config.signature)
+        ||owner.exactQuantityContext.original.strictGatePolicy!==config.policy) {
+      throw placementError('exact chemistry lost its original source, policy or lease','EXACT_CHEMISTRY_IDENTITY');
+    }
+    for(const[name,range]of Object.entries(ranges)){
+      requireBuffer(device,range.buffer,`exact chemistry ${name}`);
+      if(range.buffer.size<range.size)throw placementError('exact chemistry range shrank','EXACT_CHEMISTRY_CAPACITY');
+    }
+    if(!contents&&recordingLimitNames.some((name,index)=>device.limits[name]!==recordingLimits[index]))validate();
+  };
+  validate();config.context.read.markDerivedBuffers(ownNames.map(name=>ranges[name].buffer));validate();
+  const record={owner,arenaRecord,encoder,authority,arenaLease,config,ranges,stages:Object.freeze(stages),consumption,
+    attempted:true,completedSteps:[],completed:false,consumed:false,consumptionAttempted:false,preparation:null,validate};
+  owner.exactChemistryRecord=record;arenaRecord.exactChemistryRecord=record;
+  device.queue.writeBuffer(ranges.metadata.buffer,0,metadataUpload);
+  device.queue.writeBuffer(ranges.params.buffer,0,parameterUpload);
+  // All descriptors and parameter slices are fixed before this synchronous
+  // loop. Validate their source contents at both boundaries, before any
+  // physical application or publication. Keep lifetime, identity, buffer and
+  // device-limit checks between passes without repeatedly hashing source tables.
+  validate();
+  for(const stage of stages){
+    validate(false);encodeExactPlacementChemistryStage(encoder,stage,gpuTimestampRecorder);validate(false);record.completedSteps.push(stage);
+  }
+  validate();record.completed=true;
+  const preparation=Object.freeze({encoder,authority,arenaLease,sourceSelection:config.context.original.source.result,
+    routingCandidate:config.context.original.result,policy:config.policy,layout:l,evidenceBuffer:ranges.evidence.buffer,
+    metadataBuffer:ranges.metadata.buffer,controlBuffer:ranges.control.buffer,receiptBuffer:ranges.receipt.buffer,
+    status:'commands-recorded',physicalPublicationAdmitted:false,quantityAdmission:false,steps:record.stages,
+    explicitDispatchCount:stages.length,validate(){validate();
+      if(owner.exactChemistryRecord!==record||arenaRecord.exactChemistryRecord!==record
+          ||owner.exactChemistryPreparation!==preparation||arenaRecord.exactChemistryPreparation!==preparation
+          ||!record.completed)throw placementError('exact chemistry record changed','EXACT_CHEMISTRY_IDENTITY');
+      return preparation;}});
+  record.preparation=preparation;owner.exactChemistryPreparation=preparation;arenaRecord.exactChemistryPreparation=preparation;
+  return preparation;
+}
+function encodeExactPlacementChemistryStage(encoder,stage,gpuTimestampRecorder){
+  // The candidate's checked dispatch is two-dimensional. The original helper
+  // accepts only an x count, so preserve the actual x/y grid explicitly here.
+  const stamp=placementTimestampBegin(gpuTimestampRecorder,encoder,{
+    producerId:`sph-reaction-summary:product-event-placement:${stage.descriptor.entryPoint}`,
+    stage:stage.descriptor.entryPoint,spanClass:'same-production-command-encoder-profiled-pass'});
+  const pass=encoder.beginComputePass({label:stage.descriptor.entryPoint});
+  pass.setPipeline(stage.pipeline.pipeline);pass.setBindGroup(0,stage.bindGroup);
+  pass.dispatchWorkgroups(stage.dispatch.x,stage.dispatch.y,stage.dispatch.z);pass.end();
+  placementTimestampEnd(gpuTimestampRecorder,encoder,stamp);
+}
+function encodeExactPlacementChemistryConsumption({device,encoder,authority,arenaLease,gpuTimestampRecorder=null}={}){
+  const owner=requireLivePlacementAuthority(authority,{device,operation:'exact chemistry consumption'});
+  const arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+  const record=owner.exactChemistryRecord,preparation=owner.exactChemistryPreparation;
+  if(!record||record!==arenaRecord.exactChemistryRecord||preparation!==arenaRecord.exactChemistryPreparation
+      ||record.encoder!==encoder||record.authority!==authority||record.arenaLease!==arenaLease
+      ||!record.completed||record.consumptionAttempted||owner.segmentedEncoding||owner.encodedPlacement) {
+    throw placementError('exact chemistry consumption requires its unused original preparation','EXACT_CHEMISTRY_IDENTITY');
+  }
+  preparation.validate();record.consumptionAttempted=true;
+  encodeExactPlacementChemistryStage(encoder,record.consumption,gpuTimestampRecorder);preparation.validate();record.consumed=true;
+  return Object.freeze({preparation,encoder,authority,arenaLease,step:record.consumption,explicitDispatchCount:1});
+}
+
+function validateExactPlacementChemistryWitness(owner,arenaRecord,encoder,arenaLease,{requireLiveLease=true}={}){
+  const record=owner.exactChemistryRecord,preparation=owner.exactChemistryPreparation;
+  if(!record||!preparation||record.preparation!==preparation||!record.completed||!record.consumed
+      ||!record.consumptionAttempted||record.encoder!==encoder||record.authority!==arenaLease.authority
+      ||record.arenaLease!==arenaLease||record.completedSteps.length!==record.stages.length
+      ||record.completedSteps.some((step,i)=>step!==record.stages[i])
+      ||(requireLiveLease&&(arenaRecord.exactChemistryRecord!==record||arenaRecord.exactChemistryPreparation!==preparation))){
+    throw placementError('exact terminal requires complete original chemistry preparation and consumption','EXACT_CHEMISTRY_IDENTITY');
+  }
+  if(requireLiveLease)preparation.validate();else owner.exactQuantityContext.validate();
+  return preparation;
+}
+
+// Private original-owner evidence consumer. It only records denial checks;
+// the original core finalizer and sole terminal selector remain authoritative.
+function encodeExactPlacementPhysicalEvidenceConsumption({device,encoder,authority,arenaLease,gpuTimestampRecorder=null}={}) {
+  const owner=requireLivePlacementAuthority(authority,{device,operation:'exact physical evidence consumption'});
+  const arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+  const preparation=owner.exactPhysicalPreparation,capture=owner.exactCapturePreparation;
+  if(!preparation||preparation!==arenaRecord.exactPhysicalPreparation||preparation.encoder!==encoder
+      ||preparation.authority!==authority||preparation.arenaLease!==arenaLease||preparation.capturePreparation!==capture
+      ||capture!==arenaRecord.exactCapturePreparation||preparation.status!=='commands-recorded'
+      ||preparation.receiptBuffer!==owner.bindings.completionReceiptBuffer
+      ||owner.exactPhysicalConsumptionRecord||arenaRecord.exactPhysicalConsumptionRecord) {
+    throw placementError('exact physical evidence requires its unused original preparation','EXACT_PHYSICAL_EVIDENCE_IDENTITY');
+  }
+  preparation.validate();
+  const layout=sphExactPlacementPhysicalEvidenceLayout(preparation.physicalLayout,preparation.caloricLayout);
+  const groups=planSphExactPlacementPhysicalEvidenceDispatch(layout,device.limits?.maxComputeWorkgroupsPerDimension);
+  const limits=device.limits;
+  if(!Number.isSafeInteger(limits?.maxStorageBuffersPerShaderStage)||limits.maxStorageBuffersPerShaderStage<4
+      ||!Number.isSafeInteger(limits?.maxBindingsPerBindGroup)||limits.maxBindingsPerBindGroup<4) {
+    throw placementError('exact physical evidence binding capacity unavailable','EXACT_PHYSICAL_EVIDENCE_CAPACITY');
+  }
+  const bound=(buffer,size,label)=>{
+    requireBuffer(device,buffer,label);
+    if(!Number.isSafeInteger(buffer.size)||!Number.isSafeInteger(size)||size<4||size%4||buffer.size<size
+        ||!Number.isSafeInteger(limits.maxBufferSize)||size>limits.maxBufferSize
+        ||!Number.isSafeInteger(limits.maxStorageBufferBindingSize)||size>limits.maxStorageBufferBindingSize
+        ||(buffer.usage&GPU_BUFFER_USAGE.STORAGE)===0) {
+      throw placementError(`${label} does not fit its original physical evidence range`,'EXACT_PHYSICAL_EVIDENCE_CAPACITY');
+    }
+    return Object.freeze({buffer,offset:0,size});
+  };
+  const b=arenaLease.arena.buffers;
+  if(preparation.physicalEvidenceBuffer!==b.exactPhysicalEvidence||preparation.caloricBuffer!==b.exactCaloricReceiver
+      ||capture.receiverMapBuffer!==b.exactCaptureMap)throw placementError('exact physical evidence changed original scratch','EXACT_PHYSICAL_EVIDENCE_IDENTITY');
+  const ranges=Object.freeze([
+    bound(preparation.physicalEvidenceBuffer,layout.evidenceBytes,'physical evidence'),
+    bound(capture.receiverMapBuffer,layout.mapBytes,'original receiver map'),
+    bound(preparation.caloricBuffer,layout.caloricBytes,'preserved original caloric row'),
+    bound(preparation.receiptBuffer,layout.receiptBytes,'original receipt')]);
+  if(new Set(ranges.map(r=>r.buffer)).size!==4)throw placementError('physical evidence aliases original receipt or input','SOURCE_DESTINATION_ALIAS');
+  const descriptor=Object.freeze({label:'ulg-exact-placement-physical-evidence',
+    cacheKey:`ulg-exact-placement-physical-evidence-v1-${layout.particleCount}-${layout.eventCapacity}-${layout.caloricRecordWords}`,
+    code:createSphExactPlacementPhysicalEvidenceWgsl(preparation.physicalLayout,preparation.caloricLayout),
+    entryPoint:'consume_exact_receiver_physical_evidence',
+    bindings:Object.freeze(ranges.map((_,binding)=>{const value=computeBufferBinding(binding,binding===3?'storage':'read-only-storage');
+      return Object.freeze({...value,buffer:Object.freeze({...value.buffer})});}))});
+  const pipeline=Object.freeze({...explicitPlacementPipeline(device,descriptor)});
+  const entries=Object.freeze(ranges.map((resource,binding)=>Object.freeze({binding,resource})));
+  const bindGroup=placementBindGroup(device,pipeline,descriptor.label,entries);
+  const step=Object.freeze({descriptor,pipeline,entries,bindGroup,groups});
+  const validate=()=>{
+    if(requireLivePlacementAuthority(authority,{device,operation:'exact physical evidence validation'})!==owner
+        ||requireSegmentedPlacementArenaLease(arenaLease,{device,authority})!==arenaRecord
+        ||owner.exactPhysicalPreparation!==preparation||arenaRecord.exactPhysicalPreparation!==preparation
+        ||owner.exactCapturePreparation!==capture||arenaRecord.exactCapturePreparation!==capture
+        ||preparation.validate()!==preparation)throw placementError('exact physical evidence lost original source/owner','EXACT_PHYSICAL_EVIDENCE_IDENTITY');
+    for(const r of ranges)bound(r.buffer,r.size,'physical evidence');
+  };
+  validate();
+  const record={owner,arenaRecord,preparation,capture,encoder,authority,arenaLease,layout,step,validate,attempted:true,completed:false,witness:null};
+  owner.exactPhysicalConsumptionRecord=record;arenaRecord.exactPhysicalConsumptionRecord=record;
+  const span=placementTimestampBegin(gpuTimestampRecorder,encoder,{producerId:'sph-reaction-summary:product-event-placement:exact-physical-evidence',
+    stage:'exact-physical-evidence',spanClass:'same-production-command-encoder-profiled-pass',generationId:authority.generationId});
+  validate();const pass=encoder.beginComputePass({label:descriptor.label});pass.setPipeline(pipeline.pipeline);pass.setBindGroup(0,bindGroup);
+  pass.dispatchWorkgroups(...groups);pass.end();placementTimestampEnd(gpuTimestampRecorder,encoder,span);validate();
+  const witness=Object.freeze({preparation,capturePreparation:capture,encoder,authority,arenaLease,step,explicitDispatchCount:1,physicalPublicationAdmitted:false});
+  record.completed=true;record.witness=witness;
+  owner.exactPhysicalConsumption=witness;arenaRecord.exactPhysicalConsumption=witness;
+  return witness;
+}
+function validateExactPlacementPhysicalWitness(owner,arenaRecord,encoder,arenaLease,{requireLiveLease=true}={}) {
+  const preparation=owner.exactPhysicalPreparation,record=owner.exactPhysicalConsumptionRecord,witness=owner.exactPhysicalConsumption;
+  if(!preparation||!record||!witness||record.owner!==owner||record.arenaRecord!==arenaRecord
+      ||!record.attempted||!record.completed||record.witness!==witness
+      ||record.preparation!==preparation||witness.preparation!==preparation||record.encoder!==encoder||witness.encoder!==encoder
+      ||record.authority!==arenaLease.authority||witness.authority!==arenaLease.authority
+      ||record.arenaLease!==arenaLease||witness.arenaLease!==arenaLease||witness.step!==record.step
+      ||preparation.encoder!==encoder||preparation.authority!==arenaLease.authority||preparation.arenaLease!==arenaLease
+      ||preparation.status!=='commands-recorded'||preparation.receiptBuffer!==owner.bindings.completionReceiptBuffer
+      ||preparation.capturePreparation!==record.capture||witness.capturePreparation!==record.capture
+      ||(requireLiveLease&&(arenaRecord.exactPhysicalPreparation!==preparation
+        ||arenaRecord.exactPhysicalConsumptionRecord!==record||arenaRecord.exactPhysicalConsumption!==witness))) {
+    throw placementError('exact terminal requires original physical preparation and completed evidence consumption','EXACT_PHYSICAL_EVIDENCE_IDENTITY');
+  }
+  if(requireLiveLease){record.validate();preparation.validate();}else owner.exactQuantityContext.validate();
+  return preparation;
+}
+
+function exactEventConfigurationForAuthority(authority,device){
+ const owner=requireLivePlacementAuthority(authority,{device,operation:'exact event configuration'}),context=owner.exactQuantityContext;
+ if(!context)return null;const physical=exactPhysicalConfigurationForAuthority(authority,device);if(!physical)return null;
+ const bound=context.validate(),output=context.physical;
+ if(output.layout.eventParticleStrideWords!==64||output.residualParticleByteOffset!==output.layout.eventParticleOffsetWords*4
+  ||output.residualParticleStrideWords!==64)throw placementError('exact events require the real source residual-particle template producer','EXACT_EVENT_SOURCE');
+ const layout=sphExactPlacementEventDispositionLayout(bound.placedDestinationQuantityFormat,bound.placedDestinationQuantityLayout,
+  {physicalLayout:physical.physical,captureLayout:physical.capture,outputLayout:output.layout});
+ const limits=device.limits,alignment=limits?.minUniformBufferOffsetAlignment;
+ if(!Number.isSafeInteger(alignment)||alignment<16||(alignment&(alignment-1))!==0||limits.maxStorageBuffersPerShaderStage<layout.requiredStorageBindings
+  ||limits.maxBindingsPerBindGroup<10||limits.maxUniformBuffersPerShaderStage<1||limits.maxUniformBufferBindingSize<64)
+  throw placementError('exact event device bindings or alignment unavailable','EXACT_EVENT_CAPACITY');
+ const sizes={exactEventControl:layout.scratchWords*4,exactEventPrefixA:layout.prefixWords*4,exactEventPrefixB:layout.prefixWords*4,
+  exactEventHistory:layout.historyWords*4,exactEventHistoryCompanions:layout.eventCapacity*layout.companionWords*4,
+  exactEventScanParams:Math.max(1,layout.levels)*alignment};
+ for(const[key,size]of Object.entries(sizes))if(!Number.isSafeInteger(size)||size<4||size>0xffff_fffc||size>limits.maxBufferSize
+  ||(key!=='exactEventScanParams'&&size>limits.maxStorageBufferBindingSize))throw placementError('exact event scratch exceeds actual capacity','EXACT_EVENT_CAPACITY');
+ const dispatch=planSphExactPlacementCaptureWorkgroups(layout.eventCapacity,limits.maxComputeWorkgroupsPerDimension);
+ const initializeDispatch=planSphExactPlacementCaptureWorkgroups(Math.max(layout.eventCapacity,layout.particleCount),limits.maxComputeWorkgroupsPerDimension);
+ const summaryGroups=Math.ceil(layout.eventCapacity/64);if(summaryGroups>limits.maxComputeWorkgroupsPerDimension)throw placementError('exact original summary dispatch exceeds capacity','EXACT_EVENT_CAPACITY');
+ const signature=JSON.stringify([bound.placedDestinationQuantityFormat.wordCount,bound.placedDestinationQuantityFormat.quantumExponent,layout,alignment]);
+ context.validate();return Object.freeze({context,format:bound.placedDestinationQuantityFormat,layout,sizes,alignment,signature,dispatch,initializeDispatch,summaryGroups,
+  protectedBuffers:Object.freeze([owner.placementSourceFamily.directorySourceBuffer,context.read.validate().result.outputBuffer,context.original.source.result.outputBuffer,context.original.source.source.inventory.buffer,...Object.values(owner.bindings),...Object.values(output),context.quantities.outputBuffer]
+   .filter(v=>v&&Number.isSafeInteger(v.size)))});
+}
+function prepareExactPlacementEventDispositions({device,encoder,authority,arenaLease,gpuTimestampRecorder=null}={}){
+ const owner=requireLivePlacementAuthority(authority,{device,operation:'exact event preparation'}),arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+ const capture=owner.exactCapturePreparation,compact=owner.exactCompactionEncoding,b=arenaLease.arena.buffers;
+ if(!capture||capture!==arenaRecord.exactCapturePreparation||capture.status!=='scratch-prepared'||capture.encoder!==encoder||capture.arenaLease!==arenaLease
+  ||capture.authority!==authority||compact!==arenaRecord.exactCompactionEncoding||compact?.encoder!==encoder||owner.exactEventRecord||arenaRecord.exactEventRecord
+  ||owner.segmentedEncoding||owner.encodedPlacement||!encoder?.clearBuffer)throw placementError('exact event preparation requires unused original capture/compaction','EXACT_EVENT_IDENTITY');
+ const config=exactEventConfigurationForAuthority(authority,device);if(!config||config.signature!==arenaLease.arena.exactEventSignature)throw placementError('exact event original arena signature changed','EXACT_EVENT_IDENTITY');
+ const l=config.layout,p=l.particleCount,e=l.eventCapacity,bindings=owner.bindings;
+ const specs={events:[b.denseEmission,e*128],plan:[b.eventPlan,e*32],quantities:[bindings.placedDestinationQuantityBuffer,(p+e)*l.quantity.recordWords*4],
+  companions:[b.exactCompactCompanion,e*l.companionWords*4],aux:[config.context.physical.auxiliaryBuffer,l.output.auxWords*4],count:[b.compactCount,8],
+  scratch:[b.exactEventControl,l.scratchWords*4],keys:[b.captureKeys,e*4],sorted:[capture.captureSortedBuffer,e*4],map:[capture.receiverMapBuffer,l.physical.mapWordLength*4],
+  reduced:[capture.captureReducedValuesBuffer,l.capture.wordLength*4],physical:[b.exactPhysicalEvidence,l.physical.evidenceWordLength*4],
+  state:[bindings.placedDestinationStateBuffer,p*32],thermo:[bindings.placedDestinationThermoBuffer,p*48],mechanics:[bindings.placedDestinationMechanicsBuffer,p*128],
+  receipt:[bindings.completionReceiptBuffer,SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES],summaryKeys:[b.summaryKeys,e*4],summaryValues:[b.summaryValues,e*9*16],
+  placementParams:[b.placementParams,64],prefixA:[b.exactEventPrefixA,l.prefixWords*4],prefixB:[b.exactEventPrefixB,l.prefixWords*4],
+  history:[b.exactEventHistory,l.historyWords*4],historyCompanions:[b.exactEventHistoryCompanions,e*l.companionWords*4],
+  destinationCount:[bindings.placedDestinationResidualCountBuffer,8],scanParams:[b.exactEventScanParams,config.sizes.exactEventScanParams]};
+ const uniformNames=new Set(['placementParams','scanParams']);
+ const ranges=Object.freeze(Object.fromEntries(Object.entries(specs).map(([name,[buffer,size]])=>{
+  requireBuffer(device,buffer,'exact event '+name);const usage=uniformNames.has(name)?GPU_BUFFER_USAGE.UNIFORM:GPU_BUFFER_USAGE.STORAGE;
+  if(!Number.isSafeInteger(buffer.size)||buffer.size<size||buffer.size>device.limits.maxBufferSize||(buffer.usage&usage)!==usage
+   ||(!uniformNames.has(name)&&size>device.limits.maxStorageBufferBindingSize))throw placementError('exact event bound range is invalid: '+name,'EXACT_EVENT_CAPACITY');
+  return[name,Object.freeze({buffer,offset:0,size})];})));
+ if(new Set(Object.values(ranges).map(v=>v.buffer)).size!==Object.keys(ranges).length)throw placementError('exact event bound roles alias','SOURCE_DESTINATION_ALIAS');
+ const owned=['scratch','prefixA','prefixB','history','historyCompanions','scanParams'];
+ const radix=[arenaRecord.captureRadix,arenaRecord.directRadix,arenaRecord.summaryRadix].flatMap(r=>r.allocationEntries().map(v=>v.buffer));
+ if(owned.some(name=>config.protectedBuffers.includes(ranges[name].buffer)||radix.includes(ranges[name].buffer)
+  ||Object.entries(b).some(([key,value])=>!key.startsWith('exactEvent')&&value===ranges[name].buffer)))throw placementError('exact event scratch aliases held source or original arena','SOURCE_DESTINATION_ALIAS');
+ for(const name of owned)if((ranges[name].buffer.usage&GPU_BUFFER_USAGE.COPY_DST)===0)throw placementError('exact event scratch cannot be reset','EXACT_EVENT_CAPACITY');
+ const descriptors=sphExactPlacementEventPipelineDescriptors(config.format,l),pipelines={};
+ for(const[name,descriptor]of Object.entries(descriptors)){const pipeline=explicitPlacementPipeline(device,descriptor);if(!pipeline.pipeline)throw pipeline.error??new Error('exact event pipeline missing');pipelines[name]=Object.freeze({...pipeline});}
+ const roles={ed_events:ranges.events,product_events:ranges.events,ed_plan:ranges.plan,event_plan:ranges.plan,ed_quantities:ranges.quantities,
+  ed_companions:ranges.companions,ed_aux:ranges.aux,ed_count:ranges.count,ed_scratch:ranges.scratch,ed_outcomes:ranges.scratch,
+  ed_keys:ranges.keys,ed_sorted:ranges.sorted,ed_map:ranges.map,ed_reduced:ranges.reduced,ed_physical:ranges.physical,
+  ed_state:ranges.state,ed_thermo:ranges.thermo,ed_mechanics:ranges.mechanics,ed_receipt:ranges.receipt,receipt:ranges.receipt,
+  summary_keys:ranges.summaryKeys,summary_values:ranges.summaryValues,params:ranges.placementParams,ed_history:ranges.history,
+  ed_companions_out:ranges.historyCompanions,ed_destination_count:ranges.destinationCount};
+ const stage=(name,extra={},dispatch=config.dispatch)=>{
+  const descriptor=descriptors[name],resources={...roles,...extra};
+  const entries=Object.freeze(descriptor.roles.map(({binding,role})=>{
+   const resource=resources[role];if(!resource)throw new Error('Missing original event role '+role);return Object.freeze({binding,resource});}));
+  const writable=descriptor.roles.filter(v=>v.type==='storage').map(v=>resources[v.role].buffer);
+  const reads=descriptor.roles.filter(v=>v.type!=='storage').map(v=>resources[v.role].buffer);
+  if(writable.some(buffer=>reads.includes(buffer))||new Set(writable).size!==writable.length)throw placementError('exact event shader binds aliased write/read roles','SOURCE_DESTINATION_ALIAS');
+  return Object.freeze({name,descriptor,pipeline:pipelines[name],entries,dispatch,bindGroup:placementBindGroup(device,pipelines[name],descriptor.label,entries)});
+ };
+ const prefix=Object.freeze([stage('initialize',{},config.initializeDispatch),stage('index'),stage('prepare'),stage('summary',{},Object.freeze({x:config.summaryGroups,y:1,z:1}))]);
+ const commit=Object.freeze([stage('spare'),stage('capture'),stage('finish')]);
+ const history=[stage('history_initialize',{ed_prefix_out:ranges.prefixA})];
+ const paramsWords=new Uint32Array(config.sizes.exactEventScanParams/4);let input=ranges.prefixA,output=ranges.prefixB;
+ for(let level=1;level<=l.levels;level++){
+  paramsWords.set([2**(level-1),level,0,0],(level-1)*config.alignment/4);
+  history.push(stage('history_reduce',{ed_prefix_in:input,ed_prefix_out:output,
+   ed_params:Object.freeze({buffer:ranges.scanParams.buffer,offset:(level-1)*config.alignment,size:16})}));[input,output]=[output,input];
+ }
+ history.push(stage('history_scatter',{ed_prefix_in:input}),stage('history_publish',{ed_prefix_in:input}),stage('history_consume',{},Object.freeze({x:1,y:1,z:1})));
+ const validate=()=>{
+  if(requireLivePlacementAuthority(authority,{device,operation:'exact event validation'})!==owner||requireSegmentedPlacementArenaLease(arenaLease,{device,authority})!==arenaRecord
+   ||owner.exactCapturePreparation!==capture||arenaRecord.exactCapturePreparation!==capture||owner.exactCompactionEncoding!==compact
+   ||exactEventConfigurationForAuthority(authority,device)?.signature!==config.signature)throw placementError('exact event original source/lease changed','EXACT_EVENT_IDENTITY');
+  config.context.validate();for(const[name,r]of Object.entries(ranges)){requireBuffer(device,r.buffer,'exact event '+name);if(r.buffer.size<r.size)throw placementError('exact event range shortened','EXACT_EVENT_CAPACITY');}
+ };
+ validate();config.context.read.markDerivedBuffers(owned.map(name=>ranges[name].buffer).concat([ranges.events.buffer,ranges.summaryKeys.buffer,ranges.summaryValues.buffer]));validate();
+ const record={encoder,authority,arenaLease,owner,arenaRecord,config,ranges,prefix,commit,history:Object.freeze(history),capture,validate,
+  prefixSteps:[],commitSteps:[],historySteps:[],prepared:false,commitAttempted:false,committed:false,historyAttempted:false,historyFinalized:false,preparation:null};
+ owner.exactEventRecord=record;arenaRecord.exactEventRecord=record;
+ device.queue.writeBuffer(ranges.scanParams.buffer,0,paramsWords);
+ for(const name of owned)if(name!=='scanParams'){validate();encoder.clearBuffer(ranges[name].buffer,0,ranges[name].size);}
+ for(const value of prefix){encodeExactEventOwnerStage(record,value,gpuTimestampRecorder);record.prefixSteps.push(value);}record.prepared=true;
+ const preparation=Object.freeze({encoder,authority,arenaLease,capturePreparation:capture,layout:l,sourcePhysicalOutput:config.context.physical,
+  controlBuffer:ranges.scratch.buffer,privateHistoryCompanionBuffer:ranges.historyCompanions.buffer,historyScratchBuffer:ranges.history.buffer,
+  status:'event-summary-commands-recorded',physicalPublicationAdmitted:false,historyTransferAdmitted:false,explicitDispatchCount:prefix.length,
+  validate(){validate();if(owner.exactEventPreparation!==preparation||arenaRecord.exactEventPreparation!==preparation||!record.prepared)throw placementError('exact event preparation changed','EXACT_EVENT_IDENTITY');return preparation;}});
+ record.preparation=preparation;owner.exactEventPreparation=preparation;arenaRecord.exactEventPreparation=preparation;return preparation;
+}
+function encodeExactEventOwnerStage(record,stage,gpuTimestampRecorder){
+ record.validate();const stamp=placementTimestampBegin(gpuTimestampRecorder,record.encoder,{producerId:'sph-reaction-summary:product-event-placement:'+stage.descriptor.entryPoint,
+  stage:stage.descriptor.entryPoint,spanClass:'same-production-command-encoder-profiled-pass'});
+ const pass=record.encoder.beginComputePass({label:stage.descriptor.label});pass.setPipeline(stage.pipeline.pipeline);pass.setBindGroup(0,stage.bindGroup);
+ pass.dispatchWorkgroups(stage.dispatch.x,stage.dispatch.y,stage.dispatch.z);pass.end();placementTimestampEnd(gpuTimestampRecorder,record.encoder,stamp);record.validate();
+}
+function commitExactPlacementEventDispositions({device,encoder,authority,arenaLease,gpuTimestampRecorder=null}={}){
+ const owner=requireLivePlacementAuthority(authority,{device,operation:'exact event commit'}),arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+ const record=owner.exactEventRecord,physical=owner.exactPhysicalPreparation;
+ if(!record||record!==arenaRecord.exactEventRecord||!record.prepared||record.commitAttempted||record.encoder!==encoder||record.arenaLease!==arenaLease
+  ||!physical||physical!==arenaRecord.exactPhysicalPreparation||physical.encoder!==encoder||physical.arenaLease!==arenaLease||physical.authority!==authority
+  ||physical.capturePreparation!==record.capture||physical.status!=='commands-recorded'||physical.physicalEvidenceBuffer!==record.ranges.physical.buffer)
+  throw placementError('exact event commit requires original prepared events and actual physical recording','EXACT_EVENT_IDENTITY');
+ record.preparation.validate();physical.validate();record.commitAttempted=true;record.physical=physical;
+ for(const value of record.commit){encodeExactEventOwnerStage(record,value,gpuTimestampRecorder);record.commitSteps.push(value);}record.committed=true;
+ return Object.freeze({preparation:record.preparation,physicalPreparation:physical,explicitDispatchCount:record.commit.length,physicalPublicationAdmitted:false});
+}
+function finalizeExactPlacementResidualHistory({device,encoder,authority,arenaLease,gpuTimestampRecorder=null}={}){
+ const owner=requireLivePlacementAuthority(authority,{device,operation:'exact residual history finalization'}),arenaRecord=requireSegmentedPlacementArenaLease(arenaLease,{device,authority});
+ const record=owner.exactEventRecord;
+ if(!record||record!==arenaRecord.exactEventRecord||!record.committed||record.historyAttempted||record.encoder!==encoder||record.arenaLease!==arenaLease
+  ||owner.exactPhysicalPreparation!==record.physical||arenaRecord.exactPhysicalPreparation!==record.physical)
+  throw placementError('exact history requires original committed event stream','EXACT_EVENT_IDENTITY');
+ record.preparation.validate();record.physical.validate();record.historyAttempted=true;
+ for(const value of record.history){encodeExactEventOwnerStage(record,value,gpuTimestampRecorder);record.historySteps.push(value);}record.historyFinalized=true;
+ return Object.freeze({preparation:record.preparation,privateHistoryCompanionBuffer:record.ranges.historyCompanions.buffer,
+  residualCountBuffer:record.ranges.destinationCount.buffer,explicitDispatchCount:record.history.length,historyTransferAdmitted:false});
+}
+function validateExactPlacementEventWitness(owner,arenaRecord,encoder,arenaLease,{requireLiveLease=true}={}){
+ const record=owner.exactEventRecord,preparation=owner.exactEventPreparation;
+ if(!record||record.preparation!==preparation||record.encoder!==encoder||record.arenaLease!==arenaLease||!record.prepared||!record.committed||!record.historyFinalized
+  ||record.prefixSteps.length!==record.prefix.length||record.commitSteps.length!==record.commit.length||record.historySteps.length!==record.history.length
+  ||record.prefixSteps.some((v,i)=>v!==record.prefix[i])||record.commitSteps.some((v,i)=>v!==record.commit[i])||record.historySteps.some((v,i)=>v!==record.history[i])
+  ||(requireLiveLease&&(record!==arenaRecord.exactEventRecord||preparation!==arenaRecord.exactEventPreparation)))
+  throw placementError('exact terminal requires the complete original event disposition and history sequence','EXACT_EVENT_IDENTITY');
+ if(requireLiveLease){preparation.validate();record.physical.validate();}else owner.exactQuantityContext.validate();return preparation;
+}
+
+// All authority and command witnesses remain in the ORIGINAL owner records.
+// These private helpers never select terminal status or grant physical admission.
+function prepareExactPlacementTerminalEncoding({ device, encoder, authority, arenaLease,
+  productEventBuffer, placementSummaryBuffer, boxDimsM = [0, 0, 0], diagnosticReadbackRequested = false } = {}) {
+  const owner = requireLivePlacementAuthority(authority, { device, operation: 'exact terminal preparation' });
+  if (!owner.exactQuantityContext) return null;
+  const arenaRecord = requireSegmentedPlacementArenaLease(arenaLease, { device, authority });
+  const compact = owner.exactCompactionEncoding;
+  if (!encoder?.beginComputePass || !encoder?.finish || !compact
+      || compact !== arenaRecord.exactCompactionEncoding || compact.encoder !== encoder
+      || compact.authority !== authority || compact.arenaLease !== arenaLease
+      || compact.productEventBuffer !== productEventBuffer
+      || compact.completionReceiptBuffer !== owner.bindings.completionReceiptBuffer
+      || compact.sourcePhysicalOutput !== owner.exactQuantityContext.physical) {
+    throw placementError('exact terminal requires its original compaction, encoder and lease', 'EXACT_TERMINAL_IDENTITY');
+  }
+  if (typeof encoder.copyBufferToBuffer !== 'function') {
+    throw placementError('exact residual family storage requires original terminal raw copies', 'EXACT_TERMINAL_IDENTITY');
+  }
+  if (owner.exactTerminalRecord || arenaRecord.exactTerminalRecord || owner.segmentedEncoding
+      || owner.encodedPlacement || arenaRecord.activeEncoding) {
+    throw placementError('exact terminal preparation is one-shot', 'SUBMISSION');
+  }
+  const context = owner.exactQuantityContext, exact = context.validate();
+  const arena = arenaLease.arena, buffers = arena.buffers;
+  const p = arena.particleCapacity, e = arena.eventCapacity, terms = arena.productTermCapacity;
+  const format = exact.placedDestinationQuantityFormat, sourceLayout = exact.frozenSourceQuantityLayout;
+  const destinationLayout = exact.placedDestinationQuantityLayout;
+  const quantityCode = createSphExactPlacementQuantityTerminalWgsl(format, sourceLayout);
+  const eventConfig=exactEventConfigurationForAuthority(authority,device);
+  if(!eventConfig||eventConfig.signature!==arena.exactEventSignature)throw placementError('exact terminal requires original event arena','EXACT_EVENT_IDENTITY');
+  if (p !== authority.particleCount || e !== authority.productEventCapacity || arena.eventStrideVec4 !== 8
+      || sourceLayout !== context.quantities.layout || exact.frozenSourceQuantityBuffer !== context.quantities.outputBuffer
+      || sourceLayout.particleCount !== p || sourceLayout.eventCapacity !== e
+      || destinationLayout.currentRowOffset !== 0 || destinationLayout.eventRowOffset !== p
+      || destinationLayout.rowCount !== p + e || destinationLayout.wordLength !== (p + e) * sourceLayout.recordWords
+      || destinationLayout.recordWords !== sourceLayout.recordWords || destinationLayout.scalar !== sourceLayout.scalar
+      || destinationLayout.massWordCount !== format.wordCount
+      || compact.sourceQuantityBuffer !== exact.frozenSourceQuantityBuffer
+      || compact.sourceQuantityLayout !== sourceLayout || compact.compactCountBuffer !== buffers.compactCount) {
+    throw placementError('exact terminal lost its original/current/residual quantity planes', 'EXACT_TERMINAL_IDENTITY');
+  }
+  const dispatch = planSphExactPlacementTerminalWorkgroups({ particleCount:p,eventCapacity:e,productTermCount:terms,
+    eventStrideVec4:8,maxComputeWorkgroupsPerDimension:device.limits?.maxComputeWorkgroupsPerDimension });
+  const limits = device.limits;
+  if (!limits || !['maxStorageBuffersPerShaderStage','maxUniformBuffersPerShaderStage','maxBindingsPerBindGroup',
+    'maxStorageBufferBindingSize','maxUniformBufferBindingSize','maxBufferSize'].every(key=>Number.isSafeInteger(limits[key])&&limits[key]>0)
+      || limits.maxStorageBuffersPerShaderStage < 7 || limits.maxUniformBuffersPerShaderStage < 1
+      || limits.maxBindingsPerBindGroup < 8 || limits.maxUniformBufferBindingSize < 64) {
+    throw placementError('exact terminal exceeds original device binding limits', 'EXACT_TERMINAL_CAPACITY');
+  }
+  const bound = (buffer,size,label,usage=GPU_BUFFER_USAGE.STORAGE) => {
+    requireBuffer(device,buffer,label);
+    const limit=usage===GPU_BUFFER_USAGE.UNIFORM?limits.maxUniformBufferBindingSize:limits.maxStorageBufferBindingSize;
+    if (!Number.isSafeInteger(size)||size<4||size>0xffff_fffc||size%4
+        || !Number.isSafeInteger(buffer.size)||buffer.size<size||buffer.size>limits.maxBufferSize
+        || size>limit||(buffer.usage&usage)!==usage) {
+      throw placementError(`exact terminal ${label} does not fit its original range`, 'EXACT_TERMINAL_CAPACITY');
+    }
+    return Object.freeze({buffer,offset:0,size});
+  };
+  const b=owner.bindings;
+  const ranges=Object.freeze({
+    rollbackState:bound(b.sourceStateBuffer,p*32,'rollback state'),
+    rollbackThermo:bound(b.sourceThermoBuffer,p*48,'rollback thermo'),
+    rollbackMechanics:bound(b.sourceMechanicsBuffer,p*128,'rollback mechanics'),
+    state:bound(b.placedDestinationStateBuffer,p*32,'destination state'),
+    thermo:bound(b.placedDestinationThermoBuffer,p*48,'destination thermo'),
+    mechanics:bound(b.placedDestinationMechanicsBuffer,p*128,'destination mechanics'),
+    originalQuantities:bound(exact.frozenSourceQuantityBuffer,p*sourceLayout.recordWords*4,'byte-zero original quantity plane'),
+    quantities:bound(exact.placedDestinationQuantityBuffer,(p+e)*sourceLayout.recordWords*4,'persistent current/residual quantities'),
+    mass:bound(exact.placedDestinationMassBuffer,(p+e)*format.wordCount*4,'terminal current/residual mass',
+      GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC|GPU_BUFFER_USAGE.COPY_DST),
+    count:bound(exact.placedDestinationResidualCountBuffer,8,'destination residual count and error'),
+    candidateEvents:bound(buffers.denseEmission,e*128,'candidate events'),
+    events:bound(productEventBuffer,e*128,'published events',GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC),
+    residualEvents:bound(exact.placedDestinationResidualEventBuffer,e*128,'durable residual events',
+      GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC|GPU_BUFFER_USAGE.COPY_DST),
+    residualCompanions:bound(exact.placedDestinationResidualCompanionBuffer,e*eventConfig.layout.companionWords*4,'durable residual companions',
+      GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC|GPU_BUFFER_USAGE.COPY_DST),
+    residualPhysical:bound(exact.placedDestinationResidualPhysicalBuffer,e*208,'durable residual physical state',
+      GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC|GPU_BUFFER_USAGE.COPY_DST),
+    productTemplates:bound(context.physical.auxiliaryBuffer,eventConfig.layout.output.auxWords*4,'original product physical templates'),
+    candidateSummary:bound(buffers.candidateSummary,terms*128,'candidate summary'),
+    summary:bound(placementSummaryBuffer,terms*128,'published summary'),
+    receipt:bound(b.completionReceiptBuffer,SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES,'original receipt'),
+    historyCompanions:bound(buffers.exactEventHistoryCompanions,e*eventConfig.layout.companionWords*4,'private pending history companions',GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC),
+    params:bound(buffers.placementParams,64,'original placement params',GPU_BUFFER_USAGE.UNIFORM)
+  });
+  const writableNames=['state','thermo','mechanics','quantities','mass','count','events','summary','receipt','historyCompanions','residualEvents','residualCompanions','residualPhysical'];
+  const writes=writableNames.map(name=>ranges[name].buffer);
+  const sourceRead=context.read.validate();
+  const protectedInputs=[...Object.values(b).filter(value=>value&&Number.isSafeInteger(value.size)&&!writes.includes(value)),
+    owner.placementSourceFamily.directorySourceBuffer,
+    ...Object.values(context.physical).filter(value=>value&&Number.isSafeInteger(value.size)),
+    context.quantities.outputBuffer,sourceRead.result.outputBuffer,sourceRead.source.result.outputBuffer,
+    sourceRead.source.source.inventory.buffer,
+    ...Object.values(buffers).filter(buffer=>buffer!==ranges.historyCompanions.buffer),...arenaRecord.captureRadix.allocationEntries().map(v=>v.buffer),
+    ...arenaRecord.directRadix.allocationEntries().map(v=>v.buffer),...arenaRecord.summaryRadix.allocationEntries().map(v=>v.buffer)];
+  if (new Set(Object.values(ranges).map(r=>r.buffer)).size!==Object.keys(ranges).length
+      || new Set(writes).size!==writes.length||writes.some(buffer=>protectedInputs.includes(buffer))) {
+    throw placementError('exact terminal outputs alias source, history, arena or sibling ranges', 'SOURCE_DESTINATION_ALIAS');
+  }
+  const dimensions=[0,1,2].map(axis=>{const n=Number(boxDimsM?.[axis]);return Number.isFinite(n)&&n>0?n:0;});
+  const paramWords=Object.freeze(Array.from(new Uint32Array(placementParamsData({particleCount:p,eventCount:e,eventStrideVec4:8,
+    productTermCount:terms,boxDimsM:dimensions,generationId:authority.generationId,supportProfileId:authority.supportProfileId,
+    diagnosticReadbackRequested}))));
+  const original=sphReactionProductPlacementSegmentedPipelineDescriptors();
+  const make=(name,code,entryPoint,types)=>Object.freeze({label:`ulg-exact-placement-terminal-${name}`,
+    cacheKey:`ulg-exact-placement-terminal-v1-${name}-${format.wordCount}-${format.quantumExponent}-${sourceLayout.scalar.wordCount}-${p}-${e}`,
+    code,entryPoint,bindings:types.map((type,i)=>computeBufferBinding(i,type))});
+  const physicalTypes=['read-only-storage','read-only-storage','read-only-storage','storage','storage','storage','storage','uniform'];
+  const physicalCode=createSphExactPlacementPhysicalTerminalWgsl();
+  const descriptors=[
+    make('physical-disposition',physicalCode,'publish_or_restore_placement_destination',physicalTypes),
+    original.transactionalAuxiliaryPublish, original.transactionalTerminal,
+    make('physical-recovery',physicalCode,'recover_unsafe_placement_destination',physicalTypes),
+    make('quantities',quantityCode,'materialize_terminal_exact_placement_quantities',['read-only-storage','storage','storage','read-only-storage','uniform']),
+    make('mass',createSphExactPlacementMassTerminalWgsl(format,sourceLayout),'materialize_terminal_exact_placement_mass',
+      ['read-only-storage','storage']),
+    make('ledgers',createSphExactPlacementLedgerTerminalWgsl(),'materialize_safe_placement_ledgers',
+      ['read-only-storage','storage','read-only-storage','storage','read-only-storage','uniform']),
+    make('private-companion-recovery',createSphExactPlacementPrivateCompanionRecoveryWgsl(eventConfig.layout),'recover_exact_private_residual_companions',['storage','read-only-storage']),
+    make('residual-physical',createSphExactPlacementResidualPhysicalTerminalWgsl(eventConfig.layout),'materialize_terminal_residual_physical',
+      ['read-only-storage','read-only-storage','read-only-storage','read-only-storage','read-only-storage','storage'])
+  ];
+  const physicalNames=['rollbackState','rollbackThermo','rollbackMechanics','state','thermo','mechanics','receipt','params'];
+  const ledgerNames=['candidateEvents','events','candidateSummary','summary','receipt','params'];
+  const names=[physicalNames,ledgerNames,['receipt','params'],physicalNames,['originalQuantities','quantities','count','receipt','params'],['quantities','mass'],ledgerNames,['historyCompanions','receipt'],['productTemplates','historyCompanions','events','count','receipt','residualPhysical']];
+  const workgroups=[dispatch.physical,dispatch.ledgers,1,dispatch.physical,dispatch.quantities,dispatch.quantities,dispatch.ledgers,Math.ceil(e/64),Math.ceil(e/64)];
+  const steps=Object.freeze(descriptors.map((originalDescriptor,i)=>{
+    // Snapshot witness metadata without freezing a shared descriptor/cache object.
+    // GPU handles remain opaque; only this private wrapper is immutable.
+    const descriptor=Object.freeze({...originalDescriptor,bindings:Object.freeze(originalDescriptor.bindings.map(binding=>
+      Object.freeze({...binding,buffer:Object.freeze({...binding.buffer})})))});
+    const pipeline=Object.freeze({...explicitPlacementPipeline(device,descriptor)});
+    const entries=Object.freeze(names[i].map((name,binding)=>Object.freeze({binding,resource:ranges[name]})));
+    const bindGroup=placementBindGroup(device,pipeline,descriptor.label,entries);
+    return Object.freeze({descriptor,pipeline,bindGroup,entries,workgroups:workgroups[i]});
+  }));
+  // All terminal dispatches recover/select the pending planes first. These
+  // immutable raw-copy steps make only storage durable; no history admission.
+  const residualCopies=Object.freeze([
+    Object.freeze({source:ranges.events,destination:ranges.residualEvents,size:ranges.events.size}),
+    Object.freeze({source:ranges.historyCompanions,destination:ranges.residualCompanions,size:ranges.historyCompanions.size})
+  ]);
+  const validate=()=>{
+    if (requireLivePlacementAuthority(authority,{device,operation:'exact terminal binding validation'})!==owner
+        ||requireSegmentedPlacementArenaLease(arenaLease,{device,authority})!==arenaRecord
+        ||owner.exactCompactionEncoding!==compact||arenaRecord.exactCompactionEncoding!==compact
+        ||context.validate()!==exact||context.quantities.layout!==sourceLayout
+        ||context.physical!==compact.sourcePhysicalOutput
+        ||Object.entries(exact).some(([key,value])=>b[key]!==value)
+        ||ranges.params.buffer!==buffers.placementParams||ranges.candidateEvents.buffer!==buffers.denseEmission
+        ||ranges.candidateSummary.buffer!==buffers.candidateSummary) {
+      throw placementError('exact terminal source/arena bindings changed', 'EXACT_TERMINAL_IDENTITY');
+    }
+    for(const[name,r]of Object.entries(ranges)) {
+      const usage=name==='params'?GPU_BUFFER_USAGE.UNIFORM
+        : ['mass','residualEvents','residualCompanions','residualPhysical'].includes(name)?GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC|GPU_BUFFER_USAGE.COPY_DST
+        : ['events','historyCompanions'].includes(name)?GPU_BUFFER_USAGE.STORAGE|GPU_BUFFER_USAGE.COPY_SRC
+        : GPU_BUFFER_USAGE.STORAGE;
+      bound(r.buffer,r.size,name,usage);
+    }
+  };
+  validate();
+  context.read.markDerivedBuffers([ranges.state.buffer,ranges.thermo.buffer,ranges.quantities.buffer,ranges.mass.buffer,ranges.count.buffer,
+    ranges.events.buffer,ranges.summary.buffer,ranges.historyCompanions.buffer,
+    ranges.residualEvents.buffer,ranges.residualCompanions.buffer,ranges.residualPhysical.buffer],{mechanicsBuffers:[ranges.mechanics.buffer]});
+  validate();
+  const plan=Object.freeze({authority,encoder,arenaLease,ranges,exactBindings:exact,format,sourceLayout,destinationLayout,
+    paramWords,dispatch,steps,residualCopies,residualStorageLayout:exact.placedDestinationResidualLayout,
+    physicalPublicationAdmitted:false,historyTransferAdmitted:false});
+  const record={plan,owner,arenaRecord,validate,attempted:false,completed:false,completedSteps:[],completedResidualCopies:[],encoding:null};
+  owner.exactTerminalRecord=record;arenaRecord.exactTerminalRecord=record;
+  return plan;
+}
+function encodeExactPlacementTerminal({device,encoder,authority,arenaLease,plan,gpuTimestampRecorder=null}={}) {
+  const owner=requireLivePlacementAuthority(authority,{device,operation:'exact terminal encoding'});
+  const record=owner.exactTerminalRecord;
+  if(!record||record.plan!==plan||plan.encoder!==encoder||plan.authority!==authority||plan.arenaLease!==arenaLease
+      ||record.arenaRecord.exactTerminalRecord!==record||record.attempted||owner.segmentedEncoding||owner.encodedPlacement) {
+    throw placementError('exact terminal requires its unused original private preparation','EXACT_TERMINAL_IDENTITY');
+  }
+  record.validate();
+  const capture=owner.exactCapturePreparation;
+  if(!capture||capture!==record.arenaRecord.exactCapturePreparation||capture.encoder!==encoder
+      ||capture.authority!==authority||capture.arenaLease!==arenaLease||capture.status!=='scratch-prepared') {
+    throw placementError('exact terminal requires the original capture sequence','EXACT_TERMINAL_IDENTITY');
+  }
+  const chemistry=validateExactPlacementChemistryWitness(owner,record.arenaRecord,encoder,arenaLease);
+  const physical=validateExactPlacementPhysicalWitness(owner,record.arenaRecord,encoder,arenaLease);
+  record.physicalPreparation=physical;record.physicalEvidenceConsumption=owner.exactPhysicalConsumption;
+  record.chemistryPreparation=chemistry;
+  record.eventPreparation=validateExactPlacementEventWitness(owner,record.arenaRecord,encoder,arenaLease);
+  if(record.eventPreparation.privateHistoryCompanionBuffer!==plan.ranges.historyCompanions.buffer)throw placementError('exact event companion witness changed','EXACT_EVENT_IDENTITY');
+  record.attempted=true;
+  for(const step of plan.steps){
+    record.validate();
+    encodePlacementPass({encoder,pipeline:step.pipeline.pipeline,bindGroup:step.bindGroup,workgroupCount:step.workgroups,
+      label:step.descriptor.label,producerId:`sph-reaction-summary:product-event-placement:${step.descriptor.entryPoint}`,
+      gpuTimestampRecorder,metadata:{generationId:authority.generationId,particleCount:authority.particleCount,eventCapacity:authority.productEventCapacity}});
+    record.validate();record.completedSteps.push(step);
+  }
+  for(const copy of plan.residualCopies){
+    record.validate();
+    encoder.copyBufferToBuffer(copy.source.buffer,copy.source.offset,copy.destination.buffer,copy.destination.offset,copy.size);
+    record.validate();record.completedResidualCopies.push(copy);
+  }
+  record.completed=true;
+  const encoding=Object.freeze({plan,authority,encoder,arenaLease,steps:Object.freeze([...record.completedSteps]),
+    residualCopies:Object.freeze([...record.completedResidualCopies]),encodedCopyCount:plan.residualCopies.length,
+    residualStorageLayout:plan.residualStorageLayout,historyTransferAdmitted:false,
+    encodedDispatchCount:plan.steps.length,quantitySelectionStage:plan.steps[4],massSelectionStage:plan.steps[5],chemistryPreparation:chemistry,
+    physicalPreparation:physical,physicalEvidenceConsumption:record.physicalEvidenceConsumption,eventPreparation:record.eventPreparation,physicalPublicationAdmitted:false});
+  record.encoding=encoding;owner.exactTerminalEncoding=encoding;record.arenaRecord.exactTerminalEncoding=encoding;
+  return encoding;
+}
+function validateExactPlacementTerminalEncoding(owner,genuine,{requireLiveLease=true}={}) {
+  if(!owner.exactQuantityContext){
+    if(genuine?.exactTerminalEncoding)throw placementError('legacy placement cannot substitute exact terminal evidence','EXACT_TERMINAL_IDENTITY');
+    return null;
+  }
+  const record=owner.exactTerminalRecord,encoding=record?.encoding,plan=record?.plan;
+  if(!record||!record.completed||!record.attempted||!encoding||genuine?.exactTerminalEncoding!==encoding
+      ||owner.exactTerminalEncoding!==encoding||genuine.encoder!==plan.encoder||genuine.arenaLease!==plan.arenaLease
+      ||encoding.plan!==plan||encoding.steps.length!==9||encoding.quantitySelectionStage!==plan.steps[4]
+      ||encoding.massSelectionStage!==plan.steps[5]
+      ||encoding.encodedCopyCount!==2||encoding.residualCopies?.length!==2||record.completedResidualCopies.length!==2
+      ||encoding.residualStorageLayout!==plan.residualStorageLayout||encoding.historyTransferAdmitted!==false
+      ||encoding.residualCopies.some((copy,i)=>copy!==plan.residualCopies[i]||record.completedResidualCopies[i]!==copy)
+      ||encoding.steps.some((step,i)=>step!==plan.steps[i]||record.completedSteps[i]!==step)
+      ||genuine.transactionRollbackStateBuffer!==plan.ranges.rollbackState.buffer
+      ||genuine.transactionRollbackThermoBuffer!==plan.ranges.rollbackThermo.buffer
+      ||genuine.transactionRollbackMechanicsBuffer!==plan.ranges.rollbackMechanics.buffer
+      ||genuine.productEventBuffer!==plan.ranges.events.buffer||genuine.candidateProductEventBuffer!==plan.ranges.candidateEvents.buffer
+      ||genuine.placementSummaryBuffer!==plan.ranges.summary.buffer||genuine.candidatePlacementSummaryBuffer!==plan.ranges.candidateSummary.buffer
+      ||genuine.completionReceiptBuffer!==plan.ranges.receipt.buffer) {
+    throw placementError('exact placement requires every original terminal stage and binding','EXACT_TERMINAL_IDENTITY');
+  }
+  const chemistry=validateExactPlacementChemistryWitness(owner,record.arenaRecord,plan.encoder,plan.arenaLease,{requireLiveLease});
+  if(record.chemistryPreparation!==chemistry||encoding.chemistryPreparation!==chemistry)
+    throw placementError('exact terminal chemistry witness was substituted','EXACT_CHEMISTRY_IDENTITY');
+  const physical=validateExactPlacementPhysicalWitness(owner,record.arenaRecord,plan.encoder,plan.arenaLease,{requireLiveLease});
+  if(record.physicalPreparation!==physical||encoding.physicalPreparation!==physical
+      ||genuine.exactPhysicalPreparation!==physical
+      ||record.physicalEvidenceConsumption!==owner.exactPhysicalConsumption
+      ||encoding.physicalEvidenceConsumption!==record.physicalEvidenceConsumption
+      ||genuine.exactPhysicalConsumption!==record.physicalEvidenceConsumption) {
+    throw placementError('exact terminal physical witness was substituted','EXACT_PHYSICAL_EVIDENCE_IDENTITY');
+  }
+  const event=validateExactPlacementEventWitness(owner,record.arenaRecord,plan.encoder,plan.arenaLease,{requireLiveLease});
+  if(record.eventPreparation!==event||encoding.eventPreparation!==event||event.privateHistoryCompanionBuffer!==plan.ranges.historyCompanions.buffer)
+    throw placementError('exact terminal event witness was substituted','EXACT_EVENT_IDENTITY');
+  if(requireLiveLease)record.validate();
+  else owner.exactQuantityContext.validate();
+  return encoding;
+}
+function exactPlacementTerminalArtifactMatches(artifact,submission) {
+  if(!submission.record.exactQuantityContext)return artifact.exactTerminalEncoding===undefined;
+  try{
+    const exact=validateExactPlacementTerminalEncoding(submission.record,submission.encoding.segmentedEncoding,{requireLiveLease:false});
+    return exact===submission.encoding.exactTerminalEncoding&&exact===artifact.exactTerminalEncoding
+      &&Object.entries(exact.plan.exactBindings).every(([key,value])=>artifact[key]===value&&submission.encoding[key]===value);
+  }catch{return false;}
+}
+
 /**
  * Encode the production segmented placement chain into an existing encoder.
  * The returned encoding is still unsubmitted and owns the arena lease until
@@ -1467,11 +3198,6 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   gpuTimestampRecorder = null,
   diagnosticReadbackRequested = false
 } = {}) {
-  for (const [stateBuffer, thermoBuffer] of [[nextStateBuffer, nextThermoBuffer],
-    [frozenSourceStateBuffer, frozenSourceThermoBuffer],
-    [transactionRollbackStateBuffer, transactionRollbackThermoBuffer]]) {
-    assertSphLegacyMassPathAllowed({ stateBuffer, thermoBuffer }, 'Product placement');
-  }
   if (!encoder?.beginComputePass || !encoder?.finish) {
     throw new TypeError('segmented product placement requires a live command encoder');
   }
@@ -1479,6 +3205,16 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     device,
     operation: 'segmented placement encoding'
   });
+  // A genuine retained exact family supplies the complete current/residual
+  // quantities. Its buffers are checked against the original authority below,
+  // before uploads or encoding. Legacy callers still cannot use exact aliases.
+  if (!authorityRecord.exactQuantityContext) {
+    for (const [stateBuffer, thermoBuffer] of [[nextStateBuffer, nextThermoBuffer],
+      [frozenSourceStateBuffer, frozenSourceThermoBuffer],
+      [transactionRollbackStateBuffer, transactionRollbackThermoBuffer]]) {
+      assertSphLegacyMassPathAllowed({ stateBuffer, thermoBuffer }, 'Product placement');
+    }
+  }
   if (authorityRecord.segmentedEncoding || authorityRecord.encodedPlacement) {
     throw placementError(
       'segmented placement authority already encoded its one-shot production chain',
@@ -1491,6 +3227,18 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   });
   if (arenaRecord.activeEncoding) {
     throw placementArenaError('placement arena already encoded this lease', 'ARENA_LEASE');
+  }
+  const exactCompaction = resolveSphReactionProductPlacementExactCompactionSource(authority, { device });
+  if (exactCompaction) {
+    const compact = authorityRecord.exactCompactionEncoding;
+    if (!compact || compact !== arenaRecord.exactCompactionEncoding
+        || compact.encoder !== encoder || compact.arenaLease !== arenaLease
+        || compact.productEventBuffer !== productEventBuffer
+        || compact.compactCountBuffer !== compactCountBuffer
+        || compact.completionReceiptBuffer !== completionReceiptBuffer
+        || compact.sourcePhysicalOutput !== exactCompaction.physical) {
+      throw placementError('segmented exact placement requires its original encoded stable compaction', 'EXACT_COMPACTION_IDENTITY');
+    }
   }
   const arena = arenaLease.arena;
   const buffers = arena.buffers;
@@ -1624,6 +3372,10 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   requireMinimumBytes(summary, summaryByteLength, 'candidate placement summary');
   requireMinimumBytes(control, 32, 'placement control');
   requireMinimumBytes(receipt, SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES, 'placement completion receipt');
+  const exactTerminalPreparation = exactCompaction ? prepareExactPlacementTerminalEncoding({
+    device, encoder, authority, arenaLease, productEventBuffer: publishedEvents,
+    placementSummaryBuffer: publishedSummary, boxDimsM, diagnosticReadbackRequested
+  }) : null;
   const dimensions = [0, 1, 2].map((axis) => {
     const value = Number(boxDimsM?.[axis]);
     return Number.isFinite(value) && value > 0 ? value : 0;
@@ -1631,7 +3383,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   device.queue.writeBuffer(
     buffers.placementParams,
     0,
-    placementParamsData({
+    exactTerminalPreparation ? Uint32Array.from(exactTerminalPreparation.paramWords) : placementParamsData({
       particleCount,
       eventCount,
       eventStrideVec4: eventStride,
@@ -1646,13 +3398,15 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   // values. All placement mutation happens against these arena-owned copies;
   // the terminal passes below either publish them together or retain/restore
   // the exact pre-placement family.
-  encoder.copyBufferToBuffer(
-    publishedEvents,
-    0,
-    events,
-    0,
-    eventByteLength
-  );
+  if (!exactCompaction) {
+    encoder.copyBufferToBuffer(
+      publishedEvents,
+      0,
+      events,
+      0,
+      eventByteLength
+    );
+  }
   encoder.copyBufferToBuffer(
     publishedSummary,
     0,
@@ -1705,19 +3459,19 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   const termInitialize = pipeline(pipelineDescriptors.termInitialize);
   const summaryApply = pipeline(pipelineDescriptors.summaryApply);
   const finalize = pipeline(pipelineDescriptors.finalize);
-  const transactionalPublish = pipeline(
+  const transactionalPublish = exactTerminalPreparation ? null : pipeline(
     pipelineDescriptors.transactionalPublish
   );
-  const transactionalAuxiliaryPublish = pipeline(
+  const transactionalAuxiliaryPublish = exactTerminalPreparation ? null : pipeline(
     pipelineDescriptors.transactionalAuxiliaryPublish
   );
-  const transactionalTerminal = pipeline(
+  const transactionalTerminal = exactTerminalPreparation ? null : pipeline(
     pipelineDescriptors.transactionalTerminal
   );
-  const transactionalDestinationRecovery = pipeline(
+  const transactionalDestinationRecovery = exactTerminalPreparation ? null : pipeline(
     pipelineDescriptors.transactionalDestinationRecovery
   );
-  const transactionalAuxiliaryMaterialize = pipeline(
+  const transactionalAuxiliaryMaterialize = exactTerminalPreparation ? null : pipeline(
     pipelineDescriptors.transactionalAuxiliaryMaterialize
   );
 
@@ -1745,6 +3499,38 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     binding,
     resource: { buffer: buffers.placementParams }
   });
+  const reductionEntry = (binding, offset) => ({
+    binding,
+    resource: { buffer: buffers.reductionParams, offset, size: 16 }
+  });
+  let captureRadixExecution, captureInput;
+  let exactCapturePreparation = null;
+  let exactPhysicalPreparation = null;
+  let exactEventPreparation = null;
+  let exactChemistryPreparation = null;
+  if (exactCompaction) {
+    // Chemistry reads only the immutable selected packet, routing and staged
+    // pair headers. Prepare its private evidence before destination mutation;
+    // consumption remains after physical denial coverage below.
+    exactChemistryPreparation = encodeExactPlacementChemistryPreparation({device,encoder,authority,arenaLease,gpuTimestampRecorder});
+    explicitDispatchCount += exactChemistryPreparation.explicitDispatchCount;
+    // All exact writes stay in this family's private destination tuple. The
+    // original seal still denies publication until durable history admission.
+    exactCapturePreparation = encodeExactPlacementCapturePreparation({
+      device, encoder, authority, arenaLease, boxDimsM: dimensions, gpuTimestampRecorder
+    });
+    captureRadixExecution = exactCapturePreparation.captureRadixExecution;
+    captureInput = exactCapturePreparation.captureReducedValuesBuffer;
+    explicitDispatchCount += exactCapturePreparation.explicitDispatchCount;
+    exactEventPreparation = prepareExactPlacementEventDispositions({device,encoder,authority,arenaLease,gpuTimestampRecorder});
+    explicitDispatchCount += exactEventPreparation.explicitDispatchCount;
+    exactPhysicalPreparation = encodeExactPlacementCaloricPhysicalPreparation({
+      device, encoder, authority, arenaLease, gpuTimestampRecorder
+    });
+    captureInput = exactPhysicalPreparation.projectedCaptureReducedValuesBuffer;
+    explicitDispatchCount += exactPhysicalPreparation.explicitDispatchCount;
+    explicitDispatchCount += commitExactPlacementEventDispositions({device,encoder,authority,arenaLease,gpuTimestampRecorder}).explicitDispatchCount;
+  } else {
   encode(preflight, placementBindGroup(device, preflight, 'placement-preflight-bind-group', [
     { binding: 0, resource: { buffer: compactCount } },
     { binding: 1, resource: { buffer: control } },
@@ -1780,7 +3566,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     spanClass: 'same-grouped-production-compute-pass',
     ...metadata
   });
-  const captureRadixExecution = arenaRecord.captureRadix.encodeSort(encoder, {
+  captureRadixExecution = arenaRecord.captureRadix.encodeSort(encoder, {
     keyBuffer: buffers.captureKeys,
     elementCount: eventCount,
     keyWordCount: 1,
@@ -1788,10 +3574,6 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     generationId: authority.generationId
   });
   placementTimestampEnd(gpuTimestampRecorder, encoder, captureRadixSpan);
-  const reductionEntry = (binding, offset) => ({
-    binding,
-    resource: { buffer: buffers.reductionParams, offset, size: 16 }
-  });
   const captureSorted = captureRadixExecution.sortedIndicesBuffer;
   encode(captureInitialize, placementBindGroup(device, captureInitialize, 'capture-initialize-bind-group', [
     { binding: 0, resource: { buffer: buffers.captureKeys } },
@@ -1801,7 +3583,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     { binding: 4, resource: { buffer: buffers.captureReduceA } },
     reductionEntry(5, arenaRecord.reductionOffsets.capture.initOffset)
   ]), eventWorkgroups, 'capture-initialize');
-  let captureInput = buffers.captureReduceA;
+  captureInput = buffers.captureReduceA;
   let captureOutput = buffers.captureReduceB;
   arenaRecord.reductionOffsets.capture.levelOffsets.forEach((offset, level) => {
     encode(captureReduce, placementBindGroup(device, captureReduce, `capture-reduce-${level}-bind-group`, [
@@ -1825,6 +3607,8 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     { binding: 7, resource: { buffer: receipt } },
     paramsEntry(8)
   ]), eventWorkgroups, 'capture-apply');
+
+  }
 
   encode(directPlan, placementBindGroup(device, directPlan, 'direct-plan-bind-group', [
     { binding: 0, resource: { buffer: events } },
@@ -1934,12 +3718,30 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   ]);
   encode(termInitialize, summaryApplyEntries(termInitialize), termWorkgroups, 'term-initialize');
   encode(summaryApply, summaryApplyEntries(summaryApply), eventWorkgroups, 'summary-apply');
+  let exactChemistryConsumption=null,exactPhysicalConsumption=null;
+  if(exactCompaction){
+    explicitDispatchCount += finalizeExactPlacementResidualHistory({device,encoder,authority,arenaLease,gpuTimestampRecorder}).explicitDispatchCount;
+    // Parallel P/E denial-only coverage must run before the original core
+    // finalizer. Later direct work may legitimately differ from capture S/T/M.
+    exactPhysicalConsumption=encodeExactPlacementPhysicalEvidenceConsumption({device,encoder,authority,arenaLease,gpuTimestampRecorder});
+    explicitDispatchCount+=exactPhysicalConsumption.explicitDispatchCount;
+    exactChemistryConsumption=encodeExactPlacementChemistryConsumption({device,encoder,authority,arenaLease,gpuTimestampRecorder});
+    explicitDispatchCount+=exactChemistryConsumption.explicitDispatchCount;
+  }
   encode(finalize, placementBindGroup(device, finalize, 'placement-finalize-bind-group', [
     { binding: 0, resource: { buffer: compactCount } },
     { binding: 1, resource: { buffer: control } },
     { binding: 2, resource: { buffer: receipt } },
     paramsEntry(3)
   ]), 1, 'finalize');
+  let exactTerminalEncoding = null;
+  if (exactTerminalPreparation) {
+    // The same terminal selector covers physical rows, exact quantities and
+    // residual ledgers. Encoding this tail does not grant publication admission.
+    exactTerminalEncoding = encodeExactPlacementTerminal({ device, encoder, authority, arenaLease,
+      plan: exactTerminalPreparation, gpuTimestampRecorder });
+    explicitDispatchCount += exactTerminalEncoding.encodedDispatchCount;
+  } else {
   encode(
     transactionalPublish,
     placementBindGroup(
@@ -2035,6 +3837,8 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     'transactional-auxiliary-materialize'
   );
 
+  }
+
   const scratchBuffers = [...new Set([
     ...Object.values(buffers).filter((buffer) => (
       buffer !== decisions
@@ -2074,6 +3878,10 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     directRadixExecution,
     summaryRadixExecution,
     captureReducedValuesBuffer: captureInput,
+    ...(exactCapturePreparation ? { exactCapturePreparation } : {}),
+    ...(exactPhysicalPreparation ? { exactPhysicalPreparation, exactPhysicalConsumption } : {}),
+    ...(exactTerminalEncoding ? { exactTerminalEncoding } : {}),
+    ...(exactChemistryPreparation ? {exactChemistryPreparation,exactChemistryConsumption}:{}),
     directReducedValuesBuffer: directInput,
     summaryReducedValuesBuffer: summaryInput,
     scratchBuffers: Object.freeze(scratchBuffers),
@@ -2282,7 +4090,11 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   sourceThermoBuffer,
   sourceMechanicsBuffer
 } = {}) {
-  assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Product placement source');
+  // Raw exact buffers cannot enter this factory through the legacy path.
+  // Only an original family can proceed to the private exact-owner checks.
+  if (!isSchroederSpatialReactionPlacementSourceFamily(placementSourceFamily)) {
+    assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Product placement source');
+  }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('reaction product placement authority requires a WebGPU-like device');
   }
@@ -2296,6 +4108,13 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
       placementSourceFamily,
       { device }
     );
+  const exactQuantityContext = capturePlacementExactQuantityContext(
+    resolvedPlacementSourceFamily, device, resolvedParticleCount, resolvedEventCapacity
+  );
+  if (!exactQuantityContext) {
+    assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Product placement source');
+  }
+  const exactQuantityBindings = exactQuantityContext?.bindings ?? {};
   const generation = resolvedPlacementSourceFamily.generation;
   if (generation?.source?.sourceCount !== resolvedParticleCount) {
     throw placementError(
@@ -2490,6 +4309,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     expectationBufferByteLength:
       expectationAbi.expectationBufferByteLength
   });
+  exactQuantityContext?.validate();
   device.queue.writeBuffer(
     expectation.entry.expectationBuffer,
     0,
@@ -2500,6 +4320,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     0,
     new Uint32Array(SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_BYTES / 4)
   );
+  exactQuantityContext?.validate();
   const authority = Object.freeze({
     schema:
       ULG_SCHROEDER_SPATIAL_REACTION_PRODUCT_PLACEMENT_AUTHORITY_SCHEMA,
@@ -2541,6 +4362,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     placedDestinationStateBuffer,
     placedDestinationThermoBuffer,
     placedDestinationMechanicsBuffer,
+    ...exactQuantityBindings,
     spatialArenaIndex: expectation.entry.arenaIndex,
     arenaAcquisitionOrdinal: expectation.entry.acquisitionCount,
     bufferCreationCount: expectation.bufferCreationCount,
@@ -2550,6 +4372,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
     device,
     generation,
     placementSourceFamily: resolvedPlacementSourceFamily,
+    exactQuantityContext,
     authentication,
     directoryAbiVersion: expectationAbi.directoryAbiVersion,
     expectationBufferByteLength:
@@ -2568,7 +4391,8 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
       sourceMechanicsBuffer: resolvedSourceMechanicsBuffer,
       placedDestinationStateBuffer,
       placedDestinationThermoBuffer,
-      placedDestinationMechanicsBuffer
+      placedDestinationMechanicsBuffer,
+      ...exactQuantityBindings
     }),
     finalizedArtifact: null,
     segmentedEncoding: null,
@@ -2685,6 +4509,10 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
   const record = requireLivePlacementAuthority(authority, {
     operation: 'placement encoding seal'
   });
+  // Exact placement uses the same one-shot submission and destination owner.
+  // Its complete selected quantity/mass/residual tuple is checked below by
+  // validateExactPlacementTerminalEncoding before that owner can transfer.
+  // A placement seal alone does not authorize enclosing mechanics publication.
   if (
     record.encodingSealAttempted
     || record.encodedPlacement
@@ -2713,6 +4541,7 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
       'SUBMISSION'
     );
   }
+  const exactTerminalEncoding = validateExactPlacementTerminalEncoding(record, genuine);
   const encoder = genuine.encoder;
   if (!encoder?.finish || !encoder?.copyBufferToBuffer) {
     throw placementError('placement encoding requires a live command encoder', 'SUBMISSION');
@@ -2824,7 +4653,8 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
     record.bindings.placedDestinationStateBuffer,
     record.bindings.placedDestinationThermoBuffer,
     record.bindings.placedDestinationMechanicsBuffer,
-    ...exactEvidenceBuffers
+    ...exactEvidenceBuffers,
+    ...Object.values(record.exactQuantityContext?.bindings ?? {}).filter(value => value && Number.isSafeInteger(value.size))
   ]);
   const exactScratchBuffers = [];
   for (const [index, buffer] of [...scratchBuffers].entries()) {
@@ -2867,6 +4697,7 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
       );
     }
   }
+  validateExactPlacementTerminalEncoding(record, genuine);
   record.encodingSealAttempted = true;
   // The seal owns both the host-observation decision and the exact receipt
   // copy. No command can be appended after the command buffer is minted.
@@ -2917,6 +4748,7 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
     transactionalTerminalSealEncoded: true,
     transactionalFailClosedRecoveryEncoded: true,
     transactionalAuxiliaryMaterializationEncoded: true,
+    ...(exactTerminalEncoding ? { exactTerminalEncoding, ...exactTerminalEncoding.plan.exactBindings } : {}),
     segmentedEncoding: genuine,
     deterministicApplyMode
   });
@@ -2926,6 +4758,7 @@ export function sealSchroederSpatialReactionProductPlacementEncoding(
     encoder,
     commandBuffer,
     readback,
+    exactTerminalEncoding,
     submitted: false,
     submissionAttempted: false
   });
@@ -2968,6 +4801,13 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
       'placement submission requires the exact unused runtime encoding seal',
       'SUBMISSION'
     );
+  }
+  const exactTerminalEncoding = validateExactPlacementTerminalEncoding(record, encoding.segmentedEncoding);
+  if (encodingRecord.exactTerminalEncoding !== exactTerminalEncoding
+      || encoding.exactTerminalEncoding !== (exactTerminalEncoding ?? undefined)
+      || (exactTerminalEncoding && Object.entries(exactTerminalEncoding.plan.exactBindings)
+        .some(([key,value]) => encoding[key] !== value))) {
+    throw placementError('placement submission changed its exact terminal witness', 'EXACT_TERMINAL_IDENTITY');
   }
   const readback = encodingRecord.readback;
   const commandBuffer = encodingRecord.commandBuffer;
@@ -3062,6 +4902,7 @@ export function submitSchroederSpatialReactionProductPlacementWebGpu({
     candidateProductEventBuffer: encoding.candidateProductEventBuffer,
     placementSummaryBuffer: encoding.placementSummaryBuffer,
     candidatePlacementSummaryBuffer: encoding.candidatePlacementSummaryBuffer,
+    ...(exactTerminalEncoding ? { exactTerminalEncoding, ...exactTerminalEncoding.plan.exactBindings } : {}),
     completionReceiptBuffer: record.bindings.completionReceiptBuffer,
     completionReadbackBuffer: readback,
     diagnosticReadbackRequested: Boolean(readback),
@@ -3115,6 +4956,7 @@ export function isSubmittedSchroederSpatialReactionProductPlacementArtifact(
     record
     && isLivePlacementAuthorityRecord(artifact?.authority, record.record)
     && submittedPlacementArtifacts.has(artifact)
+    && exactPlacementTerminalArtifactMatches(artifact, record)
     && Object.isFrozen(artifact)
     && artifact.schema
       === 'peercompute.ulg.schroeder-spatial-reaction-product-placement-submission-artifact.v3'

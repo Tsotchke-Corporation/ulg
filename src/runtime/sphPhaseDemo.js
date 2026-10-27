@@ -1,3 +1,5 @@
+import { createSphExactMassFormat, encodeSphExactMass } from '../../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { withRoomAirCaloricReference } from './material/roomAirCaloricReference.js';
 // SPH phase demo logic (headless; the renderer in visualization/sphPhaseScene.js draws it).
 //
 // Builds the molten-iron-on-ice scenario as an SPH particle cloud whose specific internal
@@ -35,7 +37,9 @@ import {
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import { createSphState } from './sph/sphState.js';
-import { prepareSphCondensableParticleInitialization } from './sph/sphCondensableParticleInitialization.js';
+import { prepareSphCondensableParticleInitialization, initializeSphColdPhaseCaloricParticles } from './sph/sphCondensableParticleInitialization.js';
+import { buildSphEnvironmentParticles } from './sphEnvironmentParticles.js';
+import { normalizeSphEnvironmentInitialization, SPH_ENVIRONMENT_DRY_AIR } from './sphEnvironmentInitialization.js';
 import {
   SPH_GPU_RENDER_DOMAIN_ID_MAX,
   renderDomainIdentityForSphParticle
@@ -171,9 +175,10 @@ function exactReactionCountFromReserveAuthority(authority, materialKeys) {
 }
 
 function reactionProductReserveMaterialKeysForDemo(demo) {
-  return demo.initialBodies
+  return [...new Set([...(demo.initialBodies
     ? demo.initialBodies.bodies.map((body) => body.material)
-    : [demo.dropMaterial, demo.baseMaterial];
+    : [demo.dropMaterial, demo.baseMaterial]),
+    ...(demo.environmentInitialization?.gasSpecies ?? []).map(row => row.material)])];
 }
 
 function reactionDiscoveryCatalogCacheIdentity(discovery) {
@@ -1143,7 +1148,9 @@ function initialParticleEdgeDiagnostics({
 
 function phasePropertiesFromParticle(properties, particle) {
   if (!properties?.phases?.length) return null;
-  const phase = stablePhaseFromSpecificEnergy(properties, particle.specificInternalEnergyJPerKg);
+  const phase = particle.phaseCaloric
+    ? ['solid', 'liquid', 'gas', 'plasma'][particle.phaseCaloric.phaseId - 1]
+    : stablePhaseFromSpecificEnergy(properties, particle.specificInternalEnergyJPerKg);
   return properties.phases.find((candidate) => candidate.name === phase) || properties.phases[0];
 }
 
@@ -1421,7 +1428,8 @@ function initializeSupportedHydrostaticMpmState(demo, {
       const shearRaw = phaseName === 'solid'
         ? Math.max(Number(phase.shearModulusPa) || 0, 0)
         : 0;
-      const restVolumeM3 = massKg / restDensity;
+      const restVolumeM3 = particle.phaseCaloric
+        ? Math.fround(massKg) / Math.fround(restDensity) : massKg / restDensity;
       const halfCellM = 0.5 * Math.cbrt(restVolumeM3);
       const centerHeightM = dot3(particle.x, up);
       const centerA = dot3(particle.x, tangentA);
@@ -2405,6 +2413,8 @@ function appendPhaseCarrierLanes(particles) {
 
 function buildSphInitialBodiesDemoState({
   scenario,
+  environment,
+  environmentCellsPerAxis,
   physicalLawGroups = null,
   closures,
   allowFixtureMaterialProperties,
@@ -2435,6 +2445,7 @@ function buildSphInitialBodiesDemoState({
   const resolved = { ...baseClosures };
   const requiredMaterialKeys = [...new Set([
     ...DEFAULT_RUNTIME_MATERIAL_KEYS,
+    ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map(row => row.material) : []),
     ...normalizedInitialBodies.bodies.map((body) => body.material)
   ].filter(Boolean))];
   for (const key of requiredMaterialKeys) {
@@ -2451,6 +2462,9 @@ function buildSphInitialBodiesDemoState({
         }
       );
     }
+  }
+  if (environment?.mode === 'air') {
+    for (const [key, closure] of Object.entries(resolved)) resolved[key] = withRoomAirCaloricReference(closure, key);
   }
   if (!allowFixtureMaterialProperties) {
     for (const [key, closure] of Object.entries(resolved)) {
@@ -2515,15 +2529,24 @@ function buildSphInitialBodiesDemoState({
     });
   }
 
+  const materialProperties = Object.fromEntries(Object.entries(resolved).map(([key, closure]) => [key, closure.properties]));
+  const environmentState = environment ? buildSphEnvironmentParticles({ environment, materialProperties,
+    boxDimensionsM: boxDims, cellsPerAxis: environmentCellsPerAxis,
+    firstDomainId: normalizedInitialBodies.bodies.reduce((max, body) => Math.max(max, body.domainId), 0) + 1,
+    occupiedBoxes: bodyPlans.filter(plan => !['gas', 'plasma'].includes(plan.phase))
+      .map(plan => ({ min: plan.boundsM.minM, max: plan.boundsM.maxM })) }) : null;
+  if (environmentState) for (const particle of environmentState.particles) liveParticles.push(particle);
+  initializeSphColdPhaseCaloricParticles(liveParticles, materialProperties);
+  const sourceMaterialKeys = [...new Set(liveParticles.map(particle => particle.material))];
   const all = [...liveParticles];
   const gpuResidentMechanics = String(mechanics || 'mlsmpm') !== 'sph';
   const reactionProductReserve = reactionProductReservePlan({
     liveParticleCount: liveParticles.length,
-    materialKeys: normalizedInitialBodies.bodies.map((body) => body.material),
+    materialKeys: sourceMaterialKeys,
     minimumLiveFraction: reactionProductReserveMinimumLiveFraction,
     exactDiscoveredReactionCount: exactReactionCountFromReserveAuthority(
       reactionProductReserveAuthority,
-      normalizedInitialBodies.bodies.map((body) => body.material)
+      sourceMaterialKeys
     )
   });
   const spareProductSlotCount = gpuResidentMechanics
@@ -2560,11 +2583,17 @@ function buildSphInitialBodiesDemoState({
     ? null
     : phaseCompanionLanesRequired(
         physicalLawGroups,
-        normalizedInitialBodies.bodies.map((body) => body.material)
+        sourceMaterialKeys
       )
       ? appendPhaseCarrierLanes(all)
       : declarePhaseCarrierSingleLanePlan(all);
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
+  if (environment?.mode === 'air') state.exactMassInitialization = {
+    schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149, initialQuantities: true,
+    massWords: all.flatMap(particle => particle.massKg > 0 && particle.coldExactMassWords
+      ? particle.coldExactMassWords : Array.from(encodeSphExactMass(particle.massKg, createSphExactMassFormat()))),
+    reference: 'Original scene masses including physically allocated room-air species; binary64 ingress before f32 projection'
+  };
   state.phaseCarrierPlan = phaseCarrierPlan;
   copyInitialParticleMetadataIntoState(state, all);
 
@@ -2659,6 +2688,7 @@ function buildSphInitialBodiesDemoState({
 
   return {
     scenario: scenarioWithBodies,
+    environmentInitialization: environmentState?.inventory ?? null,
     closures: baseClosures,
     allowFixtureMaterialProperties,
     state,
@@ -2693,6 +2723,7 @@ function buildSphInitialBodiesDemoState({
     counts: {
       byBodyId: countsByBodyId,
       live: liveParticles.length,
+      ...(environmentState?.particles.length ? { environmentGas: environmentState.particles.length } : {}),
       spareProductSlots: spareProductSlotCount,
       ...(phaseCarrierPlan
         ? { phaseCompanionSlots: phaseCarrierPlan.companionCapacity }
@@ -2730,6 +2761,8 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   dropTemperatureK,
   baseTemperatureK,
   initialBodies = null,
+  environment = null,
+  environmentCellsPerAxis = 2,
   dropParticleEdge = 3, // N -> N^3 particles in the drop block
   baseParticleEdge = 5, // N -> N^3 particles in the base block
   adaptiveParticleSpacing = true,
@@ -2742,9 +2775,12 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   iceBaseHeightM,
   ironBaseHeightM
 } = {}, reactionProductReserveAuthority = null) {
+  if (environment !== null) environment = normalizeSphEnvironmentInitialization(environment);
   if (initialBodies != null) {
     return buildSphInitialBodiesDemoState({
       scenario,
+      environment,
+      environmentCellsPerAxis,
       physicalLawGroups,
       closures,
       allowFixtureMaterialProperties,
@@ -2786,6 +2822,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   const resolved = { ...baseClosures };
   const requiredMaterialKeys = [...new Set([
     ...DEFAULT_RUNTIME_MATERIAL_KEYS,
+    ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map(row => row.material) : []),
     dropMaterial,
     baseMaterial
   ].filter(Boolean))];
@@ -2804,6 +2841,9 @@ function buildSphPhaseDemoStateWithReserveAuthority({
         }
       );
     }
+  }
+  if (environment?.mode === 'air') {
+    for (const [key, closure] of Object.entries(resolved)) resolved[key] = withRoomAirCaloricReference(closure, key);
   }
   if (!allowFixtureMaterialProperties) {
     for (const [key, closure] of Object.entries(resolved)) {
@@ -3034,7 +3074,16 @@ function buildSphPhaseDemoStateWithReserveAuthority({
     particleSizePlan: initialParticleSpacing.base
   });
 
-  const all = [...baseParticles, ...dropParticles];
+  const materialProperties = Object.fromEntries(Object.entries(resolved).map(([key, closure]) => [key, closure.properties]));
+  const occupiedBoxes = [[baseMaterialState, baseBlockEdgeM, iceBase], [dropMaterialState, dropBlockEdgeM, ironBase]]
+    .filter(([materialState]) => !['gas', 'plasma'].includes(materialState.phase))
+    .map(([, size, bottom]) => ({ min: [cx - size / 2, bottom, cz - size / 2],
+      max: [cx + size / 2, bottom + size, cz + size / 2] }));
+  const environmentState = environment ? buildSphEnvironmentParticles({ environment, materialProperties,
+    boxDimensionsM: boxDims, occupiedBoxes, cellsPerAxis: environmentCellsPerAxis, firstDomainId: 3 }) : null;
+  const all = [...baseParticles, ...dropParticles, ...(environmentState?.particles ?? [])];
+  initializeSphColdPhaseCaloricParticles(all, materialProperties);
+  const sourceMaterialKeys = [...new Set(all.map(particle => particle.material))];
   // Spare zero-mass particle slots for GPU product-event placement: gas
   // reaction products become real particles by claiming one of these instead
   // of living forever as immovable product-event mass/pressure sources.
@@ -3047,11 +3096,11 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   const gpuResidentMechanics = String(mechanics || 'mlsmpm') !== 'sph';
   const reactionProductReserve = reactionProductReservePlan({
     liveParticleCount: all.length,
-    materialKeys: [dropMaterial, baseMaterial],
+    materialKeys: sourceMaterialKeys,
     minimumLiveFraction: reactionProductReserveMinimumLiveFraction,
     exactDiscoveredReactionCount: exactReactionCountFromReserveAuthority(
       reactionProductReserveAuthority,
-      [dropMaterial, baseMaterial]
+      sourceMaterialKeys
     )
   });
   const spareProductSlotCount = gpuResidentMechanics
@@ -3085,12 +3134,18 @@ function buildSphPhaseDemoStateWithReserveAuthority({
     ? null
     : phaseCompanionLanesRequired(
         physicalLawGroups,
-        [dropMaterial, baseMaterial]
+        sourceMaterialKeys
       )
       ? appendPhaseCarrierLanes(all)
       : declarePhaseCarrierSingleLanePlan(all);
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
+  if (environment?.mode === 'air') state.exactMassInitialization = {
+    schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149, initialQuantities: true,
+    massWords: all.flatMap(particle => particle.massKg > 0 && particle.coldExactMassWords
+      ? particle.coldExactMassWords : Array.from(encodeSphExactMass(particle.massKg, createSphExactMassFormat()))),
+    reference: 'Original scene masses including physically allocated room-air species; binary64 ingress before f32 projection'
+  };
   state.phaseCarrierPlan = phaseCarrierPlan;
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
@@ -3143,6 +3198,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   });
   return {
     scenario: scenarioWithDerivedBlockGeometry,
+    environmentInitialization: environmentState?.inventory ?? null,
     closures: baseClosures,
     allowFixtureMaterialProperties,
     state,
@@ -3168,6 +3224,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       baseSizeM: baseBlockEdgeM
     }),
     counts: {
+      ...(environmentState?.particles.length ? { environmentGas: environmentState.particles.length } : {}),
       drop: dropParticles.length,
       base: baseParticles.length,
       spareProductSlots: spareProductSlotCount,
@@ -5431,7 +5488,7 @@ export function gasPressureSummary(demo) {
     ? Number(demo.initialParticleSpacing?.totalBlockVolumeM3) || 0
     : demo.scenario.iron.volumeM3 + demo.scenario.ice.volumeM3;
   const airVolumeM3 = Math.max(boxVolumeM3 - initialOccupiedVolumeM3, 0);
-  if (airProps?.molarMassKgPerMol > 0 && airVolumeM3 > 0) {
+  if (!demo.environmentInitialization && airProps?.molarMassKgPerMol > 0 && airVolumeM3 > 0) {
     const airTemperatureK = demo.initialTemperaturesK?.gas ?? demo.scenario.gas.initialTemperatureK;
     const airDensity = idealGasDensityKgPerM3({
       pressurePa: demo.scenario.gas.pressurePa,
@@ -5480,7 +5537,7 @@ function particleSupportRadiusM(particle) {
 function initialBlockGeometrySummary(demo) {
   const roles = {};
   for (const particle of demo.state.particles) {
-    if (particle.spareProductSlot === true || !(Number(particle.massKg) > 0)) continue;
+    if (particle.role === 'environment-gas' || particle.spareProductSlot === true || !(Number(particle.massKg) > 0)) continue;
     const role = particle.role || 'unassigned';
     const radius = particleSupportRadiusM(particle);
     const entry = roles[role] || {
@@ -5952,9 +6009,9 @@ export function createSphPhaseDemo(options = {}) {
           }
         : {})
     };
-    return candidateDemo.initialBodies
+    return candidateDemo.initialBodies || candidateDemo.environmentInitialization?.gasSpecies.length
       ? discoverReactionNetwork(
-        candidateDemo.initialBodies.bodies.map((body) => body.material),
+        reactionProductReserveMaterialKeysForDemo(candidateDemo),
         discoveryOptions
       )
       : discoverReactions(

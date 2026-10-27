@@ -1,5 +1,7 @@
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
-import { runSphExactReactionRoutingCandidateWebGpu } from './sphExactReactionRoutingGpu.js';
+import { runSphExactReactionRoutingCandidateWebGpu, acquireSphExactReactionRoutingRead } from './sphExactReactionRoutingGpu.js';
+import { acquireSphExactMassRead, sliceSphExactMassRead, validateSphExactMassRead,
+  releaseSphExactMassRead, releaseSphExactMassInventory } from './sphExactMassInventoryGpu.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LAW_NEIGHBOR_CANDIDATE_ROW_LAYOUT,
@@ -97,7 +99,12 @@ import {
   resolveSphReactionWarmArenaLease,
   runSchroederSpatialReactionPlacementEpochWebGpu,
   schroederSpatialReactionPlacementTransferredDestinationCleanupClaim,
-  transferSchroederSpatialReactionPlacementDestinationOwnership
+  transferSchroederSpatialReactionPlacementDestinationOwnership,
+  acquireSchroederSpatialReactionPlacementDestinationRead,
+  resolveSchroederSpatialReactionPlacementDestinationRead,
+  releaseSchroederSpatialReactionPlacementDestinationRead,
+  createSchroederSpatialReactionPlacementMassInventory,
+  createSchroederSpatialReactionPlacementProductHistory
 } from './schroederSpatialReactionPlacementEpochGpu.js';
 import {
   appendGpuReadbackTelemetryObservation,
@@ -3511,6 +3518,147 @@ export function resolveSphReactionSourceCapture(result, token) {
   return seal;
 }
 
+// The captured production branch uses the original placement/summary owners.
+// Only the carrier range can become particle inventory; residual rows remain
+// in the independently owned exact history and cannot be counted twice.
+async function runCapturedExactReactionStep({ selection, expected, mlsMpmParticleState,
+  postMechanicsSourceCapture: token, boxDimsM, gpuTimestampRecorder,
+  requestQueueOrderedCleanupClaim }) {
+  if (reactionSourceCaptures.has(token)) throw new Error('Reaction source capture cannot replay');
+  reactionSourceCaptures.set(token, null);
+  const { device, sphParticleState, sphParticleUpload, reactionTable, thermalMaterialTable,
+    sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer, generation, reactionDiscoveryProposal, dtSeconds } = expected;
+  let candidate, candidateClosing, routingRead, sourceRelease, family, transferred = false;
+  let massFamily, carrierRead, destinationRead, history, physicalRetirement;
+  const releaseSourceRead = () => {
+    if (routingRead) { sourceRelease = routingRead.release(); routingRead = null; }
+    return sourceRelease ?? Promise.resolve(true);
+  };
+  const destroyOutput = ({ preserveResidentProductMass = false, queueOrderedFinalConsumer = null, preserveBuffers = [] } = {}) => {
+    if (!physicalRetirement) {
+      // Authenticate queue retirement before closing independent numeric or
+      // history owners. A forged capability must not partially retire them.
+      const destinationReadRelease = destinationRead
+        ? releaseSchroederSpatialReactionPlacementDestinationRead(destinationRead, { queueOrderedFinalConsumer })
+        : Promise.resolve(true);
+      const destinationRelease = transferred
+        ? (queueOrderedFinalConsumer
+          ? releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family, { queueOrderedFinalConsumer, preserveBuffers })
+          : releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family, { preserveBuffers }))
+        : (family ? releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { abandon: true }) : true);
+      const carrierRelease = carrierRead ? releaseSphExactMassRead(carrierRead) : Promise.resolve(true);
+      if (massFamily) releaseSphExactMassInventory(massFamily);
+      physicalRetirement = Promise.all([destinationReadRelease, destinationRelease, carrierRelease,
+        releaseSourceRead(), candidateClosing ?? candidate?.release()]).then(() => true);
+    }
+    return Promise.all([physicalRetirement,
+      preserveResidentProductMass ? true : history?.destroyResidentProductMassBuffers() ?? true]).then(() => true);
+  };
+  try {
+    candidate = await runSphExactReactionRoutingCandidateWebGpu({ selection, expected });
+    routingRead = acquireSphExactReactionRoutingRead(candidate, expected);
+    const physical = candidate.physicalOutput;
+    const certificate = createSphReactionResolvePositionInvariantCertificate({ device, ancestorGeneration: generation,
+      reactionInputStateBuffer: sourceStateBuffer, reactionInputThermoBuffer: sourceThermoBuffer,
+      reactionInputMechanicsBuffer: sourceMechanicsBuffer,
+      transactionRollbackThermoBuffer: sourceThermoBuffer, transactionRollbackMechanicsBuffer: sourceMechanicsBuffer,
+      frozenResolvedStateBuffer: physical.stateBuffer, frozenResolvedThermoBuffer: physical.thermoBuffer,
+      frozenResolvedMechanicsBuffer: physical.mechanicsBuffer, particleCount: candidate.particleCount,
+      reactionDiscoveryProposal, reactionTable, exactReactionCandidate: candidate });
+    const pendingFamily = runSchroederSpatialReactionPlacementEpochWebGpu({ device, ancestorPublicGeneration: generation,
+      sphParticleState, mlsMpmParticleState, sphParticleUpload, positionInvariantCertificate: certificate,
+      frozenSourceStateBuffer: physical.stateBuffer, frozenSourceThermoBuffer: physical.thermoBuffer,
+      frozenSourceMechanicsBuffer: physical.mechanicsBuffer });
+    candidateClosing = candidate.release();
+    family = await pendingFamily;
+    const authority = createSchroederSpatialReactionProductPlacementAuthorityWebGpu({ device,
+      placementSourceFamily: family, particleCount: candidate.particleCount,
+      productEventCapacity: physical.denseEventCount,
+      sourceStateBuffer: family.transactionRollbackStateBuffer,
+      sourceThermoBuffer: family.transactionRollbackThermoBuffer,
+      sourceMechanicsBuffer: family.transactionRollbackMechanicsBuffer });
+    const summary = await runSphReactionSummaryWebGpu({ device, sphParticleState, reactionTable, dtSeconds, boxDimsM,
+      gpuTimestampRecorder, canonicalReactionProductPlacementAuthority: authority,
+      sourceStateBuffer: family.transactionRollbackStateBuffer,
+      sourceThermoBuffer: family.transactionRollbackThermoBuffer,
+      sourceMechanicsBuffer: family.transactionRollbackMechanicsBuffer,
+      nextStateBuffer: family.placedDestinationStateBuffer,
+      nextThermoBuffer: family.placedDestinationThermoBuffer,
+      nextMechanicsBuffer: family.placedDestinationMechanicsBuffer,
+      readProductEvents: false, retainProductEventBuffer: false, readCompactSummary: false,
+      readGasSpeciesSummary: false, readProductInventory: false, readAtomResidual: false,
+      readProductPlacementSummary: false });
+    const placementArtifact = summary.reactionProductPlacementSubmissionArtifact;
+    const positionFloor = await finalizeSchroederSpatialReactionPlacementPositionEpochFloor(family, { placementArtifact });
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+    transferred = transferSchroederSpatialReactionPlacementDestinationOwnership(family,
+      { requestQueueOrderedCleanupClaim });
+    if (!transferred) throw new Error('Exact reaction destination did not transfer exactly once');
+    const copies = await Promise.allSettled([
+      createSchroederSpatialReactionPlacementMassInventory(family, { device }),
+      createSchroederSpatialReactionPlacementProductHistory(family, { device })
+    ]);
+    if (copies[0].status === 'fulfilled') massFamily = copies[0].value;
+    if (copies[1].status === 'fulfilled') history = copies[1].value;
+    const failed = copies.find(value => value.status === 'rejected');
+    if (failed) throw failed.reason;
+    destinationRead = acquireSchroederSpatialReactionPlacementDestinationRead(family, { device });
+    const wholeMass = acquireSphExactMassRead({ family: massFamily, device });
+    try { carrierRead = sliceSphExactMassRead(wholeMass, { device, rowOffset: 0, rowCount: family.particleCount }); }
+    finally { void releaseSphExactMassRead(wholeMass); }
+    const telemetry = createGpuReadbackTelemetryAccumulator({ scope: 'sph-exact-reaction-step' });
+    telemetry.merge(summary, 'reaction-summary');
+    telemetry.merge(createGpuReadbackTelemetry({ scope: 'exact-reaction-producers', complete: false,
+      unknownSources: ['exact-routing-and-output-retirement-fences'] }), 'exact-reaction-producers');
+    const result = outputEnvelope({ backend: 'webgpu', sphParticleState, mlsMpmParticleState,
+      reactionTable, thermalMaterialTable, state: sphParticleState.state, thermo: sphParticleState.thermo,
+      mechanics: mlsMpmParticleState.mechanics, proposals: null, eventCount: null, conversionCount: null,
+      reactionSummary: summary, residentProductMass: history,
+      stateBuffer: destinationRead.stateBuffer, thermoBuffer: destinationRead.thermoBuffer,
+      mechanicsBuffer: destinationRead.mechanicsBuffer, retainedOutputParticleBuffers: true,
+      destroyOutputParticleBuffers: destroyOutput, readbackMode: NO_FULL_READBACK_MODE,
+      sourceParticlePackMode: 'retained-exact-reaction-source', reactionAllocationMode: 'exact-integer-pair-allocation',
+      reactionProposalNeighborMode: 'canonical-spatial-reaction-discovery-proposals',
+      canonicalReactionDiscovery: routingRead.view.source.discovery, reactionPlacementSourceFamily: family,
+      reactionPlacementPositionEpochFloorReceipt: positionFloor, reactionPlacementDestinationOwnershipTransferred: true,
+      queueCompletionStatus: 'queue-submitted-same-device-ordering', queueCompletionMethod: 'queue.submit-same-queue-ordering',
+      readbackTelemetry: telemetry.snapshot() });
+    if (requestQueueOrderedCleanupClaim) {
+      Object.defineProperty(result, 'queueOrderedCleanupClaims', { value: Object.freeze([
+        destinationRead.queueOrderedCleanupClaim, schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(family)
+      ]) });
+    }
+    result.destroyOutputParticleBufferComponents = (selection, options = {}) => destroyOutput({ ...options,
+      preserveBuffers: ['state', 'thermo', 'mechanics'].filter(component => selection[component] !== true)
+        .map(component => result[`${component}Buffer`]) });
+    const base = createPostMechanicsStageOutputSeal(result, { device, sphParticleState, mlsMpmParticleState,
+      reactionTable, thermalMaterialTable, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer, dtSeconds },
+    { onLastRelease: releaseSourceRead });
+    const exactReaction = Object.freeze({ placementArtifact, placementFamily: family, destinationRead,
+      carrierMassRead: carrierRead, carrierQuantityRange: Object.freeze({ rowOffset: 0, rowCount: family.particleCount }),
+      routingView() {
+        if (!routingRead) throw new Error('Exact reaction source capture was released');
+        return routingRead.validate();
+      } });
+    const validate = () => {
+      base.validate(); exactReaction.routingView();
+      resolveSchroederSpatialReactionPlacementDestinationRead(destinationRead, { device });
+      if (!validateSphExactMassRead(carrierRead, { device, family: massFamily, format: massFamily.format,
+        expectedGeneration: massFamily.generation, rowOffset: 0, rowCount: family.particleCount })) {
+        throw new TypeError('Exact reaction carrier range was changed or retired');
+      }
+      return true;
+    };
+    reactionSourceCaptures.set(token, Object.freeze({ ...base, validate, exactReaction }));
+    return result;
+  } catch (error) {
+    const cleanup = Promise.resolve().then(() => destroyOutput());
+    void cleanup.catch(() => {});
+    error.exactReactionStepCleanupCompletion = cleanup;
+    throw error;
+  }
+}
+
 export async function runSphReactionStepWebGpu({
   device,
   sphParticleState,
@@ -3561,11 +3709,11 @@ export async function runSphReactionStepWebGpu({
   exactReactionSourceSelection = null
 } = {}) {
   if (exactReactionSourceSelection != null) {
-    // This explicit branch consumes the genuine source packet, without
-    // presenting speculative rows and exact companions as a stage seal.
-    // The normal exact-inventory and closure/publication guards remain below.
+    // A captured stage executes original placement and retains its complete
+    // output. Uncaptured requests remain routing inspections with no stage
+    // seal; enclosing closure/publication still validates its whole chain.
     if (retainOutputParticleBuffers !== true || readbackMode !== NO_FULL_READBACK_MODE
-        || resetMechanics !== true || postMechanicsSourceCapture != null
+        || resetMechanics !== true
         || !schroederSpatialEpochGeneration || !schroederSpatialReactionDiscoveryProposal
         || reactionPlacementEpochRunner !== runSchroederSpatialReactionPlacementEpochWebGpu
         || canonicalReactionDiscoveryResolver !== resolveSchroederSpatialReactionDiscoveryProposalForConsumer
@@ -3574,11 +3722,14 @@ export async function runSphReactionStepWebGpu({
         || reactionWarmArenaReleaseRunner !== releaseSphReactionWarmArenaAfterQueue) {
       throw new TypeError('Exact reaction routing requires the original retained canonical producer; physical publication remains unadmitted');
     }
-    return runSphExactReactionRoutingCandidateWebGpu({ selection: exactReactionSourceSelection,
-      expected: { device, sphParticleState, sphParticleUpload, mlsMpmParticleUpload,
+    const expected = { device, sphParticleState, sphParticleUpload, mlsMpmParticleUpload,
         reactionTable, thermalMaterialTable, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
         generation: schroederSpatialEpochGeneration,
-        reactionDiscoveryProposal: schroederSpatialReactionDiscoveryProposal, dtSeconds } });
+        reactionDiscoveryProposal: schroederSpatialReactionDiscoveryProposal, dtSeconds };
+    if (postMechanicsSourceCapture != null) return runCapturedExactReactionStep({
+      selection: exactReactionSourceSelection, expected, mlsMpmParticleState, postMechanicsSourceCapture,
+      boxDimsM, gpuTimestampRecorder, requestQueueOrderedCleanupClaim });
+    return runSphExactReactionRoutingCandidateWebGpu({ selection: exactReactionSourceSelection, expected });
   }
   assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Reaction and placement');
   if (postMechanicsSourceCapture) {

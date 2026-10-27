@@ -42,11 +42,14 @@ function coldSnapshot(value, seen = new Set()) {
   seen.add(value);
   let result;
   if (ArrayBuffer.isView(value)) {
-    if (!(value instanceof Float32Array) || value.constructor !== Float32Array
+    const ordinaryFloat = value instanceof Float32Array && value.constructor === Float32Array;
+    const ordinaryUint = value instanceof Uint32Array && value.constructor === Uint32Array;
+    if ((!ordinaryFloat && !ordinaryUint)
       || (typeof SharedArrayBuffer !== 'undefined' && value.buffer instanceof SharedArrayBuffer)) {
-      fail('cold arrays must be ordinary Float32Array storage');
+      fail('cold arrays must be ordinary Float32Array or Uint32Array storage');
     }
-    result = ['Float32Array', Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))];
+    result = [ordinaryFloat ? 'Float32Array' : 'Uint32Array',
+      Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))];
   } else {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null) {
@@ -263,6 +266,58 @@ export function resolveSphSpatialGasExchangeMaterials(authority, {
     recordStrideFloats: 16, materials: Object.freeze(materials),
     surfaceModel: 'linear-pure-interface', kineticAuthorization: false,
     exchangeIntervalAdmitted: false, scientificValidation: false });
+}
+
+// Cold coefficients for the explicitly bounded near-equilibrium model in
+// condensableFiniteCell.js. Saturation and enthalpy come from the original
+// caloric authority; callers cannot replace phase energies or latent offsets.
+export function resolveSphSpatialGasExchangeRates(authority, {
+  thermalMaterialTable, surfaceModels, rateModels
+} = {}) {
+  const record = authorityRecord(authority, thermalMaterialTable);
+  const materialData = resolveSphSpatialGasExchangeMaterials(authority, { thermalMaterialTable, surfaceModels });
+  snapshot(rateModels);
+  if (!rateModels || Array.isArray(rateModels) || typeof rateModels !== 'object'
+      || !Object.keys(rateModels).length) fail('explicit rate models by liquid material required');
+  const names = materialData.materials, count = names.length;
+  if (Object.keys(rateModels).some(name => !names.includes(name))) fail('rate material is not enrolled');
+  const rows = new Float32Array(count * 16 + count * count);
+  const pack = (value, name, positive = false) => {
+    const packed = Math.fround(value);
+    if (typeof value !== 'number' || !Number.isFinite(packed) || value < 0
+        || (positive && value === 0) || (value !== 0 && packed < 2 ** -126)) {
+      fail(`representable ${name} required`);
+    }
+    return packed;
+  };
+  for (const [index, [material, thermo]] of record.models.entries()) {
+    if (!Object.hasOwn(rateModels, material)) continue;
+    const model = rateModels[material];
+    const keys = ['schema', 'provenance', 'massMobilityPerAreaKg2KPerJsM2',
+      'maxAbsAffinityJPerKgK', 'maxTemperatureDifferenceK', 'heatTransferCoefficientsWPerM2K'];
+    if (!model || typeof model !== 'object'
+        || model.schema !== 'peercompute.ulg.near-equilibrium-onsager.v1'
+        || typeof model.provenance !== 'string' || !model.provenance.trim()
+        || Reflect.ownKeys(model).some(key => !keys.includes(key))
+        || !keys.every(key => Object.hasOwn(model, key))
+        || materialData.records[index * 16 + 11] !== 1) fail('complete bounded liquid rate model required');
+    const heat = model.heatTransferCoefficientsWPerM2K;
+    if (!heat || typeof heat !== 'object' || Array.isArray(heat)
+        || Reflect.ownKeys(heat).length !== count || !names.every(name => Object.hasOwn(heat, name))) {
+      fail('explicit heat coefficients for every enrolled gas material required');
+    }
+    rows.set([1, thermo.referenceTemperatureK, thermo.referencePressurePa,
+      thermo.vaporizationReferenceEnthalpyJPerKg, thermo.liquidCpJPerKgK, thermo.vaporCpJPerKgK,
+      thermo.specificGasConstantJPerKgK, thermo.vaporCvJPerKgK, thermo.vaporReferenceInternalEnergyJPerKg,
+      pack(model.massMobilityPerAreaKg2KPerJsM2, 'mass mobility'),
+      pack(model.maxAbsAffinityJPerKgK, 'affinity domain', true),
+      pack(model.maxTemperatureDifferenceK, 'temperature-jump domain', true), 0, 0, 0, 0], index * 16);
+    for (let gas = 0; gas < count; gas++) rows[count * 16 + index * count + gas] = pack(heat[names[gas]], 'heat coefficient');
+  }
+  if (!rows.every(Number.isFinite)) fail('unrepresentable rate thermodynamics');
+  authorityRecord(authority, thermalMaterialTable);
+  return Object.freeze({ records: rows, model: 'near-equilibrium-onsager',
+    integration: 'frozen-initial-rate', scientificValidation: false });
 }
 
 // Optional EOS variant only: the owner supplies bindings and calls these

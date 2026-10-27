@@ -4,9 +4,12 @@ import { validateSphExactMassFormat, SPH_EXACT_MASS_ERROR as ERROR }
 /** Wide integer caloric target arithmetic. Requires the matching EM and EE
  * libraries. These functions neither authenticate a physical source nor admit
  * a temperature, reaction, placement or publication. */
-export function createSphExactCaloricWgsl(format) {
+export function createSphExactCaloricWgsl(format, { wordCount = 3 * format.wordCount + 26 } = {}) {
   validateSphExactMassFormat(format);
-  const words = 3 * format.wordCount + 26;
+  if (!Number.isSafeInteger(wordCount) || wordCount < 3 * format.wordCount + 26 || wordCount > 8192) {
+    throw new RangeError('Exact caloric capacity cannot truncate its source envelope');
+  }
+  const words = wordCount;
   return /* wgsl */ `
 const EC_WORDS: u32 = ${words}u;
 struct ExactCaloric { words: array<u32, ${words}>, negative: u32, error: u32 }

@@ -5,7 +5,9 @@ import { createSphExactMassFormat, encodeSphExactMass }
 import { createSphExactMassInventoryWebGpu, acquireSphExactMassRead, validateSphExactMassRead,
   releaseSphExactMassRead, releaseSphExactMassInventory, runSphExactMassTransferCandidateWebGpu,
   runSphExactMassPartitionCandidateWebGpu, runSphExactMassAllocationCandidateWebGpu,
-  forkSphExactMassRead, sliceSphExactMassRead }
+  forkSphExactMassRead, sliceSphExactMassRead,
+  createSphExactMassInventoryFromReactionPlacementWebGpu,
+  createSphExactMassInventoryFromVaporExchangeWebGpu }
   from '../src/runtime/sph/sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 
@@ -48,6 +50,38 @@ function fixture() {
   return { device, format, family, expected };
 }
 
+test('cold word inventory retains lower-than-binary64 bits and snapshots caller memory', async () => {
+  const device = fakeDevice(), format = createSphExactMassFormat();
+  const words = encodeSphExactMass(.01, format); words[0] = 1;
+  const expected = words.slice();
+  const family = createSphExactMassInventoryWebGpu({ device, format, massWords: words,
+    provenance: { kind: 'initial-conditions', reference: 'Exact cold spatial allocation' } });
+  words.fill(0);
+  const read = acquireSphExactMassRead({ device, family });
+  assert.deepEqual(new Uint32Array(read.buffer.bytes), expected);
+  for (const massWords of [[], new Uint32Array(8), new Uint32Array(0)]) {
+    assert.throws(() => createSphExactMassInventoryWebGpu({ device, format, massWords,
+      provenance: { kind: 'initial-conditions', reference: 'invalid' } }));
+  }
+  assert.throws(() => createSphExactMassInventoryWebGpu({ device, format, massWords: expected, massesKg: [.01],
+    provenance: { kind: 'initial-conditions', reference: 'ambiguous' } }));
+  await releaseSphExactMassRead(read); releaseSphExactMassInventory(family); await device.drain();
+  assert.equal(device.allocated.every(buffer => buffer.destroyed === 1), true);
+});
+
+test('reaction inventory rejects raw buffers and structural placement-read copies before allocation', async () => {
+  const f = fixture(), read = acquireSphExactMassRead(f.expected), before = f.device.allocated.length;
+  for (const placementRead of [null, read, { ...read, massBuffer: read.buffer,
+    massByteLength: read.byteLength, sourceInventoryGeneration: 0,
+    particleCount: read.rowCount, quantityLayout: { rowCount: read.rowCount } }]) {
+    await assert.rejects(createSphExactMassInventoryFromReactionPlacementWebGpu({ device: f.device, placementRead }),
+      /original live retained read/);
+  }
+  assert.equal(f.device.allocated.length, before);
+  assert.equal(validateSphExactMassRead(read, f.expected), true);
+  await releaseSphExactMassRead(read); releaseSphExactMassInventory(f.family); await f.device.drain();
+});
+
 test('initial inventory preserves binary64 low bits and declares its mass-only scope', async () => {
   const f = fixture();
   assert.equal(f.family.physicalPublicationAdmitted, false);
@@ -56,6 +90,19 @@ test('initial inventory preserves binary64 low bits and declares its mass-only s
   assert.equal(validateSphExactMassRead(read, f.expected), true);
   releaseSphExactMassInventory(f.family); await releaseSphExactMassRead(read); await f.device.drain();
   assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
+});
+
+test('vapor inventory rejects raw mass and structural producer reads before allocation', async () => {
+  const f = fixture(), read = acquireSphExactMassRead(f.expected), before = f.device.allocated.length;
+  for (const producerRead of [null, read, { ...read,
+    schema: 'peercompute.ulg.exact-vapor-exchange-producer-read.v1',
+    endpoints: { particleBuffer: read.buffer, particleLayout: { rowCount: read.rowCount } } }]) {
+    await assert.rejects(createSphExactMassInventoryFromVaporExchangeWebGpu({ device: f.device, producerRead }),
+      /Unknown, copied, released or foreign/);
+  }
+  assert.equal(f.device.allocated.length, before);
+  assert.equal(validateSphExactMassRead(read, f.expected), true);
+  await releaseSphExactMassRead(read); releaseSphExactMassInventory(f.family); await f.device.drain();
 });
 
 test('family, read, device, format and generation all require exact identity', async () => {

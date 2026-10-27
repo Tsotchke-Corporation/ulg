@@ -30,6 +30,7 @@ import {
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
 import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
+import { prepareSphExactHistoryP2g } from './sphExactHistoryP2gGpu.js';
 import {
   appendQueueOrderedSubmissionBatch,
   cancelQueueOrderedCleanupClaim,
@@ -714,7 +715,8 @@ function registerSubmittedActiveSourceDenseP2g(
     selectedLevel,
     activeSourceBinding,
     spatialDirectoryBinding,
-    gridBuffer
+    gridBuffer,
+    residentProductMass = null
   }
 ) {
   const origin = Object.freeze({
@@ -729,7 +731,8 @@ function registerSubmittedActiveSourceDenseP2g(
     evidenceBuffer: spatialDirectoryBinding?.evidenceBuffer ?? null,
     completionOrdinal:
       activeSourceBinding?.activeSourceCompletionOrdinal ?? null,
-    gridBuffer
+    gridBuffer,
+    residentProductMass
   });
   if (!activeSourceDenseP2gMatchesOrigin(
     device,
@@ -747,6 +750,16 @@ function registerSubmittedActiveSourceDenseP2g(
   }
   activeSourceDenseP2gOrigins.set(projection, origin);
   return projection;
+}
+
+// Read the original P2G input association; this never registers a caller's
+// history or turns a copied projection into a producer.
+export function locallySubmittedMlsMpmActiveSourceDenseP2gHistory(device, projection, options = {}) {
+  if (!validateLocallySubmittedMlsMpmActiveSourceDenseP2g(device, projection, options)) {
+    throw new TypeError('Exact history G2P requires the original submitted P2G association');
+  }
+  const submitted = activeSourceDenseP2gOrigins.has(projection) ? projection : projection.gpuResult;
+  return activeSourceDenseP2gOrigins.get(submitted).residentProductMass;
 }
 
 export function validateLocallySubmittedMlsMpmActiveSourceDenseP2g(
@@ -2074,8 +2087,9 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   queueOrderedSubmissionBatch = null,
   p2gBackend = MLS_MPM_P2G_BACKEND_RESIDENT_SCATTER
 } = {}) {
-  const rawBorrowedProductEventBuffer = residentProductMass?.productEventBuffer || null;
-  assertSphLegacyMassPathAllowed({ productEventBuffer: rawBorrowedProductEventBuffer }, 'P2G product events');
+  const exactHistoryAdvertised = Boolean(residentProductMass && 'exactProductHistoryLayout' in residentProductMass);
+  let rawBorrowedProductEventBuffer = exactHistoryAdvertised ? null : residentProductMass?.productEventBuffer || null;
+  if (!exactHistoryAdvertised) assertSphLegacyMassPathAllowed({ productEventBuffer: rawBorrowedProductEventBuffer }, 'P2G product events');
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmP2gGridProjectionWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -2232,6 +2246,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     mechanicsFieldP2gClaims.set(fusedTransaction, fusedProducerClaim);
   }
   const ownedAllocationEntries = new Set();
+  let exactHistorySource = null, exactHistoryProjection = null;
   let allocationCleanupDelegated = false;
   let gridBufferAllocationEntry = null;
   let publishedProjection = null;
@@ -2394,7 +2409,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded'
     ? mlsMpmParticleUpload.mechanicsBuffer
     : null;
-  const productEventRows = productEventRowsFromResidentProductMass(residentProductMass);
+  const productEventRows = exactHistoryAdvertised ? null : productEventRowsFromResidentProductMass(residentProductMass);
   // Resolve canonical intent before touching assignment rows. A selected
   // generation is authoritative: malformed/contradictory legacy assignment
   // data must be structurally irrelevant, never a fallback source.
@@ -2685,6 +2700,21 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     );
     schroederSpatialDirectory.ownsBuffer = true;
   }
+  if (exactHistoryAdvertised) {
+    if (!activeSourceV2DenseP2gEnabled || mechanicsFieldViewEnabled || readbackMode !== NO_FULL_READBACK_MODE
+        || queueOrderedSubmissionBatch) {
+      throw new TypeError('Exact product history requires the original canonical dense P2G consumer');
+    }
+    const { acquireResidentProductExactHistoryRead } = mechanicsFieldKernelBundle;
+    if (!sphParticleUpload?.identityBuffer) throw new TypeError('Exact history P2G requires its associated particle identity');
+    exactHistorySource = acquireResidentProductExactHistoryRead(residentProductMass, { device, identityBuffer: sphParticleUpload.identityBuffer });
+    // The original allocation ledger releases the source pin at its actual
+    // final GPU-consumer fence, including failures after submission.
+    ownedAllocationEntries.add({ destroy: exactHistorySource.release });
+    rawBorrowedProductEventBuffer = exactHistorySource.buffer;
+    exactHistoryProjection = await prepareSphExactHistoryP2g({ device, source: exactHistorySource,
+      allocate: descriptor => trackOwnedBuffer(device.createBuffer(descriptor)) });
+  }
   const productEventBufferMismatch = rawBorrowedProductEventBuffer && !(productEventRows instanceof Float32Array)
     ? webGpuDeviceMismatchInfo({
         buffer: rawBorrowedProductEventBuffer,
@@ -2696,10 +2726,10 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     && webGpuBufferMatchesDevice(rawBorrowedProductEventBuffer, device)
     ? rawBorrowedProductEventBuffer
     : null;
-  const productEventCount = borrowedProductEventBuffer || productEventRows instanceof Float32Array
+  const productEventCount = exactHistorySource ? exactHistorySource.descriptor.rowCapacity : borrowedProductEventBuffer || productEventRows instanceof Float32Array
     ? productEventRowCountFromResidentProductMass(residentProductMass, productEventRows)
     : 0;
-  const productEventLiveCountDescriptor = borrowedProductEventBuffer
+  const productEventLiveCountDescriptor = exactHistorySource ? exactHistorySource.descriptor : borrowedProductEventBuffer
     ? productEventLiveCountCopyDescriptor(residentProductMass, device)
     : null;
   if (
@@ -2728,7 +2758,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       !(activeSourceV2DenseP2gEnabled || mechanicsFieldViewEnabled)
       || productEventLiveCountDescriptor.rowCapacity !== productEventCount
       || productEventLiveCountDescriptor.rowStrideFloats
-        !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+        !== (exactHistorySource?.layout.rowWords ?? SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS)
     )
   ) {
     throw new TypeError(
@@ -2771,7 +2801,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     mlsMpmParticleState.mechanics,
     trackOwnedBuffer
   );
-  const productEventBuffer = borrowedProductEventBuffer
+  const productEventBuffer = exactHistoryProjection?.outputBuffer || borrowedProductEventBuffer
     || (mechanicsFieldViewEnabled && !(productEventRows instanceof Float32Array)
       ? (mechanicsFieldP2gWorkspace?.emptyProductEventBuffer
           ?? tagWebGpuBufferDevice(writeStorageBuffer(
@@ -3097,7 +3127,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       ),
       computeBufferBinding(8, 'read-only-storage')
     ];
-    const p2gShader = mechanicsFieldViewEnabled
+    let p2gShader = mechanicsFieldViewEnabled
       ? (observeCanonicalSpatialAuthority === true
           ? (activeSourceV2P2gEnabled
               ? mechanicsFieldKernelBundle
@@ -3118,7 +3148,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
               ? mlsMpmP2gGridProjectionCanonicalSpatialUnobservedActiveSourceV2DenseSingleLevelWgsl
               : mlsMpmP2gGridProjectionCanonicalSpatialUnobservedWgsl))
       : mlsMpmP2gGridProjectionWgsl;
-    const p2gVariant = mechanicsFieldViewEnabled
+    let p2gVariant = mechanicsFieldViewEnabled
       ? `canonical-spatial-mechanics-field-deterministic-reduction.v5.${
         observeCanonicalSpatialAuthority === true ? 'observed' : 'unobserved'}${
         activeSourceV2P2gEnabled ? '.active-source-v2' : ''}`
@@ -3129,6 +3159,11 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
           ? '.active-source-v2-dense-single-level'
           : ''}`
       : 'precanonical-level-assignment.v9';
+    if (exactHistoryProjection) {
+      p2gShader = exactHistoryProjection.specializeP2g(p2gShader);
+      p2gVariant += `.exact-history-v2:${exactHistoryProjection.key}`;
+      p2gBindings.push(computeBufferBinding(9, 'read-only-storage'));
+    }
     let devicePipelineBundles = p2gPipelineBundlesByDevice.get(device);
     if (!devicePipelineBundles) {
       devicePipelineBundles = new Map();
@@ -3293,6 +3328,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
           : (mechanicsFieldBinding?.activeNodeBuffer
             ?? schroederSpatialDirectory.buffer) } }
     ];
+    if (exactHistoryProjection) p2gEntries.push({ binding: 9, resource: { buffer: exactHistoryProjection.validationBuffer } });
     const createP2gBindGroup = (cacheKey, layout, entries, label) => (
       mechanicsFieldViewEnabled
         && typeof mechanicsFieldExecution.ownerRuntime
@@ -3386,6 +3422,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       ? bindGroupForSharedP2gLayout(fieldSealPipelineInfo)
       : null;
     const encoder = device.createCommandEncoder();
+    exactHistoryProjection?.encode(encoder);
     if (productEventLiveCountDescriptor && activeSourceV2DenseP2gEnabled) {
       if (typeof encoder.copyBufferToBuffer !== 'function') {
         throw new Error(
@@ -3578,6 +3615,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       encoder.copyBufferToBuffer(gridBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
     }
     const commandBuffer = encoder.finish();
+    exactHistorySource?.validate();
     if (
       noFullReadback
       && (mechanicsFieldViewEnabled || activeSourceV2DenseP2gEnabled)
@@ -3879,7 +3917,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         selectedLevel: schroederSelectedLevel,
         activeSourceBinding: mechanicsFieldBinding,
         spatialDirectoryBinding: schroederSpatialDirectory,
-        gridBuffer
+        gridBuffer,
+        residentProductMass
       });
     }
     if (retainGridBuffer && gridBufferAllocationEntry) {

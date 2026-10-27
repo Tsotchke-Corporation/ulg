@@ -40,13 +40,23 @@ export function sphExactReactionSpeciesLayout(format, { termCapacity, elementCap
 export function createSphExactReactionSpeciesWgsl(format) {
   validateSphExactMassFormat(format);
   return /* wgsl */ `
+// Species metadata and wire records keep their own width when the caloric
+// workspace grows for retained rational energy. Never reinterpret their ABI.
+const EQ_WORDS: u32 = ${3 * format.wordCount + 26}u;
+fn eq_error(value: ExactCaloric) -> u32 {
+  var error = value.error;
+  for (var i = EQ_WORDS; i < EC_WORDS; i++) {
+    if (value.words[i] != 0u) { error |= ${ERROR.OVERFLOW}u; }
+  }
+  return error;
+}
 fn eq_store_wide(at: u32, value: ExactCaloric) {
-  es_output[at] = value.negative; es_output[at + 1u] = value.error;
-  for (var i = 0u; i < EC_WORDS; i++) { es_output[at + 2u + i] = value.words[i]; }
+  es_output[at] = value.negative; es_output[at + 1u] = eq_error(value);
+  for (var i = 0u; i < EQ_WORDS; i++) { es_output[at + 2u + i] = value.words[i]; }
 }
 fn eq_metadata_unsigned(at: u32) -> ExactCaloric {
   var value: ExactCaloric;
-  for (var i = 0u; i < EC_WORDS; i++) { value.words[i] = es_metadata[at + i]; }
+  for (var i = 0u; i < EQ_WORDS; i++) { value.words[i] = es_metadata[at + i]; }
   return value;
 }
 fn eq_metadata_signed(at: u32) -> ExactCaloric {
@@ -69,7 +79,7 @@ fn prepare_exact_reaction_species_quantity(@builtin(global_invocation_id) id: ve
   let rule = es_output[out + 4u] * 24u; let metadata = es_metadata[rule + 3u];
   let term_count = es_metadata[metadata + 4u]; let element_count = es_metadata[metadata + 5u];
   let term_capacity = es_params.species_term_capacity;
-  let wide_stride = EC_WORDS + 2u;
+  let wide_stride = EQ_WORDS + 2u;
   let term_offset = 16u + 2u * wide_stride;
   let term_stride = 16u + 3u * EM_WORDS + 4u * wide_stride;
   let element_offset = term_offset + term_capacity * term_stride;
@@ -79,10 +89,10 @@ fn prepare_exact_reaction_species_quantity(@builtin(global_invocation_id) id: ve
   }
   let element_capacity = es_params.species_element_capacity;
   if (es_metadata[metadata] != 0x4552504du || es_metadata[metadata + 1u] != 1u
-      || es_metadata[metadata + 2u] != EM_WORDS || es_metadata[metadata + 3u] != EC_WORDS
+      || es_metadata[metadata + 2u] != EM_WORDS || es_metadata[metadata + 3u] != EQ_WORDS
       || term_count != es_output[out + 5u] + 2u || term_count > term_capacity
       || element_count == 0u || element_count > element_capacity || element_count > 119u
-      || es_metadata[metadata + 7u] != 4u + EC_WORDS
+      || es_metadata[metadata + 7u] != 4u + EQ_WORDS
       || es_metadata[metadata + 9u] != 4u || es_metadata[metadata + 11u] != wide_stride
       || es_params.species_record_words != element_offset + element_capacity * element_stride) {
     es_output[at + 1u] = ${ERROR.INVALID_RATIO}u; return;
@@ -99,7 +109,7 @@ fn prepare_exact_reaction_species_quantity(@builtin(global_invocation_id) id: ve
   es_output[at + 7u] = term_capacity; es_output[at + 8u] = element_capacity;
   var error = 0u;
   for (var term = 0u; term < term_count; term++) {
-    let term_metadata = metadata + es_metadata[metadata + 6u] + term * (4u + EC_WORDS);
+    let term_metadata = metadata + es_metadata[metadata + 6u] + term * (4u + EQ_WORDS);
     let dest = at + term_offset + term * term_stride;
     let kind = select(2u, 1u, term < 2u);
     let mass = eq_selected_mass(out, term);
@@ -151,7 +161,7 @@ fn prepare_exact_reaction_species_quantity(@builtin(global_invocation_id) id: ve
     eq_store_wide(values, moles); eq_store_wide(values + wide_stride, entities);
     eq_store_wide(values + 2u * wide_stride, remaining_moles);
     eq_store_wide(values + 3u * wide_stride, remaining_entities);
-    row_error |= moles.error | entities.error | remaining_moles.error | remaining_entities.error;
+    row_error |= eq_error(moles) | eq_error(entities) | eq_error(remaining_moles) | eq_error(remaining_entities);
     es_output[dest + 12u] = row_error; error |= row_error;
   }
   var all_zero = 1u; var previous_z = 0u;
@@ -170,9 +180,9 @@ fn prepare_exact_reaction_species_quantity(@builtin(global_invocation_id) id: ve
       else { residual = ec_add(residual, contribution); }
     }
     let dest = at + element_offset + element * element_stride;
-    let exact_zero = select(0u, 1u, residual.error == 0u && ec_top(residual) < 0);
-    es_output[dest] = z; es_output[dest + 1u] = residual.error; es_output[dest + 2u] = exact_zero;
-    eq_store_wide(dest + 4u, residual); all_zero &= exact_zero; error |= residual.error;
+    let exact_zero = select(0u, 1u, eq_error(residual) == 0u && ec_top(residual) < 0);
+    es_output[dest] = z; es_output[dest + 1u] = eq_error(residual); es_output[dest + 2u] = exact_zero;
+    eq_store_wide(dest + 4u, residual); all_zero &= exact_zero; error |= eq_error(residual);
   }
   es_output[at + 1u] = error; es_output[at + 6u] = select(0u, all_zero, error == 0u);
   es_output[at] = select(0u, 1u, error == 0u);

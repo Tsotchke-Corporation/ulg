@@ -17660,7 +17660,8 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   enableParticleStorageMaterialization = enableParticleStorageSlotAssignment
     && Boolean(particleStorageMaterializationAdmission),
   enableParticleStorageCountSummary = true,
-  enableParticleStorageCompaction = true,
+  // Exact runs retain fixed carrier rows until a preserving compactor is enrolled.
+  enableParticleStorageCompaction = !sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload),
   particleStorageCountSummary = null,
   particleStorageCompaction = null,
   // Oscillation guard: the previous step's adoption summary. When this
@@ -17798,11 +17799,37 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   gpuTimestampRecorder = null,
   residentStepOptions = {}
 } = {}, exactMassSourceRead = null) {
+  const authenticatedInjectedGenerationLevelAssignment = Boolean(
+    enableSpatialEpochGeneration === false
+    && levelAssignment
+    && spatialEpochGeneration?.selected === true
+    && spatialEpochGeneration?.ready === true
+    && spatialEpochGeneration?.releaseScheduled !== true
+    && schroederSpatialEpochTransaction?.state
+      === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
+    && validateSchroederSpatialEpochTransactionSourceFamily(
+      schroederSpatialEpochTransaction,
+      {
+        generation: spatialEpochGeneration,
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      }
+    )
+    && validateSchroederSpatialEpochGenerationLevelAssignment(
+      spatialEpochGeneration,
+      {
+        device,
+        levelAssignment,
+        sphParticleUpload,
+        mlsMpmParticleUpload
+      }
+    )
+  );
   if (exactMassSourceRead && (enableParticleStorageCompaction || enableParticleStorageMaterialization
       || (enableTwoLevelMechanics && twoLevelMechanicsAuthority !== 'authoritative')
       || (enableCrossLevelCoupling && !enableTwoLevelMechanics)
       || particleStorageMaterialization || enableFarAggregateForceApplication
-      || !enableSpatialEpochGeneration
+      || (!enableSpatialEpochGeneration && !authenticatedInjectedGenerationLevelAssignment)
       || residentStepRunner !== runMlsMpmResidentStepWithOptionalWebGpu
       || twoLevelMechanicsRunner !== runSchroederTwoLevelMechanicsStepWebGpu
       || spatialTopologyTransitionRunner !== runSchroederSpatialTopologyTransitionWebGpu)) {
@@ -18519,32 +18546,6 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       'ERR_SCHROEDER_SPATIAL_SUCCESSOR_LEVEL_ASSIGNMENT_ADMISSION';
     throw error;
   }
-  const authenticatedInjectedGenerationLevelAssignment = Boolean(
-    enableSpatialEpochGeneration === false
-    && levelAssignment
-    && spatialEpochGeneration?.selected === true
-    && spatialEpochGeneration?.ready === true
-    && spatialEpochGeneration?.releaseScheduled !== true
-    && schroederSpatialEpochTransaction?.state
-      === SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.CANONICAL_BUILT
-    && validateSchroederSpatialEpochTransactionSourceFamily(
-      schroederSpatialEpochTransaction,
-      {
-        generation: spatialEpochGeneration,
-        sphParticleUpload,
-        mlsMpmParticleUpload
-      }
-    )
-    && validateSchroederSpatialEpochGenerationLevelAssignment(
-      spatialEpochGeneration,
-      {
-        device,
-        levelAssignment,
-        sphParticleUpload,
-        mlsMpmParticleUpload
-      }
-    )
-  );
   if (
     enableTwoLevelMechanics
     && twoLevelMechanicsAuthority === 'authoritative'
@@ -24175,10 +24176,13 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       // successor's CPU-only publication bookkeeping so the bounded arena
       // window is not held across work which cannot consume the predecessor
       // directory.  Preparation deliberately remains before commit because
-      // it authenticates the still-live generation.
+      // it authenticates the still-live generation. A paired aerosol writer
+      // also validates that source during publication, so it retains the
+      // generation until both inventories have crossed that boundary.
       if (
         hierarchyRetiresResolvedSpatialEpochGeneration
         && resolvedSpatialEpochGeneration?.releaseScheduled !== true
+        && !residentStep?.nextParticleUploads?.aerosolCondensateTransition
       ) {
         releaseResolvedSpatialEpochGeneration();
       }
@@ -24208,6 +24212,10 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         // public family back to its predecessor.
         finalizeDispersedMediumOpticsTopologyRebases();
         spatialSuccessorPublicationStampTransaction?.commit();
+        if (hierarchyRetiresResolvedSpatialEpochGeneration
+            && resolvedSpatialEpochGeneration?.releaseScheduled !== true) {
+          releaseResolvedSpatialEpochGeneration();
+        }
       }
     }
   }
@@ -26594,10 +26602,14 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     }
     if (exactMassSourceRead && residentStep?.exactMassPostMechanicsClosure
         && !retainPublishedSpatialSuccessorOnFailure(error)) {
-      releaseMlsMpmPostMechanicsExactMassCapture(residentStep.exactMassPostMechanicsClosure);
-      // Actual producer output owners fence their buffers. Drop the closure's
-      // pins and retire before metadata rollback invalidates a pending owner.
-      destroyMlsMpmResidentStepBuffers(residentStep);
+      try {
+        releaseMlsMpmPostMechanicsExactMassCapture(residentStep.exactMassPostMechanicsClosure);
+        // Actual producer output owners fence their buffers. Drop the closure's
+        // pins and retire before metadata rollback invalidates a pending owner.
+        destroyMlsMpmResidentStepBuffers(residentStep);
+      } catch (cleanupError) {
+        error.exactMassResidentCleanupError = cleanupError;
+      }
     }
     cleanupTwoLevelDispersedMediumOptics(error);
     cleanupSingleLevelPendingDispersedMediumOptics(error);

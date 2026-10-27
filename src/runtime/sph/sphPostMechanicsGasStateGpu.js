@@ -77,6 +77,8 @@ export function retainSphPostMechanicsGasSourcePair(source, { device, generation
   };
   return {
     sphParticleUpload, mlsMpmParticleUpload, residentProductMass,
+    sourceClosure: record.closure,
+    sourcePacket: packet,
     read: Object.freeze({ particleCount, sourceFamily: null, sourceStage: 'post-mechanics-closure' }),
     validate,
     acquireAerosolRead() {
@@ -84,6 +86,10 @@ export function retainSphPostMechanicsGasSourcePair(source, { device, generation
       return packet.aerosolRead == null ? null : forkSphAerosolParcelRead(packet.aerosolRead, {
         device, family: packet.aerosolFamily, expectedGeneration: packet.aerosolRead.generation
       });
+    },
+    acquireExactQuantityRead() {
+      validate();
+      return closureSources.acquireMlsMpmPostMechanicsExactGasRead(record.read, { device });
     },
     release() {
       if (released) return false;
@@ -182,9 +188,10 @@ function startRetirement(record) {
  */
 export async function runSphPostMechanicsGasStateWebGpu({ device, closure,
   caloricAuthority = null, caloricThermalMaterialTable = null,
-  speciesDiagnostics = null, diagnosticsMode = 'none' } = {}) {
-  const read = closureSources.acquireMlsMpmPostMechanicsGasSourceRead(closure, { device });
-  const record = { device, read, packet: null, assignment: null, generation: null,
+  speciesDiagnostics = null, diagnosticsMode = 'none', closureExchangeOperation = null } = {}) {
+  const read = closureSources.acquireMlsMpmPostMechanicsGasSourceRead(closure,
+    { device, exchangeOperation: closureExchangeOperation });
+  const record = { device, closure, read, packet: null, assignment: null, generation: null,
     source: null, eos: null, eosModule: null, bound: false, children: 0,
     retiring: false, geometryReleased: false, released: false, releasePromise: null,
     deviceLost: false, lossCell: null, assignmentBuffer: null, assignmentDestroyed: false };

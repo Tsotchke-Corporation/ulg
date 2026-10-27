@@ -9,6 +9,9 @@ export function exactMassRatioCases(wordCount) {
   add('zero-source', 0n, 1n, 2n, 3n);
   add('increment-two', 3n, 0n, 2n, 3n);
   add('full-width-identity', mask, 0n, mask, mask);
+  add('full-width-zero-weight', mask, 0n, 0n, mask);
+  add('full-width-unit-identity', mask, 0n, 1n, 1n);
+  add('zero-source-identity', 0n, 0n, mask, mask);
   add('full-width-product', mask - 1n, 0n, mask - 1n, mask);
   add('full-width-remainder', mask - 2n, 1n, mask - 1n, mask);
   for (let bit = 1; bit < 32 * wordCount; bit += 31) {

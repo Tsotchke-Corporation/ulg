@@ -1,6 +1,8 @@
 import { validateSphExactMassFormat, encodeSphExactMass }
   from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline,
+  prewarmCachedExplicitComputePipeline, deferConfirmedSubmittedWorkCleanup,
+  submitQueueOrderedFinalConsumerWork } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactMassTransferWgsl, SPH_EXACT_MASS_TRANSFER_MAGIC }
   from './sphExactMassTransferWgsl.js';
@@ -103,17 +105,20 @@ async function retire(record) {
  * f32 projection. Rows and their material/phase binding belong to the caller's
  * physical source family; this numeric owner alone cannot publish that family.
  */
-export function createSphExactMassInventoryWebGpu({ device, format, massesKg, provenance } = {}) {
+export function createSphExactMassInventoryWebGpu({ device, format, massesKg, massWords, provenance } = {}) {
   validateSphExactMassFormat(format);
   const kind = provenance && Object.getOwnPropertyDescriptor(provenance, 'kind');
   const reference = provenance && Object.getOwnPropertyDescriptor(provenance, 'reference');
-  if (!Array.isArray(massesKg) || !massesKg.length || kind?.value !== 'initial-conditions'
+  const explicitWords = massWords instanceof Uint32Array && massWords.buffer instanceof ArrayBuffer
+    && massWords.length > 0 && massWords.length % format.wordCount === 0;
+  if ((massWords === undefined ? !Array.isArray(massesKg) || !massesKg.length : !explicitWords || massesKg !== undefined)
+      || kind?.value !== 'initial-conditions'
       || typeof reference?.value !== 'string' || !reference.value.trim()) {
     throw new TypeError('Explicit mass rows and initial-condition provenance required');
   }
-  const rowCount = uint(massesKg.length, 'inventory row count', true);
-  const words = new Uint32Array(rowCount * format.wordCount);
-  for (let row = 0; row < rowCount; row++) {
+  const rowCount = uint(explicitWords ? massWords.length / format.wordCount : massesKg.length, 'inventory row count', true);
+  const words = explicitWords ? massWords.slice() : new Uint32Array(rowCount * format.wordCount);
+  for (let row = 0; !explicitWords && row < rowCount; row++) {
     const descriptor = Object.getOwnPropertyDescriptor(massesKg, String(row));
     if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
       throw new TypeError('Each initial mass row must be explicit own data');
@@ -127,6 +132,161 @@ export function createSphExactMassInventoryWebGpu({ device, format, massesKg, pr
     device.queue.writeBuffer(record.buffer, 0, words);
     return mintFamily(record, initialProvenance);
   } catch (error) { record.closed = true; void retire(record); throw error; }
+}
+
+/** Consume one retained original placement read into independent numeric
+ * storage. The producer has selected both current carriers and residuals;
+ * every integer limb is copied without importing a floating mass projection.
+ * Success releases this read in submission order. Failure leaves its release
+ * with the caller, while any new allocation retires behind confirmed work.
+ * This does not adopt physical quantities or residual history, or admit a
+ * closure. Those owners must retain their complete aligned records separately.
+ */
+export async function createSphExactMassInventoryFromReactionPlacementWebGpu({ device, placementRead } = {}) {
+  const { resolveSchroederSpatialReactionPlacementDestinationRead: resolve,
+    releaseSchroederSpatialReactionPlacementDestinationRead: release } =
+    await import('./schroederSpatialReactionPlacementEpochGpu.js');
+  const source = resolve(placementRead, { device });
+  const { format, quantityLayout: layout, massBuffer, massByteLength, sourceInventoryGeneration } = source;
+  validateSphExactMassFormat(format);
+  const rowCount = uint(layout?.rowCount, 'placement inventory row count', true);
+  const generation = uint(uint(sourceInventoryGeneration, 'source inventory generation') + 1,
+    'successor inventory generation', true);
+  if (layout.currentRowOffset !== 0 || layout.eventRowOffset !== source.particleCount
+      || rowCount !== source.particleCount + source.residualLayout?.eventCapacity
+      || massByteLength !== rowCount * format.wordCount * 4
+      || webGpuBufferDevice(massBuffer) !== device || massBuffer.size < massByteLength
+      || (massBuffer.usage & COPY_SRC) !== COPY_SRC) {
+    throw new TypeError('Reaction inventory requires the complete original terminal mass plane');
+  }
+  const record = recordFor(device, format, rowCount, generation);
+  try {
+    record.buffer = allocate(device, record.resources, 'ulg-exact-mass-reaction-successor', massByteLength);
+    const encoder = device.createCommandEncoder({ label: 'ulg-exact-mass-reaction-successor' });
+    encoder.copyBufferToBuffer(massBuffer, 0, record.buffer, 0, massByteLength);
+    const commands = encoder.finish();
+    resolve(placementRead, { device });
+    const family = mintFamily(record, Object.freeze({ kind: 'reaction-placement',
+      sourceGeneration: sourceInventoryGeneration, carrierRowCount: source.particleCount,
+      residualRowOffset: source.particleCount, residualRowCount: source.residualLayout.eventCapacity }));
+    const finalConsumer = submitQueueOrderedFinalConsumerWork(device, [commands],
+      { finalConsumerOwner: family, producerClaims: [placementRead.queueOrderedCleanupClaim] });
+    // This path consumes the exact producer claim synchronously; it adds no
+    // host fence and retains no predecessor family or read in the new owner.
+    release(placementRead, { queueOrderedFinalConsumer: finalConsumer });
+    return family;
+  } catch (error) {
+    record.closed = true;
+    void retire(record);
+    throw error;
+  }
+}
+
+/** Copy the current particle mass limbs from the original completed exchange.
+ * This owner still grants only numeric inventory; the closure must adopt its
+ * aligned quantities, history and aerosol together before physical publication.
+ * The caller keeps its producer read; this consumer owns a separate fork until
+ * its submitted gather is confirmed complete (or the device is lost).
+ */
+export async function createSphExactMassInventoryFromVaporExchangeWebGpu({ device, producerRead } = {}) {
+  const { resolveSphSpatialVaporAerosolProducerRead: resolve,
+    forkSphSpatialVaporAerosolProducerRead: fork,
+    releaseSphSpatialVaporAerosolProducerRead: release } = await import('./sphSpatialGasLedgerEosGpu.js');
+  const held = fork(producerRead, { device });
+  let record = null, submitted = false;
+  try {
+    const source = resolve(held, { device });
+    const { format, sourceInventoryGeneration, endpoints } = source;
+    validateSphExactMassFormat(format);
+    const rowCount = uint(source.particleCount, 'exchange inventory row count', true);
+    const generation = uint(uint(sourceInventoryGeneration, 'source inventory generation') + 1,
+      'successor inventory generation', true);
+    const layout = endpoints.particleLayout, buffer = endpoints.particleBuffer;
+    const words = rowCount * format.wordCount, groups = Math.ceil(words / 64);
+    if (layout.rowCount !== rowCount || layout.recordWords < 16 + format.wordCount
+        || layout.wordLength !== rowCount * layout.recordWords
+        || webGpuBufferDevice(buffer) !== device || buffer.size !== layout.wordLength * 4
+        || (buffer.usage & STORAGE) !== STORAGE
+        || groups > device.limits.maxComputeWorkgroupsPerDimension) {
+      throw new TypeError('Exchange inventory requires its complete original particle quantity plane');
+    }
+    record = recordFor(device, format, rowCount, generation);
+    record.buffer = allocate(device, record.resources, 'ulg-exact-mass-vapor-successor', words * 4);
+    const code = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> quantities: array<u32>;
+@group(0) @binding(1) var<storage, read_write> masses: array<u32>;
+@compute @workgroup_size(64)
+fn gather_vapor_particle_mass(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x; if (i >= arrayLength(&masses)) { return; }
+  let row = i / ${format.wordCount}u; let limb = i % ${format.wordCount}u;
+  masses[i] = quantities[row * ${layout.recordWords}u + 16u + limb];
+}`;
+    const pipeline = await prewarmCachedExplicitComputePipeline(device, {
+      code, entryPoint: 'gather_vapor_particle_mass', label: 'ulg-exact-mass-vapor-successor',
+      cacheKey: `ulg-exact-mass-vapor-successor-v1:${format.wordCount}:${layout.recordWords}`,
+      bindings: ['read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
+    if (!pipeline.pipeline) throw pipeline.error ?? new Error('Exact exchange mass gather unavailable');
+    resolve(held, { device });
+    const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+      entries: [buffer, record.buffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+    const encoder = device.createCommandEncoder({ label: 'ulg-exact-mass-vapor-successor' });
+    const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(groups); pass.end();
+    const family = mintFamily(record, Object.freeze({ kind: 'vapor-aerosol-exchange',
+      sourceGeneration: sourceInventoryGeneration, carrierRowCount: rowCount }));
+    submitted = true;
+    device.queue.submit([encoder.finish()]);
+    return family;
+  } catch (error) {
+    if (record) { record.closed = true; void retire(record); }
+    throw error;
+  } finally {
+    if (submitted) void deferConfirmedSubmittedWorkCleanup(device, () => release(held)).catch(() => {});
+    else release(held);
+  }
+}
+
+/** Gather only from an original phase producer's final committed records,
+ * including global rollback after caloric or geometry rejection. */
+export async function createSphExactMassInventoryFromPhaseTransferWebGpu({ device, result, token } = {}) {
+  const { resolveSphPhaseCarrierTransferSourceCapture: resolve } = await import('./sphPhaseCarrierTransferGpu.js');
+  const seal = resolve(result, token), held = seal.retain();
+  let record = null, submitted = false;
+  try {
+    const source = seal.exactPhase;
+    if (!source || seal.inputs.device !== device) throw new TypeError('Phase inventory requires its original exact producer');
+    const { format, quantityBuffer: buffer, quantityLayout: layout, sourceInventoryGeneration } = source;
+    validateSphExactMassFormat(format);
+    const rowCount = uint(source.particleCount, 'phase inventory row count', true);
+    const generation = uint(uint(sourceInventoryGeneration, 'phase source generation') + 1, 'phase successor generation', true);
+    const words = rowCount * format.wordCount;
+    if (layout.rowCount !== rowCount || layout.massOffsetWords !== 16 || layout.wordLength !== rowCount * layout.recordWords
+        || webGpuBufferDevice(buffer) !== device || buffer.size !== layout.wordLength * 4
+        || (buffer.usage & STORAGE) !== STORAGE || Math.ceil(words / 64) > device.limits.maxComputeWorkgroupsPerDimension) {
+      throw new TypeError('Phase inventory requires its complete original committed quantity plane');
+    }
+    record = recordFor(device, format, rowCount, generation);
+    record.buffer = allocate(device, record.resources, 'ulg-exact-mass-phase-successor', words * 4);
+    const code = `@group(0) @binding(0) var<storage, read> quantities: array<u32>;
+@group(0) @binding(1) var<storage, read_write> masses: array<u32>;
+@compute @workgroup_size(64) fn gather_phase_particle_mass(@builtin(global_invocation_id) id: vec3<u32>) {
+ let i=id.x; if(i<arrayLength(&masses)){masses[i]=quantities[(i/${format.wordCount}u)*${layout.recordWords}u+16u+i%${format.wordCount}u];}}`;
+    const pipeline = await prewarmCachedExplicitComputePipeline(device, { code, entryPoint: 'gather_phase_particle_mass',
+      cacheKey: `ulg-exact-mass-phase-successor-v1:${format.wordCount}:${layout.recordWords}`,
+      bindings: ['read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
+    if (!pipeline.pipeline) throw pipeline.error ?? new Error('Exact phase mass gather unavailable');
+    resolve(result, token); held.validate();
+    const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+      entries: [buffer, record.buffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+    const encoder = device.createCommandEncoder(); const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(Math.ceil(words / 64)); pass.end();
+    const family = mintFamily(record, Object.freeze({ kind: 'phase-carrier-transfer', sourceGeneration: sourceInventoryGeneration, carrierRowCount: rowCount }));
+    submitted = true; device.queue.submit([encoder.finish()]); return family;
+  } catch (error) { if (record) { record.closed = true; void retire(record); } throw error; }
+  finally {
+    if (submitted) void deferConfirmedSubmittedWorkCleanup(device, () => held.release()).catch(() => {});
+    else held.release();
+  }
 }
 
 export function acquireSphExactMassRead({ family, device, format = family?.format,

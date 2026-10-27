@@ -39,7 +39,11 @@ import {
   validateSchroederSpatialReactionPlacementPositionEpochFloor,
   runSchroederSpatialReactionPlacementEpochWebGpu,
   sphReactionWarmArenaStats,
-  transferSchroederSpatialReactionPlacementDestinationOwnership
+  transferSchroederSpatialReactionPlacementDestinationOwnership,
+  acquireSchroederSpatialReactionPlacementDestinationRead,
+  resolveSchroederSpatialReactionPlacementDestinationRead,
+  releaseSchroederSpatialReactionPlacementDestinationRead,
+  createSchroederSpatialReactionPlacementMassInventory
 } from '../src/runtime/sph/schroederSpatialReactionPlacementEpochGpu.js';
 import {
   sealQueueOrderedFinalConsumerCapability,
@@ -2669,6 +2673,128 @@ async function genuineRetirementFamily({ warm = false, callerOwned = false } = {
   return { fx, family, placementArtifact, lease, arena, runners,
     destinations: [family.placedDestinationStateBuffer, family.placedDestinationThermoBuffer, family.placedDestinationMechanicsBuffer] };
 }
+
+test('mass continuation rejects a legacy placement and drains its acquired read during owner retirement', async () => {
+  const { fx, family, placementArtifact, destinations } = await genuineRetirementFamily();
+  await assert.rejects(createSchroederSpatialReactionPlacementMassInventory(family, { device: fx.device }), /transferred/);
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+  const pending = createSchroederSpatialReactionPlacementMassInventory(family, { device: fx.device });
+  const rejected = assert.rejects(pending, /format/i);
+  const retirement = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family);
+  await rejected;
+  assert.equal(await retirement, true);
+  assert.ok(destinations.every(resource => resource.destroyCount === 1));
+});
+
+for (const warm of [false, true]) {
+  test(`${warm ? 'warm' : 'cold'} destination read survives source retirement and delays destination retirement`, async () => {
+    const { fx, family, placementArtifact, destinations, arena } = await genuineRetirementFamily({ warm });
+    assert.throws(() => acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device }), /transferred/);
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+    await retirementTick();
+    const read = acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device });
+    assert.equal(read.stateBuffer, destinations[0]);
+    assert.equal(read.thermoBuffer, destinations[1]);
+    assert.equal(read.mechanicsBuffer, destinations[2]);
+    assert.equal(read.physicalPublicationAdmitted, false);
+    assert.ok(Object.isFrozen(read));
+    assert.throws(() => acquireSchroederSpatialReactionPlacementDestinationRead({ ...family }, { device: fx.device }), /original/);
+    assert.throws(() => resolveSchroederSpatialReactionPlacementDestinationRead({ ...read }, { device: fx.device }), /original/);
+    assert.throws(() => resolveSchroederSpatialReactionPlacementDestinationRead(read, { device: {} }), /original/);
+    assert.throws(() => releaseSchroederSpatialReactionPlacementDestinationRead({ ...read }), /original/);
+    const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+      { completionFence: Promise.resolve(true) });
+    let retired = false; void completion.then(() => { retired = true; });
+    await retirementTick();
+    assert.equal(retired, false);
+    assert.ok(destinations.every(resource => resource.destroyCount === 0));
+    assert.throws(() => acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device }), /live/);
+    assert.equal(resolveSchroederSpatialReactionPlacementDestinationRead(read, { device: fx.device }), read);
+    const readerFence = deferred(); fx.device.queue.onSubmittedWorkDone = () => readerFence.promise;
+    const readerCompletion = releaseSchroederSpatialReactionPlacementDestinationRead(read);
+    assert.equal(releaseSchroederSpatialReactionPlacementDestinationRead(read), readerCompletion);
+    assert.throws(() => resolveSchroederSpatialReactionPlacementDestinationRead(read, { device: fx.device }), /live/);
+    await retirementTick(); assert.equal(retired, false);
+    readerFence.resolve(); assert.equal(await readerCompletion, true); assert.equal(await completion, true);
+    assert.ok(destinations.every(resource => resource.destroyCount === (warm ? 0 : 1)));
+    if (warm) assert.equal(destroySphReactionWarmArenaWebGpu(arena), true);
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+  });
+
+  test(`${warm ? 'warm' : 'cold'} retained destination uses only its genuine final-consumer capability`, async () => {
+    const { fx, family, placementArtifact, destinations, arena } = await genuineRetirementFamily({ warm });
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family, { requestQueueOrderedCleanupClaim: true });
+    const before = fx.getQueueFenceCount();
+    const read = acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device });
+    const claim = schroederSpatialReactionPlacementTransferredDestinationCleanupClaim(family);
+    const submission = submitQueueOrderedWork(fx.device, [Object.freeze({ label: 'retained-destination-consumer' })]);
+    const consumer = sealQueueOrderedFinalConsumerCapability(submission, fx.device,
+      { finalConsumerOwner: {}, producerClaims: [read.queueOrderedCleanupClaim, claim] });
+    assert.throws(() => releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family,
+      { queueOrderedFinalConsumer: consumer }), /readers must submit and release/);
+    assert.throws(() => releaseSchroederSpatialReactionPlacementDestinationRead(read,
+      { queueOrderedFinalConsumer: {} }), { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+    assert.throws(() => releaseSchroederSpatialReactionPlacementDestinationRead(read),
+      { code: 'ERR_QUEUE_ORDERED_CLEANUP_UNAUTHORIZED' });
+    assert.equal(resolveSchroederSpatialReactionPlacementDestinationRead(read, { device: fx.device }), read);
+    assert.equal(await releaseSchroederSpatialReactionPlacementDestinationRead(read,
+      { queueOrderedFinalConsumer: consumer }), true);
+    assert.equal(await releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family,
+      { queueOrderedFinalConsumer: consumer }), true);
+    assert.equal(fx.getQueueFenceCount(), before, 'queued readers add no host fence');
+    assert.ok(destinations.every(resource => resource.destroyCount === (warm ? 0 : 1)));
+    if (warm) assert.equal(destroySphReactionWarmArenaWebGpu(arena), true);
+  });
+
+  test(`${warm ? 'warm' : 'cold'} destination reader with rejected fence drains only on fulfilled device loss`, async () => {
+    const { fx, family, placementArtifact, destinations } = await genuineRetirementFamily({ warm });
+    releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+    transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+    await retirementTick();
+    const read = acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device });
+    fx.device.queue.onSubmittedWorkDone = () => Promise.reject(new Error('unconfirmed reader completion'));
+    const readerCompletion = releaseSchroederSpatialReactionPlacementDestinationRead(read);
+    const ownerCompletion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+      { completionFence: Promise.resolve(true) });
+    let settled = false; void ownerCompletion.then(() => { settled = true; });
+    await retirementTick(); assert.equal(settled, false);
+    assert.ok(destinations.every(resource => resource.destroyCount === 0));
+    fx.lost.resolve({ message: 'loss after rejected reader fence' });
+    assert.equal(await readerCompletion, false); assert.equal(await ownerCompletion, false);
+    assert.ok(destinations.every(resource => resource.destroyCount === 1));
+    assert.throws(() => acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device }), /live/);
+  });
+}
+
+test('placement destination cannot pin caller-owned allocations through an unrelated owner', async () => {
+  const { fx, family, placementArtifact, destinations } = await genuineRetirementFamily({ callerOwned: true });
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+  assert.throws(() => acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device }), /original live/);
+  assert.equal(await releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family), true);
+  assert.ok(destinations.every(resource => resource.destroyCount === 0));
+  destinations.forEach(resource => resource.destroy());
+});
+
+test('fulfilled loss drains an unreleased destination reader without querying the lost queue', async () => {
+  const { fx, family, placementArtifact, destinations } = await genuineRetirementFamily();
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { placementArtifact });
+  transferSchroederSpatialReactionPlacementDestinationOwnership(family);
+  const read = acquireSchroederSpatialReactionPlacementDestinationRead(family, { device: fx.device });
+  const completion = releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family,
+    { completionFence: Promise.resolve(true) });
+  fx.lost.resolve({ message: 'loss while consumer still holds a read' });
+  assert.equal(await completion, false);
+  assert.throws(() => resolveSchroederSpatialReactionPlacementDestinationRead(read, { device: fx.device }), /live/);
+  let fences = 0;
+  fx.device.queue.onSubmittedWorkDone = () => { fences++; throw new Error('lost queue must not be queried'); };
+  assert.equal(await releaseSchroederSpatialReactionPlacementDestinationRead(read), false);
+  assert.equal(fences, 0);
+  assert.ok(destinations.every(resource => resource.destroyCount === 1));
+});
 
 for (const warm of [false, true]) for (const mode of ['pending', 'reject', 'false', 'throw', 'missing']) {
   test(`genuine ${warm ? 'warm' : 'cold'} transferred destination retains ${mode} fence ownership until fulfilled loss`, async () => {

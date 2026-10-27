@@ -241,7 +241,8 @@ test('reaction discovery uses material closure metadata for phase boundaries and
 
   const ironOxide = discoverReactions('fe', 'o2', { materialProperties });
   assert.equal(ironOxide.reactions.length, 1);
-  assert.equal(ironOxide.reactions[0].energyModel, 'atomic-kohn-sham-tight-binding-v0');
+  assert.equal(ironOxide.reactions[0].energyModel, 'nist-janaf-standard-formation-enthalpy-298.15k-v0');
+  assert.equal(ironOxide.reactions[0].stoichiometry.thermochemicalReference.simulationPhaseApplicabilityValidation, false);
   assert.ok(ironOxide.productClosures.feo);
   assertNoUnprovenancedMaterialProperties(ironOxide.productClosures.feo.properties);
   const ironProductSummary = materialDerivationSummary(ironOxide.productClosures.feo.properties);

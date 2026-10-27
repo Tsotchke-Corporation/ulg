@@ -1,3 +1,4 @@
+import { validateSphTransportPacketMode } from './sphConservativeTransferPacketWgsl.js';
 import { sphAerosolSourceFamily } from './sphAerosolSpatialBinding.js';
 import {
   acquireSchroederSpatialSuccessorParticleProductRead,
@@ -81,8 +82,10 @@ import {
 } from './sphGpuDeviceIdentity.js';
 import {
   assertSphLegacyMassPathAllowed,
-  ensureSphGpuParticleBufferSetBorrowLifecycle
+  ensureSphGpuParticleBufferSetBorrowLifecycle,
+  acquireSphParticleExactMassRead, releaseSphParticleExactMassRead
 } from './sphGpuBuffers.js';
+import { prepareSphExactHistoryGasViews } from './sphExactHistoryP2gGpu.js';
 import {
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
@@ -248,6 +251,20 @@ const GPU_MAP_MODE = {
 
 const deviceRuntimes = new WeakMap();
 const retainedExecutions = new WeakMap();
+// Only the original EOS invocation issues this borrowed numerical input to
+// its own free-volume encoder. It is not a history/count/inventory owner.
+const retainedGasHistoryVolumeInputs = new WeakMap();
+
+export function resolveSphSpatialGasHistoryVolumeInput(input, { device, generation, encoder, gasDirectory } = {}) {
+  if (input == null) return null;
+  const record = retainedGasHistoryVolumeInputs.get(input);
+  if (!record || record.device !== device || record.generation !== generation
+      || record.encoder !== encoder || record.gasDirectory !== gasDirectory) {
+    throw new TypeError('Gas occupied volume requires the original EOS history input and encoder');
+  }
+  record.validate();
+  return record;
+}
 const retainedSpatialGasSources = new WeakMap();
 const retainedGasCellSources = new WeakMap();
 const retainedPressureConsumerReceipts = new WeakMap();
@@ -255,6 +272,7 @@ const retainedPressureMechanicsBindings = new WeakMap();
 const retainedSourceBorrowAccounting = new WeakMap();
 const lostDevices = new WeakSet();
 const vaporAerosolCandidates = new WeakMap();
+const vaporAerosolProducerReads = new WeakMap();
 // The optional caloric compiler consumes the existing thermal graph builder.
 // Load it only after retaining the source; an eager EOS -> thermal import
 // would reintroduce the thermal/reaction entry-order cycle.
@@ -1188,7 +1206,7 @@ function normalizeAuthoritativeSpatialGasGrid(
   }
 }
 
-function normalizeProductEventSource({
+async function normalizeProductEventSource({
   device,
   retainedProductEventSource = null,
   residentProductMass = null,
@@ -1198,7 +1216,13 @@ function normalizeProductEventSource({
 }) {
   const source = retainedProductEventSource || residentProductMass || null;
   const buffer = productEventBuffer || source?.productEventBuffer || null;
-  assertSphLegacyMassPathAllowed({ productEventBuffer: buffer }, 'Spatial gas product events');
+  let exactHistoryLayout = null;
+  if (source && 'exactProductHistoryLayout' in source) {
+    const history = await import('./sphMlsMpmGpuStep.js');
+    exactHistoryLayout = history.resolveResidentProductExactHistoryLayout(source, { device });
+  } else {
+    assertSphLegacyMassPathAllowed({ productEventBuffer: buffer }, 'Spatial gas product events');
+  }
   const advertised = Boolean(
     source
     || productEventBuffer
@@ -1253,11 +1277,12 @@ function normalizeProductEventSource({
       )
     };
   }
-  if (strideFloats !== SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS) {
+  const expectedStride = exactHistoryLayout?.rowWords ?? SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS;
+  if (strideFloats !== expectedStride) {
     return {
       error: rejectedExecution(
         'spatial-gas-ledger-eos-rejected-source-stride',
-        `Product-event stride must be ${SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS} floats`,
+        `Product-event stride must be ${expectedStride} words`,
         { productEventStrideFloats: strideFloats }
       )
     };
@@ -1417,7 +1442,8 @@ function normalizeProductEventSource({
     strideFloats,
     requiredBytes,
     liveCountDescriptor,
-    liveRowCountUpperBound
+    liveRowCountUpperBound,
+    exactHistoryLayout
   };
 }
 
@@ -1431,7 +1457,8 @@ function normalizeParticleSource({
   particleStateStrideFloats = null,
   particleThermoStrideFloats = null,
   schroederSpatialEpochGeneration = null,
-  schroederLevelAssignment = null
+  schroederLevelAssignment = null,
+  deferLifecycleToCurrentPair = false
 }) {
   const advertised = Boolean(
     sphParticleUpload
@@ -1610,7 +1637,7 @@ function normalizeParticleSource({
     );
   }
   try {
-    if (!ensureSphGpuParticleBufferSetBorrowLifecycle(source)) {
+    if (!deferLifecycleToCurrentPair && !ensureSphGpuParticleBufferSetBorrowLifecycle(source)) {
       return reject(
         'spatial-gas-ledger-eos-rejected-particle-source-lifecycle',
         'Particle source cannot publish the required retained borrow lifecycle'
@@ -2868,12 +2895,39 @@ fn finalize_eos() {
 }
 export const sphSpatialGasLedgerEosWgsl = gasLedgerEosWgsl();
 
-function adapterPipelines(device) {
+function adapterPipelines(device, exactHistory = false) {
+  // The genuine source/count ABI stays unchanged. Only the numeric binding
+  // is residual-only, and a failed projection invalidates the entire union.
+  let code = sphSpatialGasLedgerCandidateUnionAdapterWgsl;
+  if (exactHistory) {
+    for (const [before, after] of [
+      ['const CONTROL_MAGIC:', '@group(0) @binding(9) var<storage,read> exact_history_validation:array<u32>;\nconst CONTROL_MAGIC:'],
+      ['fn product_history_authority_ready() -> bool {',
+        'fn product_history_authority_ready() -> bool {\n  if(exact_history_validation[0u]!=0u || exact_history_validation[1u]!=0x48503247u){return false;}'],
+      ['let residual_volume = unplaced_mass / density;', 'let residual_volume = product_events[source + 23u];'],
+      ['let residual_volume = unplaced_mass / product_events[source + 17u];', 'let residual_volume = product_events[source + 23u];'],
+      // The exact projection already contains ONLY current residual mass and
+      // moles. Re-dividing identical f32 masses may yield 1-ulp on a native
+      // reciprocal implementation, silently debiting the projected moles.
+      ['let residual_fraction = unplaced_mass / total_mass;',
+        'let residual_fraction = select(-1.0, 1.0, unplaced_mass == total_mass);'],
+      ['let residual_fraction = clamp(unplaced_mass / total_mass, 0.0, 1.0);',
+        'let residual_fraction = select(-1.0, 1.0, unplaced_mass == total_mass);'],
+      ['if (params.require_complete_occupancy != 0u) {',
+        `if (params.require_complete_occupancy != 0u && !(routing==0.0 && source_status==1.0
+          && (product_events[source+11u]==1.0 || product_events[source+11u]==2.0))) {`]
+    ]) {
+      if (code.split(before).length !== 2) throw new Error(`Original gas adapter changed: ${before}`);
+      code = code.replace(before, after);
+    }
+  }
+  const variant = exactHistory ? 'exact-history.v3' : 'v6';
+  const validationBinding = exactHistory ? [computeBufferBinding(9, 'read-only-storage')] : [];
   return {
     classify: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-classify.v6',
+      cacheKey: `ulg-sph-spatial-gas-ledger-candidate-union-classify.${variant}`,
       label: 'ulg-sph-spatial-gas-ledger-candidate-union-classify',
-      code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
+      code,
       entryPoint: 'classify_gas_candidates',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -2881,25 +2935,27 @@ function adapterPipelines(device) {
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'uniform'),
         computeBufferBinding(7, 'read-only-storage'),
-        computeBufferBinding(8, 'read-only-storage')
+        computeBufferBinding(8, 'read-only-storage'),
+        ...validationBinding
       ]
     }),
     finalize: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize.v6',
+      cacheKey: `ulg-sph-spatial-gas-ledger-candidate-union-finalize.${variant}`,
       label: 'ulg-sph-spatial-gas-ledger-candidate-union-finalize',
-      code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
+      code,
       entryPoint: 'finalize_compaction',
       bindings: [
         computeBufferBinding(1, 'storage'),
         computeBufferBinding(2, 'read-only-storage'),
         computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform')
+        computeBufferBinding(6, 'uniform'),
+        ...validationBinding
       ]
     }),
     scatter: createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter.v6',
+      cacheKey: `ulg-sph-spatial-gas-ledger-candidate-union-scatter.${variant}`,
       label: 'ulg-sph-spatial-gas-ledger-candidate-union-scatter',
-      code: sphSpatialGasLedgerCandidateUnionAdapterWgsl,
+      code,
       entryPoint: 'scatter_compact_rows',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -2910,7 +2966,8 @@ function adapterPipelines(device) {
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'uniform'),
         computeBufferBinding(7, 'read-only-storage'),
-        computeBufferBinding(8, 'read-only-storage')
+        computeBufferBinding(8, 'read-only-storage'),
+        ...validationBinding
       ]
     })
   };
@@ -4713,7 +4770,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       normalizedEpoch.error.message
     );
   }
-  const normalizedProductSource = normalizeProductEventSource({
+  const normalizedProductSource = await normalizeProductEventSource({
     device,
     retainedProductEventSource,
     residentProductMass,
@@ -4737,7 +4794,10 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     particleStateStrideFloats,
     particleThermoStrideFloats,
     schroederSpatialEpochGeneration,
-    schroederLevelAssignment
+    schroederLevelAssignment,
+    // This only defers lifetime admission: the private current pair must be
+    // authenticated and retained below before allocating or submitting work.
+    deferLifecycleToCurrentPair: postMechanicsGasSource != null
   });
   if (normalizedParticleSource.error) {
     return {
@@ -4927,7 +4987,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     ...(normalizedProductSource.present === true
       ? [normalizedProductSource.source]
       : []),
-    ...(normalizedParticleSource.present === true
+    ...(normalizedParticleSource.present === true && postMechanicsGasSource == null
       ? [normalizedParticleSource.source]
       : [])
   ]);
@@ -5039,8 +5099,35 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   let queueOrderedPressureRecord = null;
   let caloricModule = null;
   let caloricData = null;
+  let exactHistoryProjection = null;
+  let exactHistoryVolumeInput = null;
   try {
     particleProductSourcePair?.validate();
+    if (normalizedProductSource.exactHistoryLayout) {
+      if (!sphParticleUpload?.identityBuffer) {
+        throw new TypeError('Exact gas history requires its associated particle identity');
+      }
+      const history = await import('./sphMlsMpmGpuStep.js');
+      const source = history.acquireResidentProductExactHistoryRead(normalizedProductSource.source,
+        { device, identityBuffer: sphParticleUpload.identityBuffer });
+      const allocations = new Set();
+      let released = false;
+      // Join the existing EOS failure/retirement lifecycle before any awaited
+      // allocation or compilation. The original paired owner supplies the
+      // parent hold when queue-ordered retirement is admitted.
+      releaseSourceBorrow = withParticleProductSourceBorrow(releaseSourceBorrow, {
+        isReleased: () => released,
+        canReleaseQueueOrdered: () => { source.validate(); return true; },
+        release: () => {
+          if (released) return true;
+          if (exactHistoryVolumeInput) retainedGasHistoryVolumeInputs.delete(exactHistoryVolumeInput);
+          for (const buffer of allocations) { buffer.destroy(); allocations.delete(buffer); }
+          source.release(); released = true; return true;
+        }
+      });
+      exactHistoryProjection = await prepareSphExactHistoryGasViews({ device, source,
+        allocate: descriptor => { const buffer = device.createBuffer(descriptor); allocations.add(buffer); return buffer; } });
+    }
     if (caloricAuthority != null) {
       caloricModule = await caloricAdmissionModule();
       particleProductSourcePair.validate();
@@ -5048,13 +5135,16 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         { thermalMaterialTable: caloricThermalMaterialTable });
       prepareCaloricBuffers(device, slot, caloricData.records);
     }
-    const adapter = adapterPipelines(device);
-    const productBindingBuffer = normalizedProductSource.present === true
+    const adapter = adapterPipelines(device, exactHistoryProjection != null);
+    const productBindingBuffer = exactHistoryProjection?.outputBuffer ?? (normalizedProductSource.present === true
       ? normalizedProductSource.buffer
-      : normalizedParticleSource.stateBuffer;
-    const productBindingByteLength = normalizedProductSource.present === true
+      : normalizedParticleSource.stateBuffer);
+    const productBindingByteLength = exactHistoryProjection?.outputBuffer.size ?? (normalizedProductSource.present === true
       ? normalizedProductSource.requiredBytes
-      : normalizedParticleSource.stateRequiredBytes;
+      : normalizedParticleSource.stateRequiredBytes);
+    const productBindingStride = exactHistoryProjection ? SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : normalizedProductSource.strideFloats;
+    const exactHistoryValidationEntry = exactHistoryProjection
+      ? [{ binding: 9, resource: { buffer: exactHistoryProjection.validationBuffer } }] : [];
     const particleStateBindingBuffer = normalizedParticleSource.present === true
       ? normalizedParticleSource.stateBuffer
       : normalizedProductSource.buffer;
@@ -5076,7 +5166,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     device.queue.writeBuffer(slot.paramsBuffer, 0, adapterParams({
       rowCount: normalizedProductSource.rowCount,
       sourceCapacity: capacity,
-      strideFloats: normalizedProductSource.strideFloats,
+      strideFloats: productBindingStride,
       productSourcePresent: normalizedProductSource.present === true,
       productCandidateCapacity,
       particleCount: normalizedParticleSource.particleCount,
@@ -5091,13 +5181,14 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       executionGeneration,
       fallbackTemperatureK: resolvedFallbackTemperatureK,
       liveCountDescriptor: normalizedProductSource.liveCountDescriptor,
-      requireCompleteOccupancy: postMechanicsGasSource != null
+      requireCompleteOccupancy: postMechanicsGasSource != null || exactHistoryProjection != null
     }));
     const classifyBindGroup = makeBindGroup(
       device,
       `${slot.label}-adapter-classify-bind-group`,
       adapter.classify.bindGroupLayout,
       [
+        ...exactHistoryValidationEntry,
         {
           binding: 0,
           resource: {
@@ -5132,6 +5223,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       `${slot.label}-adapter-finalize-bind-group`,
       adapter.finalize.bindGroupLayout,
       [
+        ...exactHistoryValidationEntry,
         { binding: 1, resource: { buffer: slot.candidateFlagsBuffer } },
         { binding: 2, resource: { buffer: slot.candidateOffsetsBuffer } },
         { binding: 5, resource: { buffer: slot.controlBuffer } },
@@ -5143,6 +5235,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       `${slot.label}-adapter-scatter-bind-group`,
       adapter.scatter.bindGroupLayout,
       [
+        ...exactHistoryValidationEntry,
         {
           binding: 0,
           resource: {
@@ -5178,6 +5271,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     const adapterEncoder = device.createCommandEncoder({
       label: `${slot.label}-adapter-encoder`
     });
+    exactHistoryProjection?.encode(adapterEncoder);
     if (normalizedProductSource.liveCountDescriptor) {
       if (typeof adapterEncoder.copyBufferToBuffer !== 'function') {
         throw new Error(
@@ -5227,6 +5321,8 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     // attempt immediately before that call so cleanup cannot recycle the
     // source borrow or arena slot while accepted GPU work may still use them.
     const adapterCommandBuffer = adapterEncoder.finish();
+    exactHistoryProjection?.validate();
+    particleProductSourcePair?.validate();
     adapterSubmissionAttempted = true;
     device.queue.submit([adapterCommandBuffer]);
     adapterSubmitted = true;
@@ -5310,6 +5406,24 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     const eosEncoder = device.createCommandEncoder({
       label: `${slot.label}-eos-encoder`
     });
+    if (exactHistoryProjection) {
+      exactHistoryVolumeInput = Object.freeze({});
+      retainedGasHistoryVolumeInputs.set(exactHistoryVolumeInput, Object.freeze({
+        device, generation: schroederSpatialEpochGeneration, encoder: eosEncoder,
+        gasDirectory: spatialGeneration.execution,
+        buffer: exactHistoryProjection.outputBuffer, validationBuffer: exactHistoryProjection.validationBuffer,
+        descriptor: normalizedProductSource.liveCountDescriptor,
+        validate: () => {
+          if (!retainedGasHistoryVolumeInputs.has(exactHistoryVolumeInput)) throw new TypeError('Gas history input retired');
+          exactHistoryProjection.validate(); particleProductSourcePair?.validate();
+          if (!validateSchroederSpatialEpochGenerationLevelAssignment(schroederSpatialEpochGeneration,
+            { device, levelAssignment: schroederLevelAssignment, sphParticleUpload, mlsMpmParticleUpload })) {
+            throw new TypeError('Gas history input lost its original particle occupancy generation');
+          }
+          return true;
+        }
+      }));
+    }
     gasFreeVolumeExecution = encodeSphSpatialGasFreeVolumeGpu(
       gasFreeVolumeRuntime,
       eosEncoder,
@@ -5317,6 +5431,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       gasDirectory: spatialGeneration.execution,
       generationReadFamily: generationConsumerLease,
       aerosolFamily: expectedAerosolFamily,
+      retainedHistoryInput: exactHistoryVolumeInput,
       grid: {
         ...normalizedGrid,
         chartId: resolvedChartId
@@ -5439,7 +5554,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       eosWgsl: sphSpatialGasLedgerEosWgsl, options: normalizedSpeciesDiagnostics,
       productBuffer: productBindingBuffer, productByteLength: productBindingByteLength,
       productCapacity: productCandidateCapacity,
-      productStride: normalizedProductSource.strideFloats,
+      productStride: productBindingStride,
       particleCount: normalizedParticleSource.particleCount,
       dispatch: capacityDispatchCount
     });
@@ -5695,6 +5810,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       chartId: resolvedChartId,
       level: resolvedLevel,
       spatialGasGrid: normalizedGrid,
+      gasConstantJPerMolK: resolvedGasConstant,
       boxMinM: resolvedBoxMinM,
       boxMaxM: resolvedBoxMaxM,
       gasControlVolumeDescriptor,
@@ -5829,7 +5945,8 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
   livePressureSourceRecord(record.gasCellSource);
   const operation = Object.freeze({});
   record.activeExchangeOperation = operation;
-  let aerosolRead = null, releaseAerosolRead = null, owner = null;
+  let aerosolRead = null, exactParticleRead = null, exactPostMechanicsRead = null, currentModule = null;
+  let releaseAerosolRead = null, owner = null;
   const validate = () => {
     if (record.activeExchangeOperation !== operation || record.terminal || record.released
         || record.releaseAttempted || record.releasePromise || record.slot.destroyed
@@ -5846,7 +5963,7 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
   try {
     validate();
     if (!options || Object.getPrototypeOf(options) !== Object.prototype
-        || Reflect.ownKeys(options).some((key) => key !== 'surfaceModels' && key !== 'edges')) {
+        || Reflect.ownKeys(options).some((key) => !['surfaceModels', 'edges', 'pressureWorkMode', 'rateModels', 'rateIntegration', 'rateSubsteps', 'transportPacketMode'].includes(key))) {
       throw new TypeError('Exchange accepts only explicit surfaceModels and prescribed edges');
     }
     const data = (key) => {
@@ -5859,6 +5976,28 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
     const materialData = record.caloricModule.resolveSphSpatialGasExchangeMaterials(
       record.caloricAuthority, { thermalMaterialTable: record.caloricThermalMaterialTable,
         surfaceModels: data('surfaceModels') });
+    const pressureWorkMode = Object.hasOwn(options, 'pressureWorkMode') ? data('pressureWorkMode') : 'prescribed';
+    if (!['prescribed', 'initial-cell-pressure'].includes(pressureWorkMode)) {
+      throw new TypeError('Unknown vapor exchange pressure-work mode');
+    }
+    const rateData = Object.hasOwn(options, 'rateModels')
+      ? record.caloricModule.resolveSphSpatialGasExchangeRates(record.caloricAuthority, {
+        thermalMaterialTable: record.caloricThermalMaterialTable,
+        surfaceModels: data('surfaceModels'), rateModels: data('rateModels') }) : null;
+    if (rateData && pressureWorkMode !== 'initial-cell-pressure') {
+      throw new TypeError('State-derived rates require original-cell pressure work');
+    }
+    const rateIntegration = Object.hasOwn(options, 'rateIntegration') ? data('rateIntegration') : 'initial-rate';
+    if (!['initial-rate', 'midpoint'].includes(rateIntegration) || (!rateData && rateIntegration !== 'initial-rate')) {
+      throw new TypeError('Rate integration requires state-derived rates and a supported method');
+    }
+    const rateSubsteps = Object.hasOwn(options, 'rateSubsteps') ? data('rateSubsteps') : 1;
+    if (!Number.isSafeInteger(rateSubsteps) || rateSubsteps < 1 || rateSubsteps > 1024
+        || (rateSubsteps & (rateSubsteps - 1)) !== 0 || (rateSubsteps !== 1 && rateIntegration !== 'midpoint')) {
+      throw new TypeError('Rate substeps require midpoint and a power of two from 1 through 1024');
+    }
+    const transportPacketMode = validateSphTransportPacketMode(Object.hasOwn(options, 'transportPacketMode')
+      ? data('transportPacketMode') : 'exact-rational');
     const edges = data('edges');
     // The lower encoder snapshots/validates edges before its first await.
     // Keep the exact data identity, not accessors that can retire a source.
@@ -5893,17 +6032,43 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
     releaseAerosolRead = parcels.releaseSphAerosolParcelRead;
     aerosolRead = pair.acquireAerosolRead();
     if (!aerosolRead) throw new TypeError('Exchange requires an existing exact retained aerosol population');
+    if (aerosolRead.exactQuantities) {
+      if (pair.acquireExactQuantityRead) {
+        currentModule = await import('./sphMlsMpmPostMechanicsClosure.js');
+        validate(); exactPostMechanicsRead = pair.acquireExactQuantityRead();
+      }
+      if (!exactPostMechanicsRead) exactParticleRead = acquireSphParticleExactMassRead(pair.sphParticleUpload,
+        record.device, { mlsMpmParticleUpload: pair.mlsMpmParticleUpload });
+    }
     validate();
+    let pressureGeometryWords = null;
+    if (pressureWorkMode === 'initial-cell-pressure') {
+      const fine = record.schroederSpatialEpochGeneration.mechanicsLevelViews[0].mechanicsFieldView;
+      const coarse = record.spatialGasGrid;
+      pressureGeometryWords = new Uint32Array(24);
+      pressureGeometryWords.set([record.gasFreeVolumeExecution.exactLevelCount, 0, fine.gridShift, 0,
+        ...fine.gridDims, coarse.gridShift, ...coarse.gridDims, 0,
+        ...record.gasControlVolumeDescriptor.boundsWords]);
+      new Float32Array(pressureGeometryWords.buffer)[1] = fine.gridSpacingM;
+    }
     owner = await encoder.runSphVaporAerosolExchangeCandidateGpu({ device: record.device,
       sourceStateBuffer: pair.sphParticleUpload.stateBuffer,
       sourceThermoBuffer: pair.sphParticleUpload.thermoBuffer,
       sourceMechanicsBuffer: pair.mlsMpmParticleUpload.mechanicsBuffer,
       particleCount: pair.read.particleCount, residentProductMass: pair.residentProductMass,
       productEventLiveCountDescriptor: record.productEventLiveCountDescriptor,
-      aerosolRead, eosControlBuffer: record.slot.controlBuffer,
+      aerosolRead, exactParticleRead, exactPostMechanicsRead, eosControlBuffer: record.slot.controlBuffer,
       compactRowsBuffer: record.slot.compactRowsBuffer, caloricRowsBuffer: record.slot.caloricRowsBuffer,
+      pressureCellsBuffer: record.slot.gasPressureCellsBuffer, pressureWorkMode,
+      pressureGeometryWords,
       compactCapacity: record.capacity, cellCapacity: record.capacity,
+      // Private normalized geometry used by this actual EOS directory. An
+      // exchange request cannot supply or override its own neighborhood size.
+      spatialGasCellSizeM: record.spatialGasGrid.gridSpacingM,
+      spatialGasConstantJPerMolK: record.gasConstantJPerMolK,
       executionGeneration: record.executionGeneration, materialRows: materialData.records,
+      rateRows: rateData?.records ?? null,
+      rateIntegration, rateSubsteps, transportPacketMode,
       edges: edgeCopy });
     validate();
     if (!owner.ready) {
@@ -5918,10 +6083,16 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
       kineticAuthorization: false, exchangeIntervalAdmitted: false, outerPublicationAdmitted: false,
       mechanicsContinuationAdmitted: false, pressureRequiresRefresh: true,
       scientificValidation: false, sourceMutation: false, epochIdentity: record.epochIdentity,
+      rateModel: rateData?.model ?? null, rateIntervalSeconds: owner.rateIntervalSeconds,
+      rateIntegration: owner.rateIntegration, rateSubsteps: owner.rateSubsteps, transportPacketMode: owner.transportPacketMode,
       executionGeneration: record.executionGeneration, sourceFamily: pair.read.sourceFamily,
       materialNames: materialData.materials, receipt: owner.receipt });
+    let currentExactSource = null;
+    if (exactPostMechanicsRead) currentExactSource = currentModule.resolveMlsMpmPostMechanicsExactGasRead(
+      exactPostMechanicsRead, { device: record.device });
     vaporAerosolCandidates.set(candidate, { owner, busy: false, releaseRequested: false,
-      releasePromise: null });
+      releasePromise: null, producerIssued: false, device: record.device,
+      sourcePair: pair, currentExactSource, edges: Object.freeze(edgeCopy) });
     record.exchangeCandidateIssued = true;
     owner = null;
     return candidate;
@@ -5932,9 +6103,62 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
     try { if (owner) await owner.release(); }
     finally {
       if (aerosolRead) releaseAerosolRead(aerosolRead);
+      if (exactParticleRead) await releaseSphParticleExactMassRead(exactParticleRead);
+      if (exactPostMechanicsRead) currentModule.releaseMlsMpmPostMechanicsExactGasRead(exactPostMechanicsRead);
       if (record.activeExchangeOperation === operation) record.activeExchangeOperation = null;
     }
   }
+}
+
+/** Retain this original completed producer for its actual current closure.
+ * This is a numerical stage read: it grants no kinetic interval or publication.
+ * Source identity is sealed while the current EOS pair is still live; subsequent
+ * reads own the completed outputs and do not depend on that predecessor fence.
+ */
+export function acquireSphSpatialVaporAerosolProducerRead(candidate, { device, closure } = {}) {
+  const record = vaporAerosolCandidates.get(candidate);
+  if (!record || record.device !== device || record.busy || record.releaseRequested || record.producerIssued
+      || !record.currentExactSource || !closure || record.sourcePair.sourceClosure !== closure) {
+    throw new TypeError('Exchange producer capture requires its original current closure and unused candidate');
+  }
+  record.sourcePair.validate();
+  const packet = record.sourcePair.sourcePacket, source = record.currentExactSource;
+  const hold = record.owner.retainProducer();
+  const value = Object.freeze({ device, closure, sourcePacket: packet,
+    sourceHistory: packet.residentProductMass, sourceInventoryGeneration: source.massRead.generation,
+    sourceParticleRead: source.sourceParticleRead, particleCount: packet.particleCount,
+    stateBuffer: hold.stateBuffer, thermoBuffer: hold.thermoBuffer, mechanicsBuffer: hold.mechanicsBuffer,
+    parcelBuffer: hold.parcelBuffer, endpoints: hold.exactQuantities.endpoints,
+    format: hold.exactQuantities.format, edges: record.edges });
+  const token = Object.freeze({ schema: 'peercompute.ulg.exact-vapor-exchange-producer-read.v1' });
+  vaporAerosolProducerReads.set(token, { candidate, record, hold, value, closed: false });
+  record.producerIssued = true;
+  return token;
+}
+
+export function resolveSphSpatialVaporAerosolProducerRead(token, { device } = {}) {
+  const read = vaporAerosolProducerReads.get(token);
+  if (!read || read.closed || read.value.device !== device) {
+    throw new TypeError('Unknown, copied, released or foreign exact exchange producer read');
+  }
+  read.hold.validate(); return read.value;
+}
+
+export function forkSphSpatialVaporAerosolProducerRead(token, { device } = {}) {
+  const value = resolveSphSpatialVaporAerosolProducerRead(token, { device });
+  const parent = vaporAerosolProducerReads.get(token);
+  // Forking must also remain possible after the public candidate closes.
+  const hold = parent.hold.retain();
+  const fork = Object.freeze({ schema: 'peercompute.ulg.exact-vapor-exchange-producer-read.v1' });
+  vaporAerosolProducerReads.set(fork, { candidate: parent.candidate, record: parent.record, hold, value, closed: false });
+  return fork;
+}
+
+export function releaseSphSpatialVaporAerosolProducerRead(token) {
+  const read = vaporAerosolProducerReads.get(token);
+  if (!read) throw new TypeError('Unknown exact exchange producer read release');
+  if (read.closed) return false;
+  read.closed = true; return read.hold.release();
 }
 
 /** Explicit native numerical oracle only; never a simulation readback loop. */

@@ -2,7 +2,8 @@ import {
   schroederAuthorityTextFingerprint,
   schroederAuthorityTypedArrayFingerprint
 } from './schroederAuthorityFingerprint.js';
-import { assertSphReactionGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
+import { assertSphReactionEnergyAuthority } from './sphReactionEnergyAuthority.js';
+import { importSphReferenceReactionTableColdInput } from './sphReferenceReactionTable.js';
 import {
   SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT,
   assertSphReactionMotionEnvelopeRulePrefix,
@@ -870,8 +871,15 @@ function cloneSafeInputFingerprint(value, family) {
 
 function authorizedWatchReactionTable(
   reactionTable,
-  watchReactionTableSource = null
+  watchReactionTableSource = null,
+  thermalMaterialTable = null
 ) {
+  // Schedule descriptors are clone-safe cold law snapshots. Recompile their
+  // explicit recipe and compare all bytes; a copied token alone never grants
+  // permission for an unknown energy suffix.
+  if (reactionTable?.coldReferenceRecipe) {
+    reactionTable = importSphReferenceReactionTableColdInput(reactionTable, thermalMaterialTable);
+  }
   if (
     !plainObject(reactionTable)
     || reactionTable.schema !== ULG_SPH_GPU_REACTION_TABLE_SCHEMA
@@ -972,8 +980,11 @@ function authorizedWatchReactionTable(
   }
   // Admit only the typed, exact phase-law tail; the legacy sections remain
   // byte-identical and arbitrary trailing bytes are still rejected below.
+  let hasEnergyTail = false;
   try {
-    assertSphReactionGasLayout(reactionTable);
+    // This checks the gas ABI too, and admits the longer energy suffix only
+    // when its original private compiler snapshot matches every byte.
+    hasEnergyTail = assertSphReactionEnergyAuthority(reactionTable);
   } catch (error) {
     throw new RangeError(`the authorized reaction watch gas layout is inconsistent: ${error.message}`, { cause: error });
   }
@@ -983,6 +994,7 @@ function authorizedWatchReactionTable(
     }
     combinedOffset += reactionTable.gasConstitutiveRecords.length;
   }
+  if (hasEnergyTail) combinedOffset = combined.length;
   if (
     combinedOffset !== combined.length
     || combinedOffset % 4 !== 0
@@ -1068,7 +1080,8 @@ export function createSchroederTargetScheduleTableFingerprints({
     ? null
     : authorizedWatchReactionTable(
         watchReactionTable,
-        watchReactionTableSource
+        watchReactionTableSource,
+        resident.thermalMaterialTable ?? null
       );
   return deepFreeze({
     schema: ULG_SCHROEDER_TARGET_SCHEDULE_TABLE_FINGERPRINTS_SCHEMA,

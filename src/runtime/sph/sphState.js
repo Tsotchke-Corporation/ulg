@@ -29,6 +29,9 @@ export function createSphState({ particles = [], smoothingLengthM, dimension = 3
       x: assertVector(p.x, dimension, `particles[${index}].x`),
       v: assertVector(p.v ?? new Array(dimension).fill(0), dimension, `particles[${index}].v`),
       massKg: Number(p.massKg),
+      ...(Object.hasOwn(p, 'mpmJ') ? { mpmJ: p.mpmJ } : {}),
+      ...(Object.hasOwn(p, 'mpmVolume0') ? { mpmVolume0: p.mpmVolume0 } : {}),
+      ...(Object.hasOwn(p, 'mpmF') ? { mpmF: Array.from(p.mpmF) } : {}),
       specificInternalEnergyJPerKg: Object.hasOwn(p, 'phaseCaloric')
         ? p.specificInternalEnergyJPerKg : Number(p.specificInternalEnergyJPerKg ?? 0),
       ...(Object.hasOwn(p, 'phaseCaloric') ? { phaseCaloric: clonePhaseCaloric(p.phaseCaloric) } : {})

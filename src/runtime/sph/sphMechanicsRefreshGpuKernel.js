@@ -4,6 +4,8 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { createSphExactMechanicsRefreshWgsl } from './sphExactMechanicsRefreshWgsl.js';
+import { prepareSphExactMechanicsRefresh } from './sphExactMechanicsRefreshGpu.js';
 import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
@@ -49,6 +51,7 @@ export const ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA = 'peercompute.u
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const PHASE_CHANGE_REST_VOLUME_RATIO_RESET_THRESHOLD = 2;
+const exactRefreshPreparations = new WeakMap();
 
 // Bookkeeping only: each standard runner's private map is the actual issuer.
 // A seal created directly with this helper cannot authenticate a stage.
@@ -740,7 +743,9 @@ export function refreshMlsMpmMechanicsCpu({
   });
 }
 
-export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
+export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
+  const exact = exactRefreshPreparations.get(args) ?? null;
+  const {
   device,
   sphParticleState,
   mlsMpmParticleState,
@@ -753,7 +758,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
   sourceMechanicsBuffer = null,
   retainOutputParticleBuffers = false,
   readbackMode = FULL_READBACK_MODE
-} = {}) {
+  } = args;
   assertRefreshInputs({ sphParticleState, mlsMpmParticleState, mechanicsMaterialTable });
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmMechanicsRefreshWebGpu requires a WebGPU-like device');
@@ -813,15 +818,18 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       | GPU_BUFFER_USAGE.COPY_DST
       | GPU_BUFFER_USAGE.COPY_SRC
   });
+  if (exact?.retainAcceptance) exact.retainAcceptanceBuffer(authorityValidationBuffer);
   device.queue.writeBuffer(
     authorityValidationBuffer,
     0,
     new Uint32Array([0])
   );
+  const refreshCode = exact ? createSphExactMechanicsRefreshWgsl() : mlsMpmMechanicsRefreshWgsl;
+  const extraBindings = exact ? [computeBufferBinding(8, 'read-only-storage')] : [];
   const refreshPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v5-transactional-main',
+    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}`,
     label: 'ulg-mls-mpm-mechanics-refresh',
-    code: mlsMpmMechanicsRefreshWgsl,
+    code: refreshCode,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -831,13 +839,14 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'uniform'),
       computeBufferBinding(6, 'read-only-storage'),
-      computeBufferBinding(7, 'storage')
+      computeBufferBinding(7, 'storage'),
+      ...extraBindings
     ]
   });
   const commitPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-mls-mpm-mechanics-refresh.v5-transactional-commit',
+    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-commit${exact ? '-exact-quantities-v1' : ''}`,
     label: 'ulg-mls-mpm-mechanics-refresh-commit',
-    code: mlsMpmMechanicsRefreshWgsl,
+    code: refreshCode,
     entryPoint: 'commit_or_restore',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -847,7 +856,8 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       computeBufferBinding(4, 'storage'),
       computeBufferBinding(5, 'uniform'),
       computeBufferBinding(6, 'read-only-storage'),
-      computeBufferBinding(7, 'storage')
+      computeBufferBinding(7, 'storage'),
+      ...extraBindings
     ]
   });
   const bindGroupEntries = [
@@ -858,8 +868,10 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
     { binding: 4, resource: { buffer: outMechanicsBuffer } },
     { binding: 5, resource: { buffer: paramsBuffer } },
     { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } },
-    { binding: 7, resource: { buffer: authorityValidationBuffer } }
+    { binding: 7, resource: { buffer: authorityValidationBuffer } },
+    ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : [])
   ];
+  exact?.bind(authorityValidationBuffer);
   const bindGroup = device.createBindGroup({
     layout: refreshPipeline.bindGroupLayout,
     entries: bindGroupEntries
@@ -886,7 +898,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       !borrowedThermoBuffer ? thermoBuffer : null,
       !borrowedMechanicsBuffer ? mechanicsBuffer : null,
       paramsBuffer,
-      authorityValidationBuffer,
+      exact?.retainAcceptance ? null : authorityValidationBuffer,
       !retainOutputParticleBuffers ? outMechanicsBuffer : null
     ]) {
       try {
@@ -917,11 +929,12 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
       }
     }
     if (firstError) throw firstError;
+    exact?.cleanupTransient();
     cleanupComplete = true;
   };
   const result = outputEnvelope({
     backend: 'webgpu',
-    encodedDispatchCount: 2,
+    encodedDispatchCount: exact ? 8 : 2,
     sphParticleState,
     mlsMpmParticleState,
     mechanicsMaterialTable,
@@ -954,19 +967,23 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
           unknownSources: ['full-readback-pending']
         }),
     destroyOutputParticleBuffers() {
-      outMechanicsBuffer.destroy?.();
+      destroyBufferOnce(outMechanicsBuffer);
+      // The exchange capture retains its acceptance word until its last
+      // consumer releases it; a preserved mechanics buffer cannot leak it.
+      exact?.destroyOutput();
     }
   });
   return {
     schema: 'peercompute.ulg.mls-mpm-mechanics-refresh-encoder-stage.v0',
     status: 'mechanics-refresh-encoder-stage-ready',
     backend: 'webgpu',
-    encodedDispatchCount: 2,
+    encodedDispatchCount: exact ? 8 : 2,
     readbackMode,
     result,
     mechanicsBuffer: outMechanicsBuffer,
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
     encode(encoder) {
+      exact?.encode(encoder);
       const pass = encoder.beginComputePass();
       pass.setPipeline(refreshPipeline.pipeline);
       pass.setBindGroup(0, bindGroup);
@@ -979,12 +996,38 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage({
         Math.ceil(sphParticleState.particleCount / 64)
       );
       commitPass.end();
+      exact?.encode(encoder, true);
     },
     cleanupSubmittedWork: cleanup
   };
 }
 
 export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
+  if (args.exactReactionResult == null && args.exactReactionSourceCapture == null
+      && args.exactThermalResult == null && args.exactThermalSourceCapture == null
+      && args.exactVaporProducerRead == null && args.exactPhaseResult == null && args.exactPhaseSourceCapture == null) {
+    return runMechanicsRefreshWebGpu(args);
+  }
+  const capturedArgs = { ...args };
+  const exact = await prepareSphExactMechanicsRefresh(capturedArgs);
+  exactRefreshPreparations.set(capturedArgs, exact);
+  try {
+    return await runMechanicsRefreshWebGpu(capturedArgs);
+  } catch (error) {
+    const cleanup = exact.abandon().then(() => {
+      exact.stage?.cleanupSubmittedWork();
+      exact.stage?.result.destroyOutputParticleBuffers();
+    });
+    void cleanup.catch(() => {});
+    error.exactMechanicsRefreshCleanupCompletion = cleanup;
+    throw error;
+  } finally {
+    exactRefreshPreparations.delete(capturedArgs);
+  }
+}
+
+async function runMechanicsRefreshWebGpu(args) {
+  const exact = exactRefreshPreparations.get(args) ?? null;
   const token = args.postMechanicsSourceCapture ?? null;
   if (token) {
     if (mechanicsSourceCaptures.has(token)) throw new Error('Mechanics source capture cannot replay');
@@ -996,6 +1039,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
     mlsMpmParticleState: args.mlsMpmParticleState, sourceStateBuffer: args.sourceStateBuffer,
     sourceThermoBuffer: args.sourceThermoBuffer, sourceMechanicsBuffer: args.sourceMechanicsBuffer } : null;
   const stage = createMlsMpmMechanicsRefreshWebGpuEncoderStage(args);
+  if (exact) exact.stage = stage;
   const {
     device,
     mlsMpmParticleState,
@@ -1012,6 +1056,7 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   const encoder = device.createCommandEncoder();
   stage.encode(encoder);
   const commandBuffer = encoder.finish();
+  exact?.markSubmitted();
   let submittedWorkCleanupClaim = null;
   let submittedWorkFinalConsumer = null;
   if (authenticatedQueueOrderedRoute) {
@@ -1149,8 +1194,17 @@ export async function runMlsMpmMechanicsRefreshWebGpu(args = {}) {
   if (!retainOutputParticleBuffers) {
     stage.result.mechanicsBuffer = null;
   }
-  if (token) mechanicsSourceCaptures.set(token,
-    createPostMechanicsStageOutputSeal(stage.result, capturedInputs));
+  if (token) {
+    const base = createPostMechanicsStageOutputSeal(stage.result, capturedInputs,
+      { onLastRelease: exact?.releaseSource ?? null });
+    mechanicsSourceCaptures.set(token, exact ? Object.freeze({ ...base,
+      exactMechanics: Object.freeze({ quantityBuffer: exact.quantityBuffer, quantityLayout: exact.quantityLayout,
+        format: exact.format, source: exact.source }),
+      sourceCleanupCompletion: exact.sourceCleanupCompletion,
+      transferExactQuantities() { base.validate(); exact.validateOutput(); exact.transferQuantities(); },
+      validate() { base.validate(); exact.validateOutput(); return true; }
+    }) : base);
+  }
   return stage.result;
 }
 

@@ -1317,7 +1317,10 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
     thermalMaterialTable: args.thermalMaterialTable, mechanicsMaterialTable: args.mechanicsMaterialTable,
     mlsMpmParticleState: args.mlsMpmParticleState, sourceStateBuffer: args.sourceStateBuffer,
     sourceThermoBuffer: args.sourceThermoBuffer, sourceMechanicsBuffer: args.sourceMechanicsBuffer } : null;
-  const stage = createSphPhaseCarrierTransferWebGpuEncoderStage(args);
+  const exactRequested = args.exactThermalResult != null || args.exactReactionResult != null;
+  const stage = exactRequested
+    ? await (await import('./sphExactPhaseCarrierStageGpu.js')).prepareSphExactPhaseCarrierStage(args)
+    : createSphPhaseCarrierTransferWebGpuEncoderStage(args);
   const {
     device,
     retainOutputParticleBuffers = false,
@@ -1404,6 +1407,7 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
   } else {
     device.queue.submit([commandBuffer]);
   }
+  stage.markSubmitted?.();
   if (!noFullReadback) {
     const [stateBytes, thermoBytes, mechanicsBytes, evidenceBytes] = await Promise.all([
       readBuffer(device, stage.stateBuffer, stage.stateBufferByteLength, 'ulg-phase-transfer-state-readback'),
@@ -1508,8 +1512,23 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
     stage.result.thermoBuffer = null;
     stage.result.mechanicsBuffer = null;
   }
-  if (token) phaseSourceCaptures.set(token,
-    createPostMechanicsStageOutputSeal(stage.result, capturedInputs));
+  if (token) {
+    const base = createPostMechanicsStageOutputSeal(stage.result, capturedInputs, {
+      onLastRelease: stage.exactPhase ? () => {
+        void Promise.all([stage.releaseSource(), stage.releaseInventory(), stage.releaseQuantityStorage()]).catch(() => {});
+      } : null
+    });
+    phaseSourceCaptures.set(token, stage.exactPhase ? Object.freeze({ ...base, exactPhase: stage.exactPhase,
+      validate() { base.validate(); stage.validateOutput(); return true; } }) : base);
+    if (stage.exactPhase) {
+      try { await stage.completeInventory(stage.result, token); }
+      catch (error) {
+        phaseSourceCaptures.delete(token); base.release();
+        const cleanup = stage.abandon(); void cleanup.catch(() => {});
+        error.exactPhaseCleanupCompletion = cleanup; throw error;
+      }
+    }
+  }
   return stage.result;
 }
 

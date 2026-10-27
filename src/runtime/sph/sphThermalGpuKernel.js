@@ -1,3 +1,4 @@
+import { prepareSphExactThermalQuantities, appendSphExactThermalQuantityWgsl } from './sphExactThermalQuantityGpu.js';
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
 import { assertSphLegacyMassPathAllowed, markSphExactMassDerivedBuffers,
   forkSphParticleExactMassRead, releaseSphParticleExactMassRead,
@@ -65,16 +66,18 @@ import {
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES,
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
   SCHROEDER_SPATIAL_THERMAL_CONSUMER,
-  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
-  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
-  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS,
-  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION,
   ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_BUFFER_SCHEMA,
   ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA,
   createClassicThermalProposalWebGpuEncoderStage,
   createSchroederSpatialMatchedTimeThermalProposalEncoderStage,
   isLiveThermalProposalSourceAuthority
 } from './schroederSpatialThermalProposalsGpu.js';
+import {
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS,
+  SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION
+} from '../../../ulg-gpu-abi/src/schroederSpatialThermalProposalConstants.js';
 import {
   isSchroederSpatialExactNearResidentConsumerBinding,
   resolveSchroederSpatialExactNearConsumerGeneration
@@ -807,6 +810,7 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
       materialId,
       segmentOffset,
       segmentCount: materialSegments.length,
+      molarMassKgPerMol: Number(properties.molarMassKgPerMol),
       emissivityGray,
       ...carrier,
       phaseNames: [...new Set(materialSegments.map(phaseNameOfSegment))],
@@ -841,6 +845,10 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
     segmentStrideFloats: SPH_THERMAL_PHASE_SEGMENT_FLOATS,
     records: new Float32Array(records),
     segments: new Float32Array(segments),
+    // Typed immutable-input evidence for nonreacting carriers as well as
+    // reactants. Entity counts never reconstruct a molecular mass identity.
+    molarMassIdentities: new Uint32Array(metadata.flatMap(entry => [entry.materialId,
+      new Uint32Array(new Float32Array([entry.molarMassKgPerMol]).buffer)[0]])),
     metadata,
     segmentMetadata,
     scientificValidation: false,
@@ -3011,7 +3019,15 @@ export function resolveThermalResponseGraphArtifacts({
       || !same(resolvedPhaseResponseTable.responses, expectedResponses.responses)
       || !same(resolvedPhaseResponseTable.responseThermalConductivities,
         expectedResponses.responseThermalConductivities)) {
-      throw new TypeError('Inconsistent phase-specific caloric thermal artifacts');
+      const mismatches = [
+        !bankMatches(resolvedGraphBank) && 'selected graph bank',
+        !bankMatches(resolvedGraphSet.graphBank) && 'graph-set bank',
+        !individualGraphsMatch && 'individual graphs',
+        ...['materialCount', 'responseCount'].filter(key => resolvedPhaseResponseTable[key] !== expectedResponses[key]),
+        ...['records', 'responses', 'responseThermalConductivities']
+          .filter(key => !same(resolvedPhaseResponseTable[key], expectedResponses[key]))
+      ].filter(Boolean);
+      throw new TypeError(`Inconsistent phase-specific caloric thermal artifacts: ${mismatches.join(', ')}`);
     }
   }
   return {
@@ -3606,7 +3622,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   // Classic execution uses them only to enumerate the common v2 pair law;
   // overflow or unsupported support radii fall back inside the proposal pass.
   neighborBins = null
-} = {}, exactCapture = null) {
+} = {}, exactCapture = null, exactQuantities = null) {
   if (!exactCapture) assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Thermal continuation');
   assertPackedSphParticleState(sphParticleState, exactCapture);
   assertSphCondensableInitializationMatches(sphParticleState, null, thermalMaterialTable);
@@ -3873,9 +3889,9 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   }
 
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-sph-thermal-step.v7',
+    cacheKey: exactQuantities ? 'ulg-sph-thermal-step-exact-quantity.v1' : 'ulg-sph-thermal-step.v7',
     label: 'ulg-sph-thermal-step',
-    code: sphThermalStepWgsl,
+    code: exactQuantities ? appendSphExactThermalQuantityWgsl(sphThermalStepWgsl) : sphThermalStepWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -3888,7 +3904,8 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       computeBufferBinding(7, 'storage'),
       computeBufferBinding(8, 'uniform'),
       computeBufferBinding(9, 'read-only-storage'),
-      computeBufferBinding(10, 'read-only-storage')
+      computeBufferBinding(10, 'read-only-storage'),
+      ...(exactQuantities ? [computeBufferBinding(11, 'storage'), computeBufferBinding(12, 'storage')] : [])
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -3904,9 +3921,19 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       { binding: 7, resource: { buffer: outThermoBuffer } },
       { binding: 8, resource: { buffer: paramsBuffer } },
       { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } },
-      { binding: 10, resource: { buffer: spatialInputBound ? spatialInputBuffer : binPlaceholderBuffer } }
+      { binding: 10, resource: { buffer: spatialInputBound ? spatialInputBuffer : binPlaceholderBuffer } },
+      ...(exactQuantities ? [{ binding: 11, resource: { buffer: exactQuantities.updates } },
+        { binding: 12, resource: { buffer: exactQuantities.validationBuffer } }] : [])
     ]
   });
+  const exactFinalizers = exactQuantities ? ['finalize_exact_thermal', 'restore_rejected_exact_thermal'].map(entryPoint => {
+    const { pipeline: finalizer } = createCachedExplicitComputePipeline(device, {
+      cacheKey: `ulg-${entryPoint}-v1`, label: `ulg-${entryPoint}`, entryPoint,
+      code: appendSphExactThermalQuantityWgsl(sphThermalStepWgsl),
+      bindings: Array.from({ length: 13 }, (_, binding) => computeBufferBinding(binding,
+        binding === 8 ? 'uniform' : [6, 7, 11, 12].includes(binding) ? 'storage' : 'read-only-storage')) });
+    return finalizer;
+  }) : [];
   const state = new Float32Array();
   const thermo = new Float32Array();
   let commonResourcesCleaned = false;
@@ -3918,6 +3945,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   const cleanupCommonResources = () => {
     if (commonResourcesCleaned) return false;
     commonResourcesCleaned = true;
+    exactQuantities?.cleanupTransient();
     classicThermalProposalStage?.cleanupSubmittedWork();
     if (matchedTimeThermalProposalStage) {
       if (matchedTimeThermalProposalStage.submissionObserved) {
@@ -3941,6 +3969,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     if (outputParticleBuffersDestroyed) return false;
     outputParticleBufferDestroyScheduled = false;
     outputParticleBuffersDestroyed = true;
+    exactQuantities?.destroyOutput();
     outStateBuffer.destroy?.();
     outThermoBuffer.destroy?.();
     return true;
@@ -4144,7 +4173,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     ?? classicThermalProposalStage?.proposalDispatchCount
     ?? 0
   );
-  const encodedDispatchCount = encodedProposalDispatchCount + 1;
+  const encodedDispatchCount = encodedProposalDispatchCount + 1 + (exactQuantities ? exactQuantities.encodedDispatchCount + 2 : 0);
   result.encodedProposalDispatchCount = encodedProposalDispatchCount;
   result.encodedDispatchCount = encodedDispatchCount;
   return {
@@ -4161,6 +4190,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     stateBufferByteLength: outStateByteLength,
     thermoBufferByteLength: outThermoByteLength,
     encode(encoder) {
+      exactQuantities?.clear(encoder);
       matchedTimeThermalProposalStage?.encode(encoder);
       classicThermalProposalStage?.encode(encoder);
       const pass = encoder.beginComputePass({
@@ -4170,6 +4200,14 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
       pass.end();
+      if (exactQuantities) {
+        exactQuantities.encode(encoder);
+        for (const finalizer of exactFinalizers) {
+          const exactPass = encoder.beginComputePass(); exactPass.setPipeline(finalizer);
+          exactPass.setBindGroup(0, bindGroup); exactPass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64)); exactPass.end();
+        }
+        exactQuantities.commit(encoder);
+      }
     },
     markSubmittedWork() {
       thermalPrimarySubmissionObserved = true;
@@ -4285,6 +4323,7 @@ export async function acquireSphThermalExactMassSourceCapture(result, token, exp
       if (g2p.sourceMlsUpload !== record.mlsMpmParticleUpload || g2p.transaction !== record.transaction
           || g2p.generation !== record.generation || !Object.is(g2p.dt, record.requestedDtSeconds)
           || g2p.stateBuffer !== record.inputStateBuffer || g2p.thermoBuffer !== record.inputThermoBuffer
+          || (g2p.mechanicsMaterialTable ?? null) !== record.mechanicsMaterialTable
           || g2p.mechanicsBuffer !== record.mechanicsBuffer
           || !validateSphParticleExactMassRead(sourceRead,
             { device: record.device, sourceSphUpload: sourceRead.sourceSphUpload })) {
@@ -4293,10 +4332,11 @@ export async function acquireSphThermalExactMassSourceCapture(result, token, exp
       return true;
     };
     validate();
-    return Object.freeze({ device: record.device, sourceRead,
+    return Object.freeze({ device: record.device, sourceRead, quantities: record.seal.exactThermal ?? null,
       sphParticleUpload: record.sphParticleUpload, mlsMpmParticleUpload: record.mlsMpmParticleUpload,
       sourceSphUpload: record.sphParticleUpload, sourceMlsUpload: record.mlsMpmParticleUpload,
       sphParticleState: record.sphParticleState, thermalMaterialTable: record.thermalMaterialTable,
+      mechanicsMaterialTable: record.mechanicsMaterialTable,
       transaction: record.transaction, generation: record.generation,
       stateBuffer: record.seal.output.stateBuffer, thermoBuffer: record.seal.output.thermoBuffer,
       mechanicsBuffer: record.mechanicsBuffer, particleCount: sourceRead.particleCount,
@@ -4393,7 +4433,7 @@ export async function runSphThermalStepWebGpu(args = {}) {
       sphParticleState: args.sphParticleState, thermalMaterialTable: args.thermalMaterialTable,
       g2pResult: args.exactMassG2pResult, transaction: capture.transaction, generation: capture.generation,
       inputStateBuffer: capture.stateBuffer, inputThermoBuffer: capture.thermoBuffer,
-      mechanicsBuffer: capture.mechanicsBuffer, ...duration,
+      mechanicsBuffer: capture.mechanicsBuffer, mechanicsMaterialTable: capture.mechanicsMaterialTable ?? null, ...duration,
       validate() { seal.validate(); validateTable(); validateState(); return true; }
     });
     provenanceIssued = true;
@@ -4429,7 +4469,11 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null, onLas
     thermalMaterialTable: args.thermalMaterialTable,
     sourceStateBuffer: args.sourceStateBuffer, sourceThermoBuffer: args.sourceThermoBuffer,
     dtSeconds: args.dtS } : null;
-  const stage = createSphThermalStepWebGpuEncoderStageImpl(args, exactCapture);
+  const exactQuantities = exactCapture?.quantities
+    ? await prepareSphExactThermalQuantities({ device: args.device, capture: exactCapture }) : null;
+  let stage;
+  try { stage = createSphThermalStepWebGpuEncoderStageImpl(args, exactCapture, exactQuantities); }
+  catch (error) { exactQuantities?.abandon(); throw error; }
   const { device, sphParticleState, retainOutputParticleBuffers = false } = args;
   const noFullReadback = stage.readbackMode === NO_FULL_READBACK_MODE;
   let submitted = false, submitAttempted = false;
@@ -4489,8 +4533,15 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null, onLas
       stage.result.stateBuffer = null;
       stage.result.thermoBuffer = null;
     }
-    if (token) thermalSourceCaptures.set(token,
-      createPostMechanicsStageOutputSeal(stage.result, capturedInputs, { onLastRelease: onLastSourceRelease }));
+    if (token) {
+      const seal = createPostMechanicsStageOutputSeal(stage.result, capturedInputs, { onLastRelease() {
+        onLastSourceRelease?.();
+        if (exactQuantities) void deferConfirmedSubmittedWorkCleanup(device, exactQuantities.destroyOutput).catch(() => {});
+      } });
+      thermalSourceCaptures.set(token, exactQuantities ? Object.freeze({ ...seal,
+        exactThermal: Object.freeze({ quantityBuffer: exactQuantities.quantityBuffer, quantityLayout: exactQuantities.quantityLayout,
+          format: exactQuantities.format, updates: exactQuantities.updates, validationBuffer: exactQuantities.validationBuffer }) }) : seal);
+    }
     return stage.result;
   } catch (error) {
     if (exactCapture && submitAttempted) {

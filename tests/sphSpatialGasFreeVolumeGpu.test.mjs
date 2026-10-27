@@ -744,6 +744,25 @@ test('gas free-volume runtime retains fixed arenas and fails closed before encod
   assert.ok(fake.createdBuffers.every((buffer) => buffer.destroyCount === 1));
 });
 
+test('gas free-volume rejects unissued history inputs before mutating the encoder or occupying an arena', () => {
+  const fake = createFakeDevice(), authority = createLiveGasFreeVolumeAuthority(fake);
+  const runtime = createSphSpatialGasFreeVolumeGpu(fake.device, {
+    cellCapacity: authority.generation.execution.cellCapacity,
+    fineFieldCapacity: authority.generation.phaseVolumeMoment.fieldCapacity, arenaCount: 1
+  });
+  const encoder = createFakeCommandEncoder();
+  assert.throws(() => encodeSphSpatialGasFreeVolumeGpu(runtime, encoder, {
+    gasDirectory: authority.generation.execution, generationReadFamily: authority.generationReadFamily,
+    grid: authority.grid, boxMinM: [0, 0, 0], boxMaxM: [2, 2, 2], retainedHistoryInput: Object.freeze({})
+  }), /history.*input/i);
+  assert.equal(encoder.events.length, 0);
+  assert.equal(activeSphSpatialGasFreeVolumeExecutionCount(runtime), 0);
+  const execution = encodeGasFreeVolume(runtime, authority);
+  releaseSphSpatialGasFreeVolumeExecution(runtime, execution, { discardedEncoder: true });
+  destroySphSpatialGasFreeVolumeGpu(runtime);
+  releaseSchroederSpatialEpochGenerationConsumerLease(authority.generationReadFamily, { discardedEncoder: true });
+});
+
 test('gas free-volume shares unchanged kernels across capacities and labels, not device or arena state', () => {
   const fake = createFakeDevice();
   const code = createSphSpatialGasFreeVolumeWgsl(

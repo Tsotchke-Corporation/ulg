@@ -1257,6 +1257,28 @@ test('retained gas union rejects same- and cross-family source buffer aliases be
   );
 });
 
+test('current gas lifetime deferral requires a genuine private source pair before GPU work', async () => {
+  const { device, instrumentation } = fakeDevice();
+  const occupancy = retainedGasOccupancyFixture(device);
+  const product = retainedProductEventSource(device, 1);
+  const submits = instrumentation.submissions.length;
+  const rejected = await runSphSpatialGasLedgerEosRetainedWebGpu({
+    device, residentProductMass: product,
+    sphParticleUpload: occupancy.sphParticleUpload,
+    mlsMpmParticleUpload: occupancy.mlsMpmParticleUpload,
+    schroederLevelAssignment: occupancy.levelAssignment,
+    ...retainedGasAuthorityArgs(occupancy),
+    postMechanicsGasSource: Object.freeze({ schema: 'peercompute.ulg.post-mechanics-gas-source.v1' })
+  });
+  assert.equal(rejected.status, 'spatial-gas-ledger-eos-rejected-particle-product-pair');
+  assert.match(rejected.reason, /exact live private source/);
+  assert.equal(product.__ulgActiveBorrowCount, 0);
+  assert.equal(occupancy.sphParticleUpload.__ulgActiveBorrowCount ?? 0, 0);
+  assert.equal(instrumentation.submissions.length, submits);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device), false);
+  await releaseOccupancyFixture(device, occupancy);
+});
+
 test('opaque retained gas ownership supports non-extensible GPUBuffers without public destroy patching', async () => {
   const { device, instrumentation } = fakeDevice();
   const createBuffer = device.createBuffer.bind(device);

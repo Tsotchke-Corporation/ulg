@@ -1,4 +1,4 @@
-import { assertSphLegacyMassPathAllowed } from './sphGpuBuffers.js';
+import { assertSphLegacyMassPathAllowed, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import {
   ULG_SPH_AEROSOL_PARCEL_SCHEMA,
   ULG_SPH_AEROSOL_BUDGET_SCHEMA,
@@ -25,6 +25,8 @@ import { validateSchroederSpatialEpochTransactionSourceFamily } from './schroede
 import { validateSchroederSpatialAerosolPublicationWindow } from './schroederSpatialSuccessorSourceFamily.js';
 import { sphAerosolSourceFamily } from './sphAerosolSpatialBinding.js';
 import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from './sphMechanicsMaterialTable.js';
+import { encodeSphExactAerosolInitialQuantities, sphExactAerosolQuantityLayout } from './sphExactAerosolQuantities.js';
+import { validateSphExactMassFormat } from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
 
 const FAMILIES = new WeakMap();
 const PARCEL_READS = new WeakMap();
@@ -128,17 +130,22 @@ function retireFamily(record) {
  * provenance or density cannot be repaired with an optical/render sample count.
  * Condensation/extraction must later create a paired conservative successor.
  */
-export function createSphAerosolParcelFamilyWebGpu({ device, capacity, parcels = [], provenance } = {}) {
+export function createSphAerosolParcelFamilyWebGpu({ device, capacity, parcels = [], provenance, exactMass = null } = {}) {
   requireDevice(device);
   uint(capacity, 'aerosol capacity', 0xffffff);
   if (capacity === 0) throw new RangeError('aerosol capacity must be positive');
   if (!Array.isArray(parcels) || parcels.length > capacity) throw new RangeError('initial population exceeds capacity');
+  const exactFormat = exactMass == null ? null : validateSphExactMassFormat(exactMass.format);
   if (provenance?.kind !== 'initial-conditions' || typeof provenance.reference !== 'string'
       || !provenance.reference.trim()) throw new TypeError('explicit initial-condition provenance is required');
   const byteLength = capacity * SPH_AEROSOL_PARCEL_BYTES;
   const maximum = Math.min(device.limits?.maxBufferSize ?? Infinity,
     device.limits?.maxStorageBufferBindingSize ?? Infinity);
   if (byteLength > maximum) throw new RangeError('aerosol capacity exceeds device buffer limits');
+  if (exactFormat && sphExactAerosolQuantityLayout(exactFormat, capacity).byteLength > maximum) {
+    throw new RangeError('Exact aerosol quantities exceed device buffer limits');
+  }
+  const coldMasses = exactFormat ? Array(capacity).fill(0) : null;
   const bytes = new ArrayBuffer(byteLength);
   const floats = new Float32Array(bytes), words = new Uint32Array(bytes);
   const slots = new Set(), ids = new Set(), nucleusIds = new Set();
@@ -163,7 +170,13 @@ export function createSphAerosolParcelFamilyWebGpu({ device, capacity, parcels =
       throw new RangeError('initial aerosol requires material identity and condensed phase');
     }
     const offset = slot * SPH_AEROSOL_PARCEL_WORDS;
-    floats.set([...vector(parcel.positionM, 'position'), physicalFloat(parcel.massKg, 'mass', true),
+    const massProperty = Object.getOwnPropertyDescriptor(parcel, 'massKg');
+    if (exactFormat && (!massProperty || !Object.hasOwn(massProperty, 'value'))) {
+      throw new TypeError('Exact aerosol initial mass must be explicit own data');
+    }
+    const massKg = exactFormat ? massProperty.value : parcel.massKg;
+    if (coldMasses) coldMasses[slot] = massKg;
+    floats.set([...vector(parcel.positionM, 'position'), physicalFloat(massKg, 'mass', true),
       ...vector(parcel.velocityMPerS, 'velocity'), physicalFloat(parcel.specificInternalEnergyJPerKg, 'specific internal energy'),
       physicalFloat(parcel.temperatureK, 'temperature', true),
       physicalFloat(parcel.condensedDensityKgM3, 'condensed density', true), 0, 0], offset);
@@ -176,14 +189,25 @@ export function createSphAerosolParcelFamilyWebGpu({ device, capacity, parcels =
     words[offset + 22] = 1;
     words[offset + 23] = 1;
   }
+  const exactSeed = exactFormat ? encodeSphExactAerosolInitialQuantities({ format: exactFormat,
+    capacity, massesKg: coldMasses, parcelWords: words }) : null;
+  if (exactSeed && exactSeed.layout.byteLength > maximum) {
+    throw new RangeError('Exact aerosol quantities exceed device buffer limits');
+  }
   const resources = [], temporaries = [];
   const dispatch = linearDispatch(Math.ceil(capacity / 64), device);
   let submissionStarted = false;
   try {
     const buffer = allocate(device, resources, 'ulg-aerosol-initial-population', byteLength, STORAGE | COPY_SRC | COPY_DST);
     const params = allocate(device, temporaries, 'ulg-aerosol-initial-params', 16, UNIFORM | COPY_DST);
+    const quantityBuffer = exactSeed ? allocate(device, resources, 'ulg-aerosol-initial-exact-quantities',
+      exactSeed.layout.byteLength, STORAGE | COPY_SRC | COPY_DST) : null;
+    const exactQuantities = exactSeed ? Object.freeze({ format: exactFormat, quantityBuffer,
+      quantityLayout: exactSeed.layout }) : null;
+    submissionStarted = true;
     device.queue.writeBuffer(buffer, 0, bytes);
     device.queue.writeBuffer(params, 0, new Uint32Array([0, capacity, 1, 0]));
+    if (exactSeed) device.queue.writeBuffer(quantityBuffer, 0, exactSeed.words);
     const info = createCachedExplicitComputePipeline(device, {
       cacheKey: 'ulg-aerosol-initialize.v0', label: 'ulg-aerosol-initialize',
       code: sphAerosolParcelInitializeWgsl, entryPoint: 'initialize_aerosol',
@@ -199,13 +223,14 @@ export function createSphAerosolParcelFamilyWebGpu({ device, capacity, parcels =
     const command = encoder.finish();
     submissionStarted = true;
     device.queue.submit([command]);
-    const record = { device, buffer, resources, capacity, generation: 0,
+    const record = { device, buffer, resources, capacity, generation: 0, exactQuantities,
       population, ids, nucleusIds, extractionPending: null, successorAdopted: false,
       releaseRequested: false, retirementScheduled: false, borrows: 0, lost: false, quarantined: false };
     afterQueue(device, () => destroy(temporaries), () => { record.quarantined = true; });
     const family = Object.freeze({ schema: ULG_SPH_AEROSOL_PARCEL_SCHEMA,
       status: 'initial-aerosol-population-submitted', familyId: nextFamilyId++,
       capacity, generation: 0, initialParcelCount: parcels.length,
+      exactMassFormat: exactFormat,
       provenance: Object.freeze({ kind: provenance.kind, reference: provenance.reference.trim() }),
       massSource: 'independent-explicit-initial-conditions-not-carrier-transfer',
       energyScope: ENERGY_SCOPE, fullPhysicsValidation: false });
@@ -332,6 +357,7 @@ export async function runSphAerosolCondensateExtractionWebGpu({ device, sourceFa
     throw new TypeError('Condensate extraction requires an exact live source read');
   }
   const source = sourceRead == null ? requireFamily(sourceFamily, device) : PARCEL_READS.get(sourceRead).source;
+  if (source.exactQuantities) throw new TypeError('Exact aerosol quantities require the conservative exact extraction writer');
   if (expectedGeneration !== source.generation || source.generation === 0xffffffff
       || source.extractionPending || source.successorAdopted) {
     throw new TypeError('Aerosol extraction source generation is stale, pending or already adopted');
@@ -565,17 +591,122 @@ export function prepareSphAerosolCondensateTransition(candidate, {
       || sourceMechanicsBuffer !== record.sourceMechanicsBuffer) {
     throw new TypeError('Condensate transition must reserve the exact original source tuple once');
   }
+  return prepareCondensateTransitionForRecord(record);
+}
+
+/** Reserve an existing exact aerosol population from the genuine completed
+ * exchange producer. This uses the same source claim and outer publication
+ * window as extraction. The prospective family remains unreadable until both
+ * its carrier/history counterpart and this aerosol are actually committed.
+ */
+export async function prepareSphAerosolVaporTransition({ device, producerRead } = {}) {
+  const { forkSphSpatialVaporAerosolProducerRead: fork,
+    resolveSphSpatialVaporAerosolProducerRead: resolve,
+    releaseSphSpatialVaporAerosolProducerRead: release } = await import('./sphSpatialGasLedgerEosGpu.js');
+  const held = fork(producerRead, { device });
+  let retainedRead = null, source = null, sourceClaim = null, reservation = null, submitted = false;
+  let dropped = false, resolveCleanup;
+  const outputs = [], cleanupCompletion = new Promise(resolve => { resolveCleanup = resolve; });
+  const dropSource = () => {
+    if (dropped) return;
+    dropped = true;
+    if (reservation && source.extractionPending === reservation) source.extractionPending = null;
+    if (reservation && sourceClaim.pending === reservation) sourceClaim.pending = null;
+    if (retainedRead) releaseSphAerosolParcelRead(retainedRead);
+    release(held); resolveCleanup(true);
+  };
+  const dispose = () => {
+    const cleanup = () => { destroy(outputs); dropSource(); };
+    if (submitted) afterQueue(device, cleanup, () => { source.quarantined = true; }); else cleanup();
+  };
+  try {
+    const producer = resolve(held, { device }), packet = producer.sourcePacket;
+    const sourceFamily = packet.aerosolFamily;
+    retainedRead = forkSphAerosolParcelRead(packet.aerosolRead, {
+      device, family: sourceFamily, expectedGeneration: packet.aerosolRead?.generation });
+    source = PARCEL_READS.get(retainedRead).source;
+    const { sourceTransaction: transaction, sourceGeneration: generation,
+      originalSphParticleUpload: sphParticleUpload, originalMlsMpmParticleUpload: mlsMpmParticleUpload } = packet;
+    const validateSource = () => {
+      if (!validateSphAerosolParcelRead(retainedRead, { device, family: sourceFamily,
+        expectedGeneration: source.generation })) throw new TypeError('Exact vapor transition lost its original aerosol read');
+    };
+    const context = { transaction, generation, sphParticleUpload, mlsMpmParticleUpload,
+      count: producer.particleCount, topologyEpoch: packet.epochIdentity.topologyEpoch,
+      validate() {
+        if (resolve(held, { device }) !== producer || generation.releaseScheduled === true
+            || generation.execution?.released === true
+            || ['aborted', 'released', 'release-scheduled', 'release-blocked'].includes(transaction.state)
+            || !validateSchroederSpatialEpochTransactionSourceFamily(transaction,
+              { generation, sphParticleUpload, mlsMpmParticleUpload })
+            || sphAerosolSourceFamily(sphParticleUpload) !== sourceFamily) {
+          throw new TypeError('Exact vapor transition requires the original current closure transaction');
+        }
+        validateSource();
+      } };
+    context.validate();
+    if (!source.exactQuantities || source.exactQuantities.format !== producer.format
+        || producer.endpoints.aerosolLayout !== source.exactQuantities.quantityLayout
+        || producer.endpoints.aerosolBuffer.size !== source.exactQuantities.quantityBuffer.size
+        || producer.parcelBuffer.size !== source.buffer.size || source.generation === 0xffffffff
+        || source.extractionPending || source.successorAdopted) {
+      throw new TypeError('Exact vapor transition requires the complete unused original population');
+    }
+    sourceClaim = EXTRACTION_SOURCE_CLAIMS.get(generation) ?? { pending: null, adopted: false };
+    if (sourceClaim.pending || sourceClaim.adopted) throw new TypeError('Aerosol source generation already reserved or consumed');
+    reservation = {};
+    sourceClaim.pending = reservation; source.extractionPending = reservation;
+    EXTRACTION_SOURCE_CLAIMS.set(generation, sourceClaim);
+    const parcels = allocate(device, outputs, 'ulg-aerosol-vapor-successor', source.buffer.size, STORAGE | COPY_SRC | COPY_DST);
+    const quantities = allocate(device, outputs, 'ulg-aerosol-vapor-successor-quantities',
+      source.exactQuantities.quantityBuffer.size, STORAGE | COPY_SRC | COPY_DST);
+    markSphExactMassDerivedBuffers(producer.sourceParticleRead, [parcels, quantities]);
+    context.validate();
+    const encoder = device.createCommandEncoder({ label: 'ulg-aerosol-vapor-successor' });
+    encoder.copyBufferToBuffer(producer.parcelBuffer, 0, parcels, 0, parcels.size);
+    encoder.copyBufferToBuffer(producer.endpoints.aerosolBuffer, 0, quantities, 0, quantities.size);
+    submitted = true; device.queue.submit([encoder.finish()]);
+    context.validate();
+    const record = { device, source, sourceFamily, context, sourceClaim, reservation, outputs,
+      kind: 'vapor-exchange', producer, state: producer.stateBuffer, thermo: producer.thermoBuffer,
+      mechanics: producer.mechanicsBuffer, parcels, disposition: 'prepared', transition: null,
+      massSource: 'paired-current-vapor-aerosol-exchange',
+      energyScope: 'stored-internal-plus-translational-kinetic-plus-linear-surface',
+      declaration: { capacity: source.capacity, population: source.population,
+        ids: source.ids, nucleusIds: source.nucleusIds, provenance: sourceFamily.provenance },
+      exactQuantities: Object.freeze({ format: producer.format, quantityBuffer: quantities,
+        quantityLayout: producer.endpoints.aerosolLayout }),
+      validateSource, dropSource, dispose, cleanupCompletion };
+    device.lost.then(() => {
+      if (record.transition) discardSphAerosolCondensateTransition(record.transition);
+      else dispose();
+    }, () => {});
+    return prepareCondensateTransitionForRecord(record);
+  } catch (error) {
+    dispose();
+    Object.defineProperty(error, 'exactVaporTransitionCleanupCompletion', { value: cleanupCompletion, configurable: true });
+    throw error;
+  }
+}
+
+function prepareCondensateTransitionForRecord(record) {
+  requirePendingCondensateSource(record);
+  const { device, context, source, declaration } = record;
+  const energyScope = record.energyScope ?? ENERGY_SCOPE;
   const family = Object.freeze({ schema: ULG_SPH_AEROSOL_PARCEL_SCHEMA,
     status: 'outer-condensate-inventory-descriptor', familyId: nextFamilyId++,
     capacity: declaration.capacity, generation: source.generation + 1,
-    provenance: declaration.provenance, massSource: 'paired-pre-transfer-carrier-debit',
-    energyScope: ENERGY_SCOPE, fullPhysicsValidation: false });
+    provenance: declaration.provenance, massSource: record.massSource ?? 'paired-pre-transfer-carrier-debit',
+    exactMassFormat: record.exactQuantities?.format ?? null,
+    energyScope, fullPhysicsValidation: false });
   const child = { device, buffer: record.parcels, resources: [], capacity: declaration.capacity,
     generation: family.generation, population: declaration.population, ids: declaration.ids,
+    exactQuantities: record.exactQuantities ?? null,
     nucleusIds: declaration.nucleusIds, extractionPending: null, successorAdopted: false,
     releaseRequested: false, retirementScheduled: false, borrows: 0, lost: false, quarantined: false };
   const pending = { record, child, family, read: null, transition: null, disposition: 'pending', finalizing: false,
-    parcelResources: [record.parcels], residualResources: [record.state, record.thermo, record.mechanics],
+    parcelResources: [record.parcels, record.exactQuantities?.quantityBuffer].filter(Boolean),
+    residualResources: record.kind === 'vapor-exchange' ? [] : [record.state, record.thermo, record.mechanics],
     residualsRetired: false };
   record.transitionPreparing = true;
   try {
@@ -591,12 +722,15 @@ export function prepareSphAerosolCondensateTransition(candidate, {
       status: 'paired-condensate-outer-publication-reservation', particleCount: context.count,
       stateBuffer: record.state, thermoBuffer: record.thermo, mechanicsBuffer: record.mechanics,
       aerosolFamily: family, sourceAerosolFamily: record.sourceFamily,
-      sourceTopologyEpoch: context.topologyEpoch, energyScope: ENERGY_SCOPE,
+      sourceTopologyEpoch: context.topologyEpoch, energyScope,
+      ...(record.cleanupCompletion ? { cleanupCompletion: record.cleanupCompletion } : {}),
       gasVolumeAuthority: false, opticalAuthority: false, fullPhysicsValidation: false });
     pending.transition = transition;
     CONDENSATE_TRANSITIONS.set(transition, pending);
-    CONDENSATE_RESIDUAL_TRANSITIONS.set(record.state, transition);
-    CONDENSATE_RESIDUAL_TRANSITIONS.set(record.thermo, transition);
+    if (record.kind !== 'vapor-exchange') {
+      CONDENSATE_RESIDUAL_TRANSITIONS.set(record.state, transition);
+      CONDENSATE_RESIDUAL_TRANSITIONS.set(record.thermo, transition);
+    }
     record.transition = transition;
     return transition;
   } catch (error) {
@@ -759,7 +893,7 @@ export function forkSphAerosolParcelRead(read, input = {}) {
 
 function mintParcelRead(source, family) {
   const read = Object.freeze({ family, buffer: source.buffer, capacity: source.capacity,
-    familyId: family.familyId, generation: source.generation });
+    familyId: family.familyId, generation: source.generation, exactQuantities: source.exactQuantities ?? null });
   const record = { source, read, released: false, drained: false };
   PARCEL_READS.set(read, record);
   source.borrows++;
@@ -786,6 +920,7 @@ export function validateSphAerosolParcelRead(read, { family, device, expectedGen
     && !record.source.lost && !record.source.quarantined
     && record.source.device === device && read.family === family
     && read.generation === expectedGeneration && read.buffer === record.source.buffer
+    && read.exactQuantities === (record.source.exactQuantities ?? null)
     && FAMILIES.get(family) === record.source);
 }
 

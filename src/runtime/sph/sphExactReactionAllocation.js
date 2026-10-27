@@ -36,7 +36,7 @@ function snapshotMatches(object, snapshot) {
 function arrayContents(object, keys) {
   return keys.map(key => {
     const array = object[key], length = Reflect.apply(typedLength, array, []);
-    const values = new Float32Array(length);
+    const values = array instanceof Uint32Array ? new Uint32Array(length) : new Float32Array(length);
     for (let i = 0; i < length; i++) values[i] = array[i];
     return [key, values];
   });
@@ -117,9 +117,11 @@ export function compileSphExactReactionAllocation({ reactionTable, thermalMateri
   // Keep independent contents in addition to original array identities. An
   // overwritten typed-array method cannot make a changed table pass this seal.
   const contents = arrayContents(reactionTable, ARRAY_KEYS);
+  const molarKeys = thermalMaterialTable && Object.hasOwn(thermalMaterialTable, 'molarMassIdentities') ? ['molarMassIdentities'] : [];
+  if (molarKeys.length && !(thermalMaterialTable.molarMassIdentities instanceof Uint32Array)) fail('packed molecular identities required');
   const thermalSnapshot = thermalMaterialTable ? dataSnapshot(thermalMaterialTable,
-    ['records', 'segments', 'metadata', 'materialCount', 'segmentCount']) : null;
-  const thermalContents = thermalMaterialTable ? arrayContents(thermalMaterialTable, ['records', 'segments']) : null;
+    ['records', 'segments', 'metadata', 'materialCount', 'segmentCount', ...molarKeys]) : null;
+  const thermalContents = thermalMaterialTable ? arrayContents(thermalMaterialTable, ['records', 'segments', ...molarKeys]) : null;
   COMPILATIONS.set(token, { reactionTable, thermalMaterialTable, tableSnapshot, thermalSnapshot, contents, thermalContents, entry });
   resolveSphExactReactionAllocation(token);
   return token;

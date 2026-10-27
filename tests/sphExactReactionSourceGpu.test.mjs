@@ -1,15 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runExactReactionSourceNative } from './fixtures/sphExactReactionSourceNative.js';
+import { inspectExactReactionClosureNative, inspectCompletedExactReactionStep } from './fixtures/sphExactReactionClosureNative.js';
 import { runSphExactReactionSourceSelectionWebGpu, resolveSphExactReactionSourceSelection,
   acquireSphExactReactionSourceSelectionRead } from '../src/runtime/sph/sphExactReactionSourceGpu.js';
-import { runSphReactionStepWebGpu } from '../src/runtime/sph/sphReactionGpuKernel.js';
+import { runSphReactionStepWebGpu, resolveSphReactionSourceCapture,
+  ULG_SPH_GPU_REACTION_STEP_SCHEMA } from '../src/runtime/sph/sphReactionGpuKernel.js';
 import { resolveSphExactReactionRoutingCandidate } from '../src/runtime/sph/sphExactReactionRoutingGpu.js';
 import { assertSphLegacyMassPathAllowed } from '../src/runtime/sph/sphGpuBuffers.js';
 import { createResidentProductMassHandle } from '../src/runtime/sph/sphReactionGpuSummary.js';
 import { runMlsMpmP2gGridProjectionWebGpu } from '../src/runtime/sph/sphGridGpuKernel.js';
-import { mergeResidentProductMassBuffersWebGpu } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
+import { mergeResidentProductMassBuffersWebGpu, acquireResidentProductExactHistoryRead } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import { runSphSpatialGasLedgerEosRetainedWebGpu } from '../src/runtime/sph/sphSpatialGasLedgerEosGpu.js';
+import { submitQueueOrderedFinalConsumerWork } from '../src/runtime/webgpuComputeLayout.js';
+import { runMlsMpmMechanicsRefreshWebGpu, resolveMlsMpmMechanicsRefreshSourceCapture }
+  from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
+import { runMlsMpmPostMechanicsClosureWebGpu, claimMlsMpmPostMechanicsContinuation,
+  resolveMlsMpmPostMechanicsExactMassContinuation, retireMlsMpmPostMechanicsClosureOutputsAfter }
+  from '../src/runtime/sph/sphMlsMpmPostMechanicsClosure.js';
+import { runSchroederSpatialReactionDiscoveryProposalWebGpu }
+  from '../src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js';
 
 // Command recorder: genuine JavaScript producers, no WGSL arithmetic claims.
 function fakeG2pDevice() {
@@ -44,6 +54,8 @@ function fakeG2pDevice() {
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxUniformBufferBindingSize: 64 * 1024,
       maxStorageBuffersPerShaderStage: 16,
+      maxUniformBuffersPerShaderStage: 12,
+      maxBindingsPerBindGroup: 1000,
       maxComputeWorkgroupsPerDimension: 65535,
       minUniformBufferOffsetAlignment: 256
     },
@@ -212,7 +224,7 @@ function fakeG2pDevice() {
   return device;
 }
 
-async function withSource(inspect, { lost = new Promise(() => {}), stopAfterInspect = false } = {}) {
+async function withSource(inspect, { lost = new Promise(() => {}), stopAfterInspect = false, postMechanics = false } = {}) {
   const device = fakeG2pDevice();
   device.lost = lost;
   // Loss tests finish inside the genuine G2P source hook: a lost transaction
@@ -220,7 +232,7 @@ async function withSource(inspect, { lost = new Promise(() => {}), stopAfterInsp
   const stop = new Error('Source inspection completed before terminal closure');
   let observed;
   try {
-    return await runExactReactionSourceNative(device, { inspect: async args => {
+    return await runExactReactionSourceNative(device, { [postMechanics ? 'inspectPostMechanics' : 'inspect']: async args => {
       observed = await inspect(args);
       if (stopAfterInspect) throw stop;
       return observed;
@@ -229,6 +241,167 @@ async function withSource(inspect, { lost = new Promise(() => {}), stopAfterInsp
     if (error === stop) return observed;
     throw error;
   }
+}
+
+test('exact reaction runs through the enclosing closure with separate carrier and residual continuations', async () => {
+  await withSource(async args => {
+    let closure;
+    try {
+      closure = await runMlsMpmPostMechanicsClosureWebGpu({ ...args,
+        postMechanicsParticleBuffers: args.g2pResult, postMechanicsG2pResult: args.g2pResult,
+        schroederSpatialEpochTransaction: args.transaction, schroederSpatialEpochGeneration: args.generation,
+        spatialReactionDiscoveryProposalRunner: runSchroederSpatialReactionDiscoveryProposalWebGpu,
+        thermalStepOptions: { conductionRate: 0 }, boxDimsM: [2, 2, 2], readbackMode: 'no-full-readback' });
+      const next = { sphParticleUpload: { ...args.sphParticleUpload,
+        stateBuffer: closure.continuation.stateBuffer, thermoBuffer: closure.continuation.thermoBuffer },
+        mlsMpmParticleUpload: { ...args.mlsMpmParticleUpload, mechanicsBuffer: closure.continuation.mechanicsBuffer },
+        residentProductMass: closure.continuation.residentProductMass };
+      const claim = claimMlsMpmPostMechanicsContinuation(closure, { nextParticleUploads: next });
+      const captured = resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, next);
+      assert.notEqual(captured.carrierMassRead.family, args.sphParticleUpload.exactMassInventory);
+      assert.equal(captured.carrierMassRead.rowCount, args.sphParticleState.particleCount);
+      assert.equal(captured.exactQuantities.quantityLayout.rowCount, args.sphParticleState.particleCount);
+      assert.ok(next.residentProductMass);
+      assert.equal(closure.residentContinuationReady, true);
+      return true;
+    } finally {
+      if (closure) await retireMlsMpmPostMechanicsClosureOutputsAfter(closure, { after: Promise.resolve(true), abandon: true });
+    }
+  }, { stopAfterInspect: true, postMechanics: true });
+});
+
+test('exact closure publishes changed carrier ownership and survives original stage retirement', async () => {
+  await withSource(async args => {
+    const result = await inspectExactReactionClosureNative({ args });
+    assert.equal(result.pass, true, JSON.stringify(result));
+    return result;
+  }, { stopAfterInspect: true, postMechanics: true });
+});
+
+test('following genuine G2P updates the adopted reaction quantity owner', async () => {
+  await withSource(async args => {
+    const result = await inspectExactReactionClosureNative({ args, options: { advanceMechanics: true } });
+    assert.equal(result.pass, true, JSON.stringify(result));
+    return result;
+  }, { stopAfterInspect: true, postMechanics: true });
+});
+
+test('following genuine thermal evolves the adopted reaction energy', async () => {
+  await withSource(async args => {
+    const result = await inspectExactReactionClosureNative({ args, options: { advanceMechanics: true, advanceThermal: true } });
+    assert.equal(result.pass, true, JSON.stringify(result));
+    assert.equal(result.followingMechanics.thermal.matches, true);
+    return result;
+  }, { stopAfterInspect: true, postMechanics: true });
+});
+
+test('two following complete physical steps publish evolved reaction quantities', async () => {
+  await withSource(async args => {
+    const result = await inspectExactReactionClosureNative({ args, options: { advanceMechanics: true, advanceThermal: true, advanceFullStep: true } });
+    assert.equal(result.pass, true, JSON.stringify(result));
+    assert.equal(result.followingMechanics.followingPhysicalStepCompleted, true);
+    assert.equal(result.followingMechanics.followingPhysicalStepCount, 2);
+    assert.equal(result.followingMechanics.nextPhysicalStep.matches, true);
+    return result;
+  }, { stopAfterInspect: true, postMechanics: true });
+});
+
+test('following reaction consumes genuine retained thermal quantities through selection and routing', async () => {
+  await withSource(async args => {
+    const result = await inspectExactReactionClosureNative({ args,
+      options: { advanceMechanics: true, advanceThermal: true, advanceReaction: true } });
+    assert.equal(result.pass, true, JSON.stringify(result));
+    assert.equal(result.followingMechanics.reaction.pass, true);
+    return result;
+  }, { stopAfterInspect: true, postMechanics: true });
+});
+
+test('original outer reaction step publishes and retains its genuine exact continuation', async () => {
+  const device = fakeG2pDevice();
+  device.lost = new Promise(() => {});
+  const result = await runExactReactionSourceNative(device, { completeOuterReaction: true, spareParticleCount: 3,
+    internalPressureScale: 0, inspectCompletedStep: args => inspectCompletedExactReactionStep(args) });
+  assert.equal(result.pass, true, JSON.stringify(result));
+  assert.equal(result.enclosingMechanicsStepCompleted, true);
+  assert.equal(result.checks.ownerSurvivesStepRetirement, true);
+});
+
+test('original P2G borrows and projects a genuine exact product history', async () => {
+  const device = fakeG2pDevice(); device.lost = new Promise(() => {});
+  const result = await runExactReactionSourceNative(device, { completeOuterReaction: true, spareParticleCount: 3,
+    internalPressureScale: 0, inspectCompletedStep: args => inspectCompletedExactReactionStep({ ...args, options: { inspectHistoryP2g: true } }) });
+  assert.equal(result.pass, true, JSON.stringify(result));
+  assert.equal(result.historyP2g.projectionOnly, true);
+  assert.equal(result.historyP2g.grid.originalProducer, true);
+});
+
+test('original G2P retains the actual P2G history with private capture and retirement pins', async () => {
+  const device = fakeG2pDevice(); device.lost = new Promise(() => {});
+  const result = await runExactReactionSourceNative(device, { completeOuterReaction: true, spareParticleCount: 3,
+    internalPressureScale: 0, inspectCompletedStep: args => inspectCompletedExactReactionStep({ ...args,
+      options: { inspectHistoryP2g: true, inspectHistoryG2p: true } }) });
+  assert.equal(result.pass, true, JSON.stringify(result));
+  assert.equal(result.historyP2g.projectionOnly, false);
+  assert.equal(result.historyP2g.g2p.originalProducer, true);
+  const historyOutputs = device.createdBuffers.filter(buffer => buffer.label?.startsWith('ulg-exact-history-g2p-'));
+  assert.ok(historyOutputs.length > 0);
+  assert.ok(historyOutputs.every(buffer => buffer.destroyed), 'all original G2P history allocations retire');
+});
+
+for (const mode of ['physical', 'pressure', 'guarded-reaction', 'reaction']) test(`original outer ${mode} steps publish G2P history with a fresh count and retain it through retirement`, async () => {
+  const device = fakeG2pDevice(); device.lost = new Promise(() => {});
+  const result = await runExactReactionSourceNative(device, { completeOuterReaction: true, spareParticleCount: 3,
+    internalPressureScale: 0, inspectCompletedStep: args => inspectCompletedExactReactionStep({ ...args,
+      options: { historyContinuation: mode } }) });
+  assert.equal(result.pass, true, JSON.stringify(result));
+  assert.equal(result.historyContinuation.completedFollowingSteps, 2);
+});
+
+test('exact history reads reject aliases and foreign lineage and release their original borrow once', async () => {
+  const device = fakeG2pDevice(); device.lost = new Promise(() => {});
+  await runExactReactionSourceNative(device, { completeOuterReaction: true, spareParticleCount: 3,
+    internalPressureScale: 0, inspectCompletedStep: async args => {
+      const next = args.execution.residentStep.nextParticleUploads, history = next.residentProductMass;
+      const options = { device, identityBuffer: next.sphParticleUpload.identityBuffer };
+      const before = history.__ulgActiveBorrowCount;
+      assert.throws(() => acquireResidentProductExactHistoryRead({ ...history }, options), /original producer or arena owner/);
+      const foreign = device.createBuffer({ label: 'foreign-history-identity', size: 16, usage: 128 });
+      assert.throws(() => acquireResidentProductExactHistoryRead(history, { device, identityBuffer: foreign }), /complete count, storage and borrow owner/);
+      assert.equal(history.__ulgActiveBorrowCount, before);
+      const read = acquireResidentProductExactHistoryRead(history, options);
+      assert.equal(history.__ulgActiveBorrowCount, before + 1);
+      assert.equal(read.validate(), true);
+      assert.equal(read.release(), true); assert.equal(read.release(), false);
+      assert.equal(history.__ulgActiveBorrowCount, before);
+      assert.throws(read.validate, /changed or retired/);
+      foreign.destroy();
+      return inspectCompletedExactReactionStep(args);
+    } });
+});
+
+for (const failedStage of ['reactionStep', 'mechanicsRefresh']) {
+  test(`exact closure drains original owners after ${failedStage} timing hook rejection`, async () => {
+    await withSource(async args => {
+      const sentinel = new Error(`rejected ${failedStage}`);
+      let failure;
+      await assert.rejects(runMlsMpmPostMechanicsClosureWebGpu({ ...args,
+        postMechanicsParticleBuffers: args.g2pResult, postMechanicsG2pResult: args.g2pResult,
+        schroederSpatialEpochTransaction: args.transaction, schroederSpatialEpochGeneration: args.generation,
+        spatialReactionDiscoveryProposalRunner: runSchroederSpatialReactionDiscoveryProposalWebGpu,
+        thermalStepOptions: { conductionRate: 0 }, boxDimsM: [2, 2, 2], readbackMode: 'no-full-readback',
+        timedStage: async (name, work) => { const result = await work(); if (name === failedStage) throw sentinel; return result; }
+      }), error => { failure = error; return error === sentinel; });
+      const cleanup = await failure.postMechanicsCleanupCompletion;
+      assert.deepEqual(cleanup.blockers, []);
+      assert.equal(args.g2pResult.stateBuffer.destroyed, false);
+      assert.equal(args.sphParticleUpload.stateBuffer.destroyed, false);
+      for (const buffer of args.device.createdBuffers.filter(buffer =>
+        buffer.label === 'ulg-exact-mechanics-refresh-quantities' || buffer.label === 'ulg-exact-mass-reaction-successor')) {
+        assert.equal(buffer.destroyed, true, buffer.label);
+      }
+      return true;
+    }, { stopAfterInspect: true, postMechanics: true });
+  });
 }
 
 test('exact preparation admits genuine canonical inputs and keeps numerical evidence private', async () => {
@@ -663,8 +836,220 @@ function routingArgs(args, selection) {
     schroederSpatialReactionDiscoveryProposal: args.reactionDiscoveryProposal,
     exactReactionSourceSelection: selection, retainOutputParticleBuffers: true, readbackMode: 'no-full-readback' };
 }
+
+test('exact mechanics refresh consumes the genuine captured reaction and submits one transactional physical/quantity update', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args), token = {};
+    const result = await runSphReactionStepWebGpu({ ...routingArgs(args, selected), postMechanicsSourceCapture: token,
+      requestQueueOrderedCleanupClaim: true });
+    const seal = resolveSphReactionSourceCapture(result, token), refreshToken = {};
+    const options = { ...args, sourceStateBuffer: result.stateBuffer, sourceThermoBuffer: result.thermoBuffer,
+      sourceMechanicsBuffer: result.mechanicsBuffer, exactReactionResult: result, exactReactionSourceCapture: token,
+      postMechanicsSourceCapture: refreshToken, readbackMode: 'no-full-readback', retainOutputParticleBuffers: true,
+      queueOrderedProducerClaims: result.queueOrderedCleanupClaims };
+    let refresh, refreshSeal;
+    try {
+      for (const replacement of [{ exactReactionResult: { ...result } }, { exactReactionSourceCapture: {} },
+        { sourceStateBuffer: args.thermalResult.stateBuffer }, { sourceMechanicsBuffer: args.g2pResult.mechanicsBuffer }]) {
+        const allocations = args.device.createdBuffers.length;
+        let failure;
+        await assert.rejects(runMlsMpmMechanicsRefreshWebGpu({ ...options, ...replacement }), error => {
+          failure = error; return true;
+        });
+        await failure.exactMechanicsRefreshCleanupCompletion;
+        assert.equal(args.device.createdBuffers.length, allocations);
+      }
+      const start = args.device.dispatches.length;
+      refresh = await runMlsMpmMechanicsRefreshWebGpu(options);
+      refreshSeal = resolveMlsMpmMechanicsRefreshSourceCapture(refresh, refreshToken);
+      assert.deepEqual(args.device.dispatches.slice(start).map(event => event.pipeline.compute.entryPoint),
+        ['prepare_exact_mechanics_refresh', 'divide_exact_mechanics_reference',
+          'normalize_exact_mechanics_operands', 'divide_exact_mechanics_ratio',
+          'project_exact_mechanics_scalar', 'finalize_exact_mechanics_quantities',
+          'main', 'commit_or_restore', 'commit_or_restore_exact_mechanics_quantities']);
+      assert.equal(refreshSeal.exactMechanics.source, seal.exactReaction);
+      assert.equal(refreshSeal.exactMechanics.quantityLayout.rowCount, args.sphParticleState.particleCount);
+      assert.notEqual(refreshSeal.exactMechanics.quantityBuffer, seal.exactReaction.destinationRead.quantityBuffer);
+      assert.throws(() => assertSphLegacyMassPathAllowed({ sourceStateBuffer: refreshSeal.exactMechanics.quantityBuffer },
+        'Refreshed exact quantity alias'), /legacy mass path is not admitted/);
+      seal.release();
+      assert.throws(() => result.destroyOutputParticleBuffers(), /owner read/);
+      assert.throws(() => refresh.destroyOutputParticleBuffers(), /owner read/);
+      refreshSeal.release();
+      await result.destroyOutputParticleBuffers({ queueOrderedFinalConsumer: refresh.queueOrderedFinalConsumerCapability });
+      assert.equal(refreshSeal.exactMechanics.quantityBuffer.destroyed, false);
+      assert.equal(refreshSeal.validate(), true);
+    } finally {
+      refreshSeal?.release(); refresh?.destroyOutputParticleBuffers(); seal.release();
+      await result.destroyOutputParticleBuffers({ queueOrderedFinalConsumer: refresh?.queueOrderedFinalConsumerCapability });
+      await selected.release();
+    }
+    return true;
+  });
+});
+
+test('captured exact reaction executes the original summary/placement and retains separate carrier and history owners', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+    const token = {}, options = { ...routingArgs(args, selected), postMechanicsSourceCapture: token,
+      requestQueueOrderedCleanupClaim: true };
+    const pending = runSphReactionStepWebGpu(options);
+    const sourceClosing = selected.release();
+    let result, seal;
+    try {
+      result = await pending;
+      seal = resolveSphReactionSourceCapture(result, token);
+      assert.equal(seal.validate(), true);
+      assert.equal(result.schema, ULG_SPH_GPU_REACTION_STEP_SCHEMA);
+      assert.equal(result.reactionAllocationMode, 'exact-integer-pair-allocation');
+      assert.equal(result.reactionSummary.reactionProductPlacementSubmissionArtifact.submissionAuthenticated, true);
+      assert.equal(result.reactionPlacementDestinationOwnershipTransferred, true);
+      const exact = seal.exactReaction;
+      assert.equal(exact.carrierMassRead.rowCount, args.sphParticleState.particleCount);
+      assert.ok(exact.carrierMassRead.family.rowCount > exact.carrierMassRead.rowCount);
+      assert.deepEqual(exact.carrierQuantityRange, { rowOffset: 0, rowCount: args.sphParticleState.particleCount });
+      assert.equal(exact.destinationRead.stateBuffer, result.stateBuffer);
+      assert.equal(exact.routingView().source.result, selected);
+      assert.notEqual(result.residentProductMass.productEventBuffer, exact.destinationRead.residualEventBuffer);
+      assert.ok(result.residentProductMass.exactProductHistoryLayout);
+      assert.equal(result.queueOrderedCleanupClaims.length, 2);
+      assert.throws(() => result.destroyOutputParticleBuffers(), /owner read/);
+      assert.throws(() => resolveSphReactionSourceCapture({ ...result }, token), /Unknown/);
+      await assert.rejects(runSphReactionStepWebGpu(options), /cannot replay/);
+      seal.release();
+      await sourceClosing;
+      await result.destroyOutputParticleBuffers({ preserveResidentProductMass: true });
+      assert.equal(result.stateBuffer.destroyed, true);
+      assert.equal(result.residentProductMass.productEventBuffer.destroyed, false);
+      await result.residentProductMass.destroyResidentProductMassBuffers();
+    } finally {
+      seal?.release();
+      if (result) await result.destroyOutputParticleBuffers();
+      await sourceClosing;
+    }
+    return true;
+  }, { stopAfterInspect: true });
+});
+
+test('captured exact reaction retires through its genuine queued consumer and rejects a forged capability', async () => {
+  await withSource(async args => {
+    const selected = await runSphExactReactionSourceSelectionWebGpu(args), token = {};
+    const result = await runSphReactionStepWebGpu({ ...routingArgs(args, selected), postMechanicsSourceCapture: token,
+      requestQueueOrderedCleanupClaim: true });
+    const seal = resolveSphReactionSourceCapture(result, token);
+    seal.release();
+    const destination = result.stateBuffer;
+    try {
+      assert.throws(() => result.destroyOutputParticleBuffers({ queueOrderedFinalConsumer: {} }), /capability/);
+      assert.equal(destination.destroyed, false);
+      const target = args.device.createBuffer({ label: 'test-final-exact-reaction-consumer', size: destination.size, usage: 140 });
+      try {
+        const encoder = args.device.createCommandEncoder();
+        encoder.copyBufferToBuffer(destination, 0, target, 0, destination.size);
+        const consumer = submitQueueOrderedFinalConsumerWork(args.device, [encoder.finish()], {
+          finalConsumerOwner: target, producerClaims: result.queueOrderedCleanupClaims });
+        assert.equal(await result.destroyOutputParticleBuffers({ queueOrderedFinalConsumer: consumer }), true);
+        assert.equal(destination.destroyed, true);
+      } finally { target.destroy(); }
+    } finally { await result.destroyOutputParticleBuffers(); await selected.release(); }
+    return true;
+  }, { stopAfterInspect: true });
+});
+
+for (const label of ['ulg-sph-reaction-summary-records', 'ulg-exact-resident-product-history', 'ulg-schroeder-reaction-placement-residual-physical-destination']) {
+  test(`captured exact reaction ${label} allocation failure drains its original source owners`, async () => {
+    await withSource(async args => {
+      const selected = await runSphExactReactionSourceSelectionWebGpu(args), token = {}, device = args.device;
+      const create = device.createBuffer, sentinel = new Error('injected captured reaction allocation');
+      let injected = false, failure;
+      device.createBuffer = function(descriptor) {
+        if (!injected && descriptor.label === label) { injected = true; throw sentinel; }
+        return create.call(this, descriptor);
+      };
+      const pending = runSphReactionStepWebGpu({ ...routingArgs(args, selected), postMechanicsSourceCapture: token });
+      const closing = selected.release();
+      try {
+        await assert.rejects(pending, error => { failure = error; return error === sentinel; });
+        assert.equal(injected, true);
+        await failure.exactReactionStepCleanupCompletion;
+        await closing;
+        assert.equal(selected.outputBuffer.destroyed, true, 'no failed stage may strand its source read');
+        assert.throws(() => resolveSphReactionSourceCapture({}, token), /Unknown/);
+        await new Promise(resolve => setImmediate(resolve));
+        const independent = device.createdBuffers.filter(buffer => buffer.label === 'ulg-exact-mass-reaction-successor'
+          || buffer.label.startsWith('ulg-exact-resident-product-history'));
+        assert.ok(independent.every(buffer => buffer.destroyed));
+      } finally { device.createBuffer = create; await closing; }
+      return true;
+    }, { stopAfterInspect: true });
+  });
+}
 const routingBuffers = device => device.createdBuffers.filter(buffer =>
-  buffer.label?.startsWith('ulg-exact-reaction-routing') || buffer.label?.startsWith('ulg-exact-reaction-output'));
+  buffer.label?.startsWith('ulg-exact-reaction-routing') || buffer.label?.startsWith('ulg-exact-reaction-output')
+  || buffer.label?.startsWith('ulg-exact-placement-'));
+
+for (const mode of ['allocation', 'compile', 'table-after-await', 'submit-after-delegation']) {
+  test(`actual primitive quantity ${mode} failure retains original resources until confirmed retirement`, async () => {
+    await withSource(async args => {
+      const selected = await runSphExactReactionSourceSelectionWebGpu(args);
+      const device = args.device, sentinel = new Error(`primitive ${mode}`);
+      const fence = deferred();
+      const originalFence = device.queue.onSubmittedWorkDone;
+      const createBuffer = device.createBuffer, createPipeline = device.createComputePipeline;
+      const submit = device.queue.submit;
+      let triggered = false, failure;
+      device.queue.onSubmittedWorkDone = () => fence.promise;
+      device.createBuffer = function(descriptor) {
+        if (mode === 'allocation' && descriptor.label === 'ulg-exact-placement-primitives-scratch') {
+          triggered = true;
+          throw sentinel;
+        }
+        return createBuffer.call(this, descriptor);
+      };
+      device.createComputePipeline = function(descriptor) {
+        const pipeline = createPipeline.call(this, descriptor);
+        if (descriptor.compute.entryPoint === 'materialize_exact_placement_primitive_normalize') {
+          if (mode === 'compile') { triggered = true; throw sentinel; }
+          if (mode === 'table-after-await') {
+            triggered = true;
+            args.reactionTable.productTermRecords[3] *= 2;
+          }
+        }
+        return pipeline;
+      };
+      device.queue.submit = function(commands) {
+        const quantity = commands.some(command => command.events?.some(event =>
+          event.pipeline?.compute.entryPoint.startsWith('materialize_exact_placement_primitive_')));
+        const result = submit.call(this, commands);
+        if (mode === 'submit-after-delegation' && quantity) { triggered = true; throw sentinel; }
+        return result;
+      };
+      await assert.rejects(runSphReactionStepWebGpu(routingArgs(args, selected)), error => {
+        failure = error;
+        assert.equal(triggered, true);
+        if (mode === 'table-after-await') assert.match(error.message, /snapshot|changed|original/i);
+        else assert.equal(error, sentinel);
+        return true;
+      });
+      const owned = routingBuffers(device);
+      assert.ok(owned.length > 0);
+      assert.ok(owned.every(buffer => !buffer.destroyed));
+      assert.equal(selected.outputBuffer.destroyed, false);
+      assert.ok(failure.exactReactionRoutingCleanupCompletion instanceof Promise);
+      let retired = false;
+      failure.exactReactionRoutingCleanupCompletion.then(() => { retired = true; });
+      await nextTurn();
+      assert.equal(retired, false);
+      assert.ok(owned.every(buffer => !buffer.destroyed));
+      device.queue.onSubmittedWorkDone = originalFence;
+      fence.resolve();
+      assert.equal(await failure.exactReactionRoutingCleanupCompletion, true);
+      assert.ok(owned.every(buffer => buffer.destroyed));
+      await selected.release();
+      return true;
+    }, { stopAfterInspect: true });
+  });
+}
 
 test('actual reaction routing retains the original packet through cold compilation and producer close', async () => {
   await withSource(async args => {
@@ -687,6 +1072,28 @@ test('actual reaction routing retains the original packet through cold compilati
     for (const compilation of compilations.slice(1)) {
       compilation.resolve(args.device.createComputePipeline(compilation.descriptor));
     }
+    const momentumOperations = 'begin normalize normalize scale divide from_f32 multiply normalize multiply multiply finish';
+    const energyOperations = 'begin normalize normalize scale divide from_f32 from_f32 multiply scale add from_f32 multiply scale add from_f32 multiply scale add multiply normalize normalize add multiply add multiply finish';
+    const primitiveFields = [momentumOperations, momentumOperations, momentumOperations, energyOperations,
+      'begin normalize normalize scale divide from_f32 divide multiply finish',
+      'begin normalize normalize scale divide from_f32 from_f32 multiply divide multiply finish',
+      'begin normalize normalize scale divide from_f32 multiply finish'];
+    const quantityStages = ['initialize_exact_placement_quantities',
+      ...primitiveFields.flatMap(field => field.split(' ').map(operation => `materialize_exact_placement_primitive_${operation}`)),
+      'finalize_exact_placement_quantities'];
+    const quantityPipelines = [...new Set(quantityStages)];
+    assert.equal(quantityStages.length, 89);
+    assert.equal(quantityPipelines.length, 10);
+    for (let stage = 0; stage < quantityPipelines.length; stage++) {
+      await nextTurn();
+      assert.equal(compilations.length, 9 + stage,
+        'each distinct quantity pipeline compiles while the original retained source remains held');
+      const compilation = compilations[8 + stage];
+      assert.equal(compilation.descriptor.compute.entryPoint, quantityPipelines[stage]);
+      assert.equal(selected.outputBuffer.destroyed, false);
+      assert.throws(() => args.thermalResult.destroyOutputParticleBuffers(), /owner read/);
+      compilation.resolve(args.device.createComputePipeline(compilation.descriptor));
+    }
     const routed = await pending;
     const events = args.device.dispatches.filter(event => event.pipeline.compute.entryPoint === 'prepare_exact_reaction_endpoint_routes');
     assert.equal(events.length, 1);
@@ -698,6 +1105,13 @@ test('actual reaction routing retains the original packet through cold compilati
     assert.equal(routed.physicalOutput.physicalPublicationAdmitted, false);
     assert.ok(routed.physicalOutput.stateBuffer);
     assert.ok(routed.physicalOutput.compactCompanionBuffer);
+    assert.ok(routed.physicalOutput.quantities.outputBuffer);
+    assert.throws(() => assertSphLegacyMassPathAllowed({ sourceStateBuffer: routed.physicalOutput.quantities.outputBuffer }, 'quantity alias'),
+      /legacy mass path is not admitted/);
+    const primitiveScratch = args.device.createdBuffers.find(buffer => buffer.label === 'ulg-exact-placement-primitives-scratch');
+    assert.ok(primitiveScratch);
+    assert.throws(() => assertSphLegacyMassPathAllowed({ sourceStateBuffer: primitiveScratch }, 'primitive scratch alias'),
+      /legacy mass path is not admitted/);
     for (const key of ['stateBuffer', 'thermoBuffer', 'sourcePackedBuffer', 'packedBuffer']) {
       assert.throws(() => assertSphLegacyMassPathAllowed({ sourceStateBuffer: routed.physicalOutput[key] }, 'alias'),
         /legacy mass path is not admitted/, key);
@@ -711,9 +1125,10 @@ test('actual reaction routing retains the original packet through cold compilati
       assert.throws(() => assertSphLegacyMassPathAllowed(summary, 'history alias'), /legacy mass path is not admitted/, key);
       assert.throws(() => createResidentProductMassHandle(summary), /legacy mass path is not admitted/, key);
     }
-    assert.deepEqual(args.device.dispatches.slice(-7).map(event => event.pipeline.compute.entryPoint), [
+    assert.deepEqual(args.device.dispatches.slice(-(7 + quantityStages.length)).map(event => event.pipeline.compute.entryPoint), [
       'pack_exact_reaction_physical_rows', 'initialize_exact_reaction_outputs', 'stage_exact_reaction_outputs',
-      'unpack_exact_reaction_physical_rows', 'count_placement_rows', 'scan_placement_row_groups', 'scatter_placement_rows'
+      'unpack_exact_reaction_physical_rows', 'count_placement_rows', 'scan_placement_row_groups', 'scatter_placement_rows',
+      ...quantityStages
     ]);
     const inspected = resolveSphExactReactionRoutingCandidate(routed, { device: args.device });
     assert.equal(inspected.source.result, selected);
@@ -743,7 +1158,7 @@ test('actual reaction routing rejects changed tuple and custom producer hooks be
       await assert.rejects(runSphReactionStepWebGpu({ ...original, [key]: () => {} }), /original retained canonical/i, key);
     }
     for (const overrides of [{ dtSeconds: args.dtSeconds + 1 }, { retainOutputParticleBuffers: false },
-      { readbackMode: 'full' }, { resetMechanics: false }, { postMechanicsSourceCapture: {} },
+      { readbackMode: 'full' }, { resetMechanics: false },
       { schroederSpatialEpochGeneration: null }, { schroederSpatialReactionDiscoveryProposal: null }]) {
       await assert.rejects(runSphReactionStepWebGpu({ ...original, ...overrides }), /original/i);
     }

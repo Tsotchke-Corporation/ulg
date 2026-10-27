@@ -17,6 +17,10 @@ import {
   resolveSchroederSpatialReactionDiscoveryProposalForConsumer
 } from './schroederSpatialReactionDiscoveryProposalGpu.js';
 import {
+  acquireSphExactReactionRoutingRead,
+  resolveSphExactReactionRoutingCandidate
+} from './sphExactReactionRoutingGpu.js';
+import {
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
   deferConfirmedSubmittedWorkCleanup,
@@ -36,6 +40,14 @@ const transferredDestinationCleanupClaimIssuer =
     producerFamily:
       'schroeder-reaction-placement-transferred-destination'
   });
+const destinationReadCleanupClaimIssuer = createQueueOrderedCleanupClaimIssuer({
+  producerFamily: 'schroeder-reaction-placement-destination-read'
+});
+const placementInventoryLineages = new WeakMap();
+
+export function schroederSpatialReactionPlacementInventoryLineageMatches(lineage, identityBuffer) {
+  return Boolean(lineage && identityBuffer && placementInventoryLineages.get(identityBuffer) === lineage);
+}
 export const ULG_SPH_REACTION_RESOLVE_POSITION_INVARIANT_CERTIFICATE_SCHEMA =
   'peercompute.ulg.sph-reaction-resolve-position-invariant-certificate.v1';
 export const SCHROEDER_SPATIAL_REACTION_PLACEMENT_STAGE_ID =
@@ -62,6 +74,7 @@ const positionInvariantCertificates = new WeakSet();
 const positionInvariantCertificateRecords = new WeakMap();
 const placementSourceFamilies = new WeakSet();
 const placementSourceFamilyRecords = new WeakMap();
+const placementDestinationReads = new WeakMap();
 const placementPositionEpochFloorReceipts = new WeakSet();
 const placementPositionEpochFloorReceiptRecords = new WeakMap();
 const reactionWarmArenaCaches = new WeakMap();
@@ -830,7 +843,7 @@ function transferReactionWarmArenaDestinationOwnership(
 
 export function releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(
   sourceFamily,
-  { completionFence = null } = {}
+  { completionFence = null, preserveBuffers = [] } = {}
 ) {
   if (!isSchroederSpatialReactionPlacementSourceFamily(sourceFamily)) {
     throw placementEpochError(
@@ -852,6 +865,7 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     );
   }
   if (record.destinationReturnScheduled) return false;
+  const preserved = placementDestinationPreservation(record, preserveBuffers);
   if (record.deviceLost) {
     record.destinationReturnScheduled = true;
     record.destinationReturnPromise = Promise.resolve(false);
@@ -883,15 +897,19 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
       );
     }
   }
+  // Close admission before invoking a caller-supplied fence implementation.
+  record.destinationPreservedBuffers = preserved;
+  record.destinationReturnScheduled = true;
+  const consumerDrain = waitForPlacementDestinationReads(record);
   const queueFence = retirementFence(record.device, completionFence);
   const sourceReleaseFence = record.lifecycle.releasePromise?.then
     ? Promise.resolve(record.lifecycle.releasePromise).then(released => released === true)
     : null;
   const sourceConfirmed = confirmedRetirement(record, sourceReleaseFence);
   const destinationConfirmed = confirmedRetirement(record, queueFence);
-  const combinedFence = Promise.all([sourceConfirmed, destinationConfirmed])
-    .then(([sourceReleased, destinationReleased]) => sourceReleased && destinationReleased);
-  record.destinationReturnScheduled = true;
+  const combinedFence = Promise.all([sourceConfirmed, destinationConfirmed, consumerDrain])
+    .then(([sourceReleased, destinationReleased, consumersReleased]) =>
+      sourceReleased && destinationReleased && consumersReleased);
   if (record.reactionWarmArenaLease) {
     record.destinationReturnPromise = record.warmArenaReleasePromise ?? releaseSphReactionWarmArenaAfterQueue(
       record.reactionWarmArenaLease,
@@ -913,7 +931,7 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
 
 export function releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(
   sourceFamily,
-  { queueOrderedFinalConsumer = null } = {}
+  { queueOrderedFinalConsumer = null, preserveBuffers = [] } = {}
 ) {
   if (!isSchroederSpatialReactionPlacementSourceFamily(sourceFamily)) {
     throw placementEpochError(
@@ -937,7 +955,15 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     );
   }
   if (record.destinationReturnScheduled) return false;
+  const preserved = placementDestinationPreservation(record, preserveBuffers);
+  if (!record.deviceLost && record.destinationActiveReadCount > 0) {
+    throw placementEpochError(
+      'placement destination readers must submit and release before the final queue-ordered handoff',
+      'DESTINATION_READS'
+    );
+  }
   record.destinationReturnScheduled = true;
+  record.destinationPreservedBuffers = preserved;
   let cleanupReceipt;
   try {
     cleanupReceipt = releaseSubmittedWorkCleanupQueueOrdered(
@@ -955,7 +981,10 @@ export function releaseSchroederSpatialReactionPlacementTransferredDestinationOw
     // Failed capability admission consumes no claim and must not prevent its
     // genuine owner from retrying. Once cleanup starts, the claim is consumed
     // even if a destructor throws; never reopen that one-shot handoff.
-    if (!record.destinationCleanupStarted) record.destinationReturnScheduled = false;
+    if (!record.destinationCleanupStarted) {
+      record.destinationReturnScheduled = false;
+      record.destinationPreservedBuffers = null;
+    }
     throw error;
   }
   record.destinationReturnPromise =
@@ -1061,23 +1090,117 @@ export function destroySphReactionWarmArenaWebGpu(arena) {
   return destroyReactionWarmArenaRecord(record);
 }
 
+// Derive persistent storage only from this family's held genuine routing read.
+// These are candidate quantity records, not a physical acceptance certificate.
+function exactPlacementQuantitySource(read, device, particleCount) {
+  const view = read.validate();
+  const physical = view.result.physicalOutput;
+  const quantities = physical.quantities;
+  const layout = quantities?.layout;
+  const format = view.source.result.format;
+  const count = physical.denseEventCount;
+  const positive = value => Number.isSafeInteger(value) && value > 0;
+  if (!quantities || !layout || !Object.isFrozen(quantities) || !Object.isFrozen(layout)
+      || !Object.isFrozen(layout.scalar)
+      || quantities.schema !== 'peercompute.ulg.exact-placement-quantity-candidate.v1'
+      || layout.particleCount !== particleCount || layout.eventCapacity !== count
+      || !positive(count) || !positive(layout.recordWords) || !positive(layout.wordLength)
+      || !positive(layout.scalar?.wordCount)
+      || layout.massWordCount !== format.wordCount || layout.massOffsetWords !== 16
+      || layout.headerWords !== 16 || layout.scalarOffsetWords !== 16 + format.wordCount
+      || layout.scalar.recordWords !== 4 + 2 * layout.scalar.wordCount
+      || layout.recordWords !== layout.scalarOffsetWords + 7 * layout.scalar.recordWords
+      || layout.originalRowOffset !== 0 || layout.currentRowOffset !== particleCount
+      || layout.eventRowOffset !== 2 * particleCount
+      || layout.rowCount !== 2 * particleCount + count
+      || layout.wordLength !== layout.rowCount * layout.recordWords) {
+    throw placementEpochError('exact placement requires its original current quantity layout', 'QUANTITY_IDENTITY');
+  }
+  const byteLength = (particleCount + count) * layout.recordWords * Uint32Array.BYTES_PER_ELEMENT;
+  const sourceByteOffset = layout.currentRowOffset * layout.recordWords * Uint32Array.BYTES_PER_ELEMENT;
+  const sourceByteLength = layout.wordLength * Uint32Array.BYTES_PER_ELEMENT;
+  if (![byteLength, sourceByteOffset, sourceByteLength].every(positive)
+      || sourceByteOffset + byteLength !== sourceByteLength) {
+    throw placementEpochError('exact placement quantity storage is not safely addressable', 'QUANTITY_CAPACITY');
+  }
+  const eventStrideWords = 32;
+  const companionStrideWords = 8 + 3 * format.wordCount;
+  const physicalLayout = physical.layout;
+  const eventByteLength = count * eventStrideWords * Uint32Array.BYTES_PER_ELEMENT;
+  const companionByteLength = count * companionStrideWords * Uint32Array.BYTES_PER_ELEMENT;
+  if (!Object.isFrozen(physicalLayout)
+      || physicalLayout.particleCount !== particleCount || physicalLayout.denseEventCount !== count
+      || physicalLayout.massWordCount !== format.wordCount || physicalLayout.eventWords !== eventStrideWords
+      || physicalLayout.eventCompanionStrideWords !== companionStrideWords
+      || physical.eventCompanionStrideWords !== companionStrideWords
+      || ![eventByteLength, companionByteLength].every(value => positive(value) && value <= 0xffff_fffc)) {
+    throw placementEpochError('exact placement residual storage lost its original event/companion layout', 'QUANTITY_IDENTITY');
+  }
+  requireReactionWarmArenaStorageCapacity(device, byteLength, 'persistent placement quantities');
+  requireReactionWarmArenaStorageCapacity(device, 8, 'persistent placement residual count');
+  requireReactionWarmArenaStorageCapacity(device, eventByteLength, 'persistent placement residual events');
+  requireReactionWarmArenaStorageCapacity(device, companionByteLength, 'persistent placement residual companions');
+  requireReactionWarmArenaStorageCapacity(device, count * 208, 'persistent placement residual physical state');
+  const massByteLength = (particleCount + count) * format.wordCount * 4;
+  requireReactionWarmArenaStorageCapacity(device, massByteLength, 'persistent placement exact mass');
+  const sourceInventoryGeneration = exactU32(view.source.source.inventory.generation, 'source inventory generation');
+  const buffer = requireDeviceBuffer(device, quantities.outputBuffer,
+    'original exact placement quantities', sourceByteLength);
+  const countBuffer = requireDeviceBuffer(device, physical.compactCountBuffer,
+    'original exact residual count and error', 8);
+  // The rollback plane remains in the separately held original source. The
+  // destination stores current carriers followed by current-step residuals.
+  const { originalRowOffset: _originalRowOffset, ...currentLayout } = layout;
+  const destinationLayout = Object.freeze({ ...currentLayout,
+    currentRowOffset: 0, eventRowOffset: particleCount,
+    rowCount: particleCount + count, wordLength: byteLength / Uint32Array.BYTES_PER_ELEMENT });
+  const residualLayout = Object.freeze({
+    schema: 'peercompute.ulg.exact-placement-residual-storage.v2',
+    particleCount, eventCapacity: count, eventStrideWords, companionStrideWords,
+    eventByteLength, companionByteLength, physicalStrideWords: 52, physicalByteLength: count * 208, countByteLength: 8,
+    quantityLayout: destinationLayout, format,
+    historyTransferAdmitted: false, physicalPublicationAdmitted: false
+  });
+  const immutableBuffers = Object.freeze([
+    buffer, countBuffer, view.result.outputBuffer, view.source.result.outputBuffer,
+    view.source.source.inventory.buffer,
+    ...['sourcePackedBuffer', 'packedBuffer', 'stateBuffer', 'thermoBuffer', 'mechanicsBuffer',
+      'eventBuffer', 'auxiliaryBuffer', 'compactEventBuffer', 'compactCompanionBuffer',
+      'compactReceiptBuffer'].map(key => physical[key])
+  ].filter(Boolean));
+  read.validate();
+  return Object.freeze({ buffer, countBuffer, layout, format, destinationLayout,
+    byteLength, sourceByteOffset, immutableBuffers, residualLayout, massByteLength, sourceInventoryGeneration });
+}
+
 function assertDistinctPlacementBuffers({
   frozenSourceStateBuffer,
   frozenSourceThermoBuffer,
   frozenSourceMechanicsBuffer,
   placedDestinationStateBuffer,
   placedDestinationThermoBuffer,
-  placedDestinationMechanicsBuffer
+  placedDestinationMechanicsBuffer,
+  frozenSourceQuantityBuffer = null,
+  frozenSourceResidualCountBuffer = null,
+  placedDestinationQuantityBuffer = null,
+  placedDestinationMassBuffer = null,
+  placedDestinationResidualCountBuffer = null,
+  placedDestinationResidualEventBuffer = null,
+  placedDestinationResidualCompanionBuffer = null,
+  placedDestinationResidualPhysicalBuffer = null
 }) {
   const sources = [
     frozenSourceStateBuffer,
     frozenSourceThermoBuffer,
-    frozenSourceMechanicsBuffer
+    frozenSourceMechanicsBuffer,
+    ...[frozenSourceQuantityBuffer, frozenSourceResidualCountBuffer].filter(Boolean)
   ];
   const destinations = [
     placedDestinationStateBuffer,
     placedDestinationThermoBuffer,
-    placedDestinationMechanicsBuffer
+    placedDestinationMechanicsBuffer,
+    ...[placedDestinationQuantityBuffer, placedDestinationMassBuffer, placedDestinationResidualCountBuffer,
+      placedDestinationResidualEventBuffer, placedDestinationResidualCompanionBuffer, placedDestinationResidualPhysicalBuffer].filter(Boolean)
   ];
   if (new Set(sources).size !== sources.length) {
     throw placementEpochError(
@@ -1132,6 +1255,30 @@ function submitFrozenFamilyCopy(device, family) {
     0,
     family.mechanicsBufferByteLength
   );
+  if (family.placedDestinationQuantityBuffer) {
+    encoder.clearBuffer(family.placedDestinationMassBuffer, 0, family.placedDestinationMassByteLength);
+    if (typeof encoder.clearBuffer !== 'function') {
+      throw placementEpochError('exact residual destinations require original initialization clears', 'COPY_UNAVAILABLE');
+    }
+    // Durable storage is not admitted history. Only the original terminal's
+    // private recovered-tuple copy may populate these separate destinations.
+    encoder.clearBuffer(family.placedDestinationResidualEventBuffer, 0,
+      family.placedDestinationResidualLayout.eventByteLength);
+    encoder.clearBuffer(family.placedDestinationResidualCompanionBuffer, 0,
+      family.placedDestinationResidualLayout.companionByteLength);
+    encoder.clearBuffer(family.placedDestinationResidualPhysicalBuffer, 0,
+      family.placedDestinationResidualLayout.physicalByteLength);
+    encoder.copyBufferToBuffer(
+      family.frozenSourceQuantityBuffer,
+      family.frozenSourceQuantityLayout.currentRowOffset
+        * family.frozenSourceQuantityLayout.recordWords * Uint32Array.BYTES_PER_ELEMENT,
+      family.placedDestinationQuantityBuffer,
+      0,
+      family.placedDestinationQuantityByteLength
+    );
+    encoder.copyBufferToBuffer(family.frozenSourceResidualCountBuffer, 0,
+      family.placedDestinationResidualCountBuffer, 0, 8);
+  }
   device.queue.submit([encoder.finish()]);
   return Object.freeze({
     schema:
@@ -1163,7 +1310,14 @@ function destroyPlacementAuxiliaryResources(record) {
       record.levelAssignment?.assignmentBuffer
     );
   }
-  if (!record.reactionWarmArenaLease) {
+  if (record.exactSourceRead) {
+    record.exactSourceReleasePromise ??= record.exactSourceRead.release();
+    // The routing owner, not this borrowed family, destroys frozen outputs.
+    // Keep failures observable without an unhandled cleanup rejection.
+    void record.exactSourceReleasePromise.catch(error => {
+      record.lifecycle.releaseReason = error instanceof Error ? error.message : String(error);
+    });
+  } else if (!record.reactionWarmArenaLease) {
     destroyOnce(record, 'frozen-state', record.family.frozenSourceStateBuffer);
     destroyOnce(record, 'frozen-thermo', record.family.frozenSourceThermoBuffer);
     destroyOnce(
@@ -1174,23 +1328,44 @@ function destroyPlacementAuxiliaryResources(record) {
   }
 }
 
+function placementDestinationPreservation(record, buffers) {
+  const preserved = new Set(buffers);
+  const physical = ['State', 'Thermo', 'Mechanics'].map(component => record.family[`placedDestination${component}Buffer`]);
+  if ((preserved.size && record.reactionWarmArenaLease) || [...preserved].some(buffer => !physical.includes(buffer))) {
+    throw placementEpochError('Only cold physical destination components can transfer to a continuation', 'OWNERSHIP_TRANSFER');
+  }
+  return preserved;
+}
+
 function destroyPlacedDestinations(record, { includeTransferred = false } = {}) {
-  if ((record.destinationOwnershipTransferred && !includeTransferred) || record.reactionWarmArenaLease) return;
-  if (!record.callerOwnedDestinations.state) {
+  if (record.destinationOwnershipTransferred && !includeTransferred) return;
+  if (record.family.placedDestinationQuantityBuffer) {
+    destroyOnce(record, 'placed-mass', record.family.placedDestinationMassBuffer);
+    destroyOnce(record, 'placed-quantity', record.family.placedDestinationQuantityBuffer);
+    destroyOnce(record, 'placed-residual-count', record.family.placedDestinationResidualCountBuffer);
+    destroyOnce(record, 'placed-residual-events', record.family.placedDestinationResidualEventBuffer);
+    destroyOnce(record, 'placed-residual-companions', record.family.placedDestinationResidualCompanionBuffer);
+    destroyOnce(record, 'placed-residual-physical', record.family.placedDestinationResidualPhysicalBuffer);
+  }
+  // Exact borrowed-source families reject warm leases before allocation. All
+  // quantity destinations are cold family allocations, never recyclable arena
+  // buffers; legacy warm ownership still follows its existing release path.
+  if (record.reactionWarmArenaLease) return;
+  if (!record.callerOwnedDestinations.state && !record.destinationPreservedBuffers?.has(record.family.placedDestinationStateBuffer)) {
     destroyOnce(
       record,
       'placed-state',
       record.family.placedDestinationStateBuffer
     );
   }
-  if (!record.callerOwnedDestinations.thermo) {
+  if (!record.callerOwnedDestinations.thermo && !record.destinationPreservedBuffers?.has(record.family.placedDestinationThermoBuffer)) {
     destroyOnce(
       record,
       'placed-thermo',
       record.family.placedDestinationThermoBuffer
     );
   }
-  if (!record.callerOwnedDestinations.mechanics) {
+  if (!record.callerOwnedDestinations.mechanics && !record.destinationPreservedBuffers?.has(record.family.placedDestinationMechanicsBuffer)) {
     destroyOnce(
       record,
       'placed-mechanics',
@@ -1231,6 +1406,7 @@ function armDeviceLoss(record) {
         : String(error);
     } finally {
       settleRetirementAfterLoss(record);
+      settlePlacementDestinationReads(record, false);
     }
   }, observerFailed);
 }
@@ -1252,9 +1428,12 @@ export function createSphReactionResolvePositionInvariantCertificate({
   transactionRollbackThermoBuffer,
   transactionRollbackMechanicsBuffer,
   frozenResolvedStateBuffer,
+  frozenResolvedThermoBuffer = null,
+  frozenResolvedMechanicsBuffer = null,
   particleCount,
   reactionDiscoveryProposal = null,
-  reactionTable = null
+  reactionTable = null,
+  exactReactionCandidate = null
 } = {}) {
   const resolvedParticleCount = exactU32(
     particleCount,
@@ -1328,7 +1507,34 @@ export function createSphReactionResolvePositionInvariantCertificate({
   let prePlacementPositionChanged = false;
   let resolvedPositionEpoch = ancestorPositionEpoch;
   let authenticatedReactionDiscovery = null;
-  if (
+  const exactRoutingView = exactReactionCandidate == null ? null
+    : resolveSphExactReactionRoutingCandidate(exactReactionCandidate, { device });
+  if (exactRoutingView) {
+    const packet = exactRoutingView.source, original = packet.source;
+    const discovery = packet.discovery, physical = exactRoutingView.result.physicalOutput;
+    if (original.device !== device || original.generation !== ancestor
+        || original.particleCount !== resolvedParticleCount
+        || original.stateBuffer !== exactReactionInputState
+        || original.thermoBuffer !== exactReactionInputThermo
+        || original.mechanicsBuffer !== exactReactionInputMechanics
+        || packet.reactionTable !== reactionTable
+        || (reactionDiscoveryProposal != null && packet.reactionDiscoveryProposal !== reactionDiscoveryProposal)
+        || discovery?.generation !== ancestor || discovery.admitted !== true
+        || discovery.positionAuthorityStateBuffer !== ancestor.source?.sourceStateBuffer
+        || discovery.sourceCurrentStateBuffer !== exactReactionInputState
+        || discovery.sourceThermoBuffer !== exactReactionInputThermo
+        || discovery.sourceMechanicsBuffer !== exactReactionInputMechanics
+        || physical.stateBuffer !== exactFrozenResolvedState
+        || physical.thermoBuffer !== frozenResolvedThermoBuffer
+        || physical.mechanicsBuffer !== frozenResolvedMechanicsBuffer) {
+      throw placementEpochError('resolve certificate requires the original retained exact routing family', 'RESOLVE_DISCOVERY_AUTHORITY');
+    }
+    prePlacementPositionChanged = exactReactionInputState !== ancestor.source?.sourceStateBuffer;
+    resolvedPositionEpoch = prePlacementPositionChanged
+      ? incrementIdentityU32(ancestorPositionEpoch, 'post-G2P exact reaction discovery position epoch')
+      : ancestorPositionEpoch;
+    sourceAuthority = 'authenticated-retained-exact-reaction-routing-source';
+  } else if (
     reactionDiscoveryProposal == null
     && reactionTable != null
   ) {
@@ -1337,7 +1543,7 @@ export function createSphReactionResolvePositionInvariantCertificate({
       'RESOLVE_DISCOVERY_AUTHORITY'
     );
   }
-  if (reactionDiscoveryProposal != null) {
+  if (!exactRoutingView && reactionDiscoveryProposal != null) {
     authenticatedReactionDiscovery =
       resolveSchroederSpatialReactionDiscoveryProposalForConsumer(
         reactionDiscoveryProposal,
@@ -1380,7 +1586,7 @@ export function createSphReactionResolvePositionInvariantCertificate({
     sourceAuthority = prePlacementPositionChanged
       ? 'authenticated-displacement-certified-post-g2p-reaction-discovery-current-state'
       : 'authenticated-reaction-discovery-over-exact-ancestor-position-state';
-  } else if (exactReactionInputState !== ancestor.source?.sourceStateBuffer) {
+  } else if (!exactRoutingView && exactReactionInputState !== ancestor.source?.sourceStateBuffer) {
     throw placementEpochError(
       'resolve-position certificate requires the exact ancestor source state',
       'RESOLVE_SOURCE_IDENTITY'
@@ -1432,6 +1638,9 @@ export function createSphReactionResolvePositionInvariantCertificate({
     transactionRollbackMechanicsBuffer: exactTransactionRollbackMechanics,
     reactionDiscoveryProposal,
     reactionTable,
+    exactReactionCandidate,
+    frozenResolvedThermoBuffer,
+    frozenResolvedMechanicsBuffer,
     sourceAuthority,
     prePlacementPositionChanged,
     ancestorPositionEpoch,
@@ -1444,7 +1653,7 @@ export function createSphReactionResolvePositionInvariantCertificate({
 
 function positionInvariantCertificateSourceAuthorityIsCurrent(
   certificateRecord,
-  { device, ancestorGeneration, particleCount }
+  { device, ancestorGeneration, particleCount, exactSourceRead = null }
 ) {
   try {
     if (
@@ -1471,6 +1680,37 @@ function positionInvariantCertificateSourceAuthorityIsCurrent(
     );
   } catch {
     return false;
+  }
+  if (certificateRecord.exactReactionCandidate) {
+    try {
+      const { result, source: packet } = exactSourceRead
+        ? exactSourceRead.validate()
+        : resolveSphExactReactionRoutingCandidate(certificateRecord.exactReactionCandidate, { device });
+      const original = packet.source, discovery = packet.discovery, physical = result.physicalOutput;
+      const moved = original.stateBuffer !== ancestorGeneration.source?.sourceStateBuffer;
+      return result === certificateRecord.exactReactionCandidate
+        && original.device === device && original.generation === ancestorGeneration
+        && original.particleCount === particleCount
+        && original.stateBuffer === certificateRecord.reactionInputStateBuffer
+        && original.thermoBuffer === certificateRecord.reactionInputThermoBuffer
+        && original.mechanicsBuffer === certificateRecord.reactionInputMechanicsBuffer
+        && packet.reactionTable === certificateRecord.reactionTable
+        && (certificateRecord.reactionDiscoveryProposal == null
+          || packet.reactionDiscoveryProposal === certificateRecord.reactionDiscoveryProposal)
+        && discovery?.admitted === true && discovery.generation === ancestorGeneration
+        && discovery.positionAuthorityStateBuffer === ancestorGeneration.source?.sourceStateBuffer
+        && discovery.sourceCurrentStateBuffer === original.stateBuffer
+        && discovery.sourceThermoBuffer === original.thermoBuffer
+        && discovery.sourceMechanicsBuffer === original.mechanicsBuffer
+        && physical.stateBuffer === certificateRecord.frozenResolvedStateBuffer
+        && physical.thermoBuffer === certificateRecord.frozenResolvedThermoBuffer
+        && physical.mechanicsBuffer === certificateRecord.frozenResolvedMechanicsBuffer
+        && certificateRecord.prePlacementPositionChanged === moved
+        && certificateRecord.ancestorPositionEpoch === ancestorGeneration.execution.positionEpoch
+        && certificateRecord.resolvedPositionEpoch === (moved
+          ? incrementIdentityU32(ancestorGeneration.execution.positionEpoch, 'post-G2P exact reaction position epoch')
+          : ancestorGeneration.execution.positionEpoch);
+    } catch { return false; }
   }
   if (
     certificateRecord.sourceAuthority
@@ -1586,6 +1826,14 @@ export function resolveSchroederSpatialReactionPlacementSourceFamily(
       'RETIRED'
     );
   }
+  if (record.exactSourceRead) {
+    requirePublicGeneration(record.device, record.generation, sourceFamily.particleCount);
+    record.exactSourceRead.validate();
+    if (!record.exactQuantityBindings || Object.entries(record.exactQuantityBindings)
+      .some(([key, value]) => sourceFamily[key] !== value)) {
+      throw placementEpochError('persistent exact quantities changed their original destination owner', 'QUANTITY_IDENTITY');
+    }
+  }
   assertDistinctPlacementBuffers(sourceFamily);
   if (
     sourceFamily.generation !== record.generation
@@ -1605,6 +1853,23 @@ export function resolveSchroederSpatialReactionPlacementSourceFamily(
     );
   }
   return sourceFamily;
+}
+
+/** View-only access to the exact producer retained by this original family.
+ * The family keeps its release capability private. Legacy families return null. */
+export function resolveSchroederSpatialReactionPlacementExactSource(sourceFamily, { device } = {}) {
+  resolveSchroederSpatialReactionPlacementSourceFamily(sourceFamily, { device });
+  const record = placementSourceFamilyRecords.get(sourceFamily);
+  if (!record.exactSourceRead) return null;
+  const validate = () => {
+    resolveSchroederSpatialReactionPlacementSourceFamily(sourceFamily, { device: record.device });
+    return record.exactSourceRead.validate();
+  };
+  return Object.freeze({ view: validate(), validate,
+    markDerivedBuffers(buffers, options) {
+      validate(); record.exactSourceRead.markDerivedBuffers(buffers, options); validate();
+    }
+  });
 }
 
 export function schroederSpatialReactionPlacementSourceFamilyLiveness(
@@ -1716,6 +1981,8 @@ export async function finalizeSchroederSpatialReactionPlacementPositionEpochFloo
     || placementArtifact.positionMayChange !== true
     || placementArtifact.topologyMayChange !== true
     || placementArtifact.placementSourceFamily !== sourceFamily
+    || (record.exactQuantityBindings && Object.entries(record.exactQuantityBindings)
+      .some(([key, value]) => placementArtifact[key] !== value))
     || placementArtifact.generation !== record.generation
     || placementArtifact.placedDestinationStateBuffer
       !== sourceFamily.placedDestinationStateBuffer
@@ -1943,6 +2210,139 @@ export function schroederSpatialReactionPlacementTransferredDestinationCleanupCl
     : null;
 }
 
+function settlePlacementDestinationReads(record, confirmed) {
+  for (const resolve of record.destinationReadWaiters) resolve(confirmed);
+  record.destinationReadWaiters.clear();
+}
+
+function waitForPlacementDestinationReads(record) {
+  if (record.deviceLost) return Promise.resolve(false);
+  if (record.destinationActiveReadCount === 0) return Promise.resolve(true);
+  return new Promise(resolve => record.destinationReadWaiters.add(resolve));
+}
+
+/** Pin the original transferred tuple after its one-shot placement submission.
+ * The source/routing owner may already have retired. This read owns no source
+ * buffers and authorizes no new physical publication or numeric reseeding.
+ * A downstream producer can copy exact terminal rows while compilation waits,
+ * then release with its genuine queued consumer instead of adding a host fence.
+ */
+export function acquireSchroederSpatialReactionPlacementDestinationRead(sourceFamily, { device } = {}) {
+  const record = placementSourceFamilyRecords.get(sourceFamily);
+  if (!record || record.device !== device || record.deviceLost
+      || !record.destinationOwnershipTransferred || !record.finalizedPlacementArtifact
+      || !record.positionEpochFloorReceipt || record.destinationReturnScheduled
+      || record.destinationCleanupStarted || record.destinationCleanupCompleted
+      || Object.values(record.callerOwnedDestinations).some(Boolean)) {
+    throw placementEpochError('destination read requires the original live transferred placement owner', 'DESTINATION_READ');
+  }
+  const read = {
+    device, particleCount: sourceFamily.particleCount,
+    stateBuffer: sourceFamily.placedDestinationStateBuffer,
+    thermoBuffer: sourceFamily.placedDestinationThermoBuffer,
+    mechanicsBuffer: sourceFamily.placedDestinationMechanicsBuffer,
+    quantityBuffer: sourceFamily.placedDestinationQuantityBuffer ?? null,
+    massBuffer: sourceFamily.placedDestinationMassBuffer ?? null,
+    massByteLength: sourceFamily.placedDestinationMassByteLength ?? 0,
+    sourceInventoryGeneration: sourceFamily.placedDestinationMassSourceGeneration ?? null,
+    placementStorageGeneration: sourceFamily.placedDestinationStorageGeneration,
+    inventoryLineage: (() => {
+      const key = sourceFamily.identityBuffer;
+      if (!key) return null;
+      let token = placementInventoryLineages.get(key);
+      if (!token) { token = Object.freeze({}); placementInventoryLineages.set(key,token); }
+      return token;
+    })(),
+    quantityLayout: sourceFamily.placedDestinationQuantityLayout ?? null,
+    format: sourceFamily.placedDestinationQuantityFormat ?? null,
+    residualCountBuffer: sourceFamily.placedDestinationResidualCountBuffer ?? null,
+    residualEventBuffer: sourceFamily.placedDestinationResidualEventBuffer ?? null,
+    residualCompanionBuffer: sourceFamily.placedDestinationResidualCompanionBuffer ?? null,
+    residualPhysicalBuffer: sourceFamily.placedDestinationResidualPhysicalBuffer ?? null,
+    residualLayout: sourceFamily.placedDestinationResidualLayout ?? null,
+    physicalPublicationAdmitted: false
+  };
+  const held = { record, released: false, completed: false, completion: null, cleanup: null };
+  held.cleanup = () => {
+    if (held.completed) return;
+    const owner = held.record;
+    held.completed = true; held.released = true; held.record = null;
+    owner.destinationActiveReadCount--;
+    if (owner.destinationActiveReadCount === 0) settlePlacementDestinationReads(owner, !owner.deviceLost);
+  };
+  const claim = registerQueueOrderedCleanupClaim(destinationReadCleanupClaimIssuer, device,
+    { producerOutput: read, cleanup: held.cleanup });
+  Object.defineProperty(read, 'queueOrderedCleanupClaim', { value: claim });
+  Object.freeze(read);
+  placementDestinationReads.set(read, held);
+  record.destinationActiveReadCount++;
+  return read;
+}
+
+export function resolveSchroederSpatialReactionPlacementDestinationRead(read, { device } = {}) {
+  const held = placementDestinationReads.get(read), record = held?.record;
+  if (!record || held.released || record.device !== device || record.deviceLost
+      || record.destinationCleanupCompleted) {
+    throw placementEpochError('destination consumption requires its original live retained read', 'DESTINATION_READ');
+  }
+  return read;
+}
+
+/** Pin the original destination before any module/consumer await, so owner
+ * retirement may close admission without invalidating the in-flight copy.
+ * The numeric family has independent storage; complete physical quantities
+ * and residual history still belong to this placement destination owner.
+ */
+export async function createSchroederSpatialReactionPlacementMassInventory(sourceFamily, { device } = {}) {
+  const placementRead = acquireSchroederSpatialReactionPlacementDestinationRead(sourceFamily, { device });
+  try {
+    const { createSphExactMassInventoryFromReactionPlacementWebGpu } = await import('./sphExactMassInventoryGpu.js');
+    return await createSphExactMassInventoryFromReactionPlacementWebGpu({ device, placementRead });
+  } catch (error) {
+    await releaseSchroederSpatialReactionPlacementDestinationRead(placementRead);
+    throw error;
+  }
+}
+
+export async function createSchroederSpatialReactionPlacementProductHistory(sourceFamily, { device } = {}) {
+  const placementRead = acquireSchroederSpatialReactionPlacementDestinationRead(sourceFamily, { device });
+  try {
+    const { createResidentProductMassHandleFromPlacementRead } = await import('./sphReactionGpuSummary.js');
+    return await createResidentProductMassHandleFromPlacementRead({ device, placementRead });
+  } catch (error) {
+    await releaseSchroederSpatialReactionPlacementDestinationRead(placementRead);
+    throw error;
+  }
+}
+
+export function releaseSchroederSpatialReactionPlacementDestinationRead(read, { queueOrderedFinalConsumer = null } = {}) {
+  const held = placementDestinationReads.get(read);
+  if (!held) throw placementEpochError('destination retirement requires the original retained read', 'DESTINATION_READ');
+  if (held.released) return held.completion;
+  const record = held.record;
+  if (queueOrderedFinalConsumer != null) {
+    releaseSubmittedWorkCleanupQueueOrdered(record.device, held.cleanup, {
+      queueOrderedFinalConsumer, producerClaim: read.queueOrderedCleanupClaim, producerOutput: read,
+      producerFamily: 'schroeder-reaction-placement-destination-read'
+    });
+    held.completion = Promise.resolve(!record.deviceLost);
+  } else {
+    if (record.deviceLost) {
+      held.cleanup(); held.completion = Promise.resolve(false);
+      return held.completion;
+    }
+    // A sealed read claim belongs to its exact queued consumer. Cancellation
+    // rejects before closing this read, so its genuine capability may retry.
+    cancelQueueOrderedCleanupClaim(read.queueOrderedCleanupClaim, record.device,
+      { producerOutput: read, cleanup: held.cleanup });
+    held.released = true;
+    held.completion = confirmedRetirement(record, retirementFence(record.device)).then(confirmed => {
+      held.cleanup(); return confirmed && !record.deviceLost;
+    });
+  }
+  return held.completion;
+}
+
 function finalizeQueueOrderedPlacementSourceRelease(
   record,
   placementArtifact,
@@ -1980,8 +2380,9 @@ function finalizeQueueOrderedPlacementSourceRelease(
     : Promise.resolve(true);
   record.lifecycle.releasePromise = Promise.all([
     Promise.resolve(cleanupReceipt),
-    Promise.resolve(destinationRetirement)
-  ]).then(([, retired]) => retired !== false);
+    Promise.resolve(destinationRetirement),
+    Promise.resolve(record.exactSourceReleasePromise ?? true)
+  ]).then(([, retired, sourceRetired]) => retired !== false && sourceRetired !== false);
 }
 
 export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
@@ -2006,7 +2407,11 @@ export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
     );
   }
   if (record.lifecycle.releaseScheduled === true) return false;
-  resolveSchroederSpatialReactionPlacementSourceFamily(sourceFamily);
+  // Abandoning a genuine borrowed family is retirement, not new admission.
+  // Its generation may already be closing while its read still owns buffers.
+  if (!(abandon === true && record.exactSourceRead)) {
+    resolveSchroederSpatialReactionPlacementSourceFamily(sourceFamily);
+  }
   if (
     abandon !== true
     && (
@@ -2126,7 +2531,7 @@ export function releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(
       record.lifecycle.releaseStatus = 'released-after-final-consumer';
       record.lifecycle.releaseReason = null;
       record.completion.status = 'placement-consumer-completed';
-      return true;
+      return record.exactSourceReleasePromise ?? true;
     });
   return true;
 }
@@ -2261,12 +2666,28 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     || positionInvariantCertificate.resolvedPositionEpoch
       !== certificateRecord.resolvedPositionEpoch
     || certificateRecord.frozenResolvedStateBuffer !== frozenState
+    || (certificateRecord.exactReactionCandidate && (
+      certificateRecord.frozenResolvedThermoBuffer !== frozenThermo
+      || certificateRecord.frozenResolvedMechanicsBuffer !== frozenMechanics
+      || reactionWarmArenaLease != null
+    ))
     || certificateRecord.particleCount !== particleCount
   ) {
     throw placementEpochError(
       'numeric position-epoch inheritance requires the exact resolve certificate',
       'POSITION_INVARIANCE'
     );
+  }
+  const exactSourceRead = certificateRecord.exactReactionCandidate
+    ? acquireSphExactReactionRoutingRead(certificateRecord.exactReactionCandidate, { device })
+    : null;
+  let exactSourceTransferred = false;
+  try {
+  if (exactSourceRead) {
+    const originalUpload = exactSourceRead.view.source.source.sourceSphUpload;
+    if (sphParticleUpload !== originalUpload || stableIdentityBuffer !== (originalUpload?.identityBuffer ?? null)) {
+      throw placementEpochError('exact placement requires the original stable identity upload', 'SOURCE_FAMILY_IDENTITY');
+    }
   }
   const transactionRollbackStateBuffer = requireDeviceBuffer(
     device,
@@ -2316,6 +2737,13 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
   const {
     allocateSchroederSpatialSuccessorBufferFamilyIdentity
   } = await import('./schroederSpatialSuccessorSourceFamily.js');
+  requirePublicGeneration(device, ancestor, particleCount);
+  if (!positionInvariantCertificateSourceAuthorityIsCurrent(certificateRecord,
+    { device, ancestorGeneration: ancestor, particleCount, exactSourceRead })) {
+    throw placementEpochError('placement source changed during epoch preparation', 'POSITION_INVARIANCE');
+  }
+  const exactQuantities = exactSourceRead
+    ? exactPlacementQuantitySource(exactSourceRead, device, particleCount) : null;
   const ancestorEpochIdentity = exactEpochIdentity(ancestor.execution);
   const stageStorageAllocation =
     allocateSchroederSpatialSuccessorBufferFamilyIdentity({
@@ -2359,6 +2787,7 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
   ].filter(Boolean);
   if (
     providedDestinations.some((buffer) => frozenSources.includes(buffer))
+    || providedDestinations.some((buffer) => exactQuantities?.immutableBuffers.includes(buffer))
     || providedDestinations.some((buffer) => [
       transactionRollbackStateBuffer,
       transactionRollbackThermoBuffer,
@@ -2398,26 +2827,70 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
   let destinationState = validatedProvidedState;
   let destinationThermo = validatedProvidedThermo;
   let destinationMechanics = validatedProvidedMechanics;
+  let destinationQuantity = null;
+  let destinationMass = null;
+  let destinationResidualCount = null;
+  let destinationResidualEvents = null;
+  let destinationResidualCompanions = null;
+  let destinationResidualPhysical = null;
+  const allocatedDestinations = new Set();
+  const protectedDestinations = new Set([
+    ...frozenSources, ...(exactQuantities?.immutableBuffers ?? []), ...providedDestinations,
+    transactionRollbackStateBuffer, transactionRollbackThermoBuffer, transactionRollbackMechanicsBuffer,
+    stableIdentityBuffer, ancestor.execution.directoryBuffer, ancestor.source.sourceBuffer,
+    ancestor.source.sourceStateBuffer
+  ].filter(Boolean));
+  const allocateDestination = (ownerDevice, label, bytes) => {
+    const buffer = createPlacedDestinationBuffer(ownerDevice, label, bytes);
+    if (protectedDestinations.has(buffer) || allocatedDestinations.has(buffer)) {
+      throw placementEpochError('allocated placement destination aliases an original source or sibling', 'DESTINATION_ALIAS');
+    }
+    allocatedDestinations.add(buffer);
+    if (!Number.isSafeInteger(buffer.size) || buffer.size < bytes
+        || (buffer.usage & (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST))
+          !== (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST)) {
+      throw placementEpochError('allocated placement destination does not cover its original extent and usage', 'QUANTITY_CAPACITY');
+    }
+    return buffer;
+  };
+  const destroyAllocatedDestinations = () => {
+    for (const buffer of allocatedDestinations) {
+      try { buffer?.destroy?.(); } catch { /* Retire independent siblings too. */ }
+    }
+    allocatedDestinations.clear();
+  };
   try {
-    destinationState ||= createPlacedDestinationBuffer(
+    destinationState ||= allocateDestination(
       device,
       'ulg-schroeder-reaction-placement-state-destination',
       stateBytes
     );
-    destinationThermo ||= createPlacedDestinationBuffer(
+    destinationThermo ||= allocateDestination(
       device,
       'ulg-schroeder-reaction-placement-thermo-destination',
       thermoBytes
     );
-    destinationMechanics ||= createPlacedDestinationBuffer(
+    destinationMechanics ||= allocateDestination(
       device,
       'ulg-schroeder-reaction-placement-mechanics-destination',
       mechanicsBytes
     );
+    if (exactQuantities) {
+      destinationQuantity = allocateDestination(device,
+        'ulg-schroeder-reaction-placement-quantity-destination', exactQuantities.byteLength);
+      destinationResidualCount = allocateDestination(device,
+        'ulg-schroeder-reaction-placement-residual-count-destination', 8);
+      destinationResidualEvents = allocateDestination(device,
+        'ulg-schroeder-reaction-placement-residual-events-destination', exactQuantities.residualLayout.eventByteLength);
+      destinationResidualCompanions = allocateDestination(device,
+        'ulg-schroeder-reaction-placement-residual-companions-destination', exactQuantities.residualLayout.companionByteLength);
+      destinationResidualPhysical = allocateDestination(device,
+        'ulg-schroeder-reaction-placement-residual-physical-destination', exactQuantities.residualLayout.physicalByteLength);
+      destinationMass = allocateDestination(device,
+        'ulg-schroeder-reaction-placement-mass-destination', exactQuantities.massByteLength);
+    }
   } catch (error) {
-    if (!validatedProvidedState) destinationState?.destroy?.();
-    if (!validatedProvidedThermo) destinationThermo?.destroy?.();
-    if (!validatedProvidedMechanics) destinationMechanics?.destroy?.();
+    destroyAllocatedDestinations();
     throw error;
   }
   const callerOwnedDestinations = Object.freeze({
@@ -2430,7 +2903,26 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     thermo: Boolean(reactionWarmBuffers),
     mechanics: Boolean(reactionWarmBuffers)
   });
+  let initializationFence = null;
+  try {
   const bufferFamily = {
+    ...(exactQuantities ? {
+      frozenSourceQuantityBuffer: exactQuantities.buffer,
+      frozenSourceQuantityLayout: exactQuantities.layout,
+      frozenSourceResidualCountBuffer: exactQuantities.countBuffer,
+      placedDestinationQuantityBuffer: destinationQuantity,
+      placedDestinationMassBuffer: destinationMass,
+      placedDestinationMassByteLength: exactQuantities.massByteLength,
+      placedDestinationMassSourceGeneration: exactQuantities.sourceInventoryGeneration,
+      placedDestinationQuantityLayout: exactQuantities.destinationLayout,
+      placedDestinationQuantityFormat: exactQuantities.format,
+      placedDestinationQuantityByteLength: exactQuantities.byteLength,
+      placedDestinationResidualCountBuffer: destinationResidualCount,
+      placedDestinationResidualEventBuffer: destinationResidualEvents,
+      placedDestinationResidualCompanionBuffer: destinationResidualCompanions,
+      placedDestinationResidualPhysicalBuffer: destinationResidualPhysical,
+      placedDestinationResidualLayout: exactQuantities.residualLayout
+    } : {}),
     frozenSourceStateBuffer: frozenState,
     frozenSourceThermoBuffer: frozenThermo,
     frozenSourceMechanicsBuffer: frozenMechanics,
@@ -2460,9 +2952,15 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     supportEpoch: ancestorEpochIdentity.supportEpoch
   });
 
-  let initializationFence = null;
-  try {
+    requirePublicGeneration(device, ancestor, particleCount);
+    exactSourceRead?.validate();
+    exactSourceRead?.markDerivedBuffers([
+      destinationState, destinationThermo, destinationQuantity, destinationMass, destinationResidualCount,
+      destinationResidualEvents, destinationResidualCompanions, destinationResidualPhysical
+    ].filter(Boolean), { mechanicsBuffers: [destinationMechanics] });
     initializationFence = submitFrozenFamilyCopy(device, bufferFamily);
+    requirePublicGeneration(device, ancestor, particleCount);
+    exactSourceRead?.validate();
     const stageEpochTuple = Object.freeze({
       stageIdentity: SCHROEDER_SPATIAL_REACTION_PLACEMENT_STAGE_ID,
       sourceFamilyId: SCHROEDER_SPATIAL_REACTION_PLACEMENT_SOURCE_FAMILY_ID,
@@ -2553,11 +3051,23 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       callerOwnedDestinations,
       arenaOwnedDestinations,
       reactionWarmArenaLease,
+      exactSourceRead,
+      exactQuantityBindings: exactQuantities ? Object.freeze(Object.fromEntries([
+        'frozenSourceQuantityBuffer', 'frozenSourceQuantityLayout', 'frozenSourceResidualCountBuffer',
+        'placedDestinationQuantityBuffer', 'placedDestinationQuantityLayout',
+        'placedDestinationMassBuffer', 'placedDestinationMassByteLength', 'placedDestinationMassSourceGeneration',
+        'placedDestinationQuantityFormat', 'placedDestinationQuantityByteLength',
+        'placedDestinationResidualCountBuffer', 'placedDestinationResidualEventBuffer',
+        'placedDestinationResidualCompanionBuffer', 'placedDestinationResidualPhysicalBuffer', 'placedDestinationResidualLayout'
+      ].map(key => [key, family[key]]))) : null,
+      exactSourceReleasePromise: null,
       destinationOwnershipTransferred: false,
       destinationReturnScheduled: false,
       destinationReturnPromise: null,
       destinationCleanupStarted: false,
       destinationCleanupCompleted: false,
+      destinationActiveReadCount: 0,
+      destinationReadWaiters: new Set(),
       warmArenaReleasePromise: null,
       auxiliaryDestroyed: false,
       retireDestinationsOnSourceCleanup: false,
@@ -2611,15 +3121,10 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     placementSourceFamilies.add(family);
     placementSourceFamilyRecords.set(family, record);
     armDeviceLoss(record);
+    exactSourceTransferred = true;
     return family;
   } catch (error) {
-    const cleanup = () => {
-      for (const [key, buffer] of [['state', destinationState], ['thermo', destinationThermo], ['mechanics', destinationMechanics]]) {
-        if (!callerOwnedDestinations[key] && !arenaOwnedDestinations[key]) {
-          try { buffer.destroy?.(); } catch { /* Retire every sibling once. */ }
-        }
-      }
-    };
+    const cleanup = destroyAllocatedDestinations;
     // Submission can throw after delegation. Only a confirmed fence or loss
     // may retire the original candidate allocations, even before family minting.
     const cleanupFence = deferConfirmedSubmittedWorkCleanup(device, cleanup);
@@ -2636,5 +3141,12 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
       }
     }
     throw error;
+  }
+  } finally {
+    if (exactSourceRead && !exactSourceTransferred) {
+      // Includes a submit that throws after delegation: the retained owner
+      // retires this independent read only after a confirmed fence or loss.
+      void exactSourceRead.release().catch(() => {});
+    }
   }
 }

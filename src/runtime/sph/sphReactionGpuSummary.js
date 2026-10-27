@@ -79,6 +79,7 @@ import {
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
   assertSphLegacyMassPathAllowed,
+  markSphExactMassPlacementDerivedBuffers,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
@@ -101,6 +102,9 @@ import {
   acquireSphReactionProductPlacementSegmentedArenaWebGpu,
   discardSphReactionProductPlacementSegmentedArenaLease,
   encodeSphReactionProductPlacementSegmentedWebGpu,
+  encodeSphReactionProductPlacementExactCompactionWebGpu,
+  prewarmSphReactionProductPlacementExactWebGpu,
+  resolveSphReactionProductPlacementExactCompactionSource,
   finalizeSchroederSpatialReactionProductPlacementAuthority,
   observeSchroederSpatialReactionProductPlacementCompletion,
   releaseSphReactionProductPlacementSegmentedArenaAfterQueue,
@@ -114,6 +118,28 @@ import {
 import {
   createGpuReadbackTelemetryAccumulator
 } from './sphGpuReadbackTelemetry.js';
+import { sphExactResidentProductHistoryLayout, createSphExactResidentProductHistoryPackWgsl }
+  from './sphExactResidentProductHistoryWgsl.js';
+import { createResidentProductEventCountControlWords, registerResidentProductEventCountAuthority,
+  resolveResidentProductEventCountAuthority, revokeResidentProductEventCountAuthority }
+  from './sphResidentProductHistoryGpu.js';
+
+const exactProductHistoryHandles = new WeakMap();
+const exactProductHistoryDevices = new WeakMap();
+function monitorExactProductHistoryOwner(owner) {
+  let state = exactProductHistoryDevices.get(owner.device);
+  if (!state) {
+    state = { lost: false, owners: new Set() };
+    exactProductHistoryDevices.set(owner.device,state);
+    owner.device.lost.then(() => {
+      state.lost = true;
+      for (const value of [...state.owners]) { value.cleanup(); value.completed = true; }
+    }, () => {});
+  }
+  if (state.lost) throw new Error('Exact product history device is lost');
+  state.owners.add(owner);
+  owner.afterCleanup = () => state.owners.delete(owner);
+}
 
 export {
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -539,15 +565,23 @@ export function mergeResidentGasSpeciesLedgers(...ledgers) {
 // delegation or confer physical source/publication authority.
 const productEventRetirementOwners = new WeakMap();
 
-function createProductEventBufferDestructor(device, buffer, delegatedToArena) {
+function createProductEventBufferDestructor(device, buffer, delegatedToArena,
+  { additionalBuffers = [], exactHistoryLayout = null, exactCountControl = null, exactHistoryProvenance = null } = {}) {
   const owner = { device, buffer, delegatedToArena, requested: false, completed: false,
+    exactHistoryLayout, exactCountControl, exactHistoryProvenance,
     activeBorrowCount: 0, borrowDrainWaiters: new Set(), completion: null,
     claim: null, output: null, capability: null, storageDestroyed: false,
     fenceCount: 0, method: null, status: null, receipt: null, update: null, recordFence: null };
   const cleanup = () => {
     if (owner.storageDestroyed) return;
-    buffer.destroy?.();
+    if (exactHistoryLayout) {
+      for (const resource of [buffer, ...additionalBuffers]) {
+        try { resource.destroy?.(); } catch { /* Retire every owned exact plane. */ }
+      }
+      for (const handle of owner.exactHandles ?? []) revokeResidentProductEventCountAuthority(handle);
+    } else buffer.destroy?.();
     owner.storageDestroyed = true;
+    owner.afterCleanup?.();
   };
   owner.cleanup = cleanup;
   const destroy = ({ queueOrderedFinalConsumer = null } = {}) => {
@@ -628,10 +662,114 @@ function createProductEventBufferDestructor(device, buffer, delegatedToArena) {
   return destroy;
 }
 
+/** The copied packed row is an independent owner. Only an original retained
+ * terminal placement read can supply it; no raw buffer or f32 mass registrar
+ * is accepted. The copy consumes the read in same-queue submission order. */
+export async function createResidentProductMassHandleFromPlacementRead({ device, placementRead } = {}) {
+  const { resolveSchroederSpatialReactionPlacementDestinationRead: resolve,
+    releaseSchroederSpatialReactionPlacementDestinationRead: release } =
+    await import('./schroederSpatialReactionPlacementEpochGpu.js');
+  const source = resolve(placementRead, { device });
+  const layout = sphExactResidentProductHistoryLayout(source.format, source.quantityLayout);
+  const capacity = source.residualLayout?.eventCapacity, generation = source.sourceInventoryGeneration + 1;
+  if (!source.inventoryLineage || !Number.isSafeInteger(source.placementStorageGeneration)
+      || source.placementStorageGeneration < 1) throw new TypeError('Exact history requires original placement lineage');
+  // Two placement families can branch from the same input inventory. A new
+  // allocation/storage generation does not make those products disjoint.
+  // Append ancestry therefore follows the numeric inventory generation.
+  const provenance = Object.freeze({ lineage: source.inventoryLineage,
+    first: generation, last: generation });
+  const code = createSphExactResidentProductHistoryPackWgsl(layout, {
+    eventCapacity: capacity, particleCount: source.particleCount
+  });
+  if (Math.ceil(capacity / 64) > (device.limits?.maxComputeWorkgroupsPerDimension ?? 65535)) {
+    throw new RangeError('Exact history packing exceeds the device dispatch capacity');
+  }
+  const controlWords = createResidentProductEventCountControlWords({ status: 0, liveRowCount: 0,
+    rowCapacity: capacity, rowStrideVec4: layout.rowWords / 4, generation, seal: 1 });
+  const resources = [];
+  const allocate = (label, size, usage = 140) => {
+    const limit = Math.min(device.limits?.maxBufferSize ?? 268435456,
+      device.limits?.maxStorageBufferBindingSize ?? 134217728);
+    if (!Number.isSafeInteger(size) || size < 4 || size > limit) throw new RangeError('Exact history allocation exceeds storage capacity');
+    const buffer = device.createBuffer({ label, size, usage });
+    if ([source.stateBuffer, source.thermoBuffer, source.mechanicsBuffer, source.quantityBuffer,
+      source.massBuffer, source.residualEventBuffer, source.residualCompanionBuffer, source.residualCountBuffer, source.residualPhysicalBuffer,
+      ...resources].includes(buffer)) throw new TypeError('Exact history allocation aliases borrowed storage');
+    resources.push(buffer); tagWebGpuBufferDevice(buffer, device);
+    if (buffer.size < size || (buffer.usage & usage) !== usage) throw new TypeError('Exact history allocation lost its extent or usage');
+    return buffer;
+  };
+  let destroy = null;
+  try {
+    const buffer = allocate('ulg-exact-resident-product-history', capacity * layout.rowBytes);
+    const control = allocate('ulg-exact-resident-product-history-count', 256, 140 | 256);
+    await markSphExactMassPlacementDerivedBuffers(placementRead, resources, { device });
+    const entries = [source.residualEventBuffer, source.residualCompanionBuffer, source.quantityBuffer,
+      source.residualCountBuffer, buffer, control, source.residualPhysicalBuffer].map((value,binding) => ({ binding, resource: { buffer: value } }));
+    const encoder = device.createCommandEncoder({ label: 'ulg-exact-resident-product-history-pack' });
+    for (const entryPoint of ['pack_exact_product_history','seal_exact_product_history']) {
+      const info = createCachedExplicitComputePipeline(device, { code, entryPoint,
+        label: 'ulg-'+entryPoint, cacheKey: 'ulg-exact-product-history:'+entryPoint+':'+code,
+        bindings: entries.map(({ binding }) => computeBufferBinding(binding, binding === 4 || binding === 5 ? 'storage' : 'read-only-storage')) });
+      const bindGroup = device.createBindGroup({ layout: info.bindGroupLayout, entries });
+      const pass = encoder.beginComputePass();pass.setPipeline(info.pipeline);pass.setBindGroup(0,bindGroup);
+      pass.dispatchWorkgroups(entryPoint === 'pack_exact_product_history' ? Math.ceil(capacity/64) : 1);pass.end();
+    }
+    const commands = encoder.finish();resolve(placementRead,{device});
+    destroy = createProductEventBufferDestructor(device, buffer, false,
+      { additionalBuffers: [control], exactHistoryLayout: layout, exactCountControl: control, exactHistoryProvenance: provenance });
+    const owner = productEventRetirementOwners.get(destroy);
+    const summary = { productEventBuffer: buffer, productEventBufferRetained: true, productEventDevice: device,
+      productEventBufferByteLength: buffer.size, productEventRowCount: capacity,
+      productEvents: { rowStrideFloats: layout.rowWords, rowStrideBytes: layout.rowBytes },
+      destroyProductEventBuffer: destroy };
+    const handle = createResidentProductMassHandle(summary);
+    registerResidentProductEventCountAuthority(handle, { device, controlBuffer: control, controlOffsetBytes: 0,
+      rowCapacity: capacity, rowStrideFloats: layout.rowWords, generation, seal: 1 });
+    monitorExactProductHistoryOwner(owner);
+    device.queue.writeBuffer(control,0,controlWords);
+    const consumer = submitQueueOrderedFinalConsumerWork(device,[commands],
+      { finalConsumerOwner: handle, producerClaims: [placementRead.queueOrderedCleanupClaim] });
+    release(placementRead,{queueOrderedFinalConsumer:consumer});
+    return handle;
+  } catch (error) {
+    if (destroy) void destroy();
+    else if (resources.length) void deferConfirmedSubmittedWorkCleanup(device, () => {
+      for (const buffer of resources) { try { buffer.destroy(); } catch { /* Independent siblings. */ } }
+    });
+    throw error;
+  }
+}
+
+export function resolveResidentProductMassExactHistory(handle, { device } = {}) {
+  const record = exactProductHistoryHandles.get(handle);
+  if (!record) return null;
+  const { owner, layout } = record;
+  if (owner.device !== device || (owner.requested && !owner.activeBorrowCount) || owner.completed || owner.storageDestroyed
+      || handle.productEventBuffer !== owner.buffer || handle.exactProductHistoryLayout !== layout
+      || handle.exactProductHistoryProvenance !== owner.exactHistoryProvenance
+      || handle.productEventStrideFloats !== layout.rowWords || handle.productEventStrideBytes !== layout.rowBytes
+      || handle.productEventBufferByteLength !== owner.buffer.size
+      || !resolveResidentProductEventCountAuthority(handle,device)) {
+    throw new TypeError('Exact product history requires its original live owner and count authority');
+  }
+  return layout;
+}
+
+export function resolveResidentProductMassExactHistoryProvenance(handle, { device } = {}) {
+  return resolveResidentProductMassExactHistory(handle,{device})
+    ? exactProductHistoryHandles.get(handle).owner.exactHistoryProvenance : null;
+}
+
 export function createResidentProductMassHandle(reactionSummary = null) {
   if (!reactionSummary) return null;
   const productEventBuffer = reactionSummary.productEventBuffer;
-  assertSphLegacyMassPathAllowed({ productEventBuffer }, 'Resident product history');
+  const originalOwner = productEventRetirementOwners.get(reactionSummary.destroyProductEventBuffer);
+  if (!originalOwner?.exactHistoryLayout || originalOwner.buffer !== productEventBuffer
+      || originalOwner.device !== reactionSummary.productEventDevice) {
+    assertSphLegacyMassPathAllowed({ productEventBuffer }, 'Resident product history');
+  }
   const retainedProductEventBuffer = Boolean(reactionSummary.productEventBufferRetained && productEventBuffer);
   const hasInventory = Boolean(reactionSummary.productInventory?.schema);
   const hasEventRows = Boolean(reactionSummary.productEvents?.schema || reactionSummary.productEventRowCount);
@@ -801,6 +939,13 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     sphValidation: false,
     fullPhysicsValidation: false
   };
+  if (sourceOwner?.exactHistoryLayout) {
+    Object.defineProperty(handle,'exactProductHistoryLayout',{value:sourceOwner.exactHistoryLayout,enumerable:true});
+    Object.defineProperty(handle,'exactProductHistoryProvenance',{value:sourceOwner.exactHistoryProvenance,enumerable:true});
+    exactProductHistoryHandles.set(handle,{owner:sourceOwner,layout:sourceOwner.exactHistoryLayout});
+    sourceOwner.exactHandles ??= [];
+    sourceOwner.exactHandles.push(handle);
+  }
   Object.defineProperty(handle, '__ulgActiveBorrowCount', {
     configurable: false,
     enumerable: false,
@@ -2344,8 +2489,29 @@ export async function runSphReactionSummaryWebGpu({
   }
 
   const particleCount = sphParticleState.particleCount;
+  // The original placement owner holds the executed exact allocation packet.
+  // Its table, physical interval and complete buffer family must match this
+  // summary; a caller-provided flag or dense event buffer cannot replace it.
+  const exactCompactionSource = canonicalReactionProductPlacementAuthority
+    ? resolveSphReactionProductPlacementExactCompactionSource(canonicalReactionProductPlacementAuthority, { device })
+    : null;
   const sharedAllocation = pairAllocationCapture !== null;
-  if (reactionTable.energyAuthority && !sharedAllocation) {
+  if (exactCompactionSource) {
+    const packet = exactCompactionSource.validate().source;
+    const family = canonicalReactionProductPlacementAuthority.placementSourceFamily;
+    if (sharedAllocation || packet.reactionTable !== reactionTable
+        || !Object.is(packet.source.dtSeconds, dtSeconds)
+        || packet.source.particleCount !== particleCount
+        || sourceStateBuffer !== family.transactionRollbackStateBuffer
+        || sourceThermoBuffer !== family.transactionRollbackThermoBuffer
+        || sourceMechanicsBuffer !== family.transactionRollbackMechanicsBuffer
+        || nextStateBuffer !== family.placedDestinationStateBuffer
+        || nextThermoBuffer !== family.placedDestinationThermoBuffer
+        || nextMechanicsBuffer !== family.placedDestinationMechanicsBuffer) {
+      throw new TypeError('Exact reaction summary requires its original allocation, timestep and placement tuple');
+    }
+  }
+  if (reactionTable.energyAuthority && !sharedAllocation && !exactCompactionSource) {
     throw new TypeError('Physical reaction summaries require the genuine pair allocation');
   }
   const pairAllocationBuffer = sharedAllocation
@@ -2370,7 +2536,8 @@ export async function runSphReactionSummaryWebGpu({
   const gasSpeciesByteLength = gasSpeciesCount * SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const productInventoryCount = productTermCount;
   const productInventoryByteLength = productInventoryCount * SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const productEventCount = Math.max(0, particleCount * (reactionTable.productTermCount ?? 0));
+  const productEventCount = exactCompactionSource?.eventCapacity
+    ?? Math.max(0, particleCount * (reactionTable.productTermCount ?? 0));
   const useProductEventBuffer = productEventCount > 0 && (
     readProductEvents
     || retainProductEventBuffer
@@ -2407,6 +2574,10 @@ export async function runSphReactionSummaryWebGpu({
   const shouldRunProductInventory = productInventoryCount > 0 && shouldReadProductInventory;
   const shouldRunGasSpecies = gasSpeciesCount > 0 && shouldReadGasSpeciesSummary;
   const shouldRunAtomResidual = atomResidualCount > 0 && shouldReadAtomResidual;
+  if (exactCompactionSource && (shouldReadCompactSummary || shouldRunProductInventory
+      || shouldRunGasSpecies || shouldRunAtomResidual)) {
+    throw new TypeError('exact placement diagnostic summaries require genuine exact packet consumers');
+  }
   const shouldRunProductPlacement = useProductEventBuffer
     && Boolean(nextMechanicsBuffer)
     && productPlacementByteLength > 0;
@@ -2500,6 +2671,9 @@ export async function runSphReactionSummaryWebGpu({
       })
     : null;
   const reactionWarmBuffers = reactionWarmArena?.buffers ?? null;
+  if (exactCompactionSource) {
+    await prewarmSphReactionProductPlacementExactWebGpu({ device, authority: canonicalReactionProductPlacementAuthority });
+  }
   let productPlacementSegmentedArenaLease = canonicalSpatialPlacementEnabled
     ? acquireSphReactionProductPlacementSegmentedArenaWebGpu({
         device,
@@ -3084,7 +3258,7 @@ export async function runSphReactionSummaryWebGpu({
         ]
       });
     }
-    if (useProductEventBuffer) {
+    if (useProductEventBuffer && !exactCompactionSource) {
       const productEventDescriptor =
         canonicalSummaryPipelineDescriptors?.productEvent
         ?? sphReactionCanonicalSummaryPipelineDescriptors({ sharedAllocation }).productEvent;
@@ -3134,6 +3308,7 @@ export async function runSphReactionSummaryWebGpu({
     let productEventCompactScatterPipeline = null;
     let productEventCompactScatterBindGroup = null;
     if (shouldRunProductPlacement && placementAccumulatorBuffer) {
+      if (!exactCompactionSource) {
       const legacyCompactBindings = [
           computeBufferBinding(0, 'read-only-storage'),
           computeBufferBinding(1, 'storage'),
@@ -3197,6 +3372,7 @@ export async function runSphReactionSummaryWebGpu({
           layout: compactInfo.bindGroupLayout,
           entries: compactEntries
         });
+      }
       }
       // Placement runs in the same submit right after the event kernel:
       // unplaced product mass claims spare zero-mass particle slots and the
@@ -3613,7 +3789,14 @@ export async function runSphReactionSummaryWebGpu({
       });
       encoder.copyBufferToBuffer(productInventoryBuffer, 0, productInventoryReadBuffer, 0, productInventoryByteLength);
     }
-    if (productEventPipeline && productEventBindGroup && useProductEventBuffer) {
+    if (useProductEventBuffer && (exactCompactionSource || (productEventPipeline && productEventBindGroup))) {
+      if (exactCompactionSource) {
+        exactCompactionSource.validate();
+        encodeSphReactionProductPlacementExactCompactionWebGpu({
+          device, encoder, authority: canonicalReactionProductPlacementAuthority,
+          arenaLease: productPlacementSegmentedArenaLease, productEventBuffer, gpuTimestampRecorder
+        });
+      } else {
       encodeTimestampedComputePass({
         producerId: 'sph-reaction-summary:product-event-emission',
         stage: 'product-event-emission',
@@ -3652,6 +3835,7 @@ export async function runSphReactionSummaryWebGpu({
           bindGroup: productEventCompactScatterBindGroup,
           workgroupCount: productEventWorkgroupCount
         });
+      }
       }
       if (
         productEventPlacementEnvelopePipeline

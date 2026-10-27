@@ -42,6 +42,8 @@ import {
 } from '../runtime/sph/sphWorkerPresentationQos.js';
 import {
   destroySphGpuParticleBuffers,
+  uploadSphGpuParticleBuffers, uploadMlsMpmGpuParticleBuffers, destroyMlsMpmGpuParticleBuffers,
+  sphGpuParticleUploadAdvertisesExactMass,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
   sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics,
@@ -53,6 +55,8 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA
 } from '../runtime/sph/sphGpuBuffers.js';
+import { importSphExactParticleMassColdInput } from '../runtime/sph/sphExactMassParticleSeed.js';
+import { importSphReferenceReactionTableColdInput } from '../runtime/sph/sphReferenceReactionTable.js';
 import {
   SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS,
   decodeSchroederCrossLevelRefluxTerminalHeader
@@ -874,6 +878,7 @@ const WORKER_SPH_UPLOAD_BUFFER_FIELDS = Object.freeze([
 
 function workerLaneSphParticleUploads(record) {
   return new Set([
+    record?.adoptedStorageRematerialization?.sphParticleUpload,
     record?.schroederLane?.sphParticleUpload,
     record?.schroederLane?.residentStep?.nextParticleUploads
       ?.sphParticleUpload,
@@ -4135,6 +4140,37 @@ function applyWorkerAdoptedStorageRematerialization({ stageId, data, record, wor
     };
   }
   let retained = record.adoptedStorageRematerialization || null;
+  if (data.sphParticleState?.exactMass || data.sphParticleState?.coldExactMassInput) {
+    if (stageId !== SCHROEDER_LANE_SEED_STAGE_ID || sourceStep !== 0 || sourceTime !== 0
+        || retained || record.schroederLane) {
+      throw new TypeError('Exact cold inventory can initialize only a new zero-clock worker lane');
+    }
+    importSphExactParticleMassColdInput(data.sphParticleState, data.sphParticleState.coldExactMassInput);
+    const sph = uploadSphGpuParticleBuffers(device, data.sphParticleState,
+      { initialStorageGeneration: (data.schroederLaneSeed ?? data).lineage?.storageGeneration ?? null });
+    let mls;
+    try {
+      mls = uploadMlsMpmGpuParticleBuffers(device, data.mlsMpmParticleState,
+        { initialStorageGeneration: (data.schroederLaneSeed ?? data).lineage?.storageGeneration ?? null });
+      for (const upload of [sph, mls]) Object.assign(upload, {
+        workerRetained: true, sourceStage: 'schroeder-adopted-particle-storage-worker-rematerialization',
+        step: 0, time: 0, slot: 0, sourceSlot: 0, nextSlot: 0
+      });
+      data.sphParticleUpload = sph;
+      data.mlsMpmParticleUpload = mls;
+      record.adoptedStorageRematerialization = { hotBufferKey, sourceStep, sourceTime,
+        exactColdOwner: true, sphParticleUpload: sph, mlsMpmParticleUpload: mls,
+        phaseCarrierPlan: sph.phaseCarrierPlan };
+      record.phaseCarrierPlan = sph.phaseCarrierPlan;
+      return { status: 'worker-rematerialized-adopted-storage', requested: true, applied: true,
+        hotBufferKey, particleCount: sph.particleCount, exactColdInventory: true,
+        rawGpuBufferPeerComputeTransfer: false };
+    } catch (error) {
+      destroySphGpuParticleBuffers(sph);
+      if (mls) destroyMlsMpmGpuParticleBuffers(mls);
+      throw error;
+    }
+  }
   let reused = false;
   const identityRequired = seed.identityRequired === true;
   const identityRevision = normalizeString(seed.identityRevision, null);
@@ -4984,12 +5020,21 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
   // REAL family resolver and level-assignment classifier read exactly the
   // scene's identity. storageGeneration doubles as the buffer-family
   // generation word on BOTH uploads: one family, one generation.
-  const seededSphUpload = {
+  const exactColdOwner = sphGpuParticleUploadAdvertisesExactMass(sphUpload);
+  if (exactColdOwner && Object.entries(lineageWordEntries).some(([key, value]) => sphUpload[key] !== value)) {
+    throw new TypeError('Exact cold worker inventory differs from the original scene lineage');
+  }
+  const seededSphUpload = exactColdOwner ? sphUpload : {
     ...sphUpload,
     ...lineageWordEntries,
     bufferFamilyGeneration: lineage.storageGeneration
   };
-  const seededMlsUpload = {
+  if (exactColdOwner) seededSphUpload.bufferFamilyGeneration = lineage.storageGeneration;
+  if (exactColdOwner && (Object.entries(lineageWordEntries).some(([key, value]) => mlsUpload[key] !== value)
+      || mlsUpload.bufferFamilyGeneration !== lineage.storageGeneration)) {
+    throw new TypeError('Exact cold worker mechanics differ from the original scene lineage');
+  }
+  const seededMlsUpload = exactColdOwner ? mlsUpload : {
     ...mlsUpload,
     ...lineageWordEntries,
     bufferFamilyGeneration: lineage.storageGeneration
@@ -5879,6 +5924,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       requestedOptions.thermalMaterialTable
       ?? previousOptions.thermalMaterialTable
       ?? null;
+    const requestedReactionTable = requestedOptions.reactionTable ?? previousOptions.reactionTable ?? null;
+    const reactionTable = importSphReferenceReactionTableColdInput(
+      requestedReactionTable, thermalMaterialTable, previousOptions.reactionTable
+    );
     const dispersedMediumOpticalClosureTable =
       requestedOptions.dispersedMediumOpticalClosureTable
       ?? previousOptions.dispersedMediumOpticalClosureTable
@@ -5940,6 +5989,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     lane.residentStepOptions = {
       ...previousOptions,
       ...requestedOptions,
+      ...(reactionTable ? { reactionTable } : {}),
       ...(thermalMaterialTable ? { thermalMaterialTable } : {}),
       ...(mechanicsMaterialTable ? { mechanicsMaterialTable } : {}),
       ...(dispersedMediumOpticalClosureTable
@@ -8482,9 +8532,19 @@ function persistWorkerScheduleResidentStepOptions(
     );
   }
   const retainedSeed = previousSeed ?? requestedSeed;
+  const thermalMaterialTable = requested.thermalMaterialTable ?? previous.thermalMaterialTable ?? null;
+  const reactionTables = {};
+  for (const key of ['reactionTable', 'reactionActivationWatchTable']) {
+    if (requested[key]?.coldReferenceRecipe || previous[key]?.coldReferenceRecipe) {
+      reactionTables[key] = importSphReferenceReactionTableColdInput(
+        requested[key] ?? previous[key], thermalMaterialTable, previous[key]
+      );
+    }
+  }
   lane.residentStepOptions = {
     ...previous,
     ...requested,
+    ...reactionTables,
     ...(retainedSeed
       ? { dispersedMediumOpticsSeedRows: retainedSeed }
       : {}),

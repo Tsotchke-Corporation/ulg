@@ -34,6 +34,8 @@ import {
   releaseSphAerosolSpatialGenerationRead,
   validateSphAerosolSpatialGenerationRead
 } from './sphAerosolSpatialBinding.js';
+import { resolveSphSpatialGasHistoryVolumeInput } from './sphSpatialGasLedgerEosGpu.js';
+import { createSphExactHistoryGasVolumeWgsl } from './sphExactHistoryGasVolumeWgsl.js';
 
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE = {
@@ -59,6 +61,20 @@ const retainedGasFreeVolumeExecutions = new WeakMap();
 const retainedGasFreeVolumeEosReceipts = new WeakMap();
 const gasFreeVolumePipelinesByDevice = new WeakMap();
 const aerosolVolumePipelinesByDevice = new WeakMap();
+const historyVolumePipelinesByDevice = new WeakMap();
+
+function sharedHistoryVolumePipelines(device, layout) {
+  const cached = historyVolumePipelinesByDevice.get(device);
+  if (cached) return cached;
+  const module = device.createShaderModule({ label: 'ulg-sph-spatial-gas-history-volume-shader',
+    code: createSphExactHistoryGasVolumeWgsl(layout) });
+  const pipeline = entryPoint => device.createComputePipeline({ layout: 'auto',
+    label: `ulg-sph-spatial-gas-history-${entryPoint}`, compute: { module, entryPoint } });
+  const result = Object.freeze({ scatter: pipeline('scatter_history_condensed_volume'),
+    build: pipeline('build_gas_free_volume'), finalize: pipeline('finalize_gas_free_volume') });
+  historyVolumePipelinesByDevice.set(device, result);
+  return result;
+}
 
 function sharedAerosolVolumePipeline(device, layout) {
   const cached = aerosolVolumePipelinesByDevice.get(device);
@@ -810,6 +826,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       token: null,
       destroyedOwnedBuffers: new Set(),
       aerosolGeometryBuffer: null,
+      historyParamsBuffer: null,
       paramsBuffer: createOwnedBuffer(
         device,
         constructionBuffers,
@@ -850,7 +867,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
     arena.paramsBuffer,
     arena.controlBuffer,
     arena.rowsBuffer,
-    arena.aerosolGeometryBuffer
+    arena.aerosolGeometryBuffer,
+    arena.historyParamsBuffer
   ].filter(Boolean);
   const destroyArenaBuffers = (arena) => destroyOwnedBuffersExactlyOnce(
     ownBuffers(arena),
@@ -949,6 +967,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
     boxMaxM,
     gasControlVolumeDescriptor,
     aerosolFamily = undefined,
+    retainedHistoryInput = null,
     chartId = 0,
     overfillToleranceRelative = 1e-5,
     overfillToleranceAbsoluteM3 = 1e-12
@@ -968,6 +987,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       capacity,
       readFamily.identity
     );
+    const historyVolume = resolveSphSpatialGasHistoryVolumeInput(retainedHistoryInput,
+      { device, generation: readFamily.generation, encoder, gasDirectory });
     const exactLevelCount = readFamily.moments.length;
     const selectedGrid = readFamily.grids.at(-1);
     const resolvedGrid = {
@@ -1032,6 +1053,22 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       });
       let aerosolPipeline = null;
       let aerosolDispatch = null;
+      let historyPipelines = null;
+      let historyDispatch = null;
+      if (historyVolume) {
+        const count = historyVolume.descriptor;
+        historyDispatch = workgroupDispatch(count.rowCapacity, SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE,
+          maxWorkgroupsPerDimension, 'gas free-volume retained history scatter');
+        historyPipelines = sharedHistoryVolumePipelines(device, layout);
+        if (!arena.historyParamsBuffer) {
+          arena.historyParamsBuffer = createOwnedBuffer(device, constructionBuffers,
+            `${label}-arena-${arena.arenaIndex}-history-params`, 16,
+            GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
+          aerosolAllocations++;
+        }
+        device.queue.writeBuffer(arena.historyParamsBuffer, 0,
+          new Uint32Array([count.rowCapacity, count.generation, count.seal, count.rowStrideFloats / 4]));
+      }
       if (aerosolRead) {
         bufferSizeAtLeast(aerosolRead.buffer, aerosolRead.capacity * 96,
           'gas free-volume aerosol parcels');
@@ -1039,12 +1076,14 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE, maxWorkgroupsPerDimension,
           'gas free-volume aerosol scatter');
         aerosolPipeline = sharedAerosolVolumePipeline(device, layout);
+      }
+      if (aerosolRead || historyVolume) {
         if (!arena.aerosolGeometryBuffer) {
           arena.aerosolGeometryBuffer = createOwnedBuffer(device, constructionBuffers,
             `${label}-arena-${arena.arenaIndex}-aerosol-geometry`,
             SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES,
             GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
-          aerosolAllocations = 1;
+          aerosolAllocations++;
         }
         const fineGrid = readFamily.grids[0];
         device.queue.writeBuffer(arena.aerosolGeometryBuffer, 0,
@@ -1123,7 +1162,9 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         entries: [
           ...Array.from(selectedResources, ([binding, buffer]) => ({
             binding,
-            resource: { buffer }
+            resource: binding === 12 && historyVolume
+              ? { buffer, offset: historyVolume.descriptor.controlOffsetBytes, size: 64 }
+              : { buffer }
           })),
           {
             binding: 8,
@@ -1215,19 +1256,34 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         aerosolPass.dispatchWorkgroups(aerosolDispatch.x, aerosolDispatch.y, aerosolDispatch.z);
         aerosolPass.end();
       }
+      const historyResources = historyVolume ? [
+        [11, historyVolume.buffer], [12, historyVolume.descriptor.controlBuffer],
+        [13, historyVolume.validationBuffer], [14, arena.historyParamsBuffer]
+      ] : [];
+      if (historyVolume) {
+        historyVolume.validate();
+        const group = bindGroup(historyPipelines.scatter, 'scatter-history', new Map([
+          [0, directory.directoryBuffer], [6, arena.controlBuffer], [7, arena.rowsBuffer],
+          [10, arena.aerosolGeometryBuffer], ...historyResources
+        ]));
+        const pass = encoder.beginComputePass({ label: `${label}ScatterHistory` });
+        pass.setPipeline(historyPipelines.scatter); pass.setBindGroup(0, group);
+        pass.dispatchWorkgroups(historyDispatch.x, historyDispatch.y, historyDispatch.z); pass.end();
+      }
       const buildGroup = bindGroup(
-        pipelines.build,
+        historyPipelines?.build ?? pipelines.build,
         'build',
         new Map([
           [0, directory.directoryBuffer],
           [6, arena.controlBuffer],
-          [7, arena.rowsBuffer]
+          [7, arena.rowsBuffer],
+          ...historyResources
         ])
       );
       const buildPass = encoder.beginComputePass({
         label: `${label}Build`
       });
-      buildPass.setPipeline(pipelines.build);
+      buildPass.setPipeline(historyPipelines?.build ?? pipelines.build);
       buildPass.setBindGroup(0, buildGroup);
       buildPass.dispatchWorkgroupsIndirect(
         directory.consumerDispatchBuffer,
@@ -1235,17 +1291,18 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       );
       buildPass.end();
       const finalizeGroup = bindGroup(
-        pipelines.finalize,
+        historyPipelines?.finalize ?? pipelines.finalize,
         'finalize',
         new Map([
           [0, directory.directoryBuffer],
-          [6, arena.controlBuffer]
+          [6, arena.controlBuffer],
+          ...historyResources
         ])
       );
       const finalizePass = encoder.beginComputePass({
         label: `${label}Finalize`
       });
-      finalizePass.setPipeline(pipelines.finalize);
+      finalizePass.setPipeline(historyPipelines?.finalize ?? pipelines.finalize);
       finalizePass.setBindGroup(0, finalizeGroup);
       finalizePass.dispatchWorkgroups(1, 1, 1);
       finalizePass.end();
@@ -1265,6 +1322,11 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         gasFreeVolumeRowStrideFloats:
           SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS,
         exactLevelCount,
+        retainedHistory: historyVolume ? Object.freeze({
+          generation: historyVolume.descriptor.generation, seal: historyVolume.descriptor.seal,
+          capacity: historyVolume.descriptor.rowCapacity, sourceStrideFloats: historyVolume.descriptor.rowStrideFloats,
+          viewVersion: 1, dispatchCount: 1
+        }) : null,
         aerosol: aerosolRead ? Object.freeze({
           version: SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION,
           familyId: aerosolRead.familyId,
@@ -1279,8 +1341,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           'quadratic-capacity-overlap-keyed-atomic-f32-scatter',
         reductionWorkComplexity: 'O(C + (F + E + K) log C)',
         keyedLookupMaxSteps,
-        encodedComputePassCount: (exactLevelCount === 2 ? 5 : 4) + Number(Boolean(aerosolRead)),
-        encodedDispatchCount: (exactLevelCount === 2 ? 5 : 4) + Number(Boolean(aerosolRead)),
+        encodedComputePassCount: (exactLevelCount === 2 ? 5 : 4) + Number(Boolean(aerosolRead)) + Number(Boolean(historyVolume)),
+        encodedDispatchCount: (exactLevelCount === 2 ? 5 : 4) + Number(Boolean(aerosolRead)) + Number(Boolean(historyVolume)),
         indirectDispatchOffsetBytes: 0,
         retainedGpuBufferBytes: ownBuffers(arena).reduce(
           (sum, buffer) => sum + Number(buffer?.size ?? 0),
@@ -1306,6 +1368,9 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         aerosolSourceLive: () => validateSphAerosolSpatialGenerationRead(aerosolRead, {
           device, generation: readFamily.generation, aerosolFamily
         }),
+        historySourceLive: () => {
+          try { return historyVolume == null || historyVolume.validate() === true; } catch { return false; }
+        },
         gasDirectory,
         activeEosReceipt: null,
         consumerSubmitted: false,
@@ -1728,6 +1793,10 @@ function liveAuthorityExecutionRecord(execution) {
     throw authorityError('ERR_SPH_GAS_FREE_VOLUME_AEROSOL_SOURCE_STALE',
       'Gas free-volume EOS authority lost its exact sealed aerosol source');
   }
+  if (!record.historySourceLive()) {
+    throw authorityError('ERR_SPH_GAS_FREE_VOLUME_HISTORY_SOURCE_STALE',
+      'Gas free-volume EOS authority lost its original retained history');
+  }
   if (record.consumerSubmitted) {
     throw authorityError(
       'ERR_SPH_GAS_FREE_VOLUME_AUTHORITY_CONSUMED',
@@ -2003,6 +2072,10 @@ export function submitSphSpatialGasFreeVolumeEosAuthority(receipt, device) {
   if (!record.aerosolSourceLive()) {
     throw authorityError('ERR_SPH_GAS_FREE_VOLUME_AEROSOL_SOURCE_STALE',
       'Gas free-volume EOS submission lost its exact sealed aerosol source');
+  }
+  if (!record.historySourceLive()) {
+    throw authorityError('ERR_SPH_GAS_FREE_VOLUME_HISTORY_SOURCE_STALE',
+      'Gas free-volume EOS submission lost its original retained history');
   }
   if (receiptRecord.nextPassIndex !== EOS_CONSUMER_PASSES.length) {
     throw authorityError(

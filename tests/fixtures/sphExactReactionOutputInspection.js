@@ -83,7 +83,9 @@ export function inspectExactReactionOutputs({ sourceWords, routingWords, selecte
     && layout.carrierOffsetWords === count * 16 && layout.carrierStrideWords === 8 + n
     && layout.eventCompanionStrideWords === 8 + 3 * n && layout.eventCompanionOffsetWords % 64 === 0
     && layout.eventCompanionOffsetWords === Math.ceil((count * 16 + count * (8 + n)) / 64) * 64
-    && layout.auxWords === layout.eventCompanionOffsetWords + count * capacity * (8 + 3 * n));
+    && layout.eventParticleOffsetWords === Math.ceil((layout.eventCompanionOffsetWords + count * capacity * (8 + 3 * n)) / 64) * 64
+    && layout.eventParticleStrideWords === 64
+    && layout.auxWords === layout.eventParticleOffsetWords + count * capacity * 64);
   check('publication-closed', selected.physicalPublicationAdmitted === false);
   const expectedPacked = sourcePackedWords.slice(), expectedAux = new Uint32Array(layout.auxWords);
   const expectedEvents = new Uint32Array(count * capacity * 32);
@@ -170,7 +172,7 @@ export function inspectExactReactionOutputs({ sourceWords, routingWords, selecte
         bulk: bits(phaseRow[3]), shear: bits(phaseRow[4]), lambda: bits(phaseRow[5]), sound: bits(sound),
         eos: bits(phaseRow[7]), solid: bits(phaseRow[8]) };
     };
-    const stagedRows = new Map(), carrierRows = new Map(), stagedEvents = [], companionRows = [];
+    const stagedRows = new Map(), carrierRows = new Map(), stagedEvents = [], companionRows = [], residualRows = [];
     const endpointEvidence = [];
     for (let slot = 0; slot < 2 && error === 0; slot++) {
       const descriptor = route + 16 + slot * (8 + n), kind = routingWords[descriptor], row = routingWords[descriptor + 1];
@@ -221,6 +223,7 @@ export function inspectExactReactionOutputs({ sourceWords, routingWords, selecte
       [mass, direct, residual].forEach((value, i) => putMass(companion, 8 + i * n, value));
       companionRows.push(companion);
       const event = new Uint32Array(32);
+      const residualRow = new Uint32Array(64);
       if (mass !== 0n) {
         const p = product(local);
         const projectedMass = project(rational(mass, 1n, q), true);
@@ -229,12 +232,32 @@ export function inspectExactReactionOutputs({ sourceWords, routingWords, selecte
         const moles = project(quantity(mass, p.molar), true);
         const fragmentSupport = project(scale(support, residual, total), residual > 0n);
         error |= projectedMass.error | projectedDirect.error | projectedResidual.error | moles.error | fragmentSupport.error;
+        if (residual > 0n) {
+          // The residual is a separate physical fragment. Derive its quantities
+          // directly from exact residual mass and original material properties;
+          // selected event mass and rounded event views cannot supply them.
+          const entities = project(quantity(residual, p.molar, true), true);
+          const restVolume = project(quantity(residual, p.rho), true);
+          error |= entities.error | restVolume.error;
+          residualRow.set([1, 0, pair, local + 2, p.globalTerm, p.material, p.phase, p.molar, n, 1, 0, 0]);
+          residualRow.set([
+            0, 0, 0, projectedResidual.bits,
+            ...velocity, p.u,
+            p.materialBits, p.phaseBits, p.temperature, p.rho,
+            bits(Number(p.phase === 1)), bits(Number(p.phase === 2)), bits(Number(p.phase === 3)), 0,
+            0, entities.bits, bits(1), 0,
+            bits(1), 0, 0, 0, bits(1), 0, 0, 0, bits(1), 0, 0, 0, 0, 0, 0, 0,
+            0, 0, bits(1), restVolume.bits, p.solid, bits(1), p.bulk, p.shear,
+            p.lambda, p.sound, p.eos, bits(1), 0, 0, 0, projectedResidual.bits
+          ], 12);
+        }
         event.set([...midpoint, projectedMass.bits, p.materialBits, bits(p.globalTerm), bits(reaction), bits(pair),
           bits(peer), moles.bits, p.routing, p.phaseBits, projectedDirect.bits, projectedResidual.bits, p.coefficient, p.molar,
           p.temperature, p.rho, bits(1), p.u, ...velocity, fragmentSupport.bits,
           p.bulk, p.shear, p.lambda, p.sound, p.eos, p.solid, bits(1), bits(1)]);
       }
       stagedEvents.push(event);
+      residualRows.push(residualRow);
     }
     if (expectedPairErrors && Object.hasOwn(expectedPairErrors, pair)) check(`pair-${pair}-expected-error`, error === expectedPairErrors[pair]);
     if (error) expectedAux[headerAt + 1] = error;
@@ -245,12 +268,14 @@ export function inspectExactReactionOutputs({ sourceWords, routingWords, selecte
       stagedEvents.forEach((data, local) => expectedEvents.set(data, (pair * capacity + local) * 32));
       companionRows.forEach((data, local) => expectedAux.set(data, layout.eventCompanionOffsetWords
         + (pair * capacity + local) * layout.eventCompanionStrideWords));
+      residualRows.forEach((data, local) => expectedAux.set(data, layout.eventParticleOffsetWords
+        + (pair * capacity + local) * 64));
     }
     pairs.push({ pair, peer, ready: error === 0, expectedError: error, actualHeader, endpointEvidence });
   }
   compareWords('all-physical-particle-words', packedWords, expectedPacked);
   compareWords('all-dense-event-words', eventWords, expectedEvents);
-  compareWords('all-integer-companion-words', auxiliaryWords, expectedAux);
+  compareWords('all-companion-and-residual-template-words', auxiliaryWords, expectedAux);
   let carrierMass = 0n, residualMass = 0n, originalMass = 0n;
   for (let row = 0; row < count; row++) {
     const at = layout.carrierOffsetWords + row * layout.carrierStrideWords + 8;

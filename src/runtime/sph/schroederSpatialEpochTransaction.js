@@ -2955,7 +2955,7 @@ export function createSchroederSpatialEpochTransaction({
           { sphParticleUpload, mlsMpmParticleUpload }) : null);
       const read = privateCapture?.sourceRead ?? acquireSchroederSpatialSuccessorExactMassRead({ device, sphParticleUpload,
         mlsMpmParticleUpload, consumerLease: aerosolSourceFamilyConsumerLease })
-        ?? acquireSphParticleExactMassRead(sphParticleUpload, device);
+        ?? acquireSphParticleExactMassRead(sphParticleUpload, device, { mlsMpmParticleUpload });
       authority.exactMassSourceIdentity = { sphUpload: new WeakRef(sphParticleUpload),
         mlsUpload: new WeakRef(mlsMpmParticleUpload) };
       authority.exactMassSource = { read, privateCapture, sphUpload: sphParticleUpload, mlsUpload: mlsMpmParticleUpload,
@@ -3436,9 +3436,10 @@ export function commitSchroederSpatialEpochTransaction(transaction, {
     mlsMpmParticleUpload: nextMlsMpmParticleUpload
   });
   if (authority.exactMassSource || sphGpuParticleUploadAdvertisesExactMass(nextSphParticleUpload)) {
+    // A genuine captured reaction may replace the inventory. The private
+    // prepared particle owner binds that successor to this exact transaction;
+    // comparing to the unchanged source family would reject real mass writes.
     if (!authority.exactMassSource || !exactMassSourceLive(authority)
-        || nextSourceBuffers.exactMassInventory !== authority.sourceBuffers.exactMassInventory
-        || nextSourceBuffers.exactMassInventoryRange !== authority.sourceBuffers.exactMassInventoryRange
         || !validateSphExactMassSpatialCommit(nextSphParticleUpload, {
           transaction, generation: authority.generation, nextParticleUploads })) {
       throw transactionError('Exact inventory commit requires its prepared original physical continuation',

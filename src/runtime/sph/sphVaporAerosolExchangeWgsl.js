@@ -25,6 +25,7 @@ const EXCHANGE_MAX_F32: f32 = 3.402823466e38;
 const EXCHANGE_R: f32 = 8.31446261815324;
 const EXCHANGE_AVOGADRO: f32 = 6.02214076e23;
 const EXCHANGE_PI4: f32 = 12.566370614359172;
+const EXCHANGE_SHARED_MASS_SUPPORTED: bool = false;
 
 fn xp(lane: u32) -> u32 { return params.words[lane / 4u][lane % 4u]; }
 fn xf(word: u32) -> f32 { return bitcast<f32>(source[word]); }
@@ -257,7 +258,7 @@ fn initialize_vapor_aerosol_exchange() {
         || (edges[b] == 1u && edges[b + 1u] >= live)) { xedge_fail(edge, ERROR_EDGE); return; }
     for (var other = 0u; other < edge; other++) {
       let c = other * 8u;
-      if (((edges[b] == edges[c] && edges[b + 1u] == edges[c + 1u])
+      if (!EXCHANGE_SHARED_MASS_SUPPORTED && ((edges[b] == edges[c] && edges[b + 1u] == edges[c + 1u])
           || edges[b + 2u] == edges[c + 2u])
           && (((edges[b + 4u] | edges[c + 4u]) & 0x7fffffffu) != 0u)) {
         xedge_fail(edge, ERROR_OVERLAP); return;

@@ -23,14 +23,23 @@ import { acquireSphAerosolSpatialParcelRead } from '../src/runtime/sph/sphAeroso
 import { tagWebGpuBufferDevice, webGpuDeviceId } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import { ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 
-test('fresh SS, aerosol and thermal entry points initialize without an eager proposal/closure cycle', () => {
+test('fresh SS, aerosol, thermal and exact reaction entry points initialize without an eager proposal/closure cycle', () => {
   const thermal = new URL('../src/runtime/sph/sphThermalGpuKernel.js', import.meta.url).href;
+  const proposals = new URL('../src/runtime/sph/schroederSpatialThermalProposalsGpu.js', import.meta.url).href;
+  const protocol = new URL('../ulg-gpu-abi/src/schroederSpatialThermalProposalConstants.js', import.meta.url).href;
   for (const entry of ['schroederSpatialThermalProposalsGpu.js', 'sphThermalGpuKernel.js',
-    'schroederSpatialEpochTransaction.js', 'sphAerosolParcelGpu.js', 'sphMlsMpmPostMechanicsClosure.js']) {
+    'schroederSpatialEpochTransaction.js', 'sphAerosolParcelGpu.js', 'sphMlsMpmPostMechanicsClosure.js',
+    'sphExactReactionSourceGpu.js', 'sphExactReactionRoutingGpu.js',
+    'schroederSpatialReactionPlacementEpochGpu.js', 'schroederSpatialReactionProductPlacementGpu.js']) {
     const first = new URL('../src/runtime/sph/' + entry, import.meta.url).href;
     execFileSync(process.execPath, ['--input-type=module', '--eval',
       `await import(${JSON.stringify(first)});\n` +
       `const thermal = await import(${JSON.stringify(thermal)});\n` +
+      `const proposals = await import(${JSON.stringify(proposals)});\n` +
+      `const protocol = await import(${JSON.stringify(protocol)});\n` +
+      `for (const [key, value] of Object.entries(protocol)) {\n` +
+      `  if (proposals[key] !== value) throw new Error('original thermal protocol export changed: ' + key);\n` +
+      `}\n` +
       `if (!thermal.sphThermalStepWgsl.includes('THERMAL_PROPOSAL_MAGIC: u32 = 0x54504831u')) ` +
       `throw new Error('canonical thermal shader protocol changed');`],
     { timeout: 15000, stdio: 'pipe' });

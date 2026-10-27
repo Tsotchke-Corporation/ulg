@@ -30,6 +30,27 @@ export function resolveSphPhaseCaloricModels(materialProperties, explicitModels 
   return Object.freeze(resolved);
 }
 
+// Newly authored cold particles only. The geometry builder declares the pure
+// phase from its initial material state; energy is created in that phase's
+// explicit caloric basis before any GPU packer or continuing owner exists.
+export function initializeSphColdPhaseCaloricParticles(particles, materialProperties) {
+  const models = resolveSphPhaseCaloricModels(materialProperties);
+  for (const particle of particles) {
+    const model = models[particle.material];
+    if (!model || particle.phaseCaloric) continue;
+    const branch = phaseCaloricBranches(model).find(row => row.phase === particle.phaseVolumeReferencePhase);
+    if (!branch || !Number.isFinite(particle.temperatureK)
+        || particle.temperatureK < branch.minTemperatureK || particle.temperatureK > branch.maxTemperatureK) {
+      throw new RangeError(`Cold ${particle.material} particle requires a declared phase and temperature in its caloric domain`);
+    }
+    samePackedPositive(particle.restDensityKgPerM3, branch.densityKgPerM3, 'cold particle phase density');
+    const phaseId = SPH_CALORIC_PHASE_IDS[branch.phase];
+    particle.specificInternalEnergyJPerKg = branch.referenceInternalEnergyJPerKg
+      + branch.cvJPerKgK * (particle.temperatureK - branch.referenceTemperatureK);
+    particle.phaseCaloric = { phaseId, phaseFractions: [1, 2, 3, 4].map(id => Number(id === phaseId)) };
+  }
+}
+
 export function condensableInitializationProperties(model) {
   return [model.molarMassKgPerMol, ...phaseCaloricBranches(model).map((branch) => branch.cpJPerKgK)].map(Math.fround);
 }

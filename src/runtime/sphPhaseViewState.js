@@ -127,6 +127,7 @@ export function createSphPhaseViewState(driver) {
     emissiveTemperatureByMaterial: surfaceEmissiveTemperature(demo),
     materialProperties: demo.materialProperties,
     reactions: demo.reactions || [],
+    environmentInitialization: demo.environmentInitialization ?? null,
     reactionDiscovery: demo.reactionDiscovery || null,
     reactionContactRadiusM: demo.reactionContactRadiusM,
     sphGpuParticleState,

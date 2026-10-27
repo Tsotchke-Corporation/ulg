@@ -7,9 +7,18 @@ export { runSphExactReactionSourceSelectionWebGpu, resolveSphExactReactionSource
   from '../../src/runtime/sph/sphExactReactionSourceGpu.js';
 export { runSphReactionStepWebGpu } from '../../src/runtime/sph/sphReactionGpuKernel.js';
 export { resolveSphExactReactionRoutingCandidate } from '../../src/runtime/sph/sphExactReactionRoutingGpu.js';
+export { createSphReactionResolvePositionInvariantCertificate,
+  runSchroederSpatialReactionPlacementEpochWebGpu, resolveSchroederSpatialReactionPlacementExactSource,
+  releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue }
+  from '../../src/runtime/sph/schroederSpatialReactionPlacementEpochGpu.js';
 export { selectSphExactReactionAllocation } from '../../src/runtime/sph/sphExactReactionAllocation.js';
 export { selectSphExactReactionKineticCap } from '../../src/runtime/sph/sphExactReactionKineticCap.js';
 export { encodeSphExactMassUnits, projectSphExactMassF32Bits } from '../../ulg-gpu-abi/src/sphExactMassInventory.js';
+export { runExactPlacementChainNative } from './sphExactPlacementChainNative.js';
+export { inspectCapturedExactReactionNative } from './sphCapturedExactReactionNative.js';
+export { inspectExactReactionClosureNative, inspectCompletedExactReactionStep, inspectExactReactionStage } from './sphExactReactionClosureNative.js';
+import { runSchroederSpatialEpochGenerationWithBackpressureWebGpu }
+  from '../../src/runtime/sph/schroederSpatialEpochGpu.js';
 import * as buffers from '../../src/runtime/sph/sphGpuBuffers.js';
 import * as steps from '../../src/runtime/sph/sphMlsMpmGpuStep.js';
 import * as hierarchy from '../../src/runtime/sph/schroederHierarchyGpu.js';
@@ -27,6 +36,9 @@ import { selectSphExactReactionKineticCap } from '../../src/runtime/sph/sphExact
 import { sphReactionEnergyEntry } from '../../src/runtime/sph/sphReactionEnergyAuthority.js';
 import { createSphExactMassFormat, encodeSphExactMass }
   from '../../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { createSphAerosolParcelFamilyWebGpu, acquireSphAerosolParcelRead,
+  releaseSphAerosolParcelRead, releaseSphAerosolParcelFamily } from '../../src/runtime/sph/sphAerosolParcelGpu.js';
+import { stableOpticalMaterialId } from '../../src/runtime/material/opticalGpuBuffers.js';
 
 const integer = words => { let value = 0n; for (let i = words.length - 1; i >= 0; i--) value = (value << 32n) | BigInt(words[i]); return value; };
 // Independent integer arithmetic over the actual captured GPU input bits.
@@ -96,11 +108,26 @@ async function readWords(device, source) {
 
 /** Runs inside a genuine canonical mechanics stage before that epoch retires.
  * The stage wrapper returns its original result unchanged. This fixture does
- * not register public buffers as producers or inject a fake proposal. */
+ * not register public buffers as producers or inject a fake proposal. An owned
+ * private-placement inspection may explicitly end at this boundary: it does
+ * not claim post-mechanics continuation after destroying its diagnostic device. */
 export async function runExactReactionSourceNative(device, { reverse = false, dtSeconds = .000001,
-  wordCount = 9, velocities = [[0, 0, 0], [0, 0, 0]], fixtureOptions = {},
+  wordCount = 9, velocities = [[0, 0, 0], [0, 0, 0]], fixtureOptions = {}, spareParticleCount = 0,
   massesKg = [.006 + 2 ** -35, .064 + 2 ** -33], quantumExponent = wordCount === 66 ? -1074 : -149,
-  internalPressureScale = 1, expectedCaloricError = 0, inspect = null, prewarm = false, onProgress = null } = {}) {
+  internalPressureScale = 1, expectedCaloricError = 0, inspect = null, inspectPostMechanics = null,
+  stopAfterInspect = false, prewarm = false, onProgress = null,
+  completeOuterReaction = false, inspectCompletedStep = null, inspectReactionStage = null,
+  exactAerosol = false, inspectCurrentGas = null, commitVaporExchange = false, rejectVaporExchange = null,
+  traceRejectedRetry = false, vaporRateSubsteps = null, traceVaporArithmetic = false,
+  vaporTransportPacketMode = 'exact-rational', vaporConvergenceInspection = false, phaseCarrierTransfer = false } = {}) {
+  if (completeOuterReaction && (stopAfterInspect || inspect || inspectPostMechanics || typeof inspectCompletedStep !== 'function')) {
+    throw new TypeError('Complete outer reaction requires its completed-step inspector and no intermediate stop');
+  }
+  if (stopAfterInspect && typeof inspect !== 'function' && typeof inspectPostMechanics !== 'function') throw new Error('A bounded inspection requires its callback');
+  if (!Number.isSafeInteger(spareParticleCount) || spareParticleCount < 0 || spareParticleCount > 6) {
+    throw new RangeError('Native reaction fixture supports zero through six product reserves');
+  }
+  const inspectionComplete = new Error('Owned native inspection completed before post-mechanics continuation');
   const progress = (stage, extra = {}) => onProgress?.({ stage, wordCount, dtSeconds, reverse, timeMs: performance.now(), ...extra });
   const fixture = createExactReactionAllocationFixture(fixtureOptions);
   const { materialProperties, models, thermalMaterialTable, reactionTable } = fixture;
@@ -119,7 +146,24 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
     specificInternalEnergyJPerKg: models[material].liquidReferenceInternalEnergyJPerKg,
     phaseCaloric: { phaseId: 2, phaseFractions: [0, 1, 0, 0] } }));
   if (reverse) particles.reverse();
+  // Real cold-packed product reserves, with exact zero inventory. The original
+  // free-list and placement shaders must discover and populate these slots.
+  for (let i = 0; i < spareParticleCount; i++) particles.push({ ...particles[0],
+    id: `product-reserve-${i}`, x: [...particles[0].x], v: [0, 0, 0], massKg: 0,
+    spareProductSlot: true, phaseVolumeReferenceMassKg: 0, mpmVolume0: 0, visualRestParticleRadiusM: 0 });
   const initial = { smoothingLengthM: .5, dimension: 3, step: 0, time: 0, storageGeneration: 1, particles };
+  if (phaseCarrierTransfer) {
+    const lineageCapacity = particles.length;
+    for (let lane = 1; lane < 4; lane++) for (let row = 0; row < lineageCapacity; row++) {
+      particles.push({ ...particles[row], id: `phase-${lane}-${row}`, x: [...particles[row].x], v: [0, 0, 0],
+        massKg: 0, phaseCompanionSlot: true, spareProductSlot: false, phaseCarrierPrimaryIndex: row,
+        phaseCarrierLineageIndex: row, phaseCarrierLane: lane, phaseCarrierTargetPhaseId: lane + 1,
+        phaseVolumeReferenceMassKg: 0, mpmVolume0: 0, visualRestParticleRadiusM: 0 });
+    }
+    initial.phaseCarrierPlan = { schema: 'peercompute.ulg.sph-phase-carrier-plan.v2', status: 'phase-lane-capacity-ready',
+      lineageCapacity, primaryCapacity: lineageCapacity, phaseLaneCount: 4, phaseLaneStride: lineageCapacity,
+      companionStart: lineageCapacity, companionCapacity: lineageCapacity * 3, particleCapacity: particles.length };
+  }
   const packOptions = { materialProperties, condensableThermodynamicsByMaterial: models,
     particleSeparationRelaxation: 0, soundSpeedScale: .01 };
   const sphParticleState = buffers.buildSphGpuParticleBuffers(initial, { ...packOptions,
@@ -127,10 +171,55 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
   const mlsMpmParticleState = buffers.buildMlsMpmGpuParticleBuffers(initial, packOptions);
   const sphParticleUpload = buffers.uploadSphGpuParticleBuffers(device, sphParticleState);
   const mlsMpmParticleUpload = buffers.uploadMlsMpmGpuParticleBuffers(device, mlsMpmParticleState);
+  let initialAerosol = null, currentGasEvidence = null, vaporCommitNative = null, vaporRejection = null, rejectedExchange = null;
   const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable(materialProperties, packOptions);
-  let execution, observed, failure, visits = 0;
+  let execution, observed, failure, lookupLevelAssignment, stageEvidence, visits = 0;
   try {
+  if (exactAerosol) {
+    const parcel = { slot: 0, parcelId: 1n, nucleusPopulationId: 11n, physicalMultiplicity: (1n << 40n) + 7n,
+      sourceLineageIndex: 0xffffffff, sourceTopologyEpoch: 0, materialId: stableOpticalMaterialId('h2o'),
+      phaseId: 2, positionM: [typeof exactAerosol === 'string' ? .9887035489082336 : 1, 1, 1],
+      velocityMPerS: [0, 1, -1], massKg: .125 + 2 ** -54,
+      specificInternalEnergyJPerKg: models.h2o.liquidReferenceInternalEnergyJPerKg,
+      temperatureK: 300, condensedDensityKgM3: 1000 };
+    const family = createSphAerosolParcelFamilyWebGpu({ device, capacity: 2, exactMass: { format },
+      provenance: { kind: 'initial-conditions', reference: 'manufactured exact independent liquid inventory' },
+      parcels: [parcel, ...(rejectVaporExchange === 'cross-cell' || String(commitVaporExchange).startsWith('graph')
+        ? [{ ...parcel, slot: 1, parcelId: 2n, nucleusPopulationId: 12n,
+          positionM: [rejectVaporExchange === 'cross-cell' ? 2 : .9887088537216187, 1, 1] }] : [])] });
+    initialAerosol = { family, words: null, exchange: typeof exactAerosol === 'string' ? exactAerosol : null };
+    sphParticleUpload.aerosolFamily = family;
+    const held = acquireSphAerosolParcelRead({ device, family, expectedGeneration: 0 });
+    try {
+      initialAerosol.words = await readWords(device, held.exactQuantities.quantityBuffer);
+      initialAerosol.quantityLayout = held.exactQuantities.quantityLayout;
+    }
+    finally { releaseSphAerosolParcelRead(held); }
+  }
+    if (commitVaporExchange) {
+      if (!initialAerosol || !completeOuterReaction || inspectCurrentGas) throw new Error('Coupled exchange requires its full original step and aerosol');
+      const { createExactVaporCommitInspection } = await import('./sphExactVaporCommitNative.js');
+      vaporCommitNative = createExactVaporCommitInspection({ device, models, thermalMaterialTable,
+        initialAerosol, read: buffer => readWords(device, buffer), shared: typeof commitVaporExchange === 'string',
+        graph: String(commitVaporExchange).startsWith('graph'), reverseEdges: String(commitVaporExchange).endsWith('-reversed'),
+        cellPressureWork: /-work|-rates/.test(String(commitVaporExchange)),
+        produceRates: String(commitVaporExchange).includes('-rates'),
+        midpointRates: String(commitVaporExchange).includes('-midpoint'),
+        rateSubsteps: vaporRateSubsteps ?? (String(commitVaporExchange).includes('-substeps') ? 2 : 1), dtSeconds,
+        transportPacketMode: vaporTransportPacketMode, convergenceInspection: vaporConvergenceInspection });
+    }
+    if (rejectVaporExchange) {
+      if (!vaporCommitNative) throw new Error('Exchange rejection fixture requires the real coupled request');
+      const { createExactVaporRejectionInspection } = await import('./sphExactVaporRejectionNative.js');
+      vaporRejection = await createExactVaporRejectionInspection({ device, mode: rejectVaporExchange,
+        request: vaporCommitNative.request, sphParticleUpload, mlsMpmParticleUpload, initialAerosol,
+        read: buffer => readWords(device, buffer) });
+    }
     const runOptions = {
+      spatialEpochGenerationRunner: async args => {
+        lookupLevelAssignment = args.levelAssignment;
+        return runSchroederSpatialEpochGenerationWithBackpressureWebGpu(args);
+      },
       device, sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload,
       selectedLevel: 0, minLevel: 0, maxLevel: 0, baseGridSpacingM: .5, boxDimsM: [2, 2, 2],
       dt: dtSeconds, gravityMPerS2: [0, 0, 0], readbackMode: 'no-full-readback',
@@ -138,14 +227,41 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
       enableLawQueue: false, enableLawNeighborCandidates: false,
       enableParticleStorageCountSummary: false, enableParticleStorageCompaction: false,
       residentStepOptions: { thermalMaterialTable, mechanicsMaterialTable,
+        capturePostMechanicsGasSource: Boolean(inspectCurrentGas),
+        vaporAerosolExchange: vaporCommitNative?.request ?? null,
+        ...(completeOuterReaction ? { reactionTable } : {}),
         internalPressureScale,
         thermalStepOptions: { conductionRate: 0 },
         fuseNoFullResidentMechanics: false, gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null,
         gpuTimestampRecorder: { active: true, async measureQueueStage(meta, work) {
-          const original = await work();
+          if (rejectVaporExchange) console.log('exact-routing-progress', JSON.stringify({
+            phase: 'exchange-attempt-stage-start', retry: Boolean(rejectedExchange), stage: meta.stage }));
+          const original = traceVaporArithmetic && meta.stage === 'vaporExchangeCandidate'
+            ? await (await import('./sphExactVaporArithmeticTrace.js')).traceExactVaporArithmetic(device, work,
+              { edgeCount: vaporCommitNative.request.edges.length,
+                retainedWordCount: initialAerosol.quantityLayout.scalar.wordCount })
+            : traceRejectedRetry && rejectedExchange && meta.stage === 'reactionStep'
+            ? await (await import('./sphNativePassTrace.js')).withSphNativeSubmissionTrace(device, work, { splitDispatches: true })
+            : await work();
+          if (rejectVaporExchange) console.log('exact-routing-progress', JSON.stringify({
+            phase: 'exchange-attempt-stage-complete', retry: Boolean(rejectedExchange), stage: meta.stage }));
+          const rejectedCandidate = vaporRejection?.inspectStage(meta.stage, original);
+          if (vaporCommitNative && !rejectedCandidate) await vaporCommitNative.inspectStage(meta.stage, original, stageEvidence);
+          if (completeOuterReaction && inspectCurrentGas && meta.stage === 'postMechanicsClosure') {
+            const { inspectExactPostMechanicsGasNative } = await import('./sphExactPostMechanicsGasNative.js');
+            currentGasEvidence = await inspectExactPostMechanicsGasNative({ device, closure: original,
+              thermalMaterialTable, models, initialAerosol, mode: inspectCurrentGas,
+              read: buffer => readWords(device, buffer) });
+          }
+          if (completeOuterReaction && meta.stage === 'reactionStep') {
+            stageEvidence = await inspectReactionStage?.({ result: original, device })
+              ?? { originalReaction: original.reactionAllocationMode === 'exact-integer-pair-allocation' };
+            return original;
+          }
           if (meta.stage !== 'g2pReconstruction') return original;
           visits++;
           progress('g2p-complete');
+          if (completeOuterReaction) return original;
           const g2pResult = original.gpuResult;
           const capture = await acquireMlsMpmMechanicsExactMassCapture(g2pResult, { device, sphParticleUpload });
           let thermalResult, proposal, selected;
@@ -153,6 +269,13 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
           try {
             if (!capture.generation || !capture.transaction) throw new Error('Native source requires actual canonical G2P');
             const generation = capture.generation, transaction = capture.transaction;
+            if (inspectPostMechanics) {
+              observed = await inspectPostMechanics({ device, g2pResult, transaction, generation, lookupLevelAssignment,
+                sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload,
+                thermalMaterialTable, mechanicsMaterialTable, reactionTable, dtSeconds });
+              if (stopAfterInspect) throw inspectionComplete;
+              return original;
+            }
             thermalResult = await thermal.runSphThermalStepWebGpu({ device, sphParticleState,
               sphParticleUpload, thermalMaterialTable, exactMassG2pResult: g2pResult,
               exactMassSpatialEpochTransaction: transaction, exactMassSpatialEpochGeneration: generation,
@@ -166,9 +289,13 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
               sourceMechanicsBuffer: capture.mechanicsBuffer });
             progress('discovery-complete');
             const args = { device, thermalResult, thermalSourceCapture, g2pResult, transaction, generation,
-              sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload, thermalMaterialTable, reactionTable,
+              sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload, thermalMaterialTable, mechanicsMaterialTable, reactionTable,
               dtSeconds, reactionDiscoveryProposal: proposal };
-            if (inspect) { observed = await inspect(args); return original; }
+            if (inspect) {
+              observed = await inspect(args);
+              if (stopAfterInspect) throw inspectionComplete;
+              return original;
+            }
             const before = await readWords(device, capture.sourceRead.read.buffer);
             progress('source-read-complete');
             selected = await runSphExactReactionSourceSelectionWebGpu(args);
@@ -243,13 +370,42 @@ export async function runExactReactionSourceNative(device, { reverse = false, dt
       }
     };
     runOptions.gpuTimestampRecorder = runOptions.residentStepOptions.gpuTimestampRecorder;
+    if (vaporRejection) {
+      try {
+        execution = await hierarchy.runSchroederSameLevelMechanicsWebGpu(runOptions);
+        throw new Error('Rejected exchange unexpectedly completed its outer step');
+      } catch (error) { rejectedExchange = await vaporRejection.finish(error); }
+      console.log('exact-routing-progress', JSON.stringify({ phase: 'exchange-rejection-verified',
+        checks: rejectedExchange.checks }));
+    }
     execution = await hierarchy.runSchroederSameLevelMechanicsWebGpu(runOptions);
-    if (visits !== 1 || observed === undefined) throw new Error('Actual canonical G2P source hook did not execute once');
-    return observed;
-  } catch (error) { failure = error; throw error;
+    // The published source must retain both parcel and exact storage after the
+    // original cold owner closes. The fixture keeps no original read alive.
+    if (initialAerosol) releaseSphAerosolParcelFamily(initialAerosol.family);
+    if (completeOuterReaction) observed = await inspectCompletedStep({ execution, stageEvidence,
+      args: { device, sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload,
+        thermalMaterialTable, mechanicsMaterialTable, reactionTable, dtSeconds, condensableThermodynamicsByMaterial: models,
+        initialAerosol, currentGasEvidence, vaporCommitNative } });
+    if (visits !== (rejectVaporExchange ? 2 : 1) || observed === undefined) throw new Error('Actual canonical G2P source hook did not execute the expected attempts');
+    return rejectedExchange ? { ...observed, rejectedExchange } : observed;
+  } catch (error) {
+    failure = error;
+    if (completeOuterReaction) console.error('exact-full-outer-failure', error.stack ?? String(error));
+    if (error.exactMassResidentCleanupError) console.error('exact-full-outer-cleanup-failure',
+      error.exactMassResidentCleanupError.stack,
+      JSON.stringify(Array.from(error.exactMassResidentCleanupError.errors ?? [], nested => nested.stack ?? String(nested))));
+    if (error === inspectionComplete && stopAfterInspect && visits === 1 && observed !== undefined) {
+      return { ...observed, enclosingMechanicsStepCompleted: false };
+    }
+    throw error;
   } finally {
-    if (execution?.residentStep) steps.destroyMlsMpmResidentStepBuffers(execution.residentStep);
+    vaporRejection?.restore();
+    if (execution?.residentStep) {
+      try { steps.destroyMlsMpmResidentStepBuffers(execution.residentStep); }
+      catch (error) { if (!failure) throw error; failure.cleanupFailure = error; }
+    }
     buffers.destroySphGpuParticleBuffers(sphParticleUpload); buffers.destroyMlsMpmGpuParticleBuffers(mlsMpmParticleUpload);
+    if (initialAerosol) releaseSphAerosolParcelFamily(initialAerosol.family);
     try { await device.queue.onSubmittedWorkDone(); } catch (error) { if (!failure) throw error; }
   }
 }

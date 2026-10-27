@@ -36,11 +36,15 @@ local memory than the driver had allocated. Check with
 
 The isolated native fixtures that pass are static pages with no canvas or
 animation (for example `probe-phase-quantity-production-limits.mjs`). The
-actual app presents at about 120 Hz (`ui raf 119.9` in the R327 evidence), so
-the GPU must time-slice between contexts. Likely mechanism: a pass the driver
-cannot preempt within its context-switch timeout kills the channel. This is
-**a hypothesis consistent with the evidence, not a proven cause**. It would
-explain why the same kernels, at the same capacity, pass in isolation.
+actual app runs its UI loop at about 120 Hz (`ui raf 119.9` in the R327
+evidence) and keeps updating the page, so Chrome's compositor needs the GPU
+while the simulation pass runs. (Correction, from Phase 0: `ui raf` counts
+animation callbacks, not rendered frames. In R327 no simulation state was
+presented, and an idle app encodes almost no GPU work.) Likely mechanism: the
+compositor's context switch waits on a pass the driver cannot preempt within
+its timeout, and the channel is killed. This is **a hypothesis consistent with
+the evidence, not a proven cause**. It would explain why the same kernels, at
+the same capacity, pass in isolation.
 
 ### 1.3 The arithmetic is GPU-hostile by construction
 
@@ -300,6 +304,122 @@ failed gate.
 Phase 0 is small and decisive. If integer ledgers also hit the watchdog in the
 live app, this proposal is wrong, and the next step is to prove the
 time-slicing hypothesis in 1.2 directly.
+
+### Phase 0 results, 2026-10-27: gate passed
+
+**What ran.**
+
+- The signed ledger library (`src/runtime/sph/sphExactLedgerWgsl.js`) sits on
+  the committed mass format, and `ulg-gpu-abi/src/sphExactSignedLedger.js` is
+  its host codec. It provides signed add, subtract and compare; exact f32 →
+  quanta conversion; nearest-even projection; and order-independent scatter
+  through 16-bit chunk counters with a one-pass carry.
+- The probe (`tests/fixtures/sphExactLedgerProbeNative.js`) works at Iron Ice
+  capacity: 6,784 rows. Each step runs six passes:
+  - **match:** 3,392 disjoint random pairs, with mass clamped exactly to the
+    donor and all of a depleted donor's energy moved with it;
+  - **conduct:** canonical-order f32 conduction packets over a lattice graph
+    of 194,124 directed edges;
+  - **f32:** the same loop in plain f32, for comparison;
+  - **scatter:** four many-to-one transfers per row, whole-row deposits and
+    sparse recorded sources;
+  - **carry:** folds the scatter counters into the ledgers and refreshes the
+    projections;
+  - **budget:** checks ΣM = M0 and ΣU = U0 + sources.
+- `scripts/g2-ledger-live-probe.mjs` opens the actual app
+  (`pages.html?scenario=iron-ice-quench&residentAuto=1&residentGpuTimestampFeature=1`)
+  and presses Play. Once the app steps, it runs the probe on the app's own
+  GPUDevice: the one in the offscreen render worker, which both simulates and
+  presents. Probe submissions interleave with the app's.
+- `tests/sphExactLedger.native.test.mjs` runs the arithmetic against BigInt,
+  then the probe, on a static page.
+
+| Gate item | Result |
+|---|---|
+| No Xid | None in `journalctl -k` during either live run: 1,000 steps unpaced, and a 120 s soak of 7,500 steps paced at 16 ms. |
+| Bit-exact sums | Live, 1,000 steps: 3,392,000 pair transfers, 97,062,000 conduction packets, 27,136,000 scatter transfers, 106,189 deposits, 795,251 sources, no non-finite packets. ΣM equals the host's initial total. ΣU equals the host's initial total plus its own recomputation of every source. The GPU budget held on every step. An independent single-thread audit agrees. |
+| GPU time per stage | Table below. |
+| At most 2 ledger-only passes per step | 2: carry (22.8 µs median) and budget (5.5 µs). |
+
+GPU time per pass, in µs, in the live app over 1,000 steps (timestamp queries):
+
+| Pass | Median | p99 | Max | Static-page median (7,500 steps) |
+|---|---|---|---|---|
+| match | 16.9 | 19.9 | 25.3 | 16.8 |
+| conduct | 21.5 | 26.5 | 31.1 | 21.5 |
+| f32 (same loop, f32 only) | 11.9 | 13.3 | 23.7 | 11.9 |
+| scatter | 8.7 | 14.5 | 22.8 | 8.4 |
+| carry | 22.8 | 29.5 | 30.6 | 22.8 |
+| budget | 5.5 | 6.7 | 18.5 | 5.6 |
+| whole probe step | 89.2 | 110.0 | 121.2 | 88.8 |
+
+- **Exact versus f32.** Exact conversion and accumulation add 9.6 µs to the
+  same neighbour loop.
+- **Longest pass.** The longest ledger pass took 31.1 µs. R327's failing
+  exact-rational pass ran for more than 15 s.
+- **Audit.** The one-time single-thread audit takes 1.5 ms; it is a test,
+  not a per-step pass.
+
+**Soak inside the live app** (`live-soak-7500.json`): 7,500 steps over
+120 s, paced at 16 ms per step, about 4× the app's own average step rate.
+
+- **Exactness.** Every check passed again over 25,440,000 pair transfers,
+  727,965,000 conduction packets, 203,520,000 scatter transfers, 794,539
+  deposits and 5,964,281 sources. 666 conduction packets were non-finite
+  (4.6 × 10^-7); both endpoints skip them identically.
+- **Pass times.** Medians were unchanged (match 17.1, conduct 22.6,
+  carry 23.0, budget 5.6 µs), and the p99 was at most 47.5 µs. A few passes
+  reached 0.45–0.54 ms while the app's own work was in flight; the longest
+  probe step took 0.62 ms.
+- **App.** It kept stepping at the same rate: 0.0030 simulated s per wall s
+  before and during the probe. Presented states fell from 56 to 50 per
+  second, and the UI loop from 115 to 107 callbacks per second.
+
+**What Phase 0 does not show.**
+
+- **The time-slicing hypothesis (1.2) is untested.** Ledger passes are about
+  10^5 times shorter than the failing passes, so they cannot exercise it either
+  way.
+- **Fusion is still a design claim.** The probe runs match, conduct and scatter
+  as their own passes. Fusing them into thermal, phase transfer, reaction and
+  exchange is gated in Phase 1 (f32 baseline plus 2).
+**A probe defect found and fixed during the soak.**
+
+- **What the first soak showed.** It flagged `OVERFLOW` and
+  `PROJECTION_OVERFLOW` from step 4,129 onward, and 8 per-step budget
+  failures. Its final totals were still bit-exact, and the audit agreed.
+- **Cause.** The probe's first version sent random-sign energy packets. Those
+  let row energies random-walk past the f32 range (about 10^38 J). By the end,
+  70% of conduction packets were non-finite.
+- **Errors were flagged, not silent.** The flags came from two range limits.
+  First, the f32 projection (2^128 J). Second, the budget's positive and
+  negative halves, each of which must stay below 2^287 quanta.
+- **Fix.** Packets now move a fraction of the donor's own signed energy, which
+  never grows Σ|U|. Earlier `-unbounded` evidence files are kept.
+- **Phase 1 design note.** A production budget accumulator needs log2(rows)
+  bits of headroom (one extra word). The sum of |U| over rows can exceed the
+  range of any single legal row value.
+
+**App baseline (non-air Iron Ice, f32 path, unmodified).**
+
+- **Warm-up.** The first schedule compiles for about 35 s.
+- **Rates.** After that the app runs 16-step schedules: the readout shows
+  16 steps/s while a schedule runs. Measured from sim time, it averages
+  0.0030 simulated s per wall s, about 6 steps/s at its 0.5 ms step. It
+  presents 50–57 states/s.
+- **Plume horizon.** At that rate, vapor onset (about 2.2 s simulated) takes
+  about 12 minutes, and the 8,192-step arm about 23 minutes.
+- **Air mode not measured.** Air mode adds gas carriers and still runs the
+  exact-rational path today, so its f32 rate is not yet measured.
+
+Evidence, in `~/.cache/icc/repos/ulg/g2-ledger-phase0-20261027/`:
+
+- `live-1000.json` and `.png` (the app right after the probe);
+- `live-soak-7500.json` and `.png`;
+- the first-dynamics runs, kept as `*-unbounded.*`.
+
+The static-page run is `ULG_RUN_NATIVE_EXACT_LEDGER=1
+ULG_EXACT_LEDGER_STEPS=7500 node --test tests/sphExactLedger.native.test.mjs`.
 
 ## 5. Questions for the user
 

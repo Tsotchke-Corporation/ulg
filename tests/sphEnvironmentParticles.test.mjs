@@ -117,7 +117,9 @@ test('serialized atmosphere controls change actual inventory and invalid control
   }
 });
 
-for (const authoredBodies of [false, true]) test(`room air reaches original scene packers and clone-safe worker seed (${authoredBodies ? 'bodies' : 'legacy'})`, () => {
+// Exact-rational quantities are disabled (user, 2026-10-27). Room air declares
+// no exact mass, so no stage can route into them.
+for (const authoredBodies of [false, true]) test(`room air reaches original scene packers and the worker without exact-rational quantities (${authoredBodies ? 'bodies' : 'legacy'})`, () => {
   const demo = buildSphPhaseDemoState({ environment, dropParticleEdge: 2, baseParticleEdge: 2,
     ...(authoredBodies ? { initialBodies: [{ id: 'water', domainId: 1, material: 'h2o',
       sizeM: [1, 1, 1], centerM: [2.5, 0.5, 2.5], temperatureK: 293.15,
@@ -125,14 +127,12 @@ for (const authoredBodies of [false, true]) test(`room air reaches original scen
   assert.ok(demo.counts.environmentGas > 0);
   const initialGas = demo.state.particles.filter(p => p.role === 'environment-gas' && p.massKg > 0);
   assert.equal(initialGas.length, demo.counts.environmentGas);
+  assert.equal(Object.hasOwn(demo.state, 'exactMassInitialization'), false);
   for (const state of [demo.state, structuredClone(demo.state), JSON.parse(JSON.stringify(demo.state))]) {
     const opts = { materialProperties: demo.materialProperties, initialParticleSpacing: demo.initialParticleSpacing };
     const sph = buildSphGpuParticleBuffers(state, opts), mls = buildMlsMpmGpuParticleBuffers(state, opts);
     assert.equal(sph.phaseCaloricInitializationSignature, mls.phaseCaloricInitializationSignature);
-    const seed = resolveSphExactParticleMassSeed(sph);
-    assert.deepEqual(seed.massesKg, state.particles.map(p => p.massKg));
-    assert.equal(seed.format.wordCount, 9);
-    assert.throws(() => buildSphGpuParticleBuffers({ ...state, step: 1 }, opts), /cold initial/);
+    assert.equal(resolveSphExactParticleMassSeed(sph), null);
   }
   const summary = gasPressureSummary(demo);
   assert.equal(Object.hasOwn(summary.bySpecies, 'air'), false);
@@ -140,12 +140,6 @@ for (const authoredBodies of [false, true]) test(`room air reaches original scen
   const view = createSphPhaseViewState({ demo });
   const transfer = packSphPhaseViewStateForTransport(view);
   const restored = unpackSphPhaseViewStateFromTransport(structuredClone(transfer));
-  assert.deepEqual(resolveSphExactParticleMassSeed(restored.sphGpuParticleState).massWords,
-    Uint32Array.from(demo.state.exactMassInitialization.massWords));
-  for (const edit of [v => { v.sphGpuParticleState.step = 1; },
-    v => { v.sphGpuParticleState.state[3] *= 2; },
-    v => { v.coldExactMassInput.massWords[8] = 0xffffffff; }]) {
-    const changed = structuredClone(transfer); edit(changed);
-    assert.throws(() => unpackSphPhaseViewStateFromTransport(changed));
-  }
+  assert.equal(resolveSphExactParticleMassSeed(restored.sphGpuParticleState), null);
+  assert.equal(restored.sphGpuParticleState.particleCount, demo.state.particles.length);
 });

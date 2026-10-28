@@ -100,6 +100,12 @@ import {
 import { phaseSoundSpeedScaleFor } from './sph/sphMechanicsMaterialTable.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
+// Exact-rational particle quantities are disabled (user, 2026-10-27). Room
+// air's exact-mass declaration is what routed thermal, phase transfer and
+// mechanics refresh into them, so room air runs the f32 path until the
+// integer ledgers replace it (plan/todo/g2-integer-ledger-proposal.md). The
+// stages stay in the tree; no scene reaches them.
+const ROOM_AIR_EXACT_MASS_DECLARED = false;
 const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-step-timing.v0';
 const H2O_VAPOR_OPTICAL_STATE_MODEL = 'h2o-vapor-optical-diagnostic-v1';
 const H2O_VAPOR_OPTICAL_STATE_GENERATOR = `${WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL}:sealed-box-gas-summary-nonauthoritative-v1`;
@@ -2588,7 +2594,7 @@ function buildSphInitialBodiesDemoState({
       ? appendPhaseCarrierLanes(all)
       : declarePhaseCarrierSingleLanePlan(all);
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
-  if (environment?.mode === 'air') state.exactMassInitialization = {
+  if (ROOM_AIR_EXACT_MASS_DECLARED && environment?.mode === 'air') state.exactMassInitialization = {
     schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149, initialQuantities: true,
     massWords: all.flatMap(particle => particle.massKg > 0 && particle.coldExactMassWords
       ? particle.coldExactMassWords : Array.from(encodeSphExactMass(particle.massKg, createSphExactMassFormat()))),
@@ -3140,7 +3146,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       : declarePhaseCarrierSingleLanePlan(all);
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
-  if (environment?.mode === 'air') state.exactMassInitialization = {
+  if (ROOM_AIR_EXACT_MASS_DECLARED && environment?.mode === 'air') state.exactMassInitialization = {
     schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149, initialQuantities: true,
     massWords: all.flatMap(particle => particle.massKg > 0 && particle.coldExactMassWords
       ? particle.coldExactMassWords : Array.from(encodeSphExactMass(particle.massKg, createSphExactMassFormat()))),

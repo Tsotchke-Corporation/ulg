@@ -1,11 +1,14 @@
 # G2 proposal — exact integer ledgers instead of exact rationals
 
-Status: **proposal under user review, 2026-10-27.** The user paused G2 code
-changes for this review ("Stop and review first"), then approved Phase 0 and
-the pass budget in 2.5 ("yes add it, then start phase 0"). Phases 1–6 and the
-questions in section 5 still wait on the user. Codex's work through R327 is
-committed locally as `1ee78bf` (WIP checkpoint, not a milestone). G2 remains
-3/6.
+Status: **section 5 answered, 2026-10-27; new real-time requirement.** The
+user paused G2 code changes for this review ("Stop and review first"),
+approved Phase 0 and the pass budget in 2.5 ("yes add it, then start phase
+0"), and Phase 0 passed. The user then answered section 5: momentum stays
+f32, the exact energy budget counts, the exact-rational code is disabled
+rather than deleted, and the plume evidence must run near real time ("25 min
+is insane these should run near realtime"). That last answer is new scope:
+see the real-time gap in section 6. Codex's work through R327 is committed
+locally as `1ee78bf` (WIP checkpoint, not a milestone). G2 remains 3/6.
 
 ## 1. Evidence: why the R2xx–R327 path cannot deliver G2
 
@@ -278,8 +281,10 @@ water mass, so the extinction comes from the parcels themselves.
   whether the evidence is convincing.
 - **Coefficients.** The documented continuum coefficients still need an
   independent check of growth rates against a CPU reference.
-- **Wall time.** The f32 Iron Ice step rate has not been measured since
-  September. The 8,192-step run could take minutes or tens of minutes.
+- **Wall time.** The user requires the plume scenarios to run near real time
+  (section 5, Q4). Iron Ice runs dt = 0.5 ms, so that means about 2,000
+  steps/s. The f32 app averaged about 6 steps/s on 2026-10-27, so an
+  8,192-step run took about 23 minutes. Section 6 has the gap.
 - **The watchdog hypothesis is unproven.** Phase 0 tests it before anything
   else is built.
 
@@ -438,3 +443,123 @@ ULG_EXACT_LEDGER_STEPS=7500 node --test tests/sphExactLedger.native.test.mjs`.
    steps to reach Iron Ice steam. G1 performance is deferred. Is a long
    recorded run (for example 20–60 minutes) acceptable as the desktop plume
    evidence?
+
+**Answers (user, 2026-10-27): "1 yes, 2 sure, 3 disabled, 4 25 min is insane
+these should run near realtime."**
+
+1. Momentum stays an f32 mechanics quantity, outside the ledgers.
+2. A bit-exact energy budget, with mechanics heat and wall heat as recorded
+   sources, satisfies "enthalpy conserved".
+3. The exact-rational stages are disabled and kept in `1ee78bf` history. They
+   are not scheduled for deletion.
+4. **No.** A 25-minute recording is not acceptable evidence. The plume scenarios
+   must run near real time. Iron Ice uses dt = 0.5 ms, so real time is about
+   2,000 steps/s. The f32 app averaged about 6 steps/s on 2026-10-27
+   (Phase 0 results). Section 6 measures where that time goes.
+
+**Answer 3 is applied.** `ROOM_AIR_EXACT_MASS_DECLARED = false` in
+`src/runtime/sphPhaseDemo.js` stops room air from declaring exact mass. That
+declaration was the only production route into the exact-rational stages:
+exact mass made the post-mechanics closure pass exact thermal and reaction
+results to phase transfer and refresh. The stages stay in the tree; no scene
+reaches them. Humid-air Iron Ice now fails closed at its first step with
+"Phase-specific caloric reaction energy is not yet admitted": room air adds
+O2, so Fe/O2 reactions are discovered, and the f32 reaction stage refuses
+per-phase calorics. That is a clean refusal with no Xid, where R327 lost the
+GPU. Air mode returns with Phases 3 and 4.
+
+## 6. Real-time gap, measured 2026-10-27
+
+Real time for Iron Ice (dt = 0.5 ms) is 2,000 steps/s. Half real time is
+1,000 steps/s, or 1 ms per step with everything included.
+
+**Method.** The live app ran non-air f32 Iron Ice (6,784 rows) on the RTX
+5060 Ti, headed, after warm-up. Three 30 s windows followed:
+
+- a census of every WebGPU call;
+- the same census plus a timestamp pair injected into every compute and
+  render pass;
+- a census again.
+
+Steps come from the worker lane's own counter. The timed window ran at the
+same rate (6.5 vs 6.4 steps/s), so the timestamps did not slow the app. A
+second run polled the page scheduler and the app's opt-in cadence timeline
+across batch boundaries.
+
+- Probe: `scripts/realtime-gap-probe.mjs`.
+- Evidence: `~/.cache/icc/repos/ulg/realtime-gap-20261027/`
+  (`iron-ice-f32.json`, `schedule-gap-2.json`). No Xid.
+
+**Result: 6.4 steps/s, about 159 ms per step.** The app runs 16-step
+batches; one batch takes 2.55 s.
+
+| Where a step's time goes | ms/step | Share |
+|---|---:|---:|
+| Idle between batches. The page holds the next batch until it has proof that the previous batch's last state was drawn (`native-surface-post-step-presentation-proof-pending` in `sphPhaseDemoMount.js`). The GPU is mostly idle. | ~84 | 53% |
+| GPU, contact solver: `contact-graph-solve` (3.9 passes of 6.8 ms each) and `matching-cleanup-global-owner` (1 pass of 17.7 ms) | 44 | 28% |
+| GPU, everything else (about 100 passes) | 16 | 10% |
+| CPU and queue waits inside a batch | ~13 | 8% |
+| Tail fence | ~2 | 1% |
+
+- **CPU and queue waits.** Each step makes 108 compute passes, 405
+  dispatches (54 of them indirect), 32 submits, 235 buffer writes and about
+  10 queue waits.
+- **The other GPU passes.** The largest, in ms per step:
+  - thermal directional budget 2.3;
+  - contact graph build 2.0;
+  - mechanics-field view radix sort 1.4;
+  - thermal reciprocal-limited proposal 1.35;
+  - grid update 0.8;
+  - phase-volume migration 0.7;
+  - G2P 0.6;
+  - epoch radix sort and P2G clear, 0.4 each.
+
+  The render-field build costs 49 ms once per batch. Passes of 0.3–2.5 ms
+  over 6,784 rows are latency-bound, not bandwidth-bound.
+
+**The current route cannot reach it.**
+
+- Removing the presentation hold gives the in-batch rate, about 14 steps/s.
+- Even a free contact solver leaves about 28 ms per step in the remaining
+  passes and waits. That caps this pass structure near 35 steps/s, about
+  57× short of real time.
+
+**What real time needs.** No more than about 0.5 ms per step, everything
+included:
+
+1. **Decoupled presentation.** Physics batches run back to back, and the
+   presenter shows the newest state at display rate.
+2. **A parallel contact solver.** It must cost about 0.1 ms, not 44. The
+   serial owner was already identified as the wall in August; the noted fix
+   was a Jacobi-wide pair application, not more micro-optimization.
+3. **A lean pass structure.** About 15–25 wide passes per step, direct
+   dispatch only, and K steps per submit with no per-step CPU waits (the
+   Tier0 pattern).
+4. **Ledgers inside the budget.** The two ledger-only passes measured 28 µs
+   per step in Phase 0, about 6% of 0.5 ms.
+
+**Why it is plausible.**
+
+- Phase 0's six-pass step took 89 µs on the live app's device, at the same
+  capacity. It covered random matching, conduction over 194,124 edges,
+  scatter, carry and budget.
+- Tier0 bulk water ran 1,100–1,260 steps/s at 33–37k particles (2026-09-01).
+- Neither includes contact or phase change. Those are the unproven parts.
+
+**Options (user decision pending):**
+
+- **A. Real-time route first, with the ledgers built in.** Build a lean,
+  fused K-step route for the three steam presets: MLS-MPM, conduction, phase
+  transfer, parallel contact and the two ledger passes, with presentation
+  decoupled.
+  - Gate it like Phase 0: a probe at Iron Ice capacity in the live app, at
+    least 1,000 steps/s and no Xid, before any porting.
+  - G2's remaining phases then land on that route.
+  - This moves the campaign's A1 (real-time substrate) ahead of G2's
+    remaining items.
+- **B. Ledgers first, on the current route (Phases 1–5); real time after.**
+  - Every plume check runs at about 6 steps/s: about 12 minutes to vapor
+    onset.
+  - Most ledger wiring would land in kernels the real-time work replaces.
+
+Recommendation: A.

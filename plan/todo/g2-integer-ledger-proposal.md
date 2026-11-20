@@ -1415,3 +1415,36 @@ included:
   - Most ledger wiring would land in kernels the real-time work replaces.
 
 Recommendation: A.
+
+## 7. Phase 6c Closeout, 2026-11-20: Conserved Iron-Ice & Sodium-Water Plumes Verified
+
+With G3 coherent solids (`26f1e242`) and A1 substrate throughput (`a4100f24`)
+live, `scripts/step0-baseline-probe.mjs` and `scripts/g2-ledger-audit.mjs` now
+include coherent rigid-solid member mass (`ulg-solid-members`) alongside fluid
+carriers, aerosol parcels, and sinks so ownership transfer across melting
+(`schroederSolidReleaseGpu.js` `el_from_f32_bits`) is audited bit-for-bit at
+`2^-149 kg` / `2^-149 J`:
+
+- **Native Vulkan parcel/optics gates:** `sphExactVaporParcelLedger.native.test.mjs`,
+  `sphExactParcelTransportLedger.native.test.mjs`, and
+  `sphLedgerParcelOptics.native.test.mjs` all PASS (`3/3`).
+- **Room-air `iron-ice-quench` ledger audit** (`g2-iron-ice-ledger-v2.json`,
+  `environmentMode=air&exactEnergyLedger=1&environmentNucleiPerCm3=5000&sdt=0.001`,
+  `512` steps to `0.720 s`): `ledgerErrors: []`, **`massExact: true`**,
+  **`energyBudgetExact: true`**, `solids: { alive: 968, total: 1000, released: 32 }`,
+  `steamPresent: true` (`3.49 g` gas lane), `parcels: { count: 72, waterKg: 2.55e-5 }`.
+- **Room-air `sodium-water` ledger & lineage audit** (`g2-sodium-water-ledger.json`,
+  `environmentMode=air&wallModel=adiabatic&exactEnergyLedger=1&environmentNucleiPerCm3=500`,
+  `448` steps to `0.640 s`): `ledgerErrors: []`, **`massExact: true`**,
+  **`energyBudgetExact: true`**, `recordedSourcesJ: +275,129.48 J`,
+  `naoh: 68.38 g`, `h2: 1.72 g`, `committedPairs: 207`, `deliveries: 414`
+  (`merges: 198`, `spareRows: 216`), **`untracedDeliveries: 0`** across `23`
+  generations.
+- **Headed Wayland desktop sequences** (`~/.cache/icc/repos/ulg/arch-m4-g2/desktop-sequence/`):
+  - `iron-ice-plume` (`0.032 s -> 0.464 s -> 1.056 s -> 1.664 s`, `0` errors):
+    `87` rigid ice members melt into a visible top-face crater with refractive
+    meltwater pooling below and `104/104` parcel-optics frames routing
+    condensate extinction into the headspace.
+  - `sodium-water-plume` (`0.064 s -> 0.192 s -> 0.512 s -> 0.960 s`, `63.7 steps/s`,
+    `0` errors): `Na + H2O` interface ignition launches a buoyant `H2`/steam
+    plume to the upper chamber (`977` parcel stages, `15/15` parcel-optics frames).

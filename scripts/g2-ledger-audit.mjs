@@ -8,7 +8,7 @@
 //
 //   node scripts/g2-ledger-audit.mjs <probe-evidence.json>
 import { readFile } from 'node:fs/promises';
-import { createSphExactMassFormat, projectSphExactMassF32Bits } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { createSphExactMassFormat, encodeSphExactMass, projectSphExactMassF32Bits } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
 import { decodeSphExactSignedUnits } from '../ulg-gpu-abi/src/sphExactSignedLedger.js';
 import { SPH_EXACT_THERMAL_ENERGY_ERROR, SPH_EXACT_THERMAL_ENERGY_STATUS_NO_PAIR_EXCHANGE,
   SPH_EXACT_THERMAL_ENERGY_STATUS_MECHANICS_HEAT } from '../src/runtime/sph/sphExactThermalEnergyWgsl.js';
@@ -67,6 +67,26 @@ const parcelTotals = words => {
 const parcelsCold = parcelTotals(parcelRowsCold), parcelsNow = parcelTotals(parcelRowsNow);
 const sinkMass = sinksNow ? unsigned(sinksNow, 0) + unsigned(sinksNow, 2) : 0n;
 const sinkEnergy = sinksNow ? signed(sinksNow, 0, 1) : 0n;
+// G3 coherent rigid solid members (8 words each, mass f32 at word 3; released members set mass = 0
+// while transferring exact el_from_f32_bits(mass) into their reserved fluid exact_mass_rows slot).
+const solidMembersCold = audit.cold.solidMembers ?? null;
+const solidMembersNow = candidates('ulg-solid-members').filter(Array.isArray).at(-1) ?? null;
+const solidTotals = words => {
+  if (!words) return { mass: 0n, alive: 0, total: 0 };
+  const f = new Float32Array(Uint32Array.from(words).buffer);
+  const total = Math.floor(f.length / 8);
+  let mass = 0n, alive = 0;
+  for (let i = 0; i < total; i++) {
+    const m = f[i * 8 + 3];
+    if (m > 0) {
+      alive += 1;
+      const enc = encodeSphExactMass(m, format);
+      mass += Array.from(enc).reduceRight((v, w) => (v << 32n) | BigInt(w >>> 0), 0n);
+    }
+  }
+  return { mass, alive, total };
+};
+const solidsCold = solidTotals(solidMembersCold), solidsNow = solidTotals(solidMembersNow);
 const report = {
   rows, lineages, energyRecord: finalEnergyRecord?.label ?? null,
   simTimeS: evidence.samples.at(-1)?.simTimeS ?? null,
@@ -75,9 +95,11 @@ const report = {
     mechanicsHeat: Boolean(control[1] & SPH_EXACT_THERMAL_ENERGY_STATUS_MECHANICS_HEAT),
     reaction: Boolean(control[1] & SPH_EXACT_REACTION_LEDGER_STATUS_REACTION),
     particleStepsWithoutPairExchange: control[2], ledgerParticleSteps: control[3] },
-  massExact: finalMass ? sum(indices.map(row => unsigned(finalMass, row))) + parcelsNow.mass + sinkMass
-    === sum(indices.map(row => unsigned(coldMass, row))) + parcelsCold.mass : null,
+  massExact: finalMass ? sum(indices.map(row => unsigned(finalMass, row))) + parcelsNow.mass + sinkMass + solidsNow.mass
+    === sum(indices.map(row => unsigned(coldMass, row))) + parcelsCold.mass + solidsCold.mass : null,
   energyBudgetExact: finalBudget + parcelsNow.energy + sinkEnergy === coldU + parcelsCold.energy,
+  solids: solidMembersNow ? { alive: solidsNow.alive, total: solidsNow.total, released: solidsCold.alive - solidsNow.alive,
+    aliveMassKg: Number(solidsNow.mass) * 2 ** -149 } : null,
   parcels: parcelRowsNow ? { count: parcelsNow.count, waterKg: Number(parcelsNow.water) * 2 ** -149,
     sinkMassKg: Number(sinkMass) * 2 ** -149 } : null,
   recordedSourcesJ: Number(sources) * 2 ** -149,
@@ -91,13 +113,19 @@ const report = {
 const finalThermoWords = candidates('ulg-sph-phase-carrier-transfer-thermo').filter(Array.isArray).at(-1);
 if (audit.cold.thermo && finalThermoWords && finalMass) {
   const { stableOpticalMaterialId } = await import('../src/runtime/material/opticalGpuBuffers.js');
-  const atomic = { H: 1.008, O: 15.999, Na: 22.98976928 };
-  const species = { na: { Na: 1 }, h2o: { H: 2, O: 1 }, naoh: { Na: 1, O: 1, H: 1 }, h2: { H: 2 } };
+  const atomic = { H: 1.008, C: 12.011, N: 14.007, O: 15.999, Na: 22.98976928, Ar: 39.948, Fe: 55.845 };
+  const species = {
+    na: { Na: 1 }, h2o: { H: 2, O: 1 }, naoh: { Na: 1, O: 1, H: 1 }, na2o: { Na: 2, O: 1 }, h2: { H: 2 },
+    fe: { Fe: 1 }, feo: { Fe: 1, O: 1 }, fe3o4: { Fe: 3, O: 4 }, fe2o3: { Fe: 2, O: 3 },
+    n2: { N: 2 }, o2: { O: 2 }, ar: { Ar: 1 }, co2: { C: 1, O: 2 }
+  };
   const byId = new Map(Object.entries(species).map(([name, formula]) => [Math.fround(stableOpticalMaterialId(name)), { name, formula,
     M: Object.entries(formula).reduce((a, [e, n]) => a + n * atomic[e], 0) }]));
   const finalThermo = new Float32Array(Uint32Array.from(finalThermoWords).buffer);
   const tally = (massWords, thermo) => {
-    const elements = { H: 0, O: 0, Na: 0 }, bySpecies = {}; let unknownKg = 0;
+    const elements = Object.fromEntries(Object.keys(atomic).map(k => [k, 0]));
+    const bySpecies = {};
+    let unknownKg = 0;
     for (const row of indices) {
       const m = Number(unsigned(massWords, row)) * 2 ** -149;
       if (!(m > 0)) continue;

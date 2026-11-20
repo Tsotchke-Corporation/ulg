@@ -223,6 +223,7 @@ const hook = (options = {}) => {
     // Ledger audit: keep the newest record buffers to read back at the end.
     if (/^ulg-exact-(energy-phase-ledger|energy-thermal|energy-reaction-ledger|mass-ledger-phase-successor|energy-initial|mass-initial|reaction-lineage)$/.test(label)
       || label === 'ulg-sph-phase-carrier-transfer-thermo'
+      || label === 'ulg-solid-members'
       || label === 'ulg-ledger-parcel-rows' || label === 'ulg-ledger-parcel-sinks' || label === 'ulg-ledger-parcel-params') {
       // Keep the newest few: the very newest may belong to a step the pause
       // interrupted before it was written.
@@ -625,8 +626,14 @@ const hook = (options = {}) => {
       // The cold material ids of the upload that seeds the exact rows.
       G.lastThermoWrite = Array.from(new Float32Array(a[2].buffer, a[2].byteOffset, a[2].byteLength / 4));
     }
+    const u32FromWriteData = (d) => d instanceof ArrayBuffer
+      ? Array.from(new Uint32Array(d))
+      : Array.from(new Uint32Array(d.buffer, d.byteOffset, d.byteLength / 4));
     if (coldLabel === 'ulg-ledger-parcel-rows' && a[2]?.byteLength && !G.ledgerCold.parcelRows) {
-      G.ledgerCold.parcelRows = Array.from(new Uint32Array(a[2].buffer, a[2].byteOffset, a[2].byteLength / 4));
+      G.ledgerCold.parcelRows = u32FromWriteData(a[2]);
+    }
+    if (coldLabel === 'ulg-solid-members' && a[2]?.byteLength && !G.ledgerCold.solidMembers) {
+      G.ledgerCold.solidMembers = u32FromWriteData(a[2]);
     }
     if (coldLabel === 'ulg-exact-energy-initial' || coldLabel === 'ulg-exact-mass-initial') {
       const data = a[2];

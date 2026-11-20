@@ -38,6 +38,8 @@ test('law scope receipt sums per-law counts and counts zero-work steps', async (
   encodeLawActivationCount(encoder, device, 'thermal', counts(10, 5, 15), { epsilon: 0 });
   encodeLawActivationCount(encoder, device, 'thermal', counts(0, 15, 15), { epsilon: 0 });
   encodeLawActivationCount(encoder, device, 'reaction', counts(3, 7, 10));
+  encodeLawActivationCount(encoder, device, 'phase', counts(0, 15, 15), { epsilon: 0 });
+  encodeLawActivationCount(encoder, device, 'radiation', counts(0, 15, 15), { epsilon: 0 });
   const receipt = await closeLawActivationReceiptRing(device);
   assert.equal(receipt.schema, ULG_LAW_ACTIVATION_RECEIPT_SCHEMA);
   assert.deepEqual({ ...receipt.laws.thermal }, {
@@ -47,6 +49,10 @@ test('law scope receipt sums per-law counts and counts zero-work steps', async (
   assert.equal(receipt.laws.reaction.activeSourceSteps, 3);
   assert.equal(receipt.laws.reaction.zeroWorkSteps, 0);
   assert.equal(receipt.laws.reaction.exact, true);
+  assert.equal(receipt.laws.phase.zeroWorkSteps, 1);
+  assert.equal(receipt.laws.phase.exact, true);
+  assert.equal(receipt.laws.radiation.zeroWorkSteps, 1);
+  assert.equal(receipt.laws.radiation.exact, true);
   assert.equal(device.buffers[0].destroyed, true, 'the ring is released after reading');
 });
 

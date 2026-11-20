@@ -4230,7 +4230,10 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
           cellEdgeFloorM: reactionDormancyStage.cellEdgeFloorM,
           cells: reactionDormancyStage.cells,
           countBuffer: reactionDormancyStage.countBuffer,
-          dormantBuffer: reactionDormancyStage.dormantBuffer
+          dormantBuffer: reactionDormancyStage.dormantBuffer,
+          activeIndicesBuffer: reactionDormancyStage.activeIndicesBuffer,
+          indirectDispatchBuffer: reactionDormancyStage.indirectDispatchBuffer,
+          indirectDispatchOffset: reactionDormancyStage.indirectDispatchOffset ?? 16
         })
       : null,
     generation,

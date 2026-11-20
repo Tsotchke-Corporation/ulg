@@ -17,8 +17,19 @@ import { computeBufferBinding, createCachedExplicitComputePipeline } from '../we
 // superset). The predicate is symmetric, so a feasible pair has both
 // endpoints active. No epsilon: this is exact, not an approximation.
 //
-// Outputs: dormant[i] (1/0) and counts [active, dormant, present, overflow].
-const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_SRC: 0x04, COPY_DST: 0x08 });
+// Outputs: dormant[i] (1/0), counts [active, dormant, present, overflow],
+// compacted active_indices[0..active-1], and indirect dispatch args at offset
+// 16 of countBuffer ([ceil(active/64), 1, 1, active], yielding [0, 1, 1, 0]
+// zero-work witness when quiescent). Optional per-source G6/A4 temperature
+// uncertainty dT >= 0 expands scattered halo max temperatures to T + dT so
+// reaction activation remains conservative when uncertainty straddles T_act.
+const GPU_BUFFER_USAGE = Object.freeze({
+  STORAGE: 0x80,
+  UNIFORM: 0x40,
+  COPY_SRC: 0x04,
+  COPY_DST: 0x08,
+  INDIRECT: 0x0100
+});
 
 export const schroederReactionDormancyWgsl = /* wgsl */ `
 struct ReactionDormancyParams {
@@ -26,7 +37,7 @@ struct ReactionDormancyParams {
   counts: vec4<u32>,
   // state stride (vec4s), thermo stride (vec4s), reaction count, record stride (vec4s)
   strides: vec4<u32>,
-  // cell edge floor (m), maximum contact radius (m), unused, unused
+  // cell edge floor (m), maximum contact radius (m), uncertainty enabled (1/0), unused
   config: vec4<f32>,
   // grid extent x, y, z, unused
   box: vec4<f32>,
@@ -40,13 +51,23 @@ struct ReactionDormancyParams {
 // Per cell: [material presence mask, maximum temperature key].
 @group(0) @binding(4) var<storage, read_write> cell_words: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> dormant: array<u32>;
+// [active, dormant, present, overflow, dispatchX, dispatchY, dispatchZ, activeCopy]
 @group(0) @binding(6) var<storage, read_write> counts: array<atomic<u32>>;
 // The discovery proposal rows: a dormant source's row gets the sentinel the
 // discovery pass checks before overwriting its row.
 @group(0) @binding(7) var<storage, read_write> proposal_rows: array<vec4<f32>>;
+// Compacted active source indices [0..active-1].
+@group(0) @binding(8) var<storage, read_write> active_indices: array<u32>;
+// Optional per-source G6/A4 temperature uncertainty dT (K); active when params.config.z > 0.5.
+@group(0) @binding(9) var<storage, read> temperature_uncertainty: array<f32>;
 const REACTION_DORMANCY_SENTINEL: vec4<f32> = vec4<f32>(-7.0, -7.0, -7.0, -7.0);
 
 fn finite(value: f32) -> bool { return value == value && abs(value) <= 3.402823e38; }
+
+fn source_uncertainty(i: u32) -> f32 {
+  if (params.config.z <= 0.5 || i >= arrayLength(&temperature_uncertainty)) { return 0.0; }
+  return temperature_uncertainty[i];
+}
 
 fn grid_edge() -> f32 {
   return max(params.config.x, params.config.y) * 1.0001;
@@ -86,13 +107,15 @@ fn scatter_sources(@builtin(global_invocation_id) id: vec3<u32>) {
   let dims = grid_dims(edge);
   let p = source_state[i * params.strides.x].xyz;
   let thermo0 = source_thermo[i * params.strides.y];
+  let dt = source_uncertainty(i);
   let c = cell_index(cell_of(select(params.origin.xyz, p, finite(p.x) && finite(p.y) && finite(p.z)), edge, dims), dims);
-  // A malformed material or temperature poisons its cell: every material
-  // present, maximum temperature, so every source near it stays active.
-  let valid = finite(thermo0.x) && thermo0.x >= 0.0 && finite(thermo0.z);
+  // A malformed material, temperature, or uncertainty poisons its cell: every
+  // material present, maximum temperature, so every source near it stays active.
+  let valid = finite(thermo0.x) && thermo0.x >= 0.0 && finite(thermo0.z) && finite(dt) && dt >= 0.0 && dt <= 3.0e38;
   atomicOr(&cell_words[c * 2u], select(0xffffffffu, material_bit(thermo0.x), valid));
-  // Temperatures order as their f32 bits when positive; clamp the key at 0.
-  let key = select(0x7f7fffffu, bitcast<u32>(max(thermo0.z, 0.0)), valid);
+  // Temperatures order as their f32 bits when positive; pad by uncertainty +dT.
+  let t_hi = min(3.0e38, max(thermo0.z, 0.0) + max(dt, 0.0));
+  let key = select(0x7f7fffffu, bitcast<u32>(t_hi), valid);
   atomicMax(&cell_words[c * 2u + 1u], key);
 }
 
@@ -106,7 +129,9 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
   atomicAdd(&counts[2], 1u);
   let p = source_state[i * params.strides.x].xyz;
   let thermo0 = source_thermo[i * params.strides.y];
+  let dt = source_uncertainty(i);
   var is_active = !(finite(thermo0.x) && thermo0.x >= 0.0 && finite(thermo0.z)
+    && finite(dt) && dt >= 0.0 && dt <= 3.0e38
     && finite(p.x) && finite(p.y) && finite(p.z));
   if (!is_active) {
     let edge = grid_edge();
@@ -149,7 +174,21 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   dormant[i] = select(1u, 0u, is_active);
   if (!is_active && i < arrayLength(&proposal_rows)) { proposal_rows[i] = REACTION_DORMANCY_SENTINEL; }
-  atomicAdd(&counts[select(1u, 0u, is_active)], 1u);
+  if (is_active) {
+    let slot = atomicAdd(&counts[0], 1u);
+    active_indices[slot] = i;
+  } else {
+    atomicAdd(&counts[1], 1u);
+  }
+}
+
+@compute @workgroup_size(1)
+fn finalize_dispatch() {
+  let active_count = atomicLoad(&counts[0]);
+  atomicStore(&counts[4], (active_count + 63u) / 64u);
+  atomicStore(&counts[5], 1u);
+  atomicStore(&counts[6], 1u);
+  atomicStore(&counts[7], active_count);
 }
 `;
 
@@ -171,10 +210,11 @@ export function createSchroederReactionDormancyStage({ device, particleCount, bo
   while (cellsFor(floorM).reduce((a, b) => a * b, 1) > 1 << 20) floorM *= 1.25;
   const cells = cellsFor(floorM);
   const cellCount = cells[0] * cells[1] * cells[2];
-  const bindings = ['uniform', 'read-only-storage', 'read-only-storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage']
+  const bindings = ['uniform', 'read-only-storage', 'read-only-storage', 'read-only-storage', 'storage', 'storage',
+    'storage', 'storage', 'storage', 'read-only-storage']
     .map((type, binding) => computeBufferBinding(binding, type));
-  const pipelines = Object.fromEntries(['reset_cells', 'scatter_sources', 'classify_sources'].map((entryPoint) =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-reaction-dormancy-${entryPoint}.v1`,
+  const pipelines = Object.fromEntries(['reset_cells', 'scatter_sources', 'classify_sources', 'finalize_dispatch'].map((entryPoint) =>
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-reaction-dormancy-${entryPoint}.v2`,
       label: `ulg-reaction-dormancy-${entryPoint}`, code: schroederReactionDormancyWgsl, entryPoint, bindings })]));
   const params = device.createBuffer({ label: 'ulg-reaction-dormancy-params', size: 80,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
@@ -188,29 +228,53 @@ export function createSchroederReactionDormancyStage({ device, particleCount, bo
   const cellWords = device.createBuffer({ label: 'ulg-reaction-dormancy-cells', size: cellCount * 8, usage: GPU_BUFFER_USAGE.STORAGE });
   const dormantBuffer = device.createBuffer({ label: 'ulg-reaction-dormant', size: Math.max(16, particleCount * 4),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const countBuffer = device.createBuffer({ label: 'ulg-reaction-dormancy-counts', size: 16,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const countBuffer = device.createBuffer({ label: 'ulg-reaction-dormancy-counts', size: 32,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC });
+  const activeIndicesBuffer = device.createBuffer({ label: 'ulg-reaction-dormancy-active-indices',
+    size: Math.max(16, particleCount * 4), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const uncertaintyPlaceholder = device.createBuffer({ label: 'ulg-reaction-dormancy-uncertainty-placeholder',
+    size: 16, usage: GPU_BUFFER_USAGE.STORAGE });
   let group = null, groupKey = null;
+  let lastUncertaintyFlag = 0;
   return Object.freeze({
-    cells, cellEdgeFloorM: floorM, dormantBuffer, countBuffer,
-    encode(encoder, { stateBuffer, thermoBuffer, reactionRecordBuffer, proposalBuffer, proposalByteLength }) {
+    cells, cellEdgeFloorM: floorM, dormantBuffer, countBuffer, activeIndicesBuffer,
+    indirectDispatchBuffer: countBuffer, indirectDispatchOffset: 16,
+    encode(encoder, { stateBuffer, thermoBuffer, reactionRecordBuffer, proposalBuffer, proposalByteLength,
+      uncertaintyBuffer = null }) {
+      const hasUncertainty = uncertaintyBuffer ? 1 : 0;
+      if (hasUncertainty !== lastUncertaintyFlag) {
+        lastUncertaintyFlag = hasUncertainty;
+        f[10] = hasUncertainty;
+        device.queue.writeBuffer(params, 0, words);
+      }
+      const boundUncertainty = uncertaintyBuffer ?? uncertaintyPlaceholder;
       if (!group || groupKey?.[0] !== stateBuffer || groupKey[1] !== thermoBuffer || groupKey[2] !== reactionRecordBuffer
-        || groupKey[3] !== proposalBuffer) {
+        || groupKey[3] !== proposalBuffer || groupKey[4] !== boundUncertainty) {
         group = device.createBindGroup({ layout: pipelines.reset_cells.bindGroupLayout,
           entries: [
             ...[params, stateBuffer, thermoBuffer, reactionRecordBuffer, cellWords, dormantBuffer, countBuffer]
               .map((buffer, binding) => ({ binding, resource: { buffer } })),
-            { binding: 7, resource: { buffer: proposalBuffer, offset: 0, size: proposalByteLength ?? proposalBuffer.size } }
+            { binding: 7, resource: { buffer: proposalBuffer, offset: 0, size: proposalByteLength ?? proposalBuffer.size } },
+            { binding: 8, resource: { buffer: activeIndicesBuffer } },
+            { binding: 9, resource: { buffer: boundUncertainty } }
           ] });
-        groupKey = [stateBuffer, thermoBuffer, reactionRecordBuffer, proposalBuffer];
+        groupKey = [stateBuffer, thermoBuffer, reactionRecordBuffer, proposalBuffer, boundUncertainty];
       }
-      for (const [entryPoint, count] of [['reset_cells', Math.max(cellCount, 4)], ['scatter_sources', particleCount],
-        ['classify_sources', particleCount]]) {
-        const pass = encoder.beginComputePass({ label: `ulg-reaction-dormancy-${entryPoint}` });
-        pass.setPipeline(pipelines[entryPoint].pipeline); pass.setBindGroup(0, group);
-        pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
+      const pass = encoder.beginComputePass({ label: 'ulg-reaction-dormancy' });
+      pass.setBindGroup(0, group);
+      for (const [entryPoint, groupsCount] of [
+        ['reset_cells', Math.ceil(Math.max(cellCount, 4) / 64)],
+        ['scatter_sources', Math.ceil(particleCount / 64)],
+        ['classify_sources', Math.ceil(particleCount / 64)],
+        ['finalize_dispatch', 1]
+      ]) {
+        pass.setPipeline(pipelines[entryPoint].pipeline);
+        pass.dispatchWorkgroups(groupsCount);
       }
+      pass.end();
     },
-    destroy() { for (const b of [params, cellWords, dormantBuffer, countBuffer]) b.destroy(); }
+    destroy() {
+      for (const b of [params, cellWords, dormantBuffer, countBuffer, activeIndicesBuffer, uncertaintyPlaceholder]) b.destroy();
+    }
   });
 }

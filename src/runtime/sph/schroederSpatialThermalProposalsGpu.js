@@ -12803,6 +12803,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
           gatedLaws: Object.freeze(['pair-conduction', 'pair-radiation']),
           countBuffer: thermalDormancyStage.countBuffer,
           dormantBuffer: thermalDormancyStage.dormantBuffer,
+          activeIndicesBuffer: thermalDormancyStage.activeIndicesBuffer,
+          indirectDispatchBuffer: thermalDormancyStage.indirectDispatchBuffer,
+          indirectDispatchOffset: thermalDormancyStage.indirectDispatchOffset ?? 0,
           flagWordOffset: thermalDormancyFlagWord(particleCount)
         })
       : null,

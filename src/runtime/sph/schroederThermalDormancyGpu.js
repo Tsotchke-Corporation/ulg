@@ -20,8 +20,16 @@ import { computeBufferBinding, createCachedExplicitComputePipeline } from '../we
 //
 // Temperatures are reduced per cell as order-preserving u32 keys with
 // atomicMin/atomicMax (a positive f32's bits order as unsigned integers).
-// Outputs: dormant[i] (1/0) and counts [active, dormant, present, overflow].
-const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_SRC: 0x04, COPY_DST: 0x08 });
+// Outputs: dormant[i] (1/0), counts [active, dormant, present, overflow],
+// compacted active_indices[0..active-1], and indirect_dispatch [ceil(active/64), 1, 1, active]
+// (yielding [0, 1, 1, 0] zero-work witness when quiescent).
+const GPU_BUFFER_USAGE = Object.freeze({
+  STORAGE: 0x80,
+  UNIFORM: 0x40,
+  COPY_SRC: 0x04,
+  COPY_DST: 0x08,
+  INDIRECT: 0x0100
+});
 
 export const schroederThermalDormancyWgsl = /* wgsl */ `
 struct DormancyParams {
@@ -55,6 +63,9 @@ struct DormancyParams {
 @group(0) @binding(3) var<storage, read_write> cell_bounds: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> dormant: array<u32>;
 @group(0) @binding(5) var<storage, read_write> counts: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> active_indices: array<u32>;
+// Indirect dispatch arguments: [ceil(active / 64), 1, 1, active]
+@group(0) @binding(7) var<storage, read_write> indirect_dispatch: array<u32>;
 
 // The cell edge is at least every pair law's support: the configured floor,
 // and, when the thermal stage's maximum radius is bound, max(conduction
@@ -166,7 +177,21 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
   write_flag(i, select(1u, 0u, is_active));
-  atomicAdd(&counts[select(1u, 0u, is_active)], 1u);
+  if (is_active) {
+    let slot = atomicAdd(&counts[0], 1u);
+    active_indices[slot] = i;
+  } else {
+    atomicAdd(&counts[1], 1u);
+  }
+}
+
+@compute @workgroup_size(1)
+fn finalize_dispatch() {
+  let active_count = atomicLoad(&counts[0]);
+  indirect_dispatch[0] = (active_count + 63u) / 64u;
+  indirect_dispatch[1] = 1u;
+  indirect_dispatch[2] = 1u;
+  indirect_dispatch[3] = active_count;
 }
 `;
 
@@ -183,10 +208,10 @@ export function createSchroederThermalDormancyStage({ device, particleCount, box
   if (!(particleCount > 0) || !(cellEdgeM > 0) || !(epsilonK >= 0)) throw new TypeError('Dormancy needs particles, a cell edge and an epsilon');
   const cells = boxM.map(v => Math.max(1, Math.ceil(v / cellEdgeM)));
   const cellCount = cells[0] * cells[1] * cells[2];
-  const bindings = ['uniform', 'read-only-storage', 'storage', 'storage', 'storage', 'storage']
+  const bindings = ['uniform', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'storage', 'storage']
     .map((type, binding) => computeBufferBinding(binding, type));
-  const pipelines = Object.fromEntries(['reset_cells', 'scatter_temperatures', 'classify_sources'].map(entryPoint =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-thermal-dormancy-${entryPoint}.v3`,
+  const pipelines = Object.fromEntries(['reset_cells', 'scatter_temperatures', 'classify_sources', 'finalize_dispatch'].map(entryPoint =>
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-thermal-dormancy-${entryPoint}.v4`,
       label: `ulg-thermal-dormancy-${entryPoint}`, code: schroederThermalDormancyWgsl, entryPoint, bindings })]));
   const params = device.createBuffer({ label: 'ulg-thermal-dormancy-params', size: 144, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const words = new ArrayBuffer(144), u = new Uint32Array(words), f = new Float32Array(words);
@@ -206,26 +231,39 @@ export function createSchroederThermalDormancyStage({ device, particleCount, box
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const countBuffer = device.createBuffer({ label: 'ulg-thermal-dormancy-counts', size: 16,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const activeIndicesBuffer = device.createBuffer({ label: 'ulg-thermal-dormancy-active-indices',
+    size: Math.max(16, particleCount * 4), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const indirectDispatchBuffer = device.createBuffer({ label: 'ulg-thermal-dormancy-indirect',
+    size: 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC });
   const groups = new Map();
   return Object.freeze({
-    cells, dormantBuffer, countBuffer,
+    cells, dormantBuffer, countBuffer, activeIndicesBuffer, indirectDispatchBuffer, indirectDispatchOffset: 0,
     encode(encoder, { stateBuffer, thermoBuffer, temperatureBuffer = thermoBuffer }) {
       let group = groups.get(stateBuffer)?.get(temperatureBuffer);
       if (!group) {
         group = device.createBindGroup({ layout: pipelines.reset_cells.bindGroupLayout,
-          entries: [params, stateBuffer, temperatureBuffer, cellBounds, dormantBuffer, countBuffer]
+          entries: [params, stateBuffer, temperatureBuffer, cellBounds, dormantBuffer, countBuffer,
+            activeIndicesBuffer, indirectDispatchBuffer]
             .map((buffer, binding) => ({ binding, resource: { buffer } })) });
         if (groups.size > 8) groups.clear();
         if (!groups.has(stateBuffer)) groups.set(stateBuffer, new Map());
         groups.get(stateBuffer).set(temperatureBuffer, group);
       }
-      for (const [entryPoint, count] of [['reset_cells', Math.max(cellCount, 4)], ['scatter_temperatures', particleCount],
-        ['classify_sources', particleCount]]) {
-        const pass = encoder.beginComputePass({ label: `ulg-thermal-dormancy-${entryPoint}` });
-        pass.setPipeline(pipelines[entryPoint].pipeline); pass.setBindGroup(0, group);
-        pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
+      const pass = encoder.beginComputePass({ label: 'ulg-thermal-dormancy' });
+      pass.setBindGroup(0, group);
+      for (const [entryPoint, groupsCount] of [
+        ['reset_cells', Math.ceil(Math.max(cellCount, 4) / 64)],
+        ['scatter_temperatures', Math.ceil(particleCount / 64)],
+        ['classify_sources', Math.ceil(particleCount / 64)],
+        ['finalize_dispatch', 1]
+      ]) {
+        pass.setPipeline(pipelines[entryPoint].pipeline);
+        pass.dispatchWorkgroups(groupsCount);
       }
+      pass.end();
     },
-    destroy() { for (const b of [params, cellBounds, dormantBuffer, countBuffer]) b.destroy(); }
+    destroy() {
+      for (const b of [params, cellBounds, dormantBuffer, countBuffer, activeIndicesBuffer, indirectDispatchBuffer]) b.destroy();
+    }
   });
 }

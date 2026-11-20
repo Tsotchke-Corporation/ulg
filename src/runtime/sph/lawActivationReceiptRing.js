@@ -1,6 +1,6 @@
 // G4 per-schedule law activation receipt (plan/todo/g4-dynamic-laws-proposal.md).
 //
-// Each gated law stage (thermal dormancy, reaction node scope) writes its
+// Each gated law stage (thermal, reaction, phase, radiation) writes its
 // per-step counts [active, dormant, present, overflow] on the GPU. A schedule
 // opens one ring per device; every gated stage copies its counts into the next
 // slot of its law's region inside the stage's own command encoder (no extra
@@ -8,7 +8,7 @@
 // mapped once (fixed-size compact evidence) and summarized: per-law totals,
 // the steps where a law did zero work, and the exact (epsilon 0) flag.
 const COUNT_BYTES = 16;
-const LAWS = Object.freeze(['thermal', 'reaction']);
+const LAWS = Object.freeze(['thermal', 'reaction', 'phase', 'radiation']);
 const USAGE = Object.freeze({
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8

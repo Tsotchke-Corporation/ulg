@@ -34,6 +34,7 @@ import {
 import { SEDENION_REACTION_SCOPE_FINGERPRINT } from '../chemistry/sedenionReactionScope.js';
 import {
   STANDARD_FORMATION_ENTHALPY_FINGERPRINT,
+  standardFormationEnthalpyReference,
   standardReactionEnthalpyReference
 } from '../chemistry/standardFormationEnthalpy.js';
 import { deriveElementProperties } from '../material/elementClosures.js';
@@ -585,6 +586,36 @@ function alkaliGasHalogenContactClass(candidate, ca, cb) {
   return 'alkali-gas-halogen-contact';
 }
 
+function resolveDiscoveredProductTermsWithPhasePolicy(products, productKey, closure, options = {}) {
+  const normalizedProductKey = normalizeMaterialKeyForCache(productKey);
+  return (products || []).map((term) => {
+    if (term?.targetPhase || term?.targetPhasePolicy || term?.phase || term?.targetPhasePolicyId > 0) {
+      return term;
+    }
+    const termKey = normalizeMaterialKeyForCache(term?.material || term?.formula);
+    const props = termKey === normalizedProductKey
+      ? closure?.properties
+      : propertiesForMaterial(term?.material || term?.formula, options);
+    const readyPhases = (props?.phases || []).filter((phase) => (
+      ['solid', 'liquid', 'gas'].includes(String(phase?.name || '').trim().toLowerCase())
+      && Number(phase?.densityKgPerM3) > 0
+    ));
+    if (readyPhases.length <= 1) return term;
+    const refPhase = standardFormationEnthalpyReference(term?.formula || term?.material)?.phase;
+    const phaseAt298 = readyPhases.find((phase) => {
+      const range = phase?.temperatureRange || phase?.temperatureRangeK;
+      return Array.isArray(range) && range.length >= 2 && 298.15 >= Number(range[0]) && 298.15 <= Number(range[1]);
+    })?.name;
+    const chosen = (refPhase && readyPhases.some((phase) => phase.name === refPhase) ? refPhase : null)
+      || phaseAt298
+      || readyPhases.find((phase) => phase.name === 'solid')?.name
+      || readyPhases.find((phase) => phase.name === 'liquid')?.name
+      || readyPhases[0]?.name
+      || null;
+    return chosen ? { ...term, targetPhase: chosen } : term;
+  });
+}
+
 function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   const discovery = discoverReactionCandidates(ca?.formula || keyA, cb?.formula || keyB, options);
   const candidate = discovery.candidates.find((item) => item.atomBalance?.balanced === true) || null;
@@ -685,6 +716,12 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     : null;
   const waterReactiveClass = waterReactiveClassForCandidate(candidate, ca, cb);
   const alkaliHalogenClass = alkaliGasHalogenContactClass(candidate, ca, cb);
+  const resolvedProducts = resolveDiscoveredProductTermsWithPhasePolicy(
+    candidate.products,
+    candidate.productKey,
+    closure,
+    options
+  );
   return {
     dHHa: useReferenceEnergy
       ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation / (HARTREE_J * AVOGADRO)
@@ -711,7 +748,7 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
       familyId: candidate.familyId,
       equation: candidate.equation,
       reactants: candidate.reactants,
-      products: candidate.products,
+      products: resolvedProducts,
       atomBalance: candidate.atomBalance,
       sedenionScope: candidate.sedenionScope ?? null,
       provisionalEnergeticsStatus,

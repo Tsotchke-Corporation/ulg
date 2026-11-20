@@ -54474,7 +54474,6 @@ fn main(
         globalThis.__ulgA6ClosureBridgeStatus = a6Status;
       }
     } catch (error) {
-      laneState.pendingThermalPotential = null;
       if (
         predecessorTargetScheduleRequestId != null
         || workerScheduleDispatched
@@ -54482,6 +54481,7 @@ fn main(
         laneState.inFlightDynamicLawTargetScheduleRequestId = null;
         laneState.poisoned = true;
       }
+      laneState.pendingThermalPotential = null;
       throw error;
     }
     // Presentation is a consumer of committed state, never an admission

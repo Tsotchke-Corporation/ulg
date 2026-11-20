@@ -59,6 +59,12 @@ const COMMON_RUNTIME = Object.freeze({
   thermalPotential: '1',
   rigidSolids: '1',
   contactSolver: '1',
+  // Multi-workgroup parallel Jacobi cleanup (24 rounds across all SMs)
+  // handles contact convergence in parallel, bounded by a 16-pass serial
+  // polish instead of the retired 512x2 single-workgroup serial owner.
+  // Explicit URL values still win (e.g. ?contactCleanupPasses=512).
+  contactCleanupPasses: '16',
+  contactInnerRounds: '1',
   ss: '1',
   schroederLevel: '0',
   schroederMinLevel: '0',
@@ -379,11 +385,11 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       reactionActivationPolicy:
         SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
       // Cs/F is deliberately an energetic architecture fixture. Keep the
-      // execution CFL below one cell per step, but soften the preview-only
-      // modulus cap so the two-level worker route exercises and verifies its
-      // real operators instead of immediately rolling the whole step back.
-      // Scientific CFL/stiffness convergence remains a later calibration
-      // gate; neither value weakens the fail-closed terminal receipt.
+      // execution CFL below one cell per step, soften the preview-only
+      // modulus cap, and use a 0.2 ms step so the exothermic Cs + F -> CsF
+      // vaporization expansion stays inside the 8-child adaptive two-level
+      // reflux budget.
+      sdt: '0.0002',
       cfl: '0.8',
       cflSafety: '0.2',
       bodies: CESIUM_FLUORINE_TWO_LEVEL_BODIES,

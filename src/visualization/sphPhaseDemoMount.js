@@ -9405,6 +9405,7 @@ export async function mountSphPhaseDemoOverlay({
       // true and the discovered reaction catalog is handed to the scene,
       // which owns the authenticated next-schedule cutover.
       physicalLawGroups: physicalLawGroupsForInitialExecutionFromControls(),
+      reactionsRequested: physicalLawGroupsFromControls().reactions,
       schroederSimulationConfig: initialSchroederSimulationConfig,
       allowReducedProductProperties: true,
       ...(initialGridCflFactor != null ? { gridCflFactor: initialGridCflFactor } : {}),

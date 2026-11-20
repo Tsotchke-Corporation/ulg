@@ -1,7 +1,23 @@
-# Current status — 2026-11-19 AKST
+# Current status — 2026-11-20 AKST
 
 **Active plan:** Read [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) first (single
 authoritative routing document).
+
+- **2026-11-20 Slice 3.1 (G1 Decoupled Presentation Reassessment & Final Release Audit — ALL PHASES 1–3 COMPLETE on `feat/ulg-ga-consolidation`, publication hold maintained):**
+  - Resolved five live-preset and full-suite issues uncovered during the 6-preset desktop sweep and 6,184-test audit:
+    1. Threaded `reactionsRequested` (`lawr=1`) from `src/visualization/sphPhaseDemoMount.js` into `src/runtime/sphPhaseDemo.js` so authoritative dynamic reaction activation (initial `physicalLawGroups.reactions === false` at `t = 0`) still screens reactive solids (`Na`, `Cs`) onto the continuum chemistry lane while admitting cold inert ice (`Fe/H2O`) to the coherent rigid lane.
+    2. Added `resolveDiscoveredProductTermsWithPhasePolicy()` in `src/runtime/sph/reactionDiscovery.js` so multi-phase bank-anchored products (`FeO`, `NaOH`, `CsF`, oxides) emit their standard-state / 298.15 K `targetPhase`, eliminating `status: 254 (missingProductPhasePolicy)` and unlocking live exothermic ignition on `sodium-water` and `cesium-fluorine` plus NIST-JANAF `FeO(solid)` reference compilation (`Fe-018.html`).
+    3. Eliminated ~970 redundant synchronous Vulkan pipeline compiles per 10 s on two-level `cesium-fluorine` CFL rollbacks by unwrapping `createBufferTrackingDevice`'s ephemeral `Proxy` via `Symbol.for('ulg.webgpu.rawDevice')` in `src/runtime/webgpuComputeLayout.js` and adding per-`GPUDevice` `WeakMap` pipeline caches in `src/runtime/sph/schroederSpatialMechanicsFieldPairGpu.js` (17 pipelines) and `src/runtime/webgpuRadixScanUnique.js` (`createRadixGpuCountPipelines`, 10 pipelines × 4 arenas), cutting `cesium-fluorine` max frame gap **2,483 ms → 34.9 ms** (**71×**) and lifting UI rAF **12.99 Hz → 60.75 Hz**.
+    4. Promoted Slice 1.2's `contactCleanupPasses: '16'` / `contactInnerRounds: '1'` into `COMMON_RUNTIME` and set `sdt: '0.0002'` on `cesium-fluorine` in `src/runtime/sphPhaseScenarioPresets.js` so real 3-phase `CsF` boiling expansion stays inside the 8-child adaptive two-level reflux budget.
+    5. Fixed `reactionLedgerMode` in `src/runtime/sph/sphMlsMpmPostMechanicsClosure.js` to exclude explicit `reactionTable.energyAuthority` tables (matching `sphReactionGpuKernel.js`), restored `stateDeltaMergeAdmission` consumer-gating in `src/runtime/sph/schroederHierarchyGpu.js`, and aligned catch ordering in `src/visualization/sphPhaseScene.js`.
+  - **Sequential Real-Desktop Chrome G1 Sweep (all 6 configured presets, zero opt-in flags, all 6 PNGs visually inspected under `~/.cache/icc/repos/ulg/slice3-1-g1-visual/`):**
+    - `water-cycle`: **60.14 Hz** measured UI rAF (HUD 59.6 Hz, maxGap 24.6 ms), 63.6 steps/s (`sim t 0.016→0.176 s`), G6 hits 51,072, A6 adopted 1, Pause/Cam/Reset PASS, 0 errors.
+    - `iron-ice-quench`: **60.31 Hz** measured UI rAF (HUD 58.8 Hz, maxGap 19.8 ms), 31.9 steps/s (`sim t 0.016→0.136 s`), sharp Z-buffered rigid ice under glowing molten iron cap, G6 hits 47,787, A6 adopted 1, Pause/Cam/Reset PASS, 0 errors.
+    - `sodium-water`: **59.77 Hz** measured UI rAF (HUD 60.8 Hz, maxGap 58.3 ms), 63.8 steps/s (`sim t 0.128→0.320 s`), live glowing exothermic Na–H2O ignition band, G6 hits 49,390, A6 adopted 1, Pause/Cam/Reset PASS, 0 errors.
+    - `cesium-fluorine`: **60.75 Hz** measured UI rAF (HUD 58.8 Hz, maxGap 34.9 ms), 15.9 steps/s (`sim t 0.016→0.029 s`), live glowing exothermic CsF ignition front on two-level SS, G6 hits 6,671, A6 adopted 1, Pause/Cam/Reset PASS, 0 errors.
+    - `bulk-water`: **57.96 Hz** measured UI rAF (HUD 57.5 Hz, maxGap 18.6 ms), 126.8 steps/s (`sim t 0.128→0.768 s`), 32,776-particle collapsing water dam-break, Pause/Cam/Reset PASS, 0 errors.
+    - `water-realtime`: **57.91 Hz** measured UI rAF (HUD 57.6 Hz, maxGap 18.8 ms), 127.1 steps/s (`sim t 1.024→8.192 s`, **1.19× real-time**), 36,864-particle dam-break splash, Pause/Cam/Reset PASS, 0 errors.
+  - **Full Host Suite & Build:** `node --test --test-concurrency=8 tests/*.test.mjs` — **6,024 pass / 0 fail** (160 opt-in native skips, 6,184 total); `npm run build` PASS in 3.16 s. Publication hold respected (local commits on `feat/ulg-ga-consolidation` only; no push, no merge to `main`, no Pages build).
 
 - **2026-11-19 Slice 2.4 (A6 — Warm Browser WASM/WebGPU Eshkol & MoonLab Workers Wired to Live Misses — Phase 2 Complete):**
   - Hardened `src/services/clientWarmDerivationTask.js` with per-service FIFO request serialization (preventing stdout interleaving), full listener/timer cleanup, bounded timeouts, and automatic termination + respawn recovery counters (`terminateWarmWorker`, `getWarmDerivationResidency`).

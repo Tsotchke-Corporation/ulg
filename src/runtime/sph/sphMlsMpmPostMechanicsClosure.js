@@ -3202,7 +3202,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     // The G2 integer energy ledger runs the f32 heat-proxy reaction plus its
     // exact reconcile; the rational exact chain serves the rest.
     reactionLedgerMode = Boolean(massCapture && massCapture.seals[0]?.exactEnergy && !massCapture.seals[0]?.exactThermal
-      && massCapture.g2p.sourceRead.energy);
+      && massCapture.g2p.sourceRead.energy && !reactionTable?.energyAuthority);
     if (massCapture && !reactionLedgerMode) {
       const { runSphExactReactionSourceSelectionWebGpu } = await import('./sphExactReactionSourceGpu.js');
       exactReactionSelection = await runSphExactReactionSourceSelectionWebGpu({ device,

@@ -9029,8 +9029,8 @@ test('canonical exact-near consumers suppress legacy law-neighbor producers', as
     device.createdBuffers.some((buffer) => (
       buffer.label === 'ulg-schroeder-law-queue-out'
     )),
-    true,
-    'the canonical queue remains the dynamic-law activation carrier'
+    false,
+    'consumer-gated law-queue is skipped under canonical exact-near no-full-readback when unconsumed'
   );
   assert.equal(
     device.createdBuffers.some((buffer) => (

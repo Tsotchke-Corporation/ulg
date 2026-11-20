@@ -2525,7 +2525,17 @@ function createRadixPipelines(
   };
 }
 
+const DEVICE_RADIX_GPU_COUNT_PIPELINES_CACHE = new WeakMap();
+const WEBGPU_RAW_DEVICE_SYMBOL = Symbol.for('ulg.webgpu.rawDevice');
+
 function createRadixGpuCountPipelines(device, label) {
+  const keyDevice = device?.[WEBGPU_RAW_DEVICE_SYMBOL] ?? device;
+  const cacheEligible = typeof globalThis.GPUDevice === 'function'
+    && keyDevice instanceof globalThis.GPUDevice;
+  if (cacheEligible) {
+    const cached = DEVICE_RADIX_GPU_COUNT_PIPELINES_CACHE.get(keyDevice);
+    if (cached) return cached;
+  }
   const prepareModule = device.createShaderModule({
     label: `${label}-gpu-count-prepare-shader`,
     code: webGpuRadixGpuCountPrepareWgsl
@@ -2547,7 +2557,7 @@ function createRadixGpuCountPipelines(device, label) {
     layout: 'auto',
     compute: { module, entryPoint }
   });
-  return {
+  const built = {
     prepare: pipeline('prepare', prepareModule, 'prepare_gpu_count'),
     scanBlocks: pipeline('scan-blocks', scanModule, 'scan_gpu_count_blocks'),
     scanAdd: pipeline('scan-add', scanModule, 'add_gpu_count_block_offsets'),
@@ -2575,6 +2585,10 @@ function createRadixGpuCountPipelines(device, label) {
       'finalize_gpu_count_unique'
     )
   };
+  if (cacheEligible) {
+    DEVICE_RADIX_GPU_COUNT_PIPELINES_CACHE.set(keyDevice, built);
+  }
+  return built;
 }
 
 export function createWebGpuStableRadixScanUnique(device, {

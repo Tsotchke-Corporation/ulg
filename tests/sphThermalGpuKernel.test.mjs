@@ -1288,13 +1288,13 @@ test('reduced sodium-water NaOH resolves positive conductivity and transfers hea
     stableOpticalMaterialId('naoh'),
     naohEnergy
   );
-  const sodiumConductivity = sodium.phases
-    .find((phase) => phase.name === 'solid').thermalConductivityWPerMK;
-  const waterConductivity = water.phases
-    .find((phase) => phase.name === 'liquid').thermalConductivityWPerMK;
-  const expectedConductivity = 2 / (1 / sodiumConductivity + 1 / waterConductivity);
+  // Slice 2.1: NaOH is bank-anchored with boiling point 1661 K; at 2193.2 K
+  // it resolves its bank-anchored gas-phase conductivity (0.05 W/mK).
+  const expectedConductivity = naoh.phases
+    .find((phase) => phase.name === 'gas').thermalConductivityWPerMK;
 
   assert.equal(resolvedNaoh.ready, true);
+  assert.ok(expectedConductivity > 0);
   nearlyEqual(
     resolvedNaoh.thermalConductivityWPerMK,
     expectedConductivity,

@@ -9,7 +9,13 @@ import {
 import { sphPhaseScenarioPresetById } from '../src/runtime/sphPhaseScenarioPresets.js';
 import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
 
-function buildPresetDemo(presetId, { coherentRigidSolids = true, overrideBaseMechanicsMode = null, environment = null } = {}) {
+function buildPresetDemo(presetId, {
+  coherentRigidSolids = true,
+  overrideBaseMechanicsMode = null,
+  environment = null,
+  physicalLawGroups = null,
+  reactionsRequested = null
+} = {}) {
   const preset = sphPhaseScenarioPresetById(presetId);
   const controls = preset.controls;
   const sceneLengthScale = Number(preset.runtime.sceneLengthScale ?? 1);
@@ -53,6 +59,8 @@ function buildPresetDemo(presetId, { coherentRigidSolids = true, overrideBaseMec
     environment,
     mechanics: 'mlsmpm',
     coherentRigidSolids,
+    ...(physicalLawGroups ? { physicalLawGroups } : {}),
+    ...(reactionsRequested != null ? { reactionsRequested } : {}),
     allowReducedProductProperties: true
   });
 }
@@ -75,8 +83,12 @@ test('coherentRigidSolids admits cold inert ice on iron-ice-quench and keeps mol
   assert.equal(moltenIron.length, 216, 'molten iron drop remains in the fluid continuum');
 });
 
-test('coherentRigidSolids keeps reactive solids (sodium-water and cesium-fluorine) in continuum', () => {
-  const sodium = buildPresetDemo('sodium-water', { coherentRigidSolids: true });
+test('coherentRigidSolids keeps reactive solids (sodium-water and cesium-fluorine) in continuum even under authoritative dynamic activation (initial reactions=false)', () => {
+  const sodium = buildPresetDemo('sodium-water', {
+    coherentRigidSolids: true,
+    physicalLawGroups: { mechanics: true, gravity: true, eos: true, pressure: true, thermal: true, reactions: false, viscosity: true, surfaceTension: false },
+    reactionsRequested: true
+  });
   assert.equal(sodium.state.rigidBodies ?? null, null, 'reactive Na solid stays in continuum so Na+H2O chemistry executes');
 
   const cesiumBodies = sphInitialBodiesFromLegacyDropBase({
@@ -96,6 +108,8 @@ test('coherentRigidSolids keeps reactive solids (sodium-water and cesium-fluorin
     initialBodies: cesiumBodies,
     mechanics: 'mlsmpm',
     coherentRigidSolids: true,
+    physicalLawGroups: { mechanics: true, gravity: true, eos: true, pressure: true, thermal: true, reactions: false, viscosity: true, surfaceTension: false },
+    reactionsRequested: true,
     allowReducedProductProperties: true
   });
   assert.equal(cesium.state.rigidBodies ?? null, null, 'reactive Cs solid stays in continuum so Cs+F2 chemistry executes');

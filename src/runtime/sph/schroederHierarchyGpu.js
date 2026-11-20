@@ -21446,7 +21446,8 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     { expectedConsumers: ['far-aggregate', 'phase-volume', 'render'] }
   );
   const phaseVolumeMigrationHasConsumer = Boolean(
-    phaseVolumeMigrationAdmission != null
+    stateDeltaMergeAdmission != null
+    || phaseVolumeMigrationAdmission != null
     || phaseVolumeSplitMergeAdmission != null
     || enablePhaseVolumeSplitMergeApply
     || enablePhaseVolumeLevelUpdate

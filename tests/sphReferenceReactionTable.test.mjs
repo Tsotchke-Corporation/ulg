@@ -11,7 +11,7 @@ import { createSchroederTargetScheduleTableFingerprints }
   from '../src/runtime/sph/schroederTargetScheduleAuthority.js';
 
 const { demo } = createSphPhaseDemo({ environment: createSphRoomAirInitialization(),
-  environmentCellsPerAxis: 1, allowReducedProductProperties: true });
+  environmentCellsPerAxis: 1, environmentAirParcels: 'species', allowReducedProductProperties: true });
 const thermalMaterialTable = buildSphThermalMaterialTable(demo.materialProperties);
 const options = { materialProperties: demo.materialProperties, thermalMaterialTable, contactRadiusM: 0.01 };
 const table = buildSphReferenceReactionTable(demo.reactions, options);
@@ -27,7 +27,9 @@ test('actual Iron Ice oxygen chemistry has a phase-specific reference; unresolve
     && row.status === 'unresolved-energy-reference'));
   assert.equal(table.energyAuthority.scientificValidation, false);
   assert.equal(table.energyMetadata[0].source.kind, 'reference-thermochemistry');
-  assert.match(table.energyMetadata[0].source.provenance, /Fe-019\.html/);
+  // Slice 2.1: bank-anchored FeO carries solid/liquid/gas phases and compiles
+  // against its standard-state 298.15 K solid NIST-JANAF reference (Fe-018.html).
+  assert.match(table.energyMetadata[0].source.provenance, /Fe-018\.html/);
   const r = table.coldReferenceRecipe.reactions.find(row => row.product === 'feo');
   assert.ok(r.specificEnthalpyJPerKg < 0); // original discovery record is retained
   assert.equal(table.records[4], 0); // no second, legacy heat release

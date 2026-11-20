@@ -206,9 +206,15 @@ function createOwnedBuffer(
   return tagWebGpuBufferDevice(buffer, device);
 }
 
+const WEBGPU_RAW_DEVICE_SYMBOL = Symbol.for('ulg.webgpu.rawDevice');
+const DEVICE_FIELD_PAIR_PIPELINES_CACHE = new WeakMap();
+
 function createBufferTrackingDevice(device, onBufferCreated) {
   return new Proxy(device, {
     get(target, property) {
+      if (property === WEBGPU_RAW_DEVICE_SYMBOL) {
+        return target[WEBGPU_RAW_DEVICE_SYMBOL] ?? target;
+      }
       if (property === 'createBuffer') {
         return (descriptor) => {
           const buffer = target.createBuffer(descriptor);
@@ -670,55 +676,64 @@ export function createSchroederSpatialMechanicsFieldPairGpu(device, {
     }
   }
 
-  const module = device.createShaderModule({
-    label: `${label}-shader`,
-    code: schroederSpatialMechanicsFieldPairWgsl
-  });
-  const pipeline = (suffix, entryPoint) => device.createComputePipeline({
-    label: `${label}-${suffix}-pipeline`,
-    layout: 'auto',
-    compute: { module, entryPoint }
-  });
-  const pipelines = Object.freeze({
-    emit: pipeline('emit', 'emit_pair_candidates'),
-    preparePartition: pipeline(
-      'prepare-partition',
-      'prepare_pair_unique_partition'
-    ),
-    scanTailLevels: Object.freeze(Array.from(
-      { length: PAIR_PROJECTION_SCAN_MAX_LEVELS },
-      (_, level) => pipeline(
-        `scan-tail-level-${level}`,
-        `scan_pair_tail_level_${level}`
+  const rawDevice = device?.[WEBGPU_RAW_DEVICE_SYMBOL] ?? device;
+  const cachePairPipelines = typeof globalThis.GPUDevice === 'function'
+    && rawDevice instanceof globalThis.GPUDevice;
+  let pipelines = cachePairPipelines ? DEVICE_FIELD_PAIR_PIPELINES_CACHE.get(rawDevice) : null;
+  if (!pipelines) {
+    const module = device.createShaderModule({
+      label: `${label}-shader`,
+      code: schroederSpatialMechanicsFieldPairWgsl
+    });
+    const pipeline = (suffix, entryPoint) => device.createComputePipeline({
+      label: `${label}-${suffix}-pipeline`,
+      layout: 'auto',
+      compute: { module, entryPoint }
+    });
+    pipelines = Object.freeze({
+      emit: pipeline('emit', 'emit_pair_candidates'),
+      preparePartition: pipeline(
+        'prepare-partition',
+        'prepare_pair_unique_partition'
+      ),
+      scanTailLevels: Object.freeze(Array.from(
+        { length: PAIR_PROJECTION_SCAN_MAX_LEVELS },
+        (_, level) => pipeline(
+          `scan-tail-level-${level}`,
+          `scan_pair_tail_level_${level}`
+        )
+      )),
+      addTailLevels: Object.freeze([2, 1, 0].map((level) => pipeline(
+        `add-tail-level-${level}`,
+        `add_pair_tail_level_${level}`
+      ))),
+      scatterStableOrder: pipeline(
+        'scatter-stable-order',
+        'scatter_pair_stable_order'
+      ),
+      completePartition: pipeline(
+        'complete-partition',
+        'complete_pair_unique_partition'
+      ),
+      materialize: pipeline(
+        'materialize-stencil-map',
+        'materialize_pair_stencil_indices'
+      ),
+      assemble: pipeline('assemble', 'assemble_pair_field_keys'),
+      finalize: pipeline('finalize', 'finalize_pair_fields'),
+      validateTopologySuccessor: pipeline(
+        'validate-topology-successor',
+        'validate_pair_topology_successor'
+      ),
+      finalizeTopologySuccessor: pipeline(
+        'finalize-topology-successor',
+        'finalize_pair_topology_successor'
       )
-    )),
-    addTailLevels: Object.freeze([2, 1, 0].map((level) => pipeline(
-      `add-tail-level-${level}`,
-      `add_pair_tail_level_${level}`
-    ))),
-    scatterStableOrder: pipeline(
-      'scatter-stable-order',
-      'scatter_pair_stable_order'
-    ),
-    completePartition: pipeline(
-      'complete-partition',
-      'complete_pair_unique_partition'
-    ),
-    materialize: pipeline(
-      'materialize-stencil-map',
-      'materialize_pair_stencil_indices'
-    ),
-    assemble: pipeline('assemble', 'assemble_pair_field_keys'),
-    finalize: pipeline('finalize', 'finalize_pair_fields'),
-    validateTopologySuccessor: pipeline(
-      'validate-topology-successor',
-      'validate_pair_topology_successor'
-    ),
-    finalizeTopologySuccessor: pipeline(
-      'finalize-topology-successor',
-      'finalize_pair_topology_successor'
-    )
-  });
+    });
+    if (cachePairPipelines) {
+      DEVICE_FIELD_PAIR_PIPELINES_CACHE.set(rawDevice, pipelines);
+    }
+  }
   const deviceId = webGpuDeviceId(device);
   let runtime = null;
   let destroyed = false;

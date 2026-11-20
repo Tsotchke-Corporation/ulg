@@ -51,29 +51,38 @@ export function createExplicitComputePipeline(device, {
   };
 }
 
+export const WEBGPU_RAW_DEVICE_SYMBOL = Symbol.for('ulg.webgpu.rawDevice');
+
+export function unwrapWebGpuCacheDevice(device) {
+  return device?.[WEBGPU_RAW_DEVICE_SYMBOL] ?? device;
+}
+
 function computePipelineCacheForDevice(device) {
-  let cache = DEVICE_COMPUTE_PIPELINE_CACHE.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let cache = DEVICE_COMPUTE_PIPELINE_CACHE.get(keyDevice);
   if (!cache) {
     cache = new Map();
-    DEVICE_COMPUTE_PIPELINE_CACHE.set(device, cache);
+    DEVICE_COMPUTE_PIPELINE_CACHE.set(keyDevice, cache);
   }
   return cache;
 }
 
 function shaderModuleCacheForDevice(device) {
-  let cache = DEVICE_SHADER_MODULE_CACHE.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let cache = DEVICE_SHADER_MODULE_CACHE.get(keyDevice);
   if (!cache) {
     cache = new Map();
-    DEVICE_SHADER_MODULE_CACHE.set(device, cache);
+    DEVICE_SHADER_MODULE_CACHE.set(keyDevice, cache);
   }
   return cache;
 }
 
 function explicitComputeLayoutCacheForDevice(device) {
-  let cache = DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let cache = DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE.get(keyDevice);
   if (!cache) {
     cache = new Map();
-    DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE.set(device, cache);
+    DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE.set(keyDevice, cache);
   }
   return cache;
 }
@@ -209,10 +218,11 @@ export function createCachedExplicitComputePipeline(device, {
 }
 
 function pipelinePrewarmInflightForDevice(device) {
-  let inflight = DEVICE_PIPELINE_PREWARM_INFLIGHT.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let inflight = DEVICE_PIPELINE_PREWARM_INFLIGHT.get(keyDevice);
   if (!inflight) {
     inflight = new Map();
-    DEVICE_PIPELINE_PREWARM_INFLIGHT.set(device, inflight);
+    DEVICE_PIPELINE_PREWARM_INFLIGHT.set(keyDevice, inflight);
   }
   return inflight;
 }

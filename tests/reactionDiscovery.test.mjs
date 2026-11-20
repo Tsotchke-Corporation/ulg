@@ -62,7 +62,7 @@ test('active metal + water is discovered as exothermic, with a derived hydroxide
   assert.equal(materialDerivationSummary(closure.properties).fullyLowerLevelDerived, true);
 });
 
-test('anchored sodium-water discovery gives reduced NaOH a provenance-marked harmonic conductivity', () => {
+test('anchored sodium-water discovery gives bank-anchored NaOH provenance-marked liquid conductivity and optical closure', () => {
   clearReactionDiscoveryCache();
   const sodium = createReferenceAnchoredMaterialClosure('Na').properties;
   const water = createReferenceAnchoredMaterialClosure('h2o').properties;
@@ -73,15 +73,11 @@ test('anchored sodium-water discovery gives reduced NaOH a provenance-marked har
   });
   const phase = result.productClosures.naoh.properties.phases
     .find((candidate) => candidate.name === 'liquid');
-  const sodiumConductivity = sodium.phases
-    .find((candidate) => candidate.name === 'solid').thermalConductivityWPerMK;
-  const waterConductivity = water.phases
-    .find((candidate) => candidate.name === 'liquid').thermalConductivityWPerMK;
-  const expected = 2 / (1 / sodiumConductivity + 1 / waterConductivity);
 
   assert.ok(Number.isFinite(phase.thermalConductivityWPerMK));
   assert.ok(phase.thermalConductivityWPerMK > 0);
-  assert.ok(Math.abs(phase.thermalConductivityWPerMK - expected) < 1e-12);
+  // Slice 2.1: NaOH is anchored against the CRC/NIST-JANAF compound bank (0.92 W/mK liquid).
+  assert.ok(Math.abs(phase.thermalConductivityWPerMK - 0.92) < 1e-12);
   const opticalClosure =
     result.productClosures.naoh.properties.dispersedMediumOpticalClosure;
   assert.equal(opticalClosure.scientificValidation, false);
@@ -115,15 +111,61 @@ test('anchored sodium-water discovery gives reduced NaOH a provenance-marked har
   assert.notEqual(
     opticalClosure.condensedDensityKgPerM3,
     phase.densityKgPerM3,
-    'the optical reference density must not silently replace the reduced mechanical EOS density'
+    'the optical reference density must not silently replace the mechanical EOS density'
   );
   const provenance = provenanceEntriesForPath(
     result.productClosures.naoh.properties,
     'phases.liquid.thermalConductivityWPerMK'
   );
-  assert.equal(provenance.length, 1);
-  assert.equal(provenance[0].status, PROPERTY_DERIVATION_STATUS.REDUCED_ESTIMATE);
-  assert.match(provenance[0].method, /harmonic-mean representative conductivity/);
+  assert.ok(provenance.length >= 1);
+  assert.ok(
+    provenance.some((entry) => entry.status === PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK),
+    'bank-anchored NaOH records reference-fallback provenance for liquid conductivity'
+  );
+
+  // Unbanked hydroxides (LiOH) still receive provenance-marked harmonic-mean reduced conductivity.
+  const baseLithium = createReferenceAnchoredMaterialClosure('Li').properties;
+  const lithium = {
+    ...baseLithium,
+    phases: baseLithium.phases.map((p) => (
+      p.name === 'solid' ? { ...p, thermalConductivityWPerMK: 84.8 } : p
+    )),
+    propertyProvenance: {
+      ...baseLithium.propertyProvenance,
+      entries: [
+        ...(baseLithium.propertyProvenance?.entries || []),
+        {
+          paths: ['phases.solid.thermalConductivityWPerMK'],
+          status: PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK,
+          method: 'test-reference-solid-conductivity',
+          source: 'crc-handbook',
+          inputs: [],
+          accuracy: 'evidence-only',
+          blockers: []
+        }
+      ]
+    }
+  };
+  const liResult = discoverReactions('Li', 'h2o', {
+    materialProperties: { Li: lithium, h2o: water },
+    allowReducedProductProperties: true,
+    allowFixtureMaterialProperties: true
+  });
+  const liPhase = liResult.productClosures.lioh.properties.phases
+    .find((candidate) => candidate.name === 'liquid');
+  const lithiumConductivity = lithium.phases
+    .find((candidate) => candidate.name === 'solid').thermalConductivityWPerMK;
+  const waterConductivity = water.phases
+    .find((candidate) => candidate.name === 'liquid').thermalConductivityWPerMK;
+  const expectedHarmonic = 2 / (1 / lithiumConductivity + 1 / waterConductivity);
+  assert.ok(Math.abs(liPhase.thermalConductivityWPerMK - expectedHarmonic) < 1e-12);
+  const liProv = provenanceEntriesForPath(
+    liResult.productClosures.lioh.properties,
+    'phases.liquid.thermalConductivityWPerMK'
+  );
+  assert.equal(liProv.length, 1);
+  assert.equal(liProv[0].status, PROPERTY_DERIVATION_STATUS.REDUCED_ESTIMATE);
+  assert.match(liProv[0].method, /harmonic-mean representative conductivity/);
 });
 
 test('unreferenced reduced reaction products keep fail-closed dispersed optics', () => {
@@ -177,7 +219,8 @@ test('reduced NaOH enters the shared collective optical pipeline as a ready comp
 
 test('reduced product conductivity fails closed when a reactant phase lacks conductivity', () => {
   clearReactionDiscoveryCache();
-  const sodium = createReferenceAnchoredMaterialClosure('Na').properties;
+  // Use unbanked Li + H2O -> LiOH so reduced harmonic-mean conductivity is exercised.
+  const lithium = createReferenceAnchoredMaterialClosure('Li').properties;
   const water = createReferenceAnchoredMaterialClosure('h2o').properties;
   const waterWithoutConductivity = {
     ...water,
@@ -187,13 +230,13 @@ test('reduced product conductivity fails closed when a reactant phase lacks cond
         : phase
     ))
   };
-  const result = discoverReactions('Na', 'h2o', {
-    materialProperties: { Na: sodium, h2o: waterWithoutConductivity },
+  const result = discoverReactions('Li', 'h2o', {
+    materialProperties: { Li: lithium, h2o: waterWithoutConductivity },
     allowReducedProductProperties: true
   });
 
   assert.equal(
-    result.productClosures.naoh.properties.phases[0].thermalConductivityWPerMK,
+    result.productClosures.lioh.properties.phases[0].thermalConductivityWPerMK,
     0
   );
 });

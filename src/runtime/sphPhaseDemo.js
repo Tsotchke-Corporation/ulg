@@ -2504,6 +2504,7 @@ function buildSphInitialBodiesDemoState({
   environmentRefineEdgeM = null,
   environmentAirParcels = 'mixture',
   physicalLawGroups = null,
+  reactionsRequested = null,
   closures,
   allowFixtureMaterialProperties,
   allowReducedProductProperties,
@@ -2613,7 +2614,11 @@ function buildSphInitialBodiesDemoState({
     && !globalThis.__ulgSkipSolidReleaseRows;
   let reactiveSolidMaterials = null;
   if (autoRigidEligible) {
-    const reactionsEnabled = physicalLawGroups == null || physicalLawGroups.reactions !== false;
+    // Authoritative dynamic reaction activation sets initial
+    // physicalLawGroups.reactions = false even when reactions ARE requested
+    // (lawr=1) and will activate on contact. Only skip reactivity screening
+    // when chemistry is explicitly disabled (`reactionsRequested === false`).
+    const reactionsEnabled = reactionsRequested !== false;
     const candidateSolidBodies = normalizedInitialBodies.bodies.filter((body, idx) => (
       body.mechanicsMode == null && bodyPlans[idx]?.phase === 'solid'
     ));
@@ -3040,6 +3045,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   splitSpareLineageCount = 0,
   mechanics = 'mlsmpm',
   coherentRigidSolids = false,
+  reactionsRequested = null,
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
   iceBaseHeightM,
@@ -3056,6 +3062,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       environmentRefineEdgeM,
       environmentAirParcels,
       physicalLawGroups,
+      reactionsRequested,
       closures,
       allowFixtureMaterialProperties,
       allowReducedProductProperties,

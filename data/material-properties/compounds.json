@@ -42,7 +42,10 @@
       1000000
      ],
      "densityKgPerM3": 0.804,
-     "heatCapacityJPerKgK": 1996
+     "heatCapacityJPerKgK": 1996,
+     "thermalConductivityWPerMK": 0.0251,
+     "dynamicViscosityPaS": 1.23e-05,
+     "transportTemperatureK": 373.15
     }
    ],
    "transitions": [
@@ -81,6 +84,15 @@
       "https://iapws.org/documents/release/ThCond",
       "https://iapws.org/documents/release/Seawater-ThCond"
      ]
+    },
+    {
+     "family": "gas-transport",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed: dilute-gas thermal conductivity and dynamic viscosity (CRC Handbook / NIST dilute-gas values)",
+     "status": "reference-fallback",
+     "units": "W/(m K), Pa s",
+     "referenceState": "373.15 K, 101325 Pa",
+     "quality": "reference-seed-2026-11-16"
     }
    ]
   },
@@ -305,7 +317,10 @@
       1000000
      ],
      "densityKgPerM3": 1.331,
-     "heatCapacityJPerKgK": 918
+     "heatCapacityJPerKgK": 918,
+     "thermalConductivityWPerMK": 0.0265,
+     "dynamicViscosityPaS": 2.07e-05,
+     "transportTemperatureK": 300.0
     }
    ],
    "transitions": [
@@ -329,6 +344,15 @@
      "units": "K, J/kg, kg/m^3, J/(kg K)",
      "referenceState": "101325 Pa",
      "quality": "reference-seed-2026-07-06"
+    },
+    {
+     "family": "gas-transport",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed: dilute-gas thermal conductivity and dynamic viscosity (CRC Handbook / NIST dilute-gas values)",
+     "status": "reference-fallback",
+     "units": "W/(m K), Pa s",
+     "referenceState": "300.0 K, 100000 Pa",
+     "quality": "reference-seed-2026-11-16"
     }
    ]
   },
@@ -391,6 +415,108 @@
      "units": "K, J/kg, kg/m^3, J/(kg K)",
      "referenceState": "101325 Pa",
      "quality": "reference-seed-2026-07-06"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "n2",
+   "formula": "N2",
+   "name": "nitrogen",
+   "referenceState": {
+    "temperatureK": 300.0,
+    "pressurePa": 100000
+   },
+   "phases": [
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      0,
+      1000000
+     ],
+     "thermalConductivityWPerMK": 0.0259,
+     "dynamicViscosityPaS": 1.79e-05,
+     "transportTemperatureK": 300.0
+    }
+   ],
+   "transitions": [],
+   "provenance": [
+    {
+     "family": "gas-transport",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed: dilute-gas thermal conductivity and dynamic viscosity (CRC Handbook / NIST dilute-gas values)",
+     "status": "reference-fallback",
+     "units": "W/(m K), Pa s",
+     "referenceState": "300.0 K, 100000 Pa",
+     "quality": "reference-seed-2026-11-16"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "ar",
+   "formula": "Ar",
+   "name": "argon",
+   "referenceState": {
+    "temperatureK": 300.0,
+    "pressurePa": 100000
+   },
+   "phases": [
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      0,
+      1000000
+     ],
+     "thermalConductivityWPerMK": 0.0178,
+     "dynamicViscosityPaS": 2.29e-05,
+     "transportTemperatureK": 300.0
+    }
+   ],
+   "transitions": [],
+   "provenance": [
+    {
+     "family": "gas-transport",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed: dilute-gas thermal conductivity and dynamic viscosity (CRC Handbook / NIST dilute-gas values)",
+     "status": "reference-fallback",
+     "units": "W/(m K), Pa s",
+     "referenceState": "300.0 K, 100000 Pa",
+     "quality": "reference-seed-2026-11-16"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "co2",
+   "formula": "CO2",
+   "name": "carbon dioxide",
+   "referenceState": {
+    "temperatureK": 300.0,
+    "pressurePa": 100000
+   },
+   "phases": [
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      0,
+      1000000
+     ],
+     "thermalConductivityWPerMK": 0.0168,
+     "dynamicViscosityPaS": 1.5e-05,
+     "transportTemperatureK": 300.0
+    }
+   ],
+   "transitions": [],
+   "provenance": [
+    {
+     "family": "gas-transport",
+     "source": "crc-standard-reference-data",
+     "method": "manual reference seed: dilute-gas thermal conductivity and dynamic viscosity (CRC Handbook / NIST dilute-gas values)",
+     "status": "reference-fallback",
+     "units": "W/(m K), Pa s",
+     "referenceState": "300.0 K, 100000 Pa",
+     "quality": "reference-seed-2026-11-16"
     }
    ]
   }

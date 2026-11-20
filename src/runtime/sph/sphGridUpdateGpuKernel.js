@@ -1,3 +1,5 @@
+import { resolveSchroederNativePublicationStage } from './schroederSpatialCompositeMechanicsGpu.js';
+import { schroederSpatialNativePublicationWgsl } from '../../../ulg-gpu-abi/src/schroederSpatialNativePublicationWgsl.js';
 import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
@@ -16,7 +18,9 @@ import {
   ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
-  ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA
+  ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+  SCHROEDER_SPATIAL_FIELD_CONSUMER_DISPATCH_SNAPSHOT_OFFSET_BYTES,
+  SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmGridUpdateWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
@@ -29,7 +33,7 @@ import {
   schroederSpatialPhaseVolumeSurfaceStressTransportWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialPhaseVolumeSurfaceStressTransportWgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
-import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
+import { createSphDeviceLossRelay, watchSphDeviceLoss } from './sphDeviceLossRelay.js';
 import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
 import {
   assertQueueOrderedCleanupClaimsRegistered,
@@ -87,10 +91,12 @@ import {
 import {
   uploadedMechanicsMaterialPhaseRecordsMatch
 } from './sphMechanicsRefreshGpuKernel.js';
+import { schroederChainLocalLawsMatch } from './schroederSpatialChainLocalLaws.js';
 import {
   abandonSphSpatialGasPressureAuthority,
   bindSphSpatialGasPressureMechanicsAuthority,
   createSphSpatialGasPressureMechanicsAuthorityBinding,
+  encodeSphSpatialGasPressureMechanicsChainProjection,
   quarantineSphSpatialGasPressureAuthorityAfterSubmitFailure,
   retireSphSpatialGasPressureAuthorityQueueOrdered,
   sphSpatialGasPressureAuthorityQueueOrderedClaim
@@ -183,6 +189,22 @@ const mechanicsFieldGridUpdateOrigins = new WeakMap();
 const activeSourceDenseGridUpdateOrigins = new WeakMap();
 const gasPressureBoundaryPipelinesByDevice = new WeakMap();
 const mechanicsFieldGridUpdatePipelinesByDevice = new WeakMap();
+const chainPublicationPipelinesByDevice = new WeakMap();
+
+function chainPublicationPipelines(device, gridUpdateSource) {
+  const cached=chainPublicationPipelinesByDevice.get(device);
+  if(cached) return cached;
+  const code=schroederSpatialNativePublicationWgsl(gridUpdateSource);
+  const bindings=[computeBufferBinding(0,'storage'),computeBufferBinding(1,'read-only-storage'),
+    computeBufferBinding(2,'uniform'),computeBufferBinding(3,'storage'),computeBufferBinding(4,'uniform')];
+  const entries={beginHeat:'begin_heat_receipt',clearHeat:'clear_heat_rows',buildHeat:'begin_heat_build',
+    claim:'claim_velocity_state',main:'apply_chain_rows',summarizeHeat:'summarize_heat_rows',
+    validateLocal:'validate_chain_local_rows',seal:'seal_velocity_state',complete:'complete_chain_level'};
+  const result=Object.freeze(Object.fromEntries(Object.entries(entries).map(([key,entryPoint])=>[key,
+    createCachedExplicitComputePipeline(device,{cacheKey:`ulg-chain-native-publication.v2.${key}`,
+      label:`ulg-chain-native-publication-${key}`,code,entryPoint,bindings})])));
+  chainPublicationPipelinesByDevice.set(device,result);return result;
+}
 const phaseVolumeTransportPipelinesByDevice = new WeakMap();
 const phaseVolumeSurfaceStressPipelinesByDevice = new WeakMap();
 const gridUpdateSubmittedTemporaryCleanupClaimIssuer =
@@ -280,17 +302,17 @@ function phaseVolumeTransportPipelines(device) {
   );
   const bundle = Object.freeze({
     stage: pipeline(
-      'ulg-schroeder-phase-volume-transport.stage.v5',
+      'ulg-schroeder-phase-volume-transport.stage.v6',
       'ulg-schroeder-phase-volume-transport-stage',
       'stage_transport'
     ),
     validate: pipeline(
-      'ulg-schroeder-phase-volume-transport.validate-staged.v5',
+      'ulg-schroeder-phase-volume-transport.validate-staged.v6',
       'ulg-schroeder-phase-volume-transport-validate-staged',
       'validate_staged_transport'
     ),
     commit: pipeline(
-      'ulg-schroeder-phase-volume-transport.commit.v5',
+      'ulg-schroeder-phase-volume-transport.commit.v6',
       'ulg-schroeder-phase-volume-transport-commit',
       'commit_transport'
     )
@@ -1830,11 +1852,24 @@ function createGridUpdateParamsArray(options) {
   return writeGridUpdateParamsArray(buffer, options);
 }
 
-function createMechanicsFieldGridUpdateParamsArray(options) {
+function createMechanicsFieldGridUpdateParamsArray({
+  directDispatchSnapshot = false,
+  ...options
+} = {}) {
   const buffer = new ArrayBuffer(
     SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES
   );
-  return writeGridUpdateParamsArray(buffer, options);
+  writeGridUpdateParamsArray(buffer, options);
+  // A1: arms the consumer kernels' snapshot guard. Bytes 240..251 are filled
+  // on the GPU from the field view's staged dispatch words in the same encoder.
+  if (directDispatchSnapshot === true) {
+    new DataView(buffer).setUint32(
+      SCHROEDER_SPATIAL_FIELD_CONSUMER_DISPATCH_SNAPSHOT_OFFSET_BYTES + 12,
+      SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC,
+      true
+    );
+  }
+  return buffer;
 }
 
 function writeGridUpdateParamsArray(buffer, {
@@ -2120,6 +2155,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   fusedFineSubstepTransaction,
   fusedCoarseTerminalTransaction,
   fusedProducerCapability,
+  nativeChainPublication,
   retainUpdatedGridBuffer,
   readbackMode
 }) {
@@ -2158,6 +2194,21 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   }
   const p2gMutationOrdinal =
     p2gGridProjection.mechanicsFieldMutationOutputOrdinal;
+  const chainPublication=nativeChainPublication == null ? null
+    : resolveSchroederNativePublicationStage(nativeChainPublication, {
+      device,projection:p2gGridProjection,field:fieldExecution,dt
+    });
+  if(chainPublication && (fusedTransaction || mechanicsFieldEnergyReceipt?.deferSeal
+    || phaseVolumeAmbientBuoyancyRequired
+    || schroederSpatialEpochTransaction !== chainPublication.transaction
+    || !schroederChainLocalLawsMatch(chainPublication.localLaws, {
+      mechanicsMaterialTable,mechanicsMaterialPhaseUpload,ambientPressurePa,
+      phaseVolumeInterfaceTransportRequired,phaseVolumePressureScale,phaseVolumeDragScale,phaseVolumeMaxImpulseFraction,
+      gasPressureMechanicsScale,gasPressureMechanicsAuthoritySource,gasPressureMechanicsChartId
+    })
+    || gravityMPerS2.some(v=>v!==0) || wallBarrierContactScale!==0)) {
+    throw new TypeError('Chain publication consumes computed proposals; additional law stages must be explicitly composed');
+  }
   const fusedTransactionAdmitted = fusedTransaction == null
     || fusedMechanicsFieldGridUpdateAdmission(device, {
       p2gGridProjection,
@@ -2187,6 +2238,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
                 ? fusedFineSubstepTransaction.publicationLock
                 : fusedCoarseTerminalTransaction.coarsePublicationLock
             ) === true
+          : chainPublication ? fieldRuntime.isStateMutationReservationActive(fieldExecution,chainPublication.mutation)
           : fieldRuntime?.isCurrentStateArtifact?.(fieldExecution, {
               mutationOrdinal: p2gMutationOrdinal,
               stateEncoding:
@@ -2308,8 +2360,9 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       );
     }
     if (phaseVolumeInterfaceTransportRequired === true) {
-      phaseVolumeTransportAuthority =
-        resolveSchroederSpatialPhaseVolumeTransportAuthority(
+      phaseVolumeTransportAuthority = chainPublication
+        ? chainPublication.transportAuthority
+        : resolveSchroederSpatialPhaseVolumeTransportAuthority(
           schroederSpatialEpochTransaction,
           {
             generation: spatialGeneration,
@@ -2317,6 +2370,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
             mechanicsFieldView: fieldExecution
           }
         );
+      if (!phaseVolumeTransportAuthority) throw new TypeError('Native transport requires its original topology producer');
     }
     if (
       phaseVolumeStandaloneLifecycleRequired
@@ -2764,7 +2818,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         })
       );
     }
-    mutationToken = fusedTransaction != null
+    mutationToken = chainPublication?.mutation ?? (fusedTransaction != null
       ? fusedTransaction.gridUpdateMutation
       : fieldRuntime.reserveStateMutation(fieldExecution, {
           expectedOrdinal: p2gMutationOrdinal,
@@ -2773,11 +2827,26 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
           outputEncoding:
             SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_VELOCITY_GRADIENT,
           operation: 'grid-update-mass-velocity-gradient-submitted'
-        });
+        }));
+    // A1: launch the sequence's field consumers directly (1D ceiling groups)
+    // and let each kernel admit only the workgroups the staged indirect launch
+    // would have run; about 0.3 ms of GPU-process validation per indirect
+    // dispatch otherwise. Falls back to indirect when the consumer capacity
+    // could fold into 2D, or under the __ulgForceIndirectFieldConsumers switch.
+    const directFieldConsumerGroups = Number(fieldExecution.consumerDispatchMaxLinearGroups);
+    const useDirectFieldConsumerDispatch = Boolean(
+      globalThis.__ulgForceIndirectFieldConsumers !== true
+      && Number.isSafeInteger(directFieldConsumerGroups)
+      && directFieldConsumerGroups > 0
+      && directFieldConsumerGroups
+        <= Number(device.limits?.maxComputeWorkgroupsPerDimension ?? 65535)
+      && Number(paramsBuffer?.size ?? 0) >= SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES
+    );
     device.queue.writeBuffer(
       paramsBuffer,
       0,
       createMechanicsFieldGridUpdateParamsArray({
+      directDispatchSnapshot: useDirectFieldConsumerDispatch,
       p2gGridProjection,
       dt: dtSeconds,
       gravityMPerS2: gravity,
@@ -2823,9 +2892,11 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       main,
       claim,
       contact,
+      validateLocal,
       summarizeHeat,
-      seal
-    } = mechanicsFieldGridUpdatePipelines(
+      seal,
+      complete
+    } = (chainPublication ? chainPublicationPipelines : mechanicsFieldGridUpdatePipelines)(
       device,
       mlsMpmMechanicsFieldGridUpdateWgsl
     );
@@ -2996,12 +3067,17 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     }
     const entries = [
       { binding: 0, resource: { buffer: fieldBuffer } },
-      { binding: 2, resource: { buffer: paramsBuffer } }
+      { binding: 2, resource: { buffer: paramsBuffer } },
+      ...(chainPublication ? [
+        {binding:1,resource:{buffer:chainPublication.proposalBuffer}},
+        {binding:3,resource:{buffer:chainPublication.controlBuffer}},
+        {binding:4,resource:{buffer:chainPublication.paramsBuffer}}
+      ] : [])
     ];
     const mainBindGroup = gridUpdateWorkspace
       && typeof fieldRuntime.createExactConsumerBindGroup === 'function'
       ? fieldRuntime.createExactConsumerBindGroup(fieldExecution, {
-          cacheKey: 'grid-update-main',
+          cacheKey: chainPublication ? 'grid-update-chain-publication-main' : 'grid-update-main',
           layout: main.bindGroupLayout,
           entries,
           label: 'ulg-mls-mpm-mechanics-field-grid-update-main-bind-group'
@@ -3022,9 +3098,10 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     const clearHeatBindGroup = bindGroupForMechanicsPipeline(clearHeat);
     const buildHeatBindGroup = bindGroupForMechanicsPipeline(buildHeat);
     const claimBindGroup = bindGroupForMechanicsPipeline(claim);
-    const contactBindGroup = bindGroupForMechanicsPipeline(contact);
+    const contactBindGroup = contact ? bindGroupForMechanicsPipeline(contact) : null;
     const summarizeHeatBindGroup = bindGroupForMechanicsPipeline(summarizeHeat);
     const sealBindGroup = bindGroupForMechanicsPipeline(seal);
+    const completeBindGroup=complete ? bindGroupForMechanicsPipeline(complete) : null;
     const transportEntries = phaseVolumeTransportAuthority
       ? [
           { binding: 0, resource: { buffer: fieldBuffer } },
@@ -3194,6 +3271,23 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       0,
       3 * Uint32Array.BYTES_PER_ELEMENT
     );
+    if (useDirectFieldConsumerDispatch) {
+      // The same staged words, into the params snapshot the kernels guard on.
+      encoder.copyBufferToBuffer(
+        fieldExecution.indirectDispatchBuffer,
+        fieldExecution.indirectDispatchOffsetBytes,
+        paramsBuffer,
+        SCHROEDER_SPATIAL_FIELD_CONSUMER_DISPATCH_SNAPSHOT_OFFSET_BYTES,
+        3 * Uint32Array.BYTES_PER_ELEMENT
+      );
+    }
+    const dispatchFieldConsumer = (pass) => (useDirectFieldConsumerDispatch
+      ? pass.dispatchWorkgroups(directFieldConsumerGroups)
+      : pass.dispatchWorkgroupsIndirect(indirectBuffer, 0));
+    if(gasPressureBoundaryBinding) {
+      encodeSphSpatialGasPressureMechanicsChainProjection(gasPressureBoundaryBinding,
+        {device,encoder,ambientPressurePa});
+    }
     const sequencePass = encoder.beginComputePass({
       label: 'ulg-mls-mpm-grid-update-mechanics-field-sequence'
     });
@@ -3202,7 +3296,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     sequencePass.dispatchWorkgroups(1);
     sequencePass.setPipeline(clearHeat.pipeline);
     sequencePass.setBindGroup(0, clearHeatBindGroup);
-    sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    dispatchFieldConsumer(sequencePass);
     sequencePass.setPipeline(buildHeat.pipeline);
     sequencePass.setBindGroup(0, buildHeatBindGroup);
     sequencePass.dispatchWorkgroups(1);
@@ -3211,7 +3305,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     sequencePass.dispatchWorkgroups(1);
     sequencePass.setPipeline(main.pipeline);
     sequencePass.setBindGroup(0, mainBindGroup);
-    sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    dispatchFieldConsumer(sequencePass);
     if (gasPressureBoundaryPipelines) {
       for (
         let passIndex = 0;
@@ -3237,7 +3331,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     if (transportStage) {
       sequencePass.setPipeline(transportStage.pipeline);
       sequencePass.setBindGroup(0, transportStageBindGroup);
-      sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      dispatchFieldConsumer(sequencePass);
     } else if (surfaceStressInitialize) {
       sequencePass.setPipeline(
         surfaceStressInitialize.pipeline
@@ -3246,10 +3340,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         0,
         surfaceStressInitializeBindGroup
       );
-      sequencePass.dispatchWorkgroupsIndirect(
-        indirectBuffer,
-        0
-      );
+      dispatchFieldConsumer(sequencePass);
     }
     for (
       let passIndex = 0;
@@ -3263,15 +3354,15 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         0,
         surfaceStressStageBindGroups[passIndex]
       );
-      sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      dispatchFieldConsumer(sequencePass);
     }
     if (transportValidate && transportCommit) {
       sequencePass.setPipeline(transportValidate.pipeline);
       sequencePass.setBindGroup(0, transportValidateBindGroup);
-      sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      dispatchFieldConsumer(sequencePass);
       sequencePass.setPipeline(transportCommit.pipeline);
       sequencePass.setBindGroup(0, transportCommitBindGroup);
-      sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      dispatchFieldConsumer(sequencePass);
     } else if (surfaceStressValidate && surfaceStressCommit) {
       sequencePass.setPipeline(
         surfaceStressValidate.pipeline
@@ -3280,26 +3371,35 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         0,
         surfaceStressValidateBindGroup
       );
-      sequencePass.dispatchWorkgroupsIndirect(
-        indirectBuffer,
-        0
-      );
+      dispatchFieldConsumer(sequencePass);
       sequencePass.setPipeline(surfaceStressCommit.pipeline);
       sequencePass.setBindGroup(
         0,
         surfaceStressCommitBindGroup
       );
-      sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+      dispatchFieldConsumer(sequencePass);
     }
-    sequencePass.setPipeline(contact.pipeline);
-    sequencePass.setBindGroup(0, contactBindGroup);
-    sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    if(contact) {
+      sequencePass.setPipeline(contact.pipeline);
+      sequencePass.setBindGroup(0, contactBindGroup);
+      dispatchFieldConsumer(sequencePass);
+    }
+    if(validateLocal) {
+      sequencePass.setPipeline(validateLocal.pipeline);
+      sequencePass.setBindGroup(0,mainBindGroup);
+      dispatchFieldConsumer(sequencePass);
+    }
     sequencePass.setPipeline(summarizeHeat.pipeline);
     sequencePass.setBindGroup(0, summarizeHeatBindGroup);
-    sequencePass.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+    dispatchFieldConsumer(sequencePass);
     sequencePass.setPipeline(seal.pipeline);
     sequencePass.setBindGroup(0, sealBindGroup);
     sequencePass.dispatchWorkgroups(1);
+    if(complete) {
+      sequencePass.setPipeline(complete.pipeline);
+      sequencePass.setBindGroup(0,completeBindGroup);
+      sequencePass.dispatchWorkgroups(1);
+    }
     sequencePass.end();
     if (gasPressureBoundaryScratchCaptureBuffer) {
       encoder.copyBufferToBuffer(
@@ -3311,6 +3411,11 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       );
     }
     const commandBuffer = encoder.finish();
+    if(chainPublication) {
+      resolveSchroederNativePublicationStage(nativeChainPublication, {
+        device,projection:p2gGridProjection,field:fieldExecution,dt
+      });
+    }
     if (gasPressureBoundaryBinding) {
       gasPressureBoundaryProducerClaim =
         sphSpatialGasPressureAuthorityQueueOrderedClaim(
@@ -3421,6 +3526,7 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
         [commandBuffer]
       );
     } else {
+      if(chainPublication) submitted=true; // A throwing submit has unknown queue acceptance.
       device.queue.submit([commandBuffer]);
     }
     submitted = true;
@@ -3483,6 +3589,12 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
     update.fieldStateUpdateSubmittedInPlace = true;
     update.fieldStateUpdatedInPlace = false;
     update.mechanicsFieldIndirectDispatchDimensions = 2;
+    update.mechanicsFieldConsumerDispatchMode = useDirectFieldConsumerDispatch
+      ? 'direct-1d-snapshot-guarded'
+      : 'indirect-staged';
+    update.mechanicsFieldConsumerDirectWorkgroups = useDirectFieldConsumerDispatch
+      ? directFieldConsumerGroups
+      : null;
     update.mechanicsFieldIndirectDispatchLinearization =
       'linearGroup=workgroup.x+workgroup.y*dispatchX';
     update.mechanicsFieldSourceDispatchWorkgroups =
@@ -3931,6 +4043,7 @@ export async function runMlsMpmGridUpdateWebGpu({
   gasPressureBoundaryScratchCaptureBuffer = null,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
+  nativeChainPublication = null,
   retainUpdatedGridBuffer = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -4048,6 +4161,7 @@ export async function runMlsMpmGridUpdateWebGpu({
         fusedFineSubstepTransaction,
         fusedCoarseTerminalTransaction,
         fusedProducerCapability,
+        nativeChainPublication,
         retainUpdatedGridBuffer,
         readbackMode
       });
@@ -4604,10 +4718,6 @@ function describeDeviceLost(info) {
   return info?.reason || info?.message || 'device lost';
 }
 
-function watchDeviceLost(device, onDeviceLost) {
-  if (!device?.lost?.then) return;
-  device.lost.then((info) => onDeviceLost(info)).catch((error) => onDeviceLost(error));
-}
 
 export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   p2gGridProjection,
@@ -4734,9 +4844,12 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(
+      // One device.lost reaction per device; this step's loss state is held
+      // weakly, so completed steps are not retained by the device.
+      watchSphDeviceLoss(
         resolvedDeviceResult.device,
-        createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+        deviceLossState,
+        onDeviceLost
       );
     }
     if (!resolvedDeviceResult.device) {

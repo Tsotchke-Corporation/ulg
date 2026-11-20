@@ -1497,7 +1497,10 @@ test('optional G2P device-loss notifications outlive return, error and output de
           f.settle(lossOutcome, loss);
           const chains = await f.flush();
           assert.deepEqual(calls, [{ info: loss, receiver: undefined }]);
-          assert.deepEqual(chains, [{ value: undefined }]);
+          // A provided device has one per-device reaction (sphDeviceLossRelay)
+          // and no per-call catch chain; an acquired device keeps its
+          // acquisition-time chain.
+          assert.deepEqual(chains, route === 'provided' ? [] : [{ value: undefined }]);
           assert.equal(f.counters.destroys, terminal === 'destroyed-output' ? 1 : 0);
           assert.equal(f.runnerCalls.length, 1, 'late notification does not rerun work');
         });
@@ -1542,10 +1545,10 @@ test('optional G2P device-loss subscriptions and in-flight native rejection rema
           assert.equal(completed.error?.status, 'canonical-spatial-webgpu-device-lost');
           await f.flush();
           assert.deepEqual(calls, [loss]);
-          // The provided-device .catch runs one microtask later than fulfillment:
-          // an already-rejected promise reaches the runner before the loss check.
-          const expectedRunnerCalls = phase === 'during-runner'
-            || (route === 'provided' && lossOutcome === 'reject') ? 1 : 0;
+          // The per-device reaction observes fulfillment and rejection in the
+          // same microtask, so an already-settled loss always stops the step
+          // before the runner.
+          const expectedRunnerCalls = phase === 'during-runner' ? 1 : 0;
           assert.equal(f.runnerCalls.length, expectedRunnerCalls);
           assert.equal(f.counters.destroys, expectedRunnerCalls * 1);
           assert.equal(f.counters.subscriptions, 1);
@@ -1592,9 +1595,9 @@ test('optional G2P device-loss throw forwarding preserves plain calls and ignore
       assert.deepEqual(calls, mode === 'rejected-callback-throws'
         ? [{ info: loss, receiver: undefined }]
         : [{ info: loss, receiver: undefined }, { info: first, receiver: undefined }]);
-      assert.deepEqual(chains, mode === 'fulfilled-first-throws'
-        ? [{ value: undefined }]
-        : [{ error: mode === 'fulfilled-both-throw' ? second : first }]);
+      // The forwarded call sequence is unchanged; a second throw is dropped
+      // instead of rejecting a per-call chain.
+      assert.deepEqual(chains, []);
       assert.equal(adoptions, 0, 'relay must not return/adopt a notifier thenable');
       assert.equal(f.counters.destroys, 0);
       assert.equal(f.runnerCalls.length, 1);

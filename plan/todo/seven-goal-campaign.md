@@ -1,5 +1,43 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+## User decision — real time moves to A1; dt 1 ms allowed — 2026-11-13
+
+After the [2026-11-03 audit](2026-11-03audit.md), the user said: "actually we
+should defer architecural work until we reach the correct phase. and at least
+finish out this goal first". When asked where the near-real-time requirement
+should live, the user answered: "yes move it to A1, allow dt 1 ms".
+
+- **G2 acceptance no longer requires near-real-time plume runs.** That
+  requirement came from the 2026-10-27 Q4 answer in
+  `g2-integer-ledger-proposal.md`, and it now belongs to A1.
+- **G2's plume evidence may run at dt = 1 ms** (`sdt=0.001`), as sodium–water
+  already does. Longer recordings were not approved, so the existing milestone
+  cap still applies.
+  - **Caveat, measured 2026-11-13 after the approval:** dt 1 ms changes Iron
+    Ice's evolution. The app caps sound speed by dt, so moduli are 4× softer.
+  - At the same 0.832 s, the two dt values give visibly different scenes. See
+    Step 0 in the audit doc.
+  - **Confirmed by the user, 2026-11-13:** "stay on 1ms to speed up testing".
+    Test and evidence runs pass `sdt=0.001`; the preset default stays 0.5 ms.
+- **The audit's architecture steps are deferred to A1 and G4,** in campaign
+  order:
+  - decoupling physics from presentation;
+  - multi-step fusion;
+  - the law descriptor;
+  - selective contact;
+  - the steps/s gate.
+- **G2 keeps the audit items that block G2 itself:**
+  - the Step 0 baseline and rollback check;
+  - wiring vapor exchange's caloric authority;
+  - one energy definition (Cp vs Cv);
+  - integer ledgers, Phase 1 onward;
+  - the reactions that cannot fire (the humid-air step-1 failure, and
+    physical-energy reactions limited to undeformed carriers).
+- **Design rule for new G2 code:** add no per-step host fences or readbacks,
+  and keep counters on the GPU, so A1's later fusion work does not grow.
+- **Unchanged:** G1 stays deferred, G3–G7 have not started, and the hold on
+  push, merge and Pages stands.
+
 ## G2 checkpoint — physical reaction staging and exact event companions — 2026-10-25 UTC
 
 The actual reaction runner now stages physical endpoints and product events
@@ -833,7 +871,7 @@ the final A1 performance outcome before researching those improvements.
 
 | ID | Bounded track | Technical prerequisites |
 |---|---|---|
-| A1 | Real-time physics: fused/batched bulk substrate, cheap inactive laws, >=100k quiescent carriers and all-preset measured solver real-time behavior | G4; A2-A4 may provide optimizations; deferred G1 is not a prerequisite |
+| A1 | Real-time physics: fused/batched bulk substrate, cheap inactive laws, >=100k quiescent carriers and all-preset measured solver real-time behavior, including near-real-time G2 plume scenarios (moved from G2, 2026-11-13) | G4; A2-A4 may provide optimizations; deferred G1 is not a prerequisite |
 | A2 | Investigate incremental SS membership repair/particle migration, then adopt only with GPU rebuild equivalence, conservative certificates and measured benefit | Existing immutable spatial-generation contracts |
 | A3 | Representative homogeneous-region samples, conservative envelope expansion and bounded region-wide interpolation/lookup | G4, G6 |
 | A4 | Broader multidimensional material/compound/property domain functions derived from simulation samples, held-out residuals, provenance and invalidation | G6; optional reuse/integration with A3, not a hard prerequisite |

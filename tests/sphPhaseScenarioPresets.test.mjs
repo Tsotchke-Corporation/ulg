@@ -90,9 +90,15 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
       'sodium-water': '64',
       'cesium-fluorine': '16',
       'bulk-water': '64',
-      'water-realtime': '64'
+      // Real time (user, 2026-11-15): longer schedules amortize the
+      // per-schedule overhead under real-time pacing.
+      'water-realtime': '256'
     }
   );
+  const realtime = SPH_PHASE_SCENARIO_PRESETS.find((entry) => entry.id === 'water-realtime');
+  assert.deepEqual(selectKeys(realtime.runtime, ['sdt', 'implicitPressure', 'implicitCfl', 'realtimePacing', 'ss']), {
+    sdt: '0.008', implicitPressure: '1', implicitCfl: '3', realtimePacing: '1', ss: '1'
+  });
   for (const entry of STANDARD_MATRIX_PRESETS) {
     assert.equal(
       entry.frameworkValidation?.acceptanceTrack,

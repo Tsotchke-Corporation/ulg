@@ -898,7 +898,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
       !borrowedThermoBuffer ? thermoBuffer : null,
       !borrowedMechanicsBuffer ? mechanicsBuffer : null,
       paramsBuffer,
-      exact?.retainAcceptance ? null : authorityValidationBuffer,
+      exact?.retainAcceptance || retainOutputParticleBuffers ? null : authorityValidationBuffer,
       !retainOutputParticleBuffers ? outMechanicsBuffer : null
     ]) {
       try {
@@ -968,6 +968,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
         }),
     destroyOutputParticleBuffers() {
       destroyBufferOnce(outMechanicsBuffer);
+      if (!exact?.retainAcceptance) destroyBufferOnce(authorityValidationBuffer);
       // The exchange capture retains its acceptance word until its last
       // consumer releases it; a preserved mechanics buffer cannot leak it.
       exact?.destroyOutput();

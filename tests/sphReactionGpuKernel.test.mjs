@@ -1160,6 +1160,8 @@ test('SPH reaction whole-parent conversion remains available only for a distingu
     productTermRecords: new Float32Array(),
     gasProductRecords: new Float32Array(),
     atomTermRecords: new Float32Array(),
+    // Legacy tables predate the spectator term section.
+    spectatorTermRecords: new Float32Array(),
     combinedRecords: new Float32Array([
       ...source.records,
       ...source.productPhaseRecords

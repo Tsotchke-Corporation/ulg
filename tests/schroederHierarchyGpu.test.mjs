@@ -4120,6 +4120,43 @@ test('Schroeder particle-storage materialization plan requires StateManager admi
   assert.equal(view.getFloat32(44, true), 4);
 });
 
+test('Schroeder particle-storage fixed phase slots reach assignment but reject the append materializer', () => {
+  const phaseVolumeSplitMergeApply = {
+    schema: ULG_SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_EXECUTION_SCHEMA,
+    proposalRowCount: 3,
+    applyStrideFloats: SCHROEDER_PHASE_VOLUME_SPLIT_MERGE_APPLY_FLOATS
+  };
+  const allocation = createSchroederParticleStorageAllocationPlan({
+    phaseVolumeSplitMergeApply,
+    preservePhaseSlots: true,
+    currentParticleCapacity: 12,
+    requiredParticleCapacity: 12,
+    particleStorageAllocatorAdmission: approvedParticleStorageAllocatorAdmission({
+      rowCount: 3, currentParticleCapacity: 12, requiredParticleCapacity: 12
+    })
+  });
+  assert.equal(allocation.particleStorageAllocatorAdmissionApproved, true);
+  assert.equal(allocation.preservePhaseSlots, true);
+  assert.equal(new DataView(createSchroederParticleStorageAllocationParamsArray(allocation))
+    .getFloat32(36, true), 1);
+  const assignment = createSchroederParticleStorageSlotAssignmentPlan({
+    particleStorageAllocation: allocation,
+    particleStorageFreeList: createSchroederParticleStorageFreeListPlan({ slotCapacity: 2 }),
+    particleStorageSlotAssignmentAdmission: approvedParticleStorageSlotAssignmentAdmission({ rowCount: 3 })
+  });
+  assert.equal(assignment.particleStorageSlotAssignmentAdmissionApproved, true);
+  assert.equal(assignment.preservePhaseSlots, true);
+  assert.equal(new DataView(createSchroederParticleStorageSlotAssignmentParamsArray(assignment))
+    .getUint32(20, true), 1);
+  assert.throws(() => createSchroederParticleStorageMaterializationPlan({
+    ...manualBuffers({ particleCount: 3, smoothingLengthM: 0.25 }),
+    particleStorageSlotAssignment: assignment,
+    particleStorageMaterializationAdmission: approvedParticleStorageMaterializationAdmission({
+      rowCount: 3, requiredParticleCapacity: 12
+    })
+  }), /Fixed phase-slot assignments require a phase-aware materializer/);
+});
+
 test('Schroeder materialization WGSL preserves exact identity and blocks cross-domain merges', () => {
   assert.match(
     schroederParticleStorageMaterializationWgsl,
@@ -6024,6 +6061,23 @@ test('Schroeder phase-volume target aggregate materializes retained assignment t
   );
 });
 
+test('Schroeder physical gas aggregate declares material grouping without replacing identities', async () => {
+  const device = createFakeWebGpuDevice();
+  const identityBuffer = { label: 'immutable-particle-identities' };
+  const aggregate = await runSchroederPhaseVolumeTargetAggregateWebGpu({
+    device, physicalGasGrouping: true,
+    levelAssignment: { schema: ULG_SCHROEDER_LEVEL_ASSIGNMENT_EXECUTION_SCHEMA,
+      status: 'schroeder-level-assignment-submitted',
+      particleCount: 36, minLevel: 0, maxLevel: 0, baseGridSpacingM: 1,
+      assignmentBuffer: { label: 'current-assignment' } },
+    sphParticleUpload: { status: 'webgpu-uploaded', identityRequired: true, identityBuffer }
+  });
+  assert.equal(aggregate.physicalGasGrouping, true);
+  assert.equal(aggregate.aggregateIdentityKeyMode, 'gas-material-source-level-chart-cell');
+  assert.equal(device.bindGroups.at(-1).entries.find(entry => entry.binding === 5).resource.buffer, identityBuffer);
+  assert.equal(aggregate.fullParticleReadbackPerformed, false);
+});
+
 test('Schroeder hierarchy aggregate-node reduction consumes retained aggregate contributions without default readback', async () => {
   const device = createFakeWebGpuDevice();
   const hierarchyAggregate = {
@@ -7261,6 +7315,16 @@ test('Schroeder phase-volume migration consumes retained aggregate nodes without
     aggregateNodeStrideFloats: SCHROEDER_HIERARCHY_AGGREGATE_NODE_FLOATS,
     aggregateNodeBuffer: { label: 'retained-hierarchy-aggregate-node-buffer' }
   };
+  await assert.rejects(runSchroederPhaseVolumeMigrationWebGpu({
+    device, levelAssignment, hierarchyAggregateNode,
+    sphParticleUpload: { identityBuffer },
+    interfaceRefinementFieldView: {
+      schema: 'peercompute.ulg.schroeder-spatial-mechanics-field-view.v5',
+      physicalSourceCount: 130,
+      sourceBuffer: levelAssignment.assignmentBuffer, identityBuffer
+    }
+  }), /current admitted mechanics field and source family/);
+  assert.equal(device.dispatches.length, 0, 'Unowned interface topology must not dispatch');
   const migration = await runSchroederPhaseVolumeMigrationWebGpu({
     device,
     levelAssignment,

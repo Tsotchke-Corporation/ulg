@@ -268,7 +268,9 @@ test('hot open reservoir crosses one f32 ULP into an adjacent vaporization plate
     thermalMaterialTable,
     wallTemperaturesK: { xMin: 400 },
     boxDimsM: [5, 5, 5],
-    dtS: 1,
+    // Honest wall conduction (k = 0.048 W/m/K on the boiling plateau)
+    // crosses the whole plateau only in a long step.
+    dtS: 1e8,
     conductionRate: 0,
     ambientTemperatureK: 0,
     wallRate: 1e12,
@@ -284,7 +286,9 @@ test('hot open reservoir crosses one f32 ULP into an adjacent vaporization plate
     thermalMaterialTable,
     wallTemperaturesK: { xMin: 400 },
     boxDimsM: [5, 5, 5],
-    dtS: 1,
+    // Honest wall conduction (k = 0.048 W/m/K on the boiling plateau)
+    // crosses the whole plateau only in a long step.
+    dtS: 1e8,
     conductionRate: 0,
     ambientTemperatureK: 0,
     wallRate: 1e12,
@@ -327,10 +331,13 @@ test('hot open reservoir preserves phase progress while reciprocal conduction co
     thermalMaterialTable,
     wallTemperaturesK: { yMin: 400 },
     boxDimsM: [5, 5, 5],
-    dtS: 5e-4,
-    conductionRate: 1500,
+    // Honest walls deliver about 0.5 W to this boiling 8 kg carrier, so the
+    // step is long and the reciprocal pair coupling weak enough for the wall
+    // to keep driving latent progress while the neighbor still cools it.
+    dtS: 100,
+    conductionRate: 0.001,
     ambientTemperatureK: 0,
-    wallRate: 60_000,
+    wallRate: 1,
     wallLayerM: 0.25
   };
   const initialEnergyJ = totalInternalEnergyJ(source);

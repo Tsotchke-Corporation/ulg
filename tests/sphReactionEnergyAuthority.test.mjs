@@ -19,6 +19,10 @@ import { runSphReactionSummaryWebGpu } from '../src/runtime/sph/sphReactionGpuSu
 const R = 8.314462618;
 const T_REF = 300;
 const P_REF = 3000;
+// Gas rest densities are on the standard-atmosphere basis (the mechanics EOS
+// and the interface-flux law both read them as 1-atm densities), not on the
+// caloric reference pressure P_REF.
+const P_DENSITY_BASIS = 101325;
 const T_MIN = 200;
 const T_MAX = 500;
 const REFERENCE_SCHEMA = 'peercompute.ulg.reaction-energy-reference.v1';
@@ -78,7 +82,7 @@ function analyticPhase(material, phaseId, shifts = {}) {
     cv: packedCv,
     uAt: (temperatureK) => lo + packedCv * (temperatureK - T_MIN),
     tAt: (u) => T_MIN + (u - lo) / packedCv,
-    rho: Math.fround(phaseId === 2 ? p.liquidDensityKgPerM3 : P_REF * p.molarMassKgPerMol / (R * T_REF)),
+    rho: Math.fround(phaseId === 2 ? p.liquidDensityKgPerM3 : P_DENSITY_BASIS * p.molarMassKgPerMol / (R * T_REF)),
     lo,
     hi
   };
@@ -121,7 +125,7 @@ function fixture({ shifts = {}, sourcePhases = [3, 3], temperatures = [300, 300]
         { name: 'liquid', temperatureRange: [0, 400], cpJPerKgK: p.liquidCpJPerKgK,
           densityKgPerM3: p.liquidDensityKgPerM3, bulkModulusPa: 1e8, shearModulusPa: 0 },
         { name: 'gas', temperatureRange: [400, 1000], cpJPerKgK: p.vaporCpJPerKgK,
-          densityKgPerM3: P_REF * p.molarMassKgPerMol / (R * T_REF), bulkModulusPa: null, shearModulusPa: 0 }
+          densityKgPerM3: P_DENSITY_BASIS * p.molarMassKgPerMol / (R * T_REF), bulkModulusPa: null, shearModulusPa: 0 }
       ],
       transitions: [{ from: 'liquid', to: 'gas', temperatureK: 400, latentHeatJPerKg: p.vaporizationReferenceEnthalpyJPerKg }]
     };
@@ -501,7 +505,7 @@ function independentFluxCap(f, dtSeconds) {
     const d = DATA[material];
     const coefficient = f.reactants.find((term) => term.material === material).coefficient;
     const rho = f.sphParticleState.thermo[t + 3];
-    const referenceFlux = Math.fround((P_REF * d.molarMass / (R * T_REF))
+    const referenceFlux = Math.fround((P_DENSITY_BASIS * d.molarMass / (R * T_REF))
       * Math.sqrt(8 * R * 293.15 / (Math.PI * d.molarMass)) / 4);
     return {
       rate: referenceFlux * Math.sqrt(f.sphParticleState.thermo[t + 2] / 293.15) / (coefficient * Math.fround(d.molarMass)),

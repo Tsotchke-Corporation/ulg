@@ -1,3 +1,4 @@
+import { schroederPhaseSlotAdmissionFingerprint, PHASE_SLOT_ADMISSION_FIELDS } from './schroederPhaseSlotWorkerPolicy.js';
 import {
   schroederAuthorityTextFingerprint,
   schroederAuthorityTypedArrayFingerprint
@@ -20,6 +21,7 @@ import {
 } from './schroederDynamicLawRoutingContract.js';
 import {
   SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_SPECTATOR_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT,
   SPH_GPU_REACTION_HEADER_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
@@ -104,6 +106,7 @@ export const SCHROEDER_TARGET_SCHEDULE_ACTIVATION_FIELDS = Object.freeze([
   'gasBoundaryActionable',
   'explicitVacuumAmbient',
   'phaseVolumeSidecars',
+  'phaseVolumeInterfaceTransport',
   'mechanicsFieldViews'
 ]);
 
@@ -247,6 +250,16 @@ const WATCH_REACTION_TABLE_SECTIONS = Object.freeze([
     arrayField: 'atomTermRecords',
     layoutField: 'atomTermLayout',
     layout: SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT
+  }),
+  Object.freeze({
+    // Absent from tables packed before the spectator section existed; the
+    // GPU reads a spectator row only behind its sentinel.
+    optional: true,
+    countField: 'productTermCount',
+    strideField: 'spectatorTermStrideFloats',
+    arrayField: 'spectatorTermRecords',
+    layoutField: 'spectatorTermLayout',
+    layout: SPH_GPU_REACTION_SPECTATOR_TERM_ROW_LAYOUT
   })
 ]);
 
@@ -487,6 +500,7 @@ function providerWriterIds(writerSet) {
     writerSet.lawQueue ? 'law-queue' : null,
     writerSet.lawNeighborCandidates ? 'law-neighbor-candidates' : null,
     writerSet.phaseVolumeMigration ? 'phase-volume-migration' : null,
+    writerSet.phaseSlotRefinementPolicyFingerprint ? 'phase-slot-refinement' : null,
     writerSet.twoLevelMechanics ? 'two-level-mechanics' : null,
     writerSet.surfaceTension ? 'surface-tension' : null,
     writerSet.particleGasLedgerActionable
@@ -597,6 +611,25 @@ export function exactSchroederTargetScheduleProviderAuthority(value) {
   return null;
 }
 
+/**
+ * Static, readback-free predicate for the single-level gas/condensed
+ * pressure-drag transport: the mechanics material table declares a gas or
+ * plasma phase. Shared by the page target authority and the worker law
+ * activation receipt so both derive phaseVolumeInterfaceTransport exactly.
+ */
+export function schroederMechanicsTableHasGasOrPlasmaPhase(
+  mechanicsMaterialTable = null
+) {
+  return Array.isArray(mechanicsMaterialTable?.metadata)
+    && mechanicsMaterialTable.metadata.some(
+      (material) => Array.isArray(material?.phaseNames)
+        && material.phaseNames.some((phaseName) => {
+          const normalized = String(phaseName ?? '').trim().toLowerCase();
+          return normalized === 'gas' || normalized === 'plasma';
+        })
+    );
+}
+
 export function createSchroederTargetScheduleWriterSet({
   residentStepOptions = null,
   epochOptions = null,
@@ -633,6 +666,13 @@ export function createSchroederTargetScheduleWriterSet({
     || mechanics.enablePhaseVolumeMigration === true
     || hierarchy.enablePhaseVolumeMigration === true
   );
+  const phaseSlotRefinementRequested = hierarchy.enablePhaseSlotRefinement === true
+    || mechanics.enablePhaseSlotRefinement === true;
+  const phaseSlotRefinementPolicyFingerprint = phaseSlotRefinementRequested
+    ? schroederPhaseSlotAdmissionFingerprint(hierarchy.phaseSlotRefinementAdmissions
+      ?? mechanics.phaseSlotRefinementAdmissions
+      ?? Object.fromEntries(PHASE_SLOT_ADMISSION_FIELDS.map(field => [field, mechanics[field]])))
+    : null;
   const twoLevelMechanics = Boolean(
     mechanics.enableTwoLevelMechanics === true
     || hierarchy.enableTwoLevelMechanics === true
@@ -645,6 +685,9 @@ export function createSchroederTargetScheduleWriterSet({
       ?? 'observation'
     ).trim().toLowerCase() === 'authoritative'
   );
+  if (phaseSlotRefinementRequested && (!phaseVolumeMigration || twoLevelMechanics)) {
+    throw new TypeError('Phase-slot writer requires single-level phase-volume migration');
+  }
   const thermal = Boolean(resident.thermalMaterialTable);
   const reaction = resident.reactionTable != null
     && !exactQuiescentReactionTable(resident.reactionTable);
@@ -722,6 +765,13 @@ export function createSchroederTargetScheduleWriterSet({
     || gasBoundaryActionable
     || !explicitVacuumAmbient
   );
+  const phaseVolumeInterfaceTransport = Boolean(
+    !twoLevelMechanics
+    && mechanicsFieldViews
+    && schroederMechanicsTableHasGasOrPlasmaPhase(
+      resident.mechanicsMaterialTable
+    )
+  );
   const contactSolverRequested = resident.contactSolverEnabled !== false;
   const dynamicLawActive = Boolean(
     thermal
@@ -766,7 +816,9 @@ export function createSchroederTargetScheduleWriterSet({
       || twoLevelMechanics
       || particleGasLedgerActionable
       || retainedProductGasBoundaryActionable
+      || phaseVolumeInterfaceTransport
     ),
+    phaseVolumeInterfaceTransport,
     mechanicsFieldViews,
     crossLevelCoupling,
     mechanicsFieldPairV2,
@@ -780,13 +832,17 @@ export function createSchroederTargetScheduleWriterSet({
     writerIds: null,
     complete: provider.writerSetComplete
   };
+  if (phaseSlotRefinementPolicyFingerprint) base.phaseSlotRefinementPolicyFingerprint = phaseSlotRefinementPolicyFingerprint;
   base.writerIds = providerWriterIds(base);
   return deepFreeze(base);
 }
 
 export function exactSchroederTargetScheduleWriterSet(value) {
+  const hasPhaseSlotPolicy = Object.hasOwn(value ?? {}, 'phaseSlotRefinementPolicyFingerprint');
   if (
-    !objectHasExactKeys(value, WRITER_SET_KEYS)
+    !objectHasExactKeys(value, hasPhaseSlotPolicy ? [...WRITER_SET_KEYS, 'phaseSlotRefinementPolicyFingerprint'] : WRITER_SET_KEYS)
+    || (hasPhaseSlotPolicy && (!nonEmptyString(value.phaseSlotRefinementPolicyFingerprint)
+      || !value.phaseVolumeMigration || value.twoLevelMechanics))
     || value.schema !== ULG_SCHROEDER_TARGET_SCHEDULE_WRITER_SET_SCHEMA
     || !SCHROEDER_TARGET_SCHEDULE_ACTIVATION_FIELDS.every(
       (field) => typeof value[field] === 'boolean'
@@ -805,7 +861,12 @@ export function exactSchroederTargetScheduleWriterSet(value) {
         || value.twoLevelMechanics
         || value.particleGasLedgerActionable
         || value.retainedProductGasBoundaryActionable
+        || value.phaseVolumeInterfaceTransport
       )
+    || (
+      value.phaseVolumeInterfaceTransport
+      && (value.twoLevelMechanics || !value.mechanicsFieldViews)
+    )
     || (
       value.particleGasLedgerActionable
       && !value.gasBoundaryActionable
@@ -877,7 +938,7 @@ function authorizedWatchReactionTable(
   // Schedule descriptors are clone-safe cold law snapshots. Recompile their
   // explicit recipe and compare all bytes; a copied token alone never grants
   // permission for an unknown energy suffix.
-  if (reactionTable?.coldReferenceRecipe) {
+  if (reactionTable?.coldReferenceRecipe || reactionTable?.heatProxyGauge) {
     reactionTable = importSphReferenceReactionTableColdInput(reactionTable, thermalMaterialTable);
   }
   if (
@@ -928,6 +989,7 @@ function authorizedWatchReactionTable(
   }
   let combinedOffset = 0;
   for (const section of WATCH_REACTION_TABLE_SECTIONS) {
+    if (section.optional && reactionTable[section.arrayField] == null) continue;
     const count = reactionTable[section.countField];
     const stride = reactionTable[section.strideField];
     const records = reactionTable[section.arrayField];
@@ -1417,6 +1479,7 @@ function exactDormantReactionWatchToExecutingReactionTransition(
           'particleGasLedgerActionable',
           'gasBoundaryActionable',
           'phaseVolumeSidecars',
+          'phaseVolumeInterfaceTransport',
           'mechanicsFieldViews'
         ]
       : []),
@@ -1523,6 +1586,7 @@ function exactRetainedProductGasBoundaryTransition(
     'retainedProductGasBoundaryActionable',
     'gasBoundaryActionable',
     'phaseVolumeSidecars',
+    'phaseVolumeInterfaceTransport',
     'mechanicsFieldViews',
     'writerIds'
   ]);

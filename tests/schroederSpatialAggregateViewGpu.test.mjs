@@ -1141,8 +1141,10 @@ test('WGSL builds an authenticated Morton-prefix tree and exposes a budget-free 
   );
   assert.match(
     schroederSpatialAggregateStacklessTraversalWgsl,
-    /!finite_f32\(internal_energy\)[\s\S]*internal_energy < 0\.0/
+    /!finite_f32\(internal_energy\)/
   );
+  // Internal energy is gauge-relative; only kinetic energy is sign-checked.
+  assert.doesNotMatch(schroederSpatialAggregateStacklessTraversalWgsl, /internal_energy < 0\.0/);
   assert.match(schroederSpatialAggregateStacklessTraversalWgsl, /near_intersects/);
   assert.match(
     schroederSpatialAggregateStacklessTraversalWgsl,

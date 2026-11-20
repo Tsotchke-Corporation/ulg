@@ -67,6 +67,7 @@ import {
   SCHROEDER_SPATIAL_EPOCH_V2_VERSION
 } from '../../../ulg-gpu-abi/src/schroederSpatialEpoch.js';
 import {
+  SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS,
   isFinalizedSchroederSpatialExactNearConsumerReceipt,
   isSchroederSpatialExactNearResidentConsumerBinding
 } from './schroederSpatialEpochGpu.js';
@@ -606,6 +607,7 @@ export function createSchroederSingleLevelQueueOrderedCleanupCapability(
     readbackMode !== NO_FULL_READBACK_MODE
     || device !== authority.device
     || generation !== authority.generation
+    || authority.mechanicsChain != null
     || authority.twoLevelAuthoritative === true
     || authority.twoLevel != null
     || ![
@@ -677,6 +679,7 @@ export function validateSchroederSingleLevelQueueOrderedCleanupCapability(
       || device !== authority.device
       || generation !== record.generation
       || generation !== authority.generation
+      || authority.mechanicsChain != null
       || authority.twoLevelAuthoritative === true
       || authority.twoLevel != null
       || readbackMode !== NO_FULL_READBACK_MODE
@@ -716,6 +719,9 @@ export function resolveSchroederSpatialPhaseVolumeTransportAuthority(
   } = {}
 ) {
   const authority = authorityFor(transaction);
+  if (authority.mechanicsChain) {
+    throw transactionError('Mechanics chain phase consumers are not enrolled', 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_AUTHORITY');
+  }
   if (
     authority.state !== SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE
     || !authority.admittedReaders.has(
@@ -730,13 +736,22 @@ export function resolveSchroederSpatialPhaseVolumeTransportAuthority(
       'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE'
     );
   }
+  const singleLevelProposal =
+    authority.generationSnapshot.phaseVolumeInterfaceProposal;
+  const singleLevel = authority.phaseVolumeInterfaceProposalAuthoritative === true
+    && authority.twoLevelAuthoritative !== true
+    && !authority.twoLevel
+    && singleLevelProposal?.twoLevel === false;
   if (
-    authority.phaseVolumeInterfaceProposalAuthoritative !== true
-    || authority.twoLevelAuthoritative !== true
-    || !authority.twoLevel
+    !singleLevel
+    && (
+      authority.phaseVolumeInterfaceProposalAuthoritative !== true
+      || authority.twoLevelAuthoritative !== true
+      || !authority.twoLevel
+    )
   ) {
     throw transactionError(
-      'Phase-volume transport requires an authoritative two-level S9-C transaction',
+      'Phase-volume transport requires an authoritative S9-C transaction (one-level, or two-level)',
       'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_AUTHORITY'
     );
   }
@@ -749,6 +764,14 @@ export function resolveSchroederSpatialPhaseVolumeTransportAuthority(
       'Phase-volume transport generation no longer matches the transaction snapshot',
       'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY'
     );
+  }
+  if (singleLevel) {
+    return resolveSingleLevelPhaseVolumeTransportAuthority(authority, {
+      generation,
+      selectedLevel,
+      mechanicsFieldView,
+      proposal: singleLevelProposal
+    });
   }
   const twoLevel = authority.twoLevel;
   const levelIndex = selectedLevel === twoLevel.fineLevel
@@ -861,6 +884,98 @@ export function resolveSchroederSpatialPhaseVolumeTransportAuthority(
 }
 
 /**
+ * One-level S9-C transport authority: the single mechanics level is level
+ * index 0 ("fine") with no coarse level, no parent CSR and no reflux routes.
+ * The proposal's local heads cover that level's fields only.
+ */
+function resolveSingleLevelPhaseVolumeTransportAuthority(
+  authority,
+  { generation, selectedLevel, mechanicsFieldView, proposal }
+) {
+  const snapshot = authority.generationSnapshot;
+  const fieldView = snapshot.mechanicsFieldView;
+  const moment = snapshot.phaseVolumeMoment;
+  const receipt = snapshot.phaseVolumeReceipt;
+  if (
+    !Number.isInteger(selectedLevel)
+    || mechanicsFieldView !== fieldView
+    || !fieldView
+    || !moment
+    || !receipt
+    || fieldView.selectedLevel !== selectedLevel
+    || generation?.mechanicsFieldView !== fieldView
+    || generation?.phaseVolumeMoment !== moment
+    || generation?.phaseVolumeReceipt !== receipt
+    || moment.mechanicsFieldView !== fieldView
+    || receipt.phaseVolumeMoment !== moment
+    || receipt.parentPhaseVolumeMoment !== moment
+    || receipt.mechanicsFieldView !== fieldView
+    || proposal?.fineReceipt !== receipt
+    || proposal?.finePhaseVolumeMoment !== moment
+    || proposal?.fineMechanicsFieldView !== fieldView
+    || proposal?.fineLevel !== selectedLevel
+    || proposal?.coarseLevel !== -0x8000_0000
+    || proposal?.coarseFieldCapacity !== 0
+    || proposal?.coarseReceipt != null
+    || proposal?.parentFieldView != null
+  ) {
+    throw transactionError(
+      'One-level phase-volume transport lost exact level, moment, receipt, or field lineage',
+      'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY'
+    );
+  }
+  const localHeadOffsetWords = proposal.layout.fineLocalHeadOffsetWords;
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-phase-volume-transport-authority.v1',
+    status: 'schroeder-spatial-phase-volume-transport-authority-ready',
+    generation,
+    generationId: authority.generationId,
+    epochIdentity: authority.epochIdentity,
+    selectedLevel,
+    levelIndex: 0,
+    levelRole: 'single',
+    fieldCapacity: proposal.fineFieldCapacity,
+    mechanicsLevelView: null,
+    mechanicsFieldView: fieldView,
+    mechanicsFieldViewBuffer: fieldView.fieldViewBuffer,
+    phaseVolumeMoment: moment,
+    phaseVolumeMomentControlBuffer: moment.controlBuffer,
+    phaseVolumeMomentBuffer: moment.momentBuffer,
+    finePhaseVolumeMoment: moment,
+    finePhaseVolumeMomentControlBuffer: moment.controlBuffer,
+    finePhaseVolumeMomentBuffer: moment.momentBuffer,
+    coarsePhaseVolumeMoment: null,
+    coarsePhaseVolumeMomentControlBuffer: null,
+    coarsePhaseVolumeMomentBuffer: null,
+    phaseVolumeReceipt: receipt,
+    phaseVolumeReceiptControlBuffer: receipt.controlBuffer,
+    finePhaseVolumeReceipt: receipt,
+    finePhaseVolumeReceiptControlBuffer: receipt.controlBuffer,
+    coarsePhaseVolumeReceipt: null,
+    coarsePhaseVolumeReceiptControlBuffer: null,
+    fineMechanicsFieldView: fieldView,
+    fineMechanicsFieldViewBuffer: fieldView.fieldViewBuffer,
+    coarseMechanicsFieldView: null,
+    coarseMechanicsFieldViewBuffer: null,
+    phaseVolumeInterfaceProposal: proposal,
+    phaseVolumeInterfaceProposalControlBuffer: proposal.controlBuffer,
+    phaseVolumeInterfaceLocalHeadBuffer: proposal.localHeadBuffer,
+    phaseVolumeInterfaceRefluxRouteBuffer: proposal.refluxRouteBuffer,
+    phaseVolumeInterfaceRefluxRouteCapacity:
+      proposal.layout.refluxRouteCapacity,
+    phaseVolumeInterfaceRefluxRouteRowWords:
+      proposal.layout.refluxRouteRowWords,
+    localHeadOffsetWords,
+    phaseVolumeInterfaceLocalHeadOffsetWords: localHeadOffsetWords,
+    parentFieldView: null,
+    parentFieldViewBuffer: null,
+    fineLevel: selectedLevel,
+    coarseLevel: proposal.coarseLevel,
+    twoLevel: false
+  });
+}
+
+/**
  * Resolve the exact S9-A/S9-B authority needed by same-level continuum
  * surface stress. Unlike interface pressure/drag transport, this law does not
  * consume S9-C local-head or reflux-route topology and therefore applies to
@@ -901,29 +1016,26 @@ export function resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(
   }
 
   const twoLevel = authority.twoLevel;
+  const levels = authority.mechanicsChain ?? twoLevel;
   let levelIndex = 0;
   let levelRole = 'single';
   let mechanicsLevelView = null;
   let fieldView = null;
   let moment = null;
   let receipt = null;
-  if (twoLevel) {
-    levelIndex = selectedLevel === twoLevel.fineLevel
-      ? 0
-      : selectedLevel === twoLevel.coarseLevel
-        ? 1
-        : -1;
+  if (levels) {
+    levelIndex = levels.mechanicsLevelViews.findIndex(view => view.selectedLevel === selectedLevel);
     if (levelIndex < 0) {
       throw transactionError(
         'Surface stress selectedLevel is not one of the authoritative mechanics levels',
         'ERR_SCHROEDER_SURFACE_STRESS_LEVEL'
       );
     }
-    levelRole = levelIndex === 0 ? 'fine' : 'coarse';
-    mechanicsLevelView = twoLevel.mechanicsLevelViews[levelIndex];
-    fieldView = twoLevel.mechanicsFieldViews[levelIndex];
-    moment = twoLevel.phaseVolumeMoments[levelIndex];
-    receipt = twoLevel.phaseVolumeReceipts[levelIndex];
+    levelRole = authority.mechanicsChain ? 'native-chain' : levelIndex === 0 ? 'fine' : 'coarse';
+    mechanicsLevelView = levels.mechanicsLevelViews[levelIndex];
+    fieldView = levels.mechanicsFieldViews[levelIndex];
+    moment = levels.phaseVolumeMoments[levelIndex];
+    receipt = levels.phaseVolumeReceipts[levelIndex];
     if (
       mechanicsLevelView?.selectedLevel !== selectedLevel
       || mechanicsLevelView?.mechanicsFieldView !== fieldView
@@ -1169,6 +1281,7 @@ function resolveReadOnlyPhaseVolumeInterfaceProposal({
   execution,
   epochIdentity,
   twoLevel,
+  singleLevelPhaseVolumeReceipt = null,
   phaseVolumeInterfaceProposal = null,
   phaseVolumeInterfaceProposalRuntime = null,
   phaseVolumeInterfaceProposalEnabled = false
@@ -1188,18 +1301,27 @@ function resolveReadOnlyPhaseVolumeInterfaceProposal({
       phaseVolumeInterfaceProposalRuntime: null
     });
   }
-  const fineReceipt = twoLevel?.phaseVolumeReceipts?.[0] ?? null;
-  const coarseReceipt = twoLevel?.phaseVolumeReceipts?.[1] ?? null;
-  const parentFieldView = twoLevel?.parentFieldView ?? null;
+  // One-level S9-C: the single mechanics level's S9-B receipt is the fine
+  // receipt, with no coarse receipt and no parent CSR (canonical one-level
+  // descriptor shape, coarse level sentinel -2^31).
+  const singleLevel = !twoLevel;
+  const fineReceipt = singleLevel
+    ? singleLevelPhaseVolumeReceipt
+    : twoLevel?.phaseVolumeReceipts?.[0] ?? null;
+  const coarseReceipt = singleLevel
+    ? null
+    : twoLevel?.phaseVolumeReceipts?.[1] ?? null;
+  const parentFieldView = singleLevel
+    ? null
+    : twoLevel?.parentFieldView ?? null;
   if (
     !fineReceipt
-    || !coarseReceipt
-    || !parentFieldView
+    || (!singleLevel && (!coarseReceipt || !parentFieldView))
     || !phaseVolumeInterfaceProposal
     || !phaseVolumeInterfaceProposalRuntime
   ) {
     throw transactionError(
-      'Read-only phase-volume interface authority requires exact fine/coarse S9-B receipts, parent CSR, and one submitted proposal',
+      'Read-only phase-volume interface authority requires exact S9-B receipts (fine/coarse and parent CSR when two-level) and one submitted proposal',
       'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
     );
   }
@@ -1211,12 +1333,16 @@ function resolveReadOnlyPhaseVolumeInterfaceProposal({
     sourceFamilyId: execution.sourceFamilyId,
     ...epochIdentity,
     fineFieldCapacity: fineReceipt.fieldCapacity,
-    coarseFieldCapacity: coarseReceipt.fieldCapacity,
+    coarseFieldCapacity: singleLevel ? 0 : coarseReceipt.fieldCapacity,
     fineLevel: fineReceipt.selectedLevel,
-    coarseLevel: coarseReceipt.selectedLevel,
+    coarseLevel: singleLevel ? -0x8000_0000 : coarseReceipt.selectedLevel,
     fineReceiptCompletionOrdinal: fineReceipt.completionOrdinal,
-    coarseReceiptCompletionOrdinal: coarseReceipt.completionOrdinal,
-    parentFieldCompletionOrdinal: parentFieldView.completionOrdinal
+    coarseReceiptCompletionOrdinal: singleLevel
+      ? 0
+      : coarseReceipt.completionOrdinal,
+    parentFieldCompletionOrdinal: singleLevel
+      ? 0
+      : parentFieldView.completionOrdinal
   };
   const admission = validateSchroederSpatialPhaseVolumeInterfaceProposalDescriptor(
     phaseVolumeInterfaceProposal,
@@ -1244,19 +1370,21 @@ function resolveReadOnlyPhaseVolumeInterfaceProposal({
     || phaseVolumeInterfaceProposal.submitPerformed !== true
     || phaseVolumeInterfaceProposal.released === true
     || phaseVolumeInterfaceProposal.releaseScheduled === true
-    || phaseVolumeInterfaceProposal.twoLevel !== true
-    || phaseVolumeInterfaceProposal.hasParentFieldView !== true
+    || phaseVolumeInterfaceProposal.twoLevel !== !singleLevel
+    || phaseVolumeInterfaceProposal.hasParentFieldView !== !singleLevel
     || phaseVolumeInterfaceProposal.fineReceipt !== fineReceipt
     || phaseVolumeInterfaceProposal.coarseReceipt !== coarseReceipt
     || phaseVolumeInterfaceProposal.parentFieldView !== parentFieldView
     || phaseVolumeInterfaceProposal.fineMechanicsFieldView
       !== fineReceipt.mechanicsFieldView
     || phaseVolumeInterfaceProposal.coarseMechanicsFieldView
-      !== coarseReceipt.mechanicsFieldView
+      !== (singleLevel ? null : coarseReceipt.mechanicsFieldView)
     || phaseVolumeInterfaceProposal.parentFieldViewBuffer
-      !== parentFieldView.parentFieldViewBuffer
-    || phaseVolumeInterfaceProposal.encodedDispatchCount !== 3
-    || phaseVolumeInterfaceProposal.encodedComputePassCount !== 3
+      !== (singleLevel ? null : parentFieldView.parentFieldViewBuffer)
+    || phaseVolumeInterfaceProposal.encodedDispatchCount
+      !== (singleLevel ? 2 : 3)
+    || phaseVolumeInterfaceProposal.encodedComputePassCount
+      !== (singleLevel ? 2 : 3)
     || phaseVolumeInterfaceProposal.diagnosticOnly !== true
     || phaseVolumeInterfaceProposal.stateMutationAllowed !== false
     || phaseVolumeInterfaceProposal.readbackPerformed !== false
@@ -1290,30 +1418,41 @@ function resolveReadOnlyPhaseVolumeInterfaceProposal({
   });
 }
 
-function resolveAuthoritativeTwoLevelGeneration({
+function resolveAuthoritativeTwoLevelGeneration(options) {
+  return resolveAuthoritativeMechanicsGeneration(options);
+}
+
+function resolveAuthoritativeMechanicsGeneration({
   device,
   generation,
   sourceBuffers,
   spatialSourceBuffer,
   execution,
   epochIdentity,
-  aggregateViewRequired = false
+  aggregateViewRequired = false,
+  mechanicsChainAuthoritative = false
 }) {
   const levelViews = generation?.mechanicsLevelViews;
   const levels = generation?.mechanicsLevels;
+  const levelCount = generation?.mechanicsLevelCount;
+  const chain = mechanicsChainAuthoritative;
+  const contractCode = chain ? 'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_CONTRACT'
+    : 'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_CONTRACT';
   if (
-    generation?.mechanicsLevelCount !== 2
+    !Number.isInteger(levelCount)
+    || (chain ? levelCount < 2 || levelCount > SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS : levelCount !== 2)
     || !Array.isArray(levelViews)
-    || levelViews.length !== 2
+    || levelViews.length !== levelCount
     || !Object.isFrozen(levelViews)
     || levelViews.some((levelView) => !levelView || !Object.isFrozen(levelView))
     || !Array.isArray(levels)
-    || levels.length !== 2
+    || levels.length !== levelCount
     || !Object.isFrozen(levels)
   ) {
     throw transactionError(
-      'Authoritative two-level mechanics requires exactly two immutable mechanics-level descriptors',
-      'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_CONTRACT'
+      chain ? 'Authoritative mechanics chain requires two through six immutable level descriptors'
+        : 'Authoritative two-level mechanics requires exactly two immutable mechanics-level descriptors',
+      contractCode
     );
   }
   const [fineLevelView, coarseLevelView] = levelViews;
@@ -1321,23 +1460,17 @@ function resolveAuthoritativeTwoLevelGeneration({
   const coarseLevel = coarseLevelView.selectedLevel;
   const fineGrid = fineLevelView.mechanicsGrid;
   const coarseGrid = coarseLevelView.mechanicsGrid;
-  if (
-    !Number.isInteger(fineLevel)
-    || !Number.isInteger(coarseLevel)
-    || coarseLevel !== fineLevel + 1
-    || levels[0] !== fineLevel
-    || levels[1] !== coarseLevel
-    || !gridDescriptorMatches(fineLevelView.mechanicsView, fineGrid)
-    || !gridDescriptorMatches(coarseLevelView.mechanicsView, coarseGrid)
-    || !Number.isFinite(fineGrid?.gridSpacingM)
-    || !(fineGrid.gridSpacingM > 0)
-    || Math.fround(coarseGrid?.gridSpacingM)
-      !== Math.fround(fineGrid.gridSpacingM * 2)
-  ) {
-    throw transactionError(
-      'Authoritative two-level mechanics requires adjacent levels with exact 2:1 f32 grid spacing',
-      'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_CONTRACT'
-    );
+  for (const [index, levelView] of levelViews.entries()) {
+    const grid = levelView.mechanicsGrid;
+    const previous = levelViews[index - 1];
+    if (!Number.isInteger(levelView.selectedLevel)
+      || levels[index] !== levelView.selectedLevel
+      || !gridDescriptorMatches(levelView.mechanicsView, grid)
+      || !Number.isFinite(grid?.gridSpacingM) || !(grid.gridSpacingM > 0)
+      || (previous && (levelView.selectedLevel !== previous.selectedLevel + 1
+        || Math.fround(grid.gridSpacingM) !== Math.fround(previous.mechanicsGrid.gridSpacingM * 2)))) {
+      throw transactionError('Authoritative mechanics requires adjacent levels with exact 2:1 f32 grid spacing', contractCode);
+    }
   }
   const mechanicsViews = levelViews.map((levelView) => levelView.mechanicsView);
   for (const [index, levelView] of levelViews.entries()) {
@@ -1474,78 +1607,110 @@ function resolveAuthoritativeTwoLevelGeneration({
     );
   }
 
-  const hierarchyView = generation.hierarchyView;
-  const hierarchyAdmission = validateSchroederSpatialHierarchyViewDescriptor(
-    hierarchyView,
-    {
-      generationId: execution.generationId,
-      deviceOrdinal: execution.deviceOrdinal,
-      laneOrdinal: execution.laneOrdinal,
-      leaseToken: execution.leaseToken,
-      sourceFamilyId: execution.sourceFamilyId,
-      ...epochIdentity,
-      completionOrdinal: execution.buildOrdinal,
-      fineLevel,
-      coarseLevel
-    }
-  );
-  if (
-    hierarchyAdmission.admitted !== true
-    || generation.hierarchyViewRuntime !== hierarchyView?.ownerRuntime
-    || hierarchyView?.spatialExecution !== execution
-    || hierarchyView?.fineMechanicsView !== mechanicsViews[0]
-    || hierarchyView?.coarseMechanicsView !== mechanicsViews[1]
-    || !gridDescriptorMatches(hierarchyView?.fineGrid, fineGrid)
-    || !gridDescriptorMatches(hierarchyView?.coarseGrid, coarseGrid)
-    || hierarchyView?.coarseIndirectDispatchBuffer
-      !== hierarchyView?.hierarchyViewBuffer
-    || hierarchyView?.coarseIndirectDispatchOffsetBytes
-      !== SCHROEDER_SPATIAL_HIERARCHY_VIEW_DISPATCH_OFFSET_WORDS
-        * Uint32Array.BYTES_PER_ELEMENT
-    || hierarchyView?.fineIndirectDispatchBuffer
-      !== hierarchyView?.hierarchyViewBuffer
-    || hierarchyView?.fineIndirectDispatchOffsetBytes
-      !== SCHROEDER_SPATIAL_HIERARCHY_VIEW_FINE_DISPATCH_OFFSET_WORDS
-        * Uint32Array.BYTES_PER_ELEMENT
-    || hierarchyView?.topology !== 'two-level-compact-parent-child-csr'
-    || hierarchyView?.transferStencil
-      !== 'normalized-trilinear-up-to-eight-edges'
-    || !webGpuBufferMatchesDevice(hierarchyView?.hierarchyViewBuffer, device)
-  ) {
-    throw transactionError(
-      'Authoritative two-level mechanics requires the live hierarchy view derived from the same immutable generation',
-      'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_IDENTITY'
-    );
+  const adjacentPairs = chain ? generation.mechanicsAdjacentLevelPairs : null;
+  if (chain && (!Array.isArray(adjacentPairs) || !Object.isFrozen(adjacentPairs)
+    || adjacentPairs.length !== levelCount - 1
+    || adjacentPairs.some(pair => !pair || !Object.isFrozen(pair)))) {
+    throw transactionError('Mechanics chain requires every immutable adjacent pair',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_CONTRACT');
   }
-  const parentFieldView = generation.parentFieldView;
-  const parentFieldAdmission = validateSchroederSpatialParentFieldViewDescriptor(
-    parentFieldView,
-    {
-      generationId: execution.generationId,
-      deviceOrdinal: execution.deviceOrdinal,
-      laneOrdinal: execution.laneOrdinal,
-      leaseToken: execution.leaseToken,
-      sourceFamilyId: execution.sourceFamilyId,
-      ...epochIdentity,
-      completionOrdinal: execution.buildOrdinal,
-      fineLevel,
-      coarseLevel,
-      exactLevelCount: 2
+  const pairAuthorities = [];
+  for (const [index, pair] of (adjacentPairs ?? [generation]).entries()) {
+    const fineLevelView = levelViews[index], coarseLevelView = levelViews[index + 1];
+    const fineLevel = fineLevelView.selectedLevel, coarseLevel = coarseLevelView.selectedLevel;
+    const fineGrid = fineLevelView.mechanicsGrid, coarseGrid = coarseLevelView.mechanicsGrid;
+    if (chain && (pair.fineLevel !== fineLevel || pair.coarseLevel !== coarseLevel
+      || pair.parentFieldView?.inheritedFineParentView !== (index ? adjacentPairs[index-1].parentFieldView : null))) {
+      throw transactionError('Mechanics chain lost ordered inherited pair lineage',
+        'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_IDENTITY');
     }
-  );
-  if (
-    !identityBound
-    || parentFieldAdmission.admitted !== true
-    || generation.parentFieldViewRuntime !== parentFieldView?.ownerRuntime
-    || parentFieldView?.mechanicsFieldViews?.[0] !== mechanicsFieldViews[0]
-    || parentFieldView?.mechanicsFieldViews?.[1] !== mechanicsFieldViews[1]
-    || parentFieldView?.hierarchyView !== hierarchyView
-    || !webGpuBufferMatchesDevice(parentFieldView?.parentFieldViewBuffer, device)
-  ) {
-    throw transactionError(
-      'Authoritative two-level mechanics requires the live field-aware parent topology from the same immutable generation',
-      'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_PARENT_FIELD_IDENTITY'
+    const hierarchyView = pair.hierarchyView;
+    const hierarchyAdmission = validateSchroederSpatialHierarchyViewDescriptor(
+      hierarchyView,
+      {
+        generationId: execution.generationId,
+        deviceOrdinal: execution.deviceOrdinal,
+        laneOrdinal: execution.laneOrdinal,
+        leaseToken: execution.leaseToken,
+        sourceFamilyId: execution.sourceFamilyId,
+        ...epochIdentity,
+        completionOrdinal: execution.buildOrdinal,
+        fineLevel,
+        coarseLevel
+      }
     );
+    if (
+      hierarchyAdmission.admitted !== true
+      || pair.hierarchyViewRuntime !== hierarchyView?.ownerRuntime
+      || hierarchyView?.spatialExecution !== execution
+      || hierarchyView?.fineMechanicsView !== mechanicsViews[index]
+      || hierarchyView?.coarseMechanicsView !== mechanicsViews[index + 1]
+      || !gridDescriptorMatches(hierarchyView?.fineGrid, fineGrid)
+      || !gridDescriptorMatches(hierarchyView?.coarseGrid, coarseGrid)
+      || hierarchyView?.coarseIndirectDispatchBuffer
+        !== hierarchyView?.hierarchyViewBuffer
+      || hierarchyView?.coarseIndirectDispatchOffsetBytes
+        !== SCHROEDER_SPATIAL_HIERARCHY_VIEW_DISPATCH_OFFSET_WORDS
+          * Uint32Array.BYTES_PER_ELEMENT
+      || hierarchyView?.fineIndirectDispatchBuffer
+        !== hierarchyView?.hierarchyViewBuffer
+      || hierarchyView?.fineIndirectDispatchOffsetBytes
+        !== SCHROEDER_SPATIAL_HIERARCHY_VIEW_FINE_DISPATCH_OFFSET_WORDS
+          * Uint32Array.BYTES_PER_ELEMENT
+      || hierarchyView?.topology !== 'two-level-compact-parent-child-csr'
+      || hierarchyView?.transferStencil
+        !== 'normalized-trilinear-up-to-eight-edges'
+      || !webGpuBufferMatchesDevice(hierarchyView?.hierarchyViewBuffer, device)
+    ) {
+      throw transactionError(
+        'Authoritative two-level mechanics requires the live hierarchy view derived from the same immutable generation',
+        'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_IDENTITY'
+      );
+    }
+    const parentFieldView = pair.parentFieldView;
+    const parentFieldAdmission = validateSchroederSpatialParentFieldViewDescriptor(
+      parentFieldView,
+      {
+        generationId: execution.generationId,
+        deviceOrdinal: execution.deviceOrdinal,
+        laneOrdinal: execution.laneOrdinal,
+        leaseToken: execution.leaseToken,
+        sourceFamilyId: execution.sourceFamilyId,
+        ...epochIdentity,
+        completionOrdinal: execution.buildOrdinal,
+        fineLevel,
+        coarseLevel,
+        exactLevelCount: 2
+      }
+    );
+    if (
+      !identityBound
+      || parentFieldAdmission.admitted !== true
+      || pair.parentFieldViewRuntime !== parentFieldView?.ownerRuntime
+      || parentFieldView?.mechanicsFieldViews?.[0] !== mechanicsFieldViews[index]
+      || parentFieldView?.mechanicsFieldViews?.[1] !== mechanicsFieldViews[index + 1]
+      || parentFieldView?.hierarchyView !== hierarchyView
+      || !webGpuBufferMatchesDevice(parentFieldView?.parentFieldViewBuffer, device)
+    ) {
+      throw transactionError(
+        'Authoritative two-level mechanics requires the live field-aware parent topology from the same immutable generation',
+        'ERR_SCHROEDER_SPATIAL_EPOCH_TWO_LEVEL_PARENT_FIELD_IDENTITY'
+      );
+    }
+    pairAuthorities.push(Object.freeze({
+      pair, fineLevel, coarseLevel, fineLevelView, coarseLevelView,
+      fineFieldView: mechanicsFieldViews[index], coarseFieldView: mechanicsFieldViews[index + 1],
+      hierarchyView, hierarchyViewRuntime: pair.hierarchyViewRuntime,
+      parentFieldView, parentFieldViewRuntime: pair.parentFieldViewRuntime,
+      hierarchyViewBuffer: hierarchyView.hierarchyViewBuffer,
+      parentFieldViewBuffer: parentFieldView.parentFieldViewBuffer
+    }));
+  }
+  const { hierarchyView, hierarchyViewRuntime, parentFieldView, parentFieldViewRuntime } = pairAuthorities[0];
+  if (generation.hierarchyView !== hierarchyView || generation.hierarchyViewRuntime !== hierarchyViewRuntime
+    || generation.parentFieldView !== parentFieldView || generation.parentFieldViewRuntime !== parentFieldViewRuntime) {
+    throw transactionError('Finest pair aliases do not identify the mechanics chain',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_IDENTITY');
   }
   const {
     aggregateView,
@@ -1559,6 +1724,18 @@ function resolveAuthoritativeTwoLevelGeneration({
     aggregateViewRequired
   });
   return Object.freeze({
+    mechanicsChainAuthoritative: chain,
+    mechanicsAdjacentLevelPairs: adjacentPairs,
+    pairAuthorities: Object.freeze(pairAuthorities),
+    levelBuffers: Object.freeze(levelViews.map(view => Object.freeze({
+      mechanics: view.mechanicsView?.mechanicsViewBuffer,
+      field: view.mechanicsFieldView?.fieldViewBuffer,
+      momentControl: view.phaseVolumeMoment?.controlBuffer,
+      moment: view.phaseVolumeMoment?.momentBuffer,
+      receiptControl: view.phaseVolumeReceipt?.controlBuffer,
+      receiptPartial: view.phaseVolumeReceipt?.partialBuffer,
+      receiptParams: view.phaseVolumeReceipt?.paramsBuffer
+    }))),
     mechanicsLevelViews: levelViews,
     mechanicsLevels: levels,
     fineLevelView,
@@ -1665,48 +1842,51 @@ function authoritativeAggregateGenerationMatchesSnapshot(authority, generation) 
 }
 
 function authoritativeTwoLevelGenerationMatchesSnapshot(authority, generation) {
-  const snapshot = authority.generationSnapshot.twoLevel;
+  const snapshot = authority.generationSnapshot.mechanicsChain ?? authority.generationSnapshot.twoLevel;
   if (!snapshot) return true;
   let current;
   try {
-    current = resolveAuthoritativeTwoLevelGeneration({
-      device: authority.device,
-      generation,
-      sourceBuffers: authority.sourceBuffers,
+    current = resolveAuthoritativeMechanicsGeneration({
+      device: authority.device, generation, sourceBuffers: authority.sourceBuffers,
       spatialSourceBuffer: authority.generationSnapshot.sourceBuffer,
-      execution: authority.generationSnapshot.execution,
-      epochIdentity: authority.epochIdentity,
-      aggregateViewRequired: authority.aggregateViewRequired
+      execution: authority.generationSnapshot.execution, epochIdentity: authority.epochIdentity,
+      aggregateViewRequired: authority.aggregateViewRequired,
+      mechanicsChainAuthoritative: snapshot.mechanicsChainAuthoritative
     });
-  } catch {
-    return false;
-  }
+  } catch { return false; }
+  const arrays = ['mechanicsViews', 'mechanicsFieldViews', 'phaseVolumeMoments',
+    'phaseVolumeMomentRuntimes', 'phaseVolumeReceipts', 'phaseVolumeReceiptRuntimes'];
   return current.mechanicsLevelViews === snapshot.mechanicsLevelViews
     && current.mechanicsLevels === snapshot.mechanicsLevels
-    && current.fineLevelView === snapshot.fineLevelView
-    && current.coarseLevelView === snapshot.coarseLevelView
-    && current.mechanicsViews[0] === snapshot.mechanicsViews[0]
-    && current.mechanicsViews[1] === snapshot.mechanicsViews[1]
-    && current.mechanicsFieldViews[0] === snapshot.mechanicsFieldViews[0]
-    && current.mechanicsFieldViews[1] === snapshot.mechanicsFieldViews[1]
-    && current.phaseVolumeMoments[0] === snapshot.phaseVolumeMoments[0]
-    && current.phaseVolumeMoments[1] === snapshot.phaseVolumeMoments[1]
-    && current.phaseVolumeMomentRuntimes[0]
-      === snapshot.phaseVolumeMomentRuntimes[0]
-    && current.phaseVolumeMomentRuntimes[1]
-      === snapshot.phaseVolumeMomentRuntimes[1]
-    && current.phaseVolumeReceipts[0] === snapshot.phaseVolumeReceipts[0]
-    && current.phaseVolumeReceipts[1] === snapshot.phaseVolumeReceipts[1]
-    && current.phaseVolumeReceiptRuntimes[0]
-      === snapshot.phaseVolumeReceiptRuntimes[0]
-    && current.phaseVolumeReceiptRuntimes[1]
-      === snapshot.phaseVolumeReceiptRuntimes[1]
-    && current.hierarchyView === snapshot.hierarchyView
-    && current.hierarchyViewRuntime === snapshot.hierarchyViewRuntime
-    && current.parentFieldView === snapshot.parentFieldView
-    && current.parentFieldViewRuntime === snapshot.parentFieldViewRuntime
+    && current.mechanicsAdjacentLevelPairs === snapshot.mechanicsAdjacentLevelPairs
+    && arrays.every(key => current[key].length === snapshot[key].length
+      && current[key].every((value, index) => value === snapshot[key][index]))
+    && current.levelBuffers.every((buffers, index) => Object.keys(buffers).every(key =>
+      buffers[key] === snapshot.levelBuffers[index][key]))
+    && current.pairAuthorities.length === snapshot.pairAuthorities.length
+    && current.pairAuthorities.every((pair, index) => Object.keys(pair).every(key =>
+      pair[key] === snapshot.pairAuthorities[index][key]))
     && current.aggregateView === snapshot.aggregateView
     && current.aggregateViewRuntime === snapshot.aggregateViewRuntime;
+}
+
+/** The complete retained chain for a producer between P2G and G2P. */
+export function resolveSchroederSpatialMechanicsChainAuthority(transaction, {
+  device, generation = transaction?.generation
+} = {}) {
+  const authority = authorityFor(transaction);
+  if (!authority.mechanicsChain || device !== authority.device
+    || generation !== authority.generation || !generationMatchesSnapshot(authority, generation)) {
+    throw transactionError('Mechanics chain requires the exact live device, generation and all-pair snapshot',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_IDENTITY');
+  }
+  if (authority.state !== SCHROEDER_SPATIAL_EPOCH_TRANSACTION_STATE.READERS_ACTIVE
+    || !authority.admittedReaders.has(SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G)
+    || authority.admittedReaders.has(SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P)) {
+    throw transactionError('Mechanics chain executes after P2G admission and before G2P admission',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_LIFECYCLE');
+  }
+  return authority.mechanicsChain;
 }
 
 function phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation) {
@@ -1715,12 +1895,25 @@ function phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation) {
   const proposal = snapshot.phaseVolumeInterfaceProposal;
   const runtime = snapshot.phaseVolumeInterfaceProposalRuntime;
   const twoLevel = snapshot.twoLevel;
-  const fineReceipt = twoLevel?.phaseVolumeReceipts?.[0] ?? null;
-  const coarseReceipt = twoLevel?.phaseVolumeReceipts?.[1] ?? null;
-  const parentFieldView = twoLevel?.parentFieldView ?? null;
-  if (!proposal || !runtime || !fineReceipt || !coarseReceipt || !parentFieldView) {
+  const singleLevel = !twoLevel;
+  const fineReceipt = singleLevel
+    ? snapshot.phaseVolumeReceipt ?? null
+    : twoLevel?.phaseVolumeReceipts?.[0] ?? null;
+  const coarseReceipt = singleLevel
+    ? null
+    : twoLevel?.phaseVolumeReceipts?.[1] ?? null;
+  const parentFieldView = singleLevel
+    ? null
+    : twoLevel?.parentFieldView ?? null;
+  if (
+    !proposal
+    || !runtime
+    || !fineReceipt
+    || (!singleLevel && (!coarseReceipt || !parentFieldView))
+  ) {
     return false;
   }
+  const expectedDispatchCount = singleLevel ? 2 : 3;
   let admission;
   let owned = false;
   let submitted = false;
@@ -1735,12 +1928,16 @@ function phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation) {
         sourceFamilyId: snapshot.execution.sourceFamilyId,
         ...snapshot.epochIdentity,
         fineFieldCapacity: fineReceipt.fieldCapacity,
-        coarseFieldCapacity: coarseReceipt.fieldCapacity,
+        coarseFieldCapacity: singleLevel ? 0 : coarseReceipt.fieldCapacity,
         fineLevel: fineReceipt.selectedLevel,
-        coarseLevel: coarseReceipt.selectedLevel,
+        coarseLevel: singleLevel ? -0x8000_0000 : coarseReceipt.selectedLevel,
         fineReceiptCompletionOrdinal: fineReceipt.completionOrdinal,
-        coarseReceiptCompletionOrdinal: coarseReceipt.completionOrdinal,
-        parentFieldCompletionOrdinal: parentFieldView.completionOrdinal
+        coarseReceiptCompletionOrdinal: singleLevel
+          ? 0
+          : coarseReceipt.completionOrdinal,
+        parentFieldCompletionOrdinal: singleLevel
+          ? 0
+          : parentFieldView.completionOrdinal
       }
     );
     owned = runtime.ownsExecution?.(proposal) === true;
@@ -1758,7 +1955,7 @@ function phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation) {
     && proposal.submitPerformed === true
     && proposal.released !== true
     && proposal.releaseScheduled !== true
-    && proposal.twoLevel === true
+    && proposal.twoLevel === !singleLevel
     && proposal.fineReceipt === fineReceipt
     && proposal.coarseReceipt === coarseReceipt
     && proposal.parentFieldView === parentFieldView
@@ -1772,8 +1969,8 @@ function phaseVolumeInterfaceProposalMatchesSnapshot(authority, generation) {
     && proposal.readbackPerformed === false
     && proposal.fullParticleReadbackRequired === false
     && proposal.fullParticleReadbackPerformed === false
-    && proposal.encodedDispatchCount === 3
-    && proposal.encodedComputePassCount === 3
+    && proposal.encodedDispatchCount === expectedDispatchCount
+    && proposal.encodedComputePassCount === expectedDispatchCount
     && webGpuBufferMatchesDevice(proposal.controlBuffer, authority.device)
     && webGpuBufferMatchesDevice(proposal.localHeadBuffer, authority.device)
     && webGpuBufferMatchesDevice(proposal.refluxRouteBuffer, authority.device)
@@ -1936,7 +2133,17 @@ function generationMatchesSnapshot(authority, generation) {
 }
 
 function readerOrderSatisfied(authority, readerId) {
-  const rank = READER_ORDER_RANK[readerId];
+  // The complete multilevel interval uses the frozen directory for its
+  // canonical post-mechanics thermal query. Its actual producer order is
+  // P2G -> G2P -> conduction -> radiation, unlike the older single-stage path.
+  const order = id => authority.mechanicsChain
+    ? ({[SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_CONDUCTION]:8,
+        [SCHROEDER_SPATIAL_EPOCH_READER.THERMAL_RADIATION]:9,
+        [SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE]:10,
+        [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_DISCOVERY]:11,
+        [SCHROEDER_SPATIAL_EPOCH_READER.REACTION_PRODUCT_PLACEMENT]:12}[id] ?? READER_ORDER_RANK[id])
+    : READER_ORDER_RANK[id];
+  const rank = order(readerId);
   if (!Number.isInteger(rank)) return false;
   if (
     readerId === SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P
@@ -1945,7 +2152,7 @@ function readerOrderSatisfied(authority, readerId) {
     )
   ) return false;
   for (const enabledReaderId of authority.enabledConsumerReaders) {
-    const enabledRank = READER_ORDER_RANK[enabledReaderId];
+    const enabledRank = order(enabledReaderId);
     if (
       LATE_CONSUMER_READER_SET.has(enabledReaderId)
       && Number.isInteger(enabledRank)
@@ -1954,7 +2161,7 @@ function readerOrderSatisfied(authority, readerId) {
     ) return false;
   }
   for (const admittedReaderId of authority.admittedReaders.keys()) {
-    const admittedRank = READER_ORDER_RANK[admittedReaderId];
+    const admittedRank = order(admittedReaderId);
     if (!Number.isInteger(admittedRank) || admittedRank >= rank) return false;
   }
   return true;
@@ -2422,6 +2629,7 @@ export function createSchroederSpatialEpochTransaction({
   mlsMpmParticleUpload,
   aerosolSourceFamilyConsumerLease = null,
   twoLevelAuthoritative = false,
+  mechanicsChainAuthoritative = false,
   phaseVolumeInterfaceProposalAuthoritative = false,
   requiredReaderIds = DEFAULT_REQUIRED_READERS,
   enabledConsumerReaderIds = [],
@@ -2657,6 +2865,19 @@ export function createSchroederSpatialEpochTransaction({
   const aggregateViewRequired = requiredReaders.has(
     SCHROEDER_SPATIAL_EPOCH_READER.FAR_AGGREGATE
   );
+  if (typeof mechanicsChainAuthoritative !== 'boolean'
+    || (mechanicsChainAuthoritative && twoLevelAuthoritative === true)) {
+    throw transactionError('Select exactly one mechanics authority mode',
+      'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_CONTRACT');
+  }
+  if (mechanicsChainAuthoritative && phaseVolumeInterfaceProposalAuthoritative) {
+    throw transactionError('Chain phase-volume transport requires an enrolled all-pair producer',
+      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY');
+  }
+  const mechanicsChain = mechanicsChainAuthoritative
+    ? resolveAuthoritativeMechanicsGeneration({ device, generation, sourceBuffers,
+        spatialSourceBuffer, execution, epochIdentity, aggregateViewRequired,
+        mechanicsChainAuthoritative: true }) : null;
   const twoLevel = twoLevelAuthoritative === true
     ? resolveAuthoritativeTwoLevelGeneration({
         device,
@@ -2668,10 +2889,11 @@ export function createSchroederSpatialEpochTransaction({
         aggregateViewRequired
       })
     : null;
-  const aggregate = twoLevel
+  const mechanicsAuthority = mechanicsChain ?? twoLevel;
+  const aggregate = mechanicsAuthority
     ? Object.freeze({
-        aggregateView: twoLevel.aggregateView,
-        aggregateViewRuntime: twoLevel.aggregateViewRuntime,
+        aggregateView: mechanicsAuthority.aggregateView,
+        aggregateViewRuntime: mechanicsAuthority.aggregateViewRuntime,
         aggregateViewRequired
       })
     : resolveAuthoritativeAggregateGeneration({
@@ -2688,12 +2910,9 @@ export function createSchroederSpatialEpochTransaction({
       'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
     );
   }
-  if (phaseVolumeInterfaceProposalAuthoritative === true && !twoLevel) {
-    throw transactionError(
-      'Read-only phase-volume interface proposal authority requires authoritative two-level mechanics',
-      'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
-    );
-  }
+  // Single-level generations may carry a one-level S9-C proposal (fine local
+  // heads only); resolveReadOnlyPhaseVolumeInterfaceProposal authenticates
+  // its canonical one-level shape against the generation's S9-B receipt.
   if (
     phaseVolumeInterfaceProposalAuthoritative === true
     && generation.phaseVolumeInterfaceProposalEnabled !== true
@@ -2703,12 +2922,12 @@ export function createSchroederSpatialEpochTransaction({
       'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY'
     );
   }
-  const directPhaseVolumeArtifacts = twoLevel
+  const directPhaseVolumeArtifacts = mechanicsAuthority
     ? Object.freeze({
-        phaseVolumeMoment: twoLevel.phaseVolumeMoments[0],
-        phaseVolumeMomentRuntime: twoLevel.phaseVolumeMomentRuntimes[0],
-        phaseVolumeReceipt: twoLevel.phaseVolumeReceipts[0],
-        phaseVolumeReceiptRuntime: twoLevel.phaseVolumeReceiptRuntimes[0]
+        phaseVolumeMoment: mechanicsAuthority.phaseVolumeMoments[0],
+        phaseVolumeMomentRuntime: mechanicsAuthority.phaseVolumeMomentRuntimes[0],
+        phaseVolumeReceipt: mechanicsAuthority.phaseVolumeReceipts[0],
+        phaseVolumeReceiptRuntime: mechanicsAuthority.phaseVolumeReceiptRuntimes[0]
       })
     : resolveReadOnlyPhaseVolumeReceipt({
         device,
@@ -2736,6 +2955,7 @@ export function createSchroederSpatialEpochTransaction({
           execution,
           epochIdentity,
           twoLevel,
+          singleLevelPhaseVolumeReceipt: twoLevel ? null : phaseVolumeReceipt,
           phaseVolumeInterfaceProposal:
             generation.phaseVolumeInterfaceProposal ?? null,
           phaseVolumeInterfaceProposalRuntime:
@@ -2791,6 +3011,8 @@ export function createSchroederSpatialEpochTransaction({
     generation,
     generationId,
     twoLevelAuthoritative: twoLevel != null,
+    mechanicsChainAuthoritative,
+    mechanicsChain,
     aggregateViewRequired,
     aggregateView: aggregate.aggregateView,
     aggregateViewRuntime: aggregate.aggregateViewRuntime,
@@ -2847,6 +3069,7 @@ export function createSchroederSpatialEpochTransaction({
       aggregateView: aggregate.aggregateView,
       aggregateViewRuntime: aggregate.aggregateViewRuntime,
       twoLevel,
+      mechanicsChain,
       generationId,
       buildOrdinal,
       sortUniqueOrdinal,
@@ -2913,13 +3136,15 @@ export function createSchroederSpatialEpochTransaction({
     generation,
     generationId,
     twoLevelAuthoritative: twoLevel != null,
+    mechanicsChainAuthoritative,
     aggregateViewRequired,
     aggregateView: aggregate.aggregateView,
     phaseVolumeInterfaceProposalAuthoritative,
-    mechanicsLevelCount: twoLevel?.mechanicsLevelViews.length
+    mechanicsLevelCount: mechanicsAuthority?.mechanicsLevelViews.length
       ?? (generation.mechanicsView ? 1 : 0),
-    mechanicsLevels: twoLevel?.mechanicsLevels ?? null,
+    mechanicsLevels: mechanicsAuthority?.mechanicsLevels ?? null,
     hierarchyView: twoLevel?.hierarchyView ?? null,
+    mechanicsAdjacentLevelPairs: mechanicsChain?.mechanicsAdjacentLevelPairs ?? null,
     activeSourceView,
     activeRankView,
     phaseVolumeReceipt,
@@ -3801,13 +4026,14 @@ export function summarizeSchroederSpatialEpochTransaction(transaction) {
     generationId: authority.generationId,
     deviceId: authority.deviceId,
     twoLevelAuthoritative: authority.twoLevelAuthoritative,
+    mechanicsChainAuthoritative: authority.mechanicsChainAuthoritative,
     aggregateViewRequired: authority.aggregateViewRequired,
     aggregateViewStatus: authority.aggregateView?.status ?? null,
     phaseVolumeInterfaceProposalAuthoritative:
       authority.phaseVolumeInterfaceProposalAuthoritative,
-    mechanicsLevelCount: authority.twoLevel?.mechanicsLevelViews.length
+    mechanicsLevelCount: (authority.mechanicsChain ?? authority.twoLevel)?.mechanicsLevelViews.length
       ?? (authority.generation.mechanicsView ? 1 : 0),
-    mechanicsLevels: authority.twoLevel?.mechanicsLevels ?? null,
+    mechanicsLevels: (authority.mechanicsChain ?? authority.twoLevel)?.mechanicsLevels ?? null,
     hierarchyViewStatus: authority.twoLevel?.hierarchyView.status ?? null,
     hierarchyTopology: authority.twoLevel?.hierarchyView.topology ?? null,
     phaseVolumeReceiptStatus:

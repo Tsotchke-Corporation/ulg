@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { THERMAL_POTENTIAL_WORKER_CANDIDATE, THERMAL_POTENTIAL_WORKER_ACK,
+  thermalPotentialLineageKey } from '../src/runtime/material/thermalPotentialWorkerProtocol.js';
 
 import {
   ULG_SCHROEDER_WORKER_LANE_COMPUTE_MANAGER_COMPLETION_SCHEMA,
@@ -73,10 +75,24 @@ test('target-schedule authority SHA-256 fingerprint has a stable known vector', 
   );
 });
 
+const { ReservationLedger } = await import(new URL(
+  '../../peercompute/peercompute/src/peercompute/stateManager/ReservationLedger.js',
+  import.meta.url
+).href);
+
 function authorityFixture() {
   const calls = [];
   const warmByScope = new Map();
+  // G5: the PeerCompute bounded CAS reservation ledger, as StateManager
+  // exposes it.
+  const reservationLedgers = new Map();
   const stateManager = {
+    getReservationLedger(name) { return reservationLedgers.get(name) ?? null; },
+    createReservationLedger(options) {
+      const ledger = new ReservationLedger(options);
+      reservationLedgers.set(options.name, ledger);
+      return ledger;
+    },
     commitDelta(delta) {
       const scope = delta.scope;
       const entries = warmByScope.get(scope) || {};
@@ -137,7 +153,7 @@ function authorityFixture() {
       stateManager.commitDelta(delta);
     }
   };
-  return { calls, computeManager, stateManager, activeLeases };
+  return { calls, computeManager, stateManager, activeLeases, warmByScope, reservationLedgers };
 }
 
 function terminalScheduleFence({
@@ -369,6 +385,7 @@ function routeLawActivation(overrides = {}) {
     gasBoundaryActionable: false,
     explicitVacuumAmbient: false,
     phaseVolumeSidecars: false,
+    phaseVolumeInterfaceTransport: false,
     mechanicsFieldViews: true,
     activationAuthority: 'schedule-config-static-declaration-no-readback',
     ...overrides
@@ -390,6 +407,7 @@ function routeLawActivation(overrides = {}) {
     || receipt.twoLevelMechanics
     || receipt.particleGasLedgerActionable
     || receipt.retainedProductGasBoundaryActionable
+    || receipt.phaseVolumeInterfaceTransport
   );
   if (
     Object.prototype.hasOwnProperty.call(overrides, 'contactSolver')
@@ -1311,6 +1329,25 @@ function tier0ScheduleResult({
   };
 }
 
+test('worker phase-slot policy binds immutable clone-safe admission receipts to the configuration', () => {
+  const admissions = Object.fromEntries([
+    'phaseVolumeSplitMergeAdmission', 'particleStorageAllocatorAdmission',
+    'particleStorageSlotAssignmentAdmission', 'particleStorageMaterializationAdmission'
+  ].map(field => [field, { committed: true, sourceHotBufferKey: `owner:${field}` }]));
+  const options = { enablePhaseVolumeMigration: true, enablePhaseSlotRefinement: true,
+    phaseSlotRefinementAdmissions: admissions };
+  const policy = createSchroederWorkerHierarchyConfig(options);
+  assert.equal(createSchroederWorkerHierarchyConfig(structuredClone(policy)).signature, policy.signature);
+  admissions.particleStorageAllocatorAdmission.committed = false;
+  assert.equal(policy.phaseSlotRefinementAdmissions.particleStorageAllocatorAdmission.committed, true);
+  assert.notEqual(createSchroederWorkerHierarchyConfig(options).signature, policy.signature);
+  assert.throws(() => createSchroederWorkerHierarchyConfig({ ...options, enableTwoLevelMechanics: true }), /single-level/);
+  assert.throws(() => createSchroederWorkerHierarchyConfig({ ...options, enablePhaseVolumeMigration: false }), /single-level/);
+  assert.throws(() => createSchroederWorkerHierarchyConfig({ ...options, phaseSlotRefinementAdmissions: {} }), /all four/);
+  admissions.particleStorageAllocatorAdmission.buffer = new Uint32Array(4);
+  assert.throws(() => createSchroederWorkerHierarchyConfig(options), /plain control-plane/);
+});
+
 test('worker hierarchy config freezes every executable switch, including false', () => {
   const enabled = createSchroederWorkerHierarchyConfig({
     selectedLevel: 1,
@@ -2037,6 +2074,33 @@ test('a presealed dormant reaction watch admits exactly one authoritative S0-to-
   );
   assert.equal(lossReplayExecuted, false);
   assert.equal(lossManagers.calls.length, lossCallCountBeforeReplay);
+  // G5: the CAS ledger, not the last-writer-wins warm store, is the authority.
+  // Even with the warm receipt erased, the consumed token cannot be replayed.
+  const tokenLedger = lossManagers.reservationLedgers.get('ulg-schroeder-target-tokens');
+  assert.equal(tokenLedger?.fence(lossConsumptionTaskId).state, 'consumed');
+  delete lossManagers.warmByScope.get('ulg-sph-resident-pass-dag')[lossConsumptionTaskId];
+  await assert.rejects(
+    runSchroederWorkerLaneScheduleWithAuthority({
+      computeManager: lossManagers.computeManager,
+      stateManager: lossManagers.stateManager,
+      scheduleId: successorScheduleId,
+      laneId,
+      stateKey,
+      stepCount,
+      targetScheduleAuthority: lossS1Authority,
+      predecessorTargetScheduleAuthority: s0Authority,
+      predecessorDynamicLawObservation: lossObservation,
+      executeSchedule: async () => {
+        lossReplayExecuted = true;
+        return lossS1Evidence;
+      }
+    }),
+    (error) => {
+      assert.equal(error.reason, 'predecessor-target-token-replayed');
+      return true;
+    }
+  );
+  assert.equal(lossReplayExecuted, false);
 
   const managers = authorityFixture();
   const admittedS0Result = {
@@ -4804,4 +4868,66 @@ test('worker schedule authority integrates with real PeerCompute managers', asyn
   const stats = computeManager.getStats();
   assert.equal(stats.gpuResidentLanes.activeLeaseCount, 0);
   assert.equal(stats.gpuResidentLanes.completedLeaseCount, 1);
+});
+
+function thermalScheduleResult(scheduleId='fit:1') {
+  const identity={scheduleId,laneId:'fit-lane',stateKey:'fit-state'};
+  const result={...identity,...canonicalRouteScheduleEvidence({...identity,requestedStepCount:1}),
+    retainedBufferRefs:['worker:state'],gpuFence:terminalScheduleFence({...identity,completedStepCount:1})};
+  result.thermalPotential={adopted:false,ordinal:0,status:'pending-state-manager',readbackBytes:32,mapAsyncCount:1,cumulativeConsumerHits:0,
+    candidate:{schema:THERMAL_POTENTIAL_WORKER_CANDIDATE,candidateId:`candidate:${scheduleId}`,...identity,
+      sourceFingerprint:'source-v1',parentOrdinal:0,
+      lineageKey:thermalPotentialLineageKey({...result.executionRouteReceipt.lineage.target,
+        particleCount:result.executionRouteReceipt.particleCardinality.targetParticleCount})}};
+  return result;
+}
+function runThermalAuthority(f,result,extra={}) {
+  return runSchroederWorkerLaneScheduleWithAuthority({computeManager:f.computeManager,stateManager:f.stateManager,
+    laneId:result.laneId,stateKey:result.stateKey,scheduleId:result.scheduleId,stepCount:1,
+    thermalPotentialEnabled:true,executeSchedule:async()=>result,...extra});
+}
+
+test('G6 acknowledgement is generated from exact committed predecessor and budgets its fixed receipt',async()=>{
+  const f=authorityFixture(),first=thermalScheduleResult();
+  await runThermalAuthority(f,first,{executeSchedule:async({lease,thermalPotentialAcknowledgement})=>{
+    assert.equal(thermalPotentialAcknowledgement,null);assert.equal(lease.copyBudget.readbackBytes,40);return first;
+  }});
+  const second=thermalScheduleResult('fit:2');
+  second.thermalPotential={adopted:true,ordinal:1,status:'no-valid-fit',readbackBytes:32,mapAsyncCount:1,candidate:null,cumulativeConsumerHits:2};
+  await runThermalAuthority(f,second,{predecessorThermalPotential:first.thermalPotential.candidate,
+    executeSchedule:async({thermalPotentialAcknowledgement:ack})=>{
+      assert.equal(ack.schema,THERMAL_POTENTIAL_WORKER_ACK);assert.equal(ack.targetScheduleId,'fit:2');
+      assert.deepEqual(ack.candidate,first.thermalPotential.candidate);return second;
+    }});
+});
+
+test('G6 predecessor acknowledgement refuses missing or corrupted warm commits before dispatch',async()=>{
+  for(const edit of [p=>{delete p.thermalPotential;},p=>{p.thermalPotential.candidate.candidateId='foreign';},
+    p=>{p.gpuFence.fenceSatisfied=false;},p=>{p.gpuFence.laneId='foreign';},p=>{p.completedStepCount++;},
+    p=>{p.executionRouteReceipt.lineage.target.physicsTick++;},p=>{p.executionRouteReceipt.particleCardinality.targetParticleCount++;},
+    p=>{p.status='worker-resident-schedule-cancelled';}]) {
+    const f=authorityFixture(),first=thermalScheduleResult();await runThermalAuthority(f,first);
+    const payload=f.stateManager.getWarmDeltas('ulg-sph-resident-pass-dag')['ulg:schroeder-worker-schedule:fit:1'].payload;
+    edit(payload);let dispatched=false;
+    await assert.rejects(runThermalAuthority(f,thermalScheduleResult('fit:2'),{
+      predecessorThermalPotential:first.thermalPotential.candidate,executeSchedule:async()=>{dispatched=true;}}),/G6 worker/);
+    assert.equal(dispatched,false);
+  }
+  const first=thermalScheduleResult();
+  await assert.rejects(runThermalAuthority(authorityFixture(),thermalScheduleResult('fit:2'),{
+    predecessorThermalPotential:first.thermalPotential.candidate}),/G6 worker/);
+});
+
+test('G6 terminal candidate and StateManager persistence must exactly match the physical schedule',async()=>{
+  for(const edit of [r=>{r.thermalPotential.candidate.scheduleId='foreign';},r=>{r.thermalPotential.candidate.lineageKey='[]';},
+    r=>{r.thermalPotential.candidate.parentOrdinal++;},r=>{r.thermalPotential.readbackBytes=0;},
+    r=>{r.thermalPotential.adopted=true;},
+    r=>{delete r.thermalPotential;}]) {
+    const f=authorityFixture(),r=thermalScheduleResult();edit(r);
+    await assert.rejects(runThermalAuthority(f,r),/G6 worker/);
+    assert.equal(f.calls.some(([kind])=>kind==='commit'),false);
+  }
+  const f=authorityFixture(),commit=f.stateManager.commitDelta;
+  f.stateManager.commitDelta=d=>{const changed=structuredClone(d);changed.payload.thermalPotential.candidate.candidateId='changed';commit(changed);};
+  await assert.rejects(runThermalAuthority(f,thermalScheduleResult()),/did not persist the exact/);
 });

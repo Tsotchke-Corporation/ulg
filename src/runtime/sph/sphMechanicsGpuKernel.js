@@ -10,6 +10,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsPredictWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
+import { watchSphDeviceLoss } from './sphDeviceLossRelay.js';
 import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -480,10 +481,6 @@ function describeDeviceLost(info) {
   return info?.reason || info?.message || 'device lost';
 }
 
-function watchDeviceLost(device, onDeviceLost) {
-  if (!device?.lost?.then) return;
-  device.lost.then((info) => onDeviceLost(info)).catch((error) => onDeviceLost(error));
-}
 
 export async function runMlsMpmMechanicsPredictWithOptionalWebGpu({
   sphParticleState,
@@ -518,20 +515,19 @@ export async function runMlsMpmMechanicsPredictWithOptionalWebGpu({
     });
   }
   try {
-    let lostInfo = null;
+    const deviceLossState = { info: null };
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || await requestOpticalGpuDevice(navigatorRef, {
         onDeviceLost(info) {
-          lostInfo = info;
+          deviceLossState.info = info;
           if (typeof onDeviceLost === 'function') onDeviceLost(info);
         }
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(resolvedDeviceResult.device, (info) => {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      });
+      // One device.lost reaction per device; this call's loss state is held
+      // weakly, so completed predictions are not retained by the device.
+      watchSphDeviceLoss(resolvedDeviceResult.device, deviceLossState, onDeviceLost);
     }
     if (!resolvedDeviceResult.device) {
       return executionFromPrediction(cpuReference, {
@@ -544,12 +540,12 @@ export async function runMlsMpmMechanicsPredictWithOptionalWebGpu({
       });
     }
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       return executionFromPrediction(cpuReference, {
         cpuReference,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });
@@ -565,13 +561,13 @@ export async function runMlsMpmMechanicsPredictWithOptionalWebGpu({
       boxDimsM
     });
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       return executionFromPrediction(cpuReference, {
         cpuReference,
         gpuResult,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });

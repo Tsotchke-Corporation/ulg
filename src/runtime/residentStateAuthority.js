@@ -204,6 +204,7 @@ export function summarizeResidentStateAuthorityLedger(ledger) {
 
 export function buildMlsMpmResidentStepAuthorityLedger({
   nextUsesVaporAerosolExchange = false,
+  nextUsesPhaseSlotRefinement = false,
   step = null,
   time = null,
   readbackMode = null,
@@ -269,6 +270,14 @@ export function buildMlsMpmResidentStepAuthorityLedger({
         reads: [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
           RESIDENT_STATE_FAMILIES.THERMO_PHASE, RESIDENT_STATE_FAMILIES.MECHANICS,
           RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS] };
+    }
+    if (nextUsesPhaseSlotRefinement && [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+      RESIDENT_STATE_FAMILIES.THERMO_PHASE, RESIDENT_STATE_FAMILIES.MECHANICS].includes(family)) {
+      ownerStage = family === RESIDENT_STATE_FAMILIES.MECHANICS
+        ? 'mechanics-constitutive-refresh' : 'phase-slot-refinement';
+      options = { ...options, backend, status: `${ownerStage}-drives-next-particles`,
+        reads: [RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS,
+          RESIDENT_STATE_FAMILIES.THERMO_PHASE, RESIDENT_STATE_FAMILIES.MECHANICS] };
     }
     entries.push({
       family,

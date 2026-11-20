@@ -1,4 +1,7 @@
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
+import { SPH_REACTION_PARAMS_BYTES, sphReactionPhaseLineageCapacity } from './sphReactionPhaseLineage.js';
+import { compileSphExactReactionLedgerTable, createSphExactReactionLedgerReconcileStage }
+  from './sphExactReactionLedgerReconcileGpu.js';
 import { runSphExactReactionRoutingCandidateWebGpu, acquireSphExactReactionRoutingRead } from './sphExactReactionRoutingGpu.js';
 import { acquireSphExactMassRead, sliceSphExactMassRead, validateSphExactMassRead,
   releaseSphExactMassRead, releaseSphExactMassInventory } from './sphExactMassInventoryGpu.js';
@@ -10,6 +13,7 @@ import {
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_SPECTATOR_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT,
   SPH_GPU_REACTION_HEADER_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT,
@@ -31,6 +35,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphReactionStepWgsl, createSphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { assertNoCondensableCaloricReactionTable } from './sphCondensableCaloricTable.js';
+import { attachSphReactionHeatProxyGauge, sphReactionHeatProxyGaugeAdmits } from './sphReactionHeatProxyGauge.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
   attachSphReactionEnergyAuthority,
@@ -50,11 +55,13 @@ import {
   registerQueueOrderedCleanupClaim,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   assertSphLegacyMassPathAllowed,
+  markSphExactMassDerivedBuffers,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -111,6 +118,7 @@ import {
   createGpuReadbackTelemetry,
   createGpuReadbackTelemetryAccumulator
 } from './sphGpuReadbackTelemetry.js';
+
 
 export {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
@@ -291,8 +299,8 @@ function vector3From(value, fallback = [0, 0, 0]) {
   return [...fallback];
 }
 
-function assertPackedSphParticleState(sphParticleState) {
-  assertSphLegacyMassPathAllowed({ sphParticleState }, 'Reaction CPU fallback');
+function assertPackedSphParticleState(sphParticleState, { ledgerAdmitted = false } = {}) {
+  if (!ledgerAdmitted) assertSphLegacyMassPathAllowed({ sphParticleState }, 'Reaction CPU fallback');
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('SPH reaction GPU step requires a packed SPH GPU particle buffer');
   }
@@ -304,8 +312,9 @@ function assertPackedMlsMpmParticleState(mlsMpmParticleState) {
   }
 }
 
-function assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable }) {
-  assertPackedSphParticleState(sphParticleState);
+function assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable,
+  ledgerAdmitted = false }) {
+  assertPackedSphParticleState(sphParticleState, { ledgerAdmitted });
   assertPackedMlsMpmParticleState(mlsMpmParticleState);
   if (sphParticleState.particleCount !== mlsMpmParticleState.particleCount) {
     throw new RangeError('SPH reaction step requires matching SPH and MLS-MPM particle counts');
@@ -319,7 +328,8 @@ function assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionT
   const physical = assertSphReactionEnergyAuthority(reactionTable, thermalMaterialTable);
   // A caloric table cannot opt an unconverted legacy heat-proxy row in by
   // association. Mixed tables remain outside this first physical domain.
-  if (!physical || reactionTable.energyAuthority.reactionCount !== reactionTable.reactionCount) {
+  if ((!physical || reactionTable.energyAuthority.reactionCount !== reactionTable.reactionCount)
+    && !sphReactionHeatProxyGaugeAdmits(reactionTable, thermalMaterialTable)) {
     assertNoCondensableCaloricReactionTable(thermalMaterialTable);
   }
   if (physical) assertSphCondensableInitializationMatches(sphParticleState, mlsMpmParticleState, thermalMaterialTable);
@@ -329,8 +339,9 @@ function assertOptionalThermalPhaseResponseTable(table, reactionTable) {
   if (table && table.schema !== ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA) {
     throw new TypeError('SPH reaction step requires a packed thermal phase-response table');
   }
-  if (!assertSphReactionEnergyAuthority(reactionTable)
-    || reactionTable.energyAuthority.reactionCount !== reactionTable.reactionCount) {
+  if ((!assertSphReactionEnergyAuthority(reactionTable)
+    || reactionTable.energyAuthority.reactionCount !== reactionTable.reactionCount)
+    && !sphReactionHeatProxyGaugeAdmits(reactionTable)) {
     assertNoCondensableCaloricReactionTable(table);
   }
 }
@@ -458,6 +469,38 @@ function termMolarMassKgPerMol(term, materialProperties = {}) {
   const properties = materialPropertiesFor(term?.material, materialProperties);
   const molarMass = finiteNumber(properties?.molarMassKgPerMol, 0);
   return molarMass > 0 ? molarMass : 0;
+}
+
+// First-class air, slice 3 stage 2 (plan/todo/first-class-air.md). A reaction
+// lifted onto an ideal-gas mixture emits the mixture's non-reacting remainder
+// as a residue product. The residue is a spectator: it leaves carrying its own
+// sensible energy at the reactant's temperature, and the reaction heat goes to
+// the real products, which is exactly the species reaction's energy balance
+// (ideal mixing: m_mix u_mix = m_c u_c + m_res u_res at one T). Every room-air
+// gas uses u = Cv T, so u_res = (Cv_res / Cv_mix) u_mix at any temperature;
+// the GPU applies that ratio to the consumed mixture row's u.
+export const SPH_REACTION_SPECTATOR_TERM_FLOATS = SPH_GPU_REACTION_SPECTATOR_TERM_ROW_LAYOUT.length;
+// Every spectator row's pad word: tables packed before the section existed
+// have atom-term rows at that offset, which never hold this value, so the
+// GPU reads a spectator row only when the sentinel matches.
+export const SPH_REACTION_SPECTATOR_SECTION_SENTINEL = -7340.25;
+
+function reactionSpectatorForProductTerm(reaction, term, materialProperties = {}) {
+  const lifted = reaction?.stoichiometry?.liftedOntoMixture;
+  if (!lifted || term?.material !== lifted.residue) return null;
+  const residueModel = materialPropertiesFor(lifted.residue, materialProperties)?.phaseCaloricModel;
+  const mixtureModel = materialPropertiesFor(lifted.mixture, materialProperties)?.phaseCaloricModel;
+  const cvResidue = finiteNumber(residueModel?.cvJPerKgK, 0);
+  const cvMixture = finiteNumber(mixtureModel?.cvJPerKgK, 0);
+  const zeroOffset = (model, cv) => Math.abs(
+    finiteNumber(model?.referenceSpecificInternalEnergyJPerKg, NaN)
+      - cv * finiteNumber(model?.referenceTemperatureK, NaN)
+  ) <= 1e-9 * Math.abs(cv * finiteNumber(model?.referenceTemperatureK, 1));
+  if (!(cvResidue > 0) || !(cvMixture > 0)
+    || !zeroOffset(residueModel, cvResidue) || !zeroOffset(mixtureModel, cvMixture)) {
+    throw new TypeError(`Spectator residue ${lifted.residue} requires u = Cv T ideal-gas models`);
+  }
+  return Object.freeze({ mixture: lifted.mixture, residue: lifted.residue, energyRatio: cvResidue / cvMixture });
 }
 
 function productTermsForReaction(reaction, materialProperties = {}) {
@@ -794,6 +837,9 @@ export function buildSphReactionTable(reactions = [], {
   const reactionHeaders = [];
   const reactantTermRecords = [];
   const productTermRecords = [];
+  // One vec4 per product term: [spectator flag, Cv_res/Cv_mix, mixture
+  // material id, 0]. See SPH_REACTION_SPECTATOR_TERM_FLOATS.
+  const spectatorTermRecords = [];
   const gasProductRecords = [];
   const atomTermRecords = [];
   const metadata = [];
@@ -976,6 +1022,13 @@ export function buildSphReactionTable(reactions = [], {
         finiteNumber(term.charge, 0),
         0
       );
+      const spectator = reactionSpectatorForProductTerm(reaction, term, materialProperties);
+      spectatorTermRecords.push(
+        spectator ? 1 : 0,
+        spectator ? spectator.energyRatio : 0,
+        spectator ? stableOpticalMaterialId(spectator.mixture) : 0,
+        SPH_REACTION_SPECTATOR_SECTION_SENTINEL
+      );
       productTermMetadata.push({
         reactionIndex,
         productTermIndex,
@@ -989,7 +1042,8 @@ export function buildSphReactionTable(reactions = [], {
         targetPhasePolicyId: term.targetPhasePolicyId,
         phaseRecordOffset: phaseRange.offset,
         phaseRecordCount: phaseRange.count,
-        status: termStatus
+        status: termStatus,
+        spectator: spectator ?? null
       });
       const productAtomEntries = atomEntriesForTerm(term);
       for (let atomIndex = 0; atomIndex < productAtomEntries.length; atomIndex += 1) {
@@ -1114,6 +1168,7 @@ export function buildSphReactionTable(reactions = [], {
       + productTermRecords.length
       + gasProductRecords.length
       + atomTermRecords.length
+      + spectatorTermRecords.length
       + gasConstitutiveRecords.length
     ) / 4,
     recordLayout: [...SPH_GPU_REACTION_RECORD_ROW_LAYOUT],
@@ -1137,9 +1192,18 @@ export function buildSphReactionTable(reactions = [], {
     gasProductRecords: new Float32Array(gasProductRecords),
     atomTermRecords: new Float32Array(atomTermRecords),
     productPhaseRecords: new Float32Array(productPhaseRecords),
-    gasConstitutiveSchema: SPH_GAS_CONSTITUTIVE_SCHEMA,
-    gasConstitutiveOffsetVec4: (records.length + productPhaseRecords.length + reactionHeaders.length
+    spectatorTermRecords: new Float32Array(spectatorTermRecords),
+    spectatorTermStrideFloats: SPH_REACTION_SPECTATOR_TERM_FLOATS,
+    spectatorTermLayout: [...SPH_GPU_REACTION_SPECTATOR_TERM_ROW_LAYOUT],
+    spectatorTermOffsetVec4: (records.length + productPhaseRecords.length + reactionHeaders.length
       + reactantTermRecords.length + productTermRecords.length + gasProductRecords.length + atomTermRecords.length) / 4,
+    gasConstitutiveSchema: SPH_GAS_CONSTITUTIVE_SCHEMA,
+    // The spectator table sits immediately before the gas constitutive
+    // records, so every kernel finds it at gas_constitutive_offset -
+    // product_term_count without a new params word.
+    gasConstitutiveOffsetVec4: (records.length + productPhaseRecords.length + reactionHeaders.length
+      + reactantTermRecords.length + productTermRecords.length + gasProductRecords.length + atomTermRecords.length
+      + spectatorTermRecords.length) / 4,
     gasConstitutiveRecords: new Float32Array(gasConstitutiveRecords),
     combinedRecords: new Float32Array([
       ...records,
@@ -1149,6 +1213,7 @@ export function buildSphReactionTable(reactions = [], {
       ...productTermRecords,
       ...gasProductRecords,
       ...atomTermRecords,
+      ...spectatorTermRecords,
       ...gasConstitutiveRecords
     ]),
     metadata,
@@ -1163,7 +1228,13 @@ export function buildSphReactionTable(reactions = [], {
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
-  return attachSphReactionEnergyAuthority(table, reactions || [], thermalMaterialTable);
+  // A mixed-gauge (phase-caloric + legacy) heat-proxy table gets per-product
+  // gauge offsets (sphReactionHeatProxyGauge.js); single-gauge tables and
+  // physical-energy tables are returned unchanged.
+  return attachSphReactionHeatProxyGauge(
+    attachSphReactionEnergyAuthority(table, reactions || [], thermalMaterialTable),
+    thermalMaterialTable
+  );
 }
 
 function reactionRecord(table, index) {
@@ -1495,7 +1566,9 @@ function productTermRecord(table, termIndex) {
     productPhaseRecordOffset: table.productTermRecords[offset + 11],
     productPhaseRecordCount: table.productTermRecords[offset + 12],
     gasSpeciesId: table.productTermRecords[offset + 13],
-    charge: table.productTermRecords[offset + 14]
+    charge: table.productTermRecords[offset + 14],
+    // Gauge-consistent heat proxy offset (0 on single-gauge tables).
+    heatProxyGaugeJPerKg: table.productTermRecords[offset + 15]
   };
 }
 
@@ -2020,7 +2093,8 @@ function planStoichiometricFixedBufferEvent({
           consumedCurrentVolumeM3 * massKg / consumedMassKg,
         position: physical ? source.position : productPosition,
         velocity: productVelocity,
-        specificInternalEnergyJPerKg: energy?.states[0].specificInternalEnergyJPerKg ?? productSpecificInternalEnergyJPerKg
+        specificInternalEnergyJPerKg: energy?.states[0].specificInternalEnergyJPerKg
+          ?? productSpecificInternalEnergyJPerKg + finiteNumber(productVisibility[0].term?.heatProxyGaugeJPerKg, 0)
       });
       productVisibility[0].visibleMassKg += massKg;
       productVisibility[0].unplacedMassKg = Math.max(0, productVisibility[0].unplacedMassKg - massKg);
@@ -2037,7 +2111,8 @@ function planStoichiometricFixedBufferEvent({
           consumedCurrentVolumeM3 * product.massKg / consumedMassKg,
         position: physical ? freeSlots[slot].position : productPosition,
         velocity: productVelocity,
-        specificInternalEnergyJPerKg: product.resolved?.specificInternalEnergyJPerKg ?? productSpecificInternalEnergyJPerKg
+        specificInternalEnergyJPerKg: product.resolved?.specificInternalEnergyJPerKg
+          ?? productSpecificInternalEnergyJPerKg + finiteNumber(product.term?.heatProxyGaugeJPerKg, 0)
       });
       product.visibleMassKg += product.massKg;
       product.unplacedMassKg = 0;
@@ -3338,6 +3413,13 @@ function packReactionParticleRecords(sphParticleState, mlsMpmParticleState) {
   return packed;
 }
 
+// The ReactionParams uniform size, as a same-file literal for the ABI test;
+// it must equal the shared contract in sphReactionPhaseLineage.js.
+const REACTION_PARAMS_BYTES = 64;
+if (REACTION_PARAMS_BYTES !== SPH_REACTION_PARAMS_BYTES) {
+  throw new Error('ReactionParams uniform size drifted from sphReactionPhaseLineage.js');
+}
+
 function createParamsArray({
   particleCount,
   reactionCount,
@@ -3350,9 +3432,10 @@ function createParamsArray({
   resetMechanics,
   reactionTableMode = 0,
   gasConstitutiveOffsetVec4 = 0,
-  dtSeconds = 0
+  dtSeconds = 0,
+  phaseLineageCapacity = 0
 }) {
-  const buffer = new ArrayBuffer(48);
+  const buffer = new ArrayBuffer(REACTION_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, reactionCount, true);
@@ -3368,6 +3451,7 @@ function createParamsArray({
   view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
   view.setUint32(40, reactionTableMode === 1 ? 1 : 0, true);
   view.setUint32(44, gasConstitutiveOffsetVec4, true);
+  view.setUint32(48, phaseLineageCapacity >>> 0, true);
   return buffer;
 }
 
@@ -3511,6 +3595,28 @@ export function resolveSphReactionPairAllocationCapture(token, expected) {
 }
 
 const reactionSourceCaptures = new WeakMap();
+const reactionLedgerTables = new WeakMap();
+
+// The ledger reaction consumes the genuine captured thermal output and its
+// energy record, with the heat-proxy table (user, 2026-11-13).
+function validateReactionLedgerInput({ exactLedger, sourceStateBuffer, sourceThermoBuffer,
+  postMechanicsSourceCapture, reactionTable }) {
+  const seal = exactLedger?.thermalSeal;
+  if (!postMechanicsSourceCapture || !seal?.exactEnergy || typeof seal.validate !== 'function'
+      || !exactLedger.sourceRead?.read || reactionTable?.energyAuthority) {
+    throw new TypeError('Ledger reaction requires a captured thermal energy record and the heat-proxy table');
+  }
+  seal.validate();
+  if (seal.output?.stateBuffer !== sourceStateBuffer || seal.output?.thermoBuffer !== sourceThermoBuffer) {
+    throw new TypeError('Ledger reaction input differs from its genuine thermal output');
+  }
+}
+
+function compiledReactionLedgerTable(reactionTable) {
+  let compiled = reactionLedgerTables.get(reactionTable);
+  if (!compiled) { compiled = compileSphExactReactionLedgerTable(reactionTable); reactionLedgerTables.set(reactionTable, compiled); }
+  return compiled;
+}
 export function resolveSphReactionSourceCapture(result, token) {
   const seal = reactionSourceCaptures.get(token);
   if (!seal || seal.result !== result) throw new Error('Unknown reaction source capture');
@@ -3706,8 +3812,14 @@ export async function runSphReactionStepWebGpu({
   reactionWarmArenaResolveRunner = resolveSphReactionWarmArenaLease,
   reactionWarmArenaReleaseRunner = releaseSphReactionWarmArenaAfterQueue,
   postMechanicsSourceCapture = null,
-  exactReactionSourceSelection = null
+  exactReactionSourceSelection = null,
+  // G2 integer energy ledger: { thermalSeal, sourceRead } from the captured
+  // thermal step. The f32 heat-proxy reaction runs, then its exact reconcile.
+  exactLedger = null
 } = {}) {
+  if (exactLedger != null && exactReactionSourceSelection != null) {
+    throw new TypeError('A reaction is either exact-rational or ledger, not both');
+  }
   if (exactReactionSourceSelection != null) {
     // A captured stage executes original placement and retains its complete
     // output. Uncaptured requests remain routing inspections with no stage
@@ -3731,7 +3843,9 @@ export async function runSphReactionStepWebGpu({
       boxDimsM, gpuTimestampRecorder, requestQueueOrderedCleanupClaim });
     return runSphExactReactionRoutingCandidateWebGpu({ selection: exactReactionSourceSelection, expected });
   }
-  assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Reaction and placement');
+  if (exactLedger != null) validateReactionLedgerInput({ exactLedger, sourceStateBuffer, sourceThermoBuffer,
+    postMechanicsSourceCapture, reactionTable });
+  else assertSphLegacyMassPathAllowed({ sphParticleState, sphParticleUpload, sourceStateBuffer, sourceThermoBuffer }, 'Reaction and placement');
   if (postMechanicsSourceCapture) {
     if (reactionSourceCaptures.has(postMechanicsSourceCapture)) throw new Error('Reaction source capture cannot replay');
     reactionSourceCaptures.set(postMechanicsSourceCapture, null);
@@ -3744,9 +3858,12 @@ export async function runSphReactionStepWebGpu({
       throw new Error('Reaction source capture requires the standard retained producer and nested owners');
     }
   }
+  let reactionLedgerStage = null, reactionLedgerCommitted = null;
   const capturedInputs = postMechanicsSourceCapture ? { device, sphParticleState, mlsMpmParticleState,
     reactionTable, thermalMaterialTable, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer, dtSeconds } : null;
-  assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
+  // A validated ledger input is the exact-inventory authority here.
+  assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable,
+    ledgerAdmitted: exactLedger != null });
   const reactionStoichiometryDiagnostic =
     inspectSphReactionStoichiometryContract(reactionTable);
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable, reactionTable);
@@ -3891,6 +4008,12 @@ export async function runSphReactionStepWebGpu({
   reactionWarmArenaLease = (
     canonicalReactionDiscoveryEnabled
     && noFullReadback
+    // A private multilevel branch retains every numerical destination until
+    // batch admission, independently of the reaction scratch window. The
+    // legacy warm arena pools scratch AND physical destinations together; its
+    // three slots cannot own an arbitrarily long retained branch. Use the
+    // existing individually owned GPU allocation path for this lifetime.
+    && exactLedger?.privateLineage !== true
     && (reactionTable.productTermCount ?? 0) > 0
   )
     ? await reactionWarmArenaAcquireRunner({
@@ -4131,7 +4254,7 @@ export async function runSphReactionStepWebGpu({
   )), GPU_BUFFER_USAGE.COPY_SRC));
   const paramsBuffer = reactionWarmBuffers?.reactionParams || registerReactionOwnedBuffer(device.createBuffer({
     label: 'ulg-sph-reaction-params',
-    size: 48,
+    size: REACTION_PARAMS_BYTES,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   }));
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
@@ -4149,7 +4272,8 @@ export async function runSphReactionStepWebGpu({
       reactionStoichiometryDiagnostic.tableMode === 'extended-stoichiometric-v1'
         ? 1
         : 0,
-    dtSeconds
+    dtSeconds,
+    phaseLineageCapacity: sphReactionPhaseLineageCapacity(sphParticleState)
   }));
 
   if (sharedAllocation) {
@@ -4459,10 +4583,19 @@ export async function runSphReactionStepWebGpu({
         continuationMechanicsBuffer =
           reactionPlacementSourceFamily.placedDestinationMechanicsBuffer;
       }
+      if (exactLedger) {
+        reactionLedgerStage = createSphExactReactionLedgerReconcileStage({ device,
+          particleCount: sphParticleState.particleCount, compiledTable: compiledReactionLedgerTable(reactionTable),
+          massRead: exactLedger.sourceRead.read, energy: exactLedger.thermalSeal.exactEnergy,
+          privateLineage: exactLedger.privateLineage === true,
+          lineageSource: exactLedger.sourceRead.reactionLineage ?? null,
+          generation: Number(schroederSpatialEpochGeneration?.execution?.generationId ?? 0) });
+      }
       const canonicalReactionProductPlacementAuthority =
         canonicalReactionDiscoveryEnabled
           ? createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
               device,
+              ledgerReconcile: reactionLedgerStage,
               placementSourceFamily: reactionPlacementSourceFamily,
               particleCount: sphParticleState.particleCount,
               productEventCapacity:
@@ -4484,6 +4617,7 @@ export async function runSphReactionStepWebGpu({
             nextMechanicsBuffer: canonicalReactionProductPlacementAuthority ? continuationMechanicsBuffer : null } });
       }
       reactionSummary = await runSphReactionSummaryWebGpu({
+        ledgerReconcile: reactionLedgerStage,
         pairAllocationCapture,
         device,
         sphParticleState,
@@ -4528,6 +4662,17 @@ export async function runSphReactionStepWebGpu({
         queueOrderedProducerClaims:
           scratchCleanupClaim ? [scratchCleanupClaim] : []
       });
+      if (reactionLedgerStage) {
+        // The placement encoder ran the reconcile after its terminal seal and
+        // the summary submitted it; without that the ledger cannot continue.
+        if (!reactionLedgerStage.encoded) {
+          reactionLedgerStage.abandon();
+          throw new TypeError('Ledger reaction requires the canonical product placement to encode its reconcile');
+        }
+        reactionLedgerCommitted = reactionLedgerStage.commit();
+        markSphExactMassDerivedBuffers(exactLedger.sourceRead, [continuationStateBuffer, continuationThermoBuffer],
+          { mechanicsBuffers: [continuationMechanicsBuffer].filter(Boolean) });
+      }
       scratchFinalConsumer =
         reactionSummary?.queueOrderedFinalConsumerCapability
         ?? reactionSummary
@@ -5187,11 +5332,24 @@ export async function runSphReactionStepWebGpu({
       }
     );
   }
-  if (postMechanicsSourceCapture) reactionSourceCaptures.set(postMechanicsSourceCapture,
-    createPostMechanicsStageOutputSeal(result, capturedInputs));
+  if (postMechanicsSourceCapture) {
+    const committedLedger = reactionLedgerCommitted, ledgerStage = reactionLedgerStage;
+    if(committedLedger?.lineageRecord) Object.defineProperty(result,'reactionLineageRecord',{
+      value:committedLedger.lineageRecord,enumerable:false
+    });
+    const base = createPostMechanicsStageOutputSeal(result, capturedInputs, committedLedger ? {
+      onLastRelease: () => { void ledgerStage.releaseUnadopted(committedLedger).catch(() => {}); }
+    } : undefined);
+    reactionSourceCaptures.set(postMechanicsSourceCapture,
+      committedLedger ? Object.freeze({ ...base, exactLedgerReaction: committedLedger }) : base);
+  }
   return result;
   } catch (error) {
+    if (reactionLedgerStage && !reactionLedgerCommitted) reactionLedgerStage.abandon();
     const cleanupCompletions = [scheduleReactionResourceRegistryDrain()];
+    if (reactionLedgerCommitted) {
+      cleanupCompletions.push(reactionLedgerStage.releaseUnadopted(reactionLedgerCommitted));
+    }
     if (error?.localBufferCleanupCompletion?.then) {
       cleanupCompletions.push(error.localBufferCleanupCompletion);
     }

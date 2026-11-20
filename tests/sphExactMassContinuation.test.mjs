@@ -677,6 +677,52 @@ test('two genuine continuations retain one numeric family after each predecessor
   assert.equal(current.sphUpload.identityBuffer.destroyed, true);
 });
 
+test('a continuation whose thermal step ran without the ledger ends the energy record', async () => {
+  const f = fixture(); let step = null, next = null;
+  const initialRead = buffers.acquireSphParticleExactMassRead(f.sphUpload, f.device);
+  const energyBuffer = initialRead.energy.energyBuffer;
+  assert.equal(initialRead.energy.rowCount, 1);
+  assert.equal(buffers.sphGpuParticleUploadExactEnergyRows(f.sphUpload), initialRead.energy);
+  await buffers.releaseSphParticleExactMassRead(initialRead);
+  try {
+    // This f32 thermal step changes u without exact packets, so carrying the
+    // cold record forward would describe energy the carriers no longer have.
+    step = await run(f);
+    next = advance(f, step);
+    assert.equal(next.sphUpload.exactMassInventory, f.sphUpload.exactMassInventory);
+    await retire(f, step, steps.retainedContinuationBuffersFromUploads(step.nextParticleUploads));
+    const held = buffers.acquireSphParticleExactMassRead(next.sphUpload, f.device);
+    assert.equal(held.energy, null);
+    assert.equal(buffers.sphGpuParticleUploadExactEnergyRows(next.sphUpload), null);
+    assert.equal(energyBuffer.destroyed, true);
+    await buffers.releaseSphParticleExactMassRead(held);
+  } finally { if (next) await retire(next, step); }
+});
+
+test('ordinary exact continuation cannot discard a canonical finite wall successor', async () => {
+  const f = fixture(); let step;
+  try {
+    step = await run(f);
+    const env = await import('../src/runtime/thermalEnvironmentAuthority.js');
+    const authority = env.resolveSphWallReservoirAuthority({ wallModel: env.SPH_THERMAL_WALL_MODEL_FINITE,
+      wallTemperaturesK: Object.fromEntries(env.SPH_THERMAL_WALL_FACE_IDS.map(face => [face, 350])),
+      wallFaceHeatCapacitiesJPerK: Object.fromEntries(env.SPH_THERMAL_WALL_FACE_IDS.map(face => [face, 100])) });
+    const result = step.g2pReconstruction.gpuResult;
+    const submissions = f.device.submissions.length;
+    await assert.rejects(closure.runMlsMpmPostMechanicsClosureWebGpu({
+      device: f.device, sphParticleState: f.packed, mlsMpmParticleState: f.packedMls,
+      sphParticleUpload: f.sphUpload, mlsMpmParticleUpload: f.mlsUpload,
+      postMechanicsParticleBuffers: result, postMechanicsG2pResult: result,
+      thermalMaterialTable: f.thermalTable, mechanicsMaterialTable: f.mechanicsTable,
+      thermalStepOptions: { wallReservoirAuthority: authority },
+      schroederSpatialThermalProposal: { exactEnergyLedgerWords: 9 },
+      dtSeconds: .001, boxDimsM: [2, 2, 2], readbackMode: 'no-full-readback'
+    }), /requires multilevel batch wall admission/);
+    assert.equal(f.device.submissions.length, submissions);
+  } finally { await retire(f, step); }
+  assert.equal(f.sphUpload.__ulgActiveBorrowCount, 0);
+});
+
 test('failure after genuine G2P does not strand the source physical read', async () => {
   const f = fixture();
   let sawG2p = false;

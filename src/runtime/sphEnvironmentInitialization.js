@@ -94,14 +94,18 @@ function normalizeNuclei(input, temperatureK, relativeHumidity) {
   if (seed.initialHydration !== 'dry') throw new RangeError('Only explicitly dry initial seed populations are defined');
   const activation = seed.activationModel;
   fields(activation, ['id', 'provenance', 'minTemperatureK', 'maxTemperatureK',
-    'minRelativeHumidity', 'maxRelativeHumidity'], 'seed activationModel');
+    'minRelativeHumidity', 'maxRelativeHumidity', 'hygroscopicity'], 'seed activationModel');
   const activationModel = {
     id: text(activation.id, 'seed activation model id'),
     provenance: text(activation.provenance, 'seed activation model provenance'),
     minTemperatureK: positive(activation.minTemperatureK, 'seed minimum temperature'),
     maxTemperatureK: positive(activation.maxTemperatureK, 'seed maximum temperature'),
     minRelativeHumidity: nonnegative(activation.minRelativeHumidity, 'seed minimum RH'),
-    maxRelativeHumidity: nonnegative(activation.maxRelativeHumidity, 'seed maximum RH')
+    maxRelativeHumidity: nonnegative(activation.maxRelativeHumidity, 'seed maximum RH'),
+    // kappa-Koehler hygroscopicity (Petters & Kreidenweis 2007); required by
+    // the G2 integer-ledger vapor-parcel exchange.
+    ...(activation.hygroscopicity !== undefined
+      ? { hygroscopicity: nonnegative(activation.hygroscopicity, 'seed hygroscopicity') } : {})
   };
   if (activationModel.minTemperatureK > activationModel.maxTemperatureK
     || activationModel.minRelativeHumidity > activationModel.maxRelativeHumidity

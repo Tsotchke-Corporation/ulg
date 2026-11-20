@@ -88,6 +88,8 @@ export function createSphPhaseViewState(driver) {
       ...renderDescriptors[i],
       particleMassKg: Number.isFinite(Number(p.massKg)) ? Number(p.massKg) : null,
       spareProductSlot: p.spareProductSlot === true,
+      ...(p.spareSplitSlot === true ? { spareSplitSlot: true } : {}),
+      solidReleaseSlot: p.solidReleaseSlot === true,
       phaseCompanionSlot: p.phaseCompanionSlot === true,
       phaseCarrierLineageIndex: Number.isSafeInteger(p.phaseCarrierLineageIndex)
         ? p.phaseCarrierLineageIndex

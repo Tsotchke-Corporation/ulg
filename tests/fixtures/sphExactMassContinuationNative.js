@@ -37,15 +37,29 @@ export async function preloadExactMassContinuationNative() {
   return { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial, refresh, fused, identity, reflux, epoch };
 }
 
-export async function runExactMassContinuationNative(device, format, useSpatial = false, useFused = false, observeAuthority = false, sequence = null) {
+// extra: { particles, cycles, thermalStepOptions, smoothingLengthM } overrides the default
+// one-carrier, two-cycle wall-heating run (the energy-ledger gate uses them).
+export async function runExactMassContinuationNative(device, format, useSpatial = false, useFused = false, observeAuthority = false, sequence = null, extra = {}) {
   const { steps, buffers, thermal, mechanics, materials, energy, hierarchy, spatial, refresh, fused, identity, reflux, epoch } = await preloadExactMassContinuationNative();
   const twoLevel = useSpatial === 'two-level';
   const materialProperties = { fe: materials.createReferenceMaterialClosures().fe.properties };
+  // The reference Fe closure has no phase conductivity, so conduction is off
+  // unless a run declares it (the energy-ledger gate needs pair exchange).
+  if (extra.thermalConductivityWPerMK) {
+    materialProperties.fe = { ...materialProperties.fe, phases: materialProperties.fe.phases.map(phase =>
+      ({ ...phase, thermalConductivityWPerMK: extra.thermalConductivityWPerMK[phase.name] ?? phase.thermalConductivityWPerMK })) };
+  }
   const mass = 0.001 * (1 + 2 ** -30);
-  const initial = { smoothingLengthM: .5, dimension: 3, step: 0, time: 0, storageGeneration: 1,
+  const initial = { smoothingLengthM: extra.smoothingLengthM ?? .5, dimension: 3, step: 0, time: 0, storageGeneration: 1,
     particles: [{ id: 'exact-carrier', material: 'fe', initialBodyDomainId: 1, initialBodyId: 'exact-carrier-body',
       massKg: mass, x: [.15, 1, 1], v: [.1, 0, 0],
       specificInternalEnergyJPerKg: energy.specificInternalEnergyJPerKg(materialProperties.fe, 300) }] };
+  if (extra.particles) {
+    initial.particles = extra.particles.map(particle => ({ material: 'fe', initialBodyDomainId: 1,
+      initialBodyId: 'exact-carrier-body', v: [0, 0, 0], ...particle,
+      specificInternalEnergyJPerKg: energy.specificInternalEnergyJPerKg(materialProperties.fe, particle.temperatureK) }));
+    for (const particle of initial.particles) delete particle.temperatureK;
+  }
   if (twoLevel) {
     const density = materialProperties.fe.phases.find(phase => phase.name === 'solid').densityKgPerM3;
     initial.particles = [.001, .008].map((volume, index) => ({ id: `exact-level-${index}`, material: 'fe',
@@ -80,8 +94,13 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
   let previousStep = null;
   const receiptBuffers = [];
   let sourceFamily = null, sourceLease = null, successorAssignment = null;
+  {
+    const held = buffers.acquireSphParticleExactMassRead(sphUpload, device);
+    try { result.initialEnergy = held.energy ? await observe(held.energy.energyBuffer, true) : null; }
+    finally { await buffers.releaseSphParticleExactMassRead(held); }
+  }
   try {
-    for (let cycle = 1; cycle <= 2; cycle++) {
+    for (let cycle = 1; cycle <= (extra.cycles ?? 2); cycle++) {
       const options = {
         device, sphParticleState: packed, mlsMpmParticleState: packedMls,
         sphParticleUpload: sphUpload, mlsMpmParticleUpload: mlsUpload,
@@ -91,6 +110,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
         preferWebGpu: true, readbackMode: 'no-full-readback', contactSolverEnabled: useSpatial,
         observeCanonicalSpatialAuthority: observeAuthority,
         gasPressureMechanicsBoundaryEnabled: false, summaryRunner: null, fuseNoFullResidentMechanics: useFused };
+      if (extra.thermalStepOptions) Object.assign(options.thermalStepOptions, extra.thermalStepOptions);
       if (sequence?.thermal) options.thermalStepOptions.wallRate = 26;
       if (twoLevel) {
         options.boxDimsM = [4, 4, 4];
@@ -212,6 +232,7 @@ export async function runExactMassContinuationNative(device, format, useSpatial 
           assignment: twoLevel ? await observe(next.schroederSpatialSuccessorLevelAssignment.assignmentBuffer) : null,
           physicsTick: next.sphParticleUpload.physicsTick, positionEpoch: next.sphParticleUpload.positionEpoch,
           exact: await observe(held.read.buffer, true, held.read.byteOffset, held.read.byteLength),
+          energy: held.energy ? await observe(held.energy.energyBuffer, true) : null,
           state: await observe(next.sphParticleUpload.stateBuffer), thermo: await observe(next.sphParticleUpload.thermoBuffer),
           g2pState: step.g2pReconstruction ? await observe(step.g2pReconstruction.gpuResult.stateBuffer) : null,
           p2gGrid: step.p2gGridProjection?.gpuResult?.gridBuffer

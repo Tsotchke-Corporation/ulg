@@ -55,7 +55,7 @@ import {
   SCHROEDER_SPATIAL_SUPPORT_PROFILE_SEPARATION_V1
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNear.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
-import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
+import { createSphDeviceLossRelay, watchSphDeviceLoss } from './sphDeviceLossRelay.js';
 import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
 import {
   hasResidentPresentationSubmissionGap,
@@ -68,9 +68,11 @@ import {
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
+  deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
+  submitQueueOrderedProducerWorkAndCleanup,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import {
@@ -3730,6 +3732,51 @@ function snapshotExactG2pMechanicsTable(table) {
 const exactMassG2pOutputs = new WeakMap();
 const exactG2pQuantityOutputs = new WeakMap();
 const exactG2pHistoryOutputs = new WeakMap();
+const chainG2pOutputs = new WeakMap();
+const chainG2pBuffers = new WeakMap();
+
+// A chain batch is a private producer, including on the legacy manufactured
+// path. Public labels and a caller-supplied control buffer cannot authorize it.
+export function acquireMlsMpmLevelChainG2pCapture(result, { device, transaction,
+  generation, sphParticleUpload, mlsMpmParticleUpload, dt,
+  stateBuffer, mechanicsBuffer } = {}) {
+  const record = chainG2pOutputs.get(result);
+  if (!record) {
+    if (chainG2pBuffers.has(stateBuffer) || chainG2pBuffers.has(mechanicsBuffer)
+      || result?.schema === 'peercompute.ulg.mls-mpm-level-chain-g2p.v1') {
+      throw new TypeError('Chain closure requires its original G2P producer');
+    }
+    return null;
+  }
+  const validate = () => {
+    if (record.destroyed || record.device !== device || record.transaction !== transaction
+      || record.generation !== generation || record.sphParticleUpload !== sphParticleUpload
+      || record.mlsMpmParticleUpload !== mlsMpmParticleUpload || record.dt !== dt
+      || record.stateBuffer !== stateBuffer || record.mechanicsBuffer !== mechanicsBuffer
+      || !exactMassG2pOutputFieldsMatch(result, record)
+      || !validateSchroederSpatialEpochTransactionSourceFamily(transaction, {
+        device, generation, sphParticleUpload, mlsMpmParticleUpload })) {
+      throw new TypeError('Chain closure lost its original source, duration or live output');
+    }
+    for (const buffer of [record.stateBuffer, record.mechanicsBuffer, record.controlBuffer]) {
+      if (buffer.destroyed === true || !webGpuBufferMatchesDevice(buffer, device)) {
+        throw new TypeError('Chain closure output buffer is retired or foreign');
+      }
+    }
+    return true;
+  };
+  validate(); record.pins++;
+  let released = false;
+  return Object.freeze({ controlBuffer: record.controlBuffer, dt: record.dt,
+    particleCount: record.particleCount, levelCount: record.levelCount,
+    validate() { if (released) throw new TypeError('Chain closure capture was released'); return validate(); },
+    release() { if (released) return false; released = true; record.pins--; return true; }
+  });
+}
+
+const chainG2pCleanupIssuer = createQueueOrderedCleanupClaimIssuer({
+  producerFamily: 'mls-mpm-chain-g2p-level-outputs'
+});
 
 function exactMassG2pOutputFieldsMatch(result, record) {
   return record.fields.every(([key, value]) => {
@@ -3789,6 +3836,151 @@ export function acquireMlsMpmG2pExactMassCapture(result, { device, sphParticleUp
   });
 }
 
+// The existing exact continuation capture is shared by single-level and chain
+// producers; a copied result cannot mint inventory or quantity ownership.
+function registerExactG2pOutput(result, args, sourceRead, mechanicsTableCapture, quantities, history) {
+  markSphExactMassDerivedBuffers(sourceRead, [result.stateBuffer]);
+  const record = { device: args.device, mechanicsTableCapture, sourceRead, sourceSphUpload: args.sphParticleUpload,
+    quantities, history, sourceMlsUpload: args.mlsMpmParticleUpload,
+    transaction: args.schroederSpatialEpochTransaction ?? null,
+    generation: args.schroederSpatialEpochGeneration ?? null, dt: result.dt,
+    stateBuffer: result.stateBuffer, thermoBuffer: args.sphParticleUpload.thermoBuffer,
+    mechanicsBuffer: result.mechanicsBuffer, pins: 0, retired: false, fields: [] };
+  for (const key of ['destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']) {
+    const destroy = result[key];
+    result[key] = function (...inputs) {
+      if (record.pins) throw new Error('Exact G2P output is retained by a consumer');
+      let completed = false;
+      try { completed = destroy.apply(this, inputs); }
+      finally {
+        if (completed !== false) { record.retired = true; void releaseSphParticleExactMassRead(sourceRead); }
+      }
+      return completed;
+    };
+  }
+  record.fields = ['stateBuffer', 'mechanicsBuffer', 'stateBufferByteLength', 'mechanicsBufferByteLength',
+    'retainedOutputParticleBuffers', 'destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']
+    .map(key => [key, result[key]]);
+  exactMassG2pOutputs.set(result, record);
+  return result;
+}
+
+export async function runMlsMpmLevelChainG2pWebGpu(args = {}) {
+  args = { ...args, mechanicalProposals: [...(args.mechanicalProposals ?? [])] };
+  const { device, nativePublication: publication, mechanicalProposals,
+    schroederSpatialEpochTransaction: transaction, schroederSpatialEpochGeneration: generation,
+    sphParticleUpload, mlsMpmParticleUpload } = args;
+  if (args.retainOutputParticleBuffers !== true || args.readbackMode !== NO_FULL_READBACK_MODE
+    || args.fusedFineSubstepTransaction || args.fusedCoarseTerminalTransaction
+    || !transaction || transaction.generation !== generation) {
+    throw new TypeError('Chain G2P requires one unfused retained canonical transaction');
+  }
+  const { acquireSchroederNativePublication } = await import('./schroederSpatialCompositeMechanicsGpu.js');
+  const { prepareSchroederSpatialChainG2pGather } = await import('./schroederSpatialChainG2pGpu.js');
+  const capture = acquireSchroederNativePublication(publication, { device, transaction,
+    sphParticleUpload, mlsMpmParticleUpload });
+  const exact = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
+  const candidates = [], pins = [];
+  let sourceRead = null, gather = null, published = false;
+  const cleanupCandidates = () => {
+    for (const pin of pins) pin.release();
+    for (const candidate of candidates) candidate.destroyOutputParticleBuffers();
+  };
+  try {
+    const updates = publication.updates;
+    if (mechanicalProposals.length !== updates.length
+      || mechanicalProposals.some((p, i) => p?.selectedLevel !== updates[i].sourceProjection.schroederLevelFilter.selectedLevel)) {
+      throw new TypeError('Chain G2P requires one original mechanical proposal for every selected level');
+    }
+    const duration = args.dt ?? updates[0].dt;
+    if (!Number.isFinite(duration) || duration <= 0 || Math.fround(duration) !== publication.forceInputs.dt
+      || updates.some(update => update.dt !== duration)) {
+      throw new TypeError('Chain G2P timestep must match the native publication');
+    }
+    if (!exact) assertSphLegacyMassPathAllowed(args, 'Chain G2P continuation');
+    else sourceRead = acquireSchroederSpatialEpochExactMassRead(transaction, {
+      device, generation, sphParticleUpload, mlsMpmParticleUpload });
+    const table = exact ? snapshotExactG2pMechanicsTable(args.mechanicsMaterialTable) : null;
+    for (const [i, gridUpdate] of updates.entries()) {
+      capture.validate();
+      const candidate = await runMlsMpmG2pWebGpu({ ...args, gridUpdate,
+        chainNativePublicationCapture: capture,
+        dt: duration, boxDimsM: publication.forceInputs.boxDimsM,
+        canonicalSpatialRequired: true, mechanicsFieldMode: 'required',
+        schroederSelectedLevel: gridUpdate.sourceProjection.schroederLevelFilter.selectedLevel,
+        schroederSpatialMechanicalProposal: mechanicalProposals[i] });
+      candidates.push(candidate);
+      if (exact) {
+        const pin = acquireMlsMpmG2pExactMassCapture(candidate, { device, sphParticleUpload });
+        pins.push(pin);
+        // Native sparse P2G currently rejects exact residual history upstream.
+        // Never silently drop it if that upstream capability is later extended.
+        if (pin.history) throw new TypeError('Chain G2P requires native residual-history gathering');
+      }
+    }
+    gather = prepareSchroederSpatialChainG2pGather({ device, publication,
+      particleCount: sphParticleUpload.particleCount,
+      sourceStateBuffer: sphParticleUpload.stateBuffer,
+      sourceMechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer,
+      sourceQuantities: sourceRead?.quantities ?? null });
+    const encoder = device.createCommandEncoder();
+    gather.encode(encoder, candidates.map((candidate, i) => ({ stateBuffer: candidate.stateBuffer,
+      mechanicsBuffer: candidate.mechanicsBuffer, quantities: pins[i]?.quantities ?? null })));
+    for (const pin of pins) pin.validate();
+    table?.validate(); capture.validate();
+    const retirement = submitQueueOrderedProducerWorkAndCleanup(chainG2pCleanupIssuer,
+      device, [encoder.finish()], { producerOutput: gather, cleanup: cleanupCandidates });
+    capture.finish({ submitted: true });
+    // The existing queue capability retires private level outputs only after
+    // their final gather submit. No additional normal-path host fence.
+    const chainRecord = { device, transaction, generation, sphParticleUpload, mlsMpmParticleUpload,
+      dt: duration, pins: 0, destroyed: false, particleCount: sphParticleUpload.particleCount,
+      levelCount: updates.length, stateBuffer: gather.stateBuffer,
+      mechanicsBuffer: gather.mechanicsBuffer, controlBuffer: gather.controlBuffer, fields: [] };
+    const result = {
+      schema: 'peercompute.ulg.mls-mpm-level-chain-g2p.v1', backend: 'webgpu', status: 'submitted',
+      particleCount: sphParticleUpload.particleCount, dt: duration,
+      selectedLevels: Object.freeze(updates.map(u => u.sourceProjection.schroederLevelFilter.selectedLevel)),
+      stateBuffer: gather.stateBuffer, mechanicsBuffer: gather.mechanicsBuffer,
+      stateBufferByteLength: gather.stateBuffer.size, mechanicsBufferByteLength: gather.mechanicsBuffer.size,
+      controlBuffer: gather.controlBuffer, retainedOutputParticleBuffers: true,
+      queueOrderedCleanupReceipt: retirement.cleanupReceipt,
+      readbackMode: NO_FULL_READBACK_MODE, fullParticleReadbackPerformed: false,
+      scientificValidation: false, particlePublicationAllowed: false,
+      destroyOutputParticleBuffers() {
+        if (chainRecord.pins) throw new Error('Chain G2P is retained by its closure consumer');
+        if (chainRecord.destroyed) return false;
+        chainRecord.destroyed = true; gather.destroy(); return true;
+      },
+      destroyOutputParticleBufferComponents({ state = false, mechanics = false } = {}) {
+        if (!state && !mechanics) return false;
+        // The chain result is one owned tuple, including exact quantities.
+        return result.destroyOutputParticleBuffers();
+      }
+    };
+    if (exact) registerExactG2pOutput(result, args, sourceRead, table,
+      sourceRead.quantities ? Object.freeze({ quantityBuffer: gather.quantityBuffer,
+        quantityLayout: sourceRead.quantities.quantityLayout, format: sourceRead.quantities.format,
+        validationBuffer: gather.validationBuffer, projectionBuffer: gather.projectionBuffer }) : null, null);
+    chainRecord.fields = ['dt', 'particleCount', 'stateBuffer', 'mechanicsBuffer', 'controlBuffer',
+      'stateBufferByteLength', 'mechanicsBufferByteLength', 'retainedOutputParticleBuffers',
+      'destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents'].map(key => [key, result[key]]);
+    chainG2pOutputs.set(result, chainRecord);
+    chainG2pBuffers.set(result.stateBuffer, chainRecord);
+    chainG2pBuffers.set(result.mechanicsBuffer, chainRecord);
+    published = true;
+    return result;
+  } finally {
+    if (!published) {
+      capture.finish();
+      void deferConfirmedSubmittedWorkCleanup(device, () => {
+        cleanupCandidates(); gather?.destroy();
+        if (sourceRead) void releaseSphParticleExactMassRead(sourceRead);
+      });
+    }
+  }
+}
+
 export async function runMlsMpmG2pWebGpu(args = {}) {
   // Use the same captured inputs for dispatch and producer provenance across
   // awaits; callers retain no mutable argument-envelope authority.
@@ -3835,32 +4027,8 @@ export async function runMlsMpmG2pWebGpu(args = {}) {
     if (!validateSphParticleExactMassRead(sourceRead, { device: args.device, sourceSphUpload: args.sphParticleUpload })) {
       throw new TypeError('Exact G2P source changed during execution');
     }
-    markSphExactMassDerivedBuffers(sourceRead, [result.stateBuffer]);
-    const record = { device: args.device, mechanicsTableCapture, sourceRead, sourceSphUpload: args.sphParticleUpload,
-      quantities: exactG2pQuantityOutputs.get(result) ?? null,
-      history: exactG2pHistoryOutputs.get(result) ?? null,
-      sourceMlsUpload: args.mlsMpmParticleUpload,
-      transaction: args.schroederSpatialEpochTransaction ?? null,
-      generation: args.schroederSpatialEpochGeneration ?? null, dt: result.dt,
-      stateBuffer: result.stateBuffer, thermoBuffer: args.sphParticleUpload.thermoBuffer,
-      mechanicsBuffer: result.mechanicsBuffer, pins: 0, retired: false, fields: [] };
-    for (const key of ['destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']) {
-      const destroy = result[key];
-      result[key] = function (...inputs) {
-        if (record.pins) throw new Error('Exact G2P output is retained by a consumer');
-        let completed;
-        try { completed = destroy.apply(this, inputs); }
-        finally {
-          if (completed !== false) { record.retired = true; void releaseSphParticleExactMassRead(sourceRead); }
-        }
-        return completed;
-      };
-    }
-    record.fields = ['stateBuffer', 'mechanicsBuffer', 'stateBufferByteLength', 'mechanicsBufferByteLength',
-      'retainedOutputParticleBuffers', 'destroyOutputParticleBuffers', 'destroyOutputParticleBufferComponents']
-      .map(key => [key, result[key]]);
-    exactMassG2pOutputs.set(result, record);
-    return result;
+    return registerExactG2pOutput(result, args, sourceRead, mechanicsTableCapture,
+      exactG2pQuantityOutputs.get(result) ?? null, exactG2pHistoryOutputs.get(result) ?? null);
   } catch (error) {
     result?.destroyOutputParticleBuffers?.();
     void releaseSphParticleExactMassRead(sourceRead);
@@ -3892,6 +4060,7 @@ async function runMlsMpmG2pWebGpuImpl({
   schroederSpatialEpochTransaction = null,
   schroederSingleLevelQueueOrderedCleanupCapability = null,
   schroederSpatialMechanicalProposal = null,
+  chainNativePublicationCapture = null,
   gpuTimestampRecorder = null,
   fusedFineSubstepTransaction = null,
   fusedCoarseTerminalTransaction = null,
@@ -4923,6 +5092,7 @@ async function runMlsMpmG2pWebGpuImpl({
               // before offering the same queue a retained display frame; no
               // intermediate state or receipt leaves this private producer.
               assertQueueOrderedCleanupClaimsRegistered(device, queueOrderedProducerClaims);
+              chainNativePublicationCapture?.validate();
               submitQueueOrderedWork(device, [encoder.finish()]);
               fusedG2pQueueSubmitted = true;
               submissionGapWorkSubmitted = true;
@@ -4933,7 +5103,10 @@ async function runMlsMpmG2pWebGpuImpl({
                 && schroederSpatialMechanicalProposal.solverIterationCount > 0
                 && batch.value.completedJacobiIterations
                   === schroederSpatialMechanicalProposal.solverIterationCount;
-              await requestResidentPresentationSubmissionGap(device, { waitForPendingSlot });
+              // Diagnostic (probe-only): offer the retained frame without
+              // holding physics on its display slot.
+              const gap = requestResidentPresentationSubmissionGap(device, { waitForPendingSlot });
+              if (globalThis.__ulgNonBlockingSubmissionGaps !== true) await gap;
               encoder = device.createCommandEncoder();
               batch = batches.next(encoder);
             }
@@ -5053,6 +5226,7 @@ async function runMlsMpmG2pWebGpuImpl({
       encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
     }
     const commandBuffer = encoder.finish();
+    chainNativePublicationCapture?.validate();
     if (!fusedProducerClaimRemainsExact()) {
       throw canonicalSpatialExecutionError(
         'fused-g2p-provenance-lost-before-submit',
@@ -6059,10 +6233,6 @@ function describeDeviceLost(info) {
   return info?.reason || info?.message || 'device lost';
 }
 
-function watchDeviceLost(device, onDeviceLost) {
-  if (!device?.lost?.then) return;
-  device.lost.then((info) => onDeviceLost(info)).catch((error) => onDeviceLost(error));
-}
 
 export async function runMlsMpmG2pWithOptionalWebGpu({
   mechanicsMaterialTable = null,
@@ -6155,9 +6325,12 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
         onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(
+      // One device.lost reaction per device; this step's loss state is held
+      // weakly, so completed steps are not retained by the device.
+      watchSphDeviceLoss(
         resolvedDeviceResult.device,
-        createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+        deviceLossState,
+        onDeviceLost
       );
     }
     if (!resolvedDeviceResult.device) {

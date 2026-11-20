@@ -259,7 +259,7 @@ ${math.setup}
           let node_i = base_x + a; let node_j = base_y + b; let node_k = base_z + c;
           let weight = g2p_weight_at(wx, a) * g2p_weight_at(wy, b) * g2p_weight_at(wz, c);
           if (!finite(weight) || weight < 0.0) { bad = true; continue; }
-          if (weight == 0.0) { continue; }
+          if (!(weight >= bitcast<f32>(0x21800000u))) { continue; }
           if (!g2p_in_range(node_i, node_j, node_k)) { clipped++; continue; }
           let idx = g2p_grid_index(node_i, node_j, node_k);
           let field_index = field[descriptor + 4u + u32(a * 9i + b * 3i + c)];

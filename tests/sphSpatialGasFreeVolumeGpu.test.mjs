@@ -380,7 +380,7 @@ const gasFreeVolumeEncoders = new WeakMap();
 function encodeGasFreeVolume(runtime, authority) {
   const encoder = createFakeCommandEncoder();
   const execution = encodeSphSpatialGasFreeVolumeGpu(runtime, encoder, {
-    gasDirectory: authority.generation.execution,
+    gasDirectory: authority.gasDirectory ?? authority.generation.execution,
     generationReadFamily: authority.generationReadFamily,
     grid: authority.grid,
     boxMinM: [0, 0, 0],
@@ -476,7 +476,7 @@ function reachableFunctions(roots) {
   return [...found];
 }
 
-test('gas free-volume ABI is public, exact, and plans one or two levels only', () => {
+test('gas free-volume ABI is public, exact, and plans one through six levels', () => {
   assert.equal(
     publicGpuAbi.ULG_SPH_SPATIAL_GAS_FREE_VOLUME_SOURCE_SCHEMA,
     ULG_SPH_SPATIAL_GAS_FREE_VOLUME_SOURCE_SCHEMA
@@ -579,7 +579,7 @@ test('gas free-volume ABI is public, exact, and plans one or two levels only', (
   assert.throws(
     () => createSphSpatialGasFreeVolumePlan({
       ...plan,
-      exactLevelCount: 3
+      exactLevelCount: 7
     }),
     /exactLevelCount/
   );
@@ -609,16 +609,20 @@ test('gas free-volume CPU oracle clips boundary cells and subtracts only supplie
   });
   assert.equal(translated[0].geometricVolumeM3, 0.015625);
   assert.equal(translated[0].freeVolumeM3, 0.01171875);
-  assert.throws(
-    () => computeSphSpatialGasFreeVolumeCpuOracle({
-      cells: [[0, 0, 0]],
-      condensedContributions: [1.1],
-      boxMinM: [0, 0, 0],
-      boxMaxM: [1, 1, 1],
-      gridSpacingM: 1
-    }),
-    /overfills/
-  );
+  // Overlapping condensed projections (e.g. two bodies in contact) cap the
+  // condensed share: the gas keeps the declared minimum fraction of the cell.
+  const [overfilled] = computeSphSpatialGasFreeVolumeCpuOracle({
+    cells: [[0, 0, 0]],
+    condensedContributions: [1.1],
+    boxMinM: [0, 0, 0],
+    boxMaxM: [1, 1, 1],
+    gridSpacingM: 1
+  });
+  assert.equal(overfilled.overfilled, true);
+  assert.equal(overfilled.geometricVolumeM3, 1);
+  assert.equal(overfilled.condensedVolumeM3, Math.fround(1 - Math.fround(1e-3)));
+  assert.equal(overfilled.freeVolumeM3, Math.fround(1 - overfilled.condensedVolumeM3));
+  assert.ok(overfilled.freeVolumeM3 >= 0.000999);
 });
 
 test('gas free-volume shared overlap accounts for wall halos and does not renormalize sparse support', () => {
@@ -1713,4 +1717,78 @@ test('gas free-volume stale device-loss completion cannot retire a reissued succ
   ), true);
   assert.equal(destroySphSpatialGasFreeVolumeGpu(runtime), true);
   assert.equal(ownedBuffers.every((buffer) => buffer.destroyCount === 1), true);
+});
+
+
+function createLiveChainGasFreeVolumeAuthority(fake) {
+  const {device}=fake,levelAssignment=createDirectLevelAssignment(device);
+  levelAssignment.minLevel=0;levelAssignment.maxLevel=2;
+  const particleIdentityBuffer=device.createBuffer({size:8,usage:128});
+  const mechanicsLevels=Array.from({length:3},(_,selectedLevel)=>({selectedLevel,
+    mechanicsGrid:{gridNodeCount:512,gridDims:[8,8,8],gridShift:2,gridSpacingM:0.25*2**selectedLevel}}));
+  const generation=runSchroederSpatialEpochGenerationWebGpu({device,levelAssignment,
+    particleCount:2,particleIdentityBuffer,particleIdentityStrideWords:1,mechanicsLevels});
+  assert.equal(generation.ready,true,generation.reason);
+  const generationReadFamily=acquireSchroederSpatialEpochGenerationConsumerLease(generation,{consumerId:'gas-chain-lifecycle'});
+  const directoryAuthority=createLiveGasFreeVolumeAuthority(fake);
+  releaseSchroederSpatialEpochGenerationConsumerLease(directoryAuthority.generationReadFamily,{discardedEncoder:true});
+  return {generation,generationReadFamily,gasDirectory:directoryAuthority.generation.execution,grid:mechanicsLevels.at(-1).mechanicsGrid};
+}
+function createChainFreeVolumeRuntime(fake,authority,arenaCount=1) {
+  const levels=authority.generation.mechanicsLevelViews;
+  return createSphSpatialGasFreeVolumeGpu(fake.device,{
+    cellCapacity:authority.gasDirectory.cellCapacity,
+    fineFieldCapacity:levels[0].mechanicsFieldView.fieldCapacity,
+    coarseFieldCapacity:levels.at(-1).mechanicsFieldView.fieldCapacity,
+    nativeFieldCapacities:levels.map(v=>v.mechanicsFieldView.fieldCapacity),
+    parentFieldCapacities:authority.generation.mechanicsAdjacentLevelPairs.map(p=>p.parentFieldView.parentFieldCapacity),arenaCount});
+}
+test('gas chain source mutation rejects EOS authority, then queue-ordered retirement reuses all arenas without new fences',()=>{
+  const fake=createFakeDevice(),authority=createLiveChainGasFreeVolumeAuthority(fake);
+  const runtime=createChainFreeVolumeRuntime(fake,authority);
+  let fences=0;fake.device.queue.onSubmittedWorkDone=()=>{fences++;return Promise.resolve();};
+  const first=encodeGasFreeVolume(runtime,authority);
+  const middle=authority.generation.mechanicsLevelViews[1].phaseVolumeMoment;
+  const ordinal=middle.completionOrdinal;middle.completionOrdinal++;
+  assert.throws(()=>encodeAllGasFreeVolumeEosPasses(fake,first),{code:'ERR_SPH_GAS_FREE_VOLUME_CHAIN_SOURCE_STALE'});
+  middle.completionOrdinal=ordinal;
+  submitGasFreeVolumeExecution(fake,first);
+  releaseSphSpatialGasFreeVolumeExecutionQueueOrdered(runtime,first);
+  const second=encodeGasFreeVolume(runtime,authority);
+  assert.equal(second.gpuBufferCreationCountDuringEncode,0);
+  submitGasFreeVolumeExecution(fake,second);
+  releaseSphSpatialGasFreeVolumeExecutionQueueOrdered(runtime,second);
+  assert.equal(fences,0);assert.equal(activeSphSpatialGasFreeVolumeExecutionCount(runtime),0);
+  destroySphSpatialGasFreeVolumeGpu(runtime);
+  releaseSchroederSpatialEpochGenerationConsumerLease(authority.generationReadFamily,{discardedEncoder:true});
+});
+test('failed composed gas encoding quarantines its chain buffers and leaves the other arena usable',()=>{
+  const fake=createFakeDevice(),authority=createLiveChainGasFreeVolumeAuthority(fake);
+  const start=fake.createdBuffers.length,runtime=createChainFreeVolumeRuntime(fake,authority,2);
+  const encoder=createFakeCommandEncoder(),begin=encoder.beginComputePass.bind(encoder);let passes=0;
+  encoder.beginComputePass=(...args)=>{if(++passes===3)throw new Error('injected post-chain encode failure');return begin(...args);};
+  assert.throws(()=>encodeSphSpatialGasFreeVolumeGpu(runtime,encoder,{
+    gasDirectory:authority.gasDirectory,generationReadFamily:authority.generationReadFamily,
+    grid:authority.grid,boxMinM:[0,0,0],boxMaxM:[2,2,2]}),/post-chain encode failure/);
+  const owned=fake.createdBuffers.slice(start);
+  assert.ok(owned.filter(b=>b.label==='ulg-chain-volume' && b.destroyCount===1).length>0);
+  const survivor=encodeGasFreeVolume(runtime,authority);
+  releaseSphSpatialGasFreeVolumeExecution(runtime,survivor,{discardedEncoder:true});
+  destroySphSpatialGasFreeVolumeGpu(runtime);
+  assert.ok(owned.every(b=>b.destroyCount===1));
+  releaseSchroederSpatialEpochGenerationConsumerLease(authority.generationReadFamily,{discardedEncoder:true});
+});
+
+
+test('composed gas submission records ownership without re-entering mutable source hooks after queue.submit',()=>{
+  const fake=createFakeDevice(),authority=createLiveChainGasFreeVolumeAuthority(fake),runtime=createChainFreeVolumeRuntime(fake,authority);
+  const execution=encodeGasFreeVolume(runtime,authority),middle=authority.generation.mechanicsLevelViews[1].phaseVolumeMoment;
+  const ordinal=middle.completionOrdinal,submit=fake.device.queue.submit;
+  fake.device.queue.submit=(...args)=>{submit(...args);middle.completionOrdinal++;};
+  submitGasFreeVolumeExecution(fake,execution);
+  assert.equal(isSphSpatialGasFreeVolumeExecutionSubmitted(runtime,execution),true);
+  assert.throws(()=>releaseSphSpatialGasFreeVolumeExecution(runtime,execution,{discardedEncoder:true}),/queue fence/);
+  releaseSphSpatialGasFreeVolumeExecutionQueueOrdered(runtime,execution);
+  middle.completionOrdinal=ordinal;destroySphSpatialGasFreeVolumeGpu(runtime);
+  releaseSchroederSpatialEpochGenerationConsumerLease(authority.generationReadFamily,{discardedEncoder:true});
 });

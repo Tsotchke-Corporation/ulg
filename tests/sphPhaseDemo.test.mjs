@@ -1525,11 +1525,18 @@ test('SPH phase view state carries authoritative ambient and wall temperatures f
     viewState.wallReservoirAuthority.schema,
     'peercompute.ulg.sph-wall-reservoir-authority.v0'
   );
+  // Honest walls by default: finite lumped faces with derived capacities and
+  // one scene instance id for their GPU-resident temperatures.
   assert.equal(
     viewState.wallReservoirAuthority.model,
-    'infinite-fixed-temperature-reservoir'
+    'finite-heat-capacity-lumped-face'
   );
   assert.equal(viewState.wallReservoirAuthority.exchangeEnabled, true);
+  assert.equal(viewState.wallReservoirAuthority.finiteCapacity, true);
+  assert.ok(viewState.wallReservoirAuthority.instanceId);
+  for (const capacity of Object.values(viewState.wallReservoirAuthority.faceHeatCapacitiesJPerK)) {
+    assert.ok(capacity > 0);
+  }
   assert.equal(viewState.ambientTemperatureK, 247.5);
   assert.equal(viewState.scenario.ambientTemperatureK, 247.5);
   assert.equal(

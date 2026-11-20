@@ -3,6 +3,7 @@ import { standardFormationEnthalpyReference, standardReactionEnthalpyReference }
 import { buildSphReactionTable } from './sphReactionGpuKernel.js';
 import { SPH_REACTION_ENERGY_REFERENCE_SCHEMA, assertSphReactionEnergyAuthority }
   from './sphReactionEnergyAuthority.js';
+import { importSphReactionHeatProxyGauge } from './sphReactionHeatProxyGauge.js';
 
 const RECIPE_SCHEMA = 'peercompute.ulg.reference-reaction-cold-recipe.v1';
 const PHASES = [null, 'solid', 'liquid', 'gas'];
@@ -110,7 +111,9 @@ function equalData(left, right) {
  * result. No particle or continuing inventory ownership is issued here.
  */
 export function importSphReferenceReactionTableColdInput(incoming, thermalMaterialTable, previous = null) {
-  if (!incoming?.coldReferenceRecipe) return incoming;
+  // A gauge-consistent heat-proxy table is re-derived and byte-checked the
+  // same way (sphReactionHeatProxyGauge.js); plain tables pass through.
+  if (!incoming?.coldReferenceRecipe) return importSphReactionHeatProxyGauge(incoming, thermalMaterialTable, previous);
   if (previous?.coldReferenceRecipe && equalData(incoming, previous)) {
     assertSphReactionEnergyAuthority(previous, thermalMaterialTable);
     return previous;

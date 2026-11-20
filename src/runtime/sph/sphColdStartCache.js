@@ -37,7 +37,10 @@ export const SPH_STATIC_TABLE_CACHE_STORE_SCHEMA = 'peercompute.ulg.sph-static-t
 export const SPH_STATIC_TABLE_CACHE_UPDATE_SCHEMA = 'peercompute.ulg.sph-static-table-cache-update.v0';
 export const SPH_STATIC_TABLE_CACHE_REHYDRATE_SCHEMA = 'peercompute.ulg.sph-static-table-cache-rehydrate.v0';
 export const SPH_STATIC_TABLE_CACHE_BUNDLE_SCHEMA = 'peercompute.ulg.sph-static-table-cache-bundle.v0';
-export const SPH_TABLE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.sph-static-table-cache.v0';
+// v1: the thermal table carries explicitVaporizationRecords (explicit-branch
+// boiling); v0 entries lack them and must not be restored.
+// v2: reaction tables carry the spectator term section (first-class air).
+export const SPH_TABLE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.sph-static-table-cache.v2';
 export const SPH_GPU_WARMUP_CACHE_SCHEMA = 'peercompute.ulg.sph-gpu-warmup-cache.v0';
 export const SPH_COLLECTIVE_OPTICAL_ROUTE_SET_AUTHORITY_SCHEMA =
   'peercompute.ulg.sph-collective-optical-route-set-authority.v0';
@@ -530,7 +533,9 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       arrays: {
         records: thermalMaterialTable.records,
         segments: thermalMaterialTable.segments,
-        ...(thermalMaterialTable.molarMassIdentities ? { molarMassIdentities: thermalMaterialTable.molarMassIdentities } : {})
+        ...(thermalMaterialTable.molarMassIdentities ? { molarMassIdentities: thermalMaterialTable.molarMassIdentities } : {}),
+        ...(thermalMaterialTable.explicitVaporizationRecords instanceof Float32Array
+          ? { explicitVaporizationRecords: thermalMaterialTable.explicitVaporizationRecords } : {})
       },
       metadata: {
         materialCount: thermalMaterialTable.materialCount,
@@ -663,9 +668,11 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
       updatedAt
     }));
   }
-  // Physical reaction-energy capabilities are deliberately process-local and
-  // must be rebuilt from their declared source, never revived from disk.
-  if (reactionTable && !reactionTable.energyAuthority) {
+  // Physical reaction-energy capabilities (and gauge-consistent heat-proxy
+  // offsets, which depend on the live thermal table) are deliberately
+  // process-local and must be rebuilt from their declared source, never
+  // revived from disk.
+  if (reactionTable && !reactionTable.energyAuthority && !reactionTable.heatProxyGauge) {
     records.push(tableCacheRecord({
       family: 'sph-reaction-table',
       table: reactionTable,
@@ -676,6 +683,7 @@ export function createSphStaticTableCacheRecords(tableInputs = {}, {
         productTermRecords: reactionTable.productTermRecords,
         gasProductRecords: reactionTable.gasProductRecords,
         atomTermRecords: reactionTable.atomTermRecords,
+        spectatorTermRecords: reactionTable.spectatorTermRecords,
         productPhaseRecords: reactionTable.productPhaseRecords,
         combinedRecords: reactionTable.combinedRecords,
         ...(reactionTable.gasConstitutiveSchema ? { gasConstitutiveRecords: reactionTable.gasConstitutiveRecords } : {})
@@ -948,6 +956,9 @@ function restoreThermalMaterialTable(record) {
     segments: record.arrays.segments,
     ...(record.arrays.molarMassIdentities
       ? { molarMassIdentities: record.arrays.molarMassIdentities } : {}),
+    explicitVaporizationRecords: record.arrays.explicitVaporizationRecords instanceof Float32Array
+      ? record.arrays.explicitVaporizationRecords : new Float32Array(0),
+    explicitVaporizationRecordCount: (record.arrays.explicitVaporizationRecords?.length ?? 0) / 8,
     metadata: metadata.materials || [],
     segmentMetadata: metadata.segmentMetadata || [],
     materialPropertyBankWarmInputConsumer:
@@ -1361,6 +1372,7 @@ function restoreReactionTable(record) {
       + (record.arrays.productTermRecords?.length || 0)
       + (record.arrays.gasProductRecords?.length || 0)
       + (record.arrays.atomTermRecords?.length || 0)
+      + (record.arrays.spectatorTermRecords?.length || 0)
       + (record.arrays.gasConstitutiveRecords?.length || 0)
     ) / 4,
     recordLayout: metadata.recordLayout || [],
@@ -1383,6 +1395,11 @@ function restoreReactionTable(record) {
     productTermRecords: record.arrays.productTermRecords || new Float32Array(0),
     gasProductRecords: record.arrays.gasProductRecords || new Float32Array(0),
     atomTermRecords: record.arrays.atomTermRecords || new Float32Array(0),
+    ...(record.arrays.spectatorTermRecords ? {
+      spectatorTermRecords: record.arrays.spectatorTermRecords,
+      spectatorTermStrideFloats: 4,
+      spectatorTermLayout: ['spectatorFlag:f32', 'energyRatio:f32', 'mixtureMaterialId:f32', 'pad0:f32']
+    } : {}),
     productPhaseRecords: record.arrays.productPhaseRecords,
     combinedRecords: record.arrays.combinedRecords || Float32Array.from([
       ...record.arrays.records,
@@ -1392,6 +1409,7 @@ function restoreReactionTable(record) {
       ...(record.arrays.productTermRecords || []),
       ...(record.arrays.gasProductRecords || []),
       ...(record.arrays.atomTermRecords || []),
+      ...(record.arrays.spectatorTermRecords || []),
       ...(record.arrays.gasConstitutiveRecords || [])
     ]),
     metadata: metadata.reactionMetadata || [],

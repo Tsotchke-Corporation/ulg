@@ -46,6 +46,7 @@ import {
 import {
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
+  SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_FAIL_CLOSED,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_MISSING_CELL_NO_LOAD,
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_FIELD_ADMISSION_SEAL,
@@ -372,6 +373,7 @@ const ACC_EXTERNAL_WORK: u32 = ${u32(
 const INVALID_CELL: u32 = 0xffffffffu;
 const PHASE_SOLID: u32 = 1u;
 const PHASE_LIQUID: u32 = 2u;
+const CROSS_LEVEL_CHAIN_ADJOINT:u32=${u32(SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT)};
 const CROSS_LEVEL_SAME_LEVEL: u32 = ${u32(
   SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL
 )};
@@ -729,6 +731,15 @@ fn cross_level_params_admitted() -> bool {
       && params.parent_field_capacity == 0u
       && params.parent_field_word_capacity == 0u;
   }
+  if(params.cross_level_mapping_mode==CROSS_LEVEL_CHAIN_ADJOINT){
+    let distance=params.gas_selected_level-params.selected_level;
+    if(distance<0 || distance>5){return false;}
+    var spacing=params.grid_spacing_m;
+    for(var i=0;i<distance;i++){spacing*=2.0;}
+    return spacing==params.gas_grid_spacing_m && params.parent_generation_id==params.generation_id
+      && params.parent_completion_ordinal>0u && params.parent_field_capacity==params.field_capacity
+      && params.parent_field_word_capacity==64u+params.field_capacity;
+  }
   if (
     params.cross_level_mapping_mode
       != CROSS_LEVEL_FINE_TO_COARSE_PARENT_ADJOINT
@@ -834,7 +845,7 @@ fn reject_transport() {
       FIELD_RECEIPT_FAIL_CLOSED
     );
   }
-  field_store(2u, FIELD_FAIL_CLOSED);
+  field_store(2u, FIELD_FAIL_CLOSED | (3u << 30u)); // DIAG-TEMP
   field_store(44u, 0u);
   field_store(45u, 0u);
   field_store(46u, 0u);
@@ -1081,6 +1092,15 @@ fn parent_dispatch_admitted(offset: u32, invocation_count: u32) -> bool {
 }
 
 fn parent_field_view_admitted() -> bool {
+  if(params.cross_level_mapping_mode==CROSS_LEVEL_CHAIN_ADJOINT){
+    return arrayLength(&parent_field_view)==params.parent_field_word_capacity
+      && parent_field_view[0]==0x53435631u && parent_field_view[1]==1u
+      && parent_field_view[2]==3u && parent_field_view[3]==0u
+      && parent_field_view[5]==field_load(34u) && parent_field_view[6]==params.parent_completion_ordinal
+      && parent_field_view[7]==1u && parent_field_view[32]==0x53435631u
+      && parent_field_view[34]==3u && parent_field_view[35]==0u;
+  }
+
   if (params.cross_level_mapping_mode == CROSS_LEVEL_SAME_LEVEL) {
     return true;
   }
@@ -1610,6 +1630,9 @@ fn stage_fine_parent_field(field_index: u32) -> bool {
   ) {
     return false;
   }
+  return stage_effective_pressure_field(field_index,effective_gauge_pa);
+}
+fn stage_effective_pressure_field(field_index:u32,effective_gauge_pa:f32)->bool {
   let row = scratch_row(field_index);
   let mass = bitcast<f32>(scratch_load(row + SCRATCH_MASS));
   // The parent transpose changes the pressure sample, not the complementary
@@ -1665,7 +1688,10 @@ fn stage_fine_parent_node(begin: u32, end: u32) -> bool {
   for (var field_index = begin; field_index < end; field_index = field_index + 1u) {
     let phase = field_load(field_key(field_index) + 1u);
     if (phase == PHASE_SOLID || phase == PHASE_LIQUID) {
-      if (!stage_fine_parent_field(field_index)) { return false; }
+      if(params.cross_level_mapping_mode==CROSS_LEVEL_CHAIN_ADJOINT){
+        let gauge=bitcast<f32>(parent_field_view[64u+field_index]);
+        if(!finite_f32(gauge) || !stage_effective_pressure_field(field_index,gauge)){return false;}
+      }else if (!stage_fine_parent_field(field_index)) { return false; }
     } else {
       finalize_scratch_row(field_index);
     }
@@ -1680,6 +1706,7 @@ fn stage_node(begin: u32, end: u32) -> bool {
   if (
     params.cross_level_mapping_mode
       == CROSS_LEVEL_FINE_TO_COARSE_PARENT_ADJOINT
+    || params.cross_level_mapping_mode==CROSS_LEVEL_CHAIN_ADJOINT
   ) {
     return stage_fine_parent_node(begin, end);
   }

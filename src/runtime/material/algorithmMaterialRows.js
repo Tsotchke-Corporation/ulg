@@ -506,6 +506,8 @@ export function buildAlgorithmInitialBodyMlsMpmMechanicsRows({
     if (
       particle.spareProductSlot === true
       || meta.spareProductSlot === true
+      || particle.spareSplitSlot === true
+      || meta.spareSplitSlot === true
       || particle.phaseCompanionSlot === true
       || meta.phaseCompanionSlot === true
     ) continue;
@@ -609,6 +611,8 @@ export function buildAlgorithmMlsMpmMechanicsRows({
     if (
       particle.spareProductSlot === true
       || meta.spareProductSlot === true
+      || particle.spareSplitSlot === true
+      || meta.spareSplitSlot === true
       || particle.phaseCompanionSlot === true
       || meta.phaseCompanionSlot === true
     ) continue;

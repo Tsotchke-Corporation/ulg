@@ -798,6 +798,19 @@ function createSchroederSpatialEpochV2KeyWgsl() {
   let source = schroederSpatialEpochKeyWgsl;
   source = replaceRequired(
     source,
+    `fn emit_spatial_keys(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {`,
+    `fn emit_spatial_keys(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {`,
+    'v2 key launch shape builtin'
+  );
+  source = replaceRequired(
+    source,
     '@group(0) @binding(4) var<uniform> params: SpatialEpochParams;',
     `@group(0) @binding(4) var<uniform> params: SpatialEpochParams;
 @group(0) @binding(5) var<storage, read> active_source_view: array<u32>;`,
@@ -953,6 +966,18 @@ fn physical_source_for_active(active_ordinal: u32) -> u32 {
   }
   let row = source_index * ACTIVE_NODE_STRIDE;`,
     `  let linear_group = workgroup_id.x + workgroup_id.y * params.key_dispatch_x;
+  // A1: this pass's indirect arguments are the view's active dispatch words
+  // (48..50, read-only here). Admit only the groups that launch runs, so a
+  // direct 1D launch over the active-capacity ceiling is exact.
+  let launch_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    active_source_view[50u] == 0u
+    || launch_group >= active_source_view[48u] * active_source_view[49u]
+  ) {
+    return;
+  }
   let active_ordinal = linear_group * 64u + local_id.x;
   let active_count = effective_source_count();
   if (active_ordinal >= active_count) {

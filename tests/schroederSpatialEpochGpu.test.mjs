@@ -80,6 +80,7 @@ import {
   canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
   createSchroederSpatialEpochGpu,
   ownsSchroederSpatialEpochGenerationConsumerLease,
+  resolveSchroederSpatialEpochGenerationConsumerExecution,
   quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
   releaseSchroederSpatialEpochGenerationConsumerLease,
   releaseSchroederSpatialEpochGenerationConsumerLeaseAfter,
@@ -846,6 +847,36 @@ test('exact adjacent successor retires a complete generation in queue order with
     }
   );
   assert.equal(successor.execution.released, false);
+});
+
+test('consumer execution resolution rejects rebound producers, copied leases and foreign devices', async () => {
+  const device = createFakeDevice();
+  const build = () => {
+    const levelAssignment = createDirectSpatialLevelAssignment(device);
+    return runSchroederSpatialEpochGenerationWebGpu({device, levelAssignment,
+      particleCount: levelAssignment.particleCount, mechanicsLevels: [],
+      exactNearCellTreeEnabled: false, directArenaCount: 2});
+  };
+  const original = build(), foreign = build();
+  const lease = acquireSchroederSpatialEpochGenerationConsumerLease(original);
+  const execution = original.execution;
+  assert.equal(resolveSchroederSpatialEpochGenerationConsumerExecution(lease, device), execution);
+  assert.throws(() => resolveSchroederSpatialEpochGenerationConsumerExecution({...lease}, device));
+  assert.throws(() => resolveSchroederSpatialEpochGenerationConsumerExecution(lease, createFakeDevice()));
+  original.execution = foreign.execution;
+  assert.throws(() => resolveSchroederSpatialEpochGenerationConsumerExecution(lease, device));
+  original.execution = execution;
+  const generationId = execution.generationId;
+  execution.generationId += 1;
+  assert.throws(() => resolveSchroederSpatialEpochGenerationConsumerExecution(lease, device));
+  execution.generationId = generationId;
+  assert.equal(resolveSchroederSpatialEpochGenerationConsumerExecution(lease, device), execution);
+  releaseSchroederSpatialEpochGenerationConsumerLease(lease, {discardedEncoder: true});
+  assert.throws(() => resolveSchroederSpatialEpochGenerationConsumerExecution(lease, device));
+  for (const generation of [original, foreign]) {
+    releaseSchroederSpatialEpochGenerationAfterQueue(generation, device);
+    await generation.releasePromise;
+  }
 });
 
 test('one exact sole consumer lease and its generation retire atomically at a queue boundary', () => {
@@ -1743,6 +1774,10 @@ test('native-test legacy level assignment keeps an owned directory-v1 ActiveRank
 });
 
 test('directory v2 keeps sparse physical identity GPU-resident and fail-closes forged ActiveSource reuse', () => {
+  // Both launch modes: forced indirect, and A1's direct launches.
+  for (const forceIndirect of [true, false]) {
+  if (forceIndirect) globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   const device = createFakeDevice();
   const physicalSourceCount = 1001;
   const activeSourceCapacity = 64;
@@ -1925,10 +1960,17 @@ test('directory v2 keeps sparse physical identity GPU-resident and fail-closes f
   assert.ok(radixPrepareIndex > keyIndex);
   assert.ok(assembleIndex > radixPrepareIndex);
   assert.ok(finalizeIndex > assembleIndex);
-  assert.deepEqual(commands[keyIndex].dispatchIndirect, {
-    label: activeSourceView.activeSourceViewBuffer.label,
-    byteOffset: activeSourceView.activeDispatchOffsetBytes
-  });
+  if (forceIndirect) {
+    assert.deepEqual(commands[keyIndex].dispatchIndirect, {
+      label: activeSourceView.activeSourceViewBuffer.label,
+      byteOffset: activeSourceView.activeDispatchOffsetBytes
+    });
+  } else {
+    // A1: one direct group over the 64-source active capacity; the V2 key
+    // kernel admits only the view's staged active groups.
+    assert.deepEqual(commands[keyIndex].dispatch, [1, 1, 1]);
+    assert.equal(commands[keyIndex].dispatchIndirect, undefined);
+  }
   assert.deepEqual(commands[assembleIndex].dispatchIndirect, {
     label: activeSourceView.activeSourceViewBuffer.label,
     byteOffset: activeSourceView.activeDispatchOffsetBytes
@@ -1965,6 +2007,10 @@ test('directory v2 keeps sparse physical identity GPU-resident and fail-closes f
   );
   assert.equal(directoryRuntime.destroy(), true);
   assert.equal(activeSourceRuntime.destroy(), true);
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
+  }
 });
 
 test('generation consumer lease holds the complete spatial artifact family past an earlier owner fence', async () => {
@@ -2841,7 +2887,7 @@ test('two-level V0J generation mounts and retires the opt-in read-only S9-C inte
   assert.equal(sourceMechanicsBuffer.destroyCount, 0);
 });
 
-test('opt-in S9-C topology fails closed outside its exact two-level S9-B route', () => {
+test('opt-in one-level S9-C steps aside when the single level has no V0J S9-A/S9-B source', () => {
   const device = createFakeDevice();
   const levelAssignment = createDirectSpatialLevelAssignment(device);
   const generation = runSchroederSpatialEpochGenerationWebGpu({
@@ -2855,6 +2901,30 @@ test('opt-in S9-C topology fails closed outside its exact two-level S9-B route',
       gridShift: 2,
       gridSpacingM: 0.25
     },
+    phaseVolumeInterfaceProposalEnabled: true
+  });
+  // The single level's sidecars are skipped for this non-V0J source, so the
+  // one-level proposal is not built and the generation does not claim it.
+  assert.equal(generation.ready, true);
+  assert.equal(generation.phaseVolumeInterfaceProposalEnabled, false);
+  assert.equal(generation.phaseVolumeInterfaceProposal ?? null, null);
+});
+
+test('opt-in S9-C still fails closed with sidecars disabled', () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device);
+  const generation = runSchroederSpatialEpochGenerationWebGpu({
+    device,
+    levelAssignment,
+    particleCount: levelAssignment.particleCount,
+    selectedLevel: 0,
+    mechanicsGrid: {
+      gridNodeCount: 512,
+      gridDims: [8, 8, 8],
+      gridShift: 2,
+      gridSpacingM: 0.25
+    },
+    phaseVolumeSidecarsEnabled: false,
     phaseVolumeInterfaceProposalEnabled: true
   });
   assert.equal(generation.ready, false);
@@ -3695,7 +3765,10 @@ test('selected-false post-submit cleanup exposes a fresh retry instead of a reje
   );
 });
 
-test('direct spatial generation rejects a third, nonadjacent, or non-2:1 mechanics level', () => {
+// An N-level chain of 2:1 pairs is the contract (user decision 2026-11-16):
+// every adjacent link must be consecutive with exact 2:1 spacing, and the
+// chain is bounded.
+test('direct spatial generation rejects a broken chain link, nonadjacent, non-2:1, or over-long mechanics chain', () => {
   const device = createFakeDevice();
   const levelAssignment = createDirectSpatialLevelAssignment(device);
   const grid = (gridSpacingM) => ({
@@ -3708,8 +3781,12 @@ test('direct spatial generation rejects a third, nonadjacent, or non-2:1 mechani
     [
       { selectedLevel: 0, mechanicsGrid: grid(0.25) },
       { selectedLevel: 1, mechanicsGrid: grid(0.5) },
-      { selectedLevel: 2, mechanicsGrid: grid(1) }
+      { selectedLevel: 2, mechanicsGrid: grid(1.5) }
     ],
+    Array.from({ length: 7 }, (_, level) => ({
+      selectedLevel: level,
+      mechanicsGrid: grid(0.25 * (2 ** level))
+    })),
     [
       { selectedLevel: 0, mechanicsGrid: grid(0.25) },
       { selectedLevel: 2, mechanicsGrid: grid(0.5) }
@@ -3733,6 +3810,56 @@ test('direct spatial generation rejects a third, nonadjacent, or non-2:1 mechani
     assert.equal(generation.directoryBuildCount, 0);
   }
   assert.equal(device.submissions.length, 0);
+});
+
+test('six-level generations submit and retire every pair, including partial-build failures', async () => {
+  const device = createFakeDevice();
+  const levelAssignment = createDirectSpatialLevelAssignment(device, { minLevel: 0, maxLevel: 5 });
+  const particleIdentityBuffer = device.createBuffer({ label: 'chain identities', size: 8, usage: 128 });
+  const options = { device, levelAssignment, particleCount: levelAssignment.particleCount,
+    particleIdentityBuffer, particleIdentityStrideWords: 1,
+    mechanicsLevels: Array.from({ length: 6 }, (_, selectedLevel) => ({
+      selectedLevel, mechanicsGrid: {
+        gridNodeCount: 64, gridDims: [4,4,4], gridShift: 1,
+        gridSpacingM: 0.25 * 2**selectedLevel
+      }
+    })) };
+  const seed = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(seed.ready, true, seed.reason);
+  assert.equal(seed.mechanicsAdjacentLevelPairs.length, 5);
+  for (const [i, pair] of seed.mechanicsAdjacentLevelPairs.entries()) {
+    assert.equal(pair.hierarchyViewRuntime.isExecutionSubmitted(pair.hierarchyView), true);
+    assert.equal(pair.parentFieldViewRuntime.isExecutionSubmitted(pair.parentFieldView), true);
+    assert.equal(pair.parentFieldView.inheritedFineParentView,
+      i ? seed.mechanicsAdjacentLevelPairs[i-1].parentFieldView : null);
+    assert.ok(pair.parentFieldView.parentFieldCapacity <= 27 * levelAssignment.particleCount);
+  }
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(seed, device), true);
+  assert.equal(await seed.releasePromise, true);
+  for (const pair of seed.mechanicsAdjacentLevelPairs) {
+    assert.equal(pair.hierarchyView.released, true);
+    assert.equal(pair.parentFieldView.released, true);
+  }
+  const lastRuntime = seed.mechanicsAdjacentLevelPairs[4].parentFieldViewRuntime;
+  const originalEncode = lastRuntime.encode;
+  const submissions = device.submissions.length;
+  let rejected;
+  try {
+    lastRuntime.encode = () => { throw new Error('injected last-pair parent encode failure'); };
+    rejected = runSchroederSpatialEpochGenerationWebGpu(options);
+  } finally { lastRuntime.encode = originalEncode; }
+  assert.equal(rejected.ready, false);
+  assert.match(rejected.reason, /injected last-pair/);
+  assert.equal(device.submissions.length, submissions, 'discarded partial chain submits no work');
+  for (const pair of seed.mechanicsAdjacentLevelPairs) {
+    assert.equal(pair.hierarchyViewRuntime.activeExecutionCount(), 0);
+    assert.equal(pair.parentFieldViewRuntime.activeExecutionCount(), 0);
+  }
+  const retry = runSchroederSpatialEpochGenerationWebGpu(options);
+  assert.equal(retry.ready, true, retry.reason);
+  assert.equal(releaseSchroederSpatialEpochGenerationAfterQueue(retry, device), true);
+  assert.equal(await retry.releasePromise, true);
+  assert.equal(retry.mechanicsAdjacentLevelPairs.every(p => p.parentFieldView.released && p.hierarchyView.released), true);
 });
 
 test('compact mechanics generations retire under resident arena backpressure', async () => {

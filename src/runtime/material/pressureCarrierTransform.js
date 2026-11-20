@@ -22,6 +22,11 @@ export const ULG_PRESSURE_CARRIER_TRANSFORM_SCHEMA =
 export const PRESSURE_CARRIER_LAW_REFERENCE_ONLY = 0;
 // Clausius-Clapeyron plateau shift on a single liquid-to-gas segment.
 export const PRESSURE_CARRIER_LAW_CLAUSIUS_PLATEAU = 1;
+// Explicit-branch (phase-caloric) solid+liquid material: no plateau rows
+// exist, so the record carries the fusion temperature T_f (lane 6) for the
+// phase-carrier transfer's bulk equilibrium fusion conversion. Pressure
+// consumers act only on law 1 and leave this material on its explicit branches.
+export const PRESSURE_CARRIER_LAW_EXPLICIT_FUSION = 2;
 
 const f32Bits = (() => {
   const floats = new Float32Array(1);

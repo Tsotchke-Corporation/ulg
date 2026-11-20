@@ -1,4 +1,5 @@
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import { PRESSURE_CARRIER_LAW_EXPLICIT_FUSION } from '../material/pressureCarrierTransform.js';
 import { isPhaseCaloricThermodynamics } from '../material/condensableThermodynamics.js';
 import { condensableCaloricSegments, SPH_CALORIC_PHASE_IDS } from './sphCondensableCaloricTable.js';
 import { condensableInitializationProperties } from './sphCondensableParticleInitialization.js';
@@ -148,7 +149,14 @@ export function createSphSpatialGasCaloricAuthority({
     const record = thermalMaterialTable.records.subarray(recordIndices[0] * 8, recordIndices[0] * 8 + 8);
     const start = record[1];
     const segments = condensableCaloricSegments(model);
-    if (record[2] !== segments.length || record[3] !== 1 || record[5] !== 0 || record[6] !== 0 || record[7] !== 0
+    // Carrier lanes: zero, or exactly the explicit fusion lanes (law 2, fusion
+    // reference pressure, T_f) a model with a solid branch packs.
+    const solid = model.solidCaloric;
+    const lanes = solid
+      ? [PRESSURE_CARRIER_LAW_EXPLICIT_FUSION, Math.fround(solid.referencePressurePa), Math.fround(solid.referenceTemperatureK)]
+      : [0, 0, 0];
+    if (record[2] !== segments.length || record[3] !== 1
+      || record[5] !== lanes[0] || record[6] !== lanes[1] || record[7] !== lanes[2]
       || metadata[0].segmentOffset !== start || metadata[0].segmentCount !== segments.length) {
       fail('enrolled material must contain its complete declared pure-phase roster');
     }

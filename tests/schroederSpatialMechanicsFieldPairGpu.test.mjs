@@ -1278,7 +1278,7 @@ test('paired WGSL keeps disjoint monotone levels, material, and solid domains in
   );
   assert.match(
     source,
-    /fn\s+pair_quadratic_weight_at\([\s\S]*fraction\s*-\s*0\.5[\s\S]*let\s+support_weight\s*=[\s\S]*if\s*\(support_weight\s*==\s*0\.0\)\s*\{[\s\S]*pair_write_invalid_candidate\(candidate_index\);[\s\S]*continue;[\s\S]*let\s+node\s*=\s*pair_grid_index/,
+    /fn\s+pair_quadratic_weight_at\([\s\S]*fraction\s*-\s*0\.5[\s\S]*let\s+support_weight\s*=[\s\S]*if\s*\(!\(support_weight\s*>=\s*bitcast<f32>\(0x21800000u\)\)\)\s*\{[\s\S]*pair_write_invalid_candidate\(candidate_index\);[\s\S]*continue;[\s\S]*let\s+node\s*=\s*pair_grid_index/,
     'exact-zero quadratic support is omitted before field keys or clipping evidence'
   );
   assert.doesNotMatch(

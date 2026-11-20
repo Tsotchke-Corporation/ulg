@@ -546,7 +546,9 @@ fn main() {
           label,
           motion = false,
           table = reactionTable,
-          envelope = reactionMotionEnvelope
+          envelope = reactionMotionEnvelope,
+          reactionDormancy = null,
+          currentStateBuffer = null
         }) => {
           const timestamps = createCandidateTraversalTimestampRecorder(label);
           let generation = null;
@@ -577,6 +579,8 @@ fn main() {
               sphParticleUpload: upload,
               reactionTable: table,
               reactionRecordBuffer: indexed ? null : fullScanRecordBuffer,
+              ...(currentStateBuffer ? { sourceStateBuffer: currentStateBuffer } : {}),
+              reactionDormancy,
               sourceMechanicsBuffer: motion ? mechanicsBuffer : null,
               reactionMotionEnvelope: motion ? envelope : null,
               boxDimsM: motion ? motionBoxDimsM : null,
@@ -630,7 +634,15 @@ fn main() {
             );
             const proposalWords = new Uint32Array(proposalBytes);
             const timestamp = await timestamps.complete();
+            const dormancyCounts = proposal.reactionDormancy
+              ? Array.from(new Uint32Array(await readBuffer(
+                  proposal.reactionDormancy.countBuffer,
+                  16,
+                  `ulg-native-reaction-rule-index-${label}-dormancy-counts`
+                )))
+              : null;
             return {
+              dormancyCounts,
               proposalWords,
               proposalHash: hashWords(proposalWords),
               evidence: proposal.observedEvidence,
@@ -713,6 +725,58 @@ fn main() {
                 === 'future-upper-unclaimed-trigger-positive',
           `canonical thermal/phase latch failed to override an exact current-state zero: ${JSON.stringify(thermalPhaseLatch.activationObservation)}`
         );
+
+        // G4 reaction node scope: the exact dormancy predicate leaves every
+        // proposal bit for bit unchanged.
+        const dormancyGrid = {
+          originM: [-1, -1, -1],
+          boxM: [Math.max(...particles.map((particle) => particle.x[0])) + 2, 4, 2]
+        };
+        // (1) Every A has its B 0.04 m away: all active.
+        device.pushErrorScope('validation');
+        let allActiveGated = null, allActiveGatedError = null;
+        try {
+          allActiveGated = await runVariant({ indexed: true, label: 'g4-dormancy-all-active',
+            reactionDormancy: dormancyGrid });
+        } catch (error) { allActiveGatedError = error; }
+        const allActiveScopeError = await device.popErrorScope();
+        if (allActiveGatedError || allActiveScopeError) {
+          throw new Error(`G4 gated run: ${allActiveGatedError?.message?.slice(0, 200)} | validation: ${allActiveScopeError?.message}`);
+        }
+        requireTrue(allActiveGated.proposalHash === indexedWarm.proposalHash,
+          'G4 reaction dormancy changed the all-active proposals');
+        // (2) Activation temperature 1e9 K: every source dormant, same (empty) proposals.
+        const ineligibleOff = await runVariant({ indexed: true, label: 'g4-ineligible-off',
+          table: thermalPhaseIneligibleReactionTable });
+        const ineligibleGated = await runVariant({ indexed: true, label: 'g4-ineligible-dormancy',
+          table: thermalPhaseIneligibleReactionTable, reactionDormancy: dormancyGrid });
+        requireTrue(ineligibleGated.proposalHash === ineligibleOff.proposalHash,
+          'G4 reaction dormancy changed the ineligible-table proposals');
+        // (3) Every other pair's B moved 1.5 m in y: a mixed field.
+        const movedState = new Float32Array(packed.state);
+        for (let pairIndex = 0; pairIndex < pairCount; pairIndex += 2) {
+          movedState[(2 * pairIndex + 1) * 8 + 1] += 1.5;
+        }
+        const movedStateBuffer = createTaggedBuffer('ulg-native-reaction-dormancy-moved-state', movedState,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST);
+        let movedOff, movedGated;
+        try {
+          movedOff = await runVariant({ indexed: true, label: 'g4-moved-off', currentStateBuffer: movedStateBuffer });
+          movedGated = await runVariant({ indexed: true, label: 'g4-moved-dormancy',
+            currentStateBuffer: movedStateBuffer, reactionDormancy: dormancyGrid });
+        } finally {
+          movedStateBuffer.destroy();
+        }
+        requireTrue(movedGated.proposalHash === movedOff.proposalHash,
+          'G4 reaction dormancy changed the mixed-field proposals');
+        const reactionDormancyReceipt = {
+          particleCount: packed.particleCount,
+          allActive: allActiveGated.dormancyCounts,
+          ineligible: ineligibleGated.dormancyCounts,
+          mixed: movedGated.dormancyCounts,
+          mixedProposalCount: movedOff.evidence?.proposalCount ?? null,
+          allActiveProposalCount: allActiveGated.evidence?.proposalCount ?? null
+        };
 
         const tier0StateBuffer = createTaggedBuffer(
           'ulg-native-tier0-reaction-motion-watch-state',
@@ -1106,6 +1170,7 @@ fn main() {
             samplesMs: fullMs,
             medianMs: fullMedianMs
           },
+          reactionDormancyReceipt,
           ruleVisitReduction:
             fullEvidence.fullRuleScanRuleVisitCount
               / indexedEvidence.ruleIndexRuleVisitCount,
@@ -1121,6 +1186,15 @@ fn main() {
     }, { sampleCount: 4, pairCount: 128 });
 
     assert.equal(native.status, 'complete', native.reason || JSON.stringify(native));
+    {
+      // G4 reaction node scope (bit identity is asserted inside the page).
+      const r = native.reactionDormancyReceipt;
+      console.log(JSON.stringify({ reactionDormancyReceipt: r }));
+      assert.deepEqual(r.allActive, [r.particleCount, 0, r.particleCount, 0]);
+      assert.deepEqual(r.ineligible, [0, r.particleCount, r.particleCount, 0]);
+      // Half the pairs separated: their A and B (2 of every 4 sources) dormant.
+      assert.deepEqual(r.mixed, [r.particleCount / 2, r.particleCount / 2, r.particleCount, 0]);
+    }
     assert.equal(native.proposalParity, true);
     assert.equal(native.canonicalMotion.motionEnvelopeEnabled, true);
     assert.equal(

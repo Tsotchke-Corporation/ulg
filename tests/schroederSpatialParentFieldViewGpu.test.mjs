@@ -311,6 +311,19 @@ test('parent-field ABI reserves exact topology capacity and three fail-closed di
   );
 });
 
+test('bounded parent output preserves candidate scratch and rejects invalid limits', () => {
+  const capacities = { fineFieldCapacity: 54, coarseFieldCapacity: 54 };
+  const full = createSchroederSpatialParentFieldViewLayout(capacities);
+  const bounded = createSchroederSpatialParentFieldViewLayout({ ...capacities, parentFieldCapacityLimit: 54 });
+  assert.equal(bounded.parentFieldCapacity, 54);
+  assert.equal(bounded.candidateCapacity, full.candidateCapacity);
+  assert.equal(bounded.edgeCapacity, full.edgeCapacity);
+  assert.equal(bounded.wordLength, full.wordLength - 4 * (full.parentFieldCapacity - 54));
+  for (const parentFieldCapacityLimit of [0, -1, 1.5, Infinity]) {
+    assert.throws(() => createSchroederSpatialParentFieldViewLayout({ ...capacities, parentFieldCapacityLimit }), /parentFieldCapacityLimit/);
+  }
+});
+
 test('CPU parent-field oracle preserves partition and first moment while deduplicating native fields', () => {
   const oracle = buildSchroederSpatialParentFieldTopologyCpuOracle({
     fineFieldKeys: [

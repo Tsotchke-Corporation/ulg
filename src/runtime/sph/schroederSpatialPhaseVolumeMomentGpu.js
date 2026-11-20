@@ -14,6 +14,7 @@ import {
   ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
+  SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATES_PER_SOURCE,
   validateSchroederSpatialActiveSourceViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialActiveSourceView.js';
 import {
@@ -887,17 +888,47 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
         selectedLevel: plan.selectedLevel,
         ...timestampMetadata
       };
+      // A1: direct 1D launches over host ceilings instead of
+      // dispatchWorkgroupsIndirect (about 0.3 ms of GPU-process validation
+      // each on Chromium). The kernels admit only the groups the GPU-authored
+      // arguments name, so both launches are exact; ceilings past one
+      // dispatch dimension keep the indirect launch.
+      const directLaunchAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true;
+      const candidateCeilingGroups = authority.directoryV2
+        ? Math.ceil(
+            Number(authority.activeSourceView.activeSourceCapacity || 0)
+              * SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATES_PER_SOURCE
+              / SCHROEDER_SPATIAL_PHASE_VOLUME_MOMENT_WORKGROUP_SIZE
+          )
+        : 0;
+      const candidateDirect = directLaunchAllowed
+        && candidateCeilingGroups > 0 && candidateCeilingGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
+      const fieldCeilingGroups = Number(
+        mechanicsFieldView?.consumerDispatchMaxLinearGroups ?? 0
+      );
+      const fieldDirect = directLaunchAllowed
+        && Number.isInteger(fieldCeilingGroups)
+        && fieldCeilingGroups > 0 && fieldCeilingGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
       const encodeCandidatePass = (pipelineObject, bindGroupObject, passLabel, options) => (
         authority.directoryV2
-          ? encodeIndirectPass(
-              encoder,
-              pipelineObject,
-              bindGroupObject,
-              authority.activeSourceView.activeSourceViewBuffer,
-              authority.activeSourceView.candidateDispatchOffsetBytes,
-              passLabel,
-              options
-            )
+          ? (candidateDirect
+            ? encodePass(
+                encoder,
+                pipelineObject,
+                bindGroupObject,
+                [candidateCeilingGroups, 1, 1],
+                passLabel,
+                options
+              )
+            : encodeIndirectPass(
+                encoder,
+                pipelineObject,
+                bindGroupObject,
+                authority.activeSourceView.activeSourceViewBuffer,
+                authority.activeSourceView.candidateDispatchOffsetBytes,
+                passLabel,
+                options
+              ))
           : encodePass(
               encoder,
               pipelineObject,
@@ -930,7 +961,21 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
         }
       );
       encodedDispatchCount += authority.directoryV2
-        ? encodeIndirectPass(
+        ? (fieldDirect
+          ? encodePass(
+              encoder,
+              pipelines.reduce,
+              reduceBindGroup,
+              [fieldCeilingGroups, 1, 1],
+              `${label}Reduce`,
+              {
+                gpuTimestampRecorder,
+                timestampMetadata: commonTimestamp,
+                producerId: 'schroeder-spatial-phase-volume-moment-reduce',
+                stage: 'reduce-fields'
+              }
+            )
+          : encodeIndirectPass(
             encoder,
             pipelines.reduce,
             reduceBindGroup,
@@ -943,7 +988,7 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
               producerId: 'schroeder-spatial-phase-volume-moment-reduce',
               stage: 'reduce-fields'
             }
-          )
+          ))
         : encodePass(
             encoder,
             pipelines.reduce,

@@ -1,3 +1,4 @@
+import { watchSphDeviceLossFor } from './sphDeviceLossRelay.js';
 import {
   validateSchroederSpatialTopologyTransitionReceipt
 } from './schroederSpatialTopologyTransitionGpu.js';
@@ -6,6 +7,7 @@ import {
   validateSchroederSpatialEpochTransactionSourceFamily
 } from './schroederSpatialEpochTransaction.js';
 import { sphGpuParticleUploadAdvertisesExactMass, bindSphExactMassPostMechanicsContinuation,
+  bindSphExactMassChainPublication,
   activateSphExactMassSpatialContinuation, abandonSphExactMassSpatialContinuation,
   validateSphParticleExactMassRead, forkSphParticleExactMassRead,
   releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
@@ -1478,37 +1480,19 @@ function quarantineSourceFamilyAfterDeviceLoss(sourceFamily, record, info) {
   settleRequestedRetirement(sourceFamily, record);
 }
 
-// Keep these as separate module-level factories. A callback created inside
-// the watcher can share the fallback's strong sourceFamily context even when
-// its own body only uses a WeakRef, retaining every retired family until loss.
-function createWeakSourceFamilyLossCallback(sourceFamilyRef) {
-  return function quarantineAfterLoss(info) {
-    const liveSourceFamily = sourceFamilyRef.deref();
-    const liveRecord = liveSourceFamily
-      ? (sourceFamilyRecords.get(liveSourceFamily) ?? pendingSourceFamilyRecords.get(liveSourceFamily))
-      : null;
-    if (liveRecord) {
-      quarantineSourceFamilyAfterDeviceLoss(liveSourceFamily, liveRecord, info);
-    }
-  };
-}
-
-function createStrongSourceFamilyLossCallback(sourceFamily) {
-  return function quarantineAfterLoss(info) {
-    const liveRecord = sourceFamilyRecords.get(sourceFamily) ?? pendingSourceFamilyRecords.get(sourceFamily);
-    if (liveRecord) quarantineSourceFamilyAfterDeviceLoss(sourceFamily, liveRecord, info);
-  };
+// One device.lost reaction per device (sphDeviceLossRelay): a per-family
+// `device.lost.then(...)` stayed reachable from the healthy device's loss
+// promise for its whole lifetime, one reaction per step. The relay holds the
+// family only weakly; this module-level handler must not capture it.
+function quarantineSourceFamilyFromDeviceLoss(sourceFamily, info) {
+  const liveRecord = sourceFamilyRecords.get(sourceFamily)
+    ?? pendingSourceFamilyRecords.get(sourceFamily);
+  if (liveRecord) quarantineSourceFamilyAfterDeviceLoss(sourceFamily, liveRecord, info);
 }
 
 function watchSourceFamilyDeviceLoss(sourceFamily, device) {
   try {
-    const deviceLoss = device?.lost;
-    if (!deviceLoss || typeof deviceLoss.then !== 'function') return false;
-    const quarantineAfterLoss = typeof WeakRef === 'function'
-      ? createWeakSourceFamilyLossCallback(new WeakRef(sourceFamily))
-      : createStrongSourceFamilyLossCallback(sourceFamily);
-    Promise.resolve(deviceLoss).then(quarantineAfterLoss, quarantineAfterLoss);
-    return true;
+    return watchSphDeviceLossFor(device, sourceFamily, quarantineSourceFamilyFromDeviceLoss);
   } catch {
     return false;
   }
@@ -1827,7 +1811,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       ?? null,
   forcePositionAdvance = false,
   componentOwnerStages = null,
-  postMechanicsClosure = null
+  postMechanicsClosure = null,
+  chainBatchPublication = null
 } = {}) {
   const uploadFamily = validateSuccessorUploadFamily(nextParticleUploads);
   const {
@@ -1846,8 +1831,11 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
   let exactMassClosure = null;
   if (transaction.sourceBuffers?.exactMassInventory != null || sphGpuParticleUploadAdvertisesExactMass(sphUpload)) {
     const module = await import('./sphMlsMpmPostMechanicsClosure.js');
-    const claim = module.claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, { nextParticleUploads });
-    const capture = module.resolveMlsMpmPostMechanicsExactMassContinuation(postMechanicsClosure, claim, nextParticleUploads);
+    const chain = chainBatchPublication == null ? null : await import('./schroederSpatialChainPublicationGpu.js');
+    const claim = chainBatchPublication ?? module.claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, { nextParticleUploads });
+    const capture = chain
+      ? chain.resolveSchroederSpatialChainPublication(claim, { closure: postMechanicsClosure, nextParticleUploads })
+      : module.resolveMlsMpmPostMechanicsExactMassContinuation(postMechanicsClosure, claim, nextParticleUploads);
     if (capture.transaction !== transaction || capture.generation !== generation
         || capture.sourceRead.read.family !== transaction.sourceBuffers?.exactMassInventory
         || capture.sourceRead.read.rowOffset !== transaction.sourceBuffers?.exactMassInventoryRange?.rowOffset
@@ -1858,8 +1846,9 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       throw sourceFamilyError('exact publication requires its genuine transaction and closure source', 'EXACT_MASS_OWNER');
     }
     exactMassClosure = { closure: postMechanicsClosure, claim,
+      chainBatchPublication,
       carrierMassRead: capture.carrierMassRead ?? capture.sourceRead.read,
-      validateClaim: module.validateMlsMpmPostMechanicsContinuationClaim };
+      validateClaim: chain?.validateSchroederSpatialChainPublication ?? module.validateMlsMpmPostMechanicsContinuationClaim };
   }
   assertSphAerosolSpatialContinuation({ device, transaction, generation,
     sourceFamily: transaction.sourceBuffers?.aerosolFamily ?? null,
@@ -2065,6 +2054,7 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
       lookupLevelAssignment,
       nextParticleUploads,
       postClosureLevelAssignment: rawSuccessorLevelAssignment,
+      chainBatchPublication,
       maxParticleCount: particleCount
     });
   } catch (error) {
@@ -2121,7 +2111,13 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
   successorLevelAssignmentSealRecords.set(successorLevelAssignmentSeal, {
     device,
     generation,
-    lookupLevelAssignment,
+    // Weak: the lookup is the previous step's successor assignment. A strong
+    // reference chained every step's seal record (uploads, buffers, cleanup
+    // claims) back to the first step. A collected lookup can no longer be
+    // presented by any caller; validation keeps its exact buffer checks.
+    lookupLevelAssignmentRef: lookupLevelAssignment
+      ? new WeakRef(lookupLevelAssignment)
+      : null,
     nextParticleUploads,
     successorLevelAssignment
   });
@@ -2275,7 +2271,8 @@ export async function prepareSchroederSpatialSuccessorSourceFamilyPublication({
     const prepared = successorPublicationPlanRecords.get(plan);
     sourceFamilyRecord.exactMassPlan = plan;
     try {
-      sourceFamilyRecord.exactMassFamily = await bindSphExactMassPostMechanicsContinuation({
+      const bind = chainBatchPublication ? bindSphExactMassChainPublication : bindSphExactMassPostMechanicsContinuation;
+      sourceFamilyRecord.exactMassFamily = await bind({
         ...exactMassClosure, nextParticleUploads, spatialPublicationPlan: plan });
       sourceFamilyRecord.uploadEnvelope = snapshotSuccessorUploadEnvelope(sphUpload, mlsUpload);
       prepared.exactMassPrepared = true;
@@ -2376,6 +2373,8 @@ export function validateSchroederSpatialSuccessorLevelAssignmentSeal(
   } = {}
 ) {
   const record = successorLevelAssignmentSealRecords.get(seal);
+  const recordLookupLevelAssignment =
+    record?.lookupLevelAssignmentRef?.deref() ?? null;
   return Boolean(
     record
     && seal?.schema
@@ -2389,7 +2388,7 @@ export function validateSchroederSpatialSuccessorLevelAssignmentSeal(
     && (generation == null || record.generation === generation)
     && (
       lookupLevelAssignment == null
-      || record.lookupLevelAssignment === lookupLevelAssignment
+      || recordLookupLevelAssignment === lookupLevelAssignment
     )
     && (
       nextParticleUploads == null
@@ -2403,7 +2402,7 @@ export function validateSchroederSpatialSuccessorLevelAssignmentSeal(
       record.successorLevelAssignment,
       {
         device: record.device,
-        lookupLevelAssignment: record.lookupLevelAssignment,
+        lookupLevelAssignment: recordLookupLevelAssignment,
         nextParticleUploads: record.nextParticleUploads
       }
     )

@@ -107,11 +107,21 @@ export function realPhaseSoundSpeedMPerS(properties, phase) {
 // at the fixed carrier dt, instead of one global factor dragged down by the
 // stiffest phase in the whole material table (which left liquids ~1e5x too
 // soft to hold a hydrostatic column).
+//
+// liquidCflMaxSoundSpeedMPerS (A1 larger-dt slice) is the bulk cap admitted
+// for liquid phases when the semi-implicit pressure solve carries their
+// stiffness (c dt / dx up to its measured 6.4 envelope); solids and gas keep
+// the explicit cap. Zero (the default) leaves every phase unchanged.
 export function phaseSoundSpeedScaleFor(properties, phase, {
   soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
-  cflMaxSoundSpeedMPerS = 0
+  cflMaxSoundSpeedMPerS = 0,
+  liquidCflMaxSoundSpeedMPerS = 0
 } = {}) {
-  const cflMax = finiteNumber(cflMaxSoundSpeedMPerS, 0);
+  const phaseName = String(phase?.name || '').toLowerCase();
+  const liquidCap = finiteNumber(liquidCflMaxSoundSpeedMPerS, 0);
+  const cflMax = liquidCap > 0 && phaseName !== 'solid' && phaseName !== 'gas'
+    ? liquidCap
+    : finiteNumber(cflMaxSoundSpeedMPerS, 0);
   if (!(cflMax > 0)) return finiteNumber(soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE);
   const realC = realPhaseSoundSpeedMPerS(properties, phase);
   return realC > 0 ? Math.min(1, cflMax / realC) : 1;
@@ -120,6 +130,7 @@ export function phaseSoundSpeedScaleFor(properties, phase, {
 export function mechanicsMaterialPhaseRecord(material, properties, phase, {
   soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
   cflMaxSoundSpeedMPerS = 0,
+  liquidCflMaxSoundSpeedMPerS = 0,
   minGasSoundSpeedMPerS = DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S,
   viscosityEnabled = false,
   mlsMpmArtificialViscosityAlpha = DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA,
@@ -132,7 +143,8 @@ export function mechanicsMaterialPhaseRecord(material, properties, phase, {
   const restDensity = finiteNumber(phase?.densityKgPerM3, 0);
   const soundScale = phaseSoundSpeedScaleFor(properties, phase, {
     soundSpeedScale,
-    cflMaxSoundSpeedMPerS
+    cflMaxSoundSpeedMPerS,
+    liquidCflMaxSoundSpeedMPerS
   });
   const modulusScale = soundScale * soundScale;
   const bulkRaw = finiteNumber(phase?.bulkModulusPa, 0);
@@ -180,6 +192,7 @@ export function mechanicsMaterialPhaseRecord(material, properties, phase, {
 export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
   soundSpeedScale = DEFAULT_SOUND_SPEED_SCALE,
   cflMaxSoundSpeedMPerS = 0,
+  liquidCflMaxSoundSpeedMPerS = 0,
   minGasSoundSpeedMPerS = DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S,
   viscosityEnabled = false,
   mlsMpmArtificialViscosityAlpha = DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA,
@@ -196,6 +209,7 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
   const options = {
     soundSpeedScale,
     cflMaxSoundSpeedMPerS,
+    liquidCflMaxSoundSpeedMPerS,
     minGasSoundSpeedMPerS,
     viscosityEnabled,
     mlsMpmArtificialViscosityAlpha,
@@ -257,6 +271,7 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     metadata,
     soundSpeedScale,
     cflMaxSoundSpeedMPerS,
+    liquidCflMaxSoundSpeedMPerS,
     minGasSoundSpeedMPerS,
     viscosityEnabled,
     mlsMpmArtificialViscosityAlpha,

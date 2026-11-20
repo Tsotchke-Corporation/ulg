@@ -1954,6 +1954,7 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
     );
     if (
       descriptor.admitted !== true
+      || parentFieldView?.inheritedFineParentView != null
       || parentFieldView?.schema !== ULG_SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_SCHEMA
       || parentFieldView?.fineFieldView?.schema
         !== ULG_SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_SCHEMA

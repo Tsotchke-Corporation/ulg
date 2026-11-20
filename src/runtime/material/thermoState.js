@@ -54,6 +54,43 @@ export function orderedSegments(properties) {
 
 const R_GAS = 8.314462618;
 const CM1_TO_K = 1.4387768766;
+
+// One energy definition (G2 Phase 2, user 2026-11-13): u is specific internal
+// energy in every phase. cpJPerKgK is the isobaric heat capacity, so an ideal
+// gas phase's internal energy rises with Cv = Cp - R/M, and a transition to
+// gas absorbs dU = dH - R*T/M (the vapor's p*dv work; condensed volume is
+// neglected). Condensed phases have Cp ~ Cv and keep their values.
+function gasMolarMass(molarMassKgPerMol, phaseName) {
+  if (!(Number.isFinite(molarMassKgPerMol) && molarMassKgPerMol > 0)) {
+    throw new TypeError(`Gas phase ${phaseName} needs a molar mass for its internal-energy heat capacity`);
+  }
+  return molarMassKgPerMol;
+}
+
+function gasInternalHeatCapacityJPerKgK(phase, molarMassKgPerMol) {
+  if (Number.isFinite(phase.cvJPerKgK) && phase.cvJPerKgK > 0) return phase.cvJPerKgK;
+  return phase.cpJPerKgK - R_GAS / gasMolarMass(molarMassKgPerMol, phase.name);
+}
+
+function transitionInternalLatentHeatJPerKg(transition, molarMassKgPerMol) {
+  if (transition.to !== 'gas') return transition.latentHeatJPerKg;
+  return transition.latentHeatJPerKg
+    - R_GAS * transition.temperatureK / gasMolarMass(molarMassKgPerMol, transition.to);
+}
+
+function plateauSegment(transition, eStart, molarMassKgPerMol) {
+  const latentHeatJPerKg = transitionInternalLatentHeatJPerKg(transition, molarMassKgPerMol);
+  return {
+    type: 'plateau',
+    from: transition.from,
+    to: transition.to,
+    temperatureK: transition.temperatureK,
+    latentHeatJPerKg,
+    enthalpyLatentHeatJPerKg: transition.latentHeatJPerKg,
+    eStart,
+    eEnd: eStart + latentHeatJPerKg
+  };
+}
 // Piecewise-linearization cap for vibrational gas segments: past this the
 // Einstein terms are essentially classical and a single constant-cp tail
 // segment is exact to well under 1%.
@@ -61,15 +98,17 @@ const GAS_VIBRATION_SUBDIVISION_CAP_K = 4000;
 const GAS_VIBRATION_SUBDIVISION_COUNT = 12;
 
 // Exact vibrational-gas specific internal energy (J/kg) at temperature T:
-// rigid-rotor (translation + rotation + R) linear term plus the Einstein
-// enthalpy of each banked harmonic mode. Derived, not tabulated.
+// rigid-rotor (translation + rotation) linear term plus the Einstein energy of
+// each banked harmonic mode, which is the same in U and H. The banked
+// rigid-rotor value is isobaric, so its R/M is removed. Derived, not tabulated.
 function vibrationalGasEnergyFromZero(rigidRotorCpJPerKgK, thetaK, molarMassKgPerMol, temperatureK) {
   let vibrational = 0;
   for (const theta of thetaK) {
     const ratio = theta / Math.max(temperatureK, 1e-9);
     if (ratio < 60) vibrational += theta / (Math.exp(ratio) - 1);
   }
-  return rigidRotorCpJPerKgK * temperatureK + (R_GAS * vibrational) / molarMassKgPerMol;
+  const rigidRotorCvJPerKgK = rigidRotorCpJPerKgK - R_GAS / molarMassKgPerMol;
+  return rigidRotorCvJPerKgK * temperatureK + (R_GAS * vibrational) / molarMassKgPerMol;
 }
 
 // Subdivide a vibrational gas phase into constant-cp sub-segments whose
@@ -135,27 +174,20 @@ function buildOrderedSegments(properties) {
       segments.push(...subSegments);
       cumulativeEnergy = subSegments[subSegments.length - 1].eEnd;
       if (i < transitions.length) {
-        const transition = transitions[i];
-        const eStartPlateau = cumulativeEnergy;
-        cumulativeEnergy += transition.latentHeatJPerKg;
-        segments.push({
-          type: 'plateau',
-          from: transition.from,
-          to: transition.to,
-          temperatureK: transition.temperatureK,
-          latentHeatJPerKg: transition.latentHeatJPerKg,
-          eStart: eStartPlateau,
-          eEnd: cumulativeEnergy
-        });
+        const plateau = plateauSegment(transitions[i], cumulativeEnergy, molarMassKgPerMol);
+        cumulativeEnergy = plateau.eEnd;
+        segments.push(plateau);
       }
       continue;
     }
+    // A segment's cpJPerKgK is dU/dT: Cv for gas, the stored value otherwise.
     const seg = {
       type: 'phase',
       phase: phase.name,
       tLo,
       tHi,
-      cpJPerKgK: phase.cpJPerKgK,
+      cpJPerKgK: phase.name === 'gas'
+        ? gasInternalHeatCapacityJPerKgK(phase, molarMassKgPerMol) : phase.cpJPerKgK,
       debyeTemperatureK: phase.debyeTemperatureK || null,
       molarMassKgPerMol,
       atomsPerFormula,
@@ -165,18 +197,9 @@ function buildOrderedSegments(properties) {
     seg.eEnd = cumulativeEnergy;
     segments.push(seg);
     if (i < transitions.length) {
-      const transition = transitions[i];
-      const eStartPlateau = cumulativeEnergy;
-      cumulativeEnergy += transition.latentHeatJPerKg;
-      segments.push({
-        type: 'plateau',
-        from: transition.from,
-        to: transition.to,
-        temperatureK: transition.temperatureK,
-        latentHeatJPerKg: transition.latentHeatJPerKg,
-        eStart: eStartPlateau,
-        eEnd: cumulativeEnergy
-      });
+      const plateau = plateauSegment(transitions[i], cumulativeEnergy, molarMassKgPerMol);
+      cumulativeEnergy = plateau.eEnd;
+      segments.push(plateau);
     }
   }
   return segments;

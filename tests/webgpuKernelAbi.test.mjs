@@ -201,7 +201,7 @@ const CONTRACTS = [
     label: 'ulg-sph-reaction-params',
     factory: 'createParamsArray',
     wgslStruct: 'ReactionParams',
-    bytes: 48
+    bytes: 64
   },
   {
     file: 'src/runtime/sph/sphReactionGpuSummary.js',

@@ -153,6 +153,9 @@ export function thermalMaterialTablesExactlyEqual(cachedTable, liveTable) {
     && typedArrayBytesExactlyEqual(cachedTable.segments, liveTable.segments)
     && ((cachedTable.molarMassIdentities == null && liveTable.molarMassIdentities == null)
       || typedArrayBytesExactlyEqual(cachedTable.molarMassIdentities, liveTable.molarMassIdentities))
+    // Explicit-branch boiling reads these; a cache entry without them is stale.
+    && typedArrayBytesExactlyEqual(cachedTable.explicitVaporizationRecords ?? new Float32Array(0),
+      liveTable.explicitVaporizationRecords ?? new Float32Array(0))
     && JSON.stringify(cachedTable.segmentMetadata ?? []) === JSON.stringify(liveTable.segmentMetadata ?? [])
   );
 }
@@ -224,7 +227,11 @@ export function buildSphReactionTableFromViewState(viewState = {}, {
   const mechanicsProfile = viewState.mlsMpmGpuParticleState
     ?? viewState.gpuMechanics
     ?? {};
-  const builder = viewState.sphGpuParticleState?.exactMass
+  // The rational exact route compiles reference (physical-energy) reactions.
+  // The G2 integer energy ledger keeps the heat-proxy law (user, 2026-11-13):
+  // chemical heat is a recorded source in the ledger.
+  const exactMass = viewState.sphGpuParticleState?.exactMass;
+  const builder = exactMass && exactMass.energyLedger !== true
     ? buildSphReferenceReactionTable : buildSphReactionTable;
   return builder(viewState.reactions || [], {
     materialProperties: viewState.materialProperties || {},

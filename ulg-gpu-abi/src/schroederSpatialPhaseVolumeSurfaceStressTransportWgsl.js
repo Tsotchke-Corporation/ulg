@@ -19,7 +19,8 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_ROW_READY,
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_ROW_WORDS,
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_VERSION,
-  SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE
+  SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE,
+  SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
 } from './schroederSpatialPhaseVolumeTransport.js';
 import {
   schroederSpatialPhaseVolumeSurfaceStressOperatorWgsl
@@ -102,10 +103,12 @@ struct PhaseVolumeSurfaceStressParams {
   reserved9: u32,
   reserved10: u32,
   reserved11: u32,
-  reserved12: u32,
-  reserved13: u32,
-  reserved14: u32,
-  reserved15: u32,
+  // A1 direct-dispatch snapshot (bytes 240..255; see
+  // SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC).
+  dispatch_snapshot_x: u32,
+  dispatch_snapshot_y: u32,
+  dispatch_snapshot_z: u32,
+  dispatch_snapshot_w: u32,
 };
 
 struct SurfacePhaseMechanics {
@@ -119,6 +122,18 @@ struct SurfacePhaseMechanics {
 @group(0) @binding(5) var<storage, read> material_phase_records: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: PhaseVolumeSurfaceStressParams;
 @group(0) @binding(7) var<storage, read_write> transport_scratch: array<atomic<u32>>;
+
+const FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC: u32 = ${SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC}u;
+
+// A direct 1D launch of this field consumer runs only the workgroups the
+// staged indirect launch would have run. Workgroup-uniform; inert otherwise.
+fn direct_dispatch_excludes(workgroup_id: vec3<u32>) -> bool {
+  return params.dispatch_snapshot_w == FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
+    && (workgroup_id.y != 0u || workgroup_id.z != 0u
+      || params.dispatch_snapshot_z == 0u
+      || workgroup_id.x
+        >= params.dispatch_snapshot_x * params.dispatch_snapshot_y);
+}
 
 ${schroederSpatialPhaseVolumeSurfaceStressOperatorWgsl}
 
@@ -798,6 +813,7 @@ fn dispatch_surface_stress_pass(
   bond: u32,
   parity: u32
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let linear_group =
     workgroup_id.x + workgroup_id.y * field_load(60u);
   let field_index =
@@ -822,6 +838,7 @@ fn initialize_surface_stress(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let linear_group =
     workgroup_id.x + workgroup_id.y * field_load(60u);
   let field_index =
@@ -964,6 +981,7 @@ fn validate_surface_stress(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let linear_group =
     workgroup_id.x + workgroup_id.y * field_load(60u);
   let field_index =
@@ -986,6 +1004,7 @@ fn commit_surface_stress(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let linear_group =
     workgroup_id.x + workgroup_id.y * field_load(60u);
   let field_index =

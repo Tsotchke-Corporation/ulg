@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSphExactMassFormat, encodeSphExactMass } from '../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { encodeSphExactSigned, decodeSphExactSignedUnits, sphExactUnitsFromF32Bits }
+  from '../ulg-gpu-abi/src/sphExactSignedLedger.js';
+import { resolveSphExactParticleMassSeed } from '../src/runtime/sph/sphExactMassParticleSeed.js';
 import { acquireSphExactMassRead, forkSphExactMassRead, sliceSphExactMassRead,
   releaseSphExactMassRead, releaseSphExactMassInventory } from '../src/runtime/sph/sphExactMassInventoryGpu.js';
 import {
@@ -63,6 +66,50 @@ test('actual cold particle upload preserves binary64 masses outside the f32 proj
   }
   assert.equal(upload.exactMassInventory, held.read.family);
   assert.equal(sphGpuParticleUploadMatchesDevice(upload, f.device), true);
+  await releaseSphParticleExactMassRead(held); destroySphGpuParticleBuffers(upload); await f.device.drain();
+  assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
+});
+
+test('cold upload seeds signed energy rows as the rounded f32 product of the solver mass and specific energy', async () => {
+  const f = fixture({ masses: [1 + 2 ** -30, 2 ** -10 + 2 ** -50, 3.5] });
+  f.state.particles.forEach((particle, index) => { particle.specificInternalEnergyJPerKg = [3.25e5, -1234.5, 77.125][index]; });
+  f.packed = buildSphGpuParticleBuffers(f.state, f.options);
+  const upload = uploadSphGpuParticleBuffers(f.device, f.packed);
+  const held = acquireSphParticleExactMassRead(upload, f.device);
+  const energyBuffers = f.device.allocated.filter(buffer => buffer.label === 'ulg-exact-energy-initial');
+  assert.equal(energyBuffers.length, 1);
+  assert.equal(held.energy.energyBuffer, energyBuffers[0]);
+  assert.equal(held.energy.rowCount, 3); assert.equal(held.energy.format, held.read.format);
+  const words = new Uint32Array(energyBuffers[0].bytes);
+  // [U rows][S rows][control]: three rows of nine words, twice, then four.
+  assert.equal(words.length, 2 * 3 * 9 + 4);
+  for (let row = 0; row < 3; row++) {
+    const m = f.packed.state[row * 8 + 3], u = f.packed.state[row * 8 + 7];
+    const product = Math.fround(m * u);
+    assert.notEqual(product, 0);
+    // U0 = fl32(m*u): the GPU recomputes this product bit for bit.
+    assert.deepEqual(words.slice(row * 9, (row + 1) * 9), encodeSphExactSigned(product, f.format));
+    assert.equal(decodeSphExactSignedUnits(words.slice(row * 9, (row + 1) * 9), f.format),
+      sphExactUnitsFromF32Bits(new Uint32Array(new Float32Array([product]).buffer)[0], f.format));
+  }
+  assert.ok(words.slice(27).every(word => word === 0), 'cold S rows and control are clear');
+  await releaseSphParticleExactMassRead(held); destroySphGpuParticleBuffers(upload); await f.device.drain();
+  assert.equal(energyBuffers[0].destroyed, 1);
+  assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
+});
+
+test('a run format other than the energy ledger format seeds no energy rows and keeps exact mass', async () => {
+  const f = fixture({ masses: [2 ** -120, 1] });
+  const format = createSphExactMassFormat({ wordCount: 66, quantumExponent: -1074 });
+  f.packed = buildSphGpuParticleBuffers(f.state,
+    { exactMass: { format, reference: 'wide run format without an energy ledger' } });
+  assert.equal(resolveSphExactParticleMassSeed(f.packed).energyRowsStatus,
+    'run-format-is-not-the-energy-ledger-format');
+  const upload = uploadSphGpuParticleBuffers(f.device, f.packed);
+  const held = acquireSphParticleExactMassRead(upload, f.device);
+  assert.equal(held.energy, null);
+  assert.equal(f.device.allocated.some(buffer => buffer.label === 'ulg-exact-energy-initial'), false);
+  assert.deepEqual(new Uint32Array(held.read.buffer.bytes).slice(0, 66), encodeSphExactMass(2 ** -120, format));
   await releaseSphParticleExactMassRead(held); destroySphGpuParticleBuffers(upload); await f.device.drain();
   assert.equal(f.device.allocated.every(buffer => buffer.destroyed === 1), true);
 });

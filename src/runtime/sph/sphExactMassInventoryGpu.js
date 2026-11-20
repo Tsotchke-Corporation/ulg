@@ -182,6 +182,51 @@ export async function createSphExactMassInventoryFromReactionPlacementWebGpu({ d
   }
 }
 
+/** Exact, disjoint carrier/history rows for the original mechanics projection.
+ * This numeric owner is private to that projection; it cannot publish a new
+ * physical branch. No mass is reconstructed from its f32 rendering value. */
+export async function createSphExactMassInventoryFromResidualMechanicsWebGpu({device,sourceRead}={}) {
+  const {resolveSchroederResidualMechanicsSourceRead:resolve}=
+    await import('./schroederResidualMechanicsSourceGpu.js');
+  const {SPH_REACTION_RESIDUAL_HISTORY_LAYOUT:H}=await import('./sphReactionResidualHistoryGpu.js');
+  const held=resolve(sourceRead,{device}),{source,carrier}=held;
+  const mass=carrier.read,original=liveRead(mass,device);
+  const count=uint(source.particleCount,'mechanics inventory count',true);
+  const record=recordFor(device,original.format,count,
+    uint(Math.max(mass.generation,source.history.generation)+1,'mechanics inventory generation',true));
+  try {
+    record.buffer=allocate(device,record.resources,'ulg-exact-mass-residual-mechanics',count*H.format.wordCount*4);
+    const code=`
+@group(0) @binding(0) var<storage,read> history:array<u32>;
+@group(0) @binding(1) var<storage,read> control:array<u32>;
+@group(0) @binding(2) var<storage,read_write> mass:array<u32>;
+@compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) id:vec3<u32>){
+  let row=id.x;if(row>=${source.historyCapacity}u || row>=control[4] || control[2]!=0u){return;}
+  for(var w=0u;w<${H.format.wordCount}u;w++){
+    mass[(${source.phaseLayout?.carrierLineageCount??source.carrierCount}u+row)*${H.format.wordCount}u+w]=
+      history[${H.headerWords}u+row*${H.rowWords}u+${H.massOffset}u+w];
+  }
+}`;
+    const p=createCachedExplicitComputePipeline(device,{code,entryPoint:'gather',
+      cacheKey:`ulg-residual-mechanics-mass-v2-${source.carrierCount}-${source.historyCapacity}-${source.phaseLayout?.lineageCount??0}`,
+      bindings:[computeBufferBinding(0,'read-only-storage'),computeBufferBinding(1,'read-only-storage'),computeBufferBinding(2,'storage')]});
+    const group=device.createBindGroup({layout:p.bindGroupLayout,entries:[source.history.buffer,source.controlBuffer,record.buffer]
+      .map((buffer,binding)=>({binding,resource:{buffer}}))});
+    const encoder=device.createCommandEncoder();
+    if(source.phaseLayout){
+      const {carrierLineageCount,carrierLaneCount,lineageCount}=source.phaseLayout,stride=H.format.wordCount*4;
+      for(let lane=0;lane<carrierLaneCount;lane++)encoder.copyBufferToBuffer(mass.buffer,
+        mass.byteOffset+lane*carrierLineageCount*stride,record.buffer,lane*lineageCount*stride,carrierLineageCount*stride);
+    }else encoder.copyBufferToBuffer(mass.buffer,mass.byteOffset,record.buffer,0,mass.byteLength);
+    const pass=encoder.beginComputePass();pass.setPipeline(p.pipeline);pass.setBindGroup(0,group);
+    pass.dispatchWorkgroups(Math.ceil(source.historyCapacity/64));pass.end();
+    resolve(sourceRead,{device});device.queue.submit([encoder.finish()]);
+    return mintFamily(record,Object.freeze({kind:'residual-mechanics-projection',
+      carrierRowCount:source.carrierCount,historyCapacity:source.historyCapacity,
+      sourceGeneration:mass.generation,historyGeneration:source.history.generation}));
+  }catch(error){record.closed=true;void retire(record);throw error;}
+}
+
 /** Copy the current particle mass limbs from the original completed exchange.
  * This owner still grants only numeric inventory; the closure must adopt its
  * aligned quantities, history and aerosol together before physical publication.
@@ -244,6 +289,31 @@ fn gather_vapor_particle_mass(@builtin(global_invocation_id) id: vec3<u32>) {
     if (submitted) void deferConfirmedSubmittedWorkCleanup(device, () => release(held)).catch(() => {});
     else release(held);
   }
+}
+
+/** Integer energy-ledger phase transfer (g2-integer-ledger-proposal.md, Phase
+ * 2): mint the successor family whose rows the caller's ledger kernel writes
+ * in its own encoder from the original live read. The caller must submit that
+ * write before any read of the family, or abandon it before submission. */
+export function createSphExactMassLedgerSuccessorWebGpu({ device, sourceRead } = {}) {
+  const held = READS.get(sourceRead), source = held?.record;
+  if (!held || held.released || source.device !== device || source.destroyed || source.quarantined
+      || source.deviceState.lost || sourceRead.buffer !== source.buffer) {
+    throw new TypeError('Ledger mass successor requires an original live source read');
+  }
+  const rowCount = uint(sourceRead.rowCount, 'ledger successor row count', true);
+  const generation = uint(uint(sourceRead.generation, 'ledger source generation') + 1, 'ledger successor generation', true);
+  const record = recordFor(device, source.format, rowCount, generation);
+  try {
+    record.buffer = allocate(device, record.resources, 'ulg-exact-mass-ledger-phase-successor',
+      rowCount * source.format.wordCount * 4);
+    const family = mintFamily(record, Object.freeze({ kind: 'ledger-phase-carrier-transfer',
+      sourceGeneration: sourceRead.generation, carrierRowCount: rowCount }));
+    let settled = false;
+    return Object.freeze({ family, buffer: record.buffer,
+      abandon() { if (settled) return false; settled = true; record.closed = true; void retire(record); return true; },
+      commit() { if (settled) throw new TypeError('Ledger mass successor was already settled'); settled = true; return family; } });
+  } catch (error) { record.closed = true; void retire(record); throw error; }
 }
 
 /** Gather only from an original phase producer's final committed records,

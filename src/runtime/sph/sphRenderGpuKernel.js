@@ -3035,8 +3035,11 @@ function assertUniqueDispersedMediumSurfaceRoutes(
   }
   for (const opticalStateId of readyOpticalStateIds) {
     if (!surfaceIndexByOpticalStateId.has(opticalStateId)) {
+      const routed = surfaceTable.metadata
+        .map((surface) => `${surface?.material ?? '?'}/${surface?.phase ?? '?'}=${surface?.opticalStateId ?? 0}`)
+        .slice(0, 12).join(', ');
       throw new RangeError(
-        `ready dispersed-medium opticalStateId ${opticalStateId} has no render surface route`
+        `ready dispersed-medium opticalStateId ${opticalStateId} has no render surface route (routed: ${routed})`
       );
     }
     const surface = surfaceTable.metadata[

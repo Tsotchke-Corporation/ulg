@@ -432,7 +432,7 @@ test('canonical contact envelope seals the one-time solver trust ball and wall s
   );
   assert.match(
     sphReactionMotionEnvelopeWatchWgsl,
-    /REACTION_MOTION_CONTACT_TRUST_DIAMETERS: f32 =\s*16\.0/
+    /REACTION_MOTION_CONTACT_TRUST_DIAMETERS: f32 =\s*1\.0/
   );
   assert.match(
     sphReactionMotionEnvelopeWatchWgsl,

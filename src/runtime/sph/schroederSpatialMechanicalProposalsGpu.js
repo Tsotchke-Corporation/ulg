@@ -4163,15 +4163,28 @@ fn reduce_support(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
       }
     }
-    atomicMax(
-      &global_support_bits[0u],
-      bitcast<u32>(diameter_m)
-    );
-    if (ss_exact_near_finite(displacement_m)) {
+    // Words 0 and 1 size only the pair query radius. A class-0 endpoint
+    // (gas, or any non-liquid non-solid carrier) is rejected from every pair
+    // by both the graph and the solver, so its diameter and swept
+    // displacement can never reach an admitted pair. Letting them in turned
+    // a single steam carrier (rest volume ~1,600x its liquid) into a
+    // whole-scene query for every source. Word 2 (wall projection) still
+    // covers every active row: it also gates the zero-edge solver path.
+    let pair_endpoint_class =
+      mechanical_graph_source_phase_class(particle_index) != 0u;
+    if (pair_endpoint_class) {
       atomicMax(
-        &global_support_bits[1u],
-        bitcast<u32>(max(displacement_m, 0.0))
+        &global_support_bits[0u],
+        bitcast<u32>(diameter_m)
       );
+    }
+    if (ss_exact_near_finite(displacement_m)) {
+      if (pair_endpoint_class) {
+        atomicMax(
+          &global_support_bits[1u],
+          bitcast<u32>(max(displacement_m, 0.0))
+        );
+      }
     } else {
       atomicOr(
         &graph_control[14u],
@@ -7853,6 +7866,10 @@ fn mechanical_allocate_energy_iteration(
     cumulative.w + cumulative_heat_j / pos_mass.w,
     pos_mass.w > 0.0
   );
+  // Contact only dissipates (heat >= 0), so u may not fall below its
+  // step-start value. A sign test on u itself is gauge-dependent: the
+  // phase-caloric (IAPWS-style) water gauge gives ice u < 0.
+  let start_u = select(vel_u.w, cumulative.w, pos_mass.w > 0.0);
   if (
     !mechanical_solver_finite(pair_delta_k_j)
     || !mechanical_solver_finite(pair_heat_j)
@@ -7860,17 +7877,17 @@ fn mechanical_allocate_energy_iteration(
     || !mechanical_solver_finite(next_u)
     || pair_heat_j < 0.0
     || wall_heat_j < 0.0
-    || next_u < 0.0
+    || next_u < start_u
   ) {
     atomicOr(
       &graph_control[14u],
       select(
         ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NONFINITE}u,
         ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE.NEGATIVE_INTERNAL_ENERGY}u,
-        mechanical_solver_finite(next_u) && next_u < 0.0
+        mechanical_solver_finite(next_u) && next_u < start_u
       )
     );
-    if (mechanical_solver_finite(next_u) && next_u < 0.0) {
+    if (mechanical_solver_finite(next_u) && next_u < start_u) {
       atomicAdd(&traversal_evidence[39u], 1u);
     }
     return;
@@ -14105,10 +14122,10 @@ fn apply_matching_cleanup_edge_for_index(
           || !mechanical_solver_finite(primary_next_u)
           || !mechanical_solver_finite(secondary_next_u)
           || !mechanical_solver_finite(tertiary_next_u)
-          || center_next_u < 0.0
-          || primary_next_u < 0.0
-          || secondary_next_u < 0.0
-          || tertiary_next_u < 0.0
+          || center_next_u < center_cumulative.w
+          || primary_next_u < primary_cumulative.w
+          || secondary_next_u < secondary_cumulative.w
+          || tertiary_next_u < tertiary_cumulative.w
         ) {
           atomicOr(
             &graph_control[14u],
@@ -14256,9 +14273,9 @@ fn apply_matching_cleanup_edge_for_index(
           || !mechanical_solver_finite(center_next_u)
           || !mechanical_solver_finite(primary_next_u)
           || !mechanical_solver_finite(secondary_next_u)
-          || center_next_u < 0.0
-          || primary_next_u < 0.0
-          || secondary_next_u < 0.0
+          || center_next_u < center_cumulative.w
+          || primary_next_u < primary_cumulative.w
+          || secondary_next_u < secondary_cumulative.w
         ) {
           atomicOr(
             &graph_control[14u],
@@ -14438,8 +14455,8 @@ fn apply_matching_cleanup_edge_for_index(
       if (
         !mechanical_solver_finite(low_next_u)
         || !mechanical_solver_finite(high_next_u)
-        || low_next_u < 0.0
-        || high_next_u < 0.0
+        || low_next_u < low_cumulative.w
+        || high_next_u < high_cumulative.w
       ) {
         atomicOr(
           &graph_control[14u],
@@ -15804,7 +15821,11 @@ fn project_matching_cleanup_walls_for_index(self_index: u32) {
       + (cumulative.y + next_wall_heat_j) / pos_mass.w,
     pos_mass.w > 0.0
   );
-  if (!mechanical_solver_finite(next_u) || next_u < 0.0) {
+  // Wall contact only dissipates; see the gauge note at the pair sites.
+  if (
+    !mechanical_solver_finite(next_u)
+    || next_u < select(vel_u.w, cumulative.w, pos_mass.w > 0.0)
+  ) {
     atomicOr(
       &graph_control[14u],
       ${SCHROEDER_SPATIAL_MECHANICAL_GRAPH_FAILURE
@@ -18839,7 +18860,6 @@ fn publish_contact_proposal(
     || !mechanical_publish_finite3(dv)
     || !mechanical_publish_finite(du)
     || !mechanical_publish_finite(mechanical_heat_j)
-    || final_velocity.w < 0.0
     || du < 0.0
     || mechanical_heat_j < 0.0
   ) {
@@ -18911,7 +18931,6 @@ fn complete_zero_contact_proposal(
     || !mechanical_publish_finite3(original_velocity.xyz)
     || !mechanical_publish_finite(original_velocity.w)
     || original_position.w < 0.0
-    || original_velocity.w < 0.0
   ) {
     atomicOr(
       &graph_control[14u],
@@ -19916,7 +19935,8 @@ function mechanicalProposalPoolSlot(
   arenaIndex = 0,
   generation = null,
   pairGraphByteBudget = null,
-  solverBudget = null
+  solverBudget = null,
+  selectedLevel = MECHANICAL_APPLY_ALL_LEVELS
 ) {
   if (typeof solverBudget?.cacheKey !== 'string') {
     throw new TypeError(
@@ -20072,7 +20092,9 @@ function mechanicalProposalPoolSlot(
     Math.max(0, Math.trunc(finiteNumber(arenaIndex, 0))),
     'generation.execution.arenaIndex'
   );
-  const key = String(exactArenaIndex);
+  // A shared-dt chain retains a distinct single-use proposal for each level.
+  // The generation arena alone aliases those live owners.
+  const key = `${exactArenaIndex}:${selectedLevel}`;
   const solverIterationUniformPlan = mechanicalSolverIterationUniformPlan(
     device,
     solverBudget.jacobiIterations
@@ -20634,7 +20656,8 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
     authority.execution.arenaIndex,
     generation,
     pairGraphByteBudget,
-    solverBudget
+    solverBudget,
+    immutableSelectedLevel
   );
   const pool = poolAcquisition.slot;
   const identityBuffer = authority.identityBuffer || pool.identityDisabledBuffer;

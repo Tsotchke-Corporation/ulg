@@ -149,7 +149,11 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     },
     runtime: {
       reactionActivationPolicy:
-        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED
+        SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
+      // The 400 K floor and 200 K ceiling are controlled heater and cooler
+      // plates: their controllers hold the set temperature, so they are
+      // fixed-temperature faces (passive containers default to finite walls).
+      wallModel: 'infinite-fixed-temperature-reservoir'
     },
     validation: {
       // The first frozen steam lineage reaches the cold ceiling near 3.33 s.
@@ -223,7 +227,11 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       // startup to prove that fact before final topology allocation, then
       // omit product-placement rows which no reaction in this mounted catalog
       // can consume. Reactive presets retain their conservative reserve.
-      reactionProductReserveExactDiscovery: '1'
+      reactionProductReserveExactDiscovery: '1',
+      // Two inner contact rounds per cleanup pass (as sodium-water). Measured
+      // 2026-11-16 on room-air Iron Ice once meltwater exists: pass-budget
+      // non-convergence fell from 46% to 7% of steps at the same 14 steps/s.
+      contactInnerRounds: '2'
     },
     validation: {
       // The refined initial-rate screen crosses one-carrier vapor demand near
@@ -572,7 +580,16 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
     runtime: {
       reactionActivationPolicy:
         SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
-      sdt: '0.001',
+      // Real time (user, 2026-11-15): the semi-implicit liquid pressure solve
+      // carries the stiffness at an 8 ms step (c dt / dx = 3, inside the
+      // measured 6.4 envelope, converged at 15 CG iterations; c = 375 dx,
+      // 94% of the explicit 1 ms default's 400 dx), and real-time pacing sizes
+      // each presentation chunk from the measured frame period
+      // (plan/todo/a1-eshkol-coarse-dt.md).
+      sdt: '0.008',
+      implicitPressure: '1',
+      implicitCfl: '3',
+      realtimePacing: '1',
       cfl: '0.6',
       cflSafety: '0.4',
       avAlpha: '0',
@@ -583,7 +600,7 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       reactionProductReserveMinimumLiveFraction: '0',
       submitBurstSteps: '8',
       workerLivePreview: '1',
-      residentStepsPerSchedule: '64',
+      residentStepsPerSchedule: '256',
       residentComputeManagerMode: 'worker-owned-resident-lane',
       residentInterfaceRefreshMode: 'pipelined',
       schroederLawQueue: '0',

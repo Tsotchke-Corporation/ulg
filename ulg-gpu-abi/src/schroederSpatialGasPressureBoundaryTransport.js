@@ -38,6 +38,8 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LE
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT =
   1;
 
+export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT = 2;
+
 export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_BINDINGS =
   Object.freeze({
     mechanicsField: 0,
@@ -167,7 +169,8 @@ export const SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_ABI =
       sameLevel:
         SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
       fineToCoarseParentAdjoint:
-        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
+      chainAdjoint: SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT
     }),
     pressureLaw:
       'same-level:effective-gauge-pa=W-transpose-times-absolute-primal-pressure-minus-explicit-ambient;node-impulse-ns=negative-pressure-scale-times-effective-gauge-times-summed-condensed-v0j-gradient-m2-times-dt;fine-adjoint:effective-gauge-pa=A-transpose-times-W-transpose-times-primal-gauge-and-field-impulse-ns=negative-pressure-scale-times-effective-gauge-times-field-v0j-gradient-m2-times-dt;missing-primal-cells-have-zero-gauge-without-renormalization',
@@ -246,6 +249,7 @@ function tuple3(value, label, mapper) {
 }
 
 function normalizeCrossLevelMappingMode(value) {
+  if(value==='chain-adjoint' || value===SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT) return SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT;
   if (
     value === 'same-level'
     || value
@@ -261,7 +265,7 @@ function normalizeCrossLevelMappingMode(value) {
     return SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT;
   }
   throw new RangeError(
-    'crossLevelMappingMode must be same-level or fine-to-coarse-parent-adjoint'
+    'crossLevelMappingMode must be same-level, fine-to-coarse-parent-adjoint or chain-adjoint'
   );
 }
 
@@ -604,6 +608,14 @@ export function createSchroederSpatialGasPressureBoundaryTransportParams({
       throw new RangeError(
         'same-level gas metadata must match the target grid and omit parent identity'
       );
+    }
+  } else if(mappingMode===SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_CHAIN_ADJOINT) {
+    const distance=resolvedGasLevel-targetLevel;
+    if(distance<0 || distance>5 || gasSpacing!==Math.fround(targetSpacing*2**distance)
+      || resolvedParentGeneration!==integer(generationId,'generationId',1)
+      || resolvedParentCompletion<1 || resolvedParentFieldCapacity!==layout.fieldCapacity
+      || resolvedParentFieldWordCapacity!==64+layout.fieldCapacity) {
+      throw new RangeError('chain adjoint requires the original bounded level, generation and native coefficient layout');
     }
   } else {
     if (targetLevel === 0x7fff_ffff || resolvedGasLevel !== targetLevel + 1) {

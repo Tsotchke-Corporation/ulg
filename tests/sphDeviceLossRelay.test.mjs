@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSphDeviceLossRelay } from '../src/runtime/sph/sphDeviceLossRelay.js';
+import {
+  createSphDeviceLossRelay,
+  watchSphDeviceLoss,
+  watchSphDeviceLossFor
+} from '../src/runtime/sph/sphDeviceLossRelay.js';
 
 test('device-loss relay records the latest value before a plain-call notification', () => {
   const state = { info: null };
@@ -78,4 +82,93 @@ test('device-loss relay preserves rejected-promise notification identity', async
   await Promise.reject(error).then(relay).catch(relay);
   assert.deepEqual(observed, [error]);
   assert.equal(state.info, error);
+});
+
+function countedLossDevice() {
+  let resolve;
+  let reject;
+  const lost = new Promise((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
+  lost.catch(() => {});
+  let subscriptions = 0;
+  const originalThen = lost.then.bind(lost);
+  lost.then = (...args) => { subscriptions += 1; return originalThen(...args); };
+  return { device: { lost }, resolve, reject, get subscriptions() { return subscriptions; } };
+}
+const settle = () => new Promise((done) => setImmediate(done));
+
+test('device-loss registry adds one reaction per device however many steps watch it', async () => {
+  const f = countedLossDevice();
+  const states = [];
+  const calls = [];
+  for (let step = 0; step < 1000; step += 1) {
+    const state = { info: null };
+    states.push(state);
+    assert.equal(watchSphDeviceLoss(f.device, state, (info) => calls.push([step, info])), true);
+  }
+  assert.equal(f.subscriptions, 1);
+  const info = { reason: 'destroyed' };
+  f.resolve(info);
+  await settle();
+  assert.ok(states.every((state) => state.info === info), 'every live loss state learns the loss');
+  assert.equal(calls.length, 1000);
+  assert.ok(calls.every(([, value]) => value === info));
+});
+
+test('device-loss registry notifies a watcher registered after the loss', async () => {
+  const f = countedLossDevice();
+  watchSphDeviceLoss(f.device, { info: null });
+  const info = { reason: 'unknown' };
+  f.resolve(info);
+  await settle();
+  const late = { info: null };
+  const calls = [];
+  watchSphDeviceLoss(f.device, late, (value) => calls.push(value));
+  assert.equal(late.info, null, 'delivered on a later microtask, never synchronously');
+  await settle();
+  assert.equal(late.info, info);
+  assert.deepEqual(calls, [info]);
+  assert.equal(f.subscriptions, 1);
+});
+
+test('device-loss registry forwards a fulfilled-loss notifier throw once, after all watchers', async () => {
+  const f = countedLossDevice();
+  const order = [];
+  const failure = new Error('notifier failed');
+  for (const name of ['a', 'b']) {
+    watchSphDeviceLoss(f.device, { info: null }, (value) => {
+      order.push([name, value]);
+      if (value !== failure) throw failure;
+    });
+  }
+  const info = { reason: 'destroyed' };
+  f.resolve(info);
+  await settle();
+  assert.deepEqual(order, [['a', info], ['b', info], ['a', failure], ['b', failure]]);
+});
+
+test('device-loss registry calls a rejected-loss notifier once even when it throws', async () => {
+  const f = countedLossDevice();
+  const calls = [];
+  watchSphDeviceLoss(f.device, { info: null }, (value) => { calls.push(value); throw new Error('x'); });
+  const error = new Error('loss observation rejected');
+  f.reject(error);
+  await settle();
+  assert.deepEqual(calls, [error]);
+});
+
+test('device-loss target watch works on frozen targets and passes the live target', async () => {
+  const f = countedLossDevice();
+  const target = Object.freeze({ id: 7 });
+  const seen = [];
+  assert.equal(watchSphDeviceLossFor(f.device, target, (live, info) => seen.push([live, info])), true);
+  const info = { reason: 'destroyed' };
+  f.resolve(info);
+  await settle();
+  assert.deepEqual(seen, [[target, info]]);
+});
+
+test('device-loss registry rejects devices without a loss promise', () => {
+  assert.equal(watchSphDeviceLoss({}, { info: null }), false);
+  assert.equal(watchSphDeviceLoss(null, { info: null }), false);
+  assert.equal(watchSphDeviceLossFor({}, {}, () => {}), false);
 });

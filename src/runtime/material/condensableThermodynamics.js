@@ -239,6 +239,15 @@ export function isIdealGasCaloricThermodynamics(model) {
   return models.has(model) && model.schema === IDEAL_GAS_CALORIC_SCHEMA;
 }
 
+// The gas branch's rest density is on the standard-atmosphere basis that the
+// mechanics gas EOS (rho_ref = rho_rest * p_amb / 101325) and the implicit
+// atmosphere (1.2041 kg/m^3 at 101325 Pa) assume. A condensable model's
+// caloric reference pressure (water: 2339 Pa, saturation at 20 C) is an
+// enthalpy reference, not a density basis: on it, water vapor's rest density
+// was 0.0173 kg/m^3, so the EOS held vapor at 1/43 of its 1-atm density as
+// zero gauge and every vapor row claimed ~43x its volume at ambient pressure.
+export const GAS_MECHANICS_REFERENCE_PRESSURE_PA = 101325;
+
 // One phase roster drives cold packing, thermal graphs, and gas admission.
 // Phase is selected explicitly even when two energy intervals overlap.
 export function phaseCaloricBranches(model) {
@@ -252,7 +261,7 @@ export function phaseCaloricBranches(model) {
       energyMinJPerKg: model[`${prefix}EnergyMinJPerKg`], energyMaxJPerKg: model[`${prefix}EnergyMaxJPerKg`],
       minTemperatureK: model.minTemperatureK, maxTemperatureK: model.maxTemperatureK,
       densityKgPerM3: phase === 'gas'
-        ? model.referencePressurePa / (model.specificGasConstantJPerKgK * model.referenceTemperatureK)
+        ? GAS_MECHANICS_REFERENCE_PRESSURE_PA / (model.specificGasConstantJPerKgK * model.referenceTemperatureK)
         : model.liquidDensityKgPerM3 });
   });
   if (model.solidCaloric) rows.unshift(model.solidCaloric);

@@ -1,3 +1,12 @@
+import { cloneSchroederSplitSpareReserve, splitSpareReservesEqual }
+  from '../runtime/sph/schroederSplitSpareReserve.js';
+import { createThermalPotentialWorkerLane, thermalPotentialWorkerCache, cancelThermalPotentialWorkerPending, thermalPotentialWorkerOrdinal,
+  beginThermalPotentialWorkerSchedule, finishThermalPotentialWorkerSchedule,
+  destroyThermalPotentialWorkerLane } from '../runtime/material/thermalPotentialWorkerLane.js';
+import { thermalPotentialWorkerSourceKey } from '../runtime/material/thermalPotentialWorkerProtocol.js';
+import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../runtime/sph/lawActivationReceiptRing.js';
+import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
+import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
   createSphGpuQueueStageRecorder,
   createSphGpuTimestampProfiler,
@@ -143,7 +152,8 @@ import {
   schroederTargetScheduleSuccessorGasBoundaryActionable,
   schroederTargetScheduleWriterSetMatchesActivation,
   validateSchroederTargetScheduleAuthorityForExecution,
-  validateSchroederTargetScheduleConfigurationContinuity
+  validateSchroederTargetScheduleConfigurationContinuity,
+  schroederMechanicsTableHasGasOrPlasmaPhase
 } from '../runtime/sph/schroederTargetScheduleAuthority.js';
 import {
   ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_SCHEMA as ULG_WORKER_PHASE_CARRIER_ONE_TO_FOUR_TRANSITION_ROUTE_SCHEMA,
@@ -634,7 +644,9 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
       && particleCapacity === count
       && (!stableLaneAddressPresent || typeof plan.stableLaneAddress === 'string');
     if (accepted) {
+      const splitSpareReserve = cloneSchroederSplitSpareReserve(plan, count);
       return {
+        ...(splitSpareReserve ? { splitSpareReserve } : {}),
         schema: ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA,
         status: 'phase-lane-capacity-ready',
         lineageCapacity,
@@ -663,6 +675,7 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
   const particleCapacity = Number(plan?.particleCapacity);
   const accepted = countAccepted
     && plan?.schema === ULG_SPH_PHASE_CARRIER_PLAN_V1_SCHEMA
+    && plan.splitSpareReserve == null
     && plan?.status === 'phase-companion-capacity-ready'
     && Number.isSafeInteger(primaryCapacity)
     && primaryCapacity > 0
@@ -692,7 +705,8 @@ function clonePhaseCarrierPlanForParticleCount(plan, particleCount, label = 'pha
 
 function phaseCarrierPlansEqual(left, right) {
   if (left == null || right == null) return left == null && right == null;
-  if (left.schema !== right.schema || left.status !== right.status) return false;
+  if (left.schema !== right.schema || left.status !== right.status
+      || !splitSpareReservesEqual(left.splitSpareReserve, right.splitSpareReserve)) return false;
   if (left.schema === ULG_SPH_PHASE_CARRIER_PLAN_V2_SCHEMA) {
     return left.lineageCapacity === right.lineageCapacity
       && left.primaryCapacity === right.primaryCapacity
@@ -1265,6 +1279,7 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     // The owned-buffer walk below still retires the retained particle
     // families. This callback owns only the materializer's uniform buffer.
   }
+  destroyThermalPotentialWorkerLane(staticGpuResources?.thermalPotentialOwner);
   destroySphThermalResponseGraphBuffers(
     staticGpuResources?.thermalResponseGraphUpload
   );
@@ -5385,6 +5400,13 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       .trim()
       .toLowerCase() === 'authoritative'
   );
+  // Single-level gas/condensed transport (schedule law activation receipt)
+  // mounts the one-level S9-C proposal beside its S9-A/S9-B sidecars.
+  const singleLevelPhaseVolumeInterfaceTransport = Boolean(
+    data.phaseVolumeInterfaceTransportRequired === true
+    && data.enableTwoLevelMechanics !== true
+    && data.mechanicsFieldViewsRequired !== false
+  );
   // The authoritative hierarchy always uses at least four direct arenas and
   // keys its sparse mechanics pair by the physical particle capacity.  The
   // worker-built initial epoch must use that exact cache identity too.  A
@@ -5447,7 +5469,8 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       phaseVolumeSidecarsEnabled:
         data.phaseVolumeSidecarsRequired === true
         || data.enablePhaseVolumeMigration === true
-        || authoritativeTwoLevel,
+        || authoritativeTwoLevel
+        || singleLevelPhaseVolumeInterfaceTransport,
       // Field views are skipped only when the schedule proves no field-mode
       // consumer exists (see epochOptionsForStep); default is to build.
       mechanicsFieldViewsEnabled: data.mechanicsFieldViewsRequired !== false,
@@ -5507,7 +5530,8 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       // than letting the hierarchy build it. Authoritative two-level
       // mechanics therefore has to mount the same read-only S9-C topology
       // artifact the hierarchy-owned path requests for its transaction.
-      phaseVolumeInterfaceProposalEnabled: authoritativeTwoLevel,
+      phaseVolumeInterfaceProposalEnabled:
+        authoritativeTwoLevel || singleLevelPhaseVolumeInterfaceTransport,
       exactNearCellTreeEnabled: data.exactNearCellTreeEnabled !== false,
       gpuQueueTimelineRequested: epochProfilingRequested,
       gpuTimestampRecorder: null
@@ -5795,11 +5819,20 @@ function exactWorkerPhaseVolumeSurfaceStressSubmission(
       'stage_surface_stress_yz_negative_even',
       'stage_surface_stress_yz_negative_odd'
     ].join('|')
-    && Number(submission.lifecycleDispatchCount) === 21
-    && submission.lifecycleMode
-      === 'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit'
-    && submission.ambientBuoyancyMode
-      === 'field-local-s9ab-current-volume-ambient-source'
+    // Standalone S9-A/B lifecycle (21 dispatches) or, since 2026-11-15, the
+    // one integrated with the single-level S9-C transport (18 dispatches).
+    && (
+      (Number(submission.lifecycleDispatchCount) === 21
+        && submission.lifecycleMode
+          === 'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit'
+        && submission.ambientBuoyancyMode
+          === 'field-local-s9ab-current-volume-ambient-source')
+      || (Number(submission.lifecycleDispatchCount) === 18
+        && submission.lifecycleMode
+          === 'integrated-s9c-transport-eighteen-central-bonds-validate-commit'
+        && submission.ambientBuoyancyMode
+          === 'integrated-s9c-current-volume-ambient-source')
+    )
     && submission.levelRole === 'single'
     && submission.twoLevel === false
     && Number(submission.fieldCompletionOrdinal) >= 1
@@ -5816,6 +5849,66 @@ function exactWorkerPhaseVolumeSurfaceStressSubmission(
       || String(submission.generationId) === String(generationId)
     )
   );
+}
+
+// Diagnostic (scripts/a1-ab-check.mjs): at the __ulgFingerprintStep-th adopted
+// canonical step, copy the adopted particle state and thermo in queue order,
+// so A/B runs compare an exact step on any preset (never read by physics).
+// stepCount: steps the adoption covers (a Tier-0 fused sequence adopts K
+// steps at once); a target inside a sequence is recorded as missed.
+function captureWorkerLaneFingerprint(device, sphUpload, stepCount = 1) {
+  const target = globalThis.__ulgFingerprintStep;
+  if (!Number.isInteger(target)) return;
+  const fingerprint = (globalThis.__ulgLaneFingerprint ??= { adopted: 0, capture: null, missed: null });
+  const before = fingerprint.adopted;
+  fingerprint.adopted += Math.max(1, Math.round(Number(stepCount) || 1));
+  if (!fingerprint.capture && !fingerprint.missed && before < target && fingerprint.adopted > target) {
+    fingerprint.missed = { target, before, after: fingerprint.adopted };
+  }
+  if (fingerprint.adopted !== target || fingerprint.capture || !device || !sphUpload?.stateBuffer) return;
+  const encoder = device.createCommandEncoder();
+  const copy = (buffer) => {
+    if (!buffer?.size) return null;
+    const out = device.createBuffer({ size: buffer.size, usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+    encoder.copyBufferToBuffer(buffer, 0, out, 0, buffer.size);
+    return out;
+  };
+  fingerprint.capture = { step: target, particleCount: sphUpload.particleCount ?? null,
+    stateStrideFloats: Number.isFinite(sphUpload.stateStrideBytes) ? sphUpload.stateStrideBytes / 4 : null,
+    state: copy(sphUpload.stateBuffer), thermo: copy(sphUpload.thermoBuffer) };
+  device.queue.submit([encoder.finish()]);
+  fingerprint.read ??= async () => {
+    const capture = fingerprint.capture;
+    if (!capture) return null;
+    if (capture.result) return capture.result;
+    const hash = async (buffer) => {
+      if (!buffer) return null;
+      await buffer.mapAsync(GPU_MAP_MODE.READ);
+      const words = new Uint32Array(buffer.getMappedRange().slice(0)); buffer.unmap();
+      let h = 0x811c9dc5;
+      for (const word of words) for (let k = 0; k < 4; k++) { h ^= (word >>> (8 * k)) & 0xff; h = Math.imul(h, 0x01000193) >>> 0; }
+      return { bytes: words.byteLength, hash: h.toString(16) };
+    };
+    // __ulgFingerprintExport: also keep the raw state floats (A1 coarse-dt
+    // error harness, scripts/a1-coarse-dt-error.mjs).
+    const exportRaw = globalThis.__ulgFingerprintExport === true;
+    const raw = {};
+    const hashKeep = async (buffer, key) => {
+      if (!buffer) return null;
+      await buffer.mapAsync(GPU_MAP_MODE.READ);
+      const bytes = buffer.getMappedRange().slice(0); buffer.unmap();
+      if (exportRaw) raw[key] = Array.from(new Float32Array(bytes));
+      const words = new Uint32Array(bytes);
+      let h = 0x811c9dc5;
+      for (const word of words) for (let k = 0; k < 4; k++) { h ^= (word >>> (8 * k)) & 0xff; h = Math.imul(h, 0x01000193) >>> 0; }
+      return { bytes: words.byteLength, hash: h.toString(16) };
+    };
+    capture.result = { step: capture.step, particleCount: capture.particleCount,
+      stateStrideFloats: capture.stateStrideFloats ?? null,
+      state: await hashKeep(capture.state, 'state'), thermo: await hashKeep(capture.thermo, 'thermo'),
+      ...(exportRaw ? { raw } : {}) };
+    return capture.result;
+  };
 }
 
 async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
@@ -5886,6 +5979,14 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     typeof data.schroederSameLevelMechanicsRunner === 'function'
       ? data.schroederSameLevelMechanicsRunner
       : runSchroederSameLevelMechanicsWebGpu;
+  let phaseSlotRefinementOptions = {};
+  if (data.hierarchyConfig?.enablePhaseSlotRefinement === true) {
+    const policy = createSchroederWorkerHierarchyConfig(data.hierarchyConfig);
+    if (policy.signature !== data.hierarchyConfig.signature) {
+      throw new TypeError('Worker phase-slot admission receipts do not match the hierarchy signature');
+    }
+    phaseSlotRefinementOptions = { enablePhaseSlotRefinement: true, ...policy.phaseSlotRefinementAdmissions };
+  }
   const sphParticleUpload = lane.sphParticleUpload || data.sphParticleUpload || null;
   const mlsMpmParticleUpload =
     lane.mlsMpmParticleUpload || data.mlsMpmParticleUpload || null;
@@ -5937,12 +6038,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     // later static-table upload rejects, lane teardown can still reach every
     // earlier successful allocation from this same transactional refresh.
     lane.staticGpuResources = staticGpuResources;
-    if (
-      thermalMaterialTable
-      && !staticGpuResources.thermalResponseGraphUpload
-    ) {
-      staticGpuResources.thermalResponseGraphUpload =
-        uploadSphThermalResponseGraphBuffers(device, {
+    const thermalSourceInputs = {
           thermalMaterialTable,
           thermalClosureGraphSet:
             requestedOptions.thermalStepOptions?.thermalClosureGraphSet
@@ -5962,7 +6058,20 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
             || previousOptions.thermalStepOptions?.thermalPhaseResponseTable
             || previousOptions.reactionStepOptions?.thermalPhaseResponseTable
             || null
-        });
+    };
+    const activeFitSchedule = activeWorkerResidentScheduleByLaneKey.get(record.key);
+    const fitRequested = (requestedOptions.thermalStepOptions?.thermalPotentialEnabled
+      ?? previousOptions.thermalStepOptions?.thermalPotentialEnabled) === true;
+    if (fitRequested && !activeFitSchedule?.thermalPotentialStarted
+      && staticGpuResources.thermalResponseGraphUpload
+      && staticGpuResources.thermalPotentialSourceKey !== thermalPotentialWorkerSourceKey(thermalSourceInputs)) {
+      destroyThermalPotentialWorkerLane(staticGpuResources.thermalPotentialOwner);
+      delete staticGpuResources.thermalPotentialOwner;
+      throw new Error('G6 worker thermal source changed; retire and reseed the lane');
+    }
+    if (thermalMaterialTable && !staticGpuResources.thermalResponseGraphUpload) {
+      staticGpuResources.thermalResponseGraphUpload = uploadSphThermalResponseGraphBuffers(device, thermalSourceInputs);
+      staticGpuResources.thermalPotentialSourceKey = thermalPotentialWorkerSourceKey(thermalSourceInputs);
     }
     if (
       mechanicsMaterialTable
@@ -6123,6 +6232,28 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     ...residentStepOptions,
     deferContinuationOwnershipTransfer: true
   };
+  // The clone-safe policy participates in schedule fingerprints; this private
+  // cache handle is injected only at the actual physical consumer call.
+  const fitEnabled = residentStepOptions.thermalStepOptions?.thermalPotentialEnabled === true;
+  const activeSchedule = activeWorkerResidentScheduleByLaneKey.get(record.key);
+  const staticResources = lane.staticGpuResources;
+  if (fitEnabled) {
+    if (!activeSchedule || kernelRunner !== runSchroederSameLevelMechanicsWebGpu) {
+      throw new TypeError('G6 worker fitting requires the original scheduled physical producer');
+    }
+    staticResources.thermalPotentialOwner ??= createThermalPotentialWorkerLane(device, staticResources.thermalResponseGraphUpload);
+    if (!activeSchedule.thermalPotentialStarted) {
+      activeSchedule.thermalPotentialStarted = beginThermalPotentialWorkerSchedule(staticResources.thermalPotentialOwner, {
+        scheduleId: activeSchedule.scheduleId, laneId: activeSchedule.laneId, stateKey: activeSchedule.stateKey,
+        upload: sphParticleUpload, acknowledgement: activeSchedule.thermalPotentialAcknowledgement
+      });
+    }
+    kernelResidentStepOptions.thermalStepOptions = { ...residentStepOptions.thermalStepOptions,
+      thermalPotential: thermalPotentialWorkerCache(staticResources.thermalPotentialOwner) };
+  } else if (staticResources?.thermalPotentialOwner) {
+    destroyThermalPotentialWorkerLane(staticResources.thermalPotentialOwner);
+    delete staticResources.thermalPotentialOwner;
+  }
   const previousResidentStep = lane.residentStep || null;
   const rawPreviousHierarchyTransferCleanupClaims = Array.isArray(
     previousResidentStep?.schroederHierarchyArtifactTransferCleanupClaims
@@ -6272,6 +6403,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         data.enableCrossLevelCoupling === true,
       enablePhaseVolumeMigration:
         data.enablePhaseVolumeMigration === true,
+      ...phaseSlotRefinementOptions,
       boxDimsM: data.boxDimsM ?? [5, 5, 5],
       ...(data.dt != null ? { dt: data.dt } : {}),
       ...(data.gravityMPerS2 != null
@@ -6285,6 +6417,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       residentStepOptions: kernelResidentStepOptions
     });
   } catch (error) {
+    traceWorkerLane('kernel-runner-threw', { message: String(error?.message).slice(0, 200) });
     // A two-level hierarchy may reach its final fresh-optics commit inside
     // kernelRunner, before this worker receives kernelResult. Preserve the
     // non-transported exact retry tuple now; the schedule error wrapper below
@@ -6661,6 +6794,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   lane.residentStep = residentStep;
   lane.sphParticleUpload = nextSphUpload;
   lane.mlsMpmParticleUpload = nextMlsUpload;
+  captureWorkerLaneFingerprint(record.workerDevice, nextSphUpload);
   // A batched schedule has one host-visible fence at its terminal boundary.
   // Its normal success path can retire this generation synchronously because
   // every final consumer has already been submitted to the same ordered queue;
@@ -6894,6 +7028,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         schema: data.hierarchyConfig.schema ?? null,
         status: data.hierarchyConfig.status ?? null,
         signature: data.hierarchyConfig.signature ?? null,
+        ...(data.hierarchyConfig.enablePhaseSlotRefinement === true ? { enablePhaseSlotRefinement: true } : {}),
         selectedLevel: data.hierarchyConfig.selectedLevel ?? null,
         minLevel: data.hierarchyConfig.minLevel ?? null,
         maxLevel: data.hierarchyConfig.maxLevel ?? null,
@@ -8535,7 +8670,8 @@ function persistWorkerScheduleResidentStepOptions(
   const thermalMaterialTable = requested.thermalMaterialTable ?? previous.thermalMaterialTable ?? null;
   const reactionTables = {};
   for (const key of ['reactionTable', 'reactionActivationWatchTable']) {
-    if (requested[key]?.coldReferenceRecipe || previous[key]?.coldReferenceRecipe) {
+    if (requested[key]?.coldReferenceRecipe || previous[key]?.coldReferenceRecipe
+      || requested[key]?.heatProxyGauge || previous[key]?.heatProxyGauge) {
       reactionTables[key] = importSphReferenceReactionTableColdInput(
         requested[key] ?? previous[key], thermalMaterialTable, previous[key]
       );
@@ -10012,6 +10148,16 @@ export function cancelUlgMechanicsResidentStageWorkerSchedule(id) {
   };
 }
 
+// Diagnostic: a bounded ring of schedule-loop events (where a schedule is
+// waiting), read by probes; never read by physics.
+function traceWorkerLane(event, extra = null) {
+  const ring = (globalThis.__ulgLaneTrace ??= []);
+  ring.push({ event, atMs: Math.round(performance.now()), ...(extra || {}) });
+  // __ulgLaneTraceCapacity: a diagnostic probe may widen the ring.
+  const capacity = Math.max(96, Math.min(20000, Number(globalThis.__ulgLaneTraceCapacity) || 96));
+  if (ring.length > capacity) ring.splice(0, ring.length - capacity);
+}
+
 export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   payload = {},
   {
@@ -10025,6 +10171,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
   } = {}
 ) {
   const scheduleFunctionEnteredAtMs = workerResidentScheduleNowMs();
+  traceWorkerLane('schedule-enter');
   const schedule = payload.schedule && typeof payload.schedule === 'object'
     ? payload.schedule
     : {};
@@ -10117,8 +10264,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     scheduleId,
     id: normalizeString(id, null),
     laneKey,
+    laneId,
+    stateKey,
     cancelRequested: false,
-    workerDevice: null
+    workerDevice: null,
+    thermalPotentialAcknowledgement: cloneAndDeepFreezeWorkerScheduleValue(schedule.thermalPotentialAcknowledgement ?? null),
+    thermalPotentialStarted: null,
+    thermalPotentialRequested: (payload.context?.ulgMechanicsResidentStageWorker?.stageOptions
+      ?.schroederSameLevelMechanics?.residentStepOptions?.thermalStepOptions?.thermalPotentialEnabled
+      ?? existingLaneRecord?.schroederLane?.residentStepOptions?.thermalStepOptions?.thermalPotentialEnabled) === true
   };
   const cancelKeys = [...new Set([state.scheduleId, state.id].filter(Boolean))];
   for (const cancelKey of cancelKeys) {
@@ -10294,6 +10448,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         || surfaceTension
         || gasBoundaryActionable
         || !explicitVacuumAmbient;
+      // Single-level gas/condensed pressure-drag transport (one-level S9-C):
+      // the law that lets gas carriers slip through condensed matter under
+      // that matter's own pressure gradient (bubbles rise). Two-level routes
+      // carry it through cross-level coupling instead. It needs field-mode
+      // mechanics and the S9-A/S9-B sidecars, and is relevant whenever the
+      // mechanics table has a gas or plasma phase.
+      const phaseVolumeInterfaceTransport = Boolean(
+        !twoLevelMechanics
+        && mechanicsFieldViews
+        && schroederMechanicsTableHasGasOrPlasmaPhase(
+          laneResidentOptions.mechanicsMaterialTable
+        )
+      );
       const contactSolverRequested =
         laneResidentOptions.contactSolverEnabled !== false;
       const contactSolverEscalatedForDynamicLaws = Boolean(
@@ -10337,7 +10504,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           || twoLevelMechanics
           || particleGasLedgerActionable
           || retainedProductGasBoundaryActionable
+          || phaseVolumeInterfaceTransport
         ),
+        phaseVolumeInterfaceTransport,
         mechanicsFieldViews,
         activationAuthority:
           'schedule-config-static-declaration-no-readback'
@@ -10363,6 +10532,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       stepZeroOptions.mechanicsFieldViewsRequired =
         stepZeroOptions.mechanicsFieldViewsRequired === true
         || scheduleLawActivation.mechanicsFieldViews;
+      stepZeroOptions.phaseVolumeInterfaceTransportRequired =
+        stepZeroOptions.phaseVolumeInterfaceTransportRequired === true
+        || scheduleLawActivation.phaseVolumeInterfaceTransport;
       const sealScheduleDerivedEpochOptions = (options) => ({
         ...options,
         enablePhaseVolumeMigration:
@@ -10373,7 +10545,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           || scheduleLawActivation.phaseVolumeSidecars,
         mechanicsFieldViewsRequired:
           options.mechanicsFieldViewsRequired === true
-          || scheduleLawActivation.mechanicsFieldViews
+          || scheduleLawActivation.mechanicsFieldViews,
+        phaseVolumeInterfaceTransportRequired:
+          options.phaseVolumeInterfaceTransportRequired === true
+          || scheduleLawActivation.phaseVolumeInterfaceTransport
       });
       if (stepOrdinal === 1) {
         // W4b: a RETAINED lane starting a new schedule with no step-1 source
@@ -11507,6 +11682,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         ?.residentGpuTimestampProfilingRequested === true;
     const armSubmitCensus = () => {
       const queue = state.workerDevice?.queue;
+      // The per-pass census hook is inert until a probe calls it, and needs
+      // no residentGpuTimestampProfile=1 (which moves presets off Tier 0):
+      // the render worker's device negotiates timestamp-query when offered.
+      if (queue && !globalThis.__ulgArmPassTimestampCensus) {
+        globalThis.__ulgArmPassTimestampCensus = () => armSphPassTimestampCensus(state.workerDevice);
+      }
       if (!scheduleProfilingRequested || !queue) return;
       if (!queue.__ulgSubmitCensusWrapped) {
         const originalSubmit = queue.submit.bind(queue);
@@ -11528,6 +11709,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         };
       }
       queue.__ulgSubmitCensusSink = submitCensus;
+      // Per-pass GPU timing, armed on demand by a probe (diagnostic only).
+      globalThis.__ulgArmPassTimestampCensus = () => (
+        armSphPassTimestampCensus(state.workerDevice)
+      );
     };
     // M4 submit burst: hold each step's command buffers at the queue
     // boundary and flush them as one queue.submit per K steps. Queue order
@@ -11770,6 +11955,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       failureCount: 0,
       timeoutCount: 0,
       skippedUnavailableCount: 0,
+      skippedInFlightCount: 0,
       disabledAfterTimeout: false,
       lastFailureReason: null,
       intermediateAuthorityPublicationCount: 0
@@ -11864,8 +12050,62 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         state.canonicalPresentationAbortController = null;
       }
     };
+    // Non-blocking canonical presentation: a step's boundary (render of the
+    // last committed mesh queued after that step's physics, with its GPU
+    // proof and presentation opportunity) starts only when no earlier
+    // boundary is still in flight, and physics keeps encoding meanwhile.
+    // Each boundary spans a GPU completion and a vsync (~2 display frames),
+    // so awaiting it every step held physics to one step per boundary.
+    // Frames keep their serial order (at most one outstanding), and the last
+    // one completes before the schedule terminal. A skipped step boundary is
+    // counted; presentCanonicalSubmissionBoundary never throws.
+    let pendingCanonicalPresentation = null;
+    // Queue pacing for the non-blocking boundary: before encoding step k+1,
+    // wait for the GPU to finish step k-1, so at most one physics step runs
+    // ahead of the one being encoded. Encoding still overlaps execution, and
+    // each boundary's render is queued behind one step of physics instead of
+    // a whole schedule's backlog. A rejected fence (device loss) is left to
+    // the sole terminal fence to classify.
+    let canonicalPacingFence = null;
+    const paceCanonicalPhysicsQueue = async () => {
+      const queue = state.workerDevice?.queue;
+      if (typeof queue?.onSubmittedWorkDone !== 'function') return;
+      const thisStepFence = queue.onSubmittedWorkDone().catch(() => undefined);
+      const priorStepFence = canonicalPacingFence;
+      canonicalPacingFence = thisStepFence;
+      if (priorStepFence) {
+        traceWorkerLane('pacing-wait');
+        await priorStepFence;
+        traceWorkerLane('pacing-done');
+      }
+    };
+    const settleCanonicalPresentation = async () => {
+      const pending = pendingCanonicalPresentation;
+      if (pending) {
+        traceWorkerLane('presentation-settle-wait');
+        await pending;
+        traceWorkerLane('presentation-settle-done');
+      }
+      pendingCanonicalPresentation = null;
+    };
     let failedQueueDrainCheckpoint = null;
     let scheduleLoopError = null;
+    // G4 per-schedule law activation receipt (gated stages copy their counts
+    // in their own encoders; read once after the terminal fence).
+    // Opened lazily at the first step's epoch stage, once the worker device
+    // exists (it is acquired by the first stage).
+    let lawActivationReceiptRingOpened = false;
+    let lawActivationReceiptRingDevice = null;
+    const ensureLawActivationReceiptRing = () => {
+      if (lawActivationReceiptRingOpened || !state.workerDevice) return;
+      lawActivationReceiptRingOpened = Boolean(
+        openLawActivationReceiptRing(state.workerDevice, {
+          capacityPerLaw: Math.max(1, stepCount * 4)
+        })
+      );
+      lawActivationReceiptRingDevice = state.workerDevice;
+    };
+    let lawScopeReceipt = null;
     let scheduleGpuWorkMayHaveBeenSubmitted = false;
     const scheduledControlPlaneYieldOpportunityCount = tier0RouteSelected
       ? 0
@@ -11888,6 +12128,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         scheduleGpuWorkMayHaveBeenSubmitted = true;
         scheduleFirstStepStartedAtMs = workerResidentScheduleNowMs();
         state.workerDevice = record.workerDevice;
+        // Per-pass census hook (inert until a probe calls it) on Tier 0 too.
+        if (!globalThis.__ulgArmPassTimestampCensus && state.workerDevice) {
+          globalThis.__ulgArmPassTimestampCensus = () => armSphPassTimestampCensus(state.workerDevice);
+        }
         const lane = record.schroederLane;
         const residentStepOptions = lane.residentStepOptions || {};
         // Seed descriptors may retain a stale CPU step while the uploaded
@@ -11914,11 +12158,35 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         };
         const tier0PresentationRequested =
           typeof onTier0PresentationSubmissionBoundary === 'function';
-        const tier0PresentationMaxSubstepsPerSubmission =
-          resolveWorkerTier0PresentationQosSubsteps({
-            requestedStepCount: stepCount,
-            presentationRequested: tier0PresentationRequested
-          });
+        // Diagnostic overrides (probe-only, never set by the app): a fixed
+        // substep count per presentation boundary, or 'realtime' pacing that
+        // sizes the chunk from the measured frame period so simulated time per
+        // frame covers the frame's wall time (k = ceil(period / dt), floored at
+        // the shared policy's chunk).
+        const tier0StepsPerFrameOverride = globalThis.__ulgTier0StepsPerFrame;
+        const tier0RealtimePacing = (tier0StepsPerFrameOverride === 'realtime'
+          || residentStepOptions.tier0RealtimePacing === true)
+          ? (globalThis.__ulgTier0RealtimePacing ??= { framePeriodS: null, lastBoundaryMs: null, k: null })
+          : null;
+        const tier0SharedQosSubsteps = resolveWorkerTier0PresentationQosSubsteps({
+          requestedStepCount: stepCount,
+          presentationRequested: tier0PresentationRequested
+        });
+        const tier0PacingDtS = Number(commonOptions.dt ?? tier0MlsMpmParticleState.mechanicsDtS) || 0;
+        const tier0PresentationMaxSubstepsPerSubmission = (() => {
+          if (!tier0PresentationRequested) return tier0SharedQosSubsteps;
+          if (Number.isSafeInteger(Number(tier0StepsPerFrameOverride)) && Number(tier0StepsPerFrameOverride) >= 1) {
+            return Math.min(stepCount, Number(tier0StepsPerFrameOverride));
+          }
+          if (tier0RealtimePacing && tier0RealtimePacing.framePeriodS > 0 && tier0PacingDtS > 0) {
+            tier0RealtimePacing.lastBoundaryMs = null;
+            tier0RealtimePacing.k = Math.min(stepCount, 32, Math.max(tier0SharedQosSubsteps,
+              Math.ceil(tier0RealtimePacing.framePeriodS / tier0PacingDtS)));
+            return tier0RealtimePacing.k;
+          }
+          if (tier0RealtimePacing) tier0RealtimePacing.lastBoundaryMs = null;
+          return tier0SharedQosSubsteps;
+        })();
         const tier0PresentationQosEnabled = Boolean(
           tier0PresentationRequested
           && Number.isSafeInteger(
@@ -11983,9 +12251,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
                     receipt.presentationQueueCompletionSerial;
                 observation.completed = true;
                 tier0PresentationBoundaryAudit.completedCount += 1;
+                if (tier0RealtimePacing) {
+                  const nowMs = workerResidentScheduleNowMs();
+                  if (tier0RealtimePacing.lastBoundaryMs != null) {
+                    const periodS = (nowMs - tier0RealtimePacing.lastBoundaryMs) / 1000;
+                    tier0RealtimePacing.framePeriodS = tier0RealtimePacing.framePeriodS > 0
+                      ? 0.7 * tier0RealtimePacing.framePeriodS + 0.3 * periodS
+                      : periodS;
+                  }
+                  tier0RealtimePacing.lastBoundaryMs = nowMs;
+                }
                 return receipt;
               } catch (error) {
                 tier0PresentationBoundaryAudit.failureCount += 1;
+                if (tier0RealtimePacing) {
+                  tier0RealtimePacing.boundaryFailures = (tier0RealtimePacing.boundaryFailures || 0) + 1;
+                  const reason = String(error?.message || error).slice(0, 160);
+                  const reasons = (tier0RealtimePacing.failureReasons ??= {});
+                  reasons[reason] = (reasons[reason] || 0) + 1;
+                }
                 throw error;
               }
             }
@@ -12021,6 +12305,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           onPresentationSubmissionBoundary: tier0PresentationQosEnabled
             ? tier0PresentationSubmissionBoundary
             : null,
+          // Real-time pacing also pipelines the boundaries (one outstanding).
+          pipelinePresentationBoundaries: Boolean(tier0PresentationQosEnabled && tier0RealtimePacing
+            && globalThis.__ulgTier0PipelineBoundaries !== false),
           readbackMode: NO_FULL_READBACK_MODE,
           compactSummaryMode: 'none',
           // Tier0's K substeps and terminal publication remain one logical
@@ -12349,6 +12636,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         lane.residentStep = finalStep;
         lane.sphParticleUpload = nextSphUpload;
         lane.mlsMpmParticleUpload = nextMlsUpload;
+        captureWorkerLaneFingerprint(record.workerDevice, nextSphUpload,
+          finalStep?.fusedResidentSequence?.stepCount ?? 1);
         lane.sphParticleState = {
           ...(tier0Execution.nextSphParticleState || tier0SphParticleState),
           ...targetLineage,
@@ -12724,8 +13013,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       for (let stepOrdinal = 1; stepOrdinal <= stepCount; stepOrdinal += 1) {
         // Once internal GPU fences are deferred, this task yield—not queue
         // completion—is what lets a cancel message run between atomic steps.
+        let stepYieldWaitMs = 0;
         if (stepOrdinal > 1) {
+          const yieldStartedAtMs = workerResidentScheduleNowMs();
+          traceWorkerLane('yield-wait', { stepOrdinal });
           await scheduleControlPlaneTaskYielder.yieldTask(stepOrdinal);
+          stepYieldWaitMs = workerResidentScheduleNowMs() - yieldStartedAtMs;
         }
         if (
           state.cancelRequested
@@ -12749,6 +13042,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         try {
         scheduleGpuWorkMayHaveBeenSubmitted = true;
         const epochStageStartedAtMs = workerResidentScheduleNowMs();
+        ensureLawActivationReceiptRing();
+        traceWorkerLane('epoch-stage-start', { stepOrdinal });
         epochStageResult = await runUlgMechanicsResidentStageWorkerPayload(
           scheduleStagePayload(
             SCHROEDER_SPATIAL_EPOCH_STAGE_ID,
@@ -12965,6 +13260,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         }
         mechanicsStageStarted = true;
         const mechanicsStageStartedAtMs = workerResidentScheduleNowMs();
+        traceWorkerLane('mechanics-stage-start', { stepOrdinal, epochStatus: epochStageResult?.value?.status ?? epochStageResult?.status ?? null });
         mechanicsStageResult = await runUlgMechanicsResidentStageWorkerPayload(
           scheduleStagePayload(
             SCHROEDER_SAME_LEVEL_MECHANICS_STAGE_ID,
@@ -13352,6 +13648,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         }
         twoLevelMechanicsLastStep = twoLevelStep;
       }
+      // A1 diagnostic: bounded per-step wall timing of the lane loop (read by
+      // scripts/a1-hold-census.mjs through the worker); never read by physics.
+      {
+        const laneStepTiming = globalThis.__ulgLaneStepTiming
+          ?? (globalThis.__ulgLaneStepTiming = []);
+        laneStepTiming.push({
+          scheduleId, stepOrdinal, stepStartedAtMs,
+          stepElapsedMs: lastStepSummary.stepElapsedMs,
+          epochStageElapsedMs, mechanicsStageElapsedMs,
+          yieldWaitMs: stepYieldWaitMs
+        });
+        if (laneStepTiming.length > 128) laneStepTiming.splice(0, laneStepTiming.length - 128);
+      }
       stepSummaryRing.push({
         stepOrdinal,
         generationId: currentStepSeal.generationId ?? null,
@@ -13407,7 +13716,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             state.workerDevice, 'canonical-presentation-boundary'
           );
         }
-        await presentCanonicalSubmissionBoundary(stepOrdinal);
+        await paceCanonicalPhysicsQueue();
+        if (pendingCanonicalPresentation) {
+          canonicalPresentationAudit.skippedInFlightCount += 1;
+        } else {
+          const started = presentCanonicalSubmissionBoundary(stepOrdinal);
+          pendingCanonicalPresentation = started;
+          void started.finally(() => {
+            if (pendingCanonicalPresentation === started) {
+              pendingCanonicalPresentation = null;
+            }
+          });
+        }
       }
       if (
         stepSummaryRing.length
@@ -13495,6 +13815,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     } catch (error) {
       scheduleLoopError = error;
     } finally {
+      // The last lagged presentation completes before the schedule terminal.
+      await settleCanonicalPresentation();
       if (scheduleControlPlaneTaskYielder) {
         controlPlaneYieldReceipt = scheduleControlPlaneTaskYielder.close();
       }
@@ -13520,6 +13842,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // Once an intermediate queue completion reports a dead/invalid device,
     // do not issue a second blind queue callback. Convert that exact failure
     // into the terminal non-admission receipt and quarantine the lane below.
+    traceWorkerLane('schedule-terminal-fence-start', { loopError: String(scheduleLoopError?.message ?? '').slice(0, 160) });
     const terminalGpuFence = failedQueueDrainCheckpoint
       ? failedQueueDrainCheckpointTerminalFence(failedQueueDrainCheckpoint, {
           scheduleId,
@@ -13544,6 +13867,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           spatialKeyChurnExpectations,
           spatialKeyChurnFineSubstepCount
         });
+    traceWorkerLane('schedule-terminal-fence-done', { satisfied: terminalGpuFence?.fenceSatisfied ?? null });
+    if (lawActivationReceiptRingOpened) {
+      try {
+        lawScopeReceipt = terminalGpuFence?.fenceSatisfied === true
+          ? await closeLawActivationReceiptRing(lawActivationReceiptRingDevice)
+          : null;
+        // Diagnostic copy for probes (never read by physics).
+        if (lawScopeReceipt) globalThis.__ulgLastLawScopeReceipt = lawScopeReceipt;
+      } catch {
+        // The receipt is evidence only; its failure never changes admission.
+        lawScopeReceipt = null;
+      }
+    }
     const tailTerminalFenceDoneAtMs = workerResidentScheduleNowMs();
     if (tier0ExecutionAttempted) {
       tier0SubmittedCleanupRelease =
@@ -14880,11 +15216,26 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         presentation: 'pending'
       })
     });
+    const potentialOwner = record.schroederLane?.staticGpuResources?.thermalPotentialOwner;
+    const thermalPotential = potentialOwner && state.thermalPotentialStarted
+      ? { ...state.thermalPotentialStarted,
+          ...(cancelled ? { candidate: null, readbackBytes: 0, mapAsyncCount: 0, status: 'cancelled', cumulativeConsumerHits: null }
+            : await finishThermalPotentialWorkerSchedule(potentialOwner, { scheduleId, laneId, stateKey,
+                upload: record.schroederLane.sphParticleUpload })) }
+      : cancelled && state.thermalPotentialRequested
+        ? { adopted: false, ordinal: potentialOwner ? thermalPotentialWorkerOrdinal(potentialOwner) : 0,
+            candidate: null, readbackBytes: 0, mapAsyncCount: 0, status: 'cancelled', cumulativeConsumerHits: null }
+        : null;
+    state.thermalPotentialFinished = !cancelled;
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
+      thermalPotential,
       status: cancelled
         ? 'worker-resident-schedule-cancelled'
         : 'worker-resident-schedule-completed',
+      // G4 node-scope evidence: per-law active/dormant source-steps and the
+      // zero-work witnesses of this schedule (lawActivationReceiptRing.js).
+      lawScopeReceipt,
       scheduleId,
       laneId,
       stateKey,
@@ -14973,6 +15324,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     scheduleControlPlaneTaskYielder?.close();
     scheduleControlPlaneTaskYielder = null;
     const terminalLane = retainedLanes.get(laneKey)?.schroederLane ?? null;
+    if (!state.thermalPotentialFinished) {
+      cancelThermalPotentialWorkerPending(terminalLane?.staticGpuResources?.thermalPotentialOwner);
+    }
     if (terminalLane?.residentStepOptions) {
       delete terminalLane.residentStepOptions[
         SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION

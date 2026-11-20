@@ -194,7 +194,8 @@ function gridDescriptor(value, label) {
 
 export function createSchroederSpatialParentFieldViewLayout({
   fineFieldCapacity,
-  coarseFieldCapacity
+  coarseFieldCapacity,
+  parentFieldCapacityLimit = null
 } = {}) {
   const fineCapacity = integer(fineFieldCapacity, 'fineFieldCapacity', 1);
   const coarseCapacity = integer(coarseFieldCapacity, 'coarseFieldCapacity', 1);
@@ -208,7 +209,8 @@ export function createSchroederSpatialParentFieldViewLayout({
     coarseCapacity,
     'parent-field candidate capacity'
   );
-  const parentFieldCapacity = candidateCapacity;
+  const parentFieldCapacity = parentFieldCapacityLimit == null ? candidateCapacity
+    : Math.min(candidateCapacity, integer(parentFieldCapacityLimit, 'parentFieldCapacityLimit', 1));
   const edgeCapacity = fineCandidateCapacity;
   let cursor = SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_HEADER_WORDS;
   const reserve = (words, label) => {
@@ -269,6 +271,7 @@ export function createSchroederSpatialParentFieldViewPlan({
   coarseGrid,
   fineFieldCapacity,
   coarseFieldCapacity,
+  parentFieldCapacityLimit = null,
   generationId,
   deviceOrdinal,
   laneOrdinal,
@@ -322,7 +325,8 @@ export function createSchroederSpatialParentFieldViewPlan({
   ]));
   const layout = createSchroederSpatialParentFieldViewLayout({
     fineFieldCapacity,
-    coarseFieldCapacity
+    coarseFieldCapacity,
+    parentFieldCapacityLimit
   });
   return Object.freeze({
     schema: ULG_SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_SCHEMA,
@@ -337,6 +341,7 @@ export function createSchroederSpatialParentFieldViewPlan({
     coarseFieldCapacity: layout.coarseFieldCapacity,
     candidateCapacity: layout.candidateCapacity,
     parentFieldCapacity: layout.parentFieldCapacity,
+    parentFieldCapacityLimit,
     edgeCapacity: layout.edgeCapacity,
     requiredWords: layout.wordLength,
     capacityWords: layout.wordLength,
@@ -554,7 +559,8 @@ export function validateSchroederSpatialParentFieldViewDescriptor(view, expected
   try {
     expectedLayout = createSchroederSpatialParentFieldViewLayout({
       fineFieldCapacity: view.fineFieldCapacity,
-      coarseFieldCapacity: view.coarseFieldCapacity
+      coarseFieldCapacity: view.coarseFieldCapacity,
+      parentFieldCapacityLimit: view.parentFieldCapacityLimit ?? null
     });
   } catch {
     return {
@@ -619,6 +625,11 @@ export function validateSchroederSpatialParentFieldViewDescriptor(view, expected
       fieldView?.ownerRuntime?.ownsExecution?.(fieldView) === true
       && fieldView?.ownerRuntime?.isExecutionSubmitted?.(fieldView) === true
     ));
+    if (view.inheritedFineParentView) {
+      fieldsAdmitted &&= view.inheritedFineParentView.coarseFieldView === view.fineFieldView
+        && validateSchroederSpatialParentFieldViewDescriptor(view.inheritedFineParentView,
+          { coarseLevel: view.fineLevel, generationId: view.generationId }).admitted;
+    }
   } catch {
     ownerAdmitted = false;
     hierarchyAdmitted = false;

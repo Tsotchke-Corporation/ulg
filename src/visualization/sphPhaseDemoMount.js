@@ -155,6 +155,19 @@ const PHYSICAL_LAW_GROUPS = Object.freeze([
   ['surfaceTension', 'surface tension (single-level SS)', false]
 ]);
 
+
+// Density of the explicit room-air atmosphere at the standard-atmosphere
+// basis (rho * 101325 / p), for the implicit-atmosphere stand-in; undefined
+// (the 1.2041 kg/m^3 default) without an explicit atmosphere.
+function explicitAtmosphereReferenceDensityKgPerM3(inventory) {
+  const pressurePa = Number(inventory?.environment?.totalPressurePa);
+  const massKg = Number(inventory?.totalGasMassKg);
+  const volumeM3 = Number(inventory?.freeVolumeM3);
+  if (inventory?.environment?.mode !== 'air'
+    || !(pressurePa > 0) || !(massKg > 0) || !(volumeM3 > 0)) return undefined;
+  return (massKg / volumeM3) * 101325 / pressurePa;
+}
+
 export function resolveSphReactionActivationConfiguration({
   reactionsEnabled = true,
   schroederSimulationEnabled = false,
@@ -1098,6 +1111,9 @@ export function resolveSphNativeSurfacePostStepPresentationGateSettlement({
     && (
       proofStatus === 'native-resident-presentation-submission-admitted'
       || proofStatus === 'native-resident-presentation-foreground-proved'
+      // The worker-owned canvas presented the current schedule's committed,
+      // pre-continuation-captured stage output (see resolveSphResidentPresentationProof).
+      || proofStatus === 'worker-resident-presentation-committed'
     )
     && presentationSourceCurrent
   );
@@ -1216,8 +1232,16 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'lawst',
   'blob',
   'sdt',
+  'exactEnergyLedger',
+  'thermalDormancyK',
+  'reactionDormancy',
   'cfl',
   'cflSafety',
+  'implicitPressure',
+  'implicitCfl',
+  'implicitIters',
+  'implicitPrecond',
+  'implicitTol',
   'avAlpha',
   'diffAlpha',
   'wallAlpha',
@@ -1225,12 +1249,14 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'sepVel',
   'reactionProductReserveMinimumLiveFraction',
   'reactionProductReserveExactDiscovery',
+  'splitSpareLineages',
   'contactSolver',
   'contactJacobiIterations',
   'contactCleanupPasses',
   'contactInnerRounds',
   'ambientPressurePa',
   'submitBurstSteps',
+  'realtimePacing',
   'workerLivePreview',
   'compactMechanicsView',
   'observeSpatialAuthority',
@@ -1295,6 +1321,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'schroederCrossLevelCoupling',
   'schroederPhaseVolumeMigration',
   'ssPhaseVolumeMigration',
+  'schroederPhaseSlotRefinement',
   'schroederLawQueue',
   'stageMechanicsTrace',
   'schroederLawNeighbors',
@@ -2248,6 +2275,89 @@ export function resolveSphResidentPresentationProof({
       bridge,
       meshCount,
       geometryByteLength
+    };
+  }
+  if (bridge === 'worker-owned-presented-canvas') {
+    // The presentation worker owns the visible canvas (transferControlToOffscreen)
+    // and draws the retained resident stage output itself. Its receipts are the
+    // proof: the worker reports its display canvas visible with content and
+    // frames, the retained stage output is preserved, and that output's source
+    // step matches the current lane schedule (the scene sets this only from the
+    // state-manager-committed presentation of the current schedule, whose source
+    // was captured before physics continued, or from an explicit step match).
+    // A resident publish marks this state stale until the next render refresh,
+    // so a previous batch's frame cannot satisfy requireCurrentSource. This
+    // claims an admitted worker presentation, not observed compositor pixels.
+    const readFlag = (name) => (surfaceDraw?.[name] ?? renderState[name]) === true;
+    const presentationFrameCount = exactNonNegativeInteger(
+      renderState.workerOffscreenPresentationFrameCount
+    ) ?? 0;
+    const displayContentVisible = Boolean(
+      renderState.workerOffscreenPresentationDisplayOwner === 'worker'
+      && renderState.workerOffscreenPresentationDisplayCanvasVisible === true
+      && renderState.workerOffscreenPresentationStatus
+        === 'worker-offscreen-display-worker-content-visible'
+      && presentationFrameCount > 0
+    );
+    const retainedStageOutputPreserved = readFlag('workerOffscreenRetainedStageOutputPreserved');
+    const retainedStageOutputSourceStepMatchesCurrent =
+      readFlag('workerOffscreenRetainedStageOutputSourceStepMatchesCurrent');
+    const renderRowsStatus = renderState.workerOffscreenRenderRowsStatus ?? null;
+    const workerFrameRendered =
+      renderRowsStatus === 'worker-offscreen-resident-isosurface-presentation-rendered';
+    const sourceGenerationMatchesCurrent = surfaceDraw
+      ?.sourceResidentExecutionGenerationMatchesCurrent
+      ?? renderState.surfaceDrawSourceResidentExecutionGenerationMatchesCurrent
+      ?? renderState.sourceResidentExecutionGenerationMatchesCurrent
+      ?? null;
+    const sourceRetainedPrevious = Boolean(
+      surfaceDraw?.sourceResidentRetainedPrevious
+      ?? renderState.surfaceDrawSourceResidentRetainedPrevious
+      ?? renderState.sourceResidentRetainedPrevious
+      ?? false
+    );
+    const sourceMarkedStale = Boolean(
+      surfaceDraw?.residentRenderSourceStaleAfterPublish
+      ?? renderState.residentRenderSourceStaleAfterPublish
+      ?? false
+    );
+    const sourceCurrent = Boolean(
+      retainedStageOutputSourceStepMatchesCurrent
+      && sourceGenerationMatchesCurrent === true
+      && !sourceRetainedPrevious
+      && !sourceMarkedStale
+    );
+    const presentationCommitted = Boolean(
+      displayContentVisible
+      && retainedStageOutputPreserved
+      && workerFrameRendered
+    );
+    const admitted = Boolean(
+      presentationCommitted
+      && (!requireCurrentSource || sourceCurrent)
+    );
+    return {
+      visible: admitted,
+      admitted,
+      foregroundProved: false,
+      status: admitted
+        ? 'worker-resident-presentation-committed'
+        : (requireCurrentSource && presentationCommitted && !sourceCurrent)
+          ? 'worker-resident-presentation-stale-source'
+          : 'worker-resident-presentation-unadmitted',
+      bridge,
+      displayContentVisible,
+      presentationFrameCount,
+      retainedStageOutputPreserved,
+      retainedStageOutputSourceStepMatchesCurrent,
+      workerFrameRendered,
+      renderRowsStatus,
+      presentationCommitted,
+      requireCurrentSource: Boolean(requireCurrentSource),
+      sourceGenerationMatchesCurrent,
+      sourceRetainedPrevious,
+      sourceMarkedStale,
+      sourceCurrent
     };
   }
   const visible = Boolean(
@@ -4563,7 +4673,8 @@ function materialParticleCountsText(counts = {}) {
 function materialParticleCountsFromMaterials(materials = []) {
   const counts = {};
   for (const descriptor of materials || []) {
-    if (descriptor?.spareProductSlot === true || descriptor?.phaseCompanionSlot === true) continue;
+    if (descriptor?.spareProductSlot === true || descriptor?.spareSplitSlot === true
+      || descriptor?.phaseCompanionSlot === true) continue;
     const material = descriptor?.material || descriptor?.renderKey || 'unknown';
     counts[material] = (counts[material] || 0) + 1;
   }
@@ -4573,7 +4684,8 @@ function materialParticleCountsFromMaterials(materials = []) {
 function materialParticleCountsFromParticles(particles = []) {
   const counts = {};
   for (const particle of particles || []) {
-    if (particle?.spareProductSlot === true || !(Number(particle?.massKg) > 0)) continue;
+    if (particle?.spareProductSlot === true || particle?.spareSplitSlot === true
+      || !(Number(particle?.massKg) > 0)) continue;
     const material = particle?.material || 'unknown';
     counts[material] = (counts[material] || 0) + 1;
   }
@@ -6254,8 +6366,8 @@ export async function mountSphPhaseDemoOverlay({
     'grid-column:1/-1;color:#8fc7b2;font-size:10px;line-height:1.35;';
   residentScheduleEffectiveEl.textContent = 'effective schedule: resolving policy…';
   executionControlsEl.appendChild(residentScheduleEffectiveEl);
-  appendExecutionNumber({ key: 'cfl', label: 'CFL factor', value: 0.6, min: 0.01, max: 2, step: 0.05 });
-  appendExecutionNumber({ key: 'cflSafety', label: 'CFL stiffness safety', value: 0.4, min: 0.01, max: 2, step: 0.05 });
+  appendExecutionNumber({ key: 'cfl', label: 'CFL factor', value: 0.6, min: 0.01, max: 2, step: 0.01 });
+  appendExecutionNumber({ key: 'cflSafety', label: 'CFL stiffness safety', value: 0.4, min: 0.01, max: 2, step: 0.01 });
 
   const wallsEl = overlay.querySelector('#sph-walls');
   const lawsEl = overlay.querySelector('#sph-laws');
@@ -6331,14 +6443,21 @@ export async function mountSphPhaseDemoOverlay({
   for (const [key, label] of [
     ['environmentMode', 'Surroundings'], ['environmentTemperatureK', 'Temperature (K)'],
     ['environmentPressurePa', 'Pressure (Pa)'], ['environmentHumidityPercent', 'Relative humidity (%)'],
-    ['environmentCellsPerAxis', 'Gas cells per axis']
+    ['environmentCellsPerAxis', 'Gas cells per axis'], ['environmentNucleiPerCm3', 'Dry nuclei (per cm³)'],
+    ['environmentRefineEdgeMm', 'Air refine edge near bodies (mm, blank = off)'],
+    ['environmentAirParcels', 'Air parcels']
   ]) {
     const wrap = document.createElement('label');
     wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;margin:4px 0;';
     wrap.textContent = label;
-    const input = document.createElement(key === 'environmentMode' ? 'select' : 'input');
-    if (key === 'environmentMode') {
-      for (const [value, text] of [['vacuum', 'Vacuum'], ['air', 'Humid air']]) {
+    const selectOptions = key === 'environmentMode'
+      ? [['vacuum', 'Vacuum'], ['air', 'Humid air']]
+      : key === 'environmentAirParcels'
+        ? [['species', 'One row per species'], ['mixture', 'Mixture parcels']]
+        : null;
+    const input = document.createElement(selectOptions ? 'select' : 'input');
+    if (selectOptions) {
+      for (const [value, text] of selectOptions) {
         const option = document.createElement('option'); option.value = value; option.textContent = text;
         input.appendChild(option);
       }
@@ -7181,6 +7300,7 @@ export async function mountSphPhaseDemoOverlay({
     'schroederCrossLevelCoupling',
     'schroederPhaseVolumeMigration',
     'ssPhaseVolumeMigration',
+    'schroederPhaseSlotRefinement',
     'schroederTwoLevel',
     'ssTwoLevel',
     'schroederTwoLevelAuthority',
@@ -7194,8 +7314,16 @@ export async function mountSphPhaseDemoOverlay({
     // can resurrect worker SS around a stale Plain-SPH opt-out.
     'mech',
     'sdt',
+    'exactEnergyLedger',
+    'thermalDormancyK',
+    'reactionDormancy',
     'cfl',
     'cflSafety',
+    'implicitPressure',
+    'implicitCfl',
+    'implicitIters',
+    'implicitPrecond',
+    'implicitTol',
     'avAlpha',
     'diffAlpha',
     'wallAlpha',
@@ -7203,6 +7331,7 @@ export async function mountSphPhaseDemoOverlay({
     'sepVel',
     'reactionProductReserveMinimumLiveFraction',
     'reactionProductReserveExactDiscovery',
+    'splitSpareLineages',
     'reactionActivationPolicy',
     'hydroInit',
     'residentStepsPerSchedule',
@@ -7222,6 +7351,7 @@ export async function mountSphPhaseDemoOverlay({
     'contactInnerRounds',
     'ambientPressurePa',
     'submitBurstSteps',
+    'realtimePacing',
     'workerLivePreview',
     'compactMechanicsView',
     'observeSpatialAuthority',
@@ -7573,16 +7703,19 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('sceneLengthScale')
       ?? initialScenarioRuntime.sceneLengthScale
   ) ?? 1;
+  // Wall models: a passive finite container by default (honest walls),
+  // controlled fixed-temperature faces, or adiabatic.
   const initialWallModel = (() => {
     const value = String(
       initialHash.get('wallModel')
         ?? initialQuery.get('wallModel')
         ?? initialScenarioRuntime.wallModel
-        ?? 'infinite-fixed-temperature-reservoir'
+        ?? 'finite-heat-capacity-lumped-face'
     ).trim();
-    return value === 'adiabatic'
-      ? 'adiabatic'
-      : 'infinite-fixed-temperature-reservoir';
+    return ['adiabatic', 'infinite-fixed-temperature-reservoir']
+      .includes(value)
+      ? value
+      : 'finite-heat-capacity-lumped-face';
   })();
   const initialResidentWorkersEnabled = booleanUrlParam(
     initialHash.get('residentWorkers')
@@ -7684,6 +7817,25 @@ export async function mountSphPhaseDemoOverlay({
     );
     return Number.isFinite(value) && value > 0 && value <= 2 ? value : null;
   })();
+  // A1 larger-dt slice: implicitPressure=1 turns the semi-implicit liquid
+  // pressure solve on; implicitCfl = liquid c dt / dx (default 4, clamped to
+  // the measured 6.4 envelope); implicitIters = CG iterations (default 10).
+  const initialImplicitPressure = (() => {
+    const pick = (key) => initialHash.get(key) ?? initialQuery.get(key) ?? initialScenarioRuntime[key];
+    const raw = pick('implicitPressure');
+    if (raw == null || !['1', 'true', 'on'].includes(String(raw))) return null;
+    const cfl = Number(pick('implicitCfl'));
+    const iters = Number(pick('implicitIters'));
+    return {
+      cflSafety: Number.isFinite(cfl) && cfl > 0 ? cfl : undefined,
+      iterations: Number.isFinite(iters) && iters >= 1 ? Math.round(iters) : undefined,
+      // implicitPrecond=1: Jacobi-preconditioned CG (A/B arm; off by default).
+      jacobi: String(pick('implicitPrecond') ?? '0') === '1',
+      // implicitTol = relative residual for the GPU-side early stop.
+      relativeTolerance: Number.isFinite(Number(pick('implicitTol'))) && Number(pick('implicitTol')) > 0
+        ? Number(pick('implicitTol')) : undefined
+    };
+  })();
   const initialSimDtS = (() => {
     const value = Number(
       initialHash.get('sdt')
@@ -7692,6 +7844,14 @@ export async function mountSphPhaseDemoOverlay({
     );
     return Number.isFinite(value) && value > 0 && value <= 0.01 ? value : null;
   })();
+  // G2 integer energy ledger (g2-integer-ledger-proposal.md): the scene
+  // declares exact mass and energy from its original cold state.
+  const initialExactEnergyLedger = String(
+    initialHash.get('exactEnergyLedger')
+    ?? initialQuery.get('exactEnergyLedger')
+    ?? initialScenarioRuntime.exactEnergyLedger
+    ?? ''
+  ) === '1';
   const numericUrlOption = (key, { min = 0, max = 10 } = {}) => {
     const raw = initialHash.get(key) ?? initialQuery.get(key) ?? initialScenarioRuntime[key];
     // Absent params must stay null: Number(null) is 0, which silently
@@ -7701,6 +7861,21 @@ export async function mountSphPhaseDemoOverlay({
     return Number.isFinite(value) && value >= min && value <= max ? value : null;
   };
   const initialArtificialViscosityAlpha = numericUrlOption('avAlpha');
+  // G4 per-source thermal dormancy epsilon_T (K). The default is the exact
+  // predicate, epsilon_T = 0 (bit-identical to ungated; plan/todo/
+  // g4-dynamic-laws-proposal.md), so every configured preset routes its warm
+  // thermal kernel through the same activation pipeline. epsilon_T > 0 is a
+  // bounded approximation and stays an explicit opt-in;
+  // thermalDormancyK=off restores the ungated route.
+  const thermalDormancyRaw = String(initialHash.get('thermalDormancyK')
+    ?? initialQuery.get('thermalDormancyK') ?? initialScenarioRuntime.thermalDormancyK ?? '');
+  const initialThermalDormancyK = thermalDormancyRaw === 'off'
+    ? null
+    : (numericUrlOption('thermalDormancyK', { max: 1000 }) ?? 0);
+  // G4 exact reaction node scope, on by default (exact, no epsilon);
+  // reactionDormancy=0 restores the ungated route.
+  const initialReactionDormancy = String(initialHash.get('reactionDormancy')
+    ?? initialQuery.get('reactionDormancy') ?? initialScenarioRuntime.reactionDormancy ?? '1') !== '0';
   const initialHydrostaticInitialization = (() => {
     const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
     if (raw == null || raw === '') return null;
@@ -7714,6 +7889,8 @@ export async function mountSphPhaseDemoOverlay({
     'reactionProductReserveMinimumLiveFraction',
     { max: 1 }
   );
+  // First-class air, slice 1: dormant lineages reserved for SS split children.
+  const initialSplitSpareLineages = numericUrlOption('splitSpareLineages', { max: 1_000_000 });
   const initialReactionProductReserveExactDiscoveryRaw =
     initialHash.get('reactionProductReserveExactDiscovery')
     ?? initialQuery.get('reactionProductReserveExactDiscovery')
@@ -7769,6 +7946,13 @@ export async function mountSphPhaseDemoOverlay({
     2,
     256
   );
+  // A1 real-time pacing on the Tier-0 route (realtimePacing=1).
+  const initialTier0RealtimePacing = ['1', 'true', 'on'].includes(String(
+    initialHash.get('realtimePacing')
+      ?? initialQuery.get('realtimePacing')
+      ?? initialScenarioRuntime.realtimePacing
+      ?? ''
+  ));
   // Diagnostic: per-step canonical spatial-authority evidence readback.
   const initialObserveSpatialAuthority = (() => {
     const raw = initialHash.get('observeSpatialAuthority')
@@ -7984,6 +8168,13 @@ export async function mountSphPhaseDemoOverlay({
       ['twoLevelFineSubstepCount', 'schroederTwoLevelFineSubstepCount']
     )
   ) || 2;
+  const initialSchroederPhaseSlotRefinementEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederPhaseSlotRefinement'],
+      ['enablePhaseSlotRefinement', 'schroederEnablePhaseSlotRefinement']
+    ),
+    false
+  );
   const initialSchroederParticleStorageMaterializationEnabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederParticleStorageMaterialization', 'ssParticleStorageMaterialization'],
@@ -8088,6 +8279,7 @@ export async function mountSphPhaseDemoOverlay({
     twoLevelFineSubstepCount: initialSchroederTwoLevelFineSubstepCount,
     spatialKeyChurnProfileEnabled:
       initialSpatialKeyChurnProfileEnabled,
+    enablePhaseSlotRefinement: initialSchroederPhaseSlotRefinementEnabled,
     enableParticleStorageMaterialization: initialSchroederParticleStorageMaterializationEnabled,
     particleStorageAdmissionRowBudget: initialSchroederParticleStorageAdmissionRowBudget,
     particleStorageRequiredCapacity: initialSchroederParticleStorageRequiredCapacity,
@@ -8160,6 +8352,7 @@ export async function mountSphPhaseDemoOverlay({
       schroederTwoLevelFineSubstepCount: config.twoLevelFineSubstepCount,
       schroederSpatialKeyChurnProfile:
         config.spatialKeyChurnProfileEnabled === true,
+      schroederEnablePhaseSlotRefinement: config.enablePhaseSlotRefinement,
       schroederEnableParticleStorageMaterialization: config.enableParticleStorageMaterialization,
       schroederParticleStorageAdmissionRowBudget: config.particleStorageAdmissionRowBudget,
       schroederParticleStorageRequiredCapacity: config.particleStorageRequiredCapacity,
@@ -8840,8 +9033,26 @@ export async function mountSphPhaseDemoOverlay({
     // a preset into `custom`, otherwise the same body URL runs with different
     // dt/CFL/cadence after a reload.
     if (initialSimDtS != null) q.set('sdt', String(initialSimDtS));
+    if (initialExactEnergyLedger) q.set('exactEnergyLedger', '1');
+    // G4 exact dormancy is the default; persist only opt-outs and epsilon > 0.
+    if (initialThermalDormancyK == null) q.set('thermalDormancyK', 'off');
+    else if (initialThermalDormancyK !== 0) q.set('thermalDormancyK', String(initialThermalDormancyK));
+    if (!initialReactionDormancy) q.set('reactionDormancy', '0');
     if (initialGridCflFactor != null) q.set('cfl', String(initialGridCflFactor));
     if (initialCflSafety != null) q.set('cflSafety', String(initialCflSafety));
+    if (initialImplicitPressure) {
+      q.set('implicitPressure', '1');
+      if (initialImplicitPressure.cflSafety != null) {
+        q.set('implicitCfl', String(initialImplicitPressure.cflSafety));
+      }
+      if (initialImplicitPressure.iterations != null) {
+        q.set('implicitIters', String(initialImplicitPressure.iterations));
+      }
+      if (initialImplicitPressure.jacobi) q.set('implicitPrecond', '1');
+      if (initialImplicitPressure.relativeTolerance != null) {
+        q.set('implicitTol', String(initialImplicitPressure.relativeTolerance));
+      }
+    }
     if (initialArtificialViscosityAlpha != null) {
       q.set('avAlpha', String(initialArtificialViscosityAlpha));
     }
@@ -8863,6 +9074,10 @@ export async function mountSphPhaseDemoOverlay({
         String(initialReactionProductReserveMinimumLiveFraction)
       );
     }
+    if (initialSchroederPhaseSlotRefinementEnabled) q.set('schroederPhaseSlotRefinement', '1');
+    if (initialSplitSpareLineages != null) {
+      q.set('splitSpareLineages', String(Math.round(initialSplitSpareLineages)));
+    }
     if (
       initialReactionProductReserveExactDiscoveryRaw != null
       && initialReactionProductReserveExactDiscoveryRaw !== ''
@@ -8883,6 +9098,7 @@ export async function mountSphPhaseDemoOverlay({
     if (initialAmbientPressurePaOverride != null) {
       q.set('ambientPressurePa', String(initialAmbientPressurePaOverride));
     }
+    if (initialTier0RealtimePacing) q.set('realtimePacing', '1');
     if (initialSubmitBurstSteps != null) {
       q.set('submitBurstSteps', String(initialSubmitBurstSteps));
     }
@@ -8910,7 +9126,7 @@ export async function mountSphPhaseDemoOverlay({
     if (initialSceneLengthScale !== 1) {
       q.set('sceneLengthScale', String(initialSceneLengthScale));
     }
-    if (initialWallModel !== 'infinite-fixed-temperature-reservoir') {
+    if (initialWallModel !== 'finite-heat-capacity-lumped-face') {
       q.set('wallModel', initialWallModel);
     }
     if (initialCameraPositionNormalized != null) {
@@ -9116,6 +9332,9 @@ export async function mountSphPhaseDemoOverlay({
       mechanics: mechanicsModeFromControls(),
       reactionProductReserveMinimumLiveFraction:
         initialReactionProductReserveMinimumLiveFraction,
+      splitSpareLineageCount: initialSplitSpareLineages == null
+        ? 0
+        : Math.round(initialSplitSpareLineages),
       reactionProductReserveExactDiscovery:
         initialReactionProductReserveExactDiscovery,
       // Authoritative dynamic activation begins with a genuinely dormant
@@ -9127,7 +9346,19 @@ export async function mountSphPhaseDemoOverlay({
       allowReducedProductProperties: true,
       ...(initialGridCflFactor != null ? { gridCflFactor: initialGridCflFactor } : {}),
       ...(initialCflSafety != null ? { cflSafety: initialCflSafety } : {}),
+      ...(initialImplicitPressure
+        ? { implicitPressure: {
+          ...(initialImplicitPressure.cflSafety != null ? { cflSafety: initialImplicitPressure.cflSafety } : {}),
+          ...(initialImplicitPressure.iterations != null ? { iterations: initialImplicitPressure.iterations } : {}),
+          jacobi: initialImplicitPressure.jacobi,
+          ...(initialImplicitPressure.relativeTolerance != null
+            ? { relativeTolerance: initialImplicitPressure.relativeTolerance } : {})
+        } }
+        : {}),
       ...(initialSimDtS != null ? { dt: initialSimDtS } : {}),
+      ...(initialExactEnergyLedger ? { exactEnergyLedger: true } : {}),
+      ...(initialThermalDormancyK != null ? { thermalDormancyK: initialThermalDormancyK } : {}),
+      ...(initialReactionDormancy ? { reactionDormancy: true } : {}),
       ...(initialArtificialViscosityAlpha != null
         ? { mlsMpmArtificialViscosityAlpha: initialArtificialViscosityAlpha }
         : {}),
@@ -12476,6 +12707,7 @@ export async function mountSphPhaseDemoOverlay({
     schroederEnablePhaseVolumeMigration = true,
     schroederEnableLawQueue = true,
     schroederEnableLawNeighborCandidates = true,
+    schroederEnablePhaseSlotRefinement = false,
     schroederEnableParticleStorageMaterialization = false,
     schroederParticleStorageAdmissionRowBudget = null,
     schroederParticleStorageRequiredCapacity = null,
@@ -12527,6 +12759,7 @@ export async function mountSphPhaseDemoOverlay({
       `ssLawQueue=${Boolean(schroederEnableLawQueue) ? 1 : 0}`,
       `ssLawNeighbors=${Boolean(schroederEnableLawNeighborCandidates) ? 1 : 0}`,
       `ssSpatialChurnProfile=${Boolean(schroederSpatialKeyChurnProfile) ? 1 : 0}`,
+      `ssPhaseSlotRefinement=${Boolean(schroederEnablePhaseSlotRefinement) ? 1 : 0}`,
       `ssParticleStorage=${Boolean(schroederEnableParticleStorageMaterialization) ? 1 : 0}`,
       `ssParticleStorageRows=${schroederParticleStorageAdmissionRowBudget ?? 'auto'}`,
       `ssParticleStorageCapacity=${schroederParticleStorageRequiredCapacity ?? 'auto'}`,
@@ -14074,7 +14307,19 @@ export async function mountSphPhaseDemoOverlay({
       traceResidentSchedule('refresh-invoked');
       const refreshPromise = scheduledScene.refreshMlsMpmResidentSteps?.({
       ambientPressurePa: initialAmbientPressurePaOverride,
+      // The transport's implicit atmosphere stands in for the pressure support
+      // that coarse explicit air parcels (~7 cm) cannot yet give each other:
+      // they act on the grid only within ~5 mm (with it off, measured
+      // 2026-11-16, the air sank into the lower 40% of the box). In room air
+      // the stand-in takes the explicit atmosphere's own initial density, so
+      // the box's air is neutral and only warmer or lighter gas rises; a dry
+      // 1.2041 kg/m^3 stand-in lifted 50%-RH air by ~2 cm/s^2. Vacuum keeps
+      // the default. Set it to 0 once air lives on SS levels matching its size
+      // (plan/todo/first-class-air.md).
+      ambientReferenceDensityKgPerM3:
+        explicitAtmosphereReferenceDensityKgPerM3(activeViewState?.environmentInitialization),
       mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
+      tier0RealtimePacing: initialTier0RealtimePacing,
       observeCanonicalSpatialAuthority: initialObserveSpatialAuthority,
       consumeCompactMechanicsView: initialConsumeCompactMechanicsView,
       workerLiveParticlePreview: initialWorkerLivePreview,

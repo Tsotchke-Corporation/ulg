@@ -23,6 +23,7 @@ import { rhf, _uhf as uhf } from '../electronicStructure/molecularHartreeFock.js
 import { allElementBondLengthMeters, allElementSpeciesEnergyHa } from '../electronicStructure/allElementMolecularSolver.js';
 import { atomicMassKg, zForSymbol, symbolForZ } from '../electronicStructure/periodicTable.js';
 import { describeChemicalFormula } from '../chemistry/formula.js';
+import { createIdealGasMixtureResidue } from '../material/idealGasMixtureClosure.js';
 import {
   PROVISIONAL_ENERGETICS_STATUS,
   commonAnionChargeMagnitude,
@@ -937,6 +938,130 @@ function canonicalReactionIdentity(reaction) {
  * Options are passed through to `discoverReactions`; in particular, `options.materialProperties`
  * supplies the same property/provenance inputs as pair discovery.
  */
+// First-class air, slice 3 stage 2 (plan/todo/first-class-air.md; user
+// decision 2026-11-17, composition set). Only reactions change an ideal-gas
+// mixture parcel's makeup, so the compositions that can arise are the mixture
+// with reactive components removed. A species reaction that consumes gas
+// component c (mole fraction x) of mixture M is lifted onto M exactly:
+//   ... + nu c  ->  ...      becomes      ... + (nu/x) M  ->  ... + (nu/x - nu) M~c
+// Atoms, mass and moles balance identically (M = x c + (1-x) M~c), and with
+// ideal mixing the spectators carry their sensible energy through unchanged,
+// so the reaction enthalpy per equation is the species reaction's; only its
+// per-consumed-reactant-mass basis is rescaled. Residues are lifted in turn
+// until the set closes (at most 2^k mixtures for k reactive components).
+function termMolarMassKgPerMol(term, materialProperties) {
+  const key = term.material ?? null;
+  const fromProperties = key ? Number(materialProperties[key]?.molarMassKgPerMol) : NaN;
+  if (fromProperties > 0) return fromProperties;
+  return formulaMolarMassKgPerMol(term.atomCounts);
+}
+
+function sumAtomCounts(terms) {
+  const total = {};
+  for (const term of terms) {
+    for (const [Z, count] of Object.entries(term.atomCounts || {})) {
+      total[Z] = (total[Z] ?? 0) + Number(term.coefficient) * Number(count);
+    }
+  }
+  return total;
+}
+
+function formatLiftedTerm(term) {
+  const coefficient = Number(term.coefficient);
+  const shown = Number.isInteger(coefficient) ? String(coefficient) : coefficient.toPrecision(6);
+  return `${shown} ${term.formula || term.material}`;
+}
+
+function liftReactionOntoMixture(reaction, { mixtureKey, mixture, component, term, residue, residueProperties, materialProperties }) {
+  const moleFraction = component.moleFraction;
+  const mixtureCoefficient = Number(term.coefficient) / moleFraction;
+  const residueCoefficient = mixtureCoefficient - Number(term.coefficient);
+  const mixtureTerm = { coefficient: mixtureCoefficient, formula: null, material: mixtureKey,
+    atomCounts: { ...mixture.atomCounts } };
+  const residueTerm = { coefficient: residueCoefficient, formula: residue.pure ? residueProperties.formula ?? null : null,
+    material: residue.material, atomCounts: residue.pure
+      ? describeChemicalFormula(residueProperties.formula).atomCounts
+      : { ...residueProperties.atomCounts } };
+  const stoichiometry = reaction.stoichiometry;
+  const reactants = stoichiometry.reactants.map((t) => (t === term ? mixtureTerm : t));
+  const products = [...stoichiometry.products, residueTerm];
+  const sourceMass = Number(stoichiometry.balancedReactantMassKgPerEquation);
+  const liftedMass = sourceMass
+    - Number(term.coefficient) * termMolarMassKgPerMol({ ...term, material: component.material }, materialProperties)
+    + mixtureCoefficient * Number(mixture.molarMassKgPerMol ?? materialProperties[mixtureKey]?.molarMassKgPerMol);
+  const reactantAtoms = sumAtomCounts(reactants);
+  const productAtoms = sumAtomCounts(products);
+  const balanced = Object.keys({ ...reactantAtoms, ...productAtoms }).every((Z) => (
+    Math.abs((reactantAtoms[Z] ?? 0) - (productAtoms[Z] ?? 0))
+      <= 1e-9 * Math.max(1, Math.abs(reactantAtoms[Z] ?? 0))
+  ));
+  if (!balanced || !(liftedMass > 0) || !(sourceMass > 0)) {
+    throw new RangeError(`Lifting ${stoichiometry.equation} onto ${mixtureKey} does not balance`);
+  }
+  const swap = (key) => (key === component.material ? mixtureKey : key);
+  return {
+    ...reaction,
+    a: swap(reaction.a),
+    b: swap(reaction.b),
+    specificEnthalpyJPerKg: Number(reaction.specificEnthalpyJPerKg) * sourceMass / liftedMass,
+    stoichiometry: {
+      ...stoichiometry,
+      equation: `${reactants.map(formatLiftedTerm).join(' + ')} -> ${products.map(formatLiftedTerm).join(' + ')}`,
+      reactants,
+      products,
+      atomBalance: { balanced: true, reactants: reactantAtoms, products: productAtoms },
+      balancedReactantMassKgPerEquation: liftedMass,
+      liftedOntoMixture: Object.freeze({
+        mixture: mixtureKey, component: component.material, moleFraction,
+        residue: residue.material, sourceEquation: stoichiometry.equation
+      })
+    }
+  };
+}
+
+export function liftReactionsOntoIdealGasMixtures(reactions, materialProperties = {}) {
+  const properties = { ...materialProperties };
+  const queue = Object.keys(properties).filter((key) => properties[key]?.idealGasMixture);
+  const lifted = [];
+  const productClosures = {};
+  if (queue.length === 0) return { reactions: lifted, productClosures };
+  const componentClosures = new Proxy({}, {
+    get: (_, key) => (properties[key] ? { properties: properties[key], closureId: `ulg-material:${String(key)}` } : undefined)
+  });
+  const seen = new Set();
+  const speciesReactions = reactions.filter((reaction) => !reaction?.stoichiometry?.liftedOntoMixture);
+  while (queue.length > 0) {
+    const mixtureKey = queue.shift();
+    if (seen.has(mixtureKey)) continue;
+    seen.add(mixtureKey);
+    const mixture = properties[mixtureKey];
+    for (const reaction of speciesReactions) {
+      const reactants = reaction?.stoichiometry?.reactants;
+      if (!Array.isArray(reactants)) continue;
+      for (const component of mixture.idealGasMixture.components) {
+        if (reaction.a !== component.material && reaction.b !== component.material) continue;
+        const term = reactants.find((t) => (
+          String(t.formula || '').toLowerCase() === String(component.formula || '').toLowerCase()
+        ));
+        if (!term) continue;
+        const residue = createIdealGasMixtureResidue({
+          mixtureKey, mixtureProperties: mixture, removedMaterial: component.material, componentClosures
+        });
+        if (residue.closure) {
+          productClosures[residue.material] = residue.closure;
+          properties[residue.material] = residue.closure.properties;
+          queue.push(residue.material);
+        }
+        lifted.push(liftReactionOntoMixture(reaction, {
+          mixtureKey, mixture, component, term, residue,
+          residueProperties: properties[residue.material], materialProperties: properties
+        }));
+      }
+    }
+  }
+  return { reactions: lifted, productClosures };
+}
+
 export function discoverReactionNetwork(materialKeys, options = {}) {
   const materials = canonicalMaterialList(materialKeys);
   const pairOptions = options.materialProperties
@@ -985,6 +1110,47 @@ export function discoverReactionNetwork(materialKeys, options = {}) {
     }
   }
 
+  // First-class air, slice 3 stage 2: species reactions lifted onto every
+  // ideal-gas mixture (and residue mixture) that contains the species.
+  const liftedMixtures = liftReactionsOntoIdealGasMixtures(
+    [...reactionByIdentity.values()],
+    pairOptions.materialProperties || {}
+  );
+  for (const reaction of liftedMixtures.reactions) {
+    const identity = canonicalReactionIdentity(reaction);
+    if (!reactionByIdentity.has(identity)) {
+      reactionByIdentity.set(identity, {
+        ...reaction,
+        reactionDiscovery: {
+          schema: REACTION_NETWORK_DISCOVERY_SCHEMA,
+          canonicalStoichiometryIdentity: identity,
+          sourcePairs: [[reaction.a, reaction.b]],
+          liftedOntoMixture: reaction.stoichiometry.liftedOntoMixture
+        }
+      });
+    }
+  }
+  for (const [productKey, closure] of Object.entries(liftedMixtures.productClosures)) {
+    if (!productClosureByKey.has(productKey)) productClosureByKey.set(productKey, closure);
+  }
+  // A species that exists only inside live ideal-gas mixtures has no rows of
+  // its own: its reactions can never fire, and their lifted forms replace
+  // them. (Only with the caller's live material set; otherwise unchanged.)
+  if (Array.isArray(options.liveMaterialKeys) && options.materialProperties) {
+    const live = new Set(options.liveMaterialKeys.map((key) => String(key).toLowerCase()));
+    const mixtureOnly = new Set();
+    for (const key of live) {
+      for (const component of options.materialProperties[key]?.idealGasMixture?.components ?? []) {
+        if (!live.has(component.material)) mixtureOnly.add(component.material);
+      }
+    }
+    for (const [identity, reaction] of [...reactionByIdentity.entries()]) {
+      if (reaction?.stoichiometry?.liftedOntoMixture) continue;
+      if (mixtureOnly.has(String(reaction.a).toLowerCase()) || mixtureOnly.has(String(reaction.b).toLowerCase())) {
+        reactionByIdentity.delete(identity);
+      }
+    }
+  }
   const reactions = [...reactionByIdentity.entries()]
     .sort(([a], [b]) => compareCanonicalText(a, b))
     .map(([, reaction]) => reaction);

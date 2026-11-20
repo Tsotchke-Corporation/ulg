@@ -24,6 +24,26 @@ import {
 const PROVIDER = createSchroederTargetScheduleProviderAuthority({
   kind: 'none'
 });
+
+test('target schedule binds phase-slot topology writers and their admission receipts', () => {
+  const hierarchyConfig = { enablePhaseVolumeMigration: true, enablePhaseSlotRefinement: true,
+    phaseSlotRefinementAdmissions: Object.fromEntries([
+      'phaseVolumeSplitMergeAdmission', 'particleStorageAllocatorAdmission',
+      'particleStorageSlotAssignmentAdmission', 'particleStorageMaterializationAdmission'
+    ].map(field => [field, { committed: true, sourceHotBufferKey: `owner:${field}` }])) };
+  const create = () => createSchroederTargetScheduleConfiguration({ ...COMMON_CONFIGURATION,
+    hierarchyConfig, scheduleStepOptionsProvider: PROVIDER });
+  const initial = create();
+  assert.ok(exactSchroederTargetScheduleConfiguration(initial));
+  assert.ok(initial.writerSet.writerIds.includes('phase-slot-refinement'));
+  hierarchyConfig.phaseSlotRefinementAdmissions.particleStorageAllocatorAdmission.sourceHotBufferKey = 'replacement';
+  assert.notEqual(create().configurationFingerprint, initial.configurationFingerprint);
+  const torn = structuredClone(initial);
+  torn.writerSet.phaseSlotRefinementPolicyFingerprint = 'replacement';
+  assert.equal(exactSchroederTargetScheduleConfiguration(torn), null);
+  delete hierarchyConfig.phaseSlotRefinementAdmissions.particleStorageMaterializationAdmission;
+  assert.throws(create, /all four/);
+});
 const COMMON_CONFIGURATION = Object.freeze({
   maxFutureSubsteps: 2,
   dtS: 0.001,

@@ -2,6 +2,17 @@ export const ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCHEMA =
   'peercompute.ulg.schroeder-spatial-phase-volume-transport.v1';
 
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_PARAMS_BYTES = 256;
+// A1: the mechanics-field grid-update sequence (grid update, phase-volume
+// transport and surface-stress kernels) shares one 256-byte params uniform.
+// When the host launches the sequence's consumer kernels directly instead of
+// with dispatchWorkgroupsIndirect (about 0.3 ms of GPU-process validation each
+// on Chromium), it copies the field view's staged consumer dispatch words
+// (60..62) into bytes 240..251 inside the same encoder and writes this magic at
+// byte 252. Each kernel then admits only workgroups the indirect launch would
+// have run (linear group < x*y, z != 0). Any other value at byte 252 leaves the
+// kernels exactly as they were (indirect launches, tests).
+export const SCHROEDER_SPATIAL_FIELD_CONSUMER_DISPATCH_SNAPSHOT_OFFSET_BYTES = 240;
+export const SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC = 0x44495231;
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE = 64;
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_MAGIC = 0x53543931;
 export const SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_VERSION = 1;

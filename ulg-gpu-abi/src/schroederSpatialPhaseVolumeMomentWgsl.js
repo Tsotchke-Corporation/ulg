@@ -293,13 +293,27 @@ fn physical_source_for_active(active_ordinal: u32) -> u32 {
   return physical_source;
 }
 
+// A1: the view's dispatch words at dispatch_offset are the indirect
+// arguments themselves (read-only here). A group is admitted only if the
+// indirect launch (x, y, z) would have run it, so the same groups run, with
+// the same invocation indices, under an indirect launch or a direct 1D launch
+// over a host ceiling. Excluded groups get an index past every bound.
 fn active_linear_invocation(
   local_id: vec3<u32>,
   workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>,
   dispatch_offset: u32
 ) -> u32 {
   let linear_group = workgroup_id.x
-    + workgroup_id.y * active_source_view[dispatch_offset];
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    active_source_view[dispatch_offset + 2u] == 0u
+    || linear_group >= active_source_view[dispatch_offset]
+      * active_source_view[dispatch_offset + 1u]
+  ) {
+    return 0xffffffffu;
+  }
   return linear_group * MOMENT_WORKGROUP_SIZE + local_id.x;
 }
 `
@@ -477,11 +491,12 @@ fn emit_phase_volume_moment_contributions(
   @builtin(global_invocation_id) global_id: vec3<u32>${directoryV2
     ? `,
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>`
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>`
     : ''}
 ) {
   let sorted_position = ${directoryV2
-    ? 'active_linear_invocation(local_id, workgroup_id, ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD)'
+    ? 'active_linear_invocation(local_id, workgroup_id, num_workgroups, ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD)'
     : 'global_id.x'};
   let candidate_count = ${directoryV2
     ? 'active_candidate_count()'
@@ -597,7 +612,7 @@ fn emit_phase_volume_moment_contributions(
       ? `// Directory-v2 mechanics-field builders cull only canonical
     // f32-zero support. Recompute that predicate here so a missing
     // positive-support descriptor remains fail-closed lineage evidence.
-    if (weight != 0.0) {
+    if (weight >= bitcast<f32>(0x21800000u)) {
       record_invalid_lineage();
     }
     return;`
@@ -616,7 +631,7 @@ fn emit_phase_volume_moment_contributions(
     || FIELD_KEY_WORDS > arrayLength(&mechanics_field) - key_offset
     || u32(round(phase)) != mechanics_field[key_offset + 1u]
     || u32(round(material)) != mechanics_field[key_offset + 2u]
-    ${directoryV2 ? '|| !(weight > 0.0)' : ''}
+    ${directoryV2 ? '|| !(weight >= bitcast<f32>(0x21800000u))' : ''}
   ) {
     record_invalid_lineage();
     return;
@@ -650,11 +665,12 @@ fn materialize_phase_volume_moment_ranges(
   @builtin(global_invocation_id) global_id: vec3<u32>${directoryV2
     ? `,
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>`
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>`
     : ''}
 ) {
   let sorted_position = ${directoryV2
-    ? 'active_linear_invocation(local_id, workgroup_id, ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD)'
+    ? 'active_linear_invocation(local_id, workgroup_id, num_workgroups, ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD)'
     : 'global_id.x'};
   let candidate_count = ${directoryV2
     ? 'active_candidate_count()'
@@ -705,12 +721,25 @@ fn reduce_phase_volume_moments(
   @builtin(global_invocation_id) global_id: vec3<u32>${directoryV2
     ? `,
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>`
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>`
     : ''}
 ) {
-  let field_index = ${directoryV2
-    ? '(workgroup_id.x + workgroup_id.y * mechanics_field[60u]) * MOMENT_WORKGROUP_SIZE + local_id.x'
-    : 'global_id.x'};
+  ${directoryV2
+    ? `// A1: field words 60..62 are the indirect arguments (read-only here);
+  // admit exactly the groups that launch would run (see
+  // active_linear_invocation), so a direct 1D launch is equivalent.
+  let reduce_linear_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    mechanics_field[62u] == 0u
+    || reduce_linear_group >= mechanics_field[60u] * mechanics_field[61u]
+  ) {
+    return;
+  }
+  let field_index = reduce_linear_group * MOMENT_WORKGROUP_SIZE + local_id.x;`
+    : 'let field_index = global_id.x;'}
   if (field_index >= params.field_capacity) { return; }
   if (!field_identity_admitted()) {
     zero_moment_row(field_index);

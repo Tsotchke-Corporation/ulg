@@ -1048,8 +1048,34 @@ function createSchroederSpatialMechanicsViewV2Wgsl() {
     `  let dispatch_x = max(
     active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_OFFSET],
     1u
-  );`,
+  );
+  // A1: the view's active dispatch words are this pass's indirect arguments
+  // (read-only here); admit only the groups that launch runs, so a direct 1D
+  // launch over the active-capacity ceiling is exact.
+  let launch_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_OFFSET + 2u] == 0u
+    || launch_group >= active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_OFFSET]
+      * active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_OFFSET + 1u]
+  ) {
+    return;
+  }`,
     'v2 GPU indirect dispatch'
+  );
+  source = replaceWgslRequired(
+    source,
+    `fn mark_mechanics_nodes(
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {`,
+    `fn mark_mechanics_nodes(
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {`,
+    'A1 v2 mark launch shape builtin'
   );
   return source;
 }

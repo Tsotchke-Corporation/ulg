@@ -1,3 +1,22 @@
+import { encodeLawActivationCount } from './lawActivationReceiptRing.js';
+import { createSchroederThermalDormancyStage } from './schroederThermalDormancyGpu.js';
+import { thermalPotentialGpuBindings, thermalPotentialLookupWgsl } from '../material/thermalPotentialGpu.js';
+
+export function createSchroederSpatialThermalPotentialPrepassWgsl() {
+  const source = schroederSpatialThermalDerivedPrepassWgsl.replace(
+    '  var radius_m = thermal_prepass_nominal_radius_m(pos_mass.w, thermo0.w);',
+    `  if (selection.ready == 1u && thermo0.y == 2.0 && thermo1.y == 1.0) {
+    let response = thermal_prepass_response_row0(selection.response_index);
+    let fitted = g6_temperature(u32(response.z), vel_u.w, thermo0.y);
+    if (fitted.w == 1.0) { temperature_k = fitted.x; temperature_slope = fitted.y; }
+  }
+  var radius_m = thermal_prepass_nominal_radius_m(pos_mass.w, thermo0.w);`
+  );
+  return `@group(0) @binding(14) var<storage, read> g6_table: array<f32>;
+@group(0) @binding(15) var<storage, read> g6_metadata: array<vec4<f32>>;
+@group(0) @binding(16) var<storage, read_write> g6_requests: array<atomic<u32>>;
+${thermalPotentialLookupWgsl()}\n${source}`;
+}
 import {
   SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS,
   SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_CANDIDATE_DISPATCH_OFFSET_WORDS,
@@ -103,6 +122,9 @@ import {
   SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
   SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
 } from '../../../ulg-gpu-abi/src/schroederSpatialThermalProposalConstants.js';
+import { createSphExactMassFormat } from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
+import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 
 export const ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_SCHEMA =
   'peercompute.ulg.schroeder-spatial-thermal-proposal.v3';
@@ -168,7 +190,17 @@ export const SCHROEDER_SPATIAL_THERMAL_EXPECTED_ACTIVE_MEMBER_COUNT_WORD = 7;
 export const SCHROEDER_SPATIAL_THERMAL_ACTIVE_SOURCE_RANK_COUNT_WORD = 8;
 export const SCHROEDER_SPATIAL_THERMAL_PHYSICAL_TOPOLOGY_MISMATCH_COUNT_WORD = 9;
 export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS = 10;
-export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS = 10;
+// Words 0..9: the established derived row. Words 10..14: the carrier's
+// adjacent phase fronts on its own response ladder (derive). Words 15..19:
+// the interface skin partition the pair pass leaves for the phase-carrier
+// transfer (plan/todo/interface-resolution.md). Words 20..22: the
+// skin-energy-weighted offset from the carrier to its contact faces, where
+// the converted phase is born; word 23 is reserved.
+export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS = 24;
+export const SCHROEDER_SPATIAL_THERMAL_INTERFACE_FRONT_FIRST_WORD = 10;
+export const SCHROEDER_SPATIAL_THERMAL_INTERFACE_SKIN_FIRST_WORD = 15;
+// Stamp word = (epoch << 3) | target phase; epochs stay below 2^29.
+export const SCHROEDER_SPATIAL_THERMAL_INTERFACE_FRONT_EPOCH_LIMIT = 2 ** 29;
 export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_MAGIC =
   0x544b_5331;
 export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_VERSION = 1;
@@ -177,6 +209,12 @@ export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS = 2;
 export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_READY = 1;
 export const SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_MISSING = 2;
 export const SCHROEDER_SPATIAL_THERMAL_PARAMS_BYTES = 96;
+// Phase 1 integer energy ledger (plan/todo/g2-integer-ledger-proposal.md).
+// Proposal rows gain one signed net packet per particle in this run format,
+// appended after the f32 rows; only the standard format is compiled in.
+export const SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_FORMAT = createSphExactMassFormat();
+export const SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_WORDS =
+  SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_FORMAT.wordCount;
 export const SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES = 104;
 export const SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL = 1;
 export const CLASSIC_THERMAL_CANDIDATE_CAPACITY_DEFAULT = 256;
@@ -216,6 +254,8 @@ export const SCHROEDER_SPATIAL_THERMAL_CSR_STATUS_VALIDATED = 16;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_UNIFORM_COMPLETION = 1;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY = 2;
 export const SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_EXACT_NEAR_REWALK = 4;
+// G4: at least one dormant source completed without consuming candidates.
+export const SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_DORMANT = 8;
 
 export const SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_LAYOUT = Object.freeze([
   'magic:u32',
@@ -253,7 +293,21 @@ export const SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_LAYOUT = Object.freeze([
   'lowerSpecificInternalEnergyBoundJPerKg:f32',
   'upperSpecificInternalEnergyBoundJPerKg:f32',
   'materialKey:u32',
-  'phaseKey:u32'
+  'phaseKey:u32',
+  'upperFrontTemperatureK:f32',
+  'upperFrontTargetSpecificEnergyJPerKg:f32',
+  'lowerFrontTemperatureK:f32',
+  'lowerFrontTargetSpecificEnergyJPerKg:f32',
+  'frontTargetPhases:u32',
+  'interfaceSkinEnergyJ:f32',
+  'interfaceSkinSourceSpecificEnergyJPerKg:f32',
+  'interfaceSkinTargetSpecificEnergyJPerKg:f32',
+  'interfaceSkinFrontTemperatureK:f32',
+  'interfaceSkinStamp:u32',
+  'interfaceSkinFaceOffsetXM:f32',
+  'interfaceSkinFaceOffsetYM:f32',
+  'interfaceSkinFaceOffsetZM:f32',
+  'reserved:u32'
 ]);
 
 export const SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_LAYOUT = Object.freeze([
@@ -376,6 +430,44 @@ function createThermalProposalDeviceLossCallbacks(device, lossTargetHolder) {
       target.releaseLease();
     }
   };
+}
+
+// One device.lost reaction per device. Live proposals stay strongly owned by
+// the device's registry (their lease must be released on loss even when no
+// one else holds them); a successful retirement removes its holder. A
+// per-proposal `device.lost.then(...)` instead kept one reaction and holder
+// per step for the device's lifetime.
+const thermalProposalLossRegistries = new WeakMap();
+
+function registerThermalProposalDeviceLoss(device, lossTargetHolder) {
+  let registry = thermalProposalLossRegistries.get(device);
+  if (!registry) {
+    registry = { holders: new Set(), settled: null };
+    thermalProposalLossRegistries.set(device, registry);
+    const settle = (kind) => (value) => {
+      lostThermalProposalDevices.add(device);
+      registry.settled = { kind, value };
+      const holders = [...registry.holders];
+      registry.holders.clear();
+      for (const holder of holders) {
+        try {
+          createThermalProposalDeviceLossCallbacks(device, holder)[kind](value);
+        } catch {
+          // One failing cleanup must not stop the others.
+        }
+      }
+    };
+    Promise.resolve(device.lost).then(settle('fulfilled'), settle('rejected'));
+  }
+  lossTargetHolder.lossRegistry = registry;
+  if (registry.settled) {
+    const { kind, value } = registry.settled;
+    queueMicrotask(() => {
+      createThermalProposalDeviceLossCallbacks(device, lossTargetHolder)[kind](value);
+    });
+    return;
+  }
+  registry.holders.add(lossTargetHolder);
 }
 
 function finiteNumber(value, fallback = 0) {
@@ -708,6 +800,17 @@ export function evaluateSchroederSpatialThermalPairProposal({
   });
 }
 
+// Per-encode stamp for interface skin rows (1 .. 2^29 - 1, wrapping). The
+// phase-carrier transfer consumes a derived row only when its stamp carries
+// the epoch of the proposal the canonical apply consumed.
+let thermalInterfaceFrontEpochCounter = 0;
+function nextThermalInterfaceFrontEpoch() {
+  thermalInterfaceFrontEpochCounter =
+    (thermalInterfaceFrontEpochCounter
+      % (SCHROEDER_SPATIAL_THERMAL_INTERFACE_FRONT_EPOCH_LIMIT - 1)) + 1;
+  return thermalInterfaceFrontEpochCounter;
+}
+
 function createThermalParamsArray({
   particleCount,
   materialCount,
@@ -721,7 +824,9 @@ function createThermalParamsArray({
   neighborBins = null,
   candidateCapacity = 0,
   mechanicalInterfaceReceiptRequired = false,
-  mechanicalInterfaceSelectedLevel = 0
+  mechanicalInterfaceSelectedLevel = 0,
+  thermalDormancyEnabled = false,
+  interfaceFrontEpoch = 0
 }) {
   const buffer = new ArrayBuffer(SCHROEDER_SPATIAL_THERMAL_PARAMS_BYTES);
   const view = new DataView(buffer);
@@ -781,10 +886,14 @@ function createThermalParamsArray({
     ),
     true
   );
+  view.setUint32(88, thermalDormancyEnabled ? 1 : 0, true);
+  view.setUint32(92, exactU32(interfaceFrontEpoch, 'interfaceFrontEpoch'), true);
   return buffer;
 }
 
-function createProposalHeader(execution, particleCount) {
+// Word 6 announces the integer energy section that follows the f32 rows;
+// consumers that do not apply ledgers keep requiring zero.
+function createProposalHeader(execution, particleCount, { exactEnergyLedger = false } = {}) {
   const words = new Uint32Array(SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS);
   words[0] = SCHROEDER_SPATIAL_THERMAL_PROPOSAL_MAGIC;
   words[1] = SCHROEDER_SPATIAL_THERMAL_PROPOSAL_VERSION;
@@ -792,6 +901,7 @@ function createProposalHeader(execution, particleCount) {
   words[3] = exactU32(execution.supportEpoch, 'execution.supportEpoch');
   words[4] = exactU32(particleCount, 'particleCount', { positive: true });
   words[5] = SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS;
+  words[6] = exactEnergyLedger ? SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_WORDS : 0;
   words[8] = SCHROEDER_SPATIAL_SUPPORT_PROFILE_THERMAL_CONDUCTION_V1;
   words[9] = SCHROEDER_SPATIAL_SUPPORT_PROFILE_RADIATION_WIDE_V1;
   words[10] = exactU32(execution.positionEpoch, 'execution.positionEpoch');
@@ -814,17 +924,105 @@ function createEvidenceInitial(execution, supportProfileId) {
   return words;
 }
 
+// The header and f32 rows for one particle count: the row set consumers
+// authenticate. The integer energy section starts right after it.
+function proposalRowsByteLength(count) {
+  return (
+    SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS
+    + count * SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+  ) * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+// Every arena reserves the integer energy section, so enabling the ledger
+// never changes an arena's identity or size.
 function proposalBufferByteLength(capacity) {
   return (
     SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS
-    + capacity * SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+    + capacity * (SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+      + SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_WORDS)
   ) * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+// Rows, then the ActiveSource rank sidecar (one word per source), then the G4
+// thermal dormancy flags (one word per source, cleared = active).
+function thermalDormancyFlagWord(particleCount) {
+  return SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
+    + particleCount * (SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS + 1);
+}
+
+// G4 thermal dormancy option: { epsilonK, boxM: [x, y, z], originM?,
+// minCellEdgeM? } (the grid spans originM .. originM + boxM; sources outside
+// clamp into the boundary cells, which keeps the halo conservative). null
+// keeps every source active (the established route, bit for bit).
+function normalizeThermalDormancyConfig(config, smoothingLengthM) {
+  if (config == null || config === false) return null;
+  const epsilonK = Number(config.epsilonK);
+  const boxM = Array.from(config.boxM ?? [], Number);
+  if (
+    !Number.isFinite(epsilonK) || epsilonK < 0
+    || boxM.length !== 3
+    || boxM.some((value) => !Number.isFinite(value) || value <= 0)
+  ) {
+    throw new TypeError(
+      'thermalDormancy needs a finite epsilonK >= 0 and a positive boxM [x, y, z]'
+    );
+  }
+  // The allocated grid is sized by the floor; the GPU widens the edge to the
+  // pair-law supports it reads from the derived header each step.
+  const originM = Array.from(config.originM ?? [0, 0, 0], Number);
+  if (originM.length !== 3 || originM.some((value) => !Number.isFinite(value))) {
+    throw new TypeError('thermalDormancy.originM must be a finite [x, y, z]');
+  }
+  const minCellEdgeM = Math.max(
+    Number(config.minCellEdgeM) || 0,
+    2 * Math.max(0, Number(smoothingLengthM) || 0),
+    Math.max(...boxM) / 64
+  );
+  return Object.freeze({
+    epsilonK,
+    boxM: Object.freeze(boxM),
+    originM: Object.freeze(originM),
+    minCellEdgeM
+  });
+}
+
+function acquireThermalDormancyStage(device, entry, config, particleCount, smoothingLengthM) {
+  const key = [particleCount, config.epsilonK, ...config.boxM, ...config.originM,
+    config.minCellEdgeM, smoothingLengthM].join('|');
+  entry.thermalDormancyStages ??= new Map();
+  let stage = entry.thermalDormancyStages.get(key);
+  if (!stage) {
+    stage = createSchroederThermalDormancyStage({
+      device,
+      particleCount,
+      boxM: config.boxM,
+      originM: config.originM,
+      cellEdgeM: config.minCellEdgeM,
+      epsilonK: config.epsilonK,
+      wallSupportM: 0,
+      // The derived rows: temperature at word 0, maximum radius in header
+      // word 0; flags into the tail the proposal kernel reads.
+      temperatureHeaderWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS,
+      temperatureStrideWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS,
+      temperatureWordOffset: 0,
+      flagOutputWord: thermalDormancyFlagWord(particleCount),
+      maxRadiusWord: 0,
+      // Conduction support max(2h, r_a + r_b); radiation support
+      // RADIATION_PAIR_RANGE_RADII * (r_a + r_b).
+      supportFloorM: 2 * smoothingLengthM,
+      radiusMultiplier: 2 * Math.max(1, RADIATION_PAIR_RANGE_RADII)
+    });
+    entry.thermalDormancyStages.set(key, stage);
+    entry.destroyers.push(() => stage.destroy());
+  }
+  return stage;
 }
 
 function derivedBufferByteLength(capacity) {
   return (
     SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
     + capacity * SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
+    + capacity
     + capacity
   ) * Uint32Array.BYTES_PER_ELEMENT;
 }
@@ -2880,6 +3078,99 @@ fn thermal_prepass_carrier_selection_checked(
   return ThermalCarrierSelection(selected, 1u, domain_lo, domain_hi);
 }
 
+struct ThermalPhaseFronts {
+  upper_temperature_k: f32,
+  upper_target_energy: f32,
+  lower_temperature_k: f32,
+  lower_target_energy: f32,
+  // upper target phase in bits 0..7, lower in bits 8..15; 0 = no front.
+  target_phases: u32,
+};
+
+// The adjacent transition plateaus on a single-phase carrier's own response
+// ladder. A carrier in a pure sensible segment of phase p has an upper front
+// at the next plateau p -> q (its constant temperature T*, and the energy at
+// which the mass is entirely q at T*) and a lower front at the plateau below.
+// A carrier already on a plateau has no front: it is at T* throughout.
+fn thermal_prepass_phase_fronts(
+  material_id: f32,
+  specific_internal_energy: f32,
+  selected_response: u32
+) -> ThermalPhaseFronts {
+  var fronts = ThermalPhaseFronts(0.0, 0.0, 0.0, 0.0, 0u);
+  var response_offset = 0u;
+  var response_count = 0u;
+  for (
+    var record_index = 0u;
+    record_index < thermal_params.material_count;
+    record_index = record_index + 1u
+  ) {
+    let record = phase_response_records[record_index * 2u];
+    if (record.x == material_id && record.w == 1.0) {
+      response_offset = u32(max(record.y, 0.0));
+      response_count = u32(max(record.z, 0.0));
+      break;
+    }
+  }
+  if (
+    response_count == 0u
+    || selected_response < response_offset
+    || selected_response >= response_offset + response_count
+    || response_offset + response_count > thermal_params.response_count
+  ) { return fronts; }
+  let selected0 = thermal_prepass_response_row0(selected_response);
+  let selected1 = thermal_prepass_response_row1(selected_response);
+  let own_phase = u32(clamp(round(selected1.z), 0.0, 4.0));
+  if (
+    abs(selected0.y - 2.0) < 0.5
+    || own_phase == 0u
+    || u32(clamp(round(selected1.w), 0.0, 4.0)) != own_phase
+  ) { return fronts; }
+  if (selected_response + 1u < response_offset + response_count) {
+    let above = selected_response + 1u;
+    let row0 = thermal_prepass_response_row0(above);
+    let row1 = thermal_prepass_response_row1(above);
+    let to_phase = u32(clamp(round(row1.w), 0.0, 4.0));
+    if (
+      abs(row0.y - 2.0) < 0.5 && row0.w == 1.0 && row0.z >= 0.0
+      && u32(clamp(round(row1.z), 0.0, 4.0)) == own_phase
+      && to_phase != 0u && to_phase != own_phase
+      && thermal_prepass_finite(row1.x) && thermal_prepass_finite(row1.y)
+      && row1.y > row1.x && row1.x >= specific_internal_energy
+    ) {
+      let front_temperature =
+        thermal_prepass_temperature_from_graph(u32(row0.z), row1.x);
+      if (thermal_prepass_finite(front_temperature) && front_temperature > 0.0) {
+        fronts.upper_temperature_k = front_temperature;
+        fronts.upper_target_energy = row1.y;
+        fronts.target_phases = fronts.target_phases | to_phase;
+      }
+    }
+  }
+  if (selected_response > response_offset) {
+    let below = selected_response - 1u;
+    let row0 = thermal_prepass_response_row0(below);
+    let row1 = thermal_prepass_response_row1(below);
+    let from_phase = u32(clamp(round(row1.z), 0.0, 4.0));
+    if (
+      abs(row0.y - 2.0) < 0.5 && row0.w == 1.0 && row0.z >= 0.0
+      && u32(clamp(round(row1.w), 0.0, 4.0)) == own_phase
+      && from_phase != 0u && from_phase != own_phase
+      && thermal_prepass_finite(row1.x) && thermal_prepass_finite(row1.y)
+      && row1.y > row1.x && row1.y <= specific_internal_energy
+    ) {
+      let front_temperature =
+        thermal_prepass_temperature_from_graph(u32(row0.z), row1.y);
+      if (thermal_prepass_finite(front_temperature) && front_temperature > 0.0) {
+        fronts.lower_temperature_k = front_temperature;
+        fronts.lower_target_energy = row1.x;
+        fronts.target_phases = fronts.target_phases | (from_phase << 8u);
+      }
+    }
+  }
+  return fronts;
+}
+
 // Temperature and slope come from the selected current segment above. Pair
 // exchange is allowed to traverse the entire material response only when its
 // packed enthalpy curve is contiguous, continuous, and monotone. This keeps a
@@ -3286,12 +3577,58 @@ fn thermal_prepass_physical_topology_row_admitted(
   return false;
 }
 
+// A1: the prepass entries' indirect arguments are the view's dispatch words
+// at OFFSET (read-only here). Excluded groups (ones that launch would not
+// run) return first; the shape check also admits a direct 1D launch that
+// covers every staged group, so both launches run the same groups.
+fn thermal_prepass_launch_excluded(
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>,
+  offset: u32
+) -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) { return false; }
+  let launch_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  return preflight_spatial_aggregate_view[offset + 2u] == 0u
+    || launch_group >= preflight_spatial_aggregate_view[offset]
+      * preflight_spatial_aggregate_view[offset + 1u];
+}
+
+fn thermal_prepass_launch_shape_admitted(
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>,
+  offset: u32
+) -> bool {
+  let staged_x = preflight_spatial_aggregate_view[offset];
+  let staged_y = preflight_spatial_aggregate_view[offset + 1u];
+  let staged_z = preflight_spatial_aggregate_view[offset + 2u];
+  return workgroup_id.z == 0u
+    && num_workgroups.z == 1u
+    && (
+      (num_workgroups.x == staged_x && num_workgroups.y == staged_y)
+      || (
+        num_workgroups.y == 1u
+        && staged_z == 1u
+        && num_workgroups.x >= staged_x * staged_y
+      )
+    );
+}
+
 @compute @workgroup_size(64)
 fn preflight_physical_topology(
   @builtin(local_invocation_index) local_invocation_index: u32,
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  if (thermal_prepass_launch_excluded(
+    workgroup_id,
+    num_workgroups,
+    THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET
+  )) { return; }
   if (
     thermal_params.active_member_projection_enabled
       != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
@@ -3300,14 +3637,7 @@ fn preflight_physical_topology(
     ) != THERMAL_PREFLIGHT_ACTIVE_MEMBER_ADMITTED
   ) { return; }
   if (
-    num_workgroups.x != preflight_spatial_aggregate_view[
-      THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET
-    ]
-    || num_workgroups.y != preflight_spatial_aggregate_view[
-      THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET + 1u
-    ]
-    || num_workgroups.z != 1u
-    || workgroup_id.z != 0u
+    !thermal_prepass_launch_shape_admitted(workgroup_id, num_workgroups, THERMAL_PREFLIGHT_ACTIVE_SOURCE_PHYSICAL_DISPATCH_OFFSET)
   ) {
     if (
       workgroup_id.x == 0u
@@ -3350,6 +3680,11 @@ fn derive(
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  if (thermal_prepass_launch_excluded(
+    workgroup_id,
+    num_workgroups,
+    THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
+  )) { return; }
   let active_source_projection =
     thermal_params.active_member_projection_enabled
       == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE;
@@ -3368,14 +3703,7 @@ fn derive(
   var source_rank = global_id.x;
   if (active_source_projection) {
     if (
-      num_workgroups.x != preflight_spatial_aggregate_view[
-        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
-      ]
-      || num_workgroups.y != preflight_spatial_aggregate_view[
-        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET + 1u
-      ]
-      || num_workgroups.z != 1u
-      || workgroup_id.z != 0u
+      !thermal_prepass_launch_shape_admitted(workgroup_id, num_workgroups, THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET)
     ) {
       if (
         workgroup_id.x == 0u
@@ -3622,6 +3950,22 @@ fn derive(
   }
   atomicStore(&thermal_derived[row_offset + 8u], material_key);
   atomicStore(&thermal_derived[row_offset + 9u], phase_key);
+  var fronts = ThermalPhaseFronts(0.0, 0.0, 0.0, 0.0, 0u);
+  if (selection.ready == 1u && temperature_k > 0.0) {
+    fronts = thermal_prepass_phase_fronts(
+      thermo0.x,
+      vel_u.w,
+      selection.response_index
+    );
+  }
+  atomicStore(&thermal_derived[row_offset + 10u], bitcast<u32>(fronts.upper_temperature_k));
+  atomicStore(&thermal_derived[row_offset + 11u], bitcast<u32>(fronts.upper_target_energy));
+  atomicStore(&thermal_derived[row_offset + 12u], bitcast<u32>(fronts.lower_temperature_k));
+  atomicStore(&thermal_derived[row_offset + 13u], bitcast<u32>(fronts.lower_target_energy));
+  atomicStore(&thermal_derived[row_offset + 14u], fronts.target_phases);
+  for (var skin_word = 15u; skin_word < 24u; skin_word = skin_word + 1u) {
+    atomicStore(&thermal_derived[row_offset + skin_word], 0u);
+  }
   atomicStore(
     &thermal_conductivity_sidecar[conductivity_row_offset],
     selection.response_index
@@ -3801,6 +4145,11 @@ fn resolve_budget(
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  if (thermal_prepass_launch_excluded(
+    workgroup_id,
+    num_workgroups,
+    THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
+  )) { return; }
   let active_source_projection =
     thermal_params.active_member_projection_enabled
       == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE;
@@ -3813,14 +4162,7 @@ fn resolve_budget(
   var particle_index = global_id.x;
   if (active_source_projection) {
     if (
-      num_workgroups.x != preflight_spatial_aggregate_view[
-        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET
-      ]
-      || num_workgroups.y != preflight_spatial_aggregate_view[
-        THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET + 1u
-      ]
-      || num_workgroups.z != 1u
-      || workgroup_id.z != 0u
+      !thermal_prepass_launch_shape_admitted(workgroup_id, num_workgroups, THERMAL_PREFLIGHT_ACTIVE_SOURCE_DISPATCH_OFFSET)
     ) {
       if (
         workgroup_id.x == 0u
@@ -4225,6 +4567,9 @@ fn budget(
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  if (thermal_active_source_launch_excluded(workgroup_id, num_workgroups)) {
+    return;
+  }
   thermal_prepare_pair_authority_flags(local_invocation_index);
   let source_ordinal = thermal_projection_work_ordinal(
     global_id,
@@ -4371,6 +4716,9 @@ fn propose(
   @builtin(workgroup_id) workgroup_id: vec3<u32>,
   @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  if (thermal_active_source_launch_excluded(workgroup_id, num_workgroups)) {
+    return;
+  }
   thermal_prepare_pair_authority_flags(local_invocation_index);
   let source_ordinal = thermal_projection_work_ordinal(
     global_id,
@@ -4608,6 +4956,14 @@ const thermalCandidateCsrRoutePreludeWgsl = /* wgsl */ `
   // ULG_THERMAL_CANDIDATE_CSR_ROUTE_PRELUDE_END
 `;
 
+const thermalCandidateCsrDormantRouteWgsl = /* wgsl */ `
+      // ULG_THERMAL_CANDIDATE_CSR_DORMANT_ROUTE_BEGIN
+      if (thermal_params.candidate_capacity != 0u) {
+        thermal_csr_mark_route(THERMAL_CSR_ROUTE_DORMANT);
+      }
+      // ULG_THERMAL_CANDIDATE_CSR_DORMANT_ROUTE_END
+`;
+
 const thermalCandidateCsrCaptureCandidateWgsl = /* wgsl */ `
             // ULG_THERMAL_CANDIDATE_CSR_CAPTURE_CANDIDATE_BEGIN
             if (thermal_csr_capture) {
@@ -4842,6 +5198,7 @@ const THERMAL_CSR_STATUS_VALIDATED: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_STATUS
 const THERMAL_CSR_ROUTE_UNIFORM_COMPLETION: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_UNIFORM_COMPLETION}u;
 const THERMAL_CSR_ROUTE_REPLAY: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_REPLAY}u;
 const THERMAL_CSR_ROUTE_EXACT_NEAR_REWALK: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_EXACT_NEAR_REWALK}u;
+const THERMAL_CSR_ROUTE_DORMANT: u32 = ${SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_DORMANT}u;
 
 struct ThermalCsrRange {
   begin: u32,
@@ -5092,7 +5449,7 @@ fn validate_thermal_csr_rows(
     }
   } else {
   let source_pos_mass = source_state[source_index * 2u];
-  if (source_pos_mass.w <= 0.0) {
+  if (source_pos_mass.w <= 0.0 || thermal_source_dormant(source_index)) {
     if (row_state != 0u) {
       thermal_csr_mark_status(THERMAL_CSR_STATUS_INVALID);
     }
@@ -5190,6 +5547,7 @@ function stripThermalCandidateCsrWgsl(source) {
     .replace(thermalCandidateCsrAdmissionWgsl, '')
     .replace(thermalCandidateCsrTraversalPreludeWgsl, '')
     .replace(thermalCandidateCsrRoutePreludeWgsl, '')
+    .replace(thermalCandidateCsrDormantRouteWgsl, '')
     .replaceAll(thermalCandidateCsrCaptureCandidateWgsl, '')
     .replaceAll(thermalCandidateCsrSkippedMemberWgsl, '')
     .replace(thermalCandidateCsrFinalizeCaptureWgsl, '')
@@ -5255,6 +5613,247 @@ fn thermal_mechanical_interface_lookup(
   return source.slice(0, start) + inertLookup + source.slice(end);
 }
 
+// Phase 1 integer energy ledger variant (plan/todo/g2-integer-ledger-proposal.md).
+// It evaluates every pair's raw energies in (lo, hi) index roles so both
+// endpoints compute identical bits, accumulates each row's packets as exact
+// signed quanta (gained and lost magnitudes, netted once), and writes the net
+// after the f32 rows. Only ledger steps compile it; the default proposal WGSL
+// is unchanged.
+const thermalProposalLedgerReplacements = Object.freeze([
+  [`  active_rank_prevalidated: bool
+) {
+  thermal_evidence_add(0u, 1u, true);`,
+    `  active_rank_prevalidated: bool
+) {
+  thermal_ledger_reset();
+  thermal_evidence_add(0u, 1u, true);`,
+    "traversal reset"],
+  [`fn thermal_publish_proposal_row(row_offset: u32, row: vec4<f32>) {
+`,
+    `fn thermal_publish_proposal_row(row_offset: u32, row: vec4<f32>) {
+  // A row that cannot carry its exact packet fails the proposal closed.
+  if (!thermal_ledger_publish(
+    (row_offset - THERMAL_PROPOSAL_HEADER_WORDS) / THERMAL_PROPOSAL_ROW_WORDS
+  )) {
+    thermal_evidence_add(7u, 1u, true);
+    thermal_evidence_add(7u, 1u, false);
+    thermal_mark_invalid(true);
+    thermal_mark_invalid(false);
+    return;
+  }
+`,
+    "row publication"],
+  [`  let distance_m = sqrt(max(distance_squared_m2, 0.0));
+  let sphere_contact_geometry = thermal_conductive_sphere_contact_geometry(
+    self_radius_m,
+    other_radius_m,
+    distance_m
+  );
+  let interface_contact_geometry =
+    thermal_finite_volume_interface_contact_geometry(
+      self_radius_m,
+      other_radius_m,
+      mechanical_interface.effective_face_area_m2
+    );
+`,
+    `  let distance_m = sqrt(max(distance_squared_m2, 0.0));
+  // Every pair is evaluated in (lo, hi) index roles, so both endpoints
+  // compute the raw energies from identical inputs in identical order; the
+  // hi endpoint then negates them into its own orientation.
+  let pair_roles_swapped = self_index > other_index;
+  let pair_energy_sign = select(1.0, -1.0, pair_roles_swapped);
+  let other_mass_kg = max(other_pos_mass.w, 1.0e-30);
+  let a_radius_m = select(self_radius_m, other_radius_m, pair_roles_swapped);
+  let b_radius_m = select(other_radius_m, self_radius_m, pair_roles_swapped);
+  let a_temperature = select(self_temperature, other_temperature, pair_roles_swapped);
+  let b_temperature = select(other_temperature, self_temperature, pair_roles_swapped);
+  let a_temperature_slope =
+    select(self_temperature_slope, other_temperature_slope, pair_roles_swapped);
+  let b_temperature_slope =
+    select(other_temperature_slope, self_temperature_slope, pair_roles_swapped);
+  let a_mass_kg = select(self_mass, other_mass_kg, pair_roles_swapped);
+  let b_mass_kg = select(other_mass_kg, self_mass, pair_roles_swapped);
+  let a_thermal_conductivity_w_per_mk = select(
+    self_thermal_conductivity_w_per_mk,
+    other_thermal_conductivity_w_per_mk,
+    pair_roles_swapped
+  );
+  let b_thermal_conductivity_w_per_mk = select(
+    other_thermal_conductivity_w_per_mk,
+    self_thermal_conductivity_w_per_mk,
+    pair_roles_swapped
+  );
+  let sphere_contact_geometry = thermal_conductive_sphere_contact_geometry(
+    a_radius_m,
+    b_radius_m,
+    distance_m
+  );
+  let interface_contact_geometry =
+    thermal_finite_volume_interface_contact_geometry(
+      a_radius_m,
+      b_radius_m,
+      mechanical_interface.effective_face_area_m2
+    );
+`,
+    "canonical pair roles 1"],
+  [`            self_thermal_conductivity_w_per_mk
+            * contact_area_m2
+          )
+        + interface_contact_geometry.w
+          / (
+            other_thermal_conductivity_w_per_mk`,
+    `            a_thermal_conductivity_w_per_mk
+            * contact_area_m2
+          )
+        + interface_contact_geometry.w
+          / (
+            b_thermal_conductivity_w_per_mk`,
+    "canonical pair roles 2"],
+  [`        thermal_harmonic_mean_positive(
+          self_thermal_conductivity_w_per_mk,
+          other_thermal_conductivity_w_per_mk
+        );`,
+    `        thermal_harmonic_mean_positive(
+          a_thermal_conductivity_w_per_mk,
+          b_thermal_conductivity_w_per_mk
+        );`,
+    "canonical pair roles 3"],
+  [`      * (other_temperature - self_temperature) * thermal_params.dt_s;
+    conduction_energy_j = thermal_clamp_pair_energy(
+      raw_energy_j,
+      self_temperature,
+      other_temperature,
+      self_temperature_slope,
+      other_temperature_slope,
+      self_mass,
+      other_pos_mass.w
+    );`,
+    `      * (b_temperature - a_temperature) * thermal_params.dt_s;
+    conduction_energy_j = pair_energy_sign * thermal_clamp_pair_energy(
+      raw_energy_j,
+      a_temperature,
+      b_temperature,
+      a_temperature_slope,
+      b_temperature_slope,
+      a_mass_kg,
+      b_mass_kg
+    );`,
+    "canonical pair roles 4"],
+  [`    if (other_emissivity > 0.0) {
+      let view_area_m2 = thermal_radiative_view_area_m2(
+        self_radius_m,
+        other_radius_m,
+        distance_m
+      );
+      let raw_energy_j = self_emissivity * other_emissivity
+        * thermal_params.stefan_boltzmann_w_per_m2_k4
+        * (thermal_pow4(other_temperature) - thermal_pow4(self_temperature))
+        * view_area_m2 * thermal_params.dt_s;
+      radiation_energy_j = thermal_clamp_pair_energy(
+        raw_energy_j,
+        self_temperature,
+        other_temperature,
+        self_temperature_slope,
+        other_temperature_slope,
+        self_mass,
+        other_pos_mass.w
+      );
+    }`,
+    `    if (other_emissivity > 0.0) {
+      let a_emissivity = select(self_emissivity, other_emissivity, pair_roles_swapped);
+      let b_emissivity = select(other_emissivity, self_emissivity, pair_roles_swapped);
+      let view_area_m2 = thermal_radiative_view_area_m2(
+        a_radius_m,
+        b_radius_m,
+        distance_m
+      );
+      let raw_energy_j = a_emissivity * b_emissivity
+        * thermal_params.stefan_boltzmann_w_per_m2_k4
+        * (thermal_pow4(b_temperature) - thermal_pow4(a_temperature))
+        * view_area_m2 * thermal_params.dt_s;
+      radiation_energy_j = pair_energy_sign * thermal_clamp_pair_energy(
+        raw_energy_j,
+        a_temperature,
+        b_temperature,
+        a_temperature_slope,
+        b_temperature_slope,
+        a_mass_kg,
+        b_mass_kg
+      );
+    }`,
+    "canonical pair roles 5"],
+  [`  *conduction_specific_energy_delta = *conduction_specific_energy_delta
+    + conduction_energy_j / self_mass;`,
+    `  thermal_ledger_record(conduction_energy_j + radiation_energy_j);
+  *conduction_specific_energy_delta = *conduction_specific_energy_delta
+    + conduction_energy_j / self_mass;`,
+    "packet record"]
+]);
+
+const thermalProposalLedgerLibraryWgsl = /* wgsl */ `
+${createSphExactMassWgsl(SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_FORMAT)}
+${createSphExactLedgerWgsl(SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_FORMAT)}
+var<private> thermal_ledger_gained: ExactMass;
+var<private> thermal_ledger_lost: ExactMass;
+var<private> thermal_ledger_error: u32;
+
+fn thermal_ledger_reset() {
+  thermal_ledger_gained = ExactMass();
+  thermal_ledger_lost = ExactMass();
+  thermal_ledger_error = 0u;
+}
+
+fn thermal_ledger_record(packet_j: f32) {
+  let bits = bitcast<u32>(packet_j);
+  if ((bits & 0x7fffffffu) == 0u) { return; }
+  let quanta = el_from_f32_bits(bits & 0x7fffffffu);
+  if (packet_j > 0.0) {
+    let next = em_add(thermal_ledger_gained, quanta.value);
+    thermal_ledger_error |= quanta.error | next.error;
+    thermal_ledger_gained = next.value;
+  } else {
+    let next = em_add(thermal_ledger_lost, quanta.value);
+    thermal_ledger_error |= quanta.error | next.error;
+    thermal_ledger_lost = next.value;
+  }
+}
+
+// The net packet follows the f32 rows. False means this row cannot be
+// represented exactly; the caller fails the whole proposal closed.
+fn thermal_ledger_publish(particle_index: u32) -> bool {
+  if (el_negative(thermal_ledger_gained) || el_negative(thermal_ledger_lost)) {
+    return false;
+  }
+  let net = el_subtract(thermal_ledger_gained, thermal_ledger_lost);
+  if ((thermal_ledger_error | net.error) != 0u) { return false; }
+  let base = THERMAL_PROPOSAL_HEADER_WORDS
+    + thermal_params.particle_count * THERMAL_PROPOSAL_ROW_WORDS
+    + particle_index * EM_WORDS;
+  for (var i = 0u; i < EM_WORDS; i++) {
+    atomicStore(&thermal_proposals[base + i], net.value.words[i]);
+  }
+  return true;
+}
+`;
+
+const thermalProposalLedgerWgslCache = new Map();
+
+export function createSchroederSpatialThermalProposalLedgerWgsl(source) {
+  let code = thermalProposalLedgerWgslCache.get(source);
+  if (code) return code;
+  code = source;
+  for (const [needle, replacement, label] of thermalProposalLedgerReplacements) {
+    const first = code.indexOf(needle);
+    if (first < 0 || code.indexOf(needle, first + needle.length) >= 0) {
+      throw new Error(`Thermal proposal ledger WGSL anchor drifted: ${label}`);
+    }
+    code = code.slice(0, first) + replacement + code.slice(first + needle.length);
+  }
+  code = `${code}\n${thermalProposalLedgerLibraryWgsl}`;
+  thermalProposalLedgerWgslCache.set(source, code);
+  return code;
+}
+
 export const schroederSpatialThermalProposalWgsl = /* wgsl */ `
 struct ThermalProposalParams {
   particle_count: u32,
@@ -5279,6 +5878,11 @@ struct ThermalProposalParams {
   max_bin_scan_radius_cells: u32,
   mechanical_interface_receipt_required: u32,
   mechanical_interface_selected_level: i32,
+  // G4 thermal dormancy: 1 = read the dormancy flags in the derived tail.
+  thermal_dormancy_enabled: u32,
+  // Nonzero stamps this step's interface skin rows for the phase-carrier
+  // transfer; zero publishes no skin rows.
+  interface_front_epoch: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
@@ -5294,6 +5898,14 @@ struct ThermalProposalParams {
 @group(0) @binding(10) var<storage, read> spatial_aggregate_view: array<u32>;
 ${thermalCandidateCsrBindingsWgsl}
 @group(0) @binding(15) var<storage, read> thermal_conductivity_sidecar: array<u32>;
+
+// Interface skin partition for the particle this invocation traverses. Reset
+// at the start of every traversal and published once at its end.
+var<private> thermal_interface_skin_upper_j: f32;
+var<private> thermal_interface_skin_lower_j: f32;
+// Sum of E * (face - x_self) per direction; divided by E at publication.
+var<private> thermal_interface_skin_upper_face_jm: vec3<f32>;
+var<private> thermal_interface_skin_lower_face_jm: vec3<f32>;
 
 ${exactNearTraversalWgsl}
 
@@ -5479,15 +6091,53 @@ fn thermal_active_source_dispatch_matches(
     thermal_params.active_member_projection_enabled
       != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
   ) { return true; }
-  return num_workgroups.x == spatial_aggregate_view[
-      THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET
-    ]
-    && num_workgroups.y == spatial_aggregate_view[
-      THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 1u
-    ]
-    && num_workgroups.z == spatial_aggregate_view[
+  let staged_x = spatial_aggregate_view[
+    THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET
+  ];
+  let staged_y = spatial_aggregate_view[
+    THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 1u
+  ];
+  let staged_z = spatial_aggregate_view[
+    THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 2u
+  ];
+  // The exact staged launch, or (A1) a direct 1D launch that covers every
+  // staged group (thermal_active_source_launch_excluded drops the rest).
+  return (
+      num_workgroups.x == staged_x
+      && num_workgroups.y == staged_y
+      && num_workgroups.z == staged_z
+    )
+    || (
+      num_workgroups.y == 1u
+      && num_workgroups.z == 1u
+      && staged_z == 1u
+      && num_workgroups.x >= staged_x * staged_y
+    );
+}
+
+// A1: in ActiveSource projection the indirect arguments are the view's active
+// dispatch words (read-only here). A group that launch would not run returns
+// before any other work, so an indirect launch and a direct 1D launch over a
+// host ceiling run exactly the same groups. Workgroup-uniform.
+fn thermal_active_source_launch_excluded(
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>
+) -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      != THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) { return false; }
+  let launch_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  return spatial_aggregate_view[
       THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 2u
-    ];
+    ] == 0u
+    || launch_group >= spatial_aggregate_view[
+        THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET
+      ] * spatial_aggregate_view[
+        THERMAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET + 1u
+      ];
 }
 
 // ULG_THERMAL_ACTIVE_SOURCE_RANK_HELPERS_BEGIN
@@ -5876,6 +6526,24 @@ fn thermal_derived_word(particle_index: u32, component: u32) -> u32 {
   let offset = THERMAL_DERIVED_HEADER_WORDS
     + particle_index * THERMAL_DERIVED_ROW_WORDS + component;
   return atomicLoad(&thermal_derived[offset]);
+}
+
+// G4 thermal dormancy (plan/todo/g4-dynamic-laws-proposal.md). The flags are
+// written by schroederThermalDormancyGpu.js into the derived tail after the
+// ActiveSource rank sidecar, after the derived prepass and before the budget
+// pass; the tail is cleared with the derived buffer, so an unwritten flag is
+// active. The predicate is pair-conservative: a pair touching a dormant
+// source has |dT| <= epsilon_T, and both endpoints skip it.
+fn thermal_source_dormant(particle_index: u32) -> bool {
+  if (
+    thermal_params.thermal_dormancy_enabled == 0u
+    || particle_index >= thermal_params.particle_count
+  ) { return false; }
+  let word = THERMAL_DERIVED_HEADER_WORDS
+    + thermal_params.particle_count * (THERMAL_DERIVED_ROW_WORDS + 1u)
+    + particle_index;
+  return word < arrayLength(&thermal_derived)
+    && atomicLoad(&thermal_derived[word]) != 0u;
 }
 
 struct ThermalMechanicalInterfaceLookup {
@@ -6457,6 +7125,131 @@ fn thermal_pair_visit_outcome(
   );
 }
 
+// Interface skin partition (plan/todo/interface-resolution.md). The series
+// law above puts the contact at T_if = (G_s T_s + G_o T_o) / (G_s + G_o),
+// G = k A / (a / 2). When one of this carrier's own transition temperatures
+// T* lies strictly between T_s and T_if, the front sits at the contact face:
+// the bulk can conduct only G_s (T* - T_s) dt away from it, and the rest of
+// the pair heat is latent work on the skin. The pair energy itself is
+// unchanged; only its destination inside this carrier is recorded.
+fn thermal_interface_skin_accumulate(
+  self_index: u32,
+  toward_other_m: vec3<f32>,
+  self_temperature: f32,
+  other_temperature: f32,
+  self_conductivity: f32,
+  other_conductivity: f32,
+  contact_area_m2: f32,
+  self_radius_m: f32,
+  other_radius_m: f32,
+  energy_j: f32
+) {
+  let radius_per_edge = ${EQUIVALENT_SPHERE_RADIUS_PER_ISOTROPIC_CELL_EDGE};
+  let self_half_edge_m = 0.5 * self_radius_m / radius_per_edge;
+  let other_half_edge_m = 0.5 * other_radius_m / radius_per_edge;
+  if (
+    !(self_half_edge_m > 0.0) || !(other_half_edge_m > 0.0)
+    || !(contact_area_m2 > 0.0)
+    || !(self_conductivity > 0.0) || !(other_conductivity > 0.0)
+    || !ss_exact_near_finite(energy_j)
+  ) { return; }
+  let self_conductance = self_conductivity * contact_area_m2 / self_half_edge_m;
+  let other_conductance = other_conductivity * contact_area_m2 / other_half_edge_m;
+  let interface_temperature =
+    (self_conductance * self_temperature + other_conductance * other_temperature)
+      / (self_conductance + other_conductance);
+  if (!ss_exact_near_finite(interface_temperature)) { return; }
+  // The contact face divides the center line in proportion to the two
+  // half-edges, the same split the series law uses.
+  let face_offset_m = toward_other_m
+    * (self_half_edge_m / (self_half_edge_m + other_half_edge_m));
+  if (
+    !ss_exact_near_finite(face_offset_m.x)
+    || !ss_exact_near_finite(face_offset_m.y)
+    || !ss_exact_near_finite(face_offset_m.z)
+  ) { return; }
+  let target_phases = thermal_derived_word(self_index, 14u);
+  if (energy_j > 0.0 && (target_phases & 0xffu) != 0u) {
+    let front_temperature = thermal_derived_value(self_index, 10u);
+    if (front_temperature > self_temperature && front_temperature < interface_temperature) {
+      let bulk_energy_j = self_conductance
+        * (front_temperature - self_temperature) * thermal_params.dt_s;
+      if (energy_j > bulk_energy_j) {
+        thermal_interface_skin_upper_j =
+          thermal_interface_skin_upper_j + (energy_j - bulk_energy_j);
+        thermal_interface_skin_upper_face_jm = thermal_interface_skin_upper_face_jm
+          + face_offset_m * (energy_j - bulk_energy_j);
+      }
+    }
+  } else if (energy_j < 0.0 && ((target_phases >> 8u) & 0xffu) != 0u) {
+    let front_temperature = thermal_derived_value(self_index, 12u);
+    if (front_temperature < self_temperature && front_temperature > interface_temperature) {
+      let bulk_energy_j = self_conductance
+        * (front_temperature - self_temperature) * thermal_params.dt_s;
+      if (energy_j < bulk_energy_j) {
+        thermal_interface_skin_lower_j =
+          thermal_interface_skin_lower_j + (energy_j - bulk_energy_j);
+        thermal_interface_skin_lower_face_jm = thermal_interface_skin_lower_face_jm
+          + face_offset_m * (energy_j - bulk_energy_j);
+      }
+    }
+  }
+}
+
+// One row per traversed particle. The dominant direction wins; the other
+// direction's latent share stays in the bulk, which the canonical apply has
+// already received in full, so energy is conserved either way.
+fn thermal_interface_skin_publish(particle_index: u32, source_energy: f32) {
+  let row = THERMAL_DERIVED_HEADER_WORDS
+    + particle_index * THERMAL_DERIVED_ROW_WORDS;
+  let upper = thermal_interface_skin_upper_j;
+  let lower = thermal_interface_skin_lower_j;
+  let target_phases = thermal_derived_word(particle_index, 14u);
+  var energy_j = 0.0;
+  var target_energy = 0.0;
+  var front_temperature = 0.0;
+  var target_phase = 0u;
+  var face_offset_m = vec3<f32>(0.0);
+  if (upper > 0.0 && upper >= -lower) {
+    energy_j = upper;
+    face_offset_m = thermal_interface_skin_upper_face_jm / upper;
+    target_energy = thermal_derived_value(particle_index, 11u);
+    front_temperature = thermal_derived_value(particle_index, 10u);
+    target_phase = target_phases & 0xffu;
+  } else if (lower < 0.0) {
+    energy_j = lower;
+    face_offset_m = thermal_interface_skin_lower_face_jm / lower;
+    target_energy = thermal_derived_value(particle_index, 13u);
+    front_temperature = thermal_derived_value(particle_index, 12u);
+    target_phase = (target_phases >> 8u) & 0xffu;
+  }
+  let epoch = thermal_params.interface_front_epoch;
+  if (
+    epoch == 0u
+    || epoch >= ${SCHROEDER_SPATIAL_THERMAL_INTERFACE_FRONT_EPOCH_LIMIT}u
+    || target_phase == 0u || target_phase > 4u
+    || energy_j == 0.0
+    || !ss_exact_near_finite(energy_j)
+    || !ss_exact_near_finite(source_energy)
+    || !ss_exact_near_finite(target_energy)
+    || !(front_temperature > 0.0)
+    || !ss_exact_near_finite(face_offset_m.x)
+    || !ss_exact_near_finite(face_offset_m.y)
+    || !ss_exact_near_finite(face_offset_m.z)
+  ) {
+    atomicStore(&thermal_derived[row + 19u], 0u);
+    return;
+  }
+  atomicStore(&thermal_derived[row + 20u], bitcast<u32>(face_offset_m.x));
+  atomicStore(&thermal_derived[row + 21u], bitcast<u32>(face_offset_m.y));
+  atomicStore(&thermal_derived[row + 22u], bitcast<u32>(face_offset_m.z));
+  atomicStore(&thermal_derived[row + 15u], bitcast<u32>(energy_j));
+  atomicStore(&thermal_derived[row + 16u], bitcast<u32>(source_energy));
+  atomicStore(&thermal_derived[row + 17u], bitcast<u32>(target_energy));
+  atomicStore(&thermal_derived[row + 18u], bitcast<u32>(front_temperature));
+  atomicStore(&thermal_derived[row + 19u], (epoch << 3u) | target_phase);
+}
+
 fn thermal_visit_fused_pair_cached(
   budget_mode: bool,
   self_index: u32,
@@ -6514,7 +7307,11 @@ fn thermal_visit_fused_pair_cached(
     );
   }
   let other_pos_mass = source_state[other_index * 2u];
-  if (other_pos_mass.w <= 0.0) {
+  if (
+    other_pos_mass.w <= 0.0
+    || thermal_source_dormant(other_index)
+    || thermal_source_dormant(self_index)
+  ) {
     return thermal_pair_visit_outcome(
       THERMAL_PAIR_VISIT_OUTCOME_NO_REPLAY,
       thermal_mechanical_interface_unproven()
@@ -6578,8 +7375,19 @@ fn thermal_visit_fused_pair_cached(
       other_index
     );
   }
+  // Interpenetrating gases mix rather than meet at a face. Two gas carriers
+  // (phase id >= 3, gas or plasma) are never a finite-volume material
+  // interface: gases have no mechanical contact receipt, so that face area is
+  // zero and co-located air and water-vapor rows of one parcel never
+  // conducted (vapor absorbing the iron's infrared ran to its caloric limit
+  // beside 293 K air). Their conduction path is the distance between their
+  // centres, floored at the molecular mean free path (~0.1 um at 1 atm), and
+  // the pair clamp bounds the exchange at equalization.
+  let both_gas = thermal_derived_word(self_index, 9u) >= 3u
+    && thermal_derived_word(other_index, 9u) >= 3u;
   let interface_pair =
     thermal_params.mechanical_interface_receipt_required != 0u
+    && !both_gas
     && (
       material_or_phase_interface
       || mechanical_interface.classified != 0u
@@ -6606,7 +7414,11 @@ fn thermal_visit_fused_pair_cached(
     interface_pair
   );
   let conduction_path_m = select(
-    sphere_contact_geometry.y,
+    select(
+      sphere_contact_geometry.y,
+      max(distance_m, 1.0e-7),
+      both_gas
+    ),
     interface_contact_geometry.y,
     interface_pair
   );
@@ -6742,6 +7554,25 @@ fn thermal_visit_fused_pair_cached(
   } else if (radiation_energy_j < 0.0) {
     radiation_energy_j = radiation_energy_j
       * min(self_loss_scale, other_gain_scale);
+  }
+  if (
+    !budget_mode
+    && conduction_hit
+    && interface_pair
+    && conduction_energy_j != 0.0
+  ) {
+    thermal_interface_skin_accumulate(
+      self_index,
+      other_pos_mass.xyz - self_position,
+      self_temperature,
+      other_temperature,
+      self_thermal_conductivity_w_per_mk,
+      other_thermal_conductivity_w_per_mk,
+      contact_area_m2,
+      self_radius_m,
+      other_radius_m,
+      conduction_energy_j
+    );
   }
   *conduction_specific_energy_delta = *conduction_specific_energy_delta
     + conduction_energy_j / self_mass;
@@ -6926,6 +7757,26 @@ ${thermalCandidateCsrAdmissionWgsl}
     }
     return;
   }
+  if (thermal_source_dormant(particle_index)) {
+    // A dormant source moves no pair energy: it records its own temperature
+    // as its band (an isolated source's budget) and publishes a zero row.
+    if (budget_mode) {
+      let dormant_temperature_bits = bitcast<u32>(self_temperature);
+      atomicStore(&thermal_derived[derived_row_offset + 4u], 0u);
+      atomicStore(&thermal_derived[derived_row_offset + 5u], 0u);
+      atomicStore(&thermal_derived[derived_row_offset + 6u], dormant_temperature_bits);
+      atomicStore(&thermal_derived[derived_row_offset + 7u], dormant_temperature_bits);
+    } else {
+${thermalCandidateCsrDormantRouteWgsl}
+      let dormant_energy_lo = thermal_derived_value(particle_index, 6u);
+      let dormant_energy_hi = thermal_derived_value(particle_index, 7u);
+      thermal_publish_proposal_row(
+        row_offset,
+        vec4<f32>(0.0, 0.0, dormant_energy_lo, dormant_energy_hi)
+      );
+    }
+    return;
+  }
   let global_max_radius_m = bitcast<f32>(atomicLoad(&thermal_derived[0u]));
   let conduction_query_radius_m = max(
     2.0 * thermal_params.smoothing_length_m,
@@ -6964,6 +7815,10 @@ ${thermalCandidateCsrAdmissionWgsl}
   var radiation_mask_hit_count = 0u;
   var local_count_overflow = false;
   var malformed = false;
+  thermal_interface_skin_upper_j = 0.0;
+  thermal_interface_skin_lower_j = 0.0;
+  thermal_interface_skin_upper_face_jm = vec3<f32>(0.0);
+  thermal_interface_skin_lower_face_jm = vec3<f32>(0.0);
 ${thermalCandidateCsrTraversalPreludeWgsl}
 ${thermalCandidateCsrRoutePreludeWgsl}
   if (binned_lookup) {
@@ -7577,6 +8432,7 @@ ${thermalCandidateCsrFinalizeCaptureWgsl}${thermalCandidateCsrExactTraversalSuff
       energy_hi
     )
   );
+  thermal_interface_skin_publish(particle_index, self_vel_u.w);
 }
 
 ${spatialThermalExactEntryPointsWgsl}
@@ -10455,10 +11311,16 @@ export function runSchroederSpatialThermalProposalWebGpu({
   thermalResponseGraphUpload,
   dtS = 0,
   smoothingLengthM = sphParticleState?.smoothingLengthM ?? 0,
-  conductionRate = PAIR_CONDUCTION_RATE_DEFAULT
+  conductionRate = PAIR_CONDUCTION_RATE_DEFAULT,
+  exactEnergyLedger = false,
+  thermalPotential = null,
+  thermalDormancy = null
 } = {}) {
   if (!device?.createBuffer || !device?.createCommandEncoder || !device.queue?.writeBuffer) {
     throw new TypeError('Canonical thermal proposals require a WebGPU-like device');
+  }
+  if (typeof exactEnergyLedger !== 'boolean') {
+    throw new TypeError('exactEnergyLedger must be an explicit boolean');
   }
   if (lostThermalProposalDevices.has(device)) {
     throw new Error('Canonical thermal proposal device is already lost');
@@ -10501,11 +11363,19 @@ export function runSchroederSpatialThermalProposalWebGpu({
     thermoBuffer
   });
   const responseUpload = resolveThermalResponseUpload(device, thermalResponseGraphUpload);
+  const potentialBindings = thermalPotential
+    ? thermalPotentialGpuBindings(thermalPotential, device, thermalResponseGraphUpload) : null;
   const preparedLawConfig = normalizeThermalLawConfig({
     dtS,
     smoothingLengthM,
     conductionRate
   });
+  const thermalDormancyConfig = normalizeThermalDormancyConfig(
+    // Until interval-aware dormancy is integrated, approximation uncertainty
+    // keeps this candidate route active; it must never create false dormancy.
+    potentialBindings ? null : thermalDormancy,
+    preparedLawConfig.smoothingLengthM
+  );
   const authentications = authenticateThermalConsumers(device, generation);
   const conductionAuthentication = authentications[0];
   const radiationAuthentication = authentications[1];
@@ -10726,6 +11596,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
       { consumerId: 'schroeder-spatial-thermal-proposal' }
     );
   let entry = null;
+  let potentialLease = null;
   try {
   const {
     runtime,
@@ -10767,7 +11638,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   device.queue.writeBuffer(
     proposalBuffer,
     0,
-    createProposalHeader(execution, particleCount)
+    createProposalHeader(execution, particleCount, { exactEnergyLedger })
   );
   device.queue.writeBuffer(
     conductivitySidecarBuffer,
@@ -10811,7 +11682,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
       )
     );
   }
+  const interfaceFrontEpoch = nextThermalInterfaceFrontEpoch();
   device.queue.writeBuffer(paramsBuffer, 0, createThermalParamsArray({
+    interfaceFrontEpoch,
     particleCount,
     materialCount: responseUpload.materialCount,
     responseCount: responseUpload.responseCount,
@@ -10822,18 +11695,34 @@ export function runSchroederSpatialThermalProposalWebGpu({
     mechanicalInterfaceReceiptRequired: Boolean(contactInterfaceReceipt),
     mechanicalInterfaceSelectedLevel:
       contactInterfaceReceipt?.selectedLevel ?? 0,
+    thermalDormancyEnabled: Boolean(thermalDormancyConfig),
     ...preparedLawConfig
   }));
+  const thermalDormancyStage = thermalDormancyConfig
+    ? acquireThermalDormancyStage(
+        device,
+        entry,
+        thermalDormancyConfig,
+        particleCount,
+        preparedLawConfig.smoothingLengthM
+      )
+    : null;
 
-  const directoryAbiCacheKey = `directory-v${directoryAbiVersion}`;
-  const thermalProposalWgsl = directoryV2
+  // front1: derived rows carry interface phase fronts and skin rows.
+  const directoryAbiCacheKey = `directory-v${directoryAbiVersion}.front2`;
+  const defaultThermalProposalWgsl = directoryV2
     ? schroederSpatialThermalProposalV2Wgsl
     : schroederSpatialThermalProposalWgsl;
+  const thermalProposalWgsl = exactEnergyLedger
+    ? createSchroederSpatialThermalProposalLedgerWgsl(defaultThermalProposalWgsl)
+    : defaultThermalProposalWgsl;
+  const proposalCacheKey = exactEnergyLedger
+    ? `${directoryAbiCacheKey}.exact-energy` : directoryAbiCacheKey;
   const derivedPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-derived-prepass.v13.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-derived-prepass.v13.${directoryAbiCacheKey}${potentialBindings ? '.potential-v1' : ''}`,
     label: 'ulg-schroeder-spatial-thermal-derived-prepass',
-    code: schroederSpatialThermalDerivedPrepassWgsl,
+    code: potentialBindings ? createSchroederSpatialThermalPotentialPrepassWgsl() : schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'derive',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -10848,7 +11737,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
       computeBufferBinding(11, 'storage'),
-      computeBufferBinding(13, 'storage')
+      computeBufferBinding(13, 'storage'),
+      ...(potentialBindings ? [computeBufferBinding(14, 'read-only-storage'),
+        computeBufferBinding(15, 'read-only-storage'), computeBufferBinding(16, 'storage')] : [])
     ]
   });
   const conductivityFinalizePipeline = createCachedExplicitComputePipeline(device, {
@@ -10957,7 +11848,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   });
   const budgetPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-fused-budget.v25.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-fused-budget.v25.${proposalCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-budget',
     code: thermalProposalWgsl,
     entryPoint: 'budget',
@@ -10981,7 +11872,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   });
   const proposalPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-fused-proposal.v26.${directoryAbiCacheKey}`,
+      `ulg-schroeder-spatial-thermal-fused-proposal.v26.${proposalCacheKey}`,
     label: 'ulg-schroeder-spatial-thermal-fused-proposal',
     code: thermalProposalWgsl,
     entryPoint: 'propose',
@@ -11006,7 +11897,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   const zeroActiveProjectionFinalizePipeline = directoryV2
     ? createCachedExplicitComputePipeline(device, {
         cacheKey:
-          `ulg-schroeder-spatial-thermal-zero-active-finalize.v4.${directoryAbiCacheKey}`,
+          `ulg-schroeder-spatial-thermal-zero-active-finalize.v4.${proposalCacheKey}`,
         label: 'ulg-schroeder-spatial-thermal-zero-active-finalize',
         code: thermalProposalWgsl,
         entryPoint: 'finalize_zero_active_projection',
@@ -11050,7 +11941,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     candidateCsrEnabled
       ? createCachedExplicitComputePipeline(device, {
           cacheKey:
-            `ulg-schroeder-spatial-thermal-csr-${suffix}.v9.${directoryAbiCacheKey}`,
+            `ulg-schroeder-spatial-thermal-csr-${suffix}.v9.${proposalCacheKey}`,
           label: `ulg-schroeder-spatial-thermal-csr-${suffix}`,
           code: thermalProposalWgsl,
           entryPoint,
@@ -11136,7 +12027,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ];
     const derivedBindGroup = device.createBindGroup({
       layout: derivedPipeline.bindGroupLayout,
-      entries: derivedEntries
+      entries: potentialBindings ? [...derivedEntries,
+        { binding: 14, resource: { buffer: potentialBindings.table } },
+        { binding: 15, resource: { buffer: potentialBindings.metadata } },
+        { binding: 16, resource: { buffer: potentialBindings.requests } }] : derivedEntries
     });
     const conductivityFinalizeBindGroup = device.createBindGroup({
       layout: conductivityFinalizePipeline.bindGroupLayout,
@@ -11354,6 +12248,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
   ));
 
   const artifactRecord = {
+    thermalPotentialLease: (potentialLease = potentialBindings?.retain() ?? null),
     lifecycleStatus: 'prepared',
     materialized: false,
     encoded: false,
@@ -11375,6 +12270,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     entry,
     frozenStateBuffer: stateBuffer,
     frozenThermoBuffer: thermoBuffer,
+    thermalDormancyStage,
     responseUpload,
     preparedLawConfig,
     contactInterfaceReceipt,
@@ -11479,6 +12375,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
       treeLeaseActive
       || sourceCellGenerationLeaseActive
       || proposalGenerationLeaseActive
+      || artifactRecord.thermalPotentialLease
     ) {
       if (
         artifactRecord.submissionObserved
@@ -11487,6 +12384,10 @@ export function runSchroederSpatialThermalProposalWebGpu({
         const submissionFence = queueOrdered
           ? Promise.resolve(true)
           : device.queue.onSubmittedWorkDone();
+        if (artifactRecord.thermalPotentialLease) {
+          submissionFence.then(() => artifactRecord.thermalPotentialLease.release(),
+            () => artifactRecord.thermalPotentialLease.release());
+        }
         if (treeLeaseActive) {
           treeRuntime.releaseExecutionConsumerLeaseAfter(
             treeConsumerLease,
@@ -11506,6 +12407,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
           );
         }
       } else {
+        artifactRecord.thermalPotentialLease?.release();
         if (treeLeaseActive) {
           treeRuntime.releaseExecutionConsumerLease(
             treeConsumerLease,
@@ -11531,6 +12433,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     // Detach only after cleanup succeeds. Deferred/in-flight work and throwing
     // cleanup must not lose their strongly owned device-loss target early.
     lossTargetHolder.target = null;
+    lossTargetHolder.lossRegistry?.holders.delete(lossTargetHolder);
     return true;
   };
   const authorizeQueueOrderedCanonicalApplyRetirement = ({
@@ -11624,6 +12527,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ready: true,
     backend: 'webgpu',
     particleCount,
+    // Interface skin rows for the phase-carrier transfer: derived words 15..19
+    // of each traversed row, stamped (epoch << 3) | target phase.
+    interfacePhaseFront: Object.freeze({
+      buffer: derivedBuffer,
+      epoch: interfaceFrontEpoch,
+      headerWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS,
+      rowWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
+    }),
     generation,
     generationId: execution.generationId,
     supportEpoch: execution.supportEpoch,
@@ -11731,7 +12642,24 @@ export function runSchroederSpatialThermalProposalWebGpu({
     proposalRowWords: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS,
     proposalRowStrideFloats: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_FLOATS,
     proposalBufferByteLength: proposalBufferByteLength(entry.capacity),
-    activeProposalByteLength: proposalBufferByteLength(particleCount),
+    activeProposalByteLength: proposalRowsByteLength(particleCount),
+    exactEnergyLedgerWords: exactEnergyLedger ? SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_WORDS : 0,
+    exactEnergyLedgerByteOffset: proposalRowsByteLength(particleCount),
+    // G4 receipt: counts [active, dormant, present, overflow] and per-source
+    // flags, both GPU-written each matched-time encode; null when off.
+    thermalDormancy: thermalDormancyConfig
+      ? Object.freeze({
+          schema: 'ulg.schroeder-thermal-dormancy.v1',
+          epsilonK: thermalDormancyConfig.epsilonK,
+          minCellEdgeM: thermalDormancyConfig.minCellEdgeM,
+          predicate: 'halo-temperature-span-le-epsilon',
+          pairConservative: true,
+          gatedLaws: Object.freeze(['pair-conduction', 'pair-radiation']),
+          countBuffer: thermalDormancyStage.countBuffer,
+          dormantBuffer: thermalDormancyStage.dormantBuffer,
+          flagWordOffset: thermalDormancyFlagWord(particleCount)
+        })
+      : null,
     proposalRowByteOffset:
       SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT,
     proposalRowLayout: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_LAYOUT,
@@ -11831,17 +12759,11 @@ export function runSchroederSpatialThermalProposalWebGpu({
     releaseLease
   };
   if (device?.lost?.then) {
-    const lossCallbacks = createThermalProposalDeviceLossCallbacks(
-      device,
-      lossTargetHolder
-    );
-    Promise.resolve(device.lost).then(
-      lossCallbacks.fulfilled,
-      lossCallbacks.rejected
-    );
+    registerThermalProposalDeviceLoss(device, lossTargetHolder);
   }
   return artifact;
   } catch (error) {
+    potentialLease?.release();
     if (
       ownsSchroederSpatialEpochGenerationConsumerLease(
         generationConsumerLease,
@@ -12765,6 +13687,7 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
       if (encodeAttempted || record.encoded || record.releaseScheduled || record.released) {
         throw new Error('Matched-time thermal encoder stage is single-use');
       }
+      record.thermalPotentialLease?.assertLive();
       if (
         !ownsSchroederSpatialEpochGenerationConsumerLease(
           record.generationConsumerLease,
@@ -12805,11 +13728,14 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           conductivitySidecarByteLength(record.entry.capacity)
             - 10 * Uint32Array.BYTES_PER_ELEMENT
         );
+        // Rows and the integer energy section after them: rows published
+        // by dormant or uniform-completion paths must carry zero packets.
         encoder.clearBuffer(
           record.proposalBuffer,
           SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS
             * Uint32Array.BYTES_PER_ELEMENT,
-          record.particleCount * SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+          record.particleCount * (SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+            + SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_WORDS)
             * Uint32Array.BYTES_PER_ELEMENT
         );
         if (record.nativeTestTreeShadow?.diagnosticBuffer) {
@@ -12841,6 +13767,22 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
             Uint32Array.BYTES_PER_ELEMENT
           );
         }
+        // A1: in ActiveSource projection the thermal kernels admit only the
+        // groups the view's GPU-authored dispatch words name, so direct 1D
+        // launches over host ceilings replace dispatchWorkgroupsIndirect
+        // (about 0.3 ms of GPU-process validation each on Chromium). A
+        // ceiling too small fails the kernels' shape check (fail-closed).
+        const thermalDirectSourceBound = Math.max(
+          Number(record.particleCount) || 0,
+          Number(record.execution?.activeSourceCapacity) || 0,
+          Number(record.execution?.physicalSourceCapacity) || 0
+        );
+        const thermalDirectGroups = Math.ceil(thermalDirectSourceBound / 64);
+        const thermalDirectAllowed = activeSourceProjection
+          && thermalDirectGroups > 0
+          && thermalDirectGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535)
+          && globalThis.__ulgForceIndirectFieldConsumers !== true;
+        const thermalDirectActiveGroups = thermalDirectAllowed ? thermalDirectGroups : 0;
         const encodePass = (
           label,
           timestampStage,
@@ -12874,6 +13816,13 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
               dispatchIndirectBuffer,
               dispatchIndirectOffset
             );
+          } else if (
+            activeSourceProjection
+            && activeProjectionIndirect
+            && thermalDirectActiveGroups > 0
+          ) {
+            // A1: exact direct launch (see thermal_active_source_launch_excluded).
+            pass.dispatchWorkgroups(thermalDirectActiveGroups);
           } else if (compactActiveProjection && activeProjectionIndirect) {
             pass.dispatchWorkgroupsIndirect(
               record.sourceWorkIndirectBuffer,
@@ -12904,12 +13853,14 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
             'physical-topology-preflight',
             record.physicalTopologyPreflightPipeline,
             bindGroups.physicalTopologyPreflightBindGroup,
-            {
-              dispatchIndirectBuffer:
-                record.physicalTopologyWorkIndirectBuffer,
-              dispatchIndirectOffset:
-                record.physicalTopologyWorkIndirectOffset
-            }
+            thermalDirectAllowed
+              ? { dispatchWorkgroups: thermalDirectGroups }
+              : {
+                  dispatchIndirectBuffer:
+                    record.physicalTopologyWorkIndirectBuffer,
+                  dispatchIndirectOffset:
+                    record.physicalTopologyWorkIndirectOffset
+                }
           );
           encodePass(
             'ulg-schroeder-spatial-thermal-active-topology-finalize',
@@ -12933,6 +13884,48 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           bindGroups.conductivityFinalizeBindGroup,
           { dispatchWorkgroups: record.workgroups }
         );
+        if (record.thermalDormancyStage) {
+          // G4: classify sources from this step's derived temperatures, before
+          // either law pass reads the flags.
+          const timestamp = beginTimestamp(encoder, 'thermal-dormancy');
+          record.thermalDormancyStage.encode(encoder, {
+            stateBuffer,
+            temperatureBuffer: record.derivedBuffer
+          });
+          // G4 per-schedule receipt: this step's counts into the schedule ring.
+          encodeLawActivationCount(encoder, device, 'thermal',
+            record.thermalDormancyStage.countBuffer,
+            { epsilon: artifact.thermalDormancy?.epsilonK ?? null });
+          endTimestamp(encoder, timestamp);
+          // Diagnostic: the latest stage's GPU counts, read on demand (a
+          // separate submit) by probes; never read on the step path.
+          const diagnostic = (globalThis.__ulgThermalDormancy ??= { encodes: 0 });
+          diagnostic.encodes += 1;
+          diagnostic.device = device;
+          diagnostic.stage = record.thermalDormancyStage;
+          diagnostic.epsilonK = artifact.thermalDormancy?.epsilonK ?? null;
+          diagnostic.particleCount = record.particleCount;
+          diagnostic.derivedBuffer = record.derivedBuffer;
+          diagnostic.smoothingLengthM = record.preparedLawConfig?.smoothingLengthM ?? null;
+          diagnostic.readCounts ??= async () => {
+            const live = diagnostic.stage;
+            if (!live) return null;
+            const copy = diagnostic.device.createBuffer({ size: 32, usage: 1 | 8 });
+            const copyEncoder = diagnostic.device.createCommandEncoder();
+            copyEncoder.copyBufferToBuffer(live.countBuffer, 0, copy, 0, 16);
+            copyEncoder.copyBufferToBuffer(diagnostic.derivedBuffer, 0, copy, 16, 16);
+            diagnostic.device.queue.submit([copyEncoder.finish()]);
+            await copy.mapAsync(1);
+            const words = new Uint32Array(copy.getMappedRange().slice(0));
+            copy.unmap(); copy.destroy();
+            const f32 = (word) => new Float32Array(new Uint32Array([word]).buffer)[0];
+            return { encodes: diagnostic.encodes, epsilonK: diagnostic.epsilonK,
+              particleCount: diagnostic.particleCount, counts: Array.from(words.slice(0, 4)),
+              cells: live.cells, smoothingLengthM: diagnostic.smoothingLengthM,
+              maxRadiusM: f32(words[4]), maxTemperatureK: f32(words[6]),
+              minTemperatureK: f32((~words[7]) >>> 0) };
+          };
+        }
         if (localActiveProjection) {
           encodePass(
             'ulg-schroeder-spatial-thermal-active-dispatch-finalize',
@@ -13311,7 +14304,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     }));
 
     const derivedPipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v9',
+      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v10',
       label: 'ulg-classic-thermal-v2-derived-prepass',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'derive',
@@ -13332,7 +14325,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       ]
     });
     const conductivityFinalizePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-conductivity-finalize.v2',
+      cacheKey: 'ulg-classic-thermal-v2-conductivity-finalize.v3',
       label: 'ulg-classic-thermal-v2-conductivity-finalize',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'finalize_conductivity',
@@ -13343,7 +14336,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       ]
     });
     const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v10',
+      cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v11',
       label: 'ulg-classic-thermal-v2-budget-resolve',
       code: schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'resolve_budget',
@@ -13365,8 +14358,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     });
     const budgetPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: normalLookupBinned
-        ? 'ulg-classic-thermal-v2-candidate-budget.v16'
-        : 'ulg-classic-thermal-v2-exhaustive-budget.v13',
+        ? 'ulg-classic-thermal-v2-candidate-budget.v17'
+        : 'ulg-classic-thermal-v2-exhaustive-budget.v14',
       label: normalLookupBinned
         ? 'ulg-classic-thermal-v2-binned-budget'
         : 'ulg-classic-thermal-v2-exhaustive-budget',
@@ -13389,8 +14382,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     });
     const proposalPipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: normalLookupBinned
-        ? 'ulg-classic-thermal-v2-candidate-proposal.v16'
-        : 'ulg-classic-thermal-v2-exhaustive-proposal.v13',
+        ? 'ulg-classic-thermal-v2-candidate-proposal.v17'
+        : 'ulg-classic-thermal-v2-exhaustive-proposal.v14',
       label: normalLookupBinned
         ? 'ulg-classic-thermal-v2-binned-proposal'
         : 'ulg-classic-thermal-v2-exhaustive-proposal',
@@ -13449,7 +14442,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     });
     const candidateBuildPipeline = normalLookupBinned
       ? createCachedExplicitComputePipeline(device, {
-          cacheKey: 'ulg-classic-thermal-v2-candidate-build.v7',
+          cacheKey: 'ulg-classic-thermal-v2-candidate-build.v8',
           label: 'ulg-classic-thermal-v2-candidate-build',
           code: classicThermalCandidateBuildWgsl,
           entryPoint: 'build',
@@ -13516,7 +14509,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       encoder.clearBuffer(
         proposalBuffer,
         SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS * Uint32Array.BYTES_PER_ELEMENT,
-        particleCount * SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+        particleCount * (SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS
+          + SCHROEDER_SPATIAL_THERMAL_EXACT_ENERGY_WORDS)
           * Uint32Array.BYTES_PER_ELEMENT
       );
       const derivedPass = encoder.beginComputePass({
@@ -13603,7 +14597,7 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       thermalConductionContactAreaStatus:
         'partial-slice-sphere-intersection-proxy-pending-ss-receipt',
       legacyConductionRateEffective: false,
-      activeProposalByteLength: proposalBufferByteLength(particleCount),
+      activeProposalByteLength: proposalRowsByteLength(particleCount),
       proposalHeaderWords: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_HEADER_WORDS,
       proposalRowWords: SCHROEDER_SPATIAL_THERMAL_PROPOSAL_ROW_WORDS,
       proposalBufferSchema: ULG_SCHROEDER_SPATIAL_THERMAL_PROPOSAL_BUFFER_SCHEMA,

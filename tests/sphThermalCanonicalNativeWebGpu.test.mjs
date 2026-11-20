@@ -6,9 +6,13 @@ import {
 
 const RUN_NATIVE_TREE = process.env.ULG_RUN_NATIVE_THERMAL_TREE === '1';
 const RUN_NATIVE_PAIR = process.env.ULG_RUN_NATIVE_THERMAL_PAIR === '1';
+// G4 slice 2 (plan/todo/g4-dynamic-laws-proposal.md): only the per-source
+// thermal dormancy A/B cases.
+const RUN_NATIVE_DORMANCY = process.env.ULG_RUN_NATIVE_THERMAL_DORMANCY === '1';
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_THERMAL === '1'
   || RUN_NATIVE_TREE
-  || RUN_NATIVE_PAIR;
+  || RUN_NATIVE_PAIR
+  || RUN_NATIVE_DORMANCY;
 const BASE_URL = process.env.ULG_THERMAL_BASE_URL
   || 'https://127.0.0.1:5174/';
 const CHROME = process.env.ULG_THERMAL_CHROME
@@ -52,7 +56,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
     });
     native = await page.evaluate(async ({
       runNativeTreeShadow,
-      runNativePairOnly
+      runNativePairOnly,
+      runNativeDormancyOnly
     }) => {
       const fail = (message) => {
         throw new Error(message);
@@ -651,6 +656,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       const productionIceMassKg = 7.336;
       let epochOrdinal = 0;
       let pairOnlyReceipt = null;
+      let dormancyReceipt = null;
 
       const runFixture = async ({
         name,
@@ -695,7 +701,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         sameGenerationSourceCellTreeShadow = false,
         sameGenerationExhaustiveShadow = false,
         phaseResponseTableOverride = null,
-        responseUploadOverride = null
+        responseUploadOverride = null,
+        thermalDormancy = null
       }) => {
         // Aggregate views are FAR-owned.  Unqualified thermal fixtures exercise
         // the canonical directory-v2 ActiveSource route, except that the
@@ -1136,9 +1143,14 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             thermalResponseGraphUpload: fixtureResponseUpload,
             dtS,
             smoothingLengthM: packed.smoothingLengthM,
-            conductionRate
+            conductionRate,
+            thermalDormancy
           });
           requireTrue(proposal.ready === true, `${name}: proposal was not ready`);
+          requireTrue(
+            thermalDormancy ? proposal.thermalDormancy != null : proposal.thermalDormancy == null,
+            `${name}: thermal dormancy receipt presence did not match the request`
+          );
           if (nativeTestActiveSourceDispatchXLimit != null) {
             requireTrue(
               useDirectoryV2
@@ -1593,9 +1605,17 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
             const candidateCsrRoute = thermalCandidateCsrHeader?.[
               proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_WORD
             ] || 0;
+            // G4: when every present source is dormant, no source consumes
+            // candidates and the producer records the dormant route alone.
+            const everyPresentSourceDormant = Boolean(proposal.thermalDormancy)
+              && Array.from({ length: packed.particleCount }, (_, index) => index)
+                .every((index) => !(currentState[index * 8 + 3] > 0)
+                  || derivedWords[proposal.thermalDormancy.flagWordOffset + index] !== 0);
             const expectedRoute = expectCandidateCsrRoute ?? (
               derivedWords[currentActiveCountHeaderWord] === 0
                 ? 0
+                : everyPresentSourceDormant
+                  ? proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_DORMANT
                 : (
                     expectCandidateCsrFallback
                       ? proposalModule.SCHROEDER_SPATIAL_THERMAL_CSR_ROUTE_EXACT_NEAR_REWALK
@@ -1607,7 +1627,14 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 sourceIndex >= packed.particleCount
                   ? rowState === 0
                   : (
+                    // G4: a dormant source claims no candidate row.
                     currentState[sourceIndex * 8 + 3] > 0
+                      && !(
+                        proposal.thermalDormancy
+                        && derivedWords[
+                          proposal.thermalDormancy.flagWordOffset + sourceIndex
+                        ] !== 0
+                      )
                       ? (
                         rowState > 0
                         && rowState <= candidateCsr.rowStride
@@ -2321,6 +2348,21 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               ? (2 * left * right) / (left + right)
               : 0
           );
+          // G4: the GPU dormancy flags (derived tail). Both endpoints skip a
+          // pair touching a dormant source; the predicate guarantees its
+          // |dT| <= epsilon_T, checked here over every contacting pair.
+          const dormancyFlags = proposal.thermalDormancy
+            ? Array.from(
+                { length: packed.particleCount },
+                (_, index) => derivedWords[
+                  proposal.thermalDormancy.flagWordOffset + index
+                ]
+              )
+            : null;
+          let dormancySkippedPairCount = 0;
+          let dormancyMaxSkippedDeltaTK = 0;
+          let dormancySkippedRawEnergyJ = 0;
+          let dormancySkippedBoundJ = 0;
           for (let i = 0; i < packed.particleCount; i += 1) {
             const stateOffsetI = i * 8;
             const massI = packed.state[stateOffsetI + 3];
@@ -2352,6 +2394,18 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
                 * contact.areaM2 / contact.pathLengthM
                 * (derivedRows[j][0] - derivedRows[i][0])
                 * dtS;
+              if (dormancyFlags && (dormancyFlags[i] || dormancyFlags[j])) {
+                dormancySkippedPairCount += 1;
+                dormancyMaxSkippedDeltaTK = Math.max(
+                  dormancyMaxSkippedDeltaTK,
+                  Math.abs(derivedRows[j][0] - derivedRows[i][0])
+                );
+                dormancySkippedRawEnergyJ += Math.abs(rawEnergyIntoIJ);
+                dormancySkippedBoundJ += pairConductivityWPerMK
+                  * contact.areaM2 / contact.pathLengthM
+                  * proposal.thermalDormancy.epsilonK * dtS;
+                continue;
+              }
               const requestedEnergyIntoIJ = clampPairEnergy({
                 rawEnergyJ: rawEnergyIntoIJ,
                 temperatureK: derivedRows[i][0],
@@ -3899,6 +3953,21 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
               : null,
             appliedThermo: includeAppliedRowsInResult
               ? Array.from(result.thermo)
+              : null,
+            thermalDormancy: proposal.thermalDormancy
+              ? {
+                  epsilonK: proposal.thermalDormancy.epsilonK,
+                  counts: Array.from(new Uint32Array(await readBuffer(
+                    proposal.thermalDormancy.countBuffer,
+                    16,
+                    `ulg-native-thermal-${name}-dormancy-counts`
+                  ))),
+                  flags: dormancyFlags,
+                  skippedPairCount: dormancySkippedPairCount,
+                  maxSkippedDeltaTK: dormancyMaxSkippedDeltaTK,
+                  skippedRawEnergyJ: dormancySkippedRawEnergyJ,
+                  skippedBoundJ: dormancySkippedBoundJ
+                }
               : null
           };
         } finally {
@@ -5325,7 +5394,136 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
           thermalClosureGraphBank: graphSet.graphBank,
           thermalPhaseResponseTable: phaseResponseTable
         });
-        if (runNativePairOnly) {
+        if (runNativeDormancyOnly) {
+          // A 40 x 4 x 4 Fe lattice at 8 mm pitch (contact-overlapping
+          // spheres), hot half at x < 20, optional sub-epsilon noise.
+          const pitchM = 0.008;
+          const [nx, ny, nz] = [40, 4, 4];
+          const lattice = ({ noiseJPerKg = 0, interface: hasInterface = true,
+            hotIndex = null } = {}) => {
+            const out = [];
+            for (let z = 0; z < nz; z += 1) {
+              for (let y = 0; y < ny; y += 1) {
+                for (let x = 0; x < nx; x += 1) {
+                  const index = out.length;
+                  const hot = hotIndex == null
+                    ? hasInterface && x < nx / 2
+                    : index === hotIndex;
+                  out.push({
+                    id: `g4-fe-${x}-${y}-${z}`,
+                    material: 'fe',
+                    x: [5 + x * pitchM, 5 + y * pitchM, 5 + z * pitchM],
+                    v: [0, 0, 0],
+                    massKg: 4.0e-3,
+                    specificInternalEnergyJPerKg: (hot ? ironHotU : ironColdU)
+                      + noiseJPerKg * (((index * 7919) % 1000) / 1000)
+                  });
+                }
+              }
+            }
+            // The fixture requires one H2O carrier: a tiny isolated ice
+            // grain outside every Fe support. The GPU closure derives the
+            // cold Fe (u(240 K) + noise) as 239.795..239.821 K, so the grain
+            // sits at 239.81 K: inside that band to within epsilon.
+            out.push({
+              id: 'g4-isolated-ice',
+              material: 'h2o',
+              x: [5.16, 5.06, 5.06],
+              v: [0, 0, 0],
+              massKg: 1.0e-6,
+              specificInternalEnergyJPerKg: thermoState.specificInternalEnergyJPerKg(
+                materialProperties.h2o,
+                239.81
+              )
+            });
+            return out;
+          };
+          const fixture = {
+            smoothingLengthM: 0.01,
+            spatialCellSizeM: 0.02,
+            nativeGridSpacingM: 0.02,
+            dtS: 0.01,
+            useAggregate: false,
+            includeAppliedRowsInResult: true,
+            includePairLedgerInResult: false
+          };
+          const dormancyGrid = { originM: [4.99, 4.99, 4.99], boxM: [0.34, 0.05, 0.05] };
+          const sameBits = (left, right) => left.length === right.length
+            && left.every((value, index) => Object.is(value, right[index]));
+          const rowsBits = (left, right) => left.length === right.length
+            && left.every((row, index) => sameBits(row, right[index]));
+          // D-A: epsilon 0 on the clean two-temperature lattice equals the
+          // ungated producer bit for bit while sources are dormant.
+          const cleanOff = await runFixture({ name: 'g4-clean-off', particles: lattice(), ...fixture });
+          const cleanZero = await runFixture({ name: 'g4-clean-epsilon-0', particles: lattice(), ...fixture,
+            thermalDormancy: { epsilonK: 0, ...dormancyGrid } });
+          // D-C: epsilon 0.1 K with sub-epsilon noise: conservation (checked
+          // inside the fixture), every skipped pair within epsilon, debt bound.
+          const noisyOff = await runFixture({ name: 'g4-noisy-off', particles: lattice({ noiseJPerKg: 10 }), ...fixture });
+          const noisyGated = await runFixture({ name: 'g4-noisy-epsilon-0.1', particles: lattice({ noiseJPerKg: 10 }), ...fixture,
+            thermalDormancy: { epsilonK: 0.1, ...dormancyGrid } });
+          // D-Z: a field whose spans are all below epsilon (a decayed gradient):
+          // every source dormant, zero pair work, zero proposals.
+          let allDormantError = null;
+          const allDormant = await runFixture({ name: 'g4-all-dormant', particles: lattice({ noiseJPerKg: 10, interface: false }), ...fixture,
+            requireThermalExchange: false,
+            thermalDormancy: { epsilonK: 0.1, ...dormancyGrid } }).catch((error) => {
+            allDormantError = String(error?.message ?? error).slice(0, 300);
+            return null;
+          });
+          // D-B: breach: one hot source inside a dormant cold field; its
+          // halo activates in the same step and its pairs are all evaluated.
+          const hotIndex = 2 * nx * ny + 2 * nx + 20;
+          const breachOff = await runFixture({ name: 'g4-breach-off', particles: lattice({ noiseJPerKg: 10, hotIndex }), ...fixture });
+          const breachGated = await runFixture({ name: 'g4-breach-epsilon-0.1', particles: lattice({ noiseJPerKg: 10, hotIndex }), ...fixture,
+            thermalDormancy: { epsilonK: 0.1, ...dormancyGrid } });
+          const summary = (gated, off) => ({
+            counts: gated.thermalDormancy.counts,
+            skippedPairCount: gated.thermalDormancy.skippedPairCount,
+            maxSkippedDeltaTK: gated.thermalDormancy.maxSkippedDeltaTK,
+            skippedRawEnergyJ: gated.thermalDormancy.skippedRawEnergyJ,
+            skippedBoundJ: gated.thermalDormancy.skippedBoundJ,
+            reciprocalProposalEnergyJ: gated.reciprocalProposalEnergyJ,
+            proposalConservationToleranceJ: gated.proposalConservationToleranceJ,
+            appliedEnergyDeltaJ: gated.appliedEnergyDeltaJ,
+            applyConservationToleranceJ: gated.applyConservationToleranceJ,
+            absoluteConductionEnergyJ: gated.absoluteConductionEnergyJ,
+            offAbsoluteConductionEnergyJ: off?.absoluteConductionEnergyJ ?? null,
+            csrRoute: gated.thermalCandidateCsrRoute,
+            offCsrRoute: off?.thermalCandidateCsrRoute ?? null
+          });
+          const dormantRowsZero = (gated) => gated.thermalDormancy.flags.every((flag, index) => (
+            !flag || (gated.proposalRows[index][0] === 0 && gated.proposalRows[index][1] === 0)
+          ));
+          dormancyReceipt = {
+            particleCount: cleanOff.particleCount,
+            cleanBitIdentical: {
+              state: sameBits(cleanOff.appliedState, cleanZero.appliedState),
+              thermo: sameBits(cleanOff.appliedThermo, cleanZero.appliedThermo),
+              proposalRows: rowsBits(cleanOff.proposalRows, cleanZero.proposalRows)
+            },
+            clean: summary(cleanZero, cleanOff),
+            noisy: { ...summary(noisyGated, noisyOff), dormantRowsZero: dormantRowsZero(noisyGated) },
+            noisyTemperatureSpanK: (() => {
+              const t = noisyGated.derivedRows.slice(0, nx * ny * nz).map((row) => row[0]);
+              const hot = t.filter((_, i) => i % nx < nx / 2), cold = t.filter((_, i) => i % nx >= nx / 2);
+              return { hot: Math.max(...hot) - Math.min(...hot), cold: Math.max(...cold) - Math.min(...cold),
+                iceK: noisyGated.derivedRows[nx * ny * nz][0], coldMinK: Math.min(...cold) };
+            })(),
+            allDormantError,
+            allDormant: allDormant == null ? null : {
+              ...summary(allDormant, null),
+              dormantRowsZero: dormantRowsZero(allDormant),
+              maxAbsProposalDu: Math.max(...allDormant.proposalRows.map((row) => Math.max(Math.abs(row[0]), Math.abs(row[1]))))
+            },
+            breach: {
+              ...summary(breachGated, breachOff),
+              hotDormant: breachGated.thermalDormancy.flags[hotIndex],
+              hotRowBitIdentical: sameBits(breachOff.proposalRows[hotIndex], breachGated.proposalRows[hotIndex]),
+              hotConductionDu: breachGated.proposalRows[hotIndex][0]
+            }
+          };
+        } else if (runNativePairOnly) {
           const pairParticles = [
             {
               id: 'native-pair-ice',
@@ -7757,6 +7955,7 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
         uncapturedErrors,
         scopeErrors,
         pairOnlyReceipt,
+        dormancyReceipt,
         cases,
         treeShadowComparisons,
         treeShadowFailureCases,
@@ -7766,7 +7965,8 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
       };
     }, {
       runNativeTreeShadow: RUN_NATIVE_TREE,
-      runNativePairOnly: RUN_NATIVE_PAIR
+      runNativePairOnly: RUN_NATIVE_PAIR,
+      runNativeDormancyOnly: RUN_NATIVE_DORMANCY
     });
   } finally {
     await browser.close();
@@ -7775,6 +7975,41 @@ test('native Vulkan thermal v2 producer and canonical apply keep latent carriers
   assert.equal(native.status, 'passed', native.reason || JSON.stringify(native));
   assert.deepEqual(native.uncapturedErrors, []);
   assert.deepEqual(native.scopeErrors, []);
+  if (RUN_NATIVE_DORMANCY) {
+    const receipt = native.dormancyReceipt;
+    console.log(JSON.stringify(receipt));
+    const present = receipt.particleCount;
+    // D-A: bit identity at epsilon 0 with real dormancy.
+    assert.deepEqual(receipt.cleanBitIdentical, { state: true, thermo: true, proposalRows: true });
+    assert.ok(receipt.clean.counts[1] > 0, 'D-A: some sources dormant at epsilon 0');
+    assert.equal(receipt.clean.maxSkippedDeltaTK, 0, 'D-A: skipped pairs are exactly isothermal');
+    // D-C: conservation, skipped pairs within epsilon, debt within its bound.
+    for (const key of ['clean', 'noisy', 'breach']) {
+      const c = receipt[key];
+      assert.ok(Math.abs(c.reciprocalProposalEnergyJ) <= c.proposalConservationToleranceJ, `${key}: reciprocal proposal energy`);
+      assert.equal(c.counts[2], present, `${key}: present count`);
+      assert.equal(c.counts[0] + c.counts[1], present, `${key}: active + dormant = present`);
+      assert.equal(c.counts[3], 0, `${key}: no overflow`);
+    }
+    assert.ok(receipt.noisy.counts[1] > 0 && receipt.noisy.counts[0] > 0, 'D-C: mixed active and dormant');
+    assert.ok(receipt.noisy.skippedPairCount > 0, 'D-C: some contacting pairs skipped');
+    assert.ok(receipt.noisy.maxSkippedDeltaTK <= 0.1, 'D-C: every skipped pair within epsilon');
+    assert.ok(receipt.noisy.skippedRawEnergyJ <= receipt.noisy.skippedBoundJ, 'D-C: debt within the epsilon bound');
+    assert.equal(receipt.noisy.dormantRowsZero, true, 'D-C: dormant rows move no pair energy');
+    // D-Z: all dormant, zero proposals.
+    assert.equal(receipt.allDormantError, null, `D-Z: ${receipt.allDormantError}`);
+    assert.deepEqual(receipt.allDormant.counts, [0, present, present, 0]);
+    assert.equal(receipt.allDormant.csrRoute, 8, 'D-Z: dormant route only');
+    assert.equal(receipt.allDormant.absoluteConductionEnergyJ, 0, 'D-Z: zero conduction');
+    assert.equal(receipt.allDormant.maxAbsProposalDu, 0, 'D-Z: zero pair work');
+    // D-B: the breach source and its halo are active in the same step, and its
+    // own proposal equals the ungated one bit for bit.
+    assert.equal(receipt.breach.hotDormant, 0, 'D-B: hot source active');
+    assert.equal(receipt.breach.hotRowBitIdentical, true, 'D-B: hot source row unchanged by gating');
+    assert.ok(receipt.breach.hotConductionDu < 0, 'D-B: hot source loses heat');
+    assert.ok(receipt.breach.maxSkippedDeltaTK <= 0.1, 'D-B: skipped pairs within epsilon');
+    return;
+  }
   if (RUN_NATIVE_PAIR) {
     assert.ok(native.pairOnlyReceipt?.baseEnergyJ > 0);
     assert.ok(

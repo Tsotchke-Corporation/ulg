@@ -976,3 +976,13 @@ This todo is complete only when:
   recorded;
 - no CPU mirror, hot-path readback, scene scheduler, or particle-lattice solid
   rendering has been introduced.
+
+**Priority 3 gate waived by the user (2026-11-16).** The third and further SS
+levels proceed now as an N-level chain of 2:1 pairs, for first-class room
+air (`plan/todo/first-class-air.md`). The sparsity work this gate asked for
+stays as follow-up, not as a prerequisite:
+- byte-bounded CSR arenas;
+- overflow evidence;
+- consumed cross-level candidates;
+- closed affine, angular and reflux invariants;
+- extreme-ratio invariants.

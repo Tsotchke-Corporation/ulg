@@ -1217,8 +1217,10 @@ test('production reference-anchored H2O and Fe closures provide phase conductivi
   );
   assert.equal(ice.ready, true);
   nearlyEqual(ice.thermalConductivityWPerMK, 2.16, 1e-6);
-  assert.equal(steam.ready, false);
-  assert.equal(steam.status, 'phase-thermal-conductivity-missing');
+  // First-class air, slice 4: the gas phase carries its dilute-gas reference
+  // conductivity (water vapor at 373.15 K) instead of failing closed.
+  assert.equal(steam.ready, true);
+  nearlyEqual(steam.thermalConductivityWPerMK, 0.0251, 1e-6);
   assert.equal(solidIron.ready, true);
   nearlyEqual(solidIron.thermalConductivityWPerMK, 80.4, 1e-5);
   assert.equal(
@@ -1571,7 +1573,10 @@ test('SPH thermal CPU clamps a microscopic steam carrier against hot iron and co
         x: [2, 2, 2],
         v: [0, 0, 0],
         massKg: steamMassKg,
-        specificInternalEnergyJPerKg: boilingUpperEnergyJPerKg
+        // One f32 step above the f32 plateau top, so the f64 phase
+        // classification sees pure steam; the plateau end itself is not an
+        // exact f32 once vaporization latent is internal energy (dU).
+        specificInternalEnergyJPerKg: nextPositiveFloat32(boilingUpperEnergyJPerKg)
       },
       {
         id: 'hot-iron-neighbor',
@@ -1691,24 +1696,44 @@ test('SPH thermal CPU reciprocal directional budgets conserve a multi-neighbor s
   assert.ok(result.thermo[2] > packed.thermo[2]);
 });
 
-test('SPH thermal CPU table step applies wall heat from six explicit wall reservoirs', () => {
+test('SPH thermal CPU table step applies honest conduction-limited heat from six wall reservoirs', () => {
   const packed = packedTwoWaterParticles(350, 350);
   const table = buildSphThermalMaterialTable(materialProperties);
   packed.state[0] = 0.02;
   packed.state[SPH_GPU_PARTICLE_STATE_FLOATS] = 4.98;
+  const dtS = 10;
   const result = runSphThermalStepCpu({
     sphParticleState: packed,
     thermalMaterialTable: table,
     wallTemperaturesK: { xMin: 233.15, xMax: 500, yMin: 350, yMax: 350, zMin: 350, zMax: 350 },
     boxDimsM: [5, 5, 5],
-    dtS: 1e-4,
+    dtS,
     conductionRate: 0,
+    // Ambient at the carriers' temperature: no radiation in this wall test.
+    ambientTemperatureK: 350,
+    // Only the on/off gate: walls exchange by conduction, not at a fixed rate.
     wallRate: 6e4,
     wallLayerM: 0.1
   });
 
+  // Q = k a^2 (T_wall - T) / max(d, a/2), a = cube edge of the rest volume.
+  const k = TEST_PHASE_CONDUCTIVITY_W_PER_M_K.h2o.liquid;
+  const expectedWallHeatJ = (distanceM, wallK, particle) => {
+    const mass = packed.state[particle * SPH_GPU_PARTICLE_STATE_FLOATS + 3];
+    const restDensity = packed.thermo[particle * (packed.thermo.length / packed.particleCount) + 3];
+    const edge = Math.cbrt(mass / restDensity);
+    return k * edge * edge * (wallK - 350) / Math.max(distanceM, 0.5 * edge) * dtS;
+  };
+  const xMin = expectedWallHeatJ(0.02, 233.15, 0);
+  const xMax = expectedWallHeatJ(0.02, 500, 1);
   assert.ok(result.wallHeatJ.xMin < 0);
   assert.ok(result.wallHeatJ.xMax > 0);
+  assert.ok(Math.abs(result.wallHeatJ.xMin - xMin) <= 1e-3 * Math.abs(xMin), `${result.wallHeatJ.xMin} vs ${xMin}`);
+  assert.ok(Math.abs(result.wallHeatJ.xMax - xMax) <= 1e-3 * Math.abs(xMax), `${result.wallHeatJ.xMax} vs ${xMax}`);
+  // Honest walls exchange watts, not the old 6e4 W/K thermostat.
+  assert.ok(Math.abs(xMin) / dtS < 50, `wall power ${Math.abs(xMin) / dtS} W`);
+  // Faces the carriers do not touch exchange nothing.
+  assert.equal(result.wallHeatJ.yMin, 0);
   assert.ok(result.state[7] < packed.state[7]);
   assert.ok(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7] > packed.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7]);
 });
@@ -1723,9 +1748,12 @@ test('SPH thermal CPU wall reservoir does not overshoot wall temperature in one 
     thermalMaterialTable: table,
     wallTemperaturesK: { xMin: 293.15 },
     boxDimsM: [5, 5, 5],
-    dtS: 1e-4,
+    // Long enough that unclamped conduction would overshoot the wall; ambient
+    // at the wall temperature so radiation cannot pull it past either.
+    dtS: 1e6,
     conductionRate: 0,
-    wallRate: 1e10,
+    ambientTemperatureK: 293.15,
+    wallRate: 1,
     wallLayerM: 0.1
   });
 
@@ -1777,7 +1805,8 @@ test('SPH thermal CPU bounds a latent plateau carrier to one adjacent ingress UL
     thermalMaterialTable: table,
     wallTemperaturesK: { xMin: 500 },
     boxDimsM: [5, 5, 5],
-    dtS: 1,
+    // Honest wall conduction crosses the melt plateau in this long step.
+    dtS: 1e6,
     conductionRate: 0,
     ambientTemperatureK: 0,
     wallRate: 1e12,

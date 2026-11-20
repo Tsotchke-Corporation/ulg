@@ -2131,7 +2131,7 @@ struct ProducerParams {
   phase_fraction_tolerance: f32,
   mass_epsilon_kg: f32,
   exclusion_lineage_count: u32,
-  reserved1: u32,
+  refresh_route_identity: u32,
 };
 
 struct ClosureRoute {
@@ -2294,7 +2294,7 @@ fn capture_reaction_births(
     || (params.exclusion_lineage_count != 0u
       && params.exclusion_lineage_count != params.lineage_capacity)
     || arrayLength(&evidence) != 16u + params.exclusion_lineage_count
-    || params.reserved1 != 0u
+    || params.refresh_route_identity > 1u
   ) {
     atomicOr(&evidence[2u], ERROR_LAYOUT);
     return;
@@ -2343,8 +2343,16 @@ fn capture_reaction_births(
       prior_route.header.x != 0u
       && prior_route.header.z == phase_lane
     ) {
-      selected_route = prior_route;
-      selected_count = 1u;
+      // A split reserve may now contain another species. Keep a dormant
+      // declaration only while its vapor still occupies this lineage; its old
+      // zero-mass route is not authority for the replacement material.
+      let vapor = component_mass(&post_reaction_state, &post_reaction_thermo,
+        lineage_index, prior_prefix.x, prior_route.header.y);
+      if (params.refresh_route_identity == 0u
+          || (vapor.valid != 0u && vapor.mass_kg > params.mass_epsilon_kg)) {
+        selected_route = prior_route;
+        selected_count = 1u;
+      }
     }
   }
   if (selected_count == 0u) {
@@ -2427,7 +2435,7 @@ struct ProducerParams {
   phase_fraction_tolerance: f32,
   mass_epsilon_kg: f32,
   reserved0: u32,
-  reserved1: u32,
+  refresh_route_identity: u32,
 };
 
 struct ClosureRoute {
@@ -3225,7 +3233,7 @@ function requireExactStorageBuffer(device, buffer, byteLength, label) {
   return buffer;
 }
 
-function createParamsArray(topology, closureRowCount, exclusionLineageCount = 0) {
+function createParamsArray(topology, closureRowCount, exclusionLineageCount = 0, refreshRouteIdentity = false) {
   const buffer = new ArrayBuffer(PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, topology.particleCount, true);
@@ -3243,6 +3251,7 @@ function createParamsArray(topology, closureRowCount, exclusionLineageCount = 0)
   view.setFloat32(48, PHASE_FRACTION_TOLERANCE, true);
   view.setFloat32(52, MASS_EPSILON_KG, true);
   view.setUint32(56, exclusionLineageCount, true);
+  view.setUint32(60, refreshRouteIdentity ? 1 : 0, true);
   return buffer;
 }
 
@@ -3290,11 +3299,13 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
   phaseCarrierPlan,
   particleCount = phaseCarrierPlan?.particleCapacity,
   particleLineage,
+  outputTopologyEpoch = particleLineage?.topologyEpoch,
   preReactionStateBuffer = null,
   preReactionThermoBuffer = null,
   postReactionStateBuffer = null,
   postReactionThermoBuffer = null,
   aerosolCondensateTransition = null,
+  refreshRouteIdentity = false,
   preTransferStateBuffer,
   preTransferThermoBuffer,
   postTransferStateBuffer,
@@ -3325,6 +3336,14 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     );
   }
   const reactionCaptureEnabled = preReactionStateBuffer != null;
+  if (typeof refreshRouteIdentity !== 'boolean') {
+    throw new TypeError('Optical route refresh must be a boolean');
+  }
+  const routeCaptureEnabled = reactionCaptureEnabled || refreshRouteIdentity;
+  // With no reaction, equal pre/post inputs refresh route identity without
+  // inventing any condensed mass. Literal phase transfer still owns births.
+  const capturePreState = preReactionStateBuffer ?? preTransferStateBuffer;
+  const capturePreThermo = preReactionThermoBuffer ?? preTransferThermoBuffer;
   if (aerosolCondensateTransition != null && !reactionCaptureEnabled) {
     throw new TypeError('Condensate optical exclusion requires complete explicit reaction pairs');
   }
@@ -3425,17 +3444,17 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       'Dispersed-medium optics production requires distinct pre/post state and thermo buffers'
     );
   }
-  const reactionSourceBuffers = reactionCaptureEnabled
+  const reactionSourceBuffers = routeCaptureEnabled
     ? [
         requireExactStorageBuffer(
           device,
-          preReactionStateBuffer,
+          capturePreState,
           stateBufferByteLength,
           'preReactionStateBuffer'
         ),
         requireExactStorageBuffer(
           device,
-          preReactionThermoBuffer,
+          capturePreThermo,
           thermoBufferByteLength,
           'preReactionThermoBuffer'
         ),
@@ -3448,7 +3467,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       ]
     : [];
   if (
-    reactionCaptureEnabled
+    routeCaptureEnabled
     && (reactionSourceBuffers[0] === reactionSourceBuffers[1]
       || reactionSourceBuffers[2] === reactionSourceBuffers[3])
   ) {
@@ -3469,20 +3488,26 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       preTransferStateBuffer,
       preTransferThermoBuffer
     );
-  const preReactionParticleSourceFamily = reactionCaptureEnabled
+  const preReactionParticleSourceFamily = routeCaptureEnabled
     ? canonicalProducerParticleSourceFamily(
         device,
         topology.particleCount,
         boundParticleLineage,
-        preReactionStateBuffer,
-        preReactionThermoBuffer
+        capturePreState,
+        capturePreThermo
       )
     : preTransferParticleSourceFamily;
+  if (outputTopologyEpoch !== boundParticleLineage.topologyEpoch
+      && (!refreshRouteIdentity || outputTopologyEpoch !== boundParticleLineage.topologyEpoch + 1)) {
+    throw new RangeError('Optical route refresh may advance the fixed-slot output topology by exactly one');
+  }
+  const outputParticleLineage = canonicalProducerParticleLineage(device, topology.particleCount,
+    { ...boundParticleLineage, topologyEpoch: outputTopologyEpoch });
   const postTransferParticleSourceFamily =
     canonicalProducerParticleSourceFamily(
       device,
       topology.particleCount,
-      boundParticleLineage,
+      outputParticleLineage,
       postTransferStateBuffer,
       postTransferThermoBuffer
     );
@@ -3502,7 +3527,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     particleCount: topology.particleCount,
     phaseCarrierPlan,
     opticalClosureTable: resolvedOpticalClosureTable,
-    dynamicRouteIdentity: reactionCaptureEnabled,
+    dynamicRouteIdentity: routeCaptureEnabled,
     source: priorOpticsBuffer
       ? 'private-authenticated-prior-resident-declaration-snapshot'
       : 'derived-from-preregistered-seed-rows'
@@ -3615,7 +3640,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       `${label}-closure-rows`,
       resolvedOpticalClosureTable.rows
     ));
-    const reactionCaptureBuffer = reactionCaptureEnabled
+    const reactionCaptureBuffer = routeCaptureEnabled
       ? own(createOwnedBuffer(device, {
           label: `${label}-reaction-capture`,
           size: opticsBufferByteLength,
@@ -3654,7 +3679,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       paramsBuffer,
       0,
       createParamsArray(topology, resolvedOpticalClosureTable.rowCount,
-        excludedLineages ? topology.lineageCapacity : 0)
+        excludedLineages ? topology.lineageCapacity : 0, refreshRouteIdentity)
     );
 
     const pipelineDescriptors =
@@ -3668,7 +3693,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
     const applyDescriptor = pipelineDescriptors.find(
       (descriptor) => descriptor.entryPoint === 'apply_production'
     );
-    const capturePipeline = reactionCaptureEnabled
+    const capturePipeline = routeCaptureEnabled
       ? createCachedExplicitComputePipeline(device, captureDescriptor)
       : null;
     const preflightPipeline = createCachedExplicitComputePipeline(
@@ -3730,7 +3755,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       layout: applyPipeline.bindGroupLayout,
       entries: applyEntries
     });
-    const captureBindGroup = reactionCaptureEnabled
+    const captureBindGroup = routeCaptureEnabled
       ? device.createBindGroup({
           label: `${label}-reaction-capture-bind-group`,
           layout: capturePipeline.bindGroupLayout,
@@ -3738,14 +3763,14 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
             {
               binding: 0,
               resource: {
-                buffer: preReactionStateBuffer,
+                buffer: capturePreState,
                 size: stateBufferByteLength
               }
             },
             {
               binding: 1,
               resource: {
-                buffer: preReactionThermoBuffer,
+                buffer: capturePreThermo,
                 size: thermoBufferByteLength
               }
             },
@@ -3981,6 +4006,10 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       deviceLimits,
       encodedDispatchCount: 0,
       reactionCaptureEnabled,
+      routeRefreshEnabled: refreshRouteIdentity,
+      routeCaptureEnabled,
+      routeRefreshDispatchWorkgroupCount: refreshRouteIdentity
+        ? deviceLimits.dispatchWorkgroupCount : 0,
       reactionCaptureDispatchWorkgroupCount: reactionCaptureEnabled
         ? deviceLimits.dispatchWorkgroupCount
         : 0,
@@ -3996,10 +4025,10 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
         reactionCaptureEnabled
           ? 'exact-pre-reaction-post-reaction-post-transfer-state-thermo-identity-topology-and-revision'
           : 'exact-pre-post-state-thermo-identity-topology-and-revision',
-      immutableDeclarationLanes: reactionCaptureEnabled
+      immutableDeclarationLanes: routeCaptureEnabled
         ? Object.freeze([])
         : Object.freeze([0, 1, 2, 3]),
-      dynamicallyResolvedDeclarationLanes: reactionCaptureEnabled
+      dynamicallyResolvedDeclarationLanes: routeCaptureEnabled
         ? Object.freeze([0, 1, 2, 3])
         : Object.freeze([]),
       updatedMomentLanes: Object.freeze([4, 5, 6, 7]),
@@ -4090,7 +4119,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
         producerOutputAdoptionRecord.encodeState = encodeState;
         setProducerAdoptionDiagnostic(producerOutputAdoptionRecord, encodeState);
         try {
-          if (reactionCaptureEnabled) {
+          if (routeCaptureEnabled) {
             const capturePass = encoder.beginComputePass({
               label: `${label}-reaction-capture`
             });
@@ -4125,7 +4154,7 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
           producerOutputAdoptionRecord.encodeState = encodeState;
           result.status =
             'dispersed-medium-optics-producer-ready-to-submit';
-          result.encodedDispatchCount = reactionCaptureEnabled ? 3 : 2;
+          result.encodedDispatchCount = routeCaptureEnabled ? 3 : 2;
           setProducerAdoptionDiagnostic(
             producerOutputAdoptionRecord,
             'encoded'

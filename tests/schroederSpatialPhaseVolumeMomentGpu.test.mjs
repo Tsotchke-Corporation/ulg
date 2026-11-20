@@ -514,6 +514,10 @@ test('phase-volume moment arenas reuse exact immutable bind groups', () => {
 });
 
 test('phase-volume moment v2 uses only GPU ActiveSource counts and preserves physical identities', () => {
+  // Pins the indirect-launch contract; A1's direct launches are covered
+  // by the 'A1 direct launch' tests.
+  globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   const tracker = createFakeDevice();
   const authority = createMechanicsFieldAuthority(tracker.device, {
     sourceCount: 64,
@@ -582,12 +586,12 @@ test('phase-volume moment v2 uses only GPU ActiveSource counts and preserves phy
   assert.match(v2Wgsl, /!\(sum\.x >= 0\.0\)/);
   assert.match(
     v2Wgsl,
-    /let weight = wx \* wy \* wz;[\s\S]*if \(field_index == INVALID_FIELD\) \{[\s\S]*if \(weight != 0\.0\) \{[\s\S]*record_invalid_lineage\(\);[\s\S]*return;/,
+    /let weight = wx \* wy \* wz;[\s\S]*if \(field_index == INVALID_FIELD\) \{[\s\S]*if \(weight >= bitcast<f32>\(0x21800000u\)\) \{[\s\S]*record_invalid_lineage\(\);[\s\S]*return;/,
     'directory-v2 authenticates every omitted descriptor as exact f32-zero support'
   );
   assert.match(
     v2Wgsl,
-    /field_index >= mechanics_field\[34u\][\s\S]*\|\| !\(weight > 0\.0\)/,
+    /field_index >= mechanics_field\[34u\][\s\S]*\|\| !\(weight >= bitcast<f32>\(0x21800000u\)\)/,
     'every retained directory-v2 field candidate has positive support'
   );
   assert.match(
@@ -606,6 +610,9 @@ test('phase-volume moment v2 uses only GPU ActiveSource counts and preserves phy
 
   runtime.releaseExecution(execution, { discardedEncoder: true });
   assert.equal(runtime.destroy(), true);
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
 });
 
 test('phase-volume moment rejects missing borrowed provenance and enforces arena release discipline', () => {
@@ -1228,4 +1235,33 @@ test('native phase-volume sidecar conserves strict V0J and fails closed for inva
   } finally {
     await browser.close();
   }
+});
+
+test('A1 direct launch: phase-volume moment v2 launches candidate passes over the ActiveSource ceiling', () => {
+  const tracker = createFakeDevice();
+  const authority = createMechanicsFieldAuthority(tracker.device, {
+    sourceCount: 64,
+    sourceCapacity: 64,
+    directoryV2: true
+  });
+  const runtime = createSchroederSpatialPhaseVolumeMomentGpu(tracker.device, {
+    maxSourceCount: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    arenaCount: 1
+  });
+  const encoder = createFakeEncoder();
+  const execution = runtime.encode(encoder, {
+    sourceBuffer: authority.sourceBuffer,
+    sourceMechanicsBuffer: authority.sourceMechanicsBuffer,
+    sourceMechanicsBufferBorrowed: true,
+    mechanicsFieldView: authority.field
+  });
+  // 64 active sources x 27 candidates / 64 per group: the host ceiling.
+  for (const pass of encoder.passes.slice(0, 2)) {
+    assert.deepEqual(pass.dispatch, [27, 1, 1]);
+    assert.ok(!pass.indirect);
+  }
+  // The kernels admit only the staged ActiveSource candidate groups.
+  const wgsl = createSchroederSpatialPhaseVolumeMomentWgsl(execution.layout, { sourceAuthorityVersion: 2 });
+  assert.match(wgsl, /active_source_view\[dispatch_offset \+ 2u\] == 0u[\s\S]*linear_group >= active_source_view\[dispatch_offset\]/);
 });

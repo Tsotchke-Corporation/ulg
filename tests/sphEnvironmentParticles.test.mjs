@@ -52,6 +52,30 @@ test('gas carriers partition physical free space and conserve each species exact
   }
 });
 
+test('graded seeding refines air only next to bodies and keeps every species total exact', () => {
+  const coarse = build({ cellsPerAxis: 2 });
+  const graded = build({ cellsPerAxis: 2, refineEdgeM: 0.0625 });
+  assert.equal(graded.inventory.freeVolumeM3, coarse.inventory.freeVolumeM3);
+  assert.ok(graded.cells.length > coarse.cells.length);
+  const edge = (cell) => Math.max(...cell.max.map((v, i) => v - cell.min[i]));
+  const distance = (cell, solid) => Math.hypot(...[0, 1, 2].map((i) => Math.max(0,
+    cell.min[i] - solid.max[i], solid.min[i] - cell.max[i])));
+  for (const cell of graded.cells) {
+    const touching = occupiedBoxes.some((solid) => distance(cell, solid) <= 1e-12);
+    // A cell that touches a body is at the refine edge (its subtractBox
+    // pieces may be thinner on the cut axis, never coarser).
+    if (touching) assert.ok(edge(cell) <= 0.0625 + 1e-12);
+  }
+  // Air farther than its own edge from every body stays coarser.
+  assert.ok(graded.cells.some((cell) => edge(cell) > 0.0625 * 1.5));
+  for (const row of graded.inventory.gasSpecies) {
+    const total = graded.particles.filter(p => p.material === row.material).reduce((sum, p) => sum
+      + (p.coldExactMassWords.reduceRight((n, w) => (n << 32n) | BigInt(w), 0n) << 925n), 0n);
+    assert.equal(total, units(row.massKg));
+  }
+  assert.throws(() => build({ refineEdgeM: -1 }), /refineEdgeM/);
+});
+
 test('vacuum creates no gas; dry air retains its four actual chemical species', () => {
   assert.equal(build({ environment: createSphRoomAirInitialization({ mode: 'vacuum',
     totalPressurePa: 0, relativeHumidity: 0 }) }).particles.length, 0);
@@ -59,12 +83,16 @@ test('vacuum creates no gas; dry air retains its four actual chemical species', 
     .particles.map(p => p.material))], ['n2', 'o2', 'ar', 'co2']);
 });
 
-test('almost touching authored boundaries retain tiny free-space cells without changing exact species totals', () => {
+test('almost touching authored boundaries drop sub-f32 slivers without changing exact species totals', () => {
+  // 0.028 vs 0.028000000000000004 leaves a one-ulp (4e-18 m) gap: faces the
+  // GPU's f32 positions cannot separate. It is a rounding sliver, not gas.
   const result = build({ boxDimensionsM: [0.14, 0.14, 0.14], occupiedBoxes: [
     { min: [0.056, 0, 0.056], max: [0.084, 0.028, 0.084] },
     { min: [0.0616, 0.028000000000000004, 0.0616], max: [0.0784, 0.0448, 0.0784] }
   ] });
-  assert.ok(result.particles.some(p => p.massKg < 1e-20));
+  const resolutionM = 0.14 * 2 ** -23;
+  assert.ok(result.cells.every(cell => cell.max.every((v, i) => v - cell.min[i] > resolutionM)));
+  assert.ok(result.particles.every(p => p.massKg > 1e-12));
   for (const row of result.inventory.gasSpecies) {
     const total = result.particles.filter(p => p.material === row.material).reduce((sum, p) => sum
       + (p.coldExactMassWords.reduceRight((n, w) => (n << 32n) | BigInt(w), 0n) << 925n), 0n);

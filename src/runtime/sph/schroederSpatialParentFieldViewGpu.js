@@ -6,7 +6,8 @@ import {
   SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_PARAMS_BYTES,
   SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_WORKGROUP_SIZE,
   ULG_SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_SCHEMA,
-  createSchroederSpatialParentFieldViewPlan
+  createSchroederSpatialParentFieldViewPlan,
+  validateSchroederSpatialParentFieldViewDescriptor
 } from '../../../ulg-gpu-abi/src/schroederSpatialParentFieldView.js';
 import {
   schroederSpatialParentFieldViewWgsl
@@ -88,7 +89,8 @@ function parentFieldParamsData(
   hierarchyView,
   fineFieldView,
   coarseFieldView,
-  maxComputeWorkgroupsPerDimension
+  maxComputeWorkgroupsPerDimension,
+  inheritedFineParentView = null
 ) {
   const data = new ArrayBuffer(SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_PARAMS_BYTES);
   const view = new DataView(data);
@@ -151,12 +153,13 @@ function parentFieldParamsData(
   u32(172, plan.supportEpoch);
   u32(176, plan.completionOrdinal);
   u32(180, hierarchyView.completionOrdinal);
-  u32(184, fineFieldView.completionOrdinal);
+  u32(184, (inheritedFineParentView ?? fineFieldView).completionOrdinal);
   u32(188, coarseFieldView.completionOrdinal);
   u32(192, SCHROEDER_SPATIAL_PARENT_FIELD_VIEW_WORKGROUP_SIZE);
   u32(196, plan.exactLevelCount);
   u32(200, plan.requiredWords);
   u32(204, maxComputeWorkgroupsPerDimension);
+  u32(208, inheritedFineParentView ? 1 : 0);
   return data;
 }
 
@@ -288,6 +291,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
   coarseGrid,
   fineFieldCapacity,
   coarseFieldCapacity,
+  parentFieldCapacityLimit = null,
   arenaCount = 2,
   label = 'ulg-schroeder-spatial-parent-field-view'
 } = {}) {
@@ -300,6 +304,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
     coarseGrid,
     fineFieldCapacity,
     coarseFieldCapacity,
+    parentFieldCapacityLimit,
     generationId: 1,
     deviceOrdinal: 0,
     laneOrdinal: 0,
@@ -556,7 +561,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
     return bindGroup;
   }
 
-  function assertExactInputs(mechanicsFieldViews, hierarchyView) {
+  function assertExactInputs(mechanicsFieldViews, hierarchyView, inheritedFineParentView = null) {
     if (!Array.isArray(mechanicsFieldViews) || mechanicsFieldViews.length !== 2) {
       throw new RangeError(
         'spatial parent-field topology requires exactly two mechanics field views'
@@ -592,7 +597,8 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         !== Math.fround(fineFieldView.gridSpacingM * 2)
       || hierarchyView.fineMechanicsView !== fineFieldView.parentMechanicsView
       || hierarchyView.coarseMechanicsView !== coarseFieldView.parentMechanicsView
-      || fineFieldView.fieldCapacity !== template.fineFieldCapacity
+      || (inheritedFineParentView?.parentFieldCapacity ?? fineFieldView.fieldCapacity)
+        !== template.fineFieldCapacity
       || coarseFieldView.fieldCapacity !== template.coarseFieldCapacity
       || !exactIdentityMatches(fineFieldView, hierarchyView)
       || !exactIdentityMatches(coarseFieldView, hierarchyView)
@@ -606,6 +612,21 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
       throw new TypeError(
         'spatial parent-field view requires exact live two-level fields and hierarchy from one generation'
       );
+    }
+    if (inheritedFineParentView) {
+      const inheritedState = executionSubmissionState(inheritedFineParentView,
+        'schroeder-spatial-parent-field-view-gpu-encoded',
+        'schroeder-spatial-parent-field-view-gpu-build-submitted');
+      if (inheritedState !== hierarchyState
+        || inheritedFineParentView.coarseFieldView !== fineFieldView
+        || inheritedFineParentView.coarseLevel !== fineFieldView.selectedLevel
+        || !exactIdentityMatches(inheritedFineParentView, hierarchyView)
+        || !webGpuBufferMatchesDevice(inheritedFineParentView.parentFieldViewBuffer, device)
+        || (inheritedState === 'submitted' && !validateSchroederSpatialParentFieldViewDescriptor(
+          inheritedFineParentView, { coarseLevel: fineFieldView.selectedLevel }
+        ).admitted)) {
+        throw new TypeError('inherited fine fields require the exact live preceding parent union from this generation');
+      }
     }
     for (const [fieldView, expectedGrid] of [
       [fineFieldView, template.fineGrid],
@@ -631,6 +652,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
   function encode(encoder, {
     mechanicsFieldViews,
     hierarchyView,
+    inheritedFineParentView = null,
     gpuTimestampRecorder = null
   } = {}) {
     assertEncoder(encoder);
@@ -638,15 +660,17 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
       fineFieldView,
       coarseFieldView,
       parentSubmissionState
-    } = assertExactInputs(mechanicsFieldViews, hierarchyView);
+    } = assertExactInputs(mechanicsFieldViews, hierarchyView, inheritedFineParentView);
+    const fineSource = inheritedFineParentView ?? fineFieldView;
     const plan = createSchroederSpatialParentFieldViewPlan({
       fineLevel: fineFieldView.selectedLevel,
       coarseLevel: coarseFieldView.selectedLevel,
       levelCount: mechanicsFieldViews.length,
       fineGrid: gridFromFieldView(fineFieldView),
       coarseGrid: gridFromFieldView(coarseFieldView),
-      fineFieldCapacity: fineFieldView.fieldCapacity,
+      fineFieldCapacity: template.fineFieldCapacity,
       coarseFieldCapacity: coarseFieldView.fieldCapacity,
+      parentFieldCapacityLimit,
       generationId: hierarchyView.generationId,
       deviceOrdinal: hierarchyView.deviceOrdinal,
       laneOrdinal: hierarchyView.laneOrdinal,
@@ -673,7 +697,8 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
           hierarchyView,
           fineFieldView,
           coarseFieldView,
-          maxComputeWorkgroupsPerDimension
+          maxComputeWorkgroupsPerDimension,
+          inheritedFineParentView
         )
       );
       for (const buffer of [
@@ -683,7 +708,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         arena.parentFieldViewBuffer
       ]) encoder.clearBuffer(buffer);
       const resources = new Map([
-        [0, fineFieldView.fieldViewBuffer],
+        [0, inheritedFineParentView?.parentFieldViewBuffer ?? fineFieldView.fieldViewBuffer],
         [1, coarseFieldView.fieldViewBuffer],
         [2, hierarchyView.hierarchyViewBuffer],
         [3, arena.candidateKeyBuffer],
@@ -727,8 +752,8 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         encoder,
         pipelines.emitFine,
         group(pipelines.emitFine, [0, 2, 3, 5, 7, 12], 'emit-fine'),
-        fineFieldView.indirectDispatchBuffer,
-        fineFieldView.indirectDispatchOffsetBytes,
+        fineSource.indirectDispatchBuffer,
+        fineSource.indirectDispatchOffsetBytes,
         `${label}EmitFineParentCandidates`
       );
       encodedDispatchCount += encodeIndirectPass(
@@ -814,8 +839,8 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
           'scatter-fine',
           radixResources
         ),
-        fineFieldView.indirectDispatchBuffer,
-        fineFieldView.indirectDispatchOffsetBytes,
+        fineSource.indirectDispatchBuffer,
+        fineSource.indirectDispatchOffsetBytes,
         `${label}ScatterFineFieldEdges`
       );
       encodedDispatchCount += encodePass(
@@ -840,6 +865,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         mechanicsFieldViews: Object.freeze([fineFieldView, coarseFieldView]),
         fineFieldView,
         coarseFieldView,
+        inheritedFineParentView,
         hierarchyView,
         parentSubmissionState,
         parentFieldViewBuffer: arena.parentFieldViewBuffer,
@@ -891,7 +917,9 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         radixUnique,
         hierarchyView,
         fineFieldView,
-        coarseFieldView
+        coarseFieldView,
+        inheritedFineParentView,
+        layout: plan.layout
       });
       return execution;
     } catch (error) {
@@ -920,6 +948,11 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
       || execution.hierarchyView !== ownership.hierarchyView
       || execution.fineFieldView !== ownership.fineFieldView
       || execution.coarseFieldView !== ownership.coarseFieldView
+      || execution.inheritedFineParentView !== ownership.inheritedFineParentView
+      || execution.layout !== ownership.layout
+      || execution.parentFieldCapacity !== template.parentFieldCapacity
+      || execution.fineFieldCapacity !== template.fineFieldCapacity
+      || execution.parentFieldCapacityLimit !== parentFieldCapacityLimit
     ) {
       const error = new Error('spatial parent-field execution is not owned by this runtime');
       error.code = 'ERR_SCHROEDER_PARENT_FIELD_VIEW_FOREIGN_EXECUTION';
@@ -942,7 +975,7 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
       ownership.hierarchyView,
       ownership.fineFieldView,
       ownership.coarseFieldView
-    ].every((parent) => {
+    ].concat(ownership.inheritedFineParentView ? [ownership.inheritedFineParentView] : []).every((parent) => {
       try {
         return parent.ownerRuntime?.ownsExecution?.(parent) === true
           && parent.ownerRuntime?.isExecutionSubmitted?.(parent) === true;

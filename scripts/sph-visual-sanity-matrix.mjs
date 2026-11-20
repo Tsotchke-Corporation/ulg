@@ -128,7 +128,20 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
       interfaceSelector: Object.freeze({ materials: Object.freeze(['h2o']), excludePhases: Object.freeze(['gas']) }),
       minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
       minimumSustainedRiseM: 0.05,
-      tailSampleCount: 2
+      tailSampleCount: 2,
+      // Closed box in the matrix's acceptance units (x 0.028 m): box top 5
+      // (0.14 m) and grid spacing 0.12407 (3.474 mm). The inset is the largest
+      // G2P clearance, half a cell; tolerance 1e-6 and retreat 1e-2 of a cell.
+      // Steam carriers of different rest volume clamp at different heights
+      // below the ceiling (per-carrier band, user decision 2026-11-16).
+      upperWallTerminal: Object.freeze({
+        boundaryCondition: 'closed-g2p-clamped',
+        boxMaxYM: 5,
+        wallInsetM: 0.06203504908994001,
+        contactToleranceM: 1.2407009817988002e-7,
+        maximumTailRetreatM: 0.0012407009817988002,
+        perCarrierClearanceBand: true
+      })
     }),
     condensedLaunch: Object.freeze({
       selector: Object.freeze({ excludePhases: Object.freeze(['gas']) }),
@@ -1351,10 +1364,22 @@ const SURFACE_STRESS_SUBMISSION_SCHEMA =
   'peercompute.ulg.schroeder-phase-volume-surface-stress-submission.v2';
 const SURFACE_STRESS_SUBMISSION_STATUS =
   'eighteen-pass-central-bond-surface-stress-submitted-unverified';
-const SURFACE_STRESS_STANDALONE_LIFECYCLE =
-  'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit';
-const SURFACE_STRESS_AMBIENT_BUOYANCY_MODE =
-  'field-local-s9ab-current-volume-ambient-source';
+// Two exact lifecycles: the standalone S9-A/B one (initialize + ambient +
+// eighteen bonds + validate/commit = 21 dispatches), and since 2026-11-15 the
+// one integrated with the single-level S9-C transport (18 dispatches; the
+// transport owns initialization and the ambient source).
+const SURFACE_STRESS_LIFECYCLES = Object.freeze([
+  Object.freeze({
+    mode: 'standalone-s9ab-initialize-ambient-eighteen-central-bonds-validate-commit',
+    dispatchCount: 21,
+    ambientBuoyancyMode: 'field-local-s9ab-current-volume-ambient-source'
+  }),
+  Object.freeze({
+    mode: 'integrated-s9c-transport-eighteen-central-bonds-validate-commit',
+    dispatchCount: 18,
+    ambientBuoyancyMode: 'integrated-s9c-current-volume-ambient-source'
+  })
+]);
 
 function metricSurfaceStressSubmission(metric) {
   return metric?.residentStep?.phaseVolumeSurfaceStressSubmission
@@ -1374,10 +1399,11 @@ function surfaceStressSubmissionExact(submission, selectedLevel) {
     && submission?.requested === true
     && submission?.submitted === true
     && Number(submission?.dispatchCount) === 18
-    && Number(submission?.lifecycleDispatchCount) === 21
-    && submission?.lifecycleMode === SURFACE_STRESS_STANDALONE_LIFECYCLE
-    && submission?.ambientBuoyancyMode
-      === SURFACE_STRESS_AMBIENT_BUOYANCY_MODE
+    && SURFACE_STRESS_LIFECYCLES.some((lifecycle) => (
+      Number(submission?.lifecycleDispatchCount) === lifecycle.dispatchCount
+      && submission?.lifecycleMode === lifecycle.mode
+      && submission?.ambientBuoyancyMode === lifecycle.ambientBuoyancyMode
+    ))
     && submission?.levelRole === 'single'
     && submission?.twoLevel === false
     && Number(submission?.positiveSurfaceTensionPhaseRecordCount) > 0

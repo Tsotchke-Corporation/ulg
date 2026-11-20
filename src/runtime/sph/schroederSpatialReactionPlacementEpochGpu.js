@@ -4,6 +4,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { SPH_REACTION_PARAMS_BYTES } from './sphReactionPhaseLineage.js';
 import {
   schroederSpatialEpochGenerationRetirementCapability
 } from './schroederSpatialEpochGpu.js';
@@ -522,7 +523,7 @@ function createReactionWarmArena(device, descriptor, slotIndex) {
         device,
         createdBuffers,
         `${prefix}-reaction-params`,
-        48,
+        SPH_REACTION_PARAMS_BYTES,
         GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       ),
       summaryParams: createReactionWarmArenaBuffer(

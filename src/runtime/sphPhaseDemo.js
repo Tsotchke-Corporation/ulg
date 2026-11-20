@@ -20,6 +20,7 @@ import {
   CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
 } from './material/condensedDispersedOpticalReferences.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
+import { gpuPhaseId, stableOpticalMaterialId } from './material/opticalGpuBuffers.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
   equilibriumFromSpecificEnergy,
@@ -37,8 +38,11 @@ import {
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA
 } from '../../ulg-gpu-abi/src/index.js';
 import { createSphState } from './sph/sphState.js';
+import { SCHROEDER_SPLIT_SPARE_RESERVE_SCHEMA, clonePhaseCarrierPlanWithSplitReserve }
+  from './sph/schroederSplitSpareReserve.js';
 import { prepareSphCondensableParticleInitialization, initializeSphColdPhaseCaloricParticles } from './sph/sphCondensableParticleInitialization.js';
-import { buildSphEnvironmentParticles } from './sphEnvironmentParticles.js';
+import { buildSphEnvironmentParticles, createSphEnvironmentAirMixtureClosure,
+  SPH_ENVIRONMENT_AIR_MIXTURE_MATERIAL } from './sphEnvironmentParticles.js';
 import { normalizeSphEnvironmentInitialization, SPH_ENVIRONMENT_DRY_AIR } from './sphEnvironmentInitialization.js';
 import {
   SPH_GPU_RENDER_DOMAIN_ID_MAX,
@@ -98,6 +102,9 @@ import {
   strictReactionGateIsClassified
 } from './sph/sphReactionGpuSummary.js';
 import { phaseSoundSpeedScaleFor } from './sph/sphMechanicsMaterialTable.js';
+import { normalizeSphImplicitPressureOptions } from './sph/sphImplicitPressureGpu.js';
+import { seedSchroederSolidRigidBody } from './sph/schroederSolidRigidGpu.js';
+import { SCHROEDER_SOLID_BODIES_SCHEMA } from './sph/schroederSolidRigidLane.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 // Exact-rational particle quantities are disabled (user, 2026-10-27). Room
@@ -169,11 +176,24 @@ function reactionProductReserveMaterialSetKey(materialKeys = []) {
   )].sort());
 }
 
-function exactReactionCountFromReserveAuthority(authority, materialKeys) {
+// Reaction discovery runs on chemical species: an ideal-gas mixture material
+// (first-class air mixture parcels) stands for its components there, and its
+// reactions are lifted from theirs (reactionDiscovery.js
+// liftReactionsOntoIdealGasMixtures). Compare live material sets the same way.
+function reactionDiscoveryMaterialKeys(materialKeys, materialProperties = {}) {
+  return [...new Set(materialKeys.flatMap((key) => {
+    const mixture = materialProperties?.[key]?.idealGasMixture;
+    return mixture ? mixture.components.map((component) => component.material) : [key];
+  }))];
+}
+
+function exactReactionCountFromReserveAuthority(authority, materialKeys, materialProperties = {}) {
   if (
     authority?.authority !== REACTION_PRODUCT_RESERVE_EXACT_DISCOVERY_AUTHORITY
     || authority.materialSetKey
-      !== reactionProductReserveMaterialSetKey(materialKeys)
+      !== reactionProductReserveMaterialSetKey(
+        reactionDiscoveryMaterialKeys(materialKeys, materialProperties)
+      )
   ) {
     return null;
   }
@@ -1381,6 +1401,7 @@ function initializeSupportedHydrostaticMpmState(demo, {
   gravityMPerS2 = [0, -9.80665, 0],
   soundSpeedScale = 1,
   cflMaxSoundSpeedMPerS = 0,
+  liquidCflMaxSoundSpeedMPerS = 0,
   enabled = true
 } = {}) {
   if (!enabled || !demo?.state?.particles?.length) {
@@ -1428,7 +1449,8 @@ function initializeSupportedHydrostaticMpmState(demo, {
       if (!(restDensity > 0) || !(bulkRaw > 0) || !(massKg > 0)) continue;
       const phaseSoundSpeedScale = phaseSoundSpeedScaleFor(properties, phase, {
         soundSpeedScale,
-        cflMaxSoundSpeedMPerS
+        cflMaxSoundSpeedMPerS,
+        liquidCflMaxSoundSpeedMPerS
       });
       const phaseModulusScale = phaseSoundSpeedScale * phaseSoundSpeedScale;
       const shearRaw = phaseName === 'solid'
@@ -2224,6 +2246,11 @@ function copyInitialParticleMetadataIntoState(state, sourceParticles) {
     particle.material = source.material;
     particle.role = source.role;
     particle.spareProductSlot = source.spareProductSlot === true;
+    // SS split-spare lineage (first-class air); only set when true.
+    if (source.spareSplitSlot === true) particle.spareSplitSlot = true;
+    // A rigid body's reserved meltwater row (G3/A5); only set when true so
+    // particle records without rigid bodies are unchanged.
+    if (source.solidReleaseSlot === true) particle.solidReleaseSlot = true;
     particle.phaseCompanionSlot = source.phaseCompanionSlot === true;
     particle.phaseCarrierPrimaryIndex = Number.isSafeInteger(source.phaseCarrierPrimaryIndex)
       ? source.phaseCarrierPrimaryIndex
@@ -2274,6 +2301,47 @@ function copyInitialParticleMetadataIntoState(state, sourceParticles) {
     particle.currentParticleRadiusM = source.currentParticleRadiusM;
     particle.particleSizeState = source.particleSizeState ? { ...source.particleSizeState } : null;
   });
+}
+
+// First-class air, slice 1 (plan/todo/first-class-air.md): dormant lineages
+// reserved for SS split children. Like product spares they carry zero mass and
+// a stable, collision-free identity that is never mutated; a split child takes
+// the spare's identity, so continuity cohorts and render domains stay exact.
+// A spare is free whenever all four phase lanes are empty again.
+function normalizeSplitSpareLineageCount(value) {
+  if (value == null || value === '') return 0;
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0 || count > 1_000_000) {
+    throw new RangeError('splitSpareLineageCount must be an integer in [0, 1000000]');
+  }
+  return count;
+}
+
+function appendSplitSpareLineages(all, count, positionM) {
+  const resolved = normalizeSplitSpareLineageCount(count);
+  if (resolved === 0) return { count: 0, firstContinuityDomainId: 0 };
+  const firstLineageIndex = all.length;
+  const template = all[0];
+  const firstContinuityDomainId = firstReservedProductContinuityDomainId(all, resolved);
+  for (let spare = 0; spare < resolved; spare += 1) {
+    const continuityDomainId = firstContinuityDomainId + spare;
+    all.push({
+      ...template,
+      role: 'spare-split-slot',
+      initialBodyId: null,
+      initialBodyDomainId: continuityDomainId,
+      renderDomainId: continuityDomainId,
+      renderDomainKey: `ss-split-reserve:${continuityDomainId}`,
+      initialBodyParticleIndex: null,
+      x: [...positionM],
+      v: [0, 0, 0],
+      massKg: 0,
+      spareProductSlot: false,
+      spareSplitSlot: true
+    });
+  }
+  return { schema: SCHROEDER_SPLIT_SPARE_RESERVE_SCHEMA,
+    count: resolved, firstLineageIndex, firstContinuityDomainId };
 }
 
 function firstReservedProductContinuityDomainId(
@@ -2417,10 +2485,24 @@ function appendPhaseCarrierLanes(particles) {
   });
 }
 
+// Parcel water must share the carriers' caloric ladder: its reference u at
+// 273.15 K is the app's liquid-water u extrapolated with Cp (the parcel's
+// T = 273.15 + (u - u0) / c_w), so a deposited droplet is ordinary water.
+function ledgerParcelWaterReference(materialProperties, environment) {
+  const water = materialProperties?.h2o;
+  if (!water) throw new TypeError('Ledger nuclei require H2O material properties');
+  const cw = 4186, uAt283 = specificInternalEnergyJPerKg(water, 283.15);
+  return { waterReferenceU0: uAt283 - cw * 10, waterSpecificHeatJPerKgK: cw,
+    vaporMaterialId: stableOpticalMaterialId('h2o'), pressurePa: environment.totalPressurePa };
+}
+
 function buildSphInitialBodiesDemoState({
   scenario,
+  exactEnergyLedger = false,
   environment,
   environmentCellsPerAxis,
+  environmentRefineEdgeM = null,
+  environmentAirParcels = 'species',
   physicalLawGroups = null,
   closures,
   allowFixtureMaterialProperties,
@@ -2429,6 +2511,7 @@ function buildSphInitialBodiesDemoState({
   initialTargetNeighborCount,
   reactionProductReserveMinimumLiveFraction,
   reactionProductReserveAuthority,
+  splitSpareLineageCount = 0,
   mechanics,
   materialPropertyBank,
   materialPropertyCrystalStructureBank
@@ -2471,6 +2554,9 @@ function buildSphInitialBodiesDemoState({
   }
   if (environment?.mode === 'air') {
     for (const [key, closure] of Object.entries(resolved)) resolved[key] = withRoomAirCaloricReference(closure, key);
+    if (environmentAirParcels === 'mixture') {
+      resolved[SPH_ENVIRONMENT_AIR_MIXTURE_MATERIAL] = createSphEnvironmentAirMixtureClosure(resolved);
+    }
   }
   if (!allowFixtureMaterialProperties) {
     for (const [key, closure] of Object.entries(resolved)) {
@@ -2514,6 +2600,9 @@ function buildSphInitialBodiesDemoState({
   const liveParticles = [];
   const bodyRanges = [];
   const countsByBodyId = {};
+  // G3 SOL-1: a rigid body's particle lattice becomes its members (one SE(3)
+  // frame, plan/todo/g3-solids-proposal.md); its samples are not SPH particles.
+  const rigidBodies = [];
   for (let bodyIndex = 0; bodyIndex < normalizedInitialBodies.bodies.length; bodyIndex += 1) {
     const body = normalizedInitialBodies.bodies[bodyIndex];
     const plan = bodyPlans[bodyIndex];
@@ -2523,6 +2612,73 @@ function buildSphInitialBodiesDemoState({
       plan,
       properties: resolved[body.material].properties
     });
+    if (body.mechanicsMode === 'rigid') {
+      const properties = resolved[body.material].properties;
+      const seed = seedSchroederSolidRigidBody({ bodyId: rigidBodies.length,
+        members: particles.map(particle => ({ x: [...particle.x], massKg: particle.massKg })),
+        velocity: [...body.velocityMPerS], angularVelocity: [...(body.angularVelocityRadPerS ?? [0, 0, 0])] });
+      // G3 Phase 4: member thermal state on the material's own caloric curve
+      // (thermoState u(T), linear per phase), and one reserved dormant liquid
+      // row per member for melt release (activated by schroederSolidReleaseGpu).
+      const melt = properties?.transitions?.find(t => t.from === 'solid' && t.to === 'liquid') ?? null;
+      const solidPhase = properties?.phases?.find(phase => phase.name === 'solid') ?? null;
+      const liquidPhase = properties?.phases?.find(phase => phase.name === 'liquid') ?? null;
+      let thermal = null, releaseRowStart = null;
+      // Diagnostic (probe S0_INIT_GLOBALS): build the body without its member
+      // thermal state and reserved release rows.
+      if (!globalThis.__ulgSkipSolidReleaseRows
+        && melt && solidPhase?.cpJPerKgK > 0 && liquidPhase?.cpJPerKgK > 0 && liquidPhase.densityKgPerM3 > 0) {
+        const meltK = melt.temperatureK;
+        const solidEdgeU = specificInternalEnergyJPerKg(properties, meltK - 1) + solidPhase.cpJPerKgK;
+        const liquidEdgeU = specificInternalEnergyJPerKg(properties, meltK + 1) - liquidPhase.cpJPerKgK;
+        thermal = {
+          meltTemperatureK: meltK,
+          memberSpecificInternalEnergyJPerKg: specificInternalEnergyJPerKg(properties, body.temperatureK),
+          solidBranch: { referenceTemperatureK: body.temperatureK,
+            referenceInternalEnergyJPerKg: specificInternalEnergyJPerKg(properties, body.temperatureK),
+            cvJPerKgK: solidPhase.cpJPerKgK, energyMaxJPerKg: solidEdgeU },
+          liquidBranch: { referenceTemperatureK: meltK, referenceInternalEnergyJPerKg: liquidEdgeU,
+            cvJPerKgK: liquidPhase.cpJPerKgK, energyMinJPerKg: liquidEdgeU },
+          // Conductivity as the SPH thermal kernel reads it; absent means none.
+          solidConductivityWPerMK: Number(solidPhase.thermalConductivityWPerMK) > 0 ? Number(solidPhase.thermalConductivityWPerMK) : 0,
+          liquidConductivityWPerMK: Number(liquidPhase.thermalConductivityWPerMK) > 0 ? Number(liquidPhase.thermalConductivityWPerMK) : 0,
+          liquidDensityKgPerM3: liquidPhase.densityKgPerM3,
+          // Represented molecules per kilogram (N_A / M); released meltwater
+          // carries mass * this, as seeded particles do (sphGpuBuffers).
+          liquidEntitiesPerKg: Number(properties?.molarMassKgPerMol) > 0
+            ? 6.02214076e23 / Number(properties.molarMassKgPerMol)
+            : 0,
+          materialId: stableOpticalMaterialId(body.material),
+          // 0 K disables a face in the rigid stage: adiabatic walls exchange nothing.
+          wallTemperaturesK: ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'].map(face => (
+            scenario.walls?.authority?.exchangeEnabled === false
+              ? 0
+              : Number(scenario.walls?.faces?.[face]) || 0)),
+          // The scene's wall authority: finite walls share one GPU-resident
+          // face state between the rigid and fluid thermal exchanges.
+          wallReservoirAuthority: scenario.walls?.authority ?? null
+        };
+        const liquidBody = { ...body, temperatureK: meltK + 1 };
+        const liquidPlan = initialBodyParticlePlan(liquidBody, properties, pressurePa, pitchByBodyId[body.id]);
+        const releaseParticles = fillAxisAlignedInitialBody({ body: liquidBody, plan: liquidPlan, properties });
+        releaseRowStart = liveParticles.length;
+        for (const particle of releaseParticles) {
+          particle.massKg = 0;
+          particle.role = `solid-release:${rigidBodies.length}`;
+          // Dormant until a melted member is released into it; it still
+          // declares the meltwater's liquid render surface route.
+          particle.solidReleaseSlot = true;
+          liveParticles.push(particle);
+        }
+      }
+      rigidBodies.push({ bodyId: rigidBodies.length, sourceBodyId: body.id, material: body.material,
+        temperatureK: body.temperatureK, pitchByAxisM: [...plan.spacingByAxisM],
+        seed: JSON.parse(JSON.stringify(seed)), thermal, releaseRowStart });
+      countsByBodyId[body.id] = 0;
+      bodyRanges.push({ bodyId: body.id, domainId: body.domainId, material: body.material, start, count: 0,
+        endExclusive: start, mechanicsMode: 'rigid' });
+      continue;
+    }
     for (const particle of particles) liveParticles.push(particle);
     countsByBodyId[body.id] = particles.length;
     bodyRanges.push({
@@ -2537,7 +2693,8 @@ function buildSphInitialBodiesDemoState({
 
   const materialProperties = Object.fromEntries(Object.entries(resolved).map(([key, closure]) => [key, closure.properties]));
   const environmentState = environment ? buildSphEnvironmentParticles({ environment, materialProperties,
-    boxDimensionsM: boxDims, cellsPerAxis: environmentCellsPerAxis,
+    boxDimensionsM: boxDims, cellsPerAxis: environmentCellsPerAxis, ledgerParcels: exactEnergyLedger,
+    refineEdgeM: environmentRefineEdgeM, airParcels: environmentAirParcels,
     firstDomainId: normalizedInitialBodies.bodies.reduce((max, body) => Math.max(max, body.domainId), 0) + 1,
     occupiedBoxes: bodyPlans.filter(plan => !['gas', 'plasma'].includes(plan.phase))
       .map(plan => ({ min: plan.boundsM.minM, max: plan.boundsM.maxM })) }) : null;
@@ -2552,7 +2709,8 @@ function buildSphInitialBodiesDemoState({
     minimumLiveFraction: reactionProductReserveMinimumLiveFraction,
     exactDiscoveredReactionCount: exactReactionCountFromReserveAuthority(
       reactionProductReserveAuthority,
-      sourceMaterialKeys
+      sourceMaterialKeys,
+      materialProperties
     )
   });
   const spareProductSlotCount = gpuResidentMechanics
@@ -2585,6 +2743,9 @@ function buildSphInitialBodiesDemoState({
       spareProductSlot: true
     });
   }
+  const splitSpareReserve = gpuResidentMechanics
+    ? appendSplitSpareLineages(all, splitSpareLineageCount, boxCenterM)
+    : { count: 0, firstContinuityDomainId: 0 };
   const phaseCarrierPlan = !gpuResidentMechanics
     ? null
     : phaseCompanionLanesRequired(
@@ -2594,13 +2755,45 @@ function buildSphInitialBodiesDemoState({
       ? appendPhaseCarrierLanes(all)
       : declarePhaseCarrierSingleLanePlan(all);
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
-  if (ROOM_AIR_EXACT_MASS_DECLARED && environment?.mode === 'air') state.exactMassInitialization = {
-    schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149, initialQuantities: true,
+  // The G2 integer energy ledger declares integer mass only; its energy rows
+  // are seeded from the packed state, and no rational quantities run.
+  if (exactEnergyLedger || (ROOM_AIR_EXACT_MASS_DECLARED && environment?.mode === 'air')) state.exactMassInitialization = {
+    schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149,
+    initialQuantities: !exactEnergyLedger,
+    ...(exactEnergyLedger ? { energyLedger: true } : {}),
     massWords: all.flatMap(particle => particle.massKg > 0 && particle.coldExactMassWords
       ? particle.coldExactMassWords : Array.from(encodeSphExactMass(particle.massKg, createSphExactMassFormat()))),
-    reference: 'Original scene masses including physically allocated room-air species; binary64 ingress before f32 projection'
+    reference: exactEnergyLedger
+      ? 'G2 integer energy ledger: original scene masses; binary64 ingress before f32 projection'
+      : 'Original scene masses including physically allocated room-air species; binary64 ingress before f32 projection'
   };
-  state.phaseCarrierPlan = phaseCarrierPlan;
+  state.phaseCarrierPlan = splitSpareReserve.count > 0
+    ? Object.freeze(clonePhaseCarrierPlanWithSplitReserve({ ...phaseCarrierPlan, splitSpareReserve }))
+    : phaseCarrierPlan;
+  // G2 ledger nuclei (clone-safe): dry parcels for the vapor-parcel exchange.
+  if (exactEnergyLedger && environmentState?.parcels?.length) {
+    state.ledgerParcels = Object.freeze({ schema: 'peercompute.ulg.sph-ledger-parcels.v1',
+      cellsPerAxis: environmentCellsPerAxis, boxDimensionsM: [...boxDims],
+      ...ledgerParcelWaterReference(materialProperties, environment),
+      parcels: environmentState.parcels.map(parcel => ({ ...parcel, x: [...parcel.x] })) });
+  }
+  // G3 coherent rigid bodies (clone-safe cold declaration for the GPU lane).
+  if (rigidBodies.length) {
+    // A5 SOL-3: conductivity and heat capacity of every scene material's
+    // phases, as the fluid side of member <-> particle conduction reads them.
+    const fluidThermal = [];
+    for (const [materialKey, entry] of Object.entries(resolved)) {
+      for (const phase of entry?.properties?.phases ?? []) {
+        const conductivity = Number(phase.thermalConductivityWPerMK);
+        const heatCapacity = Number(phase.cpJPerKgK ?? phase.heatCapacityJPerKgK);
+        if (conductivity > 0 && heatCapacity > 0) {
+          fluidThermal.push({ materialId: stableOpticalMaterialId(materialKey), phaseId: gpuPhaseId(phase.name),
+            conductivityWPerMK: conductivity, heatCapacityJPerKgK: heatCapacity });
+        }
+      }
+    }
+    state.rigidBodies = Object.freeze({ schema: SCHROEDER_SOLID_BODIES_SCHEMA, bodies: rigidBodies, fluidThermal });
+  }
   copyInitialParticleMetadataIntoState(state, all);
 
   const totalBlockVolumeM3 = bodyPlans.reduce((sum, plan) => sum + plan.blockVolumeM3, 0);
@@ -2731,6 +2924,7 @@ function buildSphInitialBodiesDemoState({
       live: liveParticles.length,
       ...(environmentState?.particles.length ? { environmentGas: environmentState.particles.length } : {}),
       spareProductSlots: spareProductSlotCount,
+      ...(splitSpareReserve.count > 0 ? { splitSpareLineages: splitSpareReserve.count } : {}),
       ...(phaseCarrierPlan
         ? { phaseCompanionSlots: phaseCarrierPlan.companionCapacity }
         : {}),
@@ -2739,6 +2933,7 @@ function buildSphInitialBodiesDemoState({
       ...(legacyDrop ? { drop: countsByBodyId[legacyDrop.id] } : {})
     },
     reactionProductReservePlan: reactionProductReserve,
+    splitSpareReserve: Object.freeze({ ...splitSpareReserve }),
     materialProperties: Object.fromEntries(
       Object.entries(resolved).map(([key, closure]) => [key, closure.properties])
     )
@@ -2769,24 +2964,31 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   initialBodies = null,
   environment = null,
   environmentCellsPerAxis = 2,
+  environmentRefineEdgeM = null,
+  environmentAirParcels = 'species',
   dropParticleEdge = 3, // N -> N^3 particles in the drop block
   baseParticleEdge = 5, // N -> N^3 particles in the base block
   adaptiveParticleSpacing = true,
   initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
   reactionProductReserveMinimumLiveFraction = null,
+  splitSpareLineageCount = 0,
   mechanics = 'mlsmpm',
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
   iceBaseHeightM,
-  ironBaseHeightM
+  ironBaseHeightM,
+  exactEnergyLedger = false
 } = {}, reactionProductReserveAuthority = null) {
   if (environment !== null) environment = normalizeSphEnvironmentInitialization(environment);
   if (initialBodies != null) {
     return buildSphInitialBodiesDemoState({
       scenario,
+      exactEnergyLedger,
       environment,
       environmentCellsPerAxis,
+      environmentRefineEdgeM,
+      environmentAirParcels,
       physicalLawGroups,
       closures,
       allowFixtureMaterialProperties,
@@ -2795,6 +2997,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       initialTargetNeighborCount,
       reactionProductReserveMinimumLiveFraction,
       reactionProductReserveAuthority,
+      splitSpareLineageCount,
       mechanics,
       materialPropertyBank,
       materialPropertyCrystalStructureBank
@@ -2850,6 +3053,9 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   }
   if (environment?.mode === 'air') {
     for (const [key, closure] of Object.entries(resolved)) resolved[key] = withRoomAirCaloricReference(closure, key);
+    if (environmentAirParcels === 'mixture') {
+      resolved[SPH_ENVIRONMENT_AIR_MIXTURE_MATERIAL] = createSphEnvironmentAirMixtureClosure(resolved);
+    }
   }
   if (!allowFixtureMaterialProperties) {
     for (const [key, closure] of Object.entries(resolved)) {
@@ -3086,7 +3292,9 @@ function buildSphPhaseDemoStateWithReserveAuthority({
     .map(([, size, bottom]) => ({ min: [cx - size / 2, bottom, cz - size / 2],
       max: [cx + size / 2, bottom + size, cz + size / 2] }));
   const environmentState = environment ? buildSphEnvironmentParticles({ environment, materialProperties,
-    boxDimensionsM: boxDims, occupiedBoxes, cellsPerAxis: environmentCellsPerAxis, firstDomainId: 3 }) : null;
+    boxDimensionsM: boxDims, occupiedBoxes, cellsPerAxis: environmentCellsPerAxis, firstDomainId: 3,
+    refineEdgeM: environmentRefineEdgeM, airParcels: environmentAirParcels,
+    ledgerParcels: exactEnergyLedger }) : null;
   const all = [...baseParticles, ...dropParticles, ...(environmentState?.particles ?? [])];
   initializeSphColdPhaseCaloricParticles(all, materialProperties);
   const sourceMaterialKeys = [...new Set(all.map(particle => particle.material))];
@@ -3106,7 +3314,8 @@ function buildSphPhaseDemoStateWithReserveAuthority({
     minimumLiveFraction: reactionProductReserveMinimumLiveFraction,
     exactDiscoveredReactionCount: exactReactionCountFromReserveAuthority(
       reactionProductReserveAuthority,
-      sourceMaterialKeys
+      sourceMaterialKeys,
+      materialProperties
     )
   });
   const spareProductSlotCount = gpuResidentMechanics
@@ -3136,6 +3345,9 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       spareProductSlot: true
     });
   }
+  const splitSpareReserve = gpuResidentMechanics
+    ? appendSplitSpareLineages(all, splitSpareLineageCount, [cx, (ironBase + iceBase) / 2, cz])
+    : { count: 0, firstContinuityDomainId: 0 };
   const phaseCarrierPlan = !gpuResidentMechanics
     ? null
     : phaseCompanionLanesRequired(
@@ -3146,18 +3358,34 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       : declarePhaseCarrierSingleLanePlan(all);
   const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
-  if (ROOM_AIR_EXACT_MASS_DECLARED && environment?.mode === 'air') state.exactMassInitialization = {
-    schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149, initialQuantities: true,
+  // The G2 integer energy ledger declares integer mass only; its energy rows
+  // are seeded from the packed state, and no rational quantities run.
+  if (exactEnergyLedger || (ROOM_AIR_EXACT_MASS_DECLARED && environment?.mode === 'air')) state.exactMassInitialization = {
+    schema: 'peercompute.ulg.sph-exact-mass-initialization.v1', wordCount: 9, quantumExponent: -149,
+    initialQuantities: !exactEnergyLedger,
+    ...(exactEnergyLedger ? { energyLedger: true } : {}),
     massWords: all.flatMap(particle => particle.massKg > 0 && particle.coldExactMassWords
       ? particle.coldExactMassWords : Array.from(encodeSphExactMass(particle.massKg, createSphExactMassFormat()))),
-    reference: 'Original scene masses including physically allocated room-air species; binary64 ingress before f32 projection'
+    reference: exactEnergyLedger
+      ? 'G2 integer energy ledger: original scene masses; binary64 ingress before f32 projection'
+      : 'Original scene masses including physically allocated room-air species; binary64 ingress before f32 projection'
   };
-  state.phaseCarrierPlan = phaseCarrierPlan;
+  state.phaseCarrierPlan = splitSpareReserve.count > 0
+    ? Object.freeze(clonePhaseCarrierPlanWithSplitReserve({ ...phaseCarrierPlan, splitSpareReserve }))
+    : phaseCarrierPlan;
+  // G2 ledger nuclei (clone-safe): dry parcels for the vapor-parcel exchange.
+  if (exactEnergyLedger && environmentState?.parcels?.length) {
+    state.ledgerParcels = Object.freeze({ schema: 'peercompute.ulg.sph-ledger-parcels.v1',
+      cellsPerAxis: environmentCellsPerAxis, boxDimensionsM: [...boxDims],
+      ...ledgerParcelWaterReference(materialProperties, environment),
+      parcels: environmentState.parcels.map(parcel => ({ ...parcel, x: [...parcel.x] })) });
+  }
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
     p.material = all[index].material;
     p.role = all[index].role;
     p.spareProductSlot = all[index].spareProductSlot === true;
+    if (all[index].spareSplitSlot === true) p.spareSplitSlot = true;
     p.phaseCompanionSlot = all[index].phaseCompanionSlot === true;
     p.phaseCarrierPrimaryIndex = Number.isSafeInteger(all[index].phaseCarrierPrimaryIndex)
       ? all[index].phaseCarrierPrimaryIndex
@@ -3234,18 +3462,40 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       drop: dropParticles.length,
       base: baseParticles.length,
       spareProductSlots: spareProductSlotCount,
+      ...(splitSpareReserve.count > 0 ? { splitSpareLineages: splitSpareReserve.count } : {}),
       ...(phaseCarrierPlan
         ? { phaseCompanionSlots: phaseCarrierPlan.companionCapacity }
         : {}),
       total: all.length
     },
     reactionProductReservePlan: reactionProductReserve,
+    splitSpareReserve: Object.freeze({ ...splitSpareReserve }),
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };
 }
 
 export function buildSphPhaseDemoState(options = {}) {
-  return buildSphPhaseDemoStateWithReserveAuthority(options);
+  return withThermalDormancyDeclaration(
+    buildSphPhaseDemoStateWithReserveAuthority(options),
+    options
+  );
+}
+
+// G4 per-source thermal dormancy (plan/todo/g4-dynamic-laws-proposal.md):
+// `thermalDormancyK` declares epsilon_T on the particle state, which travels
+// with the state to every resident lane; the step hands it to the canonical
+// thermal producer. Absent, every source stays active.
+function withThermalDormancyDeclaration(demo, options) {
+  const raw = options?.thermalDormancyK;
+  const epsilonK = Number(raw);
+  if (raw != null && raw !== '' && Number.isFinite(epsilonK) && epsilonK >= 0 && demo?.state) {
+    demo.state.thermalDormancy = Object.freeze({ epsilonK });
+  }
+  // `reactionDormancy` declares the exact reaction node-scope predicate.
+  if (options?.reactionDormancy === true && demo?.state) {
+    demo.state.reactionDormancy = Object.freeze({ exact: true });
+  }
+  return demo;
 }
 
 /**
@@ -5613,11 +5863,26 @@ function initialBlockGeometrySummary(demo) {
   };
 }
 
-function solveClosureEquilibriumK(parts) {
-  const total = (t) => parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, t), 0);
+// Finite walls join the closed system as lumped faces holding C * (T - T0).
+function finiteWallClosureParts(scenario) {
+  const authority = scenario?.walls?.authority;
+  if (authority?.finiteCapacity !== true) return null;
+  return Object.keys(authority.faces).map((faceId) => ({
+    capacityJPerK: Number(authority.faceHeatCapacitiesJPerK?.[faceId]) || 0,
+    initialTemperatureK: Number(authority.faces[faceId])
+  }));
+}
+
+function solveClosureEquilibriumK(parts, walls = []) {
+  const wallEnergy = (t) => walls.reduce(
+    (sum, wall) => sum + wall.capacityJPerK * (t - wall.initialTemperatureK),
+    0
+  );
+  const total = (t) => parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, t), 0)
+    + wallEnergy(t);
   const target = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, p.initialTemperatureK), 0);
-  let lo = Math.min(...parts.map((p) => p.initialTemperatureK));
-  let hi = Math.max(...parts.map((p) => p.initialTemperatureK));
+  let lo = Math.min(...parts.map((p) => p.initialTemperatureK), ...walls.map((w) => w.initialTemperatureK));
+  let hi = Math.max(...parts.map((p) => p.initialTemperatureK), ...walls.map((w) => w.initialTemperatureK));
   for (let i = 0; i < 200; i += 1) {
     const mid = 0.5 * (lo + hi);
     if (total(mid) < target) lo = mid;
@@ -5679,8 +5944,16 @@ function computeDerivedInitialBodiesPreflight(demo) {
     });
   }
   const adiabaticEquilibriumK = solveClosureEquilibriumK(equilibriumParts);
-  const asymptoticInteriorTempK = adiabatic ? adiabaticEquilibriumK : meanWallTempK;
-  const bindingInteriorTempK = adiabatic ? adiabaticEquilibriumK : maxWallTempK;
+  const finiteWalls = finiteWallClosureParts(scenario);
+  const finiteWallEquilibriumK = finiteWalls
+    ? solveClosureEquilibriumK(equilibriumParts, finiteWalls)
+    : null;
+  const asymptoticInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteWalls ? finiteWallEquilibriumK : meanWallTempK);
+  const bindingInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteWalls ? finiteWallEquilibriumK : maxWallTempK);
   const initialEnergyJ = equilibriumParts.reduce(
     (sum, part) => sum + part.massKg * specificInternalEnergyJPerKg(
       part.properties,
@@ -5870,8 +6143,16 @@ function computeDerivedDemoPreflight(demo) {
   ];
   if (airProps) parts.push({ massKg: airMassKg, properties: airProps, initialTemperatureK: airTemp });
   const adiabaticEquilibriumK = solveClosureEquilibriumK(parts);
-  const asymptoticInteriorTempK = adiabatic ? adiabaticEquilibriumK : meanWallTempK;
-  const bindingInteriorTempK = adiabatic ? adiabaticEquilibriumK : maxWallTempK;
+  const finiteWalls = finiteWallClosureParts(scenario);
+  const finiteWallEquilibriumK = finiteWalls
+    ? solveClosureEquilibriumK(parts, finiteWalls)
+    : null;
+  const asymptoticInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteWalls ? finiteWallEquilibriumK : meanWallTempK);
+  const bindingInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteWalls ? finiteWallEquilibriumK : maxWallTempK);
   const initialEnergyJ = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, p.initialTemperatureK), 0);
   const finalEnergyJ = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, asymptoticInteriorTempK), 0);
   const heatExportedToWallsJ = adiabatic ? 0 : initialEnergyJ - finalEnergyJ;
@@ -6002,6 +6283,9 @@ export function createSphPhaseDemo(options = {}) {
   } = {}) => {
     const discoveryOptions = {
       materialProperties: candidateDemo.materialProperties,
+      liveMaterialKeys: [...new Set((candidateDemo.state?.particles ?? [])
+        .filter((particle) => particle.role !== 'spare-product-slot')
+        .map((particle) => particle.material))],
       productClosures: options.productClosures,
       cachedProductClosures: options.cachedProductClosures,
       allowFixtureMaterialProperties: candidateDemo.allowFixtureMaterialProperties,
@@ -6050,11 +6334,11 @@ export function createSphPhaseDemo(options = {}) {
       );
       const provedReactionCatalogCacheIdentity =
         reactionDiscoveryCatalogCacheIdentity(prefetchedReactionDiscovery);
-      demo = buildSphPhaseDemoStateWithReserveAuthority(options, Object.freeze({
+      demo = withThermalDormancyDeclaration(buildSphPhaseDemoStateWithReserveAuthority(options, Object.freeze({
         authority: REACTION_PRODUCT_RESERVE_EXACT_DISCOVERY_AUTHORITY,
         materialSetKey: provedMaterialSetKey,
         reactionCount: 0
-      }));
+      })), options);
       requireInitialMaterialAuthority(demo);
       if (
         reactionProductReserveMaterialSetKey(
@@ -6176,6 +6460,16 @@ export function createSphPhaseDemo(options = {}) {
   const requestedGravityMPerS2 = options.gravity ?? [0, -9.80665, 0];
   const gravityMPerS2 = physicalLawGroups.gravity ? requestedGravityMPerS2 : [0, 0, 0];
   const cflMaxSoundSpeedMPerS = (cflSafety * mechLengthM) / carrierDt;
+  // A1 larger-dt slice: with the semi-implicit pressure solve, liquid bulk
+  // stiffness is capped at its own (measured) envelope c dt / dx <= 6.4
+  // instead of the explicit cflSafety; solids and gas are unchanged. MLS-MPM
+  // only (the solve runs on the fused Tier-0 sequence).
+  const implicitPressure = mechanics === 'mlsmpm'
+    ? normalizeSphImplicitPressureOptions(options.implicitPressure)
+    : null;
+  const liquidCflMaxSoundSpeedMPerS = implicitPressure
+    ? Math.max((implicitPressure.cflSafety * mechLengthM) / carrierDt, cflMaxSoundSpeedMPerS)
+    : 0;
   const soundSpeedScale = Math.min(1, maxRealSoundSpeed > 0 ? cflMaxSoundSpeedMPerS / maxRealSoundSpeed : 1);
   const modulusScale = soundSpeedScale * soundSpeedScale; // moduli scale as c^2
   const requestedMinGasSoundSpeedMPerS = options.minGasSoundSpeedMPerS ?? 40;
@@ -6223,6 +6517,8 @@ export function createSphPhaseDemo(options = {}) {
     requestedMinGasSoundSpeedMPerS,
     maxRealSoundSpeedMPerS: maxRealSoundSpeed,
     cflMaxSoundSpeedMPerS,
+    liquidCflMaxSoundSpeedMPerS,
+    implicitPressure,
     cflSafety,
     gridCflFactor,
     mlsMpmArtificialViscosityAlpha,
@@ -6272,6 +6568,7 @@ export function createSphPhaseDemo(options = {}) {
     gravityMPerS2,
     soundSpeedScale,
     cflMaxSoundSpeedMPerS,
+    liquidCflMaxSoundSpeedMPerS,
     enabled: hydrostaticInitializationEnabled
   });
 

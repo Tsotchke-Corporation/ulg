@@ -181,10 +181,16 @@ fn schroeder_phase_volume_pressure_drag_pair(
       + pressure_impulse * condensed_response_inverse_mass;
   var gas_velocity =
     initial_gas_velocity - pressure_impulse * gas_response_inverse_mass;
+  // No product of two impulses: for microscopic fields (~1e-18 kg sliver
+  // support at a node) an impulse is ~1e-20 N s and its square falls below
+  // the f32 normal range, which GPUs flush to zero. That dropped the
+  // quadratic kinetic term and over-stated drag heat by alpha/2 (0.6%), so a
+  // stiff gas mixture failed the pair's exact energy check. The impulse is
+  // first scaled to the relative velocity it imparts.
+  let pressure_relative_velocity_change = pressure_impulse * response_inverse_mass;
   let pressure_kinetic_delta =
     dot(pressure_impulse, initial_condensed_velocity - initial_gas_velocity)
-    + 0.5 * dot(pressure_impulse, pressure_impulse)
-      * response_inverse_mass;
+    + 0.5 * dot(pressure_relative_velocity_change, pressure_impulse);
   let pressure_internal_compensation =
     -pressure_kinetic_delta;
 
@@ -213,12 +219,14 @@ fn schroeder_phase_volume_pressure_drag_pair(
     condensed_velocity + drag_impulse * condensed_response_inverse_mass;
   gas_velocity =
     gas_velocity - drag_impulse * gas_response_inverse_mass;
+  // D = mu alpha (v_g - v_c), so |D|^2 / (2 mu) = -(alpha / 2) D.(v_c - v_g):
+  // the drag kinetic change is exactly D.(v_c - v_g) (1 - alpha / 2), with no
+  // impulse squared (see the pressure term above).
   let drag_kinetic_delta =
     dot(
       drag_impulse,
       pre_drag_condensed_velocity - pre_drag_gas_velocity
-    )
-    + 0.5 * dot(drag_impulse, drag_impulse) * response_inverse_mass;
+    ) * (1.0 - 0.5 * drag_alpha);
   let drag_heat = max(0.0, -drag_kinetic_delta);
 
   if (!schroeder_phase_volume_finite_vec3(condensed_velocity)

@@ -26,7 +26,20 @@ export function withRoomAirCaloricReference(closure, material) {
       liquidReferenceEnthalpyJPerKg: 83910, vaporizationReferenceEnthalpyJPerKg: 2453500,
       liquidCpJPerKgK: liquid.cpJPerKgK, vaporCpJPerKgK: gasCp,
       liquidDensityKgPerM3: liquid.densityKgPerM3, molarMassKgPerMol,
-      minTemperatureK: 273.15, maxTemperatureK: 600, maxPressurePa: 2e6,
+      // Execution domain, shared by the liquid and vapor branches. Vapor next
+      // to molten iron and hot oxide exceeds 600 K (it absorbs their
+      // radiation); past the domain a row resolves to missing properties
+      // (status 255), the ActiveSource classifier rejects it and the spatial
+      // directory and contact fail closed for the rest of the run. With the
+      // bank's constant Cps the vaporization internal-energy gap reaches zero
+      // near 1198 K, so the reduced model is self-consistent only below that;
+      // 1100 K keeps ~250 kJ/kg of gap. Liquid is bounded physically by the
+      // boiling plateau (~485 K at maxPressurePa).
+      // The lower bound admits transient supercooling: meltwater touching
+      // colder ice drops below T_f within a step before the phase-carrier
+      // transfer's bulk fusion freezes it back at T_f (fusion stays at 273.15 K,
+      // inside both branches).
+      minTemperatureK: 233.15, maxTemperatureK: 1100, maxPressurePa: 2e6,
       provenance: `NIST steam tables at 20 C: p=0.002339 MPa, h_l=83.91 kJ/kg, h_fg=2453.5 kJ/kg (${WATER_REFERENCE}). Constant Cp and liquid density from material-property-reference-bank; reduced ideal vapor/incompressible liquid model.`,
       solidCaloric: { referenceTemperatureK: fusion.temperatureK, referencePressurePa: 101325,
         fusionEnthalpyJPerKg: fusion.latentHeatJPerKg, cpJPerKgK: solid.cpJPerKgK,

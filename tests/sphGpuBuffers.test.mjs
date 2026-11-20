@@ -226,6 +226,39 @@ test('SPH GPU particle buffers pack CPU-authoritative particle state', () => {
   assert.equal(packed.phaseChangeValidation, false);
 });
 
+test('SS split-spare lineages are dormant, uniquely identified, and disjoint from the product pool', () => {
+  const baseline = buildSphPhaseDemoState();
+  const demo = buildSphPhaseDemoState({ splitSpareLineageCount: 6 });
+  assert.equal(demo.counts.splitSpareLineages, 6);
+  assert.equal(demo.splitSpareReserve.count, 6);
+  const spareIndices = demo.state.particles
+    .map((particle, index) => ({ particle, index }))
+    .filter(({ particle }) => particle.spareSplitSlot === true && particle.phaseCompanionSlot !== true);
+  assert.equal(spareIndices.length, 6);
+  const sphRows = decodeSphGpuParticleRows(buildSphGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  }));
+  const domains = new Set();
+  for (const { particle, index } of spareIndices) {
+    assert.equal(particle.massKg, 0);
+    assert.equal(particle.spareProductSlot, false);
+    assert.equal(sphRows[index].massKg, 0);
+    assert.equal(sphRows[index].status, SPH_GPU_PARTICLE_STATUS.splitSpareReserved);
+    domains.add(particle.renderDomainId);
+  }
+  assert.equal(domains.size, 6);
+  // Identities are past every live and product-reserve identity.
+  const otherMax = Math.max(...demo.state.particles
+    .filter((particle) => particle.spareSplitSlot !== true)
+    .map((particle) => Number(particle.renderDomainId) || 0));
+  assert.ok(Math.min(...domains) > otherMax);
+  // Without the option nothing changes; with it, six lineages are added
+  // (each with its companion lanes when the phase-carrier plan is active).
+  assert.equal(baseline.counts.splitSpareLineages, undefined);
+  const lanes = demo.counts.phaseCompanionSlots ? 4 : 1;
+  assert.equal(demo.state.particles.length - baseline.state.particles.length, 6 * lanes);
+});
+
 test('GPU particle buffers distinguish dormant reaction-product and phase-companion slots', () => {
   const demo = buildSphPhaseDemoState();
   const sphPacked = buildSphGpuParticleBuffers(demo.state, {

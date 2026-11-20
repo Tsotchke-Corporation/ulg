@@ -83,7 +83,7 @@ export function assertSphMechanicsGasLayout(table) {
 
 export function assertSphReactionGasLayout(table, { authenticatedCombinedLength = null } = {}) {
   const sections = ['records', 'productPhaseRecords', 'reactionHeaders', 'reactantTermRecords',
-    'productTermRecords', 'gasProductRecords', 'atomTermRecords'];
+    'productTermRecords', 'gasProductRecords', 'atomTermRecords', 'spectatorTermRecords'];
   const prefixFloats = sections.reduce((sum, key) => sum + (table?.[key]?.length ?? 0), 0);
   if (table?.gasConstitutiveSchema == null) {
     if (table?.gasConstitutiveRecords != null || table?.gasConstitutiveOffsetVec4 != null) {
@@ -100,6 +100,8 @@ export function assertSphReactionGasLayout(table, { authenticatedCombinedLength 
   }
   const rows = table.gasConstitutiveRecords;
   for (const key of sections) {
+    // The spectator section is absent from tables packed before it existed.
+    if (key === 'spectatorTermRecords' && table[key] == null) continue;
     if (!(table[key] instanceof Float32Array)) throw new TypeError('Invalid reaction gas prefix');
   }
   // Only the private reaction-energy authority may supply a longer exact

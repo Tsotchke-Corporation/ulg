@@ -1,3 +1,7 @@
+import { clonePhaseCarrierPlanWithSplitReserve } from './schroederSplitSpareReserve.js';
+import { borrowSphReactionResidualHistory, validateSphReactionResidualHistoryCandidate }
+  from './sphReactionResidualHistoryGpu.js';
+import { createSchroederSolidRigidFamily, registerSchroederSolidRigidFamily } from './schroederSolidRigidLane.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
@@ -44,6 +48,7 @@ import {
 } from './sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { encodeSphExactParticleInitialQuantities } from './sphExactParticleInitialQuantities.js';
+import { sphExactThermalEnergyRecordWords, SPH_EXACT_THERMAL_ENERGY_WORDS } from './sphExactThermalEnergyWgsl.js';
 import {
   advanceSphDispersedMediumGpuBufferParticleTopologyEpoch,
   buildSphDispersedMediumGpuBuffers,
@@ -81,6 +86,9 @@ export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
   ready: 1,
   energyClampedLow: 2,
   energyClampedHigh: 3,
+  // First-class air, slice 1: a dormant lineage reserved for SS split
+  // children (plan/todo/first-class-air.md). Disjoint from the product pool.
+  splitSpareReserved: 252,
   reactionProductReserved: 253,
   phaseCompanionReserved: 254,
   missingMaterialProperties: 255
@@ -111,7 +119,9 @@ const sphParticleBufferSetLifecycleRecords = new WeakMap();
 const exactMassParticleBuffers = new WeakSet();
 const exactMassParticleReads = new WeakMap();
 const exactMassContinuationBindings = new WeakMap();
+const residualMechanicsBindings = new WeakSet();
 const EXACT_MASS_PARTICLE_SOURCE_FIELDS = ['status', 'sourceSchema', 'particleCount',
+  'phaseCarrierPlan',
   'storageGeneration', 'physicsTick', 'physicsSubstep', 'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch',
   'stateStrideBytes', 'thermoStrideBytes', 'identityStrideBytes', 'identitySchema', 'identityRevision',
   'stateBufferByteLength', 'thermoBufferByteLength', 'identityBufferByteLength'];
@@ -394,6 +404,14 @@ function statusForParticle(particle, eq, properties) {
   ) {
     return SPH_GPU_PARTICLE_STATUS.reactionProductReserved;
   }
+  // Split spares are claimed only by the SS split pipeline, never by
+  // reaction placement, so the two pools cannot contend for a lineage.
+  if (
+    particle?.spareSplitSlot === true
+    && !(finiteNumber(particle?.massKg, 0) > 0)
+  ) {
+    return SPH_GPU_PARTICLE_STATUS.splitSpareReserved;
+  }
   return statusForEquilibrium(eq, properties);
 }
 
@@ -437,6 +455,7 @@ function mechanicsScaleOptions(state, {
       DEFAULT_SOUND_SPEED_SCALE
     ),
     cflMaxSoundSpeedMPerS: finiteNumber(cflMaxSoundSpeedMPerS ?? stateParams.cflMaxSoundSpeedMPerS, 0),
+    liquidCflMaxSoundSpeedMPerS: finiteNumber(stateParams.liquidCflMaxSoundSpeedMPerS, 0),
     minGasSoundSpeedMPerS: finiteNumber(
       minGasSoundSpeedMPerS ?? stateParams.minGasSoundSpeedMPerS,
       DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
@@ -516,7 +535,8 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
   // instead of a global factor set by the stiffest phase in the table.
   const soundSpeedScale = phaseSoundSpeedScaleFor(properties, ph, {
     soundSpeedScale: finiteNumber(options.soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE),
-    cflMaxSoundSpeedMPerS: finiteNumber(options.cflMaxSoundSpeedMPerS, 0)
+    cflMaxSoundSpeedMPerS: finiteNumber(options.cflMaxSoundSpeedMPerS, 0),
+    liquidCflMaxSoundSpeedMPerS: finiteNumber(options.liquidCflMaxSoundSpeedMPerS, 0)
   });
   const modulusScale = soundSpeedScale * soundSpeedScale;
   const restDensity = finiteNumber(ph?.densityKgPerM3 ?? particle.restDensityKgPerM3, 0);
@@ -583,10 +603,12 @@ export function buildSphGpuParticleBuffers(state, {
     throw new TypeError('buildSphGpuParticleBuffers requires a SPH state with particles');
   }
   const particleCount = state.particles.length;
+  const phaseCarrierPlan = clonePhaseCarrierPlanWithSplitReserve(state.phaseCarrierPlan, particleCount);
   const declaredExactMass = sphExactMassOptionsFromColdState(state);
   if (exactMass && declaredExactMass && (exactMass.format.wordCount !== declaredExactMass.format.wordCount
       || exactMass.format.quantumExponent !== declaredExactMass.format.quantumExponent
       || (exactMass.initialQuantities ?? false) !== declaredExactMass.initialQuantities
+      || (exactMass.energyLedger ?? false) !== declaredExactMass.energyLedger
       || exactMass.reference !== declaredExactMass.reference)) {
     throw new TypeError('Exact mass options conflict with the cold scene declaration');
   }
@@ -676,6 +698,7 @@ export function buildSphGpuParticleBuffers(state, {
       phaseId: gpuPhaseId(phase),
       status,
       spareProductSlot: particle.spareProductSlot === true,
+      ...(particle.spareSplitSlot === true ? { spareSplitSlot: true } : {}),
       phaseCompanionSlot: particle.phaseCompanionSlot === true,
       phaseCarrierPrimaryIndex: Number.isSafeInteger(particle.phaseCarrierPrimaryIndex)
         ? particle.phaseCarrierPrimaryIndex
@@ -745,14 +768,23 @@ export function buildSphGpuParticleBuffers(state, {
     identityRevision: particleIdentityRevision(identityValues, renderDomainKeys),
     cpuIdentityStale: false,
     metadata,
-    phaseCarrierPlan: state.phaseCarrierPlan ? { ...state.phaseCarrierPlan } : null,
+    phaseCarrierPlan,
     dispersedMediumOptics,
     materialPropertyBankWarmInputTable,
     materialPropertyBankParticleSizeTable,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
-    fullPhysicsValidation: false
+    fullPhysicsValidation: false,
+    // G2 ledger nuclei (cold, clone-safe); uploaded only beside an energy ledger.
+    ...(state.ledgerParcels && exactMassSeed?.energyLedger ? { ledgerParcels: state.ledgerParcels } : {}),
+    // G3 coherent rigid bodies (cold, clone-safe); their resident family is
+    // keyed by the upload identity buffer.
+    ...(state.rigidBodies ? { rigidBodies: state.rigidBodies } : {}),
+    // G4 per-source thermal dormancy declaration ({ epsilonK }).
+    ...(state.thermalDormancy ? { thermalDormancy: state.thermalDormancy } : {}),
+    // G4 reaction node scope declaration ({ exact: true }).
+    ...(state.reactionDormancy ? { reactionDormancy: state.reactionDormancy } : {})
   }, exactMassSeed);
 }
 
@@ -1142,10 +1174,10 @@ function destroySphGpuParticleBuffersNow(buffers, record = null) {
   // Once a parent has entered the private lifecycle, retire the exact core
   // allocations recorded at admission. Mutable public aliases remain useful
   // diagnostics but must not redirect destruction to unrelated buffers.
-  if (buffers.ownsStateBuffer !== false) {
+  if (buffers.ownsStateBuffer !== false && !record?.exactMass?.retainedFamilies?.buffers.has(record.stateBuffer)) {
     (record?.stateBuffer ?? buffers.stateBuffer)?.destroy?.();
   }
-  if (buffers.ownsThermoBuffer !== false) {
+  if (buffers.ownsThermoBuffer !== false && !record?.exactMass?.retainedFamilies?.buffers.has(record.thermoBuffer)) {
     (record?.thermoBuffer ?? buffers.thermoBuffer)?.destroy?.();
   }
   if (buffers.ownsIdentityBuffer !== false && !record?.exactMass) {
@@ -2366,6 +2398,8 @@ export function uploadSphGpuParticleBuffers(device, packed, { initialStorageGene
   }
   const exactSeed = resolveSphExactParticleMassSeed(packed);
   if (exactSeed) packed = exactSeed.packed;
+  const phaseCarrierPlan = clonePhaseCarrierPlanWithSplitReserve(packed.phaseCarrierPlan, packed.particleCount);
+  if(exactSeed && phaseCarrierPlan)Object.freeze(phaseCarrierPlan);
   if (initialStorageGeneration !== null && (!Number.isInteger(initialStorageGeneration)
       || initialStorageGeneration < 1 || initialStorageGeneration > 0xffffffff
       || (packed.storageGeneration != null && packed.storageGeneration !== initialStorageGeneration))) {
@@ -2486,7 +2520,7 @@ export function uploadSphGpuParticleBuffers(device, packed, { initialStorageGene
     identityBuffer,
     identityValueMax,
     renderDomainKeys: { ...(packed.renderDomainKeys || {}) },
-    phaseCarrierPlan: packed.phaseCarrierPlan ? { ...packed.phaseCarrierPlan } : null,
+    phaseCarrierPlan,
     dispersedMediumOptics,
     dispersedMediumOpticsAuthority: dispersedMediumOptics?.authority ?? null,
     dispersedMediumOpticsBuffer: dispersedMediumOptics?.buffer ?? null,
@@ -2532,14 +2566,21 @@ export function uploadSphGpuParticleBuffers(device, packed, { initialStorageGene
     );
   }
   if (exactSeed) {
-    let family = null;
+    let family = null, energyBuffer = null;
     try {
       family = createSphExactMassInventoryWebGpu({ device, format: exactSeed.format,
         ...(exactSeed.massWords ? { massWords: exactSeed.massWords } : { massesKg: exactSeed.massesKg }),
         provenance: { kind: 'initial-conditions', reference: exactSeed.reference } });
       const read = acquireSphExactMassRead({ family, device });
       const range = Object.freeze({ rowOffset: read.rowOffset, rowCount: read.rowCount });
+      energyBuffer = exactSeed.energyWords ? createExactEnergyRowsBuffer(device, exactSeed.energyWords) : null;
+      const parcels = energyBuffer && packed.ledgerParcels
+        ? createLedgerParcelFamily(device, packed.ledgerParcels, exactSeed.format) : null;
       lifecycleRecord.exactMass = { family, read, range, identityOwners: { count: 1, identityBuffer }, retired: false,
+        energy: energyBuffer
+          ? { owners: 1, value: exactEnergyRows(energyBuffer, exactSeed.format, read.rowCount) } : null,
+        parcels: parcels ? { owners: 1, value: parcels } : null,
+        energyRowsStatus: exactSeed.energyRowsStatus,
         coldQuantitySeed: exactSeed.initialQuantities ? exactSeed : null,
         sourceFields: EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, upload[key]]) };
       Object.defineProperty(upload, 'exactMassInventory', { value: family, enumerable: true });
@@ -2547,11 +2588,82 @@ export function uploadSphGpuParticleBuffers(device, packed, { initialStorageGene
       for (const buffer of [stateBuffer, thermoBuffer, identityBuffer]) exactMassParticleBuffers.add(buffer);
     } catch (error) {
       if (family) releaseSphExactMassInventory(family);
+      if (energyBuffer && !lifecycleRecord.exactMass) energyBuffer.destroy();
       destroySphGpuParticleBuffersNow(upload, lifecycleRecord);
       throw error;
     }
   }
+  // G3 coherent rigid bodies: one resident family per scene identity buffer.
+  if (packed.rigidBodies) {
+    registerSchroederSolidRigidFamily(identityBuffer, createSchroederSolidRigidFamily(device, packed.rigidBodies));
+  }
   return upload;
+}
+
+/** The live G2 ledger parcel family of an active exact owner, or null. */
+export function sphGpuParticleUploadLedgerParcels(upload) {
+  const owner = sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass;
+  return owner && owner.active !== false && !owner.retired ? owner.parcels?.value ?? null : null;
+}
+
+/**
+ * Borrow the live parcel family for a later same-device consumer (the
+ * presenter's parcel optics): the family is not destroyed until every borrow
+ * is released, even if its carrier owners retire first.
+ */
+export function beginSphGpuParticleUploadLedgerParcelsBorrow(upload) {
+  const owner = sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass;
+  const holder = owner && owner.active !== false && !owner.retired ? owner.parcels : null;
+  if (!holder?.value) return null;
+  holder.owners++;
+  let released = false;
+  return Object.freeze({ parcels: holder.value, release() {
+    if (released) return;
+    released = true;
+    if (--holder.owners === 0) (holder.destroy ?? holder.value.destroy)();
+  } });
+}
+
+export const SPH_LEDGER_PARCEL_FAMILY_SCHEMA = 'peercompute.ulg.sph-ledger-parcel-family.v1';
+// Parcels persist with their carrier owner and are updated in place by the
+// vapor-parcel exchange and transport stages: f32 params (8 floats: position,
+// multiplicity, dry density, kappa, temperature, radius), the exact ledger
+// [dry | water | U] per parcel, and the sinks [wall mass | wall U | solute].
+function createLedgerParcelFamily(device, cold, format) {
+  const W = format.wordCount, parcels = cold.parcels, count = parcels.length;
+  if (cold.schema !== 'peercompute.ulg.sph-ledger-parcels.v1' || !count) {
+    throw new TypeError('Ledger parcels require the cold parcel declaration');
+  }
+  const params = new Float32Array(count * 8), ledger = new Uint32Array(count * 3 * W);
+  parcels.forEach((parcel, i) => {
+    params.set([...parcel.x, parcel.multiplicity, parcel.densityKgPerM3, parcel.hygroscopicity, 0,
+      parcel.dryRadiusM], i * 8);
+    if (parcel.dryMassWords?.length !== W) throw new TypeError('Ledger parcel dry mass words do not match the run format');
+    ledger.set(parcel.dryMassWords, i * 3 * W);
+  });
+  const make = (label, data) => {
+    const buffer = tagWebGpuBufferDevice(device.createBuffer({ label, size: Math.max(16, data.byteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST }), device);
+    device.queue.writeBuffer(buffer, 0, data);
+    return buffer;
+  };
+  const paramsBuffer = make('ulg-ledger-parcel-params', params);
+  const ledgerBuffer = make('ulg-ledger-parcel-rows', ledger);
+  const sinkBuffer = make('ulg-ledger-parcel-sinks', new Uint32Array(3 * W));
+  for (const key of ['vaporMaterialId', 'pressurePa', 'waterReferenceU0']) {
+    if (!Number.isFinite(cold[key])) throw new TypeError(`Ledger parcels require a finite ${key}`);
+  }
+  return Object.freeze({ schema: SPH_LEDGER_PARCEL_FAMILY_SCHEMA, device, count, format,
+    cellsPerAxis: cold.cellsPerAxis, boxDimensionsM: Object.freeze([...cold.boxDimensionsM]),
+    vaporMaterialId: cold.vaporMaterialId, pressurePa: cold.pressurePa, waterReferenceU0: cold.waterReferenceU0,
+    paramsBuffer, ledgerBuffer, sinkBuffer,
+    destroy() { paramsBuffer.destroy(); ledgerBuffer.destroy(); sinkBuffer.destroy(); } });
+}
+
+/** The live carrier energy record of an active exact owner, or null. */
+export function sphGpuParticleUploadExactEnergyRows(upload) {
+  const owner = sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass;
+  return owner && owner.active !== false && !owner.retired ? owner.energy?.value ?? null : null;
 }
 
 export function sphGpuParticleUploadAdvertisesExactMass(upload) {
@@ -2571,22 +2683,92 @@ function exactParticleMassOwnerMatches(upload, record) {
     && upload.stateBuffer === record.stateBuffer && upload.thermoBuffer === record.thermoBuffer
     && upload.identityBuffer === record.identityBuffer && upload.particleCount === record.particleCount
     && upload.topologyEpoch === record.topologyEpoch && upload.identityRevision === record.identityRevision
+    && exactEnergyRowsMatch(owner.energy, { device: record.device, format: owner.family.format,
+      rowCount: record.particleCount })
     && validateSphExactMassRead(owner.read, { device: record.device, family: owner.family,
       format: owner.family.format, expectedGeneration: owner.family.generation,
       rowOffset: owner.range.rowOffset, rowCount: record.particleCount });
+}
+
+export const SPH_EXACT_ENERGY_ROWS_SCHEMA = 'peercompute.ulg.exact-signed-energy-rows.v1';
+
+// One energy record per carrier family, beside the exact-mass inventory and
+// sharing its owner's lifecycle: signed U = m*u rows, cumulative source rows
+// S, then control words (sphExactThermalEnergyWgsl.js). The cold record has
+// S = 0 and clear control. A ledger writer hands each successor record over;
+// a continuation without one ends the energy ledger.
+function createExactEnergyRowsBuffer(device, words) {
+  const rowCount = words instanceof Uint32Array ? words.length / SPH_EXACT_THERMAL_ENERGY_WORDS : 0;
+  const byteLength = Number.isSafeInteger(rowCount) && rowCount > 0
+    ? sphExactThermalEnergyRecordWords(rowCount) * Uint32Array.BYTES_PER_ELEMENT : 0;
+  if (byteLength === 0
+      || byteLength > (device.limits?.maxBufferSize ?? Infinity)
+      || byteLength > (device.limits?.maxStorageBufferBindingSize ?? Infinity)) {
+    throw new RangeError('Initial exact energy rows exceed device capacity');
+  }
+  // createBuffer zero-fills: S rows and control words start cleared.
+  const buffer = tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-exact-energy-initial', size: byteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+  }), device);
+  try { device.queue.writeBuffer(buffer, 0, words); }
+  catch (error) { buffer.destroy(); throw error; }
+  exactMassParticleBuffers.add(buffer);
+  return buffer;
+}
+
+function exactEnergyRows(energyBuffer, format, rowCount) {
+  return Object.freeze({ schema: SPH_EXACT_ENERGY_ROWS_SCHEMA, energyBuffer, format, rowCount });
+}
+
+function exactEnergyRowsMatch(energy, { device, format, rowCount }) {
+  const value = energy?.value;
+  return !energy || Boolean(value?.schema === SPH_EXACT_ENERGY_ROWS_SCHEMA
+    && value.format === format && value.rowCount === rowCount
+    && format.wordCount === SPH_EXACT_THERMAL_ENERGY_WORDS
+    && value.energyBuffer?.size === sphExactThermalEnergyRecordWords(rowCount) * 4
+    && webGpuBufferDevice(value.energyBuffer) === device);
 }
 
 function retireExactParticleMassOwner(record) {
   const owner = record?.exactMass;
   if (!owner || owner.retired) return;
   owner.retired = true;
+  if (owner.publicationBorrow) {
+    // The published descriptor is a retained view of the private producer,
+    // not a second owner of its physical or auxiliary allocations.
+    owner.physicalRetirement = releaseSphParticleExactMassRead(owner.publicationBorrow);
+    void owner.physicalRetirement.catch(error => { record.cleanupError = error; });
+    return;
+  }
+  const rootRetirement = owner.privateRootSource && --owner.privateRootSource.owners===0
+    ? releaseSphParticleExactMassRead(owner.privateRootSource.read) : null;
   // Numeric windows retain their root independently of carrier identity. Close
   // fresh root admission; other original owners continue through held forks.
   releaseSphExactMassInventory(owner.family);
   void releaseSphExactMassRead(owner.read);
   if (owner.quantities && --owner.quantities.owners === 0) owner.quantities.value.quantityBuffer.destroy();
+  if (owner.energy && --owner.energy.owners === 0) owner.energy.value.energyBuffer.destroy();
+  if (owner.parcels && --owner.parcels.owners === 0) (owner.parcels.destroy ?? owner.parcels.value.destroy)();
+  owner.residentClock?.destroy();
+  owner.finiteWall?.destroy();
+  if (owner.reactionLineage && --owner.reactionLineage.owners === 0) owner.reactionLineage.destroy();
+  if (owner.residualHistory && --owner.residualHistory.owners === 0) owner.residualHistory.destroy();
+  if (owner.residentHistory && --owner.residentHistory.owners === 0) {
+    owner.residentHistory.read.release();
+    void Promise.resolve(owner.residentHistory.handle.destroyResidentProductMassBuffers())
+      .catch(error => { record.cleanupError = error; });
+  }
   if (--owner.identityOwners.count === 0) {
-    owner.identityOwners.identityBuffer.destroy();
+    if(owner.identityOwners.borrowed!==true)owner.identityOwners.identityBuffer.destroy();
+  }
+  owner.releasePrivateSource?.();
+  if(owner.retainedFamilies) {
+    owner.physicalRetirement=Promise.all([owner.retainedFamilies.retire(),rootRetirement]).then(()=>true);
+    void owner.physicalRetirement.catch(error=>{record.cleanupError=error;});
+  } else if(rootRetirement) {
+    owner.physicalRetirement=rootRetirement;
+    void rootRetirement.catch(error=>{record.cleanupError=error;});
   }
 }
 
@@ -2634,7 +2816,15 @@ export function acquireSphParticleExactMassRead(upload, device, { mlsMpmParticle
   }
   const handle = Object.freeze({ read, sourceSphUpload: upload, particleCount: record.particleCount,
     topologyEpoch: record.topologyEpoch, identityRevision: record.identityRevision,
-    quantities: record.exactMass.quantities?.value ?? null });
+    quantities: record.exactMass.quantities?.value ?? null,
+    energy: record.exactMass.energy?.value ?? null,
+    residentClock:record.exactMass.residentClock?.clock??null,
+    finiteWallState:record.exactMass.finiteWall?.state??null,
+    reactionLineage:record.exactMass.reactionLineage?.value??null,
+    residualHistory:record.exactMass.residualHistory?.value??null,
+    residualMechanicsSource:record.exactMass.mechanicsSourceRead?.source??null,
+    residentProductMass:record.exactMass.residentHistory?.handle??null,
+    residentProductHistoryRead:record.exactMass.residentHistory?.read??null });
   exactMassParticleReads.set(handle, { record, upload, mlsOwner, released: false });
   return handle;
 }
@@ -2657,7 +2847,7 @@ export async function releaseSphParticleExactMassRead(handle) {
   if (!held) throw new TypeError('Exact particle read retirement requires the original handle');
   if (held.released) return held.completion;
   held.released = true;
-  held.completion = releaseSphExactMassRead(handle.read).then(() => {
+  held.completion = releaseSphExactMassRead(handle.read).then(async () => {
     held.record.exactMassActiveReadCount--;
     if (held.mlsOwner && --held.mlsOwner.readCount === 0) {
       const pending = [...held.mlsOwner.cleanups]; held.mlsOwner.cleanups.clear();
@@ -2666,6 +2856,7 @@ export async function releaseSphParticleExactMassRead(handle) {
       }
     }
     finishSphGpuParticleBorrowRelease(held.upload, held.record);
+    await held.record.exactMass?.physicalRetirement;
     return true;
   });
   return held.completion;
@@ -2673,12 +2864,75 @@ export async function releaseSphParticleExactMassRead(handle) {
 
 export function validateSphParticleExactMassRead(handle, { device, sourceSphUpload } = {}) {
   const held = exactMassParticleReads.get(handle);
+  try { held?.record.exactMass?.mechanicsSourceRead?.validate(); } catch { return false; }
+  try { held?.record.exactMass?.residentHistory?.read.validate(); } catch { return false; }
+  try { held?.record.exactMass?.residualHistory?.read.validate(); } catch { return false; }
   return Boolean(held && !held.released && held.record.device === device && held.upload === sourceSphUpload
     && !held.record.destroyed && exactParticleMassOwnerMatches(held.upload, held.record)
     && (!held.mlsOwner || exactMassMechanicsOwnerMatches(held.mlsOwner.upload, held.mlsOwner))
     && validateSphExactMassRead(handle.read, { device, family: held.record.exactMass.family,
       format: handle.read.format, expectedGeneration: handle.read.generation,
       rowOffset: held.record.exactMass.read.rowOffset, rowCount: held.record.particleCount }));
+}
+
+/** Authenticate a temporary combined mechanics source through its actual
+ * producer. Its canonical rows are disjoint copies, its physical buffers stay
+ * pinned by that producer, and ordinary continuation/publication is forbidden.
+ * The caller must scatter the complete mechanics result back to the original
+ * carrier/history owners and pass whole-step admission before publication. */
+export async function bindSphExactMassResidualMechanicsSource({device,source,includeEnergy=false}={}) {
+  if(typeof includeEnergy!=='boolean')throw new TypeError('Residual energy enrollment must be an explicit boolean');
+  const {borrowSchroederResidualMechanicsSource:borrow}=await import('./schroederResidualMechanicsSourceGpu.js');
+  const {createSphExactMassInventoryFromResidualMechanicsWebGpu:create}=await import('./sphExactMassInventoryGpu.js');
+  if(residualMechanicsBindings.has(source))throw new TypeError('Residual mechanics source already has a physical owner');
+  const capture=borrow(source,{device});
+  residualMechanicsBindings.add(source);
+  let family=null,read=null,energyBuffer=null;
+  try {
+    // The retired rational companion has a different update contract. This
+    // route preserves the canonical integer ledger rather than dropping it.
+    if(capture.carrier.quantities)throw new TypeError('Residual mechanics requires canonical ledger quantities');
+    family=await create({device,sourceRead:capture});capture.validate();
+    read=acquireSphExactMassRead({family,device});
+    if(includeEnergy){
+      const {createSphResidualMechanicsEnergyBuffer}=await import('./sphResidualMechanicsEnergyGpu.js');
+      energyBuffer=createSphResidualMechanicsEnergyBuffer({device,sourceRead:capture});
+      exactMassParticleBuffers.add(energyBuffer);
+    }
+    const range=Object.freeze({rowOffset:read.rowOffset,rowCount:read.rowCount});
+    const sph={...source.sphParticleUpload,ownsStateBuffer:false,ownsThermoBuffer:false,ownsIdentityBuffer:false};
+    const mls={...source.mlsMpmParticleUpload,ownsMechanicsBuffer:false};
+    const record=installSphGpuParticleBufferSetBorrowLifecycle(sph,null);
+    if(!record)throw new TypeError('Residual mechanics source could not bind its particle lifecycle');
+    Object.defineProperty(sph,'exactMassInventory',{value:family,enumerable:true});
+    Object.defineProperty(sph,'exactMassInventoryRange',{value:range,enumerable:true});
+    record.exactMass={family,read,range,retired:false,mechanicsOnly:true,mechanicsSourceRead:capture,
+      energy:energyBuffer?{owners:1,value:exactEnergyRows(energyBuffer,read.format,source.particleCount)}:null,
+      identityOwners:{count:1,identityBuffer:sph.identityBuffer,borrowed:true},
+      releasePrivateSource:()=>capture.release(),
+      sourceFields:EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key=>[key,sph[key]])};
+    registerExactMassMechanicsOwner(mls,sph,device);
+    return Object.freeze({sphParticleUpload:sph,mlsMpmParticleUpload:mls,
+      sphParticleState:source.sphParticleState,mlsMpmParticleState:source.mlsMpmParticleState,
+      source,physicalPublicationAdmitted:false,
+      destroy(){destroyMlsMpmGpuParticleBuffers(mls);destroySphGpuParticleBuffers(sph);}});
+  }catch(error){
+    energyBuffer?.destroy();
+    if(read)await releaseSphExactMassRead(read);
+    if(family)releaseSphExactMassInventory(family);
+    // A failed producer may have submitted before it failed. Only this error
+    // path needs a new fence; normal lifetime follows the held source owner.
+    await device.queue.onSubmittedWorkDone();capture.release();residualMechanicsBindings.delete(source);throw error;
+  }
+}
+
+/** Recover the original projection behind a held genuine mechanics read. */
+export function resolveSphResidualMechanicsSourceRead(read,{device}={}) {
+  const owner=exactMassParticleReads.get(read)?.record.exactMass;
+  if(!owner?.mechanicsOnly || !validateSphParticleExactMassRead(read,{device,sourceSphUpload:read.sourceSphUpload})) {
+    throw new TypeError('Residual transport requires its original combined mechanics source');
+  }
+  owner.mechanicsSourceRead.validate();return owner.mechanicsSourceRead;
 }
 
 /** Marking can only forbid legacy mutation; it does not authorize a successor. */
@@ -2748,6 +3002,126 @@ export async function bindSphExactMassPostMechanicsContinuation({ closure, claim
   exactMassContinuationBindings.set(closure, { target, claim });
   module.releaseMlsMpmPostMechanicsExactMassCapture(closure);
   return family;
+}
+
+/** Same-lane private continuation; the ordinary publication claim rejects it.
+ * Keep source auxiliaries alive through the existing borrow lifecycle. The
+ * caller supplies the batch completion fence when retiring this private owner. */
+export async function bindSphExactMassChainPrivateContinuation({closure,claim,nextParticleUploads,retireOwner}) {
+  const module=await import('./sphMlsMpmPostMechanicsClosure.js');
+  let capture=module.resolveMlsMpmChainPrivateExactMassContinuation(closure,claim,nextParticleUploads);
+  if(typeof retireOwner!=='function' || !capture.residentClock) throw new TypeError('Private chain requires its clock and retirement owner');
+  const target=nextParticleUploads.sphParticleUpload;
+  if(exactMassContinuationBindings.has(closure)) throw new TypeError('Private chain already has an owner');
+  const held=exactMassParticleReads.get(capture.sourceRead),source=held?.record,sourceMls=held?.mlsOwner;
+  if(!source || !sourceMls) throw new TypeError('Private chain lost its original auxiliary owners');
+  // Keep the original immutable source/auxiliary family once per lineage,
+  // rather than keeping every intermediate physical predecessor forever.
+  let residentHistory=null, newHistoryRead=null;
+  if(capture.residentProductMass) {
+    if(source.exactMass.residentHistory?.handle===capture.residentProductMass) residentHistory=source.exactMass.residentHistory;
+    else {
+      const historyModule=await import('./sphMlsMpmGpuStep.js');
+      newHistoryRead=historyModule.acquireResidentProductHistoryRead(capture.residentProductMass,{device:source.device});
+      residentHistory={owners:0,handle:capture.residentProductMass,read:newHistoryRead};
+    }
+  }
+  capture={...capture,residentHistoryHolder:residentHistory};
+  let family,rootSource;
+  try {
+    rootSource=source.exactMass.privateRootSource ?? {
+      read:forkSphParticleExactMassRead(capture.sourceRead,{device:source.device,sourceSphUpload:held.upload}),owners:0};
+    family=installExactMassContinuationOwner({target,existing:sphParticleBufferSetLifecycleRecords.get(target),
+      capture,stateBuffer:claim.stateBuffer,thermoBuffer:claim.thermoBuffer,privateChain:true});
+  }
+  catch(error) {
+    newHistoryRead?.release();
+    if(rootSource?.owners===0)await releaseSphParticleExactMassRead(rootSource.read);
+    throw error;
+  }
+  registerExactMassMechanicsOwner(nextParticleUploads.mlsMpmParticleUpload,target,source.device);
+  source.activeBorrowCount++;sourceMls.readCount++;
+  const owner=sphParticleBufferSetLifecycleRecords.get(target).exactMass;
+  owner.privateRootSource=rootSource;rootSource.owners++;
+  owner.retainedFamilies=module.transferMlsMpmChainPrivatePhysicalFamilies(closure,claim,nextParticleUploads);
+  owner.retireOwner=retireOwner;
+  let sourceReleased=false;
+  owner.releasePrivateSource=()=>{
+    if(sourceReleased)return;sourceReleased=true;
+    source.activeBorrowCount--;
+    if(--sourceMls.readCount===0) {
+      const cleanups=[...sourceMls.cleanups];sourceMls.cleanups.clear();
+      for(const cleanup of cleanups) {try{cleanup();}catch(error){sourceMls.cleanupError=error;}}
+    }
+    finishSphGpuParticleBorrowRelease(held.upload,source);
+  };
+  exactMassContinuationBindings.set(closure,{target,claim});
+  return family;
+}
+
+/** Bind the existing SS publication window to an observed final chain owner.
+ * All physical and auxiliary families stay pinned by one original producer
+ * read. The public descriptor never destroys or duplicates those allocations. */
+export async function bindSphExactMassChainPublication({closure,claim,nextParticleUploads,spatialPublicationPlan}) {
+  const chain = await import('./schroederSpatialChainPublicationGpu.js');
+  const spatial = await import('./schroederSpatialSuccessorSourceFamily.js');
+  const capture = chain.resolveSchroederSpatialChainPublication(claim, {closure,nextParticleUploads});
+  if (!spatial.validateSchroederSpatialExactMassPreparation(spatialPublicationPlan,
+    {closure,claim,nextParticleUploads,transaction:capture.transaction,generation:capture.generation})) {
+    throw new TypeError('Chain publication requires its original spatial preparation');
+  }
+  const held = exactMassParticleReads.get(capture.publicationRead);
+  const source = held?.record, parent = source?.exactMass;
+  const target = nextParticleUploads.sphParticleUpload, mls = nextParticleUploads.mlsMpmParticleUpload;
+  if (!parent || sphParticleBufferSetLifecycleRecords.has(target)
+    || target.stateBuffer !== source.stateBuffer || target.thermoBuffer !== source.thermoBuffer
+    || target.identityBuffer !== source.identityBuffer || target.particleCount !== source.particleCount
+    || target.phaseCarrierPlan !== held.upload.phaseCarrierPlan
+    || mls.mechanicsBuffer !== held.mlsOwner?.physical.mechanicsBuffer
+    || target.ownsStateBuffer !== false || target.ownsThermoBuffer !== false
+    || target.ownsIdentityBuffer !== false || mls.ownsMechanicsBuffer !== false
+    || sphGpuParticleUploadAdvertisesDispersedMediumOptics(target)) {
+    throw new TypeError('Chain publication changed its retained physical family');
+  }
+  const record = installSphGpuParticleBufferSetBorrowLifecycle(target, null);
+  if (!record) throw new TypeError('Chain publication has no compatible particle lifecycle');
+  Object.defineProperty(target,'exactMassInventory',{value:parent.family,enumerable:true});
+  Object.defineProperty(target,'exactMassInventoryRange',{value:parent.range,enumerable:true});
+  record.exactMass = {
+    family:parent.family, read:capture.publicationRead.read, range:parent.range,
+    quantities:parent.quantities, energy:parent.energy, parcels:parent.parcels,
+    residentClock:parent.residentClock, finiteWall:parent.finiteWall,
+    reactionLineage:parent.reactionLineage, residualHistory:parent.residualHistory,
+    residentHistory:parent.residentHistory, identityOwners:parent.identityOwners,
+    mechanicsOnly:parent.mechanicsOnly, mechanicsSourceRead:parent.mechanicsSourceRead,
+    privateRootSource:parent.privateRootSource,
+    publicationBorrow:capture.takePublicationRead(), retired:false, active:false,
+    sourceFields:EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key=>[key,target[key]]),
+    spatialPublicationPlan,
+    validateSpatialCommit:spatial.validateSchroederSpatialExactMassCommitPlan,
+    validateSpatialPublication:spatial.validateSchroederSpatialExactMassPublicationWindow
+  };
+  registerExactMassMechanicsOwner(mls,target,source.device);
+  return parent.family;
+}
+
+// Called only after the original private closure has released its stage pins
+// at the batch fence. Ordinary destroy entrances otherwise defer to that owner.
+export async function retireSphExactMassChainPrivateContinuation({closure,claim,nextParticleUploads}) {
+  const module=await import('./sphMlsMpmPostMechanicsClosure.js');
+  if(!module.validateMlsMpmChainPrivateRetirement(closure,claim,nextParticleUploads)
+    || exactMassContinuationBindings.get(closure)?.claim!==claim) throw new TypeError('Private retirement requires its original claim');
+  const owner=sphParticleBufferSetLifecycleRecords.get(nextParticleUploads.sphParticleUpload)?.exactMass;
+  if(!owner) throw new TypeError('Private continuation lost its particle owner');
+  owner.retireOwner=null;
+  destroyMlsMpmGpuParticleBuffers(nextParticleUploads.mlsMpmParticleUpload);
+  destroySphGpuParticleBuffers(nextParticleUploads.sphParticleUpload);
+  // All original closure consumers have retired at the batch fence. The
+  // published view pins this result and its root, so intermediate parents can
+  // retire even while this final result remains in use by the next batch.
+  owner.releasePrivateSource?.();
+  if(owner.retired && owner.retainedFamilies) owner.physicalRetirement??=owner.retainedFamilies.retire();
+  await owner.physicalRetirement;
 }
 
 const exactMassMechanicsOwners = new WeakMap();
@@ -2828,7 +3202,8 @@ export function runMlsMpmGpuParticleBufferSetCleanupAfterBorrows(upload, cleanup
   // Snapshot ownership at the request, after any legitimate auxiliary transfer;
   // delayed cleanup never rereads mutable buffer fields or ownership flags.
   const physical = Object.freeze({ ...owner.physical,
-    ownsMechanicsBuffer: upload.ownsMechanicsBuffer,
+    ownsMechanicsBuffer: upload.ownsMechanicsBuffer !== false
+      && !targetRecord?.exactMass?.retainedFamilies?.buffers.has(owner.physical.mechanicsBuffer),
     ownsMaterialPropertyBankWarmInputBuffer: upload.ownsMaterialPropertyBankWarmInputBuffer,
     ownsMaterialPropertyBankParticleSizeBuffer: upload.ownsMaterialPropertyBankParticleSizeBuffer });
   const retire = () => {
@@ -2886,19 +3261,40 @@ export function transferMlsMpmGpuAuxiliaryRetirementOwnership(source, target) {
 }
 
 function installExactMassContinuationOwner({ target, existing, capture,
-  stateBuffer, thermoBuffer, spatial = null, spatialPublicationPlan = null }) {
+  stateBuffer, thermoBuffer, spatial = null, spatialPublicationPlan = null, privateChain=false }) {
   const held = exactMassParticleReads.get(capture.sourceRead);
   const source = held?.record;
+  const residualSource=source?.exactMass?.mechanicsSourceRead?.source??null;
+  if(source?.exactMass?.mechanicsOnly) {
+    // A complete private chain can retain the expanded phase family as one
+    // fixed-capacity solver input. Its physical and exact rows must all have
+    // passed the existing phase, inventory, rollback and clock finalization.
+    // Ordinary publication and mechanics-only succession remain forbidden.
+    const layout=residualSource?.phaseLayout;
+    const root=exactMassParticleReads.get(source.exactMass.mechanicsSourceRead.carrier)?.record.exactMass;
+    if(!privateChain || !layout || capture.residualPhasePlan!==layout.plan
+      || !capture.residualPhaseValidationBuffer || !capture.residentClock
+      || !capture.exactEnergy || !capture.carrierMassRead
+      || target.particleCount!==layout.particleCount
+      || target.phaseCarrierPlan?.phaseLaneCount!==4
+      || target.phaseCarrierPlan?.phaseLaneStride!==layout.lineageCount
+      || target.phaseCarrierPlan?.lineageCapacity!==layout.lineageCount
+      || !root || root.parcels || root.finiteWall || root.residentClock || root.reactionLineage || root.residentHistory) {
+      throw new TypeError('Residual mechanics projection requires a complete private phase closure and represented auxiliary state');
+    }
+  }
   if (!source || !validateSphParticleExactMassRead(capture.sourceRead, {
     device: source.device, sourceSphUpload: held.upload })
       || target.particleCount !== source.particleCount || target.identityBuffer !== source.identityBuffer
       || target.identityRevision !== source.identityRevision
-      || (!spatial && target.topologyEpoch !== source.topologyEpoch)
+      || (!spatial && !privateChain && target.topologyEpoch !== source.topologyEpoch)
       || target.stateStrideBytes !== held.upload.stateStrideBytes || target.thermoStrideBytes !== held.upload.thermoStrideBytes
       || target.identityStrideBytes !== held.upload.identityStrideBytes
       || (existing && !exactParentDispersedMediumRecordMatches(target, existing, source.device))
       || (!existing && sphGpuParticleUploadAdvertisesDispersedMediumOptics(target))) {
-    throw new TypeError('Exact inventory continuation changed its retained row association');
+    const changed=['particleCount','identityBuffer','identityRevision'].filter(key=>target[key]!==source?.[key]);
+    const strides=['stateStrideBytes','thermoStrideBytes','identityStrideBytes'].filter(key=>target[key]!==held?.upload[key]);
+    throw new TypeError(`Exact inventory continuation changed its retained row association (${[...changed,...strides].join(',') || 'source ownership or optics'})`);
   }
   const massRead = capture.carrierMassRead ?? capture.sourceRead.read;
   const family = massRead.family;
@@ -2914,6 +3310,55 @@ function installExactMassContinuationOwner({ target, existing, capture,
   }
   const quantities = exact ? { owners: 0, value: Object.freeze({ quantityBuffer: exact.quantityBuffer,
     quantityLayout: exact.quantityLayout, format: exact.format }) } : source.exactMass.quantities;
+  // Only a ledger writer's successor record continues the energy ledger. A
+  // step that changed u without one ends it rather than carrying rows that
+  // no longer describe these carriers.
+  const nextEnergy = capture.exactEnergy ?? null;
+  if (nextEnergy && typeof capture.transferExactEnergy !== 'function') {
+    throw new TypeError('Exact energy continuation requires its producer hand-over');
+  }
+  const energy = nextEnergy ? { owners: 0, value: exactEnergyRows(nextEnergy.energyBuffer,
+    nextEnergy.format, nextEnergy.rowCount) } : null;
+  if (!exactEnergyRowsMatch(energy, { device: source.device, format: massRead.format,
+    rowCount: target.particleCount })) {
+    throw new TypeError('Exact continuation requires complete carrier energy rows');
+  }
+  if(capture.parcels && (!energy || typeof capture.transferParcels!=='function'
+    || capture.parcels.device!==source.device || capture.parcels.format!==massRead.format
+    || capture.parcels.count!==source.exactMass.parcels?.value.count)) {
+    throw new TypeError('Parcel continuation requires its genuine aligned successor');
+  }
+  if(source.exactMass.residentClock && !capture.residentClock) {
+    throw new TypeError('A private chain continuation cannot drop its resident clock');
+  }
+  if(capture.residentClock && (!privateChain || typeof capture.transferResidentClock!=='function')) {
+    throw new TypeError('Resident clock requires private chain ownership until batch admission');
+  }
+  if(source.exactMass.finiteWall && !capture.finiteWall) {
+    throw new TypeError('A private chain continuation cannot drop its finite wall state');
+  }
+  if(capture.finiteWall && (!privateChain || capture.finiteWall.device!==source.device
+    || typeof capture.transferFiniteWall!=='function')) {
+    throw new TypeError('Finite wall requires private chain ownership until batch admission');
+  }
+  if(capture.reactionLineage && (!privateChain || capture.reactionLineage.device!==source.device
+    || typeof capture.transferReactionLineage!=='function')) {
+    throw new TypeError('Reaction lineage requires its private producer handover');
+  }
+  if(source.exactMass.residualHistory && !capture.residualHistory) {
+    throw new TypeError('Private continuation cannot drop its canonical residual history');
+  }
+  if(capture.residualHistory) {
+    if(!privateChain || typeof capture.transferResidualHistory!=='function') {
+      throw new TypeError('Canonical residual history requires private chain handover');
+    }
+    validateSphReactionResidualHistoryCandidate(capture.residualHistory,source.device);
+  }
+  if(privateChain && (source.exactMass.residentHistory && !capture.residentProductMass
+    || (capture.residentProductMass??null)!==(capture.residentHistoryHolder?.handle??null))) {
+    throw new TypeError('Private chain cannot drop or replace its retained product history');
+  }
+  capture.residentHistoryHolder?.read.validate();
   const read = forkSphExactMassRead(massRead, { device: source.device });
   let record = existing;
   try {
@@ -2927,18 +3372,44 @@ function installExactMassContinuationOwner({ target, existing, capture,
         || ('exactMassInventoryRange' in target && target.exactMassInventoryRange !== range)) {
       throw new TypeError('Exact inventory successor has no compatible private particle lifecycle');
     }
+    if(target.phaseCarrierPlan)Object.freeze(target.phaseCarrierPlan);
     const sourceFields = EXACT_MASS_PARTICLE_SOURCE_FIELDS.map(key => [key, target[key]]);
     markSphExactMassDerivedBuffers(capture.sourceRead, [target.stateBuffer, target.thermoBuffer, target.identityBuffer]);
     Object.defineProperty(target, 'exactMassInventory', { value: family, enumerable: true });
     Object.defineProperty(target, 'exactMassInventoryRange', { value: range, enumerable: true });
     if (exact) capture.transferExactQuantities();
-    record.exactMass = { family, read, range, quantities,
+    if (nextEnergy) capture.transferExactEnergy();
+    const parcelTransfer=capture.parcels?capture.transferParcels():null;
+    const parcels=parcelTransfer?{owners:0,value:parcelTransfer.parcels,destroy:parcelTransfer.destroy}
+      :energy?source.exactMass.parcels??null:null;
+    const residentClock=capture.residentClock?capture.transferResidentClock():null;
+    const finiteWall=capture.finiteWall?capture.transferFiniteWall():null;
+    const lineageTransfer=capture.reactionLineage?capture.transferReactionLineage():null;
+    const reactionLineage=lineageTransfer?{owners:0,value:lineageTransfer.lineage,destroy:lineageTransfer.destroy}
+      :source.exactMass.reactionLineage??null;
+    const residualTransfer=capture.residualHistory?capture.transferResidualHistory():null;
+    let residualHistory=null;
+    if(residualTransfer) {
+      let residualRead;
+      try {residualRead=borrowSphReactionResidualHistory(residualTransfer.history,{device:source.device});}
+      catch(error) {residualTransfer.destroy();throw error;}
+      residualHistory={owners:0,value:residualTransfer.history,read:residualRead,
+        destroy(){residualRead.release();residualTransfer.destroy();}};
+    }
+    const residentHistory=capture.residentHistoryHolder??null;
+    record.exactMass = { family, read, range, quantities, energy, parcels,residentClock,finiteWall,reactionLineage,residentHistory,residualHistory,
+      ...(source.exactMass.mechanicsOnly?{mechanicsOnly:true,mechanicsSourceRead:source.exactMass.mechanicsSourceRead}:{}),
       identityOwners: source.exactMass.identityOwners, retired: false, sourceFields,
       active: !spatial, spatialPublicationPlan,
       validateSpatialCommit: spatial?.validateSchroederSpatialExactMassCommitPlan,
       validateSpatialPublication: spatial?.validateSchroederSpatialExactMassPublicationWindow };
     record.exactMass.identityOwners.count++;
     if (quantities) quantities.owners++;
+    if (energy) energy.owners++;
+    if (parcels) parcels.owners++;
+    if (reactionLineage) reactionLineage.owners++;
+    if (residualHistory) residualHistory.owners++;
+    if (residentHistory) residentHistory.owners++;
     return family;
   } catch (error) {
     if (record?.exactMass?.read === read) {
@@ -2967,7 +3438,8 @@ export function activateSphExactMassSpatialContinuation({ plan, commitReceipt, n
   }
   owner.active = true;
   try {
-    const read = acquireSphParticleExactMassRead(upload, record.device);
+    const read = acquireSphParticleExactMassRead(upload, record.device,
+      {mlsMpmParticleUpload:nextParticleUploads.mlsMpmParticleUpload});
     owner.spatialPublicationPlan = null;
     owner.validateSpatialCommit = null;
     owner.validateSpatialPublication = null;
@@ -3039,6 +3511,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
   }
   const scaleOptions = mechanicsScaleOptions(state, options);
   const particleCount = state.particles.length;
+  const phaseCarrierPlan = clonePhaseCarrierPlanWithSplitReserve(state.phaseCarrierPlan, particleCount);
   const mechanics = new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
   const metadata = [];
   const caloricInitialization = prepareSphCondensableParticleInitialization(
@@ -3088,6 +3561,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       solid: constitutive.solid,
       status,
       spareProductSlot: particle.spareProductSlot === true,
+      ...(particle.spareSplitSlot === true ? { spareSplitSlot: true } : {}),
       phaseCompanionSlot: particle.phaseCompanionSlot === true,
       effectiveBulkModulusPa: constitutive.effectiveBulkModulusPa,
       shearModulusPa: constitutive.shearModulusPa,
@@ -3137,6 +3611,9 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     soundSpeedScale: scaleOptions.soundSpeedScale,
     cflMaxSoundSpeedMPerS: scaleOptions.cflMaxSoundSpeedMPerS,
+    liquidCflMaxSoundSpeedMPerS: scaleOptions.liquidCflMaxSoundSpeedMPerS,
+    // A1 larger-dt slice: the flagged semi-implicit pressure solve (null = off).
+    implicitPressure: state.gpuMechanics?.implicitPressure ?? null,
     minGasSoundSpeedMPerS: scaleOptions.minGasSoundSpeedMPerS,
     viscosityEnabled: scaleOptions.viscosityEnabled,
     mlsMpmArtificialViscosityAlpha: scaleOptions.mlsMpmArtificialViscosityAlpha,
@@ -3153,7 +3630,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       : [0, -9.80665, 0],
     mechanics,
     metadata,
-    phaseCarrierPlan: state.phaseCarrierPlan ? { ...state.phaseCarrierPlan } : null,
+    phaseCarrierPlan,
     materialPropertyBankWarmInputTable,
     materialPropertyBankParticleSizeTable,
     algorithmMaterialMlsMpmMechanicsRows,
@@ -3178,6 +3655,7 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed, { initialStorageG
       || (packed.storageGeneration != null && packed.storageGeneration !== initialStorageGeneration))) {
     throw new TypeError('Initial upload generation must agree with the cold source when declared');
   }
+  const phaseCarrierPlan = clonePhaseCarrierPlanWithSplitReserve(packed.phaseCarrierPlan, packed.particleCount);
   const coldMechanics = (packed.step ?? 0) === 0 && (packed.time ?? 0) === 0
     ? packed.mechanics.slice() : null;
   const materialPropertyBankWarmInputBuffer = optionalStorageBuffer(
@@ -3215,7 +3693,7 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed, { initialStorageG
       coldMechanics ?? packed.mechanics,
       { copySource: true }
     ),
-    phaseCarrierPlan: packed.phaseCarrierPlan ? { ...packed.phaseCarrierPlan } : null,
+    phaseCarrierPlan,
     materialPropertyBankWarmInputBuffer,
     materialPropertyBankParticleSizeBuffer,
     materialPropertyBankWarmInputRowCount: packed.materialPropertyBankWarmInputTable?.rowCount ?? 0,

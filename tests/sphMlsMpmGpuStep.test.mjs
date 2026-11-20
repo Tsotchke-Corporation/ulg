@@ -313,6 +313,22 @@ const NATIVE_PRODUCT_HISTORY_PROMOTION_BASE_URL =
   process.env.ULG_PRODUCT_HISTORY_PROMOTION_BASE_URL
   || 'https://127.0.0.1:5174/';
 
+test('resident chain refuses absent GPU authority and conflicting or unsupported laws before encoding', async () => {
+  let gpuCalls=0;
+  const device={createBuffer(){gpuCalls++;throw new Error('unexpected allocation');},
+    queue:{submit(){gpuCalls++;throw new Error('unexpected submit');}}};
+  const base={device,preferWebGpu:true,readbackMode:'no-full-readback',stepCount:2,
+    schroederSpatialChain:{mechanicsLevels:[{},{}],classificationPolicy:{}},
+    forceInputs:{dt:0.001,boxDimsM:[1,1,1],gravityMPerS2:[0,-9.81,0]}};
+  for(const options of [
+    {...base,device:null},{...base,preferWebGpu:false},{...base,readbackMode:'full'},
+    {...base,dt:0.002},{...base,gravityMPerS2:[0,0,0]},
+    {...base,pressureInterfaceForceSolver:{}},{...base,ambientPressurePa:101325},
+    {...base,condensateExtraction:{}},{...base,schroederSpatialEpochGeneration:{}}
+  ])await assert.rejects(runMlsMpmResidentStepsWithOptionalWebGpu(options),/Resident chain/);
+  assert.equal(gpuCalls,0);
+});
+
 test('reaction-placement continuation adoption fails closed before minting copied lineage or lifecycle authority', () => {
   assert.equal(
     ULG_SPH_REACTION_PLACEMENT_CONTINUATION_ADOPTION_SCHEMA,
@@ -806,14 +822,17 @@ test('single-level fused mechanics G2P keeps local heat but omits route sampling
         'fn measure_g2p_energy_receipt(',
         'fn consume_g2p_energy_receipt()'
       );
-      assert.match(measure, /mass > 0\.0 && \(prior < 0\.0 \|\| next < 0\.0\)/);
+      // Specific internal energy is gauge-relative (phase-caloric ice is
+      // negative): the receipt checks finiteness, not sign.
+      assert.doesNotMatch(measure, /prior < 0\.0|next < 0\.0/);
       for (const value of ['mass', 'prior', 'next', 'delta_j']) {
         assert.ok(measure.includes(`!g2p_energy_finite(${value})`));
       }
       assert.match(source, /bitcast<u32>\(value\) & 0x7f800000u/);
       assert.doesNotMatch(measure, /delta_j <|measure_tolerance|measure_gamma_n/);
-      // The actual deposition path still protects absolute resulting energy.
-      assert.match(source, /next_internal_energy < 0\.0/);
+      // The deposition path admits any finite (gauge-relative) energy.
+      assert.doesNotMatch(source, /next_internal_energy < 0\.0/);
+      assert.match(source, /next_internal_energy != next_internal_energy/);
       assert.match(
         source,
         /g2p_scale_close\([\s\S]*published_field_heat,[\s\S]*consumed_field_heat,[\s\S]*energy_evidence_count[\s\S]*g2p_scale_close\([\s\S]*published_pressure_internal_compensation,[\s\S]*consumed_pressure_internal_compensation,[\s\S]*energy_evidence_count/
@@ -21830,9 +21849,10 @@ test('resident product-history grows conservatively then clamps candidate metada
   const submissionCountBeforeCeiling = device.submissions.length;
   const emittedPastCeiling = residentProductMassHandle({
     label: 'gpu-count-growth-emitted-past-ceiling',
-    rowCount: 262145 - sixteenMiB.productEventLiveRowCountUpperBound,
+    // Past the 128 MiB no-host ceiling (1048576 rows of 128 B).
+    rowCount: 1048577 - sixteenMiB.productEventLiveRowCountUpperBound,
     byteLength:
-      (262145 - sixteenMiB.productEventLiveRowCountUpperBound) * 128
+      (1048577 - sixteenMiB.productEventLiveRowCountUpperBound) * 128
   });
   const atCeiling = await mergeResidentProductMassBuffersWebGpu({
     device,
@@ -21841,9 +21861,9 @@ test('resident product-history grows conservatively then clamps candidate metada
     allowHostCompactionObservation: false
   });
   assert.notEqual(atCeiling.productEventBuffer, sixteenMiB.productEventBuffer);
-  assert.equal(atCeiling.productEventBufferByteLength, 32 * 1024 * 1024);
-  assert.equal(atCeiling.productEventLiveCountAuthority.rowCapacity, 262144);
-  assert.equal(atCeiling.productEventLiveRowCountUpperBound, 262144);
+  assert.equal(atCeiling.productEventBufferByteLength, 128 * 1024 * 1024);
+  assert.equal(atCeiling.productEventLiveCountAuthority.rowCapacity, 1048576);
+  assert.equal(atCeiling.productEventLiveRowCountUpperBound, 1048576);
   assert.equal(
     atCeiling.productEventLiveRowCountUpperBoundAuthority,
     'gpu-authenticated-physical-capacity-no-readback'
@@ -21860,7 +21880,7 @@ test('resident product-history grows conservatively then clamps candidate metada
       4 * 1024 * 1024,
       8 * 1024 * 1024,
       16 * 1024 * 1024,
-      32 * 1024 * 1024
+      128 * 1024 * 1024
     ]
   );
   assert.ok(device.createdBuffers.length > allocationCountBeforeCeiling);
@@ -21881,8 +21901,8 @@ test('resident product-history grows conservatively then clamps candidate metada
     allowHostCompactionObservation: false
   });
   assert.equal(retry.productEventBuffer, atCeiling.productEventBuffer);
-  assert.equal(retry.productEventLiveRowCountUpperBound, 262144);
-  assert.equal(retry.productEventLiveCountAuthority.rowCapacity, 262144);
+  assert.equal(retry.productEventLiveRowCountUpperBound, 1048576);
+  assert.equal(retry.productEventLiveCountAuthority.rowCapacity, 1048576);
   assert.equal(device.createdBuffers.length, allocationCountAtCeiling);
   assert.equal(device.submissions.length, submissionCountBeforeCeiling + 2);
   assert.equal(mapCount, 0);
@@ -22371,8 +22391,9 @@ test('resident product-history rejects no-host capacities before allocation or s
       device: hardCeilingDevice,
       inputResidentProductMass: residentProductMassHandle({
         label: 'gpu-count-hard-ceiling-seed',
-        rowCount: 32768,
-        byteLength: 32768 * 128
+        // (rows + 1) x 128 B x 8 headroom exceeds the 128 MiB ceiling.
+        rowCount: 131072,
+        byteLength: 131072 * 128
       }),
       emittedResidentProductMass: residentProductMassHandle({
         label: 'gpu-count-hard-ceiling-emitted',

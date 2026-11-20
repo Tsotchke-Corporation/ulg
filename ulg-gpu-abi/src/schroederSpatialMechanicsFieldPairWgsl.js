@@ -900,7 +900,7 @@ fn pair_successor_level_stencil_matches(
           level_ordinal,
           descriptor_word
         );
-        if (support_weight == 0.0 || node >= node_count) {
+        if (!(support_weight >= bitcast<f32>(0x21800000u)) || node >= node_count) {
           if (field_index != FIELD_INVALID_KEY) {
             return false;
           }
@@ -1030,7 +1030,11 @@ fn pair_emit_level(
           pair_quadratic_weight_at(fraction.x, ox)
           * pair_quadratic_weight_at(fraction.y, oy)
           * pair_quadratic_weight_at(fraction.z, oz);
-        if (support_weight == 0.0) {
+        // Stencil support is weight >= 2^-60 (bits 0x21800000) everywhere the
+        // field-key support set is decided (field view, field pair, P2G, G2P,
+        // phase-volume moment): below it, w*m and w*V of a resolvable row
+        // underflow f32 and the key could never own a contribution.
+        if (!(support_weight >= bitcast<f32>(0x21800000u))) {
           pair_write_invalid_candidate(candidate_index);
           continue;
         }

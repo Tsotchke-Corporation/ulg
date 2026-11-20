@@ -5,9 +5,18 @@
  * receipt validation rather than silently weakening the bound.
  */
 export const SPH_CANONICAL_CONTACT_MOTION_BOUND_REVISION =
-  'canonical-contact-epoch-trust-wall-shell-v1';
+  'canonical-contact-epoch-trust-wall-shell-v2';
 
-export const SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS = 16;
+// Per-step contact correction slack, in own rest diameters, on top of the
+// swept (2x post-G2P) displacement and the wall projection that the epoch
+// ball already carries. New overlap created in one step is bounded by the
+// relative CFL travel of the pair (<= one cell); earlier overlap was already
+// resolved to the position tolerance. One diameter therefore covers every
+// admissible correction. The pair graph and the mixed-law query radius both
+// scale with (1 + 2 * trust): v1's 16 diameters made the radius ~33
+// diameters, i.e. an all-pairs graph in mixed-body scenes, which overflowed
+// the cleanup owner's frontier (Iron Ice) and failed thermal closed with it.
+export const SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS = 1;
 
 export const SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_ABSOLUTE_M = 1e-6;
 

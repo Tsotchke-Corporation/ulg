@@ -51,6 +51,7 @@ import {
   validateSphReactionStrictGateControl,
   validateSphReactionStrictGateProducerReceipt
 } from '../../../ulg-gpu-abi/src/index.js';
+import { sphReactionPhaseLineageCapacity } from './sphReactionPhaseLineage.js';
 import {
   sphReactionProductEventCompactWgsl,
   sphReactionProductEventPlacementEnvelopeWgsl,
@@ -300,7 +301,8 @@ function createSummaryParamsArray({
   atomTermCount,
   partialCount,
   hasProposals = false,
-  dtSeconds = 0
+  dtSeconds = 0,
+  phaseLineageCapacity = 0
 }) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
@@ -317,7 +319,9 @@ function createSummaryParamsArray({
   // match the apply kernel's dt so ledger and application agree.
   view.setFloat32(36, Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0, true);
   view.setUint32(40, gasConstitutiveOffsetVec4, true);
-  view.setUint32(44, 0, true);
+  // Word 44: the phase lineage capacity read by the product-event kernel
+  // (padding for the other summary kernels).
+  view.setUint32(44, phaseLineageCapacity >>> 0, true);
   return buffer;
 }
 
@@ -2445,6 +2449,8 @@ export function enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors({
 let reactionEnergyAuthorityModule, reactionPairProducerModule;
 
 export async function runSphReactionSummaryWebGpu({
+  // G2 integer energy ledger reconcile, encoded by the segmented placement.
+  ledgerReconcile = null,
   device,
   sphParticleState,
   reactionTable,
@@ -3156,7 +3162,8 @@ export async function runSphReactionSummaryWebGpu({
       atomTermCount: reactionTable.atomTermCount ?? 0,
       partialCount,
       hasProposals: borrowedProposalBuffer,
-      dtSeconds
+      dtSeconds,
+      phaseLineageCapacity: sphReactionPhaseLineageCapacity(sphParticleState)
     }));
     let partialsPipeline = null;
     let partialsBindGroup = null;
@@ -3951,7 +3958,8 @@ export async function runSphReactionSummaryWebGpu({
             boxDimsM: productPlacementBoxDimsM,
             gpuTimestampRecorder,
             diagnosticReadbackRequested:
-              Boolean(productEventPlacementCompletionReadBuffer)
+              Boolean(productEventPlacementCompletionReadBuffer),
+            ledgerReconcile
           });
       } else if (productEventPlacementPipeline && productEventPlacementBindGroup) {
         encodeTimestampedComputePass({

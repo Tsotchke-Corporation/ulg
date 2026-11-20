@@ -391,13 +391,15 @@ test('S9-B receipt ABI v2 fixes a separate seven-storage-binding selected-source
     wgsl,
     /fn mechanics_field_dispatch_shape_admitted\(field_count: u32\)[\s\S]*dispatch_y == expected_y[\s\S]*mechanics_field\[44u\] == dispatch_x[\s\S]*mechanics_field\[45u\] == dispatch_y[\s\S]*mechanics_field\[46u\] == dispatch_z/
   );
+  // A1: the field group decodes from the launch shape and is admitted only
+  // inside the staged field arguments (words 60..62).
   assert.match(
     wgsl,
-    /workgroup_id\.x \+ workgroup_id\.y \* mechanics_field\[60u\]/
+    /workgroup_id\.y \* num_workgroups\.x[\s\S]*mechanics_field\[62u\] == 0u[\s\S]*linear_group >= mechanics_field\[60u\] \* mechanics_field\[61u\]/
   );
   assert.match(
     wgsl,
-    /fn reduce_phase_volume_receipt_fields\([\s\S]*mechanics_field_linear_invocation\(local_id, workgroup_id\)[\s\S]*linear_group < group_count\(field_count\)/
+    /fn reduce_phase_volume_receipt_fields\([\s\S]*mechanics_field_linear_invocation\(local_id, workgroup_id, num_workgroups\)[\s\S]*linear_group < group_count\(field_count\)/
   );
   assert.doesNotMatch(
     wgsl,
@@ -551,6 +553,10 @@ test('S9-B receipt arenas reuse exact immutable bind groups', () => {
 });
 
 test('S9-B v2 scans ActiveSource indirectly, retains physical rows, and never invents A', () => {
+  // Pins the indirect-launch contract; A1's direct launches are covered
+  // by the 'A1 direct launch' tests.
+  globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   const fixture = createFakeDevice();
   const authority = createAuthority(fixture.device, {
     sourceCount: 64,
@@ -660,6 +666,9 @@ test('S9-B v2 scans ActiveSource indirectly, retains physical rows, and never in
   phase.runtime.releaseExecution(phase.moment, { discardedEncoder: true });
   assert.equal(runtime.destroy(), true);
   assert.equal(phase.runtime.destroy(), true);
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
 });
 
 test('S9-B receipt treats a partial active timestamp recorder as unavailable', () => {
@@ -805,4 +814,24 @@ test('receipt descriptor rejects identity drift and cannot overclaim ready/admit
       | SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_STATUS_ADMITTED,
     3
   );
+});
+
+test('A1 direct launch: S9-B v2 reduces sources over the ActiveSource capacity ceiling', () => {
+  const fixture = createFakeDevice();
+  const authority = createAuthority(fixture.device, {
+    sourceCount: 64,
+    sourceCapacity: 64,
+    directoryV2: true
+  });
+  const phase = buildS9aMoment(fixture.device, authority);
+  const runtime = createSchroederSpatialPhaseVolumeReceiptGpu(fixture.device, {
+    maxSourceCount: 64,
+    fieldCapacity: authority.plan.fieldCapacity,
+    arenaCount: 1
+  });
+  const encoder = createFakeEncoder();
+  runtime.encode(encoder, { phaseVolumeMoment: phase.moment });
+  // One group of 64 active sources; the kernel admits only staged groups.
+  assert.deepEqual(encoder.passes[0].dispatch, [1, 1, 1]);
+  assert.ok(!encoder.passes[0].indirect);
 });

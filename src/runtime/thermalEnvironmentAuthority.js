@@ -15,6 +15,39 @@ export const SPH_THERMAL_WALL_FACE_IDS = Object.freeze([
 export const SPH_THERMAL_WALL_MODEL_FIXED =
   'infinite-fixed-temperature-reservoir';
 export const SPH_THERMAL_WALL_MODEL_ADIABATIC = 'adiabatic';
+// Honest walls: each face is a finite lumped body (one temperature per face)
+// whose temperature moves with the heat it exchanges, T += Q / C. C is the
+// face's heat capacity, derived from a declared wall material and thickness
+// (rho * c * area * thickness), never an assumed reservoir.
+export const SPH_THERMAL_WALL_MODEL_FINITE =
+  'finite-heat-capacity-lumped-face';
+
+/** Per-face heat capacity of a thin lumped wall of one material. */
+export function sphWallFaceHeatCapacitiesJPerK({
+  boxDimsM,
+  densityKgPerM3,
+  specificHeatJPerKgK,
+  thicknessM
+} = {}) {
+  const [x, y, z] = Array.from(boxDimsM || []).map(Number);
+  const rho = Number(densityKgPerM3);
+  const c = Number(specificHeatJPerKgK);
+  const t = Number(thicknessM);
+  if (![x, y, z, rho, c, t].every((value) => Number.isFinite(value) && value > 0)) {
+    throw new RangeError(
+      'wall face heat capacity requires positive box dimensions, density, specific heat and thickness'
+    );
+  }
+  const perArea = rho * c * t;
+  return Object.freeze({
+    xMin: perArea * y * z,
+    xMax: perArea * y * z,
+    yMin: perArea * x * z,
+    yMax: perArea * x * z,
+    zMin: perArea * x * y,
+    zMax: perArea * x * y
+  });
+}
 
 function finiteAmbientTemperatureK(value, label) {
   const resolved = Number(value);
@@ -137,12 +170,31 @@ function assertWallModel(model, label) {
   if (
     model !== SPH_THERMAL_WALL_MODEL_FIXED
     && model !== SPH_THERMAL_WALL_MODEL_ADIABATIC
+    && model !== SPH_THERMAL_WALL_MODEL_FINITE
   ) {
     throw new RangeError(
-      `${label} must be ${SPH_THERMAL_WALL_MODEL_FIXED} or ${SPH_THERMAL_WALL_MODEL_ADIABATIC}`
+      `${label} must be ${SPH_THERMAL_WALL_MODEL_FIXED}, ${SPH_THERMAL_WALL_MODEL_ADIABATIC} or ${SPH_THERMAL_WALL_MODEL_FINITE}`
     );
   }
   return model;
+}
+
+function normalizedFaceHeatCapacities(capacities, label) {
+  const faces = {};
+  for (const faceId of SPH_THERMAL_WALL_FACE_IDS) {
+    const value = Number(capacities?.[faceId]);
+    if (!Number.isFinite(value) || !(value > 0)) {
+      throw new RangeError(`${label}.${faceId} must be a positive finite J/K`);
+    }
+    faces[faceId] = value;
+  }
+  return Object.freeze(faces);
+}
+
+function wallInstanceId() {
+  const random = globalThis.crypto?.randomUUID?.();
+  return random
+    || `wall-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function normalizedWallFaces(
@@ -176,6 +228,9 @@ export function resolveSphWallReservoirAuthority({
   wallTemperaturesK,
   wallReservoirAuthority = null,
   wallModel,
+  wallFaceHeatCapacitiesJPerK = null,
+  wallMaterial = null,
+  wallThicknessM = null,
   defaultWallTemperatureK = 0,
   source = 'thermal-step-caller',
   defaultSource = 'sph-thermal-kernel-default',
@@ -222,15 +277,19 @@ export function resolveSphWallReservoirAuthority({
   if (
     inherited
     && wallReservoirAuthority.exchangeEnabled
-      !== (inheritedModel === SPH_THERMAL_WALL_MODEL_FIXED)
+      !== (inheritedModel !== SPH_THERMAL_WALL_MODEL_ADIABATIC)
   ) {
     throw new TypeError(
       'wallReservoirAuthority.exchangeEnabled must match wallReservoirAuthority.model'
     );
   }
-  if (inherited && wallReservoirAuthority.finiteCapacity !== false) {
+  if (
+    inherited
+    && wallReservoirAuthority.finiteCapacity
+      !== (inheritedModel === SPH_THERMAL_WALL_MODEL_FINITE)
+  ) {
     throw new TypeError(
-      'wallReservoirAuthority.finiteCapacity must be false'
+      'wallReservoirAuthority.finiteCapacity must match wallReservoirAuthority.model'
     );
   }
   const scalarMapProvided = wallTemperaturesK !== undefined;
@@ -256,13 +315,49 @@ export function resolveSphWallReservoirAuthority({
     inheritedFaces
     ?? scalarFaces
     ?? normalizedWallFaces(undefined, defaultWallTemperatureK);
+  const finite = model === SPH_THERMAL_WALL_MODEL_FINITE;
+  // A finite wall carries its per-face heat capacity and a stable instance id
+  // (minted when the scene resolves it; it survives structured clone, so the
+  // GPU-resident face temperatures persist for the scene and reset with it).
+  const faceHeatCapacitiesJPerK = finite
+    ? normalizedFaceHeatCapacities(
+        inherited
+          ? wallReservoirAuthority.faceHeatCapacitiesJPerK
+          : wallFaceHeatCapacitiesJPerK,
+        inherited
+          ? 'wallReservoirAuthority.faceHeatCapacitiesJPerK'
+          : 'wallFaceHeatCapacitiesJPerK'
+      )
+    : null;
+  const instanceId = finite
+    ? String(
+        inherited
+          ? wallReservoirAuthority.instanceId || ''
+          : wallInstanceId()
+      )
+    : null;
+  if (finite && !instanceId) {
+    throw new TypeError('wallReservoirAuthority.instanceId is required for finite walls');
+  }
   return Object.freeze({
     schema: ULG_SPH_WALL_RESERVOIR_AUTHORITY_SCHEMA,
     status: 'wall-reservoir-authority-ready',
     model,
     faces,
-    exchangeEnabled: model === SPH_THERMAL_WALL_MODEL_FIXED,
-    finiteCapacity: false,
+    exchangeEnabled: model !== SPH_THERMAL_WALL_MODEL_ADIABATIC,
+    finiteCapacity: finite,
+    ...(finite
+      ? {
+          faceHeatCapacitiesJPerK,
+          instanceId,
+          wallMaterial: inherited
+            ? wallReservoirAuthority.wallMaterial ?? null
+            : wallMaterial,
+          wallThicknessM: inherited
+            ? wallReservoirAuthority.wallThicknessM ?? null
+            : wallThicknessM
+        }
+      : {}),
     source: inherited
       ? wallReservoirAuthority.source
       : (defaultApplied ? defaultSource : source),

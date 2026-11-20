@@ -52,7 +52,7 @@ fn scatter_history_condensed_volume(@builtin(local_invocation_id) local_id:vec3<
   atomicAdd(&output_control[49u],1u);
   if(!history_volume_source_ready()){fail(INVALID_HISTORY,51u);return;}
   if(atomicLoad(&output_control[3u])!=0u||slot>=history_count[3u]){return;}
-  if(aerosol_geometry.fine_nx*aerosol_geometry.fine_ny*aerosol_geometry.fine_nz!=params.fine_grid_node_count
+  if(!aerosol_chain_geometry_ready() || aerosol_geometry.fine_nx*aerosol_geometry.fine_ny*aerosol_geometry.fine_nz!=params.fine_grid_node_count
     || !(params.fine_grid_spacing_m>0.0)||!finite_f32(params.fine_grid_spacing_m)
     || (params.exact_level_count==1u && (aerosol_geometry.fine_nx!=params.nx
       || aerosol_geometry.fine_ny!=params.ny || aerosol_geometry.fine_nz!=params.nz

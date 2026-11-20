@@ -321,8 +321,9 @@ test('encoder stage binds one immutable source set and orders global preflight b
   assert.equal(stage.result.fullParticleReadbackPerformed, false);
   assert.equal(device.pipelines.length, 2);
   assert.equal(device.bindGroups.length, 2);
-  assert.equal(device.bindGroups[0].entries.length, 9);
-  assert.equal(device.bindGroups[1].entries.length, 9);
+  // Binding 9 is the interface-front row source (a dummy when absent).
+  assert.equal(device.bindGroups[0].entries.length, 10);
+  assert.equal(device.bindGroups[1].entries.length, 10);
   assert.equal(encoder.passes.length, 2);
   assert.match(encoder.passes[0].descriptor.label, /preflight$/);
   assert.match(encoder.passes[1].descriptor.label, /transfer-apply$/);
@@ -381,6 +382,9 @@ test('retained phase-carrier outputs retire superseded mechanics independently a
     thermo: stage.result.thermoBuffer,
     mechanics: stage.result.mechanicsBuffer
   };
+  assert.equal(stage.result.evidenceBuffer, stage.evidenceBuffer);
+  stage.cleanupSubmittedWork();
+  assert.equal(stage.evidenceBuffer.destroyed, false, 'validation survives temporary cleanup');
   const destroyCounts = { state: 0, thermo: 0, mechanics: 0 };
   for (const [component, buffer] of Object.entries(outputBuffers)) {
     const destroy = buffer.destroy.bind(buffer);
@@ -401,6 +405,7 @@ test('retained phase-carrier outputs retire superseded mechanics independently a
   assert.equal(outputBuffers.state.destroyed, false);
   assert.equal(outputBuffers.thermo.destroyed, false);
   assert.equal(outputBuffers.mechanics.destroyed, true);
+  assert.equal(stage.evidenceBuffer.destroyed, false, 'validation survives partial output retirement');
 
   assert.equal(
     stage.result.destroyOutputParticleBufferComponents({ mechanics: true }),
@@ -417,6 +422,21 @@ test('retained phase-carrier outputs retire superseded mechanics independently a
   assert.deepEqual(destroyCounts, { state: 1, thermo: 1, mechanics: 1 });
   assert.equal(stage.result.ownsStateBuffer, false);
   assert.equal(stage.result.ownsThermoBuffer, false);
+  assert.equal(stage.evidenceBuffer.destroyed, true, 'last output releases validation');
+  stage.cleanupSubmittedWork();
+});
+
+test('phase validation retirement retries a failed destroy without losing ownership', () => {
+  const device = createFakeDevice();
+  const stage = createSphPhaseCarrierTransferWebGpuEncoderStage({
+    ...fakeStageFixture(device, 2), retainOutputParticleBuffers: true
+  });
+  device.throwOnDestroyLabel = stage.evidenceBuffer.label;
+  const retire = () => stage.result.destroyOutputParticleBufferComponents({ state: true, thermo: true, mechanics: true });
+  assert.throws(retire, /injected-phase-local-cleanup-failure/);
+  assert.equal(stage.evidenceBuffer.destroyed, false);
+  assert.equal(retire(), true);
+  assert.equal(stage.evidenceBuffer.destroyed, true);
   stage.cleanupSubmittedWork();
 });
 

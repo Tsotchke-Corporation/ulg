@@ -19,6 +19,7 @@ import { cloneSphState, createSphState } from '../src/runtime/sph/sphState.js';
 import {
   buildSphThermalMaterialTable,
   createSphThermalStepWebGpuEncoderStage,
+  resolveThermalConductivityFromTable,
   runSphThermalStepCpu
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
@@ -55,6 +56,10 @@ const temperatureAt = (phaseId, u) => phaseId === 2
   ? 300 + (u + 50_003) / 4000
   : 300 + (u - 120_000) / 3900;
 const PACKERS = [buildSphGpuParticleBuffers, buildMlsMpmGpuParticleBuffers];
+// Gas rest density is on the standard-atmosphere basis the mechanics EOS
+// assumes (101325 Pa), not on the caloric reference pressure: R_s = 100,
+// T0 = 300 K.
+const VAPOR_REST_DENSITY = 101325 / (100 * 300);
 
 function propertyRecord() {
   return {
@@ -64,7 +69,7 @@ function propertyRecord() {
         temperatureRange: [0, 373], bulkModulusPa: 2e9, shearModulusPa: 0,
         thermalConductivityWPerMK: 0.6,
         thermalConductivityProvenance: { source: 'synthetic declared liquid conductivity' } },
-      { name: 'gas', cpJPerKgK: 4000, densityKgPerM3: 0.1,
+      { name: 'gas', cpJPerKgK: 4000, densityKgPerM3: VAPOR_REST_DENSITY,
         temperatureRange: [373, 1e6], bulkModulusPa: null, shearModulusPa: 0,
         thermalConductivityWPerMK: 0.025,
         thermalConductivityProvenance: { source: 'synthetic declared vapor conductivity' } }
@@ -117,7 +122,7 @@ function assertPackedParticle(packed, mechanics, index, phaseId, u, massKg = 1) 
   const s = index * 8;
   const t = index * 12;
   const m = index * 32;
-  const rho = Math.fround(phaseId === 2 ? 1000 : 0.1);
+  const rho = Math.fround(phaseId === 2 ? 1000 : VAPOR_REST_DENSITY);
   const expectedTemperature = temperatureAt(phaseId, Math.fround(u));
   assert.equal(packed.state[s + 3], Math.fround(massKg));
   assert.equal(packed.state[s + 7], Math.fround(u), 'the original U is not rebased');
@@ -148,6 +153,22 @@ function assertPackedParticle(packed, mechanics, index, phaseId, u, massKg = 1) 
     near(mechanics.mechanics[m + 25] ** 2 / (100 * expectedTemperature),
       4000 / 3900, 2e-7, 'gas gamma');
   }
+}
+
+
+// Honest conduction-limited walls: choose dt so a wall pulse delivers exactly
+// `joules` to particle 0, computing its conductance k*a*a/L exactly as
+// runSphThermalStepCpu does (a = cube edge of the rest volume, L = max(d, a/2)).
+function honestWallPulseDtS(packedState, thermalTable, { joules = 3900, deltaK = 20 } = {}) {
+  const mass = packedState.state[3];
+  const restDensity = packedState.thermo[3];
+  const edge = Math.cbrt(mass / restDensity);
+  const phaseId = packedState.thermo[1];
+  const k = resolveThermalConductivityFromTable(thermalTable, packedState.thermo[0],
+    packedState.state[7], phaseId, packedState.thermo.subarray(4, 8)).thermalConductivityWPerMK;
+  const path = Math.max(packedState.state[0], 0.5 * edge);
+  const conductance = k * edge * edge / path;
+  return joules / (conductance * deltaK);
 }
 
 test('fresh constructor and clone preserve the explicit declaration with independent arrays', () => {
@@ -236,7 +257,7 @@ test('the shared cold selector uses model phase and volume without mutating the 
     assert.equal(selected.phaseCaloric, true);
     assert.equal(selected.stablePhase, phaseId === 2 ? 'liquid' : 'gas');
     near(selected.temperatureK, temperatureAt(phaseId, 34_200), 1e-10, 'cold selector temperature');
-    assert.equal(selected.restDensityKgPerM3, Math.fround(phaseId === 2 ? 1000 : 0.1));
+    assert.equal(selected.restDensityKgPerM3, Math.fround(phaseId === 2 ? 1000 : VAPOR_REST_DENSITY));
     assert.equal(selected.referenceVolumeM3, 0.5 / selected.restDensityKgPerM3);
     assert.deepEqual(Object.values(selected.phaseFractions), fractions(phaseId));
     assert.equal(selected.clamped, null);
@@ -268,8 +289,8 @@ test('explicit property and particle overrides may agree at exact packed f32 pre
   props[MATERIAL].phases[1].cpJPerKgK += 1e-8;
   props[MATERIAL].phases[1].densityKgPerM3 += 1e-12;
   const input = state([particle()]);
-  input.particles[0].restDensityKgPerM3 = 0.1;
-  input.particles[0].mpmVolume0 = 10;
+  input.particles[0].restDensityKgPerM3 = VAPOR_REST_DENSITY;
+  input.particles[0].mpmVolume0 = 1 / VAPOR_REST_DENSITY;
   const packed = buildSphGpuParticleBuffers(input, options(props));
   const mechanics = buildMlsMpmGpuParticleBuffers(input, options(props));
   assertPackedParticle(packed, mechanics, 0, 3, 34_200);
@@ -301,7 +322,8 @@ test('real packer output continues twice through the actual CPU thermal step on 
 
 test('fresh packed vapor takes an independent 3900 J/kg wall pulse as exactly one kelvin', () => {
   const props = properties();
-  const packed = buildSphGpuParticleBuffers(state(), options(props));
+  const packed = buildSphGpuParticleBuffers(
+    state([particle(3, undefined, { x: [0.25, 20, 20] })]), options(props));
   const beforeS = packed.state.slice();
   const beforeT = packed.thermo.slice();
   const table = buildSphThermalMaterialTable(props, { condensableThermodynamicsByMaterial: models });
@@ -309,9 +331,13 @@ test('fresh packed vapor takes an independent 3900 J/kg wall pulse as exactly on
   const records = table.records.slice();
   for (let offset = 4; offset < records.length; offset += 8) records[offset] = 0;
   const out = runSphThermalStepCpu({ sphParticleState: packed,
-    thermalMaterialTable: { ...table, records }, wallTemperaturesK: { xMin: 298 },
-    wallLayerM: 1, wallRate: 2600, dtS: 0.1, conductionRate: 0, boxDimsM: [4, 4, 4] });
-  // Q/m = dt * rate * (1-x/layer) * (Twall-T) = .1*2600*.75*20 = 3900.
+    thermalMaterialTable: { ...table, records }, // The 1 kg vapor parcel is a cube about 2.15 m on a side: a 40 m box in y
+    // and z keeps it touching x-min only.
+    wallTemperaturesK: { xMin: 298 },
+    wallLayerM: 1, wallRate: 1,
+    dtS: honestWallPulseDtS(packed, { ...table, records }),
+    conductionRate: 0, boxDimsM: [4, 40, 40] });
+  // Honest wall: Q/m = (k a^2 / L) * (Twall-T) * dt / m = 3900 by construction.
   assert.equal(out.state[7], 34_200 + 3900);
   assert.equal(out.thermo[2], 279);
   assert.equal(out.thermo[1], 3);
@@ -505,7 +531,9 @@ for (const [name, overrides] of [
 }
 
 test('finite representable mass can still overflow or underflow its physical reference volume', () => {
-  const vapor = state([particle(3, 34_200, { massKg: 1e38 })]);
+  // On the standard-atmosphere density basis (3.38 kg/m^3 here) no f32 mass
+  // overflows the vapor volume; the smallest subnormal mass underflows it.
+  const vapor = state([particle(3, 34_200, { massKg: 2 ** -149 })]);
   rejectsBoth(vapor, options(), /Unrepresentable explicit caloric reference volume/);
   const liquid = state([particle(2, 34_200, { massKg: 2 ** -149 })]);
   rejectsBoth(liquid, options(), /Unrepresentable explicit caloric reference volume/);
@@ -731,8 +759,8 @@ test('exact matching ill-conditioned Cp-R inputs remain valid with the declared 
   near(packed.thermo[2], expectedTemperature, 2e-5, 'small-Cv gas temperature');
   assert.equal(packed.thermo[1], 3);
   assert.deepEqual(Array.from(packed.thermo.slice(4, 8)), fractions(3));
-  assert.equal(packed.thermo[3], Math.fround(0.1));
-  assert.equal(mechanics.mechanics[19], Math.fround(1 / Math.fround(0.1)));
+  assert.equal(packed.thermo[3], Math.fround(VAPOR_REST_DENSITY));
+  assert.equal(mechanics.mechanics[19], Math.fround(1 / Math.fround(VAPOR_REST_DENSITY)));
   assert.equal(mechanics.mechanics[26], 2);
   const expectedGamma = CONDITIONED_CP / CONDITIONED_CV;
   const expectedSoundSpeed = Math.sqrt(expectedGamma * 100 * expectedTemperature);

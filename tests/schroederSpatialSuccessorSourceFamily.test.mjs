@@ -1162,18 +1162,16 @@ test('weak device-loss callback has no strong-family parent closure', () => {
     assert.ok(match, `${name} must have its own module-level closure scope`);
     return { parameters: match[1], body: match[2] };
   };
-  // This is a lexical-isolation contract, not a claim that GC ran. The weak
-  // factory must never receive the raw family, even as an unused parameter.
-  const weak = moduleFunction('createWeakSourceFamilyLossCallback');
-  assert.equal(weak.parameters, 'sourceFamilyRef');
-  assert.doesNotMatch(weak.body, /\b(?:sourceFamily|device|WeakRef)\b/);
-  assert.match(weak.body, /sourceFamilyRef\.deref\(\)/);
-  const strong = moduleFunction('createStrongSourceFamilyLossCallback');
-  assert.equal(strong.parameters, 'sourceFamily');
+  // This is a lexical-isolation contract, not a claim that GC ran. The loss
+  // handler is module-level (it receives the family only when the relay's
+  // weak target is still alive) and the watcher creates no closure that could
+  // capture the family.
+  const handler = moduleFunction('quarantineSourceFamilyFromDeviceLoss');
+  assert.equal(handler.parameters, 'sourceFamily, info');
   const watcher = moduleFunction('watchSourceFamilyDeviceLoss');
-  assert.doesNotMatch(watcher.body, /=>|\bfunction\s*(?:\w+\s*)?\(/);
-  assert.match(watcher.body, /createWeakSourceFamilyLossCallback\(new WeakRef\(sourceFamily\)\)/);
-  assert.match(watcher.body, /createStrongSourceFamilyLossCallback\(sourceFamily\)/);
+  assert.doesNotMatch(watcher.body, /=>|\bfunction\s*(?:\w+\s*)?\(|\.then\(/);
+  assert.match(watcher.body,
+    /watchSphDeviceLossFor\(device, sourceFamily, quarantineSourceFamilyFromDeviceLoss\)/);
 });
 
 for (const weakTarget of ['live', 'absent', 'unavailable']) {

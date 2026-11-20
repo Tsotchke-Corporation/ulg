@@ -52,7 +52,8 @@ import {
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_ROW_READY,
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_ROW_WORDS,
   SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_SCRATCH_VERSION,
-  SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE
+  SCHROEDER_SPATIAL_PHASE_VOLUME_TRANSPORT_WORKGROUP_SIZE,
+  SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
 } from './schroederSpatialPhaseVolumeTransport.js';
 import {
   schroederSpatialPhaseVolumePressureDragOperatorWgsl
@@ -126,10 +127,12 @@ struct PhaseVolumeTransportParams {
   reserved9: u32,
   reserved10: u32,
   reserved11: u32,
-  reserved12: u32,
-  reserved13: u32,
-  reserved14: u32,
-  reserved15: u32,
+  // A1 direct-dispatch snapshot (bytes 240..255; see
+  // SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC).
+  dispatch_snapshot_x: u32,
+  dispatch_snapshot_y: u32,
+  dispatch_snapshot_z: u32,
+  dispatch_snapshot_w: u32,
 };
 
 struct PhaseMechanics {
@@ -147,6 +150,18 @@ struct PhaseMechanics {
 @group(0) @binding(5) var<storage, read> material_phase_records: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: PhaseVolumeTransportParams;
 @group(0) @binding(7) var<storage, read_write> transport_scratch: array<atomic<u32>>;
+
+const FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC: u32 = ${SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC}u;
+
+// A direct 1D launch of this field consumer runs only the workgroups the
+// staged indirect launch would have run. Workgroup-uniform; inert otherwise.
+fn direct_dispatch_excludes(workgroup_id: vec3<u32>) -> bool {
+  return params.dispatch_snapshot_w == FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
+    && (workgroup_id.y != 0u || workgroup_id.z != 0u
+      || params.dispatch_snapshot_z == 0u
+      || workgroup_id.x
+        >= params.dispatch_snapshot_x * params.dispatch_snapshot_y);
+}
 
 ${schroederSpatialPhaseVolumePressureDragOperatorWgsl}
 
@@ -490,8 +505,18 @@ fn proposal_admission_reason() -> u32 {
   if (!proposal_identity_matches()) { return 6u; }
   if (proposal_control[23u] != bitcast<u32>(params.fine_level)) { return 7u; }
   if (proposal_control[24u] != bitcast<u32>(params.coarse_level)) { return 8u; }
-  if (proposal_control[25u] != 1u) { return 9u; }
-  if (proposal_control[26u] != 1u) { return 10u; }
+  // A one-level S9-C proposal (no coarse level, no parent routes) carries
+  // only fine local heads. It is admitted for the single mechanics level;
+  // every other word below is still authenticated exactly.
+  let one_level = proposal_control[25u] == 0u
+    && proposal_control[26u] == 0u
+    && proposal_control[24u] == 0x80000000u
+    && proposal_control[19u] == 0u
+    && params.level_index == 0u;
+  if (!one_level) {
+    if (proposal_control[25u] != 1u) { return 9u; }
+    if (proposal_control[26u] != 1u) { return 10u; }
+  }
   if (proposal_control[29u] != params.parent_field_completion_ordinal) { return 11u; }
   if (proposal_control[34u] != LOCAL_HEAD_WORDS) { return 12u; }
   if (proposal_control[37u] != MOMENT_ROW_WORDS) { return 13u; }
@@ -932,11 +957,28 @@ fn stage_ambient_buoyancy(field_index: u32) -> bool {
     return true;
   }
   let mass = field_mass(field_index);
-  let volume = field_volume(field_index);
+  // Archimedes against the implicit atmosphere: a gas field displaces the
+  // volume it would occupy at the atmosphere's pressure, p_i V_i / p_amb
+  // (Amagat). Co-located species rows of one mixture each fill the whole
+  // parcel at their partial pressure (Dalton), so their own volumes overlap
+  // and a sum over them counts the parcel once per species; their volumes
+  // at the ambient pressure do not overlap, and sum to the volume the
+  // mixture displaces. At the ambient temperature a mixture of ambient
+  // composition is then exactly neutral, and a warmer or lighter gas rises.
+  let own_volume = field_volume(field_index);
+  var displaced_volume = own_volume;
+  if (params.ambient_pressure_pa > 0.0) {
+    let absolute_pressure = field_absolute_pressure(field_index);
+    if (!finite_f32(absolute_pressure) || absolute_pressure < 0.0) {
+      return false;
+    }
+    displaced_volume =
+      own_volume * (absolute_pressure / params.ambient_pressure_pa);
+  }
   var velocity = scratch_velocity(field_index);
   let initial_velocity = velocity;
   var impulse = -params.ambient_density_kg_per_m3
-    * volume
+    * displaced_volume
     * vec3<f32>(params.gravity_x, params.gravity_y, params.gravity_z)
     * params.dt;
   let max_speed = max(
@@ -1087,12 +1129,19 @@ fn stage_gas_condensed_pair(condensed: u32, gas: u32) -> bool {
     transport_balance_tolerance(momentum_sum_abs.z, 4u)
       + transport_state_floor(momentum_state_abs.z, 4u)
   );
+  // Representation floor of the velocity-differenced kinetic energy: per
+  // field, two sequential f32 velocity updates (pressure impulse, then the
+  // backward-Euler drag impulse), a 5-rounding dot, the squared-speed
+  // difference and the mass/half scaling — about 14 roundings, bounded by 16.
+  // With drag active (any positive viscosity, e.g. the anchored gas mu) the
+  // measured residual sits at 4-8 ulps of the kinetic state, above the former
+  // 6-operation floor; this is rounding, not an accounting gap.
   let energy_tolerance = transport_balance_tolerance(
     abs(kinetic_delta)
       + abs(deposited_pressure_compensation)
       + abs(deposited_heat),
     6u
-  ) + transport_state_floor(kinetic_state_abs, 6u);
+  ) + transport_state_floor(kinetic_state_abs, 16u);
   if (!finite_f32(condensed_pressure_compensation)
       || !finite_f32(gas_pressure_compensation)
       || !finite_f32(condensed_heat)
@@ -1115,6 +1164,73 @@ fn stage_gas_condensed_pair(condensed: u32, gas: u32) -> bool {
     && scratch_add_f32(gas, SCRATCH_PRESSURE_J, gas_pressure_compensation)
     && scratch_add_heat(condensed, condensed_heat)
     && scratch_add_heat(gas, gas_heat);
+}
+
+// Gas species sharing a node exchange momentum by Maxwell-Stefan friction,
+// K_ij = p x_i x_j / D_ij. At gas densities the relaxation time ~ rho D / p
+// (~1e-10 s at room conditions) is far below any step, so the stiff limit
+// applies: every non-condensed field at the node takes the node's gas
+// centre-of-mass velocity (diffusion-scale relative motion, ~mm/s, is a
+// separate law). Each field's kinetic energy in the centre-of-mass frame,
+// m |v - v_cm|^2 / 2, becomes its own heat; that is exactly the kinetic
+// energy lost, so momentum and energy are conserved. Without it, one row per
+// species lets species sort by molar mass under gravity (room-air N2 rose to
+// the ceiling while O2, Ar and CO2 sank).
+fn stage_gas_mixture(first: u32, end: u32) -> bool {
+  var mass = 0.0;
+  var momentum = vec3<f32>(0.0);
+  var count = 0u;
+  for (var field_index = first; field_index < end; field_index = field_index + 1u) {
+    if (field_load(field_key(field_index) + 1u) < PHASE_GAS) { continue; }
+    let m = field_mass(field_index);
+    if (!(m > 0.0)) { continue; }
+    mass = mass + m;
+    momentum = momentum + m * scratch_velocity(field_index);
+    count = count + 1u;
+  }
+  if (count < 2u) { return true; }
+  if (!(mass > 0.0) || !finite_vec3(momentum)) { return false; }
+  let shared_velocity = momentum / mass;
+  var heat_sum = 0.0;
+  var kinetic_delta = 0.0;
+  var kinetic_state_abs = 0.0;
+  var momentum_residual = vec3<f32>(0.0);
+  var momentum_state_abs = vec3<f32>(0.0);
+  for (var field_index = first; field_index < end; field_index = field_index + 1u) {
+    if (field_load(field_key(field_index) + 1u) < PHASE_GAS) { continue; }
+    let m = field_mass(field_index);
+    if (!(m > 0.0)) { continue; }
+    let velocity = scratch_velocity(field_index);
+    let relative = velocity - shared_velocity;
+    let heat = 0.5 * m * dot(relative, relative);
+    heat_sum = heat_sum + heat;
+    kinetic_delta = kinetic_delta
+      + 0.5 * m * (dot(shared_velocity, shared_velocity) - dot(velocity, velocity));
+    kinetic_state_abs = kinetic_state_abs
+      + 0.5 * m * (dot(velocity, velocity) + dot(shared_velocity, shared_velocity));
+    momentum_residual = momentum_residual + m * (shared_velocity - velocity);
+    momentum_state_abs = momentum_state_abs + m * (abs(velocity) + abs(shared_velocity));
+    if (!finite_f32(heat) || heat < 0.0
+      || !scratch_set_velocity(field_index, shared_velocity)
+      || !scratch_add_heat(field_index, heat)) {
+      return false;
+    }
+  }
+  // Residuals difference stored f32 state: the per-field dot products, the
+  // centre-of-mass division and the accumulation over a node's fields.
+  let operations = 8u + 2u * count;
+  let momentum_tolerance = vec3<f32>(
+    transport_state_floor(momentum_state_abs.x, operations),
+    transport_state_floor(momentum_state_abs.y, operations),
+    transport_state_floor(momentum_state_abs.z, operations)
+  );
+  let energy_residual = kinetic_delta + heat_sum;
+  return finite_vec3(momentum_residual)
+    && all(abs(momentum_residual) <= momentum_tolerance)
+    && finite_f32(energy_residual)
+    && abs(energy_residual)
+      <= transport_state_floor(kinetic_state_abs, operations)
+        + transport_balance_tolerance(heat_sum, operations);
 }
 
 fn scratch_row_seal(field_index: u32) -> u32 {
@@ -1186,6 +1302,7 @@ fn stage_transport(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let first = field_linear_invocation(local_id, workgroup_id);
   if (field_admission_reason() != 0u) {
     reject_scratch();
@@ -1237,6 +1354,10 @@ fn stage_transport(
       }
     }
   }
+  if (!stage_gas_mixture(range.x, range.y)) {
+    reject_scratch();
+    return;
+  }
   for (
     var field_index = range.x;
     field_index < range.y;
@@ -1251,6 +1372,7 @@ fn validate_staged_transport(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_admitted() || !scratch_admitted()) {
     reject_scratch();
@@ -1268,6 +1390,7 @@ fn commit_transport(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!scratch_admitted()
       || scratch_load(SCRATCH_FAILURE_WORD) != 0u) {

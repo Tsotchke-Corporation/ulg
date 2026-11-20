@@ -123,14 +123,14 @@ test('canonical solver and dynamic-law watcher share one contact trust contract'
     SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS,
     SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS
   );
-  assert.equal(SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS, 16);
+  assert.equal(SPH_CANONICAL_CONTACT_POSITION_TRUST_DIAMETERS, 1);
   assert.equal(
     SPH_CANONICAL_CONTACT_POSITION_TOLERANCE_EPSILON_MULTIPLIER,
     64
   );
   assert.match(
     schroederSpatialMechanicalGraphSolverWgsl,
-    /16\.0[\s\S]*self_diameter_m[\s\S]*2\.0 \* initial_displacement_m[\s\S]*current_wall_projection_m/
+    /1\.0[\s\S]*self_diameter_m[\s\S]*2\.0 \* initial_displacement_m[\s\S]*current_wall_projection_m/
   );
 });
 
@@ -3172,7 +3172,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_EVIDENCE_LAYOUT.length, 48);
   assert.equal(SCHROEDER_SPATIAL_CONSUMER_EVIDENCE_WORDS, 48);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_TRAVERSAL_COUNT, 1);
-  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS, 16);
+  assert.equal(SCHROEDER_SPATIAL_MECHANICAL_POSITION_TRUST_DIAMETERS, 1);
   assert.equal(SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_PASSES, 1024);
   assert.equal(
     SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_ENCODED_PASSES,
@@ -3979,7 +3979,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
     /return epoch_distance_m <= pair_radius_m/
   );
   assert.match(schroederSpatialMechanicalProposalWgsl,
-    /let mixed_law_query_radius_m = 33\.0 \* max\(global_max_diameter, 0\.0\)[\s\S]*4\.0 \* max\(global_max_displacement_m, 0\.0\)[\s\S]*2\.0 \* max\(global_max_wall_projection_m, 0\.0\)/);
+    /let mixed_law_query_radius_m = 3\.0 \* max\(global_max_diameter, 0\.0\)[\s\S]*4\.0 \* max\(global_max_displacement_m, 0\.0\)[\s\S]*2\.0 \* max\(global_max_wall_projection_m, 0\.0\)/);
   assert.match(schroederSpatialMechanicalProposalWgsl,
     /let homogeneous_liquid_material_bits = atomicLoad\(&global_support_bits\[\s*4u\s*\]\);[\s\S]*let homogeneous_liquid_certificate =\s*mechanical_params\.retain_complete_authenticated_cell_cliques == 0u[\s\S]*support_reduction_complete[\s\S]*homogeneous_liquid_material_bits[\s\S]*global_support_bits\[\s*5u\s*\]/);
   assert.match(schroederSpatialMechanicalProposalWgsl,
@@ -4593,7 +4593,7 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
   assert.match(schroederSpatialMechanicalGraphSolverWgsl,
     /inverse_mass_share/);
   assert.match(schroederSpatialMechanicalGraphSolverWgsl,
-    /let position_trust_capacity_m = select\([\s\S]*16\.0[\s\S]*self_diameter_m[\s\S]*2\.0 \* initial_displacement_m[\s\S]*current_wall_projection_m,[\s\S]*particle_scales\[self_index\]\.z,[\s\S]*iteration > 0u/);
+    /let position_trust_capacity_m = select\([\s\S]*1\.0[\s\S]*self_diameter_m[\s\S]*2\.0 \* initial_displacement_m[\s\S]*current_wall_projection_m,[\s\S]*particle_scales\[self_index\]\.z,[\s\S]*iteration > 0u/);
   assert.match(schroederSpatialMechanicalGraphSolverWgsl,
     /let remaining_position_trust_m = max\([\s\S]*position_trust_capacity_m[\s\S]*initial_displacement_m[\s\S]*current_wall_projection_m/);
   assert.match(schroederSpatialMechanicalGraphSolverWgsl,
@@ -4872,6 +4872,17 @@ function liveFixtureWithoutBudget() {
   return rest;
 }
 
+test('mechanical proposals retain distinct selected-level owners in one generation', async () => {
+  const fixture=liveFixture(2,{sourceRowLayout:'level-assignment',minLevel:0,maxLevel:2});
+  const proposals=[0,1,2].map(selectedLevel=>runSchroederSpatialMechanicalProposalWebGpu({...fixture,selectedLevel}));
+  assert.equal(new Set(proposals.map(p=>p.proposalBuffer)).size,3);
+  assert.throws(()=>runSchroederSpatialMechanicalProposalWebGpu({...fixture,selectedLevel:1}),/still leased/);
+  for(const p of proposals) await p.releaseAfterSubmittedWork();
+  const reused=runSchroederSpatialMechanicalProposalWebGpu({...fixture,selectedLevel:1});
+  assert.equal(reused.proposalBuffer,proposals[1].proposalBuffer);
+  await reused.releaseAfterSubmittedWork();
+});
+
 test('level-assignment spatial sources use SS-authenticated identity and level selection', async () => {
   const graphSelectionSource = schroederSpatialMechanicalProposalWgsl.slice(
     schroederSpatialMechanicalProposalWgsl.indexOf(
@@ -4930,8 +4941,7 @@ test('level-assignment spatial sources use SS-authenticated identity and level s
   );
   assert.ok(solverDispatch);
   const supportBuffer = fixture.device.buffers.find(
-    ({ label }) => label
-      === 'ulg-schroeder-spatial-mechanical-global-support-bound-0'
+    ({ label }) => label?.startsWith('ulg-schroeder-spatial-mechanical-global-support-bound-0:')
   );
   assert.ok(supportBuffer);
   assert.equal(

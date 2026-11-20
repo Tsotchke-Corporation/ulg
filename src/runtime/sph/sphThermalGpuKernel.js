@@ -1,5 +1,8 @@
 import { prepareSphExactThermalQuantities, appendSphExactThermalQuantityWgsl } from './sphExactThermalQuantityGpu.js';
+import { appendSphExactThermalEnergyWgsl, sphExactThermalEnergyRecordWords, SPH_EXACT_THERMAL_ENERGY_WORDS }
+  from './sphExactThermalEnergyWgsl.js';
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
+import { isCondensableThermodynamics } from '../material/condensableThermodynamics.js';
 import { assertSphLegacyMassPathAllowed, markSphExactMassDerivedBuffers,
   forkSphParticleExactMassRead, releaseSphParticleExactMassRead,
   validateSphParticleExactMassRead } from './sphGpuBuffers.js';
@@ -26,6 +29,11 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphThermalStepWgsl as sphThermalStepLegacyWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
+  sphFiniteWallEnergyAddWgsl,
+  sphFiniteWallStateFor
+} from './sphFiniteWallStateGpu.js';
+import { prepareSphExactFiniteWallCandidate, validateSphExactFiniteWallRecord } from './sphExactFiniteWallGpu.js';
+import {
   isPhaseCaloricSegmentType,
   condensableCaloricSegments,
   hasCondensableCaloricRows,
@@ -41,6 +49,7 @@ import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import {
   PRESSURE_CARRIER_LAW_CLAUSIUS_PLATEAU,
+  PRESSURE_CARRIER_LAW_EXPLICIT_FUSION,
   PRESSURE_CARRIER_LAW_REFERENCE_ONLY
 } from '../material/pressureCarrierTransform.js';
 import {
@@ -395,6 +404,70 @@ export const sphThermalStepWgsl = createCanonicalThermalProposalApplyWgsl(
   sphThermalStepLegacyWgsl
 );
 
+// Honest finite walls: the same kernel, with each parcel's applied wall
+// exchange also added (with opposite sign) into its face's pending energy
+// (binding 14, sphFiniteWallStateGpu.js). The arithmetic on du is unchanged:
+// the applied delta is captured, then added exactly as before.
+function createFiniteWallThermalStepWgsl(baseWgsl) {
+  const replaceOnce = (text, from, to, label) => {
+    const count = text.split(from).length - 1;
+    if (count !== 1) {
+      throw new Error(`finite-wall thermal WGSL anchor ${label} matched ${count} times`);
+    }
+    return text.replace(from, to);
+  };
+  let text = baseWgsl;
+  text = replaceOnce(
+    text,
+    `\t      if (params.canonical_proposal_enabled == 1u
+\t        && canonical_reachable_domain_ready) {
+\t        du = du + canonical_thermal_open_reservoir_delta(
+\t          equilibrium_limited_du,`,
+    `\t      var wall_applied_du = 0.0;
+\t      if (params.canonical_proposal_enabled == 1u
+\t        && canonical_reachable_domain_ready) {
+\t        wall_applied_du = canonical_thermal_open_reservoir_delta(
+\t          equilibrium_limited_du,`,
+    'canonical wall delta'
+  );
+  text = replaceOnce(
+    text,
+    `\t        du = du + clamp_du_to_energy_domain(
+\t          equilibrium_limited_du,
+\t          current_u,
+\t          carrier_u_lo,
+\t          carrier_u_hi
+\t        );
+\t      }
+\t    }
+\t  }`,
+    `\t        wall_applied_du = clamp_du_to_energy_domain(
+\t          equilibrium_limited_du,
+\t          current_u,
+\t          carrier_u_lo,
+\t          carrier_u_hi
+\t        );
+\t      }
+\t      du = du + wall_applied_du;
+\t      finite_wall_energy_add(face, -mass * wall_applied_du);
+\t    }
+\t  }`,
+    'clamped wall delta'
+  );
+  const declaration = `@group(0) @binding(14) var<storage, read_write> finite_wall_state: array<atomic<u32>>;
+${sphFiniteWallEnergyAddWgsl('finite_wall_state')}
+`;
+  return replaceOnce(
+    text,
+    'const PAIR_CONDUCTION_RELAXATION_LIMIT: f32',
+    `${declaration}const PAIR_CONDUCTION_RELAXATION_LIMIT: f32`,
+    'finite wall declaration'
+  );
+}
+
+export const sphThermalStepFiniteWallWgsl =
+  createFiniteWallThermalStepWgsl(sphThermalStepWgsl);
+
 export {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
@@ -716,6 +789,59 @@ function derivePressureCarrierLanes(properties, materialSegments) {
   };
 }
 
+/**
+ * Explicit-branch (phase-caloric) solid+liquid(+gas) materials have no plateau
+ * rows: phase is selected explicitly and energy never moves a row between
+ * branches. Fusion is a separate equilibrium authority in the phase-carrier
+ * transfer, which needs T_f. The fusion reference of the created model is T_f;
+ * it must lie inside both packed branches so u_s(T_f) and u_l(T_f) are points
+ * of the same lines the thermal kernel inverts.
+ */
+function explicitFusionCarrierLanes(caloricModel, materialSegments) {
+  const solid = caloricModel?.solidCaloric;
+  if (!solid) return null;
+  const branch = (phase) => materialSegments.find((segment) => segment.type === 'phase'
+    && segment.phaseCaloric && segment.phase === phase);
+  const solidBranch = branch('solid');
+  const liquidBranch = branch('liquid');
+  if (!solidBranch || !liquidBranch) return null;
+  const fusionTemperatureK = Math.fround(solid.referenceTemperatureK);
+  for (const segment of [solidBranch, liquidBranch]) {
+    if (!(segment.tLo <= fusionTemperatureK && fusionTemperatureK <= segment.tHi)) {
+      throw new RangeError('Explicit fusion temperature must lie inside the packed solid and liquid branches');
+    }
+  }
+  return {
+    pressureCarrierLawId: PRESSURE_CARRIER_LAW_EXPLICIT_FUSION,
+    referencePressurePa: Math.fround(solid.referencePressurePa),
+    clausiusInvTemperatureLogSlopePerK: fusionTemperatureK
+  };
+}
+
+// Per explicit-branch condensable material, the terms of its own saturation
+// curve (condensableThermodynamics.js evaluateCondensableThermodynamics):
+//   ln p_eq(T, P) = ln p_ref + h_fg/r * (dT/T_ref)/T
+//                 + dcp/r * (ln(1 + dT/T_ref) - dT/T) + v_l (P - p_ref)/(r T),
+// dT = T - T_ref. The phase-carrier transfer's bulk boiling solves
+// p_eq(T_sat, P) = P on the GPU. Stride 8: materialId, T_ref, p_ref, h_fg,
+// dcp, r, v_l, and the reference-ladder pressure (> 0 = ready): without
+// absolute-pressure authority the legacy plateau boils at the pressure its
+// plateau was packed at, and explicit boiling uses that same pressure.
+export const SPH_THERMAL_EXPLICIT_VAPORIZATION_RECORD_FLOATS = 8;
+function explicitVaporizationRecord(materialId, model) {
+  if (!isCondensableThermodynamics(model)) return null;
+  const values = [materialId, model.referenceTemperatureK, model.referencePressurePa,
+    model.vaporizationReferenceEnthalpyJPerKg, model.vaporCpJPerKgK - model.liquidCpJPerKgK,
+    model.specificGasConstantJPerKgK, model.liquidSpecificVolumeM3PerKg,
+    THERMAL_CARRIER_REFERENCE_PRESSURE_PA];
+  if (!values.every(Number.isFinite) || !(model.referenceTemperatureK > 0)
+    || !(model.referencePressurePa > 0) || !(model.vaporizationReferenceEnthalpyJPerKg > 0)
+    || !(model.specificGasConstantJPerKgK > 0) || !(model.liquidSpecificVolumeM3PerKg > 0)) {
+    throw new RangeError('Unpackable explicit vaporization record');
+  }
+  return values;
+}
+
 export function buildSphThermalMaterialTable(materialProperties = {}, {
   materialPropertyBankGpuWarmInputTable = null,
   // Cold, explicit enrollment only. Callers must initialize phase/U from the
@@ -726,6 +852,7 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
   const segments = [];
   const metadata = [];
   const segmentMetadata = [];
+  const explicitVaporizationRecords = [];
   condensableThermodynamicsByMaterial = resolveSphPhaseCaloricModels(materialProperties,
     condensableThermodynamicsByMaterial);
   const materialBankWarmInputs = materialBankWarmInputsByMaterial(materialPropertyBankGpuWarmInputTable);
@@ -794,7 +921,10 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
       }
     }
     const emissivityGray = deriveGrayEmissivityForMaterial(material, properties);
-    const carrier = derivePressureCarrierLanes(properties, materialSegments);
+    const carrier = (hasCaloricModel && explicitFusionCarrierLanes(caloricModel, materialSegments))
+      || derivePressureCarrierLanes(properties, materialSegments);
+    const vaporization = hasCaloricModel ? explicitVaporizationRecord(materialId, caloricModel) : null;
+    if (vaporization) explicitVaporizationRecords.push(...vaporization);
     records.push(
       materialId,
       segmentOffset,
@@ -845,6 +975,9 @@ export function buildSphThermalMaterialTable(materialProperties = {}, {
     segmentStrideFloats: SPH_THERMAL_PHASE_SEGMENT_FLOATS,
     records: new Float32Array(records),
     segments: new Float32Array(segments),
+    explicitVaporizationRecords: new Float32Array(explicitVaporizationRecords),
+    explicitVaporizationRecordCount:
+      explicitVaporizationRecords.length / SPH_THERMAL_EXPLICIT_VAPORIZATION_RECORD_FLOATS,
     // Typed immutable-input evidence for nonreacting carriers as well as
     // reactants. Entity counts never reconstruct a molecular mass identity.
     molarMassIdentities: new Uint32Array(metadata.flatMap(entry => [entry.materialId,
@@ -1384,6 +1517,13 @@ export function resolveThermalConductivityFromTable(
     phaseToId: GPU_PHASE_IDS.unknown,
     provenance: null
   };
+}
+
+// Edge of the cube with the carrier's rest volume (m); 0 when unknown.
+function carrierParcelEdgeM(carrier, sphParticleState) {
+  const restDensity = finiteNumber(sphParticleState.thermo[carrier.thermoOffset + 3], 0);
+  if (!(carrier.massKg > 0) || !(restDensity > 0)) return 0;
+  return Math.cbrt(carrier.massKg / restDensity);
 }
 
 function particleNominalRadiusM(massKg, restDensityKgPerM3) {
@@ -2739,7 +2879,16 @@ export function runSphThermalStepCpu({
       faceIndex += 1
     ) {
       const distance = wallDistance(position, dims, faceIndex);
-      if (distance >= layer) continue;
+      // Honest walls (same law as the GPU kernel): conduction through the
+      // carrier's own phase conductivity over its face area a^2, across the
+      // centre-to-wall path (at least a/2), only while it touches the wall.
+      // effectiveWallRate is the on/off gate, not an exchange rate.
+      const wallParcelEdgeM = carrierParcelEdgeM(carrier, sphParticleState);
+      const wallConductivity = finiteNumber(carrier.thermalConductivityWPerMK, 0);
+      if (!(effectiveWallRate > 0) || !(wallConductivity > 0)
+        || !(wallParcelEdgeM > 0) || distance >= wallParcelEdgeM) continue;
+      const wallPathM = Math.max(distance, 0.5 * wallParcelEdgeM);
+      const wallConductanceWPerK = wallConductivity * wallParcelEdgeM * wallParcelEdgeM / wallPathM;
       const faceWallTempK = wallTemp(
         resolvedWallTemperaturesK,
         FACE_IDS[faceIndex]
@@ -2766,9 +2915,8 @@ export function runSphThermalStepCpu({
         ]
       );
       const rawDUSpecific =
-        effectiveWallRate
+        wallConductanceWPerK
         * (faceWallTempK - currentTemperatureK)
-        * (1 - distance / layer)
         * dt
         / mass;
       const equilibriumLimitedDUSpecific = clampWallSpecificEnergyDelta({
@@ -3591,6 +3739,7 @@ export async function createSphThermalStepExactSequenceWebGpuEncoderStage(args, 
 
 function createSphThermalStepWebGpuEncoderStageImpl({
   device,
+  postMechanicsSourceCapture = null,
   sphParticleState,
   thermalMaterialTable,
   thermalClosureGraphSet = null,
@@ -3651,6 +3800,20 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     : 0;
   const ambientRadiationExchangeEnabled =
     resolvedWallReservoirAuthority.exchangeEnabled === true;
+  // Honest finite walls: the scene's GPU-resident face temperatures and
+  // energy accumulators (null for fixed and adiabatic walls).
+  const privateWallState = exactCapture?.sourceRead?.finiteWallState ?? null;
+  if (privateWallState && (resolvedWallReservoirAuthority.finiteCapacity !== true
+    || privateWallState.instanceId !== resolvedWallReservoirAuthority.instanceId)) {
+    throw new TypeError('Private finite wall continuation requires the same explicit wall authority');
+  }
+  const finiteWallState = privateWallState ?? sphFiniteWallStateFor(
+    device,
+    resolvedWallReservoirAuthority
+  );
+  if (resolvedWallReservoirAuthority.finiteCapacity === true && !finiteWallState) {
+    throw new TypeError('Finite walls require their GPU-resident wall state');
+  }
   const canonicalGenerationProvided = schroederSpatialEpochGeneration != null;
   const canonicalProposalProvided = schroederSpatialThermalProposal != null;
   if (canonicalGenerationProvided !== canonicalProposalProvided) {
@@ -3873,6 +4036,26 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     ambientRadiationExchangeEnabled,
     canonicalThermalProposal
   }));
+  // Integer energy ledger (g2-integer-ledger-proposal.md, Phase 1): a ledger
+  // proposal carries exact pair packets, and only the exact energy apply may
+  // consume it. It adds them and this step's source packets to a successor
+  // copy of the carrier energy record and projects u from the result.
+  const proposalLedgerWords = Number(schroederSpatialThermalProposal?.exactEnergyLedgerWords ?? 0);
+  const exactEnergyRows = exactCapture?.sourceRead?.energy ?? null;
+  const exactEnergyLedger = proposalLedgerWords !== 0;
+  if (exactEnergyLedger && (proposalLedgerWords !== SPH_EXACT_THERMAL_ENERGY_WORDS
+      || !spatialCanonicalThermalProposal || !exactEnergyRows || exactQuantities
+      || exactEnergyRows.rowCount !== sphParticleState.particleCount
+      || exactEnergyRows.energyBuffer.size
+        !== sphExactThermalEnergyRecordWords(exactEnergyRows.rowCount) * Uint32Array.BYTES_PER_ELEMENT
+      || webGpuBufferDevice(exactEnergyRows.energyBuffer) !== device)) {
+    throw new TypeError('An integer energy ledger proposal requires the exact energy apply and its carrier record');
+  }
+  const exactEnergyOutput = exactEnergyLedger ? tagWebGpuBufferDevice(device.createBuffer({
+    label: 'ulg-exact-energy-thermal', size: exactEnergyRows.energyBuffer.size,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  }), device) : null;
+  if (exactEnergyOutput) registerSetupFailureCleanup(() => exactEnergyOutput.destroy?.());
   const spatialInputBuffer = canonicalThermalProposal.proposalBuffer;
   const spatialInputBound = Boolean(spatialInputBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder
@@ -3888,10 +4071,30 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     registerSetupFailureCleanup(() => binPlaceholderBuffer.destroy?.());
   }
 
+  if (finiteWallState && exactQuantities) {
+    throw new TypeError(
+      'Finite walls require the canonical energy ledger instead of the exact-quantity variant'
+    );
+  }
+  if (privateWallState && !exactEnergyLedger) {
+    throw new TypeError('Private finite walls require their canonical energy ledger continuation');
+  }
+  if (finiteWallState && exactEnergyLedger && (!postMechanicsSourceCapture || !retainOutputParticleBuffers)) {
+    throw new TypeError('Canonical finite walls require a retained thermal producer capture');
+  }
+  const exactFiniteWall = finiteWallState && exactEnergyLedger
+    ? prepareSphExactFiniteWallCandidate({ device, state: finiteWallState, particleCount: sphParticleState.particleCount }) : null;
+  if (exactFiniteWall) registerSetupFailureCleanup(exactFiniteWall.destroy);
   const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-    cacheKey: exactQuantities ? 'ulg-sph-thermal-step-exact-quantity.v1' : 'ulg-sph-thermal-step.v7',
+    // v2/v8: honest conduction-limited walls read binding 13.
+    cacheKey: exactQuantities ? 'ulg-sph-thermal-step-exact-quantity.v2'
+      : exactEnergyLedger ? `ulg-sph-thermal-step-exact-energy.v4-wall-${Boolean(exactFiniteWall)}`
+        : finiteWallState ? 'ulg-sph-thermal-step-finite-wall.v3' : 'ulg-sph-thermal-step.v8',
     label: 'ulg-sph-thermal-step',
-    code: exactQuantities ? appendSphExactThermalQuantityWgsl(sphThermalStepWgsl) : sphThermalStepWgsl,
+    code: exactQuantities ? appendSphExactThermalQuantityWgsl(sphThermalStepWgsl)
+      : exactEnergyLedger ? appendSphExactThermalEnergyWgsl(exactFiniteWall ? sphThermalStepFiniteWallWgsl : sphThermalStepWgsl,
+        { finiteWalls: Boolean(exactFiniteWall) })
+        : finiteWallState ? sphThermalStepFiniteWallWgsl : sphThermalStepWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -3905,7 +4108,10 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       computeBufferBinding(8, 'uniform'),
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
-      ...(exactQuantities ? [computeBufferBinding(11, 'storage'), computeBufferBinding(12, 'storage')] : [])
+      ...(exactQuantities ? [computeBufferBinding(11, 'storage'), computeBufferBinding(12, 'storage')] : []),
+      ...(exactEnergyLedger ? [computeBufferBinding(11, 'storage')] : []),
+      computeBufferBinding(13, 'read-only-storage'),
+      ...(finiteWallState ? [computeBufferBinding(14, 'storage')] : [])
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -3923,14 +4129,17 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       { binding: 9, resource: { buffer: materialBankWarmInputBinding.buffer } },
       { binding: 10, resource: { buffer: spatialInputBound ? spatialInputBuffer : binPlaceholderBuffer } },
       ...(exactQuantities ? [{ binding: 11, resource: { buffer: exactQuantities.updates } },
-        { binding: 12, resource: { buffer: exactQuantities.validationBuffer } }] : [])
+        { binding: 12, resource: { buffer: exactQuantities.validationBuffer } }] : []),
+      ...(exactEnergyOutput ? [{ binding: 11, resource: { buffer: exactEnergyOutput } }] : []),
+      { binding: 13, resource: { buffer: responseGraphUpload.responseThermalConductivityBuffer } },
+      ...(finiteWallState ? [{ binding: 14, resource: { buffer: exactFiniteWall?.packets ?? finiteWallState.buffer } }] : [])
     ]
   });
   const exactFinalizers = exactQuantities ? ['finalize_exact_thermal', 'restore_rejected_exact_thermal'].map(entryPoint => {
     const { pipeline: finalizer } = createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-${entryPoint}-v1`, label: `ulg-${entryPoint}`, entryPoint,
+      cacheKey: `ulg-${entryPoint}-v2-conductivity-binding`, label: `ulg-${entryPoint}`, entryPoint,
       code: appendSphExactThermalQuantityWgsl(sphThermalStepWgsl),
-      bindings: Array.from({ length: 13 }, (_, binding) => computeBufferBinding(binding,
+      bindings: Array.from({ length: 14 }, (_, binding) => computeBufferBinding(binding,
         binding === 8 ? 'uniform' : [6, 7, 11, 12].includes(binding) ? 'storage' : 'read-only-storage')) });
     return finalizer;
   }) : [];
@@ -3945,6 +4154,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   const cleanupCommonResources = () => {
     if (commonResourcesCleaned) return false;
     commonResourcesCleaned = true;
+    exactFiniteWall?.cleanupTransient();
     exactQuantities?.cleanupTransient();
     classicThermalProposalStage?.cleanupSubmittedWork();
     if (matchedTimeThermalProposalStage) {
@@ -4045,6 +4255,9 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     }
     const cleaned = cleanupCommonResources();
     destroyOutputParticleBuffersNow();
+    // An aborted step never hands its successor energy record to an owner.
+    exactEnergyOutput?.destroy?.();
+    exactFiniteWall?.destroy();
     return cleaned;
   };
   const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
@@ -4173,9 +4386,13 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     ?? classicThermalProposalStage?.proposalDispatchCount
     ?? 0
   );
-  const encodedDispatchCount = encodedProposalDispatchCount + 1 + (exactQuantities ? exactQuantities.encodedDispatchCount + 2 : 0);
+  const encodedDispatchCount = encodedProposalDispatchCount + 1 + (exactQuantities ? exactQuantities.encodedDispatchCount + 2 : 0)
+    + (exactFiniteWall?.encodedDispatchCount ?? 0);
   result.encodedProposalDispatchCount = encodedProposalDispatchCount;
   result.encodedDispatchCount = encodedDispatchCount;
+  result.exactEnergy = exactEnergyOutput ? Object.freeze({ energyBuffer: exactEnergyOutput,
+    format: exactEnergyRows.format, rowCount: exactEnergyRows.rowCount }) : null;
+  result.exactFiniteWall = exactFiniteWall?.record ?? null;
   return {
     schema: 'peercompute.ulg.sph-thermal-encoder-stage.v0',
     status: 'thermal-encoder-stage-ready',
@@ -4189,10 +4406,19 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     thermoBuffer: outThermoBuffer,
     stateBufferByteLength: outStateByteLength,
     thermoBufferByteLength: outThermoByteLength,
+    destroyExactFiniteWall: exactFiniteWall?.destroy ?? null,
+    transferExactFiniteWall: exactFiniteWall?.transfer ?? null,
     encode(encoder) {
+      exactFiniteWall?.encodeBefore(encoder);
       exactQuantities?.clear(encoder);
       matchedTimeThermalProposalStage?.encode(encoder);
       classicThermalProposalStage?.encode(encoder);
+      if (exactEnergyOutput) {
+        encoder.copyBufferToBuffer(exactEnergyRows.energyBuffer, 0, exactEnergyOutput, 0, exactEnergyOutput.size);
+      }
+      // Finite walls: the apply reads the current face temperatures (GPU copy
+      // into the params' wall words) and the step's face energy is applied after.
+      finiteWallState?.encodeTemperatureCopy(encoder, paramsBuffer, 48);
       const pass = encoder.beginComputePass({
         label: 'ulg-sph-thermal-v2-canonical-proposal-apply'
       });
@@ -4200,6 +4426,8 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
       pass.end();
+      if (exactFiniteWall) exactFiniteWall.encodeAfter(encoder);
+      else finiteWallState?.encodeUpdate(encoder);
       if (exactQuantities) {
         exactQuantities.encode(encoder);
         for (const finalizer of exactFinalizers) {
@@ -4333,6 +4561,7 @@ export async function acquireSphThermalExactMassSourceCapture(result, token, exp
     };
     validate();
     return Object.freeze({ device: record.device, sourceRead, quantities: record.seal.exactThermal ?? null,
+      energy: record.seal.exactEnergy ?? null,
       sphParticleUpload: record.sphParticleUpload, mlsMpmParticleUpload: record.mlsMpmParticleUpload,
       sourceSphUpload: record.sphParticleUpload, sourceMlsUpload: record.mlsMpmParticleUpload,
       sphParticleState: record.sphParticleState, thermalMaterialTable: record.thermalMaterialTable,
@@ -4534,13 +4763,39 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null, onLas
       stage.result.thermoBuffer = null;
     }
     if (token) {
+      // The successor energy record belongs to this seal until a continuation
+      // owner adopts it; otherwise it retires with the seal's last release.
+      const exactEnergy = stage.result.exactEnergy;
+      const exactFiniteWall = stage.result.exactFiniteWall;
+      let exactEnergyTransferred = false;
       const seal = createPostMechanicsStageOutputSeal(stage.result, capturedInputs, { onLastRelease() {
         onLastSourceRelease?.();
         if (exactQuantities) void deferConfirmedSubmittedWorkCleanup(device, exactQuantities.destroyOutput).catch(() => {});
+        if ((exactEnergy && !exactEnergyTransferred) || exactFiniteWall) {
+          void deferConfirmedSubmittedWorkCleanup(device, () => {
+            if (!exactEnergyTransferred) exactEnergy?.energyBuffer.destroy?.();
+            stage.destroyExactFiniteWall?.();
+          }).catch(() => {});
+        }
       } });
       thermalSourceCaptures.set(token, exactQuantities ? Object.freeze({ ...seal,
         exactThermal: Object.freeze({ quantityBuffer: exactQuantities.quantityBuffer, quantityLayout: exactQuantities.quantityLayout,
-          format: exactQuantities.format, updates: exactQuantities.updates, validationBuffer: exactQuantities.validationBuffer }) }) : seal);
+          format: exactQuantities.format, updates: exactQuantities.updates, validationBuffer: exactQuantities.validationBuffer }) })
+        : exactEnergy ? Object.freeze({ ...seal, exactEnergy, exactFiniteWall,
+          transferExactFiniteWall: stage.transferExactFiniteWall,
+          validate() {
+            seal.validate();
+            if (stage.result.exactEnergy !== exactEnergy || stage.result.exactFiniteWall !== exactFiniteWall) {
+              throw new TypeError('Exact thermal successor identity changed');
+            }
+            if (exactFiniteWall) validateSphExactFiniteWallRecord(exactFiniteWall, device);
+            return true;
+          },
+          transferExactEnergy() {
+            if (exactEnergyTransferred) throw new TypeError('Exact energy record was already adopted');
+            exactEnergyTransferred = true;
+          } })
+          : seal);
     }
     return stage.result;
   } catch (error) {

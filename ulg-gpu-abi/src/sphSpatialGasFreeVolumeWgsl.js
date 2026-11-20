@@ -1,6 +1,7 @@
 import {
   SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION,
   SPH_SPATIAL_GAS_FREE_VOLUME_MAGIC,
+  SPH_SPATIAL_GAS_FREE_VOLUME_MINIMUM_GAS_FRACTION,
   SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS,
   SPH_SPATIAL_GAS_FREE_VOLUME_STATUS,
   SPH_SPATIAL_GAS_FREE_VOLUME_VERSION,
@@ -115,6 +116,7 @@ struct AerosolGeometry {
   fine_ny: u32,
   fine_nz: u32,
   fine_grid_shift: i32,
+  levels: array<vec4<i32>,6>,
 };
 @group(0) @binding(9) var<storage, read> aerosol_parcels: array<u32>;
 @group(0) @binding(10) var<uniform> aerosol_geometry: AerosolGeometry;
@@ -136,6 +138,7 @@ const INVALID_MOMENT: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.INVALID_MOM
 const INVALID_PARENT: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.INVALID_PARENT)};
 const INVALID_GEOMETRY: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.INVALID_GEOMETRY)};
 const OVERFILLED: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.OVERFILLED)};
+const MINIMUM_GAS_FRACTION: f32 = ${SPH_SPATIAL_GAS_FREE_VOLUME_MINIMUM_GAS_FRACTION};
 const NONFINITE_VOLUME: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.NONFINITE_VOLUME)};
 const COUNT_MISMATCH: u32 = ${u32(SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.COUNT_MISMATCH)};
 const DIRECTORY_MAGIC: u32 = 0x53534531u;
@@ -593,6 +596,54 @@ fn aerosol_quadratic_weight(fraction: f32, ordinal: u32) -> f32 {
   return 0.5 * value * value;
 }
 
+// Compose every adjacent geometric A. Each axis retains at most two
+// neighboring nodes; positive support is checked at every intermediate grid.
+fn aerosol_chain_geometry_ready() -> bool {
+  if(params.exact_level_count<1u || params.exact_level_count>6u){return false;}
+  if(params.exact_level_count<=2u){return true;}
+  if(any(aerosol_geometry.levels[0]!=vec4<i32>(i32(aerosol_geometry.fine_nx),
+    i32(aerosol_geometry.fine_ny),i32(aerosol_geometry.fine_nz),aerosol_geometry.fine_grid_shift))){return false;}
+  let last=aerosol_geometry.levels[params.exact_level_count-1u];
+  if(any(last!=vec4<i32>(i32(params.nx),i32(params.ny),i32(params.nz),params.grid_shift))){return false;}
+  var spacing=params.fine_grid_spacing_m;
+  for(var level=1u;level<params.exact_level_count;level++){
+    if(any(aerosol_geometry.levels[level].xyz<=vec3<i32>(0))){return false;}spacing*=2.0;
+  }
+  return spacing==params.grid_spacing_m;
+}
+fn aerosol_project_adjacent_chain(node:vec3<i32>,volume:f32)->bool {
+  var lower=node;var upper_weight=vec3<f32>(0.0);
+  for(var level=1u;level<params.exact_level_count;level++){
+    let next_lower=vec3<i32>(floor(vec3<f32>(lower)*0.5));
+    var next_upper_weight=vec3<f32>(0.0);
+    for(var side=0;side<2;side++){
+      let coordinate=vec3<f32>(lower+vec3<i32>(side))*0.5;
+      let base=floor(coordinate);let fraction=coordinate-base;
+      let weight=select(vec3<f32>(1.0)-upper_weight,upper_weight,side==1);
+      // base is next_lower or next_lower+1. Accumulate the exact adjacent
+      // interpolation contribution into the latter, retaining zero supports.
+      next_upper_weight+=weight*select(fraction,vec3<f32>(1.0),base>vec3<f32>(next_lower));
+    }
+    lower=next_lower;upper_weight=next_upper_weight;
+    let grid=aerosol_geometry.levels[level];
+    for(var axis=0u;axis<3u;axis++){
+      let low=lower[axis]+grid.w;
+      if((upper_weight[axis]<1.0 && (low<0 || low>=grid[axis]))
+        || (upper_weight[axis]>0.0 && (low+1<0 || low+1>=grid[axis]))){return false;}
+    }
+  }
+  let indexed=lower+vec3<i32>(params.grid_shift);
+  for(var corner=0u;corner<8u;corner++){
+    let offset=vec3<u32>((corner>>2u)&1u,(corner>>1u)&1u,corner&1u);
+    let weights=select(vec3<f32>(1.0)-upper_weight,upper_weight,offset==vec3<u32>(1u));
+    let weight=weights.x*weights.y*weights.z;if(weight==0.0){continue;}
+    let destination=indexed+vec3<i32>(offset);
+    let dense=(u32(destination.x)*params.ny+u32(destination.y))*params.nz+u32(destination.z);
+    if(!scatter_to_gas_cell(dense,volume*weight)){return false;}
+  }
+  return true;
+}
+
 fn aerosol_project_fine_node(node: vec3<i32>, volume: f32) -> bool {
   let indexed = node + vec3<i32>(aerosol_geometry.fine_grid_shift);
   if (any(indexed < vec3<i32>(0))
@@ -605,6 +656,7 @@ fn aerosol_project_fine_node(node: vec3<i32>, volume: f32) -> bool {
       * params.nz + u32(indexed.z);
     return scatter_to_gas_cell(dense, volume);
   }
+  if(params.exact_level_count>2u){return aerosol_project_adjacent_chain(node,volume);}
   // Exact geometric A from the canonical 2:1 hierarchy. No invented material
   // key or CSR field is needed. Positive support outside the admitted coarse
   // grid is rejected, not clipped and redistributed among surviving nodes.
@@ -643,7 +695,7 @@ fn scatter_aerosol_condensed_volume(
   // resets counters; the producing encoder clears them before any dispatch.
   atomicAdd(&output_control[39u], 1u);
   if (atomicLoad(&output_control[3u]) != 0u) { return; }
-  if (params.aerosol_enabled != 1u || params.aerosol_version != AEROSOL_VERSION
+  if (!aerosol_chain_geometry_ready() || params.aerosol_enabled != 1u || params.aerosol_version != AEROSOL_VERSION
     || params.aerosol_capacity > arrayLength(&aerosol_parcels) / 24u
     || aerosol_geometry.fine_nx * aerosol_geometry.fine_ny * aerosol_geometry.fine_nz
       != params.fine_grid_node_count
@@ -726,10 +778,21 @@ fn scatter_aerosol_condensed_volume(
 @compute @workgroup_size(${SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE})
 fn build_gas_free_volume(
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
+  // A1: the directory's staged consumer dispatch (words 42..44, written with
+  // the indirect arguments) admits exactly the groups the indirect launch
+  // runs, so a direct launch over a cell-capacity ceiling is equivalent.
   let linear_group = workgroup_id.x
-    + workgroup_id.y * max(gas_directory[42u], 1u);
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    gas_directory[44u] == 0u
+    || linear_group >= gas_directory[42u] * gas_directory[43u]
+  ) {
+    return;
+  }
   let cell = linear_group * WORKGROUP_SIZE + local_id.x;
   if (!directory_ready()) {
     return;
@@ -791,20 +854,26 @@ fn build_gas_free_volume(
     fail(INVALID_GEOMETRY, 19u);
     return;
   }
+  // Minimum gas volume fraction: the condensed share is capped so the gas
+  // keeps MINIMUM_GAS_FRACTION of the cell (see the constant's declaration).
+  // Overlap beyond the f32 tolerance is counted (word 20) as evidence, not
+  // rejected. The row stays exact: free == geometric - condensed_effective.
   let tolerance = max(
     params.overfill_tolerance_absolute_m3,
     geometric * params.overfill_tolerance_relative
   );
   if (condensed > geometric + tolerance) {
-    atomicStore(&output_rows[output + 3u], FAIL_CLOSED | OVERFILLED);
-    fail(OVERFILLED, 20u);
-    return;
+    atomicAdd(&output_control[20u], 1u);
   }
+  let condensed_effective = min(
+    condensed,
+    geometric * (1.0 - MINIMUM_GAS_FRACTION)
+  );
   atomicStore(&output_rows[output], bitcast<u32>(geometric));
-  atomicStore(&output_rows[output + 1u], bitcast<u32>(condensed));
+  atomicStore(&output_rows[output + 1u], bitcast<u32>(condensed_effective));
   atomicStore(
     &output_rows[output + 2u],
-    bitcast<u32>(max(0.0, geometric - condensed))
+    bitcast<u32>(geometric - condensed_effective)
   );
   atomicStore(&output_rows[output + 3u], READY | ADMITTED);
   atomicAdd(&output_control[15u], 1u);

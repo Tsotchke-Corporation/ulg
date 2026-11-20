@@ -44,8 +44,10 @@ checkpoints remain evidence, not active order.
 ## Completed Refactor Shape And Active Follow-Ons
 
 Items 1–6 and the refactor-owned portion of item 8 landed in the completed SS
-record. Item 7 remains active under `../sol-critic.md`; the third level in item
-6 remains explicitly held.
+record. Item 7 remains active under `../sol-critic.md`. The third-level hold in
+item 6 was lifted by the user on 2026-11-16: an N-level chain of 2:1 pairs for
+first-class room air (`../first-class-air.md`), with the SOL-critic Priority 3
+gate waived.
 
 1. One exact GPU particle-to-cell key emission and canonical sort/unique per
    immutable spatial epoch.
@@ -57,8 +59,8 @@ record. Item 7 remains active under `../sol-critic.md`; the third level in item
 4. Compact mechanics node/stencil view for same-level MLS-MPM/Ocean kernels.
 5. Explicit epoch-boundary scheduling for position, topology, phase/support,
    and level changes.
-6. Conservative two-level coupling and aggregate-far traversal; the third
-   level remains on hold.
+6. Conservative two-level coupling and aggregate-far traversal; generalizing
+   to an N-level 2:1 chain is active (2026-11-16).
 7. Coherent-solid body/member/contact/shape carriers and mixed solid-liquid
    coupling from `../sol-critic.md`.
 8. Render/source-family views and PeerCompute portable summaries without

@@ -29,14 +29,19 @@ export function createExtendedPhaseCaloricFixture(thermodynamics) {
     thermalConductivityProvenance: { source: 'Manufactured isolated wall-heating experiment' },
     dynamicViscosityPaS: 0, surfaceTensionNPerM: 0
   });
+  // Gas rest densities are on the standard-atmosphere basis the mechanics EOS
+  // assumes, not on each model's caloric reference pressure.
+  const gasRestDensity = (molarMassKgPerMol, temperatureK) => (
+    thermodynamics.GAS_MECHANICS_REFERENCE_PRESSURE_PA * molarMassKgPerMol
+      / (8.314462618 * temperatureK));
   const materialProperties = {
     'three-phase': { molarMassKgPerMol: 8.314462618 / 100,
       phases: [phase('solid', 2000, 1250, [0, 300]), phase('liquid', 4000, 1000, [300, 373]),
-        phase('gas', 4000, 0.1, [373, 1e6])],
+        phase('gas', 4000, gasRestDensity(8.314462618 / 100, 300), [373, 1e6])],
       transitions: [{ from: 'solid', to: 'liquid', temperatureK: 300, latentHeatJPerKg: 20000 },
         { from: 'liquid', to: 'gas', temperatureK: 373, latentHeatJPerKg: 200000 }] },
     'gas-only': { molarMassKgPerMol: 8.314462618 / 200,
-      phases: [phase('gas', 1000, 0.1, [0, 1e6])], transitions: [] }
+      phases: [phase('gas', 1000, gasRestDensity(8.314462618 / 200, 300), [0, 1e6])], transitions: [] }
   };
   const particle = (material, phaseId, u, x) => ({ material, massKg: 1, x, v: [0.5, -0.25, 0.125],
     specificInternalEnergyJPerKg: u,

@@ -138,7 +138,8 @@ test('v4 gas boundary ABI reserves the exact owner and parent bindings', () => {
       sameLevel:
         SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_SAME_LEVEL,
       fineToCoarseParentAdjoint:
-        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT
+        SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_CROSS_LEVEL_MAPPING_FINE_TO_COARSE_PARENT_ADJOINT,
+      chainAdjoint: 2
     }
   );
 });

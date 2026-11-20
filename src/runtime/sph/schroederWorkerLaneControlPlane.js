@@ -1,3 +1,7 @@
+import { cloneSchroederPhaseSlotWorkerAdmissions, schroederPhaseSlotAdmissionFingerprint } from './schroederPhaseSlotWorkerPolicy.js';
+import { THERMAL_POTENTIAL_WORKER_ACK, isThermalPotentialWorkerCandidate,
+  thermalPotentialWorkerCandidateEquals, validateThermalPotentialWorkerResult
+} from '../material/thermalPotentialWorkerProtocol.js';
 import {
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   createMlsMpmResidentStepsCommitDelta
@@ -117,6 +121,7 @@ const WORKER_ROUTE_ACTIVATION_FIELDS = Object.freeze([
   'gasBoundaryActionable',
   'explicitVacuumAmbient',
   'phaseVolumeSidecars',
+  'phaseVolumeInterfaceTransport',
   'mechanicsFieldViews'
 ]);
 const WORKER_ROUTE_ACTIVE_LAW_BLOCKERS = Object.freeze([
@@ -295,11 +300,15 @@ const WORKER_FINAL_EPOCH_SEAL_KEYS = Object.freeze([
 const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'internalPressureScale',
   'ambientPressurePa',
+  // 0 when the ambient atmosphere is explicitly simulated (room air): the
+  // transport's implicit-atmosphere buoyancy must not double-count it.
+  'ambientReferenceDensityKgPerM3',
   'externalGaugePressurePa',
   'externalGaugePressureEnabled',
   'gasPressureMechanicsBoundaryEnabled',
   'particleGasLedgerActionable',
   'mechanicsSubmitBurstSteps',
+  'tier0RealtimePacing',
   'contactSolverEnabled',
   'consumeCompactMechanicsView',
   'observeCanonicalSpatialAuthority',
@@ -376,6 +385,12 @@ function optionalPositiveFinite(value) {
  * defaults and make UI/config telemetry disagree with the executed graph.
  */
 export function createSchroederWorkerHierarchyConfig(options = {}) {
+  const phaseSlotRefinementAdmissions = options.enablePhaseSlotRefinement === true
+    ? cloneSchroederPhaseSlotWorkerAdmissions(options.phaseSlotRefinementAdmissions) : null;
+  if (phaseSlotRefinementAdmissions
+      && (options.enablePhaseVolumeMigration !== true || options.enableTwoLevelMechanics === true)) {
+    throw new TypeError('Worker phase-slot refinement requires single-level phase-volume migration');
+  }
   const selectedLevel = optionalInteger(options.selectedLevel ?? 0);
   const minLevel = optionalInteger(options.minLevel);
   const maxLevel = optionalInteger(options.maxLevel);
@@ -411,6 +426,7 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
     );
   }
   const config = {
+    ...(phaseSlotRefinementAdmissions ? { enablePhaseSlotRefinement: true, phaseSlotRefinementAdmissions } : {}),
     schema: ULG_SCHROEDER_WORKER_HIERARCHY_CONFIG_SCHEMA,
     status: 'schroeder-worker-hierarchy-config-ready',
     selectedLevel,
@@ -445,7 +461,7 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
     enablePhaseVolumeMigration:
       options.enablePhaseVolumeMigration === true
   };
-  const signature = [
+  let signature = [
     config.selectedLevel,
     config.baseGridSpacingM ?? 'default',
     config.minLevel ?? 'default',
@@ -467,6 +483,9 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
     config.enableCrossLevelCoupling ? 1 : 0,
     config.enablePhaseVolumeMigration ? 1 : 0
   ].join(':');
+  if (phaseSlotRefinementAdmissions) {
+    signature += ':' + schroederPhaseSlotAdmissionFingerprint(phaseSlotRefinementAdmissions);
+  }
   return Object.freeze({ ...config, signature });
 }
 
@@ -901,7 +920,12 @@ function exactWorkerRouteActivationReceipt(value) {
         || receipt.twoLevelMechanics
         || receipt.particleGasLedgerActionable
         || receipt.retainedProductGasBoundaryActionable
+        || receipt.phaseVolumeInterfaceTransport
       )
+    || (
+      receipt.phaseVolumeInterfaceTransport
+      && (receipt.twoLevelMechanics || !receipt.mechanicsFieldViews)
+    )
     || (
       receipt.particleGasLedgerActionable
       && !receipt.gasBoundaryActionable
@@ -1167,18 +1191,48 @@ function validateOuterPredecessorTargetToken({
   });
 }
 
+// G5: predecessor target tokens are consumed through PeerCompute's bounded
+// CAS reservation ledger, so two consumers of one token in this realm cannot
+// both pass a read-then-commit check: exactly one reservation wins and
+// commits. The ledger is the authority; the warm entry stays the receipt.
+export const ULG_SCHROEDER_TARGET_TOKEN_RESERVATION_LEDGER = 'ulg-schroeder-target-tokens';
+export const ULG_SCHROEDER_TARGET_TOKEN_RESERVATION_AUDIT_SCOPE = 'ulg-schroeder-target-token-reservations';
+
+function targetTokenReservationLedger(stateManager) {
+  if (typeof stateManager?.getReservationLedger !== 'function') return null;
+  return stateManager.getReservationLedger(ULG_SCHROEDER_TARGET_TOKEN_RESERVATION_LEDGER)
+    ?? stateManager.createReservationLedger({
+      name: ULG_SCHROEDER_TARGET_TOKEN_RESERVATION_LEDGER,
+      auditNamespace: ULG_SCHROEDER_TARGET_TOKEN_RESERVATION_AUDIT_SCOPE
+    });
+}
+
 function persistOuterPredecessorTargetTokenConsumption({
   stateManager,
   admission
 } = {}) {
   if (admission == null) return null;
   const taskId = nonEmptyString(admission.stateManagerConsumptionTaskId);
+  requireWorkerRouteReceipt(Boolean(taskId), 'predecessor-target-token-replayed');
+  const ledger = targetTokenReservationLedger(stateManager);
+  const reservation = ledger
+    ? ledger.reserve({ key: taskId, consumerId: admission.consumerScheduleId ?? 'unknown', expectedEpoch: 0 })
+    : null;
   requireWorkerRouteReceipt(
-    Boolean(taskId)
+    (ledger == null || reservation?.ok === true)
       && readStateManagerWarmEntry(stateManager, {
         taskId,
         scope: COMMIT_SCOPE
       }) == null,
+    'predecessor-target-token-replayed'
+  );
+  // Exactly-once: the reservation commits before the receipt is written. A
+  // failure after this point never makes the token available again.
+  const reservationCommit = reservation
+    ? ledger.commit(reservation.token, { admissionId: taskId })
+    : null;
+  requireWorkerRouteReceipt(
+    reservation == null || reservationCommit?.ok === true,
     'predecessor-target-token-replayed'
   );
   const payload = deepFreezeWorkerRouteValue({
@@ -2167,6 +2221,35 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
   });
 }
 
+function committedThermalPotentialAcknowledgement(stateManager, candidate, { scheduleId, laneId, stateKey }) {
+  if (candidate == null) return null;
+  candidate = cloneWorkerRouteReceipt(candidate);
+  const refuse = () => { throw new Error('G6 worker predecessor has no matching StateManager commit'); };
+  if (!isThermalPotentialWorkerCandidate(candidate) || candidate.laneId !== laneId
+    || candidate.stateKey !== stateKey || candidate.scheduleId === scheduleId) refuse();
+  const taskId = `ulg:schroeder-worker-schedule:${candidate.scheduleId}`;
+  const payload = readStateManagerWarmEntry(stateManager, { taskId, scope: COMMIT_SCOPE })?.payload;
+  const route = payload?.executionRouteReceipt, fence = payload?.gpuFence;
+  const count = payload?.completedStepCount;
+  if (payload?.schema !== ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA
+    || payload?.status !== 'worker-resident-schedule-completed' || payload?.stateKey !== stateKey
+    || !Number.isSafeInteger(count) || count <= 0 || count !== route?.execution?.requestedStepCount
+    || count !== route?.execution?.completedStepCount || route?.execution?.terminalFenceSatisfied !== true
+    || route?.scheduleId !== candidate.scheduleId || route?.laneId !== laneId || route?.stateKey !== stateKey
+    || fence?.required !== true || fence?.fenceSatisfied !== true || fence?.laneId !== laneId || fence?.stateKey !== stateKey
+    || fence?.queueFencePolicy !== QUEUE_FENCE_POLICY || fence?.status !== 'queue-work-completed'
+    || fence?.method !== 'queue.onSubmittedWorkDone' || fence?.queueCompletionStatus !== 'queue-work-completed'
+    || fence?.queueCompletionMethod !== 'queue.onSubmittedWorkDone'
+    || payload?.gpuResidentLaneRequirement?.laneId !== laneId
+    || payload?.gpuResidentLaneRequirement?.stateKey !== stateKey
+    || !thermalPotentialWorkerCandidateEquals(payload?.thermalPotential?.candidate, candidate)) refuse();
+  validateThermalPotentialWorkerResult(payload.thermalPotential, {
+    enabled: true, scheduleId: candidate.scheduleId, laneId, stateKey, route
+  });
+  return deepFreezeWorkerRouteValue({ schema: THERMAL_POTENTIAL_WORKER_ACK,
+    status: 'state-manager-committed', targetScheduleId: scheduleId, candidate: { ...candidate } });
+}
+
 export async function runSchroederWorkerLaneScheduleWithAuthority({
   computeManager,
   stateManager,
@@ -2179,6 +2262,8 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
   targetScheduleAuthority = null,
   predecessorTargetScheduleAuthority = null,
   predecessorDynamicLawObservation = null,
+  thermalPotentialEnabled = false,
+  predecessorThermalPotential = null,
   seedUploadBytes = 0,
   seedRequired = false,
   retainedBytes = 0,
@@ -2201,6 +2286,10 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
     );
   }
   const requestedStepCount = positiveInteger(stepCount, 1);
+  const thermalPotentialAcknowledgement = thermalPotentialEnabled === true
+    ? committedThermalPotentialAcknowledgement(stateManager, predecessorThermalPotential, {
+      scheduleId: resolvedScheduleId, laneId: resolvedLaneId, stateKey: resolvedStateKey })
+    : null;
   const latchedRunTargetScheduleAuthority = targetScheduleAuthority == null
     ? null
     : cloneWorkerRouteReceipt(targetScheduleAuthority);
@@ -2298,7 +2387,7 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
         // dynamic-law watch and the retained product-history live-row bound.
         // Route-execution telemetry remains separate (Tier0 still reports
         // zero hot-loop bytes), while the lease admits their additive maximum.
-        readbackBytes: 2 * Uint32Array.BYTES_PER_ELEMENT,
+        readbackBytes: 2 * Uint32Array.BYTES_PER_ELEMENT + (thermalPotentialEnabled === true ? 32 : 0),
         retainedBytes: Math.max(0, Math.round(Number(retainedBytes) || 0)),
         compactSummaryBytes: Math.max(
           terminalRefluxCompactSummaryBytes,
@@ -2310,6 +2399,7 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
     });
     const scheduleResult = await executeSchedule({
       lease,
+      thermalPotentialAcknowledgement,
       residentSequenceLaneContract,
       twoLevelTerminalRefluxReceiptRequired:
         twoLevelTerminalRefluxReceiptRequired === true
@@ -2347,6 +2437,12 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
             stateManagerConsumption:
               predecessorTargetTokenStateManagerConsumption
           });
+    const thermalPotential = validateThermalPotentialWorkerResult(scheduleResult?.thermalPotential, {
+      enabled: thermalPotentialEnabled === true, scheduleId: resolvedScheduleId,
+      laneId: resolvedLaneId, stateKey: resolvedStateKey, route: executionRouteAdmission.receipt,
+      acknowledgement: thermalPotentialAcknowledgement,
+      cancelled: scheduleResult.status === 'worker-resident-schedule-cancelled'
+    });
     const retainedBufferRefs = Array.isArray(scheduleResult?.retainedBufferRefs)
       ? [...scheduleResult.retainedBufferRefs]
       : [];
@@ -2449,6 +2545,7 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
       predecessorTargetTokenAdmission;
     commitDelta.payload.predecessorTargetTokenConsumption =
       predecessorTargetTokenConsumption;
+    commitDelta.payload.thermalPotential = thermalPotential;
     computeManager.commitDelta(commitDelta);
     const stateManagerCommit = readResidentStepsCommittedWarmDelta(stateManager, {
       delta: commitDelta,
@@ -2463,6 +2560,8 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
       );
     }
     if (
+      !workerRouteValuesEqual(stateManagerCommit.warmEntry?.payload?.thermalPotential, thermalPotential)
+      ||
       !workerRouteValuesEqual(
         stateManagerCommit.warmEntry?.payload?.executionRouteReceipt,
         executionRouteAdmission.receipt

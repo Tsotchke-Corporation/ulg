@@ -27,8 +27,36 @@ test('scenario geometry: iron cube is 1/8 the ice volume with the right masses',
   assert.ok(preflight.masses.airMassKg > 1500 && preflight.masses.airMassKg < 1525);
 });
 
-test('default cold infinite reservoirs make cold solid iron + ice energetically feasible', () => {
-  const preflight = computeThermodynamicPreflight(createSphPhaseScenario());
+test('honest finite walls (default) close the box: interior and walls share one temperature', () => {
+  const scenario = createSphPhaseScenario();
+  const preflight = computeThermodynamicPreflight(scenario);
+  assert.equal(preflight.boundary.model, 'finite-heat-capacity-lumped-face');
+  assert.equal(scenario.wallReservoirAuthority.finiteCapacity, true);
+  assert.equal(scenario.wallReservoirAuthority.exchangeEnabled, true);
+  assert.equal(preflight.boundary.wallMaterial, 'fe');
+  assert.equal(preflight.boundary.wallThicknessM, 0.002);
+  // Each face's capacity derives from the wall material: rho c A t.
+  const edge = scenario.box.dimensionsM[0];
+  const expectedCapacity = 7874 * 449 * edge * edge * 0.002;
+  for (const capacity of Object.values(preflight.boundary.wallHeatCapacitiesJPerK)) {
+    assert.ok(Math.abs(capacity - expectedCapacity) <= 1e-9 * expectedCapacity);
+  }
+  // Energy closes exactly: what the interior gives up, the faces hold.
+  const ledgerSum = preflight.energyBudget.wallLedger.reduce((s, w) => s + w.heatJ, 0);
+  assert.ok(Math.abs(ledgerSum - preflight.energyBudget.heatExportedToWallsJ)
+    <= 1e-6 * Math.abs(preflight.energyBudget.heatExportedToWallsJ));
+  // The faces start cold (-40 F) and end at the mixed temperature, so all are sinks.
+  assert.ok(preflight.boundary.asymptoticInteriorTempK > 233.15);
+  assert.equal(preflight.boundary.asymptoticInteriorTempK, preflight.boundary.finiteWallEquilibriumK);
+  assert.ok(preflight.energyBudget.wallLedger.every((w) => w.role === 'sink'));
+  // A sealed finite box cannot cool molten iron + ice below freezing.
+  assert.equal(preflight.feasibility.feasible, false);
+});
+
+test('cold infinite reservoirs make cold solid iron + ice energetically feasible', () => {
+  const preflight = computeThermodynamicPreflight(createSphPhaseScenario({
+    wallModel: 'infinite-fixed-temperature-reservoir'
+  }));
   assert.equal(preflight.boundary.model, 'infinite-fixed-temperature-reservoir');
   assert.ok(Math.abs(preflight.boundary.asymptoticInteriorTempK - 233.15) < 1e-9);
   assert.equal(preflight.feasibility.feasible, true);
@@ -91,7 +119,8 @@ test('preflight is evidence-only and never overclaims, including the ABI artifac
   });
   assert.equal(artifact.schema, ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA);
   assert.equal(artifact.scenarioId, SPH_PHASE_SCENARIO_ID);
-  assert.equal(artifact.status, 'preflight-feasible');
+  // The artifact carries the preflight's own verdict (finite walls by default).
+  assert.equal(artifact.status, preflight.status);
   for (const flag of ['closureBacked', 'scientificValidation', 'fullPhysicsValidation', 'materialValidation', 'eosValidation', 'sphValidation', 'phaseChangeValidation']) {
     assert.equal(artifact[flag], false, `artifact ${flag} must be false`);
   }

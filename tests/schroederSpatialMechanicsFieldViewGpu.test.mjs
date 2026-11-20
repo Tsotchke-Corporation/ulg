@@ -550,7 +550,7 @@ test('packed mechanics-field scratch keys preserve public x4 order and fail clos
 test('directory-v2 mechanics fields omit exact-zero quadratic support before clipping', () => {
   assert.match(
     schroederSpatialMechanicsFieldViewV2Wgsl,
-    /fn emit_field_candidates_v2\([\s\S]*let support_weight =[\s\S]*if \(support_weight == 0\.0\) \{[\s\S]*field_write_invalid_candidate\(candidate_index\);[\s\S]*continue;[\s\S]*let node_index = field_grid_index/,
+    /fn emit_field_candidates_v2\([\s\S]*let support_weight =[\s\S]*if \(!\(support_weight >= bitcast<f32>\(0x21800000u\)\)\) \{[\s\S]*field_write_invalid_candidate\(candidate_index\);[\s\S]*continue;[\s\S]*let node_index = field_grid_index/,
     'directory-v2 must cull mathematical zero support before clipping'
   );
 
@@ -786,6 +786,10 @@ test('directory-v2 mechanics field treats valid inactive and other-level rows as
 });
 
 test('directory-v2 mechanics-field encode uses GPU-only A authority with zero hot-path allocations', async () => {
+  // Both launch modes: forced indirect, and A1's direct launches.
+  for (const forceIndirect of [true, false]) {
+  if (forceIndirect) globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   const device = createFakeDevice();
   const fixture = createDirectoryV2MechanicsParent(device, {
     physicalSourceCount: 4,
@@ -919,15 +923,24 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
   const assemblePass = fieldPasses.find(({ descriptor }) => (
     descriptor.label?.endsWith('AssembleKeysV2')
   ));
-  assert.deepEqual(sourcePass.commands.at(-1).dispatchIndirect, {
-    buffer: fixture.activeSourceView.activeSourceViewBuffer,
-    byteOffset: fixture.activeSourceView.activeDispatchOffsetBytes
-  });
-  for (const pass of [stencilPass, assemblePass]) {
-    assert.deepEqual(pass.commands.at(-1).dispatchIndirect, {
+  if (forceIndirect) {
+    assert.deepEqual(sourcePass.commands.at(-1).dispatchIndirect, {
       buffer: fixture.activeSourceView.activeSourceViewBuffer,
-      byteOffset: fixture.activeSourceView.candidateDispatchOffsetBytes
+      byteOffset: fixture.activeSourceView.activeDispatchOffsetBytes
     });
+    for (const pass of [stencilPass, assemblePass]) {
+      assert.deepEqual(pass.commands.at(-1).dispatchIndirect, {
+        buffer: fixture.activeSourceView.activeSourceViewBuffer,
+        byteOffset: fixture.activeSourceView.candidateDispatchOffsetBytes
+      });
+    }
+  } else {
+    // A1: direct launches over host ceilings; the V2 kernels admit only the
+    // view's staged groups (field_staged_linear_invocation).
+    for (const pass of [sourcePass, stencilPass, assemblePass]) {
+      assert.equal(pass.commands.at(-1).dispatchIndirect, undefined);
+      assert.ok(Array.isArray(pass.commands.at(-1).dispatch));
+    }
   }
   const gpuCountBinding = device.bindGroups.find(({ label }) => (
     label?.endsWith('gpu-count-prepare-bind-group')
@@ -975,6 +988,10 @@ test('directory-v2 mechanics-field encode uses GPU-only A authority with zero ho
 
   assert.equal(await runtime.releaseExecutionAfter(field), true);
   assert.equal(runtime.destroy(), true);
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
+  }
 });
 
 test('mechanics-field arenas reuse exact immutable bind groups', () => {
@@ -1172,6 +1189,10 @@ test('directory-v2 topology successor copies immutable topology into fresh mutab
 });
 
 test('mechanics-field runtime publishes GPU-authored sparse work evidence under a small device limit', async () => {
+  // Both launch modes: forced indirect, and A1's direct launches.
+  for (const forceIndirect of [true, false]) {
+  if (forceIndirect) globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   const device = createFakeDevice({
     limits: { maxComputeWorkgroupsPerDimension: 4 }
   });
@@ -1315,13 +1336,20 @@ test('mechanics-field runtime publishes GPU-authored sparse work evidence under 
         commands.at(-1)?.dispatchIndirect?.byteOffset
       ])
   );
-  assert.deepEqual(indirectDispatchBySuffix, {
+  // Under a small device limit the direct ceilings may not fit one
+  // dimension; those launches stay indirect (exact either way).
+  const expectedIndirect = {
     EmitCandidatesV2: generation.activeSourceView.activeDispatchOffsetBytes,
     MaterializeStencilMapV2:
       generation.activeSourceView.candidateDispatchOffsetBytes,
     AssembleKeysV2:
       generation.activeSourceView.candidateDispatchOffsetBytes
-  });
+  };
+  for (const [suffix, offset] of Object.entries(indirectDispatchBySuffix)) {
+    if (forceIndirect) assert.equal(offset, expectedIndirect[suffix]);
+    else assert.ok(offset === undefined || offset === expectedIndirect[suffix]);
+  }
+  if (forceIndirect) assert.deepEqual(indirectDispatchBySuffix, expectedIndirect);
 
   const paramsBuffer = field.ownerRuntime.allocationEntries().find(
     ({ role, arenaIndex }) => (
@@ -1344,6 +1372,10 @@ test('mechanics-field runtime publishes GPU-authored sparse work evidence under 
     true
   );
   assert.equal(await generation.releasePromise, true);
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
+  }
 });
 
 test('mechanics-field runtime rejects only work beyond two-dimensional dispatch capacity', () => {

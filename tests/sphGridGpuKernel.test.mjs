@@ -3798,8 +3798,14 @@ test('single-level S9-A/B surface stress runs the standalone 18-central-bond lif
     lifecycleTrace.map(({ entryPoint }) => entryPoint),
     expectedLifecycle
   );
+  // A1: the field view's consumer capacity fits one dispatch dimension, so the
+  // sequence launches its consumers directly and the kernels guard on the
+  // staged dispatch snapshot copied into params bytes 240..251.
+  assert.equal(update.mechanicsFieldConsumerDispatchMode, 'direct-1d-snapshot-guarded');
+  assert.ok(Number.isSafeInteger(update.mechanicsFieldConsumerDirectWorkgroups)
+    && update.mechanicsFieldConsumerDirectWorkgroups > 0);
   assert.equal(
-    lifecycleTrace.every(({ kind }) => kind === 'indirect'),
+    lifecycleTrace.every(({ kind }) => kind === 'direct'),
     true
   );
   assert.equal(
@@ -8923,7 +8929,10 @@ test('optional P2G device-loss notifications outlive return, error and output de
           f.settle(lossOutcome, loss);
           const chains = await f.flush();
           assert.deepEqual(calls, [{ info: loss, receiver: undefined }]);
-          assert.deepEqual(chains, [{ value: undefined }]);
+          // A provided device has one per-device reaction (sphDeviceLossRelay)
+          // and no per-call catch chain; an acquired device keeps its
+          // acquisition-time chain.
+          assert.deepEqual(chains, route === 'provided' ? [] : [{ value: undefined }]);
           assert.equal(f.counters.destroys, terminal === 'destroyed-output' ? 1 : 0);
           assert.equal(f.runnerCalls.length, 1, 'late notification does not rerun work');
         });
@@ -8968,10 +8977,10 @@ test('optional P2G device-loss subscriptions and in-flight native rejection rema
           assert.equal(completed.error?.status, 'canonical-spatial-webgpu-device-lost');
           await f.flush();
           assert.deepEqual(calls, [loss]);
-          // The provided-device .catch runs one microtask later than fulfillment:
-          // an already-rejected promise reaches the runner before the loss check.
-          const expectedRunnerCalls = phase === 'during-runner'
-            || (route === 'provided' && lossOutcome === 'reject') ? 1 : 0;
+          // The per-device reaction observes fulfillment and rejection in the
+          // same microtask, so an already-settled loss always stops the step
+          // before the runner.
+          const expectedRunnerCalls = phase === 'during-runner' ? 1 : 0;
           assert.equal(f.runnerCalls.length, expectedRunnerCalls);
           // P2G has never destroyed the returned grid at this loss-check seam.
           assert.equal(f.counters.destroys, 0);
@@ -9019,9 +9028,9 @@ test('optional P2G device-loss throw forwarding preserves plain calls and ignore
       assert.deepEqual(calls, mode === 'rejected-callback-throws'
         ? [{ info: loss, receiver: undefined }]
         : [{ info: loss, receiver: undefined }, { info: first, receiver: undefined }]);
-      assert.deepEqual(chains, mode === 'fulfilled-first-throws'
-        ? [{ value: undefined }]
-        : [{ error: mode === 'fulfilled-both-throw' ? second : first }]);
+      // The forwarded call sequence is unchanged; a second throw is dropped
+      // instead of rejecting a per-call chain.
+      assert.deepEqual(chains, []);
       assert.equal(adoptions, 0, 'relay must not return/adopt a notifier thenable');
       assert.equal(f.counters.destroys, 0);
       assert.equal(f.runnerCalls.length, 1);

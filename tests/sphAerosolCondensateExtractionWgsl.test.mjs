@@ -15,6 +15,51 @@ import { sphGasConstitutiveWgsl } from '../ulg-gpu-abi/src/sphGasConstitutiveWgs
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
+// The interface phase-front skin conversion (plan/todo/interface-resolution.md)
+// is a deliberate, enumerated extension of the transfer: strip its additions
+// and map its one restructured block back to the original text, so the hash
+// below still pins every pre-existing line of transfer arithmetic.
+const ORIGINAL_PHASE_AGGREGATE_COMPONENT = `
+    let fraction = max(fractions[target_phase - 1u], 0.0);
+    if (!(fraction > params.fraction_activation_epsilon)) { continue; }
+    let component_mass = s0.w * fraction;
+    let mechanics_row4 = source_mechanics[source_index * 8u + 4u];
+    let component_current_volume = mechanics_row4.z * mechanics_row4.w * fraction;
+    let component_energy = source_component_energy(source_index, target_phase).x;
+    aggregate.mass = aggregate.mass + component_mass;
+    aggregate.current_volume = aggregate.current_volume + component_current_volume;
+    aggregate.first_moment = aggregate.first_moment + s0.xyz * component_mass;
+    aggregate.momentum = aggregate.momentum + s1.xyz * component_mass;
+    aggregate.internal_energy = aggregate.internal_energy + component_energy * component_mass;
+    aggregate.source_kinetic_energy = aggregate.source_kinetic_energy
+      + 0.5 * component_mass * dot(s1.xyz, s1.xyz);
+    aggregate.temperature_mass = aggregate.temperature_mass + t0.z * component_mass;
+`;
+function stripInterfaceFrontExtension(source) {
+  const steps = [
+    [/  \/\/ Interface phase-front skin conversion \(plan[\s\S]*?front_row_words: u32,\n/, ''],
+    // Explicit-branch bulk fusion and boiling (first-class air): the
+    // transfer-local closure tail, the conversions ahead of the original skin
+    // function (renamed skin_front_conversion), and the extended count loop.
+    [/  \/\/ Transfer-local closure tail[\s\S]*?_closure_pad: u32,\n/, ''],
+    [/struct FrontConversion \{[\s\S]*?\n\};\n/, ''],
+    [/@group\(0\) @binding\(9\) var<storage, read> interface_front: array<u32>;\n/, ''],
+    [/\/\/ A carrier converts at most once per step[\s\S]*?(?=fn skin_front_conversion\()/, ''],
+    [/fn skin_front_conversion\(/, 'fn front_conversion('],
+    [/\/\/ Interface phase-front skin conversion\. The thermal[\s\S]*?\nfn front_conversion\([\s\S]*?\n}\n/, ''],
+    [/    let conversion = front_conversion\(source_index\);\n    if \(conversion\.ready == 1u\) \{\n      let converted_bit[\s\S]*?\n    \}\n(?=  \}\n  return phase_set;)/, ''],
+    [/\n    var fraction = max\(fractions\[target_phase - 1u\], 0\.0\);[\s\S]*?aggregate\.temperature_mass = aggregate\.temperature_mass \+ component_temperature \* component_mass;\n/, ORIGINAL_PHASE_AGGREGATE_COMPONENT],
+    [/  for \(var phase_id = 1u; phase_id <= 4u; phase_id = phase_id \+ 1u\) \{\n    let source = phase_lane_index\(lineage_index, phase_id\);\n    if \(skin_front_conversion[\s\S]*?\n    \}\n  \}\n/, '']
+  ];
+  let stripped = source;
+  for (const [pattern, replacement] of steps) {
+    const next = stripped.replace(pattern, replacement);
+    assert.notEqual(next, stripped, `interface-front extension step ${pattern} must match exactly once`);
+    stripped = next;
+  }
+  return stripped;
+}
+
 test('thermodynamics extraction preserves the existing helper and all remaining transfer arithmetic', () => {
   const helper = sphPhaseCarrierThermodynamicsWgsl.slice(
     sphPhaseCarrierThermodynamicsWgsl.indexOf('// Resolve the pressure-adjusted plateau')
@@ -27,7 +72,7 @@ test('thermodynamics extraction preserves the existing helper and all remaining 
   // computed from the implementation under test.
   assert.equal(sha256(helper), 'f5d44b3944bed082134a13abba94e60b1d710a43fb7383ba57924bbd7033f99e');
   assert.equal(
-    sha256(sphPhaseCarrierTransferWgsl.replace(helper, '').replace(sphGasConstitutiveWgsl, '')
+    sha256(stripInterfaceFrontExtension(sphPhaseCarrierTransferWgsl).replace(helper, '').replace(sphGasConstitutiveWgsl, '')
       .replace(/fn closure_sound_speed\([\s\S]*?\n}\n/, '')
       .replace('phases: LineagePhases, lineage_index: u32', 'phases: LineagePhases')
       .replaceAll('lineage_mechanics_valid(phases, lineage_index)', 'lineage_mechanics_valid(phases)')

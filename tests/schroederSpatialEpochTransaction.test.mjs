@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createSchroederSpatialCompositeMechanicsGpu, acquireSchroederNativePublication } from '../src/runtime/sph/schroederSpatialCompositeMechanicsGpu.js';
+import { runMlsMpmP2gGridProjectionWebGpu } from '../src/runtime/sph/sphGridGpuKernel.js';
+import { ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
 
 import {
   SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY,
@@ -14,6 +19,8 @@ import {
   abortSchroederSpatialEpochTransaction,
   commitSchroederSpatialEpochTransaction,
   createSchroederSpatialEpochTransaction,
+  createSchroederSingleLevelQueueOrderedCleanupCapability,
+  resolveSchroederSpatialMechanicsChainAuthority,
   quarantineSchroederSpatialEpochTransactionLawInputs,
   recordSchroederSpatialEpochTransactionLegacyLookup,
   resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority,
@@ -206,7 +213,8 @@ function twoLevelFixture({
   phaseVolumeInterfaceProposalEnabled = false,
   aggregateViewEnabled = false,
   mechanicsAuthorityEnabled = true,
-  mechanicsLevelCount = 2
+  mechanicsLevelCount = 2,
+  nativeP2g = false
 } = {}) {
   const device = createLiveFakeDevice();
   const particleCount = 2;
@@ -253,7 +261,7 @@ function twoLevelFixture({
     levelEpoch: 29,
     supportEpoch: 31,
     minLevel: 0,
-    maxLevel: mechanicsLevelCount > 1 ? 1 : 0,
+    maxLevel: Math.max(0, mechanicsLevelCount - 1),
     chartId: 0,
     baseGridSpacingM: 0.25
   };
@@ -284,26 +292,14 @@ function twoLevelFixture({
       : null,
     particleIdentityStrideWords: 1,
     particleBufferSet: aggregateViewEnabled ? sphParticleUpload : null,
-    mechanicsLevels: mechanicsAuthorityEnabled ? [
-      {
-        selectedLevel: 0,
-        mechanicsGrid: {
-          gridNodeCount: 512,
-          gridDims: [8, 8, 8],
-          gridShift: 2,
-          gridSpacingM: 0.25
-        }
-      },
-      {
-        selectedLevel: 1,
-        mechanicsGrid: {
-          gridNodeCount: 125,
-          gridDims: [5, 5, 5],
-          gridShift: 2,
-          gridSpacingM: 0.5
-        }
-      }
-    ].slice(0, mechanicsLevelCount) : [],
+    mechanicsLevels: mechanicsAuthorityEnabled ? Array.from({ length: mechanicsLevelCount }, (_, selectedLevel) => {
+      const n = nativeP2g ? Math.round(1 / (0.25 * 2**selectedLevel)) + 5
+        : selectedLevel === 0 ? 8 : 5;
+      return { selectedLevel, mechanicsGrid: {
+        gridNodeCount: n**3, gridDims: [n,n,n], gridShift: nativeP2g ? 1 : 2,
+        gridSpacingM: 0.25 * 2**selectedLevel
+      } };
+    }) : [],
     phaseVolumeSidecarsEnabled: mechanicsAuthorityEnabled,
     phaseVolumeReceiptEnabled,
     phaseVolumeInterfaceProposalEnabled
@@ -777,6 +773,351 @@ test('spatial epoch transaction admits one exact two-level generation only by ex
   });
 });
 
+test('explicit chain authority captures all pairs and is valid only between P2G and G2P', () => {
+  for (const mechanicsLevelCount of [2, 3, 6]) {
+    const f = twoLevelFixture({ mechanicsLevelCount, phaseVolume: true });
+    assert.equal(f.generation.ready, true, f.generation.reason);
+    const transaction = createSchroederSpatialEpochTransaction({ ...f, mechanicsChainAuthoritative: true });
+    const options = { device: f.device, generation: f.generation };
+    assert.equal(transaction.twoLevelAuthoritative, false);
+    assert.equal(transaction.mechanicsChainAuthoritative, true);
+    assert.equal(transaction.mechanicsLevelCount, mechanicsLevelCount);
+    assert.equal(summarizeSchroederSpatialEpochTransaction(transaction).mechanicsLevelCount, mechanicsLevelCount);
+    assert.throws(() => resolveSchroederSpatialMechanicsChainAuthority(transaction, options),
+      { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_LIFECYCLE' });
+    admitSchroederSpatialEpochTransactionReader(transaction, { ...f,
+      readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+      phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION });
+    const chain = resolveSchroederSpatialMechanicsChainAuthority(transaction, options);
+    assert.equal(Object.isFrozen(chain), true);
+    assert.equal(chain.pairAuthorities.length, mechanicsLevelCount - 1);
+    for (const [index, pair] of chain.pairAuthorities.entries()) {
+      assert.equal(pair.parentFieldView, f.generation.mechanicsAdjacentLevelPairs[index].parentFieldView);
+      assert.equal(pair.fineFieldView, f.generation.mechanicsLevelViews[index].mechanicsFieldView);
+      assert.equal(pair.coarseFieldView, f.generation.mechanicsLevelViews[index+1].mechanicsFieldView);
+      assert.equal(chain.phaseVolumeReceipts[index].mechanicsFieldView, pair.fineFieldView);
+    }
+    assert.throws(() => createSchroederSingleLevelQueueOrderedCleanupCapability(transaction,
+      { ...f, readbackMode: 'no-full-readback' }),
+      { code: 'ERR_SCHROEDER_SINGLE_LEVEL_QUEUE_ORDERED_CLEANUP_AUTHORITY' });
+    admitSchroederSpatialEpochTransactionReader(transaction, { ...f,
+      readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+      phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT });
+    assert.throws(() => resolveSchroederSpatialMechanicsChainAuthority(transaction, options),
+      { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_LIFECYCLE' });
+    abortSchroederSpatialEpochTransaction(transaction);
+  }
+});
+
+test('cross-level transport binds original sources and keeps its buffers until confirmed consumer retirement', async () => {
+  const { prepareSchroederChainCrossTransport, resolveSchroederChainCrossTransport } =
+    await import('../src/runtime/sph/schroederSpatialChainCrossTransportGpu.js');
+  const { buildMlsMpmMechanicsMaterialTable } = await import('../src/runtime/sph/sphMechanicsMaterialTable.js');
+  const { uploadMlsMpmMechanicsMaterialPhaseRecords } = await import('../src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
+  const f = twoLevelFixture({ mechanicsLevelCount: 3, phaseVolume: true });
+  f.device.createBindGroupLayout = d => d;
+  f.device.createPipelineLayout = d => d;
+  const transaction = createSchroederSpatialEpochTransaction({ ...f, mechanicsChainAuthoritative: true });
+  admitSchroederSpatialEpochTransactionReader(transaction, { ...f,
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION });
+  const table = buildMlsMpmMechanicsMaterialTable({ gas: { molarMassKgPerMol: 0.028,
+    phases: [{ name: 'gas', densityKgPerM3: 1, cpJPerKgK: 1000,
+      dynamicViscosityPaS: 0.00001, temperatureRange: [100, 1000] }] } });
+  const upload = uploadMlsMpmMechanicsMaterialPhaseRecords(f.device, table);
+  const laws = f.generation.mechanicsLevelViews.map(() => ({ mechanicsMaterialTable: table,
+    mechanicsMaterialPhaseUpload: upload, phaseVolumeInterfaceTransportRequired: true, phaseVolumePressureScale: 0 }));
+  const prepare = localLawInputs => prepareSchroederChainCrossTransport({ device: f.device, transaction, localLawInputs });
+  const allocated = [], createBuffer = f.device.createBuffer.bind(f.device);
+  f.device.createBuffer = descriptor => { const buffer = createBuffer(descriptor); allocated.push(buffer); return buffer; };
+  assert.throws(() => prepare(laws), /ten storage bindings/);
+  f.device.limits.maxStorageBuffersPerShaderStage = 10;
+  for (const change of [{ phaseVolumePressureScale: 1 }, { phaseVolumeInterfaceTransportRequired: false },
+    { phaseVolumeDragScale: 2 }, { mechanicsMaterialTable: { ...table } }]) {
+    assert.throws(() => prepare(laws.map((law, i) => i === 1 ? { ...law, ...change } : law)), /common explicit phase laws/);
+  }
+  assert.equal(allocated.length, 0, 'unsupported laws refuse before allocating or acquiring a lease');
+  const handle = prepare(laws), owner = resolveSchroederChainCrossTransport(handle, f.device, transaction);
+  assert.throws(() => resolveSchroederChainCrossTransport({ ...handle }, f.device, transaction), /original phase\/source owner/);
+  assert.throws(() => resolveSchroederChainCrossTransport(handle, {}, transaction), /original phase\/source owner/);
+  assert.throws(() => resolveSchroederChainCrossTransport(handle, f.device, { ...transaction }), /original phase\/source owner/);
+  assert.throws(() => resolveSchroederChainCrossTransport(handle, f.device, transaction,
+    owner.laws.map((law, i) => i === 1 ? { ...law, phaseVolumeDragScale: 2 } : law)), /original phase\/source owner/);
+  const records = upload.recordsBuffer;
+  upload.recordsBuffer = f.buffer('foreign-material-records');
+  assert.throws(() => owner.validate(), /material or source authority changed/);
+  upload.recordsBuffer.destroy(); upload.recordsBuffer = records;
+  const original = table.records[0]; table.records[0] = original + 1;
+  assert.throws(() => owner.validate(), /material or source authority changed/);
+  table.records[0] = original;
+  owner.validate();
+  owner.encodeMoments(createFakeEncoder());
+  assert.throws(() => owner.encodeMoments(createFakeEncoder()), /already encoded/);
+  owner.submitted();
+  assert.throws(() => owner.submitted(), /stale/);
+  await assert.rejects(handle.retire(), /existing consumer fence/);
+  await assert.rejects(handle.retire(Promise.reject(new Error('cross consumer fence failed'))), /cross consumer fence failed/);
+  assert.equal(owner.closed, false);
+  const liveBuffers = allocated.filter(buffer => !buffer.destroyed);
+  assert.ok(liveBuffers.length > 0);
+  let finish;
+  const retirement = handle.retire(new Promise(resolve => { finish = resolve; }));
+  assert.ok(liveBuffers.every(buffer => !buffer.destroyed));
+  finish(); await retirement;
+  assert.ok(liveBuffers.every(buffer => buffer.destroyed));
+  assert.throws(() => resolveSchroederChainCrossTransport(handle, f.device, transaction), /original phase\/source owner/);
+  upload.destroyMechanicsMaterialPhaseUpload();
+  abortSchroederSpatialEpochTransaction(transaction);
+});
+
+test('composite mechanics binds every current level and retains its arena until queue retirement', async () => {
+  const f = twoLevelFixture({ mechanicsLevelCount: 6, phaseVolume: true, nativeP2g: true });
+  f.device.createBindGroupLayout = d => d;
+  f.device.createPipelineLayout = d => d;
+  Object.assign(f.sphParticleUpload, {schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    stateBufferByteLength:64, thermoBufferByteLength:96, identityBufferByteLength:8});
+  Object.assign(f.mlsMpmParticleUpload, {schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status:'webgpu-uploaded', particleCount:2, mechanicsStrideBytes:128, mechanicsBufferByteLength:256});
+  const transaction = createSchroederSpatialEpochTransaction({ ...f, mechanicsChainAuthoritative: true });
+  admitSchroederSpatialEpochTransactionReader(transaction, { ...f,
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION });
+  const runtime = createSchroederSpatialCompositeMechanicsGpu(f.device, {
+    parentFieldCapacities: f.generation.mechanicsAdjacentLevelPairs.map(p => p.parentFieldView.parentFieldCapacity),
+    nativeFieldCapacities: f.generation.mechanicsLevelViews.map(v=>v.mechanicsFieldView.fieldCapacity),
+    arenaCount: 1
+  });
+  const encode = () => runtime.encode(createFakeEncoder(), { transaction });
+  assert.throws(encode, /P2G momentum/);
+  const fields=f.generation.mechanicsLevelViews.map(v => v.mechanicsFieldView);
+  // Exercise the real producer registration against a protocol-only device.
+  // Physics assertions remain in the native GPU matrix.
+  const p2gProjections=[];
+  const project = spec => runMlsMpmP2gGridProjectionWebGpu({device:f.device,
+      sphParticleState:{schema:ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,particleCount:2},
+      mlsMpmParticleState:{schema:ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,particleCount:2},
+      sphParticleUpload:f.sphParticleUpload,mlsMpmParticleUpload:f.mlsMpmParticleUpload,
+      schroederSpatialEpochGeneration:f.generation,canonicalSpatialRequired:true,
+      schroederSelectedLevel:spec.selectedLevel,mechanicsFieldMode:'required',
+      gridSpacingM:0.25 * 2**spec.selectedLevel,boxDimsM:[1,1,1],
+      dt:0.001,internalPressureScale:0,readbackMode:'no-full-readback'});
+  for (const spec of fields) p2gProjections.push(await project(spec));
+  const first=encode();
+  assert.equal(first.pairs.length,5);
+  assert.equal(first.gpuBufferCreationCountDuringEncode,0);
+  for (let i=1; i<5; i++) assert.equal(first.pairs[i].sourceStateBuffer,first.pairs[i-1].stateBuffer);
+  assert.equal(runtime.ownsExecution({...first}),false);
+  const pending=fields[3].ownerRuntime.reserveStateMutation(fields[3], {
+    expectedOrdinal: 1, expectedEncoding: 1, outputEncoding: 2, operation: 'test-host-protocol'
+  });
+  assert.equal(runtime.ownsExecution(first),false);
+  assert.throws(() => runtime.markExecutionSubmitted(first),/stale/);
+  fields[3].ownerRuntime.discardStateMutation(pending,{discardedEncoder:true});
+  assert.equal(runtime.ownsExecution(first),true);
+  assert.throws(() => runtime.discardExecution(first),/discarded encoder/);
+  runtime.discardExecution(first,{discardedEncoder:true});
+  const forceInputs={dt:0.001,gravityMPerS2:[0,-9.81,0],boxDimsM:[32,32,32],
+    wallsEnabled:false,contactEnabled:false,cflFactor:0.4,
+    wallBarrierElasticStiffnessNPerM:0,wallBarrierContactScale:1,wallBarrierMinGapM:0.0001};
+  for (const bad of [{...forceInputs,gravityMPerS2:null},{...forceInputs,dt:0},
+    {...forceInputs,wallsEnabled:undefined},{...forceInputs,cflFactor:Infinity}]) {
+    assert.throws(()=>runtime.encode(createFakeEncoder(),{transaction,forceInputs:bad}),/Chain force/);
+  }
+  assert.throws(()=>runtime.encode(createFakeEncoder(),{transaction,forceInputs}),/exact submitted native P2G/);
+  const second=runtime.encode(createFakeEncoder(),{transaction,forceInputs,p2gProjections});
+  const exactFirstProjection=p2gProjections[0];
+  p2gProjections[0]={...exactFirstProjection};
+  assert.equal(runtime.ownsExecution(second),true,'caller array cannot replace retained producers');
+  p2gProjections[0]=exactFirstProjection;
+  const productDispatch=exactFirstProjection.residentProductMassProductEventDispatchMode;
+  exactFirstProjection.residentProductMassProductEventDispatchMode='forged-isolation';
+  assert.equal(runtime.ownsExecution(second),false,'product-source isolation belongs to the original P2G');
+  exactFirstProjection.residentProductMassProductEventDispatchMode=productDispatch;
+  assert.equal(runtime.ownsExecution(second),true);
+  assert.equal(second.correction.nativeStates.length,6);
+  assert.equal(second.correction.updatedPairs.length,5);
+  assert.equal(Object.isFrozen(second.correction.forceInputs.gravityMPerS2),true);
+  forceInputs.gravityMPerS2[1]=0;
+  assert.equal(second.correction.forceInputs.gravityMPerS2[1],Math.fround(-9.81));
+  second.correction.nativeStates[3].stateBuffer.destroyed=true;
+  assert.equal(runtime.ownsExecution(second),false);
+  second.correction.nativeStates[3].stateBuffer.destroyed=false;
+  assert.equal(second.pairs[0].stateBuffer,first.pairs[0].stateBuffer);
+  assert.ok(second.completionOrdinal>first.completionOrdinal);
+  runtime.markExecutionSubmitted(second);
+  assert.throws(() => runtime.markExecutionSubmitted(second),/stale/);
+  assert.throws(encode,/backpressure/);
+  assert.throws(() => runtime.destroy(),/live executions/);
+  f.device.queue.onSubmittedWorkDone=()=>undefined;
+  await assert.rejects(runtime.releaseExecutionAfter(second),/completion evidence/);
+  assert.throws(encode,/backpressure/);
+  f.device.queue.onSubmittedWorkDone=()=>Promise.reject(new Error('test fence failed'));
+  await assert.rejects(runtime.releaseExecutionAfter(second),/test fence failed/);
+  assert.equal(runtime.isExecutionSubmitted(second),true);
+  assert.throws(encode,/backpressure/);
+  let finish;
+  f.device.queue.onSubmittedWorkDone=()=>new Promise(resolve=>{finish=resolve;});
+  const release=runtime.releaseExecutionAfter(second);
+  assert.equal(runtime.releaseExecutionAfter(second),release);
+  assert.equal(second.released,false);
+  finish();
+  assert.equal(await release,true);
+  assert.equal(second.released,true);
+  assert.equal(runtime.ownsExecution(second),false);
+  // A real replacement P2G on the same field invalidates the old producer,
+  // even though its public buffer, timestep and grid still match.
+  const replacement=await project(fields[0]);
+  assert.throws(()=>runtime.encode(createFakeEncoder(),{transaction,forceInputs,p2gProjections}),
+    /exact submitted native P2G/);
+  p2gProjections[0]=replacement;
+  const third=runtime.encode(createFakeEncoder(),{transaction,forceInputs,p2gProjections});
+  runtime.markExecutionSubmitted(third);
+  await assert.rejects(runtime.publishNativeState(third,{localLawInputs:[{}]}),/one local law declaration/);
+  await assert.rejects(runtime.publishNativeState(third,{localLawInputs:fields.map(()=>({
+    phaseVolumeInterfaceTransportRequired:true
+  }))}),/original pre-P2G topology family/);
+  await assert.rejects(runtime.publishNativeState(third,{localLawInputs:fields.map(()=>({
+    gasPressureMechanicsScale:NaN
+  }))}),/finite and nonnegative/);
+  assert.equal(fields.every(field=>!field.ownerRuntime.stateMutationState(field).pending),true,
+    'invalid local laws do not acquire any native mutation');
+  f.device.queue.onSubmittedWorkDone=()=>Promise.resolve();
+  let publicationSubmits=0,retirementRefused;
+  f.device.queue.submit=()=>{
+    if(publicationSubmits++===0) {
+      assert.equal(fields.every(field=>field.ownerRuntime.stateMutationState(field).pending),true,
+        'every level reserved before the first native publication');
+      retirementRefused=runtime.releaseExecutionAfter(third).then(()=>false,()=>true);
+    }
+  };
+  const publicationPending=runtime.publishNativeState(third);
+  await assert.rejects(runtime.publishNativeState(third),/unconsumed submitted chain/);
+  const publication=await publicationPending;
+  assert.equal(publication.updates.length,6);
+  for(const update of publication.updates) {
+    assert.equal(update.mechanicsFieldGridUpdateHotPathAllocationCount,0);
+    assert.equal(update.mapAsyncCount,0);
+    assert.equal(update.hostQueueFenceCount,0);
+  }
+  assert.equal(publicationSubmits,6);
+  assert.equal(await retirementRefused,true);
+  assert.equal(fields.every(field=>field.ownerRuntime.stateMutationState(field).encoding===2),true);
+  await assert.rejects(runtime.publishNativeState(third),/unconsumed submitted chain/);
+  const consumerOptions={...f,transaction};
+  assert.throws(()=>acquireSchroederNativePublication({...publication},consumerOptions),/genuine live/);
+  const oldDt=publication.updates[0].dt;
+  publication.updates[0].dt=oldDt*2;
+  assert.throws(()=>acquireSchroederNativePublication(publication,consumerOptions),/genuine live/);
+  publication.updates[0].dt=oldDt;
+  const consumer=acquireSchroederNativePublication(publication,consumerOptions);
+  assert.equal(consumer.validate(),true);
+  assert.throws(()=>acquireSchroederNativePublication(publication,consumerOptions),/already has/);
+  await assert.rejects(runtime.releaseExecutionAfter(third),/G2P still owns/);
+  assert.equal(consumer.finish({submitted:true}),true);
+  assert.throws(()=>consumer.validate(),/closed/);
+  assert.throws(()=>acquireSchroederNativePublication(publication,consumerOptions),/already has/);
+  await runtime.releaseExecutionAfter(third);
+  assert.throws(()=>acquireSchroederNativePublication(publication,consumerOptions),/genuine live/);
+  // A submit exception is not proof that no command reached the queue. Keep
+  // that field quarantined, discard only untouched reservations, and deny retry.
+  f.device.queue.submit=()=>{};
+  for(let i=0;i<fields.length;i++) p2gProjections[i]=await project(fields[i]);
+  const fourth=runtime.encode(createFakeEncoder(),{transaction,forceInputs,p2gProjections});
+  runtime.markExecutionSubmitted(fourth);
+  f.device.queue.submit=()=>{throw new Error('injected native submit uncertainty');};
+  await assert.rejects(runtime.publishNativeState(fourth),/injected native submit uncertainty/);
+  assert.equal(fields[0].ownerRuntime.stateMutationState(fields[0]).quarantined,true);
+  assert.equal(fields.slice(1).every(field=>!field.ownerRuntime.stateMutationState(field).pending),true);
+  await assert.rejects(runtime.publishNativeState(fourth),/unconsumed submitted chain/);
+  await runtime.releaseExecutionAfter(fourth);
+  runtime.destroy();
+  abortSchroederSpatialEpochTransaction(transaction);
+});
+
+test('chain creation rejects missing reordered foreign and disconnected middle pairs', () => {
+  const f = twoLevelFixture({ mechanicsLevelCount: 4, phaseVolume: true });
+  const foreign = twoLevelFixture({ mechanicsLevelCount: 4, phaseVolume: true });
+  const pairs = f.generation.mechanicsAdjacentLevelPairs;
+  const variants = [null, pairs.slice(), Object.freeze(pairs.slice(0, 2)),
+    Object.freeze([pairs[1], pairs[0], pairs[2]]),
+    Object.freeze([pairs[0], foreign.generation.mechanicsAdjacentLevelPairs[1], pairs[2]]),
+    Object.freeze([pairs[0], Object.freeze({ ...pairs[1], parentFieldView: pairs[0].parentFieldView }), pairs[2]])];
+  for (const mechanicsAdjacentLevelPairs of variants) {
+    assert.throws(() => createSchroederSpatialEpochTransaction({ ...f,
+      generation: { ...f.generation, mechanicsAdjacentLevelPairs }, mechanicsChainAuthoritative: true }),
+      /chain|two-level|topology/i);
+  }
+  for (const options of [{ mechanicsChainAuthoritative: 'yes' },
+    { mechanicsChainAuthoritative: true, twoLevelAuthoritative: true },
+    { mechanicsChainAuthoritative: true, phaseVolumeInterfaceProposalAuthoritative: true }]) {
+    assert.throws(() => createSchroederSpatialEpochTransaction({ ...f, ...options }));
+  }
+});
+
+test('chain local pressure/surface authority binds every native level and the whole hierarchy', () => {
+  const f=twoLevelFixture({mechanicsLevelCount:6,phaseVolume:true});
+  const transaction=createSchroederSpatialEpochTransaction({...f,mechanicsChainAuthoritative:true});
+  const resolve=(view,generation=f.generation)=>resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(transaction,{
+    generation,selectedLevel:view.selectedLevel,mechanicsFieldView:view.mechanicsFieldView
+  });
+  const views=f.generation.mechanicsLevelViews;
+  assert.throws(()=>resolve(views[0]),{code:'ERR_SCHROEDER_SURFACE_STRESS_LIFECYCLE'});
+  admitSchroederSpatialEpochTransactionReader(transaction,{...f,readerId:SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase:SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION});
+  for(const view of views){
+    const authority=resolve(view);
+    assert.equal(authority.levelRole,'native-chain');
+    assert.equal(authority.phaseVolumeMoment,view.phaseVolumeMoment);
+    assert.equal(authority.phaseVolumeReceipt,view.phaseVolumeReceipt);
+    assert.throws(()=>resolve({...view,mechanicsFieldView:{...view.mechanicsFieldView}}),
+      {code:'ERR_SCHROEDER_SURFACE_STRESS_IDENTITY'});
+  }
+  assert.throws(()=>resolve(views[0],{...f.generation}),{code:'ERR_SCHROEDER_SURFACE_STRESS_IDENTITY'});
+  const middle=views[3].phaseVolumeMoment,original=middle.momentBuffer;
+  middle.momentBuffer={...original};
+  assert.throws(()=>resolve(views[0]),{code:'ERR_SCHROEDER_SURFACE_STRESS_IDENTITY'});
+  middle.momentBuffer=original;
+  admitSchroederSpatialEpochTransactionReader(transaction,{...f,readerId:SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+    phase:SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT});
+  assert.throws(()=>resolve(views[0]),{code:'ERR_SCHROEDER_SURFACE_STRESS_LIFECYCLE'});
+  abortSchroederSpatialEpochTransaction(transaction);
+});
+
+test('chain snapshots reject intermediate descriptor and buffer mutation after admission', () => {
+  const f = twoLevelFixture({ mechanicsLevelCount: 6, phaseVolume: true });
+  assert.equal(f.generation.ready, true, f.generation.reason);
+  const transaction = createSchroederSpatialEpochTransaction({ ...f, mechanicsChainAuthoritative: true });
+  admitSchroederSpatialEpochTransactionReader(transaction, { ...f,
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION });
+  const options = { device: f.device, generation: f.generation };
+  const view = f.generation.mechanicsLevelViews[3];
+  const pair = f.generation.mechanicsAdjacentLevelPairs[3];
+  const changes = [
+    [f.generation, 'mechanicsAdjacentLevelPairs', Object.freeze([...f.generation.mechanicsAdjacentLevelPairs])],
+    [view.mechanicsFieldView, 'fieldViewBuffer', f.buffer('foreign field')],
+    [view.phaseVolumeMoment, 'momentBuffer', f.buffer('foreign moment')],
+    [view.phaseVolumeReceipt, 'controlBuffer', f.buffer('foreign receipt')],
+    [pair.hierarchyView, 'hierarchyViewBuffer', f.buffer('foreign hierarchy')],
+    [pair.parentFieldView, 'parentFieldViewBuffer', f.buffer('foreign parent')],
+    [pair.parentFieldView, 'inheritedFineParentView', null],
+    [pair.parentFieldView, 'generationId', pair.parentFieldView.generationId + 1]
+  ];
+  for (const [object, key, replacement] of changes) {
+    const original = object[key];
+    try {
+      object[key] = replacement;
+      assert.equal(validateSchroederSpatialEpochTransactionSourceFamily(transaction, f), false, key);
+      assert.throws(() => resolveSchroederSpatialMechanicsChainAuthority(transaction, options),
+        { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_IDENTITY' }, key);
+    } finally { object[key] = original; }
+    assert.equal(resolveSchroederSpatialMechanicsChainAuthority(transaction, options).pairAuthorities.length, 5);
+  }
+  assert.throws(() => resolveSchroederSpatialMechanicsChainAuthority(transaction, { ...options, device: {} }),
+    { code: 'ERR_SCHROEDER_SPATIAL_EPOCH_CHAIN_IDENTITY' });
+  abortSchroederSpatialEpochTransaction(transaction);
+});
+
 test('two-level aggregate construction matches the immutable FAR reader contract', () => {
   const privateGeneration = twoLevelFixture();
   assert.equal(privateGeneration.generation.aggregateView, null);
@@ -1132,6 +1473,142 @@ test('S9-C transport authority is exact and exists only between P2G and G2P', ()
     }),
     { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE' }
   );
+});
+
+test('single-level transaction admits a one-level S9-C proposal and exact transport authority', () => {
+  const f = twoLevelFixture({
+    phaseVolume: true,
+    phaseVolumeInterfaceProposalEnabled: true,
+    mechanicsLevelCount: 1
+  });
+  assert.equal(f.generation.ready, true, f.generation.reason);
+  assert.equal(f.generation.mechanicsLevelViews.length, 1);
+  const proposal = f.generation.phaseVolumeInterfaceProposal;
+  assert.ok(proposal, 'one-level S9-C proposal is built');
+  assert.equal(proposal.twoLevel, false);
+  assert.equal(proposal.hasParentFieldView, false);
+  assert.equal(proposal.coarseLevel, -0x8000_0000);
+  assert.equal(proposal.coarseFieldCapacity, 0);
+  assert.equal(proposal.coarseReceipt, null);
+  assert.equal(proposal.parentFieldView, null);
+  assert.equal(proposal.encodedDispatchCount, 2);
+  assert.equal(proposal.fineReceipt, f.generation.phaseVolumeReceipt);
+
+  const transaction = createSchroederSpatialEpochTransaction({
+    ...f,
+    phaseVolumeInterfaceProposalAuthoritative: true
+  });
+  assert.equal(transaction.twoLevelAuthoritative, false);
+  assert.equal(transaction.phaseVolumeInterfaceProposalAuthoritative, true);
+  assert.equal(transaction.phaseVolumeInterfaceProposal, proposal);
+  const readerInputs = {
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  };
+  const fieldView = f.generation.mechanicsFieldView;
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: fieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE' }
+  );
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+    ...readerInputs
+  }), true);
+
+  const single = resolveSchroederSpatialPhaseVolumeTransportAuthority(
+    transaction,
+    {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: fieldView
+    }
+  );
+  assert.equal(single.levelRole, 'single');
+  assert.equal(single.levelIndex, 0);
+  assert.equal(single.twoLevel, false);
+  assert.equal(single.fineLevel, 0);
+  assert.equal(single.coarseLevel, -0x8000_0000);
+  assert.equal(single.mechanicsFieldView, fieldView);
+  assert.equal(single.phaseVolumeMoment, f.generation.phaseVolumeMoment);
+  assert.equal(single.phaseVolumeReceipt, f.generation.phaseVolumeReceipt);
+  assert.equal(single.fieldCapacity, proposal.fineFieldCapacity);
+  assert.equal(single.parentFieldView, null);
+  assert.equal(single.coarseMechanicsFieldView, null);
+  assert.equal(single.phaseVolumeInterfaceProposal, proposal);
+  assert.equal(
+    single.localHeadOffsetWords,
+    proposal.layout.fineLocalHeadOffsetWords
+  );
+
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 1,
+      mechanicsFieldView: fieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY' }
+  );
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: { ...fieldView }
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_IDENTITY' }
+  );
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_G2P,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.INTEGRATION_COMMIT,
+    ...readerInputs
+  }), true);
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: fieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_LIFECYCLE' }
+  );
+});
+
+test('single-level transaction without S9-C authority refuses transport', () => {
+  const f = twoLevelFixture({
+    phaseVolume: true,
+    phaseVolumeInterfaceProposalEnabled: true,
+    mechanicsLevelCount: 1
+  });
+  const transaction = createSchroederSpatialEpochTransaction(f);
+  assert.equal(transaction.phaseVolumeInterfaceProposalAuthoritative, false);
+  assert.equal(admitSchroederSpatialEpochTransactionReader(transaction, {
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION,
+    generation: f.generation,
+    sphParticleUpload: f.sphParticleUpload,
+    mlsMpmParticleUpload: f.mlsMpmParticleUpload
+  }), true);
+  assert.throws(
+    () => resolveSchroederSpatialPhaseVolumeTransportAuthority(transaction, {
+      generation: f.generation,
+      selectedLevel: 0,
+      mechanicsFieldView: f.generation.mechanicsFieldView
+    }),
+    { code: 'ERR_SCHROEDER_PHASE_VOLUME_TRANSPORT_AUTHORITY' }
+  );
+});
+
+test('single-level transaction refuses authoritative S9-C without a built proposal', () => {
+  const f = twoLevelFixture({ phaseVolume: true, mechanicsLevelCount: 1 });
+  assert.equal(f.generation.phaseVolumeInterfaceProposal, null);
+  assert.throws(() => createSchroederSpatialEpochTransaction({
+    ...f,
+    phaseVolumeInterfaceProposalAuthoritative: true
+  }), { code: 'ERR_SCHROEDER_PHASE_VOLUME_INTERFACE_PROPOSAL_IDENTITY' });
 });
 
 test('two-level transaction refuses opt-in S9-C authority without its exact proposal', () => {

@@ -1,3 +1,4 @@
+import { SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC, SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION } from './schroederSpatialMechanicsFieldView.js';
 import {
   schroederSpatialExactNearTraversalV1Wgsl
 } from './schroederSpatialExactNearTraversalWgsl.js';
@@ -586,6 +587,9 @@ struct ThermalParams {
 @group(0) @binding(7) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(8) var<uniform> params: ThermalParams;
 @group(0) @binding(9) var<storage, read> material_bank_warm_input_rows: array<vec4<f32>>;
+// Response-aligned phase thermal conductivities (W/m/K), from the closure
+// derived phase response table (same ladder as phase_responses).
+@group(0) @binding(13) var<storage, read> response_thermal_conductivities: array<f32>;
 // Shared per-substep neighbor bins (built by the separation bin-fill pass):
 // counts prefix [0, cell_count) then entry slots. When bins_enabled == 0
 // (standalone/legacy paths) the kernel falls back to the exhaustive pair
@@ -1047,6 +1051,97 @@ fn thermal_emissivity(material_id: f32) -> f32 {
   return 0.0;
 }
 
+// The response row a carrier's state selects: the explicit caloric row when
+// the material declares one, otherwise the same legacy ladder selection as
+// thermal_temperature_slope (pure phase, mixed plateau, containing interval,
+// then the energy fallback). 0xffffffff when the data is missing.
+fn thermal_selected_response_index(
+  material_id: f32,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
+) -> u32 {
+  let caloric = thermal_phase_caloric_selection(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (caloric.w < 0.0) { return 0xffffffffu; }
+  if (caloric.w == 1.0) { return u32(caloric.x); }
+  var material_response_offset = 0u;
+  var material_response_count = 0u;
+  var found_material = false;
+  for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
+    let record = phase_response_records[record_index * 2u];
+    if (record.x == material_id) {
+      material_response_offset = u32(record.y);
+      material_response_count = u32(record.z);
+      found_material = true;
+      break;
+    }
+  }
+  if (!found_material || material_response_count == 0u) { return 0xffffffffu; }
+  let classification = thermal_carrier_phase_classification(phase_id, phase_fractions);
+  var fallback = material_response_offset;
+  var fallback_found = false;
+  var containing = 0xffffffffu;
+  var mixed_plateau = 0xffffffffu;
+  var pure_phase_response = 0xffffffffu;
+  for (var local = 0u; local < material_response_count; local = local + 1u) {
+    let candidate = material_response_offset + local;
+    if (candidate >= params.response_count) { return 0xffffffffu; }
+    let row0 = response_row0(candidate);
+    let row1 = response_row1(candidate);
+    if (!fallback_found) {
+      fallback = candidate;
+      if (specific_internal_energy <= row1.y || local + 1u == material_response_count) {
+        fallback_found = true;
+      }
+    }
+    if (specific_internal_energy >= row1.x && specific_internal_energy <= row1.y) {
+      if (containing == 0xffffffffu) { containing = candidate; }
+      let phase_from = u32(clamp(round(row1.z), 0.0, 4.0));
+      let phase_to = u32(clamp(round(row1.w), 0.0, 4.0));
+      if (
+        classification.x != 0u
+        && phase_from == classification.x
+        && phase_to == classification.x
+      ) {
+        pure_phase_response = candidate;
+      }
+      if (classification.y == 1u && abs(row0.y - 2.0) < 0.5) {
+        mixed_plateau = candidate;
+      }
+    }
+  }
+  var selected = fallback;
+  if (containing != 0xffffffffu) { selected = containing; }
+  if (mixed_plateau != 0xffffffffu) { selected = mixed_plateau; }
+  if (pure_phase_response != 0xffffffffu) { selected = pure_phase_response; }
+  return selected;
+}
+
+// Thermal conductivity (W/m/K) of the carrier's selected phase response; 0
+// when missing (no conduction-limited exchange is then possible).
+fn thermal_phase_conductivity(
+  material_id: f32,
+  specific_internal_energy: f32,
+  phase_id: f32,
+  phase_fractions: vec4<f32>
+) -> f32 {
+  let response_index = thermal_selected_response_index(
+    material_id, specific_internal_energy, phase_id, phase_fractions
+  );
+  if (response_index >= params.response_count
+    || response_index >= arrayLength(&response_thermal_conductivities)) { return 0.0; }
+  let k = response_thermal_conductivities[response_index];
+  return select(0.0, k, thermal_value_finite(k) && k > 0.0);
+}
+
+// Edge of the cube with the parcel's rest volume (m); 0 when unknown.
+fn parcel_edge_m(mass_kg: f32, rest_density_kg_per_m3: f32) -> f32 {
+  if (mass_kg <= 0.0 || rest_density_kg_per_m3 <= 0.0) { return 0.0; }
+  return pow(mass_kg / rest_density_kg_per_m3, 1.0 / 3.0);
+}
+
 // Exchange area between two particles modelled as discs: the emitter's disc
 // pi*r_i^2 scaled by the solid-angle fraction of the receiver r_j^2/(4 d^2).
 // Symmetric in (i, j), so gather-side pair exchange conserves energy. Capped
@@ -1455,14 +1550,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	    neighbor_max_temperature
 	  );
 
+	  // Honest walls: an isothermal wall exchanges heat with a parcel only by
+	  // conduction through the parcel's own phase conductivity k, over its face
+	  // area a^2 (a = edge of the cube with its rest volume), across the path
+	  // from its centre to the wall (at least a/2), and only while it touches
+	  // the wall; parcels farther away reach the wall through their neighbours.
+	  // params.wall_rate is only the on/off gate (the wall reservoir authority
+	  // writes 0 when wall exchange is disabled); it is not an exchange rate.
+	  let wall_parcel_edge_m = parcel_edge_m(mass, row0.w);
+	  let wall_conductivity = thermal_phase_conductivity(row0.x, vel_u.w, row0.y, row1);
 	  for (var face = 0u; face < 6u; face = face + 1u) {
 	    let distance = wall_distance(position, face);
-	    if (distance < params.wall_layer_m) {
-	      let weight = 1.0 - distance / params.wall_layer_m;
+	    if (params.wall_rate > 0.0 && wall_conductivity > 0.0
+	      && wall_parcel_edge_m > 0.0 && distance < wall_parcel_edge_m) {
+	      let wall_path_m = max(distance, 0.5 * wall_parcel_edge_m);
+	      let wall_conductance_w_per_k =
+	        wall_conductivity * wall_parcel_edge_m * wall_parcel_edge_m / wall_path_m;
 	      let face_wall_temperature = wall_temperature(face);
 	      let current_u = vel_u.w + du;
 	      let current_temperature = temperature + du * temperature_slope;
-	      let raw_du_specific = params.wall_rate * (face_wall_temperature - current_temperature) * weight * params.dt / mass;
+	      let raw_du_specific = wall_conductance_w_per_k * (face_wall_temperature - current_temperature) * params.dt / mass;
 	      let equilibrium_limited_du = clamp_wall_du_specific(
 	        raw_du_specific,
 	        current_temperature,
@@ -1546,6 +1653,12 @@ struct ReactionParams {
   // every extended section absent is the distinguishable legacy schema.
   reaction_table_mode: u32,
   gas_constitutive_offset: u32,
+  // Phase-carrier v2 lineage capacity (rows = 4 lanes x capacity), or 0 when
+  // the state has no phase lanes. See reaction_row_hosts_product.
+  phase_lineage_capacity: u32,
+  _phase_pad0: u32,
+  _phase_pad1: u32,
+  _phase_pad2: u32,
 };
 
 struct ReactionParticleBinParams {
@@ -1738,6 +1851,43 @@ fn product_term_row1(term_index: u32) -> vec4<f32> {
   let reactant_base = header_base + params.reaction_count * 4u;
   let product_base = reactant_base + params.reactant_term_count * 3u;
   return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+// Gauge-consistent heat proxy (src/runtime/sph/sphReactionHeatProxyGauge.js):
+// the product term's runtime-gauge offset (word 15), 0 on single-gauge tables.
+fn product_term_gauge(term_index: u32) -> f32 {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u].w;
+}
+
+// First-class air, slice 3 stage 2 (sphReactionGpuKernel.js
+// reactionSpectatorForProductTerm): one row per product term immediately
+// before the gas constitutive records, [flag, Cv_res/Cv_mix, mixture material
+// id, sentinel]. A flagged term is the spectator residue of a reaction lifted
+// onto an ideal-gas mixture; rows without the sentinel (tables packed before
+// the section existed) are never spectators.
+const REACTION_SPECTATOR_SECTION_SENTINEL: f32 = -7340.25;
+
+fn product_term_spectator(term_index: u32) -> vec4<f32> {
+  if (params.gas_constitutive_offset < params.product_term_count
+      || term_index >= params.product_term_count) {
+    return vec4<f32>(0.0);
+  }
+  let row = reaction_records[
+    params.gas_constitutive_offset - params.product_term_count + term_index
+  ];
+  if (row.w != REACTION_SPECTATOR_SECTION_SENTINEL || row.x != 1.0 || !(row.y > 0.0)) {
+    return vec4<f32>(0.0);
+  }
+  return row;
+}
+
+// Spectator specific energy: the residue leaves with its own sensible energy
+// at the consumed mixture row's temperature, u_res = (Cv_res/Cv_mix) u_mix.
+fn spectator_specific_energy(spectator: vec4<f32>, a_material: f32, a_u: f32, b_u: f32) -> f32 {
+  return spectator.y * select(b_u, a_u, a_material == spectator.z);
 }
 
 fn reactant_term_row0(term_index: u32) -> vec4<f32> {
@@ -2001,6 +2151,25 @@ fn copy_particle(index: u32) {
   for (var row = 0u; row < REACTION_PARTICLE_RECORD_VEC4S; row = row + 1u) {
     out_particle_records[base + row] = particle_records[base + row];
   }
+}
+
+// Phase-carrier v2 keeps one material per lineage across its four phase
+// lanes. A freed reactant row may host a product in place only while every
+// other lane of its lineage is empty; otherwise the pair is deferred (see
+// resolve_particle). Without this a partly frozen Fe lineage (solid lane
+// active) hosted its liquid lane's oxide, and the contact graph then refused
+// every step (lineage material mismatch).
+fn reaction_row_hosts_product(index: u32) -> bool {
+  let capacity = params.phase_lineage_capacity;
+  if (capacity == 0u || capacity * 4u != params.particle_count) { return true; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let row = lane * capacity + lineage;
+    if (row != index && particle_records[row * REACTION_PARTICLE_RECORD_VEC4S].w != 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 fn particle_current_volume(index: u32) -> f32 {
@@ -2974,12 +3143,13 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
     var legacy_product_material_id = rx0.z;
     var legacy_next_mass = pos_mass.w;
     var legacy_represented_entity_count = thermo_row2(particle_index).y;
-    let legacy_next_u = vel_u.w - rx1.x;
+    var legacy_next_u = vel_u.w - rx1.x;
     if (product_term_count > 0u) {
       let product_term_offset = u32(max(header0.w, 0.0));
       let slot_index = select(1u, 0u, particle_index < partner_index);
       let local_term = min(slot_index, product_term_count - 1u);
       let term_index = product_term_offset + local_term;
+      legacy_next_u = legacy_next_u + product_term_gauge(term_index);
       let term0 = product_term_row0(term_index);
       let term1 = product_term_row1(term_index);
       legacy_product_material_id = term0.y;
@@ -3108,6 +3278,20 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
   let product_mass_scale = consumed_mass / raw_product_mass;`}
   let source0_free = select(source0_remaining <= max(source0_pos_mass.w, 1.0) * 1.0e-7, source0_remaining == 0.0, physical_energy);
   let source1_free = select(source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7, source1_remaining == 0.0, physical_energy);
+  // A freed parent that cannot host its product in place (another phase lane
+  // of its lineage still holds mass) defers the whole pair: the product may
+  // neither join a mixed-material lineage nor leave as a condensed product
+  // event (mechanics-field mode admits gas-only product events). Both rows
+  // keep their state this step.
+  if ((source0_free && !reaction_row_hosts_product(source0_index))
+    || (source1_free && !reaction_row_hosts_product(source1_index))) {
+    ${sharedAllocation ? `if (pair_only) {
+      reject_allocated_pair(source0_index, source1_index, 8u);
+      return;
+    }` : ''}
+    copy_particle(particle_index);
+    return;
+  }
 
   // Products are born at the consumed pair's mass-weighted COM velocity.
   // Momentum accounting: unconsumed remainders keep their own velocities, so
@@ -3129,11 +3313,30 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
   // merge. Preserve total energy by thermalizing the relative kinetic energy;
   // rx1.x is specific reaction enthalpy per kg of products (negative when
   // exothermic), so subtracting it adds released chemical heat.
+  // Spectator residues (heat-proxy route) take their own sensible energy; the
+  // real products share the rest, so energy is conserved and the reaction heat
+  // goes to the real products as in the species reaction.
+  var spectator_mass = 0.0;
+  var spectator_energy = 0.0;
+  if (!physical_energy) {
+    for (var spectator_local = 0u; spectator_local < product_term_count; spectator_local = spectator_local + 1u) {
+      let spectator_term_index = u32(max(header0.w, 0.0)) + spectator_local;
+      let spectator = product_term_spectator(spectator_term_index);
+      if (spectator.x != 1.0) { continue; }
+      let spectator_term0 = product_term_row0(spectator_term_index);
+      let term_mass = extent_mol * spectator_term0.z * spectator_term0.w * product_mass_scale;
+      spectator_mass = spectator_mass + term_mass;
+      spectator_energy = spectator_energy + term_mass * spectator_specific_energy(
+        spectator, source0_thermo.x, source0_vel_u.w, source1_vel_u.w
+      );
+    }
+  }
   let product_u = (
     consumed_total_energy
     - rx1.x * consumed_mass
     - 0.5 * consumed_mass * dot(product_com_velocity, product_com_velocity)
-  ) / max(consumed_mass, 1.0e-20);
+    - spectator_energy
+  ) / max(consumed_mass - spectator_mass, 1.0e-20);
   var product_temperature = vec2<f32>(0.0);
   if (physical_energy) {
     product_temperature = energy_product_temperature(reaction_index, ${sharedAllocation ? 'source0_index, ' : ''}source0_thermo.x, source1_thermo.x,
@@ -3163,7 +3366,13 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
       * product_mass_scale;`}
     let product_current_volume = consumed_current_volume
       * product_mass / max(consumed_mass, 1.0e-20);
-    var product_energy_state = vec4<f32>(product_u, 0.0, 1.0, 0.0);
+    var product_energy_state = vec4<f32>(product_u + product_term_gauge(product_term_index), 0.0, 1.0, 0.0);
+    let validated_spectator = product_term_spectator(product_term_index);
+    if (!physical_energy && validated_spectator.x == 1.0) {
+      product_energy_state.x = spectator_specific_energy(
+        validated_spectator, source0_thermo.x, source0_vel_u.w, source1_vel_u.w
+      );
+    }
     if (physical_energy) {
       product_energy_state = energy_product_state(reaction_index, product_term_index, product_temperature.x);
     }
@@ -3232,7 +3441,13 @@ fn resolve_particle(particle_index: u32, pair_only: bool) {
     if (product_term.status == 1.0 && product_term.material_id > 0.0 && emitted_product_mass > 0.0) {
       let emitted_product_current_volume = consumed_current_volume
         * emitted_product_mass / max(consumed_mass, 1.0e-20);
-      var product_energy_state = vec4<f32>(product_u, 0.0, 1.0, 0.0);
+      var product_energy_state = vec4<f32>(product_u + product_term_gauge(product_term.term_index), 0.0, 1.0, 0.0);
+      let emitted_spectator = product_term_spectator(product_term.term_index);
+      if (!physical_energy && emitted_spectator.x == 1.0) {
+        product_energy_state.x = spectator_specific_energy(
+          emitted_spectator, source0_thermo.x, source0_vel_u.w, source1_vel_u.w
+        );
+      }
       if (physical_energy) {
         product_energy_state = energy_product_state(reaction_index, product_term.term_index, product_temperature.x);
       }
@@ -3883,6 +4098,7 @@ ${schroederSpatialExactNearTraversalV1Wgsl}
 // ULG_PRODUCT_PLACEMENT_SPATIAL_BINDINGS_END
 
 const PHASE_COMPANION_RESERVED_STATUS: f32 = 254.0;
+const SPLIT_SPARE_RESERVED_STATUS: f32 = 252.0;
 const REACTION_PRODUCT_PLACEMENT_AVOGADRO_PER_MOL: f32 = 6.02214076e23;
 
 fn placement_represented_entity_count_for_product_mass(
@@ -5110,7 +5326,8 @@ fn place_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
       for (var candidate = cursor; candidate < params.particle_count; candidate = candidate + 1u) {
         let candidate_thermo_base = candidate * params.thermo_stride_vec4;
         let candidate_reserved_for_phase =
-          abs(next_thermo[candidate_thermo_base + 2u].z - PHASE_COMPANION_RESERVED_STATUS) < 0.5;
+          abs(next_thermo[candidate_thermo_base + 2u].z - PHASE_COMPANION_RESERVED_STATUS) < 0.5
+          || abs(next_thermo[candidate_thermo_base + 2u].z - SPLIT_SPARE_RESERVED_STATUS) < 0.5;
         if (
           next_state[candidate * params.state_stride_vec4].w <= 0.0
           && !candidate_reserved_for_phase
@@ -5556,7 +5773,8 @@ struct ReactionSummaryParams {
   // kernel's dt_s so ledger and application agree. 0 disables the cap.
   dt_s: f32,
   _pad2: u32,
-  _pad3: u32,
+  // Phase-carrier v2 lineage capacity (summary params word 11), or 0.
+  phase_lineage_capacity: u32,
 };
 
 struct ReactantTerm {
@@ -5590,6 +5808,28 @@ struct ProductMechanics {
 @group(0) @binding(5) var<storage, read_write> partial_summaries: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: ReactionSummaryParams;
 @group(0) @binding(7) var<storage, read> proposals: array<vec4<f32>>;
+
+// Mirrors the step kernel's in-place hosting deferral (reaction_row_hosts_product)
+// on the same pre-reaction state: a pair whose freed parent cannot host its
+// product did not react, so no ledger may count its consumption.
+fn reaction_lineage_row_hosts(index: u32) -> bool {
+  let capacity = params.phase_lineage_capacity;
+  if (capacity == 0u || capacity * 4u != params.particle_count) { return true; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let row = lane * capacity + lineage;
+    if (row != index && source_state[row * 2u].w != 0.0) { return false; }
+  }
+  return true;
+}
+
+fn reaction_pair_deferred(a: u32, a_mass: f32, a_consumed: f32, b: u32, b_mass: f32, b_consumed: f32, energy: bool) -> bool {
+  let a_remaining = max(a_mass - a_consumed, 0.0);
+  let b_remaining = max(b_mass - b_consumed, 0.0);
+  let a_free = a_remaining <= select(max(a_mass, 1.0) * 1.0e-7, 0.0, energy);
+  let b_free = b_remaining <= select(max(b_mass, 1.0) * 1.0e-7, 0.0, energy);
+  return (a_free && !reaction_lineage_row_hosts(a)) || (b_free && !reaction_lineage_row_hosts(b));
+}
 
 var<workgroup> wg_changed_material: array<f32, 64>;
 var<workgroup> wg_changed_mass: array<f32, 64>;
@@ -5629,6 +5869,15 @@ fn product_term_row1(term_index: u32) -> vec4<f32> {
   let reactant_base = header_base + params.reaction_count * 4u;
   let product_base = reactant_base + params.reactant_term_count * 3u;
   return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+// Gauge-consistent heat proxy (src/runtime/sph/sphReactionHeatProxyGauge.js):
+// the product term's runtime-gauge offset (word 15), 0 on single-gauge tables.
+fn product_term_gauge(term_index: u32) -> f32 {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u].w;
 }
 
 fn reaction_row1(reaction_index: u32) -> vec4<f32> {
@@ -5946,7 +6195,9 @@ ${sharedAllocation ? `              if (reaction_energy_enabled(reaction_index))
               let partner_consumed = reaction_consumed_mass(reaction_index, partner_source_pos_mass.w, extent_mol, partner_term.coefficient, partner_term.molar_mass);
               let consumed_mass = self_consumed + partner_consumed;
               let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
-              if (extent_mol > 0.0 && consumed_mass > 0.0 && raw_product_mass > 0.0) {
+              let pair_deferred = reaction_pair_deferred(particle_index, source_pos_mass.w, self_consumed,
+                partner_index, partner_source_pos_mass.w, partner_consumed, reaction_energy_enabled(reaction_index));
+              if (!pair_deferred && extent_mol > 0.0 && consumed_mass > 0.0 && raw_product_mass > 0.0) {
                 let mass_scale = consumed_mass / raw_product_mass;
                 let partner_next_pos_mass = next_state[partner_index * 2u];
                 let self_next_row0 = next_thermo[particle_index * 3u];
@@ -6244,7 +6495,8 @@ struct ReactionSummaryParams {
   // summary params packer); must match the apply kernel's dt_s.
   dt_s: f32,
   _pad2: u32,
-  _pad3: u32,
+  // Phase-carrier v2 lineage capacity (summary params word 11), or 0.
+  phase_lineage_capacity: u32,
 };
 
 struct ReactantTerm {
@@ -6277,6 +6529,28 @@ struct ProductMechanics {
 @group(0) @binding(5) var<storage, read> proposals: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> product_inventory: array<vec4<f32>>;
 @group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
+
+// Mirrors the step kernel's in-place hosting deferral (reaction_row_hosts_product)
+// on the same pre-reaction state: a pair whose freed parent cannot host its
+// product did not react, so no ledger may count its consumption.
+fn reaction_lineage_row_hosts(index: u32) -> bool {
+  let capacity = params.phase_lineage_capacity;
+  if (capacity == 0u || capacity * 4u != params.particle_count) { return true; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let row = lane * capacity + lineage;
+    if (row != index && source_state[row * 2u].w != 0.0) { return false; }
+  }
+  return true;
+}
+
+fn reaction_pair_deferred(a: u32, a_mass: f32, a_consumed: f32, b: u32, b_mass: f32, b_consumed: f32, energy: bool) -> bool {
+  let a_remaining = max(a_mass - a_consumed, 0.0);
+  let b_remaining = max(b_mass - b_consumed, 0.0);
+  let a_free = a_remaining <= select(max(a_mass, 1.0) * 1.0e-7, 0.0, energy);
+  let b_free = b_remaining <= select(max(b_mass, 1.0) * 1.0e-7, 0.0, energy);
+  return (a_free && !reaction_lineage_row_hosts(a)) || (b_free && !reaction_lineage_row_hosts(b));
+}
 
 fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
   let base = (params.reaction_count + params.product_phase_count) * 3u;
@@ -6312,6 +6586,15 @@ fn product_term_row1(term_index: u32) -> vec4<f32> {
   let reactant_base = header_base + params.reaction_count * 4u;
   let product_base = reactant_base + params.reactant_term_count * 3u;
   return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+// Gauge-consistent heat proxy (src/runtime/sph/sphReactionHeatProxyGauge.js):
+// the product term's runtime-gauge offset (word 15), 0 on single-gauge tables.
+fn product_term_gauge(term_index: u32) -> f32 {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u].w;
 }
 
 fn product_term_row3(term_index: u32) -> vec4<f32> {
@@ -6498,6 +6781,10 @@ ${sharedAllocation ? `      if (reaction_energy_enabled(reaction_index)) {
       if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
         continue;
       }
+      if (reaction_pair_deferred(particle_index, source_pos_mass.w, source_consumed,
+          partner_index, partner_source_pos_mass.w, partner_consumed, reaction_energy_enabled(reaction_index))) {
+        continue;
+      }
       let mass_scale = consumed_mass / raw_product_mass;
       let row_raw_mass = extent_mol * coefficient * molar_mass;
       let row_mass = row_raw_mass * mass_scale;
@@ -6553,7 +6840,9 @@ struct ReactionSummaryParams {
   // summary params packer); must match the apply kernel's dt_s.
   dt_s: f32,
   gas_constitutive_offset: u32,
-  _pad3: u32,
+  // Phase-carrier v2 lineage capacity, or 0; must match the step kernel's
+  // reaction_row_hosts_product so both agree on in-place product hosting.
+  phase_lineage_capacity: u32,
 };
 
 struct ReactantTerm {
@@ -6587,6 +6876,19 @@ struct ProductMechanics {
 @group(0) @binding(6) var<storage, read_write> product_events: array<vec4<f32>>;
 @group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
 @group(0) @binding(8) var<storage, read> source_mechanics: array<vec4<f32>>;
+
+// Mirrors the step kernel's reaction_row_hosts_product on the same
+// pre-reaction state, so both kernels defer exactly the same pairs.
+fn reaction_event_row_hosts_product(index: u32) -> bool {
+  let capacity = params.phase_lineage_capacity;
+  if (capacity == 0u || capacity * 4u != params.particle_count) { return true; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let row = lane * capacity + lineage;
+    if (row != index && source_state[row * 2u].w != 0.0) { return false; }
+  }
+  return true;
+}
 
 fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
   let base = (params.reaction_count + params.product_phase_count) * 3u;
@@ -6633,6 +6935,28 @@ fn product_term_row3(term_index: u32) -> vec4<f32> {
   let header_base = (params.reaction_count + params.product_phase_count) * 3u;
   let product_base = header_base + params.reaction_count * 4u + params.reactant_term_count * 3u;
   return reaction_records[product_base + term_index * 4u + 3u];
+}
+
+// First-class air, slice 3 stage 2: the spectator table, identical to the
+// step kernel's product_term_spectator (the event energy must match apply).
+const REACTION_SPECTATOR_SECTION_SENTINEL: f32 = -7340.25;
+
+fn product_term_spectator(term_index: u32) -> vec4<f32> {
+  if (params.gas_constitutive_offset < params.product_term_count
+      || term_index >= params.product_term_count) {
+    return vec4<f32>(0.0);
+  }
+  let row = reaction_records[
+    params.gas_constitutive_offset - params.product_term_count + term_index
+  ];
+  if (row.w != REACTION_SPECTATOR_SECTION_SENTINEL || row.x != 1.0 || !(row.y > 0.0)) {
+    return vec4<f32>(0.0);
+  }
+  return row;
+}
+
+fn spectator_specific_energy(spectator: vec4<f32>, a_material: f32, a_u: f32, b_u: f32) -> f32 {
+  return spectator.y * select(b_u, a_u, a_material == spectator.z);
 }
 
 fn product_phase_row0(phase_index: u32) -> vec4<f32> {
@@ -6987,6 +7311,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let partner_remaining = max(partner_source_pos_mass.w - partner_consumed, 0.0);
 	  let source_free = source_remaining <= select(max(source_pos_mass.w, 1.0) * 1.0e-7, 0.0, reaction_energy_enabled(reaction_index));
 	  let partner_free = partner_remaining <= select(max(partner_source_pos_mass.w, 1.0) * 1.0e-7, 0.0, reaction_energy_enabled(reaction_index));
+	  // Mirrors the step kernel's deferral: such a pair did not react.
+	  if ((source_free && !reaction_event_row_hosts_product(particle_index))
+	    || (partner_free && !reaction_event_row_hosts_product(partner_index))) {
+	    return;
+	  }
 	  let reaction_product_term_count = u32(max(reaction_header_row1(reaction_index).x, 0.0));
 	  var direct_placed_mass_kg = 0.0;
 	  if (source_free && product_term_index_for_parent_slot(reaction_index, 0u) == product_term_index) {
@@ -7019,11 +7348,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  let consumed_total_energy =
 	    source_consumed * (source_u + 0.5 * dot(source_velocity, source_velocity))
 	    + partner_consumed * (partner_u + 0.5 * dot(partner_velocity, partner_velocity));
+	  // Spectator residues (heat-proxy route) keep their own sensible energy;
+	  // the real products share the rest (identical to the apply kernel).
+	  var spectator_mass = 0.0;
+	  var spectator_energy = 0.0;
+	  if (!reaction_energy_enabled(reaction_index)) {
+	    let spectator_offset = u32(max(reaction_header_row0(reaction_index).w, 0.0));
+	    for (var spectator_local = 0u; spectator_local < reaction_product_term_count; spectator_local = spectator_local + 1u) {
+	      let spectator = product_term_spectator(spectator_offset + spectator_local);
+	      if (spectator.x != 1.0) { continue; }
+	      let spectator_term0 = product_term_row0(spectator_offset + spectator_local);
+	      let term_mass = extent_mol * spectator_term0.z * spectator_term0.w * mass_scale;
+	      spectator_mass = spectator_mass + term_mass;
+	      spectator_energy = spectator_energy
+	        + term_mass * spectator_specific_energy(spectator, source_row0.x, source_u, partner_u);
+	    }
+	  }
 	  var product_u = (
 	    consumed_total_energy
 	    - rx1.x * consumed_mass
 	    - 0.5 * consumed_mass * dot(product_velocity, product_velocity)
-	  ) / max(consumed_mass, 1.0e-20);
+	    - spectator_energy
+	  ) / max(consumed_mass - spectator_mass, 1.0e-20)
+	    // Gauge-consistent heat proxy offset (word 15), 0 on single-gauge tables.
+	    + product_term_row3(product_term_index).w;
+	  let event_spectator = product_term_spectator(product_term_index);
+	  if (!reaction_energy_enabled(reaction_index) && event_spectator.x == 1.0) {
+	    product_u = spectator_specific_energy(event_spectator, source_row0.x, source_u, partner_u);
+	  }
 	  if (reaction_energy_enabled(reaction_index)) {
 	    let temperature = energy_product_temperature(reaction_index, source_row0.x, partner_source_row0.x,
 	      source_consumed, partner_consumed, source_state[particle_index * 2u + 1u],
@@ -7102,7 +7454,8 @@ struct ReactionSummaryParams {
   // summary params packer); must match the apply kernel's dt_s.
   dt_s: f32,
   _pad2: u32,
-  _pad3: u32,
+  // Phase-carrier v2 lineage capacity (summary params word 11), or 0.
+  phase_lineage_capacity: u32,
 };
 
 struct ReactantTerm {
@@ -7122,6 +7475,28 @@ struct ReactantTerm {
 @group(0) @binding(3) var<storage, read> proposals: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> atom_residuals: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> params: ReactionSummaryParams;
+
+// Mirrors the step kernel's in-place hosting deferral (reaction_row_hosts_product)
+// on the same pre-reaction state: a pair whose freed parent cannot host its
+// product did not react, so no ledger may count its consumption.
+fn reaction_lineage_row_hosts(index: u32) -> bool {
+  let capacity = params.phase_lineage_capacity;
+  if (capacity == 0u || capacity * 4u != params.particle_count) { return true; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let row = lane * capacity + lineage;
+    if (row != index && source_state[row * 2u].w != 0.0) { return false; }
+  }
+  return true;
+}
+
+fn reaction_pair_deferred(a: u32, a_mass: f32, a_consumed: f32, b: u32, b_mass: f32, b_consumed: f32, energy: bool) -> bool {
+  let a_remaining = max(a_mass - a_consumed, 0.0);
+  let b_remaining = max(b_mass - b_consumed, 0.0);
+  let a_free = a_remaining <= select(max(a_mass, 1.0) * 1.0e-7, 0.0, energy);
+  let b_free = b_remaining <= select(max(b_mass, 1.0) * 1.0e-7, 0.0, energy);
+  return (a_free && !reaction_lineage_row_hosts(a)) || (b_free && !reaction_lineage_row_hosts(b));
+}
 @group(0) @binding(6) var<storage, read> next_state: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read> next_thermo: array<vec4<f32>>;
 
@@ -7159,6 +7534,15 @@ fn product_term_row1(term_index: u32) -> vec4<f32> {
   let reactant_base = header_base + params.reaction_count * 4u;
   let product_base = reactant_base + params.reactant_term_count * 3u;
   return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+// Gauge-consistent heat proxy (src/runtime/sph/sphReactionHeatProxyGauge.js):
+// the product term's runtime-gauge offset (word 15), 0 on single-gauge tables.
+fn product_term_gauge(term_index: u32) -> f32 {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u].w;
 }
 
 fn atom_term_row(atom_term_index: u32) -> vec4<f32> {
@@ -7356,6 +7740,10 @@ ${sharedAllocation ? `      if (reaction_energy_enabled(reaction_index)) {
       if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
         continue;
       }
+      if (reaction_pair_deferred(particle_index, source_pos_mass.w, source_consumed,
+          partner_index, partner_source_pos_mass.w, partner_consumed, reaction_energy_enabled(reaction_index))) {
+        continue;
+      }
       let mass_scale = consumed_mass / raw_product_mass;
       let product_side_scale = select(1.0, mass_scale, term_kind_id == 2.0);
       let sign = select(-1.0, 1.0, term_kind_id == 2.0);
@@ -7397,7 +7785,8 @@ struct ReactionSummaryParams {
   // summary params packer); must match the apply kernel's dt_s.
   dt_s: f32,
   _pad2: u32,
-  _pad3: u32,
+  // Phase-carrier v2 lineage capacity (summary params word 11), or 0.
+  phase_lineage_capacity: u32,
 };
 
 struct ReactantTerm {
@@ -7419,6 +7808,28 @@ struct ReactantTerm {
 @group(0) @binding(5) var<storage, read> proposals: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> gas_species_summaries: array<vec4<f32>>;
 @group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
+
+// Mirrors the step kernel's in-place hosting deferral (reaction_row_hosts_product)
+// on the same pre-reaction state: a pair whose freed parent cannot host its
+// product did not react, so no ledger may count its consumption.
+fn reaction_lineage_row_hosts(index: u32) -> bool {
+  let capacity = params.phase_lineage_capacity;
+  if (capacity == 0u || capacity * 4u != params.particle_count) { return true; }
+  let lineage = index % capacity;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let row = lane * capacity + lineage;
+    if (row != index && source_state[row * 2u].w != 0.0) { return false; }
+  }
+  return true;
+}
+
+fn reaction_pair_deferred(a: u32, a_mass: f32, a_consumed: f32, b: u32, b_mass: f32, b_consumed: f32, energy: bool) -> bool {
+  let a_remaining = max(a_mass - a_consumed, 0.0);
+  let b_remaining = max(b_mass - b_consumed, 0.0);
+  let a_free = a_remaining <= select(max(a_mass, 1.0) * 1.0e-7, 0.0, energy);
+  let b_free = b_remaining <= select(max(b_mass, 1.0) * 1.0e-7, 0.0, energy);
+  return (a_free && !reaction_lineage_row_hosts(a)) || (b_free && !reaction_lineage_row_hosts(b));
+}
 
 fn reaction_row1(reaction_index: u32) -> vec4<f32> {
   return reaction_records[reaction_index * 3u + 1u];
@@ -7458,6 +7869,15 @@ fn product_term_row1(term_index: u32) -> vec4<f32> {
   let reactant_base = header_base + params.reaction_count * 4u;
   let product_base = reactant_base + params.reactant_term_count * 3u;
   return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+// Gauge-consistent heat proxy (src/runtime/sph/sphReactionHeatProxyGauge.js):
+// the product term's runtime-gauge offset (word 15), 0 on single-gauge tables.
+fn product_term_gauge(term_index: u32) -> f32 {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u].w;
 }
 
 fn gas_product_row0(gas_index: u32) -> vec4<f32> {
@@ -7643,6 +8063,10 @@ ${sharedAllocation ? `      if (reaction_energy_enabled(reaction_index)) {
       let consumed_mass = source_consumed + partner_consumed;
       let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
       if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
+        continue;
+      }
+      if (reaction_pair_deferred(particle_index, source_pos_mass.w, source_consumed,
+          partner_index, partner_source_pos_mass.w, partner_consumed, reaction_energy_enabled(reaction_index))) {
         continue;
       }
       let mass_scale = consumed_mass / raw_product_mass;
@@ -10672,7 +11096,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           continue;
         }
         let weight = p2g_weight_at(wx, ox) * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz);
-        if (weight == 0.0) {
+        // Stencil support floor 2^-60, shared with the mechanics field view.
+        if (!(weight >= bitcast<f32>(0x21800000u))) {
           continue;
         }
         let node_pos = vec3<f32>(
@@ -10735,7 +11160,8 @@ fn scatter_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
           continue;
         }
         let weight = p2g_weight_at(wx, ox) * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz);
-        if (weight == 0.0) {
+        // Stencil support floor 2^-60, shared with the mechanics field view.
+        if (!(weight >= bitcast<f32>(0x21800000u))) {
           continue;
         }
         var pressure_affine = vec3<f32>(0.0);
@@ -12304,7 +12730,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           continue;
         }
         let weight = g2p_weight_at(wx, a) * g2p_weight_at(wy, b) * g2p_weight_at(wz, c);
-        if (weight == 0.0) {
+        // Stencil support floor 2^-60, shared with the mechanics field view.
+        if (!(weight >= bitcast<f32>(0x21800000u))) {
           continue;
         }
         let idx = g2p_grid_index(node_i, node_j, node_k);
@@ -16010,20 +16437,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let volume_ratio = represented_volume / max(rest_volume, 0.000001);
   let gas_phase = abs(phase_id - params.gas_phase_id) < 0.5;
   let phase_expanded = gas_phase && volume_ratio >= max(params.volume_expand_threshold, 1.0);
-  if (!phase_expanded) {
+  // Fixed phase-slot children have distinct immutable identities and J=1.
+  // Their opt-in coarsening domain is material + source level/chart/cell.
+  // Non-gas rows never contribute, so condensed identities cannot alias it.
+  let physical_gas_grouping = (params.flags & 1u) != 0u;
+  if (select(!phase_expanded, !gas_phase, physical_gas_grouping)) {
     ss_pvta_write_empty(aggregate_offset, assignment_offset, particle_index, 32.0);
     return;
   }
 
   let physical_support = ss_pvta_volume_radius(represented_volume) * max(params.support_radius_scale, 0.0);
   let target_support = max(physical_support, source_support);
-  let target_level_i32 = ss_pvta_level_from_support(target_support);
+  let target_level_i32 = select(ss_pvta_level_from_support(target_support), i32(source_level), physical_gas_grouping);
   let target_level = f32(target_level_i32);
   let target_grid_spacing = max(params.base_grid_spacing_m, 0.000001) * exp2(target_level);
   let target_cell = floor(position / target_grid_spacing);
   let level_delta = target_level - source_level;
 
-  aggregate_rows[aggregate_offset + 0u] = f32(particle_identity[particle_index]);
+  aggregate_rows[aggregate_offset + 0u] = select(f32(particle_identity[particle_index]),
+    level_assignments[assignment_offset + 9u], physical_gas_grouping);
   aggregate_rows[aggregate_offset + 1u] = target_level;
   aggregate_rows[aggregate_offset + 2u] = chart_id;
   aggregate_rows[aggregate_offset + 3u] = 1.0;
@@ -17913,6 +18345,77 @@ struct SchroederPhaseVolumeMigrationParams {
 @group(0) @binding(2) var<storage, read_write> migration_rows: array<f32>;
 @group(0) @binding(3) var<uniform> params: SchroederPhaseVolumeMigrationParams;
 @group(0) @binding(4) var<storage, read> particle_identity: array<u32>;
+@group(0) @binding(5) var<storage, read> interface_fields: array<u32>;
+
+// Query the admitted mechanics dictionary, not all particles. A center's
+// 27-node interpolation stencil does not cover a coarse carrier's physical
+// volume. Keep that cheap local query, then search occupied dictionary ranges
+// across the physical support bounds for larger carriers.
+fn ss_pvm_interface_source_ready(particle: u32) -> bool {
+  if ((params.flags & 1u) == 0u) { return false; }
+  if (interface_fields[0u] != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u
+      || interface_fields[1u] != ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u
+      || interface_fields[2u] != 3u || particle >= interface_fields[16u]) { return false; }
+  let descriptor = interface_fields[24u] + particle * interface_fields[25u];
+  return interface_fields[descriptor] == 3u && interface_fields[descriptor + 3u] == 1u;
+}
+fn ss_pvm_condensed_interface(particle: u32) -> bool {
+  if (!ss_pvm_interface_source_ready(particle)) { return false; }
+  let descriptor = interface_fields[24u] + particle * interface_fields[25u];
+  let count = interface_fields[34u];
+  let keys = interface_fields[26u]; let stride = interface_fields[27u];
+  for (var stencil = 0u; stencil < 27u; stencil++) {
+    let field = interface_fields[descriptor + 4u + stencil];
+    if (field >= count) { continue; }
+    let node = interface_fields[keys + field * stride];
+    var lo = 0u; var hi = count;
+    while (lo < hi) {
+      let middle = lo + (hi - lo) / 2u;
+      if (interface_fields[keys + middle * stride] < node) { lo = middle + 1u; }
+      else { hi = middle; }
+    }
+    if (lo < count && interface_fields[keys + lo * stride] == node) {
+      let phase = interface_fields[keys + lo * stride + 1u];
+      if (phase == 1u || phase == 2u) { return true; }
+    }
+  }
+  let assignment = particle * max(params.assignment_stride, 16u);
+  let support = ss_pvm_volume_radius(level_assignments[assignment + 3u])
+    * max(params.support_radius_scale, 0.0);
+  let dx = bitcast<f32>(interface_fields[23u]);
+  if (!(dx > 0.0) || !(support > 1.5 * dx)) { return false; }
+  let dims = vec3<u32>(interface_fields[19u], interface_fields[20u], interface_fields[21u]);
+  if (any(dims == vec3<u32>(0u))) { return false; }
+  let position = vec3<f32>(level_assignments[assignment + 12u],
+    level_assignments[assignment + 13u], level_assignments[assignment + 14u]);
+  let center = position / dx + vec3<f32>(f32(interface_fields[22u]));
+  let extent = vec3<f32>(support / dx);
+  let lower = max(vec3<i32>(ceil(center - extent)), vec3<i32>(0));
+  let upper = min(vec3<i32>(floor(center + extent)), vec3<i32>(dims) - vec3<i32>(1));
+  if (any(lower > upper)) { return false; }
+  // Dense node IDs are x-major, then y, then z. One lower-bound per x/y
+  // stripe skips empty space; the inner scan visits only occupied fields.
+  // This conservative support box decides refinement, never heat or force.
+  for (var x = lower.x; x <= upper.x; x++) {
+    for (var y = lower.y; y <= upper.y; y++) {
+      let stripe = (u32(x) * dims.y + u32(y)) * dims.z;
+      let first = stripe + u32(lower.z); let last = stripe + u32(upper.z);
+      var lo = 0u; var hi = count;
+      while (lo < hi) {
+        let middle = lo + (hi - lo) / 2u;
+        if (interface_fields[keys + middle * stride] < first) { lo = middle + 1u; }
+        else { hi = middle; }
+      }
+      for (var field = lo; field < count; field++) {
+        let key = keys + field * stride;
+        if (interface_fields[key] > last) { break; }
+        let phase = interface_fields[key + 1u];
+        if (phase == 1u || phase == 2u) { return true; }
+      }
+    }
+  }
+  return false;
+}
 
 const SCHROEDER_PVM_ASSIGNMENT_STRIDE: u32 = 16u;
 const SCHROEDER_PVM_AGGREGATE_NODE_STRIDE: u32 = 32u;
@@ -18067,7 +18570,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     level_assignments[assignment_offset + 14u]
   );
   let chart_id = level_assignments[assignment_offset + 15u];
-  let particle_domain = f32(particle_identity[particle_index]);
+  let physical_gas_grouping = (params.flags & 1u) != 0u;
+  let particle_domain = select(f32(particle_identity[particle_index]), material_id, physical_gas_grouping);
 
   if (!ss_pvm_positive(represented_volume) || !ss_pvm_positive(rest_volume)) {
     ss_pvm_write_row(
@@ -18109,8 +18613,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let volume_ratio = max(represented_volume / max(rest_volume, 0.000001), 0.0);
   let physical_support = ss_pvm_volume_radius(represented_volume) * max(params.support_radius_scale, 0.0);
-  let target_support = max(physical_support, source_support);
-  let target_level_i32 = ss_pvm_level_from_support(target_support);
+  let at_interface = ss_pvm_condensed_interface(particle_index);
+  let interface_support = max(params.target_support_cells, 1.0) * source_grid_spacing;
+  let interface_refine = at_interface && physical_support
+    > interface_support * (1.0 + max(level_assignments[assignment_offset + 11u], 0.0));
+  // One octet per accepted step halves each child's support radius. The
+  // hysteresis band avoids threshold flicker; interface rows never coarsen.
+  let target_support = select(max(physical_support, source_support), physical_support * 0.5, interface_refine);
+  let target_level_i32 = select(ss_pvm_level_from_support(target_support), i32(source_level), physical_gas_grouping);
   let target_level = f32(target_level_i32);
   let target_grid_spacing = ss_pvm_grid_spacing_for_level(target_level_i32);
   let level_delta = target_level - source_level;
@@ -18166,8 +18676,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (sparse_surface_refine_pressure) {
     refine_pressure_reason_mask_u32 = refine_pressure_reason_mask_u32 | 4u;
   }
+  if (interface_refine) { refine_pressure_reason_mask_u32 |= 64u; }
   let refine_pressure_reason_mask = f32(refine_pressure_reason_mask_u32);
-  // Hysteresis: only INTEGRITY reasons (missing aggregate, residual
+  // Legacy expansion hysteresis: only INTEGRITY reasons (missing aggregate, residual
   // violation - bits 1|2) force a refine. The sparse-surface bit stays in
   // the telemetry mask but must not convert a coarsen-worthy lone particle
   // into a split: a just-merged particle is always alone in its cell, so
@@ -18178,12 +18689,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // and in-place level migration handles them via the phase-volume level
   // update overlay.
   let integrity_refine_mask_u32 = refine_pressure_reason_mask_u32 & 3u;
-  let coarsen = phase_expanded
+  let legacy_coarsen = phase_expanded && !at_interface
     && level_delta >= delta_threshold
     && aggregate_matched
     && residual_ok
     && integrity_refine_mask_u32 == 0u;
-  let refine = phase_expanded && integrity_refine_mask_u32 != 0u;
+  // Away from interfaces one bounded octet may coarsen inside a source cell.
+  // Use the lower hysteresis envelope of a 2:1 bulk support radius; a merged
+  // singleton cannot merge again. The writer independently validates actual
+  // members' material, caloric branch and constitutive keys before any write.
+  let bulk_support_limit = 2.0 * interface_support
+    * max(1.0 - max(level_assignments[assignment_offset + 11u], 0.0), 0.0);
+  let aggregate_support = ss_pvm_volume_radius(aggregate_volume) * max(params.support_radius_scale, 0.0);
+  let physical_coarsen = gas_phase && ss_pvm_interface_source_ready(particle_index)
+    && !at_interface && aggregate_matched && residual_ok
+    && aggregate_match_count >= 2.0 && aggregate_match_count <= 8.0
+    && ss_pvm_positive(aggregate_volume) && aggregate_support <= bulk_support_limit;
+  let coarsen = select(legacy_coarsen, physical_coarsen, physical_gas_grouping);
+  let refine = interface_refine || (phase_expanded && integrity_refine_mask_u32 != 0u);
 
   var status = 1.0;
   if (phase_expanded) {
@@ -18472,7 +18995,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let coarsen_delta = 1.0 - aggregate_matching_count;
-  let refine_delta = max(1.0, ceil(abs(level_delta))) - 1.0;
+  // Geometric refinement is three-dimensional: a single 2:1 refinement
+  // creates eight children, retaining the source plus seven spare lineages.
+  // Preserve the existing integrity-repair policy for other reason masks.
+  let interface_refine = (u32(proposal_rows[proposal_offset + 7u]) & 64u) != 0u;
+  let refine_delta = select(max(1.0, ceil(abs(level_delta))) - 1.0, 7.0, interface_refine);
   let particle_count_delta = select(
     select(0.0, coarsen_delta, coarsen_eligible),
     refine_delta,
@@ -18541,6 +19068,13 @@ struct SchroederParticleStorageAllocationParams {
 
 const SCHROEDER_PSAL_APPLY_STRIDE: u32 = 32u;
 const SCHROEDER_PSAL_ALLOCATION_STRIDE: u32 = 32u;
+
+// Fixed phase slots use spare-lineage ranks instead of an append window.
+// Distinct actions keep these intents separate from the legacy materializer:
+// 5 = split retaining the source, 6 = merge into the leader, 7 = merge member.
+fn ss_psal_preserve_phase_slots() -> bool {
+  return (u32(params.flags) & 1u) != 0u;
+}
 
 fn ss_psal_active_apply(apply_offset: u32) -> bool {
   let status = apply_rows[apply_offset + 3u];
@@ -18629,9 +19163,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let particle_delta = apply_rows[apply_offset + 7u];
-  var allocation_count = max(particle_delta, 0.0);
-  var free_count = max(-particle_delta, 0.0);
+  var allocation_count = select(max(particle_delta, 0.0), 0.0, ss_psal_preserve_phase_slots());
+  var free_count = select(max(-particle_delta, 0.0), 0.0, ss_psal_preserve_phase_slots());
   var divide_mass_split = false;
+  var phase_slot_action = 1.0;
   let status_bits_self = u32(max(apply_rows[apply_offset + 3u], 0.0));
   if ((status_bits_self & 4u) != 0u) {
     // Mass-correct split: the source is replaced by (delta + 1) children,
@@ -18641,6 +19176,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       allocation_count = particle_delta + 1.0;
       free_count = 1.0;
       divide_mass_split = true;
+      if (ss_psal_preserve_phase_slots()) {
+        allocation_count = particle_delta;
+        free_count = 0.0;
+        phase_slot_action = 5.0;
+      }
     } else {
       allocation_count = 0.0;
       free_count = 0.0;
@@ -18655,13 +19195,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let is_leader = apply_rows[apply_offset + 0u] == group.leader_source_index;
       allocation_count = select(0.0, 1.0, is_leader);
       free_count = 1.0;
+      if (ss_psal_preserve_phase_slots()) {
+        allocation_count = 0.0;
+        free_count = select(1.0, 0.0, is_leader);
+        phase_slot_action = select(7.0, 6.0, is_leader);
+      }
     } else {
       allocation_count = 0.0;
       free_count = 0.0;
     }
   }
   let capacity_required_by_row = params.current_particle_capacity + allocation_count;
-  let capacity_residual = max(capacity_required_by_row - params.required_particle_capacity, 0.0);
+  // In the fixed layout the GPU free-list grant, not append capacity, bounds
+  // the split. Merges need no spare and never change the phase-lane stride.
+  let capacity_residual = select(
+    max(capacity_required_by_row - params.required_particle_capacity, 0.0),
+    0.0,
+    ss_psal_preserve_phase_slots()
+  );
   let allocation_required = allocation_count > 0.0;
   let free_required = free_count > 0.0;
 
@@ -18683,6 +19234,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   );
   if (divide_mass_split) {
     slot_action_id = 4.0;
+  }
+  if (ss_psal_preserve_phase_slots()) {
+    slot_action_id = phase_slot_action;
   }
 
   allocation_rows[allocation_offset + 0u] = apply_rows[apply_offset + 0u];
@@ -18804,6 +19358,22 @@ fn ss_pssa_free_allowed(
     return false;
   }
   let slot_action = allocation_rows[allocation_offset + 8u];
+  if (slot_action == 7.0) {
+    // Fixed-slot merge members can retire only beside an admitted in-place
+    // leader in the same group. An empty spare pool must not deny a merge.
+    if ((params.flags & 1u) == 0u) { return false; }
+    let my_cell = allocation_rows[allocation_offset + 18u];
+    if (my_cell < 0.0) { return false; }
+    for (var row = 0u; row < params.allocation_row_count; row = row + 1u) {
+      let other = row * allocation_stride;
+      if (ss_pssa_active_allocation(other)
+          && allocation_rows[other + 8u] == 6.0
+          && allocation_rows[other + 18u] == my_cell) {
+        return true;
+      }
+    }
+    return false;
+  }
   if (abs(slot_action - 2.0) >= 0.5) {
     // Non-merge frees (mass-correct splits free their own source alongside
     // their granted children) gate on this row's own grant when it writes.
@@ -18879,6 +19449,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
 
+  let fixed_action = allocation_rows[allocation_offset + 8u];
+  let preserve_phase_slots = (params.flags & 1u) != 0u;
+  // A fixed-slot intent must never be interpreted as a legacy append/free.
+  if (!preserve_phase_slots && fixed_action >= 5.0) {
+    ss_pssa_write_empty(assignment_offset, allocation_offset, free_list_offset, 32.0);
+    return;
+  }
+  if (preserve_phase_slots && fixed_action != 1.0
+      && fixed_action != 5.0 && fixed_action != 6.0 && fixed_action != 7.0) {
+    ss_pssa_write_empty(assignment_offset, allocation_offset, free_list_offset, 32.0);
+    return;
+  }
+
   let base_slot = free_list_rows[free_list_offset + 0u];
   let slot_capacity = free_list_rows[free_list_offset + 1u];
   let available_slot_count = free_list_rows[free_list_offset + 2u];
@@ -18887,17 +19470,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let allocation_capacity_residual = allocation_rows[allocation_offset + 15u];
   let writer_slot_offset = ss_pssa_writer_slot_offset(row_index, allocation_stride);
   let row_slot_start = base_slot + writer_slot_offset;
-  let target_slot_residual = max((writer_slot_offset + target_count) - slot_capacity, 0.0);
-  let available_slot_residual = max((writer_slot_offset + target_count) - available_slot_count, 0.0);
+  let target_slot_residual = select(
+    max((writer_slot_offset + target_count) - slot_capacity, 0.0),
+    0.0, preserve_phase_slots && target_count == 0.0
+  );
+  let available_slot_residual = select(
+    max((writer_slot_offset + target_count) - available_slot_count, 0.0),
+    0.0, preserve_phase_slots && target_count == 0.0
+  );
   let target_granted = target_count > 0.0
     && target_slot_residual <= 0.0
     && available_slot_residual <= 0.0;
-  let target_start = select(-1.0, row_slot_start, target_granted);
+  var target_start = select(-1.0, row_slot_start, target_granted);
+  if (preserve_phase_slots && fixed_action == 6.0) {
+    target_start = allocation_rows[allocation_offset + 0u];
+  }
   let free_allowed = ss_pssa_free_allowed(row_index, allocation_offset, allocation_stride, target_granted);
   let free_start = select(-1.0, allocation_rows[allocation_offset + 0u], free_allowed);
 
   var status = 1.0 + 8.0;
-  if (target_count > 0.0 && target_start >= 0.0) {
+  if ((target_count > 0.0 || (preserve_phase_slots && fixed_action == 6.0)) && target_start >= 0.0) {
     status = status + 2.0;
   }
   let effective_free_count = select(0.0, free_count, free_allowed);
@@ -18918,7 +19510,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   assignment_rows[assignment_offset + 7u] = allocation_rows[allocation_offset + 7u];
   assignment_rows[assignment_offset + 8u] = allocation_rows[allocation_offset + 8u];
   assignment_rows[assignment_offset + 9u] = target_start;
-  assignment_rows[assignment_offset + 10u] = target_count;
+  assignment_rows[assignment_offset + 10u] = select(
+    target_count, 1.0, preserve_phase_slots && fixed_action == 6.0
+  );
   assignment_rows[assignment_offset + 11u] = free_start;
   assignment_rows[assignment_offset + 12u] = effective_free_count;
   assignment_rows[assignment_offset + 13u] = base_slot;
@@ -19447,6 +20041,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let materialization_offset = row_index * materialization_stride;
   let assignment_status = assignment_rows[assignment_offset + 3u];
   let assignment_admission = assignment_rows[assignment_offset + 6u];
+
+  // Actions 5-7 address stable phase slots and spare-lineage ranks. This
+  // append/compact materializer cannot consume them, even if an admission
+  // was passed accidentally. A phase-aware materializer must own the write.
+  if (assignment_rows[assignment_offset + 8u] >= 5.0) {
+    ss_psm_write_empty(materialization_offset, assignment_offset, 32.0);
+    return;
+  }
 
   if (assignment_status <= 0.0 || assignment_status >= 32.0 || assignment_admission <= 0.0 || params.admission_approved == 0u) {
     ss_psm_write_empty(materialization_offset, assignment_offset, 32.0);

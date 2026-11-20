@@ -1,3 +1,4 @@
+import { watchSphDeviceLoss } from '../sph/sphDeviceLossRelay.js';
 import {
   OPTICAL_GPU_RECORD_ROW_LAYOUT,
   OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT,
@@ -1203,15 +1204,14 @@ export async function runOpticalGpuLookupWithOptionalWebGpu({
     });
   }
   try {
-    let lostInfo = null;
+    const deviceLossState = { info: null };
     const resolvedDeviceResult = device
       ? { status: 'webgpu-device-ready', reason: 'provided device', device }
       : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
     if (resolvedDeviceResult.device) {
-      watchDeviceLost(resolvedDeviceResult.device, (info) => {
-        lostInfo = info;
-        if (typeof onDeviceLost === 'function') onDeviceLost(info);
-      });
+      // One device.lost reaction per device; this lookup's loss state is held
+      // weakly, so completed lookups are not retained by the device.
+      watchSphDeviceLoss(resolvedDeviceResult.device, deviceLossState, onDeviceLost);
     }
     if (!resolvedDeviceResult.device) {
       return lookupExecutionFromResult(cpuResult, {
@@ -1224,25 +1224,25 @@ export async function runOpticalGpuLookupWithOptionalWebGpu({
       });
     }
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       return lookupExecutionFromResult(cpuResult, {
         cpuReference: cpuResult,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });
     }
     const gpuResult = await webGpuRunner({ device: resolvedDeviceResult.device, table, lookup });
     await Promise.resolve();
-    if (lostInfo) {
+    if (deviceLossState.info) {
       return lookupExecutionFromResult(cpuResult, {
         cpuReference: cpuResult,
         gpuResult,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
-          reason: describeDeviceLost(lostInfo),
+          reason: describeDeviceLost(deviceLossState.info),
           fallback: 'cpu-reference'
         }
       });

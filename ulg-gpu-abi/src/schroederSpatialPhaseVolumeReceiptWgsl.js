@@ -356,18 +356,36 @@ fn physical_source_for_active(active_ordinal: u32) -> u32 {
   return physical_source;
 }
 
-fn active_source_linear_group(workgroup_id: vec3<u32>) -> u32 {
-  return workgroup_id.x
-    + workgroup_id.y
-      * active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD];
+// A1: the view's active dispatch words are this pass's indirect arguments
+// (read-only here). A group the indirect launch (x, y, z) would not run gets
+// an index past every bound (no work, no partial), so an indirect launch and
+// a direct 1D launch over a host ceiling are exact. No early return: the
+// reductions below are barrier-uniform.
+fn active_source_linear_group(
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>
+) -> u32 {
+  let linear_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD + 2u] == 0u
+    || linear_group >= active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD]
+      * active_source_view[ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD + 1u]
+  ) {
+    return 0xffffffffu;
+  }
+  return linear_group;
 }
 
 fn active_source_linear_invocation(
   local_id: vec3<u32>,
-  workgroup_id: vec3<u32>
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>
 ) -> u32 {
-  return active_source_linear_group(workgroup_id)
-    * RECEIPT_WORKGROUP_SIZE + local_id.x;
+  let linear_group = active_source_linear_group(workgroup_id, num_workgroups);
+  if (linear_group == 0xffffffffu) { return 0xffffffffu; }
+  return linear_group * RECEIPT_WORKGROUP_SIZE + local_id.x;
 }
 `
     : ''}
@@ -405,17 +423,32 @@ fn mechanics_field_dispatch_shape_admitted(field_count: u32) -> bool {
     && mechanics_field[46u] == dispatch_z;
 }
 
-fn mechanics_field_linear_invocation(
-  local_id: vec3<u32>,
-  workgroup_id: vec3<u32>
+// A1: field words 60..62 are the field pass's indirect arguments; same rule
+// as active_source_linear_group.
+fn mechanics_field_linear_group(
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>
 ) -> u32 {
-  let linear_group =
-    workgroup_id.x + workgroup_id.y * mechanics_field[60u];
-  return linear_group * RECEIPT_WORKGROUP_SIZE + local_id.x;
+  let linear_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    mechanics_field[62u] == 0u
+    || linear_group >= mechanics_field[60u] * mechanics_field[61u]
+  ) {
+    return 0xffffffffu;
+  }
+  return linear_group;
 }
 
-fn mechanics_field_linear_group(workgroup_id: vec3<u32>) -> u32 {
-  return workgroup_id.x + workgroup_id.y * mechanics_field[60u];
+fn mechanics_field_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>
+) -> u32 {
+  let linear_group = mechanics_field_linear_group(workgroup_id, num_workgroups);
+  if (linear_group == 0xffffffffu) { return 0xffffffffu; }
+  return linear_group * RECEIPT_WORKGROUP_SIZE + local_id.x;
 }
 
 fn control_store(word: u32, value: u32) {
@@ -694,10 +727,11 @@ fn field_key_matches(field_index: u32, row_offset: u32) -> bool {
 fn reduce_phase_volume_receipt_sources(
   @builtin(global_invocation_id) global_id: vec3<u32>,
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
   let work_source = ${directoryV2
-    ? 'active_source_linear_invocation(local_id, workgroup_id)'
+    ? 'active_source_linear_invocation(local_id, workgroup_id, num_workgroups)'
     : 'global_id.x'};
   let source_index = ${directoryV2
     ? 'physical_source_for_active(work_source)'
@@ -823,7 +857,7 @@ fn reduce_phase_volume_receipt_sources(
   }
   if (local_id.x == 0u) {
     let linear_group = ${directoryV2
-      ? 'active_source_linear_group(workgroup_id)'
+      ? 'active_source_linear_group(workgroup_id, num_workgroups)'
       : 'workgroup_id.x'};
     if (linear_group < ${directoryV2
       ? 'group_count(active_source_count())'
@@ -836,10 +870,11 @@ fn reduce_phase_volume_receipt_sources(
 @compute @workgroup_size(${SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_WORKGROUP_SIZE})
 fn reduce_phase_volume_receipt_fields(
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
   let field_index =
-    mechanics_field_linear_invocation(local_id, workgroup_id);
+    mechanics_field_linear_invocation(local_id, workgroup_id, num_workgroups);
   let field_count = admitted_field_count();
   var local_sum = vec4<f32>(0.0);
   var local_condition = vec4<f32>(0.0);
@@ -891,7 +926,7 @@ fn reduce_phase_volume_receipt_fields(
     stride = stride / 2u;
   }
   if (local_id.x == 0u) {
-    let linear_group = mechanics_field_linear_group(workgroup_id);
+    let linear_group = mechanics_field_linear_group(workgroup_id, num_workgroups);
     if (linear_group < group_count(field_count)) {
       partials[params.field_partial_offset_vec4 + linear_group] = field_sums[0u];
       partials[params.field_conditioning_offset_vec4 + linear_group] = condition_sums[0u];

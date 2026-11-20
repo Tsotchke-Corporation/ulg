@@ -467,7 +467,7 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
     return true;
   }
 
-  function assertReceipt(receipt, expectedCapacity, expectedLevel, expectedCompletion, role) {
+  function assertReceipt(receipt, expectedCapacity, expectedLevel, expectedCompletion, role, expectedState = 'encoded') {
     const state = executionSubmissionState(
       receipt,
       'schroeder-spatial-phase-volume-receipt-gpu-encoded',
@@ -491,9 +491,12 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
     const fieldView = receipt?.mechanicsFieldView;
     if (
       admission.admitted !== true
-      || state !== 'encoded'
-      || momentState !== 'encoded'
-      || fieldState !== 'encoded'
+      || state !== expectedState
+      || momentState !== expectedState
+      || fieldState !== expectedState
+      || receipt.releaseScheduled === true
+      || receipt.phaseVolumeMoment?.releaseScheduled === true
+      || receipt.mechanicsFieldView?.releaseScheduled === true
       || receipt?.schema !== ULG_SCHROEDER_SPATIAL_PHASE_VOLUME_RECEIPT_SCHEMA
       || receipt?.released === true
       || receipt?.fieldCapacity !== expectedCapacity
@@ -507,7 +510,7 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
       || !webGpuBufferMatchesDevice(receipt.phaseVolumeMoment?.momentBuffer, device)
     ) {
       throw new TypeError(
-        `${role} receipt must be one exact live encoded S9-B artifact on this device`
+        `${role} receipt must be one exact live ${expectedState} S9-B artifact on this device`
       );
     }
     bufferSizeAtLeast(receipt.controlBuffer, receipt.layout.controlByteLength, `${role} receipt control`);
@@ -559,6 +562,7 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
 
   function encode(encoder, {
     fineReceipt,
+    submittedNativeReceipt = null,
     coarseReceipt = null,
     parentFieldView = null,
     gpuTimestampRecorder = null,
@@ -566,12 +570,20 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
   } = {}) {
     assertEncoder(encoder);
     if (!fineReceipt) throw new TypeError('phase-volume interface proposal requires fineReceipt');
+    // Native local heads may be constructed after the original immutable
+    // topology has submitted. Require the complete original submitted family;
+    // this does not authorize a submitted parent/reflux construction.
+    if (submittedNativeReceipt != null && (submittedNativeReceipt !== fineReceipt
+      || layout.coarseFieldCapacity !== 0 || coarseReceipt != null || parentFieldView != null)) {
+      throw new TypeError('Submitted native topology requires its exact single native receipt');
+    }
     const fine = assertReceipt(
       fineReceipt,
       layout.fineFieldCapacity,
       fineReceipt.selectedLevel,
       fineReceipt.completionOrdinal,
-      'fine'
+      'fine',
+      submittedNativeReceipt == null ? 'encoded' : 'submitted'
     );
     const twoLevel = layout.coarseFieldCapacity > 0;
     if (!twoLevel && (coarseReceipt != null || parentFieldView != null)) {

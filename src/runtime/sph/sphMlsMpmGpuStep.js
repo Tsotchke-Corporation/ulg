@@ -1,4 +1,27 @@
+import { splitSpareReservesEqual } from './schroederSplitSpareReserve.js';
+import { retainedSchroederPhaseSlotRefinementBuffers } from './schroederPhaseSlotRefinementGpu.js';
+
+const phaseSlotOwnershipRollbacks = new WeakMap();
+
+// Called only for an unpublished refinement candidate. Retain the original
+// auxiliary-owner transaction instead of guessing how to reverse its aliases.
+export function rollbackMlsMpmPhaseSlotContinuationOwnership(step) {
+  const output = step?.phaseSlotRefinementStep;
+  const rollback = output && phaseSlotOwnershipRollbacks.get(output);
+  if (!rollback) return false;
+  rollback();
+  phaseSlotOwnershipRollbacks.delete(output);
+  return true;
+}
+import {
+  encodeSphImplicitPressureSolve,
+  normalizeSphImplicitPressureOptions
+} from './sphImplicitPressureGpu.js';
+import { ensureSchroederSolidRigidFamilyForUpload, runSchroederSolidRigidLaneStep } from './schroederSolidRigidLane.js';
+import { runSchroederSpatialChainResidentBatchWebGpu, schroederSpatialChainResidentClock,
+  retireSchroederSpatialChainResidentStep, bindSchroederSpatialChainResidentDelta } from './schroederSpatialChainResidentGpu.js';
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
+  sphGpuParticleUploadExactEnergyRows,
   bindSphExactMassPostMechanicsContinuation, bindSphExactMassFusedSequenceContinuation,
   runMlsMpmGpuParticleBufferSetCleanupAfterBorrows, transferMlsMpmGpuAuxiliaryRetirementOwnership,
   acquireSphParticleExactMassRead,
@@ -137,7 +160,8 @@ import {
   ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
   validateSchroederSpatialMechanicsViewDescriptor,
   validateSchroederSpatialMechanicsFieldViewDescriptor,
-  validateSchroederSpatialActiveSourceViewDescriptor
+  validateSchroederSpatialActiveSourceViewDescriptor,
+  SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   mlsMpmG2pReconstructWgsl,
@@ -5088,7 +5112,7 @@ export function deriveAuthoritativeSpatialGasGrid(
   )
     ? schroederSpatialEpochGeneration.mechanicsLevelViews
     : [];
-  if (levelViews.length < 1 || levelViews.length > 2) return null;
+  if (levelViews.length < 1 || levelViews.length > 6) return null;
   const selected = levelViews[levelViews.length - 1];
   const field = selected?.mechanicsFieldView || null;
   const gridDims = Array.from(field?.gridDims || []);
@@ -8225,9 +8249,10 @@ fn measure_g2p_energy_receipt(
   let mass = sph_state[state].w;
   let prior = sph_state[state + 1u].w;
   let next = out_sph_state[state + 1u].w;
+  // prior/next are gauge-relative specific energies (phase-caloric ice is
+  // negative), so only their finiteness is structural.
   if (!(mass >= 0.0) || !g2p_energy_finite(mass)
-      || !g2p_energy_finite(prior) || !g2p_energy_finite(next)
-      || (mass > 0.0 && (prior < 0.0 || next < 0.0))) {
+      || !g2p_energy_finite(prior) || !g2p_energy_finite(next)) {
     g2p_receipt_reject(false, false, false);
     return;
   }
@@ -8657,9 +8682,11 @@ fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {`,
     }
   }
   let next_internal_energy = vel_u.w + sampled_internal_energy_delta;
+  // Specific internal energy is gauge-relative: a phase-caloric table zeroes
+  // liquid at the triple point, so ice is legitimately negative. Mechanics
+  // admits any finite value; the caloric domain belongs to the thermal graph.
   if (next_internal_energy != next_internal_energy
       || abs(next_internal_energy) > 3.402823466e+38
-      || next_internal_energy < 0.0
       || !sampled_pressure_valid
       || !sampled_pressure_initialized
       || !(sampled_pressure_weight > 0.0)
@@ -8972,6 +8999,10 @@ function createSingleLevelMechanicsFieldG2pWgsl(sourceWgsl) {
   );
 }
 
+// Fused grid-update params are bound to the mechanics-field grid-update
+// kernels, whose GridUpdateParams view is 256 bytes (see that WGSL).
+const FUSED_GRID_UPDATE_PARAMS_BYTES = 256;
+
 export const mlsMpmMechanicsFieldGridUpdateWgsl = `
 struct GridUpdateParams {
   grid_node_count: u32,
@@ -8994,10 +9025,27 @@ struct GridUpdateParams {
   wall_barrier_elastic_stiffness_n_per_m: f32,
   wall_barrier_contact_scale: f32,
   wall_barrier_min_gap_m: f32,
+  // Bytes 80..239 belong to the phase-volume transport / surface-stress views
+  // of the same shared 256-byte params uniform.
+  shared_transport_params: array<vec4<u32>, 10>,
+  // A1 direct-dispatch snapshot, bytes 240..255 (see
+  // SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC).
+  dispatch_snapshot: vec4<u32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> field_view: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: GridUpdateParams;
+
+const FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC: u32 = ${SCHROEDER_SPATIAL_FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC}u;
+
+// A direct 1D launch of this field consumer runs only the workgroups the
+// staged indirect launch would have run. Workgroup-uniform; inert otherwise.
+fn direct_dispatch_excludes(workgroup_id: vec3<u32>) -> bool {
+  return params.dispatch_snapshot.w == FIELD_CONSUMER_DIRECT_DISPATCH_MAGIC
+    && (workgroup_id.y != 0u || workgroup_id.z != 0u
+      || params.dispatch_snapshot.z == 0u
+      || workgroup_id.x >= params.dispatch_snapshot.x * params.dispatch_snapshot.y);
+}
 
 const FIELD_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC}u;
 const FIELD_VERSION: u32 = ${SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION}u;
@@ -9261,6 +9309,7 @@ fn clear_heat_rows(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_structurally_admitted()
       || !field_receipt_admitted(FIELD_RECEIPT_PHASE_HEAT_CLEARING)
@@ -9432,6 +9481,7 @@ fn main(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_operation_admitted(
       ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
@@ -9598,6 +9648,7 @@ fn contact_fields(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let first = field_linear_invocation(local_id, workgroup_id);
   let field_count = field_word(34u);
   if (!field_operation_admitted(
@@ -9697,6 +9748,7 @@ fn summarize_heat_rows(
   @builtin(local_invocation_id) local_id: vec3<u32>,
   @builtin(workgroup_id) workgroup_id: vec3<u32>
 ) {
+  if (direct_dispatch_excludes(workgroup_id)) { return; }
   let field_index = field_linear_invocation(local_id, workgroup_id);
   if (!field_operation_admitted(
       ${SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_EMPTY}u
@@ -11499,7 +11551,10 @@ function createFusedGridUpdateParamsArray({
   pressureInterfaceForceRowCount = 0,
   mechanicsFieldMutation = null
 }) {
-  const buffer = new ArrayBuffer(80);
+  // The mechanics-field grid-update kernels bound to this buffer read a
+  // 256-byte GridUpdateParams view (A1 dispatch snapshot at bytes 240..255);
+  // the zero tail leaves their direct-dispatch guard inert on this path.
+  const buffer = new ArrayBuffer(FUSED_GRID_UPDATE_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, gridSpec.gridNodeCount, true);
   view.setUint32(4, gridSpec.gridDims[0], true);
@@ -11539,7 +11594,7 @@ function createFusedActiveGridUpdateParamsArray({
   pressureInterfaceForceRowCount = 0,
   activeGridDispatch
 }) {
-  const buffer = new ArrayBuffer(112);
+  const buffer = new ArrayBuffer(FUSED_GRID_UPDATE_PARAMS_BYTES);
   new Uint8Array(buffer).set(new Uint8Array(createFusedGridUpdateParamsArray({
     gridSpec,
     dt,
@@ -11976,6 +12031,23 @@ function pressureInterfaceGridForceBlockedFields() {
     pressureInterfaceImpulseProofStatus: 'not-submitted-no-pressure-interface-force-rows',
     pressureInterfaceForceConsumerStatus: 'blocked-pressure-force-rows-unavailable'
   };
+}
+
+/**
+ * A single-level spatial epoch whose transaction carries an authoritative
+ * one-level S9-C proposal requires the gas/condensed pressure-drag
+ * transport in its mechanics-field grid update (two-level transactions
+ * route transport through the cross-level coupling instead).
+ */
+export function schroederSingleLevelPhaseVolumeTransportRequired(
+  transaction = null
+) {
+  return Boolean(
+    transaction
+    && transaction.twoLevelAuthoritative !== true
+    && transaction.phaseVolumeInterfaceProposalAuthoritative === true
+    && transaction.phaseVolumeInterfaceProposal?.twoLevel === false
+  );
 }
 
 export function phaseVolumeAmbientBuoyancyRequired({
@@ -14470,6 +14542,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   registerSubmittedCleanup = null,
   maxSubstepsPerSubmission = null,
   onPresentationSubmissionBoundary = null,
+  // A1 real-time pacing: keep at most one presentation boundary outstanding
+  // while the next chunk is encoded and submitted, instead of idling the GPU
+  // through each frame's completion round trip. Boundaries are still called
+  // in order (each awaited before the next), and the last is awaited before
+  // the sequence returns.
+  pipelinePresentationBoundaries = false,
   // PROF-0. Off by default: timestamp queries require the device to have been
   // created with the 'timestamp-query' feature, and resolving them costs a
   // small readback that the hot loop should not pay unprofiled.
@@ -14709,6 +14787,16 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   const separationVelocityDamping =
     mlsMpmParticleState?.particleSeparationVelocityDamping
     ?? MLS_MPM_PARTICLE_SEPARATION_VELOCITY_DAMPING_DEFAULT;
+  const implicitPressureOptions = normalizeSphImplicitPressureOptions(
+    mlsMpmParticleState?.implicitPressure
+  );
+  let implicitPressureDispatchCount = 0;
+  if (implicitPressureOptions) {
+    // Diagnostic tap (flag-on only): how many Tier-0 sequences carried the solve.
+    const tap = (globalThis.__ulgImplicitPressure ??= { sequences: 0, steps: 0, options: null });
+    tap.sequences += 1;
+    tap.options = implicitPressureOptions;
+  }
   const activeGridDispatch = resolveFusedActiveGridDispatch({
     requested: fuseActiveGrid,
     sphParticleState,
@@ -14964,6 +15052,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   const submissionStepCounts = [];
   let commandSubmissionCount = 0;
   let presentationBoundaryCount = 0;
+  let pendingPresentationBoundary = null;
   let presentationBoundaryCompletedCount = 0;
   let presentationBoundaryFailureCount = 0;
   let presentationQosHostQueueFenceCount = 0;
@@ -15283,6 +15372,25 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         activeGridIndirectDispatchArgs
       );
       gridUpdatePass.end();
+      // A1 larger-dt slice: the flagged semi-implicit liquid pressure solve
+      // rewrites updated_grid_nodes velocities in place before G2P. Off by
+      // default; off encodes nothing.
+      if (implicitPressureOptions) {
+        implicitPressureDispatchCount += encodeSphImplicitPressureSolve(device, encoder, {
+          options: implicitPressureOptions,
+          stateBuffer: currentStateBuffer,
+          thermoBuffer: currentThermoBuffer,
+          mechanicsBuffer: currentMechanicsBuffer,
+          gridBuffer: updatedGridBuffer,
+          gridSpec,
+          particleCount,
+          dt: dtSeconds,
+          internalPressureScale: finiteNumber(internalPressureScale, 1),
+          cflFactor: finiteNumber(cflFactor, DEFAULT_CFL_FACTOR),
+          timestampPassExtras: gpuTimestampProfiler.passDescriptorExtras('implicitPressure')
+        });
+        globalThis.__ulgImplicitPressure.steps += 1;
+      }
 
       const g2pBindGroup = memoizedBindGroup(
         g2pBindGroupLayout,
@@ -15598,24 +15706,42 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
           totalSubstepCount: count,
           chunkStepCount: currentSubmissionStepCount
         });
-        try {
-          const boundaryReceipt = await
-            onPresentationSubmissionBoundary(boundaryMetadata);
-          presentationBoundaryCompletedCount += 1;
-          presentationQosHostQueueFenceCount += Math.max(
-            0,
-            Number(boundaryReceipt?.presentationQosHostQueueFenceCount) || 0
-          );
-        } catch {
-          // Presentation QoS is deliberately fail-open. The logical physics
-          // transaction remains authoritative and must reach its sole
-          // terminal publication even if a frame opportunity times out or
-          // the compositor-facing callback fails.
-          presentationBoundaryFailureCount += 1;
+        // Presentation QoS is deliberately fail-open. The logical physics
+        // transaction remains authoritative and must reach its sole terminal
+        // publication even if a frame opportunity times out or the
+        // compositor-facing callback fails.
+        const settleBoundary = async (pending) => {
+          try {
+            const boundaryReceipt = await pending;
+            presentationBoundaryCompletedCount += 1;
+            presentationQosHostQueueFenceCount += Math.max(
+              0,
+              Number(boundaryReceipt?.presentationQosHostQueueFenceCount) || 0
+            );
+          } catch {
+            presentationBoundaryFailureCount += 1;
+          }
+        };
+        if (pipelinePresentationBoundaries) {
+          if (pendingPresentationBoundary) await pendingPresentationBoundary;
+          let started;
+          try {
+            started = onPresentationSubmissionBoundary(boundaryMetadata);
+          } catch (error) {
+            started = Promise.reject(error);
+          }
+          pendingPresentationBoundary = settleBoundary(started);
+        } else {
+          await settleBoundary(onPresentationSubmissionBoundary(boundaryMetadata));
         }
         encoder = createSequenceCommandEncoder();
         currentSubmissionStepCount = 0;
       }
+    }
+    // A pipelined boundary settles before the terminal work is encoded.
+    if (pendingPresentationBoundary) {
+      await pendingPresentationBoundary;
+      pendingPresentationBoundary = null;
     }
     if (
       (reactionActivationWatchTable == null)
@@ -16231,8 +16357,18 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
       presentationQosHostQueueFenceCount,
       logicalAuthorityPublicationCount: 1,
       intermediateAuthorityPublicationCount: 0,
-      dispatchCount: dispatchTopology.totalDispatches + sidecarFusionDispatchCount,
+      dispatchCount: dispatchTopology.totalDispatches + sidecarFusionDispatchCount
+        + implicitPressureDispatchCount,
       mechanicsDispatchCount: dispatchTopology.totalDispatches,
+      // A1 larger-dt slice receipt: null when the flag is off.
+      implicitPressure: implicitPressureOptions
+        ? {
+          ...implicitPressureOptions,
+          stepCount: count,
+          dispatchCount: implicitPressureDispatchCount,
+          cflNumber: implicitPressureOptions.cflSafety
+        }
+        : null,
       sidecarFusionDispatchCount,
       sidecarFusionDispatchCounts: {
         ...sidecarFusionDispatchCounts
@@ -18335,6 +18471,7 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
       taskId
     });
   const completedStepCount = Math.max(0, Math.round(finiteNumber(execution?.completedStepCount, stepSummaries.length)));
+  const chainClock = schroederSpatialChainResidentClock(execution?.finalStep, execution);
   const version = Math.max(
     0,
     Math.round(finiteNumber(
@@ -18345,7 +18482,7 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
       completedStepCount
     ))
   );
-  return {
+  return bindSchroederSpatialChainResidentDelta({
     schema: ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
     taskId: taskId || `ulg:sph-resident-steps:${resolvedStateKey || 'local'}`,
     scope,
@@ -18359,6 +18496,7 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
       readbackMode: execution?.readbackMode || execution?.finalStep?.readbackMode || null,
       requestedReadbackMode: execution?.requestedReadbackMode || null,
       completedStepCount,
+      ...(chainClock ? { chainClock } : {}),
       continuationAvailable: execution?.continuationAvailable === true,
       continuedFromResidentState: execution?.continuedFromResidentState === true,
       residentSourceMode: execution?.residentSourceMode || null,
@@ -18390,7 +18528,7 @@ export function createMlsMpmResidentStepsCommitDelta(execution = {}, {
       phaseChangeValidation: false,
       fullPhysicsValidation: false
     }
-  };
+  }, execution?.finalStep);
 }
 
 function attachResidentGpuLaneExecution(step, { lease = null, execution = null, error = null } = {}) {
@@ -18800,6 +18938,7 @@ function phaseCarrierPlansEqual(left, right) {
     left
     && right
     && fields.every((field) => left[field] === right[field])
+    && splitSpareReservesEqual(left.splitSpareReserve, right.splitSpareReserve)
   );
 }
 
@@ -20273,6 +20412,7 @@ export function createMlsMpmResidentStepsComputeTask({
         taskStepOptions.schroederSpatialEpochGeneration ?? null,
       mechanicsMaterialTable: taskStepOptions.mechanicsMaterialTable,
       ambientPressurePa: taskStepOptions.ambientPressurePa,
+      ambientReferenceDensityKgPerM3: taskStepOptions.ambientReferenceDensityKgPerM3,
       gravityMPerS2: taskStepOptions.gravityMPerS2,
       residentProductMass:
         taskStepOptions.residentProductMass
@@ -22367,7 +22507,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
           backend: 'webgpu',
           status: 'spatial-gas-ledger-producer-stage-blocked',
           reason:
-            'retained gas EOS requires one exact live one/two-level SS occupancy grid',
+            'retained gas EOS requires one exact live SS occupancy chain of one through six levels',
           executionSource:
             'retained-spatial-gas-ledger-eos-fail-closed-missing-spatial-generation',
           readbackMode,
@@ -26881,6 +27021,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           mechanicsMaterialTable:
             stepOptions.mechanicsMaterialTable ?? null,
           ambientPressurePa: stepOptions.ambientPressurePa,
+          ambientReferenceDensityKgPerM3: stepOptions.ambientReferenceDensityKgPerM3,
           gravityMPerS2:
             stepOptions.gravityMPerS2
             ?? stepOptions.mlsMpmParticleState?.gravityMPerS2
@@ -28156,11 +28297,22 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             stepOptions.mechanicsRefreshOptions
               ?.mechanicsMaterialPhaseUpload || null,
           ambientPressurePa: finiteNumber(stepOptions.ambientPressurePa, 0),
+          ambientReferenceDensityKgPerM3: stepOptions.ambientReferenceDensityKgPerM3,
           phaseVolumeAmbientBuoyancyRequired:
             phaseVolumeAmbientBuoyancyRequiredThisStep,
+          // With the exact gas pressure boundary present, S9-C shares the
+          // field as drag-only (pressure scale exactly zero), as two-level.
           phaseVolumePressureScale:
-            finiteNumber(stepOptions.internalPressureScale, 1),
-          phaseVolumeInterfaceTransportRequired: false,
+            exactPressureInputs?.authoritySource
+              && schroederSingleLevelPhaseVolumeTransportRequired(
+                stepOptions.schroederSpatialEpochTransaction
+              )
+              ? 0
+              : finiteNumber(stepOptions.internalPressureScale, 1),
+          phaseVolumeInterfaceTransportRequired:
+            schroederSingleLevelPhaseVolumeTransportRequired(
+              stepOptions.schroederSpatialEpochTransaction
+            ),
           gasPressureMechanicsAuthoritySource:
             exactPressureInputs?.authoritySource || null,
           gasPressureMechanicsChartId: 0,
@@ -30685,8 +30837,12 @@ const RESIDENT_PRODUCT_HISTORY_ARENA_MIN_CAPACITY_BYTES =
 const RESIDENT_PRODUCT_HISTORY_ARENA_MAX_SLOTS = 3;
 const RESIDENT_PRODUCT_HISTORY_GPU_COUNT_MIN_CAPACITY_BYTES =
   4 * 1024 * 1024;
+// Capacity ceiling for the host-free product-history arena (also bounded by
+// the device's buffer and binding limits). The requirement is rows x product
+// terms x 128 B x 8; 32 MiB refused room-air mixture parcels (8 terms, 52 MB)
+// and graded 8.75 mm air (53 MB), so it is 128 MiB.
 const RESIDENT_PRODUCT_HISTORY_NO_HOST_OBSERVATION_MAX_BYTES =
-  32 * 1024 * 1024;
+  128 * 1024 * 1024;
 const RESIDENT_PRODUCT_HISTORY_GPU_COUNT_RECORDS_PER_SLOT = 128;
 const RESIDENT_PRODUCT_HISTORY_GPU_COUNT_CONTROL_BANK_COUNT = 2;
 // Each physical bank also owns record zero as its immutable empty-parent
@@ -32031,6 +32187,26 @@ function beginResidentProductMassHandleBorrow(handle, role) {
 /** Read an original exact history owner without manufacturing a legacy event
  * handle. The consuming producer must release this pin only after its final
  * submitted read completes (or before submission on an encoding failure). */
+export function acquireResidentProductHistoryRead(handle, { device } = {}) {
+  const buffer = residentProductMassMergeBuffer(handle, device);
+  const descriptor = productEventLiveCountCopyDescriptor(handle, device);
+  if (!descriptor || !buffer || !Object.hasOwn(handle, '__ulgActiveBorrowCount')) {
+    throw new TypeError('Product history requires its original counted and borrowable owner');
+  }
+  const drop = beginResidentProductMassHandleBorrow(handle, 'private ledger history consumer');
+  let live = true;
+  return Object.freeze({ buffer, descriptor,
+    validate() {
+      if (!live || residentProductMassMergeBuffer(handle, device) !== buffer
+        || !validateProductEventLiveCountCopyDescriptor(descriptor, { handle, device })) {
+        throw new TypeError('Product history source changed or retired');
+      }
+      return true;
+    },
+    release() { if (!live) return false; live = false; return drop(); }
+  });
+}
+
 export function acquireResidentProductExactHistoryRead(handle, { device, identityBuffer = null } = {}) {
   const layout = resolveResidentProductExactHistoryLayout(handle, { device });
   if (!layout) throw new TypeError('Exact history consumption requires its original owner');
@@ -34375,6 +34551,7 @@ export function transferMaterialPropertyBankAuxiliaryOwnership({
 
 function buildNextParticleUploads({
   postMechanicsClosure = null,
+  privateChainFamily = null,
   sphParticleState,
   mlsMpmParticleState,
   sphParticleUpload,
@@ -34404,7 +34581,7 @@ function buildNextParticleUploads({
   const reaction = retainedReactionOutputBuffers(reactionStep);
   const mechanicsRefresh = retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep);
   const phaseCarrierTransfer = retainedPhaseCarrierTransferOutputBuffers(phaseCarrierTransferStep);
-  const terminalParticleFamily = selectMlsMpmTerminalParticleFamily({
+  const terminalParticleFamily = privateChainFamily ?? selectMlsMpmTerminalParticleFamily({
     postMechanicsClosure,
     sphParticleState,
     sphParticleUpload,
@@ -34491,8 +34668,9 @@ function buildNextParticleUploads({
           ? ((sourcePositionEpoch % 0xffff_ffff) + 1)
           : particlePingPong.nextStep);
   const sourceTopologyEpoch = Number(sphParticleUpload?.topologyEpoch ?? sphParticleState?.topologyEpoch);
+  const topologyMutation = Boolean(schroederParticleStorage || terminalParticleFamily.phaseSlotRefinementSelected);
   if (
-    schroederParticleStorage
+    topologyMutation
     && sourceTopologyEpoch === 0xffff_ffff
   ) {
     const error = new Error(
@@ -34523,7 +34701,7 @@ function buildNextParticleUploads({
     : (Number.isInteger(sourceTopologyEpoch)
         && sourceTopologyEpoch >= 0
         && sourceTopologyEpoch <= 0xffff_ffff
-      ? sourceTopologyEpoch + (schroederParticleStorage ? 1 : 0)
+      ? sourceTopologyEpoch + (topologyMutation ? 1 : 0)
       : null);
   const explicitChartEpoch = Number(continuationIdentity?.chartEpoch);
   const nextChartEpoch = Number.isInteger(explicitChartEpoch)
@@ -34543,8 +34721,14 @@ function buildNextParticleUploads({
     && explicitSupportEpoch <= 0xffff_ffff
     ? explicitSupportEpoch
     : nextPositionEpoch;
+  if (terminalParticleFamily.phaseSlotRefinementSelected && (!Number.isInteger(sourceTopologyEpoch)
+      || sourceTopologyEpoch < 0 || nextTopologyEpoch <= sourceTopologyEpoch)) {
+    throw new TypeError('Refined particle continuation requires an advancing topology epoch');
+  }
+  // Fixed phase-slot refinement preserves every identity word. Topology has
+  // its own advancing epoch; only the legacy storage writer revises identity.
   const nextIdentityRevision = schroederParticleStorage
-    ? `${schroederParticleStorage.identityRevision
+    ? `${schroederParticleStorage?.identityRevision
       || sphParticleUpload?.identityRevision
       || sphParticleState?.identityRevision
       || 'particle-identity'}:ss-topology:${particlePingPong.nextStep}`
@@ -34562,7 +34746,9 @@ function buildNextParticleUploads({
           nextTopologyEpoch,
           nextIdentityRevision
         });
-  const particleSourceStage = terminalParticleFamily.vaporAerosolExchangeSelected
+  const particleSourceStage = terminalParticleFamily.phaseSlotRefinementSelected
+    ? 'phase-slot-refinement'
+    : terminalParticleFamily.vaporAerosolExchangeSelected
     ? 'vapor-aerosol-exchange'
     : phaseCarrierFamilySelected
     ? 'sph-phase-carrier-transfer'
@@ -34787,7 +34973,73 @@ function buildNextParticleUploads({
     try { auxiliaryOwnershipTransfer?.rollback?.(); } catch {}
     throw error;
   }
+  if (terminalParticleFamily.phaseSlotRefinementSelected) {
+    phaseSlotOwnershipRollbacks.set(postMechanicsClosure.phaseSlotRefinementStep, () => {
+      auxiliaryOwnershipTransfer?.rollback?.();
+      dispersedMediumOwnershipTransfer?.rollback?.();
+      if (identityOwnershipTransferApplied) {
+        sphParticleUpload.ownsIdentityBuffer = sourceIdentityOwnershipSnapshot.ownsIdentityBuffer;
+        sphParticleUpload.identityOwnership = sourceIdentityOwnershipSnapshot.identityOwnership;
+        nextParticleUploads.sphParticleUpload.ownsIdentityBuffer = false;
+        nextParticleUploads.sphParticleUpload.identityOwnership = 'rolled-back-phase-slot-continuation';
+      }
+    });
+  }
   return nextParticleUploads;
+}
+
+/** A private source for another step in the same resident batch. The GPU clock
+ * owns elapsed time; host step/time are deliberately unchanged until the batch
+ * is admitted. This uses the regular upload builder and exact-owner lifecycle,
+ * and cannot satisfy the public post-mechanics continuation claim. */
+export async function createMlsMpmChainPrivateContinuation(postMechanicsClosure) {
+  const closureModule=await import('./sphMlsMpmPostMechanicsClosure.js');
+  const buffers=await import('./sphGpuBuffers.js');
+  const source=closureModule.resolveMlsMpmChainPrivateSource(postMechanicsClosure);
+  const {device,sphParticleState,mlsMpmParticleState,sphParticleUpload,mlsMpmParticleUpload}=source;
+  if(!sphParticleState || !mlsMpmParticleState) throw new TypeError('Private chain lost its captured host descriptors');
+  const increment=(value,name)=>{
+    if(!Number.isInteger(value) || value<0 || value>=0xffffffff) throw new RangeError(`Private chain ${name} exhausted`);
+    return value+1;
+  };
+  const sourceSlot=sphParticleUpload.slot??0;
+  const nextParticleUploads=buildNextParticleUploads({postMechanicsClosure,privateChainFamily:source.particleFamily,
+    device,sphParticleState,mlsMpmParticleState,sphParticleUpload,mlsMpmParticleUpload,
+    thermalStep:postMechanicsClosure.thermalStep,reactionStep:postMechanicsClosure.reactionStep,
+    phaseCarrierTransferStep:postMechanicsClosure.phaseCarrierTransferStep,
+    mechanicsRefreshStep:postMechanicsClosure.mechanicsRefreshStep,
+    mergedResidentProductMass:source.residentProductMass,deferIdentityOwnershipTransfer:true,
+    continuationIdentity:{physicsTick:sphParticleUpload.physicsTick,
+      physicsSubstep:increment(sphParticleUpload.physicsSubstep,'substep'),
+      storageGeneration:increment(sphParticleUpload.storageGeneration,'storage generation'),
+      positionEpoch:increment(sphParticleUpload.positionEpoch,'position epoch'),
+      levelEpoch:increment(sphParticleUpload.levelEpoch,'level epoch'),
+      supportEpoch:increment(sphParticleUpload.supportEpoch,'support epoch')},
+    particlePingPong:{sourceSlot,nextSlot:sourceSlot===0?1:0,
+      nextStep:sphParticleState.step??0,nextTime:sphParticleState.time??0}});
+  if(!nextParticleUploads) throw new TypeError('Private chain has no complete retained particle family');
+  const claim=closureModule.claimMlsMpmChainPrivateContinuation(postMechanicsClosure,{nextParticleUploads});
+  let after=null,retirement=null;
+  const retireOwner=()=>{
+    if(!after) throw new TypeError('Private chain retirement requires the owning batch fence');
+    if(!retirement) retirement=closureModule.retireMlsMpmPostMechanicsClosureOutputsAfter(postMechanicsClosure,{after})
+      .then(()=>buffers.retireSphExactMassChainPrivateContinuation({closure:postMechanicsClosure,claim,nextParticleUploads}))
+      .catch(error=>{retirement=null;throw error;});
+    return retirement;
+  };
+  await buffers.bindSphExactMassChainPrivateContinuation({closure:postMechanicsClosure,claim,nextParticleUploads,retireOwner});
+  const nextState=(state,upload)=>({...state,...Object.fromEntries(['storageGeneration','physicsTick','physicsSubstep',
+    'positionEpoch','topologyEpoch','chartEpoch','levelEpoch','supportEpoch'].map(key=>[key,upload[key]])),
+    step:state.step??0,time:state.time??0});
+  return Object.freeze({schema:'peercompute.ulg.mls-mpm-private-chain-continuation.v1',
+    status:'private-chain-awaiting-batch-admission',residentContinuationReady:false,
+    pendingBatchAdmission:true,nextParticleUploads,claim,clock:source.clock,
+    sphParticleState:nextState(sphParticleState,nextParticleUploads.sphParticleUpload),
+    mlsMpmParticleState:nextState(mlsMpmParticleState,nextParticleUploads.mlsMpmParticleUpload),
+    retire(batchFence) {
+      if(!batchFence || typeof batchFence.then!=='function') throw new TypeError('Private chain retirement requires a batch completion promise');
+      if(!retirement) after=batchFence;return retireOwner();
+    }});
 }
 
 function reactionPlacementContinuationAdoptionError(message, code, ErrorType = Error) {
@@ -35252,7 +35504,9 @@ async function residentStepEnvelope({
   })
 }) {
   const postMechanicsContinuation = postMechanicsClosure?.continuation ?? null;
+  const phaseSlotRefinementStep = postMechanicsClosure?.phaseSlotRefinementStep ?? null;
   const optionalStages = [
+    phaseSlotRefinementStep,
     schroederFarForceDeltaFusion,
     schroederFarAggregateGasStateDelta,
     schroederFarAggregateGasCellImport,
@@ -35320,6 +35574,7 @@ async function residentStepEnvelope({
     schroederFarForceDeltaFusion, schroederParticleStorageAdoption,
     thermalStep, reactionStep, mechanicsRefreshStep, phaseCarrierTransferStep
   });
+  const nextUsesPhaseSlotRefinement = terminalParticleFamily.phaseSlotRefinementSelected;
   const nextUsesVaporAerosolExchange = terminalParticleFamily.vaporAerosolExchangeSelected;
   const reactionComponentMutations =
     reactionOutputComponentMutations(reactionStep);
@@ -35378,7 +35633,9 @@ async function residentStepEnvelope({
   const mechanicsRefreshTrigger = reactionOutputParticleMutation
     ? 'reaction'
     : (thermalStep ? 'thermal' : null);
-  const thermalMechanicsRefreshStatus = nextUsesVaporAerosolExchange
+  const thermalMechanicsRefreshStatus = nextUsesPhaseSlotRefinement
+    ? 'mechanics-constitutive-refreshed-after-phase-slot-refinement'
+    : nextUsesVaporAerosolExchange
     ? 'mechanics-constitutive-refreshed-after-vapor-aerosol-exchange'
     : mechanicsRefreshTrigger
     ? (nextUsesPhaseCarrierTransfer
@@ -35563,6 +35820,7 @@ async function residentStepEnvelope({
     ['reaction', reactionStep?.result || reactionStep],
     ['mechanics-refresh', mechanicsRefreshStep?.result || mechanicsRefreshStep],
     ['phase-carrier-transfer', phaseCarrierTransferStep?.result || phaseCarrierTransferStep],
+    ['phase-slot-refinement', phaseSlotRefinementStep],
     ['vapor-aerosol-exchange', postMechanicsClosure?.vaporAerosolExchangeStep],
     ['dispersed-medium-optics', dispersedMediumOpticsProducerStep?.result || dispersedMediumOpticsProducerStep]
   ]
@@ -35676,6 +35934,7 @@ async function residentStepEnvelope({
     mechanicsRefreshOutput
   });
   const residentAuthorityLedger = buildMlsMpmResidentStepAuthorityLedger({
+    nextUsesPhaseSlotRefinement,
     nextUsesVaporAerosolExchange,
     step: particlePingPong.nextStep,
     time: particlePingPong.nextTime,
@@ -36153,9 +36412,13 @@ async function residentStepEnvelope({
     residentActiveGridDispatchPlanHintDispatchArgsBufferByteLength: activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
     residentActiveGridDispatchPlanHintMetadataBufferByteLength: activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
     nextParticleUploads,
+    nextUsesPhaseSlotRefinement,
+    phaseSlotRefinementStep,
     nextUsesVaporAerosolExchange,
     nextParticleBufferMode: nextParticleUploads
-      ? nextUsesVaporAerosolExchange
+      ? nextUsesPhaseSlotRefinement
+        ? 'retained-phase-slot-refinement-and-refreshed-mechanics-buffers'
+        : nextUsesVaporAerosolExchange
         ? 'retained-vapor-aerosol-exchange-and-refreshed-mechanics-buffers'
         : (nextUsesPhaseCarrierTransfer
           ? (nextUsesMechanicsRefresh
@@ -36335,6 +36598,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   residentProductMass = null,
   internalPressureScale = 1,
   ambientPressurePa = 0,
+  ambientReferenceDensityKgPerM3 = undefined,
   phaseVolumeMaxImpulseFraction = 0.5,
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
@@ -36369,6 +36633,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   phaseCarrierTransferOptions = {},
   condensateExtraction = null,
   vaporAerosolExchange = null,
+  phaseSlotRefinement = null,
   capturePostMechanicsGasSource = false,
   dispersedMediumOpticalClosureTable = null,
   dispersedMediumOpticalClosureGpuTable = null,
@@ -36413,8 +36678,21 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   onResidentStageProgress = null
 } = {}) {
   const exactMassContinuation = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
+  if (phaseSlotRefinement && ((exactMassContinuation && !sphGpuParticleUploadExactEnergyRows(sphParticleUpload))
+      || capturePostMechanicsGasSource
+      || condensateExtraction || vaporAerosolExchange || schroederParticleStorageMaterialization
+      || ((sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload)
+          || dispersedMediumOpticsSeedRows || dispersedMediumOpticalClosureTable)
+        && dispersedMediumOpticsProducerRunner !== runSphDispersedMediumOpticsProducerWebGpu))) {
+    throw new TypeError('Resident phase-slot refinement requires standard optics production; rational inventory and current gas/condensate remain unadmitted');
+  }
+  // The reaction activation watch only reads the terminal state; the G2
+  // integer energy ledger (energy rows present) admits it.
+  const energyLedgerContinuation = exactMassContinuation
+    && sphGpuParticleUploadExactEnergyRows(sphParticleUpload) != null;
   if (exactMassContinuation && (!preferWebGpu || !device || readbackMode !== NO_FULL_READBACK_MODE
-      || !thermalMaterialTable || !mechanicsMaterialTable || reactionActivationWatchTable
+      || !thermalMaterialTable || !mechanicsMaterialTable
+      || (reactionActivationWatchTable && !energyLedgerContinuation)
       || (reactionTable?.reactionCount > 0 && (!schroederSpatialEpochTransaction || reactionStepRunner !== runSphReactionStepWebGpu))
       || condensateExtraction
       || schroederParticleStorageMaterialization || schroederFarAggregateForceApplication
@@ -36544,6 +36822,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       try { submitStepTimelineMarker(name); } catch {}
     }
     markStageProgress('resident-stage-started', { stage: name });
+    // Diagnostic ring (where a step waits); never read by physics.
+    const laneTrace = (globalThis.__ulgLaneTrace ??= []);
+    laneTrace.push({ event: 'stage-start', stage: name, atMs: Math.round(startMs) });
+    const traceCapacity = Math.max(96, Math.min(20000, Number(globalThis.__ulgLaneTraceCapacity) || 96));
+    if (laneTrace.length > traceCapacity) laneTrace.splice(0, laneTrace.length - traceCapacity);
     try {
       const result = gpuTimestampRecorder?.active === true
         && typeof gpuTimestampRecorder.measureQueueStage === 'function'
@@ -36589,6 +36872,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   let canonicalFreshDispersedMediumOpticsReplacement = null;
   let canonicalAdoptedDispersedMediumTargetUpload = null;
   let postMechanicsClosure = null;
+  let phaseSlotRefinementEnvelope = null;
+  let phaseSlotPreserveRetirementStarted = false;
   let exactMassG2pOutput = null;
   let exactMassFusedOutput = null;
   let exactMassFusedCleanup = null;
@@ -37028,11 +37313,26 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
               spatialMechanicalProposal.contactInterfaceReceipt,
             thermalResponseGraphUpload:
               spatialProposalThermalResponseGraphUpload,
+            thermalPotential: thermalStepOptions.thermalPotential ?? null,
             dtS: dtSeconds,
             smoothingLengthM:
               thermalStepOptions.smoothingLengthM
               ?? sphParticleState.smoothingLengthM,
-            conductionRate: thermalStepOptions.conductionRate
+            conductionRate: thermalStepOptions.conductionRate,
+            // Carriers with a live integer energy record get exact pair
+            // packets; the exact thermal apply then continues that record.
+            exactEnergyLedger:
+              sphGpuParticleUploadExactEnergyRows(sphParticleUpload) != null,
+            // G4 per-source thermal dormancy ({ epsilonK }; off by default):
+            // the grid spans the simulation box.
+            thermalDormancy: (
+              thermalStepOptions.thermalDormancy ?? sphParticleState?.thermalDormancy
+            )?.epsilonK >= 0
+              ? {
+                  boxM: dims,
+                  ...(thermalStepOptions.thermalDormancy ?? sphParticleState.thermalDormancy)
+                }
+              : null
           })
         );
         if (spatialThermalProposal?.ready !== true) {
@@ -37407,10 +37707,20 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     mechanicsMaterialPhaseUpload:
       mechanicsRefreshOptions.mechanicsMaterialPhaseUpload ?? null,
     ambientPressurePa,
+    ambientReferenceDensityKgPerM3,
     phaseVolumeAmbientBuoyancyRequired: ambientBuoyancyRequired,
-    phaseVolumePressureScale: internalPressureScale,
+    phaseVolumePressureScale:
+      exactGasPressureMechanicsAuthoritySource
+        && schroederSingleLevelPhaseVolumeTransportRequired(
+          schroederSpatialEpochTransaction
+        )
+        ? 0
+        : internalPressureScale,
     phaseVolumeMaxImpulseFraction,
-    phaseVolumeInterfaceTransportRequired: false,
+    phaseVolumeInterfaceTransportRequired:
+      schroederSingleLevelPhaseVolumeTransportRequired(
+        schroederSpatialEpochTransaction
+      ),
     gasPressureMechanicsAuthoritySource:
       exactGasPressureMechanicsAuthoritySource,
     gasPressureMechanicsChartId: 0,
@@ -37610,6 +37920,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     createGpuReadbackTelemetryAccumulator({
       scope: 'mls-mpm-resident-product-merge'
     });
+  // G3 coherent rigid bodies: one SE(3) step per resident step, on the same
+  // device and queue, after the continuum mechanics.
+  runSchroederSolidRigidLaneStep(
+    ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
+    { device: resolvedDevice, dtSeconds, gravity, boxM: dims,
+      fluid: solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) });
   postMechanicsClosure = await timedStage('postMechanicsClosure', () => runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
     stageMechanicsTracer: createSphStageMechanicsTracer({
@@ -37640,6 +37956,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     phaseCarrierTransferOptions,
     condensateExtraction,
     vaporAerosolExchange,
+    phaseSlotRefinement,
     captureGasSource: capturePostMechanicsGasSource,
     gasSourceLevelAssignment: schroederLevelAssignment,
     boxDimsM: dims,
@@ -37808,7 +38125,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       }
     },
     async afterPhaseCarrierTransfer({
-      phaseCarrierTransferFamilyReceipt
+      phaseCarrierTransferFamilyReceipt, opticsTerminalBuffers = null
     }) {
       if (!canonicalDispersedMediumOpticsInputsAdvertised) return;
       if (!dispersedMediumOpticalClosureTable) {
@@ -37900,10 +38217,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
             phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
           preTransferThermoBuffer:
             phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer,
-          postTransferStateBuffer:
-            phaseCarrierTransferFamilyReceipt.postTransferStateBuffer,
-          postTransferThermoBuffer:
-            phaseCarrierTransferFamilyReceipt.postTransferThermoBuffer,
+          postTransferStateBuffer: opticsTerminalBuffers?.stateBuffer
+            ?? phaseCarrierTransferFamilyReceipt.postTransferStateBuffer,
+          postTransferThermoBuffer: opticsTerminalBuffers?.thermoBuffer
+            ?? phaseCarrierTransferFamilyReceipt.postTransferThermoBuffer,
+          refreshRouteIdentity: Boolean(phaseSlotRefinement),
+          outputTopologyEpoch: particleLineage.topologyEpoch + (phaseSlotRefinement ? 1 : 0),
           priorOptics: sourceDispersedMediumOpticsAdvertised
             ? sphParticleUpload.dispersedMediumOptics
             : null,
@@ -38287,7 +38606,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     fullPhysicsValidation: false
   };
 
-  const step = await timedStage('residentStepEnvelope', () => residentStepEnvelope({
+  const step = await timedStage('residentStepEnvelope', async () => {
+    const envelope = await residentStepEnvelope({
     postMechanicsClosure,
     residentProductMergeReadbackTelemetry,
     sphParticleState,
@@ -38345,7 +38665,13 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       stageTiming,
       orchestrationReadbackTelemetry:
         orchestrationReadbackTelemetry.snapshot()
-    }));
+    });
+    if (postMechanicsClosure.phaseSlotRefinementStep) phaseSlotRefinementEnvelope = envelope;
+    return envelope;
+  });
+  if (postMechanicsClosure.phaseSlotRefinementStep) {
+    phaseSlotRefinementEnvelope = step;
+  }
   if (postMechanicsClosure.aerosolCondensateTransition || exactMassContinuation) {
     const claim = claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, {
       nextParticleUploads: step.nextParticleUploads
@@ -39017,8 +39343,54 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       throw error;
     }
   }
+  if (phaseSlotRefinementEnvelope && !(exactMassContinuation && schroederSpatialEpochTransaction)) {
+    // Exact spatial publication still needs these captures to authenticate
+    // and adopt its ledger successor; that owner retires them after commit.
+    // Commit the preserve decision only after all terminal watches and lane
+    // checks have succeeded. Earlier failures still abandon the private family.
+    claimMlsMpmPostMechanicsContinuation(postMechanicsClosure, {
+      nextParticleUploads: step.nextParticleUploads
+    });
+    phaseSlotPreserveRetirementStarted = true;
+    await retireMlsMpmPostMechanicsClosureOutputsAfter(postMechanicsClosure, {
+      queueOrderedFinalConsumer: postMechanicsClosure.queueOrderedFinalConsumerCapabilities.phaseCarrierOutput
+    });
+    step.phaseSlotRetirementMethod = 'authenticated-final-refresh-submission';
+  }
   return step;
   } catch (error) {
+    if (postMechanicsClosure?.phaseSlotRefinementStep) {
+      // A failed resident envelope publishes no successor. Keep cleanup on the
+      // producer's queue, preserve borrowed inputs, and expose a retry if a
+      // producer refuses retirement. Never change a started retirement's mode.
+      const retryRetirement = async () => {
+        const cleanupDevice = device || resolvedDeviceResult?.device;
+        const receipt = await retireMlsMpmPostMechanicsClosureOutputsAfter(postMechanicsClosure, {
+          after: cleanupDevice.queue.onSubmittedWorkDone().then(() => true),
+          abandon: !phaseSlotPreserveRetirementStarted
+        });
+        if (phaseSlotRefinementEnvelope) {
+          rollbackMlsMpmPhaseSlotContinuationOwnership(phaseSlotRefinementEnvelope);
+          destroyMlsMpmResidentStepBuffers(phaseSlotRefinementEnvelope, {
+            preserveBuffers: retainedContinuationBuffersFromUploads({ sphParticleUpload, mlsMpmParticleUpload }),
+            preserveResidentProductMass: residentProductMass
+          });
+          const cleanup = await phaseSlotRefinementEnvelope.residentCleanupCompletion;
+          if (cleanup && cleanup.status !== 'resident-cleanup-complete') {
+            throw new Error('Rejected phase-slot refinement cleanup remains incomplete');
+          }
+        }
+        return receipt;
+      };
+      const retirement = retryRetirement();
+      retirement.catch(() => {});
+      try {
+        Object.defineProperties(error, {
+          phaseSlotRefinementRetirement: { value: retirement },
+          retryPhaseSlotRefinementRetirement: { value: retryRetirement }
+        });
+      } catch {}
+    }
     if (postMechanicsClosure) abandonMlsMpmPostMechanicsCondensate(postMechanicsClosure);
     if (postMechanicsClosure) releaseMlsMpmPostMechanicsExactMassCapture(postMechanicsClosure);
     if (exactMassFusedCleanup) {
@@ -39182,6 +39554,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
   residentProductMass = null,
   internalPressureScale = 0,
   ambientPressurePa = 0,
+  ambientReferenceDensityKgPerM3 = undefined,
   phaseVolumeMaxImpulseFraction = 0.5,
   mechanicsMaterialTable = null,
   mechanicsMaterialPhaseUpload = null,
@@ -39400,11 +39773,22 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       mechanicsMaterialTable,
       mechanicsMaterialPhaseUpload,
       ambientPressurePa: finiteNumber(ambientPressurePa, 0),
+      ambientReferenceDensityKgPerM3,
       phaseVolumeAmbientBuoyancyRequired:
         phaseVolumeAmbientBuoyancyRequired === true,
-      phaseVolumePressureScale: finiteNumber(internalPressureScale, 1),
+      phaseVolumePressureScale:
+        gasPressureMechanicsBoundaryRequired
+          && gasPressureMechanicsAuthoritySource
+          && schroederSingleLevelPhaseVolumeTransportRequired(
+            schroederSpatialEpochTransaction
+          )
+          ? 0
+          : finiteNumber(internalPressureScale, 1),
       phaseVolumeMaxImpulseFraction,
-      phaseVolumeInterfaceTransportRequired: false,
+      phaseVolumeInterfaceTransportRequired:
+        schroederSingleLevelPhaseVolumeTransportRequired(
+          schroederSpatialEpochTransaction
+        ),
       gasPressureMechanicsAuthoritySource:
         gasPressureMechanicsBoundaryRequired
           ? gasPressureMechanicsAuthoritySource
@@ -39472,6 +39856,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
           })
         : runMlsMpmG2pWithOptionalWebGpu(g2pStageOptions)
     ));
+    // G3 coherent rigid bodies on the mechanics-only route as well.
+    runSchroederSolidRigidLaneStep(
+      ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
+      { device: resolvedDevice, dtSeconds, gravity, boxM: dims,
+        fluid: solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) });
 
     const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
     const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;
@@ -39677,8 +40066,11 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   preserveResidentProductMassHandles = [],
   destroyInputResidentProductMass = false,
   preserveBuffers = [],
-  queueOrderedFinalConsumer = null
+  queueOrderedFinalConsumer = null,
+  after = null
 } = {}) {
+  const chainRetirement = retireSchroederSpatialChainResidentStep(step, {after,preserveBuffers});
+  if (chainRetirement) return chainRetirement;
   if (step?.aerosolPostMechanicsClosure) {
     abandonMlsMpmPostMechanicsCondensate(step.aerosolPostMechanicsClosure);
   }
@@ -40201,6 +40593,10 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       step?.phaseCarrierTransferStep
     );
     const partialFamilies = [
+      {
+        output: retainedSchroederPhaseSlotRefinementBuffers(step?.phaseSlotRefinementStep),
+        components: ['state', 'thermo', 'mechanics']
+      },
       {
         output: retainedSchroederFarForceDeltaFusionOutputBuffers(
           step?.schroederFarForceDeltaFusion
@@ -41374,6 +41770,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   ...args
 } = {}) {
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  if (args.schroederSpatialChain != null) {
+    return runSchroederSpatialChainResidentBatchWebGpu({...args,stepCount:count});
+  }
   const requestedDispersedMediumOpticsSeedRows =
     args.dispersedMediumOpticsSeedRows ?? null;
   if (requestedDispersedMediumOpticsSeedRows != null) {
@@ -41451,6 +41850,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.schroederSpatialEpochGeneration ?? null,
       mechanicsMaterialTable: args.mechanicsMaterialTable,
       ambientPressurePa: args.ambientPressurePa,
+      ambientReferenceDensityKgPerM3: args.ambientReferenceDensityKgPerM3,
       gravityMPerS2: args.gravityMPerS2,
       residentProductMass
     });
@@ -41598,6 +41998,7 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
       cflFactor: args.cflFactor,
       internalPressureScale: args.internalPressureScale,
       ambientPressurePa: args.ambientPressurePa,
+      ambientReferenceDensityKgPerM3: args.ambientReferenceDensityKgPerM3,
       externalGaugePressurePa: args.externalGaugePressurePa,
       externalGaugePressureEnabled:
         args.externalGaugePressureEnabled === true,
@@ -41655,6 +42056,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.maxSubstepsPerSubmission ?? null,
       onPresentationSubmissionBoundary:
         args.onPresentationSubmissionBoundary ?? null,
+      pipelinePresentationBoundaries:
+        args.pipelinePresentationBoundaries === true,
       // PROF-0. Opt-in per run. The device must also have been created with
       // 'timestamp-query' (webgpuDeviceLimits.js negotiates it); the profiler
       // stays inert and says so if it was not.
@@ -42493,7 +42896,8 @@ export function destroyMlsMpmResidentStepsBuffers(execution, {
   preserveResidentProductMass = null,
   preserveResidentProductMassHandles = [],
   preserveBuffers = [],
-  queueOrderedFinalConsumer = null
+  queueOrderedFinalConsumer = null,
+  after = null
 } = {}) {
   for (const step of execution?.retainedSteps ?? []) {
     destroyMlsMpmResidentStepBuffers(step, {
@@ -42501,6 +42905,7 @@ export function destroyMlsMpmResidentStepsBuffers(execution, {
       preserveResidentProductMassHandles,
       destroyInputResidentProductMass: true,
       preserveBuffers,
+      after,
       queueOrderedFinalConsumer:
         step?.queueOrderedHierarchyFinalConsumerCapability ?? null
     });
@@ -42510,6 +42915,20 @@ export function destroyMlsMpmResidentStepsBuffers(execution, {
     preserveResidentProductMassHandles,
     destroyInputResidentProductMass: true,
     preserveBuffers,
+    after,
     queueOrderedFinalConsumer
   });
+}
+
+// G3 Phase 4: the fluid rows a melted rigid member is released into are the
+// step's post-mechanics state and mechanics plus the step's thermo. The
+// exact-mass routes keep their integer inventory, which an f32 activation
+// would bypass, so release stays off there (members remain in the body).
+function solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) {
+  if (sphParticleState?.exactMass || sphParticleState?.coldExactMassInput) return null;
+  const g2p = retainedG2pOutputBuffers(g2pReconstruction);
+  const thermoBuffer = sphParticleUpload?.thermoBuffer ?? null;
+  return g2p?.stateBuffer && g2p?.mechanicsBuffer && thermoBuffer
+    ? { stateBuffer: g2p.stateBuffer, mechanicsBuffer: g2p.mechanicsBuffer, thermoBuffer,
+        particleCount: sphParticleState?.particleCount ?? 0 } : null;
 }

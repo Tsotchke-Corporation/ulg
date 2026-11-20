@@ -866,7 +866,38 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
       recordingStarted = true;
       encoder.clearBuffer(arena.controlBuffer);
       encoder.clearBuffer(arena.partialBuffer);
-      encodedDispatchCount += authority.directoryV2
+      // A1: direct 1D launches over host ceilings instead of
+      // dispatchWorkgroupsIndirect (about 0.3 ms of GPU-process validation
+      // each on Chromium); the kernels give groups outside the GPU-authored
+      // arguments no work, so both launches are exact.
+      const directLaunchAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true;
+      const sourceCeilingGroups = authority.directoryV2
+        ? Math.ceil(Number(authority.activeSourceView.activeSourceCapacity || 0) / 64)
+        : 0;
+      const sourceDirect = directLaunchAllowed
+        && sourceCeilingGroups > 0 && sourceCeilingGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
+      const fieldCeilingGroups = Number(
+        mechanicsFieldView?.consumerDispatchMaxLinearGroups ?? 0
+      );
+      const fieldDirect = directLaunchAllowed
+        && Number.isInteger(fieldCeilingGroups)
+        && fieldCeilingGroups > 0 && fieldCeilingGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
+      encodedDispatchCount += authority.directoryV2 && sourceDirect
+        ? encodePass(
+            encoder,
+            pipelines.sources,
+            sourceBindGroup,
+            [sourceCeilingGroups, 1, 1],
+            `${label}ReduceSources`,
+            {
+              gpuTimestampRecorder,
+              timestampMetadata: commonTimestamp,
+              producerId:
+                'schroeder-spatial-phase-volume-receipt-source-reduction',
+              stage: 'reduce-sources'
+            }
+          )
+        : authority.directoryV2
         ? encodeIndirectPass(
             encoder,
             pipelines.sources,
@@ -896,20 +927,30 @@ export function createSchroederSpatialPhaseVolumeReceiptGpu(device, {
               stage: 'reduce-sources'
             }
           );
-      encodedDispatchCount += encodeIndirectPass(
-        encoder,
-        pipelines.fields,
-        fieldBindGroup,
-        mechanicsFieldView.fieldViewBuffer,
-        FIELD_VIEW_DISPATCH_OFFSET_BYTES,
-        `${label}ReduceFields`,
-        {
-          gpuTimestampRecorder,
-          timestampMetadata: commonTimestamp,
-          producerId: 'schroeder-spatial-phase-volume-receipt-field-reduction',
-          stage: 'reduce-fields'
-        }
-      );
+      const fieldPassOptions = {
+        gpuTimestampRecorder,
+        timestampMetadata: commonTimestamp,
+        producerId: 'schroeder-spatial-phase-volume-receipt-field-reduction',
+        stage: 'reduce-fields'
+      };
+      encodedDispatchCount += fieldDirect
+        ? encodePass(
+            encoder,
+            pipelines.fields,
+            fieldBindGroup,
+            [fieldCeilingGroups, 1, 1],
+            `${label}ReduceFields`,
+            fieldPassOptions
+          )
+        : encodeIndirectPass(
+            encoder,
+            pipelines.fields,
+            fieldBindGroup,
+            mechanicsFieldView.fieldViewBuffer,
+            FIELD_VIEW_DISPATCH_OFFSET_BYTES,
+            `${label}ReduceFields`,
+            fieldPassOptions
+          );
       encodedDispatchCount += encodePass(
         encoder,
         pipelines.finalize,

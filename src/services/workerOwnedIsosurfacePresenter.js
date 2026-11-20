@@ -1,3 +1,5 @@
+import { latestSchroederSolidRigidFamily, schroederSolidRigidFamilyForUpload } from '../runtime/sph/schroederSolidRigidLane.js';
+import { createSchroederSolidMemberShapeRenderer } from '../runtime/sph/schroederSolidShapeCarrier.js';
 import {
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
@@ -10,8 +12,10 @@ import {
   validateProductEventLiveCountCopyDescriptor
 } from '../runtime/sph/sphResidentProductHistoryGpu.js';
 import {
+  beginSphGpuParticleUploadLedgerParcelsBorrow,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics
 } from '../runtime/sph/sphGpuBuffers.js';
+import { encodeSphLedgerParcelOpticsWebGpu } from '../runtime/sph/sphLedgerParcelOpticsGpu.js';
 import {
   beginSphDispersedMediumGpuBufferBorrow
 } from '../runtime/sph/sphDispersedMediumGpuBuffers.js';
@@ -69,6 +73,9 @@ export const ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_FRAME_SCHEMA 
 
 const ULG_SPH_GPU_RENDER_FIELD_SCHEMA =
   'peercompute.ulg.sph-gpu-render-field.v1';
+// A1: physics may wait for a busy render lane (a retained submission gap) only
+// when no lane frame has completed for this long: about 30 presented frames/s.
+export const RETAINED_GAP_STARVATION_MS = 1000 / 30;
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const CONSERVATIVE_NO_READBACK_MODE = 'gpu-conservative-no-readback';
 const DEFAULT_DEPTH_FORMAT = 'depth24plus';
@@ -901,6 +908,16 @@ export function createWorkerOwnedIsosurfacePresenter({
     return job.releaseDispersedMediumSourceBorrow?.() === true;
   };
 
+  // The ledger parcel family is read by the frame's last submission (the
+  // medium pack encoder), so its borrow ends with the job, not at the
+  // render-field boundary.
+  const releaseLedgerParcelsBorrow = (job) => {
+    if (!job?.ledgerParcelsBorrow) return;
+    const borrow = job.ledgerParcelsBorrow;
+    job.ledgerParcelsBorrow = null;
+    borrow.release();
+  };
+
   const releaseFrame = (frame, reason) => {
     if (!frame) return;
     nativeMaterial?.releaseFrame(frame);
@@ -1188,6 +1205,22 @@ export function createWorkerOwnedIsosurfacePresenter({
     return true;
   };
 
+  // G3 SOL-1: rigid shape carriers in the opaque pass. The vertex shader emits
+  // each live member's exposed voxel faces and reads the pose from the
+  // resident frame buffer the sim lane writes (melted members vanish).
+  let solidShapeRenderer = null;
+  const SOLID_SHAPE_COLORS = Object.freeze({ h2o: [0.78, 0.9, 0.98], ice: [0.78, 0.9, 0.98], fe: [0.55, 0.56, 0.6] });
+  const drawSolidRigidShapes = (pass, frame) => {
+    // Copy-back presentation routes carry no step upload: fall back to the
+    // family this device last stepped.
+    const family = frame?.solidRigidFamily ?? latestSchroederSolidRigidFamily(device);
+    if (!family || family.destroyed || family.device !== device || !Array.isArray(frame.viewProjectionMatrix)) return false;
+    solidShapeRenderer ??= createSchroederSolidMemberShapeRenderer(device, { colorFormat: format, depthFormat });
+    solidShapeRenderer.draw(pass, family, { viewProjection: new Float32Array(frame.viewProjectionMatrix),
+      colorLinear: SOLID_SHAPE_COLORS[String(family.materials?.[0]).toLowerCase()] ?? [0.7, 0.7, 0.72] });
+    return true;
+  };
+
   const renderFrame = async (frame, {
     viewProjectionMatrix = frame.viewProjectionMatrix,
     cameraPositionM = frame.cameraPositionM,
@@ -1314,6 +1347,8 @@ export function createWorkerOwnedIsosurfacePresenter({
         for (const surface of orderedSurfaces) {
           if (workerNativeSurfaceKind(surface) === 'opaque') drawNative(opaquePass, surface);
         }
+        // Rigid shape carriers draw inside the opaque pass (no separate pass).
+        drawSolidRigidShapes(opaquePass, frame);
       } finally { opaquePass.end(); }
 
       // Each condensed surface gets its own rear-depth map and scene-color
@@ -1596,11 +1631,27 @@ export function createWorkerOwnedIsosurfacePresenter({
   };
 
   let pendingSourceProgressToken = 0;
+  // Renders queued or running on the lane, and when the lane last completed a
+  // visible frame. The lane's frames hold it through GPU completion and the next
+  // presentation opportunity (rAF), so a retained submission gap queued behind
+  // them gates physics on display frames (A1: about 44 ms of every 63 ms Iron
+  // Ice step). Physics is offered a gap freely only while the lane is idle; it
+  // may wait for a busy lane only when presentation is starving (no frame for
+  // RETAINED_GAP_STARVATION_MS), which bounds both sides.
+  let renderLaneDepth = 0;
+  let lastLaneFrameCompletedAtMs = null;
   const onRenderLane = (render) => {
+    renderLaneDepth += 1;
     const scheduled = renderLaneTail.then(render);
-    renderLaneTail = scheduled.catch(() => {});
+    const settled = scheduled.then((proof) => {
+      renderLaneDepth -= 1;
+      if (proof) lastLaneFrameCompletedAtMs = temporalNowMs();
+    }, () => { renderLaneDepth -= 1; });
+    renderLaneTail = settled;
     return scheduled;
   };
+  const presentationStarving = () => lastLaneFrameCompletedAtMs == null
+    || temporalNowMs() - lastLaneFrameCompletedAtMs > RETAINED_GAP_STARVATION_MS;
   const scheduleRenderFrame = (frame, options) =>
     onRenderLane(() => renderFrame(frame, options));
 
@@ -1613,10 +1664,16 @@ export function createWorkerOwnedIsosurfacePresenter({
     return ageS > (frame.lastDisplayedMotionAgeS || 0)
       && ageS < frame.motionPacing.maxSimulationAgeS;
   };
-  const hasRetainedSubmissionGapOpportunity = ({ waitForPendingSlot = false } = {}) =>
-    typeof waitForPendingSlot === 'boolean' && !retainedSubmissionGapWaiter
-      && (waitForPendingSlot || !retainedSubmissionGap)
+  // Unless presentation is starving, physics never waits behind an in-flight
+  // frame: no gap while the render lane is occupied, and no prospective wait
+  // for a pending predecessor's full proof.
+  const hasRetainedSubmissionGapOpportunity = ({ waitForPendingSlot = false } = {}) => {
+    if (typeof waitForPendingSlot !== 'boolean' || retainedSubmissionGapWaiter) return false;
+    const starving = presentationStarving();
+    if (!starving && (retainedSubmissionGap || renderLaneDepth > 0)) return false;
+    return (waitForPendingSlot || !retainedSubmissionGap)
       && retainedSubmissionGapEligible(currentFrame);
+  };
 
   const stopTemporalPresentation = () => {
     temporalLoopToken += 1;
@@ -1733,6 +1790,26 @@ export function createWorkerOwnedIsosurfacePresenter({
         ...proof
       }
     );
+  };
+
+  // G2 Phase 6: parcel droplets join the H2O collective route's optical depth
+  // after the gather and before the medium pack (sphLedgerParcelOpticsGpu.js).
+  const encodeLedgerParcelOptics = (job, encoder, renderField, descriptor) => {
+    const parcels = job.ledgerParcelsBorrow?.parcels ?? null;
+    if (!parcels || parcels.device !== device || globalThis.__ulgDisableLedgerParcelOptics) return null;
+    const metadata = renderField.surfaceTable.metadata;
+    const surfaceIndex = descriptor.consumedSurfaceIndices.find(
+      (index) => Number(metadata[index]?.materialId) === parcels.vaporMaterialId
+    );
+    const route = surfaceIndex == null ? null : metadata[surfaceIndex];
+    const stats = (globalThis.__ulgLedgerParcelOptics ??= { frames: 0, routed: 0, unrouted: 0 });
+    stats.frames++;
+    if (!route) { stats.unrouted++; return null; }
+    stats.routed++;
+    return encodeSphLedgerParcelOpticsWebGpu({ device, encoder, parcels,
+      fieldRowsBuffer: descriptor.fieldRowsBuffer, fieldOffset: Number(route.fieldOffset),
+      resolution: Number(route.resolution), fieldPadding: Number(renderField.fieldPadding),
+      refEdgeM: Number(renderField.refEdgeM) });
   };
 
   const buildFrame = async (job, captured) => {
@@ -1890,6 +1967,7 @@ export function createWorkerOwnedIsosurfacePresenter({
     const extracted = [];
     const translatedSurfaces = [];
     let participatingMediumPackedFrame = null;
+    let ledgerParcelOpticsParams = null;
     try {
       for (const descriptor of marchingCubesDescriptors) {
         const entry = await adapterForDescriptor(descriptor);
@@ -1948,6 +2026,9 @@ export function createWorkerOwnedIsosurfacePresenter({
         participatingMediumDescriptor?.status
           === PARTICIPATING_MEDIUM_READY_STATUS
       ) {
+        ledgerParcelOpticsParams = encodeLedgerParcelOptics(
+          job, encoder, renderField, participatingMediumDescriptor
+        );
         participatingMediumPackedFrame = await encodeParticipatingMediumPack(
           ensureParticipatingMediumRuntime(),
           encoder,
@@ -1964,6 +2045,11 @@ export function createWorkerOwnedIsosurfacePresenter({
         }
       }
       device.queue.submit([encoder.finish()]);
+      if (ledgerParcelOpticsParams) {
+        const params = ledgerParcelOpticsParams;
+        ledgerParcelOpticsParams = null;
+        void deferSubmittedWorkCleanup(device, () => params.destroy());
+      }
       for (const item of extracted) {
         item.rawExecution.result?.retireTemporaryResourcesAfterSubmit?.();
       }
@@ -2077,9 +2163,12 @@ export function createWorkerOwnedIsosurfacePresenter({
               released: false
             }
           : null,
+        solidRigidFamily: job.solidRigidFamily ?? null,
         surfaces
       };
     } catch (error) {
+      // Never submitted: nothing queued references the optics params.
+      ledgerParcelOpticsParams?.destroy();
       renderField.destroyRenderFieldBuffers?.({
         force: true,
         releaseLeases: true,
@@ -2314,6 +2403,7 @@ export function createWorkerOwnedIsosurfacePresenter({
           }
           releaseProductEventSourceBorrow(job);
           releaseDispersedMediumSourceBorrow(job);
+          releaseLedgerParcelsBorrow(job);
           activeJob = null;
         }
       }
@@ -2336,6 +2426,7 @@ export function createWorkerOwnedIsosurfacePresenter({
     if (!job) return;
     releaseProductEventSourceBorrow(job);
     releaseDispersedMediumSourceBorrow(job);
+    releaseLedgerParcelsBorrow(job);
     void job.capturePromise.then((captured) => {
       releaseCapturedRows(captured, 'worker-isosurface-queued-job-superseded');
     }).catch(() => {});
@@ -2669,6 +2760,10 @@ export function createWorkerOwnedIsosurfacePresenter({
         receiptFields,
         productEvents,
         dispersedMediumOptics,
+        // Borrowed after admission: every earlier return path ends before it.
+        ledgerParcelsBorrow: beginSphGpuParticleUploadLedgerParcelsBorrow(retained.sphParticleUpload),
+        // G3 coherent rigid bodies: drawn from their resident frame buffer.
+        solidRigidFamily: schroederSolidRigidFamilyForUpload(retained.sphParticleUpload),
         releaseProductEventSourceBorrow: releaseProductEventBorrow,
         productEventSourceBorrowReleased: false,
         releaseDispersedMediumSourceBorrow: releaseDispersedMediumBorrow,

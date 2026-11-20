@@ -54,6 +54,16 @@ const GPU_BUFFER_USAGE = {
 // order while eliminating eight radix digit rounds per generation.
 const FIELD_RADIX_KEY_WORDS = 3;
 
+
+export function consumerDispatchMaxLinearGroups(fieldCapacity, dispatchXLimit) {
+  const capacity = Number(fieldCapacity);
+  const limit = Number(dispatchXLimit);
+  if (!Number.isSafeInteger(capacity) || capacity <= 0
+    || !Number.isSafeInteger(limit) || limit <= 0) return null;
+  const groups = Math.ceil(capacity / SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_WORKGROUP_SIZE);
+  return groups <= limit ? groups : null;
+}
+
 function significantNibblesForMaximum(maximum, fallback = 8) {
   if (!Number.isInteger(maximum) || maximum < 0 || maximum > 0xffff_ffff) {
     return fallback;
@@ -1198,8 +1208,34 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         spanClass: 'same-production-command-encoder',
         ...stageTimestampMetadata
       };
+      // A1: the V2 field kernels admit only the groups the ActiveSource
+      // view's GPU-authored dispatch words name (field_staged_linear_
+      // invocation), so direct 1D launches over host ceilings replace
+      // dispatchWorkgroupsIndirect (about 0.3 ms of GPU-process validation
+      // each on Chromium). Ceilings past one dispatch dimension stay indirect.
+      const v2ActiveCapacity = directoryV2
+        ? Number(activeSourceView.activeSourceCapacity) || 0
+        : 0;
+      const v2DirectAllowed = directoryV2
+        && globalThis.__ulgForceIndirectFieldConsumers !== true;
+      const v2ActiveGroups = Math.ceil(v2ActiveCapacity / 64);
+      const v2CandidateGroups = Math.ceil(v2ActiveCapacity * 27 / 64);
+      const v2ActiveDirect = v2DirectAllowed
+        && v2ActiveGroups > 0 && v2ActiveGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
+      const v2CandidateDirect = v2DirectAllowed
+        && v2CandidateGroups > 0 && v2CandidateGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
       let encodedDispatchCount = directoryV2
-        ? encodeIndirectPass(
+        ? (v2ActiveDirect
+          ? encodePass(
+              encoder,
+              selectedPipelines.emit,
+              emitBindGroup,
+              [v2ActiveGroups, 1, 1],
+              `${label}EmitCandidatesV2`,
+              gpuTimestampRecorder,
+              emissionTimestamp
+            )
+          : encodeIndirectPass(
             encoder,
             selectedPipelines.emit,
             emitBindGroup,
@@ -1208,7 +1244,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
             `${label}EmitCandidatesV2`,
             gpuTimestampRecorder,
             emissionTimestamp
-          )
+          ))
         : encodePass(
             encoder,
             selectedPipelines.emit,
@@ -1309,7 +1345,17 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         timestampDescriptor
       ) => (
         directoryV2
-          ? encodeIndirectPass(
+          ? (v2CandidateDirect
+            ? encodePass(
+                encoder,
+                pipeline,
+                bindGroup,
+                [v2CandidateGroups, 1, 1],
+                passLabel,
+                gpuTimestampRecorder,
+                timestampDescriptor
+              )
+            : encodeIndirectPass(
               encoder,
               pipeline,
               bindGroup,
@@ -1318,7 +1364,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
               passLabel,
               gpuTimestampRecorder,
               timestampDescriptor
-            )
+            ))
           : encodePass(
               encoder,
               pipeline,
@@ -1488,6 +1534,12 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         indirectDispatchBuffer: arena.fieldViewBuffer,
         indirectDispatchOffsetBytes:
           SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS * UINT32_BYTES,
+        // A1: workgroups a direct 1D launch needs to cover every linear group
+        // the GPU-finalized consumer dispatch can name (x = groups, y = 1 while
+        // groups <= the dispatch-x limit); null keeps consumers indirect.
+        consumerDispatchMaxLinearGroups: consumerDispatchMaxLinearGroups(
+          plan.fieldCapacity, maxComputeWorkgroupsPerDimension
+        ),
         encodedDispatchCount,
         encodedComputePassCount: 4 + radixUnique.encodedComputePassCount,
         retainedGpuBufferBytes,
@@ -1896,6 +1948,12 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
         indirectDispatchOffsetBytes:
           SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_DISPATCH_OFFSET_WORDS
             * UINT32_BYTES,
+        // A1: workgroups a direct 1D launch needs to cover every linear group
+        // the GPU-finalized consumer dispatch can name (x = groups, y = 1 while
+        // groups <= the dispatch-x limit); null keeps consumers indirect.
+        consumerDispatchMaxLinearGroups: consumerDispatchMaxLinearGroups(
+          plan.fieldCapacity, maxComputeWorkgroupsPerDimension
+        ),
         encodedDispatchCount,
         encodedComputePassCount: 1,
         retainedGpuBufferBytes,

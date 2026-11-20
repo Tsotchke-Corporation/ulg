@@ -62,6 +62,7 @@ import {
   uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from '../runtime/sph/sphGpuBuffers.js';
+import { exportSphExactParticleMassColdInput } from '../runtime/sph/sphExactMassParticleSeed.js';
 import {
   SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MAX,
   SCHROEDER_SPATIAL_MECHANICAL_CLEANUP_PASS_BUDGET_MIN,
@@ -382,6 +383,17 @@ export function resolveSphSceneThermalStepOptions({
       ? 'sph-phase-scene-step-override'
       : 'sph-phase-scene'
   });
+  // A wall-temperature override on finite walls keeps the finite model and its
+  // face capacities; the walls restart (new instance) at the set temperatures.
+  const baseFiniteWalls = !hasWallAuthorityOverride
+    && wallReservoirAuthority?.finiteCapacity === true
+    ? wallReservoirAuthority
+    : null;
+  const overriddenWallModel = hasWallModelOverride
+    ? resolvedOverrides.wallModel
+    : (hasWallTemperaturesOverride && baseFiniteWalls
+        ? baseFiniteWalls.model
+        : undefined);
   const resolvedWallAuthority = resolveSphWallReservoirAuthority({
     wallTemperaturesK: hasWallTemperaturesOverride
       ? resolvedOverrides.wallTemperaturesK
@@ -393,9 +405,16 @@ export function resolveSphSceneThermalStepOptions({
             ? null
             : wallReservoirAuthority
         ),
-    wallModel: hasWallModelOverride
-      ? resolvedOverrides.wallModel
-      : undefined,
+    wallModel: overriddenWallModel,
+    ...(baseFiniteWalls
+      && (hasWallTemperaturesOverride || hasWallModelOverride)
+      && overriddenWallModel === baseFiniteWalls.model
+      ? {
+          wallFaceHeatCapacitiesJPerK: baseFiniteWalls.faceHeatCapacitiesJPerK,
+          wallMaterial: baseFiniteWalls.wallMaterial,
+          wallThicknessM: baseFiniteWalls.wallThicknessM
+        }
+      : {}),
     source:
       hasWallTemperaturesOverride || hasWallModelOverride
         ? 'sph-phase-scene-step-override'
@@ -13410,8 +13429,11 @@ export function createResidentMaterialSeedSurfaceBatches({
     // Retained product capacity rows clone a real particle descriptor but
     // carry zero authoritative mass until a GPU reaction claims them. They
     // must remain in particle buffers, yet must not seed a wildcard material
-    // surface from their placeholder descriptor.
-    if (Number.isFinite(particleMassKg) && particleMassKg <= 0) continue;
+    // surface from their placeholder descriptor. A rigid body's reserved
+    // meltwater rows are different: their material and phase are the real
+    // future liquid, whose optics rows are already routed, so they seed its
+    // surface (zero mass contributes nothing to the field until release).
+    if (Number.isFinite(particleMassKg) && particleMassKg <= 0 && source.solidReleaseSlot !== true) continue;
     const explicitDomainId = normalizeRenderDomainId(source.renderDomainId);
     const renderDomainId = explicitDomainId > 0
       ? explicitDomainId
@@ -36439,7 +36461,8 @@ fn main(
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
     g2pRunner = undefined,
-    mechanicsSubmitBurstSteps = null
+    mechanicsSubmitBurstSteps = null,
+    tier0RealtimePacing = false
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -36725,6 +36748,7 @@ fn main(
           internalPressureScale: effectiveInternalPressureScale,
           ambientPressurePa: effectiveAmbientPressurePa,
           mechanicsSubmitBurstSteps,
+          tier0RealtimePacing,
           cflFactor,
           ...(requestedPhaseVolumeMaxImpulseFraction == null
             ? {}
@@ -36985,6 +37009,7 @@ fn main(
     schroederStateDeltaMergeAdmission = null,
     schroederPhaseVolumeMigrationAdmission = null,
     schroederEnableParticleStorageMaterialization = false,
+    schroederEnablePhaseSlotRefinement = false,
     schroederParticleStorageAdmissionRowBudget = null,
     schroederParticleStorageRequiredCapacity = null,
     schroederParticleStorageCapacityMargin = null,
@@ -37005,6 +37030,7 @@ fn main(
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     ambientPressurePa = null,
+    ambientReferenceDensityKgPerM3 = undefined,
     gasPressureSummary = null,
     pressureFeedback = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
@@ -37014,6 +37040,10 @@ fn main(
     // ignores the request (with a declared blocker) on any lane where a law
     // family or diagnostic could observe submit boundaries.
     mechanicsSubmitBurstSteps = null,
+    // A1: size each Tier-0 presentation chunk from the measured frame period
+    // so simulated time keeps up with wall time (off: the shared 2-substep
+    // QoS chunk).
+    tier0RealtimePacing = false,
     // Diagnostic: per-step canonical spatial-authority evidence readback
     // (rejection counters). Production runs never read this; a fail-closed
     // GPU rollback is host-invisible without it.
@@ -37262,7 +37292,7 @@ fn main(
       Boolean(schroederPressureInterfaceOwnerScopeDiagnosticReadback);
     const requestedSchroederEnableActiveNodeIndex = Boolean(schroederEnableActiveNodeIndex);
     const requestedSchroederEnableActiveNodeSortedIndex = Boolean(schroederEnableActiveNodeSortedIndex);
-    const requestedSchroederWorkerHierarchyConfig =
+    let requestedSchroederWorkerHierarchyConfig =
       createSchroederWorkerHierarchyConfig({
         selectedLevel: requestedSchroederSelectedLevel,
         baseGridSpacingM: requestedSchroederBaseGridSpacingM,
@@ -37375,7 +37405,7 @@ fn main(
     const requestedSchroederEnableParticleStorageMaterialization = requestedSchroederSimulation && Boolean(
       schroederEnablePhaseVolumeMigration
       && (
-        schroederEnableParticleStorageMaterialization
+        schroederEnableParticleStorageMaterialization || schroederEnablePhaseSlotRefinement
       || schroederAdmissionPolicyBoolean([
         'enableParticleStorageMaterialization',
         'schroederEnableParticleStorageMaterialization',
@@ -37776,6 +37806,18 @@ fn main(
         };
       }
     }
+    if (schroederEnablePhaseSlotRefinement) {
+      requestedSchroederWorkerHierarchyConfig = createSchroederWorkerHierarchyConfig({
+        ...requestedSchroederWorkerHierarchyConfig,
+        enablePhaseSlotRefinement: true,
+        phaseSlotRefinementAdmissions: {
+          phaseVolumeSplitMergeAdmission: requestedSchroederPhaseVolumeSplitMergeAdmission,
+          particleStorageAllocatorAdmission: requestedSchroederParticleStorageAllocatorAdmission,
+          particleStorageSlotAssignmentAdmission: requestedSchroederParticleStorageSlotAssignmentAdmission,
+          particleStorageMaterializationAdmission: requestedSchroederParticleStorageMaterializationAdmission
+        }
+      });
+    }
     const requestedSchroederParticleStorageMaterializationRowCount = Math.max(
       0,
       Math.round(Number(
@@ -38038,6 +38080,7 @@ fn main(
       ambientPressurePa: effectiveAmbientPressurePa,
       ambientPressureEvidence: resolvedAmbientPressureEvidence,
       mechanicsSubmitBurstSteps,
+      tier0RealtimePacing,
       wallTemperaturesK:
         resolvedSceneThermalStepOptions.wallTemperaturesK,
       wallReservoirAuthority:
@@ -38626,6 +38669,7 @@ fn main(
           gravityMPerS2: effectiveGravity,
           internalPressureScale: effectiveInternalPressureScale,
           ambientPressurePa: effectiveAmbientPressurePa,
+          ambientReferenceDensityKgPerM3,
           // Preset identity does not choose the gas path. Every SS schedule
           // presents its current particles to the shared candidate union;
           // phase and thermodynamic rows decide whether publication is empty.
@@ -38634,6 +38678,7 @@ fn main(
           particleGasLedgerActionable:
             requestedParticleGasLedgerActionable,
           mechanicsSubmitBurstSteps,
+          tier0RealtimePacing,
           cflFactor,
           ...(requestedPhaseVolumeMaxImpulseFraction == null
             ? {}
@@ -39163,11 +39208,14 @@ fn main(
           step.schroederPortableSummary = schroederResult.portableSummary ?? null;
           step.portableSummary = schroederResult.portableSummary ?? null;
           step.renderLod = schroederResult.portableSummary?.renderLod ?? null;
-          step.localRetainedRenderBuffers = schroederResult.localRetainedRenderBuffers ?? null;
-          step.schroederLocalRetainedRenderBuffers =
-            schroederResult.schroederLocalRetainedRenderBuffers
-            || schroederResult.localRetainedRenderBuffers
-            || null;
+          // The hierarchy seals these ownership references on the original
+          // step. Keep that owner (including its non-enumerable cleanup
+          // capabilities) instead of rewriting or cloning the step here.
+          const retainedRenderBuffers = schroederResult.localRetainedRenderBuffers ?? null;
+          if (step.localRetainedRenderBuffers !== retainedRenderBuffers
+              || step.schroederLocalRetainedRenderBuffers !== retainedRenderBuffers) {
+            throw new TypeError('Scene hierarchy render ownership does not match its resident step');
+          }
           return step;
         };
         const runSchroederSceneResidentSteps = async (baseOptions) => {
@@ -39561,7 +39609,8 @@ fn main(
               ...(requestedSchroederParticleStorageAllocatorAdmission
                 ? { particleStorageAllocatorAdmission: requestedSchroederParticleStorageAllocatorAdmission }
                 : {}),
-              ...(requestedSchroederParticleStorageFreeList
+              enablePhaseSlotRefinement: schroederEnablePhaseSlotRefinement,
+              ...(requestedSchroederParticleStorageFreeList && !schroederEnablePhaseSlotRefinement
                 ? { particleStorageFreeList: requestedSchroederParticleStorageFreeList }
                 : {}),
               ...(requestedSchroederParticleStorageSlotAssignmentAdmission
@@ -40896,6 +40945,16 @@ fn main(
             internalPressureScale: effectiveInternalPressureScale,
             ambientPressurePa: effectiveAmbientPressurePa,
             ambientPressureEvidence: resolvedAmbientPressureEvidence,
+            mechanicsSubmitBurstSteps,
+            tier0RealtimePacing,
+            wallTemperaturesK:
+              resolvedSceneThermalStepOptions.wallTemperaturesK,
+            wallReservoirAuthority:
+              resolvedSceneThermalStepOptions.wallReservoirAuthority,
+            ambientTemperatureK:
+              resolvedSceneThermalStepOptions.ambientTemperatureK,
+            thermalEnvironmentAuthority:
+              resolvedSceneThermalStepOptions.thermalEnvironmentAuthority,
             physicalLawGroups: lawGroups,
             reactionActivationPolicy: currentReactionActivationPolicy,
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
@@ -40912,6 +40971,7 @@ fn main(
             activeGridDispatchPlanRefreshMode: requestedActiveGridDispatchPlanRefreshMode,
             activeGridSafetyCells: normalizedActiveGridSafetyCells,
             schroederSimulation: requestedSchroederSimulation,
+            contactSolverEnabled: requestedSchroederContactSolverEnabled,
             contactJacobiIterations: requestedContactJacobiIterations,
             contactCleanupPassBudget: requestedContactCleanupPassBudget,
             contactInnerRounds: requestedContactInnerRounds,
@@ -43335,6 +43395,7 @@ fn main(
         ? buildMlsMpmMechanicsMaterialTable(materialProperties, {
           soundSpeedScale: nextMlsMpmGpuParticleState?.soundSpeedScale,
           cflMaxSoundSpeedMPerS: nextMlsMpmGpuParticleState?.cflMaxSoundSpeedMPerS,
+          liquidCflMaxSoundSpeedMPerS: nextMlsMpmGpuParticleState?.liquidCflMaxSoundSpeedMPerS,
           minGasSoundSpeedMPerS: nextMlsMpmGpuParticleState?.minGasSoundSpeedMPerS,
           viscosityEnabled: currentPhysicalLawGroups.viscosity,
           mlsMpmArtificialViscosityAlpha: nextMlsMpmGpuParticleState?.mlsMpmArtificialViscosityAlpha,
@@ -53564,7 +53625,12 @@ fn main(
               preferWebGpu: true,
               readbackMode: 'no-full-readback',
               common: {
-                sphParticleState,
+                // A structured clone drops the private cold seed binding;
+                // the worker re-binds an exact seed from these inputs.
+                sphParticleState: exportSphExactParticleMassColdInput(sphParticleState)
+                  ? { ...sphParticleState,
+                    coldExactMassInput: exportSphExactParticleMassColdInput(sphParticleState) }
+                  : sphParticleState,
                 mlsMpmParticleState
               },
               stageOptions: {
@@ -54058,6 +54124,8 @@ fn main(
         targetScheduleAuthority,
         predecessorTargetScheduleAuthority,
         predecessorDynamicLawObservation,
+        thermalPotentialEnabled: scheduleResidentStepOptions?.thermalStepOptions?.thermalPotentialEnabled === true,
+        predecessorThermalPotential: laneState.pendingThermalPotential ?? null,
         twoLevelTerminalRefluxReceiptRequired,
         seedRequired: laneSeededThisSchedule,
         seedUploadBytes: estimateSchroederWorkerLaneSeedUploadBytes({
@@ -54066,6 +54134,7 @@ fn main(
         }),
         executeSchedule: async ({
           lease,
+          thermalPotentialAcknowledgement,
           residentSequenceLaneContract,
           twoLevelTerminalRefluxReceiptRequired:
             authorityTerminalRefluxReceiptRequired
@@ -54145,6 +54214,7 @@ fn main(
               timeoutMs: scheduleTimeoutMs,
               schedule: {
                 scheduleId,
+                thermalPotentialAcknowledgement,
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
                 targetScheduleAuthority:
@@ -54335,7 +54405,9 @@ fn main(
         }
         });
       workerLanePageTiming.authorityCommitCompletedAtMs = nowMs();
+      laneState.pendingThermalPotential = workerLaneAuthority.scheduleResult?.thermalPotential?.candidate ?? null;
     } catch (error) {
+      laneState.pendingThermalPotential = null;
       if (
         predecessorTargetScheduleRequestId != null
         || workerScheduleDispatched

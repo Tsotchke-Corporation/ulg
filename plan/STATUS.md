@@ -1,4 +1,333 @@
-# Current status - 2026-10-24
+# Current status — 2026-11-19 UTC
+
+- G6 worker adoption now passes actual module-worker IPC with real
+  ComputeManager/StateManager commits. Twelve direct/fitted physical intervals
+  preserve exact mass/U-S; dropped acknowledgement delays adoption, changed
+  source rejects before advancing physics, and fresh fit hits are recorded.
+  Zero GPU errors; 732 host tests pass, three opt-in skips; build passes.
+  Mounted scene/offscreen integration, G4 uncertainty, potential identities,
+  Eshkol pinning and resource/performance acceptance remain. Only G5/G7 accepted.
+  Evidence: `g6-worker-adoption-20261119/`.
+
+- G6 now passes complete same-level thermal intervals across fit adoption:
+  three manufactured scenarios, 18 intervals, exact mass/U-S, actual
+  hot-to-cold transfer and fixed-size GPU evidence. State/thermo/energy rows
+  are unchanged by adoption. Real StateManager commits follow fixture-owned
+  queue observation; production worker IPC, G4 uncertainty and the remaining
+  G6 acceptance gates stay open. 621 host checks pass, three opt-in skips;
+  native has zero GPU errors and build passes. Only G5/G7 accepted.
+
+- G6 opt-in canonical thermal prepass consumes a GPU-fitted caloric potential.
+  Actual spatial misses, invalid-fit recovery, StateManager-gated adoption and
+  subsequent spatial hits pass native checks, zero GPU errors. 84 host tests,
+  build and independent review pass. Commit evidence is manufactured; complete
+  physical interval, G4 uncertainty, worker/scene, source-potential identities,
+  Eshkol pin and mounted/resource acceptance remain. Only G5/G7 accepted.
+
+- G6 host admission/provenance/reservation repairs pass 29 focused checks.
+  Independent review confirmed the original GPU-detected fit/adoption cycle,
+  real SS consumer and mounted evidence remain required. The former 95%
+  estimate overstated readiness; no new goal is accepted.
+
+- Retained-product EOS coverage passes seven scenarios twice through six
+  levels, including fault recovery and publication/retirement. Five original
+  phase cases and three pressure regressions pass twice, zero GPU errors.
+  This is manufactured-state evidence; actual room-air plume remains open.
+
+- Native surface stress passes eight scenarios twice through six levels.
+  Five repeated pressure/phase/surface scenarios pass twice, with exact mass/U-S
+  and energy-fault recovery at 10 us. Larger-step and live-preset behavior are
+  not accepted. Retained-product EOS coverage is verified above; its momentum
+  check accounts for the existing boundary traction ledger. Full explicit-air
+  coupling, live enrollment and actual plume remain. Only G5/G7 accepted.
+  Evidence: `air-chain-surface-20261119/`.
+
+- Cross-level mixture/drag now reaches actual particles with mass, momentum,
+  nodal energy and angular-momentum checks. Twenty-one GPU scenarios pass twice
+  across two runs; the failed constant-NaN test injection is preserved. Five
+  repeated pressure/phase intervals pass twice with exact mass/U-S and fault
+  recovery. Five default composite scenarios pass twice. Surface/history coverage,
+  remaining laws, live enrollment and actual plume remain; only G5/G7 accepted.
+  Evidence: `air-chain-cross-transport-20261119/verification.md`.
+
+- Inherited phase-volume data now carries gas/condensed volume and all three
+  gradients through adjacent 2:1 restriction. Fourteen native scenarios pass
+  twice through six levels (231.574 s across two runs), preserving volume,
+  affine moments, cohort identity and the exact operator transpose; corrupt and zero-volume/nonzero-gradient
+  inputs reject. Scalar EOS occupancy remains a separate format. Cross-level
+  force/reflux consumption and actual room-air plume remain; only G5/G7
+  accepted. Evidence: `air-chain-phase-moments-20261119/verification.md`.
+
+- Original native S9-C mixture/drag now runs in the chain and repeated
+  pressure/phase intervals, with momentum/heat checks, exact mass/U-S and
+  fault recovery through six levels. Native topology is built before P2G;
+  empty levels retain exact zero authority. Cross-level transport, surface/
+  buoyancy verification, live enrollment and actual plume remain. Only G5/G7
+  accepted. Evidence: `air-chain-native-transport-20261119/verification.md`.
+
+- Original-source pressure now runs inside repeated private energy/phase
+  intervals. Six native scenarios pass twice through six levels, with actual
+  on/off velocity differences, exact mass/U-S, complete fault rollback and
+  clock recovery; zero GPU errors. Resident environmental guards remain until
+  remaining transport/mixture/surface laws and live enrollment are composed.
+  No plume acceptance; only G5/G7 accepted. Evidence:
+  `air-chain-pressure-interval-20261119/verification.md`.
+
+- Original EOS pressure now reaches every native level through its retained
+  transpose and one bounded consumer lifetime. Twelve 3/4/6-level native cases
+  pass twice (465.029 s), including populated/coarse-only fields and complete
+  fault rollback; zero GPU errors. 199 host checks and build pass. Resident
+  interval pressure-energy/phase closure, remaining laws and actual room-air
+  plume remain. Only G5/G7 accepted. Evidence:
+  `air-chain-pressure-family-20261119/verification.md`.
+
+- The original gas EOS/free-volume owner now consumes adjacent-chain occupancy
+  through six levels. Twelve native cases pass twice (192.846 s), including
+  aerosol/CSR per-cell equivalence, coarse-only volume and middle-link faults;
+  zero GPU errors. 157 host checks and build pass. Child arenas follow existing
+  retirement without new fences. All-level pressure-force adoption, nonempty
+  exact-history coverage and actual plume remain. Only G5/G7 accepted.
+  Evidence: `air-chain-eos-volume-20261119/verification.md`.
+
+- Adjacent-chain volume restriction and its exact pressure transpose now pass
+  twelve native scenarios twice through six levels, with conserved volume/work,
+  fault rejection and zero GPU errors. A coarse-only test found and fixed a
+  parent-union live-prefix overflow. 174 host tests, build and seven native G2P
+  regressions twice pass. EOS/pressure adoption, auxiliary
+  occupancy and actual plume remain. Only G5/G7 accepted. Evidence:
+  `air-chain-volume-adjoint-20261119/`.
+
+- Existing gas-boundary pressure now reaches the chain mechanics runner with
+  canonical work receipts and whole-chain CFL rollback. Five two-level cases
+  pass twice; three pass again after the product-source provenance guard.
+  Seven multilevel G2P regressions pass twice; 441 host tests and build pass.
+  N-level gas-volume projection/pressure adjoint, full interval integration and
+  actual room-air plume remain. Only G5/G7 accepted. Evidence:
+  `air-chain-local-laws-20261119/`.
+
+- Native multilevel batches now enter the existing real ComputeManager and
+  StateManager with matching retained buffers and accepted GPU time. Normal
+  evolution, energy-fault recovery and rejected-commit cleanup pass twice;
+  370 host tests, four publication regressions twice and build pass. Worker/
+  scene enrollment and required laws still precede actual room-air plume proof.
+  Only G5/G7 accepted. Evidence: `air-chain-resident-admission-20261119/`.
+
+- The final private chain state now publishes through the existing spatial
+  successor owner with accepted GPU time. Four phase/fault cases pass twice;
+  intermediate allocations retire before the next batch. Five auxiliary cases
+  pass twice with publication and twice without; 234 host tests and build pass.
+  Resident ComputeManager/StateManager admission and live scene enrollment
+  remain, followed by required pressure/mixture/surface laws and plume proof.
+  Only G5/G7 accepted. Evidence: `air-chain-public-admission-20261119/verification.md`.
+
+- Complete private intervals now retain combined phase groups at fixed capacity,
+  with exact inventory checks, whole-state rollback and accepted GPU time.
+  Five three-attempt native sequences pass twice; 146 host tests, five ordinary
+  regressions twice and build pass. Desktop presets advance but show no proven
+  steam plume. Next: existing resident state/clock publication and live-runner
+  enrollment, preserving auxiliary families and newly emitted products.
+  G2 remains open; only G5/G7 accepted. Evidence:
+  `air-chain-residual-phase-continuation-20261119/verification.md`.
+
+- Retained products now enter genuine four-slot phase groups and pass native
+  fusion/vaporization and exact mass/U-S checks. Five phase cases and six thermal
+  regression cases pass twice, zero GPU errors; 167 host checks and build pass.
+  Next: phase-successor persistence and whole-interval rollback, then reaction/
+  clock/state admission and plume evidence. G2 and all architecture goals remain
+  open; only G5/G7 accepted. Evidence: `air-chain-residual-phase-20261119/verification.md`.
+
+- Populated retained products now consume canonical thermal exchange and carry
+  updated state/thermo/exact energy into repeated mechanics. Six GPU thermal
+  cases and two three-attempt recovery sequences pass twice, including exact
+  combined U-S conservation, conduction/radiation isolation and complete fault
+  rollback. 371 host checks and build pass. Next: authenticated four-slot phase
+  lineages and reaction consumers, then full interval/clock admission and actual
+  plume proof. Only G5/G7 accepted; all architecture goals remain open. Evidence:
+  `air-chain-residual-thermal-20261119/verification.md`.
+
+- Carrier and populated-history mechanics successors now persist together with
+  exact heat accounting and original-state rollback. 16 GPU cases and two
+  three-attempt recovery sequences pass twice; final history verdicts survive
+  caller-control reuse. 861 host checks, 14 final ownership checks, build and
+  affected ordinary-chain regressions pass. Next: full thermal/phase/reaction
+  integration and interval/clock admission, then room-air plume proof. Only
+  G5/G7 accepted; G1 deferred; remaining G/A goals open. Evidence:
+  `air-chain-residual-handoff-20261119/verification.md`.
+
+- Canonical retained products now run through native multilevel P2G/forces/G2P
+  using an authenticated combined source and exact GPU mass copies. 13 motion
+  cases pass twice, including gravity, elastic shear and complete mechanical
+  rejection rollback. Six repeated-step regressions pass, three repeated on
+  final source; 812 broader host checks, eight focused ownership tests and
+  build pass. Next: carrier/history successor handoff with exact energy/work
+  closure and repeated populated evolution, then actual plume proof. Only
+  G5/G7 accepted; G2 and A1–A6 stay open. Evidence:
+  `air-chain-residual-motion-20261119/verification.md`.
+
+- Canonical residual history now retains full state/thermo/mechanics and exact
+  quantities, preserving deformation/APIC through carry and rollback. 38 GPU
+  cases pass twice, 19 inventory cases twice, four repeated-step scenarios
+  twice, 517 host tests and build pass. Next: native spatial/P2G/G2P transport;
+  populated mechanics still rejects. No new G2 or architecture acceptance.
+  Evidence: `air-chain-residual-physical-20261119/verification.md`.
+
+- Whole-step conservation now includes canonical residual mass and U-S with
+  carriers/parcels/sinks, including reaction-disabled carry. A real one-quantum
+  energy fault rejects, rolls back and then recovers; 13 affected continuation
+  scenarios pass twice, plus 19 populated-inventory cases twice, 517 host tests
+  and build. Next: native spatial/mechanics transport of populated history.
+  Physical residual admission still rejects. No new G2 or A1–A6 acceptance.
+  Evidence: `air-chain-residual-inventory-20261119/verification.md`.
+
+- Canonical reaction history now compacts, carries and restores exact mass/U/S
+  records with GPU counts and private ownership. Fifteen GPU history cases
+  pass twice; eight actual private-chain scenarios pass twice (empty histories).
+  Count shrink/growth corruption is now rejected. 517 host tests and build pass.
+  Next: complete history inventory reduction and native mechanics transport;
+  mass-bearing simulation steps still reject. Only G5/G7 accepted, all A1–A6
+  open. Evidence: `air-chain-residual-history-20261119/verification.md`.
+
+- Private reaction residual production now retains exact mass, U and S.
+  Eight GPU producer cases pass twice; eight affected repeated-step scenarios
+  pass twice with zero GPU errors. 512 host tests and build pass. Mass-bearing
+  continuation still rejects: next are canonical history compaction/merge,
+  native transport and whole-step inventory/rollback, followed by optical
+  handover, accepted publication and actual plume proof. Only G5/G7 accepted;
+  no architecture goal closed. Evidence:
+  `air-chain-residual-ledger-20261119/verification.md`.
+
+- Multilevel finite walls now use paired canonical energy packets and a
+  separate retained successor, with whole-step wall rollback. Eleven GPU
+  scenarios pass twice; three 4,097-contributor reduction checks pass signed
+  cancellation, sub-microjoule heat and overflow. 281 host tests, 62 final
+  ownership tests, build, ledger/parcel regression and legacy wall checks pass.
+  The single-level canonical route still refuses until wall admission exists.
+  Six desktop images show three presets rendering/advancing without page
+  errors; plume/optics/cadence acceptance remains open. The desktop scope is
+  inactive after returning143 on teardown. Next: multilevel state/clock
+  admission, wall/parcel handover and repeated evolution, then plume proof.
+  No new G2 or A1–A6 acceptance. Evidence:
+  `air-chain-finite-walls-20261119/`.
+
+- Multilevel parcels now use a separate captured successor with complete
+  carrier/parcel/sink conservation and rejection rollback. Ten GPU scenarios
+  twice, wet-wall deposition/rollback twice, eighteen large-inventory cases,
+  277 host tests and build pass. Reaction/refinement regression also passes
+  22 scenarios twice. Three desktop presets render and advance with no
+  page/console errors; cadence/motion proof and plume acceptance remain open.
+  Next: finite walls, resident state/clock admission and repeated evolution,
+  then actual plume proof. No new G2 or A1–A6 acceptance.
+  Evidence: `air-chain-parcels-20261119/verification.md`.
+
+- Multilevel refinement now has retained validation, genuine final mass/energy,
+  phase checks before redistribution, exact global conservation and complete
+  rejection rollback. Eleven GPU scenarios pass twice, zero errors; 646 host
+  tests and build pass. Evidence: `air-chain-refinement-20261119/verification.md`.
+  Next: parcels/sinks and finite walls, live state/clock admission, repeated
+  multilevel evolution and actual plume proof. G2/A1–A6 remain open.
+
+Start with [the November handoff](handoff-2026-11-17.md) and
+[implementation status](implementation-status.md).
+
+- [G5 is accepted](done/g5-reservation.md): 81 tests; all original criteria pass.
+- [G7 is accepted](done/g7-release-audit.md): eight tests and the offline report;
+  all original criteria pass. Other campaign targets remain open; G1 deferred.
+- Multilevel phase transfer now retains successor exact mass/energy and rejects
+  the whole batch on phase or projection errors. Iron/water fusion and water
+  liquid/gas plateau cases pass with exact budgets; failed batches restore all
+  physical/mass/energy rows. Regression18 scenarios twice and extended phase9
+  twice pass, zero GPU errors; 599 host tests pass, one opt-in skip; build passes.
+  Evidence: `air-chain-phase-20261119/`. Next: reaction-plus-phase rollback,
+  remaining writers, live state/clock admission, repeated evolution and plume.
+  Only G5/G7 accepted; no new G2 or architecture acceptance.
+- Canonical integer-energy closure now passes seven GPU scenarios twice
+  (122.9 s); the previous five closure scenarios also pass twice. All GPU errors
+  are zero; 587 host tests and build pass. Contact heat is recorded, cross-level
+  pair energy is exact, and late failures restore physical and ledger state.
+  Evidence: `air-chain-ledger-20261119/`. Next: phase/reaction successor mass
+  rollback, remaining writers, resident state/clock admission and actual plume.
+  G2 and all architecture goals remain open.
+- Multilevel thermal/refresh closure candidates now pass five GPU cases twice
+  (86.9 s, zero GPU errors), plus 538 host tests and build. Contact heat reaches
+  temperature; upstream, late-stage and missing-output faults restore the whole
+  physical/exact-quantity family. Original caller dt and producer retention are
+  enforced. Exact thermal conductivity bindings/capacity and refresh-validation
+  lifetime are repaired. Evidence: `air-chain-closure-20261119/`.
+  Canonical integer-energy/phase/reaction/parcel/finite-wall integration and
+  resident state/clock admission remain, followed by repeated evolution and
+  actual plume proof. Candidate publication stays pending; G2/A5 remain open.
+- Multilevel G2P now returns one coherent particle candidate, with all-level
+  energy receipts and whole-batch physical/exact-quantity rollback. Seven GPU
+  scenarios pass twice, zero errors (125.4 s); 451 host tests and build pass.
+  Contact heat reaches particle internal energy. Evidence: `air-chain-g2p-20261119/`.
+  Next: actual post-mechanics energy/thermo closure and runner enrollment,
+  required phase/mixture laws and room-air plume. Only G5/G7 remain accepted.
+- Native velocity/heat publication now passes: eight GPU scenarios, two
+  cycles each, zero GPU errors (167.1 s). Corrections reach actual native
+  velocity rows and heat sidecars through the existing grid-update receipt
+  lifecycle. CFL faults and unconsumed pressure obligations reject the chain.
+  All-level reservations, early-retirement refusal and submit-failure handling
+  pass host checks; 353 host tests and normal build pass. Evidence:
+  `air-chain-native-state-20261119/`. Next: one coherent multilevel G2P result,
+  production runner and required phase/fine-scale law integration, then
+  room-air/plume acceptance. Native heat is not yet particle thermo heat.
+- Exact P2G producer/timestep binding now passes. The force/correction path
+  requires real submitted producers for every native level and rechecks them
+  at submission. Clones, missing/reordered levels, changed pressure/grid/source
+  inputs, mismatched timestep and superseded producers are rejected. Seven
+  native GPU scenarios pass two cycles each (149.8 s, zero GPU errors); 353
+  host tests pass. The CFL case now uses the same timestep in P2G and correction.
+  Evidence: `air-chain-publication-20261119/`. Next: native velocity/heat
+  publication and G2P, with all-level mutation ownership and existing
+  pressure/phase accounting, then production runner and room-air/plume proof.
+- Coarsest force and downward correction proposals now pass GPU gates for
+  force-off, gravity, static walls and normal contact through six levels.
+  Linear momentum and the transported nodal energy budget are conserved by
+  the transfer; dissipated kinetic energy remains available for heat. A final
+  control rejects the whole chain if even one level fails. Seven scenarios,
+  two cycles each, pass in 148.0 s with zero GPU errors. Host tests: 131 pass,
+  one opt-in skip; normal build passes. Evidence: `air-chain-correction-20261119/`.
+  Next: exact per-level P2G/dt provenance and native velocity/heat publication
+  through the existing grid-update/G2P lifecycle, preserving fine-scale laws,
+  then production runner and phase/room-air integration. The new operators
+  still write proposals only; G2/A5 and the full campaign remain open.
+- All-pair transaction authority and GPU composite restriction now pass. The
+  combined state carries mass, momentum, mass gradients and a transported
+  kinetic-energy budget through empty intermediate levels; it keeps native
+  and inherited state distinct. Native 2/3/4/6-level tests plus overlapping
+  six-level fluid fields pass two lifecycle cycles each (89.2 s), including
+  stale-state rejection. 131 focused host tests pass (one opt-in skip); normal
+  build passes. Six-level phase-moment/receipt cache capacity is fixed too.
+  Next: force update, conservative downward correction/reflux and G2P, then
+  phase/contact/heat consumers and actual room-air/plume proof. The new state
+  is not yet enrolled in the production chain runner; G2/A5 remain open.
+  Evidence: `air-chain-authority-20261119/` under the ICC cache.
+- Multilevel topology now carries inherited fine fields through empty middle
+  levels. Native GPU checks pass for 2/3/4/6 levels, including two build/release
+  cycles, partition/first-moment invariants, capacity and stale-source refusal.
+  All-pair submission/cleanup and six-level cache capacity are repaired.
+  107 host tests and the normal build pass. The chain physics runner is still
+  missing; this closes a topology prerequisite, not G2 or an architecture goal.
+  Evidence: `air-level-chain-20261119/` under the ICC cache.
+- Actual Iron Ice now refines coarse gas at condensed interfaces. The previous
+  27-node center query missed every interface; the physical-support query finds
+  them using occupied ranges in the admitted GPU dictionary.
+- A three-schedule/six-step room-air run commits with 56 active split spares,
+  176 gas carriers (80 nitrogen), and zero fixed-record/GPU errors. Refinement
+  remains opt-in. Total preset conservation and visible plume remain unproven.
+- Eleven native worker scenarios pass, including a neighbor beyond the old
+  stencil, merge-back, capacity, material and conservation checks. 269 relevant
+  host tests and the normal build pass.
+- Next: complete coarse-air/multilevel and mixture representation, then
+  contact/heat coupling and actual G2 plume acceptance. The new gate proves
+  real-preset splitting and continuation, not full first-class-air acceptance.
+- Evidence: `air-interface-preset-20261119/` under the ICC cache. Headed desktop
+  screenshots were black; no visual claim. The earlier timed probe split 28
+  spares but failed its four-step assertion after completing only two steps.
+- Slice 1c/A5 stay open. No commit, push, merge or Pages build; existing dirty
+  work is preserved.
+
+# Historical status - 2026-10-24
 
 Start at [plan/handoff-2026-10-24.md](handoff-2026-10-24.md). Branch `main`
 has local campaign commits through the handoff; nothing is pushed, merged or

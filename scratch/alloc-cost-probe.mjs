@@ -1,7 +1,7 @@
 import { chromium } from '@playwright/test';
-const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=vulkan', '--enable-features=Vulkan,UseSkiaRenderer'] });
+const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--use-angle=vulkan', '--enable-features=Vulkan,UseSkiaRenderer'] });
 const page = await browser.newPage({ ignoreHTTPSErrors: true });
-await page.goto('https://localhost:5173/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+await page.goto('https://127.0.0.1:5173/', { waitUntil: 'domcontentloaded', timeout: 30000 });
 const out = await page.evaluate(async () => {
   const adapter = await navigator.gpu.requestAdapter();
   const device = await adapter.requestDevice();

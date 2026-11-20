@@ -328,12 +328,11 @@ fn receipt_admitted(
     || global_source_capacity == 0u
     || global_source_count > global_source_capacity
     || global_source_count > 0xffffffffu / STENCIL_SIZE
-    || selected_source_count == 0u
     || selected_source_count > global_source_count
     || selected_source_count > 0xffffffffu / STENCIL_SIZE
     || selected_candidate_count != selected_source_count * STENCIL_SIZE
     || selected_candidate_count > global_candidate_count
-    || field_count == 0u
+    || ((selected_source_count == 0u) != (field_count == 0u))
     || field_count > field_capacity
     || field_groups > (0xffffffffu - source_groups) / 2u
     || field_capacity_groups > (0xffffffffu - source_capacity_groups) / 2u
@@ -377,8 +376,13 @@ fn receipt_admitted(
     && finite_f32(gradient_tolerance)
     && finite_f32(volume_conditioning)
     && finite_f32(gradient_conditioning)
-    && source_total > 0.0
-    && field_total > 0.0
+    // Empty native levels are authenticated zero support, not absent
+    // authority. Require the complete zero inventory and exact zero moments.
+    && ((selected_source_count > 0u && source_total > 0.0 && field_total > 0.0)
+      || (selected_source_count == 0u && field_count == 0u
+        && source_total == 0.0 && field_total == 0.0 && volume_residual == 0.0
+        && gradient_x == 0.0 && gradient_y == 0.0 && gradient_z == 0.0
+        && gradient_norm == 0.0 && volume_conditioning == 0.0 && gradient_conditioning == 0.0))
     && gradient_norm >= 0.0
     && volume_tolerance > 0.0
     && gradient_tolerance > 0.0
@@ -521,7 +525,6 @@ fn field_admitted(
     && candidate_count > 0u
     && candidate_count % STENCIL_SIZE == 0u
     && candidate_count <= source_count * STENCIL_SIZE
-    && field_count > 0u
     && field_count <= field_capacity
     && (*field_view)[35u] == 0u
     && (*field_view)[37u] == 0u
@@ -1057,7 +1060,7 @@ fn finalize_phase_volume_interface_proposal() {
     routes == 0u,
     params.two_level == 0u
   );
-  let counts_ok = fine_count > 0u
+  let counts_ok = (fine_count > 0u || one_level_ok)
     && fine_heads <= fine_count
     && coarse_heads <= coarse_count
     && routes <= params.reflux_route_capacity

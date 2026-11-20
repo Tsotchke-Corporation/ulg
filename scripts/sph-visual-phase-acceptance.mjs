@@ -542,6 +542,13 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
   const upperWallMaximumTailRetreatM = finiteOrNull(
     requestedUpperWallTerminal?.maximumTailRetreatM
   );
+  // G2P wall clearance is per carrier: min(0.5 V0^(1/3), 0.5 dx). In the
+  // per-carrier band mode wallInsetM is the largest clearance (half a cell),
+  // and every carrier rests between its own clamp and the ceiling, so the
+  // cohort's extent must lie in [box - inset - retreat, box + tolerance]
+  // (user decision 2026-11-16) instead of at one shared terminal height.
+  const upperWallPerCarrierBand =
+    requestedUpperWallTerminal?.perCarrierClearanceBand === true;
   const upperWallConfigurationValid = Boolean(
     upperWallTerminalConfigured
     && upperWallBoundaryCondition === CLOSED_G2P_CLAMPED_BOUNDARY
@@ -577,7 +584,10 @@ export function generatedCohortTrajectoryEvidence(checkpoints, options = {}) {
       && sample.yCenterM <= sample.yMaxM + extentOrderingToleranceM
     );
     const yMaxContactErrorM = orderedExtent && Number.isFinite(upperWallTerminalYM)
-      ? Math.abs(sample.yMaxM - upperWallTerminalYM)
+      ? (upperWallPerCarrierBand
+        // In the band: zero once the top carrier reaches the half-cell line.
+        ? Math.max(0, upperWallTerminalYM - sample.yMaxM)
+        : Math.abs(sample.yMaxM - upperWallTerminalYM))
       : null;
     const passed = Boolean(
       upperWallConfigurationValid

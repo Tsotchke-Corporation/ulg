@@ -14,11 +14,19 @@ export const SPH_SPATIAL_GAS_FREE_VOLUME_VERSION = 3;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_WORKGROUP_SIZE = 64;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_CONTROL_WORDS = 64;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_ROW_WORDS = 4;
+// Minimum gas volume fraction (user decision 2026-11-16). Where condensed
+// bodies meet, each body's kernel-smoothed volume spills about one cell past
+// its surface and the projections overlap, so a cell's condensed volume can
+// read more than the cell holds (~7% at liquid-iron/ice contact). The gas in
+// such a cell keeps this declared fraction of the cell: it is squeezed to a
+// high but finite pressure and the pressure transport expels it. Only the
+// volume the gas EOS sees is bounded; mass and energy are untouched.
+export const SPH_SPATIAL_GAS_FREE_VOLUME_MINIMUM_GAS_FRACTION = 1e-3;
 export const SPH_SPATIAL_GAS_FREE_VOLUME_PARAMS_BYTES = 288;
 // Optional same-build extension in previously reserved words. Absence keeps
 // every extension word zero and does not add an allocation or dispatch.
 export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION = 1;
-export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES = 16;
+export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES = 112;
 
 export const SPH_SPATIAL_GAS_FREE_VOLUME_STATUS = Object.freeze({
   READY: 1 << 0,
@@ -203,7 +211,7 @@ export function createSphSpatialGasFreeVolumePlan({
   overfillToleranceRelative = 1e-5,
   overfillToleranceAbsoluteM3 = 1e-12
 } = {}) {
-  const levels = integer(exactLevelCount, 'exactLevelCount', 1, 2);
+  const levels = integer(exactLevelCount, 'exactLevelCount', 1, 6);
   const resolvedGrid = gridDescriptor(grid);
   const lower = vec3(boxMinM, 'boxMinM', finiteNumber);
   const upper = vec3(boxMaxM, 'boxMaxM', finiteNumber);
@@ -239,7 +247,7 @@ export function createSphSpatialGasFreeVolumePlan({
     coarseFieldCapacity: integer(
       coarseFieldCapacity,
       'coarseFieldCapacity',
-      levels === 2 ? 1 : 0
+      levels > 1 ? 1 : 0
     ),
     exactLevelCount: levels,
     grid: resolvedGrid,
@@ -262,17 +270,17 @@ export function createSphSpatialGasFreeVolumePlan({
     coarseMomentGeneration: integer(
       coarseMomentGeneration,
       'coarseMomentGeneration',
-      levels === 2 ? 1 : 0
+      levels > 1 ? 1 : 0
     ),
     parentCompletionOrdinal: integer(
       parentCompletionOrdinal,
       'parentCompletionOrdinal',
-      levels === 2 ? 1 : 0
+      levels > 1 ? 1 : 0
     ),
     parentCapacityWords: integer(
       parentCapacityWords,
       'parentCapacityWords',
-      levels === 2 ? 80 : 0
+      levels > 1 ? 80 : 0
     ),
     overfillToleranceRelative: relative,
     overfillToleranceAbsoluteM3: absolute,
@@ -340,13 +348,18 @@ export function computeSphSpatialGasFreeVolumeCpuOracle({
     if (!(geometricVolumeM3 > 0)) {
       throw new RangeError(`cells[${index}] has no geometric box intersection`);
     }
-    if (condensedVolumeM3 > geometricVolumeM3 + tolerance) {
-      throw new RangeError(`cells[${index}] condensed volume overfills its geometry`);
-    }
+    // Minimum gas volume fraction, exactly as the GPU kernel: overlap is
+    // reported (overfilled) and the condensed share capped, never rejected.
+    const condensedEffectiveM3 = Math.min(
+      condensedVolumeM3,
+      Math.fround(geometricVolumeM3
+        * Math.fround(1 - Math.fround(SPH_SPATIAL_GAS_FREE_VOLUME_MINIMUM_GAS_FRACTION)))
+    );
     return Object.freeze({
       geometricVolumeM3,
-      condensedVolumeM3,
-      freeVolumeM3: Math.fround(Math.max(0, geometricVolumeM3 - condensedVolumeM3)),
+      condensedVolumeM3: condensedEffectiveM3,
+      overfilled: condensedVolumeM3 > geometricVolumeM3 + tolerance,
+      freeVolumeM3: Math.fround(geometricVolumeM3 - condensedEffectiveM3),
       statusFlags:
         SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.READY
         | SPH_SPATIAL_GAS_FREE_VOLUME_STATUS.ADMITTED

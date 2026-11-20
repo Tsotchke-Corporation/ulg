@@ -2098,6 +2098,90 @@ test('native startup presentation proof rejects bridge labels and stale foregrou
   assert.equal(zeroDraw.visible, false);
 });
 
+test('A1: the worker-owned presented canvas proves the current committed presentation from worker receipts', () => {
+  // Field names and values as the worker-owned route publishes them (live
+  // Iron Ice, 2026-11-14). Before this proof existed the bridge fell through to
+  // "missing-visible-bridge" and every resident batch waited out the full
+  // post-step presentation timeout.
+  const renderState = {
+    schema: 'peercompute.ulg.sph-resident-render-state.v0',
+    status: 'resident-render-presentation-worker-retained-output-preserved',
+    surfaceDrawVisibleRendererBridge: 'worker-owned-presented-canvas',
+    workerOffscreenPresentationDisplayOwner: 'worker',
+    workerOffscreenPresentationDisplayCanvasVisible: true,
+    workerOffscreenPresentationStatus: 'worker-offscreen-display-worker-content-visible',
+    workerOffscreenPresentationFrameCount: 677,
+    workerOffscreenRenderRowsStatus: 'worker-offscreen-resident-isosurface-presentation-rendered',
+    workerOffscreenRetainedStageOutputPreserved: true,
+    workerOffscreenRetainedStageOutputSourceStepMatchesCurrent: true
+  };
+  const surfaceDraw = {
+    visibleRendererBridge: 'worker-owned-presented-canvas',
+    workerOffscreenRetainedStageOutputPreserved: true,
+    workerOffscreenRetainedStageOutputSourceStepMatchesCurrent: true,
+    sourceResidentExecutionGenerationMatchesCurrent: true,
+    sourceResidentRetainedPrevious: false,
+    residentRenderSourceStaleAfterPublish: false
+  };
+  const exact = resolveSphResidentPresentationProof({ renderState, surfaceDraw, requireCurrentSource: true });
+  assert.equal(exact.status, 'worker-resident-presentation-committed');
+  assert.equal(exact.admitted, true);
+  assert.equal(exact.visible, true);
+  assert.equal(exact.foregroundProved, false, 'no compositor pixel claim');
+  assert.equal(exact.sourceCurrent, true);
+
+  // A resident publish marks the render artifacts stale until the next render
+  // refresh: the previous batch's frame must not satisfy requireCurrentSource.
+  for (const [label, patch] of [
+    ['published after refresh', { residentRenderSourceStaleAfterPublish: true }],
+    ['retained previous', { sourceResidentRetainedPrevious: true }],
+    ['other execution generation', { sourceResidentExecutionGenerationMatchesCurrent: false }],
+    ['retained output for another step', { workerOffscreenRetainedStageOutputSourceStepMatchesCurrent: false }]
+  ]) {
+    const proof = resolveSphResidentPresentationProof({
+      renderState, surfaceDraw: { ...surfaceDraw, ...patch }, requireCurrentSource: true });
+    assert.equal(proof.admitted, false, label);
+    assert.equal(proof.status, 'worker-resident-presentation-stale-source', label);
+    // Without the current-source requirement the committed frame is still a visible presentation.
+    assert.equal(resolveSphResidentPresentationProof({
+      renderState, surfaceDraw: { ...surfaceDraw, ...patch } }).admitted, true, label);
+  }
+
+  // No worker frame on a visible canvas: not admitted at all.
+  for (const [label, patch] of [
+    ['canvas hidden', { workerOffscreenPresentationDisplayCanvasVisible: false }],
+    ['main-thread display owner', { workerOffscreenPresentationDisplayOwner: 'main-native' }],
+    ['no frames', { workerOffscreenPresentationFrameCount: 0 }],
+    ['content not visible', { workerOffscreenPresentationStatus: 'worker-offscreen-display-pending' }],
+    ['no isosurface frame', { workerOffscreenRenderRowsStatus: 'worker-offscreen-render-rows-pending' }],
+    ['output not retained', { workerOffscreenRetainedStageOutputPreserved: false }]
+  ]) {
+    const proof = resolveSphResidentPresentationProof({
+      renderState: { ...renderState, ...patch },
+      surfaceDraw: patch.workerOffscreenRetainedStageOutputPreserved === false
+        ? { ...surfaceDraw, workerOffscreenRetainedStageOutputPreserved: false } : surfaceDraw,
+      requireCurrentSource: true
+    });
+    assert.equal(proof.admitted, false, label);
+    assert.equal(proof.status, 'worker-resident-presentation-unadmitted', label);
+  }
+
+  // The post-step gate settles as an exact admission (not a timeout fail-open).
+  const gate = {
+    active: true, generation: 3, scheduleToken: 7,
+    status: 'native-surface-post-step-presentation-proof-pending'
+  };
+  const settled = resolveSphNativeSurfacePostStepPresentationGateSettlement({
+    gate, generation: 3, currentGeneration: 3, scheduleToken: 7, currentScheduleToken: 7,
+    presentationAdmitted: true, presentationVisible: true,
+    presentationProof: exact,
+    presentationHandoffAdmission: { admitted: true, status: 'native-surface-candidate-completion-handoff-admitted' },
+    boundedAttemptComplete: true
+  });
+  assert.equal(settled.status, 'native-surface-post-step-presentation-admitted');
+  assert.equal(settled.active, false);
+});
+
 test('only the typed pre-copy camera snapshot failure is eligible for a native render retry', () => {
   assert.equal(
     isSphNativeSurfaceCameraPresentationSnapshotStale(

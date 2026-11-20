@@ -671,6 +671,8 @@ struct ProductSpareScanParams {
 };
 
 const PHASE_COMPANION_RESERVED_STATUS_FOR_SPARE_SCAN: f32 = 254.0;
+// SS split-spare lineages (status 252) belong to the split pool only.
+const SPLIT_SPARE_RESERVED_STATUS_FOR_SPARE_SCAN: f32 = 252.0;
 `;
 
 // Stable ascending free-particle discovery. Each workgroup performs a parallel
@@ -705,6 +707,7 @@ fn mark_spare_particles(
       1u,
       state0.w <= 0.0
         && abs(reserved_status - PHASE_COMPANION_RESERVED_STATUS_FOR_SPARE_SCAN) >= 0.5
+        && abs(reserved_status - SPLIT_SPARE_RESERVED_STATUS_FOR_SPARE_SCAN) >= 0.5
     );
   }
   spare_particle_scan[lane] = available;

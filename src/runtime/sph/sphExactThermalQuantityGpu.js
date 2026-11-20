@@ -21,7 +21,7 @@ export async function prepareSphExactThermalQuantities({ device, capture }) {
   if (layout.rowCount !== count || bytes !== original.size
       || !Number.isSafeInteger(scratchBytes) || Math.max(bytes, scratchBytes) > device.limits.maxStorageBufferBindingSize
       || Math.max(bytes, scratchBytes, operations.length * alignment) > device.limits.maxBufferSize
-      || device.limits.maxStorageBuffersPerShaderStage < 12
+      || device.limits.maxStorageBuffersPerShaderStage < 13
       || Math.ceil(count / 32) > device.limits.maxComputeWorkgroupsPerDimension) {
     throw new RangeError('Exact thermal quantities exceed the original carrier/device capacity');
   }

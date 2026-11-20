@@ -48,6 +48,7 @@ import {
 } from './schroederSpatialEpochGpu.js';
 import {
   abandonSphSpatialGasFreeVolumeEosAuthority,
+  acquireSphSpatialGasFreeVolumePressureChain,
   activeSphSpatialGasFreeVolumeExecutionCount,
   createSphSpatialGasFreeVolumeGpu,
   canReleaseSphSpatialGasFreeVolumeExecutionQueueOrdered,
@@ -269,6 +270,89 @@ const retainedSpatialGasSources = new WeakMap();
 const retainedGasCellSources = new WeakMap();
 const retainedPressureConsumerReceipts = new WeakMap();
 const retainedPressureMechanicsBindings = new WeakMap();
+const retainedPressureMechanicsFamilies = new WeakMap();
+const retainedChainPressureInputs = new WeakMap();
+
+export function resolveSphSpatialGasChainPressureInput(input, {device,execution} = {}) {
+  const original=retainedChainPressureInputs.get(input);
+  if(!original || original.device!==device || original.execution!==execution) {
+    throw new TypeError('Chain pressure requires its original EOS-issued input');
+  }
+  original.validate();return original;
+}
+
+// One original EOS owner, one ordered consumer for every native level. The
+// last consumer retires the owner through its existing queue-order claim.
+export function beginSphSpatialGasPressureMechanicsFamily(source, {device,generation,ambientPressurePa} = {}) {
+  const record=livePressureSourceRecord(source);
+  const levels=generation?.mechanicsLevelViews;
+  if(device!==record.device || generation!==record.schroederSpatialEpochGeneration
+    || !Array.isArray(levels) || levels.length<3 || levels.length>6
+    || levels.length!==generation.mechanicsLevelCount || record.pressureMechanicsFamily
+    || !Number.isFinite(ambientPressurePa) || ambientPressurePa<0) {
+    throw pressureMechanicsBindingError('Multilevel pressure requires one complete original native family and common ambient pressure');
+  }
+  const handle=Object.freeze({});
+  const input=Object.freeze({});
+  const family={handle,input,record,fields:Object.freeze(levels.map(level=>level.mechanicsFieldView)),
+    ambientPressurePa:Math.fround(ambientPressurePa),completed:0,closed:false,projectionEncoded:false,projection:null};
+  const validate=()=>{
+    if(record.pressureMechanicsFamily!==family || family.closed || record.terminal || record.released
+      || record.releasePromise || record.releaseAttempted || record.slot.retainedExecution!==record.execution
+      || record.slot.ownerToken!==record.ownerToken
+      || !ownsSchroederSpatialEpochGenerationConsumerLease(record.generationConsumerLease,generation)) {
+      throw pressureMechanicsBindingError('Multilevel pressure family lost its original owner');
+    }
+  };
+  record.pressureMechanicsFamily=family;
+  retainedChainPressureInputs.set(input,Object.freeze({device,execution:record.gasFreeVolumeExecution,validate,
+    pressureBuffer:record.slot.gasPressureCellsBuffer,controlBuffer:record.slot.controlBuffer,
+    directoryBuffer:record.spatialGeneration.execution.directoryBuffer}));
+  try {
+    family.projection=acquireSphSpatialGasFreeVolumePressureChain(record.gasFreeVolumeExecution,input);
+    retainedPressureMechanicsFamilies.set(handle,family);return handle;
+  }catch(error){record.pressureMechanicsFamily=null;retainedChainPressureInputs.delete(input);throw error;}
+}
+
+export function finishSphSpatialGasPressureMechanicsFamily(handle) {
+  const family=retainedPressureMechanicsFamilies.get(handle);
+  if(!family || family.closed || family.completed!==family.fields.length || !family.record.released) {
+    throw pressureMechanicsBindingError('Every native pressure consumer must submit before family completion');
+  }
+  family.closed=true;retainedChainPressureInputs.delete(family.input);return true;
+}
+
+export function abortSphSpatialGasPressureMechanicsFamily(handle) {
+  const family=retainedPressureMechanicsFamilies.get(handle);
+  if(!family || family.closed)return false;
+  const record=family.record;
+  if(record.activePressureConsumerReceipt)abandonSphSpatialGasPressureAuthority(record.activePressureConsumerReceipt);
+  family.closed=true;retainedChainPressureInputs.delete(family.input);
+  // Only the failed path needs the established final-consumer fence. A
+  // throwing submit already quarantines this graph until device loss.
+  return record.terminal || record.released || releaseSphSpatialGasLedgerEosAfterQueue(record.execution);
+}
+
+export function encodeSphSpatialGasPressureMechanicsChainProjection(binding,{device,encoder,ambientPressurePa}={}) {
+  const b=retainedPressureMechanicsBindings.get(binding);
+  if(!b || b.device!==device || b.record.activePressureConsumerReceipt!==b.receipt) {
+    throw pressureMechanicsBindingError('Pressure projection requires the exact borrowed mechanics binding');
+  }
+  const family=b.record.pressureMechanicsFamily;
+  if(!family)return false;
+  const receipt=retainedPressureConsumerReceipts.get(b.receipt);
+  if(family.closed || receipt.state!=='borrowed' || receipt.familyIndex!==family.completed
+    || !Object.is(Math.fround(ambientPressurePa),family.ambientPressurePa)) {
+    throw pressureMechanicsBindingError('Native pressure must use the original family order and ambient pressure');
+  }
+  family.projection.validate();
+  if(!family.projectionEncoded){
+    if(family.completed!==0)throw pressureMechanicsBindingError('Pressure transpose must precede every native consumer');
+    family.projection.encode(encoder,b.paramsBuffer);family.projectionEncoded=true;
+  }
+  receipt.projectionPrepared=true;
+  return true;
+}
 const retainedSourceBorrowAccounting = new WeakMap();
 const lostDevices = new WeakSet();
 const vaporAerosolCandidates = new WeakMap();
@@ -783,15 +867,19 @@ function gasFreeVolumeRuntimeFor({
   cellCapacity,
   fineFieldCapacity,
   coarseFieldCapacity,
+  nativeFieldCapacities = null,
+  parentFieldCapacities = null,
   label
 }) {
-  const key = `${cellCapacity}:${fineFieldCapacity}:${coarseFieldCapacity}`;
+  const key = `${cellCapacity}:${fineFieldCapacity}:${coarseFieldCapacity}:${nativeFieldCapacities?.join(',') ?? ''}:${parentFieldCapacities?.join(',') ?? ''}`;
   let freeVolumeRuntime = runtime.gasFreeVolumeRuntimes.get(key);
   if (freeVolumeRuntime) return freeVolumeRuntime;
   freeVolumeRuntime = createSphSpatialGasFreeVolumeGpu(device, {
     cellCapacity,
     fineFieldCapacity,
     coarseFieldCapacity,
+    nativeFieldCapacities,
+    parentFieldCapacities,
     arenaCount: SPH_SPATIAL_GAS_LEDGER_EOS_ARENA_COUNT,
     label
   });
@@ -1151,9 +1239,9 @@ function normalizeAuthoritativeSpatialGasGrid(
     )
       ? schroederSpatialEpochGeneration.mechanicsLevelViews
       : [];
-    if (levelViews.length < 1 || levelViews.length > 2) {
+    if (levelViews.length < 1 || levelViews.length > 6) {
       throw new RangeError(
-        'retained gas EOS supports exactly one or two mechanics levels'
+        'retained gas EOS supports one through six mechanics levels'
       );
     }
     const selected = levelViews[levelViews.length - 1];
@@ -2533,6 +2621,32 @@ fn linear_cell_index(
   return linear_group * 64u + local_id.x;
 }
 
+const STAGED_DISPATCH_EXCLUDED: u32 = 0xffffffffu;
+
+// A1: the cell index under the staged consumer dispatch words (x, y, z at
+// authority[word..word+2], copied from the directory's consumer dispatch in
+// this encoder). The launch's own linear group is admitted only if the staged
+// indirect launch would have run it, so an indirect launch (shape x, y, 1)
+// and a direct 1D launch over a host ceiling run exactly the same groups with
+// the same cell indices. Workgroup-uniform.
+fn staged_linear_cell_index(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>,
+  snapshot_word: u32
+) -> u32 {
+  let staged_x = atomicLoad(&authority[snapshot_word]);
+  let staged_y = atomicLoad(&authority[snapshot_word + 1u]);
+  let staged_z = atomicLoad(&authority[snapshot_word + 2u]);
+  let linear_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (staged_z == 0u || linear_group >= staged_x * staged_y) {
+    return STAGED_DISPATCH_EXCLUDED;
+  }
+  return linear_group * 64u + local_id.x;
+}
+
 fn key_word(cell_index: u32, word: u32) -> u32 {
   return directory[params.cell_keys_offset_words + cell_index * 5u + word];
 }
@@ -2572,13 +2686,16 @@ fn find_cell(sought_key: array<u32, 5>) -> u32 {
 @compute @workgroup_size(64)
 fn aggregate_cells(
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
-  let cell_index = linear_cell_index(
+  let cell_index = staged_linear_cell_index(
     local_id,
     workgroup_id,
-    atomicLoad(&authority[22u])
+    num_workgroups,
+    22u
   );
+  if (cell_index == STAGED_DISPATCH_EXCLUDED) { return; }
   if (
     !directory_ready()
     || !free_volume_contract_ready()
@@ -2786,13 +2903,16 @@ fn neighbor_key(cell_index: u32, axis: u32, positive: bool) -> array<u32, 5> {
 @compute @workgroup_size(64)
 fn derive_gradients(
   @builtin(local_invocation_id) local_id: vec3<u32>,
-  @builtin(workgroup_id) workgroup_id: vec3<u32>
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
-  let cell_index = linear_cell_index(
+  let cell_index = staged_linear_cell_index(
     local_id,
     workgroup_id,
-    atomicLoad(&authority[25u])
+    num_workgroups,
+    25u
   );
+  if (cell_index == STAGED_DISPATCH_EXCLUDED) { return; }
   if (
     !directory_ready()
     || cell_index >= directory[18u]
@@ -2976,7 +3096,7 @@ function adapterPipelines(device, exactHistory = false) {
 function eosPipelines(device, caloricModule = null) {
   // Two material-general layouts, not kernels compiled per material/reaction.
   const code = caloricModule ? gasLedgerEosWgsl(caloricModule) : sphSpatialGasLedgerEosWgsl;
-  const variant = caloricModule ? 'caloric.v1' : 'v4';
+  const variant = caloricModule ? 'caloric.v2' : 'v5';
   const bindings = [
     computeBufferBinding(0, 'read-only-storage'),
     computeBufferBinding(1, 'read-only-storage'),
@@ -3878,6 +3998,8 @@ function reservePressureConsumerReceipt(
   if (
     queueOrderedRetirementMode == null
     || record.queueOrderedRetirementMode != null
+    || (record.pressureMechanicsFamily && (record.pressureMechanicsFamily.closed || record.pressureMechanicsFamily.failed
+      || consumerKind !== 'schroeder-spatial-gas-pressure-boundary'))
   ) {
     throw pressureAuthorityError(
       'ERR_SPH_GAS_PRESSURE_AUTHORITY_CONSUMER_KIND_INVALID',
@@ -4157,6 +4279,18 @@ function pressureMechanicsMapping(record, authority) {
   const levelViews = Array.isArray(generation?.mechanicsLevelViews)
     ? generation.mechanicsLevelViews
     : [];
+  const family=record.pressureMechanicsFamily;
+  if(family){
+    const index=family.fields.indexOf(targetField);
+    if(family.closed || index!==family.completed || index<0
+      || authority.selectedLevel!==targetField.selectedLevel || gasField!==family.fields.at(-1)) {
+      throw pressureMechanicsBindingError('Pressure family requires each original native S9 consumer exactly once in order');
+    }
+    family.projection.validate();
+    return Object.freeze({mode:'chain-adjoint',targetField,gasField,parentFieldView:null,
+      familyIndex:index,coefficientBuffer:family.projection.nativeBuffers[index],
+      completionOrdinal:family.projection.completionOrdinal});
+  }
   if (
     targetField === gasField
     && Object.is(authority?.selectedLevel, record.level)
@@ -4389,7 +4523,22 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       throw new TypeError('device.createBindGroup must be a function');
     }
     const directoryMetadata = pressureMechanicsDirectoryMetadata(record);
-    const parentFieldViewBuffer = mapping.parentFieldView?.parentFieldViewBuffer
+    const receiptRecord=retainedPressureConsumerReceipts.get(receipt);
+    if(mapping.mode==='chain-adjoint'){
+      const family=record.pressureMechanicsFamily;
+      receiptRecord.familyIndex=mapping.familyIndex;
+      if(mapping.familyIndex<family.fields.length-1){
+        receiptRecord.queueOrderedCleanup=()=>{
+          if(family.closed || family.failed || family.completed!==mapping.familyIndex
+            || record.activePressureConsumerReceipt!==receipt || receiptRecord.state!=='borrowed'
+            || receiptRecord.projectionPrepared!==true) throw pressureMechanicsBindingError('Pressure family member retirement is stale');
+          return true;
+        };
+        receiptRecord.queueOrderedCleanupClaim=registerQueueOrderedCleanupClaim(gasPressureQueueOrderedCleanupClaimIssuer,
+          device,{producerOutput:receipt,cleanup:receiptRecord.queueOrderedCleanup});
+      }
+    }
+    const parentFieldViewBuffer = mapping.coefficientBuffer ?? mapping.parentFieldView?.parentFieldViewBuffer
       // The v2 shader never reads binding 8 in same-level mode. Reuse the
       // already-private read-only directory allocation as a non-authoritative
       // dummy so callers still cannot substitute topology.
@@ -4458,11 +4607,11 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       targetGridNodeCount: mapping.targetField.gridNodeCount,
       targetGridShift: mapping.targetField.gridShift,
       targetGridSpacingM: Math.fround(mapping.targetField.gridSpacingM),
-      parentGenerationId: mapping.parentFieldView?.generationId ?? 0,
+      parentGenerationId: mapping.mode==='chain-adjoint' ? phaseVolumeAuthority.generationId : mapping.parentFieldView?.generationId ?? 0,
       parentCompletionOrdinal:
-        mapping.parentFieldView?.completionOrdinal ?? 0,
-      parentFieldCapacity: mapping.parentFieldView?.parentFieldCapacity ?? 0,
-      parentFieldWordCapacity: mapping.parentFieldView?.capacityWords ?? 0
+        mapping.completionOrdinal ?? mapping.parentFieldView?.completionOrdinal ?? 0,
+      parentFieldCapacity: mapping.mode==='chain-adjoint' ? phaseVolumeAuthority.fieldCapacity : mapping.parentFieldView?.parentFieldCapacity ?? 0,
+      parentFieldWordCapacity: mapping.mode==='chain-adjoint' ? 64+phaseVolumeAuthority.fieldCapacity : mapping.parentFieldView?.capacityWords ?? 0
     });
     retainedPressureMechanicsBindings.set(binding, {
       binding,
@@ -4470,6 +4619,7 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       record,
       device,
       bindGroup,
+      paramsBuffer:publicSnapshot.find(entry=>entry.binding===7).resource.buffer,
       bindCount: 0
     });
     return binding;
@@ -4549,7 +4699,12 @@ export function sphSpatialGasPressureAuthorityQueueOrderedClaim(
     );
   }
   queueOrderedPressureRetirementContext(record);
-  return record.queueOrderedCleanupClaim;
+  if(record.pressureMechanicsFamily && (receiptRecord.projectionPrepared!==true
+    || record.pressureMechanicsFamily.failed || record.pressureMechanicsFamily.closed
+    || receiptRecord.familyIndex!==record.pressureMechanicsFamily.completed)) {
+    throw pressureMechanicsBindingError('Pressure family member lacks its original prepared projection');
+  }
+  return receiptRecord.queueOrderedCleanupClaim ?? record.queueOrderedCleanupClaim;
 }
 
 export function retireSphSpatialGasPressureAuthorityQueueOrdered(
@@ -4570,11 +4725,11 @@ export function retireSphSpatialGasPressureAuthorityQueueOrdered(
   try {
     releaseSubmittedWorkCleanupQueueOrdered(
       device,
-      record.queueOrderedCleanup,
+      receiptRecord.queueOrderedCleanup ?? record.queueOrderedCleanup,
       {
         queueOrderedFinalConsumer,
-        producerClaim: record.queueOrderedCleanupClaim,
-        producerOutput: record.gasCellSource,
+        producerClaim: receiptRecord.queueOrderedCleanupClaim ?? record.queueOrderedCleanupClaim,
+        producerOutput: receiptRecord.queueOrderedCleanupClaim ? receipt : record.gasCellSource,
         producerFamily: GAS_PRESSURE_QUEUE_ORDERED_PRODUCER_FAMILY
       }
     );
@@ -4584,7 +4739,9 @@ export function retireSphSpatialGasPressureAuthorityQueueOrdered(
   }
   receiptRecord.state = 'submitted';
   record.activePressureConsumerReceipt = null;
-  record.pressureConsumerSubmitted = true;
+  const family=record.pressureMechanicsFamily;
+  if(family){family.completed++;record.queueOrderedRetirementMode=null;}
+  record.pressureConsumerSubmitted = !family || family.completed===family.fields.length;
   record.pressureConsumerSubmitCount += 1;
   return true;
 }
@@ -4595,6 +4752,7 @@ export function markSphSpatialGasPressureAuthoritySubmitted(receipt) {
   const record = receiptRecord?.record;
   if (
     !record
+    || record.pressureMechanicsFamily
     || receiptRecord.receipt !== receipt
     || receiptRecord.state !== 'borrowed'
     || record.activePressureConsumerReceipt !== receipt
@@ -4626,6 +4784,11 @@ export function abandonSphSpatialGasPressureAuthority(receipt) {
     return false;
   }
   receiptRecord.state = 'abandoned';
+  if(receiptRecord.queueOrderedCleanupClaim){
+    cancelQueueOrderedCleanupClaim(receiptRecord.queueOrderedCleanupClaim,record.device,
+      {producerOutput:receipt,cleanup:receiptRecord.queueOrderedCleanup});
+  }
+  if(record.pressureMechanicsFamily)record.pressureMechanicsFamily.failed=true;
   record.activePressureConsumerReceipt = null;
   record.queueOrderedRetirementMode = null;
   record.pressureConsumerAbandonCount += 1;
@@ -5392,8 +5555,8 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       schroederSpatialEpochGeneration.mechanicsLevelViews;
     const fineFieldCapacity =
       mechanicsLevelViews[0].mechanicsFieldView.fieldCapacity;
-    const coarseFieldCapacity = mechanicsLevelViews.length === 2
-      ? mechanicsLevelViews[1].mechanicsFieldView.fieldCapacity
+    const coarseFieldCapacity = mechanicsLevelViews.length > 1
+      ? mechanicsLevelViews.at(-1).mechanicsFieldView.fieldCapacity
       : 0;
     gasFreeVolumeRuntime = gasFreeVolumeRuntimeFor({
       runtime,
@@ -5401,6 +5564,10 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       cellCapacity: spatialGeneration.execution.layout.cellCapacity,
       fineFieldCapacity,
       coarseFieldCapacity,
+      nativeFieldCapacities: mechanicsLevelViews.length > 2
+        ? mechanicsLevelViews.map(v=>v.mechanicsFieldView.fieldCapacity) : null,
+      parentFieldCapacities: mechanicsLevelViews.length > 2
+        ? schroederSpatialEpochGeneration.mechanicsAdjacentLevelPairs.map(p=>p.parentFieldView.parentFieldCapacity) : null,
       label: `${slot.label}-gas-free-volume`
     });
     const eosEncoder = device.createCommandEncoder({
@@ -5485,6 +5652,24 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         * UINT32_BYTES,
       3 * UINT32_BYTES
     );
+    // A1: launch the aggregate and gradient kernels directly over the
+    // directory's cell-capacity ceiling instead of dispatchWorkgroupsIndirect
+    // (about 0.3 ms of GPU-process validation each on Chromium). The kernels
+    // admit only the groups the staged words copied above would have run
+    // (staged_linear_cell_index), so both launches are exact. Capacities past
+    // one dispatch dimension keep the indirect launch.
+    const directConsumerGroups = Math.ceil(
+      Math.max(0, Number(spatialGeneration.execution.cellCapacity) || 0) / 64
+    );
+    const directConsumerDispatch = directConsumerGroups > 0
+      && directConsumerGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535)
+      && globalThis.__ulgForceIndirectFieldConsumers !== true;
+    const dispatchStagedDirectoryConsumer = (pass) => (directConsumerDispatch
+      ? pass.dispatchWorkgroups(directConsumerGroups)
+      : pass.dispatchWorkgroupsIndirect(
+        spatialGeneration.execution.consumerDispatchBuffer,
+        0
+      ));
     const aggregatePass = eosEncoder.beginComputePass({
       label: `${slot.label}-eos-aggregate-pass`
     });
@@ -5502,10 +5687,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         publicEntries: eosEntries
       }
     ).receipt;
-    aggregatePass.dispatchWorkgroupsIndirect(
-      spatialGeneration.execution.consumerDispatchBuffer,
-      0
-    );
+    dispatchStagedDirectoryConsumer(aggregatePass);
     aggregatePass.end();
     const gradientPass = eosEncoder.beginComputePass({
       label: `${slot.label}-eos-gradient-pass`
@@ -5524,10 +5706,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
         publicEntries: eosEntries
       }
     );
-    gradientPass.dispatchWorkgroupsIndirect(
-      spatialGeneration.execution.consumerDispatchBuffer,
-      0
-    );
+    dispatchStagedDirectoryConsumer(gradientPass);
     gradientPass.end();
     const finalizerPass = eosEncoder.beginComputePass({
       label: `${slot.label}-eos-finalizer-pass`
@@ -5837,6 +6016,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       oracleDiagnostics: null,
       speciesDiagnostics: speciesDiagnosticDescriptor,
       activePressureConsumerReceipt: null,
+      pressureMechanicsFamily: null,
       pressureConsumerSubmitted: false,
       pressureConsumerBindCount: 0,
       pressureConsumerSubmitCount: 0,
@@ -5943,6 +6123,7 @@ export async function runSphSpatialVaporAerosolExchangeCandidate(execution, opti
   // Reserve before any caller-controlled properties or async module loading.
   // This is a separate consumer, never a fabricated pressure receipt.
   livePressureSourceRecord(record.gasCellSource);
+  if(record.pressureMechanicsFamily) throw new TypeError('Vapor exchange cannot borrow a native pressure consumer family');
   const operation = Object.freeze({});
   record.activeExchangeOperation = operation;
   let aerosolRead = null, exactParticleRead = null, exactPostMechanicsRead = null, currentModule = null;
@@ -6193,7 +6374,8 @@ export function releaseSphSpatialGasLedgerEosAfterQueue(execution) {
   ) {
     return false;
   }
-  if (record.activePressureConsumerReceipt || record.activeExchangeOperation) {
+  if (record.activePressureConsumerReceipt || record.activeExchangeOperation
+    || (record.pressureMechanicsFamily && !record.pressureMechanicsFamily.closed)) {
     record.status =
       'spatial-gas-ledger-eos-release-blocked-active-pressure-consumer';
     return false;

@@ -30,7 +30,7 @@ const evidence = { schema: 'ulg.realtime-gap-probe.v1', started: started.toISOSt
 // devices created before it was installed.
 const hook = () => {
   if (globalThis.__rtGap) return;
-  const G = globalThis.__rtGap = { devices: [], timing: false, readbackErrors: 0, pending: 0, untimed: 0 };
+  const G = globalThis.__rtGap = { devices: [], timing: false, fenceSites: true, readbackErrors: 0, pending: 0, untimed: 0 };
   const encDev = new WeakMap(), passInfo = new WeakMap(), cbInfo = new WeakMap(), encTiming = new WeakMap(),
     queueDev = new WeakMap();
   const fresh = () => ({ encoders: 0, computePasses: 0, renderPasses: 0, dispatch: 0, dispatchIndirect: 0,
@@ -39,7 +39,7 @@ const hook = () => {
   const entryFor = device => {
     let e = G.devices.find(x => x.device === device);
     if (!e) {
-      e = { device, c: fresh(), labels: new Map(), ns: new Map(), nsCount: new Map(), qsPool: [], bufPool: [] };
+      e = { device, c: fresh(), labels: new Map(), indirect: new Map(), ns: new Map(), nsCount: new Map(), qsPool: [], bufPool: [] };
       G.devices.push(e); queueDev.set(device.queue, e);
       device.lost.then(info => { e.lost = `${info.reason}: ${info.message}`; });
     }
@@ -92,6 +92,7 @@ const hook = () => {
   });
   wrap(GPUComputePassEncoder.prototype, 'setPipeline', function (o, a) {
     const info = passInfo.get(this);
+    if (info) info.currentPipeline = a[0]?.label || '?';
     if (info && info.pipeline === null) {
       info.pipeline = a[0]?.label || '?';
       if (info.slot >= 0 && !info.label) encTiming.get(info.encoder).labels[info.slot] = `pipe:${info.pipeline}`;
@@ -104,7 +105,11 @@ const hook = () => {
     return Reflect.apply(o, this, a);
   });
   wrap(GPUComputePassEncoder.prototype, 'dispatchWorkgroupsIndirect', function (o, a) {
-    const info = passInfo.get(this); if (info) info.e.c.dispatchIndirect++;
+    const info = passInfo.get(this);
+    if (info) { info.e.c.dispatchIndirect++;
+      // Per pass label and pipeline: which sites still launch indirectly.
+      const key = `${info.label || '?'} | ${info.currentPipeline || info.pipeline || '?'}`;
+      info.e.indirect.set(key, (info.e.indirect.get(key) || 0) + 1); }
     return Reflect.apply(o, this, a);
   });
   wrap(GPUComputePassEncoder.prototype, 'end', function (o, a) {
@@ -160,18 +165,43 @@ const hook = () => {
     if (e) { e.c.writeBuffer++; e.c.writeBytes += a[4] ?? (a[2]?.byteLength ?? 0); }
     return Reflect.apply(o, this, a);
   });
+  // Call sites of fences and readbacks (top app frames).
+  const site = () => { if (!G.fenceSites) return null;
+    const frames = (new Error().stack || '').split('\n').slice(2).map(l => l.trim())
+      .filter(l => !l.includes('Reflect') && !l.includes('wrap')).slice(0, 4)
+      .map(l => l.replace(/^at /, '').replace(/https?:\/\/[^/]+\//, '').replace(/\?[^:)]*/, ''));
+    return frames.join(' <- '); };
+  const countSite = (e, kind) => { const k = site(); if (!k || !e) return;
+    e.sites ??= new Map(); const key = `${kind}: ${k}`; e.sites.set(key, (e.sites.get(key) || 0) + 1); };
   wrap(GPUQueue.prototype, 'onSubmittedWorkDone', function (o, a) {
-    const e = queueDev.get(this); if (e) e.c.workDone++;
+    const e = queueDev.get(this); if (e) { e.c.workDone++; countSite(e, 'workDone'); }
     return Reflect.apply(o, this, a);
   });
+  // Object creation per device (GPU-process work besides command recording).
+  for (const name of ['createBindGroup', 'createBuffer', 'createTexture', 'createQuerySet', 'createShaderModule',
+    'createComputePipeline', 'createBindGroupLayout', 'createPipelineLayout', 'createCommandEncoder']) {
+    wrap(GPUDevice.prototype, name, function (o, a) {
+      const e = entryFor(this); if (e) { e.created ??= {}; e.created[name] = (e.created[name] || 0) + 1; }
+      return Reflect.apply(o, this, a); });
+  }
+  wrap(GPUBuffer.prototype, 'destroy', function (o, a) {
+    for (const e of G.devices) { e.created ??= {}; e.created.destroyBuffer = (e.created.destroyBuffer || 0) + 1; }
+    return Reflect.apply(o, this, a); });
+  for (const name of ['popErrorScope', 'createComputePipelineAsync', 'createRenderPipelineAsync']) {
+    wrap(GPUDevice.prototype, name, function (o, a) { countSite(entryFor(this), name); return Reflect.apply(o, this, a); });
+  }
   wrap(GPUBuffer.prototype, 'mapAsync', function (o, a) {
     // Buffers do not expose their device; count against every device (one is busy).
     for (const e of G.devices) e.c.mapAsync++;
+    countSite(G.devices.find(x => x.c.computePasses > 0) || G.devices[0], 'mapAsync');
     return Reflect.apply(o, this, a);
   });
-  G.reset = () => { for (const e of G.devices) { e.c = fresh(); e.labels = new Map(); e.ns = new Map(); e.nsCount = new Map(); } };
+  G.reset = () => { for (const e of G.devices) { e.c = fresh(); e.labels = new Map(); e.indirect = new Map(); e.sites = new Map(); e.created = {}; e.ns = new Map(); e.nsCount = new Map(); } };
   G.snapshot = () => G.devices.map(e => ({ lost: e.lost ?? null, counters: { ...e.c },
     labels: Object.fromEntries([...e.labels].sort((x, y) => y[1] - x[1])),
+    indirect: Object.fromEntries([...(e.indirect || new Map())].sort((x, y) => y[1] - x[1])),
+    sites: Object.fromEntries([...(e.sites || new Map())].sort((x, y) => y[1] - x[1]).slice(0, 40)),
+    created: { ...(e.created || {}) },
     ns: Object.fromEntries([...e.ns].sort((x, y) => y[1] - x[1])),
     nsCount: Object.fromEntries(e.nsCount) }));
 };

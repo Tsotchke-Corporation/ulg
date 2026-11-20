@@ -1472,7 +1472,11 @@ fn emit_field_candidates_v2(
           field_quadratic_weight_at(fraction.x, ox)
           * field_quadratic_weight_at(fraction.y, oy)
           * field_quadratic_weight_at(fraction.z, oz);
-        if (support_weight == 0.0) {
+        // Stencil support is weight >= 2^-60 (bits 0x21800000) everywhere the
+        // field-key support set is decided (field view, field pair, P2G, G2P,
+        // phase-volume moment): below it, w*m and w*V of a resolvable row
+        // underflow f32 and the key could never own a contribution.
+        if (!(support_weight >= bitcast<f32>(0x21800000u))) {
           field_write_invalid_candidate(candidate_index);
           continue;
         }
@@ -1721,6 +1725,61 @@ fn materialize_stencil_field_indices_v2(
     `    && unique_evidence[7u] == 3u;`,
     'v2 GPU-count ready-admitted status'
   );
+  // A1: the V2 consumers' indirect arguments are the ActiveSource view's
+  // active/candidate dispatch words (read-only here). A group that launch
+  // would not run gets an index past every bound, and every V2 entry returns
+  // on that index before any work, so an indirect launch and a direct 1D
+  // launch over a host ceiling run exactly the same groups.
+  source = replaceV2Required(
+    source,
+    `fn field_store(word: u32, value: u32) {`,
+    `fn field_staged_linear_invocation(
+  local_id: vec3<u32>,
+  workgroup_id: vec3<u32>,
+  num_workgroups: vec3<u32>,
+  dispatch_word: u32
+) -> u32 {
+  let launch_group = workgroup_id.x
+    + workgroup_id.y * num_workgroups.x
+    + workgroup_id.z * num_workgroups.x * num_workgroups.y;
+  if (
+    active_source_view[dispatch_word + 2u] == 0u
+    || launch_group >= active_source_view[dispatch_word]
+      * active_source_view[dispatch_word + 1u]
+  ) {
+    return 0xffffffffu;
+  }
+  return launch_group * params.workgroup_size + local_id.x;
+}
+
+fn field_store(word: u32, value: u32) {`,
+    'A1 staged linear invocation'
+  );
+  for (const word of ['ACTIVE_SOURCE_ACTIVE_DISPATCH_WORD', 'ACTIVE_SOURCE_CANDIDATE_DISPATCH_WORD']) {
+    const call = `field_linear_invocation(
+    local_id,
+    workgroup_id,
+    active_source_view[${word}]
+  )`;
+    if (!source.includes(call)) throw new Error(`Mechanics-field V2 WGSL changed: ${word} linearization`);
+    source = source.replaceAll(call,
+      `field_staged_linear_invocation(local_id, workgroup_id, num_workgroups, ${word})`);
+  }
+  for (const entry of ['emit_field_candidates_v2', 'materialize_stencil_field_indices_v2', 'assemble_field_keys_v2']) {
+    source = replaceV2Required(
+      source,
+      `fn ${entry}(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {`,
+      `fn ${entry}(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>,
+  @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {`,
+      `A1 ${entry} launch shape builtin`
+    );
+  }
   return source;
 }
 

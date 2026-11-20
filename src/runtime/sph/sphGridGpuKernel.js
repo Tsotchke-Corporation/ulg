@@ -28,7 +28,7 @@ import {
   SCHROEDER_SPATIAL_EPOCH_WITH_MECHANICS_EVIDENCE_BYTES
 } from '../../../ulg-gpu-abi/src/schroederMechanicsSpatialAuthorityWgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
-import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
+import { createSphDeviceLossRelay, watchSphDeviceLoss } from './sphDeviceLossRelay.js';
 import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
 import { prepareSphExactHistoryP2g } from './sphExactHistoryP2gGpu.js';
 import {
@@ -199,6 +199,9 @@ const SCHROEDER_SPATIAL_EPOCH_SCHEMA = 'peercompute.ulg.schroeder-spatial-epoch.
 const SCHROEDER_SPATIAL_EPOCH_GENERATION_SCHEMA =
   'peercompute.ulg.schroeder-spatial-epoch-generation.v1';
 const mechanicsFieldP2gOrigins = new WeakMap();
+// Unfused sparse producers have their own provenance. They must never acquire
+// a fused transaction's admission by copying its public projection fields.
+const nativeMechanicsFieldP2gOrigins = new WeakMap();
 const mechanicsFieldP2gClaims = new WeakMap();
 const p2gPipelineBundlesByDevice = new WeakMap();
 
@@ -621,6 +624,96 @@ export function validateLocallySubmittedMlsMpmMechanicsFieldP2g(
   const origin = mechanicsFieldP2gOrigins.get(projection);
   return origin?.deviceId === webGpuDeviceId(device)
     && mechanicsFieldP2gMatchesOrigin(projection, origin, options);
+}
+
+const NATIVE_P2G_INPUT_KEYS = Object.freeze([
+  'backend', 'status', 'dt', 'gridSpacingM', 'gridNodeCount', 'gridShift', 'particleCount',
+  'ambientPressurePa', 'internalPressureScale', 'externalGaugePressurePa',
+  'externalGaugePressureEnabled', 'externalGaugePressureAppliedInStressProjection',
+  'mechanicsFieldPressureRequiredConsumerMask', 'mechanicsFieldViewExecution',
+  'mechanicsFieldViewBuffer', 'mechanicsFieldViewByteLength', 'mechanicsFieldViewEnabled',
+  'mechanicsFieldMode', 'gridStateAuthority', 'denseGridAuthoritative',
+  'mechanicsFieldMutationInputOrdinal', 'mechanicsFieldMutationOutputOrdinal',
+  'mechanicsFieldMutationInputStateEncoding', 'mechanicsFieldMutationOutputStateEncoding',
+  'mechanicsFieldTemporalCoarsePredictorEnabled', 'readbackMode',
+  'residentProductMass', 'residentProductMassStatus',
+  'residentProductMassProductEventBufferDeviceMismatch',
+  'residentProductMassCoupledEventCount', 'residentProductMassCoupledUnplacedMassKg',
+  'residentProductMassProductEventDispatchMode', 'residentProductMassGridCouplingStatus',
+  'residentProductMassInputProductEventCountAuthority',
+  'residentProductMassInputProductEventCountHostKnown',
+  'residentProductMassInputProductEventCount', 'residentProductMassInputProductEventRowCapacity'
+]);
+
+function captureNativeMechanicsFieldP2g(device, projection, generation,
+  sphParticleUpload, mlsMpmParticleUpload) {
+  const sourceBuffers = Object.freeze({
+    stateBuffer: sphParticleUpload.stateBuffer,
+    thermoBuffer: sphParticleUpload.thermoBuffer,
+    identityBuffer: sphParticleUpload.identityBuffer,
+    mechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer
+  });
+  return Object.freeze({
+    device, projection, generation, sphParticleUpload, mlsMpmParticleUpload,
+    fieldExecution: projection.mechanicsFieldViewExecution,
+    inputs: Object.freeze(Object.fromEntries(NATIVE_P2G_INPUT_KEYS.map(key => [key, projection[key]]))),
+    gridDims: Object.freeze([...projection.gridDims]),
+    selectedLevel: projection.schroederLevelFilter?.selectedLevel,
+    dt: Math.fround(projection.dt), sourceBuffers,
+    sourceSizes: Object.freeze(Object.fromEntries(Object.entries(sourceBuffers)
+      .map(([key, buffer]) => [key, buffer?.size])))
+  });
+}
+
+/** Resolve only an exact, current, unfused sparse P2G result, never a clone.
+ * Callers bind generation and source buffers from their admitted transaction.
+ * No producer registration capability is exported. */
+export function resolveSubmittedMlsMpmNativeMechanicsP2g(device, projection, {
+  generation, fieldExecution, sourceBuffers, dt, mutationReservation = null
+} = {}) {
+  const origin = nativeMechanicsFieldP2gOrigins.get(projection);
+  let admitted = false;
+  try {
+    admitted = Boolean(origin && origin.device === device
+      && origin.generation === generation && generation?.ready === true
+      && generation.execution?.released !== true
+      && origin.fieldExecution === fieldExecution
+      && Number.isFinite(dt) && dt > 0 && Math.fround(dt) === origin.dt
+      && NATIVE_P2G_INPUT_KEYS.every(key => Object.is(projection[key], origin.inputs[key]))
+      && projection.backend === 'webgpu' && projection.status === 'projected'
+      && projection.mechanicsFieldMode === MLS_MPM_MECHANICS_FIELD_MODE_REQUIRED
+      && projection.mechanicsFieldViewEnabled === true
+      && projection.mechanicsFieldTemporalCoarsePredictorEnabled === false
+      && projection.readbackMode === NO_FULL_READBACK_MODE
+      && projection.fusedFineSubstepTransaction == null
+      && projection.fusedCoarseTerminalTransaction == null
+      && projection.mechanicsFieldViewBuffer === fieldExecution.fieldViewBuffer
+      && projection.schroederLevelFilter?.selectedLevel === origin.selectedLevel
+      && origin.selectedLevel === fieldExecution.selectedLevel
+      && Array.isArray(projection.gridDims) && projection.gridDims.length === 3
+      && origin.gridDims.every((value, i) => projection.gridDims[i] === value)
+      && fieldExecution.ownerRuntime.ownsExecution(fieldExecution)
+      && fieldExecution.ownerRuntime.isExecutionSubmitted(fieldExecution)
+      && (mutationReservation == null ? fieldExecution.ownerRuntime.isCurrentStateArtifact(fieldExecution, {
+        mutationOrdinal: origin.inputs.mechanicsFieldMutationOutputOrdinal,
+        stateEncoding: SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
+      }) : fieldExecution.ownerRuntime.isStateMutationReservationActive(fieldExecution, mutationReservation)
+        && mutationReservation.expectedOrdinal === origin.inputs.mechanicsFieldMutationOutputOrdinal
+        && mutationReservation.expectedEncoding === SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT)
+      && projection.mechanicsFieldMutationOutputStateEncoding
+        === SCHROEDER_SPATIAL_MECHANICS_FIELD_STATE_ENCODING_MASS_MOMENTUM_GRADIENT
+      && Object.entries(origin.sourceBuffers).every(([key, buffer]) =>
+        buffer === sourceBuffers?.[key] && buffer?.destroyed !== true
+        && buffer.size === origin.sourceSizes[key] && webGpuBufferMatchesDevice(buffer, device)
+        && buffer === (key === 'mechanicsBuffer'
+          ? origin.mlsMpmParticleUpload[key] : origin.sphParticleUpload[key]))
+      && fusedParticleUploadAbiMatches(device, origin.sphParticleUpload,
+        origin.mlsMpmParticleUpload, origin.inputs.particleCount));
+  } catch { admitted = false; }
+  if (!admitted) {
+    throw new TypeError('Chain mechanics requires exact submitted native P2G producers with matching source, field and timestep');
+  }
+  return origin;
 }
 
 function activeSourceDenseP2gMatchesOrigin(
@@ -3928,10 +4021,13 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       ownedAllocationEntries.delete(gridBufferAllocationEntry);
     }
     if (mechanicsFieldViewEnabled && fusedTransaction == null) {
+      const nativeOrigin = captureNativeMechanicsFieldP2g(device, projection,
+        schroederSpatialEpochGeneration, sphParticleUpload, mlsMpmParticleUpload);
       mechanicsFieldMutationRuntime.markStateMutationSubmitted(
         mechanicsFieldMutationToken
       );
       mechanicsFieldMutationCommitted = true;
+      nativeMechanicsFieldP2gOrigins.set(projection, nativeOrigin);
     }
     publishedProjection = projection;
     return projection;
@@ -4332,10 +4428,6 @@ function describeDeviceLost(info) {
   return reason || message || 'device lost';
 }
 
-function watchDeviceLost(device, onDeviceLost) {
-  if (!device?.lost?.then) return;
-  device.lost.then((info) => onDeviceLost(info)).catch((error) => onDeviceLost(error));
-}
 
 export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   sphParticleState,
@@ -4431,9 +4523,12 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         onDeviceLost: createSphDeviceLossRelay(deviceLossState, onDeviceLost)
       }));
     if (resolvedDeviceResult.device && device) {
-      watchDeviceLost(
+      // One device.lost reaction per device; this step's loss state is held
+      // weakly, so completed steps are not retained by the device.
+      watchSphDeviceLoss(
         resolvedDeviceResult.device,
-        createSphDeviceLossRelay(deviceLossState, onDeviceLost)
+        deviceLossState,
+        onDeviceLost
       );
     }
     if (!resolvedDeviceResult.device) {

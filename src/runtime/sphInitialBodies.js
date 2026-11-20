@@ -28,8 +28,13 @@ const BODY_KEYS = new Set([
   'temperatureK',
   'particlesPerEdge',
   'velocityMPerS',
-  'legacyRole'
+  'legacyRole',
+  // G3 SOL-1: 'continuum' (default, MLS-MPM particles) or 'rigid' (one
+  // coherent SE(3) frame; plan/todo/g3-solids-proposal.md).
+  'mechanicsMode',
+  'angularVelocityRadPerS'
 ]);
+const BODY_MECHANICS_MODES = new Set(['continuum', 'rigid']);
 
 const CONTAINER_KEYS = new Set(['schema', 'bodies']);
 const BODY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -227,6 +232,19 @@ function normalizeBody(body, index) {
       body.legacyRole,
       `${path}.legacyRole`
     );
+  }
+  if (body.mechanicsMode != null && body.mechanicsMode !== 'continuum') {
+    if (!BODY_MECHANICS_MODES.has(body.mechanicsMode)) {
+      fail("must be 'continuum' or 'rigid'", { code: 'invalid-mechanics-mode', path: `${path}.mechanicsMode` });
+    }
+    normalized.mechanicsMode = body.mechanicsMode;
+  }
+  if (body.angularVelocityRadPerS != null) {
+    if (normalized.mechanicsMode !== 'rigid') {
+      fail('is only defined for rigid bodies', { code: 'invalid-angular-velocity', path: `${path}.angularVelocityRadPerS` });
+    }
+    normalized.angularVelocityRadPerS = vector3(body.angularVelocityRadPerS,
+      `${path}.angularVelocityRadPerS`, finiteFloat32Number);
   }
 
   return Object.freeze(normalized);

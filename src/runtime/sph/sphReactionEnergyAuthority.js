@@ -9,7 +9,8 @@ const AUTHORITIES = new WeakMap();
 const R = 8.314462618;
 const ROUNDING_BUDGET = 1e-4;
 const ARRAY_KEYS = ['records', 'reactionHeaders', 'reactantTermRecords', 'productTermRecords',
-  'gasProductRecords', 'atomTermRecords', 'productPhaseRecords', 'combinedRecords', 'gasConstitutiveRecords'];
+  'gasProductRecords', 'atomTermRecords', 'spectatorTermRecords', 'productPhaseRecords', 'combinedRecords',
+  'gasConstitutiveRecords'];
 const COUNT_KEYS = ['reactionCount', 'reactionHeaderCount', 'reactantTermCount', 'productTermCount',
   'gasProductCount', 'atomTermCount', 'productPhaseCount', 'combinedRecordCount',
   'gasConstitutiveSchema', 'gasConstitutiveOffsetVec4'];
@@ -34,7 +35,7 @@ const freeze = (value) => {
 
 // Reuse the exact piecewise-linear thermal graph samples in both directions.
 // There is no second fitted caloric law, extrapolation or phase-from-U choice.
-function phaseCurves(artifacts, materialId) {
+export function phaseCurves(artifacts, materialId) {
   const { thermalPhaseResponseTable: responses, thermalClosureGraphSet: graphs } = artifacts;
   const curves = [];
   for (let i = 0; i < responses.responseCount; i += 1) {
@@ -66,7 +67,7 @@ function phaseCurves(artifacts, materialId) {
   return curves;
 }
 
-function sampleCurve(curve, value, inverse) {
+export function sampleCurve(curve, value, inverse) {
   const input = inverse ? 1 : 0, output = inverse ? 0 : 1;
   const s = curve.samples;
   if (!Number.isFinite(value) || value < s[input] || value > s[s.length - 4 + input]) return null;

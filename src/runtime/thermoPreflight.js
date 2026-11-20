@@ -17,9 +17,18 @@ import {
   specificEnergyJPerKg
 } from './materials/referenceMaterials.js';
 import {
+  SPH_THERMAL_WALL_MODEL_FINITE,
   resolveSphThermalEnvironmentAuthority,
-  resolveSphWallReservoirAuthority
+  resolveSphWallReservoirAuthority,
+  sphWallFaceHeatCapacitiesJPerK
 } from './thermalEnvironmentAuthority.js';
+
+// Honest walls: by default the box is a passive finite container, a thin wall
+// of a reference material whose faces warm or cool with the heat they take
+// (thermalEnvironmentAuthority.js). Its capacity derives from that material's
+// own reference density and heat capacity; nothing here is an assumed sink.
+const DEFAULT_WALL_MATERIAL = 'fe';
+const DEFAULT_WALL_THICKNESS_M = 0.002;
 
 export const ULG_THERMODYNAMIC_PREFLIGHT_SCHEMA = 'peercompute.ulg.thermodynamic-preflight.v0';
 export const SPH_PHASE_SCENARIO_ID = 'sph-phase-ice-on-molten-iron';
@@ -76,7 +85,7 @@ export function createSphPhaseScenario(overrides = {}) {
   const resolvedReferenceBoxEdgeM =
     Math.max(...referenceBoxDimensionsM.map(Number));
   const boxEdgeM = Math.max(...boxDimensionsM);
-  const wallModel = overrides.wallModel ?? 'infinite-fixed-temperature-reservoir';
+  const wallModel = overrides.wallModel ?? SPH_THERMAL_WALL_MODEL_FINITE;
   const defaultWallTempK = overrides.wallTemperatureK ?? FAHRENHEIT_MINUS_40_K;
   const wallFaces = {};
   for (const faceId of WALL_FACE_IDS) {
@@ -96,9 +105,28 @@ export function createSphPhaseScenario(overrides = {}) {
       : 'scenario-gas-initial-temperature',
     sourceScenarioId: SPH_PHASE_SCENARIO_ID
   });
+  const finiteWalls = wallModel === SPH_THERMAL_WALL_MODEL_FINITE;
+  const wallMaterial = overrides.wallMaterial ?? DEFAULT_WALL_MATERIAL;
+  const wallThicknessM = Number(overrides.wallThicknessM ?? DEFAULT_WALL_THICKNESS_M);
+  const wallMaterialData = REFERENCE_MATERIALS[wallMaterial] ?? null;
+  if (finiteWalls && !wallMaterialData) {
+    throw new RangeError(`wallMaterial ${wallMaterial} is not a reference material`);
+  }
   const wallReservoir = resolveSphWallReservoirAuthority({
     wallTemperaturesK: wallFaces,
     wallModel,
+    ...(finiteWalls
+      ? {
+          wallFaceHeatCapacitiesJPerK: sphWallFaceHeatCapacitiesJPerK({
+            boxDimsM: boxDimensionsM,
+            densityKgPerM3: wallMaterialData.densityKgPerM3.solid,
+            specificHeatJPerKgK: wallMaterialData.cpJPerKgK.solid,
+            thicknessM: wallThicknessM
+          }),
+          wallMaterial,
+          wallThicknessM
+        }
+      : {}),
     source: 'scenario-wall-boundary',
     sourceScenarioId: SPH_PHASE_SCENARIO_ID
   });
@@ -161,16 +189,27 @@ function representedEntities(material, massKg, macroParticleCount) {
   };
 }
 
-function solveAdiabaticEquilibriumK({ mFe, tFe0, mIce, tIce0, mAir, tAir0 }) {
+function solveAdiabaticEquilibriumK({
+  mFe, tFe0, mIce, tIce0, mAir, tAir0,
+  // Finite walls: lumped faces of capacity C (J/K) starting at T0 join the
+  // closed system, each holding C * (T - T0) at a uniform final T.
+  wallCapacitiesJPerK = [],
+  wallInitialTemperaturesK = []
+}) {
+  const wallEnergy = (t) => wallCapacitiesJPerK.reduce(
+    (sum, capacity, index) => sum + capacity * (t - wallInitialTemperaturesK[index]),
+    0
+  );
   const totalEnergy = (t) =>
     mFe * specificEnergyJPerKg('fe', t)
     + mIce * specificEnergyJPerKg('h2o', t)
-    + mAir * specificEnergyJPerKg('air', t);
+    + mAir * specificEnergyJPerKg('air', t)
+    + wallEnergy(t);
   const targetEnergy = mFe * specificEnergyJPerKg('fe', tFe0)
     + mIce * specificEnergyJPerKg('h2o', tIce0)
     + mAir * specificEnergyJPerKg('air', tAir0);
-  let lo = Math.min(tFe0, tIce0, tAir0);
-  let hi = Math.max(tFe0, tIce0, tAir0);
+  let lo = Math.min(tFe0, tIce0, tAir0, ...wallInitialTemperaturesK);
+  let hi = Math.max(tFe0, tIce0, tAir0, ...wallInitialTemperaturesK);
   // Total internal energy is monotonic increasing in a uniform temperature, so bisection on
   // energy conservation has a unique root.
   for (let i = 0; i < 200; i += 1) {
@@ -211,13 +250,26 @@ export function computeThermodynamicPreflight(scenario = createSphPhaseScenario(
   const maxWallTempK = Math.max(...wallTemps);
   const meanWallTempK = wallTemps.reduce((sum, t) => sum + t, 0) / wallTemps.length;
   const adiabatic = scenario.walls.model === 'adiabatic';
+  const finiteCapacities = scenario.walls.authority?.finiteCapacity === true
+    ? WALL_FACE_IDS.map((faceId) => scenario.walls.authority.faceHeatCapacitiesJPerK[faceId])
+    : null;
 
   const adiabaticEquilibriumK = solveAdiabaticEquilibriumK({
     mFe: ironMassKg, tFe0, mIce: iceMassKg, tIce0, mAir: airMassKg, tAir0
   });
+  // Finite walls close the system: interior and walls reach one mixed temperature.
+  const finiteWallEquilibriumK = finiteCapacities
+    ? solveAdiabaticEquilibriumK({
+        mFe: ironMassKg, tFe0, mIce: iceMassKg, tIce0, mAir: airMassKg, tAir0,
+        wallCapacitiesJPerK: finiteCapacities,
+        wallInitialTemperaturesK: wallTemps
+      })
+    : null;
   // Infinite fixed-temperature reservoirs drive the lumped interior to the (mean) wall
   // temperature over unbounded time; an adiabatic box conserves energy to a mixed equilibrium.
-  const asymptoticInteriorTempK = adiabatic ? adiabaticEquilibriumK : meanWallTempK;
+  const asymptoticInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteCapacities ? finiteWallEquilibriumK : meanWallTempK);
 
   const initialEnergyJ = ironMassKg * specificEnergyJPerKg('fe', tFe0)
     + iceMassKg * specificEnergyJPerKg('h2o', tIce0)
@@ -231,7 +283,9 @@ export function computeThermodynamicPreflight(scenario = createSphPhaseScenario(
   // --- Feasibility of the requested final state (cold solid iron + ice) ---
   // The binding constraint is the warmest sustained interior temperature: any reservoir at or
   // above the water freezing point sustains an unfrozen region (adiabatic uses its mixed temp).
-  const bindingInteriorTempK = adiabatic ? adiabaticEquilibriumK : maxWallTempK;
+  const bindingInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteCapacities ? finiteWallEquilibriumK : maxWallTempK);
   const feasibleH2oFrozen = bindingInteriorTempK < waterFreezingK;
   const feasibleFeSolid = bindingInteriorTempK < fe.meltingPointK;
   const feasible = feasibleH2oFrozen && feasibleFeSolid;
@@ -248,8 +302,15 @@ export function computeThermodynamicPreflight(scenario = createSphPhaseScenario(
     return netExportPositive ? 'sink' : 'balanced';
   };
   const sinkFaceCount = WALL_FACE_IDS.filter((faceId) => roleFor(scenario.walls.faces[faceId]) === 'sink').length;
-  const wallLedger = WALL_FACE_IDS.map((faceId) => {
+  const wallLedger = WALL_FACE_IDS.map((faceId, index) => {
     const temperatureK = scenario.walls.faces[faceId];
+    if (finiteCapacities) {
+      // A finite face holds exactly C * (T_final - T_0).
+      const heatJ = finiteCapacities[index] * (asymptoticInteriorTempK - temperatureK);
+      return { faceId, temperatureK, role: heatJ > 0 ? 'sink' : heatJ < 0 ? 'source' : 'balanced',
+        areaM2: faceAreaM2, areaFraction: 1 / WALL_FACE_IDS.length, heatJ,
+        heatCapacityJPerK: finiteCapacities[index] };
+    }
     const role = roleFor(temperatureK);
     const heatJ = (role === 'sink' && sinkFaceCount > 0)
       ? heatExportedToWallsJ / sinkFaceCount
@@ -309,7 +370,15 @@ export function computeThermodynamicPreflight(scenario = createSphPhaseScenario(
       maxWallTempK,
       meanWallTempK,
       asymptoticInteriorTempK,
-      adiabaticEquilibriumK
+      adiabaticEquilibriumK,
+      finiteWallEquilibriumK,
+      ...(finiteCapacities
+        ? {
+            wallHeatCapacitiesJPerK: { ...scenario.walls.authority.faceHeatCapacitiesJPerK },
+            wallMaterial: scenario.walls.authority.wallMaterial ?? null,
+            wallThicknessM: scenario.walls.authority.wallThicknessM ?? null
+          }
+        : {})
     },
     energyBudget: {
       initialInternalEnergyJ: initialEnergyJ,

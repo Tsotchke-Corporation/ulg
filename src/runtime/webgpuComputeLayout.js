@@ -761,6 +761,21 @@ export function armWorkerQueueSubmitBurst(device) {
   return record;
 }
 
+/**
+ * Diagnostic hook below the submit burst: wrap the burst's real submit (the
+ * point where held command buffers truly reach the queue). Anything that maps
+ * a buffer written by a command buffer must hook here, or it maps before a
+ * held buffer's real submit and that submit fails validation ("used in submit
+ * while mapped"), silently dropping the batch. Returns false when the device
+ * has no burst record (then queue.submit is the real submit).
+ */
+export function wrapWorkerQueueRealSubmit(device, wrap) {
+  const record = workerQueueSubmitBurstRecords.get(device);
+  if (!record) return false;
+  record.realSubmit = wrap(record.realSubmit);
+  return true;
+}
+
 export function openWorkerQueueSubmitBurst(device, {
   label = null,
   writeThrough = false
@@ -956,6 +971,17 @@ const queueOrderedSubmissionReceiptRecords = new WeakMap();
 const queueOrderedCleanupClaimIssuerRecords = new WeakMap();
 const queueOrderedCleanupClaimRecords = new WeakMap();
 
+// A consumed or cancelled claim keeps only its terminal state (replays fail on
+// it). Its producer output, cleanup closure and capability are dropped: every
+// later check rejects on state first, and holding them let one step's cleanup
+// closure keep the next step's claims, and so every step's artifacts and GPU
+// buffers, reachable (about 15 MB/s on Iron Ice).
+function releaseSettledQueueOrderedCleanupClaimRecord(claimRecord) {
+  claimRecord.producerOutput = null;
+  claimRecord.cleanup = null;
+  claimRecord.capability = null;
+}
+
 function queueOrderedAuthorityReference(value) {
   return Boolean(
     value != null
@@ -1066,6 +1092,7 @@ export function cancelQueueOrderedCleanupClaim(
     );
   }
   claimRecord.state = 'cancelled';
+  releaseSettledQueueOrderedCleanupClaimRecord(claimRecord);
   return true;
 }
 
@@ -1441,6 +1468,7 @@ function consumeQueueOrderedFinalConsumerCapability(
   // Consume before invoking user cleanup. A throwing destructor must not make
   // the authority replayable with replacement cleanup code.
   claimRecord.state = 'consumed';
+  releaseSettledQueueOrderedCleanupClaimRecord(claimRecord);
   record.claims.delete(producerClaim);
   record.remainingClaimCount -= 1;
   if (record.remainingClaimCount === 0) {

@@ -9,6 +9,13 @@ count as done while the visible physics loop or measured cadence is incoherent.
 
 ## Superseding Immediate Goal Order - 2026-09-04 AKDT
 
+**Update 2026-11-18.** [G5](../done/g5-reservation.md) and
+[G7](../done/g7-release-audit.md) are accepted against their original criteria.
+The other eleven targets remain open. Use [the November handoff](../handoff-2026-11-17.md)
+and [implementation status](../implementation-status.md). Next: first-class-air
+worker publication, multilevel air and the G2/A5 plume path. The November
+user decisions allow dependency-driven order; original acceptance stays intact.
+
 **Update 2026-10-24.** Current entry point:
 [plan/handoff-2026-10-24.md](../handoff-2026-10-24.md). Item 1 below (G1) was
 failed by the user on 2026-09-13 and is delayed until architecture work makes

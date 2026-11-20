@@ -421,6 +421,9 @@ export const SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT = Object.freeze([
   // evaluates 1/T* = 1/Tref - beta*ln(P/Pref) without carrying L and M.
   // lawId 0 means this material has no admitted plateau and must not be
   // pressure-shifted; there is no implicit one-atmosphere fallback.
+  // lawId 2 (explicit-branch fusion) reuses the lanes: referencePressurePa is
+  // the fusion reference pressure and the third lane is the fusion
+  // temperature T_f in K, read by the phase-carrier transfer's bulk fusion.
   'pressureCarrierLawId:f32',
   'referencePressurePa:f32',
   'clausiusInvTemperatureLogSlopePerK:f32'
@@ -542,6 +545,16 @@ export const SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT = Object.freeze([
   'productPhaseRecordCount:f32',
   'gasSpeciesId:f32',
   'charge:f32',
+  'pad0:f32'
+]);
+// One row per product term (first-class air, slice 3 stage 2): a residue
+// product of a reaction lifted onto an ideal-gas mixture is a spectator that
+// keeps u = energyRatio * u(consumed mixture row); see sphReactionGpuKernel.js.
+// The section sits immediately before the gas constitutive records.
+export const SPH_GPU_REACTION_SPECTATOR_TERM_ROW_LAYOUT = Object.freeze([
+  'spectatorFlag:f32',
+  'energyRatio:f32',
+  'mixtureMaterialId:f32',
   'pad0:f32'
 ]);
 export const SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT = Object.freeze([

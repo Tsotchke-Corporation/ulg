@@ -411,6 +411,35 @@ test('S9-C one-level proposal is a read-only, same-encoder artifact with no host
   assert.equal(runtime.destroy(), true);
 });
 
+test('submitted native S9-C requires the complete original family and retires after its fence', async () => {
+  const fixture = createFakeDevice(), authority = createAuthority(fixture.device);
+  const chain = buildReceipt(fixture.device, authority);
+  const runtime = createSchroederSpatialPhaseVolumeInterfaceProposalGpu(fixture.device, {
+    fineFieldCapacity: authority.plan.fieldCapacity
+  });
+  const encode = receipt => runtime.encode(createFakeEncoder(), {
+    fineReceipt: receipt, submittedNativeReceipt: receipt
+  });
+  assert.throws(() => encode(chain.receipt), /live submitted/);
+  chain.momentRuntime.markExecutionSubmitted(chain.moment);
+  chain.receiptRuntime.markExecutionSubmitted(chain.receipt);
+  assert.throws(() => encode(chain.receipt), /live submitted/);
+  authority.fieldOwnerRuntime.markExecutionSubmitted(authority.field);
+  assert.throws(() => encode({ ...chain.receipt }), /live submitted/);
+  chain.receipt.releaseScheduled = true;
+  assert.throws(() => encode(chain.receipt), /live submitted/);
+  chain.receipt.releaseScheduled = false;
+  const proposal = encode(chain.receipt);
+  assert.equal(runtime.markExecutionSubmitted(proposal), true);
+  assert.equal(proposal.twoLevel, false);
+  const fence = deferred(), retirement = runtime.releaseExecutionAfter(proposal, fence.promise);
+  assert.equal(runtime.destroy(), false);
+  assert.equal(proposal.released, false);
+  fence.resolve();
+  assert.equal(await retirement, true);
+  assert.equal(runtime.destroy(), true);
+});
+
 test('S9-C arenas reuse exact immutable bind groups', () => {
   const fixture = createFakeDevice();
   const authority = createAuthority(fixture.device);
@@ -539,19 +568,30 @@ test('native S9-C shader admits a compact authenticated local span and fails no 
     executablePath: process.env.ULG_PHASE_VOLUME_INTERFACE_CHROME || '/usr/bin/google-chrome',
     headless: true,
     args: [
+      '--ignore-certificate-errors',
       '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer',
       '--enable-unsafe-webgpu',
+      '--enable-webgpu-developer-features',
       '--ignore-gpu-blocklist'
     ]
   });
   try {
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.route(NATIVE_BASE_URL, route => route.fulfill({
+      contentType: 'text/html',
+      body: '<title>Native S9-C topology regression</title>'
+    }));
     await page.goto(NATIVE_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     const native = await page.evaluate(async () => {
-      const adapter = await navigator.gpu?.requestAdapter({
-        powerPreference: 'high-performance'
-      });
+      // A freshly launched Vulkan process can return null while its adapter
+      // initializes. Keep the native requirement, with bounded startup retry.
+      let adapter = null;
+      const adapterDeadline = performance.now() + 10_000;
+      while (!adapter && navigator.gpu && performance.now() < adapterDeadline) {
+        adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) await new Promise(resolve => setTimeout(resolve, 200));
+      }
       if (!adapter) return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
       const device = await adapter.requestDevice();
       const uncapturedErrors = [];

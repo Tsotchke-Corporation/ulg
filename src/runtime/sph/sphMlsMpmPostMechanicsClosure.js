@@ -1,3 +1,10 @@
+import { runSphLedgerParcelCandidateWebGpu, resolveSphLedgerParcelCandidateSourceCapture,
+  retainedSphLedgerParcelCandidateBuffers } from './sphLedgerParcelCandidateGpu.js';
+import { resolveSphWallReservoirAuthority } from '../thermalEnvironmentAuthority.js';
+import {
+  runSchroederPhaseSlotRefinementWebGpu, resolveSchroederPhaseSlotRefinementSourceCapture,
+  retainedSchroederPhaseSlotRefinementBuffers
+} from './schroederPhaseSlotRefinementGpu.js';
 import { createSphMlsMpmKernelBundleLoader } from './sphMlsMpmKernelBundleLoader.js';
 import { runMlsMpmMechanicsRefreshWithOptionalWebGpu,
   runMlsMpmMechanicsRefreshWebGpu,
@@ -8,7 +15,9 @@ import {
   resolveSphPhaseCarrierTransferSourceCapture
 } from './sphPhaseCarrierTransferGpu.js';
 import { createResidentProductMassHandle } from './sphReactionGpuSummary.js';
-import { deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup,
+  createQueueOrderedCleanupClaimIssuer, registerQueueOrderedCleanupClaim,
+  cancelQueueOrderedCleanupClaim, releaseSubmittedWorkCleanupQueueOrdered } from '../webgpuComputeLayout.js';
 import {
   validateSchroederSpatialEpochTransactionSourceFamily
 } from './schroederSpatialEpochTransaction.js';
@@ -43,7 +52,8 @@ import {
   bindSphAerosolSpatialContinuation
 } from './sphAerosolSpatialBinding.js';
 import { ensureSphGpuParticleBufferSetBorrowLifecycle,
-  sphGpuParticleUploadAdvertisesExactMass, sphGpuParticleUploadAdvertisesDispersedMediumOptics,
+  sphGpuParticleUploadAdvertisesExactMass, sphGpuParticleUploadAdvertisesDispersedMediumOptics, sphGpuParticleUploadExactEnergyRows,
+  sphGpuParticleUploadLedgerParcels,
   markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
 import { validateSchroederSpatialEpochGenerationLevelAssignment } from './schroederSpatialEpochGpu.js';
 
@@ -89,6 +99,10 @@ const CONDENSATE_CLOSURE_STAGE_ORDER = Object.freeze(
 );
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const phaseSlotRetirementFamily = 'post-mechanics-phase-slot-retirement';
+const phaseSlotRetirementIssuer = createQueueOrderedCleanupClaimIssuer({
+  producerFamily: phaseSlotRetirementFamily
+});
 const POST_MECHANICS_COMPONENTS = Object.freeze([
   'state',
   'thermo',
@@ -114,27 +128,54 @@ function validateCapturedExactMass(authority) {
   const reaction = capture.stageNames.includes('reactionStep') ? capture.seals[1] : null;
   const phase = capture.seals[capture.stageNames.indexOf('phaseCarrierTransfer')] ?? null;
   const refresh = capture.seals.at(-1);
-  const current = phase ?? reaction ?? thermal;
+  const refinement = capture.seals[capture.stageNames.indexOf('phaseSlotRefinement')] ?? null;
+  const parcels = capture.seals[capture.stageNames.indexOf('ledgerParcels')] ?? null;
+  const current = parcels ?? refinement ?? phase ?? reaction ?? thermal;
   const predecessor = capture.exchange?.sourceContinuation ?? authority.continuation;
   if (!phase && !reaction && thermal.exactThermal && refresh.exactMechanics?.source !== thermal.exactThermal) {
     throw new TypeError('Mechanics refresh must evolve the retained thermal quantities before publication');
   }
   const expectedStages = ['thermalStep', ...(reaction ? ['reactionStep'] : []),
-    ...(phase ? ['phaseCarrierTransfer'] : []), 'mechanicsRefresh'].join(',');
+    ...(phase ? ['phaseCarrierTransfer'] : []), ...(refinement ? ['phaseSlotRefinement'] : []), ...(parcels ? ['ledgerParcels'] : []), 'mechanicsRefresh'].join(',');
   if (capture.stageNames.join(',') !== expectedStages
       || thermal.inputs.sourceStateBuffer !== capture.g2p.stateBuffer
       || thermal.inputs.sourceThermoBuffer !== capture.g2p.thermoBuffer
       || refresh.inputs.sourceStateBuffer !== current.output.stateBuffer
       || refresh.inputs.sourceThermoBuffer !== current.output.thermoBuffer
-      || refresh.inputs.sourceMechanicsBuffer !== (phase?.output.mechanicsBuffer ?? reaction?.output.mechanicsBuffer ?? capture.g2p.mechanicsBuffer)
+      || refresh.inputs.sourceMechanicsBuffer !== (parcels?.output.mechanicsBuffer ?? refinement?.output.mechanicsBuffer ?? phase?.output.mechanicsBuffer ?? reaction?.output.mechanicsBuffer ?? capture.g2p.mechanicsBuffer)
       || authority.closure.continuation !== authority.continuation
       || predecessor.stateBuffer !== current.output.stateBuffer
       || predecessor.thermoBuffer !== current.output.thermoBuffer
       || predecessor.mechanicsBuffer !== refresh.output.mechanicsBuffer
-      || (!reaction && !capture.g2p.history && predecessor.residentProductMass != null)) {
+      || (!reaction && !capture.g2p.history && predecessor.residentProductMass != null
+        && !(thermal.exactEnergy && !thermal.exactThermal))) {
     throw new TypeError('Exact inventory requires its genuine G2P/thermal/reaction/refresh chain');
   }
-  if (phase) {
+  if (refinement && (!phase?.exactLedgerPhase || !refinement.exactLedgerRefinement
+      || refinement.sourcePhaseSeal !== phase
+      || refinement.inputs.sourceStateBuffer !== phase.output.stateBuffer
+      || refinement.inputs.sourceThermoBuffer !== phase.output.thermoBuffer
+      || refinement.inputs.sourceMechanicsBuffer !== phase.output.mechanicsBuffer
+      || refinement.exactLedgerRefinement.carrierMassRead.rowCount !== capture.g2p.particleCount)) {
+    throw new TypeError('Refinement continuation lost its original phase ledger or aligned successor');
+  }
+  if (parcels && (!parcels.exactLedgerParcels || parcels.sourcePredecessorSeal !== (refinement ?? phase)
+    || parcels.inputs.sourceStateBuffer !== (refinement ?? phase)?.output.stateBuffer
+    || parcels.inputs.sourceThermoBuffer !== (refinement ?? phase)?.output.thermoBuffer
+    || parcels.inputs.sourceMechanicsBuffer !== (refinement ?? phase)?.output.mechanicsBuffer)) {
+    throw new TypeError('Parcel continuation lost its genuine predecessor and successor inventory');
+  }
+  const ledgerReaction = reaction?.exactLedgerReaction ?? null;
+  if (phase?.exactLedgerPhase) {
+    const beforePhase = ledgerReaction ? reaction : thermal;
+    if ((reaction && !ledgerReaction) || !thermal.exactEnergy || thermal.exactThermal || refresh.exactMechanics
+        || phase.inputs.sourceStateBuffer !== beforePhase.output.stateBuffer
+        || phase.inputs.sourceThermoBuffer !== beforePhase.output.thermoBuffer
+        || phase.inputs.sourceMechanicsBuffer !== (ledgerReaction ? reaction.output.mechanicsBuffer : capture.g2p.mechanicsBuffer)
+        || phase.exactLedgerPhase.carrierMassRead?.rowCount !== capture.g2p.particleCount) {
+      throw new TypeError('Ledger phase continuation lost its thermal energy record or aligned mass successor');
+    }
+  } else if (phase) {
     const beforePhase = reaction ?? thermal;
     if (!phase.exactPhase || phase.exactPhase.source !== (reaction?.exactReaction ?? thermal.exactThermal ?? thermal)
         || phase.inputs.sourceStateBuffer !== beforePhase.output.stateBuffer
@@ -154,7 +195,15 @@ function validateCapturedExactMass(authority) {
     }
     capture.motionValidate(); capture.mergeValidate();
   }
-  if (reaction) {
+  if (ledgerReaction) {
+    if (reaction.inputs.sourceStateBuffer !== thermal.output.stateBuffer
+        || reaction.inputs.sourceThermoBuffer !== thermal.output.thermoBuffer
+        || reaction.inputs.sourceMechanicsBuffer !== capture.g2p.mechanicsBuffer
+        || !thermal.exactEnergy || thermal.exactThermal || refresh.exactMechanics
+        || ledgerReaction.carrierMassRead?.rowCount !== capture.g2p.particleCount) {
+      throw new TypeError('Ledger reaction continuation lost its thermal energy record or aligned mass successor');
+    }
+  } else if (reaction) {
     if (reaction.inputs.sourceStateBuffer !== thermal.output.stateBuffer
         || reaction.inputs.sourceThermoBuffer !== thermal.output.thermoBuffer
         || reaction.inputs.sourceMechanicsBuffer !== capture.g2p.mechanicsBuffer
@@ -170,15 +219,59 @@ function validateCapturedExactMass(authority) {
   return capture;
 }
 
+// The captured reaction seal of a G2 ledger reaction, shaped as the energy
+// record input the ledger phase transfer reads.
+function reactionLedgerSeal(capture) {
+  const seal = capture?.seals?.[capture.stageNames.indexOf('reactionStep')];
+  if (!seal?.exactLedgerReaction) return null;
+  return Object.freeze({ exactEnergy: seal.exactLedgerReaction.exactEnergy,
+    exactLedgerReaction: seal.exactLedgerReaction, output: seal.output, validate: () => seal.validate() });
+}
+
 export function resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, nextParticleUploads) {
   const authority = closureAuthorityFor(closure);
   if (!validateMlsMpmPostMechanicsContinuationClaim(closure, claim, { nextParticleUploads })) {
     throw new TypeError('Exact inventory requires the original claimed continuation');
   }
+  return exactMassContinuationCapture(authority);
+}
+
+function exactMassContinuationCapture(authority) {
   const capture = validateCapturedExactMass(authority);
   const finalRefresh = capture.exchange?.refreshSeal ?? capture.seals.at(-1);
   const phase = capture.seals[capture.stageNames.indexOf('phaseCarrierTransfer')] ?? null;
+  // The thermal energy record is current only if no later stage wrote u;
+  // phase transfer, reaction and exchange end the ledger instead.
+  const thermalSeal = capture.seals[0];
+  const ledgerPhase = phase?.exactLedgerPhase ?? null;
+  const ledgerReaction = capture.seals[capture.stageNames.indexOf('reactionStep')]?.exactLedgerReaction ?? null;
+  const exactEnergyCurrent = Boolean(thermalSeal?.exactEnergy) && !phase && !capture.exchange
+    && !capture.stageNames.includes('reactionStep');
+  // The newest ledger writer hands its record over: phase, else reaction,
+  // else thermal when nothing after it wrote u.
+  const ledgerRefinement = capture.seals[capture.stageNames.indexOf('phaseSlotRefinement')]?.exactLedgerRefinement ?? null;
+  const ledgerParcels = capture.seals[capture.stageNames.indexOf('ledgerParcels')]?.exactLedgerParcels;
+  const ledgerStage = ledgerParcels ?? ledgerRefinement ?? ledgerPhase ?? (phase ? null : ledgerReaction);
+  const energySeal = ledgerStage && !capture.exchange ? ledgerStage : exactEnergyCurrent ? thermalSeal : null;
   return Object.freeze({ sourceRead: capture.g2p.sourceRead,
+    ...(authority.chainCapture && ledgerPhase && capture.g2p.sourceRead.residualMechanicsSource?.phaseLayout ? {
+      residualPhasePlan:capture.g2p.sourceRead.residualMechanicsSource.phaseLayout.plan,
+      residualPhaseValidationBuffer:phase.phaseValidationBuffer
+    } : {}),
+    ...(energySeal ? { exactEnergy: energySeal.exactEnergy,
+      transferExactEnergy: energySeal.transferExactEnergy } : {}),
+    ...(ledgerStage ? { carrierMassRead: capture.exchange?.massRead ?? ledgerStage.carrierMassRead } : {}),
+    ...(ledgerParcels ? { parcels:ledgerParcels.parcels,transferParcels:ledgerParcels.transferParcels } : {}),
+    ...(authority.chainCapture ? {residentClock:authority.chainCapture.finalization.clock,
+      transferResidentClock:authority.chainCapture.finalization.transferClock,
+      residentProductMass:authority.continuation.residentProductMass??null} : {}),
+    ...(authority.chainCapture?.wallRecord ? {finiteWall:thermalSeal.exactFiniteWall,
+      transferFiniteWall:thermalSeal.transferExactFiniteWall} : {}),
+    ...(authority.chainCapture && ledgerReaction?.lineageRecord ? {reactionLineage:ledgerReaction.lineageRecord,
+      transferReactionLineage:ledgerReaction.transferLineage} : {}),
+    ...(authority.chainCapture?.finalization.residualHistory ? {
+      residualHistory:authority.chainCapture.finalization.residualHistory,
+      transferResidualHistory:authority.chainCapture.finalization.transferResidualHistory} : {}),
     sourceSphUpload: capture.g2p.sourceSphUpload ?? capture.g2p.sourceRead.sourceSphUpload,
     sourceMlsUpload: capture.g2p.sourceMlsUpload,
     transaction: authority.transaction, generation: authority.generation,
@@ -188,6 +281,116 @@ export function resolveMlsMpmPostMechanicsExactMassContinuation(closure, claim, 
       exactQuantities: finalRefresh.exactMechanics,
       transferExactQuantities: finalRefresh.transferExactQuantities
     } : {}) });
+}
+
+// Private chaining retains numerical candidates inside the existing resident
+// lane. It never grants the ordinary continuation/StateManager claim.
+export function resolveMlsMpmChainPrivateSource(closure) {
+  const authority=closureAuthorityFor(closure);
+  resolveMlsMpmChainClosureAdmission(closure);
+  const capture=validateCapturedExactMass(authority);
+  if(authority.retirementMode || authority.continuation.productMassMergeRequired) {
+    throw new TypeError('Private chain requires its completed history merge');
+  }
+  return Object.freeze({device:authority.device,
+    sphParticleUpload:capture.g2p.sourceRead.sourceSphUpload,
+    mlsMpmParticleUpload:capture.g2p.sourceMlsUpload,
+    sphParticleState:capture.seals[0].inputs.sphParticleState,
+    mlsMpmParticleState:capture.seals.at(-1).inputs.mlsMpmParticleState,
+    clock:authority.chainCapture.finalization.clock,
+    residentProductMass:authority.continuation.residentProductMass??null,
+    particleFamily:Object.freeze({stateBuffer:authority.continuation.stateBuffer,
+      thermoBuffer:authority.continuation.thermoBuffer,mechanicsBuffer:authority.continuation.mechanicsBuffer,
+      particleCount:capture.g2p.particleCount,phaseSlotRefinementSelected:Boolean(closure.phaseSlotRefinementStep),
+      phaseCarrierFamilySelected:Boolean(closure.phaseCarrierTransferStep),
+      thermoSource:'private-chain-closure',schroederParticleStorageSelected:false})});
+}
+
+export function resolveMlsMpmChainPrivateExactMassContinuation(closure,claim,nextParticleUploads) {
+  if(!validateMlsMpmChainPrivateContinuationClaim(closure,claim,{nextParticleUploads})) {
+    throw new TypeError('Private chain requires its original private continuation claim');
+  }
+  return exactMassContinuationCapture(closureAuthorityFor(closure));
+}
+
+export function validateMlsMpmChainPrivateRetirement(closure,claim,nextParticleUploads) {
+  if(!validateMlsMpmChainPrivateContinuationClaim(closure,claim,{nextParticleUploads})) return false;
+  const receipt=closureAuthorityFor(closure).retirementReceipt;
+  return receipt?.claimReceipt===claim && receipt.abandoned===false;
+}
+
+/** Pooled stage allocations cannot be destroyed one selected buffer at a time.
+ * Transfer the entire original family with its selected private S/T/M rows. */
+export function transferMlsMpmChainPrivatePhysicalFamilies(closure,claim,nextParticleUploads) {
+  if(!validateMlsMpmChainPrivateContinuationClaim(closure,claim,{nextParticleUploads})) {
+    throw new TypeError('Private physical handover requires its original continuation claim');
+  }
+  const authority=closureAuthorityFor(closure);
+  if(authority.retirementMode || authority.privatePhysicalFamilies) {
+    throw new TypeError('Private physical families were already transferred or retired');
+  }
+  const selected=new Set([claim.stateBuffer,claim.thermoBuffer,claim.mechanicsBuffer]);
+  const families=new Set(authority.ownedFamilies.filter(family=>family.managedBuffers.some(buffer=>selected.has(buffer))));
+  const buffers=new Set([...families].flatMap(family=>family.managedBuffers));
+  const retired=new Set();
+  let completion=null;
+  const transfer=Object.freeze({buffers,
+    retire() {
+      completion??=(async()=>{
+        for(const family of families) {
+          if(retired.has(family)) continue;
+          const capability=family.output.queueOrderedRetainedOutputFinalConsumerCapability;
+          const options=capability?{queueOrderedFinalConsumer:capability}:undefined;
+          let released;
+          if(family.externallyPreservedBuffers.length) {
+            if(typeof family.destroyOutputParticleBufferComponents!=='function') {
+              throw new TypeError(`Private ${family.stage} cannot retire an external alias`);
+            }
+            released=await family.destroyOutputParticleBufferComponents.call(family.output,
+              Object.fromEntries(family.managedComponents.map(({component})=>[component,true])),options);
+          } else released=await family.destroyOutputParticleBuffers.call(family.output,options);
+          if(released===false) throw new Error(`Private ${family.stage} family did not confirm retirement`);
+          retired.add(family);
+        }
+        return true;
+      })().catch(error=>{completion=null;throw error;});
+      return completion;
+    }});
+  authority.privatePhysicalFamilies={families,transfer};
+  return transfer;
+}
+
+function releaseChainClosureCapture(capture) {
+  if (!capture || capture.released) return false;
+  capture.released = true;
+  if (capture.ownsSeals) for (const seal of capture.seals) seal.release();
+  capture.producer.release();
+  capture.finalization?.destroy();
+  return true;
+}
+
+// Consumer descriptor, not publication authority. A future resident runner
+// must consume this control in its atomic state/clock admission submission.
+export function resolveMlsMpmChainClosureAdmission(closure) {
+  const authority = closureAuthorityFor(closure);
+  const capture = authority.chainCapture;
+  if (!capture || capture.released || closure.continuation !== authority.continuation
+    || closure.chainAdmissionControlBuffer !== capture.finalization.controlBuffer) {
+    throw new TypeError('Chain admission requires the original live closure');
+  }
+  capture.producer.validate();
+  for (const seal of capture.seals) seal.validate();
+  return Object.freeze({ controlBuffer: capture.finalization.controlBuffer,
+    stateBuffer: authority.continuation.stateBuffer, thermoBuffer: authority.continuation.thermoBuffer,
+    mechanicsBuffer: authority.continuation.mechanicsBuffer,
+    exactQuantities: authority.exactMassCapture?.seals.at(-1)?.exactMechanics ?? null,
+    exactEnergy: capture.energy ?? null,
+    carrierMassRead: capture.massRead ?? null,
+    parcelRecord: capture.parcelRecord ?? null,
+    wallRecord: capture.wallRecord ?? null,
+    lineageRecord: capture.lineageRecord ?? null,
+    clock: capture.finalization.clock,
+    transaction: authority.transaction, generation: authority.generation });
 }
 
 function releaseExactMassCapture(capture) {
@@ -810,6 +1013,24 @@ export function selectMlsMpmTerminalParticleFamily({
   phaseCarrierTransferStep = null
 } = {}) {
   const authority = postMechanicsClosure == null ? null : closureAuthorityFor(postMechanicsClosure);
+  if (authority?.chainCapture) throw new TypeError('Chain terminal family still awaits resident state and clock admission');
+  if (authority?.phaseSlotCapture && authority.retirementMode) throw new TypeError('Refined closure is already retired');
+  const refinement = authority?.phaseSlotCapture
+    ? retainedSchroederPhaseSlotRefinementBuffers(authority.phaseSlotRefinementStep) : {};
+  const refinementSelected = Boolean(refinement.stateBuffer);
+  if (refinementSelected) {
+    for (const seal of (authority.exactMassCapture ?? authority.phaseSlotCapture).seals) seal.validate();
+    if (authority.closure.phaseSlotRefinementStep !== authority.phaseSlotRefinementStep
+        || authority.phaseSlotCapture.sphParticleState !== sphParticleState
+        || authority.phaseSlotCapture.sphParticleUpload !== sphParticleUpload
+        || authority.closure.continuation !== authority.continuation
+        || authority.continuation.stateBuffer !== refinement.stateBuffer
+        || authority.continuation.thermoBuffer !== refinement.thermoBuffer
+        || authority.continuation.mechanicsBuffer !== retainedMechanicsRefreshOutputBuffers(mechanicsRefreshStep).mechanicsBuffer
+        || schroederParticleStorageAdoption?.adopted === true) {
+      throw new TypeError('Refined terminal family requires its captured constitutive continuation');
+    }
+  }
   let exchangeContinuation = null;
   if (authority?.exactMassCapture?.exchange) {
     validateCapturedExactMass(authority);
@@ -836,10 +1057,10 @@ export function selectMlsMpmTerminalParticleFamily({
   const phase = retainedPhaseCarrierTransferOutputBuffers(
     phaseCarrierTransferStep
   );
-  const phaseCarrierFamilySelected = Boolean(
+  const phaseCarrierFamilySelected = !refinementSelected && Boolean(
     phase.stateBuffer && phase.thermoBuffer && phase.mechanicsBuffer
   );
-  const storage = !phaseCarrierFamilySelected
+  const storage = !refinementSelected && !phaseCarrierFamilySelected
     && schroederParticleStorageAdoption?.adopted === true
     ? schroederParticleStorageAdoption
     : null;
@@ -847,7 +1068,7 @@ export function selectMlsMpmTerminalParticleFamily({
   const sourceThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded'
     ? sphParticleUpload.thermoBuffer ?? null
     : null;
-  const stateBuffer = exchangeContinuation?.stateBuffer || (
+  const stateBuffer = (refinementSelected ? authority.continuation.stateBuffer : null) || exchangeContinuation?.stateBuffer || (
     (phaseCarrierFamilySelected ? phase.stateBuffer : null)
     || storage?.stateBuffer
     || (reactionMutations.state ? reaction.stateBuffer : null)
@@ -856,7 +1077,7 @@ export function selectMlsMpmTerminalParticleFamily({
     || g2p.stateBuffer
     || null
   );
-  const thermoBuffer = exchangeContinuation?.thermoBuffer || (
+  const thermoBuffer = (refinementSelected ? authority.continuation.thermoBuffer : null) || exchangeContinuation?.thermoBuffer || (
     (phaseCarrierFamilySelected ? phase.thermoBuffer : null)
     || storage?.thermoBuffer
     || (reactionMutations.thermo ? reaction.thermoBuffer : null)
@@ -864,7 +1085,7 @@ export function selectMlsMpmTerminalParticleFamily({
     || sourceThermoBuffer
     || null
   );
-  const mechanicsBuffer = exchangeContinuation?.mechanicsBuffer || (
+  const mechanicsBuffer = (refinementSelected ? authority.continuation.mechanicsBuffer : null) || exchangeContinuation?.mechanicsBuffer || (
     storage?.mechanicsBuffer
     || mechanicsRefresh.mechanicsBuffer
     || (phaseCarrierFamilySelected ? phase.mechanicsBuffer : null)
@@ -924,12 +1145,13 @@ export function selectMlsMpmTerminalParticleFamily({
     vaporAerosolExchangeSelected: exchangeContinuation != null,
     phaseCarrierFamilySelected,
     schroederParticleStorageSelected: Boolean(storage),
+    phaseSlotRefinementSelected: refinementSelected,
     reactionMutations,
     stateBuffer,
     thermoBuffer,
     mechanicsBuffer,
-    stateSource: exchangeContinuation ? 'vapor-aerosol-exchange' : stateSource,
-    thermoSource: exchangeContinuation ? 'vapor-aerosol-exchange' : thermoSource,
+    stateSource: refinementSelected ? 'phase-slot-refinement' : exchangeContinuation ? 'vapor-aerosol-exchange' : stateSource,
+    thermoSource: refinementSelected ? 'phase-slot-refinement' : exchangeContinuation ? 'vapor-aerosol-exchange' : thermoSource,
     mechanicsSource: exchangeContinuation ? 'exchange-mechanics-refresh' : mechanicsSource
   });
   MLS_MPM_TERMINAL_PARTICLE_FAMILIES.add(family);
@@ -1003,6 +1225,8 @@ function postMechanicsOwnedOutputFamilies({
   reactionStep,
   mechanicsRefreshStep,
   phaseCarrierTransferStep,
+  phaseSlotRefinementStep,
+  ledgerParcelStep,
   preservedBuffers = new Set()
 }) {
   const far = retainedSchroederFarForceDeltaFusionOutputBuffers(
@@ -1017,7 +1241,15 @@ function postMechanicsOwnedOutputFamilies({
     phaseCarrierTransferStep
   );
   const phaseSource = retainedStageSource(phaseCarrierTransferStep);
+  const refinement = retainedSchroederPhaseSlotRefinementBuffers(phaseSlotRefinementStep);
+  const parcels = retainedSphLedgerParcelCandidateBuffers(ledgerParcelStep);
   const candidates = [
+    { stage: 'ledger-vapor-parcel-transport', output: parcels,
+      components: ['state','thermo','mechanics'].map(component => [component,
+        parcels[`${component}Buffer`], parcels[`owns${component[0].toUpperCase()}${component.slice(1)}Buffer`]]) },
+    { stage: 'phase-slot-refinement', output: refinement,
+      components: ['state', 'thermo', 'mechanics'].map(component => [component,
+        refinement[`${component}Buffer`], refinement[`owns${component[0].toUpperCase()}${component.slice(1)}Buffer`]]) },
     {
       stage: 'schroeder-far-force-delta-fusion',
       output: far,
@@ -1124,6 +1356,8 @@ function destroyFailedPostMechanicsStageOutputs({
   reactionStep,
   mechanicsRefreshStep,
   phaseCarrierTransferStep,
+  phaseSlotRefinementStep,
+  ledgerParcelStep,
   inputResidentProductMass,
   replacementResidentProductMass = null
 }) {
@@ -1168,6 +1402,8 @@ function destroyFailedPostMechanicsStageOutputs({
     reactionStep,
     mechanicsRefreshStep,
     phaseCarrierTransferStep,
+    phaseSlotRefinementStep,
+    ledgerParcelStep,
     preservedBuffers: preserved
   });
   const familyManagedBuffers = new Set(ownerFamilies.flatMap(
@@ -1447,6 +1683,8 @@ export function resolveMlsMpmPostMechanicsContinuation({
   reactionStep = null,
   mechanicsRefreshStep = null,
   phaseCarrierTransferStep = null,
+  phaseSlotRefinementStep = null,
+  ledgerParcelStep = null,
   phaseCarrierPlan = null,
   inputResidentProductMass = null,
   sphParticleUpload = null,
@@ -1473,8 +1711,15 @@ export function resolveMlsMpmPostMechanicsContinuation({
     buffer: null,
     ownedByClosure: false
   };
+  const refinement = retainedSchroederPhaseSlotRefinementBuffers(phaseSlotRefinementStep);
+  const parcels = retainedSphLedgerParcelCandidateBuffers(ledgerParcelStep);
+  if ((refinement.stateBuffer || parcels.stateBuffer) && !mechanicsRefreshOutput.mechanicsBuffer) {
+    throw new TypeError('Refined continuation requires constitutive refresh');
+  }
   const selected = {
     state: select([
+      {stage:'ledger-vapor-parcel-transport',buffer:parcels.stateBuffer,ownedByClosure:Boolean(parcels.stateBuffer)},
+      { stage: 'phase-slot-refinement', buffer: refinement.stateBuffer, ownedByClosure: Boolean(refinement.stateBuffer) },
       {
         stage: 'phase-carrier-transfer-v2',
         buffer: phaseCarrierOutput.stateBuffer,
@@ -1508,6 +1753,8 @@ export function resolveMlsMpmPostMechanicsContinuation({
       }
     ]),
     thermo: select([
+      {stage:'ledger-vapor-parcel-transport',buffer:parcels.thermoBuffer,ownedByClosure:Boolean(parcels.thermoBuffer)},
+      { stage: 'phase-slot-refinement', buffer: refinement.thermoBuffer, ownedByClosure: Boolean(refinement.thermoBuffer) },
       {
         stage: 'phase-carrier-transfer-v2',
         buffer: phaseCarrierOutput.thermoBuffer,
@@ -1717,6 +1964,8 @@ function ownedPostMechanicsStageEntries({
   reactionStep,
   mechanicsRefreshStep,
   phaseCarrierTransferStep,
+  phaseSlotRefinementStep,
+  ledgerParcelStep,
   preservedBuffers
 }) {
   const far = retainedSchroederFarForceDeltaFusionOutputBuffers(
@@ -1731,7 +1980,13 @@ function ownedPostMechanicsStageEntries({
     phaseCarrierTransferStep
   );
   const phaseSource = retainedStageSource(phaseCarrierTransferStep);
+  const refinement = retainedSchroederPhaseSlotRefinementBuffers(phaseSlotRefinementStep);
+  const parcels = retainedSphLedgerParcelCandidateBuffers(ledgerParcelStep);
   const entries = [
+    ...['state','thermo','mechanics'].map(component => ['ledger-vapor-parcel-transport',component,
+      parcels[`${component}Buffer`],parcels[`owns${component[0].toUpperCase()}${component.slice(1)}Buffer`]]),
+    ...['state', 'thermo', 'mechanics'].map(component => ['phase-slot-refinement', component,
+      refinement[`${component}Buffer`], refinement[`owns${component[0].toUpperCase()}${component.slice(1)}Buffer`]]),
     ['schroeder-far-force-delta-fusion', 'state', far.stateBuffer,
       far.ownsStateBuffer],
     ['thermal-phase', 'state', thermal.stateBuffer, thermal.ownsStateBuffer],
@@ -1793,6 +2048,8 @@ function registerPostMechanicsClosureAuthority(closure, {
     reactionStep: closure.reactionStep,
     mechanicsRefreshStep: closure.mechanicsRefreshStep,
     phaseCarrierTransferStep: closure.phaseCarrierTransferStep,
+    phaseSlotRefinementStep: closure.phaseSlotRefinementStep,
+    ledgerParcelStep: closure.ledgerParcelStep,
     preservedBuffers
   });
   const ownedBuffers = new Map();
@@ -1807,6 +2064,8 @@ function registerPostMechanicsClosureAuthority(closure, {
     reactionStep: closure.reactionStep,
     mechanicsRefreshStep: closure.mechanicsRefreshStep,
     phaseCarrierTransferStep: closure.phaseCarrierTransferStep,
+    phaseSlotRefinementStep: closure.phaseSlotRefinementStep,
+    ledgerParcelStep: closure.ledgerParcelStep,
     preservedBuffers
   });
   const authority = {
@@ -1895,16 +2154,36 @@ function continuationClaimEnvelopeMatches(authority, nextParticleUploads) {
  * is rejected.
  */
 export function claimMlsMpmPostMechanicsContinuation(
+  closure,options={}
+) {
+  return claimPostMechanicsContinuation(closure,options,false);
+}
+
+export function claimMlsMpmChainPrivateContinuation(closure,options={}) {
+  resolveMlsMpmChainPrivateSource(closure);
+  return claimPostMechanicsContinuation(closure,options,true);
+}
+
+function claimPostMechanicsContinuation(
   closure,
   {
     nextParticleUploads = null,
     stateBuffer = null,
     thermoBuffer = null,
     mechanicsBuffer = null
-  } = {}
+  } = {}, privateChain=false
 ) {
   const authority = closureAuthorityFor(closure);
+  if (authority.chainCapture && !privateChain) {
+    throw new TypeError('Chain closure awaits resident GPU state and clock admission');
+  }
   if (authority.exchangeOperation) throw gasSourceError('Vapor exchange still owns closure preparation');
+  if (authority.phaseSlotCapture && !authority.claimReceipt) {
+    if (authority.phaseSlotCapture.released || closure.phaseSlotRefinementStep !== authority.phaseSlotRefinementStep) {
+      throw new TypeError('Refined continuation lost its captured producer');
+    }
+    for (const seal of (authority.exactMassCapture ?? authority.phaseSlotCapture).seals) seal.validate();
+  }
   if (authority.exactMassCapture && !authority.claimReceipt) {
     if (!nextParticleUploads) throw new TypeError('Exact inventory requires a complete continuation envelope');
     validateCapturedExactMass(authority);
@@ -1960,7 +2239,8 @@ export function claimMlsMpmPostMechanicsContinuation(
   ));
   authority.claimReceipt = Object.freeze({
     schema: 'peercompute.ulg.mls-mpm-post-mechanics-continuation-claim.v1',
-    status: 'post-mechanics-continuation-claimed',
+    status: privateChain ? 'post-mechanics-private-chain-claimed' : 'post-mechanics-continuation-claimed',
+    privateChain,
     closure,
     continuation,
     nextParticleUploads,
@@ -2005,13 +2285,24 @@ export function abandonMlsMpmPostMechanicsCondensate(closure) {
 }
 
 export function validateMlsMpmPostMechanicsContinuationClaim(
+  closure,claimReceipt,options={}
+) {
+  return validateContinuationClaim(closure,claimReceipt,options,false);
+}
+
+export function validateMlsMpmChainPrivateContinuationClaim(closure,claimReceipt,options={}) {
+  return validateContinuationClaim(closure,claimReceipt,options,true);
+}
+
+function validateContinuationClaim(
   closure,
   claimReceipt,
-  options = {}
+  options = {}, privateChain=false
 ) {
   try {
     const authority = closureAuthorityFor(closure);
     if (authority.claimReceipt !== claimReceipt) return false;
+    if(claimReceipt?.privateChain!==privateChain || (privateChain && !authority.chainCapture)) return false;
     const claimed = continuationBuffersFromClaimInput(options);
     return claimReceipt?.closure === closure
       && claimReceipt?.continuation === authority.continuation
@@ -2056,7 +2347,14 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
     authority.retirementReceipt
   );
   if (authority.retirementPromise) return authority.retirementPromise;
-  if (!after || typeof after.then !== 'function') {
+  const queueRetirement = authority.phaseSlotQueueRetirement;
+  if (queueOrderedFinalConsumer != null && (!queueRetirement
+      || queueRetirement.capability !== queueOrderedFinalConsumer
+      || requestedAbandon || !authority.phaseSlotCapture)) {
+    throw postMechanicsClosureError('Phase-slot retirement requires its exact final refresh submission',
+      'ERR_MLS_MPM_POST_MECHANICS_RETIREMENT_AUTHORITY');
+  }
+  if (queueOrderedFinalConsumer == null && (!after || typeof after.then !== 'function')) {
     throw postMechanicsClosureError(
       'Post-mechanics output retirement requires an exact owner fence',
       'ERR_MLS_MPM_POST_MECHANICS_RETIREMENT_FENCE',
@@ -2085,7 +2383,7 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
   if (requestedAbandon) abandonMlsMpmPostMechanicsCondensate(closure);
   const preserved = new Set(retirementMode.preserved);
   authority.retirementFailureReason = null;
-  const attempt = Promise.resolve(after).then(async (confirmed) => {
+  const retire = async (confirmed) => {
     if (confirmed !== true) {
       throw postMechanicsClosureError(
         'Post-mechanics output owner fence was not confirmed',
@@ -2093,6 +2391,11 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
       );
     }
     releaseGasCapturePins(authority);
+    if (authority.phaseSlotCapture && !authority.phaseSlotCapture.released) {
+      for (const seal of authority.phaseSlotCapture.seals) seal.release();
+      authority.phaseSlotCapture.released = true;
+    }
+    releaseChainClosureCapture(authority.chainCapture);
     releaseExactMassCapture(authority.exactMassCapture);
     await authority.exactMassCapture?.selectionCleanup;
     await authority.exactMassCapture?.motionCleanup;
@@ -2123,6 +2426,10 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
         familyManagedBuffers.add(buffer);
       }
       if (authority.releasedFamilies.has(family)) continue;
+      if(!requestedAbandon && authority.privatePhysicalFamilies?.families.has(family)) {
+        for(const buffer of family.managedBuffers) familyPreservedBuffers.add(buffer);
+        continue;
+      }
       let retiredFamilyBuffers = authority.retiredFamilyBuffers.get(family);
       if (!retiredFamilyBuffers) {
         retiredFamilyBuffers = new Set();
@@ -2283,7 +2590,26 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
       preservedOwnerFamilyBufferCount: familyPreservedBuffers.size
     });
     return authority.retirementReceipt;
-  }).then(
+  };
+  let retirement;
+  if (queueOrderedFinalConsumer != null) {
+    if (queueRetirement.started) {
+      // A failed component retirement can retry the already authenticated
+      // submission. Its preserve mode and claimed family remain immutable.
+      retirement = Promise.resolve(true).then(retire);
+    } else {
+      queueRetirement.run = () => { queueRetirement.attempt = Promise.resolve(true).then(retire); };
+      releaseSubmittedWorkCleanupQueueOrdered(authority.device, queueRetirement.cleanup, {
+        queueOrderedFinalConsumer, producerClaim: queueRetirement.claim,
+        producerOutput: queueRetirement, producerFamily: phaseSlotRetirementFamily
+      });
+      queueRetirement.started = true;
+      retirement = queueRetirement.attempt;
+    }
+  } else {
+    retirement = Promise.resolve(after).then(retire);
+  }
+  const attempt = retirement.then(
     (receipt) => {
       authority.retirementPromise = null;
       return receipt;
@@ -2329,6 +2655,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   mechanicsRefreshOptions = {},
   phaseCarrierTransferRunner = runSphPhaseCarrierTransferWebGpu,
   phaseCarrierTransferOptions = {},
+  phaseSlotRefinement = null,
   condensateExtraction = null,
   vaporAerosolExchange = null,
   captureGasSource = false,
@@ -2394,16 +2721,35 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   const stageEligible = postMechanicsBackend === 'webgpu'
     && sphParticleUpload?.status === 'webgpu-uploaded';
   const exactMassRequested = sphGpuParticleUploadAdvertisesExactMass(sphParticleUpload);
-  if (exactMassRequested && (!stageEligible || !preferWebGpu || readbackMode !== NO_FULL_READBACK_MODE
-      || !thermalMaterialTable || !mechanicsMaterialTable || !postMechanicsG2pResult
-      || condensateExtraction
-      || (reactionTable?.reactionCount > 0 && (!schroederSpatialEpochTransaction
-        || typeof spatialReactionDiscoveryProposalRunner !== 'function'))
-      || schroederFarAggregateForceApplication
-      || (sphAerosolSourceFamily(sphParticleUpload) && !schroederSpatialEpochTransaction)
-      || sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload))) {
-    throw new TypeError('Exact inventory closure requires standard captured GPU producers; requested coupling remains unadmitted');
+  if (exactMassRequested) {
+    const unadmitted = Object.entries({
+      'gpu-stage': !stageEligible || !preferWebGpu,
+      'no-full-readback': readbackMode !== NO_FULL_READBACK_MODE,
+      'thermal-table': !thermalMaterialTable,
+      'mechanics-table': !mechanicsMaterialTable,
+      'g2p-result': !postMechanicsG2pResult,
+      'condensate-extraction': Boolean(condensateExtraction),
+      'reaction-discovery': reactionTable?.reactionCount > 0 && (!schroederSpatialEpochTransaction
+        || typeof spatialReactionDiscoveryProposalRunner !== 'function'),
+      'far-aggregate-force': Boolean(schroederFarAggregateForceApplication),
+      'aerosol-without-epoch': Boolean(sphAerosolSourceFamily(sphParticleUpload) && !schroederSpatialEpochTransaction),
+      // The integer energy ledger runs the f32 phase split and refresh, which
+      // carry the optics sidecar; optics writes optics rows, never mass or u.
+      'dispersed-medium-optics': sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload)
+        && sphGpuParticleUploadExactEnergyRows(sphParticleUpload) == null
+    }).filter(([, blocked]) => blocked).map(([name]) => name);
+    if (unadmitted.length) {
+      throw new TypeError('Exact inventory closure requires standard captured GPU producers; requested coupling '
+        + `remains unadmitted: ${unadmitted.join(', ')}`);
+    }
   }
+  if (phaseSlotRefinement && ((exactMassRequested && !sphGpuParticleUploadExactEnergyRows(sphParticleUpload))
+      || captureGasSource || condensateExtraction
+      || !stageEligible || !preferWebGpu || readbackMode !== NO_FULL_READBACK_MODE
+      || !thermalMaterialTable || !mechanicsMaterialTable)) {
+    throw new TypeError('Phase-slot refinement requires captured f32 or integer-ledger producers; rational inventory and current gas/parcel topology remain unadmitted');
+  }
+  const phaseSlotCapture = phaseSlotRefinement ? { seals: [], released: false, sphParticleState, sphParticleUpload } : null;
   const massCapture = exactMassRequested ? { seals: [], stageNames: [], tokens: new Map(), g2p: null, released: false } : null;
   if (exactMassRequested && sphAerosolSourceFamily(sphParticleUpload)) {
     const parcels = acquireSphAerosolSpatialParcelRead({ device,
@@ -2468,9 +2814,10 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         sourceTransaction: schroederSpatialEpochTransaction, aerosolFamily,
         kineticsAdmitted: false, exchangeIntervalAdmitted: false, outerPublicationAdmitted: false } };
   }
+  let chainCapture = null;
   const completedCapturedStages = new Map();
   const capturedStage = async (name, runner, optionsForStage) => {
-    const capture = massCapture ?? gasCapture;
+    const capture = massCapture ?? gasCapture ?? phaseSlotCapture ?? chainCapture;
     if (!capture) return timedStage(name, () => runner(optionsForStage()));
     let standard;
     let resolve;
@@ -2482,6 +2829,12 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       const module = await loadReactionKernel();
       standard = runner === runSphReactionStepWebGpu || runner === module.runSphReactionStepWebGpu;
       resolve = module.resolveSphReactionSourceCapture;
+    } else if (name === 'ledgerParcels') {
+      standard = runner === runSphLedgerParcelCandidateWebGpu;
+      resolve = resolveSphLedgerParcelCandidateSourceCapture;
+    } else if (name === 'phaseSlotRefinement') {
+      standard = runner === runSchroederPhaseSlotRefinementWebGpu;
+      resolve = resolveSchroederPhaseSlotRefinementSourceCapture;
     } else if (name === 'phaseCarrierTransfer') {
       standard = runner === runSphPhaseCarrierTransferWebGpu;
       resolve = resolveSphPhaseCarrierTransferSourceCapture;
@@ -2521,12 +2874,16 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   let reactionStep = null;
   let mechanicsRefreshStep = null;
   let phaseCarrierTransferStep = null;
+  let phaseSlotRefinementStep = null;
+  let ledgerParcelStep = null;
+  let phaseSlotQueueRetirement = null;
   let phaseCarrierTransferFamilyReceipt = null;
   let aerosolCondensateTransition = null;
   let queueOrderedFinalConsumerCapability = null;
   let mechanicsQueueOrderedFinalConsumerCapability = null;
   let replacementResidentProductMass = null;
   let exactReactionSelection = null;
+  let reactionLedgerMode = false;
   const readbackTelemetry = createGpuReadbackTelemetryAccumulator({
     scope: 'mls-mpm-post-mechanics-closure'
   });
@@ -2546,10 +2903,52 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     return postSeparationThermalBinReleaseScheduled;
   };
   try {
+  const { acquireMlsMpmLevelChainG2pCapture } = await import('./sphG2pGpuKernel.js');
+  const chainProducer = acquireMlsMpmLevelChainG2pCapture(postMechanicsG2pResult, {
+    device, transaction: schroederSpatialEpochTransaction, generation: schroederSpatialEpochGeneration,
+    sphParticleUpload, mlsMpmParticleUpload, dt: dtSeconds,
+    stateBuffer: postMechanicsParticleBuffers.stateBuffer, mechanicsBuffer: postMechanicsParticleBuffers.mechanicsBuffer
+  });
+  if (chainProducer) {
+    chainCapture = { producer: chainProducer, seals: massCapture?.seals ?? [], ownsSeals: !massCapture,
+      stageNames: massCapture?.stageNames ?? [], tokens: massCapture?.tokens ?? new Map(), released: false };
+    const { resolveSphResidentClockOrigin } = await import('./sphResidentClockGpu.js');
+    chainCapture.clockOrigin=resolveSphResidentClockOrigin(sphParticleState,mlsMpmParticleState,
+      sphParticleUpload,mlsMpmParticleUpload);
+    if (!thermalMaterialTable || !mechanicsMaterialTable || !stageEligible || !preferWebGpu
+      || readbackMode !== NO_FULL_READBACK_MODE) {
+      throw new TypeError('Chain closure requires retained standard thermal and mechanics producers');
+    }
+    thermalStepOptions = Object.freeze({ ...thermalStepOptions });
+    // These writers require their own batch gate and successor mass/energy
+    // rollback. Refusal preserves the missing integration instead of dropping it.
+    if (captureGasSource
+      || condensateExtraction || vaporAerosolExchange || schroederFarAggregateForceApplication) {
+      throw new TypeError('Chain closure still requires batch admission for history/gas-capture writers');
+    }
+  }
   if (massCapture) {
+    // The canonical thermal producer returns a separate wall candidate. Only
+    // the multilevel batch currently retains, verifies and rolls it back;
+    // another continuation must not adopt the particles and drop that owner.
+    if (!chainCapture && schroederSpatialThermalProposal?.exactEnergyLedgerWords
+      && resolveSphWallReservoirAuthority(thermalStepOptions).finiteCapacity) {
+      throw new TypeError('Canonical finite wall continuation requires multilevel batch wall admission');
+    }
     const { acquireMlsMpmMechanicsExactMassCapture } = await import('./sphG2pGpuKernel.js');
     massCapture.g2p = await acquireMlsMpmMechanicsExactMassCapture(postMechanicsG2pResult, { device, sphParticleUpload,
       transaction: schroederSpatialEpochTransaction, generation: schroederSpatialEpochGeneration, dt: dtSeconds });
+    if(!chainCapture && massCapture.g2p.sourceRead.residentClock) {
+      throw new TypeError('A private chain source requires its state/clock-aware chain producer');
+    }
+    if(chainCapture) chainCapture.sourceClock=massCapture.g2p.sourceRead.residentClock??null;
+    if(chainCapture && inputResidentProductMass!==(massCapture.g2p.sourceRead.residentProductMass??null)) {
+      throw new TypeError('Private chain history differs from its original particle owner');
+    }
+    if (chainCapture && !massCapture.g2p.quantities && sphGpuParticleUploadExactEnergyRows(sphParticleUpload)
+      && !schroederSpatialThermalProposal?.exactEnergyLedgerWords) {
+      throw new TypeError('Chain closure still requires its canonical integer-energy ledger consumer');
+    }
     if (massCapture.g2p.transaction !== schroederSpatialEpochTransaction
         || massCapture.g2p.generation !== schroederSpatialEpochGeneration
         || massCapture.g2p.dt !== dtSeconds) {
@@ -2559,9 +2958,22 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         || postMechanicsParticleBuffers.mechanicsBuffer !== massCapture.g2p.mechanicsBuffer) {
       throw new TypeError('Exact closure input differs from its genuine G2P output');
     }
-    if ((massCapture.g2p.history?.sourceHandle ?? null) !== inputResidentProductMass) {
+    // The G2 energy ledger keeps the f32 product-event history: its reaction
+    // reconcile flags any event mass left in it (disposition 6), so the
+    // history carries no ledger mass. The rational route keeps exact history.
+    const energyLedgerRoute = sphGpuParticleUploadExactEnergyRows(sphParticleUpload) != null
+      && !massCapture.g2p.history;
+    if (!energyLedgerRoute && (massCapture.g2p.history?.sourceHandle ?? null) !== inputResidentProductMass) {
       throw new TypeError('Exact closure history differs from the original P2G/G2P input');
     }
+  }
+  if (chainCapture && phaseCarrierPlanReady(sphParticleUpload?.phaseCarrierPlan || sphParticleState?.phaseCarrierPlan)
+    && (!massCapture?.g2p.sourceRead.energy || massCapture.g2p.quantities)) {
+    throw new TypeError('Chain phase closure requires its canonical integer mass and energy owners');
+  }
+  if (chainCapture && reactionTable?.reactionCount > 0
+    && (!massCapture?.g2p.sourceRead.energy || massCapture.g2p.quantities || reactionTable.energyAuthority)) {
+    throw new TypeError('Chain reaction closure requires its canonical integer ledger and heat-proxy law');
   }
   if (gasCapture) {
     if (!ensureSphGpuParticleBufferSetBorrowLifecycle(sphParticleUpload)) {
@@ -2721,7 +3133,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         // the owning resident route after this closure returns.
         reactionMotionEnvelope: null,
         captureActivationObservation: false,
-        gpuTimestampRecorder
+        gpuTimestampRecorder,
+        // G4 reaction node scope (exact; off unless the state declares it).
+        reactionDormancy: sphParticleState?.reactionDormancy && boxDimsM
+          ? { boxM: Array.from(boxDimsM, Number) }
+          : null
       })
     );
     if (resolvedSchroederSpatialReactionDiscoveryProposal?.ready !== true) {
@@ -2783,7 +3199,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
           readReactionAtomResidual: false
         }
       : {};
-    if (massCapture) {
+    // The G2 integer energy ledger runs the f32 heat-proxy reaction plus its
+    // exact reconcile; the rational exact chain serves the rest.
+    reactionLedgerMode = Boolean(massCapture && massCapture.seals[0]?.exactEnergy && !massCapture.seals[0]?.exactThermal
+      && massCapture.g2p.sourceRead.energy);
+    if (massCapture && !reactionLedgerMode) {
       const { runSphExactReactionSourceSelectionWebGpu } = await import('./sphExactReactionSourceGpu.js');
       exactReactionSelection = await runSphExactReactionSourceSelectionWebGpu({ device,
         thermalResult: thermalStep, thermalSourceCapture: massCapture.tokens.get('thermalStep'),
@@ -2799,7 +3219,9 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       // actually consumed, including the post-thermal discovery selection.
       ...noFullReactionSummaryDefaults,
       ...reactionStepOptions,
-      ...(massCapture ? { exactReactionSourceSelection: exactReactionSelection } : {}),
+      ...(reactionLedgerMode ? { exactLedger: Object.freeze({ thermalSeal: massCapture.seals[0],
+        sourceRead: massCapture.g2p.sourceRead, privateLineage: Boolean(chainCapture) }) }
+        : massCapture ? { exactReactionSourceSelection: exactReactionSelection } : {}),
       device,
       sphParticleState,
       mlsMpmParticleState,
@@ -2979,7 +3401,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   }
   if (
     phaseCarrierPlanReady(phaseCarrierPlan)
-    && thermalStep
+    && (thermalStep || phaseSlotRefinement)
     && thermalMaterialTable
     && mechanicsMaterialTable
     && typeof phaseCarrierTransferRunner === 'function'
@@ -2998,7 +3420,15 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       'phaseCarrierTransfer',
       phaseCarrierTransferRunner, () => ({
         ...phaseCarrierTransferOptions,
-        ...(massCapture ? {
+        // A thermal energy record (G2 ledger) continues through the f32 split
+        // plus its exact reconcile; the rational stage serves the rest.
+        ...(massCapture && !reactionStep && massCapture.seals[0]?.exactEnergy && !massCapture.seals[0]?.exactThermal ? {
+          exactLedger: Object.freeze({ thermalSeal: massCapture.seals[0], sourceRead: massCapture.g2p.sourceRead })
+        } : massCapture && reactionStep && reactionLedgerSeal(massCapture) ? {
+          exactLedger: Object.freeze({ thermalSeal: reactionLedgerSeal(massCapture),
+            sourceRead: massCapture.g2p.sourceRead,
+            massRead: reactionLedgerSeal(massCapture).exactLedgerReaction.carrierMassRead })
+        } : massCapture ? {
           ...(reactionStep ? { exactReactionResult: reactionStep,
             exactReactionSourceCapture: massCapture.tokens.get('reactionStep') }
             : { exactThermalResult: thermalStep, exactThermalSourceCapture: massCapture.tokens.get('thermalStep') }),
@@ -3015,6 +3445,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         sourceStateBuffer: phaseCarrierSourceStateBuffer,
         sourceThermoBuffer: phaseCarrierSourceThermoBuffer,
         sourceMechanicsBuffer: phaseCarrierSourceMechanicsBuffer,
+        // The interface skin rows belong to the proposal this step's canonical
+        // thermal apply consumed; the transfer converts only that epoch's rows.
+        interfacePhaseFront: schroederSpatialThermalProposal
+          ? schroederSpatialThermalProposal.interfacePhaseFront ?? null
+          : null,
         retainOutputParticleBuffers: true,
         readbackMode,
         queueOrderedProducerClaims:
@@ -3069,7 +3504,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       reactionThermoMutationApplied: reactionComponentMutations.thermo
     });
     executedStageOrder.push('phase-carrier-transfer-v2');
-    if (typeof afterPhaseCarrierTransfer === 'function') {
+    if (!phaseSlotRefinement && typeof afterPhaseCarrierTransfer === 'function') {
       await afterPhaseCarrierTransfer({
         phaseCarrierTransferStep,
         phaseCarrierTransferFamilyReceipt
@@ -3084,16 +3519,16 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     retainedStageSource(phaseCarrierTransferStep)
       ?.queueOrderedCleanupClaim
     ?? null;
-  const mechanicsRefreshSourceStateBuffer = phaseCarrierOutput.stateBuffer || (
+  let mechanicsRefreshSourceStateBuffer = phaseCarrierOutput.stateBuffer || (
     reactionComponentMutations.state ? reactionOutput.stateBuffer : null
   ) || thermalOutput.stateBuffer
     || farForceOutput.stateBuffer
     || postMechanicsParticleBuffers.stateBuffer;
-  const mechanicsRefreshSourceThermoBuffer = phaseCarrierOutput.thermoBuffer || (
+  let mechanicsRefreshSourceThermoBuffer = phaseCarrierOutput.thermoBuffer || (
     reactionComponentMutations.thermo ? reactionOutput.thermoBuffer : null
   ) || thermalOutput.thermoBuffer
     || sphParticleUpload?.thermoBuffer;
-  const mechanicsRefreshSourceMechanicsBuffer =
+  let mechanicsRefreshSourceMechanicsBuffer =
     phaseCarrierOutput.mechanicsBuffer
     || (reactionComponentMutations.mechanics
       ? reactionOutput.mechanicsBuffer
@@ -3105,8 +3540,88 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     mechanicsRefreshSourceThermoBuffer,
     mechanicsRefreshSourceMechanicsBuffer
   );
+  if (phaseSlotRefinement) {
+    if (!phaseCarrierTransferStep) throw new TypeError('Refinement requires the final phase-transfer producer');
+    phaseSlotRefinementStep = await capturedStage('phaseSlotRefinement', runSchroederPhaseSlotRefinementWebGpu, () => ({
+      device, sphParticleState, mlsMpmParticleState, sphParticleUpload, mlsMpmParticleUpload,
+      sourceStateBuffer: mechanicsRefreshSourceStateBuffer,
+      sourceThermoBuffer: mechanicsRefreshSourceThermoBuffer,
+      sourceMechanicsBuffer: mechanicsRefreshSourceMechanicsBuffer,
+      thermalMaterialTable, boxDimsM, readbackMode, phaseSlotRefinement,
+      ...(massCapture ? { exactLedger: { phaseResult: phaseCarrierTransferStep,
+        phaseCapture: massCapture.tokens.get('phaseCarrierTransfer'), sourceRead: massCapture.g2p.sourceRead } } : {})
+    }));
+    mechanicsRefreshSourceStateBuffer = phaseSlotRefinementStep.stateBuffer;
+    mechanicsRefreshSourceThermoBuffer = phaseSlotRefinementStep.thermoBuffer;
+    mechanicsRefreshSourceMechanicsBuffer = phaseSlotRefinementStep.mechanicsBuffer;
+    executedStageOrder.push('phase-slot-refinement');
+    await traceStageMechanics('phase-slot-refinement', mechanicsRefreshSourceStateBuffer,
+      mechanicsRefreshSourceThermoBuffer, mechanicsRefreshSourceMechanicsBuffer);
+    // Only the standard captured refresh can seal this closure-owned cleanup
+    // claim. The callback is installed when continuation ownership is claimed;
+    // the producer output and cleanup function never cross the module boundary.
+    phaseSlotQueueRetirement = { device, capability: null, started: false, run: null, attempt: null };
+    phaseSlotQueueRetirement.cleanup = () => phaseSlotQueueRetirement.run();
+    phaseSlotQueueRetirement.claim = registerQueueOrderedCleanupClaim(phaseSlotRetirementIssuer, device, {
+      producerOutput: phaseSlotQueueRetirement, cleanup: phaseSlotQueueRetirement.cleanup
+    });
+  }
+  // Consume the newest private carrier state: refinement when selected, phase
+  // transfer otherwise. Exchange/transport update those same mass and energy
+  // records before constitutive refresh and spatial publication claim them.
+  const ledgerParcels = massCapture ? sphGpuParticleUploadLedgerParcels(sphParticleUpload) : null;
+  const ledgerRefinementRecord = massCapture?.seals[massCapture.stageNames.indexOf('phaseSlotRefinement')]?.exactLedgerRefinement;
+  const ledgerPhaseRecord = massCapture?.seals[massCapture.stageNames.indexOf('phaseCarrierTransfer')]?.exactLedgerPhase;
+  const ledgerParcelRecord = ledgerRefinementRecord ?? ledgerPhaseRecord;
+  let ledgerParcelStagesRan = false;
+  const parcelStageCounters = (globalThis.__ulgLedgerParcelStage ??= { ran: 0, noParcels: 0, noPhaseLedger: 0, noCapture: 0 });
+  if (!massCapture) parcelStageCounters.noCapture++;
+  else if (!ledgerParcels) parcelStageCounters.noParcels++;
+  else if (!ledgerParcelRecord) parcelStageCounters.noPhaseLedger++;
+  if (chainCapture && ledgerParcels && (!ledgerParcelRecord || globalThis.__ulgDisableLedgerParcelStage)) {
+    throw new TypeError('Chain parcel closure requires its enabled phase ledger producer');
+  }
+  if (ledgerParcels && ledgerParcelRecord && !globalThis.__ulgDisableLedgerParcelStage) {
+    if (chainCapture) {
+      ledgerParcelStep = await capturedStage('ledgerParcels', runSphLedgerParcelCandidateWebGpu, () => ({
+        device,sphParticleState,mlsMpmParticleState,sphParticleUpload,mlsMpmParticleUpload,
+        sourceStateBuffer:mechanicsRefreshSourceStateBuffer,sourceThermoBuffer:mechanicsRefreshSourceThermoBuffer,
+        sourceMechanicsBuffer:mechanicsRefreshSourceMechanicsBuffer,thermalMaterialTable,dtSeconds,readbackMode,
+        exactLedger:{sourceRead:massCapture.g2p.sourceRead,phaseResult:phaseCarrierTransferStep,
+          phaseCapture:massCapture.tokens.get('phaseCarrierTransfer'),refinementResult:phaseSlotRefinementStep,
+          refinementCapture:massCapture.tokens.get('phaseSlotRefinement')}
+      }));
+      mechanicsRefreshSourceStateBuffer=ledgerParcelStep.stateBuffer;
+      mechanicsRefreshSourceThermoBuffer=ledgerParcelStep.thermoBuffer;
+      mechanicsRefreshSourceMechanicsBuffer=ledgerParcelStep.mechanicsBuffer;
+    } else {
+      const { runSphLedgerParcelStagesWebGpu } = await import('./sphLedgerParcelStagesGpu.js');
+      await runSphLedgerParcelStagesWebGpu({ device, parcels: ledgerParcels,
+        particleCount: sphParticleState.particleCount, dtSeconds,
+        stateBuffer: mechanicsRefreshSourceStateBuffer, thermoBuffer: mechanicsRefreshSourceThermoBuffer,
+        mechanicsBuffer: mechanicsRefreshSourceMechanicsBuffer,
+        massRead: ledgerParcelRecord.carrierMassRead, energy: ledgerParcelRecord.exactEnergy,
+        thermalMaterialTable });
+    }
+    parcelStageCounters.ran++;
+    ledgerParcelStagesRan = true;
+    executedStageOrder.push('ledger-vapor-parcel-transport');
+  }
+  if (phaseSlotRefinementStep && typeof afterPhaseCarrierTransfer === 'function') {
+    // Condensed lanes keep their fixed addresses through gas refinement. Produce
+    // optics against the current family after parcel exchange, while all phase
+    // inputs are still retained and before refresh seals their cleanup claims.
+    await afterPhaseCarrierTransfer({
+      phaseCarrierTransferStep,
+      phaseCarrierTransferFamilyReceipt,
+      opticsTerminalBuffers: Object.freeze({
+        stateBuffer: mechanicsRefreshSourceStateBuffer,
+        thermoBuffer: mechanicsRefreshSourceThermoBuffer
+      })
+    });
+  }
   if (
-    (thermalStep || reactionMutatesParticles)
+    (thermalStep || reactionMutatesParticles || phaseSlotRefinementStep)
     && mechanicsMaterialTable
     && typeof mechanicsRefreshRunner === 'function'
     && stageEligible
@@ -3118,8 +3633,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       'mechanicsRefresh',
       mechanicsRefreshRunner, () => ({
         ...mechanicsRefreshOptions,
-        ...(massCapture && phaseCarrierTransferStep ? { exactPhaseResult: phaseCarrierTransferStep,
+        ...(massCapture && phaseCarrierTransferStep
+          && massCapture.seals[massCapture.stageNames.indexOf('phaseCarrierTransfer')]?.exactLedgerPhase ? {}
+          : massCapture && phaseCarrierTransferStep ? { exactPhaseResult: phaseCarrierTransferStep,
           exactPhaseSourceCapture: massCapture.tokens.get('phaseCarrierTransfer') }
+          : massCapture && reactionStep && reactionLedgerSeal(massCapture) ? {}
           : massCapture && reactionStep ? { exactReactionResult: reactionStep,
           exactReactionSourceCapture: massCapture.tokens.get('reactionStep') }
           : massCapture?.seals[0]?.exactThermal ? { exactThermalResult: thermalStep,
@@ -3138,24 +3656,31 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         preferWebGpu,
         retainOutputParticleBuffers: true,
         readbackMode,
-        queueOrderedProducerClaims:
-          phaseCarrierOutputCleanupClaim
+        queueOrderedProducerClaims: [
+          ...(phaseSlotQueueRetirement ? [phaseSlotQueueRetirement.claim] : []),
+          ...(phaseCarrierOutputCleanupClaim
             ? [phaseCarrierOutputCleanupClaim]
             : queueOrderedFinalConsumerCapability
               ? []
-            : pendingQueueOrderedCleanupClaims
+            : pendingQueueOrderedCleanupClaims)
+        ]
       })
     );
     mechanicsQueueOrderedFinalConsumerCapability =
         retainedStageSource(mechanicsRefreshStep)
           ?.queueOrderedFinalConsumerCapability
         ?? null;
+    if (phaseSlotQueueRetirement) {
+      if (!mechanicsQueueOrderedFinalConsumerCapability) throw new TypeError('Refinement refresh omitted its final submission capability');
+      phaseSlotQueueRetirement.capability = mechanicsQueueOrderedFinalConsumerCapability;
+    }
     if (!queueOrderedFinalConsumerCapability) {
       queueOrderedFinalConsumerCapability =
         mechanicsQueueOrderedFinalConsumerCapability;
     }
     executedStageOrder.push('mechanics-constitutive-refresh');
   }
+  if (phaseSlotRefinementStep && !mechanicsRefreshStep) throw new TypeError('Refinement constitutive refresh did not execute');
   // Thermal/reaction retained-output claims are consumed by the first exact
   // sidecar submission after those stages.  A later hierarchy submission has
   // a different bounded claim set, so keep the sealing capability beside each
@@ -3210,6 +3735,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     reactionStep,
     mechanicsRefreshStep,
     phaseCarrierTransferStep,
+    phaseSlotRefinementStep,
+    ledgerParcelStep,
     phaseCarrierPlan,
     inputResidentProductMass: massCapture?.motionHistory ?? inputResidentProductMass,
     sphParticleUpload,
@@ -3427,6 +3954,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       mapAsyncCount: 1, readbackBytes: 64, hostQueueFenceCount: 0
     }]] : []),
     ['phase-carrier-transfer', phaseCarrierTransferStep],
+    ['phase-slot-refinement', phaseSlotRefinementStep],
+    ['ledger-vapor-parcel-transport', ledgerParcelStep],
     ['mechanics-refresh', mechanicsRefreshStep]
   ]
     .filter(([, stage]) => Boolean(stage))
@@ -3464,15 +3993,88 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     && continuation.thermoBuffer
     && continuation.mechanicsBuffer
   );
+  if (chainCapture) {
+    const refresh = retainedStageSource(mechanicsRefreshStep);
+    const thermal = chainCapture.seals[0];
+    chainCapture.wallRecord = thermal.exactFiniteWall ?? null;
+    if (resolveSphWallReservoirAuthority(thermalStepOptions).finiteCapacity && !chainCapture.wallRecord) {
+      throw new TypeError('Finite wall chain requires its genuine canonical wall successor');
+    }
+    const phase = chainCapture.seals[chainCapture.stageNames.indexOf('phaseCarrierTransfer')];
+    const reaction = chainCapture.seals[chainCapture.stageNames.indexOf('reactionStep')];
+    const reactionLedger = reaction?.exactLedgerReaction;
+    const refinement = chainCapture.seals[chainCapture.stageNames.indexOf('phaseSlotRefinement')];
+    const refinementLedger = refinement?.exactLedgerRefinement;
+    const parcels = chainCapture.seals[chainCapture.stageNames.indexOf('ledgerParcels')];
+    chainCapture.parcelRecord = parcels?.exactLedgerParcels ?? null;
+    if ((ledgerParcels && (!chainCapture.parcelRecord || parcels.sourcePredecessorSeal !== (refinement ?? phase)))
+      || !refresh?.authorityValidationBuffer || !continuation.ready
+      || (reactionStep && !reactionLedger?.validationBuffer)
+      || (phaseSlotRefinementStep && (!refinementLedger || !refinement.refinementValidationBuffer
+        || refinement.sourcePhaseSeal !== phase))
+      || (phaseCarrierTransferStep && (!phase?.exactLedgerPhase || !phase.phaseValidationBuffer))) {
+      throw new TypeError('Chain closure requires captured thermal/refresh completion and reaction/phase rollback integration');
+    }
+    chainCapture.producer.validate();
+    for (const seal of chainCapture.seals) seal.validate();
+    const originalEnergy = massCapture && !massCapture.g2p.quantities
+      ? massCapture.g2p.sourceRead.energy : null;
+    chainCapture.energy = chainCapture.parcelRecord?.exactEnergy ?? refinementLedger?.exactEnergy ?? phase?.exactLedgerPhase?.exactEnergy
+      ?? reactionLedger?.exactEnergy
+      ?? (thermal.exactThermal ? null : thermal.exactEnergy ?? null);
+    chainCapture.massRead = chainCapture.parcelRecord?.carrierMassRead ?? refinementLedger?.carrierMassRead ?? phase?.exactLedgerPhase?.carrierMassRead ?? reactionLedger?.carrierMassRead ?? null;
+    const closureMassRead=chainCapture.massRead
+      ?? (massCapture?.g2p.sourceRead.energy?massCapture.g2p.sourceRead.read:null);
+    chainCapture.lineageRecord = reactionLedger?.lineageRecord ?? null;
+    const { prepareSchroederSpatialChainClosure } = await import('./schroederSpatialChainClosureGpu.js');
+    chainCapture.finalization = prepareSchroederSpatialChainClosure({ device, capture: chainCapture.producer,
+      residualSourceControlBuffer:massCapture?.g2p.sourceRead.residualMechanicsSource?.controlBuffer??null,
+      clockOrigin:chainCapture.clockOrigin,
+      sourceClock:chainCapture.sourceClock,
+      original: { stateBuffer: sphParticleUpload.stateBuffer, thermoBuffer: sphParticleUpload.thermoBuffer,
+        mechanicsBuffer: mlsMpmParticleUpload.mechanicsBuffer }, candidate: continuation,
+      refreshValidationBuffer: refresh.authorityValidationBuffer,
+      thermalValidationBuffer: thermal?.exactThermal?.validationBuffer ?? refresh.authorityValidationBuffer,
+      originalQuantities: massCapture?.g2p.sourceRead.quantities ?? null,
+      candidateQuantities: massCapture?.seals.at(-1)?.exactMechanics ?? null,
+      originalEnergy, candidateEnergy: chainCapture.energy,
+      originalMassRead: closureMassRead ? massCapture.g2p.sourceRead.read : null,
+      candidateMassRead: closureMassRead,
+      parcelRecord: chainCapture.parcelRecord,
+      wallRecord: chainCapture.wallRecord,
+      lineageRecord: chainCapture.lineageRecord,
+      sourceResidualHistory: massCapture?.g2p.sourceRead.residualHistory??null,
+      emittedResidualLedger: reactionLedger?.residualLedger??null,
+      phaseCandidateMassRead: phase?.exactLedgerPhase?.carrierMassRead ?? null,
+      refinementValidationBuffer: refinement?.refinementValidationBuffer ?? null,
+      phasePredecessorMassRead: reactionLedger?.carrierMassRead ?? massCapture?.g2p.sourceRead.read ?? null,
+      reactionValidationBuffer: reactionLedger?.validationBuffer ?? null,
+      sourceHistoryRead: massCapture?.g2p.sourceRead.residentProductHistoryRead ?? null,
+      candidateHistory: continuation.residentProductMass ?? null,
+      phaseValidationBuffer: phase?.phaseValidationBuffer ?? null,
+      phaseLineageCount: phaseCarrierTransferStep?.lineageCount ?? 0
+    });
+    const encoder = device.createCommandEncoder();
+    chainCapture.finalization.encode(encoder);
+    chainCapture.producer.validate();
+    for (const seal of chainCapture.seals) seal.validate();
+    device.queue.submit([encoder.finish()]);
+  }
   const closure = {
     schema: ULG_MLS_MPM_POST_MECHANICS_CLOSURE_SCHEMA,
-    status: continuation.ready && !continuation.productMassMergeRequired
+    status: chainCapture ? 'post-mechanics-closure-awaiting-chain-admission'
+      : continuation.ready && !continuation.productMassMergeRequired
       ? 'post-mechanics-closure-complete'
       : 'post-mechanics-closure-incomplete',
     backend: postMechanicsBackend,
-    authoritativeStageOrder: aerosolCondensateTransition
+    authoritativeStageOrder: Object.freeze((phaseSlotRefinementStep
+      ? Object.freeze(MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER.flatMap(stage =>
+          stage === 'phase-carrier-transfer-v2' ? [stage, 'phase-slot-refinement'] : [stage]))
+      : aerosolCondensateTransition
       ? CONDENSATE_CLOSURE_STAGE_ORDER
-      : MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER,
+      : MLS_MPM_POST_MECHANICS_CLOSURE_STAGE_ORDER).flatMap(stage =>
+        stage === 'mechanics-constitutive-refresh' && ledgerParcelStagesRan
+          ? ['ledger-vapor-parcel-transport', stage] : [stage])),
     executedStageOrder: Object.freeze([...executedStageOrder]),
     // Reports its own absence rather than returning null, so a missing trace
     // says whether the tracer never reached this closure or reached it disabled.
@@ -3490,6 +4092,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     reactionStep,
     mechanicsRefreshStep,
     phaseCarrierTransferStep,
+    phaseSlotRefinementStep,
+    ledgerParcelStep,
     phaseCarrierPlan,
     continuation,
     residentProductMass: continuation.residentProductMass,
@@ -3497,7 +4101,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     readbackMode,
     fullParticleReadbackPerformed,
     fullParticleReadbackFree,
-    residentContinuationReady,
+    residentContinuationReady: !chainCapture && residentContinuationReady,
+    ...(chainCapture ? { chainAdmissionControlBuffer: chainCapture.finalization.controlBuffer } : {}),
     ...readbackTelemetry.snapshot(),
     scientificValidation: false,
     sphValidation: false,
@@ -3559,6 +4164,12 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     transaction: schroederSpatialEpochTransaction,
     generation: schroederSpatialEpochGeneration
   });
+  if (chainCapture) closureAuthority.chainCapture = chainCapture;
+  if (phaseSlotCapture) {
+    closureAuthority.phaseSlotCapture = phaseSlotCapture;
+    closureAuthority.phaseSlotRefinementStep = phaseSlotRefinementStep;
+    closureAuthority.phaseSlotQueueRetirement = phaseSlotQueueRetirement;
+  }
   if (massCapture) {
     closureAuthority.exactMassCapture = massCapture;
     validateCapturedExactMass(closureAuthority);
@@ -3623,6 +4234,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     // producer claims. Keep that actual capability even when assignment of
     // the awaited stage result never completed.
     const submittedRefresh = mechanicsRefreshStep ?? completedCapturedStages.get('mechanicsRefresh');
+    if (phaseSlotQueueRetirement && !retainedStageSource(submittedRefresh)?.queueOrderedFinalConsumerCapability) {
+      cancelQueueOrderedCleanupClaim(phaseSlotQueueRetirement.claim, device, {
+        producerOutput: phaseSlotQueueRetirement, cleanup: phaseSlotQueueRetirement.cleanup
+      });
+    }
     mechanicsQueueOrderedFinalConsumerCapability ??=
       retainedStageSource(submittedRefresh)?.queueOrderedFinalConsumerCapability ?? null;
     queueOrderedFinalConsumerCapability ??= mechanicsQueueOrderedFinalConsumerCapability;
@@ -3634,7 +4250,16 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
         output.queueOrderedRetainedOutputFinalConsumerCapability = queueOrderedFinalConsumerCapability;
       }
     }
+    if (chainCapture) {
+      error.chainClosureCleanupCompletion = deferConfirmedSubmittedWorkCleanup(device,
+        () => releaseChainClosureCapture(chainCapture));
+      void error.chainClosureCleanupCompletion.catch(() => {});
+    }
     releaseExactMassCapture(massCapture);
+    if (phaseSlotCapture) {
+      for (const seal of phaseSlotCapture.seals) seal.release();
+      phaseSlotCapture.released = true;
+    }
     if (exactReactionSelection) massCapture.selectionCleanup = exactReactionSelection.release();
     if (gasCapture) {
       if (!gasCapture.exactCapture) {
@@ -3724,6 +4349,8 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
           reactionStep: reactionStep ?? completedCapturedStages.get('reactionStep'),
           mechanicsRefreshStep: mechanicsRefreshStep ?? completedCapturedStages.get('mechanicsRefresh'),
           phaseCarrierTransferStep: phaseCarrierTransferStep ?? completedCapturedStages.get('phaseCarrierTransfer'),
+          phaseSlotRefinementStep: phaseSlotRefinementStep ?? completedCapturedStages.get('phaseSlotRefinement'),
+          ledgerParcelStep: ledgerParcelStep ?? completedCapturedStages.get('ledgerParcels'),
           inputResidentProductMass,
           replacementResidentProductMass
         });

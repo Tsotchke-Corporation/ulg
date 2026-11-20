@@ -1002,6 +1002,19 @@ test('post-closure admission seals an exact next-tick/substep-zero successor', (
   );
 });
 
+test('public fields cannot fabricate accepted batch clock authority', () => {
+  for (const currentPhysicsTick of [12,13]) {
+    const device=createFakeDevice();
+    const admission=createPostClosureAdmissionFixture(device,{currentPhysicsTick,currentPhysicsSubstep:0});
+    assert.throws(()=>admitSchroederPostClosureLevelAssignment({device,
+      lookupLevelAssignment:admission.fixture.priorLevelAssignment,
+      nextParticleUploads:admission.nextParticleUploads,postClosureLevelAssignment:admission.classified,
+      chainBatchPublication:Object.freeze({schema:'peercompute.ulg.chain-batch-publication.v1',
+        step:currentPhysicsTick,time:0.002,acceptedIntervalCount:2,readbackBytes:128})
+    }),{code:'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY'});
+  }
+});
+
 test('post-closure admission rejects skipped, wrong-substep, wrapped, and stale successors', () => {
   const cases = [
     {

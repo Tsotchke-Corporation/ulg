@@ -34,8 +34,11 @@ import {
   releaseSphAerosolSpatialGenerationRead,
   validateSphAerosolSpatialGenerationRead
 } from './sphAerosolSpatialBinding.js';
-import { resolveSphSpatialGasHistoryVolumeInput } from './sphSpatialGasLedgerEosGpu.js';
+import { resolveSphSpatialGasHistoryVolumeInput, resolveSphSpatialGasChainPressureInput } from './sphSpatialGasLedgerEosGpu.js';
 import { createSphExactHistoryGasVolumeWgsl } from './sphExactHistoryGasVolumeWgsl.js';
+import { createSchroederSpatialChainVolumeGpu } from './schroederSpatialChainVolumeGpu.js';
+import { createSphSpatialGasChainFreeVolumeWgsl } from './sphSpatialGasChainFreeVolumeWgsl.js';
+import { sphSpatialGasChainPressureWgsl } from './sphSpatialGasChainPressureWgsl.js';
 
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE = {
@@ -478,7 +481,8 @@ function exactParent(parent, device) {
 
 function normalizeGenerationReadFamily(generationReadFamily, device, {
   fineFieldCapacity,
-  coarseFieldCapacity
+  coarseFieldCapacity,
+  nativeFieldCapacities = null
 }) {
   const generation = generationReadFamily?.generation;
   if (
@@ -511,9 +515,9 @@ function normalizeGenerationReadFamily(generationReadFamily, device, {
           : null,
         phaseVolumeMoment: generation.phaseVolumeMoment
       }];
-  if (levelViews.length < 1 || levelViews.length > 2) {
+  if (levelViews.length < 1 || levelViews.length > 6) {
     throw new RangeError(
-      'gas free-volume requires exactly one or two mechanics levels'
+      'gas free-volume requires one through six mechanics levels'
     );
   }
   const moments = levelViews.map((entry) => entry.phaseVolumeMoment);
@@ -525,13 +529,18 @@ function normalizeGenerationReadFamily(generationReadFamily, device, {
   if (
     moments[0].fieldCapacity !== fineFieldCapacity
     || (
-      moments.length === 2
-      && moments[1].fieldCapacity !== coarseFieldCapacity
+      moments.length > 1
+      && moments.at(-1).fieldCapacity !== coarseFieldCapacity
     )
   ) {
     throw new RangeError(
       'gas free-volume moment capacities do not match the retained runtime tier'
     );
+  }
+  if (moments.length > 2 && (!nativeFieldCapacities
+    || nativeFieldCapacities.length !== moments.length
+    || moments.some((m,i) => m.fieldCapacity !== nativeFieldCapacities[i]))) {
+    throw new RangeError('gas free-volume requires the complete native capacity tier');
   }
   const identityFields = [
     'generationId',
@@ -578,8 +587,19 @@ function normalizeGenerationReadFamily(generationReadFamily, device, {
     }
     return grid;
   });
-  const parent = generation.parentFieldView ?? null;
-  if (moments.length === 2) {
+  const pairs = generation.mechanicsAdjacentLevelPairs;
+  const parent = moments.length > 2 ? pairs?.at(-1)?.parentFieldView : generation.parentFieldView ?? null;
+  if (moments.length > 2) {
+    if (!Array.isArray(pairs) || pairs.length !== moments.length - 1
+      || pairs.some((pair,i) => {
+        const p = pair.parentFieldView;
+        return !exactParent(p,device) || p.fineFieldView !== moments[i].mechanicsFieldView
+          || p.coarseFieldView !== moments[i+1].mechanicsFieldView
+          || p.inheritedFineParentView !== (i ? pairs[i-1].parentFieldView : null)
+          || identityFields.some(key => p[key] !== moments[0][key])
+          || !sameGrid(p.fineGrid,grids[i]) || !sameGrid(p.coarseGrid,grids[i+1]);
+      })) throw new TypeError('gas free-volume requires every original adjacent projection');
+  } else if (moments.length === 2) {
     if (
       !exactParent(parent, device)
       || parent.fineFieldView !== moments[0].mechanicsFieldView
@@ -713,10 +733,10 @@ function paramsData(
   u32(26, directory.layout.wordLength);
   u32(27, directory.layout.cellKeysOffsetWords);
   u32(28, moments[0].fieldCapacity);
-  u32(29, moments[1]?.fieldCapacity ?? 0);
+  u32(29, moments.length > 1 ? moments.at(-1).fieldCapacity : 0);
   u32(
     30,
-    plan.exactLevelCount === 2 ? plan.parentCapacityWords : 48
+    plan.exactLevelCount > 1 ? plan.parentCapacityWords : 48
   );
   u32(31, fineGrid.gridNodeCount);
   f32(32, fineGrid.gridSpacingM);
@@ -735,7 +755,7 @@ function paramsData(
     identity.levelEpoch,
     identity.supportEpoch,
     moments[0].completionOrdinal,
-    moments[1]?.completionOrdinal ?? 0
+    moments.length > 1 ? moments.at(-1).completionOrdinal : 0
   ].forEach((value, index) => u32(35 + index, value));
   u32(48, fineScatterDispatch.x);
   u32(49, fineScatterDispatch.y);
@@ -761,6 +781,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
   cellCapacity,
   fineFieldCapacity,
   coarseFieldCapacity = 0,
+  nativeFieldCapacities = null,
+  parentFieldCapacities = null,
   arenaCount = 2,
   label = 'ulg-sph-spatial-gas-free-volume'
 } = {}) {
@@ -815,7 +837,32 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
     throw new RangeError('gas free-volume rows exceed WebGPU buffer limits');
   }
   const constructionBuffers = [];
+  const chainRetirementOwner = Object.freeze({});
+  const nativeCapacities = nativeFieldCapacities ? Object.freeze([...nativeFieldCapacities]) : null;
+  let chainRuntime = null;
   try {
+  if (nativeCapacities) {
+    if (nativeCapacities.length < 3 || nativeCapacities[0] !== fineCapacity
+      || nativeCapacities.at(-1) !== coarseCapacity) throw new RangeError('Invalid gas chain capacity tier');
+    chainRuntime = createSchroederSpatialChainVolumeGpu(device, {
+      nativeFieldCapacities:nativeCapacities, parentFieldCapacities, arenaCount:count,
+      retirementOwner:chainRetirementOwner
+    });
+  }
+  const chainPipelines = chainRuntime ? (() => {
+    const module = device.createShaderModule({code:createSphSpatialGasChainFreeVolumeWgsl(layout)});
+    const pipeline = entryPoint => device.createComputePipeline({layout:'auto',compute:{module,entryPoint}});
+    return {validate:pipeline('validate_chain_gas_free_volume_authority'),scatter:pipeline('scatter_chain_condensed_volume')};
+  })() : null;
+  const pressurePipelines = chainRuntime ? (() => {
+    const module = device.createShaderModule({code:sphSpatialGasChainPressureWgsl});
+    const bindGroupLayout = device.createBindGroupLayout({entries:[3,4,6,7,8,9,10].map(binding => ({
+      binding,visibility:4,buffer:{type:binding===7 || binding===10 ? 'uniform' : binding===9 ? 'storage' : 'read-only-storage'}
+    }))});
+    const pipelineLayout = device.createPipelineLayout({bindGroupLayouts:[bindGroupLayout]});
+    return {bindGroupLayout,pipelines:['initialize_chain_pressure','project_chain_pressure','seal_chain_pressure']
+      .map(entryPoint => device.createComputePipeline({layout:pipelineLayout,compute:{module,entryPoint}}))};
+  })() : null;
   const pipelines = sharedGasFreeVolumePipelines(device, layout);
   const arenas = [];
   for (let arenaIndex = 0; arenaIndex < count; arenaIndex += 1) {
@@ -827,6 +874,11 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       destroyedOwnedBuffers: new Set(),
       aerosolGeometryBuffer: null,
       historyParamsBuffer: null,
+      chainParamsBuffer: chainRuntime ? createOwnedBuffer(device, constructionBuffers,
+        `${label}-arena-${arenaIndex}-chain-params`, 16, GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST) : null,
+      chainPressureBuffer: chainRuntime ? createOwnedBuffer(device, constructionBuffers,
+        `${label}-arena-${arenaIndex}-chain-pressure`, (64+parentFieldCapacities.at(-1))*4,
+        GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST) : null,
       paramsBuffer: createOwnedBuffer(
         device,
         constructionBuffers,
@@ -868,7 +920,9 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
     arena.controlBuffer,
     arena.rowsBuffer,
     arena.aerosolGeometryBuffer,
-    arena.historyParamsBuffer
+    arena.historyParamsBuffer,
+    arena.chainParamsBuffer,
+    arena.chainPressureBuffer
   ].filter(Boolean);
   const destroyArenaBuffers = (arena) => destroyOwnedBuffersExactlyOnce(
     ownBuffers(arena),
@@ -978,7 +1032,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       device,
       {
         fineFieldCapacity: fineCapacity,
-        coarseFieldCapacity: coarseCapacity
+        coarseFieldCapacity: coarseCapacity,
+        nativeFieldCapacities: nativeCapacities
       }
     );
     const directory = normalizeGasDirectory(
@@ -1001,30 +1056,19 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         'gas free-volume grid must be the exact selected occupancy grid'
       );
     }
-    if (
-      exactLevelCount === 2
-      && (
-        readFamily.levelViews[1].selectedLevel
-          !== readFamily.levelViews[0].selectedLevel + 1
-        || readFamily.grids[1].gridSpacingM
-          !== Math.fround(readFamily.grids[0].gridSpacingM * 2)
-      )
-    ) {
-      throw new RangeError(
-        'gas free-volume two-level grid requires adjacent exact 2:1 levels'
-      );
+    for (let i=1;i<exactLevelCount;i++) {
+      if (readFamily.levelViews[i].selectedLevel !== readFamily.levelViews[i-1].selectedLevel+1
+        || readFamily.grids[i].gridSpacingM !== Math.fround(readFamily.grids[i-1].gridSpacingM*2)) {
+        throw new RangeError('gas free-volume requires adjacent exact 2:1 levels');
+      }
     }
-    if (exactLevelCount === 2 && coarseCapacity < 1) {
-      throw new RangeError(
-        'gas free-volume runtime lacks the retained coarse field tier'
-      );
-    }
+    if (exactLevelCount > 2 && !chainRuntime) throw new RangeError('gas free-volume lacks its complete chain tier');
     const parentCapacityWords =
       readFamily.parent?.layout?.wordLength ?? 0;
     const plan = createSphSpatialGasFreeVolumePlan({
       cellCapacity: capacity,
       fineFieldCapacity: fineCapacity,
-      coarseFieldCapacity: exactLevelCount === 2 ? coarseCapacity : 0,
+      coarseFieldCapacity: exactLevelCount > 1 ? coarseCapacity : 0,
       exactLevelCount,
       grid: resolvedGrid,
       boxMinM,
@@ -1036,7 +1080,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       storageGeneration: readFamily.identity.storageGeneration,
       fineMomentGeneration: readFamily.moments[0].generationId,
       coarseMomentGeneration:
-        readFamily.moments[1]?.generationId ?? 0,
+        exactLevelCount > 1 ? readFamily.moments.at(-1).generationId : 0,
       parentCompletionOrdinal:
         readFamily.parent?.completionOrdinal ?? 0,
       parentCapacityWords,
@@ -1047,6 +1091,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
     let encoderMutationStarted = false;
     let aerosolRead = null;
     let aerosolAllocations = 0;
+    let chainExecution = null;
     try {
       aerosolRead = acquireSphAerosolSpatialGenerationRead({
         device, generation: readFamily.generation, aerosolFamily
@@ -1086,11 +1131,13 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           aerosolAllocations++;
         }
         const fineGrid = readFamily.grids[0];
-        device.queue.writeBuffer(arena.aerosolGeometryBuffer, 0,
-          new Int32Array([...fineGrid.gridDims, fineGrid.gridShift]));
+        const geometry = new Int32Array(SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES / 4);
+        geometry.set([...fineGrid.gridDims, fineGrid.gridShift]);
+        readFamily.grids.forEach((g,i) => geometry.set([...g.gridDims,g.gridShift],4+i*4));
+        device.queue.writeBuffer(arena.aerosolGeometryBuffer,0,geometry);
       }
       const fine = readFamily.moments[0];
-      const coarse = readFamily.moments[1] ?? fine;
+      const coarse = readFamily.moments.at(-1);
       const parentBuffer = readFamily.parent?.parentFieldViewBuffer
         ?? directory.directoryBuffer;
       bufferSizeAtLeast(
@@ -1127,7 +1174,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           plan,
           readFamily.identity,
           readFamily.grids[0],
-          readFamily.grids[1],
+          exactLevelCount > 1 ? readFamily.grids.at(-1) : null,
           directory,
           readFamily.moments,
           fineScatterDispatch,
@@ -1142,6 +1189,11 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       encoderMutationStarted = true;
       encoder.clearBuffer(arena.controlBuffer);
       encoder.clearBuffer(arena.rowsBuffer);
+      if (chainRuntime) {
+        chainExecution = chainRuntime.encode(encoder,{generationReadFamily});
+        device.queue.writeBuffer(arena.chainParamsBuffer,0,new Uint32Array([
+          readFamily.parent.parentFieldCapacity,chainExecution.completionOrdinal,0,0]));
+      }
       const resources = new Map([
         [0, directory.directoryBuffer],
         [1, fine.controlBuffer],
@@ -1176,6 +1228,20 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           }
         ]
       });
+      if (chainExecution) {
+        const chainResources = new Map([[0,directory.directoryBuffer],[6,arena.controlBuffer],
+          [9,chainExecution.coarseVolumeBuffer],[10,parentBuffer],[11,arena.chainParamsBuffer]]);
+        const validate = encoder.beginComputePass({label:`${label}ValidateChain`});
+        validate.setPipeline(chainPipelines.validate);
+        validate.setBindGroup(0,bindGroup(chainPipelines.validate,'validate-chain',chainResources));
+        validate.dispatchWorkgroups(1);validate.end();
+        chainResources.set(7,arena.rowsBuffer);
+        const scatter = encoder.beginComputePass({label:`${label}ScatterChain`});
+        scatter.setPipeline(chainPipelines.scatter);
+        scatter.setBindGroup(0,bindGroup(chainPipelines.scatter,'scatter-chain',chainResources));
+        const dispatch=workgroupDispatch(readFamily.parent.parentFieldCapacity,64,maxWorkgroupsPerDimension,'gas chain scatter');
+        scatter.dispatchWorkgroups(dispatch.x,dispatch.y,dispatch.z);scatter.end();
+      } else {
       const validateGroup = bindGroup(
         pipelines.validate,
         'validate',
@@ -1242,6 +1308,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         );
         coarseScatterPass.end();
       }
+      }
       if (aerosolRead) {
         const aerosolGroup = bindGroup(aerosolPipeline, 'scatter-aerosol', new Map([
           [0, directory.directoryBuffer],
@@ -1285,10 +1352,21 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       });
       buildPass.setPipeline(historyPipelines?.build ?? pipelines.build);
       buildPass.setBindGroup(0, buildGroup);
-      buildPass.dispatchWorkgroupsIndirect(
-        directory.consumerDispatchBuffer,
-        0
-      );
+      // A1: direct launch over the cell-capacity ceiling (exact; the kernel
+      // admits only the staged indirect groups). Avoids Chromium's per-call
+      // indirect validation (~0.3 ms of GPU-process time).
+      const directBuildGroups = Math.ceil(capacity / 64);
+      if (
+        directBuildGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535)
+        && globalThis.__ulgForceIndirectFieldConsumers !== true
+      ) {
+        buildPass.dispatchWorkgroups(directBuildGroups);
+      } else {
+        buildPass.dispatchWorkgroupsIndirect(
+          directory.consumerDispatchBuffer,
+          0
+        );
+      }
       buildPass.end();
       const finalizeGroup = bindGroup(
         historyPipelines?.finalize ?? pipelines.finalize,
@@ -1332,7 +1410,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           familyId: aerosolRead.familyId,
           generation: aerosolRead.generation,
           capacity: aerosolRead.capacity,
-          projection: exactLevelCount === 2 ? 'quadratic-B-geometric-A-QCV-W' : 'quadratic-B-QCV-W',
+          projection: exactLevelCount > 2 ? 'quadratic-B-adjacent-chain-A-QCV-W'
+            : exactLevelCount === 2 ? 'quadratic-B-geometric-A-QCV-W' : 'quadratic-B-QCV-W',
           dispatchCount: 1
         }) : null,
         gasControlVolumeDescriptor: plan.gasControlVolumeDescriptor,
@@ -1341,13 +1420,13 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
           'quadratic-capacity-overlap-keyed-atomic-f32-scatter',
         reductionWorkComplexity: 'O(C + (F + E + K) log C)',
         keyedLookupMaxSteps,
-        encodedComputePassCount: (exactLevelCount === 2 ? 5 : 4) + Number(Boolean(aerosolRead)) + Number(Boolean(historyVolume)),
-        encodedDispatchCount: (exactLevelCount === 2 ? 5 : 4) + Number(Boolean(aerosolRead)) + Number(Boolean(historyVolume)),
+        encodedComputePassCount: (exactLevelCount === 2 ? 5 : 4) + (chainExecution ? exactLevelCount-1 : 0) + Number(Boolean(aerosolRead)) + Number(Boolean(historyVolume)),
+        encodedDispatchCount: (exactLevelCount === 2 ? 5 : 4) + (chainExecution ? 3*(exactLevelCount-1) : 0) + Number(Boolean(aerosolRead)) + Number(Boolean(historyVolume)),
         indirectDispatchOffsetBytes: 0,
         retainedGpuBufferBytes: ownBuffers(arena).reduce(
           (sum, buffer) => sum + Number(buffer?.size ?? 0),
           0
-        ),
+         ) + (chainExecution ? chainRuntime.retainedGpuBufferBytes / count : 0),
         gpuBufferCreationCountDuringEncode: aerosolAllocations,
         bufferAllocationCountDuringEncode: aerosolAllocations,
         readbackPerformed: false,
@@ -1364,6 +1443,42 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         arena,
         token,
         generationReadFamily,
+        chainExecution,
+        chainSourceLive: () => !chainExecution || chainRuntime.ownsExecution(chainExecution),
+        acquireChainPressure(input) {
+          const original = resolveSphSpatialGasChainPressureInput(input, {device,execution});
+          const validate = () => {
+            original.validate();
+            if (!recordStillOwnsExecution(execution,record) || !chainExecution
+              || !chainRuntime.ownsExecution(chainExecution)) throw new TypeError('Gas pressure lost its original volume chain');
+          };
+          validate();
+          let encoded=false;
+          return Object.freeze({nativeBuffers:chainExecution.nativeAdjointBuffers,
+            completionOrdinal:chainExecution.completionOrdinal,validate,
+            encode(pressureEncoder,paramsBuffer) {
+              validate();
+              if(encoded || !webGpuBufferMatchesDevice(paramsBuffer,device)) throw new TypeError('Gas pressure chain requires one original encoding');
+              encoded=true;
+              const resources = new Map([[3,original.pressureBuffer],[4,original.directoryBuffer],
+                [6,original.controlBuffer],[7,paramsBuffer],[8,parentBuffer],
+                [9,arena.chainPressureBuffer],[10,arena.chainParamsBuffer]]);
+              const group=device.createBindGroup({layout:pressurePipelines.bindGroupLayout,
+                entries:[...resources].map(([binding,buffer])=>({binding,resource:{buffer}}))});
+              pressureEncoder.clearBuffer(arena.chainPressureBuffer);
+              const pass=pressureEncoder.beginComputePass();pass.setBindGroup(0,group);
+              pass.setPipeline(pressurePipelines.pipelines[0]);pass.dispatchWorkgroups(1);
+              const groups=Math.ceil(parentFieldCapacities.at(-1)/64),max=device.limits?.maxComputeWorkgroupsPerDimension ?? 65535;
+              pass.setPipeline(pressurePipelines.pipelines[1]);pass.dispatchWorkgroups(Math.min(groups,max),Math.ceil(groups/max));
+              pass.setPipeline(pressurePipelines.pipelines[2]);pass.dispatchWorkgroups(1);pass.end();
+              chainRuntime.encodePullback(pressureEncoder,chainExecution,{coarseValuesBuffer:arena.chainPressureBuffer,
+                offsetWords:64,coarseRecord:true,ownerToken:chainRetirementOwner});
+              for(const buffer of chainExecution.nativeAdjointBuffers) {
+                pressureEncoder.copyBufferToBuffer(chainExecution.controlBuffer,0,buffer,32*4,64);
+              }
+            }
+          });
+        },
         aerosolRead,
         aerosolSourceLive: () => validateSphAerosolSpatialGenerationRead(aerosolRead, {
           device, generation: readFamily.generation, aerosolFamily
@@ -1387,6 +1502,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       return execution;
     } catch (error) {
       releaseSphAerosolSpatialGenerationRead(aerosolRead);
+      const failedChain = chainExecution ?? error.chainVolumeExecution;
+      if (failedChain) chainRuntime.retireWithOwner(failedChain,chainRetirementOwner,{retireArena:true});
       if (encoderMutationStarted) {
         arena.retired = true;
         destroyArenaBuffers(arena);
@@ -1398,8 +1515,9 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
   }
 
   function markExecutionSubmitted(execution) {
-    ownershipFor(execution);
+    const record = ownershipFor(execution);
     if (submitted.has(execution)) return false;
+    if (record.chainExecution) chainRuntime.markSubmitted(record.chainExecution,chainRetirementOwner);
     submitted.add(execution);
     return true;
   }
@@ -1414,6 +1532,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
     // callback clear or destroy the successor's ownership state.
     if (!recordStillOwnsExecution(execution, record, token)) return false;
     pendingReleases.delete(execution);
+    if (record.chainExecution) chainRuntime.retireWithOwner(record.chainExecution,chainRetirementOwner,{retireArena:deviceLost});
     if (deviceLost) {
       record.arena.retired = true;
       destroyArenaBuffers(record.arena);
@@ -1595,6 +1714,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       );
     }
     destroyed = true;
+    chainRuntime?.destroy();
     for (const arena of arenas) {
       destroyArenaBuffers(arena);
     }
@@ -1622,8 +1742,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       'quadratic-capacity-overlap-keyed-atomic-f32-scatter',
     reductionWorkComplexity: 'O(C + (F + E + K) log C)',
     keyedLookupMaxSteps,
-    retainedGpuBufferCount: count * 3,
-    retainedGpuBufferBytes
+    retainedGpuBufferCount: count * (chainRuntime ? 5 : 3) + (chainRuntime?.retainedGpuBufferCount ?? 0),
+    retainedGpuBufferBytes: retainedGpuBufferBytes + (chainRuntime?.retainedGpuBufferBytes ?? 0)
   });
   retainedGasFreeVolumeRuntimes.set(runtimeToken, {
     runtime: runtimeToken,
@@ -1644,6 +1764,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
   });
   return runtimeToken;
   } catch (error) {
+    chainRuntime?.destroy();
     destroyOwnedBuffersExactlyOnce(constructionBuffers);
     throw error;
   }
@@ -1736,6 +1857,14 @@ export function isExactSphSpatialGasFreeVolumeExecution(execution) {
   return exactExecutionRecord(execution) !== null;
 }
 
+// Only the original EOS can issue this private input. Public free-volume
+// executions and observation snapshots alone cannot expose pressure buffers.
+export function acquireSphSpatialGasFreeVolumePressureChain(execution, input) {
+  const record=exactExecutionRecord(execution);
+  if(!record?.chainExecution || !record.isLive()) throw new TypeError('Gas pressure requires its live multilevel free-volume owner');
+  return record.acquireChainPressure(input);
+}
+
 export function describeSphSpatialGasFreeVolumeExecution(
   execution,
   options = {}
@@ -1788,6 +1917,10 @@ function liveAuthorityExecutionRecord(execution) {
       'ERR_SPH_GAS_FREE_VOLUME_AUTHORITY_TERMINAL',
       'Gas free-volume execution is released or no longer owns its arena'
     );
+  }
+  if (!record.chainSourceLive()) {
+    throw authorityError('ERR_SPH_GAS_FREE_VOLUME_CHAIN_SOURCE_STALE',
+      'Gas free-volume lost its original adjacent-chain source');
   }
   if (!record.aerosolSourceLive()) {
     throw authorityError('ERR_SPH_GAS_FREE_VOLUME_AEROSOL_SOURCE_STALE',
@@ -2068,6 +2201,10 @@ export function submitSphSpatialGasFreeVolumeEosAuthority(receipt, device) {
       'ERR_SPH_GAS_FREE_VOLUME_AUTHORITY_TERMINAL',
       'Gas free-volume EOS submission lost its live execution owner'
     );
+  }
+  if (!record.chainSourceLive()) {
+    throw authorityError('ERR_SPH_GAS_FREE_VOLUME_CHAIN_SOURCE_STALE',
+      'Gas free-volume lost its original adjacent-chain source');
   }
   if (!record.aerosolSourceLive()) {
     throw authorityError('ERR_SPH_GAS_FREE_VOLUME_AEROSOL_SOURCE_STALE',

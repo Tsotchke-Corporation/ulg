@@ -1,3 +1,4 @@
+import { isSphExactReactionLedgerReconcileStage } from './sphExactReactionLedgerReconcileGpu.js';
 import {sphExactPlacementEventDispositionLayout,sphExactPlacementEventPipelineDescriptors,createSphExactPlacementPrivateCompanionRecoveryWgsl} from './sphExactPlacementEventDispositionWgsl.js';
 import { sphExactPlacementPhysicalEvidenceLayout, planSphExactPlacementPhysicalEvidenceDispatch,
   createSphExactPlacementPhysicalEvidenceWgsl } from './sphExactPlacementPhysicalEvidenceWgsl.js';
@@ -3196,7 +3197,10 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   productTermCount = arenaLease?.arena?.productTermCapacity,
   boxDimsM = [0, 0, 0],
   gpuTimestampRecorder = null,
-  diagnosticReadbackRequested = false
+  diagnosticReadbackRequested = false,
+  // G2 integer energy ledger: encoded after the transactional terminal seal,
+  // so it reads the final published rows, the event plan and the receipt.
+  ledgerReconcile = null
 } = {}) {
   if (!encoder?.beginComputePass || !encoder?.finish) {
     throw new TypeError('segmented product placement requires a live command encoder');
@@ -3208,7 +3212,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   // A genuine retained exact family supplies the complete current/residual
   // quantities. Its buffers are checked against the original authority below,
   // before uploads or encoding. Legacy callers still cannot use exact aliases.
-  if (!authorityRecord.exactQuantityContext) {
+  if (!authorityRecord.exactQuantityContext && !isSphExactReactionLedgerReconcileStage(ledgerReconcile)) {
     for (const [stateBuffer, thermoBuffer] of [[nextStateBuffer, nextThermoBuffer],
       [frozenSourceStateBuffer, frozenSourceThermoBuffer],
       [transactionRollbackStateBuffer, transactionRollbackThermoBuffer]]) {
@@ -3838,6 +3842,13 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
   );
 
   }
+  if (ledgerReconcile) {
+    ledgerReconcile.encode(encoder, {
+      events, eventPlan: buffers.eventPlan, compactCount: compactCountBuffer, receipt,
+      eventCapacity: Math.floor(events.size / 128),
+      rollbackState, rollbackThermo, state, thermo, mechanics
+    });
+  }
 
   const scratchBuffers = [...new Set([
     ...Object.values(buffers).filter((buffer) => (
@@ -4088,11 +4099,15 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   productEventCapacity,
   sourceStateBuffer,
   sourceThermoBuffer,
-  sourceMechanicsBuffer
+  sourceMechanicsBuffer,
+  // G2 integer energy ledger: its reconcile stage is the exact-inventory
+  // authority; the placement itself stays the f32 law.
+  ledgerReconcile = null
 } = {}) {
+  const ledgerAdmitted = isSphExactReactionLedgerReconcileStage(ledgerReconcile);
   // Raw exact buffers cannot enter this factory through the legacy path.
   // Only an original family can proceed to the private exact-owner checks.
-  if (!isSchroederSpatialReactionPlacementSourceFamily(placementSourceFamily)) {
+  if (!ledgerAdmitted && !isSchroederSpatialReactionPlacementSourceFamily(placementSourceFamily)) {
     assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Product placement source');
   }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -4111,7 +4126,7 @@ export function createSchroederSpatialReactionProductPlacementAuthorityWebGpu({
   const exactQuantityContext = capturePlacementExactQuantityContext(
     resolvedPlacementSourceFamily, device, resolvedParticleCount, resolvedEventCapacity
   );
-  if (!exactQuantityContext) {
+  if (!exactQuantityContext && !ledgerAdmitted) {
     assertSphLegacyMassPathAllowed({ sourceStateBuffer, sourceThermoBuffer }, 'Product placement source');
   }
   const exactQuantityBindings = exactQuantityContext?.bindings ?? {};

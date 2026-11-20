@@ -253,16 +253,108 @@ function anchorConductorOpticalConstants(properties, materialKey) {
  * anchoredPaths }; when no usable bank record exists the input properties pass
  * through unchanged (anchored: false).
  */
+// First-class air (plan/todo/first-class-air.md, slice 4): a gas phase carries
+// measured dilute-gas transport exactly as condensed phases carry their
+// measured conductivity. Only k and mu are set, so derived gas density and
+// heat capacity (and every caloric gauge built on them) are unchanged. The
+// record need not carry phase transitions: transport anchoring is independent
+// of the phase-boundary anchoring above.
+function anchorGasTransport(properties, materialKey) {
+  const record = compoundRecordFor(materialKey) ?? elementRecordFor(materialKey);
+  const provenance = bankProvenanceForFamily(record || {}, 'gas-transport');
+  const reference = record ? bankPhase(record, 'gas') : null;
+  const phases = properties?.phases;
+  const gasIndex = Array.isArray(phases) ? phases.findIndex((phase) => phase?.name === 'gas') : -1;
+  const conductivity = Number(reference?.thermalConductivityWPerMK);
+  const viscosity = Number(reference?.dynamicViscosityPaS);
+  if (
+    !provenance
+    || provenance.source !== REFERENCE_ANCHOR_SOURCE
+    || gasIndex < 0
+    || !(conductivity > 0)
+  ) {
+    return { properties, anchored: false, residuals: null, anchoredPaths: [] };
+  }
+  const derived = phases[gasIndex];
+  const gas = {
+    ...derived,
+    thermalConductivityWPerMK: conductivity,
+    thermalConductivityProvenance: {
+      schema: 'peercompute.ulg.material-thermal-conductivity-provenance.v0',
+      status: provenance.status ?? 'reference-fallback',
+      source: provenance.source,
+      method: provenance.method,
+      units: provenance.units ?? 'W/(m K), Pa s',
+      referenceState: provenance.referenceState ?? record.referenceState ?? null,
+      quality: provenance.quality ?? null,
+      applicationPolicy:
+        provenance.applicationPolicy
+        ?? 'dilute-gas reference value held constant within the runtime gas phase segment',
+      references: [...(provenance.references || [])],
+      bank: record.symbol ? 'elements' : 'compounds',
+      record: record.key || record.symbol || null,
+      phase: 'gas',
+      family: 'gas-transport',
+      transportTemperatureK: Number(reference.transportTemperatureK) || null
+    },
+    ...(viscosity > 0 ? { dynamicViscosityPaS: viscosity } : {})
+  };
+  const anchoredPaths = ['phases.gas.thermalConductivityWPerMK'];
+  if (viscosity > 0) anchoredPaths.push('phases.gas.dynamicViscosityPaS');
+  const residuals = {
+    gasTransport: {
+      derivedThermalConductivityWPerMK: derived.thermalConductivityWPerMK ?? null,
+      referenceThermalConductivityWPerMK: conductivity,
+      derivedDynamicViscosityPaS: derived.dynamicViscosityPaS ?? null,
+      referenceDynamicViscosityPaS: viscosity > 0 ? viscosity : null
+    }
+  };
+  const anchored = {
+    ...properties,
+    phases: phases.map((phase, index) => (index === gasIndex ? gas : phase)),
+    referenceBankAnchoring: {
+      schema: 'peercompute.ulg.material-reference-bank-anchoring.v0',
+      ...(properties.referenceBankAnchoring || {}),
+      bank: properties.referenceBankAnchoring?.bank ?? (record.symbol ? 'elements' : 'compounds'),
+      source: properties.referenceBankAnchoring?.source ?? REFERENCE_ANCHOR_SOURCE,
+      derivationResiduals: {
+        ...(properties.referenceBankAnchoring?.derivationResiduals || {}),
+        ...residuals
+      }
+    },
+    propertyProvenance: {
+      ...(properties.propertyProvenance || {}),
+      entries: [
+        ...(properties.propertyProvenance?.entries || []),
+        propertyProvenanceEntry({
+          paths: anchoredPaths,
+          status: PROPERTY_DERIVATION_STATUS.REFERENCE_FALLBACK,
+          source: 'material-property-reference-bank',
+          method: `dilute-gas thermal conductivity and dynamic viscosity at ${provenance.referenceState} (${provenance.method})`,
+          inputs: [record.formula ?? record.symbol ?? String(materialKey)]
+        })
+      ],
+      notes: [
+        ...(properties.propertyProvenance?.notes || []),
+        `Gas transport (k, mu) anchored to the reference bank for ${record.formula ?? record.symbol}.`
+      ]
+    }
+  };
+  return { properties: anchored, anchored: true, residuals, anchoredPaths };
+}
+
 export function anchorDerivedMaterialProperties(properties, materialKey) {
   const phaseAnchoring = anchorDerivedPhaseBoundaries(properties, materialKey);
   const bandAnchoring = anchorGasElectronicBand(phaseAnchoring.properties, materialKey);
   const opticalAnchoring = anchorConductorOpticalConstants(bandAnchoring.properties, materialKey);
-  const applied = [phaseAnchoring, bandAnchoring, opticalAnchoring].filter((result) => result.anchored);
+  const transportAnchoring = anchorGasTransport(opticalAnchoring.properties, materialKey);
+  const applied = [phaseAnchoring, bandAnchoring, opticalAnchoring, transportAnchoring]
+    .filter((result) => result.anchored);
   if (applied.length === 0) {
     return { properties, anchored: false, residuals: null, anchoredPaths: [] };
   }
   return {
-    properties: opticalAnchoring.properties,
+    properties: transportAnchoring.properties,
     anchored: true,
     residuals: Object.assign({}, ...applied.map((result) => result.residuals || {})),
     anchoredPaths: applied.flatMap((result) => result.anchoredPaths || [])

@@ -2758,8 +2758,9 @@ fn traverse_aggregate_view(
       || !finite_vec3(first_moment)
       || !finite_vec3(momentum)
       || !finite_vec3(angular_momentum)
+      // Internal energy is gauge-relative (phase-caloric ice is negative);
+      // only its finiteness is structural.
       || !finite_f32(internal_energy)
-      || internal_energy < 0.0
       || !finite_f32(kinetic_energy)
       || kinetic_energy < 0.0
       || !finite_vec3(minimum)

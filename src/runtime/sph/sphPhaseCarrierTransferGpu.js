@@ -15,6 +15,7 @@ import {
 } from '../webgpuComputeLayout.js';
 import {
   assertSphLegacyMassPathAllowed,
+  markSphExactMassDerivedBuffers,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -226,13 +227,76 @@ export function packSphPhaseCarrierClosureRows(thermalMaterialTable, mechanicsMa
   };
 }
 
+// The transfer's own closure: the shared rows plus, after them, the explicit
+// vaporization records (sphThermalGpuKernel.js) for bulk boiling. Other
+// stages keep the shared layout, whose length encodes the gas section; the
+// transfer carries the gas-record count and the vaporization offset instead.
+export function packSphPhaseCarrierTransferClosureRows(thermalMaterialTable, mechanicsMaterialTable) {
+  const shared = packSphPhaseCarrierClosureRows(thermalMaterialTable, mechanicsMaterialTable);
+  const vaporization = thermalMaterialTable.explicitVaporizationRecords instanceof Float32Array
+    ? thermalMaterialTable.explicitVaporizationRecords : new Float32Array(0);
+  if (vaporization.length % 8 !== 0) throw new RangeError('explicit vaporization records use stride 8');
+  const values = new Float32Array(shared.values.length + vaporization.length);
+  values.set(shared.values, 0);
+  values.set(vaporization, shared.values.length);
+  const materialEnd = shared.materialRecordOffsetVec4 + shared.materialRecordCount * 2;
+  return {
+    ...shared,
+    values,
+    gasRecordCount: shared.values.length / 4 - materialEnd,
+    vaporizationOffsetVec4: shared.values.length / 4,
+    vaporizationRecordCount: vaporization.length / 8
+  };
+}
+
+export const SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES = 96;
+// Words per row the interface-front consumer reads (the SS thermal proposal's
+// derived row: fronts at 10..14, skin outputs at 15..19, face offset 20..22).
+export const SPH_PHASE_CARRIER_INTERFACE_FRONT_MIN_ROW_WORDS = 24;
+
+const interfaceFrontDummyBuffers = new WeakMap();
+function interfaceFrontDummyBuffer(device) {
+  let buffer = interfaceFrontDummyBuffers.get(device);
+  if (!buffer) {
+    buffer = uploadStorageBuffer(
+      device,
+      'ulg-sph-phase-carrier-transfer-interface-front-absent',
+      new Uint32Array(SPH_PHASE_CARRIER_INTERFACE_FRONT_MIN_ROW_WORDS)
+    );
+    interfaceFrontDummyBuffers.set(device, buffer);
+  }
+  return buffer;
+}
+
+// A front source is admitted only when it names a live buffer on this device,
+// a row stride the shader understands, and a nonzero epoch. Anything else is
+// the absent front: no skin conversion, the established transfer bit for bit.
+export function resolveSphPhaseCarrierInterfaceFront(interfacePhaseFront, device) {
+  const front = interfacePhaseFront || null;
+  const epoch = Number(front?.epoch);
+  const headerWords = Number(front?.headerWords);
+  const rowWords = Number(front?.rowWords);
+  if (
+    !front?.buffer
+    || webGpuBufferDevice(front.buffer) !== device
+    || !Number.isSafeInteger(epoch) || epoch <= 0 || epoch >= 2 ** 29
+    || !Number.isSafeInteger(headerWords) || headerWords < 0
+    || !Number.isSafeInteger(rowWords)
+    || rowWords < SPH_PHASE_CARRIER_INTERFACE_FRONT_MIN_ROW_WORDS
+  ) {
+    return null;
+  }
+  return Object.freeze({ buffer: front.buffer, epoch, headerWords, rowWords });
+}
+
 function createParamsArray({
   particleCount,
   plan,
   closure,
-  absolutePressureAuthority = false
+  absolutePressureAuthority = false,
+  interfaceFront = null
 }) {
-  const buffer = new ArrayBuffer(64);
+  const buffer = new ArrayBuffer(SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, plan.lineageCapacity, true);
@@ -250,6 +314,13 @@ function createParamsArray({
   view.setUint32(52, closure.materialRecordOffsetVec4, true);
   view.setUint32(56, absolutePressureAuthority === true ? 1 : 0, true);
   view.setFloat32(60, SPH_PHASE_COMPONENT_ACTIVATION_EPSILON, true);
+  view.setUint32(64, interfaceFront ? 1 : 0, true);
+  view.setUint32(68, interfaceFront ? interfaceFront.epoch : 0, true);
+  view.setUint32(72, interfaceFront ? interfaceFront.headerWords : 0, true);
+  view.setUint32(76, interfaceFront ? interfaceFront.rowWords : 0, true);
+  view.setUint32(80, closure.gasRecordCount ?? 0, true);
+  view.setUint32(84, closure.vaporizationOffsetVec4 ?? 0, true);
+  view.setUint32(88, closure.vaporizationRecordCount ?? 0, true);
   return buffer;
 }
 
@@ -263,7 +334,10 @@ function initialEvidence(primaryCapacity) {
     0, // transferred lineages
     0, // rejected lineages
     0xffffffff, // first rejected lineage
-    0, 0, 0, 0, 0, 0, 0, 0
+    0, // interface-front skin conversions (source carriers)
+    0, // bulk explicit-branch fusion conversions (source carriers)
+    0, // bulk explicit-branch boiling conversions (source carriers)
+    0, 0, 0, 0, 0
   ]);
 }
 
@@ -293,6 +367,32 @@ struct PhaseTransferParams {
   // resolves on the reference ladder, which is the pre-Slice-9 behavior.
   absolute_pressure_authority: u32,
   fraction_activation_epsilon: f32,
+  // Interface phase-front skin conversion (plan/todo/interface-resolution.md).
+  // Rows come from the SS thermal proposal's derived buffer; a row is consumed
+  // only when its stamp carries this step's front_epoch.
+  front_enabled: u32,
+  front_epoch: u32,
+  front_header_words: u32,
+  front_row_words: u32,
+  // Transfer-local closure tail (packSphPhaseCarrierTransferClosureRows).
+  gas_record_count: u32,
+  vaporization_offset_vec4: u32,
+  vaporization_record_count: u32,
+  _closure_pad: u32,
+};
+
+struct FrontConversion {
+  ready: u32,
+  own_phase: u32,
+  target_phase: u32,
+  mass: f32,
+  target_energy: f32,
+  own_energy: f32,
+  temperature: f32,
+  // The converted mass is born at its contact faces; the remainder moves by
+  // -mass * offset / (m - mass) so the lineage's first moment is unchanged.
+  face_offset: vec3<f32>,
+  own_offset: vec3<f32>,
 };
 
 struct LineagePhases {
@@ -327,6 +427,7 @@ struct PhaseAggregate {
 @group(0) @binding(6) var<storage, read_write> out_mechanics: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> evidence: array<atomic<u32>>;
 @group(0) @binding(8) var<uniform> params: PhaseTransferParams;
+@group(0) @binding(9) var<storage, read> interface_front: array<u32>;
 
 const EVIDENCE_MAGIC: u32 = 0x50544631u;
 const EVIDENCE_VERSION: u32 = 1u;
@@ -355,6 +456,351 @@ fn thermo0(index: u32) -> vec4<f32> { return source_thermo[index * 3u]; }
 fn thermo1(index: u32) -> vec4<f32> { return source_thermo[index * 3u + 1u]; }
 fn thermo2(index: u32) -> vec4<f32> { return source_thermo[index * 3u + 2u]; }
 
+// Interface phase-front skin conversion. The thermal proposal partitioned the
+// pair heat a carrier received across a contact whose interface temperature
+// lies past one of its own transition temperatures T*: the part its bulk could
+// conduct away from a front pinned at T* stayed sensible, and the excess E is
+// latent work on the skin. Here that skin mass m = E / (u_target - u_pre)
+// leaves the carrier as the next phase at T*, and the remaining mass keeps the
+// rest of the carrier's energy, so the lineage's energy is unchanged.
+// A carrier converts at most once per step: the interface skin front when the
+// thermal proposal stamped one, otherwise the bulk explicit-branch fusion.
+fn front_conversion(source_index: u32) -> FrontConversion {
+  let skin = skin_front_conversion(source_index);
+  if (skin.ready == 1u) { return skin; }
+  let fusion = explicit_fusion_conversion(source_index);
+  if (fusion.ready == 1u) { return fusion; }
+  return explicit_boiling_conversion(source_index);
+}
+
+// ln p_eq(T, P) - ln P of an explicit condensable (its model's own curve,
+// see sphThermalGpuKernel.js explicitVaporizationRecord). Positive means the
+// liquid's saturation pressure exceeds the total pressure: it boils.
+fn explicit_boiling_excess(record: u32, temperature: f32, pressure: f32) -> f32 {
+  let base = params.vaporization_offset_vec4 + record * 2u;
+  let a = closure_rows[base];
+  let b = closure_rows[base + 1u];
+  let t_ref = a.y;
+  let p_ref = a.z;
+  let h_fg = a.w;
+  let dcp = b.x;
+  let r = b.y;
+  let v_l = b.z;
+  let dt = temperature - t_ref;
+  return log(p_ref) + h_fg / r * (dt / t_ref) / temperature
+    + dcp / r * (log(1.0 + dt / t_ref) - dt / temperature)
+    + v_l * (pressure - p_ref) / (r * temperature)
+    - log(pressure);
+}
+
+// Bulk boiling for explicit-branch condensables: a liquid whose temperature
+// exceeds T_sat(P) at its own absolute pressure sends
+// m (u - u_l(T_sat)) / (u_g(T_sat) - u_l(T_sat)) to its gas lane at
+// u_g(T_sat); the remainder keeps the rest of its energy (energy-exact). Only
+// liquid -> gas: below boiling, evaporation and condensation depend on the
+// vapor's partial pressure, which is the vapor-exchange law's authority.
+// Without absolute-pressure authority the pressure is the reference ladder's
+// (as the legacy plateau boils on its packed reference plateau).
+fn explicit_boiling_conversion(source_index: u32) -> FrontConversion {
+  let none = FrontConversion(0u, 0u, 0u, 0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
+  if (params.vaporization_record_count == 0u) { return none; }
+  let s0 = state0(source_index);
+  let s1 = state1(source_index);
+  let t0 = thermo0(source_index);
+  let fractions = thermo1(source_index);
+  let mass = s0.w;
+  let energy = s1.w;
+  if (!(mass > params.mass_epsilon) || !finite_f32(energy)) { return none; }
+  if (!nearly_equal(fractions.y, 1.0) || fractions.x > params.fraction_activation_epsilon
+    || fractions.z > params.fraction_activation_epsilon || fractions.w > params.fraction_activation_epsilon) {
+    return none;
+  }
+  var record = INVALID_INDEX;
+  for (var index = 0u; index < params.vaporization_record_count; index = index + 1u) {
+    let row = closure_rows[params.vaporization_offset_vec4 + index * 2u];
+    if (row.x == t0.x && closure_rows[params.vaporization_offset_vec4 + index * 2u + 1u].w > 0.0) {
+      record = index;
+      break;
+    }
+  }
+  if (record == INVALID_INDEX) { return none; }
+  let pressure = select(
+    closure_rows[params.vaporization_offset_vec4 + record * 2u + 1u].w,
+    source_mechanics[source_index * 8u + 7u].x,
+    params.absolute_pressure_authority != 0u
+  );
+  if (!finite_f32(pressure) || !(pressure > 0.0)) { return none; }
+  // The liquid's temperature on its own packed branch line.
+  var liquid_lo = 0.0;
+  var liquid_hi = 0.0;
+  var energy_lo = 0.0;
+  var energy_hi = 0.0;
+  var found = false;
+  for (var segment = 0u; segment < params.thermal_segment_count; segment = segment + 1u) {
+    let base = params.thermal_offset_vec4 + segment * 3u;
+    let row0 = closure_rows[base];
+    if (row0.x == t0.x && row0.y > 2.5 && u32(round(row0.z)) == 2u && u32(round(row0.w)) == 2u) {
+      let row1 = closure_rows[base + 1u];
+      energy_lo = row1.x; energy_hi = row1.y; liquid_lo = row1.z; liquid_hi = row1.w;
+      found = true;
+      break;
+    }
+  }
+  if (!found || !(energy_hi > energy_lo) || !(liquid_hi > liquid_lo)) { return none; }
+  let temperature = liquid_lo + (energy - energy_lo) * (liquid_hi - liquid_lo) / (energy_hi - energy_lo);
+  if (!finite_f32(temperature) || !(temperature > liquid_lo)
+    || !(explicit_boiling_excess(record, temperature, pressure) > 0.0)) { return none; }
+  // T_sat(P) by bisection on the monotone excess (positive latent heat).
+  var lo = liquid_lo;
+  var hi = temperature;
+  if (explicit_boiling_excess(record, lo, pressure) > 0.0) { return none; }
+  for (var iteration = 0u; iteration < 40u; iteration = iteration + 1u) {
+    let mid = 0.5 * (lo + hi);
+    if (explicit_boiling_excess(record, mid, pressure) > 0.0) { hi = mid; } else { lo = mid; }
+  }
+  let saturation_temperature = hi;
+  let liquid_energy = explicit_branch_energy_at(t0.x, 2u, saturation_temperature);
+  let gas_energy = explicit_branch_energy_at(t0.x, 3u, saturation_temperature);
+  if (liquid_energy.y != 1.0 || gas_energy.y != 1.0 || !(gas_energy.x > liquid_energy.x)
+    || !(energy > liquid_energy.x)) { return none; }
+  var converted = min(mass * (energy - liquid_energy.x) / (gas_energy.x - liquid_energy.x), mass);
+  if (!finite_f32(converted) || !(converted > params.mass_epsilon)) { return none; }
+  let whole = mass - converted <= params.mass_epsilon;
+  let lineage_index = source_index % params.phase_lane_stride;
+  let target_s0 = state0(phase_lane_index(lineage_index, 3u));
+  // Gas never enters contact, so an existing gas carrier may gather from
+  // anywhere; an empty gas lane nucleates only on a non-sliver conversion.
+  if (!(target_s0.w > params.mass_epsilon) && !whole && converted < FUSION_NUCLEATION_FRACTION * mass) {
+    return none;
+  }
+  var converted_energy = gas_energy.x;
+  var own_energy = energy;
+  if (whole) {
+    converted = mass;
+    converted_energy = energy;
+  } else {
+    own_energy = (mass * energy - converted * gas_energy.x) / (mass - converted);
+    if (!finite_f32(own_energy)) { return none; }
+  }
+  return FrontConversion(1u, 2u, 3u, converted, converted_energy, own_energy,
+    saturation_temperature, vec3<f32>(0.0), vec3<f32>(0.0));
+}
+
+const EXPLICIT_FUSION_LAW: u32 = 2u;
+// Fraction of a carrier that must convert before it nucleates an empty
+// condensed lane (~0.16 K of ice superheat). A smaller excess stays sensible
+// until it accumulates, so no step's sliver becomes a free carrier.
+const FUSION_NUCLEATION_FRACTION: f32 = 1.0e-3;
+
+struct ExplicitFusion {
+  valid: u32,
+  temperature: f32,
+  solid_energy: f32,
+  liquid_energy: f32,
+};
+
+// u on the material's packed explicit branch for phase_id at temperature,
+// from the same endpoints the thermal kernel inverts (y = 1 when found).
+fn explicit_branch_energy_at(material_id: f32, phase_id: u32, temperature: f32) -> vec2<f32> {
+  for (var segment = 0u; segment < params.thermal_segment_count; segment = segment + 1u) {
+    let base = params.thermal_offset_vec4 + segment * 3u;
+    let row0 = closure_rows[base];
+    if (row0.x != material_id || row0.y < 2.5
+      || u32(round(row0.z)) != phase_id || u32(round(row0.w)) != phase_id) { continue; }
+    let row1 = closure_rows[base + 1u];
+    if (!(row1.y > row1.x) || !(row1.w > row1.z)
+      || !(temperature >= row1.z) || !(temperature <= row1.w)) { return vec2<f32>(0.0, 0.0); }
+    return vec2<f32>(row1.x + (temperature - row1.z) * (row1.y - row1.x) / (row1.w - row1.z), 1.0);
+  }
+  return vec2<f32>(0.0, 0.0);
+}
+
+fn explicit_fusion_for(material_id: f32) -> ExplicitFusion {
+  let none = ExplicitFusion(0u, 0.0, 0.0, 0.0);
+  for (var record = 0u; record < params.material_record_count; record = record + 1u) {
+    let base = params.material_record_offset_vec4 + record * 2u;
+    if (closure_rows[base].x != material_id) { continue; }
+    let row1 = closure_rows[base + 1u];
+    if (u32(round(row1.y)) != EXPLICIT_FUSION_LAW || !finite_f32(row1.w) || !(row1.w > 0.0)) {
+      return none;
+    }
+    let solid = explicit_branch_energy_at(material_id, 1u, row1.w);
+    let liquid = explicit_branch_energy_at(material_id, 2u, row1.w);
+    if (solid.y != 1.0 || liquid.y != 1.0 || !(liquid.x > solid.x)) { return none; }
+    return ExplicitFusion(1u, row1.w, solid.x, liquid.x);
+  }
+  return none;
+}
+
+// Bulk equilibrium fusion for explicit-branch (phase-caloric) materials, which
+// have no plateau rows: phase is selected explicitly, so energy alone never
+// melts or freezes a carrier there. A solid above u_s(T_f) sends
+// m (u - u_s) / (u_l - u_s) to its liquid lane at u_l(T_f); a liquid below
+// u_l(T_f) freezes m (u_l - u) / (u_l - u_s) at u_s(T_f). The remainder keeps
+// the rest of the carrier's energy, so the lineage's energy is unchanged. The
+// converted mass is born nested at the parent's centre (as a condensed skin is).
+fn explicit_fusion_conversion(source_index: u32) -> FrontConversion {
+  let none = FrontConversion(0u, 0u, 0u, 0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
+  let s0 = state0(source_index);
+  let s1 = state1(source_index);
+  let t0 = thermo0(source_index);
+  let fractions = thermo1(source_index);
+  let mass = s0.w;
+  let energy = s1.w;
+  if (!(mass > params.mass_epsilon) || !finite_f32(energy)) { return none; }
+  var own_phase = 0u;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let fraction = fractions[lane];
+    if (fraction > params.fraction_activation_epsilon) {
+      if (own_phase != 0u || !nearly_equal(fraction, 1.0)) { return none; }
+      own_phase = lane + 1u;
+    }
+  }
+  if (own_phase != 1u && own_phase != 2u) { return none; }
+  let fusion = explicit_fusion_for(t0.x);
+  if (fusion.valid == 0u) { return none; }
+  let latent = fusion.liquid_energy - fusion.solid_energy;
+  var target_phase = 0u;
+  var converted = 0.0;
+  var target_energy = 0.0;
+  if (own_phase == 1u && energy > fusion.solid_energy) {
+    target_phase = 2u;
+    converted = mass * (energy - fusion.solid_energy) / latent;
+    target_energy = fusion.liquid_energy;
+  } else if (own_phase == 2u && energy < fusion.liquid_energy) {
+    target_phase = 1u;
+    converted = mass * (fusion.liquid_energy - energy) / latent;
+    target_energy = fusion.solid_energy;
+  } else {
+    return none;
+  }
+  converted = min(converted, mass);
+  if (!finite_f32(converted) || !(converted > params.mass_epsilon)) { return none; }
+  let whole = mass - converted <= params.mass_epsilon;
+  let lineage_index = source_index % params.phase_lane_stride;
+  let target_index = phase_lane_index(lineage_index, target_phase);
+  let target_s0 = state0(target_index);
+  if (!(target_s0.w > params.mass_epsilon)) {
+    if (!whole && converted < FUSION_NUCLEATION_FRACTION * mass) { return none; }
+  } else {
+    // Merge only into a target carrier this one still touches; one that has
+    // moved away would otherwise be pulled across the scene (skin rule).
+    let own_row4 = source_mechanics[source_index * 8u + 4u];
+    let target_row4 = source_mechanics[target_index * 8u + 4u];
+    let own_edge = pow(max(own_row4.z * own_row4.w, 0.0), 1.0 / 3.0);
+    let target_edge = pow(max(target_row4.z * target_row4.w, 0.0), 1.0 / 3.0);
+    if (!(distance(s0.xyz, target_s0.xyz) <= 0.5 * (own_edge + target_edge))) { return none; }
+  }
+  var converted_energy = target_energy;
+  var own_energy = energy;
+  if (whole) {
+    converted = mass;
+    converted_energy = energy;
+  } else {
+    own_energy = (mass * energy - converted * target_energy) / (mass - converted);
+    if (!finite_f32(own_energy)) { return none; }
+  }
+  return FrontConversion(1u, own_phase, target_phase, converted,
+    converted_energy, own_energy, fusion.temperature, vec3<f32>(0.0), vec3<f32>(0.0));
+}
+
+fn skin_front_conversion(source_index: u32) -> FrontConversion {
+  var none = FrontConversion(0u, 0u, 0u, 0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
+  if (params.front_enabled == 0u || params.front_row_words < 24u) { return none; }
+  let row = params.front_header_words + source_index * params.front_row_words;
+  if (row + 24u > arrayLength(&interface_front)) { return none; }
+  let stamp = interface_front[row + 19u];
+  if ((stamp >> 3u) != params.front_epoch || params.front_epoch == 0u) { return none; }
+  let target_phase = stamp & 7u;
+  let s0 = state0(source_index);
+  let s1 = state1(source_index);
+  let t0 = thermo0(source_index);
+  let fractions = thermo1(source_index);
+  let mass = s0.w;
+  if (!(mass > params.mass_epsilon) || target_phase < 1u || target_phase > 4u) { return none; }
+  // Only a single-phase carrier has a bulk below its own front. A carrier
+  // already on a plateau is at T* everywhere and splits by equilibrium.
+  var own_phase = 0u;
+  for (var lane = 0u; lane < 4u; lane = lane + 1u) {
+    let fraction = fractions[lane];
+    if (fraction > params.fraction_activation_epsilon) {
+      if (own_phase != 0u || !nearly_equal(fraction, 1.0)) { return none; }
+      own_phase = lane + 1u;
+    }
+  }
+  if (own_phase == 0u || own_phase == target_phase) { return none; }
+  if (target_phase != own_phase + 1u && target_phase + 1u != own_phase) { return none; }
+  let skin_energy_j = bitcast<f32>(interface_front[row + 15u]);
+  let source_energy = bitcast<f32>(interface_front[row + 16u]);
+  let target_energy = bitcast<f32>(interface_front[row + 17u]);
+  let front_temperature = bitcast<f32>(interface_front[row + 18u]);
+  let face_offset = vec3<f32>(
+    bitcast<f32>(interface_front[row + 20u]),
+    bitcast<f32>(interface_front[row + 21u]),
+    bitcast<f32>(interface_front[row + 22u])
+  );
+  if (
+    !finite_f32(face_offset.x) || !finite_f32(face_offset.y) || !finite_f32(face_offset.z)
+  ) { return none; }
+  // A lane holds one carrier per phase per lineage. Converting into a
+  // condensed lane whose carrier sits elsewhere would merge the skin into it
+  // and pull that solid or liquid carrier across the scene to the face,
+  // which contact must then undo every step. Convert into a condensed lane
+  // only while it is empty or already touches this face. Gas never enters
+  // contact, so a gas lane may gather its skin from anywhere.
+  // A condensed skin (melt or freeze) deposits onto condensed matter that is
+  // already there; it never nucleates a free carrier. An empty condensed lane
+  // would turn one step's skin (~1e-12 kg for iron) into a free solid beside
+  // 1e-4 kg neighbours, a contact the Jacobi solve cannot converge on. Its
+  // energy then stays in the bulk, which the canonical apply already holds.
+  if (target_phase <= 2u) {
+    let lineage_index = source_index % params.phase_lane_stride;
+    let target_index = phase_lane_index(lineage_index, target_phase);
+    let target_s0 = state0(target_index);
+    if (!(target_s0.w > params.mass_epsilon)) { return none; }
+    {
+      let own_row4 = source_mechanics[source_index * 8u + 4u];
+      let target_row4 = source_mechanics[target_index * 8u + 4u];
+      let own_edge = pow(max(own_row4.z * own_row4.w, 0.0), 1.0 / 3.0);
+      let target_edge = pow(max(target_row4.z * target_row4.w, 0.0), 1.0 / 3.0);
+      let face_position = s0.xyz + face_offset;
+      if (
+        !(distance(face_position, target_s0.xyz) <= 0.5 * (own_edge + target_edge))
+      ) { return none; }
+    }
+  }
+  let denominator = target_energy - source_energy;
+  if (
+    !finite_f32(skin_energy_j) || !finite_f32(source_energy)
+    || !finite_f32(target_energy) || !finite_f32(front_temperature)
+    || !finite_f32(denominator) || denominator == 0.0
+    || skin_energy_j * denominator <= 0.0 || front_temperature <= 0.0
+  ) { return none; }
+  var converted = min(skin_energy_j / denominator, mass);
+  if (!(converted > params.mass_epsilon)) { return none; }
+  let energy = s1.w;
+  var own_energy = energy;
+  var converted_energy = target_energy;
+  // Gas never enters contact, so a gas skin is born at its contact face. A
+  // condensed skin (melt or freeze) is born nested at the parent's centre:
+  // the contact graph occludes a companion wholly inside its parent, while a
+  // new solid or liquid at the face would sit squeezed between two carriers.
+  var converted_offset = select(vec3<f32>(0.0), face_offset, target_phase >= 3u);
+  var own_offset = vec3<f32>(0.0);
+  if (mass - converted <= params.mass_epsilon) {
+    // The whole carrier converts; it carries its own energy and place.
+    converted = mass;
+    converted_energy = energy;
+    converted_offset = vec3<f32>(0.0);
+  } else {
+    own_energy = (mass * energy - converted * target_energy) / (mass - converted);
+    own_offset = -converted_offset * (converted / (mass - converted));
+    if (!finite_f32(own_energy)) { return none; }
+  }
+  return FrontConversion(1u, own_phase, target_phase, converted,
+    converted_energy, own_energy, front_temperature, converted_offset, own_offset);
+}
+
 fn phase_lane_index(lineage_index: u32, phase_id: u32) -> u32 {
   return (phase_id - 1u) * params.phase_lane_stride + lineage_index;
 }
@@ -372,8 +818,9 @@ fn mechanics_record_index(material_id: f32, phase_id: u32) -> u32 {
 fn closure_sound_speed(record: u32, temperature: f32) -> f32 {
   let row1 = closure_rows[params.mechanics_offset_vec4 + record * 3u + 1u];
   let end = params.material_record_offset_vec4 + params.material_record_count * 2u;
-  if (row1.w != 2.0 || arrayLength(&closure_rows) == end) { return row1.z; }
-  if (arrayLength(&closure_rows) != end + params.mechanics_record_count) { return -1.0; }
+  if (row1.w != 2.0 || params.gas_record_count == 0u) { return row1.z; }
+  if (params.gas_record_count != params.mechanics_record_count
+    || arrayLength(&closure_rows) < end + params.gas_record_count) { return -1.0; }
   return gas_constitutive_sound_speed(closure_rows[end + record], temperature);
 }
 
@@ -472,6 +919,14 @@ fn lineage_phases(lineage_index: u32) -> LineagePhases {
         return phase_set;
       }
     }
+    let conversion = front_conversion(source_index);
+    if (conversion.ready == 1u) {
+      let converted_bit = 1u << (conversion.target_phase - 1u);
+      if ((phase_set.phase_mask & converted_bit) == 0u) {
+        phase_set.phase_mask = phase_set.phase_mask | converted_bit;
+        phase_set.count = phase_set.count + 1u;
+      }
+    }
   }
   return phase_set;
 }
@@ -537,20 +992,47 @@ fn phase_aggregate(
     let t0 = thermo0(source_index);
     let fractions = thermo1(source_index);
     let t2 = thermo2(source_index);
-    let fraction = max(fractions[target_phase - 1u], 0.0);
+    var fraction = max(fractions[target_phase - 1u], 0.0);
+    var component_energy = 0.0;
+    var component_temperature = t0.z;
+    var component_offset = vec3<f32>(0.0);
+    let conversion = front_conversion(source_index);
+    if (conversion.ready == 1u) {
+      // A converting carrier is single-phase: its own phase keeps the
+      // remainder, the next phase receives the skin at T*.
+      if (target_phase == conversion.target_phase) {
+        fraction = conversion.mass / s0.w;
+        component_energy = conversion.target_energy;
+        component_temperature = conversion.temperature;
+        component_offset = conversion.face_offset;
+      } else if (target_phase == conversion.own_phase) {
+        fraction = (s0.w - conversion.mass) / s0.w;
+        component_energy = conversion.own_energy;
+        component_offset = conversion.own_offset;
+      } else {
+        fraction = 0.0;
+      }
+    } else {
+      component_energy = source_component_energy(source_index, target_phase).x;
+    }
     if (!(fraction > params.fraction_activation_epsilon)) { continue; }
-    let component_mass = s0.w * fraction;
+    let component_mass = select(
+      s0.w * fraction,
+      select(s0.w - conversion.mass, conversion.mass, target_phase == conversion.target_phase),
+      conversion.ready == 1u
+    );
+    if (!(component_mass > 0.0)) { continue; }
     let mechanics_row4 = source_mechanics[source_index * 8u + 4u];
     let component_current_volume = mechanics_row4.z * mechanics_row4.w * fraction;
-    let component_energy = source_component_energy(source_index, target_phase).x;
     aggregate.mass = aggregate.mass + component_mass;
     aggregate.current_volume = aggregate.current_volume + component_current_volume;
-    aggregate.first_moment = aggregate.first_moment + s0.xyz * component_mass;
+    aggregate.first_moment = aggregate.first_moment
+      + (s0.xyz + component_offset) * component_mass;
     aggregate.momentum = aggregate.momentum + s1.xyz * component_mass;
     aggregate.internal_energy = aggregate.internal_energy + component_energy * component_mass;
     aggregate.source_kinetic_energy = aggregate.source_kinetic_energy
       + 0.5 * component_mass * dot(s1.xyz, s1.xyz);
-    aggregate.temperature_mass = aggregate.temperature_mass + t0.z * component_mass;
+    aggregate.temperature_mass = aggregate.temperature_mass + component_temperature * component_mass;
     aggregate.smoothing_length = max(aggregate.smoothing_length, max(t2.x, 0.0));
     aggregate.entity_count = aggregate.entity_count + max(t2.y, 0.0) * fraction;
     aggregate.radius_cubed = aggregate.radius_cubed + pow(max(t2.w, 0.0), 3.0) * fraction;
@@ -819,6 +1301,16 @@ fn preflight(@builtin(global_invocation_id) global_id: vec3<u32>) {
     atomicAdd(&evidence[4u], 1u);
   }
   atomicAdd(&evidence[3u], 1u);
+  for (var phase_id = 1u; phase_id <= 4u; phase_id = phase_id + 1u) {
+    let source = phase_lane_index(lineage_index, phase_id);
+    if (skin_front_conversion(source).ready == 1u) {
+      atomicAdd(&evidence[8u], 1u);
+    } else if (explicit_fusion_conversion(source).ready == 1u) {
+      atomicAdd(&evidence[9u], 1u);
+    } else if (explicit_boiling_conversion(source).ready == 1u) {
+      atomicAdd(&evidence[10u], 1u);
+    }
+  }
 }
 
 @compute @workgroup_size(64)
@@ -886,10 +1378,17 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   // pressure for every particle. It does not today, so the pressure-adjusted
   // plateau stays inert and the reference ladder is used, exactly as before.
   absolutePressureAuthority = false,
+  // { buffer, epoch, headerWords, rowWords } from the SS thermal proposal that
+  // fed this step's canonical thermal apply. Absent: no skin conversion.
+  interfacePhaseFront = null,
   retainOutputParticleBuffers = false,
   readbackMode = NO_FULL_READBACK_MODE
-} = {}) {
-  assertSphLegacyMassPathAllowed({ sphParticleState, sourceStateBuffer, sourceThermoBuffer }, 'Phase-carrier transfer');
+} = {}, ledgerAuthority = null) {
+  // Only the captured ledger route below may run the f32 split on exact
+  // carriers: its reconcile pass makes the result exact.
+  if (ledgerAuthority !== PHASE_LEDGER_AUTHORITY) {
+    assertSphLegacyMassPathAllowed({ sphParticleState, sourceStateBuffer, sourceThermoBuffer }, 'Phase-carrier transfer');
+  }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('Phase-carrier transfer requires a WebGPU-like device');
   }
@@ -910,6 +1409,10 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     }
   }
 
+  const resolvedInterfaceFront = resolveSphPhaseCarrierInterfaceFront(
+    interfacePhaseFront,
+    device
+  );
   const setupAllocations = [];
   const ownSetupAllocation = (buffer) => {
     if (buffer) setupAllocations.push(buffer);
@@ -933,7 +1436,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     workgroups
   } = (() => {
     try {
-      const closure = packSphPhaseCarrierClosureRows(
+      const closure = packSphPhaseCarrierTransferClosureRows(
         thermalMaterialTable,
         mechanicsMaterialTable
       );
@@ -975,14 +1478,15 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
       ));
       const paramsBuffer = ownSetupAllocation(device.createBuffer({
         label: 'ulg-sph-phase-carrier-transfer-params',
-        size: 64,
+        size: SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       }));
       device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
         particleCount: sphParticleState.particleCount,
         plan,
         closure,
-        absolutePressureAuthority
+        absolutePressureAuthority,
+        interfaceFront: resolvedInterfaceFront
       }));
 
       const bindings = [
@@ -994,17 +1498,18 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
         computeBufferBinding(5, 'storage'),
         computeBufferBinding(6, 'storage'),
         computeBufferBinding(7, 'storage'),
-        computeBufferBinding(8, 'uniform')
+        computeBufferBinding(8, 'uniform'),
+        computeBufferBinding(9, 'read-only-storage')
       ];
       const preflightPipeline = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-phase-carrier-transfer.v3.preflight',
+        cacheKey: 'ulg-sph-phase-carrier-transfer.v4.preflight',
         label: 'ulg-sph-phase-carrier-transfer-preflight',
         code: sphPhaseCarrierTransferWgsl,
         entryPoint: 'preflight',
         bindings
       });
       const applyPipeline = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-phase-carrier-transfer.v3.apply',
+        cacheKey: 'ulg-sph-phase-carrier-transfer.v4.apply',
         label: 'ulg-sph-phase-carrier-transfer-apply',
         code: sphPhaseCarrierTransferWgsl,
         entryPoint: 'apply_transfer',
@@ -1019,7 +1524,14 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
         { binding: 5, resource: { buffer: outThermoBuffer } },
         { binding: 6, resource: { buffer: outMechanicsBuffer } },
         { binding: 7, resource: { buffer: evidenceBuffer } },
-        { binding: 8, resource: { buffer: paramsBuffer } }
+        { binding: 8, resource: { buffer: paramsBuffer } },
+        {
+          binding: 9,
+          resource: {
+            buffer: resolvedInterfaceFront?.buffer
+              || interfaceFrontDummyBuffer(device)
+          }
+        }
       ];
       const preflightBindGroup = device.createBindGroup({
         layout: preflightPipeline.bindGroupLayout,
@@ -1106,7 +1618,9 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
         }
       }
     }
-    outputsDestroyed = Object.values(outputComponentsDestroyed).every(Boolean);
+    const allComponentsDestroyed = Object.values(outputComponentsDestroyed).every(Boolean);
+    if (allComponentsDestroyed) destroyBufferOnce(evidenceBuffer);
+    outputsDestroyed = allComponentsDestroyed;
     const requestedComplete = Object.entries(requested).every(
       ([component, selected]) => (
         selected !== true || outputComponentsDestroyed[component] === true
@@ -1130,7 +1644,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     let firstError = null;
     for (const buffer of [
       closureBuffer,
-      evidenceBuffer,
+      ...(retainOutputParticleBuffers ? [] : [evidenceBuffer]),
       paramsBuffer
     ]) {
       try {
@@ -1162,10 +1676,13 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     phaseLaneStride: plan.phaseLaneStride,
     companionStart: plan.companionStart,
     lineageCount: plan.lineageCapacity,
+    interfacePhaseFrontConsumed: Boolean(resolvedInterfaceFront),
+    interfacePhaseFrontEpoch: resolvedInterfaceFront?.epoch ?? 0,
     state: new Float32Array(),
     thermo: new Float32Array(),
     mechanics: new Float32Array(),
     evidence: null,
+    evidenceBuffer: retainOutputParticleBuffers ? evidenceBuffer : null,
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
     mechanicsBuffer: retainOutputParticleBuffers ? outMechanicsBuffer : null,
@@ -1299,6 +1816,26 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
 }
 
 const phaseSourceCaptures = new WeakMap();
+const PHASE_LEDGER_AUTHORITY = Object.freeze({});
+
+// Integer energy ledger (g2-integer-ledger-proposal.md, Phase 2): a captured
+// phase transfer whose thermal input carries an exact energy record runs the
+// f32 split and then the reconcile pass that makes it exact.
+function validatePhaseLedgerInput(args, ledger, token) {
+  const seal = ledger?.thermalSeal;
+  if (!token || !seal?.exactEnergy || typeof seal.validate !== 'function' || !ledger.sourceRead?.read) {
+    throw new TypeError('Ledger phase transfer requires a captured thermal energy record');
+  }
+  seal.validate();
+  if (seal.output?.stateBuffer !== args.sourceStateBuffer || seal.output?.thermoBuffer !== args.sourceThermoBuffer) {
+    throw new TypeError('Ledger phase transfer input differs from its genuine thermal output');
+  }
+  if (ledger.massRead != null && (ledger.massRead.rowCount !== seal.exactEnergy.rowCount
+      || ledger.massRead.format !== seal.exactEnergy.format)) {
+    throw new TypeError('Ledger phase transfer mass rows differ from its energy record');
+  }
+}
+
 export function resolveSphPhaseCarrierTransferSourceCapture(result, token) {
   const seal = phaseSourceCaptures.get(token);
   if (!seal || seal.result !== result) throw new Error('Unknown phase-transfer source capture');
@@ -1318,9 +1855,26 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
     mlsMpmParticleState: args.mlsMpmParticleState, sourceStateBuffer: args.sourceStateBuffer,
     sourceThermoBuffer: args.sourceThermoBuffer, sourceMechanicsBuffer: args.sourceMechanicsBuffer } : null;
   const exactRequested = args.exactThermalResult != null || args.exactReactionResult != null;
+  const exactLedger = args.exactLedger ?? null;
+  if (exactLedger) {
+    if (exactRequested) throw new TypeError('A phase transfer is either exact-rational or ledger, not both');
+    validatePhaseLedgerInput(args, exactLedger, token);
+  }
   const stage = exactRequested
     ? await (await import('./sphExactPhaseCarrierStageGpu.js')).prepareSphExactPhaseCarrierStage(args)
-    : createSphPhaseCarrierTransferWebGpuEncoderStage(args);
+    : createSphPhaseCarrierTransferWebGpuEncoderStage(args, exactLedger ? PHASE_LEDGER_AUTHORITY : null);
+  let ledgerStage = null;
+  if (exactLedger) {
+    const plan = args.phaseCarrierPlan ?? args.sphParticleState?.phaseCarrierPlan;
+    try {
+      ledgerStage = (await import('./sphExactPhaseLedgerReconcileGpu.js')).createSphExactPhaseLedgerReconcileStage({
+        device: args.device, lineageCount: Number(plan?.lineageCapacity), laneStride: Number(plan?.phaseLaneStride),
+        particleCount: args.sphParticleState.particleCount, inputStateBuffer: args.sourceStateBuffer,
+        outStateBuffer: stage.stateBuffer, outThermoBuffer: stage.thermoBuffer, outMechanicsBuffer: stage.mechanicsBuffer,
+        // After a ledger reaction the reaction's successor rows are the input.
+        massRead: exactLedger.massRead ?? exactLedger.sourceRead.read, energy: exactLedger.thermalSeal.exactEnergy });
+    } catch (error) { stage.cleanupSubmittedWork(); stage.cleanupRetainedOutput?.(); throw error; }
+  }
   const {
     device,
     retainOutputParticleBuffers = false,
@@ -1334,12 +1888,15 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
       : [];
   const authenticatedQueueOrderedRoute =
     noFullReadback && exactConsumerClaims.length > 0;
-  const encoder = device.createCommandEncoder();
-  stage.encode(encoder);
-  const commandBuffer = encoder.finish();
   let submittedWorkCleanupClaim = null;
   let submittedWorkFinalConsumer = null;
   let outputCleanupClaim = null;
+  let ledgerCommitted = null;
+  try {
+  const encoder = device.createCommandEncoder();
+  stage.encode(encoder);
+  ledgerStage?.encode(encoder);
+  const commandBuffer = encoder.finish();
   if (authenticatedQueueOrderedRoute) {
     try {
       if (retainOutputParticleBuffers) {
@@ -1408,6 +1965,16 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
     device.queue.submit([commandBuffer]);
   }
   stage.markSubmitted?.();
+    if (ledgerStage) {
+      markSphExactMassDerivedBuffers(exactLedger.sourceRead, [stage.stateBuffer, stage.thermoBuffer],
+        { mechanicsBuffers: [stage.mechanicsBuffer] });
+    }
+    ledgerCommitted = ledgerStage?.commit() ?? null;
+  } catch (error) {
+    // Nothing reached the queue: the successor records were never written.
+    if (!ledgerCommitted) ledgerStage?.abandon();
+    throw error;
+  }
   if (!noFullReadback) {
     const [stateBytes, thermoBytes, mechanicsBytes, evidenceBytes] = await Promise.all([
       readBuffer(device, stage.stateBuffer, stage.stateBufferByteLength, 'ulg-phase-transfer-state-readback'),
@@ -1429,6 +1996,9 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
         + Math.max(4, stage.evidenceBufferByteLength)
     }));
     stage.result.invalidLineageCount = stage.result.evidence[6];
+    stage.result.interfaceFrontConversionCount = stage.result.evidence[8];
+    stage.result.explicitFusionConversionCount = stage.result.evidence[9];
+    stage.result.explicitBoilingConversionCount = stage.result.evidence[10];
     stage.result.firstInvalidLineage = stage.result.evidence[7] === 0xffffffff
       ? null
       : stage.result.evidence[7];
@@ -1516,10 +2086,23 @@ export async function runSphPhaseCarrierTransferWebGpu(args = {}) {
     const base = createPostMechanicsStageOutputSeal(stage.result, capturedInputs, {
       onLastRelease: stage.exactPhase ? () => {
         void Promise.all([stage.releaseSource(), stage.releaseInventory(), stage.releaseQuantityStorage()]).catch(() => {});
+      } : ledgerCommitted ? () => {
+        void ledgerStage.releaseUnadopted(ledgerCommitted).catch(() => {});
       } : null
     });
     phaseSourceCaptures.set(token, stage.exactPhase ? Object.freeze({ ...base, exactPhase: stage.exactPhase,
-      validate() { base.validate(); stage.validateOutput(); return true; } }) : base);
+      validate() { base.validate(); stage.validateOutput(); return true; } })
+      : ledgerCommitted ? Object.freeze({ ...base, exactLedgerPhase: ledgerCommitted,
+        sourceParticleRead: exactLedger.sourceRead,
+        phaseValidationBuffer: stage.evidenceBuffer,
+        validate() {
+          base.validate();
+          if (stage.result.evidenceBuffer !== stage.evidenceBuffer) {
+            throw new TypeError('Captured phase validation buffer was replaced');
+          }
+          return true;
+        }
+      }) : base);
     if (stage.exactPhase) {
       try { await stage.completeInventory(stage.result, token); }
       catch (error) {

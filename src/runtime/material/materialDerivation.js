@@ -744,7 +744,9 @@ function deriveMixtureProperties({ key, components }) {
     idealGas: true,
     mixture: true,
     heatCapacityModel: { gas: 'component-statistical-mechanics' },
-    phases: [{ name: 'gas', cpJPerKgK: cvMolar / molarMassKgPerMol, densityKgPerM3, temperatureRange: [0, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }],
+    // cpJPerKgK is isobaric for every phase; the mixture's Cv is explicit.
+    phases: [{ name: 'gas', cpJPerKgK: (cvMolar + R) / molarMassKgPerMol, cvJPerKgK: cvMolar / molarMassKgPerMol,
+      densityKgPerM3, temperatureRange: [0, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }],
     transitions: []
   }, {
     entries: [

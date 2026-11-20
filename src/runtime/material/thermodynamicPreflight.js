@@ -17,11 +17,17 @@ function energyOf(properties, temperatureK) {
   return specificInternalEnergyJPerKg(properties, temperatureK);
 }
 
-function solveAdiabaticEquilibriumK(parts) {
-  const total = (t) => parts.reduce((sum, p) => sum + p.massKg * energyOf(p.properties, t), 0);
+// Finite walls join the closed system as lumped faces holding C * (T - T0).
+function solveAdiabaticEquilibriumK(parts, walls = []) {
+  const wallEnergy = (t) => walls.reduce(
+    (sum, wall) => sum + wall.capacityJPerK * (t - wall.initialTemperatureK),
+    0
+  );
+  const total = (t) => parts.reduce((sum, p) => sum + p.massKg * energyOf(p.properties, t), 0)
+    + wallEnergy(t);
   const target = parts.reduce((sum, p) => sum + p.massKg * energyOf(p.properties, p.initialTemperatureK), 0);
-  let lo = Math.min(...parts.map((p) => p.initialTemperatureK));
-  let hi = Math.max(...parts.map((p) => p.initialTemperatureK));
+  let lo = Math.min(...parts.map((p) => p.initialTemperatureK), ...walls.map((w) => w.initialTemperatureK));
+  let hi = Math.max(...parts.map((p) => p.initialTemperatureK), ...walls.map((w) => w.initialTemperatureK));
   for (let i = 0; i < 200; i += 1) {
     const mid = 0.5 * (lo + hi);
     if (total(mid) < target) lo = mid;
@@ -74,13 +80,29 @@ export async function computeClosureBackedPreflight(scenario = createSphPhaseSce
   const airMassKg = airVolumeM3 * densitySamples.air.value;
 
   const adiabatic = scenario.walls.model === 'adiabatic';
-  const adiabaticEquilibriumK = solveAdiabaticEquilibriumK([
+  const closureParts = [
     { massKg: ironMassKg, properties: feClosure.properties, initialTemperatureK: tFe0 },
     { massKg: iceMassKg, properties: h2oClosure.properties, initialTemperatureK: tIce0 },
     { massKg: airMassKg, properties: airClosure.properties, initialTemperatureK: tAir0 }
-  ]);
-  const asymptoticInteriorTempK = reference.boundary.asymptoticInteriorTempK;
-  const bindingInteriorTempK = adiabatic ? adiabaticEquilibriumK : reference.boundary.maxWallTempK;
+  ];
+  const adiabaticEquilibriumK = solveAdiabaticEquilibriumK(closureParts);
+  // Honest finite walls: a closed system of interior and lumped faces.
+  const wallAuthority = scenario.walls.authority;
+  const finiteWalls = wallAuthority?.finiteCapacity === true
+    ? Object.keys(wallAuthority.faces).map((faceId) => ({
+        capacityJPerK: Number(wallAuthority.faceHeatCapacitiesJPerK[faceId]),
+        initialTemperatureK: Number(wallAuthority.faces[faceId])
+      }))
+    : null;
+  const finiteWallEquilibriumK = finiteWalls
+    ? solveAdiabaticEquilibriumK(closureParts, finiteWalls)
+    : null;
+  const asymptoticInteriorTempK = finiteWalls
+    ? finiteWallEquilibriumK
+    : reference.boundary.asymptoticInteriorTempK;
+  const bindingInteriorTempK = adiabatic
+    ? adiabaticEquilibriumK
+    : (finiteWalls ? finiteWallEquilibriumK : reference.boundary.maxWallTempK);
 
   const initialEnergyJ = ironMassKg * energyOf(feClosure.properties, tFe0)
     + iceMassKg * energyOf(h2oClosure.properties, tIce0)

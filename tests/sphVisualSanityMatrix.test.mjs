@@ -1319,6 +1319,13 @@ test('standard canned scenarios use worker-owned SS with a native surface consum
           maximumTailRetreatM: 0.0024814019635976003
         }
       );
+    } else if (scenario.presetId === 'iron-ice-quench') {
+      // Closed-ceiling steam terminal with per-carrier clearance (scaled x 0.028).
+      const wall = scenario.phaseAwareAcceptance.generatedGas.upperWallTerminal;
+      assert.equal(wall.boundaryCondition, 'closed-g2p-clamped');
+      assert.equal(wall.perCarrierClearanceBand, true);
+      assert.ok(Math.abs(wall.boxMaxYM - 0.14) < 1e-12, `box ${wall.boxMaxYM}`);
+      assert.ok(Math.abs(wall.wallInsetM - 0.0034739627 / 2) < 1e-9, `inset ${wall.wallInsetM}`);
     } else {
       assert.equal(
         scenario.phaseAwareAcceptance?.generatedGas?.upperWallTerminal,

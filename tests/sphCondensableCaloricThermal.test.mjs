@@ -73,6 +73,22 @@ function packed({ phaseId = 3, energy = u(3, 278), phaseFractions = fractions(ph
       ...phaseFractions, 0.2, 10, 1, 0.1]) };
 }
 
+
+// Honest conduction-limited walls: choose dt so a wall pulse delivers exactly
+// `joules` to particle 0, computing its conductance k*a*a/L exactly as
+// runSphThermalStepCpu does (a = cube edge of the rest volume, L = max(d, a/2)).
+function honestWallPulseDtS(packedState, thermalTable, { joules = 3900, deltaK = 20 } = {}) {
+  const mass = packedState.state[3];
+  const restDensity = packedState.thermo[3];
+  const edge = Math.cbrt(mass / restDensity);
+  const phaseId = packedState.thermo[1];
+  const k = resolveThermalConductivityFromTable(thermalTable, packedState.thermo[0],
+    packedState.state[7], phaseId, packedState.thermo.subarray(4, 8)).thermalConductivityWPerMK;
+  const path = Math.max(packedState.state[0], 0.5 * edge);
+  const conductance = k * edge * edge / path;
+  return joules / (conductance * deltaK);
+}
+
 test('explicit enrollment emits exactly two independent caloric rows and preserves default legacy tables', () => {
   assert.equal(table.segmentCount, 2);
   assert.equal(responses.responseCount, 2);
@@ -213,12 +229,15 @@ test('actual CPU thermal preserves fresh cool vapor across two zero-heat steps a
 });
 
 test('real wall pulse uses phase Cv: 3900 J/kg gives cool vapor one kelvin without rebasing phase', () => {
-  const source = packed({ position: [0.25, 2, 2] });
+  const source = packed({ position: [0.25, 20, 20] });
   const before = source.state.slice();
   const out = runSphThermalStepCpu({ sphParticleState: source,
-    thermalMaterialTable: withoutRadiation(table), wallTemperaturesK: { xMin: 298 },
-    wallLayerM: 1, wallRate: 2600, dtS: 0.1, conductionRate: 0, boxDimsM: [4, 4, 4] });
-  // Q = 2600 W/K * (298-278) K * (1-.25/1) * .1 s = 3900 J.
+    thermalMaterialTable: withoutRadiation(table), // The 1 kg vapor parcel is a cube about 2.15 m on a side: a 40 m box in y
+    // and z keeps it touching x-min only.
+    wallTemperaturesK: { xMin: 298 },
+    wallLayerM: 1, wallRate: 1, dtS: honestWallPulseDtS(source, withoutRadiation(table)),
+    conductionRate: 0, boxDimsM: [4, 40, 40] });
+  // Honest wall: Q = (k a^2 / L) * (298-278) K * dt = 3900 J by construction.
   near(out.wallHeatJ.xMin, 3900);
   near(out.state[7] - before[7], 3900);
   near(out.thermo[2], 279, 4e-5);

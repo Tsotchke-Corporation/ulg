@@ -46,10 +46,17 @@ test('reference material closures are non-overclaiming and cite pending microphy
 
 test('thermo core: H2O matches the constant-cp reference; iron solid uses first-principles Debye', () => {
   const { fe, h2o } = createReferenceMaterialClosures();
-  // Water still uses constant per-phase heat capacities, so it matches the reference exactly.
-  for (const t of [233.15, 300, 350, 500]) {
+  // Water still uses constant per-phase heat capacities. The condensed phases
+  // match the enthalpy-based constant-cp reference exactly; steam is internal
+  // energy (G2 Phase 2: Cv and dU of vaporization), so it sits exactly the
+  // ideal-gas h - u = R*T/M below the reference.
+  for (const t of [233.15, 300, 350]) {
     assert.ok(Math.abs(specificInternalEnergyJPerKg(h2o.properties, t) - specificEnergyJPerKg('h2o', t)) < 1e-6);
   }
+  const gasT = 500;
+  const rOverM = 8.314462618 / h2o.properties.molarMassKgPerMol;
+  assert.ok(Math.abs(specificEnergyJPerKg('h2o', gasT) - specificInternalEnergyJPerKg(h2o.properties, gasT)
+    - rOverM * gasT) < 1e-6);
   // Iron solid heat capacity is now the Debye model: below Dulong–Petit at low T, approaching it
   // at high T. So its internal energy is genuinely lower than the constant-449 reference.
   const cv233 = heatCapacityJPerKgK(fe.properties, 233.15);
@@ -111,7 +118,8 @@ test('MaterialRegistry sampling outside the closure domain emits a refresh reque
 
 test('closure-backed preflight reproduces the reference-constant preflight', async () => {
   const registry = await freshRegistry();
-  const scenario = createSphPhaseScenario();
+  // The -40 F reservoir premise of this comparison (finite walls are below).
+  const scenario = createSphPhaseScenario({ wallModel: 'infinite-fixed-temperature-reservoir' });
   const preflight = await computeClosureBackedPreflight(scenario, { materialRegistry: registry, allowFixtureBaseline: true });
   assert.equal(preflight.closureBacked, true);
   // Masses + feasibility are invariant to the heat-capacity model, so they still match.
@@ -129,11 +137,20 @@ test('closure-backed preflight reproduces the reference-constant preflight', asy
   const adiabatic = await computeClosureBackedPreflight(createSphPhaseScenario({ wallModel: 'adiabatic' }), { materialRegistry: registry, allowFixtureBaseline: true });
   assert.equal(adiabatic.closureSampling.feasible, false);
   assert.equal(adiabatic.closureSampling.consistentWithReference, true);
+
+  // Honest finite walls (the default): a sealed box mixes above freezing, and
+  // the closure-backed verdict agrees with the reference-constant one.
+  const finite = await computeClosureBackedPreflight(createSphPhaseScenario(), { materialRegistry: registry, allowFixtureBaseline: true });
+  assert.equal(finite.boundary.model, 'finite-heat-capacity-lumped-face');
+  assert.equal(finite.closureSampling.feasible, false);
+  assert.equal(finite.closureSampling.consistentWithReference, true);
 });
 
 test('closure-backed preflight runs strict derived closures without fixture baseline', async () => {
   const registry = await derivedRegistry();
-  const preflight = await computeClosureBackedPreflight(createSphPhaseScenario(), { materialRegistry: registry });
+  const preflight = await computeClosureBackedPreflight(createSphPhaseScenario({
+    wallModel: 'infinite-fixed-temperature-reservoir'
+  }), { materialRegistry: registry });
   assert.equal(preflight.closureBacked, true);
   assert.equal(preflight.status, 'preflight-feasible');
   assert.equal(preflight.closureSampling.feasible, true);

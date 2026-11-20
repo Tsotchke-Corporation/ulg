@@ -1,3 +1,4 @@
+import { watchSphDeviceLossFor } from './sphDeviceLossRelay.js';
 import {
   SPH_DISPERSED_MEDIUM_OPTICS_ROW_BYTES,
   SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS,
@@ -934,15 +935,9 @@ function registerSphDispersedMediumGpuBuffer(
     authorityRecords.set(authority, record);
     uploadRecords.set(upload, record);
     bufferRecords.set(buffer, record);
-    if (device.lost?.then) {
-      Promise.resolve(device.lost).then(() => {
-        record.deviceLost = true;
-        destroyUploadRecordNow(record);
-      }).catch(() => {
-        record.deviceLost = true;
-        destroyUploadRecordNow(record);
-      });
-    }
+    // Weak per-record loss watch: a strong per-record reaction kept every
+    // step's record (rows, buffers, authority) alive with the device.
+    watchSphDeviceLossFor(device, record, quarantineUploadRecordAfterDeviceLoss);
     return upload;
   } catch (error) {
     if (authority) authorityRecords.delete(authority);
@@ -1762,4 +1757,9 @@ export function destroySphDispersedMediumGpuBuffers(upload) {
   const record = uploadRecords.get(upload);
   if (!record || record.upload !== upload) return false;
   return retireUploadRecord(record);
+}
+
+function quarantineUploadRecordAfterDeviceLoss(record) {
+  record.deviceLost = true;
+  destroyUploadRecordNow(record);
 }

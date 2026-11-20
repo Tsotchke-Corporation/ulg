@@ -5924,6 +5924,45 @@ test('worker schedule executes the exact enabled and disabled hierarchy policy',
   }
 });
 
+test('worker phase-slot refinement forwards configuration-bound admission receipts and rejects tampering before execution', async () => {
+  const fields = ['phaseVolumeSplitMergeAdmission', 'particleStorageAllocatorAdmission',
+    'particleStorageSlotAssignmentAdmission', 'particleStorageMaterializationAdmission'];
+  for (const mode of ['admitted', 'tampered', 'missing']) {
+    const fixture = workerScheduleFixture({ laneSuffix: `phase-slot-${mode}` });
+    fixture.buffers.gridSpacingM = 0.25;
+    const laneOptions = { laneId: `ulg:test:phase-slot-${mode}-lane`, stateKey: `ulg:test:phase-slot-${mode}-state` };
+    const hierarchyConfig = structuredClone(createSchroederWorkerHierarchyConfig({
+      selectedLevel: 0, minLevel: 0, maxLevel: 0,
+      enablePhaseVolumeMigration: true, enablePhaseSlotRefinement: true,
+      phaseSlotRefinementAdmissions: Object.fromEntries(fields.map(field => [field,
+        { committed: true, sourceHotBufferKey: `owner:${field}` }]))
+    }));
+    if (mode === 'tampered') hierarchyConfig.phaseSlotRefinementAdmissions.particleStorageAllocatorAdmission.sourceHotBufferKey = 'different-owner';
+    if (mode === 'missing') delete hierarchyConfig.phaseSlotRefinementAdmissions.particleStorageAllocatorAdmission;
+    Object.assign(fixture.stageOptions.schroederSameLevelMechanics, {
+      hierarchyConfig, enablePhaseVolumeMigration: true, residentStepOptions: {}
+    });
+    fixture.stageOptions.schroederSpatialEpoch.scheduleStepOptionsProvider = null;
+    try {
+      const run = () => runUlgMechanicsResidentStageWorkerSchedulePayload(schedulePayload(
+        workerSchroederStageContext(fixture.device, fixture.buffers, fixture.stageOptions),
+        { stepCount: 1, scheduleId: `ulg:test:phase-slot-${mode}-schedule` }, laneOptions));
+      if (mode !== 'admitted') {
+        await assert.rejects(run, /hierarchy signature|all four storage admission/);
+        assert.equal(fixture.runnerCalls.length, 0);
+      } else {
+        const result = await run();
+        assert.equal(result.status, 'worker-resident-schedule-completed');
+        assert.equal(fixture.runnerCalls.length, 1);
+        assert.equal(fixture.runnerCalls[0].enablePhaseSlotRefinement, true);
+        for (const field of fields) assert.deepEqual(fixture.runnerCalls[0][field], hierarchyConfig.phaseSlotRefinementAdmissions[field]);
+        assert.equal(result.perStepSummaries.lastStep.hierarchyStageSummary.hierarchyConfig.enablePhaseSlotRefinement, true);
+        structuredClone(result);
+      }
+    } finally { releaseUlgMechanicsResidentStageWorkerLane(laneOptions); }
+  }
+});
+
 test('schedule provider overrides cannot clear sidecars or mechanics views required by the derived law activation', async () => {
   const fixture = workerScheduleFixture({
     laneSuffix: 'provider-required-view-seal'
@@ -6440,6 +6479,7 @@ test('ULG canonical presentation opportunities are bounded and preserve sole ter
       let readinessCheckCount = 0;
       let resolveHung = null;
       let settled = false;
+      let outstandingBoundaries = 0;
       try {
         const result = await runUlgMechanicsResidentStageWorkerSchedulePayload(
           schedulePayload(workerSchroederStageContext(
@@ -6462,15 +6502,23 @@ test('ULG canonical presentation opportunities are bounded and preserve sole ter
                 boundaries.push(boundary);
                 signals.push(signal);
                 assert.equal(settled, false);
+                // Non-blocking presentation: a boundary starts right after its
+                // step's physics was queued, never more than one at a time,
+                // and in step order (a busy boundary skips later steps).
                 assert.equal(fixture.runnerCalls.length, boundary.completedSubstepCount);
+                assert.equal(outstandingBoundaries, 0, 'at most one presentation boundary outstanding');
+                outstandingBoundaries += 1;
                 assert.equal(signal.aborted, false);
+                const previous = boundaries.at(-2);
+                assert.ok(!previous || boundary.completedSubstepCount > previous.completedSubstepCount);
                 assert.deepEqual(boundary, {
-                  submissionOrdinal: boundaries.length,
-                  completedSubstepCount: boundaries.length,
+                  submissionOrdinal: boundary.completedSubstepCount,
+                  completedSubstepCount: boundary.completedSubstepCount,
                   totalSubstepCount: stepCount,
                   chunkStepCount: 1
                 });
-                if (mode === 'rejected') throw new Error('renderer unavailable');
+                const release = () => { outstandingBoundaries -= 1; };
+                if (mode === 'rejected') { release(); throw new Error('renderer unavailable'); }
                 if (mode === 'hung') return new Promise((resolve) => { resolveHung = resolve; });
                 if (mode === 'cancelled') {
                   setTimeout(() => cancelUlgMechanicsResidentStageWorkerSchedule(scheduleId), 0);
@@ -6479,12 +6527,11 @@ test('ULG canonical presentation opportunities are bounded and preserve sole ter
                 await fixture.device.queue.onSubmittedWorkDone();
                 boundaryFenceCount += 1;
                 await new Promise((resolve) => setTimeout(resolve, 0));
-                assert.equal(fixture.runnerCalls.length, boundary.completedSubstepCount,
-                  'next canonical physics step cannot overtake the awaited presentation');
                 const receipt = canonicalIsosurfaceBoundaryProof(
                   boundary, mode === 'replayed-proof' ? 1 : boundaries.length
                 );
                 if (mode === 'invalid-proof') receipt.isosurfaceFrameProof.authoritativeStateMutation = true;
+                release();
                 return receipt;
               }
             })
@@ -6492,32 +6539,59 @@ test('ULG canonical presentation opportunities are bounded and preserve sole ter
         );
         settled = true;
         const cancelled = mode === 'cancelled';
-        const expectedSteps = cancelled ? 1 : stepCount;
         const unavailable = mode === 'not-ready' || mode === 'readiness-throws';
-        const expectedBoundaries = mode === 'no-callback' || mode === 'one-step' || unavailable
-          ? 0 : mode === 'hung' || cancelled ? 1 : 3;
-        const expectedCompleted = mode === 'completed' ? 3 : mode === 'replayed-proof' ? 1 : 0;
+        const presenting = !['no-callback', 'one-step'].includes(mode) && !unavailable;
         const audit = result.canonicalPresentationOpportunities;
-        assert.equal(result.completedStepCount, expectedSteps);
-        assert.equal(result.cancelled, cancelled);
-        assert.equal(fixture.runnerCalls.length, expectedSteps);
-        assert.equal(progress.length, expectedSteps);
-        assert.equal(boundaries.length, expectedBoundaries);
+        // Presentation never holds physics: a hung or cancelled renderer
+        // cannot stall the steps; cancellation still stops the schedule.
+        const steps = result.completedStepCount;
+        if (cancelled) {
+          assert.ok(steps >= 1 && steps <= stepCount);
+        } else {
+          assert.equal(steps, stepCount);
+        }
+        // A cancel issued from inside a (never-settling) presentation
+        // callback may land after the last step: physics no longer waits.
+        if (!cancelled) assert.equal(result.cancelled, false);
+        if (cancelled && result.cancelled !== true) assert.equal(steps, stepCount);
+        assert.equal(fixture.runnerCalls.length, steps);
+        assert.equal(progress.length, steps);
+        assert.equal(boundaries.length, audit.boundaryCount);
         assert.equal(audit.requested, mode !== 'no-callback');
-        assert.equal(audit.boundaryCount, expectedBoundaries);
+        if (!presenting) {
+          assert.equal(audit.boundaryCount, 0);
+        } else if (mode === 'hung' || cancelled) {
+          assert.equal(audit.boundaryCount, 1);
+        } else {
+          // Every non-final step either starts a boundary or skips one that is
+          // still in flight.
+          assert.ok(audit.boundaryCount >= 1);
+          assert.equal(audit.boundaryCount + audit.skippedInFlightCount, stepCount - 1);
+        }
+        const expectedCompleted = mode === 'completed'
+          ? audit.boundaryCount
+          : mode === 'replayed-proof' ? 1 : 0;
         assert.equal(audit.completedCount, expectedCompleted);
-        assert.equal(audit.failureCount, expectedBoundaries - expectedCompleted);
-        assert.equal(audit.timeoutCount, mode === 'hung' ? 1 : 0);
+        assert.equal(audit.failureCount, audit.boundaryCount - expectedCompleted);
+        if (cancelled) {
+          // Aborted by the cancel, or by its own timeout if the schedule won.
+          assert.equal(audit.timeoutCount, audit.disabledAfterTimeout ? 1 : 0);
+        } else {
+          assert.equal(audit.timeoutCount, mode === 'hung' ? 1 : 0);
+          assert.equal(audit.disabledAfterTimeout, mode === 'hung');
+        }
         assert.equal(readinessCheckCount, unavailable ? 3 : 0);
         assert.equal(audit.skippedUnavailableCount, unavailable ? 3 : 0);
-        assert.equal(audit.disabledAfterTimeout, mode === 'hung');
         assert.equal(audit.maxWaitMs, ULG_WORKER_CANONICAL_PRESENTATION_BOUNDARY_TIMEOUT_MS);
         assert.equal(audit.intermediateAuthorityPublicationCount, 0);
         assert.equal(result.gpuFence.terminalScheduleFence, true);
         assert.equal(result.gpuFence.authorityAdmissionReady, true);
-        assert.equal(result.gpuFence.completedStepCount, expectedSteps);
-        assert.equal(fixture.device.queue.submittedWorkDoneCount, boundaryFenceCount + 1,
-          'presentation fences supplement exactly one terminal authority fence');
+        assert.equal(result.gpuFence.completedStepCount, steps);
+        // One terminal authority fence, the renderer's own fences, and at
+        // most one queue-pacing fence per presenting step.
+        const fences = fixture.device.queue.submittedWorkDoneCount;
+        assert.ok(fences >= boundaryFenceCount + 1, `fences ${fences}`);
+        assert.ok(fences <= boundaryFenceCount + 1 + (presenting ? stepCount - 1 : 0), `fences ${fences}`);
         if (mode === 'hung' || cancelled) assert.equal(signals[0].aborted, true);
         if (resolveHung) {
           resolveHung(canonicalIsosurfaceBoundaryProof(boundaries[0], 1));
@@ -10510,6 +10584,44 @@ const WORKER_SEED_MECHANICS_GRID = Object.freeze({
   gridNodeCount: 8,
   gridShift: 1,
   gridSpacingM: 1
+});
+
+test('ULG resident stage worker preserves a split reserve during seed and rejects conflicting reserve layouts', async () => {
+  const device = createFakeGpuDevice();
+  const buffers = phaseCarrierBuffers();
+  const reserve = { schema: 'peercompute.ulg.schroeder-split-spare-reserve.v1',
+    firstLineageIndex: 0, count: 1, firstContinuityDomainId: 101 };
+  for (const packed of [buffers.sphParticleState, buffers.mlsMpmParticleState]) {
+    packed.phaseCarrierPlan.splitSpareReserve = { ...reserve,
+      localOnlyBuffer: { label: 'not-transportable' }, localOnlyArray: new Float32Array(4) };
+  }
+  // This gate exercises descriptors and ownership only; the fake device does
+  // not evaluate physics. The reserve is dormant at initialization.
+  buffers.sphParticleState.state[3] = 0;
+  const laneOptions = { laneId: 'ulg:test:split-reserve-seed', stateKey: 'ulg:test:split-reserve-seed-state' };
+  const seed = (reserveOverride) => runUlgMechanicsResidentStageWorkerPayload(payload(
+    workerLaneSeedStage(), workerSchroederStageContext(device, buffers, {
+      schroederLaneSeed: workerLaneSeedStageOptions({
+        hotBufferKey: 'ulg:sph-resident:split-reserve-seed', particleCount: 4,
+        rematerializationSeedOverrides: { phaseCarrierPlan: {
+          ...buffers.sphParticleState.phaseCarrierPlan,
+          splitSpareReserve: reserveOverride ?? reserve
+        } }
+      })
+    }), null, laneOptions));
+  try {
+    const result = await seed();
+    assert.equal(result.value.status, 'worker-schroeder-lane-seeded');
+    const remat = result.value.workerResidentStage.workerAdoptedStorageRematerialization;
+    assert.deepEqual(remat.phaseCarrierPlan.splitSpareReserve, reserve);
+    assert.equal(remat.phaseCarrierPlanPropagatedToUploads, true);
+    await assert.rejects(seed({ ...reserve, firstContinuityDomainId: 102 }), /lane-already-seeded/);
+    releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+    for (const delta of [{ firstContinuityDomainId: 102 }, { firstLineageIndex: 1 }]) {
+      await assert.rejects(seed({ ...reserve, ...delta }), /phase-carrier-plan-mismatch/);
+      releaseUlgMechanicsResidentStageWorkerLane(laneOptions);
+    }
+  } finally { releaseUlgMechanicsResidentStageWorkerLane(laneOptions); }
 });
 
 test('ULG resident stage worker seeds a fresh SS lane from a cloneable descriptor and a 2-step schedule advances beyond the seeded lineage', async () => {

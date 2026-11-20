@@ -18,7 +18,8 @@ import {
   resolveWorkerOwnedIsosurfaceAdmission,
   resolveWorkerOwnedIsosurfaceProductEventSource,
   snapshotWorkerOwnedSurfaceMetadata,
-  summarizeWorkerOwnedIsosurfaceOpticalPresentation
+  summarizeWorkerOwnedIsosurfaceOpticalPresentation,
+  RETAINED_GAP_STARVATION_MS
 } from '../src/services/workerOwnedIsosurfacePresenter.js';
 import {
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
@@ -3650,6 +3651,36 @@ test('retained submission gap is bounded while queued and never submits after it
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(frameProofs(rig).some(p => p.reason
       === 'worker-owned-isosurface-retained-submission-gap'), false);
+  } finally { fence.resolve(); await rig.presenter.dispose(); }
+});
+
+test('A1: physics is offered a gap behind a busy render lane only when presentation is starving', async t => {
+  // The rig's last frame completed at wall 1000 ms. Below the starvation bound
+  // a busy lane (a frame held through GPU completion) offers no gap, so the
+  // solver never waits behind display frames; above it the bounded wait returns.
+  const { rig, setWallMs } = await createControlledMotionRig(t);
+  const fence = deferred();
+  try {
+    rig.setQueueCompletion(fence.promise);
+    const camera = rig.presenter.redraw({ viewProjectionMatrix: viewProjectionWithTranslation(2) });
+    await waitFor(() => queueSubmissionCount(rig) === 3, 'camera holding the render lane');
+    setWallMs(1000 + RETAINED_GAP_STARVATION_MS / 2);
+    assert.equal(rig.presenter.hasRetainedSubmissionGapOpportunity(), false, 'busy lane, not starving');
+    assert.equal(rig.presenter.hasRetainedSubmissionGapOpportunity({ waitForPendingSlot: true }), false,
+      'the final-batch wait cannot hold physics behind a busy lane either');
+    const before = queueSubmissionCount(rig);
+    assert.equal(await rig.presenter.presentRetainedSubmissionGap(), false);
+    assert.equal(queueSubmissionCount(rig), before, 'no gap was queued');
+    setWallMs(1000 + RETAINED_GAP_STARVATION_MS * 3);
+    assert.equal(rig.presenter.hasRetainedSubmissionGapOpportunity(), true, 'starving: bounded wait allowed');
+    rig.setQueueCompletion(Promise.resolve());
+    fence.resolve();
+    await camera;
+    await new Promise(resolve => setImmediate(resolve));
+    // The camera frame just completed on an idle lane: a gap is free to take.
+    const completedAt = 1000 + RETAINED_GAP_STARVATION_MS * 3;
+    setWallMs(completedAt + RETAINED_GAP_STARVATION_MS / 4);
+    assert.equal(rig.presenter.hasRetainedSubmissionGapOpportunity(), true, 'idle lane, not starving');
   } finally { fence.resolve(); await rig.presenter.dispose(); }
 });
 

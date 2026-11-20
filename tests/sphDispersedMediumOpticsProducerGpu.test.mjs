@@ -2438,3 +2438,43 @@ test('GPU producer rolls back all owned setup allocations on write or pipeline f
     assert.equal(sources.every((buffer) => buffer.destroyed === false), true);
   }
 });
+
+test('route refresh binds only the next topology and exact current buffer family', () => {
+  const device = createFakeDevice();
+  const fixture = producerGpuFixture(device, 2);
+  const epoch = fixture.particleLineage.topologyEpoch;
+  for (const outputTopologyEpoch of [epoch - 1, epoch + 2]) {
+    assert.throws(() => createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
+      ...fixture, refreshRouteIdentity: true, outputTopologyEpoch
+    }), /exactly one/);
+  }
+  assert.throws(() => createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
+    ...fixture, outputTopologyEpoch: epoch + 1
+  }), /exactly one/);
+  const stage = createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
+    ...fixture, refreshRouteIdentity: true, outputTopologyEpoch: epoch + 1
+  });
+  stage.encode(createFakeEncoder());
+  assert.equal(stage.result.reactionCaptureEnabled, false);
+  assert.equal(stage.result.routeRefreshEnabled, true);
+  assert.equal(stage.result.encodedDispatchCount, 3);
+  const lineage = { ...fixture.particleLineage, topologyEpoch: epoch + 1 };
+  const family = { ...fixture.postTransferParticleSourceFamily, topologyEpoch: epoch + 1 };
+  const claim = issueSphDispersedMediumOpticsProducerAdoptionClaim(stage.result);
+  for (const invalidFamily of [fixture.postTransferParticleSourceFamily,
+    { ...family, stateBuffer: fixture.preTransferStateBuffer }]) {
+    assert.throws(() => consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(claim, {
+      device, outputBuffer: stage.outputBuffer, particleLineage: lineage,
+      particleSourceFamily: invalidFamily, particleSourceFamilyRegistrar: {}
+    }), /particle (source family|lineage)/);
+  }
+  const { adoptedOutput } = consumeSphDispersedMediumOpticsProducerClaimAsGpuBuffer(claim, {
+    device, outputBuffer: stage.outputBuffer, particleLineage: lineage,
+    particleSourceFamily: family, particleSourceFamilyRegistrar: {}
+  });
+  assert.equal(sphDispersedMediumOpticsProducerAdoptionMatches(stage.result, adoptedOutput,
+    { device, particleSourceFamily: family }), true);
+  assert.equal(adoptedOutput.declarationMode, 'gpu-dynamic-route-catalog-v0');
+  stage.cleanupSubmittedWork();
+  assert.equal(destroySphDispersedMediumGpuBuffers(adoptedOutput), true);
+});

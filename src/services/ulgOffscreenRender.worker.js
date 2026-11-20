@@ -654,15 +654,47 @@ function publishResidentStageStatus({
       : {}),
     ...compactError(error)
   };
-  publish({
+  const message = {
     status,
     reason,
     workerReady,
     workerDeviceSource,
     workerDeviceProvided,
     workerOffscreenResidentStage: residentStageStatus
-  });
+  };
+  try {
+    publish(message);
+  } catch (publishError) {
+    // A terminal status must always reach the page: a schedule error that
+    // carries a non-cloneable value (a function, GPU object or class
+    // instance in its diagnostics) made postMessage throw here, and the page
+    // then waited forever on a schedule that had already failed closed.
+    // Re-post a JSON-safe copy (non-cloneable values dropped) and say so.
+    (globalThis.__ulgLaneTrace ??= []).push({ event: 'resident-status-clone-failed',
+      atMs: Math.round(nowMs()), status, message: String(publishError?.message).slice(0, 160) });
+    publish({
+      ...cloneSafeStatusValue(message),
+      statusCloneFallback: true,
+      statusCloneFallbackError: String(publishError?.message || publishError).slice(0, 300)
+    });
+  }
   return residentStageStatus;
+}
+
+// JSON-safe deep copy for a status message that failed structured clone:
+// functions, symbols and cycles are dropped; typed arrays become arrays.
+function cloneSafeStatusValue(value) {
+  const seen = new WeakSet();
+  return JSON.parse(JSON.stringify(value, (key, item) => {
+    if (typeof item === 'function' || typeof item === 'symbol') return undefined;
+    if (typeof item === 'bigint') return String(item);
+    if (ArrayBuffer.isView(item)) return Array.from(item);
+    if (item && typeof item === 'object') {
+      if (seen.has(item)) return undefined;
+      seen.add(item);
+    }
+    return item;
+  }) ?? null);
 }
 
 function publishRetainedCompactSnapshotStatus(nextStatus = {}) {
@@ -2554,6 +2586,12 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
         ),
         timeoutMs
       );
+      (globalThis.__ulgLaneTrace ??= []).push({ event: 'render-worker-schedule-resolved',
+        atMs: Math.round(performance.now()), status: result?.status ?? null });
+    } catch (error) {
+      (globalThis.__ulgLaneTrace ??= []).push({ event: 'render-worker-schedule-rejected',
+        atMs: Math.round(performance.now()), message: String(error?.message).slice(0, 200) });
+      throw error;
     } finally { sourceProgressActive = false; }
     try {
       const terminalCandidate = residentScheduleCandidateStreamIsCurrent(

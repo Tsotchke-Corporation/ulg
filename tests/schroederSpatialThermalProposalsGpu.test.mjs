@@ -76,6 +76,7 @@ import {
   evaluateSchroederSpatialThermalPairProposal,
   isLiveThermalProposalSourceAuthority,
   runSchroederSpatialThermalProposalWebGpu,
+  createSchroederSpatialThermalProposalLedgerWgsl,
   schroederSpatialThermalDeviceRuntimeAllocationOwnership,
   schroederSpatialThermalDerivedPrepassWgsl,
   schroederSpatialThermalProposalV2Wgsl,
@@ -495,7 +496,10 @@ test('thermal proposal ABI is two-profile, resident, and binding-10 compatible',
     ULG_SCHROEDER_SPATIAL_THERMAL_CONTACT_GEOMETRY_AUTHORITY_SCHEMA,
     'peercompute.ulg.schroeder-spatial-thermal-contact-geometry-authority.v1'
   );
-  assert.equal(SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS, 10);
+  // Words 10..14 carry the carrier's adjacent phase fronts; 15..22 the
+  // interface skin row (with its face offset) the phase-carrier transfer
+  // consumes.
+  assert.equal(SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS, 24);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_HEADER_WORDS, 12);
   assert.equal(SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_SIDECAR_ROW_WORDS, 2);
   assert.equal(
@@ -693,10 +697,17 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
     ),
     schroederSpatialThermalProposalWgsl.indexOf('fn thermal_traverse_particle(')
   );
+  // Interpenetrating gas carriers are never a finite-volume material
+  // interface; they conduct over their centre distance (gas mixing).
   assert.match(
     pairLaw,
-    /let interface_pair =\s*thermal_params\.mechanical_interface_receipt_required != 0u\s*&&\s*\(\s*material_or_phase_interface\s*\|\|\s*mechanical_interface\.classified != 0u\s*\);/
+    /let both_gas = thermal_derived_word\(self_index, 9u\) >= 3u\s*&&\s*thermal_derived_word\(other_index, 9u\) >= 3u;/
   );
+  assert.match(
+    pairLaw,
+    /let interface_pair =\s*thermal_params\.mechanical_interface_receipt_required != 0u\s*&&\s*!both_gas\s*&&\s*\(\s*material_or_phase_interface\s*\|\|\s*mechanical_interface\.classified != 0u\s*\);/
+  );
+  assert.match(pairLaw, /max\(distance_m, 1\.0e-7\),\s*both_gas/);
   assert.doesNotMatch(pairLaw, /thermal_params\.conduction_rate/);
   const traversalLaw = schroederSpatialThermalProposalWgsl.slice(
     schroederSpatialThermalProposalWgsl.indexOf('fn thermal_traverse_particle('),
@@ -850,11 +861,12 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
     schroederSpatialThermalProposalWgsl,
     /fn thermal_publish_proposal_row\(row_offset: u32, row: vec4<f32>\)/
   );
+  // Definition, null-mass, uniform, G4 dormant-source and law-result rows.
   assert.equal(
     schroederSpatialThermalProposalWgsl.match(
       /\bthermal_publish_proposal_row\(/g
     )?.length,
-    4
+    5
   );
   assert.equal(
     schroederSpatialThermalProposalWgsl.match(
@@ -869,9 +881,13 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
     'if (global_max_temperature_bits == global_min_temperature_bits)',
     inactiveRowBranch
   );
+  const dormantSourceBranch = schroederSpatialThermalProposalWgsl.indexOf(
+    'if (thermal_source_dormant(particle_index))',
+    uniformTemperatureBranch
+  );
   const boundedLiveRowBranch = schroederSpatialThermalProposalWgsl.indexOf(
     'let energy_lo = thermal_derived_value(particle_index, 6u)',
-    uniformTemperatureBranch
+    dormantSourceBranch
   );
   const proposalTraversalEnd = schroederSpatialThermalProposalWgsl.indexOf(
     '@compute @workgroup_size(64)\nfn budget',
@@ -880,7 +896,8 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   assert.ok(
     inactiveRowBranch >= 0
       && uniformTemperatureBranch > inactiveRowBranch
-      && boundedLiveRowBranch > uniformTemperatureBranch
+      && dormantSourceBranch > uniformTemperatureBranch
+      && boundedLiveRowBranch > dormantSourceBranch
       && proposalTraversalEnd > boundedLiveRowBranch
   );
   const publicationCount = (begin, end) => (
@@ -889,7 +906,8 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
       .match(/\bthermal_publish_proposal_row\(/g)?.length ?? 0
   );
   assert.equal(publicationCount(inactiveRowBranch, uniformTemperatureBranch), 1);
-  assert.equal(publicationCount(uniformTemperatureBranch, boundedLiveRowBranch), 1);
+  assert.equal(publicationCount(uniformTemperatureBranch, dormantSourceBranch), 1);
+  assert.equal(publicationCount(dormantSourceBranch, boundedLiveRowBranch), 1);
   assert.equal(publicationCount(boundedLiveRowBranch, proposalTraversalEnd), 1);
   assert.match(schroederSpatialThermalProposalWgsl,
     /thermal_flush_evidence\(index: u32, count: u32, is_conduction: bool\)/);
@@ -1375,6 +1393,10 @@ test('manufactured interface conduction falls back to sphere contact without a r
 });
 
 test('thermal proposal selects the authenticated directory-v2 ActiveSource view', async () => {
+  // Both launch modes: forced indirect, and A1's direct launches.
+  for (const forceIndirect of [true, false]) {
+  if (forceIndirect) globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   assert.match(
     schroederSpatialThermalDerivedPrepassWgsl,
     /if \(active_source_projection\) \{\s+derive_source_count = atomicLoad\(\s+&thermal_derived\[\s+THERMAL_PREFLIGHT_EXPECTED_ACTIVE_MEMBER_COUNT_WORD\s+\]\s+\);\s+\}\s+if \(source_rank >= derive_source_count\) \{ return; \}/
@@ -1523,10 +1545,17 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
     'ulg-schroeder-spatial-thermal-reciprocal-limited-proposal',
     'ulg-schroeder-spatial-thermal-zero-active-finalize'
   ]);
-  assert.deepEqual(passes[1].commands[0].dispatchIndirect, {
-    buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
-    offset: fixture.generation.activeSourceView.physicalDispatchOffsetBytes
-  });
+  if (forceIndirect) {
+    assert.deepEqual(passes[1].commands[0].dispatchIndirect, {
+      buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
+      offset: fixture.generation.activeSourceView.physicalDispatchOffsetBytes
+    });
+  } else {
+    // A1: a direct launch over the source ceiling; the prepass kernels admit
+    // only the view's staged groups (thermal_prepass_launch_excluded).
+    assert.ok(Array.isArray(passes[1].commands[0].dispatch));
+    assert.equal(passes[1].commands[0].dispatchIndirect, undefined);
+  }
   const physicalPreflightEntries =
     passes[1].bindGroup.bindGroup.entries;
   assert.equal(
@@ -1550,10 +1579,19 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
     fixture.generation.activeSourceView.activeSourceViewBuffer
   );
   for (const index of [3, 5, 8, 9]) {
-    assert.deepEqual(passes[index].commands[0].dispatchIndirect, {
-      buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
-      offset: fixture.generation.activeSourceView.activeDispatchOffsetBytes
-    });
+    if (forceIndirect) {
+      assert.deepEqual(passes[index].commands[0].dispatchIndirect, {
+        buffer: fixture.generation.activeSourceView.activeSourceViewBuffer,
+        offset: fixture.generation.activeSourceView.activeDispatchOffsetBytes
+      });
+    } else {
+      // A1: the same direct ceiling as the physical preflight.
+      assert.deepEqual(
+        passes[index].commands[0].dispatch,
+        passes[1].commands[0].dispatch
+      );
+      assert.equal(passes[index].commands[0].dispatchIndirect, undefined);
+    }
   }
   assert.deepEqual(passes[0].commands[0].dispatch, [1, 1, 1]);
   assert.deepEqual(passes[2].commands[0].dispatch, [1, 1, 1]);
@@ -1571,6 +1609,10 @@ test('thermal proposal selects the authenticated directory-v2 ActiveSource view'
   assert.deepEqual(thermalEncoder.copies, []);
   assert.equal(result.releaseAfterCanonicalApplySubmittedWork(), true);
   await fixture.device.queue.onSubmittedWorkDone();
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
+  }
 });
 
 test('canonical queue-ordered thermal retirement avoids a host queue fence while standalone retirement retains one', async () => {
@@ -2630,7 +2672,11 @@ test('thermal loss target factory isolates holder scope and retirement detaches 
   assert.equal(releaseBody.match(/lossTargetHolder\.target\s*=\s*null/g)?.length, 1);
   assert.doesNotMatch(releaseBody.slice(detach), /\b(?:release|destroy)\w*\(/,
     'the target is detached after owned cleanup, not before it');
-  assert.match(source, /Promise\.resolve\(device\.lost\)\.then\(\s*lossCallbacks\.fulfilled,\s*lossCallbacks\.rejected\s*\)/);
+  // One loss reaction per device; a successful retirement drops its holder
+  // from the device registry right after detaching the target.
+  assert.match(source, /Promise\.resolve\(device\.lost\)\.then\(settle\('fulfilled'\), settle\('rejected'\)\)/);
+  assert.match(releaseBody.slice(detach),
+    /^lossTargetHolder\.target = null;\s*lossTargetHolder\.lossRegistry\?\.holders\.delete\(lossTargetHolder\);/);
 
   // Exercise the actual retirement body too, including a synchronous cleanup
   // failure. No private export or collection timing is needed for this seam.
@@ -2777,8 +2823,8 @@ for (const outcome of ['fulfilled', 'rejected']) {
     const fixture = liveFixture(2);
     const loss = controlledThermalDeviceLoss(fixture.device);
     const first = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
-    const firstHandlers = loss.registrations[0];
-    assert.equal(typeof firstHandlers?.[outcome], 'function');
+    const handlers = loss.registrations[0];
+    assert.equal(typeof handlers?.[outcome], 'function');
     submitThermalLossProposal(fixture, first, { queueOrdered: true });
     assert.equal(first.releaseAfterCanonicalApplySubmittedWork(), true);
     await new Promise((resolve) => setImmediate(resolve));
@@ -2787,23 +2833,22 @@ for (const outcome of ['fulfilled', 'rejected']) {
     const second = runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 });
     assert.equal(second.runtimeCacheHit, true);
     assert.equal(second.proposalBuffer, first.proposalBuffer);
-    const secondHandlers = loss.registrations[1];
+    assert.equal(loss.registrations.length, 1, 'one loss reaction per device, not per proposal');
     const beforeSubmissions = fixture.device.submissions.length;
     const beforeDestroy = second.proposalBuffer.destroyCount;
-    // Deliver only the old subscription first; the current owner still has
-    // its own loss callback to release its exact lease.
-    firstHandlers[outcome]({ message: 'old retired target' });
+    // The device's single loss reaction releases the current owner's exact
+    // lease and leaves the retired owner (detached from the registry) as is.
+    handlers[outcome]({ message: 'current target' });
     assert.equal(first.terminalDisposition, retiredDisposition);
-    assert.equal(second.released, false);
-    assert.equal(second.lifecycleStatus, 'prepared');
-    assert.throws(() => runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 }),
-      /device is already lost/);
-    secondHandlers[outcome]({ message: 'current target' });
     assert.equal(second.released, true);
     assert.equal(second.terminalDisposition, outcome === 'fulfilled'
       ? 'device-lost-quarantined' : 'device-loss-observation-rejected');
-    firstHandlers[outcome]({ message: 'old callback replay' });
+    assert.throws(() => runSchroederSpatialThermalProposalWebGpu({ ...fixture, dtS: 0.001 }),
+      /device is already lost/);
+    handlers[outcome]({ message: 'callback replay' });
     assert.equal(first.terminalDisposition, retiredDisposition);
+    assert.equal(second.terminalDisposition, outcome === 'fulfilled'
+      ? 'device-lost-quarantined' : 'device-loss-observation-rejected');
     assert.equal(second.proposalBuffer.destroyCount, beforeDestroy,
       'arena-cached proposal buffers are not owned by the loss subscription');
     assert.equal(fixture.device.submissions.length, beforeSubmissions);
@@ -3074,6 +3119,9 @@ test('thermal proposal preparation defers matched-time work and returns resident
   );
   assert.equal(result.proposalRowByteOffset, 64);
   assert.equal(result.activeProposalByteLength, 64 + 2 * 16);
+  // The integer energy section follows the f32 rows; this step leaves it off.
+  assert.equal(result.exactEnergyLedgerWords, 0);
+  assert.equal(result.exactEnergyLedgerByteOffset, 64 + 2 * 16);
   assert.deepEqual(result.canonicalApplyMode.invalidHeaderWordIndices, [6, 7]);
   assert.equal(result.canonicalApplyMode.publishedRowCountHeaderWord, 15);
   assert.equal(
@@ -3116,6 +3164,8 @@ test('thermal proposal preparation defers matched-time work and returns resident
     (
       SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
         + 2 * SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
+        // ActiveSource rank sidecar, then the G4 thermal dormancy flags.
+        + 2
         + 2
     ) * 4
   );
@@ -3808,4 +3858,31 @@ test('thermal proposal authority rejects stale generations and foreign closure b
     }
   }), /canonical generation device/);
   assert.equal(destroySchroederSpatialThermalProposalRuntime(foreign.device), false);
+});
+
+test('the integer energy ledger is a separate proposal variant over both directory versions', () => {
+  for (const source of [schroederSpatialThermalProposalWgsl, schroederSpatialThermalProposalV2Wgsl]) {
+    assert.doesNotMatch(source, /thermal_ledger_/);
+    const ledger = createSchroederSpatialThermalProposalLedgerWgsl(source);
+    assert.equal(createSchroederSpatialThermalProposalLedgerWgsl(source), ledger, 'the variant is built once');
+    const publish = ledger.slice(ledger.indexOf('fn thermal_publish_proposal_row('),
+      ledger.indexOf('struct ThermalPairVisitOutcome'));
+    // A row that cannot carry its exact packet fails the proposal closed
+    // before any f32 word of that row is stored.
+    assert.ok(publish.indexOf('thermal_ledger_publish(') < publish.indexOf('atomicStore(&thermal_proposals[row_offset]'));
+    assert.match(publish, /thermal_mark_invalid\(true\);\s*thermal_mark_invalid\(false\);\s*return;/);
+    assert.match(ledger, /fn thermal_traverse_particle\([\s\S]*?\) \{\n  thermal_ledger_reset\(\);/);
+    // Both endpoints evaluate the pair in (lo, hi) roles; the hi end negates.
+    assert.match(ledger, /let pair_roles_swapped = self_index > other_index;/);
+    assert.match(ledger, /\* \(b_temperature - a_temperature\) \* thermal_params\.dt_s;\n    conduction_energy_j = pair_energy_sign \* thermal_clamp_pair_energy\(/);
+    assert.match(ledger, /thermal_pow4\(b_temperature\) - thermal_pow4\(a_temperature\)/);
+    assert.match(ledger, /thermal_ledger_record\(conduction_energy_j \+ radiation_energy_j\);/);
+  }
+  assert.throws(() => createSchroederSpatialThermalProposalLedgerWgsl('fn drifted() {}'), /anchor drifted: traversal reset/);
+});
+
+test('canonical thermal proposals require an explicit boolean energy ledger choice', () => {
+  const device = { createBuffer() {}, createCommandEncoder() {}, queue: { writeBuffer() {} } };
+  assert.throws(() => runSchroederSpatialThermalProposalWebGpu({ device, exactEnergyLedger: 'yes' }),
+    /exactEnergyLedger must be an explicit boolean/);
 });

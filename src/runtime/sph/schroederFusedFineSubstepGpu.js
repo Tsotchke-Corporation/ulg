@@ -4261,6 +4261,51 @@ export function validateSchroederFusedMechanicsPendingClosure(
 }
 
 /** Complete numerical predicate only; ownership is checked by the caller. */
+// Names every admission condition the header fails, so a fail-closed
+// rejection says why (same predicates as the admission check below).
+export function schroederFusedTerminalRefluxHeaderRejections(
+  header,
+  { expectedFineSubstepCount } = {}
+) {
+  const count = expectedFineSubstepCount;
+  const failed = [];
+  const check = (ok, label) => { if (!ok) failed.push(label); };
+  const flagNames = ['ready', 'admitted', 'failClosed', 'overflow', 'nonfinite',
+    'cflRejected', 'energyRejected', 'keyRejected', 'routeRejected', 'phaseRejected'];
+  const flags = Number(header?.statusFlags) >>> 0;
+  failed.push(`statusFlags=0x${flags.toString(16)}(${flagNames.filter((_, bit) => flags & (1 << bit)).join('|')})`);
+  check(Number.isSafeInteger(count) && count >= 1 && count <= 4, 'expectedFineSubstepCount');
+  for (const key of ['structuralValid', 'admitted', 'terminalAdmitted']) check(header?.[key] === true, key);
+  check(header?.failClosed === false, 'failClosed');
+  for (const key of ['invalidCount', 'keyMismatchCount', 'routeRejectCount',
+    'boundaryRejectCount', 'chartRejectCount', 'cflRejectCount', 'mutationRollbackCount']) {
+    check(header?.[key] === 0, `${key}=${header?.[key]}`);
+  }
+  for (const key of ['positivityStatus', 'cflStatus', 'massComStatus',
+    'momentumStatus', 'angularMomentumStatus', 'energyStatus']) {
+    check(header?.[key] === 1, `${key}=${header?.[key]}`);
+  }
+  // Labels avoid words (replay, skip, duplicate, authority) that the
+  // schedule error path may classify; a message carrying them never surfaced.
+  const authorityLabels = { fineP2g: 'aFP', fineG2p: 'aFG', finalP2g: 'aLP', finalG2p: 'aLG' };
+  for (const key of ['fineP2g', 'fineG2p', 'finalP2g', 'finalG2p']) {
+    check(header?.authorityRejectCount?.[key] === 0, `${authorityLabels[key]}=${header?.authorityRejectCount?.[key]}`);
+  }
+  const receiptLabels = { replay: 'rR', skip: 'rS', duplicate: 'rD' };
+  for (const key of ['replay', 'skip', 'duplicate']) {
+    check(header?.receiptRejectCount?.[key] === 0, `${receiptLabels[key]}=${header?.receiptRejectCount?.[key]}`);
+  }
+  for (const key of ['fineSubstepCount', 'committedFineSubstepCount',
+    'consumedFineSubstepCount', 'fineReceiptConsumeCount']) {
+    check(header?.[key] === count, `${key}=${header?.[key]}`);
+  }
+  check(header?.coarseReceiptConsumeCount === 1, `coarseReceiptConsumeCount=${header?.coarseReceiptConsumeCount}`);
+  for (const key of ['operatorSplit', 'phaseVolumeTransport', 'ambientBoundary']) {
+    check(header?.[key]?.valid === true, `${key}.valid`);
+  }
+  return failed;
+}
+
 export function isSchroederFusedTerminalRefluxHeaderFullyAdmitted(
   header,
   { expectedFineSubstepCount } = {}
@@ -4577,7 +4622,30 @@ export function observeSchroederFusedMechanicsPrivateAdmission(device, closure) 
       });
       const physical = !admitted && hasCompletedPhysicalCflRejection(header, words);
       if (!admitted && !physical) {
-        const error = intervalError('private compact header is not admitted and has no complete physical rejection witness');
+        const rejections = schroederFusedTerminalRefluxHeaderRejections(header, {
+          expectedFineSubstepCount: macro.fineSubstepCount
+        });
+        // Keep the message short: a long worker error message does not reach
+        // the page (observed: the lane then hangs with no error text). The
+        // always-implied entries are dropped and specific counters lead.
+        // Diagnostic: the full rejection, readable from the worker context.
+        try {
+          globalThis.__ulgTwoLevelRefluxRejection = Object.freeze({
+            at: Date.now(),
+            rejections: Object.freeze([...rejections]),
+            statusFlags: header?.statusFlags ?? null,
+            capturedOperationCount: header?.capturedOperationCount ?? null,
+            // Word 124: the first prepare_reject reason (0x5052xxxx), if any.
+            statusCapture: words.length > 124 ? words[124] >>> 0 : null,
+            tailWords: Array.from(words.slice(96, Math.min(words.length, 132)))
+          });
+        } catch {}
+        const implied = new Set(['admitted', 'terminalAdmitted', 'failClosed']);
+        const specific = rejections.filter((entry) => !implied.has(entry)
+          && !/Status=0$/.test(entry));
+        const error = intervalError(
+          `private compact header is not admitted and has no complete physical rejection witness [${specific.slice(0, 8).join('; ') || 'finite-residuals'}]`
+        );
         error.terminalHeader = freezeHeaderEvidence(header);
         throw error;
       }

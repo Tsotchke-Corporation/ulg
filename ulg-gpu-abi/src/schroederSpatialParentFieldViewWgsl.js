@@ -68,7 +68,7 @@ struct SchroederSpatialParentFieldViewParams {
   exact_level_count: u32,
   cleared_words: u32,
   max_compute_workgroups_per_dimension: u32,
-  pad1: u32,
+  fine_source_parent: u32,
   pad2: u32,
   pad3: u32,
   pad4: u32,
@@ -333,7 +333,52 @@ fn field_view_admitted(
   ) == 0u;
 }
 
+// A middle level receives the prior pair's complete union, including fields
+// with no native particle on that level. The buffer keeps its real parent ABI.
+fn inherited_fine_admission_mask() -> u32 {
+  if (arrayLength(&fine_field_view) < 80u) { return 0xffffffffu; }
+  var mask = 0u;
+  if (fine_field_view[0u] != PARENT_FIELD_MAGIC || fine_field_view[1u] != PARENT_FIELD_VERSION
+      || fine_field_view[2u] != READY_ADMITTED || params.fine_source_parent != 1u) { mask |= 1u; }
+  if (!same_identity(&fine_field_view)) { mask |= 2u; }
+  if (bitcast<i32>(fine_field_view[17u]) != params.fine_level
+      || bitcast<i32>(fine_field_view[16u]) + 1 != params.fine_level
+      || fine_field_view[19u] != params.fine_grid_node_count
+      || fine_field_view[23u] != params.fine_nx || fine_field_view[24u] != params.fine_ny
+      || fine_field_view[25u] != params.fine_nz || fine_field_view[27u] != u32(params.fine_shift)
+      || fine_field_view[29u] != bitcast<u32>(params.fine_spacing_m)
+      || fine_field_view[67u] != 2u) { mask |= 4u; }
+  if (fine_field_view[44u] != params.fine_field_completion_ordinal) { mask |= 8u; }
+  if (fine_field_view[33u] != params.fine_field_capacity
+      || fine_field_view[37u] > params.fine_field_capacity) { mask |= 16u; }
+  if (fine_field_view[48u] != 80u || fine_field_view[49u] != KEY_WORDS) { mask |= 32u; }
+  if (fine_field_view[55u] > fine_field_view[56u]
+      || fine_field_view[56u] > arrayLength(&fine_field_view)
+      || params.fine_field_capacity > (arrayLength(&fine_field_view)-80u)/KEY_WORDS) { mask |= 64u; }
+  if (fine_field_view[39u] != 0u || fine_field_view[40u] != 0u
+      || fine_field_view[41u] != 0u || fine_field_view[71u] != 0u) { mask |= 128u; }
+  return mask;
+}
+
+fn fine_source_count() -> u32 {
+  return select(fine_field_view[34u], fine_field_view[37u], params.fine_source_parent == 1u);
+}
+fn fine_source_key_word(field: u32, word: u32) -> u32 {
+  let keys = select(fine_field_view[26u], fine_field_view[48u], params.fine_source_parent == 1u);
+  return fine_field_view[keys + field * KEY_WORDS + word];
+}
+fn fine_source_key_valid(field: u32) -> bool {
+  if (field >= fine_source_count()) { return false; }
+  let family = fine_source_key_word(field, 1u);
+  let material = fine_source_key_word(field, 2u);
+  let domain = fine_source_key_word(field, 3u);
+  return fine_source_key_word(field, 0u) < params.fine_grid_node_count
+    && family >= 1u && family <= 4u && material >= 1u && material <= 0x00ffffffu
+    && select(domain == 0u, domain != 0u, family == 1u);
+}
+
 fn fine_field_admission_mask() -> u32 {
+  if (params.fine_source_parent != 0u) { return inherited_fine_admission_mask(); }
   return field_view_admission_mask(
     &fine_field_view,
     params.fine_level,
@@ -505,6 +550,50 @@ fn dense_coords(index: u32, ny: u32, nz: u32) -> vec3<i32> {
   return vec3<i32>(i32(x), i32(remainder / nz), i32(remainder % nz));
 }
 
+// Dyadic trilinear transfer for inherited nodes. Native nodes retain the
+// immutable hierarchy CSR; inherited nodes need not occur in its native list.
+// Every nonzero edge is checked below for partition of unity and first moment.
+fn inherited_parent_edge(dense: u32, wanted: u32) -> vec2<u32> {
+  let fine = dense_coords(dense, params.fine_ny, params.fine_nz) - vec3<i32>(params.fine_shift);
+  let coordinate = vec3<f32>(fine) * 0.5;
+  let base = vec3<i32>(floor(coordinate));
+  let fraction = coordinate - vec3<f32>(base);
+  var ordinal = 0u;
+  for (var edge=0u; edge<8u; edge++) {
+    let offset = vec3<u32>(edge & 1u, (edge >> 1u) & 1u, (edge >> 2u) & 1u);
+    let axis = select(vec3<f32>(1.0)-fraction, fraction, offset != vec3<u32>(0u));
+    let weight = axis.x * axis.y * axis.z;
+    if (!(weight > 0.0)) { continue; }
+    if (ordinal == wanted) {
+      let parent = base + vec3<i32>(offset) + vec3<i32>(params.coarse_shift);
+      if (any(parent < vec3<i32>(0))
+          || any(parent >= vec3<i32>(i32(params.coarse_nx),i32(params.coarse_ny),i32(params.coarse_nz)))) {
+        return vec2<u32>(INVALID_INDEX, bitcast<u32>(weight));
+      }
+      let node = (u32(parent.x)*params.coarse_ny+u32(parent.y))*params.coarse_nz+u32(parent.z);
+      return vec2<u32>(node, bitcast<u32>(weight));
+    }
+    ordinal++;
+  }
+  return vec2<u32>(INVALID_INDEX, 0u);
+}
+fn source_edge_range(dense: u32) -> vec2<u32> {
+  if (params.fine_source_parent == 0u) {
+    let compact = hierarchy_fine_compact_index(dense);
+    if (compact == INVALID_INDEX) { return vec2<u32>(0u); }
+    return hierarchy_edge_range(compact);
+  }
+  var count=0u;
+  for (var edge=0u; edge<8u; edge++) {
+    if (inherited_parent_edge(dense,edge).y != 0u) { count++; }
+  }
+  return vec2<u32>(0u,count);
+}
+fn source_parent_edge(dense: u32, begin: u32, edge: u32) -> vec2<u32> {
+  if (params.fine_source_parent == 1u) { return inherited_parent_edge(dense,edge); }
+  return vec2<u32>(hierarchy_parent_dense(begin+edge),bitcast<u32>(hierarchy_edge_weight(begin+edge)));
+}
+
 // Publish an authenticated live prefix for the radix runtime. Fine candidate
 // rows retain their fixed eight-wide per-field layout, while coarse rows begin
 // immediately after the live fine prefix. This preserves every downstream
@@ -514,7 +603,7 @@ fn prepare_candidate_count() {
   let fine_admitted = fine_field_admission_mask() == 0u;
   let coarse_admitted = coarse_field_admission_mask() == 0u;
   let hierarchy_is_admitted = hierarchy_admitted();
-  let fine_count = select(0u, fine_field_view[34u], fine_admitted);
+  let fine_count = select(0u, fine_source_count(), fine_admitted);
   let coarse_count = select(0u, coarse_field_view[34u], coarse_admitted);
   var candidate_count = 0u;
   if (
@@ -555,35 +644,32 @@ fn emit_fine_parent_candidates(
     if (field_index == 0u) { atomicAdd(&parent_field_view[39u], 1u); }
     return;
   }
-  let field_count = fine_field_view[34u];
+  let field_count = fine_source_count();
   if (field_index >= field_count) { return; }
-  if (!field_key_valid(&fine_field_view, field_index, params.fine_grid_node_count)) {
+  if (!fine_source_key_valid(field_index)) {
     atomicAdd(&parent_field_view[71u], 1u);
     return;
   }
-  let dense_node = field_key_word(&fine_field_view, field_index, 0u);
-  let compact_fine = hierarchy_fine_compact_index(dense_node);
-  if (compact_fine == INVALID_INDEX) {
-    atomicAdd(&parent_field_view[39u], 1u);
-    return;
-  }
-  let edge_range = hierarchy_edge_range(compact_fine);
+  let dense_node = fine_source_key_word(field_index, 0u);
+  let edge_range = source_edge_range(dense_node);
   if (
     edge_range.y == 0u
     || edge_range.y > MAX_FINE_EDGES
-    || edge_range.x > hierarchy_view[36u]
-    || edge_range.y > hierarchy_view[36u] - edge_range.x
+    || (params.fine_source_parent == 0u && (
+      edge_range.x > hierarchy_view[36u]
+      || edge_range.y > hierarchy_view[36u] - edge_range.x
+    ))
   ) {
     atomicAdd(&parent_field_view[39u], 1u);
     return;
   }
-  let family = field_key_word(&fine_field_view, field_index, 1u);
-  let material = field_key_word(&fine_field_view, field_index, 2u);
-  let domain = field_key_word(&fine_field_view, field_index, 3u);
+  let family = fine_source_key_word(field_index, 1u);
+  let material = fine_source_key_word(field_index, 2u);
+  let domain = fine_source_key_word(field_index, 3u);
   for (var local_edge = 0u; local_edge < edge_range.y; local_edge = local_edge + 1u) {
-    let hierarchy_edge = edge_range.x + local_edge;
-    let parent_dense = hierarchy_parent_dense(hierarchy_edge);
-    let weight = hierarchy_edge_weight(hierarchy_edge);
+    let edge = source_parent_edge(dense_node, edge_range.x, local_edge);
+    let parent_dense = edge.x;
+    let weight = bitcast<f32>(edge.y);
     if (
       parent_dense >= params.coarse_grid_node_count
       || !finite_f32(weight)
@@ -611,7 +697,7 @@ fn emit_coarse_native_candidates(
 ) {
   let field_index = flattened_invocation_index(global_id, workgroup_count);
   if (field_index >= params.coarse_field_capacity) { return; }
-  let fine_count = min(fine_field_view[34u], params.fine_field_capacity);
+  let fine_count = min(fine_source_count(), params.fine_field_capacity);
   let candidate_index = fine_count * MAX_FINE_EDGES + field_index;
   candidate_store_invalid(candidate_index);
   output_store(params.coarse_native_map_offset_words + field_index, INVALID_INDEX);
@@ -685,7 +771,10 @@ fn materialize_candidate_union_indices(
   var union_index = INVALID_INDEX;
   if (!candidate_is_invalid(candidate_index)) {
     var inclusive_head_count = unique_evidence[2u];
-    if (sorted_position + 1u < params.candidate_capacity) {
+    // The unique scan covers the admitted live prefix, not the capacity tail.
+    // With no fine candidates all live rows can be valid coarse keys, so the
+    // final row must use the unique total instead of an unscanned tail word.
+    if (sorted_position + 1u < output_load(72u)) {
       inclusive_head_count = unique_group_by_sorted_position[sorted_position + 1u];
     }
     if (inclusive_head_count > 0u) {
@@ -698,7 +787,7 @@ fn materialize_candidate_union_indices(
   }
   candidate_union_indices[candidate_index] = union_index;
   let live_fine_candidate_count = min(
-    fine_field_view[34u],
+    fine_source_count(),
     params.fine_field_capacity
   ) * MAX_FINE_EDGES;
   if (candidate_index >= live_fine_candidate_count) {
@@ -782,14 +871,9 @@ fn scatter_fine_field_edges(
   let edge_base = fine_edge_offsets[field_index];
   output_store(params.fine_edge_offset_offset_words + field_index, edge_base);
   if (!fine_field_admitted() || !hierarchy_admitted()) { return; }
-  if (field_index >= fine_field_view[34u]) { return; }
-  let dense_node = field_key_word(&fine_field_view, field_index, 0u);
-  let compact_fine = hierarchy_fine_compact_index(dense_node);
-  if (compact_fine == INVALID_INDEX) {
-    atomicAdd(&parent_field_view[39u], 1u);
-    return;
-  }
-  let edge_range = hierarchy_edge_range(compact_fine);
+  if (field_index >= fine_source_count()) { return; }
+  let dense_node = fine_source_key_word(field_index, 0u);
+  let edge_range = source_edge_range(dense_node);
   if (
     edge_range.y != fine_edge_counts[field_index]
     || edge_range.y == 0u
@@ -800,15 +884,15 @@ fn scatter_fine_field_edges(
     atomicAdd(&parent_field_view[40u], 1u);
     return;
   }
-  let family = field_key_word(&fine_field_view, field_index, 1u);
-  let material = field_key_word(&fine_field_view, field_index, 2u);
-  let domain = field_key_word(&fine_field_view, field_index, 3u);
+  let family = fine_source_key_word(field_index, 1u);
+  let material = fine_source_key_word(field_index, 2u);
+  let domain = fine_source_key_word(field_index, 3u);
   var weight_sum = 0.0;
   var reproduced = vec3<f32>(0.0);
   for (var local_edge = 0u; local_edge < edge_range.y; local_edge = local_edge + 1u) {
-    let hierarchy_edge = edge_range.x + local_edge;
-    let parent_dense = hierarchy_parent_dense(hierarchy_edge);
-    let weight = hierarchy_edge_weight(hierarchy_edge);
+    let edge = source_parent_edge(dense_node, edge_range.x, local_edge);
+    let parent_dense = edge.x;
+    let weight = bitcast<f32>(edge.y);
     let candidate_index = field_index * MAX_FINE_EDGES + local_edge;
     let parent_index = candidate_union_indices[candidate_index];
     if (
@@ -878,7 +962,7 @@ fn finalize_parent_field_view() {
     && unique_evidence[5u] == RADIX_KEY_WORDS
     && unique_evidence[6u] == RADIX_KEY_WORDS
     && unique_evidence[7u] == 3u;
-  let fine_count = select(0u, fine_field_view[34u], fine_admitted);
+  let fine_count = select(0u, fine_source_count(), fine_admitted);
   let coarse_count = select(0u, coarse_field_view[34u], coarse_admitted);
   let parent_count = unique_count_without_sentinel();
   let last_fine = params.fine_field_capacity - 1u;

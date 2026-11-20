@@ -372,6 +372,10 @@ test('mechanics-view v2 plan preserves physical identity without a host active c
 });
 
 test('directory-v2 encoding dispatches sparse work from the exact GPU ActiveSource authority', async () => {
+  // Both launch modes: forced indirect, and A1's direct launches.
+  for (const forceIndirect of [true, false]) {
+  if (forceIndirect) globalThis.__ulgForceIndirectFieldConsumers = true;
+  try {
   const device = createFakeDevice();
   const runtime = createRuntime(device);
   const authority = createV2Authority(device);
@@ -425,10 +429,16 @@ test('directory-v2 encoding dispatches sparse work from the exact GPU ActiveSour
       && /MarkNodesActiveOrdinal/.test(event.descriptor.label)
   );
   assert.ok(markPass);
-  assert.deepEqual(markPass.commands[0].dispatchIndirect, {
-    buffer: authority.activeSourceViewBuffer,
-    byteOffset: 48 * UINT32_BYTES
-  });
+  if (forceIndirect) {
+    assert.deepEqual(markPass.commands[0].dispatchIndirect, {
+      buffer: authority.activeSourceViewBuffer,
+      byteOffset: 48 * UINT32_BYTES
+    });
+  } else {
+    // A1: direct launch; the V2 mark kernel admits only staged groups.
+    assert.equal(markPass.commands[0].dispatchIndirect, undefined);
+    assert.ok(Array.isArray(markPass.commands[0].dispatch));
+  }
   const markBindingSix = markPass.commands[0].bindGroup.value.entries.find(
     (entry) => entry.binding === 6
   );
@@ -477,6 +487,10 @@ test('directory-v2 encoding dispatches sparse work from the exact GPU ActiveSour
   assert.equal(runtime.activeExecutionCount(), 0);
   assert.equal(execution.released, true);
   assert.equal(runtime.destroy(), true);
+  } finally {
+    delete globalThis.__ulgForceIndirectFieldConsumers;
+  }
+  }
 });
 
 test('mechanics-view arenas reuse exact immutable bind groups', () => {

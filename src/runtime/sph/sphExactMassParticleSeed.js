@@ -1,11 +1,13 @@
 import {
   createSphExactMassFormat, encodeSphExactMass, projectSphExactMassF32Bits, validateSphExactMassFormat
 } from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
+import { encodeSphExactSigned } from '../../../ulg-gpu-abi/src/sphExactSignedLedger.js';
+import { SPH_EXACT_THERMAL_ENERGY_FORMAT } from './sphExactThermalEnergyWgsl.js';
 
 const SEEDS = new WeakMap(), PACKED = new WeakMap(), ARRAYS = new WeakSet();
 const ROW_KEYS = ['id', 'material', 'materialId', 'phaseId', 'renderDomainId',
   'molarMassBits', 'initialPhaseReferenceMatchesMass',
-  'spareProductSlot', 'phaseCompanionSlot', 'phaseCarrierPrimaryIndex',
+  'spareProductSlot', 'spareSplitSlot', 'phaseCompanionSlot', 'phaseCarrierPrimaryIndex',
   'phaseCarrierCompanionIndex', 'phaseCarrierLineageIndex', 'phaseCarrierLane', 'phaseCarrierTargetPhaseId'];
 const PACKED_KEYS = ['particleCount', 'step', 'time', 'topologyEpoch', 'identityRevision',
   'stateStrideBytes', 'thermoStrideBytes', 'identityStrideBytes', 'positionEpoch',
@@ -17,13 +19,18 @@ export function sphExactMassOptionsFromColdState(state) {
   if (!Object.hasOwn(state, 'exactMassInitialization')) return null;
   const input = state.exactMassInitialization;
   if (!input || input.schema !== 'peercompute.ulg.sph-exact-mass-initialization.v1'
-      || Object.keys(input).some(key => !['schema', 'wordCount', 'quantumExponent', 'reference', 'massWords', 'initialQuantities'].includes(key))
+      || Object.keys(input).some(key => !['schema', 'wordCount', 'quantumExponent', 'reference', 'massWords', 'initialQuantities', 'energyLedger'].includes(key))
       || !Object.hasOwn(input, 'wordCount') || !Object.hasOwn(input, 'quantumExponent')
       || (Object.hasOwn(input, 'initialQuantities') && typeof input.initialQuantities !== 'boolean')
+      || (Object.hasOwn(input, 'energyLedger') && typeof input.energyLedger !== 'boolean')
+      || (input.energyLedger === true && input.initialQuantities === true)
       || typeof input.reference !== 'string' || !input.reference.trim()) {
     throw new TypeError('Explicit exact mass cold initialization declaration required');
   }
+  // energyLedger declares the G2 integer energy ledger route: integer mass and
+  // energy rows only, no rational quantities, and the heat-proxy reaction law.
   return { format: createSphExactMassFormat(input), reference: input.reference, initialQuantities: input.initialQuantities ?? false,
+    energyLedger: input.energyLedger === true,
     ...(Object.hasOwn(input, 'massWords') ? { massWords: input.massWords } : {}) };
 }
 
@@ -43,6 +50,12 @@ export function prepareSphExactParticleMassSeed(state, options) {
   validateSphExactMassFormat(format);
   if (options.initialQuantities !== undefined && typeof options.initialQuantities !== 'boolean') {
     throw new TypeError('Cold initial quantities declaration must be boolean');
+  }
+  if (options.energyLedger !== undefined && typeof options.energyLedger !== 'boolean') {
+    throw new TypeError('Cold energy ledger declaration must be boolean');
+  }
+  if (options.energyLedger === true && options.initialQuantities === true) {
+    throw new TypeError('The integer energy ledger carries no rational initial quantities');
   }
   if (typeof options.reference !== 'string' || !options.reference.trim()
       || !Array.isArray(state?.particles) || !state.particles.length
@@ -82,7 +95,7 @@ export function prepareSphExactParticleMassSeed(state, options) {
     massesKg.push(mass.value); projections.push(projection.bits);
   }
   const seed = Object.freeze({ format, reference: options.reference.trim(), rowCount: massesKg.length,
-    initialQuantities: options.initialQuantities === true });
+    initialQuantities: options.initialQuantities === true, energyLedger: options.energyLedger === true });
   SEEDS.set(seed, { massesKg: Object.freeze(massesKg), massWords, projections });
   return seed;
 }
@@ -102,12 +115,30 @@ export function bindSphExactParticleMassSeed(packed, seed) {
       throw new TypeError('Initial particle mass projection disagrees with exact inventory');
     }
   }
+  // Extensive internal energy U0 = fl32(m*u) in signed run quanta: the
+  // correctly rounded f32 product of the two projections the solver starts
+  // from, which the GPU ledger can recompute bit for bit to recognise a cold
+  // row. Each row is stored exactly or not at all. A run format too narrow or
+  // coarse for any row seeds no energy rows; ledger consumers then refuse.
+  const ledgerFormat = seed.format.wordCount === SPH_EXACT_THERMAL_ENERGY_FORMAT.wordCount
+    && seed.format.quantumExponent === SPH_EXACT_THERMAL_ENERGY_FORMAT.quantumExponent;
+  let energyWords = ledgerFormat ? new Uint32Array(seed.rowCount * seed.format.wordCount) : null;
+  let energyRowsStatus = ledgerFormat ? 'exact' : 'run-format-is-not-the-energy-ledger-format';
+  for (let row = 0; row < seed.rowCount && energyWords; row++) {
+    const energyJ = Math.fround(packed.state[row * 8 + 3] * packed.state[row * 8 + 7]);
+    try {
+      energyWords.set(encodeSphExactSigned(energyJ, seed.format), row * seed.format.wordCount);
+    } catch {
+      energyWords = null;
+      energyRowsStatus = `row-${row}-not-exact-in-run-format`;
+    }
+  }
   Object.defineProperty(packed, 'exactMass', { value: seed, enumerable: true });
   const arrays = ['state', 'thermo', 'identity'].map(key => {
     ARRAYS.add(packed[key]); ARRAYS.add(packed[key].buffer);
     return [key, packed[key], bytes(packed[key]).slice()];
   });
-  PACKED.set(packed, { seed, ...record, arrays,
+  PACKED.set(packed, { seed, ...record, energyWords, energyRowsStatus, arrays,
     packedSnapshot: { ...packed, metadata: packed.metadata.map(row => ({ ...row })) },
     fields: PACKED_KEYS.map(key => [key, packed[key]]),
     rows: packed.metadata.map(row => ROW_KEYS.map(key => [key, row[key]])) });
@@ -150,6 +181,7 @@ export function resolveSphExactParticleMassSeed(packed) {
       ? new Uint32Array(snapshot.slice().buffer) : new Float32Array(snapshot.slice().buffer);
   }
   return Object.freeze({ ...record.seed, massesKg: record.massesKg, massWords: record.massWords?.slice() ?? null,
+    energyWords: record.energyWords?.slice() ?? null, energyRowsStatus: record.energyRowsStatus,
     packed: Object.freeze(packedSnapshot) });
 }
 
@@ -162,7 +194,8 @@ export function exportSphExactParticleMassColdInput(packed) {
   if (!seed) return null;
   return { schema: 'peercompute.ulg.sph-exact-mass-cold-input.v1',
     wordCount: seed.format.wordCount, quantumExponent: seed.format.quantumExponent,
-    reference: seed.reference, initialQuantities: seed.initialQuantities, massesKg: [...seed.massesKg],
+    reference: seed.reference, initialQuantities: seed.initialQuantities, energyLedger: seed.energyLedger,
+    massesKg: [...seed.massesKg],
     massWords: seed.massWords ? Array.from(seed.massWords) : null,
     fields: Object.fromEntries(PACKED_KEYS.map(key => [key, packed[key]])),
     rows: packed.metadata.map(row => Object.fromEntries(ROW_KEYS.map(key => [key, row[key]]))),
@@ -184,6 +217,7 @@ export function importSphExactParticleMassColdInput(packed, input) {
   const seed = prepareSphExactParticleMassSeed({ step: 0, time: 0,
     particles: input.massesKg.map(massKg => ({ massKg })) }, {
     format: createSphExactMassFormat(input), reference: input.reference, initialQuantities: input.initialQuantities ?? false,
+    energyLedger: input.energyLedger === true,
     ...(input.massWords != null ? { massWords: input.massWords } : {}) });
   if (PACKED.has(packed)) {
     const original = resolveSphExactParticleMassSeed(packed);
@@ -191,6 +225,7 @@ export function importSphExactParticleMassColdInput(packed, input) {
         || original.format.quantumExponent !== seed.format.quantumExponent
         || original.reference !== seed.reference
         || original.initialQuantities !== seed.initialQuantities
+        || original.energyLedger !== seed.energyLedger
         || original.massesKg.some((mass, i) => mass !== input.massesKg[i])
         || Boolean(original.massWords) !== Boolean(input.massWords)
         || original.massWords?.some((word, i) => word !== input.massWords[i])) {
@@ -201,7 +236,8 @@ export function importSphExactParticleMassColdInput(packed, input) {
   if (!packed.exactMass || packed.exactMass.format.wordCount !== input.wordCount
       || packed.exactMass.format.quantumExponent !== input.quantumExponent
       || packed.exactMass.reference !== input.reference
-      || (packed.exactMass.initialQuantities ?? false) !== seed.initialQuantities) {
+      || (packed.exactMass.initialQuantities ?? false) !== seed.initialQuantities
+      || (packed.exactMass.energyLedger ?? false) !== seed.energyLedger) {
     throw new TypeError('Cold transfer differs from the packed exact mass declaration');
   }
   return bindSphExactParticleMassSeed(packed, seed);

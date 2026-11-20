@@ -834,15 +834,33 @@ export function createSchroederSpatialMechanicsViewGpu(device, {
         activeSourceViewBindingSize
       );
       let encodedDispatchCount = 0;
+      // A1: exact direct launch over the active-capacity ceiling (the V2 mark
+      // kernel admits only the view's staged active groups); avoids
+      // Chromium's per-call indirect validation.
+      const markDirectGroups = v2Directory
+        ? Math.ceil((Number(activeSourceView.activeSourceCapacity) || 0)
+          / SCHROEDER_SPATIAL_MECHANICS_VIEW_WORKGROUP_SIZE)
+        : 0;
+      const markDirect = v2Directory
+        && markDirectGroups > 0 && markDirectGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535)
+        && globalThis.__ulgForceIndirectFieldConsumers !== true;
       encodedDispatchCount += v2Directory
-        ? encodeIndirectPass(
+        ? (markDirect
+          ? encodePass(
+              encoder,
+              markPipeline,
+              markBindGroup,
+              [markDirectGroups, 1, 1],
+              `${label}MarkNodesActiveOrdinal`
+            )
+          : encodeIndirectPass(
             encoder,
             markPipeline,
             markBindGroup,
             activeSourceViewBuffer,
             activeSourceView.activeDispatchOffsetBytes,
             `${label}MarkNodesActiveOrdinal`
-          )
+          ))
         : encodePass(
             encoder,
             markPipeline,

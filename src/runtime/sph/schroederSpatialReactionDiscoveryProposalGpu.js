@@ -1,3 +1,5 @@
+import { encodeLawActivationCount } from './lawActivationReceiptRing.js';
+import { createSchroederReactionDormancyStage } from './schroederReactionDormancyGpu.js';
 import {
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V1_UNIFORM_BYTES,
   SCHROEDER_SPATIAL_EXACT_NEAR_EXPECTATION_V2_UNIFORM_BYTES,
@@ -128,7 +130,8 @@ const REACTION_RECORD_VEC4S = 3;
 const REACTION_RECORD_FLOATS = REACTION_RECORD_VEC4S * 4;
 const MAX_EXACT_F32_INTEGER =
   SPH_REACTION_MOTION_ENVELOPE_MAX_EXACT_COUNT;
-const PARAMS_BYTES = 96;
+// Word 24: G4 reaction node-scope dormancy enabled (1 = read binding 11).
+const PARAMS_BYTES = 112;
 const DISPLACEMENT_CERTIFICATE_READY_F32_BITS = 0x3f80_0000;
 const REACTION_DISCOVERY_EVIDENCE_MAXIMUM_DISPLACEMENT_BITS = 20;
 const REACTION_DISCOVERY_EVIDENCE_CERTIFICATE_STATUS_BITS = 21;
@@ -449,7 +452,47 @@ function arenaCacheForDevice(device) {
   return cache;
 }
 
+// G4 reaction node scope. The option is { boxM: [x, y, z], originM?,
+// minCellEdgeM? }; the predicate is exact, so it has no epsilon.
+function acquireReactionDormancyStage(device, arenaEntry, config, {
+  particleCount,
+  reactionCount,
+  maximumContactRadiusM
+}) {
+  const boxM = Array.from(config?.boxM ?? [], Number);
+  const originM = Array.from(config?.originM ?? [0, 0, 0], Number);
+  if (
+    boxM.length !== 3 || boxM.some((value) => !Number.isFinite(value) || value <= 0)
+    || originM.length !== 3 || originM.some((value) => !Number.isFinite(value))
+  ) {
+    throw new TypeError('reactionDormancy needs a positive boxM [x, y, z] and a finite originM');
+  }
+  const minCellEdgeM = Math.max(0, Number(config.minCellEdgeM) || 0);
+  const key = [particleCount, reactionCount, maximumContactRadiusM, ...boxM, ...originM,
+    minCellEdgeM].join('|');
+  arenaEntry.reactionDormancyStages ??= new Map();
+  let stage = arenaEntry.reactionDormancyStages.get(key);
+  if (!stage) {
+    stage = createSchroederReactionDormancyStage({
+      device,
+      particleCount,
+      boxM,
+      originM,
+      maximumContactRadiusM: Math.max(0, maximumContactRadiusM),
+      minCellEdgeM,
+      reactionCount,
+      reactionRecordStrideVec4s: REACTION_RECORD_VEC4S,
+      stateStrideVec4s: 2,
+      thermoStrideVec4s: 3
+    });
+    arenaEntry.reactionDormancyStages.set(key, stage);
+  }
+  return stage;
+}
+
 function destroyArenaEntry(entry) {
+  for (const stage of entry.reactionDormancyStages?.values?.() ?? []) stage.destroy();
+  entry.reactionDormancyStages?.clear?.();
   entry.proposalBuffer?.destroy?.();
   entry.evidenceBuffer?.destroy?.();
   entry.evidenceReadbackBuffer?.destroy?.();
@@ -1346,7 +1389,8 @@ function createParamsArray({
   maximumContactRadiusM,
   reactionRuleIndex,
   collectDiagnosticEvidence = false,
-  reactionMotionEnvelope = null
+  reactionMotionEnvelope = null,
+  reactionDormancyEnabled = false
 }) {
   const data = new ArrayBuffer(PARAMS_BYTES);
   const view = new DataView(data);
@@ -1423,6 +1467,7 @@ function createParamsArray({
     reactionMotionEnvelope?.contactCorrectionEnabled === true ? 1 : 0,
     true
   );
+  view.setUint32(96, reactionDormancyEnabled === true ? 1 : 0, true);
   return data;
 }
 
@@ -1484,6 +1529,8 @@ struct ReactionDiscoveryParams {
   activation_box_dim_y_m: f32,
   activation_box_dim_z_m: f32,
   activation_contact_correction_enabled: u32,
+  // G4: 1 = skip sources the exact reaction dormancy predicate rules out.
+  reaction_dormancy_enabled: u32,
 };
 
 @group(0) @binding(0) var<storage, read> source_state_authority: array<vec4<f32>>;
@@ -1497,6 +1544,11 @@ struct ReactionDiscoveryParams {
 @group(0) @binding(8) var<uniform> spatial_expectation: ${exactNearExpectationType};
 @group(0) @binding(9) var<uniform> params: ReactionDiscoveryParams;
 @group(0) @binding(10) var<storage, read_write> reaction_activation_observation: array<atomic<u32>>;
+// G4 reaction node scope (schroederReactionDormancyGpu.js): the dormancy
+// stage, encoded just before this pass, writes this sentinel into the
+// proposal row of every source with no feasible reaction pair this step. The
+// pass reads its own row before overwriting it, so no binding is added.
+const REACTION_DORMANCY_SENTINEL: vec4<f32> = vec4<f32>(-7.0, -7.0, -7.0, -7.0);
 
 ${exactNearTraversalWgsl}
 ${exactNearCellTreeTraversalWgsl}
@@ -2269,6 +2321,7 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (particle_index >= params.particle_count) {
     return;
   }
+  let reaction_dormancy_prior_row = reaction_proposals[particle_index];
   reaction_proposals[particle_index] = reaction_discovery_invalid_proposal();
   reaction_discovery_reset_hot_counters();
   atomicAdd(&traversal_evidence[0u], 1u);
@@ -2298,6 +2351,14 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
   if (reaction_discovery_mass(particle_index) <= 0.0) {
+    return;
+  }
+  // G4: no feasible pair (exact predicate), so the no-partner proposal
+  // written above already is this source's result.
+  if (
+    params.reaction_dormancy_enabled != 0u
+    && all(reaction_dormancy_prior_row == REACTION_DORMANCY_SENTINEL)
+  ) {
     return;
   }
   if (
@@ -3297,7 +3358,8 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   gpuTimestampRecorder = null,
   collectGpuResidentDiagnosticEvidence = false,
   observeGpuEvidence = false,
-  captureActivationObservation = false
+  captureActivationObservation = false,
+  reactionDormancy = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer || !device.queue?.submit) {
     throw new TypeError('canonical reaction discovery requires a WebGPU-like device');
@@ -3617,6 +3679,13 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     'reaction discovery expectationBuffer'
   );
   device.queue.writeBuffer(expectationBuffer, 0, authentication.expectationData);
+  const reactionDormancyStage = reactionDormancy
+    ? acquireReactionDormancyStage(device, arenaEntry, reactionDormancy, {
+        particleCount,
+        reactionCount,
+        maximumContactRadiusM
+      })
+    : null;
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount,
     reactionCount,
@@ -3625,7 +3694,8 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     collectDiagnosticEvidence:
       collectGpuResidentDiagnosticEvidence === true
       || observeGpuEvidence === true,
-    reactionMotionEnvelope
+    reactionMotionEnvelope,
+    reactionDormancyEnabled: Boolean(reactionDormancyStage)
   }));
   device.queue.writeBuffer(evidenceBuffer, 0, evidenceInitial);
   if (captureActivationObservation === true) {
@@ -3906,6 +3976,36 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     encoder,
     displacementTimestampSpan
   );
+  if (reactionDormancyStage) {
+    // G4: classify sources from the same current state and thermo the
+    // proposal pass reads, before it reads the flags.
+    reactionDormancyStage.encode(encoder, {
+      stateBuffer: currentStateBuffer,
+      thermoBuffer,
+      reactionRecordBuffer: resolvedReactionRecordBuffer,
+      proposalBuffer,
+      proposalByteLength
+    });
+    // G4 per-schedule receipt: this step's counts into the schedule ring.
+    encodeLawActivationCount(encoder, device, 'reaction', reactionDormancyStage.countBuffer);
+    // Diagnostic: the latest stage's counts, read on demand by probes.
+    const diagnostic = (globalThis.__ulgReactionDormancy ??= { encodes: 0 });
+    diagnostic.encodes += 1;
+    diagnostic.device = device;
+    diagnostic.stage = reactionDormancyStage;
+    diagnostic.readCounts ??= async () => {
+      const live = diagnostic.stage;
+      if (!live) return null;
+      const copy = diagnostic.device.createBuffer({ size: 16, usage: 1 | 8 });
+      const copyEncoder = diagnostic.device.createCommandEncoder();
+      copyEncoder.copyBufferToBuffer(live.countBuffer, 0, copy, 0, 16);
+      diagnostic.device.queue.submit([copyEncoder.finish()]);
+      await copy.mapAsync(1);
+      const counts = Array.from(new Uint32Array(copy.getMappedRange().slice(0)));
+      copy.unmap(); copy.destroy();
+      return { encodes: diagnostic.encodes, counts, cells: live.cells, cellEdgeFloorM: live.cellEdgeFloorM };
+    };
+  }
   const proposalTimestampSpan = beginReactionDiscoveryTimestampSpan(
     gpuTimestampRecorder,
     encoder,
@@ -4070,7 +4170,11 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     ) {
       releaseReactionDiscoveryArenaResources(arenaEntry, arenaLease);
       throw new Error(
-        `Canonical reaction discovery GPU completion evidence was missing or rejected: ${JSON.stringify(observedEvidence)}`
+        `Canonical reaction discovery GPU completion evidence was missing or rejected: ${JSON.stringify({
+          expectedGenerationId: authentication.generationId,
+          expectedSupportEpoch: authentication.epochIdentity.supportEpoch,
+          expectedReactionCount: reactionCount
+        })} ${JSON.stringify(observedEvidence)}`
       );
     }
   }
@@ -4116,6 +4220,19 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     particleCount,
     reactionCount,
     maximumContactRadiusM,
+    // G4 receipt: counts [active, dormant, present, overflow] and the flags,
+    // GPU-written before this proposal pass; null when off.
+    reactionDormancy: reactionDormancyStage
+      ? Object.freeze({
+          schema: 'ulg.schroeder-reaction-dormancy.v1',
+          predicate: 'halo-co-reactant-and-activation-temperature',
+          exact: true,
+          cellEdgeFloorM: reactionDormancyStage.cellEdgeFloorM,
+          cells: reactionDormancyStage.cells,
+          countBuffer: reactionDormancyStage.countBuffer,
+          dormantBuffer: reactionDormancyStage.dormantBuffer
+        })
+      : null,
     generation,
     generationId: authentication.generationId,
     epochIdentity: authentication.epochIdentity,

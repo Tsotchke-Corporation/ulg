@@ -1,3 +1,4 @@
+import { validateSchroederSpatialChainPublicationTick } from './schroederSpatialChainPublicationGpu.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SCHROEDER_LEVEL_ASSIGNMENT_ROW_LAYOUT,
@@ -56,7 +57,8 @@ export const SCHROEDER_FROZEN_SPATIAL_KEY_CHURN_TARGETS_OPTION =
   'schroederFrozenSpatialKeyChurnTargets';
 const SCHROEDER_POST_CLOSURE_TICK_MODE = Object.freeze({
   SAME_LOOKUP_TICK: 'same-lookup-tick',
-  NEXT_TICK_SUCCESSOR: 'next-tick-successor'
+  NEXT_TICK_SUCCESSOR: 'next-tick-successor',
+  ACCEPTED_CHAIN_CLOCK: 'accepted-chain-clock'
 });
 
 const U32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
@@ -720,7 +722,7 @@ function exactPostClosureLevelAssignmentRecord(
     && (device == null || record.device === device)
     && (
       lookupLevelAssignment == null
-      || record.lookupLevelAssignment === lookupLevelAssignment
+      || record.lookupLevelAssignmentRef.deref() === lookupLevelAssignment
     )
     && (
       nextParticleUploads == null
@@ -754,7 +756,7 @@ export function validateSchroederPostClosureLevelAssignment(
     && levelAssignment.sourceThermoBuffer === sph.thermoBuffer
     && levelAssignment.sourceMechanicsBuffer === mls.mechanicsBuffer
     && levelAssignment.sourceLookupAssignmentBuffer
-      === record.lookupLevelAssignment.assignmentBuffer
+      === record.lookupAssignmentBuffer
     && levelAssignment.postClosureTickMode === record.postClosureTickMode
     && levelAssignment.sourceLookupPhysicsTick
       === record.sourceLookupPhysicsTick
@@ -1219,6 +1221,7 @@ export function admitSchroederPostClosureLevelAssignment({
   lookupLevelAssignment,
   nextParticleUploads,
   postClosureLevelAssignment,
+  chainBatchPublication = null,
   maxParticleCount = nextParticleUploads?.sphParticleUpload?.particleCount
 } = {}) {
   if (!device || (typeof device !== 'object' && typeof device !== 'function')) {
@@ -1327,7 +1330,15 @@ export function admitSchroederPostClosureLevelAssignment({
     && currentIdentity.physicsTick === lookup.identity.physicsTick + 1
     && currentIdentity.physicsSubstep === 0
   );
-  const postClosureTickMode = sameLookupTick
+  const acceptedChainClock = chainBatchPublication != null
+    && validateSchroederSpatialChainPublicationTick(chainBatchPublication,
+      {device,lookupLevelAssignment,nextParticleUploads});
+  if (chainBatchPublication != null && !acceptedChainClock) {
+    throw refreshError('post-closure batch tick requires its original accepted GPU clock',
+      'ERR_SCHROEDER_POST_CLOSURE_ASSIGNMENT_IDENTITY');
+  }
+  const postClosureTickMode = acceptedChainClock
+    ? SCHROEDER_POST_CLOSURE_TICK_MODE.ACCEPTED_CHAIN_CLOCK : sameLookupTick
     ? SCHROEDER_POST_CLOSURE_TICK_MODE.SAME_LOOKUP_TICK
     : nextTickSuccessor
       ? SCHROEDER_POST_CLOSURE_TICK_MODE.NEXT_TICK_SUCCESSOR
@@ -1405,7 +1416,13 @@ export function admitSchroederPostClosureLevelAssignment({
   });
   admittedPostClosureLevelAssignments.set(postClosureLevelAssignment, {
     device,
-    lookupLevelAssignment,
+    // Weak: the lookup is the previous step's post-closure assignment, itself
+    // a key in this WeakMap. A strong reference chained every step's record
+    // (and its uploads, buffers and cleanup claims) back to the first step,
+    // leaking about 15 MB/s on Iron Ice. Identity checks deref the ref (any
+    // caller that passes the lookup holds it); buffer checks use the buffer.
+    lookupLevelAssignmentRef: new WeakRef(lookupLevelAssignment),
+    lookupAssignmentBuffer: lookupLevelAssignment.assignmentBuffer,
     nextParticleUploads,
     assignmentBuffer: postClosureLevelAssignment.assignmentBuffer,
     postClosureTickMode,

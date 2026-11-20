@@ -39,6 +39,10 @@ import {
   ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA,
   ULG_SPH_SPATIAL_GAS_LEDGER_EOS_EXECUTION_SCHEMA_V3,
   abandonSphSpatialGasPressureAuthority,
+  beginSphSpatialGasPressureMechanicsFamily,
+  finishSphSpatialGasPressureMechanicsFamily,
+  abortSphSpatialGasPressureMechanicsFamily,
+  encodeSphSpatialGasPressureMechanicsChainProjection,
   bindSphSpatialGasPressureMechanicsAuthority,
   createSphSpatialGasPressureMechanicsAuthorityBinding,
   describeSphSpatialGasPressureAuthority,
@@ -237,6 +241,8 @@ function fakeDevice() {
       return buffer;
     },
     createShaderModule(descriptor) { return descriptor; },
+    createBindGroupLayout(descriptor) { return descriptor; },
+    createPipelineLayout(descriptor) { return descriptor; },
     createComputePipeline(descriptor) {
       const pipeline = {
         ...descriptor,
@@ -336,7 +342,8 @@ function epochIdentity(overrides = {}) {
 function retainedGasOccupancyFixture(device, {
   particleCount = 2,
   identity = epochIdentity(),
-  gridSpacingM = 1
+  gridSpacingM = 1,
+  levelCount = 1
 } = {}) {
   const taggedBuffer = (label, size) => tagWebGpuBufferDevice(
     device.createBuffer({ label, size, usage: 128 | 8 }),
@@ -367,11 +374,12 @@ function retainedGasOccupancyFixture(device, {
     particleCount * Uint32Array.BYTES_PER_ELEMENT
   );
   const spatialGasGrid = Object.freeze({
-    selectedLevel: 0,
+    selectedLevel: levelCount-1,
+    levelCount,
     gridDims: Object.freeze([4, 4, 4]),
     gridNodeCount: 64,
     gridShift: 2,
-    gridSpacingM: Math.fround(gridSpacingM)
+    gridSpacingM: Math.fround(gridSpacingM*2**(levelCount-1))
   });
   const sphParticleUpload = {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -423,9 +431,9 @@ function retainedGasOccupancyFixture(device, {
     sourceMechanicsBufferByteLength: sourceMechanicsBuffer.size,
     ...identity,
     minLevel: 0,
-    maxLevel: 0,
+    maxLevel: levelCount-1,
     chartId: 0,
-    baseGridSpacingM: spatialGasGrid.gridSpacingM
+    baseGridSpacingM: Math.fround(gridSpacingM)
   };
   const generation = runSchroederSpatialEpochGenerationWebGpu({
     device,
@@ -435,6 +443,8 @@ function retainedGasOccupancyFixture(device, {
     particleIdentityStrideWords: 1,
     selectedLevel: spatialGasGrid.selectedLevel,
     mechanicsGrid: spatialGasGrid,
+    ...(levelCount>1 ? {mechanicsLevels:Array.from({length:levelCount},(_,selectedLevel)=>({selectedLevel,
+      mechanicsGrid:{...spatialGasGrid,selectedLevel,gridSpacingM:Math.fround(gridSpacingM*2**selectedLevel)}}))} : {}),
     exactNearCellTreeEnabled: false
   });
   assert.equal(generation.ready, true, generation.reason);
@@ -534,6 +544,7 @@ function retainedGasActiveNodeGenerationFixture(device, {
 
 function retainedGasAuthorityArgs(fixture) {
   return {
+    level:fixture.spatialGasGrid.selectedLevel,
     epochIdentity: fixture.identity,
     schroederSpatialEpochGeneration: fixture.generation,
     spatialGasGrid: fixture.spatialGasGrid,
@@ -686,8 +697,8 @@ function pressureConsumerFixture(device, instrumentation, result) {
   };
 }
 
-function pressureMechanicsAuthorityFixture(device, fixture) {
-  const levelView = fixture.generation.mechanicsLevelViews.at(-1);
+function pressureMechanicsAuthorityFixture(device, fixture, index=-1) {
+  const levelView = fixture.generation.mechanicsLevelViews.at(index);
   const mechanicsFieldView = levelView.mechanicsFieldView;
   const phaseVolumeMoment = levelView.phaseVolumeMoment;
   const phaseVolumeReceipt = levelView.phaseVolumeReceipt;
@@ -859,6 +870,78 @@ function setGasCandidateParticle(stateRows, thermoRows, rowIndex, {
   thermoRows[thermoAt('representedEntityCount')] = representedEntityCount;
   thermoRows[thermoAt('status')] = status;
 }
+
+test('native pressure family retains its original EOS through every level, then retires without a host fence', async () => {
+  const {device,instrumentation}=fakeDevice();
+  const source=retainedProductEventSource(device,2);
+  const occupancy=retainedGasOccupancyFixture(device,{levelCount:3});
+  const result=await runSphSpatialGasLedgerEosRetainedWebGpu({device,residentProductMass:source,...retainedGasAuthorityArgs(occupancy)});
+  assert.equal(result.ready,true,result.reason);
+  const family=beginSphSpatialGasPressureMechanicsFamily(result.retainedGasCellFieldSource,
+    {device,generation:occupancy.generation,ambientPressurePa:101325});
+  assert.throws(()=>finishSphSpatialGasPressureMechanicsFamily({...family}));
+  assert.throws(()=>finishSphSpatialGasPressureMechanicsFamily(family));
+  assert.throws(()=>pressureConsumerFixture(device,instrumentation,result).encode());
+  assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(result),false);
+  assert.equal(source.__ulgActiveBorrowCount,1);
+  const fenceCount=instrumentation.queueFenceCount;
+  for(let i=0;i<3;i++){
+    const mechanics=pressureMechanicsAuthorityFixture(device,occupancy,i);
+    const binding=createSphSpatialGasPressureMechanicsAuthorityBinding(result.retainedGasCellFieldSource,
+      {device,bindGroupLayout:{},publicEntries:mechanics.publicEntries,phaseVolumeAuthority:mechanics.authority,chartId:0});
+    assert.equal(binding.crossLevelMappingMode,'chain-adjoint');
+    assert.equal(binding.targetLevel,i);
+    assert.equal(markSphSpatialGasPressureAuthoritySubmitted(binding.receipt),false);
+    const encoder=device.createCommandEncoder();
+    assert.throws(()=>encodeSphSpatialGasPressureMechanicsChainProjection(binding,{device,encoder,ambientPressurePa:1}));
+    encodeSphSpatialGasPressureMechanicsChainProjection(binding,{device,encoder,ambientPressurePa:101325});
+    const pass=encoder.beginComputePass();bindSphSpatialGasPressureMechanicsAuthority(binding,{device,passEncoder:pass});pass.end();
+    const claim=sphSpatialGasPressureAuthorityQueueOrderedClaim(binding.receipt,device);
+    const proof=submitQueueOrderedFinalConsumerWork(device,[encoder.finish()],{finalConsumerOwner:{},producerClaims:[claim]});
+    assert.equal(retireSphSpatialGasPressureAuthorityQueueOrdered(binding.receipt,device,proof),true);
+    assert.equal(result.released,i===2);
+    assert.equal(result.gasPressureAuthorityConsumerSubmitted,i===2);
+    assert.equal(source.__ulgActiveBorrowCount,i===2?0:1);
+    assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(result),false);
+    assert.equal(retireSphSpatialGasPressureAuthorityQueueOrdered(binding.receipt,device,proof),false);
+  }
+  assert.equal(instrumentation.queueFenceCount,fenceCount);
+  assert.equal(finishSphSpatialGasPressureMechanicsFamily(family),true);
+  assert.equal(abortSphSpatialGasPressureMechanicsFamily(family),false);
+  await releaseOccupancyFixture(device,occupancy);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device),true);
+});
+
+test('a partially submitted pressure family cannot retry an abandoned member and keeps fenced abort ownership', async () => {
+  const {device,instrumentation}=fakeDevice();
+  const source=retainedProductEventSource(device,2);
+  const occupancy=retainedGasOccupancyFixture(device,{levelCount:3});
+  const result=await runSphSpatialGasLedgerEosRetainedWebGpu({device,residentProductMass:source,...retainedGasAuthorityArgs(occupancy)});
+  const family=beginSphSpatialGasPressureMechanicsFamily(result.retainedGasCellFieldSource,
+    {device,generation:occupancy.generation,ambientPressurePa:0});
+  const create=i=>{
+    const m=pressureMechanicsAuthorityFixture(device,occupancy,i);
+    return createSphSpatialGasPressureMechanicsAuthorityBinding(result.retainedGasCellFieldSource,
+      {device,bindGroupLayout:{},publicEntries:m.publicEntries,phaseVolumeAuthority:m.authority,chartId:0});
+  };
+  const first=create(0),encoder=device.createCommandEncoder();
+  encodeSphSpatialGasPressureMechanicsChainProjection(first,{device,encoder,ambientPressurePa:0});
+  const pass=encoder.beginComputePass();bindSphSpatialGasPressureMechanicsAuthority(first,{device,passEncoder:pass});pass.end();
+  const claim=sphSpatialGasPressureAuthorityQueueOrderedClaim(first.receipt,device);
+  const proof=submitQueueOrderedFinalConsumerWork(device,[encoder.finish()],{finalConsumerOwner:{},producerClaims:[claim]});
+  retireSphSpatialGasPressureAuthorityQueueOrdered(first.receipt,device,proof);
+  const second=create(1);
+  assert.equal(abandonSphSpatialGasPressureAuthority(second.receipt),true);
+  assert.equal(result.released,false);
+  assert.equal(source.__ulgActiveBorrowCount,1);
+  assert.throws(()=>create(1));
+  assert.equal(releaseSphSpatialGasLedgerEosAfterQueue(result),false);
+  assert.equal(abortSphSpatialGasPressureMechanicsFamily(family),true);
+  await result.releasePromise;
+  assert.equal(source.__ulgActiveBorrowCount,0);
+  await releaseOccupancyFixture(device,occupancy);
+  assert.equal(destroySphSpatialGasLedgerEosGpu(device),true);
+});
 
 test('CPU gas-candidate union preserves residual-only mass, source order, and exact provenance', () => {
   const productRows = new Float32Array(

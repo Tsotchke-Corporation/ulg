@@ -137,8 +137,8 @@ test('native plateau resolution follows the particle pressure', {
       // directly. Strip the shader's entry points so only the helpers remain.
       const helpers = transferWgsl.split('@compute')[0];
       const code = `${helpers}
-@group(0) @binding(9) var<storage, read> probe_in: array<f32>;
-@group(0) @binding(10) var<storage, read_write> probe_out: array<f32>;
+@group(0) @binding(10) var<storage, read> probe_in: array<f32>;
+@group(0) @binding(11) var<storage, read_write> probe_out: array<f32>;
 
 @compute @workgroup_size(1)
 fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -176,7 +176,7 @@ fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
       });
 
       // params: matches PhaseTransferParams field order.
-      const params = new ArrayBuffer(64);
+      const params = new ArrayBuffer(80); // front_* words 64..79 stay 0
       const view = new DataView(params);
       view.setUint32(0, 4, true);      // particle_count
       view.setUint32(4, 1, true);      // lineage_capacity
@@ -216,8 +216,8 @@ fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
       const entries = [
         { binding: 3, resource: { buffer: storage(closure, S) } },
         { binding: 8, resource: { buffer: storage(new Uint8Array(params), GPUBufferUsage.UNIFORM) } },
-        { binding: 9, resource: { buffer: storage(probeData, S) } },
-        { binding: 10, resource: { buffer: outBuffer } }
+        { binding: 10, resource: { buffer: storage(probeData, S) } },
+        { binding: 11, resource: { buffer: outBuffer } }
       ];
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();

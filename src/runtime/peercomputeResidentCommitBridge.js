@@ -3,6 +3,8 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA
 } from './sph/sphMlsMpmGpuStep.js';
+import { settleSchroederSpatialChainResidentDelta } from './sph/schroederSpatialChainResidentGpu.js';
+import { settleThermalPotentialDelta } from './material/thermalPotentialGpu.js';
 
 export const ULG_RESIDENT_STATE_COMMIT_BRIDGE_SCHEMA = 'peercompute.ulg.resident-state-commit-bridge.v0';
 export const ULG_RESIDENT_STATE_COMMIT_ADMISSION_SCHEMA = 'peercompute.ulg.resident-state-commit-admission.v0';
@@ -211,15 +213,30 @@ export function createResidentStateManagerCommitHandler(stateManager, {
       requireFenceSatisfied
     });
     if (typeof onAdmission === 'function') {
-      onAdmission(admission, delta);
+      try {
+        onAdmission(admission, delta);
+      } catch (error) {
+        settleThermalPotentialDelta(delta, false);
+        throw error;
+      }
     }
     if (!admission.accepted) {
+      settleThermalPotentialDelta(delta, false);
       const error = new Error(`ULG resident commit delta rejected: ${admission.reason || 'invalid-delta'}`);
       error.code = 'ERR_ULG_RESIDENT_DELTA_REJECTED';
       error.admission = admission;
+      const cleanup = settleSchroederSpatialChainResidentDelta(delta,false);
+      if (cleanup) error.residentSequenceCleanupCompletion = cleanup;
       throw error;
     }
-    stateManager.commitDelta(delta);
+    try {
+      stateManager.commitDelta(delta);
+    } catch (error) {
+      settleThermalPotentialDelta(delta, false);
+      throw error;
+    }
+    settleSchroederSpatialChainResidentDelta(delta,true);
+    settleThermalPotentialDelta(delta, true);
     return admission;
   };
 }

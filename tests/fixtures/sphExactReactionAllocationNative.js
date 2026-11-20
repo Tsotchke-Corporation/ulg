@@ -29,7 +29,7 @@ export function createExactReactionAllocationFixture({ reactionCount = 1, identi
       phases: [{ name: 'liquid', temperatureRange: [0, 400], cpJPerKgK: 4000,
         densityKgPerM3: parameters.liquidDensityKgPerM3, bulkModulusPa: 1e8, shearModulusPa: 0 },
       { name: 'gas', temperatureRange: [400, 1000], cpJPerKgK: parameters.vaporCpJPerKgK,
-        densityKgPerM3: parameters.referencePressurePa * molarMass / (8.314462618 * 300), bulkModulusPa: null, shearModulusPa: 0 }],
+        densityKgPerM3: 101325 * molarMass / (8.314462618 * 300), bulkModulusPa: null, shearModulusPa: 0 }],
       transitions: mobileReactants || !['h2', 'o2'].includes(material)
         ? [{ from: 'liquid', to: 'gas', temperatureK: 400, latentHeatJPerKg: 2e6 }] : [] };
   }

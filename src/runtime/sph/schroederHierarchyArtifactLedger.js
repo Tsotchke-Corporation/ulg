@@ -210,6 +210,10 @@ const FAMILY_BUFFER_SPECS = Object.freeze({
   'particle-storage-allocation': [
     { role: 'allocation', fields: ['allocationBuffer'], destroyMethod: 'destroyAllocationBuffer' }
   ],
+  'phase-slot-spare-scan': [
+    ...['localPrefixBuffer', 'groupOffsetsBuffer', 'spareLineagesBuffer', 'freeListBuffer', 'paramsBuffer']
+      .map(field => ({ role: field, fields: [field], destroyMethod: 'destroyScanBuffers' }))
+  ],
   'particle-storage-slot-assignment': [
     {
       role: 'slot-assignment',

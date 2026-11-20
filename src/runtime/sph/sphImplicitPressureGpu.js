@@ -743,6 +743,36 @@ function implicitPressurePipelines(device) {
   return cached;
 }
 
+/**
+ * Update the cached Eshkol/A4 stiffness response table buffer on `device` at a
+ * schedule boundary (accepting either an array of A4 response functions or an
+ * already-packed table from `packResponseFunctionsForGpu`).
+ */
+export function updateSphImplicitPressureStiffnessTable(device, responseFunctionsOrPacked) {
+  const cache = implicitPressurePipelines(device);
+  const packed = responseFunctionsOrPacked?.data instanceof Float32Array
+    ? responseFunctionsOrPacked
+    : packResponseFunctionsForGpu(
+        Array.isArray(responseFunctionsOrPacked)
+          ? responseFunctionsOrPacked
+          : [responseFunctionsOrPacked]
+      );
+  if (packed.data.byteLength <= cache.stiffnessTable.size) {
+    device.queue.writeBuffer(cache.stiffnessTable, 0, packed.data);
+  } else {
+    const next = device.createBuffer({
+      label: 'ulg-sph-implicit-pressure-response-table',
+      size: packed.data.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(next, 0, packed.data);
+    cache.stiffnessTable.destroy();
+    cache.stiffnessTable = next;
+    for (const workspace of cache.workspaces) workspace.bindGroups.clear();
+  }
+  return cache.stiffnessTable;
+}
+
 /** The WGSL compilation messages of the solver module (for compile checks). */
 export async function sphImplicitPressureCompilationErrors(device) {
   const info = await implicitPressurePipelines(device).module.getCompilationInfo();
@@ -842,7 +872,8 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
     })));
     workspace.paramsKey = paramsKey;
   }
-  const groupKey = (source) => [source, stateBuffer, thermoBuffer, mechanicsBuffer, gridBuffer];
+  const activeStiffnessTable = options.stiffnessTableBuffer ?? cache.stiffnessTable;
+  const groupKey = (source) => [source, stateBuffer, thermoBuffer, mechanicsBuffer, gridBuffer, activeStiffnessTable];
   const bindGroup = (source) => {
     const key = groupKey(source);
     for (const [cachedKey, group] of workspace.bindGroups) {
@@ -864,7 +895,7 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
         { binding: 9, resource: { buffer: workspace.cgQ } },
         { binding: 10, resource: { buffer: workspace.scalars } },
         { binding: 11, resource: { buffer: workspace.partials } },
-        { binding: 12, resource: { buffer: cache.stiffnessTable } }
+        { binding: 12, resource: { buffer: activeStiffnessTable } }
       ]
     });
     if (workspace.bindGroups.size >= 16) workspace.bindGroups.clear();

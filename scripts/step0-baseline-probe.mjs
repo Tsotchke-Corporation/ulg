@@ -1724,6 +1724,7 @@ try {
   evidence.lawScopeReceipt = (await inAll(() => globalThis.__ulgLastLawScopeReceipt ?? null)).filter(entry => entry.value);
   console.log(JSON.stringify({ lawScopeReceipt: evidence.lawScopeReceipt }));
   evidence.implicitPressure = (await inAll(() => globalThis.__ulgImplicitPressure ?? null)).filter(entry => entry.value);
+  evidence.thermalPotential = (await inAll(() => globalThis.__ulgThermalPotentialStatus ?? null)).filter(entry => entry.value);
   console.log(JSON.stringify({ implicitPressure: evidence.implicitPressure }));
   // S0_LANE_TRACE=1: the worker lane's last 96 timestamped events.
   if (process.env.S0_LANE_TRACE === '1') {

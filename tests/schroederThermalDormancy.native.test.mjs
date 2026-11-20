@@ -40,13 +40,20 @@ test('native Vulkan thermal dormancy predicate is pair-conservative', {
       const rand = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
       const positions = Array.from({ length: n }, () => [0.02 + 1.96 * rand(), 0.02 + 1.96 * rand(), 0.02 + 1.96 * rand()]);
       const masses = positions.map((_, i) => i % 17 === 0 ? 0 : 0.01);
-      const run = async ({ temperature, walls }) => {
-        const state = new Float32Array(n * 8), thermo = new Float32Array(n * 12);
-        positions.forEach((p, i) => { state.set([...p, masses[i]], i * 8); thermo.set([1, 2, temperature(p, i), 1000], i * 12); });
+      const run = async ({ temperature, uncertainty = null, walls }) => {
+        const state = new Float32Array(n * 8);
+        const thermoFloats = n * 12 + (uncertainty ? n : 0);
+        const thermo = new Float32Array(thermoFloats);
+        positions.forEach((p, i) => {
+          state.set([...p, masses[i]], i * 8);
+          thermo.set([1, 2, temperature(p, i), 1000], i * 12);
+          if (uncertainty) thermo[n * 12 + i] = uncertainty(p, i);
+        });
         const make = data => { const b = device.createBuffer({ size: data.byteLength, usage: 0x80 | 0x08 }); device.queue.writeBuffer(b, 0, data); return b; };
         const stateBuffer = make(state), thermoBuffer = make(thermo);
         const stage = dormancy.createSchroederThermalDormancyStage({ device, particleCount: n, boxM: [2, 2, 2],
-          cellEdgeM: 0.25, epsilonK: 0.01, wallSupportM: 0.1, wallTemperaturesK: walls });
+          cellEdgeM: 0.25, epsilonK: 0.01, wallSupportM: 0.1, wallTemperaturesK: walls,
+          uncertaintyWordOffset: uncertainty ? n * 12 : null });
         const e = device.createCommandEncoder(); stage.encode(e, { stateBuffer, thermoBuffer }); device.queue.submit([e.finish()]);
         const read = async b => { const c = device.createBuffer({ size: b.size, usage: 1 | 8 }); const x = device.createCommandEncoder();
           x.copyBufferToBuffer(b, 0, c, 0, b.size); device.queue.submit([x.finish()]); await c.mapAsync(1);
@@ -61,8 +68,13 @@ test('native Vulkan thermal dormancy predicate is pair-conservative', {
       const step = await run({ temperature: (p, i) => (p[0] < 1 ? 300 : 310) + 0.0025 * ((i * 7919) % 1000) / 1000,
         walls: [0, 0, 0, 0, 0, 0] });
       const wall = await run({ temperature: () => 300, walls: [0, 0, 400, 0, 0, 0] });
+      // D4: G6 empirical uncertainty interval [T - dT, T + dT] stays dormant when
+      // 2*dT <= epsilon (0.004 <= 0.01) and activates conservatively when 2*dT > epsilon (0.016 > 0.01).
+      const uncSmall = await run({ temperature: () => 300, uncertainty: () => 0.002, walls: [0, 0, 0, 0, 0, 0] });
+      const uncStraddle = await run({ temperature: () => 300, uncertainty: () => 0.008, walls: [0, 0, 0, 0, 0, 0] });
+      const uncWall = await run({ temperature: () => 300, uncertainty: () => 0.004, walls: [0, 0, 300.008, 0, 0, 0] });
       device.destroy();
-      return { status: 'ran', errors, errorCount, positions, masses, uniform, step, wall };
+      return { status: 'ran', errors, errorCount, positions, masses, uniform, step, wall, uncSmall, uncStraddle, uncWall };
     });
     assert.notEqual(out.status, 'unsupported', 'WebGPU adapter unavailable');
     assert.notEqual(out.status, 'compile-error', `dormancy WGSL compiles: ${JSON.stringify(out.compileErrors)}`);
@@ -102,6 +114,19 @@ test('native Vulkan thermal dormancy predicate is pair-conservative', {
         assert.equal(w.dormant[i] === 0, nearFloor, `D3: source ${i} wall activation`);
       }
       report.wall = w.counts;
+    }
+    // D4: conservative G6 uncertainty intervals.
+    assert.deepEqual(out.uncSmall.counts.slice(0, 3), [0, present, present],
+      'D4: sub-epsilon uncertainty band (2*dT < eps) remains dormant');
+    assert.deepEqual(out.uncStraddle.counts.slice(0, 3), [present, 0, present],
+      'D4: uncertainty straddling epsilon (2*dT > eps) activates conservatively');
+    { const uw = out.uncWall;
+      for (let i = 0; i < out.positions.length; i++) {
+        if (!(out.masses[i] > 0)) continue;
+        const nearFloor = out.positions[i][1] <= 0.1;
+        assert.equal(uw.dormant[i] === 0, nearFloor, `D4: wall + uncertainty activates near-floor source ${i}`);
+      }
+      report.uncertainty = { small: out.uncSmall.counts, straddle: out.uncStraddle.counts, wall: uw.counts };
     }
     console.log(JSON.stringify(report));
   } finally { await browser.close(); }

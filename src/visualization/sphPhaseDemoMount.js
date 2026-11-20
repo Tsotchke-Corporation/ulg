@@ -1237,6 +1237,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'exactEnergyLedger',
   'thermalDormancyK',
   'reactionDormancy',
+  'thermalPotential',
   'cfl',
   'cflSafety',
   'implicitPressure',
@@ -7364,6 +7365,7 @@ export async function mountSphPhaseDemoOverlay({
     'exactEnergyLedger',
     'thermalDormancyK',
     'reactionDormancy',
+    'thermalPotential',
     'cfl',
     'cflSafety',
     'implicitPressure',
@@ -7923,6 +7925,11 @@ export async function mountSphPhaseDemoOverlay({
   // reactionDormancy=0 restores the ungated route.
   const initialReactionDormancy = String(initialHash.get('reactionDormancy')
     ?? initialQuery.get('reactionDormancy') ?? initialScenarioRuntime.reactionDormancy ?? '1') !== '0';
+  // G6 live caloric thermal potential closure loop, on by default for thermal
+  // Schroeder scenes; thermalPotential=0 restores the direct-graph-only route.
+  const initialThermalPotentialRaw = String(initialHash.get('thermalPotential')
+    ?? initialQuery.get('thermalPotential') ?? initialScenarioRuntime.thermalPotential ?? '1');
+  const initialThermalPotential = initialThermalPotentialRaw !== '0' && initialThermalPotentialRaw !== 'false';
   const initialHydrostaticInitialization = (() => {
     const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
     if (raw == null || raw === '') return null;
@@ -9085,6 +9092,7 @@ export async function mountSphPhaseDemoOverlay({
     if (initialThermalDormancyK == null) q.set('thermalDormancyK', 'off');
     else if (initialThermalDormancyK !== 0) q.set('thermalDormancyK', String(initialThermalDormancyK));
     if (!initialReactionDormancy) q.set('reactionDormancy', '0');
+    if (!initialThermalPotential) q.set('thermalPotential', '0');
     if (initialGridCflFactor != null) q.set('cfl', String(initialGridCflFactor));
     if (initialCflSafety != null) q.set('cflSafety', String(initialCflSafety));
     if (initialImplicitPressure) {
@@ -9406,6 +9414,7 @@ export async function mountSphPhaseDemoOverlay({
       ...(initialExactEnergyLedger ? { exactEnergyLedger: true } : {}),
       ...(initialThermalDormancyK != null ? { thermalDormancyK: initialThermalDormancyK } : {}),
       ...(initialReactionDormancy ? { reactionDormancy: true } : {}),
+      thermalPotentialEnabled: initialThermalPotential,
       ...(initialArtificialViscosityAlpha != null
         ? { mlsMpmArtificialViscosityAlpha: initialArtificialViscosityAlpha }
         : {}),

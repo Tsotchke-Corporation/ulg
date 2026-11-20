@@ -3172,7 +3172,8 @@ test('thermal proposal preparation defers matched-time work and returns resident
     (
       SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
         + 2 * SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
-        // ActiveSource rank sidecar, then the G4 thermal dormancy flags.
+        // ActiveSource rank sidecar, G4 thermal dormancy flags, and G6 temperature uncertainty.
+        + 2
         + 2
         + 2
     ) * 4

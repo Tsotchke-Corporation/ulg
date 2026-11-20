@@ -56,6 +56,7 @@ const COMMON_RUNTIME = Object.freeze({
   // instead of pretending the request is the effective schedule size.
   residentStepsPerSchedule: '16',
   submitBurstSteps: '4',
+  thermalPotential: '1',
   contactSolver: '1',
   ss: '1',
   schroederLevel: '0',

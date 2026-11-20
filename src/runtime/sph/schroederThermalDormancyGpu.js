@@ -42,6 +42,8 @@ struct DormancyParams {
   support: vec4<f32>,
   // grid origin x, y, z, unused
   origin: vec4<f32>,
+  // per-source temperature uncertainty word base + 1 (0 = none), unused...
+  uncertainty: vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> params: DormancyParams;
 @group(0) @binding(1) var<storage, read> source_state: array<vec4<f32>>;
@@ -84,6 +86,10 @@ fn write_flag(i: u32, flag: u32) {
   dormant[i] = flag;
   if (params.temps.z != 0u) { temperature_words[params.temps.z - 1u + i] = flag; }
 }
+fn source_uncertainty(i: u32) -> f32 {
+  if (params.uncertainty.x == 0u) { return 0.0; }
+  return bitcast<f32>(temperature_words[params.uncertainty.x - 1u + i]);
+}
 
 @compute @workgroup_size(64)
 fn reset_cells(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -105,12 +111,17 @@ fn scatter_temperatures(@builtin(global_invocation_id) id: vec3<u32>) {
   if (!(edge > 0.0)) { return; }
   let dims = grid_dims(edge);
   let t = bitcast<f32>(temperature_words[params.temps.x + i * params.temps.y]);
+  let dt = source_uncertainty(i);
   let c = cell_index(cell_of(s0.xyz, edge, dims), dims);
-  // A present source without a positive finite temperature poisons its cell
-  // (span = the whole f32 range), so every source near it stays active.
-  let valid = t > 0.0 && t <= 3.0e38;
-  atomicMin(&cell_bounds[c * 2u], select(0u, bitcast<u32>(t), valid));
-  atomicMax(&cell_bounds[c * 2u + 1u], select(0x7f7fffffu, bitcast<u32>(t), valid));
+  // A present source without a positive finite temperature or valid
+  // uncertainty poisons its cell (span = the whole f32 range), so every
+  // source near it stays active. Otherwise scatter its conservative interval
+  // [t - dt, t + dt] so halo span hi - lo >= |T_a - T_b| + dt_a + dt_b.
+  let valid = t > 0.0 && t <= 3.0e38 && dt >= 0.0 && dt <= 3.0e38;
+  let t_lo = select(0.0, max(1.0e-6, t - dt), valid);
+  let t_hi = select(3.402823e38, min(3.0e38, t + dt), valid);
+  atomicMin(&cell_bounds[c * 2u], select(0u, bitcast<u32>(t_lo), valid));
+  atomicMax(&cell_bounds[c * 2u + 1u], select(0x7f7fffffu, bitcast<u32>(t_hi), valid));
 }
 
 @compute @workgroup_size(64)
@@ -121,8 +132,10 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
   if (!(s0.w > 0.0)) { write_flag(i, 0u); return; }
   atomicAdd(&counts[2], 1u);
   let t = bitcast<f32>(temperature_words[params.temps.x + i * params.temps.y]);
+  let dt = source_uncertainty(i);
   let edge = grid_edge();
-  var is_active = params.config.w != 0.0 || !(t > 0.0) || !(edge > 0.0);
+  let valid_dt = dt >= 0.0 && dt <= 3.0e38;
+  var is_active = params.config.w != 0.0 || !(t > 0.0) || !valid_dt || !(edge > 0.0);
   if (!is_active) {
     let dims = grid_dims(edge);
     let c = cell_of(s0.xyz, edge, dims);
@@ -143,13 +156,13 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
     is_active = hi - lo > params.config.y;
   }
   if (!is_active) {
-    // Walls within the support at a temperature outside the band.
+    // Walls within the support at a temperature outside the uncertainty-padded band.
     let p = s0.xyz - params.origin.xyz; let r = params.config.z;
     let gaps = array<f32, 6>(p.x, params.box.x - p.x, p.y, params.box.y - p.y, p.z, params.box.z - p.z);
     let temps = array<f32, 6>(params.walls0.x, params.walls0.y, params.walls0.z, params.walls0.w,
       params.walls1.x, params.walls1.y);
     for (var w = 0u; w < 6u; w++) {
-      if (gaps[w] <= r && temps[w] > 0.0 && abs(temps[w] - t) > params.config.y) { is_active = true; }
+      if (gaps[w] <= r && temps[w] > 0.0 && abs(temps[w] - t) + dt > params.config.y) { is_active = true; }
     }
   }
   write_flag(i, select(1u, 0u, is_active));
@@ -165,18 +178,18 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
 export function createSchroederThermalDormancyStage({ device, particleCount, boxM, cellEdgeM, epsilonK,
   wallSupportM, wallTemperaturesK = [0, 0, 0, 0, 0, 0], radiationActive = false,
   temperatureHeaderWords = 0, temperatureStrideWords = 12, temperatureWordOffset = 2,
-  flagOutputWord = null, maxRadiusWord = null, supportFloorM = 0, radiusMultiplier = 0,
-  originM = [0, 0, 0] } = {}) {
+  flagOutputWord = null, maxRadiusWord = null, uncertaintyWordOffset = null,
+  supportFloorM = 0, radiusMultiplier = 0, originM = [0, 0, 0] } = {}) {
   if (!(particleCount > 0) || !(cellEdgeM > 0) || !(epsilonK >= 0)) throw new TypeError('Dormancy needs particles, a cell edge and an epsilon');
   const cells = boxM.map(v => Math.max(1, Math.ceil(v / cellEdgeM)));
   const cellCount = cells[0] * cells[1] * cells[2];
   const bindings = ['uniform', 'read-only-storage', 'storage', 'storage', 'storage', 'storage']
     .map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['reset_cells', 'scatter_temperatures', 'classify_sources'].map(entryPoint =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-thermal-dormancy-${entryPoint}.v2`,
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-thermal-dormancy-${entryPoint}.v3`,
       label: `ulg-thermal-dormancy-${entryPoint}`, code: schroederThermalDormancyWgsl, entryPoint, bindings })]));
-  const params = device.createBuffer({ label: 'ulg-thermal-dormancy-params', size: 128, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const words = new ArrayBuffer(128), u = new Uint32Array(words), f = new Float32Array(words);
+  const params = device.createBuffer({ label: 'ulg-thermal-dormancy-params', size: 144, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const words = new ArrayBuffer(144), u = new Uint32Array(words), f = new Float32Array(words);
   u.set([particleCount, ...cells], 0);
   f.set([cellEdgeM, epsilonK, wallSupportM ?? cellEdgeM, radiationActive ? 1 : 0], 4);
   f.set([...boxM, 0], 8); f.set(wallTemperaturesK.slice(0, 4), 12); f.set([...wallTemperaturesK.slice(4, 6), 0, 0], 16);
@@ -186,6 +199,7 @@ export function createSchroederThermalDormancyStage({ device, particleCount, box
     flagOutputWord == null ? 0 : flagOutputWord + 1, maxRadiusWord == null ? 0 : maxRadiusWord + 1], 20);
   f.set([supportFloorM, radiusMultiplier, 0, 0], 24);
   f.set([...originM, 0], 28);
+  u.set([uncertaintyWordOffset == null ? 0 : uncertaintyWordOffset + 1, 0, 0, 0], 32);
   device.queue.writeBuffer(params, 0, words);
   const cellBounds = device.createBuffer({ label: 'ulg-thermal-dormancy-cells', size: cellCount * 8, usage: GPU_BUFFER_USAGE.STORAGE });
   const dormantBuffer = device.createBuffer({ label: 'ulg-thermal-dormant', size: Math.max(16, particleCount * 4),

@@ -784,7 +784,9 @@ export function buildSphGpuParticleBuffers(state, {
     // G4 per-source thermal dormancy declaration ({ epsilonK }).
     ...(state.thermalDormancy ? { thermalDormancy: state.thermalDormancy } : {}),
     // G4 reaction node scope declaration ({ exact: true }).
-    ...(state.reactionDormancy ? { reactionDormancy: state.reactionDormancy } : {})
+    ...(state.reactionDormancy ? { reactionDormancy: state.reactionDormancy } : {}),
+    // G6 live caloric thermal-potential closure declaration.
+    ...(state.thermalPotentialEnabled === true ? { thermalPotentialEnabled: true } : {})
   }, exactMassSeed);
 }
 

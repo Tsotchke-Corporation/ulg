@@ -38738,7 +38738,17 @@ fn main(
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
             thermalResponseGraphUpload: resolvedThermalResponseGraphUpload,
-            ...resolvedSceneThermalStepOptions
+            ...resolvedSceneThermalStepOptions,
+            ...(resolvedSceneThermalStepOptions.thermalPotentialEnabled !== false
+              && (
+                resolvedSceneThermalStepOptions.thermalPotentialEnabled === true
+                || sourceSphParticleState?.thermalPotentialEnabled === true
+              )
+              && lawGroups.thermal === true
+              && requestedSchroederSimulation === true
+              && effectiveThermalMaterialTable != null
+              ? { thermalPotentialEnabled: true }
+              : {})
           },
           mechanicsRefreshOptions: {
             mechanicsMaterialPhaseUpload: resolvedMechanicsMaterialPhaseUpload
@@ -54405,7 +54415,24 @@ fn main(
         }
         });
       workerLanePageTiming.authorityCommitCompletedAtMs = nowMs();
-      laneState.pendingThermalPotential = workerLaneAuthority.scheduleResult?.thermalPotential?.candidate ?? null;
+      const committedThermalPotential =
+        workerLaneAuthority.scheduleResult?.thermalPotential ?? null;
+      laneState.pendingThermalPotential =
+        committedThermalPotential?.candidate ?? null;
+      if (committedThermalPotential) {
+        const g6Status = Object.freeze({
+          enabled: true,
+          scheduleId,
+          ordinal: committedThermalPotential.ordinal ?? 0,
+          adopted: committedThermalPotential.adopted === true,
+          status: committedThermalPotential.status ?? null,
+          cumulativeConsumerHits:
+            committedThermalPotential.cumulativeConsumerHits ?? 0,
+          hasCandidate: Boolean(committedThermalPotential.candidate)
+        });
+        scene.userData.sphThermalPotentialStatus = g6Status;
+        globalThis.__ulgThermalPotentialStatus = g6Status;
+      }
     } catch (error) {
       laneState.pendingThermalPotential = null;
       if (

@@ -8,7 +8,11 @@ export function createSchroederSpatialThermalPotentialPrepassWgsl() {
     `  if (selection.ready == 1u && thermo0.y == 2.0 && thermo1.y == 1.0) {
     let response = thermal_prepass_response_row0(selection.response_index);
     let fitted = g6_temperature(u32(response.z), vel_u.w, thermo0.y);
-    if (fitted.w == 1.0) { temperature_k = fitted.x; temperature_slope = fitted.y; }
+    if (fitted.w == 1.0) {
+      temperature_k = fitted.x;
+      temperature_slope = fitted.y;
+      temperature_uncertainty_k = abs(fitted.x) * max(0.0, fitted.z);
+    }
   }
   var radius_m = thermal_prepass_nominal_radius_m(pos_mass.w, thermo0.w);`
   );
@@ -945,10 +949,15 @@ function proposalBufferByteLength(capacity) {
 }
 
 // Rows, then the ActiveSource rank sidecar (one word per source), then the G4
-// thermal dormancy flags (one word per source, cleared = active).
+// thermal dormancy flags (one word per source, cleared = active), then the G6
+// per-source temperature uncertainty in K (one f32 word per source, 0 = exact).
 function thermalDormancyFlagWord(particleCount) {
   return SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
     + particleCount * (SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS + 1);
+}
+
+function thermalUncertaintyWord(particleCount) {
+  return thermalDormancyFlagWord(particleCount) + particleCount;
 }
 
 // G4 thermal dormancy option: { epsilonK, boxM: [x, y, z], originM?,
@@ -1007,6 +1016,7 @@ function acquireThermalDormancyStage(device, entry, config, particleCount, smoot
       temperatureStrideWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS,
       temperatureWordOffset: 0,
       flagOutputWord: thermalDormancyFlagWord(particleCount),
+      uncertaintyWordOffset: thermalUncertaintyWord(particleCount),
       maxRadiusWord: 0,
       // Conduction support max(2h, r_a + r_b); radiation support
       // RADIATION_PAIR_RANGE_RADII * (r_a + r_b).
@@ -1023,6 +1033,7 @@ function derivedBufferByteLength(capacity) {
   return (
     SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS
     + capacity * SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS
+    + capacity
     + capacity
     + capacity
   ) * Uint32Array.BYTES_PER_ELEMENT;
@@ -3854,6 +3865,12 @@ fn derive(
     for (var component = 0u; component < ${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u; component = component + 1u) {
       atomicStore(&thermal_derived[row_offset + component], 0u);
     }
+    let inactive_uncertainty_word = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS}u
+      + thermal_params.particle_count * (${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u + 2u)
+      + particle_index;
+    if (inactive_uncertainty_word < arrayLength(&thermal_derived)) {
+      atomicStore(&thermal_derived[inactive_uncertainty_word], 0u);
+    }
     return;
   }
   if (!active_source_projection) {
@@ -3896,6 +3913,7 @@ fn derive(
   );
   var temperature_k = -1.0;
   var temperature_slope = -1.0;
+  var temperature_uncertainty_k = 0.0;
   if (selection.ready == 1u) {
     let response0 = thermal_prepass_response_row0(selection.response_index);
     temperature_k = thermal_prepass_temperature_from_graph(
@@ -3916,14 +3934,23 @@ fn derive(
     || temperature_k < 0.0
     || !thermal_prepass_finite(temperature_slope)
     || temperature_slope < 0.0
+    || !thermal_prepass_finite(temperature_uncertainty_k)
+    || temperature_uncertainty_k < 0.0
     || !thermal_prepass_finite(radius_m)
     || !thermal_prepass_finite(emissivity)
   ) {
     atomicAdd(&thermal_derived[1u], 1u);
     temperature_k = 0.0;
     temperature_slope = 0.0;
+    temperature_uncertainty_k = 0.0;
     radius_m = 0.0;
     emissivity = 0.0;
+  }
+  let uncertainty_word = ${SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS}u
+    + thermal_params.particle_count * (${SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS}u + 2u)
+    + particle_index;
+  if (uncertainty_word < arrayLength(&thermal_derived)) {
+    atomicStore(&thermal_derived[uncertainty_word], bitcast<u32>(temperature_uncertainty_k));
   }
   atomicStore(&thermal_derived[row_offset], bitcast<u32>(temperature_k));
   atomicStore(&thermal_derived[row_offset + 1u], bitcast<u32>(temperature_slope));
@@ -11427,9 +11454,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
     conductionRate
   });
   const thermalDormancyConfig = normalizeThermalDormancyConfig(
-    // Until interval-aware dormancy is integrated, approximation uncertainty
-    // keeps this candidate route active; it must never create false dormancy.
-    potentialBindings ? null : thermalDormancy,
+    // G4 dormancy now consumes the per-source G6 temperature uncertainty band
+    // [T - dT, T + dT], keeping uncertainty-straddling sources conservatively active.
+    thermalDormancy,
     preparedLawConfig.smoothingLengthM
   );
   const authentications = authenticateThermalConsumers(device, generation);
@@ -11776,7 +11803,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     ? `${directoryAbiCacheKey}.exact-energy` : directoryAbiCacheKey;
   const derivedPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-derived-prepass.v13.${directoryAbiCacheKey}${potentialBindings ? '.potential-v1' : ''}`,
+      `ulg-schroeder-spatial-thermal-derived-prepass.v14.${directoryAbiCacheKey}${potentialBindings ? '.potential-v2' : ''}`,
     label: 'ulg-schroeder-spatial-thermal-derived-prepass',
     code: potentialBindings ? createSchroederSpatialThermalPotentialPrepassWgsl() : schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'derive',

@@ -3495,6 +3495,10 @@ function withThermalDormancyDeclaration(demo, options) {
   if (options?.reactionDormancy === true && demo?.state) {
     demo.state.reactionDormancy = Object.freeze({ exact: true });
   }
+  // G6 live caloric thermal-potential closure loop opt-in / default.
+  if (options?.thermalPotentialEnabled === true && demo?.state) {
+    demo.state.thermalPotentialEnabled = true;
+  }
   return demo;
 }
 

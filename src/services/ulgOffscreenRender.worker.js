@@ -3757,11 +3757,9 @@ function drawWorkerParticleTemporalMotionFrame({
   const segmentWallAgeS = workerPresentationPlaying
     ? Math.max(0, (drawAtMs - presentation.motionSegmentStartedAtMs) / 1000) : 0;
   const rawAgeS = workerParticleActiveWallAgeS(presentation, drawAtMs);
-  if (!frozenRedraw && rawAgeS >= presentation.motion.maxHorizonS - 1e-6) {
-    return { rendered: false, horizonExhausted: true, completion: null };
-  }
   const boundaryCompletedSubsteps = Number(boundary?.completedSubstepCount);
   const boundaryTotalSubsteps = Number(boundary?.totalSubstepCount);
+  const boundaryChunkSubsteps = Math.max(1, Number(boundary?.chunkStepCount) || 1);
   const boundaryProgressReady = Boolean(
     boundary
     && Number.isSafeInteger(boundaryCompletedSubsteps)
@@ -3770,23 +3768,30 @@ function drawWorkerParticleTemporalMotionFrame({
     && boundaryTotalSubsteps > 0
     && boundaryCompletedSubsteps < boundaryTotalSubsteps
   );
-  // Forced queue-boundary frames represent an exact fraction of the logical
-  // K-step transaction. Their motion age must not depend on whether a fence
-  // happened to resolve just before or after vsync. Autonomous frames retain
-  // wall-time extrapolation between those deterministic anchors.
-  const wallMotionAgeS = Math.min(
-    presentation.motionSegmentAgeS + segmentWallAgeS * presentation.motion.simulationTimeScale,
-    presentation.motion.maxSimulationAgeS
-  );
-  const boundaryMotionAgeS = boundaryProgressReady
-    ? presentation.motion.maxSimulationAgeS
-      * boundaryCompletedSubsteps / boundaryTotalSubsteps
-    : null;
   const requestedMotionAgeS = Number(motionAgeSOverride);
   const motionAgeOverrideReady = Boolean(
     Number.isFinite(requestedMotionAgeS)
     && requestedMotionAgeS > 0
   );
+  if (!frozenRedraw && !boundaryProgressReady && !motionAgeOverrideReady && rawAgeS >= presentation.motion.maxHorizonS - 1e-6) {
+    return { rendered: false, horizonExhausted: true, completion: null };
+  }
+  // Forced queue-boundary frames represent an exact fraction of the logical
+  // K-step transaction. Their motion age must not depend on whether a fence
+  // happened to resolve just before or after vsync. Autonomous frames retain
+  // wall-time extrapolation between those deterministic anchors, capped just
+  // below the next expected boundary so they never overtake its anchor.
+  const autonomousCapAgeS = Number.isFinite(presentation.autonomousCapAgeS) && presentation.autonomousCapAgeS > 0
+    ? Math.min(presentation.autonomousCapAgeS, presentation.motion.maxSimulationAgeS)
+    : presentation.motion.maxSimulationAgeS;
+  const wallMotionAgeS = Math.min(
+    presentation.motionSegmentAgeS + segmentWallAgeS * presentation.motion.simulationTimeScale,
+    autonomousCapAgeS
+  );
+  const boundaryMotionAgeS = boundaryProgressReady
+    ? presentation.motion.maxSimulationAgeS
+      * boundaryCompletedSubsteps / boundaryTotalSubsteps
+    : null;
   const motionAgeS = frozenRedraw ? presentation.lastAdmittedMotionAgeS : motionAgeOverrideReady
     ? Math.max(
         presentation.lastMotionAgeS,
@@ -3796,12 +3801,12 @@ function drawWorkerParticleTemporalMotionFrame({
         )
       )
     : boundaryProgressReady
-      ? Math.max(
-          presentation.lastMotionAgeS,
-          Math.min(
+      ? Math.min(
+          Math.max(
             boundaryMotionAgeS,
-            presentation.motion.maxSimulationAgeS
-          )
+            presentation.lastMotionAgeS + 2e-6
+          ),
+          Math.max(presentation.lastMotionAgeS + 2e-6, presentation.motion.maxSimulationAgeS - 1e-6)
         )
       : wallMotionAgeS;
   const horizonExhausted = motionAgeOverrideReady || boundaryProgressReady
@@ -3845,6 +3850,12 @@ function drawWorkerParticleTemporalMotionFrame({
   const playbackSignal = workerParticlePlaybackController.signal;
   presentation.lastSubmittedAtMs = drawAtMs;
   presentation.lastMotionAgeS = motionAgeS;
+  if (boundaryProgressReady) {
+    presentation.motionSegmentStartedAtMs = drawAtMs;
+    presentation.motionSegmentAgeS = motionAgeS;
+    presentation.autonomousCapAgeS = presentation.motion.maxSimulationAgeS
+      * Math.min(1, (boundaryCompletedSubsteps + 0.9 * boundaryChunkSubsteps) / boundaryTotalSubsteps);
+  }
   let queueCompletion = null;
   let queueCompletionSerial = null;
   try {
@@ -3879,9 +3890,10 @@ function drawWorkerParticleTemporalMotionFrame({
         reason: 'worker-particle-temporal-queue-completion-unavailable'
       };
     }
+    const boundaryChunkSteps = Math.max(1, Number(boundary?.chunkStepCount) || 1);
     const opportunityCompletion = waitForWorkerParticlePresentationOpportunity({
       afterGpuCompletion: queueCompletion,
-      timeoutMs: Math.max(50, presentation.motion.minFrameIntervalMs * 4),
+      timeoutMs: Math.max(50, presentation.motion.minFrameIntervalMs * 4, Math.min(250, boundaryChunkSteps * 20)),
       signal: frozenRedraw ? signal : (signal
         ? AbortSignal.any([signal, playbackSignal]) : playbackSignal),
       isCurrent: () => !disposed
@@ -4052,9 +4064,11 @@ export async function runWorkerParticleTemporalPresentationSubmissionBoundary(
       );
     }
     const boundaryGeneration = presentation.generation;
+    const boundaryChunkSteps = Math.max(1, Number(boundary?.chunkStepCount) || 1);
     const deadlineMs = Math.max(
       50,
-      presentation.motion.minFrameIntervalMs * 4
+      presentation.motion.minFrameIntervalMs * 4,
+      Math.min(250, boundaryChunkSteps * 20)
     );
     if (workerParticleTemporalFrameInFlight) {
       const prior = await promiseWithinWorkerParticleDeadline(
@@ -4176,6 +4190,12 @@ export async function runWorkerParticleTemporalPresentationSubmissionBoundary(
         continueAfterAdmission: false,
         motionAgeSOverride: terminalHandoffMotionAgeS
       });
+    } else if (boundaryCompleted) {
+      // Resume the 60 Hz autonomous motion loop between QoS chunk boundaries
+      // (capped below the next boundary's deterministic motionAgeS anchor).
+      if (!disposed && workerParticleTemporalPresentation === boundaryPresentation) {
+        scheduleWorkerParticleTemporalPresentation();
+      }
     } else if (!boundaryCompleted) {
       // A rejected/aborted boundary is not permission to strand the ordinary
       // display loop. Wait for its borrowed GPU resources to drain, then

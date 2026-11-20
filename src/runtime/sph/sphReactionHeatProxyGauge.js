@@ -20,7 +20,11 @@
 // own value at T_ref (the energy authority's exact thermal-graph samples), so
 // each gauge's zero cancels. Single-gauge (all-legacy) tables are unchanged:
 // their gauges already agree, and their existing evidence stays bit-identical.
-import { hasCondensableCaloricRows, isPhaseCaloricSegmentType } from './sphCondensableCaloricTable.js';
+import {
+  hasCondensableCaloricRows,
+  isPhaseCaloricSegmentType,
+  SPH_THERMAL_GAS_ONLY_CALORIC_SEGMENT_TYPE
+} from './sphCondensableCaloricTable.js';
 import { resolveThermalResponseGraphArtifacts } from './sphThermalGpuKernel.js';
 import { phaseCurves, sampleCurve } from './sphReactionEnergyAuthority.js';
 
@@ -33,10 +37,18 @@ const ISSUED = new WeakMap();
 
 const fail = (message) => { throw new TypeError(`Gauge-consistent heat proxy: ${message}`); };
 
-function materialHasPhaseCaloricRows(thermalMaterialTable, materialId) {
+// Single-phase ideal-gas phase-caloric products (e.g. H2 in room-air
+// sodium-water) have one unambiguous gas branch u = Cv*T and explicit phase 3;
+// multi-phase condensable phase-caloric products still require explicit
+// phase-resolved physical reaction energy.
+function materialHasMultiPhaseCaloricRows(thermalMaterialTable, materialId) {
   const rows = thermalMaterialTable?.segments;
   for (let offset = 0; offset + 1 < (rows?.length ?? 0); offset += 12) {
-    if (rows[offset] === materialId && isPhaseCaloricSegmentType(rows[offset + 1])) return true;
+    if (
+      rows[offset] === materialId
+      && isPhaseCaloricSegmentType(rows[offset + 1])
+      && rows[offset + 1] !== SPH_THERMAL_GAS_ONLY_CALORIC_SEGMENT_TYPE
+    ) return true;
   }
   return false;
 }
@@ -115,9 +127,10 @@ export function attachSphReactionHeatProxyGauge(table, thermalMaterialTable, {
         return { material: term.material, materialId, spectator: true,
           energyRatio: term.spectator.energyRatio, gaugeOffsetJPerKg: 0 };
       }
-      // A phase-caloric product needs an explicit phase-resolved write, which
-      // the heat-proxy writer (ladder selection) does not provide.
-      if (materialHasPhaseCaloricRows(thermalMaterialTable, materialId)) {
+      // A multi-phase condensable phase-caloric product needs an explicit
+      // phase-resolved write, which the heat-proxy writer (ladder selection)
+      // does not provide. Single-phase ideal-gas products (type 5) are unambiguous.
+      if (materialHasMultiPhaseCaloricRows(thermalMaterialTable, materialId)) {
         fail(`product ${term.material} uses a phase-caloric gauge; its write needs physical reaction energy`);
       }
       const ref = referenceEnergy(artifacts, materialId, referenceTemperatureK, row[6] > 0 ? row[6] : 0);

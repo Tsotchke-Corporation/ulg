@@ -398,6 +398,56 @@ function anchorDerivedPhaseBoundaries(properties, materialKey) {
   anchorTransition('solid', 'liquid', melting, 'melting');
   anchorTransition('liquid', 'gas', boiling, 'boiling');
 
+  // Reduced product closures start as a single condensed liquid branch. When
+  // the bank supplies a melting point, synthesize the missing solid phase and
+  // melting transition with explicit reference-fallback provenance so oxides
+  // and salts carry realistic solid heat capacity and latent heat.
+  const hasSolidTransition = transitions.some((transition) => transition.from === 'solid' && transition.to === 'liquid');
+  if (melting && !hasSolidTransition && phases.some((phase) => phase.name === 'liquid')) {
+    transitions.unshift({
+      from: 'solid',
+      to: 'liquid',
+      temperatureK: melting.temperatureK,
+      latentHeatJPerKg: melting.latentHeatJPerKg
+    });
+    anchoredPaths.push('transitions.solid->liquid.temperatureK', 'transitions.solid->liquid.latentHeatJPerKg');
+    residuals.melting = {
+      derivedTemperatureK: null,
+      referenceTemperatureK: melting.temperatureK,
+      derivedLatentHeatJPerKg: null,
+      referenceLatentHeatJPerKg: melting.latentHeatJPerKg
+    };
+    const liquid = phases.find((phase) => phase.name === 'liquid');
+    if (Array.isArray(liquid?.temperatureRange)) {
+      liquid.temperatureRange = [melting.temperatureK, liquid.temperatureRange[1]];
+    }
+    if (!phases.some((phase) => phase.name === 'solid')) {
+      const solidRef = bankPhase(record, 'solid');
+      const solidDensity = Number(solidRef?.densityKgPerM3) > 0
+        ? Number(solidRef.densityKgPerM3)
+        : Number(liquid?.densityKgPerM3) || 2000;
+      const solidCp = Number(solidRef?.heatCapacityJPerKgK ?? solidRef?.cpJPerKgK) > 0
+        ? Number(solidRef.heatCapacityJPerKgK ?? solidRef.cpJPerKgK)
+        : Number(liquid?.cpJPerKgK) || 800;
+      const solidBulk = Number(liquid?.bulkModulusPa) > 0 ? Number(liquid.bulkModulusPa) : 1e9;
+      phases.unshift({
+        name: 'solid',
+        cpJPerKgK: solidCp,
+        densityKgPerM3: solidDensity,
+        temperatureRange: [0, melting.temperatureK],
+        bulkModulusPa: solidBulk,
+        shearModulusPa: 0
+      });
+      anchoredPaths.push(
+        'phases.solid.temperatureRange',
+        'phases.solid.densityKgPerM3',
+        'phases.solid.cpJPerKgK',
+        'phases.solid.bulkModulusPa',
+        'phases.solid.shearModulusPa'
+      );
+    }
+  }
+
   // Element derivations often stop at the liquid phase; when the bank knows a
   // boiling point, synthesize the missing gas transition and an ideal-gas
   // phase row so those materials can vaporize instead of superheating forever.

@@ -519,6 +519,342 @@
      "quality": "reference-seed-2026-11-16"
     }
    ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "feo",
+   "formula": "FeO",
+   "name": "iron(II) oxide (wustite)",
+   "referenceState": {
+    "temperatureK": 298.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [0, 1650],
+     "densityKgPerM3": 5745,
+     "heatCapacityJPerKgK": 725,
+     "thermalConductivityWPerMK": 3.2
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [1650, 3687],
+     "densityKgPerM3": 4550,
+     "heatCapacityJPerKgK": 950,
+     "thermalConductivityWPerMK": 2.5
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [3687, 1000000],
+     "densityKgPerM3": 0.24,
+     "heatCapacityJPerKgK": 650,
+     "thermalConductivityWPerMK": 0.04
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 1650,
+     "latentHeatJPerKg": 437000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 3687,
+     "latentHeatJPerKg": 3200000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "CRC / NIST-JANAF thermochemical bank anchor for oxide product closure",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K), W/(m K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-11-19"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "fe3o4",
+   "formula": "Fe3O4",
+   "name": "iron(II,III) oxide (magnetite)",
+   "referenceState": {
+    "temperatureK": 298.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [0, 1870],
+     "densityKgPerM3": 5170,
+     "heatCapacityJPerKgK": 750,
+     "thermalConductivityWPerMK": 4.5
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [1870, 2896],
+     "densityKgPerM3": 4500,
+     "heatCapacityJPerKgK": 920,
+     "thermalConductivityWPerMK": 3.0
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [2896, 1000000],
+     "densityKgPerM3": 0.96,
+     "heatCapacityJPerKgK": 700,
+     "thermalConductivityWPerMK": 0.04
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 1870,
+     "latentHeatJPerKg": 596000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 2896,
+     "latentHeatJPerKg": 2800000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "CRC / NIST-JANAF thermochemical bank anchor for oxide product closure",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K), W/(m K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-11-19"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "fe2o3",
+   "formula": "Fe2O3",
+   "name": "iron(III) oxide (hematite)",
+   "referenceState": {
+    "temperatureK": 298.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [0, 1838],
+     "densityKgPerM3": 5240,
+     "heatCapacityJPerKgK": 750,
+     "thermalConductivityWPerMK": 4.0
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [1838, 3200],
+     "densityKgPerM3": 4400,
+     "heatCapacityJPerKgK": 930,
+     "thermalConductivityWPerMK": 2.8
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [3200, 1000000],
+     "densityKgPerM3": 0.6,
+     "heatCapacityJPerKgK": 680,
+     "thermalConductivityWPerMK": 0.04
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 1838,
+     "latentHeatJPerKg": 540000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 3200,
+     "latentHeatJPerKg": 2900000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "CRC / NIST-JANAF thermochemical bank anchor for oxide product closure",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K), W/(m K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-11-19"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "naoh",
+   "formula": "NaOH",
+   "name": "sodium hydroxide",
+   "referenceState": {
+    "temperatureK": 298.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [0, 596],
+     "densityKgPerM3": 2130,
+     "heatCapacityJPerKgK": 1490,
+     "thermalConductivityWPerMK": 1.0
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [596, 1661],
+     "densityKgPerM3": 1780,
+     "heatCapacityJPerKgK": 2150,
+     "thermalConductivityWPerMK": 0.92
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [1661, 1000000],
+     "densityKgPerM3": 0.29,
+     "heatCapacityJPerKgK": 1350,
+     "thermalConductivityWPerMK": 0.05
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 596,
+     "latentHeatJPerKg": 165000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 1661,
+     "latentHeatJPerKg": 4380000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "CRC / NIST-JANAF thermochemical bank anchor for hydroxide product closure",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K), W/(m K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-11-19"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "na2o",
+   "formula": "Na2O",
+   "name": "sodium oxide",
+   "referenceState": {
+    "temperatureK": 298.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [0, 1405],
+     "densityKgPerM3": 2270,
+     "heatCapacityJPerKgK": 1115,
+     "thermalConductivityWPerMK": 2.0
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [1405, 2223],
+     "densityKgPerM3": 1900,
+     "heatCapacityJPerKgK": 1450,
+     "thermalConductivityWPerMK": 1.4
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [2223, 1000000],
+     "densityKgPerM3": 0.34,
+     "heatCapacityJPerKgK": 1100,
+     "thermalConductivityWPerMK": 0.04
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 1405,
+     "latentHeatJPerKg": 769000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 2223,
+     "latentHeatJPerKg": 3500000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "CRC / NIST-JANAF thermochemical bank anchor for oxide product closure",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K), W/(m K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-11-19"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.compound.v0",
+   "key": "csf",
+   "formula": "CsF",
+   "name": "cesium fluoride",
+   "referenceState": {
+    "temperatureK": 298.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [0, 976],
+     "densityKgPerM3": 4638,
+     "heatCapacityJPerKgK": 336,
+     "thermalConductivityWPerMK": 1.5
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [976, 1524],
+     "densityKgPerM3": 3650,
+     "heatCapacityJPerKgK": 488,
+     "thermalConductivityWPerMK": 0.8
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [1524, 1000000],
+     "densityKgPerM3": 1.21,
+     "heatCapacityJPerKgK": 260,
+     "thermalConductivityWPerMK": 0.03
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 976,
+     "latentHeatJPerKg": 143000
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 1524,
+     "latentHeatJPerKg": 760000
+    }
+   ],
+   "provenance": [
+    {
+     "family": "phase-transitions",
+     "source": "crc-standard-reference-data",
+     "method": "CRC / NIST-JANAF thermochemical bank anchor for halide product closure",
+     "status": "reference-fallback",
+     "units": "K, J/kg, kg/m^3, J/(kg K), W/(m K)",
+     "referenceState": "101325 Pa",
+     "quality": "reference-seed-2026-11-19"
+    }
+   ]
   }
  ]
 }

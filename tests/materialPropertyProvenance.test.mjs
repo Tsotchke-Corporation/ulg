@@ -168,6 +168,36 @@ test('reference-backed reduced NaOH optics are completely tracked but remain unv
   }
 });
 
+test('general bank-anchored oxide/hydroxide/halide product closures carry full phase transitions and explicit reference-fallback provenance', () => {
+  const products = [
+    { key: 'feo', label: 'FeO', atomCounts: { 26: 1, 8: 1 }, meltingK: 1650, boilingK: 3687 },
+    { key: 'fe3o4', label: 'Fe3O4', atomCounts: { 26: 3, 8: 4 }, meltingK: 1870, boilingK: 2896 },
+    { key: 'fe2o3', label: 'Fe2O3', atomCounts: { 26: 2, 8: 3 }, meltingK: 1838, boilingK: 3200 },
+    { key: 'naoh', label: 'NaOH', atomCounts: { 11: 1, 8: 1, 1: 1 }, meltingK: 596, boilingK: 1661 },
+    { key: 'na2o', label: 'Na2O', atomCounts: { 11: 2, 8: 1 }, meltingK: 1405, boilingK: 2223 },
+    { key: 'csf', label: 'CsF', atomCounts: { 55: 1, 9: 1 }, meltingK: 976, boilingK: 1524 }
+  ];
+  for (const product of products) {
+    const properties = deriveCompoundClosure({
+      ...product,
+      reactants: [{ material: 'Fe', molarMassKgPerMol: 0.055845, densityKgPerM3: 7874, bulkModulusPa: 1.7e11, thermalConductivityWPerMK: 80 }],
+      allowReducedEstimates: true
+    }).properties;
+    assert.doesNotThrow(() => assertNoUnprovenancedMaterialProperties(properties), product.key);
+    assert.deepEqual(properties.phases.map((p) => p.name), ['solid', 'liquid', 'gas'], product.key);
+    const melt = properties.transitions.find((t) => t.from === 'solid' && t.to === 'liquid');
+    const boil = properties.transitions.find((t) => t.from === 'liquid' && t.to === 'gas');
+    assert.equal(melt?.temperatureK, product.meltingK, `${product.key} meltingK`);
+    assert.ok(melt?.latentHeatJPerKg > 1e5, `${product.key} melting latent heat`);
+    assert.equal(boil?.temperatureK, product.boilingK, `${product.key} boilingK`);
+    assert.ok(boil?.latentHeatJPerKg > 5e5, `${product.key} boiling latent heat`);
+    const summary = materialDerivationSummary(properties);
+    assert.equal(summary.hasReferenceFallbacks, true, product.key);
+    assert.equal(properties.validation.scientificValidation, false, product.key);
+    assert.equal(properties.referenceBankAnchoring?.bank, 'compounds', product.key);
+  }
+});
+
 test('reference-backed H2O/Fe remain blocked while production closures are fully derived', () => {
   const referenceClosures = createReferenceMaterialClosures();
   for (const key of ['h2o', 'fe']) {

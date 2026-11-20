@@ -2502,7 +2502,7 @@ function buildSphInitialBodiesDemoState({
   environment,
   environmentCellsPerAxis,
   environmentRefineEdgeM = null,
-  environmentAirParcels = 'species',
+  environmentAirParcels = 'mixture',
   physicalLawGroups = null,
   closures,
   allowFixtureMaterialProperties,
@@ -2965,7 +2965,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   environment = null,
   environmentCellsPerAxis = 2,
   environmentRefineEdgeM = null,
-  environmentAirParcels = 'species',
+  environmentAirParcels = 'mixture',
   dropParticleEdge = 3, // N -> N^3 particles in the drop block
   baseParticleEdge = 5, // N -> N^3 particles in the base block
   adaptiveParticleSpacing = true,

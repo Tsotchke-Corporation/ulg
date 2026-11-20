@@ -6,9 +6,9 @@ export const SPH_ENVIRONMENT_CONTROL_DEFAULTS = Object.freeze({
   environmentNucleiPerCm3: '0',
   // First-class air (graded seeding): blank keeps uniform coarse cells.
   environmentRefineEdgeMm: '',
-  // First-class air, slice 3: 'species' seeds one row per dry-air species;
-  // 'mixture' seeds one mixture parcel per cell (exact composition carried).
-  environmentAirParcels: 'species'
+  // First-class air, slice 3: 'mixture' seeds one mixture parcel per cell
+  // (exact composition carried, default); 'species' seeds one row per dry-air species.
+  environmentAirParcels: 'mixture'
 });
 
 // Benchmark dry nuclei for the G2 integer-ledger vapor-parcel exchange: an
@@ -50,6 +50,6 @@ export function sphEnvironmentOptionsFromControls(values) {
     ? null
     : numeric('environmentRefineEdgeMm') / 1000,
   environmentAirParcels: values.environmentAirParcels == null || values.environmentAirParcels === ''
-    ? 'species'
+    ? 'mixture'
     : String(values.environmentAirParcels) };
 }

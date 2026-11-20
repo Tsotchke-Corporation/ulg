@@ -103,6 +103,21 @@ function typedMaterialClosureModel(properties) {
   );
 }
 
+function materialDispersedOpticsExplicitlyBlocked(properties) {
+  const closure = properties?.dispersedMediumOpticalClosure;
+  if (
+    !closure
+    || typeof closure !== 'object'
+    || Array.isArray(closure)
+    || closure.schema
+      !== ULG_SPH_DISPERSED_MEDIUM_OPTICAL_CLOSURE_PROPERTY_SCHEMA
+  ) return false;
+  return (
+    closure.morphologyModel === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL_LABELS.blocked
+    || closure.morphologyModelId === SPH_DISPERSED_MEDIUM_OPTICAL_MORPHOLOGY_MODEL.blocked
+  );
+}
+
 function explicitRouteClosureModel(route) {
   if (route?.closureModel == null && route?.closureModelId == null) return null;
   return closureModelForRoute(route);
@@ -393,12 +408,16 @@ export function collectiveOpticalRouteDescriptorsFromMaterialProperties(
     for (const transition of properties?.transitions || []) {
       const pair = transitionRoutePair(transition);
       if (!pair) continue;
+      const routeOverride = explicitRouteClosureModel(transition);
+      if (!routeOverride && !closureModel && materialDispersedOpticsExplicitlyBlocked(properties)) {
+        continue;
+      }
       appendRouteDescriptor(result, routeById, routeByKey, {
         material,
         properties,
         ...pair,
         closureModel: routeClosureModel({
-          routeOverride: explicitRouteClosureModel(transition),
+          routeOverride,
           globalOverride: closureModel,
           properties
         }),

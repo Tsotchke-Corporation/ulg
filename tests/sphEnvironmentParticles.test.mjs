@@ -163,8 +163,18 @@ for (const authoredBodies of [false, true]) test(`room air reaches original scen
     assert.equal(resolveSphExactParticleMassSeed(sph), null);
   }
   const summary = gasPressureSummary(demo);
-  assert.equal(Object.hasOwn(summary.bySpecies, 'air'), false);
-  assert.deepEqual(Object.keys(summary.bySpecies).sort(), ['ar', 'co2', 'h2o', 'n2', 'o2']);
+  // Mixture parcels are the default (Owner Decision #11): dry air travels as
+  // conserved mixture parcels carrying exact species composition alongside H2O.
+  assert.equal(Object.hasOwn(summary.bySpecies, 'air'), true);
+  assert.deepEqual(Object.keys(summary.bySpecies).sort(), ['air', 'h2o']);
+  const speciesDemo = buildSphPhaseDemoState({ environment, environmentAirParcels: 'species',
+    dropParticleEdge: 2, baseParticleEdge: 2,
+    ...(authoredBodies ? { initialBodies: [{ id: 'water', domainId: 1, material: 'h2o',
+      sizeM: [1, 1, 1], centerM: [2.5, 0.5, 2.5], temperatureK: 293.15,
+      particlesPerEdge: [2, 2, 2], velocityMPerS: [0, 0, 0] }] } : {}) });
+  const speciesSummary = gasPressureSummary(speciesDemo);
+  assert.equal(Object.hasOwn(speciesSummary.bySpecies, 'air'), false);
+  assert.deepEqual(Object.keys(speciesSummary.bySpecies).sort(), ['ar', 'co2', 'h2o', 'n2', 'o2']);
   const view = createSphPhaseViewState({ demo });
   const transfer = packSphPhaseViewStateForTransport(view);
   const restored = unpackSphPhaseViewStateFromTransport(structuredClone(transfer));

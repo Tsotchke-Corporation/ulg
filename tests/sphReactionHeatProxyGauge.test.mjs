@@ -27,7 +27,14 @@ test('room-air Iron Ice mixes gauges and gets a gauge-consistent heat proxy', ()
   assert.equal(sphReactionHeatProxyGaugeAdmits(table, thermalMaterialTable), true);
   assert.equal(table.energyAuthority, undefined, 'the heat-proxy law is kept');
   const equations = table.metadata.map((m) => `${m.a}+${m.b}`);
-  assert.ok(equations.includes('fe+o2'));
+  // Default mixture air lifts Fe + O2 onto Fe + air with spectator residue.
+  assert.ok(equations.includes('fe+air'));
+  const { demo: speciesDemo } = createSphPhaseDemo({ environment: createSphRoomAirInitialization(),
+    environmentAirParcels: 'species', environmentCellsPerAxis: 1, allowReducedProductProperties: true });
+  const speciesThermal = buildSphThermalMaterialTable(speciesDemo.materialProperties);
+  const speciesTable = buildSphReactionTable(speciesDemo.reactions, { materialProperties: speciesDemo.materialProperties,
+    thermalMaterialTable: speciesThermal, contactRadiusM: 0.01 });
+  assert.ok(speciesTable.metadata.map((m) => `${m.a}+${m.b}`).includes('fe+o2'));
 });
 
 test('at T_ref the products receive exactly the proxy heat as sensible energy, in every gauge', () => {
@@ -35,7 +42,8 @@ test('at T_ref the products receive exactly the proxy heat as sensible energy, i
   for (const entry of table.heatProxyGauge.reactions) {
     const r = entry.reactionIndex;
     const h = table.records[r * 12 + 4];
-    // Reactants at T_ref carry u_r = uRef_r; the legacy proxy averages them.
+    // Reactants at T_ref carry u_r = uRef_r; spectator residues keep their own
+    // sensible energy ratio and leave the real products sharing the remainder.
     const reactantTerms = table.reactantTermMetadata.filter((t) => t.reactionIndex === r);
     let mass = 0, energy = 0;
     reactantTerms.forEach((t, k) => {
@@ -43,14 +51,25 @@ test('at T_ref the products receive exactly the proxy heat as sensible energy, i
       mass += row[2] * row[3];
       energy += row[2] * row[3] * entry.reactants[k].uRef;
     });
-    const legacyU = (energy - h * mass) / mass;
+    let spectatorMass = 0, spectatorEnergy = 0;
     for (const product of entry.products) {
+      if (!product.spectator) continue;
+      const meta = table.productTermMetadata.find((t) => t.reactionIndex === r && t.material === product.material);
+      const row = table.productTermRecords.subarray(meta.productTermIndex * 16, meta.productTermIndex * 16 + 16);
+      const mixtureRef = entry.reactants.find((ref) => ref.material === meta.spectator.mixture);
+      spectatorMass += row[2] * row[3];
+      spectatorEnergy += row[2] * row[3] * product.energyRatio * mixtureRef.uRef;
+    }
+    const legacyU = (energy - h * mass - spectatorEnergy) / (mass - spectatorMass);
+    for (const product of entry.products) {
+      if (product.spectator) continue;
       const index = table.productTermMetadata.find((t) => t.reactionIndex === r && t.material === product.material).productTermIndex;
       const gauge = table.productTermRecords[index * 16 + 15];
       const productU = legacyU + gauge;
-      // Sensible energy above T_ref in the product's own gauge equals -h.
+      // Sensible energy above T_ref in the product's own gauge equals -h * mass / (mass - spectatorMass).
       const sensible = productU - product.uRef;
-      assert.ok(Math.abs(sensible - (-h)) <= 1e-6 * Math.abs(h) + 1, `${product.material}: ${sensible} vs ${-h}`);
+      const expected = (-h * mass) / (mass - spectatorMass);
+      assert.ok(Math.abs(sensible - expected) <= 1e-6 * Math.abs(expected) + 1, `${product.material}: ${sensible} vs ${expected}`);
       // The uRef really is the runtime graph at T_ref.
       const curve = phaseCurves(artifacts, product.materialId).find((c) => c.phaseId === product.phaseId);
       assert.equal(Math.fround(sampleCurve(curve, T_REF, true)), Math.fround(product.uRef));
@@ -60,6 +79,27 @@ test('at T_ref the products receive exactly the proxy heat as sensible energy, i
       assert.equal(table.combinedRecords[base + index * 16 + 15], gauge);
     }
   }
+});
+
+test('room-air sodium-water admits single-phase gas H2 and bank-anchored NaOH through the heat-proxy gauge', () => {
+  const { demo: naDemo } = createSphPhaseDemo({
+    dropMaterial: 'Na',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 293.15,
+    environment: createSphRoomAirInitialization(),
+    environmentCellsPerAxis: 1,
+    allowReducedProductProperties: true
+  });
+  const naThermal = buildSphThermalMaterialTable(naDemo.materialProperties);
+  const naTable = buildSphReactionTable(naDemo.reactions, {
+    materialProperties: naDemo.materialProperties,
+    thermalMaterialTable: naThermal,
+    contactRadiusM: 0.01
+  });
+  assert.ok(naTable.heatProxyGauge, 'sodium-water room-air gauge attached');
+  assert.equal(sphReactionHeatProxyGaugeAdmits(naTable, naThermal), true);
+  assert.ok(naDemo.materialProperties.naoh?.transitions?.length >= 2, 'NaOH bank-anchored with melt/boil');
 });
 
 test('single-gauge tables are unchanged and copies are not admitted', () => {

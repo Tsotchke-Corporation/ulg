@@ -21,6 +21,7 @@ import {
   createCondensedDispersedMediumOpticalClosure
 } from './condensedDispersedOpticalReferences.js';
 import { deriveFormulaMaterialProperties } from './materialDerivation.js';
+import { anchorDerivedMaterialProperties } from './referenceBankAnchoring.js';
 import {
   PROPERTY_DERIVATION_STATUS as DS,
   materialDerivationSummary,
@@ -289,7 +290,7 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
       atomCounts,
       densityKgPerM3
     });
-  return withPropertyProvenance({
+  const reduced = withPropertyProvenance({
     molarMassKgPerMol,
     atomsPerFormula,
     label,
@@ -355,6 +356,13 @@ function deriveReducedCompoundProperties({ key, label, atomCounts, reactants = [
         : 'Dispersed optics remain fail-closed because no phase- and composition-matched reference record is available.'
     ]
   });
+  // General bank-anchored product closure (Star Spec case 3 / Plan Sec 2.10):
+  // when the CRC/JANAF compound bank carries measured phase boundaries, latent
+  // heats, densities, Cp, and conductivities for this formula, anchor onto them
+  // with explicit reference-fallback provenance while retaining the reactant-
+  // packed estimates in derivationResiduals.
+  const anchored = anchorDerivedMaterialProperties(reduced, key || label);
+  return anchored.anchored ? anchored.properties : reduced;
 }
 
 /**

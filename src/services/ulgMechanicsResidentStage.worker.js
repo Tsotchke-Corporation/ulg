@@ -8670,10 +8670,12 @@ function persistWorkerScheduleResidentStepOptions(
   const thermalMaterialTable = requested.thermalMaterialTable ?? previous.thermalMaterialTable ?? null;
   const reactionTables = {};
   for (const key of ['reactionTable', 'reactionActivationWatchTable']) {
-    if (requested[key]?.coldReferenceRecipe || previous[key]?.coldReferenceRecipe
-      || requested[key]?.heatProxyGauge || previous[key]?.heatProxyGauge) {
+    const effective = Object.prototype.hasOwnProperty.call(requested, key)
+      ? requested[key]
+      : previous[key];
+    if (effective?.coldReferenceRecipe || effective?.heatProxyGauge) {
       reactionTables[key] = importSphReferenceReactionTableColdInput(
-        requested[key] ?? previous[key], thermalMaterialTable, previous[key]
+        effective, thermalMaterialTable, previous[key]
       );
     }
   }

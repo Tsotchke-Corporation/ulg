@@ -2069,9 +2069,10 @@ fn classify_gas_candidates(@builtin(global_invocation_id) global_id: vec3<u32>) 
       && finite_f32(solid_fraction)
       && abs(solid_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE
       && finite_f32(liquid_fraction)
-      && abs(liquid_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && liquid_fraction >= -PARTICLE_PHASE_FRACTION_TOLERANCE
       && finite_f32(gas_fraction)
-      && abs(gas_fraction - 1.0) <= PARTICLE_PHASE_FRACTION_TOLERANCE
+      && gas_fraction > PARTICLE_PHASE_FRACTION_TOLERANCE
+      && abs(liquid_fraction + gas_fraction - 1.0) <= PARTICLE_PHASE_FRACTION_TOLERANCE
       && finite_f32(plasma_fraction)
       && abs(plasma_fraction) <= PARTICLE_PHASE_FRACTION_TOLERANCE;
     let particle_valid = pure_gas && active_status
@@ -2329,9 +2330,10 @@ fn scatter_compact_rows(@builtin(global_invocation_id) global_id: vec3<u32>) {
       particle_state[state + 1u],
       particle_state[state + 2u]
     );
+    let vapor_fraction = clamp(particle_thermo[thermo + 6u], 0.0, 1.0);
     material_id = particle_thermo[thermo + 0u];
-    mass_kg = particle_state[state + 3u];
-    moles = particle_thermo[thermo + 9u] / AVOGADRO_ENTITIES_PER_MOL;
+    mass_kg = particle_state[state + 3u] * vapor_fraction;
+    moles = (particle_thermo[thermo + 9u] * vapor_fraction) / AVOGADRO_ENTITIES_PER_MOL;
     temperature_k = particle_thermo[thermo + 2u];
     support_volume_m3 = mass_kg / particle_thermo[thermo + 3u];
     source_discriminant = -1.0;

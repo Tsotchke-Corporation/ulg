@@ -387,13 +387,16 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
       -0.95,
       0.95
     );
-    let phase = relative_henyey_greenstein(
+    let cos_theta = dot(-light_direction, view_direction);
+    let forward_phase = relative_henyey_greenstein(
       asymmetry,
       // light_direction points from the sample toward the light; photons
       // arrive along its negative, which is the propagation direction used
       // by the physical asymmetry convention.
-      dot(-light_direction, view_direction)
+      cos_theta
     );
+    let backward_phase = relative_henyey_greenstein(-0.35 * asymmetry, cos_theta);
+    let phase = 0.70 * forward_phase + 0.30 * backward_phase + 0.55 * albedo * albedo;
     let scattering_color = finite_nonnegative_sample3(scattering_color_depth)
       / max(cell_scattering_depth, 1.0e-8);
     let source = max(scattering_color, vec3<f32>(0.0))

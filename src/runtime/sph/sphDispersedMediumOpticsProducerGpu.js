@@ -1993,12 +1993,28 @@ export function deriveSphDispersedMediumOpticsProducerReference({
       (route.vaporPhaseId - 1) * topology.phaseLaneStride + lineageIndex;
     const condensedParticleIndex =
       (route.condensedPhaseId - 1) * topology.phaseLaneStride + lineageIndex;
-    const gasToCondensed = phaseTransferContribution({
+    const preGasToCondensed = phaseTransferContribution({
       state: preTransferState,
       thermo: preTransferThermo,
       particleIndex: gasParticleIndex,
       materialId: route.dispersedMaterialId,
       targetPhaseId: route.condensedPhaseId
+    });
+    const postRetainedInVapor = phaseTransferContribution({
+      state: postTransferState,
+      thermo: postTransferThermo,
+      particleIndex: gasParticleIndex,
+      materialId: route.dispersedMaterialId,
+      targetPhaseId: route.condensedPhaseId
+    });
+    const gasToCondensed = Object.freeze({
+      valid: preGasToCondensed.valid,
+      massKg: postRetainedInVapor.valid
+        ? Math.fround(Math.max(
+            0,
+            Math.fround(preGasToCondensed.massKg - postRetainedInVapor.massKg)
+          ))
+        : preGasToCondensed.massKg
     });
     const condensedToGas = phaseTransferContribution({
       state: preTransferState,
@@ -2557,6 +2573,33 @@ fn transfer_contribution(
   return TransferContribution(1u, mass_kg * clamp(fraction, 0.0, 1.0));
 }
 
+fn retained_transfer_contribution(
+  particle_index: u32,
+  material_id: f32,
+  target_phase_id: u32
+) -> TransferContribution {
+  let mass_kg = state0(&post_transfer_state, particle_index).w;
+  if (!finite_f32(mass_kg) || mass_kg < 0.0) {
+    return TransferContribution(0u, 0.0);
+  }
+  if (!(mass_kg > params.mass_epsilon_kg)) {
+    return TransferContribution(1u, 0.0);
+  }
+  let material = thermo0(&post_transfer_thermo, particle_index).x;
+  if (material != material_id || target_phase_id < 1u || target_phase_id > 4u) {
+    return TransferContribution(0u, 0.0);
+  }
+  let fraction = thermo1(&post_transfer_thermo, particle_index)[target_phase_id - 1u];
+  if (
+    !finite_f32(fraction)
+    || fraction < -params.phase_fraction_tolerance
+    || fraction > 1.0 + params.phase_fraction_tolerance
+  ) {
+    return TransferContribution(0u, 0.0);
+  }
+  return TransferContribution(1u, mass_kg * clamp(fraction, 0.0, 1.0));
+}
+
 fn condensed_mass(
   particle_index: u32,
   material_id: f32,
@@ -3023,10 +3066,23 @@ fn apply_production(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let lineage_index = particle_index % params.phase_lane_stride;
   let gas_index = phase_lane_index(lineage_index, vapor_phase_id);
   let condensed_index = phase_lane_index(lineage_index, condensed_phase_id);
-  let gas_to_condensed = transfer_contribution(
+  let pre_gas_to_condensed = transfer_contribution(
     gas_index,
     prefix.x,
     condensed_phase_id
+  );
+  let post_retained_in_vapor = retained_transfer_contribution(
+    gas_index,
+    prefix.x,
+    condensed_phase_id
+  );
+  let gas_to_condensed = TransferContribution(
+    pre_gas_to_condensed.valid,
+    select(
+      pre_gas_to_condensed.mass_kg,
+      max(0.0, pre_gas_to_condensed.mass_kg - post_retained_in_vapor.mass_kg),
+      post_retained_in_vapor.valid != 0u
+    )
   );
   let condensed_to_gas = transfer_contribution(
     condensed_index,

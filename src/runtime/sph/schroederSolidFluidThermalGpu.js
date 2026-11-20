@@ -111,12 +111,23 @@ fn reset_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
   }
 }
 
+fn effective_fluid_radius(j: u32) -> f32 {
+  let mass_kg = fluid_state[j * 2u].w;
+  if (!(mass_kg > 0.0)) { return 0.0; }
+  let row0 = fluid_thermo[j * 3u];
+  var r = fluid_thermo[j * 3u + 2u].w;
+  if (row0.y >= 2.5 && row0.w > 0.0) {
+    let gas_r = pow(max(0.75 * mass_kg / (PI * row0.w), 0.0), 1.0 / 3.0);
+    r = max(r, min(gas_r, 3.0 * params.geom.x));
+  }
+  return r;
+}
+
 @compute @workgroup_size(64)
 fn measure_fluid_radius(@builtin(global_invocation_id) id: vec3<u32>) {
   let j = id.x;
   if (j >= params.counts.y) { return; }
-  if (!(fluid_state[j * 2u].w > 0.0)) { return; }
-  let r = fluid_thermo[j * 3u + 2u].w;
+  let r = effective_fluid_radius(j);
   if (r > 0.0) { atomicMax(&coupling_ledger[3], bitcast<i32>(r)); }
 }
 
@@ -144,7 +155,7 @@ fn couple_particles(@builtin(global_invocation_id) id: vec3<u32>) {
   let props = fluid_properties(row0.x, row0.y);
   let k_p = props.x;
   if (!(k_p > 0.0) || !(props.y > 0.0)) { return; }
-  let radius = fluid_thermo[j * 3u + 2u].w;
+  let radius = effective_fluid_radius(j);
   let a = params.geom.x;
   let dt = params.melt.w;
   let quantum = params.geom.z;

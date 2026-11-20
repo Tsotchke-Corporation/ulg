@@ -710,6 +710,51 @@ fn explicit_fusion_conversion(source_index: u32) -> FrontConversion {
     converted_energy, own_energy, fusion.temperature, vec3<f32>(0.0), vec3<f32>(0.0));
 }
 
+// When a rising gas carrier (phase 3) partially condenses onto the liquid-gas
+// plateau while its lineage's liquid carrier (phase 2) is occupied at a
+// non-local distance (e.g. a floor pool), keep the micron-scale condensate
+// co-advected inside the vapor parcel instead of teleporting it across empty
+// space into the distant pool.
+fn separated_vapor_retains_condensate(lineage_index: u32, source_index: u32) -> bool {
+  let s0 = state0(source_index);
+  if (!(s0.w > params.mass_epsilon)) { return false; }
+  let fractions = thermo1(source_index);
+  if (
+    fractions.x > params.fraction_activation_epsilon
+    || fractions.w > params.fraction_activation_epsilon
+    || !(fractions.y > params.fraction_activation_epsilon)
+    || !(fractions.z > params.fraction_activation_epsilon)
+  ) { return false; }
+  let liquid_index = phase_lane_index(lineage_index, 2u);
+  let liquid_s0 = state0(liquid_index);
+  if (!(liquid_s0.w > params.mass_epsilon)) { return false; }
+  let liquid_row4 = source_mechanics[liquid_index * 8u + 4u];
+  let liquid_edge = pow(max(liquid_row4.z * liquid_row4.w, 0.0), 1.0 / 3.0);
+  return !(distance(s0.xyz, liquid_s0.xyz) <= 0.35 * liquid_edge);
+}
+
+fn retained_vapor_condensate_fraction(
+  target_index: u32,
+  target_phase: u32,
+  material_id: f32,
+  specific_energy: f32
+) -> f32 {
+  if (
+    target_phase != 3u
+    || front_conversion(target_index).ready != 0u
+    || !separated_vapor_retains_condensate(target_index % params.phase_lane_stride, target_index)
+  ) {
+    return 0.0;
+  }
+  let absolute_pressure_pa = source_mechanics[target_index * 8u + 7u].x;
+  let e0 = plateau_endpoint(material_id, 2u, 3u, specific_energy, 2u, absolute_pressure_pa);
+  let e1 = plateau_endpoint(material_id, 2u, 3u, specific_energy, 3u, absolute_pressure_pa);
+  if (e0.y == 0.0 || e1.y == 0.0 || !(e1.x > e0.x) || specific_energy >= e1.x) {
+    return 0.0;
+  }
+  return clamp((e1.x - specific_energy) / (e1.x - e0.x), 0.0, 1.0);
+}
+
 fn skin_front_conversion(source_index: u32) -> FrontConversion {
   var none = FrontConversion(0u, 0u, 0u, 0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));
   if (params.front_enabled == 0u || params.front_row_words < 24u) { return none; }
@@ -1018,6 +1063,17 @@ fn phase_aggregate(
       } else {
         fraction = 0.0;
       }
+    } else if (
+      source_phase == 3u
+      && separated_vapor_retains_condensate(lineage_index, source_index)
+    ) {
+      if (target_phase == 3u) {
+        fraction = 1.0;
+        component_energy = s1.w;
+        component_temperature = t0.z;
+      } else {
+        fraction = 0.0;
+      }
     } else {
       component_energy = source_component_energy(source_index, target_phase).x;
     }
@@ -1150,6 +1206,9 @@ fn write_phase_slot(
   let rest_volume = aggregate.mass / max(record0.z, params.mass_epsilon);
   let volume_ratio_j = 1.0;
   let isotropic_scale = 1.0;
+  let retained_vapor_condensate = retained_vapor_condensate_fraction(
+    target_index, target_phase, phases.material_id, specific_energy
+  );
   out_state[target_index * 2u] = vec4<f32>(position, aggregate.mass);
   out_state[target_index * 2u + 1u] = vec4<f32>(velocity, specific_energy);
   out_thermo[target_index * 3u] = vec4<f32>(
@@ -1158,7 +1217,11 @@ fn write_phase_slot(
     temperature,
     record0.z
   );
-  out_thermo[target_index * 3u + 1u] = one_hot(target_phase);
+  out_thermo[target_index * 3u + 1u] = select(
+    one_hot(target_phase),
+    vec4<f32>(0.0, retained_vapor_condensate, 1.0 - retained_vapor_condensate, 0.0),
+    retained_vapor_condensate > params.fraction_activation_epsilon
+  );
   out_thermo[target_index * 3u + 2u] = vec4<f32>(
     aggregate.smoothing_length,
     aggregate.entity_count,

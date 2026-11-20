@@ -49,6 +49,8 @@ function stripInterfaceFrontExtension(source) {
     [/\/\/ Interface phase-front skin conversion\. The thermal[\s\S]*?\nfn front_conversion\([\s\S]*?\n}\n/, ''],
     [/    let conversion = front_conversion\(source_index\);\n    if \(conversion\.ready == 1u\) \{\n      let converted_bit[\s\S]*?\n    \}\n(?=  \}\n  return phase_set;)/, ''],
     [/\n    var fraction = max\(fractions\[target_phase - 1u\], 0\.0\);[\s\S]*?aggregate\.temperature_mass = aggregate\.temperature_mass \+ component_temperature \* component_mass;\n/, ORIGINAL_PHASE_AGGREGATE_COMPONENT],
+    [/  let retained_vapor_condensate = retained_vapor_condensate_fraction\([\s\S]*?\n  \);\n/, ''],
+    [/  out_thermo\[target_index \* 3u \+ 1u\] = select\([\s\S]*?retained_vapor_condensate > params\.fraction_activation_epsilon\n  \);/, '  out_thermo[target_index * 3u + 1u] = one_hot(target_phase);'],
     [/  for \(var phase_id = 1u; phase_id <= 4u; phase_id = phase_id \+ 1u\) \{\n    let source = phase_lane_index\(lineage_index, phase_id\);\n    if \(skin_front_conversion[\s\S]*?\n    \}\n  \}\n/, '']
   ];
   let stripped = source;

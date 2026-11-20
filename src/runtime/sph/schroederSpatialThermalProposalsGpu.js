@@ -3953,6 +3953,12 @@ fn derive(
   }
   var radius_m = thermal_prepass_nominal_radius_m(pos_mass.w, thermo0.w);
   var emissivity = thermal_prepass_emissivity(thermo0.x);
+  // Beer-Lambert mean-chord IR optical thickness (tau = kappa_P * rho * 4r/3 = kappa_P * m / (pi r^2))
+  // for gas-phase carriers so millimeter-scale vapor puffs are optically thin rather than solid blackbodies.
+  if (emissivity > 0.0 && thermo0.y >= 2.5 && pos_mass.w > 0.0 && radius_m > 0.0) {
+    let gas_ir_tau = 0.04 * pos_mass.w / max(3.14159265359 * radius_m * radius_m, 1.0e-30);
+    emissivity = emissivity * clamp(1.0 - exp(-gas_ir_tau), 0.0, 1.0);
+  }
   if (
     selection.ready != 1u
     || !thermal_prepass_finite(vel_u.w)
@@ -7017,6 +7023,7 @@ fn thermal_prepare_pair_authority_flags(local_invocation_index: u32) {
     thermal_pair_authority_flags = vec2<u32>(
       select(0u, 1u, thermal_conductivity_sidecar_admitted()),
       select(0u, 1u, thermal_mechanical_interface_receipt_admitted())
+        | select(0u, 2u, thermal_mechanical_interface_receipt_pass_cap_fallback())
     );
   }
   workgroupBarrier();
@@ -7037,9 +7044,19 @@ fn thermal_mechanical_interface_receipt_pair_admitted() -> bool {
     thermal_params.active_member_projection_enabled
       == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
   ) {
-    return thermal_pair_authority_flags.y != 0u;
+    return (thermal_pair_authority_flags.y & 1u) != 0u;
   }
   return thermal_mechanical_interface_receipt_admitted();
+}
+
+fn thermal_mechanical_interface_receipt_pair_pass_cap_fallback() -> bool {
+  if (
+    thermal_params.active_member_projection_enabled
+      == THERMAL_ACTIVE_SOURCE_PROJECTION_MODE_ACTIVE_SOURCE
+  ) {
+    return (thermal_pair_authority_flags.y & 2u) != 0u;
+  }
+  return thermal_mechanical_interface_receipt_pass_cap_fallback();
 }
 
 fn thermal_particle_conductivity_w_per_mk(particle_index: u32) -> f32 {
@@ -7253,13 +7270,10 @@ fn thermal_interface_skin_accumulate(
   self_conductivity: f32,
   other_conductivity: f32,
   contact_area_m2: f32,
-  self_radius_m: f32,
-  other_radius_m: f32,
+  self_half_edge_m: f32,
+  other_half_edge_m: f32,
   energy_j: f32
 ) {
-  let radius_per_edge = ${EQUIVALENT_SPHERE_RADIUS_PER_ISOTROPIC_CELL_EDGE};
-  let self_half_edge_m = 0.5 * self_radius_m / radius_per_edge;
-  let other_half_edge_m = 0.5 * other_radius_m / radius_per_edge;
   if (
     !(self_half_edge_m > 0.0) || !(other_half_edge_m > 0.0)
     || !(contact_area_m2 > 0.0)
@@ -7522,19 +7536,60 @@ fn thermal_visit_fused_pair_cached(
       other_radius_m,
       mechanical_interface.effective_face_area_m2
     );
+  let self_is_gas = thermal_derived_word(self_index, 9u) >= 3u;
+  let other_is_gas = thermal_derived_word(other_index, 9u) >= 3u;
+  let either_gas = self_is_gas || other_is_gas;
+  let one_gas = either_gas && !both_gas;
+  let gas_pair_temp_k = select(other_temperature, self_temperature, self_is_gas);
+  let cond_pair_temp_k = select(self_temperature, other_temperature, self_is_gas);
+  let hot_condensed_film = one_gas && (cond_pair_temp_k > gas_pair_temp_k);
+  let min_pair_radius_m = min(self_radius_m, other_radius_m);
+  let max_pair_radius_m = max(self_radius_m, other_radius_m);
+  let submerged_condensed = !either_gas
+    && min_pair_radius_m > 0.0
+    && (distance_m + min_pair_radius_m < max_pair_radius_m);
+  let gas_film_volume_fraction = clamp(
+    (min_pair_radius_m * min_pair_radius_m * min_pair_radius_m)
+      / max(max_pair_radius_m * max_pair_radius_m * max_pair_radius_m, 1.0e-30),
+    0.0,
+    1.0
+  );
+  let submerged_laplace_area_m2 =
+    4.0 * 3.14159265359 * min_pair_radius_m * min_pair_radius_m;
+  let effective_sphere_area_m2 = select(
+    select(
+      sphere_contact_geometry.x,
+      submerged_laplace_area_m2,
+      submerged_condensed
+    ),
+    sphere_contact_geometry.x * gas_film_volume_fraction,
+    hot_condensed_film
+  );
+  let effective_sphere_path_m = select(
+    select(
+      sphere_contact_geometry.y,
+      min_pair_radius_m,
+      submerged_condensed
+    ),
+    max(sphere_contact_geometry.y, max_pair_radius_m),
+    hot_condensed_film
+  );
+  let use_finite_volume_face = interface_pair
+    && !one_gas
+    && !submerged_condensed;
   let contact_area_m2 = select(
-    sphere_contact_geometry.x,
+    effective_sphere_area_m2,
     interface_contact_geometry.x,
-    interface_pair
+    use_finite_volume_face
   );
   let conduction_path_m = select(
     select(
-      sphere_contact_geometry.y,
+      effective_sphere_path_m,
       max(distance_m, 1.0e-7),
       both_gas
     ),
     interface_contact_geometry.y,
-    interface_pair
+    use_finite_volume_face
   );
   let conduction_hit = contact_area_m2 > 0.0
     && conduction_path_m > 0.0
@@ -7565,7 +7620,7 @@ fn thermal_visit_fused_pair_cached(
             other_thermal_conductivity_w_per_mk
             * contact_area_m2
           );
-      if (interface_resistance_k_per_w > 0.0) {
+      if (use_finite_volume_face && interface_resistance_k_per_w > 0.0) {
         pair_conductance_w_per_k =
           1.0 / interface_resistance_k_per_w;
       }
@@ -7578,6 +7633,17 @@ fn thermal_visit_fused_pair_cached(
       pair_conductance_w_per_k =
         pair_thermal_conductivity_w_per_mk
           * contact_area_m2 / conduction_path_m;
+    }
+    if (interface_pair && !use_finite_volume_face) {
+      let fallback_k_sum =
+        self_thermal_conductivity_w_per_mk + other_thermal_conductivity_w_per_mk;
+      if (fallback_k_sum > 0.0) {
+        pair_conductance_w_per_k = (
+          2.0
+          * (self_thermal_conductivity_w_per_mk * other_thermal_conductivity_w_per_mk)
+          / fallback_k_sum
+        ) * contact_area_m2 / conduction_path_m;
+      }
     }
     if (
       !ss_exact_near_finite(pair_conductance_w_per_k)
@@ -7669,12 +7735,33 @@ fn thermal_visit_fused_pair_cached(
     radiation_energy_j = radiation_energy_j
       * min(self_loss_scale, other_gain_scale);
   }
+  let skin_interface_pair = !either_gas && (
+    use_finite_volume_face
+    || (
+      (
+        thermal_params.mechanical_interface_receipt_required == 0u
+        || thermal_mechanical_interface_receipt_pair_pass_cap_fallback()
+        || submerged_condensed
+      )
+      && material_or_phase_interface
+    )
+  );
   if (
     !budget_mode
     && conduction_hit
-    && interface_pair
+    && skin_interface_pair
     && conduction_energy_j != 0.0
   ) {
+    let skin_self_half_m = select(
+      min(0.5 * conduction_path_m, self_radius_m),
+      interface_contact_geometry.z,
+      use_finite_volume_face
+    );
+    let skin_other_half_m = select(
+      min(0.5 * conduction_path_m, other_radius_m),
+      interface_contact_geometry.w,
+      use_finite_volume_face
+    );
     thermal_interface_skin_accumulate(
       self_index,
       other_pos_mass.xyz - self_position,
@@ -7683,8 +7770,8 @@ fn thermal_visit_fused_pair_cached(
       self_thermal_conductivity_w_per_mk,
       other_thermal_conductivity_w_per_mk,
       contact_area_m2,
-      self_radius_m,
-      other_radius_m,
+      skin_self_half_m,
+      skin_other_half_m,
       conduction_energy_j
     );
   }

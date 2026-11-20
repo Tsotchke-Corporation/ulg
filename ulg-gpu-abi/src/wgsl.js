@@ -8386,6 +8386,25 @@ fn render_bulk_phase_weight(
     return phase_weight;
   }
   let dispersed = dispersed_medium_optics_rows[particle_index];
+  if (
+    render_row1(particle_index).y == 3.0
+    && surface_phase_id == 2.0
+    && params.particle_count >= 4u
+    && (params.particle_count % 4u) == 0u
+  ) {
+    let phase_stride = params.particle_count / 4u;
+    let companion_index = (particle_index % phase_stride) + phase_stride;
+    if (companion_index < arrayLength(&dispersed_medium_optics_rows)) {
+      let companion = dispersed_medium_optics_rows[companion_index];
+      if (
+        sph_dispersed_medium_optics_row_is_ready(companion)
+        && companion.dispersed_material_id == material_id
+        && companion.dispersed_phase_id == surface_phase_id
+      ) {
+        return 0.0;
+      }
+    }
+  }
   if (!sph_dispersed_medium_optics_row_is_ready(dispersed)
     || dispersed.dispersed_material_id != material_id
     || dispersed.dispersed_phase_id != surface_phase_id) {
@@ -8990,6 +9009,71 @@ ${motionField ? '    render_motion_field[out_index] = vec4<f32>(0.0);' : ''}
             row1.z,
             absorption_optical_depth
           );
+        }
+      } else if (
+        dispersed_surface_active
+        && row0.w > 0.0
+        && row1.y == 3.0
+        && params.particle_count >= 4u
+        && (params.particle_count % 4u) == 0u
+      ) {
+        let phase_stride = params.particle_count / 4u;
+        let companion_index = (particle_index % phase_stride) + phase_stride;
+        if (companion_index < arrayLength(&dispersed_medium_optics_rows)) {
+          let companion = dispersed_medium_optics_rows[companion_index];
+          let row4_wet = render_row4(particle_index);
+          let suspended_condensate_fraction = clamp(1.0 - row2.y - row4_wet.x, 0.0, 1.0);
+          if (
+            suspended_condensate_fraction > 0.0
+            && sph_dispersed_medium_optics_row_is_ready(companion)
+            && companion.optical_state_id > 0.0
+            && companion.optical_state_id == s3.y
+          ) {
+            let dispersed_particle = vec3<f32>(
+              clamp(params.field_padding + (row0.x / ref_edge) * span, 0.001, 0.999),
+              clamp(params.field_padding + (row0.y / ref_edge) * span, 0.001, 0.999),
+              clamp(params.field_padding + (row0.z / ref_edge) * span, 0.001, 0.999)
+            );
+            let support_cells = clamp(max((row3.y * span / ref_edge) * f32(resolution), 3.6), 1.0, 6.0);
+            let wx = max(0.0, 1.0 - abs(f32(x) - dispersed_particle.x * f32(resolution)) / support_cells) / support_cells;
+            let wy = max(0.0, 1.0 - abs(f32(y) - dispersed_particle.y * f32(resolution)) / support_cells) / support_cells;
+            let wz = max(0.0, 1.0 - abs(f32(z) - dispersed_particle.z * f32(resolution)) / support_cells) / support_cells;
+            let cell_weight = wx * wy * wz;
+            if (cell_weight > 0.0) {
+              // Nucleated sub-micron condensate fog droplets suspended in wet vapor
+              // at the Lorenz-Mie first interference maximum (r_32 = 0.45 um, Q_sca = 3.8, g = 0.72).
+              let companion_rho = select(1000.0, render_row1(companion_index).w, render_row1(companion_index).w > 100.0);
+              let mist_mass_kg = row0.w * suspended_condensate_fraction;
+              let mist_scattering_m2 = (0.75 * 3.8 * mist_mass_kg) / (companion_rho * 0.45e-6);
+              let inverse_cell_edge_per_m = min(
+                RENDER_FIELD_F32_FINITE_MAX,
+                (span * f32(resolution)) / ref_edge
+              );
+              let scattering_optical_depth = render_field_balanced_optical_product(
+                mist_scattering_m2,
+                cell_weight,
+                inverse_cell_edge_per_m
+              );
+              let asymmetry_optical_depth = render_field_balanced_signed_optical_product(
+                0.72 * mist_scattering_m2,
+                cell_weight,
+                inverse_cell_edge_per_m
+              );
+              dispersed_scattering_optical_depth = render_field_saturating_nonnegative_add(
+                dispersed_scattering_optical_depth,
+                scattering_optical_depth
+              );
+              dispersed_scattering_asymmetry = render_field_accumulate_signed_scale(
+                dispersed_scattering_asymmetry,
+                asymmetry_optical_depth
+              );
+              dispersed_temperature = render_field_accumulate_weighted_temperature(
+                dispersed_temperature,
+                row1.z,
+                scattering_optical_depth
+              );
+            }
+          }
         }
       }
     }

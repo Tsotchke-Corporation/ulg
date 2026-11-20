@@ -53,9 +53,53 @@ async function evaluate(vm, source) {
   return lines;
 }
 
+const ERROR_LINE_PATTERN =
+  /^(?:ERR\b|error\b|parse\s+error|syntax\s+error|runtime\s+error|type\s+error|compile\s+error|exception\b|undefined\b|unbound\b|unterminated\b|unexpected\b|invalid\b|failed\b)/i;
+const NUMERIC_LINE_PATTERN =
+  /^(?:=>\s*)?([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)$/;
+
+function isErrorLine(line) {
+  return ERROR_LINE_PATTERN.test(String(line ?? '').trim());
+}
+
+function assertBalancedSexp(source) {
+  const text = String(source ?? '');
+  let depth = 0;
+  let inString = false;
+  let inComment = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inComment) {
+      if (ch === '\n') inComment = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === ';') { inComment = true; continue; }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '#' && text[i + 1] === '\\') { i += 2; continue; }
+    if (ch === '(' || ch === '[') depth += 1;
+    else if (ch === ')' || ch === ']') {
+      depth -= 1;
+      if (depth < 0) throw new Error('Eshkol syntax error: unexpected closing parenthesis');
+    }
+  }
+  if (inString) throw new Error('Eshkol syntax error: unterminated string literal');
+  if (depth !== 0) throw new Error(`Eshkol syntax error: unbalanced parentheses (depth=${depth})`);
+}
+
 function lastNumber(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return NaN;
+  if (lines.some(isErrorLine)) return NaN;
   for (let i = lines.length - 1; i >= 0; i--) {
-    const value = Number(String(lines[i]).trim().split(/\s+/).at(-1));
+    const trimmed = String(lines[i] ?? '').trim();
+    if (!trimmed) continue;
+    const match = NUMERIC_LINE_PATTERN.exec(trimmed);
+    if (!match) continue;
+    const value = Number(match[1]);
     if (Number.isFinite(value)) return value;
   }
   return NaN;
@@ -76,8 +120,9 @@ self.addEventListener('message', async (event) => {
     let result;
     if (type === 'sample') {
       const { definition, call, points = [] } = event.data;
+      assertBalancedSexp(definition);
       const definitionOutput = await evaluate(vm, definition);
-      if (definitionOutput.some((line) => line.startsWith('ERR'))) throw new Error(definitionOutput.join(' '));
+      if (definitionOutput.some(isErrorLine)) throw new Error(definitionOutput.join(' '));
       const samples = [];
       for (const point of points) {
         const lines = await evaluate(vm, `(begin (display (${call} ${point.map((x) => Number(x).toPrecision(17)).join(' ')})) (newline))`);

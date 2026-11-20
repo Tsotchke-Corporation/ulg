@@ -31,10 +31,12 @@ function requireLiveLane(lane) {
   return state;
 }
 
+const LANE_KEY = 'regional-closure-generation';
+
 /**
  * Create a G5-reserved resident GPU A3 regional closure lane wrapping
  * `regionalClosureSamplerGpu.js`. Schedule boundaries promote pending GPU or
- * Eshkol-derived A4 response tables under bounded ReservationLedger capacity.
+ * Eshkol-derived A4 response tables under bounded ReservationLedger CAS control.
  */
 export function createRegionalClosureWorkerLane(device, {
   name = 'ulg-regional-closure-lane',
@@ -51,9 +53,9 @@ export function createRegionalClosureWorkerLane(device, {
   heldOutPerAxis = 3,
   safetyFactor = 2
 } = {}) {
-  const ledger = new ReservationLedger({ name, maxKeys: maxGenerations });
+  const ledger = new ReservationLedger({ name, maxKeys: Math.max(1, maxGenerations) });
   let sampler = null;
-  let initialReservation = null;
+  let initialToken = null;
   try {
     sampler = createRegionalClosureSamplerGpu(device, {
       generatorWgsl,
@@ -68,11 +70,11 @@ export function createRegionalClosureWorkerLane(device, {
       heldOutPerAxis,
       safetyFactor
     });
-    initialReservation = ledger.reserve('generation:0', {
-      schema: REGIONAL_CLOSURE_WORKER_LANE_SCHEMA,
-      ordinal: 0,
-      source: 'gpu-regional-sampler'
-    });
+    const res = ledger.reserve({ key: LANE_KEY, consumerId: 'generation:0' });
+    if (!res.ok) throw new Error(`G5 reservation rejected for initial lane: ${res.reason}`);
+    initialToken = res.token;
+    const commit = ledger.commit(initialToken, { admissionId: 'gpu-regional-sampler:0' });
+    if (!commit.ok) throw new Error(`G5 commit rejected for initial lane: ${commit.reason}`);
     const handle = Object.freeze({ schema: REGIONAL_CLOSURE_WORKER_LANE_SCHEMA });
     lanes.set(handle, {
       device,
@@ -80,14 +82,13 @@ export function createRegionalClosureWorkerLane(device, {
       sampler,
       closed: false,
       ordinal: 0,
-      activeReservation: initialReservation,
       adoptedScheduleIds: [],
       externalSourceFingerprint: null,
       externalTableBuffer: null
     });
     return handle;
   } catch (error) {
-    initialReservation?.release?.();
+    if (initialToken) ledger.cancel(initialToken);
     if (sampler) {
       for (const buffer of Object.values(sampler.buffers)) buffer.destroy();
     }
@@ -133,7 +134,7 @@ export function encodeRegionalClosureLaneVerify(lane, encoder, {
 
 /**
  * Promote pending GPU regional fits at a schedule boundary under G5
- * ReservationLedger capacity control.
+ * ReservationLedger CAS control.
  */
 export function encodeRegionalClosureLaneAdopt(lane, encoder, {
   membersBuffer,
@@ -142,18 +143,14 @@ export function encodeRegionalClosureLaneAdopt(lane, encoder, {
 }) {
   const state = requireLiveLane(lane);
   const nextOrdinal = state.ordinal + 1;
-  const reservation = state.ledger.reserve(`generation:${nextOrdinal}`, {
-    schema: REGIONAL_CLOSURE_WORKER_LANE_SCHEMA,
-    ordinal: nextOrdinal,
-    scheduleId,
-    source: 'gpu-regional-sampler'
-  });
+  state.ledger.retire(LANE_KEY);
+  const res = state.ledger.reserve({ key: LANE_KEY, consumerId: `generation:${nextOrdinal}` });
+  if (!res.ok) throw new Error(`G5 reservation rejected on lane adopt: ${res.reason}`);
   encodeRegionalClosureScheduleBoundary(encoder, state.sampler, {
     membersBuffer,
     regionCount
   });
-  const previous = state.activeReservation;
-  state.activeReservation = reservation;
+  state.ledger.commit(res.token, { admissionId: `gpu-regional-sampler:${nextOrdinal}` });
   state.ordinal = nextOrdinal;
   state.externalSourceFingerprint = null;
   if (state.externalTableBuffer) {
@@ -161,7 +158,6 @@ export function encodeRegionalClosureLaneAdopt(lane, encoder, {
     state.externalTableBuffer = null;
   }
   if (scheduleId) state.adoptedScheduleIds.push(scheduleId);
-  previous?.release?.();
   return Object.freeze({
     adopted: true,
     ordinal: state.ordinal,
@@ -173,7 +169,7 @@ export function encodeRegionalClosureLaneAdopt(lane, encoder, {
 /**
  * Adopt an externally fitted A4 / Eshkol-AD response table (from
  * `deriveEosStiffnessResponse` or an A6 warm worker) into the lane under G5
- * ReservationLedger authority, retiring the superseded table buffer.
+ * ReservationLedger CAS authority, retiring the superseded table buffer.
  */
 export function adoptExternalRegionalResponseTable(lane, responseFunctionsOrPacked, {
   scheduleId = null,
@@ -188,12 +184,6 @@ export function adoptExternalRegionalResponseTable(lane, responseFunctionsOrPack
           : [responseFunctionsOrPacked]
       );
   const nextOrdinal = state.ordinal + 1;
-  const reservation = state.ledger.reserve(`generation:${nextOrdinal}`, {
-    schema: REGIONAL_CLOSURE_WORKER_LANE_SCHEMA,
-    ordinal: nextOrdinal,
-    scheduleId,
-    source: sourceFingerprint
-  });
   let nextBuffer = null;
   try {
     nextBuffer = state.device.createBuffer({
@@ -204,18 +194,28 @@ export function adoptExternalRegionalResponseTable(lane, responseFunctionsOrPack
     state.device.queue.writeBuffer(nextBuffer, 0, packed.data);
   } catch (error) {
     nextBuffer?.destroy?.();
-    reservation.release();
     throw error;
   }
-  const previousReservation = state.activeReservation;
   const previousExternal = state.externalTableBuffer;
-  state.activeReservation = reservation;
+  state.ledger.retire(LANE_KEY);
+  const res = state.ledger.reserve({ key: LANE_KEY, consumerId: `generation:${nextOrdinal}` });
+  if (!res.ok) {
+    nextBuffer.destroy();
+    throw new Error(`G5 reservation rejected on external table adopt: ${res.reason}`);
+  }
+  state.ledger.attach(res.token, () => {
+    if (state.externalTableBuffer === nextBuffer) state.externalTableBuffer = null;
+    nextBuffer.destroy();
+  });
+  state.ledger.commit(res.token, { admissionId: `${sourceFingerprint}:${nextOrdinal}` });
   state.externalTableBuffer = nextBuffer;
   state.externalSourceFingerprint = sourceFingerprint;
   state.ordinal = nextOrdinal;
   if (scheduleId) state.adoptedScheduleIds.push(scheduleId);
-  previousExternal?.destroy?.();
-  previousReservation?.release?.();
+  // Previous external table was destroyed by ledger.retire(LANE_KEY) if attached; guard in case it wasn't.
+  if (previousExternal && previousExternal !== nextBuffer) {
+    try { previousExternal.destroy(); } catch { /* Already destroyed by retire. */ }
+  }
   return Object.freeze({
     adopted: true,
     ordinal: state.ordinal,
@@ -230,10 +230,10 @@ export function destroyRegionalClosureWorkerLane(lane) {
   const state = lanes.get(lane);
   if (!state || state.closed) return;
   state.closed = true;
-  state.externalTableBuffer?.destroy?.();
-  state.externalTableBuffer = null;
-  for (const buffer of Object.values(state.sampler.buffers)) buffer.destroy();
-  state.activeReservation?.release?.();
-  state.activeReservation = null;
   state.ledger.destroy();
+  if (state.externalTableBuffer) {
+    try { state.externalTableBuffer.destroy(); } catch { /* Destroyed by ledger. */ }
+    state.externalTableBuffer = null;
+  }
+  for (const buffer of Object.values(state.sampler.buffers)) buffer.destroy();
 }

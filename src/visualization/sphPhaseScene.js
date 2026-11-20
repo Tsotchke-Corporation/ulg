@@ -45,6 +45,7 @@ import {
   stableOpticalStateKey,
   uploadOpticalGpuTable
 } from '../runtime/material/opticalGpuBuffers.js';
+import { createWarmClosureMissBridge } from '../runtime/material/warmClosureMissBridge.js';
 import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -53486,6 +53487,9 @@ fn main(
       || workerSchroederLaneState.bridgeLifecycleGeneration !== bridge.lifecycleGeneration
       || workerSchroederLaneState.configurationSignature !== configurationSignature
     ) {
+      if (workerSchroederLaneState?.a6Bridge) {
+        try { workerSchroederLaneState.a6Bridge.destroy(); } catch { /* Already closed. */ }
+      }
       const supersededLane = (
         workerSchroederLaneState
         && workerSchroederLaneBridgeReference === bridge
@@ -54432,6 +54436,42 @@ fn main(
         });
         scene.userData.sphThermalPotentialStatus = g6Status;
         globalThis.__ulgThermalPotentialStatus = g6Status;
+      }
+      // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
+      // background Eshkol/MoonLab derivations at this schedule boundary and
+      // dispatch deduplicated non-blocking EOS stiffness misses over G5
+      // reservations without ever stalling the physics cadence.
+      if (typeof Worker === 'function' && globalThis.__ulgDisableA6Bridge !== true) {
+        laneState.a6Bridge ??= createWarmClosureMissBridge({
+          maxInFlight: 4,
+          scope: `${laneId}:a6-closure`,
+          onStateCommit: (delta) => {
+            laneState.lastA6CommitDelta = delta;
+          }
+        });
+        laneState.a6Bridge.adoptPendingAtScheduleBoundary({ scheduleId });
+        const missNeeded = committedThermalPotential?.status === 'no-valid-fit'
+          || (committedThermalPotential && !committedThermalPotential.adopted)
+          || (laneState.a6Bridge.getStatus().stats.dispatched === 0
+            && Boolean(scheduleResidentStepOptions?.implicitPressure));
+        if (missNeeded && currentMaterialProperties && typeof currentMaterialProperties === 'object') {
+          for (const [matKey, props] of Object.entries(currentMaterialProperties)) {
+            const liq = props?.phases?.find((phase) => phase?.name === 'liquid' && Number(phase?.densityKgPerM3) > 0);
+            if (!liq) continue;
+            const rho0 = Number(liq.densityKgPerM3);
+            const cSound = Number(liq.soundSpeedMPerS) > 0 ? Number(liq.soundSpeedMPerS) : 1480;
+            laneState.a6Bridge.requestEosStiffnessClosureMiss({
+              missKey: `scene-eos:${matKey}:${rho0}:${cSound}`,
+              restDensityKgPerM3: rho0,
+              soundSpeedMPerS: cSound,
+              scheduleId
+            });
+            break;
+          }
+        }
+        const a6Status = laneState.a6Bridge.getStatus();
+        scene.userData.sphA6ClosureBridgeStatus = a6Status;
+        globalThis.__ulgA6ClosureBridgeStatus = a6Status;
       }
     } catch (error) {
       laneState.pendingThermalPotential = null;

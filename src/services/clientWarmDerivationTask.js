@@ -5,59 +5,179 @@
 //     moonlab.wasm with its WebGPU backend, from /service-assets/moonlab/);
 //   - Eshkol: /workers/eshkol-warm-vm.worker.js (Eshkol's VM from
 //     /service-assets/eshkol/vm/).
-// The returned value is deterministic (replicas can be quorum-compared);
-// residency evidence (page id, worker spawns, calls, timings) travels in the
-// commit delta.
-let moonlabWorker = null;
-let eshkolWorker = null;
+//
+// Requests to a given warm worker are serialized so module-scoped stdout
+// buffers never interleave. Listener cleanup, bounded timeouts, and automatic
+// worker termination + respawn on fatal errors/timeouts ensure worker crashes
+// recover cleanly without stalling the physics loop.
+const DEFAULT_TIMEOUT_MS = 30_000;
+const WORKER_URLS = Object.freeze({
+  moonlab: '/workers/moonlab-warm-webgpu.worker.js',
+  eshkol: '/workers/eshkol-warm-vm.worker.js'
+});
+
+const workers = { moonlab: null, eshkol: null };
+const queues = { moonlab: Promise.resolve(), eshkol: Promise.resolve() };
 const spawns = { moonlab: 0, eshkol: 0 };
 const calls = { moonlab: 0, eshkol: 0 };
+const failures = { moonlab: 0, eshkol: 0 };
+const recoveries = { moonlab: 0, eshkol: 0 };
 let nextId = 1;
 
-function request(worker, message, match) {
-  return new Promise((resolve, reject) => {
-    const onMessage = (event) => {
-      const data = event.data ?? {};
-      if (!match(data)) return;
-      worker.removeEventListener('message', onMessage);
-      resolve(data);
-    };
-    worker.addEventListener('message', onMessage);
-    worker.addEventListener('error', (error) => reject(new Error(String(error?.message ?? error))), { once: true });
-    worker.postMessage(message);
+function normalizeService(service) {
+  return service === 'eshkol' ? 'eshkol' : 'moonlab';
+}
+
+function ensureWorker(service) {
+  if (!workers[service]) {
+    workers[service] = new Worker(WORKER_URLS[service]);
+    spawns[service] += 1;
+  }
+  return workers[service];
+}
+
+/**
+ * Terminate and clear a warm worker (used for teardown and crash-recovery
+ * tests). The next call for `service` automatically spawns a fresh warm worker.
+ */
+export function terminateWarmWorker(service, { countRecovery = true } = {}) {
+  const key = normalizeService(service);
+  const existing = workers[key];
+  workers[key] = null;
+  if (existing) {
+    try { existing.terminate(); } catch { /* Already terminated. */ }
+    if (countRecovery) recoveries[key] += 1;
+    return true;
+  }
+  return false;
+}
+
+/** Snapshot of warm-worker residency, failure, and recovery counters. */
+export function getWarmDerivationResidency() {
+  return Object.freeze({
+    spawns: Object.freeze({ ...spawns }),
+    calls: Object.freeze({ ...calls }),
+    failures: Object.freeze({ ...failures }),
+    recoveries: Object.freeze({ ...recoveries }),
+    activeWorkers: Object.freeze({
+      moonlab: workers.moonlab !== null,
+      eshkol: workers.eshkol !== null
+    })
   });
 }
 
-async function runMoonlab({ qubits = 12 } = {}) {
-  if (!moonlabWorker) { moonlabWorker = new Worker('/workers/moonlab-warm-webgpu.worker.js'); spawns.moonlab += 1; }
+function requestWithRecovery(service, message, match, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const execute = () => new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = ensureWorker(service);
+    } catch (error) {
+      failures[service] += 1;
+      reject(error);
+      return;
+    }
+    let settled = false;
+    let timer = null;
+    const cleanup = () => {
+      if (timer != null) { clearTimeout(timer); timer = null; }
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+    };
+    const onMessage = (event) => {
+      const data = event.data ?? {};
+      if (!match(data)) return;
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(data);
+    };
+    const onError = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      failures[service] += 1;
+      terminateWarmWorker(service, { countRecovery: true });
+      reject(new Error(`A6 ${service} worker crashed: ${String(error?.message ?? error)}`));
+    };
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        failures[service] += 1;
+        terminateWarmWorker(service, { countRecovery: true });
+        reject(new Error(`A6 ${service} worker timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+    }
+    try {
+      worker.postMessage(message);
+    } catch (error) {
+      settled = true;
+      cleanup();
+      failures[service] += 1;
+      terminateWarmWorker(service, { countRecovery: true });
+      reject(error);
+    }
+  });
+  // Serialize requests to the same warm worker so stdout/context stay coherent,
+  // while keeping the queue advancing even after a rejected call.
+  const pending = queues[service].then(execute, execute);
+  queues[service] = pending.then(() => {}, () => {});
+  return pending;
+}
+
+async function runMoonlab({ qubits = 12, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   calls.moonlab += 1;
   const id = `ulg-a6-moonlab-${nextId++}`;
   const started = performance.now();
-  const reply = await request(moonlabWorker, { id, type: 'ghz', qubits }, (data) => data.id === id);
-  if (!reply.ok) throw new Error(`MoonLab: ${reply.error}`);
+  const reply = await requestWithRecovery('moonlab', { id, type: 'ghz', qubits }, (data) => data.id === id, { timeoutMs });
+  if (!reply.ok) {
+    failures.moonlab += 1;
+    throw new Error(`MoonLab: ${reply.error}`);
+  }
   return {
     elapsedMs: performance.now() - started,
     workerResidency: reply.residency,
-    value: { schema: 'peercompute.ulg.client-quantum-response.v2', service: 'moonlab-wasm-webgpu-worker',
-      circuit: `ghz-${qubits}`, dim: reply.dim, nonzero: reply.nonzero, probabilitySum: reply.probabilitySum }
+    value: {
+      schema: 'peercompute.ulg.client-quantum-response.v2',
+      service: 'moonlab-wasm-webgpu-worker',
+      circuit: `ghz-${qubits}`,
+      dim: reply.dim,
+      nonzero: reply.nonzero,
+      probabilitySum: reply.probabilitySum,
+      nativeDispatches: reply.nativeDispatches ?? null
+    }
   };
 }
 
-async function runEshkol({ operation = 'sample', threshold = null, definition, call, points, n, a, b }) {
-  if (!eshkolWorker) { eshkolWorker = new Worker('/workers/eshkol-warm-vm.worker.js'); spawns.eshkol += 1; }
+async function runEshkol({ operation = 'sample', threshold = null, definition, call, points, n, a, b, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   calls.eshkol += 1;
   const id = `ulg-a6-eshkol-${nextId++}`;
   const started = performance.now();
   const message = operation === 'matmul-sum'
     ? { id, type: 'matmul-sum', threshold, n, a, b }
     : { id, type: 'sample', threshold, definition, call, points };
-  const reply = await request(eshkolWorker, message, (data) => data.id === id);
-  if (!reply.ok) throw new Error(`Eshkol: ${reply.error}`);
+  const reply = await requestWithRecovery('eshkol', message, (data) => data.id === id, { timeoutMs });
+  if (!reply.ok) {
+    failures.eshkol += 1;
+    throw new Error(`Eshkol: ${reply.error}`);
+  }
   const value = operation === 'matmul-sum'
-    ? { schema: 'peercompute.ulg.client-tensor-result.v1', service: 'eshkol-vm-wasm-webgpu-worker', n,
-        matmulSum: reply.matmulSum }
-    : { schema: 'peercompute.ulg.client-closure-samples.v1', service: 'eshkol-vm-wasm-webgpu-worker', call, points,
-        samples: reply.samples };
+    ? {
+        schema: 'peercompute.ulg.client-tensor-result.v1',
+        service: 'eshkol-vm-wasm-webgpu-worker',
+        n,
+        matmulSum: reply.matmulSum
+      }
+    : {
+        schema: 'peercompute.ulg.client-closure-samples.v1',
+        service: 'eshkol-vm-wasm-webgpu-worker',
+        call,
+        points,
+        samples: reply.samples
+      };
   return {
     elapsedMs: performance.now() - started,
     workerResidency: { ...reply.residency, gpuDispatches: reply.gpuDispatches ?? null },
@@ -66,15 +186,41 @@ async function runEshkol({ operation = 'sample', threshold = null, definition, c
 }
 
 export async function run({ service, scope = 'ulg-a6-client', ...data } = {}) {
-  const result = service === 'eshkol' ? await runEshkol(data) : await runMoonlab(data);
+  const key = normalizeService(service);
+  const result = key === 'eshkol' ? await runEshkol(data) : await runMoonlab(data);
   return {
     value: result.value,
     commitDelta: {
-      taskId: `ulg-a6-client:${service}`,
+      taskId: `ulg-a6-client:${key}`,
       scope,
-      version: calls[service] ?? 0,
-      payload: { residency: { pageId: globalThis.__ulgA6PeerId ?? null, service, spawns: spawns[service],
-        calls: calls[service], elapsedMs: result.elapsedMs, worker: result.workerResidency ?? null } }
+      version: calls[key] ?? 0,
+      payload: {
+        residency: {
+          pageId: globalThis.__ulgA6PeerId ?? null,
+          service: key,
+          spawns: spawns[key],
+          calls: calls[key],
+          failures: failures[key],
+          recoveries: recoveries[key],
+          elapsedMs: result.elapsedMs,
+          worker: result.workerResidency ?? null
+        }
+      }
     }
   };
+}
+
+/** Direct sampler adapter for `deriveEosStiffnessResponse` backed by the warm Eshkol worker. */
+export async function sampleEshkolWarm(definition, call, points, { threshold = null, timeoutMs = DEFAULT_TIMEOUT_MS, scope = 'ulg-a6-eos-stiffness' } = {}) {
+  const response = await run({
+    service: 'eshkol',
+    operation: 'sample',
+    scope,
+    threshold,
+    timeoutMs,
+    definition,
+    call,
+    points
+  });
+  return response.value.samples;
 }

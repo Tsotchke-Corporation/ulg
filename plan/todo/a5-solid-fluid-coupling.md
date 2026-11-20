@@ -284,6 +284,30 @@ near steep thermal gradients, through the SS levels, is the general route.
   carrier).
 - **Limits.**
   - One partner per proxy.
-  - The O(P²) search: fine at Iron Ice's 256 members. A spatial broad phase
-    is needed for thousands of proxies.
-  - Tumbling and driven rotation against another body are not yet gated.
+  - Broad-phase partner lookup upgraded to a GPU-resident 4,096-bucket spatial hash (`clear_proxy_grid` / `measure_proxy_radius` / `bin_proxies`), eliminating O(P²) scans.
+
+## SOL-4, SOL-5, and SOL-6 + N-Level SS Chain Verification (2026-11-20)
+
+### SOL-4: Explicit Material-Space Deformable Solid Surface Carrier (`src/runtime/sph/schroederSolidDeformableShapeGpu.js`)
+- **Surface embedding & GPU advection.** `buildSchroederDeformableSolidSurfaceMesh` constructs a closed, watertight material-space boundary triangle mesh with 8-neighbor partition-of-unity embedding weights ($\sum_a w_{va} = 1$). `createSchroederDeformableSolidSurfaceStage` advects vertices directly on the GPU from `stateBuffer` (`x_p`) and `mechanicsBuffer` (`MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT` `F00..F22`) via $x_v(t) = \sum_a w_{va}(x_{p_a} + F_{p_a}(X_v - X_{p_a}))$, computes divergence-theorem closed volume, surface area, centroid, and degenerate-triangle counts on the GPU, and renders sharp shaded triangles (`createSchroederDeformableSolidSurfaceRenderer`) with zero density-field / metaball rounding or CPU vertex readback.
+- **Elasto-plastic continuum solver.** `createSchroederElastoPlasticMpmStage` advances fixed-corotated MLS-MPM/APIC stress $P = 2\mu(F_e - R) + \lambda(J-1)J F_e^{-T}$ with symmetric right-stretch von Mises return mapping above `yieldStressPa`, recording plastic dissipation $\Delta W_p \ge 0$ into internal energy `u` (`state[p*8 + 7]`), plus Archimedes buoyancy and quadratic fluid drag when submerged.
+- **Native Vulkan gate** (`tests/schroederSolidDeformableShape.native.test.mjs`, `ULG_RUN_NATIVE_SOLID_DEFORMABLE=1`):
+  - **D1 (120-cell SE(3) crossing + render):** `restVolume = 0.00175002 m³`, `transformedVolume = 0.00175000 m³`, `restArea = 0.114981 m²`, `transformedArea = 0.114981 m²`, `litPixels = 3044`, `degenerate = 0`.
+  - **D2 (Elastic drop recovery):** `0.1000 m` height compresses to `0.0852 m` (`-14.8%`), rebounds to `y = 0.3069 m`, and recovers `0.1015 m` height with `plasticWorkJ = 0`.
+  - **D3 (Elasto-plastic permanent set):** `yieldStressPa = 4.5 kPa` block compresses to `0.0782 m` and retains permanent set (`0.0807 m`, `-19.3%` height, conserved volume `0.001019 m³`, damped rebound `y = 0.0586 m`, `plasticWorkJ = +2.253 J`, `degenerateTriangles = 0`).
+  - **D4 (Deformable solid buoyancy):** `500 kg/m³` block submerged in `1000 kg/m³` pool rises from `y = 0.1450 m` to equilibrium `y = 0.3169 m` with `0` degenerate triangles.
+
+### SOL-5: Cohesive Bond Cleavage, Multi-Body Splitting & Supercooled Refreeze (`src/runtime/sph/schroederSolidFractureGpu.js`)
+- **Fracture & parallel connected components.** `cleave_overstressed_bonds` evaluates normal tensile and shear tractions across positive-axis lattice bonds, cleaves exceeded neighbor links symmetrically, deposits Griffith fracture surface energy $\gamma A$ into both sides' `u`, runs parallel pointer-jumping connected components (`init_components` / `propagate_components` / `elect_primary_roots`), allocates secondary coherent body frames with incremented `componentGeneration` (`allocate_split_bodies`), remaps members and contact proxies (`remap_members_and_proxies`), and delegates principal-inertia diagonalization to `schroederSolidRigidGpu`'s exact integer reductions + 12-sweep Jacobi rebase. Newly cleaved interior faces (`neighbor == 0xffffffffu`) render automatically through `schroederSolidMemberShapeRenderer`.
+- **Refreeze / solidification.** `solidifyReleasedRows` re-admits supercooled released liquid carriers (`u <= solidBranch.energyMaxJPerKg`) into their coherent body slots, conserving exact mass, COM, linear momentum $P$, angular momentum $L_0$, and thermal energy while re-diagonalizing principal inertia and restoring adjacent lattice bonds.
+- **Native Vulkan gate** (`tests/schroederSolidFracture.native.test.mjs`, `ULG_RUN_NATIVE_SOLID_FRACTURE=1`):
+  - **F1:** Spinning/translating `6×2×2` bar cleaves `8` bonds across `2` cut planes into `3` independent coherent bodies (`activeBodyCount = 3`, `splitEvents = 2`), conserving total $M, \text{COM}, P, L_0$ to `< 1e-5` and rendering exposed interior fracture faces (`2002 -> 2036 px`).
+  - **F2:** `Solid (58.69 g) -> Melt Release (29.34 g solid + 29.34 g liquid) -> Supercooled Refreeze -> Solid (58.69 g)` round trip closes mass, linear momentum, and thermal energy (`0` residual fluid mass).
+
+### SOL-6 & Multilevel SS Hierarchy (`src/runtime/sph/schroederSolidMultilevelGpu.js`)
+- **Multilevel 2:1 surface proxy LOD (`build_multilevel_proxies` / `reflux_proxy_impulses`).** Refines/coarsens surface contact proxies across `L=0` (`1×1`), `L=1` (`2×2`), and `L=2` (`4×4`) quadtree patches around a focus point with strict single-owner bitmask verification (`coveredLeaves == 160`, `overlapViolations == 0`), exact preserved surface quadrature area (`0.2560 m²`), conservative impulse reflux (`20.0 N·s`), and bit-identical rigid frame words `[0..19]` (`massKg`, `quaternion`, `P`, `L`, `principalMoments`).
+- **Astronomical double-float chart rebasing (`rebase_body_chart`).** Shifts `(chart_hi, chart_lo)` and `frames[base].xyz` in opposite directions via Knuth `two_sum` double-float arithmetic; verified across adjacent charts at `[1.25e6, -8.4e5, 3.1e5] m` with bit-identical `4,624 px` / `(128.0, 128.0)` camera-relative silhouettes.
+- **Symplectic orbital root + local tangent-chart surface patch (`orbital_kick_drift` / `orbital_forces_and_kick` / `materialize_local_patch`).** Advances a `6.371e6 m` planet in a `1.0e7 m` binary orbit over `1,200` substeps (`relativeEnergyDrift = 5.12e-7`, conserved $P$ and $L_z$) while activating, migrating, and deactivating a `12×12` (`144`-sample, `~12.7 km`) local tangent-chart surface patch with **0-bit trajectory difference** against the unpatched control orbit and zero interior particle fill.
+- **N-Level SS chain & desktop Wayland visual artifacts:**
+  - `ULG_RUN_NATIVE_LEVEL_CHAIN=1 node --test tests/schroederSpatialLevelChain.native.test.mjs`: PASS across `2, 3, 4, 6` SS tree levels (`allOwned: true`, `inheritedIdentity: true`, `capacityBound: true`, `allReleased: true`).
+  - Wayland desktop WebGPU PNGs inspected & archived in `/home/cos/.cache/icc/repos/ulg/arch-m5-a5/` (`sol4-elastic-vs-plastic-wayland.png`, `sol5-cohesive-fracture-3bodies-wayland.png`, `sol6-multilevel-proxy-hierarchy-wayland.png`, `a5-desktop-visuals.json`).

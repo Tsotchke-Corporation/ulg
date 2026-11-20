@@ -182,20 +182,44 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     family.stageKey = key;
   }
   const encoder = device.createCommandEncoder({ label: 'ulg-solid-rigid-lane' });
-  family.stage.encode(encoder, dtSeconds);
   // Members melt and release only when a fluid lane receives them this step
-  // (the f32 route's post-mechanics buffers); otherwise they stay in the body.
+  // (the f32 or G2 exact-ledger post-mechanics buffers); otherwise they stay in the body.
   const releaseEnabled = Boolean(fluid?.stateBuffer && fluid?.thermoBuffer && fluid?.mechanicsBuffer && family.releaseStage);
-  family.thermalStage?.encode(encoder, dtSeconds, { releaseEnabled });
+  const couplingEligible = Boolean(releaseEnabled && family.couplingStage && fluid.particleCount > 0);
+  const contactEligible = Boolean(fluid?.stateBuffer && fluid?.thermoBuffer && fluid.particleCount > 0);
+  // Perform ALL uniform writeBuffer updates, buffer clears, and finite-wall
+  // temperature copies BEFORE opening the shared compute pass (critical under
+  // burst pooled write-through, which encodes writeBuffer as copyBufferToBuffer).
+  family.stage.prepare?.(dtSeconds);
+  family.thermalStage?.prepare?.(encoder, dtSeconds, { releaseEnabled });
+  if (couplingEligible) {
+    family.couplingStage.prepare?.(encoder, dtSeconds, {
+      particleCount: fluid.particleCount,
+      exactEnergyBuffer: fluid.exactEnergyBuffer ?? null,
+      exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0
+    });
+  }
+  if (contactEligible) {
+    family.contactStage.prepare?.(dtSeconds, { particleCount: fluid.particleCount });
+  }
+  if (releaseEnabled) {
+    family.releaseStage.prepare?.(fluid);
+  }
+  const pass = encoder.beginComputePass({ label: 'ulg-solid-rigid-lane' });
+  family.stage.encode(encoder, dtSeconds, { pass, prepared: true });
+  family.thermalStage?.encode(encoder, dtSeconds, { releaseEnabled, pass, prepared: true });
   family.lastReleaseEnabled = releaseEnabled;
-  // A5 SOL-3: member <-> SPH particle heat on the same f32 fluid buffers.
-  family.lastCouplingEnabled = Boolean(releaseEnabled && family.couplingStage && fluid.particleCount > 0)
+  // A5 SOL-3: member <-> SPH particle heat on f32 and G2 exact energy-ledger fluid buffers.
+  family.lastCouplingEnabled = couplingEligible
     && family.couplingStage.encode(encoder, dtSeconds, { memberThermoBuffer: family.thermalStage.thermoBuffer,
-      fluidStateBuffer: fluid.stateBuffer, fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount });
-  family.lastContactEnabled = Boolean(fluid?.stateBuffer && fluid?.thermoBuffer && fluid.particleCount > 0)
+      fluidStateBuffer: fluid.stateBuffer, fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
+      exactEnergyBuffer: fluid.exactEnergyBuffer ?? null, exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0,
+      pass, prepared: true });
+  family.lastContactEnabled = contactEligible
     && family.contactStage.encode(encoder, dtSeconds, { fluidStateBuffer: fluid.stateBuffer,
-      fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount });
-  if (releaseEnabled) family.releaseStage.encode(encoder, fluid);
+      fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount, pass, prepared: true });
+  if (releaseEnabled) family.releaseStage.encode(encoder, { ...fluid, pass, prepared: true });
+  pass.end();
   // Diagnostic (scripts/a1-ab-check.mjs): at step __ulgFingerprintStep, copy
   // the fluid state/thermo and rigid frames in queue order, so an A/B
   // fingerprint is taken at an exact step whatever the pause timing.

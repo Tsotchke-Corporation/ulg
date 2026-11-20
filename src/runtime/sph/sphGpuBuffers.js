@@ -2668,6 +2668,13 @@ export function sphGpuParticleUploadExactEnergyRows(upload) {
   return owner && owner.active !== false && !owner.retired ? owner.energy?.value ?? null : null;
 }
 
+/** The live exact-mass read buffer of an active G2 energy-ledger upload, or null. */
+export function sphGpuParticleUploadExactMassBuffer(upload) {
+  const owner = sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass;
+  return owner && owner.active !== false && !owner.retired && owner.energy?.value
+    ? owner.read?.buffer ?? null : null;
+}
+
 export function sphGpuParticleUploadAdvertisesExactMass(upload) {
   return Boolean(upload && (sphParticleBufferSetLifecycleRecords.get(upload)?.exactMass
     || 'exactMassInventory' in upload || 'exactMassInventoryRange' in upload || ['stateBuffer', 'thermoBuffer', 'identityBuffer']

@@ -19,9 +19,13 @@ import { SPH_EXACT_THERMAL_ENERGY_FORMAT } from './sphExactThermalEnergyWgsl.js'
 // adds them to the frame's world P and L. Momentum is conserved up to the
 // f32 updates of each side; positions are never moved directly.
 //
-// Neighbour search is brute force (particles x members); binning belongs to A1.
+// Neighbour search uses a GPU-resident 4096-bucket 3D spatial cell hash over
+// alive rigid members (O(N + M), zero host round-trips). Bucket collisions in
+// the 27-cell stencil are deduplicated per thread so every member is tested at
+// most once.
 const FORMAT = SPH_EXACT_THERMAL_ENERGY_FORMAT;
 const COUNTER_WORDS_PER_ROW = 4 * FORMAT.wordCount;
+const GRID_BUCKETS = 4096;
 const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_SRC: 0x04, COPY_DST: 0x08 });
 export const SCHROEDER_SOLID_FLUID_CONTACT_LAW = Object.freeze({ baumgarte: 0.2, maxBiasSpeedMPerS: 0.5, slopM: 2.5e-4 });
 
@@ -44,14 +48,53 @@ struct ContactParams {
 @group(0) @binding(4) var<storage, read_write> fluid_state: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> fluid_thermo: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> impulse_counters: array<atomic<u32>>;
-// [contacts this step, scatter error flags, unused, unused]
+// [contacts this step, scatter error flags, max fluid radius f32 bits, unused]
 @group(0) @binding(7) var<storage, read_write> contact_ledger: array<atomic<u32>>;
+// [cell_head[4096], member_next[memberCount]]
+@group(0) @binding(8) var<storage, read_write> spatial_grid: array<atomic<u32>>;
 
 const ROWS: u32 = 6u;
+const GRID_BUCKETS: u32 = ${GRID_BUCKETS}u;
+const GRID_MASK: u32 = ${GRID_BUCKETS - 1}u;
+const EMPTY_NODE: u32 = 0xffffffffu;
 
-@compute @workgroup_size(4)
+fn hash_cell(c: vec3<i32>) -> u32 {
+  return ((bitcast<u32>(c.x) * 73856093u) ^ (bitcast<u32>(c.y) * 19349663u) ^ (bitcast<u32>(c.z) * 83492791u)) & GRID_MASK;
+}
+
+fn grid_cell_edge() -> f32 {
+  let max_r = bitcast<f32>(atomicLoad(&contact_ledger[2]));
+  return max(max(2.0 * params.law.x, params.law.x + max_r) * 1.01, 1.0e-5);
+}
+
+@compute @workgroup_size(64)
 fn reset_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x == 0u) { atomicStore(&contact_ledger[0], 0u); }
+  if (id.x < GRID_BUCKETS) { atomicStore(&spatial_grid[id.x], EMPTY_NODE); }
+  if (id.x == 0u) {
+    atomicStore(&contact_ledger[0], 0u);
+    atomicStore(&contact_ledger[2], 0u);
+  }
+}
+
+@compute @workgroup_size(64)
+fn measure_fluid_radius(@builtin(global_invocation_id) id: vec3<u32>) {
+  let j = id.x;
+  if (j >= params.counts.y) { return; }
+  if (!(fluid_state[j * 2u].w > 0.0)) { return; }
+  let r = fluid_thermo[j * 3u + 2u].w;
+  if (r > 0.0) { atomicMax(&contact_ledger[2], bitcast<u32>(r)); }
+}
+
+@compute @workgroup_size(64)
+fn bin_members(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.counts.x) { return; }
+  if (!(members[i * 2u].w > 0.0)) { return; }
+  let xm = member_world[i * 2u].xyz;
+  let edge = grid_cell_edge();
+  let bucket = hash_cell(vec3<i32>(floor(xm / edge)));
+  let prev = atomicExchange(&spatial_grid[bucket], i);
+  atomicStore(&spatial_grid[GRID_BUCKETS + i], prev);
 }
 
 @compute @workgroup_size(64)
@@ -65,39 +108,64 @@ fn contact_particles(@builtin(global_invocation_id) id: vec3<u32>) {
   var v = fluid_state[j * 2u + 1u].xyz;
   let a = params.law.x;
   let dt = params.time.x;
+  let edge = grid_cell_edge();
+  let base_cell = vec3<i32>(floor(p.xyz / edge));
+  var seen: array<u32, 27>;
+  var seen_count = 0u;
   var contacts = 0u;
   var error = 0u;
-  for (var i = 0u; i < params.counts.x; i++) {
-    let m = members[i * 2u];
-    if (!(m.w > 0.0)) { continue; }
-    let xm = member_world[i * 2u].xyz;
-    let offset = p.xyz - xm;
-    let d = length(offset);
-    let reach = a + radius_p;
-    if (!(d < reach) || !(d > 1.0e-9)) { continue; }
-    let body = bitcast<u32>(members[i * 2u + 1u].x);
-    if (body >= params.counts.z) { continue; }
-    let n = offset / d;
-    let vm = member_world[i * 2u + 1u].xyz;
-    let vn = dot(v - vm, n);
-    let goal_speed = min(params.law.z * max(reach - d - params.law.y, 0.0) / dt, params.law.w);
-    if (!(vn < goal_speed)) { continue; }
-    let frame0 = frames[body * 8u];
-    let inv_mass = 1.0 / mass_p + select(0.0, 1.0 / frame0.w, frame0.w > 0.0);
-    let impulse = ((goal_speed - vn) / inv_mass) * n;
-    v = v + impulse / mass_p;
-    // The body's reaction: -impulse at the contact point (member surface).
-    let lever = (xm + n * a) - frame0.xyz;
-    let reaction = -impulse;
-    let angular = cross(lever, reaction);
-    let row = body * ROWS;
-    error |= fc_scatter_f32(row, bitcast<u32>(reaction.x));
-    error |= fc_scatter_f32(row + 1u, bitcast<u32>(reaction.y));
-    error |= fc_scatter_f32(row + 2u, bitcast<u32>(reaction.z));
-    error |= fc_scatter_f32(row + 3u, bitcast<u32>(angular.x));
-    error |= fc_scatter_f32(row + 4u, bitcast<u32>(angular.y));
-    error |= fc_scatter_f32(row + 5u, bitcast<u32>(angular.z));
-    contacts += 1u;
+  for (var dz = -1i; dz <= 1i; dz++) {
+    for (var dy = -1i; dy <= 1i; dy++) {
+      for (var dx = -1i; dx <= 1i; dx++) {
+        let bucket = hash_cell(base_cell + vec3<i32>(dx, dy, dz));
+        var dup = false;
+        for (var s = 0u; s < seen_count; s++) {
+          if (seen[s] == bucket) { dup = true; break; }
+        }
+        if (dup) { continue; }
+        seen[seen_count] = bucket;
+        seen_count += 1u;
+        var i = atomicLoad(&spatial_grid[bucket]);
+        while (i != EMPTY_NODE) {
+          let next_i = atomicLoad(&spatial_grid[GRID_BUCKETS + i]);
+          let m = members[i * 2u];
+          if (m.w > 0.0) {
+            let xm = member_world[i * 2u].xyz;
+            let offset = p.xyz - xm;
+            let d = length(offset);
+            let reach = a + radius_p;
+            if (d < reach && d > 1.0e-9) {
+              let body = bitcast<u32>(members[i * 2u + 1u].x);
+              if (body < params.counts.z) {
+                let n = offset / d;
+                let vm = member_world[i * 2u + 1u].xyz;
+                let vn = dot(v - vm, n);
+                let goal_speed = min(params.law.z * max(reach - d - params.law.y, 0.0) / dt, params.law.w);
+                if (vn < goal_speed) {
+                  let frame0 = frames[body * 8u];
+                  let inv_mass = 1.0 / mass_p + select(0.0, 1.0 / frame0.w, frame0.w > 0.0);
+                  let impulse = ((goal_speed - vn) / inv_mass) * n;
+                  v = v + impulse / mass_p;
+                  // The body's reaction: -impulse at the contact point (member surface).
+                  let lever = (xm + n * a) - frame0.xyz;
+                  let reaction = -impulse;
+                  let angular = cross(lever, reaction);
+                  let row = body * ROWS;
+                  error |= fc_scatter_f32(row, bitcast<u32>(reaction.x));
+                  error |= fc_scatter_f32(row + 1u, bitcast<u32>(reaction.y));
+                  error |= fc_scatter_f32(row + 2u, bitcast<u32>(reaction.z));
+                  error |= fc_scatter_f32(row + 3u, bitcast<u32>(angular.x));
+                  error |= fc_scatter_f32(row + 4u, bitcast<u32>(angular.y));
+                  error |= fc_scatter_f32(row + 5u, bitcast<u32>(angular.z));
+                  contacts += 1u;
+                }
+              }
+            }
+          }
+          i = next_i;
+        }
+      }
+    }
   }
   if (contacts == 0u) { return; }
   let old = fluid_state[j * 2u + 1u];
@@ -129,14 +197,17 @@ fn apply_impulses(@builtin(global_invocation_id) id: vec3<u32>) {
 export function createSchroederSolidFluidContactStage({ device, memberCount, bodyCount, memberBuffer, memberWorldBuffer,
   frameBuffer, memberRadiusM, law = SCHROEDER_SOLID_FLUID_CONTACT_LAW } = {}) {
   const bindings = ['uniform', 'read-only-storage', 'read-only-storage', 'storage', 'storage', 'read-only-storage',
-    'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
-  const pipelines = Object.fromEntries(['reset_ledger', 'contact_particles', 'apply_impulses'].map((entryPoint) =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-${entryPoint}.v0`,
+    'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
+  const pipelines = Object.fromEntries(['reset_ledger', 'measure_fluid_radius', 'bin_members', 'contact_particles',
+    'apply_impulses'].map((entryPoint) =>
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-${entryPoint}.v1`,
       label: `ulg-solid-fluid-contact-${entryPoint}`, code: schroederSolidFluidContactWgsl, entryPoint, bindings })]));
   const counters = device.createBuffer({ label: 'ulg-solid-fluid-contact-counters',
     size: (bodyCount * 6 * COUNTER_WORDS_PER_ROW + 4) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const ledgerBuffer = device.createBuffer({ label: 'ulg-solid-fluid-contact-ledger', size: 16,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST });
+  const spatialGrid = device.createBuffer({ label: 'ulg-solid-fluid-contact-grid',
+    size: (GRID_BUCKETS + Math.max(1, memberCount)) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const params = device.createBuffer({ label: 'ulg-solid-fluid-contact-params', size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const words = new ArrayBuffer(48), u = new Uint32Array(words), f = new Float32Array(words);
@@ -144,29 +215,45 @@ export function createSchroederSolidFluidContactStage({ device, memberCount, bod
   const groups = new Map();
   return Object.freeze({
     ledgerBuffer,
-    encode(encoder, dtSeconds, { fluidStateBuffer, fluidThermoBuffer, particleCount }) {
+    prepare(dtSeconds, { particleCount = 0 } = {}) {
       if (!(particleCount > 0) || !(dtSeconds > 0)) return false;
       u.set([memberCount, particleCount, bodyCount, 0], 0);
       f[8] = dtSeconds;
       device.queue.writeBuffer(params, 0, words);
+      return true;
+    },
+    encode(encoder, dtSeconds, { fluidStateBuffer, fluidThermoBuffer, particleCount, pass: sharedPass = null, prepared = false }) {
+      if (!(particleCount > 0) || !(dtSeconds > 0)) return false;
+      if (!prepared) {
+        u.set([memberCount, particleCount, bodyCount, 0], 0);
+        f[8] = dtSeconds;
+        device.queue.writeBuffer(params, 0, words);
+      }
       const key = `${groups.size}`;
       let group = null;
       for (const [k, g] of groups) if (k[0] === fluidStateBuffer && k[1] === fluidThermoBuffer) group = g;
       if (!group) {
         group = device.createBindGroup({ layout: pipelines.contact_particles.bindGroupLayout,
           entries: [params, memberWorldBuffer, memberBuffer, frameBuffer, fluidStateBuffer, fluidThermoBuffer, counters,
-            ledgerBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+            ledgerBuffer, spatialGrid].map((buffer, binding) => ({ binding, resource: { buffer } })) });
         if (groups.size > 8) groups.clear();
         groups.set([fluidStateBuffer, fluidThermoBuffer, key], group);
       }
-      for (const [entryPoint, count, size] of [['reset_ledger', 1, 4], ['contact_particles', particleCount, 64],
-        ['apply_impulses', bodyCount, 64]]) {
-        const pass = encoder.beginComputePass({ label: `ulg-solid-fluid-contact-${entryPoint}` });
-        pass.setPipeline(pipelines[entryPoint].pipeline); pass.setBindGroup(0, group);
-        pass.dispatchWorkgroups(Math.ceil(count / size)); pass.end();
+      const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-solid-fluid-contact' });
+      pass.setBindGroup(0, group);
+      for (const [entryPoint, count] of [
+        ['reset_ledger', GRID_BUCKETS],
+        ['measure_fluid_radius', particleCount],
+        ['bin_members', memberCount],
+        ['contact_particles', particleCount],
+        ['apply_impulses', bodyCount]
+      ]) {
+        pass.setPipeline(pipelines[entryPoint].pipeline);
+        pass.dispatchWorkgroups(Math.ceil(count / 64));
       }
+      if (!sharedPass) pass.end();
       return true;
     },
-    destroy() { for (const b of [counters, ledgerBuffer, params]) b.destroy(); }
+    destroy() { for (const b of [counters, ledgerBuffer, spatialGrid, params]) b.destroy(); }
   });
 }

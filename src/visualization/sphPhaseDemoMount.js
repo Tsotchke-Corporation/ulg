@@ -1238,6 +1238,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'thermalDormancyK',
   'reactionDormancy',
   'thermalPotential',
+  'rigidSolids',
   'cfl',
   'cflSafety',
   'implicitPressure',
@@ -7366,6 +7367,7 @@ export async function mountSphPhaseDemoOverlay({
     'thermalDormancyK',
     'reactionDormancy',
     'thermalPotential',
+    'rigidSolids',
     'cfl',
     'cflSafety',
     'implicitPressure',
@@ -7930,6 +7932,11 @@ export async function mountSphPhaseDemoOverlay({
   const initialThermalPotentialRaw = String(initialHash.get('thermalPotential')
     ?? initialQuery.get('thermalPotential') ?? initialScenarioRuntime.thermalPotential ?? '1');
   const initialThermalPotential = initialThermalPotentialRaw !== '0' && initialThermalPotentialRaw !== 'false';
+  // G3 / A5 coherent rigid solids, on by default where physically admitted;
+  // rigidSolids=0 restores continuum-only solids.
+  const initialRigidSolidsRaw = String(initialHash.get('rigidSolids')
+    ?? initialQuery.get('rigidSolids') ?? initialScenarioRuntime.rigidSolids ?? '1');
+  const initialRigidSolids = initialRigidSolidsRaw !== '0' && initialRigidSolidsRaw !== 'false';
   const initialHydrostaticInitialization = (() => {
     const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
     if (raw == null || raw === '') return null;
@@ -9093,6 +9100,7 @@ export async function mountSphPhaseDemoOverlay({
     else if (initialThermalDormancyK !== 0) q.set('thermalDormancyK', String(initialThermalDormancyK));
     if (!initialReactionDormancy) q.set('reactionDormancy', '0');
     if (!initialThermalPotential) q.set('thermalPotential', '0');
+    if (!initialRigidSolids) q.set('rigidSolids', '0');
     if (initialGridCflFactor != null) q.set('cfl', String(initialGridCflFactor));
     if (initialCflSafety != null) q.set('cflSafety', String(initialCflSafety));
     if (initialImplicitPressure) {
@@ -9415,6 +9423,7 @@ export async function mountSphPhaseDemoOverlay({
       ...(initialThermalDormancyK != null ? { thermalDormancyK: initialThermalDormancyK } : {}),
       ...(initialReactionDormancy ? { reactionDormancy: true } : {}),
       thermalPotentialEnabled: initialThermalPotential,
+      coherentRigidSolids: initialRigidSolids,
       ...(initialArtificialViscosityAlpha != null
         ? { mlsMpmArtificialViscosityAlpha: initialArtificialViscosityAlpha }
         : {}),

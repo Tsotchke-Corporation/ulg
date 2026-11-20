@@ -2513,6 +2513,7 @@ function buildSphInitialBodiesDemoState({
   reactionProductReserveAuthority,
   splitSpareLineageCount = 0,
   mechanics,
+  coherentRigidSolids = false,
   materialPropertyBank,
   materialPropertyCrystalStructureBank
 }) {
@@ -2600,34 +2601,97 @@ function buildSphInitialBodiesDemoState({
   const liveParticles = [];
   const bodyRanges = [];
   const countsByBodyId = {};
-  // G3 SOL-1: a rigid body's particle lattice becomes its members (one SE(3)
-  // frame, plan/todo/g3-solids-proposal.md); its samples are not SPH particles.
+  // G3 SOL-1 / A5: a rigid body's particle lattice becomes its members (one
+  // SE(3) frame, plan/todo/g3-solids-proposal.md); its samples are not SPH
+  // particles. When coherentRigidSolids is enabled on the canonical MLS-MPM
+  // lane, any unpinned solid body below its melting point with complete melt
+  // closures and non-degenerate 3D inertia is physically admitted unless an
+  // active chemical reaction in this scene consumes its material.
   const rigidBodies = [];
+  const autoRigidEligible = coherentRigidSolids === true
+    && String(mechanics || 'mlsmpm') === 'mlsmpm'
+    && !globalThis.__ulgSkipSolidReleaseRows;
+  let reactiveSolidMaterials = null;
+  if (autoRigidEligible) {
+    const reactionsEnabled = physicalLawGroups == null || physicalLawGroups.reactions !== false;
+    const candidateSolidBodies = normalizedInitialBodies.bodies.filter((body, idx) => (
+      body.mechanicsMode == null && bodyPlans[idx]?.phase === 'solid'
+    ));
+    if (reactionsEnabled && candidateSolidBodies.length > 0) {
+      const sceneMaterials = [...new Set([
+        ...normalizedInitialBodies.bodies.map((b) => b.material),
+        ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map((row) => row.material) : [])
+      ].filter(Boolean))];
+      reactiveSolidMaterials = new Set();
+      if (sceneMaterials.length >= 2) {
+        try {
+          const resolvedMaterialProperties = Object.fromEntries(
+            Object.entries(resolved).map(([key, closure]) => [key, closure.properties])
+          );
+          const catalog = discoverReactionNetwork(sceneMaterials, {
+            materialProperties: resolvedMaterialProperties,
+            liveMaterialKeys: sceneMaterials,
+            allowFixtureMaterialProperties: allowFixtureMaterialProperties === true,
+            allowReducedProductProperties: allowReducedProductProperties === true || allowFixtureMaterialProperties === true
+          });
+          for (const reaction of catalog?.reactions ?? []) {
+            for (const candidateKey of [
+              reaction?.reactant,
+              reaction?.partner,
+              ...(reaction?.reactants ?? []).map((r) => (typeof r === 'string' ? r : r?.material ?? r?.key)),
+              ...(reaction?.reactionDiscovery?.sourcePairs ?? []).flat()
+            ]) {
+              const key = String(candidateKey || '').trim().toLowerCase();
+              if (key) reactiveSolidMaterials.add(key);
+            }
+          }
+        } catch {
+          for (const body of candidateSolidBodies) {
+            reactiveSolidMaterials.add(String(body.material || '').trim().toLowerCase());
+          }
+        }
+      }
+    }
+  }
   for (let bodyIndex = 0; bodyIndex < normalizedInitialBodies.bodies.length; bodyIndex += 1) {
     const body = normalizedInitialBodies.bodies[bodyIndex];
     const plan = bodyPlans[bodyIndex];
     const start = liveParticles.length;
+    const properties = resolved[body.material].properties;
     const particles = fillAxisAlignedInitialBody({
       body,
       plan,
-      properties: resolved[body.material].properties
+      properties
     });
-    if (body.mechanicsMode === 'rigid') {
-      const properties = resolved[body.material].properties;
+    const melt = properties?.transitions?.find(t => t.from === 'solid' && t.to === 'liquid') ?? null;
+    const solidPhase = properties?.phases?.find(phase => phase.name === 'solid') ?? null;
+    const liquidPhase = properties?.phases?.find(phase => phase.name === 'liquid') ?? null;
+    const meltClosureReady = Boolean(
+      melt && Number.isFinite(melt.temperatureK)
+      && solidPhase?.cpJPerKgK > 0
+      && liquidPhase?.cpJPerKgK > 0
+      && liquidPhase.densityKgPerM3 > 0
+    );
+    const bodyMaterialKey = String(body.material || '').trim().toLowerCase();
+    const autoAdmitRigid = autoRigidEligible
+      && body.mechanicsMode == null
+      && plan.phase === 'solid'
+      && meltClosureReady
+      && body.temperatureK < melt.temperatureK
+      && body.particlesPerEdge.every((count) => count >= 2)
+      && !(reactiveSolidMaterials?.has(bodyMaterialKey))
+      && (rigidBodies.length === 0 || String(rigidBodies[0].material || '').trim().toLowerCase() === bodyMaterialKey);
+    if (body.mechanicsMode === 'rigid' || autoAdmitRigid) {
       const seed = seedSchroederSolidRigidBody({ bodyId: rigidBodies.length,
         members: particles.map(particle => ({ x: [...particle.x], massKg: particle.massKg })),
         velocity: [...body.velocityMPerS], angularVelocity: [...(body.angularVelocityRadPerS ?? [0, 0, 0])] });
       // G3 Phase 4: member thermal state on the material's own caloric curve
       // (thermoState u(T), linear per phase), and one reserved dormant liquid
       // row per member for melt release (activated by schroederSolidReleaseGpu).
-      const melt = properties?.transitions?.find(t => t.from === 'solid' && t.to === 'liquid') ?? null;
-      const solidPhase = properties?.phases?.find(phase => phase.name === 'solid') ?? null;
-      const liquidPhase = properties?.phases?.find(phase => phase.name === 'liquid') ?? null;
       let thermal = null, releaseRowStart = null;
       // Diagnostic (probe S0_INIT_GLOBALS): build the body without its member
       // thermal state and reserved release rows.
-      if (!globalThis.__ulgSkipSolidReleaseRows
-        && melt && solidPhase?.cpJPerKgK > 0 && liquidPhase?.cpJPerKgK > 0 && liquidPhase.densityKgPerM3 > 0) {
+      if (!globalThis.__ulgSkipSolidReleaseRows && meltClosureReady) {
         const meltK = melt.temperatureK;
         const solidEdgeU = specificInternalEnergyJPerKg(properties, meltK - 1) + solidPhase.cpJPerKgK;
         const liquidEdgeU = specificInternalEnergyJPerKg(properties, meltK + 1) - liquidPhase.cpJPerKgK;
@@ -2716,7 +2780,7 @@ function buildSphInitialBodiesDemoState({
   const spareProductSlotCount = gpuResidentMechanics
     ? reactionProductReserve.slotCount
     : 0;
-  const spareTemplate = liveParticles[0];
+  const spareTemplate = liveParticles.find((p) => p.solidReleaseSlot !== true) ?? liveParticles[0];
   const boxCenterM = boxDims.map((extent) => extent / 2);
   const firstSpareContinuityDomainId =
     firstReservedProductContinuityDomainId(
@@ -2740,6 +2804,7 @@ function buildSphInitialBodiesDemoState({
       x: [...boxCenterM],
       v: [0, 0, 0],
       massKg: 0,
+      solidReleaseSlot: false,
       spareProductSlot: true
     });
   }
@@ -2974,6 +3039,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   reactionProductReserveMinimumLiveFraction = null,
   splitSpareLineageCount = 0,
   mechanics = 'mlsmpm',
+  coherentRigidSolids = false,
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
   iceBaseHeightM,
@@ -2999,6 +3065,7 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       reactionProductReserveAuthority,
       splitSpareLineageCount,
       mechanics,
+      coherentRigidSolids,
       materialPropertyBank,
       materialPropertyCrystalStructureBank
     });

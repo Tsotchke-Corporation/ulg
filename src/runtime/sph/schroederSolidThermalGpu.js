@@ -240,12 +240,7 @@ export function createSchroederSolidThermalStage({ device, memberCount, bodyCoun
   return Object.freeze({
     get thermoBuffer() { return current === 0 ? thermoA : thermoB; },
     heatLedgerBuffer: heatLedger, releaseEventBuffer: releaseEvents, releaseCountBuffer: releaseCount,
-    /**
-     * Encode one conduction step; release events accumulate until the caller
-     * clears the count. Without `releaseEnabled` a melted member stays in its
-     * body (no fluid lane to receive it), so mass is never dropped.
-     */
-    encode(encoder, dtSeconds, { releaseEnabled = false } = {}) {
+    prepare(encoder, dtSeconds, { releaseEnabled = false } = {}) {
       f[15] = dtSeconds; u[2] = releaseEnabled ? 1 : 0; device.queue.writeBuffer(params, 0, words);
       // Finite walls: the live face temperatures (x min..y max at byte 80,
       // z min/max at byte 96) replace the seeded ones for this step.
@@ -253,11 +248,27 @@ export function createSchroederSolidThermalStage({ device, memberCount, bodyCoun
         finiteWallState.encodeTemperatureCopy(encoder, params, 80, 4, 0);
         finiteWallState.encodeTemperatureCopy(encoder, params, 96, 2, 4);
       }
-      for (const [entryPoint, count] of [['conduct_members', memberCount], ['drain_wall_heat', bodyCount]]) {
-        const pass = encoder.beginComputePass({ label: `ulg-solid-thermal-${entryPoint}` });
-        pass.setPipeline(pipelines[entryPoint].pipeline); pass.setBindGroup(0, groups[current]);
-        pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
+    },
+    /**
+     * Encode one conduction step; release events accumulate until the caller
+     * clears the count. Without `releaseEnabled` a melted member stays in its
+     * body (no fluid lane to receive it), so mass is never dropped.
+     */
+    encode(encoder, dtSeconds, { releaseEnabled = false, pass: sharedPass = null, prepared = false } = {}) {
+      if (!prepared) {
+        f[15] = dtSeconds; u[2] = releaseEnabled ? 1 : 0; device.queue.writeBuffer(params, 0, words);
+        if (finiteWallState) {
+          finiteWallState.encodeTemperatureCopy(encoder, params, 80, 4, 0);
+          finiteWallState.encodeTemperatureCopy(encoder, params, 96, 2, 4);
+        }
       }
+      const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-solid-thermal' });
+      pass.setBindGroup(0, groups[current]);
+      for (const [entryPoint, count] of [['conduct_members', memberCount], ['drain_wall_heat', bodyCount]]) {
+        pass.setPipeline(pipelines[entryPoint].pipeline);
+        pass.dispatchWorkgroups(Math.ceil(count / 64));
+      }
+      if (!sharedPass) pass.end();
       current = 1 - current;
     },
     destroy() {

@@ -219,6 +219,7 @@ import {
   retireSphGpuParticleBufferSetDispersedMediumOptics,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics,
+  sphGpuParticleUploadExactMassBuffer,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -43067,15 +43068,31 @@ export function destroyMlsMpmResidentStepsBuffers(execution, {
   });
 }
 
-// G3 Phase 4: the fluid rows a melted rigid member is released into are the
-// step's post-mechanics state and mechanics plus the step's thermo. The
-// exact-mass routes keep their integer inventory, which an f32 activation
-// would bypass, so release stays off there (members remain in the body).
+// G3 / A5 SOL-3: the fluid rows a rigid body couples with (traction/buoyancy,
+// thermal conduction, and melt release) are the step's post-mechanics state and
+// mechanics plus the step's thermo. On the G2 exact-energy-ledger route, exact
+// energy and exact mass buffers travel alongside so thermal exchange and melt
+// release preserve the integer sum(U - S) and exact-mass ledgers; only the
+// retired rational initialQuantities route stays disabled.
 function solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) {
-  if (sphParticleState?.exactMass || sphParticleState?.coldExactMassInput) return null;
+  if (sphParticleState?.exactMass?.initialQuantities === true) return null;
   const g2p = retainedG2pOutputBuffers(g2pReconstruction);
   const thermoBuffer = sphParticleUpload?.thermoBuffer ?? null;
-  return g2p?.stateBuffer && g2p?.mechanicsBuffer && thermoBuffer
-    ? { stateBuffer: g2p.stateBuffer, mechanicsBuffer: g2p.mechanicsBuffer, thermoBuffer,
-        particleCount: sphParticleState?.particleCount ?? 0 } : null;
+  if (!g2p?.stateBuffer || !g2p?.mechanicsBuffer || !thermoBuffer) return null;
+  const exactEnergy = sphGpuParticleUploadExactEnergyRows(sphParticleUpload);
+  const exactMassBuffer = exactEnergy ? sphGpuParticleUploadExactMassBuffer(sphParticleUpload) : null;
+  if ((sphParticleState?.exactMass || sphParticleState?.coldExactMassInput) && (!exactEnergy || !exactMassBuffer)) {
+    return null;
+  }
+  return {
+    stateBuffer: g2p.stateBuffer,
+    mechanicsBuffer: g2p.mechanicsBuffer,
+    thermoBuffer,
+    particleCount: sphParticleState?.particleCount ?? 0,
+    ...(exactEnergy && exactMassBuffer ? {
+      exactEnergyBuffer: exactEnergy.energyBuffer,
+      exactEnergyRowCount: exactEnergy.rowCount,
+      exactMassBuffer
+    } : {})
+  };
 }

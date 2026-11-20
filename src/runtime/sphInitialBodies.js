@@ -233,7 +233,7 @@ function normalizeBody(body, index) {
       `${path}.legacyRole`
     );
   }
-  if (body.mechanicsMode != null && body.mechanicsMode !== 'continuum') {
+  if (body.mechanicsMode != null) {
     if (!BODY_MECHANICS_MODES.has(body.mechanicsMode)) {
       fail("must be 'continuum' or 'rigid'", { code: 'invalid-mechanics-mode', path: `${path}.mechanicsMode` });
     }

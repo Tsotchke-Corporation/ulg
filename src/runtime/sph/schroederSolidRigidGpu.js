@@ -47,6 +47,7 @@ export const SCHROEDER_SOLID_MEMBER_WORDS = 8;
 export const SCHROEDER_SOLID_REDUCTION_ROWS = 16;
 const FORMAT = SPH_EXACT_THERMAL_ENERGY_FORMAT;
 const COUNTER_WORDS_PER_ROW = 4 * FORMAT.wordCount;
+const PROXY_GRID_BUCKETS = 4096;
 const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_SRC: 0x04, COPY_DST: 0x08 });
 
 /** The rigid-lane WGSL; `workgroupSize` only changes the member dispatch shape. */
@@ -92,10 +93,16 @@ struct RigidParams {
 @group(0) @binding(10) var<storage, read_write> lattice: array<vec4<f32>>;
 // Per body, 8 vec4: the rebased frame (flag in rebase[base + 7].x).
 @group(0) @binding(11) var<storage, read_write> rebase: array<vec4<f32>>;
+// GPU spatial cell hash for O(P) body-body proxy pairing:
+// [cell_head[4096], max_radius_bits, proxy_next[proxyCount]]
+@group(0) @binding(12) var<storage, read_write> proxy_grid: array<atomic<u32>>;
 
 const FRAME_VEC4: u32 = ${SCHROEDER_SOLID_FRAME_WORDS / 4}u;
 const MEMBER_VEC4: u32 = ${SCHROEDER_SOLID_MEMBER_WORDS / 4}u;
 const ROWS: u32 = ${SCHROEDER_SOLID_REDUCTION_ROWS}u;
+const PROXY_GRID_BUCKETS: u32 = ${PROXY_GRID_BUCKETS}u;
+const PROXY_GRID_MASK: u32 = ${PROXY_GRID_BUCKETS - 1}u;
+const PROXY_EMPTY_NODE: u32 = 0xffffffffu;
 
 fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
   return vec4<f32>(
@@ -373,6 +380,40 @@ fn scatter_pair_impulse(g: PairGeometry, impulse: vec3<f32>) {
   scatter_contact_impulse(g.b, g.rb, -impulse);
 }
 
+fn proxy_hash_cell(c: vec3<i32>) -> u32 {
+  return ((bitcast<u32>(c.x) * 73856093u) ^ (bitcast<u32>(c.y) * 19349663u) ^ (bitcast<u32>(c.z) * 83492791u)) & PROXY_GRID_MASK;
+}
+
+fn proxy_cell_edge() -> f32 {
+  let max_r = bitcast<f32>(atomicLoad(&proxy_grid[PROXY_GRID_BUCKETS]));
+  let max_dist = 2.25 * max_r + params.contact.w + params.gravity_dt.w * 2.0 * params.contact2.y;
+  return max(max_dist * 1.01, 1.0e-4);
+}
+
+@compute @workgroup_size(64)
+fn clear_proxy_grid(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x < PROXY_GRID_BUCKETS) { atomicStore(&proxy_grid[id.x], PROXY_EMPTY_NODE); }
+  if (id.x == 0u) { atomicStore(&proxy_grid[PROXY_GRID_BUCKETS], 0u); }
+}
+
+@compute @workgroup_size(64)
+fn measure_proxy_radius(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.counts.z || params.counts.x < 2u || !proxy_alive(i)) { return; }
+  let r = proxies[i * 2u].w;
+  if (r > 0.0) { atomicMax(&proxy_grid[PROXY_GRID_BUCKETS], bitcast<u32>(r)); }
+}
+
+@compute @workgroup_size(64)
+fn bin_proxies(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.counts.z || params.counts.x < 2u || !proxy_alive(i)) { return; }
+  let p = proxy_world_point(i);
+  let bucket = proxy_hash_cell(vec3<i32>(floor(p / proxy_cell_edge())));
+  let prev = atomicExchange(&proxy_grid[bucket], i);
+  atomicStore(&proxy_grid[PROXY_GRID_BUCKETS + 1u + i], prev);
+}
+
 @compute @workgroup_size(64)
 fn warm_start_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
@@ -382,10 +423,31 @@ fn warm_start_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
   if (proxy_alive(i)) {
     let body = proxy_body(i);
     let p = proxy_world_point(i); let radius = proxies[i * 2u].w;
-    for (var j = i + 1u; j < params.counts.z; j = j + 1u) {
-      if (proxy_body(j) == body || !proxy_alive(j)) { continue; }
-      let gap = length(proxy_world_point(j) - p) - radius - proxies[j * 2u].w;
-      if (gap < best) { best = gap; partner = j; }
+    let base_cell = vec3<i32>(floor(p / proxy_cell_edge()));
+    var seen: array<u32, 27>;
+    var seen_count = 0u;
+    for (var dz = -1i; dz <= 1i; dz++) {
+      for (var dy = -1i; dy <= 1i; dy++) {
+        for (var dx = -1i; dx <= 1i; dx++) {
+          let bucket = proxy_hash_cell(base_cell + vec3<i32>(dx, dy, dz));
+          var dup = false;
+          for (var s = 0u; s < seen_count; s++) {
+            if (seen[s] == bucket) { dup = true; break; }
+          }
+          if (dup) { continue; }
+          seen[seen_count] = bucket;
+          seen_count += 1u;
+          var j = atomicLoad(&proxy_grid[bucket]);
+          while (j != PROXY_EMPTY_NODE) {
+            let next_j = atomicLoad(&proxy_grid[PROXY_GRID_BUCKETS + 1u + j]);
+            if (j > i && proxy_body(j) != body && proxy_alive(j)) {
+              let gap = length(proxy_world_point(j) - p) - radius - proxies[j * 2u].w;
+              if (gap < best || (gap == best && j < partner)) { best = gap; partner = j; }
+            }
+            j = next_j;
+          }
+        }
+      }
     }
   }
   // Reach: the same near band as the walls, widened by this step's approach.
@@ -857,18 +919,20 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
     throw new TypeError('The rigid stage needs bodies, members and their buffers');
   }
   if (proxyCount > 0 && !proxyBuffer) throw new TypeError('Contact proxies need their buffer');
-  if (!(Number(device.limits?.maxStorageBuffersPerShaderStage) >= 11)) {
-    throw new RangeError('The rigid lane binds 11 storage buffers; request the resident SPH device limits');
+  if (!(Number(device.limits?.maxStorageBuffersPerShaderStage) >= 12)) {
+    throw new RangeError('The rigid lane binds 12 storage buffers; request the resident SPH device limits');
   }
   const code = schroederSolidRigidWgsl({ workgroupSize });
   const bindings = ['uniform', 'storage', 'storage', 'storage', 'storage', 'storage',
-    'storage', 'storage', 'storage', 'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
+    'storage', 'storage', 'storage', 'storage', 'storage', 'storage', 'storage']
+    .map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['integrate_bodies', 'regenerate_members', 'drain_reductions',
-    'kick_bodies', 'warm_start_proxies', 'contact_proxies', 'warm_start_pairs', 'contact_pairs', 'apply_contact',
+    'kick_bodies', 'warm_start_proxies', 'contact_proxies', 'clear_proxy_grid', 'measure_proxy_radius', 'bin_proxies',
+    'warm_start_pairs', 'contact_pairs', 'apply_contact',
     'drift_bodies',
     'rebase_prepare', 'rebase_members', 'rebase_proxies', 'rebase_commit']
     .map(entryPoint => [entryPoint, createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-solid-rigid-${entryPoint}-wg${workgroupSize}.v0`, label: `ulg-solid-rigid-${entryPoint}`, code, entryPoint, bindings })]));
+      cacheKey: `ulg-solid-rigid-${entryPoint}-wg${workgroupSize}.v1`, label: `ulg-solid-rigid-${entryPoint}`, code, entryPoint, bindings })]));
   const params = device.createBuffer({ label: 'ulg-solid-rigid-params', size: 96,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const memberWorldBuffer = device.createBuffer({ label: 'ulg-solid-member-world', size: memberCount * 32,
@@ -885,6 +949,8 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
     size: bodyCount * SCHROEDER_SOLID_LATTICE_FLOATS * 4, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const rebaseBuffer = device.createBuffer({ label: 'ulg-solid-rebase', size: bodyCount * SCHROEDER_SOLID_FRAME_WORDS * 4,
     usage: GPU_BUFFER_USAGE.STORAGE });
+  const proxyGridBuffer = device.createBuffer({ label: 'ulg-solid-proxy-grid',
+    size: (PROXY_GRID_BUCKETS + 1 + Math.max(1, proxyCount)) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const proxyStateBuffer = device.createBuffer({ label: 'ulg-solid-proxy-state', size: Math.max(1, proxyCount) * 64,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const contactCounterBuffer = device.createBuffer({ label: 'ulg-solid-contact-counters',
@@ -902,49 +968,59 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
   const bindGroup = device.createBindGroup({ layout: pipelines.integrate_bodies.bindGroupLayout,
     entries: [params, frameBuffer, memberBuffer, memberWorldBuffer, counterBuffer, reductionBuffer,
       proxyBuffer ?? placeholderProxies, proxyStateBuffer, contactCounterBuffer, impulseLedgerBuffer,
-      latticeBuffer ?? ownedLattice, rebaseBuffer]
+      latticeBuffer ?? ownedLattice, rebaseBuffer, proxyGridBuffer]
       .map((buffer, binding) => ({ binding, resource: { buffer } })) });
-  const encodePass = (encoder, entryPoint, groups) => {
-    const pass = encoder.beginComputePass({ label: `ulg-solid-rigid-${entryPoint}` });
-    pass.setPipeline(pipelines[entryPoint].pipeline); pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(groups); pass.end();
-  };
   return Object.freeze({
     memberWorldBuffer, reductionBuffer, counterBuffer, reductionRows: rows, impulseLedgerBuffer, proxyStateBuffer,
-    /** Encode one step: integrate (when dt > 0), regenerate, drain. */
-    encode(encoder, dtSeconds) {
+    prepare(dtSeconds) {
       f[7] = dtSeconds; device.queue.writeBuffer(params, 0, words);
+    },
+    /** Encode one step: integrate (when dt > 0), regenerate, drain in one compute pass. */
+    encode(encoder, dtSeconds, { pass: sharedPass = null, prepared = false } = {}) {
+      if (!prepared) { f[7] = dtSeconds; device.queue.writeBuffer(params, 0, words); }
       const bodyGroups = Math.ceil(bodyCount / 64);
+      const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-solid-rigid' });
+      pass.setBindGroup(0, bindGroup);
+      const dispatch = (entryPoint, groups) => {
+        pass.setPipeline(pipelines[entryPoint].pipeline);
+        pass.dispatchWorkgroups(groups);
+      };
       if (dtSeconds > 0) {
         // Fresh exact reductions over the alive members, then a rebase when a
         // release changed the body's mass (a no-op otherwise).
-        encodePass(encoder, 'regenerate_members', Math.ceil(memberCount / workgroupSize));
-        encodePass(encoder, 'drain_reductions', bodyGroups);
-        encodePass(encoder, 'rebase_prepare', bodyGroups);
-        encodePass(encoder, 'rebase_members', Math.ceil(memberCount / 64));
-        if (proxyCount > 0) encodePass(encoder, 'rebase_proxies', Math.ceil(proxyCount / 64));
-        encodePass(encoder, 'rebase_commit', bodyGroups);
+        dispatch('regenerate_members', Math.ceil(memberCount / workgroupSize));
+        dispatch('drain_reductions', bodyGroups);
+        dispatch('rebase_prepare', bodyGroups);
+        dispatch('rebase_members', Math.ceil(memberCount / 64));
+        if (proxyCount > 0) dispatch('rebase_proxies', Math.ceil(proxyCount / 64));
+        dispatch('rebase_commit', bodyGroups);
       }
       if (dtSeconds > 0 && proxyCount > 0) {
         const proxyGroups = Math.ceil(proxyCount / 64);
         const bodyPairs = bodyCount >= 2;
-        encodePass(encoder, 'kick_bodies', bodyGroups);
-        encodePass(encoder, 'warm_start_proxies', proxyGroups);
-        if (bodyPairs) encodePass(encoder, 'warm_start_pairs', proxyGroups);
-        encodePass(encoder, 'apply_contact', bodyGroups);
-        for (let k = 0; k < contactLaw.iterations; k++) {
-          encodePass(encoder, 'contact_proxies', proxyGroups);
-          if (bodyPairs) encodePass(encoder, 'contact_pairs', proxyGroups);
-          encodePass(encoder, 'apply_contact', bodyGroups);
+        dispatch('kick_bodies', bodyGroups);
+        dispatch('warm_start_proxies', proxyGroups);
+        if (bodyPairs) {
+          dispatch('clear_proxy_grid', Math.ceil(PROXY_GRID_BUCKETS / 64));
+          dispatch('measure_proxy_radius', proxyGroups);
+          dispatch('bin_proxies', proxyGroups);
+          dispatch('warm_start_pairs', proxyGroups);
         }
-        encodePass(encoder, 'drift_bodies', bodyGroups);
-      } else if (dtSeconds > 0) encodePass(encoder, 'integrate_bodies', bodyGroups);
-      encodePass(encoder, 'regenerate_members', Math.ceil(memberCount / workgroupSize));
-      encodePass(encoder, 'drain_reductions', Math.ceil(bodyCount / 64));
+        dispatch('apply_contact', bodyGroups);
+        for (let k = 0; k < contactLaw.iterations; k++) {
+          dispatch('contact_proxies', proxyGroups);
+          if (bodyPairs) dispatch('contact_pairs', proxyGroups);
+          dispatch('apply_contact', bodyGroups);
+        }
+        dispatch('drift_bodies', bodyGroups);
+      } else if (dtSeconds > 0) dispatch('integrate_bodies', bodyGroups);
+      dispatch('regenerate_members', Math.ceil(memberCount / workgroupSize));
+      dispatch('drain_reductions', bodyGroups);
+      if (!sharedPass) pass.end();
     },
     destroy() {
       for (const buffer of [params, memberWorldBuffer, counterBuffer, reductionBuffer, proxyStateBuffer,
-        contactCounterBuffer, impulseLedgerBuffer, placeholderProxies, ownedLattice, rebaseBuffer]) buffer?.destroy();
+        contactCounterBuffer, impulseLedgerBuffer, placeholderProxies, ownedLattice, rebaseBuffer, proxyGridBuffer]) buffer?.destroy();
     }
   });
 }

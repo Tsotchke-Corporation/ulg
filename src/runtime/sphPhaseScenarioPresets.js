@@ -57,6 +57,7 @@ const COMMON_RUNTIME = Object.freeze({
   residentStepsPerSchedule: '16',
   submitBurstSteps: '4',
   thermalPotential: '1',
+  rigidSolids: '1',
   contactSolver: '1',
   ss: '1',
   schroederLevel: '0',

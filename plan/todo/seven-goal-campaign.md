@@ -1,5 +1,41 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+## User decision — architecture-first re-sequencing & guardrail reset — 2026-11-19 AKST
+
+On 2026-11-19, after checkpointing the Oct 27–Nov 19 worktree locally (`31fb694`)
+and branching `feat/ulg-ga-consolidation`, the user approved a clean reset of
+execution order and workflow constraints, consolidated into
+[`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md):
+
+- **Architecture-first order:** Phase 1 builds the A1 substrate floor (decoupled
+  presentation, parallel Jacobi contact + thermal decoupling, fused K-step GPU
+  epoch slots), fixes the N-level SS chain bottleneck (including eliminating the
+  216-indirect-dispatch cross-transport loop), and closes the live Eshkol / A3 /
+  A4 / G6 closure loop ON by default. Phase 2 lands G2, G3/A5, G4, and A6
+  directly onto that single canonical lane. Phase 3 reassesses G1.
+- **Local commits & legacy retirement:** Local commits per verified vertical
+  slice on feature branches are authorized (push, merge to `main`, and Pages
+  builds remain held). Retiring/deleting superseded legacy code routes, dead
+  shaders, duplicate contact impulses, and production CPU test mirrors is
+  authorized once GPU replacements pass invariants (physical laws stay intact).
+- **Boundary discipline & performance gate:** Keep PeerCompute admission strict
+  at schedule/peer boundaries; drop intra-worker anti-forgery ceremony and
+  574-file manual hash manifests. Enforce a hard per-step submit /
+  indirect-dispatch / ms budget gate on every new SS and closure slice.
+- **Runtime contracts & G1 rule:** G1 acceptance updates from
+  `presented_steps == physics_steps` to **latest committed physics state
+  presented at `>=54 Hz`** across all six presets with full optics/controls.
+  GPU-advanced multi-step SS epoch slots (or bounded A2 validity) are permitted
+  for K-step batching. Thermal conduction is decoupled from contact pass-cap
+  exhaustion. Remaining mega-oracles split into lockable vertical slices that
+  turn ON by default once GPU invariants pass.
+- **Parked physics defaults:** General bank-anchored product closures (with
+  explicit `imported` provenance) are approved for FeO/missing-oxide
+  overheating; `environmentAirParcels=mixture` becomes default once visual and
+  conservation checks pass.
+- **Preserved:** G5 and G7 remain accepted; all historical G1–G7/A1–A6 failure
+  records and audit evidence below remain intact.
+
 ## User decision — real time moves to A1; dt 1 ms allowed — 2026-11-13
 
 After the [2026-11-03 audit](2026-11-03audit.md), the user said: "actually we

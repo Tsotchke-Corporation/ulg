@@ -6,7 +6,16 @@
 # actual source/artifact review and domain measurements remain mandatory.
 # Keep FAIL visible instead of filtering for PASS-only history. Unproven
 # required checks must be FAIL with a reason, never WARN/UNKNOWN acceptance.
-# Use one explicit current-run trace bundle; see seven-goal-campaign.md.
+# Use one explicit current-run trace bundle; see plan/CURRENT-PLAN.md and
+# plan/todo/seven-goal-campaign.md.
+#
+# 2026-11-19 owner updates (plan/CURRENT-PLAN.md):
+# - G1 decoupled rule: >=54 Hz presentation of the latest committed physics
+#   state (presented_steps == physics_steps is no longer required).
+# - Vertical slices lock and turn ON by default once GPU invariants and the
+#   hard per-step submit/indirect-dispatch/ms budget gate pass; clean local
+#   commits + ICC source-drift replace manual 574-file source-hash manifests.
+# - All 13 target names and prior failed evidence remain preserved unchanged.
 
 oracles:
   - name: ulg-g1-presentation

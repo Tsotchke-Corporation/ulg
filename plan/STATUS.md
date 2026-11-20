@@ -1,4 +1,23 @@
-# Current status — 2026-11-19 UTC
+# Current status — 2026-11-19 AKST
+
+**Active plan:** Read [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) first (single
+authoritative routing document).
+
+- **2026-11-19 checkpoint & plan consolidation:** Local checkpoint `31fb694`
+  landed on `main` capturing all Oct 27–Nov 19 worktree changes; active work
+  branched to `feat/ulg-ga-consolidation` (push, merge, and Pages remain held).
+  Owner approved architecture-first re-sequencing: **Phase 1** (A1 substrate
+  floor + parallel Jacobi contact + fused GPU-epoch substrate + fast N-level SS
+  chain + live Eshkol/A3/A4/G6 closure loop), **Phase 2** (land G2/G3/A5/G4/A6
+  directly on the single canonical lane, ON by default), **Phase 3** (G1
+  decoupled presentation reassessment at `>=54 Hz` latest committed state).
+  Local slice commits, retiring superseded legacy code routes once GPU
+  replacements pass, bank-anchored product closures (`imported` provenance),
+  mixture-parcel default after verification, and a hard per-step submit /
+  indirect-dispatch / ms budget gate are all in force. G5 and G7 remain the two
+  accepted original milestones; all prior evidence is preserved below.
+
+## Previous checkpoint entries (2026-11-19 UTC and earlier)
 
 - G6 worker adoption now passes actual module-worker IPC with real
   ComputeManager/StateManager commits. Twelve direct/fitted physical intervals

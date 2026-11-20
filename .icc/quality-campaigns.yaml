@@ -1,67 +1,70 @@
-# User-approved campaign, 2026-09-06. Ordered delivery, not a claim of completion.
+# User-approved campaign, 2026-09-06, re-sequenced architecture-first on 2026-11-19.
+# Active routing and slice budgets: plan/CURRENT-PLAN.md.
 # Native quality-campaign currently reports oracle states unknown; run the actual
-# completion-oracle targets separately. See plan/todo/seven-goal-campaign.md.
+# completion-oracle targets separately.
 # 2026-09-13: G1 failed acceptance and is deferred to reassessment after the
-# architecture tracks. Its unchanged oracle and the 13-milestone threshold
-# preserve the unmet target; reordering does not count G1 as delivered.
+# architecture tracks. 2026-11-18: G5 and G7 accepted.
+# 2026-11-19: Phase 1 leads with A1/A2/G6/A3/A4 (substrate + fast N-level SS +
+# live closure loop); Phase 2 lands G2/G3/A5/G4/A6; Phase 3 reassesses decoupled G1
+# (latest committed physics state at >=54 Hz).
 campaigns:
   - id: ulg-seven-goals-and-architecture
-    objective: Deliver G2-G7 and bounded architectural follow-ons, then reassess failed and deferred G1
+    objective: Architecture-first delivery of A1/A2/G6/A3/A4 substrate and closure loop, then G2/G3/A5/G4/A6 on that canonical lane, then decoupled G1 reassessment (G5 and G7 accepted)
     node: ulg
     acceptance:
       metric: reviewed_required_milestones
       threshold: 13
       direction: '>='
     stages:
-      - id: g2-plumes
-        title: "Conserved steam and aerosol transport"
-        node: ulg
-        oracle: ulg-g2-plumes
-      - id: g3-solids
-        title: "Minimum coherent solids SOL-0 and SOL-1"
-        node: ulg
-        oracle: ulg-g3-solids
-      - id: g4-dynamic-laws
-        title: "Generalized per-node warm dynamic laws"
-        node: ulg
-        oracle: ulg-g4-dynamic-laws
       - id: g5-reservation
-        title: "Bounded CAS multi-consumer reservation"
+        title: "ACCEPTED (2026-11-18): Bounded CAS multi-consumer reservation"
         node: ulg
         oracle: ulg-g5-reservation
-      - id: g6-local-fit
-        title: "One local provenance-bound online closure fit and cache"
-        node: ulg
-        oracle: ulg-g6-local-fit
       - id: g7-release-audit
-        title: "External advisory scientific release audit"
+        title: "ACCEPTED (2026-11-18): External advisory scientific release audit"
         node: ulg
         oracle: ulg-g7-release-audit
       - id: a1-realtime-substrate
-        title: "Follow-on real-time physics and bulk execution"
+        title: "Phase 1: Real-time bulk substrate, decoupled presentation, parallel Jacobi contact, fused K-step lane"
         node: ulg
         oracle: ulg-a1-realtime-substrate
       - id: a2-incremental-spatial
-        title: "Follow-on incremental spatial membership and particle migration"
+        title: "Phase 1: GPU-advanced multi-step SS epoch slots and fast N-level SS chain"
         node: ulg
         oracle: ulg-a2-incremental-spatial
+      - id: g6-local-fit
+        title: "Phase 1: Live local provenance-bound online closure fit and cache"
+        node: ulg
+        oracle: ulg-g6-local-fit
       - id: a3-representative-sampling
-        title: "Follow-on representative sampling and envelope expansion"
+        title: "Phase 1: Representative homogeneous-region GPU sampling and envelope expansion"
         node: ulg
         oracle: ulg-a3-representative-sampling
       - id: a4-material-functions
-        title: "Follow-on multidimensional derived material-property functions"
+        title: "Phase 1: Eshkol-derived multidimensional material-property response functions"
         node: ulg
         oracle: ulg-a4-material-functions
+      - id: g2-plumes
+        title: "Phase 2: Conserved steam and aerosol transport on the exact-ledger canonical lane"
+        node: ulg
+        oracle: ulg-g2-plumes
+      - id: g3-solids
+        title: "Phase 2: Coherent solids SOL-0 and SOL-1 integrated into SS spatial cells"
+        node: ulg
+        oracle: ulg-g3-solids
       - id: a5-solids-and-levels
-        title: "Follow-on dependency-gated solid mechanics and tree levels"
+        title: "Phase 2: Dependency-gated solid mechanics coupling, deformation, topology, and multilevel solids"
         node: ulg
         oracle: ulg-a5-solids-and-levels
+      - id: g4-dynamic-laws
+        title: "Phase 2: Compacted per-node warm dynamic law activation with closure uncertainty"
+        node: ulg
+        oracle: ulg-g4-dynamic-laws
       - id: a6-remote-derivation
-        title: "Follow-on PeerCompute warm remote derivation"
+        title: "Phase 2: Warm browser WASM/WebGPU Eshkol/MoonLab derivation wired to live misses"
         node: ulg
         oracle: ulg-a6-remote-derivation
       - id: g1-presentation
-        title: "FAILED acceptance; presentation target deferred to architectural reassessment"
+        title: "Phase 3 reassessment: decoupled presentation of latest committed state at >=54 Hz (prior 2026-09-13 attempt FAILED/deferred)"
         node: ulg
         oracle: ulg-g1-presentation

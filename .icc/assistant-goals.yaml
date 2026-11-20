@@ -1,46 +1,117 @@
 # ULG-side assistant goals. Used by ICC assistant-status/next-action style
 # commands when available, and by human/agent handoff readers today.
+# Active routing and 2026-11-19 owner decisions: plan/CURRENT-PLAN.md.
 
 goals:
-  - id: g1-presentation
-    task_id: goal1-all-preset-wallclock-rendering-20260904
+  - id: a1-realtime-substrate
+    task_id: ulg-a1-realtime-substrate
     priority: high
-    status: skipped
-    goal: "FAILED acceptance; shared54Hz presentation deferred to architectural follow-ons"
-    oracle: ulg-g1-presentation
+    status: in_progress
+    goal: "Phase 1: Real-time bulk substrate, decoupled presentation, parallel Jacobi contact + thermal decoupling, fused K-step GPU epoch slots, and retiring superseded legacy routes"
+    oracle: ulg-a1-realtime-substrate
     depends_on: []
-    reason: "User2026-09-13 ends current G1 effort as failed. Skipped means execution deferred, not accepted delivery; preserve gains and failed oracle evidence. Reassess after architecture work."
-    tags: [ulg-campaign, deferred]
+    reason: "2026-11-19 owner decision: architecture-first sequencing. Build the real-time substrate floor first (hard per-step submit/indirect-dispatch/ms budget gate; retire dead/superseded routes once GPU replacements pass) before landing remaining domain goals."
+    tags: [ulg-campaign, phase-1, architecture-first]
+
+  - id: a2-incremental-spatial
+    task_id: ulg-a2-incremental-spatial
+    priority: high
+    status: in_progress
+    goal: "Phase 1: GPU-advanced multi-step SS epoch slots / bounded spatial validity and fast N-level SS chain (no 216-indirect-dispatch bottleneck)"
+    oracle: ulg-a2-incremental-spatial
+    depends_on: [a1-realtime-substrate]
+    reason: "2026-11-19 owner decision: lift per-step host epoch rebuild requirement for K-step GPU batching and bring the N-level SS chain under the per-step dispatch/latency budget."
+    tags: [ulg-campaign, phase-1, architecture-first]
+
+  - id: g6-local-fit
+    task_id: ulg-g6-local-fit
+    priority: high
+    status: in_progress
+    goal: "Phase 1: Live local provenance-bound online closure fit/cache loop enabled by default with G4 uncertainty bounds"
+    oracle: ulg-g6-local-fit
+    depends_on: [a1-realtime-substrate]
+    reason: "2026-11-19 owner decision: close the live GPU miss -> sample -> fit -> adopt -> hit loop together with A3/A4 as a lockable vertical slice ON by default; drop intra-worker anti-forgery ceremony while keeping schedule/peer admission strict."
+    tags: [ulg-campaign, phase-1, architecture-first]
+
+  - id: a3-representative-sampling
+    task_id: ulg-a3-representative-sampling
+    priority: high
+    status: in_progress
+    goal: "Phase 1: Representative homogeneous-region GPU sampling wired into live closure misses and envelope expansion"
+    oracle: ulg-a3-representative-sampling
+    depends_on: [a1-realtime-substrate, g6-local-fit]
+    reason: "2026-11-19 owner decision: wire existing regionalClosureSamplerGpu.js into live scenes as part of Phase 1 closure loop."
+    tags: [ulg-campaign, phase-1, architecture-first]
+
+  - id: a4-material-functions
+    task_id: ulg-a4-material-functions
+    priority: high
+    status: in_progress
+    goal: "Phase 1: Eshkol-derived multidimensional material/property response functions live on the canonical lane"
+    oracle: ulg-a4-material-functions
+    depends_on: [g6-local-fit]
+    reason: "2026-11-19 owner decision: generalize proven Eshkol AD -> responseFunctionGpu -> resident evaluator pipeline onto the canonical lane ON by default."
+    tags: [ulg-campaign, phase-1, architecture-first]
 
   - id: g2-plumes
     task_id: ulg-g2-conserved-plumes
     priority: high
-    status: in_progress
-    goal: "Conserved steam and aerosol transport"
+    status: todo
+    goal: "Phase 2: Conserved steam and aerosol transport on the single exact-ledger canonical lane (mixture air default, bank-anchored product closures)"
     oracle: ulg-g2-plumes
-    depends_on: []
-    reason: "Active after the 2026-09-13 HTTPS and cesium desktop usability checks. Begin with diagnostic-only species saturation on SS gas cells, then conserved aerosol transport. G1 throughput is not a prerequisite. 2026-11-13: the near-real-time plume requirement moved to A1; plume evidence may use dt 1 ms; architecture work is deferred until G2 is finished."
-    tags: [ulg-campaign, immediate]
+    depends_on: [a1-realtime-substrate, a2-incremental-spatial, g6-local-fit]
+    reason: "2026-11-19 owner decision: land G2 onto the Phase 1 substrate + fast N-level SS chain; bank-anchored product closures (explicit imported provenance) approved for FeO/oxides; environmentAirParcels=mixture becomes default once visual/conservation checks pass."
+    tags: [ulg-campaign, phase-2]
 
   - id: g3-solids
     task_id: ulg-g3-solids
     priority: high
     status: todo
-    goal: "Minimum coherent solids SOL-0 and SOL-1"
+    goal: "Phase 2: Coherent solids SOL-0/SOL-1 integrated into SS spatial cells on the exact-ledger canonical lane"
     oracle: ulg-g3-solids
-    depends_on: []
-    reason: "Immediate delivery priority 3; see seven-goal-campaign.md for acceptance and ordering."
-    tags: [ulg-campaign, immediate]
+    depends_on: [a1-realtime-substrate, a2-incremental-spatial]
+    reason: "2026-11-19 owner decision: replace brute-force solid searches with SS spatial cells and wire exact-ledger melt release ON by default."
+    tags: [ulg-campaign, phase-2]
+
+  - id: a5-solids-and-levels
+    task_id: ulg-a5-solids-and-levels
+    priority: medium
+    status: todo
+    goal: "Phase 2: Dependency-gated SOL-2/3 solid-fluid coupling, SOL-4 deformation, SOL-5 topology, and multilevel SS solids"
+    oracle: ulg-a5-solids-and-levels
+    depends_on: [g3-solids]
+    reason: "Lands on the single canonical SS lane after G3 spatial integration."
+    tags: [ulg-campaign, phase-2]
 
   - id: g4-dynamic-laws
     task_id: ulg-g4-dynamic-laws
     priority: high
     status: todo
-    goal: "Generalized per-node warm dynamic laws"
+    goal: "Phase 2: Generalized compacted per-node warm dynamic law activation carrying G6/A4 uncertainty bounds"
     oracle: ulg-g4-dynamic-laws
-    depends_on: []
-    reason: "Immediate delivery priority 4; see seven-goal-campaign.md for acceptance and ordering."
-    tags: [ulg-campaign, immediate]
+    depends_on: [a1-realtime-substrate, g6-local-fit]
+    reason: "2026-11-19 owner decision: extend per-node conservative activation + GPU compacted dispatch across thermal, phase, radiation, and reaction stages."
+    tags: [ulg-campaign, phase-2]
+
+  - id: a6-remote-derivation
+    task_id: ulg-a6-remote-derivation
+    priority: medium
+    status: todo
+    goal: "Phase 2: Warm browser WASM/WebGPU Eshkol and MoonLab derivation workers wired to live G6/A3 envelope misses"
+    oracle: ulg-a6-remote-derivation
+    depends_on: [g5-reservation, g6-local-fit, a3-representative-sampling]
+    reason: "Connect existing warm client workers to live closure misses with G5 reservations and failure/recovery proof."
+    tags: [ulg-campaign, phase-2]
+
+  - id: g1-presentation
+    task_id: goal1-all-preset-wallclock-rendering-20260904
+    priority: high
+    status: skipped
+    goal: "Phase 3 reassessment: decoupled presentation of latest committed physics state at >=54 Hz across all six configured presets with full optics and controls"
+    oracle: ulg-g1-presentation
+    depends_on: [a1-realtime-substrate, g2-plumes, g3-solids, g4-dynamic-laws]
+    reason: "User 2026-09-13 ended initial G1 effort as failed/deferred; 2026-11-19 updated G1 acceptance from presented_steps == physics_steps to latest committed state at >=54 Hz for Phase 3 reassessment. Preserve historical failed evidence."
+    tags: [ulg-campaign, phase-3, deferred]
 
   - id: g5-reservation
     task_id: ulg-g5-reservation
@@ -50,18 +121,7 @@ goals:
     oracle: ulg-g5-reservation
     depends_on: []
     reason: Accepted 2026-11-18; original G5 oracle 3/3 PASS, 81 source-bound tests and independent source/bundle review pass. Bounded single-realm ownership only. Evidence in /home/cos/.cache/icc/repos/ulg/g5-acceptance-20261118/.
-    tags: [ulg-campaign, immediate]
-
-
-  - id: g6-local-fit
-    task_id: ulg-g6-local-fit
-    priority: high
-    status: todo
-    goal: "One local provenance-bound online closure fit and cache"
-    oracle: ulg-g6-local-fit
-    depends_on: [g4-dynamic-laws]
-    reason: "Immediate delivery priority 6; see seven-goal-campaign.md for acceptance and ordering."
-    tags: [ulg-campaign, immediate]
+    tags: [ulg-campaign, accepted]
 
   - id: g7-release-audit
     task_id: ulg-g7-release-audit
@@ -71,67 +131,7 @@ goals:
     oracle: ulg-g7-release-audit
     depends_on: []
     reason: "Accepted 2026-11-18: original G7 oracle 3/3 PASS on one exact reviewed receipt bundle; eight tests pass, real cached NIST/PubChem audit and independent source/artifact review pass. Evidence: /home/cos/.cache/icc/repos/ulg/g5-g7-acceptance-20261118/. Offline advisory tooling only; no physics or broader campaign acceptance."
-    tags: [ulg-campaign, immediate]
-
-  - id: a1-realtime-substrate
-    task_id: ulg-a1-realtime-substrate
-    priority: medium
-    status: todo
-    goal: "Follow-on real-time physics and bulk execution"
-    oracle: ulg-a1-realtime-substrate
-    depends_on: [g4-dynamic-laws]
-    reason: "Architectural follow-on; G1 failed acceptance is deferred, not a prerequisite for researching its remedy. Reassess visual throughput after architecture evidence. 2026-11-13: also owns the near-real-time G2 plume requirement and the 2026-11-03 audit's Steps 1-3 (decoupling, fusion, law descriptor, selective contact)."
-    tags: [ulg-campaign, follow-on]
-
-  - id: a2-incremental-spatial
-    task_id: ulg-a2-incremental-spatial
-    priority: medium
-    status: todo
-    goal: "Follow-on incremental spatial membership and particle migration"
-    oracle: ulg-a2-incremental-spatial
-    depends_on: []
-    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
-    tags: [ulg-campaign, follow-on]
-
-  - id: a3-representative-sampling
-    task_id: ulg-a3-representative-sampling
-    priority: medium
-    status: todo
-    goal: "Follow-on representative sampling and envelope expansion"
-    oracle: ulg-a3-representative-sampling
-    depends_on: [g4-dynamic-laws, g6-local-fit]
-    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
-    tags: [ulg-campaign, follow-on]
-
-  - id: a4-material-functions
-    task_id: ulg-a4-material-functions
-    priority: medium
-    status: todo
-    goal: "Follow-on multidimensional derived material-property functions"
-    oracle: ulg-a4-material-functions
-    depends_on: [g6-local-fit]
-    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
-    tags: [ulg-campaign, follow-on]
-
-  - id: a5-solids-and-levels
-    task_id: ulg-a5-solids-and-levels
-    priority: medium
-    status: todo
-    goal: "Follow-on dependency-gated solid mechanics and tree levels"
-    oracle: ulg-a5-solids-and-levels
-    depends_on: [g3-solids]
-    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
-    tags: [ulg-campaign, follow-on]
-
-  - id: a6-remote-derivation
-    task_id: ulg-a6-remote-derivation
-    priority: medium
-    status: todo
-    goal: "Follow-on PeerCompute warm remote derivation"
-    oracle: ulg-a6-remote-derivation
-    depends_on: [g5-reservation, g6-local-fit]
-    reason: "Architectural follow-on; never a retroactive Goal 1 completion requirement."
-    tags: [ulg-campaign, follow-on]
+    tags: [ulg-campaign, accepted]
 
 # Preserved historical cross-cutting goals; mapped in seven-goal-campaign.md.
 # ICC reads only goals above, so these do not create duplicate active work.

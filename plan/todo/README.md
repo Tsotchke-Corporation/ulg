@@ -1,5 +1,17 @@
 # ULG Todo Priority Index
 
+**Superseding entry point (2026-11-19):** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
+first. Owner decisions on 2026-11-19 re-sequenced the campaign
+**architecture-first** (Phase 1: A1 substrate floor + live A3/A4/G6 closure
+loop + fast N-level SS chain; Phase 2: land G2/G3/A5/G4/A6 on that single
+canonical lane; Phase 3: decoupled G1 reassessment), authorized local slice
+commits and retiring superseded legacy code routes, added a hard per-step
+submit/indirect-dispatch/ms budget gate, approved bank-anchored product
+closures and mixture-parcel default after verification, and consolidated active
+routing into `plan/CURRENT-PLAN.md`. The detailed todo files in this directory
+remain subsystem design references; historical sequencing notes below are
+preserved for audit traceability.
+
 Date: 2026-06-14 AKDT
 
 Use this file as the active routing layer for `plan/todo/`. The detailed todo

@@ -3,14 +3,19 @@
 These are checked-in ULG campaign and acceptance definitions. Durable tasks,
 leases, attempts, source indexes and runtime evidence live outside the repo.
 
-ICC executes completion-oracle and production-audit policies today. The current
-campaign is [seven goals and architectural follow-ons](../plan/todo/seven-goal-campaign.md).
-None of its thirteen milestones is accepted. On 2026-09-13 the user ended the
-current G1 effort as failed acceptance and deferred it to architectural
-reassessment. ICC's `skipped` execution disposition is not delivered work.
-G2 is active following the requested HTTPS and real-desktop cesium usability
-checks. Do not confuse configuration validation, static test references or a
-matching event label with application acceptance.
+ICC executes completion-oracle and production-audit policies today. The active
+routing document is [`plan/CURRENT-PLAN.md`](../plan/CURRENT-PLAN.md) (with full
+historical campaign definitions in
+[seven-goal-campaign.md](../plan/todo/seven-goal-campaign.md)). **G5** and
+**G7** were accepted on 2026-11-18; on 2026-11-19 the owner re-sequenced the
+remaining eleven targets **architecture-first** (Phase 1: A1/A2/G6/A3/A4
+substrate, fast N-level SS chain, and live closure loop; Phase 2: G2/G3/A5/G4/A6
+on that single canonical lane; Phase 3: decoupled G1 reassessment at `>=54 Hz`
+latest committed state), authorized local slice commits and retiring superseded
+legacy routes, and added a hard per-step submit/indirect-dispatch/ms budget
+gate. Historical 2026-09-13 G1 failure evidence remains preserved; do not confuse
+configuration validation, static test references, or a matching event label with
+application acceptance.
 
 ## Files
 

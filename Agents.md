@@ -1,9 +1,12 @@
 # Agents Guide (v2)
 
-A leaner brief than `Agents.md`. It states intent and the few hard guardrails,
-then trusts your judgment for the rest. Where this file and `Agents.md` disagree
-on *process*, prefer this one; where they disagree on *physics/architecture
-intent*, they should already agree — if they don't, ask.
+**Start here:** Read [`plan/CURRENT-PLAN.md`](plan/CURRENT-PLAN.md) first — it is
+the single active source of truth for execution order, runtime contracts,
+performance budgets, and the 2026-11-19 owner decisions.
+
+A leaner brief than `oldagents.md`. It states intent and the few hard guardrails,
+then trusts your judgment for the rest. Where this file and `plan/CURRENT-PLAN.md`
+agree on intent, follow `plan/CURRENT-PLAN.md` for current sequencing and gates.
 
 ## What we're building
 
@@ -14,7 +17,10 @@ browser with three.js, executed over PeerCompute with Eshkol/MoonLab supplying
 derived law/closure artifacts. The PDF in `plan/` is the reference design.
 
 The mission is to **add** laws and connect them from first principles. Do not
-remove or demote a law to make the runtime simpler.
+remove or demote a physical law to make the runtime simpler — **but DO retire
+and delete superseded execution routes, dead shader variants, duplicate contact
+responses, and production CPU test mirrors once the GPU replacement passes its
+invariants** (2026-11-19 owner authorization).
 
 ## Hard guardrails (don't cross these without asking)
 
@@ -61,11 +67,19 @@ remove or demote a law to make the runtime simpler.
 
 ## Working style
 
-- Commit locally at clean points: the slice passed its validation, docs/log are
-  updated, and no required validation is still running. Push only when asked.
-- Keep two living docs current: a **short** `plan/implementation-status.md`
-  (current focus, in-flight, last-green, next) and a development `log.md`
-  narrative. Keep them short enough to actually read.
+- Commit locally on feature branches at clean vertical-slice checkpoints: the
+  slice passed its GPU invariants, budget gate, and docs update, and no required
+  validation is still running. **Push, merge to `main`, and GitHub Pages builds
+  only when explicitly asked.**
+- Enforce PeerCompute admission, epoch fencing, and provenance strictly at the
+  **schedule and peer boundary**; do not add intra-worker anti-forgery ceremony
+  between sibling JS modules or manual multi-hundred-file source-hash manifests
+  (use clean local commits + ICC `source-drift`).
+- Enforce the hard per-step submit / indirect-dispatch / ms budget gate in
+  `plan/CURRENT-PLAN.md` on every new SS, contact, and closure slice.
+- Keep `plan/CURRENT-PLAN.md` and the top section of `plan/STATUS.md` current
+  and concise. Do not load `plan/log.md` or `plan/notes/` wholesale unless
+  auditing a specific prior failure.
 - Keep a live Vite demo running so progress is visible.
 - Never use `terminal-browser`, tmux browser panes, or any split-terminal
   browser workflow in this repository. The user works from mobile and those

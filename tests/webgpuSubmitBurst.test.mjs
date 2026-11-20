@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  acquireQueueOrderedPooledBuffer,
   armWorkerQueueSubmitBurst,
   openWorkerQueueSubmitBurst,
   flushWorkerQueueSubmitBurst,
   closeWorkerQueueSubmitBurst,
+  releaseQueueOrderedPooledBuffer,
   workerQueueSubmitBurstStats,
   withWorkerQueueSubmitBurstWriteThrough,
   deferConfirmedSubmittedWorkCleanup,
@@ -603,4 +605,210 @@ test('reopening after close works; double-open fails closed', () => {
   closeWorkerQueueSubmitBurst(device);
   openWorkerQueueSubmitBurst(device);
   closeWorkerQueueSubmitBurst(device);
+});
+
+test('pooledWriteThrough coalesces stale writeBuffers into one reusable slab upload and one submit', () => {
+  const { device, ops } = createFakeDevice();
+  let createBufferCount = 0;
+  const origCreateBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (desc) => {
+    createBufferCount += 1;
+    return origCreateBuffer(desc);
+  };
+  armWorkerQueueSubmitBurst(device);
+  const paramsA = device.createBuffer({ label: 'params-a', size: 16 });
+  const paramsB = device.createBuffer({ label: 'params-b', size: 16 });
+  const baselineCreates = createBufferCount;
+
+  openWorkerQueueSubmitBurst(device, { label: 'pooled-test', pooledWriteThrough: true });
+  device.queue.submit(['step-1-a']);
+  device.queue.writeBuffer(paramsA, 0, new Float32Array([1, 2, 3, 4]));
+  device.queue.writeBuffer(paramsB, 0, new Float32Array([5, 6, 7, 8]));
+  device.queue.submit(['step-1-b']);
+  device.queue.writeBuffer(paramsA, 0, new Float32Array([9, 10, 11, 12]));
+  device.queue.submit(['step-2-a']);
+  assert.equal(ops.length, 0, 'no submit or writeBuffer until flush');
+  const stats = closeWorkerQueueSubmitBurst(device);
+
+  assert.equal(stats.pooledWriteThroughCount, 3);
+  assert.equal(stats.staleWriteFlushCount, 0);
+  assert.equal(stats.flushCount, 1);
+  assert.equal(createBufferCount - baselineCreates, 1, 'exactly one reusable staging slab allocated');
+  // One realWriteBuffer to the reusable slab strictly before one realSubmit.
+  assert.equal(ops.length, 2);
+  assert.equal(ops[0].op, 'writeBuffer');
+  assert.equal(ops[0].buffer.label, 'ulg-submit-burst-pooled-staging');
+  assert.equal(ops[1].op, 'submit');
+  assert.equal(ops[1].commandBuffers.length, 5);
+  assert.equal(ops[1].commandBuffers[0], 'step-1-a');
+  assert.equal(ops[1].commandBuffers[1].copies.length, 2);
+  assert.equal(ops[1].commandBuffers[2], 'step-1-b');
+  assert.equal(ops[1].commandBuffers[3].copies.length, 1);
+  assert.equal(ops[1].commandBuffers[4], 'step-2-a');
+
+  // Second burst reuses the SAME staging slab with zero new allocations.
+  openWorkerQueueSubmitBurst(device, { label: 'pooled-test-2', pooledWriteThrough: true });
+  device.queue.submit(['step-3-a']);
+  device.queue.writeBuffer(paramsA, 0, new Float32Array([13, 14, 15, 16]));
+  device.queue.submit(['step-3-b']);
+  closeWorkerQueueSubmitBurst(device);
+  assert.equal(createBufferCount - baselineCreates, 1, 'second burst creates zero staging buffers');
+});
+
+test('coalesceComputePasses merges consecutive compute passes and splits on clearBuffer/copyBufferToBuffer', () => {
+  const realPasses = [];
+  const encoderOps = [];
+  const { device } = createFakeDevice();
+  device.createCommandEncoder = () => ({
+    label: 'raw-enc',
+    beginComputePass(desc) {
+      const pass = { label: desc?.label ?? 'unlabelled', dispatches: 0, ended: false };
+      realPasses.push(pass);
+      encoderOps.push(`pass:${pass.label}`);
+      return {
+        setPipeline() {},
+        setBindGroup() {},
+        dispatchWorkgroups() { pass.dispatches += 1; },
+        dispatchWorkgroupsIndirect() { pass.dispatches += 1; },
+        end() { pass.ended = true; }
+      };
+    },
+    clearBuffer() { encoderOps.push('clear'); },
+    copyBufferToBuffer() { encoderOps.push('copy'); },
+    finish() { encoderOps.push('finish'); return { label: 'cmd' }; }
+  });
+  armWorkerQueueSubmitBurst(device);
+  openWorkerQueueSubmitBurst(device, { label: 'coalesce-test', coalesceComputePasses: true });
+  const enc = device.createCommandEncoder({ label: 'stage' });
+  const p1 = enc.beginComputePass({ label: 'a' }); p1.setPipeline('p1'); p1.dispatchWorkgroups(1); p1.end();
+  const p2 = enc.beginComputePass({ label: 'b' }); p2.setPipeline('p2'); p2.dispatchWorkgroups(2); p2.end();
+  const p3 = enc.beginComputePass({ label: 'c' }); p3.setPipeline('p3'); p3.dispatchWorkgroups(3); p3.end();
+  enc.clearBuffer();
+  const p4 = enc.beginComputePass({ label: 'd' }); p4.setPipeline('p4'); p4.dispatchWorkgroups(4); p4.end();
+  enc.copyBufferToBuffer();
+  const p5 = enc.beginComputePass({ label: 'e' }); p5.setPipeline('p5'); p5.dispatchWorkgroups(5); p5.end();
+  enc.finish();
+  closeWorkerQueueSubmitBurst(device);
+
+  assert.equal(realPasses.length, 3, '5 consecutive/split passes coalesce into 3 real compute passes');
+  assert.equal(realPasses[0].dispatches, 3);
+  assert.equal(realPasses[1].dispatches, 1);
+  assert.equal(realPasses[2].dispatches, 1);
+  assert.ok(realPasses.every((p) => p.ended));
+  assert.deepEqual(encoderOps, ['pass:a', 'clear', 'pass:d', 'copy', 'pass:e', 'finish']);
+});
+
+test('coalesceComputePasses hoists disjoint clearBuffer and flushes touched clearBuffer', () => {
+  const realPasses = [];
+  const encoderOps = [];
+  const { device } = createFakeDevice();
+  device.createBindGroup = (desc) => ({ label: desc?.label ?? 'bg', entries: desc?.entries });
+  device.createCommandEncoder = () => ({
+    label: 'raw-enc',
+    beginComputePass(desc) {
+      const pass = { label: desc?.label ?? 'unlabelled', dispatches: 0, ended: false };
+      realPasses.push(pass);
+      encoderOps.push(`pass:${pass.label}`);
+      return {
+        setPipeline() {},
+        setBindGroup() {},
+        dispatchWorkgroups() { pass.dispatches += 1; },
+        dispatchWorkgroupsIndirect() { pass.dispatches += 1; },
+        end() { pass.ended = true; }
+      };
+    },
+    clearBuffer(buf) { encoderOps.push(`clear:${buf?.label ?? 'none'}`); },
+    copyBufferToBuffer() { encoderOps.push('copy'); },
+    finish() { encoderOps.push('finish'); return { label: 'cmd' }; }
+  });
+  armWorkerQueueSubmitBurst(device);
+  const bufA = device.createBuffer({ label: 'A', size: 16 });
+  const bufB = device.createBuffer({ label: 'B', size: 16 });
+  const bgA = device.createBindGroup({ entries: [{ binding: 0, resource: { buffer: bufA } }] });
+  const bgAB = device.createBindGroup({
+    entries: [
+      { binding: 0, resource: { buffer: bufA } },
+      { binding: 1, resource: { buffer: bufB } }
+    ]
+  });
+  openWorkerQueueSubmitBurst(device, { label: 'hoist-test', coalesceComputePasses: true });
+  const enc = device.createCommandEncoder({ label: 'stage' });
+  const p1 = enc.beginComputePass({ label: 'p1' });
+  p1.setPipeline('pipe1'); p1.setBindGroup(0, bgA); p1.dispatchWorkgroups(1); p1.end();
+  // B has not been touched by p1 -> hoisted before p1, keeping 1 fused pass!
+  enc.clearBuffer(bufB);
+  const p2 = enc.beginComputePass({ label: 'p2' });
+  p2.setPipeline('pipe2'); p2.setBindGroup(0, bgAB); p2.dispatchWorkgroups(2); p2.end();
+  // A WAS touched by p1/p2 -> flushes fused pass first, then clears A!
+  enc.clearBuffer(bufA);
+  const p3 = enc.beginComputePass({ label: 'p3' });
+  p3.setPipeline('pipe3'); p3.setBindGroup(0, bgA); p3.dispatchWorkgroups(3); p3.end();
+  enc.finish();
+  closeWorkerQueueSubmitBurst(device);
+
+  assert.equal(realPasses.length, 2);
+  assert.equal(realPasses[0].dispatches, 2);
+  assert.equal(realPasses[1].dispatches, 1);
+  assert.deepEqual(encoderOps, ['clear:B', 'pass:p1', 'clear:A', 'pass:p3', 'finish']);
+});
+
+test('render-pass submit flushes burst immediately and createTexture.destroy defers while held', () => {
+  const { device, ops } = createFakeDevice();
+  device.createTexture = (desc) => {
+    const tex = {
+      label: desc?.label ?? 'tex',
+      destroy() { ops.push({ op: 'destroy-tex', tex }); }
+    };
+    return tex;
+  };
+  const baseEncoder = device.createCommandEncoder;
+  device.createCommandEncoder = (desc) => {
+    const enc = baseEncoder(desc);
+    enc.beginRenderPass = () => ({ end() {} });
+    return enc;
+  };
+  armWorkerQueueSubmitBurst(device);
+  const tex = device.createTexture({ label: 'optical-vol' });
+  openWorkerQueueSubmitBurst(device, { label: 'render-test', pooledWriteThrough: true });
+  device.queue.submit(['compute-1']);
+  tex.destroy();
+  assert.equal(ops.some((o) => o.op === 'destroy-tex'), false, 'texture destroy deferred while held');
+  const renderEnc = device.createCommandEncoder({ label: 'render' });
+  renderEnc.beginRenderPass({}).end();
+  const renderCmd = renderEnc.finish();
+  device.queue.submit([renderCmd]);
+  assert.equal(ops[0].op, 'submit', 'render-pass submit flushes burst immediately');
+  assert.equal(ops[0].commandBuffers.length, 2);
+  closeWorkerQueueSubmitBurst(device);
+});
+
+test('buffer.mapAsync flushes held submit burst before mapping', async () => {
+  const { device, ops } = createFakeDevice();
+  const baseCreateBuffer = device.createBuffer.bind(device);
+  device.createBuffer = (desc) => {
+    const b = baseCreateBuffer(desc);
+    b.mapAsync = async () => { ops.push({ op: 'mapAsync', buffer: b }); };
+    return b;
+  };
+  armWorkerQueueSubmitBurst(device);
+  const readBuf = device.createBuffer({ label: 'readback', size: 32 });
+  openWorkerQueueSubmitBurst(device, { label: 'map-test', pooledWriteThrough: true });
+  device.queue.submit(['copy-to-readback']);
+  await readBuf.mapAsync(1);
+  assert.deepEqual(ops.map((o) => o.op), ['submit', 'mapAsync']);
+  closeWorkerQueueSubmitBurst(device);
+});
+
+test('queue-ordered buffer pool recycles FIFO buffers and refuses MAP_READ buffers', () => {
+  const { device } = createFakeDevice();
+  const b1 = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'out', label: 'out', size: 64, usage: 0x84 });
+  const b2 = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'out', label: 'out', size: 64, usage: 0x84 });
+  assert.notEqual(b1, b2);
+  assert.equal(releaseQueueOrderedPooledBuffer(device, b1, { bucketKey: 'out', size: 64, usage: 0x84 }), true);
+  assert.equal(releaseQueueOrderedPooledBuffer(device, b2, { bucketKey: 'out', size: 64, usage: 0x84 }), true);
+  assert.equal(acquireQueueOrderedPooledBuffer(device, { bucketKey: 'out', label: 'out', size: 64, usage: 0x84 }), b1);
+  assert.equal(acquireQueueOrderedPooledBuffer(device, { bucketKey: 'out', label: 'out', size: 64, usage: 0x84 }), b2);
+  // MAP_READ buffers are never pooled (destroyed immediately).
+  const mapped = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'read', label: 'read', size: 64, usage: 0x09 });
+  assert.equal(releaseQueueOrderedPooledBuffer(device, mapped, { bucketKey: 'read', size: 64, usage: 0x09 }), false);
 });

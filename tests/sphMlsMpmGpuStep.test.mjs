@@ -27379,3 +27379,75 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(tracker.destroyed, 18);
 });
+
+test('executable law descriptor rejects illegal double-writers and write+accumulate conflicts', async () => {
+  const {
+    validateFusedResidentLawPlan,
+    assertValidFusedResidentLawPlan
+  } = await import('../src/runtime/sph/sphMlsMpmGpuStep.js');
+  const valid = validateFusedResidentLawPlan({
+    requiredStageOrder: ['mechanics-p2g', 'thermal-phase', 'phase-carrier-transfer'],
+    stages: [
+      {
+        id: 'thermal-phase',
+        lawNodeId: 'ulg-sph-thermal-phase-law',
+        orderConstraint: 'after-mechanics-g2p',
+        reads: ['sph-particle-state'],
+        writes: ['sph-particle-state'],
+        accumulates: ['exact-thermal-energy-ledger']
+      },
+      {
+        id: 'phase-carrier-transfer',
+        lawNodeId: 'ulg-sph-phase-carrier-transfer-law',
+        orderConstraint: 'after-thermal-phase',
+        reads: ['sph-particle-state'],
+        writes: ['sph-particle-state'],
+        accumulates: ['exact-thermal-energy-ledger']
+      }
+    ]
+  });
+  assert.equal(valid.valid, true);
+  assert.deepEqual(valid.errors, []);
+
+  assert.throws(
+    () => assertValidFusedResidentLawPlan({
+      requiredStageOrder: ['stage-a', 'stage-b'],
+      stages: [
+        {
+          id: 'stage-a',
+          lawNodeId: 'law-a',
+          orderConstraint: 'c1',
+          reads: [],
+          writes: ['fresh-dispersed-medium-optics'],
+          accumulates: []
+        },
+        {
+          id: 'stage-b',
+          lawNodeId: 'law-b',
+          orderConstraint: 'c2',
+          reads: [],
+          writes: ['fresh-dispersed-medium-optics'],
+          accumulates: []
+        }
+      ]
+    }),
+    /illegal-double-writer:fresh-dispersed-medium-optics/
+  );
+
+  assert.throws(
+    () => assertValidFusedResidentLawPlan({
+      requiredStageOrder: ['stage-a'],
+      stages: [
+        {
+          id: 'stage-a',
+          lawNodeId: 'law-a',
+          orderConstraint: 'c1',
+          reads: [],
+          writes: ['mls-mpm-grid-momentum'],
+          accumulates: ['mls-mpm-grid-momentum']
+        }
+      ]
+    }),
+    /stage-writes-and-accumulates-same-resource/
+  );
+});

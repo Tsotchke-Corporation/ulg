@@ -21277,7 +21277,14 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     resolvedActiveNodeSortedIndex,
     activeNodeSortedIndex
   );
-  const resolvedLawQueue = twoLevelAuthoritative || !enableLawQueue
+  const lawQueueSupersededWithoutConsumer = Boolean(
+    canonicalExactNearSupersedesLegacyLawNeighbors
+    && readbackMode === SCHROEDER_NO_FULL_READBACK_MODE
+    && !lawQueue
+  );
+  const resolvedLawQueue = twoLevelAuthoritative
+    || !enableLawQueue
+    || lawQueueSupersededWithoutConsumer
     ? null
     : lawQueue || await lawQueueRunner({
       device,
@@ -21438,9 +21445,19 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     hierarchyAggregateNode,
     { expectedConsumers: ['far-aggregate', 'phase-volume', 'render'] }
   );
+  const phaseVolumeMigrationHasConsumer = Boolean(
+    phaseVolumeMigrationAdmission != null
+    || phaseVolumeSplitMergeAdmission != null
+    || enablePhaseVolumeSplitMergeApply
+    || enablePhaseVolumeLevelUpdate
+    || enablePhaseSlotRefinement
+    || enablePhaseVolumeDiagnosticSummary
+    || readbackMode !== SCHROEDER_NO_FULL_READBACK_MODE
+  );
   const resolvedPhaseVolumeTargetAggregate = !resolvedLevelAssignment
     || !enablePhaseVolumeMigration
     || !enablePhaseVolumeTargetAggregate
+    || (!phaseVolumeTargetAggregate && !phaseVolumeMigrationHasConsumer)
     ? null
     : phaseVolumeTargetAggregate || await runHierarchyStage(
       'phase-volume-target-aggregate',
@@ -21670,6 +21687,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   const resolvedPhaseVolumeMigration = !resolvedLevelAssignment
     || !resolvedPhaseVolumeAggregateNodeForMigration
     || !enablePhaseVolumeMigration
+    || (!phaseVolumeMigration && !phaseVolumeMigrationHasConsumer)
     ? null
     : phaseVolumeMigration || await runHierarchyStage(
       'phase-volume-migration',

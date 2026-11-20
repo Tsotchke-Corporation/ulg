@@ -503,11 +503,319 @@ export function deferConfirmedSubmittedWorkCleanup(device, cleanup, options = nu
 // derives that eligibility from the schedule's law-activation receipt.
 
 const workerQueueSubmitBurstRecords = new WeakMap();
+const WORKER_SUBMIT_BURST_POOLED_STAGING_INITIAL_BYTES = 512 * 1024;
+const WORKER_SUBMIT_BURST_POOLED_STAGING_MAX_BYTES = 8 * 1024 * 1024;
 
 function workerQueueSubmitBurstError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function createCoalescingComputeCommandEncoder(
+  rawEncoder,
+  { onRenderPass = null, bindGroupBuffers = null } = {}
+) {
+  let pendingOps = [];
+  let pendingLabel = null;
+  let touchedBuffers = new Set();
+  let unknownBuffersTouched = false;
+  let hasRenderPass = false;
+
+  const noteBuffer = (buffer) => {
+    if (buffer) touchedBuffers.add(buffer);
+    else unknownBuffersTouched = true;
+  };
+
+  const noteBindGroup = (bindGroup) => {
+    if (!bindGroup) return;
+    const buffers = bindGroupBuffers?.get(bindGroup);
+    if (!buffers) {
+      unknownBuffersTouched = true;
+      return;
+    }
+    for (let i = 0; i < buffers.length; i += 1) {
+      touchedBuffers.add(buffers[i]);
+    }
+  };
+
+  const flushPendingCompute = () => {
+    if (pendingOps.length === 0) return;
+    const ops = pendingOps;
+    const label = pendingLabel;
+    pendingOps = [];
+    pendingLabel = null;
+    touchedBuffers = new Set();
+    unknownBuffersTouched = false;
+    const pass = label !== null && label !== undefined
+      ? rawEncoder.beginComputePass({ label })
+      : rawEncoder.beginComputePass();
+    let activePipeline = null;
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
+      if (op.kind === 'pipeline') {
+        if (op.pipeline !== activePipeline) {
+          activePipeline = op.pipeline;
+          pass.setPipeline(op.pipeline);
+        }
+      } else if (op.kind === 'bindGroup') {
+        if (op.extra) pass.setBindGroup(op.index, op.bindGroup, ...op.extra);
+        else pass.setBindGroup(op.index, op.bindGroup);
+      } else if (op.kind === 'dispatch') {
+        if (op.z !== undefined) pass.dispatchWorkgroups(op.x, op.y, op.z);
+        else if (op.y !== undefined) pass.dispatchWorkgroups(op.x, op.y);
+        else pass.dispatchWorkgroups(op.x);
+      } else if (op.kind === 'dispatchIndirect') {
+        pass.dispatchWorkgroupsIndirect(op.buffer, op.offset);
+      } else if (op.kind === 'pushDebugGroup') {
+        pass.pushDebugGroup?.(op.label);
+      } else if (op.kind === 'popDebugGroup') {
+        pass.popDebugGroup?.();
+      } else if (op.kind === 'insertDebugMarker') {
+        pass.insertDebugMarker?.(op.label);
+      }
+    }
+    pass.end();
+  };
+
+  const sharedPassProxy = {
+    setPipeline(pipeline) {
+      pendingOps.push({ kind: 'pipeline', pipeline });
+    },
+    setBindGroup(index, bindGroup, ...rest) {
+      noteBindGroup(bindGroup);
+      const extra = rest.length > 0
+        ? rest.map((arg) => (Array.isArray(arg) ? arg.slice() : ArrayBuffer.isView(arg) ? new Uint32Array(arg) : arg))
+        : null;
+      pendingOps.push({ kind: 'bindGroup', index, bindGroup, extra });
+    },
+    dispatchWorkgroups(x, y, z) {
+      pendingOps.push({ kind: 'dispatch', x, y, z });
+    },
+    dispatchWorkgroupsIndirect(indirectBuffer, indirectOffset) {
+      noteBuffer(indirectBuffer);
+      pendingOps.push({
+        kind: 'dispatchIndirect',
+        buffer: indirectBuffer,
+        offset: indirectOffset
+      });
+    },
+    pushDebugGroup(label) {
+      pendingOps.push({ kind: 'pushDebugGroup', label });
+    },
+    popDebugGroup() {
+      pendingOps.push({ kind: 'popDebugGroup' });
+    },
+    insertDebugMarker(label) {
+      pendingOps.push({ kind: 'insertDebugMarker', label });
+    },
+    end() {
+      // Kept buffered so consecutive compute passes (and disjoint-buffer
+      // clearBuffer/copyBufferToBuffer setup calls) coalesce into one
+      // hardware GPUComputePassEncoder.
+    }
+  };
+  const wrapper = {
+    get label() {
+      return rawEncoder.label;
+    },
+    beginComputePass(descriptor) {
+      if (descriptor?.timestampWrites) {
+        flushPendingCompute();
+        return rawEncoder.beginComputePass(descriptor);
+      }
+      if (pendingOps.length === 0 && pendingLabel === null) {
+        pendingLabel = descriptor?.label ?? null;
+      }
+      return sharedPassProxy;
+    },
+    beginRenderPass(descriptor) {
+      flushPendingCompute();
+      hasRenderPass = true;
+      return rawEncoder.beginRenderPass(descriptor);
+    },
+    clearBuffer(buffer, ...rest) {
+      if (
+        pendingOps.length > 0
+        && (unknownBuffersTouched || !buffer || touchedBuffers.has(buffer))
+      ) {
+        flushPendingCompute();
+      }
+      return rawEncoder.clearBuffer(buffer, ...rest);
+    },
+    copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      if (
+        pendingOps.length > 0
+        && (
+          unknownBuffersTouched
+          || !source
+          || !destination
+          || touchedBuffers.has(source)
+          || touchedBuffers.has(destination)
+        )
+      ) {
+        flushPendingCompute();
+      }
+      return rawEncoder.copyBufferToBuffer(
+        source,
+        sourceOffset,
+        destination,
+        destinationOffset,
+        size
+      );
+    },
+    copyBufferToTexture(...args) {
+      flushPendingCompute();
+      return rawEncoder.copyBufferToTexture(...args);
+    },
+    copyTextureToBuffer(...args) {
+      flushPendingCompute();
+      return rawEncoder.copyTextureToBuffer(...args);
+    },
+    copyTextureToTexture(...args) {
+      flushPendingCompute();
+      return rawEncoder.copyTextureToTexture(...args);
+    },
+    resolveQuerySet(...args) {
+      flushPendingCompute();
+      return rawEncoder.resolveQuerySet(...args);
+    },
+    writeTimestamp(...args) {
+      flushPendingCompute();
+      return rawEncoder.writeTimestamp(...args);
+    },
+    pushDebugGroup(...args) {
+      flushPendingCompute();
+      return rawEncoder.pushDebugGroup?.(...args);
+    },
+    popDebugGroup(...args) {
+      flushPendingCompute();
+      return rawEncoder.popDebugGroup?.(...args);
+    },
+    insertDebugMarker(...args) {
+      flushPendingCompute();
+      return rawEncoder.insertDebugMarker?.(...args);
+    },
+    finish(descriptor) {
+      flushPendingCompute();
+      const commandBuffer = descriptor !== undefined
+        ? rawEncoder.finish(descriptor)
+        : rawEncoder.finish();
+      if (hasRenderPass && typeof onRenderPass === 'function') {
+        onRenderPass(commandBuffer);
+      }
+      return commandBuffer;
+    }
+  };
+  return wrapper;
+}
+
+function workerQueueSubmitBurstSealPooledCopies(device, record) {
+  const pending = record.pooledPendingCopies;
+  if (!pending || pending.length === 0) return;
+  record.pooledPendingCopies = [];
+  if (!record.pooledStagingBuffer || typeof device.createCommandEncoder !== 'function') {
+    return;
+  }
+  const encoder = (record.realCreateCommandEncoder || device.createCommandEncoder).call(
+    device,
+    { label: 'ulg-submit-burst-pooled-write-through' }
+  );
+  for (let i = 0; i < pending.length; i += 1) {
+    const copy = pending[i];
+    encoder.copyBufferToBuffer(
+      record.pooledStagingBuffer,
+      copy.sourceOffset,
+      copy.target,
+      copy.targetOffset,
+      copy.byteLength
+    );
+  }
+  record.heldCommandBuffers.push(encoder.finish());
+  record.heldSubmitStamp = record.createStamp;
+  if (record.heldCommandBuffers.length > record.stats.maxHeldCommandBuffers) {
+    record.stats.maxHeldCommandBuffers = record.heldCommandBuffers.length;
+  }
+}
+
+function workerQueueSubmitBurstPooledWriteThrough(
+  device,
+  record,
+  buffer,
+  bufferOffset,
+  data,
+  dataOffset,
+  size
+) {
+  if (
+    typeof device.createCommandEncoder !== 'function'
+    || typeof record.realWriteBuffer !== 'function'
+  ) {
+    return false;
+  }
+  const targetOffset = Number(bufferOffset) || 0;
+  if (targetOffset < 0 || targetOffset % 4 !== 0) return false;
+  let bytes;
+  try {
+    bytes = workerQueueSubmitBurstWriteThroughBytes(data, dataOffset, size);
+  } catch {
+    bytes = null;
+  }
+  if (!bytes || bytes.byteLength === 0 || bytes.byteLength % 4 !== 0) {
+    return false;
+  }
+  if (bytes.byteLength > WORKER_SUBMIT_BURST_POOLED_STAGING_MAX_BYTES) {
+    return false;
+  }
+  const copySrcUsage = globalThis.GPUBufferUsage?.COPY_SRC ?? 0x0004;
+  const copyDstUsage = globalThis.GPUBufferUsage?.COPY_DST ?? 0x0008;
+  if (!record.pooledStagingBuffer) {
+    let targetCap = Math.max(
+      record.pooledStagingTargetCapacity || WORKER_SUBMIT_BURST_POOLED_STAGING_INITIAL_BYTES,
+      bytes.byteLength
+    );
+    targetCap = Math.min(
+      WORKER_SUBMIT_BURST_POOLED_STAGING_MAX_BYTES,
+      Math.ceil(targetCap / 4) * 4
+    );
+    try {
+      record.pooledStagingBuffer = record.realCreateBuffer({
+        label: 'ulg-submit-burst-pooled-staging',
+        size: targetCap,
+        usage: copySrcUsage | copyDstUsage
+      });
+      record.pooledStagingCapacity = targetCap;
+      record.pooledStagingBytes = new Uint8Array(targetCap);
+      record.pooledStagingCursor = 0;
+    } catch {
+      record.pooledStagingBuffer = null;
+      record.pooledStagingCapacity = 0;
+      record.pooledStagingBytes = null;
+      return false;
+    }
+  }
+  if (record.pooledStagingCursor + bytes.byteLength > record.pooledStagingCapacity) {
+    // Request a larger slab after the caller flushes the current burst so
+    // earlier held copies never lose their referenced staging buffer.
+    const desired = Math.min(
+      WORKER_SUBMIT_BURST_POOLED_STAGING_MAX_BYTES,
+      Math.max(record.pooledStagingCapacity * 2, bytes.byteLength)
+    );
+    if (desired > record.pooledStagingCapacity) {
+      record.pooledStagingGrowRequested = desired;
+    }
+    return false;
+  }
+  const sourceOffset = record.pooledStagingCursor;
+  record.pooledStagingBytes.set(bytes, sourceOffset);
+  record.pooledStagingCursor = sourceOffset + bytes.byteLength;
+  record.pooledPendingCopies.push({
+    target: buffer,
+    targetOffset,
+    sourceOffset,
+    byteLength: bytes.byteLength
+  });
+  return true;
 }
 
 function workerQueueSubmitBurstWriteThroughBytes(data, dataOffset, size) {
@@ -611,6 +919,15 @@ export function armWorkerQueueSubmitBurst(device) {
     open: false,
     label: null,
     writeThroughEnabled: false,
+    pooledWriteThroughEnabled: false,
+    coalesceComputePassesEnabled: false,
+    pooledStagingBuffer: null,
+    pooledStagingCapacity: 0,
+    pooledStagingTargetCapacity: WORKER_SUBMIT_BURST_POOLED_STAGING_INITIAL_BYTES,
+    pooledStagingGrowRequested: 0,
+    pooledStagingBytes: null,
+    pooledStagingCursor: 0,
+    pooledPendingCopies: [],
     // Monotonic creation counter; a buffer stamped after the last held
     // submit cannot be referenced by any held command buffer.
     createStamp: 0,
@@ -619,6 +936,8 @@ export function armWorkerQueueSubmitBurst(device) {
     postSubmitCleanups: [],
     deferredCleanups: [],
     bufferStamps: new WeakMap(),
+    bindGroupBuffers: new WeakMap(),
+    renderPassCommandBuffers: new WeakSet(),
     realSubmit: queue.submit.bind(queue),
     realWriteBuffer: typeof queue.writeBuffer === 'function'
       ? queue.writeBuffer.bind(queue)
@@ -630,6 +949,15 @@ export function armWorkerQueueSubmitBurst(device) {
       ? queue.onSubmittedWorkDone.bind(queue)
       : null,
     realCreateBuffer: device.createBuffer.bind(device),
+    realCreateTexture: typeof device.createTexture === 'function'
+      ? device.createTexture.bind(device)
+      : null,
+    realCreateBindGroup: typeof device.createBindGroup === 'function'
+      ? device.createBindGroup.bind(device)
+      : null,
+    realCreateCommandEncoder: typeof device.createCommandEncoder === 'function'
+      ? device.createCommandEncoder.bind(device)
+      : null,
     stats: {
       openCount: 0,
       flushCount: 0,
@@ -640,6 +968,7 @@ export function armWorkerQueueSubmitBurst(device) {
       staleWriteFlushCount: 0,
       staleWriteFlushLabels: {},
       writeThroughCount: 0,
+      pooledWriteThroughCount: 0,
       writeThroughLabels: {},
       fenceFlushCount: 0,
       cadenceFlushCount: 0,
@@ -653,13 +982,27 @@ export function armWorkerQueueSubmitBurst(device) {
   workerQueueSubmitBurstRecords.set(device, record);
   queue.submit = (commandBuffers) => {
     if (record.open) {
+      if (record.pooledPendingCopies.length > 0) {
+        workerQueueSubmitBurstSealPooledCopies(device, record);
+      }
+      let containsRenderPass = false;
       for (const commandBuffer of commandBuffers) {
+        if (commandBuffer && typeof commandBuffer === 'object'
+            && record.renderPassCommandBuffers.has(commandBuffer)) {
+          containsRenderPass = true;
+        }
         record.heldCommandBuffers.push(commandBuffer);
       }
       record.heldSubmitStamp = record.createStamp;
       record.stats.heldSubmitTotal += 1;
       if (record.heldCommandBuffers.length > record.stats.maxHeldCommandBuffers) {
         record.stats.maxHeldCommandBuffers = record.heldCommandBuffers.length;
+      }
+      if (containsRenderPass) {
+        // Render passes may reference ephemeral swapchain textures from
+        // context.getCurrentTexture() that expire at the end of the frame, so
+        // flush immediately on render-pass submission to keep them valid.
+        flushWorkerQueueSubmitBurst(device, 'render-pass-submit');
       }
       return undefined;
     }
@@ -673,18 +1016,30 @@ export function armWorkerQueueSubmitBurst(device) {
         if (!(typeof stamp === 'number' && stamp > record.heldSubmitStamp)) {
           // The target buffer may be referenced by a held command buffer, so
           // an immediate write would land BEFORE commands that were encoded
-          // against the buffer's current contents. Two order-preserving
-          // responses exist: flush first (default), or copy the data into a
-          // fresh staging buffer and hold a copyBufferToBuffer at the
-          // write's queue position (any writeBuffer target already carries
-          // COPY_DST, and writeBuffer's 4-byte offset/size rules match the
-          // copy's). Write-through is opt-in because it MEASURED WORSE on
-          // the bulk lane: ~21 arena-params writes/step became 21 staging
-          // buffers + encoders per step (11.4 ms/step vs 8.0 flushing, 1k
-          // particles, 2026-08-28) — the flush it saves is cheaper than the
-          // churn it adds while a per-step retirement fence bounds held
-          // windows to one step anyway.
-          const writeThrough = record.writeThroughEnabled
+          // against the buffer's current contents. Three order-preserving
+          // responses exist: flush first (default), pooled reusable-slab copy
+          // (zero createBuffer per write; one realWriteBuffer before realSubmit),
+          // or per-write staging copy (legacy writeThrough).
+          const pooledWriteThrough = record.pooledWriteThroughEnabled
+            && workerQueueSubmitBurstPooledWriteThrough(
+              device,
+              record,
+              buffer,
+              bufferOffset,
+              data,
+              dataOffset,
+              size
+            );
+          if (pooledWriteThrough) {
+            const label = String(buffer?.label || 'unlabeled');
+            record.stats.writeThroughCount += 1;
+            record.stats.pooledWriteThroughCount += 1;
+            record.stats.writeThroughLabels[label] =
+              (record.stats.writeThroughLabels[label] || 0) + 1;
+            return undefined;
+          }
+          const writeThrough = !record.pooledWriteThroughEnabled
+            && record.writeThroughEnabled
             && workerQueueSubmitBurstWriteThrough(
               device,
               record,
@@ -748,7 +1103,15 @@ export function armWorkerQueueSubmitBurst(device) {
           && !(confirmedCleanup?.cleanupDepth > 0)
           && !(typeof stamp === 'number' && stamp > record.heldSubmitStamp)
         ) {
-          record.deferredCleanups.push(realDestroy);
+          if (record.pooledWriteThroughEnabled) {
+            // Once realSubmit(held) accepts the command buffers, WebGPU keeps
+            // referenced buffers alive until GPU completion, so synchronous
+            // post-submit destroy needs zero onSubmittedWorkDone fences.
+            record.postSubmitCleanups.push(realDestroy);
+            record.stats.postSubmitCleanupTotal += 1;
+          } else {
+            record.deferredCleanups.push(realDestroy);
+          }
           record.stats.deferredDestroyTotal += 1;
           return undefined;
         }
@@ -756,9 +1119,117 @@ export function armWorkerQueueSubmitBurst(device) {
         return realDestroy();
       };
     }
+    if (typeof buffer?.mapAsync === 'function') {
+      const realMapAsync = buffer.mapAsync.bind(buffer);
+      buffer.mapAsync = (...mapArgs) => {
+        if (record.open && record.heldCommandBuffers.length > 0) {
+          flushWorkerQueueSubmitBurst(device, 'map-async');
+        }
+        return realMapAsync(...mapArgs);
+      };
+    }
     return buffer;
   };
+  if (record.realCreateTexture) {
+    device.createTexture = (descriptor) => {
+      const texture = record.realCreateTexture(descriptor);
+      record.createStamp += 1;
+      record.bufferStamps.set(texture, record.createStamp);
+      if (typeof texture?.destroy === 'function') {
+        const realDestroy = texture.destroy.bind(texture);
+        let destroyed = false;
+        texture.destroy = () => {
+          if (destroyed) return undefined;
+          destroyed = true;
+          const stamp = record.bufferStamps.get(texture);
+          const confirmedCleanup = confirmedCleanupDeviceStates.get(device);
+          if (
+            record.open
+            && record.heldCommandBuffers.length > 0
+            && confirmedCleanup?.lost !== true
+            && !(confirmedCleanup?.cleanupDepth > 0)
+            && !(typeof stamp === 'number' && stamp > record.heldSubmitStamp)
+          ) {
+            if (record.pooledWriteThroughEnabled) {
+              record.postSubmitCleanups.push(realDestroy);
+              record.stats.postSubmitCleanupTotal += 1;
+            } else {
+              record.deferredCleanups.push(realDestroy);
+            }
+            record.stats.deferredDestroyTotal += 1;
+            return undefined;
+          }
+          record.stats.immediateDestroyTotal += 1;
+          return realDestroy();
+        };
+      }
+      return texture;
+    };
+  }
+  if (record.realCreateBindGroup) {
+    device.createBindGroup = (descriptor) => {
+      const group = record.realCreateBindGroup(descriptor);
+      if (group && typeof group === 'object' && Array.isArray(descriptor?.entries)) {
+        const buffers = [];
+        for (let i = 0; i < descriptor.entries.length; i += 1) {
+          const buf = descriptor.entries[i]?.resource?.buffer;
+          if (buf) buffers.push(buf);
+        }
+        record.bindGroupBuffers.set(group, buffers);
+      }
+      return group;
+    };
+  }
+  if (record.realCreateCommandEncoder) {
+    device.createCommandEncoder = (descriptor) => {
+      const raw = descriptor !== undefined
+        ? record.realCreateCommandEncoder(descriptor)
+        : record.realCreateCommandEncoder();
+      if (!record.open || !raw) return raw;
+      const markRenderPass = (commandBuffer) => {
+        if (commandBuffer && typeof commandBuffer === 'object') {
+          record.renderPassCommandBuffers.add(commandBuffer);
+        }
+      };
+      if (
+        record.coalesceComputePassesEnabled
+        && typeof raw.beginComputePass === 'function'
+      ) {
+        return createCoalescingComputeCommandEncoder(raw, {
+          onRenderPass: markRenderPass,
+          bindGroupBuffers: record.bindGroupBuffers
+        });
+      }
+      if (typeof raw.beginRenderPass === 'function' && typeof raw.finish === 'function') {
+        let sawRenderPass = false;
+        const origBeginRender = raw.beginRenderPass.bind(raw);
+        const origFinish = raw.finish.bind(raw);
+        raw.beginRenderPass = (desc) => {
+          sawRenderPass = true;
+          return origBeginRender(desc);
+        };
+        raw.finish = (desc) => {
+          const cb = desc !== undefined ? origFinish(desc) : origFinish();
+          if (sawRenderPass) markRenderPass(cb);
+          return cb;
+        };
+      }
+      return raw;
+    };
+  }
   return record;
+}
+
+/**
+ * Diagnostic hook below the submit burst: wrap the burst's real
+ * createCommandEncoder so pass-timestamp instrumentation sees the actual
+ * coalesced hardware compute passes.
+ */
+export function wrapWorkerQueueRealCreateCommandEncoder(device, wrap) {
+  const record = workerQueueSubmitBurstRecords.get(device);
+  if (!record || !record.realCreateCommandEncoder) return false;
+  record.realCreateCommandEncoder = wrap(record.realCreateCommandEncoder);
+  return true;
 }
 
 /**
@@ -778,7 +1249,9 @@ export function wrapWorkerQueueRealSubmit(device, wrap) {
 
 export function openWorkerQueueSubmitBurst(device, {
   label = null,
-  writeThrough = false
+  writeThrough = false,
+  pooledWriteThrough = false,
+  coalesceComputePasses = false
 } = {}) {
   const record = armWorkerQueueSubmitBurst(device);
   if (record.open) {
@@ -790,6 +1263,8 @@ export function openWorkerQueueSubmitBurst(device, {
   record.open = true;
   record.label = label;
   record.writeThroughEnabled = writeThrough === true;
+  record.pooledWriteThroughEnabled = pooledWriteThrough === true;
+  record.coalesceComputePassesEnabled = coalesceComputePasses === true;
   record.stats.openCount += 1;
   return record;
 }
@@ -797,6 +1272,13 @@ export function openWorkerQueueSubmitBurst(device, {
 export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
   const record = workerQueueSubmitBurstRecords.get(device);
   if (!record) return null;
+  if (record.pooledPendingCopies.length > 0) {
+    workerQueueSubmitBurstSealPooledCopies(device, record);
+  }
+  const pooledUploadBytes = record.pooledStagingCursor;
+  const pooledStagingBuffer = record.pooledStagingBuffer;
+  const pooledStagingBytes = record.pooledStagingBytes;
+  record.pooledStagingCursor = 0;
   const held = record.heldCommandBuffers;
   const postSubmitCleanups = record.postSubmitCleanups;
   const cleanups = record.deferredCleanups;
@@ -811,9 +1293,33 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
     if (reason === 'step-cadence') record.stats.cadenceFlushCount += 1;
     if (reason === 'burst-close') record.stats.closeFlushCount += 1;
     try {
+      if (pooledUploadBytes > 0 && pooledStagingBuffer && pooledStagingBytes) {
+        // Queue-timeline ordered BEFORE realSubmit(held) and AFTER any prior
+        // flush's realSubmit, so one reusable slab serves all bursts safely.
+        record.realWriteBuffer(
+          pooledStagingBuffer,
+          0,
+          pooledStagingBytes,
+          0,
+          pooledUploadBytes
+        );
+      }
       record.realSubmit(held);
     } catch (error) {
       submitError = error;
+    }
+  }
+  if (record.pooledStagingGrowRequested > record.pooledStagingCapacity) {
+    const oldSlab = record.pooledStagingBuffer;
+    record.pooledStagingTargetCapacity = record.pooledStagingGrowRequested;
+    record.pooledStagingGrowRequested = 0;
+    record.pooledStagingBuffer = null;
+    record.pooledStagingCapacity = 0;
+    record.pooledStagingBytes = null;
+    if (oldSlab) {
+      postSubmitCleanups.push(() => {
+        oldSlab.destroy?.();
+      });
     }
   }
   // These cleanups own disposable staging resources only. The real submit has
@@ -877,6 +1383,9 @@ export function closeWorkerQueueSubmitBurst(device, reason = 'burst-close') {
   }
   record.open = false;
   record.label = null;
+  record.writeThroughEnabled = false;
+  record.pooledWriteThroughEnabled = false;
+  record.coalesceComputePassesEnabled = false;
   const stats = snapshotWorkerQueueSubmitBurstStats(record.stats);
   if (flushError) throw flushError;
   return stats;
@@ -910,9 +1419,11 @@ export async function withWorkerQueueSubmitBurstWriteThrough(
   const record = armWorkerQueueSubmitBurst(device);
   const borrowed = record.open === true;
   const previousWriteThroughEnabled = record.writeThroughEnabled;
+  const previousPooledWriteThroughEnabled = record.pooledWriteThroughEnabled;
   const previousLabel = record.label;
   if (borrowed) {
     record.writeThroughEnabled = true;
+    record.pooledWriteThroughEnabled = false;
   } else {
     openWorkerQueueSubmitBurst(device, { label, writeThrough: true });
   }
@@ -936,6 +1447,7 @@ export async function withWorkerQueueSubmitBurstWriteThrough(
     boundaryError = error;
   } finally {
     record.writeThroughEnabled = previousWriteThroughEnabled;
+    record.pooledWriteThroughEnabled = previousPooledWriteThroughEnabled;
     record.label = borrowed ? previousLabel : null;
   }
 
@@ -1530,4 +2042,100 @@ export function releaseSubmittedWorkCleanupQueueOrdered(
     queueCompletionStatus: 'queue-ordered-owner-submission-authenticated',
     queueCompletionMethod: 'same-gpu-queue-submission-order'
   });
+}
+
+// Per-device FIFO buffer pool for same-queue transient output / uniform
+// buffers retired at authenticated submission boundaries (no MAP_READ/MAP_WRITE).
+// Because buffers are only returned after all submitted consumers have been
+// queued on the same GPUQueue, WebGPU's queue-timeline ordering guarantees
+// prior reads finish before the reused buffer is written in a later submit,
+// while rotating identical GPUBuffer handles so downstream bind-group caches hit.
+const queueOrderedBufferPoolByDevice = new WeakMap();
+const QUEUE_ORDERED_POOL_BUCKET_LIMIT = 6;
+const MAP_READ_BIT = 0x0001;
+const MAP_WRITE_BIT = 0x0002;
+
+function queueOrderedBufferPoolForDevice(device) {
+  let pool = queueOrderedBufferPoolByDevice.get(device);
+  if (pool) return pool;
+  pool = {
+    buckets: new Map(),
+    lost: false
+  };
+  queueOrderedBufferPoolByDevice.set(device, pool);
+  if (device?.lost && typeof device.lost.then === 'function') {
+    device.lost.then(() => {
+      pool.lost = true;
+      pool.buckets.clear();
+    }).catch(() => {
+      pool.lost = true;
+      pool.buckets.clear();
+    });
+  }
+  return pool;
+}
+
+export function acquireQueueOrderedPooledBuffer(
+  device,
+  { bucketKey, label, size, usage } = {}
+) {
+  const normalizedSize = Math.max(4, Math.ceil(Number(size) || 4));
+  const normalizedUsage = Number(usage) || 0;
+  const poolable = Boolean(
+    device
+    && bucketKey
+    && (normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) === 0
+  );
+  if (poolable) {
+    const pool = queueOrderedBufferPoolForDevice(device);
+    if (!pool.lost) {
+      const fullKey = `${bucketKey}:${normalizedSize}:${normalizedUsage}`;
+      const bucket = pool.buckets.get(fullKey);
+      if (bucket && bucket.length > 0) {
+        const reused = bucket.shift();
+        if (reused) return reused;
+      }
+    }
+  }
+  return device.createBuffer({
+    label,
+    size: normalizedSize,
+    usage: normalizedUsage
+  });
+}
+
+export function releaseQueueOrderedPooledBuffer(
+  device,
+  buffer,
+  { bucketKey, size, usage } = {}
+) {
+  if (!buffer) return false;
+  const normalizedSize = Math.max(4, Math.ceil(Number(size ?? buffer.size) || 4));
+  const normalizedUsage = Number(usage ?? buffer.usage) || 0;
+  if (
+    !device
+    || !bucketKey
+    || (normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0
+  ) {
+    buffer.destroy?.();
+    return false;
+  }
+  const pool = queueOrderedBufferPoolForDevice(device);
+  if (pool.lost) {
+    buffer.destroy?.();
+    return false;
+  }
+  const fullKey = `${bucketKey}:${normalizedSize}:${normalizedUsage}`;
+  let bucket = pool.buckets.get(fullKey);
+  if (!bucket) {
+    bucket = [];
+    pool.buckets.set(fullKey, bucket);
+  }
+  if (bucket.includes(buffer)) return true;
+  if (bucket.length >= QUEUE_ORDERED_POOL_BUCKET_LIMIT) {
+    buffer.destroy?.();
+    return false;
+  }
+  bucket.push(buffer);
+  return true;
 }

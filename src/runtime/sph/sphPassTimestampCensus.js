@@ -1,4 +1,7 @@
-import { wrapWorkerQueueRealSubmit } from '../webgpuComputeLayout.js';
+import {
+  wrapWorkerQueueRealCreateCommandEncoder,
+  wrapWorkerQueueRealSubmit
+} from '../webgpuComputeLayout.js';
 // Diagnostic-only per-pass GPU timing for one device: every compute pass
 // encoded after arming gets beginning/end timestamp writes (unless it already
 // has its own), and the GPU durations are summed by pass label. The stage
@@ -43,10 +46,11 @@ export function armSphPassTimestampCensus(device, { mode = globalThis.__ulgPassC
     read: device.createBuffer({ size: MAX_PASSES_PER_ENCODER * 2 * QUERY_BYTES,
       usage: USAGE.MAP_READ | USAGE.COPY_DST })
   };
-  const originalCreateCommandEncoder = device.createCommandEncoder.bind(device);
   let encoderOrdinal = 0;
-  device.createCommandEncoder = (descriptor) => {
-    const encoder = originalCreateCommandEncoder(descriptor);
+  const censusCreateCommandEncoder = (originalCreateCommandEncoder) => (descriptor) => {
+    const encoder = descriptor !== undefined
+      ? originalCreateCommandEncoder(descriptor)
+      : originalCreateCommandEncoder();
     encoderOrdinal += 1;
     // 'sparse': the full census on 1 encoder in 20 (samples pass times while
     // leaving most encoders untouched).
@@ -92,6 +96,9 @@ export function armSphPassTimestampCensus(device, { mode = globalThis.__ulgPassC
     };
     return encoder;
   };
+  if (!wrapWorkerQueueRealCreateCommandEncoder(device, censusCreateCommandEncoder)) {
+    device.createCommandEncoder = censusCreateCommandEncoder(device.createCommandEncoder.bind(device));
+  }
   const queue = device.queue;
   // Map only after the real submit: below the worker submit burst when one is
   // armed (wrapWorkerQueueRealSubmit). Wrapping queue.submit above a burst

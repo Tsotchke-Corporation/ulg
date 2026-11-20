@@ -62,6 +62,7 @@ import {
   segmentTemperatureFromEnergyAbove
 } from '../material/thermoState.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
   createCachedExplicitComputePipeline,
@@ -69,6 +70,7 @@ import {
   deferConfirmedSubmittedWorkCleanup,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  releaseQueueOrderedPooledBuffer,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 import {
@@ -3998,25 +4000,53 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     sphParticleState.thermo.byteLength,
     sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
-  const outStateBuffer = createOutputStorageBuffer(
-    device,
-    'ulg-sph-thermal-output-state',
-    outStateByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
+  const useQueueOrderedThermalPool = Boolean(
+    readbackMode === NO_FULL_READBACK_MODE
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
   );
+  const thermalOutUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const thermalParamsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
+  const outStateBuffer = useQueueOrderedThermalPool
+    ? tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-sph-thermal-output-state',
+        label: 'ulg-sph-thermal-output-state',
+        size: outStateByteLength,
+        usage: thermalOutUsage
+      }), device)
+    : createOutputStorageBuffer(
+        device,
+        'ulg-sph-thermal-output-state',
+        outStateByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      );
   registerSetupFailureCleanup(() => outStateBuffer.destroy?.());
-  const outThermoBuffer = createOutputStorageBuffer(
-    device,
-    'ulg-sph-thermal-output-thermo',
-    outThermoByteLength,
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const outThermoBuffer = useQueueOrderedThermalPool
+    ? tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-sph-thermal-output-thermo',
+        label: 'ulg-sph-thermal-output-thermo',
+        size: outThermoByteLength,
+        usage: thermalOutUsage
+      }), device)
+    : createOutputStorageBuffer(
+        device,
+        'ulg-sph-thermal-output-thermo',
+        outThermoByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      );
   registerSetupFailureCleanup(() => outThermoBuffer.destroy?.());
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-sph-thermal-params',
-    size: THERMAL_PARAMS_BYTES,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const paramsBuffer = useQueueOrderedThermalPool
+    ? tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-sph-thermal-params',
+        label: 'ulg-sph-thermal-params',
+        size: THERMAL_PARAMS_BYTES,
+        usage: thermalParamsUsage
+      }), device)
+    : device.createBuffer({
+        label: 'ulg-sph-thermal-params',
+        size: THERMAL_PARAMS_BYTES,
+        usage: thermalParamsUsage
+      });
   registerSetupFailureCleanup(() => paramsBuffer.destroy?.());
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
@@ -4171,17 +4201,42 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
     if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
     if (!materialBankWarmInputBinding.borrowed) materialBankWarmInputBinding.destroy();
-    paramsBuffer.destroy?.();
+    if (useQueueOrderedThermalPool && thermalPrimarySubmissionObserved === true) {
+      releaseQueueOrderedPooledBuffer(device, paramsBuffer, {
+        bucketKey: 'ulg-sph-thermal-params',
+        size: THERMAL_PARAMS_BYTES,
+        usage: thermalParamsUsage
+      });
+    } else {
+      paramsBuffer.destroy?.();
+    }
     binPlaceholderBuffer?.destroy?.();
     return true;
   };
-  const destroyOutputParticleBuffersNow = () => {
+  const destroyOutputParticleBuffersNow = ({ aborted = false } = {}) => {
     if (outputParticleBuffersDestroyed) return false;
     outputParticleBufferDestroyScheduled = false;
     outputParticleBuffersDestroyed = true;
     exactQuantities?.destroyOutput();
-    outStateBuffer.destroy?.();
-    outThermoBuffer.destroy?.();
+    if (
+      useQueueOrderedThermalPool
+      && !aborted
+      && thermalPrimarySubmissionObserved === true
+    ) {
+      releaseQueueOrderedPooledBuffer(device, outStateBuffer, {
+        bucketKey: 'ulg-sph-thermal-output-state',
+        size: outStateByteLength,
+        usage: thermalOutUsage
+      });
+      releaseQueueOrderedPooledBuffer(device, outThermoBuffer, {
+        bucketKey: 'ulg-sph-thermal-output-thermo',
+        size: outThermoByteLength,
+        usage: thermalOutUsage
+      });
+    } else {
+      outStateBuffer.destroy?.();
+      outThermoBuffer.destroy?.();
+    }
     return true;
   };
   const registerRetainedOutputCleanupClaim = () => {
@@ -4254,7 +4309,7 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       }
     }
     const cleaned = cleanupCommonResources();
-    destroyOutputParticleBuffersNow();
+    destroyOutputParticleBuffersNow({ aborted: true });
     // An aborted step never hands its successor energy record to an owner.
     exactEnergyOutput?.destroy?.();
     exactFiniteWall?.destroy();

@@ -11730,7 +11730,6 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     let submitBurstEligibilityCache = null;
     const resolveSubmitBurstEligibility = () => {
       if (submitBurstEligibilityCache) return submitBurstEligibilityCache;
-      const activation = resolveScheduleLawActivation();
       const blockers = [];
       if (
         !Number.isInteger(submitBurstStepsRequested)
@@ -11738,20 +11737,6 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         || submitBurstStepsRequested > 256
       ) {
         blockers.push('burst-not-requested');
-      }
-      if (activation.thermal) blockers.push('thermal-active');
-      if (activation.reaction) blockers.push('reaction-active');
-      if (activation.lawQueue) blockers.push('law-queue-active');
-      if (activation.lawNeighborCandidates) {
-        blockers.push('law-neighbor-candidates-active');
-      }
-      if (activation.phaseVolumeMigration) {
-        blockers.push('phase-volume-migration-active');
-      }
-      if (activation.twoLevelMechanics) blockers.push('two-level-mechanics-active');
-      if (activation.surfaceTension) blockers.push('surface-tension-active');
-      if (activation.gasBoundaryActionable) {
-        blockers.push('gas-boundary-actionable');
       }
       if (terminalRefluxReceiptRequired) {
         blockers.push('terminal-reflux-receipts-required');
@@ -13033,7 +13018,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         let epochStageResult = null;
         let mechanicsStageResult = null;
         let mechanicsStageStarted = false;
-        const stepStartedAtMs = workerResidentScheduleNowMs();
+        const burstDevice = state.workerDevice || record.workerDevice || null;
+      if (
+        !submitBurstOpened
+        && burstDevice
+        && resolveSubmitBurstEligibility().eligible
+      ) {
+        // When the worker device is already authenticated from a prior
+        // schedule, open the submit burst before step 1's epoch stage so step 1
+        // also benefits from compute-pass coalescing and pooled write-through.
+        state.workerDevice = burstDevice;
+        openWorkerQueueSubmitBurst(burstDevice, {
+          label: `ulg-worker-schedule-${scheduleId}`,
+          pooledWriteThrough: true,
+          coalesceComputePasses: true
+        });
+        submitBurstOpened = true;
+      }
+      const stepStartedAtMs = workerResidentScheduleNowMs();
         if (scheduleFirstStepStartedAtMs == null) {
           scheduleFirstStepStartedAtMs = stepStartedAtMs;
         }
@@ -13081,9 +13083,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           && state.workerDevice
         ) {
           // Opened after the first epoch stage proves the device, so seed
-          // uploads and the lane's first generation go direct.
+          // uploads and the lane's first generation go direct. Pooled
+          // write-through coalesces per-step uniform/params writeBuffers into
+          // one slab upload before realSubmit instead of breaking the burst.
           openWorkerQueueSubmitBurst(state.workerDevice, {
-            label: `ulg-worker-schedule-${scheduleId}`
+            label: `ulg-worker-schedule-${scheduleId}`,
+            pooledWriteThrough: true,
+            coalesceComputePasses: true
           });
           submitBurstOpened = true;
         }
@@ -13709,17 +13715,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // The complete canonical step is queued before rendering the last
         // committed mesh. Never expose these internal retained physics rows
         // or replace the schedule's terminal authority/adoption boundary.
-        // A held burst must reach the real queue before a render can cover
-        // its prefix (or acquire a swapchain texture for that submission).
-        if (submitBurstOpened) {
-          flushWorkerQueueSubmitBurst(
-            state.workerDevice, 'canonical-presentation-boundary'
-          );
-        }
-        await paceCanonicalPhysicsQueue();
+        // Only flush the submit burst when actually launching a new
+        // presentation boundary; when one is already in flight, physics keeps
+        // batching without stalling on a per-step host fence (Dawn backpressure
+        // is bounded by the lagged queue-drain checkpoint).
         if (pendingCanonicalPresentation) {
           canonicalPresentationAudit.skippedInFlightCount += 1;
         } else {
+          if (submitBurstOpened) {
+            flushWorkerQueueSubmitBurst(
+              state.workerDevice, 'canonical-presentation-boundary'
+            );
+          }
           const started = presentCanonicalSubmissionBoundary(stepOrdinal);
           pendingCanonicalPresentation = started;
           void started.finally(() => {

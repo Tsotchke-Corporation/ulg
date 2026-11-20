@@ -90,10 +90,14 @@ export function normalizeSphImplicitPressureOptions(value) {
     // dam break at c dt / dx = 4 it slowed convergence of the bulk motion
     // (10 iterations: centre of mass 18% of motion off vs 3.9% without).
     jacobi: source.jacobi === true || source.jacobi === 1 || source.jacobi === '1',
-    // Relative residual at which the CG stops early (GPU-side); 0 runs every
-    // iteration.
-    relativeTolerance: Number.isFinite(Number(source.relativeTolerance)) && Number(source.relativeTolerance) > 0
-      ? Math.min(Number(source.relativeTolerance), 0.5) : 0,
+    // Relative residual at which the CG stops early (GPU-side); defaults to
+    // 1e-3 (squared 1e-6) so converged solves skip redundant iterations while
+    // explicit 0 runs every iteration unconditionally.
+    relativeTolerance: source.relativeTolerance === undefined
+      ? 1e-3
+      : (Number.isFinite(Number(source.relativeTolerance)) && Number(source.relativeTolerance) > 0
+          ? Math.min(Number(source.relativeTolerance), 0.5)
+          : 0),
     // K from the Eshkol-derived response (default) or the closed form (A/B).
     stiffnessSource: source.stiffnessSource === SPH_IMPLICIT_PRESSURE_STIFFNESS_SOURCES.closedForm
       || source.stiffnessSource === 'closed-form'
@@ -159,6 +163,12 @@ struct ImplicitPressureParams {
 @group(0) @binding(11) var<storage, read_write> partials: array<f32>;
 // A4 resident response table (responseFunctionGpu.js layout).
 @group(0) @binding(12) var<storage, read> rf_table: array<f32>;
+
+fn ip_particle_kv_offset() -> u32 {
+  let node_groups = (params.grid_node_count + 63u) / 64u;
+  let particle_groups = (params.particle_count + 63u) / 64u;
+  return max(2u * node_groups, particle_groups);
+}
 
 var<workgroup> partial: array<f32, 256>;
 
@@ -278,7 +288,7 @@ fn ip_particle_apply(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.particle_count) { return; }
   // A converged solve skips the expensive particle half of A.
   if (params.source_is_direction == 1u && ip_converged()) { return; }
-  let kv = ip_particle_weight(id.x);
+  let kv = partials[ip_particle_kv_offset() + id.x];
   if (kv == 0.0) { return; }
   let p_grid = sph_state[id.x * 2u].xyz * params.inv_grid_spacing_m;
   let bx = i32(floor(p_grid.x - 0.5));
@@ -287,20 +297,30 @@ fn ip_particle_apply(@builtin(global_invocation_id) id: vec3<u32>) {
   let wx = ip_weights(p_grid.x - f32(bx));
   let wy = ip_weights(p_grid.y - f32(by));
   let wz = ip_weights(p_grid.z - f32(bz));
+  let h = params.grid_spacing_m;
+  let dx = (vec3<f32>(f32(bx), f32(bx + 1i), f32(bx + 2i)) - vec3<f32>(p_grid.x)) * h;
+  let dy = (vec3<f32>(f32(by), f32(by + 1i), f32(by + 2i)) - vec3<f32>(p_grid.y)) * h;
+  let dz = (vec3<f32>(f32(bz), f32(bz + 1i), f32(bz + 2i)) - vec3<f32>(p_grid.z)) * h;
   let scale = 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
   if (params.source_is_direction == 2u) {
-    // diag(A)_i,axis = dt / m_i sum_p (K V theta)_p dt (4 / h^2 w dpos_axis)^2
+    let diag_scale = ip_scalar(6u);
+    let kv_dt = kv * params.dt;
     for (var a = 0i; a < 3i; a = a + 1i) {
+      let wa = ip_weight_at(wx, a);
+      let dxa = ip_weight_at(dx, a);
+      let ni = bx + a;
       for (var b = 0i; b < 3i; b = b + 1i) {
+        let wab = wa * ip_weight_at(wy, b);
+        let dyb = ip_weight_at(dy, b);
+        let nj = by + b;
         for (var c = 0i; c < 3i; c = c + 1i) {
-          let ni = bx + a; let nj = by + b; let nk = bz + c;
+          let nk = bz + c;
           if (!ip_in_range(ni, nj, nk)) { continue; }
           let idx = ip_grid_index(ni, nj, nk);
           if (!(grid_nodes[idx * 2u].x > 0.0)) { continue; }
-          let w = ip_weight_at(wx, a) * ip_weight_at(wy, b) * ip_weight_at(wz, c);
-          let g = scale * w * (vec3<f32>(f32(ni), f32(nj), f32(nk)) - p_grid) * params.grid_spacing_m;
-          let d = kv * params.dt * g * g;
-          let diag_scale = ip_scalar(6u);
+          let w = wab * ip_weight_at(wz, c);
+          let g = scale * w * vec3<f32>(dxa, dyb, ip_weight_at(dz, c));
+          let d = kv_dt * g * g;
           ip_atomic_add_fixed(idx * 3u, d.x, diag_scale);
           ip_atomic_add_fixed(idx * 3u + 1u, d.y, diag_scale);
           ip_atomic_add_fixed(idx * 3u + 2u, d.z, diag_scale);
@@ -309,37 +329,114 @@ fn ip_particle_apply(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     return;
   }
+  let s_shift = i32(params.shift);
+  let interior = bx + s_shift >= 0 && by + s_shift >= 0 && bz + s_shift >= 0
+    && bx + s_shift + 2 < i32(params.grid_nx)
+    && by + s_shift + 2 < i32(params.grid_ny)
+    && bz + s_shift + 2 < i32(params.grid_nz);
+  let use_dir = params.source_is_direction != 0u;
   var div = 0.0;
+  var active_mask = 0u;
+  if (interior) {
+    let ny = params.grid_ny;
+    let nz = params.grid_nz;
+    let stride_x = ny * nz;
+    let base_idx = (u32(bx + s_shift) * ny + u32(by + s_shift)) * nz + u32(bz + s_shift);
+    var bit = 1u;
+    for (var a = 0u; a < 3u; a = a + 1u) {
+      let wa = wx[a];
+      let dxa = dx[a];
+      let row_x = base_idx + a * stride_x;
+      for (var b = 0u; b < 3u; b = b + 1u) {
+        let wab = wa * wy[b];
+        let dyb = dy[b];
+        let row_xy = row_x + b * nz;
+        for (var c = 0u; c < 3u; c = c + 1u) {
+          let idx = row_xy + c;
+          let node0 = grid_nodes[idx * 2u];
+          if (node0.x > 0.0) {
+            active_mask = active_mask | bit;
+            let w = wab * wz[c];
+            let source = select(node0.yzw, cg_p[idx].xyz, use_dir);
+            div = div + w * (source.x * dxa + source.y * dyb + source.z * dz[c]);
+          }
+          bit = bit << 1u;
+        }
+      }
+    }
+    let s = kv * params.dt * scale * scale * div;
+    if (s == 0.0) { return; }
+    let fixed_scale = ip_scalar(5u);
+    bit = 1u;
+    for (var a = 0u; a < 3u; a = a + 1u) {
+      let wa = wx[a];
+      let dxa = dx[a];
+      let row_x = base_idx + a * stride_x;
+      for (var b = 0u; b < 3u; b = b + 1u) {
+        let wab = wa * wy[b];
+        let dyb = dy[b];
+        let row_xy = row_x + b * nz;
+        for (var c = 0u; c < 3u; c = c + 1u) {
+          if ((active_mask & bit) != 0u) {
+            let idx = row_xy + c;
+            let sw = s * wab * wz[c];
+            ip_atomic_add_fixed(idx * 3u, sw * dxa, fixed_scale);
+            ip_atomic_add_fixed(idx * 3u + 1u, sw * dyb, fixed_scale);
+            ip_atomic_add_fixed(idx * 3u + 2u, sw * dz[c], fixed_scale);
+          }
+          bit = bit << 1u;
+        }
+      }
+    }
+    return;
+  }
+  var bit = 1u;
   for (var a = 0i; a < 3i; a = a + 1i) {
+    let wa = ip_weight_at(wx, a);
+    let dxa = ip_weight_at(dx, a);
+    let ni = bx + a;
     for (var b = 0i; b < 3i; b = b + 1i) {
+      let wab = wa * ip_weight_at(wy, b);
+      let dyb = ip_weight_at(dy, b);
+      let nj = by + b;
       for (var c = 0i; c < 3i; c = c + 1i) {
-        let ni = bx + a; let nj = by + b; let nk = bz + c;
-        if (!ip_in_range(ni, nj, nk)) { continue; }
-        let idx = ip_grid_index(ni, nj, nk);
-        if (!(grid_nodes[idx * 2u].x > 0.0)) { continue; }
-        let w = ip_weight_at(wx, a) * ip_weight_at(wy, b) * ip_weight_at(wz, c);
-        let source = select(grid_nodes[idx * 2u].yzw, cg_p[idx].xyz, params.source_is_direction != 0u);
-        let dpos = (vec3<f32>(f32(ni), f32(nj), f32(nk)) - p_grid) * params.grid_spacing_m;
-        div = div + scale * w * dot(source, dpos);
+        let nk = bz + c;
+        if (ip_in_range(ni, nj, nk)) {
+          let idx = ip_grid_index(ni, nj, nk);
+          let node0 = grid_nodes[idx * 2u];
+          if (node0.x > 0.0) {
+            active_mask = active_mask | bit;
+            let w = wab * ip_weight_at(wz, c);
+            let source = select(node0.yzw, cg_p[idx].xyz, use_dir);
+            div = div + w * (source.x * dxa + source.y * dyb + source.z * ip_weight_at(dz, c));
+          }
+        }
+        bit = bit << 1u;
       }
     }
   }
-  let s = kv * params.dt * div;
+  let s = kv * params.dt * scale * scale * div;
   if (s == 0.0) { return; }
   let fixed_scale = ip_scalar(5u);
+  bit = 1u;
   for (var a = 0i; a < 3i; a = a + 1i) {
+    let wa = ip_weight_at(wx, a);
+    let dxa = ip_weight_at(dx, a);
+    let ni = bx + a;
     for (var b = 0i; b < 3i; b = b + 1i) {
+      let wab = wa * ip_weight_at(wy, b);
+      let dyb = ip_weight_at(dy, b);
+      let nj = by + b;
       for (var c = 0i; c < 3i; c = c + 1i) {
-        let ni = bx + a; let nj = by + b; let nk = bz + c;
-        if (!ip_in_range(ni, nj, nk)) { continue; }
-        let idx = ip_grid_index(ni, nj, nk);
-        if (!(grid_nodes[idx * 2u].x > 0.0)) { continue; }
-        let w = ip_weight_at(wx, a) * ip_weight_at(wy, b) * ip_weight_at(wz, c);
-        let dpos = (vec3<f32>(f32(ni), f32(nj), f32(nk)) - p_grid) * params.grid_spacing_m;
-        let f = s * scale * w * dpos;
-        ip_atomic_add_fixed(idx * 3u, f.x, fixed_scale);
-        ip_atomic_add_fixed(idx * 3u + 1u, f.y, fixed_scale);
-        ip_atomic_add_fixed(idx * 3u + 2u, f.z, fixed_scale);
+        if ((active_mask & bit) != 0u) {
+          let nk = bz + c;
+          let idx = ip_grid_index(ni, nj, nk);
+          let sw = s * wab * ip_weight_at(wz, c);
+          ip_atomic_add_fixed(idx * 3u, sw * dxa, fixed_scale);
+          ip_atomic_add_fixed(idx * 3u + 1u, sw * dyb, fixed_scale);
+          ip_atomic_add_fixed(idx * 3u + 2u, sw * ip_weight_at(dz, c), fixed_scale);
+        }
+        bit = bit << 1u;
       }
     }
   }
@@ -357,7 +454,10 @@ fn ip_clear_iteration(@builtin(global_invocation_id) id: vec3<u32>) {
 fn ip_particle_kv_max(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) local: u32,
     @builtin(workgroup_id) group: vec3<u32>) {
   var kv = 0.0;
-  if (id.x < params.particle_count) { kv = ip_particle_weight(id.x); }
+  if (id.x < params.particle_count) {
+    kv = ip_particle_weight(id.x);
+    partials[ip_particle_kv_offset() + id.x] = kv;
+  }
   partial[local] = kv;
   workgroupBarrier();
   var stride = 32u;
@@ -667,7 +767,10 @@ function workspaceFor(device, cache, { gridNodeCount, particleCount }) {
     cgP: make('ulg-sph-implicit-pressure-cg-p', nodes * NODE_VEC4_BYTES),
     cgQ: make('ulg-sph-implicit-pressure-cg-q', nodes * NODE_VEC4_BYTES),
     scalars: make('ulg-sph-implicit-pressure-scalars', 64),
-    partials: make('ulg-sph-implicit-pressure-partials', Math.ceil(Math.max(2 * nodes, particles) / 64) * 4 + 16),
+    partials: make(
+      'ulg-sph-implicit-pressure-partials',
+      (Math.max(2 * Math.ceil(nodes / 64), Math.ceil(particles / 64)) + particles + 4) * 4
+    ),
     params: [0, 1, 2].map((source) => make(`ulg-sph-implicit-pressure-params-${source}`, PARAMS_BYTES,
       S.UNIFORM | S.COPY_DST)),
     bindGroups: new Map()
@@ -773,9 +876,13 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
   const forDiagonal = bindGroup(2);
   const nodeGroups = Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64));
   const particleGroups = Math.max(1, Math.ceil(particleCount / 64));
-  // Under the per-pass timestamp census (diagnostic only) each kernel gets its
-  // own labelled pass so its GPU time is attributable; otherwise one pass.
-  const splitPasses = Boolean(device.__ulgPassTimestampCensus);
+  // Keep all CG dispatches in a single compute pass by default so pass-census
+  // probes measure real production pass counts (set __ulgPassCensusSplitImplicit
+  // only when drilling down per-kernel CG timings).
+  const splitPasses = Boolean(
+    device.__ulgPassTimestampCensus
+    && globalThis.__ulgPassCensusSplitImplicit === true
+  );
   let pass = splitPasses ? null
     : encoder.beginComputePass({ label: 'ulg-sph-implicit-pressure', ...(timestampPassExtras ?? {}) });
   let dispatches = 0;

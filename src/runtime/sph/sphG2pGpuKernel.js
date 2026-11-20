@@ -62,6 +62,7 @@ import {
   requestResidentPresentationSubmissionGap
 } from './residentPresentationSubmissionGap.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
@@ -70,6 +71,7 @@ import {
   deferSubmittedWorkCleanup,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  releaseQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
   submitQueueOrderedProducerWorkAndCleanup,
@@ -4664,8 +4666,29 @@ async function runMlsMpmG2pWebGpuImpl({
   const thermoBuffer = borrowedThermoBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-thermo-in', sphParticleState.thermo));
   const mechanicsBuffer = borrowedMechanicsBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-mechanics-in', mlsMpmParticleState.mechanics));
   const gridBuffer = borrowedGridBuffer || ownAllocation(writeStorageBuffer(device, 'ulg-mls-mpm-g2p-grid-in', gridUpdate.updatedGridNodes));
-  const outStateBuffer = createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const outMechanicsBuffer = createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const useQueueOrderedPool = Boolean(
+    readbackMode === NO_FULL_READBACK_MODE
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const outStateUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const outStateBuffer = useQueueOrderedPool
+    ? ownAllocation(tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-mls-mpm-g2p-state-out',
+        label: 'ulg-mls-mpm-g2p-state-out',
+        size: Math.max(4, stateByteLength),
+        usage: outStateUsage
+      }), device))
+    : createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: outStateUsage });
+  const outMechanicsBuffer = useQueueOrderedPool
+    ? ownAllocation(tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-mls-mpm-g2p-mechanics-out',
+        label: 'ulg-mls-mpm-g2p-mechanics-out',
+        size: Math.max(4, mechanicsByteLength),
+        usage: outMechanicsUsage
+      }), device))
+    : createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: outMechanicsUsage });
   const g2pWorkspace = mechanicsFieldRequired
     ? fieldRuntime?.g2pWorkspaceForExecution?.(fieldExecution) ?? null
     : null;
@@ -5422,7 +5445,15 @@ async function runMlsMpmG2pWebGpuImpl({
         for (let attempt = 0; attempt < 2; attempt += 1) {
           if (state === true && !outputStateBufferDestroyed) {
             try {
-              outStateBuffer.destroy?.();
+              if (useQueueOrderedPool) {
+                releaseQueueOrderedPooledBuffer(device, outStateBuffer, {
+                  bucketKey: 'ulg-mls-mpm-g2p-state-out',
+                  size: Math.max(4, stateByteLength),
+                  usage: outStateUsage
+                });
+              } else {
+                outStateBuffer.destroy?.();
+              }
               outputStateBufferDestroyed = true;
               if (origin) origin.outputStateRetired = true;
             } catch (error) {
@@ -5431,7 +5462,15 @@ async function runMlsMpmG2pWebGpuImpl({
           }
           if (mechanics === true && !outputMechanicsBufferDestroyed) {
             try {
-              outMechanicsBuffer.destroy?.();
+              if (useQueueOrderedPool) {
+                releaseQueueOrderedPooledBuffer(device, outMechanicsBuffer, {
+                  bucketKey: 'ulg-mls-mpm-g2p-mechanics-out',
+                  size: Math.max(4, mechanicsByteLength),
+                  usage: outMechanicsUsage
+                });
+              } else {
+                outMechanicsBuffer.destroy?.();
+              }
               outputMechanicsBufferDestroyed = true;
               if (origin) origin.outputMechanicsRetired = true;
             } catch (error) {

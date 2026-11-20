@@ -19046,6 +19046,107 @@ function uniqueStringList(values = []) {
   return [...new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))];
 }
 
+export function validateFusedResidentLawPlan(plan) {
+  const errors = [];
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.stages)) {
+    return Object.freeze({
+      valid: false,
+      errors: Object.freeze(['fused-law-plan-invalid-structure']),
+      stageCount: 0,
+      exclusiveWritersByResource: Object.freeze({}),
+      accumulatorsByResource: Object.freeze({})
+    });
+  }
+  const order = Array.isArray(plan.requiredStageOrder) ? plan.requiredStageOrder : [];
+  const orderIndex = new Map(order.map((stageId, idx) => [stageId, idx]));
+  const seenStageIds = new Set();
+  const exclusiveWritersByResource = new Map();
+  const accumulatorsByResource = new Map();
+  const handoffCompatibleResources = new Set([
+    'sph-particle-state',
+    'sph-thermo-phase',
+    'mls-mpm-mechanics',
+    'mls-mpm-grid-velocity'
+  ]);
+
+  for (const stage of plan.stages) {
+    if (!stage || typeof stage !== 'object') {
+      errors.push('stage-entry-not-object');
+      continue;
+    }
+    const id = String(stage.id || '').trim();
+    if (!id) {
+      errors.push('stage-missing-id');
+      continue;
+    }
+    if (seenStageIds.has(id)) {
+      errors.push(`duplicate-stage-id:${id}`);
+    }
+    seenStageIds.add(id);
+    if (!stage.lawNodeId || !stage.orderConstraint) {
+      errors.push(`stage-missing-contract-metadata:${id}`);
+    }
+    const writes = Array.isArray(stage.writes) ? stage.writes : [];
+    const accumulates = Array.isArray(stage.accumulates) ? stage.accumulates : [];
+    const writeSet = new Set(writes);
+    for (const acc of accumulates) {
+      if (writeSet.has(acc)) {
+        errors.push(`stage-writes-and-accumulates-same-resource:${id}:${acc}`);
+      }
+      if (!accumulatorsByResource.has(acc)) accumulatorsByResource.set(acc, []);
+      accumulatorsByResource.get(acc).push(id);
+    }
+    for (const resource of writes) {
+      if (!exclusiveWritersByResource.has(resource)) {
+        exclusiveWritersByResource.set(resource, []);
+      }
+      const priorWriters = exclusiveWritersByResource.get(resource);
+      if (priorWriters.length > 0) {
+        const currentOrder = orderIndex.get(id);
+        const priorOrder = orderIndex.get(priorWriters[priorWriters.length - 1]);
+        const strictlyOrderedHandoff = (
+          handoffCompatibleResources.has(resource)
+          && Number.isInteger(priorOrder)
+          && Number.isInteger(currentOrder)
+          && currentOrder > priorOrder
+          && Array.isArray(stage.reads)
+          && stage.reads.includes(resource)
+        );
+        if (!strictlyOrderedHandoff) {
+          errors.push(
+            `illegal-double-writer:${resource}:${priorWriters[priorWriters.length - 1]}+${id}`
+          );
+        }
+      }
+      priorWriters.push(id);
+    }
+  }
+  return Object.freeze({
+    valid: errors.length === 0,
+    errors: Object.freeze(errors),
+    stageCount: plan.stages.length,
+    exclusiveWritersByResource: Object.freeze(
+      Object.fromEntries([...exclusiveWritersByResource.entries()].map(([k, v]) => [k, Object.freeze([...v])]))
+    ),
+    accumulatorsByResource: Object.freeze(
+      Object.fromEntries([...accumulatorsByResource.entries()].map(([k, v]) => [k, Object.freeze([...v])]))
+    )
+  });
+}
+
+export function assertValidFusedResidentLawPlan(plan) {
+  const validation = validateFusedResidentLawPlan(plan);
+  if (!validation.valid) {
+    const error = new Error(
+      `Invalid fused resident law plan: ${validation.errors.join(', ')}`
+    );
+    error.code = 'ERR_FUSED_RESIDENT_LAW_PLAN_INVALID';
+    error.validation = validation;
+    throw error;
+  }
+  return validation;
+}
+
 function createFusedResidentSidecarFusionPlan({
   requested = false,
   stepCount = 1,
@@ -19108,7 +19209,8 @@ function createFusedResidentSidecarFusionPlan({
       lawNodeId: 'ulg-sph-resident-product-mass-law',
       orderConstraint: 'before-mechanics-p2g',
       reads: ['resident-product-mass', 'sph-particle-state', 'mls-mpm-mechanics'],
-      writes: ['mls-mpm-grid-momentum'],
+      writes: [],
+      accumulates: ['mls-mpm-grid-momentum'],
       consumesRetainedBuffers: ['resident-product-mass-buffer'],
       producesRetainedBuffers: ['mls-mpm-grid-buffer'],
       fusionRequirement: 'p2g-must-consume-resident-product-mass-eos-sidecar'
@@ -19128,6 +19230,7 @@ function createFusedResidentSidecarFusionPlan({
       orderConstraint: 'before-mechanics-grid-update',
       reads: ['pressure-interface-force-rows', 'mls-mpm-grid-momentum'],
       writes: ['mls-mpm-grid-velocity'],
+      accumulates: ['mls-mpm-grid-force'],
       consumesRetainedBuffers: ['pressure-interface-force-rows-buffer'],
       producesRetainedBuffers: ['mls-mpm-updated-grid-buffer'],
       stateManagerAdmissionRequired: true,
@@ -19144,6 +19247,7 @@ function createFusedResidentSidecarFusionPlan({
       orderConstraint: 'after-mechanics-g2p-before-reaction',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'thermal-material-table'],
       writes: ['sph-particle-state', 'sph-thermo-phase'],
+      accumulates: ['exact-thermal-energy-ledger'],
       consumesRetainedBuffers: ['g2p-state-buffer', 'source-thermo-buffer'],
       producesRetainedBuffers: ['thermal-state-buffer', 'thermal-thermo-buffer'],
       fusionRequirement: 'thermal-runner-must-consume-retained-g2p-state-and-retain-state-thermo'
@@ -19160,6 +19264,7 @@ function createFusedResidentSidecarFusionPlan({
         : 'after-mechanics-g2p-before-mechanics-refresh',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
       writes: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'],
+      accumulates: ['exact-mass-ledger', 'exact-thermal-energy-ledger'],
       consumesRetainedBuffers: ['state-buffer', 'thermo-buffer', 'g2p-mechanics-buffer'],
       producesRetainedBuffers: ['reaction-state-buffer', 'reaction-thermo-buffer', 'resident-product-mass-buffer'],
       fusionRequirement: 'reaction-runner-must-retain-particle-and-product-mass-outputs'
@@ -19189,6 +19294,7 @@ function createFusedResidentSidecarFusionPlan({
         'sph-thermo-phase',
         'mls-mpm-mechanics'
       ],
+      accumulates: ['exact-mass-ledger'],
       consumesRetainedBuffers: [
         'thermal-or-reaction-state-buffer',
         'thermal-or-reaction-thermo-buffer',
@@ -19222,6 +19328,7 @@ function createFusedResidentSidecarFusionPlan({
         'prior-or-seed-dispersed-medium-optics'
       ],
       writes: ['fresh-dispersed-medium-optics'],
+      accumulates: [],
       consumesRetainedBuffers: [
         'phase-carrier-state-buffer',
         'phase-carrier-thermo-buffer',
@@ -19253,6 +19360,7 @@ function createFusedResidentSidecarFusionPlan({
         'after-thermal-reaction-or-phase-carrier-before-next-step-p2g',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'mechanics-material-table'],
       writes: ['mls-mpm-mechanics'],
+      accumulates: [],
       consumesRetainedBuffers: ['state-buffer', 'thermo-buffer', 'g2p-mechanics-buffer'],
       producesRetainedBuffers: ['mechanics-refresh-buffer'],
       conditionalRequired: 'required-when-thermal-or-reaction-changes-phase-without-mechanics-authority',
@@ -19282,7 +19390,7 @@ function createFusedResidentSidecarFusionPlan({
   const blockers = sidecarFusionRequired
     ? (sidecarFusionRunnable ? [] : ['sidecar-fusion-execution-not-implemented'])
     : [];
-  return {
+  const plan = {
     schema: ULG_MLS_MPM_FUSED_RESIDENT_SIDECAR_PLAN_SCHEMA,
     status: sidecarFusionRequired
       ? (thermalSidecarFusionRunnable
@@ -19332,6 +19440,8 @@ function createFusedResidentSidecarFusionPlan({
     scientificValidation: false,
     fullPhysicsValidation: false
   };
+  plan.lawDescriptorValidation = assertValidFusedResidentLawPlan(plan);
+  return plan;
 }
 
 function createFusedResidentSidecarStepEvidence({
@@ -41782,7 +41892,27 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   }
   const canonicalSpatialIntent = args.canonicalSpatialRequired === true
     || args.schroederSpatialEpochGeneration?.selected === true;
-  if (count > 1 && canonicalSpatialIntent) {
+  const canonicalSpatialEpochAdvancer = typeof args.canonicalSpatialEpochAdvancer === 'function'
+    ? args.canonicalSpatialEpochAdvancer
+    : null;
+  const canonicalSpatialValidityHorizon = args.canonicalSpatialValidityHorizon ?? null;
+  const canonicalSpatialHorizonAdmitted = Boolean(
+    canonicalSpatialValidityHorizon
+    && canonicalSpatialValidityHorizon.verified === true
+    && Number.isInteger(canonicalSpatialValidityHorizon.maxSteps)
+    && canonicalSpatialValidityHorizon.maxSteps >= count
+    && Number.isFinite(Number(canonicalSpatialValidityHorizon.maxDisplacementM))
+    && Number.isFinite(Number(canonicalSpatialValidityHorizon.spatialMarginM))
+    && Number(canonicalSpatialValidityHorizon.maxDisplacementM) >= 0
+    && Number(canonicalSpatialValidityHorizon.maxDisplacementM)
+      <= Number(canonicalSpatialValidityHorizon.spatialMarginM)
+  );
+  if (
+    count > 1
+    && canonicalSpatialIntent
+    && !canonicalSpatialEpochAdvancer
+    && !canonicalSpatialHorizonAdmitted
+  ) {
     const error = new Error(
       'Canonical spatial authority rejected before execution: one immutable hierarchy generation cannot span multiple position epochs'
     );
@@ -41790,6 +41920,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     error.status = 'canonical-spatial-generation-cannot-span-position-epochs';
     throw error;
   }
+  let currentCanonicalSpatialEpochGeneration =
+    args.schroederSpatialEpochGeneration ?? null;
   const resolvedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
   const resolvedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(compactSummaryScope);
   const resolvedActiveGridDispatchPlanRefreshMode = normalizeMlsMpmActiveGridPlanRefreshMode(
@@ -42257,6 +42389,18 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
 
   try {
     for (let index = 0; index < count; index += 1) {
+    if (index > 0 && canonicalSpatialIntent && canonicalSpatialEpochAdvancer) {
+      currentCanonicalSpatialEpochGeneration = await canonicalSpatialEpochAdvancer({
+        stepIndex: index,
+        stepCount: count,
+        device: resolvedDevice,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        previousGeneration: currentCanonicalSpatialEpochGeneration
+      });
+    }
     const summarizeStep = compactSummaryModeRequestsReadback(resolvedCompactSummaryMode)
       && (resolvedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY || index === count - 1);
     markSequenceProgress(useThermalSidecarDirectRunner
@@ -42276,6 +42420,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     });
     const stepArgs = {
       ...args,
+      ...(currentCanonicalSpatialEpochGeneration
+        ? { schroederSpatialEpochGeneration: currentCanonicalSpatialEpochGeneration }
+        : {}),
       sphParticleState,
       mlsMpmParticleState,
       sphParticleUpload,

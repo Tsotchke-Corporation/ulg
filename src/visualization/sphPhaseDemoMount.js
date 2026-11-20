@@ -157,14 +157,16 @@ const PHYSICAL_LAW_GROUPS = Object.freeze([
 
 
 // Density of the explicit room-air atmosphere at the standard-atmosphere
-// basis (rho * 101325 / p), for the implicit-atmosphere stand-in; undefined
-// (the 1.2041 kg/m^3 default) without an explicit atmosphere.
-function explicitAtmosphereReferenceDensityKgPerM3(inventory) {
+// basis (rho * 101325 / p), for the single-level implicit-atmosphere stand-in;
+// returns 0 when multi-level SS owns explicit air on levels matching parcel
+// size (retiring the implicit stand-in), and undefined without room air.
+function explicitAtmosphereReferenceDensityKgPerM3(inventory, { multiLevelExplicitAir = false } = {}) {
   const pressurePa = Number(inventory?.environment?.totalPressurePa);
   const massKg = Number(inventory?.totalGasMassKg);
   const volumeM3 = Number(inventory?.freeVolumeM3);
   if (inventory?.environment?.mode !== 'air'
     || !(pressurePa > 0) || !(massKg > 0) || !(volumeM3 > 0)) return undefined;
+  if (multiLevelExplicitAir === true) return 0;
   return (massKg / volumeM3) * 101325 / pressurePa;
 }
 
@@ -14362,7 +14364,11 @@ export async function mountSphPhaseDemoOverlay({
       // the default. Set it to 0 once air lives on SS levels matching its size
       // (plan/todo/first-class-air.md).
       ambientReferenceDensityKgPerM3:
-        explicitAtmosphereReferenceDensityKgPerM3(activeViewState?.environmentInitialization),
+        explicitAtmosphereReferenceDensityKgPerM3(activeViewState?.environmentInitialization, {
+          multiLevelExplicitAir:
+            Number(activeViewState?.schroederConfig?.maxLevel ?? 0)
+              > Number(activeViewState?.schroederConfig?.minLevel ?? 0)
+        }),
       mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
       tier0RealtimePacing: initialTier0RealtimePacing,
       observeCanonicalSpatialAuthority: initialObserveSpatialAuthority,

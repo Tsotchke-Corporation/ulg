@@ -870,6 +870,82 @@ test('cross-level transport binds original sources and keeps its buffers until c
   abortSchroederSpatialEpochTransaction(transaction);
 });
 
+test('cross-level transport meets the Section 3 dispatch budget with zero indirect dispatches per level pair', async () => {
+  const {
+    prepareSchroederChainCrossTransport,
+    resolveSchroederChainCrossTransport,
+    SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_INDIRECT_DISPATCHES_PER_PAIR,
+    SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_DIRECT_DISPATCHES_PER_PAIR
+  } = await import('../src/runtime/sph/schroederSpatialChainCrossTransportGpu.js');
+  const { buildMlsMpmMechanicsMaterialTable } = await import('../src/runtime/sph/sphMechanicsMaterialTable.js');
+  const { uploadMlsMpmMechanicsMaterialPhaseRecords } = await import('../src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
+  assert.equal(SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_INDIRECT_DISPATCHES_PER_PAIR, 0);
+  assert.ok(SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_INDIRECT_DISPATCHES_PER_PAIR <= 16);
+  assert.equal(SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_DIRECT_DISPATCHES_PER_PAIR, 6);
+  const f = twoLevelFixture({ mechanicsLevelCount: 3, phaseVolume: true });
+  f.device.limits.maxStorageBuffersPerShaderStage = 10;
+  f.device.createBindGroupLayout = (d) => d;
+  f.device.createPipelineLayout = (d) => d;
+  const transaction = createSchroederSpatialEpochTransaction({ ...f, mechanicsChainAuthoritative: true });
+  admitSchroederSpatialEpochTransactionReader(transaction, {
+    ...f,
+    readerId: SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,
+    phase: SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION
+  });
+  const table = buildMlsMpmMechanicsMaterialTable({
+    gas: {
+      molarMassKgPerMol: 0.028,
+      phases: [{
+        name: 'gas',
+        densityKgPerM3: 1,
+        cpJPerKgK: 1000,
+        dynamicViscosityPaS: 0.00001,
+        temperatureRange: [100, 1000]
+      }]
+    }
+  });
+  const upload = uploadMlsMpmMechanicsMaterialPhaseRecords(f.device, table);
+  const laws = f.generation.mechanicsLevelViews.map(() => ({
+    mechanicsMaterialTable: table,
+    mechanicsMaterialPhaseUpload: upload,
+    phaseVolumeInterfaceTransportRequired: true,
+    phaseVolumePressureScale: 0
+  }));
+  const handle = prepareSchroederChainCrossTransport({ device: f.device, transaction, localLawInputs: laws });
+  const owner = resolveSchroederChainCrossTransport(handle, f.device, transaction);
+  owner.encodeMoments(createFakeEncoder());
+  let directDispatches = 0;
+  let indirectDispatches = 0;
+  let computePasses = 0;
+  const countedEncoder = {
+    clearBuffer() {},
+    copyBufferToBuffer() {},
+    beginComputePass() {
+      computePasses += 1;
+      return {
+        setPipeline() {},
+        setBindGroup() {},
+        dispatchWorkgroups() { directDispatches += 1; },
+        dispatchWorkgroupsIndirect() { indirectDispatches += 1; },
+        end() {}
+      };
+    },
+    finish() { return {}; }
+  };
+  const pairField = f.buffer('pair-field-scratch');
+  const pairOriginal = f.buffer('pair-original-scratch');
+  owner.encodePair(countedEncoder, 0, pairField, pairField, pairOriginal, pairField, 1, { dt: 0.001, cflFactor: 0.4 });
+  assert.equal(indirectDispatches, 0, 'cross-transport exchange must use 0 indirect dispatches per level pair');
+  assert.equal(computePasses, 2, 'cross-transport exchange must stay within 2 compute passes per level pair');
+  assert.equal(directDispatches, 7, '1 prolong dispatch + 6 simultaneous cross-transport dispatches');
+  owner.submitted();
+  await handle.retire(Promise.resolve());
+  pairField.destroy();
+  pairOriginal.destroy();
+  upload.destroyMechanicsMaterialPhaseUpload();
+  abortSchroederSpatialEpochTransaction(transaction);
+});
+
 test('composite mechanics binds every current level and retains its arena until queue retirement', async () => {
   const f = twoLevelFixture({ mechanicsLevelCount: 6, phaseVolume: true, nativeP2g: true });
   f.device.createBindGroupLayout = d => d;

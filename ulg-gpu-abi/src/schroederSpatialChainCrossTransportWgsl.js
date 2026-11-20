@@ -2,9 +2,12 @@ import { schroederSpatialPhaseVolumePressureDragOperatorWgsl } from './schroeder
 import { schroederSpatialMechanicsSpeedBoundWgsl } from './schroederSpatialMechanicsCorrectionWgsl.js';
 
 // An adjacent pair exchanges impulses between its corrected fine composite
-// and native coarse fields. A fine node owns all its cohorts. The 6^3 colors
-// have disjoint trilinear coarse supports, so each pass observes prior reflux
-// without float atomics or a host solver. Complete affine support is mandatory.
+// and native coarse fields. A fine node owns all its cohorts. Rather than
+// iterating 6^3 = 216 indirect color passes per level pair, three direct
+// dispatches (count_coarse_overlap -> exchange_simultaneous -> apply_coarse_delta)
+// run all fine nodes simultaneously against frozen coarse velocities with exact
+// Gershgorin overlap scaling (guaranteeing nonnegative excess heat by
+// Cauchy-Schwarz) and CAS f32 accumulation into the impulse ledger scratch.
 export const schroederSpatialChainCrossTransportWgsl = /* wgsl */ `
 struct Params { words:array<vec4<u32>,16> };
 @group(0) @binding(0) var<storage,read> topology:array<u32>;
@@ -24,6 +27,18 @@ fn p(i:u32)->u32{return params.words[i/4u][i%4u];}
 fn f(i:u32)->f32{return bitcast<f32>(p(i));}
 fn finite(v:f32)->bool{return schroeder_phase_volume_finite_f32(v);}
 fn fail(mask:u32){atomicOr(&fine[27],mask);atomicOr(&coarse[27],mask);}
+fn atomic_add_f32_ledger(at:u32,delta:f32){
+  if(delta==0.0){return;}
+  if(!finite(delta)){fail(1024u);return;}
+  var old=atomicLoad(&impulse_ledger[at]);
+  loop{
+    let next=bitcast<f32>(old)+delta;
+    if(!finite(next)){fail(1024u);return;}
+    let res=atomicCompareExchangeWeak(&impulse_ledger[at],old,bitcast<u32>(next));
+    if(res.exchanged){return;}
+    old=res.old_value;
+  }
+}
 fn book_impulse(offset:u32,i:u32,j:vec3<f32>){
   for(var a=0u;a<3u;a++){
     let at=offset+i*3u+a;
@@ -114,6 +129,47 @@ fn apply(buffer:ptr<storage,array<atomic<u32>>,read_write>,i:u32,impulse:vec3<f3
   if(p(0)>0u&&(fine_moments[0]!=0x53435031u||fine_moments[2]!=3u||fine_moments[3]!=0u
     ||fine_moments[6]!=p(4)||fine_moments[23]!=4u||fine_moments[22]!=fine_keys[44])){fail(256u);}
 }
+fn count_overlap_pair(i:u32,candidate:vec4<u32>){
+  let k=key(i);
+  if(all(k.yzw==candidate.yzw)||(k.y<3u&&candidate.y<3u)){return;}
+  let a=load_row(&fine,i);if(a.x==0.0){return;}
+  let point=fine_position(i)/bitcast<f32>(topology[29])+vec3<f32>(f32(topology[27]));
+  let base=vec3<i32>(floor(point));let fraction=point-floor(point);
+  let dims=vec3<i32>(i32(topology[23]),i32(topology[24]),i32(topology[25]));
+  var indices:array<u32,8>;var count=0u;
+  for(var x=0;x<2;x++){for(var y=0;y<2;y++){for(var z=0;z<2;z++){
+    let side=vec3<i32>(x,y,z);let node=base+side;
+    let factors=select(vec3<f32>(1.0)-fraction,fraction,side==vec3<i32>(1));let w=factors.x*factors.y*factors.z;
+    if(w==0.0){continue;}
+    if(!finite(w)||w<=0.0||w>1.0){fail(512u);return;}
+    if(any(node<vec3<i32>(0))||any(node>=dims)){return;}
+    let dense=u32((node.x*dims.y+node.y)*dims.z+node.z);
+    let recipient=vec4<u32>(dense,candidate.yzw);let j=coarse_lower(recipient);
+    if(j>=atomicLoad(&coarse[17])||any(coarse_key(j)!=recipient)){return;}
+    let b=load_row(&coarse,j);let m=coarse_moment(j);
+    if(b.x==0.0&&m.x==0.0){return;}
+    if(!(b.x>0.0)||!(m.x>0.0)||coarse_moments[j*12u+9u]!=3u){fail(512u);return;}
+    indices[count]=j;count++;
+  }}}
+  let scratch=p(32);
+  for(var e=0u;e<count;e++){
+    atomicAdd(&impulse_ledger[scratch+indices[e]*5u+4u],1u);
+  }
+}
+@compute @workgroup_size(64) fn count_coarse_overlap(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>){
+  let i=id.x+id.y*groups.x*64u;
+  if(atomicLoad(&fine[27])!=0u||atomicLoad(&coarse[27])!=0u||i>=topology[35]){return;}
+  let k=key(i);if(i>0u&&key(i-1u).x==k.x){return;}
+  var stop=i+1u;while(stop<topology[35]&&key(stop).x==k.x){stop++;}
+  for(var field=i;field<stop;field++){
+    let point=fine_position(field)/bitcast<f32>(topology[29])+vec3<f32>(f32(topology[27]));
+    let node=vec3<i32>(floor(point));let dims=vec3<i32>(i32(topology[23]),i32(topology[24]),i32(topology[25]));
+    if(any(node<vec3<i32>(0))||any(node>=dims)){continue;}
+    let dense=u32((node.x*dims.y+node.y)*dims.z+node.z);
+    var candidate=coarse_lower(vec4<u32>(dense,0u,0u,0u));
+    while(candidate<atomicLoad(&coarse[17])&&coarse_key(candidate).x==dense){count_overlap_pair(field,coarse_key(candidate));candidate++;}
+  }
+}
 fn exchange(i:u32,candidate:vec4<u32>){
   let k=key(i);
   // Same material/phase/domain is already one composite mechanics cohort.
@@ -123,7 +179,10 @@ fn exchange(i:u32,candidate:vec4<u32>){
   let point=fine_position(i)/bitcast<f32>(topology[29])+vec3<f32>(f32(topology[27]));
   let base=vec3<i32>(floor(point));let fraction=point-floor(point);
   let dims=vec3<i32>(i32(topology[23]),i32(topology[24]),i32(topology[25]));
-  var indices:array<u32,8>;var weights:array<f32,8>;var count=0u;
+  let scratch=p(32);
+  var indices:array<u32,8>;var weights:array<f32,8>;var overlaps:array<f32,8>;
+  var coarse_mass:array<f32,8>;var coarse_vel:array<vec3<f32>,8>;
+  var count=0u;
   var mass=0.0;var inverse=0.0;var bm=vec4<f32>(0.0);var bv=vec3<f32>(0.0);var sum=0.0;
   for(var x=0;x<2;x++){for(var y=0;y<2;y++){for(var z=0;z<2;z++){
     let side=vec3<i32>(x,y,z);let node=base+side;
@@ -139,16 +198,18 @@ fn exchange(i:u32,candidate:vec4<u32>){
     let b=load_row(&coarse,j);let m=coarse_moment(j);
     if(b.x==0.0&&m.x==0.0){return;}
     if(!(b.x>0.0)||!(m.x>0.0)||coarse_moments[j*12u+9u]!=3u){fail(512u);return;}
-    indices[count]=j;weights[count]=w;count++;sum+=w;
-    mass+=w*b.x;inverse+=w*w/b.x;bm+=w*m;bv+=w*(b.yzw/b.x);
+    let ov=f32(max(1u,atomicLoad(&impulse_ledger[scratch+j*5u+4u])));
+    let bv_j=b.yzw/b.x;
+    indices[count]=j;weights[count]=w;overlaps[count]=ov;coarse_mass[count]=b.x;coarse_vel[count]=bv_j;
+    count++;sum+=w;
+    mass+=w*b.x;inverse+=w*w*ov/b.x;bm+=w*m;bv+=w*bv_j;
   }}}
   if(abs(sum-1.0)>4e-6||!(am.x>0.0)||!(a.x>0.0)||!finite(inverse)||!(inverse>0.0)){fail(512u);return;}
   let response=1.0/a.x+inverse;
   var impulse=vec3<f32>(0.0);var heat=0.0;
   if(k.y>=3u&&candidate.y>=3u){
-    // Stiff binary mixture projection with the actual stencil response mass.
-    // Multiple routes are applied in order; no global mixture convergence is
-    // inferred from one sweep of these conservative local projections.
+    // Stiff binary mixture projection with Gershgorin overlap response mass.
+    // Exact linear/angular momentum and nonnegative excess heat by Cauchy-Schwarz.
     impulse=(bv-av)/response;heat=0.5*dot(impulse,bv-av);
   }else{
     let ac=material(k);let bc=material(candidate);
@@ -169,16 +230,20 @@ fn exchange(i:u32,candidate:vec4<u32>){
   if(!apply(&fine,i,impulse,0.5*heat)){fail(1024u);return;}
   book_impulse(p(30),i,impulse);
   for(var e=0u;e<count;e++){
-    if(!apply(&coarse,indices[e],-weights[e]*impulse,0.5*weights[e]*heat)){fail(1024u);return;}
-    book_impulse(p(31),indices[e],-weights[e]*impulse);
+    let dp=-weights[e]*impulse;
+    let d_budget=dot(dp,coarse_vel[e])+0.5*overlaps[e]*dot(dp,dp)/coarse_mass[e]+0.5*weights[e]*heat;
+    if(!finite(d_budget)){fail(1024u);return;}
+    let base_s=scratch+indices[e]*5u;
+    atomic_add_f32_ledger(base_s,dp.x);
+    atomic_add_f32_ledger(base_s+1u,dp.y);
+    atomic_add_f32_ledger(base_s+2u,dp.z);
+    atomic_add_f32_ledger(base_s+3u,d_budget);
   }
 }
-@compute @workgroup_size(64) fn exchange_color(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>){
+@compute @workgroup_size(64) fn exchange_simultaneous(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>){
   let i=id.x+id.y*groups.x*64u;
   if(atomicLoad(&fine[27])!=0u||atomicLoad(&coarse[27])!=0u||i>=topology[35]){return;}
   let k=key(i);if(i>0u&&key(i-1u).x==k.x){return;}
-  let coord=vec3<u32>(k.x/(topology[21]*topology[22]),(k.x/topology[22])%topology[21],k.x%topology[22]);
-  if((coord.x%6u)*36u+(coord.y%6u)*6u+coord.z%6u!=p(1)){return;}
   var stop=i+1u;while(stop<topology[35]&&key(stop).x==k.x){stop++;}
   for(var field=i;field<stop;field++){
     let point=fine_position(field)/bitcast<f32>(topology[29])+vec3<f32>(f32(topology[27]));
@@ -188,6 +253,27 @@ fn exchange(i:u32,candidate:vec4<u32>){
     var candidate=coarse_lower(vec4<u32>(dense,0u,0u,0u));
     while(candidate<atomicLoad(&coarse[17])&&coarse_key(candidate).x==dense){exchange(field,coarse_key(candidate));candidate++;}
   }
+}
+@compute @workgroup_size(64) fn apply_coarse_delta(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>){
+  let j=id.x+id.y*groups.x*64u;
+  if(j>=atomicLoad(&coarse[17])){return;}
+  let base_s=p(32)+j*5u;
+  let dpx=bitcast<f32>(atomicExchange(&impulse_ledger[base_s],0u));
+  let dpy=bitcast<f32>(atomicExchange(&impulse_ledger[base_s+1u],0u));
+  let dpz=bitcast<f32>(atomicExchange(&impulse_ledger[base_s+2u],0u));
+  let d_budget=bitcast<f32>(atomicExchange(&impulse_ledger[base_s+3u],0u));
+  atomicStore(&impulse_ledger[base_s+4u],0u);
+  if(atomicLoad(&fine[27])!=0u||atomicLoad(&coarse[27])!=0u){return;}
+  let dp=vec3<f32>(dpx,dpy,dpz);
+  if(all(dp==vec3<f32>(0.0))&&d_budget==0.0){return;}
+  let row=load_row(&coarse,j);
+  let at=64u+j*8u;
+  let momentum=row.yzw+dp;
+  let budget=bitcast<f32>(atomicLoad(&coarse[at+7u]))+d_budget;
+  if(!finite(budget)||budget<0.0||!schroeder_phase_volume_finite_vec3(momentum)){fail(1024u);return;}
+  for(var a=0u;a<3u;a++){atomicStore(&coarse[at+1u+a],bitcast<u32>(momentum[a]));}
+  atomicStore(&coarse[at+7u],bitcast<u32>(budget));
+  book_impulse(p(31),j,dp);
 }
 fn validate_row(buffer:ptr<storage,array<atomic<u32>>,read_write>,i:u32,spacing:f32)->bool{
   if(i>=atomicLoad(&(*buffer)[17])){return true;}

@@ -11,6 +11,8 @@ import { snapshotSchroederChainLocalLaws, schroederChainLocalLawsMatch } from '.
 const owners = new WeakMap();
 const IDENTITY = ['generationId','deviceOrdinal','laneOrdinal','leaseToken','sourceFamilyId',
   'storageGeneration','physicsTick','physicsSubstep','positionEpoch','topologyEpoch','chartEpoch','levelEpoch','supportEpoch'];
+export const SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_INDIRECT_DISPATCHES_PER_PAIR = 0;
+export const SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_DIRECT_DISPATCHES_PER_PAIR = 6;
 
 export function resolveSchroederChainCrossTransport(handle, device, transaction, laws = null) {
   const owner = owners.get(handle);
@@ -55,10 +57,9 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
   try {
     const module=device.createShaderModule({code:schroederSpatialChainCrossTransportWgsl,label:'ulg-chain-cross-transport'});
     const layout=device.createBindGroupLayout({entries:Array.from({length:11},(_,binding)=>({binding,visibility:4,
-      buffer:{type:binding===8?'uniform':[6,7,9].includes(binding)?'storage':'read-only-storage',
-        ...(binding===8?{hasDynamicOffset:true,minBindingSize:256}:{})}}))});
+      buffer:{type:binding===8?'uniform':[6,7,9].includes(binding)?'storage':'read-only-storage'}}))});
     const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
-    const pipelines=['initialize_cross','exchange_color','validate_cross','seal_cross','admit_cross_angular'].map(entryPoint=>
+    const pipelines=['initialize_cross','count_coarse_overlap','exchange_simultaneous','apply_coarse_delta','validate_cross','seal_cross','admit_cross_angular'].map(entryPoint=>
       device.createComputePipeline({layout:pipelineLayout,compute:{module,entryPoint}}));
     const accounting=(code,entryPoint,types)=>{
       const m=device.createShaderModule({code});
@@ -72,12 +73,14 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
     const region=n=>{const offset=ledgerWords;ledgerWords+=n*3;return offset;};
     const parentOffsets=parents.map(p=>region(p.parentFieldCapacity));
     const nativeOffsets=levels.map(v=>region(v.mechanicsFieldView.fieldCapacity));
+    const maxCoarseCapacity=Math.max(1,...levels.slice(1).map(v=>v.mechanicsFieldView.fieldCapacity));
+    const coarseScratchOffset=ledgerWords;
+    ledgerWords+=maxCoarseCapacity*5;
     if(ledgerWords*4>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize)) {
       throw new RangeError('Cross transport impulse accounting exceeds device storage limits');
     }
     const ledger=device.createBuffer({size:ledgerWords*4,usage:140,label:'ulg-chain-cross-impulse-ledger'});allocated.push(ledger);
-    const stride=Math.max(256,device.limits?.minUniformBufferOffsetAlignment??256);
-    const uniforms=parents.map(()=>{const b=device.createBuffer({size:stride*216,usage:72,label:'ulg-chain-cross-colors'});allocated.push(b);return b;});
+    const uniforms=parents.map(()=>{const b=device.createBuffer({size:256,usage:72,label:'ulg-chain-cross-params'});allocated.push(b);return b;});
     const reductionUniforms=levels.map((_,i)=>{
       const b=device.createBuffer({size:256,usage:72,label:'ulg-chain-cross-angular-params'});allocated.push(b);
       const words=new Uint32Array(64);words[33]=nativeOffsets[i];device.queue.writeBuffer(b,0,words);return b;
@@ -93,35 +96,38 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
       },
       encodePair(encoder,index,fineBuffer,coarseBuffer,originalBuffer,fineGeometryBuffer,completionOrdinal,forces){
         validate();if(!phase || !volume.ownsExecution(phase)||submitted)throw new TypeError('Cross transport phase source is stale');
-        const parent=parents[index],data=new Uint32Array(stride/4*216);
-        for(let color=0;color<216;color++){
-          const words=data.subarray(color*stride/4,(color+1)*stride/4),floats=new Float32Array(words.buffer,words.byteOffset,words.length);
-          words.set([index?1:0,color,0,parent.completionOrdinal,phase.completionOrdinal,completionOrdinal,phaseUpload.phaseRecordCount]);
-          floats[8]=forces.dt;floats[9]=forces.cflFactor;floats[10]=laws[index].phaseVolumeDragScale;floats[11]=laws[index].phaseVolumeMaxImpulseFraction;
-          words.set(IDENTITY.map(k=>parent[k]),16);
-          words[29]=parentOffsets[index];words[30]=index?parentOffsets[index-1]:nativeOffsets[0];words[31]=nativeOffsets[index+1];
-        }
-        device.queue.writeBuffer(uniforms[index],0,data);
+        const parent=parents[index],words=new Uint32Array(64),floats=new Float32Array(words.buffer);
+        words.set([index?1:0,0,0,parent.completionOrdinal,phase.completionOrdinal,completionOrdinal,phaseUpload.phaseRecordCount]);
+        floats[8]=forces.dt;floats[9]=forces.cflFactor;floats[10]=laws[index].phaseVolumeDragScale;floats[11]=laws[index].phaseVolumeMaxImpulseFraction;
+        words.set(IDENTITY.map(k=>parent[k]),16);
+        words[29]=parentOffsets[index];words[30]=index?parentOffsets[index-1]:nativeOffsets[0];words[31]=nativeOffsets[index+1];
+        words[32]=coarseScratchOffset;
+        device.queue.writeBuffer(uniforms[index],0,words);
         const buffers=[parent.parentFieldViewBuffer,index?parents[index-1].parentFieldViewBuffer:levels[0].phaseVolumeMoment.momentBuffer,
           index?phase.phaseMomentBuffers[index-1]:levels[0].phaseVolumeMoment.momentBuffer,
           levels[index+1].phaseVolumeMoment.momentBuffer,phase.phaseMomentBuffers[index],records,fineBuffer,coarseBuffer,uniforms[index],ledger,fineGeometryBuffer];
         const group=device.createBindGroup({label:'ulg-chain-cross-transport-bind-group',layout,
-          entries:buffers.map((buffer,binding)=>({binding,resource:{buffer,...(binding===8?{size:256}:{})}}))});
+          entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
         groups[index]=group;
-        const count=Math.max(index?parents[index-1].parentFieldCapacity:levels[0].mechanicsFieldView.fieldCapacity,levels[index+1].mechanicsFieldView.fieldCapacity);
-        const dispatchGroups=Math.ceil(count/64),max=device.limits?.maxComputeWorkgroupsPerDimension??65535;
+        const fineCapacity=Math.max(1,index?parents[index-1].parentFieldCapacity:levels[0].mechanicsFieldView.fieldCapacity);
+        const coarseCapacity=Math.max(1,levels[index+1].mechanicsFieldView.fieldCapacity);
+        const count=Math.max(fineCapacity,coarseCapacity);
+        const max=device.limits?.maxComputeWorkgroupsPerDimension??65535;
+        const dispatch2d=(passObj,elements)=>{const g=Math.max(1,Math.ceil(elements/64));passObj.dispatchWorkgroups(Math.min(g,max),Math.ceil(g/max));};
         const accountingPass=encoder.beginComputePass({label:'ulg-chain-cross-impulse-prolong'});
         accountingPass.setPipeline(prolong.pipeline);
         accountingPass.setBindGroup(0,device.createBindGroup({layout:prolong.layout,entries:
-          [parent.parentFieldViewBuffer,originalBuffer,fineBuffer,coarseBuffer,ledger,uniforms[index]].map((buffer,binding)=>({binding,resource:{buffer,...(binding===5?{size:256}:{})}}))}));
-        accountingPass.dispatchWorkgroups(Math.min(dispatchGroups,max),Math.ceil(dispatchGroups/max));accountingPass.end();
+          [parent.parentFieldViewBuffer,originalBuffer,fineBuffer,coarseBuffer,ledger,uniforms[index]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
+        dispatch2d(accountingPass,count);accountingPass.end();
         const pass=encoder.beginComputePass({label:`ulg-chain-cross-transport-${index}`});
-        pass.setBindGroup(0,group,[0]);pass.setPipeline(pipelines[0]);pass.dispatchWorkgroups(1);
-        pass.setPipeline(pipelines[1]);
-        for(let color=0;color<216;color++){pass.setBindGroup(0,group,[color*stride]);pass.dispatchWorkgroupsIndirect(parent.parentFieldViewBuffer,64*4);}
-        pass.setBindGroup(0,group,[0]);pass.setPipeline(pipelines[2]);
-        pass.dispatchWorkgroups(Math.min(dispatchGroups,max),Math.ceil(dispatchGroups/max));
-        pass.setPipeline(pipelines[3]);pass.dispatchWorkgroups(1);pass.end();
+        pass.setBindGroup(0,group);
+        pass.setPipeline(pipelines[0]);pass.dispatchWorkgroups(1);
+        pass.setPipeline(pipelines[1]);dispatch2d(pass,fineCapacity);
+        pass.setPipeline(pipelines[2]);dispatch2d(pass,fineCapacity);
+        pass.setPipeline(pipelines[3]);dispatch2d(pass,coarseCapacity);
+        pass.setPipeline(pipelines[4]);dispatch2d(pass,count);
+        pass.setPipeline(pipelines[5]);pass.dispatchWorkgroups(1);
+        pass.end();
       },
       encodeAdmission(encoder){
         for(const [i,level]of levels.entries()){
@@ -130,8 +136,8 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
           pass.setBindGroup(0,device.createBindGroup({layout:reduce.layout,entries:[field,ledger,reductionUniforms[i]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
           pass.dispatchWorkgroupsIndirect(field,60*4);pass.end();
         }
-        const pass=encoder.beginComputePass({label:'ulg-chain-cross-angular-admission'});pass.setBindGroup(0,groups[0],[0]);
-        pass.setPipeline(pipelines[4]);pass.dispatchWorkgroups(1);pass.end();
+        const pass=encoder.beginComputePass({label:'ulg-chain-cross-angular-admission'});pass.setBindGroup(0,groups[0]);
+        pass.setPipeline(pipelines[6]);pass.dispatchWorkgroups(1);pass.end();
       },
       submitted(){
         if(submitted||closed||!phase)throw new TypeError('Cross transport submission is stale');

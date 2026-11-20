@@ -102,9 +102,12 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
     throw new TypeError('Resident chain requires a native device, fresh per-interval hierarchy and explicit numerical inputs');
   }
   // These laws have separate existing authorities and must not silently vanish
-  // while their chain consumers are being integrated.
+  // while their chain consumers are being integrated. Ambient gas pressure is
+  // admitted whenever gasPressureMechanicsBoundaryEnabled wires the original
+  // chain gas-pressure consumer (prepareSchroederSpatialChainGasPressure).
   if (args.condensateExtraction || args.pressureInterfaceForceRowsBuffer || args.pressureInterfaceForceSolver
-      || args.externalGaugePressureEnabled || Number(args.ambientPressurePa) > 0
+      || args.externalGaugePressureEnabled
+      || (Number(args.ambientPressurePa) > 0 && args.gasPressureMechanicsBoundaryEnabled !== true)
       || args.schroederFarAggregateForceApplication || args.schroederParticleStorageMaterialization) {
     throw new TypeError('Resident chain requires its pressure, condensate and materialization consumers before adoption');
   }
@@ -119,7 +122,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
     import('../../../ulg-gpu-abi/src/index.js'), import('./schroederSpatialSuccessorSourceFamily.js')]);
   const closureOptions = {...args.closureOptions};
   for (const key of ['thermalStepOptions','mechanicsRefreshOptions','phaseCarrierTransferOptions',
-    'reactionTable','reactionStepOptions','reactionActivationWatchTable']) {
+    'reactionTable','reactionStepOptions','reactionActivationWatchTable','phaseSlotRefinement']) {
     if (args[key] !== undefined) closureOptions[key] = args[key];
   }
   for (const key of ['thermalStepOptions','mechanicsRefreshOptions','phaseCarrierTransferOptions','reactionStepOptions']) {

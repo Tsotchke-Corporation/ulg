@@ -236,30 +236,38 @@ export function createSchroederThermalDormancyStage({ device, particleCount, box
   const indirectDispatchBuffer = device.createBuffer({ label: 'ulg-thermal-dormancy-indirect',
     size: 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC });
   const groups = new Map();
+  function resolveGroup(stateBuffer, temperatureBuffer) {
+    let group = groups.get(stateBuffer)?.get(temperatureBuffer);
+    if (!group) {
+      group = device.createBindGroup({ layout: pipelines.reset_cells.bindGroupLayout,
+        entries: [params, stateBuffer, temperatureBuffer, cellBounds, dormantBuffer, countBuffer,
+          activeIndicesBuffer, indirectDispatchBuffer]
+          .map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      if (groups.size > 8) groups.clear();
+      if (!groups.has(stateBuffer)) groups.set(stateBuffer, new Map());
+      groups.get(stateBuffer).set(temperatureBuffer, group);
+    }
+    return group;
+  }
+  function encodeIntoPass(pass, { stateBuffer, thermoBuffer, temperatureBuffer = thermoBuffer }) {
+    const group = resolveGroup(stateBuffer, temperatureBuffer);
+    pass.setBindGroup(0, group);
+    for (const [entryPoint, groupsCount] of [
+      ['reset_cells', Math.ceil(Math.max(cellCount, 4) / 64)],
+      ['scatter_temperatures', Math.ceil(particleCount / 64)],
+      ['classify_sources', Math.ceil(particleCount / 64)],
+      ['finalize_dispatch', 1]
+    ]) {
+      pass.setPipeline(pipelines[entryPoint].pipeline);
+      pass.dispatchWorkgroups(groupsCount);
+    }
+  }
   return Object.freeze({
     cells, dormantBuffer, countBuffer, activeIndicesBuffer, indirectDispatchBuffer, indirectDispatchOffset: 0,
-    encode(encoder, { stateBuffer, thermoBuffer, temperatureBuffer = thermoBuffer }) {
-      let group = groups.get(stateBuffer)?.get(temperatureBuffer);
-      if (!group) {
-        group = device.createBindGroup({ layout: pipelines.reset_cells.bindGroupLayout,
-          entries: [params, stateBuffer, temperatureBuffer, cellBounds, dormantBuffer, countBuffer,
-            activeIndicesBuffer, indirectDispatchBuffer]
-            .map((buffer, binding) => ({ binding, resource: { buffer } })) });
-        if (groups.size > 8) groups.clear();
-        if (!groups.has(stateBuffer)) groups.set(stateBuffer, new Map());
-        groups.get(stateBuffer).set(temperatureBuffer, group);
-      }
+    encodeIntoPass,
+    encode(encoder, args) {
       const pass = encoder.beginComputePass({ label: 'ulg-thermal-dormancy' });
-      pass.setBindGroup(0, group);
-      for (const [entryPoint, groupsCount] of [
-        ['reset_cells', Math.ceil(Math.max(cellCount, 4) / 64)],
-        ['scatter_temperatures', Math.ceil(particleCount / 64)],
-        ['classify_sources', Math.ceil(particleCount / 64)],
-        ['finalize_dispatch', 1]
-      ]) {
-        pass.setPipeline(pipelines[entryPoint].pipeline);
-        pass.dispatchWorkgroups(groupsCount);
-      }
+      encodeIntoPass(pass, args);
       pass.end();
     },
     destroy() {

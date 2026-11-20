@@ -1129,3 +1129,33 @@ test('native WebGPU phase transfer performs a phase-pure conservative sweep and 
   nearlyEqual(native.failClosed.validLineageLiquidMass, 2.5);
   nearlyEqualVector(native.failClosed.validLineageLiquidFractions, [0, 1, 0, 0]);
 });
+
+test('G4 phaseDormancy coalesces classification, preflight, and apply into one compute pass and records phase receipt', async () => {
+  const { phaseWindowsFromThermalMaterialTable } = await import('../src/runtime/sph/schroederPhaseRadiationDormancyGpu.js');
+  const { openLawActivationReceiptRing } = await import('../src/runtime/sph/lawActivationReceiptRing.js');
+  const device = createFakeDevice();
+  const fixture = fakeStageFixture(device, 65);
+  const windows = phaseWindowsFromThermalMaterialTable(fixture.thermalMaterialTable);
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].materialId, 1);
+  assert.equal(windows[0].meltTemperatureK, Math.fround(273.15));
+
+  const ring = openLawActivationReceiptRing(device, { capacityPerLaw: 4 });
+  assert.ok(ring);
+  const copies = [];
+  const stage = createSphPhaseCarrierTransferWebGpuEncoderStage({
+    ...fixture,
+    phaseDormancy: { epsilonK: 0 }
+  });
+  const encoder = createFakeEncoder();
+  encoder.copyBufferToBuffer = (...args) => copies.push(args);
+  stage.encode(encoder);
+
+  assert.equal(encoder.passes.length, 1, 'G4 phase dormancy coalesces into a single compute pass');
+  assert.equal(encoder.passes[0].descriptor.label, 'ulg-sph-phase-carrier-transfer');
+  assert.equal(encoder.passes[0].dispatches.length, 5, 'reset, classify, finalize, preflight, apply');
+  assert.equal(stage.result.phaseDormancy?.schema, 'ulg.schroeder-phase-dormancy.v1');
+  assert.equal(stage.result.phaseDormancy?.epsilonK, 0);
+  assert.equal(ring.encodes.phase, 1, 'phase count copied into schedule lawActivationReceiptRing');
+  assert.equal(copies.length, 1);
+});

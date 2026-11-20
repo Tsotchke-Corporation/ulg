@@ -1,5 +1,6 @@
 import { encodeLawActivationCount } from './lawActivationReceiptRing.js';
 import { createSchroederThermalDormancyStage } from './schroederThermalDormancyGpu.js';
+import { createSchroederDerivedRadiationDormancyStage } from './schroederPhaseRadiationDormancyGpu.js';
 import { thermalPotentialGpuBindings, thermalPotentialLookupWgsl } from '../material/thermalPotentialGpu.js';
 
 export function createSchroederSpatialThermalPotentialPrepassWgsl() {
@@ -1024,6 +1025,31 @@ function acquireThermalDormancyStage(device, entry, config, particleCount, smoot
       radiusMultiplier: 2 * Math.max(1, RADIATION_PAIR_RANGE_RADII)
     });
     entry.thermalDormancyStages.set(key, stage);
+    entry.destroyers.push(() => stage.destroy());
+  }
+  return stage;
+}
+
+function acquireRadiationDormancyStage(device, entry, config, particleCount) {
+  const epsilonFluxWPerM2 = Number(config.radiationEpsilonFluxWPerM2) > 0
+    ? Number(config.radiationEpsilonFluxWPerM2)
+    : 0;
+  const key = [particleCount, epsilonFluxWPerM2].join('|');
+  entry.radiationDormancyStages ??= new Map();
+  let stage = entry.radiationDormancyStages.get(key);
+  if (!stage) {
+    stage = createSchroederDerivedRadiationDormancyStage({
+      device,
+      particleCount,
+      temperatureHeaderWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_HEADER_WORDS,
+      temperatureStrideWords: SCHROEDER_SPATIAL_THERMAL_DERIVED_ROW_WORDS,
+      temperatureWordOffset: 0,
+      emissivityWordOffset: 3,
+      flagRowWordOffset: 23,
+      uncertaintyWordOffset: thermalUncertaintyWord(particleCount),
+      epsilonFluxWPerM2
+    });
+    entry.radiationDormancyStages.set(key, stage);
     entry.destroyers.push(() => stage.destroy());
   }
   return stage;
@@ -5773,7 +5799,7 @@ const thermalProposalLedgerReplacements = Object.freeze([
       b_mass_kg
     );`,
     "canonical pair roles 4"],
-  [`    if (other_emissivity > 0.0) {
+  [`    if (other_emissivity > 0.0 && !radiation_source_dormant(other_index)) {
       let view_area_m2 = thermal_radiative_view_area_m2(
         self_radius_m,
         other_radius_m,
@@ -5793,7 +5819,7 @@ const thermalProposalLedgerReplacements = Object.freeze([
         other_pos_mass.w
       );
     }`,
-    `    if (other_emissivity > 0.0) {
+    `    if (other_emissivity > 0.0 && !radiation_source_dormant(other_index)) {
       let a_emissivity = select(self_emissivity, other_emissivity, pair_roles_swapped);
       let b_emissivity = select(other_emissivity, self_emissivity, pair_roles_swapped);
       let view_area_m2 = thermal_radiative_view_area_m2(
@@ -6564,12 +6590,10 @@ fn thermal_derived_word(particle_index: u32, component: u32) -> u32 {
   return atomicLoad(&thermal_derived[offset]);
 }
 
-// G4 thermal dormancy (plan/todo/g4-dynamic-laws-proposal.md). The flags are
-// written by schroederThermalDormancyGpu.js into the derived tail after the
-// ActiveSource rank sidecar, after the derived prepass and before the budget
-// pass; the tail is cleared with the derived buffer, so an unwritten flag is
-// active. The predicate is pair-conservative: a pair touching a dormant
-// source has |dT| <= epsilon_T, and both endpoints skip it.
+// G4 thermal & radiation dormancy (plan/todo/g4-dynamic-laws-proposal.md).
+// Bit 0 (1u) = thermal conduction/pair dormancy written by schroederThermalDormancyGpu.js.
+// Bit 1 (2u) = Stefan-Boltzmann radiation dormancy written by schroederPhaseRadiationDormancyGpu.js.
+// The tail is cleared with the derived buffer each step, so unwritten bits are active.
 fn thermal_source_dormant(particle_index: u32) -> bool {
   if (
     thermal_params.thermal_dormancy_enabled == 0u
@@ -6579,7 +6603,15 @@ fn thermal_source_dormant(particle_index: u32) -> bool {
     + thermal_params.particle_count * (THERMAL_DERIVED_ROW_WORDS + 1u)
     + particle_index;
   return word < arrayLength(&thermal_derived)
-    && atomicLoad(&thermal_derived[word]) != 0u;
+    && (atomicLoad(&thermal_derived[word]) & 1u) != 0u;
+}
+
+fn radiation_source_dormant(particle_index: u32) -> bool {
+  if (
+    thermal_params.thermal_dormancy_enabled == 0u
+    || particle_index >= thermal_params.particle_count
+  ) { return false; }
+  return thermal_derived_word(particle_index, 23u) != 0u;
 }
 
 struct ThermalMechanicalInterfaceLookup {
@@ -7576,9 +7608,9 @@ fn thermal_visit_fused_pair_cached(
       *local_count_overflow = true;
     }
   }
-  if (radiation_hit && self_emissivity > 0.0) {
+  if (radiation_hit && self_emissivity > 0.0 && !radiation_source_dormant(self_index)) {
     let other_emissivity = thermal_derived_value(other_index, 3u);
-    if (other_emissivity > 0.0) {
+    if (other_emissivity > 0.0 && !radiation_source_dormant(other_index)) {
       let view_area_m2 = thermal_radiative_view_area_m2(
         self_radius_m,
         other_radius_m,
@@ -11790,9 +11822,17 @@ export function runSchroederSpatialThermalProposalWebGpu({
         preparedLawConfig.smoothingLengthM
       )
     : null;
+  const radiationDormancyStage = thermalDormancyConfig
+    ? acquireRadiationDormancyStage(
+        device,
+        entry,
+        thermalDormancyConfig,
+        particleCount
+      )
+    : null;
 
   // front1: derived rows carry interface phase fronts and skin rows.
-  const directoryAbiCacheKey = `directory-v${directoryAbiVersion}.front2`;
+  const directoryAbiCacheKey = `directory-v${directoryAbiVersion}.front2.g4rad2`;
   const defaultThermalProposalWgsl = directoryV2
     ? schroederSpatialThermalProposalV2Wgsl
     : schroederSpatialThermalProposalWgsl;
@@ -12417,6 +12457,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     frozenStateBuffer: stateBuffer,
     frozenThermoBuffer: thermoBuffer,
     thermalDormancyStage,
+    radiationDormancyStage,
     responseUpload,
     preparedLawConfig,
     contactInterfaceReceipt,
@@ -12807,6 +12848,23 @@ export function runSchroederSpatialThermalProposalWebGpu({
           indirectDispatchBuffer: thermalDormancyStage.indirectDispatchBuffer,
           indirectDispatchOffset: thermalDormancyStage.indirectDispatchOffset ?? 0,
           flagWordOffset: thermalDormancyFlagWord(particleCount)
+        })
+      : null,
+    radiationDormancy: radiationDormancyStage
+      ? Object.freeze({
+          schema: 'ulg.schroeder-radiation-dormancy.v1',
+          epsilonFluxWPerM2: Number(thermalDormancyConfig.radiationEpsilonFluxWPerM2) > 0
+            ? Number(thermalDormancyConfig.radiationEpsilonFluxWPerM2)
+            : 0,
+          predicate: 'global-stefan-boltzmann-flux-bound-le-epsilon',
+          pairConservative: true,
+          gatedLaws: Object.freeze(['pair-radiation']),
+          countBuffer: radiationDormancyStage.countBuffer,
+          dormantBuffer: radiationDormancyStage.dormantBuffer,
+          activeIndicesBuffer: radiationDormancyStage.activeIndicesBuffer,
+          indirectDispatchBuffer: radiationDormancyStage.indirectDispatchBuffer,
+          indirectDispatchOffset: radiationDormancyStage.indirectDispatchOffset ?? 16,
+          flagRowWordOffset: 23
         })
       : null,
     proposalRowByteOffset:
@@ -14034,17 +14092,36 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           { dispatchWorkgroups: record.workgroups }
         );
         if (record.thermalDormancyStage) {
-          // G4: classify sources from this step's derived temperatures, before
-          // either law pass reads the flags.
+          // G4: classify thermal + radiation dormancy from this step's derived
+          // temperatures in ONE compute pass, before either law pass reads flags.
           const timestamp = beginTimestamp(encoder, 'thermal-dormancy');
-          record.thermalDormancyStage.encode(encoder, {
+          const dormancyPass = encoder.beginComputePass({ label: 'ulg-thermal-dormancy' });
+          record.thermalDormancyStage.encodeIntoPass(dormancyPass, {
             stateBuffer,
             temperatureBuffer: record.derivedBuffer
           });
+          if (record.radiationDormancyStage) {
+            record.radiationDormancyStage.encodeIntoPass(dormancyPass, {
+              stateBuffer,
+              derivedBuffer: record.derivedBuffer
+            });
+          }
+          dormancyPass.end();
           // G4 per-schedule receipt: this step's counts into the schedule ring.
           encodeLawActivationCount(encoder, device, 'thermal',
             record.thermalDormancyStage.countBuffer,
             { epsilon: artifact.thermalDormancy?.epsilonK ?? null });
+          if (record.radiationDormancyStage) {
+            encodeLawActivationCount(encoder, device, 'radiation',
+              record.radiationDormancyStage.countBuffer,
+              { epsilon: artifact.radiationDormancy?.epsilonFluxWPerM2 ?? 0 });
+            const radDiag = (globalThis.__ulgRadiationDormancy ??= { encodes: 0 });
+            radDiag.encodes += 1;
+            radDiag.device = device;
+            radDiag.stage = record.radiationDormancyStage;
+            radDiag.epsilonFluxWPerM2 = artifact.radiationDormancy?.epsilonFluxWPerM2 ?? 0;
+            radDiag.particleCount = record.particleCount;
+          }
           endTimestamp(encoder, timestamp);
           // Diagnostic: the latest stage's GPU counts, read on demand (a
           // separate submit) by probes; never read on the step path.

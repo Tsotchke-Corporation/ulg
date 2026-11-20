@@ -15493,6 +15493,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
           const phaseCarrierTransferStage =
             createSphPhaseCarrierTransferWebGpuEncoderStage({
               ...phaseCarrierTransferOptions,
+              phaseDormancy: phaseCarrierTransferOptions?.phaseDormancy !== undefined
+                ? phaseCarrierTransferOptions.phaseDormancy
+                : ((thermalStepOptions.thermalDormancy ?? sphParticleState?.thermalDormancy)?.epsilonK >= 0
+                    ? { epsilonK: 0 }
+                    : null),
               device,
               sphParticleState,
               mlsMpmParticleState,

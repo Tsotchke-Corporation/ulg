@@ -6302,6 +6302,7 @@ export async function mountSphPhaseDemoOverlay({
   const scenarioPresetSelect = document.createElement('select');
   scenarioPresetSelect.title = 'Choose a standard physics scenario';
   scenarioPresetSelect.setAttribute('aria-label', 'Choose scenario preset');
+  scenarioPresetSelect.disabled = true;
   const customScenarioOption = document.createElement('option');
   customScenarioOption.value = 'custom';
   customScenarioOption.textContent = 'Custom controls';
@@ -6317,6 +6318,7 @@ export async function mountSphPhaseDemoOverlay({
   const architectureProfileEl = overlay.querySelector('#sph-architecture-profile');
   const architectureProfileSelect = document.createElement('select');
   architectureProfileSelect.setAttribute('aria-label', 'Choose SS architecture profile');
+  architectureProfileSelect.disabled = true;
   for (const [value, label] of [
     ['preset', 'Preset defaults'],
     ['ss-single-worker', 'SS worker · single-level'],
@@ -16931,9 +16933,11 @@ export async function mountSphPhaseDemoOverlay({
     );
     window.location.reload();
   }
+  architectureProfileSelect.disabled = false;
   architectureProfileSelect.addEventListener('change', () => {
     applyArchitectureProfile(architectureProfileSelect.value);
   });
+  scenarioPresetSelect.disabled = false;
   initialBodiesEditorReady = true;
   initialBodiesEl.inert = false;
   addInitialBodyButton.disabled = false;

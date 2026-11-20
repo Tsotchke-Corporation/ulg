@@ -3420,6 +3420,11 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       'phaseCarrierTransfer',
       phaseCarrierTransferRunner, () => ({
         ...phaseCarrierTransferOptions,
+        phaseDormancy: phaseCarrierTransferOptions?.phaseDormancy !== undefined
+          ? phaseCarrierTransferOptions.phaseDormancy
+          : ((thermalStepOptions.thermalDormancy ?? sphParticleState?.thermalDormancy)?.epsilonK >= 0
+              ? { epsilonK: 0 }
+              : null),
         // A thermal energy record (G2 ledger) continues through the f32 split
         // plus its exact reconcile; the rational stage serves the rest.
         ...(massCapture && !reactionStep && massCapture.seals[0]?.exactEnergy && !massCapture.seals[0]?.exactThermal ? {

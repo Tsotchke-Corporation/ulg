@@ -7,6 +7,8 @@
 // pass, submit or host wait). After the schedule's terminal fence the ring is
 // mapped once (fixed-size compact evidence) and summarized: per-law totals,
 // the steps where a law did zero work, and the exact (epsilon 0) flag.
+import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
+
 const COUNT_BYTES = 16;
 const LAWS = Object.freeze(['thermal', 'reaction', 'phase', 'radiation']);
 const USAGE = Object.freeze({
@@ -20,7 +22,8 @@ export const ULG_LAW_ACTIVATION_RECEIPT_SCHEMA = 'peercompute.ulg.law-activation
 /** Open a ring for one schedule of at most `capacityPerLaw` gated encodes per law. */
 export function openLawActivationReceiptRing(device, { capacityPerLaw } = {}) {
   if (!device?.createBuffer || !(Number.isInteger(capacityPerLaw) && capacityPerLaw > 0)) return null;
-  const previous = rings.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const previous = rings.get(keyDevice);
   if (previous) previous.buffer.destroy?.();
   const ring = {
     capacityPerLaw,
@@ -33,13 +36,13 @@ export function openLawActivationReceiptRing(device, { capacityPerLaw } = {}) {
     overflowedEncodes: Object.fromEntries(LAWS.map((law) => [law, 0])),
     epsilon: Object.fromEntries(LAWS.map((law) => [law, null]))
   };
-  rings.set(device, ring);
+  rings.set(keyDevice, ring);
   return ring;
 }
 
 /** Copy one gated stage's counts into the open ring (no-op without a ring). */
 export function encodeLawActivationCount(encoder, device, law, countBuffer, { epsilon = null } = {}) {
-  const ring = rings.get(device);
+  const ring = device ? rings.get(unwrapWebGpuCacheDevice(device)) : null;
   const lawIndex = LAWS.indexOf(law);
   if (!ring || lawIndex < 0 || !countBuffer || typeof encoder?.copyBufferToBuffer !== 'function') return false;
   const slot = ring.encodes[law];
@@ -59,9 +62,10 @@ export function encodeLawActivationCount(encoder, device, law, countBuffer, { ep
  * Returns null when no ring was opened or no gated stage ran.
  */
 export async function closeLawActivationReceiptRing(device) {
-  const ring = rings.get(device);
+  const keyDevice = device ? unwrapWebGpuCacheDevice(device) : null;
+  const ring = keyDevice ? rings.get(keyDevice) : null;
   if (!ring) return null;
-  rings.delete(device);
+  rings.delete(keyDevice);
   const anyEncodes = LAWS.some((law) => ring.encodes[law] > 0);
   try {
     if (!anyEncodes) return null;

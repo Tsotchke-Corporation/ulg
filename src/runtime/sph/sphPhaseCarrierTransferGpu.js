@@ -11,8 +11,14 @@ import {
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   submitQueueOrderedFinalConsumerWork,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
+import { encodeLawActivationCount } from './lawActivationReceiptRing.js';
+import {
+  createSchroederPhaseDormancyStage,
+  phaseWindowsFromThermalMaterialTable
+} from './schroederPhaseRadiationDormancyGpu.js';
 import {
   assertSphLegacyMassPathAllowed,
   markSphExactMassDerivedBuffers,
@@ -1348,6 +1354,66 @@ fn apply_transfer(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+const sphPhaseCarrierTransferDormancyWgsl = sphPhaseCarrierTransferWgsl
+  .replace(
+    '@group(0) @binding(9) var<storage, read> interface_front: array<u32>;',
+    '@group(0) @binding(9) var<storage, read> interface_front: array<u32>;\n@group(0) @binding(10) var<storage, read> phase_dormant: array<u32>;'
+  )
+  .replace(
+    'fn front_conversion(source_index: u32) -> FrontConversion {\n',
+    'fn front_conversion(source_index: u32) -> FrontConversion {\n  if (source_index < arrayLength(&phase_dormant) && phase_dormant[source_index] != 0u) {\n    return FrontConversion(0u, 0u, 0u, 0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0), vec3<f32>(0.0));\n  }\n'
+  );
+
+const pooledPhaseDormancyStagesByDevice = new WeakMap();
+
+function acquirePooledPhaseDormancyStage({
+  device,
+  particleCount,
+  thermalMaterialTable,
+  absolutePressureAuthority,
+  resolvedInterfaceFront,
+  epsilonK
+}) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let pool = pooledPhaseDormancyStagesByDevice.get(keyDevice);
+  if (!pool) {
+    pool = new Map();
+    pooledPhaseDormancyStagesByDevice.set(keyDevice, pool);
+  }
+  const windows = phaseWindowsFromThermalMaterialTable(thermalMaterialTable, {
+    absolutePressureAuthority
+  });
+  const frontEnabled = Boolean(resolvedInterfaceFront?.buffer);
+  const frontHeaderWords = frontEnabled ? (resolvedInterfaceFront.headerWords >>> 0) : 0;
+  const frontRowWords = frontEnabled ? (resolvedInterfaceFront.rowWords >>> 0) : 0;
+  // Add a 1e-3 K conservative f32-rounding cushion on top of requested epsilonK
+  // so exact (epsilonK === 0) gating stays strictly bit-identical to ungated.
+  const effectiveEpsilonK = Math.max(Number(epsilonK) || 0, 1e-3);
+  const windowKey = windows
+    .map((w) => `${w.materialId}:${w.meltTemperatureK.toFixed(4)}:${w.boilTemperatureK.toFixed(4)}`)
+    .join(',');
+  const key = `${particleCount}|${effectiveEpsilonK}|${frontEnabled ? 1 : 0}|${frontHeaderWords}|${frontRowWords}|${windowKey}`;
+  let stage = pool.get(key);
+  if (!stage) {
+    if (pool.size >= 16) {
+      for (const oldStage of pool.values()) oldStage.destroy();
+      pool.clear();
+    }
+    stage = createSchroederPhaseDormancyStage({
+      device: keyDevice,
+      particleCount,
+      phaseWindows: windows,
+      epsilonK: effectiveEpsilonK,
+      frontEnabled,
+      frontHeaderWords,
+      frontRowWords,
+      frontEpoch: 0xffffffff
+    });
+    pool.set(key, stage);
+  }
+  return stage;
+}
+
 async function readBuffer(device, sourceBuffer, byteLength, label) {
   const readback = device.createBuffer({
     label,
@@ -1381,6 +1447,9 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   // { buffer, epoch, headerWords, rowWords } from the SS thermal proposal that
   // fed this step's canonical thermal apply. Absent: no skin conversion.
   interfacePhaseFront = null,
+  // G4 per-source phase dormancy ({ epsilonK = 0 }); null preserves the
+  // established 2-pass ungated unit route.
+  phaseDormancy = null,
   retainOutputParticleBuffers = false,
   readbackMode = NO_FULL_READBACK_MODE
 } = {}, ledgerAuthority = null) {
@@ -1413,6 +1482,19 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     interfacePhaseFront,
     device
   );
+  const phaseDormancyEpsilonK = (
+    phaseDormancy && Number.isFinite(Number(phaseDormancy.epsilonK)) && Number(phaseDormancy.epsilonK) >= 0
+  ) ? Number(phaseDormancy.epsilonK) : null;
+  const phaseDormancyStage = phaseDormancyEpsilonK != null
+    ? acquirePooledPhaseDormancyStage({
+        device,
+        particleCount: sphParticleState.particleCount,
+        thermalMaterialTable,
+        absolutePressureAuthority,
+        resolvedInterfaceFront,
+        epsilonK: phaseDormancyEpsilonK
+      })
+    : null;
   const setupAllocations = [];
   const ownSetupAllocation = (buffer) => {
     if (buffer) setupAllocations.push(buffer);
@@ -1499,19 +1581,24 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
         computeBufferBinding(6, 'storage'),
         computeBufferBinding(7, 'storage'),
         computeBufferBinding(8, 'uniform'),
-        computeBufferBinding(9, 'read-only-storage')
+        computeBufferBinding(9, 'read-only-storage'),
+        ...(phaseDormancyStage ? [computeBufferBinding(10, 'read-only-storage')] : [])
       ];
+      const activeWgsl = phaseDormancyStage
+        ? sphPhaseCarrierTransferDormancyWgsl
+        : sphPhaseCarrierTransferWgsl;
+      const cacheSuffix = phaseDormancyStage ? '.g4phase1' : '';
       const preflightPipeline = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-phase-carrier-transfer.v4.preflight',
+        cacheKey: `ulg-sph-phase-carrier-transfer.v4.preflight${cacheSuffix}`,
         label: 'ulg-sph-phase-carrier-transfer-preflight',
-        code: sphPhaseCarrierTransferWgsl,
+        code: activeWgsl,
         entryPoint: 'preflight',
         bindings
       });
       const applyPipeline = createCachedExplicitComputePipeline(device, {
-        cacheKey: 'ulg-sph-phase-carrier-transfer.v4.apply',
+        cacheKey: `ulg-sph-phase-carrier-transfer.v4.apply${cacheSuffix}`,
         label: 'ulg-sph-phase-carrier-transfer-apply',
-        code: sphPhaseCarrierTransferWgsl,
+        code: activeWgsl,
         entryPoint: 'apply_transfer',
         bindings
       });
@@ -1531,7 +1618,10 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
             buffer: resolvedInterfaceFront?.buffer
               || interfaceFrontDummyBuffer(device)
           }
-        }
+        },
+        ...(phaseDormancyStage
+          ? [{ binding: 10, resource: { buffer: phaseDormancyStage.dormantBuffer } }]
+          : [])
       ];
       const preflightBindGroup = device.createBindGroup({
         layout: preflightPipeline.bindGroupLayout,
@@ -1780,6 +1870,18 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
           return outputDestroyRelease ?? true;
         }
       : null,
+    phaseDormancy: phaseDormancyStage
+      ? Object.freeze({
+          schema: 'ulg.schroeder-phase-dormancy.v1',
+          epsilonK: phaseDormancyEpsilonK,
+          predicate: 'pure-phase-distance-from-transition-and-front',
+          countBuffer: phaseDormancyStage.countBuffer,
+          dormantBuffer: phaseDormancyStage.dormantBuffer,
+          activeIndicesBuffer: phaseDormancyStage.activeIndicesBuffer,
+          indirectDispatchBuffer: phaseDormancyStage.indirectDispatchBuffer,
+          indirectDispatchOffset: phaseDormancyStage.indirectDispatchOffset ?? 16
+        })
+      : null,
     scientificValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
@@ -1787,7 +1889,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   return {
     schema: 'peercompute.ulg.sph-phase-carrier-transfer-encoder-stage.v2',
     status: 'phase-carrier-transfer-encoder-stage-ready',
-    encodedDispatchCount: 2,
+    encodedDispatchCount: phaseDormancyStage ? 5 : 2,
     result,
     stateBuffer: outStateBuffer,
     thermoBuffer: outThermoBuffer,
@@ -1798,6 +1900,34 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     mechanicsBufferByteLength: mechanicsByteLength,
     evidenceBufferByteLength: evidenceValues.byteLength,
     encode(encoder) {
+      if (phaseDormancyStage) {
+        // Coalesce G4 phase dormancy classification + preflight + apply into ONE
+        // compute pass (saving 1 compute pass/step) and record exact counts into
+        // the per-schedule lawActivationReceiptRing.
+        const pass = encoder.beginComputePass({ label: 'ulg-sph-phase-carrier-transfer' });
+        phaseDormancyStage.encodeIntoPass(pass, {
+          stateBuffer: sourceStateBuffer,
+          thermoBuffer: sourceThermoBuffer,
+          interfaceFrontBuffer: resolvedInterfaceFront?.buffer ?? null
+        });
+        pass.setPipeline(preflightPipeline.pipeline);
+        pass.setBindGroup(0, preflightBindGroup);
+        pass.dispatchWorkgroups(workgroups);
+        pass.setPipeline(applyPipeline.pipeline);
+        pass.setBindGroup(0, applyBindGroup);
+        pass.dispatchWorkgroups(workgroups);
+        pass.end();
+        encodeLawActivationCount(encoder, device, 'phase', phaseDormancyStage.countBuffer, {
+          epsilon: phaseDormancyEpsilonK
+        });
+        const phaseDiag = (globalThis.__ulgPhaseDormancy ??= { encodes: 0 });
+        phaseDiag.encodes += 1;
+        phaseDiag.device = device;
+        phaseDiag.stage = phaseDormancyStage;
+        phaseDiag.epsilonK = phaseDormancyEpsilonK;
+        phaseDiag.particleCount = sphParticleState.particleCount;
+        return;
+      }
       const preflight = encoder.beginComputePass({ label: 'ulg-sph-phase-carrier-transfer-preflight' });
       preflight.setPipeline(preflightPipeline.pipeline);
       preflight.setBindGroup(0, preflightBindGroup);

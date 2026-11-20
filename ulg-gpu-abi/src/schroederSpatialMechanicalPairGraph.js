@@ -62,6 +62,8 @@ export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED =
   1 << 2;
 export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED =
   1 << 3;
+export const SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK =
+  1 << 4;
 // Receipt v3 phase-reuses the four-word-per-directed-edge matching-constraint
 // arena after its final residual/diagnostic reader. The core source offsets
 // and {peer,signedArea} rows remain independently authoritative. When the

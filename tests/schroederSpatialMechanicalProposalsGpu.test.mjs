@@ -3885,8 +3885,8 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
         /position\.x <= lower\.x \+ lower_tolerance_m\.x/g
       )
     ).length,
-    3,
-    'main solve, local refinement, and terminal cleanup enforce lower-wall complementarity'
+    4,
+    'main solve, parallel Jacobi cleanup, local refinement, and terminal cleanup enforce lower-wall complementarity'
   );
   assert.equal(
     Array.from(
@@ -3894,8 +3894,8 @@ test('mechanical WGSL retains one checked CSR graph through sixteen sealed Jacob
         /position\.x >= upper\.x - upper_tolerance_m\.x/g
       )
     ).length,
-    3,
-    'main solve, local refinement, and terminal cleanup enforce upper-wall complementarity'
+    4,
+    'main solve, parallel Jacobi cleanup, local refinement, and terminal cleanup enforce upper-wall complementarity'
   );
   for (const entryPoint of [
     'select_matching_cleanup_edge_for_index',
@@ -6212,6 +6212,29 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
     ]).flat(),
     'ulg-schroeder-spatial-mechanical-matching-constraints-initialize',
     ...Array.from(
+      { length: first.solverBudgetDeclared.parallelJacobiCleanupRounds },
+      (_, round) => (
+        (round & 1) === 0
+          ? [
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-measure',
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-check-converged',
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-solve',
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-allocate-energy'
+            ]
+          : [
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-measure',
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-solve',
+              'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-allocate-energy'
+            ]
+      )
+    ).flat(),
+    ...(first.solverBudgetDeclared.parallelJacobiCleanupRounds > 0
+      ? [
+          'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-measure',
+          'ulg-schroeder-spatial-mechanical-parallel-jacobi-cleanup-check-converged'
+        ]
+      : []),
+    ...Array.from(
       {
         length: SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
       },
@@ -6392,7 +6415,9 @@ test('deferred post-G2P residual solve publishes truthful resident bindings and 
   assert.doesNotMatch(matchingOwnerWgsl, /component_mode|atomic spin/i);
   assert.ok(
     first.encodedDispatchCount
-      <= 128 + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
+      <= 128
+        + first.solverBudgetDeclared.parallelJacobiCleanupDispatches
+        + SCHROEDER_SPATIAL_MECHANICAL_MATCHING_CLEANUP_OWNER_DISPATCHES
   );
   const energyVerifyDispatch = fixture.device.dispatches.find(
     ({ pipeline }) => pipeline?.label

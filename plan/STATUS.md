@@ -3,6 +3,12 @@
 **Active plan:** Read [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) first (single
 authoritative routing document).
 
+- **2026-11-19 Slice 1.2 (Parallel Jacobi Contact & Thermal Conduction Decoupling):**
+  - Added multi-workgroup Parallel Jacobi Cleanup kernels (`parallel_jacobi_cleanup_measure`, `parallel_jacobi_cleanup_check_converged`, `parallel_jacobi_cleanup_solve`, `parallel_jacobi_cleanup_allocate_energy`) in `src/runtime/sph/schroederSpatialMechanicalProposalsGpu.js`, running across all GPU SMs with Gershgorin stability, pairwise momentum conservation, exact `energy_ledger` closure, wall complementarity, active-edge skipping, and GPU early-exit convergence synthesis.
+  - Added `SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK` (`ulg-gpu-abi/src/schroederSpatialMechanicalPairGraph.js`) and `thermal_mechanical_interface_receipt_pass_cap_fallback()` (`src/runtime/sph/schroederSpatialThermalProposalsGpu.js`) so contact pass-cap exhaustion no longer silently aborts thermal conduction/radiation (thermal proceeds on conservative symmetric sphere geometry while corrupt/stale/nonfinite receipts still fail closed); added bounded per-device `matchedTimeBindGroupCache`.
+  - Updated `iron-ice-quench` and `sodium-water` preset cleanup budgets (`src/runtime/sphPhaseScenarioPresets.js`: 24 parallel Jacobi rounds + 16-pass bounded polish).
+  - Verified: 393/393 host tests pass, native Vulkan contact + exact thermal energy tests pass, `npm run build` passes (2.77s), and 15s live GPU pass census (`slice1-2-fast` vs `slice1-2-census`, `iron-ice-quench`, `CPUQuota=50%`) cut contact cleanup **307.1 ms → 6.27 ms/step (49× faster)**, total GPU compute **325.6 ms → 25.4 ms/step (12.8× faster)**, stepping GPU util **96.2% → 23.8%**, and restored live thermal conduction (`4.78 ms/step`, molten iron cooling); `slice1-2-sodium` verified `13.17 ms/step` total GPU time, `1.72 ms/step` cleanup, `18.3%` GPU util, 0 GPU/page errors.
+
 - **2026-11-19 Slice 1.1 (A1 Step 1 — presentation decoupling & Z-buffer parity):**
   - Fixed the rigid-solid vs fluid-isosurface depth mismatch in
     `src/services/workerOwnedIsosurfacePresenter.js` (`threeViewProjectionToWebGpuClipMatrix`

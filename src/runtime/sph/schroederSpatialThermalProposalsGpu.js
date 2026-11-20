@@ -62,6 +62,7 @@ import {
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED,
+  SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_READY,
   SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_VERSION,
   SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0,
@@ -1839,6 +1840,8 @@ const MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
 const MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK}u;
 const THERMAL_CONDUCTIVITY_STATUS_MISSING: u32 = ${SCHROEDER_SPATIAL_THERMAL_CONDUCTIVITY_STATUS_MISSING}u;
 const THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE: u32 = 3u;
 const THERMAL_PREFLIGHT_AGGREGATE_MAGIC: u32 = 0x53414731u;
@@ -5595,6 +5598,10 @@ fn thermal_mechanical_interface_receipt_admitted() -> bool {
   return false;
 }
 
+fn thermal_mechanical_interface_receipt_pass_cap_fallback() -> bool {
+  return false;
+}
+
 fn thermal_mechanical_interface_lookup(
   self_index: u32,
   other_index: u32
@@ -5932,6 +5939,8 @@ const MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_ADMITTED}u;
 const MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED}u;
+const MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK: u32 =
+  ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK}u;
 const MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM: u32 =
   ${SCHROEDER_SPATIAL_MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_SOURCE_LOCAL_LINEAR_PROBE}u;
 const MECHANICAL_INTERFACE_RECEIPT_INDEX_ALGORITHM_WORD: u32 =
@@ -6626,6 +6635,51 @@ fn thermal_mechanical_interface_receipt_admitted() -> bool {
     && row_base <= available_words
     && published_rows
       <= (available_words - row_base) / MECHANICAL_INTERFACE_RECEIPT_ROW_WORDS;
+}
+
+// Decouple thermal conduction/radiation from contact solver pass-cap
+// exhaustion: when the mechanical receipt proves authentic same-epoch header
+// provenance but failed solely on contact convergence/pass-cap budget (no
+// corruption, nonfinite, or energy-closure fault), thermal falls back cleanly
+// to conservative symmetric sphere-contact geometry instead of aborting.
+fn thermal_mechanical_interface_receipt_pass_cap_fallback() -> bool {
+  if (thermal_params.mechanical_interface_receipt_required == 0u) {
+    return false;
+  }
+  let particle_count = thermal_params.particle_count;
+  let offset_words = particle_count + 1u;
+  if (
+    arrayLength(&mechanical_interface_receipt)
+      < MECHANICAL_INTERFACE_RECEIPT_HEADER_WORDS + offset_words
+  ) { return false; }
+  return mechanical_interface_receipt[0u]
+      == MECHANICAL_INTERFACE_RECEIPT_MAGIC
+    && mechanical_interface_receipt[1u]
+      == MECHANICAL_INTERFACE_RECEIPT_VERSION
+    && mechanical_interface_receipt[2u]
+      == atomicLoad(&thermal_proposals[2u])
+    && mechanical_interface_receipt[3u]
+      == atomicLoad(&thermal_proposals[12u])
+    && mechanical_interface_receipt[4u]
+      == atomicLoad(&thermal_proposals[13u])
+    && mechanical_interface_receipt[5u]
+      == atomicLoad(&thermal_proposals[14u])
+    && mechanical_interface_receipt[6u]
+      == atomicLoad(&thermal_proposals[10u])
+    && mechanical_interface_receipt[7u]
+      == atomicLoad(&thermal_proposals[11u])
+    && mechanical_interface_receipt[8u]
+      == atomicLoad(&thermal_proposals[3u])
+    && bitcast<i32>(mechanical_interface_receipt[9u])
+      == thermal_params.mechanical_interface_selected_level
+    && mechanical_interface_receipt[10u] == particle_count
+    && mechanical_interface_receipt[12u] == offset_words
+    && mechanical_interface_receipt[15u]
+      == (
+        MECHANICAL_INTERFACE_RECEIPT_STATUS_READY
+          | MECHANICAL_INTERFACE_RECEIPT_STATUS_FAIL_CLOSED
+          | MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK
+      );
 }
 
 fn thermal_mechanical_interface_index_hash(
@@ -7387,6 +7441,7 @@ fn thermal_visit_fused_pair_cached(
     && thermal_derived_word(other_index, 9u) >= 3u;
   let interface_pair =
     thermal_params.mechanical_interface_receipt_required != 0u
+    && thermal_mechanical_interface_receipt_pair_admitted()
     && !both_gas
     && (
       material_or_phase_interface
@@ -7677,6 +7732,7 @@ ${thermalCandidateCsrAdmissionWgsl}
   if (
     thermal_params.mechanical_interface_receipt_required != 0u
     && !thermal_mechanical_interface_receipt_admitted()
+    && !thermal_mechanical_interface_receipt_pass_cap_fallback()
   ) {
     thermal_evidence_add(5u, 1u, true);
     thermal_evidence_add(5u, 1u, false);
@@ -12010,6 +12066,62 @@ export function runSchroederSpatialThermalProposalWebGpu({
       || artifactRecord.nativeTestTreeShadow;
     const treeShadowBindBuffer =
       resolveNativeTestTreeShadowBinding('binding');
+    const contactReceiptBuffer =
+      contactInterfaceReceipt?.buffer ?? thermalCsrReadOnlyDummyBuffer;
+    const cacheable = !treeShadow;
+    const cacheKey = cacheable
+      ? [
+          currentStateBuffer,
+          currentThermoBuffer,
+          stateBuffer,
+          execution.directoryBuffer,
+          activeProjectionViewBuffer,
+          derivedBuffer,
+          paramsBuffer,
+          activeDispatchBuffer,
+          conductivitySidecarBuffer,
+          proposalBuffer,
+          conductionEvidenceBuffer,
+          radiationEvidenceBuffer,
+          conductionExpectationBuffer,
+          radiationExpectationBuffer,
+          responseUpload.responseRecordBuffer,
+          responseUpload.responseBuffer,
+          responseUpload.graphNodeBuffer,
+          responseUpload.graphSampleBuffer,
+          responseUpload.responseThermalConductivityBuffer,
+          contactReceiptBuffer,
+          candidateCsrEnabled ? thermalCandidateCsr.sourceRowStateBuffer : null,
+          candidateCsrEnabled ? thermalCandidateCsr.replayBuffer : null,
+          potentialBindings?.table ?? null,
+          potentialBindings?.metadata ?? null,
+          potentialBindings?.requests ?? null,
+          derivedPipeline,
+          conductivityFinalizePipeline,
+          activeDispatchFinalizePipeline,
+          physicalTopologyPreflightPipeline ?? null,
+          activeTopologyFinalizePipeline ?? null,
+          budgetResolvePipeline,
+          artifactRecord.budgetPipeline,
+          artifactRecord.proposalPipeline,
+          zeroActiveProjectionFinalizePipeline ?? null,
+          thermalCandidateCsrValidatePipeline ?? null,
+          thermalCandidateCsrSealPipeline ?? null
+        ]
+      : null;
+    if (cacheKey) {
+      if (!Array.isArray(entry.matchedTimeBindGroupCache)) {
+        entry.matchedTimeBindGroupCache = [];
+      }
+      for (let i = 0; i < entry.matchedTimeBindGroupCache.length; i += 1) {
+        const cached = entry.matchedTimeBindGroupCache[i];
+        let matched = cached.key.length === cacheKey.length;
+        for (let k = 0; matched && k < cacheKey.length; k += 1) {
+          if (cached.key[k] !== cacheKey[k]) matched = false;
+        }
+        if (matched) return cached.groups;
+      }
+    }
     const derivedEntries = [
       { binding: 0, resource: { buffer: currentStateBuffer } },
       { binding: 1, resource: { buffer: currentThermoBuffer } },
@@ -12186,7 +12298,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
             entries: [...proposalEntries, ...traversalEntries]
           })
     );
-    return Object.freeze({
+    const groups = Object.freeze({
       derivedBindGroup,
       conductivityFinalizeBindGroup,
       activeDispatchFinalizeBindGroup,
@@ -12211,6 +12323,13 @@ export function runSchroederSpatialThermalProposalWebGpu({
         sourceCellTreeShadow?.finalizePipeline
       )
     });
+    if (cacheKey) {
+      if (entry.matchedTimeBindGroupCache.length >= 8) {
+        entry.matchedTimeBindGroupCache.shift();
+      }
+      entry.matchedTimeBindGroupCache.push({ key: cacheKey, groups });
+    }
+    return groups;
   };
   const workgroups = Math.max(1, Math.ceil(particleCount / WORKGROUP_SIZE));
   const consumerReceipts = Object.freeze(Object.fromEntries(

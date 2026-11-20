@@ -705,7 +705,15 @@ test('thermal proposal WGSL shares one pair-law core across exact-near and class
   );
   assert.match(
     pairLaw,
-    /let interface_pair =\s*thermal_params\.mechanical_interface_receipt_required != 0u\s*&&\s*!both_gas\s*&&\s*\(\s*material_or_phase_interface\s*\|\|\s*mechanical_interface\.classified != 0u\s*\);/
+    /let interface_pair =\s*thermal_params\.mechanical_interface_receipt_required != 0u\s*&&\s*thermal_mechanical_interface_receipt_pair_admitted\(\)\s*&&\s*!both_gas\s*&&\s*\(\s*material_or_phase_interface\s*\|\|\s*mechanical_interface\.classified != 0u\s*\);/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /fn thermal_mechanical_interface_receipt_pass_cap_fallback\(\) -> bool[\s\S]*MECHANICAL_INTERFACE_RECEIPT_STATUS_PASS_CAP_FALLBACK/
+  );
+  assert.match(
+    schroederSpatialThermalProposalWgsl,
+    /!thermal_mechanical_interface_receipt_admitted\(\)\s*&&\s*!thermal_mechanical_interface_receipt_pass_cap_fallback\(\)/
   );
   assert.match(pairLaw, /max\(distance_m, 1\.0e-7\),\s*both_gas/);
   assert.doesNotMatch(pairLaw, /thermal_params\.conduction_rate/);

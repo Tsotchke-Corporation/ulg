@@ -16,13 +16,17 @@ const WORKER_URLS = Object.freeze({
   eshkol: '/workers/eshkol-warm-vm.worker.js'
 });
 
-const workers = { moonlab: null, eshkol: null };
-const queues = { moonlab: Promise.resolve(), eshkol: Promise.resolve() };
-const spawns = { moonlab: 0, eshkol: 0 };
-const calls = { moonlab: 0, eshkol: 0 };
-const failures = { moonlab: 0, eshkol: 0 };
-const recoveries = { moonlab: 0, eshkol: 0 };
-let nextId = 1;
+const WARM_STATE_KEY = Symbol.for('ulg.a6.warmDerivationState');
+const warmState = (globalThis[WARM_STATE_KEY] ??= {
+  workers: { moonlab: null, eshkol: null },
+  queues: { moonlab: Promise.resolve(), eshkol: Promise.resolve() },
+  spawns: { moonlab: 0, eshkol: 0 },
+  calls: { moonlab: 0, eshkol: 0 },
+  failures: { moonlab: 0, eshkol: 0 },
+  recoveries: { moonlab: 0, eshkol: 0 },
+  nextId: 1
+});
+const { workers, queues, spawns, calls, failures, recoveries } = warmState;
 
 function normalizeService(service) {
   return service === 'eshkol' ? 'eshkol' : 'moonlab';
@@ -130,7 +134,7 @@ function requestWithRecovery(service, message, match, { timeoutMs = DEFAULT_TIME
 
 async function runMoonlab({ qubits = 12, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   calls.moonlab += 1;
-  const id = `ulg-a6-moonlab-${nextId++}`;
+  const id = `ulg-a6-moonlab-${warmState.nextId++}`;
   const started = performance.now();
   const reply = await requestWithRecovery('moonlab', { id, type: 'ghz', qubits }, (data) => data.id === id, { timeoutMs });
   if (!reply.ok) {
@@ -147,14 +151,15 @@ async function runMoonlab({ qubits = 12, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) 
       dim: reply.dim,
       nonzero: reply.nonzero,
       probabilitySum: reply.probabilitySum,
-      nativeDispatches: reply.nativeDispatches ?? null
+      nativeDispatches: reply.nativeDispatches ?? null,
+      expectedDispatches: reply.expectedDispatches ?? (qubits + 1)
     }
   };
 }
 
 async function runEshkol({ operation = 'sample', threshold = null, definition, call, points, n, a, b, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   calls.eshkol += 1;
-  const id = `ulg-a6-eshkol-${nextId++}`;
+  const id = `ulg-a6-eshkol-${warmState.nextId++}`;
   const started = performance.now();
   const message = operation === 'matmul-sum'
     ? { id, type: 'matmul-sum', threshold, n, a, b }

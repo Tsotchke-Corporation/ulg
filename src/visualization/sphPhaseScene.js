@@ -54444,6 +54444,7 @@ fn main(
       if (typeof Worker === 'function' && globalThis.__ulgDisableA6Bridge !== true) {
         laneState.a6Bridge ??= createWarmClosureMissBridge({
           maxInFlight: 4,
+          peerRequester: globalThis.__ulgA6PeerRequester ?? null,
           scope: `${laneId}:a6-closure`,
           onStateCommit: (delta) => {
             laneState.lastA6CommitDelta = delta;

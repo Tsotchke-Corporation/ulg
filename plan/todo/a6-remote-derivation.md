@@ -113,6 +113,14 @@ without PeerCompute, to diagnose them.
   Cross-device placement needs PeerCompute's network transport (WebRTC or
   relay) to other machines. That is outward-facing, so it needs the user's
   go-ahead and named peers.
-- **The Eshkol-side derivations are small.** Wiring them to ULG's actual
-  closure misses (the G6 `localClosureFitCache` / A3 regional sampler) is the
-  integration step.
+
+## End-to-End Multi-Peer Closure Miss Bridge Integration (2026-11-20)
+
+- **Unified bridge (`src/runtime/material/warmClosureMissBridge.js`, schema `v2`) & peer transport (`src/services/clientDerivationPeers.js`).**
+  - `createWarmClosureMissBridge` now accepts `peerRequester` (`startClientDerivationRequester` / `globalThis.__ulgA6PeerRequester`, wired into `src/visualization/sphPhaseScene.js`) so live ULG Eshkol-AD EOS stiffness misses and MoonLab WebGPU quantum probes execute across PeerCompute `NodeKernel` responder pages with 2-of-2 quorum validation and promote into `regionalClosureWorkerLane` + `sphImplicitPressureGpu` strictly at schedule boundaries without a second scheduler.
+  - **Epoch fencing, cancellation & source invalidation:** `cancelMiss(missKey)` immediately cancels the G5 `ReservationLedger` token and fences late completions (`stats.cancelled`, `stats.staleRejected`); `sourceChanged(nextSourceIdentity)` increments `bridgeEpoch` and evicts stale cached/pending/in-flight artifacts.
+  - **Explicit owner-loss debt (zero silent CPU fallback):** Primary responder loss (`ERR_CLIENT_PEER_ABSENT`) promotes surviving replicas (`stats.replicaPromotions`); total responder/quorum loss releases G5 slots and records explicit visible `remoteDebt` (`getStatus().remoteDebt`, `stats.ownerLosses`) with zero silent CPU hot-state fallback until responders rejoin (`retryRemoteDebt` -> `stats.debtCleared`).
+- **Native Vulkan + WASM multi-page verification (`ULG_RUN_NATIVE_A6=1`):**
+  - `tests/a6ClientDerivation.native.test.mjs`: PASS (`promoted-replica`, `quorum-accepted`, MoonLab GHZ-12 `13/13` WebGPU dispatches, Eshkol WebGPU `sf64` `sum(A·B) = 249` exact).
+  - `tests/a6WarmClosureMissBridge.native.test.mjs`: PASS (warm worker reuse `spawns: 1, loads: 1`, crash/respawn recovery, `finalLedgerActive: 0`).
+  - `tests/a6RemoteClosureMissBridge.native.test.mjs`: PASS across 4→6 same-origin PeerCompute pages (R1 3-of-3 quorum remote Eshkol Tait AD + MoonLab GHZ-12 boundary-only lane adoption + cache hit; R2 Page B death -> `promoted-replica` 2-of-2 quorum warm worker reuse; R3 `sourceChanged` invalidation + Pages C/D outage -> explicit `remoteDebt` with `adoptedDuringOutage = 0` and `ledgerActiveCount = 0` -> Pages E/F rejoin clearing `remoteDebt`).

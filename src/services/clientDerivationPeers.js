@@ -67,6 +67,7 @@ export function startClientDerivationRequester({ channelName, peerId, primaryPee
       minReplicaCount: 2, minMatchingReplicas: 2, compareCommitDeltaHash: false })
   });
   compute.setCommitDeltaHandler((delta) => deltas.push(delta));
+  const lastProvenance = () => compute.getStats().taskPlacement?.lastPlacement?.provenance ?? null;
   const submit = (id, data) => compute.submitTask({
     id, runtime: 'js', taskFamily: 'ulg-client-derivation',
     module: new URL('/src/services/clientWarmDerivationTask.js', globalThis.location.href).href, exportName: 'run', data,
@@ -74,6 +75,26 @@ export function startClientDerivationRequester({ channelName, peerId, primaryPee
       solverKey: `ulg-client-${data.service}`, solverId: 'ulg-client-derivation', confidence: 1,
       targetReplicaCount: peers.length, peerId: primaryPeerId, timeoutMs }
   });
-  return { kernel, compute, deltas, presence, submit,
-    lastProvenance: () => compute.getStats().taskPlacement.lastPlacement.provenance };
+  const submitWithProvenance = async (id, data) => {
+    const deltaCountBefore = deltas.length;
+    const value = await submit(id, data);
+    const commitDelta = deltas.length > deltaCountBefore ? deltas.at(-1) : null;
+    return {
+      value,
+      commitDelta,
+      provenance: lastProvenance()
+    };
+  };
+  return {
+    kernel,
+    compute,
+    deltas,
+    presence,
+    submit,
+    submitWithProvenance,
+    lastProvenance,
+    stop() {
+      channel.close();
+    }
+  };
 }

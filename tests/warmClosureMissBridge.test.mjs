@@ -142,3 +142,110 @@ test('warmClosureMissBridge releases G5 reservations on worker failure and recov
   assert.equal(commits[0].payload.residency.spawns, 2);
   bridge.destroy();
 });
+
+test('warmClosureMissBridge fences cancelled/stale-epoch results, invalidates on source change, and tracks remote owner-loss debt without CPU fallback', async () => {
+  let peerHealthy = true;
+  let primaryAlive = false;
+  let pendingResolve = null;
+  let remoteDispatches = 0;
+
+  const fakePeerRequester = {
+    async submitWithProvenance(_id, payload) {
+      remoteDispatches += 1;
+      if (!peerHealthy) {
+        const err = new Error('client peer peer-C is not present');
+        err.code = 'ERR_CLIENT_PEER_ABSENT';
+        throw err;
+      }
+      if (payload.service === 'moonlab' && payload.qubits === 11) {
+        await new Promise((resolve) => { pendingResolve = resolve; });
+      }
+      const value = payload.service === 'eshkol'
+        ? { samples: payload.points.map(([rho]) => rho * (1480 ** 2) * ((rho / 1000) ** 6)) }
+        : { circuit: `ghz-${payload.qubits}`, dim: 2 ** payload.qubits, probabilitySum: 1 };
+      return {
+        value,
+        commitDelta: {
+          taskId: `ulg-a6-client:${payload.service}`,
+          scope: 'peer-test',
+          version: remoteDispatches,
+          payload: { residency: { pageId: 'peer-C', spawns: 1, calls: remoteDispatches } }
+        },
+        provenance: {
+          role: primaryAlive ? 'primary' : 'promoted-replica',
+          peerId: 'client-C',
+          primaryFailure: primaryAlive ? null : { code: 'ERR_CLIENT_PEER_ABSENT' },
+          validation: { reason: 'quorum-accepted', matchingResultCount: 2 }
+        }
+      };
+    }
+  };
+
+  const commits = [];
+  const bridge = createWarmClosureMissBridge({
+    maxInFlight: 2,
+    peerRequester: fakePeerRequester,
+    sourceIdentity: 'assets-v1',
+    onPeerExhaustion: 'debt',
+    onStateCommit: (delta) => commits.push(delta)
+  });
+
+  // 1. Promoted-replica quorum derivation & provenance binding
+  const eosReq = bridge.requestEosStiffnessClosureMiss({
+    missKey: 'h2o-remote-tait',
+    restDensityKgPerM3: 1000,
+    soundSpeedMPerS: 1480,
+    scheduleId: 'sched-10'
+  });
+  const eosOut = await eosReq.promise;
+  assert.equal(eosOut.provenance.mode, 'peer-quorum');
+  assert.equal(eosOut.provenance.role, 'promoted-replica');
+  assert.equal(eosOut.provenance.primaryFailure, 'ERR_CLIENT_PEER_ABSENT');
+  assert.equal(eosOut.provenance.quorum, 'quorum-accepted');
+  assert.equal(bridge.getStatus().stats.replicaPromotions, 1);
+
+  const adopted1 = bridge.adoptPendingAtScheduleBoundary({ scheduleId: 'sched-11' });
+  assert.equal(adopted1.adoptedCount, 1);
+  assert.equal(commits[0].provenance.quorum, 'quorum-accepted');
+
+  // 2. Cancellation immediately releases G5 reservation slot and rejects late completion
+  const slowQ = bridge.requestQuantumClosureProbeMiss({ missKey: 'slow-ghz-11', qubits: 11 });
+  assert.equal(bridge.getStatus().ledgerActiveCount, 1);
+  assert.equal(bridge.cancelMiss('slow-ghz-11'), true);
+  assert.equal(bridge.getStatus().ledgerActiveCount, 0, 'Slot freed immediately on cancelMiss');
+  assert.equal(bridge.getStatus().stats.cancelled, 1);
+  pendingResolve();
+  const lateCancelResult = await slowQ.promise;
+  assert.equal(lateCancelResult.staleRejected, true);
+  assert.equal(bridge.adoptPendingAtScheduleBoundary({ scheduleId: 'sched-12' }).adoptedCount, 0);
+
+  // 3. Source change invalidates cached artifacts
+  assert.equal(bridge.getStatus().cachedCount, 1);
+  const dropped = bridge.sourceChanged('assets-v2');
+  assert.equal(dropped, 1);
+  assert.equal(bridge.getStatus().cachedCount, 0);
+  assert.equal(bridge.getStatus().epoch, 2);
+
+  // 4. Total peer loss -> explicit remoteDebt, zero silent CPU hot-state fallback, then recovery on rejoin
+  peerHealthy = false;
+  const lostReq = bridge.requestQuantumClosureProbeMiss({ missKey: 'ghz-after-loss', qubits: 8, scheduleId: 'sched-13' });
+  const lostOut = await lostReq.promise;
+  assert.equal(lostOut.failed, true);
+  assert.equal(bridge.getStatus().remoteDebtCount, 1);
+  assert.equal(bridge.getStatus().remoteDebt[0].ownerLoss, true);
+  assert.equal(bridge.getStatus().stats.ownerLosses, 1);
+  assert.equal(bridge.getStatus().ledgerActiveCount, 0);
+  assert.equal(bridge.adoptPendingAtScheduleBoundary({ scheduleId: 'sched-14' }).adoptedCount, 0);
+
+  // Peers rejoin -> retryRemoteDebt clears debt and adopts at schedule boundary!
+  peerHealthy = true;
+  primaryAlive = true;
+  const retries = bridge.retryRemoteDebt({ scheduleId: 'sched-15' });
+  assert.equal(retries.length, 1);
+  await retries[0].promise;
+  assert.equal(bridge.getStatus().remoteDebtCount, 0);
+  assert.equal(bridge.getStatus().stats.debtCleared, 1);
+  assert.equal(bridge.adoptPendingAtScheduleBoundary({ scheduleId: 'sched-16' }).adoptedCount, 1);
+
+  bridge.destroy();
+});

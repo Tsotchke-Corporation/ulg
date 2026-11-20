@@ -19,6 +19,7 @@ import {
   resolveWorkerOwnedIsosurfaceProductEventSource,
   snapshotWorkerOwnedSurfaceMetadata,
   summarizeWorkerOwnedIsosurfaceOpticalPresentation,
+  threeViewProjectionToWebGpuClipMatrix,
   RETAINED_GAP_STARVATION_MS
 } from '../src/services/workerOwnedIsosurfacePresenter.js';
 import {
@@ -5880,4 +5881,38 @@ test('successive resizes during replacement fences reach the newest framebuffer 
     3
   );
   await rig.presenter.dispose();
+});
+
+test('Slice 1.1: threeViewProjectionToWebGpuClipMatrix matches isosurface OpenGL->WebGPU clip-z depth remap', () => {
+  // Typical Three.js perspective view-projection matrix (column-major, OpenGL NDC z in [-1, 1]).
+  const near = 0.05;
+  const far = 20;
+  const f = 1 / Math.tan(Math.PI / 6);
+  const vp = [
+    f, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, -(far + near) / (far - near), -1,
+    0, 0, (-2 * far * near) / (far - near), 0
+  ];
+  const remapped = threeViewProjectionToWebGpuClipMatrix(vp);
+  const mul = (m, p) => [
+    m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12] * p[3],
+    m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13] * p[3],
+    m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14] * p[3],
+    m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15] * p[3]
+  ];
+  for (const pt of [[0, 0, -near, 1], [0.1, -0.2, -1.5, 1], [-0.3, 0.4, -far, 1]]) {
+    const glClip = mul(vp, pt);
+    const expectedZ = glClip[2] * 0.5 + glClip[3] * 0.5;
+    const gpuClip = mul(remapped, pt);
+    assert.ok(Math.abs(gpuClip[0] - glClip[0]) < 1e-5);
+    assert.ok(Math.abs(gpuClip[1] - glClip[1]) < 1e-5);
+    assert.ok(Math.abs(gpuClip[2] - expectedZ) < 1e-5);
+    assert.ok(Math.abs(gpuClip[3] - glClip[3]) < 1e-5);
+  }
+  // Near plane maps to NDC z = 0; far plane maps to NDC z = 1 (matching WebGPU depthCompare: 'less').
+  const nearClip = mul(remapped, [0, 0, -near, 1]);
+  const farClip = mul(remapped, [0, 0, -far, 1]);
+  assert.ok(Math.abs(nearClip[2] / nearClip[3] - 0) < 1e-5);
+  assert.ok(Math.abs(farClip[2] / farClip[3] - 1) < 1e-5);
 });

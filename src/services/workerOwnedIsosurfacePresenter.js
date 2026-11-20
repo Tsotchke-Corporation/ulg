@@ -76,6 +76,20 @@ const ULG_SPH_GPU_RENDER_FIELD_SCHEMA =
 // A1: physics may wait for a busy render lane (a retained submission gap) only
 // when no lane frame has completed for this long: about 30 presented frames/s.
 export const RETAINED_GAP_STARVATION_MS = 1000 / 30;
+
+// Convert a Three.js column-major OpenGL-NDC (z in [-w, w]) view-projection
+// matrix into WebGPU-NDC (z in [0, w]) so opaque rigid solid meshes write
+// bit-consistent depth values alongside workerNativeSurfaceMotionWgsl
+// (`clip.z = clip.z * 0.5 + clip.w * 0.5`).
+export function threeViewProjectionToWebGpuClipMatrix(viewProjectionMatrix) {
+  const out = new Float32Array(16);
+  for (let i = 0; i < 16; i += 1) out[i] = Number(viewProjectionMatrix[i]) || 0;
+  for (let c = 0; c < 4; c += 1) {
+    const base = c * 4;
+    out[base + 2] = 0.5 * out[base + 2] + 0.5 * out[base + 3];
+  }
+  return out;
+}
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const CONSERVATIVE_NO_READBACK_MODE = 'gpu-conservative-no-readback';
 const DEFAULT_DEPTH_FORMAT = 'depth24plus';
@@ -1216,8 +1230,10 @@ export function createWorkerOwnedIsosurfacePresenter({
     const family = frame?.solidRigidFamily ?? latestSchroederSolidRigidFamily(device);
     if (!family || family.destroyed || family.device !== device || !Array.isArray(frame.viewProjectionMatrix)) return false;
     solidShapeRenderer ??= createSchroederSolidMemberShapeRenderer(device, { colorFormat: format, depthFormat });
-    solidShapeRenderer.draw(pass, family, { viewProjection: new Float32Array(frame.viewProjectionMatrix),
-      colorLinear: SOLID_SHAPE_COLORS[String(family.materials?.[0]).toLowerCase()] ?? [0.7, 0.7, 0.72] });
+    solidShapeRenderer.draw(pass, family, {
+      viewProjection: threeViewProjectionToWebGpuClipMatrix(frame.viewProjectionMatrix),
+      colorLinear: SOLID_SHAPE_COLORS[String(family.materials?.[0]).toLowerCase()] ?? [0.7, 0.7, 0.72]
+    });
     return true;
   };
 

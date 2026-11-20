@@ -3,6 +3,22 @@
 **Active plan:** Read [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) first (single
 authoritative routing document).
 
+- **2026-11-19 Slice 1.1 (A1 Step 1 — presentation decoupling & Z-buffer parity):**
+  - Fixed the rigid-solid vs fluid-isosurface depth mismatch in
+    `src/services/workerOwnedIsosurfacePresenter.js` (`threeViewProjectionToWebGpuClipMatrix`
+    aligns solid clip-Z `[0, w]` with `workerNativeSurfaceMotionWgsl.js`),
+    verified by unit test + native Vulkan `tests/schroederSolidShape.native.test.mjs`.
+  - Added canonical worker-lane fast post-commit continuation in
+    `src/visualization/sphPhaseDemoMount.js`
+    (`resolveSphCanonicalWorkerLanePostCommitFastContinuation`), eliminating the
+    duplicate 4.1 MB full-particle readback and page-GPU upload after every
+    schedule when the worker already enqueued retained-GPU isosurface rendering.
+  - Headless 20s `gpuprobe.sh` (`iron-ice-quench`, `CPUQuota=50%`,
+    `slice1-1-fast-cont` vs `baseline-58353b6f`): post-compute page stall
+    dropped **201.3 ms → 0.6 ms** (p90 494.5 ms → 0.7 ms), page GPU uploads
+    **4.12 MB → 0 bytes**, worker particle `mapAsync` readbacks **12 → 0**,
+    submits/step **23.52 → 19.88**, zero GPU/page errors, build passes.
+
 - **2026-11-19 checkpoint & plan consolidation:** Local checkpoint `31fb694`
   landed on `main` capturing all Oct 27–Nov 19 worktree changes; active work
   branched to `feat/ulg-ga-consolidation` (push, merge, and Pages remain held).

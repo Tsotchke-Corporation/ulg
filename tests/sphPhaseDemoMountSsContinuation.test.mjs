@@ -14,6 +14,7 @@ import {
   resolveSphResidentInterfaceRefreshContinuationPolicy,
   resolveSphMountedWorkerLaneScheduleStepCount,
   resolveSphWorkerLanePostCommitFastContinuation,
+  resolveSphCanonicalWorkerLanePostCommitFastContinuation,
   materializeSphWorkerLaneNativeSurfacePresentationSource,
   residentWorkerLaneContinuationReady,
   residentWorkerLaneIsosurfacePresentationConsumerReady,
@@ -1732,4 +1733,41 @@ test('canonical SS render-mode refresh skips the legacy pressure-interface produ
     }),
     true
   );
+});
+
+test('Slice 1.1: canonical worker lane with enqueued true isosurface uses fast continuation without page readback', () => {
+  const execution = workerLaneContinuationExecution();
+  execution.workerOwnedResidentLane.executionRoute = null;
+  execution.workerOwnedResidentLane.committedPresentation = {
+    ...execution.workerOwnedResidentLane.committedPresentation,
+    schema: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_SCHEMA,
+    status: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_ENQUEUED_STATUS,
+    presentationGeometry: ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY,
+    sourceCapturedBeforePhysicsContinuation: true
+  };
+  const canonicalFast = resolveSphCanonicalWorkerLanePostCommitFastContinuation({
+    execution
+  });
+  assert.equal(canonicalFast.eligible, true);
+  assert.equal(canonicalFast.status, 'canonical-worker-post-commit-fast-continuation-ready');
+  assert.equal(
+    canonicalFast.presentationConsumer,
+    ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+  );
+  assert.equal(canonicalFast.presentationCompletionReady, false);
+
+  const missingEnqueue = resolveSphCanonicalWorkerLanePostCommitFastContinuation({
+    execution: {
+      ...execution,
+      workerOwnedResidentLane: {
+        ...execution.workerOwnedResidentLane,
+        committedPresentation: {
+          ...execution.workerOwnedResidentLane.committedPresentation,
+          sourceCapturedBeforePhysicsContinuation: false
+        }
+      }
+    }
+  });
+  assert.equal(missingEnqueue.eligible, false);
+  assert.ok(missingEnqueue.blockers.includes('worker-isosurface-presentation-not-enqueued'));
 });

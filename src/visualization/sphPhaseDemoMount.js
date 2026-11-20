@@ -3886,6 +3886,51 @@ export function resolveSphWorkerLanePostCommitFastContinuation({
   });
 }
 
+// Slice 1.1 (A1 decoupled presentation): when the canonical active-law worker
+// lane has already crossed its terminal fence, committed through ComputeManager
+// and StateManager, and synchronously captured + enqueued its exact true WebGPU
+// isosurface presentation on the worker's OffscreenCanvas, skip the duplicate
+// page-device full-particle readback, upload, and secondary surface extraction.
+export function resolveSphCanonicalWorkerLanePostCommitFastContinuation({
+  execution = null
+} = {}) {
+  const lane = execution?.workerOwnedResidentLane ?? null;
+  const isosurfacePresentationEnqueued =
+    residentWorkerLaneIsosurfacePresentationEnqueued(execution);
+  const blockers = [];
+  if (!residentWorkerLaneContinuationReady(execution)) {
+    blockers.push('strict-worker-lane-continuation-not-ready');
+  }
+  if (!isosurfacePresentationEnqueued) {
+    blockers.push('worker-isosurface-presentation-not-enqueued');
+  }
+  if (execution?.fullParticleReadbackPerformed === true) {
+    blockers.push('full-particle-readback-already-performed');
+  }
+  return Object.freeze({
+    schema:
+      'peercompute.ulg.sph-canonical-worker-lane-post-commit-fast-continuation.v0',
+    status: blockers.length === 0
+      ? 'canonical-worker-post-commit-fast-continuation-ready'
+      : 'canonical-worker-post-commit-fast-continuation-blocked',
+    eligible: blockers.length === 0,
+    physicsAuthority:
+      blockers.length === 0
+        ? 'terminal-fence-compute-manager-state-manager-committed'
+        : null,
+    presentationConsumer:
+      blockers.length === 0
+        ? ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
+        : null,
+    presentationCompletionReady: false,
+    scheduleId: lane?.scheduleId ?? null,
+    laneId: lane?.laneId ?? null,
+    stateKey: lane?.stateKey ?? null,
+    route: lane?.executionRoute?.route ?? 'canonical-worker-resident-lane',
+    blockers: Object.freeze(blockers)
+  });
+}
+
 export function residentWorkerLaneNativeSurfacePresentationReady({
   execution = null,
   presentation = null,
@@ -14684,29 +14729,44 @@ export async function mountSphPhaseDemoOverlay({
           execution,
           workerLivePreviewEnabled: initialWorkerLivePreview
         });
+      const canonicalWorkerLanePostCommitFastContinuation =
+        workerLanePostCommitFastContinuation.eligible
+          ? null
+          : resolveSphCanonicalWorkerLanePostCommitFastContinuation({
+              execution
+            });
+      const activeWorkerFastContinuation =
+        workerLanePostCommitFastContinuation.eligible
+          ? workerLanePostCommitFastContinuation
+          : canonicalWorkerLanePostCommitFastContinuation?.eligible
+          ? canonicalWorkerLanePostCommitFastContinuation
+          : workerLanePostCommitFastContinuation;
       overlay.__sphWorkerLanePostCommitFastContinuation =
-        workerLanePostCommitFastContinuation;
-      if (workerLanePostCommitFastContinuation.eligible) {
-        // Tier0 has already crossed its worker terminal fence, ComputeManager
-        // completion, StateManager commit, and exact committed worker
-        // presentation admission. Particle mode already has rendered pixels;
-        // true-isosurface mode has synchronously retained/enqueued its exact
-        // source and finishes worker-locally. In either case a second
-        // page-device particle readback + native-surface extraction would
-        // serialize the next physics schedule behind a duplicate consumer.
-        // Leave active-law canonical routes unchanged.
+        activeWorkerFastContinuation;
+      if (activeWorkerFastContinuation.eligible) {
+        // The worker lane (Tier0 or canonical active-law) has already crossed
+        // its terminal fence, ComputeManager completion, StateManager commit,
+        // and exact committed worker presentation admission. Particle mode has
+        // rendered pixels; true-isosurface mode has synchronously retained and
+        // enqueued its exact source and finishes worker-locally on its own
+        // OffscreenCanvas. A second page-device particle readback + upload +
+        // duplicate surface extraction would serialize physics behind a
+        // duplicate consumer.
         residentRenderReadbackSkippedCount += 1;
-        if (workerLanePostCommitFastContinuation.presentationCompletionReady) {
+        if (activeWorkerFastContinuation.presentationCompletionReady) {
           completePendingBodyEnvelopePreview({
             generation,
             reason: 'tier0-worker-committed-presentation-ready'
           });
         }
-        const workerLanePostCommitPresentationReason =
-          workerLanePostCommitFastContinuation.presentationConsumer
+        const isCanonicalFast =
+          activeWorkerFastContinuation === canonicalWorkerLanePostCommitFastContinuation;
+        const workerLanePostCommitPresentationReason = isCanonicalFast
+          ? 'canonical-worker-owned-true-isosurface-enqueued'
+          : activeWorkerFastContinuation.presentationConsumer
             === ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_PRESENTATION_GEOMETRY
-            ? 'tier0-worker-owned-true-isosurface-enqueued'
-            : 'tier0-worker-live-preview-versioned-mailbox';
+          ? 'tier0-worker-owned-true-isosurface-enqueued'
+          : 'tier0-worker-live-preview-versioned-mailbox';
         updateResidentPerf({
           residentStepsPerSchedule: normalizedStepCount,
           renderReadbacks: residentRenderReadbackCount,
@@ -14715,15 +14775,20 @@ export async function mountSphPhaseDemoOverlay({
           lastRenderReadbackSkipReason: workerLanePostCommitPresentationReason,
           workerLanePostCommitFastContinuation: true
         });
-        traceResidentSchedule('tier0-post-commit-fast-continuation-ready', {
-          route: workerLanePostCommitFastContinuation.route,
-          scheduleId: workerLanePostCommitFastContinuation.scheduleId,
-          presentationConsumer:
-            workerLanePostCommitFastContinuation.presentationConsumer,
-          presentationCompletionReady:
-            workerLanePostCommitFastContinuation.presentationCompletionReady,
-          presentationReason: workerLanePostCommitPresentationReason
-        });
+        traceResidentSchedule(
+          isCanonicalFast
+            ? 'canonical-worker-post-commit-fast-continuation-ready'
+            : 'tier0-post-commit-fast-continuation-ready',
+          {
+            route: activeWorkerFastContinuation.route,
+            scheduleId: activeWorkerFastContinuation.scheduleId,
+            presentationConsumer:
+              activeWorkerFastContinuation.presentationConsumer,
+            presentationCompletionReady:
+              activeWorkerFastContinuation.presentationCompletionReady,
+            presentationReason: workerLanePostCommitPresentationReason
+          }
+        );
         renderStatus();
         updateWarningBanner();
         return execution;

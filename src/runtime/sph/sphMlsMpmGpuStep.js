@@ -17,7 +17,12 @@ import {
   encodeSphImplicitPressureSolve,
   normalizeSphImplicitPressureOptions
 } from './sphImplicitPressureGpu.js';
-import { ensureSchroederSolidRigidFamilyForUpload, runSchroederSolidRigidLaneStep } from './schroederSolidRigidLane.js';
+import {
+  ensureSchroederDeformableSolidSurfaceFamilyForUpload,
+  ensureSchroederSolidRigidFamilyForUpload,
+  runSchroederDeformableSolidSurfaceLaneStep,
+  runSchroederSolidRigidLaneStep
+} from './schroederSolidRigidLane.js';
 import { runSchroederSpatialChainResidentBatchWebGpu, schroederSpatialChainResidentClock,
   retireSchroederSpatialChainResidentStep, bindSchroederSpatialChainResidentDelta } from './schroederSpatialChainResidentGpu.js';
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
@@ -38040,10 +38045,25 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     });
   // G3 coherent rigid bodies: one SE(3) step per resident step, on the same
   // device and queue, after the continuum mechanics.
+  const solidReleaseFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
   runSchroederSolidRigidLaneStep(
     ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
-    { device: resolvedDevice, dtSeconds, gravity, boxM: dims,
-      fluid: solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) });
+    { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: solidReleaseFluid });
+  // A5 SOL-4: advect explicit material-space deformable solid surfaces on GPU.
+  if (sphParticleState?.deformableSolidSurfaces) {
+    runSchroederDeformableSolidSurfaceLaneStep(
+      ensureSchroederDeformableSolidSurfaceFamilyForUpload(
+        sphParticleUpload,
+        sphParticleState.deformableSolidSurfaces,
+        resolvedDevice
+      ),
+      {
+        device: resolvedDevice,
+        stateBuffer: solidReleaseFluid?.stateBuffer,
+        mechanicsBuffer: solidReleaseFluid?.mechanicsBuffer
+      }
+    );
+  }
   postMechanicsClosure = await timedStage('postMechanicsClosure', () => runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
     stageMechanicsTracer: createSphStageMechanicsTracer({
@@ -39975,10 +39995,24 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         : runMlsMpmG2pWithOptionalWebGpu(g2pStageOptions)
     ));
     // G3 coherent rigid bodies on the mechanics-only route as well.
+    const mechanicsOnlySolidFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
     runSchroederSolidRigidLaneStep(
       ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
-      { device: resolvedDevice, dtSeconds, gravity, boxM: dims,
-        fluid: solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) });
+      { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: mechanicsOnlySolidFluid });
+    if (sphParticleState?.deformableSolidSurfaces) {
+      runSchroederDeformableSolidSurfaceLaneStep(
+        ensureSchroederDeformableSolidSurfaceFamilyForUpload(
+          sphParticleUpload,
+          sphParticleState.deformableSolidSurfaces,
+          resolvedDevice
+        ),
+        {
+          device: resolvedDevice,
+          stateBuffer: mechanicsOnlySolidFluid?.stateBuffer,
+          mechanicsBuffer: mechanicsOnlySolidFluid?.mechanicsBuffer
+        }
+      );
+    }
 
     const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
     const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;

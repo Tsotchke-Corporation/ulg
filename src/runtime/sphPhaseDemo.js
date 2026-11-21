@@ -105,6 +105,10 @@ import { phaseSoundSpeedScaleFor } from './sph/sphMechanicsMaterialTable.js';
 import { normalizeSphImplicitPressureOptions } from './sph/sphImplicitPressureGpu.js';
 import { seedSchroederSolidRigidBody } from './sph/schroederSolidRigidGpu.js';
 import { SCHROEDER_SOLID_BODIES_SCHEMA } from './sph/schroederSolidRigidLane.js';
+import {
+  SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA,
+  buildSchroederDeformableSolidSurfaceMesh
+} from './sph/schroederSolidDeformableShapeGpu.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 // Exact-rational particle quantities are disabled (user, 2026-10-27). Room
@@ -2609,6 +2613,7 @@ function buildSphInitialBodiesDemoState({
   // closures and non-degenerate 3D inertia is physically admitted unless an
   // active chemical reaction in this scene consumes its material.
   const rigidBodies = [];
+  const deformableSolidSurfaces = [];
   const autoRigidEligible = coherentRigidSolids === true
     && String(mechanics || 'mlsmpm') === 'mlsmpm'
     && !globalThis.__ulgSkipSolidReleaseRows;
@@ -2740,13 +2745,30 @@ function buildSphInitialBodiesDemoState({
           liveParticles.push(particle);
         }
       }
+      const shearModulusPa = Number(solidPhase?.shearModulusPa) || Number(solidPhase?.bulkModulusPa) || 1.0e9;
       rigidBodies.push({ bodyId: rigidBodies.length, sourceBodyId: body.id, material: body.material,
-        temperatureK: body.temperatureK, pitchByAxisM: [...plan.spacingByAxisM],
+        temperatureK: body.temperatureK, sizeM: [...body.sizeM], pitchByAxisM: [...plan.spacingByAxisM],
+        fracture: {
+          tensileStrengthPa: Math.max(1.0e5, 0.002 * shearModulusPa),
+          shearStrengthPa: Math.max(1.0e5, 0.0015 * shearModulusPa),
+          fractureEnergyJPerM2: 1.0
+        },
         seed: JSON.parse(JSON.stringify(seed)), thermal, releaseRowStart });
       countsByBodyId[body.id] = 0;
       bodyRanges.push({ bodyId: body.id, domainId: body.domainId, material: body.material, start, count: 0,
         endExclusive: start, mechanicsMode: 'rigid' });
       continue;
+    }
+    if (body.mechanicsMode === 'deformable' && particles.length > 0) {
+      const surfaceMesh = buildSchroederDeformableSolidSurfaceMesh(particles, {
+        pitchM: plan.spacingByAxisM
+      });
+      deformableSolidSurfaces.push({
+        bodyId: body.id,
+        material: body.material,
+        particleRowOffset: start,
+        mesh: surfaceMesh
+      });
     }
     for (const particle of particles) liveParticles.push(particle);
     countsByBodyId[body.id] = particles.length;
@@ -2863,6 +2885,12 @@ function buildSphInitialBodiesDemoState({
       }
     }
     state.rigidBodies = Object.freeze({ schema: SCHROEDER_SOLID_BODIES_SCHEMA, bodies: rigidBodies, fluidThermal });
+  }
+  if (deformableSolidSurfaces.length) {
+    state.deformableSolidSurfaces = Object.freeze({
+      schema: SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA,
+      surfaces: deformableSolidSurfaces
+    });
   }
   copyInitialParticleMetadataIntoState(state, all);
 

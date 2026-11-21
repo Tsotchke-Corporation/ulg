@@ -1,10 +1,12 @@
 import {
   ensureSchroederSolidRigidFamilyForUpload,
+  latestSchroederDeformableSolidSurfaceFamily,
   latestSchroederSolidRigidFamily,
   schroederSolidRigidFamilyForUpload
 } from '../runtime/sph/schroederSolidRigidLane.js';
 import { encodeSchroederSolidIsosurfaceFieldSplatWebGpu } from '../runtime/sph/schroederSolidIsosurfaceFieldGpu.js';
 import { createSchroederSolidMemberShapeRenderer } from '../runtime/sph/schroederSolidShapeCarrier.js';
+import { createSchroederDeformableSolidSurfaceRenderer } from '../runtime/sph/schroederSolidDeformableShapeGpu.js';
 import {
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
@@ -1231,6 +1233,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   // each live member's exposed voxel faces and reads the pose from the
   // resident frame buffer the sim lane writes (melted members vanish).
   let solidShapeRenderer = null;
+  let deformableSolidRenderer = null;
   const SOLID_SHAPE_COLORS = Object.freeze({ h2o: [0.78, 0.9, 0.98], ice: [0.78, 0.9, 0.98], fe: [0.55, 0.56, 0.6] });
   const drawSolidRigidShapes = (pass, frame) => {
     // When the live rigid members were splatted into the marching-cubes solid
@@ -1245,6 +1248,19 @@ export function createWorkerOwnedIsosurfacePresenter({
       viewProjection: threeViewProjectionToWebGpuClipMatrix(frame.viewProjectionMatrix),
       colorLinear: SOLID_SHAPE_COLORS[String(family.materials?.[0]).toLowerCase()] ?? [0.7, 0.7, 0.72]
     });
+    return true;
+  };
+  const drawDeformableSolidSurfaces = (pass, frame) => {
+    const family = frame?.deformableSolidFamily ?? latestSchroederDeformableSolidSurfaceFamily(device);
+    if (!family || family.destroyed || family.device !== device || !Array.isArray(frame.viewProjectionMatrix)) return false;
+    deformableSolidRenderer ??= createSchroederDeformableSolidSurfaceRenderer(device, { colorFormat: format, depthFormat });
+    const viewProjection = threeViewProjectionToWebGpuClipMatrix(frame.viewProjectionMatrix);
+    for (const entry of family.entries) {
+      deformableSolidRenderer.draw(pass, entry.stage, {
+        viewProjection,
+        colorLinear: SOLID_SHAPE_COLORS[String(entry.material).toLowerCase()] ?? [0.76, 0.58, 0.36]
+      });
+    }
     return true;
   };
 
@@ -1374,8 +1390,9 @@ export function createWorkerOwnedIsosurfacePresenter({
         for (const surface of orderedSurfaces) {
           if (workerNativeSurfaceKind(surface) === 'opaque') drawNative(opaquePass, surface);
         }
-        // Rigid shape carriers draw inside the opaque pass (no separate pass).
+        // Rigid & deformable solid shape carriers draw inside the opaque pass (no separate pass).
         drawSolidRigidShapes(opaquePass, frame);
+        drawDeformableSolidSurfaces(opaquePass, frame);
       } finally { opaquePass.end(); }
 
       // Each condensed surface gets its own rear-depth map and scene-color

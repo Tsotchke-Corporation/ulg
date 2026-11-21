@@ -29,12 +29,13 @@ const BODY_KEYS = new Set([
   'particlesPerEdge',
   'velocityMPerS',
   'legacyRole',
-  // G3 SOL-1: 'continuum' (default, MLS-MPM particles) or 'rigid' (one
-  // coherent SE(3) frame; plan/todo/g3-solids-proposal.md).
+  // G3 SOL-1 / A5 SOL-4: 'continuum' (default, MLS-MPM particles), 'rigid'
+  // (one coherent SE(3) frame), or 'deformable' (MLS-MPM/APIC continuum with
+  // an explicit GPU material-space surface carrier).
   'mechanicsMode',
   'angularVelocityRadPerS'
 ]);
-const BODY_MECHANICS_MODES = new Set(['continuum', 'rigid']);
+const BODY_MECHANICS_MODES = new Set(['continuum', 'rigid', 'deformable']);
 
 const CONTAINER_KEYS = new Set(['schema', 'bodies']);
 const BODY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -235,7 +236,7 @@ function normalizeBody(body, index) {
   }
   if (body.mechanicsMode != null) {
     if (!BODY_MECHANICS_MODES.has(body.mechanicsMode)) {
-      fail("must be 'continuum' or 'rigid'", { code: 'invalid-mechanics-mode', path: `${path}.mechanicsMode` });
+      fail("must be 'continuum', 'rigid', or 'deformable'", { code: 'invalid-mechanics-mode', path: `${path}.mechanicsMode` });
     }
     normalized.mechanicsMode = body.mechanicsMode;
   }

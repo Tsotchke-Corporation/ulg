@@ -1,7 +1,12 @@
 import { clonePhaseCarrierPlanWithSplitReserve } from './schroederSplitSpareReserve.js';
 import { borrowSphReactionResidualHistory, validateSphReactionResidualHistoryCandidate }
   from './sphReactionResidualHistoryGpu.js';
-import { createSchroederSolidRigidFamily, registerSchroederSolidRigidFamily } from './schroederSolidRigidLane.js';
+import {
+  createSchroederDeformableSolidSurfaceFamily,
+  createSchroederSolidRigidFamily,
+  registerSchroederDeformableSolidSurfaceFamily,
+  registerSchroederSolidRigidFamily
+} from './schroederSolidRigidLane.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
@@ -781,6 +786,8 @@ export function buildSphGpuParticleBuffers(state, {
     // G3 coherent rigid bodies (cold, clone-safe); their resident family is
     // keyed by the upload identity buffer.
     ...(state.rigidBodies ? { rigidBodies: state.rigidBodies } : {}),
+    // A5 SOL-4 explicit deformable solid surface carriers (cold, clone-safe).
+    ...(state.deformableSolidSurfaces ? { deformableSolidSurfaces: state.deformableSolidSurfaces } : {}),
     // G4 per-source thermal dormancy declaration ({ epsilonK }).
     ...(state.thermalDormancy ? { thermalDormancy: state.thermalDormancy } : {}),
     // G4 reaction node scope declaration ({ exact: true }).
@@ -2598,6 +2605,13 @@ export function uploadSphGpuParticleBuffers(device, packed, { initialStorageGene
   // G3 coherent rigid bodies: one resident family per scene identity buffer.
   if (packed.rigidBodies) {
     registerSchroederSolidRigidFamily(identityBuffer, createSchroederSolidRigidFamily(device, packed.rigidBodies));
+  }
+  // A5 SOL-4 explicit deformable solid surface carriers: one resident family per scene identity buffer.
+  if (packed.deformableSolidSurfaces) {
+    registerSchroederDeformableSolidSurfaceFamily(
+      identityBuffer,
+      createSchroederDeformableSolidSurfaceFamily(device, packed.deformableSolidSurfaces)
+    );
   }
   return upload;
 }

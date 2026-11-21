@@ -6,6 +6,15 @@ import {
 } from './schroederSolidRigidGpu.js';
 import { createSchroederSolidThermalStage, seedSchroederSolidMemberThermal } from './schroederSolidThermalGpu.js';
 import { createSchroederSolidReleaseStage } from './schroederSolidReleaseGpu.js';
+import { createSchroederSolidFractureStage } from './schroederSolidFractureGpu.js';
+import {
+  buildSchroederMultilevelProxyCatalog,
+  createSchroederSolidMultilevelStage
+} from './schroederSolidMultilevelGpu.js';
+import {
+  SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA,
+  createSchroederDeformableSolidSurfaceStage
+} from './schroederSolidDeformableShapeGpu.js';
 import { sphFiniteWallStateFor } from './sphFiniteWallStateGpu.js';
 
 // G3 SOL-1 Phase 3 (plan/todo/g3-solids-proposal.md): coherent rigid bodies in
@@ -74,11 +83,15 @@ export function createSchroederSolidRigidFamily(device, cold) {
     schema: SCHROEDER_SOLID_BODIES_SCHEMA, device, bodyCount: packed.bodyCount, memberCount: packed.memberCount,
     frameBuffer, memberBuffer, proxyBuffer, latticeBuffer, neighborBuffer, proxyCount,
     materials: cold.bodies.map(body => body.material),
+    bodySizesM: cold.bodies.map(body => Array.isArray(body.sizeM) ? [...body.sizeM] : null),
+    fractureOptions: cold.bodies[0].fracture ?? null,
+    maxBodyCapacity: Math.max(packed.bodyCount, Math.trunc(Number(cold.maxBodyCapacity) || packed.bodyCount)),
     bodyTemperaturesK: cold.bodies.map(body => Number(body.temperatureK) || 293.15),
     thermal, seededThermal, releaseRows, pitchByAxisM: cold.bodies[0].pitchByAxisM,
     // A5 SOL-3: the fluid materials' conductivity/heat capacity rows.
     fluidThermalRows: Array.isArray(cold.fluidThermal) ? cold.fluidThermal : [],
-    stage: null, thermalStage: null, releaseStage: null, couplingStage: null, contactStage: null, stageKey: null,
+    stage: null, thermalStage: null, releaseStage: null, couplingStage: null, contactStage: null,
+    fractureStage: null, multilevelStage: null, multilevelCatalog: null, stageKey: null,
     destroyed: false, steps: 0, releases: 0,
     destroy() {
       if (family.destroyed) return;
@@ -87,11 +100,28 @@ export function createSchroederSolidRigidFamily(device, cold) {
         globalThis.__ulgSolidRigidLane.family = null;
       }
       family.stage?.destroy(); family.thermalStage?.destroy(); family.releaseStage?.destroy(); family.couplingStage?.destroy();
-      family.contactStage?.destroy();
+      family.contactStage?.destroy(); family.fractureStage?.destroy(); family.multilevelStage?.destroy();
       for (const buffer of [frameBuffer, memberBuffer, proxyBuffer, latticeBuffer, neighborBuffer]) buffer.destroy();
     }
   };
   return family;
+}
+
+function tryBuildMultilevelCatalogForBody(bodySizeM, pitchByAxisM) {
+  if (!Array.isArray(bodySizeM) || bodySizeM.length !== 3 || !Array.isArray(pitchByAxisM) || pitchByAxisM.length !== 3) {
+    return null;
+  }
+  const finePitchM = Math.min(...pitchByAxisM.map(Number));
+  if (!(finePitchM > 0)) return null;
+  const halfExtentsM = bodySizeM.map((v) => 0.5 * Number(v));
+  if (!halfExtentsM.every((v) => Number.isFinite(v) && v > 0)) return null;
+  const counts = halfExtentsM.map((v) => Math.max(4, Math.round((2 * v) / finePitchM)));
+  if (!counts.every((c) => c >= 4 && c % 4 === 0)) return null;
+  try {
+    return buildSchroederMultilevelProxyCatalog({ bodyIndex: 0, halfExtentsM, finePitchM });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -148,8 +178,11 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
   const key = [...gravity, ...boxM].join(',');
   if (family.stageKey !== key) {
     family.stage?.destroy(); family.thermalStage?.destroy(); family.releaseStage?.destroy(); family.couplingStage?.destroy();
-    family.contactStage?.destroy();
+    family.contactStage?.destroy(); family.fractureStage?.destroy(); family.multilevelStage?.destroy();
     family.couplingStage = null;
+    family.fractureStage = null;
+    family.multilevelStage = null;
+    family.multilevelCatalog = null;
     family.stage = createSchroederSolidRigidStage({ device, bodyCount: family.bodyCount,
       memberCount: family.memberCount, frameBuffer: family.frameBuffer, memberBuffer: family.memberBuffer,
       proxyBuffer: family.proxyBuffer, proxyCount: family.proxyCount, gravity, boxM,
@@ -184,6 +217,42 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
           halfPitchM: 0.5 * Math.min(...family.pitchByAxisM) });
       }
     }
+    // A5 SOL-5: GPU-native cohesive bond cleavage & parallel connected-component
+    // topology integrity inside the same single rigid-lane compute pass.
+    if (globalThis.__ulgDisableSol5Fracture !== true) {
+      const fOpts = family.fractureOptions ?? {};
+      family.fractureStage = createSchroederSolidFractureStage({
+        device,
+        memberCount: family.memberCount,
+        proxyCount: family.proxyCount,
+        initialBodyCount: family.bodyCount,
+        maxBodyCapacity: family.maxBodyCapacity,
+        frameBuffer: family.frameBuffer,
+        memberBuffer: family.memberBuffer,
+        memberWorldBuffer: family.stage.memberWorldBuffer,
+        proxyBuffer: family.proxyBuffer,
+        neighborBuffer: family.neighborBuffer,
+        latticeBuffer: family.latticeBuffer,
+        thermoBuffer: family.thermalStage?.thermoBuffer ?? null,
+        pitchM: family.pitchByAxisM,
+        tensileStrengthPa: Number(fOpts.tensileStrengthPa) > 0 ? Number(fOpts.tensileStrengthPa) : 1.0e6,
+        shearStrengthPa: Number(fOpts.shearStrengthPa) > 0 ? Number(fOpts.shearStrengthPa) : 1.0e6,
+        fractureEnergyJPerM2: Number(fOpts.fractureEnergyJPerM2) > 0 ? Number(fOpts.fractureEnergyJPerM2) : 1.0,
+        solidBranch: t?.solidBranch ?? { referenceTemperatureK: 250, referenceInternalEnergyJPerKg: 0, cvJPerKgK: 2050, energyMaxJPerKg: 0 },
+        materialId: t?.materialId ?? 0
+      });
+    }
+    // A5 SOL-6: GPU-native multilevel 2:1 surface proxy LOD & double-float
+    // chart origin tracking inside the same single rigid-lane compute pass.
+    if (globalThis.__ulgDisableSol6Multilevel !== true) {
+      family.multilevelCatalog = tryBuildMultilevelCatalogForBody(family.bodySizesM?.[0], family.pitchByAxisM);
+      family.multilevelStage = createSchroederSolidMultilevelStage({
+        device,
+        bodyCount: family.bodyCount,
+        frameBuffer: family.frameBuffer,
+        catalog: family.multilevelCatalog
+      });
+    }
     family.stageKey = key;
   }
   const encoder = device.createCommandEncoder({ label: 'ulg-solid-rigid-lane' });
@@ -192,6 +261,9 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
   const releaseEnabled = Boolean(fluid?.stateBuffer && fluid?.thermoBuffer && fluid?.mechanicsBuffer && family.releaseStage);
   const couplingEligible = Boolean(releaseEnabled && family.couplingStage && fluid.particleCount > 0);
   const contactEligible = Boolean(fluid?.stateBuffer && fluid?.thermoBuffer && fluid.particleCount > 0);
+  const multilevelEligible = Boolean(family.multilevelStage && family.multilevelCatalog?.macroCount > 0);
+  const boxCenter = Array.isArray(boxM) && boxM.length === 3 ? boxM.map((v) => 0.5 * Number(v)) : [0, 0, 0];
+  const boxSpan = Array.isArray(boxM) && boxM.length === 3 ? Math.max(...boxM.map(Number)) : 1;
   // Perform ALL uniform writeBuffer updates, buffer clears, and finite-wall
   // temperature copies BEFORE opening the shared compute pass (critical under
   // burst pooled write-through, which encodes writeBuffer as copyBufferToBuffer).
@@ -210,6 +282,14 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
   if (releaseEnabled) {
     family.releaseStage.prepare?.(fluid);
   }
+  family.fractureStage?.prepare?.(dtSeconds);
+  if (multilevelEligible) {
+    family.multilevelStage.prepareMultilevelProxies({
+      focusWorldM: boxCenter,
+      fineRadiusM: 0.25 * boxSpan,
+      mediumRadiusM: 0.65 * boxSpan
+    });
+  }
   const pass = encoder.beginComputePass({ label: 'ulg-solid-rigid-lane' });
   family.stage.encode(encoder, dtSeconds, { pass, prepared: true });
   family.thermalStage?.encode(encoder, dtSeconds, { releaseEnabled, pass, prepared: true });
@@ -224,6 +304,17 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     && family.contactStage.encode(encoder, dtSeconds, { fluidStateBuffer: fluid.stateBuffer,
       fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount, pass, prepared: true });
   if (releaseEnabled) family.releaseStage.encode(encoder, { ...fluid, pass, prepared: true });
+  family.fractureStage?.encode(encoder, dtSeconds, { pass, prepared: true });
+  if (multilevelEligible) {
+    family.multilevelStage.encodeMultilevelProxies(encoder, {
+      focusWorldM: boxCenter,
+      fineRadiusM: 0.25 * boxSpan,
+      mediumRadiusM: 0.65 * boxSpan,
+      reflux: true,
+      pass,
+      prepared: true
+    });
+  }
   pass.end();
   // Diagnostic (scripts/a1-ab-check.mjs): at step __ulgFingerprintStep, copy
   // the fluid state/thermo and rigid frames in queue order, so an A/B
@@ -306,5 +397,105 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
       fluidThermalRows: live.fluidThermalRows.length };
   };
   counters.family = family;
+  globalThis.__ulgA5SolidStatus = Object.freeze({
+    active: true,
+    rigidBodyCount: family.bodyCount,
+    memberCount: family.memberCount,
+    steps: family.steps,
+    sol4DeformableSurfaceCount: globalThis.__ulgA5SolidStatus?.sol4DeformableSurfaceCount ?? 0,
+    sol4Steps: globalThis.__ulgA5SolidStatus?.sol4Steps ?? 0,
+    sol5FractureActive: Boolean(family.fractureStage),
+    sol6MultilevelActive: Boolean(family.multilevelStage),
+    sol6MultilevelProxiesActive: multilevelEligible,
+    sol6MacroCount: family.multilevelCatalog?.macroCount ?? 0
+  });
+  return true;
+}
+
+// A5 SOL-4: resident explicit material-space deformable solid surface carriers,
+// keyed by upload identity buffer alongside rigid solid families.
+const deformableFamiliesByIdentity = new WeakMap();
+
+export function createSchroederDeformableSolidSurfaceFamily(device, cold) {
+  if (cold?.schema !== SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA || !Array.isArray(cold.surfaces) || !cold.surfaces.length) {
+    throw new TypeError('Deformable solid surfaces require the schroeder-deformable-solid-surface declaration');
+  }
+  const entries = cold.surfaces.map((entry) => ({
+    bodyId: entry.bodyId,
+    material: entry.material,
+    particleRowOffset: Math.max(0, Math.trunc(Number(entry.particleRowOffset) || 0)),
+    stage: createSchroederDeformableSolidSurfaceStage({
+      device,
+      mesh: entry.mesh,
+      particleRowOffset: entry.particleRowOffset ?? 0
+    })
+  }));
+  const family = {
+    schema: SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA,
+    device,
+    entries,
+    steps: 0,
+    destroyed: false,
+    destroy() {
+      if (family.destroyed) return;
+      family.destroyed = true;
+      if (globalThis.__ulgSolidDeformableLane?.family === family) {
+        globalThis.__ulgSolidDeformableLane.family = null;
+      }
+      for (const entry of entries) entry.stage.destroy();
+    }
+  };
+  return family;
+}
+
+export function registerSchroederDeformableSolidSurfaceFamily(identityBuffer, family) {
+  if (!identityBuffer || !family) return null;
+  const existing = deformableFamiliesByIdentity.get(identityBuffer);
+  if (existing && !existing.destroyed) return existing;
+  deformableFamiliesByIdentity.set(identityBuffer, family);
+  finalizer?.register(identityBuffer, family.destroy);
+  return family;
+}
+
+export function schroederDeformableSolidSurfaceFamilyForUpload(upload) {
+  const family = upload?.identityBuffer ? deformableFamiliesByIdentity.get(upload.identityBuffer) : null;
+  return family && !family.destroyed ? family : null;
+}
+
+export function ensureSchroederDeformableSolidSurfaceFamilyForUpload(upload, cold, device) {
+  const existing = schroederDeformableSolidSurfaceFamilyForUpload(upload);
+  if (existing || !cold || !upload?.identityBuffer || !device) return existing;
+  return registerSchroederDeformableSolidSurfaceFamily(
+    upload.identityBuffer,
+    createSchroederDeformableSolidSurfaceFamily(device, cold)
+  );
+}
+
+export function latestSchroederDeformableSolidSurfaceFamily(device) {
+  const family = globalThis.__ulgSolidDeformableLane?.family ?? null;
+  return family && !family.destroyed && family.device === device ? family : null;
+}
+
+export function runSchroederDeformableSolidSurfaceLaneStep(family, { device, stateBuffer, mechanicsBuffer } = {}) {
+  if (!family || family.destroyed || !stateBuffer || !mechanicsBuffer) return false;
+  if (device !== family.device) throw new TypeError('The deformable solid surface lane must run on its family device');
+  const encoder = device.createCommandEncoder({ label: 'ulg-sol4-deformable-surface-lane' });
+  const pass = encoder.beginComputePass({ label: 'ulg-sol4-deformable-surface-advect' });
+  for (const entry of family.entries) {
+    entry.stage.encode(encoder, { stateBuffer, mechanicsBuffer, pass });
+  }
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  family.steps += 1;
+  const counters = (globalThis.__ulgSolidDeformableLane ??= { steps: 0, surfaces: 0, family: null });
+  counters.steps += 1;
+  counters.surfaces = family.entries.length;
+  counters.family = family;
+  globalThis.__ulgA5SolidStatus = Object.freeze({
+    ...(globalThis.__ulgA5SolidStatus ?? {}),
+    active: true,
+    sol4DeformableSurfaceCount: family.entries.length,
+    sol4Steps: family.steps
+  });
   return true;
 }

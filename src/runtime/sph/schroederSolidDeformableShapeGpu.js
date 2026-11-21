@@ -198,6 +198,8 @@ export const schroederDeformableSurfaceAdvectWgsl = /* wgsl */ `
 struct SurfaceParams {
   // vertex_count, triangle_count, particle_count, mechanics_stride_floats
   counts: vec4<u32>,
+  // particle_row_offset, reserved, reserved, reserved
+  offsets: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> params: SurfaceParams;
@@ -248,11 +250,12 @@ fn advect_vertices(@builtin(global_invocation_id) id: vec3<u32>) {
     if (wk <= 0.0) { continue; }
     let p = idx[k];
     if (p >= params.counts.z) { continue; }
-    let sbase = p * 8u;
+    let gp = p + params.offsets.x;
+    let sbase = gp * 8u;
     let xp = vec3<f32>(particle_state[sbase + 0u], particle_state[sbase + 1u], particle_state[sbase + 2u]);
     let xp0 = rest_particles[p].xyz;
     let dX = xv0 - xp0;
-    let mbase = p * mstride;
+    let mbase = gp * mstride;
     // Exact ULG MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT row-major F00..F22:
     let f0 = vec3<f32>(particle_mechanics[mbase + 0u], particle_mechanics[mbase + 1u], particle_mechanics[mbase + 2u]);
     let f1 = vec3<f32>(particle_mechanics[mbase + 3u], particle_mechanics[mbase + 4u], particle_mechanics[mbase + 5u]);
@@ -305,7 +308,8 @@ fn build_render_triangles(@builtin(global_invocation_id) id: vec3<u32>) {
 export function createSchroederDeformableSolidSurfaceStage({
   device,
   mesh,
-  mechanicsStrideFloats = 32
+  mechanicsStrideFloats = 32,
+  particleRowOffset = 0
 }) {
   const bindings = [
     computeBufferBinding(0, 'uniform'),
@@ -324,7 +328,7 @@ export function createSchroederDeformableSolidSurfaceStage({
     ['clear_summary', 'advect_vertices', 'build_render_triangles'].map((entryPoint) => [
       entryPoint,
       createCachedExplicitComputePipeline(device, {
-        cacheKey: `ulg-sol4-surface-${entryPoint}.v1`,
+        cacheKey: `ulg-sol4-surface-${entryPoint}.v2`,
         label: `ulg-sol4-surface-${entryPoint}`,
         code: schroederDeformableSurfaceAdvectWgsl,
         entryPoint,
@@ -343,13 +347,22 @@ export function createSchroederDeformableSolidSurfaceStage({
   };
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sol4-surface-params',
-    size: 16,
+    size: 32,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(
     paramsBuffer,
     0,
-    new Uint32Array([mesh.vertexCount, mesh.triangleCount, mesh.particleCount, mechanicsStrideFloats])
+    new Uint32Array([
+      mesh.vertexCount,
+      mesh.triangleCount,
+      mesh.particleCount,
+      mechanicsStrideFloats,
+      Math.max(0, Math.trunc(Number(particleRowOffset) || 0)),
+      0,
+      0,
+      0
+    ])
   );
   const restParticlesBuffer = upload('ulg-sol4-rest-particles', mesh.restParticlePositions);
   const vertRestBuffer = upload('ulg-sol4-vert-rest', mesh.vertexRestPositions);

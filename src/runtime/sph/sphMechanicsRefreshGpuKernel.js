@@ -17,8 +17,11 @@ import {
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   submitQueueOrderedFinalConsumerWork,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
+
+const mechanicsMaterialBankWarmInputBufferCache = new WeakMap();
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../material/materialPropertyBank.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -309,6 +312,30 @@ function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
     const packedRows = candidate.table?.rows;
     const packedRowCount = Math.max(0, Math.round(finiteNumber(candidate.table?.rowCount, 0)));
     if (packedRows?.byteLength > 0 && packedRowCount > 0) {
+      if (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice) {
+        const cacheKeyDevice = unwrapWebGpuCacheDevice(device);
+        let rowCache = mechanicsMaterialBankWarmInputBufferCache.get(cacheKeyDevice);
+        if (!rowCache) {
+          rowCache = new WeakMap();
+          mechanicsMaterialBankWarmInputBufferCache.set(cacheKeyDevice, rowCache);
+        }
+        let cachedBuffer = rowCache.get(packedRows);
+        if (!cachedBuffer) {
+          cachedBuffer = writeStorageBuffer(
+            device,
+            'ulg-mls-mpm-mechanics-material-bank-warm-input-rows',
+            packedRows
+          );
+          rowCache.set(packedRows, cachedBuffer);
+        }
+        return {
+          buffer: cachedBuffer,
+          rowCount: packedRowCount,
+          bufferSource: `${candidate.source}-cached`,
+          borrowed: true,
+          destroy() {}
+        };
+      }
       const buffer = writeStorageBuffer(
         device,
         'ulg-mls-mpm-mechanics-material-bank-warm-input-rows',

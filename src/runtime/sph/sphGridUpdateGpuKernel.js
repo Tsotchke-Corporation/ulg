@@ -36,6 +36,7 @@ import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay, watchSphDeviceLoss } from './sphDeviceLossRelay.js';
 import { loadSphMlsMpmKernelBundle } from './sphMlsMpmKernelBundleLoader.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
@@ -43,6 +44,7 @@ import {
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  releaseQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedFinalConsumerWork,
   submitQueueOrderedWork,
@@ -2571,17 +2573,30 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
   });
   const receiptModeFlags = mechanicsFieldEnergyReceipt?.deferSeal === true ? 1 : 0;
   const ownedBuffers = new Set();
+  const pooledOwnedBufferMeta = new WeakMap();
+  const useQueueOrderedGridUpdatePool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   let publishedUpdate = null;
   let queueOrderedSubmissionReceipt = null;
-  const trackOwnedBuffer = (buffer) => {
-    if (buffer?.destroy) ownedBuffers.add(buffer);
+  const trackOwnedBuffer = (buffer, poolMeta = null) => {
+    if (buffer?.destroy) {
+      ownedBuffers.add(buffer);
+      if (poolMeta) pooledOwnedBufferMeta.set(buffer, poolMeta);
+    }
     return buffer;
   };
   const cleanupOwnedBuffers = () => {
     for (let attempt = 0; attempt < 2 && ownedBuffers.size > 0; attempt += 1) {
       for (const buffer of [...ownedBuffers]) {
         try {
-          buffer.destroy?.();
+          const poolMeta = pooledOwnedBufferMeta.get(buffer);
+          if (poolMeta && submitted === true) {
+            releaseQueueOrderedPooledBuffer(device, buffer, poolMeta);
+          } else {
+            buffer.destroy?.();
+          }
           ownedBuffers.delete(buffer);
         } catch {
           // Continue across the complete ledger and retry each failed
@@ -2800,22 +2815,50 @@ async function runMlsMpmMechanicsFieldGridUpdateWebGpu({
       );
     }
     if (gasPressureBoundaryLayout) {
+      const scratchUsage =
+        GPU_BUFFER_USAGE.STORAGE
+        | GPU_BUFFER_USAGE.COPY_DST
+        | GPU_BUFFER_USAGE.COPY_SRC;
+      const scratchMeta = useQueueOrderedGridUpdatePool
+        ? {
+            bucketKey: 'ulg-schroeder-gas-pressure-boundary-scratch',
+            size: gasPressureBoundaryLayout.scratchByteLength,
+            usage: scratchUsage
+          }
+        : null;
       gasPressureBoundaryScratchBuffer = trackOwnedBuffer(
-        device.createBuffer({
-          label: 'ulg-schroeder-gas-pressure-boundary-scratch',
-          size: gasPressureBoundaryLayout.scratchByteLength,
-          usage:
-            GPU_BUFFER_USAGE.STORAGE
-            | GPU_BUFFER_USAGE.COPY_DST
-            | GPU_BUFFER_USAGE.COPY_SRC
-        })
+        useQueueOrderedGridUpdatePool
+          ? acquireQueueOrderedPooledBuffer(device, {
+              ...scratchMeta,
+              label: 'ulg-schroeder-gas-pressure-boundary-scratch'
+            })
+          : device.createBuffer({
+              label: 'ulg-schroeder-gas-pressure-boundary-scratch',
+              size: gasPressureBoundaryLayout.scratchByteLength,
+              usage: scratchUsage
+            }),
+        scratchMeta
       );
+      const paramsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
+      const paramsMeta = useQueueOrderedGridUpdatePool
+        ? {
+            bucketKey: 'ulg-schroeder-gas-pressure-boundary-params',
+            size: SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES,
+            usage: paramsUsage
+          }
+        : null;
       gasPressureBoundaryParamsBuffer = trackOwnedBuffer(
-        device.createBuffer({
-          label: 'ulg-schroeder-gas-pressure-boundary-params',
-          size: SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES,
-          usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-        })
+        useQueueOrderedGridUpdatePool
+          ? acquireQueueOrderedPooledBuffer(device, {
+              ...paramsMeta,
+              label: 'ulg-schroeder-gas-pressure-boundary-params'
+            })
+          : device.createBuffer({
+              label: 'ulg-schroeder-gas-pressure-boundary-params',
+              size: SCHROEDER_SPATIAL_GAS_PRESSURE_BOUNDARY_TRANSPORT_PARAMS_BYTES,
+              usage: paramsUsage
+            }),
+        paramsMeta
       );
     }
     mutationToken = chainPublication?.mutation ?? (fusedTransaction != null

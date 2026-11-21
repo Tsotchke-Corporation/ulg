@@ -159,13 +159,16 @@ import {
   schroederPhaseVolumeTargetAggregateWgsl
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   assertQueueOrderedCleanupClaimsRegistered,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  releaseQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
   releaseSubmittedWorkCleanupQueueOrdered,
@@ -8545,11 +8548,41 @@ export async function runSchroederActiveNodeListWebGpu({
     : null;
   const phaseVolumeAssignmentOverlayIndexBuffer = borrowedPhaseVolumeAssignmentOverlayIndexBuffer
     || sharedControlBuffers.disabledOverlayIndexBuffer;
-  const activeNodeBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-schroeder-active-nodes-out',
-    size: plan.activeNodeByteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  }), device);
+  const useQueueOrderedActiveNodePool = Boolean(
+    noFullReadback
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const activeNodeUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const activeNodeBuffer = tagWebGpuBufferDevice(
+    useQueueOrderedActiveNodePool
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-schroeder-active-nodes-out',
+          label: 'ulg-schroeder-active-nodes-out',
+          size: plan.activeNodeByteLength,
+          usage: activeNodeUsage
+        })
+      : device.createBuffer({
+          label: 'ulg-schroeder-active-nodes-out',
+          size: plan.activeNodeByteLength,
+          usage: activeNodeUsage
+        }),
+    device
+  );
+  let activeNodeBufferReleased = false;
+  const releaseActiveNodeBuffer = () => {
+    if (activeNodeBufferReleased) return;
+    activeNodeBufferReleased = true;
+    if (useQueueOrderedActiveNodePool && submissionObserved) {
+      releaseQueueOrderedPooledBuffer(device, activeNodeBuffer, {
+        bucketKey: 'ulg-schroeder-active-nodes-out',
+        size: plan.activeNodeByteLength,
+        usage: activeNodeUsage
+      });
+    } else {
+      activeNodeBuffer.destroy?.();
+    }
+  };
   const paramsBuffer = sharedControlBuffers.paramsBuffer;
   const readBuffer = noFullReadback
     ? null
@@ -8581,7 +8614,8 @@ export async function runSchroederActiveNodeListWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-schroeder-active-node-list',
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: assignmentBuffer } },
@@ -8682,7 +8716,7 @@ export async function runSchroederActiveNodeListWebGpu({
     );
     if (retainActiveNodeBuffer) {
       result.activeNodeBuffer = activeNodeBuffer;
-      result.destroyActiveNodeBuffer = () => activeNodeBuffer.destroy?.();
+      result.destroyActiveNodeBuffer = releaseActiveNodeBuffer;
       returnedRetainedActiveNodeBuffer = true;
     }
     successfulReturn = true;
@@ -8704,7 +8738,7 @@ export async function runSchroederActiveNodeListWebGpu({
       ) {
         phaseVolumeAssignmentOverlayIndexBuffer.destroy?.();
       }
-      if (!retainActiveNodeBuffer || !returnedRetainedActiveNodeBuffer) activeNodeBuffer.destroy?.();
+      if (!retainActiveNodeBuffer || !returnedRetainedActiveNodeBuffer) releaseActiveNodeBuffer();
       readBuffer?.destroy?.();
     };
     const recordHostQueueFence = () => {

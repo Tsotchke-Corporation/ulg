@@ -1713,15 +1713,21 @@ export function createSchroederSpatialEpochGpu(device, {
     const prev = lastAdmittedSnapshot.execution;
     if (lastAdmittedSnapshot.arena.writeSerial !== lastAdmittedSnapshot.writeSerial) return 'arena-overwritten';
     if (prev.sourceCount !== plan.sourceCount) return 'source-count-changed';
-    if (prev.laneOrdinal !== plan.laneOrdinal) return 'lane-changed';
     if (prev.sourceFamilyId !== plan.sourceFamilyId) return 'source-family-changed';
     if (
       plan.storageGeneration > 0
       && prev.storageGeneration > 0
-      && plan.storageGeneration <= prev.storageGeneration
-      && plan.physicsTick <= prev.physicsTick
-      && plan.physicsSubstep <= prev.physicsSubstep
-      && plan.positionEpoch <= prev.positionEpoch
+      && (
+        plan.storageGeneration < prev.storageGeneration
+        || plan.physicsTick < prev.physicsTick
+        || (
+          prev.laneOrdinal === plan.laneOrdinal
+          && plan.storageGeneration <= prev.storageGeneration
+          && plan.physicsTick <= prev.physicsTick
+          && plan.physicsSubstep <= prev.physicsSubstep
+          && plan.positionEpoch <= prev.positionEpoch
+        )
+      )
     ) {
       return 'non-successor-lineage';
     }

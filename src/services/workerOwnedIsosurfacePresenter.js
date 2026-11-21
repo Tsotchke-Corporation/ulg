@@ -538,6 +538,14 @@ function workerOwnedParticipatingMediumPresentation(frame) {
   });
 }
 
+export function dampedIsosurfaceShaderMotionAgeS(frame) {
+  const rawAgeS = Math.max(0, Number(frame?.drawMotionAgeS) || 0);
+  const maxAgeS = Number(frame?.motionPacing?.maxSimulationAgeS) || 0;
+  if (!(rawAgeS > 0) || !(maxAgeS > 0)) return rawAgeS;
+  const tau = maxAgeS * 0.65;
+  return tau * (1 - Math.exp(-rawAgeS / tau));
+}
+
 export function buildWorkerOwnedIsosurfaceSurfaceUniformValues(
   frame = {},
   surface = {}
@@ -593,7 +601,7 @@ export function buildWorkerOwnedIsosurfaceSurfaceUniformValues(
     words[36] = surface.descriptor?.fieldOffset ?? 0;
     words[37] = surface.metadata?.resolution ?? 0;
     words[38] = frame.motionField.rowCount;
-    values[40] = Math.max(0, Number(frame.drawMotionAgeS) || 0);
+    values[40] = dampedIsosurfaceShaderMotionAgeS(frame);
     // One field-cell edge bounds presentation deformation. It is not a
     // mechanics displacement clamp and never changes the captured source.
     values[41] = Math.abs(values[19]);
@@ -1461,7 +1469,7 @@ export function createWorkerOwnedIsosurfacePresenter({
               cameraPositionM: frame.cameraPositionM, viewportSize,
               depthTextureView: depthView, lightDirection: [0.38, 0.82, 0.42],
               motionField: frame.motionField,
-              motionAgeS: frame.drawMotionAgeS || 0
+              motionAgeS: dampedIsosurfaceShaderMotionAgeS(frame)
             }
           );
         } finally { volumePass.end(); }

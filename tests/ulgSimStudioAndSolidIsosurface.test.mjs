@@ -32,6 +32,8 @@ import {
   schroederSolidIsosurfaceFieldWgsl
 } from '../src/runtime/sph/schroederSolidIsosurfaceFieldGpu.js';
 import { createSphPhaseDemo } from '../src/runtime/sphPhaseDemo.js';
+import { resolveSphAdaptiveSyncScheduleStepCount } from '../src/visualization/sphPhaseDemoMount.js';
+import { dampedIsosurfaceShaderMotionAgeS } from '../src/services/workerOwnedIsosurfacePresenter.js';
 
 test('floor-centered container coordinates place floor center at (0, 0, 0) and round-trip with internal solver bounds', () => {
   const box = [2.4, 1.8, 3.0];
@@ -562,4 +564,25 @@ test('Studio A6 cross-machine peerRelay and peerRoom URL parameters omit when bl
   const relayLaunch = buildLaunchParamsFromStagedConfig(parsed.config);
   assert.equal(relayLaunch.peerRelay, 'wss://relay.example.net/ulg');
   assert.equal(relayLaunch.peerRoom, 'lab-cluster-1');
+});
+
+test('adaptive visual sync cadence targets ~25-40 Hz committed keyframes while honoring step ceilings and smooth motion damping', () => {
+  // Warmup starts fast (<= 4 steps instead of 64)
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: null }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: null }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 1, throughputStepsPerS: 100 }), 1);
+
+  // Real presets: sodium-water (~12 steps/s) -> 2 steps (~6-10+ Hz vs 0.17 Hz);
+  // iron-ice (~35 steps/s) -> 2 steps (~17+ Hz vs 2 Hz);
+  // water-realtime (~140 steps/s) -> 5 steps (~28 Hz vs 8.7 Hz).
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: 12 }), 2);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 35 }), 2);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 140 }), 5);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 1000 }), 16);
+
+  // Smooth shader motion damping matches exact velocity at t=0 and caps late overshoot.
+  assert.equal(dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0, motionPacing: { maxSimulationAgeS: 0.01 } }), 0);
+  assert.equal(dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0.004 }), 0.004);
+  const dampedEnd = dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0.01, motionPacing: { maxSimulationAgeS: 0.01 } });
+  assert.ok(dampedEnd > 0.004 && dampedEnd < 0.006, `expected smooth ease-out cap, got ${dampedEnd}`);
 });

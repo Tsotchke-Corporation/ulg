@@ -529,10 +529,10 @@ function dispatchInPass(pass, sampler, membersBuffer, entryPoint, groups) {
  * Call sampler.writeParams({ regionCount, memberCount }) before the submit
  * that carries this encoder (one evaluation per submit).
  */
-export function encodeRegionalClosureEvaluate(encoder, sampler, { membersBuffer, regionCount, memberCount }) {
+export function encodeRegionalClosureEvaluate(encoder, sampler, { membersBuffer, regionCount, memberCount, pass: sharedPass = null }) {
   const regionGroups = Math.ceil(regionCount / WORKGROUP);
   const memberGroups = Math.ceil(memberCount / WORKGROUP);
-  const pass = encoder.beginComputePass({ label: 'ulg-a3-evaluate' });
+  const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-a3-evaluate' });
   dispatchInPass(pass, sampler, membersBuffer, 'clear_envelope', regionGroups);
   dispatchInPass(pass, sampler, membersBuffer, 'accumulate_envelope', memberGroups);
   dispatchInPass(pass, sampler, membersBuffer, 'plan_regions', regionGroups);
@@ -542,16 +542,16 @@ export function encodeRegionalClosureEvaluate(encoder, sampler, { membersBuffer,
     dispatchInPass(pass, sampler, membersBuffer, 'plan_pending', regionGroups);
     dispatchInPass(pass, sampler, membersBuffer, 'fit_pending', regionCount);
   }
-  pass.end();
+  if (!sharedPass) pass.end();
 }
 
 /** Encode the schedule boundary: pending expanded fits become live. */
-export function encodeRegionalClosureScheduleBoundary(encoder, sampler, { membersBuffer, regionCount }) {
+export function encodeRegionalClosureScheduleBoundary(encoder, sampler, { membersBuffer, regionCount, pass: sharedPass = null }) {
   const groups = Math.ceil(regionCount / WORKGROUP);
   if (groups < 1) return;
-  const pass = encoder.beginComputePass({ label: 'ulg-a3-adopt_pending' });
+  const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-a3-adopt_pending' });
   dispatchInPass(pass, sampler, membersBuffer, 'adopt_pending', groups);
-  pass.end();
+  if (!sharedPass) pass.end();
 }
 
 /** Encode the GPU self-check of the latest evaluation's member values. */

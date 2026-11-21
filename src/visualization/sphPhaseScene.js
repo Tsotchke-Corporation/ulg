@@ -54499,6 +54499,9 @@ fn main(
         if (workerArchStatus.a3RegionalClosure) {
           globalThis.__ulgA3RegionalClosureStatus = workerArchStatus.a3RegionalClosure;
         }
+        if (workerArchStatus.a3ThermalRegionalClosure) {
+          globalThis.__ulgA3ThermalRegionalClosureStatus = workerArchStatus.a3ThermalRegionalClosure;
+        }
         if (workerArchStatus.a4GasResponse) {
           globalThis.__ulgA4GasResponseStatus = workerArchStatus.a4GasResponse;
         }

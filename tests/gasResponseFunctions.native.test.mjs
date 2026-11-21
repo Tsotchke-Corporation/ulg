@@ -58,10 +58,18 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
       const queryRows = [
         [n2.densityIndex, 293.15, 101325, 0],
         [n2.soundSpeedIndex, 293.15, 101325, 0],
+        [n2.dynamicViscosityIndex, 293.15, 101325, 0],
+        [n2.thermalConductivityIndex, 293.15, 101325, 0],
+        [n2.acousticImpedanceIndex, 293.15, 101325, 0],
+        [n2.volumetricHeatCapacityIndex, 293.15, 101325, 0],
         [h2o.densityIndex, 450.0, 220000, 0],
         [h2o.soundSpeedIndex, 450.0, 220000, 0],
-        [n2.densityIndex, 100.0, 101325, 0],     // out-of-box low T
-        [h2o.soundSpeedIndex, 450.0, 900000, 0] // out-of-box high P
+        [h2o.dynamicViscosityIndex, 450.0, 220000, 0],
+        [h2o.thermalConductivityIndex, 450.0, 220000, 0],
+        [h2o.acousticImpedanceIndex, 450.0, 220000, 0],
+        [h2o.volumetricHeatCapacityIndex, 450.0, 220000, 0],
+        [n2.densityIndex, 100.0, 101325, 0],            // out-of-box low T
+        [h2o.acousticImpedanceIndex, 450.0, 900000, 0]  // out-of-box high P
       ];
       const qData = new Float32Array(queryRows.flat());
       const qBuf = device.createBuffer({ size: qData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -81,11 +89,21 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
       readBuf.destroy();
       evaluator.destroy();
 
+      const n2Cpu = gasMod.evaluateMaterialGasResponseCpu(bundle, 'n2', 293.15, 101325);
+      const h2oCpu = gasMod.evaluateMaterialGasResponseCpu(bundle, 'h2o', 450.0, 220000);
       const cpuRef = [
-        gasMod.evaluateMaterialGasResponseCpu(bundle, 'n2', 293.15, 101325).densityKgPerM3,
-        gasMod.evaluateMaterialGasResponseCpu(bundle, 'n2', 293.15, 101325).soundSpeedMPerS,
-        gasMod.evaluateMaterialGasResponseCpu(bundle, 'h2o', 450.0, 220000).densityKgPerM3,
-        gasMod.evaluateMaterialGasResponseCpu(bundle, 'h2o', 450.0, 220000).soundSpeedMPerS
+        n2Cpu.densityKgPerM3,
+        n2Cpu.soundSpeedMPerS,
+        n2Cpu.dynamicViscosityPaS,
+        n2Cpu.thermalConductivityWPerMK,
+        n2Cpu.acousticImpedancePaSPerM,
+        n2Cpu.volumetricHeatCapacityJPerM3K,
+        h2oCpu.densityKgPerM3,
+        h2oCpu.soundSpeedMPerS,
+        h2oCpu.dynamicViscosityPaS,
+        h2oCpu.thermalConductivityWPerMK,
+        h2oCpu.acousticImpedancePaSPerM,
+        h2oCpu.volumetricHeatCapacityJPerM3K
       ];
 
       // 2. Live A3 regional closure lane inside encodeSphImplicitPressureSolve.
@@ -142,6 +160,47 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
       const hasLane = Boolean(ip.getSphImplicitPressureRegionalClosureLane(device));
       Object.values(buffers).forEach((b) => b.destroy());
 
+      // 3. Live A3 G4-cell thermal/phase regional closure lane (beyond pressure):
+      //    - Octant 0 (x,y,z < 0.5): homogeneous liquid H2O [290..350 K] -> fitted & looked up
+      //    - Octant 7 (x,y,z > 0.5): mixed liquid + gas H2O -> DIRECT_HETEROGENEOUS (no cross-phase fit)
+      const thermalReg = await import('/src/runtime/sph/sphThermalRegionalClosureGpu.js');
+      const mCount = 128;
+      const tState = new Float32Array(mCount * 8);
+      const tThermo = new Float32Array(mCount * 12);
+      for (let i = 0; i < 64; i += 1) {
+        tState.set([0.2, 0.2, 0.2, 1.0], i * 8);
+        tThermo.set([290 + i, 2, 11, 998], i * 12); // phase 2 (liquid), material 11
+      }
+      for (let i = 64; i < 128; i += 1) {
+        tState.set([0.8, 0.8, 0.8, 1.0], i * 8);
+        tThermo.set([373 + (i - 64), i % 2 === 0 ? 2 : 3, 11, 500], i * 12); // mixed liquid/gas
+      }
+      const tStateBuf = upload(tState);
+      const tThermoBuf = upload(tThermo);
+      const enc3 = device.createCommandEncoder();
+      const tTick = thermalReg.encodeSphThermalRegionalClosureScheduleTick(device, enc3, {
+        stateBuffer: tStateBuf,
+        thermoBuffer: tThermoBuf,
+        particleCount: mCount,
+        boxDimsM: [1, 1, 1],
+        scheduleId: 'native-a3-thermal:0',
+        verify: true
+      });
+      const ctrlRead = device.createBuffer({
+        size: 64,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+      });
+      enc3.copyBufferToBuffer(tTick.bindings.controlBuffer, 0, ctrlRead, 0, 64);
+      device.queue.submit([enc3.finish()]);
+      await ctrlRead.mapAsync(GPUMapMode.READ);
+      const thermalCounters = Array.from(new Uint32Array(ctrlRead.getMappedRange().slice(0)));
+      ctrlRead.unmap();
+      ctrlRead.destroy();
+      tStateBuf.destroy();
+      tThermoBuf.destroy();
+      const a3ThermalStatus = globalThis.__ulgA3ThermalRegionalClosureStatus ?? null;
+      thermalReg.destroySphThermalRegionalClosureResources(device);
+
       const validation = await device.popErrorScope();
       device.destroy();
       return {
@@ -151,6 +210,8 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
         dispatches,
         hasLane,
         a3Status,
+        a3ThermalStatus,
+        thermalCounters,
         validation: validation?.message ?? null
       };
     });
@@ -161,7 +222,7 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
   assert.equal(out.status, 'ran');
   assert.equal(out.validation, null, out.validation);
   // In-box A4 2-D GPU queries agree with CPU to < 1e-5 relative error and ok === 1.
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 12; i += 1) {
     const val = out.gpuOut[i * 2];
     const ok = out.gpuOut[i * 2 + 1];
     assert.equal(ok, 1, `query ${i} should be in-box`);
@@ -169,13 +230,24 @@ test('A4 2-D gas response GPU evaluator + live A3 implicit pressure regional lan
     assert.ok(rel <= 1e-5, `query ${i} relErr ${rel} (gpu=${val}, cpu=${out.cpuRef[i]})`);
   }
   // Out-of-box A4 2-D GPU queries strictly refuse (ok === 0).
-  assert.equal(out.gpuOut[8 + 1], 0, 'out-of-box low T must return ok = 0');
-  assert.equal(out.gpuOut[10 + 1], 0, 'out-of-box high P must return ok = 0');
+  assert.equal(out.gpuOut[24 + 1], 0, 'out-of-box low T must return ok = 0');
+  assert.equal(out.gpuOut[26 + 1], 0, 'out-of-box high P must return ok = 0');
 
-  // Live A3 regional closure lane evaluated and adopted cleanly.
+  // Live A3 regional closure lane (pressure) evaluated and adopted cleanly.
   assert.equal(out.hasLane, true);
   assert.equal(out.a3Status?.active, true);
   assert.equal(out.a3Status?.evaluatedSchedules, 1);
   assert.equal(out.a3Status?.adoptedSchedules, 1);
   assert.ok(out.dispatches > 0);
+
+  // Live A3 G4-cell thermal/phase regional closure lane:
+  // counters: [0]=exactEvaluations, [1]=lookups, [2]=fits, [4]=directRegions, [8]=verifyViolations, [10]=verifyMembers
+  assert.equal(out.a3ThermalStatus?.active, true);
+  assert.equal(out.a3ThermalStatus?.regionCount, 8);
+  assert.equal(out.a3ThermalStatus?.adoptedSchedules, 1);
+  assert.ok(out.thermalCounters[1] >= 64, `expected >= 64 homogeneous lookups, got ${out.thermalCounters[1]}`);
+  assert.ok(out.thermalCounters[2] >= 1, `expected >= 1 fitted homogeneous octant, got ${out.thermalCounters[2]}`);
+  assert.ok(out.thermalCounters[4] >= 1, `expected >= 1 mixed-phase direct octant, got ${out.thermalCounters[4]}`);
+  assert.equal(out.thermalCounters[8], 0, `expected 0 GPU verify violations, got ${out.thermalCounters[8]}`);
+  assert.equal(out.thermalCounters[10], 128, 'all 128 thermal particles verified on GPU');
 });

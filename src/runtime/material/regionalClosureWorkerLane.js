@@ -113,14 +113,16 @@ export function regionalClosureLaneBindings(lane) {
 export function encodeRegionalClosureLaneEvaluate(lane, encoder, {
   membersBuffer,
   regionCount,
-  memberCount
+  memberCount,
+  pass = null
 }) {
   const state = requireLiveLane(lane);
   state.sampler.writeParams({ regionCount, memberCount });
   encodeRegionalClosureEvaluate(encoder, state.sampler, {
     membersBuffer,
     regionCount,
-    memberCount
+    memberCount,
+    pass
   });
 }
 
@@ -139,7 +141,8 @@ export function encodeRegionalClosureLaneVerify(lane, encoder, {
 export function encodeRegionalClosureLaneAdopt(lane, encoder, {
   membersBuffer,
   regionCount,
-  scheduleId = null
+  scheduleId = null,
+  pass = null
 }) {
   const state = requireLiveLane(lane);
   const nextOrdinal = state.ordinal + 1;
@@ -148,7 +151,8 @@ export function encodeRegionalClosureLaneAdopt(lane, encoder, {
   if (!res.ok) throw new Error(`G5 reservation rejected on lane adopt: ${res.reason}`);
   encodeRegionalClosureScheduleBoundary(encoder, state.sampler, {
     membersBuffer,
-    regionCount
+    regionCount,
+    pass
   });
   state.ledger.commit(res.token, { admissionId: `gpu-regional-sampler:${nextOrdinal}` });
   state.ordinal = nextOrdinal;

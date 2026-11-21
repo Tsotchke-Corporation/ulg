@@ -5,6 +5,7 @@ import { createThermalPotentialWorkerLane, thermalPotentialWorkerCache, cancelTh
   destroyThermalPotentialWorkerLane } from '../runtime/material/thermalPotentialWorkerLane.js';
 import { thermalPotentialWorkerSourceKey } from '../runtime/material/thermalPotentialWorkerProtocol.js';
 import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../runtime/sph/lawActivationReceiptRing.js';
+import { encodeSphThermalRegionalClosureScheduleTick } from '../runtime/sph/sphThermalRegionalClosureGpu.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
@@ -15243,6 +15244,36 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             candidate: null, readbackBytes: 0, mapAsyncCount: 0, status: 'cancelled', cumulativeConsumerHits: null }
         : null;
     state.thermalPotentialFinished = !cancelled;
+    if (
+      !cancelled
+      && record.workerDevice
+      && record.schroederLane?.sphParticleUpload?.stateBuffer
+      && record.schroederLane?.sphParticleUpload?.thermoBuffer
+      && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
+      && globalThis.__ulgDisableA3ThermalRegionalLane !== true
+    ) {
+      try {
+        const a3ThermalEncoder = record.workerDevice.createCommandEncoder({
+          label: 'ulg-worker-a3-thermal-regional-schedule-tick'
+        });
+        const a3ThermalTick = encodeSphThermalRegionalClosureScheduleTick(
+          record.workerDevice,
+          a3ThermalEncoder,
+          {
+            stateBuffer: record.schroederLane.sphParticleUpload.stateBuffer,
+            thermoBuffer: record.schroederLane.sphParticleUpload.thermoBuffer,
+            particleCount: record.schroederLane.sphParticleUpload.particleCount,
+            boxDimsM: record.schroederLane.boxDimensionsM ?? [1, 1, 1],
+            scheduleId
+          }
+        );
+        if (a3ThermalTick) {
+          record.workerDevice.queue.submit([a3ThermalEncoder.finish()]);
+        }
+      } catch {
+        // Keep A3 thermal regional sampling isolated from physics admission.
+      }
+    }
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       thermalPotential,
@@ -15252,6 +15283,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           : null,
         a3RegionalClosure: globalThis.__ulgA3RegionalClosureStatus
           ? { ...globalThis.__ulgA3RegionalClosureStatus }
+          : null,
+        a3ThermalRegionalClosure: globalThis.__ulgA3ThermalRegionalClosureStatus
+          ? { ...globalThis.__ulgA3ThermalRegionalClosureStatus }
           : null,
         a4GasResponse: globalThis.__ulgA4GasResponseStatus
           ? { ...globalThis.__ulgA4GasResponseStatus }

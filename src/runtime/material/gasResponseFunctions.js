@@ -3,8 +3,12 @@
 //
 // Derives deterministic 2-D tensor Chebyshev response functions over
 // (T [K], P [Pa]) for every gas-phase material in a scene's materialProperties:
-//   - density(T, P)    = P * M / (R * T)                [kg/m^3], d/dT < 0, d/dP > 0
-//   - soundSpeed(T, P) = sqrt(gamma * (R / M) * T)      [m/s],    d/dT > 0
+//   - density(T, P)                = P * M / (R * T)                              [kg/m^3],    d/dT < 0, d/dP > 0
+//   - soundSpeed(T, P)             = sqrt(gamma * (R / M) * T)                    [m/s],       d/dT > 0
+//   - dynamicViscosity(T, P)       = mu_ref * (T/T_ref)^1.5 * (T_ref+S)/(T+S)     [Pa*s],      d/dT > 0
+//   - thermalConductivity(T, P)    = k_ref  * (T/T_ref)^1.5 * (T_ref+S)/(T+S)     [W/(m*K)],   d/dT > 0
+//   - acousticImpedance(T, P)      = rho(T, P) * c_s(T, P) = P*sqrt(gamma*M/RT)   [Pa*s/m],    d/dT < 0, d/dP > 0
+//   - volumetricHeatCapacity(T, P) = rho(T, P) * cp                               [J/(m^3*K)], d/dT < 0, d/dP > 0
 //
 // Every fit carries held-out interior + boundary face residual bounds,
 // enforced physical partial-derivative signs, explicit units, and a generator
@@ -25,8 +29,18 @@ import { stableOpticalMaterialId } from './opticalGpuBuffers.js';
 import { schroederAuthorityTextFingerprint } from '../sph/schroederAuthorityFingerprint.js';
 
 export const GAS_RESPONSE_FUNCTIONS_SCHEMA = 'peercompute.ulg.a4-gas-response-functions.v1';
+export const GAS_RESPONSE_CLOSURE_NAMES = Object.freeze([
+  'density',
+  'soundSpeed',
+  'dynamicViscosity',
+  'thermalConductivity',
+  'acousticImpedance',
+  'volumetricHeatCapacity'
+]);
 
 const AVOGADRO_R = 8.314462618;
+const BOLTZMANN_KB = 1.380649e-23;
+const AVOGADRO_NA = 6.02214076e23;
 const DEFAULT_TEMPERATURE_DOMAIN_K = Object.freeze([200, 1200]);
 const DEFAULT_PRESSURE_DOMAIN_PA = Object.freeze([20_000, 500_000]);
 
@@ -47,6 +61,48 @@ function gasGammaFor(properties, gasPhase) {
   if (atoms === 1) return 5 / 3;
   if (atoms === 2) return 1.4;
   return 4 / 3;
+}
+
+function gasCpFor(properties, gasPhase, molarMassKgPerMol, gamma) {
+  const rSpecific = AVOGADRO_R / molarMassKgPerMol;
+  const explicitCp = finitePositive(gasPhase?.cpJPerKgK, 0);
+  if (explicitCp > rSpecific * 1.01) return explicitCp;
+  return (gamma / (gamma - 1)) * rSpecific;
+}
+
+function gasTransportReferenceFor(properties, gasPhase, molarMassKgPerMol, gamma) {
+  const refTemperatureK = Math.max(
+    100,
+    Math.min(1200, finitePositive(gasPhase?.temperatureK, 293.15))
+  );
+  const sutherlandK = Math.max(50, Math.min(400, 0.38 * refTemperatureK));
+  const molecularMassKg = molarMassKgPerMol / AVOGADRO_NA;
+  const diameterM = 3.6e-10 * Math.pow(Math.max(0.002, molarMassKgPerMol) / 0.0280134, 1 / 6);
+  const kineticMuRef = (5 / 16)
+    * Math.sqrt(Math.PI * molecularMassKg * BOLTZMANN_KB * refTemperatureK)
+    / (Math.PI * diameterM * diameterM);
+  const muRefPaS = finitePositive(
+    gasPhase?.dynamicViscosityPaS ?? gasPhase?.viscosityPaS,
+    kineticMuRef
+  );
+  const rSpecific = AVOGADRO_R / molarMassKgPerMol;
+  const cpJPerKgK = gasCpFor(properties, gasPhase, molarMassKgPerMol, gamma);
+  const cvJPerKgK = Math.max(0.5 * rSpecific, cpJPerKgK - rSpecific);
+  // Modified Eucken kinetic-theory relation: k = mu * (c_v + (9/4) * R_specific)
+  const euckenKRef = muRefPaS * (cvJPerKgK + 2.25 * rSpecific);
+  const kRefWPerMK = finitePositive(gasPhase?.thermalConductivityWPerMK, euckenKRef);
+  return Object.freeze({
+    refTemperatureK,
+    sutherlandK,
+    muRefPaS,
+    kRefWPerMK,
+    cpJPerKgK
+  });
+}
+
+function sutherlandRatio(temperatureK, refTemperatureK, sutherlandK) {
+  return Math.pow(temperatureK / refTemperatureK, 1.5)
+    * ((refTemperatureK + sutherlandK) / (temperatureK + sutherlandK));
 }
 
 function createGasDensityGenerator(material, molarMassKgPerMol, sourceFingerprint) {
@@ -86,6 +142,82 @@ function createGasSoundSpeedGenerator(material, molarMassKgPerMol, gamma, source
   });
 }
 
+function createGasDynamicViscosityGenerator(material, transport, sourceFingerprint) {
+  const { refTemperatureK, sutherlandK, muRefPaS } = transport;
+  return Object.freeze({
+    id: `a4:gas-dynamic-viscosity:${material}`,
+    axes: Object.freeze([
+      Object.freeze({ name: 'temperature', unit: 'K' }),
+      Object.freeze({ name: 'pressure', unit: 'Pa' })
+    ]),
+    outputUnit: 'Pa*s',
+    sourceFingerprint,
+    regimeOf([T, P]) {
+      return Number.isFinite(T) && T > 0 && Number.isFinite(P) && P > 0 ? 'gas' : 'invalid';
+    },
+    evaluate([T]) {
+      return muRefPaS * sutherlandRatio(T, refTemperatureK, sutherlandK);
+    }
+  });
+}
+
+function createGasThermalConductivityGenerator(material, transport, sourceFingerprint) {
+  const { refTemperatureK, sutherlandK, kRefWPerMK } = transport;
+  return Object.freeze({
+    id: `a4:gas-thermal-conductivity:${material}`,
+    axes: Object.freeze([
+      Object.freeze({ name: 'temperature', unit: 'K' }),
+      Object.freeze({ name: 'pressure', unit: 'Pa' })
+    ]),
+    outputUnit: 'W/(m*K)',
+    sourceFingerprint,
+    regimeOf([T, P]) {
+      return Number.isFinite(T) && T > 0 && Number.isFinite(P) && P > 0 ? 'gas' : 'invalid';
+    },
+    evaluate([T]) {
+      return kRefWPerMK * sutherlandRatio(T, refTemperatureK, sutherlandK);
+    }
+  });
+}
+
+function createGasAcousticImpedanceGenerator(material, molarMassKgPerMol, gamma, sourceFingerprint) {
+  const coeff = Math.sqrt((gamma * molarMassKgPerMol) / AVOGADRO_R);
+  return Object.freeze({
+    id: `a4:gas-acoustic-impedance:${material}`,
+    axes: Object.freeze([
+      Object.freeze({ name: 'temperature', unit: 'K' }),
+      Object.freeze({ name: 'pressure', unit: 'Pa' })
+    ]),
+    outputUnit: 'Pa*s/m',
+    sourceFingerprint,
+    regimeOf([T, P]) {
+      return Number.isFinite(T) && T > 0 && Number.isFinite(P) && P > 0 ? 'gas' : 'invalid';
+    },
+    evaluate([T, P]) {
+      return (P * coeff) / Math.sqrt(T);
+    }
+  });
+}
+
+function createGasVolumetricHeatCapacityGenerator(material, molarMassKgPerMol, transport, sourceFingerprint) {
+  const coeff = (molarMassKgPerMol * transport.cpJPerKgK) / AVOGADRO_R;
+  return Object.freeze({
+    id: `a4:gas-volumetric-heat-capacity:${material}`,
+    axes: Object.freeze([
+      Object.freeze({ name: 'temperature', unit: 'K' }),
+      Object.freeze({ name: 'pressure', unit: 'Pa' })
+    ]),
+    outputUnit: 'J/(m^3*K)',
+    sourceFingerprint,
+    regimeOf([T, P]) {
+      return Number.isFinite(T) && T > 0 && Number.isFinite(P) && P > 0 ? 'gas' : 'invalid';
+    },
+    evaluate([T, P]) {
+      return (P * coeff) / T;
+    }
+  });
+}
+
 /**
  * Derive and pack 2-D first-principles (T, P) gas response functions for every
  * gas-capable material in `materialProperties`.
@@ -95,6 +227,10 @@ export function buildMaterialGasResponseFunctions(materialProperties = {}, {
   pressureDomainPa = DEFAULT_PRESSURE_DOMAIN_PA,
   densityDegrees = [14, 1],
   soundSpeedDegrees = [12, 1],
+  viscosityDegrees = [12, 1],
+  conductivityDegrees = [12, 1],
+  acousticImpedanceDegrees = [14, 1],
+  volumetricHeatCapacityDegrees = [14, 1],
   relativeTolerance = 1e-5,
   heldOutPerAxis = 7,
   safetyFactor = 2
@@ -118,18 +254,34 @@ export function buildMaterialGasResponseFunctions(materialProperties = {}, {
     if (!gasPhase || !(molarMassKgPerMol > 0)) continue;
 
     const gamma = gasGammaFor(properties, gasPhase);
+    const transport = gasTransportReferenceFor(properties, gasPhase, molarMassKgPerMol, gamma);
     const sourceFingerprint = schroederAuthorityTextFingerprint(
       JSON.stringify({
         schema: GAS_RESPONSE_FUNCTIONS_SCHEMA,
         material,
         molarMassKgPerMol,
-        gamma
+        gamma,
+        transport
       }),
       `a4-gas-${material}`
     );
 
     const densityGenerator = createGasDensityGenerator(material, molarMassKgPerMol, sourceFingerprint);
     const soundSpeedGenerator = createGasSoundSpeedGenerator(material, molarMassKgPerMol, gamma, sourceFingerprint);
+    const viscosityGenerator = createGasDynamicViscosityGenerator(material, transport, sourceFingerprint);
+    const conductivityGenerator = createGasThermalConductivityGenerator(material, transport, sourceFingerprint);
+    const impedanceGenerator = createGasAcousticImpedanceGenerator(
+      material,
+      molarMassKgPerMol,
+      gamma,
+      sourceFingerprint
+    );
+    const volHeatCapGenerator = createGasVolumetricHeatCapacityGenerator(
+      material,
+      molarMassKgPerMol,
+      transport,
+      sourceFingerprint
+    );
 
     const densityFit = fitResponseFunction({
       generator: densityGenerator,
@@ -149,16 +301,64 @@ export function buildMaterialGasResponseFunctions(materialProperties = {}, {
       heldOutPerAxis,
       safetyFactor
     });
+    const dynamicViscosityFit = fitResponseFunction({
+      generator: viscosityGenerator,
+      box,
+      degrees: viscosityDegrees,
+      signs: [1, 0],
+      relativeTolerance,
+      heldOutPerAxis,
+      safetyFactor
+    });
+    const thermalConductivityFit = fitResponseFunction({
+      generator: conductivityGenerator,
+      box,
+      degrees: conductivityDegrees,
+      signs: [1, 0],
+      relativeTolerance,
+      heldOutPerAxis,
+      safetyFactor
+    });
+    const acousticImpedanceFit = fitResponseFunction({
+      generator: impedanceGenerator,
+      box,
+      degrees: acousticImpedanceDegrees,
+      signs: [-1, 1],
+      relativeTolerance,
+      heldOutPerAxis,
+      safetyFactor
+    });
+    const volumetricHeatCapacityFit = fitResponseFunction({
+      generator: volHeatCapGenerator,
+      box,
+      degrees: volumetricHeatCapacityDegrees,
+      signs: [-1, 1],
+      relativeTolerance,
+      heldOutPerAxis,
+      safetyFactor
+    });
 
     const densityIndex = functions.length;
     functions.push(densityFit);
     const soundSpeedIndex = functions.length;
     functions.push(soundSpeedFit);
+    const dynamicViscosityIndex = functions.length;
+    functions.push(dynamicViscosityFit);
+    const thermalConductivityIndex = functions.length;
+    functions.push(thermalConductivityFit);
+    const acousticImpedanceIndex = functions.length;
+    functions.push(acousticImpedanceFit);
+    const volumetricHeatCapacityIndex = functions.length;
+    functions.push(volumetricHeatCapacityFit);
 
     maxRelativeResidualBound = Math.max(
       maxRelativeResidualBound,
       densityFit.residuals.relativeBound,
-      soundSpeedFit.residuals.relativeBound
+      soundSpeedFit.residuals.relativeBound,
+      dynamicViscosityFit.residuals.relativeBound,
+      thermalConductivityFit.residuals.relativeBound,
+      acousticImpedanceFit.residuals.relativeBound,
+      volumetricHeatCapacityFit.residuals.relativeBound
     );
 
     byMaterial[material] = Object.freeze({
@@ -166,11 +366,20 @@ export function buildMaterialGasResponseFunctions(materialProperties = {}, {
       materialId: stableOpticalMaterialId(material),
       molarMassKgPerMol,
       gamma,
+      transport,
       sourceFingerprint,
       densityIndex,
       soundSpeedIndex,
+      dynamicViscosityIndex,
+      thermalConductivityIndex,
+      acousticImpedanceIndex,
+      volumetricHeatCapacityIndex,
       densityFit,
-      soundSpeedFit
+      soundSpeedFit,
+      dynamicViscosityFit,
+      thermalConductivityFit,
+      acousticImpedanceFit,
+      volumetricHeatCapacityFit
     });
   }
 
@@ -181,6 +390,7 @@ export function buildMaterialGasResponseFunctions(materialProperties = {}, {
   const status = Object.freeze({
     schema: GAS_RESPONSE_FUNCTIONS_SCHEMA,
     gpuTableSchema: packedGpuTable?.schema ?? RESPONSE_FUNCTION_GPU_SCHEMA,
+    closures: GAS_RESPONSE_CLOSURE_NAMES,
     materialCount: Object.keys(byMaterial).length,
     functionCount: functions.length,
     temperatureDomainK: Object.freeze([...box[0]]),
@@ -214,6 +424,28 @@ function generatorsForMaterialEntry(entry) {
         entry.molarMassKgPerMol,
         entry.gamma,
         entry.sourceFingerprint
+      ),
+      viscosityGenerator: createGasDynamicViscosityGenerator(
+        entry.material,
+        entry.transport,
+        entry.sourceFingerprint
+      ),
+      conductivityGenerator: createGasThermalConductivityGenerator(
+        entry.material,
+        entry.transport,
+        entry.sourceFingerprint
+      ),
+      impedanceGenerator: createGasAcousticImpedanceGenerator(
+        entry.material,
+        entry.molarMassKgPerMol,
+        entry.gamma,
+        entry.sourceFingerprint
+      ),
+      volHeatCapGenerator: createGasVolumetricHeatCapacityGenerator(
+        entry.material,
+        entry.molarMassKgPerMol,
+        entry.transport,
+        entry.sourceFingerprint
       )
     });
     generatorCacheByEntry.set(entry, cached);
@@ -222,8 +454,10 @@ function generatorsForMaterialEntry(entry) {
 }
 
 /**
- * Strict in-box 2-D evaluation for a material's gas density and sound speed
- * (refuses out-of-box or stale-source inputs without ever extrapolating).
+ * Strict in-box 2-D evaluation for a material's gas density, sound speed,
+ * dynamic viscosity, thermal conductivity, acoustic impedance, and volumetric
+ * heat capacity (refuses out-of-box or stale-source inputs without ever
+ * extrapolating).
  */
 export function evaluateMaterialGasResponseCpu(bundle, material, temperatureK, pressurePa) {
   const entry = bundle?.byMaterial?.[material];
@@ -232,22 +466,66 @@ export function evaluateMaterialGasResponseCpu(bundle, material, temperatureK, p
       ok: false,
       reason: 'unknown-gas-material',
       densityKgPerM3: null,
-      soundSpeedMPerS: null
+      soundSpeedMPerS: null,
+      dynamicViscosityPaS: null,
+      thermalConductivityWPerMK: null,
+      acousticImpedancePaSPerM: null,
+      volumetricHeatCapacityJPerM3K: null
     });
   }
-  const { densityGenerator, soundSpeedGenerator } = generatorsForMaterialEntry(entry);
+  const {
+    densityGenerator,
+    soundSpeedGenerator,
+    viscosityGenerator,
+    conductivityGenerator,
+    impedanceGenerator,
+    volHeatCapGenerator
+  } = generatorsForMaterialEntry(entry);
   const density = evaluateResponseFunction(entry.densityFit, [temperatureK, pressurePa], {
     generator: densityGenerator
   });
   const soundSpeed = evaluateResponseFunction(entry.soundSpeedFit, [temperatureK, pressurePa], {
     generator: soundSpeedGenerator
   });
-  if (!density.ok || !soundSpeed.ok) {
+  const dynamicViscosity = evaluateResponseFunction(entry.dynamicViscosityFit, [temperatureK, pressurePa], {
+    generator: viscosityGenerator
+  });
+  const thermalConductivity = evaluateResponseFunction(entry.thermalConductivityFit, [temperatureK, pressurePa], {
+    generator: conductivityGenerator
+  });
+  const acousticImpedance = evaluateResponseFunction(entry.acousticImpedanceFit, [temperatureK, pressurePa], {
+    generator: impedanceGenerator
+  });
+  const volumetricHeatCapacity = evaluateResponseFunction(
+    entry.volumetricHeatCapacityFit,
+    [temperatureK, pressurePa],
+    { generator: volHeatCapGenerator }
+  );
+  if (
+    !density.ok
+    || !soundSpeed.ok
+    || !dynamicViscosity.ok
+    || !thermalConductivity.ok
+    || !acousticImpedance.ok
+    || !volumetricHeatCapacity.ok
+  ) {
+    const failed = [
+      density,
+      soundSpeed,
+      dynamicViscosity,
+      thermalConductivity,
+      acousticImpedance,
+      volumetricHeatCapacity
+    ].find((item) => !item.ok);
     return Object.freeze({
       ok: false,
-      reason: !density.ok ? density.reason : soundSpeed.reason,
+      reason: failed?.reason ?? 'out-of-domain',
       densityKgPerM3: null,
-      soundSpeedMPerS: null
+      soundSpeedMPerS: null,
+      dynamicViscosityPaS: null,
+      thermalConductivityWPerMK: null,
+      acousticImpedancePaSPerM: null,
+      volumetricHeatCapacityJPerM3K: null
     });
   }
   return Object.freeze({
@@ -255,16 +533,30 @@ export function evaluateMaterialGasResponseCpu(bundle, material, temperatureK, p
     reason: null,
     densityKgPerM3: density.value,
     soundSpeedMPerS: soundSpeed.value,
+    dynamicViscosityPaS: dynamicViscosity.value,
+    thermalConductivityWPerMK: thermalConductivity.value,
+    acousticImpedancePaSPerM: acousticImpedance.value,
+    volumetricHeatCapacityJPerM3K: volumetricHeatCapacity.value,
     densityGradient: density.gradient,
     soundSpeedGradient: soundSpeed.gradient,
-    relativeBound: Math.max(density.relativeBound, soundSpeed.relativeBound)
+    dynamicViscosityGradient: dynamicViscosity.gradient,
+    thermalConductivityGradient: thermalConductivity.gradient,
+    acousticImpedanceGradient: acousticImpedance.gradient,
+    volumetricHeatCapacityGradient: volumetricHeatCapacity.gradient,
+    relativeBound: Math.max(
+      density.relativeBound,
+      soundSpeed.relativeBound,
+      dynamicViscosity.relativeBound,
+      thermalConductivity.relativeBound,
+      acousticImpedance.relativeBound,
+      volumetricHeatCapacity.relativeBound
+    )
   });
 }
 
 /**
- * Reusable WGSL snippet providing `a4_gas_density_eval(fn_index, T, P)` and
- * `a4_gas_sound_speed_eval(fn_index, T, P)` backed by `rf_eval` (strict, zero
- * extrapolation).
+ * Reusable WGSL snippet providing 2-D `(T, P)` evaluators backed by `rf_eval`
+ * (strict in-box evaluation, zero extrapolation).
  */
 export function gasResponseFunctionGpuWgsl(tableName = 'gas_rf_table') {
   return /* wgsl */ `
@@ -273,6 +565,18 @@ fn a4_gas_density_eval(fn_index: u32, temperature_k: f32, pressure_pa: f32) -> v
   return rf_eval(fn_index, vec3<f32>(temperature_k, pressure_pa, 0.0));
 }
 fn a4_gas_sound_speed_eval(fn_index: u32, temperature_k: f32, pressure_pa: f32) -> vec2<f32> {
+  return rf_eval(fn_index, vec3<f32>(temperature_k, pressure_pa, 0.0));
+}
+fn a4_gas_viscosity_eval(fn_index: u32, temperature_k: f32, pressure_pa: f32) -> vec2<f32> {
+  return rf_eval(fn_index, vec3<f32>(temperature_k, pressure_pa, 0.0));
+}
+fn a4_gas_conductivity_eval(fn_index: u32, temperature_k: f32, pressure_pa: f32) -> vec2<f32> {
+  return rf_eval(fn_index, vec3<f32>(temperature_k, pressure_pa, 0.0));
+}
+fn a4_gas_acoustic_impedance_eval(fn_index: u32, temperature_k: f32, pressure_pa: f32) -> vec2<f32> {
+  return rf_eval(fn_index, vec3<f32>(temperature_k, pressure_pa, 0.0));
+}
+fn a4_gas_volumetric_heat_capacity_eval(fn_index: u32, temperature_k: f32, pressure_pa: f32) -> vec2<f32> {
   return rf_eval(fn_index, vec3<f32>(temperature_k, pressure_pa, 0.0));
 }
 `;

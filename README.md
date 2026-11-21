@@ -1,209 +1,157 @@
-# ULG Triad Demo
+# ULG — First-Principles Multiscale Physics Engine
 
-Browser-native ULG integration scaffold for the PeerCompute + Eshkol + MoonLab
-plan in `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`. The PDF preserves the
-original v0.5 reference body and appends the current seven-goal plan;
-the reproducible packet source is
-`plan/ULG_Triad_Current_Plan_Addendum.html`.
+**ULG** is a browser-native, WebGPU physics engine built from first principles using the **Schroeder Spatial (SS)** method. Instead of scripting canned material constants, fake smoke emitters, or hand-tuned shaders, ULG derives mechanical, thermal, chemical, and optical behavior bottom-up from atomic and electronic physics and evolves fluids, coherent solids, phase transitions, and reactive plumes in real time.
 
-This repo currently implements the first executable slice:
+- **Live Demo (GitHub Pages):** [https://tsotchke-corporation.github.io/ulg/](https://tsotchke-corporation.github.io/ulg/)
+- **Distributed Compute Fabric (PeerCompute):** [https://github.com/MetaverseJS/peercompute](https://github.com/MetaverseJS/peercompute)
 
-- shared ULG GPU ABI descriptors and JSON schemas;
-- ABI-level closure-table WGSL descriptors plus a stable f32x4 sample-buffer
-  encoder for table interpolation without a general LLVM-to-WGSL compiler;
-- shared service contract builders and adapter fixtures;
-- PeerCompute-style compute service registry;
-- supervised root service workers;
-- child-worker leases with cancellation;
-- GPU capability probing with CPU/WASM fallback status;
-- browser-facing service asset probes for real MoonLab/Eshkol readiness;
-- a supervised MoonLab WASM Bell-state probe with deterministic response/parity metadata and a magnetar dipole Ising calibration sub-artifact when copied core artifacts are available;
-- a staged Eshkol magnetar closure descriptor fixture with explicit tensor-runtime and production-handler boundary metadata for Demo A handoff wiring;
-- a compact MoonLab WebGPU complex64 parity handoff with reduced-scope browser evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
-- a Phase 2 ULG carrier runtime with a `ClosureRegistry`, table-interpolation closure handle, CPU-reference two-particle oscillator, optional WebGPU carrier step, CPU/WebGPU parity gate, device-loss CPU fallback reporting, invariant drift report, `ulg-runtime` service contract, and simulation artifacts that remain explicitly toy/reference scoped;
-- Phase 3A carrier topology primitives: normalized particle state, deterministic spatial hashes, radius-limited neighbor pairs, and closure-sampled edge messages with antisymmetric force checks for future field/material/EOS operators, without claiming SPH or phase-change validation;
-- Phase 3A field observers over neighbor graphs with compact-support scalar smoothing summaries for future material/EOS closure inputs, still without claiming an SPH solver or phase-change validation;
-- Phase 3A field-closure sample descriptors over observed scalar fields for future closure-field interpolation, without claiming material, EOS, SPH, or phase-change validation;
-- an SPH Phase overlay that starts first-principles material/reaction/view-state
-  rebuilds in the supervised `ulg-runtime` worker when available, persists
-  derived material plus reaction/product cold-start records in browser storage,
-  exposes cache/timing diagnostics and a scoped `Clear Cache` control, and
-  warns when CPU-backed derivation is dragging FPS instead of silently hiding
-  the stall;
-- a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
-- a three.js worker-tree visualization.
+---
 
-The current executable solver/law inventory, maturity classifications, and
-explicitly missing physics are maintained in
-[`plan/solver-law-inventory.md`](plan/solver-law-inventory.md).
-
-## Commands
+## Quick Start
 
 ```bash
 npm install
-npm run dev
-npm run stage:service-assets
-npm run status:live
-npm run status:live -- --bridge
-npm test
-npm run build
-npm run test:e2e
-npm run test:sph-standard-visual
+npm run dev          # Start the local WebGPU Simulation Studio
+npm test             # Run the host verification suite
+npm run build        # Build the production app bundle
+npm run build:pages  # Build and verify the GitHub Pages bundle in docs/
 ```
 
-The Vite demo exports `window.__ulgDemo` for smoke tests and browser inspection.
-`window.__ulgDemo.createPeerComputeHandoff()` exports the current artifact cache
-as `peercompute.ulg.demo-handoff.v0` packets for PeerCompute/Multiscale
-ingestion.
-Use the `SPH Phase` button for the two-material SPH/MLS-MPM evidence slice. The
-overlay reports separate render, physics, and resident FPS; warns when WebGPU or
-closure work falls back to CPU; and includes `Clear Cache` for ULG SPH
-localStorage cache families only. Its scenario menu includes the standard
-`water-cycle`, `iron-ice-quench`, `sodium-water`, and `cesium-fluorine`
-setups; the same immutable preset records drive
-`npm run test:sph-standard-visual`. That bounded framework canary executes two
-authoritative 128-step Cs/F schedules on one worker-owned SS lane. It requires
-the adjacent-level mechanics transaction, thermal/reaction closure, terminal
-reflux receipts, ComputeManager completion, StateManager commit, monotonic
-particle-state advancement, and committed OffscreenCanvas presentation. It
-also records authoritative GPU material/phase checkpoints and compositor
-frames, and fails on fallback, frozen mechanics, blank output, or a stalled
-schedule. The longer seven-arm `test:sph-standard-visual:deep` command remains
-available for scientific/calibration diagnostics.
-`window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
-the `ClosureRegistry`, resolves it in range, submits a supervised
-`simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference
-fallback, and emits a `peercompute.ulg.simulation-artifact.v0` carrier delta
-artifact. WebGPU output is accepted only when it passes CPU-reference parity;
-otherwise the artifact records the fallback reason. This is a
-core-runtime/provenance slice, not calibrated SPH or full-physics validation.
-The runtime also includes standalone Phase 3A topology primitives:
-`normalizeParticleState()`, `buildSpatialHash()`, `queryNeighborPairs()`, and
-`evaluateEdgeMessages()` are deterministic CPU-reference building blocks for
-future field operators, and the two-body carrier force path now consumes them
-before emitting compact deltas with edge-message conservation summaries. They
-also include `evaluateFieldObservers()` for compact-support scalar field
-observations over the neighbor graph. Carrier simulation deltas now preserve
-field-observer summaries for scalar carrier fields including mass without
-calling those observations density, EOS, phase, or SPH state. They do not yet
-implement a material model, EOS phase changes, or an SPH solver.
-The same topology pass now emits `fieldClosureSampleSummary` telemetry through
-`evaluateFieldClosureSamples()`, sampling the toy closure over the observed
-`closureAxisR` scalar field as an operator descriptor. This is closure-field
-interpolation evidence for future material/EOS operators, not material
-properties, density, SPH dynamics, phase behavior, or scientific validation.
-Those summaries include a `peercompute.ulg.closure-refresh-request.v0`
-decision object. When observed fields leave the declared closure table domain,
-the runtime can recommend `invalidate-and-rerun-closure-derive` through
-`ClosureRegistry.applyRefreshRequest()` without claiming material, EOS, SPH, or
-phase-change validation.
-Simulation artifact summaries and the live artifact row surface this topology
-operator evidence as `edge:pass`, `field:pass`, and `closure-field:pass` when
-compact deltas carry valid edge-message, field-observer, and field-closure
-sample summaries.
-`npm run status:live` probes the live VPN-served demo and prints a compact JSON
-readiness report. Add `-- --bridge` to also launch/post the handoff to
-PeerCompute Multiscale and report the browser ack.
+Opening the app drops straight into an **empty, zero-allocation viewport** (no workers, GPU buffers, or particles are allocated until you launch). Click the **`☰`** button in the top right to open the Simulation Setup modal:
 
-The cross-repo adapter contract lives in `ulg-gpu-abi/README.md` with fixture
-manifests and task capsules in `ulg-gpu-abi/examples/`.
-`createClosureTableDescriptor()` also emits a
-`peercompute.ulg.closure-table-wgsl-descriptor.v0` layout contract for
-`ClosureTableSample` storage-buffer rows, and
-`createClosureTableSampleBuffer()` encodes normalized table samples into the
-same f32x4 row layout consumed by the carrier WGSL path.
-The oscillator closure cached by `runOscillatorDemo()` now carries the same
-descriptor in `tableDescriptor.wgslTableDescriptor` and
-`execution.wgslTableDescriptor`, so the browser cache exposes the table/WGSL
-contract before any production compiler path exists.
+1. **Choose a preset** or assemble custom material bodies from all 118 elements and compounds in a container whose floor center is locked at `(0, 0, 0)`.
+2. **Stage edits safely** — changing bodies, container size, walls, atmosphere, or physical laws never restarts or disturbs a running simulation until you click **Launch / Relaunch**.
+3. **Inspect live physics** rendered through unified GPU marching-cubes isosurfaces and participating-medium volumetric optics, with diagnostics kept tucked behind a dedicated toggle.
 
-## Service Assets
+### Built-In Scenarios
 
-Vite serves `public/service-assets/` at `/service-assets/`. Run
-`npm run stage:service-assets` to refresh the ignored browser-facing artifacts
-from the sibling MoonLab and Eshkol repos, or copy individual artifacts there
-when testing real services, for example
-`public/service-assets/moonlab/moonlab.js` and
-`public/service-assets/moonlab/moonlab.wasm`. Pass
-`--created-at <iso-timestamp>` to make the regenerated Eshkol closure artifact
-and bundle manifest timestamps byte-stable when the sibling Eshkol helper
-supports that option. The MoonLab manifest convention
-uses `entry.serviceAssets` plus `locateFile("moonlab.wasm")` so workers can
-probe loader/WASM fetchability and MIME readiness before running the supervised
-MoonLab core probe. The optional
-`public/service-assets/moonlab/magnetar-reference-contracts.json` file can
-provide MoonLab's normalized calibrated reference suite; a missing optional
-file is reported but does not block MoonLab loader/WASM readiness. When the
-assets are ready, the MoonLab task artifact records
-the `bell_phi_plus` basis probabilities from the real WASM module, an analytic
-Bell-state response descriptor, a passing `moonlab-wasm-core` comparison, and an
-explicit `moonlab-webgpu` unsupported parity entry until MoonLab exposes browser
-WebGPU response kernels. The same core probe also evaluates the
-`magnetar-dipole-ising-calibration` handoff through MoonLab WASM Ising exports,
-recording normalized dipole fields, eight bitstring energies, ground state
-`000`, and `maxEnergyDelta = 0` against the JavaScript reference. The MoonLab
-artifact keeps the legacy `outputs.reference` field and also emits
-`outputs.references[]` as the four-entry calibrated magnetosphere MHD, PIC,
-radiation, and relativistic-reference inventory. The magnetosphere entry now
-carries a scoped analytic dipole-field reference with field maps, tolerances,
-observed deltas, and SHA-256 contract/unit hashes. When the optional normalized
-MoonLab reference suite is staged, all four calibrated families can be promoted
-to ready reference entries; compact
-artifact-summary telemetry reports both the ready Ising reference and the
-calibrated inventory counts so handoff consumers can inventory tolerance inputs
-without fetching the full artifact body. The staged suite contains reduced scalar
-tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, or
-magnetar scientific simulation. The optional
-`public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
-records MoonLab's reduced browser WebGPU complex64 evidence and compact handoff
-summary. ULG staging now requires `browserBackendPreflight.stage =
-device-acquired`, executed/passing `compute_probabilities`, `hadamard`,
-`pauli_x`, `pauli_z`, and `cnot` probes, browser-native coverage for those five
-reduced operations, zero parity-scope blockers, and explicit
-`fullFidelityMagnetarSimulation = false` / `fullPhysicsValidation = false`
-flags. This is a reduced five-operation handoff, not a full MoonLab runtime
-backend or full magnetar physics validation.
+| Scenario | Materials | What It Demonstrates |
+| --- | --- | --- |
+| **Iron–Ice Quench** | `Fe` (1850 K) + `H₂O` ice (233 K) | Coherent rigid ice solid rendered via GPU isosurface, thermal conduction, exact-ledger melt release, and rising volumetric steam |
+| **Sodium in Water** | `Na` + `H₂O` in room air | Exothermic alkali-metal reaction (`Na + H₂O -> NaOH + H₂`), product placement, heat release, and reaction smoke/vapor plume |
+| **Cesium + Fluorine** | `Cs` + `F` | Two-level Schroeder Spatial coupling across an energetic halogen-alkali reaction front |
+| **Water Cycle** | `H₂O` + heated floor / cooled ceiling | Evaporation, buoyancy-driven vapor transport, and condensation in an enclosed thermal gradient |
+| **Water Dam Break** | `H₂O` (4,608 carriers) | High-throughput resident GPU MLS-MPM/APIC free-surface liquid flow with marching-cubes isosurface rendering |
 
-For Eshkol, the default staged bundle is
-`public/service-assets/eshkol/closures/magnetar-closure/`. It packages
-`magnetar-closure.wasm` with deterministic runtime-smoke metadata under
-`validation.closureDescriptor.schema =
-"eshkol.ulg.magnetar-closure-descriptor.v0"`, including typed magnetar
-input/output tensor ids, a declared tensor-runtime contract, derivative
-placeholders, and explicit non-scientific/full-physics flags. The descriptor
-also carries `eshkol.ulg.production-handler-boundary.v0`, which identifies the
-intended PeerCompute handler boundary and now records deterministic
-production-candidate handler/runtime smoke evidence with `handlerReady: true`
-and `runtimeExecution: true`. Its tensor-runtime contract includes a concrete
-smoke-only f64 linear-memory layout at byte range `131072..131240`; the staged
-metadata records that the `main` export consumes the declared input offsets,
-produces output tensors, and changes `64` bytes in the declared tensor range.
-The boundary also exposes a production-host-import candidate contract:
-`runtimeSmokeStubsAllowed: false`, `23` required non-stub runtime imports, f64
-tensor-memory imports `ulg_read_f64`/`ulg_write_f64`, and readiness requirements
-for non-stub host imports, validated tensor memory imports, and full physics
-validation. The current ULG staging sync preserves Eshkol's
-production-candidate runtime probe: it runs the deterministic
-`main(131072, 131136)` tensor smoke path through production-candidate host
-imports and records the output tensor evidence. The bundle also declares the
-transferable `eshkol.ulg.production-handler-contract.v0` production handler
-contract for PeerCompute dispatch: `main(i32 inputOffset, i32 outputOffset) ->
-i32`, backed by content-addressed WASM, production-candidate host imports,
-validated f64 linear-memory tensors, the runtime probe,
-production-candidate handler implementation evidence, and
-production-candidate runtime-execution evidence. Its
-`eshkol.ulg.full-physics-validation-requirements.v0` block declares the five
-runtime evidence families still required from PeerCompute/MoonLab:
-magnetosphere MHD, PIC kinetic plasma, radiation transport, relativistic
-correction, and cross-family conservation coupling, with reference, tolerance,
-runtime-output, and evidence hashes required. The computed production dispatch
-preflight is still blocked at `10/9/1`: nine checks pass, while full-physics
-validation remains blocked by `full-physics-validation-not-run`. ULG now treats
-the bundle's DOM-free
-`eshkol-host-imports.js` as a first-class browser/service-worker asset: the
-service asset probe fetches it as JavaScript, the supervised Eshkol worker
-imports it, verifies the `createEshkolHostImportObject` and tensor-memory
-binding factory surface, and exposes production-host candidate requirement
-metadata in compact artifact summaries. This advances production-boundary
-evidence without claiming a full-fidelity or scientifically validated magnetar
-simulation.
+---
+
+## Core Idea: Physics From First Principles
+
+Conventional physics engines treat material behavior as artist-authored metadata: water has hardcoded density `1000`, metal has a hand-picked shader color, and steam is an uncoupled sprite emitter.
+
+ULG replaces hardcoded properties with a **bottom-up closure chain**:
+
+1. **Atomic & Electronic Structure** — Starting from atomic number $Z$, electron configuration, and chemical formula, ULG solves radial Kohn-Sham DFT (including spin-polarized LSDA and scalar-relativistic Koelling-Harmon orbitals) and molecular Hartree-Fock / all-element electronic models.
+2. **Derived Material & Thermodynamic Closures** — Cohesive energies, equilibrium densities, bulk and shear moduli, Debye heat capacities, Lindemann melting points, Clausius-Clapeyron boiling curves, Gruneisen thermal expansion, and latent-heat enthalpy ladders are derived into bounded GPU closure tables.
+3. **Stoichiometric Chemistry** — Contacting bodies check atom- and charge-balanced reaction pathways, computing reaction enthalpies, limiting-reagent conversion, product species creation, and thermal release.
+4. **Derived Optics & Volumetric Rendering** — Metallic reflectance (Drude-Lorentz), thermal incandescence (Planck blackbody integrated to CIE/sRGB), liquid transmission (Beer-Lambert), and vapor/aerosol visibility (Rayleigh/Mie scattering and droplet optical state) are computed from the same physical state that drives mechanics.
+
+When a material or reaction closure is missing or moves outside its valid domain, ULG flags or resolves the miss through its closure derivation pipeline rather than fabricating unphysical constants.
+
+---
+
+## The Schroeder Spatial (SS) Method
+
+Bridging microscopic material structure and macroscopic continuum or astrophysical dynamics requires a discretization that does not waste compute on empty space, uniform interiors, or inactive physics. The **Schroeder Spatial (SS)** method combines four architectural mechanisms in one GPU-resident hierarchy:
+
+1. **Adaptive Multi-Level Spatial Cells (`N`-level hierarchy)**
+   Space is partitioned into nested dyadic spatial levels. High-resolution cells concentrate along phase boundaries, solid-fluid interfaces, and reactive fronts, while quieter or distant volumes coarsen into conservative aggregate nodes that transmit far-field effects without all-to-all pair loops.
+2. **Scale-Adaptive Dynamic Law Activation**
+   Every active spatial node carries bitmasks for physical law families (mechanics, thermal transport, phase change, radiation, chemistry). Dormant cells—such as isothermal bulk water far from a reaction front or boiling threshold—skip inactive kernels cleanly through compacted per-node law queues instead of executing redundant work.
+3. **Exact Conservation & Cross-Level Reflux**
+   Mass, momentum, and energy exchanged across grid levels, wall reservoirs, chemical reactions, and rigid-to-fluid melt release are tracked in an exact fixed-point integer ledger (`2^-149` quantum floor). Cross-level restriction, prolongation, and reflux prevent artificial energy drift across resolution boundaries.
+4. **Unified GPU Residence & Presentation**
+   Particle-grid MLS-MPM/APIC mechanics, coherent solid bodies, incremental GPU spatial CSR indexing, thermal/reaction sidecars, marching-cubes isosurface extraction, and participating-medium volumetric raymarching stay GPU-resident on WebGPU inside a decoupled worker-owned presentation lane.
+
+---
+
+## Current Implementation Status
+
+ULG is under active engineering development. The table below distinguishes what runs live in the browser today from implemented kernel suites and future physics milestones. A file-level audit of every solver and gap is maintained in [`plan/solver-law-inventory.md`](plan/solver-law-inventory.md).
+
+### Live & Verified Today
+
+| Subsystem | Current Capability |
+| --- | --- |
+| **Electronic & Atomic Derivation** | All-electron radial Kohn-Sham DFT (LDA, spin-polarized LSDA, Koelling-Harmon scalar-relativistic), uniform electron gas (Dirac exchange + Chachiyo QMC correlation), jellium/Ashcroft cohesion, RHF/UHF/MP2 molecular SCF, geometry optimization, vibrational frequencies, and all-element ($Z=1..118$) molecular/compound derivation. |
+| **Material, Phase & Optical Closures** | Element and compound closure generation, bank-anchored product closures, piecewise phase enthalpy ladders with latent-heat plateaus, Gruneisen expansion, Drude-Lorentz metal optics, Beer-Lambert liquid absorption, Planck blackbody incandescence, and Rayleigh/Mie droplet optics for steam and smoke. |
+| **Resident WebGPU Mechanics** | Particle-parallel MLS-MPM/APIC (`P2G` / grid update / `G2P`) with pooled write-through submit bursts, compute-pass coalescing, multi-SM parallel Jacobi contact cleanup, and sustained `>1x` real-time / `>60 Hz` presentation verified up to 103k+ carriers. |
+| **Coherent Solids** | GPU-binned `SE(3)` coherent rigid solids (`SOL-0`–`SOL-3`) with solid-solid and solid-fluid wrench coupling, exact-ledger melt release into fluid carriers, and direct GPU splatting into the unified marching-cubes solid isosurface. GPU deformable solid surface (`SOL-4`), cohesive fracture/refreeze (`SOL-5`), and multilevel proxy/orbital coupling (`SOL-6`) kernels are implemented and tested. |
+| **Thermal, Chemistry & Exact Ledgers** | Energy-conserving pair conduction, finite-heat-capacity and fixed-temperature 6-face walls, graybody thermal radiation, atom/charge-balanced reactive chemistry with product/gas placement, and a `2^-149` exact energy/mass accounting ledger. |
+| **Schroeder Spatial Hierarchy** | Single-pass GPU incremental spatial CSR migration with displacement certificates, zero-indirect simultaneous multi-level SS cross-transport, compacted per-node dynamic law activation and dormancy across thermal/phase/radiation/reaction lanes. |
+| **Unified Rendering & Studio UI** | Worker-owned OffscreenCanvas WebGPU presenter, unified GPU marching-cubes isosurfaces across fluids and coherent rigid solids, volumetric participating-medium steam/smoke raymarching, floor-centered container containment enforcement, staged Launch/Relaunch UI, and zero-allocation startup. |
+| **Distributed & Triad Closure Bridge** | Content-addressed closure registry, browser localStorage persistence, warm browser WASM/WebGPU Eshkol & MoonLab closure miss bridge, and PeerCompute multi-peer responder routing with quorum failover, epoch fencing, and remote debt tracking. |
+
+### Known Current Limitations
+
+- **Derivation locality:** Atomic/molecular/optical closure derivation runs in supervised CPU/WASM workers (or remote PeerCompute peers) and uploads packed tables to WebGPU; full GPU-native Kohn-Sham and SCF derivation kernels are planned, not yet in the hot path.
+- **Continuum & chemistry depth:** Capillary surface-tension curvature force, full nonequilibrium nucleation/droplet-size evolution kinetics, transition-state (NEB) barrier search, and stiff/shock Mie-Gruneisen equations of state are still planned.
+- **Scientific validation posture:** Reduced electronic/compound closures are designed for broad all-element generality and still carry conservative non-validated scientific metadata flags pending higher-order DFT/periodic-crystal benchmarks.
+- **Frontier physics families:** Full Maxwell electromagnetism, MHD, kinetic PIC plasma, nuclear/isotope transport, and general-relativistic gravity do not yet have full local ULG runtime solvers (Eshkol and MoonLab currently provide readiness probes, calibrated reference artifacts, and staged magnetar closure/handler contracts).
+
+---
+
+## Multiscale Architecture: Quantum to Supergalactic Scale
+
+ULG's long-term goal is a single coherent simulation framework spanning **40 orders of magnitude**—from sub-nanometer quantum interactions up to supergalactic structure—without rewriting the engine per scale.
+
+The unifying principle is **closure-coupled hierarchical refinement**:
+
+```text
+  Lower Scale (Fine SS Levels / Quantum & Atomistic Workers / PeerCompute Peers)
+        │
+        │  Derives bounded, conservative closures:
+        │  EOS tables, transport coefficients, reaction rates,
+        │  fracture laws, optical spectra, sub-grid feedback operators
+        ▼
+  Higher Scale (Coarse SS Levels / Continuum, Planetary, Stellar, Cosmological GPU Lanes)
+        │
+        │  Evolves active SS cells with dynamic law masks & exact reflux.
+        │  When a cell exits its closure domain (shock, phase boundary,
+        │  ignition, collapse), it emits a Closure Refresh Request downward
+        │  or spawns finer local SS child levels.
+        ▼
+  PeerCompute Distributed Fabric (https://github.com/MetaverseJS/peercompute)
+        │  Routes closure misses, tile ownership, and heavy sub-scale solves
+        │  across connected WebGPU/WASM browser and native peers.
+```
+
+### Scale Progression
+
+| Scale Regime | Length Scale | Governing Physics & Closures | SS Hierarchy Role | Status |
+| --- | --- | --- | --- | --- |
+| **1. Quantum & Atomic** | $10^{-15}$ – $10^{-9}\,\text{m}$ | Radial/relativistic DFT, molecular SCF/MP2, multireference bond breaking, nuclear & isotope cross-sections, MoonLab quantum kernels | On-demand closure generator; produces atomic, binding, ionization, and spectral tables | **Active** (DFT/SCF/all-element); nuclear & full-Dirac planned |
+| **2. Molecular & Condensed Matter** | $10^{-9}$ – $10^{-4}\,\text{m}$ | Atomistic MD, periodic crystals/phonons, reaction-path transition states, nucleation & aerosol microphysics, crystal plasticity | Supplies continuum EOS, viscosity, thermal conductivity, reaction kinetics, and fracture closures | **Active** (MD/compound/optical closures); periodic DFT & NEB planned |
+| **3. Continuum, Solids & Chemistry** | $10^{-4}$ – $10^{3}\,\text{m}$ | MLS-MPM/APIC fluids, coherent rigid & deformable/fracturing solids, phase change, reactive chemistry, volumetric optics, EM coupling | Multi-level GPU-resident SS grid + CSR carriers + exact-ledger reflux + dynamic law dormancy | **Live Engine** (default WebGPU browser demo) |
+| **4. Planetary & Geophysical** | $10^{3}$ – $10^{8}\,\text{m}$ | Body-spanning SS levels with local coordinate rebasing (`SOL-6`), hierarchical multipole self-gravity, planetary-interior shock EOS, atmosphere & MHD | Coarse orbital/planetary cells dynamically refine around impacts, crusts, atmospheres, and plumes | **Prototype** (`SOL-6` proxy/orbital + far-aggregate gravity kernels) |
+| **5. Stellar & Compact Objects** | $10^{8}$ – $10^{12}\,\text{m}$ | Relativistic EOS, spectral radiation transport, kinetic PIC plasma, GRMHD magnetospheres, thermonuclear reaction networks | Eshkol compiled closure operators + MoonLab quantum/relativistic references coupled to SS macro cells | **Staged Triad Contracts** (Eshkol/MoonLab magnetar handlers & probes) |
+| **6. Galactic & Supergalactic** | $10^{12}$ – $10^{25}\,\text{m}$ | Deep sparse `N`-level hierarchical gravity (multipole tree / Poisson), cosmological expansion, baryonic gas & dark-matter dynamics, stellar-feedback sub-grid closures | Arbitrary-depth sparse SS hierarchy partitioned across [PeerCompute](https://github.com/MetaverseJS/peercompute) peer meshes | **Roadmap** |
+
+---
+
+## Roadmap
+
+### Near Term
+- Complete GPU-native continuum closures: capillary surface-tension curvature force, end-to-end GPU gas-cell EOS, and resident droplet nucleation/condensation kinetics.
+- Promote all four resident law families (`mechanics`, `thermal-phase`, `reaction-product-gas`, `pressure-interface`) from pass-DAG children to independently scheduled SS law executors.
+- Wire `SOL-4` deformable surfaces and `SOL-5` cohesive fracture/refreeze into live interactive presets alongside rigid solids.
+- Move closure-table compilation and atomic/electronic derivation progressively onto WebGPU and warm PeerCompute worker pools.
+
+### Mid Term
+- Generalize the Schroeder Spatial hierarchy beyond two active levels to arbitrary sparse `N`-level refinement/coarsening driven by interface, shock, and reaction-front estimators.
+- Add periodic solid-state DFT, analytic molecular gradients, NEB reaction barriers, and stiff/shock Mie-Gruneisen equations of state.
+- Enable live planetary-scale (`SOL-6`) scenarios with local floating-origin chart rebasing, hierarchical multipole self-gravity, and PeerCompute multi-peer spatial tile sharing.
+
+### Long Term
+- Couple full Maxwell/MHD, kinetic PIC plasma, spectral radiation transport, and relativistic gravity into the SS dynamic law registry.
+- Scale out peer-to-peer distributed multiscale worlds over [PeerCompute](https://github.com/MetaverseJS/peercompute), allowing simulations to zoom seamlessly from reactive surface chemistry to planetary, stellar, and supergalactic regimes under one conserved spatial hierarchy.
+
+---
+
+## Repository & Architecture References
+
+- **Live WebGPU Demo:** [https://tsotchke-corporation.github.io/ulg/](https://tsotchke-corporation.github.io/ulg/)
+- **PeerCompute Distributed Runtime:** [https://github.com/MetaverseJS/peercompute](https://github.com/MetaverseJS/peercompute)
+- **GPU ABI & Closure Table Contract:** [`ulg-gpu-abi/README.md`](ulg-gpu-abi/README.md)
+- **Detailed Solver & Law Inventory:** [`plan/solver-law-inventory.md`](plan/solver-law-inventory.md)
+- **Service Asset Staging (MoonLab / Eshkol):** run `npm run stage:service-assets` to populate local `public/service-assets/` bundles for Triad worker probes and warm closure handlers.

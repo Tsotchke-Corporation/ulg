@@ -514,7 +514,9 @@ function preflightLimit(value, fallback, path) {
  */
 export function preflightSphInitialBodiesForSimulation(value, {
   maxCellPitchAnisotropyRatio = DEFAULT_SPH_INITIAL_BODY_MAX_CELL_PITCH_ANISOTROPY_RATIO,
-  maxCrossBodyCellPitchRatio = DEFAULT_SPH_INITIAL_BODIES_MAX_CROSS_BODY_CELL_PITCH_RATIO
+  maxCrossBodyCellPitchRatio = DEFAULT_SPH_INITIAL_BODIES_MAX_CROSS_BODY_CELL_PITCH_RATIO,
+  boxDimensionsM = null,
+  coordinateFrame = 'internal'
 } = {}) {
   const initialBodies = normalizeSphInitialBodies(value);
   const anisotropyLimit = preflightLimit(
@@ -560,6 +562,22 @@ export function preflightSphInitialBodiesForSimulation(value, {
   });
 
   if (bodyPitches.length === 0) blockers.push('initial-bodies-empty');
+  if (boxDimensionsM != null) {
+    const bounds = containerBoundsForFrame(boxDimensionsM, coordinateFrame);
+    const toleranceM = Math.max(1e-9, Math.max(...bounds.dimensionsM) * 1e-9);
+    for (const body of initialBodies.bodies) {
+      let inside = true;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const minM = body.centerM[axis] - body.sizeM[axis] / 2;
+        const maxM = body.centerM[axis] + body.sizeM[axis] / 2;
+        if (minM < bounds.minM[axis] - toleranceM || maxM > bounds.maxM[axis] + toleranceM) {
+          inside = false;
+          break;
+        }
+      }
+      if (!inside) blockers.push(`body-outside-container:${body.id}`);
+    }
+  }
   const representativePitches = bodyPitches.map((body) => body.representativeCellPitchM);
   const minRepresentativeCellPitchM = representativePitches.length
     ? Math.min(...representativePitches)
@@ -764,4 +782,110 @@ export function sphInitialBodiesToLegacyDropBase(value) {
     base: byRole.get('base'),
     drop: byRole.get('drop')
   });
+}
+
+function normalizedBoxDimensionsM(boxDimensionsM) {
+  return vector3(boxDimensionsM, 'boxDimensionsM', positiveNumber);
+}
+
+/**
+ * Container coordinate bounds in either the user-facing floor-centered frame
+ * (floor center at origin: X in [-Lx/2, +Lx/2], Y in [0, Ly], Z in [-Lz/2, +Lz/2])
+ * or internal simulation box coordinates ([0, Lx] x [0, Ly] x [0, Lz]).
+ */
+export function containerBoundsForFrame(boxDimensionsM, coordinateFrame = 'floor-centered') {
+  const dims = normalizedBoxDimensionsM(boxDimensionsM);
+  if (coordinateFrame === 'floor-centered') {
+    return Object.freeze({
+      coordinateFrame: 'floor-centered',
+      dimensionsM: dims,
+      minM: Object.freeze([-dims[0] / 2, 0, -dims[2] / 2]),
+      maxM: Object.freeze([dims[0] / 2, dims[1], dims[2] / 2])
+    });
+  }
+  if (coordinateFrame === 'internal') {
+    return Object.freeze({
+      coordinateFrame: 'internal',
+      dimensionsM: dims,
+      minM: Object.freeze([0, 0, 0]),
+      maxM: Object.freeze([dims[0], dims[1], dims[2]])
+    });
+  }
+  fail("must be 'floor-centered' or 'internal'", {
+    code: 'invalid-coordinate-frame',
+    path: 'coordinateFrame'
+  });
+}
+
+export function floorCenteredToInternalCenterM(centerM, boxDimensionsM) {
+  const c = vector3(centerM, 'centerM', finiteFloat32Number);
+  const dims = normalizedBoxDimensionsM(boxDimensionsM);
+  return Object.freeze([
+    c[0] + dims[0] / 2,
+    c[1],
+    c[2] + dims[2] / 2
+  ]);
+}
+
+export function internalToFloorCenteredCenterM(centerM, boxDimensionsM) {
+  const c = vector3(centerM, 'centerM', finiteFloat32Number);
+  const dims = normalizedBoxDimensionsM(boxDimensionsM);
+  return Object.freeze([
+    c[0] - dims[0] / 2,
+    c[1],
+    c[2] - dims[2] / 2
+  ]);
+}
+
+/**
+ * Validate that every body's axis-aligned bounding box lies completely inside
+ * the container. Throws SphInitialBodiesValidationError('body-outside-container')
+ * if any body starts or extends outside container bounds.
+ */
+export function validateSphInitialBodiesInContainer(value, boxDimensionsM, {
+  coordinateFrame = 'floor-centered'
+} = {}) {
+  const normalized = normalizeSphInitialBodies(value);
+  const bounds = containerBoundsForFrame(boxDimensionsM, coordinateFrame);
+  const toleranceM = Math.max(1e-9, Math.max(...bounds.dimensionsM) * 1e-9);
+  const axisNames = ['X', 'Y', 'Z'];
+  for (let index = 0; index < normalized.bodies.length; index += 1) {
+    const body = normalized.bodies[index];
+    for (let axis = 0; axis < 3; axis += 1) {
+      const minM = body.centerM[axis] - body.sizeM[axis] / 2;
+      const maxM = body.centerM[axis] + body.sizeM[axis] / 2;
+      if (minM < bounds.minM[axis] - toleranceM || maxM > bounds.maxM[axis] + toleranceM) {
+        fail(
+          `body '${body.id}' bounds on ${axisNames[axis]} `
+          + `[${Number(minM.toPrecision(5))}, ${Number(maxM.toPrecision(5))}] m `
+          + `exceed container [${Number(bounds.minM[axis].toPrecision(5))}, ${Number(bounds.maxM[axis].toPrecision(5))}] m`,
+          {
+            code: 'body-outside-container',
+            path: `bodies[${index}].centerM[${axis}]`
+          }
+        );
+      }
+    }
+  }
+  return normalized;
+}
+
+/**
+ * Clamp a body's center so its bounds fit completely inside the container.
+ * Returns null if the body is wider/taller/deeper than the container on any axis.
+ */
+export function clampSphInitialBodyToContainer(body, boxDimensionsM, {
+  coordinateFrame = 'floor-centered'
+} = {}) {
+  const normalized = normalizeSphInitialBody(body);
+  const bounds = containerBoundsForFrame(boxDimensionsM, coordinateFrame);
+  const centerM = [0, 0, 0];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const half = normalized.sizeM[axis] / 2;
+    const minCenter = bounds.minM[axis] + half;
+    const maxCenter = bounds.maxM[axis] - half;
+    if (minCenter > maxCenter + 1e-12) return null;
+    centerM[axis] = Math.min(maxCenter, Math.max(minCenter, normalized.centerM[axis]));
+  }
+  return normalizeSphInitialBody({ ...normalized, centerM });
 }

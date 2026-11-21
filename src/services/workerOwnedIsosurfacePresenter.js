@@ -1,4 +1,9 @@
-import { latestSchroederSolidRigidFamily, schroederSolidRigidFamilyForUpload } from '../runtime/sph/schroederSolidRigidLane.js';
+import {
+  ensureSchroederSolidRigidFamilyForUpload,
+  latestSchroederSolidRigidFamily,
+  schroederSolidRigidFamilyForUpload
+} from '../runtime/sph/schroederSolidRigidLane.js';
+import { encodeSchroederSolidIsosurfaceFieldSplatWebGpu } from '../runtime/sph/schroederSolidIsosurfaceFieldGpu.js';
 import { createSchroederSolidMemberShapeRenderer } from '../runtime/sph/schroederSolidShapeCarrier.js';
 import {
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
@@ -701,7 +706,10 @@ export function resolveWorkerOwnedIsosurfaceAdmission({
     || !retained?.mlsMpmParticleState
     || !retained?.sphParticleUpload
     || !retained?.mlsMpmParticleUpload
-    || !retained?.successorSourceFamily
+    || (
+      !retained?.successorSourceFamily
+      && retained?.executionMode !== 'tier0-fused-resident-sequence'
+    )
   ) {
     reasons.push('retained-private-references');
   }
@@ -1225,6 +1233,9 @@ export function createWorkerOwnedIsosurfacePresenter({
   let solidShapeRenderer = null;
   const SOLID_SHAPE_COLORS = Object.freeze({ h2o: [0.78, 0.9, 0.98], ice: [0.78, 0.9, 0.98], fe: [0.55, 0.56, 0.6] });
   const drawSolidRigidShapes = (pass, frame) => {
+    // When the live rigid members were splatted into the marching-cubes solid
+    // isosurface field, skip the legacy flat voxel-cube overlay.
+    if (frame?.solidRigidIsosurfaceSplatted === true) return false;
     // Copy-back presentation routes carry no step upload: fall back to the
     // family this device last stepped.
     const family = frame?.solidRigidFamily ?? latestSchroederSolidRigidFamily(device);
@@ -1984,7 +1995,19 @@ export function createWorkerOwnedIsosurfacePresenter({
     const translatedSurfaces = [];
     let participatingMediumPackedFrame = null;
     let ledgerParcelOpticsParams = null;
+    let solidIsosurfaceParams = null;
+    const activeSolidRigidFamily = job.solidRigidFamily ?? null;
+    let solidRigidIsosurfaceSplatted = false;
     try {
+      if (activeSolidRigidFamily) {
+        solidIsosurfaceParams = encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
+          device,
+          encoder,
+          family: activeSolidRigidFamily,
+          renderField
+        });
+        solidRigidIsosurfaceSplatted = Boolean(solidIsosurfaceParams);
+      }
       for (const descriptor of marchingCubesDescriptors) {
         const entry = await adapterForDescriptor(descriptor);
         bindUlgWebGpuMarchingCubesVolumeSuccessorLineage({
@@ -2061,6 +2084,11 @@ export function createWorkerOwnedIsosurfacePresenter({
         }
       }
       device.queue.submit([encoder.finish()]);
+      if (solidIsosurfaceParams) {
+        const params = solidIsosurfaceParams;
+        solidIsosurfaceParams = null;
+        void deferSubmittedWorkCleanup(device, () => params.destroy());
+      }
       if (ledgerParcelOpticsParams) {
         const params = ledgerParcelOpticsParams;
         ledgerParcelOpticsParams = null;
@@ -2179,11 +2207,13 @@ export function createWorkerOwnedIsosurfacePresenter({
               released: false
             }
           : null,
-        solidRigidFamily: job.solidRigidFamily ?? null,
+        solidRigidFamily: activeSolidRigidFamily ?? null,
+        solidRigidIsosurfaceSplatted,
         surfaces
       };
     } catch (error) {
       // Never submitted: nothing queued references the optics params.
+      solidIsosurfaceParams?.destroy();
       ledgerParcelOpticsParams?.destroy();
       renderField.destroyRenderFieldBuffers?.({
         force: true,
@@ -2778,8 +2808,17 @@ export function createWorkerOwnedIsosurfacePresenter({
         dispersedMediumOptics,
         // Borrowed after admission: every earlier return path ends before it.
         ledgerParcelsBorrow: beginSphGpuParticleUploadLedgerParcelsBorrow(retained.sphParticleUpload),
-        // G3 coherent rigid bodies: drawn from their resident frame buffer.
-        solidRigidFamily: schroederSolidRigidFamilyForUpload(retained.sphParticleUpload),
+        // G3 coherent rigid bodies: splatted into the marching-cubes solid
+        // isosurface field (with fallback to their resident frame buffer).
+        solidRigidFamily:
+          schroederSolidRigidFamilyForUpload(retained.sphParticleUpload)
+          ?? (retained.sphParticleState?.rigidBodies
+            ? ensureSchroederSolidRigidFamilyForUpload(
+                retained.sphParticleUpload,
+                retained.sphParticleState.rigidBodies,
+                device
+              )
+            : null),
         releaseProductEventSourceBorrow: releaseProductEventBorrow,
         productEventSourceBorrowReleased: false,
         releaseDispersedMediumSourceBorrow: releaseDispersedMediumBorrow,

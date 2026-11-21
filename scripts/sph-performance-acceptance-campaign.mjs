@@ -207,7 +207,17 @@ export async function exactWorktreeFingerprint(repoDir) {
   const hash = createHash('sha256');
   for (const relativePath of files) {
     const absolutePath = path.join(repoDir, relativePath);
-    const stat = await lstat(absolutePath);
+    let stat;
+    try {
+      stat = await lstat(absolutePath);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        hash.update(relativePath);
+        hash.update('\0deleted\0\0');
+        continue;
+      }
+      throw error;
+    }
     hash.update(relativePath);
     hash.update('\0');
     if (stat.isSymbolicLink()) {

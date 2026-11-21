@@ -81,6 +81,9 @@ export function createSchroederSolidRigidFamily(device, cold) {
     destroy() {
       if (family.destroyed) return;
       family.destroyed = true;
+      if (globalThis.__ulgSolidRigidLane?.family === family) {
+        globalThis.__ulgSolidRigidLane.family = null;
+      }
       family.stage?.destroy(); family.thermalStage?.destroy(); family.releaseStage?.destroy(); family.couplingStage?.destroy();
       family.contactStage?.destroy();
       for (const buffer of [frameBuffer, memberBuffer, proxyBuffer, latticeBuffer, neighborBuffer]) buffer.destroy();

@@ -1,0 +1,76 @@
+import{z as e}from"./schroederSpatialMechanicsFieldView-BjyFDLz8.js";import{o as t,s as n}from"./webgpuComputeLayout-NKCaIXwi.js";import{i as r}from"./sphGpuDeviceIdentity-CsdIpAMj.js";function i({device:i,publication:a,particleCount:o,sourceStateBuffer:s,sourceMechanicsBuffer:c,sourceQuantities:l=null}){let u=[],d=(e,t,n=140)=>{if(!Number.isSafeInteger(t)||t<4||t>i.limits.maxStorageBufferBindingSize)throw RangeError(`Chain G2P gather exceeds device storage capacity`);let a=r(i.createBuffer({label:e,size:t,usage:n}),i);return u.push(a),a},f=o,p=a.updates.length;if(!Number.isSafeInteger(f)||f<1||Math.ceil(f/64)>i.limits.maxComputeWorkgroupsPerDimension)throw RangeError(`Chain G2P requires a bounded physical particle capacity`);try{let r=d(`ulg-chain-g2p-state`,f*32),o=d(`ulg-chain-g2p-mechanics`,f*128),m=d(`ulg-chain-g2p-selected-counts`,f*4),h=d(`ulg-chain-g2p-control`,128),g=d(`ulg-chain-g2p-exact-validation`,16),_=l?d(`ulg-chain-g2p-quantities`,l.quantityBuffer.size):null,v=l?d(`ulg-chain-g2p-projections`,f*48):null,y=a.updates.map((e,t)=>{let n=d(`ulg-chain-g2p-params`,32,72);return i.queue.writeBuffer(n,0,new Uint32Array([f,t,p,e.mechanicsFieldMutationOutputOrdinal,a.execution.completionOrdinal,0,0,0])),n}),b=(e,r,a,o,s=1)=>{let c=o.map(e=>e.type??`storage`),u=n(i,{code:r,entryPoint:a,cacheKey:`chain-g2p-v1-${a}-${l?.quantityLayout.recordWords??0}`,bindings:c.map((e,n)=>t(n,e))}),d=i.createBindGroup({layout:u.bindGroupLayout,entries:o.map((e,t)=>({binding:t,resource:{buffer:e.buffer??e}}))}),f=e.beginComputePass();f.setPipeline(u.pipeline),f.setBindGroup(0,d),f.dispatchWorkgroups(s),f.end()},x=e=>({buffer:e,type:`read-only-storage`}),S=`
+@group(0) @binding(0) var<storage,read> field:array<u32>;
+@group(0) @binding(1) var<storage,read> input_s:array<u32>;
+@group(0) @binding(2) var<storage,read> input_m:array<u32>;
+@group(0) @binding(3) var<storage,read_write> output_s:array<u32>;
+@group(0) @binding(4) var<storage,read_write> output_m:array<u32>;
+@group(0) @binding(5) var<storage,read_write> selected:array<atomic<u32>>;
+@group(0) @binding(6) var<storage,read_write> control:array<atomic<u32>>;
+@group(0) @binding(7) var<uniform> params:vec4<u32>;
+fn fail(bit:u32) { atomicOr(&control[2],bit); }
+@compute @workgroup_size(1) fn admit_level() {
+  let r=field[30]-36u;
+  if(field[0]!=${e}u || field[1]!=5u || field[2]!=3u || field[16]!=params.x
+    || field[24]!=64u || field[25]!=32u || field[59]!=2u || field[63]!=params.w
+    || field[r]!=0x53465233u || field[r+1]!=3u || field[r+2]!=3u || field[r+3]!=6u
+    || field[r+5]!=params.w || field[r+32]!=field[r+33] || field[r+32]!=field[r+34]) { fail(2u); }
+  for(var w=3u;w<=15u;w++) { if(field[w]!=atomicLoad(&control[w])) { fail(4u); } }
+  if(atomicLoad(&control[16])!=params.y) { fail(8u); }
+  atomicAdd(&control[16],1u);
+}
+@compute @workgroup_size(64) fn gather(@builtin(global_invocation_id) id:vec3<u32>) {
+  let row=id.x;if(row>=params.x || atomicLoad(&control[2])!=0u) {return;}
+  if(field[field[24]+row*32u+3u]!=1u) {return;}
+  if(atomicAdd(&selected[row],1u)!=0u) {fail(16u);return;}
+  for(var w=0u;w<8u;w++) {output_s[row*8u+w]=input_s[row*8u+w];}
+  for(var w=0u;w<32u;w++) {output_m[row*32u+w]=input_m[row*32u+w];}
+}
+@compute @workgroup_size(64) fn check_coverage(@builtin(global_invocation_id) id:vec3<u32>) {
+  let row=id.x;if(row>=params.x) {return;}
+  let expected=select(0u,1u,bitcast<f32>(input_s[row*8u+3u])>0.0);
+  if(atomicLoad(&selected[row])!=expected) {fail(32u);}
+}
+@compute @workgroup_size(64) fn finalize(@builtin(global_invocation_id) id:vec3<u32>) {
+  let row=id.x;if(row>=params.x) {return;}
+  if(atomicLoad(&control[2])!=0u || atomicLoad(&selected[row])==0u) {
+    for(var w=0u;w<8u;w++) {output_s[row*8u+w]=input_s[row*8u+w];}
+    for(var w=0u;w<32u;w++) {output_m[row*32u+w]=input_m[row*32u+w];}
+  }
+  if(row==0u) {atomicStore(&control[0],0x53475031u);atomicStore(&control[1],select(3u,5u,atomicLoad(&control[2])!=0u));}
+}`,C=(e,t,n,i)=>[x(e),x(t),x(n),r,o,m,h,{buffer:y[i],type:`uniform`}];return{stateBuffer:r,mechanicsBuffer:o,controlBuffer:h,validationBuffer:g,quantityBuffer:_,projectionBuffer:v,destroy(){for(let e of u)e.destroy()},encode(e,t){e.clearBuffer(m),e.clearBuffer(h),e.clearBuffer(g),e.copyBufferToBuffer(a.controlBuffer,12,h,12,52),b(e,`
+@group(0) @binding(0) var<storage,read> source:array<u32>;
+@group(0) @binding(1) var<storage,read_write> control:array<u32>;
+@group(0) @binding(2) var<uniform> expected:array<vec4<u32>,2>;
+@compute @workgroup_size(1) fn source_gate() {
+  if(source[0]!=0x53435331u || source[1]!=1u || source[2]!=3u || source[16]!=expected[0].z
+    || source[17]!=expected[1].x || source[18]!=0u
+    || source[19]!=expected[0].z || source[20]!=3u) {control[2]|=1u;}
+}`,`source_gate`,[x(a.controlBuffer),h,{buffer:y[0],type:`uniform`}]);for(let[n,r]of t.entries()){let t=a.updates[n].mechanicsFieldViewBuffer,i=C(t,r.stateBuffer,r.mechanicsBuffer,n);if(b(e,S,`admit_level`,i),b(e,S,`gather`,i,Math.ceil(f/64)),l){let n=l.quantityLayout.recordWords,i=`
+@group(0) @binding(0) var<storage,read> field:array<u32>;
+@group(0) @binding(1) var<storage,read> q:array<u32>;
+@group(0) @binding(2) var<storage,read> p:array<u32>;
+@group(0) @binding(3) var<storage,read> validation:array<u32>;
+@group(0) @binding(4) var<storage,read_write> out_q:array<u32>;
+@group(0) @binding(5) var<storage,read_write> out_p:array<u32>;
+@group(0) @binding(6) var<storage,read_write> control:array<atomic<u32>>;
+@compute @workgroup_size(64) fn quantities(@builtin(global_invocation_id) id:vec3<u32>) {
+  let row=id.x;if(row>=field[16]) {return;}
+  if(validation[0]!=0u) {atomicOr(&control[2],64u);}
+  if(field[field[24]+row*32u+3u]!=1u) {return;}
+  for(var w=0u;w<${n}u;w++) {out_q[row*${n}u+w]=q[row*${n}u+w];}
+  for(var w=0u;w<12u;w++) {out_p[row*12u+w]=p[row*12u+w];}
+}`,a=r.quantities;b(e,i,`quantities`,[x(t),x(a.quantityBuffer),x(a.projectionBuffer),x(a.validationBuffer),_,v,h],Math.ceil(f/64))}}let n=C(a.updates[0].mechanicsFieldViewBuffer,s,c,0);if(b(e,S,`check_coverage`,n,Math.ceil(f/64)),b(e,S,`finalize`,n,Math.ceil(f/64)),l){let t=l.quantityLayout.recordWords;b(e,`
+@group(0) @binding(0) var<storage,read> control:array<u32>;
+@group(0) @binding(1) var<storage,read> original:array<u32>;
+@group(0) @binding(2) var<storage,read> selected:array<u32>;
+@group(0) @binding(3) var<storage,read_write> q:array<u32>;
+@group(0) @binding(4) var<storage,read_write> p:array<u32>;
+@group(0) @binding(5) var<storage,read_write> validation:array<u32>;
+@compute @workgroup_size(64) fn finalize_quantities(@builtin(global_invocation_id) id:vec3<u32>) {
+  let row=id.x;if(row>=arrayLength(&selected)) {return;}
+  if(control[2]!=0u || selected[row]==0u) {
+    for(var w=0u;w<${t}u;w++) {q[row*${t}u+w]=original[row*${t}u+w];}
+    for(var w=0u;w<12u;w++) {p[row*12u+w]=0u;}
+  }
+  if(row==0u) {validation[0]=control[2];}
+}`,`finalize_quantities`,[x(h),x(l.quantityBuffer),x(m),_,v,g],Math.ceil(f/64))}}}}catch(e){for(let e of u)e.destroy();throw e}}export{i as prepareSchroederSpatialChainG2pGather};

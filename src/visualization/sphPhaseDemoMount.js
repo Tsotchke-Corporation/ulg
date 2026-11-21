@@ -5378,7 +5378,7 @@ function writeSphColdStartReactionCache(reactionDiscovery, materialProperties = 
   }
 }
 
-function clearSphLocalDerivedCaches() {
+export function clearSphLocalDerivedCaches() {
   const beforeMaterial = readPeerClosureCache();
   const beforeCold = readSphColdStartCache();
   const beforeStatic = storageAvailable()
@@ -6025,6 +6025,10 @@ function buildOverlayShell() {
       #sph-warning-bar { position:absolute;top:0;left:0;right:0;z-index:65;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;padding:8px 12px 8px 128px;box-sizing:border-box;pointer-events:none; }
       .sph-warning-chip { border:1px solid #f7c675;background:rgba(46,30,8,.92);color:#ffe7b2;padding:4px 7px;font-size:11px;line-height:1.25; }
       .sph-fps-chip { border:1px solid #1d8b6d;background:rgba(4,12,14,.88);color:#75f7b4;padding:4px 7px;font-size:11px;line-height:1.25;max-width:calc(100vw - 152px);white-space:normal;overflow-wrap:anywhere; }
+      #sph-phase-overlay.ulg-studio-managed #sph-panel,
+      #sph-phase-overlay.ulg-studio-managed #sph-toggle,
+      #sph-phase-overlay.ulg-studio-managed #sph-lighting-toggle,
+      #sph-phase-overlay.ulg-studio-managed #sph-warning-bar { display:none!important;pointer-events:none!important; }
       @media (max-width:700px) { #sph-panel { width:min(340px,92vw); } #sph-status { font-size:13px; } #sph-warning-bar { padding-left:118px;padding-right:8px; } .sph-fps-chip { max-width:calc(100vw - 134px);font-size:10px; } .sph-warning-chip { max-width:calc(100vw - 24px); } .sph-element-grid { grid-template-columns:repeat(18,42px);grid-auto-rows:42px; } #sph-phase-overlay .sph-element-cell { min-height:42px; } .sph-element-name { display:none; } }
     </style>
     <div id="sph-scene" style="position:absolute;inset:0;"></div>
@@ -6252,6 +6256,8 @@ function openElementPicker({ overlay, select, roleLabel }) {
 export async function mountSphPhaseDemoOverlay({
   autoStart = false,
   hideMenu = false,
+  studioManaged = false,
+  launchParams = null,
   runtime = null,
   residentComputeManager = null,
   residentStateManager = null,
@@ -6268,6 +6274,7 @@ export async function mountSphPhaseDemoOverlay({
   remoteResidentTaskGraphRefreshOptions = null
 } = {}) {
   const overlay = buildOverlayShell();
+  if (studioManaged) overlay.classList.add('ulg-studio-managed');
   document.body.appendChild(overlay);
   const bootstrapPresentation = document.querySelector('#sph-bootstrap-presentation');
   if (bootstrapPresentation) {
@@ -7225,8 +7232,12 @@ export async function mountSphPhaseDemoOverlay({
     }
   }
   function applyUrlToControls() {
-    const query = new URLSearchParams(window.location.search);
-    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const query = (studioManaged || launchParams != null)
+      ? new URLSearchParams()
+      : new URLSearchParams(window.location.search);
+    const hash = (studioManaged || launchParams != null)
+      ? new URLSearchParams(launchParams || {})
+      : new URLSearchParams(window.location.hash.replace(/^#/, ''));
     // Same fallback as the mount-time preset: a `custom` hash (written by a
     // control edit) shadows the query's preset id but is not itself a preset.
     const requestedPreset = sphPhaseScenarioPresetById(hash.get('scenario'))
@@ -7680,8 +7691,12 @@ export async function mountSphPhaseDemoOverlay({
       architectureStateOverride: architectureState
     });
   }
-  const initialQuery = new URLSearchParams(window.location.search);
-  const initialHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const initialQuery = (studioManaged || launchParams != null)
+    ? new URLSearchParams()
+    : new URLSearchParams(window.location.search);
+  const initialHash = (studioManaged || launchParams != null)
+    ? new URLSearchParams(launchParams || {})
+    : new URLSearchParams(window.location.hash.replace(/^#/, ''));
   // The hash's scenario wins, but a control edit rewrites it to `custom`
   // (not a preset id). The query still names the preset the page was opened
   // with, so fall back to it — otherwise "Preset defaults" on an edited
@@ -9297,7 +9312,9 @@ export async function mountSphPhaseDemoOverlay({
       }
       q.set('schroederUseCase', initialSchroederPortableSummaryPeerComputeUseCase);
     }
-    window.history.replaceState(null, '', canonicalMountedLocationWithHash(q));
+    if (!studioManaged) {
+      window.history.replaceState(null, '', canonicalMountedLocationWithHash(q));
+    }
   }
   applyUrlToControls(); // restore from the URL before the first build
   syncArchitectureControlDependencies({ normalizeDependencies: false });
@@ -17292,7 +17309,9 @@ export async function mountSphPhaseDemoOverlay({
   let statusRenderLastMs = 0;
   let statusRenderTimer = null;
   let statusRenderDirty = false;
+  let studioDiagnosticsVisible = false;
   function statusPanelHidden() {
+    if (studioManaged) return !studioDiagnosticsVisible;
     return overlay.querySelector('#sph-panel')?.classList?.contains('collapsed') === true;
   }
   function flushStatusRender() {
@@ -18871,6 +18890,24 @@ export async function mountSphPhaseDemoOverlay({
   return {
     close,
     overlay,
+    isPlaying() {
+      return playing;
+    },
+    isReady() {
+      return interactiveSimulationStateReady;
+    },
+    play() {
+      if (!playing) overlay.querySelector('#sph-play')?.click();
+    },
+    pause() {
+      if (playing) overlay.querySelector('#sph-play')?.click();
+    },
+    togglePlay() {
+      overlay.querySelector('#sph-play')?.click();
+    },
+    step() {
+      overlay.querySelector('#sph-step')?.click();
+    },
     setLightingMode(nextMode, options = {}) {
       lightingModeSelect.value = normalizeSphSceneLightingMode(nextMode);
       overlay.__sphSceneLighting = scene.setLightingMode?.(lightingModeSelect.value, options) || null;
@@ -18881,6 +18918,54 @@ export async function mountSphPhaseDemoOverlay({
     },
     getLightingMode() {
       return scene.getLightingMode?.() || overlay.__sphSceneLighting || null;
+    },
+    setBackgroundColor(hex, options = {}) {
+      backgroundColorInput.value = normalizeSphSceneBackgroundColorHex(hex);
+      return applyBackgroundColorFromControl(options?.reason || 'studio-background-color');
+    },
+    setBackgroundImage(url, options = {}) {
+      backgroundImageSelect.value = String(url || '');
+      return applyBackgroundImageFromControl(options?.reason || 'studio-background-image');
+    },
+    setLocalBackgroundImageFile(file) {
+      if (!file) return null;
+      const dt = typeof DataTransfer === 'function' ? new DataTransfer() : null;
+      if (dt) {
+        dt.items.add(file);
+        localBackgroundImageInput.files = dt.files;
+        localBackgroundImageInput.dispatchEvent(new Event('change'));
+        return overlay.__sphLocalBackgroundImage || null;
+      }
+      return null;
+    },
+    clearBackgroundImage() {
+      clearBackgroundImageButton.click();
+    },
+    setBlobScale(scale) {
+      const value = Number(scale);
+      if (!Number.isFinite(value) || !(value > 0)) return false;
+      blobInput.value = String(value);
+      scene.setBlobScale?.(value);
+      syncUrlFromControls();
+      return true;
+    },
+    setDiagnosticsVisible(visible) {
+      studioDiagnosticsVisible = visible === true;
+      if (studioDiagnosticsVisible) flushStatusRender();
+    },
+    getTelemetrySnapshot() {
+      const lane = overlay.__mlsMpmResidentSteps?.workerOwnedResidentLane || null;
+      return {
+        playing,
+        ready: interactiveSimulationStateReady,
+        blocked: simulationRuntimeBlocked(),
+        blockedReason: simulationRuntimeBlocked() ? simulationRuntimeAdmission.reason : null,
+        rebuildStatus: overlay.__sphPhaseRebuildWorker?.status || null,
+        fpsText: fpsEl?.textContent || '',
+        statusText: statusEl?.textContent || '',
+        simTimeS: Number(lane?.laneSimTimeS) || Number(driver?.demo?.state?.time) || 0,
+        stepCount: Number(lane?.laneCompletedStepTotal) || Number(driver?.demo?.state?.step) || 0
+      };
     },
     getBackgroundImage() {
       return scene.getBackgroundImage?.() || overlay.__sphSceneBackgroundImage || null;

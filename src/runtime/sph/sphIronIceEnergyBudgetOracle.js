@@ -667,7 +667,9 @@ export function createSphIronIceEnergyBudgetOracle({
       spatialRefinement: {
         status: Math.abs(linearRefinementFactor - 2) <= 1e-12
           ? 'exact-two-x-refinement-applied'
-          : 'noncanonical-refinement',
+          : (Math.abs(linearRefinementFactor - 1) <= 1e-12
+            ? 'exact-halved-domain-applied'
+            : 'noncanonical-refinement'),
         linearRefinementFactor,
         physicalGeometryUnchanged: true,
         referenceBaseParticlesPerEdge: 5,

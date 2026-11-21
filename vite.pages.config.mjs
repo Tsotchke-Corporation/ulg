@@ -1,15 +1,61 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 
-// GitHub Pages build of the standalone SPH phase demo.
+// GitHub Pages build of the standalone ULG simulation studio.
 // base: './' makes every asset reference relative, so the build works served from any subfolder
 // (e.g. https://user.github.io/<repo>/). Output goes to docs/ (GitHub Pages "/docs" source).
+const UNUSED_INFERENCE_VIRTUAL_ID = '\0ulg-pages-unused-inference';
+
+function excludeUnusedPeerComputeInference() {
+  return {
+    name: 'ulg-pages-exclude-unused-peercompute-inference',
+    enforce: 'pre',
+    resolveId(source, importer) {
+      if (
+        source === '@huggingface/transformers'
+        || source.startsWith('onnxruntime-web')
+        || source.startsWith('@wllama/')
+        || (
+          importer && importer.includes('/peercompute/')
+          && (
+            source.includes('/inference/ModelInferenceService')
+            || source.includes('/inference/gguf/')
+            || source.includes('/inference/diffusion/')
+            || source.includes('/inference/mesh/')
+            || source.includes('/inference/sf3d')
+            || source.includes('/inference/speech/')
+          )
+        )
+      ) {
+        return UNUSED_INFERENCE_VIRTUAL_ID;
+      }
+      return null;
+    },
+    load(id) {
+      if (id !== UNUSED_INFERENCE_VIRTUAL_ID) return null;
+      return `
+        export class ModelInferenceService {
+          constructor() { throw new Error('ModelInferenceService is not bundled in the ULG physics Pages build.'); }
+        }
+        export const diffusionRuntimeDefinition = null;
+        export const ggufRuntimeDefinition = null;
+        export const meshRuntimeDefinition = null;
+        export const sf3dRuntimeDefinition = null;
+        export const speechRuntimeDefinition = null;
+        export default {};
+      `;
+    }
+  };
+}
+
 export default defineConfig({
   base: './',
+  plugins: [excludeUnusedPeerComputeInference()],
   worker: {
     // The supervised workers are module workers, and the ULG runtime reaches
     // code-split SPH modules that cannot be emitted as one IIFE.
-    format: 'es'
+    format: 'es',
+    plugins: () => [excludeUnusedPeerComputeInference()]
   },
   build: {
     outDir: 'docs',
@@ -39,6 +85,18 @@ export default defineConfig({
         workerOwnedIsosurfacePresenter: fileURLToPath(
           new URL('./src/services/workerOwnedIsosurfacePresenter.js', import.meta.url)
         ),
+        workerPresentationOpportunity: fileURLToPath(
+          new URL('./src/services/workerPresentationOpportunity.js', import.meta.url)
+        ),
+        workerOwnedIsosurfaceMotion: fileURLToPath(
+          new URL('./src/services/workerOwnedIsosurfaceMotion.js', import.meta.url)
+        ),
+        schroederWorkerScheduleRouteEvidence: fileURLToPath(
+          new URL('./src/runtime/sph/schroederWorkerScheduleRouteEvidence.js', import.meta.url)
+        ),
+        residentPresentationSubmissionGap: fileURLToPath(
+          new URL('./src/runtime/sph/residentPresentationSubmissionGap.js', import.meta.url)
+        ),
         sphWorkerPresentationQos: fileURLToPath(
           new URL('./src/runtime/sph/sphWorkerPresentationQos.js', import.meta.url)
         )
@@ -65,6 +123,18 @@ export default defineConfig({
           }
           if (chunk.name === 'workerOwnedIsosurfacePresenter') {
             return 'assets/workerOwnedIsosurfacePresenter.js';
+          }
+          if (chunk.name === 'workerPresentationOpportunity') {
+            return 'assets/workerPresentationOpportunity.js';
+          }
+          if (chunk.name === 'workerOwnedIsosurfaceMotion') {
+            return 'assets/workerOwnedIsosurfaceMotion.js';
+          }
+          if (chunk.name === 'schroederWorkerScheduleRouteEvidence') {
+            return 'runtime/sph/schroederWorkerScheduleRouteEvidence.js';
+          }
+          if (chunk.name === 'residentPresentationSubmissionGap') {
+            return 'runtime/sph/residentPresentationSubmissionGap.js';
           }
           if (chunk.name === 'sphWorkerPresentationQos') {
             return 'runtime/sph/sphWorkerPresentationQos.js';

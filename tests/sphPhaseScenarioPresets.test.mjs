@@ -89,10 +89,7 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
       'iron-ice-quench': '16',
       'sodium-water': '64',
       'cesium-fluorine': '16',
-      'bulk-water': '64',
-      // Real time (user, 2026-11-15): longer schedules amortize the
-      // per-schedule overhead under real-time pacing.
-      'water-realtime': '256'
+      'water-realtime': '16'
     }
   );
   const realtime = SPH_PHASE_SCENARIO_PRESETS.find((entry) => entry.id === 'water-realtime');
@@ -121,9 +118,8 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
   }
 });
 
-test('adaptive-laws presets declare their runtime deviations explicitly', () => {
-  const bulk = sphPhaseScenarioPresetById('bulk-water');
-  assert.equal(bulk.standardMatrixEnabled, false);
+test('adaptive-laws presets declare their runtime deviations explicitly and normalize to isosurfaces', () => {
+  assert.equal(sphPhaseScenarioPresetById('bulk-water'), null);
   const tier0Keys = [
     'ss',
     'ambientPressurePa',
@@ -139,25 +135,20 @@ test('adaptive-laws presets declare their runtime deviations explicitly', () => 
   const tier0Runtime = {
     ss: '1',
     ambientPressurePa: '0',
-    // Explicit contact-free bulk mode: grid + EOS own same-material liquid
-    // volume; the worker admits it against the quiescent activation receipt.
     contactSolver: '0',
-    // The compact-mechanics view's admission is still broken (zero-evidence
-    // rollback); the plain V1 route is the proven-live one.
     compactMechanicsView: '0',
-    workerLivePreview: '1',
+    workerLivePreview: '0',
     schroederLawQueue: '0',
     schroederLawNeighborCandidates: '0',
     schroederPhaseVolumeMigration: '0',
     schroederActiveNodeSortedIndex: '0',
-    submitBurstSteps: '8'
+    submitBurstSteps: '4'
   };
-  assert.deepEqual(selectKeys(bulk.runtime, tier0Keys), tier0Runtime);
   const realtime = sphPhaseScenarioPresetById('water-realtime');
   assert.equal(realtime.standardMatrixEnabled, false);
   assert.deepEqual(selectKeys(realtime.runtime, tier0Keys), tier0Runtime);
-  assert.equal(realtime.controls.dropn, '16');
-  assert.equal(realtime.controls.basen, '32');
+  assert.equal(realtime.controls.dropn, '8');
+  assert.equal(realtime.controls.basen, '16');
   // Drop cube top (ironh + 0.2 * dropn) must stay inside the box and its
   // bottom above the base cube top so geometry preflight admits the scene.
   const dropBottom = Number(realtime.controls.ironh);
@@ -178,7 +169,6 @@ test('canned presets explicitly separate requested reactions from dynamic activa
       'iron-ice-quench': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
       'sodium-water': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
       'cesium-fluorine': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_AUTHORITATIVE,
-      'bulk-water': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED,
       'water-realtime': SCHROEDER_DYNAMIC_LAW_ROUTING_POLICY_DISABLED
     }
   );
@@ -204,7 +194,7 @@ test('canned presets explicitly separate requested reactions from dynamic activa
   }
 });
 
-test('standard SPH scenario presets encode the four requested scenes', () => {
+test('standard SPH scenario presets encode the deduplicated scenes', () => {
   assert.deepEqual(
     SPH_PHASE_SCENARIO_PRESETS.map((entry) => entry.id),
     [
@@ -212,7 +202,6 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
       'iron-ice-quench',
       'sodium-water',
       'cesium-fluorine',
-      'bulk-water',
       'water-realtime'
     ]
   );
@@ -253,12 +242,12 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
   assert.equal(quench.controls.base, 'h2o');
   assert.ok(Number(quench.controls.dropt) > 1811);
   assert.ok(Number(quench.controls.baset) < 273.15);
-  assert.equal(quench.controls.dropn, '6');
-  assert.equal(quench.controls.basen, '10');
-  assert.equal(quench.controls.boxx, '10');
-  assert.equal(quench.controls.boxy, '10');
-  assert.equal(quench.controls.boxz, '10');
-  assert.equal(quench.controls.ironh, '2');
+  assert.equal(quench.controls.dropn, '3');
+  assert.equal(quench.controls.basen, '5');
+  assert.equal(quench.controls.boxx, '5');
+  assert.equal(quench.controls.boxy, '5');
+  assert.equal(quench.controls.boxz, '5');
+  assert.equal(quench.controls.ironh, '1');
   assert.equal(quench.controls.lawst, '1');
   assert.deepEqual(selectKeys(quench.runtime, [
     'sceneLengthScale',
@@ -279,15 +268,14 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
       ['water-cycle', '0'],
       ['sodium-water', '0'],
       ['cesium-fluorine', '0'],
-      ['bulk-water', '0'],
       ['water-realtime', '0']
     ]
   );
 
   const sodium = sphPhaseScenarioPresetById('sodium-water');
-  assert.equal(sodium.controls.boxx, '3');
-  assert.equal(sodium.controls.boxy, '3');
-  assert.equal(sodium.controls.boxz, '3');
+  assert.equal(sodium.controls.boxx, '1.5');
+  assert.equal(sodium.controls.boxy, '1.5');
+  assert.equal(sodium.controls.boxz, '1.5');
   assert.deepEqual(selectKeys(sodium.runtime, [
     'sdt',
     'cfl',
@@ -306,8 +294,8 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
     reactionProductReserveMinimumLiveFraction: '1',
     residentStepsPerSchedule: '64',
     residentInterfaceRefreshMode: 'pipelined',
-    cameraPositionNormalized: '0.78,0.31,1.55',
-    cameraTargetNormalized: '0.50,0.31,0.50'
+    cameraPositionNormalized: '0.78,0.38,1.55',
+    cameraTargetNormalized: '0.50,0.34,0.50'
   });
   assert.deepEqual(sodium.validation.expectedMaterialPresent, ['naoh', 'h2']);
   assert.equal(sodium.validation.initialMaxTemperatureK, 300);
@@ -343,10 +331,10 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
       id: 'base',
       domainId: 1,
       material: 'F',
-      sizeM: [1, 1, 1],
-      centerM: [2, 0.5, 2],
+      sizeM: [0.6, 0.6, 0.6],
+      centerM: [1, 0.3, 1],
       temperatureK: 293.15,
-      particlesPerEdge: [5, 5, 5],
+      particlesPerEdge: [3, 3, 3],
       velocityMPerS: [0, 0, 0],
       legacyRole: 'base'
     },
@@ -354,27 +342,27 @@ test('standard SPH scenario presets encode the four requested scenes', () => {
       id: 'drop',
       domainId: 2,
       material: 'Cs',
-      sizeM: [0.6, 0.6, 0.6],
-      centerM: [2, 1.31, 2],
+      sizeM: [0.36, 0.36, 0.36],
+      centerM: [1, 0.79, 1],
       temperatureK: 293.15,
-      particlesPerEdge: [5, 5, 5],
+      particlesPerEdge: [3, 3, 3],
       velocityMPerS: [0, 0, 0],
       legacyRole: 'drop'
     }
   ]);
   assert.deepEqual(
     cesiumBodies.bodies[0].sizeM.map((size, axis) => (
-      size / cesiumBodies.bodies[0].particlesPerEdge[axis]
+      Number((size / cesiumBodies.bodies[0].particlesPerEdge[axis]).toPrecision(12))
     )),
     [0.2, 0.2, 0.2]
   );
   assert.deepEqual(
     cesiumBodies.bodies[1].sizeM.map((size, axis) => (
-      size / cesiumBodies.bodies[1].particlesPerEdge[axis]
+      Number((size / cesiumBodies.bodies[1].particlesPerEdge[axis]).toPrecision(12))
     )),
     [0.12, 0.12, 0.12]
   );
-  const cesiumFinePitchM = 0.6 / 5;
+  const cesiumFinePitchM = 0.36 / 3;
   const cesiumFineSupportRadiusM = Math.cbrt(
     (3 * cesiumFinePitchM ** 3) / (4 * Math.PI)
   );

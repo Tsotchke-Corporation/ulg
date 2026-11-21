@@ -1,0 +1,1 @@
+var e=class{constructor(){throw Error(`ModelInferenceService is not bundled in the ULG physics Pages build.`)}};const t=null,n=null,r=null,i=null,a=null;var o={};export{e as ModelInferenceService,o as default,t as diffusionRuntimeDefinition,n as ggufRuntimeDefinition,r as meshRuntimeDefinition,i as sf3dRuntimeDefinition,a as speechRuntimeDefinition};

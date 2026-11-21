@@ -1,0 +1,9 @@
+MoonLab WASM (WebGPU gpu_* API), built 2026-11-14 with emcc 6.0.8 from
+moonlab fix/browser-parity-entry 1884933 + local uncommitted fix in
+src/optimization/gpu/backends/gpu_webgpu.c: moonlab_webgpu_init_async is an
+EM_JS returning a Promise (EM_ASYNC_JS was emitted as __asyncjs__<name>, so
+every native dispatch threw ReferenceError and fell back to the CPU path).
+Also renamed the WGSL uniform field `target` (a reserved keyword; the shader
+module failed to compile, so every native pipeline was invalid) to target_qubit.
+55fea266f4ffbbb33af70dde6f07237128ca3278e714bf0a0052d10eef25f866  moonlab.js
+6b4583ea52050d17e5e7fc6cc1e208c02f406cf73ad3ec18a4c2a24c96e6f1a9  moonlab.wasm

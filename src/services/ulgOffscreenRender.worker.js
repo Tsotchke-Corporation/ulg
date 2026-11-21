@@ -5645,6 +5645,8 @@ async function initPresentation(data) {
   clearPresentation({ reason: 'init-offscreen-presentation' });
 }
 
+let initPresentationPromise = null;
+
 self.onmessage = (event) => {
   const data = event?.data || {};
   Promise.resolve().then(async () => {
@@ -5664,7 +5666,9 @@ self.onmessage = (event) => {
       previewViewProjectionOverride = null;
       previewCameraRedraw = null;
       if (data.playbackState != null) setWorkerPresentationPlaybackState(data.playbackState);
-      await initPresentation(data);
+      const pendingInit = Promise.resolve().then(() => initPresentation(data));
+      initPresentationPromise = pendingInit;
+      await pendingInit;
       return;
     }
     if (data.type === 'set-presentation-playback-state') {
@@ -5714,26 +5718,44 @@ self.onmessage = (event) => {
       return;
     }
     if (data.type === 'update-presentation-background') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       await updateWorkerPresentationBackground(data);
       return;
     }
     if (data.type === 'draw-render-rows') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       drawRenderRows(data);
       return;
     }
     if (data.type === 'draw-resident-render-producer') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       drawResidentRenderProducer(data);
       return;
     }
     if (data.type === 'draw-resident-particle-state-producer') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       drawResidentParticleStateProducer(data);
       return;
     }
     if (data.type === 'run-resident-stage-on-presentation-device') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       await runResidentStageOnPresentationDevice(data);
       return;
     }
     if (data.type === 'run-resident-schedule-on-presentation-device') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       await runResidentScheduleOnPresentationDevice(data);
       return;
     }
@@ -5791,6 +5813,9 @@ self.onmessage = (event) => {
       return;
     }
     if (data.type === 'present-committed-resident-schedule-candidate') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       await presentCommittedResidentScheduleCandidate(data);
       return;
     }
@@ -5799,6 +5824,9 @@ self.onmessage = (event) => {
       return;
     }
     if (data.type === 'export-retained-compact-snapshot') {
+      if (initPresentationPromise && !device && !disposed) {
+        await initPresentationPromise.catch(() => {});
+      }
       await exportRetainedCompactSnapshotFromPresentationDevice(data);
       return;
     }

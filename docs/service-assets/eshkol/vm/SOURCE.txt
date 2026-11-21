@@ -1,0 +1,4 @@
+eshkol upstream/master eb224260b site/static (2026-11-02): WebGPU-capable VM (ADR-0029, EshkolWebGPU.attachVm)
+9b96a5016e940d1fcbfc9ab213af0363fe7c9c5c09cadcabfa9f576afa9b5144  eshkol-vm.js
+2c0b0441ea77402e679a9ffa679062c519aacee2b39e69f8d6ebc448ff609f72  eshkol-vm.wasm
+209a397fa408c8badb754282aeb22e657e01cd43381473059173e5276eceb59c  eshkol-webgpu.js

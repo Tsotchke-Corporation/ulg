@@ -2834,6 +2834,7 @@ export function resolveUlgMechanicsResidentStageWorkerRetainedParticleState({
     successorSourceFamily: sameWorkerPrivateReferences
       ? schroederLane.successorSourceFamily
       : null,
+    executionMode: schroederLane?.executionMode || null,
     residentProductMass,
     advancedStateMetadata,
     particleCount: resolvedParticleCount,

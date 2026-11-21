@@ -1025,6 +1025,17 @@ function acquireThermalDormancyStage(device, entry, config, particleCount, smoot
       radiusMultiplier: 2 * Math.max(1, RADIATION_PAIR_RANGE_RADII)
     });
     entry.thermalDormancyStages.set(key, stage);
+    for (const buffer of new Set([
+      stage.dormantBuffer,
+      stage.countBuffer,
+      stage.activeIndicesBuffer,
+      stage.indirectDispatchBuffer
+    ])) {
+      if (buffer) {
+        tagWebGpuBufferDevice(buffer, device);
+        entry.ownedBuffers.add(buffer);
+      }
+    }
     entry.destroyers.push(() => stage.destroy());
   }
   return stage;
@@ -1050,6 +1061,17 @@ function acquireRadiationDormancyStage(device, entry, config, particleCount) {
       epsilonFluxWPerM2
     });
     entry.radiationDormancyStages.set(key, stage);
+    for (const buffer of new Set([
+      stage.dormantBuffer,
+      stage.countBuffer,
+      stage.activeIndicesBuffer,
+      stage.indirectDispatchBuffer
+    ])) {
+      if (buffer) {
+        tagWebGpuBufferDevice(buffer, device);
+        entry.ownedBuffers.add(buffer);
+      }
+    }
     entry.destroyers.push(() => stage.destroy());
   }
   return stage;

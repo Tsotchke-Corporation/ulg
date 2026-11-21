@@ -434,14 +434,20 @@ export function mountUlgSimStudioApp({
     }
 
     const hasActive = Boolean(activeSession);
-    const visuallyReady = Boolean(hasActive && !loadingActive && !launchInFlight && (snap?.visualUpdatesReady || snap?.ready));
+    const visuallyReady = Boolean(
+      hasActive
+      && !loadingActive
+      && !launchInFlight
+      && snap?.visualUpdatesReady === true
+      && snap?.pendingPreviewActive !== true
+    );
     stopBtn.hidden = !hasActive;
     playbackBarEl.hidden = !visuallyReady;
 
     if (hasActive) {
       playBtn.textContent = snap?.playing ? 'Pause' : 'Play';
-      playBtn.disabled = !snap?.ready || Boolean(snap?.blocked);
-      stepBtn.disabled = !snap?.ready || Boolean(snap?.blocked);
+      playBtn.disabled = !visuallyReady || Boolean(snap?.blocked);
+      stepBtn.disabled = !visuallyReady || Boolean(snap?.blocked);
     }
 
     if (launchInFlight || loadingActive) {
@@ -465,7 +471,7 @@ export function mountUlgSimStudioApp({
       statusPillEl.textContent = 'Unallocated';
     }
 
-    miniHudEl.hidden = !miniHudPinned || !hasActive || loadingActive || launchInFlight;
+    miniHudEl.hidden = !miniHudPinned || !visuallyReady;
     if (!miniHudEl.hidden && snap) {
       const label = activePresetLabel || 'Custom';
       if (snap.playing && !snap.workerVisualReady && snap.stepCount === 0) {
@@ -511,6 +517,17 @@ export function mountUlgSimStudioApp({
       activeSession?.setDiagnosticsVisible?.(diagnosticsOpen);
     } else {
       activeSession?.setDiagnosticsVisible?.(false);
+      const snap = activeSession?.getTelemetrySnapshot?.() || null;
+      if (
+        activeSession
+        && !launchInFlight
+        && !loadingErrorMessage
+        && !snap?.blocked
+        && !(snap?.visualUpdatesReady === true && snap?.pendingPreviewActive !== true)
+      ) {
+        loadingActive = true;
+      }
+      updateChromeAndStatus();
     }
   }
 
@@ -1436,10 +1453,19 @@ export function mountUlgSimStudioApp({
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && modalOpen && !root.querySelector('.ulg-pt-backdrop')) {
       setModalOpen(false);
-    } else if (event.code === 'Space' && !modalOpen && !loadingActive && activeSession && document.activeElement === document.body) {
-      event.preventDefault();
-      activeSession.togglePlay?.();
-      updateChromeAndStatus();
+    } else if (
+      event.code === 'Space'
+      && !modalOpen
+      && !loadingActive
+      && activeSession
+      && document.activeElement === document.body
+    ) {
+      const snap = activeSession.getTelemetrySnapshot?.() || null;
+      if (snap?.visualUpdatesReady === true && snap?.pendingPreviewActive !== true) {
+        event.preventDefault();
+        activeSession.togglePlay?.();
+        updateChromeAndStatus();
+      }
     }
   });
 
@@ -1499,7 +1525,7 @@ export function mountUlgSimStudioApp({
   });
 
   diagnosticsPollTimer = window.setInterval(() => {
-    if (loadingActive || launchInFlight || (activeSession && (modalOpen || miniHudPinned || !playbackBarEl.hidden))) {
+    if (loadingActive || launchInFlight || activeSession) {
       updateChromeAndStatus();
     }
   }, 180);

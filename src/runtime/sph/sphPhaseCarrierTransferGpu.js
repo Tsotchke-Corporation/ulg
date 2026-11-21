@@ -1477,6 +1477,34 @@ function acquirePooledPhaseDormancyStage({
   return stage;
 }
 
+export function sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership(device) {
+  if (!device || typeof device !== 'object') {
+    throw new TypeError('phase-carrier runtime allocation ownership requires the exact device');
+  }
+  const buffers = new Set();
+  const pool = pooledPhaseDormancyStagesByDevice.get(unwrapWebGpuCacheDevice(device));
+  if (pool instanceof Map) {
+    for (const stage of pool.values()) {
+      for (const buffer of [
+        stage?.dormantBuffer,
+        stage?.countBuffer,
+        stage?.activeIndicesBuffer,
+        stage?.indirectDispatchBuffer
+      ]) {
+        if (buffer && typeof buffer === 'object' && typeof buffer.destroy === 'function') {
+          buffers.add(buffer);
+        }
+      }
+    }
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.sph-phase-carrier-transfer-runtime-allocation-ownership.v0',
+    status: 'phase-carrier-transfer-runtime-allocation-ownership-complete',
+    allocationCount: buffers.size,
+    buffers: Object.freeze([...buffers])
+  });
+}
+
 async function readBuffer(device, sourceBuffer, byteLength, label) {
   const readback = device.createBuffer({
     label,

@@ -292,16 +292,103 @@ test('entry points drop straight into empty zero-allocation Simulation Studio wi
   assert.match(standaloneJs, /sphMlsMpmGpuStep/);
 });
 
-test('sodium-water preset starts Sodium at floor-centered Y = 1 m separated above water', () => {
+test('sodium-water preset starts Sodium separated above the full 5x5x5 water basin', () => {
   const staged = buildStagedConfigFromPreset('sodium-water');
   const water = staged.bodies.find((body) => body.material === 'h2o');
   const sodium = staged.bodies.find((body) => body.material === 'Na');
   assert.ok(water && sodium);
-  assert.equal(sodium.centerM[1], 1);
+  assert.deepEqual(water.particlesPerEdge, [5, 5, 5]);
+  assert.deepEqual(sodium.particlesPerEdge, [3, 3, 3]);
+  assert.equal(sodium.centerM[1], 1.5);
   const waterTop = water.centerM[1] + water.sizeM[1] / 2;
   const sodiumBottom = sodium.centerM[1] - sodium.sizeM[1] / 2;
   assert.ok(sodiumBottom - waterTop >= 0.19, `expected clear separation gap, got ${sodiumBottom - waterTop}`);
   assert.equal(validateStagedSimulationConfig(staged).valid, true);
+});
+
+test('loading status stays non-ready while PHYSICS PENDING preview is active and Studio air setups enable G2 exact ledger + CCN', () => {
+  const pendingStatus = deriveSimulationLoadingStatus(
+    {
+      rebuildStatus: 'complete',
+      ready: true,
+      workerReady: true,
+      workerVisualReady: true,
+      visualUpdatesReady: true,
+      pendingPreviewActive: true
+    },
+    { elapsedMs: 5000, autoPlay: false, previousPercent: 72 }
+  );
+  assert.equal(pendingStatus.ready, false);
+  assert.ok(pendingStatus.percent < 100);
+
+  const airConfig = buildStagedConfigFromPreset('iron-ice-quench');
+  airConfig.presetId = 'custom';
+  airConfig.environment.mode = 'air';
+  airConfig.environment.nucleiPerCm3 = 0;
+  const airParams = buildLaunchParamsFromStagedConfig(airConfig);
+  assert.equal(airParams.exactEnergyLedger, '1');
+  assert.equal(airParams.environmentNucleiPerCm3, '5000');
+});
+
+test('rigid-solid caloric branches avoid solid superheat and include discovered reaction products in fluidThermal', async () => {
+  const { sphEnvironmentOptionsFromControls } = await import('../src/runtime/sphEnvironmentControls.js');
+  const { stableOpticalMaterialId } = await import('../src/runtime/material/opticalGpuBuffers.js');
+
+  const envOpts = sphEnvironmentOptionsFromControls({
+    environmentMode: 'air',
+    environmentTemperatureK: '293.15',
+    environmentPressurePa: '101325',
+    environmentHumidityPercent: '50',
+    environmentCellsPerAxis: '2',
+    environmentNucleiPerCm3: '5000',
+    environmentAirParcels: 'mixture'
+  });
+  const { demo } = createSphPhaseDemo({
+    boxDimensionsM: [0.07, 0.07, 0.07],
+    initialBodies: [
+      {
+        id: 'base',
+        domainId: 1,
+        material: 'h2o',
+        sizeM: [0.0168, 0.0168, 0.0168],
+        centerM: [0.035, 0.03, 0.035],
+        temperatureK: 233.15,
+        particlesPerEdge: [4, 4, 4],
+        velocityMPerS: [0, 0, 0],
+        legacyRole: 'base'
+      },
+      {
+        id: 'drop',
+        domainId: 2,
+        material: 'fe',
+        sizeM: [0.0084, 0.0084, 0.0084],
+        centerM: [0.035, 0.007, 0.035],
+        temperatureK: 1850,
+        particlesPerEdge: [2, 2, 2],
+        velocityMPerS: [0, 0, 0],
+        legacyRole: 'drop'
+      }
+    ],
+    ...envOpts,
+    exactEnergyLedger: true,
+    coherentRigidSolids: true,
+    allowReducedProductProperties: true
+  });
+  const iceBody = demo.state.rigidBodies?.bodies?.[0];
+  assert.ok(iceBody?.thermal);
+  const { solidBranch, liquidBranch, meltTemperatureK, memberSpecificInternalEnergyJPerKg } = iceBody.thermal;
+  const tInit = solidBranch.referenceTemperatureK
+    + (memberSpecificInternalEnergyJPerKg - solidBranch.referenceInternalEnergyJPerKg) / solidBranch.cvJPerKgK;
+  assert.ok(Math.abs(tInit - 233.15) < 1e-6, `expected exact 233.15 K solid init, got ${tInit}`);
+  const tEdge = solidBranch.referenceTemperatureK
+    + (solidBranch.energyMaxJPerKg - solidBranch.referenceInternalEnergyJPerKg) / solidBranch.cvJPerKgK;
+  assert.ok(Math.abs(tEdge - meltTemperatureK) < 1e-6, `solid branch must meet meltK=${meltTemperatureK}, got ${tEdge}`);
+  assert.ok(Math.abs(demo.state.ledgerParcels.waterReferenceU0 - liquidBranch.energyMinJPerKg) < 1e-3);
+  const feoMatId = stableOpticalMaterialId('feo');
+  assert.ok(
+    demo.state.rigidBodies.fluidThermal.some((row) => row.materialId === feoMatId && row.conductivityWPerMK > 0),
+    'discovered reaction product feo must be included in rigid-solid fluidThermal table'
+  );
 });
 
 test('custom simulations with Hydrogen and Oxygen (h2/o2 and periodic-table H/O) discover H2O and initialize cleanly', () => {
@@ -345,4 +432,21 @@ test('returning to the Presets tab clears browser URL query parameters', async (
   );
   assert.match(studioAppSource, /function clearBrowserUrlParams\(\)/);
   assert.match(studioAppSource, /if \(nextTab === 'presets'\) \{\s*clearBrowserUrlParams\(\);\s*\}/);
+});
+
+test('worker-lane retirement protects device-pooled dormancy buffers and keeps lane identity batch-size invariant', async () => {
+  const [workerSrc, thermalSrc, phaseSrc, reactionSrc, sceneSrc] = await Promise.all([
+    fs.readFile(path.resolve(process.cwd(), 'src/services/ulgMechanicsResidentStage.worker.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/runtime/sph/schroederSpatialThermalProposalsGpu.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/runtime/sph/sphPhaseCarrierTransferGpu.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/visualization/sphPhaseScene.js'), 'utf8')
+  ]);
+  assert.match(workerSrc, /schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership\(record\.workerDevice\)/);
+  assert.match(workerSrc, /sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership\(record\.workerDevice\)/);
+  assert.match(thermalSrc, /entry\.thermalDormancyStages\.set\(key, stage\);[\s\S]*entry\.ownedBuffers\.add\(buffer\)/);
+  assert.match(thermalSrc, /entry\.radiationDormancyStages\.set\(key, stage\);[\s\S]*entry\.ownedBuffers\.add\(buffer\)/);
+  assert.match(phaseSrc, /export function sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership\(device\)/);
+  assert.match(reactionSrc, /export function schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership\(device\)/);
+  assert.match(sceneSrc, /const workerLaneConfigurationSignature = mlsMpmResidentStepsSignatureFor\(\{\s*\.\.\.signatureArgs,\s*stepCount: 1\s*\}\)/);
 });

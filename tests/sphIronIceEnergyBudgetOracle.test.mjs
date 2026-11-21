@@ -21,19 +21,19 @@ test('iron/ice oracle consumes the exact preset geometry and runtime material cl
   assert.equal(report.preset.minimumRequestedVisualHorizonS, 2);
   assert.equal(report.preset.controls.drop, 'fe');
   assert.equal(report.preset.controls.base, 'h2o');
-  assert.equal(report.preset.controls.dropn, '3');
-  assert.equal(report.preset.controls.basen, '5');
+  assert.equal(report.preset.controls.dropn, '6');
+  assert.equal(report.preset.controls.basen, '10');
   assert.equal(report.preset.runtime.sceneLengthScale, '0.014');
   assert.equal(report.preset.runtime.wallModel, 'adiabatic');
-  assert.equal(report.geometry.iceEdgeM, 0.014);
-  assert.deepEqual(report.geometry.boxDimensionsM, [0.07, 0.07, 0.07]);
-  assert.equal(report.geometry.ironEdgeM, 0.0084);
-  assert.deepEqual(report.geometry.ironSizeM, [0.0084, 0.0084, 0.0084]);
-  assert.deepEqual(report.geometry.iceSizeM, [0.014, 0.014, 0.014]);
-  assert.ok(Math.abs(report.geometry.ironMassKg - 0.00413707392) < 1e-12);
-  assert.ok(Math.abs(report.geometry.iceMassKg - 0.002516248) < 1e-12);
-  assert.deepEqual(report.geometry.ironParticlesPerEdge, [3, 3, 3]);
-  assert.deepEqual(report.geometry.iceParticlesPerEdge, [5, 5, 5]);
+  assert.equal(report.geometry.iceEdgeM, 0.028);
+  assert.deepEqual(report.geometry.boxDimensionsM, [0.14, 0.14, 0.14]);
+  assert.equal(report.geometry.ironEdgeM, 0.0168);
+  assert.deepEqual(report.geometry.ironSizeM, [0.0168, 0.0168, 0.0168]);
+  assert.deepEqual(report.geometry.iceSizeM, [0.028, 0.028, 0.028]);
+  assert.ok(Math.abs(report.geometry.ironMassKg - 0.03309659136) < 1e-12);
+  assert.ok(Math.abs(report.geometry.iceMassKg - 0.020129984) < 1e-12);
+  assert.deepEqual(report.geometry.ironParticlesPerEdge, [6, 6, 6]);
+  assert.deepEqual(report.geometry.iceParticlesPerEdge, [10, 10, 10]);
   assert.ok(Math.abs(report.geometry.ironParticleRadiusM - 0.00173698137451832) < 1e-15);
   assert.ok(Math.abs(report.geometry.iceParticleRadiusM - 0.00173698137451832) < 1e-15);
   assert.equal(
@@ -148,7 +148,7 @@ test('iron/ice oracle geometry matches an independently realized mounted body pl
   );
 });
 
-test('halved preset preserves exact 2.8 mm thermal/hydrodynamic pitch at 8x fewer carriers', () => {
+test('two-x refinement preserves the recovered baseline physical experiment', () => {
   const preset = sphPhaseScenarioPresetById('iron-ice-quench');
   const controls = preset.controls;
   const wallFaces = Object.fromEntries([
@@ -159,7 +159,7 @@ test('halved preset preserves exact 2.8 mm thermal/hydrodynamic pitch at 8x fewe
     ['zMin', 'wzmin'],
     ['zMax', 'wzmax']
   ].map(([faceId, key]) => [faceId, Number(controls[key])]));
-  const sceneLengthScale = 0.014;
+  const sceneLengthScale = 0.028;
   const scenario = createSphPhaseScenario({
     wallFaces,
     wallModel: 'adiabatic',
@@ -200,7 +200,7 @@ test('halved preset preserves exact 2.8 mm thermal/hydrodynamic pitch at 8x fewe
   );
   assert.equal(report.geometry.ironMassKg, baseline.initialParticleSpacing.drop.totalMassKg);
   assert.equal(report.geometry.iceMassKg, baseline.initialParticleSpacing.base.totalMassKg);
-  assert.equal(baseline.initialParticleSpacing.base.spacingM, 0.0028);
+  assert.equal(baseline.initialParticleSpacing.base.spacingM, 0.0056);
   assert.equal(report.candidates.spatialRefinement.carrierPitchM, 0.0028);
 });
 
@@ -264,11 +264,11 @@ test('contact ledger matches receipt-v2 face area and TPFA series resistance', (
     dtS: 1
   });
 
-  assert.equal(conduction.contactPairCount, 9);
+  assert.equal(conduction.contactPairCount, 36);
   assert.ok(Math.abs(conduction.contactCenterDistanceM - 0.0028) < 1e-14);
   assert.ok(Math.abs(conduction.contactAreaPerPairM2 - 7.84e-6) < 1e-18);
   assert.ok(
-    Math.abs(conduction.totalContactFaceAreaM2 - 7.056e-5) < 1e-16
+    Math.abs(conduction.totalContactFaceAreaM2 - 2.8224e-4) < 1e-16
   );
   assert.ok(
     Math.abs(conduction.contactAreaPerPairM2 - pair.contactAreaM2) < 1e-18
@@ -290,13 +290,13 @@ test('contact ledger matches receipt-v2 face area and TPFA series resistance', (
     ) < 1e-10
   );
   assert.ok(
-    Math.abs(conduction.aggregatePowerIntoH2oW - 166.9988220113849)
+    Math.abs(conduction.aggregatePowerIntoH2oW - 667.9952880455406)
       < 1e-10
   );
   assert.equal(radiation.perContactPowerIntoH2oW, -pair.radiationEnergyJ);
-  assert.equal(radiation.radiationPairCount, 1845);
-  assert.ok(radiation.aggregatePowerIntoH2oW > 6);
-  assert.ok(radiation.maxPowerIntoSingleH2oCarrierW > 0.2);
+  assert.equal(radiation.radiationPairCount, 14340);
+  assert.ok(radiation.aggregatePowerIntoH2oW > 40);
+  assert.ok(radiation.maxPowerIntoSingleH2oCarrierW > 0.5);
 });
 
 test('exact two-x refinement admits first vapor only as an initial-rate screen', () => {
@@ -344,21 +344,21 @@ test('exact two-x refinement admits first vapor only as an initial-rate screen',
   assert.match(shorterRun.targetHorizonVerdict.interpretation, /not a global/);
 });
 
-test('realized preset exposes the exact halved-domain carrier pitch', () => {
+test('realized preset exposes the exact two-x spatial refinement', () => {
   const candidate = report.candidates.spatialRefinement;
-  assert.equal(candidate.status, 'exact-halved-domain-applied');
-  assert.equal(candidate.linearRefinementFactor, 1);
+  assert.equal(candidate.status, 'exact-two-x-refinement-applied');
+  assert.equal(candidate.linearRefinementFactor, 2);
   assert.equal(candidate.physicalGeometryUnchanged, true);
   assert.equal(candidate.referenceBaseParticlesPerEdge, 5);
-  assert.equal(candidate.resolvedBaseParticlesPerEdge, 5);
-  assert.equal(candidate.resolvedDropParticlesPerEdge, 3);
+  assert.equal(candidate.resolvedBaseParticlesPerEdge, 10);
+  assert.equal(candidate.resolvedDropParticlesPerEdge, 6);
   assert.equal(candidate.carrierPitchM, 0.0028);
   assert.equal(
     candidate.optimisticMinimumHorizonS,
     report.minimumHorizons.oneSurfaceCarrierFirstVapor.minimumHorizonS
   );
-  assert.equal(report.geometry.iceEdgeM, 0.014);
-  assert.equal(report.preset.controls.boxx, '5');
+  assert.equal(report.geometry.iceEdgeM, 0.028);
+  assert.equal(report.preset.controls.boxx, '10');
   assert.equal(report.scientificValidation, false);
   assert.equal(report.fullPhysicsValidation, false);
 });

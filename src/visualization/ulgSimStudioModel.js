@@ -386,6 +386,16 @@ export function buildLaunchParamsFromStagedConfig(config) {
 
   const firstBody = internalBodies[0];
   const secondBody = internalBodies[1] || firstBody;
+  const isAirEnvironment = config.environment.mode === 'air';
+  const cubicBox = Math.abs(boxM[1] - boxM[0]) <= 1e-6 * boxM[0]
+    && Math.abs(boxM[2] - boxM[0]) <= 1e-6 * boxM[0];
+  const configuredNuclei = Number(config.environment.nucleiPerCm3 ?? 0);
+  const effectiveNucleiPerCm3 = configuredNuclei > 0
+    ? configuredNuclei
+    : (isAirEnvironment && cubicBox ? 5000 : 0);
+  const useExactEnergyLedger = Boolean(
+    isAirEnvironment && cubicBox && effectiveNucleiPerCm3 > 0
+  );
   const compiled = {
     ...SPH_ENVIRONMENT_CONTROL_DEFAULTS,
     ...baseRuntime,
@@ -399,6 +409,7 @@ export function buildLaunchParamsFromStagedConfig(config) {
     workerLivePreview: '0',
     mech: 'mlsmpm',
     residentAuto: '1',
+    ...(useExactEnergyLedger ? { exactEnergyLedger: '1' } : {}),
     scenario: exactPreset ? exactPreset.id : 'custom',
     sceneLengthScale: String(scale),
     wallModel: config.wallModel || 'finite-heat-capacity-lumped-face',
@@ -415,7 +426,7 @@ export function buildLaunchParamsFromStagedConfig(config) {
     environmentTemperatureK: String(config.environment.temperatureK),
     environmentPressurePa: String(config.environment.pressurePa),
     environmentHumidityPercent: String(config.environment.humidityPercent),
-    environmentNucleiPerCm3: String(config.environment.nucleiPerCm3),
+    environmentNucleiPerCm3: String(effectiveNucleiPerCm3),
     lawmech: '1',
     lawg: config.laws.gravity ? '1' : '0',
     laweos: '1',
@@ -674,7 +685,7 @@ export function deriveSimulationLoadingStatus(telemetry = null, {
     };
   }
 
-  if (telemetry?.visualUpdatesReady) {
+  if (telemetry?.visualUpdatesReady && telemetry?.pendingPreviewActive !== true) {
     return {
       ready: true,
       blocked: false,

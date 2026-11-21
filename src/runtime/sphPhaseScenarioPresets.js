@@ -20,12 +20,12 @@ const COMMON_CONTROLS = Object.freeze({
   wzmin: '293.15',
   wzmax: '293.15',
   iceh: '0',
-  ironh: '0.62',
-  dropn: '2',
-  basen: '3',
-  boxx: '2.5',
-  boxy: '2.5',
-  boxz: '2.5',
+  ironh: '1.01',
+  dropn: '3',
+  basen: '5',
+  boxx: '5',
+  boxy: '5',
+  boxz: '5',
   lawmech: '1',
   lawg: '1',
   laweos: '1',
@@ -146,12 +146,12 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       base: 'h2o',
       dropt: '300',
       baset: '300',
-      dropn: '2',
-      basen: '3',
-      ironh: '0.62',
-      boxx: '2.5',
-      boxy: '2.5',
-      boxz: '2.5',
+      dropn: '3',
+      basen: '5',
+      ironh: '1.01',
+      boxx: '5',
+      boxy: '5',
+      boxz: '5',
       wxmin: '300',
       wxmax: '300',
       wymin: '400',
@@ -203,15 +203,15 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       baset: '233.15',
       wymin: '293.15',
       wymax: '293.15',
-      // Halved 70 mm container with 5x5x5 ice (14 mm) and 3x3x3 molten iron
-      // (8.4 mm), preserving the exact 2.8 mm thermal/hydrodynamic pitch
-      // at 8x fewer carriers (152 live carriers).
-      dropn: '3',
-      basen: '5',
-      boxx: '5',
-      boxy: '5',
-      boxz: '5',
-      ironh: '1',
+      // Full physical 28 mm ice (10x10x10) and 16.8 mm molten iron (6x6x6)
+      // inside a 140 mm container at 2.8 mm thermal/hydrodynamic pitch so
+      // quenching sustains melting and continuous billowing steam plumes.
+      dropn: '6',
+      basen: '10',
+      boxx: '10',
+      boxy: '10',
+      boxz: '10',
+      ironh: '2',
       lawst: '1'
     },
     runtime: {
@@ -262,12 +262,16 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       baset: '293.15',
       wymin: '293.15',
       wymax: '293.15',
-      dropn: '2',
-      basen: '3',
-      ironh: '0.8',
-      boxx: '1.5',
-      boxy: '1.5',
-      boxz: '1.5'
+      // Full 3 m basin with 5x5x5 water (1.0 m) and 3x3x3 sodium (0.6 m)
+      // starting with a 0.2 m separation gap (bottom at 1.2 m, center at 1.5 m)
+      // and 152 spare reaction-product slots so the reaction stays active and
+      // sustains rising caustic smoke and steam plumes.
+      dropn: '3',
+      basen: '5',
+      ironh: '1.2',
+      boxx: '3',
+      boxy: '3',
+      boxz: '3'
     },
     runtime: {
       reactionActivationPolicy:

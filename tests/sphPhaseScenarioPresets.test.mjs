@@ -242,12 +242,12 @@ test('standard SPH scenario presets encode the deduplicated scenes', () => {
   assert.equal(quench.controls.base, 'h2o');
   assert.ok(Number(quench.controls.dropt) > 1811);
   assert.ok(Number(quench.controls.baset) < 273.15);
-  assert.equal(quench.controls.dropn, '3');
-  assert.equal(quench.controls.basen, '5');
-  assert.equal(quench.controls.boxx, '5');
-  assert.equal(quench.controls.boxy, '5');
-  assert.equal(quench.controls.boxz, '5');
-  assert.equal(quench.controls.ironh, '1');
+  assert.equal(quench.controls.dropn, '6');
+  assert.equal(quench.controls.basen, '10');
+  assert.equal(quench.controls.boxx, '10');
+  assert.equal(quench.controls.boxy, '10');
+  assert.equal(quench.controls.boxz, '10');
+  assert.equal(quench.controls.ironh, '2');
   assert.equal(quench.controls.lawst, '1');
   assert.deepEqual(selectKeys(quench.runtime, [
     'sceneLengthScale',
@@ -273,9 +273,12 @@ test('standard SPH scenario presets encode the deduplicated scenes', () => {
   );
 
   const sodium = sphPhaseScenarioPresetById('sodium-water');
-  assert.equal(sodium.controls.boxx, '1.5');
-  assert.equal(sodium.controls.boxy, '1.5');
-  assert.equal(sodium.controls.boxz, '1.5');
+  assert.equal(sodium.controls.dropn, '3');
+  assert.equal(sodium.controls.basen, '5');
+  assert.equal(sodium.controls.ironh, '1.2');
+  assert.equal(sodium.controls.boxx, '3');
+  assert.equal(sodium.controls.boxy, '3');
+  assert.equal(sodium.controls.boxz, '3');
   assert.deepEqual(selectKeys(sodium.runtime, [
     'sdt',
     'cfl',

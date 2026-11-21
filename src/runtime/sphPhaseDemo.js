@@ -20,6 +20,10 @@ import {
   CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
 } from './material/condensedDispersedOpticalReferences.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
+import {
+  createPhaseCaloricThermodynamics,
+  phaseCaloricBranches
+} from './material/condensableThermodynamics.js';
 import { gpuPhaseId, stableOpticalMaterialId } from './material/opticalGpuBuffers.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -2495,6 +2499,21 @@ function appendPhaseCarrierLanes(particles) {
 function ledgerParcelWaterReference(materialProperties, environment) {
   const water = materialProperties?.h2o;
   if (!water) throw new TypeError('Ledger nuclei require H2O material properties');
+  if (water.phaseCaloricModel) {
+    const model = createPhaseCaloricThermodynamics(water.phaseCaloricModel);
+    const liquid = phaseCaloricBranches(model).find((row) => row.phase === 'liquid');
+    if (liquid) {
+      const cw = liquid.cvJPerKgK;
+      const uAt273 = liquid.referenceInternalEnergyJPerKg
+        + cw * (273.15 - liquid.referenceTemperatureK);
+      return {
+        waterReferenceU0: uAt273,
+        waterSpecificHeatJPerKgK: cw,
+        vaporMaterialId: stableOpticalMaterialId('h2o'),
+        pressurePa: environment.totalPressurePa
+      };
+    }
+  }
   const cw = 4186, uAt283 = specificInternalEnergyJPerKg(water, 283.15);
   return { waterReferenceU0: uAt283 - cw * 10, waterSpecificHeatJPerKgK: cw,
     vaporMaterialId: stableOpticalMaterialId('h2o'), pressurePa: environment.totalPressurePa };
@@ -2703,16 +2722,60 @@ function buildSphInitialBodiesDemoState({
       // thermal state and reserved release rows.
       if (!globalThis.__ulgSkipSolidReleaseRows && meltClosureReady) {
         const meltK = melt.temperatureK;
-        const solidEdgeU = specificInternalEnergyJPerKg(properties, meltK - 1) + solidPhase.cpJPerKgK;
-        const liquidEdgeU = specificInternalEnergyJPerKg(properties, meltK + 1) - liquidPhase.cpJPerKgK;
+        let solidBranch;
+        let liquidBranch;
+        let memberSpecificInternalEnergyJPerKg;
+        if (properties.phaseCaloricModel) {
+          const caloricModel = createPhaseCaloricThermodynamics(properties.phaseCaloricModel);
+          const branches = phaseCaloricBranches(caloricModel);
+          const calSolid = branches.find((row) => row.phase === 'solid');
+          const calLiquid = branches.find((row) => row.phase === 'liquid');
+          if (calSolid && calLiquid) {
+            const solidAtMelt = calSolid.referenceInternalEnergyJPerKg
+              + calSolid.cvJPerKgK * (meltK - calSolid.referenceTemperatureK);
+            const liquidAtMelt = calLiquid.referenceInternalEnergyJPerKg
+              + calLiquid.cvJPerKgK * (meltK - calLiquid.referenceTemperatureK);
+            memberSpecificInternalEnergyJPerKg = calSolid.referenceInternalEnergyJPerKg
+              + calSolid.cvJPerKgK * (body.temperatureK - calSolid.referenceTemperatureK);
+            solidBranch = {
+              referenceTemperatureK: meltK,
+              referenceInternalEnergyJPerKg: solidAtMelt,
+              cvJPerKgK: calSolid.cvJPerKgK,
+              energyMaxJPerKg: solidAtMelt
+            };
+            liquidBranch = {
+              referenceTemperatureK: meltK,
+              referenceInternalEnergyJPerKg: liquidAtMelt,
+              cvJPerKgK: calLiquid.cvJPerKgK,
+              energyMinJPerKg: liquidAtMelt
+            };
+          }
+        }
+        if (!solidBranch || !liquidBranch) {
+          const solidEdgeU = specificInternalEnergyJPerKg(properties, meltK);
+          const liquidEdgeU = specificInternalEnergyJPerKg(properties, meltK + 1) - liquidPhase.cpJPerKgK;
+          memberSpecificInternalEnergyJPerKg = specificInternalEnergyJPerKg(properties, body.temperatureK);
+          const solidCv = (meltK > body.temperatureK && solidEdgeU > memberSpecificInternalEnergyJPerKg)
+            ? (solidEdgeU - memberSpecificInternalEnergyJPerKg) / (meltK - body.temperatureK)
+            : solidPhase.cpJPerKgK;
+          solidBranch = {
+            referenceTemperatureK: meltK,
+            referenceInternalEnergyJPerKg: solidEdgeU,
+            cvJPerKgK: solidCv,
+            energyMaxJPerKg: solidEdgeU
+          };
+          liquidBranch = {
+            referenceTemperatureK: meltK,
+            referenceInternalEnergyJPerKg: liquidEdgeU,
+            cvJPerKgK: liquidPhase.cpJPerKgK,
+            energyMinJPerKg: liquidEdgeU
+          };
+        }
         thermal = {
           meltTemperatureK: meltK,
-          memberSpecificInternalEnergyJPerKg: specificInternalEnergyJPerKg(properties, body.temperatureK),
-          solidBranch: { referenceTemperatureK: body.temperatureK,
-            referenceInternalEnergyJPerKg: specificInternalEnergyJPerKg(properties, body.temperatureK),
-            cvJPerKgK: solidPhase.cpJPerKgK, energyMaxJPerKg: solidEdgeU },
-          liquidBranch: { referenceTemperatureK: meltK, referenceInternalEnergyJPerKg: liquidEdgeU,
-            cvJPerKgK: liquidPhase.cpJPerKgK, energyMinJPerKg: liquidEdgeU },
+          memberSpecificInternalEnergyJPerKg,
+          solidBranch,
+          liquidBranch,
           // Conductivity as the SPH thermal kernel reads it; absent means none.
           solidConductivityWPerMK: Number(solidPhase.thermalConductivityWPerMK) > 0 ? Number(solidPhase.thermalConductivityWPerMK) : 0,
           liquidConductivityWPerMK: Number(liquidPhase.thermalConductivityWPerMK) > 0 ? Number(liquidPhase.thermalConductivityWPerMK) : 0,
@@ -6814,6 +6877,37 @@ export function createSphPhaseDemo(options = {}) {
       });
     }
     demo.materialProperties[key] = closure.properties;
+  }
+  if (demo.state?.rigidBodies && Object.keys(discovery.productClosures).length > 0) {
+    const existingRows = Array.isArray(demo.state.rigidBodies.fluidThermal)
+      ? demo.state.rigidBodies.fluidThermal
+      : [];
+    const seen = new Set(existingRows.map((row) => `${row.materialId}|${row.phaseId}`));
+    const extraRows = [];
+    for (const [key, closure] of Object.entries(discovery.productClosures)) {
+      const materialId = stableOpticalMaterialId(key);
+      for (const phase of closure?.properties?.phases ?? []) {
+        const conductivity = Number(phase.thermalConductivityWPerMK);
+        const heatCapacity = Number(phase.cpJPerKgK ?? phase.heatCapacityJPerKgK);
+        const phaseId = gpuPhaseId(phase.name);
+        const rowKey = `${materialId}|${phaseId}`;
+        if (conductivity > 0 && heatCapacity > 0 && phaseId > 0 && !seen.has(rowKey)) {
+          seen.add(rowKey);
+          extraRows.push({
+            materialId,
+            phaseId,
+            conductivityWPerMK: conductivity,
+            heatCapacityJPerKgK: heatCapacity
+          });
+        }
+      }
+    }
+    if (extraRows.length > 0) {
+      demo.state.rigidBodies = Object.freeze({
+        ...demo.state.rigidBodies,
+        fluidThermal: [...existingRows, ...extraRows]
+      });
+    }
   }
   demo.reactionNote = discovery.note;
   demo.reactionDiscovery = discovery;

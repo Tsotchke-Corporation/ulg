@@ -11291,7 +11291,7 @@ export async function mountSphPhaseDemoOverlay({
       gateStatus: settledGate?.status || null
     });
     if (
-      residentAutoStartEnabled
+      (residentAutoStartEnabled || studioManaged)
       && priorGate?.active === true
       && settledGate?.active !== true
     ) {
@@ -11499,7 +11499,7 @@ export async function mountSphPhaseDemoOverlay({
           || host?.renderOwnershipPolicy
           || initialPeerComputeRenderOwnershipPolicy;
         publishPeerComputeResidentAuthorityHostStatus('ready');
-        if (overlay.isConnected && residentAutoStartEnabled) {
+        if (overlay.isConnected && (residentAutoStartEnabled || studioManaged)) {
           startConfiguredResidentAutoplay();
         }
         return host;
@@ -16695,7 +16695,7 @@ export async function mountSphPhaseDemoOverlay({
           postRebuildIntent === 'play' ? '#sph-play' : '#sph-step'
         )?.click();
       });
-    } else if (postRebuildIntent == null && residentAutoStartEnabled) {
+    } else if (postRebuildIntent == null && (residentAutoStartEnabled || studioManaged)) {
       startConfiguredResidentAutoplay();
     }
     return true;
@@ -17833,6 +17833,7 @@ export async function mountSphPhaseDemoOverlay({
     ) {
       studioPausedBootstrapGeneration = particleSyncGeneration;
       scheduleMlsMpmResidentSteps({
+        stepCount: 1,
         continueFromResidentState: false,
         manualIntent: true
       });
@@ -18986,6 +18987,7 @@ export async function mountSphPhaseDemoOverlay({
       const autoSchedule = overlay.__mlsMpmResidentAutoSchedule || null;
       const startupGate = overlay.__sphResidentStartupPresentationGate || null;
       const rebuildStatus = overlay.__sphPhaseRebuildWorker?.status || null;
+      const pendingPreviewActive = overlay.__sphPendingPresentation?.active === true;
       const workerFrameSerial = Number(offscreen?.displayOwnerContentFrameSerial || 0);
       const workerVisualReady = Boolean(
         offscreen?.displayOwner === 'worker'
@@ -18997,13 +18999,18 @@ export async function mountSphPhaseDemoOverlay({
         interactiveSimulationStateReady
         && rebuildStatus === 'complete'
         && startupGate?.active !== true
+        && !pendingPreviewActive
         && (
           autoSchedule?.status === 'resident-initial-visual-refresh-complete'
           || autoSchedule?.status === 'resident-auto-schedule-enabled-after-initial-visual-refresh'
           || workerVisualReady
         )
       );
-      const visualUpdatesReady = workerVisualReady;
+      const visualUpdatesReady = Boolean(
+        workerVisualReady
+        && !pendingPreviewActive
+        && startupGate?.active !== true
+      );
       return {
         playing,
         ready: interactiveSimulationStateReady,
@@ -19013,6 +19020,7 @@ export async function mountSphPhaseDemoOverlay({
         authorityHostStatus: authHost?.status || null,
         autoScheduleStatus: autoSchedule?.status || null,
         startupGateActive: startupGate?.active === true,
+        pendingPreviewActive,
         workerReady: offscreen?.workerReady === true,
         displayOwner: offscreen?.displayOwner || null,
         displayCanvasVisible: offscreen?.displayCanvasVisible === true,

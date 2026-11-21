@@ -504,6 +504,51 @@ function destroyArenaEntry(entry) {
   entry.destroyed = true;
 }
 
+export function schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership(device) {
+  if (!device || typeof device !== 'object') {
+    throw new TypeError('reaction discovery runtime allocation ownership requires the exact device');
+  }
+  const buffers = new Set();
+  const cache = reactionDiscoveryArenaCaches.get(device);
+  if (cache instanceof Map) {
+    for (const entry of cache.values()) {
+      if (!entry || entry.destroyed) continue;
+      for (const buffer of [
+        entry.proposalBuffer,
+        entry.evidenceBuffer,
+        entry.evidenceReadbackBuffer,
+        entry.activationObservationWordBuffer,
+        entry.activationObservationReadbackBuffer,
+        entry.expectationBuffer,
+        entry.paramsBuffer,
+        entry.reactionRecordBuffer
+      ]) {
+        if (buffer && typeof buffer === 'object' && typeof buffer.destroy === 'function') {
+          buffers.add(buffer);
+        }
+      }
+      for (const stage of entry.reactionDormancyStages?.values?.() ?? []) {
+        for (const buffer of [
+          stage?.dormantBuffer,
+          stage?.countBuffer,
+          stage?.activeIndicesBuffer,
+          stage?.indirectDispatchBuffer
+        ]) {
+          if (buffer && typeof buffer === 'object' && typeof buffer.destroy === 'function') {
+            buffers.add(buffer);
+          }
+        }
+      }
+    }
+  }
+  return Object.freeze({
+    schema: 'peercompute.ulg.schroeder-spatial-reaction-discovery-runtime-allocation-ownership.v0',
+    status: 'spatial-reaction-discovery-runtime-allocation-ownership-complete',
+    allocationCount: buffers.size,
+    buffers: Object.freeze([...buffers])
+  });
+}
+
 function acquireReactionDiscoveryArenaResources({
   device,
   limits,

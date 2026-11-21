@@ -38068,7 +38068,7 @@ fn main(
     const residentSourceMode = continuationAvailable
       ? 'previous-gpu-resident-output'
       : 'cpu-packed-state';
-    const signature = mlsMpmResidentStepsSignatureFor({
+    const signatureArgs = {
       sphParticleState: sourceSphParticleState,
       mlsMpmParticleState: sourceMlsMpmParticleState,
       gridSpacingM,
@@ -38177,6 +38177,13 @@ fn main(
         requestedSchroederParticleStorageMaterializationRowCount,
       schroederParticleStorageRequiredCapacity:
         requestedSchroederParticleStorageRequiredCapacity
+    };
+    const signature = mlsMpmResidentStepsSignatureFor(signatureArgs);
+    // Worker-lane identity is invariant to per-schedule batch size (e.g. a
+    // 1-step paused bootstrap followed by batched playback on the same lane).
+    const workerLaneConfigurationSignature = mlsMpmResidentStepsSignatureFor({
+      ...signatureArgs,
+      stepCount: 1
     });
     const executionGeneration = mlsMpmResidentExecutionGeneration;
     const executionGenerationHandoffPromise =
@@ -40730,7 +40737,7 @@ fn main(
               residentStateManager
             });
           const workerLaneScheduleArgs = {
-            configurationSignature: signature,
+            configurationSignature: workerLaneConfigurationSignature,
             stepCount: normalizedStepCount,
             progressEverySteps: requestedWorkerLaneProgressEverySteps,
             workerLiveParticlePreview: workerLiveParticlePreview === true,

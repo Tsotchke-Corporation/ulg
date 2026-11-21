@@ -1013,7 +1013,7 @@ test('sodium wall-contact acceptance cannot mask frozen authoritative mechanics'
     (candidate) => candidate.presetId === 'sodium-water'
   );
   assert.ok(scenario);
-  const terminalYM = 1.5 - 0.12407009817988002 * 0.6;
+  const terminalYM = 3 - 0.12407009817988002;
   const materialRow = ({
     material,
     materialId,
@@ -1057,8 +1057,8 @@ test('sodium wall-contact acceptance cannot mask frozen authoritative mechanics'
     const h2MassKg = hasProducts ? 0.01 : 0;
     const naohMassKg = hasProducts ? 0.02 : 0;
     const h2oMassKg = 1 - naMassKg - h2MassKg - naohMassKg;
-    const h2YMinM = atWall ? terminalYM - 0.001 : 1.24;
-    const h2YMaxM = atWall ? terminalYM : 1.26;
+    const h2YMinM = atWall ? terminalYM - 0.001 : 1.49;
+    const h2YMaxM = atWall ? terminalYM : 1.51;
     const h2VyMPerS = atWall ? -0.03 : 7.7;
     const rows = [
       materialRow({
@@ -1195,13 +1195,13 @@ test('spatial refinement preserves physical visual acceptance distances', () => 
   assert.ok(
     Math.abs(
       ironIce.phaseAwareAcceptance.generatedGas.minimumSustainedRiseM
-      - 0.0007
+      - 0.0014
     ) < 1e-15
   );
   assert.ok(
     Math.abs(
       ironIce.phaseAwareAcceptance.condensedLaunch.maxUpwardExcursionM
-      - 0.0049
+      - 0.0098
     ) < 1e-15
   );
 });
@@ -1313,19 +1313,19 @@ test('standard canned scenarios use worker-owned SS with a native surface consum
         scenario.phaseAwareAcceptance.generatedGas.upperWallTerminal,
         {
           boundaryCondition: 'closed-g2p-clamped',
-          boxMaxYM: 1.5,
-          wallInsetM: 0.12407009817988002 * 0.6,
-          contactToleranceM: 2.4814019635976003e-7 * 0.6,
-          maximumTailRetreatM: 0.0024814019635976003 * 0.6
+          boxMaxYM: 3,
+          wallInsetM: 0.12407009817988002,
+          contactToleranceM: 2.4814019635976003e-7,
+          maximumTailRetreatM: 0.0024814019635976003
         }
       );
     } else if (scenario.presetId === 'iron-ice-quench') {
-      // Closed-ceiling steam terminal with per-carrier clearance (scaled x 0.014).
+      // Closed-ceiling steam terminal with per-carrier clearance (scaled x 0.028).
       const wall = scenario.phaseAwareAcceptance.generatedGas.upperWallTerminal;
       assert.equal(wall.boundaryCondition, 'closed-g2p-clamped');
       assert.equal(wall.perCarrierClearanceBand, true);
-      assert.ok(Math.abs(wall.boxMaxYM - 0.07) < 1e-12, `box ${wall.boxMaxYM}`);
-      assert.ok(Math.abs(wall.wallInsetM - 0.0034739627 / 4) < 1e-9, `inset ${wall.wallInsetM}`);
+      assert.ok(Math.abs(wall.boxMaxYM - 0.14) < 1e-12, `box ${wall.boxMaxYM}`);
+      assert.ok(Math.abs(wall.wallInsetM - 0.0034739627 / 2) < 1e-9, `inset ${wall.wallInsetM}`);
     } else {
       assert.equal(
         scenario.phaseAwareAcceptance?.generatedGas?.upperWallTerminal,

@@ -132,8 +132,12 @@ import {
   SCHROEDER_SPATIAL_REACTION_ACTIVATION_PREDICATE_REVISION,
   ULG_SCHROEDER_SPATIAL_REACTION_ACTIVATION_OBSERVATION_SCHEMA,
   enumerateSchroederSpatialReactionDiscoveryPrewarmPipelineDescriptors,
-  observeSchroederSpatialReactionDiscoveryActivation
+  observeSchroederSpatialReactionDiscoveryActivation,
+  schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership
 } from '../runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js';
+import {
+  sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership
+} from '../runtime/sph/sphPhaseCarrierTransferGpu.js';
 import {
   enumerateSphReactionStepPrewarmPipelineDescriptors
 } from '../runtime/sph/sphReactionGpuKernel.js';
@@ -980,7 +984,9 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       const owners = [
         schroederSpatialEpochDeviceRuntimeAllocationOwnership(record.workerDevice),
         schroederSpatialThermalDeviceRuntimeAllocationOwnership(record.workerDevice),
-        schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(record.workerDevice)
+        schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(record.workerDevice),
+        schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership(record.workerDevice),
+        sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership(record.workerDevice)
       ];
       runtimeOwnedBuffers = [...new Set(owners.flatMap(({ buffers }) => buffers))];
     }

@@ -237,6 +237,12 @@ import {
   summarizeSphRenderFieldSurfacesWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
 import {
+  ensureSchroederSolidRigidFamilyForUpload
+} from '../runtime/sph/schroederSolidRigidLane.js';
+import {
+  encodeSchroederSolidIsosurfaceFieldSplatWebGpu
+} from '../runtime/sph/schroederSolidIsosurfaceFieldGpu.js';
+import {
   buildSphRenderFieldSourceLocalWebGpu,
   SPH_RENDER_FIELD_SOURCE_LOCAL_MODE_PRODUCTION
 } from '../runtime/sph/sphRenderFieldSourceLocalGpu.js';
@@ -48120,6 +48126,37 @@ fn main(
         rejectStaleRenderFieldContinuation(
           'stale-resident-render-refresh-after-render-field-build'
         );
+        if (
+          sphParticleState?.rigidBodies?.bodies?.length > 0
+          && renderFieldExecution?.fieldRowsBuffer
+          && resolvedDeviceResult?.device
+          && sphGpuParticleUpload?.identityBuffer
+        ) {
+          try {
+            const t0SolidFamily = ensureSchroederSolidRigidFamilyForUpload(
+              sphGpuParticleUpload,
+              sphParticleState.rigidBodies,
+              resolvedDeviceResult.device
+            );
+            if (t0SolidFamily) {
+              const solidSplatEncoder = resolvedDeviceResult.device.createCommandEncoder({
+                label: 'ulg-t0-solid-isosurface-field-splat'
+              });
+              const solidSplatHandle = encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
+                device: resolvedDeviceResult.device,
+                encoder: solidSplatEncoder,
+                family: t0SolidFamily,
+                renderField: renderFieldExecution
+              });
+              if (solidSplatHandle) {
+                resolvedDeviceResult.device.queue.submit([solidSplatEncoder.finish()]);
+                solidSplatHandle.destroy?.();
+              }
+            }
+          } catch {
+            // Best-effort T=0 coherent rigid solid splat; worker lane handles live steps.
+          }
+        }
         if (
           schroederSpatialSourceFamily
           && renderFieldExecution.schroederSpatialSourceFamily == null

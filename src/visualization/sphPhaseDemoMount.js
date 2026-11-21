@@ -8448,8 +8448,8 @@ export async function mountSphPhaseDemoOverlay({
   );
   const residentSurfaceDrawModeRequest =
     resolveSphResidentSurfaceDrawModeRequest({
-      hashSurfaceDraw: initialHash.get('surfaceDraw'),
-      querySurfaceDraw: initialQuery.get('surfaceDraw'),
+      hashSurfaceDraw: studioManaged ? null : initialHash.get('surfaceDraw'),
+      querySurfaceDraw: studioManaged ? null : initialQuery.get('surfaceDraw'),
       hashSurfaceDrawDiagnostic: initialHash.get('surfaceDrawDiagnostic'),
       querySurfaceDrawDiagnostic: initialQuery.get('surfaceDrawDiagnostic'),
       hashScenarioPresetSurfaceDraw:
@@ -12857,6 +12857,11 @@ export async function mountSphPhaseDemoOverlay({
 
   function residentGpuContinuationReady(execution = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps) {
     return residentGpuContinuationEvidenceReady(execution);
+  }
+
+  function residentAnyContinuationReady(execution = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps) {
+    return residentGpuContinuationEvidenceReady(execution)
+      || residentWorkerLaneContinuationReady(execution);
   }
 
   function currentPeerComputeRenderOwnershipPolicy() {
@@ -17798,7 +17803,7 @@ export async function mountSphPhaseDemoOverlay({
     setPlaying(true);
     overlay.querySelector('#sph-play').textContent = 'Pause';
     scheduleMlsMpmResidentSteps({
-      continueFromResidentState: residentGpuContinuationReady(),
+      continueFromResidentState: residentAnyContinuationReady(),
       force
     });
     requestPlaybackTick();
@@ -17813,7 +17818,26 @@ export async function mountSphPhaseDemoOverlay({
   // calls this coordinator, and playback starts only once both sides exist.
   // This prevents a normal preset from submitting one bootstrap schedule with
   // `playing === false` and then remaining forever on its t=0 body preview.
+  let studioPausedBootstrapGeneration = -1;
   function startConfiguredResidentAutoplay({ force = false } = {}) {
+    if (
+      studioManaged
+      && !residentAutoStartEnabled
+      && !playing
+      && simulationRuntimeAdmission.ready
+      && overlay.__sphInitialBodiesDraftInvalid !== true
+      && residentStartupPresentationGate?.active !== true
+      && !resetRebuildPending
+      && Boolean(activeViewState)
+      && studioPausedBootstrapGeneration !== particleSyncGeneration
+    ) {
+      studioPausedBootstrapGeneration = particleSyncGeneration;
+      scheduleMlsMpmResidentSteps({
+        continueFromResidentState: false,
+        manualIntent: true
+      });
+      return false;
+    }
     const startup = resolveSphConfiguredAutoplayStartup({
       configured: residentAutoStartEnabled,
       runtimeReady: simulationRuntimeAdmission.ready,
@@ -18571,7 +18595,7 @@ export async function mountSphPhaseDemoOverlay({
           return;
         }
         scheduleMlsMpmResidentSteps({
-          continueFromResidentState: residentGpuContinuationReady()
+          continueFromResidentState: residentAnyContinuationReady()
         });
         renderStatus();
         updateWarningBanner();
@@ -18628,7 +18652,7 @@ export async function mountSphPhaseDemoOverlay({
     // path). Schedule resident continuation exactly like the driverless
     // branch; the CPU driver keeps stepping only while no resident
     // continuation exists (pre-first-execution, or CPU-only mechanics).
-    if (initialResidentAutoEnabled && mechanicsModeFromControls() !== 'sph' && residentGpuContinuationReady()) {
+    if (initialResidentAutoEnabled && mechanicsModeFromControls() !== 'sph' && residentAnyContinuationReady()) {
       scheduleMlsMpmResidentSteps({ continueFromResidentState: true });
       renderStatus();
       updateWarningBanner();
@@ -18688,7 +18712,9 @@ export async function mountSphPhaseDemoOverlay({
       if (activeViewState) {
         scheduleMlsMpmResidentSteps({
           manualIntent: true,
-          continueFromResidentState: residentGpuContinuationReady()
+          continueFromResidentState: typeof residentAnyContinuationReady === 'function'
+            ? residentAnyContinuationReady()
+            : residentGpuContinuationReady()
         });
       }
       renderStatus();
@@ -18743,7 +18769,7 @@ export async function mountSphPhaseDemoOverlay({
         e.target.textContent = playing ? 'Pause' : 'Play';
         if (playing) {
           scheduleMlsMpmResidentSteps({
-            continueFromResidentState: residentGpuContinuationReady()
+            continueFromResidentState: residentAnyContinuationReady()
           });
           requestPlaybackTick();
         }
@@ -18955,17 +18981,54 @@ export async function mountSphPhaseDemoOverlay({
     },
     getTelemetrySnapshot() {
       const lane = overlay.__mlsMpmResidentSteps?.workerOwnedResidentLane || null;
+      const offscreen = scene?.getWorkerOffscreenPresentation?.() || null;
+      const authHost = overlay.__sphPeerComputeResidentAuthorityHost || null;
+      const autoSchedule = overlay.__mlsMpmResidentAutoSchedule || null;
+      const startupGate = overlay.__sphResidentStartupPresentationGate || null;
+      const rebuildStatus = overlay.__sphPhaseRebuildWorker?.status || null;
+      const workerFrameSerial = Number(offscreen?.displayOwnerContentFrameSerial || 0);
+      const workerVisualReady = Boolean(
+        offscreen?.displayOwner === 'worker'
+        && offscreen?.displayOwnerContentReady === true
+        && offscreen?.displayCanvasVisible === true
+        && workerFrameSerial >= 1
+      );
+      const initialVisualReady = Boolean(
+        interactiveSimulationStateReady
+        && rebuildStatus === 'complete'
+        && startupGate?.active !== true
+        && (
+          autoSchedule?.status === 'resident-initial-visual-refresh-complete'
+          || autoSchedule?.status === 'resident-auto-schedule-enabled-after-initial-visual-refresh'
+          || workerVisualReady
+        )
+      );
+      const visualUpdatesReady = workerVisualReady;
       return {
         playing,
         ready: interactiveSimulationStateReady,
         blocked: simulationRuntimeBlocked(),
         blockedReason: simulationRuntimeBlocked() ? simulationRuntimeAdmission.reason : null,
-        rebuildStatus: overlay.__sphPhaseRebuildWorker?.status || null,
+        rebuildStatus,
+        authorityHostStatus: authHost?.status || null,
+        autoScheduleStatus: autoSchedule?.status || null,
+        startupGateActive: startupGate?.active === true,
+        workerReady: offscreen?.workerReady === true,
+        displayOwner: offscreen?.displayOwner || null,
+        displayCanvasVisible: offscreen?.displayCanvasVisible === true,
+        workerFrameSerial,
+        workerVisualReady,
+        initialVisualReady,
+        visualUpdatesReady,
+        presentedStatesPerSecond: overlay.__sphFrameCounters?.presentedStatesPerSecond ?? null,
         fpsText: fpsEl?.textContent || '',
         statusText: statusEl?.textContent || '',
         simTimeS: Number(lane?.laneSimTimeS) || Number(driver?.demo?.state?.time) || 0,
         stepCount: Number(lane?.laneCompletedStepTotal) || Number(driver?.demo?.state?.step) || 0
       };
+    },
+    isVisualReady() {
+      return this.getTelemetrySnapshot().visualUpdatesReady;
     },
     getBackgroundImage() {
       return scene.getBackgroundImage?.() || overlay.__sphSceneBackgroundImage || null;

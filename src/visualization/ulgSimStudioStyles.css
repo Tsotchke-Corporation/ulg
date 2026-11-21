@@ -178,6 +178,147 @@ body {
   display: none;
 }
 
+/* Loading overlay with animated spinner, percentage & broad phase status */
+.ulg-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 105;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 50% 44%, rgba(94, 242, 182, 0.08), transparent 54%),
+    rgba(6, 11, 17, 0.86);
+  backdrop-filter: blur(10px);
+}
+
+.ulg-loading-card {
+  width: min(440px, 92vw);
+  padding: 28px 30px;
+  border-radius: 16px;
+  border: 1px solid var(--ulg-border-strong);
+  background: rgba(9, 16, 23, 0.94);
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.58);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+
+.ulg-spinner-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ulg-spinner {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 3px solid rgba(94, 242, 182, 0.16);
+  border-top-color: var(--ulg-accent);
+  border-right-color: var(--ulg-cyan);
+  animation: ulg-spin 0.95s linear infinite;
+}
+
+.ulg-spinner-pct {
+  font-family: var(--ulg-font-mono);
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ulg-accent);
+}
+
+@keyframes ulg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ulg-loading-phase {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--ulg-text);
+  letter-spacing: -0.01em;
+}
+
+.ulg-loading-detail {
+  margin: -6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ulg-text-muted);
+}
+
+.ulg-loading-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(127, 212, 255, 0.14);
+  overflow: hidden;
+}
+
+.ulg-loading-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--ulg-accent), var(--ulg-cyan));
+  transition: width 0.25s ease-out;
+}
+
+/* Bottom-right playback controls outside modal */
+.ulg-playback-bar {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 115;
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 13px;
+  border: 1px solid var(--ulg-border-strong);
+  background: rgba(9, 16, 23, 0.88);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.ulg-playback-bar .ulg-btn {
+  min-height: 34px;
+  padding: 0 13px;
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+
+.ulg-autoplay-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--ulg-text-muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  user-select: none;
+}
+
+.ulg-autoplay-label:hover {
+  color: var(--ulg-text);
+}
+
+.ulg-autoplay-label input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--ulg-accent);
+  margin: 0;
+  cursor: pointer;
+}
+
 /* Modal backdrop & container */
 .ulg-modal-backdrop {
   position: fixed;

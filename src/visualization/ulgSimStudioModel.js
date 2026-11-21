@@ -7,6 +7,7 @@ import {
 } from '../runtime/sphEnvironmentControls.js';
 import {
   containerBoundsForFrame,
+  findOverlappingSphInitialBodies,
   floorCenteredToInternalCenterM,
   internalToFloorCenteredCenterM,
   normalizeSphInitialBodies,
@@ -22,6 +23,29 @@ import {
   normalizeSphSceneBackgroundColorHex,
   normalizeSphSceneLightingMode
 } from './sphPhaseScene.js';
+
+const DEFAULT_CUSTOM_CAMERA = Object.freeze({
+  cameraPositionNormalized: '0.78,0.46,1.55',
+  cameraTargetNormalized: '0.50,0.34,0.50'
+});
+
+const SIMULATION_URL_PARAM_KEYS = Object.freeze([
+  'preset',
+  'scenario',
+  'basePreset',
+  'box',
+  'bodies',
+  'wallModel',
+  'walls',
+  'env',
+  'laws'
+]);
+
+const VALID_WALL_MODELS = new Set([
+  'adiabatic',
+  'finite-heat-capacity-lumped-face',
+  'infinite-fixed-temperature-reservoir'
+]);
 
 export function roundNice(value, sig = 6) {
   const num = Number(value);
@@ -52,7 +76,7 @@ export function totalParticlesOf(bodies) {
 
 /**
  * Derive a clean, floor-centered staged configuration directly from a preset
- * record without touching browser URLs or spawning any runtime state.
+ * record without spawning any runtime state.
  */
 export function buildStagedConfigFromPreset(presetId) {
   const preset = sphPhaseScenarioPresetById(presetId) || SPH_PHASE_SCENARIO_PRESETS[0];
@@ -95,8 +119,12 @@ export function buildStagedConfigFromPreset(presetId) {
   }));
 
   const isTier0Water = preset.id === 'water-realtime';
+  const runtimeOverlay = { ...runtime };
+  delete runtimeOverlay.surfaceDraw;
+  delete runtimeOverlay.bodies;
   return {
     presetId: preset.id,
+    basePresetId: preset.id,
     sceneLengthScale: scale,
     boxDimensionsM,
     wallModel: runtime.wallModel || 'finite-heat-capacity-lumped-face',
@@ -134,7 +162,7 @@ export function buildStagedConfigFromPreset(presetId) {
       : preset.id === 'cesium-fluorine'
         ? 'two-level-energetic'
         : 'canonical-ss',
-    presetRuntimeOverlay: { ...runtime }
+    presetRuntimeOverlay: runtimeOverlay
   };
 }
 
@@ -142,6 +170,7 @@ export function buildBlankCustomConfig() {
   const boxDimensionsM = [2, 2, 2];
   return {
     presetId: 'custom',
+    basePresetId: null,
     sceneLengthScale: 1,
     boxDimensionsM,
     wallModel: 'finite-heat-capacity-lumped-face',
@@ -183,26 +212,30 @@ export function buildBlankCustomConfig() {
       blobScale: 1
     },
     solverProfile: 'canonical-ss',
-    presetRuntimeOverlay: {}
+    presetRuntimeOverlay: { ...DEFAULT_CUSTOM_CAMERA }
   };
 }
 
 /**
  * Validate a staged configuration in floor-centered coordinates.
- * Guarantees every body's bounding box lies completely inside the container.
+ * Guarantees every body's bounding box lies completely inside the container
+ * and no two bodies overlap.
  */
 export function validateStagedSimulationConfig(config) {
   const errors = [];
   const bodyErrors = new Map();
+  const appendBodyError = (id, msg) => {
+    bodyErrors.set(id, bodyErrors.has(id) ? `${bodyErrors.get(id)} ${msg}` : msg);
+  };
   const box = config?.boxDimensionsM;
   if (!Array.isArray(box) || box.length !== 3 || box.some((v) => !(Number(v) > 0) || !Number.isFinite(Number(v)))) {
     errors.push('Container dimensions X, Y, and Z must be positive numbers.');
-    return { valid: false, errors, bodyErrors, normalizedBodies: null, preflight: null };
+    return { valid: false, errors, bodyErrors, overlaps: [], normalizedBodies: null, preflight: null };
   }
   const bodies = Array.isArray(config?.bodies) ? config.bodies : [];
   if (bodies.length === 0) {
     errors.push('Add at least one material body before launching.');
-    return { valid: false, errors, bodyErrors, normalizedBodies: null, preflight: null };
+    return { valid: false, errors, bodyErrors, overlaps: [], normalizedBodies: null, preflight: null };
   }
 
   let normalizedBodies;
@@ -210,29 +243,43 @@ export function validateStagedSimulationConfig(config) {
     normalizedBodies = normalizeSphInitialBodies(bodies);
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
-    return { valid: false, errors, bodyErrors, normalizedBodies: null, preflight: null };
+    return { valid: false, errors, bodyErrors, overlaps: [], normalizedBodies: null, preflight: null };
   }
 
   const bounds = containerBoundsForFrame(box, 'floor-centered');
   const tol = Math.max(1e-9, Math.max(...box) * 1e-9);
   const axisNames = ['X', 'Y', 'Z'];
+  let hasOutOfBounds = false;
   for (const body of normalizedBodies.bodies) {
     for (let axis = 0; axis < 3; axis += 1) {
       const minM = body.centerM[axis] - body.sizeM[axis] / 2;
       const maxM = body.centerM[axis] + body.sizeM[axis] / 2;
       if (minM < bounds.minM[axis] - tol || maxM > bounds.maxM[axis] + tol) {
-        const msg = `${axisNames[axis]} bounds [${fmtMeters(minM)}, ${fmtMeters(maxM)}] m fall outside container [${fmtMeters(bounds.minM[axis])}, ${fmtMeters(bounds.maxM[axis])}] m.`;
-        bodyErrors.set(body.id, bodyErrors.has(body.id) ? `${bodyErrors.get(body.id)} ${msg}` : msg);
+        hasOutOfBounds = true;
+        appendBodyError(
+          body.id,
+          `${axisNames[axis]} bounds [${fmtMeters(minM)}, ${fmtMeters(maxM)}] m fall outside container [${fmtMeters(bounds.minM[axis])}, ${fmtMeters(bounds.maxM[axis])}] m.`
+        );
       }
     }
   }
-  if (bodyErrors.size > 0) {
+  if (hasOutOfBounds) {
     errors.push('One or more bodies start or extend outside the container bounds.');
   } else {
     try {
       validateSphInitialBodiesInContainer(normalizedBodies, box, { coordinateFrame: 'floor-centered' });
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  const overlaps = findOverlappingSphInitialBodies(normalizedBodies);
+  if (overlaps.length > 0) {
+    const pairLabels = overlaps.map(({ bodyA, bodyB }) => `${bodyA.id} & ${bodyB.id}`);
+    errors.push(`Bodies cannot overlap (${pairLabels.join(', ')}).`);
+    for (const { bodyA, bodyB } of overlaps) {
+      appendBodyError(bodyA.id, `Overlaps with body '${bodyB.id}'.`);
+      appendBodyError(bodyB.id, `Overlaps with body '${bodyA.id}'.`);
     }
   }
 
@@ -246,7 +293,7 @@ export function validateStagedSimulationConfig(config) {
       if (blocker.startsWith('body-cell-pitch-anisotropy:')) {
         const id = blocker.split(':')[1];
         const msg = 'Particle spacing must remain nearly isotropic across X, Y, and Z.';
-        bodyErrors.set(id, bodyErrors.has(id) ? `${bodyErrors.get(id)} ${msg}` : msg);
+        appendBodyError(id, msg);
         errors.push(`${id}: ${msg}`);
       } else if (blocker === 'cross-body-cell-pitch-ratio-exceeded') {
         errors.push('Particle pitch across bodies differs by more than 2×. Align particle counts or sizes.');
@@ -260,6 +307,7 @@ export function validateStagedSimulationConfig(config) {
     valid: errors.length === 0 && bodyErrors.size === 0,
     errors,
     bodyErrors,
+    overlaps,
     normalizedBodies,
     preflight
   };
@@ -267,7 +315,9 @@ export function validateStagedSimulationConfig(config) {
 
 /**
  * Compile a validated staged configuration into the exact in-memory parameter
- * map consumed by the GPU simulation session (never touching window.location).
+ * map consumed by the GPU simulation session.
+ * Never sets `surfaceDraw` so custom/edited scenarios never misclassify as a
+ * main-thread diagnostic override that hides the worker OffscreenCanvas.
  */
 export function buildLaunchParamsFromStagedConfig(config) {
   const validation = validateStagedSimulationConfig(config);
@@ -280,10 +330,10 @@ export function buildLaunchParamsFromStagedConfig(config) {
     ...body,
     centerM: Array.from(floorCenteredToInternalCenterM(body.centerM, boxM))
   }));
-  const preset = sphPhaseScenarioPresetById(config.presetId);
-  const baseRuntime = preset ? preset.runtime : {
+  const exactPreset = sphPhaseScenarioPresetById(config.presetId);
+  const inheritedPreset = exactPreset || sphPhaseScenarioPresetById(config.basePresetId);
+  const defaultCanonicalRuntime = {
     renderer: 'native-webgpu',
-    surfaceDraw: 'native-webgpu-surface-consumer',
     surfaceOverlay: '0',
     renderOwnership: 'worker-owned-resident-render-producer',
     workerOffscreenPresentation: '1',
@@ -309,25 +359,47 @@ export function buildLaunchParamsFromStagedConfig(config) {
     schroederCrossLevelCoupling: '0',
     schroederPhaseVolumeMigration: '1',
     schroederTwoLevel: '0',
-    schroederMechanicsFieldPairV2: '0'
+    schroederMechanicsFieldPairV2: '0',
+    ...DEFAULT_CUSTOM_CAMERA
   };
+  const baseRuntime = inheritedPreset
+    ? { ...defaultCanonicalRuntime, ...inheritedPreset.runtime }
+    : defaultCanonicalRuntime;
+  const overlayRuntime = { ...(config.presetRuntimeOverlay || {}) };
+  delete baseRuntime.surfaceDraw;
+  delete baseRuntime.bodies;
+  delete overlayRuntime.surfaceDraw;
+  delete overlayRuntime.bodies;
+
+  // If thermal or reaction laws are turned on (e.g., on an edited Tier-0
+  // preset), make sure canonical law queues and phase-volume migration are active.
+  const activeThermalOrReactions = Boolean(config.laws?.thermal || config.laws?.reactions);
+  const dynamicLawGuard = activeThermalOrReactions
+    ? {
+        schroederLawQueue: '1',
+        schroederLawNeighborCandidates: '1',
+        schroederPhaseVolumeMigration: '1',
+        schroederActiveNodeSortedIndex: '1',
+        contactSolver: '1'
+      }
+    : {};
 
   const firstBody = internalBodies[0];
   const secondBody = internalBodies[1] || firstBody;
-  return {
+  const compiled = {
     ...SPH_ENVIRONMENT_CONTROL_DEFAULTS,
     ...baseRuntime,
-    ...(config.presetRuntimeOverlay || {}),
-    // Always enforce unified GPU marching-cubes isosurface rendering
+    ...overlayRuntime,
+    ...dynamicLawGuard,
+    // Always enforce unified worker-owned GPU marching-cubes isosurface rendering
     renderer: 'native-webgpu',
-    surfaceDraw: 'native-webgpu-surface-consumer',
     surfaceOverlay: '0',
     workerOffscreenPresentation: '1',
     workerParticleOverlay: '0',
     workerLivePreview: '0',
     mech: 'mlsmpm',
     residentAuto: '1',
-    scenario: preset ? preset.id : 'custom',
+    scenario: exactPreset ? exactPreset.id : 'custom',
     sceneLengthScale: String(scale),
     wallModel: config.wallModel || 'finite-heat-capacity-lumped-face',
     boxx: String(boxM[0] / scale),
@@ -363,5 +435,305 @@ export function buildLaunchParamsFromStagedConfig(config) {
     lighting: normalizeSphSceneLightingMode(config.display.lightingMode),
     bg: normalizeSphSceneBackgroundColorHex(config.display.backgroundColor),
     blob: String(config.display.blobScale || 1)
+  };
+  delete compiled.surfaceDraw;
+  return compiled;
+}
+
+function toSearchParams(input) {
+  if (input instanceof URLSearchParams) return input;
+  if (typeof input === 'string') {
+    return new URLSearchParams(input.startsWith('?') ? input.slice(1) : input);
+  }
+  return new URLSearchParams();
+}
+
+export function hasSimulationUrlParams(searchOrParams) {
+  const params = toSearchParams(searchOrParams);
+  return SIMULATION_URL_PARAM_KEYS.some((key) => {
+    const val = params.get(key);
+    return val != null && val.trim() !== '';
+  });
+}
+
+/**
+ * Serialize a staged studio configuration into clean, forward-looking URL
+ * query parameters so editing simulation variables keeps the URL in sync
+ * and direct navigation restores and auto-launches the exact simulation.
+ */
+export function serializeStagedConfigToUrlSearchParams(config, {
+  autoPlayWhenReady = false
+} = {}) {
+  const params = new URLSearchParams();
+  if (!config) return params;
+
+  const exactPreset = sphPhaseScenarioPresetById(config.presetId);
+  if (exactPreset) {
+    params.set('preset', exactPreset.id);
+  } else {
+    params.set('preset', 'custom');
+    const basePreset = sphPhaseScenarioPresetById(config.basePresetId);
+    if (basePreset) params.set('basePreset', basePreset.id);
+  }
+
+  if (Array.isArray(config.boxDimensionsM) && config.boxDimensionsM.length === 3) {
+    params.set('box', config.boxDimensionsM.map((v) => String(roundNice(v, 6))).join(','));
+  }
+
+  if (Array.isArray(config.bodies) && config.bodies.length > 0) {
+    try {
+      const normalized = normalizeSphInitialBodies(config.bodies);
+      params.set('frame', 'floor');
+      params.set('bodies', serializeSphInitialBodies(normalized));
+    } catch {
+      // Keep raw JSON if draft is mid-edit so user edits still reflect in URL.
+      params.set('frame', 'floor');
+      params.set('bodies', JSON.stringify(config.bodies));
+    }
+  }
+
+  params.set('wallModel', config.wallModel || 'finite-heat-capacity-lumped-face');
+  if (config.wallModel !== 'adiabatic' && config.walls) {
+    const w = config.walls;
+    params.set('walls', [w.xMin, w.xMax, w.yMin, w.yMax, w.zMin, w.zMax].map((v) => String(roundNice(v, 5))).join(','));
+  }
+
+  const env = config.environment || {};
+  params.set('env', env.mode || 'vacuum');
+  if (env.mode === 'air') {
+    params.set('airT', String(roundNice(env.temperatureK ?? 293.15, 5)));
+    params.set('airP', String(roundNice(env.pressurePa ?? 101325, 6)));
+    params.set('airRh', String(roundNice(env.humidityPercent ?? 50, 4)));
+    if (Number(env.nucleiPerCm3) > 0) {
+      params.set('airNuclei', String(roundNice(env.nucleiPerCm3, 5)));
+    }
+  }
+
+  const laws = config.laws || {};
+  params.set(
+    'laws',
+    [
+      `g:${laws.gravity !== false ? 1 : 0}`,
+      `t:${laws.thermal !== false ? 1 : 0}`,
+      `r:${laws.reactions !== false ? 1 : 0}`,
+      `v:${laws.viscosity !== false ? 1 : 0}`,
+      `st:${laws.surfaceTension === true ? 1 : 0}`,
+      `rs:${laws.rigidSolids !== false ? 1 : 0}`
+    ].join(',')
+  );
+
+  const display = config.display || {};
+  if (display.lightingMode && display.lightingMode !== SPH_SCENE_LIGHTING_MODE_DEFAULT) {
+    params.set('lighting', normalizeSphSceneLightingMode(display.lightingMode));
+  }
+  if (display.backgroundColor && display.backgroundColor.toLowerCase() !== SPH_SCENE_BACKGROUND_COLOR_DEFAULT.toLowerCase()) {
+    params.set('bg', normalizeSphSceneBackgroundColorHex(display.backgroundColor));
+  }
+  if (Number.isFinite(Number(display.blobScale)) && Math.abs(Number(display.blobScale) - 1) > 1e-4) {
+    params.set('blob', String(roundNice(display.blobScale, 4)));
+  }
+  if (autoPlayWhenReady === true) {
+    params.set('autoplay', '1');
+  }
+  return params;
+}
+
+/**
+ * Parse simulation URL query parameters into a floor-centered staged config.
+ * Returns null when the URL carries no simulation variables (preserving empty
+ * zero-allocation boot on a clean URL).
+ */
+export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
+  const params = toSearchParams(searchOrParams);
+  if (!hasSimulationUrlParams(params)) return null;
+
+  const rawPreset = params.get('preset') ?? params.get('scenario');
+  const exactPreset = sphPhaseScenarioPresetById(rawPreset);
+  const basePreset = exactPreset || sphPhaseScenarioPresetById(params.get('basePreset'));
+  const config = basePreset
+    ? buildStagedConfigFromPreset(basePreset.id)
+    : buildBlankCustomConfig();
+  if (!exactPreset) {
+    config.presetId = 'custom';
+    config.basePresetId = basePreset ? basePreset.id : null;
+  }
+
+  const rawBox = params.get('box');
+  if (rawBox) {
+    const dims = rawBox.split(',').map(Number);
+    if (dims.length === 3 && dims.every((v) => Number.isFinite(v) && v > 0)) {
+      config.boxDimensionsM = dims.map((v) => roundNice(v, 6));
+    }
+  }
+
+  const rawBodies = params.get('bodies');
+  if (rawBodies) {
+    try {
+      const parsedBodies = parseSphInitialBodies(rawBodies).bodies;
+      const frame = (params.get('frame') || 'floor').trim().toLowerCase();
+      config.bodies = parsedBodies.map((body) => {
+        const centerM = frame === 'internal'
+          ? Array.from(internalToFloorCenteredCenterM(body.centerM, config.boxDimensionsM))
+          : Array.from(body.centerM);
+        return {
+          ...body,
+          centerM: centerM.map((v) => roundNice(v, 6)),
+          sizeM: Array.from(body.sizeM).map((v) => roundNice(v, 6)),
+          particlesPerEdge: [...body.particlesPerEdge],
+          velocityMPerS: [...body.velocityMPerS]
+        };
+      });
+    } catch {
+      // Fall back to base preset bodies if URL bodies payload is malformed.
+    }
+  }
+
+  const rawWallModel = params.get('wallModel');
+  if (rawWallModel && VALID_WALL_MODELS.has(rawWallModel)) {
+    config.wallModel = rawWallModel;
+  }
+  const rawWalls = params.get('walls');
+  if (rawWalls) {
+    const vals = rawWalls.split(',').map(Number);
+    if (vals.length === 6 && vals.every((v) => Number.isFinite(v) && v > 0)) {
+      config.walls = {
+        xMin: vals[0],
+        xMax: vals[1],
+        yMin: vals[2],
+        yMax: vals[3],
+        zMin: vals[4],
+        zMax: vals[5]
+      };
+    }
+  }
+
+  const rawEnv = params.get('env');
+  if (rawEnv === 'air' || rawEnv === 'vacuum') {
+    config.environment.mode = rawEnv;
+  }
+  const airT = Number(params.get('airT'));
+  if (params.has('airT') && Number.isFinite(airT) && airT > 0) config.environment.temperatureK = airT;
+  const airP = Number(params.get('airP'));
+  if (params.has('airP') && Number.isFinite(airP) && airP >= 0) config.environment.pressurePa = airP;
+  const airRh = Number(params.get('airRh'));
+  if (params.has('airRh') && Number.isFinite(airRh) && airRh >= 0) config.environment.humidityPercent = airRh;
+  const airNuclei = Number(params.get('airNuclei'));
+  if (params.has('airNuclei') && Number.isFinite(airNuclei) && airNuclei >= 0) config.environment.nucleiPerCm3 = airNuclei;
+
+  const rawLaws = params.get('laws');
+  if (rawLaws) {
+    const map = Object.fromEntries(
+      rawLaws.split(',').map((entry) => entry.split(':').map((s) => s.trim()))
+    );
+    if (map.g != null) config.laws.gravity = map.g !== '0';
+    if (map.t != null) config.laws.thermal = map.t !== '0';
+    if (map.r != null) config.laws.reactions = map.r !== '0';
+    if (map.v != null) config.laws.viscosity = map.v !== '0';
+    if (map.st != null) config.laws.surfaceTension = map.st === '1';
+    if (map.rs != null) config.laws.rigidSolids = map.rs !== '0';
+  }
+
+  if (params.has('lighting')) {
+    config.display.lightingMode = normalizeSphSceneLightingMode(params.get('lighting'));
+  }
+  if (params.has('bg')) {
+    config.display.backgroundColor = normalizeSphSceneBackgroundColorHex(params.get('bg'));
+  }
+  if (params.has('blob')) {
+    const blob = Number(params.get('blob'));
+    if (Number.isFinite(blob) && blob > 0) config.display.blobScale = blob;
+  }
+
+  const rawAutoplay = params.get('autoplay');
+  const autoPlay = rawAutoplay == null
+    ? true
+    : !['0', 'false', 'off', 'no'].includes(rawAutoplay.trim().toLowerCase());
+
+  return { config, autoPlay };
+}
+
+/**
+ * Derive a truthful broad loading phase message and progress percentage
+ * (0..100) from live simulation telemetry until visual updates are ready.
+ */
+export function deriveSimulationLoadingStatus(telemetry = null, {
+  launchInFlight = false,
+  elapsedMs = 0,
+  autoPlay = false,
+  previousPercent = 0
+} = {}) {
+  const clampPct = (v) => Math.min(100, Math.max(previousPercent, Math.round(v)));
+
+  if (telemetry?.blocked) {
+    return {
+      ready: false,
+      blocked: true,
+      percent: clampPct(Math.max(previousPercent, 10)),
+      phase: 'Initialization blocked',
+      detail: telemetry.blockedReason || 'WebGPU simulation runtime could not start.'
+    };
+  }
+
+  if (telemetry?.visualUpdatesReady) {
+    return {
+      ready: true,
+      blocked: false,
+      percent: 100,
+      phase: 'Visual updates ready',
+      detail: autoPlay ? 'Streaming live GPU isosurface frames.' : 'Initial frame ready. Press Play or Step to advance.'
+    };
+  }
+
+  if (launchInFlight || !telemetry) {
+    const sub = Math.min(14, 5 + (elapsedMs / 350));
+    return {
+      ready: false,
+      blocked: false,
+      percent: clampPct(sub),
+      phase: 'Initializing WebGPU runtime & workers…',
+      detail: 'Allocating PeerCompute compute workers and presentation surface.'
+    };
+  }
+
+  if (telemetry.rebuildStatus !== 'complete') {
+    const sub = Math.min(44, 18 + (elapsedMs / 180));
+    return {
+      ready: false,
+      blocked: false,
+      percent: clampPct(sub),
+      phase: 'Deriving material properties & chemical closures…',
+      detail: 'Solving first-principles atomic, thermodynamic, and optical tables.'
+    };
+  }
+
+  if (!telemetry.ready || telemetry.authorityHostStatus === 'initializing' || !telemetry.workerReady) {
+    const sub = Math.min(68, 48 + (elapsedMs / 260));
+    return {
+      ready: false,
+      blocked: false,
+      percent: clampPct(sub),
+      phase: 'Building spatial hierarchy & uploading GPU buffers…',
+      detail: 'Packing Schroeder Spatial cells and material closure tables onto WebGPU.'
+    };
+  }
+
+  if (!telemetry.workerVisualReady) {
+    const sub = Math.min(95, 72 + Math.min(23, (elapsedMs / 650)));
+    return {
+      ready: false,
+      blocked: false,
+      percent: clampPct(sub),
+      phase: 'Compiling WebGPU shaders & rendering first visual frame…',
+      detail: 'Preparing marching-cubes isosurface pipelines and presenting first visual frame.'
+    };
+  }
+
+  const sub = Math.min(96, 80 + (elapsedMs / 350));
+  return {
+    ready: false,
+    blocked: false,
+    percent: clampPct(sub),
+    phase: 'Rendering initial isosurface frame…',
+    detail: 'Waiting for first confirmed visual frame on WebGPU.'
   };
 }

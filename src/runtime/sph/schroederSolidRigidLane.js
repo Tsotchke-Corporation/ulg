@@ -73,7 +73,9 @@ export function createSchroederSolidRigidFamily(device, cold) {
   const family = {
     schema: SCHROEDER_SOLID_BODIES_SCHEMA, device, bodyCount: packed.bodyCount, memberCount: packed.memberCount,
     frameBuffer, memberBuffer, proxyBuffer, latticeBuffer, neighborBuffer, proxyCount,
-    materials: cold.bodies.map(body => body.material), thermal, seededThermal, releaseRows, pitchByAxisM: cold.bodies[0].pitchByAxisM,
+    materials: cold.bodies.map(body => body.material),
+    bodyTemperaturesK: cold.bodies.map(body => Number(body.temperatureK) || 293.15),
+    thermal, seededThermal, releaseRows, pitchByAxisM: cold.bodies[0].pitchByAxisM,
     // A5 SOL-3: the fluid materials' conductivity/heat capacity rows.
     fluidThermalRows: Array.isArray(cold.fluidThermal) ? cold.fluidThermal : [],
     stage: null, thermalStage: null, releaseStage: null, couplingStage: null, contactStage: null, stageKey: null,

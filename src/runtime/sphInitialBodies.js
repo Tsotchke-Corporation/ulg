@@ -889,3 +889,159 @@ export function clampSphInitialBodyToContainer(body, boxDimensionsM, {
   }
   return normalizeSphInitialBody({ ...normalized, centerM });
 }
+
+function bodyPairOverlapM(bodyA, bodyB) {
+  const maxExtent = Math.min(
+    Math.max(bodyA.sizeM[0], bodyA.sizeM[1], bodyA.sizeM[2]),
+    Math.max(bodyB.sizeM[0], bodyB.sizeM[1], bodyB.sizeM[2])
+  );
+  const tol = Math.max(1e-9, maxExtent * 1e-6);
+  const overlap = [0, 0, 0];
+  for (let axis = 0; axis < 3; axis += 1) {
+    const minA = bodyA.centerM[axis] - bodyA.sizeM[axis] / 2;
+    const maxA = bodyA.centerM[axis] + bodyA.sizeM[axis] / 2;
+    const minB = bodyB.centerM[axis] - bodyB.sizeM[axis] / 2;
+    const maxB = bodyB.centerM[axis] + bodyB.sizeM[axis] / 2;
+    const depth = Math.min(maxA, maxB) - Math.max(minA, minB);
+    if (!(depth > tol)) return null;
+    overlap[axis] = depth;
+  }
+  return Object.freeze(overlap);
+}
+
+/**
+ * Find all pairs of bodies whose axis-aligned bounding boxes have positive
+ * interior volume intersection. Touching faces (zero interior overlap) are
+ * allowed.
+ */
+export function findOverlappingSphInitialBodies(value) {
+  const normalized = normalizeSphInitialBodies(value);
+  const overlaps = [];
+  const bodies = normalized.bodies;
+  for (let i = 0; i < bodies.length; i += 1) {
+    for (let j = i + 1; j < bodies.length; j += 1) {
+      const overlapM = bodyPairOverlapM(bodies[i], bodies[j]);
+      if (overlapM) {
+        overlaps.push(Object.freeze({
+          bodyA: bodies[i],
+          bodyB: bodies[j],
+          indexA: i,
+          indexB: j,
+          overlapM
+        }));
+      }
+    }
+  }
+  return Object.freeze(overlaps);
+}
+
+function bodyFitsInsideBounds(centerM, sizeM, bounds) {
+  const tol = Math.max(1e-9, Math.max(...bounds.dimensionsM) * 1e-9);
+  for (let axis = 0; axis < 3; axis += 1) {
+    const minM = centerM[axis] - sizeM[axis] / 2;
+    const maxM = centerM[axis] + sizeM[axis] / 2;
+    if (minM < bounds.minM[axis] - tol || maxM > bounds.maxM[axis] + tol) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Find a valid in-container, non-overlapping placement for `candidate` against
+ * `existingBodies`. Returns a normalized body at the chosen placement, or null
+ * if no non-overlapping slot exists inside the container.
+ */
+export function findNonOverlappingPlacementForBody(candidate, existingBodies, boxDimensionsM, {
+  coordinateFrame = 'floor-centered',
+  gapM = null
+} = {}) {
+  const normalizedCandidate = normalizeSphInitialBody(candidate);
+  const bounds = containerBoundsForFrame(boxDimensionsM, coordinateFrame);
+  const existing = (Array.isArray(existingBodies) ? existingBodies : []).map((b) => normalizeSphInitialBody(b));
+  const clampedStart = clampSphInitialBodyToContainer(normalizedCandidate, boxDimensionsM, { coordinateFrame });
+  if (!clampedStart) return null;
+
+  const isValidCenter = (centerM) => {
+    if (!bodyFitsInsideBounds(centerM, normalizedCandidate.sizeM, bounds)) return false;
+    const probe = { centerM, sizeM: normalizedCandidate.sizeM };
+    return existing.every((other) => !bodyPairOverlapM(probe, other));
+  };
+
+  if (isValidCenter(clampedStart.centerM)) {
+    return clampedStart;
+  }
+
+  const pitch = Math.min(
+    normalizedCandidate.sizeM[0] / normalizedCandidate.particlesPerEdge[0],
+    normalizedCandidate.sizeM[1] / normalizedCandidate.particlesPerEdge[1],
+    normalizedCandidate.sizeM[2] / normalizedCandidate.particlesPerEdge[2]
+  );
+  const sep = gapM != null && Number.isFinite(Number(gapM)) && Number(gapM) >= 0
+    ? Number(gapM)
+    : Math.max(pitch * 0.25, 1e-6);
+
+  const candidates = [];
+  const half = normalizedCandidate.sizeM.map((s) => s / 2);
+  // 1. Directly above the highest existing body (aligned with candidate X/Z or floor center)
+  const highestY = existing.reduce((m, b) => Math.max(m, b.centerM[1] + b.sizeM[1] / 2), bounds.minM[1]);
+  candidates.push([clampedStart.centerM[0], highestY + sep + half[1], clampedStart.centerM[2]]);
+  candidates.push([clampedStart.centerM[0], highestY + half[1], clampedStart.centerM[2]]);
+
+  // 2. Adjacent to each existing body along +X, -X, +Z, -Z, +Y, -Y
+  for (const other of existing) {
+    const oh = other.sizeM.map((s) => s / 2);
+    for (const s of [sep, 0]) {
+      candidates.push([other.centerM[0] + oh[0] + s + half[0], other.centerM[1], other.centerM[2]]);
+      candidates.push([other.centerM[0] - oh[0] - s - half[0], other.centerM[1], other.centerM[2]]);
+      candidates.push([other.centerM[0], other.centerM[1], other.centerM[2] + oh[2] + s + half[2]]);
+      candidates.push([other.centerM[0], other.centerM[1], other.centerM[2] - oh[2] - s - half[2]]);
+      candidates.push([other.centerM[0], other.centerM[1] + oh[1] + s + half[1], other.centerM[2]]);
+      candidates.push([other.centerM[0], other.centerM[1] - oh[1] - s - half[1], other.centerM[2]]);
+    }
+  }
+
+  for (const centerM of candidates) {
+    if (isValidCenter(centerM)) {
+      return normalizeSphInitialBody({ ...normalizedCandidate, centerM });
+    }
+  }
+
+  // 3. Deterministic grid search inside the container
+  const stepX = Math.max(normalizedCandidate.sizeM[0] + sep, (bounds.maxM[0] - bounds.minM[0]) / 8);
+  const stepY = Math.max(normalizedCandidate.sizeM[1] + sep, (bounds.maxM[1] - bounds.minM[1]) / 8);
+  const stepZ = Math.max(normalizedCandidate.sizeM[2] + sep, (bounds.maxM[2] - bounds.minM[2]) / 8);
+  for (let y = bounds.minM[1] + half[1]; y <= bounds.maxM[1] - half[1] + 1e-9; y += stepY) {
+    for (let x = bounds.minM[0] + half[0]; x <= bounds.maxM[0] - half[0] + 1e-9; x += stepX) {
+      for (let z = bounds.minM[2] + half[2]; z <= bounds.maxM[2] - half[2] + 1e-9; z += stepZ) {
+        const centerM = [
+          Math.min(bounds.maxM[0] - half[0], Math.max(bounds.minM[0] + half[0], x)),
+          Math.min(bounds.maxM[1] - half[1], Math.max(bounds.minM[1] + half[1], y)),
+          Math.min(bounds.maxM[2] - half[2], Math.max(bounds.minM[2] + half[2], z))
+        ];
+        if (isValidCenter(centerM)) {
+          return normalizeSphInitialBody({ ...normalizedCandidate, centerM });
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Clamp every body inside the container and relocate any overlapping bodies to
+ * valid non-overlapping positions whenever space permits.
+ */
+export function separateOverlappingSphInitialBodies(bodies, boxDimensionsM, {
+  coordinateFrame = 'floor-centered'
+} = {}) {
+  const placed = [];
+  for (const rawBody of Array.isArray(bodies) ? bodies : []) {
+    const chosen = findNonOverlappingPlacementForBody(rawBody, placed, boxDimensionsM, {
+      coordinateFrame
+    });
+    const fallback = clampSphInitialBodyToContainer(rawBody, boxDimensionsM, { coordinateFrame });
+    placed.push(chosen || fallback || normalizeSphInitialBody(rawBody));
+  }
+  return placed;
+}

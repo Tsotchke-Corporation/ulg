@@ -1,9 +1,9 @@
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 
-// Splat live coherent rigid-body members directly into the matching
+// Splat live coherent rigid-body members directly into each matching
 // (materialId, phase=solid) marching-cubes render-field slice so rigid solids
-// (such as ice in iron-ice-quench) render through the exact same GPU
+// (such as ice or cooled solid iron) render through the exact same GPU
 // marching-cubes isosurface and optical PBR pipeline as fluid surfaces instead
 // of a separate flat-shaded voxel box overlay.
 const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_DST: 0x08 });
@@ -28,10 +28,12 @@ struct SolidFieldParams {
   counts: vec4<u32>,
   // field_padding, ref_edge_m, isovalue, subtract
   field0: vec4<f32>,
-  // strength, particle_radius_scale, default_temperature_k, target_body_mask
+  // strength, particle_radius_scale, default_temperature_k, unused
   field1: vec4<f32>,
   // color.rgb, unused
   color: vec4<f32>,
+  // body bitmask words (supports up to 128 rigid bodies per family; all 0 = all bodies)
+  body_mask: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> params: SolidFieldParams;
@@ -52,6 +54,17 @@ fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
 fn smooth_palette_weight(ratio: f32) -> f32 {
   let t = clamp(1.0 - ratio, 0.0, 1.0);
   return t * t * (3.0 - 2.0 * t);
+}
+
+fn body_in_mask(body: u32, mask: vec4<u32>) -> bool {
+  if ((mask.x | mask.y | mask.z | mask.w) == 0u) { return true; }
+  let word = body >> 5u;
+  let bit = 1u << (body & 31u);
+  if (word == 0u) { return (mask.x & bit) != 0u; }
+  if (word == 1u) { return (mask.y & bit) != 0u; }
+  if (word == 2u) { return (mask.z & bit) != 0u; }
+  if (word == 3u) { return (mask.w & bit) != 0u; }
+  return false;
 }
 
 @compute @workgroup_size(64)
@@ -92,11 +105,13 @@ fn splat_rigid_solid_isosurface(@builtin(global_invocation_id) id: vec3<u32>) {
 
   let member_count = params.counts.x;
   let has_thermo = params.counts.w != 0u;
+  let mask = params.body_mask;
 
   for (var m = 0u; m < member_count; m = m + 1u) {
     let m0 = members[m * 2u];
     if (!(m0.w > 0.0)) { continue; }
     let body = bitcast<u32>(members[m * 2u + 1u].x);
+    if (!body_in_mask(body, mask)) { continue; }
     let base = body * 8u;
     let f0 = frames[base];
     let q = frames[base + 1u];
@@ -173,41 +188,40 @@ export function encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
   ) {
     return null;
   }
-  const materialKey = family.materials?.[0];
-  const materialId = Number(family.thermal?.materialId)
-    || (materialKey ? stableOpticalMaterialId(materialKey) : 0);
-  if (!(materialId > 0)) return null;
 
-  const surface = renderField.surfaceTable.metadata.find(
-    (entry) => Number(entry?.materialId) === materialId
-      && Number(entry?.phaseId) === 1
-      && Number(entry?.opticalStateId || 0) === 0
-  );
-  if (!surface) return null;
-
-  const resolution = Math.floor(Number(surface.resolution) || 0);
-  const fieldOffset = Math.floor(Number(surface.fieldOffset) || 0);
   const refEdgeM = Number(renderField.refEdgeM);
   const fieldPadding = Number(renderField.fieldPadding);
-  if (!(resolution > 0) || !(refEdgeM > 0) || !Number.isFinite(fieldPadding)) return null;
+  if (!(refEdgeM > 0) || !Number.isFinite(fieldPadding)) return null;
 
-  const isovalue = Number(surface.isolation) || 0.25;
-  const subtract = Number(surface.subtract) || 12;
-  const strength = Number(surface.strength) || 0.02;
-  const particleRadiusScale = Number(surface.particleRadiusScale) > 0
-    ? Number(surface.particleRadiusScale)
-    : 0;
-  const color = Array.isArray(surface.colorLinear) && surface.colorLinear.length >= 3
-    ? surface.colorLinear
-    : [0.78, 0.9, 0.98];
-  const hasThermo = Boolean(family.thermalStage?.thermoBuffer);
-  const thermoBuffer = hasThermo ? family.thermalStage.thermoBuffer : dummyThermoBufferFor(device);
-  const defaultTempK = Number(family.thermal?.meltTemperatureK)
-    ? Math.min(273.15, Number(family.thermal.meltTemperatureK) - 10)
-    : 273.15;
+  const materials = Array.isArray(family.materials) && family.materials.length > 0
+    ? family.materials
+    : [null];
+  const groupsByMaterialId = new Map();
+  for (let bodyIndex = 0; bodyIndex < materials.length; bodyIndex += 1) {
+    const materialKey = materials[bodyIndex];
+    const materialId = (bodyIndex === 0 && Number(family.thermal?.materialId) > 0)
+      ? Number(family.thermal.materialId)
+      : (materialKey ? stableOpticalMaterialId(materialKey) : 0);
+    if (!(materialId > 0)) continue;
+    let group = groupsByMaterialId.get(materialId);
+    if (!group) {
+      group = {
+        materialId,
+        materialKey,
+        bodyIndices: [],
+        usesFamilyThermal: bodyIndex === 0 && Boolean(family.thermalStage?.thermoBuffer)
+      };
+      groupsByMaterialId.set(materialId, group);
+    }
+    group.bodyIndices.push(bodyIndex);
+    if (bodyIndex === 0 && family.thermalStage?.thermoBuffer) {
+      group.usesFamilyThermal = true;
+    }
+  }
+  if (groupsByMaterialId.size === 0) return null;
 
   const pipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-solid-isosurface-field-splat.v1',
+    cacheKey: 'ulg-solid-isosurface-field-splat.v2',
     label: 'ulg-solid-isosurface-field-splat',
     code: schroederSolidIsosurfaceFieldWgsl,
     entryPoint: 'splat_rigid_solid_isosurface',
@@ -221,35 +235,87 @@ export function encodeSchroederSolidIsosurfaceFieldSplatWebGpu({
     ]
   });
 
-  const params = device.createBuffer({
-    label: 'ulg-solid-isosurface-field-splat-params',
-    size: 64,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const words = new ArrayBuffer(64);
-  const u = new Uint32Array(words);
-  const f = new Float32Array(words);
-  u.set([family.memberCount, resolution, fieldOffset, hasThermo ? 1 : 0], 0);
-  f.set([fieldPadding, refEdgeM, isovalue, subtract], 4);
-  f.set([strength, particleRadiusScale, defaultTempK, 0], 8);
-  f.set([Number(color[0]) || 0.78, Number(color[1]) || 0.9, Number(color[2]) || 0.98, 0], 12);
-  device.queue.writeBuffer(params, 0, words);
+  const paramsBuffers = [];
+  for (const group of groupsByMaterialId.values()) {
+    const surface = renderField.surfaceTable.metadata.find(
+      (entry) => Number(entry?.materialId) === group.materialId
+        && Number(entry?.phaseId) === 1
+        && Number(entry?.opticalStateId || 0) === 0
+    );
+    if (!surface) continue;
+    const resolution = Math.floor(Number(surface.resolution) || 0);
+    const fieldOffset = Math.floor(Number(surface.fieldOffset) || 0);
+    if (!(resolution > 0)) continue;
 
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: params } },
-      { binding: 1, resource: { buffer: family.frameBuffer } },
-      { binding: 2, resource: { buffer: family.memberBuffer } },
-      { binding: 3, resource: { buffer: family.latticeBuffer } },
-      { binding: 4, resource: { buffer: thermoBuffer } },
-      { binding: 5, resource: { buffer: renderField.fieldRowsBuffer } }
-    ]
-  });
-  const pass = encoder.beginComputePass({ label: 'ulg-solid-isosurface-field-splat' });
-  pass.setPipeline(pipeline.pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.ceil((resolution ** 3) / 64));
-  pass.end();
-  return params;
+    const isovalue = Number(surface.isolation) || 0.25;
+    const subtract = Number(surface.subtract) || 12;
+    const strength = Number(surface.strength) || 0.02;
+    const particleRadiusScale = Number(surface.particleRadiusScale) > 0
+      ? Number(surface.particleRadiusScale)
+      : 0;
+    const color = Array.isArray(surface.colorLinear) && surface.colorLinear.length >= 3
+      ? surface.colorLinear
+      : [0.78, 0.9, 0.98];
+    const hasThermo = group.usesFamilyThermal && Boolean(family.thermalStage?.thermoBuffer);
+    const thermoBuffer = hasThermo ? family.thermalStage.thermoBuffer : dummyThermoBufferFor(device);
+    const firstBodyIdx = group.bodyIndices[0] ?? 0;
+    const bodyTempK = Number(family.bodyTemperaturesK?.[firstBodyIdx]);
+    const defaultTempK = Number.isFinite(bodyTempK) && bodyTempK > 0
+      ? bodyTempK
+      : (Number(family.thermal?.meltTemperatureK)
+        ? Math.min(273.15, Number(family.thermal.meltTemperatureK) - 10)
+        : 273.15);
+
+    const maskWords = [0, 0, 0, 0];
+    if (groupsByMaterialId.size > 1) {
+      for (const b of group.bodyIndices) {
+        const w = b >>> 5;
+        if (w < 4) maskWords[w] = (maskWords[w] | (1 << (b & 31))) >>> 0;
+      }
+    }
+
+    const params = device.createBuffer({
+      label: `ulg-solid-isosurface-field-splat-params-${group.materialId}`,
+      size: 80,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const words = new ArrayBuffer(80);
+    const u = new Uint32Array(words);
+    const f = new Float32Array(words);
+    u.set([family.memberCount, resolution, fieldOffset, hasThermo ? 1 : 0], 0);
+    f.set([fieldPadding, refEdgeM, isovalue, subtract], 4);
+    f.set([strength, particleRadiusScale, defaultTempK, 0], 8);
+    f.set([Number(color[0]) || 0.78, Number(color[1]) || 0.9, Number(color[2]) || 0.98, 0], 12);
+    u.set(maskWords, 16);
+    device.queue.writeBuffer(params, 0, words);
+
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: params } },
+        { binding: 1, resource: { buffer: family.frameBuffer } },
+        { binding: 2, resource: { buffer: family.memberBuffer } },
+        { binding: 3, resource: { buffer: family.latticeBuffer } },
+        { binding: 4, resource: { buffer: thermoBuffer } },
+        { binding: 5, resource: { buffer: renderField.fieldRowsBuffer } }
+      ]
+    });
+    const pass = encoder.beginComputePass({ label: `ulg-solid-isosurface-field-splat-${group.materialId}` });
+    pass.setPipeline(pipeline.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil((resolution ** 3) / 64));
+    pass.end();
+    paramsBuffers.push(params);
+  }
+
+  if (paramsBuffers.length === 0) return null;
+  if (paramsBuffers.length === 1) return paramsBuffers[0];
+  return {
+    surfaceCount: paramsBuffers.length,
+    destroy() {
+      for (const buffer of paramsBuffers) {
+        try { buffer.destroy(); } catch { /* Best-effort uniform cleanup. */ }
+      }
+    }
+  };
 }

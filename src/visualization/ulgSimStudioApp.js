@@ -9,7 +9,9 @@ import {
   containerBoundsForFrame,
   deriveSphInitialBodySizeM,
   duplicateSphInitialBody,
-  moveSphInitialBody
+  findNonOverlappingPlacementForBody,
+  moveSphInitialBody,
+  separateOverlappingSphInitialBodies
 } from '../runtime/sphInitialBodies.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import {
@@ -26,9 +28,13 @@ import {
   buildBlankCustomConfig,
   buildLaunchParamsFromStagedConfig,
   buildStagedConfigFromPreset,
+  deriveSimulationLoadingStatus,
   fmtMeters,
   fmtTempC,
+  hasSimulationUrlParams,
+  parseStagedConfigFromUrlSearchParams,
   roundNice,
+  serializeStagedConfigToUrlSearchParams,
   totalParticlesOf,
   validateStagedSimulationConfig
 } from './ulgSimStudioModel.js';
@@ -37,6 +43,10 @@ export {
   buildBlankCustomConfig,
   buildLaunchParamsFromStagedConfig,
   buildStagedConfigFromPreset,
+  deriveSimulationLoadingStatus,
+  hasSimulationUrlParams,
+  parseStagedConfigFromUrlSearchParams,
+  serializeStagedConfigToUrlSearchParams,
   validateStagedSimulationConfig
 };
 
@@ -171,17 +181,28 @@ export function mountUlgSimStudioApp({
 } = {}) {
   if (!container) throw new Error('ULG Studio mount requires a container element');
 
-  // Keep the address bar free of legacy query/hash clutter on clean loads.
-  let stagedConfig = buildStagedConfigFromPreset('iron-ice-quench');
+  const initialUrlParsed = typeof window !== 'undefined'
+    ? parseStagedConfigFromUrlSearchParams(window.location.search)
+    : null;
+
+  let stagedConfig = initialUrlParsed
+    ? initialUrlParsed.config
+    : buildStagedConfigFromPreset('iron-ice-quench');
   let activeSession = null;
   let activeSignature = null;
   let activePresetLabel = null;
   let sharedRuntimePromise = null;
   let launchInFlight = false;
+  let loadingActive = false;
+  let loadingStartedAtMs = 0;
+  let loadingMaxPercent = 0;
+  let loadingAutoPlay = false;
+  let loadingErrorMessage = null;
+  let autoPlayWhenReady = false;
   let activeTab = 'presets';
   let modalOpen = false;
   let diagnosticsOpen = false;
-  let miniHudPinned = false;
+  let miniHudPinned = true;
   let pendingLocalBgFile = null;
   let diagnosticsPollTimer = null;
 
@@ -198,7 +219,25 @@ export function mountUlgSimStudioApp({
         <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Configure &amp; Launch</button>
       </div>
     </div>
+    <div id="ulg-loading-overlay" class="ulg-loading-overlay" role="status" aria-live="polite" hidden>
+      <div class="ulg-loading-card">
+        <div class="ulg-spinner-wrap" aria-hidden="true">
+          <div class="ulg-spinner"></div>
+          <span id="ulg-loading-pct" class="ulg-spinner-pct">0%</span>
+        </div>
+        <h2 id="ulg-loading-phase" class="ulg-loading-phase">Initializing WebGPU runtime &amp; workers…</h2>
+        <p id="ulg-loading-detail" class="ulg-loading-detail">Preparing first-principles closures and GPU pipelines.</p>
+        <div class="ulg-loading-bar" aria-hidden="true">
+          <div id="ulg-loading-bar-fill" class="ulg-loading-bar-fill"></div>
+        </div>
+        <button id="ulg-loading-settings-btn" class="ulg-btn ulg-btn-subtle ulg-btn-sm" type="button" hidden>Open Settings</button>
+      </div>
+    </div>
     <div id="ulg-mini-hud" class="ulg-mini-hud" hidden>idle</div>
+    <div id="ulg-playback-bar" class="ulg-playback-bar" hidden>
+      <button id="ulg-play-btn" class="ulg-btn ulg-btn-primary" type="button">Play</button>
+      <button id="ulg-step-btn" class="ulg-btn ulg-btn-subtle" type="button">Step</button>
+    </div>
     <button id="ulg-menu-toggle" class="ulg-menu-btn" type="button" aria-label="Open simulation settings" aria-expanded="false" aria-controls="ulg-settings-modal">
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
         <path d="M3 5.5H17M3 10H17M3 14.5H17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
@@ -238,7 +277,7 @@ export function mountUlgSimStudioApp({
           <div class="ulg-section-head" style="margin-bottom:4px;">
             <span class="ulg-section-title">Diagnostics</span>
             <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ulg-text-muted);cursor:pointer;">
-              <input id="ulg-pin-hud-toggle" type="checkbox" style="accent-color:var(--ulg-accent);" />
+              <input id="ulg-pin-hud-toggle" type="checkbox" checked style="accent-color:var(--ulg-accent);" />
               Pin compact HUD
             </label>
           </div>
@@ -247,12 +286,14 @@ export function mountUlgSimStudioApp({
         </div>
         <footer class="ulg-modal-footer">
           <div class="ulg-footer-group">
-            <button id="ulg-play-btn" class="ulg-btn ulg-btn-subtle" type="button" hidden>Pause</button>
-            <button id="ulg-step-btn" class="ulg-btn ulg-btn-subtle" type="button" hidden>Step</button>
             <button id="ulg-stop-btn" class="ulg-btn ulg-btn-subtle ulg-btn-danger" type="button" hidden>Unload</button>
+            <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
           </div>
           <div class="ulg-footer-group">
-            <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
+            <label class="ulg-autoplay-label">
+              <input id="ulg-autoplay-toggle" type="checkbox" />
+              Play automatically when ready
+            </label>
             <button id="ulg-launch-btn" class="ulg-btn ulg-btn-primary" type="button">Launch Simulation</button>
           </div>
         </footer>
@@ -263,8 +304,15 @@ export function mountUlgSimStudioApp({
 
   const emptyStateEl = root.querySelector('#ulg-empty-state');
   const emptyOpenBtn = root.querySelector('#ulg-empty-open-btn');
+  const loadingOverlayEl = root.querySelector('#ulg-loading-overlay');
+  const loadingPctEl = root.querySelector('#ulg-loading-pct');
+  const loadingPhaseEl = root.querySelector('#ulg-loading-phase');
+  const loadingDetailEl = root.querySelector('#ulg-loading-detail');
+  const loadingBarFillEl = root.querySelector('#ulg-loading-bar-fill');
+  const loadingSettingsBtn = root.querySelector('#ulg-loading-settings-btn');
   const menuToggleBtn = root.querySelector('#ulg-menu-toggle');
   const miniHudEl = root.querySelector('#ulg-mini-hud');
+  const playbackBarEl = root.querySelector('#ulg-playback-bar');
   const modalBackdrop = root.querySelector('#ulg-settings-backdrop');
   const modalCloseBtn = root.querySelector('#ulg-modal-close');
   const statusPillEl = root.querySelector('#ulg-status-pill');
@@ -274,33 +322,93 @@ export function mountUlgSimStudioApp({
   const playBtn = root.querySelector('#ulg-play-btn');
   const stepBtn = root.querySelector('#ulg-step-btn');
   const stopBtn = root.querySelector('#ulg-stop-btn');
+  const autoplayToggle = root.querySelector('#ulg-autoplay-toggle');
   const launchBtn = root.querySelector('#ulg-launch-btn');
   const diagnosticsToggleBtn = root.querySelector('#ulg-diagnostics-toggle');
   const diagnosticsDrawerEl = root.querySelector('#ulg-diagnostics-drawer');
   const diagnosticsSummaryEl = root.querySelector('#ulg-diagnostics-summary');
   const diagnosticsPreEl = root.querySelector('#ulg-diagnostics-pre');
   const pinHudToggle = root.querySelector('#ulg-pin-hud-toggle');
+  pinHudToggle.checked = miniHudPinned;
+  autoplayToggle.checked = autoPlayWhenReady;
 
   const tabButtons = [...root.querySelectorAll('.ulg-tab-btn')];
   const tabPanels = Object.fromEntries(
     [...root.querySelectorAll('.ulg-tab-panel')].map((el) => [el.dataset.panel, el])
   );
 
+  function syncUrlFromStagedConfig() {
+    if (typeof window === 'undefined' || !window.history?.replaceState) return;
+    try {
+      const params = serializeStagedConfigToUrlSearchParams(stagedConfig, {
+        autoPlayWhenReady
+      });
+      const qs = params.toString();
+      const nextUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
+      if (window.location.pathname + window.location.search !== nextUrl) {
+        window.history.replaceState(null, '', nextUrl);
+      }
+    } catch {
+      // History replacement may be restricted in sandboxed contexts.
+    }
+  }
+
   function hasStagedChanges() {
     if (!activeSession || !activeSignature) return false;
     return configSignature(stagedConfig) !== activeSignature;
   }
 
+  function updateLoadingOverlay(snap) {
+    if (!loadingActive && !launchInFlight) {
+      loadingOverlayEl.hidden = true;
+      return;
+    }
+    if (loadingErrorMessage) {
+      loadingOverlayEl.hidden = false;
+      loadingPctEl.textContent = `${loadingMaxPercent}%`;
+      loadingBarFillEl.style.width = `${loadingMaxPercent}%`;
+      loadingPhaseEl.textContent = 'Launch failed';
+      loadingDetailEl.textContent = loadingErrorMessage;
+      loadingSettingsBtn.hidden = false;
+      return;
+    }
+    const elapsedMs = Math.max(0, performance.now() - loadingStartedAtMs);
+    const status = deriveSimulationLoadingStatus(snap, {
+      launchInFlight,
+      elapsedMs,
+      autoPlay: loadingAutoPlay,
+      previousPercent: loadingMaxPercent
+    });
+    loadingMaxPercent = status.percent;
+    loadingPctEl.textContent = `${status.percent}%`;
+    loadingBarFillEl.style.width = `${status.percent}%`;
+    loadingPhaseEl.textContent = status.phase;
+    loadingDetailEl.textContent = status.detail;
+    loadingSettingsBtn.hidden = !status.blocked;
+    if (status.ready) {
+      loadingActive = false;
+      loadingOverlayEl.hidden = true;
+    } else {
+      loadingOverlayEl.hidden = false;
+    }
+  }
+
   function updateChromeAndStatus() {
     const validation = validateStagedSimulationConfig(stagedConfig);
     const dirty = hasStagedChanges();
+    const snap = activeSession?.getTelemetrySnapshot?.() || null;
+    updateLoadingOverlay(snap);
+
     menuToggleBtn.classList.toggle('has-staged-changes', dirty);
-    emptyStateEl.hidden = Boolean(activeSession || launchInFlight);
+    emptyStateEl.hidden = Boolean(activeSession || launchInFlight || loadingActive);
 
     if (!validation.valid) {
       validationAlertEl.hidden = false;
       validationTextEl.textContent = validation.errors[0];
       fitAllBtn.hidden = validation.bodyErrors.size === 0;
+      fitAllBtn.textContent = validation.overlaps?.length > 0
+        ? 'Fit & Separate Bodies'
+        : 'Fit in Container';
     } else {
       validationAlertEl.hidden = true;
     }
@@ -315,23 +423,22 @@ export function mountUlgSimStudioApp({
     }
 
     const hasActive = Boolean(activeSession);
-    playBtn.hidden = !hasActive;
-    stepBtn.hidden = !hasActive;
+    const visuallyReady = Boolean(hasActive && !loadingActive && !launchInFlight && (snap?.visualUpdatesReady || snap?.ready));
     stopBtn.hidden = !hasActive;
+    playbackBarEl.hidden = !visuallyReady;
 
-    const snap = activeSession?.getTelemetrySnapshot?.() || null;
     if (hasActive) {
       playBtn.textContent = snap?.playing ? 'Pause' : 'Play';
-      playBtn.disabled = !snap?.ready;
-      stepBtn.disabled = !snap?.ready;
+      playBtn.disabled = !snap?.ready || Boolean(snap?.blocked);
+      stepBtn.disabled = !snap?.ready || Boolean(snap?.blocked);
     }
 
-    if (launchInFlight) {
+    if (launchInFlight || loadingActive) {
       statusPillEl.dataset.state = 'staged';
-      statusPillEl.textContent = 'Initializing WebGPU…';
+      statusPillEl.textContent = `${loadingPhaseEl.textContent} (${loadingMaxPercent}%)`;
     } else if (!validation.valid) {
       statusPillEl.dataset.state = 'error';
-      statusPillEl.textContent = 'Fix setup bounds';
+      statusPillEl.textContent = validation.overlaps?.length > 0 ? 'Bodies overlap' : 'Fix setup bounds';
     } else if (snap?.blocked) {
       statusPillEl.dataset.state = 'error';
       statusPillEl.textContent = 'Blocked';
@@ -347,9 +454,15 @@ export function mountUlgSimStudioApp({
       statusPillEl.textContent = 'Unallocated';
     }
 
-    miniHudEl.hidden = !miniHudPinned || !hasActive;
+    miniHudEl.hidden = !miniHudPinned || !hasActive || loadingActive || launchInFlight;
     if (!miniHudEl.hidden && snap) {
-      miniHudEl.textContent = `${activePresetLabel || 'Custom'} · t=${snap.simTimeS.toFixed(3)}s · ${snap.stepCount} steps`;
+      const label = activePresetLabel || 'Custom';
+      if (snap.playing && !snap.workerVisualReady && snap.stepCount === 0) {
+        miniHudEl.textContent = `${label} · compiling WebGPU shaders…`;
+      } else {
+        const stateTag = snap.playing ? '▶' : '❚❚';
+        miniHudEl.textContent = `${stateTag} ${label} · t=${snap.simTimeS.toFixed(3)}s · ${snap.stepCount} steps`;
+      }
     }
 
     if (diagnosticsOpen) {
@@ -426,6 +539,7 @@ export function mountUlgSimStudioApp({
         const next = buildStagedConfigFromPreset(entry.id);
         next.display = { ...stagedConfig.display };
         stagedConfig = next;
+        syncUrlFromStagedConfig();
         renderAllTabs();
         updateChromeAndStatus();
       });
@@ -449,6 +563,7 @@ export function mountUlgSimStudioApp({
       const next = buildBlankCustomConfig();
       next.display = { ...stagedConfig.display };
       stagedConfig = next;
+      syncUrlFromStagedConfig();
       renderAllTabs();
       updateChromeAndStatus();
     });
@@ -458,7 +573,7 @@ export function mountUlgSimStudioApp({
 
   function markStagedCustom() {
     stagedConfig.presetId = 'custom';
-    stagedConfig.presetRuntimeOverlay = {};
+    syncUrlFromStagedConfig();
   }
 
   function renderBodiesTab() {
@@ -516,13 +631,15 @@ export function mountUlgSimStudioApp({
         particlesPerEdge: [...template.particlesPerEdge],
         velocityMPerS: [0, 0, 0]
       };
-      const clamped = clampSphInitialBodyToContainer(candidate, box, { coordinateFrame: 'floor-centered' }) || candidate;
+      const placed = findNonOverlappingPlacementForBody(candidate, stagedConfig.bodies, box, {
+        coordinateFrame: 'floor-centered'
+      }) || clampSphInitialBodyToContainer(candidate, box, { coordinateFrame: 'floor-centered' }) || candidate;
       stagedConfig.bodies = [...stagedConfig.bodies, {
-        ...clamped,
-        centerM: [...clamped.centerM],
-        sizeM: [...clamped.sizeM],
-        particlesPerEdge: [...clamped.particlesPerEdge],
-        velocityMPerS: [...clamped.velocityMPerS]
+        ...placed,
+        centerM: Array.from(placed.centerM).map((v) => roundNice(v, 6)),
+        sizeM: Array.from(placed.sizeM).map((v) => roundNice(v, 6)),
+        particlesPerEdge: [...placed.particlesPerEdge],
+        velocityMPerS: [...placed.velocityMPerS]
       }];
       markStagedCustom();
       renderAllTabs();
@@ -593,10 +710,24 @@ export function mountUlgSimStudioApp({
           renderBodiesTab();
           updateChromeAndStatus();
         }, index === stagedConfig.bodies.length - 1),
-        mkBtn('Copy', 'Duplicate body', () => {
-          stagedConfig.bodies = duplicateSphInitialBody(stagedConfig.bodies, body.id).bodies.map((b) => ({
-            ...b, centerM: [...b.centerM], sizeM: [...b.sizeM], particlesPerEdge: [...b.particlesPerEdge], velocityMPerS: [...b.velocityMPerS]
-          }));
+        mkBtn('Copy', 'Duplicate body (placed without overlapping)', () => {
+          const existingIds = new Set(stagedConfig.bodies.map((b) => b.id));
+          const dupResult = duplicateSphInitialBody(stagedConfig.bodies, body.id);
+          const duplicated = dupResult.bodies.find((b) => !existingIds.has(b.id))
+            || dupResult.bodies[dupResult.bodies.length - 1];
+          const placed = findNonOverlappingPlacementForBody(duplicated, stagedConfig.bodies, stagedConfig.boxDimensionsM, {
+            coordinateFrame: 'floor-centered'
+          }) || duplicated;
+          stagedConfig.bodies = [
+            ...stagedConfig.bodies,
+            {
+              ...placed,
+              centerM: Array.from(placed.centerM).map((v) => roundNice(v, 6)),
+              sizeM: Array.from(placed.sizeM).map((v) => roundNice(v, 6)),
+              particlesPerEdge: [...placed.particlesPerEdge],
+              velocityMPerS: [...placed.velocityMPerS]
+            }
+          ];
           markStagedCustom();
           renderBodiesTab();
           updateChromeAndStatus();
@@ -1020,6 +1151,7 @@ export function mountUlgSimStudioApp({
       btn.addEventListener('click', () => {
         stagedConfig.display.lightingMode = mode;
         activeSession?.setLightingMode?.(mode, { reason: 'studio-display-lighting' });
+        if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
         renderDisplayTab();
       });
       seg.appendChild(btn);
@@ -1050,6 +1182,7 @@ export function mountUlgSimStudioApp({
       sw.addEventListener('click', () => {
         stagedConfig.display.backgroundColor = hex;
         activeSession?.setBackgroundColor?.(hex);
+        if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
         renderDisplayTab();
       });
       swatchRow.appendChild(sw);
@@ -1063,6 +1196,7 @@ export function mountUlgSimStudioApp({
     colorPicker.addEventListener('input', () => {
       stagedConfig.display.backgroundColor = colorPicker.value;
       activeSession?.setBackgroundColor?.(colorPicker.value);
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
     });
     swatchRow.appendChild(colorPicker);
     colorCol.appendChild(swatchRow);
@@ -1080,6 +1214,7 @@ export function mountUlgSimStudioApp({
     scaleInput.addEventListener('input', () => {
       stagedConfig.display.blobScale = Number(scaleInput.value);
       activeSession?.setBlobScale?.(stagedConfig.display.blobScale);
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
       const hint = scaleCol.querySelector('.ulg-field-hint');
       if (hint) hint.textContent = `${stagedConfig.display.blobScale.toFixed(2)}×`;
     });
@@ -1126,6 +1261,26 @@ export function mountUlgSimStudioApp({
     bgBlock.append(imgRow, imgStatus);
     panel.appendChild(bgBlock);
 
+    // Scene HUD & Display toggles
+    const hudBlock = document.createElement('div');
+    hudBlock.className = 'ulg-card-block';
+    hudBlock.innerHTML = '<div class="ulg-section-head"><h3 class="ulg-section-title">Viewport Overlay</h3><span class="ulg-chip">Applies live</span></div>';
+    const hudToggleLabel = document.createElement('label');
+    hudToggleLabel.className = 'ulg-toggle-item';
+    const hudToggleCb = document.createElement('input');
+    hudToggleCb.type = 'checkbox';
+    hudToggleCb.checked = miniHudPinned;
+    hudToggleCb.addEventListener('change', () => {
+      miniHudPinned = hudToggleCb.checked;
+      pinHudToggle.checked = miniHudPinned;
+      updateChromeAndStatus();
+    });
+    const hudToggleText = document.createElement('span');
+    hudToggleText.textContent = 'Pin compact HUD (shows active scenario, sim time, and step count)';
+    hudToggleLabel.append(hudToggleCb, hudToggleText);
+    hudBlock.appendChild(hudToggleLabel);
+    panel.appendChild(hudBlock);
+
     // Cache block
     const cacheBlock = document.createElement('div');
     cacheBlock.className = 'ulg-card-block';
@@ -1164,7 +1319,13 @@ export function mountUlgSimStudioApp({
   }
 
   function unloadActiveSimulation() {
-    if (!activeSession) return;
+    loadingActive = false;
+    loadingErrorMessage = null;
+    loadingMaxPercent = 0;
+    if (!activeSession) {
+      updateChromeAndStatus();
+      return;
+    }
     const session = activeSession;
     activeSession = null;
     activeSignature = null;
@@ -1177,14 +1338,27 @@ export function mountUlgSimStudioApp({
     updateChromeAndStatus();
   }
 
-  async function launchFromStaged({ closeModalAfter = true } = {}) {
+  async function launchFromStaged({
+    closeModalAfter = true,
+    autoStartOverride = null,
+    syncUrl = true
+  } = {}) {
     if (launchInFlight) return false;
     const validation = validateStagedSimulationConfig(stagedConfig);
     if (!validation.valid) {
       updateChromeAndStatus();
       return false;
     }
+    if (syncUrl) syncUrlFromStagedConfig();
+
+    const shouldAutoPlay = autoStartOverride != null ? Boolean(autoStartOverride) : autoPlayWhenReady;
     launchInFlight = true;
+    loadingActive = true;
+    loadingAutoPlay = shouldAutoPlay;
+    loadingStartedAtMs = performance.now();
+    loadingMaxPercent = 5;
+    loadingErrorMessage = null;
+
     const snapshot = structuredClone(stagedConfig);
     const sig = configSignature(snapshot);
     const launchParams = buildLaunchParamsFromStagedConfig(snapshot);
@@ -1195,12 +1369,18 @@ export function mountUlgSimStudioApp({
     updateChromeAndStatus();
 
     try {
-      unloadActiveSimulation();
+      if (activeSession) {
+        const prior = activeSession;
+        activeSession = null;
+        activeSignature = null;
+        activePresetLabel = null;
+        try { prior.close(); } catch { /* Best-effort prior GPU teardown. */ }
+      }
       const runtime = await ensureRuntime();
       const session = await mountSphPhaseDemoOverlay({
         studioManaged: true,
         launchParams,
-        autoStart: true,
+        autoStart: shouldAutoPlay,
         hideMenu: true,
         runtime,
         peercomputeModule,
@@ -1216,8 +1396,9 @@ export function mountUlgSimStudioApp({
       session.setDiagnosticsVisible?.(modalOpen && diagnosticsOpen);
       return true;
     } catch (error) {
+      loadingErrorMessage = error instanceof Error ? error.message : String(error);
       statusPillEl.dataset.state = 'error';
-      statusPillEl.textContent = `Launch failed: ${error instanceof Error ? error.message : String(error)}`;
+      statusPillEl.textContent = `Launch failed: ${loadingErrorMessage}`;
       return false;
     } finally {
       launchInFlight = false;
@@ -1228,6 +1409,12 @@ export function mountUlgSimStudioApp({
   // Event wiring
   menuToggleBtn.addEventListener('click', () => setModalOpen(!modalOpen));
   emptyOpenBtn.addEventListener('click', () => setModalOpen(true));
+  loadingSettingsBtn.addEventListener('click', () => {
+    loadingActive = false;
+    loadingErrorMessage = null;
+    setModalOpen(true);
+    updateChromeAndStatus();
+  });
   modalCloseBtn.addEventListener('click', () => setModalOpen(false));
   modalBackdrop.addEventListener('click', (event) => {
     if (event.target === modalBackdrop) setModalOpen(false);
@@ -1235,7 +1422,7 @@ export function mountUlgSimStudioApp({
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && modalOpen && !root.querySelector('.ulg-pt-backdrop')) {
       setModalOpen(false);
-    } else if (event.code === 'Space' && !modalOpen && activeSession && document.activeElement === document.body) {
+    } else if (event.code === 'Space' && !modalOpen && !loadingActive && activeSession && document.activeElement === document.body) {
       event.preventDefault();
       activeSession.togglePlay?.();
       updateChromeAndStatus();
@@ -1248,17 +1435,15 @@ export function mountUlgSimStudioApp({
 
   fitAllBtn.addEventListener('click', () => {
     const box = stagedConfig.boxDimensionsM;
-    stagedConfig.bodies = stagedConfig.bodies.map((body) => {
-      const clamped = clampSphInitialBodyToContainer(body, box, { coordinateFrame: 'floor-centered' });
-      if (!clamped) return body;
-      return {
-        ...clamped,
-        centerM: [...clamped.centerM],
-        sizeM: [...clamped.sizeM],
-        particlesPerEdge: [...clamped.particlesPerEdge],
-        velocityMPerS: [...clamped.velocityMPerS]
-      };
-    });
+    stagedConfig.bodies = separateOverlappingSphInitialBodies(stagedConfig.bodies, box, {
+      coordinateFrame: 'floor-centered'
+    }).map((body) => ({
+      ...body,
+      centerM: Array.from(body.centerM).map((v) => roundNice(v, 6)),
+      sizeM: Array.from(body.sizeM).map((v) => roundNice(v, 6)),
+      particlesPerEdge: [...body.particlesPerEdge],
+      velocityMPerS: [...body.velocityMPerS]
+    }));
     markStagedCustom();
     renderAllTabs();
     updateChromeAndStatus();
@@ -1275,6 +1460,12 @@ export function mountUlgSimStudioApp({
   stopBtn.addEventListener('click', () => {
     unloadActiveSimulation();
   });
+  autoplayToggle.addEventListener('change', () => {
+    autoPlayWhenReady = autoplayToggle.checked;
+    if (hasSimulationUrlParams(window.location.search) || activeSession) {
+      syncUrlFromStagedConfig();
+    }
+  });
   launchBtn.addEventListener('click', () => {
     void launchFromStaged({ closeModalAfter: true });
   });
@@ -1289,27 +1480,56 @@ export function mountUlgSimStudioApp({
 
   pinHudToggle.addEventListener('change', () => {
     miniHudPinned = pinHudToggle.checked;
+    renderDisplayTab();
     updateChromeAndStatus();
   });
 
   diagnosticsPollTimer = window.setInterval(() => {
-    if (activeSession && (modalOpen || miniHudPinned)) {
+    if (loadingActive || launchInFlight || (activeSession && (modalOpen || miniHudPinned || !playbackBarEl.hidden))) {
       updateChromeAndStatus();
     }
-  }, 400);
+  }, 180);
 
   renderAllTabs();
   updateChromeAndStatus();
+
+  if (initialUrlParsed) {
+    const initialValidation = validateStagedSimulationConfig(stagedConfig);
+    if (initialValidation.valid) {
+      void launchFromStaged({
+        closeModalAfter: true,
+        autoStartOverride: initialUrlParsed.autoPlay,
+        syncUrl: false
+      });
+    } else {
+      setModalOpen(true);
+    }
+  }
 
   const api = {
     root,
     openMenu: () => setModalOpen(true),
     closeMenu: () => setModalOpen(false),
     isMenuOpen: () => modalOpen,
+    isLoading: () => Boolean(loadingActive || launchInFlight),
+    getLoadingStatus: () => ({
+      active: Boolean(loadingActive || launchInFlight),
+      percent: loadingMaxPercent,
+      phase: loadingPhaseEl.textContent,
+      detail: loadingDetailEl.textContent
+    }),
+    getAutoPlayWhenReady: () => autoPlayWhenReady,
+    setAutoPlayWhenReady(next) {
+      autoPlayWhenReady = Boolean(next);
+      autoplayToggle.checked = autoPlayWhenReady;
+      return autoPlayWhenReady;
+    },
+    isMiniHudPinned: () => miniHudPinned,
     selectPreset(presetId) {
       const next = buildStagedConfigFromPreset(presetId);
       next.display = { ...stagedConfig.display };
       stagedConfig = next;
+      syncUrlFromStagedConfig();
       renderAllTabs();
       updateChromeAndStatus();
       return stagedConfig;
@@ -1318,6 +1538,7 @@ export function mountUlgSimStudioApp({
     setStagedConfig(updater) {
       const next = typeof updater === 'function' ? updater(structuredClone(stagedConfig)) : updater;
       stagedConfig = next;
+      syncUrlFromStagedConfig();
       renderAllTabs();
       updateChromeAndStatus();
       return validateStagedSimulationConfig(stagedConfig);

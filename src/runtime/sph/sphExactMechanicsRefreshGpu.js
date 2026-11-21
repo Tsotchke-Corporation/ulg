@@ -1,5 +1,12 @@
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline,
-  deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  prewarmCachedExplicitComputePipeline,
+  deferConfirmedSubmittedWorkCleanup,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { createSphExactMechanicsQuantityRefreshWgsl } from './sphExactMechanicsRefreshWgsl.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { markSphExactMassPlacementDerivedBuffers, markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
@@ -73,7 +80,11 @@ export async function prepareSphExactMechanicsRefresh(args) {
     }
     return sourceCleanup;
   };
-  const destroy = list => { for (const buffer of list.splice(0)) buffer.destroy(); };
+  const destroy = (list, allowPool = false) => {
+    for (const buffer of list.splice(0)) {
+      releaseOrDestroyQueueOrderedPooledBuffer(buffer, { allowPool });
+    }
+  };
   const validate = () => {
     seal.validate(); held.validate();
     if (!source || args.device !== seal.inputs.device || args.sphParticleState !== seal.inputs.sphParticleState
@@ -99,8 +110,21 @@ export async function prepareSphExactMechanicsRefresh(args) {
     }
     const restoreDispatch = planSphExactMechanicsRestoreDispatch(count, layout.recordWords,
       device.limits.maxComputeWorkgroupsPerDimension);
-    const allocate = (label, size, usage, list) => {
-      const buffer = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    const usePool = Boolean(
+      typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+    );
+    const allocate = (label, size, usage, list, poolKey = null) => {
+      const buffer = tagWebGpuBufferDevice(
+        usePool && poolKey
+          ? registerQueueOrderedPooledBufferReturn(
+              acquireQueueOrderedPooledBuffer(device, { bucketKey: poolKey, label, size, usage }),
+              device,
+              { bucketKey: poolKey, size, usage }
+            )
+          : device.createBuffer({ label, size, usage }),
+        device
+      );
       list.push(buffer); return buffer;
     };
     const quantityBuffer = allocate('ulg-exact-mechanics-refresh-quantities', byteLength, 128 | 8 | 4, owned);
@@ -109,9 +133,9 @@ export async function prepareSphExactMechanicsRefresh(args) {
     else if (fromThermal) markSphExactMassDerivedBuffers(held.sourceRead, [quantityBuffer]);
     else await markSphExactMassPlacementDerivedBuffers(source, [quantityBuffer], { device });
     validate();
-    const projectionBuffer = allocate('ulg-exact-mechanics-refresh-projections', count * 16, 128 | 8, transient);
-    const params = allocate('ulg-exact-mechanics-refresh-params', 16, 64 | 8, transient);
-    const scratch = allocate('ulg-exact-mechanics-refresh-scratch', count * 5 * layout.scalar.recordWords * 4, 128 | 8, transient);
+    const projectionBuffer = allocate('ulg-exact-mechanics-refresh-projections', count * 16, 128 | 8, transient, 'ulg-exact-mechanics-refresh-projections');
+    const params = allocate('ulg-exact-mechanics-refresh-params', 16, 64 | 8, transient, 'ulg-exact-mechanics-refresh-params');
+    const scratch = allocate('ulg-exact-mechanics-refresh-scratch', count * 5 * layout.scalar.recordWords * 4, 128 | 8, transient, 'ulg-exact-mechanics-refresh-scratch');
     const code = createSphExactMechanicsQuantityRefreshWgsl(format, layout);
     const pipelines = [];
     for (const entryPoint of ['prepare_exact_mechanics_refresh', 'divide_exact_mechanics_reference',
@@ -138,8 +162,10 @@ export async function prepareSphExactMechanicsRefresh(args) {
       bind(authorityValidationBuffer) {
         validate();
         const resources = [source.quantityBuffer, source.thermoBuffer, quantityBuffer, projectionBuffer, authorityValidationBuffer, params, scratch];
-        groups = pipelines.map(pipeline => device.createBindGroup({ layout: pipeline.bindGroupLayout,
-          entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+        groups = pipelines.map(pipeline => createCachedExplicitBindGroup(device, {
+          layout: pipeline.bindGroupLayout,
+          entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } }))
+        }));
       },
       encode(encoder, commit = false) {
         validate();
@@ -153,7 +179,7 @@ export async function prepareSphExactMechanicsRefresh(args) {
         }
       },
       markSubmitted() { submitted = true; },
-      cleanupTransient() { destroy(transient); },
+      cleanupTransient() { destroy(transient, submitted); },
       transferQuantities() {
         if (!submitted || retired || quantitiesTransferred) throw new TypeError('Exact mechanics quantities already transferred or retired');
         quantitiesTransferred = true;

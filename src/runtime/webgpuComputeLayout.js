@@ -2224,3 +2224,41 @@ export function releaseQueueOrderedPooledBuffer(
   bucket.push(buffer);
   return true;
 }
+
+const queueOrderedPooledBufferReturnByBuffer = new WeakMap();
+
+export function registerQueueOrderedPooledBufferReturn(
+  buffer,
+  device,
+  { bucketKey, size, usage } = {}
+) {
+  if (!buffer || !device || !bucketKey) return buffer;
+  const normalizedSize = Math.max(4, Math.ceil(Number(size ?? buffer.size) || 4));
+  const normalizedUsage = Number(usage ?? buffer.usage) || 0;
+  if ((normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0) {
+    return buffer;
+  }
+  queueOrderedPooledBufferReturnByBuffer.set(buffer, {
+    device,
+    bucketKey,
+    size: normalizedSize,
+    usage: normalizedUsage
+  });
+  return buffer;
+}
+
+export function releaseOrDestroyQueueOrderedPooledBuffer(
+  buffer,
+  { allowPool = true } = {}
+) {
+  if (!buffer) return false;
+  const spec = queueOrderedPooledBufferReturnByBuffer.get(buffer);
+  if (spec) {
+    queueOrderedPooledBufferReturnByBuffer.delete(buffer);
+    if (allowPool) {
+      return releaseQueueOrderedPooledBuffer(spec.device, buffer, spec);
+    }
+  }
+  buffer.destroy?.();
+  return false;
+}

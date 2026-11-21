@@ -3,10 +3,33 @@ import { createSchroederThermalDormancyStage } from './schroederThermalDormancyG
 import { createSchroederDerivedRadiationDormancyStage } from './schroederPhaseRadiationDormancyGpu.js';
 import { thermalPotentialGpuBindings, thermalPotentialLookupWgsl } from '../material/thermalPotentialGpu.js';
 
-export function createSchroederSpatialThermalPotentialPrepassWgsl() {
-  const source = schroederSpatialThermalDerivedPrepassWgsl.replace(
+export function createSchroederSpatialThermalDerivedPrepassWgsl({
+  fusedConductivity = false,
+  potential = false
+} = {}) {
+  let source = schroederSpatialThermalDerivedPrepassWgsl;
+  if (fusedConductivity) {
+    source = source.replace(
+      `  atomicStore(
+    &thermal_conductivity_sidecar[conductivity_row_offset],
+    selection.response_index
+  );
+  atomicStore(
+    &thermal_conductivity_sidecar[conductivity_row_offset + 1u],
+    THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE
+  );`,
+      `  thermal_prepass_finalize_conductivity_row(
+    conductivity_row_offset,
+    selection.response_index
+  );`
+    );
+  }
+  if (!potential) {
+    return source;
+  }
+  const withPotential = source.replace(
     '  var radius_m = thermal_prepass_nominal_radius_m(pos_mass.w, thermo0.w);',
-    `  if (selection.ready == 1u && thermo0.y == 2.0 && thermo1.y == 1.0) {
+    `  if (selection.ready == 1u && (thermo0.y == 1.0 || thermo0.y == 2.0 || thermo0.y == 3.0) && thermo1.y == 1.0) {
     let response = thermal_prepass_response_row0(selection.response_index);
     let fitted = g6_temperature(u32(response.z), vel_u.w, thermo0.y);
     if (fitted.w == 1.0) {
@@ -20,7 +43,14 @@ export function createSchroederSpatialThermalPotentialPrepassWgsl() {
   return `@group(0) @binding(14) var<storage, read> g6_table: array<f32>;
 @group(0) @binding(15) var<storage, read> g6_metadata: array<vec4<f32>>;
 @group(0) @binding(16) var<storage, read_write> g6_requests: array<atomic<u32>>;
-${thermalPotentialLookupWgsl()}\n${source}`;
+${thermalPotentialLookupWgsl()}\n${withPotential}`;
+}
+
+export function createSchroederSpatialThermalPotentialPrepassWgsl({ fusedConductivity = false } = {}) {
+  return createSchroederSpatialThermalDerivedPrepassWgsl({
+    fusedConductivity,
+    potential: true
+  });
 }
 import {
   SCHROEDER_SPATIAL_ACTIVE_SOURCE_VIEW_ACTIVE_DISPATCH_OFFSET_WORDS,
@@ -4069,23 +4099,10 @@ fn derive(
   }
 }
 
-@compute @workgroup_size(64)
-fn finalize_conductivity(
-  @builtin(global_invocation_id) global_id: vec3<u32>
+fn thermal_prepass_finalize_conductivity_row(
+  row_offset: u32,
+  response_index: u32
 ) {
-  let particle_index = global_id.x;
-  if (
-    particle_index >= thermal_params.particle_count
-    || !thermal_prepass_conductivity_sidecar_admitted()
-  ) { return; }
-  let row_offset =
-    thermal_prepass_conductivity_sidecar_row_offset(particle_index);
-  if (
-    atomicLoad(&thermal_conductivity_sidecar[row_offset + 1u])
-      != THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE
-  ) { return; }
-  let response_index =
-    atomicLoad(&thermal_conductivity_sidecar[row_offset]);
   var conductivity = 0.0;
   if (
     response_index < thermal_params.response_count
@@ -4114,6 +4131,26 @@ fn finalize_conductivity(
   if (status == THERMAL_CONDUCTIVITY_STATUS_MISSING) {
     atomicAdd(&thermal_conductivity_sidecar[11u], 1u);
   }
+}
+
+@compute @workgroup_size(64)
+fn finalize_conductivity(
+  @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+  let particle_index = global_id.x;
+  if (
+    particle_index >= thermal_params.particle_count
+    || !thermal_prepass_conductivity_sidecar_admitted()
+  ) { return; }
+  let row_offset =
+    thermal_prepass_conductivity_sidecar_row_offset(particle_index);
+  if (
+    atomicLoad(&thermal_conductivity_sidecar[row_offset + 1u])
+      != THERMAL_CONDUCTIVITY_STATUS_SELECTED_RESPONSE
+  ) { return; }
+  let response_index =
+    atomicLoad(&thermal_conductivity_sidecar[row_offset]);
+  thermal_prepass_finalize_conductivity_row(row_offset, response_index);
 }
 
 @compute @workgroup_size(1)
@@ -11951,11 +11988,21 @@ export function runSchroederSpatialThermalProposalWebGpu({
     : defaultThermalProposalWgsl;
   const proposalCacheKey = exactEnergyLedger
     ? `${directoryAbiCacheKey}.exact-energy` : directoryAbiCacheKey;
+  const fuseConductivityIntoDerived = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && (Number(device?.limits?.maxStorageBuffersPerShaderStage) || 0) >= (potentialBindings ? 16 : 13)
+  );
   const derivedPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
-      `ulg-schroeder-spatial-thermal-derived-prepass.v14.${directoryAbiCacheKey}${potentialBindings ? '.potential-v2' : ''}`,
+      `ulg-schroeder-spatial-thermal-derived-prepass.v15.${directoryAbiCacheKey}${fuseConductivityIntoDerived ? '.fused-k' : ''}${potentialBindings ? '.potential-v2' : ''}`,
     label: 'ulg-schroeder-spatial-thermal-derived-prepass',
-    code: potentialBindings ? createSchroederSpatialThermalPotentialPrepassWgsl() : schroederSpatialThermalDerivedPrepassWgsl,
+    code: (fuseConductivityIntoDerived || potentialBindings)
+      ? createSchroederSpatialThermalDerivedPrepassWgsl({
+          fusedConductivity: fuseConductivityIntoDerived,
+          potential: Boolean(potentialBindings)
+        })
+      : schroederSpatialThermalDerivedPrepassWgsl,
     entryPoint: 'derive',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -11970,23 +12017,26 @@ export function runSchroederSpatialThermalProposalWebGpu({
       computeBufferBinding(9, 'read-only-storage'),
       computeBufferBinding(10, 'read-only-storage'),
       computeBufferBinding(11, 'storage'),
+      ...(fuseConductivityIntoDerived ? [computeBufferBinding(12, 'read-only-storage')] : []),
       computeBufferBinding(13, 'storage'),
       ...(potentialBindings ? [computeBufferBinding(14, 'read-only-storage'),
         computeBufferBinding(15, 'read-only-storage'), computeBufferBinding(16, 'storage')] : [])
     ]
   });
-  const conductivityFinalizePipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey:
-      `ulg-schroeder-spatial-thermal-conductivity-finalize.v2.${directoryAbiCacheKey}`,
-    label: 'ulg-schroeder-spatial-thermal-conductivity-finalize',
-    code: schroederSpatialThermalDerivedPrepassWgsl,
-    entryPoint: 'finalize_conductivity',
-    bindings: [
-      computeBufferBinding(7, 'uniform'),
-      computeBufferBinding(12, 'read-only-storage'),
-      computeBufferBinding(13, 'storage')
-    ]
-  });
+  const conductivityFinalizePipeline = fuseConductivityIntoDerived
+    ? null
+    : createCachedExplicitComputePipeline(device, {
+        cacheKey:
+          `ulg-schroeder-spatial-thermal-conductivity-finalize.v2.${directoryAbiCacheKey}`,
+        label: 'ulg-schroeder-spatial-thermal-conductivity-finalize',
+        code: schroederSpatialThermalDerivedPrepassWgsl,
+        entryPoint: 'finalize_conductivity',
+        bindings: [
+          computeBufferBinding(7, 'uniform'),
+          computeBufferBinding(12, 'read-only-storage'),
+          computeBufferBinding(13, 'storage')
+        ]
+      });
   const activeDispatchFinalizePipeline = createCachedExplicitComputePipeline(device, {
     cacheKey:
       `ulg-schroeder-spatial-thermal-active-dispatch-finalize.v6.${directoryAbiCacheKey}`,
@@ -12314,26 +12364,38 @@ export function runSchroederSpatialThermalProposalWebGpu({
       { binding: 11, resource: { buffer: activeDispatchBuffer } },
       { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
     ];
+    const derivedBindGroupEntries = [
+      ...derivedEntries,
+      ...(fuseConductivityIntoDerived
+        ? [{ binding: 12, resource: { buffer: responseUpload.responseThermalConductivityBuffer } }]
+        : []),
+      ...(potentialBindings
+        ? [
+            { binding: 14, resource: { buffer: potentialBindings.table } },
+            { binding: 15, resource: { buffer: potentialBindings.metadata } },
+            { binding: 16, resource: { buffer: potentialBindings.requests } }
+          ]
+        : [])
+    ];
     const derivedBindGroup = createCachedExplicitBindGroup(device, {
       layout: derivedPipeline.bindGroupLayout,
-      entries: potentialBindings ? [...derivedEntries,
-        { binding: 14, resource: { buffer: potentialBindings.table } },
-        { binding: 15, resource: { buffer: potentialBindings.metadata } },
-        { binding: 16, resource: { buffer: potentialBindings.requests } }] : derivedEntries
+      entries: derivedBindGroupEntries
     });
-    const conductivityFinalizeBindGroup = createCachedExplicitBindGroup(device, {
-      layout: conductivityFinalizePipeline.bindGroupLayout,
-      entries: [
-        { binding: 7, resource: { buffer: paramsBuffer } },
-        {
-          binding: 12,
-          resource: {
-            buffer: responseUpload.responseThermalConductivityBuffer
-          }
-        },
-        { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
-      ]
-    });
+    const conductivityFinalizeBindGroup = conductivityFinalizePipeline
+      ? createCachedExplicitBindGroup(device, {
+          layout: conductivityFinalizePipeline.bindGroupLayout,
+          entries: [
+            { binding: 7, resource: { buffer: paramsBuffer } },
+            {
+              binding: 12,
+              resource: {
+                buffer: responseUpload.responseThermalConductivityBuffer
+              }
+            },
+            { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
+          ]
+        })
+      : null;
     const activeDispatchFinalizeBindGroup = createCachedExplicitBindGroup(device, {
       layout: activeDispatchFinalizePipeline.bindGroupLayout,
       entries: derivedEntries
@@ -14194,13 +14256,15 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           bindGroups.derivedBindGroup,
           { activeProjectionIndirect: activeSourceProjection }
         );
-        encodePass(
-          'ulg-schroeder-spatial-thermal-conductivity-finalize',
-          'conductivity-finalize',
-          record.conductivityFinalizePipeline,
-          bindGroups.conductivityFinalizeBindGroup,
-          { dispatchWorkgroups: record.workgroups }
-        );
+        if (record.conductivityFinalizePipeline && bindGroups.conductivityFinalizeBindGroup) {
+          encodePass(
+            'ulg-schroeder-spatial-thermal-conductivity-finalize',
+            'conductivity-finalize',
+            record.conductivityFinalizePipeline,
+            bindGroups.conductivityFinalizeBindGroup,
+            { dispatchWorkgroups: record.workgroups }
+          );
+        }
         if (record.thermalDormancyStage) {
           // G4: classify thermal + radiation dormancy from this step's derived
           // temperatures in ONE compute pass, before either law pass reads flags.
@@ -14639,10 +14703,17 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       candidateCapacity: normalLookupBinned ? entry.candidateCapacity : 0
     }));
 
+    const fuseClassicConductivityIntoDerived = Boolean(
+      typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+      && (Number(device?.limits?.maxStorageBuffersPerShaderStage) || 0) >= 13
+    );
     const derivedPipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-derived-prepass.v10',
+      cacheKey: `ulg-classic-thermal-v2-derived-prepass.v11${fuseClassicConductivityIntoDerived ? '.fused-k' : ''}`,
       label: 'ulg-classic-thermal-v2-derived-prepass',
-      code: schroederSpatialThermalDerivedPrepassWgsl,
+      code: fuseClassicConductivityIntoDerived
+        ? createSchroederSpatialThermalDerivedPrepassWgsl({ fusedConductivity: true })
+        : schroederSpatialThermalDerivedPrepassWgsl,
       entryPoint: 'derive',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -14657,20 +14728,23 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         computeBufferBinding(9, 'read-only-storage'),
         computeBufferBinding(10, 'read-only-storage'),
         computeBufferBinding(11, 'storage'),
+        ...(fuseClassicConductivityIntoDerived ? [computeBufferBinding(12, 'read-only-storage')] : []),
         computeBufferBinding(13, 'storage')
       ]
     });
-    const conductivityFinalizePipeline = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-classic-thermal-v2-conductivity-finalize.v3',
-      label: 'ulg-classic-thermal-v2-conductivity-finalize',
-      code: schroederSpatialThermalDerivedPrepassWgsl,
-      entryPoint: 'finalize_conductivity',
-      bindings: [
-        computeBufferBinding(7, 'uniform'),
-        computeBufferBinding(12, 'read-only-storage'),
-        computeBufferBinding(13, 'storage')
-      ]
-    });
+    const conductivityFinalizePipeline = fuseClassicConductivityIntoDerived
+      ? null
+      : createCachedExplicitComputePipeline(device, {
+          cacheKey: 'ulg-classic-thermal-v2-conductivity-finalize.v3',
+          label: 'ulg-classic-thermal-v2-conductivity-finalize',
+          code: schroederSpatialThermalDerivedPrepassWgsl,
+          entryPoint: 'finalize_conductivity',
+          bindings: [
+            computeBufferBinding(7, 'uniform'),
+            computeBufferBinding(12, 'read-only-storage'),
+            computeBufferBinding(13, 'storage')
+          ]
+        });
     const budgetResolvePipeline = createCachedExplicitComputePipeline(device, {
       cacheKey: 'ulg-classic-thermal-v2-budget-resolve.v11',
       label: 'ulg-classic-thermal-v2-budget-resolve',
@@ -14758,22 +14832,29 @@ export function createClassicThermalProposalWebGpuEncoderStage({
     const derivedBindGroup = createCachedExplicitBindGroup(device, {
       label: 'ulg-classic-thermal-v2-derived',
       layout: derivedPipeline.bindGroupLayout,
-      entries: derivedEntries
+      entries: fuseClassicConductivityIntoDerived
+        ? [
+            ...derivedEntries,
+            { binding: 12, resource: { buffer: responseUpload.responseThermalConductivityBuffer } }
+          ]
+        : derivedEntries
     });
-    const conductivityFinalizeBindGroup = createCachedExplicitBindGroup(device, {
-      label: 'ulg-classic-thermal-v2-conductivity-finalize',
-      layout: conductivityFinalizePipeline.bindGroupLayout,
-      entries: [
-        { binding: 7, resource: { buffer: paramsBuffer } },
-        {
-          binding: 12,
-          resource: {
-            buffer: responseUpload.responseThermalConductivityBuffer
-          }
-        },
-        { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
-      ]
-    });
+    const conductivityFinalizeBindGroup = conductivityFinalizePipeline
+      ? createCachedExplicitBindGroup(device, {
+          label: 'ulg-classic-thermal-v2-conductivity-finalize',
+          layout: conductivityFinalizePipeline.bindGroupLayout,
+          entries: [
+            { binding: 7, resource: { buffer: paramsBuffer } },
+            {
+              binding: 12,
+              resource: {
+                buffer: responseUpload.responseThermalConductivityBuffer
+              }
+            },
+            { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
+          ]
+        })
+      : null;
     const budgetResolveBindGroup = createCachedExplicitBindGroup(device, {
       label: 'ulg-classic-thermal-v2-budget-resolve',
       layout: budgetResolvePipeline.bindGroupLayout,
@@ -14862,15 +14943,17 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       derivedPass.setBindGroup(0, derivedBindGroup);
       derivedPass.dispatchWorkgroups(workgroups);
       derivedPass.end();
-      const conductivityFinalizePass = encoder.beginComputePass({
-        label: 'ulg-classic-thermal-v2-conductivity-finalize'
-      });
-      conductivityFinalizePass.setPipeline(
-        conductivityFinalizePipeline.pipeline
-      );
-      conductivityFinalizePass.setBindGroup(0, conductivityFinalizeBindGroup);
-      conductivityFinalizePass.dispatchWorkgroups(workgroups);
-      conductivityFinalizePass.end();
+      if (conductivityFinalizePipeline && conductivityFinalizeBindGroup) {
+        const conductivityFinalizePass = encoder.beginComputePass({
+          label: 'ulg-classic-thermal-v2-conductivity-finalize'
+        });
+        conductivityFinalizePass.setPipeline(
+          conductivityFinalizePipeline.pipeline
+        );
+        conductivityFinalizePass.setBindGroup(0, conductivityFinalizeBindGroup);
+        conductivityFinalizePass.dispatchWorkgroups(workgroups);
+        conductivityFinalizePass.end();
+      }
       if (candidateBuildPipeline) {
         const candidateBuildPass = encoder.beginComputePass({
           label: 'ulg-classic-thermal-v2-candidate-build'

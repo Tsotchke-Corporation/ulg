@@ -27,6 +27,8 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   releaseQueueOrderedPooledBuffer,
   submitQueueOrderedProducerWorkAndCleanup
 } from '../webgpuComputeLayout.js';
@@ -3733,11 +3735,30 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       : null;
     const productionInputOpticsBuffer =
       reactionCaptureBuffer ?? resolvedPriorOpticsBuffer;
-    const outputBuffer = own(createOwnedBuffer(device, {
-      label: `${label}-output`,
-      size: opticsBufferByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }));
+    const outputUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+    const outputBuffer = own(useQueueOrderedOpticsPool
+      ? registerQueueOrderedPooledBufferReturn(
+          tagWebGpuBufferDevice(
+            acquireQueueOrderedPooledBuffer(device, {
+              bucketKey: 'ulg-dispersed-optics-output',
+              label: `${label}-output`,
+              size: opticsBufferByteLength,
+              usage: outputUsage
+            }),
+            device
+          ),
+          device,
+          {
+            bucketKey: 'ulg-dispersed-optics-output',
+            size: opticsBufferByteLength,
+            usage: outputUsage
+          }
+        )
+      : createOwnedBuffer(device, {
+          label: `${label}-output`,
+          size: opticsBufferByteLength,
+          usage: outputUsage
+        }));
     const evidenceValues = initialEvidence();
     const evidenceBuffer = acquireOwnedTransientBuffer('ulg-dispersed-optics-evidence', {
       label: `${label}-evidence`,
@@ -4004,7 +4025,9 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
           'Dispersed-medium optics output cleanup is quarantined while encoding or during unresolved adoption'
         );
       }
-      outputBuffer.destroy?.();
+      releaseOrDestroyQueueOrderedPooledBuffer(outputBuffer, {
+        allowPool: useQueueOrderedOpticsPool && encodeState === 'submitted'
+      });
       removeAllocated(outputBuffer);
       outputCleanupComplete = true;
       if (producerOutputAdoptionRecord) {

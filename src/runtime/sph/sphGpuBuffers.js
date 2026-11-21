@@ -52,6 +52,7 @@ import {
   validateSphExactMassRead, forkSphExactMassRead, releaseSphExactMassRead, releaseSphExactMassInventory
 } from './sphExactMassInventoryGpu.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import { releaseOrDestroyQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 import { encodeSphExactParticleInitialQuantities } from './sphExactParticleInitialQuantities.js';
 import { sphExactThermalEnergyRecordWords, SPH_EXACT_THERMAL_ENERGY_WORDS } from './sphExactThermalEnergyWgsl.js';
 import {
@@ -3758,7 +3759,9 @@ export function destroyMlsMpmGpuParticleBuffers(buffers) {
 
 function destroyMlsMpmGpuParticleBuffersNow(buffers, physical = buffers) {
   if (physical === buffers && buffers.destroyed) return;
-  if (physical.ownsMechanicsBuffer !== false) physical.mechanicsBuffer?.destroy?.();
+  if (physical.ownsMechanicsBuffer !== false) {
+    releaseOrDestroyQueueOrderedPooledBuffer(physical.mechanicsBuffer);
+  }
   if (physical.ownsMaterialPropertyBankWarmInputBuffer !== false) {
     physical.materialPropertyBankWarmInputBuffer?.destroy?.();
   }

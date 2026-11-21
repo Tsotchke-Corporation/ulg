@@ -28,9 +28,19 @@ fn g6_key(v: f32) -> u32 { let b = bitcast<u32>(v); return select(b ^ 0x80000000
 fn g6_unkey(k: u32) -> f32 { return bitcast<f32>(select(~k, k ^ 0x80000000u, (k & 0x80000000u) != 0u)); }
 // Returns (T, dT/du, empirical relative T bound, valid). Invalid points use
 // the original graph. Miss requests are GPU-owned; they grant no adoption.
+// Supports solid (1), liquid (2), and gas (3) single-phase caloric branches,
+// checking each graph's authoritative phaseId stored in metadata[graph*4+3].w.
 fn g6_temperature(graph: u32, u: f32, phase: f32) -> vec4<f32> {
   atomicAdd(&${requests}[0u], 1u);
-  if (phase != 2.0 || !rf_finite(u) || graph >= arrayLength(&${metadata}) / 4u) {
+  if (
+    !(phase == 1.0 || phase == 2.0 || phase == 3.0)
+    || !rf_finite(u)
+    || graph >= arrayLength(&${metadata}) / 4u
+  ) {
+    atomicAdd(&${requests}[3u], 1u); return vec4<f32>(0.0);
+  }
+  let meta3 = ${metadata}[graph * 4u + 3u];
+  if (meta3.w != phase) {
     atomicAdd(&${requests}[3u], 1u); return vec4<f32>(0.0);
   }
   let m = ${metadata}[graph * 4u];
@@ -75,6 +85,17 @@ fn reset(@builtin(global_invocation_id) id: vec3<u32>) {
   atomicStore(&requests[17u + g*4u], 0u);
   atomicStore(&requests[18u + g*4u], 0u);
   atomicStore(&requests[19u + g*4u], 0u);
+  var graph_phase = 0.0;
+  if (g * 4u + 3u < arrayLength(&nodes)) {
+    let candidate_phase = nodes[g * 4u + 3u].z;
+    if (candidate_phase == 1.0 || candidate_phase == 2.0 || candidate_phase == 3.0) {
+      graph_phase = candidate_phase;
+    }
+  }
+  metadata[g * 4u] = vec4<f32>(0.0);
+  metadata[g * 4u + 1u] = vec4<f32>(0.0);
+  metadata[g * 4u + 2u] = vec4<f32>(0.0);
+  metadata[g * 4u + 3u] = vec4<f32>(0.0, 0.0, 0.0, graph_phase);
 }
 @compute @workgroup_size(64)
 fn clear_misses(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -83,8 +104,128 @@ fn clear_misses(@builtin(global_invocation_id) id: vec3<u32>) {
   atomicStore(&requests[17u+g*4u],0u);
   atomicStore(&requests[18u+g*4u],0u);
 }
-// Each graph gets one fixed-order thread. Maximum 8 samples and 65 held-out
-// probes; work and allocation depend on the cold graph count, never particles.
+fn g6_knot_slope(offset: u32, sample_count: u32, idx: u32) -> f32 {
+  if (sample_count < 2u) { return 0.0; }
+  if (idx == 0u) {
+    let a = samples[offset].xy;
+    let b = samples[offset + 1u].xy;
+    let h0 = b.x - a.x;
+    let d0 = (b.y - a.y) / h0;
+    if (sample_count == 2u) { return d0; }
+    let c = samples[offset + 2u].xy;
+    let h1 = c.x - b.x;
+    let d1 = (c.y - b.y) / h1;
+    // Second-order monotone-clamped PCHIP endpoint derivative (exact on quadratics).
+    var m = ((2.0 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+    if (m <= 0.0) { return 0.5 * d0; }
+    if (m > 3.0 * d0) { m = 3.0 * d0; }
+    return m;
+  }
+  if (idx + 1u >= sample_count) {
+    let a = samples[offset + sample_count - 2u].xy;
+    let b = samples[offset + sample_count - 1u].xy;
+    let h1 = b.x - a.x;
+    let d1 = (b.y - a.y) / h1;
+    if (sample_count == 2u) { return d1; }
+    let p = samples[offset + sample_count - 3u].xy;
+    let h0 = a.x - p.x;
+    let d0 = (a.y - p.y) / h0;
+    var m = ((2.0 * h1 + h0) * d1 - h1 * d0) / (h0 + h1);
+    if (m <= 0.0) { return 0.5 * d1; }
+    if (m > 3.0 * d1) { m = 3.0 * d1; }
+    return m;
+  }
+  let p = samples[offset + idx - 1u].xy;
+  let c = samples[offset + idx].xy;
+  let q = samples[offset + idx + 1u].xy;
+  let d0 = (c.y - p.y) / (c.x - p.x);
+  let d1 = (q.y - c.y) / (q.x - c.x);
+  if (!(d0 > 0.0) || !(d1 > 0.0)) { return 0.0; }
+  // Monotone-preserving Fritsch-Carlson harmonic mean slope (C^1 smooth, exact on linear).
+  let w0 = 2.0 * (q.x - c.x) + (c.x - p.x);
+  let w1 = (q.x - c.x) + 2.0 * (c.x - p.x);
+  return (w0 + w1) / (w0 / d0 + w1 / d1);
+}
+fn g6_eval_source_caloric(offset: u32, sample_count: u32, u: f32) -> vec3<f32> {
+  if (sample_count < 2u || offset + sample_count > arrayLength(&samples) || !rf_finite(u)) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  var lo = 0u;
+  var hi = sample_count - 2u;
+  // Binary search the strictly monotone sample table for segment [lo, lo + 1].
+  loop {
+    if (lo >= hi) { break; }
+    let mid = (lo + hi + 1u) / 2u;
+    if (samples[offset + mid].x <= u) {
+      lo = mid;
+    } else {
+      hi = mid - 1u;
+    }
+  }
+  let left = samples[offset + lo].xy;
+  let right = samples[offset + lo + 1u].xy;
+  let du = right.x - left.x;
+  let dT = right.y - left.y;
+  if (
+    !all(vec4<bool>(rf_finite(left.x), rf_finite(left.y), rf_finite(right.x), rf_finite(right.y)))
+    || !(du > 0.0)
+    || !(dT > 0.0)
+    || !(left.y > 0.0)
+  ) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  let t = clamp((u - left.x) / du, 0.0, 1.0);
+  var temp = left.y + t * dT;
+  var slope = dT / du;
+  if (sample_count >= 3u) {
+    let m0 = g6_knot_slope(offset, sample_count, lo);
+    let m1 = g6_knot_slope(offset, sample_count, lo + 1u);
+    if (!(m0 > 0.0) || !(m1 > 0.0)) { return vec3<f32>(0.0, 0.0, 0.0); }
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    temp = h00 * left.y + h10 * du * m0 + h01 * right.y + h11 * du * m1;
+    let dh00 = 6.0 * t2 - 6.0 * t;
+    let dh10 = 3.0 * t2 - 4.0 * t + 1.0;
+    let dh01 = -6.0 * t2 + 6.0 * t;
+    let dh11 = 3.0 * t2 - 2.0 * t;
+    slope = (dh00 * left.y + dh01 * right.y) / du + dh10 * m0 + dh11 * m1;
+  }
+  if (!rf_finite(temp) || !rf_finite(slope) || !(temp > 0.0) || !(slope > 0.0)) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  return vec3<f32>(temp, slope, 1.0);
+}
+// High-order Gauss-Legendre entropy integral int_{u_a}^{u_b} du / T(u) over C^1 Hermite source.
+fn g6_source_entropy_delta(offset: u32, sample_count: u32, u_a: f32, u_b: f32) -> vec2<f32> {
+  if (u_b <= u_a) { return vec2<f32>(0.0, 1.0); }
+  let gl_x = array<f32, 4>(-0.861136312, -0.339981044, 0.339981044, 0.861136312);
+  let gl_w = array<f32, 4>(0.347854845, 0.652145155, 0.652145155, 0.347854845);
+  var total = 0.0;
+  for (var i = 0u; i + 1u < sample_count; i++) {
+    let left = samples[offset + i].xy;
+    let right = samples[offset + i + 1u].xy;
+    if (right.x <= u_a) { continue; }
+    if (left.x >= u_b) { break; }
+    let seg_lo = max(left.x, u_a);
+    let seg_hi = min(right.x, u_b);
+    if (seg_hi <= seg_lo) { continue; }
+    let mid = 0.5 * (seg_lo + seg_hi);
+    let half = 0.5 * (seg_hi - seg_lo);
+    for (var q = 0u; q < 4u; q++) {
+      let ev = g6_eval_source_caloric(offset, sample_count, mid + half * gl_x[q]);
+      if (ev.z != 1.0) { return vec2<f32>(0.0, 0.0); }
+      total += half * gl_w[q] / ev.x;
+    }
+  }
+  return vec2<f32>(total, select(0.0, 1.0, rf_finite(total)));
+}
+// Each graph gets one fixed-order thread. Fits single-phase solid (1), liquid (2),
+// and gas (3) graphs — both single-affine segments and smooth multi-sample
+// nonlinear (e.g. Debye) caloric curves — validated across 65 held-out probes.
 @compute @workgroup_size(1)
 fn fit(@builtin(global_invocation_id) id: vec3<u32>) {
   let g = id.x;
@@ -93,53 +234,104 @@ fn fit(@builtin(global_invocation_id) id: vec3<u32>) {
   atomicAdd(&receipt[1u],1u);
   atomicAdd(&requests[4u], 1u);
   atomicStore(&requests[19u+g*4u], 1u);
-  // Only a single affine graph segment. Plateau, nonlinear/multisegment and
-  // invalid source graphs retain the original consumer, without extrapolation.
-  if (g*4u+1u >= arrayLength(&nodes)) { return; }
+  if (g*4u+3u >= arrayLength(&nodes)) { return; }
+  let graph_phase = nodes[g*4u+3u].z;
+  if (!(graph_phase == 1.0 || graph_phase == 2.0 || graph_phase == 3.0)) { return; }
   let n = nodes[g*4u+1u];
-  if (!rf_finite(n.x) || n.x < 0.0 || n.x != floor(n.x) || n.x >= 16777216.0 || n.y != 2.0) { return; }
+  if (!rf_finite(n.x) || n.x < 0.0 || n.x != floor(n.x) || n.x >= 16777216.0
+      || !rf_finite(n.y) || n.y < 2.0 || n.y != floor(n.y) || n.y > 256.0) { return; }
   let offset = u32(n.x);
-  if (offset >= arrayLength(&samples) || arrayLength(&samples)-offset < 2u) { return; }
-  let left = samples[offset].xy; let right = samples[offset+1u].xy;
-  let du = right.x-left.x; let dT = right.y-left.y;
+  let sample_count = u32(n.y);
+  if (offset >= arrayLength(&samples) || arrayLength(&samples)-offset < sample_count) { return; }
+  let left = samples[offset].xy;
+  let right = samples[offset + sample_count - 1u].xy;
   if (!all(vec4<bool>(rf_finite(left.x), rf_finite(left.y), rf_finite(right.x), rf_finite(right.y)))
-    || !(du > 0.0) || !(dT > 0.0) || !(left.y > 0.0)
+    || !(right.x > left.x) || !(right.y > left.y) || !(left.y > 0.0)
     || n.z != left.x || n.w != right.x) { return; }
-  let cv = du/dT;
+  // Verify strict monotonicity across every subsegment so plateaus reject cleanly.
+  for (var s = 0u; s + 1u < sample_count; s++) {
+    let a = samples[offset + s].xy;
+    let b = samples[offset + s + 1u].xy;
+    if (!all(vec4<bool>(rf_finite(a.x), rf_finite(a.y), rf_finite(b.x), rf_finite(b.y)))
+      || !(b.x > a.x) || !(b.y > a.y) || !(a.y > 0.0)) { return; }
+  }
   atomicOr(&requests[6u], 1u);
   let request_lo = unkey(atomicLoad(&requests[16u+g*4u]));
   let request_hi = unkey(atomicLoad(&requests[17u+g*4u]));
   if (!rf_finite(request_lo) || !rf_finite(request_hi) || request_lo < left.x || request_hi > right.x || request_lo > request_hi) { return; }
   let um = request_lo + (request_hi-request_lo)*0.5;
-  let tm = left.y + ((um-left.x)/du)*dT;
+  var tm = 0.0;
+  var cv = 0.0;
+  if (sample_count == 2u) {
+    let du = right.x - left.x;
+    let dT = right.y - left.y;
+    cv = du / dT;
+    tm = left.y + ((um - left.x) / du) * dT;
+  } else {
+    let mid = g6_eval_source_caloric(offset, sample_count, um);
+    if (mid.z != 1.0) { return; }
+    tm = mid.x;
+    cv = 1.0 / mid.y;
+  }
   let scale = cv*tm;
   let padding = max((request_hi-request_lo)*0.25, scale*0.02);
   let ulo = max(left.x, request_lo-padding); let uhi = min(right.x, request_hi+padding);
   let xlo = (ulo-um)/scale; let xhi = (uhi-um)/scale;
-  if (!rf_finite(scale) || !(cv > 0.0) || !(tm > 0.0) || !(xhi > xlo) || xlo < -0.25 || xhi > 0.25) { return; }
+  let max_x_span = select(0.5, 0.25, sample_count == 2u);
+  if (!rf_finite(scale) || !(cv > 0.0) || !(tm > 0.0) || !(xhi > xlo) || xlo < -max_x_span || xhi > max_x_span) { return; }
   atomicOr(&requests[6u], 2u);
   let base = u32(table[1]) + g*8u; let record = 4u+g*16u;
   var old_record:array<f32,16>;var old_coefficients:array<f32,8>;
   for(var i=0u;i<16u;i++){old_record[i]=table[record+i];}
   for(var i=0u;i<8u;i++){old_coefficients[i]=table[base+i];}
-  // Form the coefficients of log(1+x); no source values are read back.
-  for (var j=0u; j<8u; j++) {
-    var sum = 0.0;
-    for (var k=0u; k<8u; k++) {
-      let angle = 3.141592653589793*(f32(k)+0.5)/8.0;
-      let x = xlo+(cos(angle)+1.0)*0.5*(xhi-xlo);
-      // Remove the exactly representable affine part before the transform.
-      // log(1+x)-x = -x²/(2+x) + 2*(z³/3+z⁵/5+...), z=x/(2+x).
-      // On |x|<=1/4 the omitted series is below 3e-12; this avoids f32
-      // cancellation in tiny high-order coefficients and their second derivative.
-      let z=x/(2.0+x);let z2=z*z;
-      let residual=-x*x/(2.0+x)+2.0*z*z2*(1.0/3.0+z2*(1.0/5.0+z2*(1.0/7.0+z2*(1.0/9.0+z2/11.0))));
-      sum += residual*cos(f32(j)*angle);
+  if (sample_count == 2u) {
+    // Form the coefficients of log(1+x); no source values are read back.
+    for (var j=0u; j<8u; j++) {
+      var sum = 0.0;
+      for (var k=0u; k<8u; k++) {
+        let angle = 3.141592653589793*(f32(k)+0.5)/8.0;
+        let x = xlo+(cos(angle)+1.0)*0.5*(xhi-xlo);
+        let z=x/(2.0+x);let z2=z*z;
+        let residual=-x*x/(2.0+x)+2.0*z*z2*(1.0/3.0+z2*(1.0/5.0+z2*(1.0/7.0+z2*(1.0/9.0+z2/11.0))));
+        sum += residual*cos(f32(j)*angle);
+      }
+      table[base+j] = sum*select(0.25, 0.125, j==0u);
     }
-    table[base+j] = sum*select(0.25, 0.125, j==0u);
+    table[base] += (xlo+xhi)*0.5;
+    table[base+1u] += (xhi-xlo)*0.5;
+  } else {
+    // Spectral Chebyshev fit of g'(x) = tm / T_src(um + x*scale) integrated
+    // analytically to g(x) with g(xlo) = 0 (exact entropy shift stored in meta3.x).
+    var b: array<f32, 8>;
+    for (var j=0u; j<8u; j++) {
+      var sum = 0.0;
+      for (var k=0u; k<8u; k++) {
+        let angle = 3.141592653589793*(f32(k)+0.5)/8.0;
+        let x = xlo+(cos(angle)+1.0)*0.5*(xhi-xlo);
+        let u_k = clamp(um + x * scale, left.x, right.x);
+        let ev = g6_eval_source_caloric(offset, sample_count, u_k);
+        if (ev.z != 1.0) {
+          for(var r=0u;r<16u;r++){table[record+r]=old_record[r];}
+          for(var r=0u;r<8u;r++){table[base+r]=old_coefficients[r];}
+          return;
+        }
+        sum += (tm / ev.x) * cos(f32(j) * angle);
+      }
+      b[j] = sum * select(0.25, 0.125, j == 0u);
+    }
+    let half_w = 0.5 * (xhi - xlo);
+    var a: array<f32, 8>;
+    a[1] = half_w * (b[0] - 0.5 * b[2]);
+    a[2] = half_w * (b[1] - b[3]) / 4.0;
+    a[3] = half_w * (b[2] - b[4]) / 6.0;
+    a[4] = half_w * (b[3] - b[5]) / 8.0;
+    a[5] = half_w * (b[4] - b[6]) / 10.0;
+    a[6] = half_w * (b[5] - b[7]) / 12.0;
+    a[7] = half_w * b[6] / 14.0;
+    // Shift a[0] so g(xlo) = g(xi = -1) = 0.
+    a[0] = -(-a[1] + a[2] - a[3] + a[4] - a[5] + a[6] - a[7]);
+    for (var j=0u; j<8u; j++) { table[base+j] = a[j]; }
   }
-  table[base] += (xlo+xhi)*0.5;
-  table[base+1u] += (xhi-xlo)*0.5;
   table[record] = 1.0; table[record+1u] = f32(g*8u);
   table[record+2u] = 8.0; table[record+3u] = 1.0; table[record+4u] = 1.0;
   table[record+5u] = xlo; table[record+6u] = xhi;
@@ -153,9 +345,21 @@ fn fit(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = xlo+fraction*(xhi-xlo);
     let d = rf_eval_differential(g, vec3<f32>(x,0.0,0.0));
     if (d.ok != 1u || !(d.gradient.x > 0.0) || !(d.hessian[0][0] < 0.0)) { valid=false; continue; }
-    t_error = max(t_error, abs(1.0/d.gradient.x-(1.0+x))/(1.0+x));
-    slope_error = max(slope_error, abs(-d.hessian[0][0]/(d.gradient.x*d.gradient.x)-1.0));
-    entropy_error = max(entropy_error, abs(d.value-log(1.0+x)));
+    if (sample_count == 2u) {
+      t_error = max(t_error, abs(1.0/d.gradient.x-(1.0+x))/(1.0+x));
+      slope_error = max(slope_error, abs(-d.hessian[0][0]/(d.gradient.x*d.gradient.x)-1.0));
+      entropy_error = max(entropy_error, abs(d.value-log(1.0+x)));
+    } else {
+      let u_p = clamp(um + x * scale, left.x, right.x);
+      let ev = g6_eval_source_caloric(offset, sample_count, u_p);
+      let ent = g6_source_entropy_delta(offset, sample_count, ulo, u_p);
+      if (ev.z != 1.0 || ent.y != 1.0) { valid = false; continue; }
+      let t_fit = tm / d.gradient.x;
+      let slope_fit = -d.hessian[0][0] / (cv * d.gradient.x * d.gradient.x);
+      t_error = max(t_error, abs(t_fit - ev.x) / ev.x);
+      slope_error = max(slope_error, abs(slope_fit - ev.y) / ev.y);
+      entropy_error = max(entropy_error, abs(d.value - ent.x / cv));
+    }
   }
   atomicOr(&requests[6u], select(4u, 8u, valid));
   atomicMax(&requests[7u], bitcast<u32>(t_error));
@@ -173,10 +377,17 @@ fn fit(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
   table[record+11u] = entropy_error*2.0;
+  var entropy_offset = 0.0;
+  if (sample_count == 2u) {
+    entropy_offset = cv * log(tm / left.y);
+  } else {
+    let base_ent = g6_source_entropy_delta(offset, sample_count, left.x, ulo);
+    entropy_offset = select(0.0, base_ent.x, base_ent.y == 1.0);
+  }
   metadata[g*4u] = vec4<f32>(um,cv,tm,1.0);
   metadata[g*4u+1u] = vec4<f32>(ulo,uhi,t_error*2.0,slope_error*2.0);
   metadata[g*4u+2u] = vec4<f32>(left, right);
-  metadata[g*4u+3u] = vec4<f32>(cv*log(tm/left.y),left.y,entropy_error*2.0,0.0);
+  metadata[g*4u+3u] = vec4<f32>(entropy_offset,left.y,entropy_error*2.0,graph_phase);
   atomicStore(&requests[19u+g*4u], 2u);
   atomicAdd(&requests[5u], 1u);
   atomicAdd(&receipt[2u],1u);

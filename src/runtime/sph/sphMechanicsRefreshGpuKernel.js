@@ -17,6 +17,7 @@ import {
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
   releaseQueueOrderedPooledBuffer,
   submitQueueOrderedFinalConsumerWork,
   releaseSubmittedWorkCleanupQueueOrdered,
@@ -850,14 +851,22 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
   );
   const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
   const outMechanicsBuffer = useQueueOrderedRefreshPool
-    ? tagWebGpuBufferDevice(
-        acquireQueueOrderedPooledBuffer(device, {
+    ? registerQueueOrderedPooledBufferReturn(
+        tagWebGpuBufferDevice(
+          acquireQueueOrderedPooledBuffer(device, {
+            bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+            label: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+            size: outMechanicsByteLength,
+            usage: outMechanicsUsage
+          }),
+          device
+        ),
+        device,
+        {
           bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
-          label: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
           size: outMechanicsByteLength,
           usage: outMechanicsUsage
-        }),
-        device
+        }
       )
     : createOutputStorageBuffer(
         device,
@@ -887,16 +896,22 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
   const authorityValidationUsage = GPU_BUFFER_USAGE.STORAGE
     | GPU_BUFFER_USAGE.COPY_DST
     | GPU_BUFFER_USAGE.COPY_SRC;
-  const poolAuthorityValidation = Boolean(
-    useQueueOrderedRefreshPool && !exact?.retainAcceptance
-  );
+  const poolAuthorityValidation = Boolean(useQueueOrderedRefreshPool);
   const authorityValidationBuffer = poolAuthorityValidation
-    ? acquireQueueOrderedPooledBuffer(device, {
-        bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-        label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-        size: Uint32Array.BYTES_PER_ELEMENT,
-        usage: authorityValidationUsage
-      })
+    ? registerQueueOrderedPooledBufferReturn(
+        acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+          label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+          size: Uint32Array.BYTES_PER_ELEMENT,
+          usage: authorityValidationUsage
+        }),
+        device,
+        {
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+          size: Uint32Array.BYTES_PER_ELEMENT,
+          usage: authorityValidationUsage
+        }
+      )
     : device.createBuffer({
         label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
         size: Uint32Array.BYTES_PER_ELEMENT,

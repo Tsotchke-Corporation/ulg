@@ -16,6 +16,7 @@ import {
 import {
   consumeSphDispersedMediumOpticsProducerAdoptionClaim
 } from './sphDispersedMediumOpticsProducerGpu.js';
+import { releaseOrDestroyQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 
 const GPU_BUFFER_USAGE = {
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
@@ -562,7 +563,11 @@ function destroyUploadRecordNow(record) {
   // completed.  In particular, a deferred destruction that throws during its
   // final borrow release must retain `destroyRequested` so its exact owner can
   // retry the same allocation rather than losing retirement authority.
-  if (record.ownsBuffer) record.buffer.destroy?.();
+  if (record.ownsBuffer) {
+    releaseOrDestroyQueueOrderedPooledBuffer(record.buffer, {
+      allowPool: !record.deviceLost
+    });
+  }
   record.active = false;
   record.destroyed = true;
   record.destroyRequested = false;

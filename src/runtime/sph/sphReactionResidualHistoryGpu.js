@@ -248,11 +248,28 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
   if(transported && !source)throw new TypeError('Residual transport requires its original history');
   if(!source && !emitted)return null;
   let sourceRead=null,emittedRead=null,transportRead=null,scan=null,buffer=null;
-  const resources=new Set(),destroyed=new Set();
-  const owner={device,closed:false,privateLive:false,retired:false,retiring:false,readers:0,
+  const resources=new Set(),retainedResources=new Set(),destroyed=new Set();
+  const owner={device,closed:false,privateLive:false,retired:false,retiring:false,producerStageRetired:false,readers:0,
     sourceRead:null,emittedRead:null,transportRead:null,controlBuffer:null,
+    releaseProducerStage() {
+      if(!this.closed || this.producerStageRetired || this.retired || this.retiring)return;
+      this.retiring=true;const errors=[];
+      for(const resource of resources) {
+        if(retainedResources.has(resource) || destroyed.has(resource))continue;
+        try{resource.destroy();destroyed.add(resource);}catch(error){errors.push(error);}
+      }
+      this.retiring=false;
+      if(errors.length)throw new AggregateError(errors,'Residual history retirement failed');
+      this.producerStageRetired=true;
+      scan?.destroy();scan=null;
+      sourceRead?.release();emittedRead?.release();
+    },
     retire() {
-      if(!this.closed || this.privateLive || this.readers || this.retired || this.retiring)return;
+      if(!this.closed || this.retired || this.retiring)return;
+      if(this.privateLive || this.readers) {
+        this.releaseProducerStage();
+        return;
+      }
       this.retiring=true;const errors=[];
       for(const resource of resources) {
         if(destroyed.has(resource))continue;
@@ -260,7 +277,9 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
       }
       this.retiring=false;
       if(errors.length)throw new AggregateError(errors,'Residual history retirement failed');
-      scan?.destroy();sourceRead?.release();emittedRead?.release();transportRead?.release();this.retired=true;
+      this.producerStageRetired=true;
+      scan?.destroy();scan=null;
+      sourceRead?.release();emittedRead?.release();transportRead?.release();this.retired=true;
     }};
   const destroy=()=>{const first=!owner.closed;owner.closed=true;owner.retire();return first;};
   const own=resource=>{
@@ -288,9 +307,13 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
       throw new RangeError('Residual history requires bounded same-device storage and count identities');
     }
     buffer=allocate('ulg-reaction-residual-history',(L.headerWords+rows*L.rowWords)*4,128|4|8);
+    retainedResources.add(buffer);
     // A transported successor outlives the interval's caller-owned control.
     // Retain the finalized verdict with the history's own storage lifetime.
-    if(transportRead)owner.controlBuffer=allocate('ulg-reaction-residual-history-verdict',12,128|4|8);
+    if(transportRead){
+      owner.controlBuffer=allocate('ulg-reaction-residual-history-verdict',12,128|4|8);
+      retainedResources.add(owner.controlBuffer);
+    }
     const flags=allocate('ulg-reaction-residual-live-flags',scanCount*4,128|4|8);
     const prefix=allocate('ulg-reaction-residual-live-prefix',scanCount*4,128|4|8);
     const params=allocate('ulg-reaction-residual-history-identities',48,64|8);

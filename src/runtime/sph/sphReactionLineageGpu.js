@@ -40,11 +40,20 @@ export function prepareSphReactionLineageCandidate({ device, source = null }) {
   const size = (SPH_REACTION_LINEAGE_CAPACITY + 1) * SPH_REACTION_LINEAGE_ROW_WORDS * 4;
   let beforeBuffer = sourceRead?.buffer ?? null, buffer = null;
   const owner = { device, sourceRead, producerClosed: false, privateLive: false,
-    transferred: false, borrows: 0, retired: false,
-    retire() {
-      if (!this.producerClosed || this.privateLive || this.borrows || this.retired) return;
-      this.retired = true; buffer?.destroy();
+    transferred: false, borrows: 0, retired: false, inputsReleased: false,
+    releaseInputs() {
+      if (this.inputsReleased) return;
+      this.inputsReleased = true;
       if (sourceRead) sourceRead.release(); else beforeBuffer?.destroy();
+    },
+    retire() {
+      if (!this.producerClosed || this.retired) return;
+      if (this.privateLive || this.borrows) {
+        this.releaseInputs();
+        return;
+      }
+      this.retired = true; buffer?.destroy();
+      this.releaseInputs();
     } };
   const destroy = () => {
     if (owner.producerClosed) return false;

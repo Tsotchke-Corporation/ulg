@@ -48,3 +48,21 @@ test('failed lineage allocation releases its predecessor borrow without closing 
   const read=borrowSphReactionLineage(gpu,owner.lineage);read.release();
   candidate.destroy();owner.destroy();assert.ok(gpu.buffers.every(buffer=>buffer.destroyed===1));
 });
+
+test('multi-step lineage chains release retired predecessors on producer close instead of leaking O(N)',()=>{
+  const gpu=device();
+  let prev=prepareSphReactionLineageCandidate({device:gpu}),prevOwner=prev.transfer();
+  const lineageBuffers=[prevOwner.lineage.buffer];
+  for(let step=0;step<8;step++){
+    const next=prepareSphReactionLineageCandidate({device:gpu,source:prevOwner.lineage});
+    const nextOwner=next.transfer();
+    prev.destroy();prevOwner.destroy();
+    next.destroy();
+    lineageBuffers.push(nextOwner.lineage.buffer);
+    prev=next;prevOwner=nextOwner;
+  }
+  assert.equal(lineageBuffers.filter(b=>b.destroyed===0).length,1);
+  assert.equal(prevOwner.lineage.buffer.destroyed,0);
+  prevOwner.destroy();
+  assert.ok(gpu.buffers.every(b=>b.destroyed===1));
+});

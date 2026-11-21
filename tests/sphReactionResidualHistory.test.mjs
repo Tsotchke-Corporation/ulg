@@ -106,3 +106,25 @@ test('history forks retain a closed producer and reject copied, foreign and rele
   fork.release();assert.equal(holder.history.buffer.destroyed,1);assert.equal(f.emitted.buffer.destroyed,1);
   assert.equal(fork.release(),false);
 });
+
+test('multi-step residual history chains release retired predecessors instead of retaining O(N) buffers',()=>{
+  const f=fixture();
+  let prevProducer=f.make(),prevHolder=f.finish(prevProducer);
+  const allHistoryBuffers=[prevHolder.history.buffer];
+  for(let step=0;step<8;step++){
+    const nextProducer=f.make({source:prevHolder.history,emitted:null});
+    const nextHolder=f.finish(nextProducer);
+    prevProducer.destroy();prevHolder.destroy();
+    nextProducer.destroy();
+    allHistoryBuffers.push(nextHolder.history.buffer);
+    prevProducer=nextProducer;prevHolder=nextHolder;
+  }
+  f.emission.destroy();
+  // Every retired predecessor buffer must already be destroyed while only the live tip remains.
+  const liveCount=allHistoryBuffers.filter(b=>b.destroyed===0).length;
+  assert.equal(liveCount,1);
+  assert.equal(prevHolder.history.buffer.destroyed,0);
+  assert.equal(f.emitted.buffer.destroyed,1);
+  prevHolder.destroy();
+  assert.equal(prevHolder.history.buffer.destroyed,1);
+});

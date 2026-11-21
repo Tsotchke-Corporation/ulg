@@ -22,9 +22,19 @@ function rotr(value, bits) {
 }
 
 const SHA256_WORDS = new Uint32Array(64);
-const SHARED_TEXT_ENCODER = new TextEncoder();
+let cachedTextEncoderCtor = null;
+let cachedTextEncoder = null;
 let sha256Padded = new Uint8Array(4096);
 let sha256PaddedView = new DataView(sha256Padded.buffer);
+
+function encodeUtf8Text(value) {
+  const Ctor = globalThis.TextEncoder;
+  if (Ctor !== cachedTextEncoderCtor || !cachedTextEncoder) {
+    cachedTextEncoderCtor = Ctor;
+    cachedTextEncoder = new Ctor();
+  }
+  return cachedTextEncoder.encode(value);
+}
 
 function ensureSha256Padded(paddedLength) {
   if (sha256Padded.length < paddedLength) {
@@ -132,7 +142,7 @@ export function schroederAuthorityTextFingerprint(value, label) {
     throw new TypeError('authority fingerprint text must be a string');
   }
   return schroederAuthorityBytesFingerprint(
-    SHARED_TEXT_ENCODER.encode(value),
+    encodeUtf8Text(value),
     label
   );
 }

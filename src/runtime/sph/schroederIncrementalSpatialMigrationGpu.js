@@ -2274,6 +2274,7 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
   maxDisplacementSpacingMultiple = 1.0,
   allowMembershipDelta = false,
   enforceCellJumpLimit = true,
+  targetDirectoryBuffers = null,
   label = 'ulg-schroeder-incremental-spatial-encoder'
 } = {}) {
   if (!device?.createBuffer || !device?.createComputePipeline) {
@@ -2359,6 +2360,11 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
     scratchLayout.atomicByteLength,
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   );
+  if (Array.isArray(targetDirectoryBuffers)) {
+    for (const dirBuf of targetDirectoryBuffers) {
+      if (dirBuf) paramsBufferForTarget(dirBuf);
+    }
+  }
   const maxWorkgroupsPerDim = positiveInteger(
     device.limits?.maxComputeWorkgroupsPerDimension ?? 65535,
     'maxComputeWorkgroupsPerDimension'

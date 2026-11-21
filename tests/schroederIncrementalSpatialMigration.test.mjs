@@ -60,7 +60,7 @@ test('A2 certificate parser decodes conservative displacement ratio and fallback
   assert.equal(cert.admitted, true);
 });
 
-test('A2 WGSL generator binds <= 8 storage buffers and defines all 16 single-pass stages', () => {
+test('A2 WGSL generator binds <= 8 storage buffers and defines all 17 single-pass stages', () => {
   const layout = createSchroederIncrementalSpatialScratchLayout({
     maxSourceCount: 4096,
     cellCapacity: 4096,
@@ -69,8 +69,9 @@ test('A2 WGSL generator binds <= 8 storage buffers and defines all 16 single-pas
   const wgsl = createSchroederIncrementalSpatialMigrationWgsl(layout);
   assert.equal(typeof ULG_SCHROEDER_INCREMENTAL_SPATIAL_MIGRATION_SCHEMA, 'string');
   const storageDecls = wgsl.match(/var<storage,/g) || [];
-  assert.equal(storageDecls.length, 7, 'uses 7 storage buffers (<= 8 WebGPU minimum)');
+  assert.equal(storageDecls.length, 8, 'uses 8 storage buffers (<= 8 WebGPU minimum)');
   for (const fnName of [
+    'detect_departed_members',
     'detect_moved_members',
     'sort_moved_chunks',
     'merge_w1024',
@@ -149,19 +150,19 @@ test('A2 live spatial epoch runtime uses 1-pass incremental CSR migration on suc
   assert.equal(exec2.a2IncrementalMigration.mode, 'incremental-gpu-encoded');
   assert.equal(exec2.a2IncrementalMigration.predecessorGenerationId, 1);
   assert.equal(exec2.encodedComputePassCount, 1);
-  assert.equal(exec2.encodedDispatchCount, 16);
+  assert.equal(exec2.encodedDispatchCount, 17);
   assert.equal(exec2.radixPassCount, 0);
   assert.notEqual(exec2.directoryBuffer, exec1.directoryBuffer, 'must write to distinct immutable arena');
   runtime.markExecutionSubmitted(exec2);
 
-  // Release exec1 queue-ordered, then generation 3 with changed topologyEpoch -> falls back to full radix
+  // Release exec1 queue-ordered, then generation 3 with changed chartEpoch -> falls back to full radix
   assert.equal(runtime.releaseExecutionQueueOrdered(exec1), true);
   const exec3 = runtime.encode(createMockEncoder(), {
     sourceBuffer: srcA,
     sourceCount: 32,
     sortMode: 'lexicographic-u32x5',
     generationId: 3,
-    topologyEpoch: 2
+    chartEpoch: 2
   });
   assert.equal(exec3.a2IncrementalMigration.mode, 'full-radix');
   assert.ok(exec3.radixPassCount > 0);

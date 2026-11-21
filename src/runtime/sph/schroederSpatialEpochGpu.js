@@ -2065,25 +2065,25 @@ export function createSchroederSpatialEpochGpu(device, {
     let radixUnique = null;
     let incrementalMigrationEncoded = null;
     try {
-      const canUseIncrementalMigration = Boolean(
-        incrementalMigrationSupported
-        && !directoryV2
-        && !logicalSourceCountGpuAuthored
-        && !activeRankViewEnabled
-        && plan.sourceCount > 0
-        && globalThis.__ulgDisableIncrementalSpatialMigration !== true
-        && lastAdmittedV1Snapshot != null
-        && lastAdmittedV1Snapshot.arena !== arena
-        && lastAdmittedV1Snapshot.arena.writeSerial === lastAdmittedV1Snapshot.writeSerial
-        && lastAdmittedV1Snapshot.execution.sourceCount === plan.sourceCount
-        && lastAdmittedV1Snapshot.execution.topologyEpoch === plan.topologyEpoch
-        && lastAdmittedV1Snapshot.execution.chartEpoch === plan.chartEpoch
-        && lastAdmittedV1Snapshot.execution.levelEpoch === plan.levelEpoch
-        && lastAdmittedV1Snapshot.execution.supportEpoch === plan.supportEpoch
-        && lastAdmittedV1Snapshot.execution.sortMode === plan.sortMode
-        && lastAdmittedV1Snapshot.execution.sourceRowLayoutId === plan.sourceRowLayoutId
-        && webGpuBufferMatchesDevice(lastAdmittedV1Snapshot.execution.directoryBuffer, device)
-      );
+      let incrementalSkipReason = null;
+      if (!incrementalMigrationSupported) incrementalSkipReason = 'unsupported';
+      else if (directoryV2) incrementalSkipReason = 'directory-v2';
+      else if (logicalSourceCountGpuAuthored) incrementalSkipReason = 'logical-source-count-gpu-authored';
+      else if (activeRankViewEnabled) incrementalSkipReason = 'active-rank-view';
+      else if (!(plan.sourceCount > 0)) incrementalSkipReason = 'empty-source';
+      else if (globalThis.__ulgDisableIncrementalSpatialMigration === true) incrementalSkipReason = 'disabled-by-flag';
+      else if (!lastAdmittedV1Snapshot) incrementalSkipReason = 'first-generation';
+      else if (lastAdmittedV1Snapshot.arena === arena) incrementalSkipReason = 'same-arena';
+      else if (lastAdmittedV1Snapshot.arena.writeSerial !== lastAdmittedV1Snapshot.writeSerial) incrementalSkipReason = 'arena-overwritten';
+      else if (lastAdmittedV1Snapshot.execution.sourceCount !== plan.sourceCount) incrementalSkipReason = 'source-count-changed';
+      else if (lastAdmittedV1Snapshot.execution.topologyEpoch !== plan.topologyEpoch) incrementalSkipReason = 'topology-epoch-changed';
+      else if (lastAdmittedV1Snapshot.execution.chartEpoch !== plan.chartEpoch) incrementalSkipReason = 'chart-epoch-changed';
+      else if (lastAdmittedV1Snapshot.execution.levelEpoch !== plan.levelEpoch) incrementalSkipReason = 'level-epoch-changed';
+      else if (lastAdmittedV1Snapshot.execution.supportEpoch !== plan.supportEpoch) incrementalSkipReason = 'support-epoch-changed';
+      else if (lastAdmittedV1Snapshot.execution.sortMode !== plan.sortMode) incrementalSkipReason = 'sort-mode-changed';
+      else if (lastAdmittedV1Snapshot.execution.sourceRowLayoutId !== plan.sourceRowLayoutId) incrementalSkipReason = 'row-layout-changed';
+      else if (!webGpuBufferMatchesDevice(lastAdmittedV1Snapshot.execution.directoryBuffer, device)) incrementalSkipReason = 'device-mismatch';
+      const canUseIncrementalMigration = incrementalSkipReason === null;
       const activeIncrementalEncoder = canUseIncrementalMigration
         ? ensureIncrementalMigrationEncoder()
         : null;
@@ -2616,6 +2616,7 @@ export function createSchroederSpatialEpochGpu(device, {
         radixUnique,
         arenaWriteSerial: arena.writeSerial,
         incrementalEncoded: Boolean(incrementalMigrationEncoded),
+      incrementalSkipReason,
         sourceBuffer: resolvedSourceBuffer,
         activeSourceView: directoryV2 ? activeSourceView : null,
         activeSourceViewBuffer: directoryV2
@@ -2783,9 +2784,11 @@ export function createSchroederSpatialEpochGpu(device, {
       if (ownership.incrementalEncoded) {
         stats.incrementalHits += 1;
         stats.lastMode = 'incremental-gpu-encoded';
+        stats.lastSkipReason = null;
       } else {
         stats.fullRadixBuilds += 1;
         stats.lastMode = 'full-radix';
+        stats.lastSkipReason = ownership.incrementalSkipReason ?? null;
       }
       stats.lastGenerationId = execution.generationId;
     }

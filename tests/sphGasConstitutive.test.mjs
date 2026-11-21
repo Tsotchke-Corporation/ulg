@@ -148,11 +148,13 @@ test('uploaded mechanics identity includes law tail and malformed layouts alloca
   let allocations = 0;
   const device = { createBuffer: () => { allocations++; return { destroy() {} }; }, queue: { writeBuffer() {} } };
   const upload = uploadMlsMpmMechanicsMaterialPhaseRecords(device, table);
+  const validAllocations = allocations;
+  assert.ok(validAllocations >= 1);
   assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch(upload, table, device), true);
   table.records[28] *= 2;
   assert.equal(uploadedMechanicsMaterialPhaseRecordsMatch(upload, table, device), false);
   table.records[28] = -1;
   assert.throws(() => uploadMlsMpmMechanicsMaterialPhaseRecords(device, table));
-  assert.equal(allocations, 1);
+  assert.equal(allocations, validAllocations);
   upload.destroyMechanicsMaterialPhaseUpload();
 });

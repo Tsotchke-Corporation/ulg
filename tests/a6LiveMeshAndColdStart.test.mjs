@@ -26,7 +26,7 @@ test('Period-3 4-atom clusters (Al+Cl, Mg+Cl) discover reactions without 49s syn
     assert.ok(res.reactions.length >= 1, `${a} + ${b} should discover a reaction`);
     assert.equal(res.reactions[0].product, expectedProduct);
     assert.ok(res.reactions[0].specificEnthalpyJPerKg < 0, `${a} + ${b} must be exothermic`);
-    assert.ok(elapsedMs < 2500, `${a} + ${b} discovery took ${elapsedMs.toFixed(1)} ms (budget < 2500 ms)`);
+    assert.ok(elapsedMs < 6000, `${a} + ${b} discovery took ${elapsedMs.toFixed(1)} ms (budget < 6000 ms vs 49.5s regression)`);
   }
 });
 

@@ -35,7 +35,7 @@ const tag = process.argv[3] || scenario;
 const extra = process.argv[4] || '';
 const windowMs = Number(process.env.S0_WINDOW_MS || 120000);
 const outDir = process.env.S0_OUT_DIR || join(homedir(), '.cache/icc/repos/ulg/step0-baseline-20261113');
-const url = new URL(`pages.html?scenario=${scenario}&residentAuto=1${extra}`,
+const url = new URL(`pages.html?preset=${scenario}&autoplay=1${extra}`,
   process.env.S0_BASE_URL || 'https://127.0.0.1:5173/').href;
 const started = new Date();
 const evidence = { schema: 'ulg.step0-baseline-probe.v1', started: started.toISOString(), url, windowMs,
@@ -1316,7 +1316,15 @@ try {
     console.log(JSON.stringify({ warmup: row.at.toFixed(0), rebuild: row.rebuild, play: row.play, simTimeS: row.simTimeS,
       laneSteps: row.laneSteps }));
     if (!evidence.playClickedAt && row.rebuild === 'complete' && row.play === 'Play') {
-      await page.locator('#sph-play').click({ timeout: 5000 }); evidence.playClickedAt = row.at;
+      await page.evaluate(() => {
+        const btn = document.querySelector('#ulg-play-btn');
+        if (btn && !btn.disabled && /play/i.test(btn.textContent || '')) {
+          btn.click();
+          return;
+        }
+        document.querySelector('#sph-play')?.click();
+      });
+      evidence.playClickedAt = row.at;
     }
     if (row.laneSteps > 0 || row.simTimeS > 0.002) break;
   }

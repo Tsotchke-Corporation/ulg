@@ -98,3 +98,131 @@ export function startClientDerivationRequester({ channelName, peerId, primaryPee
     }
   };
 }
+
+export const ULG_LIVE_CLIENT_DERIVATION_PEER_MESH_CHANNEL = 'ulg-a6-derivation-peers-v1';
+
+/**
+ * Live self-discovering A6 PeerCompute client derivation mesh for browser
+ * sessions. Each live tab acts as a PeerCompute NodeKernel responder over
+ * `BroadcastChannel` and discovers sibling same-origin tabs. When at least two
+ * sibling responders are alive, `getActiveRequester()` returns a 2-of-2 quorum
+ * PeerCompute requester; when running solo, it returns `null` so the bridge
+ * uses the local warm Eshkol/MoonLab WASM/WebGPU worker with zero spurious
+ * peer-absent debt.
+ */
+export function startLiveClientDerivationPeerMesh({
+  channelName = ULG_LIVE_CLIENT_DERIVATION_PEER_MESH_CHANNEL,
+  peerId = `ulg-tab-${Math.random().toString(36).slice(2, 10)}`,
+  nodeId = null,
+  timeoutMs = 15_000,
+  staleMs = 1500
+} = {}) {
+  if (typeof BroadcastChannel !== 'function') return null;
+  const resolvedNodeId = nodeId || `client-${peerId}`;
+  const responder = startClientDerivationResponder({
+    channelName,
+    peerId,
+    nodeId: resolvedNodeId
+  });
+  const discoveryChannel = new BroadcastChannel(channelName);
+  const remotePresence = new Map(); // remotePeerId -> { alive, at }
+  let activeRequester = null;
+  let activePeerSignature = '';
+  let stopped = false;
+
+  const pruneAndListRemotePeers = () => {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const alive = [];
+    for (const [id, rec] of remotePresence.entries()) {
+      if (!rec.alive || now - rec.at > staleMs) {
+        remotePresence.delete(id);
+        continue;
+      }
+      alive.push(id);
+    }
+    alive.sort();
+    return alive;
+  };
+
+  discoveryChannel.onmessage = (event) => {
+    if (stopped) return;
+    const message = event.data ?? {};
+    if (message.type !== 'presence' || !message.from || message.from === peerId) return;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (message.alive) {
+      remotePresence.set(message.from, { alive: true, at: now });
+    } else {
+      remotePresence.delete(message.from);
+    }
+  };
+
+  function getActiveRequester() {
+    if (stopped) return null;
+    const peers = pruneAndListRemotePeers();
+    if (peers.length < 2) {
+      if (activeRequester) {
+        try { activeRequester.stop(); } catch { /* Already closed. */ }
+        activeRequester = null;
+        activePeerSignature = '';
+      }
+      return null;
+    }
+    const sig = peers.join(',');
+    if (activeRequester && activePeerSignature === sig) {
+      return activeRequester;
+    }
+    if (activeRequester) {
+      try { activeRequester.stop(); } catch { /* Already closed. */ }
+      activeRequester = null;
+    }
+    activeRequester = startClientDerivationRequester({
+      channelName,
+      peerId: `${peerId}:req`,
+      primaryPeerId: peers[0],
+      replicaPeerIds: peers.slice(1),
+      timeoutMs
+    });
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    for (const id of peers) {
+      activeRequester.presence.set(id, { alive: true, at: now });
+    }
+    activePeerSignature = sig;
+    return activeRequester;
+  }
+
+  function getStatus() {
+    const peers = stopped ? [] : pruneAndListRemotePeers();
+    return Object.freeze({
+      active: !stopped,
+      channelName,
+      peerId,
+      nodeId: resolvedNodeId,
+      remotePeerIds: Object.freeze(peers),
+      remotePeerCount: peers.length,
+      quorumReady: peers.length >= 2,
+      requesterActive: Boolean(activeRequester)
+    });
+  }
+
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    if (activeRequester) {
+      try { activeRequester.stop(); } catch { /* Already closed. */ }
+      activeRequester = null;
+    }
+    try { responder.stop(); } catch { /* Already closed. */ }
+    try { discoveryChannel.close(); } catch { /* Already closed. */ }
+    remotePresence.clear();
+  }
+
+  globalThis.addEventListener?.('pagehide', stop, { once: true });
+  return Object.freeze({
+    peerId,
+    nodeId: resolvedNodeId,
+    channelName,
+    getActiveRequester,
+    getStatus,
+    stop
+  });
+}

@@ -120,9 +120,26 @@ export function reactionDiscoveryProvesEmptyCatalog(result) {
 
 const atom = (Z, x, y, z) => ({ Z, position: [x, y, z] });
 const speciesInBasis = (species) => species.atoms.every((a) => a.Z <= BASIS_MAX_Z);
+// Pure-JS STO-3G two-electron integrals scale as O(nBasis^4): a 4-atom Period-3
+// cluster (e.g. AlCl3, 36 basis functions) stalls ~27 s synchronously. Cap
+// synchronous STO-3G at 24 basis functions and route larger Period-3 clusters to
+// the consistent all-element atomic-Kohn-Sham tight-binding solver.
+const MAX_SYNC_STO3G_BASIS_FUNCTIONS = 24;
+function sto3gBasisFunctionCount(species) {
+  let count = 0;
+  for (const a of species?.atoms || []) {
+    const z = Number(a?.Z ?? 0);
+    if (z <= 2) count += 1;
+    else if (z <= 10) count += 5;
+    else count += 9;
+  }
+  return count;
+}
 
 function energyModelForSpecies(...species) {
-  return species.every(speciesInBasis) ? ENERGY_MODEL_HF : ENERGY_MODEL_ALL_ELEMENT;
+  return species.every((item) => speciesInBasis(item) && sto3gBasisFunctionCount(item) <= MAX_SYNC_STO3G_BASIS_FUNCTIONS)
+    ? ENERGY_MODEL_HF
+    : ENERGY_MODEL_ALL_ELEMENT;
 }
 
 function speciesEnergyHa(species, model = energyModelForSpecies(species)) {
@@ -636,18 +653,6 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     ...candidate.reactants.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb)),
     ...candidate.products.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb))
   ];
-  const model = energyModelForSpecies(...species);
-  const largestSpeciesAtomCount = Math.max(...species.map((item) => item.atoms?.length || 0));
-  const deriveCandidateEnergy = options.deriveCandidateEnergies !== false
-    && !(model === ENERGY_MODEL_HF && largestSpeciesAtomCount > 4);
-  let dHHa;
-  try {
-    if (!deriveCandidateEnergy) throw new Error('candidate energy derivation skipped for large light-element formula');
-    dHHa = termEnergySumHa(candidate.products, ca, cb, model)
-      - termEnergySumHa(candidate.reactants, ca, cb, model);
-  } catch {
-    dHHa = null;
-  }
   const balancedReactantMassKgPerEquation = candidate.reactants.reduce((sum, term) => (
     sum + Math.max(0, Number(term.coefficient) || 0) * formulaMolarMassKgPerMol(term.atomCounts)
   ), 0);
@@ -656,14 +661,27 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation
       / balancedReactantMassKgPerEquation
     : null;
+  const useReferenceEnergy = Number.isFinite(referenceSpecificEnthalpyJPerKg)
+    && referenceSpecificEnthalpyJPerKg < 0;
+  const model = energyModelForSpecies(...species);
+  const largestSpeciesAtomCount = Math.max(...species.map((item) => item.atoms?.length || 0));
+  const deriveCandidateEnergy = options.deriveCandidateEnergies !== false
+    && !useReferenceEnergy
+    && !(model === ENERGY_MODEL_HF && largestSpeciesAtomCount > 4);
+  let dHHa;
+  try {
+    if (!deriveCandidateEnergy) throw new Error('candidate energy derivation skipped');
+    dHHa = termEnergySumHa(candidate.products, ca, cb, model)
+      - termEnergySumHa(candidate.reactants, ca, cb, model);
+  } catch {
+    dHHa = null;
+  }
   const derivedSpecificEnthalpyJPerKg = Number.isFinite(dHHa)
     ? (dHHa * HARTREE_J * AVOGADRO) / balancedReactantMassKgPerEquation
     : null;
   const candidateSpecificEnthalpyJPerKg = Number.isFinite(candidate.energetics.reactionEnthalpyJPerBalancedEquation)
     ? candidate.energetics.reactionEnthalpyJPerBalancedEquation / balancedReactantMassKgPerEquation
     : candidate.energetics.specificEnthalpyJPerKgProduct;
-  const useReferenceEnergy = Number.isFinite(referenceSpecificEnthalpyJPerKg)
-    && referenceSpecificEnthalpyJPerKg < 0;
   const useDerivedEnergy = !useReferenceEnergy
     && Number.isFinite(derivedSpecificEnthalpyJPerKg)
     && (derivedSpecificEnthalpyJPerKg < 0 || !(candidateSpecificEnthalpyJPerKg < 0));

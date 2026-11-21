@@ -330,11 +330,33 @@ export function formulaUnitGeometry(atomCounts) {
   return out;
 }
 
+const MAX_SYNC_STO3G_BASIS_FUNCTIONS = 24;
+
+function sto3gBasisCountForZ(Z) {
+  const z = Number(Z);
+  if (z <= 2) return 1;
+  if (z <= 10) return 5;
+  return 9;
+}
+
 function allInMolecularBasis(atomCounts) {
-  return Object.keys(atomCounts).every((Z) => Number(Z) <= BASIS_MAX_Z);
+  let basisCount = 0;
+  for (const [zRaw, count] of Object.entries(atomCounts || {})) {
+    const z = Number(zRaw);
+    if (!(z <= BASIS_MAX_Z)) return false;
+    basisCount += sto3gBasisCountForZ(z) * Math.max(0, Number(count) || 0);
+  }
+  return basisCount > 0 && basisCount <= MAX_SYNC_STO3G_BASIS_FUNCTIONS;
 }
 
 function homoLumoColor(geometry) {
+  if (!Array.isArray(geometry) || geometry.length === 0) return null;
+  let basisCount = 0;
+  for (const a of geometry) {
+    if (!(Number(a?.Z) <= BASIS_MAX_Z)) return null;
+    basisCount += sto3gBasisCountForZ(a.Z);
+  }
+  if (basisCount > MAX_SYNC_STO3G_BASIS_FUNCTIONS) return null;
   try {
     const res = rhf(geometry);
     const eps = res.orbitalEnergies;

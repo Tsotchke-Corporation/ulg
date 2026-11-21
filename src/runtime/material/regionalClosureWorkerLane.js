@@ -23,7 +23,7 @@ fn a3_generator(x: vec3<f32>) -> f32 {
 }
 `;
 
-const lanes = new WeakMap();
+const lanes = (globalThis[Symbol.for('ulg.regionalClosureWorkerLane.lanes')] ??= new WeakMap());
 
 function requireLiveLane(lane) {
   const state = lanes.get(lane);

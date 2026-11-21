@@ -46,6 +46,7 @@ import {
   uploadOpticalGpuTable
 } from '../runtime/material/opticalGpuBuffers.js';
 import { createWarmClosureMissBridge } from '../runtime/material/warmClosureMissBridge.js';
+import { startLiveClientDerivationPeerMesh } from '../services/clientDerivationPeers.js';
 import {
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -53527,6 +53528,9 @@ fn main(
       if (workerSchroederLaneState?.a6Bridge) {
         try { workerSchroederLaneState.a6Bridge.destroy(); } catch { /* Already closed. */ }
       }
+      if (workerSchroederLaneState?.a6PeerMesh) {
+        try { workerSchroederLaneState.a6PeerMesh.stop(); } catch { /* Already closed. */ }
+      }
       const supersededLane = (
         workerSchroederLaneState
         && workerSchroederLaneBridgeReference === bridge
@@ -54500,14 +54504,25 @@ fn main(
       // dispatch deduplicated non-blocking EOS stiffness misses over G5
       // reservations without ever stalling the physics cadence.
       if (typeof Worker === 'function' && globalThis.__ulgDisableA6Bridge !== true) {
+        if (typeof BroadcastChannel === 'function' && globalThis.__ulgDisableA6PeerMesh !== true) {
+          laneState.a6PeerMesh ??= startLiveClientDerivationPeerMesh({
+            peerId: `${laneId}`,
+            nodeId: `client-${laneId}`
+          });
+        }
+        const activePeerRequester = globalThis.__ulgA6PeerRequester
+          ?? laneState.a6PeerMesh?.getActiveRequester?.()
+          ?? null;
         laneState.a6Bridge ??= createWarmClosureMissBridge({
           maxInFlight: 4,
-          peerRequester: globalThis.__ulgA6PeerRequester ?? null,
+          peerRequester: activePeerRequester,
+          onPeerExhaustion: 'local-warm-worker',
           scope: `${laneId}:a6-closure`,
           onStateCommit: (delta) => {
             laneState.lastA6CommitDelta = delta;
           }
         });
+        laneState.a6Bridge.setPeerRequester?.(activePeerRequester);
         laneState.a6Bridge.adoptPendingAtScheduleBoundary({ scheduleId });
         const missNeeded = committedThermalPotential?.status === 'no-valid-fit'
           || (committedThermalPotential && !committedThermalPotential.adopted)
@@ -54529,8 +54544,11 @@ fn main(
           }
         }
         const a6Status = laneState.a6Bridge.getStatus();
+        const a6PeerMeshStatus = laneState.a6PeerMesh?.getStatus?.() ?? null;
         scene.userData.sphA6ClosureBridgeStatus = a6Status;
+        scene.userData.sphA6PeerMeshStatus = a6PeerMeshStatus;
         globalThis.__ulgA6ClosureBridgeStatus = a6Status;
+        globalThis.__ulgA6PeerMeshStatus = a6PeerMeshStatus;
       }
     } catch (error) {
       if (

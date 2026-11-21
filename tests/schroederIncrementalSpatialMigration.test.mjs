@@ -6,10 +6,15 @@ import {
   SCHROEDER_INCREMENTAL_MIGRATION_MODE,
   ULG_SCHROEDER_INCREMENTAL_SPATIAL_CERTIFICATE_SCHEMA,
   ULG_SCHROEDER_INCREMENTAL_SPATIAL_MIGRATION_SCHEMA,
+  createSchroederIncrementalSpatialMigrationEncoder,
   createSchroederIncrementalSpatialMigrationWgsl,
   createSchroederIncrementalSpatialScratchLayout,
   parseSchroederIncrementalSpatialCertificate
 } from '../src/runtime/sph/schroederIncrementalSpatialMigrationGpu.js';
+import {
+  createSchroederSpatialEpochGpu,
+  registerSchroederIncrementalSpatialMigrationEncoderFactory
+} from '../src/runtime/sph/schroederSpatialEpochGpu.js';
 
 test('A2 scratch layout partitions all CSR migration regions without overlap', () => {
   const layout = createSchroederIncrementalSpatialScratchLayout({
@@ -83,4 +88,86 @@ test('A2 WGSL generator binds <= 8 storage buffers and defines all 16 single-pas
   ]) {
     assert.ok(wgsl.includes(`fn ${fnName}`), `missing entry point ${fnName}`);
   }
+});
+
+test('A2 live spatial epoch runtime uses 1-pass incremental CSR migration on successor steps and falls back on contract changes', () => {
+  registerSchroederIncrementalSpatialMigrationEncoderFactory(createSchroederIncrementalSpatialMigrationEncoder);
+  const buffers = [];
+  const createMockBuffer = ({ label, size, usage }) => {
+    const b = { label, size, usage, destroyed: false, destroy() { this.destroyed = true; } };
+    buffers.push(b);
+    return b;
+  };
+  const mockDevice = {
+    limits: { maxComputeWorkgroupsPerDimension: 65535, maxStorageBuffersPerShaderStage: 8 },
+    createBuffer: createMockBuffer,
+    createShaderModule: ({ code }) => ({ code }),
+    createBindGroupLayout: (desc) => ({ desc }),
+    createPipelineLayout: (desc) => ({ desc }),
+    createComputePipeline: (desc) => ({ desc, getBindGroupLayout: () => ({}) }),
+    createBindGroup: (desc) => ({ desc }),
+    queue: { writeBuffer() {}, submit() {}, onSubmittedWorkDone: () => Promise.resolve() }
+  };
+  const createMockEncoder = () => ({
+    clearBuffer() {},
+    copyBufferToBuffer() {},
+    beginComputePass() {
+      return { setBindGroup() {}, setPipeline() {}, dispatchWorkgroups() {}, dispatchWorkgroupsIndirect() {}, end() {} };
+    },
+    finish() { return {}; }
+  });
+
+  const runtime = createSchroederSpatialEpochGpu(mockDevice, {
+    maxSourceCount: 64,
+    cellCapacity: 64,
+    arenaCount: 2,
+    enableIncrementalMigration: true
+  });
+  const srcA = createMockBuffer({ label: 'src-a', size: 64 * 64, usage: 0x80 });
+  const srcB = createMockBuffer({ label: 'src-b', size: 64 * 64, usage: 0x80 });
+
+  // Generation 1: bootstrap uses full radix
+  const exec1 = runtime.encode(createMockEncoder(), {
+    sourceBuffer: srcA,
+    sourceCount: 32,
+    sortMode: 'lexicographic-u32x5',
+    generationId: 1,
+    topologyEpoch: 1
+  });
+  assert.equal(exec1.a2IncrementalMigration.mode, 'full-radix');
+  assert.ok(exec1.radixPassCount > 0);
+  runtime.markExecutionSubmitted(exec1);
+
+  // Generation 2: same contract -> 1-pass incremental CSR into distinct immutable arena!
+  const exec2 = runtime.encode(createMockEncoder(), {
+    sourceBuffer: srcB,
+    sourceCount: 32,
+    sortMode: 'lexicographic-u32x5',
+    generationId: 2,
+    topologyEpoch: 1
+  });
+  assert.equal(exec2.a2IncrementalMigration.mode, 'incremental-gpu-encoded');
+  assert.equal(exec2.a2IncrementalMigration.predecessorGenerationId, 1);
+  assert.equal(exec2.encodedComputePassCount, 1);
+  assert.equal(exec2.encodedDispatchCount, 16);
+  assert.equal(exec2.radixPassCount, 0);
+  assert.notEqual(exec2.directoryBuffer, exec1.directoryBuffer, 'must write to distinct immutable arena');
+  runtime.markExecutionSubmitted(exec2);
+
+  // Release exec1 queue-ordered, then generation 3 with changed topologyEpoch -> falls back to full radix
+  assert.equal(runtime.releaseExecutionQueueOrdered(exec1), true);
+  const exec3 = runtime.encode(createMockEncoder(), {
+    sourceBuffer: srcA,
+    sourceCount: 32,
+    sortMode: 'lexicographic-u32x5',
+    generationId: 3,
+    topologyEpoch: 2
+  });
+  assert.equal(exec3.a2IncrementalMigration.mode, 'full-radix');
+  assert.ok(exec3.radixPassCount > 0);
+  runtime.markExecutionSubmitted(exec3);
+
+  assert.equal(runtime.releaseExecutionQueueOrdered(exec2), true);
+  assert.equal(runtime.releaseExecutionQueueOrdered(exec3), true);
+  assert.equal(runtime.destroy(), true);
 });

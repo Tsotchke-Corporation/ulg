@@ -2024,3 +2024,208 @@ export function createSchroederIncrementalSpatialMigrationGpu(device, {
     destroy
   });
 }
+
+/**
+ * Lightweight target-arena encoder for live `createSchroederSpatialEpochGpu`
+ * integration (A2). Writes the single-pass 16-dispatch incremental CSR
+ * directory directly into caller-owned immutable target arena buffers without
+ * allocating duplicate directory arenas.
+ */
+export function createSchroederIncrementalSpatialMigrationEncoder(device, {
+  maxSourceCount,
+  cellCapacity = maxSourceCount,
+  maxMovedMembers = 16384,
+  maxCellJump = 1,
+  maxDisplacementSpacingMultiple = 1.0,
+  label = 'ulg-schroeder-incremental-spatial-encoder'
+} = {}) {
+  if (!device?.createBuffer || !device?.createComputePipeline) {
+    throw new TypeError('Incremental spatial migration encoder requires a WebGPU device');
+  }
+  const resolvedMaxSourceCount = positiveInteger(maxSourceCount, 'maxSourceCount', MAX_EXACT_F32_INTEGER);
+  const resolvedCellCapacity = positiveInteger(
+    cellCapacity,
+    'cellCapacity',
+    Math.min(resolvedMaxSourceCount, MAX_SUPPORTED_CELL_CAPACITY)
+  );
+  const resolvedMaxMovedMembers = normalizeMaxMovedMembers(
+    Math.min(maxMovedMembers, Math.max(1024, resolvedMaxSourceCount))
+  );
+  const resolvedMaxCellJump = nonNegativeInteger(maxCellJump, 'maxCellJump', 1024);
+  const resolvedMaxDisp = Number(maxDisplacementSpacingMultiple);
+  if (!(Number.isFinite(resolvedMaxDisp) && resolvedMaxDisp > 0)) {
+    throw new RangeError('maxDisplacementSpacingMultiple must be a finite positive number');
+  }
+  const scratchLayout = createSchroederIncrementalSpatialScratchLayout({
+    maxSourceCount: resolvedMaxSourceCount,
+    cellCapacity: resolvedCellCapacity,
+    maxMovedMembers: resolvedMaxMovedMembers
+  });
+  const rawDevice = unwrapWebGpuCacheDevice(device);
+  const bindings = [
+    computeBufferBinding(0, 'uniform'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(4, 'storage'),
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage')
+  ];
+  const wgsl = createSchroederIncrementalSpatialMigrationWgsl(scratchLayout);
+  const cachePrefix = `ulg-a2-inc-spatial-${resolvedMaxSourceCount}-${resolvedCellCapacity}-${resolvedMaxMovedMembers}.v1`;
+  const pipelines = Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [
+    entryPoint,
+    createCachedExplicitComputePipeline(rawDevice, {
+      cacheKey: `${cachePrefix}:${entryPoint}`,
+      label: `${label}-${entryPoint}`,
+      code: wgsl,
+      entryPoint,
+      bindings
+    })
+  ]));
+  const createOwned = (bufLabel, size, usage) => tagWebGpuBufferDevice(
+    device.createBuffer({ label: bufLabel, size: Math.max(16, size), usage }),
+    device
+  );
+  const paramsBuffer = createOwned(`${label}-params`, PARAMS_BYTES, GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
+  const scratchBuffer = createOwned(`${label}-scratch`, scratchLayout.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+  const atomicsBuffer = createOwned(
+    `${label}-atomics`,
+    scratchLayout.atomicByteLength,
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const maxWorkgroupsPerDim = positiveInteger(
+    device.limits?.maxComputeWorkgroupsPerDimension ?? 65535,
+    'maxComputeWorkgroupsPerDimension'
+  );
+  let destroyed = false;
+
+  function encodeIntoTarget(encoder, {
+    plan,
+    sourceBuffer,
+    prevSourceBuffer = null,
+    prevExecution,
+    targetDirectoryBuffer,
+    targetConsumerDispatchBuffer,
+    maxCellJumpOverride = null,
+    maxDisplacementOverride = null
+  }) {
+    if (destroyed) throw new Error(`${label} is destroyed`);
+    if (!prevExecution?.directoryBuffer || prevExecution.directoryBuffer === targetDirectoryBuffer) {
+      throw new TypeError('Incremental spatial migration requires a distinct immutable predecessor directoryBuffer');
+    }
+    const packedParams = packMigrationParams(plan, {
+      hasPrevSource: Boolean(prevSourceBuffer),
+      maxMovedMembers: resolvedMaxMovedMembers,
+      maxCellJump: maxCellJumpOverride == null
+        ? resolvedMaxCellJump
+        : nonNegativeInteger(maxCellJumpOverride, 'maxCellJumpOverride', 1024),
+      maxDisplacementSpacingMultiple: maxDisplacementOverride == null
+        ? resolvedMaxDisp
+        : Number(maxDisplacementOverride),
+      prevExecution,
+      consumerDispatchXLimit: maxWorkgroupsPerDim
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, packedParams);
+    encoder.clearBuffer(atomicsBuffer);
+    encoder.clearBuffer(
+      scratchBuffer,
+      scratchLayout.oldIncomingGroupOffset * UINT32_BYTES,
+      scratchLayout.oldIncomingGroupWords * UINT32_BYTES
+    );
+
+    const sourceBindBytes = Math.min(
+      Number(sourceBuffer.size) || resolvedMaxSourceCount * ACTIVE_NODE_STRIDE_FLOATS * 4,
+      resolvedMaxSourceCount * ACTIVE_NODE_STRIDE_FLOATS * 4
+    );
+    const prevSourceBindBuffer = prevSourceBuffer || sourceBuffer;
+    const prevSourceBindBytes = Math.min(
+      Number(prevSourceBindBuffer.size) || sourceBindBytes,
+      resolvedMaxSourceCount * ACTIVE_NODE_STRIDE_FLOATS * 4
+    );
+    const bindGroup = device.createBindGroup({
+      label: `${label}-bind-group`,
+      layout: pipelines.detect_moved_members.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: paramsBuffer, offset: 0, size: PARAMS_BYTES } },
+        { binding: 1, resource: { buffer: sourceBuffer, offset: 0, size: sourceBindBytes } },
+        { binding: 2, resource: { buffer: prevSourceBindBuffer, offset: 0, size: prevSourceBindBytes } },
+        { binding: 3, resource: { buffer: prevExecution.directoryBuffer } },
+        { binding: 4, resource: { buffer: targetDirectoryBuffer } },
+        { binding: 5, resource: { buffer: targetConsumerDispatchBuffer } },
+        { binding: 6, resource: { buffer: atomicsBuffer } },
+        { binding: 7, resource: { buffer: scratchBuffer } }
+      ]
+    });
+
+    const nGroups = Math.ceil(plan.sourceCount / 256);
+    const movedGroups = Math.ceil(resolvedMaxMovedMembers / 256);
+    const chunkGroups = Math.ceil(resolvedMaxMovedMembers / CHUNK_SORT_SIZE);
+    const scanGroups = Math.ceil(resolvedCellCapacity / SCAN_TILE_CELLS);
+    const cellGroups = Math.ceil(resolvedCellCapacity / 256);
+    const dirtyGroups = Math.ceil(scratchLayout.dirtyOldCellsCapacity / 64);
+
+    const pass = encoder.beginComputePass({ label });
+    pass.setBindGroup(0, bindGroup);
+    const dispatches = [
+      ['detect_moved_members', nGroups],
+      ['sort_moved_chunks', chunkGroups],
+      ['merge_w1024', movedGroups],
+      ['merge_w2048', movedGroups],
+      ['merge_w4096', movedGroups],
+      ['merge_w8192', movedGroups],
+      ['classify_moved_groups', 1],
+      ['scan_old_cells_local', scanGroups],
+      ['scan_old_cells_top', 1],
+      ['scan_old_cells_add', scanGroups],
+      ['emit_surviving_old_cells', cellGroups],
+      ['emit_brand_new_cells', movedGroups],
+      ['copy_clean_old_members', nGroups],
+      ['copy_brand_new_cell_members', movedGroups],
+      ['merge_dirty_cell_members', dirtyGroups],
+      ['finalize_migrated_directory', 1]
+    ];
+    for (const [entry, groups] of dispatches) {
+      pass.setPipeline(pipelines[entry].pipeline);
+      pass.dispatchWorkgroups(Math.max(1, groups));
+    }
+    pass.end();
+
+    return Object.freeze({
+      encodedComputePassCount: 1,
+      encodedDispatchCount: dispatches.length,
+      clearedWordCount: scratchLayout.atomicTotalWords + scratchLayout.oldIncomingGroupWords,
+      paramsWriteCount: 1,
+      certificateBuffer: atomicsBuffer
+    });
+  }
+
+  function ownedBuffers() {
+    return [
+      { role: 'spatial-incremental-params', arenaIndex: -1, buffer: paramsBuffer },
+      { role: 'spatial-incremental-scratch', arenaIndex: -1, buffer: scratchBuffer },
+      { role: 'spatial-incremental-atomics', arenaIndex: -1, buffer: atomicsBuffer }
+    ];
+  }
+
+  function destroy() {
+    if (destroyed) return false;
+    destroyed = true;
+    paramsBuffer.destroy?.();
+    scratchBuffer.destroy?.();
+    atomicsBuffer.destroy?.();
+    return true;
+  }
+
+  return Object.freeze({
+    schema: ULG_SCHROEDER_INCREMENTAL_SPATIAL_MIGRATION_SCHEMA,
+    scratchLayout,
+    maxSourceCount: resolvedMaxSourceCount,
+    cellCapacity: resolvedCellCapacity,
+    maxMovedMembers: resolvedMaxMovedMembers,
+    encodeIntoTarget,
+    ownedBuffers,
+    destroy
+  });
+}

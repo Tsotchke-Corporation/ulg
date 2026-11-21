@@ -240,6 +240,7 @@ import {
   canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
   canReleaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
   quarantineSchroederSpatialEpochGenerationAfterDeviceLoss,
+  registerSchroederIncrementalSpatialMigrationEncoderFactory,
   releaseSchroederSpatialEpochGenerationAfterQueue,
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer,
   releaseSchroederSpatialEpochGenerationQueueOrderedAfterSuccessor,
@@ -247,6 +248,13 @@ import {
   schroederSpatialEpochGenerationRetirementCapability,
   validateSchroederSpatialEpochGenerationLevelAssignment
 } from './schroederSpatialEpochGpu.js';
+import {
+  createSchroederIncrementalSpatialMigrationEncoder
+} from './schroederIncrementalSpatialMigrationGpu.js';
+
+registerSchroederIncrementalSpatialMigrationEncoderFactory(
+  createSchroederIncrementalSpatialMigrationEncoder
+);
 import {
   SCHROEDER_SPATIAL_MECHANICAL_CONSUMERS,
   runSchroederSpatialMechanicalProposalWebGpu

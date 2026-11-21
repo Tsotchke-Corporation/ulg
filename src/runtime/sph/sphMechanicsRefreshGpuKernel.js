@@ -12,6 +12,7 @@ import {
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
@@ -361,6 +362,21 @@ export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMater
     'ulg-mls-mpm-mechanics-material-phase-records',
     mechanicsMaterialTable.records
   );
+  const a4GasTableData = mechanicsMaterialTable.a4GasResponseTable?.data;
+  const a4GasResponseTableBuffer = a4GasTableData instanceof Float32Array && a4GasTableData.length > 0
+    ? writeStorageBuffer(
+      device,
+      'ulg-mls-mpm-a4-gas-response-table',
+      a4GasTableData
+    )
+    : null;
+  if (a4GasResponseTableBuffer && mechanicsMaterialTable.a4GasResponseStatus) {
+    globalThis.__ulgA4GasResponseStatus = Object.freeze({
+      ...mechanicsMaterialTable.a4GasResponseStatus,
+      gpuTableUploaded: true,
+      gpuTableBytes: a4GasTableData.byteLength
+    });
+  }
   let destroyed = false;
   return {
     schema: ULG_MLS_MPM_MECHANICS_MATERIAL_PHASE_UPLOAD_SCHEMA,
@@ -373,10 +389,13 @@ export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMater
     recordsByteLength: mechanicsMaterialTable.records.byteLength,
     recordsBuffer,
     materialPhaseBuffer: recordsBuffer,
+    a4GasResponseTableBuffer,
+    a4GasResponseStatus: mechanicsMaterialTable.a4GasResponseStatus ?? null,
     destroyMechanicsMaterialPhaseUpload() {
       if (destroyed) return;
       destroyed = true;
       recordsBuffer.destroy?.();
+      a4GasResponseTableBuffer?.destroy?.();
       this.destroyed = true;
     },
     destroyed: false,
@@ -872,11 +891,13 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : [])
   ];
   exact?.bind(authorityValidationBuffer);
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-mechanics-refresh-main',
     layout: refreshPipeline.bindGroupLayout,
     entries: bindGroupEntries
   });
-  const commitBindGroup = device.createBindGroup({
+  const commitBindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-mechanics-refresh-commit',
     layout: commitPipeline.bindGroupLayout,
     entries: bindGroupEntries
   });

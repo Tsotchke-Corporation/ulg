@@ -116,7 +116,7 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
         materials: Object.freeze(['h2o']),
         phases: Object.freeze(['gas'])
       }),
-      minimumCeilingContactYM: 3.95,
+      minimumCeilingContactYM: 4.75,
       minimumGasMassLossFraction: 0.02,
       minimumGasMassLossFractionOfSystem: 1e-6,
       minimumReturnDropM: 0.25
@@ -129,8 +129,8 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
       minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
       minimumSustainedRiseM: 0.05,
       tailSampleCount: 2,
-      // Closed box in the matrix's acceptance units (x 0.014 m): box top 5
-      // (0.07 m) and grid spacing 0.12407 (1.737 mm). The inset is the largest
+      // Closed box in the matrix's acceptance units (x 0.028 m): box top 5
+      // (0.14 m) and grid spacing 0.12407 (3.474 mm). The inset is the largest
       // G2P clearance, half a cell; tolerance 1e-6 and retreat 1e-2 of a cell.
       upperWallTerminal: Object.freeze({
         boundaryCondition: 'closed-g2p-clamped',
@@ -152,12 +152,12 @@ const STANDARD_PHASE_ACCEPTANCE_BY_PRESET = Object.freeze({
       selector: Object.freeze({ materials: Object.freeze(['h2']), phases: Object.freeze(['gas']) }),
       interfaceSelector: Object.freeze({ excludePhases: Object.freeze(['gas']) }),
       minimumMassFractionOfSystem: DEFAULT_GENERATED_COHORT_MINIMUM_SYSTEM_MASS_FRACTION,
-      minimumSustainedRiseM: 0.05 / 0.6,
+      minimumSustainedRiseM: 0.05,
       minimumSustainedMeanVyMPerS: 0.001,
       tailSampleCount: 2,
       upperWallTerminal: Object.freeze({
         boundaryCondition: 'closed-g2p-clamped',
-        boxMaxYM: 2.5,
+        boxMaxYM: 3,
         wallInsetM: 0.12407009817988002,
         contactToleranceM: 2.4814019635976003e-7,
         maximumTailRetreatM: 0.0024814019635976003

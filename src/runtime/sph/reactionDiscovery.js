@@ -120,9 +120,26 @@ export function reactionDiscoveryProvesEmptyCatalog(result) {
 
 const atom = (Z, x, y, z) => ({ Z, position: [x, y, z] });
 const speciesInBasis = (species) => species.atoms.every((a) => a.Z <= BASIS_MAX_Z);
+// Pure-JS STO-3G two-electron integrals scale as O(nBasis^4): a 4-atom Period-3
+// cluster (e.g. AlCl3, 36 basis functions) stalls ~27 s synchronously. Cap
+// synchronous STO-3G at 24 basis functions and route larger Period-3 clusters to
+// the consistent all-element atomic-Kohn-Sham tight-binding solver.
+const MAX_SYNC_STO3G_BASIS_FUNCTIONS = 24;
+function sto3gBasisFunctionCount(species) {
+  let count = 0;
+  for (const a of species?.atoms || []) {
+    const z = Number(a?.Z ?? 0);
+    if (z <= 2) count += 1;
+    else if (z <= 10) count += 5;
+    else count += 9;
+  }
+  return count;
+}
 
 function energyModelForSpecies(...species) {
-  return species.every(speciesInBasis) ? ENERGY_MODEL_HF : ENERGY_MODEL_ALL_ELEMENT;
+  return species.every((item) => speciesInBasis(item) && sto3gBasisFunctionCount(item) <= MAX_SYNC_STO3G_BASIS_FUNCTIONS)
+    ? ENERGY_MODEL_HF
+    : ENERGY_MODEL_ALL_ELEMENT;
 }
 
 function speciesEnergyHa(species, model = energyModelForSpecies(species)) {
@@ -636,18 +653,6 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     ...candidate.reactants.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb)),
     ...candidate.products.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb))
   ];
-  const model = energyModelForSpecies(...species);
-  const largestSpeciesAtomCount = Math.max(...species.map((item) => item.atoms?.length || 0));
-  const deriveCandidateEnergy = options.deriveCandidateEnergies !== false
-    && !(model === ENERGY_MODEL_HF && largestSpeciesAtomCount > 4);
-  let dHHa;
-  try {
-    if (!deriveCandidateEnergy) throw new Error('candidate energy derivation skipped for large light-element formula');
-    dHHa = termEnergySumHa(candidate.products, ca, cb, model)
-      - termEnergySumHa(candidate.reactants, ca, cb, model);
-  } catch {
-    dHHa = null;
-  }
   const balancedReactantMassKgPerEquation = candidate.reactants.reduce((sum, term) => (
     sum + Math.max(0, Number(term.coefficient) || 0) * formulaMolarMassKgPerMol(term.atomCounts)
   ), 0);
@@ -656,14 +661,27 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation
       / balancedReactantMassKgPerEquation
     : null;
+  const useReferenceEnergy = Number.isFinite(referenceSpecificEnthalpyJPerKg)
+    && referenceSpecificEnthalpyJPerKg < 0;
+  const model = energyModelForSpecies(...species);
+  const largestSpeciesAtomCount = Math.max(...species.map((item) => item.atoms?.length || 0));
+  const deriveCandidateEnergy = options.deriveCandidateEnergies !== false
+    && !useReferenceEnergy
+    && !(model === ENERGY_MODEL_HF && largestSpeciesAtomCount > 4);
+  let dHHa;
+  try {
+    if (!deriveCandidateEnergy) throw new Error('candidate energy derivation skipped');
+    dHHa = termEnergySumHa(candidate.products, ca, cb, model)
+      - termEnergySumHa(candidate.reactants, ca, cb, model);
+  } catch {
+    dHHa = null;
+  }
   const derivedSpecificEnthalpyJPerKg = Number.isFinite(dHHa)
     ? (dHHa * HARTREE_J * AVOGADRO) / balancedReactantMassKgPerEquation
     : null;
   const candidateSpecificEnthalpyJPerKg = Number.isFinite(candidate.energetics.reactionEnthalpyJPerBalancedEquation)
     ? candidate.energetics.reactionEnthalpyJPerBalancedEquation / balancedReactantMassKgPerEquation
     : candidate.energetics.specificEnthalpyJPerKgProduct;
-  const useReferenceEnergy = Number.isFinite(referenceSpecificEnthalpyJPerKg)
-    && referenceSpecificEnthalpyJPerKg < 0;
   const useDerivedEnergy = !useReferenceEnergy
     && Number.isFinite(derivedSpecificEnthalpyJPerKg)
     && (derivedSpecificEnthalpyJPerKg < 0 || !(candidateSpecificEnthalpyJPerKg < 0));
@@ -864,19 +882,64 @@ function metalOxygenReaction(metalKey, metalComp, oxKey, oxComp, options = {}) {
   };
 }
 
-// Hydrogen + oxygen → water (the original combustion case, now derived through the same path).
+// Hydrogen + oxygen → water (balanced 2 H2 + O2 -> 2 H2O with phase-explicit
+// NIST-JANAF formation enthalpy reference and derived molecular fallback).
 function hydrogenOxygenReaction(fuelKey = 'h2', oxidizerKey = 'o2') {
   const model = energyModelForSpecies(H2, O2, H2O);
   const eH2 = speciesEnergyHa(H2, model); const eO2 = speciesEnergyHa(O2, model); const eH2O = speciesEnergyHa(H2O, model);
-  const dHHa = eH2O - eH2 - 0.5 * eO2; // H2 + ½O2 → H2O
-  const specificEnthalpyJPerKg = (dHHa * HARTREE_J * AVOGADRO) / 0.0180153;
+  const dHHa = 2 * eH2O - 2 * eH2 - eO2; // 2 H2 + O2 → 2 H2O
+  const reactants = [
+    { coefficient: 2, formula: 'H2', atomCounts: { 1: 2 } },
+    { coefficient: 1, formula: 'O2', atomCounts: { 8: 2 } }
+  ];
+  const products = [
+    { coefficient: 2, formula: 'H2O', atomCounts: { 1: 2, 8: 1 }, targetPhase: 'liquid' }
+  ];
+  const balancedReactantMassKgPerEquation = reactants.reduce(
+    (sum, term) => sum + term.coefficient * formulaMolarMassKgPerMol(term.atomCounts),
+    0
+  );
+  const referenceEnergetics = standardReactionEnthalpyReference({
+    equation: '2 H2 + O2 -> 2 H2O',
+    reactants,
+    products
+  });
+  const useReferenceEnergy = Boolean(
+    referenceEnergetics && Number.isFinite(referenceEnergetics.reactionEnthalpyJPerBalancedEquation)
+      && referenceEnergetics.reactionEnthalpyJPerBalancedEquation < 0
+  );
+  const specificEnthalpyJPerKg = useReferenceEnergy
+    ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation / balancedReactantMassKgPerEquation
+    : (dHHa * HARTREE_J * AVOGADRO) / balancedReactantMassKgPerEquation;
   return {
-    dHHa,
+    dHHa: useReferenceEnergy
+      ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation / (HARTREE_J * AVOGADRO)
+      : dHHa,
     productKey: 'h2o',
     closure: null,
-    energyModel: model,
+    energyModel: useReferenceEnergy ? referenceEnergetics.model : model,
     specificEnthalpyJPerKg,
-    phaseRequirements: { [fuelKey]: ['gas'], [oxidizerKey]: ['gas'] }
+    phaseRequirements: { [fuelKey]: ['gas'], [oxidizerKey]: ['gas'] },
+    stoichiometry: {
+      familyId: 'hydrogen-oxygen-combustion',
+      equation: '2 H2 + O2 -> 2 H2O',
+      reactants,
+      products,
+      atomBalance: {
+        balanced: true,
+        reactants: { 1: 4, 8: 2 },
+        products: { 1: 4, 8: 2 }
+      },
+      sedenionScope: null,
+      provisionalEnergeticsStatus: null,
+      energeticsStatus: useReferenceEnergy
+        ? referenceEnergetics.status
+        : 'derived-model-energy-ready',
+      thermochemicalReference: useReferenceEnergy ? referenceEnergetics : null,
+      balancedReactantMassKgPerEquation,
+      specificEnthalpyBasis: 'consumed-reactant-mass',
+      scientificValidation: false
+    }
   };
 }
 

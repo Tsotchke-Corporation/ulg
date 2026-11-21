@@ -89,6 +89,7 @@ import {
 } from '../../../ulg-gpu-abi/src/schroederSpatialExactNearCellTreeWgsl.js';
 import {
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
@@ -1025,6 +1026,17 @@ function acquireThermalDormancyStage(device, entry, config, particleCount, smoot
       radiusMultiplier: 2 * Math.max(1, RADIATION_PAIR_RANGE_RADII)
     });
     entry.thermalDormancyStages.set(key, stage);
+    for (const buffer of new Set([
+      stage.dormantBuffer,
+      stage.countBuffer,
+      stage.activeIndicesBuffer,
+      stage.indirectDispatchBuffer
+    ])) {
+      if (buffer) {
+        tagWebGpuBufferDevice(buffer, device);
+        entry.ownedBuffers.add(buffer);
+      }
+    }
     entry.destroyers.push(() => stage.destroy());
   }
   return stage;
@@ -1050,6 +1062,17 @@ function acquireRadiationDormancyStage(device, entry, config, particleCount) {
       epsilonFluxWPerM2
     });
     entry.radiationDormancyStages.set(key, stage);
+    for (const buffer of new Set([
+      stage.dormantBuffer,
+      stage.countBuffer,
+      stage.activeIndicesBuffer,
+      stage.indirectDispatchBuffer
+    ])) {
+      if (buffer) {
+        tagWebGpuBufferDevice(buffer, device);
+        entry.ownedBuffers.add(buffer);
+      }
+    }
     entry.destroyers.push(() => stage.destroy());
   }
   return stage;
@@ -12291,14 +12314,14 @@ export function runSchroederSpatialThermalProposalWebGpu({
       { binding: 11, resource: { buffer: activeDispatchBuffer } },
       { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
     ];
-    const derivedBindGroup = device.createBindGroup({
+    const derivedBindGroup = createCachedExplicitBindGroup(device, {
       layout: derivedPipeline.bindGroupLayout,
       entries: potentialBindings ? [...derivedEntries,
         { binding: 14, resource: { buffer: potentialBindings.table } },
         { binding: 15, resource: { buffer: potentialBindings.metadata } },
         { binding: 16, resource: { buffer: potentialBindings.requests } }] : derivedEntries
     });
-    const conductivityFinalizeBindGroup = device.createBindGroup({
+    const conductivityFinalizeBindGroup = createCachedExplicitBindGroup(device, {
       layout: conductivityFinalizePipeline.bindGroupLayout,
       entries: [
         { binding: 7, resource: { buffer: paramsBuffer } },
@@ -12311,23 +12334,23 @@ export function runSchroederSpatialThermalProposalWebGpu({
         { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
       ]
     });
-    const activeDispatchFinalizeBindGroup = device.createBindGroup({
+    const activeDispatchFinalizeBindGroup = createCachedExplicitBindGroup(device, {
       layout: activeDispatchFinalizePipeline.bindGroupLayout,
       entries: derivedEntries
     });
     const physicalTopologyPreflightBindGroup = physicalTopologyPreflightPipeline
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
           layout: physicalTopologyPreflightPipeline.bindGroupLayout,
           entries: derivedEntries
         })
       : null;
     const activeTopologyFinalizeBindGroup = activeTopologyFinalizePipeline
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
           layout: activeTopologyFinalizePipeline.bindGroupLayout,
           entries: derivedEntries
         })
       : null;
-    const budgetResolveBindGroup = device.createBindGroup({
+    const budgetResolveBindGroup = createCachedExplicitBindGroup(device, {
       layout: budgetResolvePipeline.bindGroupLayout,
       entries: derivedEntries
     });
@@ -12416,24 +12439,24 @@ export function runSchroederSpatialThermalProposalWebGpu({
             : [])
         ]
       : candidateCsrEntries;
-    const budgetBindGroup = device.createBindGroup({
+    const budgetBindGroup = createCachedExplicitBindGroup(device, {
       layout: artifactRecord.budgetPipeline.bindGroupLayout,
       entries: [...proposalEntries, ...traversalEntries]
     });
-    const proposalBindGroup = device.createBindGroup({
+    const proposalBindGroup = createCachedExplicitBindGroup(device, {
       layout: artifactRecord.proposalPipeline.bindGroupLayout,
       entries: [...proposalEntries, ...traversalEntries]
     });
     const zeroActiveProjectionFinalizeBindGroup =
       zeroActiveProjectionFinalizePipeline
-        ? device.createBindGroup({
+        ? createCachedExplicitBindGroup(device, {
             layout: zeroActiveProjectionFinalizePipeline.bindGroupLayout,
             entries: [...proposalEntries, ...candidateCsrEntries]
           })
         : null;
     const candidateCsrControlBindGroup = (pipelineInfo) => {
       if (!pipelineInfo || !candidateCsrEnabled) return null;
-      return device.createBindGroup({
+      return createCachedExplicitBindGroup(device, {
         layout: pipelineInfo.bindGroupLayout,
         entries: [...proposalEntries, ...candidateCsrEntries]
       });
@@ -12447,7 +12470,7 @@ export function runSchroederSpatialThermalProposalWebGpu({
     const sourceCellControlBindGroup = (pipelineInfo) => (
       !pipelineInfo || !sourceCellTreeShadow
         ? null
-        : device.createBindGroup({
+        : createCachedExplicitBindGroup(device, {
             layout: pipelineInfo.bindGroupLayout,
             entries: [...proposalEntries, ...traversalEntries]
           })
@@ -14732,11 +14755,13 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       { binding: 11, resource: { buffer: activeDispatchBuffer } },
       { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
     ];
-    const derivedBindGroup = device.createBindGroup({
+    const derivedBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-classic-thermal-v2-derived',
       layout: derivedPipeline.bindGroupLayout,
       entries: derivedEntries
     });
-    const conductivityFinalizeBindGroup = device.createBindGroup({
+    const conductivityFinalizeBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-classic-thermal-v2-conductivity-finalize',
       layout: conductivityFinalizePipeline.bindGroupLayout,
       entries: [
         { binding: 7, resource: { buffer: paramsBuffer } },
@@ -14749,7 +14774,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         { binding: 13, resource: { buffer: conductivitySidecarBuffer } }
       ]
     });
-    const budgetResolveBindGroup = device.createBindGroup({
+    const budgetResolveBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-classic-thermal-v2-budget-resolve',
       layout: budgetResolvePipeline.bindGroupLayout,
       entries: derivedEntries
     });
@@ -14769,7 +14795,8 @@ export function createClassicThermalProposalWebGpuEncoderStage({
         })
       : null;
     const candidateBuildBindGroup = candidateBuildPipeline
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
+          label: 'ulg-classic-thermal-v2-candidate-build',
           layout: candidateBuildPipeline.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: sourceStateBuffer } },
@@ -14797,11 +14824,13 @@ export function createClassicThermalProposalWebGpuEncoderStage({
       { binding: 10, resource: { buffer: sourceStateBuffer } },
       { binding: 15, resource: { buffer: conductivitySidecarBuffer } }
     ];
-    const budgetBindGroup = device.createBindGroup({
+    const budgetBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-classic-thermal-v2-budget',
       layout: budgetPipeline.bindGroupLayout,
       entries: proposalEntries
     });
-    const proposalBindGroup = device.createBindGroup({
+    const proposalBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-classic-thermal-v2-proposal',
       layout: proposalPipeline.bindGroupLayout,
       entries: proposalEntries
     });

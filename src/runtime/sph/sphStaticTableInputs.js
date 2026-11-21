@@ -229,11 +229,12 @@ export function buildSphReactionTableFromViewState(viewState = {}, {
     ?? {};
   // The rational exact route compiles reference (physical-energy) reactions.
   // The G2 integer energy ledger keeps the heat-proxy law (user, 2026-11-13):
-  // chemical heat is a recorded source in the ledger.
+  // chemical heat is a recorded source in the ledger. When a reaction produces
+  // a multi-phase condensable phase-caloric species (such as H2 + O2 -> H2O in
+  // humid room air), the heat-proxy writer rightly refuses to guess a phase
+  // branch; promote cleanly to the physical reference-reaction energy authority.
   const exactMass = viewState.sphGpuParticleState?.exactMass;
-  const builder = exactMass && exactMass.energyLedger !== true
-    ? buildSphReferenceReactionTable : buildSphReactionTable;
-  return builder(viewState.reactions || [], {
+  const tableOptions = {
     materialProperties: viewState.materialProperties || {},
     thermalMaterialTable: thermalMaterialTable ?? buildSphThermalMaterialTableFromViewState(viewState),
     contactRadiusM:
@@ -243,7 +244,23 @@ export function buildSphReactionTableFromViewState(viewState = {}, {
     soundSpeedScale: mechanicsProfile.soundSpeedScale,
     cflMaxSoundSpeedMPerS: mechanicsProfile.cflMaxSoundSpeedMPerS,
     minGasSoundSpeedMPerS: mechanicsProfile.minGasSoundSpeedMPerS
-  });
+  };
+  const reactions = viewState.reactions || [];
+  if (exactMass && exactMass.energyLedger !== true) {
+    return buildSphReferenceReactionTable(reactions, tableOptions);
+  }
+  try {
+    return buildSphReactionTable(reactions, tableOptions);
+  } catch (error) {
+    if (
+      error instanceof TypeError
+      && /Gauge-consistent heat proxy: product .* uses a phase-caloric gauge/.test(error.message)
+      && reactions.length > 0
+    ) {
+      return buildSphReferenceReactionTable(reactions, tableOptions);
+    }
+    throw error;
+  }
 }
 
 /**

@@ -292,16 +292,103 @@ test('entry points drop straight into empty zero-allocation Simulation Studio wi
   assert.match(standaloneJs, /sphMlsMpmGpuStep/);
 });
 
-test('sodium-water preset starts Sodium at floor-centered Y = 1 m separated above water', () => {
+test('sodium-water preset starts Sodium separated above the full 5x5x5 water basin', () => {
   const staged = buildStagedConfigFromPreset('sodium-water');
   const water = staged.bodies.find((body) => body.material === 'h2o');
   const sodium = staged.bodies.find((body) => body.material === 'Na');
   assert.ok(water && sodium);
-  assert.equal(sodium.centerM[1], 1);
+  assert.deepEqual(water.particlesPerEdge, [5, 5, 5]);
+  assert.deepEqual(sodium.particlesPerEdge, [3, 3, 3]);
+  assert.equal(sodium.centerM[1], 1.5);
   const waterTop = water.centerM[1] + water.sizeM[1] / 2;
   const sodiumBottom = sodium.centerM[1] - sodium.sizeM[1] / 2;
   assert.ok(sodiumBottom - waterTop >= 0.19, `expected clear separation gap, got ${sodiumBottom - waterTop}`);
   assert.equal(validateStagedSimulationConfig(staged).valid, true);
+});
+
+test('loading status stays non-ready while PHYSICS PENDING preview is active and Studio air setups enable G2 exact ledger + CCN', () => {
+  const pendingStatus = deriveSimulationLoadingStatus(
+    {
+      rebuildStatus: 'complete',
+      ready: true,
+      workerReady: true,
+      workerVisualReady: true,
+      visualUpdatesReady: true,
+      pendingPreviewActive: true
+    },
+    { elapsedMs: 5000, autoPlay: false, previousPercent: 72 }
+  );
+  assert.equal(pendingStatus.ready, false);
+  assert.ok(pendingStatus.percent < 100);
+
+  const airConfig = buildStagedConfigFromPreset('iron-ice-quench');
+  airConfig.presetId = 'custom';
+  airConfig.environment.mode = 'air';
+  airConfig.environment.nucleiPerCm3 = 0;
+  const airParams = buildLaunchParamsFromStagedConfig(airConfig);
+  assert.equal(airParams.exactEnergyLedger, '1');
+  assert.equal(airParams.environmentNucleiPerCm3, '5000');
+});
+
+test('rigid-solid caloric branches avoid solid superheat and include discovered reaction products in fluidThermal', async () => {
+  const { sphEnvironmentOptionsFromControls } = await import('../src/runtime/sphEnvironmentControls.js');
+  const { stableOpticalMaterialId } = await import('../src/runtime/material/opticalGpuBuffers.js');
+
+  const envOpts = sphEnvironmentOptionsFromControls({
+    environmentMode: 'air',
+    environmentTemperatureK: '293.15',
+    environmentPressurePa: '101325',
+    environmentHumidityPercent: '50',
+    environmentCellsPerAxis: '2',
+    environmentNucleiPerCm3: '5000',
+    environmentAirParcels: 'mixture'
+  });
+  const { demo } = createSphPhaseDemo({
+    boxDimensionsM: [0.07, 0.07, 0.07],
+    initialBodies: [
+      {
+        id: 'base',
+        domainId: 1,
+        material: 'h2o',
+        sizeM: [0.0168, 0.0168, 0.0168],
+        centerM: [0.035, 0.03, 0.035],
+        temperatureK: 233.15,
+        particlesPerEdge: [4, 4, 4],
+        velocityMPerS: [0, 0, 0],
+        legacyRole: 'base'
+      },
+      {
+        id: 'drop',
+        domainId: 2,
+        material: 'fe',
+        sizeM: [0.0084, 0.0084, 0.0084],
+        centerM: [0.035, 0.007, 0.035],
+        temperatureK: 1850,
+        particlesPerEdge: [2, 2, 2],
+        velocityMPerS: [0, 0, 0],
+        legacyRole: 'drop'
+      }
+    ],
+    ...envOpts,
+    exactEnergyLedger: true,
+    coherentRigidSolids: true,
+    allowReducedProductProperties: true
+  });
+  const iceBody = demo.state.rigidBodies?.bodies?.[0];
+  assert.ok(iceBody?.thermal);
+  const { solidBranch, liquidBranch, meltTemperatureK, memberSpecificInternalEnergyJPerKg } = iceBody.thermal;
+  const tInit = solidBranch.referenceTemperatureK
+    + (memberSpecificInternalEnergyJPerKg - solidBranch.referenceInternalEnergyJPerKg) / solidBranch.cvJPerKgK;
+  assert.ok(Math.abs(tInit - 233.15) < 1e-6, `expected exact 233.15 K solid init, got ${tInit}`);
+  const tEdge = solidBranch.referenceTemperatureK
+    + (solidBranch.energyMaxJPerKg - solidBranch.referenceInternalEnergyJPerKg) / solidBranch.cvJPerKgK;
+  assert.ok(Math.abs(tEdge - meltTemperatureK) < 1e-6, `solid branch must meet meltK=${meltTemperatureK}, got ${tEdge}`);
+  assert.ok(Math.abs(demo.state.ledgerParcels.waterReferenceU0 - liquidBranch.energyMinJPerKg) < 1e-3);
+  const feoMatId = stableOpticalMaterialId('feo');
+  assert.ok(
+    demo.state.rigidBodies.fluidThermal.some((row) => row.materialId === feoMatId && row.conductivityWPerMK > 0),
+    'discovered reaction product feo must be included in rigid-solid fluidThermal table'
+  );
 });
 
 test('custom simulations with Hydrogen and Oxygen (h2/o2 and periodic-table H/O) discover H2O and initialize cleanly', () => {
@@ -345,4 +432,134 @@ test('returning to the Presets tab clears browser URL query parameters', async (
   );
   assert.match(studioAppSource, /function clearBrowserUrlParams\(\)/);
   assert.match(studioAppSource, /if \(nextTab === 'presets'\) \{\s*clearBrowserUrlParams\(\);\s*\}/);
+});
+
+test('worker-lane retirement protects device-pooled dormancy buffers and keeps lane identity batch-size invariant', async () => {
+  const [workerSrc, thermalSrc, phaseSrc, reactionSrc, sceneSrc] = await Promise.all([
+    fs.readFile(path.resolve(process.cwd(), 'src/services/ulgMechanicsResidentStage.worker.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/runtime/sph/schroederSpatialThermalProposalsGpu.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/runtime/sph/sphPhaseCarrierTransferGpu.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/runtime/sph/schroederSpatialReactionDiscoveryProposalGpu.js'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/visualization/sphPhaseScene.js'), 'utf8')
+  ]);
+  assert.match(workerSrc, /schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership\(record\.workerDevice\)/);
+  assert.match(workerSrc, /sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership\(record\.workerDevice\)/);
+  assert.match(thermalSrc, /entry\.thermalDormancyStages\.set\(key, stage\);[\s\S]*entry\.ownedBuffers\.add\(buffer\)/);
+  assert.match(thermalSrc, /entry\.radiationDormancyStages\.set\(key, stage\);[\s\S]*entry\.ownedBuffers\.add\(buffer\)/);
+  assert.match(phaseSrc, /export function sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership\(device\)/);
+  assert.match(reactionSrc, /export function schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership\(device\)/);
+  assert.match(sceneSrc, /const workerLaneConfigurationSignature = mlsMpmResidentStepsSignatureFor\(\{\s*\.\.\.signatureArgs,\s*stepCount: 1\s*\}\)/);
+});
+
+test('Studio exposes per-body SOL-4/5/6 solid mechanics options and 2-level First-Class Air enrollment with URL round-tripping', () => {
+  const cfg = buildBlankCustomConfig();
+  cfg.boxDimensionsM = [0.2, 0.2, 0.2];
+  cfg.bodies = [
+    {
+      id: 'ice-block',
+      domainId: 1,
+      material: 'h2o',
+      sizeM: [0.06, 0.06, 0.06],
+      centerM: [0, 0.03, 0],
+      temperatureK: 240,
+      particlesPerEdge: [3, 3, 3],
+      velocityMPerS: [0, 0, 0],
+      mechanicsMode: 'deformable'
+    }
+  ];
+  cfg.environment.mode = 'air';
+  cfg.environment.twoLevelAir = true;
+  cfg.laws.cohesiveFracture = false;
+  cfg.laws.multilevelSolids = false;
+
+  const params = serializeStagedConfigToUrlSearchParams(cfg, { autoPlayWhenReady: true });
+  assert.equal(params.get('airTwoLevel'), '1');
+  assert.match(params.get('laws'), /cf:0/);
+  assert.match(params.get('laws'), /ml:0/);
+
+  const parsed = parseStagedConfigFromUrlSearchParams(params);
+  assert.ok(parsed);
+  assert.equal(parsed.config.bodies[0].mechanicsMode, 'deformable');
+  assert.equal(parsed.config.environment.twoLevelAir, true);
+  assert.equal(parsed.config.laws.cohesiveFracture, false);
+  assert.equal(parsed.config.laws.multilevelSolids, false);
+
+  const launch = buildLaunchParamsFromStagedConfig(parsed.config);
+  // Strictly 2-level First-Class Air (maxLevel - minLevel === 1; 3rd SS level stays on hold).
+  assert.equal(launch.schroederTwoLevel, '1');
+  assert.equal(launch.schroederMinLevel, '0');
+  assert.equal(launch.schroederMaxLevel, '1');
+  assert.equal(launch.schroederTwoLevelAuthority, 'authoritative');
+  assert.equal(launch.environmentAirParcels, 'mixture');
+  assert.ok(Number(launch.splitSpareLineages) >= 64);
+  assert.ok(Number(launch.schroederBaseGridSpacingM) > 0);
+  assert.equal(launch.solidFracture, '0');
+  assert.equal(launch.solidMultilevel, '0');
+
+  // Verify createSphPhaseDemo materializes SOL-4 deformable solid surfaces and SOL-5/6 rigid options.
+  const deformableDemo = createSphPhaseDemo({
+    boxDimensionsM: [0.2, 0.2, 0.2],
+    initialBodies: [{
+      id: 'soft-block',
+      domainId: 1,
+      material: 'h2o',
+      sizeM: [0.06, 0.06, 0.06],
+      centerM: [0.1, 0.03, 0.1],
+      temperatureK: 240,
+      particlesPerEdge: [3, 3, 3],
+      velocityMPerS: [0, 0, 0],
+      mechanicsMode: 'deformable'
+    }],
+    coherentRigidSolids: true
+  });
+  assert.equal(deformableDemo.demo.state.deformableSolidSurfaces?.surfaces?.length, 1);
+  assert.equal(deformableDemo.demo.state.deformableSolidSurfaces.surfaces[0].bodyId, 'soft-block');
+  assert.equal(deformableDemo.demo.state.deformableSolidSurfaces.surfaces[0].domainId, 1);
+
+  const rigidDemo = createSphPhaseDemo({
+    boxDimensionsM: [0.2, 0.2, 0.2],
+    initialBodies: [{
+      id: 'rigid-ice',
+      domainId: 1,
+      material: 'h2o',
+      sizeM: [0.06, 0.06, 0.06],
+      centerM: [0.1, 0.03, 0.1],
+      temperatureK: 240,
+      particlesPerEdge: [3, 3, 3],
+      velocityMPerS: [0, 0, 0],
+      mechanicsMode: 'rigid'
+    }],
+    coherentRigidSolids: true,
+    solidFractureEnabled: true,
+    solidMultilevelEnabled: false
+  });
+  assert.equal(rigidDemo.demo.state.rigidBodies?.fractureEnabled, true);
+  assert.equal(rigidDemo.demo.state.rigidBodies?.multilevelEnabled, false);
+  assert.ok(rigidDemo.demo.state.rigidBodies?.maxBodyCapacity >= 5);
+});
+
+test('Studio A6 cross-machine peerRelay and peerRoom URL parameters omit when blank and round-trip cleanly when set', () => {
+  const defaultCfg = buildStagedConfigFromPreset('iron-ice-quench');
+  const defaultParams = serializeStagedConfigToUrlSearchParams(defaultCfg, { autoPlayWhenReady: true });
+  assert.equal(defaultParams.has('peerRelay'), false);
+  assert.equal(defaultParams.has('peerRoom'), false);
+  const defaultLaunch = buildLaunchParamsFromStagedConfig(defaultCfg);
+  assert.equal(defaultLaunch.peerRelay, undefined);
+  assert.equal(defaultLaunch.peerRoom, undefined);
+
+  const relayCfg = buildStagedConfigFromPreset('iron-ice-quench');
+  relayCfg.network.peerRelayUrl = 'wss://relay.example.net/ulg';
+  relayCfg.network.peerRoomId = 'lab-cluster-1';
+  const relayParams = serializeStagedConfigToUrlSearchParams(relayCfg, { autoPlayWhenReady: true });
+  assert.equal(relayParams.get('peerRelay'), 'wss://relay.example.net/ulg');
+  assert.equal(relayParams.get('peerRoom'), 'lab-cluster-1');
+
+  const parsed = parseStagedConfigFromUrlSearchParams(relayParams);
+  assert.ok(parsed);
+  assert.equal(parsed.config.network.peerRelayUrl, 'wss://relay.example.net/ulg');
+  assert.equal(parsed.config.network.peerRoomId, 'lab-cluster-1');
+
+  const relayLaunch = buildLaunchParamsFromStagedConfig(parsed.config);
+  assert.equal(relayLaunch.peerRelay, 'wss://relay.example.net/ulg');
+  assert.equal(relayLaunch.peerRoom, 'lab-cluster-1');
 });

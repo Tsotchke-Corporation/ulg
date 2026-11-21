@@ -373,9 +373,15 @@ export function createSchroederSolidFractureStage({
     setMemberLoads(loadsFloat32) {
       device.queue.writeBuffer(memberLoadBuffer, 0, loadsFloat32);
     },
-    encode(encoder, dtSeconds = 1e-3, { pass: sharedPass = null } = {}) {
+    prepare(dtSeconds = 1e-3) {
       f[7] = dtSeconds;
       device.queue.writeBuffer(paramsBuffer, 0, raw);
+    },
+    encode(encoder, dtSeconds = 1e-3, { pass: sharedPass = null, prepared = false } = {}) {
+      if (!prepared) {
+        f[7] = dtSeconds;
+        device.queue.writeBuffer(paramsBuffer, 0, raw);
+      }
       const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-sol5-fracture' });
       pass.setBindGroup(0, bindGroup);
       const mGroups = Math.ceil(memberCount / 64);

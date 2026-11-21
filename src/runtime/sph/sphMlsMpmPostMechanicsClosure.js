@@ -3574,7 +3574,10 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   // Consume the newest private carrier state: refinement when selected, phase
   // transfer otherwise. Exchange/transport update those same mass and energy
   // records before constitutive refresh and spatial publication claim them.
-  const ledgerParcels = massCapture ? sphGpuParticleUploadLedgerParcels(sphParticleUpload) : null;
+  const ledgerParcels = massCapture
+    ? (sphGpuParticleUploadLedgerParcels(sphParticleUpload)
+      ?? sphGpuParticleUploadLedgerParcels(massCapture.g2p?.sourceRead?.sourceSphUpload))
+    : null;
   const ledgerRefinementRecord = massCapture?.seals[massCapture.stageNames.indexOf('phaseSlotRefinement')]?.exactLedgerRefinement;
   const ledgerPhaseRecord = massCapture?.seals[massCapture.stageNames.indexOf('phaseCarrierTransfer')]?.exactLedgerPhase;
   const ledgerParcelRecord = ledgerRefinementRecord ?? ledgerPhaseRecord;

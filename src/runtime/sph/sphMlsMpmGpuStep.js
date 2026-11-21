@@ -17,7 +17,12 @@ import {
   encodeSphImplicitPressureSolve,
   normalizeSphImplicitPressureOptions
 } from './sphImplicitPressureGpu.js';
-import { ensureSchroederSolidRigidFamilyForUpload, runSchroederSolidRigidLaneStep } from './schroederSolidRigidLane.js';
+import {
+  ensureSchroederDeformableSolidSurfaceFamilyForUpload,
+  ensureSchroederSolidRigidFamilyForUpload,
+  runSchroederDeformableSolidSurfaceLaneStep,
+  runSchroederSolidRigidLaneStep
+} from './schroederSolidRigidLane.js';
 import { runSchroederSpatialChainResidentBatchWebGpu, schroederSpatialChainResidentClock,
   retireSchroederSpatialChainResidentStep, bindSchroederSpatialChainResidentDelta } from './schroederSpatialChainResidentGpu.js';
 import { assertSphLegacyMassPathAllowed, sphGpuParticleUploadAdvertisesExactMass,
@@ -187,7 +192,7 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 import {
   createSphGpuTimestampProfiler,
   encodeSphGpuTimestampMarkerPass
@@ -12507,15 +12512,45 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         size: Math.max(4, gridByteLength),
         usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
       });
-  const p2gAccumulatorBuffer = device.createBuffer({
-    label: mechanicsFieldViewEnabled
+  const poolFusedTempBuffers = typeof device.queue?.onSubmittedWorkDone === 'function';
+  const pooledTempEntries = [];
+  const acquireFusedTempBuffer = (bucketKey, label, size, usage) => {
+    const normalizedSize = Math.max(4, size);
+    if (!poolFusedTempBuffers) {
+      return device.createBuffer({ label, size: normalizedSize, usage });
+    }
+    const buffer = acquireQueueOrderedPooledBuffer(device, {
+      bucketKey,
+      label,
+      size: normalizedSize,
+      usage
+    });
+    pooledTempEntries.push({ buffer, bucketKey, size: normalizedSize, usage });
+    return buffer;
+  };
+  const writeFusedTempUniformBuffer = (bucketKey, label, data) => {
+    const buffer = acquireFusedTempBuffer(
+      bucketKey,
+      label,
+      data.byteLength,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    );
+    device.queue.writeBuffer(buffer, 0, data);
+    return buffer;
+  };
+  const p2gAccumulatorUsage = GPU_BUFFER_USAGE.STORAGE
+    | GPU_BUFFER_USAGE.COPY_DST
+    | (compactMechanicsOwnedEvidenceEnabled ? GPU_BUFFER_USAGE.COPY_SRC : 0);
+  const p2gAccumulatorBuffer = acquireFusedTempBuffer(
+    mechanicsFieldViewEnabled
       ? 'ulg-mls-mpm-fused-p2g-deterministic-field-contributions'
       : 'ulg-mls-mpm-fused-p2g-grid-accumulators',
-    size: Math.max(4, p2gScratchByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE
-      | GPU_BUFFER_USAGE.COPY_DST
-      | (compactMechanicsOwnedEvidenceEnabled ? GPU_BUFFER_USAGE.COPY_SRC : 0)
-  });
+    mechanicsFieldViewEnabled
+      ? 'ulg-mls-mpm-fused-p2g-deterministic-field-contributions'
+      : 'ulg-mls-mpm-fused-p2g-grid-accumulators',
+    p2gScratchByteLength,
+    p2gAccumulatorUsage
+  );
   const compactMechanicsG2pEvidenceBuffer =
     compactMechanicsOwnedEvidenceEnabled
       ? device.createBuffer({
@@ -12543,8 +12578,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     size: Math.max(4, mechanicsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   }), device);
-  const p2gParamsBuffer = writeGpuBuffer(
-    device,
+  const p2gParamsBuffer = writeFusedTempUniformBuffer(
+    'ulg-mls-mpm-fused-p2g-params',
     'ulg-mls-mpm-fused-p2g-params',
     aabbActiveGridEnabled
       ? createFusedActiveP2gParamsArray(
@@ -12576,11 +12611,10 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
             outputOrdinal: mechanicsFieldMutationPlan.p2gOutputOrdinal,
             expectedEncoding: mechanicsFieldMutationPlan.expectedEncoding
           } : null
-        ),
-    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        )
   );
-  const gridUpdateParamsBuffer = writeGpuBuffer(
-    device,
+  const gridUpdateParamsBuffer = writeFusedTempUniformBuffer(
+    'ulg-mls-mpm-fused-grid-update-params',
     'ulg-mls-mpm-fused-grid-update-params',
     aabbActiveGridEnabled
       ? createFusedActiveGridUpdateParamsArray({
@@ -12603,11 +12637,10 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
             expectedOrdinal: mechanicsFieldMutationPlan.p2gOutputOrdinal,
             outputOrdinal: mechanicsFieldMutationPlan.gridOutputOrdinal
           } : null
-        }),
-    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        })
   );
-  const g2pParamsBuffer = writeGpuBuffer(
-    device,
+  const g2pParamsBuffer = writeFusedTempUniformBuffer(
+    'ulg-mls-mpm-fused-g2p-params',
     'ulg-mls-mpm-fused-g2p-params',
     createFusedG2pParamsArray({
       particleCount,
@@ -12621,8 +12654,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       schroederSpatialDirectory: schroederActiveNodeFilter,
       mechanicsFieldMutationOrdinal:
         mechanicsFieldMutationPlan?.gridOutputOrdinal ?? null
-    }),
-    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    })
   );
   const productEventBuffer = sharedZeroPlaceholderBuffer(
     device,
@@ -12645,10 +12677,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       })
     : null;
   const tempBuffers = [
-    p2gAccumulatorBuffer,
-    p2gParamsBuffer,
-    gridUpdateParamsBuffer,
-    g2pParamsBuffer,
+    ...(poolFusedTempBuffers
+      ? []
+      : [p2gAccumulatorBuffer, p2gParamsBuffer, gridUpdateParamsBuffer, g2pParamsBuffer]),
     ...[compactMechanicsG2pEvidenceBuffer].filter(Boolean),
     // productEventBuffer and pressureRowsBuffer are shared per device and
     // deliberately absent here: destroying them would break later substeps.
@@ -12860,42 +12891,48 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           ? schroederActiveNodeFilter.activeSourceBuffer
           : schroederActiveNodeFilter.activeNodeBuffer } }
       ];
-    const p2gBindGroup = device.createBindGroup({ layout: p2gBindGroupLayout, entries: p2gEntries });
-    const p2gFinalizeBindGroup = device.createBindGroup({ layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
+    const p2gBindGroup = createCachedExplicitBindGroup(device, { label: 'ulg-mls-mpm-p2g', layout: p2gBindGroupLayout, entries: p2gEntries });
+    const p2gFinalizeBindGroup = createCachedExplicitBindGroup(device, { label: 'ulg-mls-mpm-p2g-finalize', layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
     const compactMechanicsPreflightBindGroups =
-      compactMechanicsPreflightPipelineInfos.map((pipelineInfo) => (
-        device.createBindGroup({
+      compactMechanicsPreflightPipelineInfos.map((pipelineInfo, index) => (
+        createCachedExplicitBindGroup(device, {
+          label: `ulg-mls-mpm-compact-preflight-${index}`,
           layout: pipelineInfo.bindGroupLayout,
           entries: p2gEntries
         })
       ));
     const mechanicsFieldPreflightBindGroups =
-      mechanicsFieldPreflightPipelineInfos.map((pipelineInfo) => (
-        device.createBindGroup({
+      mechanicsFieldPreflightPipelineInfos.map((pipelineInfo, index) => (
+        createCachedExplicitBindGroup(device, {
+          label: `ulg-mls-mpm-field-preflight-${index}`,
           layout: pipelineInfo.bindGroupLayout,
           entries: p2gEntries
         })
       ));
     const compactMechanicsValidationBindGroup = compactMechanicsValidationPipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-compact-validation',
         layout: compactMechanicsValidationPipelineInfo.bindGroupLayout,
         entries: p2gEntries
       })
       : null;
     const mechanicsFieldValidationBindGroup = mechanicsFieldValidationPipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-field-validation',
         layout: mechanicsFieldValidationPipelineInfo.bindGroupLayout,
         entries: p2gEntries
       })
       : null;
     const mechanicsFieldP2gSealBindGroup = mechanicsFieldP2gSealPipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-field-p2g-seal',
         layout: mechanicsFieldP2gSealPipelineInfo.bindGroupLayout,
         entries: p2gEntries
       })
       : null;
     const activeAccumulatorClearBindGroup = activeAccumulatorClearPipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-active-accum-clear',
         layout: activeAccumulatorClearPipelineInfo.bindGroupLayout,
         entries: p2gEntries
       })
@@ -12936,7 +12973,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           : [])
       ]
     });
-    const gridUpdateBindGroup = device.createBindGroup({
+    const gridUpdateBindGroup = createCachedExplicitBindGroup(device, {
       layout: gridUpdateBindGroupLayout,
       entries: mechanicsFieldViewEnabled ? [
         {
@@ -12986,7 +13023,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         }))
       : [];
     const mechanicsFieldHeatBindGroups = mechanicsFieldHeatPipelineInfos.map(
-      (pipelineInfo) => device.createBindGroup({
+      (pipelineInfo) => createCachedExplicitBindGroup(device, {
         layout: pipelineInfo.bindGroupLayout,
         entries: [
           {
@@ -13001,7 +13038,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     );
     const mechanicsFieldGridUpdateClaimBindGroup =
       mechanicsFieldGridUpdateClaimPipelineInfo
-        ? device.createBindGroup({
+        ? createCachedExplicitBindGroup(device, {
             layout: mechanicsFieldGridUpdateClaimPipelineInfo.bindGroupLayout,
             entries: [
               {
@@ -13039,7 +13076,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       })
       : null;
     const mechanicsFieldContactBindGroup = mechanicsFieldContactPipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
         layout: mechanicsFieldContactPipelineInfo.bindGroupLayout,
         entries: [
           {
@@ -13051,7 +13088,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       })
       : null;
     const mechanicsFieldVelocitySealBindGroup = mechanicsFieldVelocitySealPipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
         layout: mechanicsFieldVelocitySealPipelineInfo.bindGroupLayout,
         entries: [
           {
@@ -13153,19 +13190,22 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           : schroederActiveNodeFilter.activeNodeBuffer } }]
         : [])
     ];
-    const g2pBindGroup = device.createBindGroup({
+    const g2pBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-g2p',
       layout: g2pBindGroupLayout,
       entries: g2pEntries
     });
     const canonicalG2pFinalizeBindGroup = canonicalG2pFinalizePipelineInfo
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-g2p-finalize',
         layout: canonicalG2pFinalizePipelineInfo.bindGroupLayout,
         entries: g2pEntries
       })
       : null;
     const mechanicsFieldG2pReceiptBindGroups =
-      mechanicsFieldG2pReceiptPipelineInfos.map((pipelineInfo) =>
-        device.createBindGroup({
+      mechanicsFieldG2pReceiptPipelineInfos.map((pipelineInfo, index) =>
+        createCachedExplicitBindGroup(device, {
+          label: `ulg-mls-mpm-g2p-receipt-${index}`,
           layout: pipelineInfo.bindGroupLayout,
           entries: g2pEntries
         })
@@ -14157,6 +14197,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     }
     const cleanup = () => {
       for (const buffer of separationTransientBuffers) buffer.destroy?.();
+      for (const entry of pooledTempEntries) {
+        releaseQueueOrderedPooledBuffer(device, entry.buffer, entry);
+      }
       for (const buffer of tempBuffers) buffer.destroy?.();
       if (!retained) {
         gridBuffer?.destroy?.();
@@ -15388,7 +15431,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
           dt: dtSeconds,
           internalPressureScale: finiteNumber(internalPressureScale, 1),
           cflFactor: finiteNumber(cflFactor, DEFAULT_CFL_FACTOR),
-          timestampPassExtras: gpuTimestampProfiler.passDescriptorExtras('implicitPressure')
+          timestampPassExtras: gpuTimestampProfiler.passDescriptorExtras('implicitPressure'),
+          regionalSampleOnScheduleBoundary: index === 0,
+          scheduleId: `mls-mpm-seq:${globalThis.__ulgImplicitPressure.steps}`
         });
         globalThis.__ulgImplicitPressure.steps += 1;
       }
@@ -38038,10 +38083,25 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     });
   // G3 coherent rigid bodies: one SE(3) step per resident step, on the same
   // device and queue, after the continuum mechanics.
+  const solidReleaseFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
   runSchroederSolidRigidLaneStep(
     ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
-    { device: resolvedDevice, dtSeconds, gravity, boxM: dims,
-      fluid: solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) });
+    { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: solidReleaseFluid });
+  // A5 SOL-4: advect explicit material-space deformable solid surfaces on GPU.
+  if (sphParticleState?.deformableSolidSurfaces) {
+    runSchroederDeformableSolidSurfaceLaneStep(
+      ensureSchroederDeformableSolidSurfaceFamilyForUpload(
+        sphParticleUpload,
+        sphParticleState.deformableSolidSurfaces,
+        resolvedDevice
+      ),
+      {
+        device: resolvedDevice,
+        stateBuffer: solidReleaseFluid?.stateBuffer,
+        mechanicsBuffer: solidReleaseFluid?.mechanicsBuffer
+      }
+    );
+  }
   postMechanicsClosure = await timedStage('postMechanicsClosure', () => runMlsMpmPostMechanicsClosureWebGpu({
     device: resolvedDevice,
     stageMechanicsTracer: createSphStageMechanicsTracer({
@@ -39973,10 +40033,24 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         : runMlsMpmG2pWithOptionalWebGpu(g2pStageOptions)
     ));
     // G3 coherent rigid bodies on the mechanics-only route as well.
+    const mechanicsOnlySolidFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
     runSchroederSolidRigidLaneStep(
       ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
-      { device: resolvedDevice, dtSeconds, gravity, boxM: dims,
-        fluid: solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) });
+      { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: mechanicsOnlySolidFluid });
+    if (sphParticleState?.deformableSolidSurfaces) {
+      runSchroederDeformableSolidSurfaceLaneStep(
+        ensureSchroederDeformableSolidSurfaceFamilyForUpload(
+          sphParticleUpload,
+          sphParticleState.deformableSolidSurfaces,
+          resolvedDevice
+        ),
+        {
+          device: resolvedDevice,
+          stateBuffer: mechanicsOnlySolidFluid?.stateBuffer,
+          mechanicsBuffer: mechanicsOnlySolidFluid?.mechanicsBuffer
+        }
+      );
+    }
 
     const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
     const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;

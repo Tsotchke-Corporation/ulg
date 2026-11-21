@@ -50,6 +50,7 @@ import {
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
@@ -4355,7 +4356,7 @@ export async function runSphReactionStepWebGpu({
     ]
   });
   const packBindGroup = packPipelineInfo
-    ? device.createBindGroup({
+    ? createCachedExplicitBindGroup(device, {
       layout: packPipelineInfo.bindGroupLayout,
       entries: [
         { binding: 1, resource: { buffer: packSourceStateBuffer } },
@@ -4367,7 +4368,7 @@ export async function runSphReactionStepWebGpu({
     })
     : null;
   const reactionParticleBinBindGroup = reactionParticleBinPipelineInfo
-    ? device.createBindGroup({
+    ? createCachedExplicitBindGroup(device, {
       layout: reactionParticleBinPipelineInfo.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
@@ -4380,16 +4381,16 @@ export async function runSphReactionStepWebGpu({
     })
     : null;
   const proposeBindGroup = proposePipelineInfo
-    ? device.createBindGroup(proposeBindEntries(proposePipelineInfo.bindGroupLayout))
+    ? createCachedExplicitBindGroup(device, proposeBindEntries(proposePipelineInfo.bindGroupLayout))
     : null;
-  const initializePairsGroup = sharedAllocation ? device.createBindGroup({ layout: initializePairsInfo.bindGroupLayout,
+  const initializePairsGroup = sharedAllocation ? createCachedExplicitBindGroup(device, { layout: initializePairsInfo.bindGroupLayout,
     entries: [{ binding: 0, resource: { buffer: packedParticleRecordBuffer } },
       { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
       { binding: 11, resource: { buffer: paramsBuffer } },
       { binding: 25, resource: { buffer: pairAllocationBuffer } }] }) : null;
-  const allocatePairsGroup = sharedAllocation ? device.createBindGroup(resolveBindEntries(allocatePairsInfo.bindGroupLayout)) : null;
-  const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
-  const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
+  const allocatePairsGroup = sharedAllocation ? createCachedExplicitBindGroup(device, resolveBindEntries(allocatePairsInfo.bindGroupLayout)) : null;
+  const resolveBindGroup = createCachedExplicitBindGroup(device, resolveBindEntries(resolveBindGroupLayout));
+  const unpackBindGroup = createCachedExplicitBindGroup(device, unpackBindEntries(unpackBindGroupLayout));
   const encoder = device.createCommandEncoder();
   const particleWorkgroups = Math.max(
     1,

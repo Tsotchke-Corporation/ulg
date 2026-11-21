@@ -74,7 +74,16 @@ const FORWARD_LAW_TOGGLES = Object.freeze([
   ['reactions', 'Chemical Reactions'],
   ['viscosity', 'Viscosity'],
   ['surfaceTension', 'Surface Tension'],
-  ['rigidSolids', 'Coherent Rigid Solids']
+  ['rigidSolids', 'Coherent Rigid Solids'],
+  ['cohesiveFracture', 'Cohesive Fracture & Refreeze (SOL-5)'],
+  ['multilevelSolids', 'Multilevel Solid Proxies (SOL-6)']
+]);
+
+const BODY_MECHANICS_MODE_OPTIONS = Object.freeze([
+  ['auto', 'Auto (phase-admitted)'],
+  ['rigid', 'Coherent Rigid Solid (SOL-1/5/6)'],
+  ['deformable', 'Deformable Solid Carrier (SOL-4)'],
+  ['continuum', 'Continuum MLS-MPM']
 ]);
 
 function configSignature(config) {
@@ -434,14 +443,20 @@ export function mountUlgSimStudioApp({
     }
 
     const hasActive = Boolean(activeSession);
-    const visuallyReady = Boolean(hasActive && !loadingActive && !launchInFlight && (snap?.visualUpdatesReady || snap?.ready));
+    const visuallyReady = Boolean(
+      hasActive
+      && !loadingActive
+      && !launchInFlight
+      && snap?.visualUpdatesReady === true
+      && snap?.pendingPreviewActive !== true
+    );
     stopBtn.hidden = !hasActive;
     playbackBarEl.hidden = !visuallyReady;
 
     if (hasActive) {
       playBtn.textContent = snap?.playing ? 'Pause' : 'Play';
-      playBtn.disabled = !snap?.ready || Boolean(snap?.blocked);
-      stepBtn.disabled = !snap?.ready || Boolean(snap?.blocked);
+      playBtn.disabled = !visuallyReady || Boolean(snap?.blocked);
+      stepBtn.disabled = !visuallyReady || Boolean(snap?.blocked);
     }
 
     if (launchInFlight || loadingActive) {
@@ -465,7 +480,7 @@ export function mountUlgSimStudioApp({
       statusPillEl.textContent = 'Unallocated';
     }
 
-    miniHudEl.hidden = !miniHudPinned || !hasActive || loadingActive || launchInFlight;
+    miniHudEl.hidden = !miniHudPinned || !visuallyReady;
     if (!miniHudEl.hidden && snap) {
       const label = activePresetLabel || 'Custom';
       if (snap.playing && !snap.workerVisualReady && snap.stepCount === 0) {
@@ -483,7 +498,32 @@ export function mountUlgSimStudioApp({
       } else {
         diagnosticsSummaryEl.textContent = snap.fpsText
           || `sim t=${snap.simTimeS.toFixed(3)}s · steps=${snap.stepCount} · rebuild=${snap.rebuildStatus || 'ready'}`;
-        diagnosticsPreEl.textContent = snap.statusText || '';
+        const archLines = [];
+        const a2 = globalThis.__ulgA2IncrementalSpatialStatus;
+        if (a2) {
+          archLines.push(`A2 incremental CSR: hits=${a2.incrementalHits ?? 0} full=${a2.fullRadixBuilds ?? 0} mode=${a2.lastMode ?? 'n/a'}`);
+        }
+        const a3 = globalThis.__ulgA3RegionalClosureStatus;
+        const a3t = globalThis.__ulgA3ThermalRegionalClosureStatus;
+        if (a3 || a3t) {
+          archLines.push(`A3 regional closures: pressure=${a3?.adoptedSchedules ?? 0} thermalG4=${a3t?.adoptedSchedules ?? 0} (${a3t?.regionCount ?? 0} regions)`);
+        }
+        const a4 = globalThis.__ulgA4GasResponseStatus;
+        if (a4) {
+          archLines.push(`A4 2-D gas closures: ${a4.functionCount ?? 0} fns / ${a4.materialCount ?? 0} mats (gpu=${Boolean(a4.gpuTableUploaded)})`);
+        }
+        const a5 = globalThis.__ulgA5SolidStatus;
+        if (a5) {
+          archLines.push(`A5 solids: rigid=${a5.rigidBodyCount ?? 0} deformable=${a5.sol4DeformableSurfaceCount ?? 0} sol5=${Boolean(a5.sol5FractureActive)} sol6=${Boolean(a5.sol6MultilevelActive)}`);
+        }
+        const a6Mesh = globalThis.__ulgA6PeerMeshStatus;
+        const a6Bridge = globalThis.__ulgA6ClosureBridgeStatus;
+        if (a6Mesh || a6Bridge) {
+          const rtcCount = Array.isArray(a6Mesh?.webrtcDataChannelPeers) ? a6Mesh.webrtcDataChannelPeers.length : 0;
+          archLines.push(`A6 derivation: transport=${a6Mesh?.transport ?? 'local'} connected=${Boolean(a6Mesh?.connected)} peers=${a6Mesh?.remotePeerCount ?? 0} webrtc=${rtcCount} quorum=${Boolean(a6Mesh?.quorumReady)} debt=${a6Bridge?.remoteDebtCount ?? 0}`);
+        }
+        const archSuffix = archLines.length > 0 ? `\n\n--- Architecture ---\n${archLines.join('\n')}` : '';
+        diagnosticsPreEl.textContent = `${snap.statusText || ''}${archSuffix}`.trim();
       }
     }
   }
@@ -511,6 +551,17 @@ export function mountUlgSimStudioApp({
       activeSession?.setDiagnosticsVisible?.(diagnosticsOpen);
     } else {
       activeSession?.setDiagnosticsVisible?.(false);
+      const snap = activeSession?.getTelemetrySnapshot?.() || null;
+      if (
+        activeSession
+        && !launchInFlight
+        && !loadingErrorMessage
+        && !snap?.blocked
+        && !(snap?.visualUpdatesReady === true && snap?.pendingPreviewActive !== true)
+      ) {
+        loadingActive = true;
+      }
+      updateChromeAndStatus();
     }
   }
 
@@ -838,6 +889,36 @@ export function mountUlgSimStudioApp({
       row1.append(matField, tempField);
       card.appendChild(row1);
 
+      // Row 1b: Solid Mechanics Mode (Auto / Rigid / Deformable SOL-4 / Continuum)
+      const mechField = document.createElement('label');
+      mechField.className = 'ulg-field';
+      mechField.innerHTML = '<span class="ulg-field-label"><span>Mechanics Carrier</span><span class="ulg-field-hint">Auto promotes cold non-reactive solids to coherent rigid frames</span></span>';
+      const mechSelect = document.createElement('select');
+      mechSelect.className = 'ulg-select';
+      mechSelect.dataset.bodyMechanicsMode = body.id;
+      const currentMode = body.mechanicsMode || 'auto';
+      for (const [modeVal, modeLabel] of BODY_MECHANICS_MODE_OPTIONS) {
+        const o = document.createElement('option');
+        o.value = modeVal;
+        o.textContent = modeLabel;
+        if (modeVal === currentMode) o.selected = true;
+        mechSelect.appendChild(o);
+      }
+      mechSelect.addEventListener('change', () => {
+        if (mechSelect.value === 'auto') {
+          delete body.mechanicsMode;
+          delete body.angularVelocityRadPerS;
+        } else {
+          body.mechanicsMode = mechSelect.value;
+          if (mechSelect.value !== 'rigid') delete body.angularVelocityRadPerS;
+        }
+        markStagedCustom();
+        renderBodiesTab();
+        updateChromeAndStatus();
+      });
+      mechField.appendChild(mechSelect);
+      card.appendChild(mechField);
+
       // Row 2: Particles per edge (X, Y, Z) -> derives size
       const ppeField = document.createElement('div');
       ppeField.className = 'ulg-field';
@@ -1109,6 +1190,23 @@ export function mountUlgSimStudioApp({
         airGrid.appendChild(wrap);
       }
       envBlock.appendChild(airGrid);
+
+      // First-Class Air 2-Level SS toggle (strictly 2 levels: L0 fine + L1 coarse ambient)
+      const twoLevelAirLabel = document.createElement('label');
+      twoLevelAirLabel.className = 'ulg-toggle-item';
+      twoLevelAirLabel.style.marginTop = '10px';
+      const twoLevelAirCb = document.createElement('input');
+      twoLevelAirCb.type = 'checkbox';
+      twoLevelAirCb.checked = Boolean(stagedConfig.environment.twoLevelAir);
+      twoLevelAirCb.addEventListener('change', () => {
+        stagedConfig.environment.twoLevelAir = twoLevelAirCb.checked;
+        markStagedCustom();
+        updateChromeAndStatus();
+      });
+      const twoLevelAirText = document.createElement('span');
+      twoLevelAirText.textContent = '2-Level First-Class Air (L1 coarse ambient + L0 fine interface, retires implicit atmosphere stand-in)';
+      twoLevelAirLabel.append(twoLevelAirCb, twoLevelAirText);
+      envBlock.appendChild(twoLevelAirLabel);
     }
     panel.appendChild(envBlock);
 
@@ -1295,6 +1393,53 @@ export function mountUlgSimStudioApp({
     hudBlock.appendChild(hudToggleLabel);
     panel.appendChild(hudBlock);
 
+    // Remote Derivation Peers (A6 cross-machine WebRTC / signaling relay)
+    stagedConfig.network = stagedConfig.network || { peerRelayUrl: '', peerRoomId: '' };
+    const peerBlock = document.createElement('div');
+    peerBlock.className = 'ulg-card-block';
+    const peerDetails = document.createElement('details');
+    peerDetails.className = 'ulg-details';
+    if (stagedConfig.network.peerRelayUrl || stagedConfig.network.peerRoomId) peerDetails.open = true;
+    peerDetails.innerHTML = '<summary>Remote Derivation Peers (A6 WebRTC / Signaling Relay)</summary><p class="ulg-section-help" style="margin-top:8px;">Optional WebSocket signaling relay for cross-machine PeerCompute 2-of-2 quorum derivation over WebRTC DataChannels. Leave blank to use local warm workers and sibling same-origin tabs.</p>';
+    const peerGrid = document.createElement('div');
+    peerGrid.className = 'ulg-grid-2';
+    peerGrid.style.marginTop = '8px';
+
+    const relayField = document.createElement('label');
+    relayField.className = 'ulg-field';
+    relayField.innerHTML = '<span class="ulg-field-label"><span>Signaling Relay URL</span><span class="ulg-field-hint">wss://…</span></span>';
+    const relayInp = document.createElement('input');
+    relayInp.type = 'text';
+    relayInp.className = 'ulg-input';
+    relayInp.placeholder = 'wss://relay.example/ws';
+    relayInp.value = stagedConfig.network.peerRelayUrl || '';
+    relayInp.addEventListener('change', () => {
+      stagedConfig.network.peerRelayUrl = relayInp.value.trim();
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+      updateChromeAndStatus();
+    });
+    relayField.appendChild(relayInp);
+
+    const roomField = document.createElement('label');
+    roomField.className = 'ulg-field';
+    roomField.innerHTML = '<span class="ulg-field-label"><span>Mesh Room ID</span><span class="ulg-field-hint">optional</span></span>';
+    const roomInp = document.createElement('input');
+    roomInp.type = 'text';
+    roomInp.className = 'ulg-input';
+    roomInp.placeholder = 'ulg-a6-derivation-peers-v1';
+    roomInp.value = stagedConfig.network.peerRoomId || '';
+    roomInp.addEventListener('change', () => {
+      stagedConfig.network.peerRoomId = roomInp.value.trim();
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+      updateChromeAndStatus();
+    });
+    roomField.appendChild(roomInp);
+
+    peerGrid.append(relayField, roomField);
+    peerDetails.appendChild(peerGrid);
+    peerBlock.appendChild(peerDetails);
+    panel.appendChild(peerBlock);
+
     // Cache block
     const cacheBlock = document.createElement('div');
     cacheBlock.className = 'ulg-card-block';
@@ -1436,10 +1581,19 @@ export function mountUlgSimStudioApp({
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && modalOpen && !root.querySelector('.ulg-pt-backdrop')) {
       setModalOpen(false);
-    } else if (event.code === 'Space' && !modalOpen && !loadingActive && activeSession && document.activeElement === document.body) {
-      event.preventDefault();
-      activeSession.togglePlay?.();
-      updateChromeAndStatus();
+    } else if (
+      event.code === 'Space'
+      && !modalOpen
+      && !loadingActive
+      && activeSession
+      && document.activeElement === document.body
+    ) {
+      const snap = activeSession.getTelemetrySnapshot?.() || null;
+      if (snap?.visualUpdatesReady === true && snap?.pendingPreviewActive !== true) {
+        event.preventDefault();
+        activeSession.togglePlay?.();
+        updateChromeAndStatus();
+      }
     }
   });
 
@@ -1499,7 +1653,7 @@ export function mountUlgSimStudioApp({
   });
 
   diagnosticsPollTimer = window.setInterval(() => {
-    if (loadingActive || launchInFlight || (activeSession && (modalOpen || miniHudPinned || !playbackBarEl.hidden))) {
+    if (loadingActive || launchInFlight || activeSession) {
       updateChromeAndStatus();
     }
   }, 180);

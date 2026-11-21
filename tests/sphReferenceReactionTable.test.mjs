@@ -6,6 +6,7 @@ import { buildSphThermalMaterialTable } from '../src/runtime/sph/sphThermalGpuKe
 import { assertSphReactionEnergyAuthority } from '../src/runtime/sph/sphReactionEnergyAuthority.js';
 import { buildSphReferenceReactionTable, importSphReferenceReactionTableColdInput }
   from '../src/runtime/sph/sphReferenceReactionTable.js';
+import { buildSphReactionTableFromViewState } from '../src/runtime/sph/sphStaticTableInputs.js';
 import { standardFormationEnthalpyReference } from '../src/runtime/chemistry/standardFormationEnthalpy.js';
 import { createSchroederTargetScheduleTableFingerprints }
   from '../src/runtime/sph/schroederTargetScheduleAuthority.js';
@@ -68,4 +69,28 @@ test('an unsupported discovery catalog cannot claim no chemistry or acquire inve
   assert.throws(() => buildSphReferenceReactionTable(nitride, options), /No reaction candidate/);
   const promised = { ...demo.reactions[0], energyReference: { schema: 'invented' } };
   assert.throws(() => buildSphReferenceReactionTable([promised], options), /unknown reference schema/);
+});
+
+test('H + O and h2 + o2 in humid room air compile to physical reaction energy authority instead of heat-proxy gauge block', () => {
+  for (const [matA, matB] of [['H', 'O'], ['h2', 'o2']]) {
+    const { demo: hoDemo } = createSphPhaseDemo({
+      boxDimensionsM: [1.5, 1.5, 1.5],
+      environment: createSphRoomAirInitialization(),
+      environmentCellsPerAxis: 1,
+      allowReducedProductProperties: true,
+      initialBodies: [
+        { id: 'b1', domainId: 1, material: matA, sizeM: [0.4, 0.4, 0.4], centerM: [0.75, 0.25, 0.75], temperatureK: 293.15, particlesPerEdge: [2, 2, 2], velocityMPerS: [0, 0, 0] },
+        { id: 'b2', domainId: 2, material: matB, sizeM: [0.4, 0.4, 0.4], centerM: [0.75, 0.9, 0.75], temperatureK: 293.15, particlesPerEdge: [2, 2, 2], velocityMPerS: [0, 0, 0] }
+      ]
+    });
+    const hoThermal = buildSphThermalMaterialTable(hoDemo.materialProperties);
+    const hoTable = buildSphReactionTableFromViewState(hoDemo, { thermalMaterialTable: hoThermal });
+    assert.equal(assertSphReactionEnergyAuthority(hoTable, hoThermal), true);
+    assert.ok(hoTable.reactionCount >= 1);
+    assert.equal(hoTable.productTermMetadata[0].material, 'h2o');
+    assert.equal(hoTable.energyAuthority.mode, 'closed-adiabatic-runtime-gauge-corrected');
+    assert.ok(hoTable.coldReferenceRecipe);
+    const imported = importSphReferenceReactionTableColdInput(structuredClone(hoTable), structuredClone(hoThermal));
+    assert.equal(assertSphReactionEnergyAuthority(imported, hoThermal), true);
+  }
 });

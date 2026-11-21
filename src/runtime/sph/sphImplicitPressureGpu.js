@@ -23,6 +23,15 @@
 // iterate scale); flag-off encodes nothing and is unchanged.
 
 import { ESHKOL_TAIT_STIFFNESS_TABLE } from '../material/eshkolEosStiffnessTable.js';
+import {
+  DEFAULT_TAIT_EOS_REGIONAL_GENERATOR_WGSL,
+  adoptExternalRegionalResponseTable,
+  createRegionalClosureWorkerLane,
+  destroyRegionalClosureWorkerLane,
+  encodeRegionalClosureLaneAdopt,
+  encodeRegionalClosureLaneEvaluate,
+  regionalClosureLaneBindings
+} from '../material/regionalClosureWorkerLane.js';
 import { packResponseFunctionsForGpu, responseFunctionGpuWgsl } from '../material/responseFunctionGpu.js';
 import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
 
@@ -799,6 +808,48 @@ const ENTRY_POINTS = [
   'ip_cg_apply', 'ip_reduce_alpha', 'ip_cg_update_xr', 'ip_reduce_beta', 'ip_cg_update_p', 'ip_reduce_pscale'
 ];
 
+// A3 GPU-resident member packer: projects live liquid Tait density ratios
+// (rho / rho0) directly into regionalClosureSamplerGpu's vec4<f32> member buffer
+// without any host readback. Region 0 holds the bulk liquid envelope; non-liquid
+// particles get region 0xffffffffu so A3 skips them cleanly.
+const REGIONAL_MEMBER_PACK_WGSL = /* wgsl */ `
+struct PackParams {
+  particle_count: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+};
+@group(0) @binding(0) var<uniform> pack_params: PackParams;
+@group(0) @binding(1) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> members: array<vec4<f32>>;
+
+@compute @workgroup_size(128)
+fn ip_pack_regional_members(@builtin(global_invocation_id) id: vec3<u32>) {
+  let p = id.x;
+  if (p >= pack_params.particle_count) { return; }
+  let mb = p * 8u;
+  let row4 = mls_mechanics[mb + 4u];
+  let row5 = mls_mechanics[mb + 5u];
+  let row6 = mls_mechanics[mb + 6u];
+  let volume = select(0.0, row4.w * row4.z, row4.w > 0.0 && row4.z > 0.0);
+  let rho0 = sph_thermo[p * 3u].w;
+  let mass = sph_state[p * 2u].w;
+  let is_liquid = volume > 0.0
+    && !(row5.x > 0.5 && row5.w > 0.0)
+    && row6.z > 0.5 && row6.z < 1.5
+    && row6.y > 0.0 && rho0 > 0.0 && mass > 0.0;
+  if (is_liquid) {
+    let ratio = clamp((mass / volume) / rho0, 0.5, 2.0);
+    members[p] = vec4<f32>(ratio, 0.0, 0.0, bitcast<f32>(0u));
+  } else {
+    // Region id 1u is >= region_count (1u) and non-NaN in f32 bitcast, so A3 skips it cleanly.
+    members[p] = vec4<f32>(1.0, 0.0, 0.0, bitcast<f32>(1u));
+  }
+}
+`;
+
 const pipelineCache = new WeakMap();
 
 function implicitPressurePipelines(device) {
@@ -828,9 +879,152 @@ function implicitPressurePipelines(device) {
   const stiffnessTable = keyDevice.createBuffer({ label: 'ulg-sph-implicit-pressure-response-table',
     size: SPH_IMPLICIT_PRESSURE_STIFFNESS_TABLE.data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   keyDevice.queue.writeBuffer(stiffnessTable, 0, SPH_IMPLICIT_PRESSURE_STIFFNESS_TABLE.data);
-  cached = { module, layout, pipelines, workspaces: [], stiffnessTable };
+  cached = {
+    module,
+    layout,
+    pipelines,
+    workspaces: [],
+    stiffnessTable,
+    regionalPackPipeline: null,
+    regionalPackLayout: null,
+    regionalPackParamsBuffer: null,
+    regionalMembersBuffer: null,
+    regionalMemberCapacity: 0,
+    regionalLane: null,
+    regionalEvaluatedSchedules: 0,
+    regionalAdoptedSchedules: 0
+  };
   pipelineCache.set(keyDevice, cached);
   return cached;
+}
+
+function ensureRegionalClosureSamplerResources(device, cache, particleCount) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  if (!cache.regionalPackPipeline) {
+    const packModule = keyDevice.createShaderModule({
+      label: 'ulg-sph-implicit-pressure-a3-pack',
+      code: REGIONAL_MEMBER_PACK_WGSL
+    });
+    cache.regionalPackLayout = keyDevice.createBindGroupLayout({
+      label: 'ulg-sph-implicit-pressure-a3-pack-layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
+      ]
+    });
+    cache.regionalPackPipeline = keyDevice.createComputePipeline({
+      label: 'ulg-sph-implicit-pressure-a3-pack-pipeline',
+      layout: keyDevice.createPipelineLayout({ bindGroupLayouts: [cache.regionalPackLayout] }),
+      compute: { module: packModule, entryPoint: 'ip_pack_regional_members' }
+    });
+    cache.regionalPackParamsBuffer = keyDevice.createBuffer({
+      label: 'ulg-sph-implicit-pressure-a3-pack-params',
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+  }
+  const needed = Math.max(256, 1 << Math.ceil(Math.log2(Math.max(1, particleCount))));
+  if (!cache.regionalLane || cache.regionalMemberCapacity < needed) {
+    if (cache.regionalLane) destroyRegionalClosureWorkerLane(cache.regionalLane);
+    cache.regionalMembersBuffer?.destroy?.();
+    cache.regionalMemberCapacity = needed;
+    cache.regionalMembersBuffer = keyDevice.createBuffer({
+      label: `ulg-sph-implicit-pressure-a3-members-${needed}`,
+      size: needed * 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    cache.regionalLane = createRegionalClosureWorkerLane(keyDevice, {
+      name: 'ulg-sph-implicit-pressure-a3-lane',
+      generatorWgsl: DEFAULT_TAIT_EOS_REGIONAL_GENERATOR_WGSL,
+      axes: 1,
+      regionCapacity: 1,
+      memberCapacity: needed,
+      degrees: [8],
+      tolerances: [0.35],
+      margin: 0.25,
+      policy: 'async',
+      relativeTolerance: 1e-5,
+      heldOutPerAxis: 3,
+      safetyFactor: 2
+    });
+    for (const workspace of cache.workspaces) workspace.bindGroups.clear();
+  }
+  return cache.regionalLane;
+}
+
+/**
+ * Access the live G5-reserved A3 regional closure lane on `device` (or null
+ * before the first implicit-pressure schedule runs).
+ */
+export function getSphImplicitPressureRegionalClosureLane(device) {
+  if (!device) return null;
+  const cached = pipelineCache.get(unwrapWebGpuCacheDevice(device));
+  return cached?.regionalLane ?? null;
+}
+
+/**
+ * Encode one GPU-resident A3 regional envelope/sample/fit + G5 CAS schedule-
+ * boundary adoption tick for the live implicit pressure lane (zero host
+ * readback). Called once per schedule so per-substep pass budgets stay flat.
+ */
+export function encodeSphImplicitPressureRegionalClosureScheduleTick(device, encoder, {
+  stateBuffer,
+  thermoBuffer,
+  mechanicsBuffer,
+  particleCount,
+  scheduleId = null
+}) {
+  if (!(particleCount > 0) || globalThis.__ulgDisableA3RegionalLane === true) return null;
+  const cache = implicitPressurePipelines(device);
+  const lane = ensureRegionalClosureSamplerResources(device, cache, particleCount);
+  device.queue.writeBuffer(
+    cache.regionalPackParamsBuffer,
+    0,
+    new Uint32Array([particleCount, 0, 0, 0])
+  );
+  const packGroup = device.createBindGroup({
+    label: 'ulg-sph-implicit-pressure-a3-pack-group',
+    layout: cache.regionalPackLayout,
+    entries: [
+      { binding: 0, resource: { buffer: cache.regionalPackParamsBuffer } },
+      { binding: 1, resource: { buffer: stateBuffer } },
+      { binding: 2, resource: { buffer: thermoBuffer } },
+      { binding: 3, resource: { buffer: mechanicsBuffer } },
+      { binding: 4, resource: { buffer: cache.regionalMembersBuffer } }
+    ]
+  });
+  const packPass = encoder.beginComputePass({ label: 'ulg-sph-implicit-pressure-a3-pack' });
+  packPass.setPipeline(cache.regionalPackPipeline);
+  packPass.setBindGroup(0, packGroup);
+  packPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 128)));
+  packPass.end();
+
+  encodeRegionalClosureLaneEvaluate(lane, encoder, {
+    membersBuffer: cache.regionalMembersBuffer,
+    regionCount: 1,
+    memberCount: particleCount
+  });
+  cache.regionalEvaluatedSchedules += 1;
+  const adopted = encodeRegionalClosureLaneAdopt(lane, encoder, {
+    membersBuffer: cache.regionalMembersBuffer,
+    regionCount: 1,
+    scheduleId
+  });
+  cache.regionalAdoptedSchedules += 1;
+  const bindings = regionalClosureLaneBindings(lane);
+  globalThis.__ulgA3RegionalClosureStatus = Object.freeze({
+    active: true,
+    ordinal: bindings.ordinal,
+    regionCount: 1,
+    memberCount: particleCount,
+    evaluatedSchedules: cache.regionalEvaluatedSchedules,
+    adoptedSchedules: cache.regionalAdoptedSchedules,
+    externalSourceFingerprint: bindings.externalSourceFingerprint
+  });
+  return adopted;
 }
 
 /**
@@ -858,6 +1052,12 @@ export function updateSphImplicitPressureStiffnessTable(device, responseFunction
     device.queue.writeBuffer(next, 0, packed.data);
     cache.stiffnessTable.destroy();
     cache.stiffnessTable = next;
+    for (const workspace of cache.workspaces) workspace.bindGroups.clear();
+  }
+  if (cache.regionalLane) {
+    adoptExternalRegionalResponseTable(cache.regionalLane, packed, {
+      sourceFingerprint: 'sph-implicit-pressure-external-a4'
+    });
     for (const workspace of cache.workspaces) workspace.bindGroups.clear();
   }
   return cache.stiffnessTable;
@@ -940,7 +1140,9 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
   dt,
   internalPressureScale = 1,
   cflFactor = 0.6,
-  timestampPassExtras = null
+  timestampPassExtras = null,
+  regionalSampleOnScheduleBoundary = false,
+  scheduleId = null
 }) {
   if (!options?.enabled || !(particleCount > 0) || !(dt > 0)) return 0;
   const cache = implicitPressurePipelines(device);
@@ -949,6 +1151,20 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
   const jacobi = options.jacobi === true;
   const stiffnessTable = options.stiffnessSource === SPH_IMPLICIT_PRESSURE_STIFFNESS_SOURCES.closedForm
     ? null : ESHKOL_TAIT_STIFFNESS_TABLE;
+  if (
+    regionalSampleOnScheduleBoundary === true
+    && stiffnessTable != null
+    && !options.stiffnessTableBuffer
+    && globalThis.__ulgDisableA3RegionalLane !== true
+  ) {
+    encodeSphImplicitPressureRegionalClosureScheduleTick(device, encoder, {
+      stateBuffer,
+      thermoBuffer,
+      mechanicsBuffer,
+      particleCount,
+      scheduleId
+    });
+  }
   // The grid update clamps node speed to cfl_factor dx / dt; the bound's
   // source speed starts from that cap.
   const maxSpeedMPerS = Math.max(Number(cflFactor) || 0.6, 1e-3) * gridSpec.gridSpacingM / dt;
@@ -962,7 +1178,10 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
     })));
     workspace.paramsKey = paramsKey;
   }
-  const activeStiffnessTable = options.stiffnessTableBuffer ?? cache.stiffnessTable;
+  const activeA3Table = cache.regionalLane && globalThis.__ulgDisableA3RegionalLane !== true
+    ? regionalClosureLaneBindings(cache.regionalLane).tableBuffer
+    : null;
+  const activeStiffnessTable = options.stiffnessTableBuffer ?? activeA3Table ?? cache.stiffnessTable;
   const groupKey = (source) => [source, stateBuffer, thermoBuffer, mechanicsBuffer, gridBuffer, activeStiffnessTable];
   const bindGroup = (source) => {
     const key = groupKey(source);

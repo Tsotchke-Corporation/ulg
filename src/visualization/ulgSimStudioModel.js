@@ -141,7 +141,9 @@ export function buildStagedConfigFromPreset(presetId) {
       temperatureK: Number(controls.environmentTemperatureK ?? 293.15),
       pressurePa: Number(controls.environmentPressurePa ?? 101325),
       humidityPercent: Number(controls.environmentHumidityPercent ?? 50),
-      nucleiPerCm3: Number(controls.environmentNucleiPerCm3 ?? 0)
+      nucleiPerCm3: Number(controls.environmentNucleiPerCm3 ?? 0),
+      twoLevelAir: runtime.schroederTwoLevel === '1'
+        && (controls.environmentMode || SPH_ENVIRONMENT_CONTROL_DEFAULTS.environmentMode) === 'air'
     },
     laws: {
       gravity: controls.lawg !== '0',
@@ -149,13 +151,19 @@ export function buildStagedConfigFromPreset(presetId) {
       reactions: controls.lawr !== '0',
       viscosity: controls.lawv !== '0',
       surfaceTension: controls.lawst === '1',
-      rigidSolids: runtime.rigidSolids !== '0'
+      rigidSolids: runtime.rigidSolids !== '0',
+      cohesiveFracture: runtime.solidFracture !== '0',
+      multilevelSolids: runtime.solidMultilevel !== '0'
     },
     bodies: floorCenteredBodies,
     display: {
       lightingMode: SPH_SCENE_LIGHTING_MODE_DEFAULT,
       backgroundColor: SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
       blobScale: Number(controls.blob ?? 1)
+    },
+    network: {
+      peerRelayUrl: '',
+      peerRoomId: ''
     },
     solverProfile: isTier0Water
       ? 'tier0-realtime'
@@ -184,7 +192,8 @@ export function buildBlankCustomConfig() {
       temperatureK: 293.15,
       pressurePa: 101325,
       humidityPercent: 50,
-      nucleiPerCm3: 0
+      nucleiPerCm3: 0,
+      twoLevelAir: false
     },
     laws: {
       gravity: true,
@@ -192,7 +201,9 @@ export function buildBlankCustomConfig() {
       reactions: true,
       viscosity: true,
       surfaceTension: false,
-      rigidSolids: true
+      rigidSolids: true,
+      cohesiveFracture: true,
+      multilevelSolids: true
     },
     bodies: [
       {
@@ -210,6 +221,10 @@ export function buildBlankCustomConfig() {
       lightingMode: SPH_SCENE_LIGHTING_MODE_DEFAULT,
       backgroundColor: SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
       blobScale: 1
+    },
+    network: {
+      peerRelayUrl: '',
+      peerRoomId: ''
     },
     solverProfile: 'canonical-ss',
     presetRuntimeOverlay: { ...DEFAULT_CUSTOM_CAMERA }
@@ -386,11 +401,65 @@ export function buildLaunchParamsFromStagedConfig(config) {
 
   const firstBody = internalBodies[0];
   const secondBody = internalBodies[1] || firstBody;
+  const isAirEnvironment = config.environment.mode === 'air';
+  const twoLevelAirEnabled = Boolean(isAirEnvironment && config.environment.twoLevelAir === true);
+  const cubicBox = Math.abs(boxM[1] - boxM[0]) <= 1e-6 * boxM[0]
+    && Math.abs(boxM[2] - boxM[0]) <= 1e-6 * boxM[0];
+  const configuredNuclei = Number(config.environment.nucleiPerCm3 ?? 0);
+  const effectiveNucleiPerCm3 = configuredNuclei > 0
+    ? configuredNuclei
+    : (isAirEnvironment && cubicBox ? 5000 : 0);
+  const useExactEnergyLedger = Boolean(
+    isAirEnvironment && cubicBox && effectiveNucleiPerCm3 > 0
+  );
+  let twoLevelAirRuntime = {};
+  if (twoLevelAirEnabled) {
+    // First-Class Air 2-level SS enrollment (strictly 2 levels: maxLevel - minLevel === 1).
+    // Coarse level (L1) hosts ambient air parcels while fine level (L0) resolves condensed
+    // bodies and interfaces; sphPhaseDemoMount retires the single-level implicit atmosphere
+    // stand-in automatically whenever maxLevel > minLevel.
+    const bodyPitches = internalBodies.map((body) => (
+      Math.cbrt(
+        (body.sizeM[0] / body.particlesPerEdge[0])
+        * (body.sizeM[1] / body.particlesPerEdge[1])
+        * (body.sizeM[2] / body.particlesPerEdge[2])
+      )
+    )).filter((p) => Number.isFinite(p) && p > 0);
+    const finePitchM = bodyPitches.length > 0 ? Math.min(...bodyPitches) : Math.min(...boxM) / 10;
+    const fineSupportRadiusM = Math.cbrt((3 * (finePitchM ** 3)) / (4 * Math.PI));
+    const twoLevelBaseDxM = Math.max(fineSupportRadiusM / 1.5, Math.max(...boxM) / 36);
+    const maxSceneTempK = Math.max(
+      Number(config.environment.temperatureK) || 293.15,
+      ...internalBodies.map((body) => Number(body.temperatureK) || 293.15)
+    );
+    const airAcousticSpeedMPerS = Math.max(350, Math.sqrt(1.4 * 287.05 * maxSceneTempK));
+    const twoLevelAcousticDtS = roundNice(
+      Math.min(0.0002, Math.max(1e-6, (0.4 * twoLevelBaseDxM) / airAcousticSpeedMPerS)),
+      4
+    );
+    twoLevelAirRuntime = {
+      schroederMinLevel: '0',
+      schroederMaxLevel: '1',
+      schroederTwoLevel: '1',
+      schroederTwoLevelAuthority: 'authoritative',
+      schroederTwoLevelSubsteps: '2',
+      schroederCrossLevelCoupling: '0',
+      schroederMechanicsFieldPairV2: '1',
+      schroederBaseGridSpacingM: String(twoLevelBaseDxM),
+      sdt: String(twoLevelAcousticDtS),
+      cfl: '0.8',
+      cflSafety: '0.2',
+      residentStepsPerSchedule: '4',
+      environmentAirParcels: 'mixture',
+      splitSpareLineages: String(Math.min(256, Math.max(64, totalParticlesOf(internalBodies))))
+    };
+  }
   const compiled = {
     ...SPH_ENVIRONMENT_CONTROL_DEFAULTS,
     ...baseRuntime,
     ...overlayRuntime,
     ...dynamicLawGuard,
+    ...twoLevelAirRuntime,
     // Always enforce unified worker-owned GPU marching-cubes isosurface rendering
     renderer: 'native-webgpu',
     surfaceOverlay: '0',
@@ -399,6 +468,7 @@ export function buildLaunchParamsFromStagedConfig(config) {
     workerLivePreview: '0',
     mech: 'mlsmpm',
     residentAuto: '1',
+    ...(useExactEnergyLedger ? { exactEnergyLedger: '1' } : {}),
     scenario: exactPreset ? exactPreset.id : 'custom',
     sceneLengthScale: String(scale),
     wallModel: config.wallModel || 'finite-heat-capacity-lumped-face',
@@ -415,7 +485,7 @@ export function buildLaunchParamsFromStagedConfig(config) {
     environmentTemperatureK: String(config.environment.temperatureK),
     environmentPressurePa: String(config.environment.pressurePa),
     environmentHumidityPercent: String(config.environment.humidityPercent),
-    environmentNucleiPerCm3: String(config.environment.nucleiPerCm3),
+    environmentNucleiPerCm3: String(effectiveNucleiPerCm3),
     lawmech: '1',
     lawg: config.laws.gravity ? '1' : '0',
     laweos: '1',
@@ -425,6 +495,8 @@ export function buildLaunchParamsFromStagedConfig(config) {
     lawv: config.laws.viscosity ? '1' : '0',
     lawst: config.laws.surfaceTension ? '1' : '0',
     rigidSolids: config.laws.rigidSolids ? '1' : '0',
+    solidFracture: config.laws.cohesiveFracture !== false ? '1' : '0',
+    solidMultilevel: config.laws.multilevelSolids !== false ? '1' : '0',
     base: firstBody.material,
     drop: secondBody.material,
     baset: String(firstBody.temperatureK),
@@ -434,7 +506,13 @@ export function buildLaunchParamsFromStagedConfig(config) {
     bodies: serializeSphInitialBodies(internalBodies),
     lighting: normalizeSphSceneLightingMode(config.display.lightingMode),
     bg: normalizeSphSceneBackgroundColorHex(config.display.backgroundColor),
-    blob: String(config.display.blobScale || 1)
+    blob: String(config.display.blobScale || 1),
+    ...(String(config.network?.peerRelayUrl || '').trim()
+      ? { peerRelay: String(config.network.peerRelayUrl).trim() }
+      : {}),
+    ...(String(config.network?.peerRoomId || '').trim()
+      ? { peerRoom: String(config.network.peerRoomId).trim() }
+      : {})
   };
   delete compiled.surfaceDraw;
   return compiled;
@@ -507,20 +585,23 @@ export function serializeStagedConfigToUrlSearchParams(config, {
     if (Number(env.nucleiPerCm3) > 0) {
       params.set('airNuclei', String(roundNice(env.nucleiPerCm3, 5)));
     }
+    if (env.twoLevelAir === true) {
+      params.set('airTwoLevel', '1');
+    }
   }
 
   const laws = config.laws || {};
-  params.set(
-    'laws',
-    [
-      `g:${laws.gravity !== false ? 1 : 0}`,
-      `t:${laws.thermal !== false ? 1 : 0}`,
-      `r:${laws.reactions !== false ? 1 : 0}`,
-      `v:${laws.viscosity !== false ? 1 : 0}`,
-      `st:${laws.surfaceTension === true ? 1 : 0}`,
-      `rs:${laws.rigidSolids !== false ? 1 : 0}`
-    ].join(',')
-  );
+  const lawTokens = [
+    `g:${laws.gravity !== false ? 1 : 0}`,
+    `t:${laws.thermal !== false ? 1 : 0}`,
+    `r:${laws.reactions !== false ? 1 : 0}`,
+    `v:${laws.viscosity !== false ? 1 : 0}`,
+    `st:${laws.surfaceTension === true ? 1 : 0}`,
+    `rs:${laws.rigidSolids !== false ? 1 : 0}`
+  ];
+  if (laws.cohesiveFracture === false) lawTokens.push('cf:0');
+  if (laws.multilevelSolids === false) lawTokens.push('ml:0');
+  params.set('laws', lawTokens.join(','));
 
   const display = config.display || {};
   if (display.lightingMode && display.lightingMode !== SPH_SCENE_LIGHTING_MODE_DEFAULT) {
@@ -532,6 +613,11 @@ export function serializeStagedConfigToUrlSearchParams(config, {
   if (Number.isFinite(Number(display.blobScale)) && Math.abs(Number(display.blobScale) - 1) > 1e-4) {
     params.set('blob', String(roundNice(display.blobScale, 4)));
   }
+  const network = config.network || {};
+  const peerRelayUrl = String(network.peerRelayUrl || '').trim();
+  const peerRoomId = String(network.peerRoomId || '').trim();
+  if (peerRelayUrl) params.set('peerRelay', peerRelayUrl);
+  if (peerRoomId) params.set('peerRoom', peerRoomId);
   if (autoPlayWhenReady === true) {
     params.set('autoplay', '1');
   }
@@ -619,6 +705,10 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
   if (params.has('airRh') && Number.isFinite(airRh) && airRh >= 0) config.environment.humidityPercent = airRh;
   const airNuclei = Number(params.get('airNuclei'));
   if (params.has('airNuclei') && Number.isFinite(airNuclei) && airNuclei >= 0) config.environment.nucleiPerCm3 = airNuclei;
+  if (params.has('airTwoLevel')) {
+    const rawTwoLevel = String(params.get('airTwoLevel') || '').trim().toLowerCase();
+    config.environment.twoLevelAir = ['1', 'true', 'yes', 'on'].includes(rawTwoLevel);
+  }
 
   const rawLaws = params.get('laws');
   if (rawLaws) {
@@ -631,6 +721,8 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
     if (map.v != null) config.laws.viscosity = map.v !== '0';
     if (map.st != null) config.laws.surfaceTension = map.st === '1';
     if (map.rs != null) config.laws.rigidSolids = map.rs !== '0';
+    if (map.cf != null) config.laws.cohesiveFracture = map.cf !== '0';
+    if (map.ml != null) config.laws.multilevelSolids = map.ml !== '0';
   }
 
   if (params.has('lighting')) {
@@ -642,6 +734,13 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
   if (params.has('blob')) {
     const blob = Number(params.get('blob'));
     if (Number.isFinite(blob) && blob > 0) config.display.blobScale = blob;
+  }
+  config.network = config.network || { peerRelayUrl: '', peerRoomId: '' };
+  if (params.has('peerRelay')) {
+    config.network.peerRelayUrl = String(params.get('peerRelay') || '').trim();
+  }
+  if (params.has('peerRoom')) {
+    config.network.peerRoomId = String(params.get('peerRoom') || '').trim();
   }
 
   const rawAutoplay = params.get('autoplay');
@@ -674,7 +773,7 @@ export function deriveSimulationLoadingStatus(telemetry = null, {
     };
   }
 
-  if (telemetry?.visualUpdatesReady) {
+  if (telemetry?.visualUpdatesReady && telemetry?.pendingPreviewActive !== true) {
     return {
       ready: true,
       blocked: false,

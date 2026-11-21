@@ -677,3 +677,362 @@ test('A2 incremental spatial migration: exact CSR equivalence, fail-closed certi
     await browser.close();
   }
 });
+
+test('A2 live incremental spatial migration: bit-exact V2 ActiveSource (births, deaths, multi-cell & level jumps) and V1 GPU-authored counts on Vulkan WebGPU', {
+  skip: RUN_NATIVE ? false : 'set ULG_RUN_NATIVE_INCREMENTAL_SPATIAL=1 to run on native WebGPU',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(new URL('service-assets/README.md', BASE_URL).href, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    const out = await page.evaluate(async () => {
+      let adapter = null;
+      for (let i = 0; i < 5 && !adapter; i += 1) {
+        adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+        if (!adapter) await new Promise((r) => setTimeout(r, 400));
+      }
+      if (!adapter) return { status: 'unsupported' };
+      const device = await adapter.requestDevice({
+        requiredLimits: {
+          maxBufferSize: Math.min(512 * 1024 * 1024, adapter.limits.maxBufferSize),
+          maxStorageBufferBindingSize: Math.min(256 * 1024 * 1024, adapter.limits.maxStorageBufferBindingSize),
+          maxStorageBuffersPerShaderStage: Math.min(16, adapter.limits.maxStorageBuffersPerShaderStage)
+        }
+      });
+      const gpuErrors = [];
+      device.addEventListener('uncapturederror', (e) => {
+        if (gpuErrors.length < 20) gpuErrors.push(String(e.error?.message || e.error));
+      });
+
+      const {
+        createSchroederSpatialEpochGpu,
+        registerSchroederIncrementalSpatialMigrationEncoderFactory,
+        ULG_SCHROEDER_SPATIAL_GPU_LOGICAL_COUNT_SOURCE_SCHEMA
+      } = await import('/src/runtime/sph/schroederSpatialEpochGpu.js');
+      const {
+        createSchroederIncrementalSpatialMigrationEncoder
+      } = await import('/src/runtime/sph/schroederIncrementalSpatialMigrationGpu.js');
+      const {
+        createSchroederSpatialActiveSourceViewGpu
+      } = await import('/src/runtime/sph/schroederSpatialActiveSourceViewGpu.js');
+      const { tagWebGpuBufferDevice } = await import('/src/runtime/sph/sphGpuDeviceIdentity.js');
+
+      registerSchroederIncrementalSpatialMigrationEncoderFactory(
+        createSchroederIncrementalSpatialMigrationEncoder
+      );
+
+      async function readU32(buffer, wordCount) {
+        const bytes = wordCount * 4;
+        const staging = device.createBuffer({
+          size: bytes,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(buffer, 0, staging, 0, bytes);
+        device.queue.submit([enc.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const words = new Uint32Array(staging.getMappedRange().slice(0));
+        staging.unmap();
+        staging.destroy();
+        return words;
+      }
+
+      async function compareDirs(incExec, refExec, isV2) {
+        const layout = refExec.layout;
+        const incDir = await readU32(incExec.directoryBuffer, layout.wordLength);
+        const refDir = await readU32(refExec.directoryBuffer, layout.wordLength);
+        const incDisp = await readU32(incExec.consumerDispatchBuffer, 3);
+        const refDisp = await readU32(refExec.consumerDispatchBuffer, 3);
+        const diffs = [];
+        for (let w = 0; w < 48; w += 1) {
+          if (incDir[w] !== refDir[w]) diffs.push({ section: 'header', w, inc: incDir[w], ref: refDir[w] });
+        }
+        const cellCount = refDir[18];
+        const activeCount = isV2 ? refDir[37] : refDir[16];
+        for (let i = 0; i < cellCount * 5 && diffs.length < 10; i += 1) {
+          const idx = layout.cellKeysOffsetWords + i;
+          if (incDir[idx] !== refDir[idx]) diffs.push({ section: 'cell_keys', i, inc: incDir[idx], ref: refDir[idx] });
+        }
+        for (let i = 0; i <= cellCount && diffs.length < 10; i += 1) {
+          const idx = layout.cellOffsetsOffsetWords + i;
+          if (incDir[idx] !== refDir[idx]) diffs.push({ section: 'cell_offsets', i, inc: incDir[idx], ref: refDir[idx] });
+        }
+        for (let i = 0; i < activeCount && diffs.length < 10; i += 1) {
+          const idx = layout.cellMembersOffsetWords + i;
+          if (incDir[idx] !== refDir[idx]) diffs.push({ section: 'cell_members', i, inc: incDir[idx], ref: refDir[idx] });
+        }
+        const revCount = isV2 ? refDir[16] : activeCount;
+        for (let i = 0; i < revCount && diffs.length < 10; i += 1) {
+          const idx = layout.particleToCellOffsetWords + i;
+          if (incDir[idx] !== refDir[idx]) diffs.push({ section: 'reverse', i, inc: incDir[idx], ref: refDir[idx] });
+        }
+        if (refExec.queryGeometryMode === 1) {
+          const qeOff = refExec.queryEvidenceOffsetWords;
+          for (let i = 0; i < 6 && diffs.length < 10; i += 1) {
+            if (incDir[qeOff + i] !== refDir[qeOff + i]) {
+              diffs.push({ section: 'query_evidence', i, inc: incDir[qeOff + i], ref: refDir[qeOff + i] });
+            }
+          }
+        }
+        for (let i = 0; i < 3; i += 1) {
+          if (incDisp[i] !== refDisp[i]) diffs.push({ section: 'dispatch', i, inc: incDisp[i], ref: refDisp[i] });
+        }
+        return { exactMatch: diffs.length === 0, activeCount, cellCount, diffs };
+      }
+
+      // 1. Directory-V2 with ActiveSourceView: births, deaths, multi-cell jumps, and level changes
+      const P = 256;
+      const BASE_SPACING = 0.25;
+      const buildLevelRows = (spec) => {
+        const rows = new Float32Array(P * 16);
+        for (let i = 0; i < P; i += 1) {
+          const base = i * 16;
+          const entry = spec(i);
+          if (!entry) {
+            rows[base + 0] = 0;
+            rows[base + 1] = BASE_SPACING;
+            rows[base + 6] = 0; // dormant (zero mass)
+            rows[base + 7] = 1000;
+            rows[base + 8] = 2;
+            rows[base + 9] = 1;
+            rows[base + 10] = 1; // admitted structural status
+            rows[base + 15] = 0;
+            continue;
+          }
+          const spacing = BASE_SPACING * (2 ** entry.level);
+          rows[base + 0] = entry.level;
+          rows[base + 1] = spacing;
+          rows[base + 2] = spacing;
+          rows[base + 3] = spacing ** 3;
+          rows[base + 4] = spacing ** 3;
+          rows[base + 5] = spacing ** 3;
+          rows[base + 6] = 1.0; // active positive mass
+          rows[base + 7] = 1000;
+          rows[base + 8] = 2;
+          rows[base + 9] = 1;
+          rows[base + 10] = 1; // admitted active
+          rows[base + 12] = entry.x;
+          rows[base + 13] = entry.y;
+          rows[base + 14] = entry.z;
+          rows[base + 15] = 0; // chart 0
+        }
+        return rows;
+      };
+      const uploadRows = (rows) => {
+        const buf = tagWebGpuBufferDevice(
+          device.createBuffer({
+            size: rows.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+          }),
+          device
+        );
+        device.queue.writeBuffer(buf, 0, rows);
+        return buf;
+      };
+      const profile = {
+        schema: 'peercompute.ulg.schroeder-spatial-exact-near-query-profile.v1',
+        status: 'schroeder-spatial-exact-near-query-profile-ready',
+        ready: true,
+        sourceCount: P,
+        chartId: 0,
+        minLevel: 0,
+        maxLevel: 1,
+        levelCount: 2,
+        baseGridSpacingM: BASE_SPACING,
+        levelSpacingMode: 'base-grid-spacing-times-pow2-level',
+        positionAuthority: 'same-epoch-pre-integration-particle-state'
+      };
+      const v2Inc = createSchroederSpatialEpochGpu(device, {
+        maxSourceCount: P, activeSourceCapacity: P, cellCapacity: P,
+        directoryAbiVersion: 2, arenaCount: 3, enableIncrementalMigration: true,
+        label: 'test-v2-inc'
+      });
+      const v2Ref = createSchroederSpatialEpochGpu(device, {
+        maxSourceCount: P, activeSourceCapacity: P, cellCapacity: P,
+        directoryAbiVersion: 2, arenaCount: 3, enableIncrementalMigration: false,
+        label: 'test-v2-ref'
+      });
+      const asvRuntime = createSchroederSpatialActiveSourceViewGpu(device, {
+        maxPhysicalSourceCount: P, activeSourceCapacity: P, arenaCount: 4,
+        label: 'test-v2-asv'
+      });
+
+      const stepsV2 = [
+        // Step 0 (bootstrap full radix): rows 0..199 active at level 0
+        (i) => (i < 200 ? { level: 0, x: (i % 8) * 0.25 + 0.1, y: Math.floor(i / 8) * 0.25 + 0.1, z: 0.1 } : null),
+        // Step 1 (incremental): 20 deaths (0..19 dormant), 30 births (200..229 active), multi-cell jumps & level 0->1 switches
+        (i) => {
+          if (i < 20 || i >= 230) return null;
+          if (i >= 200) return { level: 1, x: (i - 200) * 0.5 + 0.2, y: 1.2, z: 0.3 };
+          const jump = (i % 5 === 0) ? 1.75 : 0.0;
+          const level = (i % 7 === 0) ? 1 : 0;
+          return { level, x: (i % 8) * 0.25 + 0.1 + jump, y: Math.floor(i / 8) * 0.25 + 0.1, z: 0.1 };
+        },
+        // Step 2 (incremental): all dormant -> A = 0
+        () => null,
+        // Step 3 (incremental from A = 0): rebirth of 64 rows
+        (i) => (i < 64 ? { level: 0, x: (i % 4) * 0.25 + 0.05, y: Math.floor(i / 4) * 0.25 + 0.05, z: 0.05 } : null)
+      ];
+
+      const v2Results = [];
+      let prevInc = null;
+      for (let s = 0; s < stepsV2.length; s += 1) {
+        const buf = uploadRows(buildLevelRows(stepsV2[s]));
+        const genId = s + 1;
+        const common = {
+          sourceBuffer: buf, sourceCount: P, sourceRowLayoutId: 1,
+          sourceFamily: 'schroeder-level-assignment-particles',
+          sortMode: 'lexicographic-u32x5', generationId: genId, leaseToken: genId,
+          buildOrdinal: genId, sortUniqueOrdinal: genId, storageGeneration: genId,
+          physicsTick: s, physicsSubstep: 0, positionEpoch: s,
+          exactNearQueryProfile: profile
+        };
+        const encInc = device.createCommandEncoder();
+        const asvInc = asvRuntime.encode(encInc, { ...common, physicalSourceCount: P });
+        const exInc = v2Inc.encode(encInc, { ...common, activeSourceView: asvInc });
+        device.queue.submit([encInc.finish()]);
+        asvRuntime.markExecutionSubmitted(asvInc);
+        v2Inc.markExecutionSubmitted(exInc);
+
+        const encRef = device.createCommandEncoder();
+        const asvRef = asvRuntime.encode(encRef, { ...common, physicalSourceCount: P });
+        const exRef = v2Ref.encode(encRef, { ...common, activeSourceView: asvRef });
+        device.queue.submit([encRef.finish()]);
+        asvRuntime.markExecutionSubmitted(asvRef);
+        v2Ref.markExecutionSubmitted(exRef);
+
+        const cmp = await compareDirs(exInc, exRef, true);
+        v2Results.push({
+          step: s,
+          mode: exInc.a2IncrementalMigration.mode,
+          ...cmp
+        });
+        const fence = device.queue.onSubmittedWorkDone();
+        await Promise.all([
+          asvRuntime.releaseExecutionAfter(asvInc, fence),
+          asvRuntime.releaseExecutionAfter(asvRef, fence),
+          v2Ref.releaseExecutionAfter(exRef, fence),
+          prevInc ? v2Inc.releaseExecutionAfter(prevInc, fence) : Promise.resolve()
+        ]);
+        prevInc = exInc;
+        buf.destroy();
+      }
+      if (prevInc) await v2Inc.releaseExecutionAfter(prevInc, device.queue.onSubmittedWorkDone());
+      v2Inc.destroy();
+      v2Ref.destroy();
+      asvRuntime.destroy();
+
+      // 2. Directory-V1 with GPU-authored logicalSourceCountAuthority (shrink & grow live count)
+      const countBuf = tagWebGpuBufferDevice(
+        device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+        }),
+        device
+      );
+      const v1Inc = createSchroederSpatialEpochGpu(device, {
+        maxSourceCount: P, cellCapacity: P, directoryAbiVersion: 1, arenaCount: 3,
+        enableIncrementalMigration: true, label: 'test-v1-gpu-count-inc'
+      });
+      const v1Ref = createSchroederSpatialEpochGpu(device, {
+        maxSourceCount: P, cellCapacity: P, directoryAbiVersion: 1, arenaCount: 3,
+        enableIncrementalMigration: false, label: 'test-v1-gpu-count-ref'
+      });
+      const buildActiveNodeRows = (count, shift) => {
+        const rows = new Float32Array(P * 16);
+        for (let i = 0; i < count; i += 1) {
+          const base = i * 16;
+          rows[base + 0] = 0;
+          rows[base + 8] = BASE_SPACING;
+          rows[base + 10] = i;
+          rows[base + 11] = 1;
+          rows[base + 12] = (i % 8) * 0.25 + 0.1 + shift;
+          rows[base + 13] = Math.floor(i / 8) * 0.25 + 0.1;
+          rows[base + 14] = 0.1;
+          rows[base + 15] = 0;
+        }
+        return rows;
+      };
+      const v1Results = [];
+      let prevV1 = null;
+      for (const [s, liveCount, shift] of [[0, 120, 0.0], [1, 150, 0.25], [2, 90, 0.5]]) {
+        device.queue.writeBuffer(countBuf, 0, new Uint32Array([liveCount, 0, 0, 0]));
+        const buf = uploadRows(buildActiveNodeRows(liveCount, shift));
+        const genId = s + 1;
+        const logicalAuthority = Object.freeze({
+          schema: ULG_SCHROEDER_SPATIAL_GPU_LOGICAL_COUNT_SOURCE_SCHEMA,
+          status: 'schroeder-spatial-gpu-logical-count-source-ready',
+          ready: true,
+          buffer: countBuf,
+          byteOffset: 0,
+          sourceCapacity: P,
+          storageGeneration: genId
+        });
+        const common = {
+          sourceBuffer: buf, sourceCount: P, sourceRowLayoutId: 2,
+          sortMode: 'lexicographic-u32x5', generationId: genId, leaseToken: genId,
+          buildOrdinal: genId, sortUniqueOrdinal: genId, storageGeneration: genId,
+          physicsTick: s, physicsSubstep: 0, positionEpoch: s,
+          logicalSourceCountAuthority: logicalAuthority
+        };
+        const encInc = device.createCommandEncoder();
+        const exInc = v1Inc.encode(encInc, common);
+        device.queue.submit([encInc.finish()]);
+        v1Inc.markExecutionSubmitted(exInc);
+
+        const encRef = device.createCommandEncoder();
+        const exRef = v1Ref.encode(encRef, common);
+        device.queue.submit([encRef.finish()]);
+        v1Ref.markExecutionSubmitted(exRef);
+
+        const cmp = await compareDirs(exInc, exRef, false);
+        v1Results.push({ step: s, liveCount, mode: exInc.a2IncrementalMigration.mode, ...cmp });
+        const fence = device.queue.onSubmittedWorkDone();
+        await Promise.all([
+          v1Ref.releaseExecutionAfter(exRef, fence),
+          prevV1 ? v1Inc.releaseExecutionAfter(prevV1, fence) : Promise.resolve()
+        ]);
+        prevV1 = exInc;
+        buf.destroy();
+      }
+      if (prevV1) await v1Inc.releaseExecutionAfter(prevV1, device.queue.onSubmittedWorkDone());
+      countBuf.destroy();
+      v1Inc.destroy();
+      v1Ref.destroy();
+
+      return { status: 'ok', gpuErrors, v2Results, v1Results };
+    });
+
+    console.log(JSON.stringify(out, null, 2));
+    assert.equal(out.status, 'ok');
+    assert.deepEqual(out.gpuErrors, []);
+    assert.equal(out.v2Results[0].mode, 'full-radix');
+    assert.equal(out.v2Results[0].exactMatch, true);
+    for (let s = 1; s < out.v2Results.length; s += 1) {
+      assert.equal(out.v2Results[s].mode, 'incremental-gpu-encoded', `v2 step ${s} should use incremental`);
+      assert.equal(out.v2Results[s].exactMatch, true, `v2 step ${s} must be bit-identical: ${JSON.stringify(out.v2Results[s].diffs)}`);
+    }
+    assert.equal(out.v1Results[0].mode, 'full-radix');
+    assert.equal(out.v1Results[0].exactMatch, true);
+    for (let s = 1; s < out.v1Results.length; s += 1) {
+      assert.equal(out.v1Results[s].mode, 'incremental-gpu-encoded', `v1-gpu-count step ${s} should use incremental`);
+      assert.equal(out.v1Results[s].exactMatch, true, `v1-gpu-count step ${s} must be bit-identical: ${JSON.stringify(out.v1Results[s].diffs)}`);
+    }
+  } finally {
+    await browser.close();
+  }
+});

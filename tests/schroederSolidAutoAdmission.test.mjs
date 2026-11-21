@@ -71,16 +71,16 @@ test('coherentRigidSolids admits cold inert ice on iron-ice-quench and keeps mol
   assert.equal(demo.state.rigidBodies.bodies.length, 1);
   assert.equal(demo.state.rigidBodies.bodies[0].sourceBodyId, 'base');
   assert.equal(demo.state.rigidBodies.bodies[0].material, 'h2o');
-  assert.equal(demo.state.rigidBodies.bodies[0].seed.members.length, 125);
+  assert.equal(demo.state.rigidBodies.bodies[0].seed.members.length, 1000);
   assert.ok(demo.state.rigidBodies.bodies[0].thermal, 'ice body carries full melt-release thermal closure');
   assert.equal(demo.state.rigidBodies.fluidThermal.length > 0, true);
 
   const releaseSlots = demo.state.particles.filter((p) => p.solidReleaseSlot === true && p.phaseCompanionSlot !== true);
-  assert.equal(releaseSlots.length, 125, '125 primary dormant liquid release slots reserved for ice melt');
+  assert.equal(releaseSlots.length, 1000, '1000 primary dormant liquid release slots reserved for ice melt');
   const spareSlots = demo.state.particles.filter((p) => p.spareProductSlot === true);
   assert.ok(spareSlots.every((p) => p.solidReleaseSlot !== true), 'spare product slots never inherit solidReleaseSlot');
   const moltenIron = demo.state.particles.filter((p) => p.material === 'fe' && p.massKg > 0);
-  assert.equal(moltenIron.length, 27, 'molten iron drop remains in the fluid continuum');
+  assert.equal(moltenIron.length, 216, 'molten iron drop remains in the fluid continuum');
 });
 
 test('coherentRigidSolids keeps reactive solids (sodium-water and cesium-fluorine) in continuum even under authoritative dynamic activation (initial reactions=false)', () => {

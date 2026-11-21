@@ -20,6 +20,10 @@ import {
   CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
 } from './material/condensedDispersedOpticalReferences.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
+import {
+  createPhaseCaloricThermodynamics,
+  phaseCaloricBranches
+} from './material/condensableThermodynamics.js';
 import { gpuPhaseId, stableOpticalMaterialId } from './material/opticalGpuBuffers.js';
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -105,6 +109,10 @@ import { phaseSoundSpeedScaleFor } from './sph/sphMechanicsMaterialTable.js';
 import { normalizeSphImplicitPressureOptions } from './sph/sphImplicitPressureGpu.js';
 import { seedSchroederSolidRigidBody } from './sph/schroederSolidRigidGpu.js';
 import { SCHROEDER_SOLID_BODIES_SCHEMA } from './sph/schroederSolidRigidLane.js';
+import {
+  SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA,
+  buildSchroederDeformableSolidSurfaceMesh
+} from './sph/schroederSolidDeformableShapeGpu.js';
 
 const DEFAULT_RUNTIME_MATERIAL_KEYS = Object.freeze(['h2o', 'fe', 'air', 'h2', 'o2']);
 // Exact-rational particle quantities are disabled (user, 2026-10-27). Room
@@ -2491,6 +2499,21 @@ function appendPhaseCarrierLanes(particles) {
 function ledgerParcelWaterReference(materialProperties, environment) {
   const water = materialProperties?.h2o;
   if (!water) throw new TypeError('Ledger nuclei require H2O material properties');
+  if (water.phaseCaloricModel) {
+    const model = createPhaseCaloricThermodynamics(water.phaseCaloricModel);
+    const liquid = phaseCaloricBranches(model).find((row) => row.phase === 'liquid');
+    if (liquid) {
+      const cw = liquid.cvJPerKgK;
+      const uAt273 = liquid.referenceInternalEnergyJPerKg
+        + cw * (273.15 - liquid.referenceTemperatureK);
+      return {
+        waterReferenceU0: uAt273,
+        waterSpecificHeatJPerKgK: cw,
+        vaporMaterialId: stableOpticalMaterialId('h2o'),
+        pressurePa: environment.totalPressurePa
+      };
+    }
+  }
   const cw = 4186, uAt283 = specificInternalEnergyJPerKg(water, 283.15);
   return { waterReferenceU0: uAt283 - cw * 10, waterSpecificHeatJPerKgK: cw,
     vaporMaterialId: stableOpticalMaterialId('h2o'), pressurePa: environment.totalPressurePa };
@@ -2515,6 +2538,8 @@ function buildSphInitialBodiesDemoState({
   splitSpareLineageCount = 0,
   mechanics,
   coherentRigidSolids = false,
+  solidFractureEnabled = true,
+  solidMultilevelEnabled = true,
   materialPropertyBank,
   materialPropertyCrystalStructureBank
 }) {
@@ -2534,10 +2559,25 @@ function buildSphInitialBodiesDemoState({
     ...(closures || {})
   };
   const resolved = { ...baseClosures };
+  const activeBodyMaterialKeys = normalizedInitialBodies.bodies.map((body) => body.material).filter(Boolean);
+  const activeBodyMaterialLower = new Set(activeBodyMaterialKeys.map((k) => String(k).toLowerCase()));
+  // Avoid case-colliding material IDs (e.g. 'Fe' body alongside default 'fe'):
+  // migrate any base closure onto the active body's exact key casing.
+  for (const activeKey of activeBodyMaterialKeys) {
+    const lower = String(activeKey).toLowerCase();
+    for (const existingKey of Object.keys(resolved)) {
+      if (existingKey !== activeKey && existingKey.toLowerCase() === lower) {
+        if (!resolved[activeKey]) resolved[activeKey] = resolved[existingKey];
+        delete resolved[existingKey];
+      }
+    }
+  }
   const requiredMaterialKeys = [...new Set([
-    ...DEFAULT_RUNTIME_MATERIAL_KEYS,
-    ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map(row => row.material) : []),
-    ...normalizedInitialBodies.bodies.map((body) => body.material)
+    ...activeBodyMaterialKeys,
+    ...DEFAULT_RUNTIME_MATERIAL_KEYS.filter((k) => !activeBodyMaterialLower.has(String(k).toLowerCase())),
+    ...(environment?.mode === 'air'
+      ? SPH_ENVIRONMENT_DRY_AIR.species.map((row) => row.material).filter((k) => !activeBodyMaterialLower.has(String(k).toLowerCase()))
+      : [])
   ].filter(Boolean))];
   for (const key of requiredMaterialKeys) {
     if (resolved[key]) continue;
@@ -2609,6 +2649,7 @@ function buildSphInitialBodiesDemoState({
   // closures and non-degenerate 3D inertia is physically admitted unless an
   // active chemical reaction in this scene consumes its material.
   const rigidBodies = [];
+  const deformableSolidSurfaces = [];
   const autoRigidEligible = coherentRigidSolids === true
     && String(mechanics || 'mlsmpm') === 'mlsmpm'
     && !globalThis.__ulgSkipSolidReleaseRows;
@@ -2698,16 +2739,60 @@ function buildSphInitialBodiesDemoState({
       // thermal state and reserved release rows.
       if (!globalThis.__ulgSkipSolidReleaseRows && meltClosureReady) {
         const meltK = melt.temperatureK;
-        const solidEdgeU = specificInternalEnergyJPerKg(properties, meltK - 1) + solidPhase.cpJPerKgK;
-        const liquidEdgeU = specificInternalEnergyJPerKg(properties, meltK + 1) - liquidPhase.cpJPerKgK;
+        let solidBranch;
+        let liquidBranch;
+        let memberSpecificInternalEnergyJPerKg;
+        if (properties.phaseCaloricModel) {
+          const caloricModel = createPhaseCaloricThermodynamics(properties.phaseCaloricModel);
+          const branches = phaseCaloricBranches(caloricModel);
+          const calSolid = branches.find((row) => row.phase === 'solid');
+          const calLiquid = branches.find((row) => row.phase === 'liquid');
+          if (calSolid && calLiquid) {
+            const solidAtMelt = calSolid.referenceInternalEnergyJPerKg
+              + calSolid.cvJPerKgK * (meltK - calSolid.referenceTemperatureK);
+            const liquidAtMelt = calLiquid.referenceInternalEnergyJPerKg
+              + calLiquid.cvJPerKgK * (meltK - calLiquid.referenceTemperatureK);
+            memberSpecificInternalEnergyJPerKg = calSolid.referenceInternalEnergyJPerKg
+              + calSolid.cvJPerKgK * (body.temperatureK - calSolid.referenceTemperatureK);
+            solidBranch = {
+              referenceTemperatureK: meltK,
+              referenceInternalEnergyJPerKg: solidAtMelt,
+              cvJPerKgK: calSolid.cvJPerKgK,
+              energyMaxJPerKg: solidAtMelt
+            };
+            liquidBranch = {
+              referenceTemperatureK: meltK,
+              referenceInternalEnergyJPerKg: liquidAtMelt,
+              cvJPerKgK: calLiquid.cvJPerKgK,
+              energyMinJPerKg: liquidAtMelt
+            };
+          }
+        }
+        if (!solidBranch || !liquidBranch) {
+          const solidEdgeU = specificInternalEnergyJPerKg(properties, meltK);
+          const liquidEdgeU = specificInternalEnergyJPerKg(properties, meltK + 1) - liquidPhase.cpJPerKgK;
+          memberSpecificInternalEnergyJPerKg = specificInternalEnergyJPerKg(properties, body.temperatureK);
+          const solidCv = (meltK > body.temperatureK && solidEdgeU > memberSpecificInternalEnergyJPerKg)
+            ? (solidEdgeU - memberSpecificInternalEnergyJPerKg) / (meltK - body.temperatureK)
+            : solidPhase.cpJPerKgK;
+          solidBranch = {
+            referenceTemperatureK: meltK,
+            referenceInternalEnergyJPerKg: solidEdgeU,
+            cvJPerKgK: solidCv,
+            energyMaxJPerKg: solidEdgeU
+          };
+          liquidBranch = {
+            referenceTemperatureK: meltK,
+            referenceInternalEnergyJPerKg: liquidEdgeU,
+            cvJPerKgK: liquidPhase.cpJPerKgK,
+            energyMinJPerKg: liquidEdgeU
+          };
+        }
         thermal = {
           meltTemperatureK: meltK,
-          memberSpecificInternalEnergyJPerKg: specificInternalEnergyJPerKg(properties, body.temperatureK),
-          solidBranch: { referenceTemperatureK: body.temperatureK,
-            referenceInternalEnergyJPerKg: specificInternalEnergyJPerKg(properties, body.temperatureK),
-            cvJPerKgK: solidPhase.cpJPerKgK, energyMaxJPerKg: solidEdgeU },
-          liquidBranch: { referenceTemperatureK: meltK, referenceInternalEnergyJPerKg: liquidEdgeU,
-            cvJPerKgK: liquidPhase.cpJPerKgK, energyMinJPerKg: liquidEdgeU },
+          memberSpecificInternalEnergyJPerKg,
+          solidBranch,
+          liquidBranch,
           // Conductivity as the SPH thermal kernel reads it; absent means none.
           solidConductivityWPerMK: Number(solidPhase.thermalConductivityWPerMK) > 0 ? Number(solidPhase.thermalConductivityWPerMK) : 0,
           liquidConductivityWPerMK: Number(liquidPhase.thermalConductivityWPerMK) > 0 ? Number(liquidPhase.thermalConductivityWPerMK) : 0,
@@ -2740,13 +2825,31 @@ function buildSphInitialBodiesDemoState({
           liveParticles.push(particle);
         }
       }
+      const shearModulusPa = Number(solidPhase?.shearModulusPa) || Number(solidPhase?.bulkModulusPa) || 1.0e9;
       rigidBodies.push({ bodyId: rigidBodies.length, sourceBodyId: body.id, material: body.material,
-        temperatureK: body.temperatureK, pitchByAxisM: [...plan.spacingByAxisM],
+        temperatureK: body.temperatureK, sizeM: [...body.sizeM], pitchByAxisM: [...plan.spacingByAxisM],
+        fracture: {
+          tensileStrengthPa: Math.max(1.0e5, 0.002 * shearModulusPa),
+          shearStrengthPa: Math.max(1.0e5, 0.0015 * shearModulusPa),
+          fractureEnergyJPerM2: 1.0
+        },
         seed: JSON.parse(JSON.stringify(seed)), thermal, releaseRowStart });
       countsByBodyId[body.id] = 0;
       bodyRanges.push({ bodyId: body.id, domainId: body.domainId, material: body.material, start, count: 0,
         endExclusive: start, mechanicsMode: 'rigid' });
       continue;
+    }
+    if (body.mechanicsMode === 'deformable' && particles.length > 0) {
+      const surfaceMesh = buildSchroederDeformableSolidSurfaceMesh(particles, {
+        pitchM: plan.spacingByAxisM
+      });
+      deformableSolidSurfaces.push({
+        bodyId: body.id,
+        domainId: body.domainId,
+        material: body.material,
+        particleRowOffset: start,
+        mesh: surfaceMesh
+      });
     }
     for (const particle of particles) liveParticles.push(particle);
     countsByBodyId[body.id] = particles.length;
@@ -2862,7 +2965,23 @@ function buildSphInitialBodiesDemoState({
         }
       }
     }
-    state.rigidBodies = Object.freeze({ schema: SCHROEDER_SOLID_BODIES_SCHEMA, bodies: rigidBodies, fluidThermal });
+    const maxBodyCapacity = solidFractureEnabled !== false
+      ? Math.max(rigidBodies.length + 4, rigidBodies.length * 2)
+      : rigidBodies.length;
+    state.rigidBodies = Object.freeze({
+      schema: SCHROEDER_SOLID_BODIES_SCHEMA,
+      bodies: rigidBodies,
+      fluidThermal,
+      maxBodyCapacity,
+      fractureEnabled: solidFractureEnabled !== false,
+      multilevelEnabled: solidMultilevelEnabled !== false
+    });
+  }
+  if (deformableSolidSurfaces.length) {
+    state.deformableSolidSurfaces = Object.freeze({
+      schema: SCHROEDER_DEFORMABLE_SOLID_SURFACE_SCHEMA,
+      surfaces: deformableSolidSurfaces
+    });
   }
   copyInitialParticleMetadataIntoState(state, all);
 
@@ -3045,6 +3164,8 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   splitSpareLineageCount = 0,
   mechanics = 'mlsmpm',
   coherentRigidSolids = false,
+  solidFractureEnabled = true,
+  solidMultilevelEnabled = true,
   reactionsRequested = null,
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
@@ -3073,6 +3194,8 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       splitSpareLineageCount,
       mechanics,
       coherentRigidSolids,
+      solidFractureEnabled,
+      solidMultilevelEnabled,
       materialPropertyBank,
       materialPropertyCrystalStructureBank
     });
@@ -3103,11 +3226,23 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   // other element symbol, a closure DERIVED on the fly from the simulation (elementMaterialClosure:
   // jellium + atomic DFT + universal rules). No per-material reference tables.
   const resolved = { ...baseClosures };
+  const activeLegacyMaterialKeys = [dropMaterial, baseMaterial].filter(Boolean);
+  const activeLegacyLower = new Set(activeLegacyMaterialKeys.map((k) => String(k).toLowerCase()));
+  for (const activeKey of activeLegacyMaterialKeys) {
+    const lower = String(activeKey).toLowerCase();
+    for (const existingKey of Object.keys(resolved)) {
+      if (existingKey !== activeKey && existingKey.toLowerCase() === lower) {
+        if (!resolved[activeKey]) resolved[activeKey] = resolved[existingKey];
+        delete resolved[existingKey];
+      }
+    }
+  }
   const requiredMaterialKeys = [...new Set([
-    ...DEFAULT_RUNTIME_MATERIAL_KEYS,
-    ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map(row => row.material) : []),
-    dropMaterial,
-    baseMaterial
+    ...activeLegacyMaterialKeys,
+    ...DEFAULT_RUNTIME_MATERIAL_KEYS.filter((k) => !activeLegacyLower.has(String(k).toLowerCase())),
+    ...(environment?.mode === 'air'
+      ? SPH_ENVIRONMENT_DRY_AIR.species.map((row) => row.material).filter((k) => !activeLegacyLower.has(String(k).toLowerCase()))
+      : [])
   ].filter(Boolean))];
   for (const key of requiredMaterialKeys) {
     if (resolved[key]) continue;
@@ -6462,8 +6597,10 @@ export function createSphPhaseDemo(options = {}) {
   demo.state.surfaceTensionLawAdmission = surfaceTensionLawAdmission;
   // Per-face cumulative heat ledger (J exchanged with each fixed-temperature wall reservoir).
   demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
-  const gasDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'gas').densityKgPerM3;
-  const liquidDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'liquid').densityKgPerM3;
+  const h2oProps = demo.materialProperties.h2o
+    ?? Object.entries(demo.materialProperties).find(([k]) => k.toLowerCase() === 'h2o')?.[1];
+  const gasDensity = h2oProps.phases.find((p) => p.name === 'gas').densityKgPerM3;
+  const liquidDensity = h2oProps.phases.find((p) => p.name === 'liquid').densityKgPerM3;
   // Single simulation clock: each driver.step advances the mechanics by `mechanicalSubsteps`
   // carrier substeps of `dt` each, and the thermal step by the SAME sim-time (subs * dt). This
   // keeps the thermodynamics and the motion on one clock — heat flow / melting / steam no longer
@@ -6785,7 +6922,43 @@ export function createSphPhaseDemo(options = {}) {
         ]
       });
     }
-    demo.materialProperties[key] = closure.properties;
+    const existingKey = Object.keys(demo.materialProperties).find((k) => k.toLowerCase() === String(key).toLowerCase());
+    if (!existingKey) {
+      demo.materialProperties[key] = closure.properties;
+    } else if (existingKey === key) {
+      demo.materialProperties[key] = closure.properties;
+    }
+  }
+  if (demo.state?.rigidBodies && Object.keys(discovery.productClosures).length > 0) {
+    const existingRows = Array.isArray(demo.state.rigidBodies.fluidThermal)
+      ? demo.state.rigidBodies.fluidThermal
+      : [];
+    const seen = new Set(existingRows.map((row) => `${row.materialId}|${row.phaseId}`));
+    const extraRows = [];
+    for (const [key, closure] of Object.entries(discovery.productClosures)) {
+      const materialId = stableOpticalMaterialId(key);
+      for (const phase of closure?.properties?.phases ?? []) {
+        const conductivity = Number(phase.thermalConductivityWPerMK);
+        const heatCapacity = Number(phase.cpJPerKgK ?? phase.heatCapacityJPerKgK);
+        const phaseId = gpuPhaseId(phase.name);
+        const rowKey = `${materialId}|${phaseId}`;
+        if (conductivity > 0 && heatCapacity > 0 && phaseId > 0 && !seen.has(rowKey)) {
+          seen.add(rowKey);
+          extraRows.push({
+            materialId,
+            phaseId,
+            conductivityWPerMK: conductivity,
+            heatCapacityJPerKgK: heatCapacity
+          });
+        }
+      }
+    }
+    if (extraRows.length > 0) {
+      demo.state.rigidBodies = Object.freeze({
+        ...demo.state.rigidBodies,
+        fluidThermal: [...existingRows, ...extraRows]
+      });
+    }
   }
   demo.reactionNote = discovery.note;
   demo.reactionDiscovery = discovery;

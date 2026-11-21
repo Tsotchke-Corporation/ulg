@@ -2194,6 +2194,54 @@ test('canonical two-level mechanics refreshes exact gas pressure per epoch and k
   );
 });
 
+test('canonical two-level mechanics refreshes exact gas pressure across fine substeps when exactMass inventory is active', async () => {
+  const fixture = productionM3Fixture({
+    fineSubstepCount: 2,
+    exactMass: true,
+    phaseVolumeInterfaceTransportEnabled: true
+  });
+  const { result, counts, gridUpdates } = await settleBefore(
+    runProductionM3Fixture(fixture, {
+      overrides: {
+        gasPressureMechanicsBoundaryEnabled: true,
+        particleGasLedgerActionable: true,
+        retainedProductGasBoundaryActionable: false,
+        residentProductMass: null
+      }
+    }),
+    10000,
+    'exact-mass two-level gas boundary stalled'
+  );
+  assert.deepEqual(counts, { p2g: 5, gridUpdate: 3, g2p: 3 });
+  assert.equal(result.exactGasPressureMechanics.enabled, true);
+  assert.equal(result.exactGasPressureMechanics.producerCount, 3);
+  assert.equal(result.exactGasPressureMechanics.boundarySubmissionCount, 3);
+  assert.equal(result.hostQueueFenceCount, 0);
+  assert.equal(result.mapAsyncCount, 0);
+  assert.equal(gridUpdates.length, 3);
+  for (const update of gridUpdates) {
+    assert.equal(update.gasPressureBoundarySubmitted, true);
+    assert.equal(update.gasPressureBoundarySubmission?.authorityRetiredQueueOrdered, true);
+  }
+  assert.equal(await settleBefore(
+    abandonSchroederFusedMechanicsPendingClosureAfter(
+      fixture.device,
+      result.pendingPostMechanicsClosure,
+      { reason: new Error('exact-mass two-level gas boundary cleanup') }
+    ),
+    10000,
+    'exact-mass two-level gas boundary abandonment stalled'
+  ), true);
+  assert.equal(await settleBefore(
+    fixture.controller.completionPromise(),
+    10000,
+    'exact-mass two-level controller completion stalled'
+  ), true);
+  destroySphGpuParticleBuffers(fixture.sphParticleUpload);
+  destroyMlsMpmGpuParticleBuffers(fixture.mlsMpmParticleUpload);
+  destroyMlsMpmMechanicsMaterialPhaseUpload(fixture.mechanicsMaterialPhaseUpload);
+});
+
 test('Slice 9 declares cross-level pressure only for operator-readable projections', async () => {
   const fixture = productionM3Fixture({
     fineSubstepCount: 1,

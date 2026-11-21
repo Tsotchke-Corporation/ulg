@@ -688,6 +688,8 @@ export function createSchroederSolidMultilevelStage({
   };
 
   return Object.freeze({
+    macroCount,
+    bodyCount,
     bodyChartsBuffer,
     activeProxiesBuffer,
     lodStatsBuffer,
@@ -697,14 +699,29 @@ export function createSchroederSolidMultilevelStage({
     setLeafImpulses(impulsesFloat32) {
       device.queue.writeBuffer(leafImpulseBuffer, 0, impulsesFloat32);
     },
-    encodeMultilevelProxies(
-      encoder,
-      { focusWorldM = [0, 0, 0], fineRadiusM = 0.15, mediumRadiusM = 0.45, reflux = true }
-    ) {
+    prepareMultilevelProxies({ focusWorldM = [0, 0, 0], fineRadiusM = 0.15, mediumRadiusM = 0.45 } = {}) {
       f.set([focusWorldM[0], focusWorldM[1], focusWorldM[2], fineRadiusM], 4);
       f[8] = mediumRadiusM;
       device.queue.writeBuffer(paramsBuffer, 0, raw);
-      const pass = encoder.beginComputePass({ label: 'ulg-sol6-multilevel-proxies' });
+    },
+    encodeMultilevelProxies(
+      encoder,
+      {
+        focusWorldM = [0, 0, 0],
+        fineRadiusM = 0.15,
+        mediumRadiusM = 0.45,
+        reflux = true,
+        pass: sharedPass = null,
+        prepared = false
+      } = {}
+    ) {
+      if (!(macroCount > 0)) return;
+      if (!prepared) {
+        f.set([focusWorldM[0], focusWorldM[1], focusWorldM[2], fineRadiusM], 4);
+        f[8] = mediumRadiusM;
+        device.queue.writeBuffer(paramsBuffer, 0, raw);
+      }
+      const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-sol6-multilevel-proxies' });
       pass.setBindGroup(0, bindGroup);
       pass.setPipeline(pipelines.clear_lod_stats.pipeline);
       pass.dispatchWorkgroups(1);
@@ -714,7 +731,7 @@ export function createSchroederSolidMultilevelStage({
         pass.setPipeline(pipelines.reflux_proxy_impulses.pipeline);
         pass.dispatchWorkgroups(Math.ceil((catalog?.maxActiveProxies ?? 16) / 64));
       }
-      pass.end();
+      if (!sharedPass) pass.end();
     },
     encodeChartRebase(encoder, targetCharts) {
       const packed = new Float32Array(Math.max(1, bodyCount) * 8);

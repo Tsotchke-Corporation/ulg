@@ -26,19 +26,52 @@ function referenceReaction(reaction, options) {
   // inspection so multi-phase condensable products are not pre-rejected by
   // the heat-proxy gauge before energyReference is attached and validated.
   const terms = buildSphReactionTable([reaction], { ...options, thermalMaterialTable: null });
+  const lifted = reaction.stoichiometry?.liftedOntoMixture ?? null;
   const side = (kind) => terms[`${kind}TermMetadata`].map(term => {
-    const phases = materialPropertiesForKey(options.materialProperties, term.material)?.phases ?? [];
-    const standard = standardFormationEnthalpyReference(term.formula);
-    const phase = kind === 'product' ? PHASES[term.targetPhasePolicyId]
-      : standard?.phase;
+    const props = materialPropertiesForKey(options.materialProperties, term.material);
+    const phases = props?.phases ?? [];
+    const isLiftedMixture = Boolean(lifted && kind === 'reactant' && term.material === lifted.mixture);
+    const isLiftedResidue = Boolean(lifted && kind === 'product' && term.material === lifted.residue);
+    const standard = (isLiftedMixture || isLiftedResidue)
+      ? null
+      : standardFormationEnthalpyReference(term.formula);
+    const phase = (isLiftedMixture || isLiftedResidue)
+      ? 'gas'
+      : (kind === 'product' ? PHASES[term.targetPhasePolicyId] : standard?.phase);
     if (!phase || !phases.some(p => p.name === phase)) {
-      throw new TypeError(`no compatible reference phase for ${term.formula}`);
+      throw new TypeError(`no compatible reference phase for ${term.formula || term.material}`);
     }
-    return { material: term.material, formula: term.formula, coefficient: term.coefficient, phase };
+    return {
+      material: term.material,
+      formula: term.formula,
+      coefficient: term.coefficient,
+      phase,
+      isLiftedMixture,
+      isLiftedResidue
+    };
   });
   const reactants = side('reactant'), products = side('product');
+  // By exact ideal mixing (zero enthalpy of mixing), the formation enthalpy
+  // difference of (mixture - spectator residue) equals the consumed pure
+  // component's formation enthalpy. Evaluate NIST-JANAF on the underlying
+  // species terms while retaining full mixture/residue phases for the GPU
+  // adiabatic temperature solve.
+  const enthalpyReactants = reactants.map((row) => {
+    if (!row.isLiftedMixture) return row;
+    const compProps = materialPropertiesForKey(options.materialProperties, lifted.component);
+    const compFormula = compProps?.formula || String(lifted.component || '').toUpperCase();
+    return {
+      material: lifted.component,
+      formula: compFormula,
+      coefficient: row.coefficient * Number(lifted.moleFraction),
+      phase: 'gas'
+    };
+  });
+  const enthalpyProducts = products.filter((row) => !row.isLiftedResidue);
   const reference = standardReactionEnthalpyReference({
-    equation: reaction.stoichiometry?.equation, reactants, products
+    equation: lifted?.sourceEquation || reaction.stoichiometry?.equation,
+    reactants: enthalpyReactants,
+    products: enthalpyProducts
   });
   if (!reference) throw new TypeError('phase-specific formation enthalpy reference unavailable');
   const referenceTerms = [...reference.reactantRecords, ...reference.productRecords];

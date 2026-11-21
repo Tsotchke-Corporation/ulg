@@ -1034,20 +1034,36 @@ function graphSamplesForThermalSegment(segment, sourceSegment = null) {
     ];
   }
 
+  const f32 = Math.fround;
   const samples = [];
   for (let index = 0; index < THERMAL_DEBYE_GRAPH_SAMPLE_COUNT; index += 1) {
     const alpha = index / (THERMAL_DEBYE_GRAPH_SAMPLE_COUNT - 1);
     const temperatureK = sourceSegment.tLo + alpha * (sourceSegment.tHi - sourceSegment.tLo);
     const axis = sourceSegment.eStart + segmentEnergyAbove(sourceSegment, temperatureK);
-    if (samples.length && axis <= samples[samples.length - 1].axis) continue;
+    if (
+      samples.length
+      && (f32(axis) <= f32(samples[samples.length - 1].axis)
+        || f32(temperatureK) <= f32(samples[samples.length - 1].value))
+    ) continue;
     samples.push({ axis, value: temperatureK, derivative: 0 });
   }
-  if (samples.length < 2 || samples[samples.length - 1].axis < energyEnd) {
-    if (samples.length && energyEnd <= samples[samples.length - 1].axis) samples.pop();
-    samples.push({ axis: energyEnd, value: temperatureEnd, derivative: 0 });
-  }
-  if (samples[0]?.axis > energyStart) {
-    samples.unshift({ axis: energyStart, value: temperatureStart, derivative: 0 });
+  if (samples.length) {
+    // Keep packed f32 endpoints exact and strictly monotone in both U and T.
+    if (f32(samples[0].axis) <= f32(energyStart) || f32(samples[0].value) <= f32(temperatureStart)) {
+      samples[0] = { axis: energyStart, value: temperatureStart, derivative: 0 };
+    } else {
+      samples.unshift({ axis: energyStart, value: temperatureStart, derivative: 0 });
+    }
+    while (
+      samples.length > 1
+      && (f32(energyEnd) <= f32(samples[samples.length - 1].axis)
+        || f32(temperatureEnd) <= f32(samples[samples.length - 1].value))
+    ) {
+      samples.pop();
+    }
+    if (f32(energyEnd) > f32(samples[samples.length - 1].axis) && f32(temperatureEnd) > f32(samples[samples.length - 1].value)) {
+      samples.push({ axis: energyEnd, value: temperatureEnd, derivative: 0 });
+    }
   }
   for (let index = 0; index < samples.length; index += 1) {
     samples[index].derivative = sampleDerivative(samples, index);

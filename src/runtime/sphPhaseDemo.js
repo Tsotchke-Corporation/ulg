@@ -2557,10 +2557,25 @@ function buildSphInitialBodiesDemoState({
     ...(closures || {})
   };
   const resolved = { ...baseClosures };
+  const activeBodyMaterialKeys = normalizedInitialBodies.bodies.map((body) => body.material).filter(Boolean);
+  const activeBodyMaterialLower = new Set(activeBodyMaterialKeys.map((k) => String(k).toLowerCase()));
+  // Avoid case-colliding material IDs (e.g. 'Fe' body alongside default 'fe'):
+  // migrate any base closure onto the active body's exact key casing.
+  for (const activeKey of activeBodyMaterialKeys) {
+    const lower = String(activeKey).toLowerCase();
+    for (const existingKey of Object.keys(resolved)) {
+      if (existingKey !== activeKey && existingKey.toLowerCase() === lower) {
+        if (!resolved[activeKey]) resolved[activeKey] = resolved[existingKey];
+        delete resolved[existingKey];
+      }
+    }
+  }
   const requiredMaterialKeys = [...new Set([
-    ...DEFAULT_RUNTIME_MATERIAL_KEYS,
-    ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map(row => row.material) : []),
-    ...normalizedInitialBodies.bodies.map((body) => body.material)
+    ...activeBodyMaterialKeys,
+    ...DEFAULT_RUNTIME_MATERIAL_KEYS.filter((k) => !activeBodyMaterialLower.has(String(k).toLowerCase())),
+    ...(environment?.mode === 'air'
+      ? SPH_ENVIRONMENT_DRY_AIR.species.map((row) => row.material).filter((k) => !activeBodyMaterialLower.has(String(k).toLowerCase()))
+      : [])
   ].filter(Boolean))];
   for (const key of requiredMaterialKeys) {
     if (resolved[key]) continue;
@@ -3194,11 +3209,23 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   // other element symbol, a closure DERIVED on the fly from the simulation (elementMaterialClosure:
   // jellium + atomic DFT + universal rules). No per-material reference tables.
   const resolved = { ...baseClosures };
+  const activeLegacyMaterialKeys = [dropMaterial, baseMaterial].filter(Boolean);
+  const activeLegacyLower = new Set(activeLegacyMaterialKeys.map((k) => String(k).toLowerCase()));
+  for (const activeKey of activeLegacyMaterialKeys) {
+    const lower = String(activeKey).toLowerCase();
+    for (const existingKey of Object.keys(resolved)) {
+      if (existingKey !== activeKey && existingKey.toLowerCase() === lower) {
+        if (!resolved[activeKey]) resolved[activeKey] = resolved[existingKey];
+        delete resolved[existingKey];
+      }
+    }
+  }
   const requiredMaterialKeys = [...new Set([
-    ...DEFAULT_RUNTIME_MATERIAL_KEYS,
-    ...(environment?.mode === 'air' ? SPH_ENVIRONMENT_DRY_AIR.species.map(row => row.material) : []),
-    dropMaterial,
-    baseMaterial
+    ...activeLegacyMaterialKeys,
+    ...DEFAULT_RUNTIME_MATERIAL_KEYS.filter((k) => !activeLegacyLower.has(String(k).toLowerCase())),
+    ...(environment?.mode === 'air'
+      ? SPH_ENVIRONMENT_DRY_AIR.species.map((row) => row.material).filter((k) => !activeLegacyLower.has(String(k).toLowerCase()))
+      : [])
   ].filter(Boolean))];
   for (const key of requiredMaterialKeys) {
     if (resolved[key]) continue;
@@ -6553,8 +6580,10 @@ export function createSphPhaseDemo(options = {}) {
   demo.state.surfaceTensionLawAdmission = surfaceTensionLawAdmission;
   // Per-face cumulative heat ledger (J exchanged with each fixed-temperature wall reservoir).
   demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
-  const gasDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'gas').densityKgPerM3;
-  const liquidDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'liquid').densityKgPerM3;
+  const h2oProps = demo.materialProperties.h2o
+    ?? Object.entries(demo.materialProperties).find(([k]) => k.toLowerCase() === 'h2o')?.[1];
+  const gasDensity = h2oProps.phases.find((p) => p.name === 'gas').densityKgPerM3;
+  const liquidDensity = h2oProps.phases.find((p) => p.name === 'liquid').densityKgPerM3;
   // Single simulation clock: each driver.step advances the mechanics by `mechanicalSubsteps`
   // carrier substeps of `dt` each, and the thermal step by the SAME sim-time (subs * dt). This
   // keeps the thermodynamics and the motion on one clock — heat flow / melting / steam no longer
@@ -6876,7 +6905,12 @@ export function createSphPhaseDemo(options = {}) {
         ]
       });
     }
-    demo.materialProperties[key] = closure.properties;
+    const existingKey = Object.keys(demo.materialProperties).find((k) => k.toLowerCase() === String(key).toLowerCase());
+    if (!existingKey) {
+      demo.materialProperties[key] = closure.properties;
+    } else if (existingKey === key) {
+      demo.materialProperties[key] = closure.properties;
+    }
   }
   if (demo.state?.rigidBodies && Object.keys(discovery.productClosures).length > 0) {
     const existingRows = Array.isArray(demo.state.rigidBodies.fluidThermal)

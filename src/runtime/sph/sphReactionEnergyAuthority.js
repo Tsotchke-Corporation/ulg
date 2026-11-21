@@ -120,11 +120,14 @@ function termList(table, reactionIndex, kind, artifacts, refs) {
   });
 }
 
-function validateBalance(table, reactionIndex, reactants, products) {
+function validateBalance(table, reactionIndex, reactants, products, {
+  allowFractionalMixtureAtoms = false
+} = {}) {
   if (reactants.length !== 2 || new Set(reactants.map((x) => x.materialId)).size !== 2) {
     fail('physical mode requires two distinct reactant carriers');
   }
   const atoms = new Map();
+  const atomScale = new Map();
   let charge = 0;
   for (const [kind, terms, sign] of [[1, reactants, -1], [2, products, 1]]) {
     for (const term of terms) {
@@ -132,17 +135,29 @@ function validateBalance(table, reactionIndex, reactants, products) {
       for (let i = 0; i < table.atomTermCount; i += 1) {
         const row = table.atomTermRecords.subarray(i * 8, i * 8 + 8);
         if (row[0] !== reactionIndex || row[1] !== kind || row[2] !== term.termIndex) continue;
+        const validAtomCount = allowFractionalMixtureAtoms
+          ? (Number.isFinite(row[4]) && row[4] > 0)
+          : (row[4] > 0 && Number.isInteger(row[4]));
         if (row[7] !== 1 || row[5] !== term.coefficient || !Number.isInteger(row[3])
-          || row[3] < 1 || row[3] > 118 || !(row[4] > 0) || !Number.isInteger(row[4])
+          || row[3] < 1 || row[3] > 118 || !validAtomCount
           || !Number.isFinite(row[6])) fail('invalid atom/charge term');
-        atoms.set(row[3], (atoms.get(row[3]) || 0) + sign * row[4] * term.coefficient);
+        const contribution = row[4] * term.coefficient;
+        atoms.set(row[3], (atoms.get(row[3]) || 0) + sign * contribution);
+        atomScale.set(row[3], Math.max(atomScale.get(row[3]) || 0, Math.abs(contribution)));
         charge += sign * row[6] * term.coefficient;
         count += 1;
       }
       if (!count) fail('missing atom inventory for a reaction term');
     }
   }
-  if ([...atoms.values()].some((x) => x !== 0) || charge !== 0) fail('atom or charge imbalance');
+  const atomImbalanced = [...atoms.entries()].some(([z, delta]) => (
+    allowFractionalMixtureAtoms
+      ? Math.abs(delta) > ROUNDING_BUDGET * Math.max(1, atomScale.get(z) || 1)
+      : delta !== 0
+  ));
+  if (atomImbalanced || Math.abs(charge) > (allowFractionalMixtureAtoms ? ROUNDING_BUDGET : 0)) {
+    fail('atom or charge imbalance');
+  }
   const mass = (terms) => terms.reduce((sum, t) => sum + t.coefficient * t.molarMass, 0);
   const reactantMass = mass(reactants), productMass = mass(products);
   if (!(reactantMass > 0) || Math.abs(productMass - reactantMass) > ROUNDING_BUDGET * reactantMass) {
@@ -207,7 +222,9 @@ export function attachSphReactionEnergyAuthority(table, reactions, thermalMateri
     if (hasH === hasU) fail('exactly one signed reference DeltaH or DeltaU per mole extent is required');
     const reactants = termList(table, index, 'reactant', artifacts, ref.reactantPhases);
     const products = termList(table, index, 'product', artifacts, ref.productPhases);
-    const { reactantMass, productMass } = validateBalance(table, index, reactants, products);
+    const { reactantMass, productMass } = validateBalance(table, index, reactants, products, {
+      allowFractionalMixtureAtoms: Boolean(reaction.stoichiometry?.liftedOntoMixture)
+    });
     let deltaPv = 0, deltaRuntime = 0;
     for (const [terms, sign] of [[reactants, -1], [products, 1]]) {
       for (const term of terms) {

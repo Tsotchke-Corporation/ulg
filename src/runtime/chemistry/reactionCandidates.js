@@ -20,6 +20,19 @@ export const PROVISIONAL_ENERGETICS_STATUS = 'provisional-heuristic-not-scientif
 
 const FAMILY_ACTIVE_METAL_WATER = 'active-metal-water-hydroxide';
 const FAMILY_BINARY_IONIC = 'binary-ionic-synthesis';
+const FAMILY_BINARY_COVALENT = 'binary-covalent-synthesis';
+
+const PAULING_ELECTRONEGATIVITY_NONMETAL = new Map([
+  [1, 2.20], [5, 2.04], [6, 2.55], [7, 3.04], [8, 3.44], [9, 3.98],
+  [14, 1.90], [15, 2.19], [16, 2.58], [17, 3.16],
+  [33, 2.18], [34, 2.55], [35, 2.96], [52, 2.10], [53, 2.66]
+]);
+const COVALENT_POSITIVE_VALENCE = new Map([
+  [1, 1], [5, 3], [6, 4], [7, 3], [14, 4], [15, 3], [16, 4], [33, 3], [34, 4], [52, 4]
+]);
+const COVALENT_NEGATIVE_VALENCE = new Map([
+  [1, 1], [6, 4], [7, 3], [8, 2], [9, 1], [15, 3], [16, 2], [17, 1], [34, 2], [35, 1], [53, 1]
+]);
 
 const ALKALI_METALS = new Set([3, 11, 19, 37, 55, 87]);
 const ALKALINE_EARTH_METALS = new Set([4, 12, 20, 38, 56, 88]);
@@ -293,6 +306,86 @@ function binaryIonicCandidate(metalSpecies, anionSpecies) {
   });
 }
 
+function binaryCovalentCandidate(lessEnSpecies, moreEnSpecies) {
+  const left = singleElement(lessEnSpecies);
+  const right = singleElement(moreEnSpecies);
+  if (!left || !right || left.Z === right.Z) return null;
+  // H + O is owned by the exact balanced hydrogenOxygenReaction (2 H2 + O2 -> 2 H2O).
+  if (
+    (left.Z === HYDROGEN_Z && right.Z === OXYGEN_Z)
+    || (left.Z === OXYGEN_Z && right.Z === HYDROGEN_Z)
+  ) return null;
+  // Metals are already handled by binaryIonicCandidate.
+  if (commonCationCharge(left.Z) != null || commonCationCharge(right.Z) != null) return null;
+  const chiLeft = PAULING_ELECTRONEGATIVITY_NONMETAL.get(left.Z);
+  const chiRight = PAULING_ELECTRONEGATIVITY_NONMETAL.get(right.Z);
+  if (!(chiLeft > 0) || !(chiRight > 0)) return null;
+  const deltaChi = chiRight - chiLeft;
+  if (!(deltaChi >= 0.35)) return null;
+  // Breaking the N≡N triple bond (945 kJ/mol) makes low-polarity nitrogen
+  // oxides, halides, sulfides, and cyanides endothermic; require sufficient
+  // electronegativity contrast (e.g. NH3, BN, Si3N4, P3N5, NF3).
+  if (left.Z === 7 && deltaChi < 0.85) return null;
+  if (right.Z === 7 && deltaChi < 0.65) return null;
+  const posValence = COVALENT_POSITIVE_VALENCE.get(left.Z);
+  const negValence = COVALENT_NEGATIVE_VALENCE.get(right.Z);
+  if (!posValence || !negValence) return null;
+  // Prefer standard chemical formula ordering (e.g. NH3 rather than H3N, CH4 rather than H4C).
+  const hydrogenAsLigand = left.Z === HYDROGEN_Z && (right.Z === 6 || right.Z === 7 || right.Z === 14 || right.Z === 15 || right.Z === 16);
+  const div = gcd(posValence, negValence);
+  const leftAtoms = negValence / div;
+  const rightAtoms = posValence / div;
+  const productCoefficient = lcm(
+    left.count / gcd(leftAtoms, left.count),
+    right.count / gcd(rightAtoms, right.count)
+  );
+  const leftCoefficient = (leftAtoms * productCoefficient) / left.count;
+  const rightCoefficient = (rightAtoms * productCoefficient) / right.count;
+  const productFormula = hydrogenAsLigand
+    ? ionicFormula(right.Z, rightAtoms, left.Z, leftAtoms)
+    : ionicFormula(left.Z, leftAtoms, right.Z, rightAtoms);
+  const productAtomCounts = {
+    [left.Z]: leftAtoms,
+    [right.Z]: rightAtoms
+  };
+  const reactants = [
+    term(leftCoefficient, lessEnSpecies),
+    term(rightCoefficient, moreEnSpecies)
+  ];
+  const products = [term(productCoefficient, productFormula, productAtomCounts)];
+  const sedenionScope = resolveSedenionReactionScope(lessEnSpecies, moreEnSpecies, {
+    familyId: FAMILY_BINARY_COVALENT,
+    leftRole: 'donor',
+    rightRole: 'acceptor',
+    preferredBondType: 'covalent'
+  });
+  if (sedenionScope.reactiveClass === 'inert') return null;
+
+  return candidate({
+    familyId: FAMILY_BINARY_COVALENT,
+    familyLabel: 'nonmetal + nonmetal -> valence-balanced covalent binary compound',
+    reactants,
+    products,
+    productFormula,
+    productAtomCounts,
+    energetics: heuristicEnergetics({
+      model: 'heuristic-binary-covalent-electronegativity-v0',
+      // Pauling polar-bond stabilization scale (approx -96 kJ/mol * deltaChi^2 per bond).
+      perProductFormulaJPerMol: -96_000 * (deltaChi * deltaChi) * Math.max(1, posValence * leftAtoms),
+      productCoefficient,
+      productAtomCounts,
+      notes: [
+        'Stoichiometry is valence-balanced from periodic-table covalent octet counts and exact atom conservation.',
+        'Energetics are provisional Pauling polar-bond heuristics until superseded by electronic-structure or reference thermochemistry.'
+      ]
+    }),
+    sedenionScope,
+    limitations: [
+      'Selects the primary covalent oxidation state; multi-oxide/kinetics competition is not yet solved from electronic structure.'
+    ]
+  });
+}
+
 function dedupeCandidates(candidates) {
   const seen = new Set();
   return candidates.filter((item) => {
@@ -335,6 +428,8 @@ export function discoverReactionCandidates(leftInput, rightInput, options = {}) 
     }
     const ionic = binaryIonicCandidate(a, b, options);
     if (ionic) candidates.push(ionic);
+    const covalent = binaryCovalentCandidate(a, b, options);
+    if (covalent) candidates.push(covalent);
   }
 
   return {

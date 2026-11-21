@@ -3128,7 +3128,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     const produceExactGasBoundary = async ({
       stage,
       currentSphUpload,
-      currentMlsUpload
+      currentMlsUpload,
+      particleContinuation = null
     }) => {
       if (!exactGasPressureBoundaryActive) return null;
       if (
@@ -3170,6 +3171,9 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
           mlsMpmParticleUpload: particleGasLedgerActionable
             ? currentMlsUpload
             : null,
+          ...(particleGasLedgerActionable && particleContinuation != null
+            ? { schroederParticleContinuation: particleContinuation }
+            : {}),
           particleStateBuffer: particleGasLedgerActionable
             ? currentSphUpload.stateBuffer
             : null,
@@ -3882,7 +3886,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
       const fineGasBoundary = await produceExactGasBoundary({
         stage: `fine-${substep}-gas-ledger-eos`,
         currentSphUpload,
-        currentMlsUpload
+        currentMlsUpload,
+        particleContinuation: activeParticleContinuation
       });
       const workspace = await runGpuQueueStage(
         `fine-${substep}-parent-predictor`,
@@ -4295,7 +4300,8 @@ export async function runSchroederTwoLevelMechanicsStepWebGpu({
     const terminalGasBoundary = await produceExactGasBoundary({
       stage: 'terminal-coarse-gas-ledger-eos',
       currentSphUpload,
-      currentMlsUpload
+      currentMlsUpload,
+      particleContinuation: activeParticleContinuation
     });
     const terminalGridUpdate = await runGpuQueueStage(
       'terminal-coarse-grid-update',

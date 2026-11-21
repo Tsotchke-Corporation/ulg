@@ -1387,8 +1387,33 @@ export function createWorkerOwnedIsosurfacePresenter({
       });
       try {
         material.drawBackground(opaquePass, frame);
+        const activeDeformableFamily = frame?.deformableSolidFamily
+          ?? latestSchroederDeformableSolidSurfaceFamily(device);
+        const deformableSolidDomainIds = (
+          activeDeformableFamily
+          && !activeDeformableFamily.destroyed
+          && activeDeformableFamily.device === device
+          && Array.isArray(frame.viewProjectionMatrix)
+        )
+          ? new Set(
+              activeDeformableFamily.entries
+                .map((entry) => Number(entry.domainId))
+                .filter((id) => Number.isFinite(id) && id > 0)
+            )
+          : null;
         for (const surface of orderedSurfaces) {
-          if (workerNativeSurfaceKind(surface) === 'opaque') drawNative(opaquePass, surface);
+          if (workerNativeSurfaceKind(surface) !== 'opaque') continue;
+          // Explicit SOL-4 deformable solid carriers render their watertight
+          // material-space surface mesh directly; skip duplicate solid metaballs
+          // for the same renderDomainId while keeping any melted liquid surfaces.
+          if (
+            deformableSolidDomainIds
+            && Number(surface?.metadata?.phaseId) === 1
+            && deformableSolidDomainIds.has(Number(surface?.metadata?.renderDomainId))
+          ) {
+            continue;
+          }
+          drawNative(opaquePass, surface);
         }
         // Rigid & deformable solid shape carriers draw inside the opaque pass (no separate pass).
         drawSolidRigidShapes(opaquePass, frame);

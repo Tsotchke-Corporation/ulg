@@ -85,6 +85,8 @@ export function createSchroederSolidRigidFamily(device, cold) {
     materials: cold.bodies.map(body => body.material),
     bodySizesM: cold.bodies.map(body => Array.isArray(body.sizeM) ? [...body.sizeM] : null),
     fractureOptions: cold.bodies[0].fracture ?? null,
+    fractureEnabled: cold.fractureEnabled !== false,
+    multilevelEnabled: cold.multilevelEnabled !== false,
     maxBodyCapacity: Math.max(packed.bodyCount, Math.trunc(Number(cold.maxBodyCapacity) || packed.bodyCount)),
     bodyTemperaturesK: cold.bodies.map(body => Number(body.temperatureK) || 293.15),
     thermal, seededThermal, releaseRows, pitchByAxisM: cold.bodies[0].pitchByAxisM,
@@ -219,7 +221,7 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     }
     // A5 SOL-5: GPU-native cohesive bond cleavage & parallel connected-component
     // topology integrity inside the same single rigid-lane compute pass.
-    if (globalThis.__ulgDisableSol5Fracture !== true) {
+    if (family.fractureEnabled !== false && globalThis.__ulgDisableSol5Fracture !== true) {
       const fOpts = family.fractureOptions ?? {};
       family.fractureStage = createSchroederSolidFractureStage({
         device,
@@ -244,7 +246,7 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     }
     // A5 SOL-6: GPU-native multilevel 2:1 surface proxy LOD & double-float
     // chart origin tracking inside the same single rigid-lane compute pass.
-    if (globalThis.__ulgDisableSol6Multilevel !== true) {
+    if (family.multilevelEnabled !== false && globalThis.__ulgDisableSol6Multilevel !== true) {
       family.multilevelCatalog = tryBuildMultilevelCatalogForBody(family.bodySizesM?.[0], family.pitchByAxisM);
       family.multilevelStage = createSchroederSolidMultilevelStage({
         device,
@@ -422,6 +424,7 @@ export function createSchroederDeformableSolidSurfaceFamily(device, cold) {
   }
   const entries = cold.surfaces.map((entry) => ({
     bodyId: entry.bodyId,
+    domainId: Number.isFinite(Number(entry.domainId)) ? Number(entry.domainId) : null,
     material: entry.material,
     particleRowOffset: Math.max(0, Math.trunc(Number(entry.particleRowOffset) || 0)),
     stage: createSchroederDeformableSolidSurfaceStage({

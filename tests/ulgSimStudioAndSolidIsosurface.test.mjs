@@ -450,3 +450,90 @@ test('worker-lane retirement protects device-pooled dormancy buffers and keeps l
   assert.match(reactionSrc, /export function schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership\(device\)/);
   assert.match(sceneSrc, /const workerLaneConfigurationSignature = mlsMpmResidentStepsSignatureFor\(\{\s*\.\.\.signatureArgs,\s*stepCount: 1\s*\}\)/);
 });
+
+test('Studio exposes per-body SOL-4/5/6 solid mechanics options and 2-level First-Class Air enrollment with URL round-tripping', () => {
+  const cfg = buildBlankCustomConfig();
+  cfg.boxDimensionsM = [0.2, 0.2, 0.2];
+  cfg.bodies = [
+    {
+      id: 'ice-block',
+      domainId: 1,
+      material: 'h2o',
+      sizeM: [0.06, 0.06, 0.06],
+      centerM: [0, 0.03, 0],
+      temperatureK: 240,
+      particlesPerEdge: [3, 3, 3],
+      velocityMPerS: [0, 0, 0],
+      mechanicsMode: 'deformable'
+    }
+  ];
+  cfg.environment.mode = 'air';
+  cfg.environment.twoLevelAir = true;
+  cfg.laws.cohesiveFracture = false;
+  cfg.laws.multilevelSolids = false;
+
+  const params = serializeStagedConfigToUrlSearchParams(cfg, { autoPlayWhenReady: true });
+  assert.equal(params.get('airTwoLevel'), '1');
+  assert.match(params.get('laws'), /cf:0/);
+  assert.match(params.get('laws'), /ml:0/);
+
+  const parsed = parseStagedConfigFromUrlSearchParams(params);
+  assert.ok(parsed);
+  assert.equal(parsed.config.bodies[0].mechanicsMode, 'deformable');
+  assert.equal(parsed.config.environment.twoLevelAir, true);
+  assert.equal(parsed.config.laws.cohesiveFracture, false);
+  assert.equal(parsed.config.laws.multilevelSolids, false);
+
+  const launch = buildLaunchParamsFromStagedConfig(parsed.config);
+  // Strictly 2-level First-Class Air (maxLevel - minLevel === 1; 3rd SS level stays on hold).
+  assert.equal(launch.schroederTwoLevel, '1');
+  assert.equal(launch.schroederMinLevel, '0');
+  assert.equal(launch.schroederMaxLevel, '1');
+  assert.equal(launch.schroederTwoLevelAuthority, 'authoritative');
+  assert.equal(launch.environmentAirParcels, 'mixture');
+  assert.ok(Number(launch.splitSpareLineages) >= 64);
+  assert.ok(Number(launch.schroederBaseGridSpacingM) > 0);
+  assert.equal(launch.solidFracture, '0');
+  assert.equal(launch.solidMultilevel, '0');
+
+  // Verify createSphPhaseDemo materializes SOL-4 deformable solid surfaces and SOL-5/6 rigid options.
+  const deformableDemo = createSphPhaseDemo({
+    boxDimensionsM: [0.2, 0.2, 0.2],
+    initialBodies: [{
+      id: 'soft-block',
+      domainId: 1,
+      material: 'h2o',
+      sizeM: [0.06, 0.06, 0.06],
+      centerM: [0.1, 0.03, 0.1],
+      temperatureK: 240,
+      particlesPerEdge: [3, 3, 3],
+      velocityMPerS: [0, 0, 0],
+      mechanicsMode: 'deformable'
+    }],
+    coherentRigidSolids: true
+  });
+  assert.equal(deformableDemo.demo.state.deformableSolidSurfaces?.surfaces?.length, 1);
+  assert.equal(deformableDemo.demo.state.deformableSolidSurfaces.surfaces[0].bodyId, 'soft-block');
+  assert.equal(deformableDemo.demo.state.deformableSolidSurfaces.surfaces[0].domainId, 1);
+
+  const rigidDemo = createSphPhaseDemo({
+    boxDimensionsM: [0.2, 0.2, 0.2],
+    initialBodies: [{
+      id: 'rigid-ice',
+      domainId: 1,
+      material: 'h2o',
+      sizeM: [0.06, 0.06, 0.06],
+      centerM: [0.1, 0.03, 0.1],
+      temperatureK: 240,
+      particlesPerEdge: [3, 3, 3],
+      velocityMPerS: [0, 0, 0],
+      mechanicsMode: 'rigid'
+    }],
+    coherentRigidSolids: true,
+    solidFractureEnabled: true,
+    solidMultilevelEnabled: false
+  });
+  assert.equal(rigidDemo.demo.state.rigidBodies?.fractureEnabled, true);
+  assert.equal(rigidDemo.demo.state.rigidBodies?.multilevelEnabled, false);
+  assert.ok(rigidDemo.demo.state.rigidBodies?.maxBodyCapacity >= 5);
+});

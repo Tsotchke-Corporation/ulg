@@ -21133,6 +21133,10 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         generation: owner.generation,
         sphParticleUpload: owner.source.sphParticleUpload,
         mlsMpmParticleUpload: owner.source.mlsMpmParticleUpload,
+        aerosolSourceFamilyConsumerLease:
+          owner.source.sphParticleUpload === sphParticleUpload
+            ? levelAssignmentSourceFamilyLease
+            : null,
         residentStepOptions,
         twoLevelAuthoritative: true,
         residentRunnerExactNearConsumerAware
@@ -22321,7 +22325,8 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
           smoothingLengthM:
             thermalStepOptions.smoothingLengthM
             ?? proposalSphParticleState?.smoothingLengthM,
-          conductionRate: thermalStepOptions.conductionRate
+          conductionRate: thermalStepOptions.conductionRate,
+          exactEnergyLedger: Boolean(exactMassSourceRead?.energy)
         })
       );
       if (twoLevelSpatialThermalProposal?.ready !== true) {
@@ -22973,6 +22978,10 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       === twoLevelPostMechanicsContinuation.mechanicsBuffer
   );
   if (closureContinuationSelected) {
+    if (exactMassSourceRead && finalTwoLevelContinuationUploads?.sphParticleUpload) {
+      delete finalTwoLevelContinuationUploads.sphParticleUpload.exactMassInventory;
+      delete finalTwoLevelContinuationUploads.sphParticleUpload.exactMassInventoryRange;
+    }
     twoLevelPostMechanicsContinuationClaim =
       claimMlsMpmPostMechanicsContinuation(
         twoLevelPostMechanicsClosure,
@@ -23060,9 +23069,9 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     twoLevelDispersedMediumOpticsAdoptedTarget = targetSphUpload;
     if (
       targetSphUpload.dispersedMediumOptics !== adoptedOptics
-      || ensureSphGpuParticleBufferSetBorrowLifecycle(
+      || (!exactMassSourceRead && ensureSphGpuParticleBufferSetBorrowLifecycle(
         targetSphUpload
-      ) !== true
+      ) !== true)
       || !sphDispersedMediumOpticsMatchesParticleUpload(
         targetSphUpload
       )

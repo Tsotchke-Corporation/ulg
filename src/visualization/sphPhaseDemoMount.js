@@ -7954,6 +7954,12 @@ export async function mountSphPhaseDemoOverlay({
   const initialRigidSolidsRaw = String(initialHash.get('rigidSolids')
     ?? initialQuery.get('rigidSolids') ?? initialScenarioRuntime.rigidSolids ?? '1');
   const initialRigidSolids = initialRigidSolidsRaw !== '0' && initialRigidSolidsRaw !== 'false';
+  const initialSolidFractureRaw = String(initialHash.get('solidFracture')
+    ?? initialQuery.get('solidFracture') ?? initialScenarioRuntime.solidFracture ?? '1');
+  const initialSolidFracture = initialSolidFractureRaw !== '0' && initialSolidFractureRaw !== 'false';
+  const initialSolidMultilevelRaw = String(initialHash.get('solidMultilevel')
+    ?? initialQuery.get('solidMultilevel') ?? initialScenarioRuntime.solidMultilevel ?? '1');
+  const initialSolidMultilevel = initialSolidMultilevelRaw !== '0' && initialSolidMultilevelRaw !== 'false';
   const initialHydrostaticInitialization = (() => {
     const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
     if (raw == null || raw === '') return null;
@@ -9118,6 +9124,8 @@ export async function mountSphPhaseDemoOverlay({
     if (!initialReactionDormancy) q.set('reactionDormancy', '0');
     if (!initialThermalPotential) q.set('thermalPotential', '0');
     if (!initialRigidSolids) q.set('rigidSolids', '0');
+    if (!initialSolidFracture) q.set('solidFracture', '0');
+    if (!initialSolidMultilevel) q.set('solidMultilevel', '0');
     if (initialGridCflFactor != null) q.set('cfl', String(initialGridCflFactor));
     if (initialCflSafety != null) q.set('cflSafety', String(initialCflSafety));
     if (initialImplicitPressure) {
@@ -9444,6 +9452,8 @@ export async function mountSphPhaseDemoOverlay({
       ...(initialReactionDormancy ? { reactionDormancy: true } : {}),
       thermalPotentialEnabled: initialThermalPotential,
       coherentRigidSolids: initialRigidSolids,
+      solidFractureEnabled: initialSolidFracture,
+      solidMultilevelEnabled: initialSolidMultilevel,
       ...(initialArtificialViscosityAlpha != null
         ? { mlsMpmArtificialViscosityAlpha: initialArtificialViscosityAlpha }
         : {}),
@@ -19011,11 +19021,20 @@ export async function mountSphPhaseDemoOverlay({
         && !pendingPreviewActive
         && startupGate?.active !== true
       );
+      const terminalExecutionError = Boolean(
+        autoSchedule?.status === 'resident-auto-schedule-stopped-terminal-error'
+        && typeof overlay.__mlsMpmResidentStepsError === 'string'
+        && overlay.__mlsMpmResidentStepsError.trim().length > 0
+      );
+      const blocked = simulationRuntimeBlocked() || terminalExecutionError;
+      const blockedReason = simulationRuntimeBlocked()
+        ? simulationRuntimeAdmission.reason
+        : (terminalExecutionError ? overlay.__mlsMpmResidentStepsError : null);
       return {
         playing,
         ready: interactiveSimulationStateReady,
-        blocked: simulationRuntimeBlocked(),
-        blockedReason: simulationRuntimeBlocked() ? simulationRuntimeAdmission.reason : null,
+        blocked,
+        blockedReason,
         rebuildStatus,
         authorityHostStatus: authHost?.status || null,
         autoScheduleStatus: autoSchedule?.status || null,

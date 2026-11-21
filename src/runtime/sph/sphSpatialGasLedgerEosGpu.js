@@ -1146,6 +1146,27 @@ function withParticleProductSourceBorrow(sourceBorrow, pair) {
   return release;
 }
 
+function withCanonicalParticleExactMassBorrow(sourceBorrow, canonicalRead) {
+  if (!canonicalRead) return sourceBorrow;
+  let canonicalReleased = false;
+  const release = () => {
+    if (!canonicalReleased) {
+      canonicalReleased = true;
+      void canonicalRead.release();
+    }
+    const buffersReleased = sourceBorrow.isReleased() || sourceBorrow();
+    return buffersReleased;
+  };
+  release.canRelease = () => !canonicalReleased && sourceBorrow.canRelease();
+  release.releaseQueueOrdered = () => {
+    if (!release.canRelease()) return false;
+    return release();
+  };
+  release.isReleased = () => canonicalReleased && sourceBorrow.isReleased();
+  release.activeCount = () => sourceBorrow.activeCount() + (canonicalReleased ? 0 : 1);
+  return release;
+}
+
 function prepareCaloricBuffers(device, slot, records) {
   if (!slot.caloricRowsBuffer) {
     const raw = device.createBuffer({ label: `${slot.label}-caloric-cells`,
@@ -4870,6 +4891,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   authenticateParticleProductSource = false,
   sourceFamilyConsumerLease = null,
   postMechanicsGasSource = null,
+  schroederParticleContinuation = null,
   caloricAuthority = null,
   caloricThermalMaterialTable = null
 } = {}) {
@@ -4888,6 +4910,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   });
   let spatialGeneration = null;
   let spatialGenerationAttempted = false;
+  let canonicalExactMassRead = null;
+  const releaseCanonicalOnEarlyExit = () => {
+    if (canonicalExactMassRead) {
+      void canonicalExactMassRead.release();
+      canonicalExactMassRead = null;
+    }
+  };
   const retainedReadbackTelemetrySnapshot = () => mergeGpuReadbackTelemetry([
     {
       source: 'retained-spatial-gas-eos',
@@ -4900,10 +4929,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
   ], {
     scope: 'sph-spatial-gas-ledger-eos-retained'
   });
-  const rejectedExecutionWithTelemetry = (status, reason, extra = {}) => ({
-    ...rejectedExecution(status, reason, extra),
-    ...retainedReadbackTelemetrySnapshot()
-  });
+  const rejectedExecutionWithTelemetry = (status, reason, extra = {}) => {
+    releaseCanonicalOnEarlyExit();
+    return {
+      ...rejectedExecution(status, reason, extra),
+      ...retainedReadbackTelemetrySnapshot()
+    };
+  };
   let expectedAerosolFamily = aerosolFamily;
   try {
     if (sphParticleUpload != null) {
@@ -4949,6 +4981,25 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       ...retainedReadbackTelemetrySnapshot()
     };
   }
+  if (
+    schroederParticleContinuation != null
+    && postMechanicsGasSource == null
+    && sphParticleUpload != null
+  ) {
+    try {
+      const fusedMod = await import('./schroederFusedFineSubstepGpu.js');
+      canonicalExactMassRead = fusedMod.acquireSchroederCanonicalParticleExactMassRead(
+        device,
+        schroederParticleContinuation,
+        { sphParticleUpload, mlsMpmParticleUpload }
+      );
+    } catch (error) {
+      return rejectedExecutionWithTelemetry(
+        'spatial-gas-ledger-eos-rejected-particle-source-lifecycle',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
   const normalizedParticleSource = normalizeParticleSource({
     device,
     sphParticleUpload,
@@ -4960,11 +5011,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     particleThermoStrideFloats,
     schroederSpatialEpochGeneration,
     schroederLevelAssignment,
-    // This only defers lifetime admission: the private current pair must be
-    // authenticated and retained below before allocating or submitting work.
-    deferLifecycleToCurrentPair: postMechanicsGasSource != null
+    // This only defers lifetime admission: the private current pair or canonical
+    // fine-substep exact-mass continuation must be authenticated and retained
+    // before allocating or submitting work.
+    deferLifecycleToCurrentPair: postMechanicsGasSource != null || canonicalExactMassRead != null
   });
   if (normalizedParticleSource.error) {
+    releaseCanonicalOnEarlyExit();
     return {
       ...normalizedParticleSource.error,
       ...retainedReadbackTelemetrySnapshot()
@@ -5152,7 +5205,9 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     ...(normalizedProductSource.present === true
       ? [normalizedProductSource.source]
       : []),
-    ...(normalizedParticleSource.present === true && postMechanicsGasSource == null
+    ...(normalizedParticleSource.present === true
+        && postMechanicsGasSource == null
+        && canonicalExactMassRead == null
       ? [normalizedParticleSource.source]
       : [])
   ]);
@@ -5161,6 +5216,13 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
       'spatial-gas-ledger-eos-rejected-source-lifecycle',
       'Unable to acquire every exact retained gas-candidate source borrow'
     );
+  }
+  if (canonicalExactMassRead) {
+    releaseSourceBorrow = withCanonicalParticleExactMassBorrow(
+      releaseSourceBorrow,
+      canonicalExactMassRead
+    );
+    canonicalExactMassRead = null;
   }
   let particleProductSourcePair = null;
   try {

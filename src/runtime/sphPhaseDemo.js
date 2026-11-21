@@ -2538,6 +2538,8 @@ function buildSphInitialBodiesDemoState({
   splitSpareLineageCount = 0,
   mechanics,
   coherentRigidSolids = false,
+  solidFractureEnabled = true,
+  solidMultilevelEnabled = true,
   materialPropertyBank,
   materialPropertyCrystalStructureBank
 }) {
@@ -2843,6 +2845,7 @@ function buildSphInitialBodiesDemoState({
       });
       deformableSolidSurfaces.push({
         bodyId: body.id,
+        domainId: body.domainId,
         material: body.material,
         particleRowOffset: start,
         mesh: surfaceMesh
@@ -2962,7 +2965,17 @@ function buildSphInitialBodiesDemoState({
         }
       }
     }
-    state.rigidBodies = Object.freeze({ schema: SCHROEDER_SOLID_BODIES_SCHEMA, bodies: rigidBodies, fluidThermal });
+    const maxBodyCapacity = solidFractureEnabled !== false
+      ? Math.max(rigidBodies.length + 4, rigidBodies.length * 2)
+      : rigidBodies.length;
+    state.rigidBodies = Object.freeze({
+      schema: SCHROEDER_SOLID_BODIES_SCHEMA,
+      bodies: rigidBodies,
+      fluidThermal,
+      maxBodyCapacity,
+      fractureEnabled: solidFractureEnabled !== false,
+      multilevelEnabled: solidMultilevelEnabled !== false
+    });
   }
   if (deformableSolidSurfaces.length) {
     state.deformableSolidSurfaces = Object.freeze({
@@ -3151,6 +3164,8 @@ function buildSphPhaseDemoStateWithReserveAuthority({
   splitSpareLineageCount = 0,
   mechanics = 'mlsmpm',
   coherentRigidSolids = false,
+  solidFractureEnabled = true,
+  solidMultilevelEnabled = true,
   reactionsRequested = null,
   materialPropertyBank = DEFAULT_MATERIAL_PROPERTY_BANK,
   materialPropertyCrystalStructureBank = DEFAULT_MATERIAL_PROPERTY_CRYSTAL_STRUCTURE_BANK,
@@ -3179,6 +3194,8 @@ function buildSphPhaseDemoStateWithReserveAuthority({
       splitSpareLineageCount,
       mechanics,
       coherentRigidSolids,
+      solidFractureEnabled,
+      solidMultilevelEnabled,
       materialPropertyBank,
       materialPropertyCrystalStructureBank
     });

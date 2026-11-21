@@ -3161,7 +3161,8 @@ export async function bindSphExactMassFusedTerminalContinuation(closure) {
     return existing.exactMass.family;
   }
   const family = installExactMassContinuationOwner({ target, existing, capture,
-    stateBuffer: capture.stateBuffer, thermoBuffer: capture.thermoBuffer });
+    stateBuffer: capture.stateBuffer, thermoBuffer: capture.thermoBuffer,
+    preserveEnergy: true });
   registerExactMassMechanicsOwner(capture.nextParticleUploads.mlsMpmParticleUpload,
     target, capture.sourceRead.read.device);
   sphParticleBufferSetLifecycleRecords.get(target).exactMass.retireOwner = capture.retireOwner;
@@ -3284,7 +3285,8 @@ export function transferMlsMpmGpuAuxiliaryRetirementOwnership(source, target) {
 }
 
 function installExactMassContinuationOwner({ target, existing, capture,
-  stateBuffer, thermoBuffer, spatial = null, spatialPublicationPlan = null, privateChain=false }) {
+  stateBuffer, thermoBuffer, spatial = null, spatialPublicationPlan = null, privateChain=false,
+  preserveEnergy = false }) {
   const held = exactMassParticleReads.get(capture.sourceRead);
   const source = held?.record;
   const residualSource=source?.exactMass?.mechanicsSourceRead?.source??null;
@@ -3341,7 +3343,7 @@ function installExactMassContinuationOwner({ target, existing, capture,
     throw new TypeError('Exact energy continuation requires its producer hand-over');
   }
   const energy = nextEnergy ? { owners: 0, value: exactEnergyRows(nextEnergy.energyBuffer,
-    nextEnergy.format, nextEnergy.rowCount) } : null;
+    nextEnergy.format, nextEnergy.rowCount) } : (preserveEnergy ? source.exactMass.energy ?? null : null);
   if (!exactEnergyRowsMatch(energy, { device: source.device, format: massRead.format,
     rowCount: target.particleCount })) {
     throw new TypeError('Exact continuation requires complete carrier energy rows');

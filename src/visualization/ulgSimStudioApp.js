@@ -1521,6 +1521,34 @@ export function mountUlgSimStudioApp({
     const snapshot = structuredClone(stagedConfig);
     const sig = configSignature(snapshot);
     const launchParams = buildLaunchParamsFromStagedConfig(snapshot);
+    if (typeof window !== 'undefined') {
+      const urlSearch = new URLSearchParams(window.location.search || '');
+      const urlHash = new URLSearchParams(
+        String(window.location.hash || '').replace(/^#/, '')
+      );
+      const urlParam = (key) => urlHash.get(key) ?? urlSearch.get(key);
+      const explicitSteps = (
+        urlParam('residentStepsPerSchedule')
+        ?? urlParam('residentStepBatch')
+        ?? urlParam('residentVisualSteps')
+        ?? urlParam('presentationStepsPerSchedule')
+      );
+      const explicitAdaptiveSync = urlParam('adaptiveSync');
+      if (explicitSteps != null && explicitSteps !== '') {
+        launchParams.residentStepsPerSchedule = String(explicitSteps);
+        if (explicitAdaptiveSync != null && explicitAdaptiveSync !== '') {
+          launchParams.adaptiveSync = String(explicitAdaptiveSync);
+        } else {
+          delete launchParams.adaptiveSync;
+        }
+      } else if (explicitAdaptiveSync != null && explicitAdaptiveSync !== '') {
+        launchParams.adaptiveSync = String(explicitAdaptiveSync);
+      } else {
+        launchParams.adaptiveSync = '1';
+      }
+    } else if (launchParams.adaptiveSync == null) {
+      launchParams.adaptiveSync = '1';
+    }
     const presetEntry = sphPhaseScenarioPresetById(snapshot.presetId);
     const label = presetEntry ? presetEntry.label : 'Custom';
 

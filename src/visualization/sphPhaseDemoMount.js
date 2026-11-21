@@ -8640,11 +8640,13 @@ export async function mountSphPhaseDemoOverlay({
     ?? initialHash.get('presentationStepsPerSchedule')
     ?? initialQuery.get('presentationStepsPerSchedule')
   );
-  const adaptiveSyncCadenceEnabled = !hasExplicitUrlResidentStepsPerSchedule
-    && parseBooleanUrlParam(
-      initialHash.get('adaptiveSync') ?? initialQuery.get('adaptiveSync'),
-      true
-    );
+  const explicitAdaptiveSyncParam = (
+    initialHash.get('adaptiveSync')
+    ?? initialQuery.get('adaptiveSync')
+  );
+  const adaptiveSyncCadenceEnabled = explicitAdaptiveSyncParam != null
+    ? booleanUrlParam(explicitAdaptiveSyncParam, true)
+    : !hasExplicitUrlResidentStepsPerSchedule;
   const residentStepsPerScheduleOverride = positiveIntegerUrlParam(
     initialHash.get('residentStepsPerSchedule')
       ?? initialQuery.get('residentStepsPerSchedule')
@@ -13019,7 +13021,7 @@ export async function mountSphPhaseDemoOverlay({
             throughputStepsPerS: frameCounters.residentCompletionThroughputEwmaFps,
             targetScheduleWallS: 0.036,
             minSteps: 2,
-            warmupMaxSteps: 4
+            warmupMaxSteps: 2
           })
         : evidence.effectiveStepCount;
       overlay.__sphResidentScheduleControlEvidence = evidence;

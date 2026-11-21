@@ -586,3 +586,18 @@ test('adaptive visual sync cadence targets ~25-40 Hz committed keyframes while h
   const dampedEnd = dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0.01, motionPacing: { maxSimulationAgeS: 0.01 } });
   assert.ok(dampedEnd > 0.004 && dampedEnd < 0.006, `expected smooth ease-out cap, got ${dampedEnd}`);
 });
+
+test('mobile modal CSS locks header/tabs/footer flex-shrink:0 and body min-height:0 so tabs never collapse', async () => {
+  const [cssSrc, htmlSrc, appSrc] = await Promise.all([
+    fs.readFile(path.resolve(process.cwd(), 'src/visualization/ulgSimStudioStyles.css'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'index.html'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/visualization/ulgSimStudioApp.js'), 'utf8')
+  ]);
+  assert.match(htmlSrc, /viewport-fit=cover/);
+  assert.match(cssSrc, /\.ulg-modal-header\s*\{[\s\S]*?flex:\s*0\s+0\s+auto;/);
+  assert.match(cssSrc, /\.ulg-modal-tabs\s*\{[\s\S]*?flex:\s*0\s+0\s+auto;[\s\S]*?overflow-y:\s*hidden;/);
+  assert.match(cssSrc, /\.ulg-modal-body\s*\{[\s\S]*?min-height:\s*0;/);
+  assert.match(cssSrc, /\.ulg-modal-footer\s*\{[\s\S]*?flex:\s*0\s+0\s+auto;/);
+  assert.match(cssSrc, /height:\s*100dvh;/);
+  assert.match(appSrc, /launchParams\.adaptiveSync\s*=\s*'1'/);
+});

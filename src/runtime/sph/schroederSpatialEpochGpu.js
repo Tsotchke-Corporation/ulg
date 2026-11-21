@@ -2838,7 +2838,8 @@ export function createSchroederSpatialEpochGpu(device, {
         incrementalHits: 0,
         fullRadixBuilds: 0,
         lastMode: null,
-        lastGenerationId: null
+        lastGenerationId: null,
+        skipReasonCounts: Object.create(null)
       });
       if (ownership.incrementalEncoded) {
         stats.incrementalHits += 1;
@@ -2847,7 +2848,10 @@ export function createSchroederSpatialEpochGpu(device, {
       } else {
         stats.fullRadixBuilds += 1;
         stats.lastMode = 'full-radix';
-        stats.lastSkipReason = ownership.incrementalSkipReason ?? null;
+        const reasonKey = `${execution.laneId || 'default'}:${ownership.incrementalSkipReason ?? 'unknown'}`;
+        stats.lastSkipReason = reasonKey;
+        stats.skipReasonCounts = stats.skipReasonCounts || Object.create(null);
+        stats.skipReasonCounts[reasonKey] = (stats.skipReasonCounts[reasonKey] || 0) + 1;
       }
       stats.lastGenerationId = execution.generationId;
     }

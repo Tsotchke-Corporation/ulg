@@ -8234,11 +8234,41 @@ export async function runSchroederLevelAssignmentWebGpu({
     || writeStorageBuffer(device, 'ulg-schroeder-level-sph-thermo-in', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer
     || writeStorageBuffer(device, 'ulg-schroeder-level-mls-mpm-mechanics-in', mlsMpmParticleState.mechanics);
-  const assignmentBuffer = tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-schroeder-level-assignments-out',
-    size: plan.assignmentByteLength,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  }), device);
+  const useQueueOrderedAssignmentPool = Boolean(
+    noFullReadback
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const assignmentUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const assignmentBuffer = tagWebGpuBufferDevice(
+    useQueueOrderedAssignmentPool
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-schroeder-level-assignments-out',
+          label: 'ulg-schroeder-level-assignments-out',
+          size: plan.assignmentByteLength,
+          usage: assignmentUsage
+        })
+      : device.createBuffer({
+          label: 'ulg-schroeder-level-assignments-out',
+          size: plan.assignmentByteLength,
+          usage: assignmentUsage
+        }),
+    device
+  );
+  let assignmentBufferReleased = false;
+  const releaseAssignmentBuffer = () => {
+    if (assignmentBufferReleased) return;
+    assignmentBufferReleased = true;
+    if (useQueueOrderedAssignmentPool && submissionObserved) {
+      releaseQueueOrderedPooledBuffer(device, assignmentBuffer, {
+        bucketKey: 'ulg-schroeder-level-assignments-out',
+        size: plan.assignmentByteLength,
+        usage: assignmentUsage
+      });
+    } else {
+      assignmentBuffer.destroy?.();
+    }
+  };
   const paramsBuffer = levelAssignmentSharedControlBuffers(device).paramsBuffer;
   const readBuffer = noFullReadback
     ? null
@@ -8268,7 +8298,8 @@ export async function runSchroederLevelAssignmentWebGpu({
       entryPoint: 'main',
       bindings
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-schroeder-level-assignment',
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: stateBuffer } },
@@ -8348,7 +8379,7 @@ export async function runSchroederLevelAssignmentWebGpu({
     };
     if (retainAssignmentBuffer) {
       result.assignmentBuffer = assignmentBuffer;
-      result.destroyAssignmentBuffer = () => assignmentBuffer.destroy?.();
+      result.destroyAssignmentBuffer = releaseAssignmentBuffer;
       returnedRetainedAssignmentBuffer = true;
     }
     successfulReturn = true;
@@ -8358,7 +8389,7 @@ export async function runSchroederLevelAssignmentWebGpu({
       if (!borrowedStateBuffer) stateBuffer.destroy?.();
       if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
       if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-      if (!retainAssignmentBuffer || !returnedRetainedAssignmentBuffer) assignmentBuffer.destroy?.();
+      if (!retainAssignmentBuffer || !returnedRetainedAssignmentBuffer) releaseAssignmentBuffer();
       readBuffer?.destroy?.();
     };
     if (

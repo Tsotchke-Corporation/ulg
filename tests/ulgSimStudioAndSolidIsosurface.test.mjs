@@ -32,6 +32,8 @@ import {
   schroederSolidIsosurfaceFieldWgsl
 } from '../src/runtime/sph/schroederSolidIsosurfaceFieldGpu.js';
 import { createSphPhaseDemo } from '../src/runtime/sphPhaseDemo.js';
+import { resolveSphAdaptiveSyncScheduleStepCount } from '../src/visualization/sphPhaseDemoMount.js';
+import { dampedIsosurfaceShaderMotionAgeS } from '../src/services/workerOwnedIsosurfacePresenter.js';
 
 test('floor-centered container coordinates place floor center at (0, 0, 0) and round-trip with internal solver bounds', () => {
   const box = [2.4, 1.8, 3.0];
@@ -562,4 +564,40 @@ test('Studio A6 cross-machine peerRelay and peerRoom URL parameters omit when bl
   const relayLaunch = buildLaunchParamsFromStagedConfig(parsed.config);
   assert.equal(relayLaunch.peerRelay, 'wss://relay.example.net/ulg');
   assert.equal(relayLaunch.peerRoom, 'lab-cluster-1');
+});
+
+test('adaptive visual sync cadence targets burst-aligned high-Hz committed keyframes while honoring step ceilings and smooth motion damping', () => {
+  // Warmup starts at burst-aligned 4 steps (instead of 16/64) to keep reactive target authority invariant
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: null }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: null }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 1, throughputStepsPerS: 100 }), 1);
+
+  // Real presets: burst-aligned minSteps=4 keeps submits/step <= 2 and full physics throughput
+  // while raising sodium-water from 0.17 Hz -> ~4 Hz, iron-ice from 2 Hz -> ~7-8 Hz,
+  // water-cycle from 3.3 Hz -> ~13 Hz, and water-realtime from 7.6 Hz -> ~24 Hz.
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: 14 }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 35 }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 140 }), 5);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 1000 }), 16);
+
+  // Smooth shader motion damping matches exact velocity at t=0 and caps late overshoot.
+  assert.equal(dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0, motionPacing: { maxSimulationAgeS: 0.01 } }), 0);
+  assert.equal(dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0.004 }), 0.004);
+  const dampedEnd = dampedIsosurfaceShaderMotionAgeS({ drawMotionAgeS: 0.01, motionPacing: { maxSimulationAgeS: 0.01 } });
+  assert.ok(dampedEnd > 0.004 && dampedEnd < 0.006, `expected smooth ease-out cap, got ${dampedEnd}`);
+});
+
+test('mobile modal CSS locks header/tabs/footer flex-shrink:0 and body min-height:0 so tabs never collapse', async () => {
+  const [cssSrc, htmlSrc, appSrc] = await Promise.all([
+    fs.readFile(path.resolve(process.cwd(), 'src/visualization/ulgSimStudioStyles.css'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'index.html'), 'utf8'),
+    fs.readFile(path.resolve(process.cwd(), 'src/visualization/ulgSimStudioApp.js'), 'utf8')
+  ]);
+  assert.match(htmlSrc, /viewport-fit=cover/);
+  assert.match(cssSrc, /\.ulg-modal-header\s*\{[\s\S]*?flex:\s*0\s+0\s+auto;/);
+  assert.match(cssSrc, /\.ulg-modal-tabs\s*\{[\s\S]*?flex:\s*0\s+0\s+auto;[\s\S]*?overflow-y:\s*hidden;/);
+  assert.match(cssSrc, /\.ulg-modal-body\s*\{[\s\S]*?min-height:\s*0;/);
+  assert.match(cssSrc, /\.ulg-modal-footer\s*\{[\s\S]*?flex:\s*0\s+0\s+auto;/);
+  assert.match(cssSrc, /height:\s*100dvh;/);
+  assert.match(appSrc, /launchParams\.adaptiveSync\s*=\s*'1'/);
 });

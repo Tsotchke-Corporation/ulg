@@ -22,9 +22,12 @@ import {
   SPHERE_OPTICAL_EFFICIENCY_NUMERIC_POLICY
 } from '../material/opticalClosure.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
+  releaseQueueOrderedPooledBuffer,
   submitQueueOrderedProducerWorkAndCleanup
 } from '../webgpuComputeLayout.js';
 import {
@@ -3696,12 +3699,37 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       `${label}-closure-rows`,
       resolvedOpticalClosureTable.rows
     ));
+    const useQueueOrderedOpticsPool = Boolean(
+      typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+    );
+    const pooledOpticsSpecs = new Map();
+    const acquireOwnedTransientBuffer = (bucketKey, descriptor) => {
+      if (!useQueueOrderedOpticsPool) {
+        return own(createOwnedBuffer(device, descriptor));
+      }
+      const buffer = tagWebGpuBufferDevice(
+        acquireQueueOrderedPooledBuffer(device, {
+          bucketKey,
+          label: descriptor.label,
+          size: descriptor.size,
+          usage: descriptor.usage
+        }),
+        device
+      );
+      pooledOpticsSpecs.set(buffer, {
+        bucketKey,
+        size: descriptor.size,
+        usage: descriptor.usage
+      });
+      return own(buffer);
+    };
     const reactionCaptureBuffer = routeCaptureEnabled
-      ? own(createOwnedBuffer(device, {
+      ? acquireOwnedTransientBuffer('ulg-dispersed-optics-reaction-capture', {
           label: `${label}-reaction-capture`,
           size: opticsBufferByteLength,
           usage: GPU_BUFFER_USAGE.STORAGE
-        }))
+        })
       : null;
     const productionInputOpticsBuffer =
       reactionCaptureBuffer ?? resolvedPriorOpticsBuffer;
@@ -3711,13 +3739,13 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
     }));
     const evidenceValues = initialEvidence();
-    const evidenceBuffer = own(createOwnedBuffer(device, {
+    const evidenceBuffer = acquireOwnedTransientBuffer('ulg-dispersed-optics-evidence', {
       label: `${label}-evidence`,
       size: evidenceScratchByteLength,
       usage: GPU_BUFFER_USAGE.STORAGE
         | GPU_BUFFER_USAGE.COPY_SRC
         | GPU_BUFFER_USAGE.COPY_DST
-    }));
+    });
     device.queue.writeBuffer(evidenceBuffer, 0, evidenceValues);
     if (excludedLineages) {
       // Cold, privately validated donor addresses. Material, mass and phase
@@ -3726,11 +3754,11 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       for (const lineage of excludedLineages) flags[lineage] = 1;
       device.queue.writeBuffer(evidenceBuffer, EVIDENCE_BYTES, flags);
     }
-    const paramsBuffer = own(createOwnedBuffer(device, {
+    const paramsBuffer = acquireOwnedTransientBuffer('ulg-dispersed-optics-params', {
       label: `${label}-params`,
       size: PARAMS_BYTES,
       usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    }));
+    });
     device.queue.writeBuffer(
       paramsBuffer,
       0,
@@ -3801,18 +3829,18 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
         resource: { buffer: paramsBuffer, size: PARAMS_BYTES }
       }
     ];
-    const preflightBindGroup = device.createBindGroup({
+    const preflightBindGroup = createCachedExplicitBindGroup(device, {
       label: `${label}-preflight-bind-group`,
       layout: preflightPipeline.bindGroupLayout,
       entries: applyEntries
     });
-    const applyBindGroup = device.createBindGroup({
+    const applyBindGroup = createCachedExplicitBindGroup(device, {
       label: `${label}-apply-bind-group`,
       layout: applyPipeline.bindGroupLayout,
       entries: applyEntries
     });
     const captureBindGroup = routeCaptureEnabled
-      ? device.createBindGroup({
+      ? createCachedExplicitBindGroup(device, {
           label: `${label}-reaction-capture-bind-group`,
           layout: capturePipeline.bindGroupLayout,
           entries: [
@@ -3903,7 +3931,14 @@ export function createSphDispersedMediumOpticsProducerWebGpuEncoderStage({
       let firstError = null;
       for (const buffer of transientBuffers) {
         try {
-          buffer.destroy?.();
+          const poolSpec = pooledOpticsSpecs.get(buffer);
+          if (poolSpec && encodeState === 'encoded') {
+            pooledOpticsSpecs.delete(buffer);
+            releaseQueueOrderedPooledBuffer(device, buffer, poolSpec);
+          } else {
+            pooledOpticsSpecs.delete(buffer);
+            buffer.destroy?.();
+          }
           removeAllocated(buffer);
         } catch (error) {
           firstError ??= error;

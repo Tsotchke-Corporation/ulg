@@ -9,6 +9,7 @@ import { prepareSphExactMechanicsRefresh } from './sphExactMechanicsRefreshGpu.j
 import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
@@ -16,9 +17,13 @@ import {
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  releaseQueueOrderedPooledBuffer,
   submitQueueOrderedFinalConsumerWork,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
+
+const mechanicsMaterialBankWarmInputBufferCache = new WeakMap();
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../material/materialPropertyBank.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -309,6 +314,30 @@ function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
     const packedRows = candidate.table?.rows;
     const packedRowCount = Math.max(0, Math.round(finiteNumber(candidate.table?.rowCount, 0)));
     if (packedRows?.byteLength > 0 && packedRowCount > 0) {
+      if (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice) {
+        const cacheKeyDevice = unwrapWebGpuCacheDevice(device);
+        let rowCache = mechanicsMaterialBankWarmInputBufferCache.get(cacheKeyDevice);
+        if (!rowCache) {
+          rowCache = new WeakMap();
+          mechanicsMaterialBankWarmInputBufferCache.set(cacheKeyDevice, rowCache);
+        }
+        let cachedBuffer = rowCache.get(packedRows);
+        if (!cachedBuffer) {
+          cachedBuffer = writeStorageBuffer(
+            device,
+            'ulg-mls-mpm-mechanics-material-bank-warm-input-rows',
+            packedRows
+          );
+          rowCache.set(packedRows, cachedBuffer);
+        }
+        return {
+          buffer: cachedBuffer,
+          rowCount: packedRowCount,
+          bufferSource: `${candidate.source}-cached`,
+          borrowed: true,
+          destroy() {}
+        };
+      }
       const buffer = writeStorageBuffer(
         device,
         'ulg-mls-mpm-mechanics-material-bank-warm-input-rows',
@@ -810,33 +839,69 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
   const outputBufferInitializationMode = 'shader-copies-source-mechanics-rows';
   // Never size GPU outputs from the CPU arrays alone: under GPU-resident
   // continuation the CPU copies can be stale or detached (byteLength 0).
-  const outMechanicsBuffer = createOutputStorageBuffer(
-    device,
-    'ulg-mls-mpm-mechanics-refresh-output-mechanics',
-    Math.max(
-      mlsMpmParticleState.mechanics.byteLength,
-      mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
-    ),
-    GPU_BUFFER_USAGE.COPY_SRC
+  const useQueueOrderedRefreshPool = Boolean(
+    readbackMode === NO_FULL_READBACK_MODE
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
   );
-  const paramsBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-mechanics-refresh-params',
-    size: 16,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const outMechanicsByteLength = Math.max(
+    mlsMpmParticleState.mechanics.byteLength,
+    mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const outMechanicsBuffer = useQueueOrderedRefreshPool
+    ? tagWebGpuBufferDevice(
+        acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+          label: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+          size: outMechanicsByteLength,
+          usage: outMechanicsUsage
+        }),
+        device
+      )
+    : createOutputStorageBuffer(
+        device,
+        'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+        outMechanicsByteLength,
+        GPU_BUFFER_USAGE.COPY_SRC
+      );
+  const paramsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
+  const paramsBuffer = useQueueOrderedRefreshPool
+    ? acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-mls-mpm-mechanics-refresh-params',
+        label: 'ulg-mls-mpm-mechanics-refresh-params',
+        size: 16,
+        usage: paramsUsage
+      })
+    : device.createBuffer({
+        label: 'ulg-mls-mpm-mechanics-refresh-params',
+        size: 16,
+        usage: paramsUsage
+      });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     phaseRecordCount: mechanicsMaterialTable.phaseRecordCount,
     gasConstitutiveOffsetVec4: mechanicsMaterialTable.gasConstitutiveOffsetVec4 ?? 0,
     materialBankWarmInputRowCount: materialBankWarmInputBinding.rowCount
   }));
-  const authorityValidationBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-    size: Uint32Array.BYTES_PER_ELEMENT,
-    usage: GPU_BUFFER_USAGE.STORAGE
-      | GPU_BUFFER_USAGE.COPY_DST
-      | GPU_BUFFER_USAGE.COPY_SRC
-  });
+  const authorityValidationUsage = GPU_BUFFER_USAGE.STORAGE
+    | GPU_BUFFER_USAGE.COPY_DST
+    | GPU_BUFFER_USAGE.COPY_SRC;
+  const poolAuthorityValidation = Boolean(
+    useQueueOrderedRefreshPool && !exact?.retainAcceptance
+  );
+  const authorityValidationBuffer = poolAuthorityValidation
+    ? acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+        label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+        size: Uint32Array.BYTES_PER_ELEMENT,
+        usage: authorityValidationUsage
+      })
+    : device.createBuffer({
+        label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+        size: Uint32Array.BYTES_PER_ELEMENT,
+        usage: authorityValidationUsage
+      });
   if (exact?.retainAcceptance) exact.retainAcceptanceBuffer(authorityValidationBuffer);
   device.queue.writeBuffer(
     authorityValidationBuffer,
@@ -908,8 +973,34 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
   let cleanupComplete = false;
   const destroyBufferOnce = (buffer) => {
     if (!buffer || destroyedBuffers.has(buffer)) return;
-    buffer.destroy?.();
     destroyedBuffers.add(buffer);
+    if (useQueueOrderedRefreshPool) {
+      if (buffer === outMechanicsBuffer) {
+        releaseQueueOrderedPooledBuffer(device, buffer, {
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
+          size: outMechanicsByteLength,
+          usage: outMechanicsUsage
+        });
+        return;
+      }
+      if (buffer === paramsBuffer) {
+        releaseQueueOrderedPooledBuffer(device, buffer, {
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-params',
+          size: 16,
+          usage: paramsUsage
+        });
+        return;
+      }
+      if (poolAuthorityValidation && buffer === authorityValidationBuffer) {
+        releaseQueueOrderedPooledBuffer(device, buffer, {
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
+          size: Uint32Array.BYTES_PER_ELEMENT,
+          usage: authorityValidationUsage
+        });
+        return;
+      }
+    }
+    buffer.destroy?.();
   };
   const cleanup = () => {
     if (cleanupComplete) return;

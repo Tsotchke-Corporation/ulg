@@ -72,8 +72,11 @@ import {
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
   releaseQueueOrderedPooledBuffer,
-  releaseSubmittedWorkCleanupQueueOrdered
+  releaseSubmittedWorkCleanupQueueOrdered,
+  unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
+
+const thermalMaterialBankWarmInputBufferCache = new WeakMap();
 import {
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES,
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
@@ -3095,6 +3098,30 @@ function resolveMaterialBankWarmInputShaderBinding(device, {
     0
   )));
   if (packedRows?.byteLength > 0 && packedRowCount > 0) {
+    if (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice) {
+      const cacheKeyDevice = unwrapWebGpuCacheDevice(device);
+      let rowCache = thermalMaterialBankWarmInputBufferCache.get(cacheKeyDevice);
+      if (!rowCache) {
+        rowCache = new WeakMap();
+        thermalMaterialBankWarmInputBufferCache.set(cacheKeyDevice, rowCache);
+      }
+      let cachedBuffer = rowCache.get(packedRows);
+      if (!cachedBuffer) {
+        cachedBuffer = writeStorageBuffer(
+          device,
+          'ulg-sph-thermal-material-bank-warm-input-rows',
+          packedRows
+        );
+        rowCache.set(packedRows, cachedBuffer);
+      }
+      return {
+        buffer: cachedBuffer,
+        rowCount: packedRowCount,
+        bufferSource: 'sph-particle-state-cached',
+        borrowed: true,
+        destroy() {}
+      };
+    }
     const buffer = writeStorageBuffer(
       device,
       'ulg-sph-thermal-material-bank-warm-input-rows',

@@ -15234,18 +15234,75 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       })
     });
     const potentialOwner = record.schroederLane?.staticGpuResources?.thermalPotentialOwner;
-    const thermalPotential = potentialOwner && state.thermalPotentialStarted
-      ? { ...state.thermalPotentialStarted,
-          ...(cancelled ? { candidate: null, readbackBytes: 0, mapAsyncCount: 0, status: 'cancelled', cumulativeConsumerHits: null }
-            : await finishThermalPotentialWorkerSchedule(potentialOwner, { scheduleId, laneId, stateKey,
-                upload: record.schroederLane.sphParticleUpload })) }
-      : cancelled && state.thermalPotentialRequested
-        ? { adopted: false, ordinal: potentialOwner ? thermalPotentialWorkerOrdinal(potentialOwner) : 0,
-            candidate: null, readbackBytes: 0, mapAsyncCount: 0, status: 'cancelled', cumulativeConsumerHits: null }
-        : null;
+    const laneStepAfterSchedule = Number(
+      finalParticleLineage?.physicsTick ?? record.schroederLane?.sphParticleUpload?.step ?? 0
+    );
+    const lastTpStep = Number(record._thermalPotentialLastFinishStep);
+    const shouldFinishThermalPotential = Boolean(
+      !cancelled
+      && potentialOwner
+      && state.thermalPotentialStarted
+      && (
+        !Number.isFinite(lastTpStep)
+        || stepCount > 8
+        || Number(state.thermalPotentialStarted?.ordinal ?? 0) === 0
+        || state.thermalPotentialStarted?.adopted === true
+        || (laneStepAfterSchedule - lastTpStep) >= 16
+      )
+    );
+    let thermalPotential = null;
+    if (potentialOwner && state.thermalPotentialStarted) {
+      if (cancelled) {
+        thermalPotential = {
+          ...state.thermalPotentialStarted,
+          candidate: null,
+          readbackBytes: 0,
+          mapAsyncCount: 0,
+          status: 'cancelled',
+          cumulativeConsumerHits: null
+        };
+      } else if (shouldFinishThermalPotential) {
+        thermalPotential = {
+          ...state.thermalPotentialStarted,
+          ...(await finishThermalPotentialWorkerSchedule(potentialOwner, {
+            scheduleId,
+            laneId,
+            stateKey,
+            upload: record.schroederLane.sphParticleUpload
+          }))
+        };
+        record._thermalPotentialLastFinishStep = laneStepAfterSchedule;
+      } else {
+        thermalPotential = {
+          ...state.thermalPotentialStarted,
+          candidate: null,
+          readbackBytes: 0,
+          mapAsyncCount: 0,
+          status: 'deferred-capacity',
+          cumulativeConsumerHits: null
+        };
+      }
+    } else if (cancelled && state.thermalPotentialRequested) {
+      thermalPotential = {
+        adopted: false,
+        ordinal: potentialOwner ? thermalPotentialWorkerOrdinal(potentialOwner) : 0,
+        candidate: null,
+        readbackBytes: 0,
+        mapAsyncCount: 0,
+        status: 'cancelled',
+        cumulativeConsumerHits: null
+      };
+    }
     state.thermalPotentialFinished = !cancelled;
+    const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
+    const shouldRunA3ThermalTick = Boolean(
+      !Number.isFinite(lastA3ThermalStep)
+      || stepCount > 8
+      || (laneStepAfterSchedule - lastA3ThermalStep) >= 16
+    );
     if (
       !cancelled
+      && shouldRunA3ThermalTick
       && record.workerDevice
       && record.schroederLane?.sphParticleUpload?.stateBuffer
       && record.schroederLane?.sphParticleUpload?.thermoBuffer
@@ -15269,6 +15326,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         );
         if (a3ThermalTick) {
           record.workerDevice.queue.submit([a3ThermalEncoder.finish()]);
+          record._a3ThermalLastTickStep = laneStepAfterSchedule;
         }
       } catch {
         // Keep A3 thermal regional sampling isolated from physics admission.

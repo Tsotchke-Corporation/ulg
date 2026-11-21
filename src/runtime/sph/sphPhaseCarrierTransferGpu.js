@@ -4,6 +4,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
@@ -11,10 +12,13 @@ import {
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  releaseQueueOrderedPooledBuffer,
   submitQueueOrderedFinalConsumerWork,
   releaseSubmittedWorkCleanupQueueOrdered,
   unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
+
+const phaseCarrierTransferClosureCache = new WeakMap();
 import { encodeLawActivationCount } from './lawActivationReceiptRing.js';
 import {
   createSchroederPhaseDormancyStage,
@@ -1592,6 +1596,21 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     if (buffer) setupAllocations.push(buffer);
     return buffer;
   };
+  const useQueueOrderedPhasePool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const pooledBufferMeta = new WeakMap();
+  const acquirePhasePooledBuffer = (bucketKey, label, size, usage) => {
+    const normalizedSize = Math.max(4, size);
+    const buf = tagWebGpuBufferDevice(
+      acquireQueueOrderedPooledBuffer(device, { bucketKey, label, size: normalizedSize, usage }),
+      device
+    );
+    pooledBufferMeta.set(buf, { bucketKey, size: normalizedSize, usage });
+    return buf;
+  };
+  let closureBufferCached = false;
   const {
     closureBuffer,
     evidenceValues,
@@ -1610,51 +1629,140 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
     workgroups
   } = (() => {
     try {
-      const closure = packSphPhaseCarrierTransferClosureRows(
-        thermalMaterialTable,
-        mechanicsMaterialTable
-      );
-      const closureBuffer = ownSetupAllocation(uploadStorageBuffer(
-        device,
-        'ulg-sph-phase-carrier-transfer-closure-rows',
-        closure.values
-      ));
+      let closure;
+      let closureBuffer;
+      if (
+        useQueueOrderedPhasePool
+        && thermalMaterialTable && typeof thermalMaterialTable === 'object'
+        && mechanicsMaterialTable && typeof mechanicsMaterialTable === 'object'
+      ) {
+        const cacheDev = unwrapWebGpuCacheDevice(device);
+        let devMap = phaseCarrierTransferClosureCache.get(cacheDev);
+        if (!devMap) {
+          devMap = new WeakMap();
+          phaseCarrierTransferClosureCache.set(cacheDev, devMap);
+        }
+        let thermMap = devMap.get(thermalMaterialTable);
+        if (!thermMap) {
+          thermMap = new WeakMap();
+          devMap.set(thermalMaterialTable, thermMap);
+        }
+        let cachedEntry = thermMap.get(mechanicsMaterialTable);
+        if (!cachedEntry) {
+          const packed = packSphPhaseCarrierTransferClosureRows(
+            thermalMaterialTable,
+            mechanicsMaterialTable
+          );
+          const buf = uploadStorageBuffer(
+            device,
+            'ulg-sph-phase-carrier-transfer-closure-rows',
+            packed.values
+          );
+          cachedEntry = { closure: packed, closureBuffer: buf };
+          thermMap.set(mechanicsMaterialTable, cachedEntry);
+        }
+        closure = cachedEntry.closure;
+        closureBuffer = cachedEntry.closureBuffer;
+        closureBufferCached = true;
+      } else {
+        closure = packSphPhaseCarrierTransferClosureRows(
+          thermalMaterialTable,
+          mechanicsMaterialTable
+        );
+        closureBuffer = ownSetupAllocation(uploadStorageBuffer(
+          device,
+          'ulg-sph-phase-carrier-transfer-closure-rows',
+          closure.values
+        ));
+      }
       const evidenceValues = initialEvidence(plan.lineageCapacity);
-      const evidenceBuffer = ownSetupAllocation(uploadStorageBuffer(
-        device,
-        'ulg-sph-phase-carrier-transfer-evidence',
-        evidenceValues,
-        GPU_BUFFER_USAGE.COPY_SRC
-      ));
+      const evidenceUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC;
+      const evidenceBuffer = ownSetupAllocation(
+        useQueueOrderedPhasePool
+          ? (() => {
+              const buf = acquirePhasePooledBuffer(
+                'ulg-sph-phase-carrier-transfer-evidence',
+                'ulg-sph-phase-carrier-transfer-evidence',
+                evidenceValues.byteLength,
+                evidenceUsage
+              );
+              device.queue.writeBuffer(buf, 0, evidenceValues);
+              return buf;
+            })()
+          : uploadStorageBuffer(
+              device,
+              'ulg-sph-phase-carrier-transfer-evidence',
+              evidenceValues,
+              GPU_BUFFER_USAGE.COPY_SRC
+            )
+      );
       const stateByteLength = sphParticleState.particleCount
         * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
       const thermoByteLength = sphParticleState.particleCount
         * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
       const mechanicsByteLength = mlsMpmParticleState.particleCount
         * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-      const outStateBuffer = ownSetupAllocation(createStorageBuffer(
-        device,
-        'ulg-sph-phase-carrier-transfer-state',
-        stateByteLength,
-        GPU_BUFFER_USAGE.COPY_SRC
-      ));
-      const outThermoBuffer = ownSetupAllocation(createStorageBuffer(
-        device,
-        'ulg-sph-phase-carrier-transfer-thermo',
-        thermoByteLength,
-        GPU_BUFFER_USAGE.COPY_SRC
-      ));
-      const outMechanicsBuffer = ownSetupAllocation(createStorageBuffer(
-        device,
-        'ulg-sph-phase-carrier-transfer-mechanics',
-        mechanicsByteLength,
-        GPU_BUFFER_USAGE.COPY_SRC
-      ));
-      const paramsBuffer = ownSetupAllocation(device.createBuffer({
-        label: 'ulg-sph-phase-carrier-transfer-params',
-        size: SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES,
-        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      }));
+      const outUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+      const outStateBuffer = ownSetupAllocation(
+        useQueueOrderedPhasePool
+          ? acquirePhasePooledBuffer(
+              'ulg-sph-phase-carrier-transfer-state',
+              'ulg-sph-phase-carrier-transfer-state',
+              stateByteLength,
+              outUsage
+            )
+          : createStorageBuffer(
+              device,
+              'ulg-sph-phase-carrier-transfer-state',
+              stateByteLength,
+              GPU_BUFFER_USAGE.COPY_SRC
+            )
+      );
+      const outThermoBuffer = ownSetupAllocation(
+        useQueueOrderedPhasePool
+          ? acquirePhasePooledBuffer(
+              'ulg-sph-phase-carrier-transfer-thermo',
+              'ulg-sph-phase-carrier-transfer-thermo',
+              thermoByteLength,
+              outUsage
+            )
+          : createStorageBuffer(
+              device,
+              'ulg-sph-phase-carrier-transfer-thermo',
+              thermoByteLength,
+              GPU_BUFFER_USAGE.COPY_SRC
+            )
+      );
+      const outMechanicsBuffer = ownSetupAllocation(
+        useQueueOrderedPhasePool
+          ? acquirePhasePooledBuffer(
+              'ulg-sph-phase-carrier-transfer-mechanics',
+              'ulg-sph-phase-carrier-transfer-mechanics',
+              mechanicsByteLength,
+              outUsage
+            )
+          : createStorageBuffer(
+              device,
+              'ulg-sph-phase-carrier-transfer-mechanics',
+              mechanicsByteLength,
+              GPU_BUFFER_USAGE.COPY_SRC
+            )
+      );
+      const paramsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
+      const paramsBuffer = ownSetupAllocation(
+        useQueueOrderedPhasePool
+          ? acquirePhasePooledBuffer(
+              'ulg-sph-phase-carrier-transfer-params',
+              'ulg-sph-phase-carrier-transfer-params',
+              SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES,
+              paramsUsage
+            )
+          : device.createBuffer({
+              label: 'ulg-sph-phase-carrier-transfer-params',
+              size: SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES,
+              usage: paramsUsage
+            })
+      );
       device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
         particleCount: sphParticleState.particleCount,
         plan,
@@ -1760,7 +1868,16 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
   const destroyedBuffers = new Set();
   const destroyBufferOnce = (buffer) => {
     if (!buffer || destroyedBuffers.has(buffer)) return;
-    buffer.destroy?.();
+    if (closureBufferCached && buffer === closureBuffer) {
+      destroyedBuffers.add(buffer);
+      return;
+    }
+    const meta = pooledBufferMeta.get(buffer);
+    if (meta) {
+      releaseQueueOrderedPooledBuffer(device, buffer, meta);
+    } else {
+      buffer.destroy?.();
+    }
     destroyedBuffers.add(buffer);
   };
   const outputComponentBuffers = Object.freeze({

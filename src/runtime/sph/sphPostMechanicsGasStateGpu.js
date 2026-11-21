@@ -145,7 +145,11 @@ async function retire(record) {
     }
     record.geometryReleased = true;
     if (record.assignment && !record.assignmentDestroyed) {
-      record.assignmentBuffer.destroy();
+      if (typeof record.assignment.destroyAssignmentBuffer === 'function') {
+        record.assignment.destroyAssignmentBuffer();
+      } else {
+        record.assignmentBuffer.destroy();
+      }
       record.assignmentDestroyed = true;
     }
     if (record.bound) {

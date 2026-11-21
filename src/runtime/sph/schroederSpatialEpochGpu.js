@@ -1589,7 +1589,12 @@ export function createSchroederSpatialEpochGpu(device, {
         label: `${label}-a2-incremental`
       })
     : null;
+  const lastAdmittedSnapshotsByKey = new Map();
   let lastAdmittedSnapshot = null;
+  const snapshotKeyForPlan = (plan) => `${plan.sourceFamilyId}:${plan.sortMode}`;
+  const snapshotForPlan = (plan) => (
+    lastAdmittedSnapshotsByKey.get(snapshotKeyForPlan(plan)) ?? lastAdmittedSnapshot
+  );
   const ensureIncrementalMigrationEncoder = () => {
     if (!incrementalMigrationSupported || !incrementalMigrationEncoderFactory) return null;
     if (!incrementalMigrationEncoder) {
@@ -1705,23 +1710,29 @@ export function createSchroederSpatialEpochGpu(device, {
     return record;
   }
 
-  function incrementalPlanSkipReason(plan) {
+  function incrementalPlanSkipReason(plan, prevSnapshot = snapshotForPlan(plan)) {
     if (!incrementalMigrationSupported) return 'unsupported';
     if (!(plan.sourceCount > 0)) return 'empty-source';
     if (globalThis.__ulgDisableIncrementalSpatialMigration === true) return 'disabled-by-flag';
-    if (!lastAdmittedSnapshot) return 'first-generation';
-    const prev = lastAdmittedSnapshot.execution;
-    if (lastAdmittedSnapshot.arena.writeSerial !== lastAdmittedSnapshot.writeSerial) return 'arena-overwritten';
+    if (!prevSnapshot) return 'first-generation';
+    const prev = prevSnapshot.execution;
+    if (prevSnapshot.arena.writeSerial !== prevSnapshot.writeSerial) return 'arena-overwritten';
     if (prev.sourceCount !== plan.sourceCount) return 'source-count-changed';
-    if (prev.laneOrdinal !== plan.laneOrdinal) return 'lane-changed';
     if (prev.sourceFamilyId !== plan.sourceFamilyId) return 'source-family-changed';
     if (
       plan.storageGeneration > 0
       && prev.storageGeneration > 0
-      && plan.storageGeneration <= prev.storageGeneration
-      && plan.physicsTick <= prev.physicsTick
-      && plan.physicsSubstep <= prev.physicsSubstep
-      && plan.positionEpoch <= prev.positionEpoch
+      && (
+        plan.storageGeneration < prev.storageGeneration
+        || plan.physicsTick < prev.physicsTick
+        || (
+          prev.laneOrdinal === plan.laneOrdinal
+          && plan.storageGeneration <= prev.storageGeneration
+          && plan.physicsTick <= prev.physicsTick
+          && plan.physicsSubstep <= prev.physicsSubstep
+          && plan.positionEpoch <= prev.positionEpoch
+        )
+      )
     ) {
       return 'non-successor-lineage';
     }
@@ -1735,7 +1746,7 @@ export function createSchroederSpatialEpochGpu(device, {
     return null;
   }
 
-  function acquireArena(requestedArenaIndex = null, preferredSkipArena = null) {
+  function acquireArena(requestedArenaIndex = null, preferredSkipArena = null, secondarySkipArenas = null) {
     if (destroyed) throw new Error(`${label} is destroyed`);
     if (deviceLossObserved) {
       const error = new Error(`${label} observed device loss`);
@@ -1750,7 +1761,14 @@ export function createSchroederSpatialEpochGpu(device, {
         resolvedArenaCount - 1
       )];
     } else {
-      arena = arenas.find(
+      arena = (secondarySkipArenas && secondarySkipArenas.size > 0
+        ? arenas.find(
+            (candidate) => !candidate.inUse && candidate.retired !== true
+              && candidate !== preferredSkipArena
+              && !secondarySkipArenas.has(candidate)
+          )
+        : null)
+      || arenas.find(
         (candidate) => !candidate.inUse && candidate.retired !== true && candidate !== preferredSkipArena
       ) || arenas.find(
         (candidate) => !candidate.inUse && candidate.retired !== true
@@ -2095,10 +2113,19 @@ export function createSchroederSpatialEpochGpu(device, {
       && plan.sourceRowLayoutId
         === SCHROEDER_SPATIAL_SOURCE_ROW_LAYOUT_LEVEL_ASSIGNMENT_V0
     );
-    const preArenaIncrementalSkipReason = incrementalPlanSkipReason(plan);
+    const matchedPrevSnapshot = snapshotForPlan(plan);
+    const preArenaIncrementalSkipReason = incrementalPlanSkipReason(plan, matchedPrevSnapshot);
+    const secondarySkipArenas = lastAdmittedSnapshotsByKey.size > 1
+      ? new Set(
+          Array.from(lastAdmittedSnapshotsByKey.values())
+            .filter((snap) => snap.arena.writeSerial === snap.writeSerial)
+            .map((snap) => snap.arena)
+        )
+      : null;
     const arena = acquireArena(
       arenaIndex,
-      preArenaIncrementalSkipReason === null ? lastAdmittedSnapshot?.arena ?? null : null
+      preArenaIncrementalSkipReason === null ? matchedPrevSnapshot?.arena ?? null : null,
+      secondarySkipArenas
     );
     const executionToken = arena.executionToken;
     const bindGroupCreationCountBefore = arena.bindGroupCreationCount;
@@ -2116,7 +2143,7 @@ export function createSchroederSpatialEpochGpu(device, {
     let incrementalMigrationEncoded = null;
     try {
       const incrementalSkipReason = preArenaIncrementalSkipReason
-        ?? (lastAdmittedSnapshot?.arena === arena ? 'same-arena' : null);
+        ?? (matchedPrevSnapshot?.arena === arena ? 'same-arena' : null);
       const canUseIncrementalMigration = incrementalSkipReason === null;
       const activeIncrementalEncoder = canUseIncrementalMigration
         ? ensureIncrementalMigrationEncoder()
@@ -2149,8 +2176,8 @@ export function createSchroederSpatialEpochGpu(device, {
         incrementalMigrationEncoded = activeIncrementalEncoder.encodeIntoTarget(encoder, {
           plan,
           sourceBuffer: resolvedSourceBuffer,
-          prevSourceBuffer: lastAdmittedSnapshot.sourceBuffer,
-          prevExecution: lastAdmittedSnapshot.execution,
+          prevSourceBuffer: matchedPrevSnapshot.sourceBuffer,
+          prevExecution: matchedPrevSnapshot.execution,
           targetDirectoryBuffer: arena.directoryBuffer,
           targetConsumerDispatchBuffer: arena.consumerDispatchBuffer,
           directoryAbiVersion: resolvedDirectoryAbiVersion,
@@ -2479,7 +2506,7 @@ export function createSchroederSpatialEpochGpu(device, {
         a2IncrementalMigration: incrementalMigrationEncoded
           ? Object.freeze({
               mode: 'incremental-gpu-encoded',
-              predecessorGenerationId: lastAdmittedSnapshot?.execution?.generationId ?? null,
+              predecessorGenerationId: matchedPrevSnapshot?.execution?.generationId ?? null,
               certificateBuffer: incrementalMigrationEncoded.certificateBuffer
             })
           : Object.freeze({
@@ -2822,17 +2849,20 @@ export function createSchroederSpatialEpochGpu(device, {
       configurable: false
     });
     if (incrementalMigrationSupported) {
-      lastAdmittedSnapshot = Object.freeze({
+      const nextSnapshot = Object.freeze({
         arena: ownership.arena,
         writeSerial: ownership.arenaWriteSerial,
         execution,
         sourceBuffer: ownership.sourceBuffer
       });
+      lastAdmittedSnapshot = nextSnapshot;
+      lastAdmittedSnapshotsByKey.set(snapshotKeyForPlan(execution), nextSnapshot);
       const stats = (globalThis.__ulgA2IncrementalSpatialStatus ??= {
         incrementalHits: 0,
         fullRadixBuilds: 0,
         lastMode: null,
-        lastGenerationId: null
+        lastGenerationId: null,
+        skipReasonCounts: Object.create(null)
       });
       if (ownership.incrementalEncoded) {
         stats.incrementalHits += 1;
@@ -2841,7 +2871,10 @@ export function createSchroederSpatialEpochGpu(device, {
       } else {
         stats.fullRadixBuilds += 1;
         stats.lastMode = 'full-radix';
-        stats.lastSkipReason = ownership.incrementalSkipReason ?? null;
+        const reasonKey = `${execution.laneId || 'default'}:${ownership.incrementalSkipReason ?? 'unknown'}`;
+        stats.lastSkipReason = reasonKey;
+        stats.skipReasonCounts = stats.skipReasonCounts || Object.create(null);
+        stats.skipReasonCounts[reasonKey] = (stats.skipReasonCounts[reasonKey] || 0) + 1;
       }
       stats.lastGenerationId = execution.generationId;
     }
@@ -3103,6 +3136,7 @@ export function createSchroederSpatialEpochGpu(device, {
     }
     destroyed = true;
     lastAdmittedSnapshot = null;
+    lastAdmittedSnapshotsByKey.clear();
     if (incrementalMigrationEncoder) {
       incrementalMigrationEncoder.destroy();
       incrementalMigrationEncoder = null;

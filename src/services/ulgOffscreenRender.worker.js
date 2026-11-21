@@ -2496,10 +2496,20 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
     : livePreviewEnabled
       ? (boundary, options) => runWorkerParticleTemporalPresentationSubmissionBoundary(boundary, options)
       : null;
+  const scheduleStepCount = Number(schedulePayload.schedule?.stepCount) || 0;
+  const shortInteractiveIsosurfaceSchedule = Boolean(
+    isosurfacePresentationEnabled
+    && !workerOwnedIsosurfacePresenterOverride
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && scheduleStepCount > 0
+    && scheduleStepCount <= 4
+  );
   const canPresentScheduleSubmissionBoundary = () => {
     if (!workerPresentationPlaying
       || !residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) return false;
     if (isosurfacePresentationEnabled) {
+      if (shortInteractiveIsosurfaceSchedule) return false;
       const presenter = workerOwnedIsosurfacePresenterOverride ?? workerOwnedIsosurfacePresenter;
       return Boolean(presenter && (typeof presenter.hasSubmissionBoundaryOpportunity === 'function'
         ? presenter.hasSubmissionBoundaryOpportunity() : true));
@@ -2517,7 +2527,7 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
       && residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)
       && (workerOwnedIsosurfacePresenterOverride ?? workerOwnedIsosurfacePresenter)
         === gapPresenter;
-    if (isosurfacePresentationEnabled && gapIsCurrent()
+    if (isosurfacePresentationEnabled && !shortInteractiveIsosurfaceSchedule && gapIsCurrent()
       && typeof gapPresenter?.hasRetainedSubmissionGapOpportunity === 'function'
       && typeof gapPresenter?.presentRetainedSubmissionGap === 'function') {
       unregisterSubmissionGap = registerResidentPresentationSubmissionGap(gapDevice, {

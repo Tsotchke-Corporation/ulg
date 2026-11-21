@@ -471,6 +471,26 @@ export function resolveSphMountedWorkerLaneScheduleStepCount({
   });
 }
 
+export function resolveSphAdaptiveSyncScheduleStepCount({
+  baseEffectiveStepCount = 1,
+  throughputStepsPerS = null,
+  targetScheduleWallS = 0.042,
+  minSteps = 4,
+  warmupMaxSteps = 4
+} = {}) {
+  const ceiling = Math.max(1, Math.round(Number(baseEffectiveStepCount) || 1));
+  const floorSteps = Math.max(1, Math.min(ceiling, Math.round(Number(minSteps) || 1)));
+  const rate = Number(throughputStepsPerS);
+  if (!(Number.isFinite(rate) && rate > 0)) {
+    const warmup = Math.max(1, Math.round(Number(warmupMaxSteps) || floorSteps));
+    return Math.min(ceiling, warmup);
+  }
+  if (ceiling <= floorSteps) return ceiling;
+  const targetWallS = Number(targetScheduleWallS);
+  const desired = Math.floor(rate * (Number.isFinite(targetWallS) && targetWallS > 0 ? targetWallS : 0.042));
+  return Math.max(floorSteps, Math.min(ceiling, desired));
+}
+
 export function resolveSphMountedScheduleControlEvidence({
   requestedStepCount = 1,
   residentStepsPerScheduleMax = null,
@@ -8610,6 +8630,23 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('crossPeerSnapshotExport'),
     false
   );
+  const hasExplicitUrlResidentStepsPerSchedule = Boolean(
+    initialHash.get('residentStepsPerSchedule')
+    ?? initialQuery.get('residentStepsPerSchedule')
+    ?? initialHash.get('residentStepBatch')
+    ?? initialQuery.get('residentStepBatch')
+    ?? initialHash.get('residentVisualSteps')
+    ?? initialQuery.get('residentVisualSteps')
+    ?? initialHash.get('presentationStepsPerSchedule')
+    ?? initialQuery.get('presentationStepsPerSchedule')
+  );
+  const explicitAdaptiveSyncParam = (
+    initialHash.get('adaptiveSync')
+    ?? initialQuery.get('adaptiveSync')
+  );
+  const adaptiveSyncCadenceEnabled = explicitAdaptiveSyncParam != null
+    ? booleanUrlParam(explicitAdaptiveSyncParam, true)
+    : !hasExplicitUrlResidentStepsPerSchedule;
   const residentStepsPerScheduleOverride = positiveIntegerUrlParam(
     initialHash.get('residentStepsPerSchedule')
       ?? initialQuery.get('residentStepsPerSchedule')
@@ -12974,12 +13011,25 @@ export async function mountSphPhaseDemoOverlay({
         residentStepsPerScheduleMax: workerLanePolicyMax,
         workerLaneActive: initialWorkerOwnedResidentLaneReady
       });
+      const adaptiveStepCount = (
+        adaptiveSyncCadenceEnabled
+        && evidence.workerLaneActive
+        && evidence.effectiveStepCount > 2
+      )
+        ? resolveSphAdaptiveSyncScheduleStepCount({
+            baseEffectiveStepCount: evidence.effectiveStepCount,
+            throughputStepsPerS: frameCounters.residentCompletionThroughputEwmaFps,
+            targetScheduleWallS: 0.042,
+            minSteps: 4,
+            warmupMaxSteps: 4
+          })
+        : evidence.effectiveStepCount;
       overlay.__sphResidentScheduleControlEvidence = evidence;
       residentScheduleEffectiveEl.textContent = evidence.workerLaneActive
-        ? `effective schedule: ${evidence.effectiveStepCount} step${evidence.effectiveStepCount === 1 ? '' : 's'} `
-          + `(requested ${workerLaneRequestedStepCount}, policy maximum ${evidence.policyMaxStepCount})`
+        ? `effective schedule: ${adaptiveStepCount} step${adaptiveStepCount === 1 ? '' : 's'} `
+          + `(requested ${workerLaneRequestedStepCount}, policy maximum ${evidence.policyMaxStepCount}${adaptiveStepCount < evidence.effectiveStepCount ? ', adaptive sync' : ''})`
         : `effective schedule: waiting for worker lane (requested ${workerLaneRequestedStepCount})`;
-      return evidence.effectiveStepCount;
+      return adaptiveStepCount;
     }
     let baseCount = RESIDENT_STEPS_PER_SCHEDULE_FALLBACK;
     const candidates = [
@@ -15853,11 +15903,16 @@ export async function mountSphPhaseDemoOverlay({
       ) {
         pendingMlsMpmResidentStepsSignature = null;
       }
+      const nextAdaptiveStepCount = () => (
+        adaptiveSyncCadenceEnabled && !lawInputs.reactions?.checked
+          ? currentResidentStepsPerSchedule()
+          : normalizedStepCount
+      );
       if (scheduleLatestGeneration && overlay.isConnected && !resetRebuildPending) {
         window.requestAnimationFrame(() => {
           if (!overlay.isConnected || resetRebuildPending) return;
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15881,7 +15936,7 @@ export async function mountSphPhaseDemoOverlay({
           scheduleCurrent: residentScheduleIsCurrent()
         })) {
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15898,7 +15953,7 @@ export async function mountSphPhaseDemoOverlay({
             scheduleCurrent: residentScheduleIsCurrent()
           })) return;
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15916,7 +15971,7 @@ export async function mountSphPhaseDemoOverlay({
         // completion rather than a page frame.
         if (overlay.isConnected && playing && generation === particleSyncGeneration) {
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15929,7 +15984,7 @@ export async function mountSphPhaseDemoOverlay({
         window.requestAnimationFrame(() => {
           if (!overlay.isConnected || !playing || generation !== particleSyncGeneration) return;
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,

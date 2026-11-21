@@ -1,6 +1,9 @@
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
-  createCachedExplicitComputePipeline
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  releaseQueueOrderedPooledBuffer
 } from '../runtime/webgpuComputeLayout.js';
 
 export const ULG_NATIVE_SURFACE_TEMPERATURE_ROWS_SCHEMA =
@@ -563,6 +566,13 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
     maxComputeWorkgroupsPerDimension
   });
 
+  const useQueueOrderedTempPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const paramsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
+  const dispatchArgsBytes = 3 * Uint32Array.BYTES_PER_ELEMENT;
+  const dispatchArgsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT;
   let outputBuffer = null;
   let paramsBuffer = null;
   let dispatchArgsBuffer = null;
@@ -572,11 +582,18 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
       size: outputByteLength,
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
     });
-    paramsBuffer = device.createBuffer({
-      label: `${label}-params`,
-      size: ULG_NATIVE_SURFACE_TEMPERATURE_PARAMS_BYTE_LENGTH,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    });
+    paramsBuffer = useQueueOrderedTempPool
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-native-surface-temperature-params',
+          label: `${label}-params`,
+          size: ULG_NATIVE_SURFACE_TEMPERATURE_PARAMS_BYTE_LENGTH,
+          usage: paramsUsage
+        })
+      : device.createBuffer({
+          label: `${label}-params`,
+          size: ULG_NATIVE_SURFACE_TEMPERATURE_PARAMS_BYTE_LENGTH,
+          usage: paramsUsage
+        });
     device.queue.writeBuffer(
       paramsBuffer,
       0,
@@ -585,11 +602,18 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
       params.byteLength
     );
 
-    dispatchArgsBuffer = device.createBuffer({
-      label: `${label}-dispatch-indirect`,
-      size: 3 * Uint32Array.BYTES_PER_ELEMENT,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT
-    });
+    dispatchArgsBuffer = useQueueOrderedTempPool
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-native-surface-temperature-dispatch-indirect',
+          label: `${label}-dispatch-indirect`,
+          size: dispatchArgsBytes,
+          usage: dispatchArgsUsage
+        })
+      : device.createBuffer({
+          label: `${label}-dispatch-indirect`,
+          size: dispatchArgsBytes,
+          usage: dispatchArgsUsage
+        });
 
     const {
       dispatchPlanPipeline,
@@ -599,7 +623,7 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
       bindGroupLayout,
       temperaturePipelineCacheStatus
     } = nativeSurfaceTemperaturePipelineBundle(device);
-    const dispatchPlanBindGroup = device.createBindGroup({
+    const dispatchPlanBindGroup = createCachedExplicitBindGroup(device, {
       label: `${label}-dispatch-plan-bind-group`,
       layout: dispatchPlanBindGroupLayout,
       entries: [
@@ -621,12 +645,12 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
           binding: 5,
           resource: {
             buffer: dispatchArgsBuffer,
-            size: 3 * Uint32Array.BYTES_PER_ELEMENT
+            size: dispatchArgsBytes
           }
         }
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       label: `${label}-bind-group`,
       layout: bindGroupLayout,
       entries: [
@@ -755,8 +779,21 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
         if (destroyed) return false;
         destroyed = true;
         outputBuffer.destroy?.();
-        paramsBuffer.destroy?.();
-        dispatchArgsBuffer.destroy?.();
+        if (useQueueOrderedTempPool) {
+          releaseQueueOrderedPooledBuffer(device, paramsBuffer, {
+            bucketKey: 'ulg-native-surface-temperature-params',
+            size: ULG_NATIVE_SURFACE_TEMPERATURE_PARAMS_BYTE_LENGTH,
+            usage: paramsUsage
+          });
+          releaseQueueOrderedPooledBuffer(device, dispatchArgsBuffer, {
+            bucketKey: 'ulg-native-surface-temperature-dispatch-indirect',
+            size: dispatchArgsBytes,
+            usage: dispatchArgsUsage
+          });
+        } else {
+          paramsBuffer.destroy?.();
+          dispatchArgsBuffer.destroy?.();
+        }
         result.destroyed = true;
         result.status = 'native-surface-temperature-resources-destroyed';
         return true;

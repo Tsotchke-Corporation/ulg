@@ -15237,14 +15237,14 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     const laneStepAfterSchedule = Number(
       finalParticleLineage?.physicsTick ?? record.schroederLane?.sphParticleUpload?.step ?? 0
     );
-    const lastTpStep = Number(record.schroederLane?._thermalPotentialLastFinishStep);
+    const lastTpStep = Number(record._thermalPotentialLastFinishStep);
     const shouldFinishThermalPotential = Boolean(
       !cancelled
       && potentialOwner
       && state.thermalPotentialStarted
       && (
         !Number.isFinite(lastTpStep)
-        || stepCount > 4
+        || stepCount > 8
         || Number(state.thermalPotentialStarted?.ordinal ?? 0) === 0
         || state.thermalPotentialStarted?.adopted === true
         || (laneStepAfterSchedule - lastTpStep) >= 16
@@ -15271,16 +15271,14 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             upload: record.schroederLane.sphParticleUpload
           }))
         };
-        if (record.schroederLane) {
-          record.schroederLane._thermalPotentialLastFinishStep = laneStepAfterSchedule;
-        }
+        record._thermalPotentialLastFinishStep = laneStepAfterSchedule;
       } else {
         thermalPotential = {
           ...state.thermalPotentialStarted,
           candidate: null,
           readbackBytes: 0,
           mapAsyncCount: 0,
-          status: 'cached-current',
+          status: 'deferred-capacity',
           cumulativeConsumerHits: null
         };
       }
@@ -15296,10 +15294,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       };
     }
     state.thermalPotentialFinished = !cancelled;
-    const lastA3ThermalStep = Number(record.schroederLane?._a3ThermalLastTickStep);
+    const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
     const shouldRunA3ThermalTick = Boolean(
       !Number.isFinite(lastA3ThermalStep)
-      || stepCount > 4
+      || stepCount > 8
       || (laneStepAfterSchedule - lastA3ThermalStep) >= 16
     );
     if (
@@ -15328,9 +15326,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         );
         if (a3ThermalTick) {
           record.workerDevice.queue.submit([a3ThermalEncoder.finish()]);
-          if (record.schroederLane) {
-            record.schroederLane._a3ThermalLastTickStep = laneStepAfterSchedule;
-          }
+          record._a3ThermalLastTickStep = laneStepAfterSchedule;
         }
       } catch {
         // Keep A3 thermal regional sampling isolated from physics admission.

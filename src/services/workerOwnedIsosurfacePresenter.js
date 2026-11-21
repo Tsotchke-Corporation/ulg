@@ -2136,15 +2136,15 @@ export function createWorkerOwnedIsosurfacePresenter({
         }
       }
       device.queue.submit([encoder.finish()]);
-      if (solidIsosurfaceParams) {
-        const params = solidIsosurfaceParams;
+      if (solidIsosurfaceParams || ledgerParcelOpticsParams) {
+        const solidParams = solidIsosurfaceParams;
+        const ledgerParams = ledgerParcelOpticsParams;
         solidIsosurfaceParams = null;
-        void deferSubmittedWorkCleanup(device, () => params.destroy());
-      }
-      if (ledgerParcelOpticsParams) {
-        const params = ledgerParcelOpticsParams;
         ledgerParcelOpticsParams = null;
-        void deferSubmittedWorkCleanup(device, () => params.destroy());
+        void deferSubmittedWorkCleanup(device, () => {
+          solidParams?.destroy?.();
+          ledgerParams?.destroy?.();
+        });
       }
       for (const item of extracted) {
         item.rawExecution.result?.retireTemporaryResourcesAfterSubmit?.();

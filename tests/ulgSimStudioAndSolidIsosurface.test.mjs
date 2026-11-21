@@ -566,17 +566,17 @@ test('Studio A6 cross-machine peerRelay and peerRoom URL parameters omit when bl
   assert.equal(relayLaunch.peerRoom, 'lab-cluster-1');
 });
 
-test('adaptive visual sync cadence targets ~25-40 Hz committed keyframes while honoring step ceilings and smooth motion damping', () => {
-  // Warmup starts fast (<= 4 steps instead of 64)
+test('adaptive visual sync cadence targets burst-aligned high-Hz committed keyframes while honoring step ceilings and smooth motion damping', () => {
+  // Warmup starts at burst-aligned 4 steps (instead of 16/64) to keep reactive target authority invariant
   assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: null }), 4);
   assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: null }), 4);
   assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 1, throughputStepsPerS: 100 }), 1);
 
-  // Real presets: sodium-water (~12 steps/s) -> 2 steps (~6-10+ Hz vs 0.17 Hz);
-  // iron-ice (~35 steps/s) -> 2 steps (~17+ Hz vs 2 Hz);
-  // water-realtime (~140 steps/s) -> 5 steps (~28 Hz vs 8.7 Hz).
-  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: 12 }), 2);
-  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 35 }), 2);
+  // Real presets: burst-aligned minSteps=4 keeps submits/step <= 2 and full physics throughput
+  // while raising sodium-water from 0.17 Hz -> ~4 Hz, iron-ice from 2 Hz -> ~7-8 Hz,
+  // water-cycle from 3.3 Hz -> ~13 Hz, and water-realtime from 7.6 Hz -> ~24 Hz.
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 64, throughputStepsPerS: 14 }), 4);
+  assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 35 }), 4);
   assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 140 }), 5);
   assert.equal(resolveSphAdaptiveSyncScheduleStepCount({ baseEffectiveStepCount: 16, throughputStepsPerS: 1000 }), 16);
 

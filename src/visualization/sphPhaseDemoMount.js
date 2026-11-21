@@ -474,20 +474,20 @@ export function resolveSphMountedWorkerLaneScheduleStepCount({
 export function resolveSphAdaptiveSyncScheduleStepCount({
   baseEffectiveStepCount = 1,
   throughputStepsPerS = null,
-  targetScheduleWallS = 0.036,
-  minSteps = 2,
+  targetScheduleWallS = 0.042,
+  minSteps = 4,
   warmupMaxSteps = 4
 } = {}) {
   const ceiling = Math.max(1, Math.round(Number(baseEffectiveStepCount) || 1));
   const floorSteps = Math.max(1, Math.min(ceiling, Math.round(Number(minSteps) || 1)));
-  if (ceiling <= floorSteps) return ceiling;
   const rate = Number(throughputStepsPerS);
   if (!(Number.isFinite(rate) && rate > 0)) {
-    const warmup = Math.max(floorSteps, Math.round(Number(warmupMaxSteps) || floorSteps));
+    const warmup = Math.max(1, Math.round(Number(warmupMaxSteps) || floorSteps));
     return Math.min(ceiling, warmup);
   }
+  if (ceiling <= floorSteps) return ceiling;
   const targetWallS = Number(targetScheduleWallS);
-  const desired = Math.floor(rate * (Number.isFinite(targetWallS) && targetWallS > 0 ? targetWallS : 0.036));
+  const desired = Math.floor(rate * (Number.isFinite(targetWallS) && targetWallS > 0 ? targetWallS : 0.042));
   return Math.max(floorSteps, Math.min(ceiling, desired));
 }
 
@@ -13019,9 +13019,9 @@ export async function mountSphPhaseDemoOverlay({
         ? resolveSphAdaptiveSyncScheduleStepCount({
             baseEffectiveStepCount: evidence.effectiveStepCount,
             throughputStepsPerS: frameCounters.residentCompletionThroughputEwmaFps,
-            targetScheduleWallS: 0.036,
-            minSteps: 2,
-            warmupMaxSteps: 2
+            targetScheduleWallS: 0.042,
+            minSteps: 4,
+            warmupMaxSteps: 4
           })
         : evidence.effectiveStepCount;
       overlay.__sphResidentScheduleControlEvidence = evidence;
@@ -15903,11 +15903,16 @@ export async function mountSphPhaseDemoOverlay({
       ) {
         pendingMlsMpmResidentStepsSignature = null;
       }
+      const nextAdaptiveStepCount = () => (
+        adaptiveSyncCadenceEnabled && !lawInputs.reactions?.checked
+          ? currentResidentStepsPerSchedule()
+          : normalizedStepCount
+      );
       if (scheduleLatestGeneration && overlay.isConnected && !resetRebuildPending) {
         window.requestAnimationFrame(() => {
           if (!overlay.isConnected || resetRebuildPending) return;
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15931,7 +15936,7 @@ export async function mountSphPhaseDemoOverlay({
           scheduleCurrent: residentScheduleIsCurrent()
         })) {
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15948,7 +15953,7 @@ export async function mountSphPhaseDemoOverlay({
             scheduleCurrent: residentScheduleIsCurrent()
           })) return;
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15966,7 +15971,7 @@ export async function mountSphPhaseDemoOverlay({
         // completion rather than a page frame.
         if (overlay.isConnected && playing && generation === particleSyncGeneration) {
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,
@@ -15979,7 +15984,7 @@ export async function mountSphPhaseDemoOverlay({
         window.requestAnimationFrame(() => {
           if (!overlay.isConnected || !playing || generation !== particleSyncGeneration) return;
           scheduleMlsMpmResidentSteps({
-            stepCount: normalizedStepCount,
+            stepCount: nextAdaptiveStepCount(),
             workerLaneProgressEverySteps:
               requestedWorkerLaneProgressEverySteps,
             readbackMode,

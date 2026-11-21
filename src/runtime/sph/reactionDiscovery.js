@@ -864,19 +864,64 @@ function metalOxygenReaction(metalKey, metalComp, oxKey, oxComp, options = {}) {
   };
 }
 
-// Hydrogen + oxygen → water (the original combustion case, now derived through the same path).
+// Hydrogen + oxygen → water (balanced 2 H2 + O2 -> 2 H2O with phase-explicit
+// NIST-JANAF formation enthalpy reference and derived molecular fallback).
 function hydrogenOxygenReaction(fuelKey = 'h2', oxidizerKey = 'o2') {
   const model = energyModelForSpecies(H2, O2, H2O);
   const eH2 = speciesEnergyHa(H2, model); const eO2 = speciesEnergyHa(O2, model); const eH2O = speciesEnergyHa(H2O, model);
-  const dHHa = eH2O - eH2 - 0.5 * eO2; // H2 + ½O2 → H2O
-  const specificEnthalpyJPerKg = (dHHa * HARTREE_J * AVOGADRO) / 0.0180153;
+  const dHHa = 2 * eH2O - 2 * eH2 - eO2; // 2 H2 + O2 → 2 H2O
+  const reactants = [
+    { coefficient: 2, formula: 'H2', atomCounts: { 1: 2 } },
+    { coefficient: 1, formula: 'O2', atomCounts: { 8: 2 } }
+  ];
+  const products = [
+    { coefficient: 2, formula: 'H2O', atomCounts: { 1: 2, 8: 1 }, targetPhase: 'liquid' }
+  ];
+  const balancedReactantMassKgPerEquation = reactants.reduce(
+    (sum, term) => sum + term.coefficient * formulaMolarMassKgPerMol(term.atomCounts),
+    0
+  );
+  const referenceEnergetics = standardReactionEnthalpyReference({
+    equation: '2 H2 + O2 -> 2 H2O',
+    reactants,
+    products
+  });
+  const useReferenceEnergy = Boolean(
+    referenceEnergetics && Number.isFinite(referenceEnergetics.reactionEnthalpyJPerBalancedEquation)
+      && referenceEnergetics.reactionEnthalpyJPerBalancedEquation < 0
+  );
+  const specificEnthalpyJPerKg = useReferenceEnergy
+    ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation / balancedReactantMassKgPerEquation
+    : (dHHa * HARTREE_J * AVOGADRO) / balancedReactantMassKgPerEquation;
   return {
-    dHHa,
+    dHHa: useReferenceEnergy
+      ? referenceEnergetics.reactionEnthalpyJPerBalancedEquation / (HARTREE_J * AVOGADRO)
+      : dHHa,
     productKey: 'h2o',
     closure: null,
-    energyModel: model,
+    energyModel: useReferenceEnergy ? referenceEnergetics.model : model,
     specificEnthalpyJPerKg,
-    phaseRequirements: { [fuelKey]: ['gas'], [oxidizerKey]: ['gas'] }
+    phaseRequirements: { [fuelKey]: ['gas'], [oxidizerKey]: ['gas'] },
+    stoichiometry: {
+      familyId: 'hydrogen-oxygen-combustion',
+      equation: '2 H2 + O2 -> 2 H2O',
+      reactants,
+      products,
+      atomBalance: {
+        balanced: true,
+        reactants: { 1: 4, 8: 2 },
+        products: { 1: 4, 8: 2 }
+      },
+      sedenionScope: null,
+      provisionalEnergeticsStatus: null,
+      energeticsStatus: useReferenceEnergy
+        ? referenceEnergetics.status
+        : 'derived-model-energy-ready',
+      thermochemicalReference: useReferenceEnergy ? referenceEnergetics : null,
+      balancedReactantMassKgPerEquation,
+      specificEnthalpyBasis: 'consumed-reactant-mass',
+      scientificValidation: false
+    }
   };
 }
 

@@ -8,13 +8,26 @@ import { importSphReactionHeatProxyGauge } from './sphReactionHeatProxyGauge.js'
 const RECIPE_SCHEMA = 'peercompute.ulg.reference-reaction-cold-recipe.v1';
 const PHASES = [null, 'solid', 'liquid', 'gas'];
 
+function materialPropertiesForKey(materialProperties = {}, key = '') {
+  if (!materialProperties || !key) return null;
+  if (Object.hasOwn(materialProperties, key)) return materialProperties[key];
+  const lower = String(key).toLowerCase();
+  if (Object.hasOwn(materialProperties, lower)) return materialProperties[lower];
+  for (const [candidateKey, properties] of Object.entries(materialProperties)) {
+    if (String(candidateKey).toLowerCase() === lower) return properties;
+  }
+  return null;
+}
+
 function referenceReaction(reaction, options) {
   if (reaction.energyReference !== undefined) return reaction;
   // Resolve formula aliases and product routing with the same compiler that
-  // will own the executable table. Discovery order is not an identity map.
-  const terms = buildSphReactionTable([reaction], options);
+  // will own the executable table. Omit thermalMaterialTable during term
+  // inspection so multi-phase condensable products are not pre-rejected by
+  // the heat-proxy gauge before energyReference is attached and validated.
+  const terms = buildSphReactionTable([reaction], { ...options, thermalMaterialTable: null });
   const side = (kind) => terms[`${kind}TermMetadata`].map(term => {
-    const phases = options.materialProperties[term.material]?.phases ?? [];
+    const phases = materialPropertiesForKey(options.materialProperties, term.material)?.phases ?? [];
     const standard = standardFormationEnthalpyReference(term.formula);
     const phase = kind === 'product' ? PHASES[term.targetPhasePolicyId]
       : standard?.phase;

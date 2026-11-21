@@ -6,6 +6,74 @@ const DEVICE_COMPUTE_PIPELINE_CACHE = new WeakMap();
 const DEVICE_SHADER_MODULE_CACHE = new WeakMap();
 const DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE = new WeakMap();
 const DEVICE_PIPELINE_PREWARM_INFLIGHT = new WeakMap();
+const DEVICE_EXPLICIT_BIND_GROUP_CACHE = new WeakMap();
+const GPU_RESOURCE_ID_MAP = new WeakMap();
+let nextGpuResourceId = 1;
+const MAX_CACHED_BIND_GROUPS_PER_LAYOUT = 128;
+
+function gpuResourceId(resource) {
+  let id = GPU_RESOURCE_ID_MAP.get(resource);
+  if (id === undefined) {
+    id = nextGpuResourceId;
+    nextGpuResourceId += 1;
+    GPU_RESOURCE_ID_MAP.set(resource, id);
+  }
+  return id;
+}
+
+export function createCachedExplicitBindGroup(device, descriptor) {
+  const createBindGroupFn = device?.createBindGroup;
+  const layout = descriptor?.layout;
+  const entries = descriptor?.entries;
+  if (
+    !device
+    || (typeof device !== 'object' && typeof device !== 'function')
+    || typeof createBindGroupFn !== 'function'
+    || !layout
+    || (typeof layout !== 'object' && typeof layout !== 'function')
+    || !Array.isArray(entries)
+    || entries.length === 0
+  ) {
+    return device.createBindGroup(descriptor);
+  }
+  let key = descriptor?.label ? `${descriptor.label}#` : '';
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const resource = entry?.resource;
+    const buffer = resource?.buffer;
+    if (!buffer || (typeof buffer !== 'object' && typeof buffer !== 'function')) {
+      return device.createBindGroup(descriptor);
+    }
+    const offset = resource.offset === undefined ? -1 : Number(resource.offset);
+    const size = resource.size === undefined ? -1 : Number(resource.size);
+    if (index > 0) key += '|';
+    key += `${entry.binding}:${gpuResourceId(buffer)}:${offset}:${size}`;
+  }
+  let byCreateFn = DEVICE_EXPLICIT_BIND_GROUP_CACHE.get(device);
+  if (!byCreateFn) {
+    byCreateFn = new WeakMap();
+    DEVICE_EXPLICIT_BIND_GROUP_CACHE.set(device, byCreateFn);
+  }
+  let byLayout = byCreateFn.get(createBindGroupFn);
+  if (!byLayout) {
+    byLayout = new WeakMap();
+    byCreateFn.set(createBindGroupFn, byLayout);
+  }
+  let cache = byLayout.get(layout);
+  if (!cache) {
+    cache = new Map();
+    byLayout.set(layout, cache);
+  }
+  const cached = cache.get(key);
+  if (cached) return cached;
+  const bindGroup = device.createBindGroup(descriptor);
+  if (cache.size >= MAX_CACHED_BIND_GROUPS_PER_LAYOUT) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
+  cache.set(key, bindGroup);
+  return bindGroup;
+}
 
 export function computeBufferBinding(
   binding,
@@ -105,21 +173,22 @@ function cachedShaderModule(device, { label, code }) {
 }
 
 function bindingSignature(bindings = []) {
-  return JSON.stringify(bindings.map((entry) => ({
-    binding: entry.binding,
-    visibility: entry.visibility,
-    buffer: entry.buffer
-      ? {
-          type: entry.buffer.type || 'uniform',
-          hasDynamicOffset: entry.buffer.hasDynamicOffset === true,
-          minBindingSize: Number(entry.buffer.minBindingSize || 0)
-        }
-      : null,
-    sampler: entry.sampler ?? null,
-    texture: entry.texture ?? null,
-    storageTexture: entry.storageTexture ?? null,
-    externalTexture: entry.externalTexture ?? null
-  })));
+  let out = '';
+  for (let index = 0; index < bindings.length; index += 1) {
+    const entry = bindings[index];
+    if (index > 0) out += ';';
+    out += `${entry.binding},${entry.visibility},`;
+    if (entry.buffer) {
+      out += `b:${entry.buffer.type || 'uniform'}:${entry.buffer.hasDynamicOffset === true ? 1 : 0}:${Number(entry.buffer.minBindingSize || 0)}`;
+    } else {
+      out += 'b:-';
+    }
+    if (entry.sampler != null) out += `,s:${JSON.stringify(entry.sampler)}`;
+    if (entry.texture != null) out += `,t:${JSON.stringify(entry.texture)}`;
+    if (entry.storageTexture != null) out += `,st:${JSON.stringify(entry.storageTexture)}`;
+    if (entry.externalTexture != null) out += `,et:${JSON.stringify(entry.externalTexture)}`;
+  }
+  return out;
 }
 
 function cachedExplicitComputeLayout(device, { label, entryPoint, bindings }) {

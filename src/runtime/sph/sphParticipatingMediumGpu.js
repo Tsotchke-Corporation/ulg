@@ -227,6 +227,12 @@ struct VolumeUniforms {
   bounds_max_ambient: vec4<f32>,
   light_direction_intensity: vec4<f32>,
   viewport_depth_epsilon: vec4<f32>,
+  motion_params: vec4<f32>,
+};
+
+struct RenderRouteRow {
+  identity: vec4<u32>,
+  scattering_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: VolumeUniforms;
@@ -234,8 +240,52 @@ struct VolumeUniforms {
 @group(0) @binding(2) var scattering_volume: texture_3d<f32>;
 @group(0) @binding(3) var volume_sampler: sampler;
 @group(0) @binding(4) var opaque_depth: texture_depth_2d;
+@group(0) @binding(5) var<storage, read> motion_rows: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> route_rows: array<RenderRouteRow>;
 
 const HALF_FLOAT_MAX: f32 = 65504.0;
+
+fn sample_medium_velocity(uvw: vec3<f32>) -> vec3<f32> {
+  let age_s = uniforms.motion_params.x;
+  let route_count = u32(max(uniforms.motion_params.y, 0.0));
+  let resolution = u32(max(uniforms.motion_params.z, 0.0));
+  let row_count = u32(max(uniforms.motion_params.w, 0.0));
+  if (!(age_s > 0.0) || route_count == 0u || resolution < 2u || row_count == 0u) {
+    return vec3<f32>(0.0);
+  }
+  let available = min(row_count, arrayLength(&motion_rows));
+  let route_limit = min(route_count, arrayLength(&route_rows));
+  let slab = resolution * resolution;
+  let max_idx = resolution - 1u;
+  let cell = min(
+    vec3<u32>(clamp(uvw * f32(max_idx) + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(f32(max_idx)))),
+    vec3<u32>(max_idx)
+  );
+  let cell_offset = cell.x + resolution * cell.y + slab * cell.z;
+  var moment = vec4<f32>(0.0);
+  for (var route_index = 0u; route_index < route_limit; route_index += 1u) {
+    let field_offset = route_rows[route_index].identity.x;
+    if (field_offset >= available) {
+      continue;
+    }
+    let remaining = available - field_offset;
+    if (resolution > remaining / resolution || resolution > remaining / slab) {
+      continue;
+    }
+    let row = motion_rows[field_offset + cell_offset];
+    if (row.w > 0.0 && row.w == row.w && all(row.xyz == row.xyz)) {
+      moment += row;
+    }
+  }
+  if (!(moment.w > 1.0e-8) || moment.w != moment.w || any(moment.xyz != moment.xyz)) {
+    return vec3<f32>(0.0);
+  }
+  let vel = moment.xyz / moment.w;
+  if (any(vel != vel) || any(abs(vel) > vec3<f32>(1.0e6))) {
+    return vec3<f32>(0.0);
+  }
+  return vel;
+}
 
 fn finite_nonnegative_sample(value: f32) -> f32 {
   let finite = value == value && abs(value) <= HALF_FLOAT_MAX;
@@ -357,11 +407,27 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
       vec3<f32>(0.0),
       vec3<f32>(1.0)
     );
-    let optical = textureSampleLevel(optical_volume, volume_sampler, uvw, 0.0);
+    var sample_uvw = uvw;
+    if (uniforms.motion_params.x > 0.0 && uniforms.motion_params.w > 0.0) {
+      let local_velocity = sample_medium_velocity(uvw);
+      let raw_disp = local_velocity * uniforms.motion_params.x;
+      let disp_len = length(raw_disp);
+      if (disp_len > 1.0e-9) {
+        let max_disp = cell_edge * 1.5;
+        let adv_disp = raw_disp * (max_disp / (max_disp + disp_len));
+        sample_uvw = clamp(
+          (world_position - adv_disp - uniforms.bounds_min_cell_edge.xyz)
+            / (uniforms.bounds_max_ambient.xyz - uniforms.bounds_min_cell_edge.xyz),
+          vec3<f32>(0.0),
+          vec3<f32>(1.0)
+        );
+      }
+    }
+    let optical = textureSampleLevel(optical_volume, volume_sampler, sample_uvw, 0.0);
     let scattering_color_depth = textureSampleLevel(
       scattering_volume,
       volume_sampler,
-      uvw,
+      sample_uvw,
       0.0
     ).rgb;
     let distance_scale = step_length / cell_edge;
@@ -1007,6 +1073,11 @@ export function createSphParticipatingMediumGpu(device, {
     minFilter: 'linear',
     mipmapFilter: 'nearest'
   });
+  const emptyMotionBuffer = device.createBuffer({
+    label: 'ulg-sph-participating-medium-empty-motion',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
   const record = {
     active: true,
     device,
@@ -1017,6 +1088,7 @@ export function createSphParticipatingMediumGpu(device, {
     packPipelinePromise,
     renderPipelinePromise,
     sampler,
+    emptyMotionBuffer,
     frames: new Set()
   };
   const runtime = {
@@ -1039,6 +1111,7 @@ export function createSphParticipatingMediumGpu(device, {
         destroySphParticipatingMediumPackedFrame(frame);
       }
       record.frames.clear();
+      destroyGpuResource(record.emptyMotionBuffer);
       return true;
     }
   };
@@ -1313,7 +1386,9 @@ function writeRenderUniforms(record, {
   lightIntensity = 1,
   ambientIntensity = 0.18,
   stepCount = DEFAULT_STEP_COUNT,
-  depthEpsilon = 1e-6
+  depthEpsilon = 1e-6,
+  motionAgeS = 0,
+  motionRowCount = 0
 }) {
   const inverse = finiteVector(inverseViewProjectionMatrix, 16);
   const camera = finiteVector(cameraPositionM, 3);
@@ -1355,6 +1430,16 @@ function writeRenderUniforms(record, {
   values[32] = viewport[0];
   values[33] = viewport[1];
   values[34] = resolvedDepthEpsilon;
+  const resolvedMotionAgeS = Number.isFinite(Number(motionAgeS)) && Number(motionAgeS) > 0
+    ? Number(motionAgeS)
+    : 0;
+  const resolvedMotionRowCount = Number.isSafeInteger(Number(motionRowCount)) && Number(motionRowCount) > 0
+    ? Number(motionRowCount)
+    : 0;
+  values[36] = resolvedMotionRowCount > 0 ? resolvedMotionAgeS : 0;
+  values[37] = record.descriptor.routeCount || 0;
+  values[38] = record.descriptor.resolution || 0;
+  values[39] = resolvedMotionRowCount;
   record.runtimeRecord.device.queue.writeBuffer(
     record.renderUniformBuffer,
     0,
@@ -1380,7 +1465,9 @@ export async function encodeSphParticipatingMediumRender(
     lightIntensity = 1,
     ambientIntensity = 0.18,
     stepCount = DEFAULT_STEP_COUNT,
-    depthEpsilon = 1e-6
+    depthEpsilon = 1e-6,
+    motionField = null,
+    motionAgeS = 0
   } = {}
 ) {
   const runtimeRecord = assertRuntime(runtime);
@@ -1402,6 +1489,12 @@ export async function encodeSphParticipatingMediumRender(
   if (!frameRecord.active) {
     throw new TypeError('participating medium packed frame was destroyed before rendering');
   }
+  const motionBuffer = motionField?.buffer && motionField?.destroyed !== true
+    ? motionField.buffer
+    : runtimeRecord.emptyMotionBuffer;
+  const motionRowCount = motionBuffer === runtimeRecord.emptyMotionBuffer
+    ? 0
+    : Math.max(0, Math.floor(Number(motionField?.rowCount) || 0));
   const uniformReceipt = writeRenderUniforms(frameRecord, {
     inverseViewProjectionMatrix,
     cameraPositionM,
@@ -1410,19 +1503,33 @@ export async function encodeSphParticipatingMediumRender(
     lightIntensity,
     ambientIntensity,
     stepCount,
-    depthEpsilon
+    depthEpsilon,
+    motionAgeS,
+    motionRowCount
   });
-  const bindGroup = runtimeRecord.device.createBindGroup({
-    label: 'ulg-sph-participating-medium-render-bind-group',
-    layout: renderPipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: frameRecord.renderUniformBuffer } },
-      { binding: 1, resource: frameRecord.opticalTextureView },
-      { binding: 2, resource: frameRecord.scatteringTextureView },
-      { binding: 3, resource: runtimeRecord.sampler },
-      { binding: 4, resource: depthTextureView }
-    ]
-  });
+  let bindGroup = frameRecord.cachedRenderBindGroup;
+  if (
+    !bindGroup
+    || frameRecord.cachedRenderDepthView !== depthTextureView
+    || frameRecord.cachedRenderMotionBuffer !== motionBuffer
+  ) {
+    bindGroup = runtimeRecord.device.createBindGroup({
+      label: 'ulg-sph-participating-medium-render-bind-group',
+      layout: renderPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: frameRecord.renderUniformBuffer } },
+        { binding: 1, resource: frameRecord.opticalTextureView },
+        { binding: 2, resource: frameRecord.scatteringTextureView },
+        { binding: 3, resource: runtimeRecord.sampler },
+        { binding: 4, resource: depthTextureView },
+        { binding: 5, resource: { buffer: motionBuffer } },
+        { binding: 6, resource: { buffer: frameRecord.routeRowsBuffer } }
+      ]
+    });
+    frameRecord.cachedRenderBindGroup = bindGroup;
+    frameRecord.cachedRenderDepthView = depthTextureView;
+    frameRecord.cachedRenderMotionBuffer = motionBuffer;
+  }
   pass.setPipeline(renderPipeline);
   pass.setBindGroup(0, bindGroup);
   pass.drawIndirect(frameRecord.drawIndirectBuffer, 0);

@@ -21,13 +21,34 @@ function rotr(value, bits) {
   return (value >>> bits) | (value << (32 - bits));
 }
 
+const SHA256_WORDS = new Uint32Array(64);
+const SHARED_TEXT_ENCODER = new TextEncoder();
+let sha256Padded = new Uint8Array(4096);
+let sha256PaddedView = new DataView(sha256Padded.buffer);
+
+function ensureSha256Padded(paddedLength) {
+  if (sha256Padded.length < paddedLength) {
+    let nextLength = sha256Padded.length;
+    while (nextLength < paddedLength) nextLength *= 2;
+    sha256Padded = new Uint8Array(nextLength);
+    sha256PaddedView = new DataView(sha256Padded.buffer);
+  }
+  return sha256Padded;
+}
+
+function hexWord(word) {
+  return word.toString(16).padStart(8, '0');
+}
+
 function sha256Hex(bytes) {
-  const bitLength = bytes.length * 8;
-  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
-  const padded = new Uint8Array(paddedLength);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-  const view = new DataView(padded.buffer);
+  const byteLength = bytes.length;
+  const bitLength = byteLength * 8;
+  const paddedLength = Math.ceil((byteLength + 9) / 64) * 64;
+  const padded = ensureSha256Padded(paddedLength);
+  padded.set(bytes, 0);
+  padded.fill(0, byteLength, paddedLength);
+  padded[byteLength] = 0x80;
+  const view = sha256PaddedView;
   view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000));
   view.setUint32(paddedLength - 4, bitLength >>> 0);
 
@@ -39,7 +60,7 @@ function sha256Hex(bytes) {
   let h5 = 0x9b05688c;
   let h6 = 0x1f83d9ab;
   let h7 = 0x5be0cd19;
-  const words = new Uint32Array(64);
+  const words = SHA256_WORDS;
 
   for (let offset = 0; offset < paddedLength; offset += 64) {
     for (let index = 0; index < 16; index += 1) {
@@ -92,9 +113,8 @@ function sha256Hex(bytes) {
     h7 = (h7 + h) >>> 0;
   }
 
-  return [h0, h1, h2, h3, h4, h5, h6, h7]
-    .map((word) => word.toString(16).padStart(8, '0'))
-    .join('');
+  return hexWord(h0) + hexWord(h1) + hexWord(h2) + hexWord(h3)
+    + hexWord(h4) + hexWord(h5) + hexWord(h6) + hexWord(h7);
 }
 
 export function schroederAuthorityBytesFingerprint(bytes, label) {
@@ -112,7 +132,7 @@ export function schroederAuthorityTextFingerprint(value, label) {
     throw new TypeError('authority fingerprint text must be a string');
   }
   return schroederAuthorityBytesFingerprint(
-    new TextEncoder().encode(value),
+    SHARED_TEXT_ENCODER.encode(value),
     label
   );
 }

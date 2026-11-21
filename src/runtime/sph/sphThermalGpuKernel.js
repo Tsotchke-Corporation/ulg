@@ -65,6 +65,7 @@ import {
   acquireQueueOrderedPooledBuffer,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   deferConfirmedSubmittedWorkCleanup,
@@ -4160,7 +4161,8 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       ...(finiteWallState ? [computeBufferBinding(14, 'storage')] : [])
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-sph-thermal-step-bind-group',
     layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },

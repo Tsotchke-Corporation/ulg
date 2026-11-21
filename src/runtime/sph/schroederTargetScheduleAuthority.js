@@ -273,12 +273,26 @@ function plainObject(value) {
   }
 }
 
+const EXACT_KEYS_SET_CACHE = new WeakMap();
+
+function exactKeysSet(keys) {
+  let set = EXACT_KEYS_SET_CACHE.get(keys);
+  if (!set) {
+    set = new Set(keys);
+    EXACT_KEYS_SET_CACHE.set(keys, set);
+  }
+  return set;
+}
+
 function objectHasExactKeys(value, keys) {
   if (!plainObject(value)) return false;
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length
-    && actual.every((key, index) => key === expected[index]);
+  const actual = Object.keys(value);
+  if (actual.length !== keys.length) return false;
+  const expected = exactKeysSet(keys);
+  for (let index = 0; index < actual.length; index += 1) {
+    if (!expected.has(actual[index])) return false;
+  }
+  return true;
 }
 
 function nonEmptyString(value) {
@@ -313,38 +327,56 @@ function valuesEqual(left, right) {
     ));
 }
 
-function stableToken(value, seen = new Set()) {
-  if (value === null) return 'null';
-  if (typeof value === 'string') return `s:${JSON.stringify(value)}`;
-  if (typeof value === 'boolean') return value ? 'b:1' : 'b:0';
-  if (typeof value === 'number') {
+function appendStableToken(value, seen, out) {
+  if (value === null) { out.push('null'); return; }
+  const kind = typeof value;
+  if (kind === 'string') { out.push('s:', JSON.stringify(value)); return; }
+  if (kind === 'boolean') { out.push(value ? 'b:1' : 'b:0'); return; }
+  if (kind === 'number') {
     if (!Number.isFinite(value)) throw new TypeError('fingerprint numbers must be finite');
-    if (Object.is(value, -0)) return 'n:-0';
-    return `n:${value}`;
+    out.push(Object.is(value, -0) ? 'n:-0' : `n:${value}`);
+    return;
   }
   if (ArrayBuffer.isView(value)) {
-    return `t:${schroederAuthorityTypedArrayFingerprint(
+    out.push('t:', schroederAuthorityTypedArrayFingerprint(
       value,
       'typed-array-content-v2'
-    )}`;
+    ));
+    return;
   }
   if (Array.isArray(value)) {
     if (seen.has(value)) throw new TypeError('fingerprint inputs must be acyclic');
     seen.add(value);
-    const token = `a:[${value.map((entry) => stableToken(entry, seen)).join(',')}]`;
+    out.push('a:[');
+    for (let index = 0; index < value.length; index += 1) {
+      if (index > 0) out.push(',');
+      appendStableToken(value[index], seen, out);
+    }
+    out.push(']');
     seen.delete(value);
-    return token;
+    return;
   }
   if (!plainObject(value)) {
     throw new TypeError('fingerprint inputs must be clone-safe plain values');
   }
   if (seen.has(value)) throw new TypeError('fingerprint inputs must be acyclic');
   seen.add(value);
-  const token = `o:{${Object.keys(value).sort().map(
-    (key) => `${JSON.stringify(key)}=${stableToken(value[key], seen)}`
-  ).join(',')}}`;
+  const keys = Object.keys(value).sort();
+  out.push('o:{');
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (index > 0) out.push(',');
+    out.push(JSON.stringify(key), '=');
+    appendStableToken(value[key], seen, out);
+  }
+  out.push('}');
   seen.delete(value);
-  return token;
+}
+
+function stableToken(value, seen = new Set()) {
+  const out = [];
+  appendStableToken(value, seen, out);
+  return out.join('');
 }
 
 function textFingerprint(value, label) {

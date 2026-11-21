@@ -12,6 +12,7 @@ import {
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
@@ -890,11 +891,13 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : [])
   ];
   exact?.bind(authorityValidationBuffer);
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-mechanics-refresh-main',
     layout: refreshPipeline.bindGroupLayout,
     entries: bindGroupEntries
   });
-  const commitBindGroup = device.createBindGroup({
+  const commitBindGroup = createCachedExplicitBindGroup(device, {
+    label: 'ulg-mls-mpm-mechanics-refresh-commit',
     layout: commitPipeline.bindGroupLayout,
     entries: bindGroupEntries
   });

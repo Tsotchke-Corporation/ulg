@@ -1434,7 +1434,9 @@ export function createWorkerOwnedIsosurfacePresenter({
             readyParticipatingMediumRuntime, volumePass, {
               packedFrame: packedMedium, inverseViewProjectionMatrix,
               cameraPositionM: frame.cameraPositionM, viewportSize,
-              depthTextureView: depthView, lightDirection: [0.38, 0.82, 0.42]
+              depthTextureView: depthView, lightDirection: [0.38, 0.82, 0.42],
+              motionField: frame.motionField,
+              motionAgeS: frame.drawMotionAgeS || 0
             }
           );
         } finally { volumePass.end(); }

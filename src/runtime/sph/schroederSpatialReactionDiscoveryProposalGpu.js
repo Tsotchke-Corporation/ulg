@@ -21,6 +21,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
 import {
@@ -3799,7 +3800,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
           : pipelineDescriptors.activationObservationWithoutMotion
       )
     : null;
-  const proposalBindGroup = device.createBindGroup({
+  const proposalBindGroup = createCachedExplicitBindGroup(device, {
     label: 'ulg-schroeder-spatial-reaction-discovery-proposal-bindings',
     layout: proposalPipeline.bindGroupLayout,
     entries: [
@@ -3845,7 +3846,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       ) }
     ]
   });
-  const displacementBindGroup = device.createBindGroup({
+  const displacementBindGroup = createCachedExplicitBindGroup(device, {
     label: 'ulg-schroeder-spatial-reaction-discovery-displacement-bindings',
     layout: displacementPipeline.bindGroupLayout,
     entries: [
@@ -3867,7 +3868,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       ) }
     ]
   });
-  const sealBindGroup = device.createBindGroup({
+  const sealBindGroup = createCachedExplicitBindGroup(device, {
     label: 'ulg-schroeder-spatial-reaction-discovery-seal-bindings',
     layout: sealPipeline.bindGroupLayout,
     entries: [
@@ -3886,7 +3887,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     ]
   });
   const activationMotionBoundsBindGroup = activationMotionBoundsPipeline
-    ? device.createBindGroup({
+    ? createCachedExplicitBindGroup(device, {
         label:
           'ulg-schroeder-spatial-reaction-discovery-activation-bounds-bindings',
         layout: activationMotionBoundsPipeline.bindGroupLayout,
@@ -3918,7 +3919,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       })
     : null;
   const activationMotionWatchBindGroup = activationMotionWatchPipeline
-    ? device.createBindGroup({
+    ? createCachedExplicitBindGroup(device, {
         label:
           'ulg-schroeder-spatial-reaction-discovery-activation-watch-bindings',
         layout: activationMotionWatchPipeline.bindGroupLayout,
@@ -3966,7 +3967,7 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       })
     : null;
   const activationObservationBindGroup = activationObservationPipeline
-    ? device.createBindGroup({
+    ? createCachedExplicitBindGroup(device, {
         label: 'ulg-schroeder-spatial-reaction-discovery-activation-bindings',
         layout: activationObservationPipeline.bindGroupLayout,
         entries: [

@@ -7,6 +7,7 @@ import {
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
@@ -1714,11 +1715,13 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
           ? [{ binding: 10, resource: { buffer: phaseDormancyStage.dormantBuffer } }]
           : [])
       ];
-      const preflightBindGroup = device.createBindGroup({
+      const preflightBindGroup = createCachedExplicitBindGroup(device, {
+        label: 'ulg-sph-phase-carrier-preflight',
         layout: preflightPipeline.bindGroupLayout,
         entries: bindGroupEntries
       });
-      const applyBindGroup = device.createBindGroup({
+      const applyBindGroup = createCachedExplicitBindGroup(device, {
+        label: 'ulg-sph-phase-carrier-apply',
         layout: applyPipeline.bindGroupLayout,
         entries: bindGroupEntries
       });

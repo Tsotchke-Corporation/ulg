@@ -519,7 +519,8 @@ export function mountUlgSimStudioApp({
         const a6Mesh = globalThis.__ulgA6PeerMeshStatus;
         const a6Bridge = globalThis.__ulgA6ClosureBridgeStatus;
         if (a6Mesh || a6Bridge) {
-          archLines.push(`A6 derivation: transport=${a6Mesh?.transport ?? 'local'} peers=${a6Mesh?.remotePeerCount ?? 0} quorum=${Boolean(a6Mesh?.quorumReady)} debt=${a6Bridge?.remoteDebtCount ?? 0}`);
+          const rtcCount = Array.isArray(a6Mesh?.webrtcDataChannelPeers) ? a6Mesh.webrtcDataChannelPeers.length : 0;
+          archLines.push(`A6 derivation: transport=${a6Mesh?.transport ?? 'local'} connected=${Boolean(a6Mesh?.connected)} peers=${a6Mesh?.remotePeerCount ?? 0} webrtc=${rtcCount} quorum=${Boolean(a6Mesh?.quorumReady)} debt=${a6Bridge?.remoteDebtCount ?? 0}`);
         }
         const archSuffix = archLines.length > 0 ? `\n\n--- Architecture ---\n${archLines.join('\n')}` : '';
         diagnosticsPreEl.textContent = `${snap.statusText || ''}${archSuffix}`.trim();
@@ -1391,6 +1392,53 @@ export function mountUlgSimStudioApp({
     hudToggleLabel.append(hudToggleCb, hudToggleText);
     hudBlock.appendChild(hudToggleLabel);
     panel.appendChild(hudBlock);
+
+    // Remote Derivation Peers (A6 cross-machine WebRTC / signaling relay)
+    stagedConfig.network = stagedConfig.network || { peerRelayUrl: '', peerRoomId: '' };
+    const peerBlock = document.createElement('div');
+    peerBlock.className = 'ulg-card-block';
+    const peerDetails = document.createElement('details');
+    peerDetails.className = 'ulg-details';
+    if (stagedConfig.network.peerRelayUrl || stagedConfig.network.peerRoomId) peerDetails.open = true;
+    peerDetails.innerHTML = '<summary>Remote Derivation Peers (A6 WebRTC / Signaling Relay)</summary><p class="ulg-section-help" style="margin-top:8px;">Optional WebSocket signaling relay for cross-machine PeerCompute 2-of-2 quorum derivation over WebRTC DataChannels. Leave blank to use local warm workers and sibling same-origin tabs.</p>';
+    const peerGrid = document.createElement('div');
+    peerGrid.className = 'ulg-grid-2';
+    peerGrid.style.marginTop = '8px';
+
+    const relayField = document.createElement('label');
+    relayField.className = 'ulg-field';
+    relayField.innerHTML = '<span class="ulg-field-label"><span>Signaling Relay URL</span><span class="ulg-field-hint">wss://…</span></span>';
+    const relayInp = document.createElement('input');
+    relayInp.type = 'text';
+    relayInp.className = 'ulg-input';
+    relayInp.placeholder = 'wss://relay.example/ws';
+    relayInp.value = stagedConfig.network.peerRelayUrl || '';
+    relayInp.addEventListener('change', () => {
+      stagedConfig.network.peerRelayUrl = relayInp.value.trim();
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+      updateChromeAndStatus();
+    });
+    relayField.appendChild(relayInp);
+
+    const roomField = document.createElement('label');
+    roomField.className = 'ulg-field';
+    roomField.innerHTML = '<span class="ulg-field-label"><span>Mesh Room ID</span><span class="ulg-field-hint">optional</span></span>';
+    const roomInp = document.createElement('input');
+    roomInp.type = 'text';
+    roomInp.className = 'ulg-input';
+    roomInp.placeholder = 'ulg-a6-derivation-peers-v1';
+    roomInp.value = stagedConfig.network.peerRoomId || '';
+    roomInp.addEventListener('change', () => {
+      stagedConfig.network.peerRoomId = roomInp.value.trim();
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+      updateChromeAndStatus();
+    });
+    roomField.appendChild(roomInp);
+
+    peerGrid.append(relayField, roomField);
+    peerDetails.appendChild(peerGrid);
+    peerBlock.appendChild(peerDetails);
+    panel.appendChild(peerBlock);
 
     // Cache block
     const cacheBlock = document.createElement('div');

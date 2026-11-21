@@ -7960,6 +7960,12 @@ export async function mountSphPhaseDemoOverlay({
   const initialSolidMultilevelRaw = String(initialHash.get('solidMultilevel')
     ?? initialQuery.get('solidMultilevel') ?? initialScenarioRuntime.solidMultilevel ?? '1');
   const initialSolidMultilevel = initialSolidMultilevelRaw !== '0' && initialSolidMultilevelRaw !== 'false';
+  const initialPeerRelayUrl = String(
+    initialHash.get('peerRelay') ?? initialQuery.get('peerRelay') ?? initialScenarioRuntime.peerRelay ?? ''
+  ).trim();
+  const initialPeerRoomId = String(
+    initialHash.get('peerRoom') ?? initialQuery.get('peerRoom') ?? initialScenarioRuntime.peerRoom ?? ''
+  ).trim();
   const initialHydrostaticInitialization = (() => {
     const raw = initialHash.get('hydroInit') ?? initialQuery.get('hydroInit');
     if (raw == null || raw === '') return null;
@@ -11158,6 +11164,8 @@ export async function mountSphPhaseDemoOverlay({
     renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
     materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
     residentAuthorityHost: currentResidentAuthorityHostForScene(),
+    a6PeerRelayUrl: initialPeerRelayUrl,
+    a6PeerRoomId: initialPeerRoomId,
     cameraPositionNormalized: initialCameraPositionNormalized,
     cameraTargetNormalized: initialCameraTargetNormalized
   });
@@ -16486,6 +16494,8 @@ export async function mountSphPhaseDemoOverlay({
       renderOwnershipPolicy: initialPeerComputeRenderOwnershipPolicy,
       materialInterfaceSurfaceTablePolicy: initialMaterialInterfaceSurfaceTablePolicy,
       residentAuthorityHost: currentResidentAuthorityHostForScene(),
+      a6PeerRelayUrl: initialPeerRelayUrl,
+      a6PeerRoomId: initialPeerRoomId,
       cameraPositionNormalized: initialCameraPositionNormalized,
       cameraTargetNormalized: initialCameraTargetNormalized
     });

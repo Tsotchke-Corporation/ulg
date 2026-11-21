@@ -161,6 +161,10 @@ export function buildStagedConfigFromPreset(presetId) {
       backgroundColor: SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
       blobScale: Number(controls.blob ?? 1)
     },
+    network: {
+      peerRelayUrl: '',
+      peerRoomId: ''
+    },
     solverProfile: isTier0Water
       ? 'tier0-realtime'
       : preset.id === 'cesium-fluorine'
@@ -217,6 +221,10 @@ export function buildBlankCustomConfig() {
       lightingMode: SPH_SCENE_LIGHTING_MODE_DEFAULT,
       backgroundColor: SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
       blobScale: 1
+    },
+    network: {
+      peerRelayUrl: '',
+      peerRoomId: ''
     },
     solverProfile: 'canonical-ss',
     presetRuntimeOverlay: { ...DEFAULT_CUSTOM_CAMERA }
@@ -498,7 +506,13 @@ export function buildLaunchParamsFromStagedConfig(config) {
     bodies: serializeSphInitialBodies(internalBodies),
     lighting: normalizeSphSceneLightingMode(config.display.lightingMode),
     bg: normalizeSphSceneBackgroundColorHex(config.display.backgroundColor),
-    blob: String(config.display.blobScale || 1)
+    blob: String(config.display.blobScale || 1),
+    ...(String(config.network?.peerRelayUrl || '').trim()
+      ? { peerRelay: String(config.network.peerRelayUrl).trim() }
+      : {}),
+    ...(String(config.network?.peerRoomId || '').trim()
+      ? { peerRoom: String(config.network.peerRoomId).trim() }
+      : {})
   };
   delete compiled.surfaceDraw;
   return compiled;
@@ -599,6 +613,11 @@ export function serializeStagedConfigToUrlSearchParams(config, {
   if (Number.isFinite(Number(display.blobScale)) && Math.abs(Number(display.blobScale) - 1) > 1e-4) {
     params.set('blob', String(roundNice(display.blobScale, 4)));
   }
+  const network = config.network || {};
+  const peerRelayUrl = String(network.peerRelayUrl || '').trim();
+  const peerRoomId = String(network.peerRoomId || '').trim();
+  if (peerRelayUrl) params.set('peerRelay', peerRelayUrl);
+  if (peerRoomId) params.set('peerRoom', peerRoomId);
   if (autoPlayWhenReady === true) {
     params.set('autoplay', '1');
   }
@@ -715,6 +734,13 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
   if (params.has('blob')) {
     const blob = Number(params.get('blob'));
     if (Number.isFinite(blob) && blob > 0) config.display.blobScale = blob;
+  }
+  config.network = config.network || { peerRelayUrl: '', peerRoomId: '' };
+  if (params.has('peerRelay')) {
+    config.network.peerRelayUrl = String(params.get('peerRelay') || '').trim();
+  }
+  if (params.has('peerRoom')) {
+    config.network.peerRoomId = String(params.get('peerRoom') || '').trim();
   }
 
   const rawAutoplay = params.get('autoplay');

@@ -537,3 +537,29 @@ test('Studio exposes per-body SOL-4/5/6 solid mechanics options and 2-level Firs
   assert.equal(rigidDemo.demo.state.rigidBodies?.multilevelEnabled, false);
   assert.ok(rigidDemo.demo.state.rigidBodies?.maxBodyCapacity >= 5);
 });
+
+test('Studio A6 cross-machine peerRelay and peerRoom URL parameters omit when blank and round-trip cleanly when set', () => {
+  const defaultCfg = buildStagedConfigFromPreset('iron-ice-quench');
+  const defaultParams = serializeStagedConfigToUrlSearchParams(defaultCfg, { autoPlayWhenReady: true });
+  assert.equal(defaultParams.has('peerRelay'), false);
+  assert.equal(defaultParams.has('peerRoom'), false);
+  const defaultLaunch = buildLaunchParamsFromStagedConfig(defaultCfg);
+  assert.equal(defaultLaunch.peerRelay, undefined);
+  assert.equal(defaultLaunch.peerRoom, undefined);
+
+  const relayCfg = buildStagedConfigFromPreset('iron-ice-quench');
+  relayCfg.network.peerRelayUrl = 'wss://relay.example.net/ulg';
+  relayCfg.network.peerRoomId = 'lab-cluster-1';
+  const relayParams = serializeStagedConfigToUrlSearchParams(relayCfg, { autoPlayWhenReady: true });
+  assert.equal(relayParams.get('peerRelay'), 'wss://relay.example.net/ulg');
+  assert.equal(relayParams.get('peerRoom'), 'lab-cluster-1');
+
+  const parsed = parseStagedConfigFromUrlSearchParams(relayParams);
+  assert.ok(parsed);
+  assert.equal(parsed.config.network.peerRelayUrl, 'wss://relay.example.net/ulg');
+  assert.equal(parsed.config.network.peerRoomId, 'lab-cluster-1');
+
+  const relayLaunch = buildLaunchParamsFromStagedConfig(parsed.config);
+  assert.equal(relayLaunch.peerRelay, 'wss://relay.example.net/ulg');
+  assert.equal(relayLaunch.peerRoom, 'lab-cluster-1');
+});

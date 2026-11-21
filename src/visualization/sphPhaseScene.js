@@ -14832,6 +14832,8 @@ export function createSphPhaseScene(container, {
   renderOwnershipPolicy = null,
   materialInterfaceSurfaceTablePolicy = null,
   residentAuthorityHost = null,
+  a6PeerRelayUrl = '',
+  a6PeerRoomId = '',
   cameraPositionNormalized = null,
   cameraTargetNormalized = null,
   navigatorRef = globalThis.navigator
@@ -54514,10 +54516,19 @@ fn main(
       // dispatch deduplicated non-blocking EOS stiffness misses over G5
       // reservations without ever stalling the physics cadence.
       if (typeof Worker === 'function' && globalThis.__ulgDisableA6Bridge !== true) {
-        if (typeof BroadcastChannel === 'function' && globalThis.__ulgDisableA6PeerMesh !== true) {
+        const resolvedA6RelayUrl = String(a6PeerRelayUrl || '').trim();
+        const resolvedA6RoomId = String(a6PeerRoomId || '').trim() || undefined;
+        const peerComputeNetMgr = residentAuthorityHost?.networkManager ?? null;
+        if (
+          globalThis.__ulgDisableA6PeerMesh !== true
+          && (typeof BroadcastChannel === 'function' || resolvedA6RelayUrl || peerComputeNetMgr)
+        ) {
           laneState.a6PeerMesh ??= startLiveClientDerivationPeerMesh({
             peerId: `${laneId}`,
-            nodeId: `client-${laneId}`
+            nodeId: `client-${laneId}`,
+            ...(resolvedA6RelayUrl ? { relayUrl: resolvedA6RelayUrl } : {}),
+            ...(resolvedA6RoomId ? { roomId: resolvedA6RoomId } : {}),
+            ...(peerComputeNetMgr ? { networkManager: peerComputeNetMgr } : {})
           });
         }
         const activePeerRequester = globalThis.__ulgA6PeerRequester
@@ -54526,13 +54537,17 @@ fn main(
         laneState.a6Bridge ??= createWarmClosureMissBridge({
           maxInFlight: 4,
           peerRequester: activePeerRequester,
-          onPeerExhaustion: 'local-warm-worker',
+          requireRemotePeer: Boolean(resolvedA6RelayUrl),
+          onPeerExhaustion: resolvedA6RelayUrl ? 'debt' : 'local-warm-worker',
           scope: `${laneId}:a6-closure`,
           onStateCommit: (delta) => {
             laneState.lastA6CommitDelta = delta;
           }
         });
         laneState.a6Bridge.setPeerRequester?.(activePeerRequester);
+        if (activePeerRequester && laneState.a6Bridge.getStatus().remoteDebtCount > 0) {
+          laneState.a6Bridge.retryRemoteDebt?.({ scheduleId });
+        }
         laneState.a6Bridge.adoptPendingAtScheduleBoundary({ scheduleId });
         const missNeeded = committedThermalPotential?.status === 'no-valid-fit'
           || (committedThermalPotential && !committedThermalPotential.adopted)

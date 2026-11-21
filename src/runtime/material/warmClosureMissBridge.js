@@ -65,6 +65,7 @@ export function createWarmClosureMissBridge({
   lane = null,
   maxInFlight = 4,
   peerRequester = null,
+  requireRemotePeer = false,
   taskRunner = runWarmDerivationTask,
   sourceIdentity = 'ulg-a6-client-assets.v1',
   onPeerExhaustion = 'debt',
@@ -178,6 +179,11 @@ export function createWarmClosureMissBridge({
         throw peerError;
       }
     }
+    if (!activeRequester && requireRemotePeer && onPeerExhaustion === 'debt') {
+      const error = new Error('no remote derivation peer quorum is currently present');
+      error.code = 'ERR_CLIENT_PEER_ABSENT';
+      throw error;
+    }
     const reply = await taskRunner(payload);
     const provenance = summarizePeerProvenance(null, 'local-warm-worker');
     stats.lastProvenance = provenance;
@@ -189,7 +195,7 @@ export function createWarmClosureMissBridge({
   }
 
   function recordDebtOnFailure(key, kind, scheduleId, requestArgs, error) {
-    const ownerLoss = Boolean(currentPeerRequester ?? globalThis.__ulgA6PeerRequester) && isPeerOwnerLossError(error);
+    const ownerLoss = (Boolean(currentPeerRequester ?? globalThis.__ulgA6PeerRequester) || requireRemotePeer) && isPeerOwnerLossError(error);
     if (ownerLoss) {
       stats.ownerLosses += 1;
     }
@@ -226,7 +232,7 @@ export function createWarmClosureMissBridge({
       closed,
       epoch: bridgeEpoch,
       sourceIdentity: currentSourceIdentity,
-      remoteEnabled: Boolean(currentPeerRequester ?? globalThis.__ulgA6PeerRequester),
+      remoteEnabled: Boolean(currentPeerRequester ?? globalThis.__ulgA6PeerRequester ?? requireRemotePeer),
       activeOrdinal,
       inFlightCount: inFlightByKey.size,
       pendingAdoptionCount: pendingAdoptions.length,

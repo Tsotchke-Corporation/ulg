@@ -97,7 +97,14 @@ function mintFamily(record, provenance) {
 }
 async function retire(record) {
   if (!record.closed || record.borrows || record.releasePromise) return record.releasePromise;
-  record.releasePromise = queueFence(record).then(() => { destroy(record); return true; });
+  record.releasePromise = deferConfirmedSubmittedWorkCleanup(record.device, () => {
+    destroy(record);
+  }, {
+    onQueueFenceRejected() { record.quarantined = true; }
+  }).then(() => true, () => {
+    record.quarantined = true;
+    return untilLoss(record).then(() => { destroy(record); return true; });
+  });
   return record.releasePromise;
 }
 
@@ -417,14 +424,35 @@ export function sliceSphExactMassRead(read, { device, rowOffset, rowCount } = {}
   }
   return mintRead(record, read.rowOffset + rowOffset, rowCount);
 }
-export function releaseSphExactMassRead(read) {
+export function releaseSphExactMassRead(read, { deferInBurst = false, confirmed = false } = {}) {
   const held = READS.get(read);
   if (!held) throw new TypeError('Exact mass retirement requires the original read');
   if (held.released) return held.releasePromise;
   held.released = true;
-  held.releasePromise = queueFence(held.record).then(() => {
-    held.record.borrows--; void retire(held.record); return true;
-  });
+  const finishRelease = () => {
+    held.record.borrows--;
+    if (held.record.closed && !held.record.borrows && !held.record.releasePromise) {
+      held.record.releasePromise = Promise.resolve(true);
+      destroy(held.record);
+    }
+    return true;
+  };
+  if (confirmed === true) {
+    held.releasePromise = Promise.resolve(finishRelease());
+    return held.releasePromise;
+  }
+  if (deferInBurst === true) {
+    held.releasePromise = deferConfirmedSubmittedWorkCleanup(held.record.device, () => {
+      finishRelease();
+    }, {
+      onQueueFenceRejected() { held.record.quarantined = true; }
+    }).then(() => true, () => {
+      held.record.quarantined = true;
+      return untilLoss(held.record).then(finishRelease);
+    });
+    return held.releasePromise;
+  }
+  held.releasePromise = queueFence(held.record).then(finishRelease);
   return held.releasePromise;
 }
 export function releaseSphExactMassInventory(family) {

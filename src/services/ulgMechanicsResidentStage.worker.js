@@ -6412,6 +6412,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         : {}),
       enableTwoLevelMechanics,
       ...(enableLevelChainMechanics ? { enableLevelChainMechanics: true } : {}),
+      ...(enableLevelChainMechanics && Number.isSafeInteger(data.chainBatchStepCount) && data.chainBatchStepCount > 1
+        ? { chainBatchStepCount: data.chainBatchStepCount }
+        : {}),
       twoLevelMechanicsAuthority:
         data.twoLevelMechanicsAuthority
         || (enableTwoLevelMechanics ? 'authoritative' : 'observation'),
@@ -7284,6 +7287,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       readbackMode: residentStep.readbackMode ?? null,
       twoLevelMechanicsEnabled: enableTwoLevelMechanics,
       levelChainMechanicsEnabled: enableLevelChainMechanics,
+      chainBatchStepCount:
+        Number.isSafeInteger(residentStep.chainBatchStepCount)
+          ? residentStep.chainBatchStepCount
+          : Number.isSafeInteger(kernelResult?.chainClockReceipt?.acceptedBatchStepCount)
+            ? kernelResult.chainClockReceipt.acceptedBatchStepCount
+            : null,
       mechanicsLevelCount: currentSeal.mechanicsLevelCount ?? null,
       twoLevelMechanicsAuthority:
         residentStep.twoLevelMechanicsAuthority
@@ -10714,10 +10723,20 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       // watch. The resident route submits it after the exact published
       // post-closure family exists; the worker's schedule-terminal fence then
       // orders the single four-byte map.
+      const chainBatchActive = Boolean(
+        (baseMechanicsOptions.enableLevelChainMechanics === true
+          || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics === true)
+        && stepOrdinal === 1
+        && stepCount > 1
+        && Number(epochSeal?.mechanicsLevelCount) >= 3
+        && !twoLevelMechanicsRequested
+        && !terminalRefluxReceiptRequired
+        && typeof baseMechanicsOptions.schroederSameLevelMechanicsRunner !== 'function'
+      );
       cleanResidentStepOptions.captureReactionActivationObservation = Boolean(
         scheduleReactionActivationWatchTable
         && scheduleReactionActivationMotionEnvelope
-        && stepOrdinal === stepCount
+        && (stepOrdinal === stepCount || chainBatchActive)
       );
       cleanResidentStepOptions.reactionActivationMotionEnvelope =
         cleanResidentStepOptions.captureReactionActivationObservation
@@ -10840,9 +10859,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       // can actually publish.
       return {
         ...continuationOptions,
+        ...(chainBatchActive ? { chainBatchStepCount: stepCount } : {}),
         stageMechanicsTraceEnabled:
           continuationOptions.stageMechanicsTraceEnabled === true
-          && stepOrdinal === stepCount,
+          && (stepOrdinal === stepCount || chainBatchActive),
         spatialKeyChurnProfileRequested:
           spatialKeyChurnObservationApplicable,
         expectedSpatialEpochSeal: epochSeal,
@@ -13487,7 +13507,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         });
         terminalRefluxTargetsByStep.delete(stepOrdinal);
       }
-      completedStepCount = stepOrdinal;
+      const chainBatchCompletedSteps =
+        residentStepSummary?.levelChainMechanicsEnabled === true
+        && Number.isSafeInteger(residentStepSummary?.chainBatchStepCount)
+        && residentStepSummary.chainBatchStepCount > 1
+          ? residentStepSummary.chainBatchStepCount
+          : null;
+      completedStepCount = chainBatchCompletedSteps != null
+        ? Math.min(stepCount, (stepOrdinal - 1) + chainBatchCompletedSteps)
+        : stepOrdinal;
+      if (chainBatchCompletedSteps != null) {
+        stepOrdinal = stepCount;
+      }
       previousEpochSeal = currentStepSeal;
       lastMechanicsStageResult = mechanicsStageResult;
       const rawHierarchyStageSummary =

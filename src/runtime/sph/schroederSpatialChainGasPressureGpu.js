@@ -29,14 +29,14 @@ export async function prepareSchroederSpatialChainGasPressure({device,source,gen
     epochIdentity,spatialGasGrid:grid,boxMinM:[0,0,0],boxMaxM:boxDimsM,
     spatialGasCellSizeM:grid.gridSpacingM,spatialGasSupportVolumeFallbackM3:0,
     chartId,level:grid.selectedLevel,diagnosticsMode:'none'});
-  const retire=async()=>{
+  const retire=async(confirmedFence = null)=>{
     if(execution.released) return true;
     if(execution.cleanupPromise) {
       if(await execution.cleanupPromise!==true) throw new Error('Chain EOS failure cleanup was not confirmed');
       return true;
     }
     if(!execution.ready) return true;
-    if(!execution.releaseScheduled && !releaseSphSpatialGasLedgerEosAfterQueue(execution)) {
+    if(!execution.releaseScheduled && !releaseSphSpatialGasLedgerEosAfterQueue(execution, confirmedFence)) {
       throw new Error(execution.releaseStatus??'Chain EOS retirement was refused');
     }
     if(execution.releasePromise && await execution.releasePromise!==true) {

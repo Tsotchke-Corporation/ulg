@@ -7,6 +7,7 @@ import { abortSchroederSpatialEpochTransaction, admitSchroederSpatialEpochTransa
   SCHROEDER_SPATIAL_EPOCH_READER as READER, SCHROEDER_SPATIAL_EPOCH_READER_PHASE as PHASE }
   from './schroederSpatialEpochTransaction.js';
 import { runSchroederSpatialChainMechanicsWebGpu } from './schroederSpatialChainMechanicsGpu.js';
+import { releasePooledSchroederSpatialCompositeMechanicsGpu } from './schroederSpatialCompositeMechanicsGpu.js';
 import { runSchroederSpatialThermalProposalWebGpu } from './schroederSpatialThermalProposalsGpu.js';
 import { runMlsMpmPostMechanicsClosureWebGpu,
   resolveMlsMpmChainClosureAdmission,
@@ -43,7 +44,8 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
   phaseVolumeInterfaceTransportRequired = false, mechanicsMaterialPhaseUpload = null,
   phaseVolumePressureScale = gasPressureMechanicsBoundaryEnabled ? 0 : 1,
   phaseVolumeDragScale = 1, phaseVolumeMaxImpulseFraction = 0.5,
-  sourceFamilyConsumerLease = null
+  sourceFamilyConsumerLease = null,
+  prebuiltSpatialEpoch = null
 } = {}) {
   if (!sphGpuParticleUploadExactEnergyRows(sphParticleUpload)
     || !thermalResponseGraphUpload || !thermalMaterialTable || !mechanicsMaterialTable
@@ -83,15 +85,16 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
   closureOptions={...closureOptions,thermalStepOptions:{...closureOptions.thermalStepOptions}};
   const particleCount=sphParticleUpload.particleCount;
   let assignment, generation, transaction, composite, execution, g2p, closure, continuation, thermalProposal;
-  let sourceRead=null, pressure=null;
+  let sourceRead=null, pressure=null, borrowedSpatialEpoch=false;
   const proposals=[];
   let retirement=null, executionSubmitted=false;
   const retire=after=>{
     if(!after || typeof after.then!=='function') throw new TypeError('Chain retirement requires its batch fence');
     retirement ??= (async()=>{
       if(await after!==true) throw new TypeError('Chain retirement requires confirmed batch completion');
-      if(continuation) await continuation.retire(Promise.resolve(true));
-      else if(closure) await retireMlsMpmPostMechanicsClosureOutputsAfter(closure,{after:Promise.resolve(true),abandon:true});
+      const confirmedFence = Promise.resolve(true);
+      if(continuation) await continuation.retire(confirmedFence);
+      else if(closure) await retireMlsMpmPostMechanicsClosureOutputsAfter(closure,{after:confirmedFence,abandon:true});
       g2p?.destroyOutputParticleBuffers();
       thermalProposal?.abandonPreparedWork();
       for(const proposal of proposals.filter(p=>!p.released)) {
@@ -99,26 +102,31 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
         else await proposal.releaseAfterSubmittedWork();
       }
       if(execution) {
-        if(executionSubmitted) await composite.releaseExecutionAfter(execution);
+        if(executionSubmitted) await composite.releaseExecutionAfter(execution, confirmedFence);
         else composite.discardExecution(execution,{discardedEncoder:true});
       }
-      composite?.destroy();
-      await pressure?.retire();
-      if(generation && !generation.released) {
-        if(!releaseSchroederSpatialEpochGenerationAfterQueue(generation,device) && !generation.releasePromise) {
-          throw new Error(generation.releaseReason || 'Chain spatial retirement was not admitted');
+      if(composite) {
+        releasePooledSchroederSpatialCompositeMechanicsGpu(composite, { destroy: !executionSubmitted });
+      }
+      await pressure?.retire(confirmedFence);
+      if(!borrowedSpatialEpoch && generation && !generation.released) {
+        const releasedQueueOrdered = releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(generation,device);
+        if(!releasedQueueOrdered && !generation.released) {
+          if(!releaseSchroederSpatialEpochGenerationAfterQueue(generation,device) && !generation.releasePromise) {
+            throw new Error(generation.releaseReason || 'Chain spatial retirement was not admitted');
+          }
+          if(await generation.releasePromise!==true) throw new Error('Chain spatial owner did not retire');
         }
-        if(await generation.releasePromise!==true) throw new Error('Chain spatial owner did not retire');
       }
       if(transaction) {
         if(transaction.state===STATE.COMMITTED || transaction.state===STATE.RELEASE_BLOCKED) {
-          if(await scheduleSchroederSpatialEpochTransactionRelease(transaction,{after:Promise.resolve(true)})!==true) {
+          if(await scheduleSchroederSpatialEpochTransactionRelease(transaction,{after:confirmedFence})!==true) {
             throw new Error('Published chain transaction did not retire');
           }
         } else abortSchroederSpatialEpochTransaction(transaction);
       }
-      assignment?.destroyAssignmentBuffer();
-      if(sourceRead) {await releaseSphParticleExactMassRead(sourceRead);sourceRead=null;}
+      if(!borrowedSpatialEpoch) assignment?.destroyAssignmentBuffer();
+      if(sourceRead) {await releaseSphParticleExactMassRead(sourceRead, { confirmed: true });sourceRead=null;}
       return true;
     })().catch(error=>{retirement=null;throw error;});
     return retirement;
@@ -127,12 +135,40 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
     sourceRead = acquireSchroederSpatialSuccessorExactMassRead({
       device, sphParticleUpload, mlsMpmParticleUpload, consumerLease: sourceFamilyConsumerLease
     }) ?? acquireSphParticleExactMassRead(sphParticleUpload, device, { mlsMpmParticleUpload });
-    assignment=await runSchroederLevelAssignmentWebGpu({...classificationPolicy,device,...source,
-      minLevel:mechanicsLevels[0].selectedLevel,maxLevel:mechanicsLevels.at(-1).selectedLevel,
-      retainAssignmentBuffer:true,readbackMode:'no-full-readback',queueOrderedCleanup:true});
-    generation=runSchroederSpatialEpochGenerationWebGpu({device,levelAssignment:assignment,
-      particleCount,particleIdentityBuffer:sphParticleUpload.identityBuffer,
-      particleIdentityStrideWords:sphParticleUpload.identityStrideBytes/4,mechanicsLevels});
+    const prebuiltGeneration = prebuiltSpatialEpoch?.generation ?? null;
+    const prebuiltAssignment = prebuiltSpatialEpoch?.assignment ?? null;
+    const prebuiltExecution = prebuiltGeneration?.execution ?? null;
+    const canBorrowPrebuilt = Boolean(
+      prebuiltGeneration?.ready === true
+      && prebuiltGeneration.selected === true
+      && !prebuiltGeneration.released
+      && prebuiltAssignment
+      && Array.isArray(prebuiltGeneration.mechanicsLevelViews)
+      && prebuiltGeneration.mechanicsLevelViews.length === mechanicsLevels.length
+      && prebuiltGeneration.mechanicsLevelViews.every((view, index) => (
+        view?.selectedLevel === mechanicsLevels[index].selectedLevel
+        && Number(view?.mechanicsFieldView?.fieldCapacity) > 0
+      ))
+      && Number(prebuiltAssignment.particleCount ?? prebuiltExecution?.particleCount ?? prebuiltExecution?.sourceCount) === particleCount
+      && Number(prebuiltExecution?.storageGeneration ?? prebuiltAssignment.storageGeneration) === sphParticleUpload.storageGeneration
+      && Number(prebuiltExecution?.physicsTick ?? prebuiltAssignment.physicsTick) === sphParticleUpload.physicsTick
+      && Number(prebuiltExecution?.positionEpoch ?? prebuiltAssignment.positionEpoch) === sphParticleUpload.positionEpoch
+    );
+    if (canBorrowPrebuilt) {
+      borrowedSpatialEpoch = true;
+      assignment = prebuiltAssignment;
+      generation = prebuiltGeneration;
+    } else {
+      assignment=await runSchroederLevelAssignmentWebGpu({...classificationPolicy,device,...source,
+        minLevel:mechanicsLevels[0].selectedLevel,maxLevel:mechanicsLevels.at(-1).selectedLevel,
+        retainAssignmentBuffer:true,readbackMode:'no-full-readback',queueOrderedCleanup:true});
+      generation=runSchroederSpatialEpochGenerationWebGpu({device,levelAssignment:assignment,
+        laneId:prebuiltGeneration?.source?.laneId ?? 'ulg-mechanics-resident-stage-worker',
+        particleCount,particleIdentityBuffer:sphParticleUpload.identityBuffer,
+        particleIdentityStrideWords:sphParticleUpload.identityStrideBytes/4,
+        exactCellAtlas:{cellMin:[0,0,0],cellCount:[...mechanicsLevels[0].mechanicsGrid.gridDims]},
+        mechanicsLevels});
+    }
     if(!generation.ready) throw new Error(`Chain spatial generation refused: ${generation.reason}`);
     if(gasPressureMechanicsBoundaryEnabled) pressure=await prepareSchroederSpatialChainGasPressure({
       device,source,generation,assignment,sourceRead,boxDimsM:forceInputs.boxDimsM,

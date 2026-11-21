@@ -3712,7 +3712,7 @@ async function runCapturedExactReactionStep({ selection, expected, mlsMpmParticl
     destinationRead = acquireSchroederSpatialReactionPlacementDestinationRead(family, { device });
     const wholeMass = acquireSphExactMassRead({ family: massFamily, device });
     try { carrierRead = sliceSphExactMassRead(wholeMass, { device, rowOffset: 0, rowCount: family.particleCount }); }
-    finally { void releaseSphExactMassRead(wholeMass); }
+    finally { void releaseSphExactMassRead(wholeMass, { deferInBurst: true }); }
     const telemetry = createGpuReadbackTelemetryAccumulator({ scope: 'sph-exact-reaction-step' });
     telemetry.merge(summary, 'reaction-summary');
     telemetry.merge(createGpuReadbackTelemetry({ scope: 'exact-reaction-producers', complete: false,

@@ -2769,7 +2769,7 @@ function retireExactParticleMassOwner(record) {
   // Numeric windows retain their root independently of carrier identity. Close
   // fresh root admission; other original owners continue through held forks.
   releaseSphExactMassInventory(owner.family);
-  void releaseSphExactMassRead(owner.read);
+  void releaseSphExactMassRead(owner.read, { deferInBurst: true });
   if (owner.quantities && --owner.quantities.owners === 0) owner.quantities.value.quantityBuffer.destroy();
   if (owner.energy && --owner.energy.owners === 0) owner.energy.value.energyBuffer.destroy();
   if (owner.parcels && --owner.parcels.owners === 0) (owner.parcels.destroy ?? owner.parcels.value.destroy)();
@@ -2865,12 +2865,12 @@ export function forkSphParticleExactMassRead(handle, { device, sourceSphUpload }
   return fork;
 }
 
-export async function releaseSphParticleExactMassRead(handle) {
+export async function releaseSphParticleExactMassRead(handle, options = undefined) {
   const held = exactMassParticleReads.get(handle);
   if (!held) throw new TypeError('Exact particle read retirement requires the original handle');
   if (held.released) return held.completion;
   held.released = true;
-  held.completion = releaseSphExactMassRead(handle.read).then(async () => {
+  held.completion = releaseSphExactMassRead(handle.read, options).then(async () => {
     held.record.exactMassActiveReadCount--;
     if (held.mlsOwner && --held.mlsOwner.readCount === 0) {
       const pending = [...held.mlsOwner.cleanups]; held.mlsOwner.cleanups.clear();
@@ -3440,7 +3440,7 @@ function installExactMassContinuationOwner({ target, existing, capture,
     if (record?.exactMass?.read === read) {
       record.exactMass.identityOwners.count--; record.exactMass = null;
     }
-    void releaseSphExactMassRead(read);
+    void releaseSphExactMassRead(read, { deferInBurst: true });
     throw error;
   }
 }

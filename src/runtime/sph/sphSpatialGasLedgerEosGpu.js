@@ -6428,7 +6428,7 @@ export function releaseSphSpatialVaporAerosolExchangeCandidate(candidate) {
 }
 
 /** Schedule the one generation-owner fence after the final queue consumer. */
-export function releaseSphSpatialGasLedgerEosAfterQueue(execution) {
+export function releaseSphSpatialGasLedgerEosAfterQueue(execution, externalFence = null) {
   const record = retainedExecutions.get(execution);
   if (
     !record
@@ -6454,26 +6454,30 @@ export function releaseSphSpatialGasLedgerEosAfterQueue(execution) {
     return false;
   }
   record.releaseAttempted = true;
-  const finalConsumerFenceProvider = record.device.queue?.onSubmittedWorkDone;
-  if (typeof finalConsumerFenceProvider !== 'function') {
-    return quarantineRetainedExecution(
-      record,
-      'spatial-gas-ledger-eos-release-quarantined-fence-provider-missing',
-      'spatial-gas-final-consumer-cleanup-fence-provider-missing'
-    );
-  }
   let finalConsumerFenceCandidate;
-  try {
-    finalConsumerFenceCandidate = finalConsumerFenceProvider.call(
-      record.device.queue
-    );
-  } catch (error) {
-    record.releaseError = error instanceof Error ? error.message : String(error);
-    return quarantineRetainedExecution(
-      record,
-      'spatial-gas-ledger-eos-release-quarantined-fence-provider-error',
-      'spatial-gas-final-consumer-cleanup-fence-provider-error'
-    );
+  if (externalFence && typeof externalFence.then === 'function') {
+    finalConsumerFenceCandidate = externalFence;
+  } else {
+    const finalConsumerFenceProvider = record.device.queue?.onSubmittedWorkDone;
+    if (typeof finalConsumerFenceProvider !== 'function') {
+      return quarantineRetainedExecution(
+        record,
+        'spatial-gas-ledger-eos-release-quarantined-fence-provider-missing',
+        'spatial-gas-final-consumer-cleanup-fence-provider-missing'
+      );
+    }
+    try {
+      finalConsumerFenceCandidate = finalConsumerFenceProvider.call(
+        record.device.queue
+      );
+    } catch (error) {
+      record.releaseError = error instanceof Error ? error.message : String(error);
+      return quarantineRetainedExecution(
+        record,
+        'spatial-gas-ledger-eos-release-quarantined-fence-provider-error',
+        'spatial-gas-final-consumer-cleanup-fence-provider-error'
+      );
+    }
   }
   const finalConsumerFence = promiseFromConfirmedThenable(
     finalConsumerFenceCandidate

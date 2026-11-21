@@ -17697,6 +17697,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   coarseActiveNodeList = null,
   enableTwoLevelMechanics = false,
   enableLevelChainMechanics = false,
+  chainBatchStepCount = 1,
   enableMechanicsFieldPairV2 = false,
   enableCanonicalSingleLevelQueueOrderedCleanup = false,
   twoLevelFineSubstepCount = 2,
@@ -18508,8 +18509,12 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
           }
         : {})
     };
+    const resolvedChainBatchStepCount = Math.max(
+      1,
+      Math.round(Number(chainBatchStepCount) || 1)
+    );
     const chainBatch = await runSchroederSpatialChainResidentBatchWebGpu({
-      stepCount: 1,
+      stepCount: resolvedChainBatchStepCount,
       device,
       preferWebGpu: true,
       readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
@@ -18540,6 +18545,10 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       },
       phaseVolumeInterfaceTransportRequired: chainInterfaceTransportRequired,
       sourceFamilyConsumerLease: levelAssignmentSourceFamilyLease ?? null,
+      prebuiltInitialSpatialEpoch:
+        spatialEpochGeneration?.ready === true && levelAssignment
+          ? { generation: spatialEpochGeneration, assignment: levelAssignment }
+          : null,
       closureOptions: chainClosureOptions
     });
     const chainStep = chainBatch.finalStep;
@@ -18547,6 +18556,9 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     chainStep.nextMlsMpmParticleState = chainBatch.nextMlsMpmParticleState;
     chainStep.mechanicsLevelCount = chainLevelCount;
     chainStep.schroederLevelChainEnabled = true;
+    chainStep.chainBatchStepCount =
+      chainBatch.chainClockReceipt?.acceptedBatchStepCount
+      ?? resolvedChainBatchStepCount;
     chainStep.schroederRequestedReadbackMode = readbackMode;
     chainStep.schroederSpatialTransitionPolicy = spatialTransitionPolicy;
     chainStep.residentProductMass = chainBatch.nextResidentProductMass ?? null;

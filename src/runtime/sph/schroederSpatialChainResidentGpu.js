@@ -146,6 +146,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
         ...args, mechanicsLevels, classificationPolicy, forceInputs, mechanicsOptions, ...current.nextParticleUploads,
         sphParticleState:current.sphParticleState, mlsMpmParticleState:current.mlsMpmParticleState,
         sourceFamilyConsumerLease: index === 0 ? args.sourceFamilyConsumerLease ?? null : null,
+        prebuiltSpatialEpoch: index === 0 ? args.prebuiltInitialSpatialEpoch ?? null : null,
         device, closureOptions, retainForPublication:index === stepCount - 1 });
       privateSteps.push(next);
       current = next;

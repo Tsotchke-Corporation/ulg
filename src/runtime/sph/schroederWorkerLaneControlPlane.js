@@ -2188,7 +2188,13 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
     const canonicalSourceLineage = phaseCarrierOneToFourTransition
       ? phaseCarrierOneToFourTransition.terminalLineage
       : sourceLineage;
-    const sourceToSealExact = completedCount === 1
+    const levelChainMultiStepBatchSeal = Boolean(
+      finalEpochSeal.mechanicsLevelCount >= 3
+      && completedCount > 1
+      && workerRouteLineageEquals(canonicalSourceLineage, finalEpochLineage)
+      && targetLineage.physicsTick === canonicalSourceLineage.physicsTick + completedCount
+    );
+    const sourceToSealExact = completedCount === 1 || levelChainMultiStepBatchSeal
       ? workerRouteLineageEquals(canonicalSourceLineage, finalEpochLineage)
       : canonicalSourceLineage.storageGeneration
           < finalEpochLineage.storageGeneration

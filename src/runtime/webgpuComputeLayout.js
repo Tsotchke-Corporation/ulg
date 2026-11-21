@@ -479,10 +479,14 @@ function fenceConfirmedCleanup(ticket, requestFence, queue = null) {
     const fence = requestFence.call(queue);
     if (fence && typeof fence.then === 'function') {
       Promise.resolve(fence).then(() => ticket.finish(true), () => {
+        try { ticket.onQueueFenceRejected?.(); } catch {}
         // Keep the cleanup quarantined until fulfilled device loss.
       });
+    } else {
+      try { ticket.onQueueFenceRejected?.(); } catch {}
     }
   } catch {
+    try { ticket.onQueueFenceRejected?.(); } catch {}
     // A missing, throwing or rejected fence never authorizes cleanup.
   }
 }
@@ -501,10 +505,12 @@ export function deferConfirmedSubmittedWorkCleanup(device, cleanup, options = nu
     throw new TypeError('Confirmed cleanup requires a device and cleanup function');
   }
   const state = confirmedCleanupDeviceState(device);
-  const ticket = { cleanup, onQueueFenceRequested: null, finished: false, finish: null };
+  const ticket = { cleanup, onQueueFenceRequested: null, onQueueFenceRejected: null, finished: false, finish: null };
   try {
     const observer = options?.onQueueFenceRequested;
     if (typeof observer === 'function') ticket.onQueueFenceRequested = observer;
+    const rejectObserver = options?.onQueueFenceRejected;
+    if (typeof rejectObserver === 'function') ticket.onQueueFenceRejected = rejectObserver;
   } catch {
     // A telemetry accessor failure must not change cleanup behavior.
   }

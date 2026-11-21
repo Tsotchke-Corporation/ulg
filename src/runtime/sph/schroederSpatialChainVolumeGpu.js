@@ -4,10 +4,49 @@ import { validateSchroederSpatialParentFieldViewDescriptor } from '../../../ulg-
 import { ownsSchroederSpatialEpochGenerationConsumerLease,
   resolveSchroederSpatialEpochGenerationConsumerExecution } from './schroederSpatialEpochGpu.js';
 import { tagWebGpuBufferDevice, webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
+import {
+  unwrapWebGpuCacheDevice,
+  createCachedExplicitBindGroup
+} from '../webgpuComputeLayout.js';
 
 const IDENTITY = ['generationId','deviceOrdinal','laneOrdinal','leaseToken','sourceFamilyId',
   'storageGeneration','physicsTick','physicsSubstep','positionEpoch','topologyEpoch','chartEpoch','levelEpoch','supportEpoch'];
 const ROW_OFFSET_WORDS = 64;
+const chainVolumePipelinesByDevice = new WeakMap();
+
+function sharedChainVolumePipelines(device, phaseMoments) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let entry = chainVolumePipelinesByDevice.get(keyDevice);
+  const key = phaseMoments ? 'phaseMoments' : 'scalar';
+  if (entry?.[key]) return entry[key];
+  const bundle = (code, types, names) => {
+    const module = device.createShaderModule({ code });
+    const layout = device.createBindGroupLayout({
+      entries: types.map((type, binding) => ({ binding, visibility: 4, buffer: { type } }))
+    });
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+    return {
+      layout,
+      pipelines: names.map(entryPoint => device.createComputePipeline({
+        layout: pipelineLayout, compute: { module, entryPoint }
+      }))
+    };
+  };
+  const compiled = Object.freeze({
+    up: bundle(createSchroederSpatialChainVolumeWgsl({ phaseMoments }),
+      [...Array(6).fill('read-only-storage'), 'storage', 'uniform'],
+      ['initialize_volume', 'restrict_volume', 'seal_volume']),
+    down: bundle(createSchroederSpatialChainVolumeAdjointWgsl({ phaseMoments }),
+      [...Array(3).fill('read-only-storage'), ...Array(3).fill('storage'), 'uniform'],
+      ['initialize_adjoint', 'pullback', 'seal_adjoint'])
+  });
+  if (!entry) {
+    entry = Object.create(null);
+    chainVolumePipelinesByDevice.set(keyDevice, entry);
+  }
+  entry[key] = compiled;
+  return compiled;
+}
 
 // Derived linear operators only. This object does not grant EOS, pressure,
 // native-state mutation or publication authority. The caller retains its
@@ -31,20 +70,7 @@ export function createSchroederSpatialChainVolumeGpu(device, {
     || [...parents,...natives].some(n => (64+n*rowStrideWords)*4 > limit)) {
     throw new RangeError('Chain volume exceeds device storage limits');
   }
-  const bundle = (code, types, names) => {
-    const module = device.createShaderModule({code});
-    const layout = device.createBindGroupLayout({entries:types.map((type,binding)=>({
-      binding,visibility:4,buffer:{type}}))});
-    const pipelineLayout = device.createPipelineLayout({bindGroupLayouts:[layout]});
-    return {layout,pipelines:names.map(entryPoint=>device.createComputePipeline({
-      layout:pipelineLayout,compute:{module,entryPoint}}))};
-  };
-  const up = bundle(createSchroederSpatialChainVolumeWgsl({ phaseMoments }),
-    [...Array(6).fill('read-only-storage'),'storage','uniform'],
-    ['initialize_volume','restrict_volume','seal_volume']);
-  const down = bundle(createSchroederSpatialChainVolumeAdjointWgsl({ phaseMoments }),
-    [...Array(3).fill('read-only-storage'),...Array(3).fill('storage'),'uniform'],
-    ['initialize_adjoint','pullback','seal_adjoint']);
+  const { up, down } = sharedChainVolumePipelines(device, phaseMoments);
   const allocated = [];
   const destroyedBuffers = new Set();
   const destroyBuffer = b => {if(!destroyedBuffers.has(b)){destroyedBuffers.add(b);b.destroy();}};
@@ -111,7 +137,7 @@ export function createSchroederSpatialChainVolumeGpu(device, {
     } catch{return false;}
   }
   function bind(encoder,b,resources,count,indirect=null) {
-    const group=device.createBindGroup({layout:b.layout,entries:resources.map((buffer,binding)=>({binding,resource:{buffer}}))});
+    const group=createCachedExplicitBindGroup(device,{label:'ulg-chain-volume-bg',layout:b.layout,entries:resources.map((buffer,binding)=>({binding,resource:{buffer}}))});
     const pass=encoder.beginComputePass();pass.setBindGroup(0,group);
     pass.setPipeline(b.pipelines[0]);pass.dispatchWorkgroups(1);
     pass.setPipeline(b.pipelines[1]);
@@ -208,13 +234,18 @@ export function createSchroederSpatialChainVolumeGpu(device, {
       }else if(!live(execution))throw new TypeError('Stale chain volume submit');
       owner.submitted=true;return true;
     },
-    async releaseAfter(execution){
+    async releaseAfter(execution, externalFence = null){
       const owner=owners.get(execution);if(!owner || owner.released)return false;
       if(!owner.submitted)throw new TypeError('Chain volume release needs a submitted execution');
-      if(!owner.releasePromise)owner.releasePromise=device.queue.onSubmittedWorkDone().then(()=>{
-        if(owner.released || owner.arena.owner!==owner)return false;
-        owner.released=true;owner.arena.owner=null;return true;
-      },error=>{owner.releasePromise=null;throw error;});
+      if(!owner.releasePromise){
+        const fence = externalFence && typeof externalFence.then === 'function'
+          ? externalFence
+          : device.queue.onSubmittedWorkDone();
+        owner.releasePromise=Promise.resolve(fence).then(()=>{
+          if(owner.released || owner.arena.owner!==owner)return false;
+          owner.released=true;owner.arena.owner=null;return true;
+        },error=>{owner.releasePromise=null;throw error;});
+      }
       return owner.releasePromise;
     },
     discard(execution,{discardedEncoder=false}={}){

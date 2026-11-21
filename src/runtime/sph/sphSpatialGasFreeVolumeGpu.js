@@ -40,6 +40,7 @@ import { createSchroederSpatialChainVolumeGpu } from './schroederSpatialChainVol
 import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
 import { createSphSpatialGasChainFreeVolumeWgsl } from './sphSpatialGasChainFreeVolumeWgsl.js';
 import { sphSpatialGasChainPressureWgsl } from './sphSpatialGasChainPressureWgsl.js';
+import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
 
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE = {
@@ -66,9 +67,12 @@ const retainedGasFreeVolumeEosReceipts = new WeakMap();
 const gasFreeVolumePipelinesByDevice = new WeakMap();
 const aerosolVolumePipelinesByDevice = new WeakMap();
 const historyVolumePipelinesByDevice = new WeakMap();
+const chainGasFreeVolumePipelinesByDevice = new WeakMap();
+const chainGasPressurePipelinesByDevice = new WeakMap();
 
 function sharedHistoryVolumePipelines(device, layout) {
-  const cached = historyVolumePipelinesByDevice.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const cached = historyVolumePipelinesByDevice.get(keyDevice);
   if (cached) return cached;
   const module = device.createShaderModule({ label: 'ulg-sph-spatial-gas-history-volume-shader',
     code: createSphExactHistoryGasVolumeWgsl(layout) });
@@ -76,12 +80,13 @@ function sharedHistoryVolumePipelines(device, layout) {
     label: `ulg-sph-spatial-gas-history-${entryPoint}`, compute: { module, entryPoint } });
   const result = Object.freeze({ scatter: pipeline('scatter_history_condensed_volume'),
     build: pipeline('build_gas_free_volume'), finalize: pipeline('finalize_gas_free_volume') });
-  historyVolumePipelinesByDevice.set(device, result);
+  historyVolumePipelinesByDevice.set(keyDevice, result);
   return result;
 }
 
 function sharedAerosolVolumePipeline(device, layout) {
-  const cached = aerosolVolumePipelinesByDevice.get(device);
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const cached = aerosolVolumePipelinesByDevice.get(keyDevice);
   if (cached) return cached;
   const module = device.createShaderModule({
     label: 'ulg-sph-spatial-gas-free-volume-aerosol-shader',
@@ -92,7 +97,7 @@ function sharedAerosolVolumePipeline(device, layout) {
     layout: 'auto',
     compute: { module, entryPoint: 'scatter_aerosol_condensed_volume' }
   });
-  aerosolVolumePipelinesByDevice.set(device, pipeline);
+  aerosolVolumePipelinesByDevice.set(keyDevice, pipeline);
   return pipeline;
 }
 
@@ -100,8 +105,9 @@ function sharedGasFreeVolumePipelines(device, layout) {
   // Capacities, geometry and authority are runtime uniforms, not shader
   // specializations. Share only immutable compiled code on this exact device;
   // each runtime below still owns its arenas, bindings and execution leases.
+  const keyDevice = unwrapWebGpuCacheDevice(device);
   const code = createSphSpatialGasFreeVolumeWgsl(layout);
-  let byCode = gasFreeVolumePipelinesByDevice.get(device);
+  let byCode = gasFreeVolumePipelinesByDevice.get(keyDevice);
   const cached = byCode?.get(code);
   if (cached) return cached;
   const label = 'ulg-sph-spatial-gas-free-volume';
@@ -121,10 +127,51 @@ function sharedGasFreeVolumePipelines(device, layout) {
   // A construction error must not publish a partially initialized bundle.
   if (!byCode) {
     byCode = new Map();
-    gasFreeVolumePipelinesByDevice.set(device, byCode);
+    gasFreeVolumePipelinesByDevice.set(keyDevice, byCode);
   }
   byCode.set(code, pipelines);
   return pipelines;
+}
+
+function sharedChainGasFreeVolumePipelines(device, layout) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const code = createSphSpatialGasChainFreeVolumeWgsl(layout);
+  let byCode = chainGasFreeVolumePipelinesByDevice.get(keyDevice);
+  const cached = byCode?.get(code);
+  if (cached) return cached;
+  const module = device.createShaderModule({ code });
+  const pipeline = entryPoint => device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint } });
+  const result = Object.freeze({
+    validate: pipeline('validate_chain_gas_free_volume_authority'),
+    scatter: pipeline('scatter_chain_condensed_volume')
+  });
+  if (!byCode) {
+    byCode = new Map();
+    chainGasFreeVolumePipelinesByDevice.set(keyDevice, byCode);
+  }
+  byCode.set(code, result);
+  return result;
+}
+
+function sharedChainGasPressurePipelines(device) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const cached = chainGasPressurePipelinesByDevice.get(keyDevice);
+  if (cached) return cached;
+  const module = device.createShaderModule({ code: sphSpatialGasChainPressureWgsl });
+  const bindGroupLayout = device.createBindGroupLayout({
+    entries: [3, 4, 6, 7, 8, 9, 10].map(binding => ({
+      binding, visibility: 4,
+      buffer: { type: binding === 7 || binding === 10 ? 'uniform' : binding === 9 ? 'storage' : 'read-only-storage' }
+    }))
+  });
+  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+  const result = Object.freeze({
+    bindGroupLayout,
+    pipelines: ['initialize_chain_pressure', 'project_chain_pressure', 'seal_chain_pressure']
+      .map(entryPoint => device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint } }))
+  });
+  chainGasPressurePipelinesByDevice.set(keyDevice, result);
+  return result;
 }
 
 function gasFreeVolumeError(code, message, ErrorType = Error) {
@@ -850,20 +897,8 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
       retirementOwner:chainRetirementOwner
     });
   }
-  const chainPipelines = chainRuntime ? (() => {
-    const module = device.createShaderModule({code:createSphSpatialGasChainFreeVolumeWgsl(layout)});
-    const pipeline = entryPoint => device.createComputePipeline({layout:'auto',compute:{module,entryPoint}});
-    return {validate:pipeline('validate_chain_gas_free_volume_authority'),scatter:pipeline('scatter_chain_condensed_volume')};
-  })() : null;
-  const pressurePipelines = chainRuntime ? (() => {
-    const module = device.createShaderModule({code:sphSpatialGasChainPressureWgsl});
-    const bindGroupLayout = device.createBindGroupLayout({entries:[3,4,6,7,8,9,10].map(binding => ({
-      binding,visibility:4,buffer:{type:binding===7 || binding===10 ? 'uniform' : binding===9 ? 'storage' : 'read-only-storage'}
-    }))});
-    const pipelineLayout = device.createPipelineLayout({bindGroupLayouts:[bindGroupLayout]});
-    return {bindGroupLayout,pipelines:['initialize_chain_pressure','project_chain_pressure','seal_chain_pressure']
-      .map(entryPoint => device.createComputePipeline({layout:pipelineLayout,compute:{module,entryPoint}}))};
-  })() : null;
+  const chainPipelines = chainRuntime ? sharedChainGasFreeVolumePipelines(device, layout) : null;
+  const pressurePipelines = chainRuntime ? sharedChainGasPressurePipelines(device) : null;
   const pipelines = sharedGasFreeVolumePipelines(device, layout);
   const arenas = [];
   for (let arenaIndex = 0; arenaIndex < count; arenaIndex += 1) {

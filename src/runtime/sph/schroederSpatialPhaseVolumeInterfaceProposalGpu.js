@@ -22,6 +22,37 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
+
+const interfaceProposalPipelinesByDevice = new WeakMap();
+
+function sharedPhaseVolumeInterfaceProposalPipelines(device, layout, label) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const code = createSchroederSpatialPhaseVolumeInterfaceProposalWgsl(layout);
+  let byCode = interfaceProposalPipelinesByDevice.get(keyDevice);
+  const cached = byCode?.get(code);
+  if (cached) return cached;
+  const module = device.createShaderModule({
+    label: `${label}-shader`,
+    code
+  });
+  const pipeline = (entryPoint) => device.createComputePipeline({
+    label: `${label}-${entryPoint.replaceAll('_', '-')}-pipeline`,
+    layout: 'auto',
+    compute: { module, entryPoint }
+  });
+  const pipelines = Object.freeze({
+    localHeads: pipeline('emit_phase_volume_interface_local_heads'),
+    refluxRoutes: pipeline('emit_phase_volume_interface_reflux_routes'),
+    finalize: pipeline('finalize_phase_volume_interface_proposal')
+  });
+  if (!byCode) {
+    byCode = new Map();
+    interfaceProposalPipelinesByDevice.set(keyDevice, byCode);
+  }
+  byCode.set(code, pipelines);
+  return pipelines;
+}
 
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE = {
@@ -283,20 +314,11 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
     throw new RangeError('phase-volume interface proposal dispatch exceeds the WebGPU limit');
   }
 
-  const module = device.createShaderModule({
-    label: `${label}-shader`,
-    code: createSchroederSpatialPhaseVolumeInterfaceProposalWgsl(layout)
-  });
-  const pipeline = (entryPoint) => device.createComputePipeline({
-    label: `${label}-${entryPoint.replaceAll('_', '-')}-pipeline`,
-    layout: 'auto',
-    compute: { module, entryPoint }
-  });
-  const pipelines = Object.freeze({
-    localHeads: pipeline('emit_phase_volume_interface_local_heads'),
-    refluxRoutes: pipeline('emit_phase_volume_interface_reflux_routes'),
-    finalize: pipeline('finalize_phase_volume_interface_proposal')
-  });
+  const pipelines = sharedPhaseVolumeInterfaceProposalPipelines(
+    device,
+    layout,
+    label
+  );
   const deviceId = webGpuDeviceId(device);
   let destroyed = false;
   let deviceLossObserved = false;

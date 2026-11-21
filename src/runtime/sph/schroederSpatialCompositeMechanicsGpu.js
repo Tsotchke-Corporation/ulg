@@ -22,6 +22,10 @@ import { resolveSchroederChainLocalTransport } from './schroederSpatialChainLoca
 import { resolveSchroederChainCrossTransport } from './schroederSpatialChainCrossTransportGpu.js';
 import { beginSphSpatialGasPressureMechanicsFamily, finishSphSpatialGasPressureMechanicsFamily,
   abortSphSpatialGasPressureMechanicsFamily } from './sphSpatialGasLedgerEosGpu.js';
+import {
+  unwrapWebGpuCacheDevice,
+  createCachedExplicitBindGroup
+} from '../webgpuComputeLayout.js';
 
 const IDENTITY = Object.freeze(['generationId', 'deviceOrdinal', 'laneOrdinal',
   'leaseToken', 'sourceFamilyId', 'storageGeneration', 'physicsTick',
@@ -29,6 +33,126 @@ const IDENTITY = Object.freeze(['generationId', 'deviceOrdinal', 'laneOrdinal',
 const USAGE = { COPY_SRC: 4, COPY_DST: 8, STORAGE: 128, INDIRECT: 256, UNIFORM: 64 };
 const nativePublicationStages = new WeakMap();
 const nativePublications = new WeakMap();
+const compositePipelinesByDevice = new WeakMap();
+const compositeRuntimePoolByDevice = new WeakMap();
+const compositePooledMeta = new WeakMap();
+const COMPOSITE_POOL_MAX_CONFIGS_PER_DEVICE = 8;
+
+function sharedCompositeMechanicsPipelines(device, { needCorrection = false, label = 'ulg-schroeder-composite-mechanics' } = {}) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let byLabel = compositePipelinesByDevice.get(keyDevice);
+  if (!byLabel) {
+    byLabel = new Map();
+    compositePipelinesByDevice.set(keyDevice, byLabel);
+  }
+  let entry = byLabel.get(label);
+  if (!entry) {
+    const module = device.createShaderModule({ label, code: schroederSpatialCompositeMechanicsWgsl });
+    const bindGroupLayout = device.createBindGroupLayout({ entries: Array.from({ length: 6 }, (_, binding) => ({
+      binding, visibility: globalThis.GPUShaderStage?.COMPUTE ?? 4,
+      buffer: { type: binding === 5 ? 'uniform' : binding === 4 ? 'storage' : 'read-only-storage' }
+    })) });
+    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+    const pipelines = ['initialize', 'restrict_and_combine', 'seal'].map(entryPoint =>
+      device.createComputePipeline({ label: `${label}-${entryPoint}`, layout: pipelineLayout,
+        compute: { module, entryPoint } }));
+    entry = { bindGroupLayout, pipelines, forceBundle: null, prolongBundle: null, admissionBundle: null };
+    byLabel.set(label, entry);
+  }
+  if (needCorrection && !entry.forceBundle) {
+    const stageBundle = (code, types, names) => {
+      const stageModule = device.createShaderModule({ code, label: `${label}-correction` });
+      const groupLayout = device.createBindGroupLayout({ entries: types.map((type, binding) => ({
+        binding, visibility: globalThis.GPUShaderStage?.COMPUTE ?? 4, buffer: { type }
+      })) });
+      const stageLayout = device.createPipelineLayout({ bindGroupLayouts: [groupLayout] });
+      return {
+        groupLayout,
+        pipelines: names.map(entryPoint => device.createComputePipeline({
+          layout: stageLayout, compute: { module: stageModule, entryPoint }, label: `${label}-${entryPoint}`
+        }))
+      };
+    };
+    const forceBundle = stageBundle(schroederSpatialChainForceWgsl,
+      ['read-only-storage', 'read-only-storage', 'storage', 'uniform'],
+      ['initialize_force', 'force_rows', 'contact_rows', 'validate_force_rows', 'seal_force']);
+    const prolongBundle = stageBundle(schroederSpatialChainProlongWgsl,
+      ['read-only-storage', 'read-only-storage', 'read-only-storage', 'read-only-storage', 'storage', 'read-only-storage', 'storage', 'uniform'],
+      ['initialize_prolong', 'prolong_fine', 'prolong_native', 'seal_prolong']);
+    const admissionBundle = stageBundle(schroederSpatialChainCorrectionAccumulateAdmissionWgsl,
+      ['read-only-storage', 'read-only-storage', 'storage', 'uniform'],
+      ['init_chain_admission', 'accumulate_chain_admission', 'seal_chain_admission']);
+    entry.forceBundle = forceBundle;
+    entry.prolongBundle = prolongBundle;
+    entry.admissionBundle = admissionBundle;
+  }
+  return entry;
+}
+
+function compositePoolKey({ firstMoments = false, parentFieldCapacities, nativeFieldCapacities = null, label = 'ulg-schroeder-composite-mechanics' }) {
+  return `${label}|m:${firstMoments ? 1 : 0}|p:${parentFieldCapacities.join(',')}|n:${nativeFieldCapacities ? nativeFieldCapacities.join(',') : ''}`;
+}
+
+export function acquirePooledSchroederSpatialCompositeMechanicsGpu(device, options = {}) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const key = compositePoolKey(options);
+  let byKey = compositeRuntimePoolByDevice.get(keyDevice);
+  if (byKey) {
+    const bucket = byKey.get(key);
+    if (bucket && bucket.length > 0) {
+      const runtime = bucket.pop();
+      // Refresh LRU order for this dynamic level configuration.
+      byKey.delete(key);
+      byKey.set(key, bucket);
+      return runtime;
+    }
+  }
+  const runtime = createSchroederSpatialCompositeMechanicsGpu(device, options);
+  compositePooledMeta.set(runtime, { keyDevice, key });
+  return runtime;
+}
+
+export function releasePooledSchroederSpatialCompositeMechanicsGpu(runtime, { destroy = false } = {}) {
+  if (!runtime) return false;
+  const meta = compositePooledMeta.get(runtime);
+  if (!meta || destroy) {
+    compositePooledMeta.delete(runtime);
+    try { runtime.destroy(); } catch {}
+    return false;
+  }
+  let byKey = compositeRuntimePoolByDevice.get(meta.keyDevice);
+  if (!byKey) {
+    byKey = new Map();
+    compositeRuntimePoolByDevice.set(meta.keyDevice, byKey);
+  }
+  let bucket = byKey.get(meta.key);
+  if (!bucket) {
+    bucket = [];
+    byKey.set(meta.key, bucket);
+  } else {
+    byKey.delete(meta.key);
+    byKey.set(meta.key, bucket);
+  }
+  if (bucket.length < 2) {
+    bucket.push(runtime);
+  } else {
+    compositePooledMeta.delete(runtime);
+    try { runtime.destroy(); } catch {}
+  }
+  // Evict oldest unused dynamic level-capacity configurations beyond cap.
+  while (byKey.size > COMPOSITE_POOL_MAX_CONFIGS_PER_DEVICE) {
+    const oldestKey = byKey.keys().next().value;
+    const evicted = byKey.get(oldestKey);
+    byKey.delete(oldestKey);
+    if (evicted) {
+      for (const r of evicted) {
+        compositePooledMeta.delete(r);
+        try { r.destroy(); } catch {}
+      }
+    }
+  }
+  return true;
+}
 
 // A chain has one particle consumer. Retain its control arena until that
 // consumer has submitted the whole batch, including the final rollback.
@@ -110,34 +234,16 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
   if ([...layouts,...(nativeLayouts ?? []),...(correctedLayouts ?? [])].some(x => x.byteLength > bufferLimit)) {
     throw new RangeError('Composite mechanics exceeds WebGPU storage limits');
   }
-  const module = device.createShaderModule({ label, code: schroederSpatialCompositeMechanicsWgsl });
-  const bindGroupLayout = device.createBindGroupLayout({ entries: Array.from({ length: 6 }, (_, binding) => ({
-    binding, visibility: globalThis.GPUShaderStage?.COMPUTE ?? 4,
-    buffer: { type: binding === 5 ? 'uniform' : binding === 4 ? 'storage' : 'read-only-storage' }
-  })) });
-  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-  const pipelines = ['initialize', 'restrict_and_combine', 'seal'].map(entryPoint =>
-    device.createComputePipeline({ label: `${label}-${entryPoint}`, layout: pipelineLayout,
-      compute: { module, entryPoint } }));
-  const stageBundle = (code, types, names) => {
-    const stageModule=device.createShaderModule({ code, label: `${label}-correction` });
-    const groupLayout=device.createBindGroupLayout({ entries: types.map((type,binding)=>({
-      binding,visibility:globalThis.GPUShaderStage?.COMPUTE ?? 4,buffer:{type}
-    })) });
-    const stageLayout=device.createPipelineLayout({bindGroupLayouts:[groupLayout]});
-    return {groupLayout,pipelines:names.map(entryPoint=>device.createComputePipeline({
-      layout:stageLayout,compute:{module:stageModule,entryPoint},label:`${label}-${entryPoint}`
-    }))};
-  };
-  const forceBundle=nativeLayouts ? stageBundle(schroederSpatialChainForceWgsl,
-    ['read-only-storage','read-only-storage','storage','uniform'],
-    ['initialize_force','force_rows','contact_rows','validate_force_rows','seal_force']) : null;
-  const prolongBundle=nativeLayouts ? stageBundle(schroederSpatialChainProlongWgsl,
-    ['read-only-storage','read-only-storage','read-only-storage','read-only-storage','storage','read-only-storage','storage','uniform'],
-    ['initialize_prolong','prolong_fine','prolong_native','seal_prolong']) : null;
-  const admissionBundle=nativeLayouts ? stageBundle(schroederSpatialChainCorrectionAccumulateAdmissionWgsl,
-    ['read-only-storage','read-only-storage','storage','uniform'],
-    ['init_chain_admission','accumulate_chain_admission','seal_chain_admission']) : null;
+  const {
+    bindGroupLayout,
+    pipelines,
+    forceBundle: cachedForceBundle,
+    prolongBundle: cachedProlongBundle,
+    admissionBundle: cachedAdmissionBundle
+  } = sharedCompositeMechanicsPipelines(device, { needCorrection: Boolean(nativeLayouts), label });
+  const forceBundle = nativeLayouts ? cachedForceBundle : null;
+  const prolongBundle = nativeLayouts ? cachedProlongBundle : null;
+  const admissionBundle = nativeLayouts ? cachedAdmissionBundle : null;
   const buffers = [];
   const allocate = (size, usage, suffix) => {
     const b = tagWebGpuBufferDevice(device.createBuffer({ size, usage, label: `${label}-${suffix}` }), device);
@@ -286,7 +392,7 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
         const bound = [parent.parentFieldViewBuffer,
           previous?.parentFieldViewBuffer ?? nativeStates[0].buffer,
           pairs[i].sourceStateBuffer, nativeStates[i+1].buffer, output.stateBuffer, output.paramsBuffer];
-        const group = device.createBindGroup({ layout: bindGroupLayout,
+        const group = createCachedExplicitBindGroup(device, { label: `${label}-pair-${i}-bg`, layout: bindGroupLayout,
           entries: bound.map((buffer,binding) => ({ binding, resource: { buffer } })) });
         const pass = encoder.beginComputePass({ label: `${label}-pair-${i}` });
         pass.setBindGroup(0, group);
@@ -309,7 +415,7 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
   function encodeCorrection(encoder,execution,owner,forces) {
     const {arena,authority,nativeStates}=owner, c=arena.correction;
     for (const buffer of [...c.updatedBuffers,...c.nativeBuffers,c.controlBuffer]) encoder.clearBuffer(buffer);
-    const group=(bundle,bound)=>device.createBindGroup({layout:bundle.groupLayout,
+    const group=(bundle,bound)=>createCachedExplicitBindGroup(device,{label:`${label}-corr-bg`,layout:bundle.groupLayout,
       entries:bound.map((buffer,binding)=>({binding,resource:{buffer}}))});
     const baseParams=parent=>{
       const words=new Uint32Array(48); words[0]=execution.completionOrdinal;words[1]=execution.completionOrdinal;
@@ -513,14 +619,16 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
     owner.arena.execution = null; owners.delete(execution); released.add(execution);
     return true;
   }
-  function releaseExecutionAfter(execution) {
+  function releaseExecutionAfter(execution, externalFence = null) {
     const owner = owners.get(execution);
     if (released.has(execution)) return Promise.resolve(true);
     if (!owner?.submitted) return Promise.reject(new TypeError('Composite release requires submitted work'));
     if (owner.publication?.status==='active') return Promise.reject(new TypeError('Native publication still owns correction storage'));
     if (owner.publication?.record?.consumer === 'active') return Promise.reject(new TypeError('Chain G2P still owns native publication storage'));
     if (owner.releasePromise) return owner.releasePromise;
-    const fence = device.queue.onSubmittedWorkDone();
+    const fence = externalFence && typeof externalFence.then === 'function'
+      ? externalFence
+      : device.queue.onSubmittedWorkDone();
     if (!fence || typeof fence.then !== 'function') {
       return Promise.reject(new TypeError('Composite retirement requires queue completion evidence'));
     }

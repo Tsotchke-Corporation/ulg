@@ -1,8 +1,65 @@
 import { createSchroederSpatialPhaseVolumeInterfaceProposalGpu } from './schroederSpatialPhaseVolumeInterfaceProposalGpu.js';
 import { resolveSchroederSpatialMechanicsChainAuthority,
   resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority } from './schroederSpatialEpochTransaction.js';
+import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
 
 const owners = new WeakMap();
+const localTransportRuntimePoolByDevice = new WeakMap();
+const LOCAL_TRANSPORT_POOL_MAX_CAPACITIES = 16;
+
+function acquirePooledLocalTransportRuntime(device, fineFieldCapacity) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const byCap = localTransportRuntimePoolByDevice.get(keyDevice);
+  if (byCap) {
+    const bucket = byCap.get(fineFieldCapacity);
+    if (bucket && bucket.length > 0) {
+      const runtime = bucket.pop();
+      byCap.delete(fineFieldCapacity);
+      byCap.set(fineFieldCapacity, bucket);
+      return runtime;
+    }
+  }
+  return createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
+    fineFieldCapacity, arenaCount: 1
+  });
+}
+
+function releasePooledLocalTransportRuntime(device, fineFieldCapacity, runtime, { destroy = false } = {}) {
+  if (!runtime) return true;
+  if (destroy) {
+    return runtime.destroy();
+  }
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let byCap = localTransportRuntimePoolByDevice.get(keyDevice);
+  if (!byCap) {
+    byCap = new Map();
+    localTransportRuntimePoolByDevice.set(keyDevice, byCap);
+  }
+  let bucket = byCap.get(fineFieldCapacity);
+  if (!bucket) {
+    bucket = [];
+    byCap.set(fineFieldCapacity, bucket);
+  } else {
+    byCap.delete(fineFieldCapacity);
+    byCap.set(fineFieldCapacity, bucket);
+  }
+  if (bucket.length < 4) {
+    bucket.push(runtime);
+  } else {
+    runtime.destroy();
+  }
+  while (byCap.size > LOCAL_TRANSPORT_POOL_MAX_CAPACITIES) {
+    const oldestCap = byCap.keys().next().value;
+    const evicted = byCap.get(oldestCap);
+    byCap.delete(oldestCap);
+    if (evicted) {
+      for (const r of evicted) {
+        try { r.destroy(); } catch {}
+      }
+    }
+  }
+  return true;
+}
 export function resolveSchroederChainLocalTransport(handle, device, transaction, enabled) {
   const owner = owners.get(handle);
   if (!owner || owner.device !== device || owner.transaction !== transaction || owner.retired
@@ -16,7 +73,7 @@ export function resolveSchroederChainLocalTransport(handle, device, transaction,
 // Native S9-C heads describe co-located native fields only. They do not claim
 // inherited/composite interface or reflux authority. The composite owner keeps
 // these original topology producers alive through all native consumers.
-export async function prepareSchroederChainLocalTransport(device, transaction, enabled) {
+export async function prepareSchroederChainLocalTransport(device, transaction, enabled, { poolRuntimes = false } = {}) {
   const chain = resolveSchroederSpatialMechanicsChainAuthority(transaction, { device });
   if (!Array.isArray(enabled) || enabled.length !== chain.mechanicsLevelViews.length) {
     throw new TypeError('Native transport requires one explicit declaration per mechanics level');
@@ -30,11 +87,18 @@ export async function prepareSchroederChainLocalTransport(device, transaction, e
     await fence;
     owner.retired = true;
     for (const record of records) {
-      if (record.proposal && !record.proposal.released) {
-        if (submitted) await record.runtime.releaseExecutionAfter(record.proposal, fence);
-        else record.runtime.releaseExecution(record.proposal, { discardedEncoder: true });
+      let healthy = true;
+      try {
+        if (record.proposal && !record.proposal.released) {
+          if (submitted) await record.runtime.releaseExecutionAfter(record.proposal, fence);
+          else record.runtime.releaseExecution(record.proposal, { discardedEncoder: true });
+        }
+      } catch (err) {
+        healthy = false;
+        try { record.runtime.destroy(); } catch {}
+        throw err;
       }
-      if (!record.runtime.destroy()) throw new Error('Native topology still has live consumers');
+      releasePooledLocalTransportRuntime(device, record.fineFieldCapacity, record.runtime, { destroy: !healthy || !submitted || poolRuntimes !== true });
     }
     return true;
   };
@@ -44,10 +108,12 @@ export async function prepareSchroederChainLocalTransport(device, transaction, e
       const base = resolveSchroederSpatialPhaseVolumeSurfaceStressAuthority(transaction, {
         selectedLevel: view.selectedLevel, mechanicsFieldView: view.mechanicsFieldView
       });
-      const runtime = createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
-        fineFieldCapacity: base.fieldCapacity, arenaCount: 1
-      });
-      const record = { index, runtime, base, proposal: null };
+      const runtime = poolRuntimes === true
+        ? acquirePooledLocalTransportRuntime(device, base.fieldCapacity)
+        : createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
+            fineFieldCapacity: base.fieldCapacity, arenaCount: 1
+          });
+      const record = { index, runtime, base, fineFieldCapacity: base.fieldCapacity, proposal: null };
       records.push(record);
       try { record.proposal = runtime.encode(encoder, {
         fineReceipt: base.phaseVolumeReceipt, submittedNativeReceipt: base.phaseVolumeReceipt

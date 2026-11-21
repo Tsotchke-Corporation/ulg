@@ -159,7 +159,7 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
     const seal = createPostMechanicsStageOutputSeal(result, { device,sphParticleState,mlsMpmParticleState,
       sphParticleUpload,mlsMpmParticleUpload,sourceStateBuffer,sourceThermoBuffer,sourceMechanicsBuffer,
       thermalMaterialTable,dtSeconds,exactLedger }, { onLastRelease() {
-        void releaseSphExactMassRead(massRead).then(() => {
+        void releaseSphExactMassRead(massRead, { deferInBurst: true }).then(() => {
           if(!adoptedEnergy) energyBuffer.destroy();
           if(!adoptedParcels) retireParcels();validationBuffer.destroy();borrow.release();
         }).catch(() => {});

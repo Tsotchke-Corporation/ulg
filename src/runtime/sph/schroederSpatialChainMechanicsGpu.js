@@ -1,7 +1,10 @@
 import { createSchroederSpatialEpochTransaction, admitSchroederSpatialEpochTransactionReader,
   abortSchroederSpatialEpochTransaction, SCHROEDER_SPATIAL_EPOCH_READER,
   SCHROEDER_SPATIAL_EPOCH_READER_PHASE } from './schroederSpatialEpochTransaction.js';
-import { createSchroederSpatialCompositeMechanicsGpu } from './schroederSpatialCompositeMechanicsGpu.js';
+import {
+  acquirePooledSchroederSpatialCompositeMechanicsGpu,
+  releasePooledSchroederSpatialCompositeMechanicsGpu
+} from './schroederSpatialCompositeMechanicsGpu.js';
 import { runMlsMpmP2gGridProjectionWebGpu } from './sphGridGpuKernel.js';
 import { runMlsMpmLevelChainG2pWebGpu } from './sphG2pGpuKernel.js';
 import { runSchroederSpatialMechanicalProposalWebGpu } from './schroederSpatialMechanicalProposalsGpu.js';
@@ -41,9 +44,9 @@ export async function runSchroederSpatialChainMechanicsWebGpu({device,source,gen
       readerId:SCHROEDER_SPATIAL_EPOCH_READER.MECHANICS_P2G,phase:SCHROEDER_SPATIAL_EPOCH_READER_PHASE.PRE_INTEGRATION});
     if (localLawInputs?.some(law => law.phaseVolumeInterfaceTransportRequired)) {
       localTransport = await prepareSchroederChainLocalTransport(device, transaction,
-        localLawInputs.map(law => law.phaseVolumeInterfaceTransportRequired));
+        localLawInputs.map(law => law.phaseVolumeInterfaceTransportRequired), { poolRuntimes: true });
     }
-    if(crossLevelTransportRequired)crossTransport=prepareSchroederChainCrossTransport({device,transaction,localLawInputs});
+    if(crossLevelTransportRequired)crossTransport=prepareSchroederChainCrossTransport({device,transaction,localLawInputs,poolStorage:true});
     const projections=[];
     for(const spec of mechanicsLevels)projections.push(await runMlsMpmP2gGridProjectionWebGpu({
       ...mechanicsOptions,device,...source,mechanicsMaterialTable,
@@ -51,7 +54,7 @@ export async function runSchroederSpatialChainMechanicsWebGpu({device,source,gen
       schroederSelectedLevel:spec.selectedLevel,mechanicsFieldMode:'required',
       gridSpacingM:spec.mechanicsGrid.gridSpacingM,boxDimsM:spec.mechanicsGrid.boxDimsM,
       dt:forceInputs.dt,internalPressureScale,readbackMode:'no-full-readback'}));
-    composite=createSchroederSpatialCompositeMechanicsGpu(device,{
+    composite=acquirePooledSchroederSpatialCompositeMechanicsGpu(device,{
       firstMoments:crossLevelTransportRequired,
       parentFieldCapacities:generation.mechanicsAdjacentLevelPairs.map(p=>p.parentFieldView.parentFieldCapacity),
       nativeFieldCapacities:generation.mechanicsLevelViews.map(v=>v.mechanicsFieldView.fieldCapacity),arenaCount:1});
@@ -69,16 +72,18 @@ export async function runSchroederSpatialChainMechanicsWebGpu({device,source,gen
     return {transaction,composite,execution,publication,g2p,proposals};
   }catch(error){
     error.chainMechanicsCleanupCompletion=(async()=>{
-      await device.queue.onSubmittedWorkDone();
+      const done = device.queue.onSubmittedWorkDone();
+      await done;
       await localTransport?.retire(Promise.resolve());
       await crossTransport?.retire(Promise.resolve());
       g2p?.destroyOutputParticleBuffers();
       for(const p of proposals)if(!p.released)await p.releaseAfterSubmittedWork();
       if(execution){
-        if(submitted)await composite.releaseExecutionAfter(execution);
+        if(submitted)await composite.releaseExecutionAfter(execution, Promise.resolve(true));
         else composite.discardExecution(execution,{discardedEncoder:true});
       }
-      composite?.destroy();if(transaction)abortSchroederSpatialEpochTransaction(transaction);
+      releasePooledSchroederSpatialCompositeMechanicsGpu(composite, { destroy: true });
+      if(transaction)abortSchroederSpatialEpochTransaction(transaction);
     })();
     try{await error.chainMechanicsCleanupCompletion;}catch(cleanupError){error.chainMechanicsCleanupError=cleanupError;}
     throw error;

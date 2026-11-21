@@ -7,8 +7,143 @@ import { acquireSchroederSpatialEpochGenerationConsumerLease,
   releaseSchroederSpatialEpochGenerationConsumerLeaseQueueOrderedAfterFinalConsumer } from './schroederSpatialEpochGpu.js';
 import { uploadedMechanicsMaterialPhaseRecordsMatch } from './sphMechanicsRefreshGpuKernel.js';
 import { snapshotSchroederChainLocalLaws, schroederChainLocalLawsMatch } from './schroederSpatialChainLocalLaws.js';
+import {
+  unwrapWebGpuCacheDevice,
+  createCachedExplicitBindGroup
+} from '../webgpuComputeLayout.js';
 
 const owners = new WeakMap();
+const crossTransportPipelinesByDevice = new WeakMap();
+const crossTransportPoolByDevice = new WeakMap();
+const CROSS_TRANSPORT_POOL_MAX_CONFIGS = 8;
+
+function sharedCrossTransportPipelines(device) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  let cached = crossTransportPipelinesByDevice.get(keyDevice);
+  if (cached) return cached;
+  const module = device.createShaderModule({ code: schroederSpatialChainCrossTransportWgsl, label: 'ulg-chain-cross-transport' });
+  const layout = device.createBindGroupLayout({
+    entries: Array.from({ length: 11 }, (_, binding) => ({
+      binding, visibility: 4,
+      buffer: { type: binding === 8 ? 'uniform' : [6, 7, 9].includes(binding) ? 'storage' : 'read-only-storage' }
+    }))
+  });
+  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
+  const pipelines = ['initialize_cross', 'count_coarse_overlap', 'exchange_simultaneous', 'apply_coarse_delta', 'validate_cross', 'seal_cross', 'admit_cross_angular']
+    .map(entryPoint => device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint } }));
+  const accounting = (code, entryPoint, types) => {
+    const m = device.createShaderModule({ code });
+    const l = device.createBindGroupLayout({ entries: types.map((type, binding) => ({ binding, visibility: 4, buffer: { type } })) });
+    return {
+      layout: l,
+      pipeline: device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [l] }), compute: { module: m, entryPoint } })
+    };
+  };
+  const prolong = accounting(schroederSpatialChainCrossImpulseProlongWgsl, 'prolong_impulse',
+    ['read-only-storage', 'read-only-storage', 'read-only-storage', 'read-only-storage', 'storage', 'uniform']);
+  const reduce = accounting(schroederSpatialChainCrossAngularReductionWgsl, 'reduce_angular',
+    ['read-only-storage', 'storage', 'uniform']);
+  cached = Object.freeze({ layout, pipelines, prolong, reduce });
+  crossTransportPipelinesByDevice.set(keyDevice, cached);
+  return cached;
+}
+
+function acquireCrossTransportStorage(device, parentCapacities, nativeCapacities, { usePool = false } = {}) {
+  const keyDevice = unwrapWebGpuCacheDevice(device);
+  const key = `p:${parentCapacities.join(',')}|n:${nativeCapacities.join(',')}`;
+  if (usePool) {
+    const byKey = crossTransportPoolByDevice.get(keyDevice);
+    if (byKey) {
+      const bucket = byKey.get(key);
+      if (bucket && bucket.length > 0) {
+        const storage = bucket.pop();
+        byKey.delete(key);
+        byKey.set(key, bucket);
+        return storage;
+      }
+    }
+  }
+  const retirementOwner = Object.freeze({});
+  const volume = createSchroederSpatialChainVolumeGpu(device, {
+    phaseMoments: true, arenaCount: 1, retirementOwner,
+    parentFieldCapacities: parentCapacities,
+    nativeFieldCapacities: nativeCapacities
+  });
+  const allocated = [];
+  try {
+    let ledgerWords = 64;
+    const region = n => { const offset = ledgerWords; ledgerWords += n * 3; return offset; };
+    const parentOffsets = parentCapacities.map(c => region(c));
+    const nativeOffsets = nativeCapacities.map(c => region(c));
+    const maxCoarseCapacity = Math.max(1, ...nativeCapacities.slice(1));
+    const coarseScratchOffset = ledgerWords;
+    ledgerWords += maxCoarseCapacity * 5;
+    if (ledgerWords * 4 > Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize)) {
+      throw new RangeError('Cross transport impulse accounting exceeds device storage limits');
+    }
+    const ledger = device.createBuffer({ size: ledgerWords * 4, usage: 140, label: 'ulg-chain-cross-impulse-ledger' });
+    allocated.push(ledger);
+    const uniforms = parentCapacities.map(() => {
+      const b = device.createBuffer({ size: 256, usage: 72, label: 'ulg-chain-cross-params' });
+      allocated.push(b); return b;
+    });
+    const reductionUniforms = nativeCapacities.map((_, i) => {
+      const b = device.createBuffer({ size: 256, usage: 72, label: 'ulg-chain-cross-angular-params' });
+      allocated.push(b);
+      const words = new Uint32Array(64);
+      words[33] = nativeOffsets[i];
+      device.queue.writeBuffer(b, 0, words);
+      return b;
+    });
+    return {
+      keyDevice, key, retirementOwner, volume, allocated,
+      ledger, uniforms, reductionUniforms, parentOffsets, nativeOffsets, coarseScratchOffset
+    };
+  } catch (error) {
+    volume.destroy();
+    for (const b of allocated) b.destroy();
+    throw error;
+  }
+}
+
+function releaseCrossTransportStorage(storage, { destroy = false } = {}) {
+  if (!storage) return;
+  if (destroy) {
+    try { storage.volume.destroy(); } catch {}
+    for (const b of storage.allocated) { try { b.destroy(); } catch {} }
+    return;
+  }
+  let byKey = crossTransportPoolByDevice.get(storage.keyDevice);
+  if (!byKey) {
+    byKey = new Map();
+    crossTransportPoolByDevice.set(storage.keyDevice, byKey);
+  }
+  let bucket = byKey.get(storage.key);
+  if (!bucket) {
+    bucket = [];
+    byKey.set(storage.key, bucket);
+  } else {
+    byKey.delete(storage.key);
+    byKey.set(storage.key, bucket);
+  }
+  if (bucket.length < 2) {
+    bucket.push(storage);
+  } else {
+    try { storage.volume.destroy(); } catch {}
+    for (const b of storage.allocated) { try { b.destroy(); } catch {} }
+  }
+  while (byKey.size > CROSS_TRANSPORT_POOL_MAX_CONFIGS) {
+    const oldestKey = byKey.keys().next().value;
+    const evicted = byKey.get(oldestKey);
+    byKey.delete(oldestKey);
+    if (evicted) {
+      for (const s of evicted) {
+        try { s.volume.destroy(); } catch {}
+        for (const b of s.allocated) { try { b.destroy(); } catch {} }
+      }
+    }
+  }
+}
 const IDENTITY = ['generationId','deviceOrdinal','laneOrdinal','leaseToken','sourceFamilyId',
   'storageGeneration','physicsTick','physicsSubstep','positionEpoch','topologyEpoch','chartEpoch','levelEpoch','supportEpoch'];
 export const SCHROEDER_SPATIAL_CHAIN_CROSS_TRANSPORT_INDIRECT_DISPATCHES_PER_PAIR = 0;
@@ -26,7 +161,7 @@ export function resolveSchroederChainCrossTransport(handle, device, transaction,
 // Pressure remains with the original EOS/pressure-work receipt path. Until an
 // inherited constitutive pressure receipt is composed, a nonzero phase pressure
 // request rejects explicitly; it is never silently discarded or booked as heat.
-export function prepareSchroederChainCrossTransport({device,transaction,localLawInputs}) {
+export function prepareSchroederChainCrossTransport({device,transaction,localLawInputs,poolStorage=false}) {
   const authority=resolveSchroederSpatialMechanicsChainAuthority(transaction,{device});
   const laws=localLawInputs?.map(snapshotSchroederChainLocalLaws);
   if (!laws || laws.length!==authority.mechanicsLevelViews.length
@@ -48,43 +183,16 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
   validate();
   const parents=authority.pairAuthorities.map(p=>p.parentFieldView);
   const levels=authority.mechanicsLevelViews;
-  const retirementOwner=Object.freeze({});
-  const volume=createSchroederSpatialChainVolumeGpu(device,{phaseMoments:true,arenaCount:1,retirementOwner,
-    parentFieldCapacities:parents.map(p=>p.parentFieldCapacity),
-    nativeFieldCapacities:levels.map(v=>v.mechanicsFieldView.fieldCapacity)});
-  const allocated=[];
+  const parentCapacities = parents.map(p=>p.parentFieldCapacity);
+  const nativeCapacities = levels.map(v=>v.mechanicsFieldView.fieldCapacity);
+  const { layout, pipelines, prolong, reduce } = sharedCrossTransportPipelines(device);
+  const storage = acquireCrossTransportStorage(device, parentCapacities, nativeCapacities, { usePool: poolStorage === true });
+  const {
+    retirementOwner, volume, ledger, uniforms, reductionUniforms,
+    parentOffsets, nativeOffsets, coarseScratchOffset
+  } = storage;
   let lease,phase,closed=false,submitted=false;
   try {
-    const module=device.createShaderModule({code:schroederSpatialChainCrossTransportWgsl,label:'ulg-chain-cross-transport'});
-    const layout=device.createBindGroupLayout({entries:Array.from({length:11},(_,binding)=>({binding,visibility:4,
-      buffer:{type:binding===8?'uniform':[6,7,9].includes(binding)?'storage':'read-only-storage'}}))});
-    const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
-    const pipelines=['initialize_cross','count_coarse_overlap','exchange_simultaneous','apply_coarse_delta','validate_cross','seal_cross','admit_cross_angular'].map(entryPoint=>
-      device.createComputePipeline({layout:pipelineLayout,compute:{module,entryPoint}}));
-    const accounting=(code,entryPoint,types)=>{
-      const m=device.createShaderModule({code});
-      const l=device.createBindGroupLayout({entries:types.map((type,binding)=>({binding,visibility:4,buffer:{type}}))});
-      return {layout:l,pipeline:device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[l]}),compute:{module:m,entryPoint}})};
-    };
-    const prolong=accounting(schroederSpatialChainCrossImpulseProlongWgsl,'prolong_impulse',
-      ['read-only-storage','read-only-storage','read-only-storage','read-only-storage','storage','uniform']);
-    const reduce=accounting(schroederSpatialChainCrossAngularReductionWgsl,'reduce_angular',['read-only-storage','storage','uniform']);
-    let ledgerWords=64;
-    const region=n=>{const offset=ledgerWords;ledgerWords+=n*3;return offset;};
-    const parentOffsets=parents.map(p=>region(p.parentFieldCapacity));
-    const nativeOffsets=levels.map(v=>region(v.mechanicsFieldView.fieldCapacity));
-    const maxCoarseCapacity=Math.max(1,...levels.slice(1).map(v=>v.mechanicsFieldView.fieldCapacity));
-    const coarseScratchOffset=ledgerWords;
-    ledgerWords+=maxCoarseCapacity*5;
-    if(ledgerWords*4>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize)) {
-      throw new RangeError('Cross transport impulse accounting exceeds device storage limits');
-    }
-    const ledger=device.createBuffer({size:ledgerWords*4,usage:140,label:'ulg-chain-cross-impulse-ledger'});allocated.push(ledger);
-    const uniforms=parents.map(()=>{const b=device.createBuffer({size:256,usage:72,label:'ulg-chain-cross-params'});allocated.push(b);return b;});
-    const reductionUniforms=levels.map((_,i)=>{
-      const b=device.createBuffer({size:256,usage:72,label:'ulg-chain-cross-angular-params'});allocated.push(b);
-      const words=new Uint32Array(64);words[33]=nativeOffsets[i];device.queue.writeBuffer(b,0,words);return b;
-    });
     const groups=[];
     lease=acquireSchroederSpatialEpochGenerationConsumerLease(transaction.generation,{consumerId:'chain-cross-transport'});
     const owner={device,transaction,laws,validate,get closed(){return closed;},
@@ -106,7 +214,7 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
         const buffers=[parent.parentFieldViewBuffer,index?parents[index-1].parentFieldViewBuffer:levels[0].phaseVolumeMoment.momentBuffer,
           index?phase.phaseMomentBuffers[index-1]:levels[0].phaseVolumeMoment.momentBuffer,
           levels[index+1].phaseVolumeMoment.momentBuffer,phase.phaseMomentBuffers[index],records,fineBuffer,coarseBuffer,uniforms[index],ledger,fineGeometryBuffer];
-        const group=device.createBindGroup({label:'ulg-chain-cross-transport-bind-group',layout,
+        const group=createCachedExplicitBindGroup(device,{label:'ulg-chain-cross-transport-bind-group',layout,
           entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
         groups[index]=group;
         const fineCapacity=Math.max(1,index?parents[index-1].parentFieldCapacity:levels[0].mechanicsFieldView.fieldCapacity);
@@ -116,7 +224,7 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
         const dispatch2d=(passObj,elements)=>{const g=Math.max(1,Math.ceil(elements/64));passObj.dispatchWorkgroups(Math.min(g,max),Math.ceil(g/max));};
         const accountingPass=encoder.beginComputePass({label:'ulg-chain-cross-impulse-prolong'});
         accountingPass.setPipeline(prolong.pipeline);
-        accountingPass.setBindGroup(0,device.createBindGroup({layout:prolong.layout,entries:
+        accountingPass.setBindGroup(0,createCachedExplicitBindGroup(device,{label:'ulg-chain-cross-prolong-bg',layout:prolong.layout,entries:
           [parent.parentFieldViewBuffer,originalBuffer,fineBuffer,coarseBuffer,ledger,uniforms[index]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
         dispatch2d(accountingPass,count);accountingPass.end();
         const pass=encoder.beginComputePass({label:`ulg-chain-cross-transport-${index}`});
@@ -133,7 +241,7 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
         for(const [i,level]of levels.entries()){
           const field=level.mechanicsFieldView.fieldViewBuffer;
           const pass=encoder.beginComputePass({label:'ulg-chain-cross-native-angular'});pass.setPipeline(reduce.pipeline);
-          pass.setBindGroup(0,device.createBindGroup({layout:reduce.layout,entries:[field,ledger,reductionUniforms[i]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
+          pass.setBindGroup(0,createCachedExplicitBindGroup(device,{label:'ulg-chain-cross-angular-bg',layout:reduce.layout,entries:[field,ledger,reductionUniforms[i]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
           pass.dispatchWorkgroupsIndirect(field,60*4);pass.end();
         }
         const pass=encoder.beginComputePass({label:'ulg-chain-cross-angular-admission'});pass.setBindGroup(0,groups[0]);
@@ -148,13 +256,19 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
         if(!fence?.then)throw new TypeError('Cross transport requires its existing consumer fence');
         await fence;if(closed)return;
         if(!lease.released)await releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(lease,fence);
-        if(phase)volume.retireWithOwner(phase,retirementOwner);
-        volume.destroy();for(const b of allocated)b.destroy();closed=true;
+        let healthy = true;
+        try {
+          if(phase)volume.retireWithOwner(phase,retirementOwner);
+        } catch {
+          healthy = false;
+        }
+        releaseCrossTransportStorage(storage, { destroy: !healthy || poolStorage !== true });
+        closed=true;
       }};
     const handle=Object.freeze({retire:owner.retire});owners.set(handle,owner);return handle;
   }catch(error){
     // Construction has encoded no work. Any lease here is still unused.
     if(lease)error.crossTransportCleanup=releaseSchroederSpatialEpochGenerationConsumerLeaseAfter(lease,Promise.resolve());
-    volume.destroy();for(const b of allocated)b.destroy();throw error;
+    releaseCrossTransportStorage(storage, { destroy: true });throw error;
   }
 }

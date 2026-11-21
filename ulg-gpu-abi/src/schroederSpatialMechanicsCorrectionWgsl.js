@@ -1,4 +1,5 @@
 import { SCHROEDER_SPATIAL_MECHANICS_CORRECTION_MAGIC } from './schroederSpatialMechanicsCorrection.js';
+import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from './schroederSpatialScaleAtlas.js';
 
 // Squaring nodal mass underflows for small reaction residuals even when both
 // momentum and velocity are representable. Compare dimensionless speed, with
@@ -23,7 +24,9 @@ fn f(i:u32)->f32 { return bitcast<f32>(p(i)); }
 fn finite(v:f32)->bool { return (bitcast<u32>(v)&0x7f800000u)!=0x7f800000u; }
 fn momentum(row:Row)->vec3<f32> { return vec3<f32>(row[1],row[2],row[3]); }
 fn kinetic(row:Row)->f32 {
-  if (row[0]>0.0) { return dot(momentum(row),momentum(row))/(2.0*row[0]); } return 0.0;
+  // Divide before squaring so small nodal masses (e.g. air stencil tails or
+  // sub-microscopic parcels) do not underflow |p|^2 to zero in f32.
+  if (row[0]>0.0) { let v=momentum(row)/row[0]; return 0.5*row[0]*dot(v,v); } return 0.0;
 }
 fn valid(row:Row)->bool {
   for(var w=0u;w<8u;w++) { if(!finite(row[w]) || (row[0]==0.0 && row[w]!=0.0)) { return false; } }
@@ -233,7 +236,10 @@ fn record_cfl(row:Row,spacing:f32) {
     delta+=correction(row,topology[topology[52]+e],weight); weights+=weight;
   }
   if(abs(weights-1.0)>0.000004) { fail(4u); return; }
+  let before7=row[7];
   for(var axis=0u;axis<3u;axis++) { row[axis+1u]+=delta[axis]; } row[7]+=delta.w;
+  let cancel_tol=max(1e-12,(abs(before7)+abs(delta.w))*3e-5);
+  if(row[7]<0.0 && row[7]>=-cancel_tol && kinetic(row)<=row[7]+cancel_tol) { row[7]=0.0; }
   if(!valid(row)) { numeric_fail(4u); return; }
   if(!within_cfl(row,bitcast<f32>(topology[28]))) { record_cfl(row,bitcast<f32>(topology[28]));numeric_fail(8u); return; } store_fine(i,row);
 }
@@ -243,7 +249,10 @@ fn record_cfl(row:Row,spacing:f32) {
   for(var w=0u;w<7u;w++) { row[w]=bitcast<f32>(native[source+w]); } row[7]=kinetic(row);
   if(!valid(row)) { numeric_fail(16u); return; }
   let delta=correction(row,topology[topology[54]+i],1.0);
+  let before7=row[7];
   for(var axis=0u;axis<3u;axis++) { row[axis+1u]+=delta[axis]; } row[7]+=delta.w;
+  let cancel_tol=max(1e-12,(abs(before7)+abs(delta.w))*3e-5);
+  if(row[7]<0.0 && row[7]>=-cancel_tol && kinetic(row)<=row[7]+cancel_tol) { row[7]=0.0; }
   if(!valid(row)) { numeric_fail(32u); return; }
   if(!within_cfl(row,bitcast<f32>(topology[29]))) { numeric_fail(64u); return; } store_native(i,row);
 }
@@ -259,9 +268,73 @@ fn record_cfl(row:Row,spacing:f32) {
 }
 `;
 
+// Constant-binding (O(1) storage bindings regardless of active level count)
+// chain admission accumulator. Runs inside a single compute pass:
+//   1. init_chain_admission(level0, level0, control, params)
+//   2. accumulate_chain_admission(level0, level_i, control, params) for i=1..N-1
+//   3. seal_chain_admission(level0, level0, control, params)
+// Control layout is bit-identical to schroederSpatialChainCorrectionAdmissionWgsl
+// on words 0..20, and uses word 22 to count verified accumulated levels.
+export const schroederSpatialChainCorrectionAccumulateAdmissionWgsl = /* wgsl */ `
+@group(0) @binding(0) var<storage,read> level0:array<u32>;
+@group(0) @binding(1) var<storage,read> current_level:array<u32>;
+@group(0) @binding(2) var<storage,read_write> control:array<u32>;
+@group(0) @binding(3) var<uniform> admission_params:vec4<u32>;
+const CORRECTION_MAGIC: u32 = ${SCHROEDER_SPATIAL_MECHANICS_CORRECTION_MAGIC}u;
+const CHAIN_CONTROL_MAGIC: u32 = 0x53435331u;
+
+@compute @workgroup_size(1) fn init_chain_admission() {
+  var err = 0u;
+  if (level0[0] != CORRECTION_MAGIC || level0[1] != 1u || level0[2] != 3u || level0[27] != 0u) {
+    err |= 1u;
+  }
+  control[0] = CHAIN_CONTROL_MAGIC;
+  control[1] = 1u;
+  control[2] = 1u;
+  for (var w = 3u; w <= 15u; w++) { control[w] = level0[w]; }
+  control[16] = admission_params.y;
+  control[17] = level0[23];
+  control[18] = err;
+  control[22] = 1u;
+}
+
+@compute @workgroup_size(1) fn accumulate_chain_admission() {
+  let level_index = admission_params.x;
+  let level_count = admission_params.y;
+  var err = control[18];
+  if (control[0] != CHAIN_CONTROL_MAGIC || control[1] != 1u || control[2] != 1u
+    || control[16] != level_count || control[22] != level_index
+    || level_index == 0u || level_index >= level_count) {
+    err |= 4u;
+  }
+  if (current_level[0] != CORRECTION_MAGIC || current_level[1] != 1u
+    || current_level[2] != 3u || current_level[27] != 0u
+    || current_level[16] != level0[16] + level_index
+    || current_level[23] != level0[23]) {
+    err |= 1u;
+  }
+  for (var w = 3u; w <= 15u; w++) {
+    if (current_level[w] != level0[w]) { err |= 2u; }
+  }
+  control[18] = err;
+  control[22] = control[22] + 1u;
+}
+
+@compute @workgroup_size(1) fn seal_chain_admission() {
+  let level_count = admission_params.y;
+  var err = control[18];
+  if (control[0] != CHAIN_CONTROL_MAGIC || control[1] != 1u || control[2] != 1u
+    || control[16] != level_count || control[22] != level_count) {
+    err |= 4u;
+  }
+  control[18] = err;
+  control[2] = select(3u, 5u, err != 0u);
+}
+`;
+
 export function schroederSpatialChainCorrectionAdmissionWgsl(levelCount) {
-  if (!Number.isInteger(levelCount) || levelCount<2 || levelCount>6) {
-    throw new RangeError('Chain correction admission requires two through six levels');
+  if (!Number.isInteger(levelCount) || levelCount < 2 || levelCount > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS) {
+    throw new RangeError(`Chain correction admission requires two through ${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} levels`);
   }
   return /* wgsl */ `
   ${Array.from({length:levelCount},(_,i)=>`@group(0) @binding(${i}) var<storage,read> level${i}:array<u32>;`).join('\n')}

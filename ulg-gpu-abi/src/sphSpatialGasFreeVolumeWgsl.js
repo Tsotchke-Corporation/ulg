@@ -13,6 +13,9 @@ import {
 import {
   SCHROEDER_QUADRATIC_CONTROL_VOLUME_PROJECTION_VERSION
 } from './schroederQuadraticControlVolumeProjection.js';
+import {
+  SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS
+} from './schroederSpatialScaleAtlas.js';
 
 const u32 = (value) => `${Number(value) >>> 0}u`;
 
@@ -116,7 +119,7 @@ struct AerosolGeometry {
   fine_ny: u32,
   fine_nz: u32,
   fine_grid_shift: i32,
-  levels: array<vec4<i32>,6>,
+  levels: array<vec4<i32>,${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS}>,
 };
 @group(0) @binding(9) var<storage, read> aerosol_parcels: array<u32>;
 @group(0) @binding(10) var<uniform> aerosol_geometry: AerosolGeometry;
@@ -599,7 +602,7 @@ fn aerosol_quadratic_weight(fraction: f32, ordinal: u32) -> f32 {
 // Compose every adjacent geometric A. Each axis retains at most two
 // neighboring nodes; positive support is checked at every intermediate grid.
 fn aerosol_chain_geometry_ready() -> bool {
-  if(params.exact_level_count<1u || params.exact_level_count>6u){return false;}
+  if(params.exact_level_count<1u || params.exact_level_count>${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS}u){return false;}
   if(params.exact_level_count<=2u){return true;}
   if(any(aerosol_geometry.levels[0]!=vec4<i32>(i32(aerosol_geometry.fine_nx),
     i32(aerosol_geometry.fine_ny),i32(aerosol_geometry.fine_nz),aerosol_geometry.fine_grid_shift))){return false;}

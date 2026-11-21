@@ -36996,6 +36996,7 @@ fn main(
     schroederTileCellCount = null,
     schroederEnablePortableSummary = true,
     schroederEnableTwoLevelMechanics = false,
+    schroederEnableLevelChainMechanics = false,
     schroederEnableMechanicsFieldPairV2 = false,
     schroederTwoLevelMechanicsAuthority = 'observation',
     schroederTwoLevelFineSubstepCount = 1,
@@ -37286,6 +37287,7 @@ fn main(
       : null;
     const requestedSchroederEnablePortableSummary = Boolean(schroederEnablePortableSummary);
     const requestedSchroederEnableTwoLevelMechanics = Boolean(schroederEnableTwoLevelMechanics);
+    const requestedSchroederEnableLevelChainMechanics = Boolean(schroederEnableLevelChainMechanics);
     const requestedSchroederEnableMechanicsFieldPairV2 =
       Boolean(schroederEnableMechanicsFieldPairV2);
     const requestedSchroederTwoLevelMechanicsAuthority =
@@ -37311,6 +37313,9 @@ fn main(
         tileCellCount: requestedSchroederTileCellCount,
         spatialArenaCount: requestedSchroederSpatialArenaCount,
         enableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
+        ...(requestedSchroederEnableLevelChainMechanics
+          ? { enableLevelChainMechanics: true }
+          : {}),
         twoLevelMechanicsAuthority:
           requestedSchroederTwoLevelMechanicsAuthority,
         twoLevelFineSubstepCount:
@@ -39609,6 +39614,9 @@ fn main(
               baseGridSpacingM: requestedSchroederBaseGridSpacingM,
               spatialEpochArenaCount: requestedSchroederSpatialArenaCount,
               enableTwoLevelMechanics: requestedSchroederEnableTwoLevelMechanics,
+              ...(requestedSchroederEnableLevelChainMechanics
+                ? { enableLevelChainMechanics: true }
+                : {}),
               enableMechanicsFieldPairV2:
                 requestedSchroederEnableMechanicsFieldPairV2,
               enableCanonicalSingleLevelQueueOrderedCleanup:
@@ -40761,6 +40769,9 @@ fn main(
               requestedSchroederEnableMechanicsFieldPairV2,
             enableTwoLevelMechanics:
               requestedSchroederEnableTwoLevelMechanics,
+            ...(requestedSchroederEnableLevelChainMechanics
+              ? { enableLevelChainMechanics: true }
+              : {}),
             twoLevelMechanicsAuthority:
               requestedSchroederTwoLevelMechanicsAuthority,
             twoLevelFineSubstepCount:
@@ -53466,6 +53477,7 @@ fn main(
     spatialArenaCount = null,
     enableMechanicsFieldPairV2 = false,
     enableTwoLevelMechanics = false,
+    enableLevelChainMechanics = false,
     twoLevelMechanicsAuthority = 'observation',
     twoLevelFineSubstepCount = 1,
     spatialKeyChurnProfileRequested = false,
@@ -53512,6 +53524,7 @@ fn main(
         spatialArenaCount,
         enableMechanicsFieldPairV2,
         enableTwoLevelMechanics,
+        ...(enableLevelChainMechanics ? { enableLevelChainMechanics: true } : {}),
         twoLevelMechanicsAuthority,
         twoLevelFineSubstepCount
       }
@@ -53850,6 +53863,9 @@ fn main(
         workerHierarchyConfig.enableMechanicsFieldPairV2,
       enableTwoLevelMechanics:
         workerHierarchyConfig.enableTwoLevelMechanics,
+      ...(workerHierarchyConfig.enableLevelChainMechanics === true
+        ? { enableLevelChainMechanics: true }
+        : {}),
       enablePhaseVolumeMigration:
         workerHierarchyConfig.enablePhaseVolumeMigration
     };
@@ -53859,6 +53875,9 @@ fn main(
         workerHierarchyConfig.enableMechanicsFieldPairV2,
       enableTwoLevelMechanics:
         workerHierarchyConfig.enableTwoLevelMechanics,
+      ...(workerHierarchyConfig.enableLevelChainMechanics === true
+        ? { enableLevelChainMechanics: true }
+        : {}),
       enableLawQueue: workerHierarchyConfig.enableLawQueue,
       enableLawNeighborCandidates:
         workerHierarchyConfig.enableLawNeighborCandidates,
@@ -54357,6 +54376,9 @@ fn main(
                         workerHierarchyConfig.enableMechanicsFieldPairV2,
                       enableTwoLevelMechanics:
                         workerHierarchyConfig.enableTwoLevelMechanics,
+                      ...(workerHierarchyConfig.enableLevelChainMechanics === true
+                        ? { enableLevelChainMechanics: true }
+                        : {}),
                       twoLevelMechanicsAuthority:
                         workerHierarchyConfig.twoLevelMechanicsAuthority,
                       twoLevelFineSubstepCount:
@@ -54399,6 +54421,9 @@ fn main(
                         workerHierarchyConfig.enableMechanicsFieldPairV2,
                       enableTwoLevelMechanics:
                         workerHierarchyConfig.enableTwoLevelMechanics,
+                      ...(workerHierarchyConfig.enableLevelChainMechanics === true
+                        ? { enableLevelChainMechanics: true }
+                        : {}),
                       twoLevelMechanicsAuthority:
                         workerHierarchyConfig.twoLevelMechanicsAuthority,
                       twoLevelFineSubstepCount:

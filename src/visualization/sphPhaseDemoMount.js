@@ -1354,6 +1354,8 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'ssParticleStorageMaterialization',
   'schroederTwoLevel',
   'ssTwoLevel',
+  'schroederLevelChain',
+  'ssLevelChain',
   'schroederMechanicsFieldPairV2',
   'ssMechanicsFieldPairV2',
   'schroederTwoLevelAuthority',
@@ -8258,6 +8260,13 @@ export async function mountSphPhaseDemoOverlay({
     ),
     false
   );
+  const initialSchroederLevelChainMechanicsEnabled = booleanUrlParam(
+    initialUrlOrSchroederPolicyValue(
+      ['schroederLevelChain', 'ssLevelChain'],
+      ['enableLevelChainMechanics', 'schroederEnableLevelChainMechanics', 'levelChainMechanics']
+    ),
+    false
+  );
   const initialSchroederMechanicsFieldPairV2Enabled = booleanUrlParam(
     initialUrlOrSchroederPolicyValue(
       ['schroederMechanicsFieldPairV2', 'ssMechanicsFieldPairV2'],
@@ -8383,6 +8392,7 @@ export async function mountSphPhaseDemoOverlay({
     enableLawQueue: initialSchroederLawQueueEnabled,
     enableLawNeighborCandidates: initialSchroederLawNeighborCandidatesEnabled,
     enableTwoLevelMechanics: initialSchroederTwoLevelMechanicsEnabled,
+    enableLevelChainMechanics: initialSchroederLevelChainMechanicsEnabled,
     enableMechanicsFieldPairV2:
       initialSchroederMechanicsFieldPairV2Enabled,
     twoLevelMechanicsAuthority: initialSchroederTwoLevelMechanicsAuthority,
@@ -8456,6 +8466,7 @@ export async function mountSphPhaseDemoOverlay({
       schroederEnableLawQueue: config.enableLawQueue,
       schroederEnableLawNeighborCandidates: config.enableLawNeighborCandidates,
       schroederEnableTwoLevelMechanics: config.enableTwoLevelMechanics,
+      schroederEnableLevelChainMechanics: config.enableLevelChainMechanics === true,
       schroederEnableMechanicsFieldPairV2:
         config.enableMechanicsFieldPairV2,
       schroederTwoLevelMechanicsAuthority: config.twoLevelMechanicsAuthority,
@@ -9332,6 +9343,9 @@ export async function mountSphPhaseDemoOverlay({
         if (initialSchroederTwoLevelFineSubstepCount > 1) {
           q.set('schroederTwoLevelSubsteps', String(initialSchroederTwoLevelFineSubstepCount));
         }
+      }
+      if (initialSchroederLevelChainMechanicsEnabled) {
+        q.set('schroederLevelChain', '1');
       }
       if (initialSpatialKeyChurnProfileEnabled) {
         q.set('spatialChurnProfile', '1');

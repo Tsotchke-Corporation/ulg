@@ -3,6 +3,9 @@ import {
   schroederQuadraticControlVolumePrimalAxisExtent,
   validateSchroederQuadraticControlVolumeDescriptor
 } from './schroederQuadraticControlVolumeProjection.js';
+import {
+  SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS
+} from './schroederSpatialScaleAtlas.js';
 
 export const ULG_SPH_SPATIAL_GAS_FREE_VOLUME_SOURCE_SCHEMA =
   'peercompute.ulg.sph-spatial-gas-free-volume-source.v3';
@@ -26,7 +29,8 @@ export const SPH_SPATIAL_GAS_FREE_VOLUME_PARAMS_BYTES = 288;
 // Optional same-build extension in previously reserved words. Absence keeps
 // every extension word zero and does not add an allocation or dispatch.
 export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION = 1;
-export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES = 112;
+export const SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES =
+  16 + SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS * 16;
 
 export const SPH_SPATIAL_GAS_FREE_VOLUME_STATUS = Object.freeze({
   READY: 1 << 0,
@@ -211,7 +215,7 @@ export function createSphSpatialGasFreeVolumePlan({
   overfillToleranceRelative = 1e-5,
   overfillToleranceAbsoluteM3 = 1e-12
 } = {}) {
-  const levels = integer(exactLevelCount, 'exactLevelCount', 1, 6);
+  const levels = integer(exactLevelCount, 'exactLevelCount', 1, SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS);
   const resolvedGrid = gridDescriptor(grid);
   const lower = vec3(boxMinM, 'boxMinM', finiteNumber);
   const upper = vec3(boxMaxM, 'boxMaxM', finiteNumber);

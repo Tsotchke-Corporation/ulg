@@ -15863,3 +15863,227 @@ test('ULG resident stage worker seeded lane works through single-stage messages 
   assertNoWorkerGpuBuffers(advanced, 'seededAdvancedSchedule');
   structuredClone(advanced);
 });
+
+test('ULG worker schedule admits single-step Tier0 when semi-implicit pressure is active so paused launches never lock into explicit canonical mechanics', async () => {
+  const previousGpuBufferUsage = globalThis.GPUBufferUsage;
+  const previousGpuShaderStage = globalThis.GPUShaderStage;
+  globalThis.GPUBufferUsage = {
+    MAP_READ: 0x0001,
+    MAP_WRITE: 0x0002,
+    COPY_SRC: 0x0004,
+    COPY_DST: 0x0008,
+    INDEX: 0x0010,
+    VERTEX: 0x0020,
+    UNIFORM: 0x0040,
+    STORAGE: 0x0080,
+    INDIRECT: 0x0100,
+    QUERY_RESOLVE: 0x0200
+  };
+  globalThis.GPUShaderStage = {
+    VERTEX: 0x1,
+    FRAGMENT: 0x2,
+    COMPUTE: 0x4
+  };
+  const implicitDevice = createFakeGpuDevice();
+  const createdPipelineLabels = [];
+  const baseCreateComputePipeline = implicitDevice.createComputePipeline.bind(
+    implicitDevice
+  );
+  implicitDevice.createBindGroupLayout = (desc) => ({ desc });
+  implicitDevice.createPipelineLayout = (desc) => ({ desc });
+  implicitDevice.createComputePipeline = (desc) => {
+    if (desc?.label) createdPipelineLabels.push(desc.label);
+    return baseCreateComputePipeline(desc);
+  };
+  const implicitBuffers = lawsQuiescentSingleLaneBuffers();
+  implicitBuffers.mlsMpmParticleState = {
+    ...implicitBuffers.mlsMpmParticleState,
+    implicitPressure: { enabled: true, cflSafety: 3 }
+  };
+  const implicitLane = {
+    laneId: 'ulg:test:tier0-implicit-single-step-lane',
+    stateKey: 'ulg:test:tier0-implicit-single-step-state'
+  };
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(implicitDevice, implicitBuffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:tier0-implicit-single-step',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'tier0-implicit-single-step-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      implicitLane
+    ));
+
+    const stageOptions = {
+      schroederSpatialEpoch: {
+        selectedLevel: 0,
+        mechanicsFieldViewsRequired: false
+      },
+      schroederSameLevelMechanics: {
+        residentStepOptions: {
+          contactSolverEnabled: false,
+          ambientPressurePa: 0,
+          activeGridSafetyCells: 1
+        }
+      }
+    };
+
+    // Paused initial frame runs stepCount === 1; with implicitPressure active it
+    // must enter Tier 0 so the semi-implicit pressure solver runs on step 1.
+    const pausedStep = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(implicitDevice, implicitBuffers, stageOptions),
+        {
+          stepCount: 1,
+          scheduleId: 'ulg:test:tier0-implicit-paused-step-1'
+        },
+        implicitLane
+      )
+    );
+    assert.equal(pausedStep.status, 'worker-resident-schedule-completed');
+    assert.equal(pausedStep.completedStepCount, 1);
+    assert.equal(
+      pausedStep.executionRouteReceipt.route,
+      'tier0-fused-resident-sequence'
+    );
+    assert.deepEqual(pausedStep.executionRouteReceipt.blockers, []);
+    assert.equal(
+      pausedStep.executionRouteReceipt.execution.submissionMode,
+      'single-terminal-submission'
+    );
+    assert.deepEqual(
+      pausedStep.executionRouteReceipt.execution.submissionStepCounts,
+      [1]
+    );
+    assert.ok(
+      createdPipelineLabels.includes('ulg-sph-implicit-pressure-ip_cg_init'),
+      'single-step Tier0 schedule must actually encode the semi-implicit pressure solver'
+    );
+
+    // Subsequent Play schedule (stepCount === 4) continues seamlessly on Tier 0
+    // rather than being locked out by canonical-to-tier0-reentry-not-admitted.
+    const playStep = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(implicitDevice, implicitBuffers, stageOptions),
+        {
+          stepCount: 4,
+          scheduleId: 'ulg:test:tier0-implicit-play-step-4'
+        },
+        implicitLane
+      )
+    );
+    assert.equal(playStep.status, 'worker-resident-schedule-completed');
+    assert.equal(playStep.completedStepCount, 4);
+    assert.equal(
+      playStep.executionRouteReceipt.route,
+      'tier0-fused-resident-sequence'
+    );
+    assert.deepEqual(playStep.executionRouteReceipt.blockers, []);
+    assert.equal(
+      playStep.finalMechanicsLineage.physicsTick,
+      pausedStep.finalMechanicsLineage.physicsTick + 4
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(implicitLane);
+    if (previousGpuBufferUsage === undefined) {
+      delete globalThis.GPUBufferUsage;
+    } else {
+      globalThis.GPUBufferUsage = previousGpuBufferUsage;
+    }
+    if (previousGpuShaderStage === undefined) {
+      delete globalThis.GPUShaderStage;
+    } else {
+      globalThis.GPUShaderStage = previousGpuShaderStage;
+    }
+  }
+
+  // Without implicitPressure, stepCount === 1 preserves existing canonical
+  // routing with step-count-not-greater-than-one + terminal-lineage-unavailable.
+  const explicitDevice = createFakeGpuDevice();
+  const explicitBuffers = lawsQuiescentSingleLaneBuffers();
+  const explicitLane = {
+    laneId: 'ulg:test:explicit-single-step-lane',
+    stateKey: 'ulg:test:explicit-single-step-state'
+  };
+  const mechanicsFixture = workerSeededMechanicsRunnerFixture(explicitDevice, {
+    particleCount: 1
+  });
+  try {
+    await runUlgMechanicsResidentStageWorkerPayload(payload(
+      workerLaneSeedStage(),
+      workerSchroederStageContext(explicitDevice, explicitBuffers, {
+        schroederLaneSeed: workerLaneSeedStageOptions({
+          hotBufferKey: 'ulg:sph-resident:explicit-single-step',
+          particleCount: 1,
+          rematerializationSeedOverrides: {
+            identityRequired: true,
+            identityRevision: 'explicit-single-step-identity',
+            identitySchema: ULG_SPH_GPU_PARTICLE_IDENTITY_BUFFER_SCHEMA,
+            identityStrideBytes:
+              SPH_GPU_PARTICLE_IDENTITY_UINTS * Uint32Array.BYTES_PER_ELEMENT,
+            particleIdentityMutationApproved: true,
+            requiresAuthoritativeFourBufferRows: true,
+            outputParticleCapacity: 1
+          }
+        })
+      }),
+      null,
+      explicitLane
+    ));
+    const singleExplicit = await runUlgMechanicsResidentStageWorkerSchedulePayload(
+      schedulePayload(
+        workerSchroederStageContext(explicitDevice, explicitBuffers, {
+          schroederSpatialEpoch: {
+            useWorkerRetainedParticleBuffers: true,
+            selectedLevel: 0,
+            mechanicsGrid: WORKER_SEED_MECHANICS_GRID,
+            exactNearCellTreeEnabled: false,
+            mechanicsFieldViewsRequired: false
+          },
+          schroederSameLevelMechanics: {
+            schroederSameLevelMechanicsRunner: mechanicsFixture.runner,
+            residentStepOptions: {
+              contactSolverEnabled: false,
+              ambientPressurePa: 0,
+              activeGridSafetyCells: 1
+            }
+          }
+        }),
+        {
+          stepCount: 1,
+          scheduleId: 'ulg:test:explicit-single-step-1'
+        },
+        explicitLane
+      )
+    );
+    assert.equal(
+      singleExplicit.executionRouteReceipt.route,
+      'canonical-schroeder'
+    );
+    assert.ok(
+      singleExplicit.executionRouteReceipt.blockers.includes(
+        'step-count-not-greater-than-one'
+      )
+    );
+    assert.ok(
+      singleExplicit.executionRouteReceipt.blockers.includes(
+        'terminal-lineage-unavailable'
+      )
+    );
+  } finally {
+    releaseUlgMechanicsResidentStageWorkerLane(explicitLane);
+  }
+});

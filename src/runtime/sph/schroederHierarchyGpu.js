@@ -1,5 +1,10 @@
 import { sphGpuParticleUploadAdvertisesExactMass, assertSphLegacyMassPathAllowed,
   acquireSphParticleExactMassRead, releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
+import {
+  SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS,
+  buildSchroederMechanicsChainLevelSpecs
+} from '../../../ulg-gpu-abi/src/index.js';
+import { runSchroederSpatialChainResidentBatchWebGpu } from './schroederSpatialChainResidentGpu.js';
 import { runSchroederSplitSpareLineageScanWebGpu } from './schroederSplitSpareLineageScanGpu.js';
 import { validateSchroederSpatialMechanicsFieldViewDescriptor } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsFieldView.js';
 import {
@@ -17691,6 +17696,7 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
   schroederSpatialEpochTransaction = null,
   coarseActiveNodeList = null,
   enableTwoLevelMechanics = false,
+  enableLevelChainMechanics = false,
   enableMechanicsFieldPairV2 = false,
   enableCanonicalSingleLevelQueueOrderedCleanup = false,
   twoLevelFineSubstepCount = 2,
@@ -17975,11 +17981,16 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
       || (enableTwoLevelMechanics && twoLevelMechanicsAuthority !== 'authoritative')
       || (enableCrossLevelCoupling && !enableTwoLevelMechanics)
       || particleStorageMaterialization || enableFarAggregateForceApplication
-      || (!enableSpatialEpochGeneration && !authenticatedInjectedGenerationLevelAssignment)
+      || (!enableSpatialEpochGeneration && !authenticatedInjectedGenerationLevelAssignment && !enableLevelChainMechanics)
       || residentStepRunner !== runMlsMpmResidentStepWithOptionalWebGpu
       || twoLevelMechanicsRunner !== runSchroederTwoLevelMechanicsStepWebGpu
       || spatialTopologyTransitionRunner !== runSchroederSpatialTopologyTransitionWebGpu)) {
     throw new TypeError('Exact inventory spatial mechanics requires the preserving resident producers');
+  }
+  if (enableLevelChainMechanics && (enableTwoLevelMechanics || enableMechanicsFieldPairV2)) {
+    throw new RangeError(
+      'enableLevelChainMechanics cannot be combined with two-level coupled mechanics or paired-v2 fields'
+    );
   }
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSchroederSameLevelMechanicsWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -18348,6 +18359,346 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     readbackMode,
     tileCellCount
   });
+  if (enableLevelChainMechanics) {
+    const chainMinLevel = Number.isInteger(minLevel) ? minLevel : 0;
+    const chainMaxLevel = Number.isInteger(maxLevel) ? maxLevel : chainMinLevel + 2;
+    const chainLevelCount = chainMaxLevel - chainMinLevel + 1;
+    if (
+      chainLevelCount < 3
+      || chainLevelCount > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS
+    ) {
+      throw new RangeError(
+        `enableLevelChainMechanics requires 3..${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} contiguous levels (got ${chainLevelCount})`
+      );
+    }
+    const chainMechanicsLevels = buildSchroederMechanicsChainLevelSpecs({
+      boxDimsM,
+      fineGridSpacingM: plan.nativeGridSpacingM,
+      levelCount: chainLevelCount,
+      minLevel: chainMinLevel,
+      gridSpecFactory: createMlsMpmGridSpec
+    });
+    const chainClassificationPolicy = {
+      baseGridSpacingM: plan.baseGridSpacingM,
+      minLevel: chainMinLevel,
+      maxLevel: chainMaxLevel,
+      targetSupportCells: finitePositive(targetSupportCells, DEFAULT_TARGET_SUPPORT_CELLS),
+      supportRadiusScale: Math.max(0, finiteNumber(supportRadiusScale, DEFAULT_SUPPORT_RADIUS_SCALE)),
+      tileCellCount
+    };
+    const chainDtS = Math.fround(finitePositive(dt, 0.0001));
+    const chainCleanupPassBudget = Math.max(
+      1,
+      Math.round(Number(residentStepOptions?.contactCleanupPassBudget) || 16)
+    );
+    const chainJacobiIterations = Math.max(
+      1,
+      Math.round(Number(residentStepOptions?.contactJacobiIterations) || 16)
+    );
+    const chainContactInnerRounds = Math.max(
+      1,
+      Math.round(Number(residentStepOptions?.contactInnerRounds) || 1)
+    );
+    const chainForceInputs = {
+      dt: chainDtS,
+      boxDimsM: Array.isArray(boxDimsM) ? [...boxDimsM] : [boxDimsM, boxDimsM, boxDimsM],
+      gravityMPerS2: Array.isArray(gravityMPerS2) ? [...gravityMPerS2] : [0, -9.81, 0],
+      wallsEnabled: residentStepOptions?.wallsEnabled !== false,
+      contactEnabled: residentStepOptions?.contactSolverEnabled !== false,
+      cflFactor: Math.min(1, Math.max(1e-6, finitePositive(cflFactor, 0.4))),
+      wallBarrierElasticStiffnessNPerM: Math.max(
+        0,
+        finiteNumber(residentStepOptions?.wallBarrierElasticStiffnessNPerM, 0)
+      ),
+      wallBarrierContactScale: Math.min(
+        1,
+        Math.max(0, finiteNumber(residentStepOptions?.wallBarrierContactScale, 1))
+      ),
+      wallBarrierMinGapM: Math.max(
+        1e-9,
+        finitePositive(
+          residentStepOptions?.wallBarrierMinGapM,
+          Math.max(1e-5, plan.nativeGridSpacingM * 0.05)
+        )
+      )
+    };
+    const chainMechanicsMaterialTable = residentStepOptions?.mechanicsMaterialTable ?? null;
+    const chainThermalMaterialTable = residentStepOptions?.thermalMaterialTable ?? null;
+    const chainThermalResponseGraphUpload =
+      residentStepOptions?.thermalStepOptions?.thermalResponseGraphUpload
+      ?? residentStepOptions?.reactionStepOptions?.thermalResponseGraphUpload
+      ?? null;
+    const chainMechanicsMaterialPhaseUpload =
+      residentStepOptions?.mechanicsRefreshOptions?.mechanicsMaterialPhaseUpload
+      ?? null;
+    const chainAmbientPressurePa = Math.max(0, finiteNumber(residentStepOptions?.ambientPressurePa, 0));
+    const chainGasPressureEnabled = Boolean(
+      chainAmbientPressurePa > 0
+      || residentStepOptions?.gasPressureMechanicsBoundaryEnabled === true
+    );
+    const chainGasPressureScale = Math.max(
+      0,
+      finiteNumber(residentStepOptions?.gasPressureMechanicsScale, 1)
+    );
+    const chainTableHasGasOrPlasma = Boolean(
+      Array.isArray(chainMechanicsMaterialTable?.phases)
+      && chainMechanicsMaterialTable.phases.some((phase) => (
+        phase && (
+          phase.phaseId === 3
+          || phase.phaseId === 4
+          || phase.phase === 'gas'
+          || phase.phase === 'plasma'
+        )
+      ))
+    );
+    const chainInterfaceTransportRequired = Boolean(
+      chainMechanicsMaterialPhaseUpload
+      && chainTableHasGasOrPlasma
+    );
+    const chainSourceOpticsAdvertised =
+      sphGpuParticleUploadAdvertisesDispersedMediumOptics(sphParticleUpload);
+    const chainRequestedOpticsSeedRows =
+      residentStepOptions?.dispersedMediumOpticsSeedRows ?? null;
+    const chainResolvedOpticsSeedRows =
+      chainRequestedOpticsSeedRows?.rows ?? chainRequestedOpticsSeedRows;
+    const chainOpticsDeclared = Boolean(
+      chainSourceOpticsAdvertised
+      || chainResolvedOpticsSeedRows
+      || residentStepOptions?.dispersedMediumOpticalClosureTable
+    );
+    let chainCapturedOpticsHook = null;
+    let chainOpticsProducerStep = null;
+    let chainOpticsSourceFamilyTransition = null;
+    const chainClosureOptions = {
+      spatialReactionDiscoveryProposalRunner:
+        residentStepOptions?.spatialReactionDiscoveryProposalRunner
+        || runSchroederSpatialReactionDiscoveryProposalWebGpu,
+      schroederLawQueue: null,
+      schroederLawNeighborCandidates: null,
+      reactionLawInputsQuarantined: true,
+      ...(residentStepOptions?.thermalStepOptions
+        ? { thermalStepOptions: { ...residentStepOptions.thermalStepOptions } }
+        : {}),
+      ...(residentStepOptions?.mechanicsRefreshOptions
+        ? { mechanicsRefreshOptions: { ...residentStepOptions.mechanicsRefreshOptions } }
+        : {}),
+      ...(residentStepOptions?.phaseCarrierTransferOptions
+        ? { phaseCarrierTransferOptions: { ...residentStepOptions.phaseCarrierTransferOptions } }
+        : {}),
+      ...(residentStepOptions?.reactionTable
+        ? { reactionTable: residentStepOptions.reactionTable }
+        : {}),
+      ...(residentStepOptions?.reactionStepOptions
+        ? { reactionStepOptions: { ...residentStepOptions.reactionStepOptions } }
+        : {}),
+      ...(residentStepOptions?.reactionActivationWatchTable
+        ? { reactionActivationWatchTable: residentStepOptions.reactionActivationWatchTable }
+        : {}),
+      ...(chainOpticsDeclared
+        ? {
+            afterPhaseCarrierTransfer: async ({
+              phaseCarrierTransferFamilyReceipt,
+              opticsTerminalBuffers = null
+            }) => {
+              chainCapturedOpticsHook = {
+                phaseCarrierTransferFamilyReceipt,
+                opticsTerminalBuffers
+              };
+            }
+          }
+        : {})
+    };
+    const chainBatch = await runSchroederSpatialChainResidentBatchWebGpu({
+      stepCount: 1,
+      device,
+      preferWebGpu: true,
+      readbackMode: SCHROEDER_NO_FULL_READBACK_MODE,
+      schroederSpatialChain: {
+        mechanicsLevels: chainMechanicsLevels,
+        classificationPolicy: chainClassificationPolicy
+      },
+      forceInputs: chainForceInputs,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      mechanicsMaterialTable: chainMechanicsMaterialTable,
+      thermalMaterialTable: chainThermalMaterialTable,
+      thermalResponseGraphUpload: chainThermalResponseGraphUpload,
+      mechanicsMaterialPhaseUpload: chainMechanicsMaterialPhaseUpload,
+      gasPressureMechanicsBoundaryEnabled: chainGasPressureEnabled,
+      ambientPressurePa: chainAmbientPressurePa,
+      gasPressureMechanicsScale: chainGasPressureScale,
+      mechanicsOptions: {
+        ambientPressurePa: chainAmbientPressurePa,
+        cleanupPassBudget: chainCleanupPassBudget,
+        jacobiIterations: chainJacobiIterations,
+        contactInnerRounds: chainContactInnerRounds,
+        contactCleanupPassBudget: chainCleanupPassBudget,
+        contactJacobiIterations: chainJacobiIterations,
+        contactSolverEnabled: residentStepOptions?.contactSolverEnabled !== false
+      },
+      phaseVolumeInterfaceTransportRequired: chainInterfaceTransportRequired,
+      sourceFamilyConsumerLease: levelAssignmentSourceFamilyLease ?? null,
+      closureOptions: chainClosureOptions
+    });
+    const chainStep = chainBatch.finalStep;
+    chainStep.nextSphParticleState = chainBatch.nextSphParticleState;
+    chainStep.nextMlsMpmParticleState = chainBatch.nextMlsMpmParticleState;
+    chainStep.mechanicsLevelCount = chainLevelCount;
+    chainStep.schroederLevelChainEnabled = true;
+    chainStep.schroederRequestedReadbackMode = readbackMode;
+    chainStep.schroederSpatialTransitionPolicy = spatialTransitionPolicy;
+    chainStep.residentProductMass = chainBatch.nextResidentProductMass ?? null;
+    chainStep.stageStatus = {
+      mechanics: 'schroeder-level-chain',
+      postMechanicsClosure: 'executed'
+    };
+    chainStep.stageBackends = {
+      mechanics: 'webgpu',
+      postMechanicsClosure: 'webgpu'
+    };
+    if (chainOpticsDeclared && chainCapturedOpticsHook) {
+      const targetSphUpload = chainStep.nextParticleUploads?.sphParticleUpload ?? null;
+      if (!targetSphUpload) {
+        throw sphDispersedMediumOpticsRemapRequiredError(
+          'level-chain-optics-producer-terminal-upload-missing'
+        );
+      }
+      const {
+        phaseCarrierTransferFamilyReceipt,
+        opticsTerminalBuffers
+      } = chainCapturedOpticsHook;
+      const opticalClosureTable =
+        residentStepOptions?.dispersedMediumOpticalClosureTable ?? null;
+      const producerRunner =
+        residentStepOptions?.dispersedMediumOpticsProducerRunner
+        ?? runSphDispersedMediumOpticsProducerWebGpu;
+      if (!opticalClosureTable || typeof producerRunner !== 'function') {
+        throw new TypeError(
+          'Canonical N-level chain optics production requires an authenticated optical closure table and producer runner'
+        );
+      }
+      const particleLineage = phaseCarrierTransferFamilyReceipt?.particleLineage;
+      if (chainSourceOpticsAdvertised) {
+        chainOpticsSourceFamilyTransition =
+          registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation({
+            sourceSphUpload: sphParticleUpload,
+            device,
+            sourceStateBuffer: sphParticleUpload.stateBuffer,
+            sourceThermoBuffer: sphParticleUpload.thermoBuffer,
+            targetStateBuffer: phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
+            targetThermoBuffer: phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer
+          });
+      }
+      for (const field of [
+        'dispersedMediumOptics',
+        'dispersedMediumOpticsAuthority',
+        'dispersedMediumOpticsBuffer',
+        'dispersedMediumOpticsRowCount',
+        'dispersedMediumOpticsRowStrideFloats',
+        'dispersedMediumOpticsBufferByteLength',
+        'ownsDispersedMediumOpticsBuffer'
+      ]) {
+        delete targetSphUpload[field];
+      }
+      const postTransferStateBuffer =
+        opticsTerminalBuffers?.stateBuffer
+        ?? phaseCarrierTransferFamilyReceipt.postTransferStateBuffer;
+      const postTransferThermoBuffer =
+        opticsTerminalBuffers?.thermoBuffer
+        ?? phaseCarrierTransferFamilyReceipt.postTransferThermoBuffer;
+      const targetTopologyEpoch = targetSphUpload.topologyEpoch;
+      chainOpticsProducerStep = await producerRunner({
+        device,
+        phaseCarrierPlan: phaseCarrierTransferFamilyReceipt.phaseCarrierPlan,
+        particleCount: particleLineage.particleCount,
+        particleLineage,
+        outputTopologyEpoch: targetTopologyEpoch,
+        refreshRouteIdentity: targetTopologyEpoch === particleLineage.topologyEpoch + 1,
+        preReactionStateBuffer:
+          phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+            ? phaseCarrierTransferFamilyReceipt.preReactionStateBuffer
+            : null,
+        preReactionThermoBuffer:
+          phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+            ? phaseCarrierTransferFamilyReceipt.preReactionThermoBuffer
+            : null,
+        preTransferStateBuffer: phaseCarrierTransferFamilyReceipt.preTransferStateBuffer,
+        postReactionStateBuffer:
+          phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+            ? phaseCarrierTransferFamilyReceipt.postReactionStateBuffer
+            : null,
+        postReactionThermoBuffer:
+          phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+            ? phaseCarrierTransferFamilyReceipt.postReactionThermoBuffer
+            : null,
+        aerosolCondensateTransition:
+          phaseCarrierTransferFamilyReceipt.reactionParticleMutationApplied === true
+            ? phaseCarrierTransferFamilyReceipt.aerosolCondensateTransition
+            : null,
+        preTransferThermoBuffer: phaseCarrierTransferFamilyReceipt.preTransferThermoBuffer,
+        postTransferStateBuffer,
+        postTransferThermoBuffer,
+        priorOptics: chainSourceOpticsAdvertised
+          ? sphParticleUpload.dispersedMediumOptics
+          : null,
+        seedOpticsRows: chainSourceOpticsAdvertised
+          ? null
+          : chainResolvedOpticsSeedRows,
+        opticalClosureTable,
+        opticalClosureGpuTable:
+          residentStepOptions?.dispersedMediumOpticalClosureGpuTable ?? null,
+        label: 'ulg-schroeder-level-chain-dispersed-medium-optics'
+      });
+      const producerClaim = issueSphDispersedMediumOpticsProducerAdoptionClaim(
+        chainOpticsProducerStep
+      );
+      adoptSphGpuParticleDispersedMediumOpticsSidecar(
+        device,
+        producerClaim,
+        chainOpticsProducerStep.outputBuffer,
+        { sourceSphUpload: targetSphUpload }
+      );
+      registerFreshSphDispersedMediumOpticsReplacement({
+        finalStep: chainStep,
+        sourceSphUpload: sphParticleUpload,
+        targetSphUpload,
+        sourceOptics: chainSourceOpticsAdvertised
+          ? sphParticleUpload.dispersedMediumOptics
+          : null,
+        intermediateUploads: [],
+        sourceFamilyTransitions: chainOpticsSourceFamilyTransition
+          ? [chainOpticsSourceFamilyTransition]
+          : []
+      });
+      chainStep.dispersedMediumOpticsReplacementStatus =
+        'fresh-dispersed-medium-optics-pending-step-acceptance';
+    }
+    chainStep.dispersedMediumOpticsProducerStep = chainOpticsProducerStep;
+    return {
+      schema: ULG_SCHROEDER_SAME_LEVEL_MECHANICS_EXECUTION_SCHEMA,
+      status: 'schroeder-level-chain-mechanics-executed',
+      backend: 'webgpu',
+      selectedLevel: plan.selectedLevel,
+      minLevel: chainMinLevel,
+      maxLevel: chainMaxLevel,
+      mechanicsLevelCount: chainLevelCount,
+      levelChainMechanicsEnabled: true,
+      twoLevelMechanicsEnabled: false,
+      mechanicsFieldPairV2Enabled: false,
+      residentStep: chainStep,
+      schroederSpatialSuccessorSourceFamily:
+        chainStep.schroederSpatialSuccessorSourceFamily,
+      chainClockReceipt: chainBatch.chainClockReceipt,
+      nextSphParticleState: chainBatch.nextSphParticleState,
+      nextMlsMpmParticleState: chainBatch.nextMlsMpmParticleState,
+      nextParticleUploads: chainStep.nextParticleUploads,
+      fullParticleReadbackFree: true,
+      fullParticleReadbackPerformed: false,
+      readbackMode
+    };
+  }
   const reportHierarchyStage = (status, stage, details = {}) => {
     // Diagnostic ring (where a step waits); never read by physics.
     const laneTrace = (globalThis.__ulgLaneTrace ??= []);

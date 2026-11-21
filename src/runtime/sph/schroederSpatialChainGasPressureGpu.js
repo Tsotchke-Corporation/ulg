@@ -8,7 +8,8 @@ import { validateSphParticleExactMassRead } from './sphGpuBuffers.js';
 // substitute gas inventory can enter this path. The existing native consumer
 // family retires the EOS after its last useful submission.
 export async function prepareSchroederSpatialChainGasPressure({device,source,generation,
-  assignment,sourceRead,boxDimsM,ambientPressurePa,gasPressureMechanicsScale}) {
+  assignment,sourceRead,boxDimsM,ambientPressurePa,gasPressureMechanicsScale,
+  sourceFamilyConsumerLease = null}) {
   if(!validateSphParticleExactMassRead(sourceRead,{device,sourceSphUpload:source.sphParticleUpload})) {
     throw new TypeError('Chain gas pressure requires the original interval inventory read');
   }
@@ -21,6 +22,9 @@ export async function prepareSchroederSpatialChainGasPressure({device,source,gen
   const execution=await runSphSpatialGasLedgerEosRetainedWebGpu({device,
     sphParticleUpload:source.sphParticleUpload,mlsMpmParticleUpload:source.mlsMpmParticleUpload,
     residentProductMass:sourceRead.residentProductMass??null,
+    ...(sourceFamilyConsumerLease != null
+      ? { authenticateParticleProductSource: true, sourceFamilyConsumerLease }
+      : {}),
     schroederLevelAssignment:assignment,schroederSpatialEpochGeneration:generation,
     epochIdentity,spatialGasGrid:grid,boxMinM:[0,0,0],boxMaxM:boxDimsM,
     spatialGasCellSizeM:grid.gridSpacingM,spatialGasSupportVolumeFallbackM3:0,

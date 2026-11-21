@@ -1450,7 +1450,7 @@ function resolveAuthoritativeMechanicsGeneration({
     || !Object.isFrozen(levels)
   ) {
     throw transactionError(
-      chain ? 'Authoritative mechanics chain requires two through six immutable level descriptors'
+      chain ? `Authoritative mechanics chain requires two through ${SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS} immutable level descriptors`
         : 'Authoritative two-level mechanics requires exactly two immutable mechanics-level descriptors',
       contractCode
     );

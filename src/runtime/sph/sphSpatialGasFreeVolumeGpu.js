@@ -37,6 +37,7 @@ import {
 import { resolveSphSpatialGasHistoryVolumeInput, resolveSphSpatialGasChainPressureInput } from './sphSpatialGasLedgerEosGpu.js';
 import { createSphExactHistoryGasVolumeWgsl } from './sphExactHistoryGasVolumeWgsl.js';
 import { createSchroederSpatialChainVolumeGpu } from './schroederSpatialChainVolumeGpu.js';
+import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
 import { createSphSpatialGasChainFreeVolumeWgsl } from './sphSpatialGasChainFreeVolumeWgsl.js';
 import { sphSpatialGasChainPressureWgsl } from './sphSpatialGasChainPressureWgsl.js';
 
@@ -515,9 +516,9 @@ function normalizeGenerationReadFamily(generationReadFamily, device, {
           : null,
         phaseVolumeMoment: generation.phaseVolumeMoment
       }];
-  if (levelViews.length < 1 || levelViews.length > 6) {
+  if (levelViews.length < 1 || levelViews.length > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS) {
     throw new RangeError(
-      'gas free-volume requires one through six mechanics levels'
+      `gas free-volume requires one through ${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} mechanics levels`
     );
   }
   const moments = levelViews.map((entry) => entry.phaseVolumeMoment);

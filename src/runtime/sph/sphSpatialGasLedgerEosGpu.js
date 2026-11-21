@@ -29,6 +29,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS,
   ULG_SCHROEDER_SPATIAL_DIRECTORY_SOURCE_SCHEMA,
   ULG_SCHROEDER_SPATIAL_GPU_LOGICAL_COUNT_SOURCE_SCHEMA,
   acquireSchroederSpatialEpochGenerationConsumerLease,
@@ -287,7 +288,7 @@ export function beginSphSpatialGasPressureMechanicsFamily(source, {device,genera
   const record=livePressureSourceRecord(source);
   const levels=generation?.mechanicsLevelViews;
   if(device!==record.device || generation!==record.schroederSpatialEpochGeneration
-    || !Array.isArray(levels) || levels.length<3 || levels.length>6
+    || !Array.isArray(levels) || levels.length<3 || levels.length>SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS
     || levels.length!==generation.mechanicsLevelCount || record.pressureMechanicsFamily
     || !Number.isFinite(ambientPressurePa) || ambientPressurePa<0) {
     throw pressureMechanicsBindingError('Multilevel pressure requires one complete original native family and common ambient pressure');
@@ -1260,9 +1261,9 @@ function normalizeAuthoritativeSpatialGasGrid(
     )
       ? schroederSpatialEpochGeneration.mechanicsLevelViews
       : [];
-    if (levelViews.length < 1 || levelViews.length > 6) {
+    if (levelViews.length < 1 || levelViews.length > SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS) {
       throw new RangeError(
-        'retained gas EOS supports one through six mechanics levels'
+        `retained gas EOS supports one through ${SCHROEDER_SPATIAL_MAX_MECHANICS_LEVELS} mechanics levels`
       );
     }
     const selected = levelViews[levelViews.length - 1];

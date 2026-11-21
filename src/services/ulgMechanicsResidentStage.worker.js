@@ -1,3 +1,6 @@
+import {
+  buildSchroederMechanicsChainLevelSpecs
+} from '../../ulg-gpu-abi/src/index.js';
 import { cloneSchroederSplitSpareReserve, splitSpareReservesEqual }
   from '../runtime/sph/schroederSplitSpareReserve.js';
 import { createThermalPotentialWorkerLane, thermalPotentialWorkerCache, cancelThermalPotentialWorkerPending, thermalPotentialWorkerOrdinal,
@@ -5,6 +8,7 @@ import { createThermalPotentialWorkerLane, thermalPotentialWorkerCache, cancelTh
   destroyThermalPotentialWorkerLane } from '../runtime/material/thermalPotentialWorkerLane.js';
 import { thermalPotentialWorkerSourceKey } from '../runtime/material/thermalPotentialWorkerProtocol.js';
 import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../runtime/sph/lawActivationReceiptRing.js';
+import { normalizeSphImplicitPressureOptions } from '../runtime/sph/sphImplicitPressureGpu.js';
 import { encodeSphThermalRegionalClosureScheduleTick } from '../runtime/sph/sphThermalRegionalClosureGpu.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
@@ -1220,7 +1224,16 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
       return;
     }
     try {
-      const evidence = destroyMlsMpmResidentStepBuffers(step, options);
+      const evidence = destroyMlsMpmResidentStepBuffers(step, {
+        ...options,
+        ...(step?.status === 'schroeder-chain-resident-step-executed' && !options?.after
+          ? {
+              after: record.workerDevice?.queue?.onSubmittedWorkDone
+                ? record.workerDevice.queue.onSubmittedWorkDone().then(() => true)
+                : Promise.resolve(true)
+            }
+          : {})
+      });
       if (
         evidence?.schema !== 'peercompute.ulg.mls-mpm-resident-buffer-retirement-evidence.v0'
         || !(evidence.retiredBuffers instanceof Set)
@@ -5396,14 +5409,30 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     gridShift: fineGridSpec.shift,
     gridSpacingM: fineGridSpec.gridSpacingM
   };
-  const coarseGridSpec = data.enableTwoLevelMechanics === true
+  const enableLevelChainMechanics = Boolean(
+    data.enableLevelChainMechanics === true
+    && Number.isInteger(data.minLevel)
+    && Number.isInteger(data.maxLevel)
+    && (data.maxLevel - data.minLevel + 1) >= 3
+  );
+  const chainMechanicsLevels = enableLevelChainMechanics
+    ? buildSchroederMechanicsChainLevelSpecs({
+        boxDimsM: data.boxDimsM,
+        fineGridSpacingM: nativeGridSpacingM,
+        levelCount: data.maxLevel - data.minLevel + 1,
+        minLevel: data.minLevel,
+        gridSpecFactory: createMlsMpmGridSpec
+      })
+    : null;
+  const coarseGridSpec = !enableLevelChainMechanics && data.enableTwoLevelMechanics === true
     ? createMlsMpmGridSpec({
         boxDimsM: data.boxDimsM,
         gridSpacingM: nativeGridSpacingM * 2
       })
     : null;
   const authoritativeTwoLevel = Boolean(
-    data.enableTwoLevelMechanics === true
+    !enableLevelChainMechanics
+    && data.enableTwoLevelMechanics === true
     && String(data.twoLevelMechanicsAuthority || 'observation')
       .trim()
       .toLowerCase() === 'authoritative'
@@ -5413,6 +5442,7 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
   const singleLevelPhaseVolumeInterfaceTransport = Boolean(
     data.phaseVolumeInterfaceTransportRequired === true
     && data.enableTwoLevelMechanics !== true
+    && !enableLevelChainMechanics
     && data.mechanicsFieldViewsRequired !== false
   );
   // The authoritative hierarchy always uses at least four direct arenas and
@@ -5478,6 +5508,7 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
         data.phaseVolumeSidecarsRequired === true
         || data.enablePhaseVolumeMigration === true
         || authoritativeTwoLevel
+        || enableLevelChainMechanics
         || singleLevelPhaseVolumeInterfaceTransport,
       // Field views are skipped only when the schedule proves no field-mode
       // consumer exists (see epochOptionsForStep); default is to build.
@@ -5513,22 +5544,24 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
         cellMin: [0, 0, 0],
         cellCount: [...mechanicsGrid.gridDims]
       },
-      ...(coarseGridSpec
-        ? {
-            mechanicsLevels: [
-              { selectedLevel, mechanicsGrid },
-              {
-                selectedLevel: selectedLevel + 1,
-                mechanicsGrid: {
-                  gridNodeCount: coarseGridSpec.gridNodeCount,
-                  gridDims: [...coarseGridSpec.gridDims],
-                  gridShift: coarseGridSpec.shift,
-                  gridSpacingM: coarseGridSpec.gridSpacingM
+      ...(chainMechanicsLevels
+        ? { mechanicsLevels: chainMechanicsLevels }
+        : coarseGridSpec
+          ? {
+              mechanicsLevels: [
+                { selectedLevel, mechanicsGrid },
+                {
+                  selectedLevel: selectedLevel + 1,
+                  mechanicsGrid: {
+                    gridNodeCount: coarseGridSpec.gridNodeCount,
+                    gridDims: [...coarseGridSpec.gridDims],
+                    gridShift: coarseGridSpec.shift,
+                    gridSpacingM: coarseGridSpec.gridSpacingM
+                  }
                 }
-              }
-            ]
-          }
-        : {}),
+              ]
+            }
+          : {}),
       ...(resolvedSpatialEpochArenaCount == null
         ? {}
         : { directArenaCount: resolvedSpatialEpochArenaCount }
@@ -5981,8 +6014,15 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       `expectedSpatialEpochSeal does not match the retained generation on: ${expectedSealMismatch.join(', ')}`
     );
   }
-  const enableTwoLevelMechanics = data.enableTwoLevelMechanics === true
-    || currentSeal.mechanicsLevelCount > 1;
+  const enableLevelChainMechanics = Boolean(
+    (data.enableLevelChainMechanics === true
+      || data.hierarchyConfig?.enableLevelChainMechanics === true)
+    && currentSeal.mechanicsLevelCount >= 3
+  );
+  const enableTwoLevelMechanics = !enableLevelChainMechanics && (
+    data.enableTwoLevelMechanics === true
+    || currentSeal.mechanicsLevelCount > 1
+  );
   const kernelRunner =
     typeof data.schroederSameLevelMechanicsRunner === 'function'
       ? data.schroederSameLevelMechanicsRunner
@@ -6219,6 +6259,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   const canonicalSingleLevelQueueOrderedCleanupRequested = Boolean(
     queueOrderedScheduleRetirement
     && !enableTwoLevelMechanics
+    && !enableLevelChainMechanics
     && data.enableMechanicsFieldPairV2 !== true
   );
   if (queueOrderedScheduleRetirement) {
@@ -6299,7 +6340,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
     previousResidentStep?.nextParticleUploads
   );
   const spatialEpochTransaction =
-    kernelRunner === runSchroederSameLevelMechanicsWebGpu
+    kernelRunner === runSchroederSameLevelMechanicsWebGpu && !enableLevelChainMechanics
       ? createSchroederSameLevelMechanicsSpatialEpochTransaction({
           device,
           generation,
@@ -6370,6 +6411,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         ? { tileCellCount: data.tileCellCount }
         : {}),
       enableTwoLevelMechanics,
+      ...(enableLevelChainMechanics ? { enableLevelChainMechanics: true } : {}),
       twoLevelMechanicsAuthority:
         data.twoLevelMechanicsAuthority
         || (enableTwoLevelMechanics ? 'authoritative' : 'observation'),
@@ -6783,7 +6825,10 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         ].filter(Boolean),
         destroyInputResidentProductMass: true,
         preserveBuffers: retainedContinuationBuffersFromUploads(nextUploads),
-        queueOrderedFinalConsumer: currentHierarchyFinalConsumer
+        queueOrderedFinalConsumer: currentHierarchyFinalConsumer,
+        ...(previousResidentStep.status === 'schroeder-chain-resident-step-executed'
+          ? { after: device.queue.onSubmittedWorkDone().then(() => true) }
+          : {})
       });
     } catch (error) {
       record.poisonedCanonicalResidentStep = residentStep;
@@ -7042,6 +7087,9 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         maxLevel: data.hierarchyConfig.maxLevel ?? null,
         enableTwoLevelMechanics:
           data.hierarchyConfig.enableTwoLevelMechanics === true,
+        ...(data.hierarchyConfig.enableLevelChainMechanics === true
+          ? { enableLevelChainMechanics: true }
+          : {}),
         twoLevelMechanicsAuthority:
           data.hierarchyConfig.twoLevelMechanicsAuthority ?? null,
         twoLevelFineSubstepCount:
@@ -7071,6 +7119,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       : null,
     mechanicsLevelCount: currentSeal.mechanicsLevelCount ?? null,
     twoLevelMechanicsEnabled: enableTwoLevelMechanics,
+    levelChainMechanicsEnabled: enableLevelChainMechanics,
     twoLevelMechanicsAuthority:
       data.twoLevelMechanicsAuthority
       || (enableTwoLevelMechanics ? 'authoritative' : 'observation'),
@@ -7234,6 +7283,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
       stageBackends: { ...(residentStep.stageBackends || {}) },
       readbackMode: residentStep.readbackMode ?? null,
       twoLevelMechanicsEnabled: enableTwoLevelMechanics,
+      levelChainMechanicsEnabled: enableLevelChainMechanics,
       mechanicsLevelCount: currentSeal.mechanicsLevelCount ?? null,
       twoLevelMechanicsAuthority:
         residentStep.twoLevelMechanicsAuthority
@@ -7709,12 +7759,17 @@ function exactWorkerParticleGasLedgerCandidateSource({
   );
 }
 
-function expectedWorkerTier0TerminalLineage(source, stepCount) {
+function expectedWorkerTier0TerminalLineage(
+  source,
+  stepCount,
+  { allowSingleStep = false } = {}
+) {
   if (!source) return null;
   const count = Number(stepCount);
+  const minCount = allowSingleStep === true ? 1 : 2;
   if (
     !Number.isSafeInteger(count)
-    || count < 2
+    || count < minCount
     || source.storageGeneration > 0xffff_fffe
     || source.positionEpoch > 0xffff_fffe
     || source.physicsTick > 0xffff_ffff - count
@@ -10373,6 +10428,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         baseMechanicsOptions.enableTwoLevelMechanics === true
         || baseMechanicsOptions.hierarchyConfig?.enableTwoLevelMechanics
           === true;
+      const levelChainMechanics =
+        baseMechanicsOptions.enableLevelChainMechanics === true
+        || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics
+          === true;
       const authoritativeTwoLevelMechanics = Boolean(
         twoLevelMechanics
         && String(
@@ -10455,17 +10514,17 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         baseEpochOptions.mechanicsFieldViewsRequired === true
         || phaseVolumeMigration
         || twoLevelMechanics
+        || levelChainMechanics
         || surfaceTension
         || gasBoundaryActionable
         || !explicitVacuumAmbient;
       // Single-level gas/condensed pressure-drag transport (one-level S9-C):
       // the law that lets gas carriers slip through condensed matter under
-      // that matter's own pressure gradient (bubbles rise). Two-level routes
-      // carry it through cross-level coupling instead. It needs field-mode
-      // mechanics and the S9-A/S9-B sidecars, and is relevant whenever the
-      // mechanics table has a gas or plasma phase.
+      // that matter's own pressure gradient (bubbles rise). Two-level and
+      // N-level chain routes carry it through cross-level coupling instead.
       const phaseVolumeInterfaceTransport = Boolean(
         !twoLevelMechanics
+        && !levelChainMechanics
         && mechanicsFieldViews
         && schroederMechanicsTableHasGasOrPlasmaPhase(
           laneResidentOptions.mechanicsMaterialTable
@@ -10482,6 +10541,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           || lawNeighborCandidates
           || phaseVolumeMigration
           || twoLevelMechanics
+          || levelChainMechanics
           || surfaceTension
           // Particle classification/free-volume pressure is independent of
           // condensed contact. Preserve an explicit contact-free water route
@@ -10512,6 +10572,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         phaseVolumeSidecars: Boolean(
           phaseVolumeMigration
           || twoLevelMechanics
+          || levelChainMechanics
           || particleGasLedgerActionable
           || retainedProductGasBoundaryActionable
           || phaseVolumeInterfaceTransport
@@ -10911,9 +10972,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       sphParticleUpload: scheduleStartLane?.sphParticleUpload,
       mlsMpmParticleUpload: scheduleStartLane?.mlsMpmParticleUpload
     });
+    const implicitPressureRequired = Boolean(
+      normalizeSphImplicitPressureOptions(
+        scheduleStartLane?.mlsMpmParticleState?.implicitPressure
+      )
+    );
     const tier0ExpectedLineage = expectedWorkerTier0TerminalLineage(
       tier0SourceLineage,
-      stepCount
+      stepCount,
+      { allowSingleStep: implicitPressureRequired }
     );
     const tier0PhaseCarrierPlan =
       scheduleSourceSphParticleUpload?.phaseCarrierPlan
@@ -11400,7 +11467,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       scheduleReactionActivationWatchTable
     );
     const tier0RouteBlockers = [];
-    if (stepCount < 2) tier0RouteBlockers.push('step-count-not-greater-than-one');
+    // Semi-implicit liquid pressure (A1) executes inside the Tier-0 fused
+    // sequence. Allow single-step (paused initial frame / manual Step) schedules
+    // to enter and remain on Tier 0 whenever implicitPressure is active so a
+    // paused launch never locks the lane into explicit-only canonical mechanics.
+    if (stepCount < 2 && !implicitPressureRequired) {
+      tier0RouteBlockers.push('step-count-not-greater-than-one');
+    }
     if (
       scheduleStepOptionsProvider
       && !workerLaneAssignmentOnlyScheduleProviders.has(

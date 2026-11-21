@@ -57,7 +57,7 @@ fn apply_chain_rows(@builtin(local_invocation_id) local_id:vec3<u32>,@builtin(wo
     if(chain_proposal[source+w]!=field_word(native_row+w)) { chain_publication_reject(20u);return; }
   }
   var velocity=vec3<f32>(0.0);var kinetic=0.0;
-  if(mass>0.0) { velocity=momentum/mass;kinetic=dot(momentum,momentum)/(2.0*mass); }
+  if(mass>0.0) { velocity=momentum/mass;kinetic=0.5*mass*dot(velocity,velocity); }
   else if(any(momentum!=vec3<f32>(0.0)) || budget!=0.0) { chain_publication_reject(21u);return; }
   let residual=budget-kinetic;
   if(!chain_finite(kinetic) || !all(vec3<bool>(chain_finite(velocity.x),chain_finite(velocity.y),chain_finite(velocity.z)))

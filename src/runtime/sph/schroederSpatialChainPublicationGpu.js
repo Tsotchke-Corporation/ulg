@@ -108,6 +108,7 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep}
     const claim=Object.freeze({schema:'peercompute.ulg.chain-batch-publication.v1',step,time,
       acceptedStepCount,
       acceptedIntervalCount:accepted,rejectedIntervalCount:rejected,attemptedIntervalCount:attempted,
+      admissionErrorMask:error,
       mapAsyncCount:1,readbackBytes:128});
     record={device,step:finalStep,closure:original.closure,uploads,read,taken:false,closed:false,
       resolveStep:resolveSchroederSpatialChainStep,validateRead:validateSphParticleExactMassRead,

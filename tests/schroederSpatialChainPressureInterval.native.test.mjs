@@ -5,11 +5,14 @@ test('original-source gas pressure survives repeated exact-energy phase interval
   skip:process.env.ULG_RUN_NATIVE_CHAIN_PRESSURE_INTERVAL!=='1',timeout:600000
 },async()=>{
   const {chromium}=await import('@playwright/test');
-  const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:true,
+  const wayland=Boolean(process.env.WAYLAND_DISPLAY);
+  const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:!wayland,
     args:['--ignore-certificate-errors','--use-angle=vulkan','--enable-features=Vulkan,UseSkiaRenderer',
-      '--enable-unsafe-webgpu','--ignore-gpu-blocklist','--enable-webgpu-developer-features']});
+      '--enable-unsafe-webgpu','--ignore-gpu-blocklist','--enable-webgpu-developer-features',
+      ...(wayland?['--ozone-platform=wayland']:[])]});
   try{
-    const page=await browser.newPage(),url='https://127.0.0.1:5173/__chain_pressure_interval_test__';
+    const context=await browser.newContext({ignoreHTTPSErrors:true});
+    const page=await context.newPage(),url='https://127.0.0.1:5173/__chain_pressure_interval_test__';
     page.on('requestfailed',request=>console.log(JSON.stringify({requestFailed:request.url(),failure:request.failure()})));
     await page.route(url,r=>r.fulfill({contentType:'text/html',body:'<title>Pressure interval</title>'}));
     await page.goto(url);

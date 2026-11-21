@@ -10,8 +10,9 @@ import {
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsCorrection.js';
 import {
   schroederSpatialChainForceWgsl, schroederSpatialChainProlongWgsl,
-  schroederSpatialChainCorrectionAdmissionWgsl
+  schroederSpatialChainCorrectionAccumulateAdmissionWgsl
 } from '../../../ulg-gpu-abi/src/schroederSpatialMechanicsCorrectionWgsl.js';
+import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
 import { resolveSchroederSpatialMechanicsChainAuthority, validateSchroederSpatialEpochTransactionSourceFamily } from './schroederSpatialEpochTransaction.js';
 import { resolveSubmittedMlsMpmNativeMechanicsP2g,
   exactGasPressureMechanicsP2gProductSourceIsolationCertified } from './sphGridGpuKernel.js';
@@ -86,10 +87,11 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
   if (!device?.createBuffer || !device?.createComputePipeline || !device.queue?.writeBuffer) {
     throw new TypeError('Composite mechanics requires a WebGPU device');
   }
+  const maxPairCount = SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS - 1;
   if (!Array.isArray(parentFieldCapacities) || parentFieldCapacities.length < 1
-    || parentFieldCapacities.length > 5 || !Number.isInteger(arenaCount)
+    || parentFieldCapacities.length > maxPairCount || !Number.isInteger(arenaCount)
     || arenaCount < 1 || arenaCount > 8) {
-    throw new RangeError('Composite mechanics requires one to five bounded pair capacities');
+    throw new RangeError(`Composite mechanics requires one to ${maxPairCount} bounded pair capacities`);
   }
   const layouts = parentFieldCapacities.map(capacity=>createSchroederSpatialCompositeMechanicsLayout(capacity,{firstMoments}));
   if (nativeFieldCapacities != null && (!Array.isArray(nativeFieldCapacities)
@@ -98,7 +100,9 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
   }
   const nativeLayouts = nativeFieldCapacities?.map(createSchroederSpatialMechanicsCorrectionLayout);
   const correctedLayouts = nativeLayouts ? parentFieldCapacities.map(createSchroederSpatialMechanicsCorrectionLayout) : null;
-  if (nativeLayouts && (device.limits?.maxStorageBuffersPerShaderStage ?? 8)<Math.max(7,nativeLayouts.length+1)) {
+  // Constant O(1) storage bindings (max 7 in prolongBundle, 3 in admissionBundle)
+  // so arbitrary N-level chains run cleanly even at WebGPU's 8-binding floor.
+  if (nativeLayouts && (device.limits?.maxStorageBuffersPerShaderStage ?? 8) < 7) {
     throw new RangeError('Chain correction exceeds WebGPU storage binding limits');
   }
   const bufferLimit = Math.min(device.limits?.maxBufferSize ?? 268435456,
@@ -131,8 +135,9 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
   const prolongBundle=nativeLayouts ? stageBundle(schroederSpatialChainProlongWgsl,
     ['read-only-storage','read-only-storage','read-only-storage','read-only-storage','storage','read-only-storage','storage','uniform'],
     ['initialize_prolong','prolong_fine','prolong_native','seal_prolong']) : null;
-  const admissionBundle=nativeLayouts ? stageBundle(schroederSpatialChainCorrectionAdmissionWgsl(nativeLayouts.length),
-    [...nativeLayouts.map(()=>'read-only-storage'),'storage'],['admit_chain']) : null;
+  const admissionBundle=nativeLayouts ? stageBundle(schroederSpatialChainCorrectionAccumulateAdmissionWgsl,
+    ['read-only-storage','read-only-storage','storage','uniform'],
+    ['init_chain_admission','accumulate_chain_admission','seal_chain_admission']) : null;
   const buffers = [];
   const allocate = (size, usage, suffix) => {
     const b = tagWebGpuBufferDevice(device.createBuffer({ size, usage, label: `${label}-${suffix}` }), device);
@@ -150,6 +155,7 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
         updatedBuffers:correctedLayouts.map((layout,i)=>allocate(layout.byteLength,USAGE.STORAGE|USAGE.COPY_SRC|USAGE.COPY_DST|USAGE.INDIRECT,`parent-corrected-${i}`)),
         paramsBuffers:layouts.map((_,i)=>allocate(192,USAGE.UNIFORM|USAGE.COPY_DST,`prolong-params-${i}`)),
         publicationParams:nativeLayouts.map((_,i)=>allocate(16,USAGE.UNIFORM|USAGE.COPY_DST,`publication-params-${i}`)),
+        admissionParams:nativeLayouts.map((_,i)=>allocate(16,USAGE.UNIFORM|USAGE.COPY_DST,`admission-params-${i}`)),
         forceParamsBuffer:allocate(192,USAGE.UNIFORM|USAGE.COPY_DST,'force-params'),
         controlBuffer:allocate(256,USAGE.STORAGE|USAGE.COPY_SRC|USAGE.COPY_DST,'chain-admission')
       } : null
@@ -190,6 +196,7 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
         && (!execution.correction || [owner.arena.correction.controlBuffer,
           owner.arena.correction.forceParamsBuffer,...owner.arena.correction.paramsBuffers,
           ...owner.arena.correction.publicationParams,
+          ...owner.arena.correction.admissionParams,
           ...owner.arena.correction.nativeBuffers,...owner.arena.correction.updatedBuffers]
           .every(buffer=>!buffer.destroyed && webGpuBufferMatchesDevice(buffer,device)));
     } catch { return false; }
@@ -249,7 +256,7 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
     const execution = Object.freeze({
       schema: ULG_SCHROEDER_SPATIAL_COMPOSITE_MECHANICS_SCHEMA,
       ownerRuntime: runtime, transaction, pairs, completionOrdinal, correction,
-      encodedDispatchCount: pairs.length*3+(forces ? 6+pairs.length*4 : 0)+(cross?pairs.length*223+nativeStates.length+1:0),
+      encodedDispatchCount: pairs.length*3+(forces ? 5+nativeStates.length+1+pairs.length*4 : 0)+(cross?pairs.length*223+nativeStates.length+1:0),
       gpuBufferCreationCountDuringEncode: 0,
       fullParticleReadbackPerformed: false,
       normalHotLoopReadbackFree: true,
@@ -347,10 +354,30 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
       owner.cross?.encodePair(encoder,i,i?c.updatedBuffers[i-1]:c.nativeBuffers[0],c.nativeBuffers[i+1],execution.pairs[i].stateBuffer,execution.pairs[i].sourceStateBuffer,execution.completionOrdinal,forces);
     }
     owner.cross?.encodeAdmission(encoder);
+    const levelCount = c.nativeBuffers.length;
+    for (let levelIndex = 0; levelIndex < levelCount; levelIndex += 1) {
+      device.queue.writeBuffer(
+        c.admissionParams[levelIndex],
+        0,
+        new Uint32Array([levelIndex, levelCount, 0, 0])
+      );
+    }
     const admission=encoder.beginComputePass({label:`${label}-chain-admission`});
+    const initGroup = group(admissionBundle, [c.nativeBuffers[0], c.nativeBuffers[0], c.controlBuffer, c.admissionParams[0]]);
     admission.setPipeline(admissionBundle.pipelines[0]);
-    admission.setBindGroup(0,group(admissionBundle,[...c.nativeBuffers,c.controlBuffer]));
-    admission.dispatchWorkgroups(1);admission.end();
+    admission.setBindGroup(0, initGroup);
+    admission.dispatchWorkgroups(1);
+    admission.setPipeline(admissionBundle.pipelines[1]);
+    for (let levelIndex = 1; levelIndex < levelCount; levelIndex += 1) {
+      admission.setBindGroup(0, group(admissionBundle, [
+        c.nativeBuffers[0], c.nativeBuffers[levelIndex], c.controlBuffer, c.admissionParams[levelIndex]
+      ]));
+      admission.dispatchWorkgroups(1);
+    }
+    admission.setPipeline(admissionBundle.pipelines[2]);
+    admission.setBindGroup(0, initGroup);
+    admission.dispatchWorkgroups(1);
+    admission.end();
   }
   function markExecutionSubmitted(execution) {
     const owner = owners.get(execution);

@@ -576,10 +576,17 @@ test('gas free-volume ABI is public, exact, and plans one through six levels', (
   });
   assert.equal(translated.boxMaxM[0] - translated.boxMinM[0], 0.015625);
   assert.notEqual(translated.gasControlVolumeDescriptor.boundsWords[3], 0);
+  assert.equal(
+    createSphSpatialGasFreeVolumePlan({
+      ...plan,
+      exactLevelCount: 16
+    }).exactLevelCount,
+    16
+  );
   assert.throws(
     () => createSphSpatialGasFreeVolumePlan({
       ...plan,
-      exactLevelCount: 7
+      exactLevelCount: 17
     }),
     /exactLevelCount/
   );

@@ -5,11 +5,14 @@ test('cross-level transport reaches native particles with conserved momentum, en
   skip:process.env.ULG_RUN_NATIVE_CHAIN_CROSS_TRANSPORT!=='1',timeout:900000
 },async()=>{
   const {chromium}=await import('@playwright/test');
-  const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:true,
+  const wayland=Boolean(process.env.WAYLAND_DISPLAY);
+  const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome',headless:!wayland,
     args:['--ignore-certificate-errors','--use-angle=vulkan','--enable-features=Vulkan,UseSkiaRenderer',
-      '--enable-unsafe-webgpu','--ignore-gpu-blocklist','--enable-webgpu-developer-features']});
+      '--enable-unsafe-webgpu','--ignore-gpu-blocklist','--enable-webgpu-developer-features',
+      ...(wayland?['--ozone-platform=wayland']:[])]});
   try{
-    const page=await browser.newPage(),url='https://127.0.0.1:5173/__chain_cross_transport_test__';
+    const context=await browser.newContext({ignoreHTTPSErrors:true});
+    const page=await context.newPage(),url='https://127.0.0.1:5173/__chain_cross_transport_test__';
     page.on('requestfailed',request=>console.log(JSON.stringify({failedRequest:request.url(),failure:request.failure()})));
     await page.route(url,r=>r.fulfill({contentType:'text/html',body:'<title>Cross transport</title>'}));await page.goto(url);
     const scenarios=[{levelCount:2},{levelCount:3},{levelCount:6,emptyMiddle:true},

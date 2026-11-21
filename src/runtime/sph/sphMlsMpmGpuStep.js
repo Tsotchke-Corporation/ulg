@@ -39,6 +39,7 @@ import { acquireSphAerosolSpatialParcelRead } from './sphAerosolSpatialBinding.j
 import { releaseSphAerosolParcelRead } from './sphAerosolParcelGpu.js';
 import {
   SCHROEDER_ACTIVE_NODE_ROW_LAYOUT,
+  SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS,
   SCHROEDER_FAR_AGGREGATE_FORCE_APPLICATION_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_CELL_IMPORT_ROW_LAYOUT,
   SCHROEDER_FAR_AGGREGATE_GAS_STATE_DELTA_ROW_LAYOUT,
@@ -5118,7 +5119,7 @@ export function deriveAuthoritativeSpatialGasGrid(
   )
     ? schroederSpatialEpochGeneration.mechanicsLevelViews
     : [];
-  if (levelViews.length < 1 || levelViews.length > 6) return null;
+  if (levelViews.length < 1 || levelViews.length > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS) return null;
   const selected = levelViews[levelViews.length - 1];
   const field = selected?.mechanicsFieldView || null;
   const gridDims = Array.from(field?.gridDims || []);
@@ -19880,7 +19881,8 @@ function createFusedResidentSequencePreflight({
   ambientBuoyancyRequested = false,
   ambientBuoyancyRequired = false,
   ambientBuoyancySkipReason = null,
-  requireExactTerminalLineage = false
+  requireExactTerminalLineage = false,
+  implicitPressureRequired = false
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
@@ -19912,7 +19914,9 @@ function createFusedResidentSequencePreflight({
     }
   }
   if (sequenceRequested) {
-    if (normalizedStepCount <= 1) blockers.push('step-count-not-greater-than-one');
+    if (normalizedStepCount <= 1 && implicitPressureRequired !== true) {
+      blockers.push('step-count-not-greater-than-one');
+    }
     if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
       blockers.push('compact-summary-every-step');
     }
@@ -20053,7 +20057,8 @@ function createResidentSequenceLaneContract({
   ambientBuoyancyRequired = false,
   ambientBuoyancySkipReason = null,
   exactTerminalLineageRequired = false,
-  exactTerminalLineageReady = null
+  exactTerminalLineageReady = null,
+  implicitPressureRequired = false
 } = {}) {
   const normalizedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   const normalizedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode);
@@ -20071,7 +20076,9 @@ function createResidentSequenceLaneContract({
   });
   const requirementBlockers = [];
   if (sequenceRequested) {
-    if (normalizedStepCount <= 1) requirementBlockers.push('step-count-not-greater-than-one');
+    if (normalizedStepCount <= 1 && implicitPressureRequired !== true) {
+      requirementBlockers.push('step-count-not-greater-than-one');
+    }
     if (readbackMode !== NO_FULL_READBACK_MODE) requirementBlockers.push('full-readback-requested');
     if (normalizedCompactSummaryMode === MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP) {
       requirementBlockers.push('compact-summary-every-step');
@@ -20096,7 +20103,7 @@ function createResidentSequenceLaneContract({
   }
   const blockers = uniqueStringList(requirementBlockers);
   const sequenceRunnable = sequenceRequested
-    && normalizedStepCount > 1
+    && (normalizedStepCount > 1 || implicitPressureRequired === true)
     && readbackMode === NO_FULL_READBACK_MODE
     && normalizedCompactSummaryMode !== MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP
     && blockers.length === 0;
@@ -20605,7 +20612,12 @@ export function createMlsMpmResidentStepsComputeTask({
     ambientBuoyancyRequired,
     ambientBuoyancySkipReason: ambientBuoyancyExecution.skipReason,
     exactTerminalLineageRequired,
-    exactTerminalLineageReady
+    exactTerminalLineageReady,
+    implicitPressureRequired: Boolean(
+      normalizeSphImplicitPressureOptions(
+        taskStepOptions.mlsMpmParticleState?.implicitPressure
+      )
+    )
   });
   const hotLoopBudget = summarizeMlsMpmResidentHotLoopBudget({
     ...taskStepOptions,
@@ -22668,7 +22680,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
           backend: 'webgpu',
           status: 'spatial-gas-ledger-producer-stage-blocked',
           reason:
-            'retained gas EOS requires one exact live SS occupancy chain of one through six levels',
+            `retained gas EOS requires one exact live SS occupancy chain of one through ${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} levels`,
           executionSource:
             'retained-spatial-gas-ledger-eos-fail-closed-missing-spatial-generation',
           readbackMode,
@@ -35169,6 +35181,7 @@ export async function createMlsMpmChainPrivateContinuation(postMechanicsClosure)
     thermalStep:postMechanicsClosure.thermalStep,reactionStep:postMechanicsClosure.reactionStep,
     phaseCarrierTransferStep:postMechanicsClosure.phaseCarrierTransferStep,
     mechanicsRefreshStep:postMechanicsClosure.mechanicsRefreshStep,
+    replaceDispersedMediumOptics:true,
     mergedResidentProductMass:source.residentProductMass,deferIdentityOwnershipTransfer:true,
     continuationIdentity:{physicsTick:sphParticleUpload.physicsTick,
       physicsSubstep:increment(sphParticleUpload.physicsSubstep,'substep'),
@@ -42159,7 +42172,12 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     ambientBuoyancyRequired,
     ambientBuoyancySkipReason,
     requireExactTerminalLineage:
-      requireLawsQuiescentSingleLanePhaseCarrierPlan
+      requireLawsQuiescentSingleLanePhaseCarrierPlan,
+    implicitPressureRequired: Boolean(
+      normalizeSphImplicitPressureOptions(
+        args.mlsMpmParticleState?.implicitPressure
+      )
+    )
   });
   if (
     requireLawsQuiescentSingleLanePhaseCarrierPlan

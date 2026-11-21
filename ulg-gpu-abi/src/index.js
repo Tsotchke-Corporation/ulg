@@ -4,6 +4,7 @@ export * from './sphDispersedMediumWgsl.js';
 export * from './parallelPrimitives.js';
 export * from './schroederSpatialEpoch.js';
 export * from './schroederSpatialEpochWgsl.js';
+export * from './schroederSpatialScaleAtlas.js';
 export * from './schroederSpatialActiveSourceView.js';
 export * from './schroederSpatialActiveSourceViewWgsl.js';
 export * from './schroederSpatialActiveRankView.js';

@@ -5,17 +5,20 @@ test('native adjacent level chains retain inherited fields through empty levels'
   skip: process.env.ULG_RUN_NATIVE_LEVEL_CHAIN !== '1', timeout: 180000
 }, async () => {
   const { chromium } = await import('@playwright/test');
-  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true,
+  const wayland = Boolean(process.env.WAYLAND_DISPLAY);
+  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: !wayland,
     args: ['--ignore-certificate-errors', '--use-angle=vulkan',
       '--enable-features=Vulkan,UseSkiaRenderer', '--enable-unsafe-webgpu',
-      '--ignore-gpu-blocklist', '--enable-webgpu-developer-features'] });
+      '--ignore-gpu-blocklist', '--enable-webgpu-developer-features',
+      ...(wayland ? ['--ozone-platform=wayland'] : [])] });
   try {
-    const page = await browser.newPage();
+    const context = await browser.newContext({ ignoreHTTPSErrors: true });
+    const page = await context.newPage();
     const url = 'https://127.0.0.1:5173/__level_chain_test__';
     await page.route(url, route => route.fulfill({ contentType: 'text/html',
       body: '<!doctype html><title>Level chain GPU invariants</title>' }));
     await page.goto(url);
-    for (const levelCount of [2, 3, 4, 6]) {
+    for (const levelCount of [2, 3, 4, 6, 8]) {
       const result = await page.evaluate(async levelCount => {
         const { runLevelChainNative } = await import('/tests/fixtures/schroederSpatialLevelChainNative.js');
         return runLevelChainNative(levelCount);

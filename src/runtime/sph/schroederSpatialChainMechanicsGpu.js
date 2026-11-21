@@ -15,7 +15,7 @@ import { prepareSchroederChainCrossTransport } from './schroederSpatialChainCros
  * nor its G2P result grants publication or thermal/energy admission. */
 export async function runSchroederSpatialChainMechanicsWebGpu({device,source,generation,
   mechanicsLevels,forceInputs,internalPressureScale=1,mechanicsOptions={},mechanicsMaterialTable,
-  localLawInputs=null,crossLevelTransportRequired=false}={}) {
+  localLawInputs=null,crossLevelTransportRequired=false,sourceFamilyConsumerLease=null}={}) {
   source={...source};mechanicsOptions={...mechanicsOptions};
   if(localLawInputs!=null) {
     if(!Array.isArray(localLawInputs) || localLawInputs.length!==mechanicsLevels.length) {
@@ -32,6 +32,9 @@ export async function runSchroederSpatialChainMechanicsWebGpu({device,source,gen
   try {
     transaction=createSchroederSpatialEpochTransaction({device,generation,...source,
       mechanicsChainAuthoritative:true,
+      ...(sourceFamilyConsumerLease != null
+        ? { aerosolSourceFamilyConsumerLease: sourceFamilyConsumerLease }
+        : {}),
       enabledConsumerReaderIds:SCHROEDER_SPATIAL_THERMAL_CONSUMERS.map(c=>c.consumerId),
       consumerSupportProfileIds:Object.fromEntries(SCHROEDER_SPATIAL_THERMAL_CONSUMERS.map(c=>[c.consumerId,c.supportProfileId]))});
     admitSchroederSpatialEpochTransactionReader(transaction,{generation,...source,

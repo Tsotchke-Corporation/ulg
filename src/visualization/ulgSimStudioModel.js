@@ -1,4 +1,7 @@
 import {
+  SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS
+} from '../../ulg-gpu-abi/src/index.js';
+import {
   SPH_PHASE_SCENARIO_PRESETS,
   sphPhaseScenarioPresetById
 } from '../runtime/sphPhaseScenarioPresets.js';
@@ -65,6 +68,23 @@ export function fmtTempC(kelvin) {
   const c = Number(kelvin) - 273.15;
   if (!Number.isFinite(c)) return '';
   return `${c >= 0 ? '+' : ''}${c.toFixed(1)} °C`;
+}
+
+export function normalizeAirHierarchyLevels(levels, twoLevelFallback = false) {
+  const num = Number(levels);
+  if (Number.isFinite(num)) {
+    const rounded = Math.round(num);
+    if (rounded >= 2 && rounded <= SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS) {
+      return rounded;
+    }
+    if (rounded > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS) {
+      return SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS;
+    }
+    if (rounded === 1 && !twoLevelFallback) {
+      return 1;
+    }
+  }
+  return twoLevelFallback ? 2 : 1;
 }
 
 export function totalParticlesOf(bodies) {
@@ -143,7 +163,15 @@ export function buildStagedConfigFromPreset(presetId) {
       humidityPercent: Number(controls.environmentHumidityPercent ?? 50),
       nucleiPerCm3: Number(controls.environmentNucleiPerCm3 ?? 0),
       twoLevelAir: runtime.schroederTwoLevel === '1'
-        && (controls.environmentMode || SPH_ENVIRONMENT_CONTROL_DEFAULTS.environmentMode) === 'air'
+        && (controls.environmentMode || SPH_ENVIRONMENT_CONTROL_DEFAULTS.environmentMode) === 'air',
+      airHierarchyLevels: (controls.environmentMode || SPH_ENVIRONMENT_CONTROL_DEFAULTS.environmentMode) === 'air'
+        ? (runtime.schroederLevelChain === '1'
+            ? normalizeAirHierarchyLevels(
+                Number(runtime.schroederMaxLevel ?? 2) - Number(runtime.schroederMinLevel ?? 0) + 1,
+                false
+              )
+            : (runtime.schroederTwoLevel === '1' ? 2 : 1))
+        : 1
     },
     laws: {
       gravity: controls.lawg !== '0',
@@ -193,7 +221,8 @@ export function buildBlankCustomConfig() {
       pressurePa: 101325,
       humidityPercent: 50,
       nucleiPerCm3: 0,
-      twoLevelAir: false
+      twoLevelAir: false,
+      airHierarchyLevels: 1
     },
     laws: {
       gravity: true,
@@ -402,7 +431,14 @@ export function buildLaunchParamsFromStagedConfig(config) {
   const firstBody = internalBodies[0];
   const secondBody = internalBodies[1] || firstBody;
   const isAirEnvironment = config.environment.mode === 'air';
-  const twoLevelAirEnabled = Boolean(isAirEnvironment && config.environment.twoLevelAir === true);
+  const airHierarchyLevels = isAirEnvironment
+    ? normalizeAirHierarchyLevels(
+        config.environment.airHierarchyLevels,
+        config.environment.twoLevelAir === true
+      )
+    : 1;
+  const twoLevelAirEnabled = isAirEnvironment && airHierarchyLevels === 2;
+  const multiLevelChainAirEnabled = isAirEnvironment && airHierarchyLevels >= 3;
   const cubicBox = Math.abs(boxM[1] - boxM[0]) <= 1e-6 * boxM[0]
     && Math.abs(boxM[2] - boxM[0]) <= 1e-6 * boxM[0];
   const configuredNuclei = Number(config.environment.nucleiPerCm3 ?? 0);
@@ -410,14 +446,15 @@ export function buildLaunchParamsFromStagedConfig(config) {
     ? configuredNuclei
     : (isAirEnvironment && cubicBox ? 5000 : 0);
   const useExactEnergyLedger = Boolean(
-    isAirEnvironment && cubicBox && effectiveNucleiPerCm3 > 0
+    multiLevelChainAirEnabled
+    || (isAirEnvironment && cubicBox && effectiveNucleiPerCm3 > 0)
   );
   let twoLevelAirRuntime = {};
-  if (twoLevelAirEnabled) {
-    // First-Class Air 2-level SS enrollment (strictly 2 levels: maxLevel - minLevel === 1).
-    // Coarse level (L1) hosts ambient air parcels while fine level (L0) resolves condensed
-    // bodies and interfaces; sphPhaseDemoMount retires the single-level implicit atmosphere
-    // stand-in automatically whenever maxLevel > minLevel.
+  if (twoLevelAirEnabled || multiLevelChainAirEnabled) {
+    // First-Class Air multi-level SS enrollment (2-level coupled OR 3..16-level
+    // 2:1 Schroeder chain). Coarse levels host ambient air parcels while L0
+    // resolves condensed bodies and interfaces; sphPhaseDemoMount retires the
+    // single-level implicit atmosphere stand-in whenever maxLevel > minLevel.
     const bodyPitches = internalBodies.map((body) => (
       Math.cbrt(
         (body.sizeM[0] / body.particlesPerEdge[0])
@@ -437,22 +474,42 @@ export function buildLaunchParamsFromStagedConfig(config) {
       Math.min(0.0002, Math.max(1e-6, (0.4 * twoLevelBaseDxM) / airAcousticSpeedMPerS)),
       4
     );
-    twoLevelAirRuntime = {
-      schroederMinLevel: '0',
-      schroederMaxLevel: '1',
-      schroederTwoLevel: '1',
-      schroederTwoLevelAuthority: 'authoritative',
-      schroederTwoLevelSubsteps: '2',
-      schroederCrossLevelCoupling: '0',
-      schroederMechanicsFieldPairV2: '1',
-      schroederBaseGridSpacingM: String(twoLevelBaseDxM),
-      sdt: String(twoLevelAcousticDtS),
-      cfl: '0.8',
-      cflSafety: '0.2',
-      residentStepsPerSchedule: '4',
-      environmentAirParcels: 'mixture',
-      splitSpareLineages: String(Math.min(256, Math.max(64, totalParticlesOf(internalBodies))))
-    };
+    if (multiLevelChainAirEnabled) {
+      twoLevelAirRuntime = {
+        schroederMinLevel: '0',
+        schroederMaxLevel: String(airHierarchyLevels - 1),
+        schroederLevelChain: '1',
+        schroederTwoLevel: '0',
+        schroederCrossLevelCoupling: '0',
+        schroederMechanicsFieldPairV2: '0',
+        schroederBaseGridSpacingM: String(twoLevelBaseDxM),
+        sdt: String(twoLevelAcousticDtS),
+        cfl: '0.8',
+        cflSafety: '0.2',
+        residentStepsPerSchedule: '4',
+        submitBurstSteps: '4',
+        environmentAirParcels: 'mixture',
+        exactEnergyLedger: '1',
+        splitSpareLineages: String(Math.min(256, Math.max(64, totalParticlesOf(internalBodies))))
+      };
+    } else {
+      twoLevelAirRuntime = {
+        schroederMinLevel: '0',
+        schroederMaxLevel: '1',
+        schroederTwoLevel: '1',
+        schroederTwoLevelAuthority: 'authoritative',
+        schroederTwoLevelSubsteps: '2',
+        schroederCrossLevelCoupling: '0',
+        schroederMechanicsFieldPairV2: '1',
+        schroederBaseGridSpacingM: String(twoLevelBaseDxM),
+        sdt: String(twoLevelAcousticDtS),
+        cfl: '0.8',
+        cflSafety: '0.2',
+        residentStepsPerSchedule: '4',
+        environmentAirParcels: 'mixture',
+        splitSpareLineages: String(Math.min(256, Math.max(64, totalParticlesOf(internalBodies))))
+      };
+    }
   }
   const compiled = {
     ...SPH_ENVIRONMENT_CONTROL_DEFAULTS,
@@ -585,7 +642,13 @@ export function serializeStagedConfigToUrlSearchParams(config, {
     if (Number(env.nucleiPerCm3) > 0) {
       params.set('airNuclei', String(roundNice(env.nucleiPerCm3, 5)));
     }
-    if (env.twoLevelAir === true) {
+    const airLevels = normalizeAirHierarchyLevels(
+      env.airHierarchyLevels,
+      env.twoLevelAir === true
+    );
+    if (airLevels >= 3) {
+      params.set('airLevels', String(airLevels));
+    } else if (airLevels === 2) {
       params.set('airTwoLevel', '1');
     }
   }
@@ -705,9 +768,15 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
   if (params.has('airRh') && Number.isFinite(airRh) && airRh >= 0) config.environment.humidityPercent = airRh;
   const airNuclei = Number(params.get('airNuclei'));
   if (params.has('airNuclei') && Number.isFinite(airNuclei) && airNuclei >= 0) config.environment.nucleiPerCm3 = airNuclei;
-  if (params.has('airTwoLevel')) {
+  if (params.has('airLevels')) {
+    const parsedAirLevels = normalizeAirHierarchyLevels(params.get('airLevels'), false);
+    config.environment.airHierarchyLevels = parsedAirLevels;
+    config.environment.twoLevelAir = parsedAirLevels === 2;
+  } else if (params.has('airTwoLevel')) {
     const rawTwoLevel = String(params.get('airTwoLevel') || '').trim().toLowerCase();
-    config.environment.twoLevelAir = ['1', 'true', 'yes', 'on'].includes(rawTwoLevel);
+    const enabled = ['1', 'true', 'yes', 'on'].includes(rawTwoLevel);
+    config.environment.twoLevelAir = enabled;
+    config.environment.airHierarchyLevels = enabled ? 2 : 1;
   }
 
   const rawLaws = params.get('laws');

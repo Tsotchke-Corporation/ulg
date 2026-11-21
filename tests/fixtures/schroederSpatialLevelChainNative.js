@@ -63,11 +63,13 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {
   let count = parent[37];
   if (i == 0u) {
     atomicAdd(&receipt[1], 1u);
-    let debug = 8u + PAIR * 4u;
-    atomicStore(&receipt[debug], parent[2]);
-    atomicStore(&receipt[debug+1u], parent[35]);
-    atomicStore(&receipt[debug+2u], count);
-    atomicStore(&receipt[debug+3u], parent[39] | parent[40] | parent[41] | parent[71] | parent[78] | parent[79]);
+    if (PAIR < 5u) {
+      let debug = 8u + PAIR * 4u;
+      atomicStore(&receipt[debug], parent[2]);
+      atomicStore(&receipt[debug+1u], parent[35]);
+      atomicStore(&receipt[debug+2u], count);
+      atomicStore(&receipt[debug+3u], parent[39] | parent[40] | parent[41] | parent[71] | parent[78] | parent[79]);
+    }
     if (PAIR == 1u) {
       atomicStore(&receipt[28], parent[78]); atomicStore(&receipt[29], parent[79]);
       atomicStore(&receipt[30], source[33]); atomicStore(&receipt[31], parent[30]);
@@ -478,7 +480,7 @@ if(explicitRefinement) {
     };
     const mechanicsLevels = Array.from({ length: levelCount }, (_, selectedLevel) => {
       const gridSpacingM = 0.5 * 2**selectedLevel;
-      const n = 32 / gridSpacingM + (composite ? 5 : 3);
+      const n = Math.max(1, Math.ceil(32 / gridSpacingM)) + (composite ? 5 : 3);
       return { selectedLevel, mechanicsGrid: {
         gridNodeCount: n**3, gridDims: [n,n,n], gridShift: 1, gridSpacingM, boxDimsM:[32,32,32]
       } };

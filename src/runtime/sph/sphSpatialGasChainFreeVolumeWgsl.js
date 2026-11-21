@@ -1,4 +1,5 @@
 import { createSphSpatialGasFreeVolumeWgsl } from '../../../ulg-gpu-abi/src/sphSpatialGasFreeVolumeWgsl.js';
+import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
 
 // W consumes the actual final CSR keys and the authenticated R volume record.
 // No inherited row is presented as a native phase-volume moment.
@@ -10,7 +11,7 @@ export function createSphSpatialGasChainFreeVolumeWgsl(layout) {
 
 @compute @workgroup_size(1)
 fn validate_chain_gas_free_volume_authority() {
-  if(params.exact_level_count<3u || params.exact_level_count>6u
+  if(params.exact_level_count<3u || params.exact_level_count>${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS}u
     || !control_volume_geometry_ready()){fail(INVALID_GEOMETRY,19u);return;}
   if(!directory_ready()){fail(INVALID_DIRECTORY,16u);return;}
   if((params.aerosol_enabled==0u && (params.aerosol_family_id!=0u

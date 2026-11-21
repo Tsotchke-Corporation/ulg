@@ -17,7 +17,7 @@ test('optional aerosol volume ABI fits reserved lanes and leaves legacy defaults
   const layout = createSphSpatialGasFreeVolumeLayout({ cellCapacity: 128 });
   assert.equal(layout.paramsByteLength, 288); assert.equal(layout.controlWords, 64);
   assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_VERSION, 1);
-  assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES, 112);
+  assert.equal(SPH_SPATIAL_GAS_FREE_VOLUME_AEROSOL_GEOMETRY_BYTES, 272);
   assert.deepEqual([O.AEROSOL_ENABLED, O.AEROSOL_FAMILY_ID, O.AEROSOL_GENERATION,
     O.AEROSOL_CAPACITY, O.AEROSOL_VISITED_COUNT, O.AEROSOL_LIVE_COUNT,
     O.INVALID_AEROSOL_COUNT, O.AEROSOL_VERSION, O.AEROSOL_COMPLETION_GENERATION],

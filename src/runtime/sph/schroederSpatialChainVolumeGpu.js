@@ -1,4 +1,5 @@
 import { createSchroederSpatialChainVolumeWgsl, createSchroederSpatialChainVolumeAdjointWgsl } from '../../../ulg-gpu-abi/src/schroederSpatialChainVolumeWgsl.js';
+import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
 import { validateSchroederSpatialParentFieldViewDescriptor } from '../../../ulg-gpu-abi/src/schroederSpatialParentFieldView.js';
 import { ownsSchroederSpatialEpochGenerationConsumerLease,
   resolveSchroederSpatialEpochGenerationConsumerExecution } from './schroederSpatialEpochGpu.js';
@@ -17,7 +18,7 @@ export function createSchroederSpatialChainVolumeGpu(device, {
   if (typeof phaseMoments !== 'boolean') throw new TypeError('Chain phase moments require an explicit boolean');
   const rowStrideWords = phaseMoments ? 4 : 1;
   if (!Array.isArray(nativeFieldCapacities) || nativeFieldCapacities.length < 2
-    || nativeFieldCapacities.length > 6 || !Array.isArray(parentFieldCapacities)
+    || nativeFieldCapacities.length > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS || !Array.isArray(parentFieldCapacities)
     || parentFieldCapacities.length !== nativeFieldCapacities.length - 1
     || [...nativeFieldCapacities,...parentFieldCapacities].some(n => !Number.isSafeInteger(n) || n < 1)
     || !Number.isInteger(arenaCount) || arenaCount < 1 || arenaCount > 8) {

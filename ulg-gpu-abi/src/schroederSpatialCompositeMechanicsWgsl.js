@@ -145,7 +145,7 @@ fn source_row(i: u32) -> array<f32, 8> {
   else {
     if ((source_state[start+7u] > 0u) != (row[0u] > 0.0)
       || source_state[start+7u] == 0xffffffffu) { fail(8u); }
-    if (row[0u] > 0.0) { row[7u] = dot(vec3<f32>(row[1u],row[2u],row[3u]),vec3<f32>(row[1u],row[2u],row[3u])) / (2.0*row[0u]); }
+    if (row[0u] > 0.0) { let v = vec3<f32>(row[1u],row[2u],row[3u]) / row[0u]; row[7u] = 0.5 * row[0u] * dot(v,v); }
   }
   return row;
 }
@@ -153,14 +153,14 @@ fn native_row(i: u32) -> array<f32, 8> {
   let start = native[30u] + i*8u; var row: array<f32, 8>;
   for (var w=0u; w<7u; w++) { row[w] = bitcast<f32>(native[start+w]); }
   if ((native[start+7u] > 0u) != (row[0u] > 0.0) || native[start+7u] == 0xffffffffu) { fail(8u); }
-  if (row[0u] > 0.0) { row[7u] = dot(vec3<f32>(row[1u],row[2u],row[3u]),vec3<f32>(row[1u],row[2u],row[3u])) / (2.0*row[0u]); }
+  if (row[0u] > 0.0) { let v = vec3<f32>(row[1u],row[2u],row[3u]) / row[0u]; row[7u] = 0.5 * row[0u] * dot(v,v); }
   return row;
 }
 fn valid_row(row: array<f32, 8>) -> bool {
   for (var w=0u; w<8u; w++) { if (!finite(row[w]) || (row[0u] == 0.0 && row[w] != 0.0)) { return false; } }
   if (row[0u] < 0.0 || row[7u] < 0.0) { return false; }
   if (row[0u] > 0.0) {
-    let p = vec3<f32>(row[1u],row[2u],row[3u]); let kinetic = dot(p,p)/(2.0*row[0u]);
+    let v = vec3<f32>(row[1u],row[2u],row[3u]) / row[0u]; let kinetic = 0.5 * row[0u] * dot(v,v);
     if (!finite(kinetic) || kinetic > row[7u] + max(1e-12, abs(row[7u])*2e-5)) { return false; }
   }
   return true;

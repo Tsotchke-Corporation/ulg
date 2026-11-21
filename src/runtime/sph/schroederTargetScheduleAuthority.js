@@ -709,6 +709,10 @@ export function createSchroederTargetScheduleWriterSet({
     mechanics.enableTwoLevelMechanics === true
     || hierarchy.enableTwoLevelMechanics === true
   );
+  const levelChainMechanics = Boolean(
+    mechanics.enableLevelChainMechanics === true
+    || hierarchy.enableLevelChainMechanics === true
+  );
   const authoritativeTwoLevelMechanics = Boolean(
     twoLevelMechanics
     && String(
@@ -793,12 +797,14 @@ export function createSchroederTargetScheduleWriterSet({
     epoch.mechanicsFieldViewsRequired === true
     || phaseVolumeMigration
     || twoLevelMechanics
+    || levelChainMechanics
     || surfaceTension
     || gasBoundaryActionable
     || !explicitVacuumAmbient
   );
   const phaseVolumeInterfaceTransport = Boolean(
     !twoLevelMechanics
+    && !levelChainMechanics
     && mechanicsFieldViews
     && schroederMechanicsTableHasGasOrPlasmaPhase(
       resident.mechanicsMaterialTable
@@ -812,6 +818,7 @@ export function createSchroederTargetScheduleWriterSet({
     || lawNeighborCandidates
     || phaseVolumeMigration
     || twoLevelMechanics
+    || levelChainMechanics
     || surfaceTension
     // Merely presenting the current particle family to the gas candidate
     // classifier must not turn contact back on for contact-free fluids. Keep
@@ -846,6 +853,7 @@ export function createSchroederTargetScheduleWriterSet({
     phaseVolumeSidecars: Boolean(
       phaseVolumeMigration
       || twoLevelMechanics
+      || levelChainMechanics
       || particleGasLedgerActionable
       || retainedProductGasBoundaryActionable
       || phaseVolumeInterfaceTransport
@@ -865,14 +873,22 @@ export function createSchroederTargetScheduleWriterSet({
     complete: provider.writerSetComplete
   };
   if (phaseSlotRefinementPolicyFingerprint) base.phaseSlotRefinementPolicyFingerprint = phaseSlotRefinementPolicyFingerprint;
+  if (levelChainMechanics) base.levelChainMechanics = true;
   base.writerIds = providerWriterIds(base);
   return deepFreeze(base);
 }
 
 export function exactSchroederTargetScheduleWriterSet(value) {
   const hasPhaseSlotPolicy = Object.hasOwn(value ?? {}, 'phaseSlotRefinementPolicyFingerprint');
+  const hasLevelChainMechanics = Object.hasOwn(value ?? {}, 'levelChainMechanics');
+  const expectedKeys = [
+    ...WRITER_SET_KEYS,
+    ...(hasPhaseSlotPolicy ? ['phaseSlotRefinementPolicyFingerprint'] : []),
+    ...(hasLevelChainMechanics ? ['levelChainMechanics'] : [])
+  ];
   if (
-    !objectHasExactKeys(value, hasPhaseSlotPolicy ? [...WRITER_SET_KEYS, 'phaseSlotRefinementPolicyFingerprint'] : WRITER_SET_KEYS)
+    !objectHasExactKeys(value, expectedKeys)
+    || (hasLevelChainMechanics && (value.levelChainMechanics !== true || value.twoLevelMechanics === true))
     || (hasPhaseSlotPolicy && (!nonEmptyString(value.phaseSlotRefinementPolicyFingerprint)
       || !value.phaseVolumeMigration || value.twoLevelMechanics))
     || value.schema !== ULG_SCHROEDER_TARGET_SCHEDULE_WRITER_SET_SCHEMA
@@ -891,13 +907,14 @@ export function exactSchroederTargetScheduleWriterSet(value) {
       !== Boolean(
         value.phaseVolumeMigration
         || value.twoLevelMechanics
+        || (hasLevelChainMechanics && value.levelChainMechanics === true)
         || value.particleGasLedgerActionable
         || value.retainedProductGasBoundaryActionable
         || value.phaseVolumeInterfaceTransport
       )
     || (
       value.phaseVolumeInterfaceTransport
-      && (value.twoLevelMechanics || !value.mechanicsFieldViews)
+      && (value.twoLevelMechanics || (hasLevelChainMechanics && value.levelChainMechanics === true) || !value.mechanicsFieldViews)
     )
     || (
       value.particleGasLedgerActionable
@@ -921,6 +938,7 @@ export function exactSchroederTargetScheduleWriterSet(value) {
           || value.lawNeighborCandidates
           || value.phaseVolumeMigration
           || value.twoLevelMechanics
+          || (hasLevelChainMechanics && value.levelChainMechanics === true)
           || value.surfaceTension
           || value.gasBoundaryActionable
         )

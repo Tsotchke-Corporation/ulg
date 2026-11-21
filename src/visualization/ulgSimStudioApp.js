@@ -1191,22 +1191,60 @@ export function mountUlgSimStudioApp({
       }
       envBlock.appendChild(airGrid);
 
-      // First-Class Air 2-Level SS toggle (strictly 2 levels: L0 fine + L1 coarse ambient)
-      const twoLevelAirLabel = document.createElement('label');
-      twoLevelAirLabel.className = 'ulg-toggle-item';
-      twoLevelAirLabel.style.marginTop = '10px';
-      const twoLevelAirCb = document.createElement('input');
-      twoLevelAirCb.type = 'checkbox';
-      twoLevelAirCb.checked = Boolean(stagedConfig.environment.twoLevelAir);
-      twoLevelAirCb.addEventListener('change', () => {
-        stagedConfig.environment.twoLevelAir = twoLevelAirCb.checked;
+      // First-Class Air Schroeder Spatial hierarchy level selector (1, 2, or 3..16-level 2:1 chain)
+      const currentAirLevels = (() => {
+        const raw = Number(stagedConfig.environment.airHierarchyLevels);
+        if (Number.isInteger(raw) && raw >= 1 && raw <= 16) return raw;
+        return stagedConfig.environment.twoLevelAir === true ? 2 : 1;
+      })();
+      const airHierarchyWrap = document.createElement('div');
+      airHierarchyWrap.className = 'ulg-field';
+      airHierarchyWrap.style.marginTop = '10px';
+      const airHierarchyLabel = document.createElement('label');
+      airHierarchyLabel.textContent = 'First-Class Air Spatial Hierarchy';
+      airHierarchyWrap.appendChild(airHierarchyLabel);
+      const airHierarchySelect = document.createElement('select');
+      airHierarchySelect.className = 'ulg-select';
+      airHierarchySelect.setAttribute('aria-label', 'First-Class Air Spatial Hierarchy');
+      const airLevelOptions = [
+        [1, '1-Level (Single Grid, implicit ambient)'],
+        [2, '2-Level First-Class Air (L0–L1, 2× dyadic span)'],
+        [3, '3-Level Schroeder Chain (L0–L2, 4× dyadic span)'],
+        [4, '4-Level Schroeder Chain (L0–L3, 8× dyadic span)'],
+        [6, '6-Level Schroeder Chain (L0–L5, 32× dyadic span)']
+      ];
+      if (!airLevelOptions.some(([val]) => val === currentAirLevels)) {
+        const span = 2 ** (currentAirLevels - 1);
+        airLevelOptions.push([
+          currentAirLevels,
+          `${currentAirLevels}-Level Schroeder Chain (L0–L${currentAirLevels - 1}, ${span}× dyadic span)`
+        ]);
+      }
+      for (const [val, text] of airLevelOptions) {
+        const opt = document.createElement('option');
+        opt.value = String(val);
+        opt.textContent = text;
+        if (val === currentAirLevels) opt.selected = true;
+        airHierarchySelect.appendChild(opt);
+      }
+      airHierarchySelect.addEventListener('change', () => {
+        const nextLevels = Math.max(1, Math.min(16, Math.round(Number(airHierarchySelect.value) || 1)));
+        stagedConfig.environment.airHierarchyLevels = nextLevels;
+        stagedConfig.environment.twoLevelAir = nextLevels === 2;
         markStagedCustom();
         updateChromeAndStatus();
       });
-      const twoLevelAirText = document.createElement('span');
-      twoLevelAirText.textContent = '2-Level First-Class Air (L1 coarse ambient + L0 fine interface, retires implicit atmosphere stand-in)';
-      twoLevelAirLabel.append(twoLevelAirCb, twoLevelAirText);
-      envBlock.appendChild(twoLevelAirLabel);
+      airHierarchyWrap.appendChild(airHierarchySelect);
+      const airHierarchyHint = document.createElement('p');
+      airHierarchyHint.className = 'ulg-section-help';
+      airHierarchyHint.style.margin = '4px 0 0 0';
+      airHierarchyHint.textContent = currentAirLevels >= 3
+        ? `N-level 2:1 Schroeder chain (${currentAirLevels} levels, O(1) GPU storage bindings, exact 2⁻¹⁴⁹ mass & energy ledger, retires implicit atmosphere).`
+        : currentAirLevels === 2
+          ? 'L1 coarse ambient + L0 fine interface, retires implicit atmosphere stand-in.'
+          : 'Single fine lattice with implicit ambient atmosphere pressure.';
+      airHierarchyWrap.appendChild(airHierarchyHint);
+      envBlock.appendChild(airHierarchyWrap);
     }
     panel.appendChild(envBlock);
 

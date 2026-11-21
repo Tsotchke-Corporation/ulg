@@ -3508,8 +3508,17 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
       reactionStateMutationApplied: reactionComponentMutations.state,
       reactionThermoMutationApplied: reactionComponentMutations.thermo
     });
+    const deferOpticsForChainLedgerParcels = Boolean(
+      chainCapture
+      && massCapture
+      && (
+        sphGpuParticleUploadLedgerParcels(sphParticleUpload)
+        ?? sphGpuParticleUploadLedgerParcels(massCapture.g2p?.sourceRead?.sourceSphUpload)
+      )
+      && !globalThis.__ulgDisableLedgerParcelStage
+    );
     executedStageOrder.push('phase-carrier-transfer-v2');
-    if (!phaseSlotRefinement && typeof afterPhaseCarrierTransfer === 'function') {
+    if (!phaseSlotRefinement && !deferOpticsForChainLedgerParcels && typeof afterPhaseCarrierTransfer === 'function') {
       await afterPhaseCarrierTransfer({
         phaseCarrierTransferStep,
         phaseCarrierTransferFamilyReceipt
@@ -3615,10 +3624,14 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     ledgerParcelStagesRan = true;
     executedStageOrder.push('ledger-vapor-parcel-transport');
   }
-  if (phaseSlotRefinementStep && typeof afterPhaseCarrierTransfer === 'function') {
-    // Condensed lanes keep their fixed addresses through gas refinement. Produce
-    // optics against the current family after parcel exchange, while all phase
-    // inputs are still retained and before refresh seals their cleanup claims.
+  if (
+    (phaseSlotRefinementStep || (chainCapture && ledgerParcelStep && phaseCarrierTransferFamilyReceipt))
+    && typeof afterPhaseCarrierTransfer === 'function'
+  ) {
+    // Condensed lanes keep their fixed addresses through gas refinement and
+    // ledger-parcel candidate staging. Produce optics against the final family
+    // after parcel exchange, while all phase inputs are still retained and
+    // before refresh seals their cleanup claims.
     await afterPhaseCarrierTransfer({
       phaseCarrierTransferStep,
       phaseCarrierTransferFamilyReceipt,

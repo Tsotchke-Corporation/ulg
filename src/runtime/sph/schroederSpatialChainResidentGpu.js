@@ -145,6 +145,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
       const next = await runSchroederSpatialChainStepWebGpu({
         ...args, mechanicsLevels, classificationPolicy, forceInputs, mechanicsOptions, ...current.nextParticleUploads,
         sphParticleState:current.sphParticleState, mlsMpmParticleState:current.mlsMpmParticleState,
+        sourceFamilyConsumerLease: index === 0 ? args.sourceFamilyConsumerLease ?? null : null,
         device, closureOptions, retainForPublication:index === stepCount - 1 });
       privateSteps.push(next);
       current = next;

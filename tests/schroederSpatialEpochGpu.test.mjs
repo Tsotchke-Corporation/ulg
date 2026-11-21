@@ -3783,7 +3783,7 @@ test('direct spatial generation rejects a broken chain link, nonadjacent, non-2:
       { selectedLevel: 1, mechanicsGrid: grid(0.5) },
       { selectedLevel: 2, mechanicsGrid: grid(1.5) }
     ],
-    Array.from({ length: 7 }, (_, level) => ({
+    Array.from({ length: 17 }, (_, level) => ({
       selectedLevel: level,
       mechanicsGrid: grid(0.25 * (2 ** level))
     })),

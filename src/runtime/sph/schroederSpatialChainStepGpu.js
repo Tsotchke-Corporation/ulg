@@ -16,6 +16,7 @@ import { prepareSchroederSpatialChainGasPressure } from './schroederSpatialChain
 import { snapshotSchroederChainLocalLaws } from './schroederSpatialChainLocalLaws.js';
 import { sphGpuParticleUploadExactEnergyRows, acquireSphParticleExactMassRead,
   releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
+import { acquireSchroederSpatialSuccessorExactMassRead } from './schroederSpatialSuccessorSourceFamily.js';
 
 const chainSteps = new WeakMap();
 
@@ -41,7 +42,8 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
   gasPressureMechanicsBoundaryEnabled = false, ambientPressurePa = 0, gasPressureMechanicsScale = 1,
   phaseVolumeInterfaceTransportRequired = false, mechanicsMaterialPhaseUpload = null,
   phaseVolumePressureScale = gasPressureMechanicsBoundaryEnabled ? 0 : 1,
-  phaseVolumeDragScale = 1, phaseVolumeMaxImpulseFraction = 0.5
+  phaseVolumeDragScale = 1, phaseVolumeMaxImpulseFraction = 0.5,
+  sourceFamilyConsumerLease = null
 } = {}) {
   if (!sphGpuParticleUploadExactEnergyRows(sphParticleUpload)
     || !thermalResponseGraphUpload || !thermalMaterialTable || !mechanicsMaterialTable
@@ -122,7 +124,9 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
     return retirement;
   };
   try {
-    sourceRead=acquireSphParticleExactMassRead(sphParticleUpload,device,{mlsMpmParticleUpload});
+    sourceRead = acquireSchroederSpatialSuccessorExactMassRead({
+      device, sphParticleUpload, mlsMpmParticleUpload, consumerLease: sourceFamilyConsumerLease
+    }) ?? acquireSphParticleExactMassRead(sphParticleUpload, device, { mlsMpmParticleUpload });
     assignment=await runSchroederLevelAssignmentWebGpu({...classificationPolicy,device,...source,
       minLevel:mechanicsLevels[0].selectedLevel,maxLevel:mechanicsLevels.at(-1).selectedLevel,
       retainAssignmentBuffer:true,readbackMode:'no-full-readback',queueOrderedCleanup:true});
@@ -132,9 +136,10 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
     if(!generation.ready) throw new Error(`Chain spatial generation refused: ${generation.reason}`);
     if(gasPressureMechanicsBoundaryEnabled) pressure=await prepareSchroederSpatialChainGasPressure({
       device,source,generation,assignment,sourceRead,boxDimsM:forceInputs.boxDimsM,
-      ambientPressurePa,gasPressureMechanicsScale});
+      ambientPressurePa,gasPressureMechanicsScale,sourceFamilyConsumerLease});
     const mechanics=await runSchroederSpatialChainMechanicsWebGpu({device,source,generation,
       mechanicsLevels,forceInputs,internalPressureScale,mechanicsOptions,mechanicsMaterialTable,
+      sourceFamilyConsumerLease,
       crossLevelTransportRequired:phaseVolumeInterfaceTransportRequired,
       localLawInputs:nativePhaseLawsRequired
         ? mechanicsLevels.map((_,index)=>({...pressure?.localLawInputs[index],...nativeLaws,

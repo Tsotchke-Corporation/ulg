@@ -1,3 +1,6 @@
+import {
+  SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS
+} from '../../../ulg-gpu-abi/src/index.js';
 import { cloneSchroederPhaseSlotWorkerAdmissions, schroederPhaseSlotAdmissionFingerprint } from './schroederPhaseSlotWorkerPolicy.js';
 import { THERMAL_POTENTIAL_WORKER_ACK, isThermalPotentialWorkerCandidate,
   thermalPotentialWorkerCandidateEquals, validateThermalPotentialWorkerResult
@@ -405,6 +408,25 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
     throw new RangeError('selectedLevel must lie inside [minLevel, maxLevel]');
   }
   const enableTwoLevelMechanics = options.enableTwoLevelMechanics === true;
+  const enableLevelChainMechanics = options.enableLevelChainMechanics === true;
+  if (enableLevelChainMechanics && enableTwoLevelMechanics) {
+    throw new RangeError(
+      'enableLevelChainMechanics and enableTwoLevelMechanics are mutually exclusive'
+    );
+  }
+  if (enableLevelChainMechanics) {
+    if (minLevel == null || maxLevel == null) {
+      throw new RangeError(
+        'enableLevelChainMechanics requires explicit integer minLevel and maxLevel'
+      );
+    }
+    const chainLevels = maxLevel - minLevel + 1;
+    if (chainLevels < 3 || chainLevels > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS) {
+      throw new RangeError(
+        `enableLevelChainMechanics requires 3..${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} contiguous levels`
+      );
+    }
+  }
   const twoLevelMechanicsAuthority =
     String(options.twoLevelMechanicsAuthority ?? 'observation')
       .trim()
@@ -439,6 +461,7 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
       max: 8
     }),
     enableTwoLevelMechanics,
+    ...(enableLevelChainMechanics ? { enableLevelChainMechanics: true } : {}),
     twoLevelMechanicsAuthority,
     twoLevelFineSubstepCount,
     enableMechanicsFieldPairV2:
@@ -485,6 +508,9 @@ export function createSchroederWorkerHierarchyConfig(options = {}) {
   ].join(':');
   if (phaseSlotRefinementAdmissions) {
     signature += ':' + schroederPhaseSlotAdmissionFingerprint(phaseSlotRefinementAdmissions);
+  }
+  if (enableLevelChainMechanics) {
+    signature += ':chain1';
   }
   return Object.freeze({ ...config, signature });
 }

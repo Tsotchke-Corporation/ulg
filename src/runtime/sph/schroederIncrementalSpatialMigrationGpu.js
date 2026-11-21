@@ -235,9 +235,9 @@ struct MigrationParams {
   prev_cell_members_offset_words: u32,
   prev_particle_to_cell_offset_words: u32,
   scan_workgroups: u32,
-  pad0: u32,
-  pad1: u32,
-  pad2: u32,
+  directory_abi_version: u32,
+  allow_membership_delta: u32,
+  enforce_cell_jump_limit: u32,
   pad3: u32,
   pad4: u32,
   pad5: u32,
@@ -251,9 +251,16 @@ struct MigrationParams {
 @group(0) @binding(5) var<storage, read_write> consumer_dispatch: array<u32>;
 @group(0) @binding(6) var<storage, read_write> atomics_buf: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> scratch: array<u32>;
+@group(0) @binding(8) var<storage, read> active_source_view: array<u32>;
 
 const MAGIC: u32 = 0x53534531u;
 const ABI_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_MAGIC: u32 = 0x53535631u;
+const ACTIVE_SOURCE_VERSION: u32 = 1u;
+const ACTIVE_SOURCE_STATUS_EXACT: u32 = 3u;
+const ACTIVE_SOURCE_STATUS_REJECTED: u32 = 0xfcu;
+const ACTIVE_SOURCE_HEADER_WORDS: u32 = 64u;
+const ACTIVE_SOURCE_MISSING: u32 = 0xffffffffu;
 const ACTIVE_NODE_STRIDE: u32 = 16u;
 const EXACT_KEY_WORDS: u32 = 5u;
 const SORT_MODE_BOUNDED_ATLAS: u32 = 1u;
@@ -275,6 +282,7 @@ const MODE_ZERO_CHURN_REBASE: u32 = 1u;
 const MODE_ADJACENT_CELL_REPAIR: u32 = 2u;
 
 const FLAG_NO_PREDECESSOR: u32 = 1u;
+const FLAG_SOURCE_COUNT_CHANGED: u32 = 2u;
 const FLAG_INVALID_SOURCE: u32 = 8u;
 const FLAG_DISP_EXCEEDED: u32 = 16u;
 const FLAG_MULTI_CELL_JUMP: u32 = 32u;
@@ -338,20 +346,138 @@ fn low_bits_mask(bit_count: u32) -> u32 {
   return (1u << bit_count) - 1u;
 }
 
+fn v2_active_source_view_admitted() -> bool {
+  let bound_words = arrayLength(&active_source_view);
+  if (bound_words < ACTIVE_SOURCE_HEADER_WORDS) { return false; }
+  let status = active_source_view[2u];
+  let physical_count = active_source_view[16u];
+  let physical_capacity = active_source_view[17u];
+  let active_count = active_source_view[18u];
+  let active_capacity = active_source_view[19u];
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let capacity_words = active_source_view[27u];
+  return params.logical_count_gpu_authored == 1u
+    && params.physical_radix_count <= params.source_capacity
+    && active_source_view[0u] == ACTIVE_SOURCE_MAGIC
+    && active_source_view[1u] == ACTIVE_SOURCE_VERSION
+    && (status & ACTIVE_SOURCE_STATUS_EXACT) == ACTIVE_SOURCE_STATUS_EXACT
+    && (status & ACTIVE_SOURCE_STATUS_REJECTED) == 0u
+    && active_source_view[3u] == params.generation_id
+    && active_source_view[4u] == params.device_ordinal
+    && active_source_view[5u] == params.lane_ordinal
+    && active_source_view[6u] == params.lease_token
+    && active_source_view[7u] == params.source_family_id
+    && active_source_view[8u] == params.storage_generation
+    && active_source_view[9u] == params.physics_tick
+    && active_source_view[10u] == params.physics_substep
+    && active_source_view[11u] == params.position_epoch
+    && active_source_view[12u] == params.topology_epoch
+    && active_source_view[13u] == params.chart_epoch
+    && active_source_view[14u] == params.level_epoch
+    && active_source_view[15u] == params.support_epoch
+    && physical_count == params.source_count
+    && physical_count <= physical_capacity
+    && physical_capacity == params.source_capacity
+    && active_count <= active_capacity
+    && active_count <= params.physical_radix_count
+    && active_capacity == params.physical_radix_count
+    && active_capacity <= physical_capacity
+    && active_source_view[20u] == physical_count - active_count
+    && active_source_view[21u] == 0u
+    && active_source_view[22u] == 0u
+    && active_source_view[23u] == SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+    && active_source_view[24u] == ACTIVE_NODE_STRIDE
+    && active_to_physical == ACTIVE_SOURCE_HEADER_WORDS
+    && physical_to_active == active_to_physical + active_capacity
+    && capacity_words == physical_to_active + physical_capacity
+    && capacity_words <= bound_words
+    && active_source_view[29u] == params.build_ordinal
+    && active_source_view[30u] == params.build_ordinal
+    && active_source_view[33u] == active_count
+    && active_source_view[34u] == active_count
+    && active_source_view[35u] == active_count
+    && active_source_view[36u] <= physical_count
+    && active_source_view[43u] == active_count * 27u
+    && active_source_view[47u] != 0u;
+}
+
+fn count_contract_ready() -> bool {
+  if (params.directory_abi_version == 2u) {
+    return v2_active_source_view_admitted()
+      && params.source_row_layout_id == SOURCE_LAYOUT_LEVEL_ASSIGNMENT
+      && params.source_count <= params.source_capacity
+      && params.physical_radix_count <= params.source_capacity;
+  }
+  return params.directory_abi_version == ABI_VERSION
+    && params.logical_count_gpu_authored <= 1u
+    && params.physical_radix_count <= params.source_capacity
+    && params.source_count <= params.physical_radix_count
+    && (
+      params.logical_count_gpu_authored != 0u
+      || params.source_count == params.physical_radix_count
+    );
+}
+
+fn live_source_count() -> u32 {
+  if (!count_contract_ready()) { return 0u; }
+  if (params.directory_abi_version == 2u) {
+    return active_source_view[18u];
+  }
+  return params.source_count;
+}
+
+fn prev_active_count() -> u32 {
+  if (params.directory_abi_version == 2u) {
+    return prev_directory[37u];
+  }
+  return prev_directory[16u];
+}
+
+fn physical_source_for_active(active_ordinal: u32) -> u32 {
+  let active_count = live_source_count();
+  if (active_ordinal >= active_count) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  let active_to_physical = active_source_view[25u];
+  let physical_to_active = active_source_view[26u];
+  let physical_source = active_source_view[active_to_physical + active_ordinal];
+  if (
+    physical_source >= params.source_count
+    || active_source_view[physical_to_active + physical_source] != active_ordinal
+  ) {
+    return ACTIVE_SOURCE_MISSING;
+  }
+  return physical_source;
+}
+
 fn prev_directory_admitted() -> bool {
   let st = prev_directory[2u];
+  let is_v2 = params.directory_abi_version == 2u;
+  let count_ok = select(
+    prev_directory[16u] == params.source_count
+      || (
+        params.allow_membership_delta != 0u
+        && params.logical_count_gpu_authored != 0u
+        && prev_directory[16u] <= params.physical_radix_count
+      ),
+    prev_directory[16u] == params.source_count
+      && prev_directory[37u] <= params.physical_radix_count
+      && prev_directory[37u] <= params.source_count,
+    is_v2
+  );
   return prev_directory[0u] == MAGIC
-    && prev_directory[1u] == ABI_VERSION
+    && prev_directory[1u] == params.directory_abi_version
     && (st & (STATUS_READY | STATUS_ADMITTED)) == (STATUS_READY | STATUS_ADMITTED)
     && (st & STATUS_FAIL_CLOSED) == 0u
     && prev_directory[3u] == params.prev_generation_id
-    && prev_directory[16u] == params.source_count
+    && count_ok
     && prev_directory[18u] <= params.cell_capacity;
 }
 
 fn exact_near_query_profile_ready() -> bool {
   if (params.query_geometry_mode == QUERY_GEOMETRY_GENERIC) { return true; }
-  if (params.logical_count_gpu_authored != 0u) { return false; }
+  if (params.directory_abi_version != 2u && params.logical_count_gpu_authored != 0u) { return false; }
   if (params.query_geometry_mode != QUERY_GEOMETRY_SINGLE_CHART_POW2) { return false; }
   let min_order = signed_order_key(params.query_min_level);
   let max_order = signed_order_key(params.query_max_level);
@@ -371,6 +497,53 @@ fn repair_aborted() -> bool {
   return atomicLoad(&atomics_buf[1]) != 0u;
 }
 
+@compute @workgroup_size(256)
+fn detect_departed_members(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x == 0u) {
+    if (!count_contract_ready() || !prev_directory_admitted()) {
+      atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
+    }
+  }
+  if (!count_contract_ready() || !prev_directory_admitted()) { return; }
+  let prev_count = prev_active_count();
+  let p = gid.x;
+  if (p >= prev_count) { return; }
+  let is_v2 = params.directory_abi_version == 2u;
+  let member = prev_directory[params.prev_cell_members_offset_words + p];
+  if (member >= params.source_capacity) {
+    atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
+    return;
+  }
+  var departed = false;
+  if (is_v2) {
+    let physical_to_active = active_source_view[26u];
+    departed = member >= params.source_count
+      || active_source_view[physical_to_active + member] == ACTIVE_SOURCE_MISSING;
+  } else {
+    departed = member >= live_source_count();
+  }
+  if (departed) {
+    if (params.allow_membership_delta == 0u) {
+      atomicOr(&atomics_buf[1], FLAG_SOURCE_COUNT_CHANGED);
+      return;
+    }
+    let prev_raw = prev_directory[params.prev_particle_to_cell_offset_words + member];
+    if (is_v2 && prev_raw == 0u) {
+      atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
+      return;
+    }
+    let old_c = select(prev_raw, prev_raw - 1u, is_v2);
+    if (old_c >= prev_directory[18u]) {
+      atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
+      return;
+    }
+    scratch[S_MOVED_FLAG + member] = 1u;
+    atomicAdd(&atomics_buf[OUTGOING_BASE + old_c], 1u);
+  } else {
+    scratch[S_MOVED_FLAG + member] = 0u;
+  }
+}
+
 var<workgroup> wg_mask_lo: atomic<u32>;
 var<workgroup> wg_mask_hi: atomic<u32>;
 var<workgroup> wg_max_disp: atomic<u32>;
@@ -386,14 +559,21 @@ fn detect_moved_members(
     atomicStore(&wg_mask_hi, 0u);
     atomicStore(&wg_max_disp, 0u);
     atomicStore(&wg_max_jump, 0u);
-    if (gid.x == 0u && !prev_directory_admitted()) {
+    if (gid.x == 0u && (!count_contract_ready() || !prev_directory_admitted())) {
       atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
     }
   }
   workgroupBarrier();
 
-  let i = gid.x;
-  if (i < params.source_count && prev_directory_admitted()) {
+  let is_v2 = params.directory_abi_version == 2u;
+  let live_count = live_source_count();
+  let idx = gid.x;
+  if (idx < live_count && count_contract_ready() && prev_directory_admitted()) {
+    let i = select(idx, physical_source_for_active(idx), is_v2);
+    if (is_v2 && i == ACTIVE_SOURCE_MISSING) {
+      atomicAdd(&atomics_buf[12], 1u);
+      atomicOr(&atomics_buf[1], FLAG_INVALID_SOURCE);
+    } else {
     let row = i * ACTIVE_NODE_STRIDE;
     let source_layout = params.source_row_layout_id;
     let level_f = source_rows[row + 0u];
@@ -503,7 +683,7 @@ fn detect_moved_members(
           }
         }
 
-        if (params.has_prev_source != 0u) {
+        if (params.has_prev_source != 0u && params.max_disp_ratio > 0.0) {
           let prev_pos = vec3<f32>(
             prev_source_rows[row + 12u],
             prev_source_rows[row + 13u],
@@ -519,35 +699,15 @@ fn detect_moved_members(
           }
         }
 
-        let old_c = prev_directory[params.prev_particle_to_cell_offset_words + i];
+        let prev_raw = prev_directory[params.prev_particle_to_cell_offset_words + i];
         let prev_cell_count = prev_directory[18u];
-        if (old_c >= prev_cell_count) {
-          atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
-        } else {
-          let k_base = params.prev_cell_keys_offset_words + old_c * EXACT_KEY_WORDS;
-          let k0 = prev_directory[k_base + 0u];
-          let k1 = prev_directory[k_base + 1u];
-          let k2 = prev_directory[k_base + 2u];
-          let k3 = prev_directory[k_base + 3u];
-          let k4 = prev_directory[k_base + 4u];
-
-          var jump: u32 = 0u;
-          if (chart != k0 || level_order != k1) {
-            jump = 0xffffffffu;
+        let was_active = select((i < prev_active_count()), (prev_raw > 0u), is_v2);
+        if (!was_active) {
+          if (params.allow_membership_delta == 0u) {
+            atomicOr(&atomics_buf[1], FLAG_SOURCE_COUNT_CHANGED);
           } else {
-            jump = max(abs_diff_u32(cell_order.x, k2), max(abs_diff_u32(cell_order.y, k3), abs_diff_u32(cell_order.z, k4)));
-          }
-          atomicMax(&wg_max_jump, jump);
-          if (jump > params.max_cell_jump) {
-            atomicOr(&atomics_buf[1], FLAG_MULTI_CELL_JUMP);
-          }
-
-          let moved = (chart != k0) || (level_order != k1)
-            || (cell_order.x != k2) || (cell_order.y != k3) || (cell_order.z != k4);
-          scratch[S_MOVED_FLAG + i] = select(0u, 1u, moved);
-          if (moved) {
+            scratch[S_MOVED_FLAG + i] = 1u;
             let slot = atomicAdd(&atomics_buf[2], 1u);
-            atomicAdd(&atomics_buf[OUTGOING_BASE + old_c], 1u);
             if (slot < params.max_moved_members) {
               scratch[S_MOVED_SOURCE + slot] = i;
               let nk = S_MOVED_NEW_KEY + slot * EXACT_KEY_WORDS;
@@ -560,8 +720,51 @@ fn detect_moved_members(
               atomicOr(&atomics_buf[1], FLAG_MOVED_BUDGET_EXCEEDED);
             }
           }
+        } else {
+          let old_c = select(prev_raw, prev_raw - 1u, is_v2);
+          if (old_c >= prev_cell_count) {
+            atomicOr(&atomics_buf[1], FLAG_NO_PREDECESSOR);
+          } else {
+            let k_base = params.prev_cell_keys_offset_words + old_c * EXACT_KEY_WORDS;
+            let k0 = prev_directory[k_base + 0u];
+            let k1 = prev_directory[k_base + 1u];
+            let k2 = prev_directory[k_base + 2u];
+            let k3 = prev_directory[k_base + 3u];
+            let k4 = prev_directory[k_base + 4u];
+
+            var jump: u32 = 0u;
+            if (chart != k0 || level_order != k1) {
+              jump = 0xffffffffu;
+            } else {
+              jump = max(abs_diff_u32(cell_order.x, k2), max(abs_diff_u32(cell_order.y, k3), abs_diff_u32(cell_order.z, k4)));
+            }
+            atomicMax(&wg_max_jump, jump);
+            if (params.enforce_cell_jump_limit != 0u && jump > params.max_cell_jump) {
+              atomicOr(&atomics_buf[1], FLAG_MULTI_CELL_JUMP);
+            }
+
+            let moved = (chart != k0) || (level_order != k1)
+              || (cell_order.x != k2) || (cell_order.y != k3) || (cell_order.z != k4);
+            scratch[S_MOVED_FLAG + i] = select(0u, 1u, moved);
+            if (moved) {
+              let slot = atomicAdd(&atomics_buf[2], 1u);
+              atomicAdd(&atomics_buf[OUTGOING_BASE + old_c], 1u);
+              if (slot < params.max_moved_members) {
+                scratch[S_MOVED_SOURCE + slot] = i;
+                let nk = S_MOVED_NEW_KEY + slot * EXACT_KEY_WORDS;
+                scratch[nk + 0u] = chart;
+                scratch[nk + 1u] = level_order;
+                scratch[nk + 2u] = cell_order.x;
+                scratch[nk + 3u] = cell_order.y;
+                scratch[nk + 4u] = cell_order.z;
+              } else {
+                atomicOr(&atomics_buf[1], FLAG_MOVED_BUDGET_EXCEEDED);
+              }
+            }
+          }
         }
       }
+    }
     }
   }
   workgroupBarrier();
@@ -1118,9 +1321,12 @@ fn emit_brand_new_cells(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(256)
 fn copy_clean_old_members(@builtin(global_invocation_id) gid: vec3<u32>) {
   let p = gid.x;
-  if (repair_aborted() || p >= params.source_count) { return; }
+  let prev_count = prev_active_count();
+  if (repair_aborted() || p >= prev_count) { return; }
+  let is_v2 = params.directory_abi_version == 2u;
   let member = prev_directory[params.prev_cell_members_offset_words + p];
-  let old_c = prev_directory[params.prev_particle_to_cell_offset_words + member];
+  let prev_raw = prev_directory[params.prev_particle_to_cell_offset_words + member];
+  let old_c = select(prev_raw, prev_raw - 1u, is_v2);
   if (
     atomicLoad(&atomics_buf[OUTGOING_BASE + old_c]) != 0u
     || scratch[S_OLD_INCOMING_GROUP + old_c] != 0u
@@ -1131,7 +1337,7 @@ fn copy_clean_old_members(@builtin(global_invocation_id) gid: vec3<u32>) {
   let local_idx = p - prev_directory[params.prev_cell_offsets_offset_words + old_c];
   let dst_pos = directory[params.cell_offsets_offset_words + final_c] + local_idx;
   directory[params.cell_members_offset_words + dst_pos] = member;
-  directory[params.particle_to_cell_offset_words + member] = final_c;
+  directory[params.particle_to_cell_offset_words + member] = select(final_c, final_c + 1u, is_v2);
 }
 
 @compute @workgroup_size(256)
@@ -1139,6 +1345,7 @@ fn copy_brand_new_cell_members(@builtin(global_invocation_id) gid: vec3<u32>) {
   let k = gid.x;
   let M = atomicLoad(&atomics_buf[2]);
   if (repair_aborted() || k >= M) { return; }
+  let is_v2 = params.directory_abi_version == 2u;
   let g = scratch[S_SORTED_MOVED_GROUP + k];
   if (scratch[S_DEST_EXISTING_OLD + g] != 0xffffffffu) { return; }
   let final_c = scratch[S_DEST_FINAL_CELL + g];
@@ -1147,7 +1354,7 @@ fn copy_brand_new_cell_members(@builtin(global_invocation_id) gid: vec3<u32>) {
   let member = scratch[S_MOVED_SOURCE + slot];
   let dst_pos = directory[params.cell_offsets_offset_words + final_c] + local_idx;
   directory[params.cell_members_offset_words + dst_pos] = member;
-  directory[params.particle_to_cell_offset_words + member] = final_c;
+  directory[params.particle_to_cell_offset_words + member] = select(final_c, final_c + 1u, is_v2);
 }
 
 @compute @workgroup_size(64)
@@ -1155,8 +1362,10 @@ fn merge_dirty_cell_members(@builtin(global_invocation_id) gid: vec3<u32>) {
   let d = gid.x;
   let D = atomicLoad(&atomics_buf[3]);
   if (repair_aborted() || d >= D) { return; }
+  let is_v2 = params.directory_abi_version == 2u;
   let old_c = scratch[S_DIRTY_OLD_CELLS + d];
   let final_c = scratch[S_OLD_TO_NEW_CELL + old_c];
+  let rev_val = select(final_c, final_c + 1u, is_v2);
   var out_pos = directory[params.cell_offsets_offset_words + final_c];
   var p = prev_directory[params.prev_cell_offsets_offset_words + old_c];
   let p_end = prev_directory[params.prev_cell_offsets_offset_words + old_c + 1u];
@@ -1180,7 +1389,7 @@ fn merge_dirty_cell_members(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     if (old_m < in_m) {
       directory[params.cell_members_offset_words + out_pos] = old_m;
-      directory[params.particle_to_cell_offset_words + old_m] = final_c;
+      directory[params.particle_to_cell_offset_words + old_m] = rev_val;
       out_pos = out_pos + 1u;
       p = p + 1u;
       loop {
@@ -1191,7 +1400,7 @@ fn merge_dirty_cell_members(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
     } else {
       directory[params.cell_members_offset_words + out_pos] = in_m;
-      directory[params.particle_to_cell_offset_words + in_m] = final_c;
+      directory[params.particle_to_cell_offset_words + in_m] = rev_val;
       out_pos = out_pos + 1u;
       q = q + 1u;
     }
@@ -1200,20 +1409,23 @@ fn merge_dirty_cell_members(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(1)
 fn finalize_migrated_directory() {
+  let is_v2 = params.directory_abi_version == 2u;
+  let counts_ready = count_contract_ready();
   let flags = atomicLoad(&atomics_buf[1]);
   let moved_count = atomicLoad(&atomics_buf[2]);
   let invalid_source_count = atomicLoad(&atomics_buf[12]);
   let cell_overflow = atomicLoad(&atomics_buf[13]);
-  let live_source_count = params.source_count;
+  let live_count = live_source_count();
   let prev_count = prev_directory[18u];
   let logical_unique_count = select(
     0u,
     scratch[S_SURV_RANK_OLD + prev_count] + scratch[S_BRAND_NEW_COUNT],
-    flags == 0u
+    flags == 0u && counts_ready
   );
   let directory_capacity_ready = params.directory_capacity_words >= params.required_capacity_words;
   let overflow_free = cell_overflow == 0u
     && logical_unique_count <= params.cell_capacity
+    && logical_unique_count <= live_count
     && directory_capacity_ready
     && (flags & FLAG_CAPACITY_OVERFLOW) == 0u;
   let overflow_count = cell_overflow + select(0u, 1u, !directory_capacity_ready);
@@ -1229,12 +1441,13 @@ fn finalize_migrated_directory() {
   let allowed_low = low_bits_mask(min(query_level_count, 32u));
   let allowed_high = low_bits_mask(select(0u, query_level_count - 32u, query_level_count > 32u));
   let mask_ready = !has_query_evidence || (
-    (live_source_count == 0u || (occupied_level_mask_low | occupied_level_mask_high) != 0u)
+    (live_count == 0u || (occupied_level_mask_low | occupied_level_mask_high) != 0u)
     && (occupied_level_mask_low & ~allowed_low) == 0u
     && (occupied_level_mask_high & ~allowed_high) == 0u
   );
 
   let admitted = flags == 0u
+    && counts_ready
     && invalid_source_count == 0u
     && overflow_free
     && exact_near_query_profile_ready()
@@ -1255,7 +1468,7 @@ fn finalize_migrated_directory() {
 
   let admitted_cell_count = select(0u, logical_unique_count, admitted);
   if (admitted && admitted_cell_count <= params.cell_capacity) {
-    directory[params.cell_offsets_offset_words + admitted_cell_count] = live_source_count;
+    directory[params.cell_offsets_offset_words + admitted_cell_count] = live_count;
   }
 
   let dispatch_group_count = (admitted_cell_count + 63u) / 64u;
@@ -1267,7 +1480,8 @@ fn finalize_migrated_directory() {
   consumer_dispatch[1] = dispatch_y;
   consumer_dispatch[2] = select(0u, 1u, has_consumer_work);
 
-  let query_evidence_offset_words = params.particle_to_cell_offset_words + params.physical_radix_count;
+  let query_evidence_offset_words = params.particle_to_cell_offset_words
+    + select(params.physical_radix_count, params.source_capacity, is_v2);
   if (has_query_evidence) {
     directory[query_evidence_offset_words + 0u] = params.query_chart_id;
     directory[query_evidence_offset_words + 1u] = bitcast<u32>(params.query_min_level);
@@ -1280,24 +1494,29 @@ fn finalize_migrated_directory() {
   let live_required_words = params.header_words
     + logical_unique_count * EXACT_KEY_WORDS
     + logical_unique_count + 1u
-    + live_source_count * 2u
+    + select(live_count * 2u, live_count + params.source_count, is_v2)
     + select(0u, QUERY_EVIDENCE_WORDS, has_query_evidence);
+  let reverse_high_water_words = select(
+    select(params.header_words, params.particle_to_cell_offset_words + live_count, live_count > 0u),
+    select(params.header_words, params.particle_to_cell_offset_words + params.source_count, params.source_count > 0u),
+    is_v2
+  );
   let live_physical_high_water_words = max(
     max(
       select(params.header_words, params.cell_keys_offset_words + logical_unique_count * EXACT_KEY_WORDS, logical_unique_count > 0u),
       params.cell_offsets_offset_words + logical_unique_count + 1u
     ),
     max(
-      select(params.header_words, params.cell_members_offset_words + live_source_count, live_source_count > 0u),
+      select(params.header_words, params.cell_members_offset_words + live_count, live_count > 0u),
       max(
-        select(params.header_words, params.particle_to_cell_offset_words + live_source_count, live_source_count > 0u),
+        reverse_high_water_words,
         select(params.header_words, query_evidence_offset_words + QUERY_EVIDENCE_WORDS, has_query_evidence)
       )
     )
   );
 
   directory[0] = MAGIC;
-  directory[1] = ABI_VERSION;
+  directory[1] = params.directory_abi_version;
   directory[2] = status;
   directory[3] = params.generation_id;
   directory[4] = params.device_ordinal;
@@ -1312,11 +1531,11 @@ fn finalize_migrated_directory() {
   directory[13] = params.chart_epoch;
   directory[14] = params.level_epoch;
   directory[15] = params.support_epoch;
-  directory[16] = live_source_count;
+  directory[16] = select(live_count, params.source_count, is_v2);
   directory[17] = params.source_capacity;
   directory[18] = admitted_cell_count;
   directory[19] = params.cell_capacity;
-  directory[20] = select(0u, live_required_words, admitted);
+  directory[20] = live_required_words;
   directory[21] = select(0u, live_required_words, admitted);
   directory[22] = params.directory_capacity_words;
   directory[23] = invalid_source_count;
@@ -1333,11 +1552,11 @@ fn finalize_migrated_directory() {
   directory[34] = params.sort_unique_ordinal;
   directory[35] = select(0u, params.build_ordinal, admitted);
   directory[36] = params.generation_id;
-  directory[37] = live_source_count;
+  directory[37] = live_count;
   directory[38] = admitted_cell_count;
   directory[39] = select(0u, 1u, admitted);
   directory[40] = select(1u, 0u, overflow_free);
-  directory[41] = select(4u, 1u, admitted);
+  directory[41] = select(4u, select(1u, 3u, is_v2), admitted);
   directory[42] = consumer_dispatch[0];
   directory[43] = consumer_dispatch[1];
   directory[44] = consumer_dispatch[2];
@@ -1345,7 +1564,8 @@ fn finalize_migrated_directory() {
   directory[46] = select(SOURCE_ADAPTER_ACTIVE_NODE_ROWS, SOURCE_ADAPTER_EXACT_NEAR_QUERY, has_query_evidence);
   directory[47] = select(params.directory_capacity_words, live_physical_high_water_words, admitted);
 
-  atomicStore(&atomics_buf[0], select(MODE_ADJACENT_CELL_REPAIR, MODE_ZERO_CHURN_REBASE, moved_count == 0u));
+  let zero_churn = moved_count == 0u && live_count == prev_active_count();
+  atomicStore(&atomics_buf[0], select(MODE_ADJACENT_CELL_REPAIR, MODE_ZERO_CHURN_REBASE, zero_churn));
   atomicStore(&atomics_buf[6], admitted_cell_count);
   atomicStore(&atomics_buf[9], params.generation_id);
   atomicStore(&atomics_buf[10], params.prev_generation_id);
@@ -1360,7 +1580,11 @@ function packMigrationParams(plan, {
   maxCellJump,
   maxDisplacementSpacingMultiple,
   prevExecution,
-  consumerDispatchXLimit
+  consumerDispatchXLimit,
+  logicalSourceCountGpuAuthored = false,
+  directoryAbiVersion = 1,
+  allowMembershipDelta = false,
+  enforceCellJumpLimit = true
 }) {
   const buf = new ArrayBuffer(PARAMS_BYTES);
   const view = new DataView(buf);
@@ -1423,8 +1647,12 @@ function packMigrationParams(plan, {
   i32(plan.queryMaxLevel);
   f32(plan.queryBaseGridSpacingM);
   u32(plan.sourceRowLayoutId);
-  u32(0);
-  u32(plan.sourceCount);
+  u32(logicalSourceCountGpuAuthored ? 1 : 0);
+  u32(
+    logicalSourceCountGpuAuthored && Number.isSafeInteger(plan.activeSourceCapacity)
+      ? plan.activeSourceCapacity
+      : plan.sourceCount
+  );
   if (offset !== SCHROEDER_SPATIAL_EPOCH_PARAMS_BYTES) {
     throw new Error(`expected ${SCHROEDER_SPATIAL_EPOCH_PARAMS_BYTES} base bytes, got ${offset}`);
   }
@@ -1439,6 +1667,9 @@ function packMigrationParams(plan, {
   u32(prevExecution?.layout?.cellMembersOffsetWords ?? plan.layout.cellMembersOffsetWords);
   u32(prevExecution?.layout?.particleToCellOffsetWords ?? plan.layout.particleToCellOffsetWords);
   u32(Math.ceil(plan.cellCapacity / SCAN_TILE_CELLS));
+  u32(directoryAbiVersion === 2 ? 2 : 1);
+  u32(allowMembershipDelta ? 1 : 0);
+  u32(enforceCellJumpLimit ? 1 : 0);
   while (offset < PARAMS_BYTES) u32(0);
   return new Uint8Array(buf);
 }
@@ -1473,6 +1704,7 @@ export function parseSchroederIncrementalSpatialCertificate(words) {
 }
 
 const ENTRY_POINTS = Object.freeze([
+  'detect_departed_members',
   'detect_moved_members',
   'sort_moved_chunks',
   'merge_w1024',
@@ -1551,10 +1783,11 @@ export function createSchroederIncrementalSpatialMigrationGpu(device, {
     computeBufferBinding(4, 'storage'),
     computeBufferBinding(5, 'storage'),
     computeBufferBinding(6, 'storage'),
-    computeBufferBinding(7, 'storage')
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'read-only-storage')
   ];
   const wgsl = createSchroederIncrementalSpatialMigrationWgsl(scratchLayout);
-  const cachePrefix = `ulg-a2-inc-spatial-${resolvedMaxSourceCount}-${resolvedCellCapacity}-${resolvedMaxMovedMembers}.v1`;
+  const cachePrefix = `ulg-a2-inc-spatial-${resolvedMaxSourceCount}-${resolvedCellCapacity}-${resolvedMaxMovedMembers}.v2`;
   const pipelines = Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [
     entryPoint,
     createCachedExplicitComputePipeline(rawDevice, {
@@ -1833,7 +2066,8 @@ export function createSchroederIncrementalSpatialMigrationGpu(device, {
           { binding: 4, resource: { buffer: arena.directoryBuffer } },
           { binding: 5, resource: { buffer: arena.consumerDispatchBuffer } },
           { binding: 6, resource: { buffer: arena.atomicsBuffer } },
-          { binding: 7, resource: { buffer: scratchBuffer } }
+          { binding: 7, resource: { buffer: scratchBuffer } },
+          { binding: 8, resource: { buffer: prevExecution.directoryBuffer } }
         ]
       });
 
@@ -1847,6 +2081,7 @@ export function createSchroederIncrementalSpatialMigrationGpu(device, {
       const pass = encoder.beginComputePass({ label });
       pass.setBindGroup(0, bindGroup);
       const dispatches = [
+        ['detect_departed_members', nGroups],
         ['detect_moved_members', nGroups],
         ['sort_moved_chunks', chunkGroups],
         ['merge_w1024', movedGroups],
@@ -2037,6 +2272,8 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
   maxMovedMembers = 16384,
   maxCellJump = 1,
   maxDisplacementSpacingMultiple = 1.0,
+  allowMembershipDelta = false,
+  enforceCellJumpLimit = true,
   label = 'ulg-schroeder-incremental-spatial-encoder'
 } = {}) {
   if (!device?.createBuffer || !device?.createComputePipeline) {
@@ -2053,8 +2290,8 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
   );
   const resolvedMaxCellJump = nonNegativeInteger(maxCellJump, 'maxCellJump', 1024);
   const resolvedMaxDisp = Number(maxDisplacementSpacingMultiple);
-  if (!(Number.isFinite(resolvedMaxDisp) && resolvedMaxDisp > 0)) {
-    throw new RangeError('maxDisplacementSpacingMultiple must be a finite positive number');
+  if (!(Number.isFinite(resolvedMaxDisp) && resolvedMaxDisp >= 0)) {
+    throw new RangeError('maxDisplacementSpacingMultiple must be a finite non-negative number');
   }
   const scratchLayout = createSchroederIncrementalSpatialScratchLayout({
     maxSourceCount: resolvedMaxSourceCount,
@@ -2070,10 +2307,11 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
     computeBufferBinding(4, 'storage'),
     computeBufferBinding(5, 'storage'),
     computeBufferBinding(6, 'storage'),
-    computeBufferBinding(7, 'storage')
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'read-only-storage')
   ];
   const wgsl = createSchroederIncrementalSpatialMigrationWgsl(scratchLayout);
-  const cachePrefix = `ulg-a2-inc-spatial-${resolvedMaxSourceCount}-${resolvedCellCapacity}-${resolvedMaxMovedMembers}.v1`;
+  const cachePrefix = `ulg-a2-inc-spatial-${resolvedMaxSourceCount}-${resolvedCellCapacity}-${resolvedMaxMovedMembers}.v2`;
   const pipelines = Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [
     entryPoint,
     createCachedExplicitComputePipeline(rawDevice, {
@@ -2088,7 +2326,33 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
     device.createBuffer({ label: bufLabel, size: Math.max(16, size), usage }),
     device
   );
-  const paramsBuffer = createOwned(`${label}-params`, PARAMS_BYTES, GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
+  const paramsBuffersByTarget = new WeakMap();
+  const ownedParamsBuffers = [];
+  const bindGroupCache = new Map();
+  const bufferIds = new WeakMap();
+  let nextBufferId = 1;
+  const bufferId = (buf) => {
+    let id = bufferIds.get(buf);
+    if (!id) {
+      id = nextBufferId;
+      nextBufferId += 1;
+      bufferIds.set(buf, id);
+    }
+    return id;
+  };
+  const paramsBufferForTarget = (targetDirectoryBuffer) => {
+    let buf = paramsBuffersByTarget.get(targetDirectoryBuffer);
+    if (!buf) {
+      buf = createOwned(
+        `${label}-params-${ownedParamsBuffers.length}`,
+        PARAMS_BYTES,
+        GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      );
+      paramsBuffersByTarget.set(targetDirectoryBuffer, buf);
+      ownedParamsBuffers.push(buf);
+    }
+    return buf;
+  };
   const scratchBuffer = createOwned(`${label}-scratch`, scratchLayout.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
   const atomicsBuffer = createOwned(
     `${label}-atomics`,
@@ -2108,6 +2372,11 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
     prevExecution,
     targetDirectoryBuffer,
     targetConsumerDispatchBuffer,
+    directoryAbiVersion = 1,
+    logicalSourceCountGpuAuthored = false,
+    logicalSourceCountAuthority = null,
+    activeSourceViewBuffer = null,
+    activeSourceViewBindingSize = null,
     maxCellJumpOverride = null,
     maxDisplacementOverride = null
   }) {
@@ -2115,8 +2384,11 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
     if (!prevExecution?.directoryBuffer || prevExecution.directoryBuffer === targetDirectoryBuffer) {
       throw new TypeError('Incremental spatial migration requires a distinct immutable predecessor directoryBuffer');
     }
+    const isV2 = directoryAbiVersion === 2;
+    const targetParamsBuffer = paramsBufferForTarget(targetDirectoryBuffer);
+    const usePrevSource = Boolean(prevSourceBuffer && resolvedMaxDisp > 0);
     const packedParams = packMigrationParams(plan, {
-      hasPrevSource: Boolean(prevSourceBuffer),
+      hasPrevSource: usePrevSource,
       maxMovedMembers: resolvedMaxMovedMembers,
       maxCellJump: maxCellJumpOverride == null
         ? resolvedMaxCellJump
@@ -2125,9 +2397,22 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
         ? resolvedMaxDisp
         : Number(maxDisplacementOverride),
       prevExecution,
-      consumerDispatchXLimit: maxWorkgroupsPerDim
+      consumerDispatchXLimit: maxWorkgroupsPerDim,
+      logicalSourceCountGpuAuthored: Boolean(isV2 || logicalSourceCountGpuAuthored),
+      directoryAbiVersion: isV2 ? 2 : 1,
+      allowMembershipDelta,
+      enforceCellJumpLimit
     });
-    device.queue.writeBuffer(paramsBuffer, 0, packedParams);
+    device.queue.writeBuffer(targetParamsBuffer, 0, packedParams);
+    if (!isV2 && logicalSourceCountGpuAuthored && logicalSourceCountAuthority?.buffer) {
+      encoder.copyBufferToBuffer(
+        logicalSourceCountAuthority.buffer,
+        logicalSourceCountAuthority.byteOffset ?? 0,
+        targetParamsBuffer,
+        0,
+        UINT32_BYTES
+      );
+    }
     encoder.clearBuffer(atomicsBuffer);
     encoder.clearBuffer(
       scratchBuffer,
@@ -2139,27 +2424,46 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
       Number(sourceBuffer.size) || resolvedMaxSourceCount * ACTIVE_NODE_STRIDE_FLOATS * 4,
       resolvedMaxSourceCount * ACTIVE_NODE_STRIDE_FLOATS * 4
     );
-    const prevSourceBindBuffer = prevSourceBuffer || sourceBuffer;
+    const prevSourceBindBuffer = usePrevSource ? prevSourceBuffer : sourceBuffer;
     const prevSourceBindBytes = Math.min(
       Number(prevSourceBindBuffer.size) || sourceBindBytes,
       resolvedMaxSourceCount * ACTIVE_NODE_STRIDE_FLOATS * 4
     );
-    const bindGroup = device.createBindGroup({
-      label: `${label}-bind-group`,
-      layout: pipelines.detect_moved_members.bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: paramsBuffer, offset: 0, size: PARAMS_BYTES } },
-        { binding: 1, resource: { buffer: sourceBuffer, offset: 0, size: sourceBindBytes } },
-        { binding: 2, resource: { buffer: prevSourceBindBuffer, offset: 0, size: prevSourceBindBytes } },
-        { binding: 3, resource: { buffer: prevExecution.directoryBuffer } },
-        { binding: 4, resource: { buffer: targetDirectoryBuffer } },
-        { binding: 5, resource: { buffer: targetConsumerDispatchBuffer } },
-        { binding: 6, resource: { buffer: atomicsBuffer } },
-        { binding: 7, resource: { buffer: scratchBuffer } }
-      ]
-    });
+    const viewBuffer = isV2 && activeSourceViewBuffer
+      ? activeSourceViewBuffer
+      : prevExecution.directoryBuffer;
+    const viewSize = isV2 && activeSourceViewBuffer && activeSourceViewBindingSize != null
+      ? activeSourceViewBindingSize
+      : undefined;
+    const bgKey = `${bufferId(targetParamsBuffer)}:${bufferId(sourceBuffer)}:${sourceBindBytes}:${bufferId(prevSourceBindBuffer)}:${prevSourceBindBytes}:${bufferId(prevExecution.directoryBuffer)}:${bufferId(targetDirectoryBuffer)}:${bufferId(targetConsumerDispatchBuffer)}:${bufferId(viewBuffer)}:${viewSize ?? 0}`;
+    let bindGroup = bindGroupCache.get(bgKey);
+    if (!bindGroup) {
+      if (bindGroupCache.size >= 64) bindGroupCache.clear();
+      bindGroup = device.createBindGroup({
+        label: `${label}-bind-group`,
+        layout: pipelines.detect_moved_members.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: targetParamsBuffer, offset: 0, size: PARAMS_BYTES } },
+          { binding: 1, resource: { buffer: sourceBuffer, offset: 0, size: sourceBindBytes } },
+          { binding: 2, resource: { buffer: prevSourceBindBuffer, offset: 0, size: prevSourceBindBytes } },
+          { binding: 3, resource: { buffer: prevExecution.directoryBuffer } },
+          { binding: 4, resource: { buffer: targetDirectoryBuffer } },
+          { binding: 5, resource: { buffer: targetConsumerDispatchBuffer } },
+          { binding: 6, resource: { buffer: atomicsBuffer } },
+          { binding: 7, resource: { buffer: scratchBuffer } },
+          {
+            binding: 8,
+            resource: viewSize != null
+              ? { buffer: viewBuffer, offset: 0, size: viewSize }
+              : { buffer: viewBuffer }
+          }
+        ]
+      });
+      bindGroupCache.set(bgKey, bindGroup);
+    }
 
-    const nGroups = Math.ceil(plan.sourceCount / 256);
+    const workCount = Math.max(plan.sourceCount, plan.activeSourceCapacity ?? 0);
+    const nGroups = Math.ceil(workCount / 256);
     const movedGroups = Math.ceil(resolvedMaxMovedMembers / 256);
     const chunkGroups = Math.ceil(resolvedMaxMovedMembers / CHUNK_SORT_SIZE);
     const scanGroups = Math.ceil(resolvedCellCapacity / SCAN_TILE_CELLS);
@@ -2169,6 +2473,7 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
     const pass = encoder.beginComputePass({ label });
     pass.setBindGroup(0, bindGroup);
     const dispatches = [
+      ['detect_departed_members', nGroups],
       ['detect_moved_members', nGroups],
       ['sort_moved_chunks', chunkGroups],
       ['merge_w1024', movedGroups],
@@ -2203,7 +2508,11 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
 
   function ownedBuffers() {
     return [
-      { role: 'spatial-incremental-params', arenaIndex: -1, buffer: paramsBuffer },
+      ...ownedParamsBuffers.map((buffer, idx) => ({
+        role: `spatial-incremental-params-${idx}`,
+        arenaIndex: -1,
+        buffer
+      })),
       { role: 'spatial-incremental-scratch', arenaIndex: -1, buffer: scratchBuffer },
       { role: 'spatial-incremental-atomics', arenaIndex: -1, buffer: atomicsBuffer }
     ];
@@ -2212,7 +2521,9 @@ export function createSchroederIncrementalSpatialMigrationEncoder(device, {
   function destroy() {
     if (destroyed) return false;
     destroyed = true;
-    paramsBuffer.destroy?.();
+    bindGroupCache.clear();
+    for (const buf of ownedParamsBuffers) buf.destroy?.();
+    ownedParamsBuffers.length = 0;
     scratchBuffer.destroy?.();
     atomicsBuffer.destroy?.();
     return true;

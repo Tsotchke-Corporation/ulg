@@ -1572,18 +1572,23 @@ export function createSchroederSpatialEpochGpu(device, {
 
   const incrementalMigrationSupported = Boolean(
     enableIncrementalMigration === true
-    && !directoryV2
+    && (resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_VERSION
+      || resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION)
     && resolvedArenaCount >= 2
     && incrementalMigrationEncoderFactory
   );
   let incrementalMigrationEncoder = null;
-  let lastAdmittedV1Snapshot = null;
+  let lastAdmittedSnapshot = null;
   const ensureIncrementalMigrationEncoder = () => {
     if (!incrementalMigrationSupported || !incrementalMigrationEncoderFactory) return null;
     if (!incrementalMigrationEncoder) {
       incrementalMigrationEncoder = incrementalMigrationEncoderFactory(device, {
         maxSourceCount: resolvedMaxSourceCount,
         cellCapacity: resolvedCellCapacity,
+        maxMovedMembers: Math.min(16384, Math.max(1024, resolvedActiveSourceCapacity)),
+        allowMembershipDelta: true,
+        enforceCellJumpLimit: false,
+        maxDisplacementSpacingMultiple: 0,
         label: `${label}-a2-incremental`
       });
     }
@@ -1703,7 +1708,7 @@ export function createSchroederSpatialEpochGpu(device, {
         resolvedArenaCount - 1
       )];
     } else {
-      const preferredSkipArena = incrementalMigrationSupported ? lastAdmittedV1Snapshot?.arena ?? null : null;
+      const preferredSkipArena = incrementalMigrationSupported ? lastAdmittedSnapshot?.arena ?? null : null;
       arena = arenas.find(
         (candidate) => !candidate.inUse && candidate.retired !== true && candidate !== preferredSkipArena
       ) || arenas.find(
@@ -2067,22 +2072,20 @@ export function createSchroederSpatialEpochGpu(device, {
     try {
       let incrementalSkipReason = null;
       if (!incrementalMigrationSupported) incrementalSkipReason = 'unsupported';
-      else if (directoryV2) incrementalSkipReason = 'directory-v2';
-      else if (logicalSourceCountGpuAuthored) incrementalSkipReason = 'logical-source-count-gpu-authored';
-      else if (activeRankViewEnabled) incrementalSkipReason = 'active-rank-view';
       else if (!(plan.sourceCount > 0)) incrementalSkipReason = 'empty-source';
       else if (globalThis.__ulgDisableIncrementalSpatialMigration === true) incrementalSkipReason = 'disabled-by-flag';
-      else if (!lastAdmittedV1Snapshot) incrementalSkipReason = 'first-generation';
-      else if (lastAdmittedV1Snapshot.arena === arena) incrementalSkipReason = 'same-arena';
-      else if (lastAdmittedV1Snapshot.arena.writeSerial !== lastAdmittedV1Snapshot.writeSerial) incrementalSkipReason = 'arena-overwritten';
-      else if (lastAdmittedV1Snapshot.execution.sourceCount !== plan.sourceCount) incrementalSkipReason = 'source-count-changed';
-      else if (lastAdmittedV1Snapshot.execution.topologyEpoch !== plan.topologyEpoch) incrementalSkipReason = 'topology-epoch-changed';
-      else if (lastAdmittedV1Snapshot.execution.chartEpoch !== plan.chartEpoch) incrementalSkipReason = 'chart-epoch-changed';
-      else if (lastAdmittedV1Snapshot.execution.levelEpoch !== plan.levelEpoch) incrementalSkipReason = 'level-epoch-changed';
-      else if (lastAdmittedV1Snapshot.execution.supportEpoch !== plan.supportEpoch) incrementalSkipReason = 'support-epoch-changed';
-      else if (lastAdmittedV1Snapshot.execution.sortMode !== plan.sortMode) incrementalSkipReason = 'sort-mode-changed';
-      else if (lastAdmittedV1Snapshot.execution.sourceRowLayoutId !== plan.sourceRowLayoutId) incrementalSkipReason = 'row-layout-changed';
-      else if (!webGpuBufferMatchesDevice(lastAdmittedV1Snapshot.execution.directoryBuffer, device)) incrementalSkipReason = 'device-mismatch';
+      else if (!lastAdmittedSnapshot) incrementalSkipReason = 'first-generation';
+      else if (lastAdmittedSnapshot.arena === arena) incrementalSkipReason = 'same-arena';
+      else if (lastAdmittedSnapshot.arena.writeSerial !== lastAdmittedSnapshot.writeSerial) incrementalSkipReason = 'arena-overwritten';
+      else if (lastAdmittedSnapshot.execution.sourceCount !== plan.sourceCount) incrementalSkipReason = 'source-count-changed';
+      else if (lastAdmittedSnapshot.execution.sourceFamilyId !== plan.sourceFamilyId) incrementalSkipReason = 'source-family-changed';
+      else if (lastAdmittedSnapshot.execution.chartEpoch !== plan.chartEpoch) incrementalSkipReason = 'chart-epoch-changed';
+      else if (lastAdmittedSnapshot.execution.sortMode !== plan.sortMode) incrementalSkipReason = 'sort-mode-changed';
+      else if (lastAdmittedSnapshot.execution.sourceRowLayoutId !== plan.sourceRowLayoutId) incrementalSkipReason = 'row-layout-changed';
+      else if (lastAdmittedSnapshot.execution.queryGeometryMode !== plan.queryGeometryMode) incrementalSkipReason = 'query-geometry-changed';
+      else if (lastAdmittedSnapshot.execution.queryMinLevel !== plan.queryMinLevel || lastAdmittedSnapshot.execution.queryMaxLevel !== plan.queryMaxLevel) incrementalSkipReason = 'query-level-range-changed';
+      else if (!Object.is(lastAdmittedSnapshot.execution.queryBaseGridSpacingM, plan.queryBaseGridSpacingM)) incrementalSkipReason = 'query-spacing-changed';
+      else if (!webGpuBufferMatchesDevice(lastAdmittedSnapshot.execution.directoryBuffer, device)) incrementalSkipReason = 'device-mismatch';
       const canUseIncrementalMigration = incrementalSkipReason === null;
       const activeIncrementalEncoder = canUseIncrementalMigration
         ? ensureIncrementalMigrationEncoder()
@@ -2097,14 +2100,33 @@ export function createSchroederSpatialEpochGpu(device, {
           0,
           SCHROEDER_SPATIAL_EPOCH_HEADER_WORDS * UINT32_BYTES
         );
+        if (directoryV2) {
+          encoder.clearBuffer(
+            arena.directoryBuffer,
+            plan.layout.physicalToCellPlusOneOffsetWords * UINT32_BYTES,
+            plan.layout.physicalToCellPlusOneWords * UINT32_BYTES
+          );
+        }
         encoder.clearBuffer(arena.consumerDispatchBuffer);
+        if (activeRankViewEnabled) {
+          encoder.clearBuffer(
+            arena.activeRankViewBuffer,
+            0,
+            SCHROEDER_SPATIAL_ACTIVE_RANK_VIEW_HEADER_WORDS * UINT32_BYTES
+          );
+        }
         incrementalMigrationEncoded = activeIncrementalEncoder.encodeIntoTarget(encoder, {
           plan,
           sourceBuffer: resolvedSourceBuffer,
-          prevSourceBuffer: lastAdmittedV1Snapshot.sourceBuffer,
-          prevExecution: lastAdmittedV1Snapshot.execution,
+          prevSourceBuffer: lastAdmittedSnapshot.sourceBuffer,
+          prevExecution: lastAdmittedSnapshot.execution,
           targetDirectoryBuffer: arena.directoryBuffer,
-          targetConsumerDispatchBuffer: arena.consumerDispatchBuffer
+          targetConsumerDispatchBuffer: arena.consumerDispatchBuffer,
+          directoryAbiVersion: resolvedDirectoryAbiVersion,
+          logicalSourceCountGpuAuthored,
+          logicalSourceCountAuthority: directoryV2 ? null : logicalSourceCountAuthority,
+          activeSourceViewBuffer: directoryV2 ? activeSourceView.activeSourceViewBuffer : null,
+          activeSourceViewBindingSize: directoryV2 ? activeSourceViewBindingSize : null
         });
       } else {
       device.queue.writeBuffer(arena.paramsBuffer, 0, paramsDataForPlan(plan, {
@@ -2426,7 +2448,7 @@ export function createSchroederSpatialEpochGpu(device, {
         a2IncrementalMigration: incrementalMigrationEncoded
           ? Object.freeze({
               mode: 'incremental-gpu-encoded',
-              predecessorGenerationId: lastAdmittedV1Snapshot?.execution?.generationId ?? null,
+              predecessorGenerationId: lastAdmittedSnapshot?.execution?.generationId ?? null,
               certificateBuffer: incrementalMigrationEncoded.certificateBuffer
             })
           : Object.freeze({
@@ -2768,8 +2790,8 @@ export function createSchroederSpatialEpochGpu(device, {
       writable: false,
       configurable: false
     });
-    if (!directoryV2 && incrementalMigrationSupported) {
-      lastAdmittedV1Snapshot = Object.freeze({
+    if (incrementalMigrationSupported) {
+      lastAdmittedSnapshot = Object.freeze({
         arena: ownership.arena,
         writeSerial: ownership.arenaWriteSerial,
         execution,
@@ -2911,7 +2933,7 @@ export function createSchroederSpatialEpochGpu(device, {
             ownership.radixUnique,
             submissionFence
           )
-        : Promise.resolve(submissionFence);
+        : Promise.resolve(submissionFence).then(() => true);
     } catch (error) {
       retirementRecord.activeAttempt = null;
       releaseInFlightExecutions.delete(execution);
@@ -3049,7 +3071,7 @@ export function createSchroederSpatialEpochGpu(device, {
       throw error;
     }
     destroyed = true;
-    lastAdmittedV1Snapshot = null;
+    lastAdmittedSnapshot = null;
     if (incrementalMigrationEncoder) {
       incrementalMigrationEncoder.destroy();
       incrementalMigrationEncoder = null;
@@ -3191,7 +3213,8 @@ function directSpatialEpochRuntime(
     directoryAbiVersion: resolvedDirectoryAbiVersion,
     arenaCount: resolvedDirectArenaCount,
     enableIncrementalMigration:
-      resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_VERSION
+      (resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_VERSION
+        || resolvedDirectoryAbiVersion === SCHROEDER_SPATIAL_EPOCH_V2_VERSION)
       && resolvedDirectArenaCount >= 2
       && incrementalMigrationEncoderFactory != null,
     label:

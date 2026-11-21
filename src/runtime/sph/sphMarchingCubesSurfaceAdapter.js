@@ -8,7 +8,14 @@ import {
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import {
   addResidentBufferLease,
   createResidentBufferLeaseLedger,
@@ -3520,16 +3527,35 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   markProgress('extension-surface-translation-kernel-started');
 
   const ownedTranslationBuffers = new Set();
+  const useQueueOrderedTranslationPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   let translationSubmissionObserved = false;
-  const createOwnedTranslationBuffer = (descriptor) => {
-    const buffer = device.createBuffer(descriptor);
+  const createOwnedTranslationBuffer = (descriptor, poolBucketKey = null) => {
+    const buffer = useQueueOrderedTranslationPool && poolBucketKey
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, {
+            bucketKey: poolBucketKey,
+            label: descriptor.label,
+            size: descriptor.size,
+            usage: descriptor.usage
+          }),
+          device,
+          {
+            bucketKey: poolBucketKey,
+            size: descriptor.size,
+            usage: descriptor.usage
+          }
+        )
+      : device.createBuffer(descriptor);
     ownedTranslationBuffers.add(buffer);
     return buffer;
   };
-  const destroyOwnedTranslationBuffer = (buffer) => {
+  const destroyOwnedTranslationBuffer = (buffer, allowPool = false) => {
     if (!buffer || !ownedTranslationBuffers.delete(buffer)) return false;
     try {
-      buffer.destroy?.();
+      releaseOrDestroyQueueOrderedPooledBuffer(buffer, { allowPool });
     } catch {
       // The originating error remains authoritative. Removing the buffer from
       // the ledger first guarantees that competing cleanup paths cannot issue
@@ -3586,7 +3612,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     label: 'ulg-sph-extension-surface-draw',
     size: Math.max(4, drawRowsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  });
+  }, 'ulg-sph-extension-surface-draw');
   device.queue.writeBuffer(drawRowsBuffer, 0, initialDrawRows);
   const drawIndirectRowsBuffer = useExtensionDrawIndirectBuffer
     ? extensionDrawIndirectBuffer
@@ -3594,7 +3620,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         label: 'ulg-sph-extension-surface-draw-indirect',
         size: Math.max(4, drawIndirectRowsByteLength),
         usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-      });
+      }, 'ulg-sph-extension-surface-draw-indirect');
   if (!useExtensionDrawIndirectBuffer) {
     device.queue.writeBuffer(drawIndirectRowsBuffer, 0, new Uint32Array(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length));
   }
@@ -3604,13 +3630,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         label: 'ulg-sph-extension-surface-translation-params',
         size: 160,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-      });
+      }, 'ulg-sph-extension-surface-translation-params');
   if (!sourceVertexCounterBuffer && !useExtensionDrawIndirectBuffer) {
     sourceVertexCounterBuffer = createOwnedTranslationBuffer({
       label: 'ulg-sph-extension-surface-source-vertex-count',
       size: 4,
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    });
+    }, 'ulg-sph-extension-surface-source-vertex-count');
     device.queue.writeBuffer(sourceVertexCounterBuffer, 0, new Uint32Array([sourceVertexCount]));
     ownsSourceVertexCounterBuffer = true;
   }
@@ -4268,7 +4294,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     console.debug?.(
       `[ext-surface-destroy] surface=${resolvedSurfaceIndex} key=${resourceKey} reason=${destroyReasonForTrace}`
     );
-    buffer?.destroy?.();
+    releaseOrDestroyQueueOrderedPooledBuffer(buffer, {
+      allowPool: useQueueOrderedTranslationPool
+    });
   };
   result.releaseExtensionSurfaceBufferLeases = ({ status = 'released' } = {}) => {
     for (const leaseId of leaseIds) {

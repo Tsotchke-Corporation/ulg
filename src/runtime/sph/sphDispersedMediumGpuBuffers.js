@@ -564,9 +564,12 @@ function destroyUploadRecordNow(record) {
   // final borrow release must retain `destroyRequested` so its exact owner can
   // retry the same allocation rather than losing retirement authority.
   if (record.ownsBuffer) {
-    releaseOrDestroyQueueOrderedPooledBuffer(record.buffer, {
+    const pooled = releaseOrDestroyQueueOrderedPooledBuffer(record.buffer, {
       allowPool: !record.deviceLost
     });
+    if (pooled && bufferRecords.get(record.buffer) === record) {
+      bufferRecords.delete(record.buffer);
+    }
   }
   record.active = false;
   record.destroyed = true;

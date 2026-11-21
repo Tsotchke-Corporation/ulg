@@ -573,15 +573,26 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
   const paramsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
   const dispatchArgsBytes = 3 * Uint32Array.BYTES_PER_ELEMENT;
   const dispatchArgsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT;
+  const outputUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
   let outputBuffer = null;
   let paramsBuffer = null;
   let dispatchArgsBuffer = null;
   try {
-    outputBuffer = device.createBuffer({
-      label: `${label}-output`,
-      size: outputByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    });
+    outputBuffer = useQueueOrderedTempPool
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-native-surface-temperature-rows-output',
+          label: `${label}-output`,
+          size: outputByteLength,
+          usage: outputUsage
+        })
+      : device.createBuffer({
+          label: `${label}-output`,
+          size: outputByteLength,
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+        });
+    if (useQueueOrderedTempPool && typeof commandEncoder.clearBuffer === 'function') {
+      commandEncoder.clearBuffer(outputBuffer, 0, outputByteLength);
+    }
     paramsBuffer = useQueueOrderedTempPool
       ? acquireQueueOrderedPooledBuffer(device, {
           bucketKey: 'ulg-native-surface-temperature-params',
@@ -778,8 +789,12 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
       destroy() {
         if (destroyed) return false;
         destroyed = true;
-        outputBuffer.destroy?.();
         if (useQueueOrderedTempPool) {
+          releaseQueueOrderedPooledBuffer(device, outputBuffer, {
+            bucketKey: 'ulg-native-surface-temperature-rows-output',
+            size: outputByteLength,
+            usage: outputUsage
+          });
           releaseQueueOrderedPooledBuffer(device, paramsBuffer, {
             bucketKey: 'ulg-native-surface-temperature-params',
             size: ULG_NATIVE_SURFACE_TEMPERATURE_PARAMS_BYTE_LENGTH,
@@ -791,6 +806,7 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
             usage: dispatchArgsUsage
           });
         } else {
+          outputBuffer.destroy?.();
           paramsBuffer.destroy?.();
           dispatchArgsBuffer.destroy?.();
         }

@@ -99,6 +99,23 @@ import {
   WEBGPU_RADIX_PASSES_PER_WORD
 } from '../webgpuRadixScanUnique.js';
 
+function boundedSentinelRadixDigitRows(maxExclusiveValue, wordCount = 1) {
+  const maxValid = Math.max(1, Math.floor(Number(maxExclusiveValue) || 1) - 1);
+  const lowNibbles = Math.max(1, Math.ceil((32 - Math.clz32(maxValid)) / 4));
+  if (lowNibbles >= 7) return null;
+  const wordDigits = [];
+  for (let n = 0; n < lowNibbles; n += 1) wordDigits.push(n);
+  // Nibble 7 (bits 28..31) is 0 for every valid key < 2^28 and 15 for INVALID_KEY (0xffffffff).
+  wordDigits.push(7);
+  if (wordCount === 1) return wordDigits;
+  const all = [];
+  for (let w = 0; w < wordCount; w += 1) {
+    const base = w * 8;
+    for (const d of wordDigits) all.push(base + d);
+  }
+  return all;
+}
+
 export const ULG_SCHROEDER_SPATIAL_REACTION_PRODUCT_PLACEMENT_AUTHORITY_SCHEMA =
   'peercompute.ulg.schroeder-spatial-reaction-product-placement-authority.v2';
 export const ULG_SCHROEDER_SPATIAL_REACTION_PRODUCT_PLACEMENT_ARTIFACT_SCHEMA =
@@ -749,7 +766,7 @@ function createSegmentedPlacementArena(device, {
       retainConstantScanParamsBuffers: true,
       retainVariableScanParamsBuffers: false,
       retainedParamsSlotCount: 1,
-      serialHistogramScanMaxElementCount: 0
+      serialHistogramScanMaxElementCount: 4096
     };
     const captureRadix = createWebGpuStableRadixScanUnique(device, {
       ...radixOptions,
@@ -1895,6 +1912,7 @@ function encodeExactPlacementCapturePreparation({ device, encoder, authority, ar
       spanClass: 'same-grouped-production-compute-pass', ...metadata });
   const captureRadixExecution = arenaRecord.captureRadix.encodeSort(encoder, {
     keyBuffer: buffers.captureKeys, elementCount: e, keyWordCount: 1, keyStrideWords: 1,
+    significantDigitRows: boundedSentinelRadixDigitRows(p, 1),
     generationId: authority.generationId });
   preparation.captureRadixExecution = captureRadixExecution;
   placementTimestampEnd(gpuTimestampRecorder, encoder, radixSpan);
@@ -3575,6 +3593,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     elementCount: eventCount,
     keyWordCount: 1,
     keyStrideWords: 1,
+    significantDigitRows: boundedSentinelRadixDigitRows(particleCount, 1),
     generationId: authority.generationId
   });
   placementTimestampEnd(gpuTimestampRecorder, encoder, captureRadixSpan);
@@ -3636,6 +3655,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     elementCount: eventCount,
     keyWordCount: 2,
     keyStrideWords: 2,
+    significantDigitRows: boundedSentinelRadixDigitRows(particleCount, 2),
     generationId: authority.generationId
   });
   placementTimestampEnd(gpuTimestampRecorder, encoder, directRadixSpan);
@@ -3687,6 +3707,7 @@ export function encodeSphReactionProductPlacementSegmentedWebGpu({
     elementCount: eventCount,
     keyWordCount: 1,
     keyStrideWords: 1,
+    significantDigitRows: boundedSentinelRadixDigitRows(termCount, 1),
     generationId: authority.generationId
   });
   placementTimestampEnd(gpuTimestampRecorder, encoder, summaryRadixSpan);

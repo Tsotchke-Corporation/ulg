@@ -13,7 +13,12 @@ import {
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
   uploadOpticalGpuTable
 } from '../runtime/material/opticalGpuBuffers.js';
-import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../runtime/webgpuComputeLayout.js';
 
 export const WORKER_NATIVE_SURFACE_MATERIAL_SCHEMA =
   'peercompute.ulg.worker-native-surface-material.v0';
@@ -161,12 +166,27 @@ export function createWorkerOwnedNativeSurfaceMaterial({
   const opticalTables = new Set();
   const owned = new Set();
   const own = (resource) => { owned.add(resource); return resource; };
+  const useUniformPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const acquireUniformBuffer = (bucketKey, label, size, usage) => own(
+    useUniformPool
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, { bucketKey, label, size, usage }),
+          device,
+          { bucketKey, size, usage }
+        )
+      : device.createBuffer({ label, size, usage })
+  );
   const retire = (resources) => {
     const unique = [...new Set(resources.filter(resource => resource && owned.has(resource)))];
     for (const resource of unique) owned.delete(resource);
     if (unique.length === 0) return;
     deferSubmittedWorkCleanup(device, () => {
-      for (const resource of unique) resource.destroy?.();
+      for (const resource of unique) {
+        releaseOrDestroyQueueOrderedPooledBuffer(resource, { allowPool: !disposed && useUniformPool });
+      }
     });
   };
   const sampler = device.createSampler({
@@ -406,9 +426,12 @@ export function createWorkerOwnedNativeSurfaceMaterial({
       const optical = acquireOptical(input.opticalTable);
       try {
         entry = { optical, background: null, backgroundUrl: null,
-          bindGroups: new Map(), backgroundUniform: own(device.createBuffer({
-            label: 'ulg-worker-native-background-uniform', size: 16, usage: 64 | 8
-          })) };
+          bindGroups: new Map(), backgroundUniform: acquireUniformBuffer(
+            'ulg-worker-native-background-uniform',
+            'ulg-worker-native-background-uniform',
+            16,
+            64 | 8
+          ) };
         frames.set(frame, entry);
       } catch (error) {
         releaseOptical(optical);
@@ -458,10 +481,12 @@ export function createWorkerOwnedNativeSurfaceMaterial({
       vertices.compactNormalRowsBuffer, temperatures, motion];
     let binding = entry.bindGroups.get(surface);
     if (!binding) {
-      binding = { motionUniform: own(device.createBuffer({
-        label: 'ulg-worker-native-surface-motion-uniform',
-        size: WORKER_NATIVE_SURFACE_MOTION_UNIFORM_BYTES, usage: 64 | 8
-      })) };
+      binding = { motionUniform: acquireUniformBuffer(
+        'ulg-worker-native-surface-motion-uniform',
+        'ulg-worker-native-surface-motion-uniform',
+        WORKER_NATIVE_SURFACE_MOTION_UNIFORM_BYTES,
+        64 | 8
+      ) };
       entry.bindGroups.set(surface, binding);
     }
     if (!binding.inputs || inputs.some((buffer, index) => buffer !== binding.inputs[index])) {

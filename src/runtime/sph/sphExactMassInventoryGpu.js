@@ -539,7 +539,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
   edgeBuffer, edgeCount, edgeFormat, partition = false, allocation = false }) {
   const { held, records } = await reserveSourceReads(device, sourceReads);
   const source = records[0], format = source.format;
-  let output = null, temporary = null, mapBuffer = null;
+  let output = null, temporary = null, mapBuffer = null, fenceConfirmed = false;
   try {
     if (edgeFormat !== format || records.some(record => record.format !== format)) {
       throw new TypeError('Proposal and sources require the same original exact-mass format');
@@ -623,6 +623,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     const header = new Uint32Array(verdict.getMappedRange()).slice();
     verdict.unmap(); mapBuffer = null;
     if (!await fence) throw new Error('Exact mass device lost before confirmed retirement');
+    fenceConfirmed = true;
     for (const read of held) liveRead(read, device);
     if (header[0] !== SPH_EXACT_MASS_TRANSFER_MAGIC || header[1] !== version || ![1, 2].includes(header[2])
         || header[4] !== rowCount || header[5] !== edgeCount || header[6] !== rowCount
@@ -649,8 +650,14 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
     if (output) destroy(output);
     throw error;
   } finally {
-    if (temporary) { await queueFence(temporary); destroy(temporary); }
-    await Promise.all(held.map(read => releaseSphExactMassRead(read)));
+    const canReuseConfirmedFence = fenceConfirmed
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice;
+    if (temporary) {
+      if (!canReuseConfirmedFence) await queueFence(temporary);
+      destroy(temporary);
+    }
+    await Promise.all(held.map(read => releaseSphExactMassRead(read, { confirmed: canReuseConfirmedFence })));
     // The verdict precedes these retirement fences. A device loss while
     // draining them must not return an already-destroyed successful family.
     if (output?.family && (output.destroyed || output.deviceState.lost || output.quarantined)) {

@@ -3760,7 +3760,8 @@ export function destroyMlsMpmGpuParticleBuffers(buffers) {
 function destroyMlsMpmGpuParticleBuffersNow(buffers, physical = buffers) {
   if (physical === buffers && buffers.destroyed) return;
   if (physical.ownsMechanicsBuffer !== false) {
-    releaseOrDestroyQueueOrderedPooledBuffer(physical.mechanicsBuffer);
+    const pooled = releaseOrDestroyQueueOrderedPooledBuffer(physical.mechanicsBuffer);
+    if (pooled) exactMassMechanicsBuffers.delete(physical.mechanicsBuffer);
   }
   if (physical.ownsMaterialPropertyBankWarmInputBuffer !== false) {
     physical.materialPropertyBankWarmInputBuffer?.destroy?.();

@@ -3229,8 +3229,34 @@ export function createWebGpuStableRadixScanUnique(device, {
     return { count, words, stride };
   }
 
-  function createRadixParams({ count, words, stride, generationId }, retainedParamsLease = null) {
-    const passCount = words * WEBGPU_RADIX_PASSES_PER_WORD;
+  function normalizeSortDigitRows(words, requestedDigitRows = null) {
+    const totalDigits = words * WEBGPU_RADIX_PASSES_PER_WORD;
+    if (requestedDigitRows == null) {
+      return Array.from({ length: totalDigits }, (_, index) => index);
+    }
+    if (!Array.isArray(requestedDigitRows) || requestedDigitRows.length === 0) {
+      throw new RangeError('significantDigitRows must retain at least one digit');
+    }
+    const rows = [];
+    for (let i = 0; i < requestedDigitRows.length; i += 1) {
+      const row = nonNegativeInteger(
+        requestedDigitRows[i],
+        `significantDigitRows[${i}]`,
+        { max: totalDigits - 1 }
+      );
+      if (i > 0 && row <= rows[i - 1]) {
+        throw new RangeError(
+          'significantDigitRows must be strictly increasing in LSD radix order'
+        );
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function createRadixParams({ count, words, stride, generationId, digitRows = null }, retainedParamsLease = null) {
+    const activeDigitRows = normalizeSortDigitRows(words, digitRows);
+    const passCount = activeDigitRows.length;
     const retainedSlot = retainedParamsLease?.slot ?? null;
     const buffer = retainedSlot?.inUse === true
       ? radixParamsArena
@@ -3250,20 +3276,19 @@ export function createWebGpuStableRadixScanUnique(device, {
       workgroupCount,
       maxComputeWorkgroupsPerDimension
     );
-    let passIndex = 0;
-    for (let word = words - 1; word >= 0; word -= 1) {
-      for (let shift = 0; shift < 32; shift += WEBGPU_RADIX_BITS_PER_PASS) {
-        const base = (passIndex * paramsOffsetAlignment) / UINT32_BYTES;
-        data[base] = count;
-        data[base + 1] = workgroupCount;
-        data[base + 2] = stride;
-        data[base + 3] = word;
-        data[base + 4] = shift;
-        data[base + 5] = words;
-        data[base + 6] = generationId;
-        data[base + 7] = workgroupDispatch[0];
-        passIndex += 1;
-      }
+    for (let passIndex = 0; passIndex < activeDigitRows.length; passIndex += 1) {
+      const row = activeDigitRows[passIndex];
+      const word = words - 1 - Math.floor(row / WEBGPU_RADIX_PASSES_PER_WORD);
+      const shift = (row % WEBGPU_RADIX_PASSES_PER_WORD) * WEBGPU_RADIX_BITS_PER_PASS;
+      const base = (passIndex * paramsOffsetAlignment) / UINT32_BYTES;
+      data[base] = count;
+      data[base + 1] = workgroupCount;
+      data[base + 2] = stride;
+      data[base + 3] = word;
+      data[base + 4] = shift;
+      data[base + 5] = words;
+      data[base + 6] = generationId;
+      data[base + 7] = workgroupDispatch[0];
     }
     device.queue.writeBuffer(buffer, byteOffset, data);
     if (transientBuffer) transients.add(transientBuffer);
@@ -3289,6 +3314,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     keyWordCount,
     keyStrideWords = keyWordCount,
     generationId = 0,
+    significantDigitRows = null,
     timestampProfiler = null,
     timestampMetadata = {},
     dispatchIndirectProvider = null
@@ -3302,6 +3328,7 @@ export function createWebGpuStableRadixScanUnique(device, {
       keyWordCount,
       keyStrideWords
     });
+    const activeDigitRows = normalizeSortDigitRows(words, significantDigitRows);
     if (count === 0) {
       return attachRetainedParamsLease({
         schema: ULG_WEBGPU_RADIX_UNIQUE_SCHEMA,
@@ -3319,7 +3346,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     let histogramScanEncoding = null;
     try {
     params = createRadixParams(
-      { count, words, stride, generationId: generation },
+      { count, words, stride, generationId: generation, digitRows: activeDigitRows },
       retainedParamsLease
     );
     const paramsBuffer = params.buffer;
@@ -3386,49 +3413,49 @@ export function createWebGpuStableRadixScanUnique(device, {
       : null;
     let input = sortedIndicesA;
     let output = sortedIndicesB;
-    let passIndex = 0;
+    const passIndex = activeDigitRows.length;
     const digitCommands = [];
-    for (let word = words - 1; word >= 0; word -= 1) {
-      for (let shift = 0; shift < 32; shift += WEBGPU_RADIX_BITS_PER_PASS) {
-        const paramsOffset = paramsBaseOffset + passIndex * paramsOffsetAlignment;
-        const histogramEntries = [
-          { binding: 0, resource: { buffer: keyBuffer } },
-          { binding: 1, resource: { buffer: input } },
-          { binding: 3, resource: { buffer: histogramBuffer } },
-          { binding: 5, resource: { buffer: paramsBuffer, offset: paramsOffset, size: 32 } }
-        ];
-        const histogramBindGroup = retainedBindGroup(
-          retainedParamsLease?.slot,
-          `radix-histogram-${passIndex}`,
-          pipelines.histogram,
-          `${label}-histogram-${word}-${shift}`,
-          histogramEntries,
-          bindGroupTelemetry
-        );
-        const scatterEntries = [
-          { binding: 0, resource: { buffer: keyBuffer } },
-          { binding: 1, resource: { buffer: input } },
-          { binding: 2, resource: { buffer: output } },
-          { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
-          { binding: 5, resource: { buffer: paramsBuffer, offset: paramsOffset, size: 32 } }
-        ];
-        const scatterBindGroup = retainedBindGroup(
-          retainedParamsLease?.slot,
-          `radix-scatter-${passIndex}`,
-          pipelines.scatter,
-          `${label}-scatter-${word}-${shift}`,
-          scatterEntries,
-          bindGroupTelemetry
-        );
-        digitCommands.push({
-          word,
-          shift,
-          histogramBindGroup,
-          scatterBindGroup
-        });
-        [input, output] = [output, input];
-        passIndex += 1;
-      }
+    for (let idx = 0; idx < activeDigitRows.length; idx += 1) {
+      const row = activeDigitRows[idx];
+      const word = words - 1 - Math.floor(row / WEBGPU_RADIX_PASSES_PER_WORD);
+      const shift = (row % WEBGPU_RADIX_PASSES_PER_WORD) * WEBGPU_RADIX_BITS_PER_PASS;
+      const paramsOffset = paramsBaseOffset + idx * paramsOffsetAlignment;
+      const histogramEntries = [
+        { binding: 0, resource: { buffer: keyBuffer } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 3, resource: { buffer: histogramBuffer } },
+        { binding: 5, resource: { buffer: paramsBuffer, offset: paramsOffset, size: 32 } }
+      ];
+      const histogramBindGroup = retainedBindGroup(
+        retainedParamsLease?.slot,
+        `radix-histogram-${idx}`,
+        pipelines.histogram,
+        `${label}-histogram-${word}-${shift}`,
+        histogramEntries,
+        bindGroupTelemetry
+      );
+      const scatterEntries = [
+        { binding: 0, resource: { buffer: keyBuffer } },
+        { binding: 1, resource: { buffer: input } },
+        { binding: 2, resource: { buffer: output } },
+        { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
+        { binding: 5, resource: { buffer: paramsBuffer, offset: paramsOffset, size: 32 } }
+      ];
+      const scatterBindGroup = retainedBindGroup(
+        retainedParamsLease?.slot,
+        `radix-scatter-${idx}`,
+        pipelines.scatter,
+        `${label}-scatter-${word}-${shift}`,
+        scatterEntries,
+        bindGroupTelemetry
+      );
+      digitCommands.push({
+        word,
+        shift,
+        histogramBindGroup,
+        scatterBindGroup
+      });
+      [input, output] = [output, input];
     }
 
     const timestampActive = timestampProfilingIsActive(timestampProfiler);

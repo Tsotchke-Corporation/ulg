@@ -31,6 +31,7 @@ import {
 import {
   schroederSolidIsosurfaceFieldWgsl
 } from '../src/runtime/sph/schroederSolidIsosurfaceFieldGpu.js';
+import { createSphPhaseDemo } from '../src/runtime/sphPhaseDemo.js';
 
 test('floor-centered container coordinates place floor center at (0, 0, 0) and round-trip with internal solver bounds', () => {
   const box = [2.4, 1.8, 3.0];
@@ -289,4 +290,59 @@ test('entry points drop straight into empty zero-allocation Simulation Studio wi
   assert.doesNotMatch(mainJs, /createTriadRuntime\(\)/);
   assert.match(standaloneJs, /mountUlgSimStudioApp/);
   assert.match(standaloneJs, /sphMlsMpmGpuStep/);
+});
+
+test('sodium-water preset starts Sodium at floor-centered Y = 1 m separated above water', () => {
+  const staged = buildStagedConfigFromPreset('sodium-water');
+  const water = staged.bodies.find((body) => body.material === 'h2o');
+  const sodium = staged.bodies.find((body) => body.material === 'Na');
+  assert.ok(water && sodium);
+  assert.equal(sodium.centerM[1], 1);
+  const waterTop = water.centerM[1] + water.sizeM[1] / 2;
+  const sodiumBottom = sodium.centerM[1] - sodium.sizeM[1] / 2;
+  assert.ok(sodiumBottom - waterTop >= 0.19, `expected clear separation gap, got ${sodiumBottom - waterTop}`);
+  assert.equal(validateStagedSimulationConfig(staged).valid, true);
+});
+
+test('custom simulations with Hydrogen and Oxygen (h2/o2 and periodic-table H/O) discover H2O and initialize cleanly', () => {
+  for (const [matA, matB] of [['h2', 'o2'], ['H', 'O'], ['H', 'o2'], ['h2', 'O']]) {
+    const driver = createSphPhaseDemo({
+      boxDimensionsM: [1.5, 1.5, 1.5],
+      initialBodies: [
+        {
+          id: 'body-1',
+          domainId: 1,
+          material: matA,
+          sizeM: [0.4, 0.4, 0.4],
+          centerM: [0.75, 0.2, 0.75],
+          temperatureK: 293.15,
+          particlesPerEdge: [2, 2, 2],
+          velocityMPerS: [0, 0, 0]
+        },
+        {
+          id: 'body-2',
+          domainId: 2,
+          material: matB,
+          sizeM: [0.4, 0.4, 0.4],
+          centerM: [0.75, 0.9, 0.75],
+          temperatureK: 293.15,
+          particlesPerEdge: [2, 2, 2],
+          velocityMPerS: [0, 0, 0]
+        }
+      ]
+    });
+    assert.equal(driver.demo.reactions.length, 1, `${matA}+${matB} should discover combustion reaction`);
+    assert.equal(driver.demo.reactions[0].product, 'h2o', `${matA}+${matB} product should be h2o`);
+    assert.ok(driver.demo.reactions[0].specificEnthalpyJPerKg < 0, `${matA}+${matB} should be exothermic`);
+    assert.ok(driver.demo.materialProperties.h2o, `${matA}+${matB} should register h2o properties`);
+  }
+});
+
+test('returning to the Presets tab clears browser URL query parameters', async () => {
+  const studioAppSource = await fs.readFile(
+    path.resolve(process.cwd(), 'src/visualization/ulgSimStudioApp.js'),
+    'utf8'
+  );
+  assert.match(studioAppSource, /function clearBrowserUrlParams\(\)/);
+  assert.match(studioAppSource, /if \(nextTab === 'presets'\) \{\s*clearBrowserUrlParams\(\);\s*\}/);
 });

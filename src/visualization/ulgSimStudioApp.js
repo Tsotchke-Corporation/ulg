@@ -337,6 +337,17 @@ export function mountUlgSimStudioApp({
     [...root.querySelectorAll('.ulg-tab-panel')].map((el) => [el.dataset.panel, el])
   );
 
+  function clearBrowserUrlParams() {
+    if (typeof window === 'undefined' || !window.history?.replaceState) return;
+    try {
+      if (window.location.search) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    } catch {
+      // History replacement may be restricted in sandboxed contexts.
+    }
+  }
+
   function syncUrlFromStagedConfig() {
     if (typeof window === 'undefined' || !window.history?.replaceState) return;
     try {
@@ -484,6 +495,9 @@ export function mountUlgSimStudioApp({
     }
     for (const [name, panel] of Object.entries(tabPanels)) {
       panel.hidden = name !== activeTab;
+    }
+    if (nextTab === 'presets') {
+      clearBrowserUrlParams();
     }
   }
 
@@ -1511,6 +1525,7 @@ export function mountUlgSimStudioApp({
     openMenu: () => setModalOpen(true),
     closeMenu: () => setModalOpen(false),
     isMenuOpen: () => modalOpen,
+    setActiveTab: (tab) => setActiveTab(tab),
     isLoading: () => Boolean(loadingActive || launchInFlight),
     getLoadingStatus: () => ({
       active: Boolean(loadingActive || launchInFlight),

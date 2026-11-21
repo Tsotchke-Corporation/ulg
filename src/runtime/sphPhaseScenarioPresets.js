@@ -264,7 +264,7 @@ export const SPH_PHASE_SCENARIO_PRESETS = Object.freeze([
       wymax: '293.15',
       dropn: '2',
       basen: '3',
-      ironh: '0.61',
+      ironh: '0.8',
       boxx: '1.5',
       boxy: '1.5',
       boxz: '1.5'

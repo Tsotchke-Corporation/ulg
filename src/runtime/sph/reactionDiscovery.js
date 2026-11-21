@@ -42,6 +42,7 @@ import { deriveCompoundClosure } from '../material/compoundClosure.js';
 import {
   CONDENSED_DISPERSED_OPTICAL_REFERENCE_BANK_FINGERPRINT,
   CONDENSED_DISPERSED_OPTICAL_REFERENCE_METHOD_REVISION,
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE,
   createCondensedDispersedMediumOpticalClosure
 } from '../material/condensedDispersedOpticalReferences.js';
 import {
@@ -71,6 +72,11 @@ export const REACTION_DISCOVERY_EMPTY_CATALOG_AUTHORITY_SCHEMA =
   'peercompute.ulg.reaction-discovery-empty-catalog-authority.v0';
 const REACTION_DISCOVERY_EVALUATION_VERSION =
   'reaction-discovery-evaluation-with-empty-catalog-and-condensed-optical-reference-v1';
+const ALLOWED_MATERIAL_FALLBACK_SOURCES = Object.freeze([
+  'material-property-reference-bank',
+  H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE,
+  CONDENSED_DISPERSED_OPTICAL_REFERENCE_SOURCE
+]);
 
 function reactionDiscoveryEmptyCatalogAuthority(status, reason) {
   return Object.freeze({
@@ -286,7 +292,8 @@ function propertiesForMaterial(key, options = {}) {
       const derived = deriveMaterialProperties(key);
       requireFirstPrinciplesMaterialProperties(derived, {
         material: key,
-        context: 'reactionDiscovery.deriveMaterialProperties'
+        context: 'reactionDiscovery.deriveMaterialProperties',
+        allowedFallbackSources: ALLOWED_MATERIAL_FALLBACK_SOURCES
       });
       derivedMaterialPropertyCache.set(cacheKey, derived);
       return derived;
@@ -330,6 +337,7 @@ function reactiveWaterPhases(properties) {
 }
 
 function roleForElementZ(Z, props) {
+  if (Z === 1) return 'fuel';
   const anionCharge = commonAnionChargeMagnitude(Z);
   const cationCharge = commonCationCharge(Z);
   if (anionCharge && !cationCharge) return 'nonmetal';
@@ -358,7 +366,13 @@ function parsedFormulaComposition(key, properties) {
   const single = formula.elementCount === 1 ? formula.elements[0] : null;
   if (single && single.count === 1 && formulaInput === key) return null;
   const phaseNames = properties?.phases?.map((phase) => phase.name) || [];
-  const role = single ? roleForElementZ(single.Z, deriveElementProperties(single.Z)) : 'compound';
+  const role = single
+    ? (single.Z === 1 && single.count === 2
+        ? 'fuel'
+        : single.Z === 8 && single.count === 2
+          ? 'oxidizer'
+          : roleForElementZ(single.Z, deriveElementProperties(single.Z)))
+    : 'compound';
   const mechanical = properties ? closureMechanicalInputs(properties, role) : {
     densityKgPerM3: 0,
     bulkModulusPa: 0
@@ -370,6 +384,7 @@ function parsedFormulaComposition(key, properties) {
     molarMassKgPerMol: properties?.molarMassKgPerMol ?? formula.molarMassKgPerMol,
     meltingPointK: firstTransitionTemperature(properties, 'solid', 'liquid') ?? 0,
     reactivePhases: phaseNames,
+    ...(single ? { Z: single.Z } : {}),
     role,
     ...mechanical,
     materialDerivation: properties ? materialDerivationSummary(properties) : null
@@ -454,10 +469,7 @@ function requireCompositionFirstPrinciples(key, comp, options = {}) {
   requireFirstPrinciplesMaterialProperties(properties, {
     material: key,
     context: 'reactionDiscovery.materialComposition',
-    allowedFallbackSources: [
-      'material-property-reference-bank',
-      H2O_DISPERSED_MEDIUM_OPTICAL_FALLBACK_SOURCE
-    ]
+    allowedFallbackSources: ALLOWED_MATERIAL_FALLBACK_SOURCES
   });
 }
 
@@ -818,7 +830,7 @@ function metalWaterReaction(metalKey, metalComp, waterComp, options = {}) {
 }
 
 // Metal + oxygen → metal monoxide:  M + ½ O2 → MO.
-function metalOxygenReaction(metalKey, metalComp, oxComp, options = {}) {
+function metalOxygenReaction(metalKey, metalComp, oxKey, oxComp, options = {}) {
   const Z = metalComp.Z;
   const geometry = oxideGeometry(Z);
   const oxide = { atoms: geometry, multiplicity: multiplicityForElectrons(Z + 8) };
@@ -847,13 +859,13 @@ function metalOxygenReaction(metalKey, metalComp, oxComp, options = {}) {
     energyModel: model,
     specificEnthalpyJPerKg,
     reactant: metalKey,
-    partner: 'o2',
-    phaseRequirements: { o2: ['gas'] }
+    partner: oxKey,
+    phaseRequirements: { [oxKey]: ['gas'] }
   };
 }
 
 // Hydrogen + oxygen → water (the original combustion case, now derived through the same path).
-function hydrogenOxygenReaction() {
+function hydrogenOxygenReaction(fuelKey = 'h2', oxidizerKey = 'o2') {
   const model = energyModelForSpecies(H2, O2, H2O);
   const eH2 = speciesEnergyHa(H2, model); const eO2 = speciesEnergyHa(O2, model); const eH2O = speciesEnergyHa(H2O, model);
   const dHHa = eH2O - eH2 - 0.5 * eO2; // H2 + ½O2 → H2O
@@ -864,7 +876,7 @@ function hydrogenOxygenReaction() {
     closure: null,
     energyModel: model,
     specificEnthalpyJPerKg,
-    phaseRequirements: { h2: ['gas'], o2: ['gas'] }
+    phaseRequirements: { [fuelKey]: ['gas'], [oxidizerKey]: ['gas'] }
   };
 }
 
@@ -1332,8 +1344,8 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
   // Family 2: fuel/metal + oxygen.
   if (!rx) {
     for (const [kx, cx, ky, cy] of pairs) {
-      if (cy.role === 'oxidizer' && cx.role === 'metal') { rx = metalOxygenReaction(kx, cx, cy, options); break; }
-      if ((cx.role === 'fuel' && cy.role === 'oxidizer')) { rx = hydrogenOxygenReaction(); rx.reactant = kx; rx.partner = ky; break; }
+      if (cy.role === 'oxidizer' && cx.role === 'metal') { rx = metalOxygenReaction(kx, cx, ky, cy, options); break; }
+      if ((cx.role === 'fuel' && cy.role === 'oxidizer')) { rx = hydrogenOxygenReaction(kx, ky); rx.reactant = kx; rx.partner = ky; break; }
     }
   }
   // Fallback: simplest combined binary molecule from the two element sets (conservative).
@@ -1432,7 +1444,8 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     }
     requireFirstPrinciplesMaterialProperties(productProperties, {
       material: rx.productKey,
-      context: 'reactionDiscovery.product'
+      context: 'reactionDiscovery.product',
+      allowedFallbackSources: ALLOWED_MATERIAL_FALLBACK_SOURCES
     });
   }
   result.reactions.push({

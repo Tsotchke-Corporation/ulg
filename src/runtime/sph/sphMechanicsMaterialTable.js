@@ -6,6 +6,7 @@ import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffe
 import {
   compileSphGasConstitutive, evaluateSphGasSoundSpeed, SPH_GAS_CONSTITUTIVE_SCHEMA
 } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
+import { buildMaterialGasResponseFunctions } from '../material/gasResponseFunctions.js';
 
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-material-table.v0';
 export const ULG_MLS_MPM_MECHANICS_MATERIAL_BANK_WARM_INPUT_CONSUMER_SCHEMA =
@@ -253,6 +254,13 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     table: materialPropertyBankGpuWarmInputTable,
     matchedMaterialCount: materialBankWarmInputMatchedMaterialCount
   });
+  const a4GasResponses = buildMaterialGasResponseFunctions(materialProperties);
+  if (a4GasResponses.status.functionCount > 0) {
+    globalThis.__ulgA4GasResponseStatus = Object.freeze({
+      ...a4GasResponses.status,
+      gpuTableUploaded: globalThis.__ulgA4GasResponseStatus?.gpuTableUploaded === true
+    });
+  }
   return {
     schema: ULG_MLS_MPM_MECHANICS_MATERIAL_TABLE_SCHEMA,
     status: records.length ? 'mechanics-material-table-ready' : 'mechanics-material-table-empty',
@@ -268,6 +276,9 @@ export function buildMlsMpmMechanicsMaterialTable(materialProperties = {}, {
     gasConstitutiveSchema: SPH_GAS_CONSTITUTIVE_SCHEMA,
     gasConstitutiveOffsetVec4: records.length / 4,
     records: new Float32Array([...records, ...gasConstitutiveRecords]),
+    a4GasResponseTable: a4GasResponses.packedGpuTable,
+    a4GasResponseStatus: a4GasResponses.status,
+    a4GasResponseByMaterial: a4GasResponses.byMaterial,
     metadata,
     soundSpeedScale,
     cflMaxSoundSpeedMPerS,

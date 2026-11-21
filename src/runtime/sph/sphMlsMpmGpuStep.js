@@ -15388,7 +15388,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
           dt: dtSeconds,
           internalPressureScale: finiteNumber(internalPressureScale, 1),
           cflFactor: finiteNumber(cflFactor, DEFAULT_CFL_FACTOR),
-          timestampPassExtras: gpuTimestampProfiler.passDescriptorExtras('implicitPressure')
+          timestampPassExtras: gpuTimestampProfiler.passDescriptorExtras('implicitPressure'),
+          regionalSampleOnScheduleBoundary: index === 0,
+          scheduleId: `mls-mpm-seq:${globalThis.__ulgImplicitPressure.steps}`
         });
         globalThis.__ulgImplicitPressure.steps += 1;
       }

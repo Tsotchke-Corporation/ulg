@@ -15240,6 +15240,20 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       thermalPotential,
+      architectureStatus: Object.freeze({
+        a2IncrementalSpatial: globalThis.__ulgA2IncrementalSpatialStatus
+          ? { ...globalThis.__ulgA2IncrementalSpatialStatus }
+          : null,
+        a3RegionalClosure: globalThis.__ulgA3RegionalClosureStatus
+          ? { ...globalThis.__ulgA3RegionalClosureStatus }
+          : null,
+        a4GasResponse: globalThis.__ulgA4GasResponseStatus
+          ? { ...globalThis.__ulgA4GasResponseStatus }
+          : null,
+        a5Solid: globalThis.__ulgA5SolidStatus
+          ? { ...globalThis.__ulgA5SolidStatus }
+          : null
+      }),
       status: cancelled
         ? 'worker-resident-schedule-cancelled'
         : 'worker-resident-schedule-completed',

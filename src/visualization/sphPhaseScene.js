@@ -54474,6 +54474,27 @@ fn main(
         scene.userData.sphThermalPotentialStatus = g6Status;
         globalThis.__ulgThermalPotentialStatus = g6Status;
       }
+      const workerArchStatus = workerLaneAuthority.scheduleResult?.architectureStatus ?? null;
+      if (workerArchStatus) {
+        scene.userData.sphArchitectureStatus = workerArchStatus;
+        scene.userData.sphA2IncrementalSpatialStatus = workerArchStatus.a2IncrementalSpatial ?? null;
+        scene.userData.sphA3RegionalClosureStatus = workerArchStatus.a3RegionalClosure ?? null;
+        scene.userData.sphA4GasResponseStatus = workerArchStatus.a4GasResponse ?? null;
+        scene.userData.sphA5SolidStatus = workerArchStatus.a5Solid ?? null;
+        globalThis.__ulgArchitectureStatus = workerArchStatus;
+        if (workerArchStatus.a2IncrementalSpatial) {
+          globalThis.__ulgA2IncrementalSpatialStatus = workerArchStatus.a2IncrementalSpatial;
+        }
+        if (workerArchStatus.a3RegionalClosure) {
+          globalThis.__ulgA3RegionalClosureStatus = workerArchStatus.a3RegionalClosure;
+        }
+        if (workerArchStatus.a4GasResponse) {
+          globalThis.__ulgA4GasResponseStatus = workerArchStatus.a4GasResponse;
+        }
+        if (workerArchStatus.a5Solid) {
+          globalThis.__ulgA5SolidStatus = workerArchStatus.a5Solid;
+        }
+      }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and
       // dispatch deduplicated non-blocking EOS stiffness misses over G5

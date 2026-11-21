@@ -515,40 +515,50 @@ export function createRegionalClosureSamplerGpu(device, {
   });
 }
 
-function dispatch(encoder, sampler, membersBuffer, entryPoint, groups) {
+function dispatchInPass(pass, sampler, membersBuffer, entryPoint, groups) {
   if (groups < 1) return;
-  const pass = encoder.beginComputePass({ label: `ulg-a3-${entryPoint}` });
   pass.setPipeline(sampler.pipelines[entryPoint]);
   pass.setBindGroup(0, sampler.bindGroupFor(membersBuffer));
   pass.dispatchWorkgroups(groups);
-  pass.end();
 }
 
 /**
- * Encode one evaluation of `memberCount` members over `regionCount` regions.
+ * Encode one evaluation of `memberCount` members over `regionCount` regions
+ * inside a single compute pass (storage writes between consecutive dispatches
+ * are ordered by the WebGPU compute pass synchronization rules).
  * Call sampler.writeParams({ regionCount, memberCount }) before the submit
  * that carries this encoder (one evaluation per submit).
  */
 export function encodeRegionalClosureEvaluate(encoder, sampler, { membersBuffer, regionCount, memberCount }) {
   const regionGroups = Math.ceil(regionCount / WORKGROUP);
   const memberGroups = Math.ceil(memberCount / WORKGROUP);
-  dispatch(encoder, sampler, membersBuffer, 'clear_envelope', regionGroups);
-  dispatch(encoder, sampler, membersBuffer, 'accumulate_envelope', memberGroups);
-  dispatch(encoder, sampler, membersBuffer, 'plan_regions', regionGroups);
-  dispatch(encoder, sampler, membersBuffer, 'fit_now', regionCount);
-  dispatch(encoder, sampler, membersBuffer, 'lookup_members', memberGroups);
+  const pass = encoder.beginComputePass({ label: 'ulg-a3-evaluate' });
+  dispatchInPass(pass, sampler, membersBuffer, 'clear_envelope', regionGroups);
+  dispatchInPass(pass, sampler, membersBuffer, 'accumulate_envelope', memberGroups);
+  dispatchInPass(pass, sampler, membersBuffer, 'plan_regions', regionGroups);
+  dispatchInPass(pass, sampler, membersBuffer, 'fit_now', regionCount);
+  dispatchInPass(pass, sampler, membersBuffer, 'lookup_members', memberGroups);
   if (sampler.policy === 'async') {
-    dispatch(encoder, sampler, membersBuffer, 'plan_pending', regionGroups);
-    dispatch(encoder, sampler, membersBuffer, 'fit_pending', regionCount);
+    dispatchInPass(pass, sampler, membersBuffer, 'plan_pending', regionGroups);
+    dispatchInPass(pass, sampler, membersBuffer, 'fit_pending', regionCount);
   }
+  pass.end();
 }
 
 /** Encode the schedule boundary: pending expanded fits become live. */
 export function encodeRegionalClosureScheduleBoundary(encoder, sampler, { membersBuffer, regionCount }) {
-  dispatch(encoder, sampler, membersBuffer, 'adopt_pending', Math.ceil(regionCount / WORKGROUP));
+  const groups = Math.ceil(regionCount / WORKGROUP);
+  if (groups < 1) return;
+  const pass = encoder.beginComputePass({ label: 'ulg-a3-adopt_pending' });
+  dispatchInPass(pass, sampler, membersBuffer, 'adopt_pending', groups);
+  pass.end();
 }
 
 /** Encode the GPU self-check of the latest evaluation's member values. */
 export function encodeRegionalClosureVerify(encoder, sampler, { membersBuffer, memberCount }) {
-  dispatch(encoder, sampler, membersBuffer, 'verify_members', Math.ceil(memberCount / WORKGROUP));
+  const groups = Math.ceil(memberCount / WORKGROUP);
+  if (groups < 1) return;
+  const pass = encoder.beginComputePass({ label: 'ulg-a3-verify_members' });
+  dispatchInPass(pass, sampler, membersBuffer, 'verify_members', groups);
+  pass.end();
 }

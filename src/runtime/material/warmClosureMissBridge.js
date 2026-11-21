@@ -1,5 +1,6 @@
 import { ReservationLedger } from '../../../../peercompute/peercompute/src/peercompute/stateManager/ReservationLedger.js';
 import { deriveEosStiffnessResponse, ESHKOL_EOS_MODEL } from './eshkolEosStiffness.js';
+import { synthesizeMoonlabFirstPrinciplesClosures } from './moonlabColdMissSynthesis.js';
 import { adoptExternalRegionalResponseTable } from './regionalClosureWorkerLane.js';
 import { updateSphImplicitPressureStiffnessTable } from '../sph/sphImplicitPressureGpu.js';
 import {
@@ -496,6 +497,160 @@ export function createWarmClosureMissBridge({
   }
 
   /**
+   * Dispatch a non-blocking MoonLab + Eshkol first-principles cold-miss closure
+   * synthesis (Helmholtz a(T,v), Solid Hyperelastic Psi(J,T), Transport k/mu/D,
+   * and multi-sample Debye G6 curve) over G5 ReservationLedger CAS control,
+   * staging the packed A4 GPU bundle & G6 samples for schedule-boundary adoption.
+   */
+  function requestTriadClosureSynthesisMiss({
+    missKey,
+    material,
+    molarMassKgPerMol,
+    atomsPerFormula = 1,
+    cohesiveEnergyEvPerAtom,
+    debyeTemperatureK,
+    molecularDiameterM,
+    refDensityKgPerM3,
+    meltTemperatureK = 1200,
+    temperatureRangeK = [240, 800],
+    qubits = 4,
+    runQuantumProbe = true,
+    scheduleId = null,
+    timeoutMs = 30_000
+  } = {}) {
+    if (closed) return Object.freeze({ status: 'closed', missKey: missKey ?? null, promise: null });
+    const key = String(missKey || `triad:synthesis:${material}:${temperatureRangeK.join(',')}`);
+    const cached = completedByKey.get(key);
+    if (cached && cached.sourceIdentity === currentSourceIdentity) {
+      stats.cacheHits += 1;
+      return Object.freeze({ status: 'cache-hit', missKey: key, cached, promise: null });
+    }
+    if (inFlightByKey.has(key)) {
+      return Object.freeze({ status: 'in-flight', missKey: key, promise: inFlightByKey.get(key).promise });
+    }
+    const acquired = acquireSlotReservation(`triad:${key}`);
+    if (!acquired) {
+      stats.capacityDeferred += 1;
+      return Object.freeze({ status: 'capacity-deferred', missKey: key, promise: null });
+    }
+
+    stats.dispatched += 1;
+    const reqEpoch = bridgeEpoch;
+    const reqSource = currentSourceIdentity;
+    const requestArgs = {
+      missKey: key,
+      material,
+      molarMassKgPerMol,
+      atomsPerFormula,
+      cohesiveEnergyEvPerAtom,
+      debyeTemperatureK,
+      molecularDiameterM,
+      refDensityKgPerM3,
+      meltTemperatureK,
+      temperatureRangeK,
+      qubits,
+      runQuantumProbe,
+      scheduleId,
+      timeoutMs
+    };
+    const record = {
+      slotKey: acquired.slotKey,
+      token: acquired.token,
+      slotReleased: false,
+      cancelled: false,
+      epoch: reqEpoch,
+      source: reqSource,
+      kind: 'triad-synthesis',
+      requestArgs,
+      promise: null
+    };
+
+    const promise = (async () => {
+      try {
+        let quantumProbeReceipt = null;
+        let lastCommitDelta = null;
+        let lastProvenance = null;
+        if (runQuantumProbe) {
+          const probeOut = await executeDerivationPayload('moonlab-cold-miss', {
+            service: 'moonlab',
+            scope,
+            qubits,
+            timeoutMs
+          });
+          lastCommitDelta = probeOut.commitDelta ?? null;
+          lastProvenance = probeOut.provenance ?? null;
+          if (lastCommitDelta?.payload?.residency) {
+            stats.lastMoonlabResidency = lastCommitDelta.payload.residency;
+          }
+          quantumProbeReceipt = Object.freeze({
+            qubits,
+            value: probeOut.value ?? null,
+            fingerprint: probeOut.provenance?.peerId ?? `moonlab-q${qubits}`
+          });
+        }
+        const synthesized = await synthesizeMoonlabFirstPrinciplesClosures({
+          material,
+          molarMassKgPerMol,
+          atomsPerFormula,
+          cohesiveEnergyEvPerAtom,
+          debyeTemperatureK,
+          molecularDiameterM,
+          refDensityKgPerM3,
+          meltTemperatureK,
+          temperatureRangeK,
+          quantumProbeReceipt
+        });
+        if (closed || record.cancelled || reqEpoch !== bridgeEpoch || reqSource !== currentSourceIdentity) {
+          releaseReservationCancel(record);
+          stats.staleRejected += 1;
+          return Object.freeze({ missKey: key, staleRejected: true, cancelled: record.cancelled });
+        }
+        releaseReservationCommit(record, `triad:${key}`);
+        clearDebtIfPresent(key);
+        const entry = Object.freeze({
+          kind: 'triad-synthesis',
+          missKey: key,
+          scheduleId,
+          epoch: reqEpoch,
+          sourceIdentity: reqSource,
+          sourceFingerprint: synthesized.provenanceFingerprint,
+          provenance: lastProvenance,
+          synthesized,
+          packedGpuTable: synthesized.gpuBundle.packed,
+          g6DebyeSamples: synthesized.g6DebyeSamples,
+          commitDelta: lastCommitDelta
+        });
+        completedByKey.set(key, entry);
+        pendingAdoptions.push(entry);
+        stats.completed += 1;
+        return entry;
+      } catch (error) {
+        releaseReservationCancel(record);
+        if (record.cancelled || reqEpoch !== bridgeEpoch) {
+          stats.staleRejected += 1;
+          return Object.freeze({ missKey: key, staleRejected: true, cancelled: record.cancelled });
+        }
+        stats.failures += 1;
+        stats.lastError = String(error?.message ?? error);
+        recordDebtOnFailure(key, 'triad-synthesis', scheduleId, requestArgs, error);
+        return Object.freeze({
+          error: stats.lastError,
+          errorCode: error?.code ?? null,
+          missKey: key,
+          failed: true
+        });
+      } finally {
+        if (inFlightByKey.get(key) === record) {
+          inFlightByKey.delete(key);
+        }
+      }
+    })();
+    record.promise = promise;
+    inFlightByKey.set(key, record);
+    return Object.freeze({ status: 'dispatched', missKey: key, promise });
+  }
+
+  /**
    * Cancel an in-flight or staged-pending closure miss immediately, releasing
    * its G5 reservation slot and fencing any late completion from adoption.
    */
@@ -572,6 +727,13 @@ export function createWarmClosureMissBridge({
             scheduleId: scheduleId ?? debt.scheduleId
           })
         );
+      } else if (debt.kind === 'triad-synthesis') {
+        retried.push(
+          requestTriadClosureSynthesisMiss({
+            ...debt.requestArgs,
+            scheduleId: scheduleId ?? debt.scheduleId
+          })
+        );
       }
     }
     return Object.freeze(retried);
@@ -617,6 +779,16 @@ export function createWarmClosureMissBridge({
         if (device && updateImplicitPressure) {
           updateSphImplicitPressureStiffnessTable(device, entry.responseFunction);
           implicitPressureUpdated = true;
+        }
+      } else if (entry.kind === 'triad-synthesis' && entry.packedGpuTable) {
+        if (lane) {
+          laneAdoption = adoptExternalRegionalResponseTable(lane, entry.packedGpuTable, {
+            scheduleId,
+            sourceFingerprint: entry.sourceFingerprint
+          });
+          activeOrdinal = laneAdoption.ordinal;
+        } else {
+          activeOrdinal += 1;
         }
       } else {
         activeOrdinal += 1;
@@ -672,6 +844,7 @@ export function createWarmClosureMissBridge({
     schema: ULG_WARM_CLOSURE_MISS_BRIDGE_SCHEMA,
     requestEosStiffnessClosureMiss,
     requestQuantumClosureProbeMiss,
+    requestTriadClosureSynthesisMiss,
     cancelMiss,
     sourceChanged,
     retryRemoteDebt,

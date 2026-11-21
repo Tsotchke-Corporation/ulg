@@ -342,7 +342,7 @@ fn fit(@builtin(global_invocation_id) id: vec3<u32>) {
     // Endpoints plus an interior lattice shifted away from fit nodes.
     var fraction = (f32(p)-0.618033989)/63.0;
     if (p==0u) { fraction = 0.0; } if (p==64u) { fraction = 1.0; }
-    let x = xlo+fraction*(xhi-xlo);
+    let x = clamp(xlo + fraction * (xhi - xlo), xlo, xhi);
     let d = rf_eval_differential(g, vec3<f32>(x,0.0,0.0));
     if (d.ok != 1u || !(d.gradient.x > 0.0) || !(d.hessian[0][0] < 0.0)) { valid=false; continue; }
     if (sample_count == 2u) {

@@ -18376,11 +18376,11 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     const chainMaxLevel = Number.isInteger(maxLevel) ? maxLevel : chainMinLevel + 2;
     const chainLevelCount = chainMaxLevel - chainMinLevel + 1;
     if (
-      chainLevelCount < 3
+      chainLevelCount < 2
       || chainLevelCount > SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS
     ) {
       throw new RangeError(
-        `enableLevelChainMechanics requires 3..${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} contiguous levels (got ${chainLevelCount})`
+        `enableLevelChainMechanics requires 2..${SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS} contiguous levels (got ${chainLevelCount})`
       );
     }
     const chainMechanicsLevels = buildSchroederMechanicsChainLevelSpecs({

@@ -2189,7 +2189,9 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
       ? phaseCarrierOneToFourTransition.terminalLineage
       : sourceLineage;
     const levelChainMultiStepBatchSeal = Boolean(
-      finalEpochSeal.mechanicsLevelCount >= 3
+      (finalEpochSeal.mechanicsLevelCount >= 3
+        || (finalEpochSeal.mechanicsLevelCount >= 2
+          && scheduleResult?.terminalHierarchySummary?.levelChainMechanicsEnabled === true))
       && completedCount > 1
       && workerRouteLineageEquals(canonicalSourceLineage, finalEpochLineage)
       && targetLineage.physicsTick === canonicalSourceLineage.physicsTick + completedCount

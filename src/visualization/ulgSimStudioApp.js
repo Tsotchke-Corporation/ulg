@@ -516,6 +516,14 @@ export function mountUlgSimStudioApp({
         if (triadA4 && triadA4.active) {
           archLines.push(`Triad A4 GPU envelopes: gen=${triadA4.generation ?? 0} fns=${triadA4.functionCount ?? 0} triadMats=${triadA4.triadMaterialCount ?? 0} gasMats=${triadA4.gasMaterialCount ?? 0}`);
         }
+        const dynLod = globalThis.__ulgDynamicHierarchyLodStatus;
+        if (dynLod) {
+          archLines.push(`Dynamic SS LOD: levels=${dynLod.activeLevelCount} (${dynLod.minLevel}..${dynLod.maxLevel}) action=${dynLod.action} util=${(Number(dynLod.hardwareBudgetUtilization) || 0).toFixed(2)} transitions=${dynLod.transitionCount ?? 0}`);
+        }
+        const atlas = globalThis.__ulgScaleAtlasStatus;
+        if (atlas) {
+          archLines.push(`40-OOM Scale Atlas: charts=${atlas.activeChartCount} span=${(Number(atlas.levelSpanOom) || 0).toFixed(2)} OOM [${atlas.globalMinLevel}..${atlas.globalMaxLevel}] multipolePairs=${atlas.multipoleCoupledPairs ?? 0}`);
+        }
         const a5 = globalThis.__ulgA5SolidStatus;
         if (a5) {
           archLines.push(`A5 solids: rigid=${a5.rigidBodyCount ?? 0} deformable=${a5.sol4DeformableSurfaceCount ?? 0} sol5=${Boolean(a5.sol5FractureActive)} sol6=${Boolean(a5.sol6MultilevelActive)}`);

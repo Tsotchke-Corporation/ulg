@@ -14,6 +14,13 @@ import {
   getTriadClosureDeviceStatus,
   registerTriadClosureBundleOnDevice
 } from '../runtime/material/triadClosureGpuRegistry.js';
+import {
+  createDynamicHierarchyLodController,
+  createDynamicSchroederScaleAtlasRuntime
+} from '../runtime/sph/schroederSpatialScaleAtlasRuntime.js';
+import {
+  runSchroederScaleAtlasMultipoleWebGpu
+} from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
@@ -5425,13 +5432,20 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     data.enableLevelChainMechanics === true
     && Number.isInteger(data.minLevel)
     && Number.isInteger(data.maxLevel)
-    && (data.maxLevel - data.minLevel + 1) >= 3
+    && (data.maxLevel - data.minLevel + 1) >= 2
   );
+  const epochChainMaxLevel = (
+    enableLevelChainMechanics
+    && Number.isInteger(levelAssignment?.maxLevel)
+    && levelAssignment.maxLevel >= data.minLevel
+  )
+    ? levelAssignment.maxLevel
+    : data.maxLevel;
   const chainMechanicsLevels = enableLevelChainMechanics
     ? buildSchroederMechanicsChainLevelSpecs({
         boxDimsM: data.boxDimsM,
         fineGridSpacingM: nativeGridSpacingM,
-        levelCount: data.maxLevel - data.minLevel + 1,
+        levelCount: Math.max(2, epochChainMaxLevel - data.minLevel + 1),
         minLevel: data.minLevel,
         gridSpecFactory: createMlsMpmGridSpec
       })
@@ -6033,7 +6047,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   const enableLevelChainMechanics = Boolean(
     (data.enableLevelChainMechanics === true
       || data.hierarchyConfig?.enableLevelChainMechanics === true)
-    && currentSeal.mechanicsLevelCount >= 3
+    && currentSeal.mechanicsLevelCount >= 2
   );
   const enableTwoLevelMechanics = !enableLevelChainMechanics && (
     data.enableTwoLevelMechanics === true
@@ -10686,8 +10700,21 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       stepZeroOptions.phaseVolumeInterfaceTransportRequired =
         stepZeroOptions.phaseVolumeInterfaceTransportRequired === true
         || scheduleLawActivation.phaseVolumeInterfaceTransport;
+      const dynamicLodMaxLevel = (
+        record.dynamicHierarchyLodController
+        && (baseEpochOptions.enableLevelChainMechanics === true
+          || baseMechanicsOptions.enableLevelChainMechanics === true
+          || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics === true)
+        && Number.isInteger(stepZeroOptions.minLevel)
+      )
+        ? stepZeroOptions.minLevel + record.dynamicHierarchyLodController.snapshot().activeLevelCount - 1
+        : null;
+      if (dynamicLodMaxLevel != null) {
+        stepZeroOptions.maxLevel = dynamicLodMaxLevel;
+      }
       const sealScheduleDerivedEpochOptions = (options) => ({
         ...options,
+        ...(dynamicLodMaxLevel != null ? { maxLevel: dynamicLodMaxLevel } : {}),
         enablePhaseVolumeMigration:
           options.enablePhaseVolumeMigration === true
           || scheduleLawActivation.phaseVolumeMigration,
@@ -10799,7 +10826,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics === true)
         && stepOrdinal === 1
         && stepCount > 1
-        && Number(epochSeal?.mechanicsLevelCount) >= 3
+        && Number(epochSeal?.mechanicsLevelCount) >= 2
         && !twoLevelMechanicsRequested
         && !terminalRefluxReceiptRequired
         && typeof baseMechanicsOptions.schroederSameLevelMechanicsRunner !== 'function'
@@ -10928,8 +10955,17 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       // summaries serialized the entire hot loop without producing any
       // additional evidence. Trace the exact terminal step that the schedule
       // can actually publish.
+      const resolvedDynamicLodMaxLevel = (
+        record.dynamicHierarchyLodController
+        && (baseMechanicsOptions.enableLevelChainMechanics === true
+          || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics === true)
+        && Number.isInteger(continuationOptions.minLevel)
+      )
+        ? continuationOptions.minLevel + record.dynamicHierarchyLodController.snapshot().activeLevelCount - 1
+        : null;
       return {
         ...continuationOptions,
+        ...(resolvedDynamicLodMaxLevel != null ? { maxLevel: resolvedDynamicLodMaxLevel } : {}),
         ...(chainBatchActive ? { chainBatchStepCount: stepCount } : {}),
         stageMechanicsTraceEnabled:
           continuationOptions.stageMechanicsTraceEnabled === true
@@ -10955,6 +10991,67 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       };
     };
     const record = getLaneRecord(payload);
+    // Initialize dynamic hierarchy LOD controller on N-level chain lanes and
+    // the 40-OOM multi-chart Scale Atlas runtime at the lane level (zero GPU
+    // buffers allocated on single-chart lanes).
+    const chainConfigMinLevel = Number.isInteger(baseMechanicsOptions.minLevel)
+      ? baseMechanicsOptions.minLevel
+      : (Number.isInteger(baseEpochOptions.minLevel) ? baseEpochOptions.minLevel : 0);
+    const chainConfigMaxLevel = Number.isInteger(baseMechanicsOptions.maxLevel)
+      ? baseMechanicsOptions.maxLevel
+      : (Number.isInteger(baseEpochOptions.maxLevel) ? baseEpochOptions.maxLevel : chainConfigMinLevel);
+    const chainModeActive = Boolean(
+      baseMechanicsOptions.enableLevelChainMechanics === true
+      || baseMechanicsOptions.hierarchyConfig?.enableLevelChainMechanics === true
+      || baseEpochOptions.enableLevelChainMechanics === true
+    );
+    if (
+      chainModeActive
+      && !record.dynamicHierarchyLodController
+      && schedule.dynamicHierarchyLod !== false
+      && baseMechanicsOptions.dynamicHierarchyLod !== false
+    ) {
+      const configuredCount = Math.max(2, chainConfigMaxLevel - chainConfigMinLevel + 1);
+      const requestedMinLevels = Number.isInteger(schedule.dynamicHierarchyLodMinLevels)
+        ? schedule.dynamicHierarchyLodMinLevels
+        : (Number.isInteger(baseMechanicsOptions.dynamicHierarchyLodMinLevels)
+            ? baseMechanicsOptions.dynamicHierarchyLodMinLevels
+            : configuredCount);
+      const minActiveLevelCount = Math.max(2, Math.min(configuredCount, requestedMinLevels));
+      const maxActiveLevelCount = Math.min(16, Math.max(configuredCount + 1, 4));
+      record.dynamicHierarchyLodController = createDynamicHierarchyLodController({
+        initialActiveLevelCount: configuredCount,
+        minActiveLevelCount,
+        maxActiveLevelCount,
+        targetSyncHz: 8,
+        stepsPerSchedule: stepCount
+      });
+    }
+    if (!record.scaleAtlasRuntime) {
+      const refSpacingM = Number(baseEpochOptions.baseGridSpacingM ?? baseMechanicsOptions.baseGridSpacingM ?? 0.01);
+      record.scaleAtlasRuntime = createDynamicSchroederScaleAtlasRuntime({
+        referenceSpacingM: Number.isFinite(refSpacingM) && refSpacingM > 0 ? refSpacingM : 0.01,
+        rootGlobalBaseLevel: 0,
+        rootLocalMinLevel: chainConfigMinLevel,
+        rootLocalMaxLevel: Math.max(chainConfigMinLevel, chainConfigMaxLevel),
+        rootLabel: laneId || 'root-chart'
+      });
+    }
+    const requestedAtlasCharts = Array.isArray(schedule.scaleAtlasCharts)
+      ? schedule.scaleAtlasCharts
+      : (Array.isArray(baseMechanicsOptions.residentStepOptions?.scaleAtlasCharts)
+          ? baseMechanicsOptions.residentStepOptions.scaleAtlasCharts
+          : null);
+    if (requestedAtlasCharts && requestedAtlasCharts.length > 0 && record.scaleAtlasRuntime) {
+      for (const spec of requestedAtlasCharts) {
+        if (!spec || typeof spec !== 'object') continue;
+        try {
+          record.scaleAtlasRuntime.ensureChartForScaleLevel(spec);
+        } catch {
+          // Keep auxiliary chart registration isolated from schedule admission.
+        }
+      }
+    }
     // The scene sends immutable material/law options only with a fresh seed.
     // Persist that first schedule snapshot before route selection so Tier0
     // does not bypass the canonical mechanics stage that historically stored
@@ -15531,6 +15628,65 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // Keep A3 thermal regional sampling isolated from physics admission.
       }
     }
+    // Evaluate dynamic hierarchy LOD controller & 40-OOM scale atlas at this
+    // committed schedule boundary (zero full-particle readback; hysteresis
+    // prevents frame-to-frame level thrashing).
+    let dynamicHierarchyLodStatus = null;
+    if (record.dynamicHierarchyLodController) {
+      try {
+        const wallMs = Math.max(
+          1,
+          (scheduleLastStepEndedAtMs ?? workerResidentScheduleNowMs())
+            - (scheduleFirstStepStartedAtMs ?? scheduleFunctionEnteredAtMs)
+        );
+        const lawAct = resolveScheduleLawActivation();
+        const lodDecision = record.dynamicHierarchyLodController.evaluateScheduleBoundary({
+          scheduleWallMs: wallMs,
+          maxVolumeRatio: lawAct.gasBoundaryActionable ? 8.0 : 1.0,
+          maxThermalGradientKPerM: lawAct.thermal ? 600.0 : 0.0,
+          activeInterfaceCount: (lawAct.reaction || lawAct.phaseVolumeInterfaceTransport) ? 1 : 0,
+          deviceLimits: record.workerDevice?.limits ?? null
+        });
+        record.lastDynamicHierarchyLodDecision = lodDecision;
+        dynamicHierarchyLodStatus = lodDecision;
+        globalThis.__ulgDynamicHierarchyLodStatus = lodDecision;
+      } catch {
+        dynamicHierarchyLodStatus = record.dynamicHierarchyLodController.snapshot();
+      }
+    }
+    let scaleAtlasStatus = null;
+    if (record.scaleAtlasRuntime) {
+      try {
+        const atlasSnap = record.scaleAtlasRuntime.snapshotAtlas();
+        let multipoleCoupledPairs = 0;
+        let multipoleErrorMask = 0;
+        if (
+          atlasSnap.charts.length >= 2
+          && record.workerDevice
+          && Array.isArray(schedule.scaleAtlasMultipoleParticles)
+          && schedule.scaleAtlasMultipoleParticles.length > 0
+        ) {
+          const mp = await runSchroederScaleAtlasMultipoleWebGpu(record.workerDevice, {
+            atlasPlan: atlasSnap,
+            particles: schedule.scaleAtlasMultipoleParticles
+          });
+          multipoleCoupledPairs = mp.summary?.totalCoupledPairs ?? 0;
+          multipoleErrorMask = mp.receipt?.errorMask ?? 0;
+        }
+        scaleAtlasStatus = Object.freeze({
+          schema: atlasSnap.schema,
+          activeChartCount: atlasSnap.charts.length,
+          levelSpanOom: atlasSnap.ordersOfMagnitude,
+          globalMinLevel: atlasSnap.minGlobalLevel,
+          globalMaxLevel: atlasSnap.maxGlobalLevel,
+          multipoleCoupledPairs,
+          multipoleErrorMask
+        });
+        globalThis.__ulgScaleAtlasStatus = scaleAtlasStatus;
+      } catch {
+        scaleAtlasStatus = null;
+      }
+    }
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       thermalPotential,
@@ -15550,6 +15706,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         triadA4: record.workerDevice
           ? getTriadClosureDeviceStatus(record.workerDevice)
           : (globalThis.__ulgTriadA4ClosureStatus ? { ...globalThis.__ulgTriadA4ClosureStatus } : null),
+        dynamicHierarchyLod: dynamicHierarchyLodStatus,
+        scaleAtlas: scaleAtlasStatus,
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

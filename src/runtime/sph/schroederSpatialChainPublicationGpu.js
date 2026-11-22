@@ -95,7 +95,9 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep,
     if (!Number.isSafeInteger(step) || step>0xffffffff || !Number.isFinite(time)
       || !Number.isSafeInteger(acceptedStepCount) || acceptedStepCount<0
       || time<finalStep.sphParticleState.time) {
-      throw new RangeError('Chain batch accepted clock exceeds public lineage capacity');
+      throw new RangeError(
+        `Chain batch accepted clock exceeds public lineage capacity (step=${step}, baseStep=${clock.baseStep}, accepted=${accepted}, stateStep=${finalStep.sphParticleState.step}, time=${time}, stateTime=${finalStep.sphParticleState.time})`
+      );
     }
     if (abortIfAcceptedBelow > 0 && acceptedStepCount < abortIfAcceptedBelow && error === 1) {
       return Object.freeze({

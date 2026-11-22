@@ -54544,6 +54544,14 @@ fn main(
           scene.userData.sphTriadA4ClosureStatus = workerArchStatus.triadA4;
           globalThis.__ulgTriadA4ClosureStatus = workerArchStatus.triadA4;
         }
+        if (workerArchStatus.dynamicHierarchyLod) {
+          scene.userData.sphDynamicHierarchyLodStatus = workerArchStatus.dynamicHierarchyLod;
+          globalThis.__ulgDynamicHierarchyLodStatus = workerArchStatus.dynamicHierarchyLod;
+        }
+        if (workerArchStatus.scaleAtlas) {
+          scene.userData.sphScaleAtlasStatus = workerArchStatus.scaleAtlas;
+          globalThis.__ulgScaleAtlasStatus = workerArchStatus.scaleAtlas;
+        }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and

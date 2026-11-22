@@ -54564,6 +54564,10 @@ fn main(
           scene.userData.sphRepresentativeParticlesStatus = workerArchStatus.representativeParticles;
           globalThis.__ulgRepresentativeParticlesStatus = workerArchStatus.representativeParticles;
         }
+        if (workerArchStatus.chainDeepening) {
+          scene.userData.sphChainDeepeningStatus = workerArchStatus.chainDeepening;
+          globalThis.__ulgChainDeepeningStatus = workerArchStatus.chainDeepening;
+        }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and

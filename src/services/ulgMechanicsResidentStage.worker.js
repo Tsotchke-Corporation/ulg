@@ -31,6 +31,7 @@ import {
   buildRepresentativeParticlesStatus,
   summarizeRepresentedEntityDistribution
 } from '../runtime/sph/schroederRepresentativeParticleController.js';
+import { evaluateImplicitPressurePerNodeEnvelope } from '../runtime/sph/sphImplicitPressureGpu.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
@@ -15780,6 +15781,35 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       reclaimedSpareLineages: Number(record.representativeReclaimedSpareLineages || 0)
     });
     globalThis.__ulgRepresentativeParticlesStatus = representativeParticlesStatus;
+    const chainAmbientRefDensity = Number(
+      baseMechanicsOptions.residentStepOptions?.ambientReferenceDensityKgPerM3
+      ?? record.schroederLane?.residentStepOptions?.ambientReferenceDensityKgPerM3
+      ?? 0
+    );
+    const chainFineSubsteps = Math.max(
+      1,
+      Math.round(Number(
+        schedule.fineSubstepsPerCoarseStep
+        ?? baseMechanicsOptions.fineSubstepsPerCoarseStep
+        ?? 1
+      ) || 1)
+    );
+    const pressureEnvelopeCheck = evaluateImplicitPressurePerNodeEnvelope({
+      soundSpeedMPerS: 180,
+      maxFluidSpeedMPerS: 0,
+      gridSpacingM: Number(baseMechanicsOptions.gridSpacingM ?? baseEpochOptions.baseGridSpacingM ?? 0.01),
+      dtS: Number(baseMechanicsOptions.dt ?? commonOptions.dt ?? 1e-4)
+    });
+    const chainDeepeningStatus = Object.freeze({
+      schema: 'peercompute.ulg.schroeder-chain-deepening-status.v1',
+      levelChainActive: Boolean(chainModeActive),
+      fineSubstepsPerCoarseStep: chainFineSubsteps,
+      implicitPressureEnvelope: pressureEnvelopeCheck,
+      coherentSolidsL0Capable: true,
+      explicitHydrostaticAirActive: chainModeActive && chainAmbientRefDensity === 0,
+      ambientReferenceDensityKgPerM3: chainAmbientRefDensity
+    });
+    globalThis.__ulgChainDeepeningStatus = chainDeepeningStatus;
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       thermalPotential,
@@ -15802,6 +15832,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         implicitThermal: implicitThermalStatus,
         lawEnvelopeWatch: lawEnvelopeWatchStatus,
         representativeParticles: representativeParticlesStatus,
+        chainDeepening: chainDeepeningStatus,
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

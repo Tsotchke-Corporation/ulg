@@ -14491,8 +14491,10 @@ export async function mountSphPhaseDemoOverlay({
       ambientReferenceDensityKgPerM3:
         explicitAtmosphereReferenceDensityKgPerM3(activeViewState?.environmentInitialization, {
           multiLevelExplicitAir:
-            Number(activeViewState?.schroederConfig?.maxLevel ?? 0)
-              > Number(activeViewState?.schroederConfig?.minLevel ?? 0)
+            (Number(activeViewState?.schroederConfig?.maxLevel ?? initialSchroederMaxLevel ?? 0)
+              > Number(activeViewState?.schroederConfig?.minLevel ?? initialSchroederMinLevel ?? 0))
+            || initialSchroederEnableLevelChainMechanics === true
+            || initialSchroederEnableTwoLevelMechanics === true
         }),
       mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
       tier0RealtimePacing: initialTier0RealtimePacing,

@@ -46,6 +46,196 @@ const ESHKOL_TAIT_STIFFNESS_RESPONSE = Object.freeze({
 export const SPH_IMPLICIT_PRESSURE_STIFFNESS_TABLE = packResponseFunctionsForGpu([ESHKOL_TAIT_STIFFNESS_RESPONSE]);
 
 export const SPH_IMPLICIT_PRESSURE_MAX_CFL = 6.4;
+export const SPH_IMPLICIT_PRESSURE_MAX_ADVECTIVE_CFL = 0.5;
+export const SPH_IMPLICIT_PRESSURE_MAX_LINEARIZATION_ERROR = 0.05;
+export const SPH_IMPLICIT_PRESSURE_ENVELOPE_WATCH_SCHEMA = 'ulg.sph.implicit-pressure-envelope-watch.v1';
+
+/**
+ * Evaluate the per-node physical admissibility envelope for Eshkol-AD
+ * semi-implicit Tait pressure on coupled multi-material & N-level chain lanes:
+ *   1. Acoustic CFL: c * dt / dx <= maxAcousticCfl (6.4)
+ *   2. Advective CFL: |v| * dt / dx <= maxAdvectiveCfl (0.5)
+ *   3. Tait EOS second-order linearization error:
+ *        0.5 * (gamma - 1) * (|v| * dt / dx)^2 <= maxLinearizationError (0.05)
+ * Outside the envelope, fallbackMode switches cleanly to 'explicit-substep'
+ * with exact dyadic substep recommendation (zero silent extrapolation).
+ */
+export function evaluateImplicitPressurePerNodeEnvelope({
+  soundSpeedMPerS,
+  maxFluidSpeedMPerS = 0,
+  gridSpacingM,
+  dtS,
+  gamma = 7,
+  maxAcousticCfl = SPH_IMPLICIT_PRESSURE_MAX_CFL,
+  maxAdvectiveCfl = SPH_IMPLICIT_PRESSURE_MAX_ADVECTIVE_CFL,
+  maxLinearizationError = SPH_IMPLICIT_PRESSURE_MAX_LINEARIZATION_ERROR
+} = {}) {
+  const c = Math.max(0, Number(soundSpeedMPerS) || 0);
+  const v = Math.max(0, Number(maxFluidSpeedMPerS) || 0);
+  const dx = Number(gridSpacingM);
+  const dt = Number(dtS);
+  if (!(dx > 0) || !(dt > 0)) {
+    return Object.freeze({
+      schema: SPH_IMPLICIT_PRESSURE_ENVELOPE_WATCH_SCHEMA,
+      admitted: false,
+      acousticCfl: 0,
+      advectiveCfl: 0,
+      linearizationResidual: 0,
+      fallbackMode: 'explicit-substep',
+      recommendedSubsteps: 1,
+      reason: 'invalid-grid-or-dt'
+    });
+  }
+  const acousticCfl = (c * dt) / dx;
+  const advectiveCfl = (v * dt) / dx;
+  const linearizationResidual = 0.5 * Math.max(1, Number(gamma) - 1) * advectiveCfl * advectiveCfl;
+  let reason = 'admitted';
+  if (acousticCfl > maxAcousticCfl) reason = 'acoustic-cfl-exceeded';
+  else if (advectiveCfl > maxAdvectiveCfl) reason = 'advective-cfl-exceeded';
+  else if (linearizationResidual > maxLinearizationError) reason = 'tait-linearization-exceeded';
+  const admitted = reason === 'admitted';
+  const neededRatio = Math.max(
+    1,
+    acousticCfl / Math.max(1e-9, maxAcousticCfl),
+    advectiveCfl / Math.max(1e-9, maxAdvectiveCfl),
+    Math.sqrt(linearizationResidual / Math.max(1e-9, maxLinearizationError))
+  );
+  const recommendedSubsteps = admitted ? 1 : Math.min(8, 2 ** Math.ceil(Math.log2(neededRatio)));
+  return Object.freeze({
+    schema: SPH_IMPLICIT_PRESSURE_ENVELOPE_WATCH_SCHEMA,
+    admitted,
+    acousticCfl,
+    advectiveCfl,
+    linearizationResidual,
+    fallbackMode: admitted ? 'implicit-cg' : 'explicit-substep',
+    recommendedSubsteps,
+    reason
+  });
+}
+
+// GPU-native per-node semi-implicit pressure envelope watch shader.
+// Receipt (6 atomic u32 words):
+//   [0] admittedNodes
+//   [1] acousticCflBreaches
+//   [2] advectiveCflBreaches
+//   [3] linearizationBreaches
+//   [4] maxAdvectiveCflMicro (u32 fixed-point * 1e6)
+//   [5] fallbackRequired (0 or 1)
+export const sphImplicitPressureEnvelopeWatchWgsl = /* wgsl */ `
+struct EnvelopeWatchParams {
+  node_count: u32,
+  pad0: u32,
+  pad1: u32,
+  pad2: u32,
+  dt: f32,
+  inv_dx: f32,
+  sound_speed: f32,
+  gamma_minus_1: f32,
+  max_acoustic_cfl: f32,
+  max_advective_cfl: f32,
+  max_lin_err: f32,
+  pad3: f32,
+};
+@group(0) @binding(0) var<uniform> ew_params: EnvelopeWatchParams;
+@group(0) @binding(1) var<storage, read> ew_vel_mass: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> ew_receipt: array<atomic<u32>>;
+
+@compute @workgroup_size(64)
+fn ip_envelope_watch(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= ew_params.node_count) { return; }
+  let vm = ew_vel_mass[i];
+  if (!(vm.w > 0.0)) { return; }
+  let speed = length(vm.xyz);
+  let adv_cfl = speed * ew_params.dt * ew_params.inv_dx;
+  let ac_cfl = ew_params.sound_speed * ew_params.dt * ew_params.inv_dx;
+  let lin_err = 0.5 * ew_params.gamma_minus_1 * adv_cfl * adv_cfl;
+  atomicMax(&ew_receipt[4], u32(clamp(adv_cfl * 1000000.0, 0.0, 4294967000.0)));
+  var breached = false;
+  if (ac_cfl > ew_params.max_acoustic_cfl) { atomicAdd(&ew_receipt[1], 1u); breached = true; }
+  if (adv_cfl > ew_params.max_advective_cfl) { atomicAdd(&ew_receipt[2], 1u); breached = true; }
+  if (lin_err > ew_params.max_lin_err) { atomicAdd(&ew_receipt[3], 1u); breached = true; }
+  if (breached) {
+    atomicStore(&ew_receipt[5], 1u);
+  } else {
+    atomicAdd(&ew_receipt[0], 1u);
+  }
+}
+`;
+
+export async function runSphImplicitPressureEnvelopeWatchWebGpu(device, {
+  nodeVelocityMassRows,
+  gridSpacingM,
+  dtS,
+  soundSpeedMPerS = 180,
+  gamma = 7,
+  maxAcousticCfl = SPH_IMPLICIT_PRESSURE_MAX_CFL,
+  maxAdvectiveCfl = SPH_IMPLICIT_PRESSURE_MAX_ADVECTIVE_CFL,
+  maxLinearizationError = SPH_IMPLICIT_PRESSURE_MAX_LINEARIZATION_ERROR
+} = {}) {
+  const n = Math.floor((nodeVelocityMassRows?.length || 0) / 4);
+  if (!(n > 0)) throw new RangeError('runSphImplicitPressureEnvelopeWatchWebGpu requires non-empty nodeVelocityMassRows');
+  const stage = globalThis.GPUShaderStage?.COMPUTE ?? 4;
+  const mod = device.createShaderModule({ label: 'ulg-ip-envelope-watch', code: sphImplicitPressureEnvelopeWatchWgsl });
+  const layout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: stage, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: stage, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: stage, buffer: { type: 'storage' } }
+    ]
+  });
+  const pipeline = device.createComputePipeline({
+    label: 'ulg-ip-envelope-watch-pipeline',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+    compute: { module: mod, entryPoint: 'ip_envelope_watch' }
+  });
+  const paramsBytes = new ArrayBuffer(48);
+  new Uint32Array(paramsBytes).set([n, 0, 0, 0]);
+  new Float32Array(paramsBytes).set([
+    Math.fround(dtS), Math.fround(1 / gridSpacingM), Math.fround(soundSpeedMPerS), Math.fround(Math.max(1, gamma - 1)),
+    Math.fround(maxAcousticCfl), Math.fround(maxAdvectiveCfl), Math.fround(maxLinearizationError), 0
+  ], 4);
+  const pBuf = device.createBuffer({ size: 48, usage: 0x40 | 0x08 });
+  const vmData = nodeVelocityMassRows instanceof Float32Array ? nodeVelocityMassRows : new Float32Array(nodeVelocityMassRows);
+  const vmBuf = device.createBuffer({ size: Math.max(16, vmData.byteLength), usage: 0x80 | 0x08 });
+  const rcBuf = device.createBuffer({ size: 24, usage: 0x80 | 0x04 | 0x08 });
+  const readBuf = device.createBuffer({ size: 24, usage: 0x01 | 0x08 });
+  device.queue.writeBuffer(pBuf, 0, paramsBytes);
+  device.queue.writeBuffer(vmBuf, 0, vmData);
+  device.queue.writeBuffer(rcBuf, 0, new Uint32Array(6));
+  try {
+    const bg = device.createBindGroup({
+      layout,
+      entries: [
+        { binding: 0, resource: { buffer: pBuf } },
+        { binding: 1, resource: { buffer: vmBuf } },
+        { binding: 2, resource: { buffer: rcBuf } }
+      ]
+    });
+    const enc = device.createCommandEncoder({ label: 'ulg-ip-envelope-watch' });
+    const pass = enc.beginComputePass({ label: 'ulg-ip-envelope-watch-pass' });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(n / 64));
+    pass.end();
+    enc.copyBufferToBuffer(rcBuf, 0, readBuf, 0, 24);
+    device.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(0x01);
+    const words = new Uint32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+    return Object.freeze({
+      schema: SPH_IMPLICIT_PRESSURE_ENVELOPE_WATCH_SCHEMA,
+      admittedNodes: words[0],
+      acousticCflBreaches: words[1],
+      advectiveCflBreaches: words[2],
+      linearizationBreaches: words[3],
+      maxAdvectiveCfl: words[4] / 1e6,
+      fallbackRequired: words[5] === 1
+    });
+  } finally {
+    for (const b of [pBuf, vmBuf, rcBuf, readBuf]) b.destroy();
+  }
+}
 // The operator's stiffness K is evaluated from the Eshkol-derived response
 // (A4 Chebyshev fit of K / (rho0 c^2) over rho / rho0, Eshkol AD of the packed
 // Tait EOS: src/runtime/material/eshkolEosStiffnessTable.js). The closed form

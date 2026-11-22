@@ -1,4 +1,5 @@
 import { flushWorkerQueueSubmitBurst } from '../webgpuComputeLayout.js';
+import { normalizeSchroederChainSubcyclePlan } from './schroederSpatialChainSubcycling.js';
 
 // The existing resident sequence/ComputeManager owns scheduling and admission.
 // This adapter supplies its numerical batch and its original cleanup owner.
@@ -148,7 +149,17 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
   )
     ? args.prebuiltInitialSpatialEpoch.generation.directArenaCount
     : null;
-  const baseDt = forceInputs.dt;
+  const fineSubstepsPerCoarseStep = Math.max(
+    1,
+    Math.round(Number(args.fineSubstepsPerCoarseStep ?? args.mechanicsOptions?.fineSubstepsPerCoarseStep ?? 1) || 1)
+  );
+  const subcyclePlan = normalizeSchroederChainSubcyclePlan({
+    mechanicsLevels,
+    fineSubstepsPerCoarseStep,
+    macroDtS: forceInputs.dt
+  });
+  const baseDt = subcyclePlan.fineDtS;
+  const effectiveStepCount = stepCount * subcyclePlan.fineSubstepsPerCoarseStep;
   const dtAttempts = [{ dt: baseDt, factor: 1 }];
   if (allowAdaptiveDtRefinement) {
     let previousDt = baseDt;
@@ -188,7 +199,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
           mlsMpmParticleUpload: args.mlsMpmParticleUpload
         }
       };
-      for (let index = 0; index < stepCount; index++) {
+      for (let index = 0; index < effectiveStepCount; index++) {
         const next = await runSchroederSpatialChainStepWebGpu({
           ...args, mechanicsLevels, classificationPolicy, forceInputs: attemptForceInputs, mechanicsOptions,
           ...current.nextParticleUploads,
@@ -199,7 +210,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
           spatialEpochLaneId,
           spatialEpochDirectArenaCount,
           allowClockSegmentReset: index === 0 && allowAdaptiveDtRefinement,
-          device, closureOptions, retainForPublication: index === stepCount - 1
+          device, closureOptions, retainForPublication: index === effectiveStepCount - 1
         });
         privateSteps.push(next);
         current = next;
@@ -207,7 +218,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
       publication = await publishSchroederSpatialChainBatchWebGpu({
         device,
         finalStep: privateSteps.at(-1),
-        abortIfAcceptedBelow: allowAdaptiveDtRefinement && !isLastAttempt ? stepCount : 0
+        abortIfAcceptedBelow: allowAdaptiveDtRefinement && !isLastAttempt ? effectiveStepCount : 0
       });
       if (publication.published === false && publication.status === 'incomplete-mechanics-rejection') {
         const after = device.queue.onSubmittedWorkDone().then(() => true);
@@ -231,15 +242,17 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
       break;
     }
     const accepted = publication.clockReceipt.acceptedStepCount;
-    if (accepted > stepCount) throw new Error('Resident chain accepted more intervals than it executed');
+    if (accepted > effectiveStepCount) throw new Error('Resident chain accepted more intervals than it executed');
     const clock = Object.freeze({
       ...publication.clockReceipt,
       dtSeconds: activeDt,
       baseDtSeconds: baseDt,
       refinedDtFactor: activeFactor,
-      attemptedBatchStepCount: stepCount,
+      fineSubstepsPerCoarseStep: subcyclePlan.fineSubstepsPerCoarseStep,
+      subcyclePlan,
+      attemptedBatchStepCount: effectiveStepCount,
       acceptedBatchStepCount: accepted,
-      rejectedBatchStepCount: stepCount - accepted
+      rejectedBatchStepCount: effectiveStepCount - accepted
     });
     const finalStep = {
       schema:abi.ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA, backend:'webgpu',

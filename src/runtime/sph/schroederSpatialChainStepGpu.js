@@ -19,6 +19,12 @@ import { sphGpuParticleUploadExactEnergyRows, acquireSphParticleExactMassRead,
   releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
 import { acquireSchroederSpatialSuccessorExactMassRead } from './schroederSpatialSuccessorSourceFamily.js';
 import { flushWorkerQueueSubmitBurst } from '../webgpuComputeLayout.js';
+import {
+  ensureSchroederDeformableSolidSurfaceFamilyForUpload,
+  ensureSchroederSolidRigidFamilyForUpload,
+  runSchroederDeformableSolidSurfaceLaneStep,
+  runSchroederSolidRigidLaneStep
+} from './schroederSolidRigidLane.js';
 
 const chainSteps = new WeakMap();
 
@@ -195,6 +201,49 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
     proposals.push(...mechanics.proposals);executionSubmitted=true;
     admitSchroederSpatialEpochTransactionReader(transaction,{generation,...source,
       readerId:READER.MECHANICS_G2P,phase:PHASE.INTEGRATION_COMMIT});
+    // G3/A5 SOL-0..6 coherent rigid & deformable solid coupling onto L0 of the
+    // N-level chain (zero GPU work when the scene has no coherent solid bodies).
+    if (sphParticleState?.rigidBodies) {
+      const solidFamily = ensureSchroederSolidRigidFamilyForUpload(
+        sphParticleUpload,
+        sphParticleState.rigidBodies,
+        device
+      );
+      if (solidFamily) {
+        const l0Fluid = {
+          stateBuffer: g2p.stateBuffer,
+          thermoBuffer: sphParticleUpload.thermoBuffer,
+          mechanicsBuffer: g2p.mechanicsBuffer,
+          particleCount,
+          exactEnergyBuffer: sphParticleUpload.exactEnergyBuffer ?? null,
+          exactEnergyRowCount: sphParticleUpload.exactEnergyBuffer ? particleCount : 0
+        };
+        runSchroederSolidRigidLaneStep(solidFamily, {
+          device,
+          dtSeconds: forceInputs.dt,
+          gravity: forceInputs.gravityMPerS2,
+          boxM: forceInputs.boxDimsM,
+          fluid: l0Fluid
+        });
+        if (globalThis.__ulgA5SolidStatus && typeof globalThis.__ulgA5SolidStatus === 'object') {
+          globalThis.__ulgA5SolidStatus = { ...globalThis.__ulgA5SolidStatus, chainLevel0Coupled: true };
+        }
+      }
+    }
+    if (sphParticleState?.deformableSolidSurfaces) {
+      const defFamily = ensureSchroederDeformableSolidSurfaceFamilyForUpload(
+        sphParticleUpload,
+        sphParticleState.deformableSolidSurfaces,
+        device
+      );
+      if (defFamily) {
+        runSchroederDeformableSolidSurfaceLaneStep(defFamily, {
+          device,
+          stateBuffer: g2p.stateBuffer,
+          particleCount
+        });
+      }
+    }
     thermalProposal=runSchroederSpatialThermalProposalWebGpu({...closureOptions.thermalStepOptions,
       device,generation,schroederSpatialEpochTransaction:transaction,...source,
       thermalResponseGraphUpload,dtS:forceInputs.dt,

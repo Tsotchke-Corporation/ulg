@@ -538,6 +538,10 @@ export function mountUlgSimStudioApp({
           const entText = meanEnt > 0 ? meanEnt.toExponential(2) : '0';
           archLines.push(`Representative Particles: carriers=${rep.activeCarrierCount} spares=${rep.spareLineageCapacity} meanEntities=${entText} stefanSkin=${Boolean(rep.stefanExactSkinLedgerActive)} bulkCoarsen=${Boolean(rep.bulkCoarsenEnabled)}`);
         }
+        const cd = globalThis.__ulgChainDeepeningStatus;
+        if (cd) {
+          archLines.push(`N-Level Chain Deepening: subcycle=${cd.fineSubstepsPerCoarseStep}x ipEnv=${cd.implicitPressureEnvelope?.fallbackMode ?? 'n/a'} solidL0=on hydrostaticAir=${Boolean(cd.explicitHydrostaticAirActive)} (rhoRef=${cd.ambientReferenceDensityKgPerM3})`);
+        }
         const a5 = globalThis.__ulgA5SolidStatus;
         if (a5) {
           archLines.push(`A5 solids: rigid=${a5.rigidBodyCount ?? 0} deformable=${a5.sol4DeformableSurfaceCount ?? 0} sol5=${Boolean(a5.sol5FractureActive)} sol6=${Boolean(a5.sol6MultilevelActive)}`);

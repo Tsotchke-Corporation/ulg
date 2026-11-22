@@ -95,6 +95,10 @@ import {
   sphDispersedMediumGpuBufferParticleLineageMatches,
   validateSphDispersedMediumGpuBufferAuthority
 } from './sphDispersedMediumGpuBuffers.js';
+import {
+  planSphRenderFieldSpatialGrid,
+  encodeSphRenderFieldSpatialGridPasses
+} from './sphRenderFieldSpatialGridGpu.js';
 
 export {
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
@@ -8381,7 +8385,9 @@ export async function buildSphRenderFieldWebGpu({
   deferCleanup = true,
   useQueueFenceForCleanup = true,
   targetFieldRowsBuffer = null,
-  targetFieldRowsBufferByteLength = null
+  targetFieldRowsBufferByteLength = null,
+  preferSpatialGrid =
+    typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderFieldWebGpu requires a WebGPU-like device');
@@ -8892,11 +8898,13 @@ export async function buildSphRenderFieldWebGpu({
         size: 32,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
       }));
+      const effectiveProductEventCount =
+        borrowedProductEventBuffer || productEventRows
+          ? resolvedProductEventCount
+          : 0;
       device.queue.writeBuffer(paramsBuffer, 0, createRenderFieldParamsArray({
         particleCount: resolvedParticleCount,
-        productEventCount: borrowedProductEventBuffer || productEventRows
-          ? resolvedProductEventCount
-          : 0,
+        productEventCount: effectiveProductEventCount,
         surfaceCount: surfaceTable.surfaceCount,
         totalFieldCells: surfaceTable.totalFieldCells,
         fieldPadding,
@@ -8905,103 +8913,117 @@ export async function buildSphRenderFieldWebGpu({
         dispersedMediumOpticsEnabled: dispersedMediumOpticsAdvertised
       }));
 
-      const {
-        pipeline,
-        bindGroupLayout,
-        cacheStatus: pipelineCacheStatus
-      } = createCachedExplicitComputePipeline(device, {
-        cacheKey: retainMotionFieldBuffer
-          ? 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics-motion-v0'
-          : 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics',
-        label: 'ulg-sph-render-field',
-        code: retainMotionFieldBuffer ? sphRenderFieldMotionWgsl : sphRenderFieldWgsl,
-        entryPoint: 'main',
-        bindings: [
-          computeBufferBinding(0, 'read-only-storage'),
-          computeBufferBinding(1, 'read-only-storage'),
-          computeBufferBinding(2, 'storage'),
-          computeBufferBinding(3, 'uniform'),
-          computeBufferBinding(4, 'read-only-storage'),
-          computeBufferBinding(5, 'read-only-storage'),
-          computeBufferBinding(6, 'uniform'),
-          computeBufferBinding(7, 'read-only-storage'),
-          ...(retainMotionFieldBuffer ? [computeBufferBinding(8, 'storage')] : [])
-        ]
-      });
-      const bindGroup = device.createBindGroup({
-        layout: bindGroupLayout,
-        entries: [
-          {
-            binding: 0,
-            resource: webGpuStorageBufferBindingResource(
-              sourceRowsBuffer,
-              requiredRenderRowsByteLength,
-              { label: 'render field source rows' }
-            )
-          },
-          {
-            binding: 1,
-            resource: webGpuStorageBufferBindingResource(
-              surfaceBuffer,
-              surfaceRowsByteLength,
-              { label: 'render field surfaces' }
-            )
-          },
-          {
-            binding: 2,
-            resource: webGpuStorageBufferBindingResource(
-              fieldRowsBuffer,
-              fieldRowByteLength,
-              { label: 'render field cells' }
-            )
-          },
-          { binding: 3, resource: { buffer: paramsBuffer } },
-          {
-            binding: 4,
-            resource: webGpuStorageBufferBindingResource(
-              sourceProductEventBuffer,
-              boundProductEventRowsByteLength,
-              { label: 'render field product events' }
-            )
-          },
-          {
-            binding: 5,
-            resource: {
-              buffer: productHistoryControlBuffer,
-              offset:
-                resolvedProductEventLiveCountDescriptor?.controlOffsetBytes
-                  ?? 0,
-              size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
-            }
-          },
-          {
-            binding: 6,
-            resource: { buffer: productHistoryGateParamsBuffer }
-          },
-          {
-            binding: 7,
-            resource: webGpuStorageBufferBindingResource(
-              sourceDispersedMediumOpticsBuffer,
-              boundDispersedMediumOpticsByteLength,
-              { label: 'render field dispersed-medium optics' }
-            )
-          },
-          ...(motionFieldBuffer ? [{
-            binding: 8,
-            resource: webGpuStorageBufferBindingResource(
-              motionFieldBuffer,
-              motionFieldByteLength,
-              { label: 'render field motion' }
-            )
-          }] : [])
-        ]
-      });
+      const sourceRowsResource = webGpuStorageBufferBindingResource(
+        sourceRowsBuffer,
+        requiredRenderRowsByteLength,
+        { label: 'render field source rows' }
+      );
+      const surfaceResource = webGpuStorageBufferBindingResource(
+        surfaceBuffer,
+        surfaceRowsByteLength,
+        { label: 'render field surfaces' }
+      );
+      const fieldRowsResource = webGpuStorageBufferBindingResource(
+        fieldRowsBuffer,
+        fieldRowByteLength,
+        { label: 'render field cells' }
+      );
+      const productEventsResource = webGpuStorageBufferBindingResource(
+        sourceProductEventBuffer,
+        boundProductEventRowsByteLength,
+        { label: 'render field product events' }
+      );
+      const productHistoryControlResource = {
+        buffer: productHistoryControlBuffer,
+        offset:
+          resolvedProductEventLiveCountDescriptor?.controlOffsetBytes
+            ?? 0,
+        size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
+      };
+      const dispersedOpticsResource = webGpuStorageBufferBindingResource(
+        sourceDispersedMediumOpticsBuffer,
+        boundDispersedMediumOpticsByteLength,
+        { label: 'render field dispersed-medium optics' }
+      );
+      const motionFieldResource = motionFieldBuffer
+        ? webGpuStorageBufferBindingResource(
+            motionFieldBuffer,
+            motionFieldByteLength,
+            { label: 'render field motion' }
+          )
+        : null;
+
+      const spatialPlan = preferSpatialGrid
+        ? planSphRenderFieldSpatialGrid({
+            device,
+            surfaceRecords: surfaceRecordsForSubmission,
+            surfaceCount: surfaceTable.surfaceCount,
+            particleCount: resolvedParticleCount,
+            productEventCount: effectiveProductEventCount
+          })
+        : null;
       const encoder = device.createCommandEncoder();
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bindGroup);
-      pass.dispatchWorkgroups(workgroupCountX, workgroupCountY);
-      pass.end();
+      let pipelineCacheStatus = null;
+      if (spatialPlan) {
+        ({ pipelineCacheStatus } = encodeSphRenderFieldSpatialGridPasses({
+          device,
+          encoder,
+          plan: spatialPlan,
+          sourceRowsResource,
+          surfaceResource,
+          fieldRowsResource,
+          paramsBuffer,
+          productEventsResource,
+          productHistoryControlResource,
+          productHistoryGateParamsBuffer,
+          dispersedOpticsResource,
+          motionFieldResource
+        }));
+      } else {
+        const {
+          pipeline,
+          bindGroupLayout,
+          cacheStatus
+        } = createCachedExplicitComputePipeline(device, {
+          cacheKey: retainMotionFieldBuffer
+            ? 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics-motion-v0'
+            : 'ulg-sph-render-field-v5-disjoint-bulk-dispersed-optics',
+          label: 'ulg-sph-render-field',
+          code: retainMotionFieldBuffer ? sphRenderFieldMotionWgsl : sphRenderFieldWgsl,
+          entryPoint: 'main',
+          bindings: [
+            computeBufferBinding(0, 'read-only-storage'),
+            computeBufferBinding(1, 'read-only-storage'),
+            computeBufferBinding(2, 'storage'),
+            computeBufferBinding(3, 'uniform'),
+            computeBufferBinding(4, 'read-only-storage'),
+            computeBufferBinding(5, 'read-only-storage'),
+            computeBufferBinding(6, 'uniform'),
+            computeBufferBinding(7, 'read-only-storage'),
+            ...(retainMotionFieldBuffer ? [computeBufferBinding(8, 'storage')] : [])
+          ]
+        });
+        pipelineCacheStatus = cacheStatus;
+        const bindGroup = device.createBindGroup({
+          layout: bindGroupLayout,
+          entries: [
+            { binding: 0, resource: sourceRowsResource },
+            { binding: 1, resource: surfaceResource },
+            { binding: 2, resource: fieldRowsResource },
+            { binding: 3, resource: { buffer: paramsBuffer } },
+            { binding: 4, resource: productEventsResource },
+            { binding: 5, resource: productHistoryControlResource },
+            { binding: 6, resource: { buffer: productHistoryGateParamsBuffer } },
+            { binding: 7, resource: dispersedOpticsResource },
+            ...(motionFieldResource ? [{ binding: 8, resource: motionFieldResource }] : [])
+          ]
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+        pass.end();
+      }
       return {
         sourceRowsBuffer,
         sourceProductEventBuffer,

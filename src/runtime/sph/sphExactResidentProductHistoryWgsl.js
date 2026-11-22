@@ -165,6 +165,12 @@ fn seal_exact_product_history(){
 `;
 }
 
+export function createSphExactResidentProductHistorySourceRowChecksWgsl(layout) {
+  const l = validateLayout(layout);
+  return rowChecks(l, `let at=row*${l.rowWords / 4}u+word/4u;let lane=word%4u;
+  if(kind==0u){return source_a_rows[at][lane];}return source_b_rows[at][lane];`);
+}
+
 /** Same bounded append/count transaction as the original history owner, with
  * integer liveness and whole-row copies. The emitted source has its own
  * authenticated count; neither its capacity nor its projected mass is live
@@ -184,30 +190,32 @@ export function createSphExactResidentProductHistoryAppendWgsl(layout) {
   replace('const HISTORY_CONTROL_MAGIC:', '@group(0) @binding(6) var<storage,read> emitted_control:array<u32>;\n\nconst HISTORY_CONTROL_MAGIC:');
   const start = code.indexOf('fn history_source_row_live('), end = code.indexOf('\nfn history_fail(', start);
   if (start < 0 || end < start) throw new Error('Original history predicate changed');
-  code = code.slice(0,start) + rowChecks(l, `let at=row*${l.rowWords/4}u+word/4u;let lane=word%4u;
-  if(kind==0u){return source_a_rows[at][lane];}return source_b_rows[at][lane];`) + `
+  code = code.slice(0,start) + createSphExactResidentProductHistorySourceRowChecksWgsl(l) + `
 fn history_source_row_live(kind:u32,row:u32,stride:u32)->bool {return exact_history_live(kind,row);}
+fn history_source_row_valid(kind:u32,row:u32,stride:u32)->bool {return exact_history_valid(kind,row);}
 ` + code.slice(end);
-  replace('  let parent_count = parent_control[3u];', `  if(arrayLength(&emitted_control)<12u||emitted_control[0u]!=HISTORY_CONTROL_MAGIC
-    ||emitted_control[1u]!=HISTORY_CONTROL_VERSION||emitted_control[2u]!=HISTORY_CONTROL_READY
-    ||emitted_control[4u]!=params.expected_emitted_capacity||emitted_control[5u]!=params.expected_emitted_stride_vec4
-    ||emitted_control[6u]!=params.expected_emitted_generation||emitted_control[7u]!=params.expected_emitted_seal
-    ||emitted_control[3u]>params.expected_emitted_capacity||emitted_control[11u]!=0u
-    ||params.row_stride_vec4!=${l.rowWords/4}u||params.expected_emitted_stride_vec4!=${l.rowWords/4}u
-    ||params.emitted_source_kind>1u||params.reserved0!=0u||params.reserved1!=0u||params.reserved2!=0u){
-    history_fail(HISTORY_ERROR_SOURCE);return;
-  }
-  let source_b_count=select(params.source_b_row_count,emitted_control[3u],params.emitted_source_kind==1u);
-  let parent_count = parent_control[3u];`);
-  replace('  let source_a_count = select(', '  let unadjusted_source_a_count = select(');
-  replace('  if (\n    source_a_count > arrayLength', `  let source_a_count=select(unadjusted_source_a_count,emitted_control[3u],params.emitted_source_kind==0u);
-  if (\n    source_a_count > arrayLength`);
+  replace('        let parent_count = parent_control[3u];', `        if(arrayLength(&emitted_control)<12u||emitted_control[0u]!=HISTORY_CONTROL_MAGIC
+          ||emitted_control[1u]!=HISTORY_CONTROL_VERSION||emitted_control[2u]!=HISTORY_CONTROL_READY
+          ||emitted_control[4u]!=params.expected_emitted_capacity||emitted_control[5u]!=params.expected_emitted_stride_vec4
+          ||emitted_control[6u]!=params.expected_emitted_generation||emitted_control[7u]!=params.expected_emitted_seal
+          ||emitted_control[3u]>params.expected_emitted_capacity||emitted_control[11u]!=0u
+          ||params.row_stride_vec4!=${l.rowWords/4}u||params.expected_emitted_stride_vec4!=${l.rowWords/4}u
+          ||params.emitted_source_kind>1u||params.reserved0!=0u||params.reserved1!=0u||params.reserved2!=0u){
+          history_fail(HISTORY_ERROR_SOURCE);
+          wg_abort = 1u;
+        } else {
+        let source_b_count=select(params.source_b_row_count,emitted_control[3u],params.emitted_source_kind==1u);
+        let parent_count = parent_control[3u];`);
+  replace('        let source_a_count = select(', '        let unadjusted_source_a_count = select(');
+  replace('        if (\n          source_a_count > arrayLength', `        let source_a_count=select(unadjusted_source_a_count,emitted_control[3u],params.emitted_source_kind==0u);
+        if (\n          source_a_count > arrayLength`);
+  replace(
+    '          wg_capacity = capacity;\n        }\n      }',
+    '          wg_capacity = capacity;\n        }\n        }\n      }'
+  );
   // Only uses after the declaration change; keep the uniform field and the
   // newly generated select's fallback as their original host upper bound.
-  const body = code.indexOf('  let source_a_count=');
+  const body = code.indexOf('        let source_a_count=');
   code = code.slice(0,body) + code.slice(body).replaceAll('params.source_b_row_count','source_b_count');
-  replace('  var appended_count = 0u;', `  for(var row=0u;row<source_a_count;row++){if(!exact_history_valid(0u,row)){history_fail(HISTORY_ERROR_SOURCE);return;}}
-  for(var row=0u;row<source_b_count;row++){if(!exact_history_valid(1u,row)){history_fail(HISTORY_ERROR_SOURCE);return;}}
-  var appended_count = 0u;`);
   return code;
 }

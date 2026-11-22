@@ -3922,6 +3922,14 @@ fn history_source_row_live(
     && row3.y > 0.0;
 }
 
+fn history_source_row_valid(
+  source_kind: u32,
+  row: u32,
+  stride: u32
+) -> bool {
+  return true;
+}
+
 fn history_fail(error: u32) {
   if (arrayLength(&next_control) < 12u) { return; }
   next_control[0u] = HISTORY_CONTROL_MAGIC;
@@ -3938,113 +3946,205 @@ fn history_fail(error: u32) {
   next_control[11u] = error;
 }
 
-fn history_copy_source_row(
-  source_kind: u32,
-  source_row: u32,
-  destination_row: u32,
-  stride: u32
-) {
-  let source_base = source_row * stride;
-  let destination_base = destination_row * stride;
-  for (var component = 0u; component < stride; component = component + 1u) {
-    if (source_kind == 0u) {
-      history_rows[destination_base + component] =
-        source_a_rows[source_base + component];
-    } else {
-      history_rows[destination_base + component] =
-        source_b_rows[source_base + component];
-    }
-  }
-}
+const HISTORY_WG_SIZE: u32 = 256u;
+var<workgroup> wg_abort: u32;
+var<workgroup> wg_source_a_count: u32;
+var<workgroup> wg_source_b_count: u32;
+var<workgroup> wg_base_count: u32;
+var<workgroup> wg_stride: u32;
+var<workgroup> wg_capacity: u32;
+var<workgroup> wg_total_live: u32;
+var<workgroup> wg_invalid: atomic<u32>;
+var<workgroup> wg_scan: array<u32, 256>;
+var<workgroup> wg_live_rows: array<u32, 256>;
 
-@compute @workgroup_size(1)
-fn append_filtered_sources(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x != 0u) { return; }
-  if (
-    arrayLength(&parent_control) < 12u
-    || arrayLength(&next_control) < 12u
-    || parent_control[0u] != HISTORY_CONTROL_MAGIC
-    || parent_control[1u] != HISTORY_CONTROL_VERSION
-    || parent_control[2u] != HISTORY_CONTROL_READY
-    || parent_control[4u] != params.expected_parent_row_capacity
-    || parent_control[5u] != params.expected_parent_row_stride_vec4
-    || parent_control[6u] != params.expected_parent_generation
-    || parent_control[7u] != params.expected_parent_seal
-    || params.expected_parent_row_stride_vec4
-      != params.row_stride_vec4
-    || parent_control[3u] > params.expected_parent_row_capacity
-  ) {
-    history_fail(HISTORY_ERROR_PARENT);
-    return;
-  }
-  let stride = params.row_stride_vec4;
-  let capacity = params.row_capacity;
-  if (
-    stride < 8u
-    || capacity == 0u
-    || capacity > arrayLength(&history_rows) / stride
-  ) {
-    history_fail(HISTORY_ERROR_CAPACITY);
-    return;
-  }
-  let parent_count = parent_control[3u];
-  let source_a_count = select(
-    params.source_a_row_count,
-    parent_count,
-    params.source_a_uses_parent_count == 1u
-  );
-  if (
-    source_a_count > arrayLength(&source_a_rows) / stride
-    || params.source_b_row_count > arrayLength(&source_b_rows) / stride
-  ) {
-    history_fail(HISTORY_ERROR_SOURCE);
-    return;
-  }
-  var appended_count = 0u;
-  for (var row = 0u; row < source_a_count; row = row + 1u) {
-    if (history_source_row_live(0u, row, stride)) {
-      appended_count = appended_count + 1u;
+@compute @workgroup_size(256)
+fn append_filtered_sources(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  if (workgroup_id.x != 0u) { return; }
+  let lid = local_id.x;
+  if (lid == 0u) {
+    wg_abort = 0u;
+    atomicStore(&wg_invalid, 0u);
+    if (
+      arrayLength(&parent_control) < 12u
+      || arrayLength(&next_control) < 12u
+      || parent_control[0u] != HISTORY_CONTROL_MAGIC
+      || parent_control[1u] != HISTORY_CONTROL_VERSION
+      || parent_control[2u] != HISTORY_CONTROL_READY
+      || parent_control[4u] != params.expected_parent_row_capacity
+      || parent_control[5u] != params.expected_parent_row_stride_vec4
+      || parent_control[6u] != params.expected_parent_generation
+      || parent_control[7u] != params.expected_parent_seal
+      || params.expected_parent_row_stride_vec4
+        != params.row_stride_vec4
+      || parent_control[3u] > params.expected_parent_row_capacity
+    ) {
+      history_fail(HISTORY_ERROR_PARENT);
+      wg_abort = 1u;
+    } else {
+      let stride = params.row_stride_vec4;
+      let capacity = params.row_capacity;
+      if (
+        stride < 8u
+        || capacity == 0u
+        || capacity > arrayLength(&history_rows) / stride
+      ) {
+        history_fail(HISTORY_ERROR_CAPACITY);
+        wg_abort = 1u;
+      } else {
+        let parent_count = parent_control[3u];
+        let source_a_count = select(
+          params.source_a_row_count,
+          parent_count,
+          params.source_a_uses_parent_count == 1u
+        );
+        if (
+          source_a_count > arrayLength(&source_a_rows) / stride
+          || params.source_b_row_count > arrayLength(&source_b_rows) / stride
+        ) {
+          history_fail(HISTORY_ERROR_SOURCE);
+          wg_abort = 1u;
+        } else {
+          wg_source_a_count = source_a_count;
+          wg_source_b_count = params.source_b_row_count;
+          wg_base_count = select(
+            0u,
+            parent_count,
+            params.reuse_parent_prefix == 1u
+          );
+          wg_stride = stride;
+          wg_capacity = capacity;
+        }
+      }
     }
   }
-  for (var row = 0u; row < params.source_b_row_count; row = row + 1u) {
-    if (history_source_row_live(1u, row, stride)) {
-      appended_count = appended_count + 1u;
+  if (workgroupUniformLoad(&wg_abort) != 0u) { return; }
+  let source_a_count = workgroupUniformLoad(&wg_source_a_count);
+  let source_b_count = workgroupUniformLoad(&wg_source_b_count);
+  let base_count = workgroupUniformLoad(&wg_base_count);
+  let stride = workgroupUniformLoad(&wg_stride);
+  let capacity = workgroupUniformLoad(&wg_capacity);
+
+  var local_live = 0u;
+  for (var row = lid; row < source_a_count; row = row + HISTORY_WG_SIZE) {
+    if (!history_source_row_valid(0u, row, stride)) {
+      atomicStore(&wg_invalid, 1u);
+    } else if (history_source_row_live(0u, row, stride)) {
+      local_live = local_live + 1u;
     }
   }
-  let base_count = select(
-    0u,
-    parent_count,
-    params.reuse_parent_prefix == 1u
-  );
-  if (appended_count > capacity || base_count > capacity - appended_count) {
-    history_fail(HISTORY_ERROR_CAPACITY);
-    return;
+  for (var row = lid; row < source_b_count; row = row + HISTORY_WG_SIZE) {
+    if (!history_source_row_valid(1u, row, stride)) {
+      atomicStore(&wg_invalid, 1u);
+    } else if (history_source_row_live(1u, row, stride)) {
+      local_live = local_live + 1u;
+    }
   }
+  wg_scan[lid] = local_live;
+  workgroupBarrier();
+  for (var offset = HISTORY_WG_SIZE >> 1u; offset > 0u; offset = offset >> 1u) {
+    if (lid < offset) {
+      wg_scan[lid] = wg_scan[lid] + wg_scan[lid + offset];
+    }
+    workgroupBarrier();
+  }
+  if (lid == 0u) {
+    let invalid = atomicLoad(&wg_invalid);
+    let appended_count = wg_scan[0u];
+    wg_total_live = appended_count;
+    if (invalid != 0u) {
+      history_fail(HISTORY_ERROR_SOURCE);
+      wg_abort = 1u;
+    } else if (appended_count > capacity || base_count > capacity - appended_count) {
+      history_fail(HISTORY_ERROR_CAPACITY);
+      wg_abort = 1u;
+    }
+  }
+  if (workgroupUniformLoad(&wg_abort) != 0u) { return; }
+
+  let total_live = workgroupUniformLoad(&wg_total_live);
   var destination = base_count;
-  for (var row = 0u; row < source_a_count; row = row + 1u) {
-    if (history_source_row_live(0u, row, stride)) {
-      history_copy_source_row(0u, row, destination, stride);
-      destination = destination + 1u;
+  if (total_live > 0u) {
+    for (var chunk = 0u; chunk < source_a_count; chunk = chunk + HISTORY_WG_SIZE) {
+      let row = chunk + lid;
+      let is_live = row < source_a_count && history_source_row_live(0u, row, stride);
+      let val = select(0u, 1u, is_live);
+      wg_scan[lid] = val;
+      workgroupBarrier();
+      var s = val;
+      for (var d = 1u; d < HISTORY_WG_SIZE; d = d << 1u) {
+        var addend = 0u;
+        if (lid >= d) { addend = wg_scan[lid - d]; }
+        workgroupBarrier();
+        s = s + addend;
+        wg_scan[lid] = s;
+        workgroupBarrier();
+      }
+      let chunk_total = wg_scan[HISTORY_WG_SIZE - 1u];
+      if (is_live) {
+        wg_live_rows[s - 1u] = row;
+      }
+      workgroupBarrier();
+      let copy_vec4s = chunk_total * stride;
+      for (var k = lid; k < copy_vec4s; k = k + HISTORY_WG_SIZE) {
+        let item = k / stride;
+        let comp = k - item * stride;
+        let src_row = wg_live_rows[item];
+        history_rows[(destination + item) * stride + comp] =
+          source_a_rows[src_row * stride + comp];
+      }
+      destination = destination + chunk_total;
+      workgroupBarrier();
+    }
+    for (var chunk = 0u; chunk < source_b_count; chunk = chunk + HISTORY_WG_SIZE) {
+      let row = chunk + lid;
+      let is_live = row < source_b_count && history_source_row_live(1u, row, stride);
+      let val = select(0u, 1u, is_live);
+      wg_scan[lid] = val;
+      workgroupBarrier();
+      var s = val;
+      for (var d = 1u; d < HISTORY_WG_SIZE; d = d << 1u) {
+        var addend = 0u;
+        if (lid >= d) { addend = wg_scan[lid - d]; }
+        workgroupBarrier();
+        s = s + addend;
+        wg_scan[lid] = s;
+        workgroupBarrier();
+      }
+      let chunk_total = wg_scan[HISTORY_WG_SIZE - 1u];
+      if (is_live) {
+        wg_live_rows[s - 1u] = row;
+      }
+      workgroupBarrier();
+      let copy_vec4s = chunk_total * stride;
+      for (var k = lid; k < copy_vec4s; k = k + HISTORY_WG_SIZE) {
+        let item = k / stride;
+        let comp = k - item * stride;
+        let src_row = wg_live_rows[item];
+        history_rows[(destination + item) * stride + comp] =
+          source_b_rows[src_row * stride + comp];
+      }
+      destination = destination + chunk_total;
+      workgroupBarrier();
     }
   }
-  for (var row = 0u; row < params.source_b_row_count; row = row + 1u) {
-    if (history_source_row_live(1u, row, stride)) {
-      history_copy_source_row(1u, row, destination, stride);
-      destination = destination + 1u;
-    }
+  if (lid == 0u) {
+    next_control[0u] = HISTORY_CONTROL_MAGIC;
+    next_control[1u] = HISTORY_CONTROL_VERSION;
+    next_control[2u] = HISTORY_CONTROL_READY;
+    next_control[3u] = destination;
+    next_control[4u] = capacity;
+    next_control[5u] = stride;
+    next_control[6u] = params.next_generation;
+    next_control[7u] = params.next_seal;
+    next_control[8u] = (destination + 63u) / 64u;
+    next_control[9u] = 1u;
+    next_control[10u] = 1u;
+    next_control[11u] = 0u;
   }
-  next_control[0u] = HISTORY_CONTROL_MAGIC;
-  next_control[1u] = HISTORY_CONTROL_VERSION;
-  next_control[2u] = HISTORY_CONTROL_READY;
-  next_control[3u] = destination;
-  next_control[4u] = capacity;
-  next_control[5u] = stride;
-  next_control[6u] = params.next_generation;
-  next_control[7u] = params.next_seal;
-  next_control[8u] = (destination + 63u) / 64u;
-  next_control[9u] = 1u;
-  next_control[10u] = 1u;
-  next_control[11u] = 0u;
 }
 `;
 

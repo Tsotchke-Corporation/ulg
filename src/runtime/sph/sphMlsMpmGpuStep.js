@@ -370,6 +370,10 @@ import {
 } from './sphReactionGpuSummary.js';
 import { createSphExactResidentProductHistoryAppendWgsl } from './sphExactResidentProductHistoryWgsl.js';
 import {
+  computeResidentProductHistoryParallelBlockPlan,
+  encodeResidentProductHistoryParallelAppendPass
+} from './sphResidentProductHistoryParallelAppendGpu.js';
+import {
   residentProductMassDevice,
   residentProductMassMatchesDevice,
   tagResidentProductMassDevice,
@@ -32506,60 +32510,94 @@ function submitResidentProductHistoryFilteredAppend({
       emittedSourceKind
     })
   );
-  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(
-    device,
-    {
-      cacheKey: 'ulg-sph-resident-product-history-filtered-append-v1'+(exactHistoryLayout?':exact:'+exactHistoryLayoutKey(exactHistoryLayout):''),
-      label: 'ulg-sph-resident-product-history-filtered-append',
-      code: exactHistoryLayout ? createSphExactResidentProductHistoryAppendWgsl(exactHistoryLayout) : sphResidentProductHistoryFilteredAppendWgsl,
-      entryPoint: 'append_filtered_sources',
-      bindings: [
-        computeBufferBinding(0, 'storage'),
-        computeBufferBinding(1, 'read-only-storage'),
-        computeBufferBinding(2, 'read-only-storage'),
-        computeBufferBinding(3, 'read-only-storage'),
-        computeBufferBinding(4, 'storage'),
-        computeBufferBinding(5, 'uniform'),
-        ...(exactHistoryLayout ? [computeBufferBinding(6,'read-only-storage')] : [])
-      ]
-    }
-  );
-  const bindGroup = device.createBindGroup({
-    layout: bindGroupLayout,
-    entries: [
-      { binding: 0, resource: { buffer: slot.buffer } },
-      { binding: 1, resource: { buffer: sourceABuffer } },
-      { binding: 2, resource: { buffer: sourceBBuffer } },
-      {
-        binding: 3,
-        resource: {
-          buffer: parentAuthority.controlBuffer,
-          offset: parentAuthority.controlOffsetBytes,
-          size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES
-        }
-      },
-      {
-        binding: 4,
-        resource: {
-          buffer: nextRecord.controlBuffer,
-          offset: nextRecord.offsetBytes,
-          size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES
-        }
-      },
-      { binding: 5, resource: { buffer: slot.gpuCountParamsBuffer } },
-      ...(exactHistoryLayout ? [{ binding:6,resource:{buffer:emittedAuthority.controlBuffer,
-        offset:emittedAuthority.controlOffsetBytes,size:SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES}}] : [])
-    ]
-  });
+  const isNativeWebGpuDevice = typeof globalThis.GPUDevice !== 'undefined'
+    && device instanceof globalThis.GPUDevice;
+  const parallelPlan = isNativeWebGpuDevice
+    ? computeResidentProductHistoryParallelBlockPlan({
+        sourceARowCount,
+        sourceBRowCount,
+        sourceAUsesParentCount,
+        parentRowCapacity: parentAuthority.rowCapacity,
+        emittedRowCapacity: emittedAuthority?.rowCapacity ?? 0,
+        exactHistoryLayout,
+        emittedSourceKind,
+        maxWorkgroupsPerDimension: device?.limits?.maxComputeWorkgroupsPerDimension
+      })
+    : null;
   const encoder = device.createCommandEncoder();
   if (clearDestination) {
     encoder.clearBuffer(slot.buffer, 0, slot.capacityBytes);
   }
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(1);
-  pass.end();
+  if (parallelPlan?.eligible) {
+    encodeResidentProductHistoryParallelAppendPass({
+      device,
+      encoder,
+      historyBuffer: slot.buffer,
+      sourceABuffer,
+      sourceBBuffer,
+      parentControlBuffer: parentAuthority.controlBuffer,
+      parentControlOffsetBytes: parentAuthority.controlOffsetBytes,
+      nextControlBuffer: nextRecord.controlBuffer,
+      nextControlOffsetBytes: nextRecord.offsetBytes,
+      paramsBuffer: slot.gpuCountParamsBuffer,
+      emittedControlBuffer: exactHistoryLayout ? emittedAuthority.controlBuffer : null,
+      emittedControlOffsetBytes: exactHistoryLayout ? emittedAuthority.controlOffsetBytes : 0,
+      exactHistoryLayout,
+      totalBlocks: parallelPlan.totalBlocks
+    });
+  } else {
+    const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(
+      device,
+      {
+        cacheKey: 'ulg-sph-resident-product-history-filtered-append-v2'+(exactHistoryLayout?':exact:'+exactHistoryLayoutKey(exactHistoryLayout):''),
+        label: 'ulg-sph-resident-product-history-filtered-append',
+        code: exactHistoryLayout ? createSphExactResidentProductHistoryAppendWgsl(exactHistoryLayout) : sphResidentProductHistoryFilteredAppendWgsl,
+        entryPoint: 'append_filtered_sources',
+        bindings: [
+          computeBufferBinding(0, 'storage'),
+          computeBufferBinding(1, 'read-only-storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'storage'),
+          computeBufferBinding(5, 'uniform'),
+          ...(exactHistoryLayout ? [computeBufferBinding(6,'read-only-storage')] : [])
+        ]
+      }
+    );
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-sph-resident-product-history-filtered-append-bg',
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: slot.buffer } },
+        { binding: 1, resource: { buffer: sourceABuffer } },
+        { binding: 2, resource: { buffer: sourceBBuffer } },
+        {
+          binding: 3,
+          resource: {
+            buffer: parentAuthority.controlBuffer,
+            offset: parentAuthority.controlOffsetBytes,
+            size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: nextRecord.controlBuffer,
+            offset: nextRecord.offsetBytes,
+            size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES
+          }
+        },
+        { binding: 5, resource: { buffer: slot.gpuCountParamsBuffer } },
+        ...(exactHistoryLayout ? [{ binding:6,resource:{buffer:emittedAuthority.controlBuffer,
+          offset:emittedAuthority.controlOffsetBytes,size:SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_RECORD_BYTES}}] : [])
+      ]
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+  }
   device.queue.submit([encoder.finish()]);
   return {
     queueCompletionStatus: 'queue-submitted-same-device-ordering',

@@ -1,0 +1,1470 @@
+import * as THREE from 'three/webgpu';
+import { createUlgTaskCapsule, ULG_SERVICE_IDS, ULG_TASK_KINDS } from '../../ulg-gpu-abi/src/serviceContract.js';
+import { createSimulationModuleRegistry } from '../runtime/simulationModuleRegistry.js';
+import {
+  QUANTUM_DERIVATION_GENERATOR_FINGERPRINT,
+  buildAtomicRadialDensityArtifact,
+  buildMaterialDerivationVisualizationBundle,
+  buildMolecularChargeDensityArtifact,
+  createQuantumDerivationSimulationModule,
+  sampleMolecularChargeDensityWebGpu,
+  validateDerivationVisualizationBundle
+} from '../runtime/electronicStructure/quantumDerivationArtifacts.js';
+import { BOHR_TO_M } from '../runtime/electronicStructure/uniformElectronGas.js';
+import { eshkolHelmholtzProgram } from '../runtime/material/eshkolTriadClosures.js';
+import {
+  COSMIC_QUANTUM_SCALE_REGIMES,
+  createCosmicQuantumScaleBridge
+} from '../runtime/sph/cosmicQuantumScaleBridge.js';
+import {
+  createCosmicWebBodies,
+  createGalacticBodies,
+  createResidentCosmicModuleRegistration,
+  createResidentTiledNBodyEngine
+} from './cosmicQuantumGpuKernels.js';
+
+const HA_TO_EV = 27.211386245988;
+
+const ATOMIC_CHOICES = Object.freeze([
+  { Z: 1, label: 'H (Z=1)' },
+  { Z: 6, label: 'C (Z=6)' },
+  { Z: 7, label: 'N (Z=7)' },
+  { Z: 8, label: 'O (Z=8)' },
+  { Z: 10, label: 'Ne (Z=10)' },
+  { Z: 11, label: 'Na (Z=11)' },
+  { Z: 26, label: 'Fe (Z=26)' },
+  { Z: 55, label: 'Cs (Z=55)' },
+  { Z: 79, label: 'Au (Z=79)' }
+]);
+
+const MOLECULAR_PRESETS = Object.freeze({
+  H2O: {
+    formula: 'H2O',
+    label: 'H₂O (Water)',
+    atoms: [
+      { Z: 8, position: [0, 0, 0] },
+      { Z: 1, position: [1.43, 0, 1.108] },
+      { Z: 1, position: [-1.43, 0, 1.108] }
+    ]
+  },
+  H2: {
+    formula: 'H2',
+    label: 'H₂ (Dihydrogen)',
+    atoms: [
+      { Z: 1, position: [0, 0, -0.7] },
+      { Z: 1, position: [0, 0, 0.7] }
+    ]
+  },
+  CO: {
+    formula: 'CO',
+    label: 'CO (Carbon Monoxide)',
+    atoms: [
+      { Z: 6, position: [0, 0, -1.07] },
+      { Z: 8, position: [0, 0, 1.07] }
+    ]
+  },
+  HF: {
+    formula: 'HF',
+    label: 'HF (Hydrogen Fluoride)',
+    atoms: [
+      { Z: 9, position: [0, 0, -0.18] },
+      { Z: 1, position: [0, 0, 1.56] }
+    ]
+  }
+});
+
+const REGIME_CENTERS_LOG10 = Object.freeze({
+  'atomic-orbital': -10.5,
+  'molecular-lattice': -8.8,
+  'continuum-sph-solids': -0.3,
+  'planetary-orbital': 10.6,
+  'galactic-nbody': 20.6,
+  'supergalactic-cosmic': 26.2
+});
+
+const CPK_COLORS = Object.freeze({
+  1: 0xe6f2ff,
+  6: 0x64748b,
+  7: 0x3b82f6,
+  8: 0xef4444,
+  9: 0x34d399,
+  10: 0x38bdf8,
+  11: 0xa855f7,
+  26: 0xf59e0b,
+  55: 0xfbbf24,
+  79: 0xfacc15
+});
+
+function formatPhysicalSpan(spanM) {
+  if (!(spanM > 0) || !Number.isFinite(spanM)) return '—';
+  if (spanM < 1e-9) return `${(spanM * 1e12).toFixed(1)} pm (${(spanM / BOHR_TO_M).toFixed(2)} a₀)`;
+  if (spanM < 1e-6) return `${(spanM * 1e9).toFixed(2)} nm`;
+  if (spanM < 1e-3) return `${(spanM * 1e6).toFixed(1)} µm`;
+  if (spanM < 1e3) return `${spanM.toFixed(spanM < 10 ? 2 : 0)} m`;
+  if (spanM < 1e9) return `${(spanM / 1e3).toFixed(1)} km`;
+  if (spanM < 1e14) return `${(spanM / 1.495978707e11).toFixed(2)} AU`;
+  if (spanM < 9.4607e18) return `${(spanM / 9.4607304725808e15).toFixed(2)} ly`;
+  if (spanM < 3.0857e22) return `${(spanM / 9.4607304725808e18).toFixed(1)} kly`;
+  if (spanM < 9.4607e24) return `${(spanM / 3.085677581491367e22).toFixed(1)} Mpc`;
+  return `${(spanM / 9.4607304725808e24).toFixed(1)} Gly`;
+}
+
+function buildRadialProfileSvg(artifact) {
+  const samples = artifact?.radialProfile?.samples || [];
+  if (!samples.length) return '';
+  const w = 260;
+  const h = 76;
+  const maxP = Math.max(1e-6, ...samples.map((s) => s.radialProbabilityPerBohr));
+  const rMax = Math.max(1e-6, artifact.radialProfile.rMaxBohr);
+  const pts = samples.map((s) => {
+    const x = (s.rBohr / rMax) * (w - 16) + 8;
+    const y = h - 10 - (s.radialProbabilityPerBohr / maxP) * (h - 20);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const r95 = artifact.summary?.containmentRadii?.r95Bohr ?? 0;
+  const r95X = Math.min(w - 8, (r95 / rMax) * (w - 16) + 8);
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:76px;display:block;background:rgba(4,12,18,0.72);border-radius:6px;border:1px solid rgba(94,234,212,0.18);">
+    <polyline fill="none" stroke="#5eead4" stroke-width="1.8" points="${pts}" />
+    <line x1="${r95X.toFixed(1)}" y1="6" x2="${r95X.toFixed(1)}" y2="${h - 8}" stroke="#fbbf24" stroke-dasharray="3,2" stroke-width="1" />
+    <text x="8" y="13" fill="#94a3b8" font-size="9" font-family="monospace">4πr²ρ(r) · r95=${r95.toFixed(2)} a₀</text>
+  </svg>`;
+}
+
+function createStarfieldBackdrop() {
+  const count = 900;
+  const geo = new THREE.OctahedronGeometry(0.38, 0);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const mesh = new THREE.InstancedMesh(geo, mat, count);
+  mesh.frustumCulled = false;
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+  let seed = 424242;
+  const rnd = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  for (let i = 0; i < count; i += 1) {
+    const u = rnd() * 2 - 1;
+    const th = rnd() * Math.PI * 2;
+    const s = Math.sqrt(Math.max(0, 1 - u * u));
+    const R = 150 + rnd() * 90;
+    dummy.position.set(R * s * Math.cos(th), R * u, R * s * Math.sin(th));
+    const sc = 0.45 + rnd() * 0.95;
+    dummy.scale.setScalar(sc);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+    const tint = rnd();
+    color.setRGB(
+      tint > 0.72 ? 0.95 : 0.68,
+      tint > 0.35 ? 0.88 : 0.74,
+      1.0
+    );
+    mesh.setColorAt(i, color);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  return mesh;
+}
+
+function makeGlowSpriteTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const half = size / 2;
+  const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  grad.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+  grad.addColorStop(0.18, 'rgba(255,248,232,0.78)');
+  grad.addColorStop(0.45, 'rgba(255,220,165,0.28)');
+  grad.addColorStop(0.75, 'rgba(180,205,255,0.07)');
+  grad.addColorStop(1.0, 'rgba(0,0,0,0.0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function createSoftGlowSprite(spriteTex, colorHex, scale, opacity = 0.88) {
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: spriteTex,
+    color: colorHex,
+    transparent: true,
+    opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  }));
+  sprite.scale.set(scale, scale, 1);
+  return sprite;
+}
+
+/**
+ * Mount the standalone 38+ OOM Cosmic ↔ Quantum Continuous-Zoom PeerCompute
+ * Demo onto `container`. Shares ULG's `SimulationModuleRegistry`,
+ * `ResidentModuleBufferSession`, `SchroederScaleAtlas` bridge, first-principles
+ * Schrödinger DFT / 6-31G(d) HF / QHA / Eshkol A4 derivation stack, and
+ * `THREE.WebGPURenderer` on a single WebGPU `GPUDevice`.
+ */
+export async function mountCosmicQuantumZoomDemo(container) {
+  const root = document.createElement('div');
+  root.id = 'ulg-cosmic-quantum-root';
+  root.style.cssText = [
+    'position:fixed',
+    'inset:0',
+    'background:#040811',
+    'color:#e2f1ec',
+    'font-family:"Inter",system-ui,-apple-system,sans-serif',
+    'overflow:hidden',
+    'user-select:none'
+  ].join(';');
+  container.innerHTML = '';
+  container.appendChild(root);
+
+  const canvasHost = document.createElement('div');
+  canvasHost.style.cssText = 'position:absolute;inset:0;';
+  root.appendChild(canvasHost);
+
+  // Parse initial URL overrides (?scale=-10.5 or ?regime=galactic-nbody&tour=0)
+  const urlParams = new URLSearchParams(window.location.search);
+  const rawScaleParam = urlParams.get('scale');
+  const parsedScaleParam = rawScaleParam !== null && rawScaleParam.trim() !== '' ? Number(rawScaleParam) : Number.NaN;
+  let targetLog10 = Number.isFinite(parsedScaleParam)
+    ? parsedScaleParam
+    : REGIME_CENTERS_LOG10[urlParams.get('regime')] ?? REGIME_CENTERS_LOG10['galactic-nbody'];
+  let currentLog10 = targetLog10;
+
+  let selectedElementZ = Number.parseInt(urlParams.get('Z') || '10', 10) || 10;
+  let selectedFunctional = urlParams.get('functional') === 'lda' ? 'lda' : 'pbe';
+  let selectedMoleculeKey = MOLECULAR_PRESETS[urlParams.get('molecule')] ? urlParams.get('molecule') : 'H2O';
+  let selectedBasis = urlParams.get('basis') === '6-31g(d)' ? '6-31g(d)' : 'sto-3g';
+  let molecularViewMode = 'density'; // 'density' | 'homo' | 'lumo'
+  let galaxyPreset = ['disk', 'binary', 'sphere'].includes(urlParams.get('galaxy')) ? urlParams.get('galaxy') : 'disk';
+  let simRunning = urlParams.get('paused') !== '1';
+  let tourRunning = urlParams.get('tour') === '1';
+  let tourDirection = -1;
+  let galaxyGravity = 1.0;
+  let galaxyDt = 0.012;
+  let hubbleExpansionSpeed = 0.14;
+
+  // Acquire shared WebGPU GPUDevice for tiled N-body, ΛCDM cosmic web, 3D molecular density, AND WebGPURenderer!
+  let gpuDevice = null;
+  let gpuAdapterName = 'CPU fallback (WebGPU unavailable)';
+  try {
+    const adapter = await navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' });
+    if (adapter) {
+      gpuDevice = await adapter.requestDevice();
+      gpuAdapterName = adapter.info?.description || adapter.info?.vendor || 'WebGPU GPU';
+    }
+  } catch {
+    gpuDevice = null;
+  }
+
+  // Prefer Three.js WebGPURenderer bound to the exact same GPUDevice; gracefully fall back to WebGLRenderer.
+  let renderer = null;
+  let rendererBackend = 'three-webgl';
+  if (gpuDevice && typeof THREE.WebGPURenderer === 'function') {
+    try {
+      const wgRenderer = new THREE.WebGPURenderer({
+        antialias: true,
+        device: gpuDevice
+      });
+      wgRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+      wgRenderer.setSize(window.innerWidth, window.innerHeight);
+      wgRenderer.setClearColor(0x040811, 1);
+      wgRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+      wgRenderer.toneMappingExposure = 1.22;
+      await wgRenderer.init();
+      renderer = wgRenderer;
+      rendererBackend = 'three-webgpu';
+    } catch {
+      renderer = null;
+    }
+  }
+  if (!renderer) {
+    const THREE_GL = await import('three');
+    renderer = new THREE_GL.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x040811, 1);
+    renderer.toneMapping = THREE_GL.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.22;
+    rendererBackend = 'three-webgl';
+  }
+  canvasHost.appendChild(renderer.domElement);
+
+  // Register live simulation modules on ULG's SimulationModuleRegistry + Cosmic-to-Quantum Scale Bridge.
+  const moduleRegistry = createSimulationModuleRegistry();
+  const galacticBodies0 = createGalacticBodies({ count: 4096, preset: galaxyPreset, seed: 825 });
+  const galacticEngine = createResidentTiledNBodyEngine({
+    device: gpuDevice,
+    initialBodies: galacticBodies0,
+    mode: 0,
+    label: 'ulg-galactic-nbody'
+  });
+  const cosmicWebBodies0 = createCosmicWebBodies({ count: 3072, seed: 1370 });
+  const cosmicWebEngine = createResidentTiledNBodyEngine({
+    device: gpuDevice,
+    initialBodies: cosmicWebBodies0,
+    mode: 1,
+    label: 'ulg-cosmic-web-lcdm'
+  });
+
+  moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
+    method: { model: 'nbody-gravity', version: 1 },
+    engine: galacticEngine,
+    scaleRangeM: [1e6, 1e22]
+  }));
+  moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
+    method: { model: 'cosmology-comoving-nbody', version: 1 },
+    engine: cosmicWebEngine,
+    scaleRangeM: [1e22, 1e28]
+  }));
+  moduleRegistry.registerModule(createQuantumDerivationSimulationModule());
+  const scaleBridge = createCosmicQuantumScaleBridge({ moduleRegistry });
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.01, 600);
+  let camYaw = 0.56;
+  let camPitch = 0.62;
+  const camRadius = 15.5;
+
+  const ambientLight = new THREE.AmbientLight(0x9bd3e6, 0.72);
+  const keyLight = new THREE.DirectionalLight(0xfff5e0, 1.75);
+  keyLight.position.set(14, 18, 12);
+  const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.05);
+  rimLight.position.set(-14, -8, -12);
+  scene.add(ambientLight, keyLight, rimLight);
+
+  const spriteTex = makeGlowSpriteTexture();
+  const starfield = createStarfieldBackdrop();
+  scene.add(starfield);
+
+  // Create one floating-origin Three.Group per scale regime.
+  const regimeGroups = {};
+  for (const r of COSMIC_QUANTUM_SCALE_REGIMES) {
+    const g = new THREE.Group();
+    g.name = r.id;
+    scene.add(g);
+    regimeGroups[r.id] = g;
+  }
+
+  const instDummy = new THREE.Object3D();
+  const instColor = new THREE.Color();
+
+  // ---- 1. Supergalactic / Observable Universe Cosmic Web (10^27 m) ----
+  const cosmicGroup = regimeGroups['supergalactic-cosmic'];
+  const cosmicMesh = new THREE.InstancedMesh(
+    new THREE.IcosahedronGeometry(1, 0),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    cosmicWebEngine.count
+  );
+  cosmicMesh.frustumCulled = false;
+  cosmicGroup.add(cosmicMesh);
+
+  // Observable-universe ~93 Gly horizon wireframe sphere + filament bridges
+  const horizonRing = new THREE.Mesh(
+    new THREE.SphereGeometry(11.6, 32, 20),
+    new THREE.MeshBasicMaterial({
+      color: 0x4f46e5,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.11
+    })
+  );
+  cosmicGroup.add(horizonRing);
+
+  const filamentGeo = new THREE.BufferGeometry();
+  const filamentPos = new Float32Array(1300 * 2 * 3);
+  filamentGeo.setAttribute('position', new THREE.BufferAttribute(filamentPos, 3));
+  const filamentMat = new THREE.LineBasicMaterial({
+    color: 0x818cf8,
+    transparent: true,
+    opacity: 0.52
+  });
+  const filamentLines = new THREE.LineSegments(filamentGeo, filamentMat);
+  filamentLines.frustumCulled = false;
+  cosmicGroup.add(filamentLines);
+
+  function syncCosmicWebGeometry(bodies) {
+    const n = bodies.length / 8;
+    for (let i = 0; i < n; i += 1) {
+      const b = i * 8;
+      const massNorm = Math.min(1, bodies[b + 3] / 5.5);
+      instDummy.position.set(bodies[b], bodies[b + 1], bodies[b + 2]);
+      const sc = 0.026 + 0.068 * Math.pow(massNorm, 0.72);
+      instDummy.scale.setScalar(sc);
+      instDummy.updateMatrix();
+      cosmicMesh.setMatrixAt(i, instDummy.matrix);
+      // Warm amber-gold supercluster knots transitioning to deep indigo/violet/cyan filaments
+      instColor.setRGB(
+        0.34 + 0.66 * massNorm,
+        0.24 + 0.56 * massNorm,
+        0.96 - 0.52 * massNorm
+      );
+      cosmicMesh.setColorAt(i, instColor);
+    }
+    cosmicMesh.instanceMatrix.needsUpdate = true;
+    if (cosmicMesh.instanceColor) cosmicMesh.instanceColor.needsUpdate = true;
+
+    // Connect nearest supercluster nodes to visualize cosmic web filaments
+    let seg = 0;
+    const maxSeg = 1300;
+    const stride = Math.max(1, Math.floor(n / 220));
+    for (let i = 0; i < n && seg < maxSeg; i += stride) {
+      const bi = i * 8;
+      for (let j = i + stride; j < Math.min(n, i + stride * 24) && seg < maxSeg; j += stride) {
+        const bj = j * 8;
+        const d2 = (bodies[bi] - bodies[bj]) ** 2 + (bodies[bi + 1] - bodies[bj + 1]) ** 2 + (bodies[bi + 2] - bodies[bj + 2]) ** 2;
+        if (d2 > 0.14 && d2 < 6.8) {
+          const base = seg * 6;
+          filamentPos[base] = bodies[bi];
+          filamentPos[base + 1] = bodies[bi + 1];
+          filamentPos[base + 2] = bodies[bi + 2];
+          filamentPos[base + 3] = bodies[bj];
+          filamentPos[base + 4] = bodies[bj + 1];
+          filamentPos[base + 5] = bodies[bj + 2];
+          seg += 1;
+        }
+      }
+    }
+    filamentGeo.setDrawRange(0, seg * 2);
+    filamentGeo.attributes.position.needsUpdate = true;
+  }
+  syncCosmicWebGeometry(cosmicWebEngine.getBodies());
+
+  // ---- 2. Galactic N-Body (10^21 m — eshkols-in-space ABI) ----
+  const galacticGroup = regimeGroups['galactic-nbody'];
+  const galacticMesh = new THREE.InstancedMesh(
+    new THREE.IcosahedronGeometry(1, 0),
+    new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    galacticEngine.count
+  );
+  galacticMesh.frustumCulled = false;
+  galacticGroup.add(galacticMesh);
+
+  const galacticCoreGlow = createSoftGlowSprite(spriteTex, 0xffd27d, 5.2, 0.92);
+  galacticGroup.add(galacticCoreGlow);
+
+  function syncGalacticGeometry(bodies) {
+    const n = bodies.length / 8;
+    for (let i = 0; i < n; i += 1) {
+      const b = i * 8;
+      const x = bodies[b];
+      const y = bodies[b + 1];
+      const z = bodies[b + 2];
+      const mass = bodies[b + 3];
+      const r = Math.hypot(x, y, z);
+      instDummy.position.set(x, y, z);
+      if (i === 0 || mass > 20) {
+        instDummy.scale.setScalar(0.24);
+        instColor.setRGB(1.0, 0.95, 0.80);
+      } else if (r < 2.4) {
+        instDummy.scale.setScalar(0.032 + 0.024 * Math.min(1, mass / 0.25));
+        instColor.setRGB(1.0, 0.74, 0.32);
+      } else {
+        const hot = Math.min(1, mass / 0.18);
+        instDummy.scale.setScalar(0.024 + 0.030 * hot);
+        // Vivid astrophysics palette: sapphire/cyan spiral arms with warm gold dust knots
+        instColor.setRGB(0.26 + 0.64 * (1 - hot), 0.64 + 0.28 * hot, 1.0);
+      }
+      instDummy.updateMatrix();
+      galacticMesh.setMatrixAt(i, instDummy.matrix);
+      galacticMesh.setColorAt(i, instColor);
+    }
+    galacticMesh.instanceMatrix.needsUpdate = true;
+    if (galacticMesh.instanceColor) galacticMesh.instanceColor.needsUpdate = true;
+    galacticCoreGlow.position.set(bodies[0], bodies[1], bodies[2]);
+  }
+  syncGalacticGeometry(galacticEngine.getBodies());
+
+  // ---- 3. Planetary / Stellar Orbital System (10^10 m) ----
+  const planetaryGroup = regimeGroups['planetary-orbital'];
+  const starMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(1.38, 32, 24),
+    new THREE.MeshBasicMaterial({ color: 0xfff0ba })
+  );
+  const starHalo = createSoftGlowSprite(spriteTex, 0xffa82e, 8.8, 0.88);
+  const starPointLight = new THREE.PointLight(0xfff1cc, 95, 48, 1.35);
+  planetaryGroup.add(starMesh, starHalo, starPointLight);
+
+  const planets = [
+    { name: 'Inner Rocky', a: 3.1, r: 0.28, color: 0xd49a6a, omega: 1.55, phase: 0.4, tilt: 0.05 },
+    { name: 'Ocean World (H₂O/Fe)', a: 4.9, r: 0.42, color: 0x38bdf8, omega: 0.92, phase: 1.9, tilt: 0.03 },
+    { name: 'Ringed Giant', a: 7.7, r: 0.78, color: 0xe6be8a, omega: 0.46, phase: 3.6, tilt: 0.08, ringed: true },
+    { name: 'Ice Giant', a: 10.4, r: 0.52, color: 0x7dd3fc, omega: 0.26, phase: 5.1, tilt: 0.04 }
+  ];
+  for (const pl of planets) {
+    const orbitPts = [];
+    for (let s = 0; s <= 96; s += 1) {
+      const th = (s / 96) * Math.PI * 2;
+      orbitPts.push(new THREE.Vector3(Math.cos(th) * pl.a, Math.sin(th) * pl.a * Math.sin(pl.tilt), Math.sin(th) * pl.a));
+    }
+    const orbitLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(orbitPts),
+      new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.34 })
+    );
+    planetaryGroup.add(orbitLine);
+
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(pl.r, 28, 20),
+      new THREE.MeshStandardMaterial({ color: pl.color, roughness: 0.38, metalness: 0.12 })
+    );
+    if (pl.ringed) {
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(pl.r * 1.35, pl.r * 2.2, 56),
+        new THREE.MeshBasicMaterial({ color: 0xdfc49f, side: THREE.DoubleSide, transparent: true, opacity: 0.62 })
+      );
+      ring.rotation.x = Math.PI / 2.35;
+      mesh.add(ring);
+    }
+    pl.mesh = mesh;
+    planetaryGroup.add(mesh);
+  }
+
+  // ---- 4. Continuum Matter & Eshkol A4 Helmholtz Closure Bridge (10^0 m) ----
+  const continuumGroup = regimeGroups['continuum-sph-solids'];
+  const labCage = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(6.4, 6.4, 6.4)),
+    new THREE.LineBasicMaterial({ color: 0x2dd4bf, transparent: true, opacity: 0.55 })
+  );
+  continuumGroup.add(labCage);
+
+  const iceBlock = new THREE.Mesh(
+    new THREE.BoxGeometry(2.9, 2.2, 2.9),
+    new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0c4a6e,
+      emissiveIntensity: 0.45,
+      roughness: 0.14,
+      metalness: 0.1,
+      transparent: true,
+      opacity: 0.66
+    })
+  );
+  iceBlock.position.set(0, -1.25, 0);
+  const iceEdges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(2.92, 2.22, 2.92)),
+    new THREE.LineBasicMaterial({ color: 0xbae6fd, transparent: true, opacity: 0.72 })
+  );
+  iceEdges.position.copy(iceBlock.position);
+
+  const ironDrop = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(1.18, 3),
+    new THREE.MeshStandardMaterial({
+      color: 0xffb347,
+      emissive: 0xff5a00,
+      emissiveIntensity: 1.35,
+      roughness: 0.24,
+      metalness: 0.68
+    })
+  );
+  ironDrop.position.set(0, 0.65, 0);
+  const ironGlow = createSoftGlowSprite(spriteTex, 0xff7722, 4.8, 0.78);
+  ironGlow.position.copy(ironDrop.position);
+  const ironLight = new THREE.PointLight(0xff8c38, 26, 16, 1.5);
+  ironLight.position.copy(ironDrop.position);
+  continuumGroup.add(iceBlock, iceEdges, ironDrop, ironGlow, ironLight);
+
+  // Live 3D Eshkol A4 Helmholtz potential surface a(T, v) wrapped under the continuum specimen!
+  const helmProg = eshkolHelmholtzProgram({
+    material: 'h2o',
+    cvJPerKgK: 4184,
+    rSpecificJPerKgK: 461.5,
+    bulkModulusPa: 2.2e9,
+    refTemperatureK: 300,
+    refSpecificVolumeM3PerKg: 1e-3
+  });
+  const surfGeo = new THREE.PlaneGeometry(5.8, 5.8, 22, 22);
+  surfGeo.rotateX(-Math.PI / 2);
+  const surfPos = surfGeo.attributes.position;
+  let aMin = Infinity;
+  let aMax = -Infinity;
+  const aVals = new Float64Array(surfPos.count);
+  for (let i = 0; i < surfPos.count; i += 1) {
+    const u = (surfPos.getX(i) + 2.9) / 5.8;
+    const v = (surfPos.getZ(i) + 2.9) / 5.8;
+    const T = 260 + u * 260;
+    const spV = 0.92e-3 + v * 0.16e-3;
+    const val = helmProg.closedForm.a(T, spV);
+    aVals[i] = val;
+    if (val < aMin) aMin = val;
+    if (val > aMax) aMax = val;
+  }
+  const aSpan = Math.max(1e-6, aMax - aMin);
+  for (let i = 0; i < surfPos.count; i += 1) {
+    surfPos.setY(i, -2.95 + ((aVals[i] - aMin) / aSpan) * 1.55);
+  }
+  surfPos.needsUpdate = true;
+  surfGeo.computeVertexNormals();
+  const helmholtzSurface = new THREE.Group();
+  helmholtzSurface.add(
+    new THREE.Mesh(
+      surfGeo,
+      new THREE.MeshStandardMaterial({
+        color: 0x14b8a6,
+        emissive: 0x0f766e,
+        emissiveIntensity: 0.45,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.34,
+        roughness: 0.35
+      })
+    ),
+    new THREE.Mesh(
+      surfGeo,
+      new THREE.MeshBasicMaterial({ color: 0x5eead4, wireframe: true, transparent: true, opacity: 0.58 })
+    )
+  );
+  continuumGroup.add(helmholtzSurface);
+
+  // ---- 5. Molecular 6-31G(d) / STO-3G Charge Density & Bond Discovery (10^-9 m) ----
+  const molecularGroup = regimeGroups['molecular-lattice'];
+  let currentMolecularBundle = null;
+  let currentMolecularArtifact = null;
+  let currentMolecularBackend = 'worker-cpu-derived';
+
+  function disposeGroupChildren(group) {
+    while (group.children.length > 0) {
+      const child = group.children.pop();
+      child.traverse?.((node) => {
+        node.geometry?.dispose?.();
+        if (Array.isArray(node.material)) node.material.forEach((m) => m.dispose?.());
+        else node.material?.dispose?.();
+      });
+    }
+  }
+
+  async function rebuildMolecularScene() {
+    disposeGroupChildren(molecularGroup);
+    const preset = MOLECULAR_PRESETS[selectedMoleculeKey] || MOLECULAR_PRESETS.H2O;
+    const gridDim = selectedBasis === '6-31g(d)' ? 16 : 18;
+    const built = buildMolecularChargeDensityArtifact(preset.atoms, {
+      formula: preset.formula,
+      basis: selectedBasis,
+      gridDim,
+      includeUmp2: false,
+      includeAnalyticGradient: false,
+      includeOrbitals: true
+    });
+    currentMolecularArtifact = built.artifact;
+
+    // Evaluate 3D density directly on WebGPU when available (proving live GPU parity!)
+    let activeField = built.densePayloads[built.artifact.grid.payloadHandles.chargeDensity.key];
+    currentMolecularBackend = 'worker-cpu-derived';
+    if (molecularViewMode === 'density' && gpuDevice) {
+      try {
+        const gpuRes = await sampleMolecularChargeDensityWebGpu(gpuDevice, {
+          basis: built.hf.basis,
+          densityMatrix: built.hf.P,
+          boundsMinBohr: built.artifact.grid.boundsMinBohr,
+          boundsMaxBohr: built.artifact.grid.boundsMaxBohr,
+          dimensions: built.artifact.grid.dimensions
+        });
+        activeField = gpuRes.density;
+        currentMolecularBackend = gpuRes.statusBadge;
+      } catch {
+        currentMolecularBackend = 'worker-cpu-derived';
+      }
+    } else if (molecularViewMode === 'homo' && built.artifact.grid.payloadHandles.homoOrbital) {
+      activeField = built.densePayloads[built.artifact.grid.payloadHandles.homoOrbital.key];
+    } else if (molecularViewMode === 'lumo' && built.artifact.grid.payloadHandles.lumoOrbital) {
+      activeField = built.densePayloads[built.artifact.grid.payloadHandles.lumoOrbital.key];
+    }
+
+    // Build full visualization bundle for provenance panel (fast single pass).
+    currentMolecularBundle = buildMaterialDerivationVisualizationBundle({
+      materialKey: preset.formula.toLowerCase(),
+      formula: preset.formula,
+      atoms: preset.atoms,
+      basis: 'sto-3g',
+      functional: selectedFunctional,
+      gridDim: 10,
+      includeUmp2: false,
+      includeQhaClosure: false,
+      includeTriadA4Replay: true
+    }).bundle;
+
+    const scale = 1.95; // Bohr -> chart local scene units
+    // Nuclei spheres colored by CPK
+    for (let i = 0; i < preset.atoms.length; i += 1) {
+      const a = preset.atoms[i];
+      const rad = a.Z === 1 ? 0.42 : 0.72;
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(rad, 28, 22),
+        new THREE.MeshStandardMaterial({
+          color: CPK_COLORS[a.Z] ?? 0x94a3b8,
+          emissive: CPK_COLORS[a.Z] ?? 0x475569,
+          emissiveIntensity: 0.25,
+          roughness: 0.25,
+          metalness: 0.22
+        })
+      );
+      mesh.position.set(a.position[0] * scale, a.position[1] * scale, a.position[2] * scale);
+      molecularGroup.add(mesh);
+    }
+
+    // Mayer bond-order cylinders
+    for (const bond of built.artifact.bondDiscoveryTrace.bonds) {
+      const pA = new THREE.Vector3(...preset.atoms[bond.atomA].position).multiplyScalar(scale);
+      const pB = new THREE.Vector3(...preset.atoms[bond.atomB].position).multiplyScalar(scale);
+      const dir = new THREE.Vector3().subVectors(pB, pA);
+      const len = dir.length();
+      const cylRadius = 0.1 + 0.1 * Math.min(3, bond.mayerBondOrder);
+      const cyl = new THREE.Mesh(
+        new THREE.CylinderGeometry(cylRadius, cylRadius, len, 20),
+        new THREE.MeshStandardMaterial({
+          color: 0x99f6e4,
+          emissive: 0x14b8a6,
+          emissiveIntensity: 0.35,
+          roughness: 0.28,
+          metalness: 0.2
+        })
+      );
+      cyl.position.copy(pA).add(pB).multiplyScalar(0.5);
+      cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+      molecularGroup.add(cyl);
+    }
+
+    // Importance-sampled smooth volumetric cloud from the WebGPU 3D density / MO grid (zero cubic striping!)
+    const [nx, ny, nz] = built.artifact.grid.dimensions;
+    const minB = built.artifact.grid.boundsMinBohr;
+    const step = built.artifact.grid.voxelSpacingBohr;
+    let peak = 0;
+    for (let i = 0; i < activeField.length; i += 1) {
+      const av = Math.abs(activeField[i]);
+      if (av > peak) peak = av;
+    }
+    const thresh = peak * (molecularViewMode === 'density' ? 0.004 : 0.045);
+    const activeCells = [];
+    const cdf = [];
+    let cdfSum = 0;
+    let idx = 0;
+    for (let iz = 0; iz < nz; iz += 1) {
+      for (let iy = 0; iy < ny; iy += 1) {
+        for (let ix = 0; ix < nx; ix += 1) {
+          const val = activeField[idx++];
+          const mag = Math.abs(val);
+          if (mag < thresh) continue;
+          const weight = Math.pow(mag / Math.max(1e-9, peak), 0.55);
+          cdfSum += weight;
+          activeCells.push({ ix, iy, iz, val, mag });
+          cdf.push(cdfSum);
+        }
+      }
+    }
+    if (activeCells.length > 0 && cdfSum > 0) {
+      const sampleCount = 2600;
+      const cloudMesh = new THREE.InstancedMesh(
+        new THREE.IcosahedronGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.075,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        }),
+        sampleCount
+      );
+      cloudMesh.frustumCulled = false;
+      let seed = 918273;
+      const rnd = () => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 4294967296;
+      };
+      const baseVoxelRad = Math.min(step[0], step[1], step[2]) * scale * 0.34;
+      for (let i = 0; i < sampleCount; i += 1) {
+        const u = rnd() * cdfSum;
+        let lo = 0; let hi = cdf.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (cdf[mid] < u) lo = mid + 1;
+          else hi = mid;
+        }
+        const cell = activeCells[lo];
+        const x = (minB[0] + (cell.ix + (rnd() - 0.5)) * step[0]) * scale;
+        const y = (minB[1] + (cell.iy + (rnd() - 0.5)) * step[1]) * scale;
+        const z = (minB[2] + (cell.iz + (rnd() - 0.5)) * step[2]) * scale;
+        const intensity = Math.min(1, Math.pow(cell.mag / Math.max(1e-9, peak), 0.35));
+        instDummy.position.set(x, y, z);
+        instDummy.scale.setScalar(baseVoxelRad * (0.45 + 0.85 * intensity));
+        instDummy.updateMatrix();
+        cloudMesh.setMatrixAt(i, instDummy.matrix);
+        if (molecularViewMode === 'density') {
+          instColor.setRGB(0.10 + 0.52 * intensity, 0.72 + 0.28 * intensity, 1.0);
+        } else if (cell.val >= 0) {
+          instColor.setRGB(0.12, 0.85 * intensity + 0.15, 1.0);
+        } else {
+          instColor.setRGB(1.0, 0.28 * intensity + 0.14, 0.52);
+        }
+        cloudMesh.setColorAt(i, instColor);
+      }
+      cloudMesh.instanceMatrix.needsUpdate = true;
+      if (cloudMesh.instanceColor) cloudMesh.instanceColor.needsUpdate = true;
+      molecularGroup.add(cloudMesh);
+    }
+  }
+
+  // ---- 6. Atomic Schrödinger KS-DFT Orbital Cloud (10^-11 m) ----
+  const atomicGroup = regimeGroups['atomic-orbital'];
+  let currentAtomicArtifact = null;
+
+  function rebuildAtomicScene() {
+    disposeGroupChildren(atomicGroup);
+    const built = buildAtomicRadialDensityArtifact(selectedElementZ, {
+      functional: selectedFunctional,
+      scalarRelativistic: true,
+      spinOrbit: true,
+      gridPointsN: 650,
+      cloudGridDim: 18,
+      maxGridDim: 24
+    });
+    currentAtomicArtifact = built.artifact;
+    const halfB = built.artifact.orbitalCloudGrid.boundsBohr.max[0];
+    const normScale = 4.9 / Math.max(1.5, halfB);
+
+    // Nucleus core + silky radial glow halo
+    const nuc = new THREE.Mesh(
+      new THREE.SphereGeometry(0.28, 24, 18),
+      new THREE.MeshBasicMaterial({ color: 0xfef08a })
+    );
+    const nucGlow = createSoftGlowSprite(spriteTex, 0xfbbf24, 3.0, 0.92);
+    atomicGroup.add(nuc, nucGlow);
+
+    // Containment shell wireframe (r95 Bohr)
+    const r95Scaled = built.artifact.summary.containmentRadii.r95Bohr * normScale;
+    const shellWire = new THREE.Mesh(
+      new THREE.SphereGeometry(r95Scaled, 28, 18),
+      new THREE.MeshBasicMaterial({ color: 0xfbbf24, wireframe: true, transparent: true, opacity: 0.18 })
+    );
+    atomicGroup.add(shellWire);
+
+    // Continuous CDF importance sampling of the exact KS-DFT radial probability 4π r² ρ(r)
+    // (explicitly labeled radial-atomic-density-reconstruction, zero cubic grid artifacts!)
+    const samples = built.artifact.radialProfile.samples || [];
+    if (samples.length > 2) {
+      const cdf = new Float64Array(samples.length);
+      let peakP = 0;
+      let totalP = 0;
+      for (let i = 0; i < samples.length; i += 1) {
+        const p = Math.max(0, samples[i].radialProbabilityPerBohr);
+        if (p > peakP) peakP = p;
+        const dr = i > 0 ? Math.max(1e-6, samples[i].rBohr - samples[i - 1].rBohr) : samples[0].rBohr;
+        totalP += p * dr;
+        cdf[i] = totalP;
+      }
+      const pointCount = 3400;
+      const cloudMesh = new THREE.InstancedMesh(
+        new THREE.IcosahedronGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.085,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        }),
+        pointCount
+      );
+      cloudMesh.frustumCulled = false;
+      let seed = 135791 + selectedElementZ * 997;
+      const rnd = () => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 4294967296;
+      };
+      const r95 = Math.max(0.5, built.artifact.summary.containmentRadii.r95Bohr);
+      for (let i = 0; i < pointCount; i += 1) {
+        const u = rnd() * totalP;
+        let lo = 0; let hi = cdf.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (cdf[mid] < u) lo = mid + 1;
+          else hi = mid;
+        }
+        const s0 = samples[Math.max(0, lo - 1)];
+        const s1 = samples[lo];
+        const rBohr = s0.rBohr + rnd() * Math.max(0, s1.rBohr - s0.rBohr);
+        const rScene = rBohr * normScale;
+        const cosPhi = 2 * rnd() - 1;
+        const sinPhi = Math.sqrt(Math.max(0, 1 - cosPhi * cosPhi));
+        const theta = 2 * Math.PI * rnd();
+        instDummy.position.set(
+          rScene * sinPhi * Math.cos(theta),
+          rScene * cosPhi,
+          rScene * sinPhi * Math.sin(theta)
+        );
+        const shellFrac = Math.min(1, s1.radialProbabilityPerBohr / Math.max(1e-9, peakP));
+        const radialNorm = Math.min(1, rBohr / (r95 * 1.15));
+        instDummy.scale.setScalar(0.055 + 0.072 * (0.4 + 0.6 * radialNorm));
+        instDummy.updateMatrix();
+        cloudMesh.setMatrixAt(i, instDummy.matrix);
+        // Warm amber-gold inner core shells (1s/2s/2p) transitioning smoothly to luminous teal/cyan valence shells!
+        instColor.setRGB(
+          0.14 + 0.86 * (1 - radialNorm),
+          0.74 + 0.22 * shellFrac,
+          0.42 + 0.58 * radialNorm
+        );
+        cloudMesh.setColorAt(i, instColor);
+      }
+      cloudMesh.instanceMatrix.needsUpdate = true;
+      if (cloudMesh.instanceColor) cloudMesh.instanceColor.needsUpdate = true;
+      atomicGroup.add(cloudMesh);
+    }
+  }
+
+  // Initial first-principles quantum artifacts build
+  rebuildAtomicScene();
+  await rebuildMolecularScene();
+
+  // ---- HUD & Interactive Controls ----
+  const topBar = document.createElement('div');
+  topBar.style.cssText = [
+    'position:absolute',
+    'top:14px',
+    'left:16px',
+    'right:16px',
+    'display:flex',
+    'align-items:center',
+    'justify-content:space-between',
+    'gap:12px',
+    'pointer-events:none',
+    'z-index:10'
+  ].join(';');
+  topBar.innerHTML = `
+    <div style="pointer-events:auto;display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:10px;background:rgba(6,14,24,0.82);border:1px solid rgba(94,234,212,0.28);backdrop-filter:blur(10px);">
+      <span style="width:9px;height:9px;border-radius:50%;background:#34d399;box-shadow:0 0 10px #34d399;"></span>
+      <div>
+        <div id="cq-regime-title" style="font-size:13px;font-weight:700;letter-spacing:0.01em;color:#f0fdf4;">Galactic N-Body</div>
+        <div id="cq-scale-readout" style="font-size:11px;font-family:monospace;color:#7dd3fc;">10^20.6 m · Chart L=70</div>
+      </div>
+    </div>
+    <div style="pointer-events:auto;display:flex;align-items:center;gap:8px;">
+      <button id="cq-tour-btn" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(94,234,212,0.45);background:rgba(16,42,48,0.88);color:#99f6e4;font-size:12px;font-weight:600;cursor:pointer;">▶ Powers of Ten Tour</button>
+      <button id="cq-play-btn" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(148,163,184,0.35);background:rgba(12,22,34,0.86);color:#e2e8f0;font-size:12px;font-weight:600;cursor:pointer;">⏸ Sim Running</button>
+      <a href="/?preset=iron-ice-quench" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(251,191,36,0.4);background:rgba(36,24,10,0.85);color:#fde68a;font-size:12px;font-weight:600;text-decoration:none;">SPH Lab ↗</a>
+    </div>
+  `;
+  root.appendChild(topBar);
+
+  // Right Provenance & Regime Controls Panel
+  const sidePanel = document.createElement('aside');
+  sidePanel.id = 'cq-inspector';
+  sidePanel.style.cssText = [
+    'position:absolute',
+    'top:72px',
+    'right:16px',
+    'width:308px',
+    'max-height:calc(100vh - 178px)',
+    'overflow:auto',
+    'padding:14px',
+    'border-radius:12px',
+    'background:rgba(6,14,24,0.84)',
+    'border:1px solid rgba(148,186,180,0.24)',
+    'backdrop-filter:blur(12px)',
+    'font-size:12px',
+    'line-height:1.45',
+    'z-index:10',
+    'display:flex',
+    'flex-direction:column',
+    'gap:10px'
+  ].join(';');
+  root.appendChild(sidePanel);
+
+  // Bottom 38-OOM Continuous Logarithmic Scale Ruler
+  const bottomBar = document.createElement('div');
+  bottomBar.style.cssText = [
+    'position:absolute',
+    'left:16px',
+    'right:16px',
+    'bottom:14px',
+    'padding:10px 14px',
+    'border-radius:12px',
+    'background:rgba(6,14,24,0.86)',
+    'border:1px solid rgba(94,234,212,0.24)',
+    'backdrop-filter:blur(10px)',
+    'z-index:10',
+    'display:flex',
+    'flex-direction:column',
+    'gap:8px'
+  ].join(';');
+  bottomBar.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span style="font-size:11px;font-family:monospace;color:#94a3b8;white-space:nowrap;">10⁻¹¹ m</span>
+      <input id="cq-zoom-slider" type="range" min="-11.3" max="27.2" step="0.05" value="${currentLog10}" style="flex:1;accent-color:#34d399;cursor:pointer;" />
+      <span style="font-size:11px;font-family:monospace;color:#94a3b8;white-space:nowrap;">10²⁷ m (93 Gly)</span>
+    </div>
+    <div id="cq-regime-pills" style="display:flex;flex-wrap:wrap;gap:6px;justify-content:space-between;"></div>
+  `;
+  root.appendChild(bottomBar);
+
+  const pillsHost = bottomBar.querySelector('#cq-regime-pills');
+  const pillButtons = new Map();
+  const pillShortLabels = {
+    'atomic-orbital': '10⁻¹¹m Atomic DFT',
+    'molecular-lattice': '10⁻⁹m Molecular 6-31G(d)',
+    'continuum-sph-solids': '10⁰m Continuum & A4',
+    'planetary-orbital': '10¹⁰m Planetary',
+    'galactic-nbody': '10²¹m Galactic N-Body',
+    'supergalactic-cosmic': '10²⁷m Cosmic Web'
+  };
+  for (const r of COSMIC_QUANTUM_SCALE_REGIMES) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.dataset.regimeJump = r.id;
+    btn.textContent = pillShortLabels[r.id] || r.id;
+    btn.style.cssText = 'flex:1;min-width:128px;padding:5px 8px;border-radius:7px;border:1px solid rgba(148,163,184,0.25);background:rgba(12,24,36,0.75);color:#cbd5e1;font-size:11px;font-weight:600;cursor:pointer;';
+    btn.addEventListener('click', () => {
+      tourRunning = false;
+      updateTourButton();
+      targetLog10 = REGIME_CENTERS_LOG10[r.id];
+    });
+    pillsHost.appendChild(btn);
+    pillButtons.set(r.id, btn);
+  }
+
+  const regimeTitleEl = topBar.querySelector('#cq-regime-title');
+  const scaleReadoutEl = topBar.querySelector('#cq-scale-readout');
+  const tourBtn = topBar.querySelector('#cq-tour-btn');
+  const playBtn = topBar.querySelector('#cq-play-btn');
+  const zoomSlider = bottomBar.querySelector('#cq-zoom-slider');
+
+  function updateTourButton() {
+    tourBtn.textContent = tourRunning ? '⏸ Stop Zoom Tour' : '▶ Powers of Ten Tour';
+  }
+  function updatePlayButton() {
+    playBtn.textContent = simRunning ? '⏸ Sim Running' : '▶ Sim Paused';
+  }
+  tourBtn.addEventListener('click', () => {
+    tourRunning = !tourRunning;
+    updateTourButton();
+  });
+  playBtn.addEventListener('click', () => {
+    simRunning = !simRunning;
+    updatePlayButton();
+  });
+  zoomSlider.addEventListener('input', () => {
+    tourRunning = false;
+    updateTourButton();
+    targetLog10 = Number(zoomSlider.value);
+  });
+
+  // Pointer orbit + wheel continuous logarithmic zoom
+  let dragging = false;
+  let lastPtrX = 0;
+  let lastPtrY = 0;
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    lastPtrX = e.clientX;
+    lastPtrY = e.clientY;
+  });
+  window.addEventListener('pointerup', () => { dragging = false; });
+  window.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastPtrX;
+    const dy = e.clientY - lastPtrY;
+    lastPtrX = e.clientX;
+    lastPtrY = e.clientY;
+    camYaw -= dx * 0.006;
+    camPitch = Math.max(-1.25, Math.min(1.25, camPitch + dy * 0.006));
+  });
+  renderer.domElement.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    tourRunning = false;
+    updateTourButton();
+    targetLog10 = Math.max(-11.3, Math.min(27.2, targetLog10 + e.deltaY * 0.0035));
+  }, { passive: false });
+
+  let lastInspectorRegimeId = null;
+  let lastLeaseSummary = null;
+
+  function renderInspectorPanel(camState) {
+    const rid = camState.primaryRegime.id;
+    const bridgeSum = scaleBridge.summary();
+    const atomic = currentAtomicArtifact;
+    const mol = currentMolecularArtifact;
+    const bundleVal = currentMolecularBundle
+      ? validateDerivationVisualizationBundle(currentMolecularBundle, {
+        expectedGeneratorFingerprint: QUANTUM_DERIVATION_GENERATOR_FINGERPRINT,
+        strict: true
+      })
+      : null;
+
+    let regimeSpecificHtml = '';
+    if (rid === 'atomic-orbital' && atomic) {
+      const soOrbitals = atomic.orbitals.filter((o) => o.spinOrbitSplittingHa > 0);
+      const soLine = soOrbitals.length > 0
+        ? soOrbitals.slice(-2).map((o) => `${o.n}${'spdf'[o.l] || o.l}: ${(o.spinOrbitSplittingHa * HA_TO_EV).toFixed(3)} eV`).join(' · ')
+        : 's-shell only (ΔE_SO = 0)';
+      regimeSpecificHtml = `
+        <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Schrödinger Atomic KS-DFT</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px;">
+            <select id="cq-elem-sel" style="flex:1;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
+              ${ATOMIC_CHOICES.map((c) => `<option value="${c.Z}" ${c.Z === selectedElementZ ? 'selected' : ''}>${c.label}</option>`).join('')}
+            </select>
+            <select id="cq-func-sel" style="width:76px;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
+              <option value="pbe" ${selectedFunctional === 'pbe' ? 'selected' : ''}>PBE</option>
+              <option value="lda" ${selectedFunctional === 'lda' ? 'selected' : ''}>LDA</option>
+            </select>
+          </div>
+          ${buildRadialProfileSvg(atomic)}
+          <div style="margin-top:6px;font-family:monospace;font-size:11px;color:#cbd5e1;">
+            E_tot: ${atomic.summary.totalEnergyHa.toFixed(4)} Ha · ∫ρ=${atomic.summary.integratedElectrons.toFixed(4)}e<br/>
+            SO (L·S): ${soLine}<br/>
+            Cloud: <span style="color:#fde68a;">radial-atomic-density-reconstruction</span>
+          </div>
+        </div>
+      `;
+    } else if (rid === 'molecular-lattice' && mol) {
+      const bondStr = mol.bondDiscoveryTrace.bonds.map((b) => `B=${b.mayerBondOrder.toFixed(2)} (${(b.distanceM * 1e12).toFixed(0)}pm)`).join(', ');
+      regimeSpecificHtml = `
+        <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Molecular HF Density &amp; Bonds</div>
+          <div style="display:flex;gap:6px;margin-bottom:6px;">
+            <select id="cq-mol-sel" style="flex:1;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
+              ${Object.values(MOLECULAR_PRESETS).map((m) => `<option value="${m.formula}" ${m.formula === selectedMoleculeKey ? 'selected' : ''}>${m.label}</option>`).join('')}
+            </select>
+            <select id="cq-basis-sel" style="width:90px;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
+              <option value="sto-3g" ${selectedBasis === 'sto-3g' ? 'selected' : ''}>STO-3G</option>
+              <option value="6-31g(d)" ${selectedBasis === '6-31g(d)' ? 'selected' : ''}>6-31G(d)</option>
+            </select>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:6px;">
+            ${['density', 'homo', 'lumo'].map((m) => `<button type="button" data-mol-view="${m}" style="flex:1;padding:4px;border-radius:5px;border:1px solid ${molecularViewMode === m ? '#34d399' : 'rgba(148,163,184,0.3)'};background:${molecularViewMode === m ? 'rgba(52,211,153,0.18)' : '#0b1724'};color:#e2f1ec;font-size:11px;cursor:pointer;">${m.toUpperCase()}</button>`).join('')}
+          </div>
+          <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
+            E_RHF: ${mol.electronicSummary.rhfTotalEnergyHa.toFixed(4)} Ha (${mol.electronicSummary.nBasis} AOs)<br/>
+            HOMO-LUMO: ${mol.electronicSummary.homoLumoGapHa != null ? (mol.electronicSummary.homoLumoGapHa * HA_TO_EV).toFixed(2) + ' eV' : '—'}<br/>
+            Mayer: ${bondStr || 'none'}<br/>
+            Sampler: <span style="color:#7dd3fc;">${currentMolecularBackend}</span> · Strict: ${bundleVal?.ok ? 'PASS' : 'BLOCKED'}
+          </div>
+        </div>
+      `;
+    } else if (rid === 'continuum-sph-solids') {
+      const a4 = currentMolecularBundle?.responseFitReplay;
+      regimeSpecificHtml = `
+        <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+          <div style="font-weight:600;color:#5eead4;margin-bottom:4px;">Continuum SPH &amp; Eshkol A4 Bridge</div>
+          <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
+            Helmholtz a(T,v): Chebyshev 2D (${a4?.fitFamily || 'chebyshev-tensor-2d'})<br/>
+            Fit Residual: ${(a4?.maxRelativeResidual ?? 0).toExponential(2)}<br/>
+            Table: ${a4?.packedRuntimeRowRef?.tableByteLength ?? 0} B · In-box non-extrapolating
+          </div>
+        </div>
+      `;
+    } else if (rid === 'galactic-nbody') {
+      regimeSpecificHtml = `
+        <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+          <div style="font-weight:600;color:#fbbf24;margin-bottom:6px;">Galactic WebGPU N-Body (Eshkol ABI)</div>
+          <div style="display:flex;gap:4px;margin-bottom:6px;">
+            ${[['disk', 'Spiral'], ['binary', 'Merger'], ['sphere', 'Globular']].map(([id, lbl]) =>
+              `<button type="button" data-galaxy-preset="${id}" style="flex:1;padding:4px;border-radius:5px;border:1px solid ${galaxyPreset === id ? '#fbbf24' : 'rgba(148,163,184,0.3)'};background:${galaxyPreset === id ? 'rgba(251,191,36,0.16)' : '#0b1724'};color:#fef3c7;font-size:11px;cursor:pointer;">${lbl}</button>`
+            ).join('')}
+          </div>
+          <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
+            Bodies: ${galacticEngine.count.toLocaleString()} · Step: <span id="cq-gal-step">${galacticEngine.stepIndex}</span><br/>
+            Backend: <span style="color:#34d399;">${galacticEngine.backend}</span> (${galacticEngine.gravityMode})<br/>
+            Lease Epoch: <span id="cq-lease-epoch">${lastLeaseSummary?.resetEpoch ?? 0}</span> · Valid: true
+          </div>
+        </div>
+      `;
+    } else if (rid === 'supergalactic-cosmic') {
+      const z = Math.max(0, 1 / Math.max(0.05, cosmicWebEngine.scaleFactorA) - 1);
+      regimeSpecificHtml = `
+        <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+          <div style="font-weight:600;color:#a5b4fc;margin-bottom:4px;">Observable Universe Comoving Headroom</div>
+          <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
+            Horizon: ~93 Gly (8.8×10²⁶ m) · L=90<br/>
+            a(t): <span id="cq-cosmo-a">${cosmicWebEngine.scaleFactorA.toFixed(3)}</span> · Redshift z: <span id="cq-cosmo-z">${z.toFixed(2)}</span><br/>
+            H(a): ${camState.cosmologyFrame.hubbleParameterPerS.toExponential(2)} s⁻¹<br/>
+            Nodes: ${cosmicWebEngine.count.toLocaleString()} · Backend: ${cosmicWebEngine.backend}
+          </div>
+        </div>
+      `;
+    } else {
+      regimeSpecificHtml = `
+        <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+          <div style="font-weight:600;color:#7dd3fc;margin-bottom:4px;">Planetary Orbital Chart (L=33)</div>
+          <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
+            G-type star + 4 worlds (Ocean H₂O/Fe world at 1 AU)<br/>
+            Zoom in → Continuum SPH · Zoom out → Spiral Galaxy
+          </div>
+        </div>
+      `;
+    }
+
+    sidePanel.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-weight:700;letter-spacing:0.04em;font-size:11px;text-transform:uppercase;color:#94a3b8;">Schroeder Scale Atlas</span>
+        <span style="padding:2px 6px;border-radius:4px;background:rgba(52,211,153,0.15);color:#6ee7b7;font-family:monospace;font-size:10px;">${bridgeSum.totalSpanOrdersOfMagnitude.toFixed(1)} OOM</span>
+      </div>
+      <div style="font-family:monospace;font-size:11px;color:#94a3b8;line-height:1.5;">
+        Chart: <span style="color:#e2f1ec;">#${camState.primaryChartId} (L=${camState.primaryRegime.globalBaseLevel})</span> · Active: ${bridgeSum.activeChartCount}<br/>
+        Module: <span style="color:#7dd3fc;">${camState.primaryMethodKey}</span><br/>
+        Device: <span style="color:#e2f1ec;">${gpuAdapterName.slice(0, 26)} (${rendererBackend})</span><br/>
+        Portal Blend: ${(camState.portalBlendAlpha * 100).toFixed(0)}%${camState.secondaryRegime ? ` ↔ ${camState.secondaryRegime.id}` : ''}<br/>
+        Validation: <span style="color:#fde68a;">scientificValidation=false</span>
+      </div>
+      ${regimeSpecificHtml}
+    `;
+
+    // Wire dynamic regime controls
+    sidePanel.querySelector('#cq-elem-sel')?.addEventListener('change', (e) => {
+      selectedElementZ = Number(e.target.value);
+      rebuildAtomicScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
+    sidePanel.querySelector('#cq-func-sel')?.addEventListener('change', (e) => {
+      selectedFunctional = e.target.value;
+      rebuildAtomicScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
+    sidePanel.querySelector('#cq-mol-sel')?.addEventListener('change', async (e) => {
+      selectedMoleculeKey = e.target.value;
+      await rebuildMolecularScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
+    sidePanel.querySelector('#cq-basis-sel')?.addEventListener('change', async (e) => {
+      selectedBasis = e.target.value;
+      await rebuildMolecularScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
+    for (const btn of sidePanel.querySelectorAll('[data-mol-view]')) {
+      btn.addEventListener('click', async () => {
+        molecularViewMode = btn.dataset.molView;
+        await rebuildMolecularScene();
+        renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+      });
+    }
+    for (const btn of sidePanel.querySelectorAll('[data-galaxy-preset]')) {
+      btn.addEventListener('click', async () => {
+        galaxyPreset = btn.dataset.galaxyPreset;
+        galacticEngine.resetBodies(createGalacticBodies({ count: 4096, preset: galaxyPreset, seed: 825 }));
+        await moduleRegistry.resetModuleSession({ model: 'nbody-gravity', version: 1 });
+        syncGalacticGeometry(galacticEngine.getBodies());
+        renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+      });
+    }
+  }
+
+  // Physics dispatch via ULG SimulationModuleRegistry (with lease release each frame!)
+  let gpuStepBusy = false;
+  async function stepActiveGpuModules(camState) {
+    if (gpuStepBusy) return;
+    gpuStepBusy = true;
+    try {
+      const rid = camState.primaryRegime.id;
+      const sec = camState.secondaryRegime?.id;
+      if (rid === 'galactic-nbody' || sec === 'galactic-nbody') {
+        const cap = createUlgTaskCapsule({
+          taskId: `cq-gal-${galacticEngine.stepIndex}`,
+          serviceId: ULG_SERVICE_IDS.ulgRuntime,
+          taskKind: ULG_TASK_KINDS.simulationStep,
+          method: { model: 'nbody-gravity', version: 1 },
+          input: {
+            stepIndex: galacticEngine.stepIndex,
+            parameters: { dt: galaxyDt, gravity: galaxyGravity, softening: 0.22 }
+          }
+        });
+        const res = await moduleRegistry.dispatchSimulationStepCapsule(cap, { device: gpuDevice });
+        lastLeaseSummary = res.leaseSummary;
+        res.leaseHandle?.release?.();
+        syncGalacticGeometry(galacticEngine.getBodies());
+      }
+      if (rid === 'supergalactic-cosmic' || sec === 'supergalactic-cosmic') {
+        const cap = createUlgTaskCapsule({
+          taskId: `cq-cosmo-${cosmicWebEngine.stepIndex}`,
+          serviceId: ULG_SERVICE_IDS.ulgRuntime,
+          taskKind: ULG_TASK_KINDS.simulationStep,
+          method: { model: 'cosmology-comoving-nbody', version: 1 },
+          input: {
+            stepIndex: cosmicWebEngine.stepIndex,
+            parameters: { dt: 0.016, gravity: 0.08, softening: 0.85, hubbleRate: hubbleExpansionSpeed }
+          }
+        });
+        const res = await moduleRegistry.dispatchSimulationStepCapsule(cap, { device: gpuDevice });
+        lastLeaseSummary = res.leaseSummary;
+        res.leaseHandle?.release?.();
+        syncCosmicWebGeometry(cosmicWebEngine.getBodies());
+      }
+    } finally {
+      gpuStepBusy = false;
+    }
+  }
+
+  // Smooth continuous logarithmic visibility & scale portal cross-fade
+  let simClock = 0;
+  let rafId = 0;
+  let disposed = false;
+
+  function applyContinuousZoomPose() {
+    const camState = scaleBridge.evaluateContinuousZoomCamera(currentLog10);
+    for (const r of COSMIC_QUANTUM_SCALE_REGIMES) {
+      const group = regimeGroups[r.id];
+      const center = REGIME_CENTERS_LOG10[r.id];
+      const deltaDecades = center - currentLog10;
+      const isPrimary = r.id === camState.primaryRegime.id;
+      const isSecondary = r.id === camState.secondaryRegime?.id;
+      const visible = isPrimary || (isSecondary && Math.abs(deltaDecades) < 1.55);
+      group.visible = visible;
+      if (visible) {
+        // Clamp extreme exponential scale outside visual portal fade window for O(1) GPU stability
+        const clampedDelta = Math.max(-1.6, Math.min(1.6, deltaDecades));
+        const visualScale = Math.pow(10, clampedDelta * 0.58);
+        group.scale.setScalar(visualScale);
+      }
+    }
+
+    // Orbit camera around floating origin [0, 0, 0]
+    camera.position.set(
+      camRadius * Math.cos(camPitch) * Math.sin(camYaw),
+      camRadius * Math.sin(camPitch),
+      camRadius * Math.cos(camPitch) * Math.cos(camYaw)
+    );
+    camera.lookAt(0, 0, 0);
+
+    // Update HUD readouts
+    regimeTitleEl.textContent = camState.primaryRegime.label;
+    scaleReadoutEl.textContent = `${formatPhysicalSpan(camState.viewSpanM)} · 10^${currentLog10.toFixed(1)} m · Chart #${camState.primaryChartId} (L=${camState.primaryRegime.globalBaseLevel})`;
+    zoomSlider.value = currentLog10.toFixed(2);
+    for (const [id, btn] of pillButtons.entries()) {
+      const active = id === camState.primaryRegime.id;
+      btn.style.borderColor = active ? '#34d399' : 'rgba(148,163,184,0.25)';
+      btn.style.background = active ? 'rgba(52,211,153,0.2)' : 'rgba(12,24,36,0.75)';
+      btn.style.color = active ? '#ecfdf5' : '#cbd5e1';
+    }
+    if (lastInspectorRegimeId !== camState.primaryRegime.id) {
+      lastInspectorRegimeId = camState.primaryRegime.id;
+      renderInspectorPanel(camState);
+    } else {
+      const galStepEl = sidePanel.querySelector('#cq-gal-step');
+      if (galStepEl) galStepEl.textContent = String(galacticEngine.stepIndex);
+      const leaseEl = sidePanel.querySelector('#cq-lease-epoch');
+      if (leaseEl && lastLeaseSummary) leaseEl.textContent = String(lastLeaseSummary.resetEpoch);
+      const aEl = sidePanel.querySelector('#cq-cosmo-a');
+      if (aEl) aEl.textContent = cosmicWebEngine.scaleFactorA.toFixed(3);
+      const zEl = sidePanel.querySelector('#cq-cosmo-z');
+      if (zEl) zEl.textContent = Math.max(0, 1 / Math.max(0.05, cosmicWebEngine.scaleFactorA) - 1).toFixed(2);
+    }
+    return camState;
+  }
+
+  function frame() {
+    if (disposed) return;
+    rafId = requestAnimationFrame(frame);
+
+    if (tourRunning) {
+      targetLog10 += tourDirection * 0.055;
+      if (targetLog10 <= -11.0) { targetLog10 = -11.0; tourDirection = 1; }
+      if (targetLog10 >= 26.8) { targetLog10 = 26.8; tourDirection = -1; }
+    }
+    currentLog10 += (targetLog10 - currentLog10) * 0.14;
+    if (Math.abs(targetLog10 - currentLog10) < 1e-4) currentLog10 = targetLog10;
+
+    if (simRunning) {
+      simClock += 0.016;
+      for (const pl of planets) {
+        const ang = pl.phase + simClock * pl.omega;
+        pl.mesh.position.set(
+          Math.cos(ang) * pl.a,
+          Math.sin(ang) * pl.a * Math.sin(pl.tilt),
+          Math.sin(ang) * pl.a
+        );
+      }
+      ironDrop.rotation.y += 0.008;
+      helmholtzSurface.rotation.y -= 0.003;
+      molecularGroup.rotation.y += 0.004;
+      atomicGroup.rotation.y += 0.005;
+    }
+
+    const camState = applyContinuousZoomPose();
+    if (simRunning) {
+      void stepActiveGpuModules(camState);
+    }
+    renderer.render(scene, camera);
+  }
+
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+  window.addEventListener('resize', onResize);
+
+  const initialCam = applyContinuousZoomPose();
+  renderInspectorPanel(initialCam);
+  rafId = requestAnimationFrame(frame);
+
+  const api = {
+    getState() {
+      const cam = scaleBridge.evaluateContinuousZoomCamera(currentLog10);
+      return {
+        ready: true,
+        log10ViewSpanM: currentLog10,
+        viewSpanM: cam.viewSpanM,
+        primaryRegimeId: cam.primaryRegime.id,
+        primaryChartId: cam.primaryChartId,
+        primaryMethodKey: cam.primaryMethodKey,
+        totalSpanOom: scaleBridge.summary().totalSpanOrdersOfMagnitude,
+        gpuBackend: gpuDevice ? 'webgpu' : 'cpu-fallback',
+        rendererBackend,
+        gpuAdapterName,
+        galacticSteps: galacticEngine.stepIndex,
+        galacticBodyCount: galacticEngine.count,
+        cosmicWebSteps: cosmicWebEngine.stepIndex,
+        cosmicScaleFactorA: cosmicWebEngine.scaleFactorA,
+        atomicElementZ: selectedElementZ,
+        atomicFunctional: selectedFunctional,
+        molecularFormula: selectedMoleculeKey,
+        molecularBasis: selectedBasis,
+        molecularBackend: currentMolecularBackend,
+        registeredModules: moduleRegistry.listModules().map((m) => m.methodKey),
+        lastLeaseSummary
+      };
+    },
+    setLog10Span(val) {
+      tourRunning = false;
+      updateTourButton();
+      currentLog10 = Math.max(-11.3, Math.min(27.2, Number(val) || 0));
+      targetLog10 = currentLog10;
+      const cam = applyContinuousZoomPose();
+      renderInspectorPanel(cam);
+      renderer.render(scene, camera);
+      return cam;
+    },
+    async selectElement(Z, functional = selectedFunctional) {
+      selectedElementZ = Z;
+      selectedFunctional = functional;
+      rebuildAtomicScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    },
+    async selectMolecule(formula, basis = selectedBasis, viewMode = molecularViewMode) {
+      selectedMoleculeKey = formula;
+      selectedBasis = basis;
+      molecularViewMode = viewMode;
+      await rebuildMolecularScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    },
+    async selectGalaxyPreset(preset) {
+      galaxyPreset = preset;
+      galacticEngine.resetBodies(createGalacticBodies({ count: 4096, preset, seed: 825 }));
+      await moduleRegistry.resetModuleSession({ model: 'nbody-gravity', version: 1 });
+      syncGalacticGeometry(galacticEngine.getBodies());
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    },
+    async stepOnce() {
+      const cam = scaleBridge.evaluateContinuousZoomCamera(currentLog10);
+      await stepActiveGpuModules(cam);
+      renderer.render(scene, camera);
+    },
+    dispose() {
+      disposed = true;
+      cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', onResize);
+      galacticEngine.dispose();
+      cosmicWebEngine.dispose();
+      renderer.dispose();
+    }
+  };
+  globalThis.__ulgCosmicQuantumDemo = api;
+  return api;
+}

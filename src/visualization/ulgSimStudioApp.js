@@ -300,6 +300,7 @@ export function mountUlgSimStudioApp({
           <div class="ulg-footer-group">
             <button id="ulg-stop-btn" class="ulg-btn ulg-btn-subtle ulg-btn-danger" type="button" hidden>Unload</button>
             <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
+            <a id="ulg-cosmic-quantum-link" class="ulg-btn ulg-btn-subtle" href="/cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
           </div>
           <div class="ulg-footer-group">
             <label class="ulg-autoplay-label">

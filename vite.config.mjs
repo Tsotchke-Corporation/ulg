@@ -290,6 +290,14 @@ export default defineConfig({
     routeCacheHeadersPlugin(),
     copyPlanBackgroundsPlugin()
   ],
+  build: {
+    rollupOptions: {
+      input: {
+        index: fileURLToPath(new URL('./index.html', import.meta.url)),
+        cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url))
+      }
+    }
+  },
   worker: {
     // Every runtime worker is constructed as a module worker. The ULG runtime
     // reaches code-split SPH modules, which cannot be emitted as one IIFE.

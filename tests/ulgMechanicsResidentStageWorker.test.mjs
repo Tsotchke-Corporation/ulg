@@ -7727,8 +7727,8 @@ test('ULG resident schedule admits exactly one, four or eight owned child header
     );
     return { result, fixture };
   };
-  assert.equal(SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY, 8);
-  for (const childCount of [1, 4, 8]) {
+  assert.equal(SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY, 32);
+  for (const childCount of [1, 4, 8, 16, 32]) {
     await t.test(`${childCount} children count as one public admission`, async () => {
       const stepCount = ULG_WORKER_RESIDENT_SCHEDULE_STEP_SUMMARY_RING_CAPACITY + 1;
       const { result, fixture } = await run({ stepCount, terminalRefluxChildCount: childCount });
@@ -7741,16 +7741,19 @@ test('ULG resident schedule admits exactly one, four or eight owned child header
       const target = fixture.runnerCalls.at(-1).residentStepOptions[
         SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
       ];
-      assert.equal(target.targetBuffer.size, stepCount * 8 * 544);
-      assert.equal(target.targetOffsetBytes, (stepCount - 1) * 8 * 544);
-      assert.equal(target.targetByteLength, 8 * 544);
-      if (childCount === 8) {
+      assert.equal(target.targetBuffer.size, stepCount * 32 * 544);
+      assert.equal(target.targetOffsetBytes, (stepCount - 1) * 32 * 544);
+      assert.equal(target.targetByteLength, 32 * 544);
+      if (childCount === 8 || childCount === 32) {
         const group = fixture.runnerCalls.at(-1).residentStepOptions[
           SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION
         ];
-        assert.notEqual(Array(8).fill(group.expectedOuterMacroDt / 8)
-          .reduce((sum, dt) => sum + dt, 0), group.expectedOuterMacroDt,
-        'coverage must use eight exact equal intervals, not serial f64 sum rounding');
+        assert.equal((group.expectedOuterMacroDt / childCount) * childCount, group.expectedOuterMacroDt);
+        if (childCount === 8) {
+          assert.notEqual(Array(8).fill(group.expectedOuterMacroDt / 8)
+            .reduce((sum, dt) => sum + dt, 0), group.expectedOuterMacroDt,
+          'coverage must use eight exact equal intervals, not serial f64 sum rounding');
+        }
       }
       assertNoWorkerGpuBuffers(result, `terminalGroup${childCount}`);
       structuredClone(result);
@@ -7768,6 +7771,27 @@ test('ULG resident schedule admits exactly one, four or eight owned child header
         assert.equal(receipt.admittedStepCount, 1);
         assert.equal(receipt.observedChildCount, 16);
         assert.equal(receipt.admittedChildCount, 15);
+        assert.equal(receipt.firstRejectedStepOrdinal, 2);
+        assert.equal(receipt.firstRejectedChildOrdinal, childOrdinal);
+        assert.equal(receipt.firstRejectedDiagnostic.mutationRollbackCount, 1);
+        assertNoWorkerGpuBuffers(error.residentScheduleError);
+        structuredClone(error.residentScheduleError);
+        return true;
+      });
+    });
+  }
+  for (const childOrdinal of [1, 16, 32]) {
+    await t.test(`32-child ordinal ${childOrdinal} physical rejection rejects the entire outward step`, async () => {
+      await assert.rejects(run({
+        terminalRefluxChildCount: 32,
+        invalidTwoLevelCommitAtStep: 2,
+        terminalRefluxRejectedChildOrdinal: childOrdinal
+      }), (error) => {
+        assert.equal(error.residentScheduleError.reason, 'schedule-terminal-reflux-receipt-rejected');
+        const receipt = error.residentScheduleError.terminalGpuFence.terminalRefluxReceipt;
+        assert.equal(receipt.admittedStepCount, 1);
+        assert.equal(receipt.observedChildCount, 64);
+        assert.equal(receipt.admittedChildCount, 63);
         assert.equal(receipt.firstRejectedStepOrdinal, 2);
         assert.equal(receipt.firstRejectedChildOrdinal, childOrdinal);
         assert.equal(receipt.firstRejectedDiagnostic.mutationRollbackCount, 1);

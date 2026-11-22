@@ -75,10 +75,14 @@ export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_TARGET_SCHEMA =
   'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-group-target.v1';
 export const ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_COPY_SCHEMA =
   'peercompute.ulg.schroeder-fused-terminal-reflux-receipt-group-copy.v1';
-// One admitted original, four equal retry children, or a fully retired
-// four-child attempt restarted from the original root with eight children.
-// This is independent of the inner fine-substep ratio (r=1..4).
-export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY = 8;
+// One admitted original or a bounded dyadic whole-root refinement ladder
+// (4 -> 8 -> 16 -> 32 equal children) restarted only after full retirement of
+// the prior attempt. Independent of the inner fine-substep ratio (r=1..4).
+export const SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER = Object.freeze([4, 8, 16, 32]);
+export const SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY =
+  SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER[
+    SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.length - 1
+  ];
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -4709,7 +4713,9 @@ export function createSchroederFusedTerminalRefluxReceiptGroupTarget({
     || !Number.isSafeInteger(expectedFineLevel) || !Number.isSafeInteger(expectedCoarseLevel)
     || expectedFineLevel < -0x8000_0000 || expectedCoarseLevel > 0x7fff_ffff
     || expectedCoarseLevel !== expectedFineLevel + 1) {
-    throw intervalError('terminal reflux group requires an exact eight-slot outer interval target');
+    throw intervalError(
+      `terminal reflux group requires an exact ${SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY}-slot outer interval target`
+    );
   }
   let bufferOrigin = terminalRefluxReceiptTargetBuffers.get(targetBuffer);
   if (!bufferOrigin) {
@@ -4734,7 +4740,7 @@ export function createSchroederFusedTerminalRefluxReceiptGroupTarget({
   });
   offsets.forEach((offset) => bufferOrigin.reservedOffsets.add(offset));
   terminalRefluxGroupTargetOrigins.set(target, { device, target, original: null,
-    childCount: null, refinementFailure: null,
+    childCount: null, refinementFailure: null, refinementFailures: new Set(),
     children: [], sealed: false, failed: false, receipt: null });
   return target;
 }
@@ -4782,13 +4788,17 @@ export function bindSchroederFusedTerminalRefluxReceiptGroupOriginal(
   return true;
 }
 
-/** One bounded whole-root restart; a consumed predecessor is never reborrowed. */
+/** Bounded dyadic whole-root restart; a consumed predecessor is never reborrowed. */
 export function refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
   device, groupTarget, failedObservation
 ) {
   const group = exactGroupTarget(device, groupTarget);
   const original = group.original;
   const failed = privateAdmissionOrigins.get(failedObservation);
+  const currentTierIndex = SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.indexOf(group.childCount);
+  const nextChildCount = currentTierIndex >= 0
+    ? (SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER[currentTierIndex + 1] ?? null)
+    : null;
   const retired = record => {
     const origin = record?.origin;
     return Boolean(record && !record.lost
@@ -4801,8 +4811,8 @@ export function refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
       && origin.macroOrigin.abortRetiredAfterDeviceLoss !== true
       && origin.publicationReceipt == null && origin.publicCommitReceipt == null);
   };
-  if (group.childCount !== 4 || group.refinementFailure != null
-    || group.children.length >= 4 || !retired(original) || !retired(failed)
+  if (nextChildCount == null || group.refinementFailures.has(failed)
+    || group.children.length >= group.childCount || !retired(original) || !retired(failed)
     || original.observation.retryablePhysicalRejection !== true
     || failed.observation !== failedObservation
     || failedObservation.admitted !== false
@@ -4812,7 +4822,7 @@ export function refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
       original.sourceSnapshot, device)
     || !intervalClockMatches(original.sourceSph, original.sourceClock)
     || !intervalIdentityMatches(original.sourceIdentity, original.sourceMls)) {
-    throw intervalError('whole-interval refinement requires the exact fully retired physical four-child attempt');
+    throw intervalError('whole-interval refinement requires the exact fully retired physical refinement attempt');
   }
   const attempt = [...group.children.map(child => child.observed), failed];
   const seen = new Set([original.origin]);
@@ -4823,7 +4833,7 @@ export function refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
     const borrow = origin?.macroOrigin.privateSourceBorrow;
     const macro = origin?.macroAuthority;
     if (!retired(record) || seen.has(origin)
-      || macro.macroDt !== groupTarget.expectedOuterMacroDt / 4
+      || macro.macroDt !== groupTarget.expectedOuterMacroDt / group.childCount
       || macro.fineSubstepCount !== 2 || macro.fineDt !== macro.macroDt / 2
       || macro.fineLevel !== groupTarget.expectedFineLevel
       || macro.coarseLevel !== groupTarget.expectedCoarseLevel
@@ -4845,11 +4855,12 @@ export function refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
     seen.add(origin);
   }
   // Every earlier write has completed and the failed attempt is unpublished.
-  // Keep the original binding and all eight reserved offsets; only a new exact
+  // Keep the original binding and all reserved offsets; only a new exact
   // chain can overwrite these private slots before the final group is sealed.
+  group.refinementFailures.add(failed);
   group.refinementFailure = failed;
   group.children = [];
-  group.childCount = SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY;
+  group.childCount = nextChildCount;
   return true;
 }
 

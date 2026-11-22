@@ -441,14 +441,25 @@ export function buildLaunchParamsFromStagedConfig(config) {
   const multiLevelChainAirEnabled = isAirEnvironment && airHierarchyLevels >= 3;
   const cubicBox = Math.abs(boxM[1] - boxM[0]) <= 1e-6 * boxM[0]
     && Math.abs(boxM[2] - boxM[0]) <= 1e-6 * boxM[0];
+  const effectiveWallModel = config.wallModel || 'finite-heat-capacity-lumped-face';
+  // Single-level air on finite-capacity walls and 2-level coupled air do not
+  // carry multilevel finite-wall rollback state or G2 energy-ledger history on
+  // the exact integer energy ledger; only enable the exact ledger (and its
+  // default dry-nuclei seeding) automatically on 3+ level chains or single-level
+  // air with non-finite-capacity walls.
+  const useExactEnergyLedger = Boolean(
+    multiLevelChainAirEnabled
+    || (
+      isAirEnvironment
+      && !twoLevelAirEnabled
+      && cubicBox
+      && effectiveWallModel !== 'finite-heat-capacity-lumped-face'
+    )
+  );
   const configuredNuclei = Number(config.environment.nucleiPerCm3 ?? 0);
   const effectiveNucleiPerCm3 = configuredNuclei > 0
     ? configuredNuclei
-    : (isAirEnvironment && cubicBox ? 5000 : 0);
-  const useExactEnergyLedger = Boolean(
-    multiLevelChainAirEnabled
-    || (isAirEnvironment && cubicBox && effectiveNucleiPerCm3 > 0)
-  );
+    : (useExactEnergyLedger && isAirEnvironment && cubicBox ? 5000 : 0);
   let twoLevelAirRuntime = {};
   if (twoLevelAirEnabled || multiLevelChainAirEnabled) {
     // First-Class Air multi-level SS enrollment (2-level coupled OR 3..16-level
@@ -528,7 +539,7 @@ export function buildLaunchParamsFromStagedConfig(config) {
     ...(useExactEnergyLedger ? { exactEnergyLedger: '1' } : {}),
     scenario: exactPreset ? exactPreset.id : 'custom',
     sceneLengthScale: String(scale),
-    wallModel: config.wallModel || 'finite-heat-capacity-lumped-face',
+    wallModel: effectiveWallModel,
     boxx: String(boxM[0] / scale),
     boxy: String(boxM[1] / scale),
     boxz: String(boxM[2] / scale),

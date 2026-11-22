@@ -10,6 +10,8 @@ import {
   uploadMlsMpmMechanicsMaterialPhaseRecords
 } from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
 import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER,
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
   createSchroederFusedTerminalRefluxReceiptGroupTarget,
   observeSchroederFusedMechanicsPrivateAdmission,
@@ -15355,8 +15357,8 @@ test('an unbound arena honours the full candidate budget', () => {
 // ownership capabilities and publication paths are real. Only terminal GPU
 // arithmetic bytes are modelled; this is not native numerical evidence.
 function privateHierarchyIntervalFixture({ rejectOriginal = false, failChild = 0, refineAtChild = 0,
-  sourceStep = 25, rootTime = 0.0125, afterMacro = null, mutateHeader = null, mutateTarget = null,
-  failProducerChild = 0, targetOptionsOverrides = {} } = {}) {
+  refineAtMacros = null, sourceStep = 25, rootTime = 0.0125, afterMacro = null, mutateHeader = null,
+  mutateTarget = null, failProducerChild = 0, targetOptionsOverrides = {} } = {}) {
   const device = createFakeWebGpuDevice({ allowReadbackCopies: true });
   let loseDevice;
   device.lost = new Promise(resolve => { loseDevice = resolve; });
@@ -15417,7 +15419,9 @@ function privateHierarchyIntervalFixture({ rejectOriginal = false, failChild = 0
     generations.push(generation);
     if (generations.length === 1) {
       targetBuffer = tagWebGpuBufferDevice(device.createBuffer({
-        label: 'hierarchy-private-interval-ring', size: 8 * 544, usage: 9
+        label: 'hierarchy-private-interval-ring',
+        size: SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY * 544,
+        usage: 9
       }), device);
       options[SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION] =
         createSchroederFusedTerminalRefluxReceiptGroupTarget({ device,
@@ -15455,9 +15459,14 @@ function privateHierarchyIntervalFixture({ rejectOriginal = false, failChild = 0
     words[96] = 1; words[97] = words[98]; words[111] = words[98] + 1;
     for (const index of [48, 49, 50, 51, 52, 53, 99, 100, 101, 102, 103, 118, 119, 121]) words[index] = 1;
     words[120] = 2; words[124] = 0xffff_ffff; words[44] = 0;
+    const terminalTierStartMacro = SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.length;
     if ((rejectOriginal && macros.length === 1)
       || (refineAtChild && macros.length === refineAtChild + 1)
-      || (failChild && (macros.length === 2 || macros.length === failChild + 2))) {
+      || (Array.isArray(refineAtMacros) && refineAtMacros.includes(macros.length))
+      || (failChild && (
+        (macros.length >= 2 && macros.length <= terminalTierStartMacro)
+        || macros.length === failChild + terminalTierStartMacro
+      ))) {
       words[2] = 551; words[8] = 0; words[15] = 0; words[12] = 3; words[122] = 3;
       words[124] = 3338929101;
       words.set([1068155975, 1126672043, 1091844196, 0, 0, 0, 0, 0, 0, 1126092617, 0], 125);
@@ -15711,7 +15720,7 @@ test('private hierarchy interval stops at every rejected child and retires all p
     assert.deepEqual(structuredClone(diagnostics), diagnostics);
     assert.ok(JSON.stringify(diagnostics).length < 32768);
     assert.equal(f.copies.filter(copy => copy[2] === f.targetBuffer()).length, failChild - 1);
-    assert.equal(f.macros.length, failChild + 2);
+    assert.equal(f.macros.length, failChild + SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.length);
     assert.equal(f.generations.every(generation => generation.mechanicsLevelCount === 2), true);
     for (const { closure, args } of f.macros) {
       assert.equal(await closure.completionPromise, false);
@@ -15723,6 +15732,54 @@ test('private hierarchy interval stops at every rejected child and retires all p
     assert.equal(f.uploads.sphParticleUpload.physicsTick, 25);
     assert.equal(f.uploads.sphParticleUpload.time, 0.0125);
   });
+});
+
+test('private hierarchy interval refines through 4 -> 8 -> 16 and 4 -> 8 -> 16 -> 32 children with exact retirement and receipts', async t => {
+  for (const { label, refineAtMacros, expectedChildCount } of [
+    { label: '16-child admission after 4 and 8 CFL rejections', refineAtMacros: [2, 4], expectedChildCount: 16 },
+    { label: '32-child admission after 4, 8 and 16 CFL rejections', refineAtMacros: [2, 3, 5], expectedChildCount: 32 }
+  ]) {
+    await t.test(label, async () => {
+      const rootTime = 0.01700000000000001;
+      const f = privateHierarchyIntervalFixture({ rejectOriginal: true, refineAtMacros, rootTime });
+      const result = await f.run();
+      const group = result.residentStep.twoLevelTerminalRefluxReceiptCopy;
+      assert.equal(group.childCount, expectedChildCount);
+      assert.equal(group.summedMacroDt, 0.0005);
+      assert.equal(validateSchroederFusedTerminalRefluxReceiptGroup(f.device, group), true);
+      const lastRejectionMacro = refineAtMacros.at(-1);
+      const admitted = f.macros.slice(lastRejectionMacro);
+      assert.equal(admitted.length, expectedChildCount);
+      const expectedChildDt = 0.0005 / expectedChildCount;
+      assert.deepEqual(admitted.map(({ args }) => args.dt), Array(expectedChildCount).fill(expectedChildDt));
+      assert.equal(admitted[0].args.sphParticleUpload, f.uploads.sphParticleUpload);
+      assert.equal(admitted[0].args.mlsMpmParticleUpload, f.uploads.mlsMpmParticleUpload);
+      assert.equal(admitted[0].args.privateSourceClosure ?? null, null);
+      let privateTime = rootTime;
+      for (let i = 0; i < expectedChildCount; i += 1) {
+        if (i > 0) {
+          assert.equal(admitted[i].args.privateSourceClosure, admitted[i - 1].closure);
+          assert.equal(admitted[i].args.sphParticleUpload, admitted[i - 1].closure.finalSphParticleUpload);
+        }
+        privateTime += expectedChildDt / 2;
+        privateTime += expectedChildDt / 2;
+        assert.equal(admitted[i].closure.finalSphParticleUpload.time, privateTime);
+        const header = decodeSchroederCrossLevelRefluxTerminalHeader(new Uint32Array(
+          f.byteStore.get(f.targetBuffer()), i * 544, 136
+        ));
+        assert.equal(header.macroOwnerId, admitted[i].closure.macroAuthority.refluxLedger.macroOwnerId);
+        assert.equal(header.completionOrdinal, group.children[i].completionOrdinal);
+      }
+      assert.equal(group.publicClock.time, rootTime + 0.0005);
+      assert.equal(result.residentStep.nextParticleUploads.sphParticleUpload.physicsTick, 26);
+      assert.equal(result.residentStep.nextSphParticleState.step, 26);
+      for (const { closure, args } of f.macros.slice(0, -1)) {
+        assert.equal(await closure.completionPromise, false);
+        assert.equal(await args.canonicalEpochController.completionPromise(), true);
+      }
+      assert.equal(await result.schroederTwoLevelPositiveCompletionPromise, true);
+    });
+  }
 });
 
 test('private hierarchy interval rejects nonphysical original evidence without refinement', async () => {

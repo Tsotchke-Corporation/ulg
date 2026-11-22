@@ -229,6 +229,7 @@ import {
   enumerateSphReactionCanonicalSummaryPrewarmPipelineDescriptors
 } from '../runtime/sph/sphReactionGpuSummary.js';
 import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_BYTE_LENGTH,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
@@ -9467,7 +9468,7 @@ function workerTerminalRefluxGroupMatchesExpectation(group, expectation) {
     || group.stepOrdinal !== expectation?.stepOrdinal
     || group.targetOffsetBytes !== baseOffset
     || group.targetByteLength !== WORKER_TERMINAL_REFLUX_GROUP_BYTE_LENGTH
-    || (count !== 1 && count !== 4 && count !== SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY)
+    || (count !== 1 && !SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.includes(count))
     || !Array.isArray(group.children) || group.children.length !== count
     || !u32(group.outerCompletionOrdinal, 1)
     || group.outerCompletionOrdinal !== expectation.expectedOuterCompletionOrdinal
@@ -13232,7 +13233,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           ) {
             throw workerResidentScheduleError(
               'schedule-terminal-reflux-ring-capacity-invalid',
-              'terminal reflux groups require a bounded eight-child ring within device capacity',
+              'terminal reflux groups require a bounded refinement ring within device capacity',
               { scheduleId, stepCount, terminalRefluxRingByteLength }
             );
           }
@@ -13489,7 +13490,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         ) {
           throw workerResidentScheduleError(
             'schedule-terminal-reflux-copy-receipt-invalid',
-            'the authoritative step did not return its exact one-four-or-eight-child terminal reflux group',
+            'the authoritative step did not return its exact dyadic terminal reflux group',
             {
               scheduleId,
               stepOrdinal,

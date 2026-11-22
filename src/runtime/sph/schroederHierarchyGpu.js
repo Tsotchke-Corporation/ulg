@@ -337,6 +337,7 @@ import {
 } from './schroederHierarchyArtifactLedger.js';
 import { runSchroederTwoLevelMechanicsStepWebGpu } from './schroederCrossLevelCouplingGpu.js';
 import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY,
   SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_TARGET_OPTION,
   ULG_SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_TARGET_SCHEMA,
@@ -17551,7 +17552,13 @@ async function runSchroederPrivateTwoLevelInterval({
         (upload, index) => clockKeys.every((key, ordinal) =>
           Object.is(upload[key], rootClocks[index][ordinal]))
       ), 'Rejected candidate changed the retained original source family');
-      for (const childCount of [4, SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY]) {
+      for (
+        let tierIndex = 0;
+        tierIndex < SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.length;
+        tierIndex += 1
+      ) {
+        const childCount = SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER[tierIndex];
+        const hasFinerTier = tierIndex + 1 < SCHROEDER_FUSED_TERMINAL_REFLUX_REFINEMENT_LADDER.length;
         let childSource = source;
         let predecessor = null;
         let refineAfterFailure = null;
@@ -17590,7 +17597,7 @@ async function runSchroederPrivateTwoLevelInterval({
               originalObservation: evidence(originalObservation),
               failedObservation: evidence(observation)
             });
-            if (childCount === 4 && observation.retryablePhysicalRejection === true) {
+            if (hasFinerTier && observation.retryablePhysicalRejection === true) {
               await cleanup(error);
               requireTrue(refineSchroederFusedTerminalRefluxReceiptGroupAfterRetirement(
                 device, groupTarget, observation
@@ -17600,7 +17607,7 @@ async function runSchroederPrivateTwoLevelInterval({
               ) && [source.sphParticleUpload, source.mlsMpmParticleUpload].every(
                 (upload, index) => clockKeys.every((key, ordinal) =>
                   Object.is(upload[key], rootClocks[index][ordinal]))
-              ), 'Failed four-child attempt changed the retained original source');
+              ), `Failed ${childCount}-child attempt changed the retained original source`);
               refineAfterFailure = error;
               break;
             }

@@ -330,6 +330,48 @@ test('loading status stays non-ready while PHYSICS PENDING preview is active and
   const airParams = buildLaunchParamsFromStagedConfig(airConfig);
   assert.equal(airParams.exactEnergyLedger, '1');
   assert.equal(airParams.environmentNucleiPerCm3, '5000');
+
+  // Non-chain air modes on finite-capacity walls and 2-level coupled air must
+  // not auto-enable the exact integer energy ledger or default dry-nuclei
+  // seeding, whereas 3+ level chains keep exactEnergyLedger + CCN enabled.
+  const sodiumAirL1 = buildStagedConfigFromPreset('sodium-water');
+  sodiumAirL1.environment.mode = 'air';
+  sodiumAirL1.environment.airHierarchyLevels = 1;
+  const sodiumAirL1Params = buildLaunchParamsFromStagedConfig(sodiumAirL1);
+  assert.equal(sodiumAirL1Params.wallModel, 'finite-heat-capacity-lumped-face');
+  assert.equal(sodiumAirL1Params.exactEnergyLedger, undefined);
+  assert.equal(sodiumAirL1Params.environmentNucleiPerCm3, '0');
+
+  const sodiumAirL2 = buildStagedConfigFromPreset('sodium-water');
+  sodiumAirL2.environment.mode = 'air';
+  sodiumAirL2.environment.airHierarchyLevels = 2;
+  const sodiumAirL2Params = buildLaunchParamsFromStagedConfig(sodiumAirL2);
+  assert.equal(sodiumAirL2Params.schroederTwoLevel, '1');
+  assert.equal(sodiumAirL2Params.exactEnergyLedger, undefined);
+  assert.equal(sodiumAirL2Params.environmentNucleiPerCm3, '0');
+
+  const ironAirL2 = buildStagedConfigFromPreset('iron-ice-quench');
+  ironAirL2.environment.mode = 'air';
+  ironAirL2.environment.airHierarchyLevels = 2;
+  const ironAirL2Params = buildLaunchParamsFromStagedConfig(ironAirL2);
+  assert.equal(ironAirL2Params.schroederTwoLevel, '1');
+  assert.equal(ironAirL2Params.exactEnergyLedger, undefined);
+  assert.equal(ironAirL2Params.environmentNucleiPerCm3, '0');
+
+  const sodiumAirL3 = buildStagedConfigFromPreset('sodium-water');
+  sodiumAirL3.environment.mode = 'air';
+  sodiumAirL3.environment.airHierarchyLevels = 3;
+  const sodiumAirL3Params = buildLaunchParamsFromStagedConfig(sodiumAirL3);
+  assert.equal(sodiumAirL3Params.schroederLevelChain, '1');
+  assert.equal(sodiumAirL3Params.exactEnergyLedger, '1');
+  assert.equal(sodiumAirL3Params.environmentNucleiPerCm3, '5000');
+
+  const cesiumAirL1 = buildStagedConfigFromPreset('cesium-fluorine');
+  cesiumAirL1.environment.mode = 'air';
+  cesiumAirL1.environment.airHierarchyLevels = 1;
+  const cesiumAirL1Params = buildLaunchParamsFromStagedConfig(cesiumAirL1);
+  assert.equal(cesiumAirL1Params.exactEnergyLedger, undefined);
+  assert.equal(cesiumAirL1Params.environmentNucleiPerCm3, '0');
 });
 
 test('rigid-solid caloric branches avoid solid superheat and include discovered reaction products in fluidThermal', async () => {

@@ -40,6 +40,7 @@ import {
   decodeSchroederCrossLevelRefluxTerminalHeader
 } from '../ulg-gpu-abi/src/schroederCrossLevelRefluxLedger.js';
 import {
+  SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY,
   abandonSchroederFusedMechanicsPendingClosureAfter,
   abortSchroederTwoLevelMacroAuthorityAfter,
   bindSchroederFusedTerminalRefluxReceiptGroupOriginal,
@@ -2940,7 +2941,7 @@ async function privateAdmissionFixture({ macroDt = 0.005 } = {}) {
   };
   const targetOptions = () => ({ device, scheduleId: 'private-admission', laneId: 'lane', stateKey: 'state',
     stepOrdinal: 1, targetBuffer: tagWebGpuBufferDevice(device.createBuffer({
-      label: 'private-admission-group', size: 8 * 544, usage: 9 }), device),
+      label: 'private-admission-group', size: SCHROEDER_FUSED_TERMINAL_REFLUX_RECEIPT_GROUP_CAPACITY * 544, usage: 9 }), device),
     targetOffsetBytes: 0, expectedOuterCompletionOrdinal: macro.completionOrdinal,
     expectedOuterIdentity: fixture.sphParticleUpload, expectedOuterMacroDt: macro.macroDt,
     expectedFineSubstepCount: macro.fineSubstepCount,
@@ -3042,7 +3043,7 @@ test('private compact predicate requires every physical gate and strict actual c
   assert.equal(isSchroederFusedTerminalRefluxHeaderFullyAdmitted({ ...header, totalEnergyResidualJ: NaN }, { expectedFineSubstepCount }), false);
   const options = f.targetOptions();
   for (const key of ['stepOrdinal', 'targetOffsetBytes', 'expectedOuterCompletionOrdinal', 'expectedOuterMacroDt', 'expectedFineSubstepCount']) {
-    assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({ ...options, [key]: String(options[key]) }), /exact eight-slot/, key);
+    assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({ ...options, [key]: String(options[key]) }), /exact 32-slot/, key);
   }
   for (const invalid of [
     { targetOffsetBytes: -0 },
@@ -3051,12 +3052,12 @@ test('private compact predicate requires every physical gate and strict actual c
     { expectedFineLevel: 0x7fff_ffff, expectedCoarseLevel: 0x8000_0000 }
   ]) assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({
     ...options, ...invalid
-  }), /exact eight-slot/);
+  }), /exact 32-slot/);
   for (const field of ['storageGeneration', 'physicsTick', 'physicsSubstep',
     'positionEpoch', 'topologyEpoch', 'chartEpoch', 'levelEpoch', 'supportEpoch']) {
     assert.throws(() => createSchroederFusedTerminalRefluxReceiptGroupTarget({
       ...options, expectedOuterIdentity: { ...options.expectedOuterIdentity, [field]: -0 }
-    }), /exact eight-slot/, field);
+    }), /exact 32-slot/, field);
   }
   assert.equal(f.words.length, SCHROEDER_CROSS_LEVEL_REFLUX_LEDGER_HEADER_WORDS);
   await f.cleanup();

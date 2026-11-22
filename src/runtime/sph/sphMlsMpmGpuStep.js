@@ -193,7 +193,7 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
-import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
+import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, releaseOrDestroyQueueOrderedPooledBuffer, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 import {
   createSphGpuTimestampProfiler,
   encodeSphGpuTimestampMarkerPass
@@ -221,6 +221,7 @@ import {
   destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
+  releaseOrDestroyPooledParticleBuffer,
   registerTopologyStableSphDispersedMediumOpticsSourceFamilyContinuation,
   retireSphGpuParticleBufferSetDispersedMediumOptics,
   runSphGpuParticleBufferSetCleanupAfterBorrows,
@@ -12255,7 +12256,7 @@ function retainFusedMechanicsExactMassOutput(result, {
         // A physical read's release supplies a confirmed fence (or confirmed
         // device loss). A rejected fence alone must never trigger destruction.
         record.closed = true;
-        const completion = Promise.all(pending.map(key => releaseSphParticleExactMassRead(componentReads[key]))).then(() => {
+        const completion = Promise.all(pending.map(key => releaseSphParticleExactMassRead(componentReads[key], { deferInBurst: true }))).then(() => {
           for (const key of pending) record[`${key}Buffer`].destroy();
           return true;
         });
@@ -12286,8 +12287,8 @@ function retainFusedMechanicsExactMassOutput(result, {
     ];
     exactMassFusedMechanicsOutputs.set(output, record);
   } catch (error) {
-    void releaseSphParticleExactMassRead(held);
-    if (mechanicsRead) void releaseSphParticleExactMassRead(mechanicsRead);
+    void releaseSphParticleExactMassRead(held, { deferInBurst: true });
+    if (mechanicsRead) void releaseSphParticleExactMassRead(mechanicsRead, { deferInBurst: true });
     throw error;
   }
 }
@@ -14491,7 +14492,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu(args) {
     submittedSteps: 0, published: false, closed: false, bindingOpen: false };
   let finish;
   const settled = new Promise(resolve => { finish = resolve; });
-  record.completion = settled.then(() => releaseSphParticleExactMassRead(sourceRead));
+  record.completion = settled.then(() => releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true }));
   const register = args.registerSubmittedCleanup;
   let requestedCleanup = null;
   record.cleanup = () => record.cleanupPromise ??= record.completion.then(() => {
@@ -16589,7 +16590,9 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
           }
         }
         for (const buffer of buffersToDestroy) {
-          try { buffer.destroy?.(); } catch { cleanupFailed = true; }
+          try {
+            releaseOrDestroyQueueOrderedPooledBuffer(buffer, { allowPool: returned });
+          } catch { cleanupFailed = true; }
         }
         if (cleanupFailed) {
           throw new Error(
@@ -39719,7 +39722,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     }
     throw error;
   } finally {
-    if (exactMassSourceRead) void releaseSphParticleExactMassRead(exactMassSourceRead);
+    if (exactMassSourceRead) void releaseSphParticleExactMassRead(exactMassSourceRead, { deferInBurst: true });
   }
 }
 
@@ -40431,7 +40434,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
       return;
     }
     try {
-      buffer.destroy();
+      releaseOrDestroyPooledParticleBuffer(buffer);
       released.add(buffer);
     } catch (error) {
       throw error;

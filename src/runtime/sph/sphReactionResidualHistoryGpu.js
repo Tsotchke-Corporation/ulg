@@ -1,4 +1,10 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  releaseQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { createWebGpuU32ExclusiveScan } from '../webgpuRadixScanUnique.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { borrowSphReactionResidualLedger, SPH_REACTION_RESIDUAL_LEDGER_LAYOUT as emissionLayout }
@@ -7,6 +13,39 @@ import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { borrowSphReactionResidualTransport } from './sphReactionResidualTransportGpu.js';
 
 const candidates=new WeakMap(), histories=new WeakMap(), historyReads=new WeakMap();
+const residualHistoryScanPoolByDevice=new WeakMap();
+const RESIDUAL_HISTORY_SCAN_POOL_LIMIT=8;
+function acquirePooledResidualHistoryScan(device, scanCount) {
+  let byCount = residualHistoryScanPoolByDevice.get(device);
+  if (byCount) {
+    const bucket = byCount.get(scanCount);
+    if (bucket && bucket.length > 0) return bucket.pop();
+  }
+  return createWebGpuU32ExclusiveScan(device, {
+    maxElementCount: scanCount,
+    retainParamsBuffer: true,
+    fixedElementCount: scanCount,
+    label: 'ulg-reaction-residual-history-scan'
+  });
+}
+function releasePooledResidualHistoryScan(device, scanCount, scan) {
+  if (!scan) return;
+  let byCount = residualHistoryScanPoolByDevice.get(device);
+  if (!byCount) {
+    byCount = new Map();
+    residualHistoryScanPoolByDevice.set(device, byCount);
+  }
+  let bucket = byCount.get(scanCount);
+  if (!bucket) {
+    bucket = [];
+    byCount.set(scanCount, bucket);
+  }
+  if (bucket.length < RESIDUAL_HISTORY_SCAN_POOL_LIMIT) {
+    bucket.push(scan);
+  } else {
+    scan.destroy();
+  }
+}
 let nextSeal=1;
 const physicalOffset=Math.ceil(emissionLayout.rowWords/4)*4;
 const historyRowWords=physicalOffset+52;
@@ -247,8 +286,18 @@ fn populated_valid(kind:u32,row:u32,m:ExactMass)->bool {
 export function prepareSphReactionResidualHistory({device,source=null,emitted=null,transported=null,capacity=null,controlBuffer}) {
   if(transported && !source)throw new TypeError('Residual transport requires its original history');
   if(!source && !emitted)return null;
-  let sourceRead=null,emittedRead=null,transportRead=null,scan=null,buffer=null;
-  const resources=new Set(),retainedResources=new Set(),destroyed=new Set();
+  let sourceRead=null,emittedRead=null,transportRead=null,scan=null,buffer=null,scanCountForPool=0;
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const resources=new Set(),retainedResources=new Set(),destroyed=new Set(),poolMeta=new Map();
+  const retireScan=()=>{
+    if(!scan)return;
+    const heldScan=scan;scan=null;
+    if(useQueueOrderedPool && scanCountForPool>0) releasePooledResidualHistoryScan(device,scanCountForPool,heldScan);
+    else heldScan.destroy();
+  };
   const owner={device,closed:false,privateLive:false,retired:false,retiring:false,producerStageRetired:false,readers:0,
     sourceRead:null,emittedRead:null,transportRead:null,controlBuffer:null,
     releaseProducerStage() {
@@ -261,7 +310,7 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
       this.retiring=false;
       if(errors.length)throw new AggregateError(errors,'Residual history retirement failed');
       this.producerStageRetired=true;
-      scan?.destroy();scan=null;
+      retireScan();
       sourceRead?.release();emittedRead?.release();
     },
     retire() {
@@ -278,19 +327,38 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
       this.retiring=false;
       if(errors.length)throw new AggregateError(errors,'Residual history retirement failed');
       this.producerStageRetired=true;
-      scan?.destroy();scan=null;
+      retireScan();
       sourceRead?.release();emittedRead?.release();transportRead?.release();this.retired=true;
     }};
   const destroy=()=>{const first=!owner.closed;owner.closed=true;owner.retire();return first;};
-  const own=resource=>{
-    resources.add(resource);const raw=resource.destroy.bind(resource);
+  const own=(resource, meta = null)=>{
+    resources.add(resource);
+    if(meta) poolMeta.set(resource, meta);
+    const raw=resource.destroy.bind(resource);
     resource.destroy=()=>{
       if(destroyed.has(resource))return;
       if(!owner.retiring)throw new TypeError('Residual history storage is retained');
-      raw();destroyed.add(resource);
+      const spec = poolMeta.get(resource);
+      if (spec) {
+        resource.destroy = raw;
+        releaseQueueOrderedPooledBuffer(device, resource, spec);
+      } else {
+        raw();
+      }
+      destroyed.add(resource);
     };return resource;
   };
-  const allocate=(label,size,usage)=>own(tagWebGpuBufferDevice(device.createBuffer({label,size,usage}),device));
+  const allocate=(label,size,usage)=>{
+    if (useQueueOrderedPool) {
+      const spec = { bucketKey: label, size, usage };
+      const buf = tagWebGpuBufferDevice(
+        acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+        device
+      );
+      return own(buf, spec);
+    }
+    return own(tagWebGpuBufferDevice(device.createBuffer({label,size,usage}),device));
+  };
   try {
     transportRead=transported?borrowSphReactionResidualTransport(transported,{device,source}):null;
     sourceRead=transportRead?transportRead.forkSourceRead():source?borrowSphReactionResidualHistory(source,{device}):null;
@@ -319,9 +387,14 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
     const params=allocate('ulg-reaction-residual-history-identities',48,64|8);
     device.queue.writeBuffer(params,0,new Uint32Array([rows,source?.capacity??0,emittedCapacity,source?1:0,
       source?.generation??0,source?.seal??0,generation,seal,emitted?.generation??0,emitted?1:0,scanCount,transportRead?1:0]));
-    scan=createWebGpuU32ExclusiveScan(device,{maxElementCount:scanCount,retainParamsBuffer:true,fixedElementCount:scanCount,
-      label:'ulg-reaction-residual-history-scan'});
-    for(const {buffer:b}of scan.allocationEntries())own(b);
+    scanCountForPool=scanCount;
+    if(useQueueOrderedPool) {
+      scan=acquirePooledResidualHistoryScan(device,scanCount);
+    } else {
+      scan=createWebGpuU32ExclusiveScan(device,{maxElementCount:scanCount,retainParamsBuffer:true,fixedElementCount:scanCount,
+        label:'ulg-reaction-residual-history-scan'});
+      for(const {buffer:b}of scan.allocationEntries())own(b);
+    }
     const record=Object.freeze({device,buffer,layout:L,capacity:rows,generation,seal,
       beforeBuffer:sourceRead?.buffer??null,beforeCapacity:source?.capacity??0,
       beforeGeneration:source?.generation??0,beforeSeal:source?.seal??0,
@@ -335,7 +408,7 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
     const passes=Object.fromEntries(['initialize','mark_rows','decide','scatter','check','require_empty','restore_rows','restore_count'].map(entryPoint=>{
       const p=createCachedExplicitComputePipeline(device,{code,entryPoint,label:`ulg-residual-history-${entryPoint}`,
         cacheKey:`ulg-residual-history-v${L.version}-${entryPoint}`,bindings:types.map((type,binding)=>computeBufferBinding(binding,type))});
-      const group=device.createBindGroup({layout:p.bindGroupLayout,entries:bindings.map((b,binding)=>({binding,resource:{buffer:b}}))});
+      const group=createCachedExplicitBindGroup(device,{layout:p.bindGroupLayout,entries:bindings.map((b,binding)=>({binding,resource:{buffer:b}}))});
       return[entryPoint,(encoder,count)=>{const pass=encoder.beginComputePass();pass.setPipeline(p.pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(count);pass.end();}];
     }));
     const groups=Math.ceil(Math.max(source?.capacity??0,scanCount)/64);
@@ -345,6 +418,12 @@ export function prepareSphReactionResidualHistory({device,source=null,emitted=nu
     return Object.freeze({record,destroy,
       encode(encoder){
         validate();if(encoded)throw new TypeError('Residual history must be encoded once');
+        if(useQueueOrderedPool) {
+          encoder.clearBuffer(buffer);
+          encoder.clearBuffer(flags);
+          encoder.clearBuffer(prefix);
+          if(owner.controlBuffer) encoder.clearBuffer(owner.controlBuffer);
+        }
         passes.initialize(encoder,1);passes.mark_rows(encoder,groups);
         const prepared=scan.encode(encoder,{inputBuffer:flags,outputBuffer:prefix,elementCount:scanCount});
         scan.releasePreparedQueueOrdered(prepared);

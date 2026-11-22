@@ -9,6 +9,7 @@ import {
 import {
   SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY
 } from './schroederSpatialEpochTransaction.js';
+import { releaseOrDestroyQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 
 export { SCHROEDER_SPATIAL_EPOCH_CONSUMER_ARTIFACT_FAMILY };
 
@@ -409,7 +410,7 @@ function groupDestroyer(runtime, artifact, destroyMethod, buffer, {
       destroy: () => {
         if (invoked) return false;
         invoked = true;
-        buffer.destroy();
+        releaseOrDestroyQueueOrderedPooledBuffer(buffer);
         return true;
       },
       destroyAuthority: 'gpu-buffer-destroy'

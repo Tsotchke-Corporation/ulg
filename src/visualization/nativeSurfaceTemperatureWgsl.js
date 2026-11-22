@@ -574,6 +574,20 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
   const dispatchArgsBytes = 3 * Uint32Array.BYTES_PER_ELEMENT;
   const dispatchArgsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT;
   const outputUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
+  // Round pooled storage capacity to power-of-two slabs (capped at device max)
+  // so frame-to-frame marching-cubes vertex count variations still hit the pool.
+  const maxPoolStorageBytes = Math.min(
+    Number(device.limits?.maxStorageBufferBindingSize) || 134217728,
+    Number(device.limits?.maxBufferSize) || 268435456
+  );
+  let pooledOutputByteLength = outputByteLength;
+  if (useQueueOrderedTempPool) {
+    let pow2 = 4096;
+    while (pow2 < outputByteLength && pow2 * 2 <= maxPoolStorageBytes) {
+      pow2 *= 2;
+    }
+    pooledOutputByteLength = pow2 >= outputByteLength ? pow2 : outputByteLength;
+  }
   let outputBuffer = null;
   let paramsBuffer = null;
   let dispatchArgsBuffer = null;
@@ -582,7 +596,7 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
       ? acquireQueueOrderedPooledBuffer(device, {
           bucketKey: 'ulg-native-surface-temperature-rows-output',
           label: `${label}-output`,
-          size: outputByteLength,
+          size: pooledOutputByteLength,
           usage: outputUsage
         })
       : device.createBuffer({
@@ -792,7 +806,7 @@ export function encodeNativeSurfaceTemperatureRowsWebGpu({
         if (useQueueOrderedTempPool) {
           releaseQueueOrderedPooledBuffer(device, outputBuffer, {
             bucketKey: 'ulg-native-surface-temperature-rows-output',
-            size: outputByteLength,
+            size: pooledOutputByteLength,
             usage: outputUsage
           });
           releaseQueueOrderedPooledBuffer(device, paramsBuffer, {

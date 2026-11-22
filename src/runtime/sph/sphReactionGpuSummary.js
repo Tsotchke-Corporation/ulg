@@ -85,12 +85,16 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
+  createCachedExplicitBindGroup,
   createQueueOrderedCleanupClaimIssuer,
   createCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   submitQueueOrderedFinalConsumerWork,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
@@ -580,10 +584,10 @@ function createProductEventBufferDestructor(device, buffer, delegatedToArena,
     if (owner.storageDestroyed) return;
     if (exactHistoryLayout) {
       for (const resource of [buffer, ...additionalBuffers]) {
-        try { resource.destroy?.(); } catch { /* Retire every owned exact plane. */ }
+        try { releaseOrDestroyQueueOrderedPooledBuffer(resource); } catch { /* Retire every owned exact plane. */ }
       }
       for (const handle of owner.exactHandles ?? []) revokeResidentProductEventCountAuthority(handle);
-    } else buffer.destroy?.();
+    } else releaseOrDestroyQueueOrderedPooledBuffer(buffer);
     owner.storageDestroyed = true;
     owner.afterCleanup?.();
   };
@@ -2774,17 +2778,38 @@ export async function runSphReactionSummaryWebGpu({
     size: Math.max(4, productInventoryByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
+  const useQueueOrderedSummaryPool = Boolean(
+    !shouldReadCompactSummary
+    && !readProductEvents
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const acquireSummaryPooledBuffer = (bucketKey, size, usage) => tagWebGpuBufferDevice(
+    registerQueueOrderedPooledBufferReturn(
+      acquireQueueOrderedPooledBuffer(device, { bucketKey, label: bucketKey, size, usage }),
+      device,
+      { bucketKey, size, usage }
+    ),
+    device
+  );
+  const productEventUsage =
+    GPU_BUFFER_USAGE.STORAGE
+    | GPU_BUFFER_USAGE.COPY_SRC
+    | GPU_BUFFER_USAGE.COPY_DST;
   const productEventBuffer = useProductEventBuffer
     ? (
         reactionWarmBuffers?.productEvent
-        || tagWebGpuBufferDevice(device.createBuffer({
-          label: 'ulg-sph-reaction-product-event-out',
-          size: Math.max(4, productEventByteLength),
-          usage:
-            GPU_BUFFER_USAGE.STORAGE
-            | GPU_BUFFER_USAGE.COPY_SRC
-            | GPU_BUFFER_USAGE.COPY_DST
-        }), device)
+        || (useQueueOrderedSummaryPool
+          ? acquireSummaryPooledBuffer(
+              'ulg-sph-reaction-product-event-out',
+              Math.max(4, productEventByteLength),
+              productEventUsage
+            )
+          : tagWebGpuBufferDevice(device.createBuffer({
+              label: 'ulg-sph-reaction-product-event-out',
+              size: Math.max(4, productEventByteLength),
+              usage: productEventUsage
+            }), device))
       )
     : null;
   const productEventEmissionBuffer = shouldRunProductPlacement
@@ -2957,15 +2982,23 @@ export async function runSphReactionSummaryWebGpu({
     size: Math.max(4, productEventByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
+  const placementAccumulatorUsage =
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
   const placementAccumulatorBuffer = shouldRunProductPlacement
     ? (
         productPlacementAccumulatorBuffer
         || reactionWarmBuffers?.productPlacementSummary
-        || tagWebGpuBufferDevice(device.createBuffer({
-          label: 'ulg-sph-reaction-product-placement-accumulator',
-          size: Math.max(4, productPlacementByteLength),
-          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-        }), device)
+        || (useQueueOrderedSummaryPool
+          ? acquireSummaryPooledBuffer(
+              'ulg-sph-reaction-product-placement-accumulator',
+              Math.max(4, productPlacementByteLength),
+              placementAccumulatorUsage
+            )
+          : tagWebGpuBufferDevice(device.createBuffer({
+              label: 'ulg-sph-reaction-product-placement-accumulator',
+              size: Math.max(4, productPlacementByteLength),
+              usage: placementAccumulatorUsage
+            }), device))
       )
     : null;
   if (placementAccumulatorBuffer && !borrowedProductPlacementAccumulatorBuffer) {
@@ -2990,11 +3023,15 @@ export async function runSphReactionSummaryWebGpu({
     size: Math.max(4, atomResidualByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
-  const paramsBuffer = reactionWarmBuffers?.summaryParams || device.createBuffer({
-    label: 'ulg-sph-reaction-summary-params',
-    size: 48,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const summaryParamsUsage = GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST;
+  const paramsBuffer = reactionWarmBuffers?.summaryParams
+    || (useQueueOrderedSummaryPool
+      ? acquireSummaryPooledBuffer('ulg-sph-reaction-summary-params', 48, summaryParamsUsage)
+      : device.createBuffer({
+          label: 'ulg-sph-reaction-summary-params',
+          size: 48,
+          usage: summaryParamsUsage
+        }));
   let deferLocalBufferCleanup = false;
   let localCleanupClaim = null;
   let localCleanupFinalConsumer = null;
@@ -3051,7 +3088,7 @@ export async function runSphReactionSummaryWebGpu({
   const destroyedLocalBuffers = new Set();
   const destroyLocalBuffer = (buffer) => {
     if (!buffer || destroyedLocalBuffers.has(buffer)) return;
-    buffer.destroy?.();
+    releaseOrDestroyQueueOrderedPooledBuffer(buffer, { allowPool: localSubmissionAttempted });
     destroyedLocalBuffers.add(buffer);
   };
   const destroyLocalPlacementBuffer = (buffer) => {
@@ -3272,7 +3309,7 @@ export async function runSphReactionSummaryWebGpu({
       const { pipeline, bindGroupLayout } =
         createCachedExplicitComputePipeline(device, productEventDescriptor);
       productEventPipeline = pipeline;
-      productEventBindGroup = device.createBindGroup({
+      productEventBindGroup = createCachedExplicitBindGroup(device, {
         layout: bindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: sourceStateBuffer } },
@@ -3354,15 +3391,15 @@ export async function runSphReactionSummaryWebGpu({
         productEventCompactPipeline = compactCountInfo.pipeline;
         productEventCompactScanPipeline = compactScanInfo.pipeline;
         productEventCompactScatterPipeline = compactScatterInfo.pipeline;
-        productEventCompactBindGroup = device.createBindGroup({
+        productEventCompactBindGroup = createCachedExplicitBindGroup(device, {
           layout: compactCountInfo.bindGroupLayout,
           entries: compactEntries
         });
-        productEventCompactScanBindGroup = device.createBindGroup({
+        productEventCompactScanBindGroup = createCachedExplicitBindGroup(device, {
           layout: compactScanInfo.bindGroupLayout,
           entries: compactEntries
         });
-        productEventCompactScatterBindGroup = device.createBindGroup({
+        productEventCompactScatterBindGroup = createCachedExplicitBindGroup(device, {
           layout: compactScatterInfo.bindGroupLayout,
           entries: compactEntries
         });
@@ -3375,7 +3412,7 @@ export async function runSphReactionSummaryWebGpu({
           bindings: legacyCompactBindings
         });
         productEventCompactPipeline = compactInfo.pipeline;
-        productEventCompactBindGroup = device.createBindGroup({
+        productEventCompactBindGroup = createCachedExplicitBindGroup(device, {
           layout: compactInfo.bindGroupLayout,
           entries: compactEntries
         });
@@ -3469,32 +3506,26 @@ export async function runSphReactionSummaryWebGpu({
             usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
           }), device);
       productEventPlacementParamsBuffer = placementParamsBuffer;
-      device.queue.writeBuffer(placementParamsBuffer, 0, new Uint32Array([
-        particleCount,
-        productEventCount,
-        SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4,
-        2,
-        3,
-        8
-      ]));
-      device.queue.writeBuffer(placementParamsBuffer, 24, new Float32Array([1.0e-9]));
-      device.queue.writeBuffer(placementParamsBuffer, 28, new Uint32Array([productTermCount]));
-      device.queue.writeBuffer(placementParamsBuffer, 32, new Float32Array(productPlacementBoxDimsM));
-      device.queue.writeBuffer(
-        placementParamsBuffer,
-        44,
-        new Uint32Array([productPlacementBoxClampEnabled ? 1 : 0])
-      );
-      device.queue.writeBuffer(
-        placementParamsBuffer,
-        48,
-        new Uint32Array([
-          canonicalSpatialPlacementEnabled ? 1 : 0,
-          canonicalSpatialPlacement?.authority?.generationId ?? 0,
-          canonicalSpatialPlacement?.authority?.supportProfileId ?? 0,
-          SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION
-        ])
-      );
+      const placementParamsRaw = new ArrayBuffer(64);
+      const placementParamsU32 = new Uint32Array(placementParamsRaw);
+      const placementParamsF32 = new Float32Array(placementParamsRaw);
+      placementParamsU32[0] = particleCount;
+      placementParamsU32[1] = productEventCount;
+      placementParamsU32[2] = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS / 4;
+      placementParamsU32[3] = 2;
+      placementParamsU32[4] = 3;
+      placementParamsU32[5] = 8;
+      placementParamsF32[6] = 1.0e-9;
+      placementParamsU32[7] = productTermCount;
+      placementParamsF32[8] = productPlacementBoxDimsM[0];
+      placementParamsF32[9] = productPlacementBoxDimsM[1];
+      placementParamsF32[10] = productPlacementBoxDimsM[2];
+      placementParamsU32[11] = productPlacementBoxClampEnabled ? 1 : 0;
+      placementParamsU32[12] = canonicalSpatialPlacementEnabled ? 1 : 0;
+      placementParamsU32[13] = canonicalSpatialPlacement?.authority?.generationId ?? 0;
+      placementParamsU32[14] = canonicalSpatialPlacement?.authority?.supportProfileId ?? 0;
+      placementParamsU32[15] = SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_VERSION;
+      device.queue.writeBuffer(placementParamsBuffer, 0, placementParamsRaw);
       productEventPlacementPipeline = placementPipelineInfo?.pipeline ?? null;
       const placementCommitEntries = [
         { binding: 0, resource: { buffer: productEventBuffer } },
@@ -3530,7 +3561,7 @@ export async function runSphReactionSummaryWebGpu({
         }
       ];
       productEventPlacementBindGroup = placementPipelineInfo
-        ? device.createBindGroup({
+        ? createCachedExplicitBindGroup(device, {
             layout: placementPipelineInfo.bindGroupLayout,
             entries: placementCommitEntries
           })
@@ -3550,7 +3581,7 @@ export async function runSphReactionSummaryWebGpu({
         productEventPlacementEnvelopeFinalizePipeline =
           placementEnvelopeFinalizeInfo.pipeline;
         productEventPlacementClassificationPipeline = placementClassificationInfo.pipeline;
-        productEventPlacementClassificationBindGroup = device.createBindGroup({
+        productEventPlacementClassificationBindGroup = createCachedExplicitBindGroup(device, {
           layout: placementClassificationInfo.bindGroupLayout,
           entries: spatialClassificationEntries
         });
@@ -3575,16 +3606,16 @@ export async function runSphReactionSummaryWebGpu({
               resource: { buffer: productEventPlacementEnvelopePartialsBuffer }
             }
         ];
-        productEventPlacementEnvelopeBindGroup = device.createBindGroup({
+        productEventPlacementEnvelopeBindGroup = createCachedExplicitBindGroup(device, {
           layout: placementEnvelopeInfo.bindGroupLayout,
           entries: placementEnvelopeEntries
         });
-        productEventPlacementEnvelopeFinalizeBindGroup = device.createBindGroup({
+        productEventPlacementEnvelopeFinalizeBindGroup = createCachedExplicitBindGroup(device, {
           layout: placementEnvelopeFinalizeInfo.bindGroupLayout,
           entries: placementEnvelopeEntries
         });
         productPlacementSpareParticleMarkPipeline = spareParticleMarkInfo.pipeline;
-        productPlacementSpareParticleMarkBindGroup = device.createBindGroup({
+        productPlacementSpareParticleMarkBindGroup = createCachedExplicitBindGroup(device, {
           layout: spareParticleMarkInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: nextStateBuffer } },
@@ -3596,7 +3627,7 @@ export async function runSphReactionSummaryWebGpu({
           ]
         });
         productPlacementSpareParticleScanPipeline = spareParticleScanInfo.pipeline;
-        productPlacementSpareParticleScanBindGroup = device.createBindGroup({
+        productPlacementSpareParticleScanBindGroup = createCachedExplicitBindGroup(device, {
           layout: spareParticleScanInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: productPlacementSpareParticleGroupCountBuffer } },
@@ -3607,7 +3638,7 @@ export async function runSphReactionSummaryWebGpu({
           ]
         });
         productPlacementSpareScatterPipeline = spareScatterInfo.pipeline;
-        productPlacementSpareScatterBindGroup = device.createBindGroup({
+        productPlacementSpareScatterBindGroup = createCachedExplicitBindGroup(device, {
           layout: spareScatterInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: productPlacementSpareParticlePrefixBuffer } },
@@ -3618,7 +3649,7 @@ export async function runSphReactionSummaryWebGpu({
           ]
         });
         productPlacementSpareEventMarkPipeline = spareEventMarkInfo.pipeline;
-        productPlacementSpareEventMarkBindGroup = device.createBindGroup({
+        productPlacementSpareEventMarkBindGroup = createCachedExplicitBindGroup(device, {
           layout: spareEventMarkInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: productEventBuffer } },
@@ -3631,7 +3662,7 @@ export async function runSphReactionSummaryWebGpu({
           ]
         });
         productPlacementSpareEventScanPipeline = spareEventScanInfo.pipeline;
-        productPlacementSpareEventScanBindGroup = device.createBindGroup({
+        productPlacementSpareEventScanBindGroup = createCachedExplicitBindGroup(device, {
           layout: spareEventScanInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: productPlacementSpareEventGroupCountBuffer } },
@@ -3642,7 +3673,7 @@ export async function runSphReactionSummaryWebGpu({
           ]
         });
         productPlacementSpareAssignPipeline = spareAssignInfo.pipeline;
-        productPlacementSpareAssignBindGroup = device.createBindGroup({
+        productPlacementSpareAssignBindGroup = createCachedExplicitBindGroup(device, {
           layout: spareAssignInfo.bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: productPlacementSpareEventPrefixBuffer } },

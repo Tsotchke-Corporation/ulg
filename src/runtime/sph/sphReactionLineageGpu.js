@@ -1,4 +1,8 @@
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  releaseQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 
 const owners = new WeakMap();
 const candidates = new WeakMap();
@@ -37,6 +41,10 @@ export function validateSphReactionLineageCandidate(record, device) {
  * final chain decision restores this complete record on rejection. */
 export function prepareSphReactionLineageCandidate({ device, source = null }) {
   const sourceRead = source ? borrowSphReactionLineage(device, source) : null;
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const size = (SPH_REACTION_LINEAGE_CAPACITY + 1) * SPH_REACTION_LINEAGE_ROW_WORDS * 4;
   let beforeBuffer = sourceRead?.buffer ?? null, buffer = null;
   const owner = { device, sourceRead, producerClosed: false, privateLive: false,
@@ -65,12 +73,34 @@ export function prepareSphReactionLineageCandidate({ device, source = null }) {
     }
     if (!beforeBuffer) beforeBuffer = tagWebGpuBufferDevice(device.createBuffer({
       label: 'ulg-private-reaction-lineage-empty', size, usage: 128 | 4 | 8 }), device);
-    buffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: 'ulg-private-reaction-lineage', size, usage: 128 | 4 | 8 }), device);
+    buffer = tagWebGpuBufferDevice(
+      useQueueOrderedPool
+        ? acquireQueueOrderedPooledBuffer(device, {
+            bucketKey: 'ulg-private-reaction-lineage',
+            label: 'ulg-private-reaction-lineage',
+            size,
+            usage: 128 | 4 | 8
+          })
+        : device.createBuffer({
+            label: 'ulg-private-reaction-lineage',
+            size,
+            usage: 128 | 4 | 8
+          }),
+      device
+    );
     const rawDestroy = buffer.destroy.bind(buffer);
     buffer.destroy = () => {
       if (!owner.retired) throw new TypeError('Reaction lineage is retained by its producer or readers');
-      rawDestroy();
+      if (useQueueOrderedPool) {
+        buffer.destroy = rawDestroy;
+        releaseQueueOrderedPooledBuffer(device, buffer, {
+          bucketKey: 'ulg-private-reaction-lineage',
+          size,
+          usage: 128 | 4 | 8
+        });
+      } else {
+        rawDestroy();
+      }
     };
     const record = Object.freeze({ device, beforeBuffer, buffer,
       capacity: SPH_REACTION_LINEAGE_CAPACITY, rowWords: SPH_REACTION_LINEAGE_ROW_WORDS });

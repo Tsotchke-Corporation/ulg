@@ -1,4 +1,9 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  releaseQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
@@ -122,6 +127,10 @@ export function createSphReactionResidualLedger({ device, capacity, generation }
     throw new RangeError('Residual ledger exceeds its declared GPU capacity');
   }
   let buffer=null,params=null;
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const destroyed=new Set();
   const owner={device,committed:false,closed:false,retired:false,retiring:false,readers:0,
     retire() {
@@ -136,13 +145,32 @@ export function createSphReactionResidualLedger({ device, capacity, generation }
     }};
   const destroy=()=>{const first=!owner.closed;owner.closed=true;owner.retire();return first;};
   try {
-    buffer=tagWebGpuBufferDevice(device.createBuffer({label:'ulg-reaction-residual-ledger',size,usage:128|4|8}),device);
+    buffer=tagWebGpuBufferDevice(
+      useQueueOrderedPool
+        ? acquireQueueOrderedPooledBuffer(device,{bucketKey:'ulg-reaction-residual-ledger',label:'ulg-reaction-residual-ledger',size,usage:128|4|8})
+        : device.createBuffer({label:'ulg-reaction-residual-ledger',size,usage:128|4|8}),
+      device
+    );
     const rawDestroy=buffer.destroy.bind(buffer);
     buffer.destroy=()=>{
       if(!owner.retiring) throw new TypeError('Residual ledger is retained by its producer or readers');
-      rawDestroy();
+      if(useQueueOrderedPool) {
+        buffer.destroy=rawDestroy;
+        releaseQueueOrderedPooledBuffer(device,buffer,{bucketKey:'ulg-reaction-residual-ledger',size,usage:128|4|8});
+      } else {
+        rawDestroy();
+      }
     };
-    params=device.createBuffer({label:'ulg-reaction-residual-params',size:16,usage:64|8});
+    params=useQueueOrderedPool
+      ? acquireQueueOrderedPooledBuffer(device,{bucketKey:'ulg-reaction-residual-params',label:'ulg-reaction-residual-params',size:16,usage:64|8})
+      : device.createBuffer({label:'ulg-reaction-residual-params',size:16,usage:64|8});
+    if(useQueueOrderedPool) {
+      const rawParamsDestroy=params.destroy.bind(params);
+      params.destroy=()=>{
+        params.destroy=rawParamsDestroy;
+        releaseQueueOrderedPooledBuffer(device,params,{bucketKey:'ulg-reaction-residual-params',size:16,usage:64|8});
+      };
+    }
     const record=Object.freeze({device,buffer,layout:L,capacity,generation,
       physicalPublicationAdmitted:false});
     owners.set(record,owner);
@@ -157,6 +185,7 @@ export function createSphReactionResidualLedger({ device, capacity, generation }
           || energyOutput.size<(2*particleCount*W+4)*4) {
           throw new TypeError('Residual ledger requires the complete original reaction buffers');
         }
+        if(useQueueOrderedPool) encoder.clearBuffer(buffer,0,size);
         device.queue.writeBuffer(params,0,new Uint32Array([particleCount,capacity,generation,0]));
         for(const entryPoint of ['initialize','retain_residual']) {
           const pipeline=createCachedExplicitComputePipeline(device,{code,entryPoint,

@@ -173,6 +173,8 @@ import {
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   releaseQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
@@ -8592,12 +8594,20 @@ export async function runSchroederActiveNodeListWebGpu({
   const activeNodeUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
   const activeNodeBuffer = tagWebGpuBufferDevice(
     useQueueOrderedActiveNodePool
-      ? acquireQueueOrderedPooledBuffer(device, {
-          bucketKey: 'ulg-schroeder-active-nodes-out',
-          label: 'ulg-schroeder-active-nodes-out',
-          size: plan.activeNodeByteLength,
-          usage: activeNodeUsage
-        })
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, {
+            bucketKey: 'ulg-schroeder-active-nodes-out',
+            label: 'ulg-schroeder-active-nodes-out',
+            size: plan.activeNodeByteLength,
+            usage: activeNodeUsage
+          }),
+          device,
+          {
+            bucketKey: 'ulg-schroeder-active-nodes-out',
+            size: plan.activeNodeByteLength,
+            usage: activeNodeUsage
+          }
+        )
       : device.createBuffer({
           label: 'ulg-schroeder-active-nodes-out',
           size: plan.activeNodeByteLength,
@@ -8609,15 +8619,9 @@ export async function runSchroederActiveNodeListWebGpu({
   const releaseActiveNodeBuffer = () => {
     if (activeNodeBufferReleased) return;
     activeNodeBufferReleased = true;
-    if (useQueueOrderedActiveNodePool && submissionObserved) {
-      releaseQueueOrderedPooledBuffer(device, activeNodeBuffer, {
-        bucketKey: 'ulg-schroeder-active-nodes-out',
-        size: plan.activeNodeByteLength,
-        usage: activeNodeUsage
-      });
-    } else {
-      activeNodeBuffer.destroy?.();
-    }
+    releaseOrDestroyQueueOrderedPooledBuffer(activeNodeBuffer, {
+      allowPool: useQueueOrderedActiveNodePool && submissionObserved
+    });
   };
   const paramsBuffer = sharedControlBuffers.paramsBuffer;
   const readBuffer = noFullReadback
@@ -17679,7 +17683,7 @@ export async function runSchroederSameLevelMechanicsWebGpu(args = {}) {
     ?? acquireSphParticleExactMassRead(args.sphParticleUpload, args.device,
       { mlsMpmParticleUpload: args.mlsMpmParticleUpload });
   try { return await runSchroederSameLevelMechanicsWebGpuImpl(args, sourceRead); }
-  finally { void releaseSphParticleExactMassRead(sourceRead); }
+  finally { void releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true }); }
 }
 
 async function runSchroederSameLevelMechanicsWebGpuImpl({

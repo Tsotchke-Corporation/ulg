@@ -1,6 +1,6 @@
 import { productEventLiveCountCopyDescriptor,
   validateProductEventLiveCountCopyDescriptor } from './sphResidentProductHistoryGpu.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import { createCachedExplicitBindGroup, createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
 
 // The canonical ledger currently admits only history with no residual mass.
 // Mass-bearing residuals need their own canonical M/U/S representation. Keeping
@@ -96,7 +96,7 @@ fn source_count()->u32 {return ${before ? `min(${beforeCount}[3],cfg.before[1].x
     const pipeline = createCachedExplicitComputePipeline(device, { code, entryPoint,
       label: `ulg-chain-history-${entryPoint}`, cacheKey: `ulg-chain-history-v2-${entryPoint}-${Boolean(before)}-${Boolean(sameCount)}-${sameData}`,
       bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
-    const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+    const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
       entries: resources.map((resource, binding) => ({ binding, resource })) });
     return [entryPoint, (encoder, count) => {
       const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline);

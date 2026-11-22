@@ -52,6 +52,7 @@ import {
   bindSphAerosolSpatialContinuation
 } from './sphAerosolSpatialBinding.js';
 import { ensureSphGpuParticleBufferSetBorrowLifecycle,
+  releaseOrDestroyPooledParticleBuffer,
   sphGpuParticleUploadAdvertisesExactMass, sphGpuParticleUploadAdvertisesDispersedMediumOptics, sphGpuParticleUploadExactEnergyRows,
   sphGpuParticleUploadLedgerParcels,
   markSphExactMassDerivedBuffers } from './sphGpuBuffers.js';
@@ -2559,7 +2560,7 @@ export function retireMlsMpmPostMechanicsClosureOutputsAfter(
         continue;
       }
       try {
-        buffer.destroy?.();
+        releaseOrDestroyPooledParticleBuffer(buffer, { allowPool: retirementMode.abandon !== true });
         authority.destroyedBuffers.add(buffer);
       } catch (error) {
         failures.push(error);

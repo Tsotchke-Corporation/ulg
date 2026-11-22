@@ -1,4 +1,10 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
@@ -219,14 +225,27 @@ export function createSphExactPhaseLedgerReconcileStage({ device, lineageCount, 
   for (const buffer of [inputStateBuffer, outStateBuffer, outThermoBuffer, outMechanicsBuffer]) {
     if (webGpuBufferDevice(buffer) !== device) throw new TypeError('Ledger phase reconcile buffers must share the device');
   }
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const allocPool = (label, size, usage) => (
+    useQueueOrderedPool
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+          device,
+          { bucketKey: label, size, usage }
+        )
+      : device.createBuffer({ label, size, usage })
+  );
   const massSuccessor = createSphExactMassLedgerSuccessorWebGpu({ device, sourceRead: massRead });
   let energyOutput = null, paramsBuffer = null, settled = false;
   try {
-    energyOutput = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-exact-energy-phase-ledger',
-      size: energy.energyBuffer.size,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST }), device);
-    paramsBuffer = device.createBuffer({ label: 'ulg-exact-phase-ledger-params', size: PARAMS_BYTES,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+    energyOutput = tagWebGpuBufferDevice(allocPool('ulg-exact-energy-phase-ledger',
+      energy.energyBuffer.size,
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST), device);
+    paramsBuffer = allocPool('ulg-exact-phase-ledger-params', PARAMS_BYTES,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
     device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([lineageCount, laneStride, rowCount, massRead.byteOffset / 4]));
     const bindings = ['read-only-storage', 'storage', 'storage', 'read-only-storage', 'read-only-storage',
       'storage', 'read-only-storage', 'storage', 'uniform'].map((type, binding) => computeBufferBinding(binding, type));
@@ -237,9 +256,15 @@ export function createSphExactPhaseLedgerReconcileStage({ device, lineageCount, 
       inputStateBuffer, outStateBuffer, outMechanicsBuffer, outThermoBuffer, massRead.buffer,
       massSuccessor.buffer, energy.energyBuffer, energyOutput, paramsBuffer
     ].map((buffer, binding) => ({ binding, resource: { buffer } })) });
-    const destroyOwned = () => { energyOutput?.destroy?.(); paramsBuffer?.destroy?.(); };
+    const destroyOwned = () => {
+      releaseOrDestroyQueueOrderedPooledBuffer(energyOutput);
+      releaseOrDestroyQueueOrderedPooledBuffer(paramsBuffer);
+    };
     return Object.freeze({
       encode(encoder) {
+        if (useQueueOrderedPool) {
+          encoder.clearBuffer(energyOutput, 2 * rowCount * SPH_EXACT_THERMAL_ENERGY_WORDS * 4, 16);
+        }
         // Carry the predecessor's control words first; the reconcile then
         // ORs its own error bits into them.
         for (const [index, workgroups] of [[1, 1], [0, Math.ceil(lineageCount / 64)]]) {
@@ -252,7 +277,7 @@ export function createSphExactPhaseLedgerReconcileStage({ device, lineageCount, 
       commit() {
         if (settled) throw new TypeError('Ledger phase reconcile was already settled');
         settled = true;
-        paramsBuffer.destroy?.(); paramsBuffer = null;
+        releaseOrDestroyQueueOrderedPooledBuffer(paramsBuffer); paramsBuffer = null;
         const family = massSuccessor.commit();
         let energyAdopted = false;
         return Object.freeze({
@@ -275,14 +300,16 @@ export function createSphExactPhaseLedgerReconcileStage({ device, lineageCount, 
         // uploads retain their own delegated reads. An abandoned candidate
         // must not keep the family's device record alive until device loss.
         // This replaces the caller's separate preliminary cleanup fence.
-        return releaseSphExactMassRead(committed.carrierMassRead).then(() => {
-          if (!committed.energyAdopted) energyOutput?.destroy?.();
+        return releaseSphExactMassRead(committed.carrierMassRead, { deferInBurst: true }).then(() => {
+          if (!committed.energyAdopted) releaseOrDestroyQueueOrderedPooledBuffer(energyOutput);
           releaseSphExactMassInventory(committed.carrierMassRead.family);
         });
       }
     });
   } catch (error) {
-    massSuccessor.abandon(); energyOutput?.destroy?.(); paramsBuffer?.destroy?.();
+    massSuccessor.abandon();
+    releaseOrDestroyQueueOrderedPooledBuffer(energyOutput);
+    releaseOrDestroyQueueOrderedPooledBuffer(paramsBuffer);
     throw error;
   }
 }

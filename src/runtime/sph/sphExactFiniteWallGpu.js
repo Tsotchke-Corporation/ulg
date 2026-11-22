@@ -3,7 +3,14 @@ import { borrowSphFiniteWallState, SPH_FINITE_WALL_CANONICAL_WORDS,
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT as format } from './sphExactThermalEnergyWgsl.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import {
+  createCachedExplicitComputePipeline,
+  createCachedExplicitBindGroup,
+  computeBufferBinding,
+  acquireQueueOrderedPooledBuffer,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
 const records = new WeakMap();
@@ -62,23 +69,39 @@ export function prepareSphExactFiniteWallCandidate({ device, state, particleCoun
       if (!this.destroyed || this.wallRetired || this.privateLive || this.borrows) return;
       this.wallRetired = true; this.wallBuffer?.destroy(); read.release();
     } };
+  const isRealGpuDevice = typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
   const allocate = (label, size, usage, keep = false) => {
     if (size > device.limits.maxBufferSize || ((usage & 128) && size > device.limits.maxStorageBufferBindingSize)) {
       throw new RangeError('Canonical finite wall workspace exceeds device buffer limits');
     }
-    const buffer = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    const rawBuffer = isRealGpuDevice
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+          device,
+          { bucketKey: label, size, usage }
+        )
+      : device.createBuffer({ label, size, usage });
+    const buffer = tagWebGpuBufferDevice(rawBuffer, device);
     if (keep) {
+      const hasOwnDestroy = Object.prototype.hasOwnProperty.call(buffer, 'destroy');
+      const originalDestroy = hasOwnDestroy ? buffer.destroy : null;
       const destroyBuffer = buffer.destroy.bind(buffer);
       buffer.destroy = () => {
         if (!owner.destroyed || (buffer === owner.wallBuffer && !owner.wallRetired)) {
           throw new TypeError('Finite wall successor is retained by its thermal producer or private owner');
         }
-        destroyBuffer();
+        if (hasOwnDestroy) buffer.destroy = originalDestroy;
+        else delete buffer.destroy;
+        if (isRealGpuDevice) releaseOrDestroyQueueOrderedPooledBuffer(buffer);
+        else destroyBuffer();
       };
     }
     (keep ? retained : transient).push(buffer); return buffer;
   };
-  const cleanupTransient = () => { for (const buffer of transient.splice(0)) buffer.destroy(); };
+  const cleanupTransient = () => {
+    for (const buffer of transient.splice(0)) releaseOrDestroyQueueOrderedPooledBuffer(buffer);
+  };
   const destroy = () => {
     if (owner.destroyed) return false;
     owner.destroyed = true; cleanupTransient();
@@ -88,8 +111,11 @@ export function prepareSphExactFiniteWallCandidate({ device, state, particleCoun
   const prepare = (label, code, buffers, types, x, y = 1) => {
     const p = createCachedExplicitComputePipeline(device, { cacheKey: label, label, code, entryPoint: 'main',
       bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
-    const group = device.createBindGroup({ layout: p.bindGroupLayout,
-      entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+    const group = createCachedExplicitBindGroup(device, {
+      label: `${label}-bind-group`,
+      layout: p.bindGroupLayout,
+      entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } }))
+    });
     return encoder => {
       const pass = encoder.beginComputePass({ label }); pass.setPipeline(p.pipeline);
       pass.setBindGroup(0, group); pass.dispatchWorkgroups(x, y); pass.end();

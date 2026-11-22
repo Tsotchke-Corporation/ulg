@@ -1185,10 +1185,16 @@ function destroySphGpuParticleBuffersNow(buffers, record = null) {
   // allocations recorded at admission. Mutable public aliases remain useful
   // diagnostics but must not redirect destruction to unrelated buffers.
   if (buffers.ownsStateBuffer !== false && !record?.exactMass?.retainedFamilies?.buffers.has(record.stateBuffer)) {
-    (record?.stateBuffer ?? buffers.stateBuffer)?.destroy?.();
+    const stateBuf = record?.stateBuffer ?? buffers.stateBuffer;
+    if (releaseOrDestroyQueueOrderedPooledBuffer(stateBuf)) {
+      exactMassParticleBuffers.delete(stateBuf);
+    }
   }
   if (buffers.ownsThermoBuffer !== false && !record?.exactMass?.retainedFamilies?.buffers.has(record.thermoBuffer)) {
-    (record?.thermoBuffer ?? buffers.thermoBuffer)?.destroy?.();
+    const thermoBuf = record?.thermoBuffer ?? buffers.thermoBuffer;
+    if (releaseOrDestroyQueueOrderedPooledBuffer(thermoBuf)) {
+      exactMassParticleBuffers.delete(thermoBuf);
+    }
   }
   if (buffers.ownsIdentityBuffer !== false && !record?.exactMass) {
     (record?.identityBuffer ?? buffers.identityBuffer)?.destroy?.();
@@ -2761,18 +2767,21 @@ function retireExactParticleMassOwner(record) {
   if (owner.publicationBorrow) {
     // The published descriptor is a retained view of the private producer,
     // not a second owner of its physical or auxiliary allocations.
-    owner.physicalRetirement = releaseSphParticleExactMassRead(owner.publicationBorrow);
+    owner.physicalRetirement = releaseSphParticleExactMassRead(owner.publicationBorrow, { deferInBurst: true });
     void owner.physicalRetirement.catch(error => { record.cleanupError = error; });
     return;
   }
   const rootRetirement = owner.privateRootSource && --owner.privateRootSource.owners===0
-    ? releaseSphParticleExactMassRead(owner.privateRootSource.read) : null;
+    ? releaseSphParticleExactMassRead(owner.privateRootSource.read, { deferInBurst: true }) : null;
   // Numeric windows retain their root independently of carrier identity. Close
   // fresh root admission; other original owners continue through held forks.
   releaseSphExactMassInventory(owner.family);
   void releaseSphExactMassRead(owner.read, { deferInBurst: true });
   if (owner.quantities && --owner.quantities.owners === 0) owner.quantities.value.quantityBuffer.destroy();
-  if (owner.energy && --owner.energy.owners === 0) owner.energy.value.energyBuffer.destroy();
+  if (owner.energy && --owner.energy.owners === 0) {
+    exactMassParticleBuffers.delete(owner.energy.value.energyBuffer);
+    releaseOrDestroyQueueOrderedPooledBuffer(owner.energy.value.energyBuffer);
+  }
   if (owner.parcels && --owner.parcels.owners === 0) (owner.parcels.destroy ?? owner.parcels.value.destroy)();
   owner.residentClock?.destroy();
   owner.finiteWall?.destroy();
@@ -3170,7 +3179,7 @@ export async function bindSphExactMassFusedTerminalContinuation(closure) {
   exactMassContinuationBindings.set(closure, { target });
   // Cold retirement entrances must also wait for the already-submitted G2P.
   const submittedRead = acquireSphParticleExactMassRead(target, capture.sourceRead.read.device);
-  void releaseSphParticleExactMassRead(submittedRead);
+  void releaseSphParticleExactMassRead(submittedRead, { deferInBurst: true });
   return family;
 }
 
@@ -3187,7 +3196,7 @@ export async function bindSphExactMassFusedSequenceContinuation(step) {
   // The ordinary particle retirement entrances also wait for the producer's
   // initial submission, even if nobody has acquired a downstream read yet.
   const submittedRead = acquireSphParticleExactMassRead(target, capture.sourceRead.read.device);
-  void capture.completion.then(() => releaseSphParticleExactMassRead(submittedRead));
+  void capture.completion.then(() => releaseSphParticleExactMassRead(submittedRead, { deferInBurst: true }));
   return family;
 }
 
@@ -3748,6 +3757,16 @@ export function mlsMpmGpuParticleUploadMatchesDevice(upload, device) {
     upload.materialPropertyBankParticleSizeBuffer
   ].filter(Boolean);
   return optionalBuffers.every((buffer) => webGpuBufferDevice(buffer) === device);
+}
+
+export function releaseOrDestroyPooledParticleBuffer(buffer, options) {
+  if (!buffer) return false;
+  const pooled = releaseOrDestroyQueueOrderedPooledBuffer(buffer, options);
+  if (pooled) {
+    exactMassParticleBuffers.delete(buffer);
+    exactMassMechanicsBuffers.delete(buffer);
+  }
+  return pooled;
 }
 
 export function destroyMlsMpmGpuParticleBuffers(buffers) {

@@ -71,12 +71,15 @@ import {
   deferConfirmedSubmittedWorkCleanup,
   deferSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   releaseQueueOrderedPooledBuffer,
   releaseSubmittedWorkCleanupQueueOrdered,
   unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
 
 const thermalMaterialBankWarmInputBufferCache = new WeakMap();
+const thermalMaterialBankWarmInputEmptyBufferCache = new WeakMap();
 import {
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_OFFSET_BYTES,
   SCHROEDER_SPATIAL_THERMAL_CANONICAL_PARAMS_SENTINEL,
@@ -3137,6 +3140,25 @@ function resolveMaterialBankWarmInputShaderBinding(device, {
       }
     };
   }
+  if (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice) {
+    const cacheKeyDevice = unwrapWebGpuCacheDevice(device);
+    let cachedEmpty = thermalMaterialBankWarmInputEmptyBufferCache.get(cacheKeyDevice);
+    if (!cachedEmpty) {
+      cachedEmpty = writeStorageBuffer(
+        device,
+        'ulg-sph-thermal-material-bank-warm-input-rows-empty',
+        new Float32Array(MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length)
+      );
+      thermalMaterialBankWarmInputEmptyBufferCache.set(cacheKeyDevice, cachedEmpty);
+    }
+    return {
+      buffer: cachedEmpty,
+      rowCount: 0,
+      bufferSource: 'empty',
+      borrowed: true,
+      destroy() {}
+    };
+  }
   const emptyBuffer = writeStorageBuffer(
     device,
     'ulg-sph-thermal-material-bank-warm-input-rows-empty',
@@ -4125,11 +4147,35 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       || webGpuBufferDevice(exactEnergyRows.energyBuffer) !== device)) {
     throw new TypeError('An integer energy ledger proposal requires the exact energy apply and its carrier record');
   }
-  const exactEnergyOutput = exactEnergyLedger ? tagWebGpuBufferDevice(device.createBuffer({
-    label: 'ulg-exact-energy-thermal', size: exactEnergyRows.energyBuffer.size,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  }), device) : null;
-  if (exactEnergyOutput) registerSetupFailureCleanup(() => exactEnergyOutput.destroy?.());
+  const exactEnergyUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
+  const exactEnergyOutput = exactEnergyLedger
+    ? tagWebGpuBufferDevice(
+        useQueueOrderedThermalPool
+          ? registerQueueOrderedPooledBufferReturn(
+              acquireQueueOrderedPooledBuffer(device, {
+                bucketKey: 'ulg-exact-energy-thermal',
+                label: 'ulg-exact-energy-thermal',
+                size: exactEnergyRows.energyBuffer.size,
+                usage: exactEnergyUsage
+              }),
+              device,
+              {
+                bucketKey: 'ulg-exact-energy-thermal',
+                size: exactEnergyRows.energyBuffer.size,
+                usage: exactEnergyUsage
+              }
+            )
+          : device.createBuffer({
+              label: 'ulg-exact-energy-thermal',
+              size: exactEnergyRows.energyBuffer.size,
+              usage: exactEnergyUsage
+            }),
+        device
+      )
+    : null;
+  if (exactEnergyOutput) {
+    registerSetupFailureCleanup(() => releaseOrDestroyQueueOrderedPooledBuffer(exactEnergyOutput, { allowPool: false }));
+  }
   const spatialInputBuffer = canonicalThermalProposal.proposalBuffer;
   const spatialInputBound = Boolean(spatialInputBuffer);
   // Binding 10 must always be present in the layout; a tiny placeholder
@@ -4356,7 +4402,9 @@ function createSphThermalStepWebGpuEncoderStageImpl({
     const cleaned = cleanupCommonResources();
     destroyOutputParticleBuffersNow({ aborted: true });
     // An aborted step never hands its successor energy record to an owner.
-    exactEnergyOutput?.destroy?.();
+    if (exactEnergyOutput) {
+      releaseOrDestroyQueueOrderedPooledBuffer(exactEnergyOutput, { allowPool: false });
+    }
     exactFiniteWall?.destroy();
     return cleaned;
   };
@@ -4678,13 +4726,13 @@ export async function acquireSphThermalExactMassSourceCapture(result, token, exp
       release() {
         if (completion) return completion;
         released = true;
-        completion = releaseSphParticleExactMassRead(sourceRead).then(async () => { await releasePins(); return true; });
+        completion = releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true }).then(async () => { await releasePins(); return true; });
         return completion;
       }
     });
   } catch (error) {
     const cleanup = sourceRead
-      ? releaseSphParticleExactMassRead(sourceRead).then(async () => { await releasePins(); return true; })
+      ? releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true }).then(async () => { await releasePins(); return true; })
       : Promise.resolve(releasePins());
     // Report failed admission immediately while retaining all submitted-work
     // pins until confirmed retirement, even if that proof never arrives.
@@ -4730,7 +4778,7 @@ export async function runSphThermalStepWebGpu(args = {}) {
   let result = null, physicalRead = null, sourceRetirement = null, provenanceIssued = false;
   const releaseSource = () => {
     if (!sourceRetirement) sourceRetirement = physicalRead
-      ? releaseSphParticleExactMassRead(physicalRead).then(() => capture.release())
+      ? releaseSphParticleExactMassRead(physicalRead, { deferInBurst: true }).then(() => capture.release())
       : Promise.resolve(capture.release());
     return sourceRetirement;
   };
@@ -4873,7 +4921,7 @@ async function runSphThermalStepWebGpuImpl(args = {}, exactCapture = null, onLas
         if (exactQuantities) void deferConfirmedSubmittedWorkCleanup(device, exactQuantities.destroyOutput).catch(() => {});
         if ((exactEnergy && !exactEnergyTransferred) || exactFiniteWall) {
           void deferConfirmedSubmittedWorkCleanup(device, () => {
-            if (!exactEnergyTransferred) exactEnergy?.energyBuffer.destroy?.();
+            if (!exactEnergyTransferred) releaseOrDestroyQueueOrderedPooledBuffer(exactEnergy?.energyBuffer);
             stage.destroyExactFiniteWall?.();
           }).catch(() => {});
         }

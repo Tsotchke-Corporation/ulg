@@ -1,8 +1,15 @@
 import { validateSphExactMassFormat, encodeSphExactMass }
   from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline,
-  prewarmCachedExplicitComputePipeline, deferConfirmedSubmittedWorkCleanup,
-  submitQueueOrderedFinalConsumerWork } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  prewarmCachedExplicitComputePipeline,
+  deferConfirmedSubmittedWorkCleanup,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
+  submitQueueOrderedFinalConsumerWork
+} from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactMassTransferWgsl, SPH_EXACT_MASS_TRANSFER_MAGIC }
   from './sphExactMassTransferWgsl.js';
@@ -53,21 +60,31 @@ function untilLoss(record, operation) {
     if (operation) Promise.resolve(operation).then(value => finish(value), error => finish(error, true));
   });
 }
-function allocate(device, resources, label, size, usage = USAGE) {
+function allocate(device, resources, label, size, usage = USAGE, poolable = false) {
   const limit = Math.min(device.limits?.maxBufferSize ?? 268435456,
     usage & STORAGE ? device.limits?.maxStorageBufferBindingSize ?? 134217728 : Infinity);
   if (!Number.isSafeInteger(size) || size <= 0 || size % 4 || size > limit) {
     throw new RangeError(`${label} exceeds exact-mass buffer limits`);
   }
-  const buffer = device.createBuffer({ label, size, usage });
+  const usePool = poolable
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
+  const buffer = usePool
+    ? registerQueueOrderedPooledBufferReturn(
+        acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+        device,
+        { bucketKey: label, size, usage }
+      )
+    : device.createBuffer({ label, size, usage });
   resources.add(buffer); tagWebGpuBufferDevice(buffer, device); return buffer;
 }
 function destroy(record) {
   if (record.destroyed) return;
   record.destroyed = true;
+  const allowPool = !record.deviceState.lost && !record.quarantined;
   for (const buffer of record.resources) {
     try { if (buffer.mapState === 'mapped') buffer.unmap(); } catch { /* Confirmed loss. */ }
-    try { buffer.destroy(); } catch { /* Continue releasing the remaining owned buffers. */ }
+    try { releaseOrDestroyQueueOrderedPooledBuffer(buffer, { allowPool }); } catch { /* Continue releasing the remaining owned buffers. */ }
   }
   record.resources.clear(); record.deviceState.records.delete(record);
 }
@@ -313,7 +330,7 @@ export function createSphExactMassLedgerSuccessorWebGpu({ device, sourceRead } =
   const record = recordFor(device, source.format, rowCount, generation);
   try {
     record.buffer = allocate(device, record.resources, 'ulg-exact-mass-ledger-phase-successor',
-      rowCount * source.format.wordCount * 4);
+      rowCount * source.format.wordCount * 4, USAGE, true);
     const family = mintFamily(record, Object.freeze({ kind: 'ledger-phase-carrier-transfer',
       sourceGeneration: sourceRead.generation, carrierRowCount: rowCount }));
     let settled = false;

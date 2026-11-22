@@ -22,10 +22,13 @@ import {
   resolveSphExactReactionRoutingCandidate
 } from './sphExactReactionRoutingGpu.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   releaseSubmittedWorkCleanupQueueOrdered
 } from '../webgpuComputeLayout.js';
 
@@ -642,8 +645,14 @@ export function acquireSphReactionWarmArenaWebGpu({
     && !candidate.destroyed
   )) ?? null;
   let bufferCreationCount = 0;
+  const maxWarmArenaSlots = (
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  )
+    ? Math.max(10, REACTION_WARM_ARENA_MAX_SLOTS_PER_CAPACITY)
+    : REACTION_WARM_ARENA_MAX_SLOTS_PER_CAPACITY;
   if (!record) {
-    if (bucket.records.length >= REACTION_WARM_ARENA_MAX_SLOTS_PER_CAPACITY) {
+    if (bucket.records.length >= maxWarmArenaSlots) {
       const error = placementEpochError(
         `reaction warm arena ${descriptor.capacityKey} is under bounded backpressure`,
         'WARM_ARENA_BACKPRESSURE'
@@ -1296,7 +1305,7 @@ function submitFrozenFamilyCopy(device, family) {
 function destroyOnce(record, key, value) {
   if (record.destroyed.has(key)) return;
   record.destroyed.add(key);
-  try { value?.destroy?.(); } catch { /* Siblings still receive their one terminal attempt. */ }
+  try { releaseOrDestroyQueueOrderedPooledBuffer(value); } catch { /* Siblings still receive their one terminal attempt. */ }
 }
 
 function destroyPlacementAuxiliaryResources(record) {
@@ -2841,22 +2850,51 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     stableIdentityBuffer, ancestor.execution.directoryBuffer, ancestor.source.sourceBuffer,
     ancestor.source.sourceStateBuffer
   ].filter(Boolean));
-  const allocateDestination = (ownerDevice, label, bytes) => {
-    const buffer = createPlacedDestinationBuffer(ownerDevice, label, bytes);
+  const useQueueOrderedDestPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const allocateDestination = (ownerDevice, label, bytes, poolable = false) => {
+    const destUsage = GPU_BUFFER_USAGE.STORAGE
+      | GPU_BUFFER_USAGE.COPY_SRC
+      | GPU_BUFFER_USAGE.COPY_DST;
+    let buffer;
+    if (useQueueOrderedDestPool && poolable) {
+      const normalizedBytes = Math.max(4, bytes);
+      const candidate = acquireQueueOrderedPooledBuffer(ownerDevice, {
+        bucketKey: label,
+        label,
+        size: normalizedBytes,
+        usage: destUsage
+      });
+      if (protectedDestinations.has(candidate) || allocatedDestinations.has(candidate)) {
+        buffer = createPlacedDestinationBuffer(ownerDevice, label, bytes);
+      } else {
+        buffer = tagWebGpuBufferDevice(
+          registerQueueOrderedPooledBufferReturn(candidate, ownerDevice, {
+            bucketKey: label,
+            size: normalizedBytes,
+            usage: destUsage
+          }),
+          ownerDevice
+        );
+      }
+    } else {
+      buffer = createPlacedDestinationBuffer(ownerDevice, label, bytes);
+    }
     if (protectedDestinations.has(buffer) || allocatedDestinations.has(buffer)) {
       throw placementEpochError('allocated placement destination aliases an original source or sibling', 'DESTINATION_ALIAS');
     }
     allocatedDestinations.add(buffer);
     if (!Number.isSafeInteger(buffer.size) || buffer.size < bytes
-        || (buffer.usage & (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST))
-          !== (GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST)) {
+        || (buffer.usage & destUsage) !== destUsage) {
       throw placementEpochError('allocated placement destination does not cover its original extent and usage', 'QUANTITY_CAPACITY');
     }
     return buffer;
   };
   const destroyAllocatedDestinations = () => {
     for (const buffer of allocatedDestinations) {
-      try { buffer?.destroy?.(); } catch { /* Retire independent siblings too. */ }
+      try { releaseOrDestroyQueueOrderedPooledBuffer(buffer, { allowPool: false }); } catch { /* Retire independent siblings too. */ }
     }
     allocatedDestinations.clear();
   };
@@ -2864,17 +2902,20 @@ export async function runSchroederSpatialReactionPlacementEpochWebGpu({
     destinationState ||= allocateDestination(
       device,
       'ulg-schroeder-reaction-placement-state-destination',
-      stateBytes
+      stateBytes,
+      true
     );
     destinationThermo ||= allocateDestination(
       device,
       'ulg-schroeder-reaction-placement-thermo-destination',
-      thermoBytes
+      thermoBytes,
+      true
     );
     destinationMechanics ||= allocateDestination(
       device,
       'ulg-schroeder-reaction-placement-mechanics-destination',
-      mechanicsBytes
+      mechanicsBytes,
+      true
     );
     if (exactQuantities) {
       destinationQuantity = allocateDestination(device,

@@ -25,6 +25,7 @@ import {
 } from '../webgpuComputeLayout.js';
 
 const mechanicsMaterialBankWarmInputBufferCache = new WeakMap();
+const mechanicsMaterialBankWarmInputEmptyBufferCache = new WeakMap();
 import { MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT } from '../material/materialPropertyBank.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
@@ -354,6 +355,25 @@ function resolveMechanicsMaterialBankWarmInputShaderBinding(device, {
         }
       };
     }
+  }
+  if (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice) {
+    const cacheKeyDevice = unwrapWebGpuCacheDevice(device);
+    let cachedEmpty = mechanicsMaterialBankWarmInputEmptyBufferCache.get(cacheKeyDevice);
+    if (!cachedEmpty) {
+      cachedEmpty = writeStorageBuffer(
+        device,
+        'ulg-mls-mpm-mechanics-material-bank-warm-input-rows-empty',
+        new Float32Array(MATERIAL_PROPERTY_BANK_GPU_WARM_INPUT_ROW_LAYOUT.length)
+      );
+      mechanicsMaterialBankWarmInputEmptyBufferCache.set(cacheKeyDevice, cachedEmpty);
+    }
+    return {
+      buffer: cachedEmpty,
+      rowCount: 0,
+      bufferSource: 'empty',
+      borrowed: true,
+      destroy() {}
+    };
   }
   const emptyBuffer = writeStorageBuffer(
     device,
@@ -1017,6 +1037,10 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     }
     buffer.destroy?.();
   };
+  const retainAuthorityValidation = Boolean(
+    exact?.retainAcceptance
+    || (retainOutputParticleBuffers && (!noFullReadback || args.postMechanicsSourceCapture != null))
+  );
   const cleanup = () => {
     if (cleanupComplete) return;
     let firstError = null;
@@ -1025,7 +1049,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
       !borrowedThermoBuffer ? thermoBuffer : null,
       !borrowedMechanicsBuffer ? mechanicsBuffer : null,
       paramsBuffer,
-      exact?.retainAcceptance || retainOutputParticleBuffers ? null : authorityValidationBuffer,
+      retainAuthorityValidation ? null : authorityValidationBuffer,
       !retainOutputParticleBuffers ? outMechanicsBuffer : null
     ]) {
       try {

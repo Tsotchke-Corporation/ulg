@@ -41,7 +41,12 @@ import {
   encodeSphParticipatingMediumPack,
   encodeSphParticipatingMediumRender
 } from '../runtime/sph/sphParticipatingMediumGpu.js';
-import { deferSubmittedWorkCleanup } from '../runtime/webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../runtime/webgpuComputeLayout.js';
 import { ISOSURFACE_MOTION_WGSL } from '../visualization/isosurfaceMotionWgsl.js';
 import { encodeNativeSurfaceTemperatureRowsWebGpu } from '../visualization/nativeSurfaceTemperatureWgsl.js';
 import { createIsosurfaceMotionPacing, createPresentationPauseClock, isosurfaceMotionAge, resumeIsosurfaceMotionPacing, slowIsosurfaceMotionPacing, snapshotIsosurfaceSourceTimingBootstrap } from './workerOwnedIsosurfaceMotion.js';
@@ -797,7 +802,7 @@ function releaseExtensionFrameSurface(surface, reason) {
     // Device teardown is the final ownership boundary.
   }
   try {
-    surface?.uniformBuffer?.destroy?.();
+    releaseOrDestroyQueueOrderedPooledBuffer(surface?.uniformBuffer);
   } catch {
     // Device teardown is the final ownership boundary.
   }
@@ -2191,13 +2196,32 @@ export function createWorkerOwnedIsosurfacePresenter({
           retainDrawIndirectRowsBuffer: true,
           waitForQueueCompletion: false
         });
-        const uniformBuffer = device.createBuffer({
-          label: `ulg-worker-owned-isosurface-uniform-${descriptor.surfaceIndex}`,
-          size: WORKER_NATIVE_SURFACE_UNIFORM_BYTES,
-          usage:
-            gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
-            | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST)
-        });
+        const uniformUsage =
+          gpuBufferUsage('UNIFORM', BUFFER_USAGE_UNIFORM)
+          | gpuBufferUsage('COPY_DST', BUFFER_USAGE_COPY_DST);
+        const uniformBuffer = (
+          typeof globalThis.GPUDevice === 'function'
+          && device instanceof globalThis.GPUDevice
+        )
+          ? registerQueueOrderedPooledBufferReturn(
+              acquireQueueOrderedPooledBuffer(device, {
+                bucketKey: 'ulg-worker-owned-isosurface-uniform',
+                label: `ulg-worker-owned-isosurface-uniform-${descriptor.surfaceIndex}`,
+                size: WORKER_NATIVE_SURFACE_UNIFORM_BYTES,
+                usage: uniformUsage
+              }),
+              device,
+              {
+                bucketKey: 'ulg-worker-owned-isosurface-uniform',
+                size: WORKER_NATIVE_SURFACE_UNIFORM_BYTES,
+                usage: uniformUsage
+              }
+            )
+          : device.createBuffer({
+              label: `ulg-worker-owned-isosurface-uniform-${descriptor.surfaceIndex}`,
+              size: WORKER_NATIVE_SURFACE_UNIFORM_BYTES,
+              usage: uniformUsage
+            });
         const temperature = item.temperatureRows;
         translation.nativeSurfaceTemperatureRows = temperature;
         Object.assign(translation.surfaceDraw, {

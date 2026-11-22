@@ -73,7 +73,7 @@ export async function prepareSphExactMechanicsRefresh(args) {
   const releaseSource = () => {
     if (!heldReleased) {
       heldReleased = true;
-      const cleanup = () => { destroy(acceptance); return held.release(); };
+      const cleanup = () => { destroy(acceptance, submitted); return held.release(); };
       sourceCleanup = fromVapor && submitted ? deferConfirmedSubmittedWorkCleanup(args.device, cleanup)
         : Promise.resolve(cleanup());
       void sourceCleanup.catch(() => {});

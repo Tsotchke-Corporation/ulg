@@ -47,6 +47,7 @@ import {
 } from './sphReactionEnergyAuthority.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
   cancelQueueOrderedCleanupClaim,
   createQueueOrderedCleanupClaimIssuer,
@@ -54,6 +55,8 @@ import {
   createCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
   releaseSubmittedWorkCleanupQueueOrdered,
@@ -3653,7 +3656,7 @@ async function runCapturedExactReactionStep({ selection, expected, mlsMpmParticl
           ? releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipQueueOrdered(family, { queueOrderedFinalConsumer, preserveBuffers })
           : releaseSchroederSpatialReactionPlacementTransferredDestinationOwnershipAfterQueue(family, { preserveBuffers }))
         : (family ? releaseSchroederSpatialReactionPlacementSourceFamilyAfterQueue(family, { abandon: true }) : true);
-      const carrierRelease = carrierRead ? releaseSphExactMassRead(carrierRead) : Promise.resolve(true);
+      const carrierRelease = carrierRead ? releaseSphExactMassRead(carrierRead, { deferInBurst: true }) : Promise.resolve(true);
       if (massFamily) releaseSphExactMassInventory(massFamily);
       physicalRetirement = Promise.all([destinationReadRelease, destinationRelease, carrierRelease,
         releaseSourceRead(), candidateClosing ?? candidate?.release()]).then(() => true);
@@ -3967,7 +3970,7 @@ export async function runSphReactionStepWebGpu({
   const registerReactionOwnedBuffers = (buffers) => {
     for (const buffer of buffers || []) registerReactionOwnedBuffer(buffer);
   };
-  const destroyReactionOwnedBuffer = (buffer) => {
+  const destroyReactionOwnedBuffer = (buffer, { allowPool = true } = {}) => {
     if (!buffer || !reactionOwnedBufferRegistry.delete(buffer)) return false;
     if (buffer === pairAllocationBuffer && pairAllocationCapture) reactionPairAllocations.delete(pairAllocationCapture);
     try {
@@ -3975,7 +3978,11 @@ export async function runSphReactionStepWebGpu({
     } catch {
       // A lost or failed map may already be terminal.
     }
-    try { buffer.destroy?.(); } catch { /* continue registry drain */ }
+    try {
+      releaseOrDestroyQueueOrderedPooledBuffer(buffer, {
+        allowPool: allowPool && reactionPrimarySubmissionObserved === true
+      });
+    } catch { /* continue registry drain */ }
     return true;
   };
   const destroyLocalResponseGraphUpload = () => {
@@ -3991,7 +3998,7 @@ export async function runSphReactionStepWebGpu({
   };
   const drainReactionResourceRegistry = () => {
     for (const buffer of [...reactionOwnedBufferRegistry]) {
-      destroyReactionOwnedBuffer(buffer);
+      destroyReactionOwnedBuffer(buffer, { allowPool: false });
     }
     destroyLocalResponseGraphUpload();
     return true;
@@ -4057,23 +4064,49 @@ export async function runSphReactionStepWebGpu({
   reactionWarmBufferSet = new Set(
     Object.values(reactionWarmBuffers ?? {}).filter(Boolean)
   );
+  const useQueueOrderedReactionPool = Boolean(
+    noFullReadback
+    && !reactionWarmBuffers
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const acquireReactionPooledBuffer = (bucketKey, size, usage) => tagWebGpuBufferDevice(
+    registerQueueOrderedPooledBufferReturn(
+      acquireQueueOrderedPooledBuffer(device, { bucketKey, label: bucketKey, size, usage }),
+      device,
+      { bucketKey, size, usage }
+    ),
+    device
+  );
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
   const sourceUsesBorrowedGpuBuffers = Boolean(borrowedStateBuffer || borrowedThermoBuffer || borrowedMechanicsBuffer);
   const packedParticleFloatCount = sphParticleState.particleCount
     * SPH_REACTION_PACKED_PARTICLE_FLOATS;
-  const packedParticleRecords = reactionWarmBuffers
+  const packedParticleByteLength = Math.max(
+    4,
+    packedParticleFloatCount * Float32Array.BYTES_PER_ELEMENT
+  );
+  const packedParticleRecords = reactionWarmBuffers || (useQueueOrderedReactionPool && sourceUsesBorrowedGpuBuffers)
     ? null
     : (sourceUsesBorrowedGpuBuffers
       ? new Float32Array(packedParticleFloatCount)
       : packReactionParticleRecords(sphParticleState, mlsMpmParticleState));
   const packedParticleRecordBuffer = reactionWarmBuffers?.packedSource
-    || registerReactionOwnedBuffer(writeStorageBuffer(
-      device,
-      'ulg-sph-reaction-packed-source-particles',
-      packedParticleRecords
-    ));
+    || registerReactionOwnedBuffer(
+      useQueueOrderedReactionPool && sourceUsesBorrowedGpuBuffers
+        ? acquireReactionPooledBuffer(
+            'ulg-sph-reaction-packed-source-particles',
+            packedParticleByteLength,
+            GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+          )
+        : writeStorageBuffer(
+            device,
+            'ulg-sph-reaction-packed-source-particles',
+            packedParticleRecords
+          )
+    );
   const localSourceStateBuffer = sourceUsesBorrowedGpuBuffers && !borrowedStateBuffer
     ? (reactionWarmBuffers?.fallbackState || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-state-fallback', sphParticleState.state)))
     : null;
@@ -4232,32 +4265,76 @@ export async function runSphReactionStepWebGpu({
       ));
   const proposalBuffer = canonicalReactionDiscovery?.proposalBuffer
     || localProposalBuffer;
+  const reactionOutStorageUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC;
   const outPackedParticleRecordBuffer = reactionWarmBuffers?.packedOutput
-    || registerReactionOwnedBuffer(writeStorageBuffer(
-      device,
-      'ulg-sph-reaction-packed-output-particles',
-      new Float32Array(packedParticleFloatCount),
-      GPU_BUFFER_USAGE.COPY_SRC
-    ));
+    || registerReactionOwnedBuffer(
+      useQueueOrderedReactionPool
+        ? acquireReactionPooledBuffer(
+            'ulg-sph-reaction-packed-output-particles',
+            packedParticleByteLength,
+            reactionOutStorageUsage
+          )
+        : writeStorageBuffer(
+            device,
+            'ulg-sph-reaction-packed-output-particles',
+            new Float32Array(packedParticleFloatCount),
+            GPU_BUFFER_USAGE.COPY_SRC
+          )
+    );
   // Never size GPU outputs from the CPU arrays alone: under GPU-resident
   // continuation the CPU copies can be stale or detached (length 0).
-  const outStateBuffer = reactionWarmBuffers?.resolvedState || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(Math.max(
+  const outStateFloatCount = Math.max(
     sphParticleState.state.length,
     sphParticleState.particleCount * SPH_GPU_PARTICLE_STATE_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC));
-  const outThermoBuffer = reactionWarmBuffers?.resolvedThermo || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(Math.max(
+  );
+  const outThermoFloatCount = Math.max(
     sphParticleState.thermo.length,
     sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC));
-  const outMechanicsBuffer = reactionWarmBuffers?.resolvedMechanics || registerReactionOwnedBuffer(writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(Math.max(
+  );
+  const outMechanicsFloatCount = Math.max(
     mlsMpmParticleState.mechanics.length,
     mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
-  )), GPU_BUFFER_USAGE.COPY_SRC));
-  const paramsBuffer = reactionWarmBuffers?.reactionParams || registerReactionOwnedBuffer(device.createBuffer({
-    label: 'ulg-sph-reaction-params',
-    size: REACTION_PARAMS_BYTES,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-  }));
+  );
+  const outStateBuffer = reactionWarmBuffers?.resolvedState || registerReactionOwnedBuffer(
+    useQueueOrderedReactionPool
+      ? acquireReactionPooledBuffer(
+          'ulg-sph-reaction-output-state',
+          Math.max(4, outStateFloatCount * Float32Array.BYTES_PER_ELEMENT),
+          reactionOutStorageUsage
+        )
+      : writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(outStateFloatCount), GPU_BUFFER_USAGE.COPY_SRC)
+  );
+  const outThermoBuffer = reactionWarmBuffers?.resolvedThermo || registerReactionOwnedBuffer(
+    useQueueOrderedReactionPool
+      ? acquireReactionPooledBuffer(
+          'ulg-sph-reaction-output-thermo',
+          Math.max(4, outThermoFloatCount * Float32Array.BYTES_PER_ELEMENT),
+          reactionOutStorageUsage
+        )
+      : writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(outThermoFloatCount), GPU_BUFFER_USAGE.COPY_SRC)
+  );
+  const outMechanicsBuffer = reactionWarmBuffers?.resolvedMechanics || registerReactionOwnedBuffer(
+    useQueueOrderedReactionPool
+      ? acquireReactionPooledBuffer(
+          'ulg-sph-reaction-output-mechanics',
+          Math.max(4, outMechanicsFloatCount * Float32Array.BYTES_PER_ELEMENT),
+          reactionOutStorageUsage
+        )
+      : writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(outMechanicsFloatCount), GPU_BUFFER_USAGE.COPY_SRC)
+  );
+  const paramsBuffer = reactionWarmBuffers?.reactionParams || registerReactionOwnedBuffer(
+    useQueueOrderedReactionPool
+      ? acquireReactionPooledBuffer(
+          'ulg-sph-reaction-params',
+          REACTION_PARAMS_BYTES,
+          GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        )
+      : device.createBuffer({
+          label: 'ulg-sph-reaction-params',
+          size: REACTION_PARAMS_BYTES,
+          usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        })
+  );
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     gasConstitutiveOffsetVec4: reactionTable.gasConstitutiveOffsetVec4 ?? 0,
     particleCount: sphParticleState.particleCount,
@@ -4284,10 +4361,19 @@ export async function runSphReactionStepWebGpu({
         || bytes > (device.limits?.maxBufferSize ?? 268435456)) {
       throw new RangeError('Reaction pair allocation exceeds resident storage limits');
     }
-    pairAllocationBuffer = registerReactionOwnedBuffer(device.createBuffer({
-      label: 'ulg-sph-reaction-pair-allocation', size: bytes,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-    }));
+    pairAllocationBuffer = registerReactionOwnedBuffer(
+      useQueueOrderedReactionPool
+        ? acquireReactionPooledBuffer(
+            'ulg-sph-reaction-pair-allocation',
+            bytes,
+            GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+          )
+        : device.createBuffer({
+            label: 'ulg-sph-reaction-pair-allocation',
+            size: bytes,
+            usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+          })
+    );
     tagWebGpuBufferDevice(pairAllocationBuffer, device);
   }
   const pipelineDescriptors = sphReactionStepPipelineDescriptors({ sharedAllocation });
@@ -5349,7 +5435,7 @@ export async function runSphReactionStepWebGpu({
     if (reactionLedgerStage && !reactionLedgerCommitted) reactionLedgerStage.abandon();
     const cleanupCompletions = [scheduleReactionResourceRegistryDrain()];
     if (reactionLedgerCommitted) {
-      cleanupCompletions.push(reactionLedgerStage.releaseUnadopted(reactionLedgerCommitted));
+      cleanupCompletions.push(reactionLedgerStage.releaseUnadopted(reactionLedgerCommitted, { deferInBurst: false }));
     }
     if (error?.localBufferCleanupCompletion?.then) {
       cleanupCompletions.push(error.localBufferCleanupCompletion);

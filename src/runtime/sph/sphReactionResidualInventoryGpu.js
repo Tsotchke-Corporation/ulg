@@ -2,7 +2,7 @@ import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 import { validateSphReactionResidualHistoryCandidate, SPH_REACTION_RESIDUAL_HISTORY_LAYOUT as L,
   SPH_REACTION_RESIDUAL_HISTORY_ERROR } from './sphReactionResidualHistoryGpu.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import { createCachedExplicitBindGroup, createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
 
 // Reduce the original and candidate histories independently of their physical
 // row order. The existing closure owns all storage and the history producer.
@@ -99,7 +99,7 @@ fn header_valid(after_side:bool)->bool {
       cacheKey:`ulg-residual-inventory-v${L.version}-${first}`,label:'ulg-residual-inventory',
       bindings:['read-only-storage','read-only-storage','storage','storage','uniform'].map((type,binding)=>computeBufferBinding(binding,type))});
     const buffers=[first?history.beforeBuffer??history.buffer:previous,first?history.buffer:previous,output,controlBuffer,params];
-    const group=device.createBindGroup({layout:pipeline.bindGroupLayout,
+    const group=createCachedExplicitBindGroup(device,{layout:pipeline.bindGroupLayout,
       entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
     passes.push({pipeline:pipeline.pipeline,group,groups});previous=output;count=groups;
   }while(count>1);

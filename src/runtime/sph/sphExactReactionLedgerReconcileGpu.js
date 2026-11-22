@@ -1,4 +1,10 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
@@ -610,25 +616,46 @@ export function createSphExactReactionLedgerReconcileStage({ device, particleCou
       || massRead?.rowCount !== rowCount || massRead.format !== energy.format || massRead.byteOffset % 4 !== 0) {
     fail('complete carrier mass and energy records required');
   }
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const allocTemp = (label, size, usage) => (
+    useQueueOrderedPool
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+          device,
+          { bucketKey: label, size, usage }
+        )
+      : device.createBuffer({ label, size, usage })
+  );
   const massSuccessor = createSphExactMassLedgerSuccessorWebGpu({ device, sourceRead: massRead });
   let energyOutput = null, validationBuffer = null, tableBuffer = null, projectionParams = null, scratch = null, lineageCandidate = null, residualLedger = null;
   let settled = false, encoded = false;
-  const destroyOwned = () => { energyOutput?.destroy?.(); validationBuffer?.destroy?.(); tableBuffer?.destroy?.(); projectionParams?.destroy?.(); scratch?.destroy?.(); lineageCandidate?.destroy(); residualLedger?.destroy(); };
+  const destroyOwned = () => {
+    releaseOrDestroyQueueOrderedPooledBuffer(energyOutput);
+    releaseOrDestroyQueueOrderedPooledBuffer(validationBuffer);
+    releaseOrDestroyQueueOrderedPooledBuffer(tableBuffer);
+    releaseOrDestroyQueueOrderedPooledBuffer(projectionParams);
+    releaseOrDestroyQueueOrderedPooledBuffer(scratch);
+    lineageCandidate?.destroy();
+    residualLedger?.destroy();
+  };
   try {
     if (lineageSource && !privateLineage) fail('private lineage cannot return to the global diagnostic log');
     if (privateLineage) lineageCandidate = prepareSphReactionLineageCandidate({ device, source: lineageSource });
-    validationBuffer = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-exact-reaction-ledger-validation',
-      size: 32, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST }), device);
-    energyOutput = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-exact-energy-reaction-ledger',
-      size: energy.energyBuffer.size,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST }), device);
+    validationBuffer = tagWebGpuBufferDevice(allocTemp('ulg-exact-reaction-ledger-validation',
+      32, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST), device);
+    energyOutput = tagWebGpuBufferDevice(allocTemp('ulg-exact-energy-reaction-ledger',
+      energy.energyBuffer.size,
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST), device);
     const tableWords = compiledTable.words.slice();
     tableWords.set([rowCount, compiledTable.productTermTotal, massRead.byteOffset / 4, compiledTable.reactionCount], 0);
     tableWords.set([0, 0, 0, generation >>> 0], 4);
-    tableBuffer = device.createBuffer({ label: 'ulg-exact-reaction-ledger-table', size: tableWords.byteLength,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-    projectionParams = device.createBuffer({ label: 'ulg-exact-reaction-ledger-projection-params', size: 16,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+    tableBuffer = allocTemp('ulg-exact-reaction-ledger-table', tableWords.byteLength,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
+    projectionParams = allocTemp('ulg-exact-reaction-ledger-projection-params', 16,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
     device.queue.writeBuffer(projectionParams, 0, new Uint32Array([rowCount, 0, 0, 0]));
     const lineage = lineageCandidate?.record.buffer ?? sphExactReactionLedgerLineageBuffer(device);
     const bindings = ['read-only-storage', 'read-only-storage', 'read-only-storage', 'read-only-storage',
@@ -662,8 +689,13 @@ export function createSphExactReactionLedgerReconcileStage({ device, particleCou
         tableWords[6] = eventCapacity;
         device.queue.writeBuffer(tableBuffer, 0, tableWords);
         const scratchWords = SCRATCH_HEADER_WORDS + rowCount + Math.max(eventCapacity, 1) * PACKET_WORDS;
-        scratch = tagWebGpuBufferDevice(device.createBuffer({ label: 'ulg-exact-reaction-ledger-scratch', size: scratchWords * 4,
-          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST }), device);
+        scratch = tagWebGpuBufferDevice(allocTemp('ulg-exact-reaction-ledger-scratch', scratchWords * 4,
+          GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST), device);
+        if (useQueueOrderedPool) {
+          encoder.clearBuffer(validationBuffer, 0, 32);
+          encoder.clearBuffer(scratch, 0, scratchWords * 4);
+          encoder.clearBuffer(energyOutput, 2 * rowCount * SPH_EXACT_THERMAL_ENERGY_WORDS * 4, 16);
+        }
         const prepareGroup = device.createBindGroup({ layout: prepare.bindGroupLayout,
           entries: [receipt, compactCount, scratch, validationBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
         const bindGroup = device.createBindGroup({ layout: pipelines.reconcile_reaction_pairs.bindGroupLayout,
@@ -694,8 +726,9 @@ export function createSphExactReactionLedgerReconcileStage({ device, particleCou
       commit() {
         if (settled || !encoded) fail('reconcile must be encoded once before commit');
         settled = true;
-        tableBuffer.destroy?.(); tableBuffer = null; projectionParams.destroy?.(); projectionParams = null;
-        scratch.destroy?.(); scratch = null;
+        releaseOrDestroyQueueOrderedPooledBuffer(tableBuffer); tableBuffer = null;
+        releaseOrDestroyQueueOrderedPooledBuffer(projectionParams); projectionParams = null;
+        releaseOrDestroyQueueOrderedPooledBuffer(scratch); scratch = null;
         const family = massSuccessor.commit();
         let energyAdopted = false;
         return Object.freeze({
@@ -716,10 +749,10 @@ export function createSphExactReactionLedgerReconcileStage({ device, particleCou
         if (settled) return false;
         settled = true; massSuccessor.abandon(); destroyOwned(); return true;
       },
-      releaseUnadopted(committed) {
-        return releaseSphExactMassRead(committed.carrierMassRead).then(() => {
-          if (!committed.energyAdopted) energyOutput.destroy();
-          validationBuffer.destroy();
+      releaseUnadopted(committed, { deferInBurst = true } = {}) {
+        return releaseSphExactMassRead(committed.carrierMassRead, { deferInBurst }).then(() => {
+          if (!committed.energyAdopted) releaseOrDestroyQueueOrderedPooledBuffer(energyOutput);
+          releaseOrDestroyQueueOrderedPooledBuffer(validationBuffer);
           lineageCandidate?.destroy();
           residualLedger?.destroy();
           releaseSphExactMassInventory(committed.carrierMassRead.family);

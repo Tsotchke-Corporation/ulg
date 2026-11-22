@@ -245,6 +245,7 @@ const resolverFamilies = [
       entrypoints: [
         { module: 'src/runtime/material/propertyProvenance.js', exports: ['materialDerivationSummary', 'requireFirstPrinciplesMaterialProperties'] },
         { module: 'src/runtime/material/MaterialRegistry.js', exports: ['MaterialRegistry'] },
+        { module: 'src/runtime/material/materialResolverPipeline.js', exports: ['createMaterialResolverPipeline', 'MATERIAL_RESOLVER_PIPELINE_SCHEMA'] },
         { module: 'src/runtime/material/materialPropertyBank.js', exports: ['normalizeMaterialPropertyBank', 'materialPropertyBankWarmInput'] },
         { module: 'src/runtime/sph/sphLocalClosureCache.js', exports: ['createSphLocalCacheLookup', 'createPeerClosureCacheWrite'] },
         { module: 'src/runtime/sph/sphColdStartCache.js', exports: ['parseSphColdStartCacheSnapshot', 'emptySphStaticTableCache'] }

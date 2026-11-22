@@ -29,10 +29,10 @@ const C = 2.99792458e8;
 const BOHR_M = 5.29177210903e-11;
 const HARTREE_EV = 27.211386245988;
 const HBAR_EV_S = 6.582119569e-16;
-const INTERBAND_STRENGTH_SCALE = 0.025;
+const INTERBAND_STRENGTH_SCALE = 0.36;
 const INTERBAND_MIN_DAMPING_EV = 0.22;
-const INTERBAND_DAMPING_FRACTION = 0.35;
-const INTERBAND_ELECTRON_GAS_BROADENING_SCALE = 0.06;
+const INTERBAND_DAMPING_FRACTION = 0.22;
+const INTERBAND_ELECTRON_GAS_BROADENING_SCALE = 0.04;
 const INTERBAND_MAX_RAW_EV = 12;
 const INTERBAND_MAX_OSCILLATORS = 6;
 const OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM = Object.freeze([380, 430, 480, 530, 580, 630, 680, 730, 780]);
@@ -1236,10 +1236,11 @@ function rawRelativisticInterbandTransitions(atomicNumberZ, options = {}) {
   const gridPointsN = options.gridPointsN ?? 900;
   const rMaxBohr = options.rMaxBohr ?? 42;
   const maxScf = options.maxScf ?? 160;
-  const key = `${atomicNumberZ}:${gridPointsN}:${rMaxBohr}:${maxScf}`;
+  const key = `${atomicNumberZ}:${gridPointsN}:${rMaxBohr}:${maxScf}:so`;
   if (interbandTransitionCache.has(key)) return interbandTransitionCache.get(key);
   const atom = solveAtom(atomicNumberZ, {
     scalarRelativistic: true,
+    spinOrbit: true,
     configuration: augmentedInterbandConfiguration(atomicNumberZ),
     gridPointsN,
     rMaxBohr,
@@ -1250,10 +1251,12 @@ function rawRelativisticInterbandTransitions(atomicNumberZ, options = {}) {
   const transitions = [];
   for (const from of occupied) {
     if (from.l < 2) continue;
+    // Upper spin-orbit edge j = l + 1/2 (e.g., 5d_5/2 in Au) governs the visible absorption onset.
+    const fromEnergyHa = Number.isFinite(from.energyJPlusHa) ? from.energyJPlusHa : from.energyHa;
     for (const to of targets) {
       if (to.n === from.n && to.l === from.l) continue;
-      if (Math.abs(to.l - from.l) !== 1 || to.energyHa <= from.energyHa) continue;
-      const rawEnergyEv = (to.energyHa - from.energyHa) * HARTREE_EV;
+      if (Math.abs(to.l - from.l) !== 1 || to.energyHa <= fromEnergyHa) continue;
+      const rawEnergyEv = (to.energyHa - fromEnergyHa) * HARTREE_EV;
       if (!(rawEnergyEv > 0) || rawEnergyEv > INTERBAND_MAX_RAW_EV) continue;
       const angular = to.l > from.l
         ? (from.l + 1) / (2 * from.l + 1)

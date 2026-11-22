@@ -61,6 +61,7 @@ struct TransportParams {
 @group(0) @binding(7) var<storage, read_write> parcel_target: array<u32>;
 @group(0) @binding(8) var<storage, read_write> sinks: array<u32>;
 @group(0) @binding(9) var<storage, read_write> carrier_mechanics: array<vec4<f32>>;
+@group(0) @binding(10) var<storage, read_write> prep: array<atomic<u32>>;
 
 const PI: f32 = 3.14159265358979;
 const RHO_W: f32 = 1000.0;
@@ -70,6 +71,10 @@ const WALL: u32 = 0xfffffffeu;
 const E_ARITHMETIC: u32 = ${SPH_EXACT_PARCEL_TRANSPORT_ERROR.ARITHMETIC}u;
 const E_STOKES: u32 = ${SPH_EXACT_PARCEL_TRANSPORT_ERROR.STOKES_DECLARATION}u;
 
+// prep layout (atomic<u32>):
+//   [0] water_count, [1] carrier_dep_count, [2] any_dep_count, [3] pad
+//   [4 .. 4 + 4*C)       per-cell gas velocity (vx, vy, vz, mass) bitcast as u32
+//   [4 + 4*C .. +5*N)    compacted condensed water carriers (px, py, pz, half_edge, row)
 fn rows() -> u32 { return params.counts.x * EM_WORDS; }
 fn flag(bits: u32) { atomicOr(&carrier_energy[2u * rows()], bits); }
 fn load_parcel(p: u32, slot: u32) -> ExactMass {
@@ -91,63 +96,191 @@ fn is_water_carrier(row: u32) -> bool {
   return bitcast<u32>(t.x) == params.counts.w && (phase == 1u || phase == 2u) && carrier_state[row * 2u].w > 0.0;
 }
 
-// Pass 1, one thread per airborne parcel: move it, then choose its fate.
-@compute @workgroup_size(64)
-fn transport_parcels(@builtin(global_invocation_id) id: vec3<u32>) {
-  let p = id.x;
-  if (p >= params.counts.y) { return; }
-  parcel_target[p] = NONE;
-  let base = p * PARAM_FLOATS;
-  let n = max(parcels[base + 3u], 1.0);
-  let water = load_parcel(p, 1u); let dry = load_parcel(p, 0u);
-  if (em_zero(water) && em_zero(dry)) { return; }
-  var position = vec3<f32>(parcels[base], parcels[base + 1u], parcels[base + 2u]);
-  // Cell gas velocity: mass-weighted over gas carriers in the parcel's cell.
-  let local = (position - params.grid.xyz) / params.grid.w;
+// Pass 0a, one thread per carrier: compact condensed water carriers and precompute half_edge once.
+@compute @workgroup_size(256)
+fn prep_water_carriers(@builtin(global_invocation_id) id: vec3<u32>) {
+  let row = id.x;
+  if (row >= params.counts.x || !is_water_carrier(row)) { return; }
+  let s0 = carrier_state[row * 2u];
+  let half_edge = 0.5 * pow(s0.w / RHO_W, 1.0 / 3.0);
+  let slot = atomicAdd(&prep[0u], 1u);
+  let base = 4u + params.counts.z * 4u + slot * 5u;
+  atomicStore(&prep[base], bitcast<u32>(s0.x));
+  atomicStore(&prep[base + 1u], bitcast<u32>(s0.y));
+  atomicStore(&prep[base + 2u], bitcast<u32>(s0.z));
+  atomicStore(&prep[base + 3u], bitcast<u32>(half_edge));
+  atomicStore(&prep[base + 4u], row);
+}
+
+var<workgroup> sh_mom_gas: array<vec4<f32>, 128>;
+
+// Pass 0b, one 128-thread workgroup per gas cell: deterministic mass-weighted cell gas velocity.
+@compute @workgroup_size(128)
+fn reduce_cell_gas(
+  @builtin(workgroup_id) wg_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let c = wg_id.x;
+  let lid = local_id.x;
+  if (c >= params.counts.z) { return; }
   let dims = vec3<i32>(params.dims.xyz);
-  let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), dims - vec3<i32>(1));
-  var momentum = vec3<f32>(0.0); var gas = 0.0;
-  for (var row = 0u; row < params.counts.x; row++) {
+  let ci = i32(c);
+  let cell = vec3<i32>(ci % dims.x, (ci / dims.x) % dims.y, ci / (dims.x * dims.y));
+  var mom = vec3<f32>(0.0);
+  var gas = 0.0;
+  for (var row = lid; row < params.counts.x; row += 128u) {
     let s0 = carrier_state[row * 2u];
     if (u32(carrier_thermo[row * 3u].y + 0.5) != 3u || s0.w <= 0.0) { continue; }
     let rc = clamp(vec3<i32>(floor((s0.xyz - params.grid.xyz) / params.grid.w)), vec3<i32>(0), dims - vec3<i32>(1));
     if (any(rc != cell)) { continue; }
-    momentum += s0.w * carrier_state[row * 2u + 1u].xyz; gas += s0.w;
+    mom += s0.w * carrier_state[row * 2u + 1u].xyz;
+    gas += s0.w;
   }
-  let gas_velocity = select(vec3<f32>(0.0), momentum / gas, gas > 0.0);
-  // Stokes settling with the Cunningham correction.
-  let m_d = view(dry) / n; let m_w = view(water) / n;
-  let dry_density = parcels[base + 4u];
-  let volume = m_w / RHO_W + m_d / dry_density;
-  let r = pow(3.0 * volume / (4.0 * PI), 1.0 / 3.0);
-  let rho_p = (m_w + m_d) / max(volume, 1.0e-36);
-  let kn = params.air.w / r;
-  let slip = 1.0 + kn * (1.257 + 0.4 * exp(-1.1 / kn));
-  let relaxation = rho_p * (2.0 * r) * (2.0 * r) * slip / (18.0 * params.air.z);
-  if (relaxation > params.box.w) { flag(E_STOKES); return; }
-  let settling = relaxation * (1.0 - params.air.y / rho_p) * params.air.x;
-  let velocity = gas_velocity + vec3<f32>(0.0, settling, 0.0);
-  position += velocity * params.box.w;
-  parcels[base] = position.x; parcels[base + 1u] = position.y; parcels[base + 2u] = position.z;
-  parcels[base + 7u] = r;
-  if (any(position < vec3<f32>(0.0)) || any(position > params.box.xyz)) { parcel_target[p] = WALL; return; }
+  sh_mom_gas[lid] = vec4<f32>(mom, gas);
+  workgroupBarrier();
+  for (var stride = 64u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      sh_mom_gas[lid] += sh_mom_gas[lid + stride];
+    }
+    workgroupBarrier();
+  }
+  if (lid == 0u) {
+    let total = sh_mom_gas[0u];
+    let vel = select(vec3<f32>(0.0), total.xyz / total.w, total.w > 0.0);
+    let base = 4u + c * 4u;
+    atomicStore(&prep[base], bitcast<u32>(vel.x));
+    atomicStore(&prep[base + 1u], bitcast<u32>(vel.y));
+    atomicStore(&prep[base + 2u], bitcast<u32>(vel.z));
+    atomicStore(&prep[base + 3u], bitcast<u32>(total.w));
+  }
+}
+
+var<workgroup> sh_parcel_pos_r: vec4<f32>;
+var<workgroup> sh_parcel_active: u32;
+var<workgroup> sh_water_count: u32;
+var<workgroup> sh_best_d2: array<f32, 128>;
+var<workgroup> sh_best_row: array<u32, 128>;
+
+// Pass 1, one 128-thread workgroup per parcel: O(1) gas velocity lookup, Stokes move,
+// then parallel associative min-reduction over compacted condensed water carriers.
+@compute @workgroup_size(128)
+fn transport_parcels(
+  @builtin(workgroup_id) wg_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let p = wg_id.x;
+  let lid = local_id.x;
+  if (p >= params.counts.y) { return; }
+  if (lid == 0u) {
+    sh_parcel_active = 0u;
+    sh_water_count = atomicLoad(&prep[0u]);
+    parcel_target[p] = NONE;
+    let base = p * PARAM_FLOATS;
+    let n = max(parcels[base + 3u], 1.0);
+    let water = load_parcel(p, 1u);
+    let dry = load_parcel(p, 0u);
+    if (!em_zero(water) || !em_zero(dry)) {
+      var position = vec3<f32>(parcels[base], parcels[base + 1u], parcels[base + 2u]);
+      let local = (position - params.grid.xyz) / params.grid.w;
+      let dims = vec3<i32>(params.dims.xyz);
+      let cell = clamp(vec3<i32>(floor(local)), vec3<i32>(0), dims - vec3<i32>(1));
+      let c = u32(cell.x + dims.x * (cell.y + dims.y * cell.z));
+      let cbase = 4u + c * 4u;
+      let gas_velocity = vec3<f32>(
+        bitcast<f32>(atomicLoad(&prep[cbase])),
+        bitcast<f32>(atomicLoad(&prep[cbase + 1u])),
+        bitcast<f32>(atomicLoad(&prep[cbase + 2u]))
+      );
+      // Stokes settling with the Cunningham correction.
+      let m_d = view(dry) / n;
+      let m_w = view(water) / n;
+      let dry_density = parcels[base + 4u];
+      let volume = m_w / RHO_W + m_d / dry_density;
+      let r = pow(3.0 * volume / (4.0 * PI), 1.0 / 3.0);
+      let rho_p = (m_w + m_d) / max(volume, 1.0e-36);
+      let kn = params.air.w / r;
+      let slip = 1.0 + kn * (1.257 + 0.4 * exp(-1.1 / kn));
+      let relaxation = rho_p * (2.0 * r) * (2.0 * r) * slip / (18.0 * params.air.z);
+      if (relaxation > params.box.w) {
+        flag(E_STOKES);
+      } else {
+        let settling = relaxation * (1.0 - params.air.y / rho_p) * params.air.x;
+        let velocity = gas_velocity + vec3<f32>(0.0, settling, 0.0);
+        position += velocity * params.box.w;
+        parcels[base] = position.x;
+        parcels[base + 1u] = position.y;
+        parcels[base + 2u] = position.z;
+        parcels[base + 7u] = r;
+        if (any(position < vec3<f32>(0.0)) || any(position > params.box.xyz)) {
+          parcel_target[p] = WALL;
+          atomicAdd(&prep[2u], 1u);
+        } else {
+          sh_parcel_pos_r = vec4<f32>(position, r);
+          sh_parcel_active = 1u;
+        }
+      }
+    }
+  }
+  let is_active = workgroupUniformLoad(&sh_parcel_active);
+  if (is_active == 0u) { return; }
+  let water_count = workgroupUniformLoad(&sh_water_count);
+  if (water_count == 0u) { return; }
+  let pos_r = sh_parcel_pos_r;
+  let position = pos_r.xyz;
+  let r = pos_r.w;
+  let list_base = 4u + params.counts.z * 4u;
   // Nearest condensed water carrier within contact distance (lowest row on ties).
-  var best = NONE; var best_d2 = 3.4e38;
-  for (var row = 0u; row < params.counts.x; row++) {
-    if (!is_water_carrier(row)) { continue; }
-    let s0 = carrier_state[row * 2u];
-    let half_edge = 0.5 * pow(s0.w / RHO_W, 1.0 / 3.0);
+  var my_best = NONE;
+  var my_d2 = 3.4e38;
+  for (var idx = lid; idx < water_count; idx += 128u) {
+    let wbase = list_base + idx * 5u;
+    let wp = vec3<f32>(
+      bitcast<f32>(atomicLoad(&prep[wbase])),
+      bitcast<f32>(atomicLoad(&prep[wbase + 1u])),
+      bitcast<f32>(atomicLoad(&prep[wbase + 2u]))
+    );
+    let half_edge = bitcast<f32>(atomicLoad(&prep[wbase + 3u]));
     let reach = half_edge + r;
-    let d = s0.xyz - position;
+    let d = wp - position;
     let d2 = dot(d, d);
-    if (d2 <= reach * reach && d2 < best_d2) { best = row; best_d2 = d2; }
+    if (d2 <= reach * reach) {
+      let row = atomicLoad(&prep[wbase + 4u]);
+      if (d2 < my_d2 || (d2 == my_d2 && row < my_best)) {
+        my_best = row;
+        my_d2 = d2;
+      }
+    }
   }
-  parcel_target[p] = best;
+  sh_best_d2[lid] = my_d2;
+  sh_best_row[lid] = my_best;
+  workgroupBarrier();
+  for (var stride = 64u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      let od2 = sh_best_d2[lid + stride];
+      let orow = sh_best_row[lid + stride];
+      let cd2 = sh_best_d2[lid];
+      let crow = sh_best_row[lid];
+      if (orow != NONE && (crow == NONE || od2 < cd2 || (od2 == cd2 && orow < crow))) {
+        sh_best_d2[lid] = od2;
+        sh_best_row[lid] = orow;
+      }
+    }
+    workgroupBarrier();
+  }
+  if (lid == 0u) {
+    let best = sh_best_row[0u];
+    parcel_target[p] = best;
+    if (best != NONE) {
+      atomicAdd(&prep[1u], 1u);
+      atomicAdd(&prep[2u], 1u);
+    }
+  }
 }
 
 // Pass 2, one thread per carrier: add every parcel that deposits into it.
 @compute @workgroup_size(64)
 fn deposit_into_carriers(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (atomicLoad(&prep[1u]) == 0u) { return; }
   let row = id.x;
   if (row >= params.counts.x) { return; }
   var mass = ExactMass(); var energy = ExactMass(); var any_parcel = false;
@@ -189,6 +322,7 @@ fn deposit_into_carriers(@builtin(global_invocation_id) id: vec3<u32>) {
 // takes the dry cores of carrier-deposited parcels.
 @compute @workgroup_size(1)
 fn deposit_into_sinks() {
+  if (atomicLoad(&prep[2u]) == 0u) { return; }
   var wall_mass = load_sink(0u); var wall_energy = load_sink(1u); var solute = load_sink(2u);
   for (var p = 0u; p < params.counts.y; p++) {
     let target_row = parcel_target[p];
@@ -210,6 +344,7 @@ fn deposit_into_sinks() {
 // Pass 4, one thread per parcel: a deposited parcel's rows become exact zero.
 @compute @workgroup_size(64)
 fn retire_deposited(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (atomicLoad(&prep[2u]) == 0u) { return; }
   let p = id.x;
   if (p >= params.counts.y || parcel_target[p] == NONE) { return; }
   store_parcel(p, 0u, ExactMass()); store_parcel(p, 1u, ExactMass()); store_parcel(p, 2u, ExactMass());
@@ -222,7 +357,8 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
   waterMaterialId, airDensityKgPerM3 = 1.2, airViscosityPaS = 1.81e-5, meanFreePathM = 6.6e-8, gravityMPerS2 = -9.81,
   carrierStateBuffer, carrierThermoBuffer, carrierMassBuffer, carrierEnergyBuffer, parcelBuffer, parcelLedgerBuffer,
   sinkBuffer, carrierMechanicsBuffer = null, carrierMassRange = null } = {}) {
-  if (!(carrierCount > 0) || !(parcelCount > 0) || !(cellSizeM > 0)) fail('counts and grid required');
+  const cellCount = dims[0] * dims[1] * dims[2];
+  if (!(carrierCount > 0) || !(parcelCount > 0) || !(cellCount > 0) || !(cellSizeM > 0)) fail('counts and grid required');
   const useQueueOrderedPool = Boolean(
     typeof globalThis.GPUDevice === 'function'
     && device instanceof globalThis.GPUDevice
@@ -238,25 +374,29 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
   );
   const target = alloc('ulg-exact-parcel-target', parcelCount * 4,
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC);
+  const prepWords = 4 + cellCount * 4 + carrierCount * 5;
+  const prep = alloc('ulg-exact-parcel-transport-prep', prepWords * 4,
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
   const params = alloc('ulg-exact-parcel-transport-params', 80,
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
   const words = new ArrayBuffer(80), u = new Uint32Array(words), f = new Float32Array(words);
-  u.set([carrierCount, parcelCount, dims[0] * dims[1] * dims[2], new Uint32Array(new Float32Array([waterMaterialId]).buffer)[0]], 0);
+  u.set([carrierCount, parcelCount, cellCount, new Uint32Array(new Float32Array([waterMaterialId]).buffer)[0]], 0);
   u.set([dims[0], dims[1], dims[2], 0], 4);
   f.set([origin[0], origin[1], origin[2], cellSizeM], 8);
   f.set([boxM[0], boxM[1], boxM[2], 0], 12);
   f.set([gravityMPerS2, airDensityKgPerM3, airViscosityPaS, meanFreePathM], 16);
   const bindings = ['uniform', 'storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage',
-    'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
-  const pipelines = Object.fromEntries(['transport_parcels', 'deposit_into_carriers', 'deposit_into_sinks',
-    'retire_deposited'].map(entryPoint => [entryPoint, createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-exact-parcel-transport-${entryPoint}.v2`, label: `ulg-exact-parcel-transport-${entryPoint}`,
-    code: sphExactParcelTransportLedgerWgsl, entryPoint, bindings })]));
+    'storage', 'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
+  const pipelines = Object.fromEntries(['prep_water_carriers', 'reduce_cell_gas', 'transport_parcels',
+    'deposit_into_carriers', 'deposit_into_sinks', 'retire_deposited'].map(entryPoint => [entryPoint,
+    createCachedExplicitComputePipeline(device, {
+      cacheKey: `ulg-exact-parcel-transport-${entryPoint}.v3`, label: `ulg-exact-parcel-transport-${entryPoint}`,
+      code: sphExactParcelTransportLedgerWgsl, entryPoint, bindings })]));
   const scratchMechanics = carrierMechanicsBuffer ? null : device.createBuffer({ label: 'ulg-exact-parcel-mechanics-scratch',
     size: carrierCount * 128, usage: GPU_BUFFER_USAGE.STORAGE });
   const bindGroup = createCachedExplicitBindGroup(device, { layout: pipelines.transport_parcels.bindGroupLayout, entries: [params,
     carrierStateBuffer, carrierThermoBuffer, carrierMassBuffer, carrierEnergyBuffer, parcelBuffer, parcelLedgerBuffer,
-    target, sinkBuffer, carrierMechanicsBuffer ?? scratchMechanics].map((buffer, binding) => ({ binding,
+    target, sinkBuffer, carrierMechanicsBuffer ?? scratchMechanics, prep].map((buffer, binding) => ({ binding,
       resource: binding === 3 && carrierMassRange ? { buffer, offset: carrierMassRange.offset, size: carrierMassRange.size }
         : { buffer } })) });
   let encoded = false;
@@ -265,9 +405,15 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
     encode(encoder, dt) {
       encoded = true;
       f[15] = dt; device.queue.writeBuffer(params, 0, words);
-      for (const [name, groups] of [['transport_parcels', Math.ceil(parcelCount / 64)],
-        ['deposit_into_carriers', Math.ceil(carrierCount / 64)], ['deposit_into_sinks', 1],
-        ['retire_deposited', Math.ceil(parcelCount / 64)]]) {
+      encoder.clearBuffer(prep, 0, 16);
+      for (const [name, groups] of [
+        ['prep_water_carriers', Math.ceil(carrierCount / 256)],
+        ['reduce_cell_gas', cellCount],
+        ['transport_parcels', parcelCount],
+        ['deposit_into_carriers', Math.ceil(carrierCount / 64)],
+        ['deposit_into_sinks', 1],
+        ['retire_deposited', Math.ceil(parcelCount / 64)]
+      ]) {
         const pass = encoder.beginComputePass({ label: `ulg-exact-parcel-transport-${name}` });
         pass.setPipeline(pipelines[name].pipeline); pass.setBindGroup(0, bindGroup);
         pass.dispatchWorkgroups(groups); pass.end();
@@ -275,6 +421,7 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
     },
     destroy() {
       releaseOrDestroyQueueOrderedPooledBuffer(target, { allowPool: encoded });
+      releaseOrDestroyQueueOrderedPooledBuffer(prep, { allowPool: encoded });
       releaseOrDestroyQueueOrderedPooledBuffer(params, { allowPool: encoded });
       scratchMechanics?.destroy();
     }

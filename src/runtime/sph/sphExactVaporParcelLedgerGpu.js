@@ -206,201 +206,419 @@ fn fuchs_sutugin(kn: f32, alpha: f32) -> f32 {
   let g = 4.0 / (3.0 * alpha);
   return (1.0 + kn) / (1.0 + (g + 0.377) * kn + g * kn * kn);
 }
-// Per-droplet mass rate (kg/s); also returns S_eq in .y.
-fn droplet_rate(r: f32, r_dry: f32, kappa: f32, t: f32, p: f32, s: f32) -> vec2<f32> {
-  let c = t - 273.15;
-  let sigma = ${law.surfaceTension.a} - ${law.surfaceTension.b} * c;
-  let latent = ${law.latentHeat.a} - ${law.latentHeat.b}.0 * c;
-  let r3 = r * r * r; let d3 = r_dry * r_dry * r_dry;
+// Per-droplet mass rate (kg/s) using cell-invariant thermodynamic factors; returns S_eq in .y.
+fn droplet_rate_fast(
+  r: f32, r3: f32, d3: f32, kappa: f32, s: f32,
+  kelvin_coeff: f32, lambda_air: f32, f_k_base: f32, f_d_base: f32
+) -> vec2<f32> {
   let a_w = max(r3 - d3, 0.0) / max(r3 - d3 * (1.0 - kappa), 1.0e-36);
-  let s_eq = a_w * exp(2.0 * sigma / (RHO_W * RV * t * r));
-  let lambda = ${law.meanFreePath.l0} * (${law.meanFreePath.p0}.0 / p) * (t / ${law.meanFreePath.t0});
-  let kn = lambda / r;
-  let d_v = ${law.diffusivity.d0} * pow(t / 273.15, ${law.diffusivity.exponent}) * (${law.diffusivity.p0}.0 / p)
-    * fuchs_sutugin(kn, ${law.massAccommodation}.0);
-  let k_a = 4.1868e-3 * (${law.conductivity.a} + ${law.conductivity.b} * c) * fuchs_sutugin(kn, ${law.thermalAccommodation}.0);
-  let f_k = (latent / (RV * t) - 1.0) * latent / (k_a * t);
-  let f_d = RV * t / (d_v * saturation_pa(t));
+  let s_eq = a_w * exp(kelvin_coeff / r);
+  let kn = lambda_air / r;
+  let f_k = f_k_base / fuchs_sutugin(kn, ${law.thermalAccommodation}.0);
+  let f_d = f_d_base / fuchs_sutugin(kn, ${law.massAccommodation}.0);
   return vec2<f32>(4.0 * PI * r * (s - s_eq) / (f_k + f_d), s_eq);
 }
 
-// ---- exchange: one thread per cell ------------------------------------------
-@compute @workgroup_size(64)
-fn exchange_cells(@builtin(global_invocation_id) id: vec3<u32>) {
-  let c = id.x;
+var<workgroup> sh_gas_rows: array<u32, MAX_MEMBERS>;
+var<workgroup> sh_parcel_rows: array<u32, MAX_MEMBERS>;
+var<workgroup> sh_gas_m: array<f32, MAX_MEMBERS>;
+var<workgroup> sh_gas_u: array<f32, MAX_MEMBERS>;
+var<workgroup> sh_gas_is_vapor: array<u32, MAX_MEMBERS>;
+var<workgroup> sh_vapor_list: array<u32, MAX_MEMBERS>;
+var<workgroup> sh_f0: array<f32, MAX_MEMBERS>;
+var<workgroup> sh_f1: array<f32, MAX_MEMBERS>;
+var<workgroup> sh_f2: array<f32, MAX_MEMBERS>;
+var<workgroup> sh_f3: array<f32, MAX_MEMBERS>;
+var<workgroup> sh_em: array<ExactMass, MAX_MEMBERS>;
+var<workgroup> sh_gas_begin: u32;
+var<workgroup> sh_parcel_begin: u32;
+var<workgroup> sh_ng: u32;
+var<workgroup> sh_np: u32;
+var<workgroup> sh_nv: u32;
+var<workgroup> sh_has_work: u32;
+var<workgroup> sh_heat_to_dry_air: u32;
+var<workgroup> sh_last_heat_k: u32;
+var<workgroup> sh_vapor_mass: f32;
+var<workgroup> sh_heat_mass_sum: f32;
+var<workgroup> sh_t_air: f32;
+var<workgroup> sh_saturation: f32;
+var<workgroup> sh_u_vapor: f32;
+var<workgroup> sh_kelvin_coeff: f32;
+var<workgroup> sh_lambda_air: f32;
+var<workgroup> sh_f_k_base: f32;
+var<workgroup> sh_f_d_base: f32;
+var<workgroup> sh_k_cond: f32;
+var<workgroup> sh_total_to_gas: ExactMass;
+var<workgroup> sh_to_gas_nonzero: u32;
+var<workgroup> sh_any_vapor_changed: u32;
+
+// ---- exchange: one 128-thread workgroup per cell ----------------------------
+@compute @workgroup_size(128)
+fn exchange_cells(
+  @builtin(workgroup_id) wg_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let c = wg_id.x;
+  let lid = local_id.x;
   if (c >= cell_count()) { return; }
-  let gas_begin = atomicLoad(&cells[gas_offset_word(c)]);
-  let gas_end = atomicLoad(&cells[gas_offset_word(c + 1u)]);
-  let parcel_begin = atomicLoad(&cells[parcel_offset_word(c)]);
-  let parcel_end = atomicLoad(&cells[parcel_offset_word(c + 1u)]);
-  if (parcel_end == parcel_begin || gas_end == gas_begin) { return; }
-  if (gas_end - gas_begin > MAX_MEMBERS || parcel_end - parcel_begin > MAX_MEMBERS) { flag(E_OVERFLOW); return; }
-  // Deterministic member order: insertion sort of this cell's lists by row.
-  var gas_rows = array<u32, MAX_MEMBERS>();
-  var parcel_rows = array<u32, MAX_MEMBERS>();
-  let ng = gas_end - gas_begin; let np = parcel_end - parcel_begin;
-  for (var k = 0u; k < ng; k++) {
-    let value = atomicLoad(&cells[gas_row_word(gas_begin + k)]);
-    var j = k;
-    while (j > 0u && gas_rows[j - 1u] > value) { gas_rows[j] = gas_rows[j - 1u]; j--; }
-    gas_rows[j] = value;
+  if (lid == 0u) {
+    let gb = atomicLoad(&cells[gas_offset_word(c)]);
+    let ge = atomicLoad(&cells[gas_offset_word(c + 1u)]);
+    let pb = atomicLoad(&cells[parcel_offset_word(c)]);
+    let pe = atomicLoad(&cells[parcel_offset_word(c + 1u)]);
+    let ng = ge - gb;
+    let np = pe - pb;
+    sh_ng = ng;
+    sh_np = np;
+    sh_has_work = 0u;
+    if (np > 0u && ng > 0u) {
+      if (ng > MAX_MEMBERS || np > MAX_MEMBERS) {
+        flag(E_OVERFLOW);
+      } else {
+        sh_gas_begin = gb;
+        sh_parcel_begin = pb;
+        sh_has_work = 1u;
+      }
+    }
   }
-  for (var k = 0u; k < np; k++) {
-    let value = atomicLoad(&cells[parcel_row_word(parcel_begin + k)]);
-    var j = k;
-    while (j > 0u && parcel_rows[j - 1u] > value) { parcel_rows[j] = parcel_rows[j - 1u]; j--; }
-    parcel_rows[j] = value;
+  if (workgroupUniformLoad(&sh_has_work) == 0u) { return; }
+  let ng = workgroupUniformLoad(&sh_ng);
+  let np = workgroupUniformLoad(&sh_np);
+  let gas_begin = sh_gas_begin;
+  let parcel_begin = sh_parcel_begin;
+
+  // Deterministic ascending row order via parallel bitonic sort over 128 slots.
+  sh_gas_rows[lid] = select(0xffffffffu, atomicLoad(&cells[gas_row_word(gas_begin + lid)]), lid < ng);
+  sh_parcel_rows[lid] = select(0xffffffffu, atomicLoad(&cells[parcel_row_word(parcel_begin + lid)]), lid < np);
+  workgroupBarrier();
+  for (var k = 2u; k <= MAX_MEMBERS; k <<= 1u) {
+    for (var j = k >> 1u; j > 0u; j >>= 1u) {
+      let ixj = lid ^ j;
+      if (ixj > lid) {
+        let asc = (lid & k) == 0u;
+        let ga = sh_gas_rows[lid];
+        let gb_v = sh_gas_rows[ixj];
+        if ((asc && ga > gb_v) || (!asc && ga < gb_v)) {
+          sh_gas_rows[lid] = gb_v;
+          sh_gas_rows[ixj] = ga;
+        }
+        let pa = sh_parcel_rows[lid];
+        let pb_v = sh_parcel_rows[ixj];
+        if ((asc && pa > pb_v) || (!asc && pa < pb_v)) {
+          sh_parcel_rows[lid] = pb_v;
+          sh_parcel_rows[ixj] = pa;
+        }
+      }
+      workgroupBarrier();
+    }
   }
-  // Cell state from its gas carriers: vapor mass, mass-weighted temperature,
-  // and the vapor carriers' mass-weighted specific internal energy.
-  let volume = params.grid.w * params.grid.w * params.grid.w;
-  var vapor_mass = 0.0; var gas_mass_sum = 0.0; var t_sum = 0.0; var u_vapor_sum = 0.0;
-  for (var k = 0u; k < ng; k++) {
-    let row = gas_rows[k];
-    let m = gas_state[row * 2u].w;
-    gas_mass_sum += m; t_sum += m * gas_thermo[row * 3u].z;
-    if (is_vapor(row)) { vapor_mass += m; u_vapor_sum += m * gas_state[row * 2u + 1u].w; }
+
+  // Cell state from its gas carriers: parallel reduction across 128 threads.
+  var m_i = 0.0;
+  var t_i = 0.0;
+  var v_m = 0.0;
+  var v_u = 0.0;
+  if (lid < ng) {
+    let row = sh_gas_rows[lid];
+    let s0 = gas_state[row * 2u];
+    let s1 = gas_state[row * 2u + 1u];
+    let th = gas_thermo[row * 3u];
+    let vap = bitcast<u32>(th.x) == params.counts.w && u32(th.y + 0.5) == 3u;
+    m_i = s0.w;
+    t_i = m_i * th.z;
+    sh_gas_m[lid] = m_i;
+    sh_gas_u[lid] = s1.w;
+    sh_gas_is_vapor[lid] = select(0u, 1u, vap);
+    if (vap) {
+      v_m = m_i;
+      v_u = m_i * s1.w;
+    }
+  } else {
+    sh_gas_m[lid] = 0.0;
+    sh_gas_u[lid] = 0.0;
+    sh_gas_is_vapor[lid] = 0u;
   }
-  // Latent and sensible heat are exchanged with the cell's dry air, whose
-  // ideal-gas ladders span the cold range; the vapor's own u then changes
-  // only with the mass it moves. A cell without dry air uses all its gas.
-  let dry_mass = gas_mass_sum - vapor_mass;
-  let heat_to_dry_air = dry_mass > 0.0;
-  let heat_mass_sum = select(gas_mass_sum, dry_mass, heat_to_dry_air);
-  var last_heat_row = ng;
-  for (var k = 0u; k < ng; k++) { if (!heat_to_dry_air || !is_vapor(gas_rows[k])) { last_heat_row = k; } }
-  if (gas_mass_sum <= 0.0) { return; }
-  let t_air = t_sum / gas_mass_sum;
-  let pressure = params.physics.y;
-  let saturation = vapor_mass * RV * t_air / volume / saturation_pa(t_air);
-  let u_vapor = select(0.0, u_vapor_sum / vapor_mass, vapor_mass > 0.0);
+  sh_f0[lid] = v_m;
+  sh_f1[lid] = m_i;
+  sh_f2[lid] = t_i;
+  sh_f3[lid] = v_u;
+  workgroupBarrier();
+  for (var stride = 64u; stride > 0u; stride >>= 1u) {
+    if (lid < stride) {
+      sh_f0[lid] += sh_f0[lid + stride];
+      sh_f1[lid] += sh_f1[lid + stride];
+      sh_f2[lid] += sh_f2[lid + stride];
+      sh_f3[lid] += sh_f3[lid + stride];
+    }
+    workgroupBarrier();
+  }
+  if (lid == 0u) {
+    let vapor_mass = sh_f0[0u];
+    let gas_mass_sum = sh_f1[0u];
+    let t_sum = sh_f2[0u];
+    let u_vapor_sum = sh_f3[0u];
+    sh_has_work = select(0u, 1u, gas_mass_sum > 0.0);
+    if (gas_mass_sum > 0.0) {
+      let dry_mass = gas_mass_sum - vapor_mass;
+      let heat_to_dry = dry_mass > 0.0;
+      sh_vapor_mass = vapor_mass;
+      sh_heat_to_dry_air = select(0u, 1u, heat_to_dry);
+      sh_heat_mass_sum = select(gas_mass_sum, dry_mass, heat_to_dry);
+      var last_heat = ng;
+      var nv = 0u;
+      for (var k = 0u; k < ng; k++) {
+        let is_v = sh_gas_is_vapor[k] != 0u;
+        if (is_v) {
+          sh_vapor_list[nv] = k;
+          nv++;
+        }
+        if (!heat_to_dry || !is_v) { last_heat = k; }
+      }
+      sh_nv = nv;
+      sh_last_heat_k = last_heat;
+      let volume = params.grid.w * params.grid.w * params.grid.w;
+      let t_air = t_sum / gas_mass_sum;
+      let pressure = params.physics.y;
+      let c_air = t_air - 273.15;
+      let es_air = saturation_pa(t_air);
+      let sigma = ${law.surfaceTension.a} - ${law.surfaceTension.b} * c_air;
+      let latent_h = ${law.latentHeat.a} - ${law.latentHeat.b}.0 * c_air;
+      let lambda_air = ${law.meanFreePath.l0} * (${law.meanFreePath.p0}.0 / pressure) * (t_air / ${law.meanFreePath.t0});
+      let d_v_base = ${law.diffusivity.d0} * pow(t_air / 273.15, ${law.diffusivity.exponent}) * (${law.diffusivity.p0}.0 / pressure);
+      let k_a_base = 4.1868e-3 * (${law.conductivity.a} + ${law.conductivity.b} * c_air);
+      sh_t_air = t_air;
+      sh_saturation = vapor_mass * RV * t_air / volume / es_air;
+      sh_u_vapor = select(0.0, u_vapor_sum / vapor_mass, vapor_mass > 0.0);
+      sh_kelvin_coeff = 2.0 * sigma / (RHO_W * RV * t_air);
+      sh_lambda_air = lambda_air;
+      sh_f_k_base = (latent_h / (RV * t_air) - 1.0) * latent_h / (k_a_base * t_air);
+      sh_f_d_base = RV * t_air / (d_v_base * es_air);
+      sh_k_cond = k_a_base;
+    }
+  }
+  if (workgroupUniformLoad(&sh_has_work) == 0u) { return; }
+
+  // Phase A: integrate all np parcels' Maxwell-Mason ODEs in parallel across lid < np.
   let dt = params.physics.x;
-  let k_cond = 4.1868e-3 * (${law.conductivity.a} + ${law.conductivity.b} * (t_air - 273.15));
-  for (var q = 0u; q < np; q++) {
-    let p = parcel_rows[q];
+  let t_air = sh_t_air;
+  if (lid < np) {
+    let p = sh_parcel_rows[lid];
     let pbase = p * PARAM_FLOATS;
     let multiplicity = parcels[pbase + 3u];
     let dry_density = parcels[pbase + 4u];
     let kappa = parcels[pbase + 5u];
-    let dry = load_parcel(p, 0u); var water = load_parcel(p, 1u); var energy = load_parcel(p, 2u);
+    let dry = load_parcel(p, 0u);
+    let water = load_parcel(p, 1u);
+    let energy = load_parcel(p, 2u);
     let n = max(multiplicity, 1.0);
-    let m_w = view(water) / n; let m_d = view(dry) / n;
-    let r_dry = pow(3.0 * m_d / (4.0 * PI * dry_density), 1.0 / 3.0);
-    let r = pow(3.0 * (m_w / RHO_W + m_d / dry_density) / (4.0 * PI), 1.0 / 3.0);
-    let rate0 = droplet_rate(r, r_dry, kappa, t_air, pressure, saturation);
-    rate_probe[p * 4u] = rate0.x; rate_probe[p * 4u + 1u] = rate0.y;
-    rate_probe[p * 4u + 2u] = saturation; rate_probe[p * 4u + 3u] = r;
-    // The droplet ODE is stiff for small radii: integrate it over the step
-    // with substeps of at most a quarter of its mass e-folding time (the cell
-    // vapor is held for the step). Near equilibrium the rate vanishes, so the
-    // substeps lengthen and the droplet settles without overshoot.
-    var m_sub = m_w; var t_left = dt; var dm_droplet = 0.0;
+    let w_view = view(water);
+    let m_w = w_view / n;
+    let m_d = view(dry) / n;
+    let three_over_4pi = 3.0 / (4.0 * PI);
+    let v_dry = m_d / dry_density;
+    let d3 = three_over_4pi * v_dry;
+    let r3_0 = three_over_4pi * (m_w / RHO_W + v_dry);
+    let r = pow(r3_0, 1.0 / 3.0);
+    let kelvin_coeff = sh_kelvin_coeff;
+    let lambda_air = sh_lambda_air;
+    let f_k_base = sh_f_k_base;
+    let f_d_base = sh_f_d_base;
+    let saturation = sh_saturation;
+    let rate0 = droplet_rate_fast(r, r3_0, d3, kappa, saturation, kelvin_coeff, lambda_air, f_k_base, f_d_base);
+    rate_probe[p * 4u] = rate0.x;
+    rate_probe[p * 4u + 1u] = rate0.y;
+    rate_probe[p * 4u + 2u] = saturation;
+    rate_probe[p * 4u + 3u] = r;
+    var m_sub = m_w;
+    var t_left = dt;
+    var dm_droplet = 0.0;
     for (var it = 0u; it < 48u && t_left > 0.0; it++) {
-      let r_sub = pow(3.0 * (m_sub / RHO_W + m_d / dry_density) / (4.0 * PI), 1.0 / 3.0);
-      let rr = droplet_rate(r_sub, r_dry, kappa, t_air, pressure, saturation).x;
+      var rr = rate0.x;
+      if (it > 0u) {
+        let r3_sub = three_over_4pi * (m_sub / RHO_W + v_dry);
+        let r_sub = pow(r3_sub, 1.0 / 3.0);
+        rr = droplet_rate_fast(r_sub, r3_sub, d3, kappa, saturation, kelvin_coeff, lambda_air, f_k_base, f_d_base).x;
+      }
       if (rr == 0.0) { break; }
       let tau = (m_sub + 1.0e-3 * m_d) / abs(rr);
       let h = min(t_left, 0.25 * tau);
       var dm = rr * h;
       if (m_sub + dm < 0.0) { dm = -m_sub; }
-      m_sub += dm; dm_droplet += dm; t_left -= h;
+      m_sub += dm;
+      dm_droplet += dm;
+      t_left -= h;
     }
-    let rate = vec2<f32>(dm_droplet / dt, rate0.y);
-    // Quasi-steady droplet (Maxwell-Mason): water joins or leaves the
-    // parcel at the parcel's own specific energy; the latent difference from
-    // the vapor's u is exchanged with the cell's gas, split over all gas
-    // carriers by mass with the remainder rule.
-    let u_parcel = select(params.physics.z + C_W * (t_air - 273.15), sview(energy) / max(view(water), 1.0e-36),
-      view(water) > 0.0);
-    var latent = ExactMass();
-    if (rate.x > 0.0) {
-      var want = quanta(rate.x * n * dt);
-      for (var k = 0u; k < ng && !em_zero(want); k++) {
-        let row = gas_rows[k];
-        if (!is_vapor(row)) { continue; }
-        let held = load_gas_mass(row);
-        let take = min_exact(want, held);
-        if (em_zero(take)) { continue; }
-        let e_held = load_gas_energy(row);
-        var e_take = squanta(view(take) * gas_state[row * 2u + 1u].w);
-        if (em_compare(take, held) == 0) { e_take = e_held; }
-        let e_parcel = squanta(view(take) * u_parcel);
-        store_gas_mass(row, em_subtract(held, take).value);
-        store_gas_energy(row, el_subtract(e_held, e_take).value);
-        water = em_add(water, take).value;
-        energy = el_add(energy, e_parcel).value;
-        latent = el_add(latent, el_subtract(e_take, e_parcel).value).value;
-        want = em_subtract(want, take).value;
-      }
-    } else if (rate.x < 0.0 && vapor_mass > 0.0) {
-      let give = min_exact(quanta(-rate.x * n * dt), water);
-      if (!em_zero(give)) {
-        var e_give = squanta(view(give) * u_parcel);
-        if (em_compare(give, water) == 0) { e_give = energy; }
-        let e_vapor_total = squanta(view(give) * u_vapor);
-        var left = give; var e_left = e_vapor_total;
-        var last_vapor = ng;
-        for (var k = 0u; k < ng; k++) { if (is_vapor(gas_rows[k])) { last_vapor = k; } }
-        for (var k = 0u; k < ng; k++) {
-          let row = gas_rows[k];
-          if (!is_vapor(row)) { continue; }
-          var part = left; var e_part = e_left;
-          if (k != last_vapor) {
-            part = min_exact(quanta(view(give) * gas_state[row * 2u].w / vapor_mass), left);
-            e_part = squanta(view(part) * u_vapor);
-          }
-          store_gas_mass(row, em_add(load_gas_mass(row), part).value);
-          store_gas_energy(row, el_add(load_gas_energy(row), e_part).value);
-          left = em_subtract(left, part).value;
-          e_left = el_subtract(e_left, e_part).value;
-        }
-        water = em_subtract(water, give).value;
-        energy = el_subtract(energy, e_give).value;
-        // The gas supplies what the vapor holds beyond the liquid it left.
-        latent = el_subtract(e_give, e_vapor_total).value;
-      }
-    }
-    // Sensible heat: the droplets relax toward the gas temperature with the
-    // exact exponential factor of their own heat capacity, so they cannot
-    // overshoot; the gas gives what they take.
-    let m_water_now = view(water);
-    var heat = 0.0;
-    if (m_water_now > 0.0) {
-      let t_drop = 273.15 + (sview(energy) / m_water_now - params.physics.z) / C_W;
-      let capacity = m_water_now * C_W;
-      let kn = (${law.meanFreePath.l0} * (${law.meanFreePath.p0}.0 / pressure) * (t_air / ${law.meanFreePath.t0})) / r;
-      let conductance = 4.0 * PI * r * k_cond * fuchs_sutugin(kn, ${law.thermalAccommodation}.0) * n;
-      heat = (t_air - t_drop) * capacity * (1.0 - exp(-dt * conductance / capacity));
-    }
-    let sensible = squanta(heat);
-    energy = el_add(energy, sensible).value;
-    // Gas carriers receive latent - sensible (remainder rule by mass).
-    let to_gas = el_subtract(latent, sensible).value;
-    let to_gas_f = sview(to_gas);
-    var gas_left = to_gas;
-    for (var k = 0u; k < ng; k++) {
-      let row = gas_rows[k];
-      if (heat_to_dry_air && is_vapor(row)) { continue; }
-      var part = gas_left;
-      if (k != last_heat_row) { part = squanta(to_gas_f * gas_state[row * 2u].w / heat_mass_sum); }
-      store_gas_energy(row, el_add(load_gas_energy(row), part).value);
-      gas_left = el_subtract(gas_left, part).value;
-    }
-    if (view(water) > 0.0) {
-      parcels[pbase + 6u] = 273.15 + (sview(energy) / view(water) - params.physics.z) / C_W;
-    }
-    store_parcel(p, 1u, water);
-    store_parcel(p, 2u, energy);
-    let m_w_now = view(water) / n;
-    parcels[pbase + 7u] = pow(3.0 * (m_w_now / RHO_W + m_d / dry_density) / (4.0 * PI), 1.0 / 3.0);
+    let u_parcel = select(params.physics.z + C_W * (t_air - 273.15), sview(energy) / max(w_view, 1.0e-36), w_view > 0.0);
+    sh_f0[lid] = dm_droplet / dt;
+    sh_f1[lid] = r;
+    sh_f2[lid] = u_parcel;
+    sh_f3[lid] = m_d;
   }
-  // f32 projections of the touched gas rows.
-  for (var k = 0u; k < ng; k++) {
-    let row = gas_rows[k];
+  workgroupBarrier();
+
+  // Phase B: exact vapor packet exchange in deterministic parcel order (touching only vapor rows),
+  // accumulating exact dry-air heat transfer across all parcels for a single parallel pass.
+  if (lid == 0u) {
+    let nv = sh_nv;
+    let vapor_mass = sh_vapor_mass;
+    let u_vapor = sh_u_vapor;
+    let heat_to_dry = sh_heat_to_dry_air != 0u;
+    let heat_mass_sum = sh_heat_mass_sum;
+    let last_heat_k = sh_last_heat_k;
+    let lambda_air = sh_lambda_air;
+    let k_cond = sh_k_cond;
+    var total_to_gas = ExactMass();
+    var any_vapor_changed = 0u;
+    for (var q = 0u; q < np; q++) {
+      let p = sh_parcel_rows[q];
+      let pbase = p * PARAM_FLOATS;
+      let n = max(parcels[pbase + 3u], 1.0);
+      let dry_density = parcels[pbase + 4u];
+      var water = load_parcel(p, 1u);
+      var energy = load_parcel(p, 2u);
+      let rate_x = sh_f0[q];
+      let r = sh_f1[q];
+      let u_parcel = sh_f2[q];
+      let m_d = sh_f3[q];
+      var latent = ExactMass();
+      if (rate_x > 0.0 && nv > 0u) {
+        var want = quanta(rate_x * n * dt);
+        for (var vi = 0u; vi < nv && !em_zero(want); vi++) {
+          let k = sh_vapor_list[vi];
+          let row = sh_gas_rows[k];
+          let held = load_gas_mass(row);
+          let take = min_exact(want, held);
+          if (em_zero(take)) { continue; }
+          let e_held = load_gas_energy(row);
+          var e_take = squanta(view(take) * sh_gas_u[k]);
+          if (em_compare(take, held) == 0) { e_take = e_held; }
+          let e_parcel = squanta(view(take) * u_parcel);
+          store_gas_mass(row, em_subtract(held, take).value);
+          store_gas_energy(row, el_subtract(e_held, e_take).value);
+          water = em_add(water, take).value;
+          energy = el_add(energy, e_parcel).value;
+          latent = el_add(latent, el_subtract(e_take, e_parcel).value).value;
+          want = em_subtract(want, take).value;
+          any_vapor_changed = 1u;
+        }
+      } else if (rate_x < 0.0 && vapor_mass > 0.0 && nv > 0u) {
+        let give = min_exact(quanta(-rate_x * n * dt), water);
+        if (!em_zero(give)) {
+          var e_give = squanta(view(give) * u_parcel);
+          if (em_compare(give, water) == 0) { e_give = energy; }
+          let e_vapor_total = squanta(view(give) * u_vapor);
+          var left = give;
+          var e_left = e_vapor_total;
+          let last_vi = nv - 1u;
+          for (var vi = 0u; vi < nv; vi++) {
+            let k = sh_vapor_list[vi];
+            let row = sh_gas_rows[k];
+            var part = left;
+            var e_part = e_left;
+            if (vi != last_vi) {
+              part = min_exact(quanta(view(give) * sh_gas_m[k] / vapor_mass), left);
+              e_part = squanta(view(part) * u_vapor);
+            }
+            store_gas_mass(row, em_add(load_gas_mass(row), part).value);
+            store_gas_energy(row, el_add(load_gas_energy(row), e_part).value);
+            left = em_subtract(left, part).value;
+            e_left = el_subtract(e_left, e_part).value;
+          }
+          water = em_subtract(water, give).value;
+          energy = el_subtract(energy, e_give).value;
+          latent = el_subtract(e_give, e_vapor_total).value;
+          any_vapor_changed = 1u;
+        }
+      }
+      let m_water_now = view(water);
+      var heat = 0.0;
+      if (m_water_now > 0.0) {
+        let t_drop = 273.15 + (sview(energy) / m_water_now - params.physics.z) / C_W;
+        let capacity = m_water_now * C_W;
+        let kn = lambda_air / r;
+        let conductance = 4.0 * PI * r * k_cond * fuchs_sutugin(kn, ${law.thermalAccommodation}.0) * n;
+        heat = (t_air - t_drop) * capacity * (1.0 - exp(-dt * conductance / capacity));
+      }
+      let sensible = squanta(heat);
+      energy = el_add(energy, sensible).value;
+      let to_gas = el_subtract(latent, sensible).value;
+      if (heat_to_dry) {
+        if (!em_zero(to_gas)) {
+          let acc = el_add(total_to_gas, to_gas);
+          if (acc.error != 0u) { flag(E_ARITHMETIC); }
+          total_to_gas = acc.value;
+        }
+      } else if (!em_zero(to_gas)) {
+        // Pure-vapor cell (no dry air): apply per-parcel so any subsequent full drain sees updated e_held.
+        let to_gas_f = sview(to_gas);
+        var gas_left = to_gas;
+        for (var k = 0u; k < ng; k++) {
+          let row = sh_gas_rows[k];
+          var part = gas_left;
+          if (k != last_heat_k) { part = squanta(to_gas_f * sh_gas_m[k] / heat_mass_sum); }
+          store_gas_energy(row, el_add(load_gas_energy(row), part).value);
+          gas_left = el_subtract(gas_left, part).value;
+        }
+        any_vapor_changed = 1u;
+      }
+      if (m_water_now > 0.0) {
+        parcels[pbase + 6u] = 273.15 + (sview(energy) / m_water_now - params.physics.z) / C_W;
+      }
+      store_parcel(p, 1u, water);
+      store_parcel(p, 2u, energy);
+      let m_w_now = m_water_now / n;
+      parcels[pbase + 7u] = pow(3.0 * (m_w_now / RHO_W + m_d / dry_density) / (4.0 * PI), 1.0 / 3.0);
+    }
+    sh_total_to_gas = total_to_gas;
+    sh_to_gas_nonzero = select(0u, 1u, !em_zero(total_to_gas));
+    sh_any_vapor_changed = any_vapor_changed;
+  }
+  storageBarrier();
+  let to_gas_nz = workgroupUniformLoad(&sh_to_gas_nonzero);
+  let any_vap = workgroupUniformLoad(&sh_any_vapor_changed);
+
+  // Parallel exact remainder-rule distribution of accumulated dry-air heat (1 pass over ng threads).
+  if (to_gas_nz != 0u) {
+    let total_to_gas = sh_total_to_gas;
+    let to_gas_f = sview(total_to_gas);
+    let last_heat_k = sh_last_heat_k;
+    let heat_mass_sum = sh_heat_mass_sum;
+    let is_heat_row = lid < ng && (sh_heat_to_dry_air == 0u || sh_gas_is_vapor[lid] == 0u);
+    var my_part = ExactMass();
+    if (is_heat_row && lid != last_heat_k) {
+      my_part = squanta(to_gas_f * sh_gas_m[lid] / heat_mass_sum);
+    }
+    sh_em[lid] = my_part;
+    workgroupBarrier();
+    for (var stride = 64u; stride > 0u; stride >>= 1u) {
+      if (lid < stride) {
+        let sum = el_add(sh_em[lid], sh_em[lid + stride]);
+        if (sum.error != 0u) { flag(E_ARITHMETIC); }
+        sh_em[lid] = sum.value;
+      }
+      workgroupBarrier();
+    }
+    if (is_heat_row) {
+      if (lid == last_heat_k) {
+        let rem = el_subtract(total_to_gas, sh_em[0u]);
+        if (rem.error != 0u) { flag(E_ARITHMETIC); }
+        my_part = rem.value;
+      }
+      if (!em_zero(my_part)) {
+        let row = sh_gas_rows[lid];
+        let next_e = el_add(load_gas_energy(row), my_part);
+        if (next_e.error != 0u) { flag(E_ARITHMETIC); }
+        store_gas_energy(row, next_e.value);
+      }
+    }
+  }
+
+  // Phase C: parallel f32 projection of touched gas rows across lid < ng.
+  if ((any_vap | to_gas_nz) != 0u && lid < ng) {
+    let row = sh_gas_rows[lid];
     let m = view(load_gas_mass(row));
-    let state0 = gas_state[row * 2u]; let state1 = gas_state[row * 2u + 1u];
-    // Mass-derived mechanics lanes follow the new mass: rest volume scales
-    // with it and lane 31 is the reference mass.
+    let state0 = gas_state[row * 2u];
+    let state1 = gas_state[row * 2u + 1u];
     if (bitcast<u32>(state0.w) != bitcast<u32>(m) && state0.w > 0.0) {
       let m4 = gas_mechanics[row * 8u + 4u];
       gas_mechanics[row * 8u + 4u] = vec4<f32>(m4.xyz, m4.w * m / state0.w);
@@ -408,11 +626,6 @@ fn exchange_cells(@builtin(global_invocation_id) id: vec3<u32>) {
       gas_mechanics[row * 8u + 7u] = vec4<f32>(m7.xyz, m);
     }
     gas_state[row * 2u] = vec4<f32>(state0.xyz, m);
-    // A projection within rounding of the current u keeps that u: at a
-    // caloric-domain bound the ulp would leave the row unclassifiable.
-    // Rounding is 8 ulps, as in the phase reconcile: the ledger thermal view
-    // sits up to 4 ulps inside the domain while U/m may sit up to 4 outside.
-    // U stays exact; the next ledger step books the view's rounding to S.
     let projected_u = select(state1.w, sview(load_gas_energy(row)) / m, m > 0.0);
     let ulps = abs(bitcast<i32>(projected_u) - bitcast<i32>(state1.w));
     let keep = (projected_u >= 0.0) == (state1.w >= 0.0) && ulps <= 8;
@@ -455,7 +668,7 @@ export function createSphExactVaporParcelExchangeStage({ device, gasCount, parce
   const bindings = ['uniform', 'storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'storage', 'storage',
     'storage'].map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['count_members', 'scan_members', 'scatter_members', 'exchange_cells'].map(entryPoint =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-exact-vapor-parcel-${entryPoint}.v1`,
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-exact-vapor-parcel-${entryPoint}.v2`,
       label: `ulg-exact-vapor-parcel-${entryPoint}`, code: sphExactVaporParcelLedgerWgsl, entryPoint, bindings })]));
   // Without a mechanics buffer (unit fixtures) the lanes go to a scratch row set.
   const scratchMechanics = gasMechanicsBuffer ? null : device.createBuffer({ label: 'ulg-exact-vapor-parcel-mechanics-scratch',
@@ -475,7 +688,7 @@ export function createSphExactVaporParcelExchangeStage({ device, gasCount, parce
       encoder.clearBuffer(cells);
       if (useQueueOrderedPool) encoder.clearBuffer(probe);
       for (const [name, groups] of [['count_members', Math.ceil(members / 64)], ['scan_members', 1],
-        ['scatter_members', Math.ceil(members / 64)], ['exchange_cells', Math.ceil(cellCount / 64)]]) {
+        ['scatter_members', Math.ceil(members / 64)], ['exchange_cells', cellCount]]) {
         const pass = encoder.beginComputePass({ label: `ulg-exact-vapor-parcel-${name}` });
         pass.setPipeline(pipelines[name].pipeline); pass.setBindGroup(0, bindGroup);
         pass.dispatchWorkgroups(groups); pass.end();

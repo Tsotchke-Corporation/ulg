@@ -165,3 +165,41 @@ test('createResidentCosmicModuleRegistration integrates with SimulationModuleReg
   galEngine.dispose();
   cosmoEngine.dispose();
 });
+
+test('resident module buffer session stays O(1) memory and fast across 2000 continuous frames without ledger leak', async () => {
+  const registry = createSimulationModuleRegistry();
+  const galEngine = createResidentTiledNBodyEngine({
+    device: null,
+    initialBodies: createGalacticBodies({ count: 64, preset: 'disk', seed: 7 }),
+    mode: 0
+  });
+  registry.registerModule(createResidentCosmicModuleRegistration({
+    method: { model: 'nbody-gravity', version: 1 },
+    engine: galEngine,
+    scaleRangeM: [1e6, 1e22]
+  }));
+
+  const t0 = performance.now();
+  let lastSummary = null;
+  let firstHandle = null;
+  for (let i = 0; i < 1200; i += 1) {
+    const cap = createUlgTaskCapsule({
+      taskId: `mem-gal-${i}`,
+      serviceId: ULG_SERVICE_IDS.ulgRuntime,
+      taskKind: ULG_TASK_KINDS.simulationStep,
+      method: { model: 'nbody-gravity', version: 1 },
+      input: { stepIndex: i, parameters: { dt: 0.01, gravity: 1.0, softening: 0.25 } }
+    });
+    const res = await registry.dispatchSimulationStepCapsule(cap);
+    if (i === 0) firstHandle = res.leaseHandle;
+    res.leaseHandle.release();
+    lastSummary = res.leaseSession.summary();
+  }
+  const elapsedMs = performance.now() - t0;
+  assert.equal(firstHandle.isCurrent(), false);
+  assert.equal(lastSummary.activeHandleCount, 0);
+  assert.ok(lastSummary.ledger.resourceCount <= 2, `expected bounded resourceCount, got ${lastSummary.ledger.resourceCount}`);
+  assert.ok(lastSummary.ledger.leases.length <= 4, `expected bounded leases array, got ${lastSummary.ledger.leases.length}`);
+  assert.ok(elapsedMs < 5000, `1200 steps should stay O(1) per frame, took ${elapsedMs.toFixed(1)} ms`);
+  galEngine.dispose();
+});

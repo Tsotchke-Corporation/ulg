@@ -37,12 +37,23 @@ function clearDestroyOwnerBlockers(ledger, resourceKey) {
 }
 
 function refreshResidentBufferLeaseLedger(ledger) {
-  for (const resource of Object.values(ledger.resources)) {
-    resource.activeLeaseCount = resourceActiveLeases(ledger, resource.resourceKey).length;
+  const activeByResource = new Map();
+  let activeLeaseCount = 0;
+  for (const lease of ledger.leases) {
+    if (lease.status === 'active') {
+      activeLeaseCount += 1;
+      activeByResource.set(lease.resourceKey, (activeByResource.get(lease.resourceKey) || 0) + 1);
+    }
   }
-  ledger.resourceCount = Object.keys(ledger.resources).length;
-  ledger.activeLeaseCount = ledger.leases.filter((lease) => lease.status === 'active').length;
-  ledger.destroyedResourceCount = Object.values(ledger.resources).filter((resource) => resource.destroyed).length;
+  const resources = Object.values(ledger.resources);
+  let destroyedResourceCount = 0;
+  for (const resource of resources) {
+    resource.activeLeaseCount = activeByResource.get(resource.resourceKey) || 0;
+    if (resource.destroyed) destroyedResourceCount += 1;
+  }
+  ledger.resourceCount = resources.length;
+  ledger.activeLeaseCount = activeLeaseCount;
+  ledger.destroyedResourceCount = destroyedResourceCount;
   ledger.skippedDestroyCount = ledger.events.filter((event) => event.status === 'destroy-skipped-active-lease').length;
   ledger.pendingDestroyCount = ledger.events.filter(
     (event) => event.status === 'destroy-scheduled-owner-pending'
@@ -621,6 +632,34 @@ export function createResidentModuleBufferSession({
     return null;
   }
 
+  function pruneRetiredLedgerEntries(candidateResourceKey = null) {
+    // Keep only active leases so long-running 60 Hz sessions stay strictly O(1) in memory and CPU.
+    if (ledger.leases.length > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < ledger.leases.length; i += 1) {
+        if (ledger.leases[i].status === 'active') {
+          ledger.leases[writeIdx++] = ledger.leases[i];
+        }
+      }
+      ledger.leases.length = writeIdx;
+    }
+    const keysToCheck = candidateResourceKey
+      ? [candidateResourceKey]
+      : Object.keys(ledger.resources);
+    let pruned = false;
+    for (const key of keysToCheck) {
+      if (liveBuffers.has(key)) continue;
+      const hasActive = ledger.leases.some((l) => l.resourceKey === key && l.status === 'active');
+      if (!hasActive && ledger.resources[key]) {
+        delete ledger.resources[key];
+        pruned = true;
+      }
+    }
+    if (pruned || candidateResourceKey) {
+      refreshResidentBufferLeaseLedger(ledger);
+    }
+  }
+
   function publishBuffer({
     resourceKey = 'bodies',
     buffer = null,
@@ -645,10 +684,11 @@ export function createResidentModuleBufferSession({
     stepIndex = resolvedStep;
     ledger.step = stepIndex;
 
-    // Retire any previous unleased generation for the same baseKey.
+    // Retire any previous unleased generation for the same baseKey and prune it from the ledger.
     const previous = resolveLiveEntry(baseKey);
     if (previous) {
       liveBuffers.delete(previous.resourceKey);
+      pruneRetiredLedgerEntries(previous.resourceKey);
     }
 
     const versionedKey = makeVersionedResourceKey(baseKey);
@@ -805,8 +845,10 @@ export function createResidentModuleBufferSession({
       release: () => {
         if (tracked.released) return false;
         tracked.released = true;
+        issuedHandles.delete(handleId);
         if (tracked.resetEpoch === resetEpoch) {
           releaseResidentBufferLease(ledger, lease.leaseId, { status: 'released' });
+          pruneRetiredLedgerEntries(tracked.resourceKey);
         }
         return true;
       }

@@ -137,9 +137,189 @@ function inRange(value, range) {
   return range == null || (value >= range[0] && value <= range[1]);
 }
 
+function fnv1aHex64(input) {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < input.length; i += 1) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= (c + i) & 0xff;
+    h2 = Math.imul(h2, 0x27d4eb2d) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+}
+
+function canonicalizeHomogeneitySpec(homogeneityTest) {
+  if (homogeneityTest == null) return null;
+  if (typeof homogeneityTest === 'function') {
+    return Object.freeze({
+      kind: 'predicate-fn',
+      fn: homogeneityTest,
+      signature: String(homogeneityTest.name || 'anonymous')
+    });
+  }
+  if (typeof homogeneityTest !== 'object' || Array.isArray(homogeneityTest)) {
+    throw new RangeError('envelope.homogeneityTest must be a predicate function or declarative bounds object');
+  }
+  const normalized = {};
+  const numericBounds = [
+    'maxTemperatureVarianceK2',
+    'maxTemperatureSpanK',
+    'maxTemperatureGradientKPerM',
+    'maxDensityVarianceKg2M6',
+    'maxRelativeDensitySpan',
+    'maxPhaseFractionSpread',
+    'maxPlasticStrain',
+    'maxStrainRatePerS',
+    'maxJensenResidual'
+  ];
+  for (const key of numericBounds) {
+    if (homogeneityTest[key] != null) {
+      const limit = FINITE(homogeneityTest[key], `homogeneityTest.${key}`);
+      if (limit < 0) throw new RangeError(`homogeneityTest.${key} must be non-negative`);
+      normalized[key] = limit;
+    }
+  }
+  if (homogeneityTest.requiredPhase != null) {
+    const phase = String(homogeneityTest.requiredPhase).trim().toLowerCase();
+    if (!phase) throw new RangeError('homogeneityTest.requiredPhase must be non-empty');
+    normalized.requiredPhase = phase;
+  }
+  if (Array.isArray(homogeneityTest.requiredFields)) {
+    normalized.requiredFields = Object.freeze(
+      homogeneityTest.requiredFields.map((f) => String(f).trim()).filter(Boolean).sort()
+    );
+  }
+  if (typeof homogeneityTest.predicate === 'function') {
+    normalized.predicate = homogeneityTest.predicate;
+  }
+  return Object.freeze(normalized);
+}
+
 /**
- * The validity envelope: exact continuous bounds a query state must satisfy
- * for the closure to apply. Distinct from the quantized routing key.
+ * Canonical digest of an exact continuous validity envelope + homogeneity spec.
+ * Bound into closureInvalidationKey so quantized routing-bucket hits can never
+ * bypass incompatible exact domains or changed homogeneity requirements.
+ */
+export function canonicalClosureDomainHash(envelope) {
+  if (!envelope || typeof envelope !== 'object') {
+    throw new RangeError('canonicalClosureDomainHash requires an envelope object');
+  }
+  const fmtRange = (r) => (r == null ? 'none' : `${Number(r[0]).toPrecision(12)}..${Number(r[1]).toPrecision(12)}`);
+  const h = envelope.homogeneityTest;
+  const hDesc = h == null
+    ? 'none'
+    : typeof h === 'function'
+      ? `fn:${h.name || 'anon'}:${fnv1aHex64(String(h))}`
+      : Object.keys(h)
+          .filter((k) => k !== 'predicate' && k !== 'fn')
+          .sort()
+          .map((k) => `${k}=${Array.isArray(h[k]) ? h[k].join(',') : String(h[k])}`)
+          .join(';');
+  const canonical = [
+    `T:${fmtRange(envelope.temperatureRangeK)}`,
+    `P:${fmtRange(envelope.pressureRangePa)}`,
+    `rho:${fmtRange(envelope.densityRangeKgM3)}`,
+    `phase:${envelope.phase ?? 'any'}`,
+    `structure:${envelope.structure ?? 'any'}`,
+    `homog:${hDesc}`
+  ].join('|');
+  return `dom:${fnv1aHex64(canonical)}`;
+}
+
+function evaluateHomogeneityAdmission(homogeneitySpec, state, envelope) {
+  if (homogeneitySpec == null) return { admitted: true, reason: null };
+  if (typeof homogeneitySpec === 'function') {
+    try {
+      const res = homogeneitySpec(state, envelope);
+      if (res === true) return { admitted: true, reason: null };
+      if (res && typeof res === 'object' && res.admitted === true) return { admitted: true, reason: null };
+      return {
+        admitted: false,
+        reason: (res && typeof res === 'object' && res.reason) || 'homogeneity-predicate-rejected',
+        detail: res && typeof res === 'object' ? res : null
+      };
+    } catch (error) {
+      return {
+        admitted: false,
+        reason: 'homogeneity-predicate-error',
+        detail: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+  if (homogeneitySpec.kind === 'predicate-fn' && typeof homogeneitySpec.fn === 'function') {
+    return evaluateHomogeneityAdmission(homogeneitySpec.fn, state, envelope);
+  }
+  // Declarative distribution-aware homogeneity bounds: missing or non-finite
+  // constituent summaries fail CLOSED (never treated as wildcard!).
+  const stats = state?.homogeneity ?? state ?? {};
+  if (Array.isArray(homogeneitySpec.requiredFields)) {
+    for (const field of homogeneitySpec.requiredFields) {
+      const value = Number(stats?.[field] ?? state?.[field]);
+      if (!Number.isFinite(value)) {
+        return { admitted: false, reason: `homogeneity-missing-${field}`, field };
+      }
+    }
+  }
+  if (homogeneitySpec.requiredPhase != null) {
+    const actualPhase = String(stats?.phase ?? state?.phase ?? '').trim().toLowerCase();
+    if (!actualPhase) {
+      return { admitted: false, reason: 'homogeneity-missing-phase', field: 'phase' };
+    }
+    if (actualPhase !== homogeneitySpec.requiredPhase) {
+      return {
+        admitted: false,
+        reason: 'homogeneity-phase-mismatch',
+        field: 'phase',
+        value: actualPhase,
+        expected: homogeneitySpec.requiredPhase
+      };
+    }
+  }
+  const boundChecks = [
+    ['maxTemperatureVarianceK2', 'temperatureVarianceK2'],
+    ['maxTemperatureSpanK', 'temperatureSpanK'],
+    ['maxTemperatureGradientKPerM', 'temperatureGradientKPerM'],
+    ['maxDensityVarianceKg2M6', 'densityVarianceKg2M6'],
+    ['maxRelativeDensitySpan', 'relativeDensitySpan'],
+    ['maxPhaseFractionSpread', 'phaseFractionSpread'],
+    ['maxPlasticStrain', 'plasticStrain'],
+    ['maxStrainRatePerS', 'strainRatePerS'],
+    ['maxJensenResidual', 'jensenResidual']
+  ];
+  for (const [limitKey, stateField] of boundChecks) {
+    if (homogeneitySpec[limitKey] == null) continue;
+    const raw = stats?.[stateField] ?? state?.[stateField];
+    const value = Number(raw);
+    if (raw == null || !Number.isFinite(value) || value < 0) {
+      return {
+        admitted: false,
+        reason: `homogeneity-missing-${stateField}`,
+        field: stateField,
+        limit: homogeneitySpec[limitKey]
+      };
+    }
+    if (value > homogeneitySpec[limitKey]) {
+      return {
+        admitted: false,
+        reason: `homogeneity-exceeded-${stateField}`,
+        field: stateField,
+        value,
+        limit: homogeneitySpec[limitKey]
+      };
+    }
+  }
+  if (typeof homogeneitySpec.predicate === 'function') {
+    return evaluateHomogeneityAdmission(homogeneitySpec.predicate, state, envelope);
+  }
+  return { admitted: true, reason: null };
+}
+
+/**
+ * The validity envelope: exact continuous bounds and distribution-aware
+ * homogeneity predicates a query state must satisfy for the closure to apply.
+ * Distinct from the quantized routing key.
  */
 export function closureEnvelopeAdmits(envelope, state) {
   if (!envelope) return { admitted: false, reason: 'missing-envelope' };
@@ -150,8 +330,9 @@ export function closureEnvelopeAdmits(envelope, state) {
   ];
   for (const [field, range] of checks) {
     if (range == null) continue;
-    const value = Number(state?.[field]);
-    if (!Number.isFinite(value)) {
+    const raw = state?.[field];
+    const value = Number(raw);
+    if (raw == null || !Number.isFinite(value)) {
       return { admitted: false, reason: `query-missing-${field}` };
     }
     if (!inRange(value, range)) {
@@ -164,18 +345,24 @@ export function closureEnvelopeAdmits(envelope, state) {
       };
     }
   }
+  if (envelope.homogeneityTest != null) {
+    const homog = evaluateHomogeneityAdmission(envelope.homogeneityTest, state, envelope);
+    if (!homog.admitted) return homog;
+  }
   return { admitted: true, reason: null };
 }
 
 /**
  * Full invalidation key per the Cache Layering Rule: input hash, method
- * hash, validity domain, schema version, ABI, validation status. Records
- * whose invalidation fields differ are different records even in the same
- * regime bucket.
+ * hash, validity domain hash, schema version, ABI, validation status. Records
+ * whose invalidation fields or exact validity domains differ are different
+ * records even in the same quantized regime bucket.
  */
 export function closureInvalidationKey({
   inputHash,
   methodHash,
+  domainHash = null,
+  envelope = null,
   schemaVersion,
   abiVersion,
   validationStatus
@@ -195,7 +382,12 @@ export function closureInvalidationKey({
       `validationStatus must be one of ${Object.values(CLOSURE_VALIDATION_STATUS).join(', ')}`
     );
   }
-  return `${inputHash}|${methodHash}|${schemaVersion}|${abiVersion}|${validationStatus}`;
+  const resolvedDomainHash = domainHash != null && String(domainHash).trim()
+    ? String(domainHash).trim()
+    : (envelope ? canonicalClosureDomainHash(envelope) : null);
+  return resolvedDomainHash
+    ? `${inputHash}|${methodHash}|${resolvedDomainHash}|${schemaVersion}|${abiVersion}|${validationStatus}`
+    : `${inputHash}|${methodHash}|${schemaVersion}|${abiVersion}|${validationStatus}`;
 }
 
 export function createClosureRegimeStore({ label = 'ulg-closure-regime-store' } = {}) {
@@ -225,32 +417,42 @@ export function createClosureRegimeStore({ label = 'ulg-closure-regime-store' } 
     if (kind === 'emergent') {
       throw new RangeError('closures are never labelled emergent (spec hard rule 1)');
     }
-    const invalidationKey = closureInvalidationKey(invalidation);
+    const normalizedEnvelope = Object.freeze({
+      temperatureRangeK: Object.freeze(canonicalRange(
+        envelope.temperatureRangeK, 'envelope.temperatureRangeK'
+      )),
+      pressureRangePa: envelope.pressureRangePa == null
+        ? null
+        : Object.freeze(canonicalRange(
+          envelope.pressureRangePa, 'envelope.pressureRangePa'
+        )),
+      densityRangeKgM3: envelope.densityRangeKgM3 == null
+        ? null
+        : Object.freeze(canonicalRange(
+          envelope.densityRangeKgM3, 'envelope.densityRangeKgM3'
+        )),
+      phase: envelope.phase ?? null,
+      structure: envelope.structure ?? null,
+      homogeneityTest: canonicalizeHomogeneitySpec(envelope.homogeneityTest ?? null)
+    });
+    const domainHash = invalidation?.domainHash
+      ? String(invalidation.domainHash).trim()
+      : canonicalClosureDomainHash(normalizedEnvelope);
+    const invalidationKey = closureInvalidationKey({
+      ...invalidation,
+      domainHash
+    });
     recordOrdinal += 1;
     const record = Object.freeze({
       schema: ULG_CLOSURE_REGIME_RECORD_SCHEMA,
       ordinal: recordOrdinal,
       regimeId: regimeKey.id,
       regimeKey,
-      envelope: Object.freeze({
-        temperatureRangeK: Object.freeze(canonicalRange(
-          envelope.temperatureRangeK, 'envelope.temperatureRangeK'
-        )),
-        pressureRangePa: envelope.pressureRangePa == null
-          ? null
-          : Object.freeze(canonicalRange(
-            envelope.pressureRangePa, 'envelope.pressureRangePa'
-          )),
-        densityRangeKgM3: envelope.densityRangeKgM3 == null
-          ? null
-          : Object.freeze(canonicalRange(
-            envelope.densityRangeKgM3, 'envelope.densityRangeKgM3'
-          )),
-        homogeneityTest: envelope.homogeneityTest ?? null
-      }),
+      envelope: normalizedEnvelope,
+      domainHash,
       artifact,
       provenance: Object.freeze({ ...provenance, kind }),
-      invalidation: Object.freeze({ ...invalidation }),
+      invalidation: Object.freeze({ ...invalidation, domainHash }),
       invalidationKey,
       supersedes,
       registeredOrdinal: recordOrdinal,

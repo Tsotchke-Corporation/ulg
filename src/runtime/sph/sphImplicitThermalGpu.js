@@ -20,6 +20,7 @@ export const SPH_IMPLICIT_THERMAL_SCHEMA = 'ulg.sph.implicit-thermal.v1';
 export const SPH_IMPLICIT_THERMAL_MAX_ITERATIONS = 64;
 export const SPH_IMPLICIT_THERMAL_DEFAULT_THETA = 1.0;
 export const SPH_IMPLICIT_THERMAL_DEFAULT_RELATIVE_TOLERANCE = 1e-4;
+export const SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD = 0.45;
 export const STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670374419e-8;
 
 const GPU_BUFFER_USAGE = {
@@ -61,6 +62,165 @@ export function normalizeSphImplicitThermalOptions(raw) {
     maxFourierNumber,
     relativeTolerance,
     radiationLinearization: obj.radiationLinearization !== false
+  });
+}
+
+/**
+ * Evaluate the explicit-stability Fourier envelope Fo = alpha * dt / dx^2 for a
+ * single material/cell state. Explicit thermal conduction violates discrete
+ * maximum-principle stability above Fo ~= 0.5 (3D stability limit <= 1/6..0.5),
+ * so Fo > thresholdFo (default 0.45) triggers the 1-pass IMEX thermal PCG path.
+ */
+export function evaluateFourierThermalEnvelope({
+  thermalConductivityWPerMK,
+  densityKgPerM3,
+  specificHeatJPerKgK,
+  gridSpacingM,
+  dtS,
+  thresholdFo = SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD
+} = {}) {
+  const k = Number(thermalConductivityWPerMK);
+  const rho = Number(densityKgPerM3);
+  const cp = Number(specificHeatJPerKgK);
+  const dx = Number(gridSpacingM);
+  const dt = Number(dtS);
+  const threshold = Number.isFinite(Number(thresholdFo)) && Number(thresholdFo) > 0
+    ? Number(thresholdFo)
+    : SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD;
+  if (!(k > 0) || !(rho > 0) || !(cp > 0) || !(dx > 0) || !(dt > 0)) {
+    return Object.freeze({
+      fourierNumber: 0,
+      diffusivityM2PerS: 0,
+      thresholdFo: threshold,
+      exceedsExplicitStability: false,
+      recommendedImplicit: false,
+      recommendedIterations: 8,
+      reason: 'non-diffusive-or-inactive'
+    });
+  }
+  const diffusivityM2PerS = k / (rho * cp);
+  const fourierNumber = (diffusivityM2PerS * dt) / (dx * dx);
+  const exceedsExplicitStability = fourierNumber > threshold;
+  return Object.freeze({
+    fourierNumber,
+    diffusivityM2PerS,
+    thresholdFo: threshold,
+    exceedsExplicitStability,
+    recommendedImplicit: exceedsExplicitStability,
+    recommendedIterations: exceedsExplicitStability ? sphImplicitThermalIterationsFor(fourierNumber) : 8,
+    reason: exceedsExplicitStability ? 'fourier-envelope-exceeded' : 'explicit-stable'
+  });
+}
+
+/**
+ * Evaluate the Fourier stability envelope across all active entries in a packed
+ * thermal material table (zero per-preset branches — driven solely by physical
+ * k, rho, cp, dx, dt).
+ */
+export function computeMaterialTableFourierEnvelope(thermalMaterialTable, {
+  gridSpacingM,
+  dtS,
+  thresholdFo = SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD
+} = {}) {
+  const threshold = Number.isFinite(Number(thresholdFo)) && Number(thresholdFo) > 0
+    ? Number(thresholdFo)
+    : SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD;
+  const dx = Number(gridSpacingM);
+  const dt = Number(dtS);
+  let maxFourierNumber = 0;
+  let worstMaterialId = null;
+  let evaluatedCount = 0;
+
+  const inspectRecord = (matId, k, rho, cp) => {
+    const res = evaluateFourierThermalEnvelope({
+      thermalConductivityWPerMK: k,
+      densityKgPerM3: rho,
+      specificHeatJPerKgK: cp,
+      gridSpacingM: dx,
+      dtS: dt,
+      thresholdFo: threshold
+    });
+    if (res.diffusivityM2PerS > 0) evaluatedCount += 1;
+    if (res.fourierNumber > maxFourierNumber) {
+      maxFourierNumber = res.fourierNumber;
+      worstMaterialId = matId;
+    }
+  };
+
+  if (
+    thermalMaterialTable?.segments instanceof Float32Array
+    && Number(thermalMaterialTable.segmentStrideFloats) >= 12
+    && Number(thermalMaterialTable.segmentCount) > 0
+  ) {
+    const stride = Math.round(Number(thermalMaterialTable.segmentStrideFloats));
+    const count = Math.round(Number(thermalMaterialTable.segmentCount));
+    const segs = thermalMaterialTable.segments;
+    const matNameById = new Map();
+    for (const entry of thermalMaterialTable.metadata || []) {
+      if (entry?.materialId != null) {
+        matNameById.set(entry.materialId, entry.material ?? String(entry.materialId));
+      }
+    }
+    for (let i = 0; i < count; i += 1) {
+      const base = i * stride;
+      const matId = segs[base];
+      const segType = Math.round(segs[base + 1]);
+      if (segType !== 1) continue; // single-phase segment (not latent plateau)
+      const de = segs[base + 5] - segs[base + 4];
+      const dT = segs[base + 7] - segs[base + 6];
+      const rho = segs[base + 8];
+      const k = segs[base + 11];
+      if (!(de > 0) || !(dT > 0) || !(rho > 0) || !(k > 0)) continue;
+      const cp = de / dT;
+      inspectRecord(matNameById.get(matId) ?? String(matId), k, rho, cp);
+    }
+  } else if (Array.isArray(thermalMaterialTable?.materials)) {
+    for (const mat of thermalMaterialTable.materials) {
+      if (!mat) continue;
+      const matId = mat.materialKey ?? mat.materialId ?? mat.id ?? null;
+      const k = Number(mat.thermalConductivityWPerMK ?? mat.thermalConductivity ?? mat.k ?? 0);
+      const rho = Number(mat.densityKgPerM3 ?? mat.referenceDensityKgPerM3 ?? mat.rho0 ?? 0);
+      const cp = Number(mat.specificHeatJPerKgK ?? mat.heatCapacityJPerKgK ?? mat.cp ?? mat.cv ?? 0);
+      if (k > 0 && rho > 0 && cp > 0) {
+        inspectRecord(matId, k, rho, cp);
+      }
+      if (Array.isArray(mat.phases)) {
+        for (const phase of mat.phases) {
+          if (!phase) continue;
+          inspectRecord(
+            matId,
+            Number(phase.thermalConductivityWPerMK ?? phase.thermalConductivity ?? k),
+            Number(phase.densityKgPerM3 ?? phase.referenceDensityKgPerM3 ?? rho),
+            Number(phase.specificHeatJPerKgK ?? phase.cp ?? phase.cv ?? cp)
+          );
+        }
+      }
+    }
+  } else if (Array.isArray(thermalMaterialTable?.materialRecords)) {
+    for (const rec of thermalMaterialTable.materialRecords) {
+      if (!rec) continue;
+      inspectRecord(
+        rec.materialKey ?? rec.materialId ?? null,
+        Number(rec.thermalConductivityWPerMK ?? rec.thermalConductivity ?? 0),
+        Number(rec.densityKgPerM3 ?? rec.referenceDensityKgPerM3 ?? 0),
+        Number(rec.specificHeatJPerKgK ?? rec.heatCapacityJPerKgK ?? 0)
+      );
+    }
+  }
+
+  const exceedsExplicitStability = maxFourierNumber > threshold;
+  return Object.freeze({
+    schema: SPH_IMPLICIT_THERMAL_SCHEMA,
+    maxFourierNumber,
+    worstMaterialId,
+    evaluatedCount,
+    thresholdFo: threshold,
+    gridSpacingM: Number.isFinite(dx) ? dx : 0,
+    dtS: Number.isFinite(dt) ? dt : 0,
+    exceedsExplicitStability,
+    recommendedImplicit: exceedsExplicitStability,
+    recommendedIterations: exceedsExplicitStability ? sphImplicitThermalIterationsFor(maxFourierNumber) : 8,
+    passCount: 1
   });
 }
 
@@ -440,28 +600,34 @@ export function encodeSphImplicitThermalSolve(device, encoder, {
     ]
   });
   const wg = Math.max(1, Math.ceil(n / 64));
-  const runPass = (entryPoint, groups) => {
-    const pass = encoder.beginComputePass({ label: `ulg-it-${entryPoint}` });
+  // Coalesce the entire matrix-free PCG solve + conservative flux projection
+  // into a single WebGPU compute pass (Section 3 pass budget compliance: 1 pass
+  // instead of 1 + 1 + 6 * iterations + 1 separate passes). WebGPU guarantees
+  // storage-buffer write-to-read visibility across dispatches in a compute pass.
+  const pass = encoder.beginComputePass({ label: 'ulg-sph-implicit-thermal-pcg' });
+  pass.setBindGroup(0, bindGroup);
+  const dispatch = (entryPoint, groups) => {
     pass.setPipeline(pipelines[entryPoint]);
-    pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(groups);
-    pass.end();
   };
-  runPass('it_cg_init', wg);
-  runPass('it_reduce_init', 1);
+  dispatch('it_cg_init', wg);
+  dispatch('it_reduce_init', 1);
   for (let iter = 0; iter < normalized.iterations; iter += 1) {
-    runPass('it_cg_apply', wg);
-    runPass('it_reduce_pap', 1);
-    runPass('it_cg_update_xr', wg);
-    runPass('it_reduce_rz_new', 1);
-    runPass('it_cg_update_p', wg);
-    runPass('it_commit_rz', 1);
+    dispatch('it_cg_apply', wg);
+    dispatch('it_reduce_pap', 1);
+    dispatch('it_cg_update_xr', wg);
+    dispatch('it_reduce_rz_new', 1);
+    dispatch('it_cg_update_p', wg);
+    dispatch('it_commit_rz', 1);
   }
-  runPass('it_project_conservative_flux', wg);
+  dispatch('it_project_conservative_flux', wg);
+  pass.end();
   return {
     schema: SPH_IMPLICIT_THERMAL_SCHEMA,
     options: normalized,
     nodeCount: n,
+    passCount: 1,
+    dispatchCount: 3 + normalized.iterations * 6,
     outEnergyBuffer: ws.outEnergy,
     scalarsBuffer: ws.scalars,
     workspace: ws,

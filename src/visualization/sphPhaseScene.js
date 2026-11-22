@@ -54552,6 +54552,14 @@ fn main(
           scene.userData.sphScaleAtlasStatus = workerArchStatus.scaleAtlas;
           globalThis.__ulgScaleAtlasStatus = workerArchStatus.scaleAtlas;
         }
+        if (workerArchStatus.implicitThermal) {
+          scene.userData.sphImplicitThermalStatus = workerArchStatus.implicitThermal;
+          globalThis.__ulgImplicitThermalStatus = workerArchStatus.implicitThermal;
+        }
+        if (workerArchStatus.lawEnvelopeWatch) {
+          scene.userData.sphLawEnvelopeWatchStatus = workerArchStatus.lawEnvelopeWatch;
+          globalThis.__ulgLawEnvelopeWatchStatus = workerArchStatus.lawEnvelopeWatch;
+        }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and

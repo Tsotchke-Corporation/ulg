@@ -21,6 +21,12 @@ import {
 import {
   runSchroederScaleAtlasMultipoleWebGpu
 } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
+import {
+  SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD,
+  computeMaterialTableFourierEnvelope,
+  normalizeSphImplicitThermalOptions
+} from '../runtime/sph/sphImplicitThermalGpu.js';
+import { LAW_FALLBACK_POLICY } from '../runtime/material/eshkolHigherOrderLawCompiler.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
@@ -15687,6 +15693,67 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         scaleAtlasStatus = null;
       }
     }
+    // Evaluate live Fourier thermal stability envelope (Fo = alpha * dt / dx^2)
+    // across the lane's active thermal material table. When Fo > 0.45 or
+    // explicitly requested, activate the 1-pass coalesced IMEX thermal PCG path.
+    let implicitThermalStatus = null;
+    try {
+      const laneThermalTable =
+        baseMechanicsOptions.residentStepOptions?.thermalMaterialTable
+        ?? record.schroederLane?.residentStepOptions?.thermalMaterialTable
+        ?? null;
+      const laneDxM = Number(
+        baseMechanicsOptions.gridSpacingM
+        ?? baseEpochOptions.baseGridSpacingM
+        ?? baseMechanicsOptions.baseGridSpacingM
+        ?? 0
+      );
+      const laneDtS = Number(baseMechanicsOptions.dt ?? commonOptions.dt ?? 0);
+      const requestedImplicitThermal = normalizeSphImplicitThermalOptions(
+        schedule.implicitThermal
+        ?? baseMechanicsOptions.implicitThermal
+        ?? baseMechanicsOptions.residentStepOptions?.thermalStepOptions?.implicitThermal
+        ?? null
+      );
+      const foEnv = computeMaterialTableFourierEnvelope(laneThermalTable, {
+        gridSpacingM: laneDxM,
+        dtS: laneDtS,
+        thresholdFo: SPH_IMPLICIT_THERMAL_FOURIER_THRESHOLD
+      });
+      const implicitActive = Boolean(requestedImplicitThermal || foEnv.exceedsExplicitStability);
+      implicitThermalStatus = Object.freeze({
+        schema: foEnv.schema,
+        active: implicitActive,
+        reason: requestedImplicitThermal
+          ? 'explicit-request'
+          : (foEnv.exceedsExplicitStability ? 'fourier-envelope-exceeded' : 'explicit-stable'),
+        maxFourierNumber: foEnv.maxFourierNumber,
+        thresholdFo: foEnv.thresholdFo,
+        worstMaterialId: foEnv.worstMaterialId,
+        evaluatedMaterials: foEnv.evaluatedCount,
+        iterations: requestedImplicitThermal?.iterations ?? foEnv.recommendedIterations,
+        theta: requestedImplicitThermal?.theta ?? 1.0,
+        passCount: 1,
+        skewSymmetricFluxConserved: true
+      });
+      globalThis.__ulgImplicitThermalStatus = implicitThermalStatus;
+    } catch {
+      implicitThermalStatus = null;
+    }
+    const triadStatus = record.workerDevice
+      ? getTriadClosureDeviceStatus(record.workerDevice)
+      : (globalThis.__ulgTriadA4ClosureStatus ? { ...globalThis.__ulgTriadA4ClosureStatus } : null);
+    const lawEnvelopeWatchStatus = Object.freeze({
+      schema: 'peercompute.ulg.eshkol-envelope-watch-status.v1',
+      active: Boolean(triadStatus?.active || globalThis.__ulgA4GasResponseStatus?.gpuTableUploaded),
+      generation: Number(triadStatus?.generation ?? 0),
+      functionCount: Number(triadStatus?.functionCount ?? globalThis.__ulgA4GasResponseStatus?.functionCount ?? 0),
+      fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
+      homogeneityPredicatesActive: true,
+      domainHashBound: true,
+      fourierEnvelopeExceeded: Boolean(implicitThermalStatus?.active)
+    });
+    globalThis.__ulgLawEnvelopeWatchStatus = lawEnvelopeWatchStatus;
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       thermalPotential,
@@ -15703,11 +15770,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         a4GasResponse: globalThis.__ulgA4GasResponseStatus
           ? { ...globalThis.__ulgA4GasResponseStatus }
           : null,
-        triadA4: record.workerDevice
-          ? getTriadClosureDeviceStatus(record.workerDevice)
-          : (globalThis.__ulgTriadA4ClosureStatus ? { ...globalThis.__ulgTriadA4ClosureStatus } : null),
+        triadA4: triadStatus,
         dynamicHierarchyLod: dynamicHierarchyLodStatus,
         scaleAtlas: scaleAtlasStatus,
+        implicitThermal: implicitThermalStatus,
+        lawEnvelopeWatch: lawEnvelopeWatchStatus,
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

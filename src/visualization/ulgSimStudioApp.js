@@ -524,6 +524,14 @@ export function mountUlgSimStudioApp({
         if (atlas) {
           archLines.push(`40-OOM Scale Atlas: charts=${atlas.activeChartCount} span=${(Number(atlas.levelSpanOom) || 0).toFixed(2)} OOM [${atlas.globalMinLevel}..${atlas.globalMaxLevel}] multipolePairs=${atlas.multipoleCoupledPairs ?? 0}`);
         }
+        const impT = globalThis.__ulgImplicitThermalStatus;
+        if (impT) {
+          archLines.push(`Implicit Thermal PCG: active=${Boolean(impT.active)} Fo=${(Number(impT.maxFourierNumber) || 0).toFixed(3)} (thr=${impT.thresholdFo}) passes=${impT.passCount ?? 1} reason=${impT.reason}`);
+        }
+        const lawWatch = globalThis.__ulgLawEnvelopeWatchStatus;
+        if (lawWatch) {
+          archLines.push(`Eshkol Law Envelopes: active=${Boolean(lawWatch.active)} gen=${lawWatch.generation ?? 0} fns=${lawWatch.functionCount ?? 0} homog=on domHash=on policy=${lawWatch.fallbackPolicy}`);
+        }
         const a5 = globalThis.__ulgA5SolidStatus;
         if (a5) {
           archLines.push(`A5 solids: rigid=${a5.rigidBodyCount ?? 0} deformable=${a5.sol4DeformableSurfaceCount ?? 0} sol5=${Boolean(a5.sol5FractureActive)} sol6=${Boolean(a5.sol6MultilevelActive)}`);

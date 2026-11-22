@@ -224,6 +224,50 @@ export const SPH_LOCAL_BACKGROUND_IMAGE_MIME_TYPES = Object.freeze([
   'image/png',
   'image/webp'
 ]);
+export const SPH_BUNDLED_BACKGROUND_IMAGES = Object.freeze([
+  Object.freeze({ id: 'bg-1', url: '/plan/background-1.jpeg', label: 'Subway Vault (1)' }),
+  Object.freeze({ id: 'bg-2', url: '/plan/background-2.jpg', label: 'Alpine Cloud Sea (2)' }),
+  Object.freeze({ id: 'bg-3', url: '/plan/background-3.jpg', label: 'Misty Forest Lake (3)' }),
+  Object.freeze({ id: 'bg-4', url: '/plan/background-4.jpg', label: 'Spiral Galaxy (4)' })
+]);
+export const SPH_DEFAULT_BACKGROUND_IMAGE_URL = '/plan/background-3.jpg';
+
+const SPH_BUNDLED_BACKGROUND_BY_ALIAS = new Map([
+  ['/plan/background-1.jpg', '/plan/background-1.jpeg'],
+  ['background-1.jpg', '/plan/background-1.jpeg'],
+  ['background-1.jpeg', '/plan/background-1.jpeg'],
+  ['background-2.jpg', '/plan/background-2.jpg'],
+  ['background-3.jpg', '/plan/background-3.jpg'],
+  ['background-4.jpg', '/plan/background-4.jpg'],
+  ['1', '/plan/background-1.jpeg'],
+  ['2', '/plan/background-2.jpg'],
+  ['3', '/plan/background-3.jpg'],
+  ['4', '/plan/background-4.jpg']
+]);
+for (const item of SPH_BUNDLED_BACKGROUND_IMAGES) {
+  SPH_BUNDLED_BACKGROUND_BY_ALIAS.set(item.id, item.url);
+  SPH_BUNDLED_BACKGROUND_BY_ALIAS.set(item.url, item.url);
+}
+
+export function normalizeSphBackgroundImageUrl(
+  rawValue,
+  fallback = SPH_DEFAULT_BACKGROUND_IMAGE_URL
+) {
+  if (rawValue == null) return fallback;
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return '';
+  const lowered = trimmed.toLowerCase();
+  if (lowered === 'none' || lowered === 'solid' || lowered === 'off' || lowered === 'color') {
+    return '';
+  }
+  if (SPH_BUNDLED_BACKGROUND_BY_ALIAS.has(trimmed)) {
+    return SPH_BUNDLED_BACKGROUND_BY_ALIAS.get(trimmed);
+  }
+  if (SPH_BUNDLED_BACKGROUND_BY_ALIAS.has(lowered)) {
+    return SPH_BUNDLED_BACKGROUND_BY_ALIAS.get(lowered);
+  }
+  return fallback;
+}
 
 export function validateSphLocalBackgroundImageFile(file, {
   maxBytes = SPH_LOCAL_BACKGROUND_IMAGE_MAX_BYTES
@@ -6162,6 +6206,7 @@ function canonicalMaterialKeyFromUrl(value) {
 function normalizeUrlControlValue(key, value) {
   if (key === 'drop' || key === 'base') return canonicalMaterialKeyFromUrl(value);
   if (key === 'bg') return normalizeSphSceneBackgroundColorHex(value);
+  if (key === 'bgimg') return normalizeSphBackgroundImageUrl(value, SPH_DEFAULT_BACKGROUND_IMAGE_URL);
   if (key === 'lighting') return normalizeSphSceneLightingMode(value);
   if (key === 'reactionActivationPolicy') {
     return exactSchroederDynamicLawRoutingPolicy(value)
@@ -6644,13 +6689,10 @@ export async function mountSphPhaseDemoOverlay({
   backgroundColorInput.style.cssText = 'width:100%;height:40px;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;padding:4px;';
   backgroundColorEl.appendChild(backgroundColorInput);
   // Background image picker: the plan/ images ship with the repo and are
-  // served by the dev server; the first entry falls back to the solid color.
+  // served in both dev and production builds; the first entry falls back to solid color.
   const BACKGROUND_IMAGE_OPTIONS = Object.freeze([
     ['', 'Background: solid color'],
-    ['/plan/background-1.jpg', 'Background image 1'],
-    ['/plan/background-2.jpg', 'Background image 2'],
-    ['/plan/background-3.jpg', 'Background image 3'],
-    ['/plan/background-4.jpg', 'Background image 4']
+    ...SPH_BUNDLED_BACKGROUND_IMAGES.map((item) => [item.url, item.label])
   ]);
   const backgroundImageSelect = document.createElement('select');
   backgroundImageSelect.title = 'Choose a background image (or the solid color)';
@@ -6662,6 +6704,7 @@ export async function mountSphPhaseDemoOverlay({
     option.textContent = label;
     backgroundImageSelect.appendChild(option);
   }
+  backgroundImageSelect.value = SPH_DEFAULT_BACKGROUND_IMAGE_URL;
   const localBackgroundImageOption = document.createElement('option');
   localBackgroundImageOption.value = SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE;
   localBackgroundImageOption.textContent = 'Custom image (local session)';
@@ -7231,6 +7274,9 @@ export async function mountSphPhaseDemoOverlay({
       // Local object URLs and filenames are intentionally session-only.
       return '';
     }
+    if (key === 'bgimg' && el?.value === '') {
+      return 'none';
+    }
     return el?.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
   }
   function applyUrlValueToControl(key, el, value) {
@@ -7239,7 +7285,11 @@ export async function mountSphPhaseDemoOverlay({
       return;
     }
     const previous = el.value;
-    el.value = normalizeUrlControlValue(key, value);
+    const normalized = normalizeUrlControlValue(key, value);
+    el.value = normalized;
+    if (key === 'bgimg' && normalized === '') {
+      return;
+    }
     // A select with no matching option collapses to '', which downstream
     // consumers treat as a real (empty) material/mode and hang or fail
     // silently. Unknown URL values keep the control's default instead.
@@ -19042,8 +19092,12 @@ export async function mountSphPhaseDemoOverlay({
       return applyBackgroundColorFromControl(options?.reason || 'studio-background-color');
     },
     setBackgroundImage(url, options = {}) {
-      backgroundImageSelect.value = String(url || '');
-      return applyBackgroundImageFromControl(options?.reason || 'studio-background-image');
+      cancelPendingLocalBackgroundImage('studio-background-image-override');
+      const retiredLocalUrl = detachActiveLocalBackgroundImage();
+      backgroundImageSelect.value = normalizeSphBackgroundImageUrl(url, '');
+      const result = applyBackgroundImageFromControl(options?.reason || 'studio-background-image');
+      revokeLocalBackgroundImageObjectUrl(retiredLocalUrl, 'local-background-image-replaced-by-studio');
+      return result;
     },
     setLocalBackgroundImageFile(file) {
       if (!file) return null;

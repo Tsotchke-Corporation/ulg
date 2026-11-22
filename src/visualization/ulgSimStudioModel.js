@@ -26,6 +26,17 @@ import {
   normalizeSphSceneBackgroundColorHex,
   normalizeSphSceneLightingMode
 } from './sphPhaseScene.js';
+import {
+  SPH_BUNDLED_BACKGROUND_IMAGES,
+  SPH_DEFAULT_BACKGROUND_IMAGE_URL,
+  normalizeSphBackgroundImageUrl
+} from './sphPhaseDemoMount.js';
+
+export {
+  SPH_BUNDLED_BACKGROUND_IMAGES,
+  SPH_DEFAULT_BACKGROUND_IMAGE_URL,
+  normalizeSphBackgroundImageUrl
+};
 
 const DEFAULT_CUSTOM_CAMERA = Object.freeze({
   cameraPositionNormalized: '0.78,0.46,1.55',
@@ -187,6 +198,7 @@ export function buildStagedConfigFromPreset(presetId) {
     display: {
       lightingMode: SPH_SCENE_LIGHTING_MODE_DEFAULT,
       backgroundColor: SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
+      backgroundImageUrl: SPH_DEFAULT_BACKGROUND_IMAGE_URL,
       blobScale: Number(controls.blob ?? 1)
     },
     network: {
@@ -249,6 +261,7 @@ export function buildBlankCustomConfig() {
     display: {
       lightingMode: SPH_SCENE_LIGHTING_MODE_DEFAULT,
       backgroundColor: SPH_SCENE_BACKGROUND_COLOR_DEFAULT,
+      backgroundImageUrl: SPH_DEFAULT_BACKGROUND_IMAGE_URL,
       blobScale: 1
     },
     network: {
@@ -579,6 +592,10 @@ export function buildLaunchParamsFromStagedConfig(config) {
     bodies: serializeSphInitialBodies(internalBodies),
     lighting: normalizeSphSceneLightingMode(config.display.lightingMode),
     bg: normalizeSphSceneBackgroundColorHex(config.display.backgroundColor),
+    bgimg: normalizeSphBackgroundImageUrl(
+      config.display.backgroundImageUrl,
+      SPH_DEFAULT_BACKGROUND_IMAGE_URL
+    ) || 'none',
     blob: String(config.display.blobScale || 1),
     ...(String(config.network?.peerRelayUrl || '').trim()
       ? { peerRelay: String(config.network.peerRelayUrl).trim() }
@@ -688,6 +705,13 @@ export function serializeStagedConfigToUrlSearchParams(config, {
   }
   if (display.backgroundColor && display.backgroundColor.toLowerCase() !== SPH_SCENE_BACKGROUND_COLOR_DEFAULT.toLowerCase()) {
     params.set('bg', normalizeSphSceneBackgroundColorHex(display.backgroundColor));
+  }
+  const normalizedBgImg = normalizeSphBackgroundImageUrl(
+    display.backgroundImageUrl,
+    SPH_DEFAULT_BACKGROUND_IMAGE_URL
+  );
+  if (normalizedBgImg !== SPH_DEFAULT_BACKGROUND_IMAGE_URL) {
+    params.set('bgimg', normalizedBgImg || 'none');
   }
   if (Number.isFinite(Number(display.blobScale)) && Math.abs(Number(display.blobScale) - 1) > 1e-4) {
     params.set('blob', String(roundNice(display.blobScale, 4)));
@@ -815,6 +839,12 @@ export function parseStagedConfigFromUrlSearchParams(searchOrParams) {
   }
   if (params.has('bg')) {
     config.display.backgroundColor = normalizeSphSceneBackgroundColorHex(params.get('bg'));
+  }
+  if (params.has('bgimg')) {
+    config.display.backgroundImageUrl = normalizeSphBackgroundImageUrl(
+      params.get('bgimg'),
+      SPH_DEFAULT_BACKGROUND_IMAGE_URL
+    );
   }
   if (params.has('blob')) {
     const blob = Number(params.get('blob'));

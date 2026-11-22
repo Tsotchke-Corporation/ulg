@@ -25,6 +25,8 @@ import {
   validateSphLocalBackgroundImageFile
 } from './sphPhaseDemoMount.js';
 import {
+  SPH_BUNDLED_BACKGROUND_IMAGES,
+  SPH_DEFAULT_BACKGROUND_IMAGE_URL,
   buildBlankCustomConfig,
   buildLaunchParamsFromStagedConfig,
   buildStagedConfigFromPreset,
@@ -32,6 +34,7 @@ import {
   fmtMeters,
   fmtTempC,
   hasSimulationUrlParams,
+  normalizeSphBackgroundImageUrl,
   parseStagedConfigFromUrlSearchParams,
   roundNice,
   serializeStagedConfigToUrlSearchParams,
@@ -1344,12 +1347,99 @@ export function mountUlgSimStudioApp({
     bgBlock.className = 'ulg-card-block';
     bgBlock.innerHTML = '<div class="ulg-section-head"><h3 class="ulg-section-title">Background &amp; Surface</h3><span class="ulg-chip">Applies live</span></div>';
 
+    const activeBgImageUrl = pendingLocalBgFile
+      ? '__local__'
+      : normalizeSphBackgroundImageUrl(
+        stagedConfig.display.backgroundImageUrl,
+        SPH_DEFAULT_BACKGROUND_IMAGE_URL
+      );
+
+    // Bundled background image gallery (plan/background-1..4 + solid color)
+    const bgGalleryField = document.createElement('div');
+    bgGalleryField.className = 'ulg-field';
+    bgGalleryField.style.marginBottom = '14px';
+    bgGalleryField.innerHTML = '<span class="ulg-field-label"><span>Background Image</span><span class="ulg-field-hint">Drives live backdrop &amp; reflections</span></span>';
+    const bgThumbGrid = document.createElement('div');
+    bgThumbGrid.id = 'ulg-bg-image-gallery';
+    bgThumbGrid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:8px;margin-top:6px;';
+
+    const makeBgChoiceCard = ({ id, url, label, isSolid = false }) => {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.dataset.bgChoice = id;
+      card.dataset.bgUrl = url;
+      const isActive = !pendingLocalBgFile && activeBgImageUrl === url;
+      card.dataset.active = String(isActive);
+      card.style.cssText = [
+        'display:flex',
+        'flex-direction:column',
+        'gap:4px',
+        'padding:4px',
+        'border-radius:8px',
+        `border:1.5px solid ${isActive ? 'var(--ulg-accent,#38d9a9)' : 'rgba(148,186,180,0.22)'}`,
+        `background:${isActive ? 'rgba(56,217,169,0.12)' : 'rgba(10,20,26,0.7)'}`,
+        'color:var(--ulg-text,#e4f4ef)',
+        'cursor:pointer',
+        'text-align:left',
+        'font-size:11px',
+        'transition:border-color 120ms ease,background 120ms ease'
+      ].join(';');
+      const preview = document.createElement('div');
+      preview.style.cssText = [
+        'width:100%',
+        'aspect-ratio:16/10',
+        'border-radius:5px',
+        'overflow:hidden',
+        `background:${isSolid ? normalizeSphSceneBackgroundColorHex(stagedConfig.display.backgroundColor) : '#0b141a'}`,
+        'border:1px solid rgba(255,255,255,0.08)'
+      ].join(';');
+      if (!isSolid) {
+        const thumb = document.createElement('img');
+        thumb.src = url;
+        thumb.alt = label;
+        thumb.loading = 'lazy';
+        thumb.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+        preview.appendChild(thumb);
+      }
+      const caption = document.createElement('span');
+      caption.textContent = label;
+      caption.style.cssText = 'padding:0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;';
+      card.append(preview, caption);
+      card.addEventListener('click', () => {
+        pendingLocalBgFile = null;
+        stagedConfig.display.backgroundImageUrl = url;
+        activeSession?.setBackgroundImage?.(url);
+        if (isSolid) {
+          activeSession?.setBackgroundColor?.(stagedConfig.display.backgroundColor);
+        }
+        if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+        renderDisplayTab();
+      });
+      return card;
+    };
+
+    for (const item of SPH_BUNDLED_BACKGROUND_IMAGES) {
+      bgThumbGrid.appendChild(makeBgChoiceCard({
+        id: item.id,
+        url: item.url,
+        label: item.label
+      }));
+    }
+    bgThumbGrid.appendChild(makeBgChoiceCard({
+      id: 'solid',
+      url: '',
+      label: 'Solid Color',
+      isSolid: true
+    }));
+    bgGalleryField.appendChild(bgThumbGrid);
+    bgBlock.appendChild(bgGalleryField);
+
     const bgGrid = document.createElement('div');
     bgGrid.className = 'ulg-grid-2';
 
     const colorCol = document.createElement('div');
     colorCol.className = 'ulg-field';
-    colorCol.innerHTML = '<span class="ulg-field-label"><span>Background Color</span></span>';
+    colorCol.innerHTML = '<span class="ulg-field-label"><span>Solid Background Color</span></span>';
     const swatchRow = document.createElement('div');
     swatchRow.className = 'ulg-swatch-row';
     for (const [hex, name] of CURATED_BG_SWATCHES) {
@@ -1358,9 +1448,12 @@ export function mountUlgSimStudioApp({
       sw.className = 'ulg-swatch';
       sw.style.background = hex;
       sw.title = name;
-      sw.dataset.active = String(stagedConfig.display.backgroundColor.toLowerCase() === hex.toLowerCase());
+      sw.dataset.active = String(!activeBgImageUrl && stagedConfig.display.backgroundColor.toLowerCase() === hex.toLowerCase());
       sw.addEventListener('click', () => {
+        pendingLocalBgFile = null;
+        stagedConfig.display.backgroundImageUrl = '';
         stagedConfig.display.backgroundColor = hex;
+        activeSession?.setBackgroundImage?.('');
         activeSession?.setBackgroundColor?.(hex);
         if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
         renderDisplayTab();
@@ -1374,7 +1467,10 @@ export function mountUlgSimStudioApp({
     colorPicker.style.padding = '3px';
     colorPicker.value = normalizeSphSceneBackgroundColorHex(stagedConfig.display.backgroundColor);
     colorPicker.addEventListener('input', () => {
+      pendingLocalBgFile = null;
+      stagedConfig.display.backgroundImageUrl = '';
       stagedConfig.display.backgroundColor = colorPicker.value;
+      activeSession?.setBackgroundImage?.('');
       activeSession?.setBackgroundColor?.(colorPicker.value);
       if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
     });
@@ -1416,7 +1512,7 @@ export function mountUlgSimStudioApp({
     clearImgBtn.type = 'button';
     clearImgBtn.className = 'ulg-btn ulg-btn-subtle ulg-btn-sm';
     clearImgBtn.textContent = 'Clear Image';
-    clearImgBtn.disabled = !pendingLocalBgFile;
+    clearImgBtn.disabled = !pendingLocalBgFile && !activeBgImageUrl;
     imgInput.addEventListener('change', () => {
       const file = imgInput.files?.[0] || null;
       if (!file) return;
@@ -1429,13 +1525,15 @@ export function mountUlgSimStudioApp({
       activeSession?.setLocalBackgroundImageFile?.(file);
       clearImgBtn.disabled = false;
       imgStatus.textContent = `Loaded: ${file.name}`;
+      renderDisplayTab();
     });
     clearImgBtn.addEventListener('click', () => {
       pendingLocalBgFile = null;
+      stagedConfig.display.backgroundImageUrl = '';
       imgInput.value = '';
       activeSession?.clearBackgroundImage?.();
-      clearImgBtn.disabled = true;
-      imgStatus.textContent = 'Restored solid background color.';
+      if (hasSimulationUrlParams(window.location.search) || activeSession) syncUrlFromStagedConfig();
+      renderDisplayTab();
     });
     imgRow.append(imgInput, clearImgBtn);
     bgBlock.append(imgRow, imgStatus);

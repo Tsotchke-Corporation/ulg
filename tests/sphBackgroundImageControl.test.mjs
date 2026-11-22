@@ -1,13 +1,24 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import {
+  SPH_BUNDLED_BACKGROUND_IMAGES,
+  SPH_DEFAULT_BACKGROUND_IMAGE_URL,
   SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE,
   SPH_LOCAL_BACKGROUND_IMAGE_MAX_BYTES,
   SPH_LOCAL_BACKGROUND_IMAGE_MIME_TYPES,
   SPH_PHASE_URL_PARAM_KEYS,
+  normalizeSphBackgroundImageUrl,
   validateSphLocalBackgroundImageFile
 } from '../src/visualization/sphPhaseDemoMount.js';
+import {
+  buildBlankCustomConfig,
+  buildLaunchParamsFromStagedConfig,
+  buildStagedConfigFromPreset,
+  parseStagedConfigFromUrlSearchParams,
+  serializeStagedConfigToUrlSearchParams
+} from '../src/visualization/ulgSimStudioModel.js';
 
 test('local SPH background images accept bounded browser-decodable raster files', () => {
   assert.equal(SPH_LOCAL_BACKGROUND_IMAGE_CONTROL_VALUE, '__local-background-image__');
@@ -99,4 +110,44 @@ test('explicit main-thread bridge suppression still clears worker pixels without
   assert.deepEqual(calls, [{ backgroundColor: '#112233', reason: 'explicit-main-thread-bridge:test' }]);
   assert.equal(result.particleCount, 23);
   assert.equal(result.status, 'worker-offscreen-render-rows-suppressed-explicit-main-thread-bridge');
+});
+
+test('all 4 bundled plan background images exist, are selectable, and default to background-3.jpg', () => {
+  assert.equal(SPH_BUNDLED_BACKGROUND_IMAGES.length, 4);
+  assert.equal(SPH_DEFAULT_BACKGROUND_IMAGE_URL, '/plan/background-3.jpg');
+  for (const item of SPH_BUNDLED_BACKGROUND_IMAGES) {
+    const diskPath = new URL(`..${item.url}`, import.meta.url);
+    assert.equal(existsSync(diskPath), true, `missing bundled background image ${item.url}`);
+    assert.equal(normalizeSphBackgroundImageUrl(item.id), item.url);
+    assert.equal(normalizeSphBackgroundImageUrl(item.url), item.url);
+  }
+  // Legacy /plan/background-1.jpg alias normalizes to actual /plan/background-1.jpeg
+  assert.equal(normalizeSphBackgroundImageUrl('/plan/background-1.jpg'), '/plan/background-1.jpeg');
+  assert.equal(normalizeSphBackgroundImageUrl('none'), '');
+  assert.equal(normalizeSphBackgroundImageUrl(''), '');
+  assert.equal(normalizeSphBackgroundImageUrl(null), '/plan/background-3.jpg');
+
+  const presetCfg = buildStagedConfigFromPreset('iron-ice-quench');
+  assert.equal(presetCfg.display.backgroundImageUrl, '/plan/background-3.jpg');
+  assert.equal(buildBlankCustomConfig().display.backgroundImageUrl, '/plan/background-3.jpg');
+
+  const defaultLaunch = buildLaunchParamsFromStagedConfig(presetCfg);
+  assert.equal(defaultLaunch.bgimg, '/plan/background-3.jpg');
+
+  // Default background-3.jpg stays omitted from clean URLs, while explicit choices round-trip.
+  const defaultUrl = serializeStagedConfigToUrlSearchParams(presetCfg);
+  assert.equal(defaultUrl.has('bgimg'), false);
+
+  presetCfg.display.backgroundImageUrl = '/plan/background-4.jpg';
+  const bg4Url = serializeStagedConfigToUrlSearchParams(presetCfg);
+  assert.equal(bg4Url.get('bgimg'), '/plan/background-4.jpg');
+  const parsedBg4 = parseStagedConfigFromUrlSearchParams(bg4Url);
+  assert.equal(parsedBg4.config.display.backgroundImageUrl, '/plan/background-4.jpg');
+
+  presetCfg.display.backgroundImageUrl = '';
+  const solidUrl = serializeStagedConfigToUrlSearchParams(presetCfg);
+  assert.equal(solidUrl.get('bgimg'), 'none');
+  const parsedSolid = parseStagedConfigFromUrlSearchParams(solidUrl);
+  assert.equal(parsedSolid.config.display.backgroundImageUrl, '');
+  assert.equal(buildLaunchParamsFromStagedConfig(parsedSolid.config).bgimg, 'none');
 });

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('.', import.meta.url));
@@ -264,9 +265,30 @@ function resolveLocalHttpsConfig() {
   };
 }
 
+function copyPlanBackgroundsPlugin() {
+  return {
+    name: 'ulg-copy-plan-backgrounds',
+    writeBundle(outputOptions) {
+      const outDir = outputOptions?.dir || join(repoRoot, 'dist');
+      const planDir = join(repoRoot, 'plan');
+      if (!existsSync(planDir)) return;
+      const destDir = join(outDir, 'plan');
+      const files = readdirSync(planDir).filter(
+        (name) => /^background-[^/]+\.(?:avif|jpe?g|png|webp)$/i.test(name)
+      );
+      if (files.length === 0) return;
+      mkdirSync(destDir, { recursive: true });
+      for (const file of files) {
+        copyFileSync(join(planDir, file), join(destDir, file));
+      }
+    }
+  };
+}
+
 export default defineConfig({
   plugins: [
-    routeCacheHeadersPlugin()
+    routeCacheHeadersPlugin(),
+    copyPlanBackgroundsPlugin()
   ],
   worker: {
     // Every runtime worker is constructed as a module worker. The ULG runtime

@@ -277,7 +277,7 @@ export function createSchroederPhaseSlotLedgerStage({ device, particleCount, lin
         successor.abandon(); for (const b of owned) b.destroy(); return true;
       },
       releaseUnadopted(record) {
-        return releaseSphExactMassRead(record.carrierMassRead).then(() => {
+        return releaseSphExactMassRead(record.carrierMassRead, { deferInBurst: true }).then(() => {
           if (!record.energyAdopted) energyOutput.destroy();
         });
       }

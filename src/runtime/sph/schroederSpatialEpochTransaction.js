@@ -370,7 +370,7 @@ function releaseExactMassSource(authority) {
   if (authority.exactMassSource && !authority.exactMassSource.released) {
     authority.exactMassSource.released = true;
     if (authority.exactMassSource.privateCapture) void authority.exactMassSource.privateCapture.release();
-    else void releaseSphParticleExactMassRead(authority.exactMassSource.read);
+    else void releaseSphParticleExactMassRead(authority.exactMassSource.read, { deferInBurst: true });
     authority.exactMassSource.privateCapture = null;
     authority.exactMassSource.read = null;
     authority.exactMassSource.sphUpload = null;

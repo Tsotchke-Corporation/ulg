@@ -336,7 +336,7 @@ export async function runSphVaporAerosolExchangeCandidateGpu(inputs = {}) {
   const dropSourceRead = () => {
     if (sourceRead) { const read = sourceRead; sourceRead = null; releaseSphAerosolParcelRead(read); }
     if (historyRead) { historyRead.release(); historyRead = null; }
-    if (exactParticleHold) { void releaseSphParticleExactMassRead(exactParticleHold); exactParticleHold = null; }
+    if (exactParticleHold) { void releaseSphParticleExactMassRead(exactParticleHold, { deferInBurst: true }); exactParticleHold = null; }
     if (exactCurrentHold) { currentModule.releaseMlsMpmPostMechanicsExactGasRead(exactCurrentHold); exactCurrentHold = null; }
   };
   const validateSources = () => {

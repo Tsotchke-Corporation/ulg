@@ -21201,12 +21201,14 @@ export function runSchroederSpatialMechanicalProposalWebGpu({
   // control header, pipelines, and telemetry.
   jacobiIterations = SCHROEDER_SPATIAL_MECHANICAL_SOLVER_ITERATIONS,
   cleanupPassBudget,
-  contactInnerRounds = 1
+  contactInnerRounds = 1,
+  parallelJacobiCleanupRounds = SCHROEDER_SPATIAL_MECHANICAL_PARALLEL_JACOBI_CLEANUP_ROUNDS_DEFAULT
 } = {}) {
   const solverBudget = resolveSchroederSpatialMechanicalSolverBudget({
     jacobiIterations,
     cleanupPassBudget,
-    contactInnerRounds
+    contactInnerRounds,
+    parallelJacobiCleanupRounds
   });
   const particleCount = Math.max(0, Math.trunc(finiteNumber(
     sphParticleState?.particleCount ?? mlsMpmParticleState?.particleCount,

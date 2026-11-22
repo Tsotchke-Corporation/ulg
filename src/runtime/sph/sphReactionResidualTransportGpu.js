@@ -45,7 +45,7 @@ export async function prepareSphReactionResidualTransport({device,g2p,sphParticl
       this.retiring=false;
       if(errors.length)throw new AggregateError(errors,'Residual transport cleanup failed');
       pin?.release();chain?.release();if(thermalPin)void thermalPin.release();historyRead?.release();
-      if(carrierRead)void releaseSphParticleExactMassRead(carrierRead);
+      if(carrierRead)void releaseSphParticleExactMassRead(carrierRead, { deferInBurst: true });
       this.retired=true;return true;
     }};
   const destroy=()=>{owner.closed=true;return owner.retire();};

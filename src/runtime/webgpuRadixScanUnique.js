@@ -1190,6 +1190,15 @@ fn add_gpu_count_block_offsets(
 ) {
   let count = sealed_count();
   let dispatch_x = gpu_count_control[scan_static.add_dispatch_word];
+  let dispatch_y = gpu_count_control[scan_static.add_dispatch_word + 1u];
+  if (
+    dispatch_x == 0u
+    || dispatch_y == 0u
+    || workgroup_id.x >= dispatch_x
+    || workgroup_id.y >= dispatch_y
+  ) {
+    return;
+  }
   let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
   let first = linear_group * 512u + local_id.x * 2u;
   let second = first + 1u;
@@ -4307,14 +4316,23 @@ export function createWebGpuStableRadixScanUnique(device, {
         }
         // The top scanned level has no parent offset to add. Lower levels are
         // still encoded at their fixed maximum depth and GPU-gated to zero
-        // whenever the authored live count does not reach that recursion.
+        // whenever the authored live count does not reach that recursion. On
+        // a real GPUDevice, add_gpu_count_block_offsets guards against zero
+        // dispatch_x/dispatch_y so direct-ceiling launches avoid per-dispatch
+        // Chromium Dawn indirect validation overhead.
+        const useDirectScanAdd = typeof globalThis.GPUDevice === 'function'
+          && device instanceof globalThis.GPUDevice;
         for (let level = population.levels.length - 2; level >= 0; level -= 1) {
           if (level === population.fusedTopLevelIndex - 1) continue;
           const entry = population.levels[level];
+          const addCeiling = useDirectScanAdd
+            ? directCeilingGroups(Math.ceil(entry.maximumElementCount / 512))
+            : null;
           encodeIndirect(
             gpuCountPipelines.scanAdd,
             entry.addBindGroup,
-            entry.addDispatchOffsetBytes
+            entry.addDispatchOffsetBytes,
+            addCeiling
           );
         }
       };

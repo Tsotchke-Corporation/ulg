@@ -370,6 +370,10 @@ export function createSchroederSpatialAggregateViewGpu(device, {
       maxComputeWorkgroupsPerDimension,
       retainConstantScanParamsBuffers: true,
       retainVariableScanParamsBuffers: true,
+      serialHistogramScanMaxElementCount:
+        typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
+          ? 8_192
+          : 0,
       retainedParamsSlotCount: 1
     });
     // A v2 generation can arrive at any encode. Prepare its GPU-count

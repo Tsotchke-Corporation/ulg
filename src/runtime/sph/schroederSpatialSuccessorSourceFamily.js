@@ -1188,7 +1188,7 @@ function sourceFamilyLivenessSummary(sourceFamily, record) {
 function destroyOwnedSuccessorLevelAssignment(record) {
   if (!record.exactMassRetired) {
     record.exactMassRetired = true;
-    if (record.exactMassRead) record.exactMassRetirementPromise = releaseSphParticleExactMassRead(record.exactMassRead);
+    if (record.exactMassRead) record.exactMassRetirementPromise = releaseSphParticleExactMassRead(record.exactMassRead, { deferInBurst: true });
     else if (record.exactMassPlan) abandonSphExactMassSpatialContinuation(record.exactMassPlan, record.sphUpload);
     record.exactMassPlan = null;
   }

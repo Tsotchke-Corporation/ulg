@@ -62,9 +62,32 @@ export async function runSchroederSpatialChainMechanicsWebGpu({device,source,gen
     execution=composite.encode(encoder,{transaction,forceInputs,p2gProjections:projections,crossTransport,localLawInputs});
     device.queue.submit([encoder.finish()]);composite.markExecutionSubmitted(execution);submitted=true;
     const publication=await composite.publishNativeState(execution,{localLawInputs,localTransport});
-    for(const spec of mechanicsLevels)proposals.push(runSchroederSpatialMechanicalProposalWebGpu({
-      ...mechanicsOptions,device,generation,...source,boxDimsM:spec.mechanicsGrid.boxDimsM,
-      gridSpacingM:spec.mechanicsGrid.gridSpacingM,selectedLevel:spec.selectedLevel}));
+    const finestSelectedLevel = mechanicsLevels[0].selectedLevel;
+    for (const spec of mechanicsLevels) {
+      const isCoarseLevel = spec.selectedLevel > finestSelectedLevel;
+      const coarseContactTuning = isCoarseLevel && mechanicsOptions.diagnosticTrace !== true
+        ? {
+            jacobiIterations: Math.min(
+              Number.isInteger(mechanicsOptions.jacobiIterations) ? mechanicsOptions.jacobiIterations : 16,
+              4
+            ),
+            parallelJacobiCleanupRounds: Math.min(
+              Number.isInteger(mechanicsOptions.parallelJacobiCleanupRounds)
+                ? mechanicsOptions.parallelJacobiCleanupRounds
+                : 8,
+              2
+            )
+          }
+        : null;
+      proposals.push(runSchroederSpatialMechanicalProposalWebGpu({
+        ...mechanicsOptions,
+        ...(coarseContactTuning || {}),
+        device, generation, ...source,
+        boxDimsM: spec.mechanicsGrid.boxDimsM,
+        gridSpacingM: spec.mechanicsGrid.gridSpacingM,
+        selectedLevel: spec.selectedLevel
+      }));
+    }
     g2p=await runMlsMpmLevelChainG2pWebGpu({...mechanicsOptions,device,...source,
       nativePublication:publication,mechanicalProposals:proposals,mechanicsMaterialTable,
       schroederSpatialEpochTransaction:transaction,schroederSpatialEpochGeneration:generation,

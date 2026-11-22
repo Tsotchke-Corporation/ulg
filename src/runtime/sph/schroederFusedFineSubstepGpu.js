@@ -742,7 +742,7 @@ export function createSchroederTwoLevelMacroAuthority({
       try { fineFieldRuntime.discardStatePublicationLock(parentFieldView.fineFieldView, rootPublicationLock); }
       catch { /* The runtime retains a rejected/quarantined lock for its owner. */ }
     }
-    if (exactMassSourceRead) void releaseSphParticleExactMassRead(exactMassSourceRead);
+    if (exactMassSourceRead) void releaseSphParticleExactMassRead(exactMassSourceRead, { deferInBurst: true });
     if (privateSourceToken) releaseClaimedMlsMpmFusedCoarseTerminalOutputBorrow(device, privateSourceToken);
     throw error;
   }
@@ -1076,7 +1076,7 @@ function acquireCanonicalExactMassSource(device, continuation, {
     release() {
       if (released) return completion;
       released = true;
-      completion = releaseSphParticleExactMassRead(sourceRead).then(() => {
+      completion = releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true }).then(() => {
         if (retainPhysicalOutput) {
           origin.exactMassReaders--;
           if (origin.exactMassReaders === 0) origin.closeExactMassReaders?.();
@@ -1090,7 +1090,7 @@ function acquireCanonicalExactMassSource(device, continuation, {
 
 function retireMacroExactMassSource(origin) {
   if (!origin.exactMassSourceRead) return Promise.resolve(true);
-  origin.exactMassRetirementPromise ??= releaseSphParticleExactMassRead(origin.exactMassSourceRead);
+  origin.exactMassRetirementPromise ??= releaseSphParticleExactMassRead(origin.exactMassSourceRead, { deferInBurst: true });
   return origin.exactMassRetirementPromise;
 }
 
@@ -4100,7 +4100,7 @@ function acquirePublicExactMassSource(device, {
     release() {
       if (released) return completion;
       released = true;
-      completion = releaseSphParticleExactMassRead(sourceRead);
+      completion = releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true });
       return completion;
     }
   });

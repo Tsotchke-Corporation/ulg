@@ -458,6 +458,10 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         maxComputeWorkgroupsPerDimension,
         retainConstantScanParamsBuffers: true,
         retainVariableScanParamsBuffers: true,
+        serialHistogramScanMaxElementCount:
+          typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
+            ? 8_192
+            : 0,
         retainedParamsSlotCount: 1
       }),
       edgeScan: createWebGpuU32ExclusiveScan(device, {

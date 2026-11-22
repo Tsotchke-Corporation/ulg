@@ -3855,7 +3855,7 @@ function registerExactG2pOutput(result, args, sourceRead, mechanicsTableCapture,
       let completed = false;
       try { completed = destroy.apply(this, inputs); }
       finally {
-        if (completed !== false) { record.retired = true; void releaseSphParticleExactMassRead(sourceRead); }
+        if (completed !== false) { record.retired = true; void releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true }); }
       }
       return completed;
     };
@@ -3977,7 +3977,7 @@ export async function runMlsMpmLevelChainG2pWebGpu(args = {}) {
       capture.finish();
       void deferConfirmedSubmittedWorkCleanup(device, () => {
         cleanupCandidates(); gather?.destroy();
-        if (sourceRead) void releaseSphParticleExactMassRead(sourceRead);
+        if (sourceRead) void releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true });
       });
     }
   }
@@ -4033,7 +4033,7 @@ export async function runMlsMpmG2pWebGpu(args = {}) {
       exactG2pQuantityOutputs.get(result) ?? null, exactG2pHistoryOutputs.get(result) ?? null);
   } catch (error) {
     result?.destroyOutputParticleBuffers?.();
-    void releaseSphParticleExactMassRead(sourceRead);
+    void releaseSphParticleExactMassRead(sourceRead, { deferInBurst: true });
     throw error;
   }
 }

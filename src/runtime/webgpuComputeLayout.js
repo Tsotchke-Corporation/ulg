@@ -407,9 +407,7 @@ export function deferSubmittedWorkCleanup(device, cleanup) {
   // cleanup covers may still be HELD (encoded but not yet on the queue), so
   // an immediate onSubmittedWorkDone fence would not cover it and the
   // cleanup could destroy buffers a held command buffer still references.
-  // Park the cleanup on the burst; the flush schedules it on a real fence,
-  // one fence per cleanup exactly as below (release latency stays a
-  // correctness property; see the coalescing lesson above).
+  // Park the cleanup on the burst; the flush schedules it on a real fence.
   const burst = workerQueueSubmitBurstRecords.get(device);
   if (burst?.open) {
     burst.deferredCleanups.push(cleanup);
@@ -422,7 +420,9 @@ export function deferSubmittedWorkCleanup(device, cleanup) {
   }
   let submittedWorkDone;
   try {
-    submittedWorkDone = device.queue.onSubmittedWorkDone();
+    submittedWorkDone = burst
+      ? (requestCoalescedRealWorkDone(device, burst) ?? device.queue.onSubmittedWorkDone())
+      : device.queue.onSubmittedWorkDone();
   } catch {
     // Some device-loss/mocked implementations fail synchronously while
     // creating the fence. There is no completion primitive to retain, but we
@@ -550,8 +550,17 @@ export function deferConfirmedSubmittedWorkCleanup(device, cleanup, options = nu
     burst.stats.deferredCleanupTotal += 1;
   } else {
     try {
-      const queue = device.queue;
-      fenceConfirmedCleanup(ticket, queue?.onSubmittedWorkDone, queue);
+      if (
+        burst
+        && typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice
+        && typeof burst.realOnSubmittedWorkDone === 'function'
+      ) {
+        fenceConfirmedCleanup(ticket, () => requestCoalescedRealWorkDone(device, burst));
+      } else {
+        const queue = device.queue;
+        fenceConfirmedCleanup(ticket, queue?.onSubmittedWorkDone, queue);
+      }
     } catch {
       ticket.onQueueFenceRequested = null;
       // A throwing queue accessor did not request a fence or prove retirement.
@@ -590,6 +599,48 @@ export function deferConfirmedSubmittedWorkCleanup(device, cleanup, options = nu
 const workerQueueSubmitBurstRecords = new WeakMap();
 const WORKER_SUBMIT_BURST_POOLED_STAGING_INITIAL_BYTES = 512 * 1024;
 const WORKER_SUBMIT_BURST_POOLED_STAGING_MAX_BYTES = 8 * 1024 * 1024;
+
+function bumpWorkerQueueSubmitEpoch(record) {
+  if (!record) return;
+  record.submitEpoch += 1;
+  record.epochFence = null;
+}
+
+// Share one queue.onSubmittedWorkDone() fence on a real GPUDevice when no
+// real queue.submit / writeBuffer / writeTexture has occurred since the last
+// fence request. Same-epoch fences await the exact same GPU queue timeline
+// point, adding zero release latency while eliminating redundant Dawn IPC.
+function requestCoalescedRealWorkDone(device, record) {
+  if (
+    !record
+    || typeof record.realOnSubmittedWorkDone !== 'function'
+    || typeof globalThis.GPUDevice !== 'function'
+    || !(device instanceof globalThis.GPUDevice)
+  ) {
+    return null;
+  }
+  const epoch = record.submitEpoch;
+  if (record.epochFence && record.epochFence.epoch === epoch) {
+    return record.epochFence.promise;
+  }
+  const raw = record.realOnSubmittedWorkDone();
+  if (!raw || typeof raw.then !== 'function') {
+    return raw;
+  }
+  const entry = { epoch, promise: null };
+  const promise = Promise.resolve(raw).then(
+    (value) => value,
+    (error) => {
+      if (record.epochFence === entry) record.epochFence = null;
+      throw error;
+    }
+  );
+  // Keep shared rejection observable by callers without unhandled-rejection noise.
+  promise.catch(() => {});
+  entry.promise = promise;
+  record.epochFence = entry;
+  return promise;
+}
 
 function workerQueueSubmitBurstError(code, message) {
   const error = new Error(message);
@@ -1017,6 +1068,8 @@ export function armWorkerQueueSubmitBurst(device) {
     // submit cannot be referenced by any held command buffer.
     createStamp: 0,
     heldSubmitStamp: 0,
+    submitEpoch: 0,
+    epochFence: null,
     heldCommandBuffers: [],
     postSubmitCleanups: [],
     deferredCleanups: [],
@@ -1092,6 +1145,7 @@ export function armWorkerQueueSubmitBurst(device) {
       return undefined;
     }
     record.stats.directSubmitTotal += 1;
+    bumpWorkerQueueSubmitEpoch(record);
     return record.realSubmit(commandBuffers);
   };
   if (record.realWriteBuffer) {
@@ -1148,6 +1202,7 @@ export function armWorkerQueueSubmitBurst(device) {
           flushWorkerQueueSubmitBurst(device, 'stale-write-buffer');
         }
       }
+      bumpWorkerQueueSubmitEpoch(record);
       return record.realWriteBuffer(buffer, bufferOffset, data, dataOffset, size);
     };
   }
@@ -1157,6 +1212,7 @@ export function armWorkerQueueSubmitBurst(device) {
         record.stats.staleWriteFlushCount += 1;
         flushWorkerQueueSubmitBurst(device, 'write-texture');
       }
+      bumpWorkerQueueSubmitEpoch(record);
       return record.realWriteTexture(...writeArgs);
     };
   }
@@ -1166,6 +1222,8 @@ export function armWorkerQueueSubmitBurst(device) {
         record.stats.fenceFlushCount += 1;
         flushWorkerQueueSubmitBurst(device, 'fence-request');
       }
+      const coalesced = requestCoalescedRealWorkDone(device, record);
+      if (coalesced !== null) return coalesced;
       return record.realOnSubmittedWorkDone();
     };
   }
@@ -1381,6 +1439,7 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
       if (pooledUploadBytes > 0 && pooledStagingBuffer && pooledStagingBytes) {
         // Queue-timeline ordered BEFORE realSubmit(held) and AFTER any prior
         // flush's realSubmit, so one reusable slab serves all bursts safely.
+        bumpWorkerQueueSubmitEpoch(record);
         record.realWriteBuffer(
           pooledStagingBuffer,
           0,
@@ -1389,6 +1448,7 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
           pooledUploadBytes
         );
       }
+      bumpWorkerQueueSubmitEpoch(record);
       record.realSubmit(held);
     } catch (error) {
       submitError = error;
@@ -1417,22 +1477,60 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
       // Cleanup failures must not mask the submit error.
     }
   }
-  // One real fence per cleanup, matching deferSubmittedWorkCleanup's
-  // documented no-coalescing contract. Legacy cleanups still run if submit
-  // failed or the fence API is unavailable; confirmed tickets require proof.
+  // On a real GPUDevice, all deferred cleanups flushed here were submitted in
+  // the exact same submitEpoch above, so sharing one epoch-coalesced
+  // realOnSubmittedWorkDone() fence preserves zero-delay release latency while
+  // avoiding redundant Dawn/Vulkan queue-fence callbacks per flush.
+  const canShareFlushFence = cleanups.length > 0
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && typeof record.realOnSubmittedWorkDone === 'function';
+  let sharedFencePromise = null;
+  let sharedFenceFailed = false;
+  if (canShareFlushFence) {
+    try {
+      const candidate = requestCoalescedRealWorkDone(device, record);
+      if (candidate && typeof candidate.then === 'function') {
+        sharedFencePromise = Promise.resolve(candidate);
+      } else {
+        sharedFenceFailed = true;
+      }
+    } catch {
+      sharedFenceFailed = true;
+    }
+  }
+  const sharedRequestFence = canShareFlushFence
+    ? () => (sharedFenceFailed ? undefined : sharedFencePromise)
+    : record.realOnSubmittedWorkDone;
+  // One real fence per cleanup on mock/non-GPUDevice paths, matching
+  // deferSubmittedWorkCleanup's documented contract; shared single flush fence
+  // on real GPUDevice. Legacy cleanups still run if submit failed or the fence
+  // API is unavailable; confirmed tickets require proof.
   for (const cleanup of cleanups) {
     if (confirmedCleanupTickets.has(cleanup)) {
       // Even a submit that throws may have delegated commands. Only this
       // ticket's real fence or confirmed device loss can retire its resources.
-      fenceConfirmedCleanup(cleanup, record.realOnSubmittedWorkDone);
+      fenceConfirmedCleanup(cleanup, sharedRequestFence);
       continue;
     }
     if (record.realOnSubmittedWorkDone && submitError == null) {
-      record.realOnSubmittedWorkDone()
-        .catch(() => null)
-        .finally(() => {
-          cleanup();
-        });
+      if (canShareFlushFence) {
+        if (sharedFencePromise && !sharedFenceFailed) {
+          sharedFencePromise.then(() => cleanup(), () => cleanup());
+        } else {
+          try {
+            cleanup();
+          } catch {
+            // Cleanup failures must not mask the submit error.
+          }
+        }
+      } else {
+        record.realOnSubmittedWorkDone()
+          .catch(() => null)
+          .finally(() => {
+            cleanup();
+          });
+      }
     } else {
       try {
         cleanup();
@@ -2136,7 +2234,8 @@ export function releaseSubmittedWorkCleanupQueueOrdered(
 // prior reads finish before the reused buffer is written in a later submit,
 // while rotating identical GPUBuffer handles so downstream bind-group caches hit.
 const queueOrderedBufferPoolByDevice = new WeakMap();
-const QUEUE_ORDERED_POOL_BUCKET_LIMIT = 6;
+const queueOrderedPooledBuffersInPool = new WeakSet();
+const QUEUE_ORDERED_POOL_BUCKET_LIMIT = 16;
 const MAP_READ_BIT = 0x0001;
 const MAP_WRITE_BIT = 0x0002;
 
@@ -2178,7 +2277,10 @@ export function acquireQueueOrderedPooledBuffer(
       const bucket = pool.buckets.get(fullKey);
       if (bucket && bucket.length > 0) {
         const reused = bucket.shift();
-        if (reused) return reused;
+        if (reused) {
+          queueOrderedPooledBuffersInPool.delete(reused);
+          return reused;
+        }
       }
     }
   }
@@ -2216,12 +2318,16 @@ export function releaseQueueOrderedPooledBuffer(
     bucket = [];
     pool.buckets.set(fullKey, bucket);
   }
-  if (bucket.includes(buffer)) return true;
+  if (bucket.includes(buffer)) {
+    queueOrderedPooledBuffersInPool.add(buffer);
+    return true;
+  }
   if (bucket.length >= QUEUE_ORDERED_POOL_BUCKET_LIMIT) {
     buffer.destroy?.();
     return false;
   }
   bucket.push(buffer);
+  queueOrderedPooledBuffersInPool.add(buffer);
   return true;
 }
 
@@ -2238,6 +2344,7 @@ export function registerQueueOrderedPooledBufferReturn(
   if ((normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0) {
     return buffer;
   }
+  queueOrderedPooledBuffersInPool.delete(buffer);
   queueOrderedPooledBufferReturnByBuffer.set(buffer, {
     device,
     bucketKey,
@@ -2252,6 +2359,7 @@ export function releaseOrDestroyQueueOrderedPooledBuffer(
   { allowPool = true } = {}
 ) {
   if (!buffer) return false;
+  if (queueOrderedPooledBuffersInPool.has(buffer)) return true;
   const spec = queueOrderedPooledBufferReturnByBuffer.get(buffer);
   if (spec) {
     queueOrderedPooledBufferReturnByBuffer.delete(buffer);

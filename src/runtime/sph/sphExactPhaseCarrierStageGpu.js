@@ -211,7 +211,7 @@ export async function prepareSphExactPhaseCarrierStage(args) {
       },
       async releaseInventory() {
         const { releaseSphExactMassRead, releaseSphExactMassInventory } = await import('./sphExactMassInventoryGpu.js');
-        if (carrierMassRead) await releaseSphExactMassRead(carrierMassRead);
+        if (carrierMassRead) await releaseSphExactMassRead(carrierMassRead, { deferInBurst: true });
         if (massFamily) await releaseSphExactMassInventory(massFamily);
       }
     };

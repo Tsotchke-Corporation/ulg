@@ -2,6 +2,8 @@ export const ULG_RESIDENT_BUFFER_LEASE_LEDGER_SCHEMA = 'peercompute.ulg.resident
 export const ULG_RESIDENT_BUFFER_RESOURCE_SCHEMA = 'peercompute.ulg.resident-buffer-resource.v0';
 export const ULG_RESIDENT_BUFFER_LEASE_SCHEMA = 'peercompute.ulg.resident-buffer-lease.v0';
 export const ULG_RESIDENT_BUFFER_LEASE_SUMMARY_SCHEMA = 'peercompute.ulg.resident-buffer-lease-summary.v0';
+export const ULG_RESIDENT_MODULE_LEASE_HANDLE_SCHEMA = 'peercompute.ulg.resident-module-buffer-lease.v1';
+export const ULG_RESIDENT_MODULE_CHECKPOINT_SCHEMA = 'peercompute.ulg.resident-module-checkpoint.v1';
 
 function cleanString(value, fallback = null) {
   const text = String(value ?? '').trim();
@@ -541,4 +543,448 @@ export function buildMlsMpmResidentStepBufferLeaseLedger({
     });
   }
   return refreshResidentBufferLeaseLedger(ledger);
+}
+
+function stableModulePayloadHash(payload) {
+  const text = JSON.stringify(payload);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b) >>> 0;
+  }
+  return `fnv1a64:${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+}
+
+function normalizeLayoutDescriptor(layout = {}) {
+  const src = layout && typeof layout === 'object' ? layout : {};
+  return Object.freeze({
+    tensorId: cleanString(src.tensorId, 'state'),
+    dtype: cleanString(src.dtype, 'f32'),
+    layout: cleanString(src.layout, 'interleaved'),
+    strideElements: Math.max(1, Math.floor(finiteNumber(src.strideElements, 1))),
+    strideBytes: Math.max(4, Math.floor(finiteNumber(src.strideBytes, 4))),
+    fields: Object.freeze(Array.isArray(src.fields) ? src.fields.map((f) => String(f)) : [])
+  });
+}
+
+/**
+ * Host-owned resident buffer session for external/pluggable simulation modules
+ * (e.g., Eshkol N-body gravity, comoving cosmological charts, or quantum field
+ * samplers sharing one GPUDevice). Supplies host-issued resource keys, step
+ * numbers, layout descriptors, epoch-fenced read leases, and portable
+ * checkpoints; resetting the session invalidates every previously issued handle
+ * fail-closed.
+ */
+export function createResidentModuleBufferSession({
+  sessionId = null,
+  moduleId = 'simulation-module',
+  device = null,
+  layout = {},
+  initialStep = 0
+} = {}) {
+  const resolvedModuleId = cleanString(moduleId, 'simulation-module');
+  const resolvedSessionId = cleanString(sessionId, `${resolvedModuleId}:session:0`);
+  const defaultLayout = normalizeLayoutDescriptor(layout);
+
+  let resetEpoch = 0;
+  let stepIndex = Math.max(0, Math.floor(finiteNumber(initialStep, 0)));
+  let disposed = false;
+  let nextHandleOrdinal = 1;
+  let currentDevice = device || null;
+
+  // Map<resourceKey, { buffer, destroyFn, layout, stepIndex, resetEpoch, byteLength, rowCount, portableSnapshotFn }>
+  const liveBuffers = new Map();
+  // Map<handleId, { leaseId, resourceKey, resetEpoch, stepIndex, released }>
+  const issuedHandles = new Map();
+
+  let ledger = createResidentBufferLeaseLedger({
+    ledgerId: `${resolvedSessionId}:epoch:${resetEpoch}`,
+    stateKey: resolvedModuleId,
+    step: stepIndex,
+    scope: 'resident-module-buffer-session'
+  });
+
+  function makeVersionedResourceKey(baseKey) {
+    const cleanBase = cleanString(baseKey, 'state');
+    return `${resolvedSessionId}:e${resetEpoch}:s${stepIndex}:${cleanBase}`;
+  }
+
+  function resolveLiveEntry(resourceKeyOrBase) {
+    const key = cleanString(resourceKeyOrBase);
+    if (!key) return null;
+    if (liveBuffers.has(key)) return { resourceKey: key, entry: liveBuffers.get(key) };
+    for (const [fullKey, entry] of liveBuffers.entries()) {
+      if (entry.baseKey === key) return { resourceKey: fullKey, entry };
+    }
+    return null;
+  }
+
+  function publishBuffer({
+    resourceKey = 'bodies',
+    buffer = null,
+    destroyFn = null,
+    byteLength = 0,
+    rowCount = 0,
+    layout: bufferLayout = null,
+    stateFamily = 'module-state',
+    ownerStage = resolvedModuleId,
+    producerStage = resolvedModuleId,
+    stepIndex: nextStep = stepIndex,
+    portableSnapshotFn = null,
+    expectedConsumers = ['renderer', 'next-step']
+  } = {}) {
+    if (disposed) {
+      const err = new RangeError(`Resident buffer session ${resolvedSessionId} is disposed`);
+      err.code = 'ERR_DISPOSED_RESIDENT_BUFFER_SESSION';
+      throw err;
+    }
+    const baseKey = cleanString(resourceKey, 'state');
+    const resolvedStep = Math.max(0, Math.floor(finiteNumber(nextStep, stepIndex)));
+    stepIndex = resolvedStep;
+    ledger.step = stepIndex;
+
+    // Retire any previous unleased generation for the same baseKey.
+    const previous = resolveLiveEntry(baseKey);
+    if (previous) {
+      liveBuffers.delete(previous.resourceKey);
+    }
+
+    const versionedKey = makeVersionedResourceKey(baseKey);
+    const normalizedLayout = bufferLayout ? normalizeLayoutDescriptor(bufferLayout) : defaultLayout;
+    const resolvedByteLength = finiteNumber(
+      byteLength,
+      finiteNumber(buffer?.size, rowCount * normalizedLayout.strideBytes)
+    );
+    const resolvedRowCount = finiteNumber(
+      rowCount,
+      normalizedLayout.strideBytes > 0 ? Math.floor(resolvedByteLength / normalizedLayout.strideBytes) : 0
+    );
+
+    registerResidentBufferResource(ledger, {
+      resourceKey: versionedKey,
+      resourceKind: 'resident-module-buffer',
+      stateFamily: cleanString(stateFamily, 'module-state'),
+      ownerStage: cleanString(ownerStage, resolvedModuleId),
+      producerStage: cleanString(producerStage, resolvedModuleId),
+      source: resolvedSessionId,
+      status: 'resource-retained',
+      retained: true,
+      byteLength: resolvedByteLength,
+      rowCount: resolvedRowCount,
+      bufferLabel: cleanString(buffer?.label, versionedKey),
+      expectedConsumers
+    });
+
+    const entry = {
+      baseKey,
+      resourceKey: versionedKey,
+      buffer,
+      destroyFn: typeof destroyFn === 'function'
+        ? destroyFn
+        : (typeof buffer?.destroy === 'function' ? () => { buffer.destroy(); return true; } : null),
+      layout: normalizedLayout,
+      stepIndex: resolvedStep,
+      resetEpoch,
+      byteLength: resolvedByteLength,
+      rowCount: resolvedRowCount,
+      portableSnapshotFn: typeof portableSnapshotFn === 'function' ? portableSnapshotFn : null
+    };
+    liveBuffers.set(versionedKey, entry);
+
+    return Object.freeze({
+      sessionId: resolvedSessionId,
+      moduleId: resolvedModuleId,
+      resourceKey: versionedKey,
+      baseKey,
+      resetEpoch,
+      stepIndex: resolvedStep,
+      layout: normalizedLayout,
+      byteLength: resolvedByteLength,
+      rowCount: resolvedRowCount
+    });
+  }
+
+  function validateLeaseHandle(handle) {
+    if (!handle || handle.schema !== ULG_RESIDENT_MODULE_LEASE_HANDLE_SCHEMA) {
+      return Object.freeze({ ok: false, reason: 'invalid-lease-handle-schema' });
+    }
+    if (disposed) {
+      return Object.freeze({ ok: false, reason: 'session-disposed' });
+    }
+    if (handle.sessionId !== resolvedSessionId) {
+      return Object.freeze({ ok: false, reason: 'session-mismatch' });
+    }
+    if (handle.resetEpoch !== resetEpoch) {
+      return Object.freeze({ ok: false, reason: 'stale-reset-epoch' });
+    }
+    const tracked = issuedHandles.get(handle.handleId);
+    if (!tracked) {
+      return Object.freeze({ ok: false, reason: 'unknown-or-revoked-handle' });
+    }
+    if (tracked.released) {
+      return Object.freeze({ ok: false, reason: 'lease-released' });
+    }
+    const resource = ledger.resources[handle.resourceKey];
+    if (!resource || resource.destroyed) {
+      return Object.freeze({ ok: false, reason: 'resource-destroyed' });
+    }
+    const lease = ledger.leases.find((item) => item.leaseId === handle.leaseId);
+    if (!lease || lease.status !== 'active') {
+      return Object.freeze({ ok: false, reason: `lease-not-active:${lease?.status || 'missing'}` });
+    }
+    return Object.freeze({ ok: true, reason: 'valid' });
+  }
+
+  function assertValidLeaseHandle(handle) {
+    const verdict = validateLeaseHandle(handle);
+    if (!verdict.ok) {
+      const err = new RangeError(
+        `Rejected stale or invalid resident buffer lease (${handle?.handleId || 'unknown'}): ${verdict.reason}`
+      );
+      err.code = 'ERR_STALE_RESIDENT_BUFFER_LEASE';
+      err.reason = verdict.reason;
+      throw err;
+    }
+    return verdict;
+  }
+
+  function borrowBufferReadLease({
+    resourceKey = 'bodies',
+    consumerStage = 'external-consumer',
+    reason = 'module-read-lease'
+  } = {}) {
+    if (disposed) {
+      const err = new RangeError(`Cannot borrow lease from disposed session ${resolvedSessionId}`);
+      err.code = 'ERR_DISPOSED_RESIDENT_BUFFER_SESSION';
+      throw err;
+    }
+    const found = resolveLiveEntry(resourceKey);
+    if (!found) {
+      const err = new RangeError(`Resident buffer resource not published: ${resourceKey}`);
+      err.code = 'ERR_MISSING_RESIDENT_BUFFER_RESOURCE';
+      throw err;
+    }
+    const { resourceKey: fullKey, entry } = found;
+    const handleId = `${resolvedSessionId}:h${resetEpoch}:${nextHandleOrdinal++}`;
+    const lease = addResidentBufferLease(ledger, {
+      leaseId: `${handleId}:lease`,
+      resourceKey: fullKey,
+      consumerStage: cleanString(consumerStage, 'external-consumer'),
+      reason: cleanString(reason, 'module-read-lease'),
+      readOnly: true
+    });
+    const tracked = {
+      handleId,
+      leaseId: lease.leaseId,
+      resourceKey: fullKey,
+      resetEpoch,
+      stepIndex: entry.stepIndex,
+      released: false
+    };
+    issuedHandles.set(handleId, tracked);
+
+    const handle = Object.freeze({
+      schema: ULG_RESIDENT_MODULE_LEASE_HANDLE_SCHEMA,
+      handleId,
+      leaseId: lease.leaseId,
+      sessionId: resolvedSessionId,
+      moduleId: resolvedModuleId,
+      resourceKey: fullKey,
+      baseKey: entry.baseKey,
+      resetEpoch,
+      stepIndex: entry.stepIndex,
+      layout: entry.layout,
+      byteLength: entry.byteLength,
+      rowCount: entry.rowCount,
+      readOnly: true,
+      device: currentDevice,
+      buffer: entry.buffer,
+      isCurrent: () => validateLeaseHandle(handle).ok,
+      release: () => {
+        if (tracked.released) return false;
+        tracked.released = true;
+        if (tracked.resetEpoch === resetEpoch) {
+          releaseResidentBufferLease(ledger, lease.leaseId, { status: 'released' });
+        }
+        return true;
+      }
+    });
+    return handle;
+  }
+
+  async function createPortableCheckpoint({
+    resourceKey = 'bodies',
+    values = null,
+    metadata = {}
+  } = {}) {
+    if (disposed) {
+      throw new RangeError(`Cannot checkpoint disposed session ${resolvedSessionId}`);
+    }
+    const found = resolveLiveEntry(resourceKey);
+    const entry = found?.entry || null;
+    const layoutDesc = entry?.layout || defaultLayout;
+    let resolvedValues = values;
+    if (resolvedValues == null && entry?.portableSnapshotFn) {
+      resolvedValues = await entry.portableSnapshotFn();
+    }
+    const serializedValues = resolvedValues == null
+      ? []
+      : (ArrayBuffer.isView(resolvedValues) ? Array.from(resolvedValues) : Array.from(resolvedValues));
+    const core = {
+      schema: ULG_RESIDENT_MODULE_CHECKPOINT_SCHEMA,
+      sessionId: resolvedSessionId,
+      moduleId: resolvedModuleId,
+      baseKey: entry?.baseKey || cleanString(resourceKey, 'bodies'),
+      resetEpoch,
+      stepIndex: entry?.stepIndex ?? stepIndex,
+      layout: layoutDesc,
+      rowCount: entry?.rowCount ?? (layoutDesc.strideElements > 0 ? Math.floor(serializedValues.length / layoutDesc.strideElements) : 0),
+      values: serializedValues,
+      metadata: metadata && typeof metadata === 'object' ? { ...metadata } : {}
+    };
+    return Object.freeze({
+      ...core,
+      payloadHash: stableModulePayloadHash({
+        moduleId: core.moduleId,
+        stepIndex: core.stepIndex,
+        layout: core.layout,
+        values: core.values
+      }),
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  function reset({
+    nextStep = 0,
+    destroyBuffers = true,
+    reason = 'session-reset',
+    device: replacementDevice = undefined
+  } = {}) {
+    const revokedHandleCount = issuedHandles.size;
+    for (const tracked of issuedHandles.values()) {
+      tracked.released = true;
+      if (tracked.resetEpoch === resetEpoch) {
+        releaseResidentBufferLease(ledger, tracked.leaseId, { status: 'revoked-on-reset' });
+      }
+    }
+    issuedHandles.clear();
+
+    const destroyedResources = [];
+    for (const [fullKey, entry] of liveBuffers.entries()) {
+      if (destroyBuffers && entry.destroyFn) {
+        const event = destroyResidentBufferWithLease(ledger, fullKey, entry.destroyFn, {
+          force: true,
+          reason
+        });
+        destroyedResources.push({ resourceKey: fullKey, status: event.status });
+      }
+    }
+    liveBuffers.clear();
+
+    resetEpoch += 1;
+    stepIndex = Math.max(0, Math.floor(finiteNumber(nextStep, 0)));
+    if (replacementDevice !== undefined) {
+      currentDevice = replacementDevice;
+    }
+    ledger = createResidentBufferLeaseLedger({
+      ledgerId: `${resolvedSessionId}:epoch:${resetEpoch}`,
+      stateKey: resolvedModuleId,
+      step: stepIndex,
+      scope: 'resident-module-buffer-session'
+    });
+
+    return Object.freeze({
+      sessionId: resolvedSessionId,
+      moduleId: resolvedModuleId,
+      resetEpoch,
+      stepIndex,
+      revokedHandleCount,
+      destroyedResources: Object.freeze(destroyedResources)
+    });
+  }
+
+  async function restoreFromCheckpoint(checkpoint, {
+    uploadFn = null,
+    device: replacementDevice = undefined,
+    reason = 'checkpoint-restore'
+  } = {}) {
+    if (!checkpoint || checkpoint.schema !== ULG_RESIDENT_MODULE_CHECKPOINT_SCHEMA) {
+      throw new TypeError('Expected a valid peercompute.ulg.resident-module-checkpoint.v1 payload');
+    }
+    const expectedHash = stableModulePayloadHash({
+      moduleId: checkpoint.moduleId,
+      stepIndex: checkpoint.stepIndex,
+      layout: checkpoint.layout,
+      values: checkpoint.values
+    });
+    if (checkpoint.payloadHash !== expectedHash) {
+      const err = new Error('Checkpoint integrity mismatch: payloadHash does not match checkpoint contents');
+      err.code = 'ERR_CORRUPT_RESIDENT_CHECKPOINT';
+      throw err;
+    }
+    const resetReceipt = reset({
+      nextStep: checkpoint.stepIndex,
+      destroyBuffers: true,
+      reason,
+      device: replacementDevice
+    });
+    const uploaded = typeof uploadFn === 'function'
+      ? await uploadFn(checkpoint, { device: currentDevice, resetEpoch })
+      : null;
+    const published = publishBuffer({
+      resourceKey: checkpoint.baseKey || 'bodies',
+      buffer: uploaded?.buffer ?? null,
+      destroyFn: uploaded?.destroyFn ?? null,
+      byteLength: uploaded?.byteLength ?? (checkpoint.values.length * Float32Array.BYTES_PER_ELEMENT),
+      rowCount: checkpoint.rowCount,
+      layout: checkpoint.layout,
+      stepIndex: checkpoint.stepIndex,
+      portableSnapshotFn: uploaded?.portableSnapshotFn ?? (() => Float32Array.from(checkpoint.values))
+    });
+    return Object.freeze({
+      restored: true,
+      resetReceipt,
+      published,
+      checkpointHash: checkpoint.payloadHash
+    });
+  }
+
+  function dispose() {
+    if (disposed) return;
+    reset({ nextStep: 0, destroyBuffers: true, reason: 'session-disposed' });
+    disposed = true;
+  }
+
+  function summary() {
+    return Object.freeze({
+      sessionId: resolvedSessionId,
+      moduleId: resolvedModuleId,
+      resetEpoch,
+      stepIndex,
+      disposed,
+      hasDevice: Boolean(currentDevice),
+      liveResourceKeys: Object.freeze([...liveBuffers.keys()]),
+      activeHandleCount: [...issuedHandles.values()].filter((h) => !h.released && h.resetEpoch === resetEpoch).length,
+      ledger: summarizeResidentBufferLeaseLedger(ledger)
+    });
+  }
+
+  return Object.freeze({
+    sessionId: resolvedSessionId,
+    moduleId: resolvedModuleId,
+    get resetEpoch() { return resetEpoch; },
+    get stepIndex() { return stepIndex; },
+    get disposed() { return disposed; },
+    publishBuffer,
+    borrowBufferReadLease,
+    validateLeaseHandle,
+    assertValidLeaseHandle,
+    createPortableCheckpoint,
+    reset,
+    restoreFromCheckpoint,
+    dispose,
+    summary
+  });
 }

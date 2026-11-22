@@ -837,7 +837,8 @@ export function solveKohnShamAtomKH({
   maxScf = 500,
   tol = 1e-7,
   functional = 'lda',
-  spinOrbit = false
+  spinOrbit = false,
+  returnRadialDensity = false
 }) {
   const usePbe = String(functional || 'lda').toLowerCase() === 'pbe';
   const xMin = Math.log(rMinBohr);
@@ -926,6 +927,7 @@ export function solveKohnShamAtomKH({
     electronCount,
     integratedElectrons,
     atomicNumberZ,
+    ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: Array.from(rho), dx } } : {}),
     relativisticMethod: spinOrbit ? 'koelling-harmon+spin-orbit' : 'koelling-harmon'
   };
 }

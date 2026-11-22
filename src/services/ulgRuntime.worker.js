@@ -32,6 +32,22 @@ import {
 } from '../runtime/sph/sphLocalClosureCache.js';
 import { runCarrierRuntimeWithOptionalWebGpu } from '../runtime/webgpuCarrierKernel.js';
 import { packSphPhaseViewStateForTransport } from '../runtime/sphPhaseViewStateTransport.js';
+import {
+  defaultSimulationModuleRegistry,
+  dispatchSimulationStepCapsule,
+  listSimulationModules,
+  registerSimulationModule,
+  resetSimulationModuleSession,
+  unregisterSimulationModule
+} from '../runtime/simulationModuleRegistry.js';
+
+export {
+  defaultSimulationModuleRegistry,
+  listSimulationModules,
+  registerSimulationModule,
+  resetSimulationModuleSession,
+  unregisterSimulationModule
+};
 
 let workerId = null;
 let manifest = null;
@@ -274,6 +290,21 @@ self.addEventListener('message', (event) => {
   if (message.type === 'submit-task') {
     runTask(message.task, message.gpuLease).catch((error) => failTask(message.task, error));
   }
+  if (message.type === 'reset-simulation-module') {
+    resetSimulationModuleSession(message.method, message.options).then((receipt) => {
+      self.postMessage({
+        type: 'simulation-module-reset',
+        requestId: message.requestId || null,
+        receipt
+      });
+    }).catch((error) => {
+      self.postMessage({
+        type: 'simulation-module-reset-error',
+        requestId: message.requestId || null,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
   if (message.type === 'cancel-task') {
     cancelTask(message.rootTaskId);
   }
@@ -314,6 +345,21 @@ async function runTask(task, gpuLease) {
   if (task.taskKind === ULG_TASK_KINDS.sphStaticTableCache) {
     await runSphStaticTableCacheTask(task, record);
     return;
+  }
+  if (task.taskKind === ULG_TASK_KINDS.simulationStep) {
+    const dispatched = await dispatchSimulationStepCapsule(task, { gpuLease });
+    if (dispatched.matched) {
+      if (record.cancelled) return;
+      record.progress = 1;
+      postStatus(record);
+      postTaskResult(task.rootTaskId, {
+        artifact: dispatched.artifact,
+        leaseSummary: dispatched.leaseSummary,
+        registeredModule: dispatched.methodKey
+      });
+      activeTasks.delete(task.rootTaskId);
+      return;
+    }
   }
   const input = task.input || {};
   const closureArtifact = input.closureArtifact;

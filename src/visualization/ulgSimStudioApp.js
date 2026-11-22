@@ -532,6 +532,12 @@ export function mountUlgSimStudioApp({
         if (lawWatch) {
           archLines.push(`Eshkol Law Envelopes: active=${Boolean(lawWatch.active)} gen=${lawWatch.generation ?? 0} fns=${lawWatch.functionCount ?? 0} homog=on domHash=on policy=${lawWatch.fallbackPolicy}`);
         }
+        const rep = globalThis.__ulgRepresentativeParticlesStatus;
+        if (rep) {
+          const meanEnt = Number(rep.meanEntitiesPerCarrier || 0);
+          const entText = meanEnt > 0 ? meanEnt.toExponential(2) : '0';
+          archLines.push(`Representative Particles: carriers=${rep.activeCarrierCount} spares=${rep.spareLineageCapacity} meanEntities=${entText} stefanSkin=${Boolean(rep.stefanExactSkinLedgerActive)} bulkCoarsen=${Boolean(rep.bulkCoarsenEnabled)}`);
+        }
         const a5 = globalThis.__ulgA5SolidStatus;
         if (a5) {
           archLines.push(`A5 solids: rigid=${a5.rigidBodyCount ?? 0} deformable=${a5.sol4DeformableSurfaceCount ?? 0} sol5=${Boolean(a5.sol5FractureActive)} sol6=${Boolean(a5.sol6MultilevelActive)}`);

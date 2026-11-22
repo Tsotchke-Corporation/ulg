@@ -266,7 +266,7 @@ export const SPH_PHASE_CARRIER_TRANSFER_PARAMS_BYTES = 96;
 export const SPH_PHASE_CARRIER_INTERFACE_FRONT_MIN_ROW_WORDS = 24;
 
 const interfaceFrontDummyBuffers = new WeakMap();
-function interfaceFrontDummyBuffer(device) {
+export function interfaceFrontDummyBuffer(device) {
   let buffer = interfaceFrontDummyBuffers.get(device);
   if (!buffer) {
     buffer = uploadStorageBuffer(

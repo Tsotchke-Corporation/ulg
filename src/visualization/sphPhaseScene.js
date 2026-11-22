@@ -54560,6 +54560,10 @@ fn main(
           scene.userData.sphLawEnvelopeWatchStatus = workerArchStatus.lawEnvelopeWatch;
           globalThis.__ulgLawEnvelopeWatchStatus = workerArchStatus.lawEnvelopeWatch;
         }
+        if (workerArchStatus.representativeParticles) {
+          scene.userData.sphRepresentativeParticlesStatus = workerArchStatus.representativeParticles;
+          globalThis.__ulgRepresentativeParticlesStatus = workerArchStatus.representativeParticles;
+        }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and

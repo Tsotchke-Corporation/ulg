@@ -27,6 +27,10 @@ import {
   normalizeSphImplicitThermalOptions
 } from '../runtime/sph/sphImplicitThermalGpu.js';
 import { LAW_FALLBACK_POLICY } from '../runtime/material/eshkolHigherOrderLawCompiler.js';
+import {
+  buildRepresentativeParticlesStatus,
+  summarizeRepresentedEntityDistribution
+} from '../runtime/sph/schroederRepresentativeParticleController.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
@@ -15754,6 +15758,28 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       fourierEnvelopeExceeded: Boolean(implicitThermalStatus?.active)
     });
     globalThis.__ulgLawEnvelopeWatchStatus = lawEnvelopeWatchStatus;
+    if (!record.representativeEntityStats && scheduleSourceSphParticleState) {
+      record.representativeEntityStats = summarizeRepresentedEntityDistribution(
+        scheduleSourceSphParticleState
+      );
+    }
+    const representativeParticlesStatus = buildRepresentativeParticlesStatus({
+      phaseCarrierPlan:
+        record.phaseCarrierPlan
+        ?? record.schroederLane?.sphParticleUpload?.phaseCarrierPlan
+        ?? scheduleSourceSphParticleState?.phaseCarrierPlan
+        ?? null,
+      entityStats: record.representativeEntityStats ?? null,
+      phaseSlotRefinementEnabled: Boolean(
+        baseMechanicsOptions.enablePhaseSlotRefinement === true
+        || baseMechanicsOptions.hierarchyConfig?.enablePhaseSlotRefinement === true
+      ),
+      stefanExactSkinLedgerActive: true,
+      splitCount: Number(record.representativeSplitCount || 0),
+      bulkCoarsenMergeCount: Number(record.representativeBulkCoarsenMergeCount || 0),
+      reclaimedSpareLineages: Number(record.representativeReclaimedSpareLineages || 0)
+    });
+    globalThis.__ulgRepresentativeParticlesStatus = representativeParticlesStatus;
     return {
       schema: ULG_WORKER_RESIDENT_SCHEDULE_RESULT_SCHEMA,
       thermalPotential,
@@ -15775,6 +15801,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         scaleAtlas: scaleAtlasStatus,
         implicitThermal: implicitThermalStatus,
         lawEnvelopeWatch: lawEnvelopeWatchStatus,
+        representativeParticles: representativeParticlesStatus,
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

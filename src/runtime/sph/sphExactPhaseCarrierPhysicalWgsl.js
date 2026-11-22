@@ -14,6 +14,7 @@ struct Params {
   reserved_status: u32, fraction_validation_epsilon: f32, relative_tolerance: f32, mass_epsilon: f32,
   material_record_count: u32, material_record_offset_vec4: u32, absolute_pressure_authority: u32, fraction_activation_epsilon: f32,
   response_count: u32, graph_node_offset: u32, graph_sample_offset: u32, graph_count: u32,
+  skin_front_enabled: u32, pad0: u32, pad1: u32, pad2: u32,
 };
 @group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
@@ -53,6 +54,15 @@ fn phase_record(material: f32, phase: u32) -> u32 {
   } return 0xffffffffu;
 }
 fn component_energy(row: u32, phase: u32) -> vec2<f32> {
+  if (params.skin_front_enabled == 1u) {
+    let skin0 = out_mechanics[row * 8u];
+    if (skin0.x == 1.0) {
+      let target_phase = u32(round(skin0.y));
+      let own_phase = u32(round(out_mechanics[row * 8u + 1u].w));
+      if (phase == target_phase) { return vec2<f32>(skin0.w, 1.0); }
+      if (phase == own_phase) { return vec2<f32>(skin0.z, 1.0); }
+    }
+  }
   let fractions = source_thermo[row * 3u + 1u];
   var count = 0u; var first = 0u; var second = 0u;
   for (var i = 0u; i < 4u; i++) {
@@ -105,6 +115,39 @@ fn prepare_phase_geometry(@builtin(global_invocation_id) id: vec3<u32>) {
   geometry[row * 8u + 5u] = select(0u, 1u, m5.x == r2.x && m6.z == r1.w && m5.y == 1.0 && m6.w == 1.0);
   geometry[row * 8u + 6u] = bitcast<u32>(r0.z);
   geometry[row * 8u + 7u] = record;
+  // When Stefan skin-first conversion is active, precompute destination row's
+  // exact mass-weighted first-moment birth offset from read-only skin scratch
+  // (stored in out_mechanics[source_row * 8 + 0..2]) into out_state[row * 2]
+  // so apply_phase_physical reads only its own row with zero cross-thread race.
+  if (params.skin_front_enabled == 1u) {
+    var high = 0u;
+    for (var i = 0u; i < ${format.wordCount}u; i++) {
+      if (packets[(template_row * 4u + phase) * ${format.wordCount}u + i] != 0u) { high = i; }
+    }
+    var off_sum = vec3<f32>(0.0);
+    var w_total = 0.0;
+    for (var lane = 0u; lane < 4u; lane++) {
+      let source_row = lane * params.lineage_capacity + lineage;
+      let weight = packet_position_weight(source_row, phase, high);
+      if (weight <= 0.0) { continue; }
+      w_total += weight;
+      let s_meta = out_mechanics[source_row * 8u];
+      if (s_meta.x == 1.0) {
+        let target_p = u32(round(s_meta.y));
+        let own_p = u32(round(out_mechanics[source_row * 8u + 1u].w));
+        if (phase + 1u == target_p) {
+          off_sum += out_mechanics[source_row * 8u + 2u].xyz * weight;
+        } else if (phase + 1u == own_p) {
+          off_sum += out_mechanics[source_row * 8u + 1u].xyz * weight;
+        }
+      }
+    }
+    if (w_total > 0.0) {
+      out_state[row * 2u] = vec4<f32>(off_sum / w_total, 1.0);
+    } else {
+      out_state[row * 2u] = vec4<f32>(0.0);
+    }
+  }
 }
 fn phase_temperature(material: f32, phase: u32, energy: f32) -> f32 {
   for (var response = 0u; response < params.response_count; response++) {
@@ -169,6 +212,9 @@ fn apply_phase_physical(@builtin(global_invocation_id) id: vec3<u32>) {
     if (packet_nonzero(source_row, phase - 1u)) { smoothing = max(smoothing, source_thermo[source_row * 3u + 2u].x); }
   }
   position /= total;
+  if (params.skin_front_enabled == 1u && out_state[row * 2u].w == 1.0) {
+    position += out_state[row * 2u].xyz;
+  }
   var entities = 0.0;
   for (var lane = 0u; lane < 4u; lane++) {
     let source_row = lane * params.lineage_capacity + row % params.lineage_capacity;

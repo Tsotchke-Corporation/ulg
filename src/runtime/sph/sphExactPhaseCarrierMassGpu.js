@@ -1,17 +1,27 @@
 import { validateSphExactMassFormat } from '../../../ulg-gpu-abi/src/sphExactMassInventory.js';
 import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { webGpuBufferDevice } from './sphGpuDeviceIdentity.js';
-import { createSphExactPhaseCarrierMassWgsl } from './sphExactPhaseCarrierMassWgsl.js';
+import { createSphExactPhaseCarrierMassWgsl, createSphExactPhaseCarrierMassSkinWgsl } from './sphExactPhaseCarrierMassWgsl.js';
 
 // Numerical substage only. The physical phase producer owns allocation,
 // validation, submission, matched extensive quantities and retirement.
 export async function prepareSphExactPhaseCarrierMass({ device, format, lineageCapacity,
-  sourceMassBuffer, sourceThermoBuffer, allocate, validate }) {
+  sourceMassBuffer, sourceThermoBuffer, allocate, validate,
+  interfaceFront = null, frontBuffer = null, sourceStateBuffer = null,
+  sourceMechanicsBuffer = null, skinScratchBuffer = null }) {
   validateSphExactMassFormat(format);
   if (typeof allocate !== 'function' || typeof validate !== 'function') {
     throw new TypeError('Phase mass preparation requires producer allocation and validation');
   }
   validate();
+  const useSkinFront = Boolean(
+    interfaceFront
+    && frontBuffer
+    && sourceStateBuffer
+    && sourceMechanicsBuffer
+    && skinScratchBuffer
+    && device.limits.maxStorageBuffersPerShaderStage >= 10
+  );
   const count = lineageCapacity * 4, massBytes = count * format.wordCount * 4;
   const packetBytes = massBytes * 4;
   if (!Number.isSafeInteger(lineageCapacity) || lineageCapacity < 1
@@ -20,7 +30,7 @@ export async function prepareSphExactPhaseCarrierMass({ device, format, lineageC
       || packetBytes > device.limits.maxStorageBufferBindingSize
       || packetBytes > device.limits.maxBufferSize
       || Math.ceil(count / 32) > device.limits.maxComputeWorkgroupsPerDimension
-      || device.limits.maxStorageBuffersPerShaderStage < 6
+      || device.limits.maxStorageBuffersPerShaderStage < (useSkinFront ? 10 : 6)
       || sourceMassBuffer?.size !== massBytes || sourceThermoBuffer?.size !== count * 48
       || [sourceMassBuffer, sourceThermoBuffer].some(buffer =>
         webGpuBufferDevice(buffer) !== device || (buffer.usage & 128) === 0)) {
@@ -33,15 +43,31 @@ export async function prepareSphExactPhaseCarrierMass({ device, format, lineageC
   const sumBuffer = make('sum', massBytes);
   const massBuffer = make('mass', massBytes);
   const validationBuffer = make('validation', 16);
-  const params = make('params', 16, 64 | 8);
-  device.queue.writeBuffer(params, 0, new Uint32Array([lineageCapacity, count, 0, 0]));
-  const code = createSphExactPhaseCarrierMassWgsl(format);
-  const types = ['read-only-storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'uniform'];
-  const resources = [sourceMassBuffer, sourceThermoBuffer, packetMassBuffer, sumBuffer, massBuffer, validationBuffer, params];
+  const params = make('params', useSkinFront ? 32 : 16, 64 | 8);
+  if (useSkinFront) {
+    device.queue.writeBuffer(params, 0, new Uint32Array([
+      lineageCapacity, count, 1, interfaceFront.epoch >>> 0,
+      interfaceFront.headerWords >>> 0, interfaceFront.rowWords >>> 0, 0, 0
+    ]));
+  } else {
+    device.queue.writeBuffer(params, 0, new Uint32Array([lineageCapacity, count, 0, 0]));
+  }
+  const code = useSkinFront
+    ? createSphExactPhaseCarrierMassSkinWgsl(format)
+    : createSphExactPhaseCarrierMassWgsl(format);
+  const types = useSkinFront
+    ? ['read-only-storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'uniform',
+       'read-only-storage', 'read-only-storage', 'read-only-storage', 'storage']
+    : ['read-only-storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage', 'uniform'];
+  const resources = useSkinFront
+    ? [sourceMassBuffer, sourceThermoBuffer, packetMassBuffer, sumBuffer, massBuffer, validationBuffer, params,
+       frontBuffer, sourceStateBuffer, sourceMechanicsBuffer, skinScratchBuffer]
+    : [sourceMassBuffer, sourceThermoBuffer, packetMassBuffer, sumBuffer, massBuffer, validationBuffer, params];
+  const cachePrefix = useSkinFront ? 'ulg-exact-phase-mass-skin-v1' : 'ulg-exact-phase-mass-v4';
   const stages = [];
   for (const entryPoint of ['select_phase_packets', 'gather_phase_mass', 'commit_phase_mass']) {
     const pipeline = await prewarmCachedExplicitComputePipeline(device, { code, entryPoint,
-      cacheKey: `ulg-exact-phase-mass-v4:${format.wordCount}:${format.quantumExponent}:${entryPoint}`,
+      cacheKey: `${cachePrefix}:${format.wordCount}:${format.quantumExponent}:${entryPoint}`,
       label: `ulg-exact-phase-${entryPoint}`, bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
     if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Phase mass pipeline unavailable: ${entryPoint}`);
     validate();
@@ -51,6 +77,7 @@ export async function prepareSphExactPhaseCarrierMass({ device, format, lineageC
     }) });
   }
   return Object.freeze({ massBuffer, packetMassBuffer, validationBuffer, particleCount: count, format,
+    skinFrontActive: useSkinFront,
     transientBuffers: Object.freeze([sumBuffer, params]),
     encode(encoder) {
       validate(); encoder.clearBuffer(validationBuffer);

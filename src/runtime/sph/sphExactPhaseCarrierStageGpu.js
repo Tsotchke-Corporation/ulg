@@ -6,7 +6,12 @@ import { sphExactPlacementQuantityLayout } from './sphExactPlacementQuantityWgsl
 import { computeBufferBinding, prewarmCachedExplicitComputePipeline, deferConfirmedSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import { markSphExactMassDerivedBuffers, markSphExactMassPlacementDerivedBuffers } from './sphGpuBuffers.js';
-import { packSphPhaseCarrierClosureRows, validateSphPhaseCarrierPlan } from './sphPhaseCarrierTransferGpu.js';
+import {
+  interfaceFrontDummyBuffer,
+  packSphPhaseCarrierClosureRows,
+  resolveSphPhaseCarrierInterfaceFront,
+  validateSphPhaseCarrierPlan
+} from './sphPhaseCarrierTransferGpu.js';
 
 // Called only by the standard phase producer. Its private capture registry is
 // the source authority; this preparation helper cannot mint a phase capture.
@@ -109,23 +114,28 @@ export async function prepareSphExactPhaseCarrierStage(args) {
         mechanicsBuffer: source.mechanicsBuffer, quantityBuffer: sourceQuantityBuffer,
         materialMolars: args.thermalMaterialTable.molarMassIdentities, allocate, validate: validateInputs });
     }
+    const outState = make('state', count * 32, true), outThermo = make('thermo', count * 48, true), outMechanics = make('mechanics', count * 128, true);
+    const interfaceFront = resolveSphPhaseCarrierInterfaceFront(args.interfacePhaseFront, device);
+    const frontBuffer = interfaceFront ? interfaceFront.buffer : interfaceFrontDummyBuffer(device);
     const geometryBuffer = make('geometry', count * 32);
     const mass = await prepareSphExactPhaseCarrierMass({ device, format, lineageCapacity: plan.lineageCapacity,
-      sourceMassBuffer, sourceThermoBuffer: source.thermoBuffer, allocate, validate: validateInputs });
+      sourceMassBuffer, sourceThermoBuffer: source.thermoBuffer, allocate, validate: validateInputs,
+      interfaceFront, frontBuffer, sourceStateBuffer: source.stateBuffer,
+      sourceMechanicsBuffer: source.mechanicsBuffer, skinScratchBuffer: outMechanics });
     const quantity = await prepareSphExactPhaseCarrierQuantities({ device, format, layout, sourceQuantityBuffer,
       packetMassBuffer: mass.packetMassBuffer, candidateMassBuffer: mass.massBuffer, geometryBuffer,
       validationBuffer: mass.validationBuffer, lineageCapacity: plan.lineageCapacity, allocate, validate: validateInputs });
     transient.delete(quantity.quantityBuffer); owned.add(quantity.quantityBuffer);
-    const outState = make('state', count * 32, true), outThermo = make('thermo', count * 48, true), outMechanics = make('mechanics', count * 128, true);
     const outputBuffers = [outState, outThermo, outMechanics, quantity.quantityBuffer];
     if (fromThermal) markSphExactMassDerivedBuffers(held.sourceRead, outputBuffers);
     else await markSphExactMassPlacementDerivedBuffers(source, outputBuffers, { device });
     const closureBuffer = upload('closure', closure.values), graphBuffer = upload('caloric', graph);
-    const parameterBytes = new ArrayBuffer(80), p = new Uint32Array(parameterBytes), f = new Float32Array(parameterBytes);
+    const parameterBytes = new ArrayBuffer(96), p = new Uint32Array(parameterBytes), f = new Float32Array(parameterBytes);
     p.set([count, plan.lineageCapacity, 4, plan.lineageCapacity, closure.thermalSegmentCount, closure.mechanicsRecordCount,
       closure.thermalOffsetVec4, closure.mechanicsOffsetVec4, 254]); f[9] = 1e-7; f[10] = 2e-4;
     p[12] = closure.materialRecordCount; p[13] = closure.materialRecordOffsetVec4; p[14] = args.absolutePressureAuthority === true ? 1 : 0;
     p.set([responses.responseCount, responses.responses.length / 4, (responses.responses.length + bank.nodeRows.length) / 4, bank.graphCount], 16);
+    p[20] = mass.skinFrontActive ? 1 : 0;
     const params = upload('physical-params', parameterBytes, 64 | 8);
     const physicalCode = createSphExactPhaseCarrierPhysicalWgsl(format);
     const resources = [source.stateBuffer, source.thermoBuffer, source.mechanicsBuffer, closureBuffer, mass.packetMassBuffer,
@@ -134,7 +144,7 @@ export async function prepareSphExactPhaseCarrierStage(args) {
     const pipelines = [];
     for (const entryPoint of ['prepare_phase_geometry', 'apply_phase_physical', 'restore_rejected_phase_physical']) {
       const pipeline = await prewarmCachedExplicitComputePipeline(device, { code: physicalCode, entryPoint,
-        label: entryPoint, cacheKey: `ulg-exact-${entryPoint}-v2:${format.wordCount}`,
+        label: entryPoint, cacheKey: `ulg-exact-${entryPoint}-v3:${format.wordCount}`,
         bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
       if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Phase physical pipeline unavailable: ${entryPoint}`);
       pipelines.push({ pipeline, group: device.createBindGroup({ layout: pipeline.bindGroupLayout,

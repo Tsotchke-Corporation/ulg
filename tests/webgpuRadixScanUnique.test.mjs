@@ -3720,3 +3720,343 @@ test('native fused GPU-count scans gate dynamic depth and admit the production c
       | WEBGPU_PARALLEL_PRIMITIVE_STATUS_COUNT_OVERFLOW
   );
 });
+
+test('opt-in 8-bit radix halves digit passes, uses single-workgroup histogram scan, and falls back cleanly above limit', () => {
+  const device = createFakeDevice();
+  const keyBuffer = device.createBuffer({ label: 'keys-8bit', size: 4096 * 8, usage: 128 });
+  const authorityBuffer = device.createBuffer({ label: 'auth-8bit', size: 16, usage: 128 });
+  const runtime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 4096,
+    maxKeyWordCount: 2,
+    retainConstantScanParamsBuffers: true,
+    retainVariableScanParamsBuffers: true,
+    retainedParamsSlotCount: 1,
+    prefer8BitRadix: true,
+    label: 'host-8bit-radix'
+  });
+  assert.equal(runtime.radixBitsPerPass, 8);
+  assert.equal(
+    runtime.allocationEntries().some((entry) => entry.role === 'radix-histograms-8bit'),
+    true
+  );
+  runtime.prepareGpuCountResources();
+
+  // Direct-count encodeSort: 5 significant nibbles [0,1,2,3,4] map to 3 byte passes (0,1,2)
+  const directExec = runtime.encodeSort(createFakeEncoder(), {
+    keyBuffer,
+    elementCount: 1024,
+    keyWordCount: 2,
+    keyStrideWords: 2,
+    significantDigitRows: [0, 1, 2, 3, 4],
+    retainedParamsSlotIndex: 0
+  });
+  assert.equal(directExec.radixBitsPerPass, 8);
+  assert.equal(directExec.passCount, 3);
+  assert.equal(directExec.histogramScanMode, 'parallel-8bit-single-wg');
+  assert.equal(directExec.encodedDispatchCount, 1 + 3 * 3);
+  runtime.releaseExecution(directExec, { discardedEncoder: true });
+
+  // GPU-count encodeSortUniqueGpuCount: nibbles [0,1,8] map to 2 byte passes (0 and 4)
+  const gpuCountExec = runtime.encodeSortUniqueGpuCount(createFakeEncoder(), {
+    keyBuffer,
+    authorityBuffer,
+    generationSeal: 42,
+    maxElementCount: 4096,
+    keyWordCount: 2,
+    keyStrideWords: 2,
+    significantDigitRows: [0, 1, 8]
+  });
+  assert.equal(gpuCountExec.radixBitsPerPass, 8);
+  assert.equal(gpuCountExec.radixPassCount, 2);
+  assert.deepEqual(gpuCountExec.significantDigitRows, [0, 1, 8]);
+  assert.equal(gpuCountExec.histogramScanMode, 'gpu-count-8bit-single-wg');
+  assert.equal(gpuCountExec.histogramScanEncodedDispatchCount, 1);
+  assert.equal(gpuCountExec.encodedIndirectDispatchCount, 0);
+  runtime.releaseExecution(gpuCountExec, { discardedEncoder: true });
+  runtime.destroy();
+
+  // Above 8-bit max workgroup cap (8192 * 256 = 2097152) cleanly falls back to 4-bit
+  const fallbackRuntime = createWebGpuStableRadixScanUnique(device, {
+    maxElementCount: 2_200_000,
+    maxKeyWordCount: 1,
+    prefer8BitRadix: true,
+    label: 'host-8bit-fallback'
+  });
+  assert.equal(fallbackRuntime.radixBitsPerPass, 4);
+  fallbackRuntime.destroy();
+});
+
+test('native 8-bit radix sort and GPU-count unique match 4-bit bit-exactly across boundaries, adversarial keys, and fail-closed seals', {
+  skip: RUN_NATIVE_GPU_COUNT
+    ? false
+    : 'set ULG_RUN_NATIVE_WEBGPU_RADIX_COUNT=1 for native Vulkan WebGPU',
+  timeout: 120_000
+}, async () => {
+  const { chromium } = await import('@playwright/test');
+  const browser = await chromium.launch({
+    executablePath: process.env.ULG_WEBGPU_RADIX_COUNT_CHROME
+      || '/usr/bin/google-chrome',
+    headless: true,
+    args: [
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--enable-unsafe-webgpu',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  let native;
+  try {
+    const page = await browser.newPage({ ignoreHTTPSErrors: true });
+    await page.goto(NATIVE_GPU_COUNT_BASE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60_000
+    });
+    native = await page.evaluate(async () => {
+      const adapter = await navigator.gpu?.requestAdapter({
+        powerPreference: 'high-performance'
+      });
+      if (!adapter) {
+        return { status: 'unsupported', reason: 'WebGPU adapter unavailable' };
+      }
+      const runtimeModule = await import(
+        `/src/runtime/webgpuRadixScanUnique.js?native8Bit=${Date.now()}`
+      );
+      const device = await adapter.requestDevice();
+      const uncapturedErrors = [];
+      device.addEventListener('uncapturederror', (event) => {
+        uncapturedErrors.push(event.error?.message || String(event.error));
+      });
+      device.pushErrorScope('validation');
+      device.pushErrorScope('internal');
+      device.pushErrorScope('out-of-memory');
+
+      const readU32 = async (buffer, wordCount) => {
+        const size = Math.max(4, wordCount * 4);
+        const staging = device.createBuffer({
+          size,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(buffer, 0, staging, 0, size);
+        device.queue.submit([enc.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);
+        const out = Array.from(new Uint32Array(staging.getMappedRange().slice(0)));
+        staging.unmap();
+        staging.destroy();
+        return out.slice(0, wordCount);
+      };
+      const arraysEqual = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+      // 1. Multi-word adversarial + boundary counts on GPU-count 8-bit vs 4-bit
+      const maxN = 32_768;
+      const keyWords = 3;
+      const keyStride = 4;
+      const keys = new Uint32Array(maxN * keyStride);
+      for (let i = 0; i < maxN; i += 1) {
+        if (i < 16) {
+          // Stress bucket 255 (0xffffffff) right next to invalid tail lanes, plus 0 and duplicates
+          const pattern = [0xffffffff, 0x00000000, 0xffffffff, 0x000000ff, 0xff000000, 0x800000ff, 0xffffffff, 0x00000000][i % 8];
+          keys[i * keyStride] = pattern;
+          keys[i * keyStride + 1] = (i & 1) ? 0xffffffff : 0x00000000;
+          keys[i * keyStride + 2] = (i * 131) & 0xffff;
+        } else {
+          keys[i * keyStride] = ((i * 2654435761) >>> 0) % 19;
+          keys[i * keyStride + 1] = ((i * 40503) >>> 0) & 0xfff;
+          keys[i * keyStride + 2] = ((i * 97) >>> 0) % 257;
+        }
+        keys[i * keyStride + 3] = 0xdeadbeef; // unused stride padding word
+      }
+      const keyBuffer = device.createBuffer({
+        size: keys.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+      device.queue.writeBuffer(keyBuffer, 0, keys);
+      const authBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+
+      const rt8 = runtimeModule.createWebGpuStableRadixScanUnique(device, {
+        maxElementCount: maxN,
+        maxKeyWordCount: keyWords,
+        retainConstantScanParamsBuffers: true,
+        retainVariableScanParamsBuffers: true,
+        retainedParamsSlotCount: 1,
+        prefer8BitRadix: true,
+        label: 'native-8bit'
+      });
+      const rt4 = runtimeModule.createWebGpuStableRadixScanUnique(device, {
+        maxElementCount: maxN,
+        maxKeyWordCount: keyWords,
+        retainConstantScanParamsBuffers: true,
+        retainVariableScanParamsBuffers: true,
+        retainedParamsSlotCount: 1,
+        prefer8BitRadix: false,
+        label: 'native-4bit'
+      });
+      rt8.prepareGpuCountResources();
+      rt4.prepareGpuCountResources();
+
+      const cases = [];
+      for (const [idx, count] of [1, 3, 255, 256, 257, 513, 4097, 32768].entries()) {
+        const seal = 100 + idx;
+        device.queue.writeBuffer(authBuffer, 0, new Uint32Array([count, seal]));
+        const enc8 = device.createCommandEncoder();
+        const exec8 = rt8.encodeSortUniqueGpuCount(enc8, {
+          keyBuffer,
+          authorityBuffer: authBuffer,
+          generationSeal: seal,
+          maxElementCount: maxN,
+          keyWordCount: keyWords,
+          keyStrideWords: keyStride,
+          consumerWorkgroupSize: 64
+        });
+        device.queue.submit([enc8.finish()]);
+        const fence8 = device.queue.onSubmittedWorkDone();
+        const sorted8 = await readU32(exec8.sortedIndicesBuffer, count);
+        const ev8 = await readU32(exec8.uniqueEvidenceBuffer, 8);
+        const uniqCount8 = ev8[2];
+        const uKeys8 = await readU32(exec8.uniqueKeysBuffer, uniqCount8 * keyWords);
+        const uOff8 = await readU32(exec8.uniqueOffsetsBuffer, uniqCount8 + 1);
+        await rt8.releaseExecutionAfter(exec8, fence8);
+
+        const enc4 = device.createCommandEncoder();
+        const exec4 = rt4.encodeSortUniqueGpuCount(enc4, {
+          keyBuffer,
+          authorityBuffer: authBuffer,
+          generationSeal: seal,
+          maxElementCount: maxN,
+          keyWordCount: keyWords,
+          keyStrideWords: keyStride,
+          consumerWorkgroupSize: 64
+        });
+        device.queue.submit([enc4.finish()]);
+        const fence4 = device.queue.onSubmittedWorkDone();
+        const sorted4 = await readU32(exec4.sortedIndicesBuffer, count);
+        const ev4 = await readU32(exec4.uniqueEvidenceBuffer, 8);
+        const uKeys4 = await readU32(exec4.uniqueKeysBuffer, ev4[2] * keyWords);
+        const uOff4 = await readU32(exec4.uniqueOffsetsBuffer, ev4[2] + 1);
+        await rt4.releaseExecutionAfter(exec4, fence4);
+
+        cases.push({
+          count,
+          bits8: exec8.radixBitsPerPass,
+          passes8: exec8.radixPassCount,
+          passes4: exec4.radixPassCount,
+          dispatches8: exec8.encodedDispatchCount,
+          dispatches4: exec4.encodedDispatchCount,
+          sortedMatch: arraysEqual(sorted8, sorted4),
+          evidenceMatch: arraysEqual(ev8, ev4),
+          uniqueKeysMatch: arraysEqual(uKeys8, uKeys4),
+          uniqueOffsetsMatch: arraysEqual(uOff8, uOff4)
+        });
+      }
+
+      // 2. Direct-count encodeSort parity with odd significantDigitRows [0,1,2]
+      const smallKeys = new Uint32Array(513);
+      for (let i = 0; i < 513; i += 1) smallKeys[i] = ((i * 73) ^ 0x5a5) & 0xfff;
+      const smallKeyBuf = device.createBuffer({
+        size: smallKeys.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+      device.queue.writeBuffer(smallKeyBuf, 0, smallKeys);
+      const dEnc8 = device.createCommandEncoder();
+      const dExec8 = rt8.encodeSort(dEnc8, {
+        keyBuffer: smallKeyBuf,
+        elementCount: 513,
+        keyWordCount: 1,
+        keyStrideWords: 1,
+        significantDigitRows: [0, 1, 2],
+        retainedParamsSlotIndex: 0
+      });
+      device.queue.submit([dEnc8.finish()]);
+      const dFence8 = device.queue.onSubmittedWorkDone();
+      const dSorted8 = await readU32(dExec8.sortedIndicesBuffer, 513);
+      await rt8.releaseExecutionAfter(dExec8, dFence8);
+
+      const dEnc4 = device.createCommandEncoder();
+      const dExec4 = rt4.encodeSort(dEnc4, {
+        keyBuffer: smallKeyBuf,
+        elementCount: 513,
+        keyWordCount: 1,
+        keyStrideWords: 1,
+        significantDigitRows: [0, 1, 2],
+        retainedParamsSlotIndex: 0
+      });
+      device.queue.submit([dEnc4.finish()]);
+      const dFence4 = device.queue.onSubmittedWorkDone();
+      const dSorted4 = await readU32(dExec4.sortedIndicesBuffer, 513);
+      await rt4.releaseExecutionAfter(dExec4, dFence4);
+
+      // 3. Fail-closed zero, invalid seal, and overflow on 8-bit GPU-count
+      const checkFailClosed = async (count, authSeal, expectedSeal, maximum) => {
+        device.queue.writeBuffer(authBuffer, 0, new Uint32Array([count, authSeal]));
+        const enc = device.createCommandEncoder();
+        const exec = rt8.encodeSortUniqueGpuCount(enc, {
+          keyBuffer,
+          authorityBuffer: authBuffer,
+          generationSeal: expectedSeal,
+          maxElementCount: maximum,
+          keyWordCount: keyWords,
+          keyStrideWords: keyStride,
+          consumerWorkgroupSize: 64
+        });
+        device.queue.submit([enc.finish()]);
+        const fence = device.queue.onSubmittedWorkDone();
+        const ev = await readU32(exec.uniqueEvidenceBuffer, 8);
+        const disp = await readU32(exec.uniqueDispatchIndirectBuffer, 3);
+        await rt8.releaseExecutionAfter(exec, fence);
+        return { ev, disp };
+      };
+      const zeroCase = await checkFailClosed(0, 501, 501, 1024);
+      const badSealCase = await checkFailClosed(257, 502, 503, 1024);
+      const overflowCase = await checkFailClosed(1025, 504, 504, 1024);
+
+      rt8.destroy();
+      rt4.destroy();
+      keyBuffer.destroy();
+      smallKeyBuf.destroy();
+      authBuffer.destroy();
+      const oom = await device.popErrorScope();
+      const internal = await device.popErrorScope();
+      const validation = await device.popErrorScope();
+      device.destroy();
+      return {
+        status: 'ok',
+        cases,
+        directParity: arraysEqual(dSorted8, dSorted4),
+        directPasses8: dExec8.passCount,
+        directPasses4: dExec4.passCount,
+        zeroCase,
+        badSealCase,
+        overflowCase,
+        errors: [oom?.message, internal?.message, validation?.message, ...uncapturedErrors].filter(Boolean)
+      };
+    });
+  } finally {
+    await browser.close();
+  }
+
+  if (native.status === 'unsupported') assert.fail(native.reason);
+  assert.deepEqual(native.errors, []);
+  for (const entry of native.cases) {
+    assert.equal(entry.bits8, 8, `count=${entry.count} 8-bit mode`);
+    assert.equal(entry.passes8 * 2, entry.passes4, `count=${entry.count} half passes`);
+    assert.ok(entry.dispatches8 < entry.dispatches4, `count=${entry.count} fewer dispatches`);
+    assert.equal(entry.sortedMatch, true, `count=${entry.count} stable sorted indices match 4-bit`);
+    assert.equal(entry.evidenceMatch, true, `count=${entry.count} evidence match`);
+    assert.equal(entry.uniqueKeysMatch, true, `count=${entry.count} unique keys match`);
+    assert.equal(entry.uniqueOffsetsMatch, true, `count=${entry.count} unique offsets match`);
+  }
+  assert.equal(native.directParity, true, 'direct 8-bit encodeSort matches 4-bit');
+  assert.equal(native.directPasses8, 2);
+  assert.equal(native.directPasses4, 3);
+  assert.deepEqual(native.zeroCase.disp, [0, 0, 0]);
+  assert.equal(native.zeroCase.ev[2], 0);
+  assert.equal(native.zeroCase.ev[3], 1);
+  assert.deepEqual(native.badSealCase.disp, [0, 0, 0]);
+  assert.equal(native.badSealCase.ev[3], 0);
+  assert.deepEqual(native.overflowCase.disp, [0, 0, 0]);
+  assert.equal(native.overflowCase.ev[3], 0);
+  assert.equal(native.overflowCase.ev[4], 1);
+});

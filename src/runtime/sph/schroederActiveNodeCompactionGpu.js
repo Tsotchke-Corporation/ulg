@@ -294,7 +294,9 @@ export async function runSchroederActiveNodeCompactionEvidenceWebGpu({
   const radix = createWebGpuStableRadixScanUnique(device, {
     maxElementCount: resolvedRowCount,
     maxKeyWordCount: keyWordCount,
-    label: `${label}-radix`
+    label: `${label}-radix`,
+    prefer8BitRadix:
+      typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
   });
 
   const uniqueEvidenceReadback = device.createBuffer({

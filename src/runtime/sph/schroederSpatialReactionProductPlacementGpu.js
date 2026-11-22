@@ -766,7 +766,9 @@ function createSegmentedPlacementArena(device, {
       retainConstantScanParamsBuffers: true,
       retainVariableScanParamsBuffers: false,
       retainedParamsSlotCount: 1,
-      serialHistogramScanMaxElementCount: 4096
+      serialHistogramScanMaxElementCount: 4096,
+      prefer8BitRadix:
+        typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
     };
     const captureRadix = createWebGpuStableRadixScanUnique(device, {
       ...radixOptions,

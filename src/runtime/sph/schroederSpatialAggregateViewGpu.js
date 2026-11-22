@@ -374,7 +374,9 @@ export function createSchroederSpatialAggregateViewGpu(device, {
         typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
           ? 8_192
           : 0,
-      retainedParamsSlotCount: 1
+      retainedParamsSlotCount: 1,
+      prefer8BitRadix:
+        typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
     });
     // A v2 generation can arrive at any encode. Prepare its GPU-count
     // topology while the retained arena is created, never in the hot loop.

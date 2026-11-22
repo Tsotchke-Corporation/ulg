@@ -15,6 +15,7 @@ import {
   WEBGPU_INDIRECT_DISPATCH_ROW_LAYOUT
 } from '../../ulg-gpu-abi/src/parallelPrimitives.js';
 import {
+  computeBufferBinding,
   createCachedExplicitComputePipeline
 } from './webgpuComputeLayout.js';
 
@@ -30,6 +31,10 @@ export const WEBGPU_SCAN_FUSED_TOP_ADD_MAX_ELEMENT_COUNT = 32_768;
 export const WEBGPU_RADIX_BITS_PER_PASS = 4;
 export const WEBGPU_RADIX_BUCKET_COUNT = 1 << WEBGPU_RADIX_BITS_PER_PASS;
 export const WEBGPU_RADIX_PASSES_PER_WORD = 32 / WEBGPU_RADIX_BITS_PER_PASS;
+export const WEBGPU_RADIX_8BIT_BITS_PER_PASS = 8;
+export const WEBGPU_RADIX_8BIT_BUCKET_COUNT = 1 << WEBGPU_RADIX_8BIT_BITS_PER_PASS;
+export const WEBGPU_RADIX_8BIT_PASSES_PER_WORD = 32 / WEBGPU_RADIX_8BIT_BITS_PER_PASS;
+export const WEBGPU_RADIX_8BIT_MAX_WORKGROUPS = 8192;
 export const WEBGPU_RADIX_MAX_KEY_WORDS = 8;
 export const WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_DEFAULT = 128;
 export const WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_MAX = 1024;
@@ -734,6 +739,207 @@ fn scan_histogram_serial() {
   for (var index = 0u; index < histogram_element_count; index = index + 1u) {
     radix_histogram_offsets[index] = running;
     running = running + radix_histograms[index];
+  }
+}
+`;
+
+// 8-bit (256-bucket) coalesced stable LSD radix sort with a single-workgroup
+// coalesced histogram scan. Halves radix passes and global sort/scatter traffic
+// while keeping scatter workgroup storage at 8 KiB (half the 16 KiB minimum).
+// Layout of radix_histograms8:
+//   [0 .. 255]: global exclusive base offset for each 8-bit bucket b
+//   [(g + 1) * 256 + b]: workgroup g's bucket b count (written by histogram),
+//     overwritten in-place by scan with workgroup g's exclusive offset within b.
+export const webGpuStableRadix8BitWgsl = /* wgsl */ `
+struct RadixParams {
+  element_count: u32,
+  workgroup_count: u32,
+  key_stride_words: u32,
+  key_word_index: u32,
+  bit_offset: u32,
+  key_word_count: u32,
+  generation_id: u32,
+  dispatch_x: u32,
+};
+
+@group(0) @binding(0) var<storage, read> radix_keys: array<u32>;
+@group(0) @binding(1) var<storage, read> radix_indices_in: array<u32>;
+@group(0) @binding(2) var<storage, read_write> radix_indices_out: array<u32>;
+@group(0) @binding(3) var<storage, read_write> radix_histograms8: array<u32>;
+@group(0) @binding(4) var<storage, read> radix_histograms8_read: array<u32>;
+@group(0) @binding(5) var<uniform> radix_params: RadixParams;
+
+var<workgroup> local_hist8: array<atomic<u32>, 256>;
+var<workgroup> wg_bucket_totals8: array<u32, 256>;
+var<workgroup> wg_keys8: array<u32, 256>;
+var<workgroup> wg_vals8: array<u32, 256>;
+var<workgroup> wg_scan4_8: array<vec4<u32>, 256>;
+var<workgroup> wg_totals4_8: vec4<u32>;
+var<workgroup> wg_first8: array<u32, 256>;
+var<workgroup> wg_bucket_base8: array<u32, 256>;
+
+fn record_byte8(record_index: u32) -> u32 {
+  let key_index = record_index * radix_params.key_stride_words + radix_params.key_word_index;
+  return (radix_keys[key_index] >> radix_params.bit_offset) & 255u;
+}
+
+@compute @workgroup_size(256)
+fn histogram_8bit(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let tid = local_id.x;
+  atomicStore(&local_hist8[tid], 0u);
+  workgroupBarrier();
+  let linear_group = workgroup_id.x + workgroup_id.y * radix_params.dispatch_x;
+  let group_valid = linear_group < radix_params.workgroup_count;
+  let index = linear_group * 256u + tid;
+  if (group_valid && index < radix_params.element_count) {
+    let record_index = radix_indices_in[index];
+    atomicAdd(&local_hist8[record_byte8(record_index)], 1u);
+  }
+  workgroupBarrier();
+  if (group_valid) {
+    radix_histograms8[(linear_group + 1u) * 256u + tid] = atomicLoad(&local_hist8[tid]);
+  }
+}
+
+@compute @workgroup_size(256)
+fn scan_histogram_8bit(
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let b = local_id.x;
+  let group_count = radix_params.workgroup_count;
+  var running = 0u;
+  for (var g = 0u; g < group_count; g = g + 1u) {
+    let slot = (g + 1u) * 256u + b;
+    let c = radix_histograms8[slot];
+    radix_histograms8[slot] = running;
+    running = running + c;
+  }
+  wg_bucket_totals8[b] = running;
+
+  var offset = 1u;
+  for (var width = 128u; width > 0u; width = width >> 1u) {
+    workgroupBarrier();
+    if (b < width) {
+      let left = offset * (2u * b + 1u) - 1u;
+      let right = offset * (2u * b + 2u) - 1u;
+      wg_bucket_totals8[right] = wg_bucket_totals8[right] + wg_bucket_totals8[left];
+    }
+    offset = offset << 1u;
+  }
+  workgroupBarrier();
+  if (b == 0u) {
+    wg_bucket_totals8[255u] = 0u;
+  }
+  for (var width = 1u; width < 256u; width = width << 1u) {
+    offset = offset >> 1u;
+    workgroupBarrier();
+    if (b < width) {
+      let left = offset * (2u * b + 1u) - 1u;
+      let right = offset * (2u * b + 2u) - 1u;
+      let prior = wg_bucket_totals8[left];
+      wg_bucket_totals8[left] = wg_bucket_totals8[right];
+      wg_bucket_totals8[right] = wg_bucket_totals8[right] + prior;
+    }
+  }
+  workgroupBarrier();
+  radix_histograms8[b] = wg_bucket_totals8[b];
+}
+
+@compute @workgroup_size(256)
+fn scatter_8bit(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let tid = local_id.x;
+  let linear_group = workgroup_id.x + workgroup_id.y * radix_params.dispatch_x;
+  if (linear_group >= radix_params.workgroup_count) {
+    return;
+  }
+  wg_bucket_base8[tid] = radix_histograms8_read[tid]
+    + radix_histograms8_read[(linear_group + 1u) * 256u + tid];
+  let index = linear_group * 256u + tid;
+  let valid = index < radix_params.element_count;
+  var init_key = 0x1ffu;
+  var init_val = 0u;
+  if (valid) {
+    init_val = radix_indices_in[index];
+    init_key = record_byte8(init_val);
+  }
+  wg_keys8[tid] = init_key;
+  wg_vals8[tid] = init_val;
+  workgroupBarrier();
+
+  for (var shift = 0u; shift < 8u; shift = shift + 2u) {
+    let cur_key = wg_keys8[tid];
+    let cur_val = wg_vals8[tid];
+    let q = (cur_key >> shift) & 3u;
+    wg_scan4_8[tid] = vec4<u32>(
+      select(0u, 1u, q == 0u),
+      select(0u, 1u, q == 1u),
+      select(0u, 1u, q == 2u),
+      select(0u, 1u, q == 3u)
+    );
+    var offset = 1u;
+    for (var width = 128u; width > 0u; width = width >> 1u) {
+      workgroupBarrier();
+      if (tid < width) {
+        let left = offset * (2u * tid + 1u) - 1u;
+        let right = offset * (2u * tid + 2u) - 1u;
+        wg_scan4_8[right] = wg_scan4_8[right] + wg_scan4_8[left];
+      }
+      offset = offset << 1u;
+    }
+    workgroupBarrier();
+    if (tid == 0u) {
+      wg_totals4_8 = wg_scan4_8[255u];
+      wg_scan4_8[255u] = vec4<u32>(0u);
+    }
+    for (var width = 1u; width < 256u; width = width << 1u) {
+      offset = offset >> 1u;
+      workgroupBarrier();
+      if (tid < width) {
+        let left = offset * (2u * tid + 1u) - 1u;
+        let right = offset * (2u * tid + 2u) - 1u;
+        let prior = wg_scan4_8[left];
+        wg_scan4_8[left] = wg_scan4_8[right];
+        wg_scan4_8[right] = wg_scan4_8[right] + prior;
+      }
+    }
+    workgroupBarrier();
+    let totals = wg_totals4_8;
+    let exc = wg_scan4_8[tid];
+    var dst = exc.x;
+    if (q == 1u) {
+      dst = totals.x + exc.y;
+    } else if (q == 2u) {
+      dst = totals.x + totals.y + exc.z;
+    } else if (q == 3u) {
+      dst = totals.x + totals.y + totals.z + exc.w;
+    }
+    wg_keys8[dst] = cur_key;
+    wg_vals8[dst] = cur_val;
+    workgroupBarrier();
+  }
+
+  let sorted_key = wg_keys8[tid];
+  let sorted_val = wg_vals8[tid];
+  let sorted_valid = (sorted_key & 0x100u) == 0u;
+  let sorted_digit = sorted_key & 255u;
+  var is_first = tid == 0u;
+  if (tid > 0u) {
+    is_first = wg_keys8[tid - 1u] != sorted_key;
+  }
+  if (sorted_valid && is_first) {
+    wg_first8[sorted_digit] = tid;
+  }
+  workgroupBarrier();
+  if (sorted_valid) {
+    let local_rank = tid - wg_first8[sorted_digit];
+    let global_dst = wg_bucket_base8[sorted_digit] + local_rank;
+    radix_indices_out[global_dst] = sorted_val;
   }
 }
 `;
@@ -1471,6 +1677,256 @@ fn scatter_gpu_count(
     ];
     radix_indices_out[group_base + inclusive_rank - 1u] =
       record_index;
+  }
+}
+`;
+
+export const webGpuRadixGpuCount8BitWgsl = /* wgsl */ `
+struct DigitStatic {
+  key_word_index: u32,
+  bit_offset: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> radix_keys: array<u32>;
+@group(0) @binding(1) var<storage, read> radix_indices_in: array<u32>;
+@group(0) @binding(2) var<storage, read_write> radix_indices_out: array<u32>;
+@group(0) @binding(3) var<storage, read_write> radix_histograms8: array<u32>;
+@group(0) @binding(4) var<storage, read> radix_histograms8_read: array<u32>;
+@group(0) @binding(5) var<storage, read> gpu_count_control: array<u32>;
+@group(0) @binding(6) var<uniform> digit_static: DigitStatic;
+
+const CONTROL_STATUS: u32 = ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.STATUS_FLAGS}u;
+const CONTROL_EXPECTED_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.EXPECTED_GENERATION_SEAL}u;
+const CONTROL_LIVE_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.LIVE_ELEMENT_COUNT}u;
+const CONTROL_MAX_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.MAXIMUM_ELEMENT_COUNT}u;
+const CONTROL_KEY_STRIDE: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.KEY_STRIDE_WORDS}u;
+const CONTROL_RADIX_GROUP_COUNT: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_WORKGROUP_COUNT}u;
+const CONTROL_COMPLETION_SEAL: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.COMPLETION_GENERATION_SEAL}u;
+const CONTROL_RADIX_DISPATCH_WORD: u32 =
+  ${WEBGPU_RADIX_GPU_COUNT_CONTROL_WORD.RADIX_DISPATCH_OFFSET_WORDS}u;
+const STATUS_ADMITTED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_ADMITTED}u;
+const STATUS_FAIL_CLOSED: u32 = ${WEBGPU_PARALLEL_PRIMITIVE_STATUS_FAIL_CLOSED}u;
+
+var<workgroup> wg_ctrl8: vec3<u32>;
+var<workgroup> local_hist8: array<atomic<u32>, 256>;
+var<workgroup> wg_bucket_totals8: array<u32, 256>;
+var<workgroup> wg_keys8: array<u32, 256>;
+var<workgroup> wg_vals8: array<u32, 256>;
+var<workgroup> wg_scan4_8: array<vec4<u32>, 256>;
+var<workgroup> wg_totals4_8: vec4<u32>;
+var<workgroup> wg_first8: array<u32, 256>;
+var<workgroup> wg_bucket_base8: array<u32, 256>;
+
+fn load_sealed_ctrl8(tid: u32) -> vec3<u32> {
+  if (tid == 0u) {
+    let status = gpu_count_control[CONTROL_STATUS];
+    let sealed =
+      (status & STATUS_ADMITTED) != 0u
+      && (status & STATUS_FAIL_CLOSED) == 0u
+      && gpu_count_control[CONTROL_COMPLETION_SEAL]
+        == gpu_count_control[CONTROL_EXPECTED_SEAL];
+    let live_count = select(
+      0u,
+      min(
+        gpu_count_control[CONTROL_LIVE_COUNT],
+        gpu_count_control[CONTROL_MAX_COUNT]
+      ),
+      sealed
+    );
+    let live_groups = select(
+      0u,
+      gpu_count_control[CONTROL_RADIX_GROUP_COUNT],
+      sealed && live_count > 0u
+    );
+    let dispatch_x = gpu_count_control[
+      gpu_count_control[CONTROL_RADIX_DISPATCH_WORD]
+    ];
+    wg_ctrl8 = vec3<u32>(live_count, live_groups, dispatch_x);
+  }
+  return workgroupUniformLoad(&wg_ctrl8);
+}
+
+fn record_byte8(record_index: u32) -> u32 {
+  let key_index =
+    record_index * gpu_count_control[CONTROL_KEY_STRIDE]
+    + digit_static.key_word_index;
+  return (radix_keys[key_index] >> digit_static.bit_offset) & 255u;
+}
+
+@compute @workgroup_size(256)
+fn histogram_gpu_count_8bit(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let tid = local_id.x;
+  let ctrl = load_sealed_ctrl8(tid);
+  let live_count = ctrl.x;
+  let live_groups = ctrl.y;
+  let dispatch_x = ctrl.z;
+  let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
+  if (linear_group >= live_groups) {
+    return;
+  }
+  atomicStore(&local_hist8[tid], 0u);
+  workgroupBarrier();
+  let index = linear_group * 256u + tid;
+  if (index < live_count) {
+    let record_index = radix_indices_in[index];
+    atomicAdd(&local_hist8[record_byte8(record_index)], 1u);
+  }
+  workgroupBarrier();
+  radix_histograms8[(linear_group + 1u) * 256u + tid] = atomicLoad(&local_hist8[tid]);
+}
+
+@compute @workgroup_size(256)
+fn scan_histogram_gpu_count_8bit(
+  @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+  let b = local_id.x;
+  let ctrl = load_sealed_ctrl8(b);
+  let live_groups = ctrl.y;
+  var running = 0u;
+  for (var g = 0u; g < live_groups; g = g + 1u) {
+    let slot = (g + 1u) * 256u + b;
+    let c = radix_histograms8[slot];
+    radix_histograms8[slot] = running;
+    running = running + c;
+  }
+  wg_bucket_totals8[b] = running;
+
+  var offset = 1u;
+  for (var width = 128u; width > 0u; width = width >> 1u) {
+    workgroupBarrier();
+    if (b < width) {
+      let left = offset * (2u * b + 1u) - 1u;
+      let right = offset * (2u * b + 2u) - 1u;
+      wg_bucket_totals8[right] = wg_bucket_totals8[right] + wg_bucket_totals8[left];
+    }
+    offset = offset << 1u;
+  }
+  workgroupBarrier();
+  if (b == 0u) {
+    wg_bucket_totals8[255u] = 0u;
+  }
+  for (var width = 1u; width < 256u; width = width << 1u) {
+    offset = offset >> 1u;
+    workgroupBarrier();
+    if (b < width) {
+      let left = offset * (2u * b + 1u) - 1u;
+      let right = offset * (2u * b + 2u) - 1u;
+      let prior = wg_bucket_totals8[left];
+      wg_bucket_totals8[left] = wg_bucket_totals8[right];
+      wg_bucket_totals8[right] = wg_bucket_totals8[right] + prior;
+    }
+  }
+  workgroupBarrier();
+  radix_histograms8[b] = wg_bucket_totals8[b];
+}
+
+@compute @workgroup_size(256)
+fn scatter_gpu_count_8bit(
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let tid = local_id.x;
+  let ctrl = load_sealed_ctrl8(tid);
+  let live_count = ctrl.x;
+  let live_groups = ctrl.y;
+  let dispatch_x = ctrl.z;
+  let linear_group = workgroup_id.x + workgroup_id.y * dispatch_x;
+  if (linear_group >= live_groups) {
+    return;
+  }
+  wg_bucket_base8[tid] = radix_histograms8_read[tid]
+    + radix_histograms8_read[(linear_group + 1u) * 256u + tid];
+  let index = linear_group * 256u + tid;
+  let valid = index < live_count;
+  var init_key = 0x1ffu;
+  var init_val = 0u;
+  if (valid) {
+    init_val = radix_indices_in[index];
+    init_key = record_byte8(init_val);
+  }
+  wg_keys8[tid] = init_key;
+  wg_vals8[tid] = init_val;
+  workgroupBarrier();
+
+  for (var shift = 0u; shift < 8u; shift = shift + 2u) {
+    let cur_key = wg_keys8[tid];
+    let cur_val = wg_vals8[tid];
+    let q = (cur_key >> shift) & 3u;
+    wg_scan4_8[tid] = vec4<u32>(
+      select(0u, 1u, q == 0u),
+      select(0u, 1u, q == 1u),
+      select(0u, 1u, q == 2u),
+      select(0u, 1u, q == 3u)
+    );
+    var offset = 1u;
+    for (var width = 128u; width > 0u; width = width >> 1u) {
+      workgroupBarrier();
+      if (tid < width) {
+        let left = offset * (2u * tid + 1u) - 1u;
+        let right = offset * (2u * tid + 2u) - 1u;
+        wg_scan4_8[right] = wg_scan4_8[right] + wg_scan4_8[left];
+      }
+      offset = offset << 1u;
+    }
+    workgroupBarrier();
+    if (tid == 0u) {
+      wg_totals4_8 = wg_scan4_8[255u];
+      wg_scan4_8[255u] = vec4<u32>(0u);
+    }
+    for (var width = 1u; width < 256u; width = width << 1u) {
+      offset = offset >> 1u;
+      workgroupBarrier();
+      if (tid < width) {
+        let left = offset * (2u * tid + 1u) - 1u;
+        let right = offset * (2u * tid + 2u) - 1u;
+        let prior = wg_scan4_8[left];
+        wg_scan4_8[left] = wg_scan4_8[right];
+        wg_scan4_8[right] = wg_scan4_8[right] + prior;
+      }
+    }
+    workgroupBarrier();
+    let totals = wg_totals4_8;
+    let exc = wg_scan4_8[tid];
+    var dst = exc.x;
+    if (q == 1u) {
+      dst = totals.x + exc.y;
+    } else if (q == 2u) {
+      dst = totals.x + totals.y + exc.z;
+    } else if (q == 3u) {
+      dst = totals.x + totals.y + totals.z + exc.w;
+    }
+    wg_keys8[dst] = cur_key;
+    wg_vals8[dst] = cur_val;
+    workgroupBarrier();
+  }
+
+  let sorted_key = wg_keys8[tid];
+  let sorted_val = wg_vals8[tid];
+  let sorted_valid = (sorted_key & 0x100u) == 0u;
+  let sorted_digit = sorted_key & 255u;
+  var is_first = tid == 0u;
+  if (tid > 0u) {
+    is_first = wg_keys8[tid - 1u] != sorted_key;
+  }
+  if (sorted_valid && is_first) {
+    wg_first8[sorted_digit] = tid;
+  }
+  workgroupBarrier();
+  if (sorted_valid) {
+    let local_rank = tid - wg_first8[sorted_digit];
+    let global_dst = wg_bucket_base8[sorted_digit] + local_rank;
+    radix_indices_out[global_dst] = sorted_val;
   }
 }
 `;
@@ -2600,6 +3056,99 @@ function createRadixGpuCountPipelines(device, label) {
   return built;
 }
 
+function createRadix8BitPipelines(device) {
+  return {
+    histogram8: createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-webgpu-stable-radix-8bit-histogram.v1',
+      label: 'ulg-webgpu-stable-radix-8bit-histogram',
+      code: webGpuStableRadix8BitWgsl,
+      entryPoint: 'histogram_8bit',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(5, 'uniform')
+      ]
+    }).pipeline,
+    scanHistogram8: createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-webgpu-stable-radix-8bit-scan-histogram.v1',
+      label: 'ulg-webgpu-stable-radix-8bit-scan-histogram',
+      code: webGpuStableRadix8BitWgsl,
+      entryPoint: 'scan_histogram_8bit',
+      bindings: [
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(5, 'uniform')
+      ]
+    }).pipeline,
+    scatter8: createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-webgpu-stable-radix-8bit-scatter.v1',
+      label: 'ulg-webgpu-stable-radix-8bit-scatter',
+      code: webGpuStableRadix8BitWgsl,
+      entryPoint: 'scatter_8bit',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'uniform')
+      ]
+    }).pipeline
+  };
+}
+
+function createRadixGpuCount8BitPipelines(device) {
+  return {
+    histogram8: createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-webgpu-radix-gpu-count-8bit-histogram.v1',
+      label: 'ulg-webgpu-radix-gpu-count-8bit-histogram',
+      code: webGpuRadixGpuCount8BitWgsl,
+      entryPoint: 'histogram_gpu_count_8bit',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'uniform')
+      ]
+    }).pipeline,
+    scanHistogram8: createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-webgpu-radix-gpu-count-8bit-scan-histogram.v1',
+      label: 'ulg-webgpu-radix-gpu-count-8bit-scan-histogram',
+      code: webGpuRadixGpuCount8BitWgsl,
+      entryPoint: 'scan_histogram_gpu_count_8bit',
+      bindings: [
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(5, 'read-only-storage')
+      ]
+    }).pipeline,
+    scatter8: createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-webgpu-radix-gpu-count-8bit-scatter.v1',
+      label: 'ulg-webgpu-radix-gpu-count-8bit-scatter',
+      code: webGpuRadixGpuCount8BitWgsl,
+      entryPoint: 'scatter_gpu_count_8bit',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'uniform')
+      ]
+    }).pipeline
+  };
+}
+
+function nibbleRowsToByteRows(nibbleRows) {
+  const byteRows = [];
+  for (let i = 0; i < nibbleRows.length; i += 1) {
+    const byteRow = Math.floor(nibbleRows[i] / 2);
+    if (byteRows.length === 0 || byteRows[byteRows.length - 1] !== byteRow) {
+      byteRows.push(byteRow);
+    }
+  }
+  return byteRows;
+}
+
 export function createWebGpuStableRadixScanUnique(device, {
   maxElementCount,
   maxKeyWordCount = WEBGPU_RADIX_MAX_KEY_WORDS,
@@ -2608,7 +3157,8 @@ export function createWebGpuStableRadixScanUnique(device, {
   retainConstantScanParamsBuffers = false,
   retainVariableScanParamsBuffers = false,
   serialHistogramScanMaxElementCount = 0,
-  retainedParamsSlotCount = WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_DEFAULT
+  retainedParamsSlotCount = WEBGPU_RADIX_RETAINED_PARAMS_SLOT_COUNT_DEFAULT,
+  prefer8BitRadix = false
 } = {}) {
   assertDevice(device);
   const resolvedMaxElementCount = positiveInteger(maxElementCount, 'maxElementCount', {
@@ -2676,6 +3226,18 @@ export function createWebGpuStableRadixScanUnique(device, {
   };
   const maxWorkgroups = radixGroupCountFor(resolvedMaxElementCount);
   const maxHistogramElements = maxWorkgroups * WEBGPU_RADIX_BUCKET_COUNT;
+  const maxStorageBufferBindingSize = Number(
+    device.limits?.maxStorageBufferBindingSize ?? Number.MAX_SAFE_INTEGER
+  );
+  const histogram8ElementCount =
+    (maxWorkgroups + 1) * WEBGPU_RADIX_8BIT_BUCKET_COUNT;
+  const histogram8ByteLength = alignedBytes(
+    histogram8ElementCount * UINT32_BYTES
+  );
+  const use8BitRadix = prefer8BitRadix === true
+    && maxWorkgroups <= WEBGPU_RADIX_8BIT_MAX_WORKGROUPS
+    && histogram8ByteLength <= maxBufferSize
+    && histogram8ByteLength <= maxStorageBufferBindingSize;
   const gpuCountControlLayout = createWebGpuRadixGpuCountControlLayout({
     maxElementCount: resolvedMaxElementCount,
     maxComputeWorkgroupsPerDimension
@@ -2685,6 +3247,7 @@ export function createWebGpuStableRadixScanUnique(device, {
   const pipelines = createRadixPipelines(device, label, {
     serialHistogramScanEnabled: resolvedSerialHistogramScanMaxElementCount > 0
   });
+  const pipelines8 = use8BitRadix ? createRadix8BitPipelines(device) : null;
   const sortedIndicesA = construction.ownBuffer(createBuffer(
     device,
     `${label}-sorted-indices-a`,
@@ -2705,6 +3268,13 @@ export function createWebGpuStableRadixScanUnique(device, {
     `${label}-histogram-offsets`,
     maxHistogramElements
   ));
+  const histogram8Buffer = use8BitRadix
+    ? construction.ownBuffer(createBuffer(
+        device,
+        `${label}-histograms-8bit`,
+        histogram8ElementCount
+      ))
+    : null;
   const headFlagsBuffer = construction.ownBuffer(createBuffer(
     device,
     `${label}-head-flags`,
@@ -2801,6 +3371,9 @@ export function createWebGpuStableRadixScanUnique(device, {
     const resourceConstruction = createOwnedBufferConstruction();
     try {
     const gpuCountPipelines = createRadixGpuCountPipelines(device, label);
+    const gpuCountPipelines8 = use8BitRadix
+      ? createRadixGpuCount8BitPipelines(device)
+      : null;
     const controlBuffer = resourceConstruction.ownBuffer(createBuffer(
       device,
       `${label}-gpu-count-control`,
@@ -2852,6 +3425,28 @@ export function createWebGpuStableRadixScanUnique(device, {
       }
     }
     device.queue.writeBuffer(digitStaticBuffer, 0, digitStaticData);
+    let digitStatic8Buffer = null;
+    if (use8BitRadix) {
+      const maxBytePassCount = resolvedMaxKeyWordCount * WEBGPU_RADIX_8BIT_PASSES_PER_WORD;
+      digitStatic8Buffer = resourceConstruction.ownBuffer(device.createBuffer({
+        label: `${label}-gpu-count-digit-static-8bit`,
+        size: maxBytePassCount * paramsOffsetAlignment,
+        usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+      }));
+      const digitStatic8Data = new Uint32Array(
+        maxBytePassCount * paramsOffsetAlignment / UINT32_BYTES
+      );
+      let byteRow = 0;
+      for (let word = resolvedMaxKeyWordCount - 1; word >= 0; word -= 1) {
+        for (let shift = 0; shift < 32; shift += WEBGPU_RADIX_8BIT_BITS_PER_PASS) {
+          const base = byteRow * paramsOffsetAlignment / UINT32_BYTES;
+          digitStatic8Data[base] = word;
+          digitStatic8Data[base + 1] = shift;
+          byteRow += 1;
+        }
+      }
+      device.queue.writeBuffer(digitStatic8Buffer, 0, digitStatic8Data);
+    }
 
     const totalScanStaticRows =
       gpuCountControlLayout.histogramScanLevelCount
@@ -2896,6 +3491,9 @@ export function createWebGpuStableRadixScanUnique(device, {
       { role: 'radix-gpu-count-control', buffer: controlBuffer },
       { role: 'radix-gpu-count-config-retained-arena', buffer: configArena },
       { role: 'radix-gpu-count-digit-static', buffer: digitStaticBuffer },
+      ...(digitStatic8Buffer
+        ? [{ role: 'radix-gpu-count-digit-static-8bit', buffer: digitStatic8Buffer }]
+        : []),
       { role: 'radix-gpu-count-scan-static', buffer: scanStaticBuffer }
     ];
     const createScanPopulation = ({
@@ -3042,17 +3640,29 @@ export function createWebGpuStableRadixScanUnique(device, {
       });
     };
 
-    const histogramScanPopulation = createScanPopulation({
-      prefix: 'histogram',
-      maximumElementCount: maxHistogramElements,
-      levelCount: gpuCountControlLayout.histogramScanLevelCount,
-      countOffsetWords: gpuCountControlLayout.histogramScanCountOffsetWords,
-      dispatchOffsetWords:
-        gpuCountControlLayout.histogramScanDispatchOffsetWords,
-      firstStaticRow: histogramStaticFirstRow,
-      sourceInputBuffer: histogramBuffer,
-      sourceOutputBuffer: histogramOffsetsBuffer
-    });
+    const histogramScanPopulation = use8BitRadix
+      ? null
+      : createScanPopulation({
+          prefix: 'histogram',
+          maximumElementCount: maxHistogramElements,
+          levelCount: gpuCountControlLayout.histogramScanLevelCount,
+          countOffsetWords: gpuCountControlLayout.histogramScanCountOffsetWords,
+          dispatchOffsetWords:
+            gpuCountControlLayout.histogramScanDispatchOffsetWords,
+          firstStaticRow: histogramStaticFirstRow,
+          sourceInputBuffer: histogramBuffer,
+          sourceOutputBuffer: histogramOffsetsBuffer
+        });
+    const scanHistogram8BindGroup = use8BitRadix
+      ? device.createBindGroup({
+          label: `${label}-gpu-count-8bit-scan-histogram`,
+          layout: gpuCountPipelines8.scanHistogram8.getBindGroupLayout(0),
+          entries: [
+            { binding: 3, resource: { buffer: histogram8Buffer } },
+            { binding: 5, resource: { buffer: controlBuffer } }
+          ]
+        })
+      : null;
     const headScanPopulation = createScanPopulation({
       prefix: 'head',
       maximumElementCount: resolvedMaxElementCount,
@@ -3066,10 +3676,13 @@ export function createWebGpuStableRadixScanUnique(device, {
 
     const resources = {
       pipelines: gpuCountPipelines,
+      pipelines8: gpuCountPipelines8,
       controlBuffer,
       configArena,
       configSlotCount: gpuCountConfigSlotCount,
       digitStaticBuffer,
+      digitStatic8Buffer,
+      scanHistogram8BindGroup,
       scanStaticBuffer,
       histogramScanPopulation,
       headScanPopulation,
@@ -3263,9 +3876,12 @@ export function createWebGpuStableRadixScanUnique(device, {
     return rows;
   }
 
-  function createRadixParams({ count, words, stride, generationId, digitRows = null }, retainedParamsLease = null) {
+  function createRadixParams({ count, words, stride, generationId, digitRows = null, use8Bit = false }, retainedParamsLease = null) {
     const activeDigitRows = normalizeSortDigitRows(words, digitRows);
-    const passCount = activeDigitRows.length;
+    const activePassRows = use8Bit ? nibbleRowsToByteRows(activeDigitRows) : activeDigitRows;
+    const passesPerWord = use8Bit ? WEBGPU_RADIX_8BIT_PASSES_PER_WORD : WEBGPU_RADIX_PASSES_PER_WORD;
+    const bitsPerPass = use8Bit ? WEBGPU_RADIX_8BIT_BITS_PER_PASS : WEBGPU_RADIX_BITS_PER_PASS;
+    const passCount = activePassRows.length;
     const retainedSlot = retainedParamsLease?.slot ?? null;
     const buffer = retainedSlot?.inUse === true
       ? radixParamsArena
@@ -3285,10 +3901,10 @@ export function createWebGpuStableRadixScanUnique(device, {
       workgroupCount,
       maxComputeWorkgroupsPerDimension
     );
-    for (let passIndex = 0; passIndex < activeDigitRows.length; passIndex += 1) {
-      const row = activeDigitRows[passIndex];
-      const word = words - 1 - Math.floor(row / WEBGPU_RADIX_PASSES_PER_WORD);
-      const shift = (row % WEBGPU_RADIX_PASSES_PER_WORD) * WEBGPU_RADIX_BITS_PER_PASS;
+    for (let passIndex = 0; passIndex < activePassRows.length; passIndex += 1) {
+      const row = activePassRows[passIndex];
+      const word = words - 1 - Math.floor(row / passesPerWord);
+      const shift = (row % passesPerWord) * bitsPerPass;
       const base = (passIndex * paramsOffsetAlignment) / UINT32_BYTES;
       data[base] = count;
       data[base + 1] = workgroupCount;
@@ -3355,7 +3971,7 @@ export function createWebGpuStableRadixScanUnique(device, {
     let histogramScanEncoding = null;
     try {
     params = createRadixParams(
-      { count, words, stride, generationId: generation, digitRows: activeDigitRows },
+      { count, words, stride, generationId: generation, digitRows: activeDigitRows, use8Bit: use8BitRadix },
       retainedParamsLease
     );
     const paramsBuffer = params.buffer;
@@ -3365,11 +3981,17 @@ export function createWebGpuStableRadixScanUnique(device, {
       workgroupCount,
       maxComputeWorkgroupsPerDimension
     );
-    const histogramElementCount = workgroupCount * WEBGPU_RADIX_BUCKET_COUNT;
-    const serialHistogramScanEnabled = resolvedSerialHistogramScanMaxElementCount > 0
+    const activePassRows = use8BitRadix
+      ? nibbleRowsToByteRows(activeDigitRows)
+      : activeDigitRows;
+    const histogramElementCount = use8BitRadix
+      ? (workgroupCount + 1) * WEBGPU_RADIX_8BIT_BUCKET_COUNT
+      : workgroupCount * WEBGPU_RADIX_BUCKET_COUNT;
+    const serialHistogramScanEnabled = !use8BitRadix
+      && resolvedSerialHistogramScanMaxElementCount > 0
       && histogramElementCount > WEBGPU_SCAN_ELEMENTS_PER_WORKGROUP
       && histogramElementCount <= resolvedSerialHistogramScanMaxElementCount;
-    histogramScanEncoding = serialHistogramScanEnabled
+    histogramScanEncoding = (use8BitRadix || serialHistogramScanEnabled)
       ? null
       : histogramScan.prepare({
           inputBuffer: histogramBuffer,
@@ -3403,6 +4025,22 @@ export function createWebGpuStableRadixScanUnique(device, {
       initializeEntries,
       bindGroupTelemetry
     );
+    const scanHistogram8BindGroup = use8BitRadix
+      ? retainedBindGroup(
+          retainedParamsLease?.slot,
+          'radix8-scan-histogram',
+          pipelines8.scanHistogram8,
+          `${label}-8bit-scan-histogram-bind-group`,
+          [
+            { binding: 3, resource: { buffer: histogram8Buffer } },
+            {
+              binding: 5,
+              resource: { buffer: paramsBuffer, offset: paramsBaseOffset, size: 32 }
+            }
+          ],
+          bindGroupTelemetry
+        )
+      : null;
     const serialHistogramScanBindGroup = serialHistogramScanEnabled
       ? retainedBindGroup(
           retainedParamsLease?.slot,
@@ -3422,23 +4060,29 @@ export function createWebGpuStableRadixScanUnique(device, {
       : null;
     let input = sortedIndicesA;
     let output = sortedIndicesB;
-    const passIndex = activeDigitRows.length;
+    const passIndex = activePassRows.length;
+    const passesPerWord = use8BitRadix
+      ? WEBGPU_RADIX_8BIT_PASSES_PER_WORD
+      : WEBGPU_RADIX_PASSES_PER_WORD;
+    const bitsPerPass = use8BitRadix
+      ? WEBGPU_RADIX_8BIT_BITS_PER_PASS
+      : WEBGPU_RADIX_BITS_PER_PASS;
     const digitCommands = [];
-    for (let idx = 0; idx < activeDigitRows.length; idx += 1) {
-      const row = activeDigitRows[idx];
-      const word = words - 1 - Math.floor(row / WEBGPU_RADIX_PASSES_PER_WORD);
-      const shift = (row % WEBGPU_RADIX_PASSES_PER_WORD) * WEBGPU_RADIX_BITS_PER_PASS;
+    for (let idx = 0; idx < activePassRows.length; idx += 1) {
+      const row = activePassRows[idx];
+      const word = words - 1 - Math.floor(row / passesPerWord);
+      const shift = (row % passesPerWord) * bitsPerPass;
       const paramsOffset = paramsBaseOffset + idx * paramsOffsetAlignment;
       const histogramEntries = [
         { binding: 0, resource: { buffer: keyBuffer } },
         { binding: 1, resource: { buffer: input } },
-        { binding: 3, resource: { buffer: histogramBuffer } },
+        { binding: 3, resource: { buffer: use8BitRadix ? histogram8Buffer : histogramBuffer } },
         { binding: 5, resource: { buffer: paramsBuffer, offset: paramsOffset, size: 32 } }
       ];
       const histogramBindGroup = retainedBindGroup(
         retainedParamsLease?.slot,
-        `radix-histogram-${idx}`,
-        pipelines.histogram,
+        use8BitRadix ? `radix8-histogram-${idx}` : `radix-histogram-${idx}`,
+        use8BitRadix ? pipelines8.histogram8 : pipelines.histogram,
         `${label}-histogram-${word}-${shift}`,
         histogramEntries,
         bindGroupTelemetry
@@ -3447,13 +4091,13 @@ export function createWebGpuStableRadixScanUnique(device, {
         { binding: 0, resource: { buffer: keyBuffer } },
         { binding: 1, resource: { buffer: input } },
         { binding: 2, resource: { buffer: output } },
-        { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
+        { binding: 4, resource: { buffer: use8BitRadix ? histogram8Buffer : histogramOffsetsBuffer } },
         { binding: 5, resource: { buffer: paramsBuffer, offset: paramsOffset, size: 32 } }
       ];
       const scatterBindGroup = retainedBindGroup(
         retainedParamsLease?.slot,
-        `radix-scatter-${idx}`,
-        pipelines.scatter,
+        use8BitRadix ? `radix8-scatter-${idx}` : `radix-scatter-${idx}`,
+        use8BitRadix ? pipelines8.scatter8 : pipelines.scatter,
         `${label}-scatter-${word}-${shift}`,
         scatterEntries,
         bindGroupTelemetry
@@ -3492,6 +4136,8 @@ export function createWebGpuStableRadixScanUnique(device, {
       );
     }
 
+    const activeHistogramPipeline = use8BitRadix ? pipelines8.histogram8 : pipelines.histogram;
+    const activeScatterPipeline = use8BitRadix ? pipelines8.scatter8 : pipelines.scatter;
     for (const command of digitCommands) {
       const commandMetadata = {
         ...timestampMetadata,
@@ -3505,7 +4151,7 @@ export function createWebGpuStableRadixScanUnique(device, {
           timestampProfiler,
           `${label}Histogram`,
           commandMetadata,
-          pipelines.histogram,
+          activeHistogramPipeline,
           command.histogramBindGroup,
           workgroupDispatch,
           dispatchIndirectProvider
@@ -3513,14 +4159,35 @@ export function createWebGpuStableRadixScanUnique(device, {
       } else {
         encodeComputeDispatch(
           groupedPass,
-          pipelines.histogram,
+          activeHistogramPipeline,
           command.histogramBindGroup,
           workgroupDispatch,
           dispatchIndirectProvider
         );
       }
 
-      if (serialHistogramScanEnabled) {
+      if (use8BitRadix) {
+        if (timestampActive) {
+          encodeProfiledComputeDispatch(
+            encoder,
+            timestampProfiler,
+            `${label}RadixHistogram8BitScan`,
+            commandMetadata,
+            pipelines8.scanHistogram8,
+            scanHistogram8BindGroup,
+            [1, 1, 1],
+            dispatchIndirectProvider
+          );
+        } else {
+          encodeComputeDispatch(
+            groupedPass,
+            pipelines8.scanHistogram8,
+            scanHistogram8BindGroup,
+            [1, 1, 1],
+            dispatchIndirectProvider
+          );
+        }
+      } else if (serialHistogramScanEnabled) {
         if (timestampActive) {
           encodeProfiledComputeDispatch(
             encoder,
@@ -3557,7 +4224,7 @@ export function createWebGpuStableRadixScanUnique(device, {
           timestampProfiler,
           `${label}Scatter`,
           commandMetadata,
-          pipelines.scatter,
+          activeScatterPipeline,
           command.scatterBindGroup,
           workgroupDispatch,
           dispatchIndirectProvider
@@ -3565,7 +4232,7 @@ export function createWebGpuStableRadixScanUnique(device, {
       } else {
         encodeComputeDispatch(
           groupedPass,
-          pipelines.scatter,
+          activeScatterPipeline,
           command.scatterBindGroup,
           workgroupDispatch,
           dispatchIndirectProvider
@@ -3580,22 +4247,27 @@ export function createWebGpuStableRadixScanUnique(device, {
       elementCount: count,
       keyWordCount: words,
       keyStrideWords: stride,
+      radixBitsPerPass: bitsPerPass,
       passCount: passIndex,
       sortedIndicesBuffer: input,
       histogramElementCount,
-      histogramScanMode: serialHistogramScanEnabled ? 'serial-small' : 'parallel-scan',
-      encodedDispatchCount: 1 + passIndex * (serialHistogramScanEnabled
+      histogramScanMode: use8BitRadix
+        ? 'parallel-8bit-single-wg'
+        : serialHistogramScanEnabled
+          ? 'serial-small'
+          : 'parallel-scan',
+      encodedDispatchCount: 1 + passIndex * ((use8BitRadix || serialHistogramScanEnabled)
         ? 3
         : 2 + histogramScanEncoding.encodedDispatchCount),
       encodedComputePassCount: timestampActive
-        ? 1 + passIndex * (serialHistogramScanEnabled
+        ? 1 + passIndex * ((use8BitRadix || serialHistogramScanEnabled)
             ? 3
             : 2 + histogramScanEncoding.encodedDispatchCount)
         : 1,
       bindGroupCreationCount: bindGroupTelemetry.created
         + (histogramScanEncoding?.bindGroupCreationCount ?? 0),
       bindGroupReuseCount: bindGroupTelemetry.reused
-        + (serialHistogramScanEnabled
+        + ((use8BitRadix || serialHistogramScanEnabled)
           ? Math.max(0, passIndex - 1)
           : Math.max(
               0,
@@ -4030,9 +4702,12 @@ export function createWebGpuStableRadixScanUnique(device, {
     const resources = gpuCountResources;
     const {
       pipelines: gpuCountPipelines,
+      pipelines8: gpuCountPipelines8,
       controlBuffer,
       configArena,
       digitStaticBuffer,
+      digitStatic8Buffer,
+      scanHistogram8BindGroup,
       histogramScanPopulation,
       headScanPopulation
     } = resources;
@@ -4130,45 +4805,90 @@ export function createWebGpuStableRadixScanUnique(device, {
       let input = sortedIndicesA;
       let output = sortedIndicesB;
       const digitCommands = [];
-      for (let passIndex = 0; passIndex < digitRows.length; passIndex += 1) {
-        const digitRow = digitRows[passIndex];
-        const digitOffset = digitRow * paramsOffsetAlignment;
-        const digitResource = {
-          buffer: digitStaticBuffer,
-          offset: digitOffset,
-          size: 16
-        };
-        const histogramBindGroup = retainedBindGroup(
-          configLease.slot,
-          `gpu-count-histogram-${digitRow}`,
-          gpuCountPipelines.histogram,
-          `${label}-gpu-count-histogram-${passIndex}`,
-          [
-            { binding: 0, resource: { buffer: keyBuffer } },
-            { binding: 1, resource: { buffer: input } },
-            { binding: 3, resource: { buffer: histogramBuffer } },
-            { binding: 5, resource: { buffer: controlBuffer } },
-            { binding: 6, resource: digitResource }
-          ],
-          bindGroupTelemetry
-        );
-        const scatterBindGroup = retainedBindGroup(
-          configLease.slot,
-          `gpu-count-scatter-${digitRow}`,
-          gpuCountPipelines.scatter,
-          `${label}-gpu-count-scatter-${passIndex}`,
-          [
-            { binding: 0, resource: { buffer: keyBuffer } },
-            { binding: 1, resource: { buffer: input } },
-            { binding: 2, resource: { buffer: output } },
-            { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
-            { binding: 5, resource: { buffer: controlBuffer } },
-            { binding: 6, resource: digitResource }
-          ],
-          bindGroupTelemetry
-        );
-        digitCommands.push({ histogramBindGroup, scatterBindGroup });
-        [input, output] = [output, input];
+      if (use8BitRadix) {
+        const byteRows = nibbleRowsToByteRows(digitRows);
+        for (let passIndex = 0; passIndex < byteRows.length; passIndex += 1) {
+          const byteRow = byteRows[passIndex];
+          const digitOffset = byteRow * paramsOffsetAlignment;
+          const digitResource = {
+            buffer: digitStatic8Buffer,
+            offset: digitOffset,
+            size: 16
+          };
+          const orientation = input === sortedIndicesA ? 'a' : 'b';
+          const histogramBindGroup = retainedBindGroup(
+            configLease.slot,
+            `gpu-count-8bit-histogram-${byteRow}-${orientation}`,
+            gpuCountPipelines8.histogram8,
+            `${label}-gpu-count-8bit-histogram-${passIndex}`,
+            [
+              { binding: 0, resource: { buffer: keyBuffer } },
+              { binding: 1, resource: { buffer: input } },
+              { binding: 3, resource: { buffer: histogram8Buffer } },
+              { binding: 5, resource: { buffer: controlBuffer } },
+              { binding: 6, resource: digitResource }
+            ],
+            bindGroupTelemetry
+          );
+          const scatterBindGroup = retainedBindGroup(
+            configLease.slot,
+            `gpu-count-8bit-scatter-${byteRow}-${orientation}`,
+            gpuCountPipelines8.scatter8,
+            `${label}-gpu-count-8bit-scatter-${passIndex}`,
+            [
+              { binding: 0, resource: { buffer: keyBuffer } },
+              { binding: 1, resource: { buffer: input } },
+              { binding: 2, resource: { buffer: output } },
+              { binding: 4, resource: { buffer: histogram8Buffer } },
+              { binding: 5, resource: { buffer: controlBuffer } },
+              { binding: 6, resource: digitResource }
+            ],
+            bindGroupTelemetry
+          );
+          digitCommands.push({ histogramBindGroup, scatterBindGroup });
+          [input, output] = [output, input];
+        }
+      } else {
+        for (let passIndex = 0; passIndex < digitRows.length; passIndex += 1) {
+          const digitRow = digitRows[passIndex];
+          const digitOffset = digitRow * paramsOffsetAlignment;
+          const digitResource = {
+            buffer: digitStaticBuffer,
+            offset: digitOffset,
+            size: 16
+          };
+          const histogramBindGroup = retainedBindGroup(
+            configLease.slot,
+            `gpu-count-histogram-${digitRow}`,
+            gpuCountPipelines.histogram,
+            `${label}-gpu-count-histogram-${passIndex}`,
+            [
+              { binding: 0, resource: { buffer: keyBuffer } },
+              { binding: 1, resource: { buffer: input } },
+              { binding: 3, resource: { buffer: histogramBuffer } },
+              { binding: 5, resource: { buffer: controlBuffer } },
+              { binding: 6, resource: digitResource }
+            ],
+            bindGroupTelemetry
+          );
+          const scatterBindGroup = retainedBindGroup(
+            configLease.slot,
+            `gpu-count-scatter-${digitRow}`,
+            gpuCountPipelines.scatter,
+            `${label}-gpu-count-scatter-${passIndex}`,
+            [
+              { binding: 0, resource: { buffer: keyBuffer } },
+              { binding: 1, resource: { buffer: input } },
+              { binding: 2, resource: { buffer: output } },
+              { binding: 4, resource: { buffer: histogramOffsetsBuffer } },
+              { binding: 5, resource: { buffer: controlBuffer } },
+              { binding: 6, resource: digitResource }
+            ],
+            bindGroupTelemetry
+          );
+          digitCommands.push({ histogramBindGroup, scatterBindGroup });
+          [input, output] = [output, input];
+        }
       }
       const sortedIndicesBuffer = input;
       const markBindGroup = retainedBindGroup(
@@ -4344,19 +5064,40 @@ export function createWebGpuStableRadixScanUnique(device, {
         radixCeilingGroups
       );
       for (const command of digitCommands) {
-        encodeIndirect(
-          gpuCountPipelines.histogram,
-          command.histogramBindGroup,
-          gpuCountControlLayout.radixDispatchOffsetBytes,
-          radixCeilingGroups
-        );
-        encodeScan(histogramScanPopulation);
-        encodeIndirect(
-          gpuCountPipelines.scatter,
-          command.scatterBindGroup,
-          gpuCountControlLayout.radixDispatchOffsetBytes,
-          radixCeilingGroups
-        );
+        if (use8BitRadix) {
+          encodeIndirect(
+            gpuCountPipelines8.histogram8,
+            command.histogramBindGroup,
+            gpuCountControlLayout.radixDispatchOffsetBytes,
+            radixCeilingGroups
+          );
+          encodeIndirect(
+            gpuCountPipelines8.scanHistogram8,
+            scanHistogram8BindGroup,
+            gpuCountControlLayout.radixDispatchOffsetBytes,
+            1
+          );
+          encodeIndirect(
+            gpuCountPipelines8.scatter8,
+            command.scatterBindGroup,
+            gpuCountControlLayout.radixDispatchOffsetBytes,
+            radixCeilingGroups
+          );
+        } else {
+          encodeIndirect(
+            gpuCountPipelines.histogram,
+            command.histogramBindGroup,
+            gpuCountControlLayout.radixDispatchOffsetBytes,
+            radixCeilingGroups
+          );
+          encodeScan(histogramScanPopulation);
+          encodeIndirect(
+            gpuCountPipelines.scatter,
+            command.scatterBindGroup,
+            gpuCountControlLayout.radixDispatchOffsetBytes,
+            radixCeilingGroups
+          );
+        }
       }
       encodeIndirect(
         gpuCountPipelines.markHeads,
@@ -4397,6 +5138,9 @@ export function createWebGpuStableRadixScanUnique(device, {
         authoritySealByteOffset: sealByteOffset,
         keyWordCount: words,
         keyStrideWords: stride,
+        radixBitsPerPass: use8BitRadix
+          ? WEBGPU_RADIX_8BIT_BITS_PER_PASS
+          : WEBGPU_RADIX_BITS_PER_PASS,
         radixPassCount,
         significantDigitRows: Object.freeze([...digitRows]),
         sortedIndicesBuffer,
@@ -4410,16 +5154,19 @@ export function createWebGpuStableRadixScanUnique(device, {
         uniqueOffsetCapacity: resolvedMaxElementCount + 1,
         gpuCountControlBuffer: controlBuffer,
         gpuCountControlLayout,
-        histogramScanMode:
-          histogramScanPopulation.fusedTopAddEnabled
+        histogramScanMode: use8BitRadix
+          ? 'gpu-count-8bit-single-wg'
+          : histogramScanPopulation.fusedTopAddEnabled
             ? 'gpu-count-fixed-hierarchical-fused-top'
             : 'gpu-count-fixed-hierarchical',
-        histogramScanFusedTopAddEnabled:
-          histogramScanPopulation.fusedTopAddEnabled,
+        histogramScanFusedTopAddEnabled: use8BitRadix
+          ? false
+          : histogramScanPopulation.fusedTopAddEnabled,
         headScanFusedTopAddEnabled:
           headScanPopulation.fusedTopAddEnabled,
-        histogramScanEncodedDispatchCount:
-          histogramScanPopulation.encodedDispatchCount,
+        histogramScanEncodedDispatchCount: use8BitRadix
+          ? 1
+          : histogramScanPopulation.encodedDispatchCount,
         headScanEncodedDispatchCount:
           headScanPopulation.encodedDispatchCount,
         encodedDispatchCount: productionDispatchCount + 2,
@@ -4565,6 +5312,9 @@ export function createWebGpuStableRadixScanUnique(device, {
     },
     maxElementCount: resolvedMaxElementCount,
     maxKeyWordCount: resolvedMaxKeyWordCount,
+    radixBitsPerPass: use8BitRadix
+      ? WEBGPU_RADIX_8BIT_BITS_PER_PASS
+      : WEBGPU_RADIX_BITS_PER_PASS,
     gpuCountControlLayout,
     serialHistogramScanMaxElementCount: resolvedSerialHistogramScanMaxElementCount,
     retainedParamsSlotCount: resolvedRetainedParamsSlotCount,
@@ -4706,6 +5456,9 @@ export function createWebGpuStableRadixScanUnique(device, {
         { role: 'radix-sorted-indices-b', buffer: sortedIndicesB },
         { role: 'radix-histograms', buffer: histogramBuffer },
         { role: 'radix-histogram-offsets', buffer: histogramOffsetsBuffer },
+        ...(histogram8Buffer
+          ? [{ role: 'radix-histograms-8bit', buffer: histogram8Buffer }]
+          : []),
         { role: 'unique-head-flags', buffer: headFlagsBuffer },
         { role: 'unique-head-offsets', buffer: headOffsetsBuffer },
         { role: 'unique-keys', buffer: uniqueKeysBuffer },
@@ -4732,6 +5485,7 @@ export function createWebGpuStableRadixScanUnique(device, {
         sortedIndicesB,
         histogramBuffer,
         histogramOffsetsBuffer,
+        histogram8Buffer,
         headFlagsBuffer,
         headOffsetsBuffer,
         uniqueKeysBuffer,

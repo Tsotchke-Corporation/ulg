@@ -499,7 +499,9 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       retainVariableScanParamsBuffers: true,
       serialHistogramScanMaxElementCount:
         FIELD_SERIAL_HISTOGRAM_SCAN_MAX_ELEMENT_COUNT,
-      retainedParamsSlotCount: 1
+      retainedParamsSlotCount: 1,
+      prefer8BitRadix:
+        typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
     });
     if (enableDirectoryV2) {
       radix.prepareGpuCountResources();

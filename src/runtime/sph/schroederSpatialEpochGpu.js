@@ -1506,7 +1506,9 @@ export function createSchroederSpatialEpochGpu(device, {
       maxComputeWorkgroupsPerDimension,
       retainConstantScanParamsBuffers: true,
       retainVariableScanParamsBuffers: true,
-      retainedParamsSlotCount: 1
+      retainedParamsSlotCount: 1,
+      prefer8BitRadix:
+        typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
     });
     const gpuCountPreparation = directoryV2
       ? radix.prepareGpuCountResources()

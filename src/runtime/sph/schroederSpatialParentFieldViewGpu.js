@@ -462,7 +462,9 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
           typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
             ? 8_192
             : 0,
-        retainedParamsSlotCount: 1
+        retainedParamsSlotCount: 1,
+        prefer8BitRadix:
+          typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice
       }),
       edgeScan: createWebGpuU32ExclusiveScan(device, {
         maxElementCount: template.layout.fineFieldCapacity,

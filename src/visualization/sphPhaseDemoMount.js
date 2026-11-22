@@ -14493,8 +14493,8 @@ export async function mountSphPhaseDemoOverlay({
           multiLevelExplicitAir:
             (Number(activeViewState?.schroederConfig?.maxLevel ?? initialSchroederMaxLevel ?? 0)
               > Number(activeViewState?.schroederConfig?.minLevel ?? initialSchroederMinLevel ?? 0))
-            || initialSchroederEnableLevelChainMechanics === true
-            || initialSchroederEnableTwoLevelMechanics === true
+            || initialSchroederLevelChainMechanicsEnabled === true
+            || initialSchroederTwoLevelMechanicsEnabled === true
         }),
       mechanicsSubmitBurstSteps: initialSubmitBurstSteps,
       tier0RealtimePacing: initialTier0RealtimePacing,

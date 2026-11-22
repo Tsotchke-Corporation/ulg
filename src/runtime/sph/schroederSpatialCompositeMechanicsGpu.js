@@ -133,7 +133,8 @@ export function releasePooledSchroederSpatialCompositeMechanicsGpu(runtime, { de
     byKey.delete(meta.key);
     byKey.set(meta.key, bucket);
   }
-  if (bucket.length < 2) {
+  const bucketLimit = (typeof globalThis.GPUDevice === 'function' && meta.keyDevice instanceof globalThis.GPUDevice) ? 6 : 2;
+  if (bucket.length < bucketLimit) {
     bucket.push(runtime);
   } else {
     compositePooledMeta.delete(runtime);

@@ -7,8 +7,16 @@ import { createSphExactMassLedgerSuccessorWebGpu, acquireSphExactMassRead,
 import { createPostMechanicsStageOutputSeal } from './sphMechanicsRefreshGpuKernel.js';
 import { prepareSphLedgerParcelStagesWebGpu } from './sphLedgerParcelStagesGpu.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding,
-  createQueueOrderedCleanupClaimIssuer, submitQueueOrderedProducerWorkAndCleanup } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  computeBufferBinding,
+  createQueueOrderedCleanupClaimIssuer,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
+  submitQueueOrderedProducerWorkAndCleanup
+} from '../webgpuComputeLayout.js';
 
 const captures = new WeakMap(), results = new WeakSet();
 const scratchIssuer = createQueueOrderedCleanupClaimIssuer({ producerFamily: 'ledger-parcel-candidate-scratch' });
@@ -50,15 +58,29 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
   const borrow = beginSphGpuParticleUploadLedgerParcelsBorrow(sphParticleUpload);
   if (!borrow) throw new TypeError('Parcel candidate has no original parcel owner');
   const originalParcels = borrow.parcels, count = sphParticleState.particleCount;
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const physical = {}, parcelBuffers = [], owned = [];
   const make = (label, size) => {
-    const b = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage: 128 | 4 | 8 }), device);
+    const usage = 128 | 4 | 8;
+    const b = tagWebGpuBufferDevice(
+      useQueueOrderedPool
+        ? registerQueueOrderedPooledBufferReturn(
+            acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+            device,
+            { bucketKey: label, size, usage }
+          )
+        : device.createBuffer({ label, size, usage }),
+      device
+    );
     owned.push(b); return b;
   };
   let successor, massRead, stages, adoptedEnergy = false, adoptedParcels = false, parcelsRetired = false;
   const retireParcels=()=>{
     if(parcelsRetired) return false;
-    parcelsRetired=true;for(const buffer of parcelBuffers) buffer.destroy();return true;
+    parcelsRetired=true;for(const buffer of parcelBuffers) releaseOrDestroyQueueOrderedPooledBuffer(buffer);return true;
   };
   captures.set(token, null);
   try {
@@ -84,6 +106,7 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
       successor.buffer, 0, successor.buffer.size);
     encoder.copyBufferToBuffer(record.exactEnergy.energyBuffer, 0, energyBuffer, 0, energyBuffer.size);
     const validationBuffer = make('ulg-parcel-candidate-validation', 32);
+    if (useQueueOrderedPool) encoder.clearBuffer(validationBuffer);
     stages = prepareSphLedgerParcelStagesWebGpu({ device, parcels, particleCount: count, dtSeconds,
       ...physical, massRead: { ...record.carrierMassRead, buffer: successor.buffer, byteOffset: 0 },
       energy, thermalMaterialTable });
@@ -122,7 +145,7 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
       cacheKey: `ulg-parcel-candidate-validation-v1-${count}-${parcels.count}`, label: 'ulg-parcel-candidate-validation',
       bindings: ['read-only-storage','read-only-storage','read-only-storage','read-only-storage','storage']
         .map((type,binding) => computeBufferBinding(binding,type)) });
-    const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+    const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
       entries: [parcels.paramsBuffer,parcels.ledgerBuffer,stages.targetBuffer,energyBuffer,validationBuffer]
         .map((buffer,binding) => ({ binding,resource:{buffer} })) });
     const pass = encoder.beginComputePass();pass.setPipeline(pipeline.pipeline);pass.setBindGroup(0,group);
@@ -136,9 +159,15 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
     markSphExactMassDerivedBuffers(exactLedger.sourceRead, [physical.stateBuffer,physical.thermoBuffer],
       { mechanicsBuffers: [physical.mechanicsBuffer] });
     const remaining = new Set(['state','thermo','mechanics']);
+    let validationReleased = false;
+    const releaseValidation = () => {
+      if (validationReleased) return;
+      validationReleased = true;
+      releaseOrDestroyQueueOrderedPooledBuffer(validationBuffer);
+    };
     const destroyComponents = (selected = {}) => {
-      for(const key of [...remaining]) if(selected[key]) {physical[`${key}Buffer`].destroy();remaining.delete(key);}
-      if(!remaining.size) validationBuffer.destroy();
+      for(const key of [...remaining]) if(selected[key]) {releaseOrDestroyQueueOrderedPooledBuffer(physical[`${key}Buffer`]);remaining.delete(key);}
+      if(!remaining.size) releaseValidation();
       return true;
     };
     const result = { schema:'peercompute.ulg.sph-ledger-parcel-candidate.v1',
@@ -160,8 +189,8 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
       sphParticleUpload,mlsMpmParticleUpload,sourceStateBuffer,sourceThermoBuffer,sourceMechanicsBuffer,
       thermalMaterialTable,dtSeconds,exactLedger }, { onLastRelease() {
         void releaseSphExactMassRead(massRead, { deferInBurst: true }).then(() => {
-          if(!adoptedEnergy) energyBuffer.destroy();
-          if(!adoptedParcels) retireParcels();validationBuffer.destroy();borrow.release();
+          if(!adoptedEnergy) releaseOrDestroyQueueOrderedPooledBuffer(energyBuffer);
+          if(!adoptedParcels) retireParcels();releaseValidation();borrow.release();
         }).catch(() => {});
       } });
     captures.set(token,Object.freeze({ ...seal,sourcePredecessorSeal:predecessor,exactLedgerParcels:parcelRecord,
@@ -171,6 +200,6 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
   } catch(error) {
     stages?.destroy();
     if(massRead) await releaseSphExactMassRead(massRead);else successor?.abandon();
-    for(const b of owned) b.destroy();borrow.release();throw error;
+    for(const b of owned) releaseOrDestroyQueueOrderedPooledBuffer(b, { allowPool: false });borrow.release();throw error;
   }
 }

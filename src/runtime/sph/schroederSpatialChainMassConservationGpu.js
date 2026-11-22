@@ -1,7 +1,7 @@
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT as format } from './sphExactThermalEnergyWgsl.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import { createCachedExplicitBindGroup, createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
 import { prepareSphReactionResidualInventory } from './sphReactionResidualInventoryGpu.js';
 
 // Reactions and refinement redistribute carrier mass between lineages. Compare the complete
@@ -137,7 +137,7 @@ var<workgroup> ae:array<ExactMass,64>;
       output,controlBuffer,params,reactionValidationBuffer ?? candidateMassRead.buffer,
       ...(parcelCount ? [originalParcels.ledgerBuffer,candidateParcels.ledgerBuffer,
         originalParcels.sinkBuffer,candidateParcels.sinkBuffer] : [])];
-    const bindGroup = device.createBindGroup({layout:pipeline.bindGroupLayout,
+    const bindGroup = createCachedExplicitBindGroup(device, {layout:pipeline.bindGroupLayout,
       entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
     passes.push({ pipeline:pipeline.pipeline, bindGroup, groups });
     previous=output;count=groups;
@@ -163,7 +163,7 @@ ${createSphExactLedgerWgsl(format)}
     const pipeline=createCachedExplicitComputePipeline(device,{code,entryPoint:'compare',
       cacheKey:'ulg-chain-inventory-history-compare-v1',label:'ulg-chain-complete-inventory',
       bindings:['read-only-storage','read-only-storage','storage'].map((type,binding)=>computeBufferBinding(binding,type))});
-    const bindGroup=device.createBindGroup({layout:pipeline.bindGroupLayout,
+    const bindGroup=createCachedExplicitBindGroup(device,{layout:pipeline.bindGroupLayout,
       entries:[previous,history.buffer,controlBuffer].map((buffer,binding)=>({binding,resource:{buffer}}))});
     passes.push({pipeline:pipeline.pipeline,bindGroup,groups:1});
   }

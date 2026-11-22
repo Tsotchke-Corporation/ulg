@@ -43,7 +43,8 @@ function releasePooledLocalTransportRuntime(device, fineFieldCapacity, runtime, 
     byCap.delete(fineFieldCapacity);
     byCap.set(fineFieldCapacity, bucket);
   }
-  if (bucket.length < 4) {
+  const bucketLimit = (typeof globalThis.GPUDevice === 'function' && keyDevice instanceof globalThis.GPUDevice) ? 8 : 4;
+  if (bucket.length < bucketLimit) {
     bucket.push(runtime);
   } else {
     runtime.destroy();

@@ -1,5 +1,11 @@
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 
 // A clock segment keeps the caller's binary64 base time and dt unchanged.
 // Only accepted intervals increment its integer count. This avoids accumulating
@@ -60,9 +66,22 @@ export function prepareSphResidentClockAdvance({ device, source = null,
     || !Number.isFinite(baseTime + dt)) {
     throw new RangeError('Resident clock requires a finite nonnegative origin');
   }
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const owned = [];
   const make = (label, size, usage) => {
-    const buffer = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    const buffer = tagWebGpuBufferDevice(
+      useQueueOrderedPool
+        ? registerQueueOrderedPooledBufferReturn(
+            acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+            device,
+            { bucketKey: label, size, usage }
+          )
+        : device.createBuffer({ label, size, usage }),
+      device
+    );
     owned.push(buffer); return buffer;
   };
   let sourceReleased = false, record, transferred = false, inputsRetired = false;
@@ -131,16 +150,28 @@ struct Params { a:vec4<u32>, b:vec4<u32>, c:vec4<u32>, d:vec4<u32> };
     const destroyBuffer=buffer.destroy.bind(buffer);
     buffer.destroy=()=>{
       if(!record.destroyed) throw new Error('Resident clock belongs to its retained producer');
-      destroyBuffer();
+      if(useQueueOrderedPool) {
+        buffer.destroy=destroyBuffer;
+        releaseOrDestroyQueueOrderedPooledBuffer(buffer);
+      } else {
+        destroyBuffer();
+      }
     };
     record.dispose=()=>{
       if(record.destroyed) return false;
-      record.destroyed=true;destroyBuffer();return true;
+      record.destroyed=true;
+      if(useQueueOrderedPool) {
+        buffer.destroy=destroyBuffer;
+        releaseOrDestroyQueueOrderedPooledBuffer(buffer);
+      } else {
+        destroyBuffer();
+      }
+      return true;
     };
     const retireInputs=()=>{
       if(inputsRetired) return;
       inputsRetired=true;releaseSource();
-      for(const input of owned) if(input!==buffer) input.destroy();
+      for(const input of owned) if(input!==buffer) releaseOrDestroyQueueOrderedPooledBuffer(input);
     };
     const clock=Object.freeze({schema:'peercompute.ulg.resident-clock.v1',buffer,baseStep,baseTime,dt});
     records.set(clock,record);

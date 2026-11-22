@@ -1,4 +1,11 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT, SPH_EXACT_THERMAL_ENERGY_CONTROL_WORDS }
@@ -420,13 +427,26 @@ export function createSphExactVaporParcelExchangeStage({ device, gasCount, parce
   parcelBuffer, parcelLedgerBuffer, gasMechanicsBuffer = null, gasMassRange = null } = {}) {
   const cellCount = dims[0] * dims[1] * dims[2];
   if (!(cellCount > 0) || !(gasCount > 0) || !(parcelCount >= 0) || !(cellSizeM > 0)) fail('grid and counts required');
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const alloc = (label, size, usage) => (
+    useQueueOrderedPool
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+          device,
+          { bucketKey: label, size, usage }
+        )
+      : device.createBuffer({ label, size, usage })
+  );
   const cellWords = 6 * cellCount + 2 + gasCount + parcelCount;
-  const cells = device.createBuffer({ label: 'ulg-exact-vapor-parcel-cells', size: cellWords * 4,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
-  const probe = device.createBuffer({ label: 'ulg-exact-vapor-parcel-rate-probe', size: Math.max(parcelCount, 1) * 16,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const params = device.createBuffer({ label: 'ulg-exact-vapor-parcel-params', size: 64,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const cells = alloc('ulg-exact-vapor-parcel-cells', cellWords * 4,
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+  const probe = alloc('ulg-exact-vapor-parcel-rate-probe', Math.max(parcelCount, 1) * 16,
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (useQueueOrderedPool ? GPU_BUFFER_USAGE.COPY_DST : 0));
+  const params = alloc('ulg-exact-vapor-parcel-params', 64,
+    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
   const words = new ArrayBuffer(64), u = new Uint32Array(words), f = new Float32Array(words);
   u.set([gasCount, parcelCount, cellCount, new Uint32Array(new Float32Array([vaporMaterialId]).buffer)[0]], 0);
   u.set([dims[0], dims[1], dims[2], SPH_EXACT_VAPOR_PARCEL_MAX_CELL_MEMBERS], 4);
@@ -440,17 +460,20 @@ export function createSphExactVaporParcelExchangeStage({ device, gasCount, parce
   // Without a mechanics buffer (unit fixtures) the lanes go to a scratch row set.
   const scratchMechanics = gasMechanicsBuffer ? null : device.createBuffer({ label: 'ulg-exact-vapor-parcel-mechanics-scratch',
     size: gasCount * 128, usage: GPU_BUFFER_USAGE.STORAGE });
-  const bindGroup = device.createBindGroup({ layout: pipelines.exchange_cells.bindGroupLayout, entries: [params,
+  const bindGroup = createCachedExplicitBindGroup(device, { layout: pipelines.exchange_cells.bindGroupLayout, entries: [params,
     gasStateBuffer, gasThermoBuffer, gasMassBuffer, gasEnergyBuffer, parcelBuffer, parcelLedgerBuffer, cells, probe,
     gasMechanicsBuffer ?? scratchMechanics]
     .map((buffer, binding) => ({ binding, resource: binding === 3 && gasMassRange
       ? { buffer, offset: gasMassRange.offset, size: gasMassRange.size } : { buffer } })) });
   const members = Math.max(gasCount, parcelCount);
+  let encoded = false;
   return Object.freeze({
     probeBuffer: probe,
     encode(encoder, dt) {
+      encoded = true;
       f[12] = dt; device.queue.writeBuffer(params, 0, words);
       encoder.clearBuffer(cells);
+      if (useQueueOrderedPool) encoder.clearBuffer(probe);
       for (const [name, groups] of [['count_members', Math.ceil(members / 64)], ['scan_members', 1],
         ['scatter_members', Math.ceil(members / 64)], ['exchange_cells', Math.ceil(cellCount / 64)]]) {
         const pass = encoder.beginComputePass({ label: `ulg-exact-vapor-parcel-${name}` });
@@ -458,7 +481,12 @@ export function createSphExactVaporParcelExchangeStage({ device, gasCount, parce
         pass.dispatchWorkgroups(groups); pass.end();
       }
     },
-    destroy() { cells.destroy(); probe.destroy(); params.destroy(); scratchMechanics?.destroy(); }
+    destroy() {
+      releaseOrDestroyQueueOrderedPooledBuffer(cells, { allowPool: encoded });
+      releaseOrDestroyQueueOrderedPooledBuffer(probe, { allowPool: encoded });
+      releaseOrDestroyQueueOrderedPooledBuffer(params, { allowPool: encoded });
+      scratchMechanics?.destroy();
+    }
   });
 }
 

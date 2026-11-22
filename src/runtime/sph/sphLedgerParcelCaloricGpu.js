@@ -1,6 +1,16 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer,
+  unwrapWebGpuCacheDevice
+} from '../webgpuComputeLayout.js';
 import { schroederPhaseSlotCaloricWgsl } from './schroederPhaseSlotCaloricWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_ERROR } from './sphExactThermalEnergyWgsl.js';
+
+const ledgerParcelCaloricSegmentsCache = new WeakMap();
 
 // Parcel exchange changes carrier U/m. Refresh explicit U(T) projections before
 // pressure/mechanics consume them; the exact ledger and phase remain authority.
@@ -36,17 +46,48 @@ export function createSphLedgerParcelCaloricStage({device,particleCount,stateBuf
     label:'ulg-ledger-parcel-caloric',code,entryPoint:'refresh',bindings:
       ['uniform','read-only-storage','storage','read-only-storage','storage']
         .map((type,binding)=>computeBufferBinding(binding,type))});
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const owned=[];
-  const make=(data,usage)=>{const b=device.createBuffer({size:Math.max(16,data.byteLength),usage:usage|GPUBufferUsage.COPY_DST});
-    owned.push(b);device.queue.writeBuffer(b,0,data);return b;};
+  const make=(label,data,usage,poolable=false)=>{
+    const size=Math.max(16,data.byteLength);
+    const fullUsage=usage|GPUBufferUsage.COPY_DST;
+    const b=useQueueOrderedPool && poolable
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device,{bucketKey:label,label,size,usage:fullUsage}),
+          device,{bucketKey:label,size,usage:fullUsage}
+        )
+      : device.createBuffer({label,size,usage:fullUsage});
+    owned.push(b);device.queue.writeBuffer(b,0,data);return b;
+  };
+  let encoded=false;
   try{
-    const params=make(new Uint32Array([particleCount,thermalMaterialTable.segmentCount,
-      2*particleCount*energy.format.wordCount,0]),GPUBufferUsage.UNIFORM);
-    const segments=make(thermalMaterialTable.segments,GPUBufferUsage.STORAGE);
-    const group=device.createBindGroup({layout:pipeline.bindGroupLayout,entries:
+    const params=make('ulg-ledger-parcel-caloric-params',new Uint32Array([particleCount,thermalMaterialTable.segmentCount,
+      2*particleCount*energy.format.wordCount,0]),GPUBufferUsage.UNIFORM,true);
+    let segments;
+    if (useQueueOrderedPool && thermalMaterialTable.segments?.byteLength > 0) {
+      const cacheKeyDevice = unwrapWebGpuCacheDevice(device);
+      let segCache = ledgerParcelCaloricSegmentsCache.get(cacheKeyDevice);
+      if (!segCache) { segCache = new WeakMap(); ledgerParcelCaloricSegmentsCache.set(cacheKeyDevice, segCache); }
+      segments = segCache.get(thermalMaterialTable.segments);
+      if (!segments) {
+        segments = device.createBuffer({
+          label: 'ulg-ledger-parcel-caloric-segments',
+          size: Math.max(16, thermalMaterialTable.segments.byteLength),
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        device.queue.writeBuffer(segments, 0, thermalMaterialTable.segments);
+        segCache.set(thermalMaterialTable.segments, segments);
+      }
+    } else {
+      segments=make('ulg-ledger-parcel-caloric-segments',thermalMaterialTable.segments,GPUBufferUsage.STORAGE);
+    }
+    const group=createCachedExplicitBindGroup(device,{layout:pipeline.bindGroupLayout,entries:
       [params,stateBuffer,thermoBuffer,segments,energy.energyBuffer].map((buffer,binding)=>({binding,resource:{buffer}}))});
-    return {encode(encoder){const pass=encoder.beginComputePass({label:'ulg-ledger-parcel-caloric'});
+    return {encode(encoder){encoded=true;const pass=encoder.beginComputePass({label:'ulg-ledger-parcel-caloric'});
       pass.setPipeline(pipeline.pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(particleCount/64));pass.end();},
-      destroy(){for(const b of owned)b.destroy();}};
-  }catch(error){for(const b of owned)b.destroy();throw error;}
+      destroy(){for(const b of owned)releaseOrDestroyQueueOrderedPooledBuffer(b,{allowPool:encoded});}};
+  }catch(error){for(const b of owned)releaseOrDestroyQueueOrderedPooledBuffer(b,{allowPool:false});throw error;}
 }

@@ -1,4 +1,11 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT } from './sphExactThermalEnergyWgsl.js';
@@ -216,10 +223,23 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
   carrierStateBuffer, carrierThermoBuffer, carrierMassBuffer, carrierEnergyBuffer, parcelBuffer, parcelLedgerBuffer,
   sinkBuffer, carrierMechanicsBuffer = null, carrierMassRange = null } = {}) {
   if (!(carrierCount > 0) || !(parcelCount > 0) || !(cellSizeM > 0)) fail('counts and grid required');
-  const target = device.createBuffer({ label: 'ulg-exact-parcel-target', size: parcelCount * 4,
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
-  const params = device.createBuffer({ label: 'ulg-exact-parcel-transport-params', size: 80,
-    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  const alloc = (label, size, usage) => (
+    useQueueOrderedPool
+      ? registerQueueOrderedPooledBufferReturn(
+          acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+          device,
+          { bucketKey: label, size, usage }
+        )
+      : device.createBuffer({ label, size, usage })
+  );
+  const target = alloc('ulg-exact-parcel-target', parcelCount * 4,
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC);
+  const params = alloc('ulg-exact-parcel-transport-params', 80,
+    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
   const words = new ArrayBuffer(80), u = new Uint32Array(words), f = new Float32Array(words);
   u.set([carrierCount, parcelCount, dims[0] * dims[1] * dims[2], new Uint32Array(new Float32Array([waterMaterialId]).buffer)[0]], 0);
   u.set([dims[0], dims[1], dims[2], 0], 4);
@@ -234,14 +254,16 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
     code: sphExactParcelTransportLedgerWgsl, entryPoint, bindings })]));
   const scratchMechanics = carrierMechanicsBuffer ? null : device.createBuffer({ label: 'ulg-exact-parcel-mechanics-scratch',
     size: carrierCount * 128, usage: GPU_BUFFER_USAGE.STORAGE });
-  const bindGroup = device.createBindGroup({ layout: pipelines.transport_parcels.bindGroupLayout, entries: [params,
+  const bindGroup = createCachedExplicitBindGroup(device, { layout: pipelines.transport_parcels.bindGroupLayout, entries: [params,
     carrierStateBuffer, carrierThermoBuffer, carrierMassBuffer, carrierEnergyBuffer, parcelBuffer, parcelLedgerBuffer,
     target, sinkBuffer, carrierMechanicsBuffer ?? scratchMechanics].map((buffer, binding) => ({ binding,
       resource: binding === 3 && carrierMassRange ? { buffer, offset: carrierMassRange.offset, size: carrierMassRange.size }
         : { buffer } })) });
+  let encoded = false;
   return Object.freeze({
     targetBuffer: target,
     encode(encoder, dt) {
+      encoded = true;
       f[15] = dt; device.queue.writeBuffer(params, 0, words);
       for (const [name, groups] of [['transport_parcels', Math.ceil(parcelCount / 64)],
         ['deposit_into_carriers', Math.ceil(carrierCount / 64)], ['deposit_into_sinks', 1],
@@ -251,7 +273,11 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
         pass.dispatchWorkgroups(groups); pass.end();
       }
     },
-    destroy() { target.destroy(); params.destroy(); scratchMechanics?.destroy(); }
+    destroy() {
+      releaseOrDestroyQueueOrderedPooledBuffer(target, { allowPool: encoded });
+      releaseOrDestroyQueueOrderedPooledBuffer(params, { allowPool: encoded });
+      scratchMechanics?.destroy();
+    }
   });
 }
 

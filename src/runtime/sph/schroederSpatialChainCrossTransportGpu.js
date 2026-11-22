@@ -126,7 +126,8 @@ function releaseCrossTransportStorage(storage, { destroy = false } = {}) {
     byKey.delete(storage.key);
     byKey.set(storage.key, bucket);
   }
-  if (bucket.length < 2) {
+  const bucketLimit = (typeof globalThis.GPUDevice === 'function' && storage.keyDevice instanceof globalThis.GPUDevice) ? 6 : 2;
+  if (bucket.length < bucketLimit) {
     bucket.push(storage);
   } else {
     try { storage.volume.destroy(); } catch {}

@@ -1,5 +1,12 @@
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import {
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_MAGIC as FIELD_MAGIC,
   SCHROEDER_SPATIAL_MECHANICS_FIELD_VIEW_VERSION as FIELD_VERSION,
@@ -11,12 +18,25 @@ import {
 // particle solver; its physical descriptor selects disjoint output rows.
 export function prepareSchroederSpatialChainG2pGather({ device, publication,
   particleCount, sourceStateBuffer, sourceMechanicsBuffer, sourceQuantities = null }) {
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const buffers = [];
-  const allocate = (label, size, usage = 128 | 4 | 8) => {
+  const allocate = (label, size, usage = 128 | 4 | 8, poolable = false) => {
     if (!Number.isSafeInteger(size) || size < 4 || size > device.limits.maxStorageBufferBindingSize) {
       throw new RangeError('Chain G2P gather exceeds device storage capacity');
     }
-    const b = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    const b = tagWebGpuBufferDevice(
+      useQueueOrderedPool && poolable
+        ? registerQueueOrderedPooledBufferReturn(
+            acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+            device,
+            { bucketKey: label, size, usage }
+          )
+        : device.createBuffer({ label, size, usage }),
+      device
+    );
     buffers.push(b); return b;
   };
   const count = particleCount, levels = publication.updates.length;
@@ -25,15 +45,15 @@ export function prepareSchroederSpatialChainG2pGather({ device, publication,
     throw new RangeError('Chain G2P requires a bounded physical particle capacity');
   }
   try {
-    const stateBuffer = allocate('ulg-chain-g2p-state', count * 32);
-    const mechanicsBuffer = allocate('ulg-chain-g2p-mechanics', count * 128);
-    const selected = allocate('ulg-chain-g2p-selected-counts', count * 4);
-    const controlBuffer = allocate('ulg-chain-g2p-control', 128);
-    const validationBuffer = allocate('ulg-chain-g2p-exact-validation', 16);
+    const stateBuffer = allocate('ulg-chain-g2p-state', count * 32, 128 | 4 | 8, true);
+    const mechanicsBuffer = allocate('ulg-chain-g2p-mechanics', count * 128, 128 | 4 | 8, true);
+    const selected = allocate('ulg-chain-g2p-selected-counts', count * 4, 128 | 4 | 8, true);
+    const controlBuffer = allocate('ulg-chain-g2p-control', 128, 128 | 4 | 8, true);
+    const validationBuffer = allocate('ulg-chain-g2p-exact-validation', 16, 128 | 4 | 8, true);
     const quantityBuffer = sourceQuantities ? allocate('ulg-chain-g2p-quantities', sourceQuantities.quantityBuffer.size) : null;
-    const projectionBuffer = sourceQuantities ? allocate('ulg-chain-g2p-projections', count * 48) : null;
+    const projectionBuffer = sourceQuantities ? allocate('ulg-chain-g2p-projections', count * 48, 128 | 4 | 8, true) : null;
     const params = publication.updates.map((update, index) => {
-      const b = allocate('ulg-chain-g2p-params', 32, 64 | 8);
+      const b = allocate('ulg-chain-g2p-params', 32, 64 | 8, true);
       device.queue.writeBuffer(b, 0, new Uint32Array([count, index, levels, update.mechanicsFieldMutationOutputOrdinal,
         publication.execution.completionOrdinal, 0, 0, 0]));
       return b;
@@ -43,7 +63,7 @@ export function prepareSchroederSpatialChainG2pGather({ device, publication,
       const p = createCachedExplicitComputePipeline(device, { code, entryPoint,
         cacheKey: `chain-g2p-v1-${entryPoint}-${sourceQuantities?.quantityLayout.recordWords ?? 0}`,
         bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
-      const group = device.createBindGroup({ layout: p.bindGroupLayout,
+      const group = createCachedExplicitBindGroup(device, { layout: p.bindGroupLayout,
         entries: resources.map((r, binding) => ({ binding, resource: { buffer: r.buffer ?? r } })) });
       const pass = encoder.beginComputePass(); pass.setPipeline(p.pipeline); pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(groups); pass.end();
@@ -92,7 +112,7 @@ fn fail(bit:u32) { atomicOr(&control[2],bit); }
     const tuple = (field, s, m, i) => [ro(field), ro(s), ro(m), stateBuffer, mechanicsBuffer,
       selected, controlBuffer, { buffer: params[i], type: 'uniform' }];
     return { stateBuffer, mechanicsBuffer, controlBuffer, validationBuffer, quantityBuffer, projectionBuffer,
-      destroy() { for (const b of buffers) b.destroy(); },
+      destroy() { for (const b of buffers) releaseOrDestroyQueueOrderedPooledBuffer(b); },
       encode(encoder, candidates) {
         encoder.clearBuffer(selected); encoder.clearBuffer(controlBuffer); encoder.clearBuffer(validationBuffer);
         encoder.copyBufferToBuffer(publication.controlBuffer, 12, controlBuffer, 12, 13 * 4);
@@ -159,5 +179,5 @@ fn fail(bit:u32) { atomicOr(&control[2],bit); }
         }
       }
     };
-  } catch(error) {for(const b of buffers)b.destroy();throw error;}
+  } catch(error) {for(const b of buffers)releaseOrDestroyQueueOrderedPooledBuffer(b);throw error;}
 }

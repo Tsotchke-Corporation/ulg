@@ -7,7 +7,14 @@ import { prepareSphResidentClockAdvance } from './sphResidentClockGpu.js';
 import { validateSphReactionLineageCandidate, sphReactionLineageAdmissionWgsl } from './sphReactionLineageGpu.js';
 import { prepareSphLedgerReactionHistory } from './sphLedgerReactionHistoryGpu.js';
 import { prepareSphReactionResidualHistory } from './sphReactionResidualHistoryGpu.js';
-import { createCachedExplicitComputePipeline, computeBufferBinding } from '../webgpuComputeLayout.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  computeBufferBinding,
+  createCachedExplicitBindGroup,
+  createCachedExplicitComputePipeline,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT, SPH_EXACT_THERMAL_ENERGY_WORDS,
   sphExactThermalEnergyRecordWords } from './sphExactThermalEnergyWgsl.js';
 
@@ -27,13 +34,29 @@ export function prepareSchroederSpatialChainClosure({ device, capture, original,
   residualSourceControlBuffer = null,
   clockOrigin, sourceClock = null }) {
   capture.validate();
+  const useQueueOrderedPool = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const owned = [];
   const allocate = (label, size, usage) => {
-    const buffer = tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    const buffer = tagWebGpuBufferDevice(
+      useQueueOrderedPool
+        ? registerQueueOrderedPooledBufferReturn(
+            acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+            device,
+            { bucketKey: label, size, usage }
+          )
+        : device.createBuffer({ label, size, usage }),
+      device
+    );
     owned.push(buffer); return buffer;
   };
   let clockAdvance = null, residualHistory = null;
-  const destroy = () => { residualHistory?.destroy(); clockAdvance?.destroy(); for (const buffer of owned.splice(0)) buffer.destroy(); };
+  const destroy = () => {
+    residualHistory?.destroy(); clockAdvance?.destroy();
+    for (const buffer of owned.splice(0)) releaseOrDestroyQueueOrderedPooledBuffer(buffer);
+  };
   try {
     const controlBuffer = allocate('ulg-chain-closure-control', 128, 128 | 4 | 8);
     const history = prepareSphLedgerReactionHistory({ device, sourceRead: sourceHistoryRead,
@@ -188,7 +211,7 @@ fn mass_row(row:u32)->ExactMass {
       const pipeline = createCachedExplicitComputePipeline(device, { code, entryPoint,
         cacheKey: `ulg-chain-closure-v6-refinement-${key}`, label: `ulg-chain-closure-${entryPoint}`,
         bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
-      const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+      const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
         entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
       return (encoder, count) => {
         const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline);

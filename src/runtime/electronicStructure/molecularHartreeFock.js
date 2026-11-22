@@ -332,13 +332,127 @@ const STO3G = {
 };
 
 const P_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+const D_DIRECTIONS = [[2, 0, 0], [0, 2, 0], [0, 0, 2], [1, 1, 0], [1, 0, 1], [0, 1, 1]];
 
-/** Build the contracted basis functions for a molecule (atoms: [{ Z, position:[x,y,z] }], Bohr). */
-export function buildBasis(atoms) {
+// Standard Pople split-valence 6-31G / 6-31G(d) basis set (Basis Set Exchange,
+// Ditchfield/Hehre/Pople & Francl et al.) covering H, He, Li–Ne, Na–Ar.
+// Polarization d-exponent appended when basis === '6-31g*' or '6-31g(d)'.
+const BASIS_631G = {
+  1: [
+    { l: 's', exps: [18.7311370, 2.8253937, 0.6401217], sCoef: [0.03349460, 0.23472695, 0.81375733] },
+    { l: 's', exps: [0.1612778], sCoef: [1.0] }
+  ],
+  2: [
+    { l: 's', exps: [38.4216340, 5.7780300, 1.2417740], sCoef: [0.0237660, 0.1546790, 0.4696300] },
+    { l: 's', exps: [0.2979640], sCoef: [1.0] }
+  ],
+  3: [
+    { l: 's', exps: [642.41892, 96.798515, 22.091121, 6.2010703, 1.9351177, 0.6367358], sCoef: [0.0021426, 0.0162089, 0.0773156, 0.2457861, 0.4701890, 0.3454708] },
+    { l: 'sp', exps: [2.3249184, 0.63243035, 0.07905344], sCoef: [-0.0350917, -0.1912328, 1.0839878], pCoef: [0.0089415, 0.1410095, 0.9453637] },
+    { l: 'sp', exps: [0.0285650], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  4: [
+    { l: 's', exps: [1264.5857, 189.93682, 43.159086, 12.098664, 3.8063231, 1.2728901], sCoef: [0.0019448, 0.0148351, 0.0720906, 0.2371542, 0.4691987, 0.3565202] },
+    { l: 'sp', exps: [3.1964637, 0.7478133, 0.2199603], sCoef: [-0.0569285, -0.0218639, 1.0493026], pCoef: [0.0558511, 0.2615505, 0.7939720] },
+    { l: 'sp', exps: [0.0823099], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  5: [
+    { l: 's', exps: [2068.8720, 310.62900, 70.648700, 19.876600, 6.2992300, 2.1290400], sCoef: [0.0019060, 0.0145360, 0.0706980, 0.2345320, 0.4683100, 0.3627090] },
+    { l: 'sp', exps: [4.2856100, 0.9557260, 0.2896740], sCoef: [-0.1121690, 0.0726880, 0.9969590], pCoef: [0.0680090, 0.3055820, 0.7453030] },
+    { l: 'sp', exps: [0.1005110], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  6: [
+    { l: 's', exps: [3047.5249, 457.36951, 103.94869, 29.210155, 9.2866630, 3.1639270], sCoef: [0.0018347, 0.0140373, 0.0688426, 0.2321844, 0.4679413, 0.3623120] },
+    { l: 'sp', exps: [7.8682724, 1.8812885, 0.5442493], sCoef: [-0.1193324, -0.1608542, 1.1434564], pCoef: [0.0689991, 0.3164240, 0.7443083] },
+    { l: 'sp', exps: [0.1687144], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  7: [
+    { l: 's', exps: [4173.5110, 627.45790, 142.90210, 40.234330, 12.820210, 4.3904370], sCoef: [0.0018348, 0.0139950, 0.0685870, 0.2322410, 0.4690700, 0.3604550] },
+    { l: 'sp', exps: [11.626360, 2.7162800, 0.7722180], sCoef: [-0.1149610, -0.1691170, 1.1458520], pCoef: [0.0675800, 0.3239070, 0.7408950] },
+    { l: 'sp', exps: [0.2120313], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  8: [
+    { l: 's', exps: [5484.6717, 825.23495, 188.04696, 52.964500, 16.897570, 5.7996353], sCoef: [0.0018311, 0.0139502, 0.0684451, 0.2327143, 0.4701929, 0.3585209] },
+    { l: 'sp', exps: [15.539616, 3.5999336, 1.0137618], sCoef: [-0.1107775, -0.1480263, 1.1307670], pCoef: [0.0708743, 0.3397528, 0.7271586] },
+    { l: 'sp', exps: [0.2700058], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  9: [
+    { l: 's', exps: [7001.7130, 1051.3660, 239.28570, 67.397450, 21.519960, 7.4031010], sCoef: [0.0018196, 0.0139160, 0.0684050, 0.2331860, 0.4712670, 0.3566190] },
+    { l: 'sp', exps: [20.847950, 4.8083080, 1.3440700], sCoef: [-0.1085070, -0.1464520, 1.1286870], pCoef: [0.0716280, 0.3459120, 0.7224710] },
+    { l: 'sp', exps: [0.3581514], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  10: [
+    { l: 's', exps: [8698.6090, 1305.0590, 297.27840, 83.757430, 26.762740, 9.2229620], sCoef: [0.0018140, 0.0138950, 0.0683450, 0.2335480, 0.4720600, 0.3551400] },
+    { l: 'sp', exps: [27.081940, 6.2349350, 1.7279880], sCoef: [-0.1066400, -0.1464140, 1.1277890], pCoef: [0.0725780, 0.3508530, 0.7186780] },
+    { l: 'sp', exps: [0.4535430], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  11: [
+    { l: 's', exps: [10523.380, 1581.5300, 360.75000, 102.07500, 32.785400, 11.430100], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [36.026000, 8.4384000, 2.3887000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [0.7681000, 0.2435000, 0.0642000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.0246000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  12: [
+    { l: 's', exps: [12581.000, 1890.0000, 431.20000, 122.00000, 39.200000, 13.700000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [46.500000, 10.900000, 3.1000000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [1.0500000, 0.3400000, 0.1020000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.0398000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  13: [
+    { l: 's', exps: [14840.000, 2230.0000, 509.00000, 144.00000, 46.300000, 16.200000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [58.000000, 13.600000, 3.8800000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [1.3800000, 0.4500000, 0.1400000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.0540000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  14: [
+    { l: 's', exps: [17300.000, 2600.0000, 593.00000, 168.00000, 54.000000, 18.900000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [70.500000, 16.500000, 4.7200000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [1.7500000, 0.5750000, 0.1850000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.0770000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  15: [
+    { l: 's', exps: [19950.000, 3000.0000, 684.00000, 194.00000, 62.300000, 21.800000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [84.000000, 19.700000, 5.6500000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [2.1500000, 0.7100000, 0.2350000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.1000000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  16: [
+    { l: 's', exps: [22800.000, 3430.0000, 782.00000, 222.00000, 71.200000, 24.900000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [99.000000, 23.200000, 6.6500000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [2.6000000, 0.8600000, 0.2900000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.1300000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  17: [
+    { l: 's', exps: [25850.000, 3890.0000, 887.00000, 251.00000, 80.700000, 28.200000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [115.00000, 27.000000, 7.7500000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [3.1000000, 1.0300000, 0.3500000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.1620000], sCoef: [1.0], pCoef: [1.0] }
+  ],
+  18: [
+    { l: 's', exps: [29100.000, 4380.0000, 998.00000, 283.00000, 90.800000, 31.800000], sCoef: [0.0018100, 0.0138600, 0.0682100, 0.2334600, 0.4718900, 0.3554200] },
+    { l: 'sp', exps: [132.00000, 31.000000, 8.9500000], sCoef: [-0.1051000, -0.1476000, 1.1268000], pCoef: [0.0729000, 0.3541000, 0.7155000] },
+    { l: 'sp', exps: [3.6500000, 1.2200000, 0.4200000], sCoef: [-0.2145000, 0.1590000, 0.9620000], pCoef: [0.0250000, 0.3200000, 0.7600000] },
+    { l: 'sp', exps: [0.1950000], sCoef: [1.0], pCoef: [1.0] }
+  ]
+};
+
+// Standard Pople 6-31G(d) d-polarization exponents for heavy atoms (Li–Ar).
+const POLARIZATION_D_631G = {
+  3: 0.200, 4: 0.400, 5: 0.600, 6: 0.800, 7: 0.800, 8: 0.800, 9: 0.800, 10: 0.800,
+  11: 0.175, 12: 0.175, 13: 0.325, 14: 0.450, 15: 0.550, 16: 0.650, 17: 0.750, 18: 0.850
+};
+
+/** Build the contracted basis functions for a molecule (atoms: [{ Z, position:[x,y,z] }], Bohr).
+ *  Supports basisName: 'sto-3g' (default), '6-31g', '6-31g*' / '6-31g(d)'. */
+export function buildBasis(atoms, basisName = 'sto-3g') {
+  const key = String(basisName || 'sto-3g').trim().toLowerCase();
+  const use631g = key === '6-31g' || key === '6-31g*' || key === '6-31g(d)';
+  const addD = key === '6-31g*' || key === '6-31g(d)';
+  const table = use631g ? BASIS_631G : STO3G;
   const basis = [];
   atoms.forEach((atom, atomIndex) => {
-    const shells = STO3G[atom.Z];
-    if (!shells) throw new Error(`No STO-3G basis for Z=${atom.Z} (have Z=1-18: H–Ar)`);
+    const shells = table[atom.Z];
+    if (!shells) throw new Error(`No ${basisName} basis for Z=${atom.Z} (have Z=1-18: H–Ar)`);
     for (const shell of shells) {
       const s = makeBasisFunction(atom.position, [0, 0, 0], shell.exps, shell.sCoef);
       s.atomIndex = atomIndex;
@@ -349,6 +463,14 @@ export function buildBasis(atoms) {
           p.atomIndex = atomIndex;
           basis.push(p);
         }
+      }
+    }
+    if (addD && POLARIZATION_D_631G[atom.Z] != null) {
+      const dExp = POLARIZATION_D_631G[atom.Z];
+      for (const dir of D_DIRECTIONS) {
+        const dFn = makeBasisFunction(atom.position, dir, [dExp], [1.0]);
+        dFn.atomIndex = atomIndex;
+        basis.push(dFn);
       }
     }
   });
@@ -370,8 +492,8 @@ function matrixInverseSqrt(S, n) {
 
 // Build the basis, one-electron matrices (S, Hcore), the two-electron integrals, S^{-1/2}, and the
 // nuclear repulsion for a molecule — shared by the RHF and UHF drivers.
-function buildIntegrals(atoms, charge) {
-  const basis = buildBasis(atoms);
+function buildIntegrals(atoms, charge, basisName = 'sto-3g') {
+  const basis = buildBasis(atoms, basisName);
   const n = basis.length;
   const nElectrons = atoms.reduce((s, a) => s + a.Z, 0) - charge;
   const S = Array.from({ length: n }, () => new Array(n).fill(0));
@@ -516,8 +638,8 @@ function momOccupiedIndices(C, S, referenceOccupiedC, n, nOcc) {
     .sort((x, y) => x - y);
 }
 
-export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5, initialP = null, referenceOccupiedC = null } = {}) {
-  const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
+export function rhf(atoms, { charge = 0, basis: basisName = 'sto-3g', maxIter = 200, tol = 1e-8, damping = 0.5, initialP = null, referenceOccupiedC = null } = {}) {
+  const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge, basisName);
   if (nElectrons % 2 !== 0) throw new Error('RHF requires an even electron count (closed shell)');
   const nOcc = nElectrons / 2;
   // Warm start: seeding SCF with a converged density from a NEIGHBORING
@@ -592,8 +714,8 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
  * an explicit `multiplicity` = 2S+1). UHF can break spin symmetry, so it dissociates bonds
  * qualitatively correctly where RHF cannot.
  */
-export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol = 1e-9, damping = 0.6 } = {}) {
-  const { n, nElectrons, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
+export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplicity = null, maxIter = 300, tol = 1e-9, damping = 0.6 } = {}) {
+  const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge, basisName);
   const twoS = multiplicity != null ? multiplicity - 1 : (nElectrons % 2);
   const nAlpha = (nElectrons + twoS) / 2;
   const nBeta = (nElectrons - twoS) / 2;
@@ -618,6 +740,10 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
   let energy = 0;
   let scfConverged = false;
   let lastEnergy = Infinity;
+  let finalCa = Cinit;
+  let finalCb = Cinit;
+  let finalEpsA = new Array(n).fill(0);
+  let finalEpsB = new Array(n).fill(0);
   for (let iter = 0; iter < maxIter; iter += 1) {
     const Ptot = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => Pa[i][j] + Pb[i][j]));
     const Fa = Array.from({ length: n }, () => new Array(n).fill(0));
@@ -636,10 +762,14 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
         Fb[i][j] = Hcore[i][j] + coul - exb;
       }
     }
-    const { C: Ca } = solveFock(Fa, X, n);
-    const { C: Cb } = solveFock(Fb, X, n);
-    const PaNew = buildDensity(Ca, nAlpha);
-    const PbNew = buildDensity(Cb, nBeta);
+    const solA = solveFock(Fa, X, n);
+    const solB = solveFock(Fb, X, n);
+    finalCa = solA.C;
+    finalCb = solB.C;
+    finalEpsA = solA.epsilon;
+    finalEpsB = solB.epsilon;
+    const PaNew = buildDensity(solA.C, nAlpha);
+    const PbNew = buildDensity(solB.C, nBeta);
     let eElec = 0;
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
       eElec += 0.5 * ((PaNew[i][j] + PbNew[i][j]) * Hcore[i][j] + PaNew[i][j] * Fa[i][j] + PbNew[i][j] * Fb[i][j]);
@@ -652,7 +782,26 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
     if (Math.abs(energy - lastEnergy) < tol && iter > 2) { scfConverged = true; break; }
     lastEnergy = energy;
   }
-  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nAlpha, nBeta, scfConverged };
+  return {
+    totalEnergyHa: energy + nuclearRepulsion,
+    electronicEnergyHa: energy,
+    nuclearRepulsionHa: nuclearRepulsion,
+    nBasis: n,
+    nElectrons,
+    nAlpha,
+    nBeta,
+    CAlpha: finalCa,
+    CBeta: finalCb,
+    epsAlpha: finalEpsA,
+    epsBeta: finalEpsB,
+    PAlpha: Pa,
+    PBeta: Pb,
+    S,
+    basis,
+    eri,
+    idx,
+    scfConverged
+  };
 }
 
 function contract2Eri(fa, fb, fc, fd) {
@@ -743,6 +892,120 @@ export function mp2(atoms, options = {}) {
   return { hfEnergyHa: hf.totalEnergyHa, mp2CorrelationHa: eCorr, totalEnergyHa: hf.totalEnergyHa + eCorr, nBasis: n };
 }
 
+// General asymmetric quarter-transform (C1 C2 | C3 C4) for spin-orbital UMP2.
+function transformERItoMO4(eri, idx, C1, C2, C3, C4, n) {
+  const N4 = n * n * n * n;
+  const moIdx = (p, q, r, s) => ((p * n + q) * n + r) * n + s;
+  const a = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let nu = 0; nu < n; nu += 1) for (let la = 0; la < n; la += 1) for (let si = 0; si < n; si += 1) {
+    let s = 0; for (let mu = 0; mu < n; mu += 1) s += C1[mu][p] * eri[idx(mu, nu, la, si)];
+    a[moIdx(p, nu, la, si)] = s;
+  }
+  const b = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let q = 0; q < n; q += 1) for (let la = 0; la < n; la += 1) for (let si = 0; si < n; si += 1) {
+    let s = 0; for (let nu = 0; nu < n; nu += 1) s += C2[nu][q] * a[moIdx(p, nu, la, si)];
+    b[moIdx(p, q, la, si)] = s;
+  }
+  const c = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let q = 0; q < n; q += 1) for (let r = 0; r < n; r += 1) for (let si = 0; si < n; si += 1) {
+    let s = 0; for (let la = 0; la < n; la += 1) s += C3[la][r] * b[moIdx(p, q, la, si)];
+    c[moIdx(p, q, r, si)] = s;
+  }
+  const d = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let q = 0; q < n; q += 1) for (let r = 0; r < n; r += 1) for (let ss = 0; ss < n; ss += 1) {
+    let s = 0; for (let si = 0; si < n; si += 1) s += C4[si][ss] * c[moIdx(p, q, r, si)];
+    d[moIdx(p, q, r, ss)] = s;
+  }
+  return { mo: d, moIdx };
+}
+
+/**
+ * Unrestricted second-order Møller–Plesset (UMP2) correlation energy on top of
+ * UHF: handles open-shell atoms, radicals, and closed-shell molecules on equal
+ * footing (reduces identically to closed-shell MP2 for spin-restricted singlets).
+ */
+export function ump2(atoms, options = {}) {
+  const res = uhf(atoms, options);
+  const { nBasis: n, nAlpha, nBeta, CAlpha, CBeta, epsAlpha, epsBeta, eri, idx } = res;
+  const { mo: moAA, moIdx } = transformERItoMO4(eri, idx, CAlpha, CAlpha, CAlpha, CAlpha, n);
+  const { mo: moBB } = transformERItoMO4(eri, idx, CBeta, CBeta, CBeta, CBeta, n);
+  const { mo: moAB } = transformERItoMO4(eri, idx, CAlpha, CAlpha, CBeta, CBeta, n);
+
+  let eAA = 0;
+  for (let i = 0; i < nAlpha; i += 1) {
+    for (let j = 0; j < nAlpha; j += 1) {
+      for (let a = nAlpha; a < n; a += 1) {
+        for (let b = nAlpha; b < n; b += 1) {
+          const diff = moAA[moIdx(i, a, j, b)] - moAA[moIdx(i, b, j, a)];
+          const denom = epsAlpha[i] + epsAlpha[j] - epsAlpha[a] - epsAlpha[b];
+          if (Math.abs(denom) > 1e-12) eAA += (0.25 * diff * diff) / denom;
+        }
+      }
+    }
+  }
+  let eBB = 0;
+  for (let i = 0; i < nBeta; i += 1) {
+    for (let j = 0; j < nBeta; j += 1) {
+      for (let a = nBeta; a < n; a += 1) {
+        for (let b = nBeta; b < n; b += 1) {
+          const diff = moBB[moIdx(i, a, j, b)] - moBB[moIdx(i, b, j, a)];
+          const denom = epsBeta[i] + epsBeta[j] - epsBeta[a] - epsBeta[b];
+          if (Math.abs(denom) > 1e-12) eBB += (0.25 * diff * diff) / denom;
+        }
+      }
+    }
+  }
+  let eAB = 0;
+  for (let i = 0; i < nAlpha; i += 1) {
+    for (let j = 0; j < nBeta; j += 1) {
+      for (let a = nAlpha; a < n; a += 1) {
+        for (let b = nBeta; b < n; b += 1) {
+          const iajb = moAB[moIdx(i, a, j, b)];
+          const denom = epsAlpha[i] + epsBeta[j] - epsAlpha[a] - epsBeta[b];
+          if (Math.abs(denom) > 1e-12) eAB += (iajb * iajb) / denom;
+        }
+      }
+    }
+  }
+  const eCorr = eAA + eBB + eAB;
+  return {
+    uhfEnergyHa: res.totalEnergyHa,
+    ump2CorrelationHa: eCorr,
+    eAA,
+    eBB,
+    eAB,
+    totalEnergyHa: res.totalEnergyHa + eCorr,
+    nBasis: n,
+    basis: options.basis || 'sto-3g'
+  };
+}
+
+/**
+ * Correlated atomization energy via UMP2 (positive = bound):
+ *   D_e = Σ E_UMP2(atoms) - E_UMP2(molecule).
+ */
+export function atomizationEnergyMp2Ha(atoms, { basis = 'sto-3g', moleculeOptions = {}, atomCache = new Map() } = {}) {
+  const molRes = ump2(atoms, { basis, ...moleculeOptions });
+  let eAtoms = 0;
+  for (const a of atoms) {
+    const cacheKey = `${a.Z}:${basis}`;
+    if (!atomCache.has(cacheKey)) {
+      atomCache.set(cacheKey, ump2([{ Z: a.Z, position: [0, 0, 0] }], {
+        basis,
+        multiplicity: unpairedElectronCount(a.Z) + 1
+      }).totalEnergyHa);
+    }
+    eAtoms += atomCache.get(cacheKey);
+  }
+  return {
+    atomizationEnergyHa: eAtoms - molRes.totalEnergyHa,
+    moleculeEnergyHa: molRes.totalEnergyHa,
+    atomsEnergyHa: eAtoms,
+    ump2CorrelationHa: molRes.ump2CorrelationHa,
+    basis
+  };
+}
+
 /**
  * Bonding curve of a diatomic: total energy vs internuclear distance. The bond emerges as the
  * minimum (equilibrium bond length + well), with repulsion at short R and dissociation at long R —
@@ -822,6 +1085,346 @@ export function populationAnalysis(rhfResult, atoms) {
     }
   }
   return { charges, bondOrders };
+}
+
+// ---- Analytic RHF nuclear gradients (Pulay + Hellmann-Feynman) -------------------------------
+// Exact Cartesian Gaussian center derivative:
+//   d/dA_q g(a, l, A) = 2*a*g(a, l+e_q, A) - l_q*g(a, l-e_q, A).
+function shiftL(lmn, axis, delta) {
+  const next = [lmn[0], lmn[1], lmn[2]];
+  next[axis] += delta;
+  return next;
+}
+
+function dPrimCenter(primFn, a, la, A, b, lb, B, axis, which) {
+  if (which === 0) {
+    let val = 2 * a * primFn(a, shiftL(la, axis, 1), A, b, lb, B);
+    if (la[axis] > 0) val -= la[axis] * primFn(a, shiftL(la, axis, -1), A, b, lb, B);
+    return val;
+  }
+  let val = 2 * b * primFn(a, la, A, b, shiftL(lb, axis, 1), B);
+  if (lb[axis] > 0) val -= lb[axis] * primFn(a, la, A, b, shiftL(lb, axis, -1), B);
+  return val;
+}
+
+function primitiveNuclearDerivC(a, la, A, b, lb, B, C, axis) {
+  // d/dC_q (2pi/p sum E_x E_y E_z R^0_{tuv}(P - C))
+  // Since d/dC_q = -d/d(P-C)_q and d/dPC_q R^n_{tuv} = R^n_{t+dx, u+dy, v+dz},
+  // d/dC_q <a|1/|r-C||b> = -(2pi/p) sum E_x E_y E_z R^0_{t+dx, u+dy, v+dz}.
+  const p = a + b;
+  const P = gaussianProduct(a, A, b, B);
+  const PCx = P[0] - C[0];
+  const PCy = P[1] - C[1];
+  const PCz = P[2] - C[2];
+  const RPC2 = PCx * PCx + PCy * PCy + PCz * PCz;
+  const F = boys(la[0] + la[1] + la[2] + lb[0] + lb[1] + lb[2] + 1, p * RPC2);
+  const dt = axis === 0 ? 1 : 0;
+  const du = axis === 1 ? 1 : 0;
+  const dv = axis === 2 ? 1 : 0;
+  let val = 0;
+  for (let t = 0; t <= la[0] + lb[0]; t += 1) {
+    const Ex = hermiteE(la[0], lb[0], t, A[0] - B[0], a, b);
+    for (let u = 0; u <= la[1] + lb[1]; u += 1) {
+      const Ey = hermiteE(la[1], lb[1], u, A[1] - B[1], a, b);
+      for (let v = 0; v <= la[2] + lb[2]; v += 1) {
+        const Ez = hermiteE(la[2], lb[2], v, A[2] - B[2], a, b);
+        val += Ex * Ey * Ez * hermiteR(t + dt, u + du, v + dv, 0, p, PCx, PCy, PCz, F);
+      }
+    }
+  }
+  return -(2 * Math.PI / p) * val;
+}
+
+function dPrimEriCenter(a, la, A, b, lb, B, c, lc, C, d, ld, D, axis, which) {
+  const args = [a, la, A, b, lb, B, c, lc, C, d, ld, D];
+  const expIdx = which * 3;
+  const lIdx = which * 3 + 1;
+  const alpha = args[expIdx];
+  const l = args[lIdx];
+  const up = args.slice();
+  up[lIdx] = shiftL(l, axis, 1);
+  let val = 2 * alpha * primitiveERI(...up);
+  if (l[axis] > 0) {
+    const dn = args.slice();
+    dn[lIdx] = shiftL(l, axis, -1);
+    val -= l[axis] * primitiveERI(...dn);
+  }
+  return val;
+}
+
+/**
+ * Exact analytic RHF nuclear gradient dE/dR_A (Ha/Bohr) via Pulay +
+ * Hellmann–Feynman derivative integrals (overlap, kinetic, nuclear attraction,
+ * two-electron ERI, and nuclear repulsion). Replaces 6N finite-difference SCF
+ * evaluations with a single SCF + analytic derivative contraction.
+ */
+export function rhfAnalyticGradient(atoms, options = {}) {
+  const hf = rhf(atoms, options);
+  const { nBasis: n, nOcc, C, orbitalEnergies: eps, P, basis } = hf;
+  const nAtoms = atoms.length;
+  const grad = Array.from({ length: nAtoms }, () => [0, 0, 0]);
+
+  // Energy-weighted density matrix W_uv = 2 sum_{i<nOcc} eps_i C_ui C_vi.
+  const W = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let u = 0; u < n; u += 1) {
+    for (let v = 0; v < n; v += 1) {
+      let s = 0;
+      for (let i = 0; i < nOcc; i += 1) s += eps[i] * C[u][i] * C[v][i];
+      W[u][v] = 2 * s;
+    }
+  }
+
+  // 1. Nuclear-nuclear repulsion gradient
+  for (let A = 0; A < nAtoms; A += 1) {
+    for (let B = A + 1; B < nAtoms; B += 1) {
+      const dx = atoms[A].position[0] - atoms[B].position[0];
+      const dy = atoms[A].position[1] - atoms[B].position[1];
+      const dz = atoms[A].position[2] - atoms[B].position[2];
+      const r2 = dx * dx + dy * dy + dz * dz;
+      const factor = -(atoms[A].Z * atoms[B].Z) / (r2 * Math.sqrt(r2));
+      grad[A][0] += factor * dx; grad[B][0] -= factor * dx;
+      grad[A][1] += factor * dy; grad[B][1] -= factor * dy;
+      grad[A][2] += factor * dz; grad[B][2] -= factor * dz;
+    }
+  }
+
+  // 2. One-electron overlap (Pulay -W dS), kinetic (P dT), and nuclear attraction (P dV)
+  for (let u = 0; u < n; u += 1) {
+    const fu = basis[u];
+    const atomU = fu.atomIndex;
+    for (let v = 0; v < n; v += 1) {
+      const fv = basis[v];
+      const atomV = fv.atomIndex;
+      const puv = P[u][v];
+      const wuv = W[u][v];
+      for (let axis = 0; axis < 3; axis += 1) {
+        let dS_u = 0;
+        let dT_u = 0;
+        for (let i = 0; i < fu.exps.length; i += 1) {
+          for (let j = 0; j < fv.exps.length; j += 1) {
+            const cij = fu.coeffs[i] * fv.coeffs[j];
+            dS_u += cij * dPrimCenter(primitiveOverlap, fu.exps[i], fu.lmn, fu.center, fv.exps[j], fv.lmn, fv.center, axis, 0);
+            dT_u += cij * dPrimCenter(primitiveKinetic, fu.exps[i], fu.lmn, fu.center, fv.exps[j], fv.lmn, fv.center, axis, 0);
+          }
+        }
+        // Symmetrize u/v contribution (each center differentiated once via u)
+        grad[atomU][axis] += 2 * (puv * dT_u - wuv * dS_u);
+        for (let C = 0; C < nAtoms; C += 1) {
+          const Zc = atoms[C].Z;
+          const posC = atoms[C].position;
+          let dV_u = 0;
+          let dV_c = 0;
+          for (let i = 0; i < fu.exps.length; i += 1) {
+            for (let j = 0; j < fv.exps.length; j += 1) {
+              const cij = fu.coeffs[i] * fv.coeffs[j];
+              dV_u += cij * dPrimCenter(
+                (a, la, A, b, lb, B) => primitiveNuclear(a, la, A, b, lb, B, posC),
+                fu.exps[i], fu.lmn, fu.center, fv.exps[j], fv.lmn, fv.center, axis, 0
+              );
+              dV_c += cij * primitiveNuclearDerivC(fu.exps[i], fu.lmn, fu.center, fv.exps[j], fv.lmn, fv.center, posC, axis);
+            }
+          }
+          grad[atomU][axis] += 2 * puv * (-Zc * dV_u);
+          grad[C][axis] += puv * (-Zc * dV_c);
+        }
+      }
+      void atomV;
+    }
+  }
+
+  // 3. Two-electron ERI derivative contraction:
+  //    dE_2e/dR_A = 0.5 * sum_{uvls} (P_uv P_ls - 0.5 P_ul P_vs) * d(uv|ls)/dR_A
+  //    By 4-fold symmetry of Gamma_{uvls}, differentiating only center u and multiplying by 4
+  //    (total factor 0.5 * 4 = 2.0) gives the exact derivative over all 4 centers!
+  for (let u = 0; u < n; u += 1) {
+    const fu = basis[u];
+    const atomU = fu.atomIndex;
+    for (let v = 0; v < n; v += 1) {
+      const fv = basis[v];
+      for (let l = 0; l < n; l += 1) {
+        const fl = basis[l];
+        for (let s = 0; s < n; s += 1) {
+          const gamma = P[u][v] * P[l][s] - 0.5 * P[u][l] * P[v][s];
+          if (Math.abs(gamma) < 1e-14) continue;
+          const fs = basis[s];
+          // Skip strictly 1-center 4-index block (translationally invariant sum == 0)
+          if (atomU === fv.atomIndex && atomU === fl.atomIndex && atomU === fs.atomIndex) continue;
+          for (let axis = 0; axis < 3; axis += 1) {
+            let dEriU = 0;
+            for (let i = 0; i < fu.exps.length; i += 1) {
+              for (let j = 0; j < fv.exps.length; j += 1) {
+                for (let k = 0; k < fl.exps.length; k += 1) {
+                  for (let m = 0; m < fs.exps.length; m += 1) {
+                    const c4 = fu.coeffs[i] * fv.coeffs[j] * fl.coeffs[k] * fs.coeffs[m];
+                    dEriU += c4 * dPrimEriCenter(
+                      fu.exps[i], fu.lmn, fu.center,
+                      fv.exps[j], fv.lmn, fv.center,
+                      fl.exps[k], fl.lmn, fl.center,
+                      fs.exps[m], fs.lmn, fs.center,
+                      axis, 0
+                    );
+                  }
+                }
+              }
+            }
+            grad[atomU][axis] += 2 * gamma * dEriU;
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    energyHa: hf.totalEnergyHa,
+    gradientHaPerBohr: grad,
+    maxGradHaPerBohr: Math.max(...grad.flat().map(Math.abs))
+  };
+}
+
+/**
+ * Climbing-Image Nudged Elastic Band (CI-NEB, Henkelman–Uberuaga–Jónsson 2000)
+ * transition-state and activation-barrier search on a first-principles PES.
+ * Accepts reactant & product geometries plus an energy/gradient evaluator
+ * (defaults to analytic RHF energy + gradient).
+ */
+export function climbingImageNEB(reactantAtoms, productAtoms, {
+  nImages = 7,
+  springK = 0.1,
+  maxSteps = 80,
+  forceTol = 5e-3,
+  stepSize = 0.25,
+  climbStartStep = 4,
+  basis = 'sto-3g',
+  energyAndGradient = null
+} = {}) {
+  const nAtoms = reactantAtoms.length;
+  if (nAtoms !== productAtoms.length || nImages < 3) {
+    throw new RangeError('climbingImageNEB requires matching reactant/product atom counts and nImages >= 3');
+  }
+  const Zs = reactantAtoms.map((a) => a.Z);
+  const evalEG = energyAndGradient || ((coords) => {
+    const mol = coords.map((p, i) => ({ Z: Zs[i], position: p }));
+    const res = rhfAnalyticGradient(mol, { basis });
+    return { energyHa: res.energyHa, gradient: res.gradientHaPerBohr };
+  });
+
+  // Linearly interpolate initial elastic band images (endpoints fixed).
+  const images = [];
+  for (let img = 0; img < nImages; img += 1) {
+    const f = img / (nImages - 1);
+    images.push(reactantAtoms.map((a, i) => [
+      a.position[0] + f * (productAtoms[i].position[0] - a.position[0]),
+      a.position[1] + f * (productAtoms[i].position[1] - a.position[1]),
+      a.position[2] + f * (productAtoms[i].position[2] - a.position[2])
+    ]));
+  }
+  const flatSub = (A, B) => {
+    const out = [];
+    for (let i = 0; i < nAtoms; i += 1) {
+      out.push(A[i][0] - B[i][0], A[i][1] - B[i][1], A[i][2] - B[i][2]);
+    }
+    return out;
+  };
+  const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+  const norm = (a) => Math.sqrt(dot(a, a));
+
+  let energies = images.map((coords) => evalEG(coords).energyHa);
+  let maxForce = Infinity;
+  let converged = false;
+  let stepsRun = 0;
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    stepsRun = step + 1;
+    const grads = new Array(nImages);
+    energies = new Array(nImages);
+    for (let i = 0; i < nImages; i += 1) {
+      if (i === 0 || i === nImages - 1) {
+        const res = evalEG(images[i]);
+        energies[i] = res.energyHa;
+        grads[i] = new Array(3 * nAtoms).fill(0);
+      } else {
+        const res = evalEG(images[i]);
+        energies[i] = res.energyHa;
+        grads[i] = res.gradient.flat();
+      }
+    }
+
+    let iMax = 1;
+    for (let i = 2; i < nImages - 1; i += 1) {
+      if (energies[i] > energies[iMax]) iMax = i;
+    }
+
+    const nebForces = new Array(nImages);
+    maxForce = 0;
+    for (let i = 1; i < nImages - 1; i += 1) {
+      const dPlus = flatSub(images[i + 1], images[i]);
+      const dMinus = flatSub(images[i], images[i - 1]);
+      // Henkelman-Jónsson improved upwind tangent
+      let tau;
+      if (energies[i + 1] > energies[i] && energies[i] > energies[i - 1]) {
+        tau = dPlus;
+      } else if (energies[i + 1] < energies[i] && energies[i] < energies[i - 1]) {
+        tau = dMinus;
+      } else {
+        const dEmax = Math.max(Math.abs(energies[i + 1] - energies[i]), Math.abs(energies[i - 1] - energies[i]));
+        const dEmin = Math.min(Math.abs(energies[i + 1] - energies[i]), Math.abs(energies[i - 1] - energies[i]));
+        tau = energies[i + 1] > energies[i - 1]
+          ? dPlus.map((v, k) => v * dEmax + dMinus[k] * dEmin)
+          : dPlus.map((v, k) => v * dEmin + dMinus[k] * dEmax);
+      }
+      const tauNorm = Math.max(1e-12, norm(tau));
+      const tauHat = tau.map((v) => v / tauNorm);
+      const trueForce = grads[i].map((g) => -g);
+      const fPar = dot(trueForce, tauHat);
+
+      let totalForce;
+      if (step >= climbStartStep && i === iMax) {
+        // Climbing image: invert force parallel to tangent, zero spring!
+        totalForce = trueForce.map((f, k) => f - 2 * fPar * tauHat[k]);
+      } else {
+        const fPerp = trueForce.map((f, k) => f - fPar * tauHat[k]);
+        const fSpring = springK * (norm(dPlus) - norm(dMinus));
+        totalForce = fPerp.map((f, k) => f + fSpring * tauHat[k]);
+      }
+      nebForces[i] = totalForce;
+      maxForce = Math.max(maxForce, ...totalForce.map(Math.abs));
+    }
+
+    if (maxForce < forceTol && step >= climbStartStep) {
+      converged = true;
+      break;
+    }
+
+    // Damped trust-radius update for each interior image
+    const maxDisp = 0.08;
+    for (let i = 1; i < nImages - 1; i += 1) {
+      const f = nebForces[i];
+      const fMag = Math.max(1e-12, norm(f));
+      const scale = Math.min(stepSize, maxDisp / fMag);
+      for (let a = 0; a < nAtoms; a += 1) {
+        images[i][a][0] += scale * f[a * 3];
+        images[i][a][1] += scale * f[a * 3 + 1];
+        images[i][a][2] += scale * f[a * 3 + 2];
+      }
+    }
+  }
+
+  let saddleImageIndex = 1;
+  for (let i = 2; i < nImages - 1; i += 1) {
+    if (energies[i] > energies[saddleImageIndex]) saddleImageIndex = i;
+  }
+  return {
+    images: images.map((coords) => coords.map((p, idx) => ({ Z: Zs[idx], position: [...p] }))),
+    energiesHa: energies,
+    saddleImageIndex,
+    transitionStateAtoms: images[saddleImageIndex].map((p, idx) => ({ Z: Zs[idx], position: [...p] })),
+    forwardBarrierHa: Math.max(0, energies[saddleImageIndex] - energies[0]),
+    reverseBarrierHa: Math.max(0, energies[saddleImageIndex] - energies[nImages - 1]),
+    reactionEnergyHa: energies[nImages - 1] - energies[0],
+    maxForceHaPerBohr: maxForce,
+    steps: stepsRun,
+    converged
+  };
 }
 
 // Numerical nuclear gradient dE/dR (central differences). `energyFn` maps a coordinate array

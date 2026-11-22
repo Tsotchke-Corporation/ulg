@@ -34,6 +34,73 @@ function xcPotential(rho) {
   return (xcEnergyPerVolume(rho + d) - xcEnergyPerVolume(rho - d)) / (2 * d);
 }
 
+// Perdew–Burke–Ernzerhof (PBE, Phys. Rev. Lett. 77, 3865 (1996)) GGA
+// exchange-correlation energy density f_xc = rho * (eps_x^PBE + eps_c^PBE).
+const PBE_KAPPA = 0.804;
+const PBE_MU = 0.2195149727645171;
+const PBE_GAMMA = (1 - Math.LN2) / (Math.PI * Math.PI);
+const PBE_BETA = 0.06672455060314922;
+
+export function pbeXcEnergyPerVolume(rho, gradRhoMag) {
+  if (!(rho > 1e-14)) return 0;
+  const g = Math.max(0, Math.abs(gradRhoMag));
+  const rs = wignerSeitzRadius(rho);
+  const kF = Math.cbrt(3 * Math.PI * Math.PI * rho);
+  const s = g / (2 * kF * rho);
+  const s2 = s * s;
+  const epsXLda = -0.75 * Math.cbrt(3 / Math.PI) * Math.cbrt(rho);
+  const Fx = 1 + PBE_KAPPA - PBE_KAPPA / (1 + (PBE_MU / PBE_KAPPA) * s2);
+  const epsXPbe = epsXLda * Fx;
+
+  const epsXcLda = uegEnergyPerElectronHa(rs) - kineticPerElectron(rs);
+  const epsCLda = epsXcLda - epsXLda;
+  const ks = Math.sqrt((4 * kF) / Math.PI);
+  const t = g / (2 * ks * rho);
+  const t2 = t * t;
+  const expArg = Math.min(500, -epsCLda / PBE_GAMMA);
+  const denom = Math.exp(expArg) - 1;
+  let H = 0;
+  if (denom > 1e-30 && t2 > 0) {
+    const A = (PBE_BETA / PBE_GAMMA) / denom;
+    const At2 = A * t2;
+    const ratio = (1 + At2) / (1 + At2 + At2 * At2);
+    H = PBE_GAMMA * Math.log(1 + (PBE_BETA / PBE_GAMMA) * t2 * ratio);
+  }
+  return rho * (epsXPbe + epsCLda + H);
+}
+
+// Compute the PBE GGA Kohn–Sham potential v_xc(r) = df/drho - (1/r^2) d/dr [r^2 df/d(rho')]
+// and total GGA energy density f_xc(r) on the logarithmic radial grid.
+function pbePotentialAndDensityLog(rho, r, dx) {
+  const n = r.length;
+  const { fp: rhoP } = radialDerivativesLog(rho, r, dx);
+  const fxc = new Float64Array(n);
+  const dfDrho = new Float64Array(n);
+  const r2DfDg = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const ri = rho[i];
+    const gp = rhoP[i];
+    const gAbs = Math.abs(gp);
+    if (ri <= 1e-13) continue;
+    fxc[i] = pbeXcEnergyPerVolume(ri, gAbs);
+    const dRho = ri * 1e-4 + 1e-15;
+    dfDrho[i] = (pbeXcEnergyPerVolume(ri + dRho, gAbs) - pbeXcEnergyPerVolume(Math.max(1e-16, ri - dRho), gAbs)) / (2 * dRho);
+    const dG = gAbs * 1e-4 + 1e-12;
+    const dfDgAbs = (pbeXcEnergyPerVolume(ri, gAbs + dG) - pbeXcEnergyPerVolume(ri, Math.max(0, gAbs - dG))) / (2 * dG);
+    const signG = gp >= 0 ? 1 : -1;
+    r2DfDg[i] = r[i] * r[i] * dfDgAbs * signG;
+  }
+  const { fp: divTerm } = radialDerivativesLog(r2DfDg, r, dx);
+  const vXC = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    if (rho[i] <= 1e-13) continue;
+    const vRaw = dfDrho[i] - divTerm[i] / (r[i] * r[i]);
+    // Guard extreme numerical edge points near r_min where log derivative jumps
+    vXC[i] = Number.isFinite(vRaw) ? vRaw : xcPotential(rho[i]);
+  }
+  return { vXC, fxc };
+}
+
 // Thomas algorithm for a symmetric tridiagonal system (diag a, off-diagonal b) M x = rhs.
 function solveTridiagonal(a, b, rhs) {
   const n = a.length;
@@ -352,6 +419,48 @@ export function relativisticOrbitalCorrectionHa({ u, energyHa, vFull, r, dx, l, 
   return -0.5 * a2 * mv + darwin;
 }
 
+/**
+ * First-order Koelling–Harmon/Pauli spin-orbit coupling constant ξ_{nl} (Ha)
+ * for any l >= 1 orbital:
+ *   H_SO = (α² / 2) * (1 / (r * M(r)²)) * (dV/dr) * (L · S)
+ * where M(r) = 1 + (α²/2)(ε - V(r)). Returns ξ_{nl}, fine-structure splitting
+ * ΔE_SO = (l + 1/2) ξ_{nl}, and j = l ± 1/2 sublevel energies.
+ */
+export function spinOrbitCouplingConstantHa({ u, energyHa, vElec, r, dx, l, atomicNumberZ }) {
+  if (!(l >= 1)) {
+    return Object.freeze({
+      xiHa: 0,
+      splittingHa: 0,
+      shiftJMinusHa: 0,
+      shiftJPlusHa: 0,
+      energyJMinusHa: energyHa,
+      energyJPlusHa: energyHa
+    });
+  }
+  const a2 = ALPHA_FINE * ALPHA_FINE;
+  const a2h = 0.5 * a2;
+  const { fp: vElecP } = radialDerivativesLog(vElec, r, dx);
+  let xi = 0;
+  for (let i = 0; i < r.length; i += 1) {
+    const ri = r[i];
+    const vTot = -atomicNumberZ / ri + vElec[i];
+    const vPrime = atomicNumberZ / (ri * ri) + vElecP[i];
+    const M = 1 + a2h * (energyHa - vTot);
+    // dr = r * dx, so (1/r) * u^2 * dr = u^2 * dx!
+    xi += a2h * (vPrime / (M * M)) * u[i] * u[i] * dx;
+  }
+  const shiftJPlusHa = 0.5 * l * xi;
+  const shiftJMinusHa = -0.5 * (l + 1) * xi;
+  return Object.freeze({
+    xiHa: xi,
+    splittingHa: (l + 0.5) * xi,
+    shiftJMinusHa,
+    shiftJPlusHa,
+    energyJMinusHa: energyHa + shiftJMinusHa,
+    energyJPlusHa: energyHa + shiftJPlusHa
+  });
+}
+
 // Radial derivatives of a smooth function f sampled on the log grid (r = e^x, uniform x):
 //   df/dr = (1/r) df/dx ,   d^2f/dr^2 = (1/r^2)(d^2f/dx^2 - df/dx)   (central differences).
 function radialDerivativesLog(f, r, dx) {
@@ -448,9 +557,12 @@ export function solveKohnShamAtomLog({
   mixing = 0.2,
   maxScf = 500,
   tol = 1e-7,
+  functional = 'lda',
   relativistic = false,
+  spinOrbit = false,
   returnRadialDensity = false
 }) {
+  const usePbe = String(functional || 'lda').toLowerCase() === 'pbe';
   const xMin = Math.log(rMinBohr);
   const xMax = Math.log(rMaxBohr);
   const dx = (xMax - xMin) / (gridPointsN - 1);
@@ -467,13 +579,23 @@ export function solveKohnShamAtomLog({
   let statesByL = new Map();
   let vH = new Float64Array(gridPointsN);
   let vXC = new Float64Array(gridPointsN);
+  let fxcGrid = null;
   let vEff = new Float64Array(gridPointsN);
 
   for (let scf = 0; scf < maxScf; scf += 1) {
     vH = hartreePotentialLog(rho, r, dx);
-    for (let i = 0; i < gridPointsN; i += 1) {
-      vXC[i] = xcPotential(rho[i]);
-      vEff[i] = -atomicNumberZ / r[i] + vH[i] + vXC[i];
+    if (usePbe) {
+      const pbe = pbePotentialAndDensityLog(rho, r, dx);
+      vXC = pbe.vXC;
+      fxcGrid = pbe.fxc;
+      for (let i = 0; i < gridPointsN; i += 1) {
+        vEff[i] = -atomicNumberZ / r[i] + vH[i] + vXC[i];
+      }
+    } else {
+      for (let i = 0; i < gridPointsN; i += 1) {
+        vXC[i] = xcPotential(rho[i]);
+        vEff[i] = -atomicNumberZ / r[i] + vH[i] + vXC[i];
+      }
     }
     statesByL = new Map();
     for (const [l, count] of statesPerL) statesByL.set(l, radialStatesLog(vEff, r, dx, l, count));
@@ -491,6 +613,9 @@ export function solveKohnShamAtomLog({
     if (delta < tol && scf > 8) break;
   }
 
+  const vElecFinal = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) vElecFinal[i] = vH[i] + vXC[i];
+
   let sumOcc = 0;
   let electronCount = 0;
   let relativisticCorrectionHa = 0;
@@ -506,6 +631,15 @@ export function solveKohnShamAtomLog({
       });
       relativisticCorrectionHa += sub.occupancy * orbital.relativisticShiftHa;
     }
+    if (spinOrbit && sub.l >= 1) {
+      const so = spinOrbitCouplingConstantHa({
+        u: state.u, energyHa: state.energyHa, vElec: vElecFinal, r, dx, l: sub.l, atomicNumberZ
+      });
+      orbital.spinOrbitXiHa = so.xiHa;
+      orbital.spinOrbitSplittingHa = so.splittingHa;
+      orbital.energyJMinusHa = so.energyJMinusHa;
+      orbital.energyJPlusHa = so.energyJPlusHa;
+    }
     orbitals.push(orbital);
   }
   let integratedElectrons = 0;
@@ -515,11 +649,13 @@ export function solveKohnShamAtomLog({
     const dV = 4 * Math.PI * r[i] * r[i] * r[i] * dx; // 4π r^2 dr, dr = r dx
     integratedElectrons += rho[i] * dV;
     eHartreeDouble += 0.5 * rho[i] * vH[i] * dV;
-    eXcCorrection += (xcEnergyPerVolume(rho[i]) - vXC[i] * rho[i]) * dV;
+    const fxcVal = usePbe ? fxcGrid[i] : xcEnergyPerVolume(rho[i]);
+    eXcCorrection += (fxcVal - vXC[i] * rho[i]) * dV;
   }
   const totalEnergyHa = sumOcc - eHartreeDouble + eXcCorrection;
   return {
     totalEnergyHa,
+    functional: usePbe ? 'pbe' : 'lda',
     orbitals,
     electronCount,
     integratedElectrons,
@@ -699,8 +835,11 @@ export function solveKohnShamAtomKH({
   rMaxBohr = 40,
   mixing = 0.2,
   maxScf = 500,
-  tol = 1e-7
+  tol = 1e-7,
+  functional = 'lda',
+  spinOrbit = false
 }) {
+  const usePbe = String(functional || 'lda').toLowerCase() === 'pbe';
   const xMin = Math.log(rMinBohr);
   const dx = (Math.log(rMaxBohr) - xMin) / (gridPointsN - 1);
   const r = new Float64Array(gridPointsN);
@@ -716,13 +855,21 @@ export function solveKohnShamAtomKH({
   const prevEnergies = new Map(); // per-l seed energies (warm-start the per-orbital ε iteration)
   let vH = new Float64Array(gridPointsN);
   let vXC = new Float64Array(gridPointsN);
+  let fxcGrid = null;
   const vElec = new Float64Array(gridPointsN);
 
   for (let scf = 0; scf < maxScf; scf += 1) {
     vH = hartreePotentialLog(rho, r, dx);
-    for (let i = 0; i < gridPointsN; i += 1) {
-      vXC[i] = xcPotential(rho[i]);
-      vElec[i] = vH[i] + vXC[i];
+    if (usePbe) {
+      const pbe = pbePotentialAndDensityLog(rho, r, dx);
+      vXC = pbe.vXC;
+      fxcGrid = pbe.fxc;
+      for (let i = 0; i < gridPointsN; i += 1) vElec[i] = vH[i] + vXC[i];
+    } else {
+      for (let i = 0; i < gridPointsN; i += 1) {
+        vXC[i] = xcPotential(rho[i]);
+        vElec[i] = vH[i] + vXC[i];
+      }
     }
     statesByL = new Map();
     for (const [l, count] of statesPerL) {
@@ -750,7 +897,17 @@ export function solveKohnShamAtomKH({
     const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
     sumOcc += sub.occupancy * state.energyHa;
     electronCount += sub.occupancy;
-    orbitals.push({ n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa });
+    const orbital = { n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa };
+    if (spinOrbit && sub.l >= 1) {
+      const so = spinOrbitCouplingConstantHa({
+        u: state.u, energyHa: state.energyHa, vElec, r, dx, l: sub.l, atomicNumberZ
+      });
+      orbital.spinOrbitXiHa = so.xiHa;
+      orbital.spinOrbitSplittingHa = so.splittingHa;
+      orbital.energyJMinusHa = so.energyJMinusHa;
+      orbital.energyJPlusHa = so.energyJPlusHa;
+    }
+    orbitals.push(orbital);
   }
   let integratedElectrons = 0;
   let eHartreeDouble = 0;
@@ -759,15 +916,17 @@ export function solveKohnShamAtomKH({
     const dV = 4 * Math.PI * r[i] * r[i] * r[i] * dx;
     integratedElectrons += rho[i] * dV;
     eHartreeDouble += 0.5 * rho[i] * vH[i] * dV;
-    eXcCorrection += (xcEnergyPerVolume(rho[i]) - vXC[i] * rho[i]) * dV;
+    const fxcVal = usePbe ? fxcGrid[i] : xcEnergyPerVolume(rho[i]);
+    eXcCorrection += (fxcVal - vXC[i] * rho[i]) * dV;
   }
   return {
     totalEnergyHa: sumOcc - eHartreeDouble + eXcCorrection,
+    functional: usePbe ? 'pbe' : 'lda',
     orbitals,
     electronCount,
     integratedElectrons,
     atomicNumberZ,
-    relativisticMethod: 'koelling-harmon'
+    relativisticMethod: spinOrbit ? 'koelling-harmon+spin-orbit' : 'koelling-harmon'
   };
 }
 

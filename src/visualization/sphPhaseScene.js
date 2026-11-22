@@ -54290,6 +54290,10 @@ fn main(
           // must abandon this lane instead of attempting a delayed retry.
           workerScheduleDispatched = true;
           workerLanePageTiming.scheduleDispatchPostedAtMs = nowMs();
+          const pendingTriadAdoptions = Array.isArray(laneState.pendingTriadClosureAdoptions)
+            && laneState.pendingTriadClosureAdoptions.length > 0
+            ? laneState.pendingTriadClosureAdoptions.splice(0, laneState.pendingTriadClosureAdoptions.length)
+            : null;
           bridge.runResidentScheduleOnPresentationDevice({
             id: scheduleId,
             reason: 'schroeder-worker-lane-schedule',
@@ -54298,6 +54302,7 @@ fn main(
               schedule: {
                 scheduleId,
                 thermalPotentialAcknowledgement,
+                ...(pendingTriadAdoptions ? { triadClosureAdoptions: pendingTriadAdoptions } : {}),
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
                 targetScheduleAuthority:
@@ -54535,6 +54540,10 @@ fn main(
         if (workerArchStatus.a5Solid) {
           globalThis.__ulgA5SolidStatus = workerArchStatus.a5Solid;
         }
+        if (workerArchStatus.triadA4) {
+          scene.userData.sphTriadA4ClosureStatus = workerArchStatus.triadA4;
+          globalThis.__ulgTriadA4ClosureStatus = workerArchStatus.triadA4;
+        }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished
       // background Eshkol/MoonLab derivations at this schedule boundary and
@@ -54573,7 +54582,15 @@ fn main(
         if (activePeerRequester && laneState.a6Bridge.getStatus().remoteDebtCount > 0) {
           laneState.a6Bridge.retryRemoteDebt?.({ scheduleId });
         }
-        laneState.a6Bridge.adoptPendingAtScheduleBoundary({ scheduleId });
+        const a6Adoption = laneState.a6Bridge.adoptPendingAtScheduleBoundary({ scheduleId });
+        if (a6Adoption?.adoptedTriadBundles?.length > 0) {
+          laneState.pendingTriadClosureAdoptions ??= [];
+          for (const bundle of a6Adoption.adoptedTriadBundles) {
+            if (bundle?.materialKey && bundle?.packedData) {
+              laneState.pendingTriadClosureAdoptions.push(bundle);
+            }
+          }
+        }
         const missNeeded = committedThermalPotential?.status === 'no-valid-fit'
           || (committedThermalPotential && !committedThermalPotential.adopted)
           || (laneState.a6Bridge.getStatus().stats.dispatched === 0
@@ -54591,6 +54608,55 @@ fn main(
               scheduleId
             });
             break;
+          }
+        }
+        // Dispatch non-blocking MoonLab + Eshkol Triad 5-slot closure synthesis
+        // (Helmholtz a(T,v), Solid Psi(J,T), Transport k/mu/D) for active scene
+        // materials not yet adopted on this lane (bounded to 2 dispatches per
+        // schedule so cold synthesis never bursts or stalls physics).
+        if (currentMaterialProperties && typeof currentMaterialProperties === 'object') {
+          laneState.triadRequestedMaterials ??= new Set();
+          let dispatchedTriadThisSchedule = 0;
+          for (const [matKey, props] of Object.entries(currentMaterialProperties)) {
+            if (dispatchedTriadThisSchedule >= 2) break;
+            if (laneState.triadRequestedMaterials.has(matKey)) continue;
+            const molarMassKgPerMol = Number(props?.molarMassKgPerMol);
+            const phases = Array.isArray(props?.phases) ? props.phases : [];
+            const refPhase = phases.find((p) => p?.name === 'solid' && Number(p?.densityKgPerM3) > 0)
+              ?? phases.find((p) => p?.name === 'liquid' && Number(p?.densityKgPerM3) > 0)
+              ?? phases.find((p) => Number(p?.densityKgPerM3) > 0);
+            const refDensityKgPerM3 = Number(refPhase?.densityKgPerM3);
+            if (!(molarMassKgPerMol > 0) || !(refDensityKgPerM3 > 0)) continue;
+            const atomsPerFormula = Math.max(1, Number(props?.atomsPerFormula) || 1);
+            const meltTemperatureK = Number(props?.meltingPointK ?? props?.meltTemperatureK) > 20
+              ? Number(props.meltingPointK ?? props.meltTemperatureK)
+              : 1000;
+            const debyeTemperatureK = Number(props?.debyeTemperatureK) > 20
+              ? Number(props.debyeTemperatureK)
+              : Math.max(80, Math.min(1200, meltTemperatureK * 0.35));
+            const cohesiveEnergyEvPerAtom = Number(props?.cohesiveEnergyEvPerAtom) > 0.05
+              ? Number(props.cohesiveEnergyEvPerAtom)
+              : Math.max(0.25, Math.min(12, meltTemperatureK * 0.0028));
+            const molecularDiameterM = Number(props?.molecularDiameterM) > 1e-11
+              ? Number(props.molecularDiameterM)
+              : Math.max(2.0e-10, Math.min(8.0e-10, Math.cbrt(molarMassKgPerMol / (6.02214076e23 * refDensityKgPerM3))));
+            laneState.triadRequestedMaterials.add(matKey);
+            laneState.a6Bridge.requestTriadClosureSynthesisMiss({
+              missKey: `scene-triad:${matKey}`,
+              material: matKey,
+              molarMassKgPerMol,
+              atomsPerFormula,
+              cohesiveEnergyEvPerAtom,
+              debyeTemperatureK,
+              molecularDiameterM,
+              refDensityKgPerM3,
+              meltTemperatureK,
+              temperatureRangeK: [200, Math.max(1200, Math.min(3500, meltTemperatureK * 1.8))],
+              qubits: 4,
+              runQuantumProbe: true,
+              scheduleId
+            });
+            dispatchedTriadThisSchedule += 1;
           }
         }
         const a6Status = laneState.a6Bridge.getStatus();

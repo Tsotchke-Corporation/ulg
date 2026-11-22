@@ -300,6 +300,16 @@ async function sampleAndFit2D({
   });
 }
 
+function adaptiveTemperatureDegree(temperatureRangeK, baseDegree = 10, maxDegree = 22) {
+  const lo = Math.max(1e-6, Number(temperatureRangeK?.[0]) || 200);
+  const hi = Math.max(lo * 1.01, Number(temperatureRangeK?.[1]) || 1200);
+  const ratio = hi / lo;
+  if (ratio > 10) return Math.min(maxDegree, Math.max(baseDegree, 20));
+  if (ratio > 5) return Math.min(maxDegree, Math.max(baseDegree, 16));
+  if (ratio > 2.5) return Math.min(maxDegree, Math.max(baseDegree, 14));
+  return baseDegree;
+}
+
 export async function deriveEshkolHelmholtzPotentialClosure({
   sample = null,
   material = 'generic',
@@ -311,9 +321,12 @@ export async function deriveEshkolHelmholtzPotentialClosure({
   refInternalEnergyJPerKg = 0,
   temperatureRangeK = [240, 600],
   specificVolumeRangeM3PerKg = [0.92e-3, 1.08e-3],
-  degrees = [14, 8],
+  degrees = null,
   relativeTolerance = 1e-5
 } = {}) {
+  const resolvedDegrees = Array.isArray(degrees)
+    ? degrees
+    : [adaptiveTemperatureDegree(temperatureRangeK, 14, 22), 8];
   const program = eshkolHelmholtzProgram({
     material,
     cvJPerKgK,
@@ -339,7 +352,7 @@ export async function deriveEshkolHelmholtzPotentialClosure({
       [Number(temperatureRangeK[0]), Number(temperatureRangeK[1])],
       [Number(specificVolumeRangeM3PerKg[0]), Number(specificVolumeRangeM3PerKg[1])]
     ],
-    degrees,
+    degrees: resolvedDegrees,
     relativeTolerance
   });
   return Object.freeze({
@@ -414,9 +427,12 @@ export async function deriveEshkolTransportClosures({
   enskogDensityCoeff = 0.12,
   temperatureRangeK = [220, 1200],
   densityRangeKgPerM3 = [0.4, 4.0],
-  degrees = [10, 4],
+  degrees = null,
   relativeTolerance = 1e-5
 } = {}) {
+  const tDeg = adaptiveTemperatureDegree(temperatureRangeK, 14, 24);
+  const resolvedDegrees = Array.isArray(degrees) ? degrees : [tDeg, 6];
+  const resolvedDiffusivityDegrees = Array.isArray(degrees) ? [degrees[0], Math.max(24, degrees[1])] : [tDeg, 24];
   const program = eshkolTransportPrograms({
     material,
     refTemperatureK,
@@ -445,7 +461,7 @@ export async function deriveEshkolTransportClosures({
     axes,
     outputUnit: 'W/(m*K)',
     box,
-    degrees,
+    degrees: resolvedDegrees,
     signs: [1, 1],
     relativeTolerance
   });
@@ -459,7 +475,7 @@ export async function deriveEshkolTransportClosures({
     axes,
     outputUnit: 'Pa*s',
     box,
-    degrees,
+    degrees: resolvedDegrees,
     signs: [1, 1],
     relativeTolerance
   });
@@ -473,7 +489,7 @@ export async function deriveEshkolTransportClosures({
     axes,
     outputUnit: 'm^2/s',
     box,
-    degrees: [10, 20],
+    degrees: resolvedDiffusivityDegrees,
     signs: [1, -1],
     relativeTolerance
   });

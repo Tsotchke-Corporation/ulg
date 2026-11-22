@@ -915,7 +915,7 @@ test('native segmented reaction-product placement matches its CPU oracle and rem
           1, 0, 1, 0.01,
           0, 0, 2, 0.01
         ]);
-        const paramsBytes = new ArrayBuffer(48);
+        const paramsBytes = new ArrayBuffer(64);
         const paramsWords = new Uint32Array(paramsBytes);
         const paramsFloats = new Float32Array(paramsBytes);
         paramsWords.set([

@@ -610,6 +610,7 @@ export function createWarmClosureMissBridge({
         const entry = Object.freeze({
           kind: 'triad-synthesis',
           missKey: key,
+          material: String(material),
           scheduleId,
           epoch: reqEpoch,
           sourceIdentity: reqSource,
@@ -753,12 +754,14 @@ export function createWarmClosureMissBridge({
       return Object.freeze({
         adoptedCount: 0,
         adoptedKeys: Object.freeze([]),
+        adoptedTriadBundles: Object.freeze([]),
         activeOrdinal,
         status: statusSnapshot()
       });
     }
     const batch = pendingAdoptions.splice(0, pendingAdoptions.length);
     const adoptedKeys = [];
+    const adoptedTriadBundles = [];
     for (const entry of batch) {
       if (entry.sourceIdentity !== currentSourceIdentity || entry.epoch !== bridgeEpoch) {
         stats.staleRejected += 1;
@@ -790,6 +793,17 @@ export function createWarmClosureMissBridge({
         } else {
           activeOrdinal += 1;
         }
+        adoptedTriadBundles.push(Object.freeze({
+          missKey: entry.missKey,
+          materialKey: entry.material ?? entry.synthesized?.material ?? null,
+          packedData: entry.packedGpuTable.data instanceof Float32Array
+            ? entry.packedGpuTable.data.slice()
+            : null,
+          sourceFingerprint: entry.sourceFingerprint ?? null,
+          g6DebyeSamples: Array.isArray(entry.g6DebyeSamples)
+            ? entry.g6DebyeSamples.map((s) => ({ u: s.u, temperatureK: s.temperatureK }))
+            : null
+        }));
       } else {
         activeOrdinal += 1;
       }
@@ -817,6 +831,7 @@ export function createWarmClosureMissBridge({
     return Object.freeze({
       adoptedCount: adoptedKeys.length,
       adoptedKeys: Object.freeze(adoptedKeys),
+      adoptedTriadBundles: Object.freeze(adoptedTriadBundles),
       activeOrdinal,
       status
     });

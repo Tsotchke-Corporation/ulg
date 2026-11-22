@@ -238,15 +238,17 @@ export async function synthesizeMoonlabFirstPrinciplesClosures({
     specificVolumeRangeM3PerKg: [0.92 * v0, 1.08 * v0]
   });
 
+  const solidTHi = Math.max(10, Math.min(params.meltTemperatureK * 0.9, temperatureRangeK[1]));
+  const solidTLo = Math.max(4, Math.min(200, temperatureRangeK[0], solidTHi * 0.4));
   const solidHyperelastic = await deriveEshkolSolidHyperelasticClosure({
     sample: eshkolSample,
     material: params.material,
     lameLambda0Pa: params.lameLambda0Pa,
     lameMu0Pa: params.lameMu0Pa,
     thermalExpansionPerK: params.thermalExpansionPerK,
-    refTemperatureK: 300,
+    refTemperatureK: Math.min(300, Math.max(solidTLo, solidTHi * 0.8)),
     meltTemperatureK: params.meltTemperatureK,
-    temperatureRangeK: [Math.min(200, temperatureRangeK[0]), Math.min(params.meltTemperatureK * 0.9, temperatureRangeK[1])]
+    temperatureRangeK: [solidTLo, solidTHi]
   });
 
   const transport = await deriveEshkolTransportClosures({
@@ -267,11 +269,13 @@ export async function synthesizeMoonlabFirstPrinciplesClosures({
     transport
   });
 
+  const g6THi = Math.max(12, Math.min(params.meltTemperatureK, temperatureRangeK[1]));
+  const g6TLo = Math.max(4, Math.min(60, temperatureRangeK[0] * 0.5, g6THi * 0.4));
   const g6DebyeSamples = buildDebyeG6CaloricSamples({
     dulongPetitCvJPerKgK: params.dulongPetitCvJPerKgK,
     debyeTemperatureK: params.debyeTemperatureK,
-    tMinK: Math.max(60, temperatureRangeK[0] * 0.5),
-    tMaxK: Math.min(params.meltTemperatureK, temperatureRangeK[1]),
+    tMinK: g6TLo,
+    tMaxK: g6THi,
     sampleCount: g6SampleCount
   });
 

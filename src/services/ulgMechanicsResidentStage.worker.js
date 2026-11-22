@@ -10,6 +10,10 @@ import { thermalPotentialWorkerSourceKey } from '../runtime/material/thermalPote
 import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../runtime/sph/lawActivationReceiptRing.js';
 import { normalizeSphImplicitPressureOptions } from '../runtime/sph/sphImplicitPressureGpu.js';
 import { encodeSphThermalRegionalClosureScheduleTick } from '../runtime/sph/sphThermalRegionalClosureGpu.js';
+import {
+  getTriadClosureDeviceStatus,
+  registerTriadClosureBundleOnDevice
+} from '../runtime/material/triadClosureGpuRegistry.js';
 import { armSphPassTimestampCensus } from '../runtime/sph/sphPassTimestampCensus.js';
 import { createSchroederWorkerHierarchyConfig } from '../runtime/sph/schroederWorkerLaneControlPlane.js';
 import {
@@ -12279,6 +12283,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         });
     }
     try {
+      if (
+        record.workerDevice
+        && Array.isArray(schedule.triadClosureAdoptions)
+        && schedule.triadClosureAdoptions.length > 0
+      ) {
+        for (const adoption of schedule.triadClosureAdoptions) {
+          try {
+            registerTriadClosureBundleOnDevice(record.workerDevice, adoption);
+          } catch {
+            // Keep individual Triad bundle adoption isolated from schedule admission.
+          }
+        }
+      }
       if (tier0RouteSelected) {
         tier0ExecutionAttempted = true;
         scheduleGpuWorkMayHaveBeenSubmitted = true;
@@ -15530,6 +15547,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         a4GasResponse: globalThis.__ulgA4GasResponseStatus
           ? { ...globalThis.__ulgA4GasResponseStatus }
           : null,
+        triadA4: record.workerDevice
+          ? getTriadClosureDeviceStatus(record.workerDevice)
+          : (globalThis.__ulgTriadA4ClosureStatus ? { ...globalThis.__ulgTriadA4ClosureStatus } : null),
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

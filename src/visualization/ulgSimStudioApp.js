@@ -512,6 +512,10 @@ export function mountUlgSimStudioApp({
         if (a4) {
           archLines.push(`A4 2-D gas closures: ${a4.functionCount ?? 0} fns / ${a4.materialCount ?? 0} mats (gpu=${Boolean(a4.gpuTableUploaded)})`);
         }
+        const triadA4 = globalThis.__ulgTriadA4ClosureStatus;
+        if (triadA4 && triadA4.active) {
+          archLines.push(`Triad A4 GPU envelopes: gen=${triadA4.generation ?? 0} fns=${triadA4.functionCount ?? 0} triadMats=${triadA4.triadMaterialCount ?? 0} gasMats=${triadA4.gasMaterialCount ?? 0}`);
+        }
         const a5 = globalThis.__ulgA5SolidStatus;
         if (a5) {
           archLines.push(`A5 solids: rigid=${a5.rigidBodyCount ?? 0} deformable=${a5.sol4DeformableSurfaceCount ?? 0} sol5=${Boolean(a5.sol5FractureActive)} sol6=${Boolean(a5.sol6MultilevelActive)}`);

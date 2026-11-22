@@ -6,6 +6,11 @@ import {
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { createSphExactMechanicsRefreshWgsl } from './sphExactMechanicsRefreshWgsl.js';
 import { prepareSphExactMechanicsRefresh } from './sphExactMechanicsRefreshGpu.js';
+import {
+  getTriadClosureGpuBinding,
+  registerGasResponseTableOnDevice,
+  triadClosureMechanicsRefreshWgsl
+} from '../material/triadClosureGpuRegistry.js';
 import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
@@ -426,6 +431,14 @@ export function uploadMlsMpmMechanicsMaterialPhaseRecords(device, mechanicsMater
       gpuTableUploaded: true,
       gpuTableBytes: a4GasTableData.byteLength
     });
+    try {
+      registerGasResponseTableOnDevice(device, {
+        a4GasResponseTable: mechanicsMaterialTable.a4GasResponseTable,
+        a4GasResponseByMaterial: mechanicsMaterialTable.a4GasResponseByMaterial
+      });
+    } catch {
+      // Keep registry seeding isolated from minimal mock devices in host tests.
+    }
   }
   let destroyed = false;
   return {
@@ -943,10 +956,38 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     0,
     new Uint32Array([0])
   );
-  const refreshCode = exact ? createSphExactMechanicsRefreshWgsl() : mlsMpmMechanicsRefreshWgsl;
-  const extraBindings = exact ? [computeBufferBinding(8, 'read-only-storage')] : [];
+  const baseRefreshCode = exact ? createSphExactMechanicsRefreshWgsl() : mlsMpmMechanicsRefreshWgsl;
+  const triadBinding = getTriadClosureGpuBinding(device);
+  const requiredTriadStorageSlots = exact ? 11 : 10;
+  const useTriadEnvelopes = Boolean(
+    triadBinding.active
+    && typeof device?.limits?.maxStorageBuffersPerShaderStage === 'number'
+    && device.limits.maxStorageBuffersPerShaderStage >= requiredTriadStorageSlots
+  );
+  const refreshCode = useTriadEnvelopes
+    ? baseRefreshCode
+        .replace(
+          'fn material_bank_warm_input_anchor()',
+          `${triadClosureMechanicsRefreshWgsl()}\n\nfn material_bank_warm_input_anchor()`
+        )
+        .replace(
+          '  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    phase_mechanics.solid,\n    phase_mechanics.status,\n    phase_mechanics.bulk,\n    phase_mechanics.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    phase_mechanics.lambda,\n    phase_mechanics.sound_speed,\n    phase_mechanics.eos_model,\n    phase_mechanics.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    phase_mechanics.dynamic_viscosity,\n    phase_mechanics.surface_tension,\n    row7.w\n  );',
+          '  let resolved_pm = apply_triad_a4_mechanics_envelopes(\n    thermo0.x,\n    thermo0.z,\n    state0.w / current_volume,\n    next_volume_ratio_j,\n    phase_mechanics\n  );\n  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    resolved_pm.solid,\n    resolved_pm.status,\n    resolved_pm.bulk,\n    resolved_pm.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    resolved_pm.lambda,\n    resolved_pm.sound_speed,\n    resolved_pm.eos_model,\n    resolved_pm.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    resolved_pm.dynamic_viscosity,\n    resolved_pm.surface_tension,\n    row7.w\n  );'
+        )
+    : baseRefreshCode;
+  const extraBindings = [
+    ...(exact ? [computeBufferBinding(8, 'read-only-storage')] : []),
+    ...(useTriadEnvelopes
+      ? [
+          computeBufferBinding(9, 'read-only-storage'),
+          computeBufferBinding(10, 'read-only-storage'),
+          computeBufferBinding(11, 'storage')
+        ]
+      : [])
+  ];
+  const triadCacheSuffix = useTriadEnvelopes ? '-triad-a4-v1' : '';
   const refreshPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}`,
+    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}${triadCacheSuffix}`,
     label: 'ulg-mls-mpm-mechanics-refresh',
     code: refreshCode,
     entryPoint: 'main',
@@ -963,7 +1004,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     ]
   });
   const commitPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-commit${exact ? '-exact-quantities-v1' : ''}`,
+    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-commit${exact ? '-exact-quantities-v1' : ''}${triadCacheSuffix}`,
     label: 'ulg-mls-mpm-mechanics-refresh-commit',
     code: refreshCode,
     entryPoint: 'commit_or_restore',
@@ -988,7 +1029,14 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     { binding: 5, resource: { buffer: paramsBuffer } },
     { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } },
     { binding: 7, resource: { buffer: authorityValidationBuffer } },
-    ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : [])
+    ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : []),
+    ...(useTriadEnvelopes
+      ? [
+          { binding: 9, resource: { buffer: triadBinding.tableBuffer } },
+          { binding: 10, resource: { buffer: triadBinding.materialMapBuffer } },
+          { binding: 11, resource: { buffer: triadBinding.receiptBuffer } }
+        ]
+      : [])
   ];
   exact?.bind(authorityValidationBuffer);
   const bindGroup = createCachedExplicitBindGroup(device, {

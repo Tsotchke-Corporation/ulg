@@ -1,6 +1,9 @@
 import * as THREE from 'three/webgpu';
+import * as TSL from 'three/tsl';
 import { createUlgTaskCapsule, ULG_SERVICE_IDS, ULG_TASK_KINDS } from '../../ulg-gpu-abi/src/serviceContract.js';
 import { createSimulationModuleRegistry } from '../runtime/simulationModuleRegistry.js';
+import { createZeroCopyResidentBodyPresenter } from '../runtime/residentGpuPresenter.js';
+import { createMaterialResolverPipeline } from '../runtime/material/materialResolverPipeline.js';
 import {
   QUANTUM_DERIVATION_GENERATOR_FINGERPRINT,
   buildAtomicRadialDensityArtifact,
@@ -16,9 +19,11 @@ import {
   COSMIC_QUANTUM_SCALE_REGIMES,
   createCosmicQuantumScaleBridge
 } from '../runtime/sph/cosmicQuantumScaleBridge.js';
+import { runSchroederScaleAtlasMultipoleWebGpu } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
 import {
   createCosmicWebBodies,
   createGalacticBodies,
+  createResidentBarnesHutNBodyEngine,
   createResidentCosmicModuleRegistration,
   createResidentTiledNBodyEngine
 } from './cosmicQuantumGpuKernels.js';
@@ -26,15 +31,18 @@ import {
 const HA_TO_EV = 27.211386245988;
 
 const ATOMIC_CHOICES = Object.freeze([
-  { Z: 1, label: 'H (Z=1)' },
-  { Z: 6, label: 'C (Z=6)' },
-  { Z: 7, label: 'N (Z=7)' },
-  { Z: 8, label: 'O (Z=8)' },
-  { Z: 10, label: 'Ne (Z=10)' },
-  { Z: 11, label: 'Na (Z=11)' },
-  { Z: 26, label: 'Fe (Z=26)' },
-  { Z: 55, label: 'Cs (Z=55)' },
-  { Z: 79, label: 'Au (Z=79)' }
+  { Z: 80, label: 'Hg (Z=80 · Liquid Metal)' },
+  { Z: 79, label: 'Au (Z=79 · Gold)' },
+  { Z: 47, label: 'Ag (Z=47 · Silver)' },
+  { Z: 29, label: 'Cu (Z=29 · Copper)' },
+  { Z: 26, label: 'Fe (Z=26 · Iron)' },
+  { Z: 35, label: 'Br (Z=35 · Liquid Halogen)' },
+  { Z: 31, label: 'Ga (Z=31 · Gallium)' },
+  { Z: 17, label: 'Cl (Z=17 · Gas)' },
+  { Z: 11, label: 'Na (Z=11 · Sodium)' },
+  { Z: 10, label: 'Ne (Z=10 · Neon)' },
+  { Z: 6, label: 'C (Z=6 · Carbon)' },
+  { Z: 1, label: 'H (Z=1 · Hydrogen)' }
 ]);
 
 const MOLECULAR_PRESETS = Object.freeze({
@@ -73,6 +81,12 @@ const MOLECULAR_PRESETS = Object.freeze({
   }
 });
 
+const GALAXY_TIERS = Object.freeze({
+  '4k-direct': { id: '4k-direct', label: '4K Direct', count: 4096, mode: 'direct' },
+  '32k-bh': { id: '32k-bh', label: '32K BH Octree', count: 32768, mode: 'barnes-hut' },
+  '65k-bh': { id: '65k-bh', label: '65K BH Octree', count: 65536, mode: 'barnes-hut' }
+});
+
 const REGIME_CENTERS_LOG10 = Object.freeze({
   'atomic-orbital': -10.5,
   'molecular-lattice': -8.8,
@@ -90,9 +104,14 @@ const CPK_COLORS = Object.freeze({
   9: 0x34d399,
   10: 0x38bdf8,
   11: 0xa855f7,
+  17: 0x84cc16,
   26: 0xf59e0b,
-  55: 0xfbbf24,
-  79: 0xfacc15
+  29: 0xd97746,
+  31: 0x94a3b8,
+  35: 0xb91c1c,
+  47: 0xe2e8f0,
+  79: 0xfacc15,
+  80: 0xdbeafe
 });
 
 function formatPhysicalSpan(spanM) {
@@ -149,16 +168,11 @@ function createStarfieldBackdrop() {
     const s = Math.sqrt(Math.max(0, 1 - u * u));
     const R = 150 + rnd() * 90;
     dummy.position.set(R * s * Math.cos(th), R * u, R * s * Math.sin(th));
-    const sc = 0.45 + rnd() * 0.95;
-    dummy.scale.setScalar(sc);
+    dummy.scale.setScalar(0.45 + rnd() * 0.95);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
     const tint = rnd();
-    color.setRGB(
-      tint > 0.72 ? 0.95 : 0.68,
-      tint > 0.35 ? 0.88 : 0.74,
-      1.0
-    );
+    color.setRGB(tint > 0.72 ? 0.95 : 0.68, tint > 0.35 ? 0.88 : 0.74, 1.0);
     mesh.setColorAt(i, color);
   }
   mesh.instanceMatrix.needsUpdate = true;
@@ -201,10 +215,11 @@ function createSoftGlowSprite(spriteTex, colorHex, scale, opacity = 0.88) {
 
 /**
  * Mount the standalone 38+ OOM Cosmic ↔ Quantum Continuous-Zoom PeerCompute
- * Demo onto `container`. Shares ULG's `SimulationModuleRegistry`,
- * `ResidentModuleBufferSession`, `SchroederScaleAtlas` bridge, first-principles
- * Schrödinger DFT / 6-31G(d) HF / QHA / Eshkol A4 derivation stack, and
- * `THREE.WebGPURenderer` on a single WebGPU `GPUDevice`.
+ * Demo onto `container`. Features:
+ *   - Shared-device `THREE.WebGPURenderer` + Zero-Copy Resident `GPUBuffer` presenter (`0` bytes/frame CPU readback)
+ *   - Hierarchical WebGPU Barnes-Hut Octree N-body scaling to 32K-65K+ stars (`eshkols-in-space` ABI)
+ *   - Relativistic PBE+KH+SO Quantum -> Continuum live material propagation (liquid Hg, Br, Au, Cu, Ag, Fe, Cl)
+ *   - Live GPU cross-chart multipole coupling (`runSchroederScaleAtlasMultipoleWebGpu`) across Planetary/Galactic/Cosmic charts
  */
 export async function mountCosmicQuantumZoomDemo(container) {
   const root = document.createElement('div');
@@ -225,7 +240,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
   canvasHost.style.cssText = 'position:absolute;inset:0;';
   root.appendChild(canvasHost);
 
-  // Parse initial URL overrides (?scale=-10.5 or ?regime=galactic-nbody&tour=0)
+  // Parse initial URL overrides (?scale=-10.5 or ?regime=galactic-nbody&tier=32k-bh&Z=80)
   const urlParams = new URLSearchParams(window.location.search);
   const rawScaleParam = urlParams.get('scale');
   const parsedScaleParam = rawScaleParam !== null && rawScaleParam.trim() !== '' ? Number(rawScaleParam) : Number.NaN;
@@ -234,20 +249,20 @@ export async function mountCosmicQuantumZoomDemo(container) {
     : REGIME_CENTERS_LOG10[urlParams.get('regime')] ?? REGIME_CENTERS_LOG10['galactic-nbody'];
   let currentLog10 = targetLog10;
 
-  let selectedElementZ = Number.parseInt(urlParams.get('Z') || '10', 10) || 10;
+  let selectedElementZ = Number.parseInt(urlParams.get('Z') || '80', 10) || 80; // Default Hg (Z=80) showcasing relativistic liquid metal!
   let selectedFunctional = urlParams.get('functional') === 'lda' ? 'lda' : 'pbe';
   let selectedMoleculeKey = MOLECULAR_PRESETS[urlParams.get('molecule')] ? urlParams.get('molecule') : 'H2O';
   let selectedBasis = urlParams.get('basis') === '6-31g(d)' ? '6-31g(d)' : 'sto-3g';
-  let molecularViewMode = 'density'; // 'density' | 'homo' | 'lumo'
+  let molecularViewMode = 'density';
   let galaxyPreset = ['disk', 'binary', 'sphere'].includes(urlParams.get('galaxy')) ? urlParams.get('galaxy') : 'disk';
   let simRunning = urlParams.get('paused') !== '1';
   let tourRunning = urlParams.get('tour') === '1';
   let tourDirection = -1;
-  let galaxyGravity = 1.0;
-  let galaxyDt = 0.012;
-  let hubbleExpansionSpeed = 0.14;
+  const galaxyGravity = 1.0;
+  const galaxyDt = 0.011;
+  const hubbleExpansionSpeed = 0.14;
 
-  // Acquire shared WebGPU GPUDevice for tiled N-body, ΛCDM cosmic web, 3D molecular density, AND WebGPURenderer!
+  // Acquire shared WebGPU GPUDevice
   let gpuDevice = null;
   let gpuAdapterName = 'CPU fallback (WebGPU unavailable)';
   try {
@@ -260,15 +275,16 @@ export async function mountCosmicQuantumZoomDemo(container) {
     gpuDevice = null;
   }
 
-  // Prefer Three.js WebGPURenderer bound to the exact same GPUDevice; gracefully fall back to WebGLRenderer.
+  let galaxyTierId = GALAXY_TIERS[urlParams.get('tier')]
+    ? urlParams.get('tier')
+    : (gpuDevice ? '32k-bh' : '4k-direct');
+
+  // Shared-device Three.js WebGPURenderer (with WebGL fallback)
   let renderer = null;
   let rendererBackend = 'three-webgl';
   if (gpuDevice && typeof THREE.WebGPURenderer === 'function') {
     try {
-      const wgRenderer = new THREE.WebGPURenderer({
-        antialias: true,
-        device: gpuDevice
-      });
+      const wgRenderer = new THREE.WebGPURenderer({ antialias: true, device: gpuDevice });
       wgRenderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
       wgRenderer.setSize(window.innerWidth, window.innerHeight);
       wgRenderer.setClearColor(0x040811, 1);
@@ -293,15 +309,18 @@ export async function mountCosmicQuantumZoomDemo(container) {
   }
   canvasHost.appendChild(renderer.domElement);
 
-  // Register live simulation modules on ULG's SimulationModuleRegistry + Cosmic-to-Quantum Scale Bridge.
+  const zeroCopyActive = Boolean(gpuDevice && renderer.isWebGPURenderer);
+
+  // Content-addressed relativistic material resolver pipeline (Milestone 1)
+  const materialPipeline = createMaterialResolverPipeline();
+  let currentElementResolution = null;
+
+  // Simulation module registry + Cosmic-to-Quantum Scale Bridge
   const moduleRegistry = createSimulationModuleRegistry();
-  const galacticBodies0 = createGalacticBodies({ count: 4096, preset: galaxyPreset, seed: 825 });
-  const galacticEngine = createResidentTiledNBodyEngine({
-    device: gpuDevice,
-    initialBodies: galacticBodies0,
-    mode: 0,
-    label: 'ulg-galactic-nbody'
-  });
+  moduleRegistry.registerModule(createQuantumDerivationSimulationModule());
+
+  let galacticEngine = null;
+  let galacticPresenter = null;
   const cosmicWebBodies0 = createCosmicWebBodies({ count: 3072, seed: 1370 });
   const cosmicWebEngine = createResidentTiledNBodyEngine({
     device: gpuDevice,
@@ -309,19 +328,12 @@ export async function mountCosmicQuantumZoomDemo(container) {
     mode: 1,
     label: 'ulg-cosmic-web-lcdm'
   });
-
-  moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
-    method: { model: 'nbody-gravity', version: 1 },
-    engine: galacticEngine,
-    scaleRangeM: [1e6, 1e22]
-  }));
   moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
     method: { model: 'cosmology-comoving-nbody', version: 1 },
     engine: cosmicWebEngine,
-    scaleRangeM: [1e22, 1e28]
+    scaleRangeM: [1e22, 1e28],
+    zeroCopy: zeroCopyActive
   }));
-  moduleRegistry.registerModule(createQuantumDerivationSimulationModule());
-  const scaleBridge = createCosmicQuantumScaleBridge({ moduleRegistry });
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.01, 600);
@@ -329,18 +341,16 @@ export async function mountCosmicQuantumZoomDemo(container) {
   let camPitch = 0.62;
   const camRadius = 15.5;
 
-  const ambientLight = new THREE.AmbientLight(0x9bd3e6, 0.72);
-  const keyLight = new THREE.DirectionalLight(0xfff5e0, 1.75);
+  const ambientLight = new THREE.AmbientLight(0x9bd3e6, 0.78);
+  const keyLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
   keyLight.position.set(14, 18, 12);
-  const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.05);
+  const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.1);
   rimLight.position.set(-14, -8, -12);
   scene.add(ambientLight, keyLight, rimLight);
 
   const spriteTex = makeGlowSpriteTexture();
-  const starfield = createStarfieldBackdrop();
-  scene.add(starfield);
+  scene.add(createStarfieldBackdrop());
 
-  // Create one floating-origin Three.Group per scale regime.
   const regimeGroups = {};
   for (const r of COSMIC_QUANTUM_SCALE_REGIMES) {
     const g = new THREE.Group();
@@ -354,60 +364,39 @@ export async function mountCosmicQuantumZoomDemo(container) {
 
   // ---- 1. Supergalactic / Observable Universe Cosmic Web (10^27 m) ----
   const cosmicGroup = regimeGroups['supergalactic-cosmic'];
-  const cosmicMesh = new THREE.InstancedMesh(
-    new THREE.IcosahedronGeometry(1, 0),
-    new THREE.MeshBasicMaterial({ color: 0xffffff }),
-    cosmicWebEngine.count
-  );
-  cosmicMesh.frustumCulled = false;
-  cosmicGroup.add(cosmicMesh);
+  const cosmicPresenter = createZeroCopyResidentBodyPresenter({
+    THREE,
+    TSL,
+    renderer,
+    bodyCount: cosmicWebEngine.count,
+    palette: 'cosmic-web',
+    initialBuffer: cosmicWebEngine.getResidentBuffer()
+  });
+  cosmicGroup.add(cosmicPresenter.mesh);
+  if (!cosmicPresenter.zeroCopy) {
+    cosmicPresenter.syncFromCpuBodies(cosmicWebEngine.getBodies());
+  }
 
-  // Observable-universe ~93 Gly horizon wireframe sphere + filament bridges
   const horizonRing = new THREE.Mesh(
     new THREE.SphereGeometry(11.6, 32, 20),
-    new THREE.MeshBasicMaterial({
-      color: 0x4f46e5,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.11
-    })
+    new THREE.MeshBasicMaterial({ color: 0x4f46e5, wireframe: true, transparent: true, opacity: 0.11 })
   );
   cosmicGroup.add(horizonRing);
 
   const filamentGeo = new THREE.BufferGeometry();
   const filamentPos = new Float32Array(1300 * 2 * 3);
   filamentGeo.setAttribute('position', new THREE.BufferAttribute(filamentPos, 3));
-  const filamentMat = new THREE.LineBasicMaterial({
-    color: 0x818cf8,
-    transparent: true,
-    opacity: 0.52
-  });
-  const filamentLines = new THREE.LineSegments(filamentGeo, filamentMat);
+  const filamentLines = new THREE.LineSegments(
+    filamentGeo,
+    new THREE.LineBasicMaterial({ color: 0x818cf8, transparent: true, opacity: 0.44 })
+  );
   filamentLines.frustumCulled = false;
+  // In zero-copy WebGPU mode the 3,072 nodes evolve purely on GPU; hide static CPU filament lines so voids never show stale t=0 bridges.
+  filamentLines.visible = !cosmicPresenter.zeroCopy;
   cosmicGroup.add(filamentLines);
 
-  function syncCosmicWebGeometry(bodies) {
+  function syncCosmicFilaments(bodies) {
     const n = bodies.length / 8;
-    for (let i = 0; i < n; i += 1) {
-      const b = i * 8;
-      const massNorm = Math.min(1, bodies[b + 3] / 5.5);
-      instDummy.position.set(bodies[b], bodies[b + 1], bodies[b + 2]);
-      const sc = 0.026 + 0.068 * Math.pow(massNorm, 0.72);
-      instDummy.scale.setScalar(sc);
-      instDummy.updateMatrix();
-      cosmicMesh.setMatrixAt(i, instDummy.matrix);
-      // Warm amber-gold supercluster knots transitioning to deep indigo/violet/cyan filaments
-      instColor.setRGB(
-        0.34 + 0.66 * massNorm,
-        0.24 + 0.56 * massNorm,
-        0.96 - 0.52 * massNorm
-      );
-      cosmicMesh.setColorAt(i, instColor);
-    }
-    cosmicMesh.instanceMatrix.needsUpdate = true;
-    if (cosmicMesh.instanceColor) cosmicMesh.instanceColor.needsUpdate = true;
-
-    // Connect nearest supercluster nodes to visualize cosmic web filaments
     let seg = 0;
     const maxSeg = 1300;
     const stride = Math.max(1, Math.floor(n / 220));
@@ -431,52 +420,94 @@ export async function mountCosmicQuantumZoomDemo(container) {
     filamentGeo.setDrawRange(0, seg * 2);
     filamentGeo.attributes.position.needsUpdate = true;
   }
-  syncCosmicWebGeometry(cosmicWebEngine.getBodies());
+  syncCosmicFilaments(cosmicWebBodies0);
 
-  // ---- 2. Galactic N-Body (10^21 m — eshkols-in-space ABI) ----
+  // ---- 2. Galactic N-Body (10^21 m — Zero-Copy WebGPU Barnes-Hut / Direct) ----
   const galacticGroup = regimeGroups['galactic-nbody'];
-  const galacticMesh = new THREE.InstancedMesh(
-    new THREE.IcosahedronGeometry(1, 0),
-    new THREE.MeshBasicMaterial({ color: 0xffffff }),
-    galacticEngine.count
-  );
-  galacticMesh.frustumCulled = false;
-  galacticGroup.add(galacticMesh);
-
-  const galacticCoreGlow = createSoftGlowSprite(spriteTex, 0xffd27d, 5.2, 0.92);
+  const galacticCoreGlow = createSoftGlowSprite(spriteTex, 0xffd27d, 5.2, 0.90);
   galacticGroup.add(galacticCoreGlow);
 
-  function syncGalacticGeometry(bodies) {
-    const n = bodies.length / 8;
-    for (let i = 0; i < n; i += 1) {
-      const b = i * 8;
-      const x = bodies[b];
-      const y = bodies[b + 1];
-      const z = bodies[b + 2];
-      const mass = bodies[b + 3];
-      const r = Math.hypot(x, y, z);
-      instDummy.position.set(x, y, z);
-      if (i === 0 || mass > 20) {
-        instDummy.scale.setScalar(0.24);
-        instColor.setRGB(1.0, 0.95, 0.80);
-      } else if (r < 2.4) {
-        instDummy.scale.setScalar(0.032 + 0.024 * Math.min(1, mass / 0.25));
-        instColor.setRGB(1.0, 0.74, 0.32);
-      } else {
-        const hot = Math.min(1, mass / 0.18);
-        instDummy.scale.setScalar(0.024 + 0.030 * hot);
-        // Vivid astrophysics palette: sapphire/cyan spiral arms with warm gold dust knots
-        instColor.setRGB(0.26 + 0.64 * (1 - hot), 0.64 + 0.28 * hot, 1.0);
-      }
-      instDummy.updateMatrix();
-      galacticMesh.setMatrixAt(i, instDummy.matrix);
-      galacticMesh.setColorAt(i, instColor);
+  async function rebuildGalacticSimulation({ tierId = galaxyTierId, preset = galaxyPreset } = {}) {
+    galaxyTierId = GALAXY_TIERS[tierId] ? tierId : '32k-bh';
+    galaxyPreset = ['disk', 'binary', 'sphere'].includes(preset) ? preset : 'disk';
+    const tier = GALAXY_TIERS[galaxyTierId];
+
+    if (galacticPresenter) {
+      galacticGroup.remove(galacticPresenter.mesh);
+      galacticPresenter.dispose();
+      galacticPresenter = null;
     }
-    galacticMesh.instanceMatrix.needsUpdate = true;
-    if (galacticMesh.instanceColor) galacticMesh.instanceColor.needsUpdate = true;
-    galacticCoreGlow.position.set(bodies[0], bodies[1], bodies[2]);
+    if (galacticEngine) {
+      moduleRegistry.unregisterModule({ model: 'nbody-gravity', version: 1 });
+      galacticEngine.dispose();
+      galacticEngine = null;
+    }
+
+    const bodies0 = createGalacticBodies({ count: tier.count, preset: galaxyPreset, seed: 825 });
+    galacticEngine = tier.mode === 'barnes-hut' && gpuDevice
+      ? createResidentBarnesHutNBodyEngine({
+        device: gpuDevice,
+        initialBodies: bodies0,
+        mode: 0,
+        boxHalf: 16.0,
+        theta: 0.65,
+        label: `ulg-galactic-bh-${tier.count}`
+      })
+      : createResidentTiledNBodyEngine({
+        device: gpuDevice,
+        initialBodies: bodies0,
+        mode: 0,
+        label: `ulg-galactic-direct-${tier.count}`
+      });
+
+    moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
+      method: { model: 'nbody-gravity', version: 1 },
+      engine: galacticEngine,
+      scaleRangeM: [1e6, 1e22],
+      zeroCopy: zeroCopyActive
+    }));
+
+    galacticPresenter = createZeroCopyResidentBodyPresenter({
+      THREE,
+      TSL,
+      renderer,
+      bodyCount: galacticEngine.count,
+      palette: 'galactic',
+      initialBuffer: galacticEngine.getResidentBuffer()
+    });
+    galacticGroup.add(galacticPresenter.mesh);
+    if (!galacticPresenter.zeroCopy) {
+      galacticPresenter.syncFromCpuBodies(galacticEngine.getBodies());
+    }
+    galacticCoreGlow.position.set(bodies0[0], bodies0[1], bodies0[2]);
+    galacticCoreGlow.visible = galaxyPreset !== 'binary';
   }
-  syncGalacticGeometry(galacticEngine.getBodies());
+  await rebuildGalacticSimulation();
+
+  const scaleBridge = createCosmicQuantumScaleBridge({ moduleRegistry });
+
+  // Run real ULG GPU cross-chart multipole coupling across Planetary (L=33), Galactic (L=70), Supergalactic (L=90)!
+  let crossChartMultipoleReceipt = null;
+  if (gpuDevice) {
+    try {
+      const atlasSnap = scaleBridge.atlasRuntime.snapshotAtlas();
+      const ids = scaleBridge.summary().chartByRegimeId;
+      const mp = await runSchroederScaleAtlasMultipoleWebGpu(gpuDevice, {
+        atlas: atlasSnap,
+        particles: [
+          // Planetary system (chart #3, ~1 solar mass, 5778 K)
+          { chartId: ids['planetary-orbital'], flags: 1, massKg: 1.989e30, temperatureK: 5778, posLocal: [0.0, 0.0, 0.0], effectiveAreaM2: 6.09e18 },
+          // Galactic core & halo (chart #4, ~1e11 solar masses)
+          { chartId: ids['galactic-nbody'], flags: 1, massKg: 2.0e41, temperatureK: 4200, posLocal: [2.5, 0.2, -1.8], effectiveAreaM2: 1.0e32 },
+          // Supergalactic cluster neighbor (chart #5, ~1e15 solar masses)
+          { chartId: ids['supergalactic-cosmic'], flags: 1, massKg: 2.0e45, temperatureK: 3000, posLocal: [-4.2, 1.5, 3.1], effectiveAreaM2: 1.0e36 }
+        ]
+      });
+      crossChartMultipoleReceipt = mp.receipt;
+    } catch {
+      crossChartMultipoleReceipt = null;
+    }
+  }
 
   // ---- 3. Planetary / Stellar Orbital System (10^10 m) ----
   const planetaryGroup = regimeGroups['planetary-orbital'];
@@ -500,12 +531,10 @@ export async function mountCosmicQuantumZoomDemo(container) {
       const th = (s / 96) * Math.PI * 2;
       orbitPts.push(new THREE.Vector3(Math.cos(th) * pl.a, Math.sin(th) * pl.a * Math.sin(pl.tilt), Math.sin(th) * pl.a));
     }
-    const orbitLine = new THREE.Line(
+    planetaryGroup.add(new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(orbitPts),
       new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.34 })
-    );
-    planetaryGroup.add(orbitLine);
-
+    ));
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(pl.r, 28, 20),
       new THREE.MeshStandardMaterial({ color: pl.color, roughness: 0.38, metalness: 0.12 })
@@ -522,107 +551,21 @@ export async function mountCosmicQuantumZoomDemo(container) {
     planetaryGroup.add(mesh);
   }
 
-  // ---- 4. Continuum Matter & Eshkol A4 Helmholtz Closure Bridge (10^0 m) ----
+  // ---- 4. Continuum Matter & Quantum-Derived Eshkol A4 Helmholtz Bridge (10^0 m) ----
   const continuumGroup = regimeGroups['continuum-sph-solids'];
+  const continuumDynamicGroup = new THREE.Group();
+  continuumGroup.add(continuumDynamicGroup);
+
   const labCage = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(6.4, 6.4, 6.4)),
-    new THREE.LineBasicMaterial({ color: 0x2dd4bf, transparent: true, opacity: 0.55 })
+    new THREE.LineBasicMaterial({ color: 0x2dd4bf, transparent: true, opacity: 0.52 })
   );
   continuumGroup.add(labCage);
 
-  const iceBlock = new THREE.Mesh(
-    new THREE.BoxGeometry(2.9, 2.2, 2.9),
-    new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
-      emissive: 0x0c4a6e,
-      emissiveIntensity: 0.45,
-      roughness: 0.14,
-      metalness: 0.1,
-      transparent: true,
-      opacity: 0.66
-    })
-  );
-  iceBlock.position.set(0, -1.25, 0);
-  const iceEdges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(new THREE.BoxGeometry(2.92, 2.22, 2.92)),
-    new THREE.LineBasicMaterial({ color: 0xbae6fd, transparent: true, opacity: 0.72 })
-  );
-  iceEdges.position.copy(iceBlock.position);
-
-  const ironDrop = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(1.18, 3),
-    new THREE.MeshStandardMaterial({
-      color: 0xffb347,
-      emissive: 0xff5a00,
-      emissiveIntensity: 1.35,
-      roughness: 0.24,
-      metalness: 0.68
-    })
-  );
-  ironDrop.position.set(0, 0.65, 0);
-  const ironGlow = createSoftGlowSprite(spriteTex, 0xff7722, 4.8, 0.78);
-  ironGlow.position.copy(ironDrop.position);
-  const ironLight = new THREE.PointLight(0xff8c38, 26, 16, 1.5);
-  ironLight.position.copy(ironDrop.position);
-  continuumGroup.add(iceBlock, iceEdges, ironDrop, ironGlow, ironLight);
-
-  // Live 3D Eshkol A4 Helmholtz potential surface a(T, v) wrapped under the continuum specimen!
-  const helmProg = eshkolHelmholtzProgram({
-    material: 'h2o',
-    cvJPerKgK: 4184,
-    rSpecificJPerKgK: 461.5,
-    bulkModulusPa: 2.2e9,
-    refTemperatureK: 300,
-    refSpecificVolumeM3PerKg: 1e-3
-  });
-  const surfGeo = new THREE.PlaneGeometry(5.8, 5.8, 22, 22);
-  surfGeo.rotateX(-Math.PI / 2);
-  const surfPos = surfGeo.attributes.position;
-  let aMin = Infinity;
-  let aMax = -Infinity;
-  const aVals = new Float64Array(surfPos.count);
-  for (let i = 0; i < surfPos.count; i += 1) {
-    const u = (surfPos.getX(i) + 2.9) / 5.8;
-    const v = (surfPos.getZ(i) + 2.9) / 5.8;
-    const T = 260 + u * 260;
-    const spV = 0.92e-3 + v * 0.16e-3;
-    const val = helmProg.closedForm.a(T, spV);
-    aVals[i] = val;
-    if (val < aMin) aMin = val;
-    if (val > aMax) aMax = val;
-  }
-  const aSpan = Math.max(1e-6, aMax - aMin);
-  for (let i = 0; i < surfPos.count; i += 1) {
-    surfPos.setY(i, -2.95 + ((aVals[i] - aMin) / aSpan) * 1.55);
-  }
-  surfPos.needsUpdate = true;
-  surfGeo.computeVertexNormals();
-  const helmholtzSurface = new THREE.Group();
-  helmholtzSurface.add(
-    new THREE.Mesh(
-      surfGeo,
-      new THREE.MeshStandardMaterial({
-        color: 0x14b8a6,
-        emissive: 0x0f766e,
-        emissiveIntensity: 0.45,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.34,
-        roughness: 0.35
-      })
-    ),
-    new THREE.Mesh(
-      surfGeo,
-      new THREE.MeshBasicMaterial({ color: 0x5eead4, wireframe: true, transparent: true, opacity: 0.58 })
-    )
-  );
-  continuumGroup.add(helmholtzSurface);
-
-  // ---- 5. Molecular 6-31G(d) / STO-3G Charge Density & Bond Discovery (10^-9 m) ----
-  const molecularGroup = regimeGroups['molecular-lattice'];
-  let currentMolecularBundle = null;
-  let currentMolecularArtifact = null;
-  let currentMolecularBackend = 'worker-cpu-derived';
+  let continuumSpecimenMesh = null;
+  let continuumHelmholtzGroup = null;
+  let continuumGasCloud = null;
+  let continuumSpecimenPhase = 'liquid';
 
   function disposeGroupChildren(group) {
     while (group.children.length > 0) {
@@ -634,6 +577,173 @@ export async function mountCosmicQuantumZoomDemo(container) {
       });
     }
   }
+
+  async function rebuildContinuumFromQuantumElement() {
+    disposeGroupChildren(continuumDynamicGroup);
+    continuumSpecimenMesh = null;
+    continuumHelmholtzGroup = null;
+    continuumGasCloud = null;
+
+    currentElementResolution = await materialPipeline.resolveElement(selectedElementZ, {
+      functional: selectedFunctional,
+      scalarRelativistic: true,
+      includeGasPhase: true,
+      gridPointsN: 420
+    });
+    const p = currentElementResolution.properties;
+    const vdw = p.vdwGasProperties;
+    const phase = p.standardPhaseAt298K || 'solid';
+    continuumSpecimenPhase = phase;
+    const density = p.densityKgPerM3 ?? vdw?.condensedDensityKgPerM3 ?? 1000;
+    const bulkPa = p.bulkModulusPa ?? vdw?.bulkModulusPa ?? 2.2e9;
+    const cp = p.cpJPerKgK ?? 400;
+    const [cr, cg, cb] = p.opticalColorSrgb || [0.78, 0.85, 0.92];
+    const derivedColor = new THREE.Color(cr, cg, cb);
+    const isMetal = Boolean(p.metallicModelApplicable);
+
+    // Pedestal translucent glass/ice substrate
+    const pedestal = new THREE.Mesh(
+      new THREE.BoxGeometry(3.2, 0.45, 3.2),
+      new THREE.MeshStandardMaterial({
+        color: 0x1e3a5f,
+        emissive: 0x0c243b,
+        emissiveIntensity: 0.4,
+        roughness: 0.2,
+        metalness: 0.15,
+        transparent: true,
+        opacity: 0.58
+      })
+    );
+    pedestal.position.set(0, -1.25, 0);
+    const pedestalEdges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(3.22, 0.47, 3.22)),
+      new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.55 })
+    );
+    pedestalEdges.position.copy(pedestal.position);
+    continuumDynamicGroup.add(pedestal, pedestalEdges);
+
+    // Physically derived continuum specimen reflecting real ambient state (liquid / solid / gas) + spin-orbit sRGB color!
+    if (phase === 'liquid') {
+      // Shimmering oblate liquid metal/halogen puddle (e.g., liquid Hg or liquid Br2!)
+      const dropGeo = new THREE.SphereGeometry(1.38, 36, 26);
+      dropGeo.scale(1.22, 0.52, 1.22);
+      const dropMat = new THREE.MeshStandardMaterial({
+        color: derivedColor,
+        emissive: derivedColor.clone().multiplyScalar(isMetal ? 0.22 : 0.32),
+        roughness: isMetal ? 0.08 : 0.18,
+        metalness: isMetal ? 0.92 : 0.05
+      });
+      continuumSpecimenMesh = new THREE.Mesh(dropGeo, dropMat);
+      continuumSpecimenMesh.position.set(0, -0.35, 0);
+      const glow = createSoftGlowSprite(spriteTex, derivedColor.getHex(), 4.6, 0.42);
+      glow.position.copy(continuumSpecimenMesh.position);
+      continuumDynamicGroup.add(continuumSpecimenMesh, glow);
+    } else if (phase === 'gas') {
+      // Buoyant translucent gas plume particles (e.g., Cl2, H2, Ne!)
+      const gasCount = 260;
+      const gasMesh = new THREE.InstancedMesh(
+        new THREE.IcosahedronGeometry(0.18, 1),
+        new THREE.MeshBasicMaterial({
+          color: derivedColor,
+          transparent: true,
+          opacity: 0.28,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        }),
+        gasCount
+      );
+      gasMesh.frustumCulled = false;
+      const seeds = [];
+      let s = 4201 + selectedElementZ * 31;
+      const rnd = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+      for (let i = 0; i < gasCount; i += 1) {
+        seeds.push({
+          x: (rnd() - 0.5) * 3.8,
+          y: -0.9 + rnd() * 3.2,
+          z: (rnd() - 0.5) * 3.8,
+          speed: 0.35 + rnd() * 0.75,
+          phase: rnd() * Math.PI * 2,
+          scale: 0.55 + rnd() * 0.85
+        });
+      }
+      gasMesh.userData.seeds = seeds;
+      continuumGasCloud = gasMesh;
+      continuumDynamicGroup.add(gasMesh);
+    } else {
+      // Faceted crystalline solid specimen (Au, Cu, Ag, Fe, Ga, C, I...)
+      const solidGeo = new THREE.OctahedronGeometry(1.28, 1);
+      const solidMat = new THREE.MeshStandardMaterial({
+        color: derivedColor,
+        emissive: derivedColor.clone().multiplyScalar(0.18),
+        roughness: isMetal ? 0.20 : 0.42,
+        metalness: isMetal ? 0.88 : 0.08
+      });
+      continuumSpecimenMesh = new THREE.Mesh(solidGeo, solidMat);
+      continuumSpecimenMesh.position.set(0, 0.25, 0);
+      const glow = createSoftGlowSprite(spriteTex, derivedColor.getHex(), 4.2, 0.36);
+      glow.position.copy(continuumSpecimenMesh.position);
+      continuumDynamicGroup.add(continuumSpecimenMesh, glow);
+    }
+
+    // Rebuild 3D Eshkol A4 Helmholtz potential surface a(T, v) from the element's live derived bulk properties!
+    const refV = 1 / Math.max(10, density);
+    const helmProg = eshkolHelmholtzProgram({
+      material: p.symbol.toLowerCase(),
+      cvJPerKgK: Math.max(50, cp),
+      rSpecificJPerKgK: 8.314462618 / Math.max(1e-3, p.molarMassKgPerMol),
+      bulkModulusPa: Math.max(1e7, bulkPa),
+      refTemperatureK: 293.15,
+      refSpecificVolumeM3PerKg: refV
+    });
+    const surfGeo = new THREE.PlaneGeometry(5.8, 5.8, 22, 22);
+    surfGeo.rotateX(-Math.PI / 2);
+    const surfPos = surfGeo.attributes.position;
+    let aMin = Infinity;
+    let aMax = -Infinity;
+    const aVals = new Float64Array(surfPos.count);
+    for (let i = 0; i < surfPos.count; i += 1) {
+      const u = (surfPos.getX(i) + 2.9) / 5.8;
+      const v = (surfPos.getZ(i) + 2.9) / 5.8;
+      const T = 180 + u * 420;
+      const spV = refV * (0.92 + v * 0.16);
+      const val = helmProg.closedForm.a(T, spV);
+      aVals[i] = val;
+      if (val < aMin) aMin = val;
+      if (val > aMax) aMax = val;
+    }
+    const aSpan = Math.max(1e-6, aMax - aMin);
+    for (let i = 0; i < surfPos.count; i += 1) {
+      surfPos.setY(i, -2.95 + ((aVals[i] - aMin) / aSpan) * 1.45);
+    }
+    surfPos.needsUpdate = true;
+    surfGeo.computeVertexNormals();
+    continuumHelmholtzGroup = new THREE.Group();
+    continuumHelmholtzGroup.add(
+      new THREE.Mesh(
+        surfGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x14b8a6,
+          emissive: 0x0f766e,
+          emissiveIntensity: 0.42,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.34,
+          roughness: 0.35
+        })
+      ),
+      new THREE.Mesh(
+        surfGeo,
+        new THREE.MeshBasicMaterial({ color: 0x5eead4, wireframe: true, transparent: true, opacity: 0.56 })
+      )
+    );
+    continuumDynamicGroup.add(continuumHelmholtzGroup);
+  }
+
+  // ---- 5. Molecular 6-31G(d) / STO-3G Charge Density & Bond Discovery (10^-9 m) ----
+  const molecularGroup = regimeGroups['molecular-lattice'];
+  let currentMolecularBundle = null;
+  let currentMolecularArtifact = null;
+  let currentMolecularBackend = 'worker-cpu-derived';
 
   async function rebuildMolecularScene() {
     disposeGroupChildren(molecularGroup);
@@ -649,7 +759,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
     });
     currentMolecularArtifact = built.artifact;
 
-    // Evaluate 3D density directly on WebGPU when available (proving live GPU parity!)
     let activeField = built.densePayloads[built.artifact.grid.payloadHandles.chargeDensity.key];
     currentMolecularBackend = 'worker-cpu-derived';
     if (molecularViewMode === 'density' && gpuDevice) {
@@ -672,7 +781,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
       activeField = built.densePayloads[built.artifact.grid.payloadHandles.lumoOrbital.key];
     }
 
-    // Build full visualization bundle for provenance panel (fast single pass).
     currentMolecularBundle = buildMaterialDerivationVisualizationBundle({
       materialKey: preset.formula.toLowerCase(),
       formula: preset.formula,
@@ -685,8 +793,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
       includeTriadA4Replay: true
     }).bundle;
 
-    const scale = 1.95; // Bohr -> chart local scene units
-    // Nuclei spheres colored by CPK
+    const scale = 1.95;
     for (let i = 0; i < preset.atoms.length; i += 1) {
       const a = preset.atoms[i];
       const rad = a.Z === 1 ? 0.42 : 0.72;
@@ -704,7 +811,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
       molecularGroup.add(mesh);
     }
 
-    // Mayer bond-order cylinders
     for (const bond of built.artifact.bondDiscoveryTrace.bonds) {
       const pA = new THREE.Vector3(...preset.atoms[bond.atomA].position).multiplyScalar(scale);
       const pB = new THREE.Vector3(...preset.atoms[bond.atomB].position).multiplyScalar(scale);
@@ -726,7 +832,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
       molecularGroup.add(cyl);
     }
 
-    // Importance-sampled smooth volumetric cloud from the WebGPU 3D density / MO grid (zero cubic striping!)
     const [nx, ny, nz] = built.artifact.grid.dimensions;
     const minB = built.artifact.grid.boundsMinBohr;
     const step = built.artifact.grid.voxelSpacingBohr;
@@ -815,15 +920,14 @@ export async function mountCosmicQuantumZoomDemo(container) {
       functional: selectedFunctional,
       scalarRelativistic: true,
       spinOrbit: true,
-      gridPointsN: 650,
-      cloudGridDim: 18,
+      gridPointsN: 520,
+      cloudGridDim: 16,
       maxGridDim: 24
     });
     currentAtomicArtifact = built.artifact;
     const halfB = built.artifact.orbitalCloudGrid.boundsBohr.max[0];
     const normScale = 4.9 / Math.max(1.5, halfB);
 
-    // Nucleus core + silky radial glow halo
     const nuc = new THREE.Mesh(
       new THREE.SphereGeometry(0.28, 24, 18),
       new THREE.MeshBasicMaterial({ color: 0xfef08a })
@@ -831,7 +935,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
     const nucGlow = createSoftGlowSprite(spriteTex, 0xfbbf24, 3.0, 0.92);
     atomicGroup.add(nuc, nucGlow);
 
-    // Containment shell wireframe (r95 Bohr)
     const r95Scaled = built.artifact.summary.containmentRadii.r95Bohr * normScale;
     const shellWire = new THREE.Mesh(
       new THREE.SphereGeometry(r95Scaled, 28, 18),
@@ -839,8 +942,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
     );
     atomicGroup.add(shellWire);
 
-    // Continuous CDF importance sampling of the exact KS-DFT radial probability 4π r² ρ(r)
-    // (explicitly labeled radial-atomic-density-reconstruction, zero cubic grid artifacts!)
     const samples = built.artifact.radialProfile.samples || [];
     if (samples.length > 2) {
       const cdf = new Float64Array(samples.length);
@@ -897,7 +998,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
         instDummy.scale.setScalar(0.055 + 0.072 * (0.4 + 0.6 * radialNorm));
         instDummy.updateMatrix();
         cloudMesh.setMatrixAt(i, instDummy.matrix);
-        // Warm amber-gold inner core shells (1s/2s/2p) transitioning smoothly to luminous teal/cyan valence shells!
         instColor.setRGB(
           0.14 + 0.86 * (1 - radialNorm),
           0.74 + 0.22 * shellFrac,
@@ -911,24 +1011,14 @@ export async function mountCosmicQuantumZoomDemo(container) {
     }
   }
 
-  // Initial first-principles quantum artifacts build
+  // Initial quantum -> continuum -> molecular build
   rebuildAtomicScene();
+  await rebuildContinuumFromQuantumElement();
   await rebuildMolecularScene();
 
   // ---- HUD & Interactive Controls ----
   const topBar = document.createElement('div');
-  topBar.style.cssText = [
-    'position:absolute',
-    'top:14px',
-    'left:16px',
-    'right:16px',
-    'display:flex',
-    'align-items:center',
-    'justify-content:space-between',
-    'gap:12px',
-    'pointer-events:none',
-    'z-index:10'
-  ].join(';');
+  topBar.style.cssText = 'position:absolute;top:14px;left:16px;right:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;pointer-events:none;z-index:10;';
   topBar.innerHTML = `
     <div style="pointer-events:auto;display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:10px;background:rgba(6,14,24,0.82);border:1px solid rgba(94,234,212,0.28);backdrop-filter:blur(10px);">
       <span style="width:9px;height:9px;border-radius:50%;background:#34d399;box-shadow:0 0 10px #34d399;"></span>
@@ -945,47 +1035,13 @@ export async function mountCosmicQuantumZoomDemo(container) {
   `;
   root.appendChild(topBar);
 
-  // Right Provenance & Regime Controls Panel
   const sidePanel = document.createElement('aside');
   sidePanel.id = 'cq-inspector';
-  sidePanel.style.cssText = [
-    'position:absolute',
-    'top:72px',
-    'right:16px',
-    'width:308px',
-    'max-height:calc(100vh - 178px)',
-    'overflow:auto',
-    'padding:14px',
-    'border-radius:12px',
-    'background:rgba(6,14,24,0.84)',
-    'border:1px solid rgba(148,186,180,0.24)',
-    'backdrop-filter:blur(12px)',
-    'font-size:12px',
-    'line-height:1.45',
-    'z-index:10',
-    'display:flex',
-    'flex-direction:column',
-    'gap:10px'
-  ].join(';');
+  sidePanel.style.cssText = 'position:absolute;top:72px;right:16px;width:320px;max-height:calc(100vh - 178px);overflow:auto;padding:14px;border-radius:12px;background:rgba(6,14,24,0.84);border:1px solid rgba(148,186,180,0.24);backdrop-filter:blur(12px);font-size:12px;line-height:1.45;z-index:10;display:flex;flex-direction:column;gap:10px;';
   root.appendChild(sidePanel);
 
-  // Bottom 38-OOM Continuous Logarithmic Scale Ruler
   const bottomBar = document.createElement('div');
-  bottomBar.style.cssText = [
-    'position:absolute',
-    'left:16px',
-    'right:16px',
-    'bottom:14px',
-    'padding:10px 14px',
-    'border-radius:12px',
-    'background:rgba(6,14,24,0.86)',
-    'border:1px solid rgba(94,234,212,0.24)',
-    'backdrop-filter:blur(10px)',
-    'z-index:10',
-    'display:flex',
-    'flex-direction:column',
-    'gap:8px'
-  ].join(';');
+  bottomBar.style.cssText = 'position:absolute;left:16px;right:16px;bottom:14px;padding:10px 14px;border-radius:12px;background:rgba(6,14,24,0.86);border:1px solid rgba(94,234,212,0.24);backdrop-filter:blur(10px);z-index:10;display:flex;flex-direction:column;gap:8px;';
   bottomBar.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;">
       <span style="font-size:11px;font-family:monospace;color:#94a3b8;white-space:nowrap;">10⁻¹¹ m</span>
@@ -1047,7 +1103,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
     targetLog10 = Number(zoomSlider.value);
   });
 
-  // Pointer orbit + wheel continuous logarithmic zoom
   let dragging = false;
   let lastPtrX = 0;
   let lastPtrY = 0;
@@ -1081,6 +1136,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
     const bridgeSum = scaleBridge.summary();
     const atomic = currentAtomicArtifact;
     const mol = currentMolecularArtifact;
+    const elProps = currentElementResolution?.properties;
     const bundleVal = currentMolecularBundle
       ? validateDerivationVisualizationBundle(currentMolecularBundle, {
         expectedGeneratorFingerprint: QUANTUM_DERIVATION_GENERATOR_FINGERPRINT,
@@ -1088,28 +1144,34 @@ export async function mountCosmicQuantumZoomDemo(container) {
       })
       : null;
 
+    const mpBadge = crossChartMultipoleReceipt
+      ? `<span style="color:#34d399;">${crossChartMultipoleReceipt.verified ? 'PASS' : 'WARN'}</span> (|ΣF|=${crossChartMultipoleReceipt.momentumRelError.toExponential(1)})`
+      : 'CPU-only';
+
     let regimeSpecificHtml = '';
     if (rid === 'atomic-orbital' && atomic) {
       const soOrbitals = atomic.orbitals.filter((o) => o.spinOrbitSplittingHa > 0);
       const soLine = soOrbitals.length > 0
         ? soOrbitals.slice(-2).map((o) => `${o.n}${'spdf'[o.l] || o.l}: ${(o.spinOrbitSplittingHa * HA_TO_EV).toFixed(3)} eV`).join(' · ')
         : 's-shell only (ΔE_SO = 0)';
+      const phaseBadge = elProps?.standardPhaseAt298K?.toUpperCase() || '—';
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
-          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Schrödinger Atomic KS-DFT</div>
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Schrödinger Relativistic KS-DFT</div>
           <div style="display:flex;gap:6px;margin-bottom:6px;">
             <select id="cq-elem-sel" style="flex:1;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
               ${ATOMIC_CHOICES.map((c) => `<option value="${c.Z}" ${c.Z === selectedElementZ ? 'selected' : ''}>${c.label}</option>`).join('')}
             </select>
-            <select id="cq-func-sel" style="width:76px;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
+            <select id="cq-func-sel" style="width:72px;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
               <option value="pbe" ${selectedFunctional === 'pbe' ? 'selected' : ''}>PBE</option>
               <option value="lda" ${selectedFunctional === 'lda' ? 'selected' : ''}>LDA</option>
             </select>
           </div>
           ${buildRadialProfileSvg(atomic)}
           <div style="margin-top:6px;font-family:monospace;font-size:11px;color:#cbd5e1;">
-            E_tot: ${atomic.summary.totalEnergyHa.toFixed(4)} Ha · ∫ρ=${atomic.summary.integratedElectrons.toFixed(4)}e<br/>
+            E_tot: ${atomic.summary.totalEnergyHa.toFixed(3)} Ha · ∫ρ=${atomic.summary.integratedElectrons.toFixed(4)}e<br/>
             SO (L·S): ${soLine}<br/>
+            Bulk @293K: <span style="color:#6ee7b7;">${phaseBadge}</span> (Tm=${Math.round(elProps?.meltingPointK ?? elProps?.vdwGasProperties?.meltingPointK ?? 0)}K, Tb=${Math.round(elProps?.boilingPointK ?? elProps?.vdwGasProperties?.boilingPointK ?? 0)}K)<br/>
             Cloud: <span style="color:#fde68a;">radial-atomic-density-reconstruction</span>
           </div>
         </div>
@@ -1140,29 +1202,43 @@ export async function mountCosmicQuantumZoomDemo(container) {
         </div>
       `;
     } else if (rid === 'continuum-sph-solids') {
-      const a4 = currentMolecularBundle?.responseFitReplay;
+      const tm = Math.round(elProps?.meltingPointK ?? elProps?.vdwGasProperties?.meltingPointK ?? 0);
+      const tb = Math.round(elProps?.boilingPointK ?? elProps?.vdwGasProperties?.boilingPointK ?? 0);
+      const rho = Math.round(elProps?.densityKgPerM3 ?? elProps?.vdwGasProperties?.condensedDensityKgPerM3 ?? 0);
+      const bGpa = ((elProps?.bulkModulusPa ?? elProps?.vdwGasProperties?.bulkModulusPa ?? 0) / 1e9).toFixed(1);
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
-          <div style="font-weight:600;color:#5eead4;margin-bottom:4px;">Continuum SPH &amp; Eshkol A4 Bridge</div>
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Quantum → Continuum &amp; Eshkol A4</div>
+          <select id="cq-cont-elem-sel" style="width:100%;margin-bottom:6px;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
+            ${ATOMIC_CHOICES.map((c) => `<option value="${c.Z}" ${c.Z === selectedElementZ ? 'selected' : ''}>${c.label}</option>`).join('')}
+          </select>
           <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
-            Helmholtz a(T,v): Chebyshev 2D (${a4?.fitFamily || 'chebyshev-tensor-2d'})<br/>
-            Fit Residual: ${(a4?.maxRelativeResidual ?? 0).toExponential(2)}<br/>
-            Table: ${a4?.packedRuntimeRowRef?.tableByteLength ?? 0} B · In-box non-extrapolating
+            Element: <span style="color:#fef08a;">${elProps?.symbol || '?'}</span> (${elProps?.bondingClass || 'derived'})<br/>
+            Phase @293K: <span style="color:#34d399;font-weight:700;">${(elProps?.standardPhaseAt298K || 'solid').toUpperCase()}</span> · Tm=${tm}K · Tb=${tb}K<br/>
+            ρ=${rho.toLocaleString()} kg/m³ · B=${bGpa} GPa<br/>
+            Helmholtz a(T,v): live Eshkol A4 · Cache: ${currentElementResolution?.resolverStatus || 'cpu-derived'}
           </div>
         </div>
       `;
     } else if (rid === 'galactic-nbody') {
+      const pStats = galacticPresenter?.getStats();
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
           <div style="font-weight:600;color:#fbbf24;margin-bottom:6px;">Galactic WebGPU N-Body (Eshkol ABI)</div>
-          <div style="display:flex;gap:4px;margin-bottom:6px;">
+          <div style="display:flex;gap:4px;margin-bottom:5px;">
             ${[['disk', 'Spiral'], ['binary', 'Merger'], ['sphere', 'Globular']].map(([id, lbl]) =>
               `<button type="button" data-galaxy-preset="${id}" style="flex:1;padding:4px;border-radius:5px;border:1px solid ${galaxyPreset === id ? '#fbbf24' : 'rgba(148,163,184,0.3)'};background:${galaxyPreset === id ? 'rgba(251,191,36,0.16)' : '#0b1724'};color:#fef3c7;font-size:11px;cursor:pointer;">${lbl}</button>`
             ).join('')}
           </div>
+          <div style="display:flex;gap:4px;margin-bottom:6px;">
+            ${Object.values(GALAXY_TIERS).map((t) =>
+              `<button type="button" data-galaxy-tier="${t.id}" style="flex:1;padding:3px;border-radius:5px;border:1px solid ${galaxyTierId === t.id ? '#34d399' : 'rgba(148,163,184,0.28)'};background:${galaxyTierId === t.id ? 'rgba(52,211,153,0.16)' : '#0b1724'};color:#d1fae5;font-size:10px;cursor:pointer;">${t.label}</button>`
+            ).join('')}
+          </div>
           <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
             Bodies: ${galacticEngine.count.toLocaleString()} · Step: <span id="cq-gal-step">${galacticEngine.stepIndex}</span><br/>
-            Backend: <span style="color:#34d399;">${galacticEngine.backend}</span> (${galacticEngine.gravityMode})<br/>
+            Solver: <span style="color:#34d399;">${galacticEngine.gravityMode}</span><br/>
+            Presenter: <span style="color:#7dd3fc;">${pStats?.zeroCopy ? 'zero-copy GPU (0 B/frame)' : 'cpu-instanced'}</span><br/>
             Lease Epoch: <span id="cq-lease-epoch">${lastLeaseSummary?.resetEpoch ?? 0}</span> · Valid: true
           </div>
         </div>
@@ -1176,7 +1252,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
             Horizon: ~93 Gly (8.8×10²⁶ m) · L=90<br/>
             a(t): <span id="cq-cosmo-a">${cosmicWebEngine.scaleFactorA.toFixed(3)}</span> · Redshift z: <span id="cq-cosmo-z">${z.toFixed(2)}</span><br/>
             H(a): ${camState.cosmologyFrame.hubbleParameterPerS.toExponential(2)} s⁻¹<br/>
-            Nodes: ${cosmicWebEngine.count.toLocaleString()} · Backend: ${cosmicWebEngine.backend}
+            Nodes: ${cosmicWebEngine.count.toLocaleString()} · ${cosmicPresenter.zeroCopy ? 'zero-copy GPU' : 'cpu-instanced'}
           </div>
         </div>
       `;
@@ -1186,7 +1262,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
           <div style="font-weight:600;color:#7dd3fc;margin-bottom:4px;">Planetary Orbital Chart (L=33)</div>
           <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
             G-type star + 4 worlds (Ocean H₂O/Fe world at 1 AU)<br/>
-            Zoom in → Continuum SPH · Zoom out → Spiral Galaxy
+            Coupled via GPU cross-chart multipole to L=70 &amp; L=90
           </div>
         </div>
       `;
@@ -1200,22 +1276,26 @@ export async function mountCosmicQuantumZoomDemo(container) {
       <div style="font-family:monospace;font-size:11px;color:#94a3b8;line-height:1.5;">
         Chart: <span style="color:#e2f1ec;">#${camState.primaryChartId} (L=${camState.primaryRegime.globalBaseLevel})</span> · Active: ${bridgeSum.activeChartCount}<br/>
         Module: <span style="color:#7dd3fc;">${camState.primaryMethodKey}</span><br/>
-        Device: <span style="color:#e2f1ec;">${gpuAdapterName.slice(0, 26)} (${rendererBackend})</span><br/>
-        Portal Blend: ${(camState.portalBlendAlpha * 100).toFixed(0)}%${camState.secondaryRegime ? ` ↔ ${camState.secondaryRegime.id}` : ''}<br/>
+        Device: <span style="color:#e2f1ec;">${gpuAdapterName.slice(0, 24)} (${rendererBackend})</span><br/>
+        Multipole: ${mpBadge}<br/>
         Validation: <span style="color:#fde68a;">scientificValidation=false</span>
       </div>
       ${regimeSpecificHtml}
     `;
 
     // Wire dynamic regime controls
-    sidePanel.querySelector('#cq-elem-sel')?.addEventListener('change', (e) => {
-      selectedElementZ = Number(e.target.value);
+    const onElementChange = async (nextZ) => {
+      selectedElementZ = nextZ;
       rebuildAtomicScene();
+      await rebuildContinuumFromQuantumElement();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
-    });
-    sidePanel.querySelector('#cq-func-sel')?.addEventListener('change', (e) => {
+    };
+    sidePanel.querySelector('#cq-elem-sel')?.addEventListener('change', (e) => { void onElementChange(Number(e.target.value)); });
+    sidePanel.querySelector('#cq-cont-elem-sel')?.addEventListener('change', (e) => { void onElementChange(Number(e.target.value)); });
+    sidePanel.querySelector('#cq-func-sel')?.addEventListener('change', async (e) => {
       selectedFunctional = e.target.value;
       rebuildAtomicScene();
+      await rebuildContinuumFromQuantumElement();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
     });
     sidePanel.querySelector('#cq-mol-sel')?.addEventListener('change', async (e) => {
@@ -1237,16 +1317,19 @@ export async function mountCosmicQuantumZoomDemo(container) {
     }
     for (const btn of sidePanel.querySelectorAll('[data-galaxy-preset]')) {
       btn.addEventListener('click', async () => {
-        galaxyPreset = btn.dataset.galaxyPreset;
-        galacticEngine.resetBodies(createGalacticBodies({ count: 4096, preset: galaxyPreset, seed: 825 }));
-        await moduleRegistry.resetModuleSession({ model: 'nbody-gravity', version: 1 });
-        syncGalacticGeometry(galacticEngine.getBodies());
+        await rebuildGalacticSimulation({ tierId: galaxyTierId, preset: btn.dataset.galaxyPreset });
+        renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+      });
+    }
+    for (const btn of sidePanel.querySelectorAll('[data-galaxy-tier]')) {
+      btn.addEventListener('click', async () => {
+        await rebuildGalacticSimulation({ tierId: btn.dataset.galaxyTier, preset: galaxyPreset });
         renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
       });
     }
   }
 
-  // Physics dispatch via ULG SimulationModuleRegistry (with lease release each frame!)
+  // Zero-copy GPU dispatch via ULG SimulationModuleRegistry
   let gpuStepBusy = false;
   async function stepActiveGpuModules(camState) {
     if (gpuStepBusy) return;
@@ -1262,13 +1345,17 @@ export async function mountCosmicQuantumZoomDemo(container) {
           method: { model: 'nbody-gravity', version: 1 },
           input: {
             stepIndex: galacticEngine.stepIndex,
-            parameters: { dt: galaxyDt, gravity: galaxyGravity, softening: 0.22 }
+            parameters: { dt: galaxyDt, gravity: galaxyGravity, softening: 0.24, readback: !galacticPresenter.zeroCopy }
           }
         });
         const res = await moduleRegistry.dispatchSimulationStepCapsule(cap, { device: gpuDevice });
         lastLeaseSummary = res.leaseSummary;
+        if (galacticPresenter.zeroCopy) {
+          galacticPresenter.bindLeaseHandle(res.leaseHandle);
+        } else {
+          galacticPresenter.syncFromCpuBodies(galacticEngine.getBodies());
+        }
         res.leaseHandle?.release?.();
-        syncGalacticGeometry(galacticEngine.getBodies());
       }
       if (rid === 'supergalactic-cosmic' || sec === 'supergalactic-cosmic') {
         const cap = createUlgTaskCapsule({
@@ -1278,20 +1365,24 @@ export async function mountCosmicQuantumZoomDemo(container) {
           method: { model: 'cosmology-comoving-nbody', version: 1 },
           input: {
             stepIndex: cosmicWebEngine.stepIndex,
-            parameters: { dt: 0.016, gravity: 0.08, softening: 0.85, hubbleRate: hubbleExpansionSpeed }
+            parameters: { dt: 0.016, gravity: 0.08, softening: 0.85, hubbleRate: hubbleExpansionSpeed, readback: !cosmicPresenter.zeroCopy }
           }
         });
         const res = await moduleRegistry.dispatchSimulationStepCapsule(cap, { device: gpuDevice });
         lastLeaseSummary = res.leaseSummary;
+        if (cosmicPresenter.zeroCopy) {
+          cosmicPresenter.bindLeaseHandle(res.leaseHandle);
+        } else {
+          cosmicPresenter.syncFromCpuBodies(cosmicWebEngine.getBodies());
+          syncCosmicFilaments(cosmicWebEngine.getBodies());
+        }
         res.leaseHandle?.release?.();
-        syncCosmicWebGeometry(cosmicWebEngine.getBodies());
       }
     } finally {
       gpuStepBusy = false;
     }
   }
 
-  // Smooth continuous logarithmic visibility & scale portal cross-fade
   let simClock = 0;
   let rafId = 0;
   let disposed = false;
@@ -1307,14 +1398,11 @@ export async function mountCosmicQuantumZoomDemo(container) {
       const visible = isPrimary || (isSecondary && Math.abs(deltaDecades) < 1.55);
       group.visible = visible;
       if (visible) {
-        // Clamp extreme exponential scale outside visual portal fade window for O(1) GPU stability
         const clampedDelta = Math.max(-1.6, Math.min(1.6, deltaDecades));
-        const visualScale = Math.pow(10, clampedDelta * 0.58);
-        group.scale.setScalar(visualScale);
+        group.scale.setScalar(Math.pow(10, clampedDelta * 0.58));
       }
     }
 
-    // Orbit camera around floating origin [0, 0, 0]
     camera.position.set(
       camRadius * Math.cos(camPitch) * Math.sin(camYaw),
       camRadius * Math.sin(camPitch),
@@ -1322,7 +1410,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
     );
     camera.lookAt(0, 0, 0);
 
-    // Update HUD readouts
     regimeTitleEl.textContent = camState.primaryRegime.label;
     scaleReadoutEl.textContent = `${formatPhysicalSpan(camState.viewSpanM)} · 10^${currentLog10.toFixed(1)} m · Chart #${camState.primaryChartId} (L=${camState.primaryRegime.globalBaseLevel})`;
     zoomSlider.value = currentLog10.toFixed(2);
@@ -1370,8 +1457,32 @@ export async function mountCosmicQuantumZoomDemo(container) {
           Math.sin(ang) * pl.a
         );
       }
-      ironDrop.rotation.y += 0.008;
-      helmholtzSurface.rotation.y -= 0.003;
+      if (continuumSpecimenMesh) {
+        if (continuumSpecimenPhase === 'liquid') {
+          const pulse = 1 + 0.045 * Math.sin(simClock * 3.1);
+          continuumSpecimenMesh.scale.set(pulse, 1 / Math.sqrt(pulse), 2 - pulse);
+          continuumSpecimenMesh.rotation.y += 0.005;
+        } else {
+          continuumSpecimenMesh.rotation.y += 0.008;
+        }
+      }
+      if (continuumGasCloud) {
+        const seeds = continuumGasCloud.userData.seeds;
+        for (let i = 0; i < seeds.length; i += 1) {
+          const sd = seeds[i];
+          const y = -0.9 + ((sd.y + 0.9 + simClock * sd.speed) % 3.4);
+          instDummy.position.set(
+            sd.x + Math.sin(simClock * 1.4 + sd.phase) * 0.22,
+            y,
+            sd.z + Math.cos(simClock * 1.2 + sd.phase) * 0.22
+          );
+          instDummy.scale.setScalar(sd.scale);
+          instDummy.updateMatrix();
+          continuumGasCloud.setMatrixAt(i, instDummy.matrix);
+        }
+        continuumGasCloud.instanceMatrix.needsUpdate = true;
+      }
+      if (continuumHelmholtzGroup) continuumHelmholtzGroup.rotation.y -= 0.003;
       molecularGroup.rotation.y += 0.004;
       atomicGroup.rotation.y += 0.005;
     }
@@ -1397,6 +1508,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
   const api = {
     getState() {
       const cam = scaleBridge.evaluateContinuousZoomCamera(currentLog10);
+      const galPresenterStats = galacticPresenter?.getStats() || null;
       return {
         ready: true,
         log10ViewSpanM: currentLog10,
@@ -1410,10 +1522,20 @@ export async function mountCosmicQuantumZoomDemo(container) {
         gpuAdapterName,
         galacticSteps: galacticEngine.stepIndex,
         galacticBodyCount: galacticEngine.count,
+        galacticGravityMode: galacticEngine.gravityMode,
+        galacticTierId: galaxyTierId,
+        zeroCopyPresenter: Boolean(galPresenterStats?.zeroCopy),
+        zeroCopyBoundFrames: galPresenterStats?.zeroCopyBoundFrames ?? 0,
+        readbackBytesPerFrame: galPresenterStats?.readbackBytesPerFrame ?? null,
         cosmicWebSteps: cosmicWebEngine.stepIndex,
         cosmicScaleFactorA: cosmicWebEngine.scaleFactorA,
         atomicElementZ: selectedElementZ,
         atomicFunctional: selectedFunctional,
+        continuumElementSymbol: currentElementResolution?.properties?.symbol ?? null,
+        continuumElementPhase: currentElementResolution?.properties?.standardPhaseAt298K ?? null,
+        continuumElementTmK: currentElementResolution?.properties?.meltingPointK ?? null,
+        crossChartMultipoleVerified: Boolean(crossChartMultipoleReceipt?.verified),
+        crossChartMultipoleMomentumRelError: crossChartMultipoleReceipt?.momentumRelError ?? null,
         molecularFormula: selectedMoleculeKey,
         molecularBasis: selectedBasis,
         molecularBackend: currentMolecularBackend,
@@ -1435,6 +1557,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
       selectedElementZ = Z;
       selectedFunctional = functional;
       rebuildAtomicScene();
+      await rebuildContinuumFromQuantumElement();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
     },
     async selectMolecule(formula, basis = selectedBasis, viewMode = molecularViewMode) {
@@ -1444,11 +1567,8 @@ export async function mountCosmicQuantumZoomDemo(container) {
       await rebuildMolecularScene();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
     },
-    async selectGalaxyPreset(preset) {
-      galaxyPreset = preset;
-      galacticEngine.resetBodies(createGalacticBodies({ count: 4096, preset, seed: 825 }));
-      await moduleRegistry.resetModuleSession({ model: 'nbody-gravity', version: 1 });
-      syncGalacticGeometry(galacticEngine.getBodies());
+    async selectGalaxyPreset(preset, tierId = galaxyTierId) {
+      await rebuildGalacticSimulation({ tierId, preset });
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
     },
     async stepOnce() {
@@ -1460,8 +1580,10 @@ export async function mountCosmicQuantumZoomDemo(container) {
       disposed = true;
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', onResize);
-      galacticEngine.dispose();
-      cosmicWebEngine.dispose();
+      galacticPresenter?.dispose();
+      cosmicPresenter?.dispose();
+      galacticEngine?.dispose();
+      cosmicWebEngine?.dispose();
       renderer.dispose();
     }
   };

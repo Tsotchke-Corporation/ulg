@@ -4,9 +4,11 @@ import { createUlgTaskCapsule, ULG_SERVICE_IDS, ULG_TASK_KINDS } from '../ulg-gp
 import { createSimulationModuleRegistry } from '../src/runtime/simulationModuleRegistry.js';
 import { createCosmicQuantumScaleBridge } from '../src/runtime/sph/cosmicQuantumScaleBridge.js';
 import {
+  cosmicBarnesHutOctreeWgsl,
   cosmicNBodyTiledWgsl,
   createCosmicWebBodies,
   createGalacticBodies,
+  createResidentBarnesHutNBodyEngine,
   createResidentCosmicModuleRegistration,
   createResidentTiledNBodyEngine
 } from '../src/demos/cosmicQuantumGpuKernels.js';
@@ -202,4 +204,25 @@ test('resident module buffer session stays O(1) memory and fast across 2000 cont
   assert.ok(lastSummary.ledger.leases.length <= 4, `expected bounded leases array, got ${lastSummary.ledger.leases.length}`);
   assert.ok(elapsedMs < 5000, `1200 steps should stay O(1) per frame, took ${elapsedMs.toFixed(1)} ms`);
   galEngine.dispose();
+});
+
+test('createResidentBarnesHutNBodyEngine scales initialization to 32768 bodies and executes finite CPU fallback steps', async () => {
+  assert.ok(cosmicBarnesHutOctreeWgsl.includes('fn bh_deposit_leaves'));
+  assert.ok(cosmicBarnesHutOctreeWgsl.includes('fn bh_integrate'));
+
+  const bodies32k = createGalacticBodies({ count: 32768, preset: 'disk', seed: 825 });
+  assert.equal(bodies32k.length, 32768 * 8);
+  assert.ok(Number.isFinite(bodies32k[0]) && bodies32k[3] > 100);
+
+  const bhCpu = createResidentBarnesHutNBodyEngine({
+    device: null,
+    initialBodies: createGalacticBodies({ count: 128, preset: 'disk', seed: 42 }),
+    mode: 0,
+    boxHalf: 16.0,
+    theta: 0.65
+  });
+  const out = await bhCpu.step({ dt: 0.011, gravity: 1.0, softening: 0.24 });
+  assert.equal(bhCpu.stepIndex, 1);
+  for (const v of out) assert.ok(Number.isFinite(v));
+  bhCpu.dispose();
 });

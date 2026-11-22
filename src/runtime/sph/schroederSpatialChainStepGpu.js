@@ -18,6 +18,7 @@ import { snapshotSchroederChainLocalLaws } from './schroederSpatialChainLocalLaw
 import { sphGpuParticleUploadExactEnergyRows, acquireSphParticleExactMassRead,
   releaseSphParticleExactMassRead } from './sphGpuBuffers.js';
 import { acquireSchroederSpatialSuccessorExactMassRead } from './schroederSpatialSuccessorSourceFamily.js';
+import { flushWorkerQueueSubmitBurst } from '../webgpuComputeLayout.js';
 
 const chainSteps = new WeakMap();
 
@@ -45,7 +46,10 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
   phaseVolumePressureScale = gasPressureMechanicsBoundaryEnabled ? 0 : 1,
   phaseVolumeDragScale = 1, phaseVolumeMaxImpulseFraction = 0.5,
   sourceFamilyConsumerLease = null,
-  prebuiltSpatialEpoch = null
+  prebuiltSpatialEpoch = null,
+  spatialEpochLaneId = null,
+  spatialEpochDirectArenaCount = null,
+  allowClockSegmentReset = false
 } = {}) {
   if (!sphGpuParticleUploadExactEnergyRows(sphParticleUpload)
     || !thermalResponseGraphUpload || !thermalMaterialTable || !mechanicsMaterialTable
@@ -109,9 +113,9 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
         releasePooledSchroederSpatialCompositeMechanicsGpu(composite, { destroy: !executionSubmitted });
       }
       await pressure?.retire(confirmedFence);
-      if(!borrowedSpatialEpoch && generation && !generation.released) {
+      if(!borrowedSpatialEpoch && generation && generation.execution?.released !== true) {
         const releasedQueueOrdered = releaseSchroederSpatialEpochGenerationQueueOrderedAfterFinalConsumer(generation,device);
-        if(!releasedQueueOrdered && !generation.released) {
+        if(!releasedQueueOrdered && generation.execution?.released !== true) {
           if(!releaseSchroederSpatialEpochGenerationAfterQueue(generation,device) && !generation.releasePromise) {
             throw new Error(generation.releaseReason || 'Chain spatial retirement was not admitted');
           }
@@ -141,7 +145,7 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
     const canBorrowPrebuilt = Boolean(
       prebuiltGeneration?.ready === true
       && prebuiltGeneration.selected === true
-      && !prebuiltGeneration.released
+      && prebuiltGeneration.execution?.released !== true
       && prebuiltAssignment
       && Array.isArray(prebuiltGeneration.mechanicsLevelViews)
       && prebuiltGeneration.mechanicsLevelViews.length === mechanicsLevels.length
@@ -163,8 +167,13 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
         minLevel:mechanicsLevels[0].selectedLevel,maxLevel:mechanicsLevels.at(-1).selectedLevel,
         retainAssignmentBuffer:true,readbackMode:'no-full-readback',queueOrderedCleanup:true});
       generation=runSchroederSpatialEpochGenerationWebGpu({device,levelAssignment:assignment,
-        laneId:prebuiltGeneration?.source?.laneId ?? 'ulg-mechanics-resident-stage-worker',
-        particleCount,particleIdentityBuffer:sphParticleUpload.identityBuffer,
+        laneId:spatialEpochLaneId ?? prebuiltGeneration?.source?.laneId ?? 'ulg-mechanics-resident-stage-worker',
+        particleCount,
+        ...(particleCount > 0 ? { activeSourceCapacity: particleCount } : {}),
+        ...(Number.isInteger(spatialEpochDirectArenaCount)
+          ? { directArenaCount: spatialEpochDirectArenaCount }
+          : {}),
+        particleIdentityBuffer:sphParticleUpload.identityBuffer,
         particleIdentityStrideWords:sphParticleUpload.identityStrideBytes/4,
         exactCellAtlas:{cellMin:[0,0,0],cellCount:[...mechanicsLevels[0].mechanicsGrid.gridDims]},
         mechanicsLevels});
@@ -202,6 +211,7 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
       thermalMaterialTable,mechanicsMaterialTable,thermalResponseGraphUpload,
       schroederSpatialThermalProposal:thermalProposal,
       schroederSpatialEpochGeneration:generation,schroederSpatialEpochTransaction:transaction,
+      allowChainClockSegmentReset:allowClockSegmentReset === true,
       boxDimsM:forceInputs.boxDimsM,dtSeconds:forceInputs.dt,readbackMode:'no-full-readback'});
     continuation=await createMlsMpmChainPrivateContinuation(closure);
     const admission=resolveMlsMpmChainClosureAdmission(closure);
@@ -229,6 +239,7 @@ export async function runSchroederSpatialChainStepWebGpu({ device,
           minLevel:mechanicsLevels[0].selectedLevel,maxLevel:mechanicsLevels.at(-1).selectedLevel}), retainForPublication }) });
     return result;
   } catch(error) {
+    flushWorkerQueueSubmitBurst(device, 'chain-step-error-cleanup');
     try {await error.chainClosureCleanupCompletion;} catch(cleanupError) {error.chainClosureCleanupError=cleanupError;}
     error.chainStepCleanupCompletion=retire(device.queue.onSubmittedWorkDone().then(()=>true));
     // Keep the original numerical error while exposing any incomplete cleanup.

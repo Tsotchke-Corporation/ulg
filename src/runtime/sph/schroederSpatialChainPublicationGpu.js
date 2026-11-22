@@ -51,7 +51,7 @@ function publicState(previous,upload) {
  * The caller's resident owner still performs ComputeManager/StateManager
  * admission. One fixed 128-byte observation occurs at its batch boundary;
  * no particle payload is read and no intermediate interval is observed. */
-export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep}={}) {
+export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep,abortIfAcceptedBelow=0}={}) {
   const [{resolveSchroederSpatialChainStep},closureModule,buffers,{runSchroederLevelAssignmentWebGpu},spatial,transaction]=await Promise.all([
     import('./schroederSpatialChainStepGpu.js'),import('./sphMlsMpmPostMechanicsClosure.js'),
     import('./sphGpuBuffers.js'),import('./schroederHierarchyGpu.js'),
@@ -97,6 +97,21 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep}
       || time<finalStep.sphParticleState.time) {
       throw new RangeError('Chain batch accepted clock exceeds public lineage capacity');
     }
+    if (abortIfAcceptedBelow > 0 && acceptedStepCount < abortIfAcceptedBelow && error === 1) {
+      return Object.freeze({
+        schema:'peercompute.ulg.chain-batch-incomplete-mechanics-rejection.v1',
+        status:'incomplete-mechanics-rejection',
+        published:false,
+        clockReceipt:Object.freeze({
+          schema:'peercompute.ulg.chain-batch-publication.v1',step,time,
+          acceptedStepCount,
+          acceptedIntervalCount:accepted,rejectedIntervalCount:rejected,attemptedIntervalCount:attempted,
+          admissionErrorMask:error,
+          dtSeconds:clock.dt,
+          mapAsyncCount:1,readbackBytes:128
+        })
+      });
+    }
     const capture=resolveMlsMpmChainPrivateExactMassContinuation(original.closure,finalStep.claim,finalStep.nextParticleUploads);
     const uploads={...finalStep.nextParticleUploads,
       sphParticleUpload:borrowedUpload(finalStep.nextParticleUploads.sphParticleUpload),
@@ -109,6 +124,7 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep}
       acceptedStepCount,
       acceptedIntervalCount:accepted,rejectedIntervalCount:rejected,attemptedIntervalCount:attempted,
       admissionErrorMask:error,
+      dtSeconds:clock.dt,
       mapAsyncCount:1,readbackBytes:128});
     record={device,step:finalStep,closure:original.closure,uploads,read,taken:false,closed:false,
       resolveStep:resolveSchroederSpatialChainStep,validateRead:validateSphParticleExactMassRead,

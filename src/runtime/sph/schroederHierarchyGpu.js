@@ -18560,6 +18560,10 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
         spatialEpochGeneration?.ready === true && levelAssignment
           ? { generation: spatialEpochGeneration, assignment: levelAssignment }
           : null,
+      allowAdaptiveDtRefinement: true,
+      onAdaptiveRetryAttempt: () => {
+        chainCapturedOpticsHook = null;
+      },
       closureOptions: chainClosureOptions
     });
     const chainStep = chainBatch.finalStep;
@@ -18567,9 +18571,12 @@ async function runSchroederSameLevelMechanicsWebGpuImpl({
     chainStep.nextMlsMpmParticleState = chainBatch.nextMlsMpmParticleState;
     chainStep.mechanicsLevelCount = chainLevelCount;
     chainStep.schroederLevelChainEnabled = true;
+    chainStep.chainBatchAttemptedStepCount = resolvedChainBatchStepCount;
     chainStep.chainBatchStepCount =
       chainBatch.chainClockReceipt?.acceptedBatchStepCount
       ?? resolvedChainBatchStepCount;
+    chainStep.chainAdaptiveDtSeconds =
+      chainBatch.chainClockReceipt?.dtSeconds ?? chainDtS;
     chainStep.schroederRequestedReadbackMode = readbackMode;
     chainStep.schroederSpatialTransitionPolicy = spatialTransitionPolicy;
     chainStep.residentProductMass = chainBatch.nextResidentProductMass ?? null;

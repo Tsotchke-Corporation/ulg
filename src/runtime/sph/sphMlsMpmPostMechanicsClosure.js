@@ -2689,6 +2689,7 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
   stageMechanicsTracer = null,
   afterReactionStep = null,
   afterPhaseCarrierTransfer = null,
+  allowChainClockSegmentReset = false,
   queueOrderedProducerClaims = []
 } = {}) {
   if (vaporAerosolExchange != null) {
@@ -2942,7 +2943,18 @@ export async function runMlsMpmPostMechanicsClosureWebGpu({
     if(!chainCapture && massCapture.g2p.sourceRead.residentClock) {
       throw new TypeError('A private chain source requires its state/clock-aware chain producer');
     }
-    if(chainCapture) chainCapture.sourceClock=massCapture.g2p.sourceRead.residentClock??null;
+    if (chainCapture) {
+      const inheritedClock = massCapture.g2p.sourceRead.residentClock ?? null;
+      const startNewSegment = Boolean(
+        allowChainClockSegmentReset === true
+        && inheritedClock
+        && inheritedClock.dt !== dtSeconds
+        && sphParticleUpload?.physicsSubstep === 0
+        && sphParticleState?.step === sphParticleUpload?.step
+        && sphParticleState?.time === sphParticleUpload?.time
+      );
+      chainCapture.sourceClock = startNewSegment ? null : inheritedClock;
+    }
     if(chainCapture && inputResidentProductMass!==(massCapture.g2p.sourceRead.residentProductMass??null)) {
       throw new TypeError('Private chain history differs from its original particle owner');
     }

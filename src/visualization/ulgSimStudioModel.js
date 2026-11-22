@@ -501,7 +501,12 @@ export function buildLaunchParamsFromStagedConfig(config) {
         submitBurstSteps: '4',
         environmentAirParcels: 'mixture',
         exactEnergyLedger: '1',
-        splitSpareLineages: String(Math.min(256, Math.max(64, totalParticlesOf(internalBodies))))
+        splitSpareLineages: String(Math.min(256, Math.max(64, totalParticlesOf(internalBodies)))),
+        ...(config.laws?.reactions === true
+          && baseRuntime.reactionProductReserveExactDiscovery !== '1'
+          && baseRuntime.reactionProductReserveMinimumLiveFraction == null
+          ? { reactionProductReserveMinimumLiveFraction: '1' }
+          : {})
       };
     } else {
       twoLevelAirRuntime = {

@@ -809,6 +809,17 @@ fn apply_capture_segment_tails(@builtin(global_invocation_id) global_id: vec3<u3
   next_state[state_base] = vec4<f32>(position_out, total_mass);
   next_state[state_base + 1u] = vec4<f32>(velocity_out, internal_out);
   next_thermo[thermo_base] = vec4<f32>(thermo0.xy, temperature_out, thermo0.w);
+  // Capture-merge changes internal_out, invalidating any pre-merge two-phase
+  // plateau fractions carried on thermo1. Keep thermo1 one-hot on the active
+  // receiver phase so phase-carrier transfer does not check stale plateau
+  // weights against the new internal_out; the next thermal step re-evaluates
+  // exact equilibrium fractions from internal_out.
+  next_thermo[thermo_base + 1u] = vec4<f32>(
+    select(0.0, 1.0, thermo0.y >= 0.5 && thermo0.y < 1.5),
+    select(0.0, 1.0, thermo0.y >= 1.5 && thermo0.y < 2.5),
+    select(0.0, 1.0, thermo0.y >= 2.5 && thermo0.y < 3.5),
+    select(0.0, 1.0, thermo0.y >= 3.5)
+  );
   next_thermo[thermo_base + 2u] = vec4<f32>(
     thermo2.x,
     merged_represented_entity_count,

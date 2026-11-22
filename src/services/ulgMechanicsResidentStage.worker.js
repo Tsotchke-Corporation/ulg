@@ -5259,6 +5259,13 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
       }; run schroederSameLevelMechanics first`
     );
   }
+  if (previousLane?.pendingChainStepCleanup) {
+    flushWorkerQueueSubmitBurst(device, 'chain-prev-step-retire');
+    try {
+      await previousLane.pendingChainStepCleanup;
+    } catch {}
+    previousLane.pendingChainStepCleanup = null;
+  }
   const laneSphUpload = previousLane?.sphParticleUpload || null;
   const laneMlsUpload = previousLane?.mlsMpmParticleUpload || null;
   const retainedSourceFamily = previousLane?.successorSourceFamily
@@ -5680,6 +5687,10 @@ async function runWorkerSchroederSpatialEpochStage(data = {}) {
     // particlePingPong advances from them.
     sphParticleState: previousLane?.sphParticleState ?? null,
     mlsMpmParticleState: previousLane?.mlsMpmParticleState ?? null,
+    chainAdaptiveBaseDtS: previousLane?.chainAdaptiveBaseDtS ?? null,
+    chainAdaptiveDtS: previousLane?.chainAdaptiveDtS ?? null,
+    chainAdaptiveCleanBatches: previousLane?.chainAdaptiveCleanBatches ?? 0,
+    pendingChainStepCleanup: null,
     // Immutable law inputs and their device-local uploads are lane lifetime
     // state, not epoch lifetime state. Preserve them across the per-step
     // epoch record rebuild so continuation schedules neither disable those
@@ -6375,6 +6386,24 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         label: 'ulg-worker-two-level-queue-stage-recorder'
       })
     : null;
+  const baseChainDtS = enableLevelChainMechanics && Number.isFinite(Number(data.dt)) && Number(data.dt) > 0
+    ? Math.fround(Number(data.dt))
+    : null;
+  let effectiveDt = data.dt;
+  if (enableLevelChainMechanics && baseChainDtS != null) {
+    if (lane.chainAdaptiveBaseDtS !== baseChainDtS) {
+      lane.chainAdaptiveBaseDtS = baseChainDtS;
+      lane.chainAdaptiveDtS = baseChainDtS;
+      lane.chainAdaptiveCleanBatches = 0;
+    }
+    if (
+      Number.isFinite(lane.chainAdaptiveDtS)
+      && lane.chainAdaptiveDtS > 0
+      && lane.chainAdaptiveDtS <= baseChainDtS
+    ) {
+      effectiveDt = lane.chainAdaptiveDtS;
+    }
+  }
   let kernelResult = null;
   let successorLeaseReleasePromise = null;
   try {
@@ -6459,7 +6488,7 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
         data.enablePhaseVolumeMigration === true,
       ...phaseSlotRefinementOptions,
       boxDimsM: data.boxDimsM ?? [5, 5, 5],
-      ...(data.dt != null ? { dt: data.dt } : {}),
+      ...(effectiveDt != null ? { dt: effectiveDt } : {}),
       ...(data.gravityMPerS2 != null
         ? { gravityMPerS2: data.gravityMPerS2 }
         : {}),
@@ -6834,6 +6863,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           ? { after: device.queue.onSubmittedWorkDone().then(() => true) }
           : {})
       });
+      if (
+        previousResidentStep.status === 'schroeder-chain-resident-step-executed'
+        && previousResidentStep.residentCleanupCompletion
+      ) {
+        lane.pendingChainStepCleanup = previousResidentStep.residentCleanupCompletion;
+      }
     } catch (error) {
       record.poisonedCanonicalResidentStep = residentStep;
       poisonWorkerResidentScheduleLane(record, {
@@ -6851,6 +6886,31 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
   lane.residentStep = residentStep;
   lane.sphParticleUpload = nextSphUpload;
   lane.mlsMpmParticleUpload = nextMlsUpload;
+  if (enableLevelChainMechanics && baseChainDtS != null) {
+    const clockReceipt = kernelResult?.chainClockReceipt ?? residentStep?.chainClockReceipt ?? null;
+    const executedDtS = Number.isFinite(clockReceipt?.dtSeconds) && clockReceipt.dtSeconds > 0
+      ? Math.fround(clockReceipt.dtSeconds)
+      : effectiveDt;
+    const rejectedCount = Number(clockReceipt?.rejectedBatchStepCount ?? 0);
+    const acceptedCount = Number(clockReceipt?.acceptedBatchStepCount ?? 0);
+    const admissionErr = Number(clockReceipt?.admissionErrorMask ?? 0);
+    const minAdaptiveDtS = Math.max(1e-8, Math.fround(baseChainDtS / 512));
+    if (rejectedCount > 0 && admissionErr === 1) {
+      lane.chainAdaptiveDtS = Math.max(minAdaptiveDtS, Math.fround(executedDtS / 4));
+      lane.chainAdaptiveCleanBatches = 0;
+    } else if (rejectedCount === 0 && acceptedCount > 0) {
+      lane.chainAdaptiveDtS = executedDtS;
+      if (executedDtS < baseChainDtS) {
+        lane.chainAdaptiveCleanBatches = (lane.chainAdaptiveCleanBatches || 0) + 1;
+        if (lane.chainAdaptiveCleanBatches >= 8) {
+          lane.chainAdaptiveDtS = Math.min(baseChainDtS, Math.fround(executedDtS * 2));
+          lane.chainAdaptiveCleanBatches = 0;
+        }
+      } else {
+        lane.chainAdaptiveCleanBatches = 0;
+      }
+    }
+  }
   captureWorkerLaneFingerprint(record.workerDevice, nextSphUpload);
   // A batched schedule has one host-visible fence at its terminal boundary.
   // Its normal success path can retire this generation synchronously because
@@ -7293,6 +7353,12 @@ async function runWorkerSchroederSameLevelMechanicsStage(data = {}) {
           ? residentStep.chainBatchStepCount
           : Number.isSafeInteger(kernelResult?.chainClockReceipt?.acceptedBatchStepCount)
             ? kernelResult.chainClockReceipt.acceptedBatchStepCount
+            : null,
+      chainBatchAttemptedStepCount:
+        Number.isSafeInteger(residentStep.chainBatchAttemptedStepCount)
+          ? residentStep.chainBatchAttemptedStepCount
+          : Number.isSafeInteger(kernelResult?.chainClockReceipt?.attemptedBatchStepCount)
+            ? kernelResult.chainClockReceipt.attemptedBatchStepCount
             : null,
       mechanicsLevelCount: currentSeal.mechanicsLevelCount ?? null,
       twoLevelMechanicsAuthority:
@@ -11770,6 +11836,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       });
     };
     let completedStepCount = 0;
+    let chainBatchScheduleCompleted = false;
     let cancelled = false;
     let previousEpochSeal = null;
     let lastMechanicsStageResult = null;
@@ -13508,16 +13575,26 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         });
         terminalRefluxTargetsByStep.delete(stepOrdinal);
       }
+      const chainBatchAttemptedSteps =
+        residentStepSummary?.levelChainMechanicsEnabled === true
+        && Number.isSafeInteger(residentStepSummary?.chainBatchAttemptedStepCount)
+        && residentStepSummary.chainBatchAttemptedStepCount > 1
+          ? residentStepSummary.chainBatchAttemptedStepCount
+          : null;
       const chainBatchCompletedSteps =
         residentStepSummary?.levelChainMechanicsEnabled === true
         && Number.isSafeInteger(residentStepSummary?.chainBatchStepCount)
-        && residentStepSummary.chainBatchStepCount > 1
+        && (
+          residentStepSummary.chainBatchStepCount > 1
+          || (chainBatchAttemptedSteps != null && residentStepSummary.chainBatchStepCount >= 1)
+        )
           ? residentStepSummary.chainBatchStepCount
           : null;
       completedStepCount = chainBatchCompletedSteps != null
         ? Math.min(stepCount, (stepOrdinal - 1) + chainBatchCompletedSteps)
         : stepOrdinal;
       if (chainBatchCompletedSteps != null) {
+        chainBatchScheduleCompleted = true;
         stepOrdinal = stepCount;
       }
       previousEpochSeal = currentStepSeal;
@@ -14182,7 +14259,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     const reactionActivationObservationCaptureAllowed = Boolean(
       reactionActivationObservationExpected
       && cancelled === false
-      && completedStepCount === stepCount
+      && (completedStepCount === stepCount || chainBatchScheduleCompleted)
     );
     const expectedReactionActivationProducerRoute = tier0RouteSelected
       ? 'tier0-fused-resident-sequence'

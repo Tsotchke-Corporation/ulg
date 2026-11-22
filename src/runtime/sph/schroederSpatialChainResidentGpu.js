@@ -1,5 +1,9 @@
+import { flushWorkerQueueSubmitBurst } from '../webgpuComputeLayout.js';
+
 // The existing resident sequence/ComputeManager owns scheduling and admission.
 // This adapter supplies its numerical batch and its original cleanup owner.
+export const SCHROEDER_CHAIN_PRIVATE_DT_REFINEMENT_LADDER = Object.freeze([4, 8, 16, 32, 64, 128, 256]);
+const SCHROEDER_CHAIN_MIN_REFINED_DT_S = 1e-8;
 const residentSteps = new WeakMap();
 const residentDeltas = new WeakMap();
 
@@ -134,32 +138,113 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
     gridDims:[...level.mechanicsGrid.gridDims],boxDimsM:[...level.mechanicsGrid.boxDimsM]}}));
   const classificationPolicy = {...config.classificationPolicy};
   const mechanicsOptions = {...args.mechanicsOptions};
-  let current = { sphParticleState:args.sphParticleState, mlsMpmParticleState:args.mlsMpmParticleState,
-    nextParticleUploads:{sphParticleUpload:args.sphParticleUpload,mlsMpmParticleUpload:args.mlsMpmParticleUpload} };
+  const allowAdaptiveDtRefinement = args.allowAdaptiveDtRefinement === true;
+  const onAdaptiveRetryAttempt = typeof args.onAdaptiveRetryAttempt === 'function'
+    ? args.onAdaptiveRetryAttempt
+    : null;
+  const spatialEpochLaneId = args.prebuiltInitialSpatialEpoch?.generation?.source?.laneId ?? null;
+  const spatialEpochDirectArenaCount = Number.isInteger(
+    args.prebuiltInitialSpatialEpoch?.generation?.directArenaCount
+  )
+    ? args.prebuiltInitialSpatialEpoch.generation.directArenaCount
+    : null;
+  const baseDt = forceInputs.dt;
+  const dtAttempts = [{ dt: baseDt, factor: 1 }];
+  if (allowAdaptiveDtRefinement) {
+    let previousDt = baseDt;
+    for (const factor of SCHROEDER_CHAIN_PRIVATE_DT_REFINEMENT_LADDER) {
+      const candidateDt = Math.fround(baseDt / factor);
+      if (candidateDt >= SCHROEDER_CHAIN_MIN_REFINED_DT_S && candidateDt < previousDt) {
+        dtAttempts.push({ dt: candidateDt, factor });
+        previousDt = candidateDt;
+      }
+    }
+  }
   const privateSteps = [];
   let publication;
+  let activeDt = baseDt;
+  let activeFactor = 1;
   try {
     // The CPU encodes the requested count, never decides whether an interval
     // passed. GPU rejection restores state and holds the accepted clock.
-    for (let index = 0; index < stepCount; index++) {
-      const next = await runSchroederSpatialChainStepWebGpu({
-        ...args, mechanicsLevels, classificationPolicy, forceInputs, mechanicsOptions, ...current.nextParticleUploads,
-        sphParticleState:current.sphParticleState, mlsMpmParticleState:current.mlsMpmParticleState,
-        sourceFamilyConsumerLease: index === 0 ? args.sourceFamilyConsumerLease ?? null : null,
-        prebuiltSpatialEpoch: index === 0 ? args.prebuiltInitialSpatialEpoch ?? null : null,
-        device, closureOptions, retainForPublication:index === stepCount - 1 });
-      privateSteps.push(next);
-      current = next;
+    // When adaptive dt refinement is enabled and an entire batch is rejected
+    // solely by explicit mechanics/CFL admission (error === 1), cleanly retire
+    // the unaccepted attempt before spatial publication and retry with a new
+    // clock segment at dyadically refined dt.
+    for (let attemptIndex = 0; attemptIndex < dtAttempts.length; attemptIndex++) {
+      const { dt: attemptDt, factor } = dtAttempts[attemptIndex];
+      const isFirstAttempt = attemptIndex === 0;
+      const isLastAttempt = attemptIndex === dtAttempts.length - 1;
+      activeDt = attemptDt;
+      activeFactor = factor;
+      const attemptForceInputs = attemptDt === forceInputs.dt
+        ? forceInputs
+        : { ...forceInputs, dt: attemptDt };
+      let current = {
+        sphParticleState: args.sphParticleState,
+        mlsMpmParticleState: args.mlsMpmParticleState,
+        nextParticleUploads: {
+          sphParticleUpload: args.sphParticleUpload,
+          mlsMpmParticleUpload: args.mlsMpmParticleUpload
+        }
+      };
+      for (let index = 0; index < stepCount; index++) {
+        const next = await runSchroederSpatialChainStepWebGpu({
+          ...args, mechanicsLevels, classificationPolicy, forceInputs: attemptForceInputs, mechanicsOptions,
+          ...current.nextParticleUploads,
+          sphParticleState: current.sphParticleState,
+          mlsMpmParticleState: current.mlsMpmParticleState,
+          sourceFamilyConsumerLease: index === 0 ? args.sourceFamilyConsumerLease ?? null : null,
+          prebuiltSpatialEpoch: isFirstAttempt && index === 0 ? args.prebuiltInitialSpatialEpoch ?? null : null,
+          spatialEpochLaneId,
+          spatialEpochDirectArenaCount,
+          allowClockSegmentReset: index === 0 && allowAdaptiveDtRefinement,
+          device, closureOptions, retainForPublication: index === stepCount - 1
+        });
+        privateSteps.push(next);
+        current = next;
+      }
+      publication = await publishSchroederSpatialChainBatchWebGpu({
+        device,
+        finalStep: privateSteps.at(-1),
+        abortIfAcceptedBelow: allowAdaptiveDtRefinement && !isLastAttempt ? stepCount : 0
+      });
+      if (publication.published === false && publication.status === 'incomplete-mechanics-rejection') {
+        const after = device.queue.onSubmittedWorkDone().then(() => true);
+        await after;
+        for (const privateStep of [...privateSteps].reverse()) await privateStep.retire(Promise.resolve(true));
+        // Drain any burst-parked deferInBurst cleanups (finite-wall / parcel /
+        // exact-mass source borrows) so the untouched original source owners
+        // are completely released before retrying from the same batch origin.
+        for (let drain = 0; drain < 2; drain++) {
+          flushWorkerQueueSubmitBurst(device, 'chain-retry-retire');
+          await device.queue.onSubmittedWorkDone();
+          await Promise.resolve();
+          await Promise.resolve();
+        }
+        privateSteps.length = 0;
+        publication = null;
+        const nextAttempt = dtAttempts[attemptIndex + 1];
+        onAdaptiveRetryAttempt?.({ rejectedDt: attemptDt, nextDt: nextAttempt.dt, factor: nextAttempt.factor });
+        continue;
+      }
+      break;
     }
-    publication = await publishSchroederSpatialChainBatchWebGpu({device,finalStep:privateSteps.at(-1)});
     const accepted = publication.clockReceipt.acceptedStepCount;
     if (accepted > stepCount) throw new Error('Resident chain accepted more intervals than it executed');
-    const clock = Object.freeze({...publication.clockReceipt, attemptedBatchStepCount:stepCount,
-      acceptedBatchStepCount:accepted, rejectedBatchStepCount:stepCount - accepted});
+    const clock = Object.freeze({
+      ...publication.clockReceipt,
+      dtSeconds: activeDt,
+      baseDtSeconds: baseDt,
+      refinedDtFactor: activeFactor,
+      attemptedBatchStepCount: stepCount,
+      acceptedBatchStepCount: accepted,
+      rejectedBatchStepCount: stepCount - accepted
+    });
     const finalStep = {
       schema:abi.ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA, backend:'webgpu',
       status:'schroeder-chain-resident-step-executed', step:clock.step, time:clock.time,
-      dtSeconds:forceInputs.dt, sequence:clock.step,
+      dtSeconds:activeDt, sequence:clock.step,
       nextParticleUploads:publication.nextParticleUploads,
       nextParticleCount:publication.nextParticleUploads.sphParticleUpload.particleCount,
       schroederSpatialSuccessorSourceFamily:publication.publication.sourceFamily,
@@ -193,6 +278,7 @@ export async function runSchroederSpatialChainResidentBatchWebGpu({ stepCount, .
       chainClockReceipt:clock
     };
   } catch (error) {
+    flushWorkerQueueSubmitBurst(device, 'chain-batch-error-cleanup');
     const after = device.queue.onSubmittedWorkDone().then(() => true);
     error.residentSequenceCleanupCompletion = (async () => {
       await after;

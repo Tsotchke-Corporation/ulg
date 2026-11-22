@@ -200,10 +200,12 @@ fn correction(row:Row,parent:u32,weight:f32)->vec4<f32> {
   let heat=deltaBudget-deltaK;
   if(!finite(heat) || heat < -max(1e-12,abs(deltaBudget)*3e-5+abs(bitcast<f32>(original[a+7u]))*3e-5)
     || updated[b]!=original[a]) { numeric_fail(1u); }
-  // Keep the signed roundoff residual instead of clamping it into invented
-  // energy. Across all contributors the work terms sum to deltaK exactly;
-  // the remaining mass-weighted term carries the parent's heat increment.
-  let energy=dot(momentum(row),dv)+0.5*row[0]*dot(dv,dv)+(row[0]/mass)*heat;
+  // The fail-closed bound above rejects genuine negative heat; any remaining
+  // negative residual is bounded f32 cancellation from subtracting coarser
+  // composite budgets. Clamp it to zero before scaling by row[0]/mass so
+  // coarse-cell f32 roundoff cannot amplify past a calm child's own kinetic
+  // budget during N>=3 level prolongation.
+  let energy=dot(momentum(row),dv)+0.5*row[0]*dot(dv,dv)+(row[0]/mass)*max(0.0,heat);
   return weight*vec4<f32>(row[0]*dv,energy);
 }
 fn store_fine(i:u32,row:Row) { for(var w=0u;w<8u;w++) { atomicStore(&fine_out[64u+i*8u+w],bitcast<u32>(row[w])); } }

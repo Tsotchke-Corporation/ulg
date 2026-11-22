@@ -234,7 +234,9 @@ fn placement_classifier_consider_candidate(
   event_phase_id: f32,
   event_support_radius_m: f32,
   best_slot: ptr<function, u32>,
-  best_distance_squared: ptr<function, f32>
+  best_distance_squared: ptr<function, f32>,
+  condensed_slot: ptr<function, u32>,
+  condensed_distance_squared: ptr<function, f32>
 ) {
   if (candidate >= params.particle_count) {
     return;
@@ -251,9 +253,19 @@ fn placement_classifier_consider_candidate(
     return;
   }
   let candidate_thermo0 = next_thermo[candidate * params.thermo_stride_vec4];
+  let exact_phase_match = candidate_thermo0.y == event_phase_id;
+  // Exothermic reactions often emit condensed products at their static
+  // standard-state phase (e.g. solid NaOH or CsF) even though existing
+  // product carriers at the reaction interface have already melted to liquid.
+  // Prefer an exact same-phase match first, and allow condensed-to-condensed
+  // capture merge when no exact-phase carrier exists within capture radius;
+  // subsequent thermal + phase-carrier transfer equilibrates exact phase lanes.
+  let condensed_phase_match = !exact_phase_match
+    && placement_classifier_phase_is_condensed(event_phase_id)
+    && placement_classifier_phase_is_condensed(candidate_thermo0.y);
   if (
     candidate_thermo0.x != event_material_id
-    || candidate_thermo0.y != event_phase_id
+    || (!exact_phase_match && !condensed_phase_match)
     || !(candidate_thermo0.w > 0.0)
   ) {
     placement_receipt_increment(
@@ -273,18 +285,28 @@ fn placement_classifier_consider_candidate(
   );
   let delta = event_position - candidate_state0.xyz;
   let distance_squared = dot(delta, delta);
-  if (
-    distance_squared <= capture_radius_m * capture_radius_m
-    && (
-      distance_squared < *best_distance_squared
+  if (distance_squared <= capture_radius_m * capture_radius_m) {
+    if (exact_phase_match) {
+      if (
+        distance_squared < *best_distance_squared
+        || (
+          distance_squared == *best_distance_squared
+          && candidate < *best_slot
+        )
+      ) {
+        *best_slot = candidate;
+        *best_distance_squared = distance_squared;
+      }
+    } else if (
+      distance_squared < *condensed_distance_squared
       || (
-        distance_squared == *best_distance_squared
-        && candidate < *best_slot
+        distance_squared == *condensed_distance_squared
+        && candidate < *condensed_slot
       )
-    )
-  ) {
-    *best_slot = candidate;
-    *best_distance_squared = distance_squared;
+    ) {
+      *condensed_slot = candidate;
+      *condensed_distance_squared = distance_squared;
+    }
   }
 }
 
@@ -417,6 +439,8 @@ fn classify_product_events(
 
   var best_slot = params.particle_count;
   var best_distance_squared = 3.0e38;
+  var condensed_slot = params.particle_count;
+  var condensed_distance_squared = 3.0e38;
   var malformed = false;
   for (
     var level_ordinal = 0u;
@@ -594,7 +618,9 @@ fn classify_product_events(
               row2.w,
               event_support_radius_m,
               &best_slot,
-              &best_distance_squared
+              &best_distance_squared,
+              &condensed_slot,
+              &condensed_distance_squared
             );
           }
           if (malformed) {
@@ -622,6 +648,10 @@ fn classify_product_events(
       ${SPH_REACTION_PRODUCT_PLACEMENT_RECEIPT_INDEX.classifierUnknownCount}u
     );
     return;
+  }
+  if (best_slot >= params.particle_count && condensed_slot < params.particle_count) {
+    best_slot = condensed_slot;
+    best_distance_squared = condensed_distance_squared;
   }
   if (best_slot < params.particle_count) {
     placement_receipt_increment(

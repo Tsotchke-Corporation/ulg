@@ -134,7 +134,7 @@ export async function prepareSphExactPhaseCarrierStage(args) {
     const pipelines = [];
     for (const entryPoint of ['prepare_phase_geometry', 'apply_phase_physical', 'restore_rejected_phase_physical']) {
       const pipeline = await prewarmCachedExplicitComputePipeline(device, { code: physicalCode, entryPoint,
-        label: entryPoint, cacheKey: `ulg-exact-${entryPoint}-v1:${format.wordCount}`,
+        label: entryPoint, cacheKey: `ulg-exact-${entryPoint}-v2:${format.wordCount}`,
         bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
       if (!pipeline.pipeline) throw pipeline.error ?? new Error(`Phase physical pipeline unavailable: ${entryPoint}`);
       pipelines.push({ pipeline, group: device.createBindGroup({ layout: pipeline.bindGroupLayout,

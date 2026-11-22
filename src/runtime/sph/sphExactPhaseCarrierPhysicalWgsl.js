@@ -83,7 +83,18 @@ fn prepare_phase_geometry(@builtin(global_invocation_id) id: vec3<u32>) {
     found = true;
   }
   geometry[row * 8u + 4u] = template_row;
-  if (!found) { geometry[row * 8u + 7u] = 0xffffffffu; return; }
+  if (!found) {
+    var lineage_live = false;
+    for (var lane = 0u; lane < 4u && !lineage_live; lane++) {
+      let source_row = lane * params.lineage_capacity + lineage;
+      for (var p = 0u; p < 4u; p++) {
+        if (packet_nonzero(source_row, p)) { lineage_live = true; break; }
+      }
+    }
+    geometry[row * 8u + 5u] = select(0u, 1u, lineage_live);
+    geometry[row * 8u + 7u] = 0xffffffffu;
+    return;
+  }
   let material = source_thermo[template_row * 3u].x;
   let record = phase_record(material, phase + 1u);
   if (record == 0xffffffffu) { atomicOr(&validation[0], 0x20000u); return; }
@@ -116,6 +127,18 @@ fn apply_phase_physical(@builtin(global_invocation_id) id: vec3<u32>) {
   let row = id.x; if (row >= params.particle_count || atomicLoad(&validation[0]) != 0u) { return; }
   let phase = row / params.lineage_capacity + 1u; let record = geometry[row * 8u + 7u];
   if (record == 0xffffffffu) {
+    if (geometry[row * 8u + 5u] == 0u) {
+      // Dormant/empty lineage: preserve exact source status (253 reaction
+      // product reserve, 252 split-spare reserve, 254 phase companion) rather
+      // than clobbering primary reserve slots into companion status 254.
+      out_state[row * 2u] = vec4<f32>(source_state[row * 2u].xyz, 0.0);
+      out_state[row * 2u + 1u] = source_state[row * 2u + 1u];
+      out_thermo[row * 3u] = source_thermo[row * 3u];
+      out_thermo[row * 3u + 1u] = vec4<f32>(0.0);
+      out_thermo[row * 3u + 2u] = source_thermo[row * 3u + 2u];
+      for (var i = 0u; i < 8u; i++) { out_mechanics[row * 8u + i] = source_mechanics[row * 8u + i]; }
+      out_mechanics[row * 8u + 4u].w = 0.0; out_mechanics[row * 8u + 7u].w = 0.0; return;
+    }
     out_state[row * 2u] = vec4<f32>(source_state[row * 2u].xyz, 0.0);
     out_state[row * 2u + 1u] = source_state[row * 2u + 1u];
     out_thermo[row * 3u] = vec4<f32>(source_thermo[row * 3u].x, f32(phase), source_thermo[row * 3u].zw);

@@ -23,8 +23,7 @@ import {
 import { runSchroederScaleAtlasMultipoleWebGpu } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
 import {
   createRelaySignalingTransport,
-  startClientDerivationRequester,
-  startClientDerivationResponder
+  startLiveClientDerivationPeerMesh
 } from '../services/clientDerivationPeers.js';
 import {
   VOLUMETRIC_ORBITAL_MODES,
@@ -377,60 +376,78 @@ export async function mountCosmicQuantumZoomDemo(container) {
     }
     try {
       const peerId = `cq-${peerRole}-${Math.random().toString(36).slice(2, 8)}`;
-      const transport = createRelaySignalingTransport({
-        relayUrl: peerRelayUrl,
-        roomId: peerRoomId,
-        peerId,
-        enableWebRtc: false
-      });
+      const taskModuleUrl = globalThis.location?.href
+        ? new URL('/src/services/cosmicQuantumPeerTask.js', globalThis.location.href).href
+        : null;
       let handle = null;
-      if (peerRole === 'responder') {
-        handle = await startClientDerivationResponder({
-          transport,
+      let transport = null;
+      if (peerRole === 'observer') {
+        // Observer role: passive WebSocket room listener tracking live peer presence & traffic
+        transport = createRelaySignalingTransport({
+          relayUrl: peerRelayUrl,
+          roomId: peerRoomId,
           peerId,
-          channelName: peerRoomId,
-          executor: async (task) => {
-            const z = Number(task?.payload?.atomicNumberZ ?? task?.atomicNumberZ ?? selectedElementZ);
-            const res = await materialPipeline.resolveElement(z, { gridPointsN: 256, includeGasPhase: true });
-            return {
-              symbol: res.properties.symbol,
-              standardPhaseAt298K: res.properties.standardPhaseAt298K,
-              meltingPointK: Math.round(res.properties.meltingPointK || 0),
-              resolverStatus: res.resolverStatus,
-              scientificValidation: false
-            };
-          }
+          enableWebRtc: false
         });
-      } else if (peerRole === 'requester') {
-        handle = await startClientDerivationRequester({
-          transport,
-          peerId,
-          channelName: peerRoomId,
-          quorum: 2,
-          staleMs: 2500
-        });
-      } else {
-        // Observer role: passive WebSocket room listener tracking live peer presence
         const seenPeers = new Set();
+        let witnessedMessages = 0;
+        let lastWitnessedType = null;
         transport.onMessage((env) => {
+          witnessedMessages += 1;
+          lastWitnessedType = env?.type || null;
           if (env?.from) seenPeers.add(env.from);
+          if (env?.type === 'presence' && env?.alive === false && env?.from) seenPeers.delete(env.from);
           if (env?.type === 'peer-disconnect' && env?.peerId) seenPeers.delete(env.peerId);
           peerMeshState.remotePeers = seenPeers.size;
+          peerMeshState.witnessedMessages = witnessedMessages;
+          peerMeshState.lastWitnessedType = lastWitnessedType;
         });
         handle = {
           getPeers: () => [...seenPeers],
+          getStatus: () => ({
+            connected: transport.isConnected(),
+            remotePeerCount: seenPeers.size,
+            remotePeerIds: [...seenPeers],
+            quorumReady: false,
+            witnessedMessages,
+            lastWitnessedType
+          }),
           async stop() { transport.close(); }
+        };
+      } else {
+        // Requester / Responder mesh node: self-discovering live PeerCompute responder + 2-of-2 quorum requester
+        const mesh = startLiveClientDerivationPeerMesh({
+          relayUrl: peerRelayUrl,
+          roomId: peerRoomId,
+          peerId,
+          enableWebRtc: false,
+          taskModuleUrl,
+          announceIntervalMs: 120,
+          staleMs: 1200,
+          timeoutMs: 15000
+        });
+        transport = mesh.transport;
+        handle = {
+          mesh,
+          getPeers: () => mesh.getStatus().remotePeerIds,
+          getStatus: () => mesh.getStatus(),
+          getActiveRequester: () => mesh.getActiveRequester(),
+          async stop() { mesh.stop(); }
         };
       }
       peerMesh = { transport, handle, peerId, role: peerRole, stop: () => handle?.stop?.() };
+      const st0 = handle?.getStatus?.() || {};
       peerMeshState = {
         connected: true,
         role: peerRole,
         relayUrl: peerRelayUrl,
         roomId: peerRoomId,
         peerId,
-        remotePeers: typeof handle?.getPeers === 'function' ? handle.getPeers().length : 0,
-        quorumReady: false,
+        remotePeers: st0.remotePeerCount ?? 0,
+        remotePeerIds: [...(st0.remotePeerIds || [])],
+        quorumReady: Boolean(st0.quorumReady),
+        witnessedMessages: st0.witnessedMessages ?? 0,
+        lastWitnessedType: st0.lastWitnessedType ?? null,
         dispatches: 0,
         lastResult: null,
         error: null
@@ -1799,12 +1816,18 @@ export async function mountCosmicQuantumZoomDemo(container) {
         nebReactionXi,
         nebBarrierEv: cachedNebPath ? cachedNebPath.forwardBarrierHa * HA_TO_EV : null,
         polytopeStatus: currentPolytopeStatus,
-        peerMeshState: {
-          ...peerMeshState,
-          remotePeers: typeof peerMesh?.handle?.getPeers === 'function'
-            ? peerMesh.handle.getPeers().length
-            : peerMeshState.remotePeers
-        },
+        peerMeshState: (() => {
+          const live = peerMesh?.handle?.getStatus?.();
+          return {
+            ...peerMeshState,
+            connected: live ? Boolean(live.connected) : peerMeshState.connected,
+            remotePeers: live ? live.remotePeerCount : peerMeshState.remotePeers,
+            remotePeerIds: live ? [...(live.remotePeerIds || [])] : (peerMeshState.remotePeerIds || []),
+            quorumReady: live ? Boolean(live.quorumReady) : peerMeshState.quorumReady,
+            witnessedMessages: live?.witnessedMessages ?? peerMeshState.witnessedMessages ?? 0,
+            lastWitnessedType: live?.lastWitnessedType ?? peerMeshState.lastWitnessedType ?? null
+          };
+        })(),
         crossChartMultipoleVerified: Boolean(crossChartMultipoleReceipt?.verified),
         crossChartMultipoleMomentumRelError: crossChartMultipoleReceipt?.momentumRelError ?? null,
         molecularFormula: selectedMoleculeKey,
@@ -1848,12 +1871,17 @@ export async function mountCosmicQuantumZoomDemo(container) {
     },
     connectPeerMesh,
     async dispatchPeerDerivation(atomicNumberZ = selectedElementZ) {
-      if (!peerMesh?.handle?.submitWithProvenance) {
-        throw new Error('Peer mesh requester is not connected');
+      const req = peerMesh?.handle?.getActiveRequester?.();
+      if (!req || typeof req.submitWithProvenance !== 'function') {
+        const err = new Error('Peer mesh 2-of-2 quorum requester is not ready (requires >= 2 live remote responders)');
+        err.code = 'ERR_CLIENT_PEER_QUORUM_UNAVAILABLE';
+        throw err;
       }
-      const res = await peerMesh.handle.submitWithProvenance({
+      const taskId = `cq-quorum-${Date.now()}-${peerMeshState.dispatches + 1}`;
+      const res = await req.submitWithProvenance(taskId, {
+        service: 'cosmic-quantum-material',
         kind: 'material.resolve-element',
-        payload: { atomicNumberZ }
+        payload: { atomicNumberZ, functional: selectedFunctional }
       });
       peerMeshState.dispatches += 1;
       peerMeshState.lastResult = res;

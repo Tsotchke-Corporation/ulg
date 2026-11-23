@@ -21,6 +21,7 @@ import {
   createCosmicQuantumScaleBridge
 } from '../runtime/sph/cosmicQuantumScaleBridge.js';
 import { runSchroederScaleAtlasMultipoleWebGpu } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
+import { createMaterialPolytopeRegistry } from '../runtime/material/materialPolytopeRegistry.js';
 import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
   createRelaySignalingTransport,
@@ -910,11 +911,13 @@ export async function mountCosmicQuantumZoomDemo(container) {
 
   // ---- 5. Molecular 6-31G(d) / STO-3G Charge Density, CI-NEB Path & Polytope Overlay (10^-9 m) ----
   const molecularGroup = regimeGroups['molecular-lattice'];
+  const polytopeRegistry = createMaterialPolytopeRegistry();
   let currentMolecularBundle = null;
   let currentMolecularArtifact = null;
   let currentMolecularBackend = 'worker-cpu-derived';
   let cachedNebPath = null;
   let currentPolytopeStatus = 'accepted';
+  let currentPolytopeResolution = null;
 
   function ensureNebReactionPath() {
     if (cachedNebPath) return cachedNebPath;
@@ -1008,7 +1011,26 @@ export async function mountCosmicQuantumZoomDemo(container) {
     });
     currentMolecularArtifact = built.artifact;
 
-    // Optional Polytope Validity-Domain wireframe overlay (accepted=teal, boundary-saddle=amber)
+    // Real MaterialPolytopeRegistry state-domain membership evaluation (fail-closed)
+    polytopeRegistry.discoverMaterialPolytopes({
+      materialKey: preset.formula,
+      family: 'compound',
+      meltingPointK: preset.formula === 'H2O' ? 273.15 : 150,
+      boilingPointK: preset.formula === 'H2O' ? 373.15 : 300,
+      closureHash: `${preset.formula}:${activeBasis}:${nebModeActive ? 'neb' : 'eq'}`
+    });
+    const probeTempK = nebModeActive ? (298.15 + nebReactionXi * 140.0) : 298.15;
+    currentPolytopeResolution = polytopeRegistry.resolveState(preset.formula, {
+      temperatureK: probeTempK,
+      pressurePa: 101325
+    });
+    if (!nebModeActive) {
+      currentPolytopeStatus = currentPolytopeResolution.status;
+    } else if (currentPolytopeResolution.status !== 'accepted') {
+      currentPolytopeStatus = 'boundary-saddle';
+    }
+
+    // Optional Polytope Validity-Domain wireframe overlay driven by MaterialPolytopeRegistry
     if (showPolytopeOverlay) {
       const polyColor = currentPolytopeStatus === 'accepted' ? 0x34d399 : 0xfbbf24;
       const polyBox = new THREE.LineSegments(

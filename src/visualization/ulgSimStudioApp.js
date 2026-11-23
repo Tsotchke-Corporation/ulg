@@ -28,6 +28,7 @@ import {
   SPH_BUNDLED_BACKGROUND_IMAGES,
   SPH_DEFAULT_BACKGROUND_IMAGE_URL,
   STUDIO_CUSTOM_TEMPLATES,
+  autoResolveStagedConfigLayout,
   buildBlankCustomConfig,
   buildLaunchParamsFromStagedConfig,
   buildStagedConfigFromCustomTemplate,
@@ -719,6 +720,12 @@ export function mountUlgSimStudioApp({
   function markStagedCustom() {
     stagedConfig.presetId = 'custom';
     stagedConfig.customTemplateId = null;
+    // Pause any running live simulation when controls are edited so nothing
+    // dynamically mutates under the user until they press Play or Relaunch.
+    const snap = activeSession?.getTelemetrySnapshot?.() || null;
+    if (snap?.running === true) {
+      activeSession?.togglePlay?.();
+    }
     syncUrlFromStagedConfig();
   }
 
@@ -1878,16 +1885,10 @@ export function mountUlgSimStudioApp({
   }
 
   fitAllBtn.addEventListener('click', () => {
-    const box = stagedConfig.boxDimensionsM;
-    stagedConfig.bodies = separateOverlappingSphInitialBodies(stagedConfig.bodies, box, {
-      coordinateFrame: 'floor-centered'
-    }).map((body) => ({
-      ...body,
-      centerM: Array.from(body.centerM).map((v) => roundNice(v, 6)),
-      sizeM: Array.from(body.sizeM).map((v) => roundNice(v, 6)),
-      particlesPerEdge: [...body.particlesPerEdge],
-      velocityMPerS: [...body.velocityMPerS]
-    }));
+    const resolved = autoResolveStagedConfigLayout(stagedConfig);
+    if (resolved.resolved) {
+      stagedConfig = resolved.config;
+    }
     markStagedCustom();
     renderAllTabs();
     updateChromeAndStatus();

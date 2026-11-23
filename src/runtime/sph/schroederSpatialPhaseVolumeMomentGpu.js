@@ -813,24 +813,34 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
         ? [...bindingEntries, entries.activeSource]
         : bindingEntries;
       const bindGroup = (pipelineObject, bindingEntries, suffix) => {
-        const cached = arena.bindGroupCache.get(suffix);
-        const entriesMatch = cached?.entries.length === bindingEntries.length
-          && cached.entries.every((left, index) => {
-            const right = bindingEntries[index];
-            return left.binding === right.binding
-              && left.resource?.buffer === right.resource?.buffer
-              && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
-              && (left.resource?.size ?? null) === (right.resource?.size ?? null);
-          });
-        if (cached?.pipeline === pipelineObject && entriesMatch) {
-          return cached.bindGroup;
+        let bucket = arena.bindGroupCache.get(suffix);
+        if (!bucket) {
+          bucket = [];
+          arena.bindGroupCache.set(suffix, bucket);
+        }
+        for (let i = 0; i < bucket.length; i += 1) {
+          const cached = bucket[i];
+          if (
+            cached.pipeline === pipelineObject
+            && cached.entries.length === bindingEntries.length
+            && cached.entries.every((left, index) => {
+              const right = bindingEntries[index];
+              return left.binding === right.binding
+                && left.resource?.buffer === right.resource?.buffer
+                && (left.resource?.offset ?? 0) === (right.resource?.offset ?? 0)
+                && (left.resource?.size ?? null) === (right.resource?.size ?? null);
+            })
+          ) {
+            return cached.bindGroup;
+          }
         }
         const created = device.createBindGroup({
           label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
           layout: pipelineObject.getBindGroupLayout(0),
           entries: bindingEntries
         });
-        arena.bindGroupCache.set(suffix, {
+        if (bucket.length >= 8) bucket.shift();
+        bucket.push({
           pipeline: pipelineObject,
           entries: bindingEntries.map(({ binding, resource: bindingResource }) => ({
             binding,

@@ -539,16 +539,23 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
     bindLabel
   ) {
     const buffers = bindings.map((binding) => resources.get(binding));
-    const cached = arena.bindGroupCache.get(cacheKey);
-    if (
-      cached?.pipeline === pipelineObject
-      && cached.bindings.length === bindings.length
-      && cached.bindings.every((binding, index) => (
-        binding === bindings[index]
-        && cached.buffers[index] === buffers[index]
-      ))
-    ) {
-      return cached.bindGroup;
+    let bucket = arena.bindGroupCache.get(cacheKey);
+    if (!bucket) {
+      bucket = [];
+      arena.bindGroupCache.set(cacheKey, bucket);
+    }
+    for (let i = 0; i < bucket.length; i += 1) {
+      const cached = bucket[i];
+      if (
+        cached.pipeline === pipelineObject
+        && cached.bindings.length === bindings.length
+        && cached.bindings.every((binding, index) => (
+          binding === bindings[index]
+          && cached.buffers[index] === buffers[index]
+        ))
+      ) {
+        return cached.bindGroup;
+      }
     }
     const bindGroup = device.createBindGroup({
       label: bindLabel,
@@ -558,7 +565,8 @@ export function createSchroederSpatialParentFieldViewGpu(device, {
         resource: { buffer: buffers[index] }
       }))
     });
-    arena.bindGroupCache.set(cacheKey, {
+    if (bucket.length >= 8) bucket.shift();
+    bucket.push({
       pipeline: pipelineObject,
       bindings: [...bindings],
       buffers,

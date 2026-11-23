@@ -2479,14 +2479,14 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
   // Both scheduler routes consume the same committed display source. These
   // callbacks never read an intermediate solver state or publish authority.
   const presentScheduleSubmissionBoundary = isosurfacePresentationEnabled
-    ? async (boundary, { signal = null } = {}) => {
+    ? async (boundary, { signal = null, maxSubstepsPerSubmission = undefined } = {}) => {
         if (signal?.aborted
           || !residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
           throw new Error('isosurface presentation schedule was superseded');
         }
         const proof = await runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
           boundary,
-          { presenter: workerOwnedIsosurfacePresenterOverride, signal }
+          { presenter: workerOwnedIsosurfacePresenterOverride, signal, maxSubstepsPerSubmission }
         );
         if (signal?.aborted
           || !residentScheduleCandidateStreamIsCurrent(scheduleCandidateStream)) {
@@ -2589,6 +2589,7 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
             ...(presentScheduleSubmissionBoundary
               ? {
                   onTier0PresentationSubmissionBoundary: presentScheduleSubmissionBoundary,
+                  canPresentTier0SubmissionBoundary: canPresentScheduleSubmissionBoundary,
                   onCanonicalPresentationSubmissionBoundary: presentScheduleSubmissionBoundary,
                   canPresentCanonicalSubmissionBoundary: canPresentScheduleSubmissionBoundary
                 }
@@ -4225,7 +4226,7 @@ export async function runWorkerParticleTemporalPresentationSubmissionBoundary(
 
 export async function runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
   boundary = {},
-  { presenter = workerOwnedIsosurfacePresenter, signal = null } = {}
+  { presenter = workerOwnedIsosurfacePresenter, signal = null, maxSubstepsPerSubmission = undefined } = {}
 ) {
   const activePresenter = presenter ?? workerOwnedIsosurfacePresenter;
   const playbackRevision = workerParticlePlaybackRevision;
@@ -4258,7 +4259,11 @@ export async function runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
     presentationQosHostQueueFenceCount: frame?.presentationQosHostQueueFenceCount
   });
   if (!workerPresentationPlaying || workerParticlePlaybackRevision !== playbackRevision
-    || signal?.aborted || !isExactWorkerTier0PresentationQosBoundaryProof(receipt, boundary)) {
+    || signal?.aborted || !isExactWorkerTier0PresentationQosBoundaryProof(
+      receipt,
+      boundary,
+      maxSubstepsPerSubmission != null ? { maxSubstepsPerSubmission } : undefined
+    )) {
     // The fused submission seam already catches this presentation-only
     // failure and continues toward its one authoritative terminal result.
     throw new Error('worker isosurface presentation lacked a fresh completed boundary frame');

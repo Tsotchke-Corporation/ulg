@@ -681,21 +681,27 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
       // makes it impossible for a topology pass to acquire mutable state.
       const bindGroup = (pipelineObject, suffix, bindings) => {
         const resolvedResources = bindings.map((binding) => resources.get(binding));
-        const cached = arena.bindGroupCache.get(suffix);
-        const resourcesMatch = cached?.resources.length === resolvedResources.length
-          && cached.resources.every((left, index) => {
-            const right = resolvedResources[index];
-            return left?.buffer === right?.buffer
-              && (left?.offset ?? 0) === (right?.offset ?? 0)
-              && (left?.size ?? null) === (right?.size ?? null);
-          });
-        if (
-          cached?.pipeline === pipelineObject
-          && resourcesMatch
-          && cached.bindings.length === bindings.length
-          && cached.bindings.every((binding, index) => binding === bindings[index])
-        ) {
-          return cached.bindGroup;
+        let bucket = arena.bindGroupCache.get(suffix);
+        if (!bucket) {
+          bucket = [];
+          arena.bindGroupCache.set(suffix, bucket);
+        }
+        for (let i = 0; i < bucket.length; i += 1) {
+          const cached = bucket[i];
+          if (
+            cached.pipeline === pipelineObject
+            && cached.bindings.length === bindings.length
+            && cached.bindings.every((binding, index) => binding === bindings[index])
+            && cached.resources.length === resolvedResources.length
+            && cached.resources.every((left, index) => {
+              const right = resolvedResources[index];
+              return left?.buffer === right?.buffer
+                && (left?.offset ?? 0) === (right?.offset ?? 0)
+                && (left?.size ?? null) === (right?.size ?? null);
+            })
+          ) {
+            return cached.bindGroup;
+          }
         }
         const created = device.createBindGroup({
           label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
@@ -705,7 +711,8 @@ export function createSchroederSpatialPhaseVolumeInterfaceProposalGpu(device, {
             resource: resolvedResources[index]
           }))
         });
-        arena.bindGroupCache.set(suffix, {
+        if (bucket.length >= 8) bucket.shift();
+        bucket.push({
           pipeline: pipelineObject,
           bindings: [...bindings],
           resources: resolvedResources,

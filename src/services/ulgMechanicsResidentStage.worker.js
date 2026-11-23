@@ -9045,7 +9045,10 @@ function validateWorkerTier0FusedExecution(execution, {
           observation.completed !== true
           || isExactWorkerTier0PresentationQosBoundaryProof(
             observation.receipt,
-            metadata
+            metadata,
+            Number.isSafeInteger(fused?.maxSubstepsPerSubmission) && fused.maxSubstepsPerSubmission > 0
+              ? { maxSubstepsPerSubmission: fused.maxSubstepsPerSubmission }
+              : undefined
           )
         );
     }
@@ -10370,6 +10373,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     id = null,
     postProgress = null,
     onTier0PresentationSubmissionBoundary = null,
+    canPresentTier0SubmissionBoundary = null,
     onCanonicalPresentationSubmissionBoundary = null,
     canPresentCanonicalSubmissionBoundary = null,
     runTier0FusedResidentSequence =
@@ -12514,23 +12518,29 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           if (Number.isSafeInteger(Number(tier0StepsPerFrameOverride)) && Number(tier0StepsPerFrameOverride) >= 1) {
             return Math.min(stepCount, Number(tier0StepsPerFrameOverride));
           }
-          if (tier0RealtimePacing && tier0RealtimePacing.framePeriodS > 0 && tier0PacingDtS > 0) {
-            tier0RealtimePacing.lastBoundaryMs = null;
+          if (tier0RealtimePacing && tier0PacingDtS > 0) {
+            const targetPeriodS = tier0RealtimePacing.framePeriodS > 0
+              ? tier0RealtimePacing.framePeriodS
+              : (1 / 60);
             tier0RealtimePacing.k = Math.min(stepCount, 32, Math.max(tier0SharedQosSubsteps,
-              Math.ceil(tier0RealtimePacing.framePeriodS / tier0PacingDtS)));
+              Math.ceil(targetPeriodS / tier0PacingDtS)));
             return tier0RealtimePacing.k;
           }
-          if (tier0RealtimePacing) tier0RealtimePacing.lastBoundaryMs = null;
           return tier0SharedQosSubsteps;
         })();
+        const tier0BoundaryOpportunityReady = !tier0RealtimePacing
+          || typeof canPresentTier0SubmissionBoundary !== 'function'
+          || canPresentTier0SubmissionBoundary() === true;
         const tier0PresentationQosEnabled = Boolean(
           tier0PresentationRequested
+          && tier0BoundaryOpportunityReady
           && Number.isSafeInteger(
             tier0PresentationMaxSubstepsPerSubmission
           )
           && tier0PresentationMaxSubstepsPerSubmission > 0
           && tier0PresentationMaxSubstepsPerSubmission < stepCount
         );
+        const tier0ScheduleStartMs = tier0RealtimePacing ? workerResidentScheduleNowMs() : 0;
         const tier0PresentationBoundaryAudit = {
           invocations: [],
           completedCount: 0,
@@ -12546,12 +12556,16 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               const observation = { metadata, completed: false };
               tier0PresentationBoundaryAudit.invocations.push(observation);
               try {
+                const boundaryOpts = tier0RealtimePacing
+                  ? { maxSubstepsPerSubmission: tier0PresentationMaxSubstepsPerSubmission }
+                  : undefined;
                 const receipt = await
-                  onTier0PresentationSubmissionBoundary(metadata);
+                  onTier0PresentationSubmissionBoundary(metadata, boundaryOpts);
                 observation.receipt = receipt;
                 if (!isExactWorkerTier0PresentationQosBoundaryProof(
                   receipt,
-                  metadata
+                  metadata,
+                  boundaryOpts
                 )) {
                   throw new Error(
                     'Tier0 presentation QoS boundary lacked exact GPU/presentation proof'
@@ -12684,6 +12698,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             registerTier0SubmittedCleanup
         });
         tier0ExecutionResult = tier0Execution;
+        if (tier0RealtimePacing && tier0ScheduleStartMs > 0) {
+          const scheduleWallS = Math.max(1 / 120, Math.min(0.25, (workerResidentScheduleNowMs() - tier0ScheduleStartMs) / 1000));
+          const perFramePeriodS = Math.max(1 / 60, scheduleWallS);
+          tier0RealtimePacing.framePeriodS = tier0RealtimePacing.framePeriodS > 0
+            ? 0.7 * tier0RealtimePacing.framePeriodS + 0.3 * perFramePeriodS
+            : perFramePeriodS;
+        }
         tier0ExecutionValidation = validateWorkerTier0FusedExecution(
           tier0Execution,
           {

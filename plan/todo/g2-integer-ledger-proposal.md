@@ -1,13 +1,14 @@
 # G2 proposal — exact integer ledgers instead of exact rationals
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` PASS / `18` FAIL
-> historical receipts). Exact 9-limb `2^-149` mass & `Σ(U − S)` ledgers and GPU
-> κ-Köhler/Maxwell–Mason/Stokes parcel stages are implemented when opted in,
-> **but** default `iron-ice-quench` & `sodium-water` presets still run
-> `environmentMode='vacuum'`, 1 SS level, and `exactEnergyLedger=false`;
-> disabled 63-limb exact rationals still sit on disk; split/merge is opt-in;
-> gas `k, μ` remains static CRC/NIST bank. See
-> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 0D / Gate 3):**
+> **OPEN** (`0` PASS / `18` FAIL historical receipts). P2 added first-principles
+> Chapman–Enskog gas `k, μ`, generalized `sphExactVaporParcelLedgerGpu.js`
+> beyond H2O/air, and verified GPU two-way Stokes drag momentum conservation on
+> Vulkan. **Remaining:** migrate `sphPhaseCarrierTransferGpu.js` off 63-limb
+> `sphExactRational*` onto 9-limb `2^-149` & delete dead 63-limb modules
+> (**Gate 0D**), then enable `exactEnergyLedger` + multi-level first-class air
+> by default on presets once Section 3 budget headroom is restored (**Gate 3**).
+> See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 Status: **section 5 answered, 2026-10-27; new real-time requirement.** The
 user paused G2 code changes for this review ("Stop and review first"),

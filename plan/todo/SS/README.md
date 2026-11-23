@@ -4,16 +4,16 @@
 - Updated: 2026-11-22 AKST
 - Active routing: [`plan/CURRENT-PLAN.md`](../../CURRENT-PLAN.md)
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** Single-pass A2 incremental CSR
-> migration (`schroederIncrementalSpatialMigrationGpu.js`) IS live by default,
-> **but** 4 of 5 shipped presets run 1 SS level (`cesium-fluorine` runs 2; `0`
-> run 3+), `schroederSpatialScaleAtlasGpu.js` / migration / split-coarsen have
-> `0` live callers in `src/`, `ulgMechanicsResidentStage.worker.js:15758` has a
-> broken multipole call signature swallowed by `catch`, the dynamic LOD
-> controller (`:15724`) is write-only telemetry, `schroederActiveNodeCompactionGpu.js`
-> has `0` dispatch consumers, solids & dormancy still run private grids beside
-> SS, and the Law Adapter Contract (`schroeder-tree-and-algorithm-plan.md:129`)
-> remains unenforced.
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 3 / Gate 5):** Single-pass
+> A2 incremental CSR migration (`schroederIncrementalSpatialMigrationGpu.js`)
+> IS live by default, `lawAdapterContract.js` is enforced on fused plans (P1),
+> worker Scale Atlas multipole `{ atlas }` call signature is fixed (P0), and
+> physical observables are wired into `createDynamicHierarchyLodController`
+> (P2). **Open:** 4 of 5 presets still run 1 SS level (`0` run 3+),
+> `schroederSpatialScaleAtlasGpu.js` / split-coarsen & `schroederActiveNodeCompactionGpu.js`
+> remain opt-in, solids & dormancy still run private grids beside SS (Gate 3),
+> and stellar/galactic/supergalactic gravity must migrate off private octrees
+> onto the shared `SS` Scale Atlas multipole (Gate 5).
 
 `SS` means Schroeder Simulation. This folder retains the architecture contract
 and routes remaining SS-dependent transport and coherent-solid work. The

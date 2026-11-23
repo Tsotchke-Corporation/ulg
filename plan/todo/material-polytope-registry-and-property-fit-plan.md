@@ -2,10 +2,17 @@
 
 Date: 2026-06-18 AKDT
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **NOT STARTED in runtime
-> `src/`.** `materialPolytopeRegistry` does not exist anywhere in `src/` yet
-> (only a cosmetic wireframe + HUD label in `cosmicQuantumZoomDemo.js`). Active
-> routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 0 / Gate 2):** Core
+> `src/runtime/material/materialPolytopeRegistry.js` (v0 rectangular `(T, P)`
+> polytopes + strict `A x <= b` fail-closed membership + closure-hash
+> invalidation) and `src/runtime/material/responseFunctionFitGpu.js` (1D/2D
+> WebGPU Chebyshev fitter) are **LANDED** and wired into
+> `cosmicQuantumZoomDemo.js`. Next under **Gate 2 (Track P3)**: upgrade to true
+> piecewise-convex slanted phase-boundary polytopes (`ulg.polytope-atlas.v1`),
+> auto-bisection + conservation/residual gates, 3D Atlas Visualizer, and direct
+> Tier-1 GPU material packing. Active routing:
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) &
+> [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md).
 
 ## Purpose
 

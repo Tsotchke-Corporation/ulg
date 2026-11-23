@@ -1,13 +1,13 @@
 # G3 coherent solids: SOL-0 and SOL-1
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
-> receipts). Rigid solids run by default, **but** they still use **3 private
-> 4,096-bucket hashes instead of canonical SS cells**
-> (`schroederSolidRigidGpu.js:50`, `schroederSolidFluidContactGpu.js:28`,
-> `schroederSolidFluidThermalGpu.js:27`) and **all 5 pre-SOL-1 gates remain
-> open** (interior `4πr²` radiation, non-objective velocity smear, product
-> placement ignores `bodyId`, L0-only coupling, hardcoded `restitution/friction
-> = 0.3`). See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 3):** **OPEN**
+> (`0` formal oracle receipts). P2 closed 3 pre-SOL-1 gates (material-derived
+> restitution/friction, exposed-face solid radiation, frame-indifferent
+> co-rotational velocity smear). **Remaining under Gate 3:** migrate rigid
+> solids off **3 private 4,096-bucket hashes onto canonical SS cells**
+> (`schroederSolidRigidGpu.js`, `schroederSolidFluidContactGpu.js`,
+> `schroederSolidFluidThermalGpu.js`), `bodyId`-aware product placement, and
+> multi-level rigid coupling. See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 Date: 2026-11-14. Task: ICC `ulg-g3-solids`. Oracle: `ulg-g3-solids`.
 

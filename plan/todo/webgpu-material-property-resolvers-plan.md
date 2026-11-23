@@ -2,25 +2,21 @@
 
 Date: 2026-06-11 AKDT
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** Partial Phase 6–8 GPU migration
-> landed, with explicit remaining CPU/hybrid bottlenecks:
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 0 / Gate 1):**
+> - `src/runtime/electronicStructure/radialKohnShamWebGpu.js`: **100% GPU-resident**
+>   radial LDA SCF eigensolver (`solveAtomFullWebGpu`, `0` per-SCF CPU readbacks,
+>   `< 1.2e-5` vs CPU on Vulkan) **LANDED**. Open (Gate 1 P1.2): upgrade to full
+>   4-component radial Dirac–KS + spin-polarized PBE/SCAN + finite `R_nuc(A)` +
+>   QED radiative shifts on GPU.
 > - `src/runtime/material/opticalResolverWebGpu.js`: `webgpu-derived` 81-wavelength
 >   Drude–Lorentz + spin-orbit interband + Frank–Tamm Cherenkov + Hervé–Vandamme
->   IOR (`keepResident` zero-readback path wired), or `hybrid-webgpu-spectral-cpu-oscillators`
->   when relativistic oscillators are computed on CPU.
-> - `src/runtime/electronicStructure/radialKohnShamWebGpu.js`: PBE-GGA +
->   spin-orbit potential quadrature runs on WebGPU, **but `solveAtomWebGpu` is
->   still `hybrid-webgpu-potential-cpu-eigensolver`** (reads `vElec` back to CPU
->   every SCF iteration).
-> - `src/runtime/electronicStructure/periodicBulkDft.js` (Monkhorst–Pack bulk
->   DFT + Birch–Murnaghan) and `src/runtime/electronicStructure/molecularHartreeFock.js`
->   (`6-31G(d)`, UMP2, CI-NEB, `cas22()`, `puhf()`) remain **100% CPU JS**.
-> - **Carried forward from archived [`done/frontier-todo.md`](../done/frontier-todo.md):**
->   full GPU SCF eigensolver & GPU bulk DFT, full 4-component Dirac for heavy
->   $p/d/f$ shells, dispersion/van der Waals for noble-gas/molecular crystals,
->   and fixing `generate-molecular-vibrations.mjs` multi-bond geometry
->   minimization (`CO₂` / `N₂` / `O₂`). Active routing:
->   [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+>   IOR (`keepResident` zero-readback path wired). Open (Gate 1 P1.3): GPU
+>   Kubo–Greenwood dielectric `ε(ω)`, conductivity `σ(T)`, magnetism `χ(T)`.
+> - `periodicBulkDft.js`, `molecularHartreeFock.js`, and `mdEngine.js` remain
+>   CPU JS; porting them onto Gate 0B `src/runtime/gpuMath/` (`batchedSymmetricEigensolverGpu`,
+>   `fft3dWebGpu`, `molecularDynamicsWebGpu`) is scheduled under Gates 0–2.
+> - Active routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) &
+>   [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md).
 
 ## Current Answer (2026-06-11 Historical Baseline)
 

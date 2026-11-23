@@ -1,20 +1,19 @@
-# User-approved campaign, 2026-09-06, re-sequenced architecture-first on 2026-11-19,
-# audited and reconciled against live code at HEAD 23a961c4 on 2026-11-22.
+# ULG Unified 40-OOM Foundation-First Scale-Ladder Campaign (Restructured 2026-11-22).
 # Active routing, honest live-code scorecard, and slice budgets: plan/CURRENT-PLAN.md.
 # Native quality-campaign currently reports oracle states unknown; run the actual
 # completion-oracle targets separately on reviewed ulg.campaign.receipt.v1 bundles.
 #
-# FORMAL ACCEPTANCE (2/13): ONLY g5-reservation and g7-release-audit have
-# accepted ulg.campaign.receipt.v1 bundles (2026-11-18). All 11 other stages
-# remain OPEN with verified live-code wiring/architectural gaps documented in
-# plan/CURRENT-PLAN.md Section 4 and .icc/assistant-goals.yaml.
+# FORMAL ACCEPTANCE (2/8): ONLY g5-reservation and g7-release-audit have
+# accepted ulg.campaign.receipt.v1 bundles (2026-11-18). Gates 0-5 consolidate
+# the 11 open legacy milestones plus the full bottom-up 10^-15 m -> 10^+25 m
+# foundation and astrophysics ladder.
 campaigns:
-  - id: ulg-seven-goals-and-architecture
-    objective: Close verified live-wiring and architectural gaps across A1/A2/G6/A3/A4, G2/G3/A5/G4/A6, and decoupled G1, then capture reviewed ulg.campaign.receipt.v1 bundles for all 11 open milestones (G5 and G7 accepted)
+  - id: ulg-scale-ladder-foundation-first
+    objective: "Build ULG bottom-up across 40 orders of magnitude (10^-15 m Nuclear -> 10^+25 m Supergalactic): Gate 0 Architecture & gpuMath -> Gate 1 Complete Z=1..118 Periodic Table Engine + Live Quantum Visuals -> Gate 2 Reactions + Compound Feedback + Convex Polytope Atlas -> Gate 3 Unified SS Continuum Engine -> Gate 4 >=54 Hz Studio Presentation -> Gate 5 Planetary, Stellar, Galactic & Supergalactic TreePM Cosmology"
     node: ulg
     acceptance:
-      metric: reviewed_required_milestones
-      threshold: 13
+      metric: reviewed_required_gates
+      threshold: 8
       direction: '>='
     stages:
       - id: g5-reservation
@@ -25,47 +24,27 @@ campaigns:
         title: "ACCEPTED (2026-11-18): External advisory scientific release audit"
         node: ulg
         oracle: ulg-g7-release-audit
-      - id: a1-realtime-substrate
-        title: "OPEN (Phase 1): Real-time bulk substrate, delete Coupling #8, deduplicate 5 contact laws, retire 63-limb/CPU mirrors, fix resource leaks"
+      - id: gate0-foundation-arch
+        title: "OPEN (Priority 0 — NEXT): peercompute-core slim split, shared gpuMath (eigensolver/3D FFT/MD/Chebyshev), canonical Material-Bundle & Polytope-Atlas ABIs, Continuum Zero-Churn Step Loop"
         node: ulg
-        oracle: ulg-a1-realtime-substrate
-      - id: a2-incremental-spatial
-        title: "OPEN (Phase 1): Incremental CSR live; wire Scale Atlas / multipole / dynamic LOD / active-node compaction and 3+ level presets"
+        oracle: ulg-gate0-foundation-arch
+      - id: gate1-periodic-table-engine
+        title: "OPEN (Priority 1 — Flagship Demo): Complete Z=1..118 Periodic Table Engine (Nuclear + Relativistic Atomic + EM/Magnetic/Optical/Conductive + Bulk DFT + WebGPU MD) + real live GPU visualizations (elements-lab.html)"
         node: ulg
-        oracle: ulg-a2-incremental-spatial
-      - id: g6-local-fit
-        title: "OPEN (Phase 1): Thermal potential live by default; fix radiation epsilon drop, wire reaction/phase uncertainty, capture oracle bundle"
+        oracle: ulg-gate1-periodic-table-engine
+      - id: gate2-reactions-and-polytope-atlas
+        title: "OPEN (Priority 2): GPU Molecular QM & Chemical Reactions -> Recursive Compound Feedback Loop -> Per-Material/Compound Convex Polytope Atlas (A x <= b + GPU Chebyshev)"
         node: ulg
-        oracle: ulg-g6-local-fit
-      - id: a3-representative-sampling
-        title: "OPEN (Phase 1): Bind sphThermalRegionalClosureGpu tables to live GPU law shaders and enable A3 sampling on standard presets"
+        oracle: ulg-gate2-reactions-and-polytope-atlas
+      - id: gate3-continuum-substrate-and-physics
+        title: "OPEN (Priority 3): Macroscopic Continuum Engine & Unified SS consuming Gate 2 Polytope Atlas under Section 3 GPU budgets (consolidates A1-A6, G2-G4, G6)"
         node: ulg
-        oracle: ulg-a3-representative-sampling
-      - id: a4-material-functions
-        title: "OPEN (Phase 1): Move A4 response fitting from CPU JS onto GPU and wire eshkolHigherOrderLawCompiler into live SPH steps"
+        oracle: ulg-gate3-continuum-substrate-and-physics
+      - id: gate4-studio-presentation
+        title: "OPEN (Priority 4): Decoupled >=54 Hz latest-committed-state presentation (visibleMotionCadenceVerified=true) across all 5 active Studio presets (consolidates G1)"
         node: ulg
-        oracle: ulg-a4-material-functions
-      - id: g2-plumes
-        title: "OPEN (Phase 2): Enable exact 2^-149 ledgers, multi-level first-class air, split/merge, and GPU steam parcel stages by default"
+        oracle: ulg-gate4-studio-presentation
+      - id: gate5-planetary-to-supergalactic
+        title: "OPEN (Priority 5): Planetary interiors/N-body -> Stellar hydro/nucleosynthesis -> Galactic N-body+ISM -> Supergalactic FLRW GPU 3D-FFT TreePM + multi-host PeerCompute domain partitioning"
         node: ulg
-        oracle: ulg-g2-plumes
-      - id: g3-solids
-        title: "OPEN (Phase 2): Move rigid solids off private 4096-bucket hashes onto canonical SS cells and close all 5 pre-SOL-1 gates"
-        node: ulg
-        oracle: ulg-g3-solids
-      - id: a5-solids-and-levels
-        title: "OPEN (Phase 2): Unify solid-fluid SS hashes; fix SOL-4 N-level no-op, SOL-5 zero-loads + OOB sizing, and SOL-6 preset skip/proxy consumer"
-        node: ulg
-        oracle: ulg-a5-solids-and-levels
-      - id: g4-dynamic-laws
-        title: "OPEN (Phase 2): Consume canonical SS tree nodes and switch all 4 live law families from full ceil(N/64) launches to real dispatchWorkgroupsIndirect"
-        node: ulg
-        oracle: ulg-g4-dynamic-laws
-      - id: a6-remote-derivation
-        title: "OPEN (Phase 2): Wire device/lane & eshkolSample into live warmClosureMissBridge, remove /@fs paths, prove real 2-machine WebRTC"
-        node: ulg
-        oracle: ulg-a6-remote-derivation
-      - id: g1-presentation
-        title: "OPEN (Phase 3 reassessment): Fix native-material damped motion age, visibleMotionCadenceVerified, magic isovalues, MC buffer clamp, and pass formal G1 oracle"
-        node: ulg
-        oracle: ulg-g1-presentation
+        oracle: ulg-gate5-planetary-to-supergalactic

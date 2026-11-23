@@ -1,11 +1,11 @@
 # G6 local provenance-bound online closure fit and cache
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` PASS / `3` FAIL
-> historical receipts). `thermalPotential` IS enabled by default in presets &
-> Studio and feeds `g6_temperature` + thermal/radiation dormancy, **but**
-> `radiationEpsilonFluxWPerM2` is dropped (`normalizeThermalDormancyConfig:999`),
-> reaction/phase dormancy receive `uncertaintyBuffer = null`, and a fresh
-> reviewed `ulg.campaign.receipt.v1` oracle bundle is still required. See
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 0D / Gate 3):**
+> **OPEN** (`0` PASS / `3` FAIL historical receipts). P1 preserved
+> `radiationEpsilonFluxWPerM2` and wired packed uncertainty into reaction &
+> phase dormancy. **Remaining:** fix live `iron-ice-quench` `thermalPotential`
+> `deferred-capacity` stall (`0` consumer hits measured in `p03-iron-ice`
+> `gpuprobe.sh`) during Gate 0D and capture Gate 3 formal receipt. See
 > [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 ## G6 production worker acknowledgement verified — 2026-11-19 UTC

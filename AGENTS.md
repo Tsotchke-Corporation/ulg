@@ -31,8 +31,8 @@
 At session start and immediately after every context compaction:
 
 1. Read [`plan/CURRENT-PLAN.md`](plan/CURRENT-PLAN.md) (single active routing
-   document: honest G1–G7 / A1–A6 scorecard, Section 3 GPU budgets, and next
-   prioritized work queue).
+   document: unified 40-OOM Foundation-First Scale-Ladder Roadmap `Gate 0–5` +
+   accepted `G5`/`G7`, Section 3 GPU budgets, and next prioritized work queue).
 2. Read the top ~40 lines of [`plan/STATUS.md`](plan/STATUS.md).
 3. Consult the **`plan/` Directory Routing Map** in Section 8 below before
    searching or editing. **Do not** load `plan/log.md`, `plan/plan.md`,
@@ -159,15 +159,16 @@ preset behavior.
 
 ## 5. Campaign Oracle Honesty & Hard Per-Step GPU Budgets
 
-- **Formal oracle acceptance:** A G1–G7 or A1–A6 milestone is formally accepted
-  **only** when its `.icc/completion-oracles.yaml` target passes on one
-  reviewed `ulg.campaign.receipt.v1` bundle. Never mark unreviewed goals
-  `completed` in `.icc/assistant-goals.yaml`.
-- **G1 measurement honesty:** Decoupled presentation (`>= 54 Hz` latest
-  committed physics state across all shipped presets with true isosurfaces,
-  refraction, materials, depth, and controls) must never cite raw `UI rAF` alone
-  as proof of real physics-motion presentation; report `presented states/s` and
-  `visibleMotionCadenceVerified` honestly.
+- **Formal oracle acceptance:** A Scale-Ladder gate (`Gate 0–5`, `G5`, `G7`) or
+  retained legacy milestone is formally accepted **only** when its
+  `.icc/completion-oracles.yaml` target passes on one reviewed
+  `ulg.campaign.receipt.v1` bundle. Never mark unreviewed goals `completed` in
+  `.icc/assistant-goals.yaml`.
+- **Gate 4 / G1 measurement honesty:** Decoupled presentation (`>= 54 Hz` latest
+  committed physics state across all 5 active Studio presets with true
+  isosurfaces, refraction, materials, depth, and controls) must never cite raw
+  `UI rAF` alone as proof of real physics-motion presentation; report
+  `presented states/s` and `visibleMotionCadenceVerified` honestly.
 - **Standard invariants & constants:** Verify spatial-authority rollbacks with
   `&observeSpatialAuthority=1`; Iron Ice reference `dt = 0.5 ms`; G7 scientific
   database checks remain offline and advisory (never a runtime admission gate).
@@ -228,7 +229,7 @@ local commits:
 |---|---|---|
 | **Active Authority** | [`plan/CURRENT-PLAN.md`](plan/CURRENT-PLAN.md), [`plan/STATUS.md`](plan/STATUS.md) (top ~40 lines), [`.icc/completion-oracles.yaml`](.icc/completion-oracles.yaml), [`.icc/assistant-goals.yaml`](.icc/assistant-goals.yaml) | Read at every session start / post-compaction. Single source of truth for execution order, scorecard, budgets, and oracle criteria. |
 | **Architecture Reference** | [`plan/project-orientation.md`](plan/project-orientation.md), [`plan/ss-law-architecture-assessment.md`](plan/ss-law-architecture-assessment.md), [`plan/solver-law-inventory.md`](plan/solver-law-inventory.md), [`plan/ULG_Triad_Current_Plan_Addendum.html`](plan/ULG_Triad_Current_Plan_Addendum.html) (authoritative diagram addendum over `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`) | Consult when designing or refactoring SS, laws, closures, or Triad boundaries. |
-| **Active Work Index** | [`plan/todo/README.md`](plan/todo/README.md) | Categorized index of all 31 active `plan/todo/*.md` and `plan/todo/SS/*.md` files (Campaign G1–G7/A1–A6, SS Hierarchy, Physics Closures, Frontier Backlog). |
+| **Active Work Index** | [`plan/todo/README.md`](plan/todo/README.md) | Scale-Ladder index of all 33 active `plan/todo/*.md` and `plan/todo/SS/*.md` files (`Gate 0` Foundation → `Gate 1` Periodic Table `Z=1..118` → `Gate 2` Reactions & Polytope Atlas → `Gate 3–4` Continuum & Studio → `Gate 5` Planetary to Supergalactic). |
 | **Completed Archive** | `plan/done/` (incl. `done/g5-reservation.md`, `done/g7-release-audit.md`, `done/SS/`, `done/handoffs/`, `done/audits/`, `done/refactor/`) | Completed items, accepted G5/G7 records, archived handoffs, critiques, and audits. Do not load unless verifying history. |
 | **Superseded Archive** | `plan/moot/` (incl. `moot/SS/`, `moot/superseded-todo-readme-log-2026-11-22.md`) | Superseded plans and deprecated queues preserved for reference only. |
 | **Historical Logs & Notes** | `plan/log.md`, `plan/plan.md`, `plan/implementation-status.md`, `plan/tests.md`, `plan/notes/` (start at `plan/notes/BRIEF.md`) | Do **not** load wholesale. Consult only when auditing a specific past decision or regression. |

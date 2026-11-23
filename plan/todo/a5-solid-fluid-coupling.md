@@ -1,14 +1,13 @@
 # A5 SOL-3: solid–fluid coupling (rigid bodies ↔ SPH/MPM particles)
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
-> receipts). Isolated Vulkan tests pass for SOL-4/5/6, **but** live integration
-> has critical gaps: SOL-2/3 still use private 4,096-bucket hashes instead of SS
-> cells; SOL-4 silently no-ops on the N-level chain
-> (`schroederSpatialChainStepGpu.js:240` omits `mechanicsBuffer`); SOL-5 runs 17
-> kernels/step against all-zero `member_loads` (`0` callers write it) with a
-> **latent OOB write bug** (`frameBuffer`/`latticeBuffer` sized to `bodyCount`
-> vs `maxBodyCapacity`); SOL-6 is skipped on all shipped presets (`c>=4 &&
-> c%4==0`) and `activeProxiesBuffer` has `0` consumers. See
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 3):** **OPEN**
+> (`0` formal oracle receipts). P0/P2 fixed SOL-4 N-level `mechanicsBuffer`
+> binding, SOL-5 OOB buffer sizing & 17 zero-load dispatches/step, and SOL-6
+> `10³`/`3³` preset eligibility (`padToMultipleOf4`) + live GPU
+> `consume_active_proxy_quadrature` consumer (all verified on Vulkan).
+> **Remaining under Gate 3:** migrate SOL-2/3 solid-fluid hashing off private
+> 4,096-bucket hashes onto canonical SS cells, switch candidate arena to sparse
+> CSR, and enable cross-level coupling. See
 > [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 Date: 2026-11-14. Track A5. This is the coupling the G2 Iron Ice plume waits

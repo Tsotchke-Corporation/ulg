@@ -4,14 +4,15 @@
 - Status: active architecture correction and implementation todo
 - Branch reviewed: `SS` at `d5319c2` plus the uncommitted scenario-audit slice
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN.** All 5 pre-SOL-1 gates
-> remain open (interior `4πr²` radiation, non-objective velocity smear, `bodyId`
-> product placement, L0-only coupling, hardcoded `restitution/friction = 0.3`),
-> solids still run 3 private 4,096-bucket hashes instead of SS cells, candidate
-> arena is fixed-budget per particle (not sparse CSR), cross-level coupling is
-> disabled, extreme mass-ratio invariants are missing, and SOL-4/5/6 have live
-> wiring bugs documented in [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
-> Section 4.
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 3):** **OPEN.** P0/P2 closed
+> 3 pre-SOL-1 gates (material-derived contact restitution/friction, exposed-face
+> surface-only solid radiation, frame-indifferent co-rotational velocity smear)
+> and fixed SOL-4 N-level `mechanicsBuffer`, SOL-5 OOB/zero-load waste, and
+> SOL-6 `10³`/`3³` proxy quadrature consumption on Vulkan. **Remaining under
+> Gate 3:** migrate 3 private 4,096-bucket solid hashes onto canonical SS cells,
+> `bodyId` product placement, sparse CSR candidate arena, multi-level rigid &
+> cross-level coupling, and extreme mass-ratio invariants. Active routing:
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 Routing update, 2026-07-13 AKDT: Priority 2/3 shared-neighborhood and sparse-SS
 execution now routes through

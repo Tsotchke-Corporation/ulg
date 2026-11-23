@@ -1,15 +1,18 @@
 # A1 real-time substrate: progress record
 
-> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
-> receipts). 100k+ `water-realtime` sustains `>= 1x` RT and the `1,970 Pa·s`
-> shear viscosity bug is fixed, **but** Coupling #8 (`sphPhaseScene.js:21478,
-> 50435`), 5 overlapping iron-ice contact responses, disabled 63-limb rationals,
-> production CPU mirrors, `246` `@workgroup_size(1)` serial kernels, 11-file
-> `device.lost` leaks, unbounded `DataState.setHotBuffer`, missing
-> `uncapturederror` listener, raw NUL byte (`sphPhaseViewStateTransport.js:98`),
-> `0 K` wall default (`thermalEnvironmentAuthority.js:222`), and p-wave speed
-> mismatch (`sphPhaseDemo.js:1204`) remain open. See
-> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+> **2026-11-22 Live-Code Status (`2fe9e47b`, Consolidated into Gate 0D / Gate 3):**
+> **OPEN** (`0` formal oracle receipts). P0/P1 fixed Coupling #8 under
+> worker-owned resident rendering, enforced `lawAdapterContract.js`, wired
+> `uncapturederror` at all 6 `requestDevice` sites, bounded `DataState`
+> hot-buffer eviction (64 keys), and fixed NUL byte, p-wave speed,
+> `implicitZeroKelvinFaces`, and `sphAerosolParcelGpu.js` `device.lost` relay.
+> **Remaining (Gate 0D Zero-Churn Step Loop → Gate 3):** eliminate per-step
+> `createBuffer` (`16`), `bindGroup` (`40.5`), encoders (`36.6`), `workDone`
+> (`3.26`), `mapAsync` (`0.35`), and `32` compute passes on `iron-ice-quench`;
+> deduplicate 5 contact laws → 1; migrate `sphPhaseCarrierTransferGpu.js` off
+> 63-limb `sphExactRational*` (`71` refs / `33` files) and delete dead 63-limb &
+> CPU mirror files; burn down `76` WGSL patches & `248` `@workgroup_size(1)`
+> kernels. See [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 Date: 2026-11-14. Track A1: real-time physics, including the near-real-time
 G2 plume scenarios moved here on 2026-11-13.

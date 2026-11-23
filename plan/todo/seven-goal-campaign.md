@@ -1,10 +1,13 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
-> **2026-11-22 Live-Code & Oracle Audit (`23a961c4`):** Formal receipt check of
-> `/home/cos/.cache/icc/repos/ulg/` confirms **ONLY G5 and G7 are formally
-> accepted (`2/13`)**. All other 11 milestones remain `in_progress` with
-> line-exact live-code gaps documented in [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
-> Sections 4–6 and [`.icc/assistant-goals.yaml`](../../.icc/assistant-goals.yaml).
+> **2026-11-22 Restructuring Note (`2fe9e47b`):** **G5** and **G7** remain
+> formally accepted (`2/8` active gates). On 2026-11-22 **big dog** consolidated
+> the remaining 11 fragmented granular milestones into the **6-Gate Unified
+> 40-OOM Foundation-First Scale-Ladder Roadmap (`Gate 0`–`Gate 5`)** spanning
+> `10⁻¹⁵ m` Nuclear through `10⁺²⁵ m` Supergalactic Cosmology. This document is
+> preserved as historical lineage for the original G1–G7/A1–A6 criteria; active
+> routing is [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) and
+> [`.icc/assistant-goals.yaml`](../../.icc/assistant-goals.yaml).
 
 ## User decision — architecture-first re-sequencing & guardrail reset — 2026-11-19 AKST
 

@@ -40,16 +40,22 @@ function classifyValenceShellBonding(Z) {
   const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
   const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
   const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
-  const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
-  const sOcc = sSub?.occupancy ?? 0;
-  const pOcc = pSub?.occupancy ?? 0;
+  const dAtMaxN = cfg.find((s) => s.n === maxN && s.l === 2);
+  const dSub = dAtMaxN || cfg.find((s) => s.n === maxN - 1 && s.l === 2);
+  const sOcc = dAtMaxN ? 0 : (sSub?.occupancy ?? 0);
+  const pOcc = dAtMaxN ? 0 : (pSub?.occupancy ?? 0);
   const dOcc = dSub?.occupancy ?? 0;
-  const isClosedShell = (maxN === 1 && sOcc === 2) || pOcc === 6;
-  const isMolecularNonmetal = (maxN === 1 && sOcc === 1)
+  // Closed noble-gas shell requires complete outermost s/p octet (or 1s2) with NO occupied valence d-shell at maxN (e.g. Pd 4d10 5s0).
+  const isClosedShell = ((maxN === 1 && sOcc === 2) || pOcc === 6) && !dAtMaxN;
+  const isMolecularNonmetal = !dAtMaxN && (
+    (maxN === 1 && sOcc === 1)
     || pOcc === 5
-    || (maxN === 2 && pOcc >= 3 && pOcc <= 4);
-  const isCovalentTetrahedral = (maxN >= 2 && maxN <= 5 && pOcc === 2)
-    || (maxN === 2 && pOcc === 1);
+    || (maxN === 2 && pOcc >= 3 && pOcc <= 4)
+  );
+  const isCovalentTetrahedral = !dAtMaxN && (
+    (maxN >= 2 && maxN <= 5 && pOcc === 2)
+    || (maxN === 2 && pOcc === 1)
+  );
   return { maxN, sSub, pSub, dSub, sOcc, pOcc, dOcc, isClosedShell, isMolecularNonmetal, isCovalentTetrahedral };
 }
 
@@ -69,7 +75,8 @@ export const BULK_CRYSTAL_CANDIDATES = Object.freeze({
   }),
   hcp: Object.freeze({
     id: 'hcp', spaceGroup: 'P6_3/mmc (194)', madelungAlpha: -1.79168, coord: 12,
-    atomsPerConv: 2, packingFactor: Math.PI / (3 * Math.SQRT2),
+    // 4-atom close-packed conventional volume a_conv^3 / 4 = a_hex^3 / sqrt(2), matching Bloch & orthorhombic MD cells exactly!
+    atomsPerConv: 4, packingFactor: Math.PI / (3 * Math.SQRT2),
     shearRatioGOverK: 0.46,
     basisFractional: [[0, 0, 0], [1 / 3, 2 / 3, 0.5]]
   }),
@@ -299,10 +306,11 @@ function fitBirchMurnaghan3(rGrid, eGrid) {
 export function extractAtomDescriptorsForBulk(Z, atomResult) {
   const cfg = electronConfiguration(Z);
   const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
-  const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
+  const dAtMaxN = cfg.find((s) => s.n === maxN && s.l === 2);
+  const dSub = dAtMaxN || cfg.find((s) => s.n === maxN - 1 && s.l === 2);
   const fSub = cfg.find((s) => s.n === maxN - 2 && s.l === 3);
-  const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
-  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
+  const sSub = dAtMaxN ? null : cfg.find((s) => s.n === maxN && s.l === 0);
+  const pSub = dAtMaxN ? null : cfg.find((s) => s.n === maxN && s.l === 1);
   const zv = Math.max(1, valenceElectronCount(Z) || (dSub ? Math.min(4, dSub.occupancy) : 1));
 
   // Estimate outer radius & dipole polarizability directly from radial density moments <r^2>

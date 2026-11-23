@@ -285,6 +285,7 @@ export async function buildMaterialPolytopeAtlasWebGpu(device, bundle, {
 
   const allFitted = [];
   for (const poly of basePolytopes) {
+    const isLogPhase = poly.phase === 'gas' || poly.phase === 'plasma';
     const fitted = await fitConvexPolytopeWebGpu(
       device,
       poly,
@@ -293,9 +294,9 @@ export async function buildMaterialPolytopeAtlasWebGpu(device, bundle, {
         degrees,
         relativeTolerance,
         requirePositive: true,
-        maxDepth: maxBisectDepth,
+        maxDepth: isLogPhase ? Math.max(maxBisectDepth, 5) : maxBisectDepth,
         propertyName: 'densityKgPerM3',
-        logScale: poly.phase === 'gas' || poly.phase === 'plasma'
+        logScale: isLogPhase
       }
     );
     allFitted.push(...fitted.polytopes);

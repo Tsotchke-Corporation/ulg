@@ -81,6 +81,8 @@ async function main() {
         hydrateFoundationPolytopes,
         evaluatePolytopeAtlasBatchWebGpu
       } = await import('/src/runtime/material/foundationPolytopeAtlasGpuBridge.js');
+      const { evalChebyshev2d } = await import('/src/runtime/gpuMath/chebyshevPolytopeFitGpu.js');
+      const { evaluatePolytopeMembership } = await import('/src/runtime/material/materialPolytopeRegistry.js');
       const { validateMaterialPropertyBundle } = await import('/ulg-gpu-abi/src/materialFoundationAbi.js');
       const { symbolForZ } = await import('/src/runtime/electronicStructure/periodicTable.js');
 
@@ -88,9 +90,52 @@ async function main() {
         return Array.from(arr, (v) => Number(Number(v).toPrecision(7)));
       }
 
+      function verifyEntryTrueInteriorError(entry) {
+        const hydrated = hydrateFoundationPolytopes(entry);
+        let maxInteriorRelErr = 0;
+        let ambient300KRelErr = null;
+        for (const p of hydrated) {
+          const tMin = p.axes[0].min;
+          const tMax = p.axes[0].max;
+          const lpMin = Math.log10(p.axes[1].min);
+          const lpMax = Math.log10(p.axes[1].max);
+          const ratio = tMax / Math.max(1e-3, tMin);
+          const ts = [];
+          for (let i = 1; i <= 5; i += 1) ts.push(tMin + (i / 6) * (tMax - tMin));
+          if (ratio > 2.5) {
+            for (let i = 1; i <= 7; i += 1) ts.push(tMin * Math.pow(ratio, i / 8));
+          }
+          if (300 > tMin && 300 < tMax) ts.push(300);
+          for (const T of ts) {
+            for (const lp of [lpMin + 0.25 * (lpMax - lpMin), Math.log10(101325), lpMin + 0.75 * (lpMax - lpMin)]) {
+              if (lp < lpMin || lp > lpMax) continue;
+              const P = 10 ** lp;
+              const mem = evaluatePolytopeMembership(p, { temperatureK: T, pressurePa: P });
+              if (!mem.inside) continue;
+              const expected = evaluateBundleDensityEos(entry, p.phase, T, P);
+              const pred = evalChebyshev2d(
+                p.fit.coefficients,
+                p.fit.degrees[0],
+                p.fit.degrees[1],
+                [[tMin, tMax], [lpMin, lpMax]],
+                T,
+                lp,
+                p.fit.valueTransform || 'linear'
+              );
+              const rel = Math.abs(pred - expected) / Math.max(1e-30, Math.abs(expected));
+              if (rel > maxInteriorRelErr) maxInteriorRelErr = rel;
+              if (Math.abs(T - 300) < 1e-6 && Math.abs(P - 101325) < 10) {
+                ambient300KRelErr = rel;
+              }
+            }
+          }
+        }
+        return { maxInteriorRelErr, ambient300KRelErr };
+      }
+
       async function buildFittedAtlasEntry(bundle, materialIndex) {
         const gpuAtlas = await buildMaterialPolytopeAtlasWebGpu(device, bundle, {
-          degrees: [5, 3],
+          degrees: [5, 4],
           relativeTolerance: 0.05,
           maxBisectDepth: 3,
           materialIndex
@@ -119,6 +164,7 @@ async function main() {
           electromagnetic: bundle.electromagnetic,
           mechanical: bundle.mechanical,
           thermodynamic: bundle.thermodynamic,
+          provenance: bundle.provenance,
           polytopes: gpuAtlas.polytopes.map((p) => ({
             polytopeId: p.polytopeId,
             phase: p.phase,
@@ -151,6 +197,7 @@ async function main() {
           }
         };
 
+        const trueErr = verifyEntryTrueInteriorError(entry);
         return {
           entry,
           monotoneChecks: {
@@ -159,6 +206,8 @@ async function main() {
             surrogateRelativeBound: eshkolSolid.surrogateRelativeBound,
             allFitsValid,
             maxGpuPolytopeRelErr,
+            maxTrueInteriorRelErr: trueErr.maxInteriorRelErr,
+            ambient300KRelErr: trueErr.ambient300KRelErr,
             phasesCovered: [...new Set(gpuAtlas.polytopes.map((p) => p.phase))]
           }
         };
@@ -229,6 +278,8 @@ async function main() {
           polytopeCount: entry.polytopes.length,
           allFitsValid: monotoneChecks.allFitsValid,
           maxGpuPolytopeRelErr: Number(monotoneChecks.maxGpuPolytopeRelErr.toFixed(6)),
+          maxTrueInteriorRelErr: Number(monotoneChecks.maxTrueInteriorRelErr.toFixed(6)),
+          ambient300KRelErr: monotoneChecks.ambient300KRelErr != null ? Number(monotoneChecks.ambient300KRelErr.toFixed(6)) : null,
           surrogateRelativeBound: Number(monotoneChecks.surrogateRelativeBound.toFixed(6)),
           dRhoDTNeg: monotoneChecks.dRhoDT < 0,
           dRhoDLogPPos: monotoneChecks.dRhoDLogP > 0
@@ -283,6 +334,8 @@ async function main() {
           polytopeCount: entry.polytopes.length,
           allFitsValid: monotoneChecks.allFitsValid,
           maxGpuPolytopeRelErr: Number(monotoneChecks.maxGpuPolytopeRelErr.toFixed(6)),
+          maxTrueInteriorRelErr: Number(monotoneChecks.maxTrueInteriorRelErr.toFixed(6)),
+          ambient300KRelErr: monotoneChecks.ambient300KRelErr != null ? Number(monotoneChecks.ambient300KRelErr.toFixed(6)) : null,
           surrogateRelativeBound: Number(monotoneChecks.surrogateRelativeBound.toFixed(6)),
           dRhoDTNeg: monotoneChecks.dRhoDT < 0,
           dRhoDLogPPos: monotoneChecks.dRhoDLogP > 0,
@@ -376,6 +429,10 @@ async function main() {
       maxCompoundSurrogateBound: Math.max(...out.compoundAuditRows.map((r) => r.surrogateRelativeBound)),
       maxElementGpuPolytopeRelErr: Math.max(...out.elementAuditRows.map((r) => r.maxGpuPolytopeRelErr)),
       maxCompoundGpuPolytopeRelErr: Math.max(...out.compoundAuditRows.map((r) => r.maxGpuPolytopeRelErr)),
+      maxElementTrueInteriorRelErr: Math.max(...out.elementAuditRows.map((r) => r.maxTrueInteriorRelErr)),
+      maxCompoundTrueInteriorRelErr: Math.max(...out.compoundAuditRows.map((r) => r.maxTrueInteriorRelErr)),
+      allInteriorProbesUnder5Pct: out.elementAuditRows.every((r) => r.maxTrueInteriorRelErr <= 0.05)
+        && out.compoundAuditRows.every((r) => r.maxTrueInteriorRelErr <= 0.05),
       g7AdvisoryBenchmarks: out.advisorySummary,
       elementAuditRows: out.elementAuditRows,
       compoundAuditRows: out.compoundAuditRows,
@@ -402,6 +459,9 @@ async function main() {
       distinctCompoundSrgbCount: report.distinctCompoundSrgbCount,
       maxElementGpuPolytopeRelErr: report.maxElementGpuPolytopeRelErr,
       maxCompoundGpuPolytopeRelErr: report.maxCompoundGpuPolytopeRelErr,
+      maxElementTrueInteriorRelErr: report.maxElementTrueInteriorRelErr,
+      maxCompoundTrueInteriorRelErr: report.maxCompoundTrueInteriorRelErr,
+      allInteriorProbesUnder5Pct: report.allInteriorProbesUnder5Pct,
       reportOut: REPORT_OUT
     }, null, 2)}\n`);
   } finally {

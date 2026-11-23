@@ -44,10 +44,11 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const cfg = electronConfiguration(Z);
   const spinCfg = spinElectronConfiguration(Z);
   const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
-  const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
+  const dAtMaxN = cfg.find((s) => s.n === maxN && s.l === 2);
+  const dSub = dAtMaxN || cfg.find((s) => s.n === maxN - 1 && s.l === 2);
   const fSub = cfg.find((s) => s.n === maxN - 2 && s.l === 3);
-  const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
-  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
+  const sSub = dAtMaxN ? null : cfg.find((s) => s.n === maxN && s.l === 0);
+  const pSub = dAtMaxN ? null : cfg.find((s) => s.n === maxN && s.l === 1);
   const dOcc = dSub?.occupancy ?? 0;
   const fOcc = fSub?.occupancy ?? 0;
   const sOcc = sSub?.occupancy ?? 0;
@@ -55,8 +56,10 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const unpaired = spinCfg.reduce((sum, s) => sum + (s.occUp - s.occDown), 0);
   // Delocalized free-electron conduction count per atom: outer ns/np electrons plus
   // partial s-d hybridization for open d shells (tightly-bound filled d^10 shells do NOT
-  // join the free-electron Drude plasma — essential for realistic Cu/Ag/Au plasma frequency!).
-  const nCondPerAtom = Math.max(1, sOcc + pOcc + 0.18 * Math.min(dOcc, 10 - dOcc));
+  // join the free-electron Drude plasma — essential for realistic Cu/Ag/Au/Pd plasma frequency!).
+  const nCondPerAtom = dAtMaxN
+    ? 1.2
+    : Math.max(1, sOcc + pOcc + 0.18 * Math.min(dOcc, 10 - dOcc));
 
   const omegaAtomM3 = (4 * Math.PI / 3) * ((bulkResult.wignerSeitzRadiusBohr * BOHR_TO_M) ** 3);
   const nAtom = 1 / Math.max(1e-32, omegaAtomM3);

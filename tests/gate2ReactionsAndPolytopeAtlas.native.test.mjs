@@ -118,10 +118,11 @@ test('Gate 2 native Vulkan proof: GPU molecular RHF, recursive compound feedback
       // 3. Convex Polytope Atlas compilation for BOTH an Element (Fe) AND Reaction Compounds (H2O, NaCl) across ALL 4 phases
       const fe = await deriveElementBundleWebGpu(device, 26, { runNuclearGpuVolume: false, runLiveMd: false, atomicMaxScf: 40 });
       const h2o = await deriveCompoundBundleWebGpu(device, 'H2O', { runLiveMd: false });
+      const n2 = await deriveCompoundBundleWebGpu(device, 'N2', { runLiveMd: false });
       const nacl = await deriveCompoundBundleWebGpu(device, 'NaCl', { runLiveMd: false });
       const atlases = [];
-      for (const b of [fe.bundle, h2o.bundle, nacl.bundle]) {
-        const atlas = await buildMaterialPolytopeAtlasWebGpu(device, b, { degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2 });
+      for (const b of [fe.bundle, h2o.bundle, n2.bundle, nacl.bundle]) {
+        const atlas = await buildMaterialPolytopeAtlasWebGpu(device, b, { degrees: [5, 4], relativeTolerance: 0.05, maxBisectDepth: 3 });
         const solidHit = atlas.registry.resolveState(b.materialKey, { temperatureK: Math.max(5, b.thermodynamic.meltingPointK * 0.5), pressurePa: 101325 });
         const gasHit = atlas.registry.resolveState(b.materialKey, { temperatureK: Math.max(b.thermodynamic.boilingPointK * 1.4, b.thermodynamic.boilingPointK + 120), pressurePa: 101325 });
         const missHit = atlas.registry.resolveState(b.materialKey, { temperatureK: 500, pressurePa: 1e16 });
@@ -131,6 +132,7 @@ test('Gate 2 native Vulkan proof: GPU molecular RHF, recursive compound feedback
           polytopeCount: atlas.polytopeCount,
           packedFloats: atlas.packedGpuAtlas.data.length,
           allFitsValid: atlas.polytopes.every((p) => p.fit?.valid === true),
+          maxFitErr: Math.max(...atlas.polytopes.map((p) => p.fit?.maxRelativeError ?? 0)),
           solidFound: solidHit.found,
           solidPhase: solidHit.polytope?.phase,
           solidFitValid: solidHit.fit?.valid,

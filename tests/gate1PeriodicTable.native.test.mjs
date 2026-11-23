@@ -49,12 +49,12 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
       const { deriveElementBundleWebGpu } = await import('/src/runtime/material/periodicTableEngineWebGpu.js');
       const { validateMaterialPropertyBundle } = await import('/ulg-gpu-abi/src/materialFoundationAbi.js');
 
-      const probeZs = [1, 2, 6, 10, 11, 14, 18, 26, 29, 64, 79, 80, 92, 118];
+      const probeZs = [1, 2, 6, 10, 11, 12, 14, 18, 26, 29, 46, 64, 79, 80, 92, 118];
       const rows = [];
       for (const Z of probeZs) {
         const res = await deriveElementBundleWebGpu(device, Z, {
           runNuclearGpuVolume: Z === 26 || Z === 92, // prove GPU nuclear volume & chart on Fe & U
-          runLiveMd: Z === 18 || Z === 26 || Z === 14 || Z === 79, // prove LJ, EAM, SW, heavy metal MD
+          runLiveMd: Z === 12 || Z === 18 || Z === 26 || Z === 14 || Z === 46 || Z === 64 || Z === 79, // prove LJ, EAM (bcc/fcc/hcp), SW, heavy metal MD
           mdSteps: 12,
           atomicMaxScf: 45,
           nuclearVolDim: 16,
@@ -85,6 +85,7 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
           boilingK: res.bundle.thermodynamic.boilingPointK,
           mdTempK: res.bundle.thermodynamic.mdTempK,
           mdPressureGPa: res.bundle.thermodynamic.mdPressureGPa,
+          mdMsdA2: res.bundle.thermodynamic.mdMsdA2,
           opticalSrgb: res.bundle.electromagnetic.opticalSrgb,
           oscillatorSource: res.bundle.electromagnetic.oscillatorSource,
           blochPeak: res.visualData.bulk.blochDensity3d ? Math.max(...res.visualData.bulk.blochDensity3d) : 0,
@@ -99,7 +100,7 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
     assert.deepEqual(pageErrors, []);
     assert.equal(out.status, 'ok');
     assert.deepEqual(out.gpuErrors, []);
-    assert.equal(out.rows.length, 14);
+    assert.equal(out.rows.length, 16);
 
     for (const r of out.rows) {
       assert.equal(r.valid, true, `Bundle invalid for ${r.symbol}: ${r.errors}`);
@@ -116,9 +117,13 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
     assert.equal(byZ[2].isMetal, false, 'He must be insulating');
     assert.equal(byZ[10].isMetal, false, 'Ne must be insulating');
     assert.equal(byZ[18].isMetal, false, 'Ar must be insulating');
+    assert.equal(byZ[12].crystal, 'hcp', 'Mg selects hcp crystal');
     assert.equal(byZ[14].crystal, 'diamond', 'Si selects diamond crystal');
     assert.equal(byZ[26].crystal, 'bcc', 'Fe selects bcc crystal');
     assert.equal(byZ[29].crystal, 'fcc', 'Cu selects fcc crystal');
+    assert.equal(byZ[46].crystal, 'fcc', 'Pd (4d10 5s0) must be metallic fcc, NOT cryogenic noble-gas vdw-fcc');
+    assert.equal(byZ[46].isMetal, true, 'Pd must be metallic');
+    assert.ok(byZ[46].meltingK > 500, `Pd melting point must be metallic solid (> 500 K), got ${byZ[46].meltingK} K`);
     assert.equal(byZ[79].crystal, 'fcc', 'Au selects fcc crystal');
     assert.equal(byZ[64].crystal, 'hcp', 'Gd selects hcp crystal');
     assert.ok(byZ[14].bandGapEv > 0.4, `Si band gap=${byZ[14].bandGapEv}`);
@@ -133,7 +138,10 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
     assert.ok(byZ[79].qedShiftHa > byZ[6].qedShiftHa, 'Relativistic QED radiative shift grows strongly with Z');
     assert.equal(byZ[118].tier, 'tier-3-theoretical-envelope', 'Og must carry honest tier-3 theoretical label');
     assert.ok(Number.isFinite(byZ[26].mdTempK) && byZ[26].mdTempK > 10, 'Live Fe EAM MD ran');
-    assert.ok(Number.isFinite(byZ[26].mdPressureGPa) && Math.abs(byZ[26].mdPressureGPa) < 50, `Fe BCC MD pressure must be bounded (not 1470 GPa BCC-in-FCC mismatch!), got ${byZ[26].mdPressureGPa} GPa`);
+    assert.ok(Number.isFinite(byZ[26].mdMsdA2) && byZ[26].mdMsdA2 > 0, `Fe MD MSD must not truncate to 0, got ${byZ[26].mdMsdA2}`);
+    assert.ok(Number.isFinite(byZ[26].mdPressureGPa) && Math.abs(byZ[26].mdPressureGPa) < 50, `Fe BCC MD pressure must be bounded, got ${byZ[26].mdPressureGPa} GPa`);
+    assert.ok(Number.isFinite(byZ[12].mdPressureGPa) && Math.abs(byZ[12].mdPressureGPa) < 50, `Mg HCP MD pressure must be bounded (exact 4-atom HCP cell), got ${byZ[12].mdPressureGPa} GPa`);
+    assert.ok(Number.isFinite(byZ[64].mdPressureGPa) && Math.abs(byZ[64].mdPressureGPa) < 50, `Gd HCP MD pressure must be bounded (exact 4-atom HCP cell), got ${byZ[64].mdPressureGPa} GPa`);
     assert.ok(Number.isFinite(byZ[18].mdTempK) && byZ[18].mdTempK > 5, 'Live Ar LJ MD ran');
   } finally {
     await browser.close();

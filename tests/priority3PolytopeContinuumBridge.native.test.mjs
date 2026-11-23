@@ -106,6 +106,16 @@ test('Priority 3 native Vulkan proof: GPU Tier-1 Polytope Atlas evaluation, hitF
         ]
       });
 
+      // Verify ambient 300 K, 1 atm gas accuracy on N2 (air) and Ar directly on WebGPU!
+      const n2Eval = await evaluatePolytopeAtlasBatchWebGpu(device, {
+        materialKey: 'N2',
+        queries: [{ temperatureK: 300, pressurePa: 101325 }]
+      });
+      const arEval = await evaluatePolytopeAtlasBatchWebGpu(device, {
+        materialKey: 'Ar',
+        queries: [{ temperatureK: 300, pressurePa: 101325 }]
+      });
+
       const escalation = await escalatePolytopeMissToTriadGpu(device, {
         materialKey: 'Al2O3',
         temperatureK: 2500,
@@ -121,6 +131,8 @@ test('Priority 3 native Vulkan proof: GPU Tier-1 Polytope Atlas evaluation, hitF
         gpuErrors,
         h2oEval,
         feEval,
+        n2Eval,
+        arEval,
         escalation,
         seeded
       };
@@ -139,6 +151,14 @@ test('Priority 3 native Vulkan proof: GPU Tier-1 Polytope Atlas evaluation, hitF
 
     assert.equal(out.feEval.receipt.hitCount, 2);
     assert.equal(out.feEval.receipt.missCount, 1);
+
+    // Ambient 300 K, 1 atm gas accuracy (< 5% vs ideal/virial EOS: N2 ~ 1.137 kg/m³, Ar ~ 1.540 kg/m³!)
+    assert.equal(out.n2Eval.rows[0].hit, true, 'N2 ambient 300 K must hit gas polytope on GPU');
+    const n2RelErr = Math.abs(out.n2Eval.rows[0].densityKgPerM3 - 1.1373) / 1.1373;
+    assert.ok(n2RelErr < 0.05, `N2 300 K GPU density=${out.n2Eval.rows[0].densityKgPerM3} (relErr=${(n2RelErr * 100).toFixed(2)}% >= 5%)`);
+    assert.equal(out.arEval.rows[0].hit, true, 'Ar ambient 300 K must hit gas polytope on GPU');
+    const arRelErr = Math.abs(out.arEval.rows[0].densityKgPerM3 - 1.622) / 1.622;
+    assert.ok(arRelErr < 0.08, `Ar 300 K GPU density=${out.arEval.rows[0].densityKgPerM3} (relErr=${(arRelErr * 100).toFixed(2)}%)`);
 
     assert.equal(out.escalation.escalated, true);
     assert.equal(out.escalation.triadStatus.active, true);

@@ -309,7 +309,7 @@ fn vv_second_kick_reduce(@builtin(global_invocation_id) id: vec3<u32>) {
     let disp = unwrapped[i].xyz - pos_init[i].xyz;
     let msd_i = dot(disp, disp);
     atomicAdd(&telemetry[0], i32(clamp(ekin * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[3], i32(clamp(msd_i * 1.0e3, -2.0e9, 2.0e9)));
+    atomicAdd(&telemetry[3], i32(clamp(msd_i * 1.0e6, 0.0, 1.5e7)));
     atomicAdd(&telemetry[4], i32(clamp(m * v_new.x * 1.0e4, -2.0e9, 2.0e9)));
     atomicAdd(&telemetry[5], i32(clamp(m * v_new.y * 1.0e4, -2.0e9, 2.0e9)));
     atomicAdd(&telemetry[6], i32(clamp(m * v_new.z * 1.0e4, -2.0e9, 2.0e9)));
@@ -503,7 +503,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     const potentialEnergyEv = words[1] / 1e4;
     const totalEnergyEv = kineticEnergyEv + potentialEnergyEv;
     const virialEv = words[2] / 1e4;
-    const msdA2 = words[3] / (1e3 * atomCount);
+    const msdA2 = words[3] / (1e6 * atomCount);
     const momentum = [words[4] / 1e4, words[5] / 1e4, words[6] / 1e4];
     const volumeA3 = box[0] * box[1] * box[2];
     const dof = Math.max(1, 3 * atomCount - 3);

@@ -82,12 +82,28 @@ export async function fitConvexPolytopeWebGpu(device, polytope, evalFn, {
       }
     }
 
-    // Generate deterministic held-out probes strictly INSIDE the convex polytope A x <= b
+    // Generate deterministic held-out probes strictly INSIDE the convex polytope A x <= b:
+    // combine linear AND log-spaced temperature probes (plus ambient 300 K when in-range)
+    // so wide log-spanning gas/plasma polytopes (e.g. [10 K, 6500 K]) never hide low-T
+    // or ambient-T curvature errors behind linear probe spacing!
+    const tProbeSet = [];
+    for (let i = 1; i <= 5; i += 1) {
+      tProbeSet.push(tMin + (i / 6) * (tMax - tMin));
+    }
+    const tRatio = tMax / Math.max(1e-3, tMin);
+    if (tRatio > 2.5) {
+      for (let i = 1; i <= 5; i += 1) {
+        tProbeSet.push(tMin * Math.pow(tRatio, i / 6));
+      }
+    }
+    if (300 > tMin && 300 < tMax) {
+      tProbeSet.push(300);
+    }
+
     const heldOut = [];
     const heldOutPhysical = [];
-    for (let i = 1; i <= 5; i += 1) {
+    for (const T of tProbeSet) {
       for (let j = 1; j <= 5; j += 1) {
-        const T = tMin + (i / 6) * (tMax - tMin);
         const lp = lpMin + (j / 6) * (lpMax - lpMin);
         const P = 10 ** lp;
         const mem = evaluatePolytopeMembership(poly, { temperatureK: T, pressurePa: P });
@@ -116,14 +132,19 @@ export async function fitConvexPolytopeWebGpu(device, polytope, evalFn, {
     });
 
     // For logScale fits, evaluate exact physical relative error |exp(pred) - expected| / expected
+    // across EVERY linear + log-spaced + ambient held-out probe inside A x <= b!
     let physicalMaxRelErr = fit.maxRelativeError;
+    let worstProbeT = 0.5 * (tMin + tMax);
     if (logScale && fit.coefficients) {
       let maxRel = 0;
       const box = [[tMin, tMax], [lpMin, lpMax]];
       for (const [T, lp, expected] of heldOutPhysical) {
         const pred = evalChebyshev2d(fit.coefficients, degrees[0], degrees[1], box, T, lp, 'exp');
         const rel = Math.abs(pred - expected) / Math.max(1e-30, Math.abs(expected));
-        if (rel > maxRel) maxRel = rel;
+        if (rel > maxRel) {
+          maxRel = rel;
+          worstProbeT = T;
+        }
       }
       physicalMaxRelErr = maxRel;
     }
@@ -134,7 +155,9 @@ export async function fitConvexPolytopeWebGpu(device, polytope, evalFn, {
     const positivityOk = !requirePositive || minSample > 0;
     if ((!fitPassesTol || !positivityOk) && depth < maxDepth) {
       // Adaptive axis bisection: compare discrete 2nd-difference curvature along
-      // T (axis 0) vs log10 P (axis 1) so steep compression knees bisect along P!
+      // T (axis 0) vs log10 P (axis 1). For logScale gas/plasma polytopes with wide
+      // T ratio, ln(T) curves sharply at low T while ln(P) is nearly linear, so split T
+      // geometrically first whenever the worst error sits in the low-T span!
       let curv0 = 0;
       let curv1 = 0;
       for (let i0 = 1; i0 < n0 - 1; i0 += 1) {
@@ -153,7 +176,10 @@ export async function fitConvexPolytopeWebGpu(device, polytope, evalFn, {
           if (d2 > curv1) curv1 = d2;
         }
       }
-      const axisIndex = curv1 > curv0 * 1.05 ? 1 : (curv0 > curv1 * 1.05 ? 0 : (depth % 2));
+      const forceLowTSplit = logScale && tRatio > 6.0 && curv0 >= 0.25 * curv1 && worstProbeT < tMin + 0.35 * (tMax - tMin);
+      const axisIndex = forceLowTSplit
+        ? 0
+        : (curv1 > curv0 * 1.05 ? 1 : (curv0 > curv1 * 1.05 ? 0 : (depth % 2)));
       const [left, right] = bisectConvexPolytope(poly, axisIndex);
       const [resL, resR] = await Promise.all([
         fitSingle(left, depth + 1),

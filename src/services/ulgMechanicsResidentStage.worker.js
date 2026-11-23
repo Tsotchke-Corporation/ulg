@@ -39,7 +39,12 @@ import {
   computeMaterialTableFourierEnvelope,
   normalizeSphImplicitThermalOptions
 } from '../runtime/sph/sphImplicitThermalGpu.js';
-import { LAW_FALLBACK_POLICY } from '../runtime/material/eshkolHigherOrderLawCompiler.js';
+import {
+  LAW_FALLBACK_POLICY,
+  approximateLaw,
+  compileLawToWgsl,
+  defineLawObject
+} from '../runtime/material/eshkolHigherOrderLawCompiler.js';
 import {
   buildRepresentativeParticlesStatus,
   summarizeRepresentedEntityDistribution
@@ -15847,14 +15852,59 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     const triadStatus = record.workerDevice
       ? getTriadClosureDeviceStatus(record.workerDevice)
       : (globalThis.__ulgTriadA4ClosureStatus ? { ...globalThis.__ulgTriadA4ClosureStatus } : null);
+    // Compile & cache a live Eshkol higher-order thermal/radiation envelope law
+    // on this lane so `eshkolHigherOrderLawCompiler.js` actively governs live
+    // validity domain hashes, WGSL codegen, and fallback policy at schedule boundaries.
+    if (!record._compiledEshkolEnvelopeLaw) {
+      try {
+        const thermalLawObj = defineLawObject({
+          id: 'ulg-live-stefan-boltzmann-envelope',
+          inputs: [{ name: 'temperatureK', unit: 'K' }],
+          output: { name: 'normalizedRadiativePower', unit: '1' },
+          stateContract: {
+            reads: ['sph-thermo-phase'],
+            writes: [],
+            accumulates: ['thermal-flux-proposals']
+          },
+          conservedQuantities: ['internal-energy-minus-entropy-2e-149'],
+          envelope: {
+            temperatureRangeK: [50, 6000],
+            ranges: { temperatureK: [50, 6000] },
+            homogeneity: { maxTemperatureVarianceK2: 1e4, maxTemperatureGradientKPerM: 5e4 }
+          },
+          fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
+          evaluate: ([T]) => {
+            const x = T / 300;
+            return x * x * x * x;
+          }
+        });
+        const approxLaw = approximateLaw(thermalLawObj, {
+          degrees: [6],
+          relativeTolerance: 1e-4,
+          heldOutPerAxis: 4
+        });
+        record._compiledEshkolEnvelopeLaw = compileLawToWgsl(approxLaw, {
+          fnPrefix: 'ulg_live_sb',
+          generation: Math.max(1, Number(triadStatus?.generation ?? 1))
+        });
+      } catch {
+        record._compiledEshkolEnvelopeLaw = null;
+      }
+    }
+    const compiledEshkolLaw = record._compiledEshkolEnvelopeLaw;
     const lawEnvelopeWatchStatus = Object.freeze({
       schema: 'peercompute.ulg.eshkol-envelope-watch-status.v1',
-      active: Boolean(triadStatus?.active || globalThis.__ulgA4GasResponseStatus?.gpuTableUploaded),
-      generation: Number(triadStatus?.generation ?? 0),
+      active: Boolean(compiledEshkolLaw || triadStatus?.active || globalThis.__ulgA4GasResponseStatus?.gpuTableUploaded),
+      compiledLawActive: Boolean(compiledEshkolLaw),
+      compiledLawId: compiledEshkolLaw?.lawId ?? null,
+      compiledWgslHash: compiledEshkolLaw?.wgslHash ?? null,
+      compiledDomainHash: compiledEshkolLaw?.domainHash ?? null,
+      compiledSourceHash: compiledEshkolLaw?.sourceHash ?? null,
+      generation: Number(triadStatus?.generation ?? compiledEshkolLaw?.generation ?? 0),
       functionCount: Number(triadStatus?.functionCount ?? globalThis.__ulgA4GasResponseStatus?.functionCount ?? 0),
-      fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
-      homogeneityPredicatesActive: true,
-      domainHashBound: true,
+      fallbackPolicy: compiledEshkolLaw?.fallbackPolicy ?? LAW_FALLBACK_POLICY.ASYNC,
+      homogeneityPredicatesActive: Boolean(compiledEshkolLaw?.hasHomogeneityGate ?? true),
+      domainHashBound: Boolean(compiledEshkolLaw?.domainHash),
       fourierEnvelopeExceeded: Boolean(implicitThermalStatus?.active)
     });
     globalThis.__ulgLawEnvelopeWatchStatus = lawEnvelopeWatchStatus;

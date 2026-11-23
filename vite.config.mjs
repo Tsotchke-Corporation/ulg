@@ -285,11 +285,62 @@ function copyPlanBackgroundsPlugin() {
   };
 }
 
+const UNUSED_INFERENCE_VIRTUAL_ID = '\0ulg-dev-unused-inference';
+
+function excludeUnusedPeerComputeInference() {
+  return {
+    name: 'ulg-exclude-unused-peercompute-inference',
+    enforce: 'pre',
+    resolveId(source, importer) {
+      if (
+        source.includes('@huggingface/transformers')
+        || source.includes('onnxruntime-web')
+        || source.includes('@wllama/')
+        || (
+          importer && importer.includes('/peercompute/')
+          && (
+            source.includes('/inference/ModelInferenceService')
+            || source.includes('/inference/gguf/')
+            || source.includes('/inference/diffusion/')
+            || source.includes('/inference/mesh/')
+            || source.includes('/inference/sf3d')
+            || source.includes('/inference/speech/')
+          )
+        )
+      ) {
+        return UNUSED_INFERENCE_VIRTUAL_ID;
+      }
+      return null;
+    },
+    load(id) {
+      if (id !== UNUSED_INFERENCE_VIRTUAL_ID) return null;
+      return `
+        export class ModelInferenceService {
+          constructor() { throw new Error('ModelInferenceService is not bundled in ULG physics builds.'); }
+        }
+        export const diffusionRuntimeDefinition = null;
+        export const ggufRuntimeDefinition = null;
+        export const meshRuntimeDefinition = null;
+        export const sf3dRuntimeDefinition = null;
+        export const speechRuntimeDefinition = null;
+        export const env = {};
+        export const InferenceSession = null;
+        export const Tensor = null;
+        export function initializeWllamaModule() { throw new Error('wllama disabled in ULG build'); }
+        export function glueSerialize() { throw new Error('wllama disabled in ULG build'); }
+        export function glueDeserialize() { throw new Error('wllama disabled in ULG build'); }
+        export default {};
+      `;
+    }
+  };
+}
+
 export default defineConfig({
   resolve: {
     dedupe: ['three']
   },
   plugins: [
+    excludeUnusedPeerComputeInference(),
     routeCacheHeadersPlugin(),
     copyPlanBackgroundsPlugin()
   ],

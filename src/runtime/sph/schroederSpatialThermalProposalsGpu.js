@@ -1020,8 +1020,12 @@ function normalizeThermalDormancyConfig(config, smoothingLengthM) {
     2 * Math.max(0, Number(smoothingLengthM) || 0),
     Math.max(...boxM) / 64
   );
+  const radiationEpsilonFluxWPerM2 = Number(config.radiationEpsilonFluxWPerM2) > 0
+    ? Number(config.radiationEpsilonFluxWPerM2)
+    : 0;
   return Object.freeze({
     epsilonK,
+    radiationEpsilonFluxWPerM2,
     boxM: Object.freeze(boxM),
     originM: Object.freeze(originM),
     minCellEdgeM
@@ -13019,7 +13023,9 @@ export function runSchroederSpatialThermalProposalWebGpu({
           activeIndicesBuffer: thermalDormancyStage.activeIndicesBuffer,
           indirectDispatchBuffer: thermalDormancyStage.indirectDispatchBuffer,
           indirectDispatchOffset: thermalDormancyStage.indirectDispatchOffset ?? 0,
-          flagWordOffset: thermalDormancyFlagWord(particleCount)
+          flagWordOffset: thermalDormancyFlagWord(particleCount),
+          uncertaintyBuffer: derivedBuffer,
+          uncertaintyWordOffset: thermalUncertaintyWord(particleCount)
         })
       : null,
     radiationDormancy: radiationDormancyStage

@@ -1702,7 +1702,7 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
         * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
       const mechanicsByteLength = mlsMpmParticleState.particleCount
         * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-      const outUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+      const outUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
       const outStateBuffer = ownSetupAllocation(
         useQueueOrderedPhasePool
           ? acquirePhasePooledBuffer(
@@ -2115,18 +2115,45 @@ export function createSphPhaseCarrierTransferWebGpuEncoderStage({
         // Coalesce G4 phase dormancy classification + preflight + apply into ONE
         // compute pass (saving 1 compute pass/step) and record exact counts into
         // the per-schedule lawActivationReceiptRing.
+        const useIndirectActiveDispatch = Boolean(
+          typeof encoder.copyBufferToBuffer === 'function'
+          && phaseDormancyStage.indirectDispatchBuffer
+          && phaseDormancyStage.lineageActiveIndicesBuffer
+          && phaseDormancy?.useIndirectDispatch === true
+        );
+        if (useIndirectActiveDispatch) {
+          encoder.copyBufferToBuffer(sourceStateBuffer, 0, outStateBuffer, 0, stateByteLength);
+          encoder.copyBufferToBuffer(sourceThermoBuffer, 0, outThermoBuffer, 0, thermoByteLength);
+          encoder.copyBufferToBuffer(sourceMechanicsBuffer, 0, outMechanicsBuffer, 0, mechanicsByteLength);
+        }
         const pass = encoder.beginComputePass({ label: 'ulg-sph-phase-carrier-transfer' });
         phaseDormancyStage.encodeIntoPass(pass, {
           stateBuffer: sourceStateBuffer,
           thermoBuffer: sourceThermoBuffer,
+          uncertaintyBuffer: phaseDormancy?.uncertaintyBuffer ?? null,
+          uncertaintyWordOffset: phaseDormancy?.uncertaintyWordOffset ?? 0,
           interfaceFrontBuffer: resolvedInterfaceFront?.buffer ?? null
         });
         pass.setPipeline(preflightPipeline.pipeline);
         pass.setBindGroup(0, preflightBindGroup);
-        pass.dispatchWorkgroups(workgroups);
+        if (useIndirectActiveDispatch && typeof pass.dispatchWorkgroupsIndirect === 'function') {
+          pass.dispatchWorkgroupsIndirect(
+            phaseDormancyStage.indirectDispatchBuffer,
+            phaseDormancyStage.indirectDispatchOffset ?? 16
+          );
+        } else {
+          pass.dispatchWorkgroups(workgroups);
+        }
         pass.setPipeline(applyPipeline.pipeline);
         pass.setBindGroup(0, applyBindGroup);
-        pass.dispatchWorkgroups(workgroups);
+        if (useIndirectActiveDispatch && typeof pass.dispatchWorkgroupsIndirect === 'function') {
+          pass.dispatchWorkgroupsIndirect(
+            phaseDormancyStage.indirectDispatchBuffer,
+            phaseDormancyStage.indirectDispatchOffset ?? 16
+          );
+        } else {
+          pass.dispatchWorkgroups(workgroups);
+        }
         pass.end();
         encodeLawActivationCount(encoder, device, 'phase', phaseDormancyStage.countBuffer, {
           epsilon: phaseDormancyEpsilonK

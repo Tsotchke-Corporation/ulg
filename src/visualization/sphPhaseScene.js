@@ -50431,6 +50431,10 @@ fn main(
       const shouldSkipPressureInterfaceRefresh = Boolean(
         skipPressureInterfaceRefresh
         || (
+          (configuredWorkerOffscreenPresentation || useWorkerOwnedResidentRenderProducer)
+          && diagnosticGasProducerRefresh !== true
+        )
+        || (
           surfaceOverlayPolicy.enabled
           && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
         )

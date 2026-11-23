@@ -37,9 +37,9 @@ struct ReactionDormancyParams {
   counts: vec4<u32>,
   // state stride (vec4s), thermo stride (vec4s), reaction count, record stride (vec4s)
   strides: vec4<u32>,
-  // cell edge floor (m), maximum contact radius (m), uncertainty enabled (1/0), unused
+  // cell edge floor (m), maximum contact radius (m), uncertainty enabled (1/0), uncertainty word offset (f32-encoded u32)
   config: vec4<f32>,
-  // grid extent x, y, z, unused
+  // grid extent x, y, z, write_invalid_proposal (1 = write (-1,-1,0,0) for indirect dispatch, 0 = write -7 sentinel)
   box: vec4<f32>,
   // grid origin x, y, z, unused
   origin: vec4<f32>,
@@ -61,12 +61,16 @@ struct ReactionDormancyParams {
 // Optional per-source G6/A4 temperature uncertainty dT (K); active when params.config.z > 0.5.
 @group(0) @binding(9) var<storage, read> temperature_uncertainty: array<f32>;
 const REACTION_DORMANCY_SENTINEL: vec4<f32> = vec4<f32>(-7.0, -7.0, -7.0, -7.0);
+const REACTION_INVALID_PROPOSAL: vec4<f32> = vec4<f32>(-1.0, -1.0, 0.0, 0.0);
 
 fn finite(value: f32) -> bool { return value == value && abs(value) <= 3.402823e38; }
 
 fn source_uncertainty(i: u32) -> f32 {
-  if (params.config.z <= 0.5 || i >= arrayLength(&temperature_uncertainty)) { return 0.0; }
-  return temperature_uncertainty[i];
+  if (params.config.z <= 0.5) { return 0.0; }
+  let offset = u32(max(0.0, params.config.w));
+  let idx = offset + i;
+  if (idx >= arrayLength(&temperature_uncertainty)) { return 0.0; }
+  return temperature_uncertainty[idx];
 }
 
 fn grid_edge() -> f32 {
@@ -123,7 +127,13 @@ fn scatter_sources(@builtin(global_invocation_id) id: vec3<u32>) {
 fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
   if (i >= params.counts.x) { return; }
-  if (!source_present(i)) { dormant[i] = 0u; return; }
+  if (!source_present(i)) {
+    dormant[i] = 0u;
+    if (params.box.w > 0.5 && i < arrayLength(&proposal_rows)) {
+      proposal_rows[i] = REACTION_INVALID_PROPOSAL;
+    }
+    return;
+  }
   // Present sources only: an absent row is never read as dormant, and a
   // stale sentinel cannot survive (the discovery pass rewrites every row).
   atomicAdd(&counts[2], 1u);
@@ -173,7 +183,9 @@ fn classify_sources(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
   dormant[i] = select(1u, 0u, is_active);
-  if (!is_active && i < arrayLength(&proposal_rows)) { proposal_rows[i] = REACTION_DORMANCY_SENTINEL; }
+  if (!is_active && i < arrayLength(&proposal_rows)) {
+    proposal_rows[i] = select(REACTION_DORMANCY_SENTINEL, REACTION_INVALID_PROPOSAL, params.box.w > 0.5);
+  }
   if (is_active) {
     let slot = atomicAdd(&counts[0], 1u);
     active_indices[slot] = i;
@@ -236,15 +248,27 @@ export function createSchroederReactionDormancyStage({ device, particleCount, bo
     size: 16, usage: GPU_BUFFER_USAGE.STORAGE });
   let group = null, groupKey = null;
   let lastUncertaintyFlag = 0;
+  let lastUncertaintyOffset = 0;
+  let lastWriteInvalid = 0;
   return Object.freeze({
     cells, cellEdgeFloorM: floorM, dormantBuffer, countBuffer, activeIndicesBuffer,
     indirectDispatchBuffer: countBuffer, indirectDispatchOffset: 16,
     encode(encoder, { stateBuffer, thermoBuffer, reactionRecordBuffer, proposalBuffer, proposalByteLength,
-      uncertaintyBuffer = null }) {
+      uncertaintyBuffer = null, uncertaintyWordOffset = 0, writeInvalidProposalOnDormant = false }) {
       const hasUncertainty = uncertaintyBuffer ? 1 : 0;
-      if (hasUncertainty !== lastUncertaintyFlag) {
+      const uOffset = Math.max(0, Math.trunc(Number(uncertaintyWordOffset) || 0));
+      const writeInvalid = writeInvalidProposalOnDormant ? 1 : 0;
+      if (
+        hasUncertainty !== lastUncertaintyFlag
+        || uOffset !== lastUncertaintyOffset
+        || writeInvalid !== lastWriteInvalid
+      ) {
         lastUncertaintyFlag = hasUncertainty;
+        lastUncertaintyOffset = uOffset;
+        lastWriteInvalid = writeInvalid;
         f[10] = hasUncertainty;
+        f[11] = uOffset;
+        f[15] = writeInvalid;
         device.queue.writeBuffer(params, 0, words);
       }
       const boundUncertainty = uncertaintyBuffer ?? uncertaintyPlaceholder;

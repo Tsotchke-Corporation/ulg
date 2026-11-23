@@ -26,7 +26,7 @@ export const schroederPhaseDormancyWgsl = /* wgsl */ `
 struct PhaseDormancyParams {
   // particle_count, window_count, state_stride_vec4, thermo_stride_vec4
   counts: vec4<u32>,
-  // epsilon_K, uncertainty_enabled (1/0), unused, unused
+  // epsilon_K, uncertainty_enabled (1/0), uncertainty_word_offset, unused
   config: vec4<f32>,
   // front_enabled (1/0), front_header_words, front_row_words, front_epoch
   front: vec4<u32>,
@@ -47,8 +47,11 @@ struct PhaseDormancyParams {
 fn finite(v: f32) -> bool { return v == v && abs(v) <= 3.402823e38; }
 
 fn uncertainty_of(i: u32) -> f32 {
-  if (params.config.y <= 0.5 || i >= arrayLength(&temperature_uncertainty)) { return 0.0; }
-  return temperature_uncertainty[i];
+  if (params.config.y <= 0.5) { return 0.0; }
+  let offset = u32(max(0.0, params.config.z));
+  let idx = offset + i;
+  if (idx >= arrayLength(&temperature_uncertainty)) { return 0.0; }
+  return temperature_uncertainty[idx];
 }
 
 fn has_interface_front(i: u32) -> bool {
@@ -502,11 +505,21 @@ export function createSchroederPhaseDormancyStage({
   let group = null;
   let groupKey = null;
   let lastUncertaintyFlag = 0;
-  function encodeIntoPass(pass, { stateBuffer, thermoBuffer, uncertaintyBuffer = null, interfaceFrontBuffer = null }) {
+  let lastUncertaintyOffset = 0;
+  function encodeIntoPass(pass, {
+    stateBuffer,
+    thermoBuffer,
+    uncertaintyBuffer = null,
+    uncertaintyWordOffset = 0,
+    interfaceFrontBuffer = null
+  }) {
     const hasUncertainty = uncertaintyBuffer ? 1 : 0;
-    if (hasUncertainty !== lastUncertaintyFlag) {
+    const uOffset = Math.max(0, Math.trunc(Number(uncertaintyWordOffset) || 0));
+    if (hasUncertainty !== lastUncertaintyFlag || uOffset !== lastUncertaintyOffset) {
       lastUncertaintyFlag = hasUncertainty;
+      lastUncertaintyOffset = uOffset;
       f[5] = hasUncertainty;
+      f[6] = uOffset;
       device.queue.writeBuffer(params, 0, words);
     }
     const boundUncertainty = uncertaintyBuffer ?? uncertaintyPlaceholder;

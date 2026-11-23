@@ -1,5 +1,6 @@
 import { splitSpareReservesEqual } from './schroederSplitSpareReserve.js';
 import { retainedSchroederPhaseSlotRefinementBuffers } from './schroederPhaseSlotRefinementGpu.js';
+import { validateLawAdapterSchedule } from './lawAdapterContract.js';
 
 const phaseSlotOwnershipRollbacks = new WeakMap();
 
@@ -19106,90 +19107,14 @@ function uniqueStringList(values = []) {
 }
 
 export function validateFusedResidentLawPlan(plan) {
-  const errors = [];
-  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.stages)) {
-    return Object.freeze({
-      valid: false,
-      errors: Object.freeze(['fused-law-plan-invalid-structure']),
-      stageCount: 0,
-      exclusiveWritersByResource: Object.freeze({}),
-      accumulatorsByResource: Object.freeze({})
-    });
-  }
-  const order = Array.isArray(plan.requiredStageOrder) ? plan.requiredStageOrder : [];
-  const orderIndex = new Map(order.map((stageId, idx) => [stageId, idx]));
-  const seenStageIds = new Set();
-  const exclusiveWritersByResource = new Map();
-  const accumulatorsByResource = new Map();
-  const handoffCompatibleResources = new Set([
-    'sph-particle-state',
-    'sph-thermo-phase',
-    'mls-mpm-mechanics',
-    'mls-mpm-grid-velocity'
-  ]);
-
-  for (const stage of plan.stages) {
-    if (!stage || typeof stage !== 'object') {
-      errors.push('stage-entry-not-object');
-      continue;
-    }
-    const id = String(stage.id || '').trim();
-    if (!id) {
-      errors.push('stage-missing-id');
-      continue;
-    }
-    if (seenStageIds.has(id)) {
-      errors.push(`duplicate-stage-id:${id}`);
-    }
-    seenStageIds.add(id);
-    if (!stage.lawNodeId || !stage.orderConstraint) {
-      errors.push(`stage-missing-contract-metadata:${id}`);
-    }
-    const writes = Array.isArray(stage.writes) ? stage.writes : [];
-    const accumulates = Array.isArray(stage.accumulates) ? stage.accumulates : [];
-    const writeSet = new Set(writes);
-    for (const acc of accumulates) {
-      if (writeSet.has(acc)) {
-        errors.push(`stage-writes-and-accumulates-same-resource:${id}:${acc}`);
-      }
-      if (!accumulatorsByResource.has(acc)) accumulatorsByResource.set(acc, []);
-      accumulatorsByResource.get(acc).push(id);
-    }
-    for (const resource of writes) {
-      if (!exclusiveWritersByResource.has(resource)) {
-        exclusiveWritersByResource.set(resource, []);
-      }
-      const priorWriters = exclusiveWritersByResource.get(resource);
-      if (priorWriters.length > 0) {
-        const currentOrder = orderIndex.get(id);
-        const priorOrder = orderIndex.get(priorWriters[priorWriters.length - 1]);
-        const strictlyOrderedHandoff = (
-          handoffCompatibleResources.has(resource)
-          && Number.isInteger(priorOrder)
-          && Number.isInteger(currentOrder)
-          && currentOrder > priorOrder
-          && Array.isArray(stage.reads)
-          && stage.reads.includes(resource)
-        );
-        if (!strictlyOrderedHandoff) {
-          errors.push(
-            `illegal-double-writer:${resource}:${priorWriters[priorWriters.length - 1]}+${id}`
-          );
-        }
-      }
-      priorWriters.push(id);
-    }
-  }
-  return Object.freeze({
-    valid: errors.length === 0,
-    errors: Object.freeze(errors),
-    stageCount: plan.stages.length,
-    exclusiveWritersByResource: Object.freeze(
-      Object.fromEntries([...exclusiveWritersByResource.entries()].map(([k, v]) => [k, Object.freeze([...v])]))
-    ),
-    accumulatorsByResource: Object.freeze(
-      Object.fromEntries([...accumulatorsByResource.entries()].map(([k, v]) => [k, Object.freeze([...v])]))
-    )
+  return validateLawAdapterSchedule(plan, {
+    requireExtendedMetadata: false,
+    handoffCompatibleResources: [
+      'sph-particle-state',
+      'sph-thermo-phase',
+      'mls-mpm-mechanics',
+      'mls-mpm-grid-velocity'
+    ]
   });
 }
 

@@ -1590,6 +1590,8 @@ struct ReactionDiscoveryParams {
 @group(0) @binding(8) var<uniform> spatial_expectation: ${exactNearExpectationType};
 @group(0) @binding(9) var<uniform> params: ReactionDiscoveryParams;
 @group(0) @binding(10) var<storage, read_write> reaction_activation_observation: array<atomic<u32>>;
+@group(0) @binding(11) var<storage, read> reaction_active_indices: array<u32>;
+@group(0) @binding(12) var<storage, read> reaction_active_counts: array<u32>;
 // G4 reaction node scope (schroederReactionDormancyGpu.js): the dormancy
 // stage, encoded just before this pass, writes this sentinel into the
 // proposal row of every source with no feasible reaction pair this step. The
@@ -2363,7 +2365,10 @@ fn reaction_discovery_consider_pair(
 
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let particle_index = global_id.x;
+  propose_for_particle(global_id.x);
+}
+
+fn propose_for_particle(particle_index: u32) {
   if (particle_index >= params.particle_count) {
     return;
   }
@@ -2566,6 +2571,19 @@ fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
     reaction_proposals[particle_index] = best;
     reaction_discovery_increment_counter(6u);
   }
+}
+
+// G4 zero-work indirect dispatch entry point: iterates only compacted active
+// sources written by schroederReactionDormancyGpu.js, launching [0, 1, 1]
+// workgroups when reaction is quiescent.
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn propose_active(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let active_count = reaction_active_counts[0u];
+  if (global_id.x >= active_count) {
+    return;
+  }
+  let particle_index = reaction_active_indices[global_id.x];
+  propose_for_particle(particle_index);
 }
 
 // This second dispatch performs no lookup. It turns any directory, source, or
@@ -3231,6 +3249,25 @@ function reactionDiscoveryPipelineDescriptorsForTraversalProgram(
         computeBufferBinding(9, 'uniform')
       ]
     }),
+    proposalActiveIndirect: descriptor({
+      cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-proposal-active',
+      label: 'ulg-schroeder-spatial-reaction-discovery-proposal-active',
+      entryPoint: 'propose_active',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'read-only-storage'),
+        computeBufferBinding(6, 'storage'),
+        computeBufferBinding(7, 'storage'),
+        computeBufferBinding(8, 'uniform'),
+        computeBufferBinding(9, 'uniform'),
+        computeBufferBinding(11, 'read-only-storage'),
+        computeBufferBinding(12, 'read-only-storage')
+      ]
+    }),
     seal: descriptor({
       cacheFamily: 'ulg-schroeder-spatial-reaction-discovery-proposal',
       label: 'ulg-schroeder-spatial-reaction-discovery-seal',
@@ -3772,9 +3809,18 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     device,
     pipelineDescriptors.displacement
   );
+  const useIndirectActiveProposal = Boolean(
+    reactionDormancyStage
+    && observeGpuEvidence !== true
+    && Number(device?.limits?.maxStorageBuffersPerShaderStage ?? 0) >= 10
+    && reactionDormancyStage.indirectDispatchBuffer
+    && reactionDormancyStage.activeIndicesBuffer
+  );
   const proposalPipeline = createCachedExplicitComputePipeline(
     device,
-    pipelineDescriptors.proposal
+    useIndirectActiveProposal
+      ? pipelineDescriptors.proposalActiveIndirect
+      : pipelineDescriptors.proposal
   );
   const sealPipeline = createCachedExplicitComputePipeline(
     device,
@@ -3843,7 +3889,13 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       { binding: 9, resource: exactBufferBindingResource(
         paramsBuffer,
         PARAMS_BYTES
-      ) }
+      ) },
+      ...(useIndirectActiveProposal
+        ? [
+            { binding: 11, resource: { buffer: reactionDormancyStage.activeIndicesBuffer } },
+            { binding: 12, resource: { buffer: reactionDormancyStage.countBuffer } }
+          ]
+        : [])
     ]
   });
   const displacementBindGroup = createCachedExplicitBindGroup(device, {
@@ -4024,13 +4076,16 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   );
   if (reactionDormancyStage) {
     // G4: classify sources from the same current state and thermo the
-    // proposal pass reads, before it reads the flags.
+    // proposal pass reads, carrying optional G6 temperature uncertainty.
     reactionDormancyStage.encode(encoder, {
       stateBuffer: currentStateBuffer,
       thermoBuffer,
       reactionRecordBuffer: resolvedReactionRecordBuffer,
       proposalBuffer,
-      proposalByteLength
+      proposalByteLength,
+      uncertaintyBuffer: reactionDormancy?.uncertaintyBuffer ?? null,
+      uncertaintyWordOffset: reactionDormancy?.uncertaintyWordOffset ?? 0,
+      writeInvalidProposalOnDormant: useIndirectActiveProposal
     });
     // G4 per-schedule receipt: this step's counts into the schedule ring.
     encodeLawActivationCount(encoder, device, 'reaction', reactionDormancyStage.countBuffer);
@@ -4062,7 +4117,14 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
   });
   proposalPass.setPipeline(proposalPipeline.pipeline);
   proposalPass.setBindGroup(0, proposalBindGroup);
-  proposalPass.dispatchWorkgroups(workgroups);
+  if (useIndirectActiveProposal && typeof proposalPass.dispatchWorkgroupsIndirect === 'function') {
+    proposalPass.dispatchWorkgroupsIndirect(
+      reactionDormancyStage.indirectDispatchBuffer,
+      reactionDormancyStage.indirectDispatchOffset ?? 16
+    );
+  } else {
+    proposalPass.dispatchWorkgroups(workgroups);
+  }
   proposalPass.end();
   endReactionDiscoveryTimestampSpan(
     gpuTimestampRecorder,

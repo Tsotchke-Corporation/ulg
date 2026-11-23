@@ -118,7 +118,26 @@ job at a time, `CPUQuota=50%`, `S0_RESIDENT_PERF=1`):
 
 ---
 
-## 5. Prioritized Execution Order (Bottom-Up From `10⁻¹⁵ m` to `10⁺²⁵ m`)
+## 5. Next Prioritized Campaign Queue (2026-11-23, Post-`d687b37e`)
+
+1. **Campaign Item 1 — End-to-End `(Z, A)` Isotope & Isotopologue Propagation (Gates 1–2 → Studio/Astro):**
+   - Propagate selected isotope mass `nuclear.atomicMassU` (instead of natural-abundance `ATOMIC_MASS_U[Z-1]`) through `periodicBulkDftWebGpu.js`, `elementMdClosureWebGpu.js` (`ρ_0`, `Θ_D ∝ 1/√M`, zero-point/melting shift, MD dynamics), plus light-isotope reduced-mass & nuclear hyperfine (`μ_I`) shifts in `radialKohnShamWebGpu.js`.
+   - Extend `formula.js` & `recursiveCompoundPipeline.js` to parse & derive isotopologues (`D2O`, `T2O`, `[2H]2O`, `14CO2`, `235UF6`, `238UF6`, `60Co`, `3He`) and key `materialPolytopeRegistry.js` by canonical `(formula / Z, A)`.
+   - Replace the hardcoded 4-isotope table in `nuclearCherenkovClosure.js` (`U-238, Co-60, Cs-137, H-3`) with live Gate 1 `nuclearStructureGpu.js` arbitrary `(Z, A)` decay chains & Bateman daughter inventories.
+   - Add an interactive Isotope `A` / `N` selector & clickable Chart of Nuclides to `elements-lab.html`.
+2. **Campaign Item 2 — Gate 0D / Gate 3 Zero-Churn Step Loop Completion & Real-Time `water-realtime`:**
+   - Fix `water-realtime` K-step boundary frame rejection (`"worker isosurface presentation lacked a fresh completed boundary frame"` in `ulgOffscreenRender.worker.js:4264`) to unlock K-step batching toward `>= 1.0x` RT (`currently 0.109x` at 50% CPU).
+   - Burn down `iron-ice-quench` remaining per-step churn (`37.86` encoders, `32.56` compute passes, `16.18` `createBuffer`, `3.89` `workDone`, `36.42` `bindGroups`) to Section 3 budgets (`<= 2` submits, `<= 25` passes, `0` per-step host waits), deduplicate the 5 overlapping iron-ice contact paths → 1 canonical authority, collapse remaining solid proxy hash & dormancy grids onto SS cells, and retire unused 63-limb `sphExactRational*` where safe.
+3. **Campaign Item 3 — Gate 3 Live Studio Tier-1 Polytope Atlas Activation & Eshkol/MoonLab Miss Loop:**
+   - Wire `foundation-polytope-atlas.json` + `evaluatePolytopeAtlasWgsl` directly into Studio's resident GPU material lookup (with Tier-2 A3 regional sampling & Tier-3 A6 PeerCompute + Eshkol/MoonLab synthesis on `hitFlag == 0` misses) and retire `15/15` `reference-fallback` rows in `compounds.json`.
+4. **Campaign Item 4 — Gate 4 Visible Wayland Chrome `>= 54 Hz` Presentation & Formal Receipt Capture:**
+   - With owner approval for visible Wayland Chrome, capture & inspect sequential pixel-motion cadence (`visibleMotionCadenceVerified: true`, `>= 54 Hz`) across all 5 active Studio presets (`water-cycle`, `iron-ice-quench`, `sodium-water`, `cesium-fluorine`, `water-realtime`), eliminate remaining hardcoded `0.04` bulk alpha, and collect reviewed `ulg.campaign.receipt.v1` bundles for Gates 0–4.
+5. **Campaign Item 5 — Gate 5 Full Scale-Atlas Unification & Multi-Host WebRTC TreePM:**
+   - Migrate remaining bespoke private octrees in `selfGravitatingHydroGpu.js` & `cosmicQuantumGpuKernels.js` onto canonical `SchroederScaleAtlas` multipole, couple short-range SS Tree + long-range `fft3dWebGpu` PM in `supergalacticTreePmGpu.js`, add live GPU CI-NEB reaction barrier visuals in `elements-lab.html`, and run multi-browser WebRTC TreePM tile partitioning once `agy` delivers `../peercompute` extensions.
+
+---
+
+### Full Scale-Ladder Execution Reference (Bottom-Up From `10⁻¹⁵ m` to `10⁺²⁵ m`)
 
 > **Master Blueprints:**
 > - Gates 0–2 (`10⁻¹⁵ → 10⁻⁶ m` + Shared Foundation): [`plan/todo/periodic-table-polytope-atlas-foundation-plan.md`](todo/periodic-table-polytope-atlas-foundation-plan.md)

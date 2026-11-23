@@ -1,9 +1,12 @@
 # Planetary, Stellar, Galactic & Supergalactic Scale-Atlas Plan (`10⁺⁶ m → 10⁺²⁵ m`)
 
-- **Effective:** 2026-11-22 AKST
+- **Effective:** 2026-11-23 AKST (Updated with live status at `d687b37e`)
 - **Active routing:** [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
 - **Associated ICC Oracle:** `ulg-gate5-planetary-to-supergalactic` (see [`.icc/completion-oracles.yaml`](../../.icc/completion-oracles.yaml))
 - **Prerequisites:** Gate 0 (`gpuMath` `fft3dWebGpu` + unified `SS` Scale Atlas multipole + `peercompute-core`), Gate 1 (Nuclear & Atomic closures), Gate 2 (Convex Polytope Atlas), Gate 3 (Unified SS Continuum)
+- **Live Implementation Status (`d687b37e`):**
+  - **DONE & Vulkan-verified:** 5A (`planetaryStructureGpu.js`), 5B (`stellarNucleosynthesisBridge.js` using Gate 1 `(Z, A)` nuclear Q-values + RK4 Lane–Emden `n=1.5, 3.0`), 5C (`galacticIsmCoolingGpu.js` with Gate 1 atomic line cooling + translation-invariant DM/star/ISM/Paczyński–Wiita SMBH), 5D (`supergalacticTreePmGpu.js` sharing Gate 0B `fft3dWebGpu.js`, visually verified flagship `supergalactic.html` evolving `a=0.074→0.362`, `σ=2.43→4.82`, `cosmicQuantumZoomDemo.js` upgraded to live FLRW TreePM, and G5-fenced `distributedSpatialPartitioner.js`).
+  - **REMAINING OPEN WORK:** Migrate remaining bespoke private octrees in `selfGravitatingHydroGpu.js` & `cosmicQuantumGpuKernels.js` onto canonical `SS` Scale Atlas multipole, couple short-range SS Tree + long-range PM inside `supergalacticTreePmGpu.js`, run live multi-host WebRTC TreePM tile test once `agy` implements `../peercompute` extensions, and capture formal `ulg.campaign.receipt.v1`.
 
 ---
 

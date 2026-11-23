@@ -1,8 +1,14 @@
 # ULG Foundation-First Plan: Periodic Table First-Principles Material Engine, Reaction Feedback Loop & Polytope Atlas
 
-- **Effective:** 2026-11-22 AKST
+- **Effective:** 2026-11-23 AKST (Updated with live status at `d687b37e`)
 - **Active routing:** [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
 - **Associated ICC Oracles:** `ulg-gate0-foundation-arch`, `ulg-gate1-periodic-table-engine`, `ulg-gate2-reactions-and-polytope-atlas` (see [`.icc/completion-oracles.yaml`](../../.icc/completion-oracles.yaml))
+- **Live Implementation Status (`d687b37e`):**
+  - **DONE & Vulkan-verified:** Gate 0A (`peercomputeCore.js`, `dist/` `117.5 MB → 35 MB`), Gate 0B (`src/runtime/gpuMath/`: eigensolver, 3D FFT+Poisson, GPU MD, adaptive polytope Chebyshev), Gate 0C (`materialFoundationAbi.js` + `evaluatePolytopeAtlasWgsl` + slanted `A x <= b` registry), Gate 1 (`Z=1..118` nuclear/atomic/bulk/EM/MD engine + `elements.json` `118/118` + `elements-lab.html` 6 live tabs), Gate 2 (`molecularHartreeFockWebGpu`, `recursiveCompoundPipeline`, Eshkol AD + MoonLab 5-slot Triad GPU `polytopeAtlasBuilder`, `foundation-polytope-atlas.json`).
+  - **REMAINING OPEN WORK:**
+    1. **End-to-End `(Z, A)` Isotope & Isotopologue Support (HIGH PRIORITY):** Nuclear layer (`nuclearStructureGpu.js`) & stellar nucleosynthesis already support arbitrary `(Z, A)`, and atomic DFT receives `R_nuc(A)`, **but** bulk density/Debye/MD (`periodicBulkDftWebGpu.js`, `elementMdClosureWebGpu.js`) still read natural-abundance `ATOMIC_MASS_U[Z-1]`, `formula.js` / `recursiveCompoundPipeline.js` cannot yet parse isotopologues (`D2O`, `[2H]2O`, `14CO2`, `235UF6`, `60Co`), `nuclearCherenkovClosure.js` still hardcodes 4 isotopes instead of querying `nuclearStructureGpu.js`, and `elements-lab.html` needs an interactive `(A, N)` isotope picker + clickable Chart of Nuclides.
+    2. **Gate 0D Zero-Churn completion** (`iron-ice` `<= 25` passes / `<= 2` submits / `0` host `workDone`, `water-realtime` K-step boundary pacing `>= 1.0x` RT, 1 canonical contact law, 63-limb retirement).
+    3. **Gate 1–2 Deep Physics & Formal Receipts:** GPU CI-NEB reaction barrier visualizer, 4-component Dirac–KS / `DFT+U` refinements, migrating legacy `compounds.json` off `reference-fallback`, and formal `ulg.campaign.receipt.v1` capture.
 
 ---
 

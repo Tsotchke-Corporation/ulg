@@ -545,6 +545,30 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     });
   }
 
+  async function readPositionsAndVelocities() {
+    const byteLen = atomCount * 16;
+    const stagingPos = device.createBuffer({ size: byteLen, usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+    const stagingVel = device.createBuffer({ size: byteLen, usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+    const enc = device.createCommandEncoder({ label: 'ulg-md-read-pos-vel' });
+    enc.copyBufferToBuffer(posBuf, 0, stagingPos, 0, byteLen);
+    enc.copyBufferToBuffer(velBuf, 0, stagingVel, 0, byteLen);
+    device.queue.submit([enc.finish()]);
+    try {
+      await Promise.all([
+        stagingPos.mapAsync(GPU_BUFFER_USAGE.MAP_READ),
+        stagingVel.mapAsync(GPU_BUFFER_USAGE.MAP_READ)
+      ]);
+      const positions = new Float32Array(stagingPos.getMappedRange().slice(0, byteLen));
+      const velocities = new Float32Array(stagingVel.getMappedRange().slice(0, byteLen));
+      stagingPos.unmap();
+      stagingVel.unmap();
+      return { positions, velocities };
+    } finally {
+      stagingPos.destroy();
+      stagingVel.destroy();
+    }
+  }
+
   return Object.freeze({
     schema: ULG_GPU_MD_SCHEMA,
     atomCount,
@@ -553,6 +577,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     velocitiesBuffer: velBuf,
     forcesBuffer: forceBuf,
     stepBatch,
+    readPositionsAndVelocities,
     destroy() {
       for (const b of [paramsBuf, posBuf, velBuf, forceBuf, unwrappedBuf, posInitBuf, telemetryBuf, readTelemetryBuf]) {
         b.destroy();

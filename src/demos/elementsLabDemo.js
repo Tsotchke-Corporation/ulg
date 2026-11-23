@@ -7,6 +7,10 @@ import { ELEMENT_SYMBOLS, symbolForZ } from '../runtime/electronicStructure/peri
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
 import { deriveCompoundBundleWebGpu } from '../runtime/material/recursiveCompoundPipeline.js';
 import { buildMaterialPolytopeAtlasWebGpu } from '../runtime/material/polytopeAtlasBuilder.js';
+import {
+  buildFccCrystalMdState,
+  createMolecularDynamicsSessionWebGpu
+} from '../runtime/gpuMath/molecularDynamicsWebGpu.js';
 
 const canvas = document.getElementById('gpu-canvas');
 const plot1 = document.getElementById('plot1');
@@ -28,6 +32,10 @@ let currentElementRes = null;
 let currentCompoundRes = null;
 let currentAtlas = null;
 let selectedZ = 26;
+let liveMdSession = null;
+let liveMdState = null;
+let liveMdBusy = false;
+let liveMdYaw = 0.45;
 
 // Build clickable 118-element periodic table grid
 function buildPeriodicTableButtons() {
@@ -205,26 +213,167 @@ function drawPolytopeDiagram(cv, atlas) {
   ctx.fillRect(0, 0, w, h);
   if (!atlas?.polytopes?.length) return;
   const phaseColors = {
-    solid: 'rgba(86, 194, 255, 0.35)',
-    liquid: 'rgba(52, 211, 153, 0.35)',
-    gas: 'rgba(251, 146, 60, 0.30)',
-    plasma: 'rgba(192, 132, 252, 0.35)'
+    solid: 'rgba(86, 194, 255, 0.36)',
+    liquid: 'rgba(52, 211, 153, 0.38)',
+    gas: 'rgba(251, 146, 60, 0.34)',
+    plasma: 'rgba(192, 132, 252, 0.36)'
   };
-  const maxT = Math.max(...atlas.polytopes.map((p) => p.axes[0].max));
+  const phaseBorder = {
+    solid: '#56c2ff',
+    liquid: '#34d399',
+    gas: '#fb923c',
+    plasma: '#c084fc'
+  };
+  const minLt = Math.log10(Math.max(1, Math.min(...atlas.polytopes.map((p) => p.axes[0].min))));
+  const maxLt = Math.log10(Math.max(10, Math.max(...atlas.polytopes.map((p) => p.axes[0].max))));
   const minLp = Math.min(...atlas.polytopes.map((p) => Math.log10(p.axes[1].min)));
   const maxLp = Math.max(...atlas.polytopes.map((p) => Math.log10(p.axes[1].max)));
+  const padL = 42; const padR = 16; const padT = 26; const padB = 28;
+  const mapX = (T) => padL + ((Math.log10(Math.max(1, T)) - minLt) / Math.max(1e-6, maxLt - minLt)) * (w - padL - padR);
+  const mapY = (lp) => h - padB - ((lp - minLp) / Math.max(1e-6, maxLp - minLp)) * (h - padT - padB);
+
+  // Subtle log-grid & axis labels
+  ctx.strokeStyle = 'rgba(148,163,184,0.14)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const gx = padL + (i / 4) * (w - padL - padR);
+    ctx.beginPath(); ctx.moveTo(gx, padT); ctx.lineTo(gx, h - padB); ctx.stroke();
+    const gy = padT + (i / 4) * (h - padT - padB);
+    ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
+  }
+
   for (const poly of atlas.polytopes) {
-    const x0 = 26 + (poly.axes[0].min / maxT) * (w - 40);
-    const x1 = 26 + (poly.axes[0].max / maxT) * (w - 40);
-    const y0 = h - 20 - ((Math.log10(poly.axes[1].min) - minLp) / Math.max(1e-6, maxLp - minLp)) * (h - 36);
-    const y1 = h - 20 - ((Math.log10(poly.axes[1].max) - minLp) / Math.max(1e-6, maxLp - minLp)) * (h - 36);
-    ctx.fillStyle = phaseColors[poly.phase] || 'rgba(255,255,255,0.2)';
-    ctx.fillRect(x0, y1, Math.max(2, x1 - x0), Math.max(2, y0 - y1));
-    ctx.strokeStyle = '#93c5fd';
-    ctx.strokeRect(x0, y1, Math.max(2, x1 - x0), Math.max(2, y0 - y1));
-    ctx.fillStyle = '#fff';
-    ctx.font = '10px Inter, sans-serif';
-    ctx.fillText(poly.phase, x0 + 3, y1 + 12);
+    const lp0 = Math.log10(poly.axes[1].min);
+    const lp1 = Math.log10(poly.axes[1].max);
+    const steps = 12;
+    const upperPts = [];
+    const lowerPts = [];
+    // Sample valid T interval [tLo(lp), tHi(lp)] satisfying all A x <= b half-space inequalities!
+    for (let s = 0; s <= steps; s += 1) {
+      const lp = lp0 + (s / steps) * (lp1 - lp0);
+      let tLo = poly.axes[0].min;
+      let tHi = poly.axes[0].max;
+      for (const ineq of (poly.inequalities || [])) {
+        const a0 = ineq.a[0]; const a1 = ineq.a[1]; const b = ineq.b;
+        if (Math.abs(a0) > 1e-9) {
+          const rhs = (b - a1 * lp) / a0;
+          if (a0 > 0) tHi = Math.min(tHi, rhs);
+          else tLo = Math.max(tLo, rhs);
+        }
+      }
+      if (tHi > tLo) {
+        lowerPts.push([mapX(tLo), mapY(lp)]);
+        upperPts.push([mapX(tHi), mapY(lp)]);
+      }
+    }
+    if (lowerPts.length >= 2) {
+      ctx.beginPath();
+      ctx.moveTo(lowerPts[0][0], lowerPts[0][1]);
+      for (const pt of lowerPts) ctx.lineTo(pt[0], pt[1]);
+      for (let k = upperPts.length - 1; k >= 0; k -= 1) ctx.lineTo(upperPts[k][0], upperPts[k][1]);
+      ctx.closePath();
+      ctx.fillStyle = phaseColors[poly.phase] || 'rgba(255,255,255,0.2)';
+      ctx.fill();
+      ctx.strokeStyle = phaseBorder[poly.phase] || '#93c5fd';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      const mid = Math.floor(lowerPts.length / 2);
+      const cx = 0.5 * (lowerPts[mid][0] + upperPts[mid][0]);
+      const cy = 0.5 * (lowerPts[mid][1] + upperPts[mid][1]);
+      if (Math.abs(upperPts[mid][0] - lowerPts[mid][0]) > 22) {
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = 'bold 11px Inter, sans-serif';
+        ctx.fillText(poly.phase, cx - 16, cy + 4);
+      }
+    }
+  }
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '11px Inter, sans-serif';
+  ctx.fillText(`Convex Polytope Atlas (A x <= b, log₁₀ T vs log₁₀ P) — ${atlas.materialKey} (${atlas.polytopeCount} cells)`, padL, 16);
+  ctx.fillText(`T: ${Math.round(10 ** minLt)} K → ${Math.round(10 ** maxLt)} K (log scale)`, padL, h - 8);
+  ctx.fillText(`log₁₀ P: ${minLp.toFixed(0)}..${maxLp.toFixed(0)}`, w - 125, h - 8);
+}
+
+function drawLiveMdCrystal(ctx, w, h, res, mdState, yaw) {
+  const thermo = res.visualData.thermo;
+  const md = mdState?.telemetry || thermo.mdTelemetry;
+  ctx.fillStyle = '#56c2ff';
+  ctx.font = 'bold 15px Inter, sans-serif';
+  ctx.fillText(`Live Representative WebGPU MD — ${res.bundle.symbol} (${thermo.potential.modelName})`, 20, 28);
+  if (md) {
+    ctx.fillStyle = '#e6eefc';
+    ctx.font = '12px monospace';
+    ctx.fillText(
+      `Atoms: ${md.atomCount} | Steps: ${md.totalSteps} | t = ${fmt(md.timeFs, 1)} fs | T = ${fmt(md.temperatureK, 1)} K | P = ${fmt(md.pressureGPa, 2)} GPa | MSD = ${fmt(md.msdA2, 4)} Å²`,
+      20, 50
+    );
+  }
+  if (!mdState?.positions || !mdState?.boxL) return;
+  const pos = mdState.positions;
+  const vel = mdState.velocities;
+  const n = pos.length / 4;
+  const L = mdState.boxL;
+  const half = 0.5 * L;
+  const cx = w * 0.5;
+  const cy = h * 0.54;
+  const scale = Math.min(w, h) * 0.34;
+  const cosY = Math.cos(yaw); const sinY = Math.sin(yaw);
+  const cosX = Math.cos(0.32); const sinX = Math.sin(0.32);
+
+  // Project live GPU atom coordinates
+  const projected = [];
+  for (let i = 0; i < n; i += 1) {
+    const x = (pos[i * 4] - half) / half;
+    const y = (pos[i * 4 + 1] - half) / half;
+    const z = (pos[i * 4 + 2] - half) / half;
+    const vx = vel[i * 4]; const vy = vel[i * 4 + 1]; const vz = vel[i * 4 + 2];
+    const speed = Math.hypot(vx, vy, vz);
+    const x1 = x * cosY - z * sinY;
+    const z1 = x * sinY + z * cosY;
+    const y2 = y * cosX - z1 * sinX;
+    const z2 = y * sinX + z1 * cosX + 3.2;
+    const persp = 2.4 / Math.max(0.5, z2);
+    projected.push({
+      sx: cx + x1 * scale * persp,
+      sy: cy - y2 * scale * persp,
+      z: z2,
+      r: Math.max(3.5, 8.5 * persp),
+      speed
+    });
+  }
+  projected.sort((a, b) => b.z - a.z);
+
+  // Draw periodic cell wireframe
+  ctx.strokeStyle = 'rgba(86, 194, 255, 0.25)';
+  ctx.lineWidth = 1;
+  const corners = [];
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    const x1 = sx * cosY - sz * sinY;
+    const z1 = sx * sinY + sz * cosY;
+    const y2 = sy * cosX - z1 * sinX;
+    const z2 = sy * sinX + z1 * cosX + 3.2;
+    const persp = 2.4 / Math.max(0.5, z2);
+    corners.push([cx + x1 * scale * persp, cy - y2 * scale * persp]);
+  }
+  const edges = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+  for (const [a, b] of edges) {
+    ctx.beginPath(); ctx.moveTo(corners[a][0], corners[a][1]); ctx.lineTo(corners[b][0], corners[b][1]); ctx.stroke();
+  }
+
+  for (const p of projected) {
+    const heat = Math.min(1, p.speed * 40);
+    const rCol = Math.round(70 + 185 * heat);
+    const gCol = Math.round(170 + 60 * (1 - Math.abs(heat - 0.5)));
+    const bCol = Math.round(255 * (1 - 0.7 * heat));
+    const grad = ctx.createRadialGradient(p.sx - p.r * 0.3, p.sy - p.r * 0.3, p.r * 0.1, p.sx, p.sy, p.r);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.35, `rgb(${rCol},${gCol},${bCol})`);
+    grad.addColorStop(1, `rgba(${Math.round(rCol * 0.3)},${Math.round(gCol * 0.3)},${Math.round(bCol * 0.5)},0.9)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, p.r, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -298,40 +447,39 @@ function redrawCurrentTab() {
     });
   } else if (currentTab === 'md' && currentElementRes) {
     const thermo = currentElementRes.visualData.thermo;
-    const md = thermo.mdTelemetry;
-    ctx.fillStyle = '#56c2ff';
-    ctx.font = 'bold 15px Inter, sans-serif';
-    ctx.fillText(`Live Representative WebGPU MD — ${currentElementRes.bundle.symbol} (${thermo.potential.modelName})`, 20, 32);
+    drawLiveMdCrystal(ctx, canvas.width, canvas.height, currentElementRes, liveMdState, liveMdYaw);
+    const md = liveMdState?.telemetry || thermo.mdTelemetry;
     if (md) {
-      ctx.fillStyle = '#e6eefc';
-      ctx.font = '13px monospace';
-      ctx.fillText(`Atoms: ${md.atomCount} | Steps: ${md.totalSteps} | t = ${fmt(md.timeFs, 1)} fs`, 20, 64);
-      ctx.fillText(`T = ${fmt(md.temperatureK, 1)} K | P = ${fmt(md.pressureGPa, 2)} GPa | MSD = ${fmt(md.msdA2, 4)} Å²`, 20, 88);
-      ctx.fillText(`E_kin = ${fmt(md.kineticEnergyEv, 3)} eV | E_pot = ${fmt(md.potentialEnergyEv, 3)} eV | E_tot = ${fmt(md.totalEnergyEv, 3)} eV`, 20, 112);
       plot1Title.textContent = 'GPU Radial Distribution Function g(r)';
       const rAxis = Array.from(md.rdf).map((_, i) => ((i + 0.5) / md.rdf.length) * thermo.potential.rcutA);
       drawPlotLine(plot1, rAxis, Array.from(md.rdf), { label: 'g(r) vs r (Å)', color: '#34d399', yMin: 0 });
     }
-    plot2Title.textContent = 'Phase Transitions & Transport Summary';
+    plot2Title.textContent = `Phase Transitions (${currentElementRes.bundle.symbol})`;
     drawPlotLine(plot2, [0, 1, 2], [0, thermo.meltingPointK, thermo.boilingPointK], {
       label: `T_m = ${fmt(thermo.meltingPointK, 0)} K, T_b = ${fmt(thermo.boilingPointK, 0)} K`, color: '#ff9c54'
     });
   } else if (currentTab === 'compound' && currentCompoundRes) {
     const mqm = currentCompoundRes.visualData.molQm;
+    const cb = currentCompoundRes.bundle;
     if (mqm?.volumeData) {
       drawVolumeSlice(ctx, canvas.width, canvas.height, mqm.volumeData, mqm.volDim, 4,
-        `Live WebGPU Molecular RHF Density — ${currentCompoundRes.bundle.materialKey} (E=${fmt(mqm.totalEnergyHa, 2)} Ha, μ=${fmt(mqm.dipoleDebye, 2)} D)`, '#c084fc');
+        `Live WebGPU Molecular RHF Density — ${cb.materialKey} (E=${fmt(mqm.totalEnergyHa, 2)} Ha, μ=${fmt(mqm.dipoleDebye, 2)} D)`, '#c084fc');
     } else {
       ctx.fillStyle = '#c084fc';
       ctx.font = 'bold 15px Inter, sans-serif';
-      ctx.fillText(`Recursive Compound Closure — ${currentCompoundRes.bundle.materialKey} (${currentCompoundRes.bundle.mechanical.crystalStructure})`, 20, 34);
+      ctx.fillText(`Recursive Compound Closure — ${cb.materialKey} (${cb.mechanical.crystalStructure})`, 20, 34);
     }
     if (mqm?.orbitalEnergiesHa) {
-      plot1Title.textContent = 'Molecular Orbital Spectrum (GPU RHF)';
+      plot1Title.textContent = `Molecular Orbital Spectrum (${cb.materialKey} GPU RHF)`;
       drawPlotLine(plot1, mqm.orbitalEnergiesHa.map((_, i) => i), mqm.orbitalEnergiesHa, {
         label: `MO Energy (Ha) | HOMO-LUMO Gap = ${fmt(mqm.homoLumoGapEv, 2)} eV`, color: '#c084fc'
       });
     }
+    plot2Title.textContent = `Derived Compound Phase & Transport (${cb.materialKey})`;
+    drawPlotLine(plot2, [0, 1, 2], [0, cb.thermodynamic.meltingPointK, cb.thermodynamic.boilingPointK], {
+      label: `T_m = ${fmt(cb.thermodynamic.meltingPointK, 0)} K, T_b = ${fmt(cb.thermodynamic.boilingPointK, 0)} K, ρ = ${fmt(cb.mechanical.densityKgPerM3, 0)} kg/m³`,
+      color: '#38bdf8'
+    });
   } else if (currentTab === 'polytope' && currentAtlas) {
     drawPolytopeDiagram(canvas, currentAtlas);
     plot1Title.textContent = `Polytope Atlas (${currentAtlas.materialKey}): ${currentAtlas.polytopeCount} Convex Cells`;
@@ -340,6 +488,67 @@ function redrawCurrentTab() {
     const errs = currentAtlas.polytopes.map((p) => (p.fit?.maxRelativeError ?? 0) * 100);
     drawPlotLine(plot2, errs.map((_, i) => i), errs, { label: 'Max Rel Error (%) per Polytope', color: '#38bdf8', yMin: 0 });
   }
+}
+
+function initLiveMdForElement(res) {
+  if (liveMdSession) {
+    try { liveMdSession.destroy(); } catch {}
+    liveMdSession = null;
+  }
+  liveMdState = null;
+  if (!gpuDevice || !res?.visualData?.thermo?.potential) return;
+  const bulk = res.visualData.bulk;
+  const pot = res.visualData.thermo.potential;
+  const massU = Math.max(1, Number(res.bundle.nuclear.atomicMassU || 28));
+  const tProbe = Math.max(20, Math.min(450, 0.5 * Number(res.bundle.thermodynamic.meltingPointK || 600)));
+  const init = buildFccCrystalMdState({
+    cellsPerSide: 3,
+    latticeConstantA: Math.max(2.6, Number(bulk.latticeConstantA || 3.6)),
+    massU,
+    temperatureK: tProbe
+  });
+  liveMdSession = createMolecularDynamicsSessionWebGpu(gpuDevice, {
+    ...init,
+    potentialModel: pot.potentialModel,
+    epsilonEv: pot.epsilonEv,
+    sigmaOrR0A: pot.sigmaOrR0A,
+    alphaOrLambda: pot.alphaOrLambda,
+    rcutA: pot.rcutA,
+    eamAEv: pot.eamAEv,
+    eamBeta: pot.eamBeta,
+    swGamma: pot.swGamma,
+    dtFs: Math.min(2.0, Math.max(0.4, 0.08 * Math.sqrt(massU))),
+    targetTemperatureK: tProbe,
+    thermostatCouplingFs: 40
+  });
+  liveMdState = {
+    positions: init.positions,
+    velocities: init.velocities,
+    boxL: init.boxLengthsA[0],
+    telemetry: res.visualData.thermo.mdTelemetry
+  };
+}
+
+function tickLiveMd() {
+  if (currentTab === 'md' && liveMdSession && !liveMdBusy) {
+    liveMdBusy = true;
+    liveMdSession.stepBatch(3, { readTelemetry: true })
+      .then(async (tel) => {
+        if (!liveMdSession) return;
+        const pv = await liveMdSession.readPositionsAndVelocities();
+        liveMdYaw += 0.025;
+        liveMdState = {
+          positions: pv.positions,
+          velocities: pv.velocities,
+          boxL: liveMdSession.boxLengthsA[0],
+          telemetry: tel
+        };
+        if (currentTab === 'md') redrawCurrentTab();
+      })
+      .catch(() => {})
+      .finally(() => { liveMdBusy = false; });
+  }
+  requestAnimationFrame(tickLiveMd);
 }
 
 async function runElementDerivation(Z) {
@@ -358,6 +567,7 @@ async function runElementDerivation(Z) {
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentElementRes.bundle, {
       degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 1, materialIndex: Z
     });
+    initLiveMdForElement(currentElementRes);
     renderBundleCard(currentElementRes.bundle);
     renderG7Card(currentElementRes.bundle, currentElementRes.g7Advisory);
     statusBadge.textContent = `${symbolForZ(Z)} · WebGPU OK`;
@@ -425,7 +635,11 @@ async function boot() {
     runCompoundDerivation(compoundInput.value || 'H2O');
   });
 
-  const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+  let adapter = null;
+  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
+    adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) await new Promise((r) => setTimeout(r, 250));
+  }
   if (!adapter) {
     statusBadge.textContent = 'WebGPU unavailable (fail-closed)';
     return;
@@ -437,6 +651,7 @@ async function boot() {
   selectedZ = startZ;
   zInput.value = String(startZ);
   await runElementDerivation(startZ);
+  requestAnimationFrame(tickLiveMd);
 }
 
 boot();

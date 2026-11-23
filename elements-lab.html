@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ULG — First-Principles Periodic Table, Quantum Lab & Polytope Atlas</title>
+    <style>
+      :root {
+        --bg: #080d16;
+        --panel: rgba(14, 22, 36, 0.92);
+        --border: rgba(120, 175, 255, 0.22);
+        --accent: #56c2ff;
+        --accent2: #ff9c54;
+        --text: #e6eefc;
+        --muted: #8fa4c4;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; width: 100%;
+        background: var(--bg); color: var(--text);
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+      }
+      .shell { display: grid; grid-template-columns: 360px 1fr; grid-template-rows: 48px 1fr; height: 100vh; }
+      header {
+        grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
+        padding: 0 16px; background: #0c1424; border-bottom: 1px solid var(--border);
+      }
+      header h1 { font-size: 14px; font-weight: 700; margin: 0; letter-spacing: 0.04em; color: var(--accent); }
+      .nav-links { display: flex; gap: 10px; font-size: 12px; }
+      .nav-links a {
+        color: var(--text); text-decoration: none; padding: 4px 10px; border-radius: 6px;
+        border: 1px solid var(--border); background: rgba(255,255,255,0.03);
+      }
+      .nav-links a:hover { border-color: var(--accent); color: var(--accent); }
+      .sidebar {
+        background: var(--panel); border-right: 1px solid var(--border);
+        padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+      }
+      .pt-grid {
+        display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px;
+      }
+      .el-btn {
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(140,180,255,0.18);
+        color: var(--text); border-radius: 4px; padding: 3px 2px; font-size: 10px;
+        cursor: pointer; text-align: center; line-height: 1.15;
+      }
+      .el-btn.active { background: rgba(86,194,255,0.28); border-color: var(--accent); font-weight: 700; }
+      .el-btn small { display: block; font-size: 8px; color: var(--muted); }
+      .card {
+        background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+        border-radius: 8px; padding: 10px; font-size: 12px;
+      }
+      .card h3 { margin: 0 0 6px; font-size: 12px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+      .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+      .kv span:first-child { color: var(--muted); }
+      .main { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+      .tabs {
+        display: flex; gap: 6px; padding: 8px 12px; background: #0c1424; border-bottom: 1px solid var(--border);
+        flex-wrap: wrap;
+      }
+      .tab-btn {
+        background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--text);
+        padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+      }
+      .tab-btn.active { background: rgba(86,194,255,0.22); border-color: var(--accent); color: #fff; font-weight: 600; }
+      .viewport-wrap { flex: 1; position: relative; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+      #gpu-canvas { width: 100%; height: 100%; display: block; background: #050911; }
+      .plot-pane {
+        background: rgba(10,16,28,0.95); border-left: 1px solid var(--border);
+        padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+      }
+      canvas.plot { width: 100%; height: 185px; background: #070d18; border: 1px solid var(--border); border-radius: 6px; }
+      .badge {
+        display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px;
+        background: rgba(255,156,84,0.18); border: 1px solid rgba(255,156,84,0.5); color: var(--accent2);
+      }
+      .row { display: flex; gap: 6px; align-items: center; }
+      input, select, button.action {
+        background: #0d1729; color: var(--text); border: 1px solid var(--border);
+        border-radius: 6px; padding: 5px 8px; font-size: 12px;
+      }
+      button.action { background: rgba(86,194,255,0.2); border-color: var(--accent); cursor: pointer; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <h1>ULG — FIRST-PRINCIPLES PERIODIC TABLE, QUANTUM LAB &amp; POLYTOPE ATLAS (Z = 1..118)</h1>
+        <div class="nav-links">
+          <a href="./">Studio Continuum</a>
+          <a href="./cosmic-quantum.html">Cosmic ↔ Quantum</a>
+          <a href="./stellar-genesis.html">Stellar Genesis</a>
+          <a href="./supergalactic.html">Supergalactic TreePM ↗</a>
+        </div>
+      </header>
+
+      <aside class="sidebar">
+        <div class="card">
+          <h3>Periodic Table (Z = 1..118)</h3>
+          <div class="row" style="margin-bottom:8px;">
+            <input id="z-input" type="number" min="1" max="118" value="26" style="width:74px;" />
+            <button id="solve-z-btn" class="action">Solve on WebGPU</button>
+            <span id="status-badge" class="badge">booting…</span>
+          </div>
+          <div id="pt-grid" class="pt-grid"></div>
+        </div>
+
+        <div class="card">
+          <h3>Reaction → Compound Feedback (Gate 2)</h3>
+          <div class="row">
+            <input id="compound-input" type="text" value="H2O" placeholder="e.g. H2O, NaCl, CsF, NaOH" style="flex:1;" />
+            <button id="solve-compound-btn" class="action">Derive</button>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px;">
+            Feeds any reaction product back through GPU Molecular RHF / Ionic Crystal DFT + Optics + MD → Convex Polytope Atlas.
+          </div>
+        </div>
+
+        <div id="bundle-readout" class="card">
+          <h3>5-Domain Material Bundle</h3>
+          <div style="color:var(--muted)">Select an element or compound to run live WebGPU derivation.</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="nuclear">1. Nuclear (10⁻¹⁵ m)</button>
+          <button class="tab-btn" data-tab="atomic">2. Atomic QM (10⁻¹⁰ m)</button>
+          <button class="tab-btn" data-tab="crystal">3. Crystal &amp; EM (10⁻⁹ m)</button>
+          <button class="tab-btn" data-tab="md">4. Live WebGPU MD</button>
+          <button class="tab-btn" data-tab="compound">5. Compound &amp; Reaction QM</button>
+          <button class="tab-btn" data-tab="polytope">6. Convex Polytope Atlas</button>
+        </div>
+
+        <div class="viewport-wrap">
+          <canvas id="gpu-canvas"></canvas>
+          <section class="plot-pane">
+            <div class="card">
+              <h3 id="plot1-title">Chart of Nuclides / Live Diagnostic</h3>
+              <canvas id="plot1" class="plot" width="320" height="185"></canvas>
+            </div>
+            <div class="card">
+              <h3 id="plot2-title">WKB Barrier / Bands / RDF / Polytopes</h3>
+              <canvas id="plot2" class="plot" width="320" height="185"></canvas>
+            </div>
+            <div id="g7-card" class="card">
+              <h3>Accuracy Tier &amp; Offline G7 Advisory</h3>
+              <div style="color:var(--muted)">scientificValidation: false (first-principles GPU derivation)</div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="./src/demos/elementsLabDemo.js"></script>
+  </body>
+</html>

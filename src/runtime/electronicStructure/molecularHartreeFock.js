@@ -1904,4 +1904,4 @@ export function bondAngle(atoms, i, center, j) {
   return (Math.acos(dot / (n1 * n2)) * 180) / Math.PI;
 }
 
-export { uhf as _uhf, jacobiEigh, boys, hermiteE, hermiteR, primitiveOverlap, primitiveKinetic, primitiveNuclear, primitiveERI, makeBasisFunction, contract2 };
+export { uhf as _uhf, buildIntegrals, jacobiEigh, boys, hermiteE, hermiteR, primitiveOverlap, primitiveKinetic, primitiveNuclear, primitiveERI, makeBasisFunction, contract2 };

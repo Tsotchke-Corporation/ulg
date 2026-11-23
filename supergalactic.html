@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ULG — Supergalactic FLRW 3D-FFT TreePM Cosmology (10²⁵ m)</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+        background: #04070f; color: #e6eefc; font-family: Inter, system-ui, sans-serif;
+      }
+      #viewport { width: 100vw; height: 100vh; display: block; }
+      .hud {
+        position: fixed; top: 14px; left: 14px; width: 320px; padding: 14px;
+        background: rgba(8, 14, 26, 0.88); border: 1px solid rgba(110, 170, 255, 0.28);
+        border-radius: 10px; font-size: 12px; backdrop-filter: blur(8px);
+      }
+      .hud h1 { margin: 0 0 8px; font-size: 13px; color: #7dd3fc; letter-spacing: 0.04em; }
+      .kv { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+      .kv span:first-child { color: #94a3b8; }
+      .links { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+      .links a, button {
+        background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.4);
+        color: #e6eefc; text-decoration: none; padding: 4px 9px; border-radius: 6px; font-size: 11px; cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+    <div class="hud">
+      <h1>ULG SUPERGALACTIC FLRW 3D-FFT TREEPM (10²⁵ m)</h1>
+      <div class="kv"><span>Engine</span><span>fft3dWebGpu + Comoving CIC</span></div>
+      <div class="kv"><span>Scale Factor a(t) / z</span><span id="hud-az">booting…</span></div>
+      <div class="kv"><span>Density Contrast σ</span><span id="hud-sigma">—</span></div>
+      <div class="kv"><span>Peak Overdensity δ_max</span><span id="hud-dmax">—</span></div>
+      <div class="kv"><span>Particles / Mesh</span><span id="hud-n">—</span></div>
+      <div class="kv"><span>Status</span><span id="hud-status">initializing WebGPU…</span></div>
+      <div class="links">
+        <button id="toggle-run">Pause</button>
+        <button id="reset-sim">Reset z=19</button>
+        <a href="./elements-lab.html">Elements Lab (10⁻¹⁵ m)</a>
+        <a href="./">Studio</a>
+        <a href="./stellar-genesis.html">Stellar Genesis</a>
+      </div>
+    </div>
+    <script type="module" src="./src/demos/supergalacticDemo.js"></script>
+  </body>
+</html>

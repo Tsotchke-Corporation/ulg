@@ -444,8 +444,8 @@ struct KsParams {
   dx: f32,
   mixing: f32,
   orbital_count: u32,
-  _pad0: u32,
-  _pad1: u32,
+  use_rel: u32,
+  r_nuc_bohr: f32,
 };
 
 struct OrbitalMeta {
@@ -509,16 +509,36 @@ fn ks_solve_radial_orbitals(@builtin(workgroup_id) wg_id: vec3<u32>) {
   let l_cent = 0.5 * (f32(l_q) + 0.5) * (f32(l_q) + 0.5);
   let z = params.atomic_z;
 
+  let r_eq = sqrt(5.0 / 3.0) * max(0.0, params.r_nuc_bohr);
+  let inv_2c2 = 1.0 / (2.0 * 137.035999084 * 137.035999084);
+  let e_ref = clamp(orb_info.energy_ha, -0.75 * z * z, 0.0);
+
   var min_diag: f32 = 1e30;
   for (var i: u32 = 0u; i < n; i = i + 1u) {
     let ri = r_grid[i];
     let inv_r2 = 1.0 / (ri * ri);
-    let v_eff = -z / ri + velec_grid[i];
-    let d_val = (inv_dx2 + l_cent) * inv_r2 + v_eff;
+    let v_nuc = select(
+      -z / ri,
+      -(z / (2.0 * max(r_eq, 1e-12))) * (3.0 - (ri * ri) / max(r_eq * r_eq, 1e-24)),
+      r_eq > 0.0 && ri < r_eq
+    );
+    let v_eff = v_nuc + velec_grid[i];
+    // Koelling-Harmon scalar-relativistic effective mass M(r) = 1 + (E - V_eff) / (2 c^2)
+    let m_rel = select(1.0, max(1.0, 1.0 + max(0.0, e_ref - v_eff) * inv_2c2), params.use_rel != 0u);
+    let inv_m = 1.0 / m_rel;
+    let d_val = (inv_dx2 + l_cent) * inv_r2 * inv_m + v_eff;
     sh_diag[i] = d_val;
     if (d_val < min_diag) { min_diag = d_val; }
     if (i + 1u < n) {
-      sh_off[i] = -0.5 * inv_dx2 / (ri * r_grid[i + 1u]);
+      let r_next = r_grid[i + 1u];
+      let v_nuc_n = select(
+        -z / r_next,
+        -(z / (2.0 * max(r_eq, 1e-12))) * (3.0 - (r_next * r_next) / max(r_eq * r_eq, 1e-24)),
+        r_eq > 0.0 && r_next < r_eq
+      );
+      let m_rel_n = select(1.0, max(1.0, 1.0 + max(0.0, e_ref - (v_nuc_n + velec_grid[i + 1u])) * inv_2c2), params.use_rel != 0u);
+      let inv_m_mid = 2.0 / (m_rel + m_rel_n);
+      sh_off[i] = -0.5 * inv_dx2 * inv_m_mid / (ri * r_next);
     } else {
       sh_off[i] = 0.0;
     }
@@ -1095,6 +1115,8 @@ export async function solveAtomWebGpu(device, atomicNumberZ, {
 export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   functional = 'pbe',
   spinOrbit = true,
+  scalarRelativistic = false,
+  nuclearChargeRadiusBohr = 0,
   configuration = null,
   gridPointsN = RADIAL_KS_WEBGPU_GRID_N,
   rMinBohr = 1e-4,
@@ -1108,6 +1130,8 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   }
   const n = Math.min(RADIAL_KS_WEBGPU_GRID_N, Math.max(64, Math.floor(gridPointsN)));
   const usePbe = String(functional || 'pbe').toLowerCase() === 'pbe' ? 1 : 0;
+  const useRel = scalarRelativistic ? 1 : 0;
+  const rNucBohr = Math.max(0, Number(nuclearChargeRadiusBohr) || 0);
   const rMax = rMaxBohr ?? Math.max(20, 60 / Math.sqrt(atomicNumberZ));
   const xMin = Math.log(rMinBohr);
   const dx = (Math.log(rMax) - xMin) / (n - 1);
@@ -1141,6 +1165,8 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   f32[3] = dx;
   f32[4] = mixing;
   u32[5] = orbCount;
+  u32[6] = useRel;
+  f32[7] = rNucBohr;
 
   const uBuf = device.createBuffer({ size: 32, usage: GPU_BUF_UNIFORM | GPU_BUF_COPY_DST });
   const rBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
@@ -1246,14 +1272,25 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       orbitals.push(orb);
     }
     const totalEnergyHa = sumOcc - summary.eHartreeDouble + summary.eXcCorrection;
+    // Leading-order Uehling/Welton QED 1s radiative shift (Hartree) for relativistic runs
+    const alphaZ = atomicNumberZ / 137.035999084;
+    const qedRadiativeShiftHa = useRel
+      ? (4 / (3 * Math.PI)) * ((1 / 137.035999084) ** 3) * (atomicNumberZ ** 4)
+        * Math.max(0.5, Math.log(1 / Math.max(1e-6, alphaZ * alphaZ)) - 2.3)
+      : 0;
     return {
       schema: RADIAL_KS_WEBGPU_SCHEMA,
       symbol: symbolForZ(atomicNumberZ),
       atomicNumberZ,
       configuration: cfg,
       functional: usePbe ? 'pbe' : 'lda',
-      relativisticMethod: spinOrbit ? 'schrodinger-log-gpu+spin-orbit' : 'schrodinger-log-gpu',
-      totalEnergyHa,
+      relativisticMethod: useRel
+        ? (spinOrbit ? 'koelling-harmon-gpu+spin-orbit+qed' : 'koelling-harmon-gpu+qed')
+        : (spinOrbit ? 'schrodinger-log-gpu+spin-orbit' : 'schrodinger-log-gpu'),
+      finiteNucleusUsed: rNucBohr > 0,
+      nuclearChargeRadiusBohr: rNucBohr,
+      qedRadiativeShiftHa,
+      totalEnergyHa: totalEnergyHa + qedRadiativeShiftHa,
       orbitals,
       electronCount,
       integratedElectrons: summary.integratedElectrons,

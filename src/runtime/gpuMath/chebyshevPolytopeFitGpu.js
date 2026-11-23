@@ -108,7 +108,28 @@ export async function fitConvexPolytopeWebGpu(device, polytope, evalFn, {
 
     const positivityOk = !requirePositive || minSample > 0;
     if ((!fit.valid || !positivityOk) && depth < maxDepth) {
-      const [left, right] = bisectConvexPolytope(poly);
+      // Adaptive axis bisection: compare discrete 2nd-difference curvature along
+      // T (axis 0) vs log10 P (axis 1) so steep compression knees bisect along P!
+      let curv0 = 0;
+      let curv1 = 0;
+      for (let i0 = 1; i0 < n0 - 1; i0 += 1) {
+        for (let i1 = 0; i1 < n1; i1 += 1) {
+          const d2 = Math.abs(
+            nodeSamples[(i0 + 1) * n1 + i1] - 2 * nodeSamples[i0 * n1 + i1] + nodeSamples[(i0 - 1) * n1 + i1]
+          );
+          if (d2 > curv0) curv0 = d2;
+        }
+      }
+      for (let i0 = 0; i0 < n0; i0 += 1) {
+        for (let i1 = 1; i1 < n1 - 1; i1 += 1) {
+          const d2 = Math.abs(
+            nodeSamples[i0 * n1 + (i1 + 1)] - 2 * nodeSamples[i0 * n1 + i1] + nodeSamples[i0 * n1 + (i1 - 1)]
+          );
+          if (d2 > curv1) curv1 = d2;
+        }
+      }
+      const axisIndex = curv1 > curv0 * 1.05 ? 1 : (curv0 > curv1 * 1.05 ? 0 : (depth % 2));
+      const [left, right] = bisectConvexPolytope(poly, axisIndex);
       const [resL, resR] = await Promise.all([
         fitSingle(left, depth + 1),
         fitSingle(right, depth + 1)

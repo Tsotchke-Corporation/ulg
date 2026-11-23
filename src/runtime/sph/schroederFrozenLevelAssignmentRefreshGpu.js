@@ -2465,6 +2465,16 @@ export function createSchroederFrozenLevelAssignmentRefreshGpu(device, {
       return retirementRecordFor(execution).completionPromise;
     },
 
+    allocationEntries() {
+      return arenas.flatMap((arena) =>
+        arenaOwnedBuffers(arena).map((buffer) => ({
+          role: 'frozen-level-assignment-refresh',
+          arenaIndex: arena.arenaIndex,
+          buffer
+        }))
+      );
+    },
+
     destroy() {
       if (destroyed) return true;
       if (arenas.some((arena) => arena.busy)) return false;

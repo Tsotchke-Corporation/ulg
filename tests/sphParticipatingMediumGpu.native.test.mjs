@@ -42,6 +42,11 @@ test('native participating-medium pack and render preserve aggregate optical phy
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     });
+    await page.waitForFunction(
+      async () => Boolean(await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' })),
+      null,
+      { timeout: 10_000, polling: 250 }
+    );
     native = await page.evaluate(async () => {
       if (!window.isSecureContext) {
         return { status: 'insecure-context', url: window.location.href };

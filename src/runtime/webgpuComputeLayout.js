@@ -1483,6 +1483,7 @@ export function armWorkerQueueSubmitBurst(device) {
       buffer.destroy = () => {
         if (destroyed) return undefined;
         destroyed = true;
+        queueOrderedDestroyedBuffers.add(buffer);
         const stamp = record.bufferStamps.get(buffer);
         const confirmedCleanup = confirmedCleanupDeviceStates.get(device);
         if (
@@ -2489,6 +2490,7 @@ export function releaseSubmittedWorkCleanupQueueOrdered(
 // while rotating identical GPUBuffer handles so downstream bind-group caches hit.
 const queueOrderedBufferPoolByDevice = new WeakMap();
 const queueOrderedPooledBuffersInPool = new WeakSet();
+const queueOrderedDestroyedBuffers = new WeakSet();
 const QUEUE_ORDERED_POOL_BUCKET_LIMIT = 16;
 const MAP_READ_BIT = 0x0001;
 const MAP_WRITE_BIT = 0x0002;
@@ -2513,6 +2515,28 @@ function queueOrderedBufferPoolForDevice(device) {
   return pool;
 }
 
+export function queueOrderedPooledDeviceAllocationOwnership(device) {
+  const buffers = new Set();
+  if (!device || typeof device !== 'object') {
+    return Object.freeze({ buffers: Object.freeze([]) });
+  }
+  const pool = queueOrderedBufferPoolByDevice.get(device);
+  if (pool && !pool.lost) {
+    for (const bucket of pool.buckets.values()) {
+      for (const buffer of bucket) {
+        if (buffer && !queueOrderedDestroyedBuffers.has(buffer)) {
+          buffers.add(buffer);
+        }
+      }
+    }
+  }
+  const burst = workerQueueSubmitBurstRecords.get(device);
+  if (burst?.pooledStagingBuffer && !queueOrderedDestroyedBuffers.has(burst.pooledStagingBuffer)) {
+    buffers.add(burst.pooledStagingBuffer);
+  }
+  return Object.freeze({ buffers: Object.freeze([...buffers]) });
+}
+
 export function acquireQueueOrderedPooledBuffer(
   device,
   { bucketKey, label, size, usage } = {}
@@ -2529,12 +2553,14 @@ export function acquireQueueOrderedPooledBuffer(
     if (!pool.lost) {
       const fullKey = `${bucketKey}:${normalizedSize}:${normalizedUsage}`;
       const bucket = pool.buckets.get(fullKey);
-      if (bucket && bucket.length > 0) {
+      while (bucket && bucket.length > 0) {
         const reused = bucket.shift();
-        if (reused) {
-          queueOrderedPooledBuffersInPool.delete(reused);
-          return reused;
+        if (!reused) continue;
+        queueOrderedPooledBuffersInPool.delete(reused);
+        if (queueOrderedDestroyedBuffers.has(reused) || reused.destroyed === true) {
+          continue;
         }
+        return reused;
       }
     }
   }
@@ -2551,6 +2577,10 @@ export function releaseQueueOrderedPooledBuffer(
   { bucketKey, size, usage } = {}
 ) {
   if (!buffer) return false;
+  if (queueOrderedDestroyedBuffers.has(buffer) || buffer.destroyed === true) {
+    queueOrderedPooledBuffersInPool.delete(buffer);
+    return false;
+  }
   const normalizedSize = Math.max(4, Math.ceil(Number(size ?? buffer.size) || 4));
   const normalizedUsage = Number(usage ?? buffer.usage) || 0;
   if (

@@ -2597,10 +2597,11 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
               ? {
                   getPresentationSubmitSerial: () =>
                     workerOwnedIsosurfacePresenter?.getPresentationSubmitSerial?.() ?? 0,
-                  waitForPresentationSubmitTurn: (afterSerial) =>
+                  waitForPresentationSubmitTurn: (afterSerial, options = {}) =>
                     workerOwnedIsosurfacePresenter?.waitForPresentationSubmitTurn?.({
                       afterSerial,
-                      timeoutMs: 12
+                      timeoutMs: options?.timeoutMs ?? 24,
+                      force: options?.force === true
                     }) ?? Promise.resolve(0)
                 }
               : {}),

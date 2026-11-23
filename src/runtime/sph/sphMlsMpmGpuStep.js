@@ -13324,6 +13324,18 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     // synchronization scope in WebGPU, so later dispatches observe earlier
     // storage writes without paying a begin/end pass transition for every
     // one-workgroup claim or seal.
+    // Pooled `p2gAccumulatorBuffer` may hold prior-step non-zero bytes.
+    // In `mechanicsFieldViewEnabled`, `@binding(5)` is the deterministic
+    // contribution scratch whose untouched rows must carry `published == 0.0`,
+    // and `clear_accumulators` clears only `mechanicsFieldViewBuffer`.
+    if (
+      poolFusedTempBuffers
+      && mechanicsFieldViewEnabled
+      && activeGridDispatch.useActiveGrid
+      && typeof encoder.clearBuffer === 'function'
+    ) {
+      encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gScratchByteLength));
+    }
     let mechanicsFieldProductionPass = null;
     if (activeGridDispatch.useActiveGrid) {
       const accumulatorClearPass = mechanicsFieldViewEnabled
@@ -14947,7 +14959,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
     size: Math.max(4, gridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  });
+  }, { pool: false });
   // Previous-substep finalized grid ([mass, momentum] rows): the spatial
   // density source for the liquid EOS. Zeroed at sequence start, refreshed by
   // a copy after every substep's finalize pass.
@@ -14955,12 +14967,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
     size: Math.max(4, p2gAccumulatorByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  });
+  }, { pool: false });
   const updatedGridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
     size: Math.max(4, updatedGridByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  });
+  }, { pool: false });
   const statePingBuffers = [
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',

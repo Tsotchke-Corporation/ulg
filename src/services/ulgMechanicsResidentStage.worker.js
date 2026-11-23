@@ -155,7 +155,8 @@ import {
   resolveSchroederParticleBufferFamilyGeneration,
   runSchroederLevelAssignmentWebGpu,
   runSchroederSameLevelMechanicsWebGpu,
-  schroederGridSpacingForLevel
+  schroederGridSpacingForLevel,
+  schroederHierarchyDeviceRuntimeAllocationOwnership
 } from '../runtime/sph/schroederHierarchyGpu.js';
 import { createMlsMpmGridSpec } from '../runtime/sph/sphGridGpuKernel.js';
 import {
@@ -261,6 +262,8 @@ import {
   flushWorkerQueueSubmitBurst,
   openWorkerQueueSubmitBurst,
   prewarmCachedExplicitComputePipeline,
+  queueOrderedPooledDeviceAllocationOwnership,
+  releaseOrDestroyQueueOrderedPooledBuffer,
   workerQueueSubmitBurstStats
 } from '../runtime/webgpuComputeLayout.js';
 import {
@@ -1036,7 +1039,9 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
         schroederSpatialThermalDeviceRuntimeAllocationOwnership(record.workerDevice),
         schroederSpatialMechanicalDeviceRuntimeAllocationOwnership(record.workerDevice),
         schroederSpatialReactionDiscoveryDeviceRuntimeAllocationOwnership(record.workerDevice),
-        sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership(record.workerDevice)
+        sphPhaseCarrierTransferDeviceRuntimeAllocationOwnership(record.workerDevice),
+        schroederHierarchyDeviceRuntimeAllocationOwnership(record.workerDevice),
+        queueOrderedPooledDeviceAllocationOwnership(record.workerDevice)
       ];
       runtimeOwnedBuffers = [...new Set(owners.flatMap(({ buffers }) => buffers))];
     }
@@ -1376,7 +1381,7 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     protectedBuffers
   );
   for (const buffer of buffers) {
-    try { buffer.destroy?.(); } catch { /* best-effort lane retirement */ }
+    try { releaseOrDestroyQueueOrderedPooledBuffer(buffer); } catch { /* best-effort lane retirement */ }
   }
   retainedLanes.delete(key);
   laneRetirementProgress.delete(record);
@@ -13476,11 +13481,13 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             && typeof globalThis.GPUDevice === 'function'
             && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
           ) {
-            // Interleave at most one physics step per presentation submit when
-            // live GPU queue latency indicates shared-queue contention (zero
-            // extra GPU fences, immediate no-op when GPU queue is uncongested).
+            // Interleave at most one canonical physics step per presentation
+            // submit so Step k never piles directly onto Step k-1 ahead of the
+            // next render frame (zero extra GPU fences; immediate no-op when
+            // presentation is paused or inactive).
             lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
-              lastInterleavedRenderSerial
+              lastInterleavedRenderSerial,
+              { force: true, timeoutMs: 44 }
             );
           }
           stepYieldWaitMs = workerResidentScheduleNowMs() - yieldStartedAtMs;
@@ -13491,7 +13498,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
         ) {
           lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
-            lastInterleavedRenderSerial
+            lastInterleavedRenderSerial,
+            { force: true, timeoutMs: 44 }
           );
         }
         if (
@@ -15200,7 +15208,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         const seedAssignmentBuffer =
           lane?.laneSeed?.levelAssignment?.assignmentBuffer ?? null;
         if (seedAssignmentBuffer && !terminalBuffers.includes(seedAssignmentBuffer)) {
-          seedAssignmentBuffer.destroy?.();
+          if (typeof lane?.laneSeed?.levelAssignment?.destroyAssignmentBuffer === 'function') {
+            lane.laneSeed.levelAssignment.destroyAssignmentBuffer();
+          } else {
+            releaseOrDestroyQueueOrderedPooledBuffer(seedAssignmentBuffer);
+          }
           retiredBuffers.add(seedAssignmentBuffer);
           lane.laneSeed = {
             ...lane.laneSeed,
@@ -15780,7 +15792,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           await waitForPresentationSubmitTurn(
             typeof getPresentationSubmitSerial === 'function'
               ? getPresentationSubmitSerial()
-              : undefined
+              : undefined,
+            { force: true, timeoutMs: 44 }
           );
         }
         thermalPotential = {
@@ -15842,7 +15855,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         await waitForPresentationSubmitTurn(
           typeof getPresentationSubmitSerial === 'function'
             ? getPresentationSubmitSerial()
-            : undefined
+            : undefined,
+          { force: true, timeoutMs: 44 }
         );
       }
       try {

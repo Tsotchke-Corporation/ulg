@@ -6,6 +6,7 @@ import {
   openWorkerQueueSubmitBurst,
   flushWorkerQueueSubmitBurst,
   closeWorkerQueueSubmitBurst,
+  queueOrderedPooledDeviceAllocationOwnership,
   releaseQueueOrderedPooledBuffer,
   workerQueueSubmitBurstStats,
   withWorkerQueueSubmitBurstWriteThrough,
@@ -887,4 +888,23 @@ test('pooledWriteThrough + coalesceComputePasses fuses multiple virtual compute 
   assert.equal(realPasses[0].dispatches, 2);
   assert.equal(realPasses[1].dispatches, 2);
   assert.deepEqual(encoderOps, ['copy->B', 'pass:p1', 'copy->A', 'pass:p3', 'finish']);
+});
+
+test('queueOrderedPooledDeviceAllocationOwnership enumerates pooled buffers and skips destroyed handles', () => {
+  const { device } = createFakeDevice();
+  armWorkerQueueSubmitBurst(device);
+  const b1 = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'assign', label: 'assign', size: 64, usage: 0x84 });
+  const b2 = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'assign', label: 'assign', size: 64, usage: 0x84 });
+  assert.equal(releaseQueueOrderedPooledBuffer(device, b1, { bucketKey: 'assign', size: 64, usage: 0x84 }), true);
+  assert.equal(releaseQueueOrderedPooledBuffer(device, b2, { bucketKey: 'assign', size: 64, usage: 0x84 }), true);
+
+  const owned = queueOrderedPooledDeviceAllocationOwnership(device);
+  assert.equal(owned.buffers.includes(b1), true);
+  assert.equal(owned.buffers.includes(b2), true);
+
+  // Even if external teardown destroys a pooled handle, acquire must skip it and return live handles only.
+  b1.destroy();
+  const reacquired = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'assign', label: 'assign', size: 64, usage: 0x84 });
+  assert.equal(reacquired, b2);
+  assert.equal(releaseQueueOrderedPooledBuffer(device, b1, { bucketKey: 'assign', size: 64, usage: 0x84 }), false);
 });

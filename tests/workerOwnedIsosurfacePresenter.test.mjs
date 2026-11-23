@@ -15,6 +15,7 @@ import {
   ULG_WORKER_OFFSCREEN_RESIDENT_ISOSURFACE_REQUEST_SCHEMA,
   buildWorkerOwnedIsosurfaceSurfaceUniformValues,
   createWorkerOwnedIsosurfacePresenter,
+  dampedIsosurfaceShaderMotionAgeS,
   resolveWorkerOwnedIsosurfaceAdmission,
   resolveWorkerOwnedIsosurfaceProductEventSource,
   snapshotWorkerOwnedSurfaceMetadata,
@@ -5915,4 +5916,72 @@ test('Slice 1.1: threeViewProjectionToWebGpuClipMatrix matches isosurface OpenGL
   const farClip = mul(remapped, [0, 0, -far, 1]);
   assert.ok(Math.abs(nearClip[2] / nearClip[3] - 0) < 1e-5);
   assert.ok(Math.abs(farClip[2] / farClip[3] - 1) < 1e-5);
+});
+
+test('Gate 4 finite-horizon honesty: halted physics terminates strictly at maxSimulationAgeS with zero Zeno extension and distinct f32 shader ages', async (t) => {
+  const { rig, builtFrames, timers, setWallMs } = await createPendingSourceMotionRig(t);
+  try {
+    const frame = builtFrames[0];
+    const originalPacing = frame.motionPacing;
+    const maxAgeS = originalPacing.maxSimulationAgeS;
+    const maxWallMs = originalPacing.maxWallAgeS * 1000;
+    const startMs = originalPacing.startedAtMs;
+    const seenShaderF32 = [];
+    // Step wall clock cleanly in 16 ms ticks past the finite horizon with NO successor job.
+    let nowMs = startMs;
+    const maxTicks = Math.ceil(maxWallMs / 16) + 10;
+    for (let tick = 0; tick < maxTicks; tick += 1) {
+      const prevAge = rig.presenter.getStatus().temporalMotionAgeS;
+      if (prevAge >= maxAgeS) break;
+      await waitFor(() => timers.pendingCount > 0, `temporal timer armed before tick ${tick}`);
+      nowMs += 16;
+      setWallMs(nowMs);
+      timers.fireNext();
+      await waitFor(
+        () => rig.presenter.getStatus().temporalMotionAgeS > prevAge,
+        `temporal motion tick ${tick} to advance`
+      );
+      const latest = frameProofs(rig).at(-1);
+      if (latest?.isosurfaceTemporalPresentation) {
+        const dampedF32 = Math.fround(
+          dampedIsosurfaceShaderMotionAgeS({
+            motionPacing: frame.motionPacing,
+            drawMotionAgeS: latest.isosurfacePresentationMotionAgeS
+          })
+        );
+        if (seenShaderF32.length === 0 || seenShaderF32.at(-1) !== dampedF32) {
+          seenShaderF32.push(dampedF32);
+        }
+      }
+      if (rig.presenter.getStatus().temporalMotionAgeS >= maxAgeS) break;
+    }
+    await waitFor(() => timers.pendingCount === 0, 'pending timers to settle at finite deadline');
+    assert.equal(
+      rig.presenter.getStatus().temporalMotionAgeS,
+      maxAgeS,
+      'halted physics must reach exact finite maxSimulationAgeS'
+    );
+    assert.equal(
+      timers.pendingCount,
+      0,
+      'temporal presentation loop must terminate completely with zero pending timers'
+    );
+    assert.equal(
+      frame.motionPacing,
+      originalPacing,
+      'without an active successor build, pacing must never be slowed or stretched'
+    );
+    assert.ok(
+      nowMs - startMs <= maxWallMs + 32,
+      `finite deadline must not stretch beyond original maxWallAgeS (${nowMs - startMs} ms vs ${maxWallMs} ms)`
+    );
+    const temporalProofs = frameProofs(rig).filter((p) => p.isosurfaceTemporalPresentation);
+    assert.equal(
+      seenShaderF32.length,
+      temporalProofs.length,
+      'every emitted temporal frame must carry a strictly distinct f32 shader motion age'
+    );
+  } finally {
+    await rig.presenter.dispose();
+  }
 });

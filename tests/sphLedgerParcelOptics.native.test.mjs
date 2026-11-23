@@ -28,6 +28,11 @@ test('native Vulkan parcel optics deposit the f64 cross-section in render-field 
   try {
     const page = await browser.newPage({ ignoreHTTPSErrors: true });
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await page.waitForFunction(
+      async () => Boolean(await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' })),
+      null,
+      { timeout: 10_000, polling: 250 }
+    );
     const run = await page.evaluate(async () => {
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
       if (!adapter) return { status: 'unsupported' };

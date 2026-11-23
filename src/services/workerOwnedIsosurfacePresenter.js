@@ -902,6 +902,12 @@ export function createWorkerOwnedIsosurfacePresenter({
   let presentationQueueCompletionCount = 0;
   let submittedRenderSerial = 0;
   let recentPresentationGpuCompleteMs = 0;
+  let recentBuildFrameMs = 0;
+  let recentScheduleHandoffMs = 0;
+  let lastScheduleStepsCompletedAtMs = null;
+  let lastScheduleStepsSourceTimeS = null;
+  let pendingScheduleSourceTimeS = null;
+  let activePresentationQueueCompletion = null;
   const nextRenderSubmitWaiters = new Set();
   const wakeRenderSubmitWaiters = (forceAll = false) => {
     if (nextRenderSubmitWaiters.size === 0) return;
@@ -912,7 +918,16 @@ export function createWorkerOwnedIsosurfacePresenter({
       }
     }
   };
-  const waitForPresentationSubmitTurnInternal = ({
+  const drainActivePresentationFence = async (maxWaitMs = 50) => {
+    const inflightFence = activePresentationQueueCompletion;
+    if (!inflightFence) return false;
+    await Promise.race([
+      inflightFence,
+      new Promise((resolve) => globalThis.setTimeout(resolve, maxWaitMs))
+    ]);
+    return true;
+  };
+  const waitForPresentationSubmitTurnInternal = async ({
     afterSerial = submittedRenderSerial,
     timeoutMs = 14,
     force = false
@@ -921,31 +936,53 @@ export function createWorkerOwnedIsosurfacePresenter({
       typeof globalThis.GPUDevice === 'function'
       && device instanceof globalThis.GPUDevice
     );
+    const presentationCanInterleave = () => Boolean(
+      isRealGpu
+      && !disposed
+      && presentationPlaying
+      && currentFrame?.motionField?.buffer
+      && currentFrame?.motionPacing
+      && currentFrame.invalidationEpoch === invalidationEpoch
+      && (currentFrame.lastDisplayedMotionAgeS || 0)
+        < currentFrame.motionPacing.maxSimulationAgeS
+    );
+    if (!presentationCanInterleave()) {
+      return submittedRenderSerial;
+    }
+    // Zero-extra-fence GPU queue backpressure: when a presentation render
+    // frame is already awaiting its own `onSubmittedWorkDone()` behind a prior
+    // physics submit, drain that existing fence (bounded safely at 60 ms)
+    // before submitting another physics step onto the shared GPU queue so
+    // multiple heavy physics steps cannot pile up in front of one render.
+    const drainedInflightFence = await drainActivePresentationFence(60);
+    if (drainedInflightFence && !presentationCanInterleave()) {
+      return submittedRenderSerial;
+    }
+    const congestedQueue = !force && (
+      recentPresentationGpuCompleteMs >= 5.5
+      || (drainedInflightFence && recentPresentationGpuCompleteMs >= 3.5)
+    );
     const targetTurns = force
-      ? 1
+      ? (recentPresentationGpuCompleteMs >= 22.0
+          ? 3
+          : (recentPresentationGpuCompleteMs >= 14.0 ? 2 : 1))
       : (recentPresentationGpuCompleteMs < 3.5
           ? 0
-          : Math.min(4, Math.max(1, Math.ceil(recentPresentationGpuCompleteMs / 4.5))));
-    const targetSerial = afterSerial + targetTurns;
-    if (
-      !isRealGpu
-      || disposed
-      || !presentationPlaying
-      || !currentFrame?.motionField?.buffer
-      || !currentFrame?.motionPacing
-      || currentFrame.invalidationEpoch !== invalidationEpoch
-      || (currentFrame.lastDisplayedMotionAgeS || 0)
-        >= currentFrame.motionPacing.maxSimulationAgeS
-      || targetTurns <= 0
-      || submittedRenderSerial >= targetSerial
-    ) {
-      return Promise.resolve(submittedRenderSerial);
+          : (congestedQueue
+              ? Math.min(3, Math.max(1, Math.ceil((recentPresentationGpuCompleteMs - 3.5) / 8.0)))
+              : Math.min(3, Math.max(1, Math.ceil(recentPresentationGpuCompleteMs / 5.0)))));
+    const baseSerial = (congestedQueue || force)
+      ? Math.max(afterSerial, submittedRenderSerial)
+      : afterSerial;
+    const targetSerial = baseSerial + targetTurns;
+    if (targetTurns <= 0 || submittedRenderSerial >= targetSerial) {
+      return submittedRenderSerial;
     }
     const adaptiveTimeoutMs = Math.max(
       Number(timeoutMs) || 14,
-      Math.min(36, 10 + targetTurns * 7)
+      Math.min(52, 16 + targetTurns * 12)
     );
-    const boundedTimeoutMs = Math.max(4, Math.min(38, adaptiveTimeoutMs));
+    const boundedTimeoutMs = Math.max(4, Math.min(54, adaptiveTimeoutMs));
     return new Promise((resolve) => {
       let settled = false;
       let timer = null;
@@ -1669,10 +1706,20 @@ export function createWorkerOwnedIsosurfacePresenter({
     presentationQueueCompletionCount = presentationQueueCompletionSerial;
     const queueCompletion = device.queue.onSubmittedWorkDone();
     let gpuCompletionObserved = false;
-    void Promise.resolve(queueCompletion).then(
-      () => { gpuCompletionObserved = true; },
-      () => {} // The original fence is still awaited below for its exact error.
+    const settledQueueCompletion = Promise.resolve(queueCompletion).then(
+      () => {
+        gpuCompletionObserved = true;
+        if (activePresentationQueueCompletion === settledQueueCompletion) {
+          activePresentationQueueCompletion = null;
+        }
+      },
+      () => {
+        if (activePresentationQueueCompletion === settledQueueCompletion) {
+          activePresentationQueueCompletion = null;
+        }
+      } // The original fence is still awaited below for its exact error.
     );
+    activePresentationQueueCompletion = settledQueueCompletion;
     const opportunityCompletion = (() => {
       try {
         if (typeof waitForPresentationOpportunity !== 'function') {
@@ -1713,7 +1760,7 @@ export function createWorkerOwnedIsosurfacePresenter({
     const observedGpuWaitMs = Math.min(40, Math.max(0, gpuCompletedAtMs - submittedAtMs));
     recentPresentationGpuCompleteMs = Math.max(
       observedGpuWaitMs,
-      recentPresentationGpuCompleteMs * 0.75 + observedGpuWaitMs * 0.25
+      recentPresentationGpuCompleteMs * 0.85 + observedGpuWaitMs * 0.15
     );
     const opportunity = await opportunityCompletion;
     const opportunityTimedOut = opportunity?.available === false
@@ -1912,7 +1959,23 @@ export function createWorkerOwnedIsosurfacePresenter({
               const freshAgeS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
               if (freshAgeS == null || (retryingOpportunity
                 && freshAgeS >= frame.motionPacing.maxSimulationAgeS)) return false;
-              if (!(freshAgeS > (frame.lastDisplayedMotionAgeS || 0))) return coalesced;
+              const prevAgeS = frame.lastDisplayedMotionAgeS || 0;
+              if (!(freshAgeS > prevAgeS)) return coalesced;
+              const prevShaderF32 = Math.fround(
+                dampedIsosurfaceShaderMotionAgeS({
+                  motionPacing: frame.motionPacing,
+                  drawMotionAgeS: prevAgeS
+                })
+              );
+              const nextShaderF32 = Math.fround(
+                dampedIsosurfaceShaderMotionAgeS({
+                  motionPacing: frame.motionPacing,
+                  drawMotionAgeS: freshAgeS
+                })
+              );
+              if (!(nextShaderF32 > prevShaderF32)) {
+                return freshAgeS >= frame.motionPacing.maxSimulationAgeS ? false : coalesced;
+              }
               return renderFrame(frame, {
                 reason: 'worker-owned-isosurface-temporal-presentation',
                 allowLaggedGeneration: true,
@@ -1964,20 +2027,50 @@ export function createWorkerOwnedIsosurfacePresenter({
             )
           )
         );
-        // If a successor frame is actively building or physics is still running
-        // and displayed age has spent >80% of its bounded envelope, slow the
-        // remaining wall-time rate without extending maxSimulationAgeS so the
-        // display never prematurely freezes at the horizon during jitter spikes.
+        // Strictly one-shot, liveness-gated build-handoff slowdown: ONLY if a
+        // real successor schedule or mesh extraction is actively in flight for
+        // this frame (`latestJob || activeJob || captureInFlightCount > 0 ||
+        // pendingScheduleSourceTimeS === frame.sourceTimeS`) AND measured GPU
+        // pipeline latency is >= 1 ms, allow at most ONE finite 0.12–0.20 s
+        // build-handoff extension per frame. When physics halts or pauses, zero
+        // extension runs; even if a schedule hangs forever, motion still
+        // terminates strictly at its one-shot finite horizon (zero Zeno decay,
+        // zero mock/GPU divergence).
+        const measuredHandoffLatencyMs = Math.max(
+          recentScheduleHandoffMs,
+          recentBuildFrameMs + recentPresentationGpuCompleteMs
+        );
+        const successorActiveForFrame = Boolean(
+          latestJob
+          || activeJob
+          || captureInFlightCount > 0
+          || (
+            pendingScheduleSourceTimeS != null
+            && frame.sourceTimeS != null
+            && pendingScheduleSourceTimeS >= frame.sourceTimeS
+          )
+        );
         if (
-          isRealGpuDevice
+          !frame.buildHandoffSlowed
+          && successorActiveForFrame
+          && measuredHandoffLatencyMs >= 1.0
           && frame.motionPacing
-          && (frame.lastDisplayedMotionAgeS || 0) >= frame.motionPacing.maxSimulationAgeS * 0.8
+          && (frame.lastDisplayedMotionAgeS || 0) >= frame.motionPacing.maxSimulationAgeS * 0.5
           && (frame.lastDisplayedMotionAgeS || 0) < frame.motionPacing.maxSimulationAgeS
         ) {
+          frame.buildHandoffSlowed = true;
+          const handoffExtendS = Math.min(
+            0.20,
+            Math.max(
+              0.12,
+              (recentScheduleHandoffMs * 1.25) / 1000,
+              (recentBuildFrameMs * 2.0 + recentPresentationGpuCompleteMs * 1.5) / 1000
+            )
+          );
           const slowed = slowIsosurfaceMotionPacing(
             frame.motionPacing,
             temporalNowMs(),
-            0.25,
+            handoffExtendS,
             frame.lastDisplayedMotionAgeS || 0
           );
           if (slowed !== frame.motionPacing) frame.motionPacing = slowed;
@@ -2058,6 +2151,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   };
 
   const buildFrame = async (job, captured) => {
+    const buildStartedAtMs = nowMs();
     if (
       (captured?.dispersedMediumOptics ?? null)
       !== job.dispersedMediumOptics
@@ -2111,9 +2205,11 @@ export function createWorkerOwnedIsosurfacePresenter({
       && presentationPlaying
       && currentFrame?.motionField?.buffer
     ) {
-      // Yield one macrotask between render-field build and marching-cubes
-      // extraction so an armed temporal rAF draw can submit onto the shared
-      // queue before the multi-surface marching-cubes command buffer.
+      // Reuse any already-in-flight presentation fence (0 extra GPU fences)
+      // and yield one macrotask between render-field build and marching-cubes
+      // extraction so an armed temporal rAF draw can submit before the
+      // multi-surface marching-cubes command buffer.
+      await drainActivePresentationFence(50);
       await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
     }
 
@@ -2312,6 +2408,17 @@ export function createWorkerOwnedIsosurfacePresenter({
           );
         }
       }
+      if (
+        typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice
+        && presentationPlaying
+        && currentFrame?.motionField?.buffer
+      ) {
+        const drainedMcFence = await drainActivePresentationFence(50);
+        if (drainedMcFence || marchingCubesDescriptors.length >= 6 || recentPresentationGpuCompleteMs >= 5.5) {
+          await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+        }
+      }
       device.queue.submit([encoder.finish()]);
       if (solidIsosurfaceParams || ledgerParcelOpticsParams) {
         const solidParams = solidIsosurfaceParams;
@@ -2431,6 +2538,10 @@ export function createWorkerOwnedIsosurfacePresenter({
         releaseLeases: true,
         reason: 'worker-isosurface-extraction-submitted'
       });
+      const buildElapsedMs = Math.min(200, Math.max(0, nowMs() - buildStartedAtMs));
+      recentBuildFrameMs = recentBuildFrameMs > 0
+        ? Math.max(buildElapsedMs, recentBuildFrameMs * 0.7 + buildElapsedMs * 0.3)
+        : buildElapsedMs;
       return {
         generation: job.generation,
         invalidationEpoch: job.invalidationEpoch,
@@ -2504,7 +2615,29 @@ export function createWorkerOwnedIsosurfacePresenter({
   const admitCommittedFrame = (frame, sourceTimingBootstrap, reason, proof) => {
     const previousFrame = currentFrame;
     currentFrame = frame;
+    if (
+      pendingScheduleSourceTimeS != null
+      && frame.sourceTimeS != null
+      && frame.sourceTimeS > pendingScheduleSourceTimeS
+    ) {
+      pendingScheduleSourceTimeS = null;
+    }
     currentFrame.sourcePresentedAtMs = temporalNowMs();
+    if (
+      lastScheduleStepsCompletedAtMs != null
+      && previousFrame
+      && previousFrame.sourceTimeS === lastScheduleStepsSourceTimeS
+    ) {
+      const observedHandoffMs = Math.min(
+        260,
+        Math.max(0, currentFrame.sourcePresentedAtMs - lastScheduleStepsCompletedAtMs)
+      );
+      recentScheduleHandoffMs = recentScheduleHandoffMs > 0
+        ? Math.max(observedHandoffMs, recentScheduleHandoffMs * 0.7 + observedHandoffMs * 0.3)
+        : observedHandoffMs;
+      lastScheduleStepsCompletedAtMs = null;
+      lastScheduleStepsSourceTimeS = null;
+    }
     currentFrame.sourcePresentationPausedWallMs = presentationPauseClock.pausedAt(currentFrame.sourcePresentedAtMs);
     const previousPausedWallMs = previousFrame
       ? previousFrame.sourcePresentationPausedWallMs : frame.sourceTimingPausedWallMs;
@@ -3108,7 +3241,12 @@ export function createWorkerOwnedIsosurfacePresenter({
       presentationMotionController.abort();
       presentationMotionController = new AbortController();
       stopTemporalPresentation();
-      if (!value) wakeRenderSubmitWaiters(true);
+      if (!value) {
+        pendingScheduleSourceTimeS = null;
+        lastScheduleStepsCompletedAtMs = null;
+        lastScheduleStepsSourceTimeS = null;
+        wakeRenderSubmitWaiters(true);
+      }
       if (value) {
         if (currentFrame?.motionPacing) {
           currentFrame.motionPacing = resumeIsosurfaceMotionPacing(
@@ -3152,6 +3290,7 @@ export function createWorkerOwnedIsosurfacePresenter({
         || typeof sourceTimeS !== 'number' || !Number.isFinite(sourceTimeS) || sourceTimeS < 0
         || !Number.isSafeInteger(totalStepCount) || totalStepCount <= 1
         || !Number.isFinite(startedAtMs) || startedAtMs < 0) return null;
+      pendingScheduleSourceTimeS = sourceTimeS;
       let frame = null;
       let lastStep = 0;
       let lastObservedAtMs = startedAtMs;
@@ -3168,7 +3307,46 @@ export function createWorkerOwnedIsosurfacePresenter({
           || !Number.isFinite(atMs) || atMs < lastObservedAtMs) return false;
         lastStep = step;
         lastObservedAtMs = atMs;
-        if (step === totalStepCount) { closed = true; return false; }
+        if (step === totalStepCount) {
+          closed = true;
+          lastScheduleStepsCompletedAtMs = atMs;
+          lastScheduleStepsSourceTimeS = sourceTimeS;
+          if (!frame) {
+            const candidate = currentFrame;
+            if (candidate?.motionField?.buffer && candidate.motionPacing
+              && candidate.invalidationEpoch === epoch
+              && candidate.sourceTimeS === sourceTimeS
+              && candidate.receiptFields?.laneId === laneId
+              && candidate.receiptFields?.stateKey === stateKey
+              && candidate.receiptFields?.presentationLaneEpoch === presentationLaneEpoch) {
+              frame = candidate;
+            }
+          }
+          if (frame) {
+            const measuredLatencyMs = Math.max(
+              recentScheduleHandoffMs,
+              recentBuildFrameMs + recentPresentationGpuCompleteMs
+            );
+            if (measuredLatencyMs >= 1.0) {
+              const measuredHandoffS = Math.min(
+                0.26,
+                Math.max(
+                  0.06,
+                  (recentScheduleHandoffMs * 1.15) / 1000,
+                  (recentBuildFrameMs * 2.5 + recentPresentationGpuCompleteMs * 1.5) / 1000
+                )
+              );
+              const pacing = slowIsosurfaceMotionPacing(
+                frame.motionPacing,
+                atMs,
+                measuredHandoffS,
+                frame.lastDisplayedMotionAgeS || 0
+              );
+              if (pacing !== frame.motionPacing) frame.motionPacing = pacing;
+            }
+          }
+          return false;
+        }
         // Physics may resume once source capture is safe, before the new mesh
         // reaches the screen. Bind lazily to that exact source, never to the
         // predecessor still visible when the schedule began.
@@ -3184,11 +3362,20 @@ export function createWorkerOwnedIsosurfacePresenter({
         }
         const activeWallMs = atMs - startedAtMs
           - (presentationPauseClock.pausedAt(atMs) - startedPausedWallMs);
-        const isRealGpuDevice = Boolean(
-          typeof globalThis.GPUDevice === 'function'
-          && device instanceof globalThis.GPUDevice
+        const measuredLatencyMs = Math.max(
+          recentScheduleHandoffMs,
+          recentBuildFrameMs + recentPresentationGpuCompleteMs
         );
-        const buildHandoffMarginS = isRealGpuDevice ? 0.05 : 0;
+        const buildHandoffMarginS = measuredLatencyMs >= 1.0
+          ? Math.min(
+              0.26,
+              Math.max(
+                0.06,
+                (recentScheduleHandoffMs * 1.15) / 1000,
+                (recentBuildFrameMs * 2.5 + recentPresentationGpuCompleteMs * 1.5) / 1000
+              )
+            )
+          : 0;
         const remainingWallS = activeWallMs / 1000 * (totalStepCount - step) / step + buildHandoffMarginS;
         const pacing = slowIsosurfaceMotionPacing(frame.motionPacing, atMs,
           remainingWallS, frame.lastDisplayedMotionAgeS || 0);
@@ -3209,8 +3396,8 @@ export function createWorkerOwnedIsosurfacePresenter({
     getPresentationSubmitSerial() {
       return submittedRenderSerial;
     },
-    waitForPresentationSubmitTurn({ afterSerial = submittedRenderSerial, timeoutMs = 12 } = {}) {
-      return waitForPresentationSubmitTurnInternal({ afterSerial, timeoutMs });
+    waitForPresentationSubmitTurn({ afterSerial = submittedRenderSerial, timeoutMs = 12, force = false } = {}) {
+      return waitForPresentationSubmitTurnInternal({ afterSerial, timeoutMs, force });
     },
     hasRetainedSubmissionGapOpportunity,
     presentRetainedSubmissionGap({ signal = null, waitForPendingSlot = false } = {}) {
@@ -3411,6 +3598,9 @@ export function createWorkerOwnedIsosurfacePresenter({
       if (disposed) return false;
       retireRetainedSubmissionGap();
       stopTemporalPresentation();
+      pendingScheduleSourceTimeS = null;
+      lastScheduleStepsCompletedAtMs = null;
+      lastScheduleStepsSourceTimeS = null;
       wakeRenderSubmitWaiters(true);
       invalidationEpoch += 1;
       resizeRetryInvalidationEpoch = null;
@@ -3477,6 +3667,9 @@ export function createWorkerOwnedIsosurfacePresenter({
       if (disposed) return;
       retireRetainedSubmissionGap();
       stopTemporalPresentation();
+      pendingScheduleSourceTimeS = null;
+      lastScheduleStepsCompletedAtMs = null;
+      lastScheduleStepsSourceTimeS = null;
       disposed = true;
       wakeRenderSubmitWaiters(true);
       invalidationEpoch += 1;

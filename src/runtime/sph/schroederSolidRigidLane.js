@@ -83,6 +83,7 @@ export function createSchroederSolidRigidFamily(device, cold) {
     schema: SCHROEDER_SOLID_BODIES_SCHEMA, device, bodyCount: packed.bodyCount, memberCount: packed.memberCount,
     frameBuffer, memberBuffer, proxyBuffer, latticeBuffer, neighborBuffer, proxyCount,
     materials: cold.bodies.map(body => body.material),
+    sourceBodyIds: cold.bodies.map(body => body.sourceBodyId ?? body.bodyId ?? null),
     bodySizesM: cold.bodies.map(body => Array.isArray(body.sizeM) ? [...body.sizeM] : null),
     fractureOptions: cold.bodies[0].fracture ?? null,
     fractureEnabled: cold.fractureEnabled !== false,

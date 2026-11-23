@@ -29,25 +29,25 @@ export const NUCLEAR_CHANNEL_ROW_FLOATS = 8;
  */
 export const NUCLEAR_DECAY_CHANNELS = Object.freeze({
   'U-238': Object.freeze({
-    isotope: 'U-238', Z: 92, A: 238, mode: 'alpha',
+    isotope: 'U-238', Z: 92, A: 238, mode: 'alpha', naturallyAbundant: true,
     daughterIsotope: 'Th-234', daughterZ: 90, daughterA: 234, emittedZ: 2, emittedA: 4,
     halfLifeS: 1.40999e17, qValueMeV: 4.270,
     alphaFraction: 0.99, betaFraction: 0.0, gammaFraction: 0.01, localDepositionFraction: 0.99
   }),
   'Co-60': Object.freeze({
-    isotope: 'Co-60', Z: 27, A: 60, mode: 'beta-minus',
+    isotope: 'Co-60', Z: 27, A: 60, mode: 'beta-minus', naturallyAbundant: false,
     daughterIsotope: 'Ni-60', daughterZ: 28, daughterA: 60, emittedZ: -1, emittedA: 0,
     halfLifeS: 1.66344e8, qValueMeV: 2.823,
     alphaFraction: 0.0, betaFraction: 0.11, gammaFraction: 0.89, localDepositionFraction: 0.45
   }),
   'Cs-137': Object.freeze({
-    isotope: 'Cs-137', Z: 55, A: 137, mode: 'beta-minus',
+    isotope: 'Cs-137', Z: 55, A: 137, mode: 'beta-minus', naturallyAbundant: false,
     daughterIsotope: 'Ba-137', daughterZ: 56, daughterA: 137, emittedZ: -1, emittedA: 0,
     halfLifeS: 9.489e8, qValueMeV: 1.175,
     alphaFraction: 0.0, betaFraction: 0.44, gammaFraction: 0.56, localDepositionFraction: 0.55
   }),
   'H-3': Object.freeze({
-    isotope: 'H-3', Z: 1, A: 3, mode: 'beta-minus',
+    isotope: 'H-3', Z: 1, A: 3, mode: 'beta-minus', naturallyAbundant: false,
     daughterIsotope: 'He-3', daughterZ: 2, daughterA: 3, emittedZ: -1, emittedA: 0,
     halfLifeS: 3.8879e8, qValueMeV: 0.01859,
     alphaFraction: 0.0, betaFraction: 1.0, gammaFraction: 0.0, localDepositionFraction: 0.31

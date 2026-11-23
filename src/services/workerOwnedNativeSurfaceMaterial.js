@@ -564,6 +564,15 @@ export function createWorkerOwnedNativeSurfaceMaterial({
     return { r: 0, g: 0, b: 0, a: 1 };
   };
   return { ready, prepare, draw, drawBackground, releaseFrame, getDiagnostics, clearValue,
+    getSurfaceDrawResources(frame, surface) {
+      const entry = frames.get(frame);
+      if (!entry) return null;
+      const binding = entry.bindGroups.get(surface);
+      return {
+        opticalRecordsBuffer: entry.optical?.buffers?.recordsBuffer ?? null,
+        motionUniformBuffer: binding?.motionUniform ?? null
+      };
+    },
     transferFrame(source, target) {
       const entry = frames.get(source);
       if (entry && source !== target) { releaseFrame(target); frames.delete(source); frames.set(target, entry); }

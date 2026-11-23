@@ -17289,6 +17289,7 @@ export function createSphPhaseScene(container, {
   let currentReactionActivationPolicy =
     SCHROEDER_REACTION_ACTIVATION_POLICY_SHADOW;
   let currentSurfaceTensionLawAdmission = null;
+  let currentNuclearCherenkovSources = null;
   let sphResidentMaterialInterfaceState = null;
   let sphResidentRenderState = null;
   let sphResidentPressureInterfaceState = null;
@@ -43207,6 +43208,8 @@ fn main(
     wallReservoirAuthority = null,
     ambientTemperatureK = null,
     thermalEnvironmentAuthority = null,
+    nuclearCherenkovSources = null,
+    nuclearCherenkovSnapshot = null,
     staticTableCache = null
   }) {
     const timingStartMs = nowMs();
@@ -43320,6 +43323,12 @@ fn main(
       currentThermalEnvironmentAuthority;
     scene.userData.sphWallReservoirAuthority =
       currentWallReservoirAuthority;
+    currentNuclearCherenkovSources =
+      nuclearCherenkovSources && Array.isArray(nuclearCherenkovSources.sources) && nuclearCherenkovSources.sources.length > 0
+        ? nuclearCherenkovSources
+        : null;
+    scene.userData.sphNuclearCherenkovStatus = nuclearCherenkovSnapshot ?? null;
+    globalThis.__ulgNuclearCherenkovStatus = nuclearCherenkovSnapshot ?? null;
     const collectiveOpticalInputs = measure(
       'collectiveOpticalStaticInputs',
       () => sphCollectiveOpticalStaticInputsFromViewState({
@@ -52358,6 +52367,9 @@ fn main(
     }
     workerOffscreenPresentationBridge?.dispose?.();
     workerOffscreenPresentationBridge = null;
+    currentNuclearCherenkovSources = null;
+    scene.userData.sphNuclearCherenkovStatus = null;
+    globalThis.__ulgNuclearCherenkovStatus = null;
     sphResidentSurfaceDrawRenderBridge = null;
     scene.userData.sphResidentSurfaceDrawRenderBridge = null;
     renderer.dispose();
@@ -52870,7 +52882,8 @@ fn main(
               vertexRowsBudget: workerOwnedIsosurfaceBudget,
               viewProjectionMatrix: workerOffscreenViewProjectionMatrix(),
               cameraPositionM: camera.position.toArray(),
-              boxDimsM: [...dims]
+              boxDimsM: [...dims],
+              nuclearCherenkovSources: currentNuclearCherenkovSources
             }
           }
         : {}),
@@ -53763,6 +53776,9 @@ fn main(
                     ...(laneState.supersededLane
                       ? { retireLane: { ...laneState.supersededLane } }
                       : {}),
+                    ...(currentNuclearCherenkovSources
+                      ? { nuclearCherenkovSources: currentNuclearCherenkovSources }
+                      : {}),
                     ...classifierOptions
                   }
                 }
@@ -54318,6 +54334,7 @@ fn main(
                 scheduleId,
                 thermalPotentialAcknowledgement,
                 ...(pendingTriadAdoptions ? { triadClosureAdoptions: pendingTriadAdoptions } : {}),
+                ...(currentNuclearCherenkovSources ? { nuclearCherenkovSources: currentNuclearCherenkovSources } : {}),
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
                 targetScheduleAuthority:
@@ -54582,6 +54599,10 @@ fn main(
         if (workerArchStatus.chainDeepening) {
           scene.userData.sphChainDeepeningStatus = workerArchStatus.chainDeepening;
           globalThis.__ulgChainDeepeningStatus = workerArchStatus.chainDeepening;
+        }
+        if (workerArchStatus.nuclearCherenkov) {
+          scene.userData.sphNuclearCherenkovStatus = workerArchStatus.nuclearCherenkov;
+          globalThis.__ulgNuclearCherenkovStatus = workerArchStatus.nuclearCherenkov;
         }
       }
       // A6 warm browser WASM/WebGPU closure bridge: adopt any finished

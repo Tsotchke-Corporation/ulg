@@ -3928,14 +3928,6 @@ export function surfaceEmissive(demo) {
   for (const [material, a] of Object.entries(acc)) {
     out[material] = a.w > 0 ? [a.r / a.w, a.g / a.w, a.b / a.w] : null;
   }
-  // Phase 8 Frank-Tamm Cherenkov emission: strictly gated on β > 1/n in dielectric medium.
-  const ncSnap = demo?.nuclearCherenkov?.getSnapshot?.() || demo?.nuclearCherenkovSnapshot || null;
-  if (ncSnap?.cherenkovActive && Array.isArray(ncSnap.sources)) {
-    for (const src of ncSnap.sources) {
-      if (!src.active || !Array.isArray(src.srgb)) continue;
-      if (!out[src.material]) out[src.material] = [...src.srgb];
-    }
-  }
   return out;
 }
 

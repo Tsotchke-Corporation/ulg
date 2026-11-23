@@ -51,6 +51,12 @@ import { ISOSURFACE_MOTION_WGSL } from '../visualization/isosurfaceMotionWgsl.js
 import { encodeNativeSurfaceTemperatureRowsWebGpu } from '../visualization/nativeSurfaceTemperatureWgsl.js';
 import { createIsosurfaceMotionPacing, createPresentationPauseClock, isosurfaceMotionAge, resumeIsosurfaceMotionPacing, slowIsosurfaceMotionPacing, snapshotIsosurfaceSourceTimingBootstrap } from './workerOwnedIsosurfaceMotion.js';
 import {
+  clearSphNuclearCherenkovState,
+  createSphCherenkovVolumetricRenderer,
+  latestSphNuclearCherenkovState,
+  seedSphNuclearCherenkovSources
+} from '../runtime/sph/sphNuclearCherenkovGpu.js';
+import {
   createWorkerOwnedNativeSurfaceMaterial,
   snapshotWorkerNativeSurfaceMaterial,
   workerNativeSurfaceKind,
@@ -867,6 +873,7 @@ export function createWorkerOwnedIsosurfacePresenter({
   let latestCameraPositionM = null;
   let latestNativeSurfaceAppearance = null;
   let nativeMaterial = null;
+  let cherenkovVolumetricRenderer = null;
   let mostRecentSubmittedGeneration = 0;
   let temporalLoopToken = 0;
   let temporalDelayHandle = null;
@@ -1458,7 +1465,43 @@ export function createWorkerOwnedIsosurfacePresenter({
             view: depthView, depthLoadOp: 'load', depthStoreOp: 'store'
           }
         });
-        try { drawNative(frontPass, surface, { refractive: true }); }
+        try {
+          drawNative(frontPass, surface, { refractive: true });
+          const reqNuclear = frame?.request?.nuclearCherenkovSources;
+          if (frame?.request && 'nuclearCherenkovSources' in frame.request && !(reqNuclear?.sources?.length > 0)) {
+            if (latestSphNuclearCherenkovState(device)?.activeSourceCount > 0) {
+              clearSphNuclearCherenkovState(device);
+            }
+          } else {
+            let nuclearState = latestSphNuclearCherenkovState(device);
+            if (reqNuclear?.sources?.length > 0 && !(nuclearState?.activeSourceCount > 0)) {
+              seedSphNuclearCherenkovSources(device, { nuclearDescriptor: reqNuclear });
+              nuclearState = latestSphNuclearCherenkovState(device);
+            }
+            if (nuclearState?.activeSourceCount > 0 && nuclearState.cherenkovSourcesBuffer) {
+              cherenkovVolumetricRenderer ??= createSphCherenkovVolumetricRenderer(device, {
+                colorFormat: format,
+                depthFormat
+              });
+              const res = material.getSurfaceDrawResources?.(frame, surface);
+              const vertices = surface.translation?.surfaceVertices;
+              const indirect = surface.translation?.surfaceDraw?.drawIndirectRowsBuffer;
+              if (res?.opticalRecordsBuffer && vertices && indirect && surface.uniformBuffer) {
+                cherenkovVolumetricRenderer.draw(frontPass, {
+                  compactPositionRowsBuffer: vertices.compactPositionRowsBuffer,
+                  compactNormalRowsBuffer: vertices.compactNormalRowsBuffer,
+                  drawIndirectRowsBuffer: indirect,
+                  cameraUniformBuffer: surface.uniformBuffer,
+                  opticalRecordsBuffer: res.opticalRecordsBuffer,
+                  motionFieldBuffer: frame.motionField?.buffer ?? null,
+                  motionUniformBuffer: res.motionUniformBuffer ?? null,
+                  backDepthView: material.backDepthView(),
+                  cherenkovSourcesBuffer: nuclearState.cherenkovSourcesBuffer
+                });
+              }
+            }
+          }
+        }
         finally { frontPass.end(); }
       }
       if (packedMedium) {
@@ -3310,6 +3353,8 @@ export function createWorkerOwnedIsosurfacePresenter({
       releaseFrame(currentFrame, 'worker-isosurface-presenter-dispose');
       currentFrame = null;
       await releaseAdapterCache();
+      cherenkovVolumetricRenderer?.dispose?.();
+      cherenkovVolumetricRenderer = null;
       nativeMaterial?.dispose();
       nativeMaterial = null;
       fieldRowsBuffer?.destroy?.();

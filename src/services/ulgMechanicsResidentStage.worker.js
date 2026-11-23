@@ -11,6 +11,16 @@ import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../
 import { normalizeSphImplicitPressureOptions } from '../runtime/sph/sphImplicitPressureGpu.js';
 import { encodeSphThermalRegionalClosureScheduleTick } from '../runtime/sph/sphThermalRegionalClosureGpu.js';
 import {
+  clearSphNuclearCherenkovState,
+  encodeSphNuclearDecayAndCherenkovTick,
+  latestSphNuclearCherenkovState,
+  seedSphNuclearCherenkovSources
+} from '../runtime/sph/sphNuclearCherenkovGpu.js';
+import {
+  latestSchroederSolidRigidFamily,
+  schroederSolidRigidFamilyForUpload
+} from '../runtime/sph/schroederSolidRigidLane.js';
+import {
   getTriadClosureDeviceStatus,
   registerTriadClosureBundleOnDevice
 } from '../runtime/material/triadClosureGpuRegistry.js';
@@ -80,6 +90,7 @@ import {
   destroySphGpuParticleBuffers,
   uploadSphGpuParticleBuffers, uploadMlsMpmGpuParticleBuffers, destroyMlsMpmGpuParticleBuffers,
   sphGpuParticleUploadAdvertisesExactMass,
+  sphGpuParticleUploadExactEnergyRows,
   ensureSphGpuParticleBufferSetBorrowLifecycle,
   sphGpuParticleUploadDispersedMediumOpticsMatchesSourceBuffers,
   sphGpuParticleUploadAdvertisesDispersedMediumOptics,
@@ -1323,6 +1334,9 @@ export function releaseUlgMechanicsResidentStageWorkerLane({
     // families. This callback owns only the materializer's uniform buffer.
   }
   destroyThermalPotentialWorkerLane(staticGpuResources?.thermalPotentialOwner);
+  if (record.workerDevice) {
+    try { clearSphNuclearCherenkovState(record.workerDevice); } catch { /* best-effort */ }
+  }
   destroySphThermalResponseGraphBuffers(
     staticGpuResources?.thermalResponseGraphUpload
   );
@@ -5220,8 +5234,22 @@ async function runWorkerSchroederLaneSeedStage(data = {}) {
     // worker-local clones below. Schedule messages never resend the rows.
     sphParticleState: data.sphParticleState,
     mlsMpmParticleState: data.mlsMpmParticleState,
+    nuclearCherenkovSources:
+      seedOptions.nuclearCherenkovSources
+      ?? data.nuclearCherenkovSources
+      ?? null,
     particleCount
   };
+  const seededRigidFamily =
+    schroederSolidRigidFamilyForUpload(seededSphUpload)
+    ?? latestSchroederSolidRigidFamily(device);
+  seedSphNuclearCherenkovSources(device, {
+    nuclearDescriptor: record.schroederLane.nuclearCherenkovSources,
+    stateBuffer: seededSphUpload.stateBuffer,
+    identityBuffer: seededSphUpload.identityBuffer,
+    rigidFamily: seededRigidFamily,
+    particleCount
+  });
   const seedLevelAssignmentBufferRef = retainGpuBuffer(
     record,
     stageId,
@@ -15639,6 +15667,56 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         // Keep A3 thermal regional sampling isolated from physics admission.
       }
     }
+    let nuclearCherenkovStatus = null;
+    const activeNuclearDescriptor =
+      schedule.nuclearCherenkovSources
+      ?? record.schroederLane?.nuclearCherenkovSources
+      ?? null;
+    const hasActiveNuclearSources = Boolean(
+      Array.isArray(activeNuclearDescriptor?.sources)
+      && activeNuclearDescriptor.sources.length > 0
+    );
+    if (
+      !cancelled
+      && hasActiveNuclearSources
+      && record.workerDevice
+      && record.schroederLane?.sphParticleUpload?.stateBuffer
+      && record.schroederLane?.sphParticleUpload?.identityBuffer
+      && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
+    ) {
+      try {
+        const laneDtS = Math.max(0, Number(baseMechanicsOptions.dt ?? commonOptions.dt ?? 0));
+        const scheduleDtS = laneDtS * Math.max(0, completedStepCount);
+        const exactEnergyRec = sphGpuParticleUploadExactEnergyRows(
+          record.schroederLane.sphParticleUpload
+        );
+        const activeRigidFamily =
+          schroederSolidRigidFamilyForUpload(record.schroederLane.sphParticleUpload)
+          ?? latestSchroederSolidRigidFamily(record.workerDevice);
+        const nuclearEncoder = record.workerDevice.createCommandEncoder({
+          label: 'ulg-worker-nuclear-decay-and-cherenkov-schedule-tick'
+        });
+        nuclearCherenkovStatus = encodeSphNuclearDecayAndCherenkovTick(
+          record.workerDevice,
+          nuclearEncoder,
+          {
+            stateBuffer: record.schroederLane.sphParticleUpload.stateBuffer,
+            identityBuffer: record.schroederLane.sphParticleUpload.identityBuffer,
+            exactEnergyBuffer: exactEnergyRec?.energyBuffer ?? null,
+            rigidFamily: activeRigidFamily,
+            particleCount: record.schroederLane.sphParticleUpload.particleCount,
+            dtS: scheduleDtS,
+            nuclearDescriptor: activeNuclearDescriptor
+          }
+        );
+        if (nuclearCherenkovStatus) {
+          record.workerDevice.queue.submit([nuclearEncoder.finish()]);
+          globalThis.__ulgNuclearCherenkovStatus = nuclearCherenkovStatus;
+        }
+      } catch {
+        nuclearCherenkovStatus = latestSphNuclearCherenkovState(record.workerDevice)?.lastSnapshot ?? null;
+      }
+    }
     // Evaluate dynamic hierarchy LOD controller & 40-OOM scale atlas at this
     // committed schedule boundary (zero full-particle readback; hysteresis
     // prevents frame-to-frame level thrashing).
@@ -15833,6 +15911,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         lawEnvelopeWatch: lawEnvelopeWatchStatus,
         representativeParticles: representativeParticlesStatus,
         chainDeepening: chainDeepeningStatus,
+        nuclearCherenkov: nuclearCherenkovStatus,
         a5Solid: globalThis.__ulgA5SolidStatus
           ? { ...globalThis.__ulgA5SolidStatus }
           : null

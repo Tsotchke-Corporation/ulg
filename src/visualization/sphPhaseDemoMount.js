@@ -17194,7 +17194,9 @@ export async function mountSphPhaseDemoOverlay({
           reactionActivation.reactionActivationPolicy,
         physicalLawGroups: activePhysicalLawGroups,
         requestedPhysicalLawGroups,
-        surfaceTensionLawAdmission: null
+        surfaceTensionLawAdmission: null,
+        nuclearCherenkovSources: null,
+        nuclearCherenkovSnapshot: null
       });
       overlay.__sphPhysicalLawGroups = requestedPhysicalLawGroups;
       overlay.__sphEffectivePhysicalLawGroups = activePhysicalLawGroups;
@@ -17258,6 +17260,8 @@ export async function mountSphPhaseDemoOverlay({
         viewState.thermalEnvironmentAuthority
         ?? viewState.scenario?.thermalEnvironment
         ?? null,
+      nuclearCherenkovSources: viewState.nuclearCherenkovSources ?? null,
+      nuclearCherenkovSnapshot: viewState.nuclearCherenkovSnapshot ?? null,
       staticTableCache
     });
     resetRebuildPending = false;

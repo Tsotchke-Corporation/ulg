@@ -216,7 +216,8 @@ const resolverFamilies = [
     cpu: {
       status: 'partial-cpu-entrypoints',
       entrypoints: [
-        { module: 'src/runtime/material/radiationClosure.js', exports: ['createRadiationClosure', 'incandescentColor', 'blackbodyColorSrgb'] }
+        { module: 'src/runtime/material/radiationClosure.js', exports: ['createRadiationClosure', 'incandescentColor', 'blackbodyColorSrgb'] },
+        { module: 'src/runtime/material/nuclearCherenkovClosure.js', exports: ['packNuclearChannelRows', 'stepIsotopeInventoryLedger', 'evaluateCherenkovClosure'] }
       ]
     },
     webgpuResidencyTarget: {

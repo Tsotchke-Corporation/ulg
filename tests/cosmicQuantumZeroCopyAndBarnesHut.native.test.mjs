@@ -4,7 +4,7 @@ import test from 'node:test';
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_COSMIC_QUANTUM === '1'
   || process.env.ULG_RUN_NATIVE_WEBGPU === '1';
 
-test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURenderer presenter, and cross-chart multipole verify on real Vulkan GPU', {
+test('Translation-invariant 32K Barnes-Hut Octree, unified continuous continuum EOS (Au/Hg/Cl), volumetric raymarcher, and cross-chart multipole verify on real Vulkan GPU', {
   skip: !RUN_NATIVE && 'set ULG_RUN_NATIVE_COSMIC_QUANTUM=1 or ULG_RUN_NATIVE_WEBGPU=1',
   timeout: 120000
 }, async () => {
@@ -26,7 +26,7 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
     const url = 'https://127.0.0.1:5173/__cosmic_bh_zerocopy_proof__';
     await page.route(url, (route) => route.fulfill({
       contentType: 'text/html',
-      body: '<title>Barnes-Hut Zero-Copy WebGPU Proof</title>'
+      body: '<title>Barnes-Hut Zero-Copy & Continuous Continuum WebGPU Proof</title>'
     }));
     await page.goto(url);
     await page.waitForFunction(
@@ -56,7 +56,7 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
       const { createCosmicQuantumScaleBridge } = await import('/src/runtime/sph/cosmicQuantumScaleBridge.js');
       const { runSchroederScaleAtlasMultipoleWebGpu } = await import('/src/runtime/sph/schroederScaleAtlasMultipoleGpu.js');
 
-      // 1. 32,768-body Hierarchical WebGPU Barnes-Hut Octree with zero CPU readback
+      // 1. 32,768-body Translation-Invariant Hierarchical WebGPU Barnes-Hut Octree with zero CPU readback
       const bodies0 = createGalacticBodies({ count: 32768, preset: 'disk', seed: 825 });
       const bh = createResidentBarnesHutNBodyEngine({
         device,
@@ -111,7 +111,6 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
       await device.queue.onSubmittedWorkDone();
       const step10Ms = performance.now() - t0;
 
-      // Single readback check at the end to confirm finite kinematics + motion
       const finalBodies = await bh.readbackBodies();
       let allFinite = true;
       let moved = 0;
@@ -127,14 +126,78 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
         if (d > 1e-3) moved += 1;
       }
 
-      // 3. Zero-copy Continuum Micro-SPH (1,024 particles, liquid Hg) + 3D Volumetric Raymarcher on same GPUDevice
-      const contInit = createContinuumSpecimenBodies({ count: 1024, phase: 'liquid', seed: 4201 });
+      // 2b. Barnes-Hut off-origin translation invariance proof!
+      const bhShift = [5.0, -2.5, 3.0];
+      const bhOrig = createResidentBarnesHutNBodyEngine({
+        device,
+        initialBodies: createGalacticBodies({ count: 512, preset: 'disk', seed: 825 }),
+        mode: 0,
+        boxHalf: 16.0,
+        theta: 0.65,
+        label: 'proof-bh-trans-orig'
+      });
+      const bhShifted = createResidentBarnesHutNBodyEngine({
+        device,
+        initialBodies: createGalacticBodies({ count: 512, preset: 'disk', seed: 825, centerOffset: bhShift }),
+        mode: 0,
+        boxHalf: 16.0,
+        theta: 0.65,
+        label: 'proof-bh-trans-shift'
+      });
+      for (let s = 0; s < 8; s += 1) {
+        await bhOrig.step({ dt: 0.011, gravity: 1.0, softening: 0.24, readback: s === 7 });
+        await bhShifted.step({ dt: 0.011, gravity: 1.0, softening: 0.24, readback: s === 7 });
+      }
+      const b0 = bhOrig.getBodies();
+      const bS = bhShifted.getBodies();
+      let bhTransMaxDiff = 0;
+      for (let i = 0; i < 512; i += 1) {
+        const o = i * 8;
+        const d = Math.hypot(
+          (bS[o + 0] - bhShift[0]) - b0[o + 0],
+          (bS[o + 1] - bhShift[1]) - b0[o + 1],
+          (bS[o + 2] - bhShift[2]) - b0[o + 2]
+        );
+        if (d > bhTransMaxDiff) bhTransMaxDiff = d;
+      }
+      bhOrig.dispose();
+      bhShifted.dispose();
+
+      // 3. Unified Continuous Continuum Micro-SPH (NO phase_mode!) across Hg (liquid), Au (solid), and Cl (gas)
+      const measureContinuum = async (opts, steps = 90) => {
+        const init = createContinuumSpecimenBodies({ count: 512, ...opts, seed: 4201 });
+        const eng = createResidentContinuumDropletEngine({ device, initialBodies: init, ...opts, label: `proof-cont-${opts.tag}` });
+        for (let s = 0; s < steps; s += 1) {
+          await eng.step({ dt: 0.015, gravity: 1.8, readback: s === steps - 1 });
+        }
+        const end = eng.getBodies();
+        let meanY = 0;
+        let meanR = 0;
+        let finite = true;
+        for (let i = 0; i < 512; i += 1) {
+          const o = i * 8;
+          for (let k = 0; k < 8; k += 1) if (!Number.isFinite(end[o + k])) finite = false;
+          meanY += end[o + 1];
+          meanR += Math.hypot(end[o], end[o + 2]);
+        }
+        const mode = eng.gravityMode;
+        eng.dispose();
+        return { meanY: meanY / 512, meanR: meanR / 512, finite, mode };
+      };
+      const auCont = await measureContinuum({ tag: 'au', bulkModulusPa: 180e9, meltingPointK: 1337, boilingPointK: 3129, cohesiveEnergyEv: 3.81, temperatureK: 298.15 });
+      const hgCont = await measureContinuum({ tag: 'hg', bulkModulusPa: 25e9, meltingPointK: 234.3, boilingPointK: 629.9, cohesiveEnergyEv: 0.67, temperatureK: 298.15 });
+      const clCont = await measureContinuum({ tag: 'cl', bulkModulusPa: 1e8, meltingPointK: 171.6, boilingPointK: 239.1, cohesiveEnergyEv: 0.12, temperatureK: 298.15 });
+
+      // Zero-copy continuum presenter + 3D Volumetric Raymarcher on same GPUDevice
+      const contInit = createContinuumSpecimenBodies({ count: 1024, bulkModulusPa: 25e9, meltingPointK: 234.3, boilingPointK: 629.9, cohesiveEnergyEv: 0.67, seed: 4201 });
       const contEngine = createResidentContinuumDropletEngine({
         device,
         initialBodies: contInit,
-        phase: 'liquid',
         bulkModulusPa: 25e9,
-        label: 'proof-cont-hg'
+        meltingPointK: 234.3,
+        boilingPointK: 629.9,
+        cohesiveEnergyEv: 0.67,
+        label: 'proof-cont-hg-zc'
       });
       registry.registerModule(createResidentCosmicModuleRegistration({
         method: { model: 'continuum-micro-sph', version: 1 },
@@ -156,7 +219,7 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
       contScene.add(contPresenter.mesh);
       const radialSamples = Array.from({ length: 32 }, (_, i) => {
         const r = (i / 31) * 5.0;
-        return { rBohr: r, radialProbabilityPerBohr: r * r * Math.exp(-1.1 * r) };
+        return { rBohr: r, rhoPerBohr3: Math.exp(-1.4 * r), radialProbabilityPerBohr: r * r * Math.exp(-1.1 * r) };
       });
       const raymarcher = createVolumetricOrbitalRaymarcher({
         THREE,
@@ -178,7 +241,7 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
           serviceId: ULG_SERVICE_IDS.ulgRuntime,
           taskKind: ULG_TASK_KINDS.simulationStep,
           method: { model: 'continuum-micro-sph', version: 1 },
-          input: { stepIndex: s, parameters: { dt: 0.015, gravity: 4.8, readback: false } }
+          input: { stepIndex: s, parameters: { dt: 0.015, gravity: 1.8, readback: false } }
         });
         const res = await registry.dispatchSimulationStepCapsule(cap, { device });
         if (!res.artifact.execution.zeroCopyReadbackSkipped) contZeroCopySkipped = false;
@@ -232,6 +295,10 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
         presenterStats,
         allFinite,
         movedBodies: moved,
+        bhTransMaxDiff,
+        auCont,
+        hgCont,
+        clCont,
         contZeroCopySkipped,
         contPresenterStats,
         contAllFinite,
@@ -243,7 +310,7 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
       };
     });
 
-    console.log('Barnes-Hut 32K + Continuum Micro-SPH + Volumetric Raymarcher Vulkan Proof:', JSON.stringify(result));
+    console.log('Barnes-Hut 32K + Continuous Continuum + Volumetric Raymarcher Vulkan Proof:', JSON.stringify(result));
     assert.deepEqual(result.errors, []);
     assert.equal(result.bhMode, 'webgpu-barnes-hut-octree');
     assert.equal(result.bhCount, 32768);
@@ -253,6 +320,16 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
     assert.equal(result.presenterStats.zeroCopyBoundFrames, 10);
     assert.equal(result.allFinite, true);
     assert.ok(result.movedBodies > 30000, `expected >30k moving stars, got ${result.movedBodies}`);
+    assert.ok(result.bhTransMaxDiff < 5e-4, `Barnes-Hut off-origin translation invariance failed: maxDiff=${result.bhTransMaxDiff}`);
+
+    // Unified continuous continuum kernel: gas Cl naturally fills container higher/wider than condensed liquid Hg & solid Au under identical uniform gravity!
+    assert.equal(result.auCont.finite && result.hgCont.finite && result.clCont.finite, true);
+    assert.equal(result.auCont.mode, 'webgpu-micro-sph-continuous');
+    assert.equal(result.hgCont.mode, 'webgpu-micro-sph-continuous');
+    assert.equal(result.clCont.mode, 'webgpu-micro-sph-continuous');
+    assert.ok(result.clCont.meanY > result.hgCont.meanY + 0.35, `Gas Cl must fill upper box higher than condensed liquid Hg under identical gravity (Cl=${result.clCont.meanY}, Hg=${result.hgCont.meanY})`);
+    assert.ok(result.clCont.meanR > result.auCont.meanR + 0.4, `Gas Cl must expand wider across box than coherent solid Au (Cl=${result.clCont.meanR}, Au=${result.auCont.meanR})`);
+
     assert.equal(result.contZeroCopySkipped, true);
     assert.equal(result.contPresenterStats.zeroCopy, true);
     assert.equal(result.contPresenterStats.readbackBytesPerFrame, 0);

@@ -1,10 +1,12 @@
 #!/bin/bash
-set -u
+set -euo pipefail
 OUT="${1:-/tmp/burst-ab2-results.txt}"
-: > "$OUT"
+OUT_TMP="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "$OUT_TMP"' EXIT
+: > "$OUT_TMP"
 run() {
   local label="$1" extra="$2" window="$3"
-  echo "=== $label ===" >> "$OUT"
+  echo "=== $label ===" >> "$OUT_TMP"
   ULG_PROBE_SCENARIO=bulk-water ULG_PROBE_EXTRA="$extra" ULG_PROBE_WINDOW_MS="$window" \
     node scratch/census-probe.mjs 2>/dev/null | node -e "
 let s=''; process.stdin.on('data',(d)=>s+=d).on('end',()=>{
@@ -19,9 +21,10 @@ let s=''; process.stdin.on('data',(d)=>s+=d).on('end',()=>{
     if (lc) console.log('internal ms/step:', ((lc.lastStepEnd-lc.firstStepStart)/lc.completedStepCount).toFixed(2), 'tailFenceLagMs:', (lc.tailFenceDone-lc.lastStepEnd).toFixed(1));
     if (j.errors?.length) console.log('errors:', JSON.stringify(j.errors));
   } catch (e) { console.log('parse-failed', String(e).slice(0,150)); }
-});" >> "$OUT"
+});" >> "$OUT_TMP"
 }
 run "32.8k baseline" "" 45000
 run "32.8k burst K=8" "&submitBurstSteps=8" 45000
-echo "DONE" >> "$OUT"
+echo "DONE" >> "$OUT_TMP"
+mv -f "$OUT_TMP" "$OUT"
 cat "$OUT"

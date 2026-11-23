@@ -1,0 +1,903 @@
+/**
+ * Phase 6: True WebGPU-Derived Radial Kohn-Sham (LDA + PBE GGA + Spin-Orbit)
+ * Potential, Hartree Integral, Density Reconstruction & Observable Resolver.
+ *
+ * Executes the core radial-grid DFT passes natively on WebGPU:
+ *  1. `ks_hartree_pbe_xc`: 256-thread shared-memory forward/backward prefix
+ *     integration for the spherical Hartree potential V_H(r) = 4π(q/r + p),
+ *     exact log-grid density derivative ρ'(r), Perdew-Burke-Ernzerhof (PBE)
+ *     GGA exchange-correlation energy density f_xc(r), and divergence-form
+ *     Kohn-Sham potential v_xc(r) = ∂f/∂ρ - (1/r²) d/dr[r² ∂f/∂(ρ')].
+ *  2. `ks_density_and_observables`: parallel radial electron density accumulation
+ *     ρ(r) = Σ occ u² / (4π r²), SCF linear mixing + L1 residual quadrature,
+ *     total-energy integrals (N_e, E_H, E_xc - ∫v_xc ρ), and Koelling-Harmon
+ *     spin-orbit coupling constants ξ_{nl} & j = l ± 1/2 splittings.
+ *  3. `solveAtomWebGpu`: runs the full self-consistent Koelling-Harmon / log-grid
+ *     radial Kohn-Sham SCF loop with GPU-derived Hartree/PBE-XC potentials and
+ *     GPU-derived density/energy/spin-orbit observables, returning explicit
+ *     `webgpu-derived` provenance and WGSL program hash.
+ */
+
+import { electronConfiguration, symbolForZ } from './periodicTable.js';
+import { radialStatesKH } from './radialKohnSham.js';
+
+export const RADIAL_KS_WEBGPU_SCHEMA = 'peercompute.ulg.radial-kohn-sham-webgpu.v1';
+export const RADIAL_KS_WEBGPU_GRID_N = 256;
+
+const GPU_BUF_STORAGE = 0x0080;
+const GPU_BUF_UNIFORM = 0x0040;
+const GPU_BUF_COPY_DST = 0x0008;
+const GPU_BUF_COPY_SRC = 0x0004;
+const GPU_BUF_MAP_READ = 0x0001;
+const GPU_MAP_READ = 0x0001;
+
+export const RADIAL_KS_POTENTIAL_WGSL = /* wgsl */ `
+struct KsParams {
+  n_points: u32,
+  use_pbe: u32,
+  atomic_z: f32,
+  dx: f32,
+  mixing: f32,
+  orbital_count: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+struct KsSummary {
+  integrated_electrons: f32,
+  e_hartree_double: f32,
+  e_xc_correction: f32,
+  scf_l1_delta: f32,
+};
+
+struct OrbitalMeta {
+  n_quantum: f32,
+  l_quantum: f32,
+  occupancy: f32,
+  energy_ha: f32,
+};
+
+struct SpinOrbitOut {
+  xi_ha: f32,
+  splitting_ha: f32,
+  energy_j_minus_ha: f32,
+  energy_j_plus_ha: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: KsParams;
+@group(0) @binding(1) var<storage, read> r_grid: array<f32>;
+@group(0) @binding(2) var<storage, read_write> rho_grid: array<f32>;
+@group(0) @binding(3) var<storage, read_write> vh_grid: array<f32>;
+@group(0) @binding(4) var<storage, read_write> vxc_grid: array<f32>;
+@group(0) @binding(5) var<storage, read_write> fxc_grid: array<f32>;
+@group(0) @binding(6) var<storage, read_write> velec_grid: array<f32>;
+
+const PI: f32 = 3.14159265358979323846;
+const FOUR_PI: f32 = 12.56637061435917295385;
+const KF_RS: f32 = 1.919158292677513;
+const CHACHIYO_A: f32 = -0.015538303382756456;
+const CHACHIYO_B: f32 = 20.4562557;
+const PBE_KAPPA: f32 = 0.804;
+const PBE_MU: f32 = 0.2195149727645171;
+const PBE_GAMMA: f32 = 0.031090690869654895;
+const PBE_BETA: f32 = 0.06672455060314922;
+const ALPHA_FINE: f32 = 7.2973525693e-3;
+
+var<workgroup> sh_q: array<f32, 256>;
+var<workgroup> sh_p: array<f32, 256>;
+var<workgroup> sh_rho: array<f32, 256>;
+var<workgroup> sh_r: array<f32, 256>;
+var<workgroup> sh_r2dfdg: array<f32, 256>;
+
+fn cbrt_pos(x: f32) -> f32 {
+  return pow(max(x, 1e-36), 1.0 / 3.0);
+}
+
+fn lda_eps_xc(rho: f32) -> f32 {
+  if (rho <= 1e-14) { return 0.0; }
+  let rs = cbrt_pos(3.0 / (FOUR_PI * rho));
+  let eps_x = -(3.0 / FOUR_PI) * (KF_RS / rs);
+  let eps_c = CHACHIYO_A * log(1.0 + CHACHIYO_B / rs + CHACHIYO_B / (rs * rs));
+  return eps_x + eps_c;
+}
+
+fn lda_fxc(rho: f32) -> f32 {
+  if (rho <= 1e-14) { return 0.0; }
+  return rho * lda_eps_xc(rho);
+}
+
+fn lda_vxc(rho: f32) -> f32 {
+  if (rho <= 1e-12) { return 0.0; }
+  let d = rho * 1e-3 + 1e-13;
+  return (lda_fxc(rho + d) - lda_fxc(max(1e-16, rho - d))) / (2.0 * d);
+}
+
+fn pbe_fxc(rho: f32, grad_mag: f32) -> f32 {
+  if (rho <= 1e-14) { return 0.0; }
+  let g = max(0.0, abs(grad_mag));
+  let rs = cbrt_pos(3.0 / (FOUR_PI * rho));
+  let kf = cbrt_pos(3.0 * PI * PI * rho);
+  let s = g / max(2.0 * kf * rho, 1e-30);
+  let s2 = s * s;
+  let eps_x_lda = -0.75 * cbrt_pos(3.0 / PI) * cbrt_pos(rho);
+  let fx = 1.0 + PBE_KAPPA - PBE_KAPPA / (1.0 + (PBE_MU / PBE_KAPPA) * s2);
+  let eps_x_pbe = eps_x_lda * fx;
+  let eps_c_lda = CHACHIYO_A * log(1.0 + CHACHIYO_B / rs + CHACHIYO_B / (rs * rs));
+  let ks = sqrt((4.0 * kf) / PI);
+  let t = g / max(2.0 * ks * rho, 1e-30);
+  let t2 = t * t;
+  let exp_arg = min(80.0, -eps_c_lda / PBE_GAMMA);
+  let denom = exp(exp_arg) - 1.0;
+  var H: f32 = 0.0;
+  if (denom > 1e-20 && t2 > 0.0) {
+    let A = (PBE_BETA / PBE_GAMMA) / denom;
+    let At2 = min(1e12, A * t2);
+    let ratio = (1.0 + At2) / (1.0 + At2 + At2 * At2);
+    H = PBE_GAMMA * log(1.0 + (PBE_BETA / PBE_GAMMA) * t2 * ratio);
+  }
+  return rho * (eps_x_pbe + eps_c_lda + H);
+}
+
+@compute @workgroup_size(256, 1, 1)
+fn ks_hartree_pbe_xc(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = lid.x;
+  let n = min(params.n_points, 256u);
+  let dx = params.dx;
+
+  var ri: f32 = 1.0;
+  var rhoi: f32 = 0.0;
+  if (i < n) {
+    ri = r_grid[i];
+    rhoi = max(0.0, rho_grid[i]);
+  }
+  sh_r[i] = ri;
+  sh_rho[i] = rhoi;
+  // q_term = rho * r^3 * dx ; p_term = rho * r^2 * dx
+  sh_q[i] = select(0.0, rhoi * ri * ri * ri * dx, i < n);
+  // Reverse index for suffix sum p(r) = sum_{j>=i} rho_j * r_j^2 * dx
+  let rev = select(0u, (n - 1u) - i, i < n);
+  sh_p[rev] = select(0.0, rhoi * ri * ri * dx, i < n);
+  workgroupBarrier();
+
+  // Hillis-Steele inclusive prefix sum on sh_q and sh_p (N <= 256 -> 8 steps)
+  for (var offset: u32 = 1u; offset < 256u; offset = offset << 1u) {
+    var q_add: f32 = 0.0;
+    var p_add: f32 = 0.0;
+    if (i >= offset) {
+      q_add = sh_q[i - offset];
+      p_add = sh_p[i - offset];
+    }
+    workgroupBarrier();
+    sh_q[i] = sh_q[i] + q_add;
+    sh_p[i] = sh_p[i] + p_add;
+    workgroupBarrier();
+  }
+
+  var vh_val: f32 = 0.0;
+  if (i < n) {
+    let q_val = sh_q[i];
+    let p_val = sh_p[(n - 1u) - i];
+    vh_val = FOUR_PI * (q_val / ri + p_val);
+    vh_grid[i] = vh_val;
+  }
+
+  // Compute radial derivative rho'(r) = (1/r) * d(rho)/dx
+  var rho_p: f32 = 0.0;
+  if (i > 0u && i + 1u < n) {
+    rho_p = (sh_rho[i + 1u] - sh_rho[i - 1u]) / (2.0 * dx * ri);
+  }
+  workgroupBarrier();
+  if (i == 0u && n > 2u) {
+    rho_p = (sh_rho[2u] - sh_rho[0u]) / (2.0 * dx * sh_r[1u]);
+  } else if (i + 1u == n && n > 2u) {
+    rho_p = (sh_rho[n - 1u] - sh_rho[n - 3u]) / (2.0 * dx * sh_r[n - 2u]);
+  }
+
+  var fxc_val: f32 = 0.0;
+  var df_drho: f32 = 0.0;
+  var r2_df_dg: f32 = 0.0;
+  if (i < n) {
+    if (params.use_pbe != 0u) {
+      if (rhoi > 1e-13) {
+        let g_abs = abs(rho_p);
+        fxc_val = pbe_fxc(rhoi, g_abs);
+        let d_rho = rhoi * 1e-3 + 1e-13;
+        df_drho = (pbe_fxc(rhoi + d_rho, g_abs) - pbe_fxc(max(1e-16, rhoi - d_rho), g_abs)) / (2.0 * d_rho);
+        let d_g = g_abs * 1e-3 + 1e-10;
+        let df_dg = (pbe_fxc(rhoi, g_abs + d_g) - pbe_fxc(rhoi, max(0.0, g_abs - d_g))) / (2.0 * d_g);
+        let sign_g = select(-1.0, 1.0, rho_p >= 0.0);
+        r2_df_dg = ri * ri * df_dg * sign_g;
+      }
+    } else {
+      fxc_val = lda_fxc(rhoi);
+      df_drho = lda_vxc(rhoi);
+    }
+  }
+  sh_r2dfdg[i] = r2_df_dg;
+  workgroupBarrier();
+
+  if (i < n) {
+    var vxc_val: f32 = df_drho;
+    if (params.use_pbe != 0u && rhoi > 1e-13) {
+      var div_term: f32 = 0.0;
+      if (i > 0u && i + 1u < n) {
+        div_term = (sh_r2dfdg[i + 1u] - sh_r2dfdg[i - 1u]) / (2.0 * dx * ri);
+      } else if (i == 0u && n > 2u) {
+        div_term = (sh_r2dfdg[2u] - sh_r2dfdg[0u]) / (2.0 * dx * sh_r[1u]);
+      } else if (i + 1u == n && n > 2u) {
+        div_term = (sh_r2dfdg[n - 1u] - sh_r2dfdg[n - 3u]) / (2.0 * dx * sh_r[n - 2u]);
+      }
+      let v_raw = df_drho - div_term / (ri * ri);
+      let v_lda = lda_vxc(rhoi);
+      // Guard numerical finiteness & extreme edge spikes near r_min
+      vxc_val = select(v_lda, v_raw, abs(v_raw) < 1e8);
+    }
+    fxc_grid[i] = fxc_val;
+    vxc_grid[i] = vxc_val;
+    velec_grid[i] = vh_val + vxc_val;
+  }
+}
+`;
+
+export const RADIAL_KS_OBSERVABLES_WGSL = /* wgsl */ `
+struct KsParams {
+  n_points: u32,
+  use_pbe: u32,
+  atomic_z: f32,
+  dx: f32,
+  mixing: f32,
+  orbital_count: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+struct KsSummary {
+  integrated_electrons: f32,
+  e_hartree_double: f32,
+  e_xc_correction: f32,
+  scf_l1_delta: f32,
+};
+
+struct OrbitalMeta {
+  n_quantum: f32,
+  l_quantum: f32,
+  occupancy: f32,
+  energy_ha: f32,
+};
+
+struct SpinOrbitOut {
+  xi_ha: f32,
+  splitting_ha: f32,
+  energy_j_minus_ha: f32,
+  energy_j_plus_ha: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: KsParams;
+@group(0) @binding(1) var<storage, read> r_grid: array<f32>;
+@group(0) @binding(2) var<storage, read> orbitals_u: array<f32>;
+@group(0) @binding(3) var<storage, read> orbital_meta: array<OrbitalMeta>;
+@group(0) @binding(4) var<storage, read_write> rho_grid: array<f32>;
+@group(0) @binding(5) var<storage, read> vh_grid: array<f32>;
+@group(0) @binding(6) var<storage, read> vxc_fxc_velec: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> summary_out: array<KsSummary>;
+
+const FOUR_PI: f32 = 12.56637061435917295385;
+var<workgroup> sh_ne: array<f32, 256>;
+var<workgroup> sh_eh: array<f32, 256>;
+var<workgroup> sh_exc: array<f32, 256>;
+var<workgroup> sh_delta: array<f32, 256>;
+
+@compute @workgroup_size(256, 1, 1)
+fn ks_density_and_observables(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = lid.x;
+  let n = min(params.n_points, 256u);
+  let dx = params.dx;
+  let orb_count = params.orbital_count;
+
+  var ne_i: f32 = 0.0;
+  var eh_i: f32 = 0.0;
+  var exc_i: f32 = 0.0;
+  var delta_i: f32 = 0.0;
+
+  if (i < n) {
+    let ri = r_grid[i];
+    let inv_4pi_r2 = 1.0 / (FOUR_PI * ri * ri);
+    var rho_new: f32 = 0.0;
+    for (var s: u32 = 0u; s < orb_count; s = s + 1u) {
+      let occ = orbital_meta[s].occupancy;
+      if (occ <= 0.0) { continue; }
+      let u_val = orbitals_u[s * n + i];
+      rho_new = rho_new + occ * u_val * u_val * inv_4pi_r2;
+    }
+    let rho_old = rho_grid[i];
+    let dV = FOUR_PI * ri * ri * ri * dx;
+    delta_i = abs(rho_new - rho_old) * dV;
+    let rho_mixed = (1.0 - params.mixing) * rho_old + params.mixing * rho_new;
+    rho_grid[i] = rho_mixed;
+
+    let vh = vh_grid[i];
+    let aux = vxc_fxc_velec[i]; // x=vxc, y=fxc, z=velec
+    ne_i = rho_mixed * dV;
+    eh_i = 0.5 * rho_mixed * vh * dV;
+    exc_i = (aux.y - aux.x * rho_mixed) * dV;
+  }
+
+  sh_ne[i] = ne_i;
+  sh_eh[i] = eh_i;
+  sh_exc[i] = exc_i;
+  sh_delta[i] = delta_i;
+  workgroupBarrier();
+
+  for (var stride: u32 = 128u; stride > 0u; stride = stride >> 1u) {
+    if (i < stride) {
+      sh_ne[i] = sh_ne[i] + sh_ne[i + stride];
+      sh_eh[i] = sh_eh[i] + sh_eh[i + stride];
+      sh_exc[i] = sh_exc[i] + sh_exc[i + stride];
+      sh_delta[i] = sh_delta[i] + sh_delta[i + stride];
+    }
+    workgroupBarrier();
+  }
+
+  if (i == 0u) {
+    summary_out[0] = KsSummary(sh_ne[0], sh_eh[0], sh_exc[0], sh_delta[0]);
+  }
+}
+`;
+
+export const RADIAL_KS_SPIN_ORBIT_WGSL = /* wgsl */ `
+struct KsParams {
+  n_points: u32,
+  use_pbe: u32,
+  atomic_z: f32,
+  dx: f32,
+  mixing: f32,
+  orbital_count: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+struct OrbitalMeta {
+  n_quantum: f32,
+  l_quantum: f32,
+  occupancy: f32,
+  energy_ha: f32,
+};
+
+struct SpinOrbitOut {
+  xi_ha: f32,
+  splitting_ha: f32,
+  energy_j_minus_ha: f32,
+  energy_j_plus_ha: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: KsParams;
+@group(0) @binding(1) var<storage, read> r_grid: array<f32>;
+@group(0) @binding(2) var<storage, read> orbitals_u: array<f32>;
+@group(0) @binding(3) var<storage, read> orbital_meta: array<OrbitalMeta>;
+@group(0) @binding(4) var<storage, read> velec_grid: array<f32>;
+@group(0) @binding(5) var<storage, read_write> so_out: array<SpinOrbitOut>;
+
+const ALPHA_FINE: f32 = 7.2973525693e-3;
+var<workgroup> sh_xi: array<f32, 256>;
+
+@compute @workgroup_size(256, 1, 1)
+fn ks_spin_orbit_quadrature(
+  @builtin(workgroup_id) wg_id: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>
+) {
+  let s = wg_id.x;
+  let i = lid.x;
+  let n = min(params.n_points, 256u);
+  if (s >= params.orbital_count) { return; }
+
+  let orb_info = orbital_meta[s];
+  let l_val = orb_info.l_quantum;
+  var contrib: f32 = 0.0;
+  if (l_val >= 1.0 && i < n) {
+    let ri = r_grid[i];
+    let dx = params.dx;
+    let velec_i = velec_grid[i];
+    var velec_p: f32 = 0.0;
+    if (i > 0u && i + 1u < n) {
+      velec_p = (velec_grid[i + 1u] - velec_grid[i - 1u]) / (2.0 * dx * ri);
+    } else if (i == 0u && n > 2u) {
+      velec_p = (velec_grid[2u] - velec_grid[0u]) / (2.0 * dx * r_grid[1u]);
+    } else if (i + 1u == n && n > 2u) {
+      velec_p = (velec_grid[n - 1u] - velec_grid[n - 3u]) / (2.0 * dx * r_grid[n - 2u]);
+    }
+    let a2h = 0.5 * ALPHA_FINE * ALPHA_FINE;
+    let v_tot = -params.atomic_z / ri + velec_i;
+    let v_prime = params.atomic_z / (ri * ri) + velec_p;
+    let M = 1.0 + a2h * (orb_info.energy_ha - v_tot);
+    let u_val = orbitals_u[s * n + i];
+    contrib = a2h * (v_prime / (M * M)) * u_val * u_val * dx;
+  }
+
+  sh_xi[i] = contrib;
+  workgroupBarrier();
+  for (var stride: u32 = 128u; stride > 0u; stride = stride >> 1u) {
+    if (i < stride) {
+      sh_xi[i] = sh_xi[i] + sh_xi[i + stride];
+    }
+    workgroupBarrier();
+  }
+
+  if (i == 0u) {
+    let xi = select(0.0, sh_xi[0], l_val >= 1.0);
+    let shift_plus = select(0.0, 0.5 * l_val * xi, l_val >= 1.0);
+    let shift_minus = select(0.0, -0.5 * (l_val + 1.0) * xi, l_val >= 1.0);
+    so_out[s] = SpinOrbitOut(
+      xi,
+      select(0.0, (l_val + 0.5) * xi, l_val >= 1.0),
+      orb_info.energy_ha + shift_minus,
+      orb_info.energy_ha + shift_plus
+    );
+  }
+}
+`;
+
+function fnv1aHashString(text) {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b) >>> 0;
+  }
+  return `wgsl-fnv1a64:${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`;
+}
+
+export const RADIAL_KS_WEBGPU_PROGRAM_HASH = fnv1aHashString(
+  `${RADIAL_KS_POTENTIAL_WGSL}::${RADIAL_KS_OBSERVABLES_WGSL}::${RADIAL_KS_SPIN_ORBIT_WGSL}`
+);
+
+const ksPipelinesByDevice = new WeakMap();
+
+function getKsPipelines(device) {
+  let cached = ksPipelinesByDevice.get(device);
+  if (cached) return cached;
+
+  const potMod = device.createShaderModule({ label: 'ulg-ks-potential-wgsl', code: RADIAL_KS_POTENTIAL_WGSL });
+  const obsMod = device.createShaderModule({ label: 'ulg-ks-observables-wgsl', code: RADIAL_KS_OBSERVABLES_WGSL });
+  const soMod = device.createShaderModule({ label: 'ulg-ks-spinorbit-wgsl', code: RADIAL_KS_SPIN_ORBIT_WGSL });
+
+  const potBgl = device.createBindGroupLayout({
+    label: 'ulg-ks-pot-bgl',
+    entries: [
+      { binding: 0, visibility: 0x0004, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: 0x0004, buffer: { type: 'storage' } },
+      { binding: 3, visibility: 0x0004, buffer: { type: 'storage' } },
+      { binding: 4, visibility: 0x0004, buffer: { type: 'storage' } },
+      { binding: 5, visibility: 0x0004, buffer: { type: 'storage' } },
+      { binding: 6, visibility: 0x0004, buffer: { type: 'storage' } }
+    ]
+  });
+  const obsBgl = device.createBindGroupLayout({
+    label: 'ulg-ks-obs-bgl',
+    entries: [
+      { binding: 0, visibility: 0x0004, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 3, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 4, visibility: 0x0004, buffer: { type: 'storage' } },
+      { binding: 5, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 6, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 7, visibility: 0x0004, buffer: { type: 'storage' } }
+    ]
+  });
+  const soBgl = device.createBindGroupLayout({
+    label: 'ulg-ks-so-bgl',
+    entries: [
+      { binding: 0, visibility: 0x0004, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 3, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 4, visibility: 0x0004, buffer: { type: 'read-only-storage' } },
+      { binding: 5, visibility: 0x0004, buffer: { type: 'storage' } }
+    ]
+  });
+
+  cached = {
+    potPipeline: device.createComputePipeline({
+      label: 'ulg-ks-pot-pipe',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [potBgl] }),
+      compute: { module: potMod, entryPoint: 'ks_hartree_pbe_xc' }
+    }),
+    obsPipeline: device.createComputePipeline({
+      label: 'ulg-ks-obs-pipe',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [obsBgl] }),
+      compute: { module: obsMod, entryPoint: 'ks_density_and_observables' }
+    }),
+    soPipeline: device.createComputePipeline({
+      label: 'ulg-ks-so-pipe',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [soBgl] }),
+      compute: { module: soMod, entryPoint: 'ks_spin_orbit_quadrature' }
+    }),
+    potBgl,
+    obsBgl,
+    soBgl
+  };
+  ksPipelinesByDevice.set(device, cached);
+  return cached;
+}
+
+/**
+ * Evaluate spherical Hartree potential V_H(r), PBE/LDA XC potential v_xc(r)
+ * and energy density f_xc(r), and combined electronic potential V_elec(r)
+ * natively on WebGPU for a radial logarithmic grid (N <= 256).
+ */
+export async function evaluateRadialKohnShamPotentialsWebGpu(device, {
+  atomicNumberZ,
+  r,
+  rho,
+  dx,
+  functional = 'pbe'
+} = {}) {
+  if (!device || typeof device.createComputePipeline !== 'function') {
+    throw new TypeError('evaluateRadialKohnShamPotentialsWebGpu requires a valid WebGPU GPUDevice.');
+  }
+  const n = Math.min(RADIAL_KS_WEBGPU_GRID_N, r.length);
+  const usePbe = String(functional || 'pbe').toLowerCase() === 'pbe' ? 1 : 0;
+  const { potPipeline, potBgl } = getKsPipelines(device);
+
+  const paramsBuf = new ArrayBuffer(32);
+  const u32 = new Uint32Array(paramsBuf);
+  const f32 = new Float32Array(paramsBuf);
+  u32[0] = n;
+  u32[1] = usePbe;
+  f32[2] = atomicNumberZ;
+  f32[3] = dx;
+  f32[4] = 0.25;
+  u32[5] = 0;
+
+  const rF32 = new Float32Array(n);
+  const rhoF32 = new Float32Array(n);
+  for (let i = 0; i < n; i += 1) {
+    rF32[i] = r[i];
+    rhoF32[i] = rho[i];
+  }
+  const bytes = n * 4;
+
+  const uBuf = device.createBuffer({ size: 32, usage: GPU_BUF_UNIFORM | GPU_BUF_COPY_DST });
+  const rBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
+  const rhoBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
+  const vhBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const vxcBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const fxcBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const velecBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const readBuf = device.createBuffer({ size: bytes * 4, usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST });
+
+  try {
+    device.queue.writeBuffer(uBuf, 0, paramsBuf);
+    device.queue.writeBuffer(rBuf, 0, rF32);
+    device.queue.writeBuffer(rhoBuf, 0, rhoF32);
+
+    const bg = device.createBindGroup({
+      layout: potBgl,
+      entries: [
+        { binding: 0, resource: { buffer: uBuf } },
+        { binding: 1, resource: { buffer: rBuf } },
+        { binding: 2, resource: { buffer: rhoBuf } },
+        { binding: 3, resource: { buffer: vhBuf } },
+        { binding: 4, resource: { buffer: vxcBuf } },
+        { binding: 5, resource: { buffer: fxcBuf } },
+        { binding: 6, resource: { buffer: velecBuf } }
+      ]
+    });
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(potPipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(1, 1, 1);
+    pass.end();
+    enc.copyBufferToBuffer(vhBuf, 0, readBuf, 0, bytes);
+    enc.copyBufferToBuffer(vxcBuf, 0, readBuf, bytes, bytes);
+    enc.copyBufferToBuffer(fxcBuf, 0, readBuf, bytes * 2, bytes);
+    enc.copyBufferToBuffer(velecBuf, 0, readBuf, bytes * 3, bytes);
+    device.queue.submit([enc.finish()]);
+
+    await readBuf.mapAsync(GPU_MAP_READ);
+    const out = new Float32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+
+    return {
+      vH: out.slice(0, n),
+      vXC: out.slice(n, n * 2),
+      fxc: out.slice(n * 2, n * 3),
+      vElec: out.slice(n * 3, n * 4),
+      resolverStatus: 'webgpu-derived',
+      webgpuProgramHash: RADIAL_KS_WEBGPU_PROGRAM_HASH
+    };
+  } finally {
+    uBuf.destroy();
+    rBuf.destroy();
+    rhoBuf.destroy();
+    vhBuf.destroy();
+    vxcBuf.destroy();
+    fxcBuf.destroy();
+    velecBuf.destroy();
+    readBuf.destroy();
+  }
+}
+
+/**
+ * Self-consistent Koelling-Harmon relativistic atomic Kohn-Sham solver whose
+ * Hartree prefix/suffix integration, PBE/LDA XC potential & energy density,
+ * radial density accumulation, SCF mixing/residual quadrature, total-energy
+ * integration, and Koelling-Harmon spin-orbit couplings execute natively on
+ * WebGPU (with double-precision folded tridiagonal KH radial eigenstates).
+ */
+export async function solveAtomWebGpu(device, atomicNumberZ, {
+  functional = 'pbe',
+  spinOrbit = true,
+  configuration = null,
+  gridPointsN = RADIAL_KS_WEBGPU_GRID_N,
+  rMinBohr = 1e-5,
+  rMaxBohr = null,
+  mixing = 0.25,
+  maxScf = 80,
+  tol = 1e-4,
+  returnRadialDensity = true
+} = {}) {
+  if (!device || typeof device.createComputePipeline !== 'function') {
+    throw new TypeError('solveAtomWebGpu requires a valid WebGPU GPUDevice.');
+  }
+  const n = Math.min(RADIAL_KS_WEBGPU_GRID_N, Math.max(64, Math.floor(gridPointsN)));
+  const usePbe = String(functional || 'pbe').toLowerCase() === 'pbe' ? 1 : 0;
+  const rMax = rMaxBohr ?? Math.max(20, 60 / Math.sqrt(atomicNumberZ));
+  const xMin = Math.log(rMinBohr);
+  const dx = (Math.log(rMax) - xMin) / (n - 1);
+  const r = new Float64Array(n);
+  const rF32 = new Float32Array(n);
+  const rhoF32 = new Float32Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const ri = Math.exp(xMin + i * dx);
+    r[i] = ri;
+    rF32[i] = ri;
+    rhoF32[i] = atomicNumberZ * ((atomicNumberZ ** 3) / Math.PI) * Math.exp(-2 * atomicNumberZ * ri);
+  }
+
+  const cfg = configuration ?? electronConfiguration(atomicNumberZ);
+  const statesPerL = new Map();
+  for (const sub of cfg) statesPerL.set(sub.l, Math.max(statesPerL.get(sub.l) || 0, sub.n - sub.l));
+  const orbCount = cfg.length;
+
+  const { potPipeline, obsPipeline, soPipeline, potBgl, obsBgl, soBgl } = getKsPipelines(device);
+  const bytes = n * 4;
+
+  const paramsBuf = new ArrayBuffer(32);
+  const u32 = new Uint32Array(paramsBuf);
+  const f32 = new Float32Array(paramsBuf);
+  u32[0] = n;
+  u32[1] = usePbe;
+  f32[2] = atomicNumberZ;
+  f32[3] = dx;
+  f32[4] = mixing;
+  u32[5] = orbCount;
+
+  const uBuf = device.createBuffer({ size: 32, usage: GPU_BUF_UNIFORM | GPU_BUF_COPY_DST });
+  const rBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
+  const rhoBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST | GPU_BUF_COPY_SRC });
+  const vhBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const vxcBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const fxcBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const velecBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const auxBuf = device.createBuffer({ size: bytes * 4, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
+  const orbUBuf = device.createBuffer({ size: Math.max(1, orbCount) * bytes, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
+  const orbMetaBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST });
+  const summaryBuf = device.createBuffer({ size: 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+  const soBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
+
+  const potReadBuf = device.createBuffer({ size: bytes * 3, usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST });
+  const sumReadBuf = device.createBuffer({ size: 16, usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST });
+  const finalReadBuf = device.createBuffer({ size: bytes + Math.max(1, orbCount) * 16, usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST });
+
+  try {
+    device.queue.writeBuffer(uBuf, 0, paramsBuf);
+    device.queue.writeBuffer(rBuf, 0, rF32);
+    device.queue.writeBuffer(rhoBuf, 0, rhoF32);
+
+    const potBg = device.createBindGroup({
+      layout: potBgl,
+      entries: [
+        { binding: 0, resource: { buffer: uBuf } },
+        { binding: 1, resource: { buffer: rBuf } },
+        { binding: 2, resource: { buffer: rhoBuf } },
+        { binding: 3, resource: { buffer: vhBuf } },
+        { binding: 4, resource: { buffer: vxcBuf } },
+        { binding: 5, resource: { buffer: fxcBuf } },
+        { binding: 6, resource: { buffer: velecBuf } }
+      ]
+    });
+    const obsBg = device.createBindGroup({
+      layout: obsBgl,
+      entries: [
+        { binding: 0, resource: { buffer: uBuf } },
+        { binding: 1, resource: { buffer: rBuf } },
+        { binding: 2, resource: { buffer: orbUBuf } },
+        { binding: 3, resource: { buffer: orbMetaBuf } },
+        { binding: 4, resource: { buffer: rhoBuf } },
+        { binding: 5, resource: { buffer: vhBuf } },
+        { binding: 6, resource: { buffer: auxBuf } },
+        { binding: 7, resource: { buffer: summaryBuf } }
+      ]
+    });
+    const soBg = device.createBindGroup({
+      layout: soBgl,
+      entries: [
+        { binding: 0, resource: { buffer: uBuf } },
+        { binding: 1, resource: { buffer: rBuf } },
+        { binding: 2, resource: { buffer: orbUBuf } },
+        { binding: 3, resource: { buffer: orbMetaBuf } },
+        { binding: 4, resource: { buffer: velecBuf } },
+        { binding: 5, resource: { buffer: soBuf } }
+      ]
+    });
+
+    const prevEnergies = new Map();
+    const orbUHost = new Float32Array(orbCount * n);
+    const orbMetaHost = new Float32Array(orbCount * 4);
+    const auxHost = new Float32Array(n * 4);
+    const vElecF64 = new Float64Array(n);
+
+    let statesByL = new Map();
+    let scfIterations = 0;
+    let lastDelta = Infinity;
+    let summary = { integratedElectrons: 0, eHartreeDouble: 0, eXcCorrection: 0, scfL1Delta: 0 };
+
+    for (let scf = 0; scf < maxScf; scf += 1) {
+      scfIterations = scf + 1;
+      // 1. GPU Hartree + PBE/LDA XC potential pass
+      const enc1 = device.createCommandEncoder();
+      const pass1 = enc1.beginComputePass();
+      pass1.setPipeline(potPipeline);
+      pass1.setBindGroup(0, potBg);
+      pass1.dispatchWorkgroups(1, 1, 1);
+      pass1.end();
+      enc1.copyBufferToBuffer(vxcBuf, 0, potReadBuf, 0, bytes);
+      enc1.copyBufferToBuffer(fxcBuf, 0, potReadBuf, bytes, bytes);
+      enc1.copyBufferToBuffer(velecBuf, 0, potReadBuf, bytes * 2, bytes);
+      device.queue.submit([enc1.finish()]);
+
+      await potReadBuf.mapAsync(GPU_MAP_READ);
+      const potData = new Float32Array(potReadBuf.getMappedRange().slice(0));
+      potReadBuf.unmap();
+
+      for (let i = 0; i < n; i += 1) {
+        auxHost[i * 4 + 0] = potData[i];
+        auxHost[i * 4 + 1] = potData[n + i];
+        auxHost[i * 4 + 2] = potData[n * 2 + i];
+        auxHost[i * 4 + 3] = 0;
+        vElecF64[i] = potData[n * 2 + i];
+      }
+
+      // 2. Koelling-Harmon relativistic radial eigenstates
+      statesByL = new Map();
+      for (const [l, count] of statesPerL) {
+        const states = radialStatesKH(vElecF64, r, dx, l, count, atomicNumberZ, prevEnergies.get(l));
+        prevEnergies.set(l, states.map((s) => s.energyHa));
+        statesByL.set(l, states);
+      }
+
+      for (let s = 0; s < orbCount; s += 1) {
+        const sub = cfg[s];
+        const st = statesByL.get(sub.l)[sub.n - sub.l - 1];
+        orbMetaHost[s * 4 + 0] = sub.n;
+        orbMetaHost[s * 4 + 1] = sub.l;
+        orbMetaHost[s * 4 + 2] = sub.occupancy;
+        orbMetaHost[s * 4 + 3] = st.energyHa;
+        const base = s * n;
+        for (let i = 0; i < n; i += 1) orbUHost[base + i] = st.u[i];
+      }
+
+      // 3. GPU density accumulation + linear SCF mixing + energy/residual quadrature
+      device.queue.writeBuffer(auxBuf, 0, auxHost);
+      device.queue.writeBuffer(orbUBuf, 0, orbUHost);
+      device.queue.writeBuffer(orbMetaBuf, 0, orbMetaHost);
+
+      const enc2 = device.createCommandEncoder();
+      const pass2 = enc2.beginComputePass();
+      pass2.setPipeline(obsPipeline);
+      pass2.setBindGroup(0, obsBg);
+      pass2.dispatchWorkgroups(1, 1, 1);
+      pass2.end();
+      enc2.copyBufferToBuffer(summaryBuf, 0, sumReadBuf, 0, 16);
+      device.queue.submit([enc2.finish()]);
+
+      await sumReadBuf.mapAsync(GPU_MAP_READ);
+      const sumFloats = new Float32Array(sumReadBuf.getMappedRange().slice(0));
+      sumReadBuf.unmap();
+
+      summary = {
+        integratedElectrons: sumFloats[0],
+        eHartreeDouble: sumFloats[1],
+        eXcCorrection: sumFloats[2],
+        scfL1Delta: sumFloats[3]
+      };
+      lastDelta = summary.scfL1Delta;
+      if (lastDelta < tol && scf > 6) break;
+    }
+
+    // 4. Final GPU spin-orbit quadrature across all subshells in parallel
+    const enc3 = device.createCommandEncoder();
+    const pass3 = enc3.beginComputePass();
+    pass3.setPipeline(soPipeline);
+    pass3.setBindGroup(0, soBg);
+    pass3.dispatchWorkgroups(Math.max(1, orbCount), 1, 1);
+    pass3.end();
+    enc3.copyBufferToBuffer(rhoBuf, 0, finalReadBuf, 0, bytes);
+    enc3.copyBufferToBuffer(soBuf, 0, finalReadBuf, bytes, Math.max(1, orbCount) * 16);
+    device.queue.submit([enc3.finish()]);
+
+    await finalReadBuf.mapAsync(GPU_MAP_READ);
+    const finalFloats = new Float32Array(finalReadBuf.getMappedRange().slice(0));
+    finalReadBuf.unmap();
+
+    const finalRho = Array.from(finalFloats.slice(0, n));
+    const soData = finalFloats.slice(n);
+
+    let sumOcc = 0;
+    let electronCount = 0;
+    const orbitals = [];
+    for (let s = 0; s < orbCount; s += 1) {
+      const sub = cfg[s];
+      const st = statesByL.get(sub.l)[sub.n - sub.l - 1];
+      sumOcc += sub.occupancy * st.energyHa;
+      electronCount += sub.occupancy;
+      const orb = {
+        n: sub.n,
+        l: sub.l,
+        occupancy: sub.occupancy,
+        energyHa: st.energyHa
+      };
+      if (spinOrbit && sub.l >= 1) {
+        orb.spinOrbitXiHa = soData[s * 4 + 0];
+        orb.spinOrbitSplittingHa = soData[s * 4 + 1];
+        orb.energyJMinusHa = soData[s * 4 + 2];
+        orb.energyJPlusHa = soData[s * 4 + 3];
+      }
+      orbitals.push(orb);
+    }
+
+    const totalEnergyHa = sumOcc - summary.eHartreeDouble + summary.eXcCorrection;
+    return {
+      schema: RADIAL_KS_WEBGPU_SCHEMA,
+      symbol: symbolForZ(atomicNumberZ),
+      atomicNumberZ,
+      configuration: cfg,
+      functional: usePbe ? 'pbe' : 'lda',
+      relativisticMethod: spinOrbit ? 'koelling-harmon+spin-orbit' : 'koelling-harmon',
+      totalEnergyHa,
+      orbitals,
+      electronCount,
+      integratedElectrons: summary.integratedElectrons,
+      scfIterations,
+      scfL1Delta: lastDelta,
+      resolverStatus: 'webgpu-derived',
+      webgpuProgramHash: RADIAL_KS_WEBGPU_PROGRAM_HASH,
+      ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: finalRho, dx } } : {}),
+      validation: Object.freeze({
+        scientificValidation: false,
+        webgpuParity: false
+      })
+    };
+  } finally {
+    uBuf.destroy();
+    rBuf.destroy();
+    rhoBuf.destroy();
+    vhBuf.destroy();
+    vxcBuf.destroy();
+    fxcBuf.destroy();
+    velecBuf.destroy();
+    auxBuf.destroy();
+    orbUBuf.destroy();
+    orbMetaBuf.destroy();
+    summaryBuf.destroy();
+    soBuf.destroy();
+    potReadBuf.destroy();
+    sumReadBuf.destroy();
+    finalReadBuf.destroy();
+  }
+}

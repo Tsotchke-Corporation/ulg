@@ -1,11 +1,13 @@
 #!/bin/bash
 # Sequential A/B: burst off vs on (K=8) at 13.8k and 104k. Never concurrent.
-set -u
+set -euo pipefail
 OUT="${1:-/tmp/burst-ab-results.txt}"
-: > "$OUT"
+OUT_TMP="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "$OUT_TMP"' EXIT
+: > "$OUT_TMP"
 run() {
   local label="$1" extra="$2" window="$3"
-  echo "=== $label ===" >> "$OUT"
+  echo "=== $label ===" >> "$OUT_TMP"
   ULG_PROBE_SCENARIO=bulk-water ULG_PROBE_EXTRA="$extra" ULG_PROBE_WINDOW_MS="$window" \
     node scratch/census-probe.mjs 2>/dev/null | node -e "
 let s=''; process.stdin.on('data',(d)=>s+=d).on('end',()=>{
@@ -25,11 +27,12 @@ let s=''; process.stdin.on('data',(d)=>s+=d).on('end',()=>{
     }
     if (j.errors?.length) console.log('errors:', JSON.stringify(j.errors));
   } catch (e) { console.log('parse-failed', String(e).slice(0,150), s.slice(0,200)); }
-});" >> "$OUT"
+});" >> "$OUT_TMP"
 }
 run "13.8k baseline" "&basen=24" 40000
 run "13.8k burst K=8" "&basen=24&submitBurstSteps=8" 40000
 run "104k baseline" "&basen=47" 60000
 run "104k burst K=8" "&basen=47&submitBurstSteps=8" 60000
-echo "DONE" >> "$OUT"
+echo "DONE" >> "$OUT_TMP"
+mv -f "$OUT_TMP" "$OUT"
 cat "$OUT"

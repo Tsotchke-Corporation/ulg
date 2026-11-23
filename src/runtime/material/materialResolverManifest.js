@@ -2,6 +2,8 @@ export const MATERIAL_RESOLVER_MANIFEST_SCHEMA = 'peercompute.ulg.material-resol
 
 export const MATERIAL_RESOLVER_STATUS = Object.freeze({
   CPU_DERIVED: 'cpu-derived',
+  WEBGPU_DERIVED: 'webgpu-derived',
+  WEBGPU_DERIVED_WITH_CPU_FALLBACK: 'webgpu-derived-with-cpu-fallback',
   CPU_DERIVED_GPU_LOOKUP_CONSUMED: 'cpu-derived-gpu-lookup-consumed',
   CPU_BUILT_GPU_CONSUMED: 'cpu-built-gpu-consumed',
   MIXED_WEBGPU_RUNTIME_CPU_PROPERTY_DERIVED: 'mixed-webgpu-runtime-cpu-property-derived',
@@ -36,6 +38,7 @@ const resolverFamilies = [
       status: 'known-cpu-entrypoints',
       entrypoints: [
         { module: 'src/runtime/electronicStructure/radialKohnSham.js', exports: ['solveAtom', 'solveKohnShamAtomKH', 'radialStatesKH'] },
+        { module: 'src/runtime/electronicStructure/radialKohnShamWebGpu.js', exports: ['solveAtomWebGpu', 'evaluateRadialKohnShamPotentialsWebGpu', 'RADIAL_KS_WEBGPU_PROGRAM_HASH'] },
         { module: 'src/runtime/material/elementClosures.js', exports: ['deriveElementProperties', 'elementMaterialClosure'] },
         { module: 'src/runtime/material/opticalClosure.js', exports: ['relativisticInterbandOscillators', 'metalRelativisticColorSrgb'] }
       ]
@@ -52,10 +55,11 @@ const resolverFamilies = [
       'scfTolerance',
       'spinRelativisticFlags',
       'interbandModelParameters',
+      'webgpuProgramHash',
       'schemaVersion',
       'generatorFingerprint'
     ],
-    currentStatus: MATERIAL_RESOLVER_STATUS.CPU_DERIVED,
+    currentStatus: MATERIAL_RESOLVER_STATUS.WEBGPU_DERIVED_WITH_CPU_FALLBACK,
     validationFlags: validationFlags()
   },
   {
@@ -156,6 +160,7 @@ const resolverFamilies = [
       status: 'known-cpu-entrypoints',
       entrypoints: [
         { module: 'src/runtime/material/opticalClosure.js', exports: ['opticalRenderParams', 'metalRelativisticColorSrgb', 'waterDropletOpticalMicrophysics'] },
+        { module: 'src/runtime/material/opticalResolverWebGpu.js', exports: ['resolveOpticalBatchWebGpu', 'resolveMetalOpticalWebGpu', 'OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH'] },
         { module: 'src/runtime/material/opticalGpuBuffers.js', exports: ['buildOpticalGpuTable', 'runOpticalGpuLookupWithOptionalWebGpu'] }
       ]
     },
@@ -171,10 +176,11 @@ const resolverFamilies = [
       'spectralGridVersion',
       'microstructureSummaryHash',
       'electronicBandRowHash',
+      'webgpuProgramHash',
       'schemaVersion',
       'generatorFingerprint'
     ],
-    currentStatus: MATERIAL_RESOLVER_STATUS.CPU_DERIVED_GPU_LOOKUP_CONSUMED,
+    currentStatus: MATERIAL_RESOLVER_STATUS.WEBGPU_DERIVED_WITH_CPU_FALLBACK,
     validationFlags: validationFlags()
   },
   {

@@ -8,9 +8,24 @@ import {
   QUANTUM_DERIVATION_GENERATOR_FINGERPRINT,
   buildMaterialDerivationVisualizationBundle
 } from '../electronicStructure/quantumDerivationArtifacts.js';
+import {
+  RADIAL_KS_WEBGPU_PROGRAM_HASH,
+  solveAtomWebGpu
+} from '../electronicStructure/radialKohnShamWebGpu.js';
+import {
+  OPTICAL_RESOLVER_MODE_CHERENKOV,
+  OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
+  resolveMetalOpticalWebGpu,
+  resolveOpticalBatchWebGpu
+} from './opticalResolverWebGpu.js';
+import { evaluateCherenkovClosure } from './nuclearCherenkovClosure.js';
 import { MATERIAL_RESOLVER_MANIFEST_SCHEMA } from './materialResolverManifest.js';
 
 export const MATERIAL_RESOLVER_PIPELINE_SCHEMA = 'peercompute.ulg.material-resolver-pipeline.v1';
+
+export const MATERIAL_RESOLVER_DEFAULT_FINGERPRINT =
+  `${ELEMENT_CLOSURE_GENERATOR_FINGERPRINT}::${QUANTUM_DERIVATION_GENERATOR_FINGERPRINT}`
+  + `::${OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH}::${RADIAL_KS_WEBGPU_PROGRAM_HASH}`;
 
 function hashKey(parts) {
   const text = JSON.stringify(parts);
@@ -26,22 +41,31 @@ function hashKey(parts) {
 
 /**
  * Unified content-addressed, generator-fingerprint-guarded material resolver
- * pipeline for atomic, elemental, molecular, and quantum->A4 material closures.
+ * pipeline for atomic, elemental, optical, nuclear/Cherenkov, molecular, and
+ * quantum->A4 material closures.
  *
- * Prevents silent stale-cache reuse whenever physics solvers or relativistic
- * models change, and supports optional worker offloading without duplicating
- * authority paths.
+ * When supplied with a WebGPU `device`, runs native WGSL Drude-Lorentz/CIE
+ * optical derivation and WGSL radial Kohn-Sham Hartree/PBE-XC/spin-orbit passes
+ * reporting `resolverStatus: 'webgpu-derived'`. Falls back cleanly to worker
+ * or CPU derivation without duplicating authority paths.
  */
 export function createMaterialResolverPipeline({
-  generatorFingerprint = `${ELEMENT_CLOSURE_GENERATOR_FINGERPRINT}::${QUANTUM_DERIVATION_GENERATOR_FINGERPRINT}`,
+  generatorFingerprint = MATERIAL_RESOLVER_DEFAULT_FINGERPRINT,
   workerDispatch = null,
+  device = null,
   maxEntries = 256
 } = {}) {
   const entries = new Map();
   let activeFingerprint = String(generatorFingerprint);
+  let activeDevice = device || null;
   let hits = 0;
   let misses = 0;
+  let webgpuDerivations = 0;
   let staleEvictions = 0;
+
+  function setDevice(nextDevice) {
+    activeDevice = nextDevice || null;
+  }
 
   function pruneIfNeeded() {
     while (entries.size > maxEntries) {
@@ -89,6 +113,9 @@ export function createMaterialResolverPipeline({
     const includeGasPhase = options.includeGasPhase === true;
     const includeClosure = options.includeClosure !== false;
     const gridPointsN = options.gridPointsN ?? 500;
+    const gpuDevice = options.device !== undefined ? options.device : activeDevice;
+    const useWebGpu = Boolean(gpuDevice && typeof gpuDevice.createComputePipeline === 'function' && options.useWebGpu !== false);
+
     const cacheKey = hashKey([
       'element',
       activeFingerprint,
@@ -97,13 +124,15 @@ export function createMaterialResolverPipeline({
       scalarRelativistic,
       includeGasPhase,
       includeClosure,
-      gridPointsN
+      gridPointsN,
+      useWebGpu ? 'webgpu' : 'cpu'
     ]);
     const cached = lookup(cacheKey);
     if (cached) {
       return {
         ...cached.value,
         resolverStatus: 'cache-hit',
+        derivedBackend: cached.backend,
         cacheKey,
         generatorFingerprint: activeFingerprint
       };
@@ -112,7 +141,77 @@ export function createMaterialResolverPipeline({
     misses += 1;
     let derived;
     let backend = 'cpu-derived';
-    if (typeof workerDispatch === 'function') {
+    if (useWebGpu) {
+      const properties = deriveElementProperties(atomicNumberZ, {
+        ...options,
+        functional,
+        scalarRelativistic,
+        gridPointsN
+      });
+      const gpuAtom = await solveAtomWebGpu(gpuDevice, atomicNumberZ, {
+        functional,
+        spinOrbit: true,
+        gridPointsN: Math.min(256, gridPointsN),
+        maxScf: options.webgpuMaxScf ?? 64,
+        tol: options.webgpuTol ?? 5e-4,
+        returnRadialDensity: true
+      });
+      let gpuOptical = null;
+      if (properties.conductionElectronDensityPerM3 > 0) {
+        gpuOptical = await resolveMetalOpticalWebGpu(gpuDevice, {
+          atomicNumberZ,
+          conductionElectronDensityPerM3: properties.conductionElectronDensityPerM3,
+          interbandOscillators: properties.opticalInterbandOscillators || null,
+          interbandOptions: options.opticalInterbandOptions || {}
+        });
+      }
+      const enrichedProperties = {
+        ...properties,
+        ...(gpuOptical ? {
+          opticalColorSrgb: gpuOptical.baseColorSrgb,
+          webgpuOptical: gpuOptical
+        } : {}),
+        webgpuAtomicStructure: {
+          schema: gpuAtom.schema,
+          totalEnergyHa: gpuAtom.totalEnergyHa,
+          integratedElectrons: gpuAtom.integratedElectrons,
+          scfIterations: gpuAtom.scfIterations,
+          scfL1Delta: gpuAtom.scfL1Delta,
+          orbitals: gpuAtom.orbitals,
+          webgpuProgramHash: gpuAtom.webgpuProgramHash
+        },
+        webgpuDerived: true
+      };
+      const closure = includeClosure
+        ? elementMaterialClosure(atomicNumberZ, {
+          ...options,
+          functional,
+          scalarRelativistic,
+          includeGasPhase,
+          gridPointsN
+        })
+        : null;
+      if (closure && gpuOptical) {
+        closure.properties = {
+          ...closure.properties,
+          opticalColorSrgb: gpuOptical.baseColorSrgb,
+          webgpuOptical: gpuOptical,
+          webgpuDerived: true
+        };
+      }
+      derived = {
+        properties: enrichedProperties,
+        closure,
+        webgpuAtom: gpuAtom,
+        webgpuOptical: gpuOptical,
+        webgpuProgramHashes: Object.freeze({
+          optical: OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
+          radialKohnSham: RADIAL_KS_WEBGPU_PROGRAM_HASH
+        })
+      };
+      backend = 'webgpu-derived';
+      webgpuDerivations += 1;
+    } else if (typeof workerDispatch === 'function') {
       const workerResult = await workerDispatch({
         kind: 'material.resolve-element',
         atomicNumberZ,
@@ -147,7 +246,60 @@ export function createMaterialResolverPipeline({
     return {
       ...derived,
       resolverStatus: backend,
+      derivedBackend: backend,
       cacheKey,
+      generatorFingerprint: activeFingerprint
+    };
+  }
+
+  async function resolveOpticalBatch(requests = [], options = {}) {
+    const gpuDevice = options.device !== undefined ? options.device : activeDevice;
+    if (gpuDevice && typeof gpuDevice.createComputePipeline === 'function' && options.useWebGpu !== false) {
+      const batch = await resolveOpticalBatchWebGpu(gpuDevice, requests, {
+        keepResident: options.keepResident === true
+      });
+      webgpuDerivations += 1;
+      return {
+        ...batch,
+        generatorFingerprint: activeFingerprint
+      };
+    }
+    return {
+      schema: MATERIAL_RESOLVER_PIPELINE_SCHEMA,
+      resolverStatus: 'cpu-derived',
+      generatorFingerprint: activeFingerprint,
+      results: (requests || []).map((req) => (
+        req.mode === OPTICAL_RESOLVER_MODE_CHERENKOV
+          ? evaluateCherenkovClosure(req)
+          : { ...req, resolverStatus: 'cpu-derived' }
+      )),
+      residentBuffers: null
+    };
+  }
+
+  async function resolveCherenkov(params = {}, options = {}) {
+    const gpuDevice = options.device !== undefined ? options.device : activeDevice;
+    if (gpuDevice && typeof gpuDevice.createComputePipeline === 'function' && options.useWebGpu !== false) {
+      const batch = await resolveOpticalBatchWebGpu(gpuDevice, [{
+        mode: OPTICAL_RESOLVER_MODE_CHERENKOV,
+        beta: params.beta,
+        refractiveIndex: params.refractiveIndex ?? 1.333,
+        chargeZ: params.chargeZ ?? 1
+      }]);
+      webgpuDerivations += 1;
+      const row = batch.results[0];
+      return {
+        ...row,
+        srgb: row.baseColorSrgb,
+        beta: params.beta,
+        thresholdBeta: 1 / Math.max(1.0, params.refractiveIndex ?? 1.333),
+        resolverStatus: 'webgpu-derived',
+        generatorFingerprint: activeFingerprint
+      };
+    }
+    return {
+      ...evaluateCherenkovClosure(params),
+      resolverStatus: 'cpu-derived',
       generatorFingerprint: activeFingerprint
     };
   }
@@ -175,6 +327,7 @@ export function createMaterialResolverPipeline({
       return {
         ...cached.value,
         resolverStatus: 'cache-hit',
+        derivedBackend: cached.backend,
         cacheKey,
         generatorFingerprint: activeFingerprint
       };
@@ -221,6 +374,7 @@ export function createMaterialResolverPipeline({
     return {
       ...derived,
       resolverStatus: backend,
+      derivedBackend: backend,
       cacheKey,
       generatorFingerprint: activeFingerprint
     };
@@ -231,10 +385,16 @@ export function createMaterialResolverPipeline({
       schema: MATERIAL_RESOLVER_PIPELINE_SCHEMA,
       manifestSchema: MATERIAL_RESOLVER_MANIFEST_SCHEMA,
       generatorFingerprint: activeFingerprint,
+      webgpuDeviceAttached: Boolean(activeDevice),
+      webgpuProgramHashes: Object.freeze({
+        optical: OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
+        radialKohnSham: RADIAL_KS_WEBGPU_PROGRAM_HASH
+      }),
       entryCount: entries.size,
       maxEntries,
       hits,
       misses,
+      webgpuDerivations,
       staleEvictions
     });
   }
@@ -245,8 +405,11 @@ export function createMaterialResolverPipeline({
 
   return Object.freeze({
     schema: MATERIAL_RESOLVER_PIPELINE_SCHEMA,
+    setDevice,
     resolveElement,
     resolveMolecule,
+    resolveOpticalBatch,
+    resolveCherenkov,
     invalidateForFingerprint,
     stats,
     clear

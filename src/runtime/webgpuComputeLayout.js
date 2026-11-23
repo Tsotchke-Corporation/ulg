@@ -36,7 +36,10 @@ export function createCachedExplicitBindGroup(device, descriptor) {
   ) {
     return device.createBindGroup(descriptor);
   }
-  let key = descriptor?.label ? `${descriptor.label}#` : '';
+  const cacheLabel = descriptor?.label
+    ? String(descriptor.label).replace(/-\d+$/, '')
+    : '';
+  let key = cacheLabel ? `${cacheLabel}#` : '';
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
     const resource = entry?.resource;
@@ -846,11 +849,225 @@ function createCoalescingComputeCommandEncoder(
   return wrapper;
 }
 
+const VIRTUAL_BURST_COMPUTE_OPS = Symbol('ulg.virtualBurstComputeOps');
+
+function hasHeldBurstWork(record) {
+  return Boolean(record && (record.heldCommandBuffers.length > 0 || record.sharedBurstEncoderHasOps));
+}
+
+function ensureSharedBurstEncoder(device, record) {
+  if (record.sharedBurstEncoder) return record.sharedBurstEncoder;
+  const raw = record.realCreateCommandEncoder({ label: 'ulg-submit-burst-shared' });
+  record.sharedBurstEncoder = createCoalescingComputeCommandEncoder(raw, {
+    bindGroupBuffers: record.bindGroupBuffers
+  });
+  return record.sharedBurstEncoder;
+}
+
+function sealSharedBurstEncoder(record) {
+  if (!record.sharedBurstEncoder) return;
+  const enc = record.sharedBurstEncoder;
+  record.sharedBurstEncoder = null;
+  record.sharedBurstEncoderHasOps = false;
+  record.heldCommandBuffers.push(enc.finish());
+  record.heldSubmitStamp = record.createStamp;
+  if (record.heldCommandBuffers.length > record.stats.maxHeldCommandBuffers) {
+    record.stats.maxHeldCommandBuffers = record.heldCommandBuffers.length;
+  }
+}
+
+function replayVirtualBurstComputeOps(targetEncoder, ops) {
+  for (let i = 0; i < ops.length; i += 1) {
+    const op = ops[i];
+    if (op.kind === 'computePass') {
+      const pass = op.descriptor !== undefined
+        ? targetEncoder.beginComputePass(op.descriptor)
+        : targetEncoder.beginComputePass();
+      const passOps = op.ops;
+      for (let j = 0; j < passOps.length; j += 1) {
+        const p = passOps[j];
+        if (p.kind === 'pipeline') pass.setPipeline(p.pipeline);
+        else if (p.kind === 'bindGroup') {
+          if (p.extra) pass.setBindGroup(p.index, p.bindGroup, ...p.extra);
+          else pass.setBindGroup(p.index, p.bindGroup);
+        } else if (p.kind === 'dispatch') {
+          if (p.z !== undefined) pass.dispatchWorkgroups(p.x, p.y, p.z);
+          else if (p.y !== undefined) pass.dispatchWorkgroups(p.x, p.y);
+          else pass.dispatchWorkgroups(p.x);
+        } else if (p.kind === 'dispatchIndirect') {
+          pass.dispatchWorkgroupsIndirect(p.buffer, p.offset);
+        } else if (p.kind === 'pushDebugGroup') {
+          pass.pushDebugGroup?.(p.label);
+        } else if (p.kind === 'popDebugGroup') {
+          pass.popDebugGroup?.();
+        } else if (p.kind === 'insertDebugMarker') {
+          pass.insertDebugMarker?.(p.label);
+        }
+      }
+      pass.end();
+    } else if (op.kind === 'clearBuffer') {
+      targetEncoder.clearBuffer(op.buffer, ...op.rest);
+    } else if (op.kind === 'copyBufferToBuffer') {
+      targetEncoder.copyBufferToBuffer(
+        op.source,
+        op.sourceOffset,
+        op.destination,
+        op.destinationOffset,
+        op.size
+      );
+    } else if (op.kind === 'pushDebugGroup') {
+      targetEncoder.pushDebugGroup?.(...op.args);
+    } else if (op.kind === 'popDebugGroup') {
+      targetEncoder.popDebugGroup?.(...op.args);
+    } else if (op.kind === 'insertDebugMarker') {
+      targetEncoder.insertDebugMarker?.(...op.args);
+    }
+  }
+}
+
+function createVirtualBurstComputeEncoder(device, record, descriptor, markRenderPass) {
+  let ops = [];
+  let materialized = null;
+
+  const materialize = () => {
+    if (materialized) return materialized;
+    const raw = descriptor !== undefined
+      ? record.realCreateCommandEncoder(descriptor)
+      : record.realCreateCommandEncoder();
+    materialized = typeof raw?.beginComputePass === 'function'
+      ? createCoalescingComputeCommandEncoder(raw, {
+          onRenderPass: markRenderPass,
+          bindGroupBuffers: record.bindGroupBuffers
+        })
+      : raw;
+    if (ops.length > 0 && materialized) {
+      replayVirtualBurstComputeOps(materialized, ops);
+      ops = [];
+    }
+    return materialized;
+  };
+
+  return {
+    get label() {
+      return materialized ? materialized.label : (descriptor?.label ?? '');
+    },
+    beginComputePass(passDescriptor) {
+      if (materialized) return materialized.beginComputePass(passDescriptor);
+      if (passDescriptor?.timestampWrites) {
+        return materialize().beginComputePass(passDescriptor);
+      }
+      const passOps = [];
+      ops.push({ kind: 'computePass', descriptor: passDescriptor, ops: passOps });
+      return {
+        setPipeline(pipeline) {
+          passOps.push({ kind: 'pipeline', pipeline });
+        },
+        setBindGroup(index, bindGroup, ...rest) {
+          const extra = rest.length > 0
+            ? rest.map((arg) => (Array.isArray(arg) ? arg.slice() : ArrayBuffer.isView(arg) ? new Uint32Array(arg) : arg))
+            : null;
+          passOps.push({ kind: 'bindGroup', index, bindGroup, extra });
+        },
+        dispatchWorkgroups(x, y, z) {
+          passOps.push({ kind: 'dispatch', x, y, z });
+        },
+        dispatchWorkgroupsIndirect(buffer, offset) {
+          passOps.push({ kind: 'dispatchIndirect', buffer, offset });
+        },
+        pushDebugGroup(label) {
+          passOps.push({ kind: 'pushDebugGroup', label });
+        },
+        popDebugGroup() {
+          passOps.push({ kind: 'popDebugGroup' });
+        },
+        insertDebugMarker(label) {
+          passOps.push({ kind: 'insertDebugMarker', label });
+        },
+        end() {}
+      };
+    },
+    beginRenderPass(passDescriptor) {
+      return materialize().beginRenderPass(passDescriptor);
+    },
+    clearBuffer(buffer, ...rest) {
+      if (materialized) return materialized.clearBuffer(buffer, ...rest);
+      ops.push({ kind: 'clearBuffer', buffer, rest });
+    },
+    copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+      if (materialized) {
+        return materialized.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
+      }
+      ops.push({ kind: 'copyBufferToBuffer', source, sourceOffset, destination, destinationOffset, size });
+    },
+    copyBufferToTexture(...args) {
+      return materialize().copyBufferToTexture(...args);
+    },
+    copyTextureToBuffer(...args) {
+      return materialize().copyTextureToBuffer(...args);
+    },
+    copyTextureToTexture(...args) {
+      return materialize().copyTextureToTexture(...args);
+    },
+    resolveQuerySet(...args) {
+      return materialize().resolveQuerySet(...args);
+    },
+    writeTimestamp(...args) {
+      return materialize().writeTimestamp(...args);
+    },
+    pushDebugGroup(...args) {
+      if (materialized) return materialized.pushDebugGroup?.(...args);
+      ops.push({ kind: 'pushDebugGroup', args });
+    },
+    popDebugGroup(...args) {
+      if (materialized) return materialized.popDebugGroup?.(...args);
+      ops.push({ kind: 'popDebugGroup', args });
+    },
+    insertDebugMarker(...args) {
+      if (materialized) return materialized.insertDebugMarker?.(...args);
+      ops.push({ kind: 'insertDebugMarker', args });
+    },
+    finish(finishDescriptor) {
+      if (materialized) {
+        return finishDescriptor !== undefined
+          ? materialized.finish(finishDescriptor)
+          : materialized.finish();
+      }
+      const frozenOps = ops;
+      ops = [];
+      return Object.freeze({
+        [VIRTUAL_BURST_COMPUTE_OPS]: frozenOps,
+        label: finishDescriptor?.label ?? descriptor?.label ?? ''
+      });
+    }
+  };
+}
+
 function workerQueueSubmitBurstSealPooledCopies(device, record) {
   const pending = record.pooledPendingCopies;
   if (!pending || pending.length === 0) return;
   record.pooledPendingCopies = [];
   if (!record.pooledStagingBuffer || typeof device.createCommandEncoder !== 'function') {
+    return;
+  }
+  if (
+    record.open
+    && record.coalesceComputePassesEnabled
+    && record.pooledWriteThroughEnabled
+    && typeof record.realCreateCommandEncoder === 'function'
+  ) {
+    const shared = ensureSharedBurstEncoder(device, record);
+    for (let i = 0; i < pending.length; i += 1) {
+      const copy = pending[i];
+      shared.copyBufferToBuffer(
+        record.pooledStagingBuffer,
+        copy.sourceOffset,
+        copy.target,
+        copy.targetOffset,
+        copy.byteLength
+      );
+    }
+    record.sharedBurstEncoderHasOps = true;
+    record.heldSubmitStamp = record.createStamp;
     return;
   }
   const encoder = (record.realCreateCommandEncoder || device.createCommandEncoder).call(
@@ -1071,6 +1288,8 @@ export function armWorkerQueueSubmitBurst(device) {
     submitEpoch: 0,
     epochFence: null,
     heldCommandBuffers: [],
+    sharedBurstEncoder: null,
+    sharedBurstEncoderHasOps: false,
     postSubmitCleanups: [],
     deferredCleanups: [],
     bufferStamps: new WeakMap(),
@@ -1125,6 +1344,17 @@ export function armWorkerQueueSubmitBurst(device) {
       }
       let containsRenderPass = false;
       for (const commandBuffer of commandBuffers) {
+        const virtualOps = commandBuffer && typeof commandBuffer === 'object'
+          ? commandBuffer[VIRTUAL_BURST_COMPUTE_OPS]
+          : null;
+        if (Array.isArray(virtualOps)) {
+          if (virtualOps.length > 0) {
+            replayVirtualBurstComputeOps(ensureSharedBurstEncoder(device, record), virtualOps);
+            record.sharedBurstEncoderHasOps = true;
+          }
+          continue;
+        }
+        sealSharedBurstEncoder(record);
         if (commandBuffer && typeof commandBuffer === 'object'
             && record.renderPassCommandBuffers.has(commandBuffer)) {
           containsRenderPass = true;
@@ -1144,13 +1374,29 @@ export function armWorkerQueueSubmitBurst(device) {
       }
       return undefined;
     }
+    const materialized = [];
+    for (const commandBuffer of commandBuffers) {
+      const virtualOps = commandBuffer && typeof commandBuffer === 'object'
+        ? commandBuffer[VIRTUAL_BURST_COMPUTE_OPS]
+        : null;
+      if (Array.isArray(virtualOps)) {
+        if (virtualOps.length > 0 && record.realCreateCommandEncoder) {
+          const raw = record.realCreateCommandEncoder({ label: commandBuffer.label || 'ulg-virtual-fallback' });
+          const enc = createCoalescingComputeCommandEncoder(raw, { bindGroupBuffers: record.bindGroupBuffers });
+          replayVirtualBurstComputeOps(enc, virtualOps);
+          materialized.push(enc.finish());
+        }
+      } else {
+        materialized.push(commandBuffer);
+      }
+    }
     record.stats.directSubmitTotal += 1;
     bumpWorkerQueueSubmitEpoch(record);
-    return record.realSubmit(commandBuffers);
+    return record.realSubmit(materialized);
   };
   if (record.realWriteBuffer) {
     queue.writeBuffer = (buffer, bufferOffset, data, dataOffset, size) => {
-      if (record.open && record.heldCommandBuffers.length > 0) {
+      if (record.open && hasHeldBurstWork(record)) {
         const stamp = record.bufferStamps.get(buffer);
         if (!(typeof stamp === 'number' && stamp > record.heldSubmitStamp)) {
           // The target buffer may be referenced by a held command buffer, so
@@ -1208,7 +1454,7 @@ export function armWorkerQueueSubmitBurst(device) {
   }
   if (record.realWriteTexture) {
     queue.writeTexture = (...writeArgs) => {
-      if (record.open && record.heldCommandBuffers.length > 0) {
+      if (record.open && hasHeldBurstWork(record)) {
         record.stats.staleWriteFlushCount += 1;
         flushWorkerQueueSubmitBurst(device, 'write-texture');
       }
@@ -1218,7 +1464,7 @@ export function armWorkerQueueSubmitBurst(device) {
   }
   if (record.realOnSubmittedWorkDone) {
     queue.onSubmittedWorkDone = () => {
-      if (record.open && record.heldCommandBuffers.length > 0) {
+      if (record.open && hasHeldBurstWork(record)) {
         record.stats.fenceFlushCount += 1;
         flushWorkerQueueSubmitBurst(device, 'fence-request');
       }
@@ -1241,7 +1487,7 @@ export function armWorkerQueueSubmitBurst(device) {
         const confirmedCleanup = confirmedCleanupDeviceStates.get(device);
         if (
           record.open
-          && record.heldCommandBuffers.length > 0
+          && hasHeldBurstWork(record)
           && confirmedCleanup?.lost !== true
           && !(confirmedCleanup?.cleanupDepth > 0)
           && !(typeof stamp === 'number' && stamp > record.heldSubmitStamp)
@@ -1265,7 +1511,7 @@ export function armWorkerQueueSubmitBurst(device) {
     if (typeof buffer?.mapAsync === 'function') {
       const realMapAsync = buffer.mapAsync.bind(buffer);
       buffer.mapAsync = (...mapArgs) => {
-        if (record.open && record.heldCommandBuffers.length > 0) {
+        if (record.open && hasHeldBurstWork(record)) {
           flushWorkerQueueSubmitBurst(device, 'map-async');
         }
         return realMapAsync(...mapArgs);
@@ -1288,7 +1534,7 @@ export function armWorkerQueueSubmitBurst(device) {
           const confirmedCleanup = confirmedCleanupDeviceStates.get(device);
           if (
             record.open
-            && record.heldCommandBuffers.length > 0
+            && hasHeldBurstWork(record)
             && confirmedCleanup?.lost !== true
             && !(confirmedCleanup?.cleanupDepth > 0)
             && !(typeof stamp === 'number' && stamp > record.heldSubmitStamp)
@@ -1325,15 +1571,22 @@ export function armWorkerQueueSubmitBurst(device) {
   }
   if (record.realCreateCommandEncoder) {
     device.createCommandEncoder = (descriptor) => {
-      const raw = descriptor !== undefined
-        ? record.realCreateCommandEncoder(descriptor)
-        : record.realCreateCommandEncoder();
-      if (!record.open || !raw) return raw;
       const markRenderPass = (commandBuffer) => {
         if (commandBuffer && typeof commandBuffer === 'object') {
           record.renderPassCommandBuffers.add(commandBuffer);
         }
       };
+      if (
+        record.open
+        && record.coalesceComputePassesEnabled
+        && record.pooledWriteThroughEnabled
+      ) {
+        return createVirtualBurstComputeEncoder(device, record, descriptor, markRenderPass);
+      }
+      const raw = descriptor !== undefined
+        ? record.realCreateCommandEncoder(descriptor)
+        : record.realCreateCommandEncoder();
+      if (!record.open || !raw) return raw;
       if (
         record.coalesceComputePassesEnabled
         && typeof raw.beginComputePass === 'function'
@@ -1418,6 +1671,7 @@ export function flushWorkerQueueSubmitBurst(device, reason = 'explicit') {
   if (record.pooledPendingCopies.length > 0) {
     workerQueueSubmitBurstSealPooledCopies(device, record);
   }
+  sealSharedBurstEncoder(record);
   const pooledUploadBytes = record.pooledStagingCursor;
   const pooledStagingBuffer = record.pooledStagingBuffer;
   const pooledStagingBytes = record.pooledStagingBytes;

@@ -194,7 +194,7 @@ import {
   requestOpticalGpuDevice
 } from '../material/opticalGpuBuffers.js';
 import { createSphDeviceLossRelay } from './sphDeviceLossRelay.js';
-import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, releaseOrDestroyQueueOrderedPooledBuffer, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
+import { acquireQueueOrderedPooledBuffer, computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup, deferConfirmedSubmittedWorkCleanup, registerQueueOrderedPooledBufferReturn, releaseOrDestroyQueueOrderedPooledBuffer, releaseQueueOrderedPooledBuffer } from '../webgpuComputeLayout.js';
 import {
   createSphGpuTimestampProfiler,
   encodeSphGpuTimestampMarkerPass
@@ -14608,9 +14608,36 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
   if (exactSequence) exactSequence.count = count;
   const own = buffer => { if (exactSequence && buffer) exactSequence.buffers.add(buffer); return buffer; };
-  const createSequenceBuffer = descriptor => own(device.createBuffer(descriptor));
+  const poolSequenceTempBuffers = Boolean(
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && typeof device.queue?.onSubmittedWorkDone === 'function'
+  );
+  const createSequenceBuffer = (descriptor, { pool = true } = {}) => {
+    const size = Math.max(4, descriptor?.size ?? 0);
+    const usage = descriptor?.usage ?? 0;
+    const label = descriptor?.label;
+    if (pool && poolSequenceTempBuffers && label) {
+      const buffer = acquireQueueOrderedPooledBuffer(device, {
+        bucketKey: label,
+        label,
+        size,
+        usage
+      });
+      registerQueueOrderedPooledBufferReturn(buffer, device, {
+        bucketKey: label,
+        size,
+        usage
+      });
+      return own(buffer);
+    }
+    return own(device.createBuffer(descriptor));
+  };
   const writeSequenceBuffer = (ownerDevice, label, data, usage) => {
-    const buffer = own(ownerDevice.createBuffer({ label, size: Math.max(4, data?.byteLength ?? 0), usage }));
+    const size = Math.max(4, data?.byteLength ?? 0);
+    const buffer = ownerDevice === device
+      ? createSequenceBuffer({ label, size, usage }, { pool: true })
+      : own(ownerDevice.createBuffer({ label, size, usage }));
     if (data?.byteLength > 0) ownerDevice.queue.writeBuffer(buffer, 0, data);
     return buffer;
   };
@@ -14939,24 +14966,24 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device),
+    }, { pool: !exactSequence }), device),
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
       size: Math.max(4, stateByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device)
+    }, { pool: !exactSequence }), device)
   ];
   const mechanicsPingBuffers = [
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device),
+    }, { pool: !exactSequence }), device),
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
       size: Math.max(4, mechanicsByteLength),
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-    }), device)
+    }, { pool: !exactSequence }), device)
   ];
   const p2gParamsBuffer = writeSequenceBuffer(
     device,
@@ -15300,7 +15327,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     // so this bind group was identical on every iteration. Building it per
     // substep cost `count` driver-validated createBindGroup calls per sequence
     // (256 for a default batch) to produce the same object each time.
-    const gridUpdateBindGroup = device.createBindGroup({
+    const gridUpdateBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-fused-sequence-grid-update',
       layout: gridUpdateBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: gridBuffer } },
@@ -15309,30 +15337,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         { binding: 3, resource: { buffer: pressureRowsBuffer } }
       ]
     });
-    // Bind groups below are rebuilt every substep, but their buffer sets take
-    // only a handful of distinct values: the three "current" buffers rotate
-    // through the ping-pong pair, plus the substitutions the thermal and
-    // mechanics-refresh stages make mid-loop. Memoise on the identity of the
-    // referenced buffers, NOT on `pingIndex` -- a parity key would be wrong,
-    // because those stage substitutions do not follow parity.
-    const bindGroupMemo = [];
-    const memoizedBindGroup = (layout, buffers, buildEntries) => {
-      for (const entry of bindGroupMemo) {
-        if (entry.layout !== layout || entry.buffers.length !== buffers.length) continue;
-        let same = true;
-        for (let i = 0; i < buffers.length; i += 1) {
-          if (entry.buffers[i] !== buffers[i]) { same = false; break; }
-        }
-        if (same) return entry.bindGroup;
-      }
-      const bindGroup = device.createBindGroup({ layout, entries: buildEntries() });
-      // Bounded so an unexpected rotation pattern degrades to the old
-      // behaviour rather than growing a cache without limit.
-      if (bindGroupMemo.length < 32) {
-        bindGroupMemo.push({ layout, buffers: buffers.slice(), bindGroup });
-      }
-      return bindGroup;
-    };
+    const memoizedBindGroup = (layout, _buffers, buildEntries) => (
+      createCachedExplicitBindGroup(device, {
+        label: 'ulg-mls-mpm-fused-sequence-step',
+        layout,
+        entries: buildEntries()
+      })
+    );
     for (let index = 0; index < count; index += 1) {
       if (index === count - 1) {
         finalSourceStateBuffer = currentStateBuffer;
@@ -15839,7 +15850,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         label: 'ulg-mls-mpm-fused-sequence-exact-terminal-thermo',
         size: sphParticleUpload.thermoBufferByteLength,
         usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-      }), device);
+      }, { pool: false }), device);
       encoder.copyBufferToBuffer(currentThermoBuffer, 0, exactTerminalThermoCopy, 0,
         sphParticleUpload.thermoBufferByteLength);
       currentThermoBuffer = exactTerminalThermoCopy;

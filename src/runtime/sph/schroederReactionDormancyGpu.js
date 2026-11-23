@@ -1,4 +1,4 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 // G4 reaction node scope (plan/todo/g4-dynamic-laws-proposal.md): an exact
 // per-source activation predicate for canonical reaction discovery
@@ -272,18 +272,17 @@ export function createSchroederReactionDormancyStage({ device, particleCount, bo
         device.queue.writeBuffer(params, 0, words);
       }
       const boundUncertainty = uncertaintyBuffer ?? uncertaintyPlaceholder;
-      if (!group || groupKey?.[0] !== stateBuffer || groupKey[1] !== thermoBuffer || groupKey[2] !== reactionRecordBuffer
-        || groupKey[3] !== proposalBuffer || groupKey[4] !== boundUncertainty) {
-        group = device.createBindGroup({ layout: pipelines.reset_cells.bindGroupLayout,
-          entries: [
-            ...[params, stateBuffer, thermoBuffer, reactionRecordBuffer, cellWords, dormantBuffer, countBuffer]
-              .map((buffer, binding) => ({ binding, resource: { buffer } })),
-            { binding: 7, resource: { buffer: proposalBuffer, offset: 0, size: proposalByteLength ?? proposalBuffer.size } },
-            { binding: 8, resource: { buffer: activeIndicesBuffer } },
-            { binding: 9, resource: { buffer: boundUncertainty } }
-          ] });
-        groupKey = [stateBuffer, thermoBuffer, reactionRecordBuffer, proposalBuffer, boundUncertainty];
-      }
+      const group = createCachedExplicitBindGroup(device, {
+        label: 'ulg-reaction-dormancy-bg',
+        layout: pipelines.reset_cells.bindGroupLayout,
+        entries: [
+          ...[params, stateBuffer, thermoBuffer, reactionRecordBuffer, cellWords, dormantBuffer, countBuffer]
+            .map((buffer, binding) => ({ binding, resource: { buffer } })),
+          { binding: 7, resource: { buffer: proposalBuffer, offset: 0, size: proposalByteLength ?? proposalBuffer.size } },
+          { binding: 8, resource: { buffer: activeIndicesBuffer } },
+          { binding: 9, resource: { buffer: boundUncertainty } }
+        ]
+      });
       const pass = encoder.beginComputePass({ label: 'ulg-reaction-dormancy' });
       pass.setBindGroup(0, group);
       for (const [entryPoint, groupsCount] of [

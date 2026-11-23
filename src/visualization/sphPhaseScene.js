@@ -118,6 +118,7 @@ import {
   createSchroederTargetScheduleConfiguration,
   createSchroederTargetScheduleProviderAuthority,
   createSchroederWorkerHierarchyConfig,
+  WORKER_RESIDENT_STEP_OPTION_FIELDS,
   createSchroederWorkerResidentStepOptions,
   estimateSchroederWorkerLaneSeedUploadBytes,
   runSchroederWorkerLaneScheduleWithAuthority,
@@ -40769,6 +40770,88 @@ fn main(
               computeManager,
               residentStateManager
             });
+          const resolveCachedWorkerResidentStepOptions = (input, factory) => {
+            const ignoredNestedGpuKeys = new Set([
+              'thermalResponseGraphUpload',
+              'mechanicsMaterialPhaseUpload'
+            ]);
+            const shallowWorkerOptionEqual = (left, right, depth = 0) => {
+              if (Object.is(left, right)) return true;
+              if (left == null || right == null) return false;
+              if (typeof left !== 'object' || typeof right !== 'object') return false;
+              if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) return false;
+              if (depth >= 8) return false;
+              if (Array.isArray(left) || Array.isArray(right)) {
+                if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+                  return false;
+                }
+                for (let i = 0; i < left.length; i += 1) {
+                  if (!shallowWorkerOptionEqual(left[i], right[i], depth + 1)) return false;
+                }
+                return true;
+              }
+              const leftProto = Object.getPrototypeOf(left);
+              const rightProto = Object.getPrototypeOf(right);
+              if (
+                (leftProto !== Object.prototype && leftProto !== null)
+                || (rightProto !== Object.prototype && rightProto !== null)
+              ) {
+                return false;
+              }
+              const leftKeys = Object.keys(left).filter((k) => !ignoredNestedGpuKeys.has(k));
+              const rightKeys = Object.keys(right).filter((k) => !ignoredNestedGpuKeys.has(k));
+              if (leftKeys.length !== rightKeys.length) return false;
+              for (let i = 0; i < leftKeys.length; i += 1) {
+                const key = leftKeys[i];
+                if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+                if (!shallowWorkerOptionEqual(left[key], right[key], depth + 1)) return false;
+              }
+              return true;
+            };
+            const snapshotOptionField = (value, depth = 0) => {
+              if (value == null || typeof value !== 'object' || ArrayBuffer.isView(value) || depth >= 8) {
+                return value;
+              }
+              if (Array.isArray(value)) {
+                return value.map((entry) => snapshotOptionField(entry, depth + 1));
+              }
+              const proto = Object.getPrototypeOf(value);
+              if (proto !== Object.prototype && proto !== null) return value;
+              const copy = {};
+              for (const [k, v] of Object.entries(value)) {
+                if (ignoredNestedGpuKeys.has(k)) continue;
+                copy[k] = snapshotOptionField(v, depth + 1);
+              }
+              return copy;
+            };
+            const prior = workerSchroederLaneState?.cachedWorkerResidentStepOptionsEntry ?? null;
+            if (
+              prior
+              && !workerSchroederLaneState.poisoned
+              && workerSchroederLaneState.configurationSignature === workerLaneConfigurationSignature
+              && WORKER_RESIDENT_STEP_OPTION_FIELDS.every((field) =>
+                shallowWorkerOptionEqual(
+                  input[field],
+                  prior.snapshot[field],
+                  0
+                )
+              )
+            ) {
+              return prior.cloned;
+            }
+            const cloned = factory();
+            const snapshot = {};
+            for (const field of WORKER_RESIDENT_STEP_OPTION_FIELDS) {
+              snapshot[field] = snapshotOptionField(input[field], 0);
+            }
+            if (workerSchroederLaneState && !workerSchroederLaneState.poisoned) {
+              workerSchroederLaneState.cachedWorkerResidentStepOptionsEntry = {
+                snapshot,
+                cloned
+              };
+            }
+            return cloned;
+          };
           const workerLaneScheduleArgs = {
             configurationSignature: workerLaneConfigurationSignature,
             stepCount: normalizedStepCount,
@@ -40802,12 +40885,18 @@ fn main(
             spatialKeyChurnProfileRequested:
               requestedSchroederSpatialKeyChurnProfile,
             hierarchyConfig: requestedSchroederWorkerHierarchyConfig,
-            residentStepOptions:
-              createSchroederWorkerResidentStepOptions({
+            residentStepOptions: resolveCachedWorkerResidentStepOptions(
+              {
                 ...residentStepsOptions,
                 reactionActivationWatchTable:
                   effectiveReactionActivationWatchTable
-              }),
+              },
+              () => createSchroederWorkerResidentStepOptions({
+                ...residentStepsOptions,
+                reactionActivationWatchTable:
+                  effectiveReactionActivationWatchTable
+              })
+            ),
             dynamicReactionRoutingAllowed:
               authoritativeDynamicReactionRouting,
             requestedReadbackMode,
@@ -52758,6 +52847,8 @@ fn main(
     };
   }
 
+  let cachedWorkerOffscreenRenderTableState = null;
+
   function workerOffscreenRetainedStageOutputRenderRequest({
     stageId,
     laneId,
@@ -52790,41 +52881,76 @@ fn main(
     );
     const stateStrideFloats = Math.max(1, Math.floor(Number(sphParticleState?.stateStrideFloats) || 8));
     const thermoStrideFloats = Math.max(12, Math.floor(Number(sphParticleState?.thermoStrideFloats) || 12));
-    const materialColorRows = workerResidentParticleStateProducerColorRows(null, {
-      sphParticleState,
-      materialProperties: currentMaterialProperties,
-      reactionTable: sphReactionTable
-    });
     const workerOwnedIsosurfaceBatches =
       stageId === 'schroederSameLevelMechanics'
       && workerLaneNativeSurfacePresentationRequested
       && Array.isArray(sphResidentRenderSurfaceState?.fieldBatches)
         ? sphResidentRenderSurfaceState.fieldBatches
         : [];
-    const workerOwnedIsosurfaceSurfaceTable =
-      workerOwnedIsosurfaceBatches.length > 0
-        ? createRenderFieldSurfaceTableForBatches(
-            workerOwnedIsosurfaceBatches,
-            {
-              maxResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
-              minResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
-            }
+    const renderTableCacheHit = Boolean(
+      cachedWorkerOffscreenRenderTableState
+      && cachedWorkerOffscreenRenderTableState.sphParticleState === sphParticleState
+      && cachedWorkerOffscreenRenderTableState.materialProperties === currentMaterialProperties
+      && cachedWorkerOffscreenRenderTableState.reactionTable === sphReactionTable
+      && cachedWorkerOffscreenRenderTableState.batches === workerOwnedIsosurfaceBatches
+      && cachedWorkerOffscreenRenderTableState.batchRefs.length === workerOwnedIsosurfaceBatches.length
+      && cachedWorkerOffscreenRenderTableState.batchRefs.every(
+        (batch, idx) => batch === workerOwnedIsosurfaceBatches[idx]
+      )
+      && cachedWorkerOffscreenRenderTableState.fieldResolution
+        === SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
+    );
+    let materialColorRows;
+    let workerOwnedIsosurfaceSurfaceTable;
+    let workerOwnedIsosurfaceBudget;
+    if (renderTableCacheHit) {
+      materialColorRows = cachedWorkerOffscreenRenderTableState.materialColorRows;
+      workerOwnedIsosurfaceSurfaceTable =
+        cachedWorkerOffscreenRenderTableState.workerOwnedIsosurfaceSurfaceTable;
+      workerOwnedIsosurfaceBudget =
+        cachedWorkerOffscreenRenderTableState.workerOwnedIsosurfaceBudget;
+    } else {
+      materialColorRows = workerResidentParticleStateProducerColorRows(null, {
+        sphParticleState,
+        materialProperties: currentMaterialProperties,
+        reactionTable: sphReactionTable
+      });
+      workerOwnedIsosurfaceSurfaceTable =
+        workerOwnedIsosurfaceBatches.length > 0
+          ? createRenderFieldSurfaceTableForBatches(
+              workerOwnedIsosurfaceBatches,
+              {
+                maxResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
+                minResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION
+              }
+            )
+          : null;
+      workerOwnedIsosurfaceBudget = workerOwnedIsosurfaceSurfaceTable
+        ? Math.max(
+            3,
+            Math.floor(
+              Math.min(
+                nativeMarchingCubesVertexRowsBudgetPerSurface(
+                  workerOwnedIsosurfaceSurfaceTable.surfaceCount
+                ),
+                SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
+                  * (SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION - 1) ** 3
+              ) / 3
+            ) * 3
           )
-        : null;
-    const workerOwnedIsosurfaceBudget = workerOwnedIsosurfaceSurfaceTable
-      ? Math.max(
-          3,
-          Math.floor(
-            Math.min(
-              nativeMarchingCubesVertexRowsBudgetPerSurface(
-                workerOwnedIsosurfaceSurfaceTable.surfaceCount
-              ),
-              SPH_NATIVE_MARCHING_CUBES_MAX_VERTICES_PER_VOXEL
-                * (SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION - 1) ** 3
-            ) / 3
-          ) * 3
-        )
-      : 0;
+        : 0;
+      cachedWorkerOffscreenRenderTableState = {
+        sphParticleState,
+        materialProperties: currentMaterialProperties,
+        reactionTable: sphReactionTable,
+        batches: workerOwnedIsosurfaceBatches,
+        batchRefs: workerOwnedIsosurfaceBatches.slice(),
+        fieldResolution: SPH_WORKER_OWNED_ISOSURFACE_FIELD_RESOLUTION,
+        materialColorRows,
+        workerOwnedIsosurfaceSurfaceTable,
+        workerOwnedIsosurfaceBudget
+      };
+    }
     return {
       schema: 'peercompute.ulg.presentation-worker-retained-stage-output-render-request.v0',
       enabled: true,
@@ -53901,11 +54027,27 @@ fn main(
         : {}),
       chartId: 0
     };
-    const targetScheduleProviderAuthority =
-      createSchroederTargetScheduleProviderAuthority({
-        kind: 'worker-lane-assignment-only',
-        classifierOptions: laneContinuationClassifierOptions
-      });
+    const laneContinuationClassifierKey = [
+      workerHierarchyConfig.baseGridSpacingM ?? '',
+      workerHierarchyConfig.minLevel ?? '',
+      workerHierarchyConfig.maxLevel ?? '',
+      0
+    ].join('|');
+    const targetScheduleProviderAuthority = (
+      laneState.cachedTargetScheduleProviderAuthority?.key === laneContinuationClassifierKey
+    )
+      ? laneState.cachedTargetScheduleProviderAuthority.value
+      : (() => {
+          const built = createSchroederTargetScheduleProviderAuthority({
+            kind: 'worker-lane-assignment-only',
+            classifierOptions: laneContinuationClassifierOptions
+          });
+          laneState.cachedTargetScheduleProviderAuthority = {
+            key: laneContinuationClassifierKey,
+            value: built
+          };
+          return built;
+        })();
     workerLanePageTiming.targetProviderAuthorityReadyAtMs = nowMs();
     const targetScheduleEpochOptions = {
       hierarchyConfig: workerHierarchyConfig,
@@ -53989,20 +54131,41 @@ fn main(
             residentStepOptions: options
           })
       });
-    const dormantResidentStepOptions = requestedDynamicReactionRoutingAllowed
-      ? createParticleGasSealedResidentStepOptions({
-          ...residentStepOptions,
-          reactionTable: null,
-          reactionActivationWatchTable: dormantReactionCatalog
-        })
-      : residentStepOptions;
-    const activeResidentStepOptions = requestedDynamicReactionRoutingAllowed
-      ? createParticleGasSealedResidentStepOptions({
-          ...residentStepOptions,
-          reactionTable: dormantReactionCatalog,
-          reactionActivationWatchTable: null
-        })
-      : residentStepOptions;
+    const optionVariantCacheHit = Boolean(
+      laneState.cachedResidentStepOptionVariants
+      && laneState.cachedResidentStepOptionVariants.residentStepOptions === residentStepOptions
+      && laneState.cachedResidentStepOptionVariants.requestedDynamicReactionRoutingAllowed
+        === requestedDynamicReactionRoutingAllowed
+      && laneState.cachedResidentStepOptionVariants.particleGasLedgerActionableLatch
+        === laneState.particleGasLedgerActionableLatch
+    );
+    const dormantResidentStepOptions = optionVariantCacheHit
+      ? laneState.cachedResidentStepOptionVariants.dormantResidentStepOptions
+      : (requestedDynamicReactionRoutingAllowed
+          ? createParticleGasSealedResidentStepOptions({
+              ...residentStepOptions,
+              reactionTable: null,
+              reactionActivationWatchTable: dormantReactionCatalog
+            })
+          : residentStepOptions);
+    const activeResidentStepOptions = optionVariantCacheHit
+      ? laneState.cachedResidentStepOptionVariants.activeResidentStepOptions
+      : (requestedDynamicReactionRoutingAllowed
+          ? createParticleGasSealedResidentStepOptions({
+              ...residentStepOptions,
+              reactionTable: dormantReactionCatalog,
+              reactionActivationWatchTable: null
+            })
+          : residentStepOptions);
+    if (!optionVariantCacheHit) {
+      laneState.cachedResidentStepOptionVariants = {
+        residentStepOptions,
+        requestedDynamicReactionRoutingAllowed,
+        particleGasLedgerActionableLatch: laneState.particleGasLedgerActionableLatch,
+        dormantResidentStepOptions,
+        activeResidentStepOptions
+      };
+    }
     workerLanePageTiming.residentStepOptionVariantsReadyAtMs = nowMs();
     const predecessorReactionExecutionRequired = Boolean(
       requestedDynamicReactionRoutingAllowed
@@ -54083,57 +54246,150 @@ fn main(
         particleGasLedgerActionableForOptions(
           scheduleResidentStepOptions
         );
-      const targetConfigurationOptions = {
-        maxFutureSubsteps: requestedStepCount,
-        dtS: dt,
+      const targetConfigCacheKey = [
+        requestedStepCount,
+        dt,
         gridSpacingM,
         cflFactor,
-        boxDimsM,
-        residentStepOptions: scheduleResidentStepOptions,
-        epochOptions: targetScheduleEpochOptions,
-        mechanicsOptions: targetScheduleMechanicsOptions,
-        hierarchyConfig: workerHierarchyConfig,
-        scheduleStepOptionsProvider: targetScheduleProviderAuthority,
-        particleGasLedgerActionable
+        Array.isArray(boxDimsM) ? boxDimsM.join(',') : String(boxDimsM),
+        targetScheduleProviderAuthority.descriptorFingerprint ?? '',
+        particleGasLedgerActionable ? 1 : 0,
+        predecessorRetainedProductGasActionable ? 1 : 0,
+        requestedDynamicReactionRoutingAllowed ? 1 : 0,
+        scheduleReactionExecutionRequired ? 1 : 0,
+        JSON.stringify(workerHierarchyConfig)
+      ].join('|');
+      const targetConfigShallowEqual = (left, right, depth = 0) => {
+        if (Object.is(left, right)) return true;
+        if (left == null || right == null) return false;
+        if (typeof left !== 'object' || typeof right !== 'object') return false;
+        if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) return false;
+        if (depth >= 8) return false;
+        if (Array.isArray(left) || Array.isArray(right)) {
+          if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+            return false;
+          }
+          for (let i = 0; i < left.length; i += 1) {
+            if (!targetConfigShallowEqual(left[i], right[i], depth + 1)) return false;
+          }
+          return true;
+        }
+        const leftKeys = Object.keys(left);
+        const rightKeys = Object.keys(right);
+        if (leftKeys.length !== rightKeys.length) return false;
+        for (let i = 0; i < leftKeys.length; i += 1) {
+          const key = leftKeys[i];
+          if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+          if (!targetConfigShallowEqual(left[key], right[key], depth + 1)) return false;
+        }
+        return true;
       };
-      const staticTargetConfiguration =
-        createSchroederTargetScheduleConfiguration({
-          ...targetConfigurationOptions,
-          retainedProductGasBoundaryActionable:
-            predecessorRetainedProductGasActionable
-        });
-      workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
+      const targetConfigRelevantOptions = (options) => ({
+        contactSolverEnabled: options?.contactSolverEnabled,
+        gasPressureMechanicsBoundaryEnabled: options?.gasPressureMechanicsBoundaryEnabled,
+        particleGasLedgerActionable: options?.particleGasLedgerActionable,
+        thermalMaterialTable: options?.thermalMaterialTable ?? null,
+        mechanicsMaterialTable: options?.mechanicsMaterialTable ?? null,
+        dispersedMediumOpticalClosureTable: options?.dispersedMediumOpticalClosureTable ?? null,
+        dispersedMediumOpticsSeedRows: options?.dispersedMediumOpticsSeedRows ?? null,
+        reactionTable: options?.reactionTable ?? null,
+        reactionActivationWatchTable: options?.reactionActivationWatchTable ?? null,
+        thermalStepOptions: options?.thermalStepOptions ?? null,
+        reactionStepOptions: options?.reactionStepOptions ?? null,
+        mechanicsRefreshOptions: options?.mechanicsRefreshOptions ?? null
+      });
+      const currentRelevantScheduleOptions = targetConfigRelevantOptions(scheduleResidentStepOptions);
+      const currentRelevantActiveOptions = targetConfigRelevantOptions(activeResidentStepOptions);
+      const targetConfigCacheHit = Boolean(
+        laneState.cachedTargetScheduleConfigurations
+        && laneState.cachedTargetScheduleConfigurations.key === targetConfigCacheKey
+        && (
+          laneState.cachedTargetScheduleConfigurations.scheduleResidentStepOptions
+            === scheduleResidentStepOptions
+          || targetConfigShallowEqual(
+            laneState.cachedTargetScheduleConfigurations.relevantScheduleOptions,
+            currentRelevantScheduleOptions
+          )
+        )
+        && (
+          laneState.cachedTargetScheduleConfigurations.activeResidentStepOptions
+            === activeResidentStepOptions
+          || targetConfigShallowEqual(
+            laneState.cachedTargetScheduleConfigurations.relevantActiveOptions,
+            currentRelevantActiveOptions
+          )
+        )
+      );
+      let staticTargetConfiguration;
       let prospectiveTargetConfiguration = null;
-      if (
-        requestedDynamicReactionRoutingAllowed
-        && !scheduleReactionExecutionRequired
-        && staticTargetConfiguration.writerSet.reaction === false
-        && staticTargetConfiguration.tableFingerprints
-          .watchReactionTableSource
-            === 'reaction-activation-watch-table'
-      ) {
+      if (targetConfigCacheHit) {
+        staticTargetConfiguration =
+          laneState.cachedTargetScheduleConfigurations.staticTargetConfiguration;
         prospectiveTargetConfiguration =
+          laneState.cachedTargetScheduleConfigurations.prospectiveTargetConfiguration;
+        workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
+        workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
+      } else {
+        const targetConfigurationOptions = {
+          maxFutureSubsteps: requestedStepCount,
+          dtS: dt,
+          gridSpacingM,
+          cflFactor,
+          boxDimsM,
+          residentStepOptions: scheduleResidentStepOptions,
+          epochOptions: targetScheduleEpochOptions,
+          mechanicsOptions: targetScheduleMechanicsOptions,
+          hierarchyConfig: workerHierarchyConfig,
+          scheduleStepOptionsProvider: targetScheduleProviderAuthority,
+          particleGasLedgerActionable
+        };
+        staticTargetConfiguration =
           createSchroederTargetScheduleConfiguration({
             ...targetConfigurationOptions,
-            residentStepOptions: activeResidentStepOptions,
-            particleGasLedgerActionable:
-              particleGasLedgerActionableForOptions(
-                activeResidentStepOptions
-              )
+            retainedProductGasBoundaryActionable:
+              predecessorRetainedProductGasActionable
           });
-      } else if (
-        !predecessorRetainedProductGasActionable
-        && staticTargetConfiguration.writerSet.reaction === true
-        && staticTargetConfiguration.writerSet
-          .retainedProductGasBoundaryActionable === false
-      ) {
-        prospectiveTargetConfiguration =
-          createSchroederTargetScheduleConfiguration({
-            ...targetConfigurationOptions,
-            retainedProductGasBoundaryActionable: true
-          });
+        workerLanePageTiming.staticTargetConfigurationReadyAtMs = nowMs();
+        if (
+          requestedDynamicReactionRoutingAllowed
+          && !scheduleReactionExecutionRequired
+          && staticTargetConfiguration.writerSet.reaction === false
+          && staticTargetConfiguration.tableFingerprints
+            .watchReactionTableSource
+              === 'reaction-activation-watch-table'
+        ) {
+          prospectiveTargetConfiguration =
+            createSchroederTargetScheduleConfiguration({
+              ...targetConfigurationOptions,
+              residentStepOptions: activeResidentStepOptions,
+              particleGasLedgerActionable:
+                particleGasLedgerActionableForOptions(
+                  activeResidentStepOptions
+                )
+            });
+        } else if (
+          !predecessorRetainedProductGasActionable
+          && staticTargetConfiguration.writerSet.reaction === true
+          && staticTargetConfiguration.writerSet
+            .retainedProductGasBoundaryActionable === false
+        ) {
+          prospectiveTargetConfiguration =
+            createSchroederTargetScheduleConfiguration({
+              ...targetConfigurationOptions,
+              retainedProductGasBoundaryActionable: true
+            });
+        }
+        workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
+        laneState.cachedTargetScheduleConfigurations = {
+          key: targetConfigCacheKey,
+          scheduleResidentStepOptions,
+          activeResidentStepOptions,
+          relevantScheduleOptions: currentRelevantScheduleOptions,
+          relevantActiveOptions: currentRelevantActiveOptions,
+          staticTargetConfiguration,
+          prospectiveTargetConfiguration
+        };
       }
-      workerLanePageTiming.prospectiveTargetConfigurationReadyAtMs = nowMs();
       targetScheduleAuthority = createSchroederTargetScheduleAuthority({
         sourceScheduleId: scheduleId,
         targetScheduleRequestId: nextScheduleRequestId,
@@ -54361,8 +54617,7 @@ fn main(
                 ...(currentNuclearCherenkovSources ? { nuclearCherenkovSources: currentNuclearCherenkovSources } : {}),
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
-                targetScheduleAuthority:
-                  structuredClone(targetScheduleAuthority),
+                targetScheduleAuthority,
                 authority: 'NodeKernel/ComputeManager/StateManager',
                 twoLevelTerminalRefluxReceiptRequired:
                   authorityTerminalRefluxReceiptRequired === true,

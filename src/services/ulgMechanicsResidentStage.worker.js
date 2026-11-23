@@ -10379,6 +10379,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     canPresentTier0SubmissionBoundary = null,
     onCanonicalPresentationSubmissionBoundary = null,
     canPresentCanonicalSubmissionBoundary = null,
+    getPresentationSubmitSerial = null,
+    waitForPresentationSubmitTurn = null,
     runTier0FusedResidentSequence =
       runMlsMpmResidentStepsWithOptionalWebGpu
   } = {}
@@ -11119,17 +11121,25 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     );
     const scheduleLaneResidentStepOptionsBeforeRequest =
       record.schroederLane?.residentStepOptions;
+    const scheduleLaneResidentStepOptionsRefreshed = Boolean(
+      baseMechanicsOptions.residentStepOptions != null
+    );
     persistWorkerScheduleResidentStepOptions(
       record.schroederLane,
       baseMechanicsOptions.residentStepOptions,
       { scheduleId, laneId, stateKey }
     );
+    if (scheduleLaneResidentStepOptionsRefreshed && record.schroederLane) {
+      record.schroederLane.cachedValidatedStaticTables = null;
+    }
     const restoreScheduleResidentStepOptions = () => {
       if (scheduleLaneHadResidentStepOptions && record.schroederLane) {
         record.schroederLane.residentStepOptions =
           scheduleLaneResidentStepOptionsBeforeRequest;
+        record.schroederLane.cachedValidatedStaticTables = null;
       } else if (record.schroederLane) {
         delete record.schroederLane.residentStepOptions;
+        record.schroederLane.cachedValidatedStaticTables = null;
       }
     };
     // W4a: a seeded lane's epoch-identity monotonicity baseline is the SEED
@@ -11299,42 +11309,76 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         );
       }
       try {
-        validateSphDispersedMediumOpticalClosureTable(
-          dispersedMediumOpticalClosureTable
-        );
+        const cachedStaticTables =
+          !scheduleLaneResidentStepOptionsRefreshed
+          && scheduleStartLane
+          && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+            ? scheduleStartLane.cachedValidatedStaticTables
+            : null;
         let producerPhaseCarrierPlan = tier0PhaseCarrierPlan;
-        if (!workerDispersedMediumOpticsFourLanePhaseCarrierPlan(
-          producerPhaseCarrierPlan,
-          sourceSphUpload?.particleCount
-        )) {
-          if (
-            !scheduleStartTier0ContinuationIdentity
-            || !workerTier0LawsQuiescentPhaseCarrierPlan(
-              tier0PhaseCarrierPlan
-            )
-          ) {
-            throw new RangeError(
-              'the source family is neither exact four-lane nor an admitted Tier0 one-to-four transition'
-            );
+        const opticsCacheHit = Boolean(
+          cachedStaticTables?.opticsValidated
+          && cachedStaticTables.opticsValidated.opticalClosureTable
+            === dispersedMediumOpticalClosureTable
+          && cachedStaticTables.opticsValidated.seedRows
+            === dispersedMediumOpticsSeedRows
+          && cachedStaticTables.opticsValidated.particleCapacity
+            === tier0PhaseCarrierPlan?.particleCapacity
+          && cachedStaticTables.opticsValidated.phaseLaneCount
+            === tier0PhaseCarrierPlan?.phaseLaneCount
+        );
+        if (!opticsCacheHit) {
+          validateSphDispersedMediumOpticalClosureTable(
+            dispersedMediumOpticalClosureTable
+          );
+          if (!workerDispersedMediumOpticsFourLanePhaseCarrierPlan(
+            producerPhaseCarrierPlan,
+            sourceSphUpload?.particleCount
+          )) {
+            if (
+              !scheduleStartTier0ContinuationIdentity
+              || !workerTier0LawsQuiescentPhaseCarrierPlan(
+                tier0PhaseCarrierPlan
+              )
+            ) {
+              throw new RangeError(
+                'the source family is neither exact four-lane nor an admitted Tier0 one-to-four transition'
+              );
+            }
+            producerPhaseCarrierPlan =
+              createSphPhaseCarrierOneToFourMaterializationPlan({
+                sphParticleState: scheduleSourceSphParticleState,
+                mlsMpmParticleState: scheduleSourceMlsMpmParticleState,
+                sphParticleUpload: sourceSphUpload,
+                mlsMpmParticleUpload: scheduleSourceMlsMpmParticleUpload,
+                phaseCarrierPlan: tier0PhaseCarrierPlan
+              }).phaseCarrierPlan;
           }
-          producerPhaseCarrierPlan =
-            createSphPhaseCarrierOneToFourMaterializationPlan({
-              sphParticleState: scheduleSourceSphParticleState,
-              mlsMpmParticleState: scheduleSourceMlsMpmParticleState,
-              sphParticleUpload: sourceSphUpload,
-              mlsMpmParticleUpload: scheduleSourceMlsMpmParticleUpload,
-              phaseCarrierPlan: tier0PhaseCarrierPlan
-            }).phaseCarrierPlan;
-        }
-        if (dispersedMediumOpticsSeedRows) {
-          validateSphDispersedMediumOpticsProducerSeedRows({
-            rows:
-              dispersedMediumOpticsSeedRows.rows
-              ?? dispersedMediumOpticsSeedRows,
-            particleCount: producerPhaseCarrierPlan.particleCapacity,
-            phaseCarrierPlan: producerPhaseCarrierPlan,
-            opticalClosureTable: dispersedMediumOpticalClosureTable
-          });
+          if (dispersedMediumOpticsSeedRows) {
+            validateSphDispersedMediumOpticsProducerSeedRows({
+              rows:
+                dispersedMediumOpticsSeedRows.rows
+                ?? dispersedMediumOpticsSeedRows,
+              particleCount: producerPhaseCarrierPlan.particleCapacity,
+              phaseCarrierPlan: producerPhaseCarrierPlan,
+              opticalClosureTable: dispersedMediumOpticalClosureTable
+            });
+          }
+          if (
+            scheduleStartLane
+            && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+          ) {
+            scheduleStartLane.cachedValidatedStaticTables = {
+              ...(scheduleStartLane.cachedValidatedStaticTables || {}),
+              residentStepOptions: scheduleResidentStepOptions,
+              opticsValidated: {
+                opticalClosureTable: dispersedMediumOpticalClosureTable,
+                seedRows: dispersedMediumOpticsSeedRows,
+                particleCapacity: producerPhaseCarrierPlan?.particleCapacity,
+                phaseLaneCount: producerPhaseCarrierPlan?.phaseLaneCount
+              }
+            };
+          }
         }
       } catch (error) {
         rejectDispersedMediumOptics(
@@ -11400,11 +11444,35 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           retainedProductGasBoundaryActionable:
             retainedPredecessorGasBoundaryActionable
         });
-        scheduleTargetTableFingerprints =
-          createSchroederTargetScheduleTableFingerprints({
+        const cachedTableFpEntry =
+          !scheduleLaneResidentStepOptionsRefreshed
+          && scheduleStartLane
+          && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+          && scheduleStartLane.cachedValidatedStaticTables?.residentStepOptions
+            === scheduleResidentStepOptions
+          && scheduleStartLane.cachedValidatedStaticTables?.executingReactionActive
+            === scheduleLawActivation.reaction
+          && scheduleStartLane.cachedValidatedStaticTables?.tableFingerprints
+            ? scheduleStartLane.cachedValidatedStaticTables
+            : null;
+        scheduleTargetTableFingerprints = cachedTableFpEntry
+          ? cachedTableFpEntry.tableFingerprints
+          : createSchroederTargetScheduleTableFingerprints({
+              residentStepOptions: scheduleResidentStepOptions,
+              executingReactionActive: scheduleLawActivation.reaction
+            });
+        if (
+          !cachedTableFpEntry
+          && scheduleStartLane
+          && scheduleStartLane.residentStepOptions === scheduleResidentStepOptions
+        ) {
+          scheduleStartLane.cachedValidatedStaticTables = {
+            ...(scheduleStartLane.cachedValidatedStaticTables || {}),
             residentStepOptions: scheduleResidentStepOptions,
-            executingReactionActive: scheduleLawActivation.reaction
-          });
+            executingReactionActive: scheduleLawActivation.reaction,
+            tableFingerprints: scheduleTargetTableFingerprints
+          };
+        }
         scheduleReactionActivationMotionEnvelope =
           createSphReactionMotionEnvelope({
             maxFutureSubsteps: stepCount,
@@ -12407,8 +12475,16 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     // exists (it is acquired by the first stage).
     let lawActivationReceiptRingOpened = false;
     let lawActivationReceiptRingDevice = null;
+    record.lawActivationReceiptScheduleCounter =
+      (Number(record.lawActivationReceiptScheduleCounter) || 0) + 1;
+    const sampleLawActivationReceiptThisSchedule = Boolean(
+      schedule?.requireLawActivationReceipt === true
+      || !(typeof globalThis.GPUDevice === 'function' && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice)
+      || record.lawActivationReceiptScheduleCounter === 1
+      || record.lawActivationReceiptScheduleCounter % 8 === 0
+    );
     const ensureLawActivationReceiptRing = () => {
-      if (lawActivationReceiptRingOpened || !state.workerDevice) return;
+      if (lawActivationReceiptRingOpened || !state.workerDevice || !sampleLawActivationReceiptThisSchedule) return;
       lawActivationReceiptRingOpened = Boolean(
         openLawActivationReceiptRing(state.workerDevice, {
           capacityPerLaw: Math.max(1, stepCount * 4),
@@ -13383,6 +13459,9 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           supersededSourceRetired: false
         });
       }
+      let lastInterleavedRenderSerial = typeof getPresentationSubmitSerial === 'function'
+        ? (Number(getPresentationSubmitSerial()) || 0)
+        : 0;
       for (let stepOrdinal = 1; stepOrdinal <= stepCount; stepOrdinal += 1) {
         // Once internal GPU fences are deferred, this task yield—not queue
         // completion—is what lets a cancel message run between atomic steps.
@@ -13391,7 +13470,29 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           const yieldStartedAtMs = workerResidentScheduleNowMs();
           traceWorkerLane('yield-wait', { stepOrdinal });
           await scheduleControlPlaneTaskYielder.yieldTask(stepOrdinal);
+          if (
+            typeof waitForPresentationSubmitTurn === 'function'
+            && !state.cancelRequested
+            && typeof globalThis.GPUDevice === 'function'
+            && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+          ) {
+            // Interleave at most one physics step per presentation submit when
+            // live GPU queue latency indicates shared-queue contention (zero
+            // extra GPU fences, immediate no-op when GPU queue is uncongested).
+            lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
+              lastInterleavedRenderSerial
+            );
+          }
           stepYieldWaitMs = workerResidentScheduleNowMs() - yieldStartedAtMs;
+        } else if (
+          typeof waitForPresentationSubmitTurn === 'function'
+          && !state.cancelRequested
+          && typeof globalThis.GPUDevice === 'function'
+          && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+        ) {
+          lastInterleavedRenderSerial = await waitForPresentationSubmitTurn(
+            lastInterleavedRenderSerial
+          );
         }
         if (
           state.cancelRequested
@@ -14106,12 +14207,21 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       });
       scheduleLastStepEndedAtMs = workerResidentScheduleNowMs();
       armSubmitCensus();
+      const effectiveStepsPerFlush = (
+        canonicalPresentationRequested
+        && typeof globalThis.GPUDevice === 'function'
+        && state.workerDevice instanceof globalThis.GPUDevice
+      )
+        ? 1
+        : resolveSubmitBurstEligibility().stepsPerFlush;
       if (
         submitBurstOpened
-        && stepOrdinal % resolveSubmitBurstEligibility().stepsPerFlush === 0
+        && stepOrdinal % effectiveStepsPerFlush === 0
       ) {
         // Cadence bound: even if no fence request forced a flush this
-        // window, held work never spans more than K steps.
+        // window, held work never spans more than K steps (or 1 step under
+        // live interactive canonical presentation so shared-queue renders
+        // never wait behind multi-step physics bursts).
         flushWorkerQueueSubmitBurst(state.workerDevice, 'step-cadence');
       }
       if (
@@ -15661,6 +15771,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           cumulativeConsumerHits: null
         };
       } else if (shouldFinishThermalPotential) {
+        if (
+          typeof waitForPresentationSubmitTurn === 'function'
+          && !state.cancelRequested
+          && typeof globalThis.GPUDevice === 'function'
+          && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+        ) {
+          await waitForPresentationSubmitTurn(
+            typeof getPresentationSubmitSerial === 'function'
+              ? getPresentationSubmitSerial()
+              : undefined
+          );
+        }
         thermalPotential = {
           ...state.thermalPotentialStarted,
           ...(await finishThermalPotentialWorkerSchedule(potentialOwner, {
@@ -15695,9 +15817,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     state.thermalPotentialFinished = !cancelled;
     const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
     const shouldRunA3ThermalTick = Boolean(
-      !Number.isFinite(lastA3ThermalStep)
-      || stepCount > 8
-      || (laneStepAfterSchedule - lastA3ThermalStep) >= 16
+      (
+        !Number.isFinite(lastA3ThermalStep)
+        || stepCount > 8
+        || (laneStepAfterSchedule - lastA3ThermalStep) >= 16
+      )
+      && (stepCount > 8 || !shouldFinishThermalPotential)
     );
     if (
       !cancelled
@@ -15708,6 +15833,18 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
       && globalThis.__ulgDisableA3ThermalRegionalLane !== true
     ) {
+      if (
+        typeof waitForPresentationSubmitTurn === 'function'
+        && !state.cancelRequested
+        && typeof globalThis.GPUDevice === 'function'
+        && (state.workerDevice || record.workerDevice) instanceof globalThis.GPUDevice
+      ) {
+        await waitForPresentationSubmitTurn(
+          typeof getPresentationSubmitSerial === 'function'
+            ? getPresentationSubmitSerial()
+            : undefined
+        );
+      }
       try {
         const a3ThermalEncoder = record.workerDevice.createCommandEncoder({
           label: 'ulg-worker-a3-thermal-regional-schedule-tick'

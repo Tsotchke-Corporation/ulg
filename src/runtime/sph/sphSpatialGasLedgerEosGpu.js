@@ -4154,7 +4154,7 @@ export function encodeSphSpatialGasPressureAuthority(source, options = {}) {
     )) {
       throw new TypeError('bindGroupLayout must be a WebGPU layout object');
     }
-    const bindGroup = createBindGroup.call(device, {
+    const bindGroup = createCachedExplicitBindGroup(device, {
       label: `ulg-sph-gas-pressure-authority-${record.executionGeneration}`,
       layout: bindGroupLayout,
       entries: [
@@ -4568,7 +4568,7 @@ export function createSphSpatialGasPressureMechanicsAuthorityBinding(
       // already-private read-only directory allocation as a non-authoritative
       // dummy so callers still cannot substitute topology.
       ?? record.spatialGeneration.execution.directoryBuffer;
-    const bindGroup = createBindGroup.call(device, {
+    const bindGroup = createCachedExplicitBindGroup(device, {
       label: `ulg-sph-gas-pressure-mechanics-${record.executionGeneration}`,
       layout: bindGroupLayout,
       entries: [

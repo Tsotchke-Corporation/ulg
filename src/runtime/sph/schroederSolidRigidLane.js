@@ -300,7 +300,7 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     });
   }
   const canShareSolidGrid = Boolean(
-    couplingEligible && contactEligible && family.bodyCount === 1 && family.couplingStage?.spatialGrid
+    couplingEligible && contactEligible && family.couplingStage?.spatialGrid
   );
   if (contactEligible) {
     family.contactStage.prepare?.(dtSeconds, {

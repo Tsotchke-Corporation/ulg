@@ -274,6 +274,28 @@ function plainObject(value) {
 }
 
 const EXACT_KEYS_SET_CACHE = new WeakMap();
+// Private module-internal identity sets for deep-frozen authority structures
+// minted directly by this module. Because deepFreeze seals every own property
+// as non-writable/non-configurable data descriptors on freshly constructed
+// plain objects, no external proxy, getter, or mutation can forge membership.
+const VERIFIED_FROZEN_PROVIDERS = new WeakSet();
+const VERIFIED_FROZEN_CONFIGURATIONS = new WeakSet();
+const VERIFIED_FROZEN_TRANSITIONS = new WeakSet();
+const VERIFIED_FROZEN_AUTHORITIES = new WeakSet();
+const AUTHORITY_CONFIGURATION_CACHE = new WeakMap();
+
+export function isVerifiedFrozenSchroederTargetScheduleAuthority(value) {
+  return Boolean(value && typeof value === 'object' && VERIFIED_FROZEN_AUTHORITIES.has(value));
+}
+
+export function exactVerifiedSchroederTargetScheduleAuthorityMatch(
+  plainClone,
+  verifiedAuthority
+) {
+  if (!VERIFIED_FROZEN_AUTHORITIES.has(verifiedAuthority)) return false;
+  if (plainClone === verifiedAuthority) return true;
+  return valuesEqual(plainClone, verifiedAuthority);
+}
 
 function exactKeysSet(keys) {
   let set = EXACT_KEYS_SET_CACHE.get(keys);
@@ -557,7 +579,7 @@ export function createSchroederTargetScheduleProviderAuthority({
   descriptorFingerprint = null
 } = {}) {
   if (kind === 'none') {
-    return deepFreeze({
+    const provider = deepFreeze({
       schema: ULG_SCHROEDER_TARGET_SCHEDULE_PROVIDER_AUTHORITY_SCHEMA,
       status: 'target-schedule-provider-authority-ready',
       kind: 'none',
@@ -566,6 +588,8 @@ export function createSchroederTargetScheduleProviderAuthority({
       mayActivateDynamicWriters: false,
       writerSetComplete: true
     });
+    VERIFIED_FROZEN_PROVIDERS.add(provider);
+    return provider;
   }
   if (kind === 'worker-lane-assignment-only') {
     const filtered = {};
@@ -582,7 +606,7 @@ export function createSchroederTargetScheduleProviderAuthority({
       }
       filtered[field] = value;
     }
-    return deepFreeze({
+    const provider = deepFreeze({
       schema: ULG_SCHROEDER_TARGET_SCHEDULE_PROVIDER_AUTHORITY_SCHEMA,
       status: 'target-schedule-provider-authority-ready',
       kind,
@@ -594,9 +618,11 @@ export function createSchroederTargetScheduleProviderAuthority({
       mayActivateDynamicWriters: false,
       writerSetComplete: true
     });
+    VERIFIED_FROZEN_PROVIDERS.add(provider);
+    return provider;
   }
   if (kind === 'general-unsealed') {
-    return deepFreeze({
+    const provider = deepFreeze({
       schema: ULG_SCHROEDER_TARGET_SCHEDULE_PROVIDER_AUTHORITY_SCHEMA,
       status: 'target-schedule-provider-authority-incomplete',
       kind,
@@ -605,11 +631,16 @@ export function createSchroederTargetScheduleProviderAuthority({
       mayActivateDynamicWriters: true,
       writerSetComplete: false
     });
+    VERIFIED_FROZEN_PROVIDERS.add(provider);
+    return provider;
   }
   throw new TypeError(`Unsupported target schedule provider kind: ${kind}`);
 }
 
 export function exactSchroederTargetScheduleProviderAuthority(value) {
+  if (value && typeof value === 'object' && VERIFIED_FROZEN_PROVIDERS.has(value)) {
+    return value;
+  }
   if (
     !objectHasExactKeys(value, PROVIDER_KEYS)
     || value.schema !== ULG_SCHROEDER_TARGET_SCHEDULE_PROVIDER_AUTHORITY_SCHEMA
@@ -1357,7 +1388,7 @@ function targetScheduleConfigurationFromParts({
   writerSet,
   scheduleStepOptionsProvider,
   tableFingerprints
-}, configurationHashes) {
+}, configurationHashes, { markVerified = false } = {}) {
   const configuration = {
     schema: ULG_SCHROEDER_TARGET_SCHEDULE_CONFIGURATION_SCHEMA,
     status: writerSet.complete
@@ -1371,7 +1402,9 @@ function targetScheduleConfigurationFromParts({
   };
   configuration.configurationFingerprint =
     targetScheduleConfigurationFingerprint(configuration, configurationHashes);
-  return deepFreeze(configuration);
+  const frozen = deepFreeze(configuration);
+  if (markVerified) VERIFIED_FROZEN_CONFIGURATIONS.add(frozen);
+  return frozen;
 }
 
 export function createSchroederTargetScheduleConfiguration({
@@ -1388,12 +1421,15 @@ export function createSchroederTargetScheduleConfiguration({
   particleGasLedgerActionable = false,
   retainedProductGasBoundaryActionable = false
 } = {}) {
-  const provider = exactSchroederTargetScheduleProviderAuthority(
+  const validatedProvider = exactSchroederTargetScheduleProviderAuthority(
     scheduleStepOptionsProvider
   );
-  if (!provider) {
+  if (!validatedProvider) {
     throw new TypeError('target schedule provider authority is not exact');
   }
+  const provider = VERIFIED_FROZEN_PROVIDERS.has(validatedProvider)
+    ? validatedProvider
+    : deepFreeze(structuredClone(validatedProvider));
   const writerSet = createSchroederTargetScheduleWriterSet({
     residentStepOptions,
     epochOptions,
@@ -1422,14 +1458,20 @@ export function createSchroederTargetScheduleConfiguration({
     writerSet,
     scheduleStepOptionsProvider: provider,
     tableFingerprints
-  });
+  }, undefined, { markVerified: true });
 }
 
 export function exactSchroederTargetScheduleConfiguration(value) {
+  if (value && typeof value === 'object' && VERIFIED_FROZEN_CONFIGURATIONS.has(value)) {
+    return value;
+  }
   return validateTargetScheduleConfiguration(value, new Map());
 }
 
 function validateTargetScheduleConfiguration(value, configurationHashes) {
+  if (value && typeof value === 'object' && VERIFIED_FROZEN_CONFIGURATIONS.has(value)) {
+    return value;
+  }
   if (
     !objectHasExactKeys(value, TARGET_CONFIGURATION_KEYS)
     || value.schema !== ULG_SCHROEDER_TARGET_SCHEDULE_CONFIGURATION_SCHEMA
@@ -1737,10 +1779,15 @@ export function createSchroederProspectiveDynamicLawTransition({
   };
   transition.transitionFingerprint =
     prospectiveDynamicLawTransitionFingerprint(transition);
-  return deepFreeze(transition);
+  const frozenTransition = deepFreeze(transition);
+  VERIFIED_FROZEN_TRANSITIONS.add(frozenTransition);
+  return frozenTransition;
 }
 
 export function exactSchroederProspectiveDynamicLawTransition(value) {
+  if (value && typeof value === 'object' && VERIFIED_FROZEN_TRANSITIONS.has(value)) {
+    return value;
+  }
   return validateProspectiveDynamicLawTransition(value, new Map());
 }
 
@@ -1748,6 +1795,9 @@ function validateProspectiveDynamicLawTransition(
   value,
   configurationHashes = new Map()
 ) {
+  if (value && typeof value === 'object' && VERIFIED_FROZEN_TRANSITIONS.has(value)) {
+    return value;
+  }
   const reactionTransition = Boolean(
     value?.kind === SCHROEDER_PROSPECTIVE_DYNAMIC_LAW_TRANSITION_KIND
     && value?.lawFamily === 'reaction'
@@ -1807,6 +1857,9 @@ function validateProspectiveDynamicLawTransition(
 }
 
 function targetScheduleConfigurationFromAuthority(authority, configurationHashes) {
+  if (authority && typeof authority === 'object' && AUTHORITY_CONFIGURATION_CACHE.has(authority)) {
+    return AUTHORITY_CONFIGURATION_CACHE.get(authority);
+  }
   return targetScheduleConfigurationFromParts({
     motionEnvelope: authority.motionEnvelope,
     writerSet: authority.writerSet,
@@ -2314,12 +2367,15 @@ export function createSchroederTargetScheduleAuthority({
         sourceConfiguration: currentConfiguration,
         targetConfiguration: prospectiveTargetConfiguration
       });
+  const sealedCurrentConfiguration = VERIFIED_FROZEN_CONFIGURATIONS.has(currentConfiguration)
+    ? currentConfiguration
+    : deepFreeze(structuredClone(currentConfiguration));
   const {
     motionEnvelope,
     writerSet,
     scheduleStepOptionsProvider: provider,
     tableFingerprints
-  } = currentConfiguration;
+  } = sealedCurrentConfiguration;
   const authority = {
     schema: ULG_SCHROEDER_TARGET_SCHEDULE_AUTHORITY_SCHEMA,
     status: writerSet.complete
@@ -2357,6 +2413,8 @@ export function createSchroederTargetScheduleAuthority({
   }
   authority.requestFingerprint = targetAuthorityFingerprint(authority);
   const sealedAuthority = deepFreeze(authority);
+  VERIFIED_FROZEN_AUTHORITIES.add(sealedAuthority);
+  AUTHORITY_CONFIGURATION_CACHE.set(sealedAuthority, sealedCurrentConfiguration);
   if (predecessorAuthority) {
     const continuity = validateSchroederTargetScheduleConfigurationContinuity({
       predecessorTargetScheduleAuthority: predecessorAuthority,
@@ -2373,6 +2431,9 @@ export function createSchroederTargetScheduleAuthority({
 }
 
 export function exactSchroederTargetScheduleAuthority(value) {
+  if (value && typeof value === 'object' && VERIFIED_FROZEN_AUTHORITIES.has(value)) {
+    return value;
+  }
   // Keep this context private and invocation-local, including for public calls
   // re-entered from getters. No validation result or object identity is cached.
   const configurationHashes = new Map();

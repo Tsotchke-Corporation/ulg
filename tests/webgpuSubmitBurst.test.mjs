@@ -812,3 +812,79 @@ test('queue-ordered buffer pool recycles FIFO buffers and refuses MAP_READ buffe
   const mapped = acquireQueueOrderedPooledBuffer(device, { bucketKey: 'read', label: 'read', size: 64, usage: 0x09 });
   assert.equal(releaseQueueOrderedPooledBuffer(device, mapped, { bucketKey: 'read', size: 64, usage: 0x09 }), false);
 });
+
+test('pooledWriteThrough + coalesceComputePasses fuses multiple virtual compute encoders and interleaved writes into one real encoder', () => {
+  const realPasses = [];
+  const encoderOps = [];
+  let rawEncoderCount = 0;
+  const { device, ops } = createFakeDevice();
+  device.createBindGroup = (desc) => ({ label: desc?.label ?? 'bg', entries: desc?.entries });
+  device.createCommandEncoder = (desc) => {
+    rawEncoderCount += 1;
+    const enc = {
+      label: desc?.label ?? 'raw-enc',
+      beginComputePass(passDesc) {
+        const pass = { label: passDesc?.label ?? 'unlabelled', dispatches: 0, ended: false };
+        realPasses.push(pass);
+        encoderOps.push(`pass:${pass.label}`);
+        return {
+          setPipeline() {},
+          setBindGroup() {},
+          dispatchWorkgroups() { pass.dispatches += 1; },
+          dispatchWorkgroupsIndirect() { pass.dispatches += 1; },
+          end() { pass.ended = true; }
+        };
+      },
+      clearBuffer(buf) { encoderOps.push(`clear:${buf?.label ?? 'none'}`); },
+      copyBufferToBuffer(_src, _srcOff, dst) { encoderOps.push(`copy->${dst?.label ?? 'none'}`); },
+      finish() { encoderOps.push('finish'); return { label: enc.label }; }
+    };
+    return enc;
+  };
+  armWorkerQueueSubmitBurst(device);
+  const bufA = device.createBuffer({ label: 'A', size: 16 });
+  const bufB = device.createBuffer({ label: 'B', size: 16 });
+  const bgA = device.createBindGroup({ entries: [{ binding: 0, resource: { buffer: bufA } }] });
+  const bgB = device.createBindGroup({ entries: [{ binding: 0, resource: { buffer: bufB } }] });
+
+  openWorkerQueueSubmitBurst(device, {
+    label: 'shared-burst-test',
+    pooledWriteThrough: true,
+    coalesceComputePasses: true
+  });
+  const e1 = device.createCommandEncoder({ label: 'stage-1' });
+  const p1 = e1.beginComputePass({ label: 'p1' });
+  p1.setPipeline('pipe1'); p1.setBindGroup(0, bgA); p1.dispatchWorkgroups(1); p1.end();
+  device.queue.submit([e1.finish()]);
+
+  // Disjoint write to B while A was touched -> hoisted cleanly before p1, keeping 1 fused pass!
+  device.queue.writeBuffer(bufB, 0, new Float32Array([1, 2, 3, 4]));
+
+  const e2 = device.createCommandEncoder({ label: 'stage-2' });
+  const p2 = e2.beginComputePass({ label: 'p2' });
+  p2.setPipeline('pipe2'); p2.setBindGroup(0, bgB); p2.dispatchWorkgroups(2); p2.end();
+  device.queue.submit([e2.finish()]);
+
+  // Write to A AFTER p1 touched A -> flushes the fused pass, copies into A, then starts pass 2!
+  device.queue.writeBuffer(bufA, 0, new Float32Array([5, 6, 7, 8]));
+
+  // Consecutive stages after copy->A coalesce into a single second pass!
+  const e3 = device.createCommandEncoder({ label: 'stage-3' });
+  const p3 = e3.beginComputePass({ label: 'p3' });
+  p3.setPipeline('pipe3'); p3.setBindGroup(0, bgA); p3.dispatchWorkgroups(3); p3.end();
+  device.queue.submit([e3.finish()]);
+
+  const e4 = device.createCommandEncoder({ label: 'stage-4' });
+  const p4 = e4.beginComputePass({ label: 'p4' });
+  p4.setPipeline('pipe4'); p4.setBindGroup(0, bgB); p4.dispatchWorkgroups(4); p4.end();
+  device.queue.submit([e4.finish()]);
+
+  closeWorkerQueueSubmitBurst(device);
+
+  assert.equal(rawEncoderCount, 1, '4 virtual compute encoders + 2 write-through copies seal into 1 real command encoder');
+  assert.equal(ops.filter((o) => o.op === 'submit').length, 1, 'burst flushes in 1 queue.submit');
+  assert.equal(realPasses.length, 2, 'disjoint copy->B hoists before p1+p2 (pass 1) and touched copy->A splits before p3+p4 (pass 2)');
+  assert.equal(realPasses[0].dispatches, 2);
+  assert.equal(realPasses[1].dispatches, 2);
+  assert.deepEqual(encoderOps, ['copy->B', 'pass:p1', 'copy->A', 'pass:p3', 'finish']);
+});

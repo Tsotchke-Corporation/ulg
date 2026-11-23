@@ -40,6 +40,8 @@ import {
   createSchroederTargetScheduleConfiguration,
   createSchroederTargetScheduleProviderAuthority,
   exactSchroederTargetScheduleAuthority,
+  exactVerifiedSchroederTargetScheduleAuthorityMatch,
+  isVerifiedFrozenSchroederTargetScheduleAuthority,
   schroederTargetScheduleAuthorityEquals,
   schroederTargetScheduleConfigurationReceipt,
   schroederTargetScheduleWriterSetMatchesActivation,
@@ -300,7 +302,7 @@ const WORKER_FINAL_EPOCH_SEAL_KEYS = Object.freeze([
   'mechanicsLevels',
   ...WORKER_ROUTE_LINEAGE_FIELDS
 ]);
-const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
+export const WORKER_RESIDENT_STEP_OPTION_FIELDS = Object.freeze([
   'internalPressureScale',
   'ambientPressurePa',
   // 0 when the ambient atmosphere is explicitly simulated (room air): the
@@ -1156,17 +1158,31 @@ function validateOuterPredecessorTargetToken({
       && warmGpuResidentLaneRequirement?.stateKey === stateKey
       && warmGpuResidentLaneRequirement?.queueFencePolicy
         === QUEUE_FENCE_POLICY
-      && schroederTargetScheduleAuthorityEquals(
-        warmPayload?.targetScheduleAuthority,
-        predecessorAuthority
+      && (
+        isVerifiedFrozenSchroederTargetScheduleAuthority(predecessorAuthority)
+          ? exactVerifiedSchroederTargetScheduleAuthorityMatch(
+              cloneWorkerRouteReceipt(warmPayload?.targetScheduleAuthority),
+              predecessorAuthority
+            )
+          : schroederTargetScheduleAuthorityEquals(
+              warmPayload?.targetScheduleAuthority,
+              predecessorAuthority
+            )
       )
       && workerRouteValuesEqual(
         warmPayload?.nextScheduleLawActivationObservation,
         predecessorObservation
       )
-      && schroederTargetScheduleAuthorityEquals(
-        warmRouteReceipt?.targetScheduleAuthority,
-        predecessorAuthority
+      && (
+        isVerifiedFrozenSchroederTargetScheduleAuthority(predecessorAuthority)
+          ? exactVerifiedSchroederTargetScheduleAuthorityMatch(
+              cloneWorkerRouteReceipt(warmRouteReceipt?.targetScheduleAuthority),
+              predecessorAuthority
+            )
+          : schroederTargetScheduleAuthorityEquals(
+              warmRouteReceipt?.targetScheduleAuthority,
+              predecessorAuthority
+            )
       )
       && workerRouteValuesEqual(
         warmRouteReceipt?.nextScheduleLawActivationObservation,
@@ -1428,7 +1444,9 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
   );
   const latchedTargetScheduleAuthority = targetScheduleAuthority == null
     ? null
-    : cloneWorkerRouteReceipt(targetScheduleAuthority);
+    : isVerifiedFrozenSchroederTargetScheduleAuthority(targetScheduleAuthority)
+      ? targetScheduleAuthority
+      : cloneWorkerRouteReceipt(targetScheduleAuthority);
   const expectedTargetScheduleAuthority = latchedTargetScheduleAuthority == null
     ? null
     : exactSchroederTargetScheduleAuthority(latchedTargetScheduleAuthority);
@@ -1440,10 +1458,15 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
   requireWorkerRouteReceipt(
     expectedTargetScheduleAuthority == null
       ? receipt.targetScheduleAuthority == null
-      : schroederTargetScheduleAuthorityEquals(
-          receipt.targetScheduleAuthority,
-          expectedTargetScheduleAuthority
-        ),
+      : isVerifiedFrozenSchroederTargetScheduleAuthority(expectedTargetScheduleAuthority)
+        ? exactVerifiedSchroederTargetScheduleAuthorityMatch(
+            cloneWorkerRouteReceipt(receipt.targetScheduleAuthority),
+            expectedTargetScheduleAuthority
+          )
+        : schroederTargetScheduleAuthorityEquals(
+            receipt.targetScheduleAuthority,
+            expectedTargetScheduleAuthority
+          ),
     'target-schedule-authority-mismatch'
   );
   const rawPredecessorTargetTokenConsumption =
@@ -2237,6 +2260,18 @@ export function validateSchroederWorkerScheduleExecutionRouteReceipt(
   }
   const sanitizedReceipt = cloneWorkerRouteReceipt(receipt);
   requireWorkerRouteReceipt(Boolean(sanitizedReceipt), 'clone-safe-receipt');
+  if (
+    expectedTargetScheduleAuthority != null
+    && isVerifiedFrozenSchroederTargetScheduleAuthority(expectedTargetScheduleAuthority)
+  ) {
+    requireWorkerRouteReceipt(
+      exactVerifiedSchroederTargetScheduleAuthorityMatch(
+        sanitizedReceipt.targetScheduleAuthority,
+        expectedTargetScheduleAuthority
+      ),
+      'target-schedule-authority-mismatch'
+    );
+  }
   return deepFreezeWorkerRouteValue({
     schema: ULG_WORKER_SCHEDULE_EXECUTION_ROUTE_RECEIPT_SCHEMA,
     status: 'worker-schedule-execution-route-receipt-admitted',
@@ -2326,7 +2361,9 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
     : null;
   const latchedRunTargetScheduleAuthority = targetScheduleAuthority == null
     ? null
-    : cloneWorkerRouteReceipt(targetScheduleAuthority);
+    : isVerifiedFrozenSchroederTargetScheduleAuthority(targetScheduleAuthority)
+      ? targetScheduleAuthority
+      : cloneWorkerRouteReceipt(targetScheduleAuthority);
   const expectedTargetScheduleAuthority = latchedRunTargetScheduleAuthority == null
     ? null
     : exactSchroederTargetScheduleAuthority(latchedRunTargetScheduleAuthority);
@@ -2349,7 +2386,9 @@ export async function runSchroederWorkerLaneScheduleWithAuthority({
   const latchedPredecessorTargetScheduleAuthority =
     predecessorTargetScheduleAuthority == null
       ? null
-      : cloneWorkerRouteReceipt(predecessorTargetScheduleAuthority);
+      : isVerifiedFrozenSchroederTargetScheduleAuthority(predecessorTargetScheduleAuthority)
+        ? predecessorTargetScheduleAuthority
+        : cloneWorkerRouteReceipt(predecessorTargetScheduleAuthority);
   const latchedPredecessorDynamicLawObservation =
     predecessorDynamicLawObservation == null
       ? null

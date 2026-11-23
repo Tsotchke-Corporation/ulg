@@ -1,4 +1,4 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 // G4 slice 1 (plan/todo/g4-dynamic-laws-proposal.md): the conservative
 // per-source thermal activation predicate.
@@ -235,19 +235,14 @@ export function createSchroederThermalDormancyStage({ device, particleCount, box
     size: Math.max(16, particleCount * 4), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const indirectDispatchBuffer = device.createBuffer({ label: 'ulg-thermal-dormancy-indirect',
     size: 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC });
-  const groups = new Map();
   function resolveGroup(stateBuffer, temperatureBuffer) {
-    let group = groups.get(stateBuffer)?.get(temperatureBuffer);
-    if (!group) {
-      group = device.createBindGroup({ layout: pipelines.reset_cells.bindGroupLayout,
-        entries: [params, stateBuffer, temperatureBuffer, cellBounds, dormantBuffer, countBuffer,
-          activeIndicesBuffer, indirectDispatchBuffer]
-          .map((buffer, binding) => ({ binding, resource: { buffer } })) });
-      if (groups.size > 8) groups.clear();
-      if (!groups.has(stateBuffer)) groups.set(stateBuffer, new Map());
-      groups.get(stateBuffer).set(temperatureBuffer, group);
-    }
-    return group;
+    return createCachedExplicitBindGroup(device, {
+      label: 'ulg-thermal-dormancy-bg',
+      layout: pipelines.reset_cells.bindGroupLayout,
+      entries: [params, stateBuffer, temperatureBuffer, cellBounds, dormantBuffer, countBuffer,
+        activeIndicesBuffer, indirectDispatchBuffer]
+        .map((buffer, binding) => ({ binding, resource: { buffer } }))
+    });
   }
   function encodeIntoPass(pass, { stateBuffer, thermoBuffer, temperatureBuffer = thermoBuffer }) {
     const group = resolveGroup(stateBuffer, temperatureBuffer);

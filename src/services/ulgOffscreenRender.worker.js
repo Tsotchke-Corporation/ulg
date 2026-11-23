@@ -27,6 +27,7 @@ import {
   ULG_WORKER_PRESENTATION_FRAME_QUEUE_COMPLETION_SCOPE,
   ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_INCLUDED,
   ULG_WORKER_PRESENTATION_PHYSICS_PREFIX_NOT_ATTRIBUTED,
+  ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION,
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
   ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
   ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,
@@ -2576,6 +2577,12 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
         };
       }
     } catch { /* Missing timing leaves the admitted source's original pace. */ }
+    const isosurfaceSubmitInterleaveEnabled = Boolean(
+      isosurfacePresentationEnabled
+      && !workerOwnedIsosurfacePresenterOverride
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+    );
     let result;
     try {
       result = await timeoutResidentStage(
@@ -2585,6 +2592,17 @@ export async function runResidentScheduleOnPresentationDevice(data = {}, {
             id: data.id ?? null,
             ...(postLivePreviewProgress || postSourceTimingProgress
               ? { postProgress: postLivePreviewProgress || postSourceTimingProgress }
+              : {}),
+            ...(isosurfaceSubmitInterleaveEnabled
+              ? {
+                  getPresentationSubmitSerial: () =>
+                    workerOwnedIsosurfacePresenter?.getPresentationSubmitSerial?.() ?? 0,
+                  waitForPresentationSubmitTurn: (afterSerial) =>
+                    workerOwnedIsosurfacePresenter?.waitForPresentationSubmitTurn?.({
+                      afterSerial,
+                      timeoutMs: 12
+                    }) ?? Promise.resolve(0)
+                }
               : {}),
             ...(presentScheduleSubmissionBoundary
               ? {
@@ -4234,7 +4252,11 @@ export async function runWorkerIsosurfaceTemporalPresentationSubmissionBoundary(
     || typeof activePresenter?.presentSubmissionBoundary !== 'function') {
     throw new Error('worker isosurface presentation is unavailable at the fused submission boundary');
   }
-  const frame = await activePresenter.presentSubmissionBoundary(boundary, { signal });
+  const boundaryWithCap = Number.isSafeInteger(maxSubstepsPerSubmission)
+    && maxSubstepsPerSubmission > ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION
+    ? { ...boundary, maxSubstepsPerSubmission }
+    : boundary;
+  const frame = await activePresenter.presentSubmissionBoundary(boundaryWithCap, { signal });
   const receipt = Object.freeze({
     schema: ULG_WORKER_TIER0_PRESENTATION_QOS_BOUNDARY_PROOF_SCHEMA,
     status: ULG_WORKER_TIER0_ISOSURFACE_PRESENTATION_QOS_BOUNDARY_PROOF_STATUS,

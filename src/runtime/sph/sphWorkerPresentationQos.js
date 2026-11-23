@@ -51,16 +51,24 @@ export function isExactWorkerPresentationFrameQueueCompletionProof(
 export function isExactWorkerIsosurfacePresentationQueueAttributionProof(
   receipt,
   {
-    maxSubstepsPerSubmission =
-      ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION
+    maxSubstepsPerSubmission = null
   } = {}
 ) {
   // These identities reach the mechanics replay audit unchanged. Do not
   // accept numeric strings: relational replay checks must remain numeric.
+  const boundaryCap = receipt?.motionPresentationQosBoundary?.maxSubstepsPerSubmission;
+  const boundaryTotal = receipt?.motionPresentationQosBoundary?.totalSubstepCount;
+  const authorizedBoundaryCap = Number.isSafeInteger(boundaryCap)
+    && boundaryCap > 0
+    && boundaryCap <= 16
+    && Number.isSafeInteger(boundaryTotal)
+    && boundaryCap < boundaryTotal
+    ? boundaryCap
+    : null;
   const effectiveMaxSubsteps = Number.isSafeInteger(maxSubstepsPerSubmission)
     && maxSubstepsPerSubmission > 0
     ? maxSubstepsPerSubmission
-    : ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION;
+    : (authorizedBoundaryCap ?? ULG_WORKER_TIER0_PRESENTATION_QOS_MAX_SUBSTEPS_PER_SUBMISSION);
   if (
     !Number.isSafeInteger(receipt?.presentationQueueCompletionCount)
     || !Number.isSafeInteger(receipt?.presentationQueueCompletionSerial)

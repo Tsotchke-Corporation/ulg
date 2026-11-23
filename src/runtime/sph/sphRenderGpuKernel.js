@@ -56,11 +56,37 @@ import {
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import { incandescentColor } from '../material/radiationClosure.js';
 import {
+  acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createExplicitComputePipeline,
-  deferSubmittedWorkCleanup
+  deferSubmittedWorkCleanup,
+  registerQueueOrderedPooledBufferReturn,
+  releaseOrDestroyQueueOrderedPooledBuffer
 } from '../webgpuComputeLayout.js';
+
+function acquireRenderPooledBuffer(device, { bucketKey, label, size, usage }) {
+  const normalizedSize = Math.max(4, Math.ceil(Number(size) || 4));
+  if (
+    typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && typeof device.queue?.onSubmittedWorkDone === 'function'
+  ) {
+    const buffer = acquireQueueOrderedPooledBuffer(device, {
+      bucketKey,
+      label,
+      size: normalizedSize,
+      usage
+    });
+    return registerQueueOrderedPooledBufferReturn(buffer, device, {
+      bucketKey,
+      size: normalizedSize,
+      usage
+    });
+  }
+  return device.createBuffer({ label, size: normalizedSize, usage });
+}
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_IDENTITY_UINTS,
@@ -8856,7 +8882,8 @@ export async function buildSphRenderFieldWebGpu({
           SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
         ));
       const productHistoryGateParamsBuffer = ownUnpublishedBuffer(
-        device.createBuffer({
+        acquireRenderPooledBuffer(device, {
+          bucketKey: 'ulg-sph-render-field-product-history-gate-params',
           label: 'ulg-sph-render-field-product-history-gate-params',
           size: 32,
           usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -8869,11 +8896,20 @@ export async function buildSphRenderFieldWebGpu({
           resolvedProductEventLiveCountDescriptor
         )
       );
-      const surfaceBuffer = ownUnpublishedBuffer(writeStorageBuffer(
-        device,
-        'ulg-sph-render-field-surfaces',
-        surfaceRecordsForSubmission
-      ));
+      const surfaceBuffer = ownUnpublishedBuffer(
+        (() => {
+          const buf = acquireRenderPooledBuffer(device, {
+            bucketKey: 'ulg-sph-render-field-surfaces',
+            label: 'ulg-sph-render-field-surfaces',
+            size: Math.max(4, surfaceRecordsForSubmission?.byteLength ?? 4),
+            usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+          });
+          if (surfaceRecordsForSubmission?.byteLength > 0) {
+            device.queue.writeBuffer(buf, 0, surfaceRecordsForSubmission);
+          }
+          return buf;
+        })()
+      );
       const fieldRowsBufferBorrowed = Boolean(targetFieldRowsBuffer);
       const fieldRowsBuffer = targetFieldRowsBuffer || ownUnpublishedBuffer(
         createZeroedStorageBuffer(
@@ -8893,7 +8929,8 @@ export async function buildSphRenderFieldWebGpu({
             GPU_BUFFER_USAGE.COPY_SRC
           ))
         : null;
-      const paramsBuffer = ownUnpublishedBuffer(device.createBuffer({
+      const paramsBuffer = ownUnpublishedBuffer(acquireRenderPooledBuffer(device, {
+        bucketKey: 'ulg-sph-render-field-params',
         label: 'ulg-sph-render-field-params',
         size: 32,
         usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -9004,7 +9041,8 @@ export async function buildSphRenderFieldWebGpu({
           ]
         });
         pipelineCacheStatus = cacheStatus;
-        const bindGroup = device.createBindGroup({
+        const bindGroup = createCachedExplicitBindGroup(device, {
+          label: 'ulg-sph-render-field-bg',
           layout: bindGroupLayout,
           entries: [
             { binding: 0, resource: sourceRowsResource },
@@ -9165,7 +9203,7 @@ export async function buildSphRenderFieldWebGpu({
     destroy() {
       if (motionFieldDestroyed) return false;
       motionFieldDestroyed = true;
-      motionFieldBuffer.destroy?.();
+      releaseOrDestroyQueueOrderedPooledBuffer(motionFieldBuffer);
       return true;
     }
   }) : null;
@@ -9174,16 +9212,16 @@ export async function buildSphRenderFieldWebGpu({
   const cleanup = () => {
     if (cleanupDone) return;
     cleanupDone = true;
-    if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
-    if (!borrowedProductEventBuffer) sourceProductEventBuffer.destroy?.();
+    if (!borrowedRenderRowsBuffer) releaseOrDestroyQueueOrderedPooledBuffer(sourceRowsBuffer);
+    if (!borrowedProductEventBuffer) releaseOrDestroyQueueOrderedPooledBuffer(sourceProductEventBuffer);
     if (!borrowedDispersedMediumOpticsBuffer) {
-      sourceDispersedMediumOpticsBuffer.destroy?.();
+      releaseOrDestroyQueueOrderedPooledBuffer(sourceDispersedMediumOpticsBuffer);
     }
-    if (productHistoryControlBufferOwned) productHistoryControlBuffer.destroy?.();
-    productHistoryGateParamsBuffer.destroy?.();
-    if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
-    if (!retainFieldRowsBuffer && !fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
-    paramsBuffer.destroy?.();
+    if (productHistoryControlBufferOwned) releaseOrDestroyQueueOrderedPooledBuffer(productHistoryControlBuffer);
+    releaseOrDestroyQueueOrderedPooledBuffer(productHistoryGateParamsBuffer);
+    if (!retainSurfaceBuffer) releaseOrDestroyQueueOrderedPooledBuffer(surfaceBuffer);
+    if (!retainFieldRowsBuffer && !fieldRowsBufferBorrowed) releaseOrDestroyQueueOrderedPooledBuffer(fieldRowsBuffer);
+    releaseOrDestroyQueueOrderedPooledBuffer(paramsBuffer);
   };
   let renderFieldDeferredCleanup = false;
   if (deferNoFullCleanup && useQueueFenceForCleanup) {
@@ -9366,7 +9404,7 @@ export async function buildSphRenderFieldWebGpu({
     const destroyRenderFieldBufferOnce = (resourceKey, buffer) => {
       if (destroyedRenderFieldResourceKeys.has(resourceKey)) return;
       destroyedRenderFieldResourceKeys.add(resourceKey);
-      buffer?.destroy?.();
+      releaseOrDestroyQueueOrderedPooledBuffer(buffer);
     };
     result.destroyRenderFieldBuffers = ({
       force = false,
@@ -9969,12 +10007,12 @@ export async function extractSphRenderRowsWebGpu({
             : new Float32Array(16)
         ));
       const renderRowsBuffer = ownUnpublishedRenderRowsBuffer(
-        createZeroedStorageBuffer(
-          device,
-          'ulg-sph-render-rows',
-          renderRowsByteLength,
-          GPU_BUFFER_USAGE.COPY_SRC
-        )
+        acquireRenderPooledBuffer(device, {
+          bucketKey: 'ulg-sph-render-rows',
+          label: 'ulg-sph-render-rows',
+          size: Math.max(4, renderRowsByteLength),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+        })
       );
       const useGpuHandoffBuffer = noFullReadback
         && retainRenderRowsBuffer
@@ -9997,7 +10035,8 @@ export async function extractSphRenderRowsWebGpu({
         0
       ) * SPH_RENDER_ROW_MAX_GAS_RADIUS_SMOOTHING_RATIO;
       const paramsBuffer = ownUnpublishedRenderRowsBuffer(
-        device.createBuffer({
+        acquireRenderPooledBuffer(device, {
+          bucketKey: 'ulg-sph-render-rows-params',
           label: 'ulg-sph-render-rows-params',
           size: SPH_RENDER_ROWS_PARAMS_BYTES,
           usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
@@ -10032,7 +10071,8 @@ export async function extractSphRenderRowsWebGpu({
             computeBufferBinding(6, 'read-only-storage')
           ]
         });
-      const bindGroup = device.createBindGroup({
+      const bindGroup = createCachedExplicitBindGroup(device, {
+        label: 'ulg-sph-render-rows-bg',
         layout: bindGroupLayout,
         entries: [
           {
@@ -10087,6 +10127,9 @@ export async function extractSphRenderRowsWebGpu({
         ]
       });
       const encoder = device.createCommandEncoder();
+      if (renderRowsBuffer && typeof encoder.clearBuffer === 'function') {
+        encoder.clearBuffer(renderRowsBuffer);
+      }
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
@@ -10256,7 +10299,7 @@ export async function extractSphRenderRowsWebGpu({
   const deferredCleanupBuffers = [];
   const destroyDeferredCleanupBuffers = () => {
     for (const buffer of deferredCleanupBuffers) {
-      buffer?.destroy?.();
+      releaseOrDestroyQueueOrderedPooledBuffer(buffer);
     }
     deferredCleanupBuffers.length = 0;
   };
@@ -10269,7 +10312,7 @@ export async function extractSphRenderRowsWebGpu({
       );
     }
     destroyDeferredCleanupBuffers();
-    retainedRenderRowsBuffer.destroy?.();
+    releaseOrDestroyQueueOrderedPooledBuffer(retainedRenderRowsBuffer);
     releaseDispersedMediumOpticsBorrow?.();
     releaseDispersedMediumOpticsBorrow = null;
     if (retainedSuccessorSourceFamilyLease) {
@@ -10285,7 +10328,7 @@ export async function extractSphRenderRowsWebGpu({
   const destroyOrDefer = (buffer) => {
     if (!buffer?.destroy) return;
     if (deferNoFullReadbackCleanup) deferredCleanupBuffers.push(buffer);
-    else buffer.destroy();
+    else releaseOrDestroyQueueOrderedPooledBuffer(buffer);
   };
   if (!borrowedStateBuffer) destroyOrDefer(stateBuffer);
   if (!borrowedThermoBuffer) destroyOrDefer(thermoBuffer);

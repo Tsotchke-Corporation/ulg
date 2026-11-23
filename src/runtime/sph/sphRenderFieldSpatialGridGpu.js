@@ -1,6 +1,7 @@
 import { sphDispersedMediumOpticsWgsl } from '../../../ulg-gpu-abi/src/sphDispersedMediumWgsl.js';
 import {
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
@@ -2077,7 +2078,7 @@ export function encodeSphRenderFieldSpatialGridPasses({
   });
 
   const particleBinBG = plan.particleWorkgroups > 0
-    ? device.createBindGroup({
+    ? createCachedExplicitBindGroup(device, {
         label: 'ulg-sph-render-field-spatial-particle-bin-bg',
         layout: countParticlePipe.bindGroupLayout,
         entries: [
@@ -2120,7 +2121,7 @@ export function encodeSphRenderFieldSpatialGridPasses({
       entryPoint: 'scatter_event_bricks',
       bindings: eventBinBindings
     });
-    eventBinBG = device.createBindGroup({
+    eventBinBG = createCachedExplicitBindGroup(device, {
       label: 'ulg-sph-render-field-spatial-event-bin-bg',
       layout: countEventPipe.bindGroupLayout,
       entries: [
@@ -2135,7 +2136,7 @@ export function encodeSphRenderFieldSpatialGridPasses({
     });
   }
 
-  const scanBG = device.createBindGroup({
+  const scanBG = createCachedExplicitBindGroup(device, {
     label: 'ulg-sph-render-field-spatial-scan-bg',
     layout: scanBlocksPipe.bindGroupLayout,
     entries: [
@@ -2144,7 +2145,7 @@ export function encodeSphRenderFieldSpatialGridPasses({
     ]
   });
 
-  const gatherBG = device.createBindGroup({
+  const gatherBG = createCachedExplicitBindGroup(device, {
     label: 'ulg-sph-render-field-spatial-gather-bg',
     layout: gatherPipe.bindGroupLayout,
     entries: [

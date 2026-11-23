@@ -38,6 +38,7 @@ import { resolveSphSpatialGasHistoryVolumeInput, resolveSphSpatialGasChainPressu
 import { createSphExactHistoryGasVolumeWgsl } from './sphExactHistoryGasVolumeWgsl.js';
 import { createSchroederSpatialChainVolumeGpu } from './schroederSpatialChainVolumeGpu.js';
 import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
+import { createCachedExplicitBindGroup } from '../webgpuComputeLayout.js';
 import { createSphSpatialGasChainFreeVolumeWgsl } from './sphSpatialGasChainFreeVolumeWgsl.js';
 import { sphSpatialGasChainPressureWgsl } from './sphSpatialGasChainPressureWgsl.js';
 import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
@@ -1244,7 +1245,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         pipelineObject,
         suffix,
         selectedResources = resources
-      ) => device.createBindGroup({
+      ) => createCachedExplicitBindGroup(device, {
         label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
         layout: pipelineObject.getBindGroupLayout(0),
         entries: [
@@ -1499,8 +1500,11 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
               const resources = new Map([[3,original.pressureBuffer],[4,original.directoryBuffer],
                 [6,original.controlBuffer],[7,paramsBuffer],[8,parentBuffer],
                 [9,arena.chainPressureBuffer],[10,arena.chainParamsBuffer]]);
-              const group=device.createBindGroup({layout:pressurePipelines.bindGroupLayout,
-                entries:[...resources].map(([binding,buffer])=>({binding,resource:{buffer}}))});
+              const group = createCachedExplicitBindGroup(device, {
+                label: 'ulg-sph-gas-chain-pressure',
+                layout: pressurePipelines.bindGroupLayout,
+                entries: [...resources].map(([binding, buffer]) => ({ binding, resource: { buffer } }))
+              });
               pressureEncoder.clearBuffer(arena.chainPressureBuffer);
               const pass=pressureEncoder.beginComputePass();pass.setBindGroup(0,group);
               pass.setPipeline(pressurePipelines.pipelines[0]);pass.dispatchWorkgroups(1);
@@ -2189,7 +2193,7 @@ export function encodeSphSpatialGasFreeVolumeEosAuthority(
       throw new TypeError('bindGroupLayout must be a WebGPU layout object');
     }
     const passLabel = pass === 'finalize' ? 'finalizer' : pass;
-    const bindGroup = createBindGroup.call(candidateDevice, {
+    const bindGroup = createCachedExplicitBindGroup(candidateDevice, {
       label: `${record.label}-eos-${passLabel}-bind-group`,
       layout: bindGroupLayout,
       entries: [

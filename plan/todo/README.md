@@ -2,11 +2,12 @@
 
 - **Start here:** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) first for
   the full **40-order-of-magnitude bottom-up + bidirectional bookend roadmap
-  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**4/8
+  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**5/8
   formally accepted:** `G5`, `G7`, [`Gate 1`](../done/gate1-periodic-table.md),
-  and [`Gate 2`](../done/gate2-reactions-polytope-atlas.md); Gates 0, 3, 4, and
-  5 honestly `in_progress` at `b9e86811`), Section 3 GPU budgets, and exact
-  execution sequence.
+  [`Gate 2`](../done/gate2-reactions-polytope-atlas.md), and
+  [`Gate 4`](../done/gate4-studio-presentation.md); Gates 0, 3, and 5 honestly
+  `in_progress` at `44bb6f13`), Section 3 GPU budgets, and exact execution
+  sequence.
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
 
@@ -87,15 +88,18 @@ Completed items live in [`plan/done/`](../done/); superseded items live in
 
 ---
 
-## Priority 4 — Gate 4: Interactive Studio Presentation & Real-Time Optics (`10⁻³ → 10⁺² m`)
+## Priority 4 — Gate 4: Interactive Studio Presentation & Real-Time Optics (`10⁻³ → 10⁺² m`) — **FORMALLY ACCEPTED (`3/3 PASS`, 2026-11-23)**
 
-> Decoupled `>= 54 Hz` presentation (`visibleMotionCadenceVerified: true`)
-> across all 5 active Studio presets with true WebGPU isosurfaces, refraction,
-> Cherenkov, and volumetric plumes.
+> Formal acceptance record: [`plan/done/gate4-studio-presentation.md`](../done/gate4-studio-presentation.md)
+> (`44bb6f13`, `3/3 PASS`: all 5 active Studio presets `72.96–113.25 Hz` mean
+> presented, `62–100 Hz` min sustained 500ms, `25.3–33.5 ms` max gap, `5/5`
+> Pause/Step/Reset across lane rebuilds, `3/3` native Vulkan optics PASS,
+> `6,212/6,212` host tests PASS, `KERNEL_CLEAN`). File below remains open solely
+> for remaining Gate 3 non-SS conduction retirement.
 
-| File | Gate | Live-Code Reality (`b9e86811`, 2026-11-23) & Open Work |
+| File | Gate | Live-Code Reality (`44bb6f13`, 2026-11-23) & Remaining Gate 3 Work |
 |---|---|---|
-| [`surface-contact-transport-phase-closure-plan.md`](surface-contact-transport-phase-closure-plan.md) | Gate 3 / 4 | Magic `80/82/24` isovalues replaced with continuous density scaling; visible Wayland Chrome 5-preset sweep completed (`0` page/GPU/Xid errors, `visibleContentAdvanced: true`, `water-realtime` `1.21–1.27x` RT), measuring real presented cadence `18.8–33.8 Hz` (`water-cycle` `27.49 Hz`, `iron-ice-quench` `18.79 Hz`, `sodium-water` `27.63 Hz`, `cesium-fluorine` `33.81 Hz`, `water-realtime` `22.93 Hz`). Remaining: decouple double-vsync `onSubmittedWorkDone` + `rAF` shared-queue contention to reach `>= 54 Hz` (`visibleMotionCadenceVerified: true`) across all 5 active presets, and retire legacy non-SS conduction path. |
+| [`surface-contact-transport-phase-closure-plan.md`](surface-contact-transport-phase-closure-plan.md) | Gate 3 / Gate 4 (Accepted) | **Gate 4 ACCEPTED (`44bb6f13`):** All 5 active Studio presets verified `>= 54 Hz` visibly advancing true-isosurface presentation (`visibleMotionCadenceVerified: true`, `resetVerified: true`, `water-realtime` `113.25 Hz` / `1.84–2.09x` RT). Remaining Gate 3 item: retire legacy non-SS conduction path. |
 
 ---
 

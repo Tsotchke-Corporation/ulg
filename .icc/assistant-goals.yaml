@@ -5,9 +5,10 @@
 #
 # HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
 # .icc/completion-oracles.yaml target passes on one reviewed
-# `ulg.campaign.receipt.v1` bundle on disk. Today 4/8 active gates are
+# `ulg.campaign.receipt.v1` bundle on disk. Today 5/8 active gates are
 # formally accepted: g5-reservation, g7-release-audit,
-# gate1-periodic-table-engine, and gate2-reactions-and-polytope-atlas.
+# gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas, and
+# gate4-studio-presentation.
 
 goals:
   - id: gate0-foundation-arch
@@ -53,12 +54,12 @@ goals:
   - id: gate4-studio-presentation
     task_id: ulg-gate4-studio-presentation
     priority: high
-    status: in_progress
+    status: completed
     goal: "Priority 4 (Gate 4, 10^-3 -> 10^+2 m): Decoupled >=54 Hz presentation of latest committed physics state (visibleMotionCadenceVerified=true) across all 5 active Studio presets with true WebGPU isosurfaces, refraction, Cherenkov, volumetric plumes, and zero visual fakes"
     oracle: ulg-gate4-studio-presentation
     depends_on: [gate3-continuum-substrate-and-physics]
-    reason: "Owner-approved visible Wayland Chrome 5-preset sweep completed 2026-11-23 (/home/cos/.cache/icc/repos/ulg/gate4-wayland-sweep-20261123/ and gate4-wayland-sweep-v2-20261123/): all 5 presets rendered true WebGPU isosurfaces with visibleContentAdvanced=true, 0 page/GPU/Xid errors, and water-realtime at 1.21-1.27x RT, but measured presented cadence remains below the >=54 Hz gate (water-cycle 21.29 -> 27.49 Hz, iron-ice-quench 18.79 Hz, sodium-water 27.63 Hz, cesium-fluorine 33.81 Hz, water-realtime 22.93 Hz; UI rAF 56.4-60.0 Hz). Root cause diagnosed as double-vsync onSubmittedWorkDone + rAF contention on the shared WebGPU queue. Remains honestly in_progress until decoupled presentation reaches >=54 Hz (visibleMotionCadenceVerified=true) across all 5 presets."
-    tags: [ulg-scale-ladder, gate-4, presentation]
+    reason: "Accepted 2026-11-23 at commit 44bb6f13 (dirty: false): ICC completion-oracle ulg-gate4-studio-presentation 3/3 PASS (status: complete) on fresh ICC index after 2-round independent audit (Round 1 FAIL 2d955c07 preserved at independent-review-round1-fail.md; Round 2 ACCEPT 1b886022). Visible Wayland Vulkan 5-preset sweep verified visibleMotionCadenceVerified=true across all 5 presets (water-cycle 89.96 Hz / minSust500ms 78 / maxGap 25.3 ms; iron-ice-quench 72.96 Hz / 62 / 33.5 ms; sodium-water 76.82 Hz / 70 / 30.6 ms; cesium-fluorine 74.29 Hz / 62 / 28.5 ms; water-realtime 113.25 Hz / 100 / 25.7 ms / 1.84-2.09x RT; UI rAF ~120 Hz reported separately), finite motion horizon with distinct f32 shader ages (zero Zeno loop), 5/5 Pause/Step/Reset verified across lane rebuilds (resetStep=4), 41/41 manifest hashes, 15/15 PNG hashes (10/10 visually inspected), 3/3 native Vulkan optics/Cherenkov/parcel-optics PASS, 6212/6212 host tests PASS, 37M build (0 AI/ort-wasm assets), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate4-acceptance-20261123/ and plan/done/gate4-studio-presentation.md."
+    tags: [ulg-scale-ladder, gate-4, presentation, accepted]
 
   - id: gate5-planetary-to-supergalactic
     task_id: ulg-gate5-planetary-to-supergalactic

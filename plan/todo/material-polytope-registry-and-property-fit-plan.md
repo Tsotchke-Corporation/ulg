@@ -2,17 +2,19 @@
 
 Date: 2026-06-18 AKDT
 
-> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 0 / Gate 2):** Core
-> `src/runtime/material/materialPolytopeRegistry.js` (v0 rectangular `(T, P)`
-> polytopes + strict `A x <= b` fail-closed membership + closure-hash
-> invalidation) and `src/runtime/material/responseFunctionFitGpu.js` (1D/2D
-> WebGPU Chebyshev fitter) are **LANDED** and wired into
-> `cosmicQuantumZoomDemo.js`. Next under **Gate 2 (Track P3)**: upgrade to true
-> piecewise-convex slanted phase-boundary polytopes (`ulg.polytope-atlas.v1`),
-> auto-bisection + conservation/residual gates, 3D Atlas Visualizer, and direct
-> Tier-1 GPU material packing. Active routing:
-> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) &
-> [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md).
+> **2026-11-23 Live-Code Status (`98214a11`, Gate 0C / Gate 2 / Gate 3):**
+> **CORE + GPU TIER-1 BRIDGE LANDED & VULKAN-VERIFIED:**
+> `materialPolytopeRegistry.js` (slanted Clausius–Clapeyron `A x <= b` half-spaces
+> + `canonicalMaterialIsotopeKey` for `(Z/formula, A)` isotopes & isotopologues),
+> `chebyshevPolytopeFitGpu.js` (adaptive curvature-axis GPU Chebyshev fitter),
+> `polytopeAtlasBuilder.js` (Eshkol higher-order AD laws + MoonLab 5-slot Triad
+> synthesis), `foundation-polytope-atlas.json` (`118` elements + `20` compounds
+> covering `15/15` `compounds.json` with `0` `reference-fallback`), AND
+> `foundationPolytopeAtlasGpuBridge.js` (live Vulkan GPU batch `evaluatePolytopeAtlasWgsl`
+> with `hitFlag == 0` miss escalation to Triad GPU adoption + automatic Studio
+> worker seeding). Open: persistent OPFS/IndexedDB Polytope Atlas cache & formal
+> reviewed `ulg.campaign.receipt.v1`. Active routing:
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 ## Purpose
 

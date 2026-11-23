@@ -3,8 +3,8 @@
 - **Start here:** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) first for
   the full **40-order-of-magnitude bottom-up + bidirectional bookend roadmap
   (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (`G5`
-  & `G7` accepted; `Gate 0`–`Gate 5` core engines, Triad bridge, and bookends
-  implemented & Vulkan-verified at `99db3434`, pending formal receipt capture &
+  & `G7` accepted; `Gate 0`–`Gate 5` + **Priorities 1–5** implemented &
+  Vulkan/WebRTC-verified through `c09644f8`, pending formal receipt capture &
   remaining Gate 0D/3/4 targets), Section 3 GPU budgets, and exact execution sequence.
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
@@ -22,40 +22,41 @@ Completed items live in [`plan/done/`](../done/); superseded items live in
 > GPU MD, GPU Chebyshev), slim `peercompute-core` packaging, canonical
 > Material-Bundle & Polytope-Atlas ABIs, and Continuum Zero-Churn Step Loop.
 
-| File | Gate | Live-Code Reality (`d687b37e`, 2026-11-23) & Open Work |
+| File | Gate | Live-Code Reality (`c09644f8`, 2026-11-23) & Open Work |
 |---|---|---|
-| [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md) | **Gate 0 / 1 / 2 (Master)** | **Primary Foundation Blueprint:** Gate 0A–0C (`peercomputeCore.js`, `dist/ 35 MB`, `src/runtime/gpuMath/`, `materialFoundationAbi.js`), Gate 1 (`Z=1..118` engine, `elements.json` `118/118`, `elements-lab.html`), and Gate 2 (`molecularHartreeFockWebGpu`, `recursiveCompoundPipeline`, Eshkol/MoonLab `polytopeAtlasBuilder`, `foundation-polytope-atlas.json`) **landed & Vulkan-verified**. Open: **End-to-End Isotope & Isotopologue Propagation** (`(Z, A)` mass/Debye/MD/formula/Cherenkov/UI), deeper Dirac 4-comp/`DFT+U`/CI-NEB visuals, remaining Gate 0D zero-churn, and formal `ulg.campaign.receipt.v1`. |
-| [`cold-start-cache-performance-plan.md`](cold-start-cache-performance-plan.md) | Gate 0A | **0A DONE (`0af39d00`):** `peercomputeCore.js` + `worker.plugins` cut `dist/` **`117.5 MB → 35 MB`** (`0` `ort-wasm`/`transformers`/`sf3d` assets). Open: persistent IndexedDB/OPFS warm cache for derived Polytope Atlases & compiled WebGPU pipelines. |
-| [`a1-realtime-substrate.md`](a1-realtime-substrate.md) | Gate 0D / Gate 3 | **0D Slice 1 DONE (`13bfda97`):** cached SS/gas-EOS/solid bind groups, pooled receipt ring, shared solid-fluid spatial hash (`water-realtime` `5.04 → 13.60 steps/s`, `2.70x` faster; `iron-ice` `bindGroups 40.51 → 36.42`, GPU mean `25.3%`). Open: fix `water-realtime` K-step boundary frame check (`>= 1.0x` RT), drive `iron-ice` to `<= 25` passes / `<= 2` submits / `0` per-step `workDone` / `0` transient `createBuffer`, deduplicate 5 contact laws, retire unused 63-limb `sphExactRational*`, burn down `76` WGSL patches & `@workgroup_size(1)` kernels. |
+| [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md) | **Gate 0 / 1 / 2 (Master)** | **Primary Foundation Blueprint:** Gate 0A–0C, Gate 1 (`Z=1..118` + **Priority 1 end-to-end `(Z, A)` isotopes & isotopologues** + clickable Chart of Nuclides), and Gate 2 (`molecularHartreeFockWebGpu`, `recursiveCompoundPipeline`, **Priority 5 live CI-NEB reaction barrier visuals**, **Priority 3 `20` compounds covering `15/15` `compounds.json` with `0` `reference-fallback`**, and `foundationPolytopeAtlasGpuBridge.js`) **landed & Vulkan-verified**. Open: remaining Gate 0D iron-ice churn, deeper 4-comp Dirac/`DFT+U` refinements, OPFS Atlas cache, and formal `ulg.campaign.receipt.v1`. |
+| [`cold-start-cache-performance-plan.md`](cold-start-cache-performance-plan.md) | Gate 0A | **0A DONE (`0af39d00`):** `peercomputeCore.js` + `worker.plugins` cut `dist/` **`117.5 MB → 36 MB`** (`0` `ort-wasm`/`transformers`/`sf3d` assets). Open: persistent IndexedDB/OPFS warm cache for derived Polytope Atlases & compiled WebGPU pipelines. |
+| [`a1-realtime-substrate.md`](a1-realtime-substrate.md) | Gate 0D / Gate 3 | **0D Slices 1–2 DONE (`13bfda97`, `ca9824d8`):** `water-realtime` K-step pacing fixed (`0` boundary failures, `k=3`, **`submits 1.72 <= 2`**, `computePasses 16.24 <= 25`, `mapAsync 0`, **`15.45 steps/s` (`3.07x` faster!)**, GPU mean **`7.8%`**); 7 SS view bindGroup caches upgraded to 8-slot LRU + `nativeSurfaceTemperatureWgsl` slab binding (`iron-ice` **`bindGroups 40.51 → 30.79`**, `submits 4.30 → 3.65`, **`steps/s 2.61 → 3.77` (`+44%`)**, GPU mean **`8.0%`**). Open: drive `iron-ice` to `<= 25` passes / `<= 2` submits / `0` per-step `workDone` / `0` transient `createBuffer`, push `water-realtime` to `>= 1.0x` RT, deduplicate 5 contact laws, retire unused 63-limb `sphExactRational*`. |
 | [`selective-contact-law-application-plan.md`](selective-contact-law-application-plan.md) | Gate 0D / Gate 3 | Duplicate solid-fluid 4,096-bucket thermal/contact spatial hash collapsed (`13bfda97`); open: A/B & deduplicate the 5 overlapping iron-ice contact responses down to 1 canonical GPU contact authority and retire legacy duplicate contact tests. |
 
 ---
 
-## Priority 1 — Gate 1: Complete Periodic Table First-Principles Engine (`10⁻¹⁵ → 10⁻⁹ m`, `Z = 1..118` + Isotopes)
+## Priority 1 — Gate 1: Complete Periodic Table First-Principles Engine (`10⁻¹⁵ → 10⁻⁹ m`, `Z = 1..118` + Full `(Z, A)` Isotopes)
 
 > Flagship demo [`elements-lab.html`](../../elements-lab.html) landed & visually
-> verified across all 6 live GPU tabs (Nuclear, Atomic QM, Crystal & EM, live 3D
-> WebGPU MD, Compound & Reaction QM, `log10(T)` Convex Polytope Atlas).
+> verified across all 6 live GPU tabs + interactive **`(Z, A)` Isotope picker &
+> clickable `118×200` Chart of Nuclides** (`f6623b39`) + live **CI-NEB Reaction
+> Barrier (`E_a`, `‡ TS`)** (`c09644f8`).
 
-| File | Gate | Live-Code Reality (`d687b37e`, 2026-11-23) & Open Work |
+| File | Gate | Live-Code Reality (`c09644f8`, 2026-11-23) & Open Work |
 |---|---|---|
-| [`webgpu-material-property-resolvers-plan.md`](webgpu-material-property-resolvers-plan.md) | Gate 1 | **P1.1–P1.5 Core Engine LANDED & VULKAN-VERIFIED:** `nuclearStructureGpu.js`, finite-nucleus Koelling–Harmon+QED `radialKohnShamWebGpu.js` (`0` SCF readbacks), `periodicBulkDftWebGpu.js`, `electromagneticClosureWebGpu.js`, `elementMdClosureWebGpu.js`, `periodicTableEngineWebGpu.js`. Open: **End-to-End `(Z, A)` Isotope Propagation** (propagate `nuclear.atomicMassU` into bulk density/Debye/MD/zero-point energy, add reduced-mass & hyperfine shifts, retire 4-isotope hardcoded table in `nuclearCherenkovClosure.js` onto `nuclearStructureGpu.js`), 4-comp Dirac–KS / `DFT+U` refinements, and formal receipt. |
-| [`electron-cloud-material-derivation-visualization-plan.md`](electron-cloud-material-derivation-visualization-plan.md) | Gate 1 / 2 | Live nuclear 3D density + Chart of Nuclides + WKB barrier, atomic `ρ(r)`, Bloch 3D density + bands/DOS, live 3D WebGPU MD atoms, molecular RHF cloud, and `log10(T)` Polytope Atlas shipped in `elements-lab.html`. Open: interactive **Isotope `(A, N)` selector & clickable Chart of Nuclides**, spin-density `ρ_↑ − ρ_↓` / 3D Fermi surface views, and live CI-NEB reactive orbital evolution. |
-| [`material-property-json-bank-plan.md`](material-property-json-bank-plan.md) | Gate 1 / 2 | **`elements.json` CLOSED TO `118/118` (`4c2f170b`)** (all 7 noble gases `He..Og` added, Ajv Draft 2020-12 PASS) + [`foundation-polytope-atlas.json`](../../data/material-properties/foundation-polytope-atlas.json) (`118` elements + `15` reaction compounds + G7 advisory benchmarks). Open: migrate legacy `compounds.json` (`15/15` `reference-fallback`) onto Gate 2 derived bundles & add isotope/isotopologue keying (`D2O`, `235UF6`, `60Co`, `14CO2`). |
-| [`algorithm-derived-material-properties-plan.md`](algorithm-derived-material-properties-plan.md) | Gate 1 / 2 | Chapman–Enskog gas `μ, k`, Gate 1–2 5-domain bundles, and Eshkol/MoonLab 5-slot GPU A4 packing landed (`4c2f170b`); open: pack isotope-aware Gate 1–2 bundles natively into continuum GPU material rows. |
+| [`webgpu-material-property-resolvers-plan.md`](webgpu-material-property-resolvers-plan.md) | Gate 1 | **P1.1–P1.5 + Priority 1 `(Z, A)` Isotope Propagation DONE & VULKAN-VERIFIED (`f6623b39`):** two-body reduced-mass shift & Fermi-contact hyperfine splitting (`radialKohnShamWebGpu.js`), isotope mass/ZPE/Debye/MD (`periodicBulkDftWebGpu.js`, `elementMdClosureWebGpu.js`), arbitrary `(Z, A)` Gate 1 decay chains & Bateman ledger (`nuclearCherenkovClosure.js`). Open: 4-comp Dirac–KS / `DFT+U` refinements and formal receipt. |
+| [`electron-cloud-material-derivation-visualization-plan.md`](electron-cloud-material-derivation-visualization-plan.md) | Gate 1 / 2 | Interactive **Isotope `(A, N)` selector, `A*` reset, clickable `118×200` Chart of Nuclides, decay-chain readout (`f6623b39`)**, and live **CI-NEB Reaction Barrier & `‡ TS` curve (`c09644f8`)** landed & visually verified in `elements-lab.html`. Open: spin-density `ρ_↑ − ρ_↓` / 3D Fermi surface views. |
+| [`material-property-json-bank-plan.md`](material-property-json-bank-plan.md) | Gate 1 / 2 | **`elements.json` CLOSED TO `118/118` (`4c2f170b`)** + [`foundation-polytope-atlas.json`](../../data/material-properties/foundation-polytope-atlas.json) expanded to **`118` elements + `20` compounds (`98214a11`, covering `15/15` `compounds.json` with `0` `reference-fallback`)** + `foundationPolytopeCompoundRecordFor` & isotopologue keying (`D2O`, `T2O`, `235UF6`, `14CO2`, `60Co`, `3He`). Open: retire legacy CRC `compounds.json` tests once formal G7 benchmark switches over. |
+| [`algorithm-derived-material-properties-plan.md`](algorithm-derived-material-properties-plan.md) | Gate 1 / 2 | Chapman–Enskog gas `μ, k`, Gate 1–2 5-domain isotope-aware bundles, Eshkol/MoonLab 5-slot GPU A4 packing, and automatic Studio worker Triad seeding (`foundationPolytopeAtlasGpuBridge.js`, `98214a11`) landed. |
 
 ---
 
 ## Priority 2 — Gate 2: Chemical Reactions → Compound Feedback Loop → Convex Polytope Atlas (`10⁻¹⁰ → 10⁻⁶ m`)
 
-> Discover balanced reactions on GPU, feed every resultant compound **straight
-> back into Gate 1's simulation regime**, and compile every validated element,
-> isotope, and compound into a piecewise-convex `(T, log10 P, ...)` **Polytope Atlas**.
+> Discover balanced reactions on GPU, feed every resultant compound & isotopologue
+> **straight back into Gate 1's simulation regime**, and compile every validated
+> element, isotope, and compound into a piecewise-convex `(T, log10 P, ...)` **Polytope Atlas**.
 
-| File | Gate | Live-Code Reality (`d687b37e`, 2026-11-23) & Open Work |
+| File | Gate | Live-Code Reality (`c09644f8`, 2026-11-23) & Open Work |
 |---|---|---|
-| [`material-polytope-registry-and-property-fit-plan.md`](material-polytope-registry-and-property-fit-plan.md) | Gate 2 | **Core Atlas LANDED & VULKAN-VERIFIED (`0af39d00`, `4326c34e`, `4c2f170b`):** slanted Clausius–Clapeyron `A x <= b` half-spaces, adaptive curvature-axis GPU Chebyshev fitter, `evaluatePolytopeAtlasWgsl`, Eshkol AD higher-order laws, MoonLab 5-slot Triad GPU synthesis, `MaterialRegistry.attachPolytopeAtlas`, and `log10(T)` visualizer. Open: isotopologue keying (`H2O` vs `D2O`, `235U` vs `238U`), live Studio Tier-1 WGSL lookup consumption, and formal receipt. |
-| [`sedenion-reaction-scoping-plan.md`](sedenion-reaction-scoping-plan.md) | Gate 2 | Inert-candidate suppression fixed + `molecularHartreeFockWebGpu.js` & `recursiveCompoundPipeline.js` landed; open: GPU CI-NEB reaction barrier discovery wired into `elements-lab.html` + isotopologue formula parser (`D2O`, `[2H]2O`, `14C`, `235U`). |
+| [`material-polytope-registry-and-property-fit-plan.md`](material-polytope-registry-and-property-fit-plan.md) | Gate 2 / 3 | **DONE & VULKAN-VERIFIED (`0af39d00`, `f6623b39`, `98214a11`):** slanted Clausius–Clapeyron `A x <= b` half-spaces, `canonicalMaterialIsotopeKey` for `(Z/formula, A)`, adaptive GPU Chebyshev fitter, **`foundationPolytopeAtlasGpuBridge.js` live Vulkan `evaluatePolytopeAtlasWgsl` batch evaluation + `hitFlag == 0` Eshkol/MoonLab Triad miss escalation + automatic Studio worker seeding**. Open: OPFS/IndexedDB Atlas cache and formal receipt. |
+| [`sedenion-reaction-scoping-plan.md`](sedenion-reaction-scoping-plan.md) | Gate 2 | Isotopologue parser (`describeIsotopologueFormula`: `D2O`, `T2O`, `[2H]2O`, `235UF6`, `14CO2`, `60Co`) + H-site ZPE melting shift (`f6623b39`) AND live **CI-NEB reaction barrier (`E_a`, `‡ TS`)** in `elements-lab.html` (`c09644f8`) landed & verified. Open: GPU-batched multi-reaction network exploration. |
 
 ---
 
@@ -109,8 +110,8 @@ Completed items live in [`plan/done/`](../done/); superseded items live in
 > Scale Atlas multipole + Gate 1 nuclear/atomic closures + Gate 2 Polytope
 > Atlases + `peercompute-core` multi-host domain partitioning.
 
-| File | Sub-Scale | Live-Code Reality (`d687b37e`, 2026-11-23) & Open Work |
+| File | Sub-Scale | Live-Code Reality (`c09644f8`, 2026-11-23) & Open Work |
 |---|---|---|
-| [`planetary-to-supergalactic-scale-atlas-plan.md`](planetary-to-supergalactic-scale-atlas-plan.md) | **Gate 5 (Master)** | **5A–5D Core Engines & Top-Anchor Demo LANDED & VULKAN-VERIFIED (`4326c34e..99db3434`):** `planetaryStructureGpu.js` (5A), `stellarNucleosynthesisBridge.js` (5B), `galacticIsmCoolingGpu.js` (5C), `supergalacticTreePmGpu.js` + flagship `supergalactic.html` + `cosmicQuantumZoomDemo.js` FLRW upgrade + `distributedSpatialPartitioner.js` (5D). Open: migrate bespoke private octrees in `selfGravitatingHydroGpu.js` & `cosmicQuantumGpuKernels.js` onto canonical `SS` Scale Atlas multipole, multi-host WebRTC TreePM tile test (after `agy` ships PeerCompute extensions), and formal receipt. |
-| [`hydrogen-nebula-to-star-fusion-bridge-plan.md`](hydrogen-nebula-to-star-fusion-bridge-plan.md) | Gate 5B (Stellar) | Phase 1 `stellar-genesis.html` & translation-invariant GPU `self-gravitating-hydro@1` shipped; migrate off private octree onto shared `SS` Scale Atlas multipole, wire Gate 1 nuclear networks, and add G7 Lane–Emden / MESA advisory benchmarks. |
-| [`distributed-peercompute-network-stack-plan.md`](distributed-peercompute-network-stack-plan.md) | Gate 5D / Multi-Host | Single-host 2-browser-context WebRTC `RTCDataChannel` proof PASS (P3); stand up physical 2-machine WAN/NAT/STUN/TURN validation and distributed spatial domain partitioning for multi-GPU galactic & supergalactic simulations. |
+| [`planetary-to-supergalactic-scale-atlas-plan.md`](planetary-to-supergalactic-scale-atlas-plan.md) | **Gate 5 (Master)** | **5A–5D + Priority 5 Hybrid TreePM, Canonical Scale-Atlas Multipole & 2-Browser WebRTC TreePM LANDED & VERIFIED (`c09644f8`):** `planetaryStructureGpu.js`, `stellarNucleosynthesisBridge.js`, `galacticIsmCoolingGpu.js`, **`scaleAtlasAstrophysicsGravityBridge.js`** wired into BOTH `selfGravitatingHydroGpu.js` & `cosmicQuantumGpuKernels.js` (`momentumRelError < 1e-4`, `+5000` shift `< 1e-4`), **Hybrid FLRW TreePM** (`supergalacticTreePmGpu.js`: short-range `3×3×3` Gaussian-split tree + long-range `fft3dWebGpu` PM), and **2-browser-context WebRTC `RTCDataChannel` multi-host TreePM** (`priority5ScaleAtlasAndWebRtcTreePm.native.test.mjs`). Open: physical 2-machine WAN/TURN validation after `agy` ships PeerCompute extensions & formal receipt. |
+| [`hydrogen-nebula-to-star-fusion-bridge-plan.md`](hydrogen-nebula-to-star-fusion-bridge-plan.md) | Gate 5B (Stellar) | `selfGravitatingHydroGpu.js` wired onto canonical `SchroederScaleAtlas` multipole (`evaluateSelfGravitatingHydroScaleAtlasMultipoleWebGpu`, `c09644f8`) + Gate 1 nuclear Q-values & RK4 Lane–Emden in `stellarNucleosynthesisBridge.js`; open: retire internal octree fallback & add MESA advisory tables. |
+| [`distributed-peercompute-network-stack-plan.md`](distributed-peercompute-network-stack-plan.md) | Gate 5D / Multi-Host | **2-Browser-Context WebRTC `RTCDataChannel` A6 (`priority3GpuAndWebRtc`) + Multi-Host TreePM (`priority5ScaleAtlasAndWebRtcTreePm`, signaling WS closed + G5 CAS leases + fail-closed peer-loss reassignment) PASS (`c09644f8`)**; open: physical 2-machine WAN/NAT/STUN/TURN validation once `agy` ships `../peercompute` extensions. |

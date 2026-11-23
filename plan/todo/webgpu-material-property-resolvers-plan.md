@@ -2,21 +2,19 @@
 
 Date: 2026-06-11 AKDT
 
-> **2026-11-22 Live-Code Status (`2fe9e47b`, Gate 0 / Gate 1):**
-> - `src/runtime/electronicStructure/radialKohnShamWebGpu.js`: **100% GPU-resident**
->   radial LDA SCF eigensolver (`solveAtomFullWebGpu`, `0` per-SCF CPU readbacks,
->   `< 1.2e-5` vs CPU on Vulkan) **LANDED**. Open (Gate 1 P1.2): upgrade to full
->   4-component radial Dirac–KS + spin-polarized PBE/SCAN + finite `R_nuc(A)` +
->   QED radiative shifts on GPU.
-> - `src/runtime/material/opticalResolverWebGpu.js`: `webgpu-derived` 81-wavelength
->   Drude–Lorentz + spin-orbit interband + Frank–Tamm Cherenkov + Hervé–Vandamme
->   IOR (`keepResident` zero-readback path wired). Open (Gate 1 P1.3): GPU
->   Kubo–Greenwood dielectric `ε(ω)`, conductivity `σ(T)`, magnetism `χ(T)`.
-> - `periodicBulkDft.js`, `molecularHartreeFock.js`, and `mdEngine.js` remain
->   CPU JS; porting them onto Gate 0B `src/runtime/gpuMath/` (`batchedSymmetricEigensolverGpu`,
->   `fft3dWebGpu`, `molecularDynamicsWebGpu`) is scheduled under Gates 0–2.
-> - Active routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) &
->   [`periodic-table-polytope-atlas-foundation-plan.md`](periodic-table-polytope-atlas-foundation-plan.md).
+> **2026-11-23 Live-Code Status (`f6623b39..c09644f8`, Gate 1 / Gate 2):**
+> - **ALL 5 DOMAINS GPU-RESIDENT & ISOTOPE-NATIVE (`Z=1..118, A`):**
+>   `nuclearStructureGpu.js`, `radialKohnShamWebGpu.js` (finite `R_nuc(A)` +
+>   Koelling–Harmon + QED + two-body reduced-mass shift + Fermi-contact hyperfine
+>   splitting, `0` per-SCF CPU readbacks), `periodicBulkDftWebGpu.js` (GPU Bloch
+>   DFT + 3D FFT density + isotope mass/ZPE/Debye), `electromagneticClosureWebGpu.js`,
+>   `elementMdClosureWebGpu.js` (GPU LJ/EAM/SW MD + isotope mass/ZPE melting shift),
+>   `molecularHartreeFockWebGpu.js` (GPU RHF + 3D density), `recursiveCompoundPipeline.js`
+>   (isotopologue parsing `D2O`/`T2O`/`235UF6`/`14CO2` + ZPE), and Gate 1 arbitrary
+>   `(Z, A)` decay chains in `nuclearCherenkovClosure.js`.
+> - Remaining open: deeper 4-component Dirac–KS / `DFT+U` refinements and formal
+>   reviewed `ulg.campaign.receipt.v1`. Active routing:
+>   [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
 
 ## Current Answer (2026-06-11 Historical Baseline)
 

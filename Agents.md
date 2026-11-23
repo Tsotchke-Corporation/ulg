@@ -119,3 +119,32 @@ manufactured states, mathematical invariants, metamorphic GPU executions,
 same-device A/B paths, and compact GPU reductions. Read back only fixed-size
 evidence records; validation must not introduce CPU-owned hot state, serial data
 structures, readback/reupload boundaries, or a CPU fallback architecture.
+
+## Star Spec Anti-Shortcut Pre-Code Gate (Added 2026-11-22)
+
+Before writing any new law, closure, visualization, or demo in ULG, verify all
+five checks:
+
+1. **General physics, zero preset/material hacks:** Never add per-preset IDs,
+   material-name conditionals (`if (mat === 'h2o')`, `if (preset === 'binary')`),
+   or discrete `phase_mode` branches to physics or optics solvers. Macroscopic
+   behavior must emerge from continuous equations of state, closures, and
+   initial conditions.
+2. **Translation & multi-body invariance:** Never anchor forces, pressure
+   support, or optical effects to the world origin `(0, 0, 0)` or screen center
+   (`50% 54%`). Moving any body/cloud off-origin or splitting it into multiple
+   bodies must produce identical local physics.
+3. **Zero one-off animations or visual fakes:** Never simulate orbital motion,
+   molecular vibrations, proton collisions, shock rings, or Cherenkov glow with
+   hardcoded `Math.sin(t)`/`Math.cos(t)` loops, toggled canned meshes, or
+   fixed-screen CSS `radial-gradient` overlays. Every visible effect must be
+   rendered in 3D world space directly from live GPU simulation state.
+4. **Extend ULG's canonical GPU architecture (no toy silos or CPU mirrors):**
+   Plug new laws into ULG's existing `ClosureRegistry`, `SimulationModuleRegistry`,
+   Schroeder Spatial / MLS-MPM / exact `2^-149` ledger / volumetric GPU
+   renderers rather than building disconnected demo-only kernels or production
+   CPU mirror solvers.
+5. **Invariance-first verification:** Write tests that break hacks (off-origin
+   translation tests, arbitrary dielectric media, zero-preset/zero-origin-hack
+   WGSL checks, GPU-native invariants, and sequential visible Wayland Chrome
+   visual inspections).

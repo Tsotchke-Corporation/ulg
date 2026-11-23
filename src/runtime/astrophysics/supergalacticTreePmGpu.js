@@ -50,7 +50,7 @@ struct CosmoParams {
   omega_m: f32,
   grav_pref: f32,  // (3/2) * Omega_m * H_0^2 / a
   mean_mass_cell: f32,
-  pad0: f32,
+  short_range_r_s: f32, // TreePM force-split scale r_s (0 => pure PM)
 };
 
 struct CosmoParticle {
@@ -66,16 +66,40 @@ struct CosmoParticle {
 @group(0) @binding(2) var<storage, read_write> cic_mass_i32: array<atomic<i32>>;
 // Complex density / gradient grid bound to fft3d workspace
 @group(0) @binding(3) var<storage, read_write> fft_grid: array<vec2<f32>>;
-// 3-component force grid: vec4(fx, fy, fz, delta)
+// 3-component PM force grid: vec4(fx, fy, fz, delta)
 @group(0) @binding(4) var<storage, read_write> force_grid: array<vec4<f32>>;
 // Telemetry: [0]=sum_delta2*1e2, [1]=max_delta*1e3, [2]=sum_ke*1e3, [3]=px*1e3, [4]=py*1e3, [5]=pz*1e3
 @group(0) @binding(5) var<storage, read_write> telemetry: array<atomic<i32>>;
+// Short-range sub-cell TreePM atomic cell-multipole accumulators (grid_n^3 * 4 i32): [m, m*dx, m*dy, m*dz]
+@group(0) @binding(6) var<storage, read_write> sr_cell_accum: array<atomic<i32>>;
+// Resolved short-range TreePM cell multipole nodes: vec4(com_x, com_y, com_z, cell_mass)
+@group(0) @binding(7) var<storage, read_write> sr_cell_nodes: array<vec4<f32>>;
 
 fn wrap_coord(u: f32, L: f32) -> f32 {
   let half_l = 0.5 * L;
   var x = u + half_l;
   x = x - L * floor(x / L);
   return x - half_l;
+}
+
+// Minimum-image periodic displacement in [-L/2, L/2]
+fn wrap_delta(d: f32, L: f32) -> f32 {
+  return d - L * round(d / L);
+}
+
+// Abramowitz-Stegun 7.1.26 erfc(x) (max abs error < 1.5e-7)
+fn erfc_approx(x_in: f32) -> f32 {
+  let x = max(0.0, x_in);
+  let t = 1.0 / (1.0 + 0.3275911 * x);
+  let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+  return poly * exp(-x * x);
+}
+
+// Exact Bagla/GADGET-2 TreePM short-range force split factor:
+//   f_short(r, r_s) = erfc(r / (2 r_s)) + (r / (sqrt(pi) r_s)) * exp(-r^2 / (4 r_s^2))
+fn treepm_short_range_split(r: f32, r_s: f32) -> f32 {
+  let u = r / max(2.0 * r_s, 1.0e-5);
+  return erfc_approx(u) + (2.0 * u * 0.5641895835) * exp(-u * u);
 }
 
 @compute @workgroup_size(64)
@@ -85,6 +109,11 @@ fn clear_grids(@builtin(global_invocation_id) id: vec3<u32>) {
   if (idx < total) {
     atomicStore(&cic_mass_i32[idx], 0);
     force_grid[idx] = vec4<f32>(0.0);
+    atomicStore(&sr_cell_accum[idx * 4u + 0u], 0);
+    atomicStore(&sr_cell_accum[idx * 4u + 1u], 0);
+    atomicStore(&sr_cell_accum[idx * 4u + 2u], 0);
+    atomicStore(&sr_cell_accum[idx * 4u + 3u], 0);
+    sr_cell_nodes[idx] = vec4<f32>(0.0);
   }
   if (idx < 16u) {
     atomicStore(&telemetry[idx], 0);
@@ -131,19 +160,51 @@ fn cic_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
       }
     }
   }
+  // Accumulate exact local cell-centered monopole (mass + cell-local offset) for short-range TreePM!
+  let cell_len = L / nf;
+  let home_idx = (iz0 * n + iy0) * n + ix0;
+  let cx_center = (f32(ix0) + 0.5) * cell_len - 0.5 * L;
+  let cy_center = (f32(iy0) + 0.5) * cell_len - 0.5 * L;
+  let cz_center = (f32(iz0) + 0.5) * cell_len - 0.5 * L;
+  let dx_loc = wrap_delta(p.x - cx_center, L);
+  let dy_loc = wrap_delta(p.y - cy_center, L);
+  let dz_loc = wrap_delta(p.z - cz_center, L);
+  atomicAdd(&sr_cell_accum[home_idx * 4u + 0u], i32(round(p.w * 1000.0)));
+  atomicAdd(&sr_cell_accum[home_idx * 4u + 1u], i32(round(p.w * dx_loc * 1000.0)));
+  atomicAdd(&sr_cell_accum[home_idx * 4u + 2u], i32(round(p.w * dy_loc * 1000.0)));
+  atomicAdd(&sr_cell_accum[home_idx * 4u + 3u], i32(round(p.w * dz_loc * 1000.0)));
 }
 
-// Convert CIC mass grid into overdensity contrast RHS for 3D FFT Poisson solve:
-//   rhs = grav_pref * (rho / rho_bar - 1)
+// Convert CIC mass grid into overdensity contrast RHS for 3D FFT Poisson solve AND resolve short-range TreePM cell nodes
 @compute @workgroup_size(64)
 fn prepare_poisson_rhs(@builtin(global_invocation_id) id: vec3<u32>) {
   let idx = id.x;
-  let total = params.grid_n * params.grid_n * params.grid_n;
+  let n = params.grid_n;
+  let total = n * n * n;
   if (idx >= total) { return; }
   let m_cell = f32(atomicLoad(&cic_mass_i32[idx])) * 1.0e-3;
   let delta = (m_cell / max(params.mean_mass_cell, 1.0e-6)) - 1.0;
   fft_grid[idx] = vec2<f32>(params.grav_pref * delta, 0.0);
   force_grid[idx].w = delta;
+
+  let sr_m = f32(atomicLoad(&sr_cell_accum[idx * 4u + 0u])) * 1.0e-3;
+  if (sr_m > 1.0e-6) {
+    let iz = idx / (n * n);
+    let rem = idx - iz * n * n;
+    let iy = rem / n;
+    let ix = rem - iy * n;
+    let cell_len = params.box_l / f32(n);
+    let cx = (f32(ix) + 0.5) * cell_len - 0.5 * params.box_l;
+    let cy = (f32(iy) + 0.5) * cell_len - 0.5 * params.box_l;
+    let cz = (f32(iz) + 0.5) * cell_len - 0.5 * params.box_l;
+    let inv_m = 1.0 / sr_m;
+    let com_x = wrap_coord(cx + (f32(atomicLoad(&sr_cell_accum[idx * 4u + 1u])) * 1.0e-3) * inv_m, params.box_l);
+    let com_y = wrap_coord(cy + (f32(atomicLoad(&sr_cell_accum[idx * 4u + 2u])) * 1.0e-3) * inv_m, params.box_l);
+    let com_z = wrap_coord(cz + (f32(atomicLoad(&sr_cell_accum[idx * 4u + 3u])) * 1.0e-3) * inv_m, params.box_l);
+    sr_cell_nodes[idx] = vec4<f32>(com_x, com_y, com_z, sr_m);
+  } else {
+    sr_cell_nodes[idx] = vec4<f32>(0.0);
+  }
 
   atomicAdd(&telemetry[0], i32(clamp(delta * delta * 10.0, 0.0, 2.0e8)));
   atomicMax(&telemetry[1], i32(clamp(delta * 1000.0, -1.0e6, 2.0e9)));
@@ -202,6 +263,45 @@ fn cic_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
         let fg = force_grid[cidx];
         acc = acc + fg.xyz * w;
         local_delta = local_delta + fg.w * w;
+      }
+    }
+  }
+
+  // Hybrid TreePM short-range sub-cell 3x3x3 tree multipole correction (erfc Gaussian force-split)
+  if (params.short_range_r_s > 0.0) {
+    let cell_len = L / nf;
+    let r_s = params.short_range_r_s;
+    let r_cut = 2.0 * r_s;
+    let r_cut2 = r_cut * r_cut;
+    let eps2 = (0.55 * cell_len) * (0.55 * cell_len);
+    // Comoving peculiar-density Newton constant: 4*pi*G*rho_bar = grav_pref
+    let g_eff = (params.grav_pref * cell_len * cell_len * cell_len) / (12.566370614 * max(params.mean_mass_cell, 1.0e-6));
+    let n_i = i32(n);
+    for (var oz: i32 = -1; oz <= 1; oz = oz + 1) {
+      let nz = u32((i32(iz0) + oz + n_i) % n_i);
+      for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+        let ny = u32((i32(iy0) + oy + n_i) % n_i);
+        for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+          let nx = u32((i32(ix0) + ox + n_i) % n_i);
+          let nidx = (nz * n + ny) * n + nx;
+          let node = sr_cell_nodes[nidx];
+          if (!(node.w > 1.0e-6)) { continue; }
+          let is_home = (ox == 0 && oy == 0 && oz == 0);
+          let raw_m = select(node.w, max(0.0, node.w - pt.pos_m.w), is_home);
+          let eff_m = raw_m - params.mean_mass_cell;
+          if (abs(eff_m) < 1.0e-6) { continue; }
+          let d = vec3<f32>(
+            wrap_delta(node.x - pt.pos_m.x, L),
+            wrap_delta(node.y - pt.pos_m.y, L),
+            wrap_delta(node.z - pt.pos_m.z, L)
+          );
+          let r2 = dot(d, d);
+          if (r2 > r_cut2 || r2 < 1.0e-10) { continue; }
+          let r = sqrt(r2);
+          let split_w = treepm_short_range_split(r, r_s);
+          let inv_r3 = 1.0 / ((r2 + eps2) * sqrt(r2 + eps2));
+          acc = acc + d * (g_eff * eff_m * split_w * inv_r3);
+        }
       }
     }
   }
@@ -365,12 +465,30 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   omegaM = 0.315,
   omegaLambda = 0.685,
   smoothCells = 0.75,
-  seed = 20261122
+  enableShortRangeTree = true,
+  seed = 20261122,
+  initialPositionsShift = [0, 0, 0]
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createSupergalacticTreePmSessionWebGpu requires a live WebGPU GPUDevice');
   }
   const ic = buildZeldovichCosmologyICs({ gridPerSide, boxLengthMpc, aInit, omegaM, omegaLambda, seed });
+  const sx = Number(initialPositionsShift?.[0]) || 0;
+  const sy = Number(initialPositionsShift?.[1]) || 0;
+  const sz = Number(initialPositionsShift?.[2]) || 0;
+  if (sx !== 0 || sy !== 0 || sz !== 0) {
+    const L = boxLengthMpc;
+    const wrap = (u) => {
+      let w = u + 0.5 * L;
+      w -= L * Math.floor(w / L);
+      return w - 0.5 * L;
+    };
+    for (let i = 0; i < ic.particleCount; i += 1) {
+      ic.data[i * 16 + 0] = wrap(ic.data[i * 16 + 0] + sx);
+      ic.data[i * 16 + 1] = wrap(ic.data[i * 16 + 1] + sy);
+      ic.data[i * 16 + 2] = wrap(ic.data[i * 16 + 2] + sz);
+    }
+  }
   const particleCount = ic.particleCount;
   const gridN = pmGridN;
   const gridTotal = gridN ** 3;
@@ -382,10 +500,12 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     computeBufferBinding(2, 'storage'),
     computeBufferBinding(3, 'storage'),
     computeBufferBinding(4, 'storage'),
-    computeBufferBinding(5, 'storage')
+    computeBufferBinding(5, 'storage'),
+    computeBufferBinding(6, 'storage'),
+    computeBufferBinding(7, 'storage')
   ];
   const mkPipe = (entry) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-supergalactic-treepm-${entry}.v1`,
+    cacheKey: `ulg-supergalactic-treepm-${entry}.v2-hybrid-sr`,
     label: `ulg-supergalactic-treepm-${entry}`,
     code: supergalacticTreePmWgsl,
     entryPoint: entry,
@@ -407,18 +527,20 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   const cicBuf = device.createBuffer({ size: gridTotal * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const forceGridBuf = device.createBuffer({ size: gridTotal * 16, usage: GPU_BUFFER_USAGE.STORAGE });
   const telemetryBuf = device.createBuffer({ size: 64, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
+  const srAccumBuf = device.createBuffer({ size: gridTotal * 16, usage: GPU_BUFFER_USAGE.STORAGE });
+  const srNodeBuf = device.createBuffer({ size: gridTotal * 16, usage: GPU_BUFFER_USAGE.STORAGE });
   const readTelemetryBuf = device.createBuffer({ size: 64, usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
   const rhsSaveBuf = device.createBuffer({ size: fftWs.byteLength, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC });
 
   const bgA = device.createBindGroup({
     layout: clearPipe.bindGroupLayout,
-    entries: [paramsBuf, particleBuf, cicBuf, fftWs.bufferA, forceGridBuf, telemetryBuf].map((buffer, binding) => ({
+    entries: [paramsBuf, particleBuf, cicBuf, fftWs.bufferA, forceGridBuf, telemetryBuf, srAccumBuf, srNodeBuf].map((buffer, binding) => ({
       binding, resource: { buffer }
     }))
   });
   const bgB = device.createBindGroup({
     layout: clearPipe.bindGroupLayout,
-    entries: [paramsBuf, particleBuf, cicBuf, fftWs.bufferB, forceGridBuf, telemetryBuf].map((buffer, binding) => ({
+    entries: [paramsBuf, particleBuf, cicBuf, fftWs.bufferB, forceGridBuf, telemetryBuf, srAccumBuf, srNodeBuf].map((buffer, binding) => ({
       binding, resource: { buffer }
     }))
   });
@@ -426,6 +548,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
 
   const cellSize = boxLengthMpc / gridN;
   const smoothR2 = (smoothCells * cellSize) ** 2;
+  const shortRangeRS = enableShortRangeTree ? smoothCells * cellSize : 0.0;
   const meanMassPerCell = particleCount / gridTotal;
   let aScale = aInit;
   let stepIndex = 0;
@@ -435,7 +558,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     const gravPref = 1.5 * omegaM / Math.max(0.01, aScale);
     const ab = new ArrayBuffer(48);
     new Uint32Array(ab, 0, 4).set([particleCount, gridN, axis, stepIndex]);
-    new Float32Array(ab, 16, 8).set([boxLengthMpc, aScale, da, hA, omegaM, gravPref, meanMassPerCell, 0]);
+    new Float32Array(ab, 16, 8).set([boxLengthMpc, aScale, da, hA, omegaM, gravPref, meanMassPerCell, shortRangeRS]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
   };
 
@@ -498,7 +621,9 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
 
     return Object.freeze({
       schema: ULG_SUPERGALACTIC_TREEPM_SCHEMA,
-      backend: 'webgpu-fft3d-treepm',
+      backend: enableShortRangeTree ? 'webgpu-fft3d-hybrid-treepm' : 'webgpu-fft3d-pm',
+      hybridTreePmEnabled: Boolean(enableShortRangeTree),
+      shortRangeSplitScaleMpc: shortRangeRS,
       stepIndex,
       scaleFactorA: aScale,
       redshiftZ,
@@ -519,18 +644,73 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     });
   }
 
+  async function readParticlesSnapshot() {
+    const rb = device.createBuffer({
+      size: ic.data.byteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+    try {
+      const enc = device.createCommandEncoder({ label: 'ulg-cosmo-read-particles' });
+      enc.copyBufferToBuffer(particleBuf, 0, rb, 0, ic.data.byteLength);
+      device.queue.submit([enc.finish()]);
+      await rb.mapAsync(GPU_BUFFER_USAGE.MAP_READ);
+      const copy = new Float32Array(rb.getMappedRange().slice(0));
+      rb.unmap();
+      return copy;
+    } finally {
+      rb.destroy();
+    }
+  }
+
+  async function readTileMultipoleSummary({ xMin = -0.5 * boxLengthMpc, xMax = 0.5 * boxLengthMpc } = {}) {
+    const pts = await readParticlesSnapshot();
+    let totalMass = 0; let cx = 0; let cy = 0; let cz = 0; let count = 0;
+    for (let i = 0; i < particleCount; i += 1) {
+      const x = pts[i * 16 + 0];
+      if (x < xMin || x >= xMax) continue;
+      const y = pts[i * 16 + 1];
+      const z = pts[i * 16 + 2];
+      const m = pts[i * 16 + 3];
+      totalMass += m;
+      cx += m * x; cy += m * y; cz += m * z;
+      count += 1;
+    }
+    const com = totalMass > 0 ? [cx / totalMass, cy / totalMass, cz / totalMass] : [0, 0, 0];
+    let qTrace = 0;
+    for (let i = 0; i < particleCount; i += 1) {
+      const x = pts[i * 16 + 0];
+      if (x < xMin || x >= xMax) continue;
+      const dx = x - com[0];
+      const dy = pts[i * 16 + 1] - com[1];
+      const dz = pts[i * 16 + 2] - com[2];
+      qTrace += pts[i * 16 + 3] * (dx * dx + dy * dy + dz * dz);
+    }
+    return Object.freeze({
+      particleCount: count,
+      totalMass,
+      com: Object.freeze(com),
+      quadrupoleTrace: qTrace,
+      scaleFactorA: aScale,
+      stepIndex
+    });
+  }
+
   return Object.freeze({
     schema: ULG_SUPERGALACTIC_TREEPM_SCHEMA,
     particleCount,
     strideFloats: 16,
     boxLengthMpc,
+    hybridTreePmEnabled: Boolean(enableShortRangeTree),
+    shortRangeSplitScaleMpc: shortRangeRS,
     particlesBuffer: particleBuf,
     forceGridBuffer: forceGridBuf,
     step,
+    readParticlesSnapshot,
+    readTileMultipoleSummary,
     getState: () => ({ aScale, redshiftZ: Math.max(0, 1 / aScale - 1), stepIndex }),
     destroy() {
       fftWs.destroy();
-      for (const b of [paramsBuf, particleBuf, cicBuf, forceGridBuf, telemetryBuf, readTelemetryBuf, rhsSaveBuf]) {
+      for (const b of [paramsBuf, particleBuf, cicBuf, forceGridBuf, telemetryBuf, srAccumBuf, srNodeBuf, readTelemetryBuf, rhsSaveBuf]) {
         b.destroy();
       }
     }
@@ -552,8 +732,8 @@ export function createSupergalacticTreePmCosmicAdapter({
   seed = 1370
 } = {}) {
   const session = createSupergalacticTreePmSessionWebGpu(device, {
-    particleCount,
-    gridN,
+    gridPerSide: Math.max(8, Math.round(Math.cbrt(particleCount))),
+    pmGridN: gridN,
     boxLengthMpc,
     aInit,
     da,

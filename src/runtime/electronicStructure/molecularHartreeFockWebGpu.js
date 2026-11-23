@@ -288,6 +288,7 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
       backend: 'webgpu',
       basisCount: n,
       electronCount: totalElectrons,
+      atoms: Object.freeze(normAtoms.map((a) => Object.freeze({ Z: a.Z, x: a.x, y: a.y, z: a.z }))),
       scfIterations: scfIter,
       totalEnergyHa: lastE,
       nuclearRepulsionHa: eNuc,

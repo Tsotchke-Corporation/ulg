@@ -9,6 +9,7 @@ import { deriveNuclearDecayChain } from '../runtime/material/nuclearCherenkovClo
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
 import { deriveCompoundBundleWebGpu } from '../runtime/material/recursiveCompoundPipeline.js';
 import { buildMaterialPolytopeAtlasWebGpu } from '../runtime/material/polytopeAtlasBuilder.js';
+import { climbingImageNEB } from '../runtime/electronicStructure/molecularHartreeFock.js';
 import {
   buildFccCrystalMdState,
   createMolecularDynamicsSessionWebGpu
@@ -36,6 +37,7 @@ let currentElementRes = null;
 let currentCompoundRes = null;
 let currentAtlas = null;
 let currentDecayChain = null;
+let currentNebBarrier = null;
 let selectedZ = 26;
 let selectedA = null; // null => valley-of-stability A*
 let liveMdSession = null;
@@ -492,11 +494,34 @@ function redrawCurrentTab() {
         label: `MO Energy (Ha) | HOMO-LUMO Gap = ${fmt(mqm.homoLumoGapEv, 2)} eV`, color: '#c084fc'
       });
     }
-    plot2Title.textContent = `Derived Compound Phase & Transport (${cb.materialKey})`;
-    drawPlotLine(plot2, [0, 1, 2], [0, cb.thermodynamic.meltingPointK, cb.thermodynamic.boilingPointK], {
-      label: `T_m = ${fmt(cb.thermodynamic.meltingPointK, 0)} K, T_b = ${fmt(cb.thermodynamic.boilingPointK, 0)} K, ρ = ${fmt(cb.mechanical.densityKgPerM3, 0)} kg/m³`,
-      color: '#38bdf8'
-    });
+    if (currentNebBarrier?.energiesEv?.length >= 3) {
+      plot2Title.textContent = `CI-NEB Reaction Barrier (${cb.materialKey}: E_a = ${fmt(currentNebBarrier.forwardBarrierEv, 2)} eV)`;
+      const xs = currentNebBarrier.energiesEv.map((_, i) => i / (currentNebBarrier.energiesEv.length - 1));
+      drawPlotLine(plot2, xs, currentNebBarrier.energiesEv, {
+        label: `MEP ΔE (eV) · TS‡ img #${currentNebBarrier.saddleImageIndex} (${currentNebBarrier.pathwayLabel})`,
+        color: '#ff9c54',
+        yMin: Math.min(0, ...currentNebBarrier.energiesEv)
+      });
+      // Highlight climbing-image transition state (TS‡) marker on the MEP curve
+      const p2ctx = plot2.getContext('2d');
+      const ys = currentNebBarrier.energiesEv;
+      const loY = Math.min(0, ...ys);
+      const hiY = Math.max(1e-6, ...ys);
+      const sIdx = currentNebBarrier.saddleImageIndex;
+      const sx = 28 + (sIdx / Math.max(1, ys.length - 1)) * (plot2.width - 42);
+      const sy = plot2.height - 22 - ((ys[sIdx] - loY) / Math.max(1e-9, hiY - loY)) * (plot2.height - 42);
+      p2ctx.fillStyle = '#facc15';
+      p2ctx.beginPath();
+      p2ctx.arc(sx, sy, 4.5, 0, Math.PI * 2);
+      p2ctx.fill();
+      p2ctx.fillText('‡ TS', Math.min(plot2.width - 36, sx + 7), Math.max(26, sy - 4));
+    } else {
+      plot2Title.textContent = `Derived Compound Phase & Transport (${cb.materialKey})`;
+      drawPlotLine(plot2, [0, 1, 2], [0, cb.thermodynamic.meltingPointK, cb.thermodynamic.boilingPointK], {
+        label: `T_m = ${fmt(cb.thermodynamic.meltingPointK, 0)} K, T_b = ${fmt(cb.thermodynamic.boilingPointK, 0)} K, ρ = ${fmt(cb.mechanical.densityKgPerM3, 0)} kg/m³`,
+        color: '#38bdf8'
+      });
+    }
   } else if (currentTab === 'polytope' && currentAtlas) {
     drawPolytopeDiagram(canvas, currentAtlas);
     plot1Title.textContent = `Polytope Atlas (${currentAtlas.materialKey}): ${currentAtlas.polytopeCount} Convex Cells`;
@@ -613,6 +638,52 @@ async function runElementDerivation(Z, massNumberA = null) {
   }
 }
 
+function computeLiveCiNebBarrierForCompound(compoundRes) {
+  const atoms = compoundRes?.visualData?.molQm?.atoms;
+  if (!Array.isArray(atoms) || atoms.length < 2 || atoms.length > 5) return null;
+  if (atoms.some((a) => a.Z > 10)) return null;
+  // Build a physical reaction/inversion/rearrangement endpoint directly from solved molecular coordinates:
+  // For triatomic+ (e.g. H2O/D2O/NH3): reflect outer ligand coordinates across the central atom's plane -> inversion TS‡
+  // For diatomic (e.g. H2/HF): stretch bond to 1.85x equilibrium distance -> dissociation curve
+  const reactant = atoms.map((a) => ({ Z: a.Z, position: [a.x, a.y, a.z] }));
+  let product;
+  let pathwayLabel;
+  if (atoms.length >= 3) {
+    product = atoms.map((a, idx) => (idx === 0
+      ? { Z: a.Z, position: [a.x, a.y, a.z] }
+      : { Z: a.Z, position: [a.x, -a.y, a.z] }));
+    pathwayLabel = 'molecular inversion TS';
+  } else {
+    product = atoms.map((a, idx) => (idx === 0
+      ? { Z: a.Z, position: [a.x, a.y, a.z] }
+      : { Z: a.Z, position: [a.x * 1.85, a.y * 1.85, a.z * 1.85] }));
+    pathwayLabel = 'bond stretch MEP';
+  }
+  try {
+    const neb = climbingImageNEB(reactant, product, {
+      nImages: 5,
+      maxSteps: 6,
+      stepSize: 0.15,
+      climbStartStep: 2,
+      basis: 'sto-3g'
+    });
+    const e0 = neb.energiesHa[0];
+    const HA_TO_EV = 27.211386245988;
+    const energiesEv = neb.energiesHa.map((e) => (e - e0) * HA_TO_EV);
+    return {
+      pathwayLabel,
+      saddleImageIndex: neb.saddleImageIndex,
+      forwardBarrierEv: neb.forwardBarrierHa * HA_TO_EV,
+      reverseBarrierEv: neb.reverseBarrierHa * HA_TO_EV,
+      energiesHa: neb.energiesHa,
+      energiesEv,
+      steps: neb.steps
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function runCompoundDerivation(formula) {
   if (!gpuDevice) return;
   statusBadge.textContent = `Deriving ${formula}…`;
@@ -622,6 +693,7 @@ async function runCompoundDerivation(formula) {
       mdSteps: 12,
       reactionContext: { source: 'elements-lab-interactive' }
     });
+    currentNebBarrier = computeLiveCiNebBarrierForCompound(currentCompoundRes);
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentCompoundRes.bundle, {
       degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 1
     });
@@ -637,6 +709,7 @@ async function runCompoundDerivation(formula) {
       mode: 'compound',
       formula,
       bundle: currentCompoundRes.bundle,
+      nebBarrier: currentNebBarrier,
       atlasPolytopeCount: currentAtlas.polytopeCount
     };
   } catch (err) {

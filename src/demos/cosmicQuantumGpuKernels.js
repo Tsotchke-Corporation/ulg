@@ -4,6 +4,9 @@ import {
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline
 } from '../runtime/webgpuComputeLayout.js';
+import {
+  evaluateAstrophysicsScaleAtlasMultipoleWebGpu
+} from '../runtime/astrophysics/scaleAtlasAstrophysicsGravityBridge.js';
 
 const USAGE_STORAGE = 0x0080;
 const USAGE_UNIFORM = 0x0040;
@@ -1578,4 +1581,21 @@ export function createResidentCosmicModuleRegistration({
       return { artifact, leaseHandle };
     }
   };
+}
+
+/**
+ * Evaluate galactic & cosmic body cross-chart multipole gravity strictly
+ * through ULG's canonical 40-OOM `SchroederScaleAtlas` multipole authority
+ * (monopole + traceless quadrupole, exact F_ab = -F_ba, translation-invariant).
+ */
+export function evaluateGalacticScaleAtlasMultipoleWebGpu(device, bodies, options = {}) {
+  return evaluateAstrophysicsScaleAtlasMultipoleWebGpu(device, {
+    particleData: bodies,
+    strideFloats: 8,
+    targetGlobalLevel: options.targetGlobalLevel ?? 4,
+    massScaleKg: options.massScaleKg ?? 1.0,
+    gravityG: options.gravityG ?? 1.0,
+    temperatureK: options.temperatureK ?? 2.725,
+    ...options
+  });
 }

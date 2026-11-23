@@ -37,6 +37,9 @@ import {
   createCachedExplicitComputePipeline
 } from '../webgpuComputeLayout.js';
 import {
+  evaluateAstrophysicsScaleAtlasMultipoleWebGpu
+} from '../astrophysics/scaleAtlasAstrophysicsGravityBridge.js';
+import {
   TOV_MAX_NEUTRON_STAR_MASS_SOLAR,
   buildStellarClosureGpuTable,
   classifyEmergentStellarStage,
@@ -1220,4 +1223,22 @@ export function createSelfGravitatingHydroModuleRegistration({ engine, zeroCopy 
       return { artifact, leaseHandle };
     }
   };
+}
+
+/**
+ * Evaluate cross-chart gravitational & radiative multipole coupling for
+ * `self-gravitating-hydro@1` clouds strictly through ULG's canonical 40-OOM
+ * `SchroederScaleAtlas` multipole authority (exact Newton's 3rd law reciprocity
+ * & translation invariance).
+ */
+export function evaluateSelfGravitatingHydroScaleAtlasMultipoleWebGpu(device, particleData, options = {}) {
+  return evaluateAstrophysicsScaleAtlasMultipoleWebGpu(device, {
+    particleData,
+    strideFloats: HYDRO_PARTICLE_STRIDE_FLOATS,
+    targetGlobalLevel: options.targetGlobalLevel ?? 4,
+    massScaleKg: options.massScaleKg ?? 1.0,
+    gravityG: options.gravityG ?? 1.0,
+    temperatureK: options.temperatureK ?? 5800,
+    ...options
+  });
 }

@@ -35,6 +35,7 @@ import {
   appendQueueOrderedSubmissionBatch,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   registerQueueOrderedCleanupClaim,
@@ -3430,7 +3431,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
             mechanicsFieldExecution,
             { cacheKey, layout, entries, label }
           )
-        : device.createBindGroup({ label, layout, entries })
+        : createCachedExplicitBindGroup(device, { label, layout, entries })
     );
     const bindGroup = createP2gBindGroup(
       `${pipelineBundleKey}:main`,

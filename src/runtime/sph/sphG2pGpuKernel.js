@@ -3298,7 +3298,7 @@ export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
         computeBufferBinding(3, 'uniform')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       label: 'ulg-mls-mpm-terminal-motion-watch-bin-fill-bindings',
       layout: pipelineInfo.bindGroupLayout,
       entries: [
@@ -5037,22 +5037,25 @@ async function runMlsMpmG2pWebGpuImpl({
       ] : []),
       ...(exactHistory ? [{ binding: 12, resource: { buffer: exactHistory.validationBuffer } }] : [])
     ];
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-g2p-reconstruct',
       layout: bindGroupLayout,
       entries: g2pEntries
     });
     const canonicalFinalizeBindGroup = canonicalFinalize
       ? (canonicalFinalize.bindGroupLayout === bindGroupLayout
           ? bindGroup
-          : device.createBindGroup({
+          : createCachedExplicitBindGroup(device, {
+              label: 'ulg-mls-mpm-g2p-canonical-finalize',
               layout: canonicalFinalize.bindGroupLayout,
               entries: g2pEntries
             }))
       : null;
     const energyReceiptBindGroups = energyReceiptPipelines.map(
-      (pipelineInfo) => pipelineInfo.bindGroupLayout === bindGroupLayout
+      (pipelineInfo, idx) => pipelineInfo.bindGroupLayout === bindGroupLayout
         ? bindGroup
-        : device.createBindGroup({
+        : createCachedExplicitBindGroup(device, {
+            label: `ulg-mls-mpm-g2p-energy-receipt-${idx}`,
             layout: pipelineInfo.bindGroupLayout,
             entries: g2pEntries
           })

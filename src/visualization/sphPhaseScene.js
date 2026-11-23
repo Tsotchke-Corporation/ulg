@@ -223,7 +223,6 @@ import {
   SPH_GPU_RENDER_ROW_FLOATS,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
   SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
-  buildSphRenderFieldCpu,
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWebGpu,
   buildSphRenderMaterialMap,
@@ -231,7 +230,6 @@ import {
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderSurfaceVerticesWebGpu,
   decodeSphRenderRows,
-  extractSphRenderRowsCpu,
   extractSphRenderRowsWebGpu,
   SPH_RENDER_ROW_MAX_VOLUME_RATIO_J,
   splitSphRenderFieldBySurface,
@@ -42637,64 +42635,16 @@ fn main(
     ) {
       return null;
     }
-    const dispersedMediumAdmission =
-      resolveRenderFieldCpuParityDispersedMediumAdmission(
-        renderRowsExecution
-      );
-    if (!dispersedMediumAdmission.ok) {
-      return {
-        schema: 'peercompute.ulg.sph-render-field-cpu-parity-summary.v0',
-        status: dispersedMediumAdmission.status,
-        reason: dispersedMediumAdmission.reason,
-        surfaceCount: surfaceTable.surfaceCount,
-        maxDensityDelta: null,
-        surfaces: [],
-        scientificValidation: false,
-        sphValidation: false,
-        fullPhysicsValidation: false
-      };
-    }
-    const cpuField = buildSphRenderFieldCpu({
-      renderRows: renderRowsExecution.renderRows,
-      productEventRows: renderFieldExecution.productEventRows || null,
-      dispersedMediumOpticsRows:
-        dispersedMediumAdmission.dispersedMediumOpticsRows,
-      surfaceTable,
-      particleCount: renderRowsExecution.particleCount,
-      productEventCount: renderFieldExecution.productEventCount,
-      fieldPadding: FIELD_PADDING,
-      refEdgeM
-    });
-    const cpuSurfaces = splitSphRenderFieldBySurface(cpuField);
-    const gpuSurfaces = splitSphRenderFieldBySurface(renderFieldExecution);
-    const surfaces = cpuSurfaces.map((cpuSurface, index) => {
-      const gpuSurface = gpuSurfaces[index];
-      let cpuMaxDensity = 0;
-      let gpuMaxDensity = 0;
-      for (const value of cpuSurface.field) if (value > cpuMaxDensity) cpuMaxDensity = value;
-      for (const value of gpuSurface?.field || []) if (value > gpuMaxDensity) gpuMaxDensity = value;
-      return {
-        surfaceKey: cpuSurface.surfaceKey,
-        material: cpuSurface.material,
-        phase: cpuSurface.phase,
-        renderDomainId: cpuSurface.renderDomainId,
-        renderDomainKey: cpuSurface.renderDomainKey,
-        resolution: cpuSurface.resolution,
-        isolation: cpuSurface.isolation,
-        subtract: cpuSurface.subtract,
-        radiusNorm: cpuSurface.radiusNorm,
-        strength: cpuSurface.strength,
-        cpuMaxDensity,
-        gpuMaxDensity,
-        maxDensityDelta: Math.abs(cpuMaxDensity - gpuMaxDensity)
-      };
-    });
     return {
       schema: 'peercompute.ulg.sph-render-field-cpu-parity-summary.v0',
-      status: 'render-field-cpu-parity-summarized',
-      surfaceCount: surfaces.length,
-      maxDensityDelta: surfaces.reduce((max, surface) => Math.max(max, surface.maxDensityDelta), 0),
-      surfaces
+      status: 'retired-gpu-native-only',
+      reason: 'CPU render-field parity mirror retired under ULG GPU-native validation policy',
+      surfaceCount: surfaceTable.surfaceCount,
+      maxDensityDelta: null,
+      surfaces: [],
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
     };
   }
 
@@ -47413,44 +47363,7 @@ fn main(
           }
         );
       }
-      const extractCpuRenderRowsForMode = (readbackMode, reason) => {
-        const cpuRows = extractSphRenderRowsCpu({
-          sphParticleState: nextSphParticleState,
-          mlsMpmParticleState: nextMlsMpmParticleState,
-          ...renderDomainExtractionOptions(currentRenderDomainCounts)
-        });
-        return {
-          ...cpuRows,
-          status: 'render-rows-extracted-cpu-reference-fallback',
-          reason,
-          readbackMode,
-          renderRowsReadback: true,
-          renderRowsReadbackByteLength: cpuRows.renderRows.byteLength,
-          renderRowsBufferRetained: false,
-          renderRowsBufferByteLength: 0,
-          renderRowsGpuHandoffCopy: false,
-          renderRowsHandoffMode: 'cpu-reference-fallback',
-          queueCompletionStatus: 'cpu-reference-no-gpu-submit',
-          queueCompletionMethod: 'extractSphRenderRowsCpu',
-          compactRenderReadback: true,
-          normalHotLoopReadbackFree: false,
-          rendererOwnedDeviceAvoidedReadback: Boolean(resolvedDeviceResult.rendererOwnedDevice),
-          destroyRenderRowsBuffer() {}
-        };
-      };
       const extractRenderRowsForMode = (readbackMode) => {
-        const fullReadbackOnRendererOwnedDevice =
-          rendererOwnedCpuRenderRowsFallbackAllowed({
-            rendererOwnedDevice: resolvedDeviceResult.rendererOwnedDevice,
-            readbackMode,
-            sphParticleUpload: nextSphUpload
-          });
-        if (fullReadbackOnRendererOwnedDevice) {
-          return Promise.resolve(extractCpuRenderRowsForMode(
-            readbackMode,
-            'renderer-owned Three WebGPU device is reserved for presentation; CPU reference rows avoid mapAsync on the presentation device'
-          ));
-        }
         return extractSphRenderRowsWebGpu({
           device: resolvedDeviceResult.device,
           sphParticleState: nextSphParticleState,
@@ -54815,6 +54728,17 @@ fn main(
       laneState.pendingThermalPotential =
         committedThermalPotential?.candidate ?? null;
       if (committedThermalPotential) {
+        const observedHits = Number(committedThermalPotential.cumulativeConsumerHits);
+        if (
+          committedThermalPotential.cumulativeConsumerHits != null
+          && Number.isFinite(observedHits)
+          && observedHits >= 0
+        ) {
+          laneState.lastThermalPotentialCumulativeConsumerHits = Math.max(
+            Number(laneState.lastThermalPotentialCumulativeConsumerHits) || 0,
+            observedHits
+          );
+        }
         const g6Status = Object.freeze({
           enabled: true,
           scheduleId,
@@ -54822,7 +54746,9 @@ fn main(
           adopted: committedThermalPotential.adopted === true,
           status: committedThermalPotential.status ?? null,
           cumulativeConsumerHits:
-            committedThermalPotential.cumulativeConsumerHits ?? 0,
+            committedThermalPotential.cumulativeConsumerHits
+            ?? laneState.lastThermalPotentialCumulativeConsumerHits
+            ?? 0,
           hasCandidate: Boolean(committedThermalPotential.candidate)
         });
         scene.userData.sphThermalPotentialStatus = g6Status;

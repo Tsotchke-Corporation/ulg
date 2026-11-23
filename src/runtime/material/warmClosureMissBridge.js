@@ -1,4 +1,4 @@
-import { ReservationLedger } from '../../../../peercompute/peercompute/src/peercompute/stateManager/ReservationLedger.js';
+import { ReservationLedger } from '../peercomputeCore.js';
 import { deriveEosStiffnessResponse, ESHKOL_EOS_MODEL } from './eshkolEosStiffness.js';
 import { synthesizeMoonlabFirstPrinciplesClosures } from './moonlabColdMissSynthesis.js';
 import { adoptExternalRegionalResponseTable } from './regionalClosureWorkerLane.js';

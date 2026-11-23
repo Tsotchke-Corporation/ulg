@@ -1,4 +1,4 @@
-import { ReservationLedger } from '../../../../peercompute/peercompute/src/peercompute/stateManager/ReservationLedger.js';
+import { ReservationLedger } from '../peercomputeCore.js';
 import * as gpu from './thermalPotentialGpu.js';
 import { thermalPotentialLineageKey } from './thermalPotentialWorkerProtocol.js';
 

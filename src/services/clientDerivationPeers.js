@@ -11,9 +11,11 @@
 // goodbye) as absent with ERR_CLIENT_PEER_ABSENT so PeerCompute's redundant
 // placement executor promotes a surviving replica under 2-of-2 quorum validation
 // or surfaces explicit remoteDebt without silent CPU hot-state fallback.
-import { NodeKernel } from '../../../peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js';
-import { ComputeManager } from '../../../peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js';
-import { createRemoteResultQuorumValidator } from '../../../peercompute/peercompute/src/peercompute/computeManager/RemoteResultQuorumValidator.js';
+import {
+  NodeKernel,
+  ComputeManager,
+  createRemoteResultQuorumValidator
+} from '../runtime/peercomputeCore.js';
 
 export const ULG_LIVE_CLIENT_DERIVATION_PEER_MESH_CHANNEL = 'ulg-a6-derivation-peers-v1';
 

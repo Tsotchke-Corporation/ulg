@@ -13,6 +13,7 @@ import {
 } from './sphOpticalRouteIdentity.js';
 import {
   acquireQueueOrderedPooledBuffer,
+  createCachedExplicitBindGroup,
   registerQueueOrderedPooledBufferReturn,
   releaseOrDestroyQueueOrderedPooledBuffer
 } from '../webgpuComputeLayout.js';
@@ -1356,7 +1357,7 @@ export async function encodeSphParticipatingMediumPack(
       0,
       new Uint8Array(packParamsBytes)
     );
-    const packBindGroup = runtimeRecord.device.createBindGroup({
+    const packBindGroup = createCachedExplicitBindGroup(runtimeRecord.device, {
       label: 'ulg-sph-participating-medium-pack-bind-group',
       layout: packPipeline.getBindGroupLayout(0),
       entries: [

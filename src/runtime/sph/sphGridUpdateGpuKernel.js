@@ -4423,7 +4423,8 @@ export async function runMlsMpmGridUpdateWebGpu({
         computeBufferBinding(3, 'read-only-storage')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-mls-mpm-grid-update-direct',
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceGridBuffer } },

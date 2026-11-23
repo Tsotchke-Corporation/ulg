@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as potential from '../src/runtime/material/thermalPotentialGpu.js';
 import * as workerLane from '../src/runtime/material/thermalPotentialWorkerLane.js';
-import { THERMAL_POTENTIAL_WORKER_ACK, thermalPotentialLineageKey } from '../src/runtime/material/thermalPotentialWorkerProtocol.js';
+import { THERMAL_POTENTIAL_WORKER_ACK, thermalPotentialLineageKey, validateThermalPotentialWorkerResult } from '../src/runtime/material/thermalPotentialWorkerProtocol.js';
 import { tagWebGpuBufferDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import { ReservationLedger } from '../../peercompute/peercompute/src/peercompute/stateManager/ReservationLedger.js';
 import { createResidentStateManagerCommitHandler } from '../src/runtime/peercomputeResidentCommitBridge.js';
@@ -113,6 +113,12 @@ test('worker fit defers bounded capacity pressure while preserving its active ge
   }
   const deferred=await workerLane.finishThermalPotentialWorkerSchedule(owner,{...workerIdentity,upload:workerEpoch});
   assert.deepEqual(deferred,{candidate:null,readbackBytes:0,mapAsyncCount:0,status:'deferred-capacity',cumulativeConsumerHits:null});
+  const cadenceChecked=validateThermalPotentialWorkerResult(
+    {adopted:false,ordinal:2,candidate:null,readbackBytes:0,mapAsyncCount:0,status:'cadence-deferred',cumulativeConsumerHits:null},
+    {enabled:true,...workerIdentity,route:{lineage:{target:workerEpoch},particleCardinality:{targetParticleCount:workerEpoch.particleCount}}}
+  );
+  assert.equal(cadenceChecked.status,'cadence-deferred');
+  assert.equal(cadenceChecked.mapAsyncCount,0);
   assert.equal(workerLane.thermalPotentialWorkerOrdinal(owner),2);
   for(const pin of pins)pin.release();
   const recovered=await workerLane.finishThermalPotentialWorkerSchedule(owner,{...workerIdentity,upload:workerEpoch});

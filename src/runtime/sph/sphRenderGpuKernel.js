@@ -8866,21 +8866,22 @@ export async function buildSphRenderFieldWebGpu({
               dispersedMediumOpticsRows,
               GPU_BUFFER_USAGE.COPY_SRC
             ))
-          : ownUnpublishedBuffer(createZeroedStorageBuffer(
-              device,
-              'ulg-sph-render-field-dispersed-medium-optics-disabled',
-              SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS
-                * Float32Array.BYTES_PER_ELEMENT
-            )));
+          : ownUnpublishedBuffer(acquireRenderPooledBuffer(device, {
+              bucketKey: 'ulg-sph-render-field-dispersed-medium-optics-disabled',
+              label: 'ulg-sph-render-field-dispersed-medium-optics-disabled',
+              size: SPH_DISPERSED_MEDIUM_OPTICS_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+              usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+            })));
       const productHistoryControlBufferOwned =
         !resolvedProductEventLiveCountDescriptor;
       const productHistoryControlBuffer =
         resolvedProductEventLiveCountDescriptor?.controlBuffer
-        || ownUnpublishedBuffer(createZeroedStorageBuffer(
-          device,
-          'ulg-sph-render-field-product-history-control-disabled',
-          SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES
-        ));
+        || ownUnpublishedBuffer(acquireRenderPooledBuffer(device, {
+          bucketKey: 'ulg-sph-render-field-product-history-control-disabled',
+          label: 'ulg-sph-render-field-product-history-control-disabled',
+          size: SPH_RESIDENT_PRODUCT_EVENT_COUNT_CONTROL_PREFIX_BYTES,
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+        }));
       const productHistoryGateParamsBuffer = ownUnpublishedBuffer(
         acquireRenderPooledBuffer(device, {
           bucketKey: 'ulg-sph-render-field-product-history-gate-params',

@@ -7580,23 +7580,23 @@ async function importPeerComputeClasses({
     ? bundled
     : (nodeKernelModuleUrl
         ? await importPeerComputeModule(nodeKernelModuleUrl)
-        : await import('../../../peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js'));
+        : await import('./peercomputeCore.js'));
   const computeModule = bundled.ComputeManager
     ? bundled
     : (computeManagerModuleUrl
         ? await importPeerComputeModule(computeManagerModuleUrl)
-        : await import('../../../peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js'));
+        : await import('./peercomputeCore.js'));
   const stateModule = bundled.StateManager
     ? bundled
     : (stateManagerModuleUrl
         ? await importPeerComputeModule(stateManagerModuleUrl)
-        : await import('../../../peercompute/peercompute/src/peercompute/stateManager/StateManager.js'));
+        : await import('./peercomputeCore.js'));
   let gpuModule = bundled.GPUHubManager ? bundled : {};
   if (!gpuModule.GPUHubManager) {
     try {
       gpuModule = gpuHubModuleUrl
         ? await importPeerComputeModule(gpuHubModuleUrl)
-        : await import('../../../peercompute/peercompute/src/peercompute/gpu/GPUHubManager.js');
+        : await import('./peercomputeCore.js');
     } catch (_) {
       gpuModule = {};
     }
@@ -7606,7 +7606,7 @@ async function importPeerComputeClasses({
     try {
       quorumModule = remoteResultQuorumModuleUrl
         ? await importPeerComputeModule(remoteResultQuorumModuleUrl)
-        : await import('../../../peercompute/peercompute/src/peercompute/computeManager/RemoteResultQuorumValidator.js');
+        : await import('./peercomputeCore.js');
     } catch (_) {
       quorumModule = {};
     }

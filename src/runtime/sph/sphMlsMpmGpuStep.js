@@ -4217,8 +4217,16 @@ export async function runSchroederFarForceDeltaFusionWebGpu({
       { binding: 2, resource: { buffer: outputStateBuffer } },
       { binding: 3, resource: { buffer: paramsBuffer } }
     ];
-    const copyBindGroup = device.createBindGroup({ layout: copyLayout, entries });
-    const applyBindGroup = device.createBindGroup({ layout: applyLayout, entries });
+    const copyBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-schroeder-far-force-delta-copy',
+      layout: copyLayout,
+      entries
+    });
+    const applyBindGroup = createCachedExplicitBindGroup(device, {
+      label: 'ulg-schroeder-far-force-delta-apply',
+      layout: applyLayout,
+      entries
+    });
     const encoder = device.createCommandEncoder();
     const copyPass = encoder.beginComputePass();
     copyPass.setPipeline(copyPipeline);
@@ -4480,12 +4488,31 @@ function createActiveGridComputeDispatchArgsBuffer(
     };
   }
   const args = createComputeDispatchIndirectArgs(workgroupCountX);
-  const buffer = writeGpuBuffer(
-    device,
-    'ulg-mls-mpm-active-grid-dispatch-indirect-args',
-    args,
-    GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
-  );
+  const canPool = typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
+  const usage = GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
+  const buffer = canPool
+    ? (() => {
+        const pooled = acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+          label: 'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+          size: Math.max(4, args.byteLength),
+          usage
+        });
+        registerQueueOrderedPooledBufferReturn(pooled, device, {
+          bucketKey: 'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+          size: Math.max(4, args.byteLength),
+          usage
+        });
+        device.queue.writeBuffer(pooled, 0, args);
+        return pooled;
+      })()
+    : writeGpuBuffer(
+        device,
+        'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+        args,
+        usage
+      );
   return {
     schema: 'peercompute.ulg.mls-mpm-active-grid-compute-dispatch-indirect.v0',
     status: 'cpu-seeded-active-grid-indirect-dispatch-ready',
@@ -4521,11 +4548,30 @@ function createCompactMechanicsViewIndirectDispatchArgs(
     schroederSpatialDirectory?.mechanicsViewEnabled !== true
     || !schroederSpatialDirectory.mechanicsViewIndirectDispatchBuffer
   ) return null;
-  const buffer = device.createBuffer({
-    label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
-    size: COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT,
-    usage: GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const size = COMPUTE_DISPATCH_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT;
+  const usage = GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_DST;
+  const canPool = typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice;
+  const buffer = canPool
+    ? (() => {
+        const pooled = acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+          label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+          size,
+          usage
+        });
+        registerQueueOrderedPooledBufferReturn(pooled, device, {
+          bucketKey: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+          size,
+          usage
+        });
+        return pooled;
+      })()
+    : device.createBuffer({
+        label: 'ulg-mls-mpm-compact-mechanics-indirect-dispatch-staging',
+        size,
+        usage
+      });
   return {
     schema: 'peercompute.ulg.mls-mpm-compact-mechanics-view-indirect-dispatch.v1',
     status: 'gpu-authored-compact-mechanics-view-indirect-dispatch-ready',
@@ -14955,11 +15001,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     compactSummary: 0
   };
   const sequenceEncodeStartMs = nowMs();
+  const poolSequenceGridBuffers = poolSequenceTempBuffers && !exactSequence;
   const gridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
     size: Math.max(4, gridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  }, { pool: false });
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | ((activeGridDispatch.useActiveGrid || poolSequenceGridBuffers) ? GPU_BUFFER_USAGE.COPY_DST : 0)
+  }, { pool: poolSequenceGridBuffers });
   // Previous-substep finalized grid ([mass, momentum] rows): the spatial
   // density source for the liquid EOS. Zeroed at sequence start, refreshed by
   // a copy after every substep's finalize pass.
@@ -14967,12 +15014,12 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     label: 'ulg-mls-mpm-fused-sequence-p2g-grid-accumulators',
     size: Math.max(4, p2gAccumulatorByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-  }, { pool: false });
+  }, { pool: poolSequenceGridBuffers });
   const updatedGridBuffer = createSequenceBuffer({
     label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
     size: Math.max(4, updatedGridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
-  }, { pool: false });
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | ((activeGridDispatch.useActiveGrid || poolSequenceGridBuffers) ? GPU_BUFFER_USAGE.COPY_DST : 0)
+  }, { pool: poolSequenceGridBuffers });
   const statePingBuffers = [
     tagWebGpuBufferDevice(createSequenceBuffer({
       label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
@@ -15237,6 +15284,16 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
       return nextEncoder;
     };
     let encoder = createSequenceCommandEncoder();
+    if (poolSequenceGridBuffers) {
+      // Pooled grid buffers carry prior-schedule data; clear once at sequence
+      // start so inactive grid nodes remain zero-initialized without allocating
+      // fresh buffers or busting bind-group caches every schedule.
+      encoder.clearBuffer(gridBuffer, 0, Math.max(4, gridByteLength));
+      encoder.clearBuffer(updatedGridBuffer, 0, Math.max(4, updatedGridByteLength));
+      if (activeGridDispatch.useActiveGrid) {
+        encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
+      }
+    }
     let currentSubmissionStepCount = 0;
     const markCurrentSidecarStagesSubmitted = (submittedStepCount) => {
       while (submittedSidecarStageCount < sidecarEncoderStages.length) {
@@ -37369,6 +37426,18 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           'Canonical spatial mechanics requires a spatialMechanicalProposalRunner'
         );
       }
+      const canonicalMechanicsFieldWillRun = Boolean(
+        mechanicsMaterialTable?.surfaceTensionEnabled === true
+        || exactGasPressureMechanicsBoundaryRequested
+        || resolvePhaseVolumeAmbientBuoyancyExecution({
+          canonicalSpatialRequired,
+          schroederSpatialEpochGeneration,
+          mechanicsMaterialTable,
+          ambientPressurePa,
+          gravityMPerS2: gravity,
+          residentProductMass
+        }).required === true
+      );
       spatialMechanicalProposal = await timedStage(
         'spatialMechanicalProposal',
         () => spatialMechanicalProposalRunner({
@@ -37388,6 +37457,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
           jacobiIterations: contactJacobiIterations,
           cleanupPassBudget: contactCleanupPassBudget,
           contactInnerRounds,
+          unilateralVelocityImpulseHandledByMechanicsField: canonicalMechanicsFieldWillRun,
           gpuPassTimestampProfilingRequested:
             residentGpuTimestampProfilingRequested === true
         })

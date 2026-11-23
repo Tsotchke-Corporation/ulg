@@ -6813,3 +6813,33 @@ test('mechanical proposal binds a genuine multi-level selection immutably and en
   await settleDeferredCleanup(fixture.device);
   destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
 });
+
+test('mechanical proposal sets deduplication bit 1 when mechanics-field contact_fields owns unilateral velocity impulse', async () => {
+  const fixture = liveFixture(2);
+  const proposal = runSchroederSpatialMechanicalProposalWebGpu({
+    ...fixture,
+    unilateralVelocityImpulseHandledByMechanicsField: true
+  });
+  const paramsWrite = fixture.device.writes.find(
+    ({ buffer, offset }) => String(buffer?.label || '').startsWith(
+      'ulg-schroeder-spatial-mechanical-params-'
+    ) && offset === 0
+  );
+  assert.ok(paramsWrite, 'params buffer write must be recorded');
+  const rawBytes = paramsWrite.bytes ?? paramsWrite.data;
+  const view = new DataView(
+    rawBytes instanceof ArrayBuffer ? rawBytes : rawBytes.buffer,
+    rawBytes instanceof ArrayBuffer ? 0 : rawBytes.byteOffset,
+    rawBytes.byteLength
+  );
+  const flagsWord = view.getUint32(28, true);
+  assert.equal((flagsWord & 2) !== 0, true, 'bit 1 must suppress duplicate unilateral barrier_dv');
+  assert.equal(
+    (flagsWord & 1) !== 0,
+    Boolean(fixture.sphParticleUpload?.identityBuffer),
+    'bit 0 must preserve particle identity enablement'
+  );
+  assert.equal(proposal.releaseAfterSubmittedWork(), true);
+  await settleDeferredCleanup(fixture.device);
+  destroySchroederSpatialMechanicalProposalRuntime(fixture.device);
+});

@@ -15812,7 +15812,7 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           candidate: null,
           readbackBytes: 0,
           mapAsyncCount: 0,
-          status: 'deferred-capacity',
+          status: 'cadence-deferred',
           cumulativeConsumerHits: null
         };
       }

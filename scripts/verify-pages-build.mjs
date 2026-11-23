@@ -129,6 +129,9 @@ export async function verifyPagesBuild({
   }
   for (const file of javascriptFiles) {
     const source = await readFile(file, 'utf8');
+    if (/(?:\/@fs\/|\/home\/[a-z0-9._-]+\/projects\/)/i.test(source)) {
+      errors.push(`host-specific dev filesystem path leaked into ${path.relative(resolvedOutDir, file)}`);
+    }
     for (const reference of javascriptModuleReferences(source)) {
       resolveLocalReference({
         outDir: resolvedOutDir,

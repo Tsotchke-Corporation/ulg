@@ -279,7 +279,8 @@ function binaryIonicCandidate(metalSpecies, anionSpecies) {
     rightRole: 'anion',
     preferredBondType: 'ionic'
   });
-  if (sedenionScope.reactiveClass === 'inert') return null;
+  // Per plan/todo/sedenion-reaction-scoping-plan.md: sedenion scope prioritizes
+  // and annotates channels without suppressing stoichiometrically balanced candidates.
 
   return candidate({
     familyId: FAMILY_BINARY_IONIC,
@@ -359,7 +360,8 @@ function binaryCovalentCandidate(lessEnSpecies, moreEnSpecies) {
     rightRole: 'acceptor',
     preferredBondType: 'covalent'
   });
-  if (sedenionScope.reactiveClass === 'inert') return null;
+  // Per plan/todo/sedenion-reaction-scoping-plan.md: sedenion scope prioritizes
+  // and annotates channels without suppressing stoichiometrically balanced candidates.
 
   return candidate({
     familyId: FAMILY_BINARY_COVALENT,
@@ -386,14 +388,25 @@ function binaryCovalentCandidate(lessEnSpecies, moreEnSpecies) {
   });
 }
 
+function sedenionPriorityRank(item) {
+  const cls = item?.sedenionScope?.reactiveClass;
+  if (cls === 'reactive') return 0;
+  if (cls === 'inert') return 2;
+  return 1;
+}
+
 function dedupeCandidates(candidates) {
   const seen = new Set();
-  return candidates.filter((item) => {
+  const deduped = candidates.filter((item) => {
     const key = `${item.familyId}:${item.equation}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  return deduped
+    .map((item, idx) => ({ item, idx, rank: sedenionPriorityRank(item) }))
+    .sort((a, b) => (a.rank - b.rank) || (a.idx - b.idx))
+    .map((entry) => entry.item);
 }
 
 /**

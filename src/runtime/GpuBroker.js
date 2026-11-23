@@ -1,5 +1,8 @@
 import { createId } from './ids.js';
-import { webGpuDeviceDescriptorForResidentSph } from './webgpuDeviceLimits.js';
+import {
+  attachWebGpuUncapturedErrorTelemetry,
+  webGpuDeviceDescriptorForResidentSph
+} from './webgpuDeviceLimits.js';
 
 const PRIORITY_ORDER = ['render', 'interactive', 'simulation', 'background', 'validation'];
 
@@ -62,6 +65,7 @@ export class GpuBroker {
     try {
       const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(this.adapterHandle);
       const device = await this.adapterHandle.requestDevice(deviceDescriptor);
+      attachWebGpuUncapturedErrorTelemetry(device, { label: 'gpu-broker' });
       this.device = device;
       this.capabilities = {
         ...this.capabilities,

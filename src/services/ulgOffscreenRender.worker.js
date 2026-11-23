@@ -4,6 +4,7 @@ import {
   ULG_RESIDENT_RENDER_CANDIDATE_EPOCH_IDENTITY_WORD_FIELDS
 } from '../visualization/residentRenderCandidateMailbox.js';
 import {
+  attachWebGpuUncapturedErrorTelemetry,
   webGpuDeviceDescriptorForResidentSph
 } from '../runtime/webgpuDeviceLimits.js';
 import {
@@ -5627,6 +5628,7 @@ async function initPresentation(data) {
       timestampProfilingRequested: true
     })
   );
+  attachWebGpuUncapturedErrorTelemetry(device, { label: 'offscreen-render-worker' });
   format = gpu.getPreferredCanvasFormat();
   const initialCanvasConfiguration = desiredCanvasConfiguration || data;
   configureCanvas({

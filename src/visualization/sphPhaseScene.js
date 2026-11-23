@@ -9852,22 +9852,32 @@ export function estimateNativeMarchingCubesVertexRowsByteLengthForResolution(
 // and clamps the indirect draw count, so the translated-rows budget below is
 // a hard allocation bound rather than a resolution driver.
 export function nativeMarchingCubesVertexRowsBudgetPerSurface(surfaceCount, {
-  maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
+  maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
+  device = null,
+  maxStorageBufferBindingSize = null
 } = {}) {
   const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
-  const resolvedBudget = Math.max(
-    SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const deviceStorageLimit = Number(
+    maxStorageBufferBindingSize ?? device?.limits?.maxStorageBufferBindingSize
+  );
+  const rawBudget = Math.max(
+    bytesPerVertexRow,
     Math.round(
       Number(maxVertexRowsBufferByteLength)
       || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
     )
   );
-  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const resolvedBudget = Number.isFinite(deviceStorageLimit) && deviceStorageLimit >= bytesPerVertexRow
+    ? Math.min(rawBudget, Math.floor(deviceStorageLimit))
+    : rawBudget;
   return Math.max(3, Math.floor(resolvedBudget / resolvedSurfaceCount / bytesPerVertexRow));
 }
 
 export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surfaceCount, {
   maxVertexRowsBufferByteLength = SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT,
+  device = null,
+  maxStorageBufferBindingSize = null,
   maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION,
   maxTotalFieldCells = SPH_NATIVE_RENDER_FIELD_TOTAL_CELLS_BUDGET_DEFAULT,
   // When the extraction path enforces a per-surface vertex-rows budget
@@ -9876,13 +9886,20 @@ export function nativeMarchingCubesRenderFieldResolutionForVertexRowsBudget(surf
   vertexRowsBudgetEnforcedByExtraction = false
 } = {}) {
   const resolvedSurfaceCount = Math.max(1, Math.round(Number(surfaceCount) || 1));
-  const resolvedBudget = Math.max(
-    SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+  const bytesPerVertexRow = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const deviceStorageLimit = Number(
+    maxStorageBufferBindingSize ?? device?.limits?.maxStorageBufferBindingSize
+  );
+  const rawBudget = Math.max(
+    bytesPerVertexRow,
     Math.round(
       Number(maxVertexRowsBufferByteLength)
       || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
     )
   );
+  const resolvedBudget = Number.isFinite(deviceStorageLimit) && deviceStorageLimit >= bytesPerVertexRow
+    ? Math.min(rawBudget, Math.floor(deviceStorageLimit))
+    : rawBudget;
   const resolvedRequestedMax = Math.max(
     2,
     Math.round(Number(maxResolution) || RESIDENT_RENDER_FIELD_MAX_RESOLUTION)
@@ -47562,13 +47579,21 @@ fn main(
         2,
         Math.round(Number(surfaceDrawDiagnosticMaxResolution) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT)
       );
-      const requestedNativeMarchingCubesMaxVertexRowsBufferByteLength = Math.max(
+      const activeDeviceStorageLimit = Number(
+        device?.limits?.maxStorageBufferBindingSize
+        ?? deviceResult?.device?.limits?.maxStorageBufferBindingSize
+      );
+      const rawRequestedNativeMcBudget = Math.max(
         SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
         Math.round(
           Number(nativeMarchingCubesMaxVertexRowsBufferByteLength)
           || SPH_NATIVE_MARCHING_CUBES_VERTEX_ROWS_BYTE_BUDGET_DEFAULT
         )
       );
+      const requestedNativeMarchingCubesMaxVertexRowsBufferByteLength =
+        Number.isFinite(activeDeviceStorageLimit) && activeDeviceStorageLimit > 0
+          ? Math.min(rawRequestedNativeMcBudget, Math.floor(activeDeviceStorageLimit))
+          : rawRequestedNativeMcBudget;
       const requestedNativeMarchingCubesMaxResolution = Math.max(
         2,
         Math.min(
@@ -54325,6 +54350,10 @@ fn main(
             && laneState.pendingTriadClosureAdoptions.length > 0
             ? laneState.pendingTriadClosureAdoptions.splice(0, laneState.pendingTriadClosureAdoptions.length)
             : null;
+          const pendingEosStiffnessAdoptions = Array.isArray(laneState.pendingEosStiffnessAdoptions)
+            && laneState.pendingEosStiffnessAdoptions.length > 0
+            ? laneState.pendingEosStiffnessAdoptions.splice(0, laneState.pendingEosStiffnessAdoptions.length)
+            : null;
           bridge.runResidentScheduleOnPresentationDevice({
             id: scheduleId,
             reason: 'schroeder-worker-lane-schedule',
@@ -54334,6 +54363,7 @@ fn main(
                 scheduleId,
                 thermalPotentialAcknowledgement,
                 ...(pendingTriadAdoptions ? { triadClosureAdoptions: pendingTriadAdoptions } : {}),
+                ...(pendingEosStiffnessAdoptions ? { eosStiffnessAdoptions: pendingEosStiffnessAdoptions } : {}),
                 ...(currentNuclearCherenkovSources ? { nuclearCherenkovSources: currentNuclearCherenkovSources } : {}),
                 stepCount: requestedStepCount,
                 progressEverySteps: requestedProgressEverySteps,
@@ -54648,6 +54678,14 @@ fn main(
           for (const bundle of a6Adoption.adoptedTriadBundles) {
             if (bundle?.materialKey && bundle?.packedData) {
               laneState.pendingTriadClosureAdoptions.push(bundle);
+            }
+          }
+        }
+        if (a6Adoption?.adoptedEosStiffnessBundles?.length > 0) {
+          laneState.pendingEosStiffnessAdoptions ??= [];
+          for (const bundle of a6Adoption.adoptedEosStiffnessBundles) {
+            if (bundle?.packedData) {
+              laneState.pendingEosStiffnessAdoptions.push(bundle);
             }
           }
         }

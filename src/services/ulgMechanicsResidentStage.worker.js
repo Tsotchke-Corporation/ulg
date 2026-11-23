@@ -8,7 +8,10 @@ import { createThermalPotentialWorkerLane, thermalPotentialWorkerCache, cancelTh
   destroyThermalPotentialWorkerLane } from '../runtime/material/thermalPotentialWorkerLane.js';
 import { thermalPotentialWorkerSourceKey } from '../runtime/material/thermalPotentialWorkerProtocol.js';
 import { closeLawActivationReceiptRing, openLawActivationReceiptRing } from '../runtime/sph/lawActivationReceiptRing.js';
-import { normalizeSphImplicitPressureOptions } from '../runtime/sph/sphImplicitPressureGpu.js';
+import {
+  normalizeSphImplicitPressureOptions,
+  updateSphImplicitPressureStiffnessTable
+} from '../runtime/sph/sphImplicitPressureGpu.js';
 import { encodeSphThermalRegionalClosureScheduleTick } from '../runtime/sph/sphThermalRegionalClosureGpu.js';
 import {
   clearSphNuclearCherenkovState,
@@ -12432,6 +12435,24 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           }
         }
       }
+      if (
+        record.workerDevice
+        && Array.isArray(schedule.eosStiffnessAdoptions)
+        && schedule.eosStiffnessAdoptions.length > 0
+      ) {
+        for (const adoption of schedule.eosStiffnessAdoptions) {
+          try {
+            if (adoption?.packedData instanceof Float32Array && adoption.packedData.length > 0) {
+              updateSphImplicitPressureStiffnessTable(record.workerDevice, {
+                data: adoption.packedData,
+                functionCount: adoption.functionCount ?? 1
+              });
+            }
+          } catch {
+            // Keep individual EOS stiffness adoption isolated from schedule admission.
+          }
+        }
+      }
       if (tier0RouteSelected) {
         tier0ExecutionAttempted = true;
         scheduleGpuWorkMayHaveBeenSubmitted = true;
@@ -15756,10 +15777,10 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           && schedule.scaleAtlasMultipoleParticles.length > 0
         ) {
           const mp = await runSchroederScaleAtlasMultipoleWebGpu(record.workerDevice, {
-            atlasPlan: atlasSnap,
+            atlas: atlasSnap,
             particles: schedule.scaleAtlasMultipoleParticles
           });
-          multipoleCoupledPairs = mp.summary?.totalCoupledPairs ?? 0;
+          multipoleCoupledPairs = mp.receipt?.coupledPairDirectedCount ?? 0;
           multipoleErrorMask = mp.receipt?.errorMask ?? 0;
         }
         scaleAtlasStatus = Object.freeze({

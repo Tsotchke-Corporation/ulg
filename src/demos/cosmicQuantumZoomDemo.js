@@ -21,6 +21,7 @@ import {
   createCosmicQuantumScaleBridge
 } from '../runtime/sph/cosmicQuantumScaleBridge.js';
 import { runSchroederScaleAtlasMultipoleWebGpu } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
+import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
   createRelaySignalingTransport,
   startLiveClientDerivationPeerMesh
@@ -293,6 +294,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
     const adapter = await navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' });
     if (adapter) {
       gpuDevice = await adapter.requestDevice();
+      attachWebGpuUncapturedErrorTelemetry(gpuDevice, { label: 'cosmic-quantum-demo' });
       gpuAdapterName = adapter.info?.description || adapter.info?.vendor || 'WebGPU GPU';
     }
   } catch {

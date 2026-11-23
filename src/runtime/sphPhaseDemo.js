@@ -1214,8 +1214,10 @@ function realPhaseSoundSpeedMPerS(properties, phase) {
     return Math.sqrt(Math.max(gamma * specificGasConstant * representativePhaseTemperatureK(phase), 0));
   }
   const bulk = Number(phase?.bulkModulusPa);
+  const shear = Number(phase?.shearModulusPa);
   const density = Number(phase?.densityKgPerM3);
-  return bulk > 0 && density > 0 ? Math.sqrt(bulk / density) : 0;
+  const effectiveModulus = bulk + (Number.isFinite(shear) && shear > 0 ? (4 / 3) * shear : 0);
+  return bulk > 0 && density > 0 ? Math.sqrt(effectiveModulus / density) : 0;
 }
 
 function isotropicMpmFForJ(volumeRatioJ) {

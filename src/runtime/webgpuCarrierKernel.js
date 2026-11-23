@@ -2,7 +2,10 @@ import { carrierGraphStepWgsl } from '../../ulg-gpu-abi/src/wgsl.js';
 import { createCarrierRuntime, observeCarrierTopology } from './carrierRuntime.js';
 import { compileClosureLawGraphFromTableClosure } from './closureLawGraph.js';
 import { computeInvariants, invariantDriftReport } from './invariants.js';
-import { webGpuDeviceDescriptorForResidentSph } from './webgpuDeviceLimits.js';
+import {
+  attachWebGpuUncapturedErrorTelemetry,
+  webGpuDeviceDescriptorForResidentSph
+} from './webgpuDeviceLimits.js';
 
 export const ULG_CARRIER_WEBGPU_PARITY_SCHEMA = 'peercompute.ulg.carrier-webgpu-parity.v0';
 
@@ -130,6 +133,7 @@ async function requestWebGpuDevice(navigatorRef, { onDeviceLost = null } = {}) {
     return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
   }
   const device = await adapter.requestDevice(webGpuDeviceDescriptorForResidentSph(adapter));
+  attachWebGpuUncapturedErrorTelemetry(device, { label: 'carrier-kernel' });
   if (device?.lost?.then && typeof onDeviceLost === 'function') {
     device.lost.then((info) => {
       onDeviceLost(info);

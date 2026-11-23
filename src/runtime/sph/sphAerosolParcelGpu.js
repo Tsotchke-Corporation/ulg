@@ -16,6 +16,7 @@ import {
 } from './sphAerosolParcelWgsl.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
+import { watchSphDeviceLossFor } from './sphDeviceLossRelay.js';
 import {
   sphAerosolCondensateProposalWgsl,
   sphAerosolCondensateApplyWgsl
@@ -105,13 +106,54 @@ function destroy(resources) {
   for (const buffer of resources.splice(0)) buffer.destroy();
 }
 
+const PENDING_UNCONFIRMED_CLEANUPS = new Set();
+
+function invokeAfterQueueCallback(target) {
+  PENDING_UNCONFIRMED_CLEANUPS.delete(target);
+  target.callback();
+}
+
+function handleCondensateCandidateLost(candidateRecord) {
+  if (candidateRecord.disposition === 'prepared') {
+    if (candidateRecord.transition != null) discardSphAerosolCondensateTransition(candidateRecord.transition);
+    else { candidateRecord.disposition = 'discarded'; candidateRecord.dispose(); }
+  }
+}
+
+function handleAerosolChildLost(child) {
+  child.lost = true;
+  child.releaseRequested = true;
+  retireFamily(child);
+}
+
+function handleExtractionPairLost(pairRecord) {
+  pairRecord.released = true;
+  destroy(pairRecord.resources);
+}
+
+function handleVaporTransitionRecordLost(record) {
+  if (record.transition) discardSphAerosolCondensateTransition(record.transition);
+  else record.dispose();
+}
+
+function handlePendingCondensateTransitionLost(pending) {
+  pending.child.lost = true;
+  pending.child.releaseRequested = true;
+  retireFamily(pending.child);
+  if (pending.disposition === 'published') retireCondensateTransitionResiduals(pending);
+}
+
 function afterQueue(device, callback, quarantine = () => {}) {
   // Call before returning: this fence names the submitted reads, not work a
   // later caller happens to enqueue. A failed fence alone is NOT confirmation
   // of device loss or completed reads. Retain/quarantine until loss confirms.
   const unconfirmed = () => {
     quarantine();
-    device.lost.then(callback, () => {});
+    const token = { callback };
+    PENDING_UNCONFIRMED_CLEANUPS.add(token);
+    if (!watchSphDeviceLossFor(device, token, invokeAfterQueueCallback)) {
+      PENDING_UNCONFIRMED_CLEANUPS.delete(token);
+    }
   };
   try { Promise.resolve(device.queue.onSubmittedWorkDone()).then(callback, unconfirmed); }
   catch { unconfirmed(); }
@@ -481,12 +523,7 @@ export async function runSphAerosolCondensateExtractionWebGpu({ device, sourceFa
       sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer, validateSource,
       transition: null, transitionPreparing: false, disposition: 'prepared' };
     EXTRACTIONS.set(candidate, candidateRecord);
-    device.lost.then(() => {
-      if (candidateRecord.disposition === 'prepared') {
-        if (candidateRecord.transition != null) discardSphAerosolCondensateTransition(candidateRecord.transition);
-        else { candidateRecord.disposition = 'discarded'; candidateRecord.dispose(); }
-      }
-    });
+    watchSphDeviceLossFor(device, candidateRecord, handleCondensateCandidateLost);
     afterQueue(device, () => destroy(temporaries), () => { source.quarantined = true; });
     return candidate;
   } catch (error) {
@@ -527,7 +564,7 @@ export function adoptSphAerosolCondensateExtraction(candidate) {
     nucleusIds: declaration.nucleusIds, extractionPending: null, successorAdopted: false,
     releaseRequested: false, retirementScheduled: false, borrows: 0, lost: false, quarantined: false };
   FAMILIES.set(family, child);
-  device.lost.then(() => { child.lost = true; child.releaseRequested = true; retireFamily(child); });
+  watchSphDeviceLossFor(device, child, handleAerosolChildLost);
   const pair = Object.freeze({ schema: 'peercompute.ulg.sph-condensate-residual-aerosol-pair.v0',
     status: 'isolated-paired-inventory-ready-not-ss-successor', particleCount: context.count,
     stateBuffer: record.state, thermoBuffer: record.thermo, mechanicsBuffer: record.mechanics,
@@ -536,12 +573,7 @@ export function adoptSphAerosolCondensateExtraction(candidate) {
     gasVolumeAuthority: false, opticalAuthority: false, fullPhysicsValidation: false });
   const pairRecord = { device, family, resources: [record.state, record.thermo, record.mechanics], released: false };
   EXTRACTION_PAIRS.set(pair, pairRecord);
-  device.lost.then(() => {
-    pairRecord.released = true;
-    // Confirmed loss retires both halves even if the caller has not yet asked
-    // to release the pair, or a prior release fence remains unconfirmed.
-    destroy(pairRecord.resources);
-  });
+  watchSphDeviceLossFor(device, pairRecord, handleExtractionPairLost);
   record.disposition = 'adopted'; source.successorAdopted = true; record.sourceClaim.adopted = true;
   record.outputs.length = 0; record.dropSource();
   return pair;
@@ -677,10 +709,7 @@ export async function prepareSphAerosolVaporTransition({ device, producerRead } 
       exactQuantities: Object.freeze({ format: producer.format, quantityBuffer: quantities,
         quantityLayout: producer.endpoints.aerosolLayout }),
       validateSource, dropSource, dispose, cleanupCompletion };
-    device.lost.then(() => {
-      if (record.transition) discardSphAerosolCondensateTransition(record.transition);
-      else dispose();
-    }, () => {});
+    watchSphDeviceLossFor(device, record, handleVaporTransitionRecordLost);
     return prepareCondensateTransitionForRecord(record);
   } catch (error) {
     dispose();
@@ -712,10 +741,7 @@ function prepareCondensateTransitionForRecord(record) {
   try {
     // Register every child/read loss handler before reserving the transition.
     // Until publication, the extraction alone owns all four output buffers.
-    device.lost.then(() => {
-      child.lost = true; child.releaseRequested = true; retireFamily(child);
-      if (pending.disposition === 'published') retireCondensateTransitionResiduals(pending);
-    });
+    watchSphDeviceLossFor(device, pending, handlePendingCondensateTransitionLost);
     pending.read = mintParcelRead(child, family);
     requirePendingCondensateSource(record);
     const transition = Object.freeze({ schema: 'peercompute.ulg.sph-aerosol-condensate-transition.v0',
@@ -897,7 +923,11 @@ function mintParcelRead(source, family) {
   const record = { source, read, released: false, drained: false };
   PARCEL_READS.set(read, record);
   source.borrows++;
-  try { source.device.lost.then(() => drainParcelRead(record)); }
+  try {
+    if (!watchSphDeviceLossFor(source.device, record, drainParcelRead)) {
+      throw new TypeError('Aerosol parcel read requires a WebGPU device with a lost promise');
+    }
+  }
   catch (error) {
     PARCEL_READS.delete(read);
     if (!record.drained) { record.drained = true; source.borrows--; }

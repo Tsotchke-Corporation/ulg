@@ -339,6 +339,17 @@ export function resolveSphWallReservoirAuthority({
   if (finite && !instanceId) {
     throw new TypeError('wallReservoirAuthority.instanceId is required for finite walls');
   }
+  const implicitZeroKelvinFaces = [];
+  if (!inherited && model !== SPH_THERMAL_WALL_MODEL_ADIABATIC && defaultWallTemperatureK === 0) {
+    for (const faceId of SPH_THERMAL_WALL_FACE_IDS) {
+      const hasExplicit = scalarMapProvided
+        && wallTemperaturesK
+        && typeof wallTemperaturesK === 'object'
+        && Object.prototype.hasOwnProperty.call(wallTemperaturesK, faceId)
+        && wallTemperaturesK[faceId] !== undefined;
+      if (!hasExplicit) implicitZeroKelvinFaces.push(faceId);
+    }
+  }
   return Object.freeze({
     schema: ULG_SPH_WALL_RESERVOIR_AUTHORITY_SCHEMA,
     status: 'wall-reservoir-authority-ready',
@@ -346,6 +357,8 @@ export function resolveSphWallReservoirAuthority({
     faces,
     exchangeEnabled: model !== SPH_THERMAL_WALL_MODEL_ADIABATIC,
     finiteCapacity: finite,
+    implicitZeroKelvinFaces: Object.freeze(implicitZeroKelvinFaces),
+    implicitZeroKelvinFaceCount: implicitZeroKelvinFaces.length,
     ...(finite
       ? {
           faceHeatCapacitiesJPerK,

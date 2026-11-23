@@ -11,6 +11,7 @@ import {
 } from '../runtime/electronicStructure/quantumDerivationArtifacts.js';
 import { BOHR_TO_M } from '../runtime/electronicStructure/uniformElectronGas.js';
 import { createCosmicQuantumScaleBridge } from '../runtime/sph/cosmicQuantumScaleBridge.js';
+import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
   HYDRO_PARTICLE_STRIDE_FLOATS,
   createSelfGravitatingHydroEngine,
@@ -211,6 +212,7 @@ export async function mountStellarGenesisDemo(container) {
     const adapter = await navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' });
     if (adapter) {
       gpuDevice = await adapter.requestDevice();
+      attachWebGpuUncapturedErrorTelemetry(gpuDevice, { label: 'stellar-genesis-demo' });
       gpuAdapterName = adapter.info?.description || adapter.info?.vendor || 'WebGPU GPU';
     }
   } catch {

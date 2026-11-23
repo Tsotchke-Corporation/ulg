@@ -714,16 +714,16 @@ export function rhf(atoms, { charge = 0, basis: basisName = 'sto-3g', maxIter = 
  * an explicit `multiplicity` = 2S+1). UHF can break spin symmetry, so it dissociates bonds
  * qualitatively correctly where RHF cannot.
  */
-export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplicity = null, maxIter = 300, tol = 1e-9, damping = 0.6 } = {}) {
+export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplicity = null, maxIter = 300, tol = 1e-9, damping = 0.6, brokenSymmetry = false, brokenSymmetryPairs = 1 } = {}) {
   const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge, basisName);
   const twoS = multiplicity != null ? multiplicity - 1 : (nElectrons % 2);
   const nAlpha = (nElectrons + twoS) / 2;
   const nBeta = (nElectrons - twoS) / 2;
   if (!Number.isInteger(nAlpha) || nBeta < 0) throw new Error('inconsistent electron count / multiplicity');
 
-  // Spin-broken initial guess: diagonalize Hcore, then occupy. (Pure-Hcore guesses give the same
-  // α/β density and never break symmetry, so seed β by skipping its lowest virtual — enough for the
-  // SCF to find the broken-symmetry / high-spin solution.)
+  // Spin-broken initial guess: when brokenSymmetry is requested for a closed-shell
+  // singlet (or stretched covalent bond), rotate the frontier HOMO/LUMO pair(s) by
+  // +-pi/4 in alpha vs beta so SCF can localize opposite spins on separating centers.
   const buildDensity = (C, nOcc) => {
     const P = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
@@ -734,8 +734,27 @@ export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplici
     return P;
   };
   const { C: Cinit } = solveFock(Hcore, X, n);
-  let Pa = buildDensity(Cinit, nAlpha);
-  let Pb = buildDensity(Cinit, nBeta);
+  let CaInit = Cinit.map((row) => row.slice());
+  let CbInit = Cinit.map((row) => row.slice());
+  if (brokenSymmetry && nAlpha > 0 && nAlpha < n) {
+    const pairs = Math.max(1, Math.min(Math.floor(brokenSymmetryPairs), nAlpha, n - nAlpha));
+    const cMix = Math.SQRT1_2;
+    const sMix = Math.SQRT1_2;
+    for (let k = 0; k < pairs; k += 1) {
+      const h = nAlpha - 1 - k;
+      const l = nAlpha + k;
+      for (let i = 0; i < n; i += 1) {
+        const ch = Cinit[i][h];
+        const cl = Cinit[i][l];
+        CaInit[i][h] = cMix * ch + sMix * cl;
+        CaInit[i][l] = -sMix * ch + cMix * cl;
+        CbInit[i][h] = cMix * ch - sMix * cl;
+        CbInit[i][l] = sMix * ch + cMix * cl;
+      }
+    }
+  }
+  let Pa = buildDensity(CaInit, nAlpha);
+  let Pb = buildDensity(CbInit, nBeta);
 
   let energy = 0;
   let scfConverged = false;
@@ -782,6 +801,23 @@ export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplici
     if (Math.abs(energy - lastEnergy) < tol && iter > 2) { scfConverged = true; break; }
     lastEnergy = energy;
   }
+  // Exact UHF spin-squared expectation value:
+  //   <S^2> = S_z(S_z + 1) + N_beta - sum_{i<nAlpha, j<nBeta} |<psi_i^alpha | psi_j^beta>|^2.
+  const sz = 0.5 * (nAlpha - nBeta);
+  let ovSum = 0;
+  for (let i = 0; i < nAlpha; i += 1) {
+    for (let j = 0; j < nBeta; j += 1) {
+      let s = 0;
+      for (let u = 0; u < n; u += 1) {
+        let sv = 0;
+        for (let v = 0; v < n; v += 1) sv += S[u][v] * finalCb[v][j];
+        s += finalCa[u][i] * sv;
+      }
+      ovSum += s * s;
+    }
+  }
+  const sSquared = sz * (sz + 1) + nBeta - ovSum;
+
   return {
     totalEnergyHa: energy + nuclearRepulsion,
     electronicEnergyHa: energy,
@@ -790,6 +826,7 @@ export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplici
     nElectrons,
     nAlpha,
     nBeta,
+    sSquared,
     CAlpha: finalCa,
     CBeta: finalCb,
     epsAlpha: finalEpsA,
@@ -801,6 +838,276 @@ export function uhf(atoms, { charge = 0, basis: basisName = 'sto-3g', multiplici
     eri,
     idx,
     scfConverged
+  };
+}
+
+/**
+ * Phase 7 Multi-Reference 2-Electron, 2-Orbital Complete Active Space CI (`CAS(2,2)`)
+ * in the full 3-CSF singlet basis (`|h h_bar>`, `|l l_bar>`, `1/sqrt(2)(|h l_bar> - |h_bar l>)`)
+ * with optional active-space orbital rotation optimization (`optimizeOrbitals: true`).
+ *
+ * Captures static (left-right) electron correlation across covalent bond dissociation
+ * smoothly without RHF's ionic divergence, while returning exact natural orbital
+ * occupation numbers `n_1, n_2` (`n_1 + n_2 = 2`) and diradical character `y_0 = n_2`.
+ */
+export function cas22(atoms, {
+  charge = 0,
+  basis: basisName = 'sto-3g',
+  maxIter = 200,
+  tol = 1e-8,
+  activeHomoIndex = null,
+  activeLumoIndex = null,
+  optimizeOrbitals = true
+} = {}) {
+  const { basis, n, nElectrons, S, Hcore, eri, idx, nuclearRepulsion } = buildIntegrals(atoms, charge, basisName);
+  if (nElectrons % 2 !== 0) throw new Error('CAS(2,2) requires an even electron count');
+  const hf = rhf(atoms, { charge, basis: basisName, maxIter, tol });
+  const nOcc = hf.nOcc;
+  if (nOcc < 1 || n < nOcc + 1) {
+    throw new Error('CAS(2,2) requires at least 1 occupied and 1 virtual orbital');
+  }
+
+  const hIdx = activeHomoIndex != null ? activeHomoIndex : nOcc - 1;
+  const lIdx = activeLumoIndex != null ? activeLumoIndex : nOcc;
+  const coreIndices = [];
+  for (let i = 0; i < nOcc; i += 1) {
+    if (i !== hIdx) coreIndices.push(i);
+  }
+
+  // Build core density P_core = 2 * sum_{c in core} C_uc C_vc and frozen core energy
+  const Pcore = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let u = 0; u < n; u += 1) {
+    for (let v = 0; v < n; v += 1) {
+      let s = 0;
+      for (const c of coreIndices) s += hf.C[u][c] * hf.C[v][c];
+      Pcore[u][v] = 2 * s;
+    }
+  }
+  const Fcore = Array.from({ length: n }, () => new Array(n).fill(0));
+  let eCoreElec = 0;
+  for (let u = 0; u < n; u += 1) {
+    for (let v = 0; v < n; v += 1) {
+      let g = 0;
+      for (let k = 0; k < n; k += 1) {
+        for (let l = 0; l < n; l += 1) {
+          g += Pcore[k][l] * (eri[idx(u, v, l, k)] - 0.5 * eri[idx(u, k, l, v)]);
+        }
+      }
+      Fcore[u][v] = Hcore[u][v] + g;
+      eCoreElec += 0.5 * Pcore[u][v] * (Hcore[u][v] + Fcore[u][v]);
+    }
+  }
+  const eCoreTotal = nuclearRepulsion + eCoreElec;
+
+  const contract1e = (ca, cb) => {
+    let s = 0;
+    for (let u = 0; u < n; u += 1) {
+      for (let v = 0; v < n; v += 1) s += ca[u] * Fcore[u][v] * cb[v];
+    }
+    return s;
+  };
+  const contract2e = (ca, cb, cc, cd) => {
+    let s = 0;
+    for (let u = 0; u < n; u += 1) {
+      const cu = ca[u];
+      if (cu === 0) continue;
+      for (let v = 0; v < n; v += 1) {
+        const cuv = cu * cb[v];
+        if (cuv === 0) continue;
+        for (let k = 0; k < n; k += 1) {
+          const cuvk = cuv * cc[k];
+          if (cuvk === 0) continue;
+          for (let l = 0; l < n; l += 1) {
+            s += cuvk * cd[l] * eri[idx(u, v, k, l)];
+          }
+        }
+      }
+    }
+    return s;
+  };
+
+  const cH0 = Array.from({ length: n }, (_, u) => hf.C[u][hIdx]);
+  const cL0 = Array.from({ length: n }, (_, u) => hf.C[u][lIdx]);
+
+  const evalCasAtAngle = (theta) => {
+    const ct = Math.cos(theta);
+    const st = Math.sin(theta);
+    const ch = cH0.map((v, u) => ct * v + st * cL0[u]);
+    const cl = cH0.map((v, u) => -st * v + ct * cL0[u]);
+
+    const hhh = contract1e(ch, ch);
+    const hll = contract1e(cl, cl);
+    const hhl = contract1e(ch, cl);
+
+    const Jhh = contract2e(ch, ch, ch, ch);
+    const Jll = contract2e(cl, cl, cl, cl);
+    const Jhl = contract2e(ch, ch, cl, cl);
+    const Khl = contract2e(ch, cl, ch, cl);
+    const Ghhhl = contract2e(ch, ch, ch, cl);
+    const Gllhl = contract2e(cl, cl, ch, cl);
+
+    // Full 3-CSF Singlet CAS(2,2) Hamiltonian:
+    //   |1> = |h_a h_b>, |2> = |l_a l_b>, |3> = (|h_a l_b> - |h_b l_a>) / sqrt(2)
+    const Hci = [
+      [eCoreTotal + 2 * hhh + Jhh, Khl, Math.SQRT2 * (hhl + Ghhhl)],
+      [Khl, eCoreTotal + 2 * hll + Jll, Math.SQRT2 * (hhl + Gllhl)],
+      [Math.SQRT2 * (hhl + Ghhhl), Math.SQRT2 * (hhl + Gllhl), eCoreTotal + hhh + hll + Jhl + Khl]
+    ];
+    const { values, vectors } = jacobiEigh(Hci, 3);
+    let best = 0;
+    if (values[1] < values[best]) best = 1;
+    if (values[2] < values[best]) best = 2;
+    const c1 = vectors[0][best];
+    const c2 = vectors[1][best];
+    const c3 = vectors[2][best];
+
+    // Active-space spin-summed 1-RDM gamma_pq in {h, l}:
+    //   gamma_hh = 2 c1^2 + c3^2, gamma_ll = 2 c2^2 + c3^2, gamma_hl = sqrt(2) c3 (c1 + c2)
+    const ghh = 2 * c1 * c1 + c3 * c3;
+    const gll = 2 * c2 * c2 + c3 * c3;
+    const ghl = Math.SQRT2 * c3 * (c1 + c2);
+    const tr = ghh + gll;
+    const diff = Math.hypot(ghh - gll, 2 * ghl);
+    const n1 = 0.5 * (tr + diff);
+    const n2 = 0.5 * (tr - diff);
+
+    return {
+      totalEnergyHa: values[best],
+      excitedEnergiesHa: values.slice().sort((a, b) => a - b),
+      ciCoefficients: [c1, c2, c3],
+      naturalOccupations: [n1, n2],
+      diradicalCharacter: Math.max(0, Math.min(1, n2)),
+      theta,
+      Jhh,
+      Jll,
+      Jhl,
+      Khl,
+      h11RefHa: Hci[0][0]
+    };
+  };
+
+  const ref0 = evalCasAtAngle(0);
+  let best = ref0;
+  if (optimizeOrbitals) {
+    // Full 3-CSF CAS(2,2) is invariant under active-active rotations, so only accept
+    // rotations that strictly improve energy beyond floating-point noise.
+    let bestTheta = 0;
+    for (let k = -8; k <= 8; k += 1) {
+      const th = (k / 16) * Math.PI * 0.5;
+      const cand = evalCasAtAngle(th);
+      if (cand.totalEnergyHa < best.totalEnergyHa - 1e-10) {
+        best = cand;
+        bestTheta = th;
+      }
+    }
+    if (bestTheta !== 0) {
+      let lo = bestTheta - Math.PI / 32;
+      let hi = bestTheta + Math.PI / 32;
+      const phi = (Math.sqrt(5) - 1) / 2;
+      let x1 = hi - phi * (hi - lo);
+      let x2 = lo + phi * (hi - lo);
+      let r1 = evalCasAtAngle(x1);
+      let r2 = evalCasAtAngle(x2);
+      for (let it = 0; it < 14; it += 1) {
+        if (r1.totalEnergyHa < r2.totalEnergyHa) {
+          hi = x2; x2 = x1; r2 = r1; x1 = hi - phi * (hi - lo); r1 = evalCasAtAngle(x1);
+        } else {
+          lo = x1; x1 = x2; r1 = r2; x2 = lo + phi * (hi - lo); r2 = evalCasAtAngle(x2);
+        }
+      }
+      const mid = evalCasAtAngle(0.5 * (lo + hi));
+      if (mid.totalEnergyHa < best.totalEnergyHa - 1e-10) best = mid;
+    }
+  }
+
+  return {
+    schema: 'peercompute.ulg.molecular-cas22.v1',
+    basis: basisName,
+    nBasis: n,
+    nElectrons,
+    rhfEnergyHa: hf.totalEnergyHa,
+    totalEnergyHa: best.totalEnergyHa,
+    staticCorrelationHa: best.totalEnergyHa - hf.totalEnergyHa,
+    excitedEnergiesHa: best.excitedEnergiesHa,
+    ciCoefficients: best.ciCoefficients,
+    naturalOccupations: best.naturalOccupations,
+    diradicalCharacter: best.diradicalCharacter,
+    activeOrbitals: { homoIndex: hIdx, lumoIndex: lIdx, rotationAngleRad: best.theta },
+    exchangeIntegralKhlHa: best.Khl,
+    h11RhfConsistencyErrorHa: Math.abs(ref0.h11RefHa - hf.totalEnergyHa),
+    scfConverged: hf.scfConverged,
+    validation: {
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    }
+  };
+}
+
+/**
+ * Phase 7 Approximate Spin-Projected Unrestricted Hartree-Fock (`PUHF`, Yamaguchi 1988).
+ *
+ * Runs broken-symmetry singlet UHF (`BS`) + high-spin UHF (`HS`) and removes
+ * spin contamination using:
+ *   E_PUHF = E_BS + (<S^2>_BS / (<S^2>_HS - <S^2>_BS)) * (E_BS - E_HS).
+ * Handles single AND multiple covalent bond dissociations (H2, F2, N2) smoothly.
+ */
+export function puhf(atoms, {
+  charge = 0,
+  basis: basisName = 'sto-3g',
+  highSpinMultiplicity = 3,
+  brokenSymmetryPairs = null,
+  maxIter = 300,
+  tol = 1e-9,
+  damping = 0.55
+} = {}) {
+  const pairs = brokenSymmetryPairs ?? Math.max(1, Math.floor((highSpinMultiplicity - 1) / 2));
+  const rhfRes = rhf(atoms, { charge, basis: basisName, maxIter, tol });
+  const bsRes = uhf(atoms, {
+    charge,
+    basis: basisName,
+    multiplicity: 1,
+    brokenSymmetry: true,
+    brokenSymmetryPairs: pairs,
+    maxIter,
+    tol,
+    damping
+  });
+  const hsRes = uhf(atoms, {
+    charge,
+    basis: basisName,
+    multiplicity: highSpinMultiplicity,
+    brokenSymmetry: false,
+    maxIter,
+    tol,
+    damping
+  });
+
+  // Only apply Yamaguchi projection when BS genuinely broke spin symmetry below RHF
+  const s2Bs = Math.max(0, bsRes.sSquared);
+  const s2Hs = Math.max(s2Bs + 1e-6, hsRes.sSquared);
+  const brokeSymmetry = s2Bs > 1e-4 && bsRes.totalEnergyHa <= rhfRes.totalEnergyHa + 1e-6;
+  const projectionWeight = brokeSymmetry ? s2Bs / (s2Hs - s2Bs) : 0;
+  const rawProjected = brokeSymmetry
+    ? bsRes.totalEnergyHa + projectionWeight * (bsRes.totalEnergyHa - hsRes.totalEnergyHa)
+    : Math.min(rhfRes.totalEnergyHa, bsRes.totalEnergyHa);
+
+  return {
+    schema: 'peercompute.ulg.molecular-puhf.v1',
+    basis: basisName,
+    highSpinMultiplicity,
+    rhfEnergyHa: rhfRes.totalEnergyHa,
+    uhfBrokenSymmetryEnergyHa: bsRes.totalEnergyHa,
+    uhfHighSpinEnergyHa: hsRes.totalEnergyHa,
+    totalEnergyHa: rawProjected,
+    spinProjectionCorrectionHa: rawProjected - bsRes.totalEnergyHa,
+    sSquaredBrokenSymmetry: bsRes.sSquared,
+    sSquaredHighSpin: hsRes.sSquared,
+    brokeSymmetry,
+    scfConverged: Boolean(bsRes.scfConverged && hsRes.scfConverged),
+    validation: {
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    }
   };
 }
 

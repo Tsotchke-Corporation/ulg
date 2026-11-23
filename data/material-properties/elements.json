@@ -27,7 +27,7 @@
      "thermalConductivityWPerMK": 0.1805,
      "bulkModulusPa": 101325,
      "shearModulusPa": 0,
-     "dynamicViscosityPaS": 8.8e-06,
+     "dynamicViscosityPaS": 0.0000088,
      "surfaceTensionNPerM": 0
     }
    ],
@@ -72,6 +72,108 @@
      "units": "SI",
      "referenceState": "293.15 K, 101325 Pa",
      "quality": "bootstrap-only"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "He",
+   "name": "Helium",
+   "atomicNumber": 2,
+   "atomicMassU": 4.0026,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      0.95
+     ],
+     "densityKgPerM3": 352.6,
+     "heatCapacityJPerKgK": 6226.17,
+     "thermalConductivityWPerMK": 0.02,
+     "bulkModulusPa": 26773772.05,
+     "shearModulusPa": 8032131.61,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      0.95,
+      3.75
+     ],
+     "densityKgPerM3": 317.34,
+     "heatCapacityJPerKgK": 5712.48,
+     "bulkModulusPa": 10709508.82,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00008198,
+     "surfaceTensionNPerM": 0.000675
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      3.75,
+      10000
+     ],
+     "densityKgPerM3": 0.166393,
+     "heatCapacityJPerKgK": 5193.16,
+     "thermalConductivityWPerMK": 0.079825,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00001025,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 0.95,
+     "latentHeatJPerKg": 2170.7
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 3.75,
+     "latentHeatJPerKg": 81792.3
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.00003,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=2 (He-4)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-2-representative-effective"
     }
    ]
   },
@@ -589,7 +691,7 @@
      "thermalConductivityWPerMK": 0.0266,
      "bulkModulusPa": 101325,
      "shearModulusPa": 0,
-     "dynamicViscosityPaS": 2.06e-05,
+     "dynamicViscosityPaS": 0.0000206,
      "surfaceTensionNPerM": 0
     }
    ],
@@ -733,6 +835,108 @@
      "units": "K, J/kg",
      "referenceState": "101325 Pa",
      "quality": "reference-seed-2026-07-04"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "Ne",
+   "name": "Neon",
+   "atomicNumber": 10,
+   "atomicMassU": 20.18,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      7.21
+     ],
+     "densityKgPerM3": 1122.24,
+     "heatCapacityJPerKgK": 1234.41,
+     "thermalConductivityWPerMK": 0.02,
+     "bulkModulusPa": 139983495.26,
+     "shearModulusPa": 41995048.58,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      7.21,
+      10.01
+     ],
+     "densityKgPerM3": 1010.01,
+     "heatCapacityJPerKgK": 1133.04,
+     "bulkModulusPa": 55993398.11,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00013546,
+     "surfaceTensionNPerM": 0.001802
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      10.01,
+      10000
+     ],
+     "densityKgPerM3": 0.838907,
+     "heatCapacityJPerKgK": 1030.04,
+     "thermalConductivityWPerMK": 0.026162,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00001693,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 7.21,
+     "latentHeatJPerKg": 3267.7
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 10.01,
+     "latentHeatJPerKg": 43304.8
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.000075,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=10 (Ne-22)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-2-representative-effective"
     }
    ]
   },
@@ -1425,6 +1629,108 @@
      "units": "K, J/kg",
      "referenceState": "101325 Pa",
      "quality": "reference-seed-2026-07-04"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "Ar",
+   "name": "Argon",
+   "atomicNumber": 18,
+   "atomicMassU": 39.948,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      24.82
+     ],
+     "densityKgPerM3": 1496.83,
+     "heatCapacityJPerKgK": 623.07,
+     "thermalConductivityWPerMK": 0.0233,
+     "bulkModulusPa": 324840689.05,
+     "shearModulusPa": 97452206.72,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      24.82,
+      27.79
+     ],
+     "densityKgPerM3": 1347.15,
+     "heatCapacityJPerKgK": 572.36,
+     "bulkModulusPa": 129936275.62,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00014648,
+     "surfaceTensionNPerM": 0.005002
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      27.79,
+      10000
+     ],
+     "densityKgPerM3": 1.660686,
+     "heatCapacityJPerKgK": 520.33,
+     "thermalConductivityWPerMK": 0.014291,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00001831,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 24.82,
+     "latentHeatJPerKg": 5682.4
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 27.79,
+     "latentHeatJPerKg": 60731.9
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.000113,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=18 (Ar-38)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-2-representative-effective"
     }
    ]
   },
@@ -2997,6 +3303,108 @@
   },
   {
    "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "Kr",
+   "name": "Krypton",
+   "atomicNumber": 36,
+   "atomicMassU": 83.798,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      59.68
+     ],
+     "densityKgPerM3": 2261.1,
+     "heatCapacityJPerKgK": 296.95,
+     "thermalConductivityWPerMK": 0.0249,
+     "bulkModulusPa": 562524023.24,
+     "shearModulusPa": 168757206.97,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      59.68,
+      66.84
+     ],
+     "densityKgPerM3": 2034.99,
+     "heatCapacityJPerKgK": 272.86,
+     "bulkModulusPa": 225009609.3,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00017044,
+     "surfaceTensionNPerM": 0.012031
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      66.84,
+      10000
+     ],
+     "densityKgPerM3": 3.483583,
+     "heatCapacityJPerKgK": 248.05,
+     "thermalConductivityWPerMK": 0.007927,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00002131,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 59.68,
+     "latentHeatJPerKg": 6513.6
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 66.84,
+     "latentHeatJPerKg": 69634.8
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.000184,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=36 (Kr-82)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-2-representative-effective"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
    "symbol": "Rb",
    "name": "Rubidium",
    "atomicNumber": 37,
@@ -4459,6 +4867,108 @@
      "referenceState": "293.15 K, 101325 Pa",
      "quality": "bootstrap-only",
      "inputHash": "ulg:95286dc0"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "Xe",
+   "name": "Xenon",
+   "atomicNumber": 54,
+   "atomicMassU": 131.29,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      117.86
+     ],
+     "densityKgPerM3": 2693.75,
+     "heatCapacityJPerKgK": 189.42,
+     "thermalConductivityWPerMK": 0.028,
+     "bulkModulusPa": 844804855.6,
+     "shearModulusPa": 253441456.68,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      117.86,
+      132.01
+     ],
+     "densityKgPerM3": 2424.38,
+     "heatCapacityJPerKgK": 174.15,
+     "bulkModulusPa": 337921942.24,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00017774,
+     "surfaceTensionNPerM": 0.023762
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      132.01,
+      10000
+     ],
+     "densityKgPerM3": 5.457882,
+     "heatCapacityJPerKgK": 158.32,
+     "thermalConductivityWPerMK": 0.005276,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00002222,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 117.86,
+     "latentHeatJPerKg": 8210.3
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 132.01,
+     "latentHeatJPerKg": 87780.6
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.000245,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=54 (Xe-126)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-2-representative-effective"
     }
    ]
   },
@@ -7145,6 +7655,108 @@
   },
   {
    "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "Rn",
+   "name": "Radon",
+   "atomicNumber": 86,
+   "atomicMassU": 222,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      205.53
+     ],
+     "densityKgPerM3": 3857.67,
+     "heatCapacityJPerKgK": 112.02,
+     "thermalConductivityWPerMK": 0.0284,
+     "bulkModulusPa": 1247685067.19,
+     "shearModulusPa": 374305520.16,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      205.53,
+      230.2
+     ],
+     "densityKgPerM3": 3471.9,
+     "heatCapacityJPerKgK": 102.99,
+     "bulkModulusPa": 499074026.87,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00020689,
+     "surfaceTensionNPerM": 0.041436
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      230.2,
+      10000
+     ],
+     "densityKgPerM3": 9.228806,
+     "heatCapacityJPerKgK": 93.63,
+     "thermalConductivityWPerMK": 0.003632,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00002586,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 205.53,
+     "latentHeatJPerKg": 8467.4
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 230.2,
+     "latentHeatJPerKg": 90526.5
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.000339,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=86 (Rn-212)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-2-representative-effective"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
    "symbol": "Fr",
    "name": "Francium",
    "atomicNumber": 87,
@@ -9775,6 +10387,108 @@
      "referenceState": "293.15 K, 101325 Pa",
      "quality": "bootstrap-only",
      "inputHash": "ulg:af5b52ed"
+    }
+   ]
+  },
+  {
+   "schema": "peercompute.ulg.material-property-bank.element.v0",
+   "symbol": "Og",
+   "name": "Oganesson",
+   "atomicNumber": 118,
+   "atomicMassU": 294,
+   "referenceState": {
+    "temperatureK": 293.15,
+    "pressurePa": 101325
+   },
+   "phases": [
+    {
+     "name": "solid",
+     "temperatureRangeK": [
+      0,
+      328.9
+     ],
+     "densityKgPerM3": 4728.07,
+     "heatCapacityJPerKgK": 84.53,
+     "thermalConductivityWPerMK": 0.0313,
+     "bulkModulusPa": 1847810901.92,
+     "shearModulusPa": 554343270.58,
+     "dynamicViscosityPaS": null,
+     "surfaceTensionNPerM": null
+    },
+    {
+     "name": "liquid",
+     "temperatureRangeK": [
+      328.9,
+      368.37
+     ],
+     "densityKgPerM3": 4255.26,
+     "heatCapacityJPerKgK": 77.77,
+     "bulkModulusPa": 739124360.77,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.0002261,
+     "surfaceTensionNPerM": 0.066307
+    },
+    {
+     "name": "gas",
+     "temperatureRangeK": [
+      368.37,
+      10000
+     ],
+     "densityKgPerM3": 12.221932,
+     "heatCapacityJPerKgK": 70.7,
+     "thermalConductivityWPerMK": 0.002997,
+     "bulkModulusPa": 101325,
+     "shearModulusPa": 0,
+     "dynamicViscosityPaS": 0.00002826,
+     "surfaceTensionNPerM": 0
+    }
+   ],
+   "transitions": [
+    {
+     "name": "melting",
+     "temperatureK": 328.9,
+     "latentHeatJPerKg": 10231.6
+    },
+    {
+     "name": "boiling",
+     "temperatureK": 368.37,
+     "latentHeatJPerKg": 109385.7
+    }
+   ],
+   "mechanics": {
+    "mlsMpmMaterialClass": "noble-gas",
+    "targetNeighborCount": 32,
+    "initialPackingHint": "gas-cell-ledger",
+    "spacingPolicy": "derive-from-rest-density-and-phase"
+   },
+   "opticalPbr": {
+    "baseColorSrgb": [
+     0.92,
+     0.96,
+     1
+    ],
+    "metalness": 0,
+    "roughness": 0.08,
+    "ior": 1.000423,
+    "emissiveHint": "none"
+   },
+   "provenance": [
+    {
+     "family": "identity",
+     "source": "periodic-table-nuclear-shell-closure",
+     "method": "Gate 1 nuclear LDM+Strutinsky + periodicTable (gridPointsN=80 compatible)",
+     "status": "reduced-estimate",
+     "units": "u",
+     "referenceState": "neutral atom Z=118 (Og-304)"
+    },
+    {
+     "family": "phase-thermal-optical",
+     "source": "ulg-gate1-noble-gas-vdw-chapman-enskog",
+     "method": "Closed-shell London dispersion + Debye/Lindemann + Chapman-Enskog transport (gridPointsN=80)",
+     "status": "reduced-estimate",
+     "units": "SI",
+     "referenceState": "293.15 K, 101325 Pa",
+     "quality": "tier-3-theoretical-envelope"
     }
    ]
   }

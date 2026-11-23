@@ -21,6 +21,7 @@ import {
   createCosmicQuantumScaleBridge
 } from '../runtime/sph/cosmicQuantumScaleBridge.js';
 import { runSchroederScaleAtlasMultipoleWebGpu } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
+import { createSupergalacticTreePmCosmicAdapter } from '../runtime/astrophysics/supergalacticTreePmGpu.js';
 import { createMaterialPolytopeRegistry } from '../runtime/material/materialPolytopeRegistry.js';
 import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 import {
@@ -465,12 +466,14 @@ export async function mountCosmicQuantumZoomDemo(container) {
 
   let galacticEngine = null;
   let galacticPresenter = null;
-  const cosmicWebBodies0 = createCosmicWebBodies({ count: 3072, seed: 1370 });
-  const cosmicWebEngine = createResidentTiledNBodyEngine({
+  const cosmicWebEngine = createSupergalacticTreePmCosmicAdapter({
     device: gpuDevice,
-    initialBodies: cosmicWebBodies0,
-    mode: 1,
-    label: 'ulg-cosmic-web-lcdm'
+    particleCount: 4096,
+    gridN: 32,
+    boxLengthMpc: 18.0,
+    aInit: 0.25,
+    da: 0.006,
+    seed: 1370
   });
   moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
     method: { model: 'cosmology-comoving-nbody', version: 1 },
@@ -506,65 +509,24 @@ export async function mountCosmicQuantumZoomDemo(container) {
   const instDummy = new THREE.Object3D();
   const instColor = new THREE.Color();
 
-  // ---- 1. Supergalactic / Observable Universe Cosmic Web (10^27 m) ----
+  // ---- 1. Supergalactic / Observable Universe Cosmic Web (10^27 m — Live Gate 5D FLRW 3D-FFT TreePM) ----
   const cosmicGroup = regimeGroups['supergalactic-cosmic'];
   const cosmicPresenter = createZeroCopyResidentBodyPresenter({
     THREE,
     TSL,
     renderer,
     bodyCount: cosmicWebEngine.count,
+    strideFloats: cosmicWebEngine.strideFloats,
     palette: 'cosmic-web',
     initialBuffer: cosmicWebEngine.getResidentBuffer()
   });
   cosmicGroup.add(cosmicPresenter.mesh);
-  if (!cosmicPresenter.zeroCopy) {
-    cosmicPresenter.syncFromCpuBodies(cosmicWebEngine.getBodies());
-  }
 
   const horizonRing = new THREE.Mesh(
     new THREE.SphereGeometry(11.6, 32, 20),
     new THREE.MeshBasicMaterial({ color: 0x4f46e5, wireframe: true, transparent: true, opacity: 0.11 })
   );
   cosmicGroup.add(horizonRing);
-
-  const filamentGeo = new THREE.BufferGeometry();
-  const filamentPos = new Float32Array(1300 * 2 * 3);
-  filamentGeo.setAttribute('position', new THREE.BufferAttribute(filamentPos, 3));
-  const filamentLines = new THREE.LineSegments(
-    filamentGeo,
-    new THREE.LineBasicMaterial({ color: 0x818cf8, transparent: true, opacity: 0.44 })
-  );
-  filamentLines.frustumCulled = false;
-  // In zero-copy WebGPU mode the 3,072 nodes evolve purely on GPU; hide static CPU filament lines so voids never show stale t=0 bridges.
-  filamentLines.visible = !cosmicPresenter.zeroCopy;
-  cosmicGroup.add(filamentLines);
-
-  function syncCosmicFilaments(bodies) {
-    const n = bodies.length / 8;
-    let seg = 0;
-    const maxSeg = 1300;
-    const stride = Math.max(1, Math.floor(n / 220));
-    for (let i = 0; i < n && seg < maxSeg; i += stride) {
-      const bi = i * 8;
-      for (let j = i + stride; j < Math.min(n, i + stride * 24) && seg < maxSeg; j += stride) {
-        const bj = j * 8;
-        const d2 = (bodies[bi] - bodies[bj]) ** 2 + (bodies[bi + 1] - bodies[bj + 1]) ** 2 + (bodies[bi + 2] - bodies[bj + 2]) ** 2;
-        if (d2 > 0.14 && d2 < 6.8) {
-          const base = seg * 6;
-          filamentPos[base] = bodies[bi];
-          filamentPos[base + 1] = bodies[bi + 1];
-          filamentPos[base + 2] = bodies[bi + 2];
-          filamentPos[base + 3] = bodies[bj];
-          filamentPos[base + 4] = bodies[bj + 1];
-          filamentPos[base + 5] = bodies[bj + 2];
-          seg += 1;
-        }
-      }
-    }
-    filamentGeo.setDrawRange(0, seg * 2);
-    filamentGeo.attributes.position.needsUpdate = true;
-  }
-  syncCosmicFilaments(cosmicWebBodies0);
 
   // ---- 2. Galactic N-Body (10^21 m — Zero-Copy WebGPU Barnes-Hut / Direct) ----
   const galacticGroup = regimeGroups['galactic-nbody'];
@@ -1709,9 +1671,6 @@ export async function mountCosmicQuantumZoomDemo(container) {
         lastLeaseSummary = res.leaseSummary;
         if (cosmicPresenter.zeroCopy) {
           cosmicPresenter.bindLeaseHandle(res.leaseHandle);
-        } else {
-          cosmicPresenter.syncFromCpuBodies(cosmicWebEngine.getBodies());
-          syncCosmicFilaments(cosmicWebEngine.getBodies());
         }
         res.leaseHandle?.release?.();
       }

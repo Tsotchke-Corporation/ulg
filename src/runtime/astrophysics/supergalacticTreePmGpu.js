@@ -536,3 +536,45 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
     }
   });
 }
+
+/**
+ * Zero-copy Cosmic-Zoom adapter exposing the live Gate 5D FLRW 3D-FFT TreePM
+ * engine under the resident-engine interface (`count`, `strideFloats`,
+ * `stepIndex`, `scaleFactorA`, `getResidentBuffer`, `step`, `dispose`).
+ */
+export function createSupergalacticTreePmCosmicAdapter({
+  device,
+  particleCount = 4096,
+  gridN = 32,
+  boxLengthMpc = 18.0,
+  aInit = 0.25,
+  da = 0.008,
+  seed = 1370
+} = {}) {
+  const session = createSupergalacticTreePmSessionWebGpu(device, {
+    particleCount,
+    gridN,
+    boxLengthMpc,
+    aInit,
+    da,
+    seed
+  });
+  let lastTelemetry = null;
+  return {
+    schema: ULG_SUPERGALACTIC_TREEPM_SCHEMA,
+    gravityMode: 'webgpu-flrw-fft3d-treepm',
+    count: session.particleCount,
+    strideFloats: session.strideFloats,
+    get stepIndex() { return session.getState().stepIndex; },
+    get scaleFactorA() { return session.getState().aScale; },
+    get redshiftZ() { return session.getState().redshiftZ; },
+    get lastTelemetry() { return lastTelemetry; },
+    getResidentBuffer() { return session.particlesBuffer; },
+    getBodies() { return new Float32Array(0); },
+    async step({ readback = false } = {}) {
+      lastTelemetry = await session.step({ readTelemetry: Boolean(readback) });
+      return lastTelemetry;
+    },
+    dispose() { session.destroy(); }
+  };
+}

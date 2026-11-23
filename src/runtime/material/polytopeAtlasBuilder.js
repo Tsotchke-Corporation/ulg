@@ -10,12 +10,169 @@
 import { createMaterialPolytopeRegistry } from './materialPolytopeRegistry.js';
 import { fitConvexPolytopeWebGpu } from '../gpuMath/chebyshevPolytopeFitGpu.js';
 import {
+  defineLawObject,
+  differentiateLaw,
+  approximateLaw,
+  compileLawToWgsl,
+  LAW_FALLBACK_POLICY
+} from './eshkolHigherOrderLawCompiler.js';
+import { synthesizeMoonlabFirstPrinciplesClosures } from './moonlabColdMissSynthesis.js';
+import { registerTriadClosureBundleOnDevice } from './triadClosureGpuRegistry.js';
+import {
   ULG_POLYTOPE_ATLAS_SCHEMA,
   packPolytopeAtlasForGpu
 } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const ULG_POLYTOPE_ATLAS_BUILDER_SCHEMA = 'ulg.polytope-atlas-builder.v1';
 const R_GAS = 8.314462618;
+
+/**
+ * Compile Eshkol Higher-Order Law objects, AD partial derivatives, Chebyshev
+ * tensor approximations, and fail-closed WGSL envelope-watch evaluators directly
+ * from ANY validated Gate 1-2 `ulg.material-property-bundle.v1`.
+ */
+export function compilePolytopeEshkolHigherOrderLaws(bundle, {
+  phase = 'solid',
+  temperatureRangeK = null,
+  log10PressureRange = [2, 8],
+  degrees = [6, 8],
+  relativeTolerance = 2e-2
+} = {}) {
+  const tMelt = Math.max(15, Number(bundle.thermodynamic.meltingPointK ?? 300));
+  const tBoil = Math.max(tMelt + 20, Number(bundle.thermodynamic.boilingPointK ?? 1000));
+  const tRange = temperatureRangeK || (
+    phase === 'solid'
+      ? [Math.max(10, tMelt * 0.15), Math.max(20, tMelt * 0.95)]
+      : (phase === 'liquid'
+        ? [tMelt * 1.02, Math.max(tMelt * 1.15, tBoil * 0.96)]
+        : [tBoil * 1.05, Math.max(tBoil * 2.0, 4000)])
+  );
+  const safeId = String(bundle.materialKey || 'mat').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const densityLaw = defineLawObject({
+    id: `ulg:polytope-eos:${safeId}:${phase}`,
+    inputs: [
+      { name: 'temperatureK', unit: 'K', referenceValue: 0.5 * (tRange[0] + tRange[1]) },
+      { name: 'log10PressurePa', unit: 'log10(Pa)', referenceValue: 5.0 }
+    ],
+    output: { name: 'densityKgPerM3', unit: 'kg/m^3' },
+    parameters: {
+      materialKey: bundle.materialKey,
+      phase,
+      closureHash: bundle.closureHash
+    },
+    stateContract: {
+      reads: ['temperatureK', 'pressurePa'],
+      writes: ['densityKgPerM3'],
+      accumulates: []
+    },
+    conservationInvariants: ['positivity:density>0', 'thermodynamic-stability:dRho/dP>=0'],
+    envelope: {
+      temperatureRangeK: tRange,
+      pressureRangePa: [10 ** log10PressureRange[0], 10 ** log10PressureRange[1]],
+      phase,
+      ranges: {
+        temperatureK: tRange,
+        log10PressurePa: log10PressureRange
+      }
+    },
+    fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
+    sourceMethod: `eshkol-higher-order-polytope-eos(${bundle.accuracyTier})`,
+    eshkolBody: `(lambda (T log10P) (polytope-eos "${bundle.materialKey}" '${phase} T (expt 10 log10P)))`,
+    evaluate: ({ temperatureK, log10PressurePa }) =>
+      evaluateBundleDensityEos(bundle, phase, temperatureK, 10 ** log10PressurePa)
+  });
+
+  const thermalExpTangent = differentiateLaw(densityLaw, {
+    id: `ulg:polytope-eos:${safeId}:${phase}:dRho_dT`,
+    axis: 'temperatureK'
+  });
+  const compressibilityTangent = differentiateLaw(densityLaw, {
+    id: `ulg:polytope-eos:${safeId}:${phase}:dRho_dLogP`,
+    axis: 'log10PressurePa'
+  });
+  const approxDensity = approximateLaw(densityLaw, {
+    representation: 'chebyshev',
+    degrees,
+    relativeTolerance,
+    composition: { [bundle.materialKey]: 1.0 }
+  });
+  const compiledWgsl = compileLawToWgsl(approxDensity, {
+    fnPrefix: `eshkol_${safeId}_${phase}`.slice(0, 36)
+  });
+
+  return Object.freeze({
+    schema: 'ulg.eshkol.polytope-higher-order-laws.v1',
+    materialKey: bundle.materialKey,
+    phase,
+    densityLaw,
+    thermalExpTangent,
+    compressibilityTangent,
+    approximatedDensity: approxDensity,
+    compiledWgsl,
+    surrogateRelativeBound: approxDensity.errorBudget.surrogateRelativeBound
+  });
+}
+
+/**
+ * Feed Gate 1-2 first-principles quantum/crystal observables into MoonLab +
+ * Eshkol Triad synthesis (`synthesizeMoonlabFirstPrinciplesClosures`) to produce
+ * certified 5-slot GPU A4 Helmholtz/Hyperelastic/Transport closures + Debye G6
+ * caloric curves directly consumable by Gate 3 ULG Studio!
+ */
+export async function synthesizePolytopeMoonlabTriadClosures(bundle, {
+  eshkolSample = null,
+  quantumProbeReceipt = null,
+  temperatureRangeK = null
+} = {}) {
+  const molarMassU = Math.max(1.0, Number(bundle.nuclear.atomicMassU ?? bundle.nuclear.molarMassU ?? 28));
+  const atomsPerFormula = Math.max(1, Number(bundle.nuclear.atomsPerFormula ?? 1));
+  const cohesiveEnergyEvPerAtom = Math.max(0.05, Number(bundle.mechanical.cohesiveEnergyEv ?? 1.0) / atomsPerFormula);
+  const debyeTemperatureK = Math.max(30, Number(bundle.mechanical.debyeTempK ?? 250));
+  const latticeA = Math.max(1.5, Number(bundle.mechanical.latticeConstantA ?? 3.8));
+  const molecularDiameterM = Math.max(1.5e-10, latticeA * 0.72 * 1e-10);
+  const refDensityKgPerM3 = Math.max(50, Number(bundle.mechanical.densityKgPerM3 ?? 1000));
+  const meltTemperatureK = Math.max(20, Number(bundle.thermodynamic.meltingPointK ?? 300));
+  const tLo = Math.max(15, Math.min(240, meltTemperatureK * 0.4));
+  const tHi = Math.max(tLo + 80, Math.min(2400, meltTemperatureK * 1.4));
+
+  return synthesizeMoonlabFirstPrinciplesClosures({
+    material: bundle.materialKey,
+    molarMassKgPerMol: molarMassU * 1e-3,
+    atomsPerFormula,
+    cohesiveEnergyEvPerAtom,
+    debyeTemperatureK,
+    molecularDiameterM,
+    refDensityKgPerM3,
+    meltTemperatureK,
+    temperatureRangeK: temperatureRangeK || [tLo, tHi],
+    eshkolSample,
+    quantumProbeReceipt: quantumProbeReceipt || {
+      fingerprint: bundle.closureHash,
+      accuracyTier: bundle.accuracyTier
+    }
+  });
+}
+
+/**
+ * Bridge Gate 1-2 directly into Gate 3 Studio Continuum: synthesize MoonLab +
+ * Eshkol 5-slot GPU A4 closures from a validated material bundle and register
+ * them into `triadClosureGpuRegistry` on the live WebGPU device!
+ */
+export async function publishPolytopeBundleToTriadGpuRegistry(device, bundle, options = {}) {
+  const triad = await synthesizePolytopeMoonlabTriadClosures(bundle, options);
+  const status = registerTriadClosureBundleOnDevice(device, {
+    materialKey: bundle.materialKey,
+    materialId: options.materialId ?? null,
+    packedData: triad.gpuBundle.packed.data,
+    sourceFingerprint: triad.provenanceFingerprint,
+    g6DebyeSamples: triad.g6DebyeSamples
+  });
+  return Object.freeze({
+    materialKey: bundle.materialKey,
+    triad,
+    gpuRegistryStatus: status
+  });
+}
 
 /**
  * Evaluate continuous phase-consistent equation of state ρ(T, P) directly from

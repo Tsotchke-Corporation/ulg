@@ -225,24 +225,29 @@ export const SPH_LOCAL_BACKGROUND_IMAGE_MIME_TYPES = Object.freeze([
   'image/webp'
 ]);
 export const SPH_BUNDLED_BACKGROUND_IMAGES = Object.freeze([
-  Object.freeze({ id: 'bg-1', url: '/plan/background-1.jpeg', label: 'Subway Vault (1)' }),
-  Object.freeze({ id: 'bg-2', url: '/plan/background-2.jpg', label: 'Alpine Cloud Sea (2)' }),
-  Object.freeze({ id: 'bg-3', url: '/plan/background-3.jpg', label: 'Misty Forest Lake (3)' }),
-  Object.freeze({ id: 'bg-4', url: '/plan/background-4.jpg', label: 'Spiral Galaxy (4)' })
+  Object.freeze({ id: 'bg-1', url: './plan/background-1.jpeg', label: 'Subway Vault (1)' }),
+  Object.freeze({ id: 'bg-2', url: './plan/background-2.jpg', label: 'Alpine Cloud Sea (2)' }),
+  Object.freeze({ id: 'bg-3', url: './plan/background-3.jpg', label: 'Misty Forest Lake (3)' }),
+  Object.freeze({ id: 'bg-4', url: './plan/background-4.jpg', label: 'Spiral Galaxy (4)' })
 ]);
-export const SPH_DEFAULT_BACKGROUND_IMAGE_URL = '/plan/background-3.jpg';
+export const SPH_DEFAULT_BACKGROUND_IMAGE_URL = './plan/background-3.jpg';
 
 const SPH_BUNDLED_BACKGROUND_BY_ALIAS = new Map([
-  ['/plan/background-1.jpg', '/plan/background-1.jpeg'],
-  ['background-1.jpg', '/plan/background-1.jpeg'],
-  ['background-1.jpeg', '/plan/background-1.jpeg'],
-  ['background-2.jpg', '/plan/background-2.jpg'],
-  ['background-3.jpg', '/plan/background-3.jpg'],
-  ['background-4.jpg', '/plan/background-4.jpg'],
-  ['1', '/plan/background-1.jpeg'],
-  ['2', '/plan/background-2.jpg'],
-  ['3', '/plan/background-3.jpg'],
-  ['4', '/plan/background-4.jpg']
+  ['/plan/background-1.jpg', './plan/background-1.jpeg'],
+  ['/plan/background-1.jpeg', './plan/background-1.jpeg'],
+  ['/plan/background-2.jpg', './plan/background-2.jpg'],
+  ['/plan/background-3.jpg', './plan/background-3.jpg'],
+  ['/plan/background-4.jpg', './plan/background-4.jpg'],
+  ['./plan/background-1.jpg', './plan/background-1.jpeg'],
+  ['background-1.jpg', './plan/background-1.jpeg'],
+  ['background-1.jpeg', './plan/background-1.jpeg'],
+  ['background-2.jpg', './plan/background-2.jpg'],
+  ['background-3.jpg', './plan/background-3.jpg'],
+  ['background-4.jpg', './plan/background-4.jpg'],
+  ['1', './plan/background-1.jpeg'],
+  ['2', './plan/background-2.jpg'],
+  ['3', './plan/background-3.jpg'],
+  ['4', './plan/background-4.jpg']
 ]);
 for (const item of SPH_BUNDLED_BACKGROUND_IMAGES) {
   SPH_BUNDLED_BACKGROUND_BY_ALIAS.set(item.id, item.url);

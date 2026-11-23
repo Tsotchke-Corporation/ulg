@@ -15011,6 +15011,20 @@ export function createSphPhaseScene(container, {
       a: 1
     };
   }
+  function resolveWorkerBackgroundImageUrl(url) {
+    if (typeof url !== 'string' || !url.trim()) return null;
+    const trimmed = url.trim();
+    if (/^(?:https?:|blob:|data:)/i.test(trimmed)) return trimmed;
+    const pageHref = globalThis.location?.href;
+    if (typeof pageHref === 'string' && /^https?:/i.test(pageHref)) {
+      try {
+        return new URL(trimmed, pageHref).href;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
   function workerOffscreenNativeSurfaceAppearance() {
     return {
       lightingProfile: { ...sceneLightingProfile },
@@ -16556,7 +16570,8 @@ export function createSphPhaseScene(container, {
     return publishWorkerOffscreenRenderRowsStatus(status);
   }
   function setBackgroundImage(nextUrl, { reason = 'background-image-control', refresh = true } = {}) {
-    const url = typeof nextUrl === 'string' && nextUrl.trim() ? nextUrl.trim() : null;
+    const rawUrl = typeof nextUrl === 'string' && nextUrl.trim() ? nextUrl.trim() : null;
+    const url = rawUrl ? resolveWorkerBackgroundImageUrl(rawUrl) : null;
     const previousUrl = sceneBackgroundImageUrl;
     sceneBackgroundImageUrl = url;
     applySceneEnvironmentFromBackgroundImage(url);

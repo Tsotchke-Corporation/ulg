@@ -286,6 +286,9 @@ function copyPlanBackgroundsPlugin() {
 }
 
 export default defineConfig({
+  resolve: {
+    dedupe: ['three']
+  },
   plugins: [
     routeCacheHeadersPlugin(),
     copyPlanBackgroundsPlugin()

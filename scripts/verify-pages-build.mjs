@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..');
 const REQUIRED_SERVICE_ASSETS = Object.freeze([
+  'cosmic-quantum.html',
+  'plan/background-1.jpeg',
+  'plan/background-2.jpg',
+  'plan/background-3.jpg',
+  'plan/background-4.jpg',
   'service-assets/moonlab/moonlab.js',
   'service-assets/moonlab/moonlab.wasm',
   'service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm',

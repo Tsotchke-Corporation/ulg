@@ -231,13 +231,16 @@ export function mountUlgSimStudioApp({
   root.className = 'ulg-studio-root';
   root.innerHTML = `
     <div id="ulg-stage" class="ulg-studio-stage"></div>
-    <div id="ulg-cherenkov-aura" style="position:fixed;inset:0;pointer-events:none;z-index:2;display:none;transition:opacity 240ms ease;" aria-hidden="true"></div>
+    <div id="ulg-cherenkov-aura" style="position:fixed;inset:0;pointer-events:none;z-index:90;mix-blend-mode:screen;display:none;transition:opacity 240ms ease;" aria-hidden="true"></div>
     <div id="ulg-empty-state" class="ulg-studio-empty">
       <div class="ulg-empty-card">
         <p class="ulg-empty-eyebrow">ULG · Schroeder Spatial Physics</p>
         <h1 class="ulg-empty-title">Simulation ready</h1>
         <p class="ulg-empty-copy">Nothing is allocated yet. Open the menu in the top right to choose a preset or assemble custom bodies, then launch on WebGPU.</p>
-        <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Configure &amp; Launch</button>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">
+          <button id="ulg-empty-open-btn" class="ulg-btn ulg-btn-primary" type="button">Configure &amp; Launch</button>
+          <a id="ulg-empty-cq-link" class="ulg-btn ulg-btn-subtle" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
+        </div>
       </div>
     </div>
     <div id="ulg-loading-overlay" class="ulg-loading-overlay" role="status" aria-live="polite" hidden>
@@ -309,7 +312,7 @@ export function mountUlgSimStudioApp({
           <div class="ulg-footer-group">
             <button id="ulg-stop-btn" class="ulg-btn ulg-btn-subtle ulg-btn-danger" type="button" hidden>Unload</button>
             <button id="ulg-diagnostics-toggle" class="ulg-btn ulg-btn-subtle" type="button" aria-expanded="false">Diagnostics</button>
-            <a id="ulg-cosmic-quantum-link" class="ulg-btn ulg-btn-subtle" href="/cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
+            <a id="ulg-cosmic-quantum-link" class="ulg-btn ulg-btn-subtle" href="./cosmic-quantum.html" style="text-decoration:none;">Cosmic ↔ Quantum ↗</a>
           </div>
           <div class="ulg-footer-group">
             <label class="ulg-autoplay-label">
@@ -512,9 +515,20 @@ export function mountUlgSimStudioApp({
     if (cherenkovAuraEl) {
       if (visuallyReady && ncSnap?.cherenkovActive) {
         const [cr, cg, cb] = ncSnap.cherenkovSrgb;
-        const rgb = `${Math.round(cr * 255)}, ${Math.round(cg * 255)}, ${Math.round(cb * 255)}`;
+        // Amplify spectral blue-dominant Frank-Tamm CIE emission for screen-blended display over daylight backdrops
+        const bDom = Math.max(0.25, cb);
+        const coreR = Math.round(Math.max(0, Math.min(255, (cr * 0.24) * 255)));
+        const coreG = Math.round(Math.max(0, Math.min(255, (cg * 0.92) * 255)));
+        const coreB = Math.round(Math.max(0, Math.min(255, Math.min(1, bDom * 1.18) * 255)));
+        const haloR = Math.round(Math.max(0, Math.min(255, (cr * 0.42) * 255)));
+        const haloG = Math.round(Math.max(0, Math.min(255, (cg * 0.78) * 255)));
+        const haloB = Math.round(Math.max(0, Math.min(255, Math.min(1, bDom * 1.15) * 255)));
+        const fluxScale = Math.min(1.0, Math.max(0.55, Math.log10(Math.max(10, ncSnap.cherenkovPhotonsPerMeter || 1e4)) / 4.4));
         cherenkovAuraEl.style.display = 'block';
-        cherenkovAuraEl.style.background = `radial-gradient(circle at 50% 54%, rgba(${rgb}, 0.24) 0%, rgba(${rgb}, 0.08) 28%, rgba(${rgb}, 0.0) 62%)`;
+        cherenkovAuraEl.style.background = [
+          `radial-gradient(ellipse 19% 25% at 50% 54%, rgba(${coreR}, ${coreG}, ${coreB}, ${(0.82 * fluxScale).toFixed(3)}) 0%, rgba(${haloR}, ${haloG}, ${haloB}, ${(0.52 * fluxScale).toFixed(3)}) 42%, rgba(${haloR}, ${haloG}, ${haloB}, ${(0.18 * fluxScale).toFixed(3)}) 74%, rgba(${haloR}, ${haloG}, ${haloB}, 0.0) 100%)`,
+          `radial-gradient(circle at 50% 54%, rgba(${coreR}, ${coreG}, ${coreB}, ${(0.32 * fluxScale).toFixed(3)}) 0%, rgba(${haloR}, ${haloG}, ${haloB}, 0.0) 46%)`
+        ].join(', ');
       } else {
         cherenkovAuraEl.style.display = 'none';
       }
@@ -692,7 +706,7 @@ export function mountUlgSimStudioApp({
     customCard.type = 'button';
     customCard.className = 'ulg-preset-card';
     customCard.dataset.presetId = 'custom';
-    customCard.dataset.selected = String(stagedConfig.presetId === 'custom');
+    customCard.dataset.selected = String(stagedConfig.presetId === 'custom' && !stagedConfig.customTemplateId);
     customCard.innerHTML = `
       <div class="ulg-preset-card-title">Custom Sandbox</div>
       <div class="ulg-preset-card-copy">Start from a clean floor-centered container and assemble any materials from the periodic table.</div>
@@ -715,7 +729,7 @@ export function mountUlgSimStudioApp({
       tmplCard.type = 'button';
       tmplCard.className = 'ulg-preset-card';
       tmplCard.dataset.customTemplateId = tmpl.id;
-      tmplCard.dataset.selected = 'false';
+      tmplCard.dataset.selected = String(stagedConfig.presetId === 'custom' && stagedConfig.customTemplateId === tmpl.id);
       tmplCard.innerHTML = `
         <div class="ulg-preset-card-title">${tmpl.label}</div>
         <div class="ulg-preset-card-copy">${tmpl.summary}</div>
@@ -738,6 +752,7 @@ export function mountUlgSimStudioApp({
 
   function markStagedCustom() {
     stagedConfig.presetId = 'custom';
+    stagedConfig.customTemplateId = null;
     syncUrlFromStagedConfig();
   }
 
@@ -1818,7 +1833,8 @@ export function mountUlgSimStudioApp({
       launchParams.adaptiveSync = '1';
     }
     const presetEntry = sphPhaseScenarioPresetById(snapshot.presetId);
-    const label = presetEntry ? presetEntry.label : 'Custom';
+    const customTemplateEntry = STUDIO_CUSTOM_TEMPLATES.find((t) => t.id === snapshot.customTemplateId) || null;
+    const label = presetEntry ? presetEntry.label : (customTemplateEntry ? customTemplateEntry.label : 'Custom');
 
     if (closeModalAfter) setModalOpen(false);
     updateChromeAndStatus();

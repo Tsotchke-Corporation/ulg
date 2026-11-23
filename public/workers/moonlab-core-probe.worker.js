@@ -960,7 +960,7 @@ function evaluateIsingReferenceEnergy(model, bitstring) {
 
 async function loadMoonLabModule(serviceAssets) {
   if (!modulePromise) {
-    const loaderModule = toAbsoluteUrl(serviceAssets.loaderModule ?? '/service-assets/moonlab/moonlab.js');
+    const loaderModule = toAbsoluteUrl(serviceAssets.loaderModule ?? '../service-assets/moonlab/moonlab.js');
     importScripts(loaderModule);
     const moduleFactory = globalThis.MoonlabModule;
     if (!moduleFactory) {
@@ -969,7 +969,7 @@ async function loadMoonLabModule(serviceAssets) {
     modulePromise = moduleFactory({
       locateFile(path) {
         if (path.endsWith('.wasm')) {
-          return toAbsoluteUrl(serviceAssets.wasmModule ?? '/service-assets/moonlab/moonlab.wasm');
+          return toAbsoluteUrl(serviceAssets.wasmModule ?? '../service-assets/moonlab/moonlab.wasm');
         }
         if (serviceAssets.baseUrl) {
           return toAbsoluteUrl(new URL(path, toAbsoluteUrl(serviceAssets.baseUrl)).href);

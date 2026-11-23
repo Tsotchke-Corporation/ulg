@@ -50,6 +50,9 @@ function excludeUnusedPeerComputeInference() {
 
 export default defineConfig({
   base: './',
+  resolve: {
+    dedupe: ['three']
+  },
   plugins: [excludeUnusedPeerComputeInference()],
   worker: {
     // The supervised workers are module workers, and the ULG runtime reaches
@@ -67,6 +70,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         pages: fileURLToPath(new URL('./pages.html', import.meta.url)),
+        cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url)),
         sphMlsMpmGpuStep: fileURLToPath(
           new URL('./src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url)
         ),

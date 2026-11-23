@@ -113,7 +113,8 @@ function backendTelemetry() {
 }
 
 self.addEventListener('message', async (event) => {
-  const { id, type, baseUrl = '/service-assets/eshkol/vm/', threshold = null } = event.data ?? {};
+  const defaultBaseUrl = new URL('../service-assets/eshkol/vm/', self.location.href).href;
+  const { id, type, baseUrl = defaultBaseUrl, threshold = null } = event.data ?? {};
   try {
     const vm = await loadVm(baseUrl, threshold);
     calls += 1;

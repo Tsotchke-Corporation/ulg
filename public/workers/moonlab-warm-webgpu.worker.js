@@ -26,9 +26,9 @@ function load() {
         if (await navigator.gpu.requestAdapter()) break;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      importScripts(absolute('/service-assets/moonlab/moonlab.js'));
+      importScripts(absolute('../service-assets/moonlab/moonlab.js'));
       const module = await globalThis.MoonlabModule({
-        locateFile: (path) => (path.endsWith('.wasm') ? absolute('/service-assets/moonlab/moonlab.wasm') : path)
+        locateFile: (path) => (path.endsWith('.wasm') ? absolute('../service-assets/moonlab/moonlab.wasm') : path)
       });
       context = await module.ccall('gpu_compute_init', 'number', ['number'], [GPU_BACKEND_WEBGPU], { async: true });
       if (!context) throw new Error('gpu_compute_init(WEBGPU) returned null');

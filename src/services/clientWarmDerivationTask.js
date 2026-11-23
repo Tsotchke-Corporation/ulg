@@ -11,10 +11,23 @@
 // worker termination + respawn on fatal errors/timeouts ensure worker crashes
 // recover cleanly without stalling the physics loop.
 const DEFAULT_TIMEOUT_MS = 30_000;
-const WORKER_URLS = Object.freeze({
-  moonlab: '/workers/moonlab-warm-webgpu.worker.js',
-  eshkol: '/workers/eshkol-warm-vm.worker.js'
+const WORKER_PATHS = Object.freeze({
+  moonlab: './workers/moonlab-warm-webgpu.worker.js',
+  eshkol: './workers/eshkol-warm-vm.worker.js'
 });
+
+function resolveWarmWorkerUrl(service) {
+  const rel = WORKER_PATHS[service];
+  const pageHref = globalThis.location?.href;
+  if (typeof pageHref === 'string' && /^https?:/i.test(pageHref)) {
+    try {
+      return new URL(rel, pageHref).href;
+    } catch {
+      return rel;
+    }
+  }
+  return rel;
+}
 
 const WARM_STATE_KEY = Symbol.for('ulg.a6.warmDerivationState');
 const warmState = (globalThis[WARM_STATE_KEY] ??= {
@@ -34,7 +47,7 @@ function normalizeService(service) {
 
 function ensureWorker(service) {
   if (!workers[service]) {
-    workers[service] = new Worker(WORKER_URLS[service]);
+    workers[service] = new Worker(resolveWarmWorkerUrl(service));
     spawns[service] += 1;
   }
   return workers[service];

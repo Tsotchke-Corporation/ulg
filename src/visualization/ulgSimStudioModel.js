@@ -156,6 +156,7 @@ export function buildStagedConfigFromPreset(presetId) {
   return {
     presetId: preset.id,
     basePresetId: preset.id,
+    customTemplateId: null,
     sceneLengthScale: scale,
     boxDimensionsM,
     wallModel: runtime.wallModel || 'finite-heat-capacity-lumped-face',
@@ -219,6 +220,7 @@ export function buildBlankCustomConfig() {
   return {
     presetId: 'custom',
     basePresetId: null,
+    customTemplateId: null,
     sceneLengthScale: 1,
     boxDimensionsM,
     wallModel: 'finite-heat-capacity-lumped-face',
@@ -291,6 +293,7 @@ export const STUDIO_CUSTOM_TEMPLATES = Object.freeze([
 export function buildStagedConfigFromCustomTemplate(templateId) {
   const base = buildBlankCustomConfig();
   if (templateId === 'mercury-water-drop') {
+    base.customTemplateId = templateId;
     base.laws.reactions = false;
     base.bodies = [
       {
@@ -317,6 +320,7 @@ export function buildStagedConfigFromCustomTemplate(templateId) {
     return base;
   }
   if (templateId === 'cherenkov-pool') {
+    base.customTemplateId = templateId;
     base.laws.reactions = false;
     base.bodies = [
       {

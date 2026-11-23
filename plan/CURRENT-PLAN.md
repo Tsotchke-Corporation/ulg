@@ -1,119 +1,265 @@
 # ULG Current Plan (Authoritative Routing Document)
 
-**Effective:** 2026-11-19 AKST  
-**Baseline checkpoint:** `main` @ `31fb694`  
-**Active branch:** `feat/ulg-ga-consolidation`  
-**Status of original 13 campaign targets:** **G5** ([done/g5-reservation.md](done/g5-reservation.md)) and **G7** ([done/g7-release-audit.md](done/g7-release-audit.md)) accepted. All other goals remain open and are re-sequenced architecture-first below.
+- **Effective:** 2026-11-22 AKST
+- **Active branch:** `feat/star-spec-generalization-audit` (HEAD audited at `23a961c4`; `main` & `origin/main` at `f1cf07c7`)
+- **Publication hold:** **ACTIVE** — local commits on feature branch only; no `git push`, no merge to `main`, and no `npm run build:pages` / `docs/` edits without explicit authorization from **big dog**.
+- **Formal campaign oracle status:** **2 of 13 formally accepted** — **G5** ([done/g5-reservation.md](done/g5-reservation.md)) and **G7** ([done/g7-release-audit.md](done/g7-release-audit.md)). All other 11 campaign milestones (G1–G4, G6, A1–A6) have substantial code landed on disk, **real verified live-wiring / architectural gaps documented below**, and **zero accepted `ulg.campaign.receipt.v1` bundles on disk**.
 
-This file is the **single active source of truth** for execution order, runtime rules, performance budgets, and slice acceptance. Historical logs (`plan/log.md`, `plan/implementation-status.md`, `plan/notes/`), detailed design specs (`plan/todo/*.md`), and prior failed evidence are preserved verbatim as reference and audit history; where older routing or sequencing prose conflicts with this document, **this document governs**.
-
----
-
-## 1. Non-Negotiable Core Rules (Unchanged)
-
-1. **Star Spec physics-first:** Macroscopic behavior emerges from activated laws and validity-checked closures. Never add per-preset or per-material physics branches, scripted clouds, or tuned visual overrides. Never remove or demote a physical law.
-2. **GPU-native validation only:** No CPU mirror solver, no CPU parity gate, no full-state hot-loop readback/reupload. Validate via GPU manufactured states, mathematical invariants, metamorphic/same-device A/B runs, and fixed-size GPU reductions.
-3. **Exact integer conservation ledgers:** Keep 9-limb `2^-149` binary-dyadic integer ledgers for conserved carrier/parcel mass and `Σ(U − S)` internal energy accounting.
-4. **PeerCompute authority at the real boundary:** ComputeManager, GPUHub, and StateManager own scheduling, resource leases, and admitted schedule/peer state deltas. Rendering consumes admitted outputs and never owns physics cadence.
-5. **Visual verification & browser hygiene:** Major runtime slices finish with sequential desktop Chrome visual checks on the actual display (never `terminal-browser` or terminal pane splits; close only owned browser/server processes). One GPU workload at a time; protect host VRAM/WM responsiveness.
-6. **G7 stays advisory:** Scientific database comparisons remain offline, operator-side, and advisory — never a blocking runtime admission gate.
-7. **Publication hold:** **No `git push`, no merge to `main`, and no GitHub Pages build** without explicit owner authorization.
-8. **House rule:** Address the user as **big dog** in every response.
+This file is the **single active source of truth** for execution order, honest
+campaign status, performance budgets, and next-work prioritization. Where any
+older doc, audit, or archive conflicts with this document, **this document
+governs**.
 
 ---
 
-## 2. Owner Decisions & Guardrail Updates (2026-11-19)
+## 1. Non-Negotiable Core Rules
 
-These explicit decisions supersede earlier campaign restrictions that were stalling progress:
+1. **Star Spec physics-first:** Macroscopic behavior emerges from activated laws
+   and validity-checked closures. Zero per-preset/material physics branches,
+   zero scripted animations or CSS visual fakes, zero `(0,0,0)` origin anchors.
+   Never remove or demote a physical law.
+2. **GPU-native validation only:** No production CPU mirror solvers, no CPU
+   parity acceptance gates, no full-state hot-loop readback/reupload. Validate
+   via GPU manufactured states, mathematical invariants, metamorphic/same-device
+   A/B runs, and fixed-size GPU reductions.
+3. **Exact integer conservation ledgers:** Keep 9-limb `2^-149` binary-dyadic
+   integer ledgers for conserved carrier/parcel mass and `Σ(U − S)` internal
+   energy accounting; momentum stays f32.
+4. **PeerCompute authority at the schedule & peer boundary:** ComputeManager,
+   GPUHub, StateManager, and ReservationLedger own scheduling, resource leases,
+   epoch fencing, and admitted deltas. Drop intra-worker JS anti-forgery
+   ceremony and manual multi-hundred-file hash manifests. Rendering consumes
+   admitted outputs and never owns physics cadence.
+5. **Retiring superseded routes is authorized (2026-11-19):** Delete dead or
+   superseded execution routes (disabled 63-limb exact rationals, redundant
+   non-fused shader duplicates, duplicate overlapping contact impulses,
+   production-bundled CPU test mirrors) once the canonical GPU replacement
+   passes its invariants.
+6. **Hardware, WM, & visual hygiene:** Headless Vulkan Chrome by default; ask
+   **big dog** before launching visible desktop Chrome on Wayland (never
+   `terminal-browser` or terminal splits; close only owned browser/server
+   processes). One GPU workload at a time (`--test-concurrency=1`, `gpuprobe.sh`,
+   `MemoryMax=4G`, `<=80%` GPU target, inspect `journalctl -k` for Xid/OOM).
+7. **G7 stays advisory:** Scientific database comparisons remain offline,
+   operator-side, and advisory — never a blocking runtime admission gate.
+8. **Publication hold & house rule:** No push, merge to `main`, or Pages build
+   without authorization. Address the user as **big dog** in every response.
 
-1. **Architecture-first sequencing:** Build the real-time bulk substrate, fast N-level SS chain, and live Eshkol/A3/A4/G6 closure loop **first** (Phase 1), then land G2, G3/A5, G4, and A6 directly onto that single canonical lane (Phase 2), then reassess G1 (Phase 3).
-2. **Local slice commits allowed:** Commit verified vertical slices locally on feature branches (`feat/ulg-ga-consolidation`). Keep the hold on push, merge, and Pages builds.
-3. **Retire superseded code routes:** Deleting dead or superseded execution paths (disabled 63-limb exact rationals, redundant f32/v1 schedulers, string-patched shader duplicates, duplicate contact responses, and CPU test mirrors living inside production modules) is **explicitly authorized** once the replacement passes its GPU invariant gates. Preserving a *physical law* does not require keeping four parallel implementations of it.
-4. **Drop intra-worker ceremony:** Keep PeerCompute admission, epoch fencing, and provenance strict at the **schedule and peer boundary**. Drop intra-worker anti-forgery ceremony between sibling JS modules and 574-file manual source-hash manifests (clean local commits + ICC `source-drift` / git HEAD handle source identity).
-5. **Hard per-step performance budget gate:** Every new SS, contact, and closure slice must pass a **pass / submit / indirect-dispatch / step-ms budget gate** alongside conservation tests. Regressions like O(200+) indirect dispatches per level pair are hard blockers.
-6. **G1 decoupled presentation rule:** Update G1 acceptance from `presented_steps == physics_steps` to **latest committed physics state presented at `>=54 Hz`** across all six configured presets with true isosurfaces, refraction, materials, depth, and controls preserved.
-7. **GPU-advanced multi-step SS epochs:** Lift the single-step host epoch rebuild requirement. Allow GPU-advanced multi-step SS epoch slots (or bounded A2 spatial validity) so K-step GPU batches execute without host round-trips.
-8. **Parallel contact & thermal decoupling:** Replace the 512-pass serial contact owner with a parallel Jacobi contact pass, eliminate duplicate overlapping contact impulses, and decouple thermal conduction from contact pass-cap exhaustion.
-9. **Lockable vertical slices turned ON by default:** Split remaining mega-oracles into vertical slices that enable **by default in live scenes** as soon as their GPU invariants and budget gates pass — stop leaving delivered architecture permanently parked behind opt-in URL flags.
-10. **Bank-anchored product closures:** Approve general bank-anchored product closures (carrying explicit `imported` provenance per Star Spec case 3) to resolve unanchored stoichiometry overheating (e.g. FeO 6,780 K / missing oxides).
-11. **Mixture parcels default:** Promote `environmentAirParcels=mixture` to default once visual and conservation checks pass.
+---
+
+## 2. Standing Architectural Contracts (Preserved Across Slices)
+
+- **Cache Layering:** Hot (GPU/worker buffers) → Warm (StateManager refs/deltas
+  + G5 CAS reservations) → Cold (content-addressed JSON/cache bank). Cache keys
+  bind inputs, tool versions, validity domain, ABI, schema, and validation
+  flags.
+- **Copy-Avoidance & Zero-Copy Residency:** Hot GPU state stays on-device;
+  publish compact deltas / retained buffer refs / fixed-size reduction records
+  only. Clamp GPU allocations to `device.limits.maxStorageBufferBindingSize`.
+- **Scale & Separation Rule:** Keep the 5 hierarchy authorities strictly
+  separated (physical representation, law query/activation, contact proxy,
+  dynamic LOD, render LOD). Zero new private spatial grids or 4,096-bucket
+  hashes beside the canonical SS spatial epoch.
+- **Rollback & Benchmark Constants:** Check spatial-authority rollbacks with
+  `&observeSpatialAuthority=1`; Iron Ice benchmark `dt = 0.5 ms`; default
+  G1 target is latest committed physics state presented at `>= 54 Hz` across all
+  shipped presets with verified visible motion cadence (not raw idle `UI rAF`).
+- **Bank-Anchored & Mixture Decisions (2026-11-19):** General bank-anchored
+  product closures carry explicit `imported` provenance; `environmentAirParcels`
+  defaults to `'mixture'` (currently active whenever `environmentMode='air'`).
 
 ---
 
 ## 3. Hard Per-Step Performance & Dispatch Budget Gate
 
-Every Phase 1–2 runtime slice touching the step loop, SS chain, contact, or closures must report and pass these targets (measured headless/desktop on the canonical lane, one GPU job at a time):
+Every runtime slice touching the step loop, SS chain, contact, solids, or
+closures must report and pass these targets via `scripts/gpuprobe.sh` (one GPU
+job at a time, `CPUQuota=50%`, `S0_RESIDENT_PERF=1`):
 
-| Metric | Old Baseline (Nov 3 Audit) | Phase 1 Target | Hard Regression Rule |
+| Metric | Old Baseline (Nov 3 Audit) | Canonical Target | Hard Regression Rule |
 |---|---:|---:|---|
-| `queue.submit` per substep | 30.5 | `<= 2` (and `K` steps per submit) | No slice may increase submits/step |
-| Indirect dispatches per substep | 52 (216/pair in Nov 19 cross-transport!) | `<= 16` total across active levels | **Hard fail** if any pass loops `> 16` indirect dispatches per level |
+| `queue.submit` per substep | 30.5 | `<= 2` (and `K` steps/submit) | No slice may increase physics submits/step |
+| Indirect dispatches per substep | 52 (216/pair in Nov 19 cross-transport) | `<= 16` total across active levels | **Hard fail** if any pass loops `> 16` indirect/level |
 | Host `onSubmittedWorkDone` / `mapAsync` waits per substep | 9.1 | `0` per substep (schedule-boundary only) | Zero per-step host waits |
 | Compute passes per substep | 106 | `<= 25` active passes | Dormant laws must add `0` active passes |
-| Bulk quiescent substrate (A1 Tier-0 floor) | ~159 ms/step canonical | `<= 1 ms/step` at bulk scale, `>= 1.0x` real-time on `water-realtime` | Must hold after retiring redundant routes |
+| Bulk quiescent substrate (A1 Tier-0 floor) | ~159 ms/step | `<= 1 ms/step` bulk, `>= 1.0x` real-time on `water-realtime` | Must hold after retiring redundant routes |
 
 ---
 
-## 4. Ordered Execution Queue (Vertical Slices)
+## 4. Code-Verified Campaign Scorecard (HEAD `23a961c4`, 2026-11-22)
 
-### Phase 1 — Substrate Floor, Fast SS Chain, and Live Closure Loop
+> **Honesty boundary:** Only **G5** and **G7** have accepted
+> `ulg.campaign.receipt.v1` bundles on disk (`/home/cos/.cache/icc/repos/ulg/`).
+> Every other milestone below separates **what actually runs by default today**
+> from **verified gaps blocking real architectural closure and formal oracle
+> acceptance**.
 
-- **Slice 1.1 — Decouple Physics ↔ Presentation (`A1` Step 1)**
-  - Break the remaining physics↔presentation couplings in `sphPhaseScene.js` / `ulgMechanicsResidentStage.worker.js`: latest-committed-state presentation snapshot, guaranteed presentation slot without stalling physics batches, move JS pressure-interface force rows to GPU physics cadence.
-  - *Gate:* Presentation remains responsive while physics batches run; zero per-step frame-proof waits; GPU invariants + desktop Chrome smoke pass.
-
-- **Slice 1.2 — Parallel Jacobi Contact & Thermal Decoupling (`A1` Step 2)**
-  - A/B the five overlapping contact responses at the iron-ice interface, delete duplicate impulses, replace the 512-pass serial contact owner with a parallel Jacobi contact kernel, and decouple thermal conduction from contact pass-cap exhaustion.
-  - *Gate:* Contact GPU invariants pass, thermal never drops out on `sodium-water`, contact pass time drops from ~44 ms toward sub-millisecond scale.
-
-- **Slice 1.3 — Canonical Fused Multi-Step Substrate & Legacy Retirement (`A1` Step 3 + `A2`)**
-  - Shared command-encoder stage runner, GPU-advanced epoch slots (or bounded A2 validity) enabling K-step batches without host round-trips, executable law descriptor enforcing single-writer / `accumulates` contracts.
-  - Retire disabled 63-limb exact-rational paths, superseded non-fused/v1 shader-patch routes, and production-bundled CPU test mirrors once GPU gates pass.
-  - *Gate:* Meets the Section 3 submit/pass/wait budget; all active GPU invariants and host tests green; measurable LOC reduction in `sphMlsMpmGpuStep.js` and `sphPhaseScene.js`.
-
-- **Slice 1.4 — Fast N-Level SS Chain & Dynamic Split/Merge (`SS` + First-Class Air)**
-  - Redesign `schroederSpatialChainCrossTransportGpu.js` to eliminate the 216-indirect-dispatch loop (replace with compact single/few-pass GPU work under Section 3 budget).
-  - Wire the N-level chain + exact integer ledgers + worker split/merge (slice 1c) into the single canonical lane so contiguous air runs on coarse SS levels and interface regions refine automatically, retiring the implicit-atmosphere stand-in.
-  - *Gate:* 3–6 level manufactured + room-air conservation (`Σ mass`, `Σ(U−S)`, momentum, angular momentum), zero budget violations, live Iron Ice / room-air progression faster than single-level fine air.
-
-- **Slice 1.5 — Close the Live Eshkol / A3 / A4 / G6 Closure Loop**
-  - Connect the already-built components into one live GPU loop running **by default**:
-    1. Per-node envelope watch detects out-of-envelope regime on GPU.
-    2. **A3** (`regionalClosureSamplerGpu.js`) samples representative homogeneous regions on GPU.
-    3. **G6 / A4** (`thermalPotentialGpu.js`, `responseFunctionGpu.js`, Eshkol AD stiffness) fits bounded Chebyshev/response closures with held-out error bounds and G4 uncertainty intervals.
-    4. Schedule-boundary admission promotes the immutable fit generation via StateManager + G5 reservations.
-    5. Resident GPU evaluators (`rf_eval`, caloric potential, semi-implicit CG pressure) serve the region; out-of-envelope falls back cleanly with explicit debt/exact sub-stepping.
-  - *Gate:* End-to-end live scene executes miss → sample → fit → adopt → cache hit → measurable step/dt speedup with exact mass/`U−S` conservation and zero silent extrapolation.
-
-### Phase 2 — Land Domain Goals on the Single Canonical Lane
-
-- **Slice 2.1 — G2 Conserved Plumes & Mixture Air Default**
-  - Run room-air `iron-ice-quench` and `sodium-water` on the exact-ledger canonical N-level lane, enable general bank-anchored product closures (`imported` provenance) for FeO/oxides, flip `environmentAirParcels=mixture` to default.
-  - *Gate:* Desktop Chrome sequential visual proof of conserved rising Iron Ice condensate plume + traced `sodium-water` gas/aerosol lineage; G2 oracle criteria pass.
-
-- **Slice 2.2 — G3 / A5 Coherent Solids Inside SS**
-  - Insert solid body proxies into SS spatial cells (retiring brute-force O(N·M) / O(P²) searches), wire solid melt release and solid-fluid traction/buoyancy onto the exact-ledger canonical lane, and turn coherent rigid ice ON by default where physically admitted.
-  - *Gate:* SOL-0/SOL-1 + SOL-2/SOL-3 GPU invariants (including float/sink/neutral buoyancy and melt conservation) + desktop visual sequences.
-
-- **Slice 2.3 — G4 Compacted Per-Node Dynamic Law Activation**
-  - Extend conservative per-node envelope masks (carrying G6/A4 uncertainty bounds) and compacted GPU indirect dispatch across thermal, phase, radiation, and reaction stages so dormant regions execute zero kernel work.
-  - *Gate:* GPU A/B bit-identity at `ε = 0`, conservative activation when uncertainty straddles threshold, zero-work witness on quiescent bulk, random element-pair spot checks.
-
-- **Slice 2.4 — A6 Warm Browser WASM/WebGPU Eshkol & MoonLab Wired to Live Misses**
-  - Connect `eshkol-warm-vm.worker.js` and `moonlab-warm-webgpu.worker.js` to real Slice 1.5 closure misses through PeerCompute + G5 reservations, proving warm reuse and worker failure/recovery on live runs.
-
-### Phase 3 — G1 Reassessment & Release Readiness
-
-- **Slice 3.1 — G1 Decoupled Presentation Reassessment**
-  - Measure decoupled latest-committed-state presentation (`>=54 Hz`) across all six configured presets (`water-cycle`, `iron-ice-quench`, `sodium-water`, `cesium-fluorine`, `bulk-water`, `water-realtime`) with true isosurfaces, refraction, depth, controls, and clean lifecycle.
-  - Present complete evidence to big dog before lifting any hold on merge, push, or GitHub Pages.
+| ID | Formal Oracle (`ulg.campaign.receipt.v1`) | Live Code Reality at `23a961c4` | Verified Open Gaps (Line-Exact) |
+|---|---|---|---|
+| **G5** | **ACCEPTED** (`3/3 PASS`, 2026-11-18) | Bounded single-realm JS CAS `ReservationLedger` live. | Multi-realm/distributed reservation remains future scope. |
+| **G7** | **ACCEPTED** (`3/3 PASS`, 2026-11-18) | Offline advisory NIST/PubChem audit tooling live. | Offline advisory only; no runtime physics acceptance implied. |
+| **A1** | **OPEN** (`0` receipts) | 100k+ bulk `water-realtime` sustains `>=1x` RT; worker-owned resident lane live; `1,970 Pa·s` shear viscosity fixed. | **Coupling #8 still live** (`sphPhaseScene.js:21478, 50435` runs JS `gasPressureInterfaceForceSolver` at render cadence); **5 overlapping iron-ice contact responses still live** (`sphMlsMpmGpuStep.js:9610`, `schroederSpatialMechanicalProposalsGpu.js:6763`, `sphPressureInterfaceGpuKernel.js:638`, `sphGpuBuffers.js:86`, `wgsl.js:11466`); **63-limb exact rationals & production CPU mirrors** still in `src/runtime/sph/`; **246 `@workgroup_size(1)`** serial compute entry points; **`device.lost` listener leaks** (11 files) & unbounded `DataState.setHotBuffer` (`0` `deleteHotBuffer` callers); **no `uncapturederror` listener**; raw NUL byte at `sphPhaseViewStateTransport.js:98`; `0 K` wall default in `thermalEnvironmentAuthority.js:222`; wave-speed mismatch (`sphPhaseDemo.js:1204`). |
+| **A2** | **OPEN** (`0` receipts) | Single-pass GPU incremental CSR migration (`schroederIncrementalSpatialMigrationGpu.js`) **IS live by default** on direct spatial-epoch path (`schroederSpatialEpochGpu.js:3280`). | **0 shipped presets run 3+ SS levels** (`4/5` run 1 level, `cesium-fluorine` runs 2); `schroederSpatialScaleAtlasGpu.js`, scale-atlas migration, and split/coarsen have **`0` callers in `src/`**; `ulgMechanicsResidentStage.worker.js:15758` has a **broken call signature** to `runSchroederScaleAtlasMultipoleWebGpu` swallowed by `catch`; dynamic LOD controller (`:15724`) is write-only telemetry; `schroederActiveNodeCompactionGpu.js` is opt-in with `0` dispatch consumers. |
+| **G6** | **OPEN** (`0` PASS / `3` FAIL historical) | `thermalPotential` (`COMMON_RUNTIME.thermalPotential='1'`) **IS ON by default**, wired into `g6_temperature` and thermal/radiation dormancy. | `radiationEpsilonFluxWPerM2` dropped in `normalizeThermalDormancyConfig` (`:999-1029`, always `0`); reaction & phase dormancy receive `uncertaintyBuffer = null`; formal oracle bundle unrun. |
+| **A3** | **OPEN** (`0` receipts) | `sphImplicitPressureGpu.js` closes the GPU loop; `sphThermalRegionalClosureGpu.js` runs on schedule boundary by default. | **`implicitPressure` is OFF on all standard-matrix presets** (only `water-realtime`, `standardMatrixEnabled: false`); **`sphThermalRegionalClosureGpu.js` has ZERO live GPU law consumers** (`getSphThermalRegionalClosureLane` never called in `src/`; tables never bound to any shader). |
+| **A4** | **OPEN** (`0` receipts) | 6-closure 2-D `(T, P)` gas response tables (`gasResponseFunctions.js`) upload to GPU (`rf_eval`); `eshkolHigherOrderLawCompiler.js` exists standalone. | **All A4 fitting (`fitResponseFunction`, `gasResponseFunctions`, `eshkolEosStiffness`, `eshkolTriadClosures`) still runs 100% on CPU JS**; **`eshkolHigherOrderLawCompiler.js` is NOT wired into any live SPH step** (worker imports enum only at `:39`). |
+| **G2** | **OPEN** (`0` PASS / `18` FAIL historical) | Exact 9-limb `2^-149` mass & `Σ(U − S)` ledgers + GPU κ-Köhler/Maxwell–Mason/Stokes parcel stages are implemented & wired when opted in. | **Default `iron-ice-quench` & `sodium-water` presets run `environmentMode='vacuum'` and `exactEnergyLedger=false` (1-level)** — so exact ledgers, first-class air, and GPU steam-parcel stages are all **dormant by default**! Split/merge (`schroederPhaseSlotRefinement`) opt-in only; gas `k, μ` still static CRC/NIST bank; parcel drag is one-way only; single-level implicit-atmosphere stand-in still live. |
+| **G3 / A5** | **OPEN** (`0` receipts each) | Coherent rigid solids (`rigidSolids='1'`) ON by default; SOL-4/5/6 modules exist and pass isolated Vulkan tests. | **Solids do NOT use SS spatial cells** — they run **3 private 4,096-bucket hashes** (`schroederSolidRigidGpu.js:50`, `schroederSolidFluidContactGpu.js:28`, `schroederSolidFluidThermalGpu.js:27`); **all 5 pre-SOL-1 gates OPEN** (interior `4πr²` radiation, non-objective velocity-variance smear, product placement ignores `bodyId`, L0-only rigid coupling, hardcoded `restitution: 0.3, friction: 0.3`); **SOL-4 silently no-ops on N-level chain** (`schroederSpatialChainStepGpu.js:240` omits `mechanicsBuffer`); **SOL-5 runs 17 kernels/step against all-zero `member_loads`** (`0` callers ever write it) + **latent OOB write bug** (`frameBuffer`/`latticeBuffer` sized to `bodyCount` vs `maxBodyCapacity`); **SOL-6 skipped on ALL shipped presets** (`c >= 4 && c % 4 === 0`) and `activeProxiesBuffer` has `0` consumers. |
+| **G4** | **OPEN** (`0` receipts) | Thermal, reaction, phase, and radiative dormancy evaluators run in canonical hot loops with G6 thermal uncertainty. | **None of the 4 dormancy passes consume canonical SS tree nodes** (thermal & reaction build private 3D box grids; phase is per-particle; radiation is scalar min/max); **ZERO of the 4 live law families dispatch via `dispatchWorkgroupsIndirect`** (all still launch full `ceil(N/64)` workgroups with in-shader early returns!). |
+| **A6** | **OPEN** (`0` receipts) | Warm browser Eshkol WASM + MoonLab WebGPU workers and `BroadcastChannel`/WebSocket relay transports pass isolated browser tests. | **`sphPhaseScene.js:54631` constructs `warmClosureMissBridge` passing neither `device` nor `lane`**, so adopted `eos-stiffness` never reaches the worker stiffness table; **`warmClosureMissBridge.js:591` omits `eshkolSample`** so live Triad synthesis skips `eshkol-warm-vm.worker.js` and runs JS closed-form + CPU fit; MoonLab 4-qubit GHZ probe is hashed into provenance only; WebRTC `RTCDataChannel` never tested on real browsers/2 machines; **`peercomputeBrowserResidentHost.js:163` hardcodes 6 `/@fs/home/cos/...` dev paths** emitted into `dist/` and `docs/`. |
+| **G1** | **OPEN** (prior 2026-09-13 attempt FAILED; `0` PASS for `cesium-fluorine` & shared lifecycle) | Clip-Z NDC & unified rigid-isosurface splat fixed; Studio runs 5 built-in presets (`bulk-water` removed in `ff477d2b`) + 2 custom templates. | **2 Hz surface pops only mitigated** — and `dampedIsosurfaceShaderMotionAgeS` is **bypassed on the live native material path** (`workerOwnedNativeSurfaceMaterial.js:141` uses raw `drawMotionAgeS`); `sphPresentationCadence.js` still marks `visibleMotionCadenceVerified: false`; magic `80/82/24` isovalues live (`sphPhaseScene.js:9520`); marching-cubes `256 MB` buffer not clamped to `maxStorageBufferBindingSize`; formal oracle unrun across all presets. |
 
 ---
 
-## 5. Document & Evidence Map
+## 5. Additional Cross-Cutting Architectural & Production Debt (Verified at `23a961c4`)
 
-- **Active plan (read first):** `plan/CURRENT-PLAN.md` (this file)
-- **Live checkpoint summary:** `plan/STATUS.md` (keep top section concise)
-- **ICC durable state:** `.icc/assistant-goals.yaml`, `.icc/quality-campaigns.yaml`, `.icc/completion-oracles.yaml` (external artifacts under `/home/cos/.cache/icc/repos/ulg/`)
-- **Detailed subsystem designs (reference):** `plan/todo/SS/`, `plan/todo/a1-*.md`, `plan/todo/a3-a4-*.md`, `plan/todo/a5-*.md`, `plan/todo/a6-*.md`, `plan/todo/first-class-air.md`, `plan/todo/g2-integer-ledger-proposal.md`, `plan/todo/g3-solids-proposal.md`, `plan/todo/g4-dynamic-laws-proposal.md`, `plan/todo/g6-local-fit.md`, `plan/todo/sol-critic.md`, `plan/todo/scale-adaptive-law-activation-plan.md`, `plan/todo/eshkol-higher-order-law-closure-plan.md`
-- **Historical archive (do not load wholesale unless auditing a past failure):** `plan/log.md`, `plan/implementation-status.md`, `plan/handoff-*.md`, `plan/notes/`
+1. **Unenforced Law Adapter Contract & Fragile Shader Patching:**
+   `validateFusedResidentLawPlan` (`sphMlsMpmGpuStep.js:19108`) checks only 4
+   hardcoded resource strings on one fused sidecar plan; `74` `replaceRequiredWgsl`
+   string-patch calls remain in `sphMlsMpmGpuStep.js:5279-10132` (+ raw `.replace()`
+   in 4 more files).
+2. **Sedenion Plan Violation:** `src/runtime/chemistry/reactionCandidates.js:282, 362`
+   returns `null` on `sedenionScope.reactiveClass === 'inert'` — suppressing
+   balanced candidates instead of only prioritizing them (violates
+   `plan/todo/sedenion-reaction-scoping-plan.md`).
+3. **Production Portability & Packaging:**
+   - `src/runtime/peercomputeBrowserResidentHost.js:163-168` hardcodes 6
+     `/@fs/home/cos/projects/peercompute/...` URLs into `dist/` and `docs/`;
+     `scripts/verify-pages-build.mjs` misses variable-held `/@fs` strings.
+   - `package.json` has no `"engines"` field and depends on
+     `file:../webgpu-marching-cubes`.
+   - Marching cubes (`sphPhaseScene.js:3279`) allocates `256 MB` without clamping
+     to `device.limits.maxStorageBufferBindingSize`.
+4. **Multiscale & Electronic-Structure GPU Honesty:**
+   - `selfGravitatingHydroGpu.js` and `cosmicQuantumGpuKernels.js` build private
+     2-tier octrees instead of sharing Scale Atlas multipole.
+   - `radialKohnShamWebGpu.js` reads `vElec` back to CPU every SCF iteration
+     (`hybrid-webgpu-potential-cpu-eigensolver`); `periodicBulkDft.js` and
+     `molecularHartreeFock.js` are 100% CPU JS; `materialPolytopeRegistry` does
+     not exist in `src/` yet.
+5. **Studio UX Open Items (`plan/todo/nitpicks.md`):** Material-derived initial
+   body edge lengths, automatic overlap/OOB resolution (including box expansion),
+   and pause-on-edit consistency remain open.
+
+---
+
+## 6. True Prioritized Next-Work Queue (What We Really Have To Do Next)
+
+> **Rule:** Fix silent live-wiring bugs and architectural violations **before**
+> chasing new demos or stamping formal oracle receipts. Each step below maps
+> directly to verified code gaps above and ends with GPU invariants + Section 3
+> `gpuprobe.sh` budget checks + formal `ulg.campaign.receipt.v1` capture.
+
+### Priority 0 — Fix Active Live Bugs & Production Safety Hazards
+1. **Fix silent/hazardous live bugs immediately:**
+   - Fix **SOL-5 OOB buffer capacity bug** (`frameBuffer`/`latticeBuffer` vs
+     `maxBodyCapacity`) and either feed real contact/thermal stress into
+     `memberLoadBuffer` or gate off zero-load dispatches (`schroederSolidFractureGpu.js`,
+     `schroederSolidRigidLane.js`).
+   - Fix **worker Scale Atlas multipole broken call signature**
+     (`ulgMechanicsResidentStage.worker.js:15758`, `{ atlasPlan }` → `{ atlas }`).
+   - Wire `dampedIsosurfaceShaderMotionAgeS` into the live native material path
+     (`workerOwnedNativeSurfaceMaterial.js:141`) while pursuing true continuous
+     cadence.
+   - Wire `device` + `lane` into `createWarmClosureMissBridge`
+     (`sphPhaseScene.js:54631`) and pass `eshkolSample` in
+     `warmClosureMissBridge.js:591` so A6 actually adopts live Eshkol-WASM
+     derivations into the GPU lane.
+   - Fix `sedenionScope.reactiveClass === 'inert'` suppression in
+     `reactionCandidates.js:282, 362` (prioritize only, never drop balanced
+     candidates).
+   - Remove the 6 hardcoded `/@fs/home/cos/...` URLs from
+     `peercomputeBrowserResidentHost.js:163-168` and harden
+     `verify-pages-build.mjs`; clamp marching-cubes storage allocation to
+     `device.limits.maxStorageBufferBindingSize`; add `uncapturederror` listener;
+     fix raw NUL byte at `sphPhaseViewStateTransport.js:98`, `0 K` default wall
+     in `thermalEnvironmentAuthority.js:222`, `sphPhaseDemo.js:1204` p-wave speed,
+     `device.lost` listener leaks (11 files), and `DataState.setHotBuffer`
+     eviction.
+
+### Priority 1 — Close True Architecture Debt (A1, SS Unification, G4, A3/A4)
+2. **Finish A1 Substrate & Legacy Retirement (`plan/todo/a1-realtime-substrate.md`):**
+   - Delete **Coupling #8** (move pressure-interface force rows strictly to GPU
+     physics cadence; remove `sphPhaseScene.js:21478, 50435` render-cadence JS
+     solver).
+   - A/B and deduplicate the **5 overlapping iron-ice contact responses** down
+     to one coherent GPU contact authority (`selective-contact-law-application-plan.md`).
+   - Retire disabled **63-limb exact rationals** (`sphExactRational*` + 20+
+     unused modules) and production-bundled **CPU test mirrors**
+     (`mlsMpmCarrier.js`, `sphPhaseCarrier.js`, inline CPU mirrors in
+     `schroederSpatialMechanicalProposalsGpu.js` / `sphRenderGpuKernel.js`).
+   - Burn down hot-loop `@workgroup_size(1)` serial compute entry points and
+     begin replacing `74` `replaceRequiredWgsl` patches with an enforced typed
+     **Law Adapter Contract** (`ss-law-architecture-assessment.md`).
+3. **Make G4 Truly Zero-Work & SS-Backed (`plan/todo/g4-dynamic-laws-proposal.md`):**
+   - Replace private 3D box grids in thermal/reaction dormancy with canonical SS
+     active tree nodes (`schroederActiveNodeCompactionGpu.js`).
+   - Switch all 4 live law families (thermal, reaction, phase, radiation) from
+     full `ceil(N/64)` workgroups to real **`dispatchWorkgroupsIndirect`**
+     against compacted active-node lists.
+   - Fix `radiationEpsilonFluxWPerM2` drop and wire uncertainty buffers into
+     reaction & phase dormancy.
+4. **Close the Real A3 / A4 / G6 GPU Closure Loop (`plan/todo/a3-a4-regional-and-multidimensional-closures.md`):**
+   - Bind `sphThermalRegionalClosureGpu.js` outputs to live GPU thermal/phase
+     law shaders (currently 0 consumers!).
+   - Move A4 Chebyshev/response fitting (`fitResponseFunction`,
+     `gasResponseFunctions`, `eshkolEosStiffness`) onto GPU + wire
+     `eshkolHigherOrderLawCompiler.js` into live SPH closure misses.
+   - Promote semi-implicit coarse-`dt` pressure (`a1-eshkol-coarse-dt.md`) onto
+     canonical presets inside its 1% error envelope.
+
+### Priority 2 — Unify Coherent Solids (G3/A5) & First-Class Air / Exact Ledgers (G2) on Multi-Level SS
+5. **Unify G3 / A5 Coherent Solids onto SS Cells (`plan/todo/sol-critic.md`, `g3-solids-proposal.md`, `a5-solid-fluid-coupling.md`):**
+   - Replace the **3 private 4,096-bucket solid hashes** with canonical SS
+     spatial cells + solid proxy view.
+   - Close all **5 pre-SOL-1 gates** (surface-only radiation, objective velocity
+     smear, `bodyId`-aware product placement, multi-level rigid coupling,
+     material-derived restitution/friction).
+   - Fix **SOL-4 on N-level chain** (`mechanicsBuffer` binding) and **SOL-6
+     preset eligibility + live `activeProxiesBuffer` consumption**.
+6. **Turn G2 Exact Ledgers & Multi-Level First-Class Air ON by Default (`plan/todo/first-class-air.md`, `g2-integer-ledger-proposal.md`, `phase-resolved-steam-optics-plan.md`):**
+   - Enable `exactEnergyLedger`, multi-level SS air + worker split/merge
+     (`schroederPhaseSlotRefinement`), and GPU κ-Köhler/Maxwell–Mason/Stokes
+     plume stages on canonical room-air scenarios under Section 3 GPU budgets.
+   - Wire dynamic LOD (`dynamic-hierarchy-lod.md`) and Scale Atlas multipole
+     into live SS + share multipole across `selfGravitatingHydroGpu.js` and
+     `cosmicQuantumGpuKernels.js`.
+   - Derive dilute-gas `k, μ` from `pairPotential.js` (Slice 4) and retire the
+     single-level implicit-atmosphere stand-in (Slice 6) + magic `80/82/24`
+     isovalues (`surface-contact-transport-phase-closure-plan.md`).
+
+### Priority 3 — Formal Oracle Acceptance (A1–A6, G1–G4, G6) & Frontier Backlog
+7. **Capture & Review Formal `ulg.campaign.receipt.v1` Oracle Bundles:**
+   - Run and independently verify `.icc/completion-oracles.yaml` targets in
+     dependency order (`A1 → A2 → G6/A3/A4 → G2 → G3/A5 → G4 → A6 → G1`),
+     flipping each goal to `completed` (`accepted`) in `.icc/assistant-goals.yaml`
+     **only** after its formal receipt bundle passes.
+   - Run real 2-machine / real-browser WebRTC `RTCPeerConnection` A6 validation
+     (`distributed-peercompute-network-stack-plan.md`).
+8. **Frontier Science & UX Backlog (`plan/todo/README.md` Section 4):**
+   - GPU Kohn–Sham SCF eigensolver & GPU bulk DFT (`webgpu-material-property-resolvers-plan.md`),
+     `materialPolytopeRegistry` (`material-polytope-registry-and-property-fit-plan.md`),
+     complete non-fallback material bank (`material-property-json-bank-plan.md`),
+     Studio UX nitpicks (`nitpicks.md`), and G7 Lane-Emden/MESA benchmarks for
+     Stellar Genesis (`hydrogen-nebula-to-star-fusion-bridge-plan.md`).
+
+---
+
+## 7. Document & Evidence Map
+
+- **Canonical rules:** [`AGENTS.md`](../AGENTS.md) (`CLAUDE.md` → `@AGENTS.md`)
+- **Active routing (read first):** `plan/CURRENT-PLAN.md` (this file)
+- **Live checkpoint log:** [`plan/STATUS.md`](STATUS.md) (top ~40 lines)
+- **Active todo index (all 32 open docs):** [`plan/todo/README.md`](todo/README.md)
+- **Architecture reference:** [`plan/project-orientation.md`](project-orientation.md),
+  [`plan/ss-law-architecture-assessment.md`](ss-law-architecture-assessment.md),
+  [`plan/solver-law-inventory.md`](solver-law-inventory.md),
+  [`plan/ULG_Triad_Current_Plan_Addendum.html`](ULG_Triad_Current_Plan_Addendum.html)
+- **ICC durable control plane:** [`.icc/completion-oracles.yaml`](../.icc/completion-oracles.yaml),
+  [`.icc/assistant-goals.yaml`](../.icc/assistant-goals.yaml),
+  [`.icc/quality-campaigns.yaml`](../.icc/quality-campaigns.yaml) (external
+  receipts under `/home/cos/.cache/icc/repos/ulg/`)
+- **Archives (consult only on historical audit):** `plan/done/` (incl.
+  `done/handoffs/`, `done/audits/`, `done/refactor/`, `done/SS/`),
+  `plan/moot/`, `plan/log.md`, `plan/plan.md`, `plan/implementation-status.md`,
+  `plan/tests.md`, `plan/notes/` (start at `plan/notes/BRIEF.md`)

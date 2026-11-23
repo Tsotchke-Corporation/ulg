@@ -32,5 +32,15 @@ are no longer active todo routing.
 - `ULG_Triad_v0.5_Current_Status_Addendum_2026-06-11.md` generated the former
   stale PDF status pages. The current packet source is
   `plan/ULG_Triad_Current_Plan_Addendum.html`.
+- Archived 2026-11-22 during top-to-bottom `plan/` reconciliation:
+  `overarching-completion-plan.md`, `physics-loop-authority-diagrams.md`,
+  `sphphasedemo.md`, `webgpu-ocean-mlsmpm-simulator-plan.md`,
+  `peercompute-law-graph-authority-plan.md`,
+  `gpu-resident-lanes-and-warm-services-plan.md`,
+  `resident-state-authority-contract-plan.md`,
+  `a2-incremental-spatial-evidence.md`, and
+  `superseded-todo-readme-log-2026-11-22.md` (former 3,638-line `todo/README.md`
+  historical log). Active routing is [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
+  and [`plan/todo/README.md`](../todo/README.md).
 - Older files here may contain valid background, but do not use them as the next
-  implementation order without checking `plan/todo/README.md`.
+  implementation order without checking `plan/CURRENT-PLAN.md` and `plan/todo/README.md`.

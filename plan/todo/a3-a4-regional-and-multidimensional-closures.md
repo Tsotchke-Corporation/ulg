@@ -1,5 +1,16 @@
 # A3 regional sampling and A4 multidimensional response functions
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
+> receipts for A3 or A4). `sphImplicitPressureGpu.js` closes the A3 GPU loop
+> only when `implicitPressure=1` (OFF on all standard presets);
+> `sphThermalRegionalClosureGpu.js` runs on schedule boundaries by default **but
+> has ZERO live GPU law consumers** (`getSphThermalRegionalClosureLane` never
+> called in `src/`, tables never bound to any shader); all A4 fitting
+> (`fitResponseFunction`, `gasResponseFunctions`, `eshkolEosStiffness`,
+> `eshkolTriadClosures`) still executes **100% on CPU JS**; and
+> `eshkolHigherOrderLawCompiler.js` is not wired into live SPH steps. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Tracks A3 and A4. These build on G6 (`localClosureFitCache.js`)
 and G4 (homogeneity as a span test).
 

@@ -2,6 +2,15 @@
 
 Snapshot: 2026-07-10, branch `SS`, commit `c072c10`.
 
+> **2026-11-22 Addendum:** This catalog remains a useful baseline taxonomy of
+> solver families, but newer GPU solvers have landed since `c072c10` (exact
+> 9-limb `2^-149` mass/energy/parcel ledgers, incremental A2 CSR migration,
+> A3 regional sampling, A4 2-D gas response tables, SOL-0..6 coherent solids,
+> G4 dormancy evaluators, G6 thermal potential, Phase 6–8 optical/KS/bulk-DFT/
+> CAS(2,2)/nuclear-Cherenkov solvers, and generalized `self-gravitating-hydro@1`).
+> For verified live-code status and remaining gaps at HEAD `23a961c4`, read
+> [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) Sections 4–6.
+
 ## Reading Rules
 
 This inventory is derived from executable source, WGSL entry points, tests,

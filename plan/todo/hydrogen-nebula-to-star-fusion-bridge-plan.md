@@ -1,8 +1,8 @@
 # Hydrogen Nebula to Star Formation, Fusion & Compact Remnants Bridge Plan
 
-Date: 2026-11-22 AKST  
-Status: Phase 1 Implemented & Verified (`stellar-genesis.html`, general `self-gravitating-hydro@1` + `ClosureRegistry` 2D quantum plasma/fusion EOS); G7 MESA/Lane-Emden scientific benchmarking remains open (`scientificValidation: false`).  
-Related: [`cosmic-to-quantum-continuous-zoom-demo-plan.md`](cosmic-to-quantum-continuous-zoom-demo-plan.md), [`overarching-completion-plan.md`](overarching-completion-plan.md)
+- Date: 2026-11-22 AKST
+- Status: Phase 1 Implemented & Star-Spec Generalized (`stellar-genesis.html`, translation-invariant GPU-only `self-gravitating-hydro@1` + `ClosureRegistry` 2D quantum plasma/fusion EOS); sharing Scale Atlas multipole with SS / Cosmic-Quantum and G7 MESA/Lane-Emden scientific benchmarking remain open (`scientificValidation: false`).
+- Related: [`../CURRENT-PLAN.md`](../CURRENT-PLAN.md), [`../done/cosmic-to-quantum-continuous-zoom-demo-plan.md`](../done/cosmic-to-quantum-continuous-zoom-demo-plan.md)
 
 ## Target Vision
 

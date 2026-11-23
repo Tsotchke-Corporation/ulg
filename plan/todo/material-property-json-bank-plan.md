@@ -2,6 +2,15 @@
 
 Date: 2026-06-18 AKDT
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** `data/material-properties/` now
+> holds `elements.json` (`111` element rows: `106` `reduced-estimate`, `30`
+> `reference-fallback`, minus `7` noble gases), `compounds.json` (`15` records,
+> `15/15` `reference-fallback`), `element-crystal-structures.json` (`7`
+> `reference-fallback`), plus optical/vibration banks. Replacing remaining
+> `reference-fallback` rows (especially dilute-gas transport `k, μ` and
+> compounds) with first-principles validated closures remains open. Active
+> routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Status update, 2026-06-18 AKDT: Phase 1 has a first checked-in seed, not a
 complete bank. `data/material-properties/elements.json` now contains
 non-authoritative warm-input records for the currently exercised elements

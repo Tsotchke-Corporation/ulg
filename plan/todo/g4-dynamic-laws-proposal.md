@@ -1,5 +1,16 @@
 # G4 generalized per-node warm dynamic laws
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
+> receipts). Thermal, reaction, phase, and radiative dormancy evaluators run in
+> canonical loops (and G6 thermal uncertainty IS wired into thermal/radiation
+> dormancy), **but** none of the 4 dormancy passes consume canonical SS tree
+> nodes (thermal/reaction build private 3D box grids), **ZERO of the 4 live law
+> families dispatch via `dispatchWorkgroupsIndirect`** (all still launch full
+> `ceil(N/64)` workgroups with in-shader early returns), `radiationEpsilonFluxWPerM2`
+> is dropped (`normalizeThermalDormancyConfig:999`), and reaction/phase dormancy
+> receive `uncertaintyBuffer = null`. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Task: ICC `ulg-g4-dynamic-laws`. Oracle:
 `ulg-g4-dynamic-laws`. The design lineage is
 [scale-adaptive-law-activation-plan.md](scale-adaptive-law-activation-plan.md),

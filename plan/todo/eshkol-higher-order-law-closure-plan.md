@@ -1,9 +1,18 @@
 # Eshkol Higher-Order Law And Material Closure Plan
 
 Date: 2026-09-22 AKDT
-Status: planned; no runtime implementation claimed by this document.
-Priority: supports Goals 4–6 in the superseding seven-goal order. The first
-integrated deliverable belongs to Goal 6; broader compiler and learned-model
+
+**2026-11-22 Live-Code Status (`23a961c4`):** `src/runtime/material/eshkolHigherOrderLawCompiler.js`
+is implemented as a standalone module, **but is NOT wired into any live SPH
+step** (`src/services/ulgMechanicsResidentStage.worker.js:39` imports only the
+`LAW_FALLBACK_POLICY` enum for status telemetry; live A4 fitting in
+`localClosureFitCache.js`, `gasResponseFunctions.js`, `eshkolEosStiffness.js`,
+and `eshkolTriadClosures.js` still executes on CPU JS, and
+`warmClosureMissBridge.js:591` omits `eshkolSample` in live Triad synthesis).
+Active routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
+Priority: supports Goals 4–6 and A4/A6. The first
+integrated deliverable belongs to Goal 6 / A4; broader compiler and learned-model
 work remains subsequent, dependency-gated scope.
 
 ## Purpose And Sequencing

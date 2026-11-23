@@ -2,6 +2,11 @@
 
 Date: 2026-06-18 AKDT
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** **NOT STARTED in runtime
+> `src/`.** `materialPolytopeRegistry` does not exist anywhere in `src/` yet
+> (only a cosmetic wireframe + HUD label in `cosmicQuantumZoomDemo.js`). Active
+> routing: [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 ## Purpose
 
 Add a durable roadmap for discovering material/compound state-domain polytopes,

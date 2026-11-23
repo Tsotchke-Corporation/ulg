@@ -1,7 +1,13 @@
 # Current status — 2026-11-22 AKST
 
 **Active plan:** Read [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) first (single
-authoritative routing document).
+authoritative routing document) and [`AGENTS.md`](../AGENTS.md) (canonical
+self-contained repository rules + `plan/` routing map).
+
+- **2026-11-22 Plan Directory Cleanup, Governance Consolidation & Live-Code Audit (`feat/star-spec-generalization-audit`, local commits only — PUBLICATION HOLD ACTIVE):**
+  - **Canonical `AGENTS.md` Consolidation:** Replaced the contradicting 3-file rules patchwork with a single self-contained [`AGENTS.md`](../AGENTS.md) (`< 15 KB`, safely under Antigravity's `24,000`-byte per-file cap) + `CLAUDE.md` (`@AGENTS.md`) + clean redirects in `Agents.md` and `plan/Agents.md`. Permanently pins ULG's real Star Spec v0.4 / Two Unifications / SS Law Adapter Contract / Triad spine, GPU-native rule, formal oracle honesty, hardware/WM/focus safety, ICC caveats, and `plan/` Directory Routing Map across compactions.
+  - **`plan/` & `plan/todo/` Cleanup (`git mv` preserving history):** Archived all 6 legacy `plan/handoff-*.md` files + `plan/refactor/` to `plan/done/handoffs/` & `plan/done/refactor/`; moved historical audits/critiques (`codex-audit-7-9.md`, `greenfield.md`, `2026-11-03audit.md`, `ss-regression.md`) to `plan/done/audits/`; moved completed items (`cosmic-to-quantum-continuous-zoom-demo-plan.md`, `dynamic-initial-material-bodies-plan.md`, `frontier-todo.md`) to `plan/done/`; moved 8 superseded plans + the old 3,638-line `plan/todo/README.md` log to `plan/moot/`; moved open UX `plan/nitpicks.md` to `plan/todo/nitpicks.md`; wrote a clean categorized [`plan/todo/README.md`](todo/README.md) indexing all 32 genuinely open files.
+  - **Top-to-Bottom Code Verification Against HEAD `23a961c4`:** Reconciled [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md), [`.icc/assistant-goals.yaml`](../.icc/assistant-goals.yaml), [`.icc/quality-campaigns.yaml`](../.icc/quality-campaigns.yaml), and active `plan/todo/` headers with live source and disk receipts (`/home/cos/.cache/icc/repos/ulg/`). Formal oracle truth: **ONLY 2 of 13 milestones are formally accepted (`G5`, `G7`)**; the 11 open milestones are flipped back to honest `in_progress` with line-exact live-wiring bugs and architectural gaps documented in `plan/CURRENT-PLAN.md` Sections 4–6.
 
 - **2026-11-22 Star Spec Generalization & Anti-Hack Audit (`feat/star-spec-generalization-audit`, local commits only — PUBLICATION HOLD ACTIVE):**
   - Audited all work across `3e1f8d12..f1cf07c7` (`75` files) and landed four generalized, GPU-native remediation slices with zero preset/material-scoped hacks, zero screen-space visual fakes, zero scripted `Math.sin`/`Math.cos` animations, zero `(0,0,0)` origin anchors, and zero production CPU mirror solvers:

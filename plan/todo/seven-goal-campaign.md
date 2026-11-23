@@ -1,5 +1,11 @@
 # ULG Seven Goals and Follow-on Architecture Campaign
 
+> **2026-11-22 Live-Code & Oracle Audit (`23a961c4`):** Formal receipt check of
+> `/home/cos/.cache/icc/repos/ulg/` confirms **ONLY G5 and G7 are formally
+> accepted (`2/13`)**. All other 11 milestones remain `in_progress` with
+> line-exact live-code gaps documented in [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
+> Sections 4–6 and [`.icc/assistant-goals.yaml`](../../.icc/assistant-goals.yaml).
+
 ## User decision — architecture-first re-sequencing & guardrail reset — 2026-11-19 AKST
 
 On 2026-11-19, after checkpointing the Oct 27–Nov 19 worktree locally (`31fb694`)
@@ -38,7 +44,7 @@ execution order and workflow constraints, consolidated into
 
 ## User decision — real time moves to A1; dt 1 ms allowed — 2026-11-13
 
-After the [2026-11-03 audit](2026-11-03audit.md), the user said: "actually we
+After the [2026-11-03 audit](../done/audits/2026-11-03audit.md), the user said: "actually we
 should defer architecural work until we reach the correct phase. and at least
 finish out this goal first". When asked where the near-real-time requirement
 should live, the user answered: "yes move it to A1, allow dt 1 ms".

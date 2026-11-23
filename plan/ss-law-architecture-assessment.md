@@ -1,6 +1,18 @@
 # SS Tree and Physics Laws: Architecture Assessment
 
-Written 2026-07-25, after the Slice 9 debugging run. The question that prompted
+Written 2026-07-25, after the Slice 9 debugging run.
+
+> **2026-11-22 Live-Code Verification (`23a961c4`):** The core architectural
+> finding below **remains open**: `validateFusedResidentLawPlan`
+> (`src/runtime/sph/sphMlsMpmGpuStep.js:19108`) checks only 4 hardcoded
+> resource strings on one fused sidecar plan, `74` `replaceRequiredWgsl`
+> string-patching call sites remain in `sphMlsMpmGpuStep.js:5279-10132` (plus
+> raw `.replace()` in 4 more files), and solids / dormancy still maintain
+> private grids beside the canonical SS epoch. See
+> [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) Sections 4–6 for the active
+> remediation queue.
+
+The question that prompted
 it: *is there a well thought out architectural plan for how the datastructure
 and algorithms fit together for the SS tree and the physics laws?* The
 hypothesis behind the question — that the brittleness we keep hitting comes

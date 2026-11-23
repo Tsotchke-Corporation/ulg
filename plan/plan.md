@@ -1,4 +1,9 @@
-# ULG Implementation Plan
+# ULG Implementation Plan (Archived June–July 2026 Log)
+
+> **Archived historical log (2026-11-22):** This file records the June–July 10,
+> 2026 implementation plan and checkpoints. For active execution order, live
+> status, and open work, read [`plan/CURRENT-PLAN.md`](CURRENT-PLAN.md) and
+> [`plan/todo/README.md`](todo/README.md).
 
 ## Current Documentation Target - 2026-07-10 Solver/Law Inventory
 

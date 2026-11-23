@@ -2,6 +2,13 @@
 
 Date: 2026-06-12 AKDT
 
+> **2026-11-22 Live-Code Bug Flag (`23a961c4`):** `src/runtime/chemistry/reactionCandidates.js:282, 362`
+> currently executes `if (sedenionScope.reactiveClass === 'inert') return null;`,
+> **suppressing** balanced reaction candidates instead of only prioritizing
+> channels — violating the explicit non-suppression contract in this plan
+> (`:93, 100-101`). Tracked as Priority 0 in
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 ## Purpose
 
 Use the sedenion periodic-table reference as a symbolic reaction-channel

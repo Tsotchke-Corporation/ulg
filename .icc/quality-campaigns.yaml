@@ -1,15 +1,16 @@
-# User-approved campaign, 2026-09-06, re-sequenced architecture-first on 2026-11-19.
-# Active routing and slice budgets: plan/CURRENT-PLAN.md.
+# User-approved campaign, 2026-09-06, re-sequenced architecture-first on 2026-11-19,
+# audited and reconciled against live code at HEAD 23a961c4 on 2026-11-22.
+# Active routing, honest live-code scorecard, and slice budgets: plan/CURRENT-PLAN.md.
 # Native quality-campaign currently reports oracle states unknown; run the actual
-# completion-oracle targets separately.
-# 2026-09-13: G1 failed acceptance and is deferred to reassessment after the
-# architecture tracks. 2026-11-18: G5 and G7 accepted.
-# 2026-11-19: Phase 1 leads with A1/A2/G6/A3/A4 (substrate + fast N-level SS +
-# live closure loop); Phase 2 lands G2/G3/A5/G4/A6; Phase 3 reassesses decoupled G1
-# (latest committed physics state at >=54 Hz).
+# completion-oracle targets separately on reviewed ulg.campaign.receipt.v1 bundles.
+#
+# FORMAL ACCEPTANCE (2/13): ONLY g5-reservation and g7-release-audit have
+# accepted ulg.campaign.receipt.v1 bundles (2026-11-18). All 11 other stages
+# remain OPEN with verified live-code wiring/architectural gaps documented in
+# plan/CURRENT-PLAN.md Section 4 and .icc/assistant-goals.yaml.
 campaigns:
   - id: ulg-seven-goals-and-architecture
-    objective: Architecture-first delivery of A1/A2/G6/A3/A4 substrate and closure loop, then G2/G3/A5/G4/A6 on that canonical lane, then decoupled G1 reassessment (G5 and G7 accepted)
+    objective: Close verified live-wiring and architectural gaps across A1/A2/G6/A3/A4, G2/G3/A5/G4/A6, and decoupled G1, then capture reviewed ulg.campaign.receipt.v1 bundles for all 11 open milestones (G5 and G7 accepted)
     node: ulg
     acceptance:
       metric: reviewed_required_milestones
@@ -25,46 +26,46 @@ campaigns:
         node: ulg
         oracle: ulg-g7-release-audit
       - id: a1-realtime-substrate
-        title: "Phase 1: Real-time bulk substrate, decoupled presentation, parallel Jacobi contact, fused K-step lane"
+        title: "OPEN (Phase 1): Real-time bulk substrate, delete Coupling #8, deduplicate 5 contact laws, retire 63-limb/CPU mirrors, fix resource leaks"
         node: ulg
         oracle: ulg-a1-realtime-substrate
       - id: a2-incremental-spatial
-        title: "Phase 1: GPU-advanced multi-step SS epoch slots and fast N-level SS chain"
+        title: "OPEN (Phase 1): Incremental CSR live; wire Scale Atlas / multipole / dynamic LOD / active-node compaction and 3+ level presets"
         node: ulg
         oracle: ulg-a2-incremental-spatial
       - id: g6-local-fit
-        title: "Phase 1: Live local provenance-bound online closure fit and cache"
+        title: "OPEN (Phase 1): Thermal potential live by default; fix radiation epsilon drop, wire reaction/phase uncertainty, capture oracle bundle"
         node: ulg
         oracle: ulg-g6-local-fit
       - id: a3-representative-sampling
-        title: "Phase 1: Representative homogeneous-region GPU sampling and envelope expansion"
+        title: "OPEN (Phase 1): Bind sphThermalRegionalClosureGpu tables to live GPU law shaders and enable A3 sampling on standard presets"
         node: ulg
         oracle: ulg-a3-representative-sampling
       - id: a4-material-functions
-        title: "Phase 1: Eshkol-derived multidimensional material-property response functions"
+        title: "OPEN (Phase 1): Move A4 response fitting from CPU JS onto GPU and wire eshkolHigherOrderLawCompiler into live SPH steps"
         node: ulg
         oracle: ulg-a4-material-functions
       - id: g2-plumes
-        title: "Phase 2: Conserved steam and aerosol transport on the exact-ledger canonical lane"
+        title: "OPEN (Phase 2): Enable exact 2^-149 ledgers, multi-level first-class air, split/merge, and GPU steam parcel stages by default"
         node: ulg
         oracle: ulg-g2-plumes
       - id: g3-solids
-        title: "Phase 2: Coherent solids SOL-0 and SOL-1 integrated into SS spatial cells"
+        title: "OPEN (Phase 2): Move rigid solids off private 4096-bucket hashes onto canonical SS cells and close all 5 pre-SOL-1 gates"
         node: ulg
         oracle: ulg-g3-solids
       - id: a5-solids-and-levels
-        title: "Phase 2: Dependency-gated solid mechanics coupling, deformation, topology, and multilevel solids"
+        title: "OPEN (Phase 2): Unify solid-fluid SS hashes; fix SOL-4 N-level no-op, SOL-5 zero-loads + OOB sizing, and SOL-6 preset skip/proxy consumer"
         node: ulg
         oracle: ulg-a5-solids-and-levels
       - id: g4-dynamic-laws
-        title: "Phase 2: Compacted per-node warm dynamic law activation with closure uncertainty"
+        title: "OPEN (Phase 2): Consume canonical SS tree nodes and switch all 4 live law families from full ceil(N/64) launches to real dispatchWorkgroupsIndirect"
         node: ulg
         oracle: ulg-g4-dynamic-laws
       - id: a6-remote-derivation
-        title: "Phase 2: Warm browser WASM/WebGPU Eshkol/MoonLab derivation wired to live misses"
+        title: "OPEN (Phase 2): Wire device/lane & eshkolSample into live warmClosureMissBridge, remove /@fs paths, prove real 2-machine WebRTC"
         node: ulg
         oracle: ulg-a6-remote-derivation
       - id: g1-presentation
-        title: "Phase 3 reassessment: decoupled presentation of latest committed state at >=54 Hz (prior 2026-09-13 attempt FAILED/deferred)"
+        title: "OPEN (Phase 3 reassessment): Fix native-material damped motion age, visibleMotionCadenceVerified, magic isovalues, MC buffer clamp, and pass formal G1 oracle"
         node: ulg
         oracle: ulg-g1-presentation

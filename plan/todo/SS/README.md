@@ -1,8 +1,19 @@
 # SS Todo Routing
 
-Date: 2026-07-01 AKDT
-Updated: 2026-08-31 AKDT
-Current branch: `performance`
+- Date: 2026-07-01 AKDT
+- Updated: 2026-11-22 AKST
+- Active routing: [`plan/CURRENT-PLAN.md`](../../CURRENT-PLAN.md)
+
+> **2026-11-22 Live-Code Status (`23a961c4`):** Single-pass A2 incremental CSR
+> migration (`schroederIncrementalSpatialMigrationGpu.js`) IS live by default,
+> **but** 4 of 5 shipped presets run 1 SS level (`cesium-fluorine` runs 2; `0`
+> run 3+), `schroederSpatialScaleAtlasGpu.js` / migration / split-coarsen have
+> `0` live callers in `src/`, `ulgMechanicsResidentStage.worker.js:15758` has a
+> broken multipole call signature swallowed by `catch`, the dynamic LOD
+> controller (`:15724`) is write-only telemetry, `schroederActiveNodeCompactionGpu.js`
+> has `0` dispatch consumers, solids & dormancy still run private grids beside
+> SS, and the Law Adapter Contract (`schroeder-tree-and-algorithm-plan.md:129`)
+> remains unenforced.
 
 `SS` means Schroeder Simulation. This folder retains the architecture contract
 and routes remaining SS-dependent transport and coherent-solid work. The

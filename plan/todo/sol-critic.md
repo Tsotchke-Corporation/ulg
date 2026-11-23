@@ -1,8 +1,17 @@
 # SOL Critique: Schroeder Simulation And Coherent Solids
 
-Date: 2026-07-10 AKDT
-Status: active architecture correction and implementation todo
-Branch reviewed: `SS` at `d5319c2` plus the uncommitted scenario-audit slice
+- Date: 2026-07-10 AKDT
+- Status: active architecture correction and implementation todo
+- Branch reviewed: `SS` at `d5319c2` plus the uncommitted scenario-audit slice
+
+> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN.** All 5 pre-SOL-1 gates
+> remain open (interior `4πr²` radiation, non-objective velocity smear, `bodyId`
+> product placement, L0-only coupling, hardcoded `restitution/friction = 0.3`),
+> solids still run 3 private 4,096-bucket hashes instead of SS cells, candidate
+> arena is fixed-budget per particle (not sparse CSR), cross-level coupling is
+> disabled, extreme mass-ratio invariants are missing, and SOL-4/5/6 have live
+> wiring bugs documented in [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md)
+> Section 4.
 
 Routing update, 2026-07-13 AKDT: Priority 2/3 shared-neighborhood and sparse-SS
 execution now routes through

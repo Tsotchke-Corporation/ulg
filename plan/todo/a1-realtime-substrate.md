@@ -1,5 +1,16 @@
 # A1 real-time substrate: progress record
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
+> receipts). 100k+ `water-realtime` sustains `>= 1x` RT and the `1,970 Pa·s`
+> shear viscosity bug is fixed, **but** Coupling #8 (`sphPhaseScene.js:21478,
+> 50435`), 5 overlapping iron-ice contact responses, disabled 63-limb rationals,
+> production CPU mirrors, `246` `@workgroup_size(1)` serial kernels, 11-file
+> `device.lost` leaks, unbounded `DataState.setHotBuffer`, missing
+> `uncapturederror` listener, raw NUL byte (`sphPhaseViewStateTransport.js:98`),
+> `0 K` wall default (`thermalEnvironmentAuthority.js:222`), and p-wave speed
+> mismatch (`sphPhaseDemo.js:1204`) remain open. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Track A1: real-time physics, including the near-real-time
 G2 plume scenarios moved here on 2026-11-13.
 

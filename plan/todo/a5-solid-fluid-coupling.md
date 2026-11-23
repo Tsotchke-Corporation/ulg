@@ -1,5 +1,16 @@
 # A5 SOL-3: solid–fluid coupling (rigid bodies ↔ SPH/MPM particles)
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN** (`0` formal oracle
+> receipts). Isolated Vulkan tests pass for SOL-4/5/6, **but** live integration
+> has critical gaps: SOL-2/3 still use private 4,096-bucket hashes instead of SS
+> cells; SOL-4 silently no-ops on the N-level chain
+> (`schroederSpatialChainStepGpu.js:240` omits `mechanicsBuffer`); SOL-5 runs 17
+> kernels/step against all-zero `member_loads` (`0` callers write it) with a
+> **latent OOB write bug** (`frameBuffer`/`latticeBuffer` sized to `bodyCount`
+> vs `maxBodyCapacity`); SOL-6 is skipped on all shipped presets (`c>=4 &&
+> c%4==0`) and `activeProxiesBuffer` has `0` consumers. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 Date: 2026-11-14. Track A5. This is the coupling the G2 Iron Ice plume waits
 on: the user chose to keep G2 open until it lands.
 

@@ -2,7 +2,27 @@
 
 Date: 2026-06-11 AKDT
 
-## Current Answer
+> **2026-11-22 Live-Code Status (`23a961c4`):** Partial Phase 6–8 GPU migration
+> landed, with explicit remaining CPU/hybrid bottlenecks:
+> - `src/runtime/material/opticalResolverWebGpu.js`: `webgpu-derived` 81-wavelength
+>   Drude–Lorentz + spin-orbit interband + Frank–Tamm Cherenkov + Hervé–Vandamme
+>   IOR (`keepResident` zero-readback path wired), or `hybrid-webgpu-spectral-cpu-oscillators`
+>   when relativistic oscillators are computed on CPU.
+> - `src/runtime/electronicStructure/radialKohnShamWebGpu.js`: PBE-GGA +
+>   spin-orbit potential quadrature runs on WebGPU, **but `solveAtomWebGpu` is
+>   still `hybrid-webgpu-potential-cpu-eigensolver`** (reads `vElec` back to CPU
+>   every SCF iteration).
+> - `src/runtime/electronicStructure/periodicBulkDft.js` (Monkhorst–Pack bulk
+>   DFT + Birch–Murnaghan) and `src/runtime/electronicStructure/molecularHartreeFock.js`
+>   (`6-31G(d)`, UMP2, CI-NEB, `cas22()`, `puhf()`) remain **100% CPU JS**.
+> - **Carried forward from archived [`done/frontier-todo.md`](../done/frontier-todo.md):**
+>   full GPU SCF eigensolver & GPU bulk DFT, full 4-component Dirac for heavy
+>   $p/d/f$ shells, dispersion/van der Waals for noble-gas/molecular crystals,
+>   and fixing `generate-molecular-vibrations.mjs` multi-bond geometry
+>   minimization (`CO₂` / `N₂` / `O₂`). Active routing:
+>   [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
+## Current Answer (2026-06-11 Historical Baseline)
 
 The relativistic optical closures are not fully implemented in WebGPU.
 

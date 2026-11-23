@@ -1,5 +1,14 @@
 # First-class air on the SS hierarchy
 
+> **2026-11-22 Live-Code Status (`23a961c4`):** **OPEN.** Mixture parcels are
+> default when `environmentMode='air'`, and Slice 5 gas–condensed conduction +
+> pass-cap fallback are live in WGSL, **but** all 5 built-in presets still
+> default to `environmentMode='vacuum'` & 1 SS level; Slice 1c worker
+> split/merge (`schroederPhaseSlotRefinement`) is opt-in only; Slice 4 dilute
+> gas `k, μ` remains static CRC/NIST `compounds.json` (`reference-fallback`);
+> and Slice 6 single-level implicit-atmosphere stand-in remains live. See
+> [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md).
+
 User direction (2026-11-16):
 
 - "treat air as a first class sim object in the sph sim like everything else."

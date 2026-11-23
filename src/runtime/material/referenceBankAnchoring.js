@@ -11,6 +11,7 @@
 // the derived values as residual diagnostics, and stamps the provenance
 // accordingly.
 import compoundMaterialPropertyBank from '../../../data/material-properties/compounds.json' with { type: 'json' };
+import foundationPolytopeAtlasBank from '../../../data/material-properties/foundation-polytope-atlas.json' with { type: 'json' };
 import molecularElectronicBandsBank from '../../../data/material-properties/molecular-electronic-bands.json' with { type: 'json' };
 import {
   CONDUCTOR_OPTICAL_CONSTANTS_BANK,
@@ -50,7 +51,56 @@ function elementRecordFor(materialKey) {
   return (DEFAULT_MATERIAL_PROPERTY_BANK.records || []).find((record) => record.symbol === symbol) || null;
 }
 
-export function referenceBankRecordForMaterial(materialKey) {
+export function foundationPolytopeCompoundRecordFor(materialKey) {
+  const key = String(materialKey || '').trim().toLowerCase();
+  if (!key) return null;
+  const match = (foundationPolytopeAtlasBank.compounds || []).find((c) => (
+    String(c.materialKey || '').toLowerCase() === key
+    || String(c.formula || '').toLowerCase() === key
+  )) || (foundationPolytopeAtlasBank.elements || []).find((e) => (
+    String(e.materialKey || '').toLowerCase() === key
+    || String(e.formula || '').toLowerCase() === key
+  )) || null;
+  if (!match) return null;
+  const tMelt = Number(match.thermodynamic?.meltingPointK ?? 300);
+  const tBoil = Number(match.thermodynamic?.boilingPointK ?? 1000);
+  const rho = Number(match.mechanical?.densityKgPerM3 ?? 1000);
+  const cp = Number(match.thermodynamic?.heatCapacityCpJPerKgK ?? 1000);
+  const k = Number(match.thermodynamic?.thermalConductivityWPerMK ?? 1.0);
+  return Object.freeze({
+    schema: 'ulg.foundation-polytope-compound-record.v1',
+    key: String(match.materialKey).toLowerCase(),
+    formula: match.formula || match.materialKey,
+    accuracyTier: match.accuracyTier,
+    closureHash: match.closureHash,
+    phases: Object.freeze([
+      Object.freeze({ name: 'solid', temperatureRangeK: [0, tMelt], densityKgPerM3: rho, heatCapacityJPerKgK: cp, thermalConductivityWPerMK: k }),
+      Object.freeze({ name: 'liquid', temperatureRangeK: [tMelt, tBoil], densityKgPerM3: rho * 0.92, heatCapacityJPerKgK: cp * 1.15, thermalConductivityWPerMK: k * 0.6 }),
+      Object.freeze({ name: 'gas', temperatureRangeK: [tBoil, 1e6], densityKgPerM3: Math.max(0.08, (match.nuclear?.molarMassU || 28) * 0.04), heatCapacityJPerKgK: cp * 0.9, thermalConductivityWPerMK: 0.03 })
+    ]),
+    transitions: Object.freeze([
+      Object.freeze({ name: 'melting', temperatureK: tMelt, latentHeatJPerKg: Number(match.thermodynamic?.latentHeatFusionJPerKg ?? 1e5) }),
+      Object.freeze({ name: 'boiling', temperatureK: tBoil, latentHeatJPerKg: Number(match.thermodynamic?.latentHeatVaporizationJPerKg ?? 1e6) })
+    ]),
+    provenance: Object.freeze([
+      Object.freeze({
+        family: 'phase-transitions',
+        source: 'ulg-gate2-foundation-polytope-atlas',
+        method: 'recursive-compound-first-principles-derivation',
+        status: 'reduced-estimate',
+        accuracyTier: match.accuracyTier,
+        closureHash: match.closureHash,
+        scientificValidation: false
+      })
+    ])
+  });
+}
+
+export function referenceBankRecordForMaterial(materialKey, { preferFoundationPolytopeAtlas = false } = {}) {
+  if (preferFoundationPolytopeAtlas === true) {
+    const foundation = foundationPolytopeCompoundRecordFor(materialKey);
+    if (foundation) return { record: foundation, bank: 'foundation-polytope-atlas' };
+  }
   const compound = compoundRecordFor(materialKey);
   if (compound && bankTransitionsUsable(compound)) return { record: compound, bank: 'compounds' };
   const element = elementRecordFor(materialKey);

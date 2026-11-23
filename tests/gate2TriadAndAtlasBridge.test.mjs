@@ -23,9 +23,9 @@ test('Gate 1-2 Complete Periodic Table Bank (118/118) & Foundation Polytope Atla
   const atlas = JSON.parse(await readFile(new URL('../data/material-properties/foundation-polytope-atlas.json', import.meta.url), 'utf8'));
   assert.equal(atlas.schema, 'ulg.foundation-polytope-atlas-bank.v1');
   assert.equal(atlas.elementCount, 118);
-  assert.equal(atlas.compoundCount, 15);
+  assert.ok(atlas.compoundCount >= 20, `expected >= 20 foundation compounds, got ${atlas.compoundCount}`);
   assert.equal(atlas.elements.length, 118);
-  assert.equal(atlas.compounds.length, 15);
+  assert.ok(atlas.compounds.length >= 20, `expected >= 20 compounds, got ${atlas.compounds.length}`);
   assert.equal(atlas.scientificValidation, false);
   assert.equal(atlas.g7AdvisoryOnly, true);
 

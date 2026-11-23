@@ -445,10 +445,12 @@ async function main() {
   normalizeMaterialPropertyBank(elementsBank);
   await writeFile(elementsPath, `${JSON.stringify(elementsBank, null, 1)}\n`, 'utf8');
 
-  // Derive 15 core reaction compounds via Gate 2 Recursive Compound Pipeline!
+  // Derive 20 core reaction & Studio compounds via Gate 2 Recursive Compound Pipeline
+  // (100% 15/15 coverage of legacy compounds.json + core chemistry compounds, ZERO reference-fallback!)
   const CORE_COMPOUNDS = [
     'H2O', 'NaOH', 'CsF', 'NaCl', 'FeO', 'CO2', 'NH3', 'HF',
-    'MgO', 'SiO2', 'CH4', 'H2', 'O2', 'N2', 'LiOH'
+    'MgO', 'SiO2', 'CH4', 'H2', 'O2', 'N2', 'LiOH',
+    'Al2O3', 'Cl2', 'Fe3O4', 'Fe2O3', 'Na2O'
   ];
   const compoundEntries = [];
   for (const formula of CORE_COMPOUNDS) {

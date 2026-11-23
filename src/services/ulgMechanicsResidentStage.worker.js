@@ -28,6 +28,9 @@ import {
   registerTriadClosureBundleOnDevice
 } from '../runtime/material/triadClosureGpuRegistry.js';
 import {
+  seedStudioFoundationTriadOnDevice
+} from '../runtime/material/foundationPolytopeAtlasGpuBridge.js';
+import {
   createDynamicHierarchyLodController,
   createDynamicSchroederScaleAtlasRuntime
 } from '../runtime/sph/schroederSpatialScaleAtlasRuntime.js';
@@ -12432,6 +12435,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         });
     }
     try {
+      if (
+        record.workerDevice
+        && !record.foundationPolytopeSeeded
+        && typeof globalThis.GPUDevice === 'function'
+        && record.workerDevice instanceof globalThis.GPUDevice
+      ) {
+        record.foundationPolytopeSeeded = true;
+        try {
+          await seedStudioFoundationTriadOnDevice(record.workerDevice);
+        } catch {
+          // Keep Foundation Polytope Atlas seeding isolated from schedule admission.
+        }
+      }
       if (
         record.workerDevice
         && Array.isArray(schedule.triadClosureAdoptions)

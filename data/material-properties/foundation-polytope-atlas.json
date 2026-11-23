@@ -5,7 +5,7 @@
   "scientificValidation": false,
   "g7AdvisoryOnly": true,
   "elementCount": 118,
-  "compoundCount": 15,
+  "compoundCount": 20,
   "g7AdvisoryBenchmarks": [
     {
       "Z": 1,
@@ -38423,17 +38423,34 @@
       "atomicNumber": null,
       "formula": "H2O",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:52fe0f1f",
+      "closureHash": "ulg:7d4620f2",
       "nuclear": {
         "totalProtonsZ": 10,
         "totalNucleonsA": 18,
         "molarMassU": 18.015,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 133.58212226021982,
         "maxNuclearRadiusFm": 2.9481655013105037,
         "stoichiometry": {
           "H": 2,
           "O": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 1.008
+          },
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 15.999
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -38477,7 +38494,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "h2o:solid:ca0d833e",
+          "polytopeId": "h2o:solid:2da14f76",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -38541,7 +38558,7 @@
           ]
         },
         {
-          "polytopeId": "h2o:liquid:ca0d833e",
+          "polytopeId": "h2o:liquid:2da14f76",
           "phase": "liquid",
           "tRangeK": [
             195.3555050556799,
@@ -38615,7 +38632,7 @@
           ]
         },
         {
-          "polytopeId": "h2o:gas:ca0d833e",
+          "polytopeId": "h2o:gas:2da14f76",
           "phase": "gas",
           "tRangeK": [
             180.7910361370714,
@@ -38679,7 +38696,7 @@
           ]
         },
         {
-          "polytopeId": "h2o:plasma:ca0d833e",
+          "polytopeId": "h2o:plasma:2da14f76",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -38735,30 +38752,54 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:H2O:solid",
-        "sourceHash": "sha256:eshkol-law:bd2442aa10569d06d546d2682510930af43b964102966c2a28c2c2c34dbcfc61",
+        "sourceHash": "sha256:eshkol-law:ae1fe02f056177b2e0d0c8336feeecce2f73c1943ecea6054b7949fea6f2aa59",
         "domainHash": "dom:375f20ac1b7db161",
         "surrogateRelativeBound": 0.000037747150063816573,
         "sampleDensityAtMidpointKgM3": 1832.215288788576
       }
     },
     {
-      "materialKey": "NaOH",
+      "materialKey": "HONa",
       "family": "compound",
       "atomicNumber": null,
       "formula": "NaOH",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:b52d7351",
+      "closureHash": "ulg:831b8414",
       "nuclear": {
         "totalProtonsZ": 20,
         "totalNucleonsA": 40,
         "molarMassU": 39.997,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 324.7110816263546,
         "maxNuclearRadiusFm": 3.203435526927042,
         "stoichiometry": {
           "H": 1,
           "O": 1,
           "Na": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 1.008
+          },
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 11,
+            "symbol": "Na",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 22.99
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -38776,12 +38817,12 @@
       "mechanical": {
         "crystalStructure": "cscl-B2",
         "spaceGroup": "Pm-3m (221)",
-        "latticeConstantA": 5.1059904846041055,
-        "densityKgPerM3": 1995.705726877981,
+        "latticeConstantA": 8.142228367903199,
+        "densityKgPerM3": 600,
         "cohesiveEnergyEv": 9.461051777050717,
-        "bulkModulusPa": 40487156691.78831,
-        "shearModulusPa": 17814348944.386856,
-        "debyeTemperatureK": 540.494941188973
+        "bulkModulusPa": 9984525828.661718,
+        "shearModulusPa": 4393191364.611156,
+        "debyeTemperatureK": 489.5187635707964
       },
       "thermodynamic": {
         "temperatureK": 300,
@@ -38793,16 +38834,16 @@
         "latentHeatVaporizationJPerKg": 20997187.41678139,
         "meltingSlopeKPerLogP": 18,
         "boilingSlopeKPerLogP": 167.6553302831918,
-        "liquidDensityKgPerM3": 1836.0492687277426,
+        "liquidDensityKgPerM3": 552,
         "dynamicViscosityLiquidPaS": 0.0024198589857651787,
-        "surfaceTensionNPerM": 1.9402144087993947,
+        "surfaceTensionNPerM": 0.8707354444868927,
         "thermalConductivityWPerMK": 6.5,
         "mdTempK": null,
         "mdEnergyEv": null
       },
       "polytopes": [
         {
-          "polytopeId": "naoh:solid:fc02a8be",
+          "polytopeId": "hona:solid:836b096a",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -38866,7 +38907,7 @@
           ]
         },
         {
-          "polytopeId": "naoh:liquid:fc02a8be",
+          "polytopeId": "hona:liquid:836b096a",
           "phase": "liquid",
           "tRangeK": [
             1816.1916797309354,
@@ -38940,7 +38981,7 @@
           ]
         },
         {
-          "polytopeId": "naoh:gas:fc02a8be",
+          "polytopeId": "hona:gas:836b096a",
           "phase": "gas",
           "tRangeK": [
             2208.0027278019543,
@@ -39004,7 +39045,7 @@
           ]
         },
         {
-          "polytopeId": "naoh:plasma:fc02a8be",
+          "polytopeId": "hona:plasma:836b096a",
           "phase": "plasma",
           "tRangeK": [
             6779.8178479846365,
@@ -39059,30 +39100,47 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:NaOH:solid",
-        "sourceHash": "sha256:eshkol-law:bef252b806d8e53df3ed958598e050cdef5473aeee29f9139d4fcca07caf408a",
+        "lawId": "ulg:polytope-eos:HONa:solid",
+        "sourceHash": "sha256:eshkol-law:cec4a3a4e7d2386c65dc32b3f983a0ffaa86eaf568b932891bfe093953127641",
         "domainHash": "dom:774d28003ed22f21",
-        "surrogateRelativeBound": 0.000010476430411519228,
-        "sampleDensityAtMidpointKgM3": 1937.5427773139502
+        "surrogateRelativeBound": 0.00003517664709575136,
+        "sampleDensityAtMidpointKgM3": 582.5180229219101
       }
     },
     {
-      "materialKey": "CsF",
+      "materialKey": "FCs",
       "family": "compound",
       "atomicNumber": null,
       "formula": "CsF",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:0c791025",
+      "closureHash": "ulg:139dafc9",
       "nuclear": {
         "totalProtonsZ": 64,
         "totalNucleonsA": 148,
         "molarMassU": 151.908,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 1252.1001101111685,
         "maxNuclearRadiusFm": 5.106605009721171,
         "stoichiometry": {
           "F": 1,
           "Cs": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 9,
+            "symbol": "F",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 18.998
+          },
+          {
+            "Z": 55,
+            "symbol": "Cs",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 132.91
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -39100,12 +39158,12 @@
       "mechanical": {
         "crystalStructure": "cscl-B2",
         "spaceGroup": "Pm-3m (221)",
-        "latticeConstantA": 5.8201007496049835,
-        "densityKgPerM3": 5117.975787678508,
+        "latticeConstantA": 8.129400436580411,
+        "densityKgPerM3": 1878.0804219700558,
         "cohesiveEnergyEv": 14,
-        "bulkModulusPa": 41903295715.020294,
-        "shearModulusPa": 18437450114.60893,
-        "debyeTemperatureK": 343.36515735536113
+        "bulkModulusPa": 15376735366.326988,
+        "shearModulusPa": 6765763561.183875,
+        "debyeTemperatureK": 343.3651573553611
       },
       "thermodynamic": {
         "temperatureK": 300,
@@ -39117,16 +39175,16 @@
         "latentHeatVaporizationJPerKg": 8180813.898861372,
         "meltingSlopeKPerLogP": 18,
         "boilingSlopeKPerLogP": 237.87417815536256,
-        "liquidDensityKgPerM3": 4708.537724664227,
+        "liquidDensityKgPerM3": 1727.8339882124515,
         "dynamicViscosityLiquidPaS": 0.0024198589857651787,
-        "surfaceTensionNPerM": 2.20972047060569,
+        "surfaceTensionNPerM": 1.132612397941841,
         "thermalConductivityWPerMK": 6.5,
         "mdTempK": null,
         "mdEnergyEv": null
       },
       "polytopes": [
         {
-          "polytopeId": "csf:solid:c0280c40",
+          "polytopeId": "fcs:solid:b1eabac3",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -39190,7 +39248,7 @@
           ]
         },
         {
-          "polytopeId": "csf:liquid:c0280c40",
+          "polytopeId": "fcs:liquid:b1eabac3",
           "phase": "liquid",
           "tRangeK": [
             2655.897100976553,
@@ -39264,7 +39322,7 @@
           ]
         },
         {
-          "polytopeId": "csf:gas:c0280c40",
+          "polytopeId": "fcs:gas:b1eabac3",
           "phase": "gas",
           "tRangeK": [
             3214.5176310541633,
@@ -39328,7 +39386,7 @@
           ]
         },
         {
-          "polytopeId": "csf:plasma:c0280c40",
+          "polytopeId": "fcs:plasma:b1eabac3",
           "phase": "plasma",
           "tRangeK": [
             9823.75,
@@ -39383,11 +39441,11 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:CsF:solid",
-        "sourceHash": "sha256:eshkol-law:d5e87811781f3296f895bf246e7ed8e7b8c1597020d8f992911db073953e0d49",
+        "lawId": "ulg:polytope-eos:FCs:solid",
+        "sourceHash": "sha256:eshkol-law:541da67ecbd6766e727449b63e56fe720b46ce983e5f0a42fed1ed2cd54b95a4",
         "domainHash": "dom:544f4289d7548002",
-        "surrogateRelativeBound": 0.000010142758635597832,
-        "sampleDensityAtMidpointKgM3": 4874.269566911124
+        "surrogateRelativeBound": 0.00002498215082683331,
+        "sampleDensityAtMidpointKgM3": 1788.6580184439606
       }
     },
     {
@@ -39396,17 +39454,34 @@
       "atomicNumber": null,
       "formula": "NaCl",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:ce9c28ca",
+      "closureHash": "ulg:40c193ff",
       "nuclear": {
         "totalProtonsZ": 28,
         "totalNucleonsA": 60,
         "molarMassU": 58.44,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 517.7486845700212,
         "maxNuclearRadiusFm": 3.604524945226538,
         "stoichiometry": {
           "Na": 1,
           "Cl": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 11,
+            "symbol": "Na",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 22.99
+          },
+          {
+            "Z": 17,
+            "symbol": "Cl",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 35.45
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -39424,12 +39499,12 @@
       "mechanical": {
         "crystalStructure": "cscl-B2",
         "spaceGroup": "Pm-3m (221)",
-        "latticeConstantA": 6.710932496993501,
-        "densityKgPerM3": 1284.3124274439738,
+        "latticeConstantA": 8.20498228726714,
+        "densityKgPerM3": 702.7265347338966,
         "cohesiveEnergyEv": 6.28838993039843,
-        "bulkModulusPa": 11852465912.220177,
-        "shearModulusPa": 5215085001.376878,
-        "debyeTemperatureK": 364.54425722094584
+        "bulkModulusPa": 8000000000,
+        "shearModulusPa": 3520000000,
+        "debyeTemperatureK": 404.8862825345543
       },
       "thermodynamic": {
         "temperatureK": 300,
@@ -39441,16 +39516,16 @@
         "latentHeatVaporizationJPerKg": 9551649.54960543,
         "meltingSlopeKPerLogP": 18,
         "boilingSlopeKPerLogP": 118.76513520130055,
-        "liquidDensityKgPerM3": 1181.567433248456,
+        "liquidDensityKgPerM3": 646.5084119551849,
         "dynamicViscosityLiquidPaS": 0.0024198589857651787,
-        "surfaceTensionNPerM": 0.7465244415426064,
+        "surfaceTensionNPerM": 0.49940682869716047,
         "thermalConductivityWPerMK": 6.5,
         "mdTempK": null,
         "mdEnergyEv": null
       },
       "polytopes": [
         {
-          "polytopeId": "nacl:solid:12626243",
+          "polytopeId": "nacl:solid:e7333631",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -39514,7 +39589,7 @@
           ]
         },
         {
-          "polytopeId": "nacl:liquid:12626243",
+          "polytopeId": "nacl:liquid:e7333631",
           "phase": "liquid",
           "tRangeK": [
             1229.2492381002623,
@@ -39588,7 +39663,7 @@
           ]
         },
         {
-          "polytopeId": "nacl:gas:12626243",
+          "polytopeId": "nacl:gas:e7333631",
           "phase": "gas",
           "tRangeK": [
             1503.886258979267,
@@ -39652,7 +39727,7 @@
           ]
         },
         {
-          "polytopeId": "nacl:plasma:12626243",
+          "polytopeId": "nacl:plasma:e7333631",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -39708,29 +39783,46 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:NaCl:solid",
-        "sourceHash": "sha256:eshkol-law:3e42f90d170734473f8a1d2a823ad111b8987666b0ee993a45894a6cdfb49ad6",
+        "sourceHash": "sha256:eshkol-law:f588649d8ba2c678caa9658c233b3ae84198323697eb359120897a7e52ea3d8c",
         "domainHash": "dom:d35bb26b85e71308",
-        "surrogateRelativeBound": 0.00003086304977722578,
-        "sampleDensityAtMidpointKgM3": 1263.4740254304866
+        "surrogateRelativeBound": 0.000041119817439517785,
+        "sampleDensityAtMidpointKgM3": 691.3274057635197
       }
     },
     {
-      "materialKey": "FeO",
+      "materialKey": "OFe",
       "family": "compound",
       "atomicNumber": null,
       "formula": "FeO",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:94fe3f30",
+      "closureHash": "ulg:eb2cbb83",
       "nuclear": {
         "totalProtonsZ": 34,
         "totalNucleonsA": 72,
         "molarMassU": 71.844,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 634.4896358833787,
         "maxNuclearRadiusFm": 4.024353586562254,
         "stoichiometry": {
           "O": 1,
           "Fe": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 26,
+            "symbol": "Fe",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 55.845
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -39748,12 +39840,12 @@
       "mechanical": {
         "crystalStructure": "cscl-B2",
         "spaceGroup": "Pm-3m (221)",
-        "latticeConstantA": 5.924625007965236,
-        "densityKgPerM3": 2294.6528445842287,
+        "latticeConstantA": 8.133126116242478,
+        "densityKgPerM3": 887.0070526103917,
         "cohesiveEnergyEv": 7.122975763181862,
-        "bulkModulusPa": 19511772652.1732,
-        "shearModulusPa": 8585179966.956207,
-        "debyeTemperatureK": 349.921892156573
+        "bulkModulusPa": 8000000000,
+        "shearModulusPa": 3520000000,
+        "debyeTemperatureK": 360.3816779814805
       },
       "thermodynamic": {
         "temperatureK": 300,
@@ -39765,16 +39857,16 @@
         "latentHeatVaporizationJPerKg": 8800758.137625111,
         "meltingSlopeKPerLogP": 18,
         "boilingSlopeKPerLogP": 131.59589815841048,
-        "liquidDensityKgPerM3": 2111.0806170174906,
+        "liquidDensityKgPerM3": 816.0464884015604,
         "dynamicViscosityLiquidPaS": 0.0024198589857651787,
-        "surfaceTensionNPerM": 1.0849507898642352,
+        "surfaceTensionNPerM": 0.5757272181024365,
         "thermalConductivityWPerMK": 6.5,
         "mdTempK": null,
         "mdEnergyEv": null
       },
       "polytopes": [
         {
-          "polytopeId": "feo:solid:e4c31e4b",
+          "polytopeId": "ofe:solid:11209fa0",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -39838,7 +39930,7 @@
           ]
         },
         {
-          "polytopeId": "feo:liquid:e4c31e4b",
+          "polytopeId": "ofe:liquid:11209fa0",
           "phase": "liquid",
           "tRangeK": [
             1383.6476171651973,
@@ -39912,7 +40004,7 @@
           ]
         },
         {
-          "polytopeId": "feo:gas:e4c31e4b",
+          "polytopeId": "ofe:gas:11209fa0",
           "phase": "gas",
           "tRangeK": [
             1689.1982712532945,
@@ -39976,7 +40068,7 @@
           ]
         },
         {
-          "polytopeId": "feo:plasma:e4c31e4b",
+          "polytopeId": "ofe:plasma:11209fa0",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -40031,11 +40123,11 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:FeO:solid",
-        "sourceHash": "sha256:eshkol-law:a813a33af8918fbc59a8d87fe6e0e7eda9654f6c213f2b7a1ee9301c43a41a56",
+        "lawId": "ulg:polytope-eos:OFe:solid",
+        "sourceHash": "sha256:eshkol-law:5487a50e00ff5c3be1e2e56536ee6a97c1b9c491808de886e149e66591db0e07",
         "domainHash": "dom:5e1b51f4945eae99",
-        "surrogateRelativeBound": 0.000020374629610620643,
-        "sampleDensityAtMidpointKgM3": 2249.619318023689
+        "surrogateRelativeBound": 0.000041119817439792204,
+        "sampleDensityAtMidpointKgM3": 869.6056643416426
       }
     },
     {
@@ -40044,17 +40136,34 @@
       "atomicNumber": null,
       "formula": "CO2",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:86ad9da2",
+      "closureHash": "ulg:a0a7c02b",
       "nuclear": {
         "totalProtonsZ": 22,
         "totalNucleonsA": 46,
         "molarMassU": 44.009,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 377.7531601234276,
         "maxNuclearRadiusFm": 2.9481655013105037,
         "stoichiometry": {
           "C": 1,
           "O": 2
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 6,
+            "symbol": "C",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 12.011
+          },
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 15.999
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -40098,7 +40207,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "co2:solid:e30a59b0",
+          "polytopeId": "co2:solid:ec55e4ff",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -40162,7 +40271,7 @@
           ]
         },
         {
-          "polytopeId": "co2:liquid:e30a59b0",
+          "polytopeId": "co2:liquid:ec55e4ff",
           "phase": "liquid",
           "tRangeK": [
             55.4478651525957,
@@ -40236,7 +40345,7 @@
           ]
         },
         {
-          "polytopeId": "co2:gas:e30a59b0",
+          "polytopeId": "co2:gas:ec55e4ff",
           "phase": "gas",
           "tRangeK": [
             74.27112887305114,
@@ -40300,7 +40409,7 @@
           ]
         },
         {
-          "polytopeId": "co2:plasma:e30a59b0",
+          "polytopeId": "co2:plasma:ec55e4ff",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -40356,29 +40465,46 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:CO2:solid",
-        "sourceHash": "sha256:eshkol-law:2e5bb358a4396d24566add7ee2ace147d5cae34f37185d596ce152ed1d406acc",
+        "sourceHash": "sha256:eshkol-law:3550c1ce026aa800898e34b7c9fe485c298f67d6b52da3e494f1a71e8fc65b06",
         "domainHash": "dom:129a31aad51b9faf",
         "surrogateRelativeBound": 0.00005782187437155814,
         "sampleDensityAtMidpointKgM3": 4489.6943123385545
       }
     },
     {
-      "materialKey": "NH3",
+      "materialKey": "H3N",
       "family": "compound",
       "atomicNumber": null,
       "formula": "NH3",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:4d7c3d17",
+      "closureHash": "ulg:5194816c",
       "nuclear": {
         "totalProtonsZ": 10,
         "totalNucleonsA": 18,
         "molarMassU": 17.031,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 121.42287611620763,
         "maxNuclearRadiusFm": 2.9069646926730908,
         "stoichiometry": {
           "H": 3,
           "N": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 3,
+            "atomicMassU": 1.008
+          },
+          {
+            "Z": 7,
+            "symbol": "N",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 14.007
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -40422,7 +40548,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "nh3:solid:26008ee8",
+          "polytopeId": "h3n:solid:c03ec356",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -40486,7 +40612,7 @@
           ]
         },
         {
-          "polytopeId": "nh3:liquid:26008ee8",
+          "polytopeId": "h3n:liquid:c03ec356",
           "phase": "liquid",
           "tRangeK": [
             193.60131453406728,
@@ -40560,7 +40686,7 @@
           ]
         },
         {
-          "polytopeId": "nh3:gas:26008ee8",
+          "polytopeId": "h3n:gas:c03ec356",
           "phase": "gas",
           "tRangeK": [
             179.45546781632038,
@@ -40624,7 +40750,7 @@
           ]
         },
         {
-          "polytopeId": "nh3:plasma:26008ee8",
+          "polytopeId": "h3n:plasma:c03ec356",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -40679,8 +40805,8 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:NH3:solid",
-        "sourceHash": "sha256:eshkol-law:f054b5bd8566dfc9e67c085efa168bc2efe6e602fbce93f0ef70e246c12279fa",
+        "lawId": "ulg:polytope-eos:H3N:solid",
+        "sourceHash": "sha256:eshkol-law:5e3ab01ea7a587a8fc03cca45fc1fd1b6208bb200a70d7bf5604920b3e620f41",
         "domainHash": "dom:b67677c614980593",
         "surrogateRelativeBound": 0.00003794599419699041,
         "sampleDensityAtMidpointKgM3": 1732.204143107678
@@ -40692,17 +40818,34 @@
       "atomicNumber": null,
       "formula": "HF",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:23a00bfd",
+      "closureHash": "ulg:3d5c8f99",
       "nuclear": {
         "totalProtonsZ": 10,
         "totalNucleonsA": 20,
         "molarMassU": 20.006,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 157.45943415963512,
         "maxNuclearRadiusFm": 3.063927220246216,
         "stoichiometry": {
           "H": 1,
           "F": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 1.008
+          },
+          {
+            "Z": 9,
+            "symbol": "F",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 18.998
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -40746,7 +40889,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "hf:solid:b29be18f",
+          "polytopeId": "hf:solid:3f0abdda",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -40810,7 +40953,7 @@
           ]
         },
         {
-          "polytopeId": "hf:liquid:b29be18f",
+          "polytopeId": "hf:liquid:3f0abdda",
           "phase": "liquid",
           "tRangeK": [
             109.22751434198886,
@@ -40884,7 +41027,7 @@
           ]
         },
         {
-          "polytopeId": "hf:gas:b29be18f",
+          "polytopeId": "hf:gas:3f0abdda",
           "phase": "gas",
           "tRangeK": [
             115.21673590576196,
@@ -40948,7 +41091,7 @@
           ]
         },
         {
-          "polytopeId": "hf:plasma:b29be18f",
+          "polytopeId": "hf:plasma:3f0abdda",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -41004,29 +41147,46 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:HF:solid",
-        "sourceHash": "sha256:eshkol-law:a9a0ae74e1662abe5b919cba5827077399d2d7c6110df438c2203aafe00a43bf",
+        "sourceHash": "sha256:eshkol-law:0df6183e253dc35a105b5275677603f9b26f02999a3d36f58bdd5ddde3a618cc",
         "domainHash": "dom:63243934b6d08cf9",
         "surrogateRelativeBound": 0.000049893013161950816,
         "sampleDensityAtMidpointKgM3": 2038.553345256285
       }
     },
     {
-      "materialKey": "MgO",
+      "materialKey": "OMg",
       "family": "compound",
       "atomicNumber": null,
       "formula": "MgO",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:4fdf9031",
+      "closureHash": "ulg:18845dae",
       "nuclear": {
         "totalProtonsZ": 20,
         "totalNucleonsA": 42,
         "molarMassU": 40.304,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 354.20257432084037,
         "maxNuclearRadiusFm": 3.2992662215688715,
         "stoichiometry": {
           "O": 1,
           "Mg": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 12,
+            "symbol": "Mg",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 24.305
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -41044,11 +41204,11 @@
       "mechanical": {
         "crystalStructure": "cscl-B2",
         "spaceGroup": "Pm-3m (221)",
-        "latticeConstantA": 5.2656010916176035,
-        "densityKgPerM3": 1833.6370437718447,
+        "latticeConstantA": 7.088633526421219,
+        "densityKgPerM3": 751.5703971223252,
         "cohesiveEnergyEv": 8.014462091489978,
-        "bulkModulusPa": 31271475744.444637,
-        "shearModulusPa": 13759449327.555641,
+        "bulkModulusPa": 12817539612.696548,
+        "shearModulusPa": 5639717429.586481,
         "debyeTemperatureK": 495.5628561569258
       },
       "thermodynamic": {
@@ -41061,16 +41221,16 @@
         "latentHeatVaporizationJPerKg": 17651245.378923215,
         "meltingSlopeKPerLogP": 18,
         "boilingSlopeKPerLogP": 145.32942810680805,
-        "liquidDensityKgPerM3": 1686.9460802700971,
+        "liquidDensityKgPerM3": 691.4447653525392,
         "dynamicViscosityLiquidPaS": 0.0024198589857651787,
-        "surfaceTensionNPerM": 1.5454280038269634,
+        "surfaceTensionNPerM": 0.8527458973797154,
         "thermalConductivityWPerMK": 6.5,
         "mdTempK": null,
         "mdEnergyEv": null
       },
       "polytopes": [
         {
-          "polytopeId": "mgo:solid:d15ef288",
+          "polytopeId": "omg:solid:d545dd0b",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -41134,7 +41294,7 @@
           ]
         },
         {
-          "polytopeId": "mgo:liquid:d15ef288",
+          "polytopeId": "omg:liquid:d545dd0b",
           "phase": "liquid",
           "tRangeK": [
             1548.5725879021988,
@@ -41208,7 +41368,7 @@
           ]
         },
         {
-          "polytopeId": "mgo:gas:d15ef288",
+          "polytopeId": "omg:gas:d545dd0b",
           "phase": "gas",
           "tRangeK": [
             1887.0603797089666,
@@ -41272,7 +41432,7 @@
           ]
         },
         {
-          "polytopeId": "mgo:plasma:d15ef288",
+          "polytopeId": "omg:plasma:d545dd0b",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -41327,30 +41487,47 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:MgO:solid",
-        "sourceHash": "sha256:eshkol-law:afe9bb88f109c1d171ed7cf16cebec2ee6f6f8921c3a4e58c92813432184d1c9",
+        "lawId": "ulg:polytope-eos:OMg:solid",
+        "sourceHash": "sha256:eshkol-law:838aff5652682b8a80b92a08d478942a1dfca10ee3251baf710337285cf72f33",
         "domainHash": "dom:88adeeb9c23f2e86",
-        "surrogateRelativeBound": 0.000013327103131180799,
-        "sampleDensityAtMidpointKgM3": 1790.9945382593564
+        "surrogateRelativeBound": 0.000029004763172243397,
+        "sampleDensityAtMidpointKgM3": 734.0955289851468
       }
     },
     {
-      "materialKey": "SiO2",
+      "materialKey": "O2Si",
       "family": "compound",
       "atomicNumber": null,
       "formula": "SiO2",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:28a605e3",
+      "closureHash": "ulg:707f5066",
       "nuclear": {
         "totalProtonsZ": 30,
         "totalNucleonsA": 64,
         "molarMassU": 60.083,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 543.7442235189152,
         "maxNuclearRadiusFm": 3.4734346137461616,
         "stoichiometry": {
           "O": 2,
           "Si": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 14,
+            "symbol": "Si",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 28.085
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -41394,7 +41571,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "sio2:solid:a49790cf",
+          "polytopeId": "o2si:solid:e66c273e",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -41458,7 +41635,7 @@
           ]
         },
         {
-          "polytopeId": "sio2:liquid:a49790cf",
+          "polytopeId": "o2si:liquid:e66c273e",
           "phase": "liquid",
           "tRangeK": [
             93.57341047197642,
@@ -41532,7 +41709,7 @@
           ]
         },
         {
-          "polytopeId": "sio2:gas:a49790cf",
+          "polytopeId": "o2si:gas:e66c273e",
           "phase": "gas",
           "tRangeK": [
             103.29834679069904,
@@ -41596,7 +41773,7 @@
           ]
         },
         {
-          "polytopeId": "sio2:plasma:a49790cf",
+          "polytopeId": "o2si:plasma:e66c273e",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -41651,30 +41828,47 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:SiO2:solid",
-        "sourceHash": "sha256:eshkol-law:0b2f68df00422930c4a9e51863224dd6be44b8671c5e360af64d475dcb555720",
+        "lawId": "ulg:polytope-eos:O2Si:solid",
+        "sourceHash": "sha256:eshkol-law:170b675213bb2a5bbdb5eb886539b83f64b6cf5704dbd2dc9dc534d523e2c6cd",
         "domainHash": "dom:15362e13863a001c",
         "surrogateRelativeBound": 0.0000712507189939753,
         "sampleDensityAtMidpointKgM3": 1301.8846058244546
       }
     },
     {
-      "materialKey": "CH4",
+      "materialKey": "H4C",
       "family": "compound",
       "atomicNumber": null,
       "formula": "CH4",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:8dba8faa",
+      "closureHash": "ulg:6bc03675",
       "nuclear": {
         "totalProtonsZ": 10,
         "totalNucleonsA": 18,
         "molarMassU": 16.043,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 110.58891560298798,
         "maxNuclearRadiusFm": 2.8642493685042094,
         "stoichiometry": {
           "H": 4,
           "C": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 4,
+            "atomicMassU": 1.008
+          },
+          {
+            "Z": 6,
+            "symbol": "C",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 12.011
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -41718,7 +41912,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "ch4:solid:7a3d52b4",
+          "polytopeId": "h4c:solid:372c22db",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -41782,7 +41976,7 @@
           ]
         },
         {
-          "polytopeId": "ch4:liquid:7a3d52b4",
+          "polytopeId": "h4c:liquid:372c22db",
           "phase": "liquid",
           "tRangeK": [
             6.651493963707061,
@@ -41856,7 +42050,7 @@
           ]
         },
         {
-          "polytopeId": "ch4:gas:7a3d52b4",
+          "polytopeId": "h4c:gas:372c22db",
           "phase": "gas",
           "tRangeK": [
             37.119584200710875,
@@ -41920,7 +42114,7 @@
           ]
         },
         {
-          "polytopeId": "ch4:plasma:7a3d52b4",
+          "polytopeId": "h4c:plasma:372c22db",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -41975,8 +42169,8 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:CH4:solid",
-        "sourceHash": "sha256:eshkol-law:515dfd4f7ea8b8b480fba9d34ffc5978fba5f477d553d557bbcb1c59651ca5bd",
+        "lawId": "ulg:polytope-eos:H4C:solid",
+        "sourceHash": "sha256:eshkol-law:a5da508172d7cef6099e012072a46044a94ebf462bc3fd59fc3171c4de1dd174",
         "domainHash": "dom:2fde4433ef6d93cc",
         "surrogateRelativeBound": 0.00005178961738863781,
         "sampleDensityAtMidpointKgM3": 1638.4251894993217
@@ -41988,16 +42182,26 @@
       "atomicNumber": null,
       "formula": "H2",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:9bc4be42",
+      "closureHash": "ulg:482bfaf1",
       "nuclear": {
         "totalProtonsZ": 2,
         "totalNucleonsA": 2,
         "molarMassU": 2.016,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 0,
         "maxNuclearRadiusFm": 0.8414,
         "stoichiometry": {
           "H": 2
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 1.008
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -42041,7 +42245,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "h2:solid:bc130336",
+          "polytopeId": "h2:solid:1905ca99",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -42105,7 +42309,7 @@
           ]
         },
         {
-          "polytopeId": "h2:liquid:bc130336",
+          "polytopeId": "h2:liquid:1905ca99",
           "phase": "liquid",
           "tRangeK": [
             1,
@@ -42179,7 +42383,7 @@
           ]
         },
         {
-          "polytopeId": "h2:gas:bc130336",
+          "polytopeId": "h2:gas:1905ca99",
           "phase": "gas",
           "tRangeK": [
             3.829879122423666,
@@ -42243,7 +42447,7 @@
           ]
         },
         {
-          "polytopeId": "h2:plasma:bc130336",
+          "polytopeId": "h2:plasma:1905ca99",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -42299,7 +42503,7 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:H2:solid",
-        "sourceHash": "sha256:eshkol-law:4b0662fc4b4642d488936fffa8e909d8d2f93da5e9392b66651fa70be0f72e91",
+        "sourceHash": "sha256:eshkol-law:7526cb71a73fa3221f9a8192c70baaef2e6b8de271e4a6f6e145f92751721963",
         "domainHash": "dom:b0b700d4f013de81",
         "surrogateRelativeBound": 0.0006121743256998697,
         "sampleDensityAtMidpointKgM3": 206.09015469440905
@@ -42311,16 +42515,26 @@
       "atomicNumber": null,
       "formula": "O2",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:8cbee82c",
+      "closureHash": "ulg:f88cc41d",
       "nuclear": {
         "totalProtonsZ": 16,
         "totalNucleonsA": 32,
         "molarMassU": 31.998,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 267.16424452043964,
         "maxNuclearRadiusFm": 2.9481655013105037,
         "stoichiometry": {
           "O": 2
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 15.999
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -42364,7 +42578,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "o2:solid:d05297b3",
+          "polytopeId": "o2:solid:fab22bb8",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -42428,7 +42642,7 @@
           ]
         },
         {
-          "polytopeId": "o2:liquid:d05297b3",
+          "polytopeId": "o2:liquid:fab22bb8",
           "phase": "liquid",
           "tRangeK": [
             24.828132495335062,
@@ -42502,7 +42716,7 @@
           ]
         },
         {
-          "polytopeId": "o2:gas:d05297b3",
+          "polytopeId": "o2:gas:fab22bb8",
           "phase": "gas",
           "tRangeK": [
             50.95852717839132,
@@ -42566,7 +42780,7 @@
           ]
         },
         {
-          "polytopeId": "o2:plasma:d05297b3",
+          "polytopeId": "o2:plasma:fab22bb8",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -42622,7 +42836,7 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:O2:solid",
-        "sourceHash": "sha256:eshkol-law:d5ccf3e1e3d17f846b69d00af59b3fe3c653006fe2d7946be4b46d7ab95af9d8",
+        "sourceHash": "sha256:eshkol-law:3583fd6a0dd34568beaeb66494df940ab2b42e569238a90706b5f170b0946276",
         "domainHash": "dom:3892d0cb6ee0c290",
         "surrogateRelativeBound": 0.00005732522131183031,
         "sampleDensityAtMidpointKgM3": 3266.579218499348
@@ -42634,16 +42848,26 @@
       "atomicNumber": null,
       "formula": "N2",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:756d1cc8",
+      "closureHash": "ulg:e39373be",
       "nuclear": {
         "totalProtonsZ": 14,
         "totalNucleonsA": 30,
         "molarMassU": 28.014,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 242.84575223241526,
         "maxNuclearRadiusFm": 2.9069646926730908,
         "stoichiometry": {
           "N": 2
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 7,
+            "symbol": "N",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 14.007
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -42687,7 +42911,7 @@
       },
       "polytopes": [
         {
-          "polytopeId": "n2:solid:d663b6d0",
+          "polytopeId": "n2:solid:4b5b0676",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -42751,7 +42975,7 @@
           ]
         },
         {
-          "polytopeId": "n2:liquid:d663b6d0",
+          "polytopeId": "n2:liquid:4b5b0676",
           "phase": "liquid",
           "tRangeK": [
             18.71748629655334,
@@ -42825,7 +43049,7 @@
           ]
         },
         {
-          "polytopeId": "n2:gas:d663b6d0",
+          "polytopeId": "n2:gas:4b5b0676",
           "phase": "gas",
           "tRangeK": [
             46.30613316425199,
@@ -42889,7 +43113,7 @@
           ]
         },
         {
-          "polytopeId": "n2:plasma:d663b6d0",
+          "polytopeId": "n2:plasma:4b5b0676",
           "phase": "plasma",
           "tRangeK": [
             6500,
@@ -42945,30 +43169,54 @@
       ],
       "eshkolSolidLaw": {
         "lawId": "ulg:polytope-eos:N2:solid",
-        "sourceHash": "sha256:eshkol-law:427804496abbc1a86cbcd0c8548d7c96e7a8ae1774d102e585190da8836bf138",
+        "sourceHash": "sha256:eshkol-law:041a7df8b61b775ef363703a2707868e8957b02afe92c0dd46ab00f102a7a6bf",
         "domainHash": "dom:faec68fabf32dd2b",
         "surrogateRelativeBound": 0.00005696530686826105,
         "sampleDensityAtMidpointKgM3": 2860.2566455070987
       }
     },
     {
-      "materialKey": "LiOH",
+      "materialKey": "HLiO",
       "family": "compound",
       "atomicNumber": null,
       "formula": "LiOH",
       "accuracyTier": "tier-2-representative-effective",
-      "closureHash": "ulg:6c413b60",
+      "closureHash": "ulg:1c63d328",
       "nuclear": {
         "totalProtonsZ": 12,
         "totalNucleonsA": 24,
         "molarMassU": 23.947000000000003,
+        "isotopeMassRatio": 1,
         "totalBindingEnergyMeV": 178.54151825091333,
         "maxNuclearRadiusFm": 2.9481655013105037,
         "stoichiometry": {
           "H": 1,
           "Li": 1,
           "O": 1
-        }
+        },
+        "isotopologueSites": [
+          {
+            "Z": 1,
+            "symbol": "H",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 1.008
+          },
+          {
+            "Z": 3,
+            "symbol": "Li",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 6.94
+          },
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 15.999
+          }
+        ]
       },
       "electromagnetic": {
         "isMetal": false,
@@ -42986,11 +43234,11 @@
       "mechanical": {
         "crystalStructure": "cscl-B2",
         "spaceGroup": "Pm-3m (221)",
-        "latticeConstantA": 3.914867641168864,
-        "densityKgPerM3": 2650.995269440807,
+        "latticeConstantA": 4.928780586711889,
+        "densityKgPerM3": 1328.4393991592417,
         "cohesiveEnergyEv": 13.619755854875207,
-        "bulkModulusPa": 129311138319.79703,
-        "shearModulusPa": 56896900860.71069,
+        "bulkModulusPa": 64799063534.49809,
+        "shearModulusPa": 28511587955.17916,
         "debyeTemperatureK": 838.0978703031482
       },
       "thermodynamic": {
@@ -43003,16 +43251,16 @@
         "latentHeatVaporizationJPerKg": 50485577.88985459,
         "meltingSlopeKPerLogP": 18,
         "boilingSlopeKPerLogP": 231.98596696314362,
-        "liquidDensityKgPerM3": 2438.9156478855425,
+        "liquidDensityKgPerM3": 1222.1642472265023,
         "dynamicViscosityLiquidPaS": 0.0024198589857651787,
-        "surfaceTensionNPerM": 4.751223541986408,
+        "surfaceTensionNPerM": 2.9975101384457212,
         "thermalConductivityWPerMK": 6.5,
         "mdTempK": null,
         "mdEnergyEv": null
       },
       "polytopes": [
         {
-          "polytopeId": "lioh:solid:5479037a",
+          "polytopeId": "hlio:solid:76342ab1",
           "phase": "solid",
           "tRangeK": [
             1,
@@ -43076,7 +43324,7 @@
           ]
         },
         {
-          "polytopeId": "lioh:liquid:5479037a",
+          "polytopeId": "hlio:liquid:76342ab1",
           "phase": "liquid",
           "tRangeK": [
             2585.551934128466,
@@ -43150,7 +43398,7 @@
           ]
         },
         {
-          "polytopeId": "lioh:gas:5479037a",
+          "polytopeId": "hlio:gas:76342ab1",
           "phase": "gas",
           "tRangeK": [
             3130.2154333222907,
@@ -43214,7 +43462,7 @@
           ]
         },
         {
-          "polytopeId": "lioh:plasma:5479037a",
+          "polytopeId": "hlio:plasma:76342ab1",
           "phase": "plasma",
           "tRangeK": [
             9568.748770175685,
@@ -43269,11 +43517,1708 @@
         }
       ],
       "eshkolSolidLaw": {
-        "lawId": "ulg:polytope-eos:LiOH:solid",
-        "sourceHash": "sha256:eshkol-law:e86cc27807588712e57fa9d89717ee1039955aa8958161c6401165919c370e42",
+        "lawId": "ulg:polytope-eos:HLiO:solid",
+        "sourceHash": "sha256:eshkol-law:4ea4aa30861fb59e849bd4a45c8881a555c503c09599d561fa2b7fab1591b5d2",
         "domainHash": "dom:eeb34ac4d2636909",
-        "surrogateRelativeBound": 0.0000034160612519677804,
-        "sampleDensityAtMidpointKgM3": 2528.8595197576683
+        "surrogateRelativeBound": 0.0000066930590543341725,
+        "sampleDensityAtMidpointKgM3": 1267.2369809226527
+      }
+    },
+    {
+      "materialKey": "O3Al2",
+      "family": "compound",
+      "atomicNumber": null,
+      "formula": "Al2O3",
+      "accuracyTier": "tier-2-representative-effective",
+      "closureHash": "ulg:4e52ccbe",
+      "nuclear": {
+        "totalProtonsZ": 50,
+        "totalNucleonsA": 102,
+        "molarMassU": 101.961,
+        "isotopeMassRatio": 1,
+        "totalBindingEnergyMeV": 855.6060012812212,
+        "maxNuclearRadiusFm": 3.329794622963374,
+        "stoichiometry": {
+          "O": 3,
+          "Al": 2
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 3,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 13,
+            "symbol": "Al",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 26.982
+          }
+        ]
+      },
+      "electromagnetic": {
+        "isMetal": true,
+        "bandGapEv": 0,
+        "electricalConductivitySPerM": 1000000,
+        "staticDielectricConstant": null,
+        "magneticPhase": "diamagnetic",
+        "opticalSrgb": [
+          0.85,
+          0.9,
+          0.96
+        ],
+        "refractiveIndex550Nm": 19.026297590440446
+      },
+      "mechanical": {
+        "crystalStructure": "fcc-alloy",
+        "spaceGroup": "Fm-3m (225)",
+        "latticeConstantA": 6.630854286255372,
+        "densityKgPerM3": 2322.922508137122,
+        "cohesiveEnergyEv": 3.2,
+        "bulkModulusPa": 90000000000,
+        "shearModulusPa": 40000000000,
+        "debyeTemperatureK": 320
+      },
+      "thermodynamic": {
+        "temperatureK": 300,
+        "heatCapacityCvJPerKgK": 1125.3281561420545,
+        "heatCapacityCpJPerKgK": 1223.1827784152765,
+        "meltingPointK": 1250,
+        "boilingPointK": 2600,
+        "latentHeatFusionJPerKg": 142704.65748178225,
+        "latentHeatVaporizationJPerKg": 2785896.742588095,
+        "meltingSlopeKPerLogP": 18,
+        "boilingSlopeKPerLogP": 455.61442739939537,
+        "liquidDensityKgPerM3": 2137.088707486152,
+        "dynamicViscosityLiquidPaS": 0.0024198589857651787,
+        "surfaceTensionNPerM": 0.3891179973919174,
+        "thermalConductivityWPerMK": 45,
+        "mdTempK": null,
+        "mdEnergyEv": null
+      },
+      "polytopes": [
+        {
+          "polytopeId": "o3al2:solid:49155be6",
+          "phase": "solid",
+          "tRangeK": [
+            1,
+            1339.8971009765528
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1,
+              "scale": 1338.8971009765528,
+              "label": "T >= 1.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 1339.8971009765528,
+              "scale": 1338.8971009765528,
+              "label": "T <= 1339.90 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                1,
+                -18
+              ],
+              "b": 1159.8971009765528,
+              "scale": 1346.6185231918566,
+              "label": "T <= T_m(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o3al2:liquid:49155be6",
+          "phase": "liquid",
+          "tRangeK": [
+            1195.8971009765528,
+            4875.46756590543
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1195.8971009765528,
+              "scale": 3679.5704649288773,
+              "label": "T >= 1195.90 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 4875.46756590543,
+              "scale": 3679.5704649288773,
+              "label": "T <= 4875.47 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                -1,
+                18
+              ],
+              "b": -1159.8971009765528,
+              "scale": 3682.387107078357,
+              "label": "T >= T_m(P)"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                1,
+                -455.61442739939537
+              ],
+              "b": 319.3232919114771,
+              "scale": 5179.251608047592,
+              "label": "T <= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o3al2:gas:49155be6",
+          "phase": "gas",
+          "tRangeK": [
+            1230.5521467102676,
+            6500
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1230.5521467102676,
+              "scale": 5269.447853289732,
+              "label": "T >= 1230.55 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 6500,
+              "scale": 5269.447853289732,
+              "label": "T <= 6500.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                -1,
+                455.61442739939537
+              ],
+              "b": -319.3232919114771,
+              "scale": 6407.221635906348,
+              "label": "T >= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o3al2:plasma:49155be6",
+          "phase": "plasma",
+          "tRangeK": [
+            6500,
+            65000
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -6500,
+              "scale": 58500,
+              "label": "T >= 6500.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 65000,
+              "scale": 58500,
+              "label": "T <= 65000.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            }
+          ]
+        }
+      ],
+      "eshkolSolidLaw": {
+        "lawId": "ulg:polytope-eos:O3Al2:solid",
+        "sourceHash": "sha256:eshkol-law:8e7eaf2b32be5d72b9cd48c4c8a3b8694c3e96ff95b07e5d040b14d1bcc4714a",
+        "domainHash": "dom:b6bc74243d7f28ad",
+        "surrogateRelativeBound": 0.00000486888742527725,
+        "sampleDensityAtMidpointKgM3": 2286.919783944273
+      }
+    },
+    {
+      "materialKey": "Cl2",
+      "family": "compound",
+      "atomicNumber": null,
+      "formula": "Cl2",
+      "accuracyTier": "tier-2-representative-effective",
+      "closureHash": "ulg:dcd1d458",
+      "nuclear": {
+        "totalProtonsZ": 34,
+        "totalNucleonsA": 74,
+        "molarMassU": 70.9,
+        "isotopeMassRatio": 1,
+        "totalBindingEnergyMeV": 653.2394504077728,
+        "maxNuclearRadiusFm": 3.604524945226538,
+        "stoichiometry": {
+          "Cl": 2
+        },
+        "isotopologueSites": [
+          {
+            "Z": 17,
+            "symbol": "Cl",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 35.45
+          }
+        ]
+      },
+      "electromagnetic": {
+        "isMetal": false,
+        "bandGapEv": 5.5,
+        "electricalConductivitySPerM": 1e-16,
+        "staticDielectricConstant": 3.9834710743801653,
+        "magneticPhase": "diamagnetic",
+        "opticalSrgb": [
+          0.85,
+          0.9,
+          0.96
+        ],
+        "refractiveIndex550Nm": 1.9958634909181954
+      },
+      "mechanical": {
+        "crystalStructure": "molecular-fcc",
+        "spaceGroup": "P1 (molecular)",
+        "latticeConstantA": 5.14661660919802,
+        "densityKgPerM3": 3454.537189817895,
+        "cohesiveEnergyEv": 0.2580159389618865,
+        "bulkModulusPa": 2183353083.664024,
+        "shearModulusPa": 0,
+        "debyeTemperatureK": 117.61859873022101
+      },
+      "thermodynamic": {
+        "temperatureK": 300,
+        "heatCapacityCvJPerKgK": 647.3319273816643,
+        "heatCapacityCpJPerKgK": 703.6216601974612,
+        "meltingPointK": 130.6873319224678,
+        "boilingPointK": 259.3203496233886,
+        "latentHeatFusionJPerKg": 21456.03540594814,
+        "latentHeatVaporizationJPerKg": 323034.884044255,
+        "meltingSlopeKPerLogP": 18,
+        "boilingSlopeKPerLogP": 56.21178957374018,
+        "liquidDensityKgPerM3": 3178.1742146324636,
+        "dynamicViscosityLiquidPaS": 0.0008761948858659575,
+        "surfaceTensionNPerM": 0.05208026788599513,
+        "thermalConductivityWPerMK": 0.45,
+        "mdTempK": null,
+        "mdEnergyEv": null
+      },
+      "polytopes": [
+        {
+          "polytopeId": "cl2:solid:584c3bf6",
+          "phase": "solid",
+          "tRangeK": [
+            1,
+            220.58443289902064
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1,
+              "scale": 219.58443289902064,
+              "label": "T >= 1.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 220.58443289902064,
+              "scale": 219.58443289902064,
+              "label": "T <= 220.58 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                1,
+                -18
+              ],
+              "b": 40.58443289902064,
+              "scale": 262.58964787589116,
+              "label": "T <= T_m(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "cl2:liquid:584c3bf6",
+          "phase": "liquid",
+          "tRangeK": [
+            76.58443289902064,
+            540.0579564780141
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -76.58443289902064,
+              "scale": 463.47352357899354,
+              "label": "T >= 76.58 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 540.0579564780141,
+              "scale": 463.47352357899354,
+              "label": "T <= 540.06 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                -1,
+                18
+              ],
+              "b": -40.58443289902064,
+              "scale": 485.32845276032174,
+              "label": "T >= T_m(P)"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                1,
+                -56.21178957374018
+              ],
+              "b": -22.059939259387534,
+              "scale": 645.7806790482388,
+              "label": "T <= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "cl2:gas:584c3bf6",
+          "phase": "gas",
+          "tRangeK": [
+            90.36363988809282,
+            6500
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -90.36363988809282,
+              "scale": 6409.636360111907,
+              "label": "T >= 90.36 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 6500,
+              "scale": 6409.636360111907,
+              "label": "T <= 6500.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                -1,
+                56.21178957374018
+              ],
+              "b": 22.059939259387534,
+              "scale": 6425.3920695348925,
+              "label": "T >= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "cl2:plasma:584c3bf6",
+          "phase": "plasma",
+          "tRangeK": [
+            6500,
+            65000
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -6500,
+              "scale": 58500,
+              "label": "T >= 6500.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 65000,
+              "scale": 58500,
+              "label": "T <= 65000.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            }
+          ]
+        }
+      ],
+      "eshkolSolidLaw": {
+        "lawId": "ulg:polytope-eos:Cl2:solid",
+        "sourceHash": "sha256:eshkol-law:4747cdf2ac25f8388f14505b288b7bfb3f525b77e3a870dd6b5c4c26205c829a",
+        "domainHash": "dom:fa89fa397fce9a3a",
+        "surrogateRelativeBound": 0.00005621353341055687,
+        "sampleDensityAtMidpointKgM3": 3486.2211923370264
+      }
+    },
+    {
+      "materialKey": "O4Fe3",
+      "family": "compound",
+      "atomicNumber": null,
+      "formula": "Fe3O4",
+      "accuracyTier": "tier-2-representative-effective",
+      "closureHash": "ulg:554c7d3a",
+      "nuclear": {
+        "totalProtonsZ": 110,
+        "totalNucleonsA": 232,
+        "molarMassU": 231.531,
+        "isotopeMassRatio": 1,
+        "totalBindingEnergyMeV": 2037.051029910356,
+        "maxNuclearRadiusFm": 4.024353586562254,
+        "stoichiometry": {
+          "O": 4,
+          "Fe": 3
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 4,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 26,
+            "symbol": "Fe",
+            "A": null,
+            "count": 3,
+            "atomicMassU": 55.845
+          }
+        ]
+      },
+      "electromagnetic": {
+        "isMetal": false,
+        "bandGapEv": 5.393684029271746,
+        "electricalConductivitySPerM": 1e-16,
+        "staticDielectricConstant": 4.102245820981238,
+        "magneticPhase": "diamagnetic",
+        "opticalSrgb": [
+          0.85,
+          0.9,
+          0.96
+        ],
+        "refractiveIndex550Nm": 2.0254001631730056
+      },
+      "mechanical": {
+        "crystalStructure": "cscl-B2",
+        "spaceGroup": "Pm-3m (221)",
+        "latticeConstantA": 11.735311913578812,
+        "densityKgPerM3": 951.555940304753,
+        "cohesiveEnergyEv": 7.9448575820105365,
+        "bulkModulusPa": 8000000000,
+        "shearModulusPa": 3520000000,
+        "debyeTemperatureK": 347.94377991593814
+      },
+      "thermodynamic": {
+        "temperatureK": 300,
+        "heatCapacityCvJPerKgK": 693.7965878424919,
+        "heatCapacityCpJPerKgK": 754.1267259157521,
+        "meltingPointK": 1589.7986526719492,
+        "boilingPointK": 2305.2080463743264,
+        "latentHeatFusionJPerKg": 79927.31018698473,
+        "latentHeatVaporizationJPerKg": 3045973.3023865893,
+        "meltingSlopeKPerLogP": 18,
+        "boilingSlopeKPerLogP": 144.256332730855,
+        "liquidDensityKgPerM3": 875.4314650803728,
+        "dynamicViscosityLiquidPaS": 0.0024198589857651787,
+        "surfaceTensionNPerM": 0.30843748313785957,
+        "thermalConductivityWPerMK": 6.5,
+        "mdTempK": null,
+        "mdEnergyEv": null
+      },
+      "polytopes": [
+        {
+          "polytopeId": "o4fe3:solid:c38939b5",
+          "phase": "solid",
+          "tRangeK": [
+            1,
+            1679.695753648502
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1,
+              "scale": 1678.695753648502,
+              "label": "T >= 1.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 1679.695753648502,
+              "scale": 1678.695753648502,
+              "label": "T <= 1679.70 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                1,
+                -18
+              ],
+              "b": 1499.695753648502,
+              "scale": 1684.8606569439244,
+              "label": "T <= T_m(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o4fe3:liquid:c38939b5",
+          "phase": "liquid",
+          "tRangeK": [
+            1535.695753648502,
+            3025.665052486153
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1535.695753648502,
+              "scale": 1489.969298837651,
+              "label": "T >= 1535.70 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 3025.665052486153,
+              "scale": 1489.969298837651,
+              "label": "T <= 3025.67 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                -1,
+                18
+              ],
+              "b": -1499.695753648502,
+              "scale": 1496.911657873891,
+              "label": "T >= T_m(P)"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                1,
+                -144.256332730855
+              ],
+              "b": 1583.101725177603,
+              "scale": 1884.6329726469,
+              "label": "T <= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o4fe3:gas:c38939b5",
+          "phase": "gas",
+          "tRangeK": [
+            1871.614390639313,
+            6500
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1871.614390639313,
+              "scale": 4628.385609360687,
+              "label": "T >= 1871.61 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 6500,
+              "scale": 4628.385609360687,
+              "label": "T <= 6500.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                -1,
+                144.256332730855
+              ],
+              "b": -1583.101725177603,
+              "scale": 4770.092900462865,
+              "label": "T >= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o4fe3:plasma:c38939b5",
+          "phase": "plasma",
+          "tRangeK": [
+            6500,
+            65000
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -6500,
+              "scale": 58500,
+              "label": "T >= 6500.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 65000,
+              "scale": 58500,
+              "label": "T <= 65000.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            }
+          ]
+        }
+      ],
+      "eshkolSolidLaw": {
+        "lawId": "ulg:polytope-eos:O4Fe3:solid",
+        "sourceHash": "sha256:eshkol-law:2ccc3bc135ab7ae3e4d9529b548310b48bc635fe596331c003e5054aa6e2f077",
+        "domainHash": "dom:1b42a24da2819446",
+        "surrogateRelativeBound": 0.00004111981743930114,
+        "sampleDensityAtMidpointKgM3": 929.705174772228
+      }
+    },
+    {
+      "materialKey": "O3Fe2",
+      "family": "compound",
+      "atomicNumber": null,
+      "formula": "Fe2O3",
+      "accuracyTier": "tier-2-representative-effective",
+      "closureHash": "ulg:fb50424f",
+      "nuclear": {
+        "totalProtonsZ": 76,
+        "totalNucleonsA": 160,
+        "molarMassU": 159.687,
+        "isotopeMassRatio": 1,
+        "totalBindingEnergyMeV": 1402.5613940269773,
+        "maxNuclearRadiusFm": 4.024353586562254,
+        "stoichiometry": {
+          "O": 3,
+          "Fe": 2
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 3,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 26,
+            "symbol": "Fe",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 55.845
+          }
+        ]
+      },
+      "electromagnetic": {
+        "isMetal": false,
+        "bandGapEv": 5.393684029271746,
+        "electricalConductivitySPerM": 1e-16,
+        "staticDielectricConstant": 4.102245820981238,
+        "magneticPhase": "diamagnetic",
+        "opticalSrgb": [
+          0.85,
+          0.9,
+          0.96
+        ],
+        "refractiveIndex550Nm": 2.0254001631730056
+      },
+      "mechanical": {
+        "crystalStructure": "corundum-D51",
+        "spaceGroup": "R-3c (167)",
+        "latticeConstantA": 10.609677593690522,
+        "densityKgPerM3": 888.1209004394454,
+        "cohesiveEnergyEv": 14,
+        "bulkModulusPa": 9403336177.339718,
+        "shearModulusPa": 4137467918.0294757,
+        "debyeTemperatureK": 390.46866010077156
+      },
+      "thermodynamic": {
+        "temperatureK": 300,
+        "heatCapacityCvJPerKgK": 718.5280212440587,
+        "heatCapacityCpJPerKgK": 781.008718743542,
+        "meltingPointK": 2710,
+        "boilingPointK": 3929.5,
+        "latentHeatFusionJPerKg": 197543.13859419987,
+        "latentHeatVaporizationJPerKg": 7782293.347287087,
+        "meltingSlopeKPerLogP": 18,
+        "boilingSlopeKPerLogP": 237.87417815536256,
+        "liquidDensityKgPerM3": 817.0712284042899,
+        "dynamicViscosityLiquidPaS": 0.0024198589857651787,
+        "surfaceTensionNPerM": 0.664957625374601,
+        "thermalConductivityWPerMK": 6.5,
+        "mdTempK": null,
+        "mdEnergyEv": null
+      },
+      "polytopes": [
+        {
+          "polytopeId": "o3fe2:solid:7ba6b51c",
+          "phase": "solid",
+          "tRangeK": [
+            1,
+            2799.897100976553
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1,
+              "scale": 2798.897100976553,
+              "label": "T >= 1.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 2799.897100976553,
+              "scale": 2798.897100976553,
+              "label": "T <= 2799.90 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                1,
+                -18
+              ],
+              "b": 2619.897100976553,
+              "scale": 2802.5989691454165,
+              "label": "T <= T_m(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o3fe2:liquid:7ba6b51c",
+          "phase": "liquid",
+          "tRangeK": [
+            2655.897100976553,
+            5117.511056297064
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -2655.897100976553,
+              "scale": 2461.613955320511,
+              "label": "T >= 2655.90 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 5117.511056297064,
+              "scale": 2461.613955320511,
+              "label": "T <= 5117.51 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                -1,
+                18
+              ],
+              "b": -2619.897100976553,
+              "scale": 2465.8222289996274,
+              "label": "T >= T_m(P)"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                1,
+                -237.87417815536256
+              ],
+              "b": 2738.7692747434385,
+              "scale": 3111.41884701279,
+              "label": "T <= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o3fe2:gas:7ba6b51c",
+          "phase": "gas",
+          "tRangeK": [
+            3214.5176310541633,
+            9823.75
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -3214.5176310541633,
+              "scale": 6609.232368945837,
+              "label": "T >= 3214.52 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 9823.75,
+              "scale": 6609.232368945837,
+              "label": "T <= 9823.75 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                -1,
+                237.87417815536256
+              ],
+              "b": -2738.7692747434385,
+              "scale": 6877.742106479357,
+              "label": "T >= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "o3fe2:plasma:7ba6b51c",
+          "phase": "plasma",
+          "tRangeK": [
+            9823.75,
+            98237.5
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -9823.75,
+              "scale": 88413.75,
+              "label": "T >= 9823.75 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 98237.5,
+              "scale": 88413.75,
+              "label": "T <= 98237.50 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            }
+          ]
+        }
+      ],
+      "eshkolSolidLaw": {
+        "lawId": "ulg:polytope-eos:O3Fe2:solid",
+        "sourceHash": "sha256:eshkol-law:4a91f50f818dfec38828d9f41f8d0e00377b1df935642385ba353e2d3b1a6910",
+        "domainHash": "dom:544f4289d7548002",
+        "surrogateRelativeBound": 0.00003675262906127185,
+        "sampleDensityAtMidpointKgM3": 845.8376971807314
+      }
+    },
+    {
+      "materialKey": "ONa2",
+      "family": "compound",
+      "atomicNumber": null,
+      "formula": "Na2O",
+      "accuracyTier": "tier-2-representative-effective",
+      "closureHash": "ulg:fb83b553",
+      "nuclear": {
+        "totalProtonsZ": 30,
+        "totalNucleonsA": 62,
+        "molarMassU": 61.979,
+        "isotopeMassRatio": 1,
+        "totalBindingEnergyMeV": 515.8400409924893,
+        "maxNuclearRadiusFm": 3.203435526927042,
+        "stoichiometry": {
+          "O": 1,
+          "Na": 2
+        },
+        "isotopologueSites": [
+          {
+            "Z": 8,
+            "symbol": "O",
+            "A": null,
+            "count": 1,
+            "atomicMassU": 15.999
+          },
+          {
+            "Z": 11,
+            "symbol": "Na",
+            "A": null,
+            "count": 2,
+            "atomicMassU": 22.99
+          }
+        ]
+      },
+      "electromagnetic": {
+        "isMetal": false,
+        "bandGapEv": 5.690719895190913,
+        "electricalConductivitySPerM": 1e-16,
+        "staticDielectricConstant": 3.786844851223386,
+        "magneticPhase": "diamagnetic",
+        "opticalSrgb": [
+          0.85,
+          0.9,
+          0.96
+        ],
+        "refractiveIndex550Nm": 1.9459817191390534
+      },
+      "mechanical": {
+        "crystalStructure": "fluorite-C1",
+        "spaceGroup": "Fm-3m (225)",
+        "latticeConstantA": 10.541476747164568,
+        "densityKgPerM3": 600,
+        "cohesiveEnergyEv": 8.20127457102766,
+        "bulkModulusPa": 8000000000,
+        "shearModulusPa": 3520000000,
+        "debyeTemperatureK": 438.1780460041329
+      },
+      "thermodynamic": {
+        "temperatureK": 300,
+        "heatCapacityCvJPerKgK": 1110.7592971335453,
+        "heatCapacityCpJPerKgK": 1207.3470621016795,
+        "meltingPointK": 1637.2357956401172,
+        "boilingPointK": 2373.99190367817,
+        "latentHeatFusionJPerKg": 307488.5065519247,
+        "latentHeatVaporizationJPerKg": 11745889.490867162,
+        "meltingSlopeKPerLogP": 18,
+        "boilingSlopeKPerLogP": 148.21012220199998,
+        "liquidDensityKgPerM3": 552,
+        "dynamicViscosityLiquidPaS": 0.0024198589857651787,
+        "surfaceTensionNPerM": 0.5636593621444165,
+        "thermalConductivityWPerMK": 6.5,
+        "mdTempK": null,
+        "mdEnergyEv": null
+      },
+      "polytopes": [
+        {
+          "polytopeId": "ona2:solid:f4cac989",
+          "phase": "solid",
+          "tRangeK": [
+            1,
+            1727.13289661667
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1,
+              "scale": 1726.13289661667,
+              "label": "T >= 1.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 1727.13289661667,
+              "scale": 1726.13289661667,
+              "label": "T <= 1727.13 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                1,
+                -18
+              ],
+              "b": 1547.13289661667,
+              "scale": 1732.128972329213,
+              "label": "T <= T_m(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "ona2:liquid:f4cac989",
+          "phase": "liquid",
+          "tRangeK": [
+            1583.13289661667,
+            3114.195254863749
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1583.13289661667,
+              "scale": 1531.0623582470791,
+              "label": "T >= 1583.13 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 3114.195254863749,
+              "scale": 1531.0623582470791,
+              "label": "T <= 3114.20 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-melting",
+              "a": [
+                -1,
+                18
+              ],
+              "b": -1547.13289661667,
+              "scale": 1537.81921721674,
+              "label": "T >= T_m(P)"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                1,
+                -148.21012220199998
+              ],
+              "b": 1632.0940328437493,
+              "scale": 1936.4894333617058,
+              "label": "T <= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "ona2:gas:f4cac989",
+          "phase": "gas",
+          "tRangeK": [
+            1928.5142772477493,
+            6500
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -1928.5142772477493,
+              "scale": 4571.485722752251,
+              "label": "T >= 1928.51 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 6500,
+              "scale": 4571.485722752251,
+              "label": "T <= 6500.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            },
+            {
+              "axis": "clausius-clapeyron-boiling",
+              "a": [
+                -1,
+                148.21012220199998
+              ],
+              "b": -1632.0940328437493,
+              "scale": 4722.74508035402,
+              "label": "T >= T_b(P)"
+            }
+          ]
+        },
+        {
+          "polytopeId": "ona2:plasma:f4cac989",
+          "phase": "plasma",
+          "tRangeK": [
+            6500,
+            65000
+          ],
+          "pRangePa": [
+            100,
+            10000000000
+          ],
+          "inequalities": [
+            {
+              "axis": "temperatureK",
+              "a": [
+                -1,
+                0
+              ],
+              "b": -6500,
+              "scale": 58500,
+              "label": "T >= 6500.00 K"
+            },
+            {
+              "axis": "temperatureK",
+              "a": [
+                1,
+                0
+              ],
+              "b": 65000,
+              "scale": 58500,
+              "label": "T <= 65000.00 K"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                -1
+              ],
+              "b": -2,
+              "scale": 8,
+              "label": "P >= 1.00e+2 Pa"
+            },
+            {
+              "axis": "log10PressurePa",
+              "a": [
+                0,
+                1
+              ],
+              "b": 10,
+              "scale": 8,
+              "label": "P <= 1.00e+10 Pa"
+            }
+          ]
+        }
+      ],
+      "eshkolSolidLaw": {
+        "lawId": "ulg:polytope-eos:ONa2:solid",
+        "sourceHash": "sha256:eshkol-law:29d9975551cd2c570976f2ed845979005f52b5300be087f92f4163b8f429c881",
+        "domainHash": "dom:5f85eb2a01f61d5f",
+        "surrogateRelativeBound": 0.00004111981744045913,
+        "sampleDensityAtMidpointKgM3": 585.595904200833
       }
     }
   ]

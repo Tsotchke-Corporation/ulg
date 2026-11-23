@@ -22,6 +22,7 @@ export function createZeroCopyResidentBodyPresenter({
   TSL = null,
   renderer = null,
   bodyCount,
+  strideFloats = 8,
   palette = 'galactic',
   tintColor = null,
   particleScale = null,
@@ -29,6 +30,7 @@ export function createZeroCopyResidentBodyPresenter({
   baseGeometry = null
 } = {}) {
   const count = Math.max(1, Math.floor(Number(bodyCount) || 1));
+  const stride = strideFloats === 16 ? 16 : 8;
   const canZeroCopy = Boolean(
     renderer?.isWebGPURenderer
     && typeof renderer?.backend?.get === 'function'
@@ -51,12 +53,16 @@ export function createZeroCopyResidentBodyPresenter({
     geo.instanceCount = count;
 
     // 1-row placeholder CPU view; actual backing storage is the resident GPUBuffer injected below.
-    const interleaved = new THREE.InstancedInterleavedBuffer(new Float32Array(8), 8, 1);
+    const interleaved = new THREE.InstancedInterleavedBuffer(new Float32Array(stride), stride, 1);
     interleaved.count = count;
     const posMassAttr = new THREE.InterleavedBufferAttribute(interleaved, 4, 0, false);
     const velRadiusAttr = new THREE.InterleavedBufferAttribute(interleaved, 4, 4, false);
     geo.setAttribute('aPosMass', posMassAttr);
     geo.setAttribute('aVelRadius', velRadiusAttr);
+    if (stride === 16) {
+      geo.setAttribute('aThermo', new THREE.InterleavedBufferAttribute(interleaved, 4, 8, false));
+      geo.setAttribute('aState', new THREE.InterleavedBufferAttribute(interleaved, 4, 12, false));
+    }
 
     const backendEntry = renderer.backend.get(interleaved);
     backendEntry.buffer = initialBuffer;
@@ -69,6 +75,7 @@ export function createZeroCopyResidentBodyPresenter({
       float,
       length,
       clamp,
+      mix,
       pow,
       select
     } = TSL;
@@ -81,7 +88,41 @@ export function createZeroCopyResidentBodyPresenter({
 
     let starScale;
     let starColor;
-    if (palette === 'continuum-material') {
+    if (palette === 'blackbody-thermo' && stride === 16) {
+      // General self-gravitating thermodynamic fluid/plasma palette driven strictly
+      // by live physical state (log10T, log10Eps, heavy-element fraction xZ).
+      const aThermo = attribute('aThermo', 'vec4');
+      const aState = attribute('aState', 'vec4');
+      const logT = aThermo.x;
+      const logEps = aThermo.w;
+      const xZ = aState.w;
+
+      const uWarm = clamp(logT.sub(float(2.2)).div(float(1.3)), float(0.0), float(1.0));
+      const uSolar = clamp(logT.sub(float(3.4)).div(float(1.1)), float(0.0), float(1.0));
+      const uHot = clamp(logT.sub(float(4.5)).div(float(2.6)), float(0.0), float(1.0));
+      const uFuse = clamp(logEps.add(float(5.5)).div(float(6.5)), float(0.0), float(1.0));
+      const uHeavy = clamp(xZ.sub(float(0.14)).div(float(0.45)), float(0.0), float(1.0));
+
+      const colCold = vec3(float(0.32), float(0.24), float(0.62));
+      const colDiss = vec3(float(0.95), float(0.34), float(0.14));
+      const colSolar = vec3(float(1.0), float(0.86), float(0.56));
+      const colBlue = vec3(float(0.62), float(0.88), float(1.0));
+      const colCore = vec3(float(1.0), float(0.98), float(0.92));
+      const colEjecta = vec3(float(0.28), float(0.88), float(1.0));
+
+      let col = mix(colCold, colDiss, uWarm);
+      col = mix(col, colSolar, uSolar);
+      col = mix(col, colBlue, uHot);
+      col = mix(col, colCore, uFuse.mul(float(0.75)));
+      col = mix(col, colEjecta, uHeavy.mul(float(0.72)));
+
+      const rawScale = float(0.032)
+        .add(uWarm.mul(float(0.014)))
+        .add(uFuse.mul(float(0.042)))
+        .add(uHeavy.mul(float(0.032)));
+      starScale = select(alive, rawScale, float(0.0));
+      starColor = col;
+    } else if (palette === 'continuum-material') {
       const tr = Number.isFinite(tintColor?.[0]) ? tintColor[0] : 0.78;
       const tg = Number.isFinite(tintColor?.[1]) ? tintColor[1] : 0.85;
       const tb = Number.isFinite(tintColor?.[2]) ? tintColor[2] : 0.92;
@@ -189,9 +230,9 @@ export function createZeroCopyResidentBodyPresenter({
 
   function syncFromCpuBodies(bodies) {
     if (!bodies) return false;
-    const n = Math.min(count, Math.floor(bodies.length / 8));
+    const n = Math.min(count, Math.floor(bodies.length / stride));
     for (let i = 0; i < n; i += 1) {
-      const b = i * 8;
+      const b = i * stride;
       const x = bodies[b];
       const y = bodies[b + 1];
       const z = bodies[b + 2];
@@ -199,6 +240,24 @@ export function createZeroCopyResidentBodyPresenter({
       dummy.position.set(x, y, z);
       if (!(mass > 0)) {
         dummy.scale.setScalar(0);
+      } else if (palette === 'blackbody-thermo' && stride === 16) {
+        const logT = bodies[b + 8];
+        const logEps = bodies[b + 11];
+        const xZ = bodies[b + 15];
+        const uWarm = Math.max(0, Math.min(1, (logT - 2.2) / 1.3));
+        const uSolar = Math.max(0, Math.min(1, (logT - 3.4) / 1.1));
+        const uHot = Math.max(0, Math.min(1, (logT - 4.5) / 2.6));
+        const uFuse = Math.max(0, Math.min(1, (logEps + 5.5) / 6.5));
+        const uHeavy = Math.max(0, Math.min(1, (xZ - 0.14) / 0.45));
+        let r = 0.32 + (0.95 - 0.32) * uWarm;
+        let g = 0.24 + (0.34 - 0.24) * uWarm;
+        let bl = 0.62 + (0.14 - 0.62) * uWarm;
+        r += (1.0 - r) * uSolar; g += (0.86 - g) * uSolar; bl += (0.56 - bl) * uSolar;
+        r += (0.62 - r) * uHot; g += (0.88 - g) * uHot; bl += (1.0 - bl) * uHot;
+        r += (1.0 - r) * uFuse * 0.75; g += (0.98 - g) * uFuse * 0.75; bl += (0.92 - bl) * uFuse * 0.75;
+        r += (0.28 - r) * uHeavy * 0.72; g += (0.88 - g) * uHeavy * 0.72; bl += (1.0 - bl) * uHeavy * 0.72;
+        color.setRGB(r, g, bl);
+        dummy.scale.setScalar(0.034 + uWarm * 0.015 + uFuse * 0.042 + uHeavy * 0.032);
       } else if (palette === 'continuum-material') {
         const tr = Number.isFinite(tintColor?.[0]) ? tintColor[0] : 0.78;
         const tg = Number.isFinite(tintColor?.[1]) ? tintColor[1] : 0.85;

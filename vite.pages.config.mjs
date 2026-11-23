@@ -71,6 +71,7 @@ export default defineConfig({
       input: {
         pages: fileURLToPath(new URL('./pages.html', import.meta.url)),
         cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url)),
+        stellarGenesis: fileURLToPath(new URL('./stellar-genesis.html', import.meta.url)),
         sphMlsMpmGpuStep: fileURLToPath(
           new URL('./src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url)
         ),

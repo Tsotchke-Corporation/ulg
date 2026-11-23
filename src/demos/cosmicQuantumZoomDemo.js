@@ -1211,6 +1211,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
     <div style="pointer-events:auto;display:flex;align-items:center;gap:8px;">
       <button id="cq-tour-btn" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(94,234,212,0.45);background:rgba(16,42,48,0.88);color:#99f6e4;font-size:12px;font-weight:600;cursor:pointer;">▶ Powers of Ten Tour</button>
       <button id="cq-play-btn" type="button" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(148,163,184,0.35);background:rgba(12,22,34,0.86);color:#e2e8f0;font-size:12px;font-weight:600;cursor:pointer;">⏸ Sim Running</button>
+      <a href="./stellar-genesis.html" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(56,189,248,0.45);background:rgba(10,32,52,0.86);color:#bae6fd;font-size:12px;font-weight:600;text-decoration:none;">Stellar Genesis ↗</a>
       <a href="./?preset=iron-ice-quench" style="padding:7px 12px;border-radius:8px;border:1px solid rgba(251,191,36,0.4);background:rgba(36,24,10,0.85);color:#fde68a;font-size:12px;font-weight:600;text-decoration:none;">SPH Lab ↗</a>
     </div>
   `;

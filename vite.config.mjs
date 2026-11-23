@@ -297,7 +297,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: fileURLToPath(new URL('./index.html', import.meta.url)),
-        cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url))
+        cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url)),
+        stellarGenesis: fileURLToPath(new URL('./stellar-genesis.html', import.meta.url))
       }
     }
   },

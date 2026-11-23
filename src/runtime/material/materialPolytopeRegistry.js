@@ -1,11 +1,17 @@
-// Material Polytope Registry & Closure Validity-Domain Evaluator
-// (plan/todo/material-polytope-registry-and-property-fit-plan.md).
+// Material Polytope Registry & Convex Closure Validity-Domain Evaluator
+// (Gate 0C / Gate 2 — plan/todo/material-polytope-registry-and-property-fit-plan.md).
 //
-// Discovers, caches, and validates piecewise convex state-domain polytopes
-// (A x <= b) over (temperatureK, pressurePa) phase regions for arbitrary
-// elements, compounds, mixtures, and crystalline structures. Fitted response
-// functions cached against a polytope are strictly gated by closure hash and
-// domain membership — never silently extrapolated outside an accepted polytope.
+// Discovers, bisects, caches, GPU-packs, and validates piecewise convex
+// half-space state-domain polytopes (`A x <= b`) over `(temperatureK, log10(pressurePa))`
+// phase regions — including slanted Clausius-Clapeyron coexistence boundaries —
+// for arbitrary elements, compounds, mixtures, and crystalline structures.
+// Strictly fail-closed: never silently extrapolates outside an accepted polytope.
+
+import {
+  ULG_ACCURACY_TIERS,
+  ULG_POLYTOPE_ATLAS_SCHEMA,
+  packPolytopeAtlasForGpu
+} from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 
 export const MATERIAL_POLYTOPE_REGISTRY_SCHEMA =
   'peercompute.ulg.material-polytope-registry.v0';
@@ -25,46 +31,66 @@ function fnv1aHex(str) {
   return h.toString(16).padStart(8, '0');
 }
 
-function buildBoxPolytope({
-  schema,
+/**
+ * Construct a general convex half-space polytope `A x <= b` in
+ * `x = [temperatureK, log10(pressurePa)]` with bounding box + optional slanted
+ * phase-coexistence half-space inequalities (e.g., Clausius-Clapeyron facets).
+ */
+export function buildConvexPolytope({
+  schema = ELEMENT_POLYTOPE_SCHEMA,
   polytopeId,
   materialKey,
-  polytopeFamily,
-  phase,
+  polytopeFamily = 'element',
+  phase = 'solid',
   tMinK,
   tMaxK,
-  pMinPa,
-  pMaxPa,
-  closureHash,
-  provenance,
+  pMinPa = 1,
+  pMaxPa = 1e9,
+  extraInequalities = [],
+  accuracyTier = ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+  closureHash = 'derived-v1',
+  provenance = {},
   crystalStructure = null
 }) {
   const loT = Math.max(0.1, Number(tMinK));
   const hiT = Math.max(loT + 1e-3, Number(tMaxK));
-  const loP = Math.max(1e-3, Number(pMinPa));
+  const loP = Math.max(1e-6, Number(pMinPa));
   const hiP = Math.max(loP * 1.01, Number(pMaxPa));
   const logLoP = Math.log10(loP);
   const logHiP = Math.log10(hiP);
-  // Inequalities A * [T, log10(P)] <= b in normalized state coordinates
-  const inequalities = Object.freeze([
-    Object.freeze({ axis: 'temperatureK', a: [-1, 0], b: -loT, label: `T >= ${loT.toFixed(2)} K` }),
-    Object.freeze({ axis: 'temperatureK', a: [1, 0], b: hiT, label: `T <= ${hiT.toFixed(2)} K` }),
-    Object.freeze({ axis: 'log10PressurePa', a: [0, -1], b: -logLoP, label: `P >= ${loP.toExponential(2)} Pa` }),
-    Object.freeze({ axis: 'log10PressurePa', a: [0, 1], b: logHiP, label: `P <= ${hiP.toExponential(2)} Pa` })
-  ]);
+  const tSpan = Math.max(1e-6, hiT - loT);
+  const logPSpan = Math.max(1e-6, logHiP - logLoP);
+
+  const baseInequalities = [
+    Object.freeze({ axis: 'temperatureK', a: Object.freeze([-1, 0]), b: -loT, scale: tSpan, label: `T >= ${loT.toFixed(2)} K` }),
+    Object.freeze({ axis: 'temperatureK', a: Object.freeze([1, 0]), b: hiT, scale: tSpan, label: `T <= ${hiT.toFixed(2)} K` }),
+    Object.freeze({ axis: 'log10PressurePa', a: Object.freeze([0, -1]), b: -logLoP, scale: logPSpan, label: `P >= ${loP.toExponential(2)} Pa` }),
+    Object.freeze({ axis: 'log10PressurePa', a: Object.freeze([0, 1]), b: logHiP, scale: logPSpan, label: `P <= ${hiP.toExponential(2)} Pa` })
+  ];
+  const extra = (Array.isArray(extraInequalities) ? extraInequalities : []).map((ineq) => Object.freeze({
+    axis: ineq.axis || 'coexistence',
+    a: Object.freeze([Number(ineq.a[0]), Number(ineq.a[1])]),
+    b: Number(ineq.b),
+    scale: Math.max(1e-6, Number(ineq.scale ?? Math.hypot(ineq.a[0] * tSpan, ineq.a[1] * logPSpan))),
+    label: String(ineq.label || 'phase-boundary-facet')
+  }));
+  const inequalities = Object.freeze([...baseInequalities, ...extra]);
+
   const vertices = Object.freeze([
     Object.freeze([loT, loP]),
     Object.freeze([hiT, loP]),
     Object.freeze([hiT, hiP]),
     Object.freeze([loT, hiP])
   ]);
+  const facetKey = extra.map((e) => `${e.a[0].toFixed(4)},${e.a[1].toFixed(4)},${e.b.toFixed(4)}`).join(';');
   return Object.freeze({
     schema,
-    schemaVersion: 0,
+    schemaVersion: 1,
     polytopeId,
     materialKey: String(materialKey),
     polytopeFamily,
     phase,
+    accuracyTier,
     axes: Object.freeze([
       Object.freeze({ name: 'temperatureK', unit: 'K', min: loT, max: hiT }),
       Object.freeze({ name: 'pressurePa', unit: 'Pa', min: loP, max: hiP, scale: 'log10' })
@@ -72,13 +98,70 @@ function buildBoxPolytope({
     vertices,
     inequalities,
     crystalStructure: crystalStructure ? Object.freeze({ ...crystalStructure }) : null,
-    invalidationKey: fnv1aHex(`${materialKey}:${phase}:${closureHash}:${loT}:${hiT}:${loP}:${hiP}`),
+    invalidationKey: fnv1aHex(`${materialKey}:${phase}:${closureHash}:${loT}:${hiT}:${loP}:${hiP}:${facetKey}`),
     closureHash: String(closureHash || 'unhashed'),
     provenance: Object.freeze({
       ...(provenance || {}),
       extrapolationPolicy: 'fail-closed'
     })
   });
+}
+
+/**
+ * Bisect a convex polytope along its widest normalized axis (`T` or `log10 P`)
+ * while preserving all existing slanted coexistence half-space facets.
+ */
+export function bisectConvexPolytope(polytope, axisIndex = null) {
+  const tAxis = polytope.axes[0];
+  const pAxis = polytope.axes[1];
+  const logLoP = Math.log10(pAxis.min);
+  const logHiP = Math.log10(pAxis.max);
+  const splitT = axisIndex === 0 || (axisIndex == null && (tAxis.max - tAxis.min) / Math.max(1, tAxis.min) >= (logHiP - logLoP));
+  const extra = polytope.inequalities.slice(4);
+  if (splitT) {
+    const midT = 0.5 * (tAxis.min + tAxis.max);
+    return [
+      buildConvexPolytope({
+        ...polytope,
+        polytopeId: `${polytope.polytopeId}:tL`,
+        tMinK: tAxis.min,
+        tMaxK: midT,
+        pMinPa: pAxis.min,
+        pMaxPa: pAxis.max,
+        extraInequalities: extra
+      }),
+      buildConvexPolytope({
+        ...polytope,
+        polytopeId: `${polytope.polytopeId}:tR`,
+        tMinK: midT,
+        tMaxK: tAxis.max,
+        pMinPa: pAxis.min,
+        pMaxPa: pAxis.max,
+        extraInequalities: extra
+      })
+    ];
+  }
+  const midP = 10 ** (0.5 * (logLoP + logHiP));
+  return [
+    buildConvexPolytope({
+      ...polytope,
+      polytopeId: `${polytope.polytopeId}:pL`,
+      tMinK: tAxis.min,
+      tMaxK: tAxis.max,
+      pMinPa: pAxis.min,
+      pMaxPa: midP,
+      extraInequalities: extra
+    }),
+    buildConvexPolytope({
+      ...polytope,
+      polytopeId: `${polytope.polytopeId}:pR`,
+      tMinK: tAxis.min,
+      tMaxK: tAxis.max,
+      pMinPa: midP,
+      pMaxPa: pAxis.max,
+      extraInequalities: extra
+    })
+  ];
 }
 
 /**
@@ -98,7 +181,7 @@ export function evaluatePolytopeMembership(polytope, {
       inside: false,
       status: 'outside-domain',
       minMarginNormalized: -Infinity,
-      violatedInequalities: ['invalid-state-coordinates'],
+      violatedInequalities: Object.freeze(['invalid-state-coordinates']),
       extrapolate: false
     });
   }
@@ -107,13 +190,14 @@ export function evaluatePolytopeMembership(polytope, {
   const tSpan = Math.max(1e-6, tAxis.max - tAxis.min);
   const logPSpan = Math.max(1e-6, Math.log10(pAxis.max) - Math.log10(pAxis.min));
   const x = [T, Math.log10(P)];
-  const scales = [tSpan, tSpan, logPSpan, logPSpan];
+  const defaultScales = [tSpan, tSpan, logPSpan, logPSpan];
   const violated = [];
   let minMargin = Infinity;
   for (let i = 0; i < polytope.inequalities.length; i += 1) {
     const ineq = polytope.inequalities[i];
+    const scale = Math.max(1e-6, Number(ineq.scale ?? defaultScales[i] ?? 1));
     const slack = ineq.b - (ineq.a[0] * x[0] + ineq.a[1] * x[1]);
-    const normMargin = slack / scales[i];
+    const normMargin = slack / scale;
     if (normMargin < minMargin) minMargin = normMargin;
     if (slack < 0) violated.push(ineq.label);
   }
@@ -137,23 +221,52 @@ export function evaluatePolytopeMembership(polytope, {
 }
 
 /**
- * Create a durable Material Polytope Registry managing discovered state-domain
- * polytopes and closure-hash-invalidated fitted response descriptors.
+ * Create a durable Material Polytope Registry managing piecewise-convex
+ * state-domain polytopes (including slanted Clausius-Clapeyron coexistence
+ * facets), closure-hash-invalidated fitted response descriptors, and GPU atlas
+ * buffer packing.
  */
 export function createMaterialPolytopeRegistry() {
   const polytopesByMaterial = new Map();
   const polytopesById = new Map();
   const fitsByPolytopeId = new Map();
 
+  function registerMaterialPolytopes(materialKey, polytopeList) {
+    const key = String(materialKey || '').trim().toLowerCase();
+    const frozen = Object.freeze([...polytopeList]);
+    const prev = polytopesByMaterial.get(key) || [];
+    for (const old of prev) {
+      polytopesById.delete(old.polytopeId);
+      fitsByPolytopeId.delete(old.polytopeId);
+    }
+    polytopesByMaterial.set(key, frozen);
+    for (const p of frozen) {
+      polytopesById.set(p.polytopeId, p);
+      if (p.fit) {
+        fitsByPolytopeId.set(p.polytopeId, Object.freeze({
+          ...p.fit,
+          polytopeId: p.polytopeId,
+          invalidationKey: p.invalidationKey,
+          closureHash: p.closureHash
+        }));
+      }
+    }
+    return frozen;
+  }
+
   function discoverMaterialPolytopes({
     materialKey,
     family = 'element',
     meltingPointK = null,
     boilingPointK = null,
+    ionizationTempK = null,
+    meltingSlopeKPerLogP = 0, // Clausius-Clapeyron dT_m / d(log10 P)
+    boilingSlopeKPerLogP = 0, // Clausius-Clapeyron dT_b / d(log10 P)
     maxTemperatureK = 6000,
     minPressurePa = 1,
     maxPressurePa = 1e9,
-    closureHash = 'derived-v0',
+    accuracyTier = ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    closureHash = 'derived-v1',
     crystalStructure = null,
     provenance = {}
   } = {}) {
@@ -166,66 +279,128 @@ export function createMaterialPolytopeRegistry() {
         : ELEMENT_POLYTOPE_SCHEMA;
     const tMelt = Number(meltingPointK);
     const tBoil = Number(boilingPointK);
+    const tIon = Number(ionizationTempK);
     const tMax = Math.max(Number(maxTemperatureK) || 6000, (tBoil || tMelt || 300) + 500);
+    const logP0 = Math.log10(101325);
+    const mSlope = Number(meltingSlopeKPerLogP) || 0;
+    const bSlope = Number(boilingSlopeKPerLogP) || 0;
+    const logPMin = Math.log10(Math.max(1e-6, Number(minPressurePa)));
+    const logPMax = Math.log10(Math.max(Number(minPressurePa) * 1.01, Number(maxPressurePa)));
     const discovered = [];
 
     if (Number.isFinite(tMelt) && tMelt > 1) {
-      discovered.push(buildBoxPolytope({
+      // Slanted melting facet: T - mSlope * (logP - logP0) <= tMelt
+      const meltFacet = mSlope !== 0
+        ? [{
+          axis: 'clausius-clapeyron-melting',
+          a: [1, -mSlope],
+          b: tMelt - mSlope * logP0,
+          label: `T <= T_m(P)`
+        }]
+        : [];
+      const tMeltMax = Math.max(tMelt, tMelt + mSlope * (logPMax - logP0), tMelt + mSlope * (logPMin - logP0));
+      discovered.push(buildConvexPolytope({
         schema,
         polytopeId: `${key.toLowerCase()}:solid:${fnv1aHex(closureHash)}`,
         materialKey: key,
         polytopeFamily: family,
         phase: 'solid',
         tMinK: 1,
-        tMaxK: tMelt,
+        tMaxK: tMeltMax,
         pMinPa: minPressurePa,
         pMaxPa: maxPressurePa,
+        extraInequalities: meltFacet,
+        accuracyTier,
         closureHash,
         provenance,
         crystalStructure
       }));
     }
+
     if (Number.isFinite(tMelt) && Number.isFinite(tBoil) && tBoil > tMelt + 1) {
-      discovered.push(buildBoxPolytope({
+      const facets = [];
+      if (mSlope !== 0) {
+        facets.push({
+          axis: 'clausius-clapeyron-melting',
+          a: [-1, mSlope],
+          b: -(tMelt - mSlope * logP0),
+          label: `T >= T_m(P)`
+        });
+      }
+      if (bSlope !== 0) {
+        facets.push({
+          axis: 'clausius-clapeyron-boiling',
+          a: [1, -bSlope],
+          b: tBoil - bSlope * logP0,
+          label: `T <= T_b(P)`
+        });
+      }
+      const tLiqMin = Math.max(1, Math.min(tMelt, tMelt + mSlope * (logPMin - logP0), tMelt + mSlope * (logPMax - logP0)));
+      const tLiqMax = Math.max(tBoil, tBoil + bSlope * (logPMax - logP0), tBoil + bSlope * (logPMin - logP0));
+      discovered.push(buildConvexPolytope({
         schema,
         polytopeId: `${key.toLowerCase()}:liquid:${fnv1aHex(closureHash)}`,
         materialKey: key,
         polytopeFamily: family,
         phase: 'liquid',
-        tMinK: tMelt,
-        tMaxK: tBoil,
+        tMinK: tLiqMin,
+        tMaxK: tLiqMax,
         pMinPa: minPressurePa,
         pMaxPa: maxPressurePa,
+        extraInequalities: facets,
+        accuracyTier,
         closureHash,
         provenance
       }));
     }
-    const gasMinT = Number.isFinite(tBoil) && tBoil > 1
+
+    const gasRefT = Number.isFinite(tBoil) && tBoil > 1
       ? tBoil
       : (Number.isFinite(tMelt) && tMelt > 1 ? tMelt : 1);
-    discovered.push(buildBoxPolytope({
+    const gasFacets = bSlope !== 0 && Number.isFinite(tBoil) && tBoil > 1
+      ? [{
+        axis: 'clausius-clapeyron-boiling',
+        a: [-1, bSlope],
+        b: -(tBoil - bSlope * logP0),
+        label: `T >= T_b(P)`
+      }]
+      : [];
+    const gasTop = Number.isFinite(tIon) && tIon > gasRefT + 50 ? tIon : tMax;
+    const gasMinT = Math.max(1, Math.min(gasRefT, gasRefT + bSlope * (logPMin - logP0), gasRefT + bSlope * (logPMax - logP0)));
+    discovered.push(buildConvexPolytope({
       schema,
       polytopeId: `${key.toLowerCase()}:gas:${fnv1aHex(closureHash)}`,
       materialKey: key,
       polytopeFamily: family,
       phase: 'gas',
       tMinK: gasMinT,
-      tMaxK: tMax,
+      tMaxK: gasTop,
       pMinPa: minPressurePa,
       pMaxPa: maxPressurePa,
+      extraInequalities: gasFacets,
+      accuracyTier,
       closureHash,
       provenance
     }));
 
-    const frozen = Object.freeze(discovered);
-    const prev = polytopesByMaterial.get(key.toLowerCase()) || [];
-    for (const old of prev) {
-      polytopesById.delete(old.polytopeId);
-      fitsByPolytopeId.delete(old.polytopeId);
+    if (Number.isFinite(tIon) && tIon > gasRefT + 50) {
+      discovered.push(buildConvexPolytope({
+        schema,
+        polytopeId: `${key.toLowerCase()}:plasma:${fnv1aHex(closureHash)}`,
+        materialKey: key,
+        polytopeFamily: family,
+        phase: 'plasma',
+        tMinK: tIon,
+        tMaxK: Math.max(tMax, tIon * 10),
+        pMinPa: minPressurePa,
+        pMaxPa: maxPressurePa,
+        accuracyTier,
+        closureHash,
+        provenance
+      }));
     }
-    polytopesByMaterial.set(key.toLowerCase(), frozen);
-    for (const p of frozen) polytopesById.set(p.polytopeId, p);
-    return frozen;
+
+    return registerMaterialPolytopes(key, discovered);
   }
 
   function resolveState(materialKey, { temperatureK, pressurePa = 101325, closureHash = null } = {}) {
@@ -273,6 +448,33 @@ export function createMaterialPolytopeRegistry() {
     return record;
   }
 
+  function packMaterialAtlasGpu(materialKey, { materialIndex = 0 } = {}) {
+    const list = polytopesByMaterial.get(String(materialKey || '').toLowerCase()) || [];
+    const hydrated = list.map((p) => ({
+      ...p,
+      fit: fitsByPolytopeId.get(p.polytopeId) ?? p.fit ?? null
+    }));
+    return packPolytopeAtlasForGpu(hydrated, { materialIndex });
+  }
+
+  function exportPolytopeAtlas() {
+    const materials = {};
+    for (const [key, list] of polytopesByMaterial.entries()) {
+      materials[key] = list.map((p) => ({
+        ...p,
+        fit: fitsByPolytopeId.get(p.polytopeId) ?? p.fit ?? null
+      }));
+    }
+    return Object.freeze({
+      schema: ULG_POLYTOPE_ATLAS_SCHEMA,
+      schemaVersion: 1,
+      materialCount: polytopesByMaterial.size,
+      polytopeCount: polytopesById.size,
+      fittedCount: fitsByPolytopeId.size,
+      materials
+    });
+  }
+
   function snapshot() {
     return Object.freeze({
       schema: MATERIAL_POLYTOPE_REGISTRY_SCHEMA,
@@ -285,8 +487,11 @@ export function createMaterialPolytopeRegistry() {
   return Object.freeze({
     schema: MATERIAL_POLYTOPE_REGISTRY_SCHEMA,
     discoverMaterialPolytopes,
+    registerMaterialPolytopes,
     resolveState,
     registerResponseFit,
+    packMaterialAtlasGpu,
+    exportPolytopeAtlas,
     getPolytopes: (materialKey) => polytopesByMaterial.get(String(materialKey || '').toLowerCase()) || Object.freeze([]),
     snapshot
   });

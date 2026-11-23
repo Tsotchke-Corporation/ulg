@@ -12,18 +12,19 @@ function excludeUnusedPeerComputeInference() {
     enforce: 'pre',
     resolveId(source, importer) {
       if (
-        source === '@huggingface/transformers'
-        || source.startsWith('onnxruntime-web')
-        || source.startsWith('@wllama/')
+        source.includes('@huggingface/transformers')
+        || source.includes('onnxruntime-web')
+        || source.includes('peercompute-diffusion-ort')
+        || source.includes('@wllama/')
+        || source.includes('@kaminos/webgpu-inference-kit')
         || (
-          importer && importer.includes('/peercompute/')
+          importer && importer.includes('/peercompute/') && !importer.includes('/networkManager/')
           && (
-            source.includes('/inference/ModelInferenceService')
-            || source.includes('/inference/gguf/')
-            || source.includes('/inference/diffusion/')
-            || source.includes('/inference/mesh/')
-            || source.includes('/inference/sf3d')
-            || source.includes('/inference/speech/')
+            source.includes('/inference/')
+            || source.startsWith('../inference/')
+            || source.startsWith('./inference/')
+            || source.includes('sf3d')
+            || source.includes('ModelInferenceService')
           )
         )
       ) {
@@ -37,11 +38,17 @@ function excludeUnusedPeerComputeInference() {
         export class ModelInferenceService {
           constructor() { throw new Error('ModelInferenceService is not bundled in the ULG physics Pages build.'); }
         }
+        export class ResidentModelAdmission {
+          constructor() { throw new Error('ResidentModelAdmission is not bundled in the ULG physics Pages build.'); }
+        }
         export const diffusionRuntimeDefinition = null;
         export const ggufRuntimeDefinition = null;
         export const meshRuntimeDefinition = null;
         export const sf3dRuntimeDefinition = null;
         export const speechRuntimeDefinition = null;
+        export const env = {};
+        export const InferenceSession = null;
+        export const Tensor = null;
         export default {};
       `;
     }

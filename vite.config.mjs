@@ -295,16 +295,17 @@ function excludeUnusedPeerComputeInference() {
       if (
         source.includes('@huggingface/transformers')
         || source.includes('onnxruntime-web')
+        || source.includes('peercompute-diffusion-ort')
         || source.includes('@wllama/')
+        || source.includes('@kaminos/webgpu-inference-kit')
         || (
-          importer && importer.includes('/peercompute/')
+          importer && importer.includes('/peercompute/') && !importer.includes('/networkManager/')
           && (
-            source.includes('/inference/ModelInferenceService')
-            || source.includes('/inference/gguf/')
-            || source.includes('/inference/diffusion/')
-            || source.includes('/inference/mesh/')
-            || source.includes('/inference/sf3d')
-            || source.includes('/inference/speech/')
+            source.includes('/inference/')
+            || source.startsWith('../inference/')
+            || source.startsWith('./inference/')
+            || source.includes('sf3d')
+            || source.includes('ModelInferenceService')
           )
         )
       ) {
@@ -318,14 +319,28 @@ function excludeUnusedPeerComputeInference() {
         export class ModelInferenceService {
           constructor() { throw new Error('ModelInferenceService is not bundled in ULG physics builds.'); }
         }
+        export class ResidentModelAdmission {
+          constructor() { throw new Error('ResidentModelAdmission is not bundled in ULG physics builds.'); }
+        }
         export const diffusionRuntimeDefinition = null;
         export const ggufRuntimeDefinition = null;
         export const meshRuntimeDefinition = null;
         export const sf3dRuntimeDefinition = null;
         export const speechRuntimeDefinition = null;
+        export const MODEL_COMPOSITION_SCHEMA = 'disabled';
+        export const MODEL_COMPOSITION_LIMITS = {};
+        export const GENERATED_MESH_LIMITS = {};
         export const env = {};
         export const InferenceSession = null;
         export const Tensor = null;
+        export function modelManifestCid() { return null; }
+        export function createModelComposition() { return null; }
+        export function splitModelComposition() { return null; }
+        export function encodeGeneratedMesh() { return null; }
+        export function normalizeGeneratedMeshDescriptor() { return null; }
+        export function validateGeneratedMesh() { return { ok: false }; }
+        export function retainGeneratedMesh() { return null; }
+        export function readGeneratedMesh() { return null; }
         export function initializeWllamaModule() { throw new Error('wllama disabled in ULG build'); }
         export function glueSerialize() { throw new Error('wllama disabled in ULG build'); }
         export function glueDeserialize() { throw new Error('wllama disabled in ULG build'); }
@@ -356,7 +371,8 @@ export default defineConfig({
   worker: {
     // Every runtime worker is constructed as a module worker. The ULG runtime
     // reaches code-split SPH modules, which cannot be emitted as one IIFE.
-    format: 'es'
+    format: 'es',
+    plugins: () => [excludeUnusedPeerComputeInference()]
   },
   server: {
     https: resolveLocalHttpsConfig(),

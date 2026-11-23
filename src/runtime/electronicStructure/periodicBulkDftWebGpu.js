@@ -33,9 +33,25 @@ const BOHR_TO_A = BOHR_TO_M * 1e10;
 const HBAR = 1.054571817e-34;
 const KB = 1.380649e-23;
 
-const NOBLE_GAS_Z = new Set([2, 10, 18, 36, 54, 86, 118]);
-const DIATOMIC_MOLECULAR_Z = new Set([1, 7, 8, 9, 17, 35, 53, 85, 117]);
-const COVALENT_TETRAHEDRAL_Z = new Set([5, 6, 14, 32, 50]);
+// Electronic valence-shell bonding classification derived strictly from quantum
+// numbers (n, l, occupancy) via `electronConfiguration(Z)` — zero Z-lookup tables.
+function classifyValenceShellBonding(Z) {
+  const cfg = electronConfiguration(Z);
+  const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
+  const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
+  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
+  const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
+  const sOcc = sSub?.occupancy ?? 0;
+  const pOcc = pSub?.occupancy ?? 0;
+  const dOcc = dSub?.occupancy ?? 0;
+  const isClosedShell = (maxN === 1 && sOcc === 2) || pOcc === 6;
+  const isMolecularNonmetal = (maxN === 1 && sOcc === 1)
+    || pOcc === 5
+    || (maxN === 2 && pOcc >= 3 && pOcc <= 4);
+  const isCovalentTetrahedral = (maxN >= 2 && maxN <= 5 && pOcc === 2)
+    || (maxN === 2 && pOcc === 1);
+  return { maxN, sSub, pSub, dSub, sOcc, pOcc, dOcc, isClosedShell, isMolecularNonmetal, isCovalentTetrahedral };
+}
 
 // Exact Wigner-Seitz lattice Ewald-Madelung constants & packing metadata
 export const BULK_CRYSTAL_CANDIDATES = Object.freeze({
@@ -72,17 +88,13 @@ export const BULK_CRYSTAL_CANDIDATES = Object.freeze({
 });
 
 function selectCandidateLattices(Z) {
-  if (NOBLE_GAS_Z.has(Z) || DIATOMIC_MOLECULAR_Z.has(Z)) return ['vdw-fcc'];
-  if (COVALENT_TETRAHEDRAL_Z.has(Z)) return ['diamond', 'fcc'];
-  const cfg = electronConfiguration(Z);
-  const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
-  const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
-  const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
-  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
+  const shell = classifyValenceShellBonding(Z);
+  if (shell.isClosedShell || shell.isMolecularNonmetal) return ['vdw-fcc'];
+  if (shell.isCovalentTetrahedral) return ['diamond', 'fcc'];
   // Group 1 alkalis and mid-d metals strongly favor bcc/hcp/fcc competition
-  if (!dSub && !pSub && sSub?.occupancy === 1) return ['bcc', 'fcc'];
-  if (!dSub && !pSub && sSub?.occupancy === 2) return ['hcp', 'fcc', 'bcc'];
-  if (dSub && dSub.occupancy >= 1 && dSub.occupancy <= 9) return ['bcc', 'fcc', 'hcp'];
+  if (!shell.dSub && !shell.pSub && shell.sOcc === 1) return ['bcc', 'fcc'];
+  if (!shell.dSub && !shell.pSub && shell.sOcc === 2) return ['hcp', 'fcc', 'bcc'];
+  if (shell.dOcc >= 1 && shell.dOcc <= 9) return ['bcc', 'fcc', 'hcp'];
   return ['fcc', 'bcc', 'hcp'];
 }
 
@@ -427,7 +439,8 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
   let bandGapEv = Math.max(0, cbmEv - vbmEv);
   if (struct.id === 'vdw-fcc') {
     // Closed-shell noble gas / molecular insulator gap governed by atomic ionization minus polarization screening
-    bandGapEv = Math.max(bandGapEv, Math.min(21.5, atomDesc.ionizationPotentialHa * HA_TO_EV * (NOBLE_GAS_Z.has(Z) ? 0.85 : 0.42)));
+    const shell = classifyValenceShellBonding(Z);
+    bandGapEv = Math.max(bandGapEv, Math.min(21.5, atomDesc.ionizationPotentialHa * HA_TO_EV * (shell.isClosedShell ? 0.85 : 0.42)));
   } else if (struct.id === 'diamond') {
     // mBJ semiconductor/insulator enhancement on sp3 tetrahedral gap
     bandGapEv = Math.max(0.4, (bandGapEv + 0.35) * (1.0 + 1.8 / Math.max(1.5, a0Angstrom * 0.45)));

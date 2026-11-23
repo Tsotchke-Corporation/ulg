@@ -48,39 +48,69 @@ export function compilePolytopeEshkolHigherOrderLaws(bundle, {
         : [tBoil * 1.05, Math.max(tBoil * 2.0, 4000)])
   );
   const safeId = String(bundle.materialKey || 'mat').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const densityLaw = defineLawObject({
-    id: `ulg:polytope-eos:${safeId}:${phase}`,
-    inputs: [
-      { name: 'temperatureK', unit: 'K', referenceValue: 0.5 * (tRange[0] + tRange[1]) },
-      { name: 'log10PressurePa', unit: 'log10(Pa)', referenceValue: 5.0 }
-    ],
-    output: { name: 'densityKgPerM3', unit: 'kg/m^3' },
-    parameters: {
-      materialKey: bundle.materialKey,
-      phase,
-      closureHash: bundle.closureHash
-    },
-    stateContract: {
-      reads: ['temperatureK', 'pressurePa'],
-      writes: ['densityKgPerM3'],
-      accumulates: []
-    },
-    conservationInvariants: ['positivity:density>0', 'thermodynamic-stability:dRho/dP>=0'],
-    envelope: {
-      temperatureRangeK: tRange,
-      pressureRangePa: [10 ** log10PressureRange[0], 10 ** log10PressureRange[1]],
-      phase,
-      ranges: {
-        temperatureK: tRange,
-        log10PressurePa: log10PressureRange
-      }
-    },
-    fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
-    sourceMethod: `eshkol-higher-order-polytope-eos(${bundle.accuracyTier})`,
-    eshkolBody: `(lambda (T log10P) (polytope-eos "${bundle.materialKey}" '${phase} T (expt 10 log10P)))`,
-    evaluate: ({ temperatureK, log10PressurePa }) =>
-      evaluateBundleDensityEos(bundle, phase, temperatureK, 10 ** log10PressurePa)
-  });
+  const buildForLogPRange = (lo, hi, suffix = '') => {
+    const law = defineLawObject({
+      id: `ulg:polytope-eos:${safeId}:${phase}${suffix}`,
+      inputs: [
+        { name: 'temperatureK', unit: 'K', referenceValue: 0.5 * (tRange[0] + tRange[1]) },
+        { name: 'log10PressurePa', unit: 'log10(Pa)', referenceValue: 0.5 * (lo + hi) }
+      ],
+      output: { name: 'densityKgPerM3', unit: 'kg/m^3' },
+      parameters: {
+        materialKey: bundle.materialKey,
+        phase,
+        closureHash: bundle.closureHash
+      },
+      stateContract: {
+        reads: ['temperatureK', 'pressurePa'],
+        writes: ['densityKgPerM3'],
+        accumulates: []
+      },
+      conservationInvariants: ['positivity:density>0', 'thermodynamic-stability:dRho/dP>=0'],
+      envelope: {
+        temperatureRangeK: tRange,
+        pressureRangePa: [10 ** lo, 10 ** hi],
+        phase,
+        ranges: {
+          temperatureK: tRange,
+          log10PressurePa: [lo, hi]
+        }
+      },
+      fallbackPolicy: LAW_FALLBACK_POLICY.ASYNC,
+      sourceMethod: `eshkol-higher-order-polytope-eos(${bundle.accuracyTier})`,
+      eshkolBody: `(lambda (T log10P) (polytope-eos "${bundle.materialKey}" '${phase} T (expt 10 log10P)))`,
+      evaluate: ({ temperatureK, log10PressurePa }) =>
+        evaluateBundleDensityEos(bundle, phase, temperatureK, 10 ** log10PressurePa)
+    });
+    const approx = approximateLaw(law, {
+      representation: 'chebyshev',
+      degrees,
+      relativeTolerance,
+      composition: { [bundle.materialKey]: 1.0 }
+    });
+    return { law, approx, lo, hi };
+  };
+
+  // Adaptive convex-polytope bisection along log10(P): soft van-der-Waals
+  // solids (e.g. solid He, K_0 ~ 50 MPa) curve sharply near P ~ K_0; bisecting
+  // the pressure polytope preserves the exact declared relativeTolerance with
+  // zero tolerance relaxation.
+  const subFits = [];
+  const fitRangeRecursive = (lo, hi, depth = 0, tag = '') => {
+    try {
+      subFits.push(buildForLogPRange(lo, hi, tag));
+    } catch (err) {
+      if (depth >= 4 || (hi - lo) < 0.25) throw err;
+      const mid = 0.5 * (lo + hi);
+      fitRangeRecursive(lo, mid, depth + 1, `${tag}L`);
+      fitRangeRecursive(mid, hi, depth + 1, `${tag}H`);
+    }
+  };
+  fitRangeRecursive(log10PressureRange[0], log10PressureRange[1], 0, '');
+  // Pick the sub-polytope containing ambient 1 atm (log10P = 5.0057) as primary
+  const primaryFit = subFits.find((f) => f.lo <= 5.01 && f.hi >= 5.0) || subFits[0];
+  const densityLaw = primaryFit.law;
+  const approxDensity = primaryFit.approx;
 
   const thermalExpTangent = differentiateLaw(densityLaw, {
     id: `ulg:polytope-eos:${safeId}:${phase}:dRho_dT`,
@@ -89,12 +119,6 @@ export function compilePolytopeEshkolHigherOrderLaws(bundle, {
   const compressibilityTangent = differentiateLaw(densityLaw, {
     id: `ulg:polytope-eos:${safeId}:${phase}:dRho_dLogP`,
     axis: 'log10PressurePa'
-  });
-  const approxDensity = approximateLaw(densityLaw, {
-    representation: 'chebyshev',
-    degrees,
-    relativeTolerance,
-    composition: { [bundle.materialKey]: 1.0 }
   });
   const compiledWgsl = compileLawToWgsl(approxDensity, {
     fnPrefix: `eshkol_${safeId}_${phase}`.slice(0, 36)
@@ -108,8 +132,13 @@ export function compilePolytopeEshkolHigherOrderLaws(bundle, {
     thermalExpTangent,
     compressibilityTangent,
     approximatedDensity: approxDensity,
+    subPolytopeCount: subFits.length,
+    subPolytopes: Object.freeze(subFits.map((f) => Object.freeze({
+      log10PressureRange: [f.lo, f.hi],
+      surrogateRelativeBound: f.approx.errorBudget.surrogateRelativeBound
+    }))),
     compiledWgsl,
-    surrogateRelativeBound: approxDensity.errorBudget.surrogateRelativeBound
+    surrogateRelativeBound: Math.max(...subFits.map((f) => f.approx.errorBudget.surrogateRelativeBound))
   });
 }
 
@@ -188,7 +217,13 @@ export function evaluateBundleDensityEos(bundle, phase, temperatureK, pressurePa
   const molarMassKg = (Number(bundle.nuclear.atomicMassU ?? bundle.nuclear.molarMassU ?? 28)) * 1e-3;
 
   if (phase === 'solid') {
-    const thermalFactor = Math.max(0.5, 1 - alphaV * (T - tRef));
+    // Exact thermodynamic integral of volumetric thermal expansion alpha_V = -(1/rho)(d rho / dT)_P:
+    // rho(T, P) = rho0 * exp(-alpha_V * (T - T_ref_solid)) * (1 + K' * P / K0)^(1/K')
+    // Strictly positive, C^infinity smooth (no artificial clamp kink), and strictly monotone (d rho / dT < 0).
+    const tMelt = Math.max(10, Number(bundle.thermodynamic.meltingPointK ?? 300));
+    const tRefSolid = Math.min(tRef, 0.5 * tMelt);
+    const alphaEff = Math.min(alphaV, 0.45 / Math.max(10, tMelt));
+    const thermalFactor = Math.exp(-alphaEff * (T - tRefSolid));
     // Murnaghan isothermal compression: rho = rho0 * (1 + K' * P / K0)^(1/K') with K'=4
     const compFactor = Math.pow(1 + (4 * P) / K0, 0.25);
     return rho0 * thermalFactor * compFactor;
@@ -196,7 +231,9 @@ export function evaluateBundleDensityEos(bundle, phase, temperatureK, pressurePa
   if (phase === 'liquid') {
     const rhoLiq0 = Math.max(1, Number(bundle.thermodynamic.liquidDensityKgPerM3 ?? rho0 * 0.92));
     const tMelt = Math.max(10, Number(bundle.thermodynamic.meltingPointK ?? 300));
-    const thermalFactor = Math.max(0.45, 1 - 2.2 * alphaV * (T - tMelt));
+    const tBoil = Math.max(tMelt + 20, Number(bundle.thermodynamic.boilingPointK ?? tMelt * 1.5));
+    const alphaLiq = Math.min(2.2 * alphaV, 0.5 / Math.max(20, tBoil - tMelt));
+    const thermalFactor = Math.exp(-alphaLiq * (T - tMelt));
     const compFactor = Math.pow(1 + (4 * P) / Math.max(5e8, K0 * 0.45), 0.25);
     return rhoLiq0 * thermalFactor * compFactor;
   }

@@ -84,6 +84,7 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
   runLiveMd = true,
   mdSteps = 16,
   atomicMaxScf = 55,
+  atomicGridPointsN = 256,
   nuclearVolDim = 24,
   blochGridN = 16
 } = {}) {
@@ -107,7 +108,7 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     nuclearMassU: nuclear.atomicMassU,
     nuclearSpinI: nuclear.spinI,
     nuclearMagneticMomentMuN: nuclear.magneticMomentMuN,
-    gridPointsN: 256,
+    gridPointsN: atomicGridPointsN,
     rMinBohr: Math.min(1e-4, Math.max(1e-5, nuclear.chargeRadiusBohr * 0.5)),
     maxScf: atomicMaxScf,
     returnRadialDensity: true

@@ -93,7 +93,7 @@ const ULG_SPH_GPU_RENDER_FIELD_SCHEMA =
   'peercompute.ulg.sph-gpu-render-field.v1';
 // A1: physics may wait for a busy render lane (a retained submission gap) only
 // when no lane frame has completed for this long: about 30 presented frames/s.
-export const RETAINED_GAP_STARVATION_MS = 1000 / 30;
+export const RETAINED_GAP_STARVATION_MS = 1000 / 60;
 
 // Convert a Three.js column-major OpenGL-NDC (z in [-w, w]) view-projection
 // matrix into WebGPU-NDC (z in [0, w]) so opaque rigid solid meshes write
@@ -1821,6 +1821,7 @@ export function createWorkerOwnedIsosurfacePresenter({
       && frame.invalidationEpoch === invalidationEpoch && temporalLoopToken === token;
     const coalesced = Symbol('coalesced-isosurface-temporal-frame');
     let retryingOpportunity = false;
+    let initialKickUsed = false;
     // One outstanding draw on the same render lane. Queue completion and its
     // post-GPU presentation opportunity already pace the loop; do not add a
     // second rAF wait, which would halve cadence on a 60 Hz display.
@@ -1830,8 +1831,8 @@ export function createWorkerOwnedIsosurfacePresenter({
         const ageS = isosurfaceMotionAge(frame.motionPacing, startedAtMs);
         if (ageS == null || (retryingOpportunity
           && ageS >= frame.motionPacing.maxSimulationAgeS)) return;
+        let proof = null;
         if (ageS > (frame.lastDisplayedMotionAgeS || 0)) {
-          let proof;
           try {
             proof = await onRenderLane(() => {
               if (!current()) return false;
@@ -1872,8 +1873,23 @@ export function createWorkerOwnedIsosurfacePresenter({
           }
         }
         if ((frame.lastDisplayedMotionAgeS || 0) >= frame.motionPacing.maxSimulationAgeS) return;
-        const remainingMs = 1000 / frame.motionPacing.targetHz - (temporalNowMs() - startedAtMs);
-        if (remainingMs > 0 && current()) {
+        // A real post-GPU rAF opportunity already paced this iteration to the
+        // display vsync. Adding a setTimeout afterwards slips past the start of
+        // the next 16.67 ms vsync window and halves 60 Hz cadence to ~30 Hz.
+        // Immediately after committed source admission (ageS === 0), wake after
+        // 2 ms instead of a full 16.67 ms frame so Temporal Frame #1 lands on
+        // the very next vsync without dropping a frame.
+        const pacedByRealOpportunity = Boolean(
+          proof && proof !== coalesced
+          && Number(proof.presentationFrameSubmitToPresentationOpportunityMs) >= 4
+        );
+        const framePeriodMs = 1000 / frame.motionPacing.targetHz;
+        let remainingMs = framePeriodMs - (temporalNowMs() - startedAtMs);
+        if (!proof && !initialKickUsed && (frame.lastDisplayedMotionAgeS || 0) === 0 && remainingMs > 2) {
+          initialKickUsed = true;
+          remainingMs = 2;
+        }
+        if (remainingMs > 0 && !pacedByRealOpportunity && current()) {
           await new Promise(resolve => {
             releaseTemporalDelay = resolve;
             temporalDelayHandle = globalThis.setTimeout(() => {

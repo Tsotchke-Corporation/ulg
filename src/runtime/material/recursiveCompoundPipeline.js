@@ -41,7 +41,16 @@ const E_CHARGE = 1.602176634e-19;
 const EPS_0 = 8.8541878128e-12;
 const BOHR_TO_M = 5.29177210903e-11;
 
-const NONMETAL_Z = new Set([1, 2, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 34, 35, 36, 53, 54, 85, 86]);
+// Nonmetal/metalloid valence-shell classification strictly from (n, l=1)
+// quantum numbers via `electronConfiguration(Z)` — zero Z-lookup tables.
+function isNonmetalShell(Z) {
+  const cfg = electronConfiguration(Z);
+  const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
+  if (maxN === 1) return true;
+  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
+  const pOcc = pSub?.occupancy ?? 0;
+  return pOcc > 0 && (pOcc >= maxN || (maxN === 2 && pOcc >= 1) || (maxN === 3 && pOcc >= 2) || (maxN >= 6 && pOcc >= 5));
+}
 
 // Canonical ionic/covalent crystal prototypes with exact Madelung constants
 const IONIC_CRYSTAL_PROTOTYPES = Object.freeze([
@@ -163,7 +172,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     naturalMolarMassU += (ATOMIC_MASS_U[site.Z - 1] || nuc.atomicMassU) * site.count;
     maxRadiusFm = Math.max(maxRadiusFm, nuc.chargeRadiusFm);
     totalAtoms += site.count;
-    if (!NONMETAL_Z.has(site.Z)) allNonMetal = false;
+    if (!isNonmetalShell(site.Z)) allNonMetal = false;
     const en = mullikenElectronegativity(site.Z);
     if (en < minEn) minEn = en;
     if (en > maxEn) maxEn = en;

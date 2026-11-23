@@ -113,24 +113,30 @@ export function hydrateFoundationPolytopes(record) {
           Object.freeze({ name: 'temperatureK', unit: 'K', min: Number(tRange[0]), max: Number(tRange[1]) }),
           Object.freeze({ name: 'pressurePa', unit: 'Pa', min: Number(pRange[0]), max: Number(pRange[1]), scale: 'log10' })
         ];
-    const fit = p.fit
+    const hasValidFit = Boolean(
+      p.fit
+      && p.fit.valid !== false
+      && Array.isArray(p.fit.degrees) && p.fit.degrees.length >= 2
+      && (p.fit.coefficients instanceof Float32Array
+        ? p.fit.coefficients.length > 0
+        : Array.isArray(p.fit.coefficients) && p.fit.coefficients.length > 0)
+    );
+    const fit = hasValidFit
       ? {
           ...p.fit,
           coefficients: p.fit.coefficients instanceof Float32Array
             ? p.fit.coefficients
-            : new Float32Array(p.fit.coefficients || []),
-          valid: p.fit.valid !== false
+            : new Float32Array(p.fit.coefficients),
+          valid: true
         }
       : {
-          // Synthesize exact degree-(1,1) linear fallback table from mechanical density if JSON omitted coeffs
-          degrees: [1, 1],
-          coefficients: new Float32Array([
-            Number(record.mechanical?.densityKgPerM3) || 1000, 0,
-            0, 0
-          ]),
-          maxRelativeError: 0.05,
-          uncertaintyBound: 0.05,
-          valid: true
+          // Fail closed: unfitted polytopes are never silently fabricated as constant solid density.
+          degrees: [0, 0],
+          coefficients: new Float32Array(0),
+          maxRelativeError: Infinity,
+          uncertaintyBound: Infinity,
+          valid: false,
+          reason: 'missing-chebyshev-fit-coefficients'
         };
     return Object.freeze({
       polytopeId: String(p.polytopeId || `${record.materialKey}:${p.phase}`),

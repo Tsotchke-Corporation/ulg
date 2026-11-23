@@ -18,10 +18,19 @@ const CHROME = process.env.ULG_THERMAL_CHROME || '/usr/bin/google-chrome';
 
 test('Priority 3 host: 15/15 compounds.json formulas resolve through Gate 2 Foundation Polytope Atlas with zero reference-fallback', async () => {
   const { foundationPolytopeCompoundRecordFor, referenceBankRecordForMaterial } = await import('../src/runtime/material/referenceBankAnchoring.js');
-  const { attachFoundationPolytopeAtlasToRegistry } = await import('../src/runtime/material/foundationPolytopeAtlasGpuBridge.js');
+  const { attachFoundationPolytopeAtlasToRegistry, hydrateFoundationPolytopes } = await import('../src/runtime/material/foundationPolytopeAtlasGpuBridge.js');
   const { MaterialRegistry } = await import('../src/runtime/material/MaterialRegistry.js');
   const { ClosureRegistry } = await import('../src/runtime/ClosureRegistry.js');
   const { ArtifactCache } = await import('../src/runtime/ArtifactCache.js');
+
+  // Verify unfitted polytopes fail closed (zero silent constant solid-density fabrication!)
+  const unfitted = hydrateFoundationPolytopes({
+    materialKey: 'UnfittedTest',
+    mechanical: { densityKgPerM3: 1800 },
+    polytopes: [{ polytopeId: 'unfitted:gas', phase: 'gas', tRangeK: [400, 3000], pRangePa: [1e2, 1e8], inequalities: [] }]
+  });
+  assert.equal(unfitted[0].fit.valid, false, 'Unfitted polytope must fail closed');
+  assert.equal(unfitted[0].fit.coefficients.length, 0, 'Unfitted polytope must not fabricate coefficients');
 
   const legacyCompounds = JSON.parse(await readFile(new URL('../data/material-properties/compounds.json', import.meta.url), 'utf8'));
   assert.equal(legacyCompounds.records.length, 15);
@@ -124,7 +133,9 @@ test('Priority 3 native Vulkan proof: GPU Tier-1 Polytope Atlas evaluation, hitF
     assert.equal(out.h2oEval.receipt.hitCount, 3, 'H2O must hit 3 in-domain states on GPU');
     assert.equal(out.h2oEval.receipt.missCount, 1, 'H2O must fail closed on 1 out-of-domain state');
     assert.equal(out.h2oEval.rows[3].hit, false);
-    assert.ok(out.h2oEval.rows[0].densityKgPerM3 > 0);
+    assert.ok(out.h2oEval.rows[0].densityKgPerM3 > 500, `H2O solid density=${out.h2oEval.rows[0].densityKgPerM3}`);
+    assert.ok(out.h2oEval.rows[2].densityKgPerM3 > 0.05 && out.h2oEval.rows[2].densityKgPerM3 < 5.0,
+      `H2O gas at 900 K, 1 atm must return real steam density (< 5 kg/m³), got ${out.h2oEval.rows[2].densityKgPerM3}`);
 
     assert.equal(out.feEval.receipt.hitCount, 2);
     assert.equal(out.feEval.receipt.missCount, 1);

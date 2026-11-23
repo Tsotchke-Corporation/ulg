@@ -83,6 +83,7 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
   runNuclearGpuVolume = true,
   runLiveMd = true,
   mdSteps = 16,
+  mdCellsPerSide = 3,
   atomicMaxScf = 55,
   atomicGridPointsN = 256,
   nuclearVolDim = 24,
@@ -99,11 +100,30 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     ? await solveNuclearStructureWebGpu(device, Z, massNumberA, { volDim: nuclearVolDim })
     : deriveNuclearClosure(Z, massNumberA);
 
+  // Augment configuration with dipole-allowed (Delta l = +-1) virtual (occupancy=0) target subshells
+  // for d/f elements so the GPU radial Kohn-Sham eigensolver derives exact relativistic d->p / f->d
+  // interband transition energies strictly on WebGPU (zero effect on rho(r), zero CPU solveAtom()!).
+  const baseCfg = electronConfiguration(Z);
+  const augmentedCfg = baseCfg.map((s) => ({ ...s }));
+  const addVirtual = (n, l) => {
+    let targetN = Math.max(n, l + 1);
+    while (augmentedCfg.some((sub) => sub.n === targetN && sub.l === l)) targetN += 1;
+    augmentedCfg.push({ n: targetN, l, occupancy: 0 });
+  };
+  for (const sub of baseCfg) {
+    if (sub.occupancy > 0 && sub.l >= 2) {
+      if (sub.l - 1 >= 0) addVirtual(sub.n + 1, sub.l - 1);
+      if (sub.l + 1 <= 4) addVirtual(sub.n + 1, sub.l + 1);
+    }
+  }
+  augmentedCfg.sort((a, b) => (a.n + a.l) - (b.n + b.l) || a.n - b.n || a.l - b.l);
+
   // Stage P1.2: 100% GPU-Resident Finite-Nucleus Relativistic Atomic DFT (+ reduced-mass & hyperfine)
   const atom = await solveAtomFullWebGpu(device, Z, {
     functional: 'pbe',
     spinOrbit: true,
     scalarRelativistic: true,
+    configuration: augmentedCfg,
     nuclearChargeRadiusBohr: nuclear.chargeRadiusBohr,
     nuclearMassU: nuclear.atomicMassU,
     nuclearSpinI: nuclear.spinI,
@@ -136,7 +156,8 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     emResult: em,
     temperatureK,
     runLiveMd,
-    mdSteps
+    mdSteps,
+    mdCellsPerSide
   });
 
   const accuracyTier = Z > 100
@@ -215,7 +236,8 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       superconductingTcK: em.superconductingTcK,
       opticalSrgb: em.opticalSrgb,
       refractiveIndex550Nm: em.refractiveIndex550Nm,
-      reflectance550Nm: em.reflectance550Nm
+      reflectance550Nm: em.reflectance550Nm,
+      oscillatorSource: em.provenance?.oscillatorSource ?? 'none'
     },
     mechanical: {
       crystalStructure: bulk.crystalStructure,
@@ -250,10 +272,14 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       thermalConductivityWPerMK: thermo.thermalConductivityWPerMK,
       potentialModel: thermo.potential.modelName,
       mdEnergyEv: thermo.mdTelemetry?.totalEnergyEv ?? null,
-      mdTempK: thermo.mdTelemetry?.temperatureK ?? null
+      mdTempK: thermo.mdTelemetry?.temperatureK ?? null,
+      mdPressureGPa: thermo.mdTelemetry?.pressureGPa ?? null,
+      mdMsdA2: thermo.mdTelemetry?.msdA2 ?? null
     },
     provenance: {
-      status: 'webgpu-derived',
+      status: em.provenance?.status === 'hybrid-webgpu-spectral-cpu-oscillators'
+        ? 'hybrid-webgpu-spectral-cpu-oscillators'
+        : 'webgpu-derived',
       scientificValidation: false,
       extrapolationPolicy: 'fail-closed'
     }

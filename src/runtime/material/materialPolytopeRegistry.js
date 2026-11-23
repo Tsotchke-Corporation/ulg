@@ -133,7 +133,13 @@ export function bisectConvexPolytope(polytope, axisIndex = null) {
   const splitT = axisIndex === 0 || (axisIndex == null && (tAxis.max - tAxis.min) / Math.max(1, tAxis.min) >= (logHiP - logLoP));
   const extra = polytope.inequalities.slice(4);
   if (splitT) {
-    const midT = 0.5 * (tAxis.min + tAxis.max);
+    // Use geometric midpoint for wide log-spanning gas/plasma temperature domains (e.g. 20..6500 K)
+    // where ln(rho) ~ -ln(T) curves sharply at low T; keep arithmetic midpoint for solid/liquid.
+    const useGeomT = (polytope.phase === 'gas' || polytope.phase === 'plasma')
+      && (tAxis.max / Math.max(1e-3, tAxis.min) > 10);
+    const midT = useGeomT
+      ? Math.sqrt(tAxis.min * tAxis.max)
+      : 0.5 * (tAxis.min + tAxis.max);
     return [
       buildConvexPolytope({
         ...polytope,

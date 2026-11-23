@@ -197,7 +197,7 @@ export function packPolytopeAtlasForGpu(polytopes, { materialIndex = 0 } = {}) {
     data[r + 11] = Number(fit?.uncertaintyBound ?? 0);
     data[r + 12] = TIER_CODE[p?.accuracyTier] ?? 2;
     data[r + 13] = Number(materialIndex);
-    data[r + 14] = fit ? (fit.valid ? 1 : 0) : 1;
+    data[r + 14] = fit ? (fit.valid ? (fit.valueTransform === 'exp' ? 2 : 1) : 0) : 1;
     data[r + 15] = parseInt(String(p?.invalidationKey || '0').slice(0, 6), 16) || 0;
 
     for (const f of facets) {
@@ -311,6 +311,8 @@ fn eval_polytope_atlas_2d(
       b1 = b0;
     }
   }
-  return vec4<f32>(val, best_margin, phase_code, 1.0);
+  let valid_mode = (*atlas)[r + 14u];
+  let out_val = select(val, exp(clamp(val, -80.0, 80.0)), valid_mode > 1.5);
+  return vec4<f32>(out_val, best_margin, phase_code, 1.0);
 }
 `;

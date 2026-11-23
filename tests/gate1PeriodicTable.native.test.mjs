@@ -84,6 +84,9 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
           meltingK: res.bundle.thermodynamic.meltingPointK,
           boilingK: res.bundle.thermodynamic.boilingPointK,
           mdTempK: res.bundle.thermodynamic.mdTempK,
+          mdPressureGPa: res.bundle.thermodynamic.mdPressureGPa,
+          opticalSrgb: res.bundle.electromagnetic.opticalSrgb,
+          oscillatorSource: res.bundle.electromagnetic.oscillatorSource,
           blochPeak: res.visualData.bulk.blochDensity3d ? Math.max(...res.visualData.bulk.blochDensity3d) : 0,
           g7: res.g7Advisory
         });
@@ -102,6 +105,7 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
       assert.equal(r.valid, true, `Bundle invalid for ${r.symbol}: ${r.errors}`);
       assert.equal(r.finiteNucleusUsed, true, `Finite nucleus must feed atomic DFT for ${r.symbol}`);
       assert.equal(r.perScfCpuReadbacks, 0, `0 per-SCF CPU readbacks for ${r.symbol}`);
+      assert.notEqual(r.oscillatorSource, 'cpu-radial-ks-interband', `${r.symbol} must not fall back to CPU interband solver`);
       assert.ok(Number.isFinite(r.totalEnergyHa) && r.totalEnergyHa < 0, `totalEnergyHa=${r.totalEnergyHa} for ${r.symbol}`);
       assert.ok(Number.isFinite(r.rhoKgM3) && r.rhoKgM3 > 10, `rhoKgM3=${r.rhoKgM3} for ${r.symbol}`);
       assert.ok(r.meltingK > 1 && r.boilingK > r.meltingK, `Tm/Tb ordering for ${r.symbol}`);
@@ -113,14 +117,23 @@ test('Gate 1 native Vulkan proof: complete 5-domain WebGPU Periodic Table engine
     assert.equal(byZ[10].isMetal, false, 'Ne must be insulating');
     assert.equal(byZ[18].isMetal, false, 'Ar must be insulating');
     assert.equal(byZ[14].crystal, 'diamond', 'Si selects diamond crystal');
+    assert.equal(byZ[26].crystal, 'bcc', 'Fe selects bcc crystal');
+    assert.equal(byZ[29].crystal, 'fcc', 'Cu selects fcc crystal');
+    assert.equal(byZ[79].crystal, 'fcc', 'Au selects fcc crystal');
+    assert.equal(byZ[64].crystal, 'hcp', 'Gd selects hcp crystal');
     assert.ok(byZ[14].bandGapEv > 0.4, `Si band gap=${byZ[14].bandGapEv}`);
     assert.equal(byZ[26].magPhase, 'ferromagnetic', 'Fe must be emergent ferromagnetic');
     assert.equal(byZ[64].magPhase, 'ferromagnetic', 'Gd must be emergent ferromagnetic');
     assert.equal(byZ[29].isMetal, true, 'Cu must be metallic');
     assert.ok(byZ[29].sigmaSPerM > 1e5, `Cu conductivity=${byZ[29].sigmaSPerM}`);
+    // Real GPU optical closure: distinct sRGB across metals (not constant [0.7, 0.72, 0.76] fallback!)
+    const distinctMetalSrgb = new Set([26, 29, 79].map((z) => byZ[z].opticalSrgb.map((v) => v.toFixed(3)).join(',')));
+    assert.ok(distinctMetalSrgb.size >= 2, `Metals must have distinct GPU-derived optical sRGB, got ${[...distinctMetalSrgb]}`);
+    assert.ok(byZ[79].opticalSrgb[0] > byZ[79].opticalSrgb[2], `Relativistic Au must be warmer/yellower (r > b), got ${byZ[79].opticalSrgb}`);
     assert.ok(byZ[79].qedShiftHa > byZ[6].qedShiftHa, 'Relativistic QED radiative shift grows strongly with Z');
     assert.equal(byZ[118].tier, 'tier-3-theoretical-envelope', 'Og must carry honest tier-3 theoretical label');
     assert.ok(Number.isFinite(byZ[26].mdTempK) && byZ[26].mdTempK > 10, 'Live Fe EAM MD ran');
+    assert.ok(Number.isFinite(byZ[26].mdPressureGPa) && Math.abs(byZ[26].mdPressureGPa) < 50, `Fe BCC MD pressure must be bounded (not 1470 GPa BCC-in-FCC mismatch!), got ${byZ[26].mdPressureGPa} GPa`);
     assert.ok(Number.isFinite(byZ[18].mdTempK) && byZ[18].mdTempK > 5, 'Live Ar LJ MD ran');
   } finally {
     await browser.close();

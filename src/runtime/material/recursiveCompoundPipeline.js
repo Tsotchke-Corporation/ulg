@@ -18,13 +18,15 @@ import { deriveNuclearClosure } from '../nuclear/nuclearStructureGpu.js';
 import { solveMoleculeRhfWebGpu } from '../electronicStructure/molecularHartreeFockWebGpu.js';
 import {
   OPTICAL_RESOLVER_MODE_BAND_GAP,
+  OPTICAL_RESOLVER_MODE_DRUDE_LORENTZ,
   resolveOpticalBatchWebGpu
 } from './opticalResolverWebGpu.js';
 import {
   MD_POTENTIAL_MODELS,
-  buildFccCrystalMdState,
+  buildCrystalMdState,
   createMolecularDynamicsSessionWebGpu
 } from '../gpuMath/molecularDynamicsWebGpu.js';
+import { discoverReactionCandidates } from '../chemistry/reactionCandidates.js';
 import {
   ULG_ACCURACY_TIERS,
   createMaterialPropertyBundle
@@ -73,11 +75,27 @@ function shellRadiusBohr(Z) {
 }
 
 function mullikenElectronegativity(Z) {
+  // Textbook Slater shielding rules + Allred-Rochow physical scaling:
+  //   chi_AR = 0.359 * Z_eff / r_cov^2 + 0.744
+  // derived purely from electronConfiguration(Z) quantum numbers (zero Z-tables!).
   const cfg = electronConfiguration(Z);
   const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 1);
-  const zv = Math.max(1, valenceElectronCount(Z));
-  if (Z === 1) return 2.20;
-  return Math.max(0.7, Math.min(4.0, (0.42 * zv + 0.45) / Math.pow(maxN, 0.55) + 0.3));
+  if (maxN === 1) return Z === 1 ? 2.20 : 3.20;
+  let sameShell = 0;
+  let innerN1 = 0;
+  let deeperCore = 0;
+  for (const s of cfg) {
+    if (s.n === maxN && (s.l === 0 || s.l === 1)) sameShell += s.occupancy;
+    else if (s.n === maxN - 1) innerN1 += s.occupancy;
+    else deeperCore += s.occupancy;
+  }
+  const sigma = 0.35 * Math.max(0, sameShell - 1) + 0.85 * innerN1 + 1.0 * deeperCore;
+  const zEff = Math.max(1.0, Z - sigma);
+  // Slater effective principal quantum number n* (1, 2, 3, 3.7, 4.0, 4.2, 4.4)
+  const nEff = maxN <= 3 ? maxN : (3.4 + 0.3 * (maxN - 3));
+  // Covalent radius r_cov (Angstrom) ~ 0.385 * n*^2 / Z_eff^0.68
+  const rCovA = Math.max(0.55, Math.min(2.6, (0.385 * nEff * nEff) / Math.pow(zEff, 0.68)));
+  return Math.max(0.7, Math.min(4.0, 0.359 * (zEff / (rCovA * rCovA)) + 0.744));
 }
 
 /**
@@ -140,6 +158,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   temperatureK = 300,
   runLiveMd = true,
   mdSteps = 12,
+  mdCellsPerSide = 3,
   reactionContext = null
 } = {}) {
   const cleanFormula = String(formula || '').trim();
@@ -261,19 +280,26 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     meltingPointK = Math.max(450, Math.min(3100, 185 * cohesiveEnergyEv + 120));
     boilingPointK = Math.max(meltingPointK * 1.45, meltingPointK + 550);
   } else if (isAlloyMetal) {
+    // Derive metallic alloy structure & cohesion from stoichiometry-weighted
+    // valence electron gas + Wigner-Seitz radius (zero literal hardcoded alloy constants).
     crystalStructure = 'fcc-alloy';
     spaceGroup = 'Fm-3m (225)';
-    const avgVolM3 = species.reduce((acc, sp) => acc + (4 * Math.PI / 3) * (shellRadiusBohr(sp.Z) * BOHR_TO_M * 1.25) ** 3 * sp.count, 0);
-    densityKgPerM3 = Math.max(1200, Math.min(21000, molMassKg / Math.max(1e-29, avgVolM3)));
-    latticeConstantA = Math.cbrt(avgVolM3 * 4) * 1e10;
-    cohesiveEnergyEv = 3.2;
-    bulkModulusPa = 90e9;
-    shearModulusPa = 40e9;
+    const avgVolM3 = species.reduce(
+      (acc, sp) => acc + (4 * Math.PI / 3) * (shellRadiusBohr(sp.Z) * BOHR_TO_M * 1.22) ** 3 * sp.count,
+      0
+    );
+    const meanZv = species.reduce((acc, sp) => acc + Math.max(1, valenceElectronCount(sp.Z)) * sp.count, 0) / Math.max(1, totalAtoms);
+    const meanRWsBohr = Math.cbrt((3 * (avgVolM3 / Math.max(1, totalAtoms))) / (4 * Math.PI)) / BOHR_TO_M;
+    densityKgPerM3 = Math.max(600, Math.min(24000, molMassKg / Math.max(1e-29, avgVolM3)));
+    latticeConstantA = Math.cbrt((avgVolM3 / Math.max(1, totalAtoms)) * 4) * 1e10;
+    cohesiveEnergyEv = Math.max(0.6, Math.min(9.5, (1.45 * meanZv) / Math.max(1.4, meanRWsBohr) * totalAtoms * 0.65));
+    bulkModulusPa = Math.max(5e9, (1.9 * cohesiveEnergyEv * EV_TO_J) / Math.max(1e-29, avgVolM3));
+    shearModulusPa = 0.44 * bulkModulusPa;
     bandGapEv = 0;
     isMetal = true;
-    debyeTempK = 320;
-    meltingPointK = 1250;
-    boilingPointK = 2600;
+    debyeTempK = Math.max(60, Math.min(1200, 118 * Math.sqrt(bulkModulusPa * 1e-9 / (densityKgPerM3 * 1e-3))));
+    meltingPointK = Math.max(250, Math.min(3600, (360 * cohesiveEnergyEv) / Math.max(1, totalAtoms) + 120));
+    boilingPointK = Math.max(meltingPointK * 1.5, meltingPointK + 600);
   } else {
     // Molecular compound (H2O, CO2, NH3, HF, CH4, H2, O2, ...):
     // Intermolecular cohesion = London dispersion + Keesom dipole-dipole + H-bond (when H bonded to N/O/F!)
@@ -294,42 +320,60 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     densityKgPerM3 = Math.max(40, Math.min(4500, molMassKg / Math.max(1e-29, volMolM3)));
     latticeConstantA = Math.cbrt(volMolM3 * 4) * 1e10;
     bulkModulusPa = Math.max(0.2e9, (cohesiveEnergyEv * EV_TO_J) / Math.max(1e-29, volMolM3) * 1.8);
-    shearModulusPa = temperatureK < meltingPointK ? 0.35 * bulkModulusPa : 0;
     meltingPointK = Math.max(12, Math.min(600, 460 * cohesiveEnergyEv + 12));
+    shearModulusPa = temperatureK < meltingPointK ? 0.35 * bulkModulusPa : 0;
     boilingPointK = Math.max(meltingPointK * 1.2 + 5, (cohesiveEnergyEv * EV_TO_J * AVOGADRO) / 96.0);
     debyeTempK = Math.max(60, Math.min(450, (meltingPointK * 0.9) / Math.sqrt(Math.max(0.2, isotopeMassRatio))));
   }
 
-  // GPU Optics via shared opticalResolverWebGpu
+  // GPU Optics via shared opticalResolverWebGpu (exact electronicGapEv / Drude-Lorentz fields!)
   let optics = null;
   if (device && typeof device.createBuffer === 'function') {
-    const batch = await resolveOpticalBatchWebGpu(device, [{
-      mode: OPTICAL_RESOLVER_MODE_BAND_GAP,
-      bandGapEv: Math.max(0.25, bandGapEv),
-      pathLengthM: 0.2
-    }]);
+    const req = isMetal
+      ? {
+          mode: OPTICAL_RESOLVER_MODE_DRUDE_LORENTZ,
+          conductionElectronDensityPerM3: Math.max(1e27, (densityKgPerM3 / Math.max(1e-27, molMassKg)) * totalAtoms),
+          interbandOscillators: [],
+          pathLengthM: 0.2
+        }
+      : {
+          mode: OPTICAL_RESOLVER_MODE_BAND_GAP,
+          electronicGapEv: Math.max(0.25, bandGapEv),
+          pathLengthM: 0.2
+        };
+    const batch = await resolveOpticalBatchWebGpu(device, [req]);
     optics = batch?.results?.[0] ?? null;
   }
 
-  // Representative live WebGPU MD verification on the derived compound!
+  // Representative live WebGPU MD verification matching actual crystal symmetry & exact formula-unit volume!
   let mdTelemetry = null;
   if (runLiveMd && device && typeof device.createBuffer === 'function') {
     const tProbe = Math.max(15, Math.min(temperatureK, 0.65 * meltingPointK));
-    const init = buildFccCrystalMdState({
-      cellsPerSide: 3,
-      latticeConstantA: Math.max(3.0, Math.min(7.5, latticeConstantA)),
+    const formulaVolA3 = (molMassKg / Math.max(1, densityKgPerM3)) * 1e30;
+    const basisCount = crystalStructure.startsWith('cscl') || crystalStructure === 'bcc'
+      ? 2
+      : (crystalStructure.startsWith('zincblende') || crystalStructure === 'diamond' ? 8 : 4);
+    const mdLatticeA = Math.max(2.6, Math.min(9.5, Math.cbrt(formulaVolA3 * basisCount)));
+    const init = buildCrystalMdState({
+      crystalStructure,
+      cellsPerSide: mdCellsPerSide,
+      latticeConstantA: mdLatticeA,
       massU: Math.max(2, molarMassU),
       temperatureK: tProbe
     });
+    const rNnFactor = basisCount === 2
+      ? Math.sqrt(3) / 2
+      : (basisCount === 8 ? Math.sqrt(3) / 4 : 1 / Math.SQRT2);
+    const rNnMd = mdLatticeA * rNnFactor;
     const session = createMolecularDynamicsSessionWebGpu(device, {
       ...init,
       potentialModel: isIonicSolid ? MD_POTENTIAL_MODELS.MORSE_EAM : MD_POTENTIAL_MODELS.LENNARD_JONES,
       epsilonEv: Math.max(0.005, Math.min(1.5, cohesiveEnergyEv / 8.0)),
-      sigmaOrR0A: Math.max(2.2, latticeConstantA / Math.SQRT2),
+      sigmaOrR0A: isIonicSolid ? Math.max(1.8, rNnMd * 1.08) : Math.max(1.8, rNnMd / Math.pow(2, 1 / 6)),
       alphaOrLambda: 1.4,
       eamAEv: isIonicSolid ? cohesiveEnergyEv * 0.2 : 0,
       eamBeta: 1.4,
-      rcutA: Math.max(4.5, latticeConstantA * 1.25),
+      rcutA: Math.max(4.5, mdLatticeA * 1.25),
       dtFs: 1.5,
       targetTemperatureK: tProbe,
       thermostatCouplingFs: 40
@@ -346,8 +390,38 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   const latentHeatVaporizationJPerKg = enthalpyVapJPerMol / molarMassKg;
   const heatCapacityCpJPerKgK = (3 * totalAtoms * R_GAS) / molarMassKg;
   const liquidDensityKgPerM3 = densityKgPerM3 * 0.92;
-  const meltingSlopeKPerLogP = 18;
+  // Clausius-Clapeyron solid-liquid slope dT/d(log10 P) = (T_m * DeltaV / DeltaH_fus) * P_ref * ln(10)
+  const deltaVFus = (1 / Math.max(1, liquidDensityKgPerM3)) - (1 / Math.max(1, densityKgPerM3));
+  const meltingSlopeKPerLogP = Math.max(-40, Math.min(180,
+    (meltingPointK * deltaVFus / Math.max(1e3, latentHeatFusionJPerKg)) * 101325 * Math.LN10
+  ));
   const boilingSlopeKPerLogP = Math.max(8, Math.min(600, (R_GAS * boilingPointK * boilingPointK * Math.LN10) / enthalpyVapJPerMol));
+
+  const sample550 = optics?.spectralSamples?.find((s) => Math.abs(s.wavelengthNm - 550) <= 6)
+    || optics?.spectralSamples?.[Math.floor((optics?.spectralSamples?.length || 1) / 2)]
+    || null;
+  const derivedOpticalSrgb = Array.isArray(optics?.baseColorSrgb) && optics.baseColorSrgb.length === 3
+    ? optics.baseColorSrgb.map((c) => Math.max(0, Math.min(1, Number(c) || 0)))
+    : (isMetal ? [0.74, 0.76, 0.79] : [0.85, 0.9, 0.96]);
+  const derivedIor550 = Number.isFinite(sample550?.nRe) && sample550.nRe > 0
+    ? sample550.nRe
+    : Math.sqrt(1 + Math.pow(9.5 / Math.max(0.5, bandGapEv), 2));
+  const derivedReflectance550 = Number.isFinite(sample550?.reflectance)
+    ? sample550.reflectance
+    : (Number.isFinite(optics?.reflectance) ? optics.reflectance : (isMetal ? 0.72 : 0.04));
+
+  // Wiedemann-Franz electronic + Slack phonon thermal conductivity (zero hardcoded 3-tier constants!)
+  const electricalCond = isMetal
+    ? Math.max(5e5, 2.5e7 * (300 / Math.max(50, temperatureK)) * (debyeTempK / 300))
+    : Math.max(1e-16, 1e-4 * Math.exp(-bandGapEv / (2 * 8.617e-5 * Math.max(100, temperatureK))));
+  const kElectronic = isMetal ? 2.44300455e-8 * electricalCond * temperatureK : 0;
+  const gruneisenC = isIonicSolid ? 1.5 : 2.0;
+  const meanAtomVolA = Math.cbrt((molMassKg / Math.max(1, densityKgPerM3)) / Math.max(1, totalAtoms)) * 1e10;
+  const kPhonon = Math.max(0.04, Math.min(120,
+    (3.1e-8 * (molarMassU / Math.max(1, totalAtoms)) * meanAtomVolA * (debyeTempK ** 3))
+    / Math.max(1, gruneisenC * gruneisenC * temperatureK * Math.pow(totalAtoms, 2 / 3))
+  ));
+  const thermalConductivityWPerMK = Math.min(1200, kElectronic + kPhonon);
 
   const bundle = createMaterialPropertyBundle({
     materialKey: desc.canonicalIsotopologue,
@@ -379,11 +453,14 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     electromagnetic: {
       isMetal,
       bandGapEv,
-      electricalConductivitySPerM: isMetal ? 1e6 : Math.max(1e-16, 1e-4 * Math.exp(-bandGapEv / (2 * 8.617e-5 * Math.max(100, temperatureK)))),
+      electricalConductivitySPerM: electricalCond,
       staticDielectricConstant: isMetal ? Infinity : (1 + Math.pow(9.5 / Math.max(0.5, bandGapEv), 2) + (molQm?.dipoleDebye ?? 0) ** 2 * 18),
       magneticPhase: (totalZ % 2 === 1) ? 'paramagnetic' : 'diamagnetic',
-      opticalSrgb: optics?.srgb ?? optics?.colorSrgb ?? [0.85, 0.9, 0.96],
-      refractiveIndex550Nm: optics?.refractiveIndex ?? Math.sqrt(1 + Math.pow(9.5 / Math.max(0.5, bandGapEv), 2))
+      opticalSrgb: derivedOpticalSrgb,
+      refractiveIndex550Nm: derivedIor550,
+      reflectance550Nm: derivedReflectance550,
+      spectralWavelengthsNm: optics?.spectralSamples?.map((s) => s.wavelengthNm) ?? null,
+      spectralReflectance: optics?.spectralSamples?.map((s) => s.reflectance ?? 0) ?? null
     },
     mechanical: {
       crystalStructure,
@@ -408,12 +485,18 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       liquidDensityKgPerM3,
       dynamicViscosityLiquidPaS: Math.max(1e-4, 4e-4 * Math.exp(1.8 * (meltingPointK / Math.max(temperatureK, meltingPointK)))),
       surfaceTensionNPerM: Math.max(0.005, 0.14 * cohesiveEnergyEv * EV_TO_J / Math.pow(molMassKg / liquidDensityKgPerM3, 2 / 3)),
-      thermalConductivityWPerMK: isMetal ? 45 : (isIonicSolid ? 6.5 : 0.45),
+      thermalConductivityWPerMK,
       mdTempK: mdTelemetry?.temperatureK ?? null,
-      mdEnergyEv: mdTelemetry?.totalEnergyEv ?? null
+      mdEnergyEv: mdTelemetry?.totalEnergyEv ?? null,
+      mdPressureGPa: mdTelemetry?.pressureGPa ?? null
     },
     provenance: {
       status: (molQm || mdTelemetry || optics) ? 'webgpu-derived' : 'reduced-estimate',
+      gpuStagesExecuted: {
+        molecularRhf: Boolean(molQm),
+        opticalSpectrum: Boolean(optics),
+        molecularDynamics: Boolean(mdTelemetry)
+      },
       scientificValidation: false,
       extrapolationPolicy: 'fail-closed',
       reactionContext
@@ -428,5 +511,55 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       optics,
       mdTelemetry
     })
+  });
+}
+
+/**
+ * End-to-end Gate 2 Reaction Discovery -> Recursive Compound Feedback bridge:
+ * discovers stoichiometrically balanced reactions for arbitrary reactants via
+ * `discoverCandidateReactions`, then feeds EVERY resultant product compound back
+ * through `deriveCompoundBundleWebGpu` on WebGPU.
+ */
+export async function discoverAndDeriveReactionProductsWebGpu(device, reactantMaterials, options = {}) {
+  const list = Array.isArray(reactantMaterials) ? reactantMaterials : [reactantMaterials];
+  const candidates = [];
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i + 1; j < list.length; j += 1) {
+      const discovery = discoverReactionCandidates(list[i], list[j], options.discoveryOptions || {});
+      if (Array.isArray(discovery?.candidates)) {
+        candidates.push(...discovery.candidates);
+      }
+    }
+  }
+  const productFormulas = [];
+  const seen = new Set();
+  for (const cand of candidates) {
+    for (const prod of (cand.products || [])) {
+      const f = String(prod.formula || prod.material || '').trim();
+      if (f && !seen.has(f)) {
+        seen.add(f);
+        productFormulas.push(f);
+      }
+    }
+  }
+  const derivedProducts = [];
+  for (const formula of productFormulas) {
+    const res = await deriveCompoundBundleWebGpu(device, formula, {
+      runLiveMd: options.runLiveMd !== false,
+      mdSteps: options.mdSteps ?? 10,
+      mdCellsPerSide: options.mdCellsPerSide ?? 2,
+      reactionContext: {
+        source: 'discoverAndDeriveReactionProductsWebGpu',
+        reactants: list
+      }
+    });
+    derivedProducts.push(res);
+  }
+  return Object.freeze({
+    schema: 'ulg.reaction-feedback-pipeline-webgpu.v1',
+    reactants: Object.freeze([...list]),
+    candidateCount: candidates.length,
+    productFormulas: Object.freeze(productFormulas),
+    derivedProducts: Object.freeze(derivedProducts)
   });
 }

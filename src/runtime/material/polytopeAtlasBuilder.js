@@ -294,7 +294,8 @@ export async function buildMaterialPolytopeAtlasWebGpu(device, bundle, {
         relativeTolerance,
         requirePositive: true,
         maxDepth: maxBisectDepth,
-        propertyName: 'densityKgPerM3'
+        propertyName: 'densityKgPerM3',
+        logScale: poly.phase === 'gas' || poly.phase === 'plasma'
       }
     );
     allFitted.push(...fitted.polytopes);

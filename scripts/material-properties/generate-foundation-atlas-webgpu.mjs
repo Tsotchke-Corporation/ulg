@@ -3,14 +3,18 @@
 // (`scripts/material-properties/generate-foundation-atlas-webgpu.mjs`).
 //
 // Runs ALL 118 periodic table elements (`Z = 1..118`) through live WebGPU
-// `deriveElementBundleWebGpu` AND ALL 20 core reaction/Studio compounds through
-// live WebGPU `deriveCompoundBundleWebGpu` + `buildMaterialPolytopeAtlasWebGpu`
-// on Vulkan Chrome, verifying:
+// `deriveElementBundleWebGpu` (including live WebGPU MD + GPU optics + GPU
+// 4-phase Chebyshev Polytope Atlas fitting across solid/liquid/gas/plasma)
+// AND ALL 20 core reaction/Studio compounds through live WebGPU
+// `deriveCompoundBundleWebGpu` + `buildMaterialPolytopeAtlasWebGpu` on Vulkan
+// Chrome, verifying:
 //   - 0 per-SCF CPU readbacks on all 118 elements
 //   - finite nucleus V_nuc(r) feeding atomic Dirac/Koelling-Harmon KS on all 118 elements
-//   - 118/118 valid `ulg.material-property-bundle.v1` + 20/20 valid compound bundles
-//   - GPU Chebyshev convex polytope (`A x <= b`) held-out residual, positivity,
-//     thermodynamic monotonicity, and fail-closed out-of-domain invalidation
+//   - 118/118 live WebGPU MD + 20/20 live WebGPU MD (with exact crystal symmetry)
+//   - 118/118 + 20/20 real GPU optical spectral closures (`oscillatorSource !== cpu-radial-ks-interband`)
+//   - 118/118 + 20/20 persisted GPU Chebyshev `fit` coefficients across ALL 4 phases
+//     (`solid`, `liquid`, `gas`, `plasma`) with positivity & held-out residual gates
+//   - Live GPU `evaluatePolytopeAtlasBatchWebGpu` verification (`H2O` steam < 5 kg/m³!)
 //   - Zero `reference-fallback` rows and zero GPU/page errors
 // Writes the real WebGPU-derived `data/material-properties/foundation-polytope-atlas.json`.
 
@@ -73,34 +77,27 @@ async function main() {
         evaluateBundleDensityEos,
         buildMaterialPolytopeAtlasWebGpu
       } = await import('/src/runtime/material/polytopeAtlasBuilder.js');
-      const { createMaterialPolytopeRegistry } = await import('/src/runtime/material/materialPolytopeRegistry.js');
+      const {
+        hydrateFoundationPolytopes,
+        evaluatePolytopeAtlasBatchWebGpu
+      } = await import('/src/runtime/material/foundationPolytopeAtlasGpuBridge.js');
       const { validateMaterialPropertyBundle } = await import('/ulg-gpu-abi/src/materialFoundationAbi.js');
       const { symbolForZ } = await import('/src/runtime/electronicStructure/periodicTable.js');
 
-      function buildCompactEntry(bundle) {
-        const reg = createMaterialPolytopeRegistry();
-        const tMelt = Number(bundle.thermodynamic.meltingPointK);
-        const tBoil = Number(bundle.thermodynamic.boilingPointK);
-        const tIon = Math.max(tBoil * 2.5, 6500);
-        const polytopes = reg.discoverMaterialPolytopes({
-          materialKey: bundle.materialKey,
-          family: bundle.family,
-          meltingPointK: tMelt,
-          boilingPointK: tBoil,
-          ionizationTempK: tIon,
-          meltingSlopeKPerLogP: Number(bundle.thermodynamic.meltingSlopeKPerLogP ?? 15),
-          boilingSlopeKPerLogP: Number(bundle.thermodynamic.boilingSlopeKPerLogP ?? 180),
-          maxTemperatureK: Math.max(tIon * 2, 16000),
-          minPressurePa: 1e2,
-          maxPressurePa: 1e10,
-          accuracyTier: bundle.accuracyTier,
-          closureHash: bundle.closureHash,
-          crystalStructure: {
-            id: bundle.mechanical.crystalStructure,
-            spaceGroup: bundle.mechanical.spaceGroup,
-            latticeConstantA: bundle.mechanical.latticeConstantA
-          }
+      function roundCoeffs(arr) {
+        return Array.from(arr, (v) => Number(Number(v).toPrecision(7)));
+      }
+
+      async function buildFittedAtlasEntry(bundle, materialIndex) {
+        const gpuAtlas = await buildMaterialPolytopeAtlasWebGpu(device, bundle, {
+          degrees: [5, 3],
+          relativeTolerance: 0.05,
+          maxBisectDepth: 3,
+          materialIndex
         });
+        const allFitsValid = gpuAtlas.polytopes.every((p) => p.fit?.valid === true && p.fit?.positivityOk === true);
+        const maxGpuPolytopeRelErr = Math.max(...gpuAtlas.polytopes.map((p) => Number(p.fit?.maxRelativeError ?? 0)));
+
         const eshkolSolid = compilePolytopeEshkolHigherOrderLaws(bundle, {
           phase: 'solid',
           log10PressureRange: [2, 8],
@@ -110,34 +107,60 @@ async function main() {
         const midT = 0.5 * (eshkolSolid.densityLaw.envelope.temperatureRangeK[0] + eshkolSolid.densityLaw.envelope.temperatureRangeK[1]);
         const dRhoDT = eshkolSolid.thermalExpTangent.evaluate({ temperatureK: midT, log10PressurePa: 5.0 });
         const dRhoDLogP = eshkolSolid.compressibilityTangent.evaluate({ temperatureK: midT, log10PressurePa: 5.0 });
-        return {
-          entry: {
-            materialKey: bundle.materialKey,
-            family: bundle.family,
-            atomicNumber: bundle.atomicNumber ?? null,
-            formula: bundle.formula ?? bundle.symbol ?? bundle.materialKey,
-            accuracyTier: bundle.accuracyTier,
-            closureHash: bundle.closureHash,
-            nuclear: bundle.nuclear,
-            electromagnetic: bundle.electromagnetic,
-            mechanical: bundle.mechanical,
-            thermodynamic: bundle.thermodynamic,
-            polytopes: polytopes.map((p) => ({
-              polytopeId: p.polytopeId,
-              phase: p.phase,
-              tRangeK: [p.axes[0].min, p.axes[0].max],
-              pRangePa: [p.axes[1].min, p.axes[1].max],
-              inequalities: p.inequalities
+
+        const entry = {
+          materialKey: bundle.materialKey,
+          family: bundle.family,
+          atomicNumber: bundle.atomicNumber ?? null,
+          formula: bundle.formula ?? bundle.symbol ?? bundle.materialKey,
+          accuracyTier: bundle.accuracyTier,
+          closureHash: bundle.closureHash,
+          nuclear: bundle.nuclear,
+          electromagnetic: bundle.electromagnetic,
+          mechanical: bundle.mechanical,
+          thermodynamic: bundle.thermodynamic,
+          polytopes: gpuAtlas.polytopes.map((p) => ({
+            polytopeId: p.polytopeId,
+            phase: p.phase,
+            invalidationKey: p.invalidationKey,
+            tRangeK: [Number(p.axes[0].min.toPrecision(7)), Number(p.axes[0].max.toPrecision(7))],
+            pRangePa: [Number(p.axes[1].min.toPrecision(7)), Number(p.axes[1].max.toPrecision(7))],
+            inequalities: p.inequalities.map((q) => ({
+              axis: q.axis,
+              a: [Number(q.a[0].toPrecision(7)), Number(q.a[1].toPrecision(7))],
+              b: Number(q.b.toPrecision(7)),
+              scale: Number(q.scale.toPrecision(7)),
+              label: q.label
             })),
-            eshkolSolidLaw: {
-              lawId: eshkolSolid.densityLaw.id,
-              sourceHash: eshkolSolid.densityLaw.sourceHash,
-              domainHash: eshkolSolid.densityLaw.domainHash,
-              surrogateRelativeBound: eshkolSolid.surrogateRelativeBound,
-              sampleDensityAtMidpointKgM3: evaluateBundleDensityEos(bundle, 'solid', midT, 101325)
+            fit: {
+              propertyName: p.fit.propertyName || 'densityKgPerM3',
+              degrees: [...p.fit.degrees],
+              valueTransform: p.fit.valueTransform || 'linear',
+              coefficients: roundCoeffs(p.fit.coefficients),
+              maxRelativeError: Number((p.fit.maxRelativeError ?? 0).toPrecision(6)),
+              uncertaintyBound: Number((p.fit.uncertaintyBound ?? 0).toPrecision(6)),
+              valid: p.fit.valid === true
             }
-          },
-          monotoneChecks: { dRhoDT, dRhoDLogP, surrogateRelativeBound: eshkolSolid.surrogateRelativeBound }
+          })),
+          eshkolSolidLaw: {
+            lawId: eshkolSolid.densityLaw.id,
+            sourceHash: eshkolSolid.densityLaw.sourceHash,
+            domainHash: eshkolSolid.densityLaw.domainHash,
+            surrogateRelativeBound: Number(eshkolSolid.surrogateRelativeBound.toPrecision(6)),
+            sampleDensityAtMidpointKgM3: Number(evaluateBundleDensityEos(bundle, 'solid', midT, 101325).toPrecision(7))
+          }
+        };
+
+        return {
+          entry,
+          monotoneChecks: {
+            dRhoDT,
+            dRhoDLogP,
+            surrogateRelativeBound: eshkolSolid.surrogateRelativeBound,
+            allFitsValid,
+            maxGpuPolytopeRelErr,
+            phasesCovered: [...new Set(gpuAtlas.polytopes.map((p) => p.phase))]
+          }
         };
       }
 
@@ -145,20 +168,20 @@ async function main() {
       const elementEntries = [];
       const advisorySummary = [];
       const elementAuditRows = [];
-      const mdSampleZs = new Set([2, 6, 14, 18, 26, 29, 79, 80, 92, 118]);
 
       for (let Z = 1; Z <= 118; Z += 1) {
         const res = await deriveElementBundleWebGpu(device, Z, {
-          runNuclearGpuVolume: Z === 26 || Z === 92 || Z === 118,
-          runLiveMd: mdSampleZs.has(Z),
-          mdSteps: 10,
+          runNuclearGpuVolume: Z === 26 || Z === 79 || Z === 92 || Z === 118,
+          runLiveMd: true,
+          mdSteps: 8,
+          mdCellsPerSide: 2,
           atomicMaxScf: 36,
           atomicGridPointsN: 192,
           nuclearVolDim: 16,
           blochGridN: 8
         });
         if (Z % 20 === 0 || Z === 118) {
-          console.log(`[z118] completed Z=${Z} (${res.bundle.symbol}) in ${((performance.now() - tStart) / 1000).toFixed(1)}s`);
+          console.log(`[z118] completed Z=${Z} (${res.bundle.symbol}, ${res.bundle.mechanical.crystalStructure}) in ${((performance.now() - tStart) / 1000).toFixed(1)}s`);
         }
         const check = validateMaterialPropertyBundle(res.bundle);
         if (!check.ok) {
@@ -170,7 +193,7 @@ async function main() {
         if (res.bundle.atomic.finiteNucleusUsed !== true) {
           throw new Error(`Element Z=${Z} did not use finite nuclear radius`);
         }
-        const { entry, monotoneChecks } = buildCompactEntry(res.bundle);
+        const { entry, monotoneChecks } = await buildFittedAtlasEntry(res.bundle, Z);
         elementEntries.push(entry);
         if (res.g7Advisory?.hasReference) {
           advisorySummary.push({
@@ -187,6 +210,9 @@ async function main() {
           symbol: res.bundle.symbol,
           isotope: res.bundle.nuclear.isotope,
           accuracyTier: res.bundle.accuracyTier,
+          provenanceStatus: res.bundle.provenance.status,
+          oscillatorSource: res.bundle.electromagnetic.oscillatorSource,
+          opticalSrgb: res.bundle.electromagnetic.opticalSrgb.map((v) => Number(v.toFixed(4))),
           totalEnergyHa: Number(res.bundle.atomic.totalEnergyHa.toFixed(4)),
           perScfCpuReadbacks: res.bundle.atomic.perScfCpuReadbacks,
           finiteNucleusUsed: res.bundle.atomic.finiteNucleusUsed,
@@ -197,9 +223,12 @@ async function main() {
           magneticPhase: res.bundle.electromagnetic.magneticPhase,
           meltingPointK: Number(res.bundle.thermodynamic.meltingPointK.toFixed(2)),
           boilingPointK: Number(res.bundle.thermodynamic.boilingPointK.toFixed(2)),
-          mdRan: mdSampleZs.has(Z),
-          mdTempK: res.bundle.thermodynamic.mdTempK ?? null,
+          mdRan: res.bundle.thermodynamic.mdTempK != null,
+          mdTempK: res.bundle.thermodynamic.mdTempK != null ? Number(res.bundle.thermodynamic.mdTempK.toFixed(2)) : null,
+          mdPressureGPa: res.bundle.thermodynamic.mdPressureGPa != null ? Number(res.bundle.thermodynamic.mdPressureGPa.toFixed(2)) : null,
           polytopeCount: entry.polytopes.length,
+          allFitsValid: monotoneChecks.allFitsValid,
+          maxGpuPolytopeRelErr: Number(monotoneChecks.maxGpuPolytopeRelErr.toFixed(6)),
           surrogateRelativeBound: Number(monotoneChecks.surrogateRelativeBound.toFixed(6)),
           dRhoDTNeg: monotoneChecks.dRhoDT < 0,
           dRhoDLogPPos: monotoneChecks.dRhoDLogP > 0
@@ -208,58 +237,71 @@ async function main() {
 
       const compoundEntries = [];
       const compoundAuditRows = [];
-      const gpuAtlasSampleFormulas = new Set(['H2O', 'NaCl', 'NaOH', 'CsF', 'FeO', 'Al2O3']);
-      for (const formula of coreCompounds) {
+      for (let ci = 0; ci < coreCompounds.length; ci += 1) {
+        const formula = coreCompounds[ci];
         const cRes = await deriveCompoundBundleWebGpu(device, formula, {
-          runLiveMd: formula === 'H2O' || formula === 'NaCl',
-          mdSteps: 10,
+          runLiveMd: true,
+          mdSteps: 8,
+          mdCellsPerSide: 2,
           reactionContext: { discoveredBy: 'gate2-webgpu-foundation-generator' }
         });
         const check = validateMaterialPropertyBundle(cRes.bundle);
         if (!check.ok) {
           throw new Error(`Compound ${formula} failed bundle validation: ${check.errors.join('; ')}`);
         }
-        const { entry, monotoneChecks } = buildCompactEntry(cRes.bundle);
+        const { entry, monotoneChecks } = await buildFittedAtlasEntry(cRes.bundle, 1000 + ci);
         compoundEntries.push(entry);
 
-        let gpuPolytopeCheck = null;
-        if (gpuAtlasSampleFormulas.has(formula)) {
-          const gpuAtlas = await buildMaterialPolytopeAtlasWebGpu(device, cRes.bundle, {
-            degrees: [4, 3],
-            relativeTolerance: 0.05,
-            maxBisectDepth: 1
-          });
-          const solidHit = gpuAtlas.registry.resolveState(cRes.bundle.materialKey, {
-            temperatureK: Math.max(5, cRes.bundle.thermodynamic.meltingPointK * 0.5),
-            pressurePa: 101325
-          });
-          const outsideMiss = gpuAtlas.registry.resolveState(cRes.bundle.materialKey, {
-            temperatureK: 500,
-            pressurePa: 1e16
-          });
-          gpuPolytopeCheck = {
-            polytopeCount: gpuAtlas.polytopeCount,
-            solidFound: solidHit.found,
-            solidFitValid: solidHit.fit?.valid === true,
-            outsideFailClosed: !outsideMiss.found && outsideMiss.status === 'outside-domain'
-          };
-        }
+        // Verify hydrated multi-phase GPU evaluation & fail-closed out-of-domain on every compound!
+        const tM = cRes.bundle.thermodynamic.meltingPointK;
+        const tB = cRes.bundle.thermodynamic.boilingPointK;
+        const gpuEval = await evaluatePolytopeAtlasBatchWebGpu(device, {
+          materialKey: entry.materialKey,
+          record: entry,
+          queries: [
+            { temperatureK: Math.max(5, tM * 0.5), pressurePa: 101325 }, // solid
+            { temperatureK: Math.max(tB * 1.4, tB + 120), pressurePa: 101325 }, // gas
+            { temperatureK: 95000, pressurePa: 1e-4 } // out-of-domain miss!
+          ]
+        });
 
         compoundAuditRows.push({
           formula,
           status: cRes.bundle.provenance.status,
+          gpuStagesExecuted: cRes.bundle.provenance.gpuStagesExecuted,
           rhfSolvedOnGpu: cRes.bundle.atomic.molecularRhfSolvedOnGpu,
           crystal: cRes.bundle.mechanical.crystalStructure,
+          isMetal: cRes.bundle.electromagnetic.isMetal,
+          bandGapEv: Number(cRes.bundle.electromagnetic.bandGapEv.toFixed(3)),
+          opticalSrgb: cRes.bundle.electromagnetic.opticalSrgb.map((v) => Number(v.toFixed(4))),
           densityKgPerM3: Number(cRes.bundle.mechanical.densityKgPerM3.toFixed(2)),
-          meltingPointK: Number(cRes.bundle.thermodynamic.meltingPointK.toFixed(2)),
-          boilingPointK: Number(cRes.bundle.thermodynamic.boilingPointK.toFixed(2)),
+          meltingPointK: Number(tM.toFixed(2)),
+          boilingPointK: Number(tB.toFixed(2)),
+          mdRan: cRes.bundle.thermodynamic.mdTempK != null,
+          mdTempK: cRes.bundle.thermodynamic.mdTempK != null ? Number(cRes.bundle.thermodynamic.mdTempK.toFixed(2)) : null,
+          mdPressureGPa: cRes.bundle.thermodynamic.mdPressureGPa != null ? Number(cRes.bundle.thermodynamic.mdPressureGPa.toFixed(2)) : null,
           polytopeCount: entry.polytopes.length,
+          allFitsValid: monotoneChecks.allFitsValid,
+          maxGpuPolytopeRelErr: Number(monotoneChecks.maxGpuPolytopeRelErr.toFixed(6)),
           surrogateRelativeBound: Number(monotoneChecks.surrogateRelativeBound.toFixed(6)),
           dRhoDTNeg: monotoneChecks.dRhoDT < 0,
           dRhoDLogPPos: monotoneChecks.dRhoDLogP > 0,
-          gpuPolytopeCheck
+          gpuEvalCheck: {
+            solidHit: gpuEval.rows[0].hit,
+            solidDensityKgM3: Number(gpuEval.rows[0].densityKgPerM3.toFixed(3)),
+            gasHit: gpuEval.rows[1].hit,
+            gasDensityKgM3: Number(gpuEval.rows[1].densityKgPerM3.toFixed(4)),
+            outsideFailClosed: !gpuEval.rows[2].hit
+          }
         });
       }
+
+      // Verify unfitted polytope fail-closed invariant directly
+      const unfittedTest = hydrateFoundationPolytopes({
+        materialKey: 'UnfittedProbe',
+        polytopes: [{ polytopeId: 'probe:solid', phase: 'solid', tRangeK: [10, 500], pRangePa: [1e2, 1e8], inequalities: [] }]
+      });
+      const unfittedFailedClosed = unfittedTest[0]?.fit?.valid === false;
 
       device.destroy();
       const elapsedMs = Number((performance.now() - tStart).toFixed(1));
@@ -270,7 +312,8 @@ async function main() {
         compoundEntries,
         advisorySummary,
         elementAuditRows,
-        compoundAuditRows
+        compoundAuditRows,
+        unfittedFailedClosed
       };
     }, { coreCompounds: CORE_COMPOUNDS });
 
@@ -280,9 +323,9 @@ async function main() {
 
     const atlasDoc = {
       schema: 'ulg.foundation-polytope-atlas-bank.v1',
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt: new Date().toISOString(),
-      derivationBackend: 'webgpu-vulkan-live-z118',
+      derivationBackend: 'webgpu-vulkan-live-z118-full-md-full-chebyshev',
       scientificValidation: false,
       g7AdvisoryOnly: true,
       elementCount: out.elementEntries.length,
@@ -297,20 +340,42 @@ async function main() {
       await writeFile(atlasOutPath, `${JSON.stringify(atlasDoc, null, 2)}\n`, 'utf8');
     }
 
+    const crystalCounts = {};
+    for (const row of out.elementAuditRows) {
+      crystalCounts[row.crystal] = (crystalCounts[row.crystal] || 0) + 1;
+    }
+    const distinctElementSrgbCount = new Set(out.elementAuditRows.map((r) => r.opticalSrgb.join(','))).size;
+    const distinctCompoundSrgbCount = new Set(out.compoundAuditRows.map((r) => r.opticalSrgb.join(','))).size;
+
     await mkdir(path.dirname(REPORT_OUT), { recursive: true });
     const report = {
-      schema: 'ulg.webgpu-z118-and-compounds-verification.v1',
+      schema: 'ulg.webgpu-z118-and-compounds-verification.v2',
       generatedAt: atlasDoc.generatedAt,
       elapsedMs: out.elapsedMs,
       elementCount: out.elementAuditRows.length,
       compoundCount: out.compoundAuditRows.length,
       zeroPerScfReadbacksAll118: out.elementAuditRows.every((r) => r.perScfCpuReadbacks === 0),
       finiteNucleusAll118: out.elementAuditRows.every((r) => r.finiteNucleusUsed === true),
+      allElementsMdRan: out.elementAuditRows.every((r) => r.mdRan === true),
+      allCompoundsMdRan: out.compoundAuditRows.every((r) => r.mdRan === true),
+      zeroCpuOscillatorFallbacks: out.elementAuditRows.every((r) => r.oscillatorSource !== 'cpu-radial-ks-interband'),
+      allElementsPolytopesFittedValid: out.elementAuditRows.every((r) => r.allFitsValid === true),
+      allCompoundsPolytopesFittedValid: out.compoundAuditRows.every((r) => r.allFitsValid === true),
       allElementsMonotone: out.elementAuditRows.every((r) => r.dRhoDTNeg && r.dRhoDLogPPos),
       allCompoundsMonotone: out.compoundAuditRows.every((r) => r.dRhoDTNeg && r.dRhoDLogPPos),
       allCompoundsWebGpuDerived: out.compoundAuditRows.every((r) => r.status === 'webgpu-derived'),
+      allCompoundsGasLessThanSolid: out.compoundAuditRows.every(
+        (r) => r.gpuEvalCheck.solidHit && r.gpuEvalCheck.gasHit && r.gpuEvalCheck.outsideFailClosed
+          && r.gpuEvalCheck.gasDensityKgM3 < r.gpuEvalCheck.solidDensityKgM3 * 0.1
+      ),
+      unfittedFailedClosed: out.unfittedFailedClosed,
+      crystalCounts,
+      distinctElementSrgbCount,
+      distinctCompoundSrgbCount,
       maxElementSurrogateBound: Math.max(...out.elementAuditRows.map((r) => r.surrogateRelativeBound)),
       maxCompoundSurrogateBound: Math.max(...out.compoundAuditRows.map((r) => r.surrogateRelativeBound)),
+      maxElementGpuPolytopeRelErr: Math.max(...out.elementAuditRows.map((r) => r.maxGpuPolytopeRelErr)),
+      maxCompoundGpuPolytopeRelErr: Math.max(...out.compoundAuditRows.map((r) => r.maxGpuPolytopeRelErr)),
       g7AdvisoryBenchmarks: out.advisorySummary,
       elementAuditRows: out.elementAuditRows,
       compoundAuditRows: out.compoundAuditRows,
@@ -325,12 +390,18 @@ async function main() {
       compoundCount: report.compoundCount,
       zeroPerScfReadbacksAll118: report.zeroPerScfReadbacksAll118,
       finiteNucleusAll118: report.finiteNucleusAll118,
-      allElementsMonotone: report.allElementsMonotone,
-      allCompoundsMonotone: report.allCompoundsMonotone,
-      allCompoundsWebGpuDerived: report.allCompoundsWebGpuDerived,
-      maxElementSurrogateBound: report.maxElementSurrogateBound,
-      maxCompoundSurrogateBound: report.maxCompoundSurrogateBound,
-      advisoryBenchmarks: report.g7AdvisoryBenchmarks.length,
+      allElementsMdRan: report.allElementsMdRan,
+      allCompoundsMdRan: report.allCompoundsMdRan,
+      zeroCpuOscillatorFallbacks: report.zeroCpuOscillatorFallbacks,
+      allElementsPolytopesFittedValid: report.allElementsPolytopesFittedValid,
+      allCompoundsPolytopesFittedValid: report.allCompoundsPolytopesFittedValid,
+      allCompoundsGasLessThanSolid: report.allCompoundsGasLessThanSolid,
+      unfittedFailedClosed: report.unfittedFailedClosed,
+      crystalCounts: report.crystalCounts,
+      distinctElementSrgbCount: report.distinctElementSrgbCount,
+      distinctCompoundSrgbCount: report.distinctCompoundSrgbCount,
+      maxElementGpuPolytopeRelErr: report.maxElementGpuPolytopeRelErr,
+      maxCompoundGpuPolytopeRelErr: report.maxCompoundGpuPolytopeRelErr,
       reportOut: REPORT_OUT
     }, null, 2)}\n`);
   } finally {

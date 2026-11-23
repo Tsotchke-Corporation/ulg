@@ -65,12 +65,21 @@
       }
       .tab-btn.active { background: rgba(86,194,255,0.22); border-color: var(--accent); color: #fff; font-weight: 600; }
       .viewport-wrap { flex: 1; position: relative; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
-      #gpu-canvas { width: 100%; height: 100%; display: block; background: #050911; }
+      .canvas-stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #050911; }
+      #gpu-canvas { width: 100%; height: 100%; display: block; background: #050911; cursor: grab; }
+      #gpu-canvas:active { cursor: grabbing; }
+      #gpu-hud {
+        position: absolute; top: 10px; left: 12px; right: 12px; pointer-events: none;
+        display: flex; flex-direction: column; gap: 4px;
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+      }
+      #gpu-hud-title { font-size: 13px; font-weight: 700; color: var(--accent); }
+      #gpu-hud-sub { font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; color: var(--text); opacity: 0.92; }
       .plot-pane {
         background: rgba(10,16,28,0.95); border-left: 1px solid var(--border);
-        padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+        padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
       }
-      canvas.plot { width: 100%; height: 185px; background: #070d18; border: 1px solid var(--border); border-radius: 6px; }
+      canvas.plot { width: 100%; height: 148px; background: #070d18; border: 1px solid var(--border); border-radius: 6px; }
       .badge {
         display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px;
         background: rgba(255,156,84,0.18); border: 1px solid rgba(255,156,84,0.5); color: var(--accent2);
@@ -141,15 +150,25 @@
         </div>
 
         <div class="viewport-wrap">
-          <canvas id="gpu-canvas"></canvas>
+          <div class="canvas-stage">
+            <canvas id="gpu-canvas"></canvas>
+            <div id="gpu-hud">
+              <div id="gpu-hud-title">WebGPU 3D Scientific Viewport</div>
+              <div id="gpu-hud-sub">Direct GPU storage-buffer rendering (fixed camera; drag to orbit)</div>
+            </div>
+          </div>
           <section class="plot-pane">
             <div class="card">
               <h3 id="plot1-title">Chart of Nuclides / Live Diagnostic</h3>
-              <canvas id="plot1" class="plot" width="320" height="185"></canvas>
+              <canvas id="plot1" class="plot" width="320" height="148"></canvas>
             </div>
             <div class="card">
               <h3 id="plot2-title">WKB Barrier / Bands / RDF / Polytopes</h3>
-              <canvas id="plot2" class="plot" width="320" height="185"></canvas>
+              <canvas id="plot2" class="plot" width="320" height="148"></canvas>
+            </div>
+            <div id="plot3-card" class="card">
+              <h3 id="plot3-title">Spectral UV-Vis / Angular |Y_lm|² / MD Telemetry</h3>
+              <canvas id="plot3" class="plot" width="320" height="130"></canvas>
             </div>
             <div id="g7-card" class="card">
               <h3>Accuracy Tier &amp; Offline G7 Advisory</h3>

@@ -46,14 +46,21 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
   const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
   const fSub = cfg.find((s) => s.n === maxN - 2 && s.l === 3);
+  const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
+  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
   const dOcc = dSub?.occupancy ?? 0;
   const fOcc = fSub?.occupancy ?? 0;
+  const sOcc = sSub?.occupancy ?? 0;
+  const pOcc = pSub?.occupancy ?? 0;
   const unpaired = spinCfg.reduce((sum, s) => sum + (s.occUp - s.occDown), 0);
-  const zv = Math.max(1, valenceElectronCount(Z));
+  // Delocalized free-electron conduction count per atom: outer ns/np electrons plus
+  // partial s-d hybridization for open d shells (tightly-bound filled d^10 shells do NOT
+  // join the free-electron Drude plasma — essential for realistic Cu/Ag/Au plasma frequency!).
+  const nCondPerAtom = Math.max(1, sOcc + pOcc + 0.18 * Math.min(dOcc, 10 - dOcc));
 
   const omegaAtomM3 = (4 * Math.PI / 3) * ((bulkResult.wignerSeitzRadiusBohr * BOHR_TO_M) ** 3);
   const nAtom = 1 / Math.max(1e-32, omegaAtomM3);
-  const nElecCond = bulkResult.isMetal ? zv * nAtom : 0;
+  const nElecCond = bulkResult.isMetal ? nCondPerAtom * nAtom : 0;
   const plasmaFreqRadS = bulkResult.isMetal
     ? Math.sqrt((nElecCond * E_CHARGE * E_CHARGE) / (EPS_0 * M_ELECTRON))
     : 0;
@@ -145,8 +152,11 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const electricalResistivityOhmM = 1 / Math.max(1e-20, electricalConductivitySPerM);
 
   // ---- 3. Work Function Phi, Static Dielectric eps_r(0), Superconducting T_c ----
-  const homoHa = atomResult?.orbitals?.length
-    ? Math.max(...atomResult.orbitals.map((o) => Number(o.energyHa ?? o.energy ?? -0.35)))
+  const occAtomOrbs = Array.isArray(atomResult?.orbitals)
+    ? atomResult.orbitals.filter((o) => Number(o.occupancy ?? 1) > 0)
+    : [];
+  const homoHa = occAtomOrbs.length
+    ? Math.max(...occAtomOrbs.map((o) => Number(o.energyHa ?? o.energy ?? -0.35)))
     : -0.35;
   const workFunctionEv = Math.max(1.8, Math.min(6.5, (-homoHa * HA_TO_EV) * 0.52 + 0.65));
   const staticDielectricConstant = bulkResult.isMetal
@@ -161,24 +171,85 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   }
 
   // ---- 4. GPU Optical / Complex Dielectric Spectrum eps(omega), n(lambda), k(lambda), sRGB ----
+  // Extract relativistic d/f -> s/p interband oscillators directly from the
+  // already-solved GPU `atomResult.orbitals` (zero CPU `solveAtom()` fallback!).
   let optics = null;
   if (device && typeof device.createBuffer === 'function') {
+    const gpuInterbandOscillators = [];
+    if (bulkResult.isMetal && Array.isArray(atomResult?.orbitals) && atomResult.orbitals.length > 0) {
+      const nBohr = Math.max(1e-9, nElecCond) * (BOHR_TO_M ** 3);
+      const kF = Math.cbrt(3 * Math.PI * Math.PI * nBohr);
+      const kTf = Math.sqrt((4 * kF) / Math.PI);
+      const eGasEv = 0.5 * HA_TO_EV * kTf * kTf;
+      const occupied = atomResult.orbitals.filter((o) => Number(o.occupancy ?? o.occ ?? 0) > 0);
+      const targets = atomResult.orbitals.filter((o) => Number(o.occupancy ?? o.occ ?? 0) < 2 * (2 * o.l + 1));
+      for (const from of occupied) {
+        if (from.l < 2) continue;
+        const capFrom = 2 * (2 * from.l + 1);
+        const occFrom = Number(from.occupancy ?? from.occ ?? 0);
+        // Upper spin-orbit edge j = l + 1/2 (e.g. Au 5d_5/2) governs visible absorption onset!
+        const fromHa = Number.isFinite(from.energyJPlusHa)
+          ? from.energyJPlusHa
+          : Number(from.energyHa ?? from.energy ?? -0.5);
+        for (const to of targets) {
+          if (to.n === from.n && to.l === from.l) continue;
+          // Electric-dipole selection rule Delta l = +-1 (d -> p, f -> d)
+          if (Math.abs(to.l - from.l) !== 1) continue;
+          const toHa = Number(to.energyHa ?? to.energy ?? -0.05);
+          if (!(toHa > fromHa)) continue;
+          const rawGapEv = (toHa - fromHa) * HA_TO_EV;
+          if (!(rawGapEv > 0.2 && rawGapEv < 8.0)) continue;
+          const capTo = 2 * (2 * to.l + 1);
+          const occTo = Number(to.occupancy ?? to.occ ?? 0);
+          const filled = Math.min(1, Math.max(0, occFrom / capFrom));
+          const vacancy = Math.min(1, Math.max(0, 1 - occTo / capTo));
+          const angular = to.l > from.l ? (from.l + 1) / (2 * from.l + 1) : from.l / (2 * from.l + 1);
+          const strengthWeight = filled * vacancy * angular * (from.l === 2 ? 1.85 : 0.75);
+          if (!(strengthWeight > 0)) continue;
+          const dampingEv = Math.max(0.22, 0.10 * rawGapEv + 0.032 * eGasEv * Math.sqrt(strengthWeight));
+          gpuInterbandOscillators.push({ energyEv: rawGapEv, dampingEv, strengthWeight });
+        }
+      }
+      gpuInterbandOscillators.sort((a, b) => a.energyEv - b.energyEv || b.strengthWeight - a.strengthWeight);
+      gpuInterbandOscillators.splice(4);
+    }
+
+    // Drude damping from Bloch-Gruneisen scattering rate + open-d-band interband damping
+    const drudeScatterEv = bulkResult.isMetal
+      ? Math.max(0.08, Math.min(2.6, (HBAR * (nElecCond * E_CHARGE * E_CHARGE) / Math.max(1e-20, M_ELECTRON * electricalConductivitySPerM)) / EV_TO_J + (dOcc > 0 && dOcc < 10 ? 0.55 : 0)))
+      : 0.25;
     const req = bulkResult.isMetal
       ? {
         mode: OPTICAL_RESOLVER_MODE_DRUDE_LORENTZ,
         atomicNumberZ: Z,
         conductionElectronDensityPerM3: Math.max(1e27, nElecCond),
+        plasmaEnergyEv: Math.max(1.0, plasmaEnergyEv),
+        dampingEv: drudeScatterEv,
+        interbandOscillators: gpuInterbandOscillators,
         pathLengthM: 0.1
       }
       : {
         mode: OPTICAL_RESOLVER_MODE_BAND_GAP,
         atomicNumberZ: Z,
-        bandGapEv: Math.max(0.2, bulkResult.bandGapEv),
+        electronicGapEv: Math.max(0.2, bulkResult.bandGapEv),
         pathLengthM: 0.1
       };
     const batch = await resolveOpticalBatchWebGpu(device, [req]);
     optics = batch?.results?.[0] ?? null;
   }
+
+  const sample550 = optics?.spectralSamples?.find((s) => Math.abs(s.wavelengthNm - 550) <= 6)
+    || optics?.spectralSamples?.[Math.floor((optics?.spectralSamples?.length || 1) / 2)]
+    || null;
+  const derivedSrgb = Array.isArray(optics?.baseColorSrgb) && optics.baseColorSrgb.length === 3
+    ? optics.baseColorSrgb.map((c) => Math.max(0, Math.min(1, Number(c) || 0)))
+    : (bulkResult.isMetal ? [0.7, 0.72, 0.76] : [0.85, 0.9, 0.96]);
+  const derivedIor550 = Number.isFinite(sample550?.nRe) && sample550.nRe > 0
+    ? sample550.nRe
+    : (bulkResult.isMetal ? 1.5 : Math.sqrt(Math.max(1, staticDielectricConstant)));
+  const derivedReflectance550 = Number.isFinite(sample550?.reflectance)
+    ? sample550.reflectance
+    : (Number.isFinite(optics?.reflectance) ? optics.reflectance : (bulkResult.isMetal ? 0.72 : 0.04));
 
   return Object.freeze({
     schema: ULG_ELECTROMAGNETIC_CLOSURE_SCHEMA,
@@ -199,14 +270,16 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     curieOrNeelTempK,
     magneticSusceptibilitySi,
     superconductingTcK,
-    opticalSrgb: optics?.srgb ?? optics?.colorSrgb ?? [0.7, 0.72, 0.76],
-    refractiveIndex550Nm: optics?.refractiveIndex ?? (bulkResult.isMetal ? 1.5 : Math.sqrt(Math.max(1, staticDielectricConstant))),
-    reflectance550Nm: optics?.reflectance550Nm ?? optics?.meanReflectance ?? (bulkResult.isMetal ? 0.72 : 0.04),
+    opticalSrgb: derivedSrgb,
+    refractiveIndex550Nm: derivedIor550,
+    reflectance550Nm: derivedReflectance550,
     spectralWavelengthsNm: optics?.spectralSamples?.map((s) => s.wavelengthNm) ?? null,
-    spectralReflectance: optics?.spectralSamples?.map((s) => s.reflectance ?? s.value ?? 0) ?? null,
+    spectralReflectance: optics?.spectralSamples?.map((s) => s.reflectance ?? 0) ?? null,
+    spectralNRe: optics?.spectralSamples?.map((s) => s.nRe ?? 1) ?? null,
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
     provenance: Object.freeze({
-      status: optics ? 'webgpu-derived' : 'reduced-estimate',
+      status: optics ? (optics.resolverStatus || 'webgpu-derived') : 'reduced-estimate',
+      oscillatorSource: optics?.oscillatorSource ?? 'none',
       scientificValidation: false,
       model: 'stoner-bloch-gruneisen-kubo-drude-mcmillan'
     })

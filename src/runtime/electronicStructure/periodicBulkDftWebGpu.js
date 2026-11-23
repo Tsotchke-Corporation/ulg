@@ -242,7 +242,30 @@ function cohesiveEnergyPerAtomHa(rWsBohr, structure, atomDesc) {
     eBand += 0.18 * relSContraction * (spGapHa || 0.2) * Math.pow(3.2 / rWs, 2.5);
   }
 
-  return eKin + eXc + eMad + eCore + eBand;
+  // Structural crystal-symmetry energy differences from d-band moments (Pettifor
+  // structural trend) & close-packed coordination (zero hardcoded element IDs):
+  //   - Mid-d (d^3..d^6) & monovalent s^1 metals stabilize open bcc pseudogap
+  //   - Late-d (d^8..d^10) & trivalent/tetravalent simple metals favor 12-coord fcc
+  //   - Divalent s^2 (Be/Mg), early-d (d^1..d^2), d^7, & localized f metals favor hcp
+  const { sOcc = 0, pOcc = 0 } = atomDesc;
+  let eStruct = 0;
+  if (structure.id === 'bcc') {
+    const favorsBcc = (dOcc >= 3 && dOcc <= 6) || (dOcc === 0 && pOcc === 0 && sOcc === 1);
+    eStruct = favorsBcc ? -0.0085 : 0.0045;
+  } else if (structure.id === 'fcc') {
+    const favorsFcc = (dOcc >= 8 && dOcc <= 10 && !(dOcc === 10 && sOcc === 2 && pOcc === 0))
+      || (dOcc === 0 && sOcc === 2 && pOcc >= 1)
+      || (dOcc === 10 && pOcc >= 1);
+    eStruct = favorsFcc ? -0.0095 : 0.0015;
+  } else if (structure.id === 'hcp') {
+    const favorsHcp = (dOcc === 0 && pOcc === 0 && sOcc === 2)
+      || (dOcc === 1 || dOcc === 2 || dOcc === 7)
+      || (dOcc === 10 && sOcc === 2 && pOcc === 0)
+      || (fOcc > 0 && fOcc < 14);
+    eStruct = favorsHcp ? -0.0090 : 0.0020;
+  }
+
+  return eKin + eXc + eMad + eCore + eBand + eStruct;
 }
 
 function fitBirchMurnaghan3(rGrid, eGrid) {
@@ -278,6 +301,8 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
   const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 0);
   const dSub = cfg.find((s) => s.n === maxN - 1 && s.l === 2);
   const fSub = cfg.find((s) => s.n === maxN - 2 && s.l === 3);
+  const sSub = cfg.find((s) => s.n === maxN && s.l === 0);
+  const pSub = cfg.find((s) => s.n === maxN && s.l === 1);
   const zv = Math.max(1, valenceElectronCount(Z) || (dSub ? Math.min(4, dSub.occupancy) : 1));
 
   // Estimate outer radius & dipole polarizability directly from radial density moments <r^2>
@@ -304,8 +329,11 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     if (wOuter > 1e-6) meanR2Valence = r2Outer / wOuter;
   }
   const rcBohr = Math.max(0.55, Math.min(3.2, r90 * 0.78));
-  const homoHa = atomResult?.orbitals?.length
-    ? Math.max(...atomResult.orbitals.map((o) => Number(o.energyHa ?? o.energy ?? -0.4)))
+  const occupiedOrbs = Array.isArray(atomResult?.orbitals)
+    ? atomResult.orbitals.filter((o) => Number(o.occupancy ?? 1) > 0)
+    : [];
+  const homoHa = occupiedOrbs.length
+    ? Math.max(...occupiedOrbs.map((o) => Number(o.energyHa ?? o.energy ?? -0.4)))
     : -0.35;
   const ionizationPotentialHa = Math.max(0.12, -homoHa);
   // Kirkwood static dipole polarizability alpha_0 = (4 / (9 * N_val)) * (<r^2>_val)^2
@@ -322,6 +350,8 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
     ionizationPotentialHa,
     dOcc: dSub?.occupancy ?? 0,
     fOcc: fSub?.occupancy ?? 0,
+    sOcc: sSub?.occupancy ?? 0,
+    pOcc: pSub?.occupancy ?? 0,
     relSContraction,
     spGapHa: 0.22 + 0.4 * relSContraction
   });

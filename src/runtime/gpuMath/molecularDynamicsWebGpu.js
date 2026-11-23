@@ -587,11 +587,13 @@ export function createMolecularDynamicsSessionWebGpu(device, {
 }
 
 /**
- * Helper to generate a zero-net-momentum FCC crystal initial condition for any
- * element/compound lattice constant `aA`, atomic mass `massU`, and temperature `tempK`.
+ * Build a zero-net-momentum crystalline MD initial state matching the actual
+ * solved Bravais/covalent crystal symmetry (`fcc`, `vdw-fcc`, `bcc`, `hcp`,
+ * `diamond`) at its exact equilibrium atomic density (zero 2x BCC-in-FCC over-compression!).
  */
-export function buildFccCrystalMdState({
-  cellsPerSide = 4,
+export function buildCrystalMdState({
+  crystalStructure = 'fcc',
+  cellsPerSide = 3,
   latticeConstantA = 4.05,
   massU = 26.982,
   temperatureK = 300,
@@ -599,13 +601,44 @@ export function buildFccCrystalMdState({
 } = {}) {
   const nCell = Math.max(2, Math.trunc(cellsPerSide));
   const a = Number(latticeConstantA);
-  const basis = [
-    [0, 0, 0],
-    [0.5, 0.5, 0],
-    [0.5, 0, 0.5],
-    [0, 0.5, 0.5]
-  ];
-  const atomCount = 4 * nCell * nCell * nCell;
+  const struct = String(crystalStructure || 'fcc').toLowerCase();
+  let basis;
+  let cellScale = [1, 1, 1];
+  if (struct === 'bcc' || struct.startsWith('cscl')) {
+    basis = [
+      [0, 0, 0],
+      [0.5, 0.5, 0.5]
+    ];
+  } else if (struct === 'diamond' || struct.startsWith('zincblende')) {
+    basis = [
+      [0, 0, 0], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5],
+      [0.25, 0.25, 0.25], [0.75, 0.75, 0.25], [0.75, 0.25, 0.75], [0.25, 0.75, 0.75]
+    ];
+  } else if (struct === 'hcp') {
+    // Orthorhombic 4-atom HCP supercell (a_hex, sqrt(3)*a_hex, c_hex=1.633*a_hex)
+    // preserving exact 12-coordinated close-packed atomic volume a_conv^3 / 4 = a_hex^3 / sqrt(2)
+    const aHex = a / Math.SQRT2;
+    const scaleX = aHex / a;
+    const scaleY = (Math.sqrt(3) * aHex) / a;
+    const scaleZ = (1.632993 * aHex) / a;
+    cellScale = [scaleX, scaleY, scaleZ];
+    basis = [
+      [0, 0, 0],
+      [0.5, 0.5, 0],
+      [0, 1 / 3, 0.5],
+      [0.5, 5 / 6, 0.5]
+    ];
+  } else {
+    // fcc, vdw-fcc, molecular-fcc, rocksalt-B1, etc.
+    basis = [
+      [0, 0, 0],
+      [0.5, 0.5, 0],
+      [0.5, 0, 0.5],
+      [0, 0.5, 0.5]
+    ];
+  }
+
+  const atomCount = basis.length * nCell * nCell * nCell;
   const positions = new Float32Array(atomCount * 4);
   const velocities = new Float32Array(atomCount * 4);
   let s = seed >>> 0;
@@ -616,15 +649,18 @@ export function buildFccCrystalMdState({
   const gauss = () => Math.sqrt(-2 * Math.log(rand())) * Math.cos(2 * Math.PI * rand());
 
   const sigmaV = Math.sqrt(Math.max(1e-9, KB_EV_PER_K * temperatureK / Math.max(massU, 1e-6)));
+  const ax = a * cellScale[0];
+  const ay = a * cellScale[1];
+  const az = a * cellScale[2];
   let idx = 0;
   let vxSum = 0; let vySum = 0; let vzSum = 0;
   for (let ix = 0; ix < nCell; ix += 1) {
     for (let iy = 0; iy < nCell; iy += 1) {
       for (let iz = 0; iz < nCell; iz += 1) {
         for (const [bx, by, bz] of basis) {
-          positions[idx * 4 + 0] = (ix + bx) * a;
-          positions[idx * 4 + 1] = (iy + by) * a;
-          positions[idx * 4 + 2] = (iz + bz) * a;
+          positions[idx * 4 + 0] = (ix + bx) * ax;
+          positions[idx * 4 + 1] = (iy + by) * ay;
+          positions[idx * 4 + 2] = (iz + bz) * az;
           positions[idx * 4 + 3] = 0;
           const vx = gauss() * sigmaV;
           const vy = gauss() * sigmaV;
@@ -639,7 +675,6 @@ export function buildFccCrystalMdState({
       }
     }
   }
-  // Remove COM drift and rescale exactly to target temperature
   vxSum /= atomCount; vySum /= atomCount; vzSum /= atomCount;
   let ke = 0;
   for (let i = 0; i < atomCount; i += 1) {
@@ -658,6 +693,19 @@ export function buildFccCrystalMdState({
     velocities[i * 4 + 1] *= scale;
     velocities[i * 4 + 2] *= scale;
   }
-  const L = nCell * a;
-  return { atomCount, positions, velocities, boxLengthsA: [L, L, L] };
+  return {
+    crystalStructure: struct,
+    atomCount,
+    positions,
+    velocities,
+    boxLengthsA: [nCell * ax, nCell * ay, nCell * az]
+  };
+}
+
+/**
+ * Helper to generate a zero-net-momentum FCC crystal initial condition for any
+ * element/compound lattice constant `aA`, atomic mass `massU`, and temperature `tempK`.
+ */
+export function buildFccCrystalMdState(options = {}) {
+  return buildCrystalMdState({ ...options, crystalStructure: 'fcc', cellsPerSide: options.cellsPerSide ?? 4 });
 }

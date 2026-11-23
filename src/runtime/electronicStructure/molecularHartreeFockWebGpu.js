@@ -73,8 +73,14 @@ fn sample_molecular_volume(@builtin(global_invocation_id) id: vec3<u32>) {
     psi_orb = psi_orb + c * phi;
   }
   if (params.mode == 0u) {
-    let d = clamp(rho_tot * 0.45, 0.0, 1.0);
-    volume_out[idx] = vec4<f32>(d, 0.0, clamp(min_r / max(params.box_half_bohr, 1.0), 0.0, 1.0), d);
+    let d = clamp(pow(max(0.0, rho_tot * 0.65), 0.72), 0.0, 1.0);
+    let bond_glow = clamp(abs(psi_orb) * 0.85, 0.0, 1.0);
+    volume_out[idx] = vec4<f32>(
+      clamp(d * 0.82 + bond_glow * 0.25, 0.0, 1.0),
+      clamp(d * 0.48 + bond_glow * 0.55, 0.0, 1.0),
+      clamp(d * 1.05 + bond_glow * 0.35, 0.0, 1.0),
+      d
+    );
   } else {
     let pos_a = clamp(max(0.0, psi_orb), 0.0, 1.0);
     let neg_a = clamp(max(0.0, -psi_orb), 0.0, 1.0);
@@ -108,7 +114,9 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
   damping = 0.35,
   volDim = 24,
   volumeMode = 0,
-  basisName = 'sto-3g'
+  basisName = 'sto-3g',
+  sampleVolume = true,
+  initialP = null
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('solveMoleculeRhfWebGpu requires a live WebGPU GPUDevice');
@@ -133,7 +141,9 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
     }
   }
 
-  let P = new Float64Array(n * n);
+  let P = (initialP && initialP.length === n * n)
+    ? new Float64Array(initialP)
+    : new Float64Array(n * n);
   let lastE = 0;
   let eigvals = new Float32Array(n);
   let C = new Float32Array(n * n);
@@ -182,7 +192,7 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
     for (let i = 0; i < n * n; i += 1) eElec += 0.5 * Pnew[i] * (hFlat[i] + fFlat[i]);
     const eTot = eElec + eNuc;
     P = Pnew;
-    if (iter > 2 && Math.abs(eTot - lastE) < tol) {
+    if (iter > 1 && Math.abs(eTot - lastE) < tol) {
       lastE = eTot;
       break;
     }
@@ -194,6 +204,29 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
   const homoHa = eigvals[homoIdx];
   const lumoHa = nOcc < n ? eigvals[lumoIdx] : homoHa + 0.4;
   const homoLumoGapEv = Math.max(0.1, (lumoHa - homoHa) * HA_TO_EV);
+
+  if (!sampleVolume) {
+    return Object.freeze({
+      schema: ULG_MOLECULAR_HF_WEBGPU_SCHEMA,
+      backend: 'webgpu',
+      basisCount: n,
+      electronCount: totalElectrons,
+      atoms: Object.freeze(normAtoms.map((a) => Object.freeze({ Z: a.Z, x: a.x, y: a.y, z: a.z }))),
+      scfIterations: scfIter,
+      totalEnergyHa: lastE,
+      nuclearRepulsionHa: eNuc,
+      homoEnergyHa: homoHa,
+      lumoEnergyHa: lumoHa,
+      homoLumoGapEv,
+      densityMatrix: P,
+      accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+      provenance: Object.freeze({
+        status: 'webgpu-derived',
+        scientificValidation: false,
+        solver: 'gpumath-rhf-lowdin-sto3g'
+      })
+    });
+  }
 
   // Mulliken atomic charges & electric dipole moment (Debye)
   const mullikenCharges = new Float64Array(normAtoms.length);
@@ -311,4 +344,208 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
   } finally {
     for (const b of [pBuf, azBuf, wBuf, volBuf, readVol]) b.destroy();
   }
+}
+
+export const ULG_CI_NEB_WEBGPU_SCHEMA = 'ulg.electronic.ci-neb-webgpu.v1';
+
+/**
+ * 100% WebGPU Climbing-Image Nudged Elastic Band (CI-NEB) Transition-State
+ * Barrier Finder (`climbingImageNEBWebGpu`):
+ *
+ * Evaluates every reaction image's electronic energy and central-difference
+ * nuclear force via GPU generalized Fock diagonalization (`solveMoleculeRhfWebGpu`
+ * with warm-started density matrices — ZERO CPU eigensolver!), applying the
+ * Henkelman-Jónsson improved upwind tangent and climbing-image saddle inversion.
+ */
+export async function climbingImageNEBWebGpu(device, reactantAtoms, productAtoms, {
+  nImages = 5,
+  maxSteps = 5,
+  springK = 0.08,
+  stepSize = 0.14,
+  climbStartStep = 1,
+  forceTol = 0.015,
+  gradH = 2.5e-3,
+  maxScf = 22,
+  tol = 1e-4,
+  basisName = 'sto-3g'
+} = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('climbingImageNEBWebGpu requires a live WebGPU GPUDevice');
+  }
+  const toPos = (a) => (Array.isArray(a.position)
+    ? [Number(a.position[0]) || 0, Number(a.position[1]) || 0, Number(a.position[2]) || 0]
+    : [Number(a.x) || 0, Number(a.y) || 0, Number(a.z) || 0]);
+  const Zs = reactantAtoms.map((a) => Math.trunc(a.Z));
+  const nAtoms = Zs.length;
+  const rPos = reactantAtoms.map(toPos);
+  const pPos = productAtoms.map(toPos);
+
+  const images = [];
+  for (let img = 0; img < nImages; img += 1) {
+    const f = img / Math.max(1, nImages - 1);
+    images.push(rPos.map((rp, i) => [
+      rp[0] + f * (pPos[i][0] - rp[0]),
+      rp[1] + f * (pPos[i][1] - rp[1]),
+      rp[2] + f * (pPos[i][2] - rp[2])
+    ]));
+  }
+  const flatSub = (A, B) => {
+    const out = [];
+    for (let i = 0; i < nAtoms; i += 1) {
+      out.push(A[i][0] - B[i][0], A[i][1] - B[i][1], A[i][2] - B[i][2]);
+    }
+    return out;
+  };
+  const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+  const norm = (a) => Math.sqrt(dot(a, a));
+  const toAtomList = (coords) => coords.map((p, idx) => ({ Z: Zs[idx], position: p }));
+
+  const cachedP = new Array(nImages).fill(null);
+  let gpuRhfCalls = 0;
+
+  async function evalEnergyAndGrad(imgIdx, coords, computeGrad) {
+    const base = await solveMoleculeRhfWebGpu(device, toAtomList(coords), {
+      maxScf,
+      tol,
+      basisName,
+      sampleVolume: false,
+      initialP: cachedP[imgIdx]
+    });
+    gpuRhfCalls += 1;
+    cachedP[imgIdx] = base.densityMatrix;
+    if (!computeGrad) {
+      return { energyHa: base.totalEnergyHa, grad: new Array(3 * nAtoms).fill(0) };
+    }
+    const grad = new Array(3 * nAtoms).fill(0);
+    // Use translational invariance sum_a F_a = 0 to compute atom 0 gradient from -sum_{a>0} grad_a,
+    // cutting finite-difference GPU RHF calls by 1/nAtoms while remaining exact!
+    const work = coords.map((p) => [...p]);
+    const startAtom = nAtoms >= 2 ? 1 : 0;
+    for (let a = startAtom; a < nAtoms; a += 1) {
+      for (let d = 0; d < 3; d += 1) {
+        const orig = work[a][d];
+        work[a][d] = orig + gradH;
+        const ep = (await solveMoleculeRhfWebGpu(device, toAtomList(work), {
+          maxScf: 14, tol, basisName, sampleVolume: false, initialP: cachedP[imgIdx]
+        })).totalEnergyHa;
+        gpuRhfCalls += 1;
+        work[a][d] = orig - gradH;
+        const em = (await solveMoleculeRhfWebGpu(device, toAtomList(work), {
+          maxScf: 14, tol, basisName, sampleVolume: false, initialP: cachedP[imgIdx]
+        })).totalEnergyHa;
+        gpuRhfCalls += 1;
+        work[a][d] = orig;
+        const gVal = (ep - em) / (2 * gradH);
+        grad[a * 3 + d] = gVal;
+        if (startAtom === 1) grad[d] -= gVal;
+      }
+    }
+    return { energyHa: base.totalEnergyHa, grad };
+  }
+
+  let energies = new Array(nImages).fill(0);
+  let maxForce = Infinity;
+  let converged = false;
+  let stepsRun = 0;
+
+  // Evaluate fixed endpoints once on WebGPU
+  const end0 = await evalEnergyAndGrad(0, images[0], false);
+  const endN = await evalEnergyAndGrad(nImages - 1, images[nImages - 1], false);
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    stepsRun = step + 1;
+    const grads = new Array(nImages);
+    energies = new Array(nImages);
+    energies[0] = end0.energyHa;
+    grads[0] = end0.grad;
+    energies[nImages - 1] = endN.energyHa;
+    grads[nImages - 1] = endN.grad;
+
+    for (let i = 1; i < nImages - 1; i += 1) {
+      const res = await evalEnergyAndGrad(i, images[i], true);
+      energies[i] = res.energyHa;
+      grads[i] = res.grad;
+    }
+
+    let iMax = 1;
+    for (let i = 2; i < nImages - 1; i += 1) {
+      if (energies[i] > energies[iMax]) iMax = i;
+    }
+
+    const nebForces = new Array(nImages);
+    maxForce = 0;
+    for (let i = 1; i < nImages - 1; i += 1) {
+      const dPlus = flatSub(images[i + 1], images[i]);
+      const dMinus = flatSub(images[i], images[i - 1]);
+      let tau;
+      if (energies[i + 1] > energies[i] && energies[i] > energies[i - 1]) {
+        tau = dPlus;
+      } else if (energies[i + 1] < energies[i] && energies[i] < energies[i - 1]) {
+        tau = dMinus;
+      } else {
+        const dEmax = Math.max(Math.abs(energies[i + 1] - energies[i]), Math.abs(energies[i - 1] - energies[i]));
+        const dEmin = Math.min(Math.abs(energies[i + 1] - energies[i]), Math.abs(energies[i - 1] - energies[i]));
+        tau = energies[i + 1] > energies[i - 1]
+          ? dPlus.map((v, k) => v * dEmax + dMinus[k] * dEmin)
+          : dPlus.map((v, k) => v * dEmin + dMinus[k] * dEmax);
+      }
+      const tauNorm = Math.max(1e-12, norm(tau));
+      const tauHat = tau.map((v) => v / tauNorm);
+      const trueForce = grads[i].map((g) => -g);
+      const fPar = dot(trueForce, tauHat);
+
+      let totalForce;
+      if (step >= climbStartStep && i === iMax) {
+        totalForce = trueForce.map((f, k) => f - 2 * fPar * tauHat[k]);
+      } else {
+        const fPerp = trueForce.map((f, k) => f - fPar * tauHat[k]);
+        const fSpring = springK * (norm(dPlus) - norm(dMinus));
+        totalForce = fPerp.map((f, k) => f + fSpring * tauHat[k]);
+      }
+      nebForces[i] = totalForce;
+      maxForce = Math.max(maxForce, ...totalForce.map(Math.abs));
+    }
+
+    if (maxForce < forceTol && step >= climbStartStep) {
+      converged = true;
+      break;
+    }
+
+    const maxDisp = 0.08;
+    for (let i = 1; i < nImages - 1; i += 1) {
+      const f = nebForces[i];
+      const fMag = Math.max(1e-12, norm(f));
+      const scale = Math.min(stepSize, maxDisp / fMag);
+      for (let a = 0; a < nAtoms; a += 1) {
+        images[i][a][0] += scale * f[a * 3];
+        images[i][a][1] += scale * f[a * 3 + 1];
+        images[i][a][2] += scale * f[a * 3 + 2];
+      }
+    }
+  }
+
+  let saddleImageIndex = 1;
+  for (let i = 2; i < nImages - 1; i += 1) {
+    if (energies[i] > energies[saddleImageIndex]) saddleImageIndex = i;
+  }
+  return Object.freeze({
+    schema: ULG_CI_NEB_WEBGPU_SCHEMA,
+    backend: 'webgpu',
+    gpuRhfCalls,
+    images: Object.freeze(images.map((coords) => Object.freeze(coords.map((p, idx) => Object.freeze({ Z: Zs[idx], position: [...p] }))))),
+    energiesHa: Object.freeze([...energies]),
+    saddleImageIndex,
+    transitionStateAtoms: Object.freeze(images[saddleImageIndex].map((p, idx) => Object.freeze({ Z: Zs[idx], position: [...p] }))),
+    forwardBarrierHa: Math.max(0, energies[saddleImageIndex] - energies[0]),
+    reverseBarrierHa: Math.max(0, energies[saddleImageIndex] - energies[nImages - 1]),
+    reactionEnergyHa: energies[nImages - 1] - energies[0],
+    maxForceHaPerBohr: maxForce,
+    steps: stepsRun,
+    converged,
+    provenance: Object.freeze({
+      status: 'webgpu-derived',
+      solver: 'gpumath-rhf-ci-neb',
+      scientificValidation: false
+    })
+  });
 }

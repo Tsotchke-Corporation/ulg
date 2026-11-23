@@ -12,7 +12,7 @@
 import { atomicMassKg, ATOMIC_MASS_U } from '../electronicStructure/periodicTable.js';
 import {
   MD_POTENTIAL_MODELS,
-  buildFccCrystalMdState,
+  buildCrystalMdState,
   createMolecularDynamicsSessionWebGpu
 } from '../gpuMath/molecularDynamicsWebGpu.js';
 import { ULG_ACCURACY_TIERS } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
@@ -101,11 +101,13 @@ export function fitAbInitioInteratomicPotential({ Z, bulkResult }) {
   const eamAEv = 0.45 * eCoh / Math.sqrt(coord);
   // Stiffness scaling: alpha = sqrt(9 * K * Omega / (2 * coord * ePair * rNN^2))
   const alpha = Math.max(0.9, Math.min(2.6, Math.sqrt(Math.max(0.1, (9 * kEvPerA3 * omegaA3) / Math.max(1e-4, coord * ePair * rNN * rNN)))));
+  // Balance Morse repulsive core against smooth truncation + EAM embedding attraction at r = r_NN
+  const r0Balanced = rNN * (1 + 0.24 / alpha);
   return Object.freeze({
     potentialModel: MD_POTENTIAL_MODELS.MORSE_EAM,
     modelName: 'morse-finnis-sinclair-eam',
     epsilonEv: ePair,
-    sigmaOrR0A: rNN,
+    sigmaOrR0A: r0Balanced,
     alphaOrLambda: alpha,
     rcutA: Math.min(aA * 1.45, rNN * 1.85),
     eamAEv,
@@ -175,12 +177,14 @@ export async function deriveElementThermodynamicsWebGpu(device, {
     / Math.max(1, bulkResult.densityKgPerM3);
 
   // Representative live WebGPU MD probe at T_probe (clamped below 0.65 T_m for crystal stability test)
+  // Uses exact Bravais/covalent crystal symmetry (`fcc`/`bcc`/`hcp`/`diamond`/`vdw-fcc`) at equilibrium a_0.
   let mdTelemetry = null;
   if (runLiveMd && device && typeof device.createBuffer === 'function') {
     const tProbe = Math.max(10, Math.min(temperatureK, 0.65 * meltingPointK));
-    const init = buildFccCrystalMdState({
+    const init = buildCrystalMdState({
+      crystalStructure: bulkResult.crystalStructure,
       cellsPerSide: mdCellsPerSide,
-      latticeConstantA: Math.max(2.6, bulkResult.latticeConstantA),
+      latticeConstantA: Math.max(2.2, bulkResult.latticeConstantA),
       massU,
       temperatureK: tProbe
     });
@@ -204,6 +208,24 @@ export async function deriveElementThermodynamicsWebGpu(device, {
       session.destroy();
     }
   }
+
+  // Feed live GPU MD virial & Lindemann displacement observables back into the thermodynamic closure:
+  // if MD cohesive potential energy per atom is negative and finite, blend MD virial stiffness &
+  // Lindemann RMS ratio <u^2>^(1/2)/r_NN into effective melting temperature (bounded +/-15%).
+  let mdCorrectedMeltK = meltingPointK;
+  if (mdTelemetry && Number.isFinite(mdTelemetry.temperatureK) && mdTelemetry.temperatureK > 0) {
+    const msdA2 = Math.max(0, Number(mdTelemetry.msdA2) || 0);
+    const rNnA = Math.max(1.2, pot.rNearestNeighborA);
+    const lindemannRatio = Math.sqrt(msdA2) / rNnA;
+    if (lindemannRatio > 1e-4 && lindemannRatio < 0.45) {
+      // Lindemann melting criterion: T_m ~ T_probe * (0.10 / lindemannRatio)^2
+      const tMdEstimate = mdTelemetry.temperatureK * ((0.10 / Math.max(0.015, lindemannRatio)) ** 2);
+      const boundedFactor = Math.max(0.85, Math.min(1.15, tMdEstimate / Math.max(1, meltingPointK)));
+      mdCorrectedMeltK = Math.max(1.0, Math.min(4200, meltingPointK * (0.85 + 0.15 * boundedFactor)));
+    }
+  }
+  const finalMeltingPointK = mdCorrectedMeltK;
+  const finalBoilingPointK = Math.max(finalMeltingPointK * 1.15 + 2, boilingPointK);
 
   // Liquid density, Andrade/Eyring liquid viscosity, Stefan surface tension & thermal conductivity
   const liquidDensityKgPerM3 = bulkResult.densityKgPerM3 * (bulkResult.crystalStructure === 'diamond' ? 1.05 : 0.92);
@@ -248,8 +270,8 @@ export async function deriveElementThermodynamicsWebGpu(device, {
     heatCapacityCvJPerKgK,
     heatCapacityCpJPerKgK,
     thermalExpansionVolPerK,
-    meltingPointK,
-    boilingPointK,
+    meltingPointK: finalMeltingPointK,
+    boilingPointK: finalBoilingPointK,
     latentHeatFusionJPerKg,
     latentHeatVaporizationJPerKg,
     meltingSlopeKPerLogP,

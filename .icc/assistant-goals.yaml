@@ -16,7 +16,7 @@ goals:
     goal: "Priority 0 (Gate 0): Split slim peercompute-core (<45 MB dist, 0 ort-wasm), build reusable WebGPU gpuMath substrate (batched eigensolver, 3D FFT, WebGPU MD, polytope Chebyshev), lock Material-Bundle & Polytope-Atlas ABIs, and complete Continuum Zero-Churn Step Loop hygiene"
     oracle: ulg-gate0-foundation-arch
     depends_on: []
-    reason: "Immediate architectural prerequisite approved by big dog on 2026-11-22. Today responseFunctionFitGpu.js, materialPolytopeRegistry.js (v0 boxes), lawAdapterContract.js, and solveAtomFullWebGpu (LDA) exist, but peercompute still pulls 83 MB ort-wasm into dist/, gpuMath lacks batched GPU eigensolver/3D FFT/MD, nuclear+EM bundle ABIs are missing, and iron-ice-quench still churns 16 createBuffer / 40.5 bindGroups / 36.6 encoders / 3.26 workDone / 32 passes per step."
+    reason: "0A-0C landed & Vulkan-verified (0af39d00: peercomputeCore.js + worker.plugins cut dist/ 117.5 MB -> 35 MB with 0 AI assets; src/runtime/gpuMath/ eigensolver/fft3d/MD/polytope-fit PASS on Vulkan; materialFoundationAbi.js + evaluatePolytopeAtlasWgsl locked). 0D Slice 1 landed (13bfda97: cached SS/gas-EOS/solid bind groups, pooled receipt ring, shared solid-fluid spatial hash; water-realtime 2.70x faster). Remaining before formal oracle receipt: finish iron-ice encoder/contact churn & 63-limb rational retirement."
     tags: [ulg-scale-ladder, gate-0, foundation-first, next]
 
   - id: gate1-periodic-table-engine
@@ -26,7 +26,7 @@ goals:
     goal: "Priority 1 (Gate 1, 10^-15 -> 10^-9 m): Complete First-Principles Periodic Table Material Engine (Z=1..118: nuclear, relativistic Dirac/KH atomic, EM/magnetic/optical/conductive, bulk DFT, WebGPU MD/phonons) with real live WebGPU visualizations (elements-lab.html) and offline G7 advisory scorecards"
     oracle: ulg-gate1-periodic-table-engine
     depends_on: [gate0-foundation-arch]
-    reason: "Next flagship demo approved by big dog on 2026-11-22. Live assets exist (solveAtomFullWebGpu LDA, opticalResolverWebGpu, volumetricOrbitalRaymarcher, CPU periodicBulkDft, 4-isotope nuclearCherenkovClosure), but elements.json is missing 7 noble gases (111/118), lacks nuclear/EM/magnetic/conductivity closures, and bulk DFT + MD remain CPU JS."
+    reason: "Core engine & flagship elements-lab.html implemented and Vulkan-verified (4326c34e..99db3434): nuclearStructureGpu, finite-nucleus Koelling-Harmon+QED radialKohnShamWebGpu (0 SCF readbacks), GPU periodicBulkDftWebGpu, electromagneticClosureWebGpu, elementMdClosureWebGpu, elements.json closed to 118/118 (7 noble gases added, Ajv PASS), foundation-polytope-atlas.json generated, and all 6 interactive tabs + live 3D WebGPU MD visually verified. Remains in_progress pending formal reviewed ulg.campaign.receipt.v1."
     tags: [ulg-scale-ladder, gate-1, periodic-table, quantum-visuals]
 
   - id: gate2-reactions-and-polytope-atlas
@@ -36,7 +36,7 @@ goals:
     goal: "Priority 2 (Gate 2, 10^-10 -> 10^-6 m): GPU Molecular QM & Chemical Reactions -> Recursive Compound Feedback Loop back into Gate 1 -> Per-Material & Per-Compound Convex Polytope Atlas (A x <= b + GPU Chebyshev Tier-1 lookup tables + 3D Atlas Visualizer)"
     oracle: ulg-gate2-reactions-and-polytope-atlas
     depends_on: [gate1-periodic-table-engine]
-    reason: "Closes ULG's scientific foundation: resultant compounds feed recursively back through Gate 1 electronic/EM/crystal/MD closures (retiring 15/15 reference-fallback compounds & additive blend hacks in compoundClosure.js), then compile into piecewise-convex fail-closed Polytope Atlases."
+    reason: "Core engine implemented and Vulkan-verified (4326c34e..99db3434): molecularHartreeFockWebGpu (H2O E=-74.91 Ha, mu=1.16 D + 3D GPU density), recursiveCompoundPipeline, adaptive curvature-bisected polytopeAtlasBuilder + Eshkol higher-order AD laws + MoonLab 5-slot Triad GPU bridge, 118-element + 15-compound foundation-polytope-atlas.json, and visually verified log10(T) slanted polytope diagram. Remains in_progress pending formal reviewed ulg.campaign.receipt.v1."
     tags: [ulg-scale-ladder, gate-2, chemistry, polytope-atlas]
 
   - id: gate3-continuum-substrate-and-physics
@@ -46,7 +46,7 @@ goals:
     goal: "Priority 3 (Gate 3, 10^-6 -> 10^+2 m): Macroscopic Continuum Engine & Unified SS consuming Gate 2 Polytope Atlas at Tier-1 (with Tier-2 A3 / Tier-3 A6 misses), passing Section 3 GPU budgets, unifying 3 private solid hashes & dormancy grids onto canonical SS cells, indirect dispatch on all 4 law families, exact 2^-149 ledgers & multi-level first-class air"
     oracle: ulg-gate3-continuum-substrate-and-physics
     depends_on: [gate0-foundation-arch, gate2-reactions-and-polytope-atlas, g5-reservation]
-    reason: "Consolidates legacy A1-A6, G2-G4, G6 into one end-to-end continuum gate. P0-P3 closed major live bugs (Coupling #8 skip, A3 radiation consumer + thermo0 fix, G4 propose_active indirect, SOL-4/5/6, 3 pre-SOL-1 gates, Chapman-Enskog gas k/mu, two-way Stokes drag, real 2-browser WebRTC proof), leaving Zero-Churn Step Loop, Polytope Atlas consumption, SS hash unification, and formal oracle capture."
+    reason: "Gate 2->3 Polytope Atlas & Eshkol/MoonLab Triad bridge wired into MaterialRegistry & triadClosureGpuRegistry (4c2f170b); Zero-Churn Slice 1 landed (13bfda97: water-realtime jumped 5.04 -> 13.60 steps/s, 2.70x faster, computePasses 16.01 <= 25, mapAsync 0; iron-ice bindGroups 40.51 -> 36.42, GPU stepping mean 25.3%). Open before formal oracle acceptance: iron-ice <= 25 passes / <= 2 submits / 0 workDone, water-realtime >= 1.0x RT K-step pacing, remaining solid proxy hash unification."
     tags: [ulg-scale-ladder, gate-3, continuum, ss]
 
   - id: gate4-studio-presentation
@@ -56,7 +56,7 @@ goals:
     goal: "Priority 4 (Gate 4, 10^-3 -> 10^+2 m): Decoupled >=54 Hz presentation of latest committed physics state (visibleMotionCadenceVerified=true) across all 5 active Studio presets with true WebGPU isosurfaces, refraction, Cherenkov, volumetric plumes, and zero visual fakes"
     oracle: ulg-gate4-studio-presentation
     depends_on: [gate3-continuum-substrate-and-physics]
-    reason: "Consolidates legacy G1 (with deleted bulk-water removed). P0-P3 wired dampedNativeSurfaceMotionAgeS, clamped marching-cubes buffer budget, replaced magic 80/82/24 isovalues, and closed nitpicks.md. Awaits visibleMotionCadenceVerified=true and formal oracle receipt across all 5 active presets."
+    reason: "All 5 active Studio presets boot and step cleanly with 0 page/GPU errors in headless Vulkan verification (scripts/gate-visual-motion-verify.mjs); awaits owner-approved visible Wayland Chrome >=54 Hz pixel-motion cadence verification (headless CDP does not composite WebGPU swapchains) and formal ulg.campaign.receipt.v1."
     tags: [ulg-scale-ladder, gate-4, presentation]
 
   - id: gate5-planetary-to-supergalactic
@@ -66,7 +66,7 @@ goals:
     goal: "Priority 5 (Gate 5, 10^+6 -> 10^+25 m): Planetary (Polytope-Atlas interiors + symplectic N-body), Stellar (unified SS hydro + Gate 1 nuclear networks), Galactic (unified SS multipole + ISM hydro + Gate 1 atomic cooling + SMBH), and Supergalactic Cosmology (expanding FLRW comoving GPU 3D-FFT TreePM + multi-host PeerCompute domain partitioning)"
     oracle: ulg-gate5-planetary-to-supergalactic
     depends_on: [gate0-foundation-arch, gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics]
-    reason: "Completes ULG's 40-order-of-magnitude scale ladder on the shared gpuMath (fft3dWebGpu) + canonical SS Scale Atlas multipole + peercompute-core spine, retiring bespoke private octrees in selfGravitatingHydroGpu.js & cosmicQuantumGpuKernels.js and replacing the static cosmic-web stop with real evolving FLRW TreePM filaments."
+    reason: "Gates 5A-5D implemented & Vulkan-verified (4326c34e..99db3434): planetaryStructureGpu, stellarNucleosynthesisBridge (exact Gate 1 Q-values + RK4 Lane-Emden n=1.5,3.0), galacticIsmCoolingGpu, supergalacticTreePmGpu sharing Gate 0B fft3dWebGpu + visually verified flagship supergalactic.html (a=0.074->0.362, sigma=2.43->4.82, 162,334 moving pixels) + cosmicQuantumZoomDemo FLRW upgrade + G5-fenced distributedSpatialPartitioner. Remains in_progress pending bespoke octree migration to SS Scale Atlas multipole & formal receipt bundle."
     tags: [ulg-scale-ladder, gate-5, planetary, stellar, galactic, supergalactic]
 
   - id: g5-reservation

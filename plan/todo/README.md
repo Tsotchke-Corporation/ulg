@@ -1,9 +1,11 @@
-# ULG Active Todo Index (Unified 40-OOM Scale-Ladder Roadmap, 2026-11-22)
+# ULG Active Todo Index (Unified 40-OOM Scale-Ladder Roadmap, 2026-11-23)
 
 - **Start here:** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) first for
-  the full **40-order-of-magnitude bottom-up roadmap (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m`
-  Supergalactic)**, honest 8-gate scorecard (`G5` & `G7` accepted; `Gate 0`–`Gate 5`
-  open), Section 3 GPU budgets, and exact execution sequence.
+  the full **40-order-of-magnitude bottom-up + bidirectional bookend roadmap
+  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (`G5`
+  & `G7` accepted; `Gate 0`–`Gate 5` core engines, Triad bridge, and bookends
+  implemented & Vulkan-verified at `99db3434`, pending formal receipt capture &
+  remaining Gate 0D/3/4 targets), Section 3 GPU budgets, and exact execution sequence.
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
 

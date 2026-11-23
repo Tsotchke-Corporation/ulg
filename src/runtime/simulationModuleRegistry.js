@@ -494,7 +494,11 @@ export function createNBodyGravityModuleRegistration({
       const artifact = makeArtifact({
         artifactId: `${capsule.taskId}:nbody:${internalStepIndex}`,
         taskKind: capsule.taskKind,
-        closureRef: { module: 'physics/nbody.esk', entryPoint: 'step-world', kernelEntryPoint: 'main' },
+        closureRef: {
+          module: 'src/runtime/simulationModuleRegistry.js',
+          entryPoint: 'stepNBodyInterleavedReference',
+          kernelEntryPoint: 'cpu-direct-pairs-reference'
+        },
         representation: 'nbody-interleaved-f32',
         outputs: {
           deltas: [{ operation: 'replace', tensorId: 'bodies', fromStep: stepIndex, toStep: internalStepIndex }],
@@ -509,9 +513,9 @@ export function createNBodyGravityModuleRegistration({
         },
         execution: {
           backend: gpuBuffer ? 'webgpu-staged-reference' : 'cpu-reference',
-          stage: 'eshkol.nbody.step',
+          stage: 'ulg.nbody.cpu-reference.step',
           placement: 'local',
-          gravityMode: stepped.slotCount > 16384 ? 'barnes-hut-tree' : 'direct-pairs'
+          gravityMode: 'direct-pairs-cpu-reference'
         },
         validity: {
           finite,

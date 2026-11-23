@@ -140,6 +140,9 @@ test('Phase 9: PeerCompute service contract, MoonLab reduced complex64 parity en
   assert.equal(ml.parityPass, true);
   assert.equal(ml.validation.scientificValidation, false);
   assert.equal(ml.validation.reducedScopeParityOnly, true);
+  // Omitting parity measurements must fail closed (parityPass: false)!
+  const mlEmpty = createMoonLabReducedParityEnvelope({ qubits: 12 });
+  assert.equal(mlEmpty.parityPass, false);
 
   const eshkol = createEshkolWasmServiceManifest();
   assert.equal(eshkol.serviceId, ULG_SERVICE_IDS.eshkol);
@@ -155,8 +158,13 @@ test('Phase 9: PeerCompute service contract, MoonLab reduced complex64 parity en
   assert.equal(r1.value.standardPhaseAt298K, 'liquid');
   assert.equal(r1.value.scientificValidation, false);
   assert.deepEqual(r1, r2, 'peer task output must be bit-identical for 2-of-2 quorum validation');
+  // Missing atomicNumberZ must fail closed (no silent Hg default)
+  await assert.rejects(() => runCosmicQuantumPeerTask({ kind: 'material.resolve-element', payload: {} }), RangeError);
 
   const ch = await runCosmicQuantumPeerTask({ kind: 'nuclear.cherenkov', payload: { kineticEnergyMeV: 1.0, refractiveIndex: 1.333 } });
   assert.equal(ch.value.active, true);
   assert.equal(ch.value.scientificValidation, false);
+  // Missing refractiveIndex defaults fail-closed to vacuum (n=1.0 -> inactive)
+  const chVac = await runCosmicQuantumPeerTask({ kind: 'nuclear.cherenkov', payload: { kineticEnergyMeV: 1.0 } });
+  assert.equal(chVac.value.active, false);
 });

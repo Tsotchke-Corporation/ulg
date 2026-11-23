@@ -275,13 +275,14 @@ export function deriveElementProperties(atomicNumberZ, options = {}) {
   let freeConductionValence = valence;
   let derivation;
 
-  // 1. Molecular covalent / London-VdW non-metals (H, N, O, F, P, S, Cl, Se, Br, I, At)
-  if (!hasOpenD && !hasOpenF && (atomicNumberZ === 1 || (pOcc >= 3 && ePEv >= 4.75))) {
+  // 1. Molecular covalent / London-VdW non-metals (1s1 dimer & electronegative p>=3 non-metals)
+  const is1sDimer = sOcc === 1 && pOcc === 0 && q.maxN === 1;
+  if (!hasOpenD && !hasOpenF && (is1sDimer || (pOcc >= 3 && ePEv >= 4.75))) {
     bondingClass = 'molecular-vdw';
-    const pHoles = 6 - pOcc;
-    const isOligomer = atomicNumberZ !== 1 && pHoles >= 2 && q.maxN >= 3 && pHoles <= 3;
-    const clusterFactor = atomicNumberZ === 1 ? 0.25 : (isOligomer ? 2.6 : 1.0);
-    const alphaEff = (2 / 3) * (q.valR2 / Math.max(0.12, q.iEffHa)) * (atomicNumberZ === 1 ? 0.65 : 0.42);
+    const pHoles = is1sDimer ? 1 : (6 - pOcc);
+    const isOligomer = !is1sDimer && pHoles >= 2 && q.maxN >= 3 && pHoles <= 3;
+    const clusterFactor = is1sDimer ? 0.25 : (isOligomer ? 2.6 : 1.0);
+    const alphaEff = (2 / 3) * (q.valR2 / Math.max(0.12, q.iEffHa)) * (is1sDimer ? 0.65 : 0.42);
     const c6 = 0.75 * q.iEffHa * alphaEff * alphaEff;
     const rContact = Math.max(2.4, q.rVdw * 1.805);
     cohesiveEnergyEv = Math.max(0.001, 6 * (c6 / (rContact ** 6)) * HA_TO_EV * clusterFactor);
@@ -325,7 +326,7 @@ export function deriveElementProperties(atomicNumberZ, options = {}) {
     const sdHyb = hasFilledDCore
       ? 1.0 / (1.0 + (sdGapEv / 3.2) ** 2)
       : 0.45 / (1.0 + (sdGapEv / 4.0) ** 2);
-    const dRelWidthScale = q.maxN <= 4 ? 1.0 : (q.maxN === 5 ? 1.15 : 1.32);
+    const dRelWidthScale = 1.0 + 0.16 * Math.max(0, q.maxN - 4);
     cohesiveEnergyEv = Math.max(0.5, 0.62 * (1.7 + 4.4 * dOpenFactor + 2.1 * sdHyb) * dRelWidthScale * (eSEv / 4.8));
     bulkModulusPa = Math.max(1e9, (3.4 * cohesiveEnergyEv * EV_TO_J) / vAtom);
     meltingPointK = Math.max(300, 0.036 * (cohesiveEnergyEv * EV_TO_J / KB));
@@ -708,8 +709,8 @@ export function deriveMolecularBulkClosure({
   atoms,
   basis = 'sto-3g',
   referenceTemperatureK = 298.15,
-  intermolecularCohesionFraction = 0.045,
-  latticePhononModesCm1 = [120, 180, 260]
+  intermolecularCohesionFraction = null,
+  latticePhononModesCm1 = null
 } = {}) {
   if (!Array.isArray(atoms) || atoms.length === 0) {
     throw new RangeError('deriveMolecularBulkClosure requires a non-empty atoms geometry');
@@ -719,9 +720,25 @@ export function deriveMolecularBulkClosure({
   const atomizationJPerMol = Math.max(0, atomization.atomizationEnergyHa) * HARTREE_TO_J * AVOGADRO;
   const vib = vibrationalFrequencies(atoms, { method: (a) => atomizationEnergyMp2Ha(a, { basis }).moleculeEnergyHa, h: 5e-3 });
   const intraQha = qhaVibrationalThermoPerMol(vib.vibrationsCm1, referenceTemperatureK);
-  const latticeQha = qhaVibrationalThermoPerMol(latticePhononModesCm1, referenceTemperatureK);
 
-  const rawCohesiveJPerMol = Math.max(2000, atomizationJPerMol * intermolecularCohesionFraction);
+  // Derive intermolecular cohesion fraction & lattice phonon scale continuously from
+  // molecular heterogeneity (electronegativity/Z contrast -> polarity) and molecular mass
+  // rather than hardcoding H2O-specific constants!
+  const zVals = atoms.map((a) => Number(a.Z) || 1);
+  const zSpan = Math.max(...zVals) - Math.min(...zVals);
+  const polarityFactor = Math.min(1.0, zSpan / 7.0);
+  const resolvedCohesionFraction = (intermolecularCohesionFraction != null && Number.isFinite(Number(intermolecularCohesionFraction)))
+    ? Math.max(1e-4, Number(intermolecularCohesionFraction))
+    : 0.012 + 0.033 * polarityFactor;
+  const rawCohesiveJPerMol = Math.max(2000, atomizationJPerMol * resolvedCohesionFraction);
+  const massScale = Math.sqrt(0.018 / Math.max(0.002, molarMassKgPerMol));
+  const cohScale = Math.sqrt(rawCohesiveJPerMol / 40000);
+  const omegaBaseCm1 = Math.max(25, Math.min(450, 120 * massScale * cohScale));
+  const resolvedLatticeModes = Array.isArray(latticePhononModesCm1) && latticePhononModesCm1.length > 0
+    ? latticePhononModesCm1
+    : [omegaBaseCm1, omegaBaseCm1 * 1.5, omegaBaseCm1 * 2.15];
+  const latticeQha = qhaVibrationalThermoPerMol(resolvedLatticeModes, referenceTemperatureK);
+
   const cohesiveEnergyJPerMol = Math.max(1000, rawCohesiveJPerMol - latticeQha.zpeJPerMol);
   const cohesiveEnergyEvPerMolecule = cohesiveEnergyJPerMol / (AVOGADRO * EV_TO_J);
   const boilingPointK = cohesiveEnergyJPerMol / TROUTON_VAPORIZATION_ENTROPY;

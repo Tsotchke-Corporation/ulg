@@ -200,13 +200,13 @@ test('Phase 6 WebGPU-derived Drude-Lorentz/CIE optics, Cherenkov, and radial Koh
     assert.ok(result.cherenkovPhotonRelErr < 1e-3, `Cherenkov GPU vs CPU photon yield error: ${result.cherenkovPhotonRelErr}`);
 
     for (const atom of result.ksAtoms) {
-      assert.equal(atom.resolverStatus, 'webgpu-derived');
+      assert.equal(atom.resolverStatus, 'hybrid-webgpu-potential-cpu-eigensolver');
       assert.ok(atom.energyRelErr < 5e-3, `Z=${atom.Z} (${atom.symbol}) GPU vs CPU KS total energy relErr=${atom.energyRelErr}`);
       assert.ok(atom.neErr < 0.15, `Z=${atom.Z} electron count integral error=${atom.neErr}`);
       if (atom.Z >= 8) assert.equal(atom.hasSpinOrbit, true);
     }
 
-    assert.equal(result.hgFirstStatus, 'webgpu-derived');
+    assert.equal(result.hgFirstStatus, 'hybrid-webgpu-atomic-optical-cpu-bulk');
     assert.equal(result.hgSecondStatus, 'cache-hit');
     assert.equal(result.hgPhase, 'liquid');
     assert.equal(result.hgWebgpuDerived, true);

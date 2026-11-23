@@ -23,6 +23,7 @@ import {
   buildOrbitalVolumeData,
   evaluateRealSphericalHarmonic
 } from '../src/demos/volumetricOrbitalRaymarcher.js';
+import { buildAtomicRadialDensityArtifact } from '../src/runtime/electronicStructure/quantumDerivationArtifacts.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 
@@ -188,4 +189,36 @@ test('volumetricOrbitalRaymarcher builds signed 3D spherical-harmonic volumes wi
     negSum += dz2.data[i + 1];
   }
   assert.ok(posSum > 0 && negSum > 0, 'd_z2 volume must contain both positive polar lobes and negative equatorial torus');
+
+  // Verify live Kohn-Sham radial wavefunction (with real radial nodes!) and non-hollow 3D total density on Sodium (Z=11, 3s)
+  const na = buildAtomicRadialDensityArtifact(11, { gridPointsN: 300, includeCloudGrid: false }).artifact;
+  assert.ok(na.radialProfile.orbitalWavefunctions['0']?.radialAmplitude?.length > 0, '3s radial wavefunction must be exported');
+  const naTot = buildOrbitalVolumeData({
+    radialSamples: na.radialProfile.samples,
+    orbitalWavefunctions: na.radialProfile.orbitalWavefunctions,
+    rMaxBohr: na.radialProfile.rMaxBohr,
+    r95Bohr: na.summary.containmentRadii.r95Bohr,
+    modeId: 'total-density',
+    dim: 24
+  });
+  const centerIdx = ((12 * 24 + 12) * 24 + 12) * 4;
+  const edgeIdx = ((12 * 24 + 12) * 24 + 22) * 4;
+  assert.ok(naTot.data[centerIdx + 3] > naTot.data[edgeIdx + 3], '3D total density must peak at core (not hollow 4pi r^2 rho!)');
+
+  // 3s orbital of Sodium has real radial nodes -> BOTH positive and negative radial phases must appear in modeId="s"!
+  const na3s = buildOrbitalVolumeData({
+    radialSamples: na.radialProfile.samples,
+    orbitalWavefunctions: na.radialProfile.orbitalWavefunctions,
+    rMaxBohr: na.radialProfile.rMaxBohr,
+    r95Bohr: na.summary.containmentRadii.r95Bohr,
+    modeId: 's',
+    dim: 24
+  });
+  let sPos = 0;
+  let sNeg = 0;
+  for (let i = 0; i < na3s.data.length; i += 4) {
+    sPos += na3s.data[i + 0];
+    sNeg += na3s.data[i + 1];
+  }
+  assert.ok(sPos > 0 && sNeg > 0, `3s Kohn-Sham orbital must preserve its real radial nodes (pos=${sPos}, neg=${sNeg})`);
 });

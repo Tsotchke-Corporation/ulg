@@ -47,6 +47,7 @@ export function evaluateRealSphericalHarmonic(modeId, ux, uy, uz) {
  */
 export function buildOrbitalVolumeData({
   radialSamples = [],
+  orbitalWavefunctions = null,
   rMaxBohr = 6.0,
   r95Bohr = 3.0,
   modeId = 'total-density',
@@ -63,10 +64,14 @@ export function buildOrbitalVolumeData({
   const rawNeg = new Float32Array(n * n * n);
   const rawRad = new Float32Array(n * n * n);
 
-  // Build quick lookup helper on sorted radial samples
   const sampleCount = radialSamples.length;
-  function sampleRadialProb(rBohr) {
-    if (rBohr <= radialSamples[0].rBohr) return Math.max(0, radialSamples[0].radialProbabilityPerBohr);
+  function sampleRho3D(rBohr) {
+    const sAt = (s) => {
+      if (Number.isFinite(s.rhoPerBohr3)) return Math.max(0, s.rhoPerBohr3);
+      const rSafe = Math.max(0.08, s.rBohr);
+      return Math.max(0, (s.radialProbabilityPerBohr || 0) / (4 * Math.PI * rSafe * rSafe));
+    };
+    if (rBohr <= radialSamples[0].rBohr) return sAt(radialSamples[0]);
     if (rBohr >= radialSamples[sampleCount - 1].rBohr) return 0;
     let lo = 0;
     let hi = sampleCount - 1;
@@ -79,15 +84,33 @@ export function buildOrbitalVolumeData({
     const s1 = radialSamples[hi];
     const span = Math.max(1e-9, s1.rBohr - s0.rBohr);
     const t = (rBohr - s0.rBohr) / span;
-    return Math.max(0, s0.radialProbabilityPerBohr + t * (s1.radialProbabilityPerBohr - s0.radialProbabilityPerBohr));
+    return Math.max(0, sAt(s0) + t * (sAt(s1) - sAt(s0)));
+  }
+
+  const isTotal = modeId === 'total-density';
+  const lQuantum = modeId === 'f_xyz' ? 3 : (modeId === 'd_z2' || modeId === 'd_xy') ? 2 : modeId === 'p_z' ? 1 : 0;
+  const liveOrbWf = orbitalWavefunctions?.[String(lQuantum)] || null;
+  function sampleLiveOrbitalRadial(rBohr) {
+    if (!liveOrbWf || !Array.isArray(liveOrbWf.rValuesBohr) || liveOrbWf.rValuesBohr.length < 2) return null;
+    const rs = liveOrbWf.rValuesBohr;
+    const amps = liveOrbWf.radialAmplitude;
+    if (rBohr <= rs[0]) return amps[0];
+    if (rBohr >= rs[rs.length - 1]) return 0;
+    let lo = 0;
+    let hi = rs.length - 1;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rs[mid] <= rBohr) lo = mid;
+      else hi = mid;
+    }
+    const span = Math.max(1e-9, rs[hi] - rs[lo]);
+    const t = (rBohr - rs[lo]) / span;
+    return amps[lo] + t * (amps[hi] - amps[lo]);
   }
 
   let peakPos = 0;
   let peakNeg = 0;
   let idx = 0;
-  const isTotal = modeId === 'total-density';
-  const lQuantum = modeId === 'f_xyz' ? 3 : (modeId === 'd_z2' || modeId === 'd_xy') ? 2 : modeId === 'p_z' ? 1 : 0;
-  const rValence = Math.max(0.6, r95Bohr * 0.42);
   for (let iz = 0; iz < n; iz += 1) {
     const fz = ((iz + 0.5) / n) * 2 - 1;
     for (let iy = 0; iy < n; iy += 1) {
@@ -103,12 +126,16 @@ export function buildOrbitalVolumeData({
         const edgeFade = Math.max(0, 1 - Math.pow(rnorm, 6));
         let val = 0;
         if (isTotal) {
-          const pRad = sampleRadialProb(rBohr);
-          val = Math.pow(Math.max(0, pRad), 0.72) * edgeFade;
+          // True 3D volumetric Kohn-Sham electron density rho(r) (non-hollow at r -> 0!)
+          const rho3d = sampleRho3D(rBohr);
+          val = Math.pow(Math.max(0, rho3d), 0.34) * edgeFade;
         } else {
-          // Valence (l, m) radial shell envelope anchored to Kohn-Sham r95Bohr × exact real Y_lm(theta, phi)
-          const rhoScale = rBohr / rValence;
-          const radialOrb = Math.pow(rhoScale, lQuantum) * Math.exp(-rhoScale * (lQuantum === 0 ? 1.15 : 0.95));
+          // Use live Kohn-Sham radial wavefunction R_{nl}(r) = u_{nl}(r)/r (preserving real radial nodes!)
+          // when present; otherwise anchor continuously to sqrt(rho(r)) from radialSamples.
+          const liveR = sampleLiveOrbitalRadial(rBohr);
+          const radialOrb = liveR !== null
+            ? Math.sign(liveR) * Math.pow(Math.abs(liveR), 0.62)
+            : Math.sqrt(Math.max(0, sampleRho3D(rBohr))) * Math.pow(Math.min(1.5, rBohr / Math.max(0.4, r95Bohr * 0.45)), Math.min(2, lQuantum) * 0.5);
           const ylm = evaluateRealSphericalHarmonic(modeId, fx / rnorm, fy / rnorm, fz / rnorm);
           val = radialOrb * ylm * edgeFade;
         }
@@ -153,6 +180,7 @@ export function createVolumetricOrbitalRaymarcher({
   TSL = null,
   renderer = null,
   radialSamples = [],
+  orbitalWavefunctions = null,
   rMaxBohr = 6.0,
   r95Bohr = 3.0,
   modeId = 'total-density',
@@ -161,6 +189,7 @@ export function createVolumetricOrbitalRaymarcher({
 } = {}) {
   const { data, dim: volDim } = buildOrbitalVolumeData({
     radialSamples,
+    orbitalWavefunctions,
     rMaxBohr,
     r95Bohr,
     modeId,

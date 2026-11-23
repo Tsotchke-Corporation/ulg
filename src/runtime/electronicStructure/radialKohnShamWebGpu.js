@@ -875,7 +875,7 @@ export async function solveAtomWebGpu(device, atomicNumberZ, {
       integratedElectrons: summary.integratedElectrons,
       scfIterations,
       scfL1Delta: lastDelta,
-      resolverStatus: 'webgpu-derived',
+      resolverStatus: 'hybrid-webgpu-potential-cpu-eigensolver',
       webgpuProgramHash: RADIAL_KS_WEBGPU_PROGRAM_HASH,
       ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: finalRho, dx } } : {}),
       validation: Object.freeze({

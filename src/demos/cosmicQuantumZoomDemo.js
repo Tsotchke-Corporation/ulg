@@ -1210,6 +1210,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
       TSL,
       renderer,
       radialSamples: built.artifact.radialProfile.samples || [],
+      orbitalWavefunctions: built.artifact.radialProfile.orbitalWavefunctions || null,
       rMaxBohr: built.artifact.radialProfile.rMaxBohr || halfB,
       r95Bohr: built.artifact.summary.containmentRadii.r95Bohr || 2.5,
       modeId: selectedOrbitalMode,

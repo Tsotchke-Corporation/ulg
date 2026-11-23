@@ -206,7 +206,8 @@ export function evaluateCherenkovClosure({
   kineticEnergyMeV = null,
   restMassMeV = ELECTRON_REST_MEV,
   chargeZ = 1,
-  refractiveIndex = 1.333,
+  // Fail closed to vacuum (n = 1.0) when refractiveIndex is omitted (never assume H2O).
+  refractiveIndex = 1.0,
   refractiveIndexFn = null,
   lambdaMinNm = 380,
   lambdaMaxNm = 780

@@ -56,6 +56,11 @@ test('Phase 8: nuclear decay channels conserve exact nucleons & charge, emit the
 });
 
 test('Phase 8: Frank-Tamm Cherenkov closure fails closed below beta=1/n and produces CIE blue above threshold', () => {
+  const vacDefault = evaluateCherenkovClosure({ kineticEnergyMeV: 1.0 });
+  assert.equal(vacDefault.active, false, 'omitted refractiveIndex must fail closed to vacuum (n=1.0), never assume H2O');
+  assert.equal(vacDefault.refractiveIndex550Nm, 1.0);
+  assert.equal(vacDefault.photonsPerMeter, 0);
+
   const sub = evaluateCherenkovClosure({ kineticEnergyMeV: 0.15, refractiveIndex: 1.333 });
   assert.equal(sub.schema, ULG_CHERENKOV_CLOSURE_SCHEMA);
   assert.equal(sub.active, false);

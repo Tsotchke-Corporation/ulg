@@ -173,6 +173,7 @@ export function createMaterialResolverPipeline({
         } : {}),
         webgpuAtomicStructure: {
           schema: gpuAtom.schema,
+          resolverStatus: gpuAtom.resolverStatus,
           totalEnergyHa: gpuAtom.totalEnergyHa,
           integratedElectrons: gpuAtom.integratedElectrons,
           scfIterations: gpuAtom.scfIterations,
@@ -180,6 +181,11 @@ export function createMaterialResolverPipeline({
           orbitals: gpuAtom.orbitals,
           webgpuProgramHash: gpuAtom.webgpuProgramHash
         },
+        derivationStages: Object.freeze({
+          atomicScf: gpuAtom.resolverStatus,
+          opticalSpectral: gpuOptical ? gpuOptical.resolverStatus : 'not-applicable',
+          bulkClosures: 'cpu-derived'
+        }),
         webgpuDerived: true
       };
       const closure = includeClosure
@@ -204,12 +210,13 @@ export function createMaterialResolverPipeline({
         closure,
         webgpuAtom: gpuAtom,
         webgpuOptical: gpuOptical,
+        derivationStages: enrichedProperties.derivationStages,
         webgpuProgramHashes: Object.freeze({
           optical: OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH,
           radialKohnSham: RADIAL_KS_WEBGPU_PROGRAM_HASH
         })
       };
-      backend = 'webgpu-derived';
+      backend = 'hybrid-webgpu-atomic-optical-cpu-bulk';
       webgpuDerivations += 1;
     } else if (typeof workerDispatch === 'function') {
       const workerResult = await workerDispatch({
@@ -256,7 +263,8 @@ export function createMaterialResolverPipeline({
     const gpuDevice = options.device !== undefined ? options.device : activeDevice;
     if (gpuDevice && typeof gpuDevice.createComputePipeline === 'function' && options.useWebGpu !== false) {
       const batch = await resolveOpticalBatchWebGpu(gpuDevice, requests, {
-        keepResident: options.keepResident === true
+        keepResident: options.keepResident === true,
+        readback: options.readback !== false
       });
       webgpuDerivations += 1;
       return {
@@ -264,26 +272,36 @@ export function createMaterialResolverPipeline({
         generatorFingerprint: activeFingerprint
       };
     }
+    const list = Array.isArray(requests) ? requests : [];
+    const hasNonCherenkov = list.some((req) => (req?.mode ?? 0) !== OPTICAL_RESOLVER_MODE_CHERENKOV);
+    if (hasNonCherenkov) {
+      throw new Error(
+        'resolveOpticalBatch requires a valid WebGPU GPUDevice for Drude-Lorentz/band-gap spectral integration (refusing to echo uncomputed requests as cpu-derived).'
+      );
+    }
     return {
       schema: MATERIAL_RESOLVER_PIPELINE_SCHEMA,
       resolverStatus: 'cpu-derived',
       generatorFingerprint: activeFingerprint,
-      results: (requests || []).map((req) => (
-        req.mode === OPTICAL_RESOLVER_MODE_CHERENKOV
-          ? evaluateCherenkovClosure(req)
-          : { ...req, resolverStatus: 'cpu-derived' }
-      )),
+      results: list.map((req) => evaluateCherenkovClosure({
+        ...req,
+        refractiveIndex: Number.isFinite(Number(req?.refractiveIndex)) ? Number(req.refractiveIndex) : 1.0
+      })),
       residentBuffers: null
     };
   }
 
   async function resolveCherenkov(params = {}, options = {}) {
     const gpuDevice = options.device !== undefined ? options.device : activeDevice;
+    // Fail closed to vacuum (n = 1.0) when refractiveIndex is omitted (never assume H2O 1.333)
+    const refractiveIndex = Number.isFinite(Number(params?.refractiveIndex)) && Number(params.refractiveIndex) >= 1.0
+      ? Number(params.refractiveIndex)
+      : 1.0;
     if (gpuDevice && typeof gpuDevice.createComputePipeline === 'function' && options.useWebGpu !== false) {
       const batch = await resolveOpticalBatchWebGpu(gpuDevice, [{
         mode: OPTICAL_RESOLVER_MODE_CHERENKOV,
         beta: params.beta,
-        refractiveIndex: params.refractiveIndex ?? 1.333,
+        refractiveIndex,
         chargeZ: params.chargeZ ?? 1
       }]);
       webgpuDerivations += 1;
@@ -292,13 +310,13 @@ export function createMaterialResolverPipeline({
         ...row,
         srgb: row.baseColorSrgb,
         beta: params.beta,
-        thresholdBeta: 1 / Math.max(1.0, params.refractiveIndex ?? 1.333),
+        thresholdBeta: 1 / refractiveIndex,
         resolverStatus: 'webgpu-derived',
         generatorFingerprint: activeFingerprint
       };
     }
     return {
-      ...evaluateCherenkovClosure(params),
+      ...evaluateCherenkovClosure({ ...params, refractiveIndex }),
       resolverStatus: 'cpu-derived',
       generatorFingerprint: activeFingerprint
     };

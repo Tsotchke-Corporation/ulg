@@ -3,6 +3,7 @@ export const MATERIAL_RESOLVER_MANIFEST_SCHEMA = 'peercompute.ulg.material-resol
 export const MATERIAL_RESOLVER_STATUS = Object.freeze({
   CPU_DERIVED: 'cpu-derived',
   WEBGPU_DERIVED: 'webgpu-derived',
+  HYBRID_WEBGPU_POTENTIAL_CPU_EIGENSOLVER: 'hybrid-webgpu-potential-cpu-eigensolver',
   WEBGPU_DERIVED_WITH_CPU_FALLBACK: 'webgpu-derived-with-cpu-fallback',
   CPU_DERIVED_GPU_LOOKUP_CONSUMED: 'cpu-derived-gpu-lookup-consumed',
   CPU_BUILT_GPU_CONSUMED: 'cpu-built-gpu-consumed',
@@ -38,9 +39,14 @@ const resolverFamilies = [
       status: 'known-cpu-entrypoints',
       entrypoints: [
         { module: 'src/runtime/electronicStructure/radialKohnSham.js', exports: ['solveAtom', 'solveKohnShamAtomKH', 'radialStatesKH'] },
-        { module: 'src/runtime/electronicStructure/radialKohnShamWebGpu.js', exports: ['solveAtomWebGpu', 'evaluateRadialKohnShamPotentialsWebGpu', 'RADIAL_KS_WEBGPU_PROGRAM_HASH'] },
         { module: 'src/runtime/material/elementClosures.js', exports: ['deriveElementProperties', 'elementMaterialClosure'] },
         { module: 'src/runtime/material/opticalClosure.js', exports: ['relativisticInterbandOscillators', 'metalRelativisticColorSrgb'] }
+      ]
+    },
+    webgpu: {
+      status: 'hybrid-webgpu-potential-cpu-eigensolver',
+      entrypoints: [
+        { module: 'src/runtime/electronicStructure/radialKohnShamWebGpu.js', exports: ['solveAtomWebGpu', 'evaluateRadialKohnShamPotentialsWebGpu', 'RADIAL_KS_WEBGPU_PROGRAM_HASH'] }
       ]
     },
     webgpuResidencyTarget: {
@@ -59,7 +65,7 @@ const resolverFamilies = [
       'schemaVersion',
       'generatorFingerprint'
     ],
-    currentStatus: MATERIAL_RESOLVER_STATUS.WEBGPU_DERIVED_WITH_CPU_FALLBACK,
+    currentStatus: MATERIAL_RESOLVER_STATUS.HYBRID_WEBGPU_POTENTIAL_CPU_EIGENSOLVER,
     validationFlags: validationFlags()
   },
   {
@@ -160,8 +166,13 @@ const resolverFamilies = [
       status: 'known-cpu-entrypoints',
       entrypoints: [
         { module: 'src/runtime/material/opticalClosure.js', exports: ['opticalRenderParams', 'metalRelativisticColorSrgb', 'waterDropletOpticalMicrophysics'] },
-        { module: 'src/runtime/material/opticalResolverWebGpu.js', exports: ['resolveOpticalBatchWebGpu', 'resolveMetalOpticalWebGpu', 'OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH'] },
         { module: 'src/runtime/material/opticalGpuBuffers.js', exports: ['buildOpticalGpuTable', 'runOpticalGpuLookupWithOptionalWebGpu'] }
+      ]
+    },
+    webgpu: {
+      status: 'webgpu-spectral-integration',
+      entrypoints: [
+        { module: 'src/runtime/material/opticalResolverWebGpu.js', exports: ['resolveOpticalBatchWebGpu', 'resolveMetalOpticalWebGpu', 'OPTICAL_RESOLVER_WEBGPU_PROGRAM_HASH'] }
       ]
     },
     webgpuResidencyTarget: {

@@ -41,8 +41,10 @@ test('Phase 6 WebGPU optical & radial Kohn-Sham WGSL shaders declare clean bindi
 
   const elecFamily = materialResolverFamilyById('peercompute.ulg.material-resolver.electronic-structure-band-optics.v0');
   const optFamily = materialResolverFamilyById('peercompute.ulg.material-resolver.optical-pbr-closures.v0');
-  assert.equal(elecFamily.currentStatus, MATERIAL_RESOLVER_STATUS.WEBGPU_DERIVED_WITH_CPU_FALLBACK);
+  assert.equal(elecFamily.currentStatus, MATERIAL_RESOLVER_STATUS.HYBRID_WEBGPU_POTENTIAL_CPU_EIGENSOLVER);
   assert.equal(optFamily.currentStatus, MATERIAL_RESOLVER_STATUS.WEBGPU_DERIVED_WITH_CPU_FALLBACK);
+  assert.ok(elecFamily.webgpu?.entrypoints?.length > 0);
+  assert.ok(optFamily.webgpu?.entrypoints?.length > 0);
 });
 
 test('packOpticalResolverRequests packs Drude-Lorentz, Cherenkov, and band-gap requests into flat Float32 ABI', () => {
@@ -95,4 +97,14 @@ test('MaterialResolverPipeline resolves Cherenkov cleanly on CPU fallback and re
   assert.equal(sup.active, true);
   assert.ok(sup.srgb[2] > sup.srgb[0]);
   assert.equal(sup.resolverStatus, 'cpu-derived');
+
+  // Fail-closed vacuum default (n=1.0) when refractiveIndex is omitted — never silently assume H2O 1.333!
+  const vac = await pipeline.resolveCherenkov({ beta: 0.94 });
+  assert.equal(vac.active, false);
+
+  // Fail-closed when non-Cherenkov optical batch is requested without WebGPU device
+  await assert.rejects(
+    () => pipeline.resolveOpticalBatch([{ mode: OPTICAL_RESOLVER_MODE_BAND_GAP, electronicGapEv: 2.2 }]),
+    /WebGPU GPUDevice/
+  );
 });

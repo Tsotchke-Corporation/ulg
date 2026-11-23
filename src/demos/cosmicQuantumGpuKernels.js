@@ -954,6 +954,384 @@ export function createResidentBarnesHutNBodyEngine({
 }
 
 /**
+ * Deterministic 1,024-particle Continuum micro-SPH / elastic-solid / kinetic-gas
+ * initializer using the exact same 8-float `[x, y, z, mass, vx, vy, vz, radius]`
+ * resident GPU ABI so the 10^0 m Continuum stop renders zero-copy from GPU buffers.
+ */
+export function createContinuumSpecimenBodies({
+  count = 1024,
+  phase = 'liquid',
+  seed = 4201
+} = {}) {
+  const n = Math.max(64, Math.min(8192, Math.floor(count)));
+  const bodies = new Float32Array(n * 8);
+  const rand = mulberry32(seed);
+
+  if (phase === 'gas') {
+    for (let i = 0; i < n; i += 1) {
+      const x = (rand() - 0.5) * 4.4;
+      const y = -0.8 + rand() * 3.4;
+      const z = (rand() - 0.5) * 4.4;
+      const vx = (rand() - 0.5) * 2.8;
+      const vy = (rand() - 0.5) * 2.8;
+      const vz = (rand() - 0.5) * 2.8;
+      bodies.set([x, y, z, 0.25, vx, vy, vz, 0.085], i * 8);
+    }
+    return bodies;
+  }
+
+  // Compact droplet (liquid) or cubic crystal lattice (solid) suspended slightly above pedestal (y = -1.0)
+  const edge = Math.ceil(Math.cbrt(n));
+  const spacing = phase === 'solid' ? 0.20 : 0.19;
+  const half = ((edge - 1) * spacing) / 2;
+  let idx = 0;
+  for (let iz = 0; iz < edge && idx < n; iz += 1) {
+    for (let iy = 0; iy < edge && idx < n; iy += 1) {
+      for (let ix = 0; ix < edge && idx < n; ix += 1) {
+        const lx = ix * spacing - half;
+        const ly = iy * spacing - half;
+        const lz = iz * spacing - half;
+        if (phase === 'liquid') {
+          // Slight spherical drop shaping + mild splash jitter
+          const r = Math.hypot(lx, ly, lz);
+          const scale = r > 1e-4 ? Math.min(1.15, (1.15 / Math.max(0.8, Math.max(Math.abs(lx), Math.abs(ly), Math.abs(lz)))) * 0.85) : 1;
+          bodies.set([
+            lx * Math.min(1.0, scale) + (rand() - 0.5) * 0.03,
+            0.35 + ly * Math.min(1.0, scale) + (rand() - 0.5) * 0.03,
+            lz * Math.min(1.0, scale) + (rand() - 0.5) * 0.03,
+            1.0,
+            (rand() - 0.5) * 0.25,
+            -0.35,
+            (rand() - 0.5) * 0.25,
+            0.105
+          ], idx * 8);
+        } else {
+          // Coherent solid crystal block tilted slightly above pedestal
+          const tilt = 0.28;
+          const ct = Math.cos(tilt);
+          const st = Math.sin(tilt);
+          const rx = lx * ct - ly * st;
+          const ry = lx * st + ly * ct;
+          bodies.set([rx, 0.55 + ry, lz, 1.0, 0, -0.15, 0, 0.105], idx * 8);
+        }
+        idx += 1;
+      }
+    }
+  }
+  return bodies;
+}
+
+export const continuumMicroSphWgsl = /* wgsl */ `
+struct Body {
+  pos_mass: vec4<f32>,
+  vel_radius: vec4<f32>,
+};
+
+struct MicroSphParams {
+  count: u32,
+  phase_mode: u32, // 0=liquid (SPH pressure+cohesion+viscosity), 1=solid (elastic crystal), 2=gas (thermal kinetic)
+  pad0: u32,
+  pad1: u32,
+  dt: f32,
+  gravity: f32,
+  stiffness: f32,
+  cohesion: f32,
+  viscosity: f32,
+  floor_y: f32,
+  box_half: f32,
+  rest_dist: f32,
+};
+
+@group(0) @binding(0) var<storage, read> src_bodies: array<Body>;
+@group(0) @binding(1) var<storage, read_write> dst_bodies: array<Body>;
+@group(0) @binding(2) var<uniform> params: MicroSphParams;
+
+var<workgroup> tile_p: array<vec4<f32>, 64>;
+var<workgroup> tile_v: array<vec4<f32>, 64>;
+
+@compute @workgroup_size(64)
+fn step_continuum_micro_sph(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>
+) {
+  let idx = gid.x;
+  let n = params.count;
+  let alive = idx < n;
+  var pm = vec4<f32>(0.0);
+  var vr = vec4<f32>(0.0);
+  if (alive) {
+    pm = src_bodies[idx].pos_mass;
+    vr = src_bodies[idx].vel_radius;
+  }
+
+  var force = vec3<f32>(0.0);
+  let h = params.rest_dist * 1.95;
+  let h2 = h * h;
+  let rest = params.rest_dist;
+  let num_tiles = (n + 63u) / 64u;
+
+  for (var t: u32 = 0u; t < num_tiles; t = t + 1u) {
+    let j = t * 64u + lid.x;
+    if (j < n) {
+      tile_p[lid.x] = src_bodies[j].pos_mass;
+      tile_v[lid.x] = src_bodies[j].vel_radius;
+    } else {
+      tile_p[lid.x] = vec4<f32>(0.0);
+      tile_v[lid.x] = vec4<f32>(0.0);
+    }
+    workgroupBarrier();
+
+    if (alive && pm.w > 0.0) {
+      let tile_count = min(64u, n - t * 64u);
+      for (var k: u32 = 0u; k < tile_count; k = k + 1u) {
+        let other_p = tile_p[k];
+        if (other_p.w <= 0.0) { continue; }
+        let d = pm.xyz - other_p.xyz;
+        let r2 = dot(d, d);
+        if (r2 > 1e-7 && r2 < h2) {
+          let r = sqrt(r2);
+          let dir = d / r;
+          let q = 1.0 - r / h;
+          if (params.phase_mode == 0u) {
+            // Liquid: SPH pressure repulsion + short-range surface-tension cohesion + XSPH viscosity
+            let rep = params.stiffness * max(0.0, rest - r) / rest;
+            let coh = -params.cohesion * q * (1.0 - q) * 4.0;
+            force = force + dir * (rep + coh);
+            force = force + (tile_v[k].xyz - vr.xyz) * (params.viscosity * q);
+          } else if (params.phase_mode == 1u) {
+            // Solid: stiff elastic crystal bonds holding lattice spacing + damping
+            let stretch = (rest - r) / rest;
+            force = force + dir * (params.stiffness * 1.8 * stretch);
+            force = force + (tile_v[k].xyz - vr.xyz) * (params.viscosity * 2.2 * q);
+          } else {
+            // Gas: soft short-range kinetic collisions
+            let rep = params.stiffness * 0.25 * max(0.0, 0.75 * rest - r) / rest;
+            force = force + dir * rep;
+          }
+        }
+      }
+    }
+    workgroupBarrier();
+  }
+
+  if (alive) {
+    var pos = pm.xyz;
+    var vel = vr.xyz;
+    if (params.phase_mode != 2u) {
+      force.y = force.y - params.gravity;
+      // Gentle pedestal confinement bowl so liquid Hg forms a dynamic oscillating puddle
+      let r_xz = length(pos.xz);
+      if (r_xz > 1.45) {
+        force.x = force.x - (pos.x / r_xz) * (r_xz - 1.45) * 14.0;
+        force.z = force.z - (pos.z / r_xz) * (r_xz - 1.45) * 14.0;
+      }
+    }
+
+    let dt = params.dt;
+    vel = vel + force * dt;
+    let damp = select(select(0.992, 0.986, params.phase_mode == 1u), 0.9995, params.phase_mode == 2u);
+    vel = vel * damp;
+    let sp = length(vel);
+    if (sp > 6.5) {
+      vel = vel * (6.5 / sp);
+    }
+    pos = pos + vel * dt;
+
+    // Pedestal floor and lab cage reflections
+    let floor_y = params.floor_y;
+    let ceil_y = params.box_half;
+    let bound_xz = select(params.box_half, 1.55, params.phase_mode != 2u);
+    let bounce = select(select(0.28, 0.45, params.phase_mode == 1u), 0.98, params.phase_mode == 2u);
+    if (pos.y < floor_y) { pos.y = floor_y; vel.y = abs(vel.y) * bounce; vel.x = vel.x * 0.92; vel.z = vel.z * 0.92; }
+    if (pos.y > ceil_y) { pos.y = ceil_y; vel.y = -abs(vel.y) * bounce; }
+    if (pos.x < -bound_xz) { pos.x = -bound_xz; vel.x = abs(vel.x) * bounce; }
+    if (pos.x > bound_xz) { pos.x = bound_xz; vel.x = -abs(vel.x) * bounce; }
+    if (pos.z < -bound_xz) { pos.z = -bound_xz; vel.z = abs(vel.z) * bounce; }
+    if (pos.z > bound_xz) { pos.z = bound_xz; vel.z = -abs(vel.z) * bounce; }
+
+    dst_bodies[idx] = Body(vec4<f32>(pos, pm.w), vec4<f32>(vel, vr.w));
+  }
+}
+`;
+
+/**
+ * Resident GPU / CPU micro-SPH continuum specimen engine (`liquid` / `solid` / `gas`)
+ * driven by live quantum-derived phase & bulk modulus, binding zero-copy to
+ * `createZeroCopyResidentBodyPresenter`.
+ */
+export function createResidentContinuumDropletEngine({
+  device = null,
+  initialBodies,
+  phase = 'liquid',
+  bulkModulusPa = 25e9,
+  label = 'ulg-continuum-micro-sph'
+} = {}) {
+  let cpuBodies = Float32Array.from(initialBodies);
+  const count = cpuBodies.length / 8;
+  const phaseMode = phase === 'solid' ? 1 : phase === 'gas' ? 2 : 0;
+  const stiffness = Math.min(28, Math.max(8, 10 + Math.log10(Math.max(1e7, bulkModulusPa)) * 1.4));
+  let stepIndex = 0;
+  let disposed = false;
+
+  let buffers = null;
+  let paramsBuffer = null;
+  let stagingBuffer = null;
+  let pipelineRecord = null;
+  let bindGroups = null;
+  let ping = 0;
+
+  if (device && typeof device.createBuffer === 'function') {
+    const byteLength = Math.max(32, cpuBodies.byteLength);
+    const bodyUsage = USAGE_STORAGE | USAGE_VERTEX | USAGE_COPY_DST | USAGE_COPY_SRC;
+    buffers = [
+      device.createBuffer({ label: `${label}-buf-0`, size: byteLength, usage: bodyUsage }),
+      device.createBuffer({ label: `${label}-buf-1`, size: byteLength, usage: bodyUsage })
+    ];
+    paramsBuffer = device.createBuffer({ label: `${label}-params`, size: 48, usage: USAGE_UNIFORM | USAGE_COPY_DST });
+    stagingBuffer = device.createBuffer({ label: `${label}-staging`, size: byteLength, usage: USAGE_COPY_DST | USAGE_MAP_READ });
+    device.queue.writeBuffer(buffers[0], 0, cpuBodies);
+    device.queue.writeBuffer(buffers[1], 0, cpuBodies);
+
+    pipelineRecord = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-continuum-micro-sph.v1',
+      label: 'ulg-continuum-micro-sph-pipe',
+      code: continuumMicroSphWgsl,
+      entryPoint: 'step_continuum_micro_sph',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'storage'),
+        computeBufferBinding(2, 'uniform')
+      ]
+    });
+    bindGroups = [
+      createCachedExplicitBindGroup(device, {
+        layout: pipelineRecord.bindGroupLayout,
+        label: `${label}-bg-0`,
+        entries: [
+          { binding: 0, resource: { buffer: buffers[0] } },
+          { binding: 1, resource: { buffer: buffers[1] } },
+          { binding: 2, resource: { buffer: paramsBuffer } }
+        ]
+      }),
+      createCachedExplicitBindGroup(device, {
+        layout: pipelineRecord.bindGroupLayout,
+        label: `${label}-bg-1`,
+        entries: [
+          { binding: 0, resource: { buffer: buffers[1] } },
+          { binding: 1, resource: { buffer: buffers[0] } },
+          { binding: 2, resource: { buffer: paramsBuffer } }
+        ]
+      })
+    ];
+  }
+
+  let mapInFlight = false;
+
+  async function readbackBodies() {
+    if (!buffers || !stagingBuffer || mapInFlight || disposed) return cpuBodies;
+    mapInFlight = true;
+    try {
+      const enc = device.createCommandEncoder({ label: `${label}-readback` });
+      enc.copyBufferToBuffer(buffers[ping], 0, stagingBuffer, 0, cpuBodies.byteLength);
+      device.queue.submit([enc.finish()]);
+      await stagingBuffer.mapAsync(1);
+      cpuBodies.set(new Float32Array(stagingBuffer.getMappedRange()));
+      stagingBuffer.unmap();
+    } finally {
+      mapInFlight = false;
+    }
+    return cpuBodies;
+  }
+
+  async function step({ dt = 0.014, gravity = 4.8, readback = false } = {}) {
+    if (disposed) return cpuBodies;
+    if (!buffers || !pipelineRecord) {
+      // Lightweight CPU fallback
+      const floorY = -0.92;
+      const bound = phaseMode === 2 ? 2.6 : 1.5;
+      for (let i = 0; i < count; i += 1) {
+        const b = i * 8;
+        if (phaseMode !== 2) cpuBodies[b + 5] -= gravity * dt;
+        cpuBodies[b + 0] += cpuBodies[b + 4] * dt;
+        cpuBodies[b + 1] += cpuBodies[b + 5] * dt;
+        cpuBodies[b + 2] += cpuBodies[b + 6] * dt;
+        if (cpuBodies[b + 1] < floorY) { cpuBodies[b + 1] = floorY; cpuBodies[b + 5] = Math.abs(cpuBodies[b + 5]) * 0.35; }
+        if (cpuBodies[b + 1] > 2.6) { cpuBodies[b + 1] = 2.6; cpuBodies[b + 5] = -Math.abs(cpuBodies[b + 5]) * 0.9; }
+        if (Math.abs(cpuBodies[b + 0]) > bound) { cpuBodies[b + 0] = Math.sign(cpuBodies[b + 0]) * bound; cpuBodies[b + 4] *= -0.8; }
+        if (Math.abs(cpuBodies[b + 2]) > bound) { cpuBodies[b + 2] = Math.sign(cpuBodies[b + 2]) * bound; cpuBodies[b + 6] *= -0.8; }
+      }
+      stepIndex += 1;
+      return cpuBodies;
+    }
+
+    const pBuf = new ArrayBuffer(48);
+    const u32 = new Uint32Array(pBuf);
+    const f32 = new Float32Array(pBuf);
+    u32[0] = count;
+    u32[1] = phaseMode;
+    f32[4] = dt;
+    f32[5] = gravity;
+    f32[6] = stiffness;
+    f32[7] = phaseMode === 0 ? 4.2 : 0.0;
+    f32[8] = phaseMode === 0 ? 0.85 : 1.4;
+    f32[9] = -0.92;
+    f32[10] = 2.65;
+    f32[11] = 0.20;
+    device.queue.writeBuffer(paramsBuffer, 0, pBuf);
+
+    const srcIdx = ping;
+    const dstIdx = 1 - ping;
+    const enc = device.createCommandEncoder({ label: `${label}-step-${stepIndex}` });
+    const pass = enc.beginComputePass({ label: `${label}-pass` });
+    pass.setPipeline(pipelineRecord.pipeline);
+    pass.setBindGroup(0, bindGroups[srcIdx]);
+    pass.dispatchWorkgroups(Math.ceil(count / 64));
+    pass.end();
+    const doReadback = readback && !mapInFlight;
+    if (doReadback) {
+      enc.copyBufferToBuffer(buffers[dstIdx], 0, stagingBuffer, 0, cpuBodies.byteLength);
+    }
+    device.queue.submit([enc.finish()]);
+    ping = dstIdx;
+    stepIndex += 1;
+    if (doReadback) {
+      mapInFlight = true;
+      try {
+        await stagingBuffer.mapAsync(1);
+        cpuBodies.set(new Float32Array(stagingBuffer.getMappedRange()));
+        stagingBuffer.unmap();
+      } finally {
+        mapInFlight = false;
+      }
+    }
+    return cpuBodies;
+  }
+
+  return {
+    get count() { return count; },
+    get activeCount() { return count; },
+    get stepIndex() { return stepIndex; },
+    get scaleFactorA() { return 1.0; },
+    get phase() { return phase; },
+    get backend() { return buffers ? 'webgpu' : 'cpu-fallback'; },
+    get gravityMode() { return buffers ? `webgpu-micro-sph-${phase}` : `cpu-micro-sph-${phase}`; },
+    getBodies: () => cpuBodies,
+    readbackBodies,
+    getResidentBuffer: () => (buffers ? buffers[ping] : null),
+    step,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      buffers?.[0]?.destroy();
+      buffers?.[1]?.destroy();
+      paramsBuffer?.destroy();
+      stagingBuffer?.destroy();
+      buffers = null;
+    }
+  };
+}
+
+/**
  * Wrap a resident N-body engine (`direct` or `barnes-hut-octree`) into a ULG
  * `SimulationModuleRegistry` registration (`nbody-gravity@1` or
  * `cosmology-comoving-nbody@1`).
@@ -976,8 +1354,16 @@ export function createResidentCosmicModuleRegistration({
     method,
     kernel: {
       sourceModule: 'src/demos/cosmicQuantumGpuKernels.js',
-      entryPoint: engine.gravityMode === 'webgpu-barnes-hut-octree' ? 'bh_integrate' : 'step_nbody',
-      wgsl: engine.gravityMode === 'webgpu-barnes-hut-octree' ? cosmicBarnesHutOctreeWgsl : cosmicNBodyTiledWgsl,
+      entryPoint: engine.gravityMode?.startsWith('webgpu-micro-sph')
+        ? 'step_continuum_micro_sph'
+        : engine.gravityMode === 'webgpu-barnes-hut-octree'
+          ? 'bh_integrate'
+          : 'step_nbody',
+      wgsl: engine.gravityMode?.startsWith('webgpu-micro-sph')
+        ? continuumMicroSphWgsl
+        : engine.gravityMode === 'webgpu-barnes-hut-octree'
+          ? cosmicBarnesHutOctreeWgsl
+          : cosmicNBodyTiledWgsl,
       workgroupSize: 64
     },
     parameterSchema: {

@@ -6,12 +6,20 @@ import { createCosmicQuantumScaleBridge } from '../src/runtime/sph/cosmicQuantum
 import {
   cosmicBarnesHutOctreeWgsl,
   cosmicNBodyTiledWgsl,
+  continuumMicroSphWgsl,
+  createContinuumSpecimenBodies,
   createCosmicWebBodies,
   createGalacticBodies,
   createResidentBarnesHutNBodyEngine,
+  createResidentContinuumDropletEngine,
   createResidentCosmicModuleRegistration,
   createResidentTiledNBodyEngine
 } from '../src/demos/cosmicQuantumGpuKernels.js';
+import {
+  VOLUMETRIC_ORBITAL_MODES,
+  buildOrbitalVolumeData,
+  evaluateRealSphericalHarmonic
+} from '../src/demos/volumetricOrbitalRaymarcher.js';
 
 test('createGalacticBodies produces deterministic finite 8-float interleaved ABI across disk, binary, and sphere presets', () => {
   for (const preset of ['disk', 'binary', 'sphere']) {
@@ -225,4 +233,76 @@ test('createResidentBarnesHutNBodyEngine scales initialization to 32768 bodies a
   assert.equal(bhCpu.stepIndex, 1);
   for (const v of out) assert.ok(Number.isFinite(v));
   bhCpu.dispose();
+});
+
+test('volumetricOrbitalRaymarcher builds signed 3D spherical-harmonic volumes with honest provenance labels', () => {
+  assert.equal(VOLUMETRIC_ORBITAL_MODES.length, 6);
+  assert.equal(VOLUMETRIC_ORBITAL_MODES[0].provenance, 'radial-atomic-density-reconstruction');
+  assert.equal(VOLUMETRIC_ORBITAL_MODES[3].id, 'd_z2');
+  assert.equal(VOLUMETRIC_ORBITAL_MODES[3].provenance, 'spherical-harmonic-basis-projection');
+
+  // d_z2 polar positive (+1) and equatorial negative (-0.5)
+  assert.ok(evaluateRealSphericalHarmonic('d_z2', 0, 1, 0) > 0.99);
+  assert.ok(evaluateRealSphericalHarmonic('d_z2', 1, 0, 0) < -0.49);
+  // p_z antisymmetric
+  assert.ok(evaluateRealSphericalHarmonic('p_z', 0, 1, 0) > 0.99);
+  assert.ok(evaluateRealSphericalHarmonic('p_z', 0, -1, 0) < -0.99);
+
+  const radialSamples = Array.from({ length: 32 }, (_, i) => {
+    const r = (i / 31) * 5.0;
+    return { rBohr: r, radialProbabilityPerBohr: r * r * Math.exp(-1.2 * r) };
+  });
+
+  const tot = buildOrbitalVolumeData({ radialSamples, rMaxBohr: 5.0, r95Bohr: 3.0, modeId: 'total-density', dim: 20 });
+  assert.equal(tot.data.length, 20 * 20 * 20 * 4);
+  assert.ok(tot.peak > 0);
+  let totNeg = 0;
+  for (let i = 0; i < tot.data.length; i += 4) totNeg += tot.data[i + 1];
+  assert.equal(totNeg, 0, 'total electron density must be strictly non-negative');
+
+  const dz2 = buildOrbitalVolumeData({ radialSamples, rMaxBohr: 5.0, r95Bohr: 3.0, modeId: 'd_z2', dim: 20 });
+  let posSum = 0;
+  let negSum = 0;
+  for (let i = 0; i < dz2.data.length; i += 4) {
+    posSum += dz2.data[i + 0];
+    negSum += dz2.data[i + 1];
+  }
+  assert.ok(posSum > 0 && negSum > 0, 'd_z2 volume must contain both positive polar lobes and negative equatorial torus');
+});
+
+test('continuum-micro-sph@1 generates liquid/solid/gas specimens and integrates via SimulationModuleRegistry', async () => {
+  assert.ok(continuumMicroSphWgsl.includes('fn step_continuum_micro_sph'));
+  for (const phase of ['liquid', 'solid', 'gas']) {
+    const bodies = createContinuumSpecimenBodies({ count: 256, phase, seed: 4201 });
+    assert.equal(bodies.length, 256 * 8);
+    for (const v of bodies) assert.ok(Number.isFinite(v));
+  }
+
+  const registry = createSimulationModuleRegistry();
+  const engine = createResidentContinuumDropletEngine({
+    device: null,
+    initialBodies: createContinuumSpecimenBodies({ count: 128, phase: 'liquid', seed: 4201 }),
+    phase: 'liquid',
+    bulkModulusPa: 25e9
+  });
+  registry.registerModule(createResidentCosmicModuleRegistration({
+    method: { model: 'continuum-micro-sph', version: 1 },
+    engine,
+    scaleRangeM: [1e-4, 1e2],
+    zeroCopy: false
+  }));
+
+  const cap = createUlgTaskCapsule({
+    taskId: 'cont-host-0',
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    taskKind: ULG_TASK_KINDS.simulationStep,
+    method: { model: 'continuum-micro-sph', version: 1 },
+    input: { stepIndex: 0, parameters: { dt: 0.015, gravity: 4.8 } }
+  });
+  const res = await registry.dispatchSimulationStepCapsule(cap);
+  assert.equal(res.artifact.validation.status, 'pass');
+  assert.equal(res.artifact.execution.stage, 'continuum-micro-sph.step');
+  assert.equal(engine.stepIndex, 1);
+  res.leaseHandle.release();
+  engine.dispose();
 });

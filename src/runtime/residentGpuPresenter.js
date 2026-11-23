@@ -23,6 +23,8 @@ export function createZeroCopyResidentBodyPresenter({
   renderer = null,
   bodyCount,
   palette = 'galactic',
+  tintColor = null,
+  particleScale = null,
   initialBuffer = null,
   baseGeometry = null
 } = {}) {
@@ -79,7 +81,23 @@ export function createZeroCopyResidentBodyPresenter({
 
     let starScale;
     let starColor;
-    if (palette === 'cosmic-web') {
+    if (palette === 'continuum-material') {
+      const tr = Number.isFinite(tintColor?.[0]) ? tintColor[0] : 0.78;
+      const tg = Number.isFinite(tintColor?.[1]) ? tintColor[1] : 0.85;
+      const tb = Number.isFinite(tintColor?.[2]) ? tintColor[2] : 0.92;
+      const baseSc = Number.isFinite(particleScale) ? particleScale : 0.11;
+      const aVelRadius = attribute('aVelRadius', 'vec4');
+      const speed = length(aVelRadius.xyz);
+      const speedBoost = clamp(speed.mul(float(0.10)), float(0.0), float(0.24));
+      const rad = clamp(aVelRadius.w, float(0.04), float(0.26));
+      const rim = clamp(positionLocal.y.mul(float(0.32)).add(float(0.82)), float(0.50), float(1.18));
+      starScale = select(alive, rad.mul(float(baseSc / 0.11)), float(0.0));
+      starColor = vec3(
+        clamp(float(tr).mul(rim).add(speedBoost), float(0.0), float(1.0)),
+        clamp(float(tg).mul(rim).add(speedBoost), float(0.0), float(1.0)),
+        clamp(float(tb).mul(rim).add(speedBoost), float(0.0), float(1.0))
+      );
+    } else if (palette === 'cosmic-web') {
       const mNorm = clamp(mass.div(float(5.5)), float(0.0), float(1.0));
       const rawScale = float(0.026).add(pow(mNorm, float(0.72)).mul(float(0.068)));
       starScale = select(alive, rawScale, float(0.0));
@@ -181,6 +199,15 @@ export function createZeroCopyResidentBodyPresenter({
       dummy.position.set(x, y, z);
       if (!(mass > 0)) {
         dummy.scale.setScalar(0);
+      } else if (palette === 'continuum-material') {
+        const tr = Number.isFinite(tintColor?.[0]) ? tintColor[0] : 0.78;
+        const tg = Number.isFinite(tintColor?.[1]) ? tintColor[1] : 0.85;
+        const tb = Number.isFinite(tintColor?.[2]) ? tintColor[2] : 0.92;
+        const baseSc = Number.isFinite(particleScale) ? particleScale : 0.11;
+        const rad = Math.max(0.04, Math.min(0.26, bodies[b + 7] || baseSc));
+        const sp = Math.min(0.25, Math.hypot(bodies[b + 4], bodies[b + 5], bodies[b + 6]) * 0.12);
+        dummy.scale.setScalar(rad * (baseSc / 0.11));
+        color.setRGB(Math.min(1, tr + sp), Math.min(1, tg + sp), Math.min(1, tb + sp));
       } else if (palette === 'cosmic-web') {
         const mNorm = Math.min(1, mass / 5.5);
         dummy.scale.setScalar(0.026 + 0.068 * Math.pow(mNorm, 0.72));

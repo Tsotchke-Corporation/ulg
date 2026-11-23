@@ -14,6 +14,7 @@ import {
   validateDerivationVisualizationBundle
 } from '../runtime/electronicStructure/quantumDerivationArtifacts.js';
 import { BOHR_TO_M } from '../runtime/electronicStructure/uniformElectronGas.js';
+import { climbingImageNEB } from '../runtime/electronicStructure/molecularHartreeFock.js';
 import { eshkolHelmholtzProgram } from '../runtime/material/eshkolTriadClosures.js';
 import {
   COSMIC_QUANTUM_SCALE_REGIMES,
@@ -21,9 +22,20 @@ import {
 } from '../runtime/sph/cosmicQuantumScaleBridge.js';
 import { runSchroederScaleAtlasMultipoleWebGpu } from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
 import {
+  createRelaySignalingTransport,
+  startClientDerivationRequester,
+  startClientDerivationResponder
+} from '../services/clientDerivationPeers.js';
+import {
+  VOLUMETRIC_ORBITAL_MODES,
+  createVolumetricOrbitalRaymarcher
+} from './volumetricOrbitalRaymarcher.js';
+import {
+  createContinuumSpecimenBodies,
   createCosmicWebBodies,
   createGalacticBodies,
   createResidentBarnesHutNBodyEngine,
+  createResidentContinuumDropletEngine,
   createResidentCosmicModuleRegistration,
   createResidentTiledNBodyEngine
 } from './cosmicQuantumGpuKernels.js';
@@ -251,9 +263,15 @@ export async function mountCosmicQuantumZoomDemo(container) {
 
   let selectedElementZ = Number.parseInt(urlParams.get('Z') || '80', 10) || 80; // Default Hg (Z=80) showcasing relativistic liquid metal!
   let selectedFunctional = urlParams.get('functional') === 'lda' ? 'lda' : 'pbe';
+  let selectedOrbitalMode = VOLUMETRIC_ORBITAL_MODES.some((m) => m.id === urlParams.get('orbital'))
+    ? urlParams.get('orbital')
+    : 'total-density';
   let selectedMoleculeKey = MOLECULAR_PRESETS[urlParams.get('molecule')] ? urlParams.get('molecule') : 'H2O';
   let selectedBasis = urlParams.get('basis') === '6-31g(d)' ? '6-31g(d)' : 'sto-3g';
   let molecularViewMode = 'density';
+  let nebModeActive = urlParams.get('neb') === '1';
+  let nebReactionXi = 0.5;
+  let showPolytopeOverlay = true;
   let galaxyPreset = ['disk', 'binary', 'sphere'].includes(urlParams.get('galaxy')) ? urlParams.get('galaxy') : 'disk';
   let simRunning = urlParams.get('paused') !== '1';
   let tourRunning = urlParams.get('tour') === '1';
@@ -261,6 +279,11 @@ export async function mountCosmicQuantumZoomDemo(container) {
   const galaxyGravity = 1.0;
   const galaxyDt = 0.011;
   const hubbleExpansionSpeed = 0.14;
+  let peerRelayUrl = (urlParams.get('peerRelay') || '').trim();
+  let peerRoomId = (urlParams.get('peerRoom') || 'ulg-cosmic-quantum-mesh-v1').trim();
+  let peerRole = ['requester', 'responder', 'observer'].includes(urlParams.get('peerRole'))
+    ? urlParams.get('peerRole')
+    : 'requester';
 
   // Acquire shared WebGPU GPUDevice
   let gpuDevice = null;
@@ -311,9 +334,119 @@ export async function mountCosmicQuantumZoomDemo(container) {
 
   const zeroCopyActive = Boolean(gpuDevice && renderer.isWebGPURenderer);
 
-  // Content-addressed relativistic material resolver pipeline (Milestone 1)
-  const materialPipeline = createMaterialResolverPipeline();
+  // Content-addressed Phase 6 WebGPU-derived material resolver pipeline
+  const materialPipeline = createMaterialResolverPipeline({ device: gpuDevice });
   let currentElementResolution = null;
+
+  // Optional Phase 11 live PeerCompute WebSocket/WebRTC distributed mesh
+  let peerMesh = null;
+  let peerMeshState = {
+    connected: false,
+    role: peerRole,
+    relayUrl: peerRelayUrl,
+    roomId: peerRoomId,
+    remotePeers: 0,
+    quorumReady: false,
+    dispatches: 0,
+    lastResult: null,
+    error: null
+  };
+
+  async function disconnectPeerMesh() {
+    if (!peerMesh) return;
+    const prev = peerMesh;
+    peerMesh = null;
+    try { await prev.stop?.(); } catch { /* ignore */ }
+    try { prev.transport?.close?.(); } catch { /* ignore */ }
+    peerMeshState = {
+      ...peerMeshState,
+      connected: false,
+      remotePeers: 0,
+      quorumReady: false
+    };
+  }
+
+  async function connectPeerMesh({ relayUrl = peerRelayUrl, roomId = peerRoomId, role = peerRole } = {}) {
+    await disconnectPeerMesh();
+    peerRelayUrl = String(relayUrl || '').trim();
+    peerRoomId = String(roomId || 'ulg-cosmic-quantum-mesh-v1').trim();
+    peerRole = ['requester', 'responder', 'observer'].includes(role) ? role : 'requester';
+    if (!peerRelayUrl) {
+      peerMeshState = { ...peerMeshState, connected: false, relayUrl: '', roomId: peerRoomId, role: peerRole, error: null };
+      return peerMeshState;
+    }
+    try {
+      const peerId = `cq-${peerRole}-${Math.random().toString(36).slice(2, 8)}`;
+      const transport = createRelaySignalingTransport({
+        relayUrl: peerRelayUrl,
+        roomId: peerRoomId,
+        peerId,
+        enableWebRtc: false
+      });
+      let handle = null;
+      if (peerRole === 'responder') {
+        handle = await startClientDerivationResponder({
+          transport,
+          peerId,
+          channelName: peerRoomId,
+          executor: async (task) => {
+            const z = Number(task?.payload?.atomicNumberZ ?? task?.atomicNumberZ ?? selectedElementZ);
+            const res = await materialPipeline.resolveElement(z, { gridPointsN: 256, includeGasPhase: true });
+            return {
+              symbol: res.properties.symbol,
+              standardPhaseAt298K: res.properties.standardPhaseAt298K,
+              meltingPointK: Math.round(res.properties.meltingPointK || 0),
+              resolverStatus: res.resolverStatus,
+              scientificValidation: false
+            };
+          }
+        });
+      } else if (peerRole === 'requester') {
+        handle = await startClientDerivationRequester({
+          transport,
+          peerId,
+          channelName: peerRoomId,
+          quorum: 2,
+          staleMs: 2500
+        });
+      } else {
+        // Observer role: passive WebSocket room listener tracking live peer presence
+        const seenPeers = new Set();
+        transport.onMessage((env) => {
+          if (env?.from) seenPeers.add(env.from);
+          if (env?.type === 'peer-disconnect' && env?.peerId) seenPeers.delete(env.peerId);
+          peerMeshState.remotePeers = seenPeers.size;
+        });
+        handle = {
+          getPeers: () => [...seenPeers],
+          async stop() { transport.close(); }
+        };
+      }
+      peerMesh = { transport, handle, peerId, role: peerRole, stop: () => handle?.stop?.() };
+      peerMeshState = {
+        connected: true,
+        role: peerRole,
+        relayUrl: peerRelayUrl,
+        roomId: peerRoomId,
+        peerId,
+        remotePeers: typeof handle?.getPeers === 'function' ? handle.getPeers().length : 0,
+        quorumReady: false,
+        dispatches: 0,
+        lastResult: null,
+        error: null
+      };
+    } catch (err) {
+      peerMeshState = {
+        ...peerMeshState,
+        connected: false,
+        relayUrl: peerRelayUrl,
+        roomId: peerRoomId,
+        role: peerRole,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+    return peerMeshState;
+  }
 
   // Simulation module registry + Cosmic-to-Quantum Scale Bridge
   const moduleRegistry = createSimulationModuleRegistry();
@@ -566,12 +699,18 @@ export async function mountCosmicQuantumZoomDemo(container) {
   let continuumHelmholtzGroup = null;
   let continuumGasCloud = null;
   let continuumSpecimenPhase = 'liquid';
+  let continuumEngine = null;
+  let continuumPresenter = null;
 
   function disposeGroupChildren(group) {
     while (group.children.length > 0) {
       const child = group.children.pop();
       child.traverse?.((node) => {
-        node.geometry?.dispose?.();
+        // THREE.Sprite shares a single module-global BufferGeometry across all sprites;
+        // disposing it destroys the GPU vertex buffer for every other sprite in the scene.
+        if (!node.isSprite) {
+          node.geometry?.dispose?.();
+        }
         if (Array.isArray(node.material)) node.material.forEach((m) => m.dispose?.());
         else node.material?.dispose?.();
       });
@@ -579,6 +718,16 @@ export async function mountCosmicQuantumZoomDemo(container) {
   }
 
   async function rebuildContinuumFromQuantumElement() {
+    if (continuumPresenter) {
+      continuumDynamicGroup.remove(continuumPresenter.mesh);
+      continuumPresenter.dispose();
+      continuumPresenter = null;
+    }
+    if (continuumEngine) {
+      moduleRegistry.unregisterModule({ model: 'continuum-micro-sph', version: 1 });
+      continuumEngine.dispose();
+      continuumEngine = null;
+    }
     disposeGroupChildren(continuumDynamicGroup);
     continuumSpecimenMesh = null;
     continuumHelmholtzGroup = null;
@@ -588,7 +737,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
       functional: selectedFunctional,
       scalarRelativistic: true,
       includeGasPhase: true,
-      gridPointsN: 420
+      gridPointsN: 360
     });
     const p = currentElementResolution.properties;
     const vdw = p.vdwGasProperties;
@@ -599,11 +748,10 @@ export async function mountCosmicQuantumZoomDemo(container) {
     const cp = p.cpJPerKgK ?? 400;
     const [cr, cg, cb] = p.opticalColorSrgb || [0.78, 0.85, 0.92];
     const derivedColor = new THREE.Color(cr, cg, cb);
-    const isMetal = Boolean(p.metallicModelApplicable);
 
     // Pedestal translucent glass/ice substrate
     const pedestal = new THREE.Mesh(
-      new THREE.BoxGeometry(3.2, 0.45, 3.2),
+      new THREE.BoxGeometry(3.4, 0.42, 3.4),
       new THREE.MeshStandardMaterial({
         color: 0x1e3a5f,
         emissive: 0x0c243b,
@@ -616,74 +764,48 @@ export async function mountCosmicQuantumZoomDemo(container) {
     );
     pedestal.position.set(0, -1.25, 0);
     const pedestalEdges = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(3.22, 0.47, 3.22)),
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(3.42, 0.44, 3.42)),
       new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.55 })
     );
     pedestalEdges.position.copy(pedestal.position);
     continuumDynamicGroup.add(pedestal, pedestalEdges);
 
-    // Physically derived continuum specimen reflecting real ambient state (liquid / solid / gas) + spin-orbit sRGB color!
-    if (phase === 'liquid') {
-      // Shimmering oblate liquid metal/halogen puddle (e.g., liquid Hg or liquid Br2!)
-      const dropGeo = new THREE.SphereGeometry(1.38, 36, 26);
-      dropGeo.scale(1.22, 0.52, 1.22);
-      const dropMat = new THREE.MeshStandardMaterial({
-        color: derivedColor,
-        emissive: derivedColor.clone().multiplyScalar(isMetal ? 0.22 : 0.32),
-        roughness: isMetal ? 0.08 : 0.18,
-        metalness: isMetal ? 0.92 : 0.05
-      });
-      continuumSpecimenMesh = new THREE.Mesh(dropGeo, dropMat);
-      continuumSpecimenMesh.position.set(0, -0.35, 0);
-      const glow = createSoftGlowSprite(spriteTex, derivedColor.getHex(), 4.6, 0.42);
-      glow.position.copy(continuumSpecimenMesh.position);
-      continuumDynamicGroup.add(continuumSpecimenMesh, glow);
-    } else if (phase === 'gas') {
-      // Buoyant translucent gas plume particles (e.g., Cl2, H2, Ne!)
-      const gasCount = 260;
-      const gasMesh = new THREE.InstancedMesh(
-        new THREE.IcosahedronGeometry(0.18, 1),
-        new THREE.MeshBasicMaterial({
-          color: derivedColor,
-          transparent: true,
-          opacity: 0.28,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false
-        }),
-        gasCount
-      );
-      gasMesh.frustumCulled = false;
-      const seeds = [];
-      let s = 4201 + selectedElementZ * 31;
-      const rnd = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
-      for (let i = 0; i < gasCount; i += 1) {
-        seeds.push({
-          x: (rnd() - 0.5) * 3.8,
-          y: -0.9 + rnd() * 3.2,
-          z: (rnd() - 0.5) * 3.8,
-          speed: 0.35 + rnd() * 0.75,
-          phase: rnd() * Math.PI * 2,
-          scale: 0.55 + rnd() * 0.85
-        });
-      }
-      gasMesh.userData.seeds = seeds;
-      continuumGasCloud = gasMesh;
-      continuumDynamicGroup.add(gasMesh);
-    } else {
-      // Faceted crystalline solid specimen (Au, Cu, Ag, Fe, Ga, C, I...)
-      const solidGeo = new THREE.OctahedronGeometry(1.28, 1);
-      const solidMat = new THREE.MeshStandardMaterial({
-        color: derivedColor,
-        emissive: derivedColor.clone().multiplyScalar(0.18),
-        roughness: isMetal ? 0.20 : 0.42,
-        metalness: isMetal ? 0.88 : 0.08
-      });
-      continuumSpecimenMesh = new THREE.Mesh(solidGeo, solidMat);
-      continuumSpecimenMesh.position.set(0, 0.25, 0);
-      const glow = createSoftGlowSprite(spriteTex, derivedColor.getHex(), 4.2, 0.36);
-      glow.position.copy(continuumSpecimenMesh.position);
-      continuumDynamicGroup.add(continuumSpecimenMesh, glow);
+    // Live Zero-Copy WebGPU Resident Micro-SPH / Elastic-Solid / Thermal-Gas specimen (1,024 particles, 0 B/frame readback)
+    const microBodies0 = createContinuumSpecimenBodies({
+      count: 1024,
+      phase,
+      seed: 4201 + selectedElementZ * 17
+    });
+    continuumEngine = createResidentContinuumDropletEngine({
+      device: gpuDevice,
+      initialBodies: microBodies0,
+      phase,
+      bulkModulusPa: bulkPa,
+      label: `ulg-continuum-${p.symbol.toLowerCase()}-${phase}`
+    });
+    moduleRegistry.registerModule(createResidentCosmicModuleRegistration({
+      method: { model: 'continuum-micro-sph', version: 1 },
+      engine: continuumEngine,
+      scaleRangeM: [1e-4, 1e2],
+      zeroCopy: zeroCopyActive
+    }));
+    continuumPresenter = createZeroCopyResidentBodyPresenter({
+      THREE,
+      TSL,
+      renderer,
+      bodyCount: continuumEngine.count,
+      palette: 'continuum-material',
+      tintColor: [cr, cg, cb],
+      particleScale: phase === 'gas' ? 0.085 : 0.115,
+      initialBuffer: continuumEngine.getResidentBuffer()
+    });
+    continuumDynamicGroup.add(continuumPresenter.mesh);
+    if (!continuumPresenter.zeroCopy) {
+      continuumPresenter.syncFromCpuBodies(continuumEngine.getBodies());
     }
+    const glow = createSoftGlowSprite(spriteTex, derivedColor.getHex(), 4.4, phase === 'gas' ? 0.24 : 0.40);
+    glow.position.set(0, phase === 'liquid' ? -0.35 : 0.2, 0);
+    continuumDynamicGroup.add(glow);
 
     // Rebuild 3D Eshkol A4 Helmholtz potential surface a(T, v) from the element's live derived bulk properties!
     const refV = 1 / Math.max(10, density);
@@ -739,25 +861,115 @@ export async function mountCosmicQuantumZoomDemo(container) {
     continuumDynamicGroup.add(continuumHelmholtzGroup);
   }
 
-  // ---- 5. Molecular 6-31G(d) / STO-3G Charge Density & Bond Discovery (10^-9 m) ----
+  // ---- 5. Molecular 6-31G(d) / STO-3G Charge Density, CI-NEB Path & Polytope Overlay (10^-9 m) ----
   const molecularGroup = regimeGroups['molecular-lattice'];
   let currentMolecularBundle = null;
   let currentMolecularArtifact = null;
   let currentMolecularBackend = 'worker-cpu-derived';
+  let cachedNebPath = null;
+  let currentPolytopeStatus = 'accepted';
+
+  function ensureNebReactionPath() {
+    if (cachedNebPath) return cachedNebPath;
+    // Closed-shell 10-electron first-principles CI-NEB: H2O bent -> linear D_inf_h TS -> inverted H2O
+    const reactant = [
+      { Z: 8, position: [0, 0, 0] },
+      { Z: 1, position: [1.43, 1.108, 0] },
+      { Z: 1, position: [-1.43, 1.108, 0] }
+    ];
+    const product = [
+      { Z: 8, position: [0, 0, 0] },
+      { Z: 1, position: [1.43, -1.108, 0] },
+      { Z: 1, position: [-1.43, -1.108, 0] }
+    ];
+    cachedNebPath = climbingImageNEB(reactant, product, {
+      nImages: 7,
+      maxSteps: 14,
+      springK: 0.12,
+      stepSize: 0.16,
+      basis: 'sto-3g'
+    });
+    return cachedNebPath;
+  }
+
+  function buildNebEnergySvg(neb, xi) {
+    const energies = neb?.energiesHa || [];
+    if (energies.length < 3) return '';
+    const w = 260;
+    const h = 66;
+    const e0 = energies[0];
+    const relEv = energies.map((e) => (e - e0) * HA_TO_EV);
+    const eMin = Math.min(...relEv);
+    const eMax = Math.max(eMin + 0.1, ...relEv);
+    const pts = relEv.map((ev, i) => {
+      const x = 10 + (i / (relEv.length - 1)) * (w - 20);
+      const y = h - 10 - ((ev - eMin) / (eMax - eMin)) * (h - 22);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    const curX = 10 + Math.max(0, Math.min(1, xi)) * (w - 20);
+    const sadX = 10 + (neb.saddleImageIndex / (relEv.length - 1)) * (w - 20);
+    return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:66px;display:block;background:rgba(4,12,18,0.72);border-radius:6px;border:1px solid rgba(251,191,36,0.28);">
+      <polyline fill="none" stroke="#fbbf24" stroke-width="1.8" points="${pts}" />
+      <line x1="${sadX.toFixed(1)}" y1="6" x2="${sadX.toFixed(1)}" y2="${h - 8}" stroke="#f87171" stroke-dasharray="2,2" stroke-width="1" />
+      <line x1="${curX.toFixed(1)}" y1="6" x2="${curX.toFixed(1)}" y2="${h - 8}" stroke="#34d399" stroke-width="1.5" />
+      <text x="8" y="13" fill="#fde68a" font-size="9" font-family="monospace">CI-NEB H₂O Inversion · Ea=${(neb.forwardBarrierHa * HA_TO_EV).toFixed(2)} eV</text>
+    </svg>`;
+  }
+
+  function interpolateNebAtoms(neb, xi) {
+    const imgs = neb.images;
+    const clamped = Math.max(0, Math.min(1, xi));
+    const scaled = clamped * (imgs.length - 1);
+    const i0 = Math.min(imgs.length - 2, Math.floor(scaled));
+    const t = scaled - i0;
+    return imgs[i0].map((a, idx) => ({
+      Z: a.Z,
+      position: [
+        a.position[0] + t * (imgs[i0 + 1][idx].position[0] - a.position[0]),
+        a.position[1] + t * (imgs[i0 + 1][idx].position[1] - a.position[1]),
+        a.position[2] + t * (imgs[i0 + 1][idx].position[2] - a.position[2])
+      ]
+    }));
+  }
 
   async function rebuildMolecularScene() {
     disposeGroupChildren(molecularGroup);
-    const preset = MOLECULAR_PRESETS[selectedMoleculeKey] || MOLECULAR_PRESETS.H2O;
-    const gridDim = selectedBasis === '6-31g(d)' ? 16 : 18;
+    let activeAtoms;
+    let activeFormula;
+    let activeBasis = selectedBasis;
+    if (nebModeActive) {
+      const neb = ensureNebReactionPath();
+      activeAtoms = interpolateNebAtoms(neb, nebReactionXi);
+      activeFormula = 'H2O';
+      activeBasis = 'sto-3g';
+      currentPolytopeStatus = (nebReactionXi > 0.35 && nebReactionXi < 0.65) ? 'boundary-saddle' : 'accepted';
+    } else {
+      const preset = MOLECULAR_PRESETS[selectedMoleculeKey] || MOLECULAR_PRESETS.H2O;
+      activeAtoms = preset.atoms;
+      activeFormula = preset.formula;
+      currentPolytopeStatus = 'accepted';
+    }
+    const preset = { formula: activeFormula, atoms: activeAtoms };
+    const gridDim = activeBasis === '6-31g(d)' ? 16 : 18;
     const built = buildMolecularChargeDensityArtifact(preset.atoms, {
       formula: preset.formula,
-      basis: selectedBasis,
+      basis: activeBasis,
       gridDim,
       includeUmp2: false,
       includeAnalyticGradient: false,
       includeOrbitals: true
     });
     currentMolecularArtifact = built.artifact;
+
+    // Optional Polytope Validity-Domain wireframe overlay (accepted=teal, boundary-saddle=amber)
+    if (showPolytopeOverlay) {
+      const polyColor = currentPolytopeStatus === 'accepted' ? 0x34d399 : 0xfbbf24;
+      const polyBox = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(6.8, 5.2, 5.2)),
+        new THREE.LineBasicMaterial({ color: polyColor, transparent: true, opacity: 0.34 })
+      );
+      molecularGroup.add(polyBox);
+    }
 
     let activeField = built.densePayloads[built.artifact.grid.payloadHandles.chargeDensity.key];
     currentMolecularBackend = 'worker-cpu-derived';
@@ -910,11 +1122,17 @@ export async function mountCosmicQuantumZoomDemo(container) {
     }
   }
 
-  // ---- 6. Atomic Schrödinger KS-DFT Orbital Cloud (10^-11 m) ----
+  // ---- 6. Atomic Schrödinger KS-DFT 3D Volumetric Orbital Raymarcher (10^-11 m) ----
   const atomicGroup = regimeGroups['atomic-orbital'];
   let currentAtomicArtifact = null;
+  let currentOrbitalRaymarcher = null;
 
   function rebuildAtomicScene() {
+    if (currentOrbitalRaymarcher) {
+      atomicGroup.remove(currentOrbitalRaymarcher.mesh);
+      currentOrbitalRaymarcher.dispose();
+      currentOrbitalRaymarcher = null;
+    }
     disposeGroupChildren(atomicGroup);
     const built = buildAtomicRadialDensityArtifact(selectedElementZ, {
       functional: selectedFunctional,
@@ -929,92 +1147,40 @@ export async function mountCosmicQuantumZoomDemo(container) {
     const normScale = 4.9 / Math.max(1.5, halfB);
 
     const nuc = new THREE.Mesh(
-      new THREE.SphereGeometry(0.28, 24, 18),
+      new THREE.SphereGeometry(0.24, 24, 18),
       new THREE.MeshBasicMaterial({ color: 0xfef08a })
     );
-    const nucGlow = createSoftGlowSprite(spriteTex, 0xfbbf24, 3.0, 0.92);
+    const nucGlow = createSoftGlowSprite(spriteTex, 0xfbbf24, 2.4, 0.90);
     atomicGroup.add(nuc, nucGlow);
 
-    const r95Scaled = built.artifact.summary.containmentRadii.r95Bohr * normScale;
+    const r95Scaled = Math.min(5.0, built.artifact.summary.containmentRadii.r95Bohr * normScale);
     const shellWire = new THREE.Mesh(
       new THREE.SphereGeometry(r95Scaled, 28, 18),
-      new THREE.MeshBasicMaterial({ color: 0xfbbf24, wireframe: true, transparent: true, opacity: 0.18 })
+      new THREE.MeshBasicMaterial({ color: 0xfbbf24, wireframe: true, transparent: true, opacity: 0.16 })
     );
     atomicGroup.add(shellWire);
 
-    const samples = built.artifact.radialProfile.samples || [];
-    if (samples.length > 2) {
-      const cdf = new Float64Array(samples.length);
-      let peakP = 0;
-      let totalP = 0;
-      for (let i = 0; i < samples.length; i += 1) {
-        const p = Math.max(0, samples[i].radialProbabilityPerBohr);
-        if (p > peakP) peakP = p;
-        const dr = i > 0 ? Math.max(1e-6, samples[i].rBohr - samples[i - 1].rBohr) : samples[0].rBohr;
-        totalP += p * dr;
-        cdf[i] = totalP;
-      }
-      const pointCount = 3400;
-      const cloudMesh = new THREE.InstancedMesh(
-        new THREE.IcosahedronGeometry(1, 1),
-        new THREE.MeshBasicMaterial({
-          color: 0xffffff,
-          transparent: true,
-          opacity: 0.085,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false
-        }),
-        pointCount
-      );
-      cloudMesh.frustumCulled = false;
-      let seed = 135791 + selectedElementZ * 997;
-      const rnd = () => {
-        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-        return seed / 4294967296;
-      };
-      const r95 = Math.max(0.5, built.artifact.summary.containmentRadii.r95Bohr);
-      for (let i = 0; i < pointCount; i += 1) {
-        const u = rnd() * totalP;
-        let lo = 0; let hi = cdf.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (cdf[mid] < u) lo = mid + 1;
-          else hi = mid;
-        }
-        const s0 = samples[Math.max(0, lo - 1)];
-        const s1 = samples[lo];
-        const rBohr = s0.rBohr + rnd() * Math.max(0, s1.rBohr - s0.rBohr);
-        const rScene = rBohr * normScale;
-        const cosPhi = 2 * rnd() - 1;
-        const sinPhi = Math.sqrt(Math.max(0, 1 - cosPhi * cosPhi));
-        const theta = 2 * Math.PI * rnd();
-        instDummy.position.set(
-          rScene * sinPhi * Math.cos(theta),
-          rScene * cosPhi,
-          rScene * sinPhi * Math.sin(theta)
-        );
-        const shellFrac = Math.min(1, s1.radialProbabilityPerBohr / Math.max(1e-9, peakP));
-        const radialNorm = Math.min(1, rBohr / (r95 * 1.15));
-        instDummy.scale.setScalar(0.055 + 0.072 * (0.4 + 0.6 * radialNorm));
-        instDummy.updateMatrix();
-        cloudMesh.setMatrixAt(i, instDummy.matrix);
-        instColor.setRGB(
-          0.14 + 0.86 * (1 - radialNorm),
-          0.74 + 0.22 * shellFrac,
-          0.42 + 0.58 * radialNorm
-        );
-        cloudMesh.setColorAt(i, instColor);
-      }
-      cloudMesh.instanceMatrix.needsUpdate = true;
-      if (cloudMesh.instanceColor) cloudMesh.instanceColor.needsUpdate = true;
-      atomicGroup.add(cloudMesh);
-    }
+    currentOrbitalRaymarcher = createVolumetricOrbitalRaymarcher({
+      THREE,
+      TSL,
+      renderer,
+      radialSamples: built.artifact.radialProfile.samples || [],
+      rMaxBohr: built.artifact.radialProfile.rMaxBohr || halfB,
+      r95Bohr: built.artifact.summary.containmentRadii.r95Bohr || 2.5,
+      modeId: selectedOrbitalMode,
+      boxHalfExtent: 5.1,
+      dim: 40
+    });
+    atomicGroup.add(currentOrbitalRaymarcher.mesh);
   }
 
-  // Initial quantum -> continuum -> molecular build
+  // Initial quantum -> continuum -> molecular build (plus auto-connect PeerCompute relay if requested via URL)
   rebuildAtomicScene();
   await rebuildContinuumFromQuantumElement();
   await rebuildMolecularScene();
+  if (peerRelayUrl) {
+    await connectPeerMesh({ relayUrl: peerRelayUrl, roomId: peerRoomId, role: peerRole });
+  }
 
   // ---- HUD & Interactive Controls ----
   const topBar = document.createElement('div');
@@ -1155,9 +1321,12 @@ export async function mountCosmicQuantumZoomDemo(container) {
         ? soOrbitals.slice(-2).map((o) => `${o.n}${'spdf'[o.l] || o.l}: ${(o.spinOrbitSplittingHa * HA_TO_EV).toFixed(3)} eV`).join(' · ')
         : 's-shell only (ΔE_SO = 0)';
       const phaseBadge = elProps?.standardPhaseAt298K?.toUpperCase() || '—';
+      const orbButtons = VOLUMETRIC_ORBITAL_MODES.map((m) =>
+        `<button type="button" data-orbital-mode="${m.id}" style="padding:3px 5px;border-radius:4px;border:1px solid ${selectedOrbitalMode === m.id ? '#34d399' : 'rgba(148,163,184,0.28)'};background:${selectedOrbitalMode === m.id ? 'rgba(52,211,153,0.18)' : '#0b1724'};color:#e2f1ec;font-size:10px;cursor:pointer;">${m.label}</button>`
+      ).join('');
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
-          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Schrödinger Relativistic KS-DFT</div>
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Schrödinger Relativistic KS-DFT (3D Volumetric)</div>
           <div style="display:flex;gap:6px;margin-bottom:6px;">
             <select id="cq-elem-sel" style="flex:1;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
               ${ATOMIC_CHOICES.map((c) => `<option value="${c.Z}" ${c.Z === selectedElementZ ? 'selected' : ''}>${c.label}</option>`).join('')}
@@ -1167,20 +1336,23 @@ export async function mountCosmicQuantumZoomDemo(container) {
               <option value="lda" ${selectedFunctional === 'lda' ? 'selected' : ''}>LDA</option>
             </select>
           </div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">${orbButtons}</div>
           ${buildRadialProfileSvg(atomic)}
           <div style="margin-top:6px;font-family:monospace;font-size:11px;color:#cbd5e1;">
             E_tot: ${atomic.summary.totalEnergyHa.toFixed(3)} Ha · ∫ρ=${atomic.summary.integratedElectrons.toFixed(4)}e<br/>
             SO (L·S): ${soLine}<br/>
             Bulk @293K: <span style="color:#6ee7b7;">${phaseBadge}</span> (Tm=${Math.round(elProps?.meltingPointK ?? elProps?.vdwGasProperties?.meltingPointK ?? 0)}K, Tb=${Math.round(elProps?.boilingPointK ?? elProps?.vdwGasProperties?.boilingPointK ?? 0)}K)<br/>
-            Cloud: <span style="color:#fde68a;">radial-atomic-density-reconstruction</span>
+            Volume: <span style="color:#7dd3fc;">${currentOrbitalRaymarcher?.mode || 'fallback'}</span><br/>
+            Label: <span style="color:#fde68a;">${currentOrbitalRaymarcher?.provenance || 'radial-atomic-density-reconstruction'}</span>
           </div>
         </div>
       `;
     } else if (rid === 'molecular-lattice' && mol) {
       const bondStr = mol.bondDiscoveryTrace.bonds.map((b) => `B=${b.mayerBondOrder.toFixed(2)} (${(b.distanceM * 1e12).toFixed(0)}pm)`).join(', ');
+      const nebSvg = nebModeActive ? buildNebEnergySvg(ensureNebReactionPath(), nebReactionXi) : '';
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
-          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Molecular HF Density &amp; Bonds</div>
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Molecular HF Density, CI-NEB &amp; Polytopes</div>
           <div style="display:flex;gap:6px;margin-bottom:6px;">
             <select id="cq-mol-sel" style="flex:1;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
               ${Object.values(MOLECULAR_PRESETS).map((m) => `<option value="${m.formula}" ${m.formula === selectedMoleculeKey ? 'selected' : ''}>${m.label}</option>`).join('')}
@@ -1192,12 +1364,20 @@ export async function mountCosmicQuantumZoomDemo(container) {
           </div>
           <div style="display:flex;gap:4px;margin-bottom:6px;">
             ${['density', 'homo', 'lumo'].map((m) => `<button type="button" data-mol-view="${m}" style="flex:1;padding:4px;border-radius:5px;border:1px solid ${molecularViewMode === m ? '#34d399' : 'rgba(148,163,184,0.3)'};background:${molecularViewMode === m ? 'rgba(52,211,153,0.18)' : '#0b1724'};color:#e2f1ec;font-size:11px;cursor:pointer;">${m.toUpperCase()}</button>`).join('')}
+            <button id="cq-neb-toggle" type="button" style="padding:4px 7px;border-radius:5px;border:1px solid ${nebModeActive ? '#fbbf24' : 'rgba(148,163,184,0.3)'};background:${nebModeActive ? 'rgba(251,191,36,0.2)' : '#0b1724'};color:#fde68a;font-size:11px;cursor:pointer;">CI-NEB</button>
           </div>
+          ${nebModeActive ? `
+            ${nebSvg}
+            <div style="display:flex;align-items:center;gap:6px;margin:6px 0;">
+              <span style="font-size:10px;font-family:monospace;color:#fde68a;">ξ=${nebReactionXi.toFixed(2)}</span>
+              <input id="cq-neb-slider" type="range" min="0" max="1" step="0.05" value="${nebReactionXi}" style="flex:1;accent-color:#fbbf24;" />
+            </div>
+          ` : ''}
           <div style="font-family:monospace;font-size:11px;color:#cbd5e1;">
             E_RHF: ${mol.electronicSummary.rhfTotalEnergyHa.toFixed(4)} Ha (${mol.electronicSummary.nBasis} AOs)<br/>
             HOMO-LUMO: ${mol.electronicSummary.homoLumoGapHa != null ? (mol.electronicSummary.homoLumoGapHa * HA_TO_EV).toFixed(2) + ' eV' : '—'}<br/>
             Mayer: ${bondStr || 'none'}<br/>
-            Sampler: <span style="color:#7dd3fc;">${currentMolecularBackend}</span> · Strict: ${bundleVal?.ok ? 'PASS' : 'BLOCKED'}
+            Polytope: <span style="color:${currentPolytopeStatus === 'accepted' ? '#34d399' : '#fbbf24'};">${currentPolytopeStatus}</span> · Sampler: <span style="color:#7dd3fc;">${currentMolecularBackend}</span> · Strict: ${bundleVal?.ok ? 'PASS' : 'BLOCKED'}
           </div>
         </div>
       `;
@@ -1206,9 +1386,10 @@ export async function mountCosmicQuantumZoomDemo(container) {
       const tb = Math.round(elProps?.boilingPointK ?? elProps?.vdwGasProperties?.boilingPointK ?? 0);
       const rho = Math.round(elProps?.densityKgPerM3 ?? elProps?.vdwGasProperties?.condensedDensityKgPerM3 ?? 0);
       const bGpa = ((elProps?.bulkModulusPa ?? elProps?.vdwGasProperties?.bulkModulusPa ?? 0) / 1e9).toFixed(1);
+      const cStats = continuumPresenter?.getStats();
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
-          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Quantum → Continuum &amp; Eshkol A4</div>
+          <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Quantum → Live GPU Continuum &amp; Eshkol A4</div>
           <select id="cq-cont-elem-sel" style="width:100%;margin-bottom:6px;padding:4px 6px;border-radius:6px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(94,234,212,0.3);">
             ${ATOMIC_CHOICES.map((c) => `<option value="${c.Z}" ${c.Z === selectedElementZ ? 'selected' : ''}>${c.label}</option>`).join('')}
           </select>
@@ -1216,7 +1397,8 @@ export async function mountCosmicQuantumZoomDemo(container) {
             Element: <span style="color:#fef08a;">${elProps?.symbol || '?'}</span> (${elProps?.bondingClass || 'derived'})<br/>
             Phase @293K: <span style="color:#34d399;font-weight:700;">${(elProps?.standardPhaseAt298K || 'solid').toUpperCase()}</span> · Tm=${tm}K · Tb=${tb}K<br/>
             ρ=${rho.toLocaleString()} kg/m³ · B=${bGpa} GPa<br/>
-            Helmholtz a(T,v): live Eshkol A4 · Cache: ${currentElementResolution?.resolverStatus || 'cpu-derived'}
+            Micro-SPH: ${continuumEngine?.count ?? 0} pts · <span style="color:#7dd3fc;">${cStats?.zeroCopy ? 'zero-copy GPU (0 B/frame)' : 'cpu-instanced'}</span><br/>
+            Resolver: <span style="color:#6ee7b7;">${currentElementResolution?.derivedBackend || currentElementResolution?.resolverStatus || 'cpu-derived'}</span> (${currentElementResolution?.resolverStatus || 'derived'})
           </div>
         </div>
       `;
@@ -1268,6 +1450,29 @@ export async function mountCosmicQuantumZoomDemo(container) {
       `;
     }
 
+    const peerCountNow = typeof peerMesh?.handle?.getPeers === 'function'
+      ? peerMesh.handle.getPeers().length
+      : peerMeshState.remotePeers;
+    peerMeshState.remotePeers = peerCountNow;
+    peerMeshState.quorumReady = peerMeshState.connected && peerCountNow >= 2;
+    const peerSectionHtml = `
+      <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+          <span style="font-weight:600;color:#c4b5fd;font-size:11px;">PeerCompute Mesh</span>
+          <span id="cq-peer-badge" style="font-family:monospace;font-size:10px;color:${peerMeshState.connected ? '#34d399' : '#94a3b8'};">${peerMeshState.connected ? `${peerMeshState.role} · peers=${peerCountNow}` : 'local-only'}</span>
+        </div>
+        <div style="display:flex;gap:4px;margin-bottom:4px;">
+          <input id="cq-peer-url" type="text" placeholder="ws://127.0.0.1:8787" value="${peerRelayUrl}" style="flex:1;min-width:0;padding:3px 6px;border-radius:5px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(167,139,250,0.3);font-size:10px;font-family:monospace;" />
+          <select id="cq-peer-role" style="width:74px;padding:3px;border-radius:5px;background:#0b1724;color:#e2f1ec;border:1px solid rgba(167,139,250,0.3);font-size:10px;">
+            <option value="requester" ${peerRole === 'requester' ? 'selected' : ''}>Req</option>
+            <option value="responder" ${peerRole === 'responder' ? 'selected' : ''}>Resp</option>
+            <option value="observer" ${peerRole === 'observer' ? 'selected' : ''}>Obs</option>
+          </select>
+          <button id="cq-peer-connect" type="button" style="padding:3px 7px;border-radius:5px;border:1px solid rgba(167,139,250,0.45);background:rgba(76,29,149,0.35);color:#ddd6fe;font-size:10px;cursor:pointer;">${peerMeshState.connected ? 'Off' : 'Join'}</button>
+        </div>
+      </div>
+    `;
+
     sidePanel.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <span style="font-weight:700;letter-spacing:0.04em;font-size:11px;text-transform:uppercase;color:#94a3b8;">Schroeder Scale Atlas</span>
@@ -1281,6 +1486,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
         Validation: <span style="color:#fde68a;">scientificValidation=false</span>
       </div>
       ${regimeSpecificHtml}
+      ${peerSectionHtml}
     `;
 
     // Wire dynamic regime controls
@@ -1298,7 +1504,15 @@ export async function mountCosmicQuantumZoomDemo(container) {
       await rebuildContinuumFromQuantumElement();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
     });
+    for (const btn of sidePanel.querySelectorAll('[data-orbital-mode]')) {
+      btn.addEventListener('click', () => {
+        selectedOrbitalMode = btn.dataset.orbitalMode;
+        rebuildAtomicScene();
+        renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+      });
+    }
     sidePanel.querySelector('#cq-mol-sel')?.addEventListener('change', async (e) => {
+      nebModeActive = false;
       selectedMoleculeKey = e.target.value;
       await rebuildMolecularScene();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
@@ -1315,6 +1529,26 @@ export async function mountCosmicQuantumZoomDemo(container) {
         renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
       });
     }
+    sidePanel.querySelector('#cq-neb-toggle')?.addEventListener('click', async () => {
+      nebModeActive = !nebModeActive;
+      await rebuildMolecularScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
+    sidePanel.querySelector('#cq-neb-slider')?.addEventListener('input', async (e) => {
+      nebReactionXi = Number(e.target.value);
+      await rebuildMolecularScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
+    sidePanel.querySelector('#cq-peer-connect')?.addEventListener('click', async () => {
+      if (peerMeshState.connected) {
+        await disconnectPeerMesh();
+      } else {
+        const nextUrl = sidePanel.querySelector('#cq-peer-url')?.value || '';
+        const nextRole = sidePanel.querySelector('#cq-peer-role')?.value || 'requester';
+        await connectPeerMesh({ relayUrl: nextUrl, roomId: peerRoomId, role: nextRole });
+      }
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+    });
     for (const btn of sidePanel.querySelectorAll('[data-galaxy-preset]')) {
       btn.addEventListener('click', async () => {
         await rebuildGalacticSimulation({ tierId: galaxyTierId, preset: btn.dataset.galaxyPreset });
@@ -1337,6 +1571,26 @@ export async function mountCosmicQuantumZoomDemo(container) {
     try {
       const rid = camState.primaryRegime.id;
       const sec = camState.secondaryRegime?.id;
+      if ((rid === 'continuum-sph-solids' || sec === 'continuum-sph-solids') && continuumEngine && continuumPresenter) {
+        const cap = createUlgTaskCapsule({
+          taskId: `cq-cont-${continuumEngine.stepIndex}`,
+          serviceId: ULG_SERVICE_IDS.ulgRuntime,
+          taskKind: ULG_TASK_KINDS.simulationStep,
+          method: { model: 'continuum-micro-sph', version: 1 },
+          input: {
+            stepIndex: continuumEngine.stepIndex,
+            parameters: { dt: 0.015, gravity: 4.8, readback: !continuumPresenter.zeroCopy }
+          }
+        });
+        const res = await moduleRegistry.dispatchSimulationStepCapsule(cap, { device: gpuDevice });
+        lastLeaseSummary = res.leaseSummary;
+        if (continuumPresenter.zeroCopy) {
+          continuumPresenter.bindLeaseHandle(res.leaseHandle);
+        } else {
+          continuumPresenter.syncFromCpuBodies(continuumEngine.getBodies());
+        }
+        res.leaseHandle?.release?.();
+      }
       if (rid === 'galactic-nbody' || sec === 'galactic-nbody') {
         const cap = createUlgTaskCapsule({
           taskId: `cq-gal-${galacticEngine.stepIndex}`,
@@ -1531,9 +1785,26 @@ export async function mountCosmicQuantumZoomDemo(container) {
         cosmicScaleFactorA: cosmicWebEngine.scaleFactorA,
         atomicElementZ: selectedElementZ,
         atomicFunctional: selectedFunctional,
+        orbitalModeId: selectedOrbitalMode,
+        orbitalRaymarchMode: currentOrbitalRaymarcher?.mode ?? null,
+        orbitalProvenance: currentOrbitalRaymarcher?.provenance ?? null,
         continuumElementSymbol: currentElementResolution?.properties?.symbol ?? null,
         continuumElementPhase: currentElementResolution?.properties?.standardPhaseAt298K ?? null,
         continuumElementTmK: currentElementResolution?.properties?.meltingPointK ?? null,
+        continuumMicroSphSteps: continuumEngine?.stepIndex ?? 0,
+        continuumBodyCount: continuumEngine?.count ?? 0,
+        continuumZeroCopy: Boolean(continuumPresenter?.zeroCopy),
+        materialResolverBackend: currentElementResolution?.derivedBackend ?? currentElementResolution?.resolverStatus ?? null,
+        nebModeActive,
+        nebReactionXi,
+        nebBarrierEv: cachedNebPath ? cachedNebPath.forwardBarrierHa * HA_TO_EV : null,
+        polytopeStatus: currentPolytopeStatus,
+        peerMeshState: {
+          ...peerMeshState,
+          remotePeers: typeof peerMesh?.handle?.getPeers === 'function'
+            ? peerMesh.handle.getPeers().length
+            : peerMeshState.remotePeers
+        },
         crossChartMultipoleVerified: Boolean(crossChartMultipoleReceipt?.verified),
         crossChartMultipoleMomentumRelError: crossChartMultipoleReceipt?.momentumRelError ?? null,
         molecularFormula: selectedMoleculeKey,
@@ -1560,7 +1831,36 @@ export async function mountCosmicQuantumZoomDemo(container) {
       await rebuildContinuumFromQuantumElement();
       renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
     },
+    selectOrbitalMode(modeId) {
+      if (VOLUMETRIC_ORBITAL_MODES.some((m) => m.id === modeId)) {
+        selectedOrbitalMode = modeId;
+        rebuildAtomicScene();
+        renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+        renderer.render(scene, camera);
+      }
+    },
+    async setNebMode(enabled, xi = nebReactionXi) {
+      nebModeActive = Boolean(enabled);
+      nebReactionXi = Math.max(0, Math.min(1, Number(xi) || 0));
+      await rebuildMolecularScene();
+      renderInspectorPanel(scaleBridge.evaluateContinuousZoomCamera(currentLog10));
+      renderer.render(scene, camera);
+    },
+    connectPeerMesh,
+    async dispatchPeerDerivation(atomicNumberZ = selectedElementZ) {
+      if (!peerMesh?.handle?.submitWithProvenance) {
+        throw new Error('Peer mesh requester is not connected');
+      }
+      const res = await peerMesh.handle.submitWithProvenance({
+        kind: 'material.resolve-element',
+        payload: { atomicNumberZ }
+      });
+      peerMeshState.dispatches += 1;
+      peerMeshState.lastResult = res;
+      return res;
+    },
     async selectMolecule(formula, basis = selectedBasis, viewMode = molecularViewMode) {
+      nebModeActive = false;
       selectedMoleculeKey = formula;
       selectedBasis = basis;
       molecularViewMode = viewMode;
@@ -1580,6 +1880,10 @@ export async function mountCosmicQuantumZoomDemo(container) {
       disposed = true;
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', onResize);
+      void disconnectPeerMesh();
+      currentOrbitalRaymarcher?.dispose?.();
+      continuumPresenter?.dispose?.();
+      continuumEngine?.dispose?.();
       galacticPresenter?.dispose();
       cosmicPresenter?.dispose();
       galacticEngine?.dispose();

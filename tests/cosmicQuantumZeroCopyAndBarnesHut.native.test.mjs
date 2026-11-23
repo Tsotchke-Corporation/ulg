@@ -44,10 +44,13 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
       const { createZeroCopyResidentBodyPresenter, loadThreeWebGpuAndTsl } = await import('/src/runtime/residentGpuPresenter.js');
       const { THREE, TSL } = await loadThreeWebGpuAndTsl();
       const {
+        createContinuumSpecimenBodies,
         createGalacticBodies,
         createResidentBarnesHutNBodyEngine,
+        createResidentContinuumDropletEngine,
         createResidentCosmicModuleRegistration
       } = await import('/src/demos/cosmicQuantumGpuKernels.js');
+      const { createVolumetricOrbitalRaymarcher } = await import('/src/demos/volumetricOrbitalRaymarcher.js');
       const { createSimulationModuleRegistry } = await import('/src/runtime/simulationModuleRegistry.js');
       const { createUlgTaskCapsule, ULG_SERVICE_IDS, ULG_TASK_KINDS } = await import('/ulg-gpu-abi/src/serviceContract.js');
       const { createCosmicQuantumScaleBridge } = await import('/src/runtime/sph/cosmicQuantumScaleBridge.js');
@@ -124,7 +127,81 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
         if (d > 1e-3) moved += 1;
       }
 
-      // 3. Cross-chart multipole verification across Planetary/Galactic/Supergalactic charts
+      // 3. Zero-copy Continuum Micro-SPH (1,024 particles, liquid Hg) + 3D Volumetric Raymarcher on same GPUDevice
+      const contInit = createContinuumSpecimenBodies({ count: 1024, phase: 'liquid', seed: 4201 });
+      const contEngine = createResidentContinuumDropletEngine({
+        device,
+        initialBodies: contInit,
+        phase: 'liquid',
+        bulkModulusPa: 25e9,
+        label: 'proof-cont-hg'
+      });
+      registry.registerModule(createResidentCosmicModuleRegistration({
+        method: { model: 'continuum-micro-sph', version: 1 },
+        engine: contEngine,
+        scaleRangeM: [1e-4, 1e2],
+        zeroCopy: true
+      }));
+      const contPresenter = createZeroCopyResidentBodyPresenter({
+        THREE,
+        TSL,
+        renderer,
+        bodyCount: contEngine.count,
+        palette: 'continuum-material',
+        tintColor: [0.82, 0.85, 0.88],
+        particleScale: 0.115,
+        initialBuffer: contEngine.getResidentBuffer()
+      });
+      const contScene = new THREE.Scene();
+      contScene.add(contPresenter.mesh);
+      const radialSamples = Array.from({ length: 32 }, (_, i) => {
+        const r = (i / 31) * 5.0;
+        return { rBohr: r, radialProbabilityPerBohr: r * r * Math.exp(-1.1 * r) };
+      });
+      const raymarcher = createVolumetricOrbitalRaymarcher({
+        THREE,
+        TSL,
+        renderer,
+        radialSamples,
+        rMaxBohr: 5.0,
+        r95Bohr: 2.5,
+        modeId: 'd_z2',
+        boxHalfExtent: 5.1,
+        dim: 32
+      });
+      contScene.add(raymarcher.mesh);
+
+      let contZeroCopySkipped = true;
+      for (let s = 0; s < 5; s += 1) {
+        const cap = createUlgTaskCapsule({
+          taskId: `cont-hg-${s}`,
+          serviceId: ULG_SERVICE_IDS.ulgRuntime,
+          taskKind: ULG_TASK_KINDS.simulationStep,
+          method: { model: 'continuum-micro-sph', version: 1 },
+          input: { stepIndex: s, parameters: { dt: 0.015, gravity: 4.8, readback: false } }
+        });
+        const res = await registry.dispatchSimulationStepCapsule(cap, { device });
+        if (!res.artifact.execution.zeroCopyReadbackSkipped) contZeroCopySkipped = false;
+        contPresenter.bindLeaseHandle(res.leaseHandle);
+        renderer.render(contScene, cam);
+        res.leaseHandle.release();
+      }
+      await device.queue.onSubmittedWorkDone();
+      const contFinal = await contEngine.readbackBodies();
+      let contAllFinite = true;
+      let contMoved = 0;
+      for (let i = 0; i < contFinal.length; i += 8) {
+        for (let k = 0; k < 8; k += 1) {
+          if (!Number.isFinite(contFinal[i + k])) contAllFinite = false;
+        }
+        if (Math.hypot(contFinal[i] - contInit[i], contFinal[i + 1] - contInit[i + 1], contFinal[i + 2] - contInit[i + 2]) > 1e-3) {
+          contMoved += 1;
+        }
+      }
+      const contPresenterStats = contPresenter.getStats();
+      const raymarchMode = raymarcher.mode;
+
+      // 4. Cross-chart multipole verification across Planetary/Galactic/Supergalactic charts
       const bridge = createCosmicQuantumScaleBridge({ moduleRegistry: registry });
       const ids = bridge.summary().chartByRegimeId;
       const mp = await runSchroederScaleAtlasMultipoleWebGpu(device, {
@@ -139,6 +216,9 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
       const presenterStats = presenter.getStats();
       const bhMode = bh.gravityMode;
       const bhCount = bh.count;
+      raymarcher.dispose();
+      contPresenter.dispose();
+      contEngine.dispose();
       presenter.dispose();
       renderer.dispose();
       bh.dispose();
@@ -152,13 +232,18 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
         presenterStats,
         allFinite,
         movedBodies: moved,
+        contZeroCopySkipped,
+        contPresenterStats,
+        contAllFinite,
+        contMoved,
+        raymarchMode,
         multipoleVerified: mp.receipt.verified,
         multipoleMomentumRelError: mp.receipt.momentumRelError,
         errors
       };
     });
 
-    console.log('Barnes-Hut 32K + Zero-Copy Presenter + Multipole Vulkan Proof:', JSON.stringify(result));
+    console.log('Barnes-Hut 32K + Continuum Micro-SPH + Volumetric Raymarcher Vulkan Proof:', JSON.stringify(result));
     assert.deepEqual(result.errors, []);
     assert.equal(result.bhMode, 'webgpu-barnes-hut-octree');
     assert.equal(result.bhCount, 32768);
@@ -168,6 +253,13 @@ test('Hierarchical WebGPU Barnes-Hut Octree (32,768 bodies), zero-copy WebGPURen
     assert.equal(result.presenterStats.zeroCopyBoundFrames, 10);
     assert.equal(result.allFinite, true);
     assert.ok(result.movedBodies > 30000, `expected >30k moving stars, got ${result.movedBodies}`);
+    assert.equal(result.contZeroCopySkipped, true);
+    assert.equal(result.contPresenterStats.zeroCopy, true);
+    assert.equal(result.contPresenterStats.readbackBytesPerFrame, 0);
+    assert.equal(result.contPresenterStats.zeroCopyBoundFrames, 5);
+    assert.equal(result.contAllFinite, true);
+    assert.ok(result.contMoved > 900, `expected >900 moving micro-SPH particles, got ${result.contMoved}`);
+    assert.equal(result.raymarchMode, 'webgpu-3d-volumetric-raymarcher');
     assert.equal(result.multipoleVerified, true);
     assert.ok(result.multipoleMomentumRelError < 1e-5);
   } finally {

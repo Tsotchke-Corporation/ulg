@@ -9517,47 +9517,37 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
   };
 }
 
-const SURFACE_CONFIG = {
-  h2o: {
-    resolution: 18,
-    subtract: 24,
-    isolation: 80,
-    maxPolyCount: 24000
-  },
-  fe: {
-    resolution: 18,
-    subtract: 26,
-    isolation: 82,
-    maxPolyCount: 24000
-  },
-  // Vaporized water: a faint, diffuse cloud rather than a tight blob. Lower isolation + larger
-  // ball influence makes the metaballs bleed together into a whispy volume; high transparency and
-  // no depth-write let it read as steam drifting in front of the scene.
-  steam: {
-    resolution: 16,
-    subtract: 10,
-    isolation: 24,
-    maxPolyCount: 20000
-  },
-  default: {
-    resolution: 18,
-    subtract: 24,
-    isolation: 80,
-    maxPolyCount: 24000
-  }
-};
+const CONDENSED_SURFACE_BASELINE = Object.freeze({
+  resolution: 18,
+  subtract: 24,
+  isolation: 80,
+  maxPolyCount: 24000
+});
+const VAPOR_SURFACE_BASELINE = Object.freeze({
+  resolution: 16,
+  subtract: 10,
+  isolation: 24,
+  maxPolyCount: 20000
+});
 
-// Gas-phase surfaces need the vapor-scale field config regardless of the
-// material name: the condensed default isolation (80) encodes liquid/solid
-// density, ~3 orders above what an expanded gas field reaches, so any gas
-// other than the named 'steam' key (F2, Cl2, H2, boiled metals) attached
-// with zero marching-cubes vertices and never rendered.
-function surfaceConfigForDescriptor(renderKey, phase) {
+// Derive marching-cubes field thresholds continuously from phase and condensed
+// reference density (zero material-name h2o/fe/steam lookup hacks).
+function surfaceConfigForDescriptor(renderKey, phase, densityKgPerM3 = null) {
   const phaseName = String(phase ?? '').toLowerCase();
-  if (phaseName === 'gas' || phaseName === 'vapor') return SURFACE_CONFIG.steam;
-  const named = SURFACE_CONFIG[renderKey];
-  if (named) return named;
-  return SURFACE_CONFIG.default;
+  if (phaseName === 'gas' || phaseName === 'vapor' || phaseName === 'plasma') {
+    return VAPOR_SURFACE_BASELINE;
+  }
+  const rho = Number(densityKgPerM3);
+  if (Number.isFinite(rho) && rho > 0) {
+    const densityFactor = Math.min(1, Math.max(0, Math.log10(Math.max(rho, 500) / 1000)));
+    return {
+      resolution: CONDENSED_SURFACE_BASELINE.resolution,
+      subtract: CONDENSED_SURFACE_BASELINE.subtract + 2 * densityFactor,
+      isolation: CONDENSED_SURFACE_BASELINE.isolation + 2 * densityFactor,
+      maxPolyCount: CONDENSED_SURFACE_BASELINE.maxPolyCount
+    };
+  }
+  return CONDENSED_SURFACE_BASELINE;
 }
 
 const CPU_SURFACE_ADAPTIVE_RESOLUTION = Object.freeze([

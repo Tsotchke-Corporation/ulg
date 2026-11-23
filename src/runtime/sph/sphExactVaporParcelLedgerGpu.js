@@ -67,6 +67,32 @@ export const SPH_EXACT_VAPOR_PARCEL_PARAM_FLOATS = 8;
 const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, COPY_SRC: 0x04, COPY_DST: 0x08, UNIFORM: 0x40 });
 const fail = message => { throw new TypeError(`Exact vapor-parcel ledger: ${message}`); };
 
+/**
+ * Build a custom condensable-vapor / carrier-gas Maxwell-Mason + kappa-Kohler
+ * parameter set from material closures (generalizing beyond H2O-in-air while
+ * keeping SPH_EXACT_VAPOR_PARCEL_LAW as the explicit H2O/air benchmark default).
+ */
+export function createSphExactVaporParcelLaw(overrides = {}) {
+  return Object.freeze({
+    ...SPH_EXACT_VAPOR_PARCEL_LAW,
+    ...overrides,
+    surfaceTension: Object.freeze({ ...SPH_EXACT_VAPOR_PARCEL_LAW.surfaceTension, ...(overrides.surfaceTension || {}) }),
+    latentHeat: Object.freeze({ ...SPH_EXACT_VAPOR_PARCEL_LAW.latentHeat, ...(overrides.latentHeat || {}) }),
+    saturation: Object.freeze({ ...SPH_EXACT_VAPOR_PARCEL_LAW.saturation, ...(overrides.saturation || {}) }),
+    diffusivity: Object.freeze({ ...SPH_EXACT_VAPOR_PARCEL_LAW.diffusivity, ...(overrides.diffusivity || {}) }),
+    conductivity: Object.freeze({ ...SPH_EXACT_VAPOR_PARCEL_LAW.conductivity, ...(overrides.conductivity || {}) }),
+    meanFreePath: Object.freeze({ ...SPH_EXACT_VAPOR_PARCEL_LAW.meanFreePath, ...(overrides.meanFreePath || {}) })
+  });
+}
+
+export function buildSphExactVaporParcelLedgerWgsl(lawConfig = SPH_EXACT_VAPOR_PARCEL_LAW) {
+  const custom = createSphExactVaporParcelLaw(lawConfig);
+  return sphExactVaporParcelLedgerWgsl
+    .replace(`const RV: f32 = ${law.gasConstantVaporJPerKgK};`, `const RV: f32 = ${custom.gasConstantVaporJPerKgK};`)
+    .replace(`const RHO_W: f32 = ${law.waterDensityKgPerM3}.0;`, `const RHO_W: f32 = ${custom.waterDensityKgPerM3};`)
+    .replace(`const C_W: f32 = ${law.waterSpecificHeatJPerKgK}.0;`, `const C_W: f32 = ${custom.waterSpecificHeatJPerKgK};`);
+}
+
 const law = SPH_EXACT_VAPOR_PARCEL_LAW;
 export const sphExactVaporParcelLedgerWgsl = /* wgsl */ `
 ${createSphExactMassWgsl(SPH_EXACT_THERMAL_ENERGY_FORMAT)}
@@ -704,21 +730,22 @@ export function createSphExactVaporParcelExchangeStage({ device, gasCount, parce
 }
 
 /** f64 host evaluation of the same per-droplet law, for the gate's rate check. */
-export function sphExactVaporParcelDropletRate({ r, rDry, kappa, t, p, s }) {
+export function sphExactVaporParcelDropletRate({ r, rDry, kappa, t, p, s, law: customLaw = null }) {
+  const activeLaw = customLaw ? createSphExactVaporParcelLaw(customLaw) : law;
   const c = t - 273.15;
-  const sigma = law.surfaceTension.a - law.surfaceTension.b * c;
-  const latent = law.latentHeat.a - law.latentHeat.b * c;
+  const sigma = activeLaw.surfaceTension.a - activeLaw.surfaceTension.b * c;
+  const latent = activeLaw.latentHeat.a - activeLaw.latentHeat.b * c;
   const r3 = r ** 3, d3 = rDry ** 3;
   const aw = Math.max(r3 - d3, 0) / Math.max(r3 - d3 * (1 - kappa), 1e-36);
-  const sEq = aw * Math.exp(2 * sigma / (law.waterDensityKgPerM3 * law.gasConstantVaporJPerKgK * t * r));
-  const lambda = law.meanFreePath.l0 * (law.meanFreePath.p0 / p) * (t / law.meanFreePath.t0);
+  const sEq = aw * Math.exp(2 * sigma / (activeLaw.waterDensityKgPerM3 * activeLaw.gasConstantVaporJPerKgK * t * r));
+  const lambda = activeLaw.meanFreePath.l0 * (activeLaw.meanFreePath.p0 / p) * (t / activeLaw.meanFreePath.t0);
   const kn = lambda / r;
   const fs = alpha => { const g = 4 / (3 * alpha); return (1 + kn) / (1 + (g + 0.377) * kn + g * kn * kn); };
-  const dv = law.diffusivity.d0 * (t / 273.15) ** law.diffusivity.exponent * (law.diffusivity.p0 / p) * fs(law.massAccommodation);
-  const ka = 4.1868e-3 * (law.conductivity.a + law.conductivity.b * c) * fs(law.thermalAccommodation);
-  const es = law.saturation.e0 * Math.exp(law.saturation.a * c / (c + law.saturation.b));
-  const fk = (latent / (law.gasConstantVaporJPerKgK * t) - 1) * latent / (ka * t);
-  const fd = law.gasConstantVaporJPerKgK * t / (dv * es);
+  const dv = activeLaw.diffusivity.d0 * (t / 273.15) ** activeLaw.diffusivity.exponent * (activeLaw.diffusivity.p0 / p) * fs(activeLaw.massAccommodation);
+  const ka = 4.1868e-3 * (activeLaw.conductivity.a + activeLaw.conductivity.b * c) * fs(activeLaw.thermalAccommodation);
+  const es = activeLaw.saturation.e0 * Math.exp(activeLaw.saturation.a * c / (c + activeLaw.saturation.b));
+  const fk = (latent / (activeLaw.gasConstantVaporJPerKgK * t) - 1) * latent / (ka * t);
+  const fd = activeLaw.gasConstantVaporJPerKgK * t / (dv * es);
   return { rate: 4 * Math.PI * r * (s - sEq) / (fk + fd), sEq, saturationPa: es };
 }
 export { SPH_EXACT_THERMAL_ENERGY_CONTROL_WORDS };

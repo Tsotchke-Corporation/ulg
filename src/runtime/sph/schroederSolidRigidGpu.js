@@ -871,8 +871,54 @@ export function packSchroederSolidRigidBodies(seeds) {
  * projected-Jacobi iterations per step.
  */
 export const SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW = Object.freeze({
-  restitution: 0.3, friction: 0.3, baumgarte: 0.2, slopM: 5e-4, restitutionThresholdMPerS: 0.05, iterations: 8
+  restitution: 0.3, friction: 0.3, baumgarte: 0.2, slopM: 5e-4, restitutionThresholdMPerS: 0.05, iterations: 8,
+  source: 'benchmark-fallback'
 });
+
+/**
+ * Derive solid contact restitution and Coulomb friction continuously from
+ * material mechanics and homologous temperature (zero per-material name
+ * branches). Falls back explicitly to SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW
+ * when elastic/thermal material metadata is unavailable.
+ */
+export function deriveSchroederSolidContactLaw({
+  bulkModulusPa = null,
+  shearModulusPa = null,
+  temperatureK = null,
+  meltTemperatureK = null,
+  baumgarte = SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW.baumgarte,
+  slopM = SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW.slopM,
+  restitutionThresholdMPerS = SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW.restitutionThresholdMPerS,
+  iterations = SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW.iterations
+} = {}) {
+  const K = Number(bulkModulusPa);
+  const G = Number(shearModulusPa);
+  const T = Number(temperatureK);
+  const Tm = Number(meltTemperatureK);
+  const hasElastic = Number.isFinite(K) && K > 0;
+  const hasThermal = Number.isFinite(T) && T > 0 && Number.isFinite(Tm) && Tm > 0;
+  if (!hasElastic && !hasThermal) {
+    return SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW;
+  }
+  const stiffnessNorm = hasElastic ? Math.max(0, Math.log10(Math.max(K, 1e8) / 1e8)) : 1.0;
+  const eElastic = Math.min(0.78, Math.max(0.16, 0.20 + 0.14 * stiffnessNorm));
+  const theta = hasThermal ? Math.min(1.15, Math.max(0, T / Tm)) : 0.3;
+  const thermalDamping = Math.max(0.25, 1.0 - 0.65 * theta * theta);
+  const restitution = Math.min(0.85, Math.max(0.05, eElastic * thermalDamping));
+  const shearRatio = hasElastic && Number.isFinite(G) && G > 0
+    ? Math.min(0.75, Math.max(0.05, G / K))
+    : 0.38;
+  const friction = Math.min(0.65, Math.max(0.12, 0.16 + 0.32 * (1 - shearRatio) + 0.12 * Math.min(1, theta)));
+  return Object.freeze({
+    restitution,
+    friction,
+    baumgarte,
+    slopM,
+    restitutionThresholdMPerS,
+    iterations,
+    source: 'derived-material-mechanics'
+  });
+}
 export const SCHROEDER_SOLID_PROXY_WORDS = 8;
 export const SCHROEDER_SOLID_LATTICE_FLOATS = 16;
 

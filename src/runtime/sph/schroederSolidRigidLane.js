@@ -2,7 +2,7 @@ import { createSchroederSolidFluidContactStage } from './schroederSolidFluidCont
 import { createSchroederSolidFluidThermalStage, packSchroederSolidFluidTable } from './schroederSolidFluidThermalGpu.js';
 import {
   SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW, SCHROEDER_SOLID_FRAME_WORDS, SCHROEDER_SOLID_LATTICE_FLOATS,
-  createSchroederSolidRigidStage, packSchroederSolidContactProxies,
+  createSchroederSolidRigidStage, deriveSchroederSolidContactLaw, packSchroederSolidContactProxies,
   packSchroederSolidLattice, packSchroederSolidRigidBodies
 } from './schroederSolidRigidGpu.js';
 import { createSchroederSolidThermalStage, seedSchroederSolidMemberThermal } from './schroederSolidThermalGpu.js';
@@ -95,6 +95,7 @@ export function createSchroederSolidRigidFamily(device, cold) {
     sourceBodyIds: cold.bodies.map(body => body.sourceBodyId ?? body.bodyId ?? null),
     bodySizesM: cold.bodies.map(body => Array.isArray(body.sizeM) ? [...body.sizeM] : null),
     fractureOptions: cold.bodies[0].fracture ?? null,
+    mechanicsOptions: cold.bodies[0].mechanics ?? null,
     fractureEnabled: cold.fractureEnabled !== false,
     multilevelEnabled: cold.multilevelEnabled !== false,
     maxBodyCapacity,
@@ -127,10 +128,13 @@ function tryBuildMultilevelCatalogForBody(bodySizeM, pitchByAxisM) {
   if (!(finePitchM > 0)) return null;
   const halfExtentsM = bodySizeM.map((v) => 0.5 * Number(v));
   if (!halfExtentsM.every((v) => Number.isFinite(v) && v > 0)) return null;
-  const counts = halfExtentsM.map((v) => Math.max(4, Math.round((2 * v) / finePitchM)));
-  if (!counts.every((c) => c >= 4 && c % 4 === 0)) return null;
   try {
-    return buildSchroederMultilevelProxyCatalog({ bodyIndex: 0, halfExtentsM, finePitchM });
+    return buildSchroederMultilevelProxyCatalog({
+      bodyIndex: 0,
+      halfExtentsM,
+      finePitchM,
+      padToMultipleOf4: true
+    });
   } catch {
     return null;
   }
@@ -195,10 +199,17 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     family.fractureStage = null;
     family.multilevelStage = null;
     family.multilevelCatalog = null;
+    const derivedContactLaw = deriveSchroederSolidContactLaw({
+      bulkModulusPa: family.mechanicsOptions?.bulkModulusPa,
+      shearModulusPa: family.mechanicsOptions?.shearModulusPa,
+      temperatureK: family.bodyTemperaturesK?.[0],
+      meltTemperatureK: family.thermal?.meltTemperatureK
+    });
+    family.contactLaw = derivedContactLaw;
     family.stage = createSchroederSolidRigidStage({ device, bodyCount: family.bodyCount,
       memberCount: family.memberCount, frameBuffer: family.frameBuffer, memberBuffer: family.memberBuffer,
       proxyBuffer: family.proxyBuffer, proxyCount: family.proxyCount, gravity, boxM,
-      contactLaw: SCHROEDER_SOLID_BENCHMARK_CONTACT_LAW, latticeBuffer: family.latticeBuffer });
+      contactLaw: derivedContactLaw, latticeBuffer: family.latticeBuffer });
     family.thermalStage = null; family.releaseStage = null;
     // A5 SOL-3: two-way member <-> particle contact (fluid particles cannot
     // pass through the body; the reactions move it).

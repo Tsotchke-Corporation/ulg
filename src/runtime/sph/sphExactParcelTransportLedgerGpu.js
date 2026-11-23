@@ -75,6 +75,9 @@ const E_STOKES: u32 = ${SPH_EXACT_PARCEL_TRANSPORT_ERROR.STOKES_DECLARATION}u;
 //   [0] water_count, [1] carrier_dep_count, [2] any_dep_count, [3] pad
 //   [4 .. 4 + 4*C)       per-cell gas velocity (vx, vy, vz, mass) bitcast as u32
 //   [4 + 4*C .. +5*N)    compacted condensed water carriers (px, py, pz, half_edge, row)
+//   [4 + 4*C + 5*N .. +C) per-cell two-way parcel drag momentum reaction J_y (fixed-point 1e9 nN*s as i32 bits)
+const DRAG_MOMENTUM_FIXED_SCALE: f32 = 1.0e9;
+fn drag_base_word() -> u32 { return 4u + params.counts.z * 4u + params.counts.x * 5u; }
 fn rows() -> u32 { return params.counts.x * EM_WORDS; }
 fn flag(bits: u32) { atomicOr(&carrier_energy[2u * rows()], bits); }
 fn load_parcel(p: u32, slot: u32) -> ExactMass {
@@ -206,6 +209,15 @@ fn transport_parcels(
       } else {
         let settling = relaxation * (1.0 - params.air.y / rho_p) * params.air.x;
         let velocity = gas_velocity + vec3<f32>(0.0, settling, 0.0);
+        // Optional two-way Stokes drag momentum reaction onto suspending cell gas:
+        // At terminal Stokes speed, the parcel transmits its buoyant weight
+        // J_drag_y = (m_w + m_d) * n * (1 - rho_a / rho_p) * g_y * dt into the gas.
+        if (params.dims.w != 0u) {
+          let total_parcel_mass = (m_w + m_d) * n;
+          let drag_impulse_y = total_parcel_mass * (1.0 - params.air.y / rho_p) * params.air.x * params.box.w;
+          let drag_fixed = i32(clamp(round(drag_impulse_y * DRAG_MOMENTUM_FIXED_SCALE), -2.0e9, 2.0e9));
+          atomicAdd(&prep[drag_base_word() + c], bitcast<u32>(drag_fixed));
+        }
         position += velocity * params.box.w;
         parcels[base] = position.x;
         parcels[base + 1u] = position.y;
@@ -275,6 +287,27 @@ fn transport_parcels(
       atomicAdd(&prep[2u], 1u);
     }
   }
+}
+
+// Pass 1b (optional two-way drag): distribute per-cell Stokes drag momentum
+// impulse uniformly across gas carriers in each cell (exact Newton's 3rd law).
+@compute @workgroup_size(64)
+fn apply_parcel_drag_to_gas(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (params.dims.w == 0u) { return; }
+  let row = id.x;
+  if (row >= params.counts.x) { return; }
+  let s0 = carrier_state[row * 2u];
+  if (u32(carrier_thermo[row * 3u].y + 0.5) != 3u || s0.w <= 0.0) { return; }
+  let dims = vec3<i32>(params.dims.xyz);
+  let rc = clamp(vec3<i32>(floor((s0.xyz - params.grid.xyz) / params.grid.w)), vec3<i32>(0), dims - vec3<i32>(1));
+  let c = u32(rc.x + dims.x * (rc.y + dims.y * rc.z));
+  let gas_mass_cell = bitcast<f32>(atomicLoad(&prep[4u + c * 4u + 3u]));
+  if (!(gas_mass_cell > 0.0)) { return; }
+  let drag_fixed = bitcast<i32>(atomicLoad(&prep[drag_base_word() + c]));
+  if (drag_fixed == 0) { return; }
+  let dv_y = (f32(drag_fixed) / DRAG_MOMENTUM_FIXED_SCALE) / gas_mass_cell;
+  let s1 = carrier_state[row * 2u + 1u];
+  carrier_state[row * 2u + 1u] = vec4<f32>(s1.x, s1.y + dv_y, s1.z, s1.w);
 }
 
 // Pass 2, one thread per carrier: add every parcel that deposits into it.
@@ -355,6 +388,7 @@ fn retire_deposited(@builtin(global_invocation_id) id: vec3<u32>) {
 /** Prepares the transport/deposition passes over caller-owned buffers. */
 export function createSphExactParcelTransportStage({ device, carrierCount, parcelCount, dims, origin, cellSizeM, boxM,
   waterMaterialId, airDensityKgPerM3 = 1.2, airViscosityPaS = 1.81e-5, meanFreePathM = 6.6e-8, gravityMPerS2 = -9.81,
+  twoWayDrag = false,
   carrierStateBuffer, carrierThermoBuffer, carrierMassBuffer, carrierEnergyBuffer, parcelBuffer, parcelLedgerBuffer,
   sinkBuffer, carrierMechanicsBuffer = null, carrierMassRange = null } = {}) {
   const cellCount = dims[0] * dims[1] * dims[2];
@@ -374,23 +408,24 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
   );
   const target = alloc('ulg-exact-parcel-target', parcelCount * 4,
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC);
-  const prepWords = 4 + cellCount * 4 + carrierCount * 5;
+  const dragBaseWords = 4 + cellCount * 4 + carrierCount * 5;
+  const prepWords = dragBaseWords + cellCount;
   const prep = alloc('ulg-exact-parcel-transport-prep', prepWords * 4,
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
   const params = alloc('ulg-exact-parcel-transport-params', 80,
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST);
   const words = new ArrayBuffer(80), u = new Uint32Array(words), f = new Float32Array(words);
   u.set([carrierCount, parcelCount, cellCount, new Uint32Array(new Float32Array([waterMaterialId]).buffer)[0]], 0);
-  u.set([dims[0], dims[1], dims[2], 0], 4);
+  u.set([dims[0], dims[1], dims[2], twoWayDrag ? 1 : 0], 4);
   f.set([origin[0], origin[1], origin[2], cellSizeM], 8);
   f.set([boxM[0], boxM[1], boxM[2], 0], 12);
   f.set([gravityMPerS2, airDensityKgPerM3, airViscosityPaS, meanFreePathM], 16);
   const bindings = ['uniform', 'storage', 'read-only-storage', 'storage', 'storage', 'storage', 'storage',
     'storage', 'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['prep_water_carriers', 'reduce_cell_gas', 'transport_parcels',
-    'deposit_into_carriers', 'deposit_into_sinks', 'retire_deposited'].map(entryPoint => [entryPoint,
+    'apply_parcel_drag_to_gas', 'deposit_into_carriers', 'deposit_into_sinks', 'retire_deposited'].map(entryPoint => [entryPoint,
     createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-exact-parcel-transport-${entryPoint}.v3`, label: `ulg-exact-parcel-transport-${entryPoint}`,
+      cacheKey: `ulg-exact-parcel-transport-${entryPoint}.v4`, label: `ulg-exact-parcel-transport-${entryPoint}`,
       code: sphExactParcelTransportLedgerWgsl, entryPoint, bindings })]));
   const scratchMechanics = carrierMechanicsBuffer ? null : device.createBuffer({ label: 'ulg-exact-parcel-mechanics-scratch',
     size: carrierCount * 128, usage: GPU_BUFFER_USAGE.STORAGE });
@@ -406,14 +441,19 @@ export function createSphExactParcelTransportStage({ device, carrierCount, parce
       encoded = true;
       f[15] = dt; device.queue.writeBuffer(params, 0, words);
       encoder.clearBuffer(prep, 0, 16);
-      for (const [name, groups] of [
+      if (twoWayDrag) {
+        encoder.clearBuffer(prep, dragBaseWords * 4, cellCount * 4);
+      }
+      const steps = [
         ['prep_water_carriers', Math.ceil(carrierCount / 256)],
         ['reduce_cell_gas', cellCount],
         ['transport_parcels', parcelCount],
+        ...(twoWayDrag ? [['apply_parcel_drag_to_gas', Math.ceil(carrierCount / 64)]] : []),
         ['deposit_into_carriers', Math.ceil(carrierCount / 64)],
         ['deposit_into_sinks', 1],
         ['retire_deposited', Math.ceil(parcelCount / 64)]
-      ]) {
+      ];
+      for (const [name, groups] of steps) {
         const pass = encoder.beginComputePass({ label: `ulg-exact-parcel-transport-${name}` });
         pass.setPipeline(pipelines[name].pipeline); pass.setBindGroup(0, bindGroup);
         pass.dispatchWorkgroups(groups); pass.end();

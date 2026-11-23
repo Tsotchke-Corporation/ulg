@@ -15755,11 +15755,48 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
             - (scheduleFirstStepStartedAtMs ?? scheduleFunctionEnteredAtMs)
         );
         const lawAct = resolveScheduleLawActivation();
+        const lodBoxDims = Array.isArray(record.schroederLane?.boxDimensionsM)
+          ? record.schroederLane.boxDimensionsM
+          : [1, 1, 1];
+        const minBoxEdgeM = Math.max(1e-4, Math.min(...lodBoxDims.map((v) => Math.max(1e-4, Number(v) || 1))));
+        const lodMaterialRows = Array.isArray(record.schroederLane?.thermalMaterialTable?.materials)
+          ? record.schroederLane.thermalMaterialTable.materials
+          : [];
+        let minRho = Infinity;
+        let maxRho = 0;
+        let minTempK = Infinity;
+        let maxTempK = 0;
+        for (const mRow of lodMaterialRows) {
+          for (const ph of [mRow?.solid, mRow?.liquid, mRow?.gas]) {
+            const rho = Number(ph?.densityKgPerM3 ?? ph?.restDensityKgPerM3);
+            if (Number.isFinite(rho) && rho > 0) {
+              if (rho < minRho) minRho = rho;
+              if (rho > maxRho) maxRho = rho;
+            }
+          }
+          const tRef = Number(mRow?.temperatureK ?? mRow?.meltingPointK ?? mRow?.boilingPointK);
+          if (Number.isFinite(tRef) && tRef > 0) {
+            if (tRef < minTempK) minTempK = tRef;
+            if (tRef > maxTempK) maxTempK = tRef;
+          }
+        }
+        const computedVolumeRatio =
+          Number.isFinite(minRho) && minRho > 0 && maxRho > minRho
+            ? Math.min(1000, maxRho / minRho)
+            : (lawAct.gasBoundaryActionable ? 8.0 : 1.0);
+        const computedThermalGradientKPerM =
+          Number.isFinite(minTempK) && maxTempK > minTempK
+            ? (maxTempK - minTempK) / minBoxEdgeM
+            : (lawAct.thermal ? 600.0 : 0.0);
+        const activeInterfaceCount =
+          (lawAct.reaction ? 1 : 0)
+          + (lawAct.phaseVolumeInterfaceTransport ? 1 : 0)
+          + (lawAct.gasBoundaryActionable ? 1 : 0);
         const lodDecision = record.dynamicHierarchyLodController.evaluateScheduleBoundary({
           scheduleWallMs: wallMs,
-          maxVolumeRatio: lawAct.gasBoundaryActionable ? 8.0 : 1.0,
-          maxThermalGradientKPerM: lawAct.thermal ? 600.0 : 0.0,
-          activeInterfaceCount: (lawAct.reaction || lawAct.phaseVolumeInterfaceTransport) ? 1 : 0,
+          maxVolumeRatio: computedVolumeRatio,
+          maxThermalGradientKPerM: computedThermalGradientKPerM,
+          activeInterfaceCount,
           deviceLimits: record.workerDevice?.limits ?? null
         });
         record.lastDynamicHierarchyLodDecision = lodDecision;

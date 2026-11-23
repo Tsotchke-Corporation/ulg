@@ -5,8 +5,9 @@
 #
 # HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
 # .icc/completion-oracles.yaml target passes on one reviewed
-# `ulg.campaign.receipt.v1` bundle on disk. Today ONLY g5-reservation and
-# g7-release-audit are accepted (2/8 active gates).
+# `ulg.campaign.receipt.v1` bundle on disk. Today 4/8 active gates are
+# formally accepted: g5-reservation, g7-release-audit,
+# gate1-periodic-table-engine, and gate2-reactions-and-polytope-atlas.
 
 goals:
   - id: gate0-foundation-arch
@@ -22,22 +23,22 @@ goals:
   - id: gate1-periodic-table-engine
     task_id: ulg-gate1-periodic-table-engine
     priority: high
-    status: in_progress
+    status: completed
     goal: "Priority 1 (Gate 1, 10^-15 -> 10^-9 m): Complete First-Principles Periodic Table Material Engine (Z=1..118: nuclear, relativistic Dirac/KH atomic, EM/magnetic/optical/conductive, bulk DFT, WebGPU MD/phonons) with real live WebGPU visualizations (elements-lab.html) and offline G7 advisory scorecards"
     oracle: ulg-gate1-periodic-table-engine
     depends_on: [gate0-foundation-arch]
-    reason: "Core engine, end-to-end (Z, A) isotope propagation, & flagship elements-lab.html implemented and Vulkan-verified (4326c34e..f6623b39): nuclearStructureGpu, finite-nucleus Koelling-Harmon+QED+reduced-mass+hyperfine radialKohnShamWebGpu (0 SCF readbacks), isotope-mass/ZPE GPU periodicBulkDftWebGpu & elementMdClosureWebGpu, arbitrary (Z, A) Gate 1 decay chains in nuclearCherenkovClosure.js, elements.json 118/118, interactive (Z, A) picker + clickable 118x200 Chart of Nuclides in elements-lab.html. Remains in_progress pending formal reviewed ulg.campaign.receipt.v1."
-    tags: [ulg-scale-ladder, gate-1, periodic-table, quantum-visuals]
+    reason: "Accepted 2026-11-23 at commit b9e86811 (dirty: false): ICC completion-oracle ulg-gate1-periodic-table-engine 3/3 PASS (status: complete, 0 dropped/truncated) after 3-round independent audit (Round 1 FAIL 52d471fd & Round 2 FAIL 66aa79f5 preserved; Round 3 ACCEPT c3a3bdb7). Verified live WebGPU Z=1..118 (0 SCF readbacks, 0 CPU interband fallbacks, 50/50 exact 4-atom HCP volumes, metallic fcc Pd, 95 distinct element sRGBs, relativistic Au, 0/118 zero-MSD truncations), 10 inspected Wayland Vulkan PNGs (zero-copy 3D MD, cameraAutoSpin=false, 116314 changed px), 6/6 Vulkan proofs, 6209/6209 host tests, 37 MB build (0 AI assets), KERNEL_CLEAN. scientificValidation=false & offline G7 advisory preserved. Evidence: /home/cos/.cache/icc/repos/ulg/gate1-gate2-acceptance-20261123/ and plan/done/gate1-periodic-table.md."
+    tags: [ulg-scale-ladder, gate-1, periodic-table, quantum-visuals, accepted]
 
   - id: gate2-reactions-and-polytope-atlas
     task_id: ulg-gate2-reactions-and-polytope-atlas
     priority: high
-    status: in_progress
+    status: completed
     goal: "Priority 2 (Gate 2, 10^-10 -> 10^-6 m): GPU Molecular QM & Chemical Reactions -> Recursive Compound Feedback Loop back into Gate 1 -> Per-Material & Per-Compound Convex Polytope Atlas (A x <= b + GPU Chebyshev Tier-1 lookup tables + 3D Atlas Visualizer)"
     oracle: ulg-gate2-reactions-and-polytope-atlas
     depends_on: [gate1-periodic-table-engine]
-    reason: "Core engine, isotopologue pipeline, live CI-NEB reaction barrier visuals, & GPU Tier-1 Polytope Atlas bridge implemented and Vulkan-verified (4326c34e..c09644f8): molecularHartreeFockWebGpu, isotopologue formula.js + ZPE recursiveCompoundPipeline (H2O/D2O/T2O, 235UF6/238UF6), live CI-NEB barrier & TS marker in elements-lab.html Tab 5, isotope-keyed materialPolytopeRegistry, foundation-polytope-atlas.json expanded to 118 elements + 20 compounds (15/15 legacy compounds.json coverage with 0 reference-fallback), and foundationPolytopeAtlasGpuBridge.js. Remains in_progress pending formal reviewed ulg.campaign.receipt.v1."
-    tags: [ulg-scale-ladder, gate-2, chemistry, polytope-atlas]
+    reason: "Accepted 2026-11-23 at commit b9e86811 (dirty: false): ICC completion-oracle ulg-gate2-reactions-and-polytope-atlas 3/3 PASS (status: complete, 0 dropped/truncated) after 3-round independent audit (Round 1 FAIL 52d471fd & Round 2 FAIL 66aa79f5 preserved; Round 3 ACCEPT c3a3bdb7). Verified 100% WebGPU molecular RHF + climbingImageNEBWebGpu (H2O/D2O Ea=3.91 eV), Slater+Allred-Rochow ionic/covalent crystals (Al2O3 corundum-D51, NaCl cscl-B2), discoverAndDeriveReactionProductsWebGpu (Na+H2O->NaOH+H2), 20/20 compounds covering 15/15 legacy compounds.json (0 reference-fallback, provenance.gpuStagesExecuted), persisted 4-phase GPU Chebyshev fits (valueTransform=exp valid_mode=2, fail-closed hydration & hitFlag==0) across all 138 materials verified over 142457 adversarial interior probes (<0.6% ambient gases, <3.40% structured interior), live WGSL Tab 6 Atlas, 6/6 Vulkan proofs, 6209/6209 host tests, KERNEL_CLEAN. scientificValidation=false preserved. Evidence: /home/cos/.cache/icc/repos/ulg/gate1-gate2-acceptance-20261123/ and plan/done/gate2-reactions-polytope-atlas.md."
+    tags: [ulg-scale-ladder, gate-2, chemistry, polytope-atlas, accepted]
 
   - id: gate3-continuum-substrate-and-physics
     task_id: ulg-gate3-continuum-substrate-and-physics
@@ -56,7 +57,7 @@ goals:
     goal: "Priority 4 (Gate 4, 10^-3 -> 10^+2 m): Decoupled >=54 Hz presentation of latest committed physics state (visibleMotionCadenceVerified=true) across all 5 active Studio presets with true WebGPU isosurfaces, refraction, Cherenkov, volumetric plumes, and zero visual fakes"
     oracle: ulg-gate4-studio-presentation
     depends_on: [gate3-continuum-substrate-and-physics]
-    reason: "All 5 active Studio presets boot and step cleanly with 0 page/GPU errors in headless Vulkan verification (scripts/gate-visual-motion-verify.mjs); awaits owner-approved visible Wayland Chrome >=54 Hz pixel-motion cadence verification (headless CDP does not composite WebGPU swapchains) and formal ulg.campaign.receipt.v1."
+    reason: "Owner-approved visible Wayland Chrome 5-preset sweep completed 2026-11-23 (/home/cos/.cache/icc/repos/ulg/gate4-wayland-sweep-20261123/ and gate4-wayland-sweep-v2-20261123/): all 5 presets rendered true WebGPU isosurfaces with visibleContentAdvanced=true, 0 page/GPU/Xid errors, and water-realtime at 1.21-1.27x RT, but measured presented cadence remains below the >=54 Hz gate (water-cycle 21.29 -> 27.49 Hz, iron-ice-quench 18.79 Hz, sodium-water 27.63 Hz, cesium-fluorine 33.81 Hz, water-realtime 22.93 Hz; UI rAF 56.4-60.0 Hz). Root cause diagnosed as double-vsync onSubmittedWorkDone + rAF contention on the shared WebGPU queue. Remains honestly in_progress until decoupled presentation reaches >=54 Hz (visibleMotionCadenceVerified=true) across all 5 presets."
     tags: [ulg-scale-ladder, gate-4, presentation]
 
   - id: gate5-planetary-to-supergalactic

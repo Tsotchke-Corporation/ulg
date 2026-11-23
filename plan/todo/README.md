@@ -6,9 +6,10 @@
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
 
-Every file still in `plan/todo/` below corresponds to **verified open work** at
-HEAD `23a961c4`. Completed items have been moved to [`plan/done/`](../done/);
-superseded items have been moved to [`plan/moot/`](../moot/).
+Every file still in `plan/todo/` below corresponds to **verified open work** as
+of `abd76e44` (31 active files; `nitpicks.md` completed and moved to
+[`plan/done/nitpicks.md`](../done/nitpicks.md)). Completed items live in
+[`plan/done/`](../done/); superseded items live in [`plan/moot/`](../moot/).
 
 ---
 
@@ -62,14 +63,13 @@ superseded items have been moved to [`plan/moot/`](../moot/).
 
 | File | Live-Code Reality & Open Work |
 |---|---|
-| [`eshkol-higher-order-law-closure-plan.md`](eshkol-higher-order-law-closure-plan.md) | `eshkolHigherOrderLawCompiler.js` exists standalone, **NOT wired into any live SPH step** (worker only imports `LAW_FALLBACK_POLICY` enum). |
-| [`algorithm-derived-material-properties-plan.md`](algorithm-derived-material-properties-plan.md) | Ongoing first-principles algorithm-shaped material closure derivations. |
-| [`material-property-json-bank-plan.md`](material-property-json-bank-plan.md) | `elements.json` has 111 rows (106 `reduced-estimate`, 30 `reference-fallback`, missing 7 noble gases); `compounds.json` is 15/15 `reference-fallback`; crystal structures 7 `reference-fallback`. |
-| [`material-polytope-registry-and-property-fit-plan.md`](material-polytope-registry-and-property-fit-plan.md) | `materialPolytopeRegistry` does **not** exist in `src/` yet (only a cosmetic HUD wireframe in `cosmicQuantumZoomDemo.js`). |
-| [`sedenion-reaction-scoping-plan.md`](sedenion-reaction-scoping-plan.md) | **Active code bug:** `reactionCandidates.js:282, 362` drops `'inert'` candidates (`return null`) instead of only prioritizing them — fix to strictly prioritize without suppressing balanced channels. |
-| [`webgpu-material-property-resolvers-plan.md`](webgpu-material-property-resolvers-plan.md) | Optical GPU resolver partially hybrid; `radialKohnShamWebGpu.js` reads `vElec` back to CPU every SCF iter; `periodicBulkDft.js` & `molecularHartreeFock.js` are 100% CPU JS; tracks remaining quantitative electronic-structure shortfalls from archived `done/frontier-todo.md`. |
-| [`electron-cloud-material-derivation-visualization-plan.md`](electron-cloud-material-derivation-visualization-plan.md) | Phase 1 3D volumetric orbital raymarcher shipped (`volumetricOrbitalRaymarcher.js`); interactive polytope-discovery / sampling / fit diagnostic visualization still open. |
+| [`eshkol-higher-order-law-closure-plan.md`](eshkol-higher-order-law-closure-plan.md) | Live `eshkolHigherOrderLawCompiler` wired into worker schedule boundary (P1); full per-lane dynamic WGSL recompilation & formal A4 oracle acceptance remain open. |
+| [`algorithm-derived-material-properties-plan.md`](algorithm-derived-material-properties-plan.md) | Ongoing first-principles algorithm-shaped material closure derivations (Chapman–Enskog gas `k, μ` added in P2). |
+| [`material-property-json-bank-plan.md`](material-property-json-bank-plan.md) | `elements.json` / `compounds.json` still carry `reference-fallback` / `reduced-estimate` rows pending full lower-level derivation. |
+| [`material-polytope-registry-and-property-fit-plan.md`](material-polytope-registry-and-property-fit-plan.md) | Core `materialPolytopeRegistry.js` landed and wired into `cosmicQuantumZoomDemo.js` (P3); persistent prebaked polytope bank generation & full SPH closure table integration remain open. |
+| [`sedenion-reaction-scoping-plan.md`](sedenion-reaction-scoping-plan.md) | Inert-candidate suppression bug FIXED in P0 (`reactionCandidates.js` prioritizes without dropping balanced candidates); deeper sedenion multi-body scoping remains future research. |
+| [`webgpu-material-property-resolvers-plan.md`](webgpu-material-property-resolvers-plan.md) | True 100% GPU radial Kohn–Sham SCF eigensolver (`solveAtomFullWebGpu`, `0` per-SCF CPU readbacks) landed in P3; relativistic KH on GPU + GPU `periodicBulkDft.js` & `molecularHartreeFock.js` remain open. |
+| [`electron-cloud-material-derivation-visualization-plan.md`](electron-cloud-material-derivation-visualization-plan.md) | Phase 1 3D volumetric orbital raymarcher + live `MaterialPolytopeRegistry` status shipped; interactive polytope-sampling/fit diagnostic visualization still open. |
 | [`hydrogen-nebula-to-star-fusion-bridge-plan.md`](hydrogen-nebula-to-star-fusion-bridge-plan.md) | Phase 1 `stellar-genesis.html` + generalized GPU `self-gravitating-hydro@1` shipped; share Scale Atlas multipole with SS & Cosmic-Quantum and add G7 Lane-Emden / MESA benchmarks. |
-| [`distributed-peercompute-network-stack-plan.md`](distributed-peercompute-network-stack-plan.md) | Real 2-machine WebRTC `RTCPeerConnection` proof, spatial domain partitioning across peers, and removing `/@fs` hardcoded paths + unpinned Node engines. |
-| [`cold-start-cache-performance-plan.md`](cold-start-cache-performance-plan.md) | Persistent shader/closure warm cache, `maxStorageBufferBindingSize` clamping on marching cubes (`sphPhaseScene.js:3279`), and `verify-pages-build.mjs` variable-held `/@fs` scan. |
-| [`nitpicks.md`](nitpicks.md) | Open Studio & mount UX items: material-derived initial body dimensions, automatic overlap/OOB resolution with box expansion, pause-on-edit consistency, residual PBD drag. |
+| [`distributed-peercompute-network-stack-plan.md`](distributed-peercompute-network-stack-plan.md) | Real 2-browser-context WebRTC `RTCDataChannel` proof + `/@fs` removal + `engines.node >= 22` landed (P0/P3); physical 2-machine NAT/STUN/TURN validation & spatial domain partitioning remain open. |
+| [`cold-start-cache-performance-plan.md`](cold-start-cache-performance-plan.md) | `maxStorageBufferBindingSize` marching-cubes clamp & `verify-pages-build.mjs` `/@fs` hardening landed (P0); persistent shader/closure warm cache & cutting `83 MB` peercompute `ort-wasm` dist bloat remain open. |

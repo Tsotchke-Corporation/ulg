@@ -16,7 +16,7 @@ goals:
     goal: "Phase 1 + Arch M2: Real-time 100k+ bulk substrate, decoupled presentation, deduplicated parallel contact + thermal decoupling, legacy route retirement, and formal A1 oracle acceptance"
     oracle: ulg-a1-realtime-substrate
     depends_on: []
-    reason: "Code partially landed (100k+ water-realtime >=1x RT, 1970 Pa·s shear bug fixed), but NO ulg.campaign.receipt.v1 oracle bundle exists and verified gaps remain at 23a961c4: Coupling #8 JS pressure-interface solver still runs at render cadence (sphPhaseScene.js:21478, 50435); 5 iron-ice contact responses still overlap; disabled 63-limb rationals & production CPU mirrors remain in src/runtime/sph/; 246 @workgroup_size(1) serial compute entry points; device.lost leaks (11 files) & unbounded DataState.setHotBuffer; missing uncapturederror listener; raw NUL byte at sphPhaseViewStateTransport.js:98; 0 K wall default in thermalEnvironmentAuthority.js:222; p-wave speed mismatch in sphPhaseDemo.js:1204."
+    reason: "P0/P1 fixed Coupling #8 under worker-owned rendering, enforced lawAdapterContract.js, added uncapturederror telemetry, fixed NUL byte / p-wave speed / implicitZeroKelvinFaces / hot-buffer eviction / GPUDevice device.lost relay. Still OPEN (0 oracle receipts): 5 overlapping contact responses, 63-limb sphExactRational (71 refs / 33 files used by sphPhaseCarrierTransferGpu.js), 76 replaceRequiredWgsl patches, and iron-ice Section 3 budget breach (32 passes, 36.6 encoders, 3.68 submits, 3.26 workDone, 16 createBuffer per step)."
     tags: [ulg-campaign, phase-1, architecture-first, open-gaps]
 
   - id: a2-incremental-spatial
@@ -26,7 +26,7 @@ goals:
     goal: "Phase 1 + Arch M3: Single-pass GPU incremental spatial CSR migration, live Scale Atlas / multipole / dynamic LOD wiring, multi-level SS presets, and formal A2 oracle acceptance"
     oracle: ulg-a2-incremental-spatial
     depends_on: [a1-realtime-substrate]
-    reason: "Single-pass incremental CSR migration (schroederIncrementalSpatialMigrationGpu.js) IS live by default on direct spatial-epoch path (schroederSpatialEpochGpu.js:3280), but NO ulg.campaign.receipt.v1 oracle bundle exists and verified gaps remain: 0 shipped presets run 3+ SS levels; schroederSpatialScaleAtlasGpu.js / migration / split-coarsen have 0 callers in src/; ulgMechanicsResidentStage.worker.js:15758 has a broken call signature to runSchroederScaleAtlasMultipoleWebGpu swallowed by catch; dynamic LOD controller (:15724) is write-only telemetry; schroederActiveNodeCompactionGpu.js is opt-in with 0 dispatch consumers."
+    reason: "Incremental CSR migration is live by default, worker Scale Atlas multipole call signature fixed (P0), and dynamic LOD controller wired to physical observables (P2). Still OPEN (0 oracle receipts): 0 shipped presets run 3+ SS levels by default, scale-atlas migration/split-coarsen not in default step loop, and active-node compaction remains opt-in."
     tags: [ulg-campaign, phase-1, architecture-first, open-gaps]
 
   - id: g6-local-fit
@@ -36,7 +36,7 @@ goals:
     goal: "Phase 1: Live local provenance-bound online closure fit/cache loop enabled by default with complete G4 uncertainty propagation and formal G6 oracle acceptance"
     oracle: ulg-g6-local-fit
     depends_on: [a1-realtime-substrate]
-    reason: "thermalPotential IS enabled by default in presets/Studio and wired into g6_temperature + thermal/radiation dormancy, but formal oracle has 0 PASS / 3 FAIL historical receipts and verified gaps remain: radiationEpsilonFluxWPerM2 is dropped in normalizeThermalDormancyConfig (:999-1029, always 0) and reaction/phase dormancy still receive uncertaintyBuffer = null."
+    reason: "P1 preserved radiationEpsilonFluxWPerM2 and wired packed uncertaintyBuffer into reaction & phase dormancy. Still OPEN (0 PASS / 3 FAIL historical): live iron-ice-quench gpuprobe reports thermalPotential status='deferred-capacity' with 0 consumer hits; formal oracle unrun."
     tags: [ulg-campaign, phase-1, architecture-first, open-gaps]
 
   - id: a3-representative-sampling
@@ -46,7 +46,7 @@ goals:
     goal: "Phase 1: Representative homogeneous-region GPU sampling wired into live default closure consumers and formal A3 oracle acceptance"
     oracle: ulg-a3-representative-sampling
     depends_on: [a1-realtime-substrate, g6-local-fit]
-    reason: "sphImplicitPressureGpu.js closes the GPU loop only when implicitPressure=1 (OFF on all standard-matrix presets); sphThermalRegionalClosureGpu.js runs on the worker schedule boundary by default but has ZERO live GPU law consumers (getSphThermalRegionalClosureLane never called in src/, tables never bound to any shader). Zero ulg.campaign.receipt.v1 oracle receipts on disk."
+    reason: "P1 wired live GPU radiation consumer (consume_thermal_regional_radiation) into sphThermalRegionalClosureGpu.js and fixed its swapped thermo0.x/thermo0.z (materialId/temperatureK) bug (verified on native Vulkan). Still OPEN (0 oracle receipts): implicitPressure remains OFF on standard-matrix presets; formal oracle unrun."
     tags: [ulg-campaign, phase-1, architecture-first, open-gaps]
 
   - id: a4-material-functions
@@ -56,7 +56,7 @@ goals:
     goal: "Phase 1: GPU-native Eshkol-derived multidimensional material/property response functions wired into live SPH closure misses and formal A4 oracle acceptance"
     oracle: ulg-a4-material-functions
     depends_on: [g6-local-fit]
-    reason: "6-closure 2-D (T, P) gas response tables upload to GPU rf_eval, but ALL A4 fitting (fitResponseFunction, gasResponseFunctions, eshkolEosStiffness, eshkolTriadClosures) still runs 100% on CPU JS, and eshkolHigherOrderLawCompiler.js is NOT wired into any live SPH step (worker imports LAW_FALLBACK_POLICY enum only at :39). Zero ulg.campaign.receipt.v1 oracle receipts on disk."
+    reason: "P1/P3 landed GPU-native Chebyshev fitter (responseFunctionFitGpu.js, verified <1e-4 on Vulkan), wired live eshkolHigherOrderLawCompiler in worker, and created materialPolytopeRegistry.js. Still OPEN (0 oracle receipts): startup gas/EOS fitters remain CPU JS; formal oracle unrun."
     tags: [ulg-campaign, phase-1, architecture-first, open-gaps]
 
   - id: g2-plumes
@@ -66,7 +66,7 @@ goals:
     goal: "Phase 2 + Arch M4: Conserved steam and reaction aerosol plumes on the 2^-149 exact-ledger canonical lane enabled by default with first-class multi-level air and formal G2 oracle acceptance"
     oracle: ulg-g2-plumes
     depends_on: [a1-realtime-substrate, a2-incremental-spatial, g6-local-fit]
-    reason: "Exact 9-limb 2^-149 ledgers and GPU kappa-Kohler/Maxwell-Mason/Stokes parcel stages are implemented when opted in, but formal oracle has 0 PASS / 18 FAIL historical receipts and default iron-ice-quench & sodium-water presets still run environmentMode='vacuum', 1 SS level, and exactEnergyLedger=false; split/merge (schroederPhaseSlotRefinement) is opt-in only; gas k/mu remain static CRC/NIST bank; parcel drag is one-way only; single-level implicit-atmosphere stand-in remains live."
+    reason: "P2 added first-principles Chapman-Enskog gas k/mu, generalized vapor-parcel laws beyond H2O/air, and verified GPU two-way Stokes drag momentum conservation on Vulkan. Still OPEN (0 PASS / 18 FAIL historical): default iron-ice-quench & sodium-water remain vacuum + exactEnergyLedger=false (parcelStage.ran=0) because iron-ice already exceeds Section 3 GPU budgets."
     tags: [ulg-campaign, phase-2, open-gaps]
 
   - id: g3-solids
@@ -76,7 +76,7 @@ goals:
     goal: "Phase 2: Coherent solids SOL-0/SOL-1 integrated into canonical SS spatial cells (closing all 5 pre-SOL-1 gates) and formal G3 oracle acceptance"
     oracle: ulg-g3-solids
     depends_on: [a1-realtime-substrate, a2-incremental-spatial]
-    reason: "Rigid solids run by default, but NO ulg.campaign.receipt.v1 oracle bundle exists and critical architecture gaps remain: solids use 3 private 4096-bucket hashes instead of SS cells (schroederSolidRigidGpu.js:50, schroederSolidFluidContactGpu.js:28, schroederSolidFluidThermalGpu.js:27) and all 5 pre-SOL-1 gates are OPEN (interior 4*pi*r^2 radiation, non-objective velocity smear, product placement ignores bodyId, L0-only rigid coupling, hardcoded restitution/friction 0.3)."
+    reason: "P2 closed 3 pre-SOL-1 gates (material-derived restitution/friction, exposed-face surface-only solid radiation, frame-indifferent co-rotational velocity smear). Still OPEN (0 oracle receipts): solids still use 3 private 4096-bucket hashes rather than canonical SS cells, product placement ignores bodyId, and rigid coupling is L0-only."
     tags: [ulg-campaign, phase-2, open-gaps]
 
   - id: a5-solids-and-levels
@@ -86,7 +86,7 @@ goals:
     goal: "Phase 2 + Arch M5: Unified SS solid-fluid coupling (SOL-2/3), live N-level SOL-4 deformable surface, live-loaded SOL-5 fracture/refreeze, live SOL-6 multilevel proxies, and formal A5 oracle acceptance"
     oracle: ulg-a5-solids-and-levels
     depends_on: [g3-solids]
-    reason: "Isolated Vulkan tests pass for SOL-4/5/6, but NO ulg.campaign.receipt.v1 oracle bundle exists and severe live-code defects remain: SOL-4 silently no-ops on N-level chain (schroederSpatialChainStepGpu.js:240 omits mechanicsBuffer); SOL-5 runs 17 kernels/step against all-zero member_loads (0 callers write it) with a latent OOB write bug (frameBuffer/latticeBuffer sized to bodyCount vs maxBodyCapacity); SOL-6 is skipped on all shipped presets (c>=4 && c%4==0) and activeProxiesBuffer has 0 consumers; candidate arena not sparse CSR; cross-level coupling off."
+    reason: "P0/P2 fixed SOL-5 OOB capacity & zero-load 17-dispatch waste, SOL-4 N-level mechanicsBuffer no-op, and SOL-6 10^3/3^3 preset eligibility + live GPU activeProxies consumer (all verified on Vulkan). Still OPEN (0 oracle receipts): solid-fluid spatial hashing still outside canonical SS cells; candidate arena not sparse CSR; cross-level coupling off."
     tags: [ulg-campaign, phase-2, open-gaps]
 
   - id: g4-dynamic-laws
@@ -96,7 +96,7 @@ goals:
     goal: "Phase 2 + Arch M1: SS-node-backed compacted per-node warm dynamic law activation using real GPU indirect dispatch across all 4 live law families and formal G4 oracle acceptance"
     oracle: ulg-g4-dynamic-laws
     depends_on: [a1-realtime-substrate, g6-local-fit]
-    reason: "Dormancy evaluators run in canonical loops, but NO ulg.campaign.receipt.v1 oracle bundle exists and core G4 requirements remain open: none of the 4 dormancy passes consume canonical SS tree nodes (thermal/reaction build private 3D box grids), and ZERO of the 4 live law families dispatch with dispatchWorkgroupsIndirect (all still launch full ceil(N/64) workgroups with in-shader early returns)."
+    reason: "P1 wired real dispatchWorkgroupsIndirect on reaction discovery (propose_active) + optional phase transfer and propagated G6 uncertainty (verified on Vulkan). Still OPEN (0 oracle receipts): thermal/reaction dormancy still use private 3D box grids instead of canonical SS tree nodes; thermal & radiation still launch dense workgroups."
     tags: [ulg-campaign, phase-2, open-gaps]
 
   - id: a6-remote-derivation
@@ -106,7 +106,7 @@ goals:
     goal: "Phase 2 + Arch M6: Multi-peer PeerCompute WASM/WebGPU Eshkol & MoonLab derivation responders wired into live GPU closure tables with real browser WebRTC proof, portable packaging, and formal A6 oracle acceptance"
     oracle: ulg-a6-remote-derivation
     depends_on: [g5-reservation, g6-local-fit, a3-representative-sampling]
-    reason: "Warm worker & BroadcastChannel/relay tests pass in isolation, but NO ulg.campaign.receipt.v1 oracle bundle exists and live integration is disconnected: sphPhaseScene.js:54631 constructs warmClosureMissBridge without device or lane (adopted eos-stiffness never reaches GPU stiffness table); warmClosureMissBridge.js:591 omits eshkolSample (skips eshkol-warm-vm.worker.js for CPU JS fallback); WebRTC untested on real browsers/2 machines; peercomputeBrowserResidentHost.js:163 hardcodes 6 /@fs/home/cos/... URLs into dist/ and docs/."
+    reason: "P0/P3 wired live eshkolSample + adoptedEosStiffnessBundles into worker stiffness table, removed all 6 /@fs/home/cos/... URLs, and proved real 2-browser-context WebRTC RTCPeerConnection/RTCDataChannel derivation with signaling WS closed + fail-closed disconnect. Still OPEN (0 oracle receipts): physical 2-machine NAT/STUN/TURN validation untested on single host; peercompute pulls 83 MB unused ort-wasm into dist/."
     tags: [ulg-campaign, phase-2, open-gaps]
 
   - id: g1-presentation
@@ -116,7 +116,7 @@ goals:
     goal: "Phase 3 reassessment: decoupled presentation of latest committed physics state at >=54 Hz with verified visible motion cadence across all shipped presets and formal G1 oracle acceptance"
     oracle: ulg-g1-presentation
     depends_on: [a1-realtime-substrate, g2-plumes, g3-solids, g4-dynamic-laws]
-    reason: "Clip-Z NDC and unified rigid-isosurface splat fixed, but prior 2026-09-13 oracle FAILED (0 PASS ever for cesium-fluorine or shared-optics-and-lifecycle) and verified gaps remain: 2 Hz surface pops only mitigated and dampedIsosurfaceShaderMotionAgeS is bypassed on live native material path (workerOwnedNativeSurfaceMaterial.js:141); sphPresentationCadence.js marks visibleMotionCadenceVerified: false; magic 80/82/24 isovalues live (sphPhaseScene.js:9520); marching cubes 256 MB buffer unclamped to maxStorageBufferBindingSize."
+    reason: "P0/P2/P3 wired dampedNativeSurfaceMotionAgeS into workerOwnedNativeSurfaceMaterial.js, clamped marching-cubes buffer budget to maxStorageBufferBindingSize, replaced hardcoded h2o/fe/steam 80/82/24 isovalues with continuous density scaling, and closed nitpicks.md. Still OPEN (prior 2026-09-13 oracle FAILED): visibleMotionCadenceVerified remains false, .icc/completion-oracles.yaml still references removed bulk-water preset, and >=54 Hz visibly advancing presentation across all presets awaits formal oracle capture."
     tags: [ulg-campaign, phase-3, open-gaps]
 
   - id: g5-reservation

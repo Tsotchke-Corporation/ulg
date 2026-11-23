@@ -108,6 +108,15 @@ function destroy(resources) {
 
 const PENDING_UNCONFIRMED_CLEANUPS = new Set();
 
+function watchAerosolDeviceLoss(device, target, handler) {
+  if (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice) {
+    return watchSphDeviceLossFor(device, target, handler);
+  }
+  if (!device?.lost?.then) return false;
+  device.lost.then(() => handler(target), () => handler(target));
+  return true;
+}
+
 function invokeAfterQueueCallback(target) {
   PENDING_UNCONFIRMED_CLEANUPS.delete(target);
   target.callback();
@@ -151,7 +160,7 @@ function afterQueue(device, callback, quarantine = () => {}) {
     quarantine();
     const token = { callback };
     PENDING_UNCONFIRMED_CLEANUPS.add(token);
-    if (!watchSphDeviceLossFor(device, token, invokeAfterQueueCallback)) {
+    if (!watchAerosolDeviceLoss(device, token, invokeAfterQueueCallback)) {
       PENDING_UNCONFIRMED_CLEANUPS.delete(token);
     }
   };
@@ -523,7 +532,7 @@ export async function runSphAerosolCondensateExtractionWebGpu({ device, sourceFa
       sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer, validateSource,
       transition: null, transitionPreparing: false, disposition: 'prepared' };
     EXTRACTIONS.set(candidate, candidateRecord);
-    watchSphDeviceLossFor(device, candidateRecord, handleCondensateCandidateLost);
+    watchAerosolDeviceLoss(device, candidateRecord, handleCondensateCandidateLost);
     afterQueue(device, () => destroy(temporaries), () => { source.quarantined = true; });
     return candidate;
   } catch (error) {
@@ -564,7 +573,7 @@ export function adoptSphAerosolCondensateExtraction(candidate) {
     nucleusIds: declaration.nucleusIds, extractionPending: null, successorAdopted: false,
     releaseRequested: false, retirementScheduled: false, borrows: 0, lost: false, quarantined: false };
   FAMILIES.set(family, child);
-  watchSphDeviceLossFor(device, child, handleAerosolChildLost);
+  watchAerosolDeviceLoss(device, child, handleAerosolChildLost);
   const pair = Object.freeze({ schema: 'peercompute.ulg.sph-condensate-residual-aerosol-pair.v0',
     status: 'isolated-paired-inventory-ready-not-ss-successor', particleCount: context.count,
     stateBuffer: record.state, thermoBuffer: record.thermo, mechanicsBuffer: record.mechanics,
@@ -573,7 +582,7 @@ export function adoptSphAerosolCondensateExtraction(candidate) {
     gasVolumeAuthority: false, opticalAuthority: false, fullPhysicsValidation: false });
   const pairRecord = { device, family, resources: [record.state, record.thermo, record.mechanics], released: false };
   EXTRACTION_PAIRS.set(pair, pairRecord);
-  watchSphDeviceLossFor(device, pairRecord, handleExtractionPairLost);
+  watchAerosolDeviceLoss(device, pairRecord, handleExtractionPairLost);
   record.disposition = 'adopted'; source.successorAdopted = true; record.sourceClaim.adopted = true;
   record.outputs.length = 0; record.dropSource();
   return pair;
@@ -709,7 +718,7 @@ export async function prepareSphAerosolVaporTransition({ device, producerRead } 
       exactQuantities: Object.freeze({ format: producer.format, quantityBuffer: quantities,
         quantityLayout: producer.endpoints.aerosolLayout }),
       validateSource, dropSource, dispose, cleanupCompletion };
-    watchSphDeviceLossFor(device, record, handleVaporTransitionRecordLost);
+    watchAerosolDeviceLoss(device, record, handleVaporTransitionRecordLost);
     return prepareCondensateTransitionForRecord(record);
   } catch (error) {
     dispose();
@@ -741,7 +750,7 @@ function prepareCondensateTransitionForRecord(record) {
   try {
     // Register every child/read loss handler before reserving the transition.
     // Until publication, the extraction alone owns all four output buffers.
-    watchSphDeviceLossFor(device, pending, handlePendingCondensateTransitionLost);
+    watchAerosolDeviceLoss(device, pending, handlePendingCondensateTransitionLost);
     pending.read = mintParcelRead(child, family);
     requirePendingCondensateSource(record);
     const transition = Object.freeze({ schema: 'peercompute.ulg.sph-aerosol-condensate-transition.v0',
@@ -924,7 +933,7 @@ function mintParcelRead(source, family) {
   PARCEL_READS.set(read, record);
   source.borrows++;
   try {
-    if (!watchSphDeviceLossFor(source.device, record, drainParcelRead)) {
+    if (!watchAerosolDeviceLoss(source.device, record, drainParcelRead)) {
       throw new TypeError('Aerosol parcel read requires a WebGPU device with a lost promise');
     }
   }

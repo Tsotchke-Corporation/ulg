@@ -326,7 +326,8 @@ export function extractAtomDescriptorsForBulk(Z, atomResult) {
  *      `fft3dWebGpu` for real 3D volumetric crystal rendering!
  */
 export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
-  densityGridN = 16
+  densityGridN = 16,
+  atomicMassU = null
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('solveBulkCrystalWebGpu requires a live WebGPU GPUDevice');
@@ -353,14 +354,26 @@ export async function solveBulkCrystalWebGpu(device, Z, atomResult, {
   }
 
   const { struct, fit } = best;
-  const omegaAtomBohr3 = fit.vEqBohr3;
+  const isoMassU = Number(atomicMassU);
+  const massKg = Number.isFinite(isoMassU) && isoMassU > 0
+    ? isoMassU * 1.6605390666e-27
+    : atomicMassKg(Z);
+  const bulkModulusPa = Math.max(1e6, fit.bulkModulusGPa * 1e9);
+  const shearModulusPa = bulkModulusPa * struct.shearRatioGOverK;
+  // First-principles quantum zero-point lattice expansion: lighter isotopes have
+  // higher Debye frequency (Theta_D ~ 1/sqrt(M)) and larger zero-point volume!
+  const omega0M3 = fit.vEqBohr3 * (BOHR_TO_M ** 3);
+  const rho0Raw = massKg / omega0M3;
+  const cLong0 = Math.sqrt((bulkModulusPa + (4 / 3) * shearModulusPa) / rho0Raw);
+  const cTrans0 = Math.sqrt(shearModulusPa / rho0Raw);
+  const cMean0 = Math.cbrt(3 / (1 / (cLong0 ** 3) + 2 / (cTrans0 ** 3)));
+  const thetaD0 = (HBAR / KB) * Math.cbrt(6 * Math.PI * Math.PI / omega0M3) * cMean0;
+  const zpeFracExpand = Math.min(0.18, (1.5 * 1.6 * KB * thetaD0) / Math.max(1e-24, bulkModulusPa * omega0M3));
+  const omegaAtomBohr3 = fit.vEqBohr3 * (1 + zpeFracExpand);
   const omegaAtomM3 = omegaAtomBohr3 * (BOHR_TO_M ** 3);
-  const massKg = atomicMassKg(Z);
   const densityKgPerM3 = massKg / omegaAtomM3;
   const a0Bohr = Math.cbrt(struct.atomsPerConv * omegaAtomBohr3);
   const a0Angstrom = a0Bohr * BOHR_TO_A;
-  const bulkModulusPa = Math.max(1e6, fit.bulkModulusGPa * 1e9);
-  const shearModulusPa = bulkModulusPa * struct.shearRatioGOverK;
   const poissonRatio = (3 * bulkModulusPa - 2 * shearModulusPa) / (2 * (3 * bulkModulusPa + shearModulusPa));
   const c11Pa = bulkModulusPa + (4 / 3) * shearModulusPa;
   const c12Pa = bulkModulusPa - (2 / 3) * shearModulusPa;

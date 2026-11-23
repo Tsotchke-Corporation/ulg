@@ -123,6 +123,7 @@ export function fitAbInitioInteratomicPotential({ Z, bulkResult }) {
  */
 export async function deriveElementThermodynamicsWebGpu(device, {
   Z,
+  atomicMassU = null,
   bulkResult,
   emResult,
   temperatureK = 300,
@@ -130,12 +131,15 @@ export async function deriveElementThermodynamicsWebGpu(device, {
   mdSteps = 20,
   mdCellsPerSide = 3
 } = {}) {
-  const massKg = atomicMassKg(Z);
-  const massU = ATOMIC_MASS_U[Z - 1] || (massKg / 1.6605390666e-27);
+  const isoMassU = Number(atomicMassU);
+  const massU = Number.isFinite(isoMassU) && isoMassU > 0
+    ? isoMassU
+    : (ATOMIC_MASS_U[Z - 1] || (atomicMassKg(Z) / 1.6605390666e-27));
+  const massKg = massU * 1.6605390666e-27;
   const molarMassKg = massU * 1e-3;
   const pot = fitAbInitioInteratomicPotential({ Z, bulkResult });
 
-  // Characteristic melting & boiling scales from cohesive energy, Debye stiffness & Grüneisen anharmonicity
+  // Characteristic melting & boiling scales from cohesive energy, Debye stiffness & quantum zero-point softening
   const thetaD = Math.max(15, bulkResult.debyeTemperatureK);
   const eCohJ = bulkResult.cohesiveEnergyEv * EV_TO_J;
   const rNNM = pot.rNearestNeighborA * 1e-10;
@@ -144,11 +148,13 @@ export async function deriveElementThermodynamicsWebGpu(device, {
   const tCohMelt = bulkResult.crystalStructure === 'vdw-fcc'
     ? (0.68 * pot.epsilonEv * EV_TO_J) / KB
     : (0.029 * eCohJ) / KB;
-  const meltingPointK = Math.max(1.5, Math.min(4200,
-    bulkResult.crystalStructure === 'vdw-fcc'
-      ? Math.max(2.0, tCohMelt)
-      : 0.55 * tCohMelt + 0.45 * Math.min(tCohMelt * 1.8, tLindemann)
-  ));
+  // Quantum zero-point lattice kinetic energy reduces effective binding by ~(9/8)*kB*Theta_D
+  // so heavier isotopes (lower Theta_D ~ 1/sqrt(M)) have higher T_m than lighter isotopes!
+  const zpeMeltShiftK = Math.min(0.35 * tCohMelt, 0.085 * thetaD);
+  const baseMeltK = bulkResult.crystalStructure === 'vdw-fcc'
+    ? Math.max(1.5, tCohMelt - zpeMeltShiftK)
+    : Math.max(1.5, (0.55 * tCohMelt + 0.45 * Math.min(tCohMelt * 1.8, tLindemann)) - 0.15 * zpeMeltShiftK);
+  const meltingPointK = Math.max(1.0, Math.min(4200, baseMeltK));
   // Trouton + cohesive boiling point (clamped strictly above meltingPointK)
   const enthalpyVaporizationJPerMol = Math.max(1500, eCohJ * AVOGADRO * (bulkResult.crystalStructure === 'vdw-fcc' ? 0.92 : 0.88));
   const boilingPointK = Math.max(meltingPointK * 1.15 + 2, enthalpyVaporizationJPerMol / 88.0);

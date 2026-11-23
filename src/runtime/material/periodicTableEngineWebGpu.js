@@ -98,20 +98,26 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     ? await solveNuclearStructureWebGpu(device, Z, massNumberA, { volDim: nuclearVolDim })
     : deriveNuclearClosure(Z, massNumberA);
 
-  // Stage P1.2: 100% GPU-Resident Finite-Nucleus Relativistic Atomic DFT
+  // Stage P1.2: 100% GPU-Resident Finite-Nucleus Relativistic Atomic DFT (+ reduced-mass & hyperfine)
   const atom = await solveAtomFullWebGpu(device, Z, {
     functional: 'pbe',
     spinOrbit: true,
     scalarRelativistic: true,
     nuclearChargeRadiusBohr: nuclear.chargeRadiusBohr,
+    nuclearMassU: nuclear.atomicMassU,
+    nuclearSpinI: nuclear.spinI,
+    nuclearMagneticMomentMuN: nuclear.magneticMomentMuN,
     gridPointsN: 256,
     rMinBohr: Math.min(1e-4, Math.max(1e-5, nuclear.chargeRadiusBohr * 0.5)),
     maxScf: atomicMaxScf,
     returnRadialDensity: true
   });
 
-  // Stage P1.3a: GPU Periodic Plane-Wave Bulk Solid DFT + 3D Bloch Density
-  const bulk = await solveBulkCrystalWebGpu(device, Z, atom, { densityGridN: blochGridN });
+  // Stage P1.3a: GPU Periodic Plane-Wave Bulk Solid DFT + 3D Bloch Density (isotope mass propagated!)
+  const bulk = await solveBulkCrystalWebGpu(device, Z, atom, {
+    densityGridN: blochGridN,
+    atomicMassU: nuclear.atomicMassU
+  });
 
   // Stage P1.3b: Electromagnetic, Magnetic, Electrical, Dielectric & Optical Closures
   const em = await deriveElectromagneticClosureWebGpu(device, {
@@ -121,9 +127,10 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     temperatureK
   });
 
-  // Stage P1.4: Quasi-Harmonic Phonons + Representative WebGPU MD Thermodynamics
+  // Stage P1.4: Quasi-Harmonic Phonons + Representative WebGPU MD Thermodynamics (isotope mass propagated!)
   const thermo = await deriveElementThermodynamicsWebGpu(device, {
     Z,
+    atomicMassU: nuclear.atomicMassU,
     bulkResult: bulk,
     emResult: em,
     temperatureK,
@@ -137,10 +144,13 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       ? ULG_ACCURACY_TIERS.TIER_1_QUANTITATIVE
       : ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE);
 
+  const resolvedMaterialKey = massNumberA != null ? nuclear.isotope : symbol;
   const bundle = createMaterialPropertyBundle({
-    materialKey: symbol,
+    materialKey: resolvedMaterialKey,
     symbol,
     atomicNumber: Z,
+    massNumberA: nuclear.A,
+    isotope: nuclear.isotope,
     family: 'element',
     accuracyTier,
     generatorFingerprint: ULG_PERIODIC_TABLE_ENGINE_FINGERPRINT,
@@ -176,6 +186,9 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       unpairedElectrons: unpairedElectronCount(Z),
       totalEnergyHa: atom.totalEnergyHa,
       qedRadiativeShiftHa: atom.qedRadiativeShiftHa ?? 0,
+      reducedMassFactor: atom.reducedMassFactor ?? 1,
+      isotopeMassShiftHa: atom.isotopeMassShiftHa ?? 0,
+      hyperfineSplittingHz: atom.hyperfineSplittingHz ?? 0,
       finiteNucleusUsed: Boolean(atom.finiteNucleusUsed),
       relativisticMethod: atom.relativisticMethod,
       resolverStatus: atom.resolverStatus,

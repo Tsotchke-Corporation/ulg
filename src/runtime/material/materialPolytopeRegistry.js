@@ -22,6 +22,20 @@ export const COMPOUND_POLYTOPE_SCHEMA =
 export const CRYSTAL_STRUCTURE_POLYTOPE_SCHEMA =
   'peercompute.ulg.material-polytope.crystal-structure.v0';
 
+/**
+ * Canonical registry key for an element, isotope `(Z / symbol, A)`, or
+ * isotopologue formula (`H2O`, `D2O`, `235UF6`, `Fe-56`, etc.).
+ * Preserves backward compatibility when `massNumberA` is null/omitted.
+ */
+export function canonicalMaterialIsotopeKey(materialKey, massNumberA = null) {
+  const base = String(materialKey || '').trim().toLowerCase();
+  if (!base) return '';
+  if (massNumberA == null || !Number.isFinite(Number(massNumberA))) return base;
+  const A = Math.max(1, Math.trunc(Number(massNumberA)));
+  if (new RegExp(`-${A}$`).test(base)) return base;
+  return `${base}-${A}`;
+}
+
 function fnv1aHex(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i += 1) {
@@ -231,8 +245,8 @@ export function createMaterialPolytopeRegistry() {
   const polytopesById = new Map();
   const fitsByPolytopeId = new Map();
 
-  function registerMaterialPolytopes(materialKey, polytopeList) {
-    const key = String(materialKey || '').trim().toLowerCase();
+  function registerMaterialPolytopes(materialKey, polytopeList, { massNumberA = null } = {}) {
+    const key = canonicalMaterialIsotopeKey(materialKey, massNumberA);
     const frozen = Object.freeze([...polytopeList]);
     const prev = polytopesByMaterial.get(key) || [];
     for (const old of prev) {
@@ -256,6 +270,7 @@ export function createMaterialPolytopeRegistry() {
 
   function discoverMaterialPolytopes({
     materialKey,
+    massNumberA = null,
     family = 'element',
     meltingPointK = null,
     boilingPointK = null,
@@ -270,8 +285,11 @@ export function createMaterialPolytopeRegistry() {
     crystalStructure = null,
     provenance = {}
   } = {}) {
-    const key = String(materialKey || '').trim();
-    if (!key) throw new TypeError('discoverMaterialPolytopes requires a non-empty materialKey');
+    const rawKey = String(materialKey || '').trim();
+    if (!rawKey) throw new TypeError('discoverMaterialPolytopes requires a non-empty materialKey');
+    const key = massNumberA != null && Number.isFinite(Number(massNumberA))
+      ? `${rawKey}-${Math.max(1, Math.trunc(Number(massNumberA)))}`
+      : rawKey;
     const schema = crystalStructure
       ? CRYSTAL_STRUCTURE_POLYTOPE_SCHEMA
       : family === 'compound'
@@ -403,8 +421,8 @@ export function createMaterialPolytopeRegistry() {
     return registerMaterialPolytopes(key, discovered);
   }
 
-  function resolveState(materialKey, { temperatureK, pressurePa = 101325, closureHash = null } = {}) {
-    const list = polytopesByMaterial.get(String(materialKey || '').toLowerCase()) || [];
+  function resolveState(materialKey, { temperatureK, pressurePa = 101325, closureHash = null, massNumberA = null } = {}) {
+    const list = polytopesByMaterial.get(canonicalMaterialIsotopeKey(materialKey, massNumberA)) || [];
     let best = null;
     for (const polytope of list) {
       if (closureHash && polytope.closureHash !== closureHash) continue;
@@ -448,8 +466,8 @@ export function createMaterialPolytopeRegistry() {
     return record;
   }
 
-  function packMaterialAtlasGpu(materialKey, { materialIndex = 0 } = {}) {
-    const list = polytopesByMaterial.get(String(materialKey || '').toLowerCase()) || [];
+  function packMaterialAtlasGpu(materialKey, { materialIndex = 0, massNumberA = null } = {}) {
+    const list = polytopesByMaterial.get(canonicalMaterialIsotopeKey(materialKey, massNumberA)) || [];
     const hydrated = list.map((p) => ({
       ...p,
       fit: fitsByPolytopeId.get(p.polytopeId) ?? p.fit ?? null
@@ -492,7 +510,8 @@ export function createMaterialPolytopeRegistry() {
     registerResponseFit,
     packMaterialAtlasGpu,
     exportPolytopeAtlas,
-    getPolytopes: (materialKey) => polytopesByMaterial.get(String(materialKey || '').toLowerCase()) || Object.freeze([]),
+    getPolytopes: (materialKey, { massNumberA = null } = {}) =>
+      polytopesByMaterial.get(canonicalMaterialIsotopeKey(materialKey, massNumberA)) || Object.freeze([]),
     snapshot
   });
 }

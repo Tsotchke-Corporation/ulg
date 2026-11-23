@@ -11,6 +11,10 @@
  */
 
 import { spectralResponseToSrgb } from './opticalClosure.js';
+import { deriveNuclearClosure } from '../nuclear/nuclearStructureGpu.js';
+import { ELEMENT_SYMBOLS, symbolForZ } from '../electronicStructure/periodicTable.js';
+
+const Z_BY_SYMBOL_LOWER = new Map(ELEMENT_SYMBOLS.map((s, idx) => [s.toLowerCase(), idx + 1]));
 
 export const ULG_ISOTOPE_INVENTORY_SCHEMA = 'peercompute.ulg.isotope-inventory-ledger.v1';
 export const ULG_NUCLEAR_CHANNEL_ABI_SCHEMA = 'peercompute.ulg.nuclear-channel-rows.v1';
@@ -53,6 +57,151 @@ export const NUCLEAR_DECAY_CHANNELS = Object.freeze({
     alphaFraction: 0.0, betaFraction: 1.0, gammaFraction: 0.0, localDepositionFraction: 0.31
   })
 });
+
+function parseNuclideLabel(label) {
+  if (typeof label !== 'string') return null;
+  const s = label.trim();
+  const m1 = /^([A-Za-z]{1,2})-(\d{1,3})$/.exec(s);
+  if (m1) {
+    const Z = Z_BY_SYMBOL_LOWER.get(m1[1].toLowerCase());
+    const A = Math.trunc(Number(m1[2]));
+    if (Z && A >= Z && A <= 320) return { Z, A };
+  }
+  const m2 = /^(\d{1,3})([A-Za-z]{1,2})$/.exec(s);
+  if (m2) {
+    const Z = Z_BY_SYMBOL_LOWER.get(m2[2].toLowerCase());
+    const A = Math.trunc(Number(m2[1]));
+    if (Z && A >= Z && A <= 320) return { Z, A };
+  }
+  return null;
+}
+
+/**
+ * Resolve a conserved nuclear decay channel for ANY nuclide `(Z, A)` across the
+ * full periodic table (`Z = 1..118, A = 1..300`) by delegating directly to
+ * Gate 1's first-principles `deriveNuclearClosure(Z, A)` (preserving exact
+ * reference constants for the 4 Phase-8 benchmark isotopes when matched).
+ */
+export function resolveNuclearDecayChannel(isotopeOrZ, optionalA = null, { channels = NUCLEAR_DECAY_CHANNELS } = {}) {
+  if (typeof isotopeOrZ === 'string' && channels?.[isotopeOrZ]) {
+    return channels[isotopeOrZ];
+  }
+  let Z = null;
+  let A = null;
+  if (typeof isotopeOrZ === 'string') {
+    const parsed = parseNuclideLabel(isotopeOrZ);
+    if (!parsed) return null;
+    Z = parsed.Z;
+    A = parsed.A;
+  } else {
+    Z = Math.trunc(Number(isotopeOrZ));
+    A = Math.trunc(Number(optionalA));
+  }
+  if (!(Z >= 1 && Z <= 118 && A >= Z && A <= 320)) return null;
+  const label = `${symbolForZ(Z)}-${A}`;
+  if (channels?.[label]) return channels[label];
+
+  const nuc = deriveNuclearClosure(Z, A);
+  if (nuc.dominantMode === 'stable' || !Number.isFinite(nuc.log10HalfLifeS)) {
+    return Object.freeze({
+      isotope: label,
+      Z,
+      A,
+      mode: 'stable',
+      naturallyAbundant: true,
+      daughterIsotope: label,
+      daughterZ: Z,
+      daughterA: A,
+      emittedZ: 0,
+      emittedA: 0,
+      halfLifeS: Infinity,
+      qValueMeV: 0,
+      alphaFraction: 0,
+      betaFraction: 0,
+      gammaFraction: 0,
+      localDepositionFraction: 0,
+      derivedFromGate1Nuclear: true
+    });
+  }
+  const mode = nuc.dominantMode;
+  const halfLifeS = Math.pow(10, Math.min(30, Math.max(-12, nuc.log10HalfLifeS)));
+  const daughterZ = nuc.daughterZ;
+  const daughterA = nuc.daughterA;
+  const emittedZ = Z - daughterZ;
+  const emittedA = A - daughterA;
+  const daughterIsotope = daughterZ >= 1 && daughterZ <= 118
+    ? `${symbolForZ(daughterZ)}-${daughterA}`
+    : `Z${daughterZ}-${daughterA}`;
+  const isBetaPlusOrEc = mode === 'beta-plus' || mode === 'electron-capture';
+  const qValueMeV = Math.max(0.01,
+    mode === 'alpha' ? nuc.qAlphaMeV
+      : mode === 'beta-minus' ? nuc.qBetaMinusMeV
+        : isBetaPlusOrEc ? nuc.qElectronCaptureMeV
+          : 180.0 // spontaneous fission Q ~ 180 MeV
+  );
+  const alphaFraction = mode === 'alpha' ? 0.98 : (mode === 'spontaneous-fission' ? 0.85 : 0.0);
+  const betaFraction = (mode === 'beta-minus' || isBetaPlusOrEc) ? 0.45 : (mode === 'spontaneous-fission' ? 0.05 : 0.0);
+  const gammaFraction = Math.max(0, 1 - alphaFraction - betaFraction);
+  const localDepositionFraction = mode === 'alpha' || mode === 'spontaneous-fission' ? 0.96 : 0.50;
+
+  const ch = Object.freeze({
+    isotope: label,
+    Z,
+    A,
+    mode,
+    naturallyAbundant: halfLifeS > 1e16,
+    daughterIsotope,
+    daughterZ,
+    daughterA,
+    emittedZ,
+    emittedA,
+    halfLifeS,
+    qValueMeV,
+    alphaFraction,
+    betaFraction,
+    gammaFraction,
+    localDepositionFraction,
+    derivedFromGate1Nuclear: true
+  });
+  validateChannelConservation(ch);
+  return ch;
+}
+
+/**
+ * Trace the full multi-step radioactive decay chain from any `(Z, A)` down to
+ * a stable (or long-lived) endpoint with exact charge & nucleon conservation
+ * verified at every transition!
+ */
+export function deriveNuclearDecayChain(Z, A, { maxDepth = 20, channels = NUCLEAR_DECAY_CHANNELS } = {}) {
+  const steps = [];
+  let curZ = Math.trunc(Number(Z));
+  let curA = Math.trunc(Number(A));
+  const visited = new Set();
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const key = `${curZ}-${curA}`;
+    if (visited.has(key)) break;
+    visited.add(key);
+    const ch = resolveNuclearDecayChannel(curZ, curA, { channels });
+    if (!ch || ch.mode === 'stable' || !Number.isFinite(ch.halfLifeS)) {
+      break;
+    }
+    validateChannelConservation(ch);
+    steps.push(ch);
+    if (ch.mode === 'spontaneous-fission' || ch.daughterZ < 1 || ch.daughterZ > 118) break;
+    curZ = ch.daughterZ;
+    curA = ch.daughterA;
+  }
+  const endNuclide = curZ >= 1 && curZ <= 118 ? `${symbolForZ(curZ)}-${curA}` : `Z${curZ}-${curA}`;
+  const totalEnergyMeV = steps.reduce((acc, s) => acc + (Number(s.qValueMeV) || 0), 0);
+  return Object.freeze({
+    startIsotope: `${symbolForZ(Math.trunc(Z))}-${Math.trunc(A)}`,
+    endIsotope: endNuclide,
+    terminalIsotope: endNuclide,
+    stepCount: steps.length,
+    totalEnergyMeV,
+    steps: Object.freeze(steps)
+  });
+}
 
 function validateChannelConservation(ch) {
   if (ch.Z !== ch.daughterZ + ch.emittedZ) {
@@ -116,12 +265,12 @@ export function stepIsotopeInventoryLedger(inventory, dtS, { channels = NUCLEAR_
 
   for (const entry of inventory || []) {
     const count = Math.max(0, Number(entry.atomCount) || 0);
-    const ch = channels[entry.isotope] || null;
+    const ch = channels[entry.isotope] || resolveNuclearDecayChannel(entry.isotope, null, { channels }) || null;
     const A = entry.A ?? ch?.A ?? 0;
     initialNucleons += count * A;
     nuclideMassNumbers.set(entry.isotope, A);
 
-    if (!ch || !(ch.halfLifeS > 0) || dt === 0 || count === 0) {
+    if (!ch || ch.mode === 'stable' || !Number.isFinite(ch.halfLifeS) || !(ch.halfLifeS > 0) || dt === 0 || count === 0) {
       nextCounts.set(entry.isotope, (nextCounts.get(entry.isotope) || 0) + count);
       continue;
     }

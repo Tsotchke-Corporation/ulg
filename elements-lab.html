@@ -97,23 +97,30 @@
 
       <aside class="sidebar">
         <div class="card">
-          <h3>Periodic Table (Z = 1..118)</h3>
-          <div class="row" style="margin-bottom:8px;">
-            <input id="z-input" type="number" min="1" max="118" value="26" style="width:74px;" />
-            <button id="solve-z-btn" class="action">Solve on WebGPU</button>
+          <h3>Periodic Table &amp; Isotopes (Z = 1..118, A)</h3>
+          <div class="row" style="margin-bottom:6px;">
+            <label style="font-size:11px;color:var(--muted);">Z</label>
+            <input id="z-input" type="number" min="1" max="118" value="26" style="width:58px;" />
+            <label style="font-size:11px;color:var(--muted);">A</label>
+            <input id="a-input" type="number" min="1" max="310" placeholder="A*" title="Mass number A (leave empty for valley of stability A*)" style="width:62px;" />
+            <button id="reset-a-btn" class="action" title="Reset to valley-of-stability mass number A*" style="padding:5px 7px;">A*</button>
+            <button id="solve-z-btn" class="action">Solve</button>
+          </div>
+          <div class="row" style="margin-bottom:8px;justify-content:space-between;">
             <span id="status-badge" class="badge">booting…</span>
+            <span style="font-size:10px;color:var(--muted);">Click Chart of Nuclides to pick (Z, A)</span>
           </div>
           <div id="pt-grid" class="pt-grid"></div>
         </div>
 
         <div class="card">
-          <h3>Reaction → Compound Feedback (Gate 2)</h3>
+          <h3>Reaction → Compound &amp; Isotopologue (Gate 2)</h3>
           <div class="row">
-            <input id="compound-input" type="text" value="H2O" placeholder="e.g. H2O, NaCl, CsF, NaOH" style="flex:1;" />
+            <input id="compound-input" type="text" value="H2O" placeholder="e.g. H2O, D2O, 235UF6, NaCl" style="flex:1;" />
             <button id="solve-compound-btn" class="action">Derive</button>
           </div>
           <div style="font-size:11px;color:var(--muted);margin-top:6px;">
-            Feeds any reaction product back through GPU Molecular RHF / Ionic Crystal DFT + Optics + MD → Convex Polytope Atlas.
+            Feeds any compound or isotopologue (<code>D2O</code>, <code>T2O</code>, <code>235UF6</code>, <code>14CO2</code>) back through GPU Molecular RHF / Crystal DFT + ZPE MD → Polytope Atlas.
           </div>
         </div>
 

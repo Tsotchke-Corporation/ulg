@@ -4,6 +4,8 @@
 // directly from live WebGPU solver outputs!
 
 import { ELEMENT_SYMBOLS, symbolForZ } from '../runtime/electronicStructure/periodicTable.js';
+import { mostStableMassNumberForZ } from '../runtime/nuclear/nuclearStructureGpu.js';
+import { deriveNuclearDecayChain } from '../runtime/material/nuclearCherenkovClosure.js';
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
 import { deriveCompoundBundleWebGpu } from '../runtime/material/recursiveCompoundPipeline.js';
 import { buildMaterialPolytopeAtlasWebGpu } from '../runtime/material/polytopeAtlasBuilder.js';
@@ -17,6 +19,8 @@ const plot1 = document.getElementById('plot1');
 const plot2 = document.getElementById('plot2');
 const ptGrid = document.getElementById('pt-grid');
 const zInput = document.getElementById('z-input');
+const aInput = document.getElementById('a-input');
+const resetABtn = document.getElementById('reset-a-btn');
 const solveZBtn = document.getElementById('solve-z-btn');
 const compoundInput = document.getElementById('compound-input');
 const solveCompoundBtn = document.getElementById('solve-compound-btn');
@@ -31,7 +35,9 @@ let currentTab = 'nuclear';
 let currentElementRes = null;
 let currentCompoundRes = null;
 let currentAtlas = null;
+let currentDecayChain = null;
 let selectedZ = 26;
+let selectedA = null; // null => valley-of-stability A*
 let liveMdSession = null;
 let liveMdState = null;
 let liveMdBusy = false;
@@ -47,8 +53,10 @@ function buildPeriodicTableButtons() {
     btn.innerHTML = `<small>${Z}</small>${ELEMENT_SYMBOLS[Z - 1]}`;
     btn.addEventListener('click', () => {
       selectedZ = Z;
+      selectedA = null;
       zInput.value = String(Z);
-      runElementDerivation(Z);
+      aInput.value = String(mostStableMassNumberForZ(Z));
+      runElementDerivation(Z, null);
     });
     ptGrid.appendChild(btn);
   }
@@ -66,14 +74,23 @@ function fmt(val, digits = 3) {
   return val.toFixed(digits);
 }
 
-function renderBundleCard(bundle) {
+function renderBundleCard(bundle, decayChain = null) {
+  const nucSpin = bundle.nuclear.dominantMode
+    ? `${bundle.nuclear.spinI}${bundle.nuclear.parity} (μ=${fmt(bundle.nuclear.magneticMomentMuN, 2)} μ_N) · ${bundle.nuclear.dominantMode}`
+    : `M=${fmt(bundle.nuclear.molarMassU, 3)} u`;
+  const decaySummary = decayChain && decayChain.steps?.length > 0
+    ? `${decayChain.steps.slice(0, 3).map((s) => `${s.isotope}→${s.daughterIsotope}(${s.mode})`).join(' → ')}${decayChain.steps.length > 3 ? ` …→${decayChain.endIsotope}` : ''}`
+    : (bundle.nuclear.dominantMode === 'stable' ? 'Stable (no decay chain)' : '—');
+  const hfsVal = bundle.atomic?.hyperfineSplittingHz;
   const rows = [
     ['Material / Family', `${bundle.materialKey} (${bundle.family})`],
     ['Accuracy Tier', bundle.accuracyTier],
     ['Closure Hash', bundle.closureHash],
-    ['Nuclear', bundle.nuclear.isotope ? `${bundle.nuclear.isotope} · B/A=${fmt(bundle.nuclear.bindingPerNucleonMeV, 2)} MeV · R=${fmt(bundle.nuclear.chargeRadiusFm, 2)} fm` : `Z=${bundle.nuclear.totalProtonsZ}, A=${bundle.nuclear.totalNucleonsA}`],
-    ['Nuclear Spin / Mode', bundle.nuclear.dominantMode ? `${bundle.nuclear.spinI}${bundle.nuclear.parity} · ${bundle.nuclear.dominantMode}` : `M=${fmt(bundle.nuclear.molarMassU, 2)} u`],
+    ['Nuclear', bundle.nuclear.isotope ? `${bundle.nuclear.isotope} (M=${fmt(bundle.nuclear.atomicMassU, 3)} u) · B/A=${fmt(bundle.nuclear.bindingPerNucleonMeV, 2)} MeV · R=${fmt(bundle.nuclear.chargeRadiusFm, 2)} fm` : `Z=${bundle.nuclear.totalProtonsZ}, A=${bundle.nuclear.totalNucleonsA}`],
+    ['Spin / Mode', nucSpin],
+    ...(decayChain ? [['Decay Chain', decaySummary]] : []),
     ['Atomic Energy', `${fmt(bundle.atomic.totalEnergyHa, 2)} Ha (readbacks/SCF: ${bundle.atomic.perScfCpuReadbacks ?? 0})`],
+    ...(Number.isFinite(hfsVal) ? [['Isotope HFS / NMS', `${fmt(hfsVal * 1e-6, 2)} MHz · ΔE=${fmt(bundle.atomic.isotopeMassShiftHa, 2)} Ha`]] : []),
     ['Crystal / Density', `${bundle.mechanical.crystalStructure} · ${fmt(bundle.mechanical.densityKgPerM3, 0)} kg/m³`],
     ['Moduli / Debye', `K=${fmt(bundle.mechanical.bulkModulusPa * 1e-9, 1)} GPa · Θ_D=${fmt(bundle.mechanical.debyeTemperatureK, 0)} K`],
     ['EM / Band Gap', `${bundle.electromagnetic.isMetal ? 'Metal' : `Gap ${fmt(bundle.electromagnetic.bandGapEv, 2)} eV`} · σ=${fmt(bundle.electromagnetic.electricalConductivitySPerM)} S/m`],
@@ -551,12 +568,17 @@ function tickLiveMd() {
   requestAnimationFrame(tickLiveMd);
 }
 
-async function runElementDerivation(Z) {
+async function runElementDerivation(Z, massNumberA = null) {
   if (!gpuDevice) return;
-  statusBadge.textContent = `Solving ${symbolForZ(Z)} (Z=${Z})…`;
+  const resolvedA = massNumberA != null && Number.isFinite(Number(massNumberA))
+    ? Math.max(Z, Math.min(310, Math.trunc(Number(massNumberA))))
+    : null;
+  const label = resolvedA != null ? `${symbolForZ(Z)}-${resolvedA}` : `${symbolForZ(Z)} (Z=${Z})`;
+  statusBadge.textContent = `Solving ${label}…`;
   updateActiveElementButton();
   try {
     currentElementRes = await deriveElementBundleWebGpu(gpuDevice, Z, {
+      massNumberA: resolvedA,
       runNuclearGpuVolume: true,
       runLiveMd: true,
       mdSteps: 16,
@@ -564,18 +586,24 @@ async function runElementDerivation(Z) {
       nuclearVolDim: 24,
       blochGridN: 16
     });
+    const actualA = currentElementRes.bundle.nuclear.A;
+    if (aInput) aInput.value = String(actualA);
+    currentDecayChain = deriveNuclearDecayChain(Z, actualA, { maxDepth: 12 });
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentElementRes.bundle, {
       degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 1, materialIndex: Z
     });
     initLiveMdForElement(currentElementRes);
-    renderBundleCard(currentElementRes.bundle);
+    renderBundleCard(currentElementRes.bundle, currentDecayChain);
     renderG7Card(currentElementRes.bundle, currentElementRes.g7Advisory);
-    statusBadge.textContent = `${symbolForZ(Z)} · WebGPU OK`;
+    statusBadge.textContent = `${currentElementRes.bundle.nuclear.isotope} · WebGPU OK`;
     redrawCurrentTab();
     window.__ulgElementsLabState = {
       mode: 'element',
       Z,
+      A: actualA,
+      isotope: currentElementRes.bundle.nuclear.isotope,
       bundle: currentElementRes.bundle,
+      decayChain: currentDecayChain,
       atlasPolytopeCount: currentAtlas.polytopeCount,
       g7Advisory: currentElementRes.g7Advisory
     };
@@ -628,8 +656,37 @@ async function boot() {
   }
   solveZBtn.addEventListener('click', () => {
     const z = Math.max(1, Math.min(118, Math.trunc(Number(zInput.value) || 26)));
+    const aRaw = aInput?.value?.trim();
+    const parsedA = aRaw ? Math.trunc(Number(aRaw)) : null;
     selectedZ = z;
-    runElementDerivation(z);
+    selectedA = parsedA && parsedA >= z && parsedA <= 310 ? parsedA : null;
+    runElementDerivation(z, selectedA);
+  });
+  if (resetABtn) {
+    resetABtn.addEventListener('click', () => {
+      const z = Math.max(1, Math.min(118, Math.trunc(Number(zInput.value) || selectedZ)));
+      selectedZ = z;
+      selectedA = null;
+      if (aInput) aInput.value = String(mostStableMassNumberForZ(z));
+      runElementDerivation(z, null);
+    });
+  }
+  plot1.style.cursor = 'crosshair';
+  plot1.addEventListener('click', (ev) => {
+    if (currentTab !== 'nuclear' || !currentElementRes?.visualData?.nuclear?.chartDims) return;
+    const rect = plot1.getBoundingClientRect();
+    const cx = ((ev.clientX - rect.left) / Math.max(1, rect.width)) * plot1.width;
+    const cy = ((ev.clientY - rect.top) / Math.max(1, rect.height)) * plot1.height;
+    const { maxZ, maxN } = currentElementRes.visualData.nuclear.chartDims;
+    const nClick = Math.round(((cx - 12) / Math.max(1, plot1.width - 24)) * maxN);
+    const zClick = Math.round(((plot1.height - 12 - cy) / Math.max(1, plot1.height - 24)) * maxZ);
+    if (zClick >= 1 && zClick <= maxZ && nClick >= 0 && nClick < maxN) {
+      selectedZ = zClick;
+      selectedA = zClick + nClick;
+      zInput.value = String(selectedZ);
+      if (aInput) aInput.value = String(selectedA);
+      runElementDerivation(selectedZ, selectedA);
+    }
   });
   solveCompoundBtn.addEventListener('click', () => {
     runCompoundDerivation(compoundInput.value || 'H2O');
@@ -648,9 +705,15 @@ async function boot() {
   gpuDevice.addEventListener('uncapturederror', (e) => console.error('WebGPU error:', e.error));
   const params = new URLSearchParams(window.location.search);
   const startZ = Math.max(1, Math.min(118, Math.trunc(Number(params.get('z')) || 26)));
+  const startAParam = params.get('a');
+  const startA = startAParam && Number.isFinite(Number(startAParam))
+    ? Math.max(startZ, Math.min(310, Math.trunc(Number(startAParam))))
+    : null;
   selectedZ = startZ;
+  selectedA = startA;
   zInput.value = String(startZ);
-  await runElementDerivation(startZ);
+  if (aInput) aInput.value = String(startA ?? mostStableMassNumberForZ(startZ));
+  await runElementDerivation(startZ, startA);
   requestAnimationFrame(tickLiveMd);
 }
 

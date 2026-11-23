@@ -8,7 +8,7 @@
 // Closure -> WebGPU MD/QHA Thermodynamics) to produce a full validated
 // `ulg.material-property-bundle.v1` with ZERO hardcoded compound tables!
 
-import { describeChemicalFormula } from '../chemistry/formula.js';
+import { describeIsotopologueFormula } from '../chemistry/formula.js';
 import {
   ATOMIC_MASS_U,
   electronConfiguration,
@@ -77,7 +77,7 @@ function mullikenElectronegativity(Z) {
  * to seed GPU RHF (`solveMoleculeRhfWebGpu`).
  */
 export function buildMolecularSeedGeometryBohr(formula) {
-  const desc = describeChemicalFormula(formula);
+  const desc = describeIsotopologueFormula(formula);
   const entries = desc.elements.map((e) => ({ sym: e.symbol, Z: e.Z, count: e.count }));
   if (entries.length === 0) throw new RangeError(`Cannot parse formula: ${formula}`);
 
@@ -134,37 +134,51 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   reactionContext = null
 } = {}) {
   const cleanFormula = String(formula || '').trim();
-  const desc = describeChemicalFormula(cleanFormula);
+  const desc = describeIsotopologueFormula(cleanFormula);
   const species = desc.elements.map((e) => ({ sym: e.symbol, Z: e.Z, count: e.count }));
+  const sites = desc.sites;
   const counts = Object.fromEntries(species.map((s) => [s.sym, s.count]));
   if (species.length === 0) {
     throw new RangeError(`Invalid compound formula: ${formula}`);
   }
 
-  // ---- Layer 0 (Nuclear Composition & Exact Nucleon/Charge Conservation) ----
+  // ---- Layer 0 (Isotope-Resolved Nuclear Composition & Exact Nucleon/Charge Conservation) ----
   let totalZ = 0;
   let totalA = 0;
   let totalBindingMeV = 0;
   let molarMassU = 0;
+  let naturalMolarMassU = 0;
   let maxRadiusFm = 0;
   let allNonMetal = true;
   let minEn = Infinity;
   let maxEn = -Infinity;
   let totalAtoms = 0;
 
-  for (const sp of species) {
-    const nuc = deriveNuclearClosure(sp.Z);
-    totalZ += sp.Z * sp.count;
-    totalA += nuc.A * sp.count;
-    totalBindingMeV += nuc.bindingEnergyMeV * sp.count;
-    molarMassU += (ATOMIC_MASS_U[sp.Z - 1] || nuc.atomicMassU) * sp.count;
+  for (const site of sites) {
+    const nuc = deriveNuclearClosure(site.Z, site.A);
+    totalZ += site.Z * site.count;
+    totalA += nuc.A * site.count;
+    totalBindingMeV += nuc.bindingEnergyMeV * site.count;
+    molarMassU += site.atomicMassU * site.count;
+    naturalMolarMassU += (ATOMIC_MASS_U[site.Z - 1] || nuc.atomicMassU) * site.count;
     maxRadiusFm = Math.max(maxRadiusFm, nuc.chargeRadiusFm);
-    totalAtoms += sp.count;
-    if (!NONMETAL_Z.has(sp.Z)) allNonMetal = false;
-    const en = mullikenElectronegativity(sp.Z);
+    totalAtoms += site.count;
+    if (!NONMETAL_Z.has(site.Z)) allNonMetal = false;
+    const en = mullikenElectronegativity(site.Z);
     if (en < minEn) minEn = en;
     if (en > maxEn) maxEn = en;
   }
+  const isotopeMassRatio = molarMassU / Math.max(1e-6, naturalMolarMassU);
+  // Hydrogen-site zero-point mass ratio (drives exact H-bond / vibrational kinetic isotope effects, e.g. D2O vs H2O!)
+  let hMassNum = 0;
+  let hCount = 0;
+  for (const site of sites) {
+    if (site.Z === 1) {
+      hMassNum += site.atomicMassU * site.count;
+      hCount += site.count;
+    }
+  }
+  const meanHydrogenMassU = hCount > 0 ? hMassNum / hCount : ATOMIC_MASS_U[0];
   const deltaEn = Math.max(0, maxEn - minEn);
   const paulingIonicity = 1 - Math.exp(-0.25 * deltaEn * deltaEn);
   const isIonicSolid = !allNonMetal && paulingIonicity >= 0.30;
@@ -220,8 +234,14 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     crystalStructure = bestProto.id;
     spaceGroup = bestProto.spaceGroup;
     cohesiveEnergyEv = Math.max(1.8, Math.min(14.0, Math.abs(bestE) / EV_TO_J));
-    const volFormulaM3 = Math.max(1.5e-29, (4 * Math.PI / 3) * (rSumM * 0.52) ** 3 * totalAtoms / bestProto.packing);
-    densityKgPerM3 = Math.max(600, Math.min(14000, molMassKg / volFormulaM3));
+    const volFormulaM3 = Math.max(
+      1.5e-29,
+      species.reduce(
+        (acc, sp) => acc + (4 * Math.PI / 3) * (shellRadiusBohr(sp.Z) * BOHR_TO_M * 1.12) ** 3 * sp.count,
+        0
+      ) / bestProto.packing
+    );
+    densityKgPerM3 = Math.max(600, Math.min(24000, molMassKg / volFormulaM3));
     latticeConstantA = Math.cbrt(volFormulaM3 * 4) * 1e10;
     // Born-Landé bulk modulus K = (n_born - 1) * |E_lat| / (9 * V)
     bulkModulusPa = Math.max(8e9, (8 * Math.abs(bestE)) / (9 * volFormulaM3));
@@ -252,8 +272,14 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     const hasH = Boolean(counts.H);
     const hasNOF = Boolean(counts.N || counts.O || counts.F);
     const hBondEv = (hasH && hasNOF) ? 0.21 * Math.min(counts.H, 2 * ((counts.N || 0) + (counts.O || 0) + (counts.F || 0))) : 0;
-    const vdwEv = 0.012 * Math.pow(molarMassU, 0.72) + 0.045 * dipole * dipole;
-    cohesiveEnergyEv = Math.max(0.01, vdwEv + hBondEv);
+    // Quantum zero-point vibrational energy scales as omega_vib ~ 1/sqrt(m_H):
+    // heavier isotopes (D, T) have lower zero-point vibrational softening -> stronger effective
+    // H-bond cohesion and higher melting/boiling points (e.g. D2O > H2O) + smaller ZPE volume!
+    const zpeHShiftEv = hBondEv > 0
+      ? hBondEv * 0.095 * (1 - Math.sqrt(ATOMIC_MASS_U[0] / Math.max(0.5, meanHydrogenMassU)))
+      : 0;
+    const vdwEv = 0.012 * Math.pow(naturalMolarMassU, 0.72) + 0.045 * dipole * dipole;
+    cohesiveEnergyEv = Math.max(0.01, vdwEv + hBondEv + zpeHShiftEv);
     const rMolM = Math.max(1.3e-10, species.reduce((acc, sp) => acc + (shellRadiusBohr(sp.Z) * BOHR_TO_M) ** 3 * sp.count, 0) ** (1 / 3) * 1.65);
     const volMolM3 = (4 * Math.PI / 3) * (rMolM ** 3) / 0.56;
     densityKgPerM3 = Math.max(40, Math.min(4500, molMassKg / Math.max(1e-29, volMolM3)));
@@ -262,7 +288,7 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     shearModulusPa = temperatureK < meltingPointK ? 0.35 * bulkModulusPa : 0;
     meltingPointK = Math.max(12, Math.min(600, 460 * cohesiveEnergyEv + 12));
     boilingPointK = Math.max(meltingPointK * 1.2 + 5, (cohesiveEnergyEv * EV_TO_J * AVOGADRO) / 96.0);
-    debyeTempK = Math.max(60, Math.min(450, meltingPointK * 0.9));
+    debyeTempK = Math.max(60, Math.min(450, (meltingPointK * 0.9) / Math.sqrt(Math.max(0.2, isotopeMassRatio))));
   }
 
   // GPU Optics via shared opticalResolverWebGpu
@@ -315,8 +341,11 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   const boilingSlopeKPerLogP = Math.max(8, Math.min(600, (R_GAS * boilingPointK * boilingPointK * Math.LN10) / enthalpyVapJPerMol));
 
   const bundle = createMaterialPropertyBundle({
-    materialKey: cleanFormula,
+    materialKey: desc.canonicalIsotopologue,
     formula: cleanFormula,
+    canonicalFormula: desc.canonicalFormula,
+    canonicalIsotopologue: desc.canonicalIsotopologue,
+    hasExplicitIsotopes: desc.hasExplicitIsotopes,
     family: 'compound',
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
     generatorFingerprint: ULG_RECURSIVE_COMPOUND_FINGERPRINT,
@@ -324,9 +353,11 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       totalProtonsZ: totalZ,
       totalNucleonsA: totalA,
       molarMassU,
+      isotopeMassRatio,
       totalBindingEnergyMeV: totalBindingMeV,
       maxNuclearRadiusFm: maxRadiusFm,
-      stoichiometry: counts
+      stoichiometry: counts,
+      isotopologueSites: sites
     },
     atomic: {
       molecularRhfSolvedOnGpu: Boolean(molQm),

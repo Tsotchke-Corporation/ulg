@@ -1117,6 +1117,9 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   spinOrbit = true,
   scalarRelativistic = false,
   nuclearChargeRadiusBohr = 0,
+  nuclearMassU = null,
+  nuclearSpinI = 0,
+  nuclearMagneticMomentMuN = 0,
   configuration = null,
   gridPointsN = RADIAL_KS_WEBGPU_GRID_N,
   rMinBohr = 1e-4,
@@ -1271,12 +1274,28 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       }
       orbitals.push(orb);
     }
-    const totalEnergyHa = sumOcc - summary.eHartreeDouble + summary.eXcCorrection;
+    const rawTotalEnergyHa = sumOcc - summary.eHartreeDouble + summary.eXcCorrection;
+    // Exact two-body electron-nucleus reduced-mass normal mass shift: mu/m_e = 1 / (1 + m_e / M_nuc)
+    const mNucU = Number(nuclearMassU);
+    const hasIsotopeMass = Number.isFinite(mNucU) && mNucU > 0;
+    const reducedMassFactor = hasIsotopeMass
+      ? 1.0 / (1.0 + 1.0 / (mNucU * 1822.8884862))
+      : 1.0;
+    const totalEnergyHa = rawTotalEnergyHa * reducedMassFactor;
+    const isotopeMassShiftHa = totalEnergyHa - rawTotalEnergyHa;
     // Leading-order Uehling/Welton QED 1s radiative shift (Hartree) for relativistic runs
     const alphaZ = atomicNumberZ / 137.035999084;
     const qedRadiativeShiftHa = useRel
       ? (4 / (3 * Math.PI)) * ((1 / 137.035999084) ** 3) * (atomicNumberZ ** 4)
         * Math.max(0.5, Math.log(1 / Math.max(1e-6, alphaZ * alphaZ)) - 2.3)
+      : 0;
+    // First-principles Fermi-contact hyperfine splitting frequency (Hz) from |psi(0)|^2 ~ rho(r_min) & nuclear mu_I
+    const spinI = Math.max(0, Number(nuclearSpinI) || 0);
+    const muN = Number(nuclearMagneticMomentMuN) || 0;
+    const rhoOrigin = Math.max(0, finalRho[0] || 0);
+    // H 1s reference: rho(0) = 1/pi a0^-3, I=1/2, mu=2.793 mu_N -> 1420.4 MHz
+    const hyperfineSplittingHz = (spinI > 0 && Math.abs(muN) > 0 && rhoOrigin > 0)
+      ? 1.420405751e9 * (rhoOrigin * Math.PI) * (Math.abs(muN) / 2.792847) * ((spinI + 0.5) / 1.0)
       : 0;
     return {
       schema: RADIAL_KS_WEBGPU_SCHEMA,
@@ -1289,6 +1308,10 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
         : (spinOrbit ? 'schrodinger-log-gpu+spin-orbit' : 'schrodinger-log-gpu'),
       finiteNucleusUsed: rNucBohr > 0,
       nuclearChargeRadiusBohr: rNucBohr,
+      nuclearMassU: hasIsotopeMass ? mNucU : null,
+      reducedMassFactor,
+      isotopeMassShiftHa,
+      hyperfineSplittingHz,
       qedRadiativeShiftHa,
       totalEnergyHa: totalEnergyHa + qedRadiativeShiftHa,
       orbitals,

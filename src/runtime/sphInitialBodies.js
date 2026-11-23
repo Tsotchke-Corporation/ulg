@@ -33,9 +33,12 @@ const BODY_KEYS = new Set([
   // (one coherent SE(3) frame), or 'deformable' (MLS-MPM/APIC continuum with
   // an explicit GPU material-space surface carrier).
   'mechanicsMode',
-  'angularVelocityRadPerS'
+  'angularVelocityRadPerS',
+  // Phase 8 optional radioactive isotope tag (e.g. 'U-238', 'Co-60', 'Cs-137', 'H-3').
+  'isotope'
 ]);
 const BODY_MECHANICS_MODES = new Set(['continuum', 'rigid', 'deformable']);
+const BODY_ISOTOPE_KEYS = new Set(['U-238', 'Co-60', 'Cs-137', 'H-3']);
 
 const CONTAINER_KEYS = new Set(['schema', 'bodies']);
 const BODY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -246,6 +249,13 @@ function normalizeBody(body, index) {
     }
     normalized.angularVelocityRadPerS = vector3(body.angularVelocityRadPerS,
       `${path}.angularVelocityRadPerS`, finiteFloat32Number);
+  }
+  if (body.isotope != null && String(body.isotope).trim() !== '') {
+    const iso = String(body.isotope).trim();
+    if (!BODY_ISOTOPE_KEYS.has(iso)) {
+      fail("must be one of 'U-238', 'Co-60', 'Cs-137', or 'H-3'", { code: 'invalid-isotope', path: `${path}.isotope` });
+    }
+    normalized.isotope = iso;
   }
 
   return Object.freeze(normalized);

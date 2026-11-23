@@ -273,6 +273,79 @@ export function buildBlankCustomConfig() {
   };
 }
 
+export const STUDIO_CUSTOM_TEMPLATES = Object.freeze([
+  Object.freeze({
+    id: 'mercury-water-drop',
+    label: 'Liquid Mercury in Water',
+    summary: 'Relativistic 6s² contraction makes Hg (Z=80) a dense room-temperature liquid metal with derived spin-orbit metallic reflectance splashing into liquid water.',
+    chips: Object.freeze(['Hg + H2O', 'Relativistic PBE+SO', 'Liquid Metal @ 293 K'])
+  }),
+  Object.freeze({
+    id: 'cherenkov-pool',
+    label: 'Cherenkov Pool (Co-60 in Water)',
+    summary: 'Phase 8 nucleon-conserving Co-60 → Ni-60 isotope decay thermal deposition with Frank–Tamm Cherenkov blue emission gated strictly on β > 1/n (scientificValidation=false).',
+    chips: Object.freeze(['Co-60 + H2O', 'Frank–Tamm β>1/n', 'Phase 8 ABI'])
+  })
+]);
+
+export function buildStagedConfigFromCustomTemplate(templateId) {
+  const base = buildBlankCustomConfig();
+  if (templateId === 'mercury-water-drop') {
+    base.laws.reactions = false;
+    base.bodies = [
+      {
+        id: 'water-pool',
+        domainId: 1,
+        material: 'h2o',
+        sizeM: [0.8, 0.8, 0.8],
+        centerM: [0, 0.4, 0],
+        temperatureK: 293.15,
+        particlesPerEdge: [4, 4, 4],
+        velocityMPerS: [0, 0, 0]
+      },
+      {
+        id: 'mercury-drop',
+        domainId: 2,
+        material: 'Hg',
+        sizeM: [0.4, 0.4, 0.4],
+        centerM: [0, 1.12, 0],
+        temperatureK: 293.15,
+        particlesPerEdge: [3, 3, 3],
+        velocityMPerS: [0, 0, 0]
+      }
+    ];
+    return base;
+  }
+  if (templateId === 'cherenkov-pool') {
+    base.laws.reactions = false;
+    base.bodies = [
+      {
+        id: 'moderator-water',
+        domainId: 1,
+        material: 'h2o',
+        sizeM: [0.8, 0.8, 0.8],
+        centerM: [0, 0.4, 0],
+        temperatureK: 293.15,
+        particlesPerEdge: [4, 4, 4],
+        velocityMPerS: [0, 0, 0]
+      },
+      {
+        id: 'cobalt-60-source',
+        domainId: 2,
+        material: 'Co',
+        isotope: 'Co-60',
+        sizeM: [0.4, 0.4, 0.4],
+        centerM: [0, 1.12, 0],
+        temperatureK: 293.15,
+        particlesPerEdge: [3, 3, 3],
+        velocityMPerS: [0, 0, 0]
+      }
+    ];
+    return base;
+  }
+  return base;
+}
+
 /**
  * Validate a staged configuration in floor-centered coordinates.
  * Guarantees every body's bounding box lies completely inside the container

@@ -27,8 +27,10 @@ import {
 import {
   SPH_BUNDLED_BACKGROUND_IMAGES,
   SPH_DEFAULT_BACKGROUND_IMAGE_URL,
+  STUDIO_CUSTOM_TEMPLATES,
   buildBlankCustomConfig,
   buildLaunchParamsFromStagedConfig,
+  buildStagedConfigFromCustomTemplate,
   buildStagedConfigFromPreset,
   deriveSimulationLoadingStatus,
   fmtMeters,
@@ -41,6 +43,10 @@ import {
   totalParticlesOf,
   validateStagedSimulationConfig
 } from './ulgSimStudioModel.js';
+import {
+  createSphNuclearCherenkovController,
+  supportedIsotopesForMaterial
+} from '../runtime/sph/sphNuclearCherenkovBridge.js';
 
 export {
   buildBlankCustomConfig,
@@ -217,12 +223,15 @@ export function mountUlgSimStudioApp({
   let miniHudPinned = true;
   let pendingLocalBgFile = null;
   let diagnosticsPollTimer = null;
+  let activeNuclearController = null;
+  let activeNuclearLastSimTimeS = 0;
 
   const root = document.createElement('div');
   root.id = 'ulg-sim-studio';
   root.className = 'ulg-studio-root';
   root.innerHTML = `
     <div id="ulg-stage" class="ulg-studio-stage"></div>
+    <div id="ulg-cherenkov-aura" style="position:fixed;inset:0;pointer-events:none;z-index:2;display:none;transition:opacity 240ms ease;" aria-hidden="true"></div>
     <div id="ulg-empty-state" class="ulg-studio-empty">
       <div class="ulg-empty-card">
         <p class="ulg-empty-eyebrow">ULG · Schroeder Spatial Physics</p>
@@ -485,13 +494,43 @@ export function mountUlgSimStudioApp({
     }
 
     miniHudEl.hidden = !miniHudPinned || !visuallyReady;
+    const cherenkovAuraEl = root.querySelector('#ulg-cherenkov-aura');
+    let ncSnap = null;
+    if (activeNuclearController?.enabled && snap) {
+      const simT = Number(snap.simTimeS) || 0;
+      const dtAdvance = Math.max(0, simT - activeNuclearLastSimTimeS);
+      if (dtAdvance > 0) {
+        ncSnap = activeNuclearController.step(dtAdvance);
+        activeNuclearLastSimTimeS = simT;
+      } else {
+        ncSnap = activeNuclearController.getSnapshot();
+      }
+      globalThis.__ulgNuclearCherenkovStatus = ncSnap;
+    } else if (!activeSession) {
+      globalThis.__ulgNuclearCherenkovStatus = null;
+    }
+    if (cherenkovAuraEl) {
+      if (visuallyReady && ncSnap?.cherenkovActive) {
+        const [cr, cg, cb] = ncSnap.cherenkovSrgb;
+        const rgb = `${Math.round(cr * 255)}, ${Math.round(cg * 255)}, ${Math.round(cb * 255)}`;
+        cherenkovAuraEl.style.display = 'block';
+        cherenkovAuraEl.style.background = `radial-gradient(circle at 50% 54%, rgba(${rgb}, 0.24) 0%, rgba(${rgb}, 0.08) 28%, rgba(${rgb}, 0.0) 62%)`;
+      } else {
+        cherenkovAuraEl.style.display = 'none';
+      }
+    }
     if (!miniHudEl.hidden && snap) {
       const label = activePresetLabel || 'Custom';
       if (snap.playing && !snap.workerVisualReady && snap.stepCount === 0) {
         miniHudEl.textContent = `${label} · compiling WebGPU shaders…`;
       } else {
         const stateTag = snap.playing ? '▶' : '❚❚';
-        miniHudEl.textContent = `${stateTag} ${label} · t=${snap.simTimeS.toFixed(3)}s · ${snap.stepCount} steps`;
+        const ncTag = ncSnap?.enabled
+          ? (ncSnap.cherenkovActive
+            ? ` · Cherenkov ${ncSnap.isotopes.join('+')} θ=${ncSnap.cherenkovAngleDeg.toFixed(1)}° (β=${ncSnap.cherenkovBeta.toFixed(2)}>1/n · sciVal=false)`
+            : ` · Decay ${ncSnap.isotopes.join('+')} (below Cherenkov threshold · sciVal=false)`)
+          : '';
+        miniHudEl.textContent = `${stateTag} ${label} · t=${snap.simTimeS.toFixed(3)}s · ${snap.stepCount} steps${ncTag}`;
       }
     }
 
@@ -555,6 +594,10 @@ export function mountUlgSimStudioApp({
         if (a6Mesh || a6Bridge) {
           const rtcCount = Array.isArray(a6Mesh?.webrtcDataChannelPeers) ? a6Mesh.webrtcDataChannelPeers.length : 0;
           archLines.push(`A6 derivation: transport=${a6Mesh?.transport ?? 'local'} connected=${Boolean(a6Mesh?.connected)} peers=${a6Mesh?.remotePeerCount ?? 0} webrtc=${rtcCount} quorum=${Boolean(a6Mesh?.quorumReady)} debt=${a6Bridge?.remoteDebtCount ?? 0}`);
+        }
+        const nc = globalThis.__ulgNuclearCherenkovStatus;
+        if (nc?.enabled) {
+          archLines.push(`Phase 8 Nuclear/Cherenkov: isotopes=${nc.isotopes.join(',')} medium=${nc.medium}(n=${nc.refractiveIndex}) cherenkov=${nc.cherenkovActive ? `ON θ=${nc.cherenkovAngleDeg.toFixed(1)}°` : 'OFF'} β=${nc.cherenkovBeta.toFixed(3)} thr=${nc.cherenkovThresholdBeta.toFixed(3)} power=${nc.thermalPowerW.toExponential(2)}W nucleonErr=${nc.nucleonConservationRelError.toExponential(1)} scientificValidation=false`);
         }
         const archSuffix = archLines.length > 0 ? `\n\n--- Architecture ---\n${archLines.join('\n')}` : '';
         diagnosticsPreEl.textContent = `${snap.statusText || ''}${archSuffix}`.trim();
@@ -667,6 +710,29 @@ export function mountUlgSimStudioApp({
       updateChromeAndStatus();
     });
     grid.appendChild(customCard);
+    for (const tmpl of STUDIO_CUSTOM_TEMPLATES) {
+      const tmplCard = document.createElement('button');
+      tmplCard.type = 'button';
+      tmplCard.className = 'ulg-preset-card';
+      tmplCard.dataset.customTemplateId = tmpl.id;
+      tmplCard.dataset.selected = 'false';
+      tmplCard.innerHTML = `
+        <div class="ulg-preset-card-title">${tmpl.label}</div>
+        <div class="ulg-preset-card-copy">${tmpl.summary}</div>
+        <div class="ulg-chip-row">
+          ${tmpl.chips.map((c) => `<span class="ulg-chip">${c}</span>`).join('')}
+        </div>
+      `;
+      tmplCard.addEventListener('click', () => {
+        const next = buildStagedConfigFromCustomTemplate(tmpl.id);
+        next.display = { ...stagedConfig.display };
+        stagedConfig = next;
+        syncUrlFromStagedConfig();
+        renderAllTabs();
+        updateChromeAndStatus();
+      });
+      grid.appendChild(tmplCard);
+    }
     panel.appendChild(grid);
   }
 
@@ -952,6 +1018,38 @@ export function mountUlgSimStudioApp({
       });
       mechField.appendChild(mechSelect);
       card.appendChild(mechField);
+
+      // Row 1c: Optional Phase 8 Isotope selector for elements with decay channels (U, Co, Cs, H)
+      const isotopeChoices = supportedIsotopesForMaterial(body.material);
+      if (isotopeChoices.length > 0) {
+        const isoField = document.createElement('label');
+        isoField.className = 'ulg-field';
+        isoField.innerHTML = '<span class="ulg-field-label"><span>Isotope (Phase 8 Nuclear / Cherenkov)</span><span class="ulg-field-hint">Exact nucleon ledger · scientificValidation=false</span></span>';
+        const isoSelect = document.createElement('select');
+        isoSelect.className = 'ulg-select';
+        isoSelect.dataset.bodyIsotope = body.id;
+        const stableOpt = document.createElement('option');
+        stableOpt.value = '';
+        stableOpt.textContent = String(body.material).toLowerCase() === 'u' ? 'U-238 (natural radioactive default)' : 'Stable (no decay)';
+        if (!body.isotope) stableOpt.selected = true;
+        isoSelect.appendChild(stableOpt);
+        for (const iso of isotopeChoices) {
+          const o = document.createElement('option');
+          o.value = iso;
+          o.textContent = iso;
+          if (body.isotope === iso) o.selected = true;
+          isoSelect.appendChild(o);
+        }
+        isoSelect.addEventListener('change', () => {
+          if (isoSelect.value) body.isotope = isoSelect.value;
+          else delete body.isotope;
+          markStagedCustom();
+          renderBodiesTab();
+          updateChromeAndStatus();
+        });
+        isoField.appendChild(isoSelect);
+        card.appendChild(isoField);
+      }
 
       // Row 2: Particles per edge (X, Y, Z) -> derives size
       const ppeField = document.createElement('div');
@@ -1656,6 +1754,9 @@ export function mountUlgSimStudioApp({
     activeSession = null;
     activeSignature = null;
     activePresetLabel = null;
+    activeNuclearController = null;
+    activeNuclearLastSimTimeS = 0;
+    globalThis.__ulgNuclearCherenkovStatus = null;
     try {
       session.close();
     } catch {
@@ -1744,6 +1845,14 @@ export function mountUlgSimStudioApp({
       activeSession = session;
       activeSignature = sig;
       activePresetLabel = label;
+      activeNuclearController = createSphNuclearCherenkovController({
+        bodies: snapshot.bodies,
+        environmentMode: snapshot.environment?.mode || 'vacuum'
+      });
+      activeNuclearLastSimTimeS = 0;
+      globalThis.__ulgNuclearCherenkovStatus = activeNuclearController.enabled
+        ? activeNuclearController.getSnapshot()
+        : null;
       if (pendingLocalBgFile) {
         session.setLocalBackgroundImageFile?.(pendingLocalBgFile);
       }

@@ -31,6 +31,7 @@ import {
   stablePhaseFromSpecificEnergy
 } from './material/phaseEquilibrium.js';
 import { incandescentColor } from './material/radiationClosure.js';
+import { createSphNuclearCherenkovController } from './sph/sphNuclearCherenkovBridge.js';
 import {
   WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL,
   intrinsicColorSrgb,
@@ -3927,6 +3928,14 @@ export function surfaceEmissive(demo) {
   for (const [material, a] of Object.entries(acc)) {
     out[material] = a.w > 0 ? [a.r / a.w, a.g / a.w, a.b / a.w] : null;
   }
+  // Phase 8 Frank-Tamm Cherenkov emission: strictly gated on β > 1/n in dielectric medium.
+  const ncSnap = demo?.nuclearCherenkov?.getSnapshot?.() || demo?.nuclearCherenkovSnapshot || null;
+  if (ncSnap?.cherenkovActive && Array.isArray(ncSnap.sources)) {
+    for (const src of ncSnap.sources) {
+      if (!src.active || !Array.isArray(src.srgb)) continue;
+      if (!out[src.material]) out[src.material] = [...src.srgb];
+    }
+  }
   return out;
 }
 
@@ -6597,6 +6606,22 @@ export function createSphPhaseDemo(options = {}) {
   demo.state.surfaceTensionLawAdmission = surfaceTensionLawAdmission;
   // Per-face cumulative heat ledger (J exchanged with each fixed-temperature wall reservoir).
   demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
+  // Phase 8 live nuclear decay, exact nucleon conservation & Frank-Tamm Cherenkov controller.
+  // Zero overhead when no radioactive isotope is present (`enabled: false`).
+  const nuclearBodies = demo.initialBodies?.bodies || [
+    ...(demo.baseMaterial ? [{ id: 'base', domainId: 1, material: demo.baseMaterial, temperatureK: demo.initialTemperaturesK?.base ?? 293.15, sizeM: [demo.scenario?.ice?.edgeM ?? 0.5, demo.scenario?.ice?.edgeM ?? 0.5, demo.scenario?.ice?.edgeM ?? 0.5] }] : []),
+    ...(demo.dropMaterial ? [{ id: 'drop', domainId: 2, material: demo.dropMaterial, temperatureK: demo.initialTemperaturesK?.drop ?? 293.15, sizeM: [demo.scenario?.iron?.edgeM ?? 0.3, demo.scenario?.iron?.edgeM ?? 0.3, demo.scenario?.iron?.edgeM ?? 0.3] }] : [])
+  ];
+  demo.nuclearCherenkov = createSphNuclearCherenkovController({
+    bodies: nuclearBodies,
+    particles: demo.state?.particles,
+    materialProperties: demo.materialProperties,
+    environmentMode: options?.environment?.mode || demo.environmentInitialization?.environment?.mode || 'vacuum'
+  });
+  demo.nuclearCherenkovSnapshot = demo.nuclearCherenkov.getSnapshot();
+  if (typeof globalThis !== 'undefined' && demo.nuclearCherenkov.enabled) {
+    globalThis.__ulgNuclearCherenkovStatus = demo.nuclearCherenkovSnapshot;
+  }
   const h2oProps = demo.materialProperties.h2o
     ?? Object.entries(demo.materialProperties).find(([k]) => k.toLowerCase() === 'h2o')?.[1];
   const gasDensity = h2oProps.phases.find((p) => p.name === 'gas').densityKgPerM3;
@@ -7037,6 +7062,16 @@ export function createSphPhaseDemo(options = {}) {
       for (const face of Object.keys(demo.wallHeatLedgerJ)) demo.wallHeatLedgerJ[face] += wallHeatJ[face];
       stageMs.wallLedger = Math.max(0, nowMs() - stageStartMs);
 
+      // Phase 8: exact nucleon-conserving isotope decay thermal deposition & Frank-Tamm Cherenkov update
+      if (demo.nuclearCherenkov?.enabled) {
+        demo.nuclearCherenkovSnapshot = demo.nuclearCherenkov.step(dtStepS, {
+          particles: demo.state.particles
+        });
+        if (typeof globalThis !== 'undefined') {
+          globalThis.__ulgNuclearCherenkovStatus = demo.nuclearCherenkovSnapshot;
+        }
+      }
+
       // Phase-driven buoyancy: water that has vaporized (gas phase) rises as steam (reuse the
       // phases the thermal step already computed), over the same sim-time.
       stageStartMs = nowMs();
@@ -7118,6 +7153,9 @@ export function createSphPhaseDemo(options = {}) {
     },
     wallHeatLedgerJ() {
       return { ...demo.wallHeatLedgerJ };
+    },
+    nuclearCherenkovSummary() {
+      return demo.nuclearCherenkov ? demo.nuclearCherenkov.getSnapshot() : null;
     }
   };
 }

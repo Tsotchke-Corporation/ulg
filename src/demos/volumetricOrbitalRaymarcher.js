@@ -357,3 +357,147 @@ export function createVolumetricOrbitalRaymarcher({
     }
   };
 }
+
+/**
+ * Raymarch an arbitrary precomputed 3D electron charge density grid
+ * (`Float32Array` of shape `[nx, ny, nz]` from `buildMolecularChargeDensityArtifact`)
+ * directly on WebGPU via `Data3DTexture` + `three/tsl` — zero scripted primitives.
+ */
+export function createVolumetricDensityGridRaymarcher({
+  THREE,
+  TSL = null,
+  renderer = null,
+  densityGrid,
+  dimensions = [16, 16, 16],
+  boxHalfExtent = 4.8,
+  provenance = 'molecular-rhf-charge-density-volume'
+} = {}) {
+  const [nx, ny, nz] = dimensions;
+  const total = nx * ny * nz;
+  const data = new Uint8Array(total * 4);
+  let peak = 0;
+  for (let i = 0; i < total; i += 1) {
+    const v = Math.max(0, Number(densityGrid?.[i]) || 0);
+    if (v > peak) peak = v;
+  }
+  const invPeak = peak > 1e-12 ? 1 / peak : 0;
+  for (let iz = 0; iz < nz; iz += 1) {
+    const fz = ((iz + 0.5) / nz) * 2 - 1;
+    for (let iy = 0; iy < ny; iy += 1) {
+      const fy = ((iy + 0.5) / ny) * 2 - 1;
+      for (let ix = 0; ix < nx; ix += 1) {
+        const fx = ((ix + 0.5) / nx) * 2 - 1;
+        const idx = (iz * ny + iy) * nx + ix;
+        const norm = Math.min(1, Math.pow(Math.max(0, (Number(densityGrid?.[idx]) || 0) * invPeak), 0.52));
+        const rFrac = Math.min(1, Math.hypot(fx, fy, fz));
+        const o = idx * 4;
+        data[o + 0] = Math.round(norm * 255);
+        data[o + 1] = 0;
+        data[o + 2] = Math.round(rFrac * 255);
+        data[o + 3] = Math.round(norm * 255);
+      }
+    }
+  }
+
+  const canWebGpuRaymarch = Boolean(
+    renderer?.isWebGPURenderer
+    && TSL
+    && typeof THREE?.Data3DTexture === 'function'
+    && typeof THREE?.MeshBasicNodeMaterial === 'function'
+    && typeof TSL.texture3D === 'function'
+    && typeof TSL.Loop === 'function'
+    && typeof TSL.Fn === 'function'
+  );
+
+  if (canWebGpuRaymarch) {
+    const tex = new THREE.Data3DTexture(data, nx, ny, nz);
+    tex.format = THREE.RGBAFormat;
+    tex.type = THREE.UnsignedByteType;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.unpackAlignment = 1;
+    tex.needsUpdate = true;
+
+    const {
+      Fn, Loop, If, Break, texture3D, positionLocal, cameraPosition,
+      modelWorldMatrixInverse, vec3, vec4, float, max, min, clamp, normalize, mix
+    } = TSL;
+
+    const half = float(boxHalfExtent);
+    const invSize = float(1.0 / (2.0 * boxHalfExtent));
+    const raymarchMol = Fn(() => {
+      const ro = modelWorldMatrixInverse.mul(vec4(cameraPosition, float(1.0))).xyz;
+      const rd = normalize(positionLocal.sub(ro));
+      const safeRd = vec3(
+        rd.x.abs().lessThan(float(1e-5)).select(float(1e-5), rd.x),
+        rd.y.abs().lessThan(float(1e-5)).select(float(1e-5), rd.y),
+        rd.z.abs().lessThan(float(1e-5)).select(float(1e-5), rd.z)
+      );
+      const t0 = vec3(half.negate(), half.negate(), half.negate()).sub(ro).div(safeRd);
+      const t1 = vec3(half, half, half).sub(ro).div(safeRd);
+      const tMinV = min(t0, t1);
+      const tMaxV = max(t0, t1);
+      const tNear = max(max(max(tMinV.x, tMinV.y), tMinV.z), float(0.0));
+      const tFar = min(min(tMaxV.x, tMaxV.y), tMaxV.z);
+
+      const accumRgb = vec3(0.0, 0.0, 0.0).toVar();
+      const accumAlpha = float(0.0).toVar();
+      const span = max(tFar.sub(tNear), float(0.0));
+      const dt = span.div(float(44.0));
+      If(span.greaterThan(float(0.001)), () => {
+        Loop(44, ({ i }) => {
+          const t = tNear.add(dt.mul(float(i).add(float(0.5))));
+          const p = ro.add(rd.mul(t));
+          const uvw = clamp(p.add(vec3(half, half, half)).mul(invSize), vec3(0.001, 0.001, 0.001), vec3(0.999, 0.999, 0.999));
+          const sample = texture3D(tex, uvw).level(float(0.0));
+          const dens = sample.w;
+          const radFrac = sample.z;
+          If(dens.greaterThan(float(0.02)), () => {
+            const bondCol = vec3(0.36, 0.96, 0.84);
+            const outerCol = vec3(0.24, 0.54, 1.0);
+            const voxelCol = mix(bondCol, outerCol, clamp(radFrac, float(0.0), float(1.0)));
+            const stepAlpha = clamp(dens.mul(float(0.095)), float(0.0), float(0.30));
+            const weight = float(1.0).sub(accumAlpha).mul(stepAlpha);
+            accumRgb.addAssign(voxelCol.mul(weight).mul(float(2.4)));
+            accumAlpha.addAssign(weight);
+          });
+          If(accumAlpha.greaterThan(float(0.96)), () => { Break(); });
+        });
+      });
+      return vec4(accumRgb, clamp(accumAlpha, float(0.0), float(1.0)));
+    });
+
+    const geo = new THREE.BoxGeometry(boxHalfExtent * 2, boxHalfExtent * 2, boxHalfExtent * 2);
+    const mat = new THREE.MeshBasicNodeMaterial();
+    const outNode = raymarchMol();
+    mat.colorNode = outNode.xyz;
+    mat.opacityNode = outNode.w;
+    mat.transparent = true;
+    mat.depthWrite = false;
+    mat.side = THREE.BackSide;
+    mat.blending = THREE.AdditiveBlending;
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+
+    return {
+      mode: 'webgpu-3d-volumetric-raymarcher',
+      provenance,
+      dimensions,
+      mesh,
+      dispose() {
+        geo.dispose();
+        mat.dispose();
+        tex.dispose();
+      }
+    };
+  }
+
+  const group = new THREE.Group();
+  return {
+    mode: 'empty-fallback',
+    provenance,
+    dimensions,
+    mesh: group,
+    dispose() {}
+  };
+}

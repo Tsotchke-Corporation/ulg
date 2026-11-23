@@ -299,8 +299,15 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
       exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0
     });
   }
+  const canShareSolidGrid = Boolean(
+    couplingEligible && contactEligible && family.bodyCount === 1 && family.couplingStage?.spatialGrid
+  );
   if (contactEligible) {
-    family.contactStage.prepare?.(dtSeconds, { particleCount: fluid.particleCount });
+    family.contactStage.prepare?.(dtSeconds, {
+      particleCount: fluid.particleCount,
+      sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
+      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0
+    });
   }
   if (releaseEnabled) {
     family.releaseStage.prepare?.(fluid);
@@ -325,7 +332,10 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
       pass, prepared: true });
   family.lastContactEnabled = contactEligible
     && family.contactStage.encode(encoder, dtSeconds, { fluidStateBuffer: fluid.stateBuffer,
-      fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount, pass, prepared: true });
+      fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
+      sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
+      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
+      pass, prepared: true });
   if (releaseEnabled) family.releaseStage.encode(encoder, { ...fluid, pass, prepared: true });
   family.fractureStage?.encode(encoder, dtSeconds, { pass, prepared: true, skipIfNoLoads: true });
   if (multilevelEligible) {

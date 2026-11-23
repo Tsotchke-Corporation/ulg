@@ -16,22 +16,66 @@ const USAGE = Object.freeze({
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8
 });
 const rings = new WeakMap();
+const pooledRingBuffers = new WeakMap();
 
 export const ULG_LAW_ACTIVATION_RECEIPT_SCHEMA = 'peercompute.ulg.law-activation-receipt.v1';
 
+function acquirePooledRingBuffer(device, keyDevice, byteSize) {
+  const pool = pooledRingBuffers.get(keyDevice);
+  if (pool && pool.length > 0) {
+    const idx = pool.findIndex((entry) => entry.size >= byteSize);
+    if (idx >= 0) {
+      const [entry] = pool.splice(idx, 1);
+      return entry;
+    }
+  }
+  return {
+    size: byteSize,
+    buffer: device.createBuffer({
+      label: 'ulg-law-activation-receipt-ring',
+      size: byteSize,
+      usage: USAGE.MAP_READ | USAGE.COPY_DST
+    })
+  };
+}
+
+function releasePooledRingBuffer(keyDevice, entry) {
+  if (!entry?.buffer) return;
+  let pool = pooledRingBuffers.get(keyDevice);
+  if (!pool) {
+    pool = [];
+    pooledRingBuffers.set(keyDevice, pool);
+  }
+  if (pool.length < 4) {
+    pool.push(entry);
+  } else {
+    entry.buffer.destroy?.();
+  }
+}
+
 /** Open a ring for one schedule of at most `capacityPerLaw` gated encodes per law. */
-export function openLawActivationReceiptRing(device, { capacityPerLaw } = {}) {
+export function openLawActivationReceiptRing(device, { capacityPerLaw, reuseBuffer = false } = {}) {
   if (!device?.createBuffer || !(Number.isInteger(capacityPerLaw) && capacityPerLaw > 0)) return null;
   const keyDevice = unwrapWebGpuCacheDevice(device);
   const previous = rings.get(keyDevice);
   if (previous) previous.buffer.destroy?.();
+  const byteSize = LAWS.length * capacityPerLaw * COUNT_BYTES;
+  const pooled = reuseBuffer
+    ? acquirePooledRingBuffer(device, keyDevice, byteSize)
+    : {
+        size: byteSize,
+        buffer: device.createBuffer({
+          label: 'ulg-law-activation-receipt-ring',
+          size: byteSize,
+          usage: USAGE.MAP_READ | USAGE.COPY_DST
+        })
+      };
   const ring = {
+    keyDevice,
+    reuseBuffer: Boolean(reuseBuffer),
     capacityPerLaw,
-    buffer: device.createBuffer({
-      label: 'ulg-law-activation-receipt-ring',
-      size: LAWS.length * capacityPerLaw * COUNT_BYTES,
-      usage: USAGE.MAP_READ | USAGE.COPY_DST
-    }),
+    pooledEntry: pooled,
+    buffer: pooled.buffer,
     encodes: Object.fromEntries(LAWS.map((law) => [law, 0])),
     overflowedEncodes: Object.fromEntries(LAWS.map((law) => [law, 0])),
     epsilon: Object.fromEntries(LAWS.map((law) => [law, null]))
@@ -101,6 +145,10 @@ export async function closeLawActivationReceiptRing(device) {
     }
     return Object.freeze({ schema: ULG_LAW_ACTIVATION_RECEIPT_SCHEMA, laws: Object.freeze(laws) });
   } finally {
-    ring.buffer.destroy?.();
+    if (ring.reuseBuffer && ring.keyDevice && ring.pooledEntry) {
+      releasePooledRingBuffer(ring.keyDevice, ring.pooledEntry);
+    } else {
+      ring.buffer.destroy?.();
+    }
   }
 }

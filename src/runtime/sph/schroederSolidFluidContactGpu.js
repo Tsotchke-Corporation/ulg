@@ -1,4 +1,4 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl, createSphExactLedgerScatterWgsl } from './sphExactLedgerWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT } from './sphExactThermalEnergyWgsl.js';
@@ -63,16 +63,21 @@ fn hash_cell(c: vec3<i32>) -> u32 {
 }
 
 fn grid_cell_edge() -> f32 {
-  let max_r = bitcast<f32>(atomicLoad(&contact_ledger[2]));
-  return max(max(2.0 * params.law.x, params.law.x + max_r) * 1.01, 1.0e-5);
+  let max_r = select(
+    bitcast<f32>(atomicLoad(&contact_ledger[2])),
+    bitcast<f32>(atomicLoad(&spatial_grid[GRID_BUCKETS + params.counts.x])),
+    params.counts.w != 0u
+  );
+  let extra_slop = select(0.0, params.time.y, params.counts.w != 0u);
+  return max(max(2.0 * params.law.x, params.law.x + max_r + extra_slop) * 1.01, 1.0e-5);
 }
 
 @compute @workgroup_size(64)
 fn reset_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x < GRID_BUCKETS) { atomicStore(&spatial_grid[id.x], EMPTY_NODE); }
+  if (params.counts.w == 0u && id.x < GRID_BUCKETS) { atomicStore(&spatial_grid[id.x], EMPTY_NODE); }
   if (id.x == 0u) {
     atomicStore(&contact_ledger[0], 0u);
-    atomicStore(&contact_ledger[2], 0u);
+    if (params.counts.w == 0u) { atomicStore(&contact_ledger[2], 0u); }
   }
 }
 
@@ -200,54 +205,61 @@ export function createSchroederSolidFluidContactStage({ device, memberCount, bod
     'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['reset_ledger', 'measure_fluid_radius', 'bin_members', 'contact_particles',
     'apply_impulses'].map((entryPoint) =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-${entryPoint}.v1`,
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-contact-${entryPoint}.v2`,
       label: `ulg-solid-fluid-contact-${entryPoint}`, code: schroederSolidFluidContactWgsl, entryPoint, bindings })]));
   const counters = device.createBuffer({ label: 'ulg-solid-fluid-contact-counters',
     size: (bodyCount * 6 * COUNTER_WORDS_PER_ROW + 4) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const ledgerBuffer = device.createBuffer({ label: 'ulg-solid-fluid-contact-ledger', size: 16,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST });
   const spatialGrid = device.createBuffer({ label: 'ulg-solid-fluid-contact-grid',
-    size: (GRID_BUCKETS + Math.max(1, memberCount)) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
+    size: (GRID_BUCKETS + Math.max(1, memberCount) + 1) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const params = device.createBuffer({ label: 'ulg-solid-fluid-contact-params', size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const words = new ArrayBuffer(48), u = new Uint32Array(words), f = new Float32Array(words);
   f.set([memberRadiusM, law.slopM, law.baumgarte, law.maxBiasSpeedMPerS], 4);
-  const groups = new Map();
   return Object.freeze({
     ledgerBuffer,
-    prepare(dtSeconds, { particleCount = 0 } = {}) {
+    prepare(dtSeconds, { particleCount = 0, sharedSpatialGrid = null, sharedGridSlopM = 0 } = {}) {
       if (!(particleCount > 0) || !(dtSeconds > 0)) return false;
-      u.set([memberCount, particleCount, bodyCount, 0], 0);
+      u.set([memberCount, particleCount, bodyCount, sharedSpatialGrid ? 1 : 0], 0);
       f[8] = dtSeconds;
+      f[9] = sharedSpatialGrid ? Number(sharedGridSlopM) || 0 : 0;
       device.queue.writeBuffer(params, 0, words);
       return true;
     },
-    encode(encoder, dtSeconds, { fluidStateBuffer, fluidThermoBuffer, particleCount, pass: sharedPass = null, prepared = false }) {
+    encode(encoder, dtSeconds, { fluidStateBuffer, fluidThermoBuffer, particleCount,
+      sharedSpatialGrid = null, sharedGridSlopM = 0, pass: sharedPass = null, prepared = false }) {
       if (!(particleCount > 0) || !(dtSeconds > 0)) return false;
+      const useShared = Boolean(sharedSpatialGrid);
       if (!prepared) {
-        u.set([memberCount, particleCount, bodyCount, 0], 0);
+        u.set([memberCount, particleCount, bodyCount, useShared ? 1 : 0], 0);
         f[8] = dtSeconds;
+        f[9] = useShared ? Number(sharedGridSlopM) || 0 : 0;
         device.queue.writeBuffer(params, 0, words);
       }
-      const key = `${groups.size}`;
-      let group = null;
-      for (const [k, g] of groups) if (k[0] === fluidStateBuffer && k[1] === fluidThermoBuffer) group = g;
-      if (!group) {
-        group = device.createBindGroup({ layout: pipelines.contact_particles.bindGroupLayout,
-          entries: [params, memberWorldBuffer, memberBuffer, frameBuffer, fluidStateBuffer, fluidThermoBuffer, counters,
-            ledgerBuffer, spatialGrid].map((buffer, binding) => ({ binding, resource: { buffer } })) });
-        if (groups.size > 8) groups.clear();
-        groups.set([fluidStateBuffer, fluidThermoBuffer, key], group);
-      }
+      const activeGrid = useShared ? sharedSpatialGrid : spatialGrid;
+      const group = createCachedExplicitBindGroup(device, {
+        label: 'ulg-solid-fluid-contact-bg',
+        layout: pipelines.contact_particles.bindGroupLayout,
+        entries: [params, memberWorldBuffer, memberBuffer, frameBuffer, fluidStateBuffer, fluidThermoBuffer, counters,
+          ledgerBuffer, activeGrid].map((buffer, binding) => ({ binding, resource: { buffer } }))
+      });
       const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-solid-fluid-contact' });
       pass.setBindGroup(0, group);
-      for (const [entryPoint, count] of [
-        ['reset_ledger', GRID_BUCKETS],
-        ['measure_fluid_radius', particleCount],
-        ['bin_members', memberCount],
-        ['contact_particles', particleCount],
-        ['apply_impulses', bodyCount]
-      ]) {
+      const stages = useShared
+        ? [
+            ['reset_ledger', 1],
+            ['contact_particles', particleCount],
+            ['apply_impulses', bodyCount]
+          ]
+        : [
+            ['reset_ledger', GRID_BUCKETS],
+            ['measure_fluid_radius', particleCount],
+            ['bin_members', memberCount],
+            ['contact_particles', particleCount],
+            ['apply_impulses', bodyCount]
+          ];
+      for (const [entryPoint, count] of stages) {
         pass.setPipeline(pipelines[entryPoint].pipeline);
         pass.dispatchWorkgroups(Math.ceil(count / 64));
       }

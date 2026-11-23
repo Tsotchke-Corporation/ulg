@@ -91,6 +91,7 @@ import { prepareSphExactHistoryGasViews } from './sphExactHistoryP2gGpu.js';
 import {
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   registerQueueOrderedCleanupClaim,
@@ -3159,7 +3160,7 @@ function eosPipelines(device, caloricModule = null) {
 }
 
 function makeBindGroup(device, label, layout, entries) {
-  return device.createBindGroup({ label, layout, entries });
+  return createCachedExplicitBindGroup(device, { label, layout, entries });
 }
 
 function activeNodeDirectorySource({

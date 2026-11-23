@@ -12404,7 +12404,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       if (lawActivationReceiptRingOpened || !state.workerDevice) return;
       lawActivationReceiptRingOpened = Boolean(
         openLawActivationReceiptRing(state.workerDevice, {
-          capacityPerLaw: Math.max(1, stepCount * 4)
+          capacityPerLaw: Math.max(1, stepCount * 4),
+          reuseBuffer: true
         })
       );
       lawActivationReceiptRingDevice = state.workerDevice;

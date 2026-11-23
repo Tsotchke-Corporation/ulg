@@ -1,4 +1,4 @@
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { createSphExactLedgerWgsl } from './sphExactLedgerWgsl.js';
 import { SPH_EXACT_THERMAL_ENERGY_FORMAT } from './sphExactThermalEnergyWgsl.js';
@@ -108,6 +108,7 @@ fn reset_ledger(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&coupling_ledger[0], 0);
     atomicStore(&coupling_ledger[1], 0);
     atomicStore(&coupling_ledger[3], 0);
+    atomicStore(&spatial_grid[GRID_BUCKETS + params.counts.x], 0u);
   }
 }
 
@@ -128,7 +129,10 @@ fn measure_fluid_radius(@builtin(global_invocation_id) id: vec3<u32>) {
   let j = id.x;
   if (j >= params.counts.y) { return; }
   let r = effective_fluid_radius(j);
-  if (r > 0.0) { atomicMax(&coupling_ledger[3], bitcast<i32>(r)); }
+  if (r > 0.0) {
+    atomicMax(&coupling_ledger[3], bitcast<i32>(r));
+    atomicMax(&spatial_grid[GRID_BUCKETS + params.counts.x], bitcast<u32>(r));
+  }
 }
 
 @compute @workgroup_size(64)
@@ -275,7 +279,7 @@ export function createSchroederSolidFluidThermalStage({ device, memberCount, mem
     'read-only-storage', 'storage', 'storage', 'storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type));
   const pipelines = Object.fromEntries(['reset_ledger', 'measure_fluid_radius', 'bin_members', 'couple_particles',
     'apply_member_heat'].map((entryPoint) =>
-    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-thermal-${entryPoint}.v1`,
+    [entryPoint, createCachedExplicitComputePipeline(device, { cacheKey: `ulg-solid-fluid-thermal-${entryPoint}.v2`,
       label: `ulg-solid-fluid-thermal-${entryPoint}`, code: schroederSolidFluidThermalWgsl, entryPoint, bindings })]));
   const tableBuffer = device.createBuffer({ label: 'ulg-solid-fluid-thermal-table', size: Math.max(16, fluidTable.byteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
@@ -285,7 +289,7 @@ export function createSchroederSolidFluidThermalStage({ device, memberCount, mem
   const ledgerBuffer = device.createBuffer({ label: 'ulg-solid-fluid-thermal-ledger', size: 16,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST });
   const spatialGrid = device.createBuffer({ label: 'ulg-solid-fluid-thermal-grid',
-    size: (GRID_BUCKETS + Math.max(1, memberCount)) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
+    size: (GRID_BUCKETS + Math.max(1, memberCount) + 1) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
   const exactEnergyPlaceholder = device.createBuffer({ label: 'ulg-solid-fluid-thermal-exact-placeholder',
     size: 16, usage: GPU_BUFFER_USAGE.STORAGE });
   const params = device.createBuffer({ label: 'ulg-solid-fluid-thermal-params', size: 80,
@@ -298,9 +302,8 @@ export function createSchroederSolidFluidThermalStage({ device, memberCount, mem
   f.set([meltTemperatureK, solidConductivity, liquidConductivity, 0], 12);
   f.set([halfPitchM, slopM, quantumJ, limit], 16);
   let memberHeatCleared = false;
-  const groups = new Map();
   return Object.freeze({
-    ledgerBuffer, quantumJ,
+    ledgerBuffer, quantumJ, spatialGrid, slopM,
     prepare(encoder, dtSeconds, { particleCount = 0, exactEnergyBuffer = null, exactEnergyRowCount = 0 } = {}) {
       if (!(particleCount > 0)) return false;
       if (!memberHeatCleared) {
@@ -327,16 +330,13 @@ export function createSchroederSolidFluidThermalStage({ device, memberCount, mem
         f[15] = dtSeconds;
         device.queue.writeBuffer(params, 0, words);
       }
-      const key = [memberThermoBuffer, fluidStateBuffer, fluidThermoBuffer, boundExactEnergy];
-      let group = [...groups.entries()].find(([k]) => k.every((b, n) => b === key[n]))?.[1];
-      if (!group) {
-        group = device.createBindGroup({ layout: pipelines.couple_particles.bindGroupLayout,
-          entries: [params, memberWorldBuffer, memberBuffer, memberThermoBuffer, fluidStateBuffer, fluidThermoBuffer,
-            tableBuffer, memberHeat, ledgerBuffer, spatialGrid, boundExactEnergy]
-            .map((buffer, binding) => ({ binding, resource: { buffer } })) });
-        if (groups.size > 8) groups.clear();
-        groups.set(key, group);
-      }
+      const group = createCachedExplicitBindGroup(device, {
+        label: 'ulg-solid-fluid-thermal-bg',
+        layout: pipelines.couple_particles.bindGroupLayout,
+        entries: [params, memberWorldBuffer, memberBuffer, memberThermoBuffer, fluidStateBuffer, fluidThermoBuffer,
+          tableBuffer, memberHeat, ledgerBuffer, spatialGrid, boundExactEnergy]
+          .map((buffer, binding) => ({ binding, resource: { buffer } }))
+      });
       const pass = sharedPass ?? encoder.beginComputePass({ label: 'ulg-solid-fluid-thermal' });
       pass.setBindGroup(0, group);
       for (const [entryPoint, count] of [

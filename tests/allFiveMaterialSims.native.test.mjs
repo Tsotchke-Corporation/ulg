@@ -122,12 +122,61 @@ test('All 5 canonical material-property WebGPU simulations: LLG Magnetism, Drude
     console.log('[sim2-si-semi]', JSON.stringify({ coldMobile: siCold.mobileCount, hotMobile: siHot.mobileCount, bandGapEv: siHot.bandGapEv }));
     assert.ok(siHot.mobileCount > siCold.mobileCount, `Heating Si must thermally excite more carriers: cold=${siCold.mobileCount}, hot=${siHot.mobileCount}`);
 
-    // 3 & 4. SIMS 3 & 4: Canonical Mechanical Stress-Strain / Acoustic + NEMD Viscosity / Thermal / Free-Surface (Cu Z=29)
+    // 3 & 4. SIMS 3 & 4: High-Fidelity O(N) GPU MD — Solid -> Melt Droplet -> Boiling Vapor + Mechanical/NEMD (Cu Z=29)
     await page.evaluate(() => window.__ulgElementsLabApi.solveElement(29, null, { switchToTab: 'md' }));
-    await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 29, null, { timeout: 45_000 });
+    await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 29 && window.__ulgElementsLabState?.currentTab === 'md', null, { timeout: 45_000 });
+
+    // Equilibrium Drop & Vapor Chamber (500 Cu atoms, O(N) GPU spatial cell-list!): Solid -> Melt -> Vapor!
+    await page.evaluate(() => {
+      window.__ulgElementsLabApi.setMdMode('equilibrium', null, { chamberMode: 'drop', colorMode: 1, sizePreset: 'medium' });
+      window.__ulgElementsLabApi.setCamera(0.45, 0.30, 2.85);
+    });
+    const solidPreset = await page.evaluate(() => window.__ulgElementsLabApi.setMdPhasePreset('solid'));
+    const mdSolid = await page.evaluate(async () => {
+      let tel = null;
+      for (let k = 0; k < 5; k += 1) tel = await window.__ulgElementsLabApi.stepMd(16);
+      return tel;
+    });
+    await saveShot(page, '06a-cu-md-solid-500');
+
+    // Click actual Melt button in the accordion UI!
+    await page.click('[data-md-phase="melt"]');
+    const mdMelt = await page.evaluate(async () => {
+      let tel = null;
+      for (let k = 0; k < 14; k += 1) tel = await window.__ulgElementsLabApi.stepMd(20);
+      return tel;
+    });
+    await saveShot(page, '06b-cu-md-melt-droplet-500');
+
+    // Click actual Vapor button in the accordion UI and let atoms physically cross the 42 A chamber (~0.6 ps)!
+    await page.click('[data-md-phase="vapor"]');
+    const mdVapor = await page.evaluate(async () => {
+      let tel = null;
+      for (let k = 0; k < 24; k += 1) tel = await window.__ulgElementsLabApi.stepMd(32);
+      return tel;
+    });
+    await saveShot(page, '06c-cu-md-vapor-gas-500');
+
+    console.log('[sim3-cu-solid-melt-vapor]', JSON.stringify({
+      atomCount: mdSolid.atomCount,
+      usedCellList: mdSolid.usedCellList,
+      cellDims: mdSolid.cellDims,
+      solidPreset,
+      solid: { T: Math.round(mdSolid.temperatureK), phase: mdSolid.emergentPhase, sFrac: Number(mdSolid.solidFraction.toFixed(2)), lFrac: Number(mdSolid.liquidFraction.toFixed(2)), vFrac: Number(mdSolid.vaporFraction.toFixed(2)), coord: Number(mdSolid.meanCoordination.toFixed(2)), msd: Number(mdSolid.msdA2.toFixed(3)), lind: Number(mdSolid.lindemannRatio.toFixed(3)) },
+      melt: { T: Math.round(mdMelt.temperatureK), phase: mdMelt.emergentPhase, sFrac: Number(mdMelt.solidFraction.toFixed(2)), lFrac: Number(mdMelt.liquidFraction.toFixed(2)), vFrac: Number(mdMelt.vaporFraction.toFixed(2)), coord: Number(mdMelt.meanCoordination.toFixed(2)), msd: Number(mdMelt.msdA2.toFixed(3)), lind: Number(mdMelt.lindemannRatio.toFixed(3)) },
+      vapor: { T: Math.round(mdVapor.temperatureK), phase: mdVapor.emergentPhase, sFrac: Number(mdVapor.solidFraction.toFixed(2)), lFrac: Number(mdVapor.liquidFraction.toFixed(2)), vFrac: Number(mdVapor.vaporFraction.toFixed(2)), coord: Number(mdVapor.meanCoordination.toFixed(2)), msd: Number(mdVapor.msdA2.toFixed(3)), lind: Number(mdVapor.lindemannRatio.toFixed(3)) }
+    }));
+    assert.ok(mdSolid.atomCount >= 400, `Default desktop MD must have >=400 atoms, got ${mdSolid.atomCount}`);
+    assert.equal(mdSolid.usedCellList, true, 'O(N) GPU spatial cell-list must be active for 500-atom MD');
+    assert.equal(mdSolid.emergentPhase, 'solid', `Solid preset must stay crystalline solid, got ${mdSolid.emergentPhase}`);
+    assert.ok(mdSolid.solidFraction > 0.70 && mdSolid.vaporFraction < 0.05, `Solid fractions unexpected: S=${mdSolid.solidFraction}, V=${mdSolid.vaporFraction}`);
+    assert.ok(mdMelt.emergentPhase === 'liquid' || mdMelt.liquidFraction > 0.50, `Melt preset must genuinely melt into diffusing liquid: phase=${mdMelt.emergentPhase}, L=${mdMelt.liquidFraction}, msd=${mdMelt.msdA2}`);
+    assert.ok(mdMelt.msdA2 > mdSolid.msdA2 * 6.0 && mdMelt.vaporFraction < 0.25, `Melted liquid must diffuse while remaining cohesive droplet: msd=${mdMelt.msdA2} vs ${mdSolid.msdA2}, V=${mdMelt.vaporFraction}`);
+    assert.ok(mdVapor.emergentPhase === 'vapor' || mdVapor.vaporFraction >= 0.45, `Vapor preset must boil into free vapor gas: phase=${mdVapor.emergentPhase}, V=${mdVapor.vaporFraction}`);
+    assert.ok(mdVapor.meanCoordination < mdSolid.meanCoordination * 0.45, `Vapor coordination must collapse far below crystal: ${mdVapor.meanCoordination} vs ${mdSolid.meanCoordination}`);
 
     // Stress-Strain
-    await page.evaluate(() => window.__ulgElementsLabApi.setMdMode('strain', 150));
+    await page.evaluate(() => window.__ulgElementsLabApi.setMdMode('strain', 150, { colorMode: 2 }));
     const mdBase = await page.evaluate(() => window.__ulgElementsLabApi.stepMd(12, { npt: false }));
     const mdComp = await page.evaluate(() => window.__ulgElementsLabApi.stepMd(24, { strainX: -0.04, npt: true }));
     await saveShot(page, '06-cu-md-strain');

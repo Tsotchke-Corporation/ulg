@@ -61,6 +61,15 @@ test('Sim 3 & 4 (MD Mechanical, NEMD & Phonon VDOS): elongated acoustic cells, v
   const slab = buildCrystalMdState({ crystalStructure: 'fcc', cellsPerSide: 2, vacuumZFactor: 2.5, latticeConstantA: 4.0, massU: 27, temperatureK: 300 });
   assert.ok(slab.boxLengthsA[2] > slab.boxLengthsA[0] * 2.4);
 
+  const drop = buildCrystalMdState({ crystalStructure: 'fcc', cellsVec: [5, 5, 5], chamberScale: 2.35, latticeConstantA: 3.6, massU: 63.5, temperatureK: 300 });
+  assert.equal(drop.atomCount, 500);
+  assert.equal(drop.idealCoordination, 12);
+  assert.ok(Math.abs(drop.boxLengthsA[0] - 5 * 3.6 * 2.35) < 1e-4, 'Drop chamber must scale outer periodic box around centered crystal');
+
+  const bulkVac = buildCrystalMdState({ crystalStructure: 'bcc', cellsVec: [6, 6, 6], vacancyFraction: 0.015, latticeConstantA: 2.87, massU: 55.8, temperatureK: 300 });
+  assert.ok(bulkVac.atomCount < 2 * 216 && bulkVac.atomCount > 2 * 216 - 12, 'Bulk vacancy mode must seed physical Schottky vacancies');
+  assert.equal(bulkVac.idealCoordination, 14);
+
   // Synthetic 5 THz damped harmonic VACF -> VDOS peak must recover ~5 THz!
   const dtFs = 10;
   const fTargetThz = 5.0;

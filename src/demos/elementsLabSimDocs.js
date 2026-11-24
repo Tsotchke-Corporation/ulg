@@ -218,18 +218,18 @@ export const SIMULATION_DOCS = Object.freeze({
     ]
   },
   'md:equilibrium': {
-    title: 'Live 3D WebGPU Molecular Dynamics & Phonons',
+    title: 'Live 3D WebGPU Molecular Dynamics & Phase Transitions',
     scale: '10⁻⁸ m (Atomistic MD)',
     moduleKey: 'md-mechanical-probe@1',
     whatYouSee:
-      'Hundreds of live interacting atoms rendered zero-copy directly from WebGPU storage buffers (colored by kinetic energy), alongside live Radial Distribution Function g(r), Mean-Squared Displacement (MSD), and Phonon VDOS plots.',
+      'Hundreds to ~1,000 live interacting atoms rendered zero-copy with depth-correct spherical shading directly from WebGPU storage buffers. In Drop & Vapor open-chamber mode, watch a faceted solid crystal melt from its free surfaces into a cohesive liquid droplet and boil off into a chamber-filling vapor gas; in Bulk NPT mode, watch the periodic lattice expand visibly inside the gold V₀ reference wireframe.',
     gpuPhysics:
-      'Integrates Velocity-Verlet molecular dynamics on WebGPU with Morse/EAM/Lennard-Jones/Stillinger–Weber potentials fitted from bulk DFT, Berendsen thermostat, optional NPT barostat (thermal expansion α_V), and GPU reductions for pressure, g(r), and VACF.',
+      'Runs an O(N) 3D uniform spatial cell-listed Velocity-Verlet integrator on WebGPU with DFT-fitted Morse+Finnis–Sinclair EAM, Shifted-Force Lennard-Jones, or 3-body Stillinger–Weber potentials, exact exponential thermostatting, adaptive-compressibility Berendsen NPT barostat, live GPU per-atom coordination z_i & Solid/Liquid/Vapor phase classification, g(r), MSD, Lindemann δ_L, and VACF phonon VDOS.',
     whyInUlg:
       'Representative MD cells bridge atomic DFT up to macroscopic continuum equations of state, melting/boiling coexistence curves, and Polytope Atlases.',
     tryThis: [
-      'Click Solid, Melt, and Vapor presets (or drag Temperature T) to watch crystalline Bragg peaks in g(r) melt into a liquid and evaporate into gas!',
-      'Drop Sim Speed to 0.25× to watch individual atomic vibrations with a 4× finer Verlet timestep.'
+      'Click Solid, Melt, and Vapor to watch the faceted crystal physically melt into a diffusing liquid droplet and then boil into fast gas atoms (color by Phase to see sapphire solid → emerald liquid → magenta vapor live!).',
+      'Switch Chamber to Bulk NPT or raise Atom Count to ~900, and drop Sim Speed to 0.25× to watch atomic collisions with a 4× finer Verlet timestep.'
     ]
   },
   'md:strain': {

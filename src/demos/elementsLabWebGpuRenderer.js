@@ -304,24 +304,35 @@ fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// Zero-Copy Instanced 3D Sphere Renderer reading `positionsBuffer` & `velocitiesBuffer` DIRECTLY on WebGPU!
+// Zero-Copy Instanced 3D Sphere Renderer reading `positionsBuffer`, `velocitiesBuffer`, & `forcesBuffer` DIRECTLY on WebGPU!
 const INSTANCED_ATOMS_WGSL = /* wgsl */ `
 struct AtomRenderUniforms {
   resolution: vec2<f32>,
   yaw: f32,
   pitch: f32,
-  box_l: vec4<f32>,      // (Lx, Ly, Lz, atomRadiusFrac)
-  base_tint: vec4<f32>,  // (r, g, b, velocityColorScale)
+  box_l: vec4<f32>,        // (Lx, Ly, Lz, atomRadiusWorldA)
+  ref_box_cam: vec4<f32>,  // (refLx, refLy, refLz, camDist)
+  base_tint: vec4<f32>,    // (r, g, b, meltingTempK)
+  render_cfg: vec4<f32>,   // (colorMode: 0=Temp 1=Phase/Coord 2=E_pot, eCohEv, wireMode: 0=live 1=refGhost, pad)
 };
 
 @group(0) @binding(0) var<uniform> u: AtomRenderUniforms;
 @group(0) @binding(1) var<storage, read> positions: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> velocities: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> forces: array<vec4<f32>>;
 
 struct VsOut {
   @builtin(position) clip_pos: vec4<f32>,
   @location(0) local_uv: vec2<f32>,
   @location(1) color: vec3<f32>,
+  @location(2) view_z: f32,
+  @location(3) view_rad: f32,
+  @location(4) glow: f32,
+};
+
+struct FsOut {
+  @location(0) color: vec4<f32>,
+  @builtin(frag_depth) depth: f32,
 };
 
 fn world_to_view(p_norm: vec3<f32>) -> vec3<f32> {
@@ -330,7 +341,7 @@ fn world_to_view(p_norm: vec3<f32>) -> vec3<f32> {
   let x1 = p_norm.x * cy - p_norm.z * sy;
   let z1 = p_norm.x * sy + p_norm.z * cy;
   let y2 = p_norm.y * cp - z1 * sp;
-  let z2 = p_norm.y * sp + z1 * cp + 3.35;
+  let z2 = p_norm.y * sp + z1 * cp + max(1.65, u.ref_box_cam.w);
   return vec3<f32>(x1, y2, z2);
 }
 
@@ -346,55 +357,107 @@ fn vs_atom(
   let corner = quad[vid];
   let pos4 = positions[iid];
   let vel4 = velocities[iid];
+  let f4 = forces[iid];
   let half_box = max(vec3<f32>(0.5), u.box_l.xyz * 0.5);
-  let max_half = max(half_box.x, max(half_box.y, half_box.z));
-  let p_norm = (pos4.xyz - half_box) / max_half;
+  let ref_half = max(half_box, u.ref_box_cam.xyz * 0.5);
+  let norm_half = max(ref_half.x, max(ref_half.y, ref_half.z));
+  let p_norm = (pos4.xyz - half_box) / norm_half;
   let view = world_to_view(p_norm);
 
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let fov_scale = 1.65 * min(1.0, aspect);
-  let rad = u.box_l.w * clamp(min(half_box.x, min(half_box.y, half_box.z)) / max_half, 0.42, 1.0);
+  let rad = clamp(u.box_l.w / norm_half, 0.022, 0.16);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
   let rx = (rad * fov_scale) / max(0.35, view.z * aspect);
   let ry = (rad * fov_scale) / max(0.35, view.z);
-  let depth_z = clamp((view.z - 0.35) / 8.0, 0.001, 0.999);
+  let depth_z = clamp((view.z - 0.35) / 10.0, 0.001, 0.999);
 
-  // Velocity-magnitude thermal kinetic energy coloring (live GPU velocitiesBuffer!)
-  let speed = length(vel4.xyz);
-  let heat = clamp(speed * u.base_tint.w, 0.0, 1.0);
-  let cold_col = mix(vec3<f32>(0.28, 0.68, 1.0), u.base_tint.rgb, 0.45);
-  let warm_col = vec3<f32>(1.0, 0.56, 0.22);
-  let hot_col = vec3<f32>(1.0, 0.92, 0.55);
-  let col = select(
-    mix(cold_col, warm_col, heat * 2.0),
-    mix(warm_col, hot_col, (heat - 0.5) * 2.0),
-    heat > 0.5
-  );
+  let cmode = u32(round(u.render_cfg.x));
+  var col = u.base_tint.rgb;
+  var glow = 0.0;
+
+  if (cmode == 1u) {
+    // Emergent Structural Phase / First-Shell Coordination z_i / Z_ideal from GPU pos.w!
+    let z_norm = clamp(pos4.w, 0.0, 1.25);
+    let solid_c = mix(vec3<f32>(0.26, 0.72, 1.0), u.base_tint.rgb, 0.42);
+    let liq_c = vec3<f32>(0.22, 0.88, 0.62);
+    let surf_c = vec3<f32>(0.98, 0.74, 0.24);
+    let vap_c = vec3<f32>(0.98, 0.42, 0.68);
+    if (z_norm < 0.22) {
+      col = vap_c;
+      glow = 0.26;
+    } else if (z_norm < 0.55) {
+      col = mix(surf_c, liq_c, clamp((z_norm - 0.22) / 0.33, 0.0, 1.0));
+      glow = 0.10;
+    } else {
+      col = mix(liq_c, solid_c, clamp((z_norm - 0.55) / 0.35, 0.0, 1.0));
+      glow = 0.02;
+    }
+  } else if (cmode == 2u) {
+    // Per-Atom Potential Energy / Local Strain Stress from GPU forcesBuffer.w!
+    let e_scale = max(0.05, u.render_cfg.y);
+    let u_rel = clamp(1.0 + f4.w / e_scale, 0.0, 1.4);
+    let deep_c = vec3<f32>(0.22, 0.48, 0.96);
+    let mid_c = vec3<f32>(0.22, 0.86, 0.72);
+    let high_c = vec3<f32>(1.0, 0.48, 0.20);
+    col = select(
+      mix(deep_c, mid_c, clamp(u_rel * 1.4, 0.0, 1.0)),
+      mix(mid_c, high_c, clamp((u_rel - 0.7) * 1.4, 0.0, 1.0)),
+      u_rel > 0.7
+    );
+    glow = clamp((u_rel - 0.85) * 0.4, 0.0, 0.28);
+  } else {
+    // True Physical Per-Atom Kinetic Temperature T_i = m * v^2 / (3 k_B) normalized by T_m!
+    let m_u = max(1.0, vel4.w);
+    let v2 = dot(vel4.xyz, vel4.xyz);
+    let t_atom_k = (m_u * v2) / (3.0 * 8.617333262e-5);
+    let t_melt = max(25.0, u.base_tint.w);
+    let heat = clamp(t_atom_k / (2.35 * t_melt), 0.0, 1.0);
+    let cold_col = mix(vec3<f32>(0.28, 0.68, 1.0), u.base_tint.rgb, 0.52);
+    let melt_col = vec3<f32>(1.0, 0.58, 0.18);
+    let hot_col = vec3<f32>(1.0, 0.94, 0.64);
+    col = select(
+      mix(cold_col, melt_col, heat * 2.0),
+      mix(melt_col, hot_col, (heat - 0.5) * 2.0),
+      heat > 0.5
+    );
+    glow = clamp((heat - 0.62) * 0.55, 0.0, 0.28);
+  }
 
   var out: VsOut;
   out.clip_pos = vec4<f32>(cx + corner.x * rx, cy + corner.y * ry, depth_z, 1.0);
   out.local_uv = corner;
   out.color = col;
+  out.view_z = view.z;
+  out.view_rad = rad;
+  out.glow = glow;
   return out;
 }
 
 @fragment
-fn fs_atom(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_atom(in: VsOut) -> FsOut {
   let r2 = dot(in.local_uv, in.local_uv);
   if (r2 > 1.0) { discard; }
   let nz = sqrt(max(0.0, 1.0 - r2));
   let n = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
-  let light = normalize(vec3<f32>(-0.42, 0.62, 0.66));
-  let diff = max(0.14, dot(n, light));
-  let half_v = normalize(light + vec3<f32>(0.0, 0.0, 1.0));
-  let spec = pow(max(0.0, dot(n, half_v)), 28.0) * 0.72;
-  let rim = pow(1.0 - nz, 2.5) * 0.28;
-  let rgb = in.color * diff + vec3<f32>(1.0) * spec + vec3<f32>(0.38, 0.76, 1.0) * rim;
-  return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  let key_l = normalize(vec3<f32>(-0.42, 0.64, 0.64));
+  let fill_l = normalize(vec3<f32>(0.62, -0.35, 0.55));
+  let diff = max(0.16, dot(n, key_l)) + 0.18 * max(0.0, dot(n, fill_l));
+  let half_v = normalize(key_l + vec3<f32>(0.0, 0.0, 1.0));
+  let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.68;
+  let rim = pow(1.0 - nz, 2.4) * (0.26 + in.glow * 0.65);
+  let ao = 0.84 + 0.16 * nz;
+  let fog = clamp(1.0 - max(0.0, in.view_z - 3.6) * 0.10, 0.58, 1.0);
+  let lit = (in.color * diff * ao + vec3<f32>(1.0) * spec + mix(vec3<f32>(0.38, 0.78, 1.0), in.color, 0.45) * rim + in.color * in.glow * 0.35) * fog;
+
+  var out: FsOut;
+  out.color = vec4<f32>(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  out.depth = clamp((in.view_z - nz * in.view_rad - 0.35) / 10.0, 0.001, 0.999);
+  return out;
 }
 
-// Periodic Simulation-Box Wireframe Lines (24 vertices = 12 edges)
+// Periodic Simulation-Box Wireframe Lines (24 vertices = 12 edges; supports live box & V0 ghost box!)
 @vertex
 fn vs_wire(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
   var edges = array<vec3<f32>, 24>(
@@ -411,21 +474,26 @@ fn vs_wire(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
     vec3<f32>(-1, 1,-1), vec3<f32>(-1, 1, 1),
     vec3<f32>( 1, 1,-1), vec3<f32>( 1, 1, 1)
   );
-  let half_box = max(vec3<f32>(0.5), u.box_l.xyz * 0.5);
-  let max_half = max(half_box.x, max(half_box.y, half_box.z));
-  let box_scale = half_box / max_half;
+  let live_half = max(vec3<f32>(0.5), u.box_l.xyz * 0.5);
+  let ref_half = max(live_half, u.ref_box_cam.xyz * 0.5);
+  let norm_half = max(ref_half.x, max(ref_half.y, ref_half.z));
+  let active_half = select(live_half, max(vec3<f32>(0.5), u.ref_box_cam.xyz * 0.5), u.render_cfg.z > 0.5);
+  let box_scale = active_half / norm_half;
   let view = world_to_view(edges[vid] * box_scale);
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let fov_scale = 1.65 * min(1.0, aspect);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
-  let depth_z = clamp((view.z - 0.35) / 8.0, 0.001, 0.999);
+  let depth_z = clamp((view.z - 0.35) / 10.0, 0.001, 0.999);
   return vec4<f32>(cx, cy, depth_z, 1.0);
 }
 
 @fragment
 fn fs_wire() -> @location(0) vec4<f32> {
-  return vec4<f32>(0.34, 0.76, 1.0, 0.32);
+  if (u.render_cfg.z > 0.5) {
+    return vec4<f32>(0.98, 0.80, 0.28, 0.36);
+  }
+  return vec4<f32>(0.34, 0.76, 1.0, 0.38);
 }
 `;
 
@@ -2601,7 +2669,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
 
   // Reusable uniforms & dummy placeholder buffers
   const volUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const atomUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const atomUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const refWireUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const polyUniformBuf = device.createBuffer({ size: 32, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const polyProbeUniformBuf = device.createBuffer({ size: 16, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const polyProbeOutBuf = device.createBuffer({ size: 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
@@ -2800,39 +2869,65 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
   }
 
   /**
-   * Zero-copy WebGPU instanced MD renderer: reads `positionsBuffer` and
-   * `velocitiesBuffer` DIRECTLY from `liveMdSession` on the GPU!
+   * Zero-copy WebGPU instanced MD renderer: reads `positionsBuffer`,
+   * `velocitiesBuffer`, and `forcesBuffer` DIRECTLY from `liveMdSession` on the GPU!
    */
   function renderLiveMd({
     positionsBuffer,
     velocitiesBuffer,
+    forcesBuffer = null,
     atomCount,
     boxLengthsA,
+    initBoxLengthsA = null,
+    rNearestNeighborA = null,
+    meltingPointK = 600,
+    cohesiveEnergyEv = 1.5,
+    colorMode = 0,
     yaw = 0.45,
     pitch = 0.32,
-    tint = [0.65, 0.80, 0.96],
-    velocityColorScale = 28.0
+    camDist = 3.25,
+    tint = [0.65, 0.80, 0.96]
   }) {
     if (!positionsBuffer || !velocitiesBuffer || !(atomCount > 0)) return;
     const { w, h } = ensureCanvasSize();
     const lx = Number(boxLengthsA?.[0] || 10);
     const ly = Number(boxLengthsA?.[1] || lx);
     const lz = Number(boxLengthsA?.[2] || lx);
-    const radiusFrac = Math.max(0.055, Math.min(0.14, 0.56 / Math.cbrt(Math.max(8, atomCount))));
+    const rlx = Number(initBoxLengthsA?.[0] || lx);
+    const rly = Number(initBoxLengthsA?.[1] || ly);
+    const rlz = Number(initBoxLengthsA?.[2] || lz);
+    const minL = Math.min(lx, ly, lz);
+    const atomRadA = Number.isFinite(Number(rNearestNeighborA)) && Number(rNearestNeighborA) > 0.8
+      ? Math.max(0.65, Math.min(2.6, 0.43 * Number(rNearestNeighborA)))
+      : Math.max(0.65, minL * (0.48 / Math.cbrt(Math.max(8, atomCount))));
+    const effCamDist = Math.max(1.75, Math.min(6.4, Number(camDist) || 3.25));
+    const safeTm = Math.max(25, Number(meltingPointK) || 600);
+    const safeEcoh = Math.max(0.08, Number(cohesiveEnergyEv) || 1.5);
 
     const uData = new Float32Array([
       w, h, yaw, pitch,
-      lx, ly, lz, radiusFrac,
-      tint[0] ?? 0.65, tint[1] ?? 0.80, tint[2] ?? 0.96, velocityColorScale
+      lx, ly, lz, atomRadA,
+      rlx, rly, rlz, effCamDist,
+      tint[0] ?? 0.65, tint[1] ?? 0.80, tint[2] ?? 0.96, safeTm,
+      Number(colorMode) || 0, safeEcoh, 0.0, 0.0
     ]);
     device.queue.writeBuffer(atomUniformBuf, 0, uData);
+
+    const volRatio = (lx * ly * lz) / Math.max(1e-6, rlx * rly * rlz);
+    const showRefWire = Math.abs(volRatio - 1.0) > 0.025;
+    if (showRefWire) {
+      const refData = new Float32Array(uData);
+      refData[18] = 1.0; // wireMode = 1 (initial V0 gold ghost wireframe)
+      device.queue.writeBuffer(refWireUniformBuf, 0, refData);
+    }
 
     const atomBg = device.createBindGroup({
       layout: atomPipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: atomUniformBuf } },
         { binding: 1, resource: { buffer: positionsBuffer } },
-        { binding: 2, resource: { buffer: velocitiesBuffer } }
+        { binding: 2, resource: { buffer: velocitiesBuffer } },
+        { binding: 3, resource: { buffer: forcesBuffer || velocitiesBuffer } }
       ]
     });
     const wireBg = device.createBindGroup({
@@ -2864,6 +2959,15 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     pass.setPipeline(wirePipe);
     pass.setBindGroup(0, wireBg);
     pass.draw(24, 1);
+
+    if (showRefWire) {
+      const refWireBg = device.createBindGroup({
+        layout: wirePipe.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: refWireUniformBuf } }]
+      });
+      pass.setBindGroup(0, refWireBg);
+      pass.draw(24, 1);
+    }
 
     pass.end();
     device.queue.submit([enc.finish()]);

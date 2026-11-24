@@ -546,7 +546,11 @@ const uiState = {
   transportPlaying: true,
   // Tab 4: Live WebGPU MD, Mechanical Stress-Strain/Acoustic & NEMD Viscosity/Heat/Surface
   mdMode: 'equilibrium',          // 'equilibrium' | 'strain' | 'acoustic' | 'shear' | 'thermal' | 'surface'
-  mdNptBarostat: false,
+  mdChamberMode: 'drop',          // 'drop' (open Drop & Vapor chamber) | 'bulk' (periodic Bulk NPT)
+  mdColorMode: 1,                 // 0 = Kinetic Temp (T_i/T_m), 1 = Emergent Phase (Coord z_i), 2 = Local Potential/Stress
+  mdSizePreset: IS_MOBILE_GPU_PROFILE ? 'small' : 'medium', // 'small' (~200) | 'medium' (~500) | 'large' (~900)
+  mdPhasePreset: 'solid',         // 'solid' | 'melt' | 'vapor' | null
+  mdNptBarostat: true,
   mdPlaying: true,
   mdTargetTempK: 300,
   // Tab 5: Chemistry — 3D Molecule + Wiberg Bonds, Multi-Molecule CI-NEB, Geom Opt & Vibrations, 3D Reactive MD!
@@ -1067,7 +1071,7 @@ function buildPeriodicTableButtons() {
           if (sub === 'spin-llg' && !liveSpinSession) initSpinLatticeForActiveSpecimen();
           if (sub === 'transport' && !liveTransportSession) initElectronTransportForActiveSpecimen();
         } else if (tab === 'md') {
-          initLiveMdForActiveSpecimen(null, sub);
+          initLiveMdForActiveSpecimen(null, sub, { preserveColorMode: false });
         } else if (tab === 'compound') {
           uiState.chemViewMode = sub;
           if (sub === 'reactive-md' && !liveReactiveMdSession) {
@@ -1997,8 +2001,60 @@ function initElectronTransportForActiveSpecimen(overrideTempK = null) {
   }).catch(() => {});
 }
 
-function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) {
+function chooseMdCellsForMode(crystalStructure, modeKey, sizePreset = 'medium') {
+  const s = String(crystalStructure || 'fcc').toLowerCase();
+  const isBcc = s === 'bcc' || s.startsWith('cscl');
+  const isDia = s === 'diamond' || s.startsWith('zincblende');
+  const tier = sizePreset === 'large' ? 2 : (sizePreset === 'small' ? 0 : 1);
+
+  if (modeKey === 'acoustic') {
+    if (isBcc) return [[6, 2, 2], [9, 3, 3], [12, 4, 3]][tier];
+    if (isDia) return [[5, 2, 2], [7, 2, 2], [9, 3, 3]][tier];
+    return [[6, 2, 2], [8, 3, 3], [10, 3, 3]][tier];
+  }
+  if (modeKey === 'thermal') {
+    if (isBcc) return [[5, 3, 3], [8, 3, 3], [10, 4, 4]][tier];
+    if (isDia) return [[4, 2, 2], [6, 2, 2], [8, 3, 3]][tier];
+    return [[4, 2, 2], [6, 3, 3], [8, 3, 3]][tier];
+  }
+  if (modeKey === 'surface') {
+    if (isBcc) return [[4, 4, 4], [5, 5, 5], [6, 6, 6]][tier];
+    if (isDia) return [[2, 2, 2], [3, 3, 3], [4, 4, 4]][tier];
+    return [[3, 3, 3], [4, 4, 4], [5, 5, 5]][tier];
+  }
+  // equilibrium, strain, shear — rich cubic supercells scaled cleanly by Bravais basis size
+  if (isBcc) return [[4, 4, 4], [6, 6, 6], [8, 8, 7]][tier];     // 128 / 432 / 896 atoms
+  if (isDia) return [[3, 3, 3], [4, 4, 4], [5, 5, 5]][tier];     // 216 / 512 / 1000 atoms
+  return [[3, 3, 3], [5, 5, 5], [6, 6, 6]][tier];                // 108 / 500 / 864 atoms
+}
+
+function computeMdPhaseTemperatures(tMeltRaw, tBoilRaw, potentialModel = 1) {
+  const tMelt = Math.max(20, Number(tMeltRaw) || 600);
+  const tBoil = Math.max(tMelt * 1.25 + 10, Number(tBoilRaw) || tMelt * 2.4);
+  const isLj = Number(potentialModel) === 0;
+  const tSolid = Math.max(15, Math.round(0.30 * tMelt));
+  const tMeltLiquid = isLj
+    ? Math.round(Math.min(0.92 * tBoil, Math.max(1.25 * tMelt, 0.50 * (tMelt + tBoil))))
+    : Math.round(Math.min(0.84 * tBoil, Math.max(1.65 * tMelt, 0.52 * (tMelt + tBoil))));
+  const tVapor = isLj
+    ? Math.round(Math.max(2.15 * tBoil, 3.6 * tMelt))
+    : Math.round(Math.max(2.55 * tBoil, 6.5 * tMelt));
+  const tMax = Math.max(1500, Math.round(Math.max(tVapor * 1.25, tBoil * 3.0)));
+  return { tMelt: Math.round(tMelt), tBoil: Math.round(tBoil), tSolid, tMeltLiquid, tVapor, tMax };
+}
+
+function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null, { preserveColorMode = true } = {}) {
+  const prevMode = uiState.mdMode;
   if (overrideMode) uiState.mdMode = overrideMode;
+  if (!preserveColorMode && overrideMode && overrideMode !== prevMode) {
+    if (overrideMode === 'thermal' || overrideMode === 'acoustic' || overrideMode === 'shear') {
+      uiState.mdColorMode = 0; // Kinetic Temp vividly shows hot/cold thermal slabs & acoustic wavefronts!
+    } else if (overrideMode === 'strain') {
+      uiState.mdColorMode = 2; // Potential Energy / Local Stress
+    } else if (overrideMode === 'equilibrium') {
+      uiState.mdColorMode = 1; // Emergent Phase / Coordination (Solid / Liquid / Vapor)
+    }
+  }
   if (liveMdSession) {
     try { liveMdSession.destroy(); } catch {}
     liveMdSession = null;
@@ -2020,23 +2076,31 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) 
     surface: MD_EXPERIMENT_MODES.SURFACE_SLAB
   };
   const modeCode = modeMap[modeKey] ?? MD_EXPERIMENT_MODES.EQUILIBRIUM;
-  const cellsVec = modeKey === 'acoustic'
-    ? [5, 2, 2]
-    : (modeKey === 'thermal' ? [4, 2, 2] : null);
   const vacuumZFactor = modeKey === 'surface' ? 2.5 : 1.0;
+  const chamberScale = (modeKey === 'equilibrium' && uiState.mdChamberMode === 'drop') ? 2.35 : 1.0;
+  const vacancyFraction = (modeKey === 'equilibrium' && uiState.mdChamberMode === 'bulk') ? 0.015 : 0.0;
 
   if (activeSpecimenKind === 'compound' && currentCompoundRes?.visualData?.mdConfig) {
     const cfg = currentCompoundRes.visualData.mdConfig;
     const b = currentCompoundRes.bundle;
     const tMelt = Math.max(20, Number(b.thermodynamic.meltingPointK || 300));
-    const defaultFrac = modeKey === 'shear' ? 1.25 : (modeKey === 'strain' || modeKey === 'acoustic' ? 0.25 : 0.70);
-    const tTarget = overrideTempK ?? Math.max(20, Math.min(2400, defaultFrac * tMelt));
+    const tBoil = Math.max(tMelt * 1.25 + 10, Number(b.thermodynamic.boilingPointK || tMelt * 2.2));
+    const temps = computeMdPhaseTemperatures(tMelt, tBoil, cfg.potentialModel);
+    const defaultT = modeKey === 'shear'
+      ? temps.tMeltLiquid
+      : (modeKey === 'strain' || modeKey === 'acoustic' ? temps.tSolid : temps.tSolid);
+    const tTarget = overrideTempK ?? defaultT;
     uiState.mdTargetTempK = Math.round(tTarget);
+    uiState.mdPhasePreset = overrideTempK == null && modeKey === 'equilibrium' ? 'solid' : uiState.mdPhasePreset;
+    const cellsVec = chooseMdCellsForMode(cfg.crystalStructure, modeKey, uiState.mdSizePreset);
+    const bulkModGPa = Math.max(1.5, Number(b.mechanical?.bulkModulusPa || 12e9) / 1e9);
+    const eCohEv = Math.max(0.05, Number(b.mechanical?.cohesiveEnergyEv || cfg.epsilonEv * 8 || 0.6));
     const init = buildCrystalMdState({
       crystalStructure: cfg.crystalStructure,
-      cellsPerSide: 2,
       cellsVec,
       vacuumZFactor,
+      chamberScale,
+      vacancyFraction,
       latticeConstantA: cfg.latticeConstantA,
       massU: cfg.massU,
       temperatureK: tTarget
@@ -2052,15 +2116,22 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) 
       eamBeta: cfg.eamBeta,
       dtFs: cfg.dtFs,
       targetTemperatureK: tTarget,
-      thermostatCouplingFs: 35
+      thermostatCouplingFs: 18,
+      meltingPointK: tMelt,
+      bulkModulusGPa: bulkModGPa
     });
     liveMdConfigMeta = {
       label: b.materialKey,
       crystalStructure: cfg.crystalStructure,
       modelName: cfg.modelName,
+      potentialModel: cfg.potentialModel,
       rcutA: cfg.rcutA,
       dtFs: cfg.dtFs,
-      meltingPointK: tMelt
+      meltingPointK: tMelt,
+      boilingPointK: tBoil,
+      cohesiveEnergyEv: eCohEv,
+      rNearestNeighborA: init.rNearestNeighborA,
+      idealCoordination: init.idealCoordination
     };
     liveMdTelemetry = currentCompoundRes.visualData.mdTelemetry;
   } else if (currentElementRes?.visualData?.thermo?.potential) {
@@ -2069,15 +2140,24 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) 
     const b = currentElementRes.bundle;
     const massU = Math.max(1, Number(b.nuclear.atomicMassU || 28));
     const tMelt = Math.max(20, Number(b.thermodynamic.meltingPointK || 600));
-    const defaultFrac = modeKey === 'shear' ? 1.25 : (modeKey === 'strain' || modeKey === 'acoustic' ? 0.25 : 0.70);
-    const tTarget = overrideTempK ?? Math.max(30, Math.min(2200, defaultFrac * tMelt));
+    const tBoil = Math.max(tMelt * 1.25 + 10, Number(b.thermodynamic.boilingPointK || tMelt * 2.4));
+    const temps = computeMdPhaseTemperatures(tMelt, tBoil, pot.potentialModel);
+    const defaultT = modeKey === 'shear'
+      ? temps.tMeltLiquid
+      : (modeKey === 'strain' || modeKey === 'acoustic' ? temps.tSolid : temps.tSolid);
+    const tTarget = overrideTempK ?? defaultT;
     uiState.mdTargetTempK = Math.round(tTarget);
+    uiState.mdPhasePreset = overrideTempK == null && modeKey === 'equilibrium' ? 'solid' : uiState.mdPhasePreset;
     const dtFs = Math.min(2.0, Math.max(0.45, 0.09 * Math.sqrt(massU)));
+    const cellsVec = chooseMdCellsForMode(bulk.crystalStructure, modeKey, uiState.mdSizePreset);
+    const bulkModGPa = Math.max(1.0, Number(bulk.bulkModulusPa || 40e9) / 1e9);
+    const eCohEv = Math.max(0.05, Number(bulk.cohesiveEnergyEv || 2.0));
     const init = buildCrystalMdState({
       crystalStructure: bulk.crystalStructure,
-      cellsPerSide: modeKey === 'surface' ? 2 : 3,
       cellsVec,
       vacuumZFactor,
+      chamberScale,
+      vacancyFraction,
       latticeConstantA: Math.max(2.4, Number(bulk.latticeConstantA || 3.6)),
       massU,
       temperatureK: tTarget
@@ -2094,15 +2174,22 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) 
       swGamma: pot.swGamma,
       dtFs,
       targetTemperatureK: tTarget,
-      thermostatCouplingFs: 35
+      thermostatCouplingFs: 18,
+      meltingPointK: tMelt,
+      bulkModulusGPa: bulkModGPa
     });
     liveMdConfigMeta = {
       label: b.nuclear.isotope || b.symbol,
       crystalStructure: bulk.crystalStructure,
       modelName: pot.modelName,
+      potentialModel: pot.potentialModel,
       rcutA: pot.rcutA,
       dtFs,
-      meltingPointK: tMelt
+      meltingPointK: tMelt,
+      boilingPointK: tBoil,
+      cohesiveEnergyEv: eCohEv,
+      rNearestNeighborA: init.rNearestNeighborA,
+      idealCoordination: init.idealCoordination
     };
     liveMdTelemetry = currentElementRes.visualData.thermo.mdTelemetry;
   }
@@ -2112,10 +2199,22 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) 
       thermalDeltaT: modeKey === 'thermal' ? Math.max(40, Math.round(uiState.mdTargetTempK * 0.40)) : 0.0
     });
     if (modeKey === 'acoustic') {
-      liveMdSession.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.34 });
+      liveMdSession.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.40 });
     }
+    // Kick 2 initial GPU steps so pos.w coordination & force.w potential energy populate immediately on frame 1!
+    liveMdSession.stepBatch(2, {
+      readTelemetry: true,
+      temperatureK: uiState.mdTargetTempK,
+      nptBarostatGPa: null,
+      nonBlocking: true
+    }).then((tel) => {
+      if (!tel || !liveMdSession) return;
+      liveMdTelemetry = tel;
+      liveMdHistory.push({ t: tel.timeFs, T: tel.temperatureK, msd: tel.msdA2 });
+      if (currentTab === 'md') redrawCurrentTab();
+    }).catch(() => {});
   }
-  if (liveMdTelemetry) {
+  if (liveMdTelemetry && liveMdHistory.length === 0) {
     liveMdHistory.push({ t: 0, T: liveMdTelemetry.temperatureK, msd: liveMdTelemetry.msdA2 });
   }
 }
@@ -2705,16 +2804,27 @@ function renderSimControls() {
       runElementDerivation(selectedZ, selectedA, { preserveQuantumNumbers: true });
     });
   } else if (currentTab === 'md') {
-    const tMelt = Math.max(20, Math.round(liveMdConfigMeta?.meltingPointK || b?.thermodynamic?.meltingPointK || 600));
-    const tMax = Math.max(1500, Math.min(8000, Math.round(tMelt * 3.0)));
+    const temps = computeMdPhaseTemperatures(
+      liveMdConfigMeta?.meltingPointK || b?.thermodynamic?.meltingPointK || 600,
+      liveMdConfigMeta?.boilingPointK || b?.thermodynamic?.boilingPointK || 1500,
+      liveMdConfigMeta?.potentialModel ?? 1
+    );
+    const { tMelt, tBoil, tSolid, tMeltLiquid, tVapor, tMax } = temps;
     const mm = uiState.mdMode;
     simControls.innerHTML = `${aboutBtnHtml}
       <div class="ctrl-group">
         <div class="ctrl-row">
-          <label title="Berendsen thermostat target temperature T (K) relative to derived melting point T_m">T=<b id="lbl-md-t">${uiState.mdTargetTempK}</b>K (T_m=${tMelt}K)</label>
-          <input id="ctrl-md-t" type="range" min="15" max="${tMax}" step="10" value="${Math.min(tMax, uiState.mdTargetTempK)}" title="Adjust live WebGPU MD thermostat target temperature T (K)" />
+          <label title="Exact exponential thermostat target temperature T (K) relative to derived melting point T_m and boiling point T_b">T=<b id="lbl-md-t">${uiState.mdTargetTempK}</b>K <span style="opacity:0.7;">(T_m=${tMelt} · T_b=${tBoil})</span></label>
         </div>
-        ${mm === 'equilibrium' ? `<label title="Enable Berendsen NPT constant-pressure barostat to measure live thermal expansion α_V(T)"><input id="ctrl-md-npt" type="checkbox" title="Enable Berendsen NPT constant-pressure barostat to measure live thermal expansion α_V(T)" ${uiState.mdNptBarostat ? 'checked' : ''} /> NPT α_V Barostat</label>` : ''}
+        <div class="ctrl-row">
+          <input id="ctrl-md-t" type="range" min="15" max="${tMax}" step="${tMax > 4000 ? 25 : 10}" value="${Math.min(tMax, uiState.mdTargetTempK)}" title="Adjust live WebGPU MD thermostat target temperature T (K) from cryogenic solid through liquid melting to boiling vapor" />
+        </div>
+        ${mm === 'equilibrium' ? `
+        <div class="ctrl-row">
+          <button id="ctrl-md-ch-drop" class="action${uiState.mdChamberMode === 'drop' ? ' active-toggle' : ''}" title="Open Chamber (Drop &amp; Vapor): free crystal surfaces eliminate periodic superheating so you watch faceted Solid → cohesive Liquid Droplet → chamber-filling Vapor!">Drop &amp; Vapor</button>
+          <button id="ctrl-md-ch-bulk" class="action${uiState.mdChamberMode === 'bulk' ? ' active-toggle' : ''}" title="Periodic Bulk (NPT): space-filling crystal with physical thermal vacancies and constant-pressure volume expansion">Bulk NPT</button>
+        </div>
+        ${uiState.mdChamberMode === 'bulk' ? `<label title="Enable adaptive Berendsen NPT constant-pressure barostat to measure live thermal expansion α_V(T) &amp; vaporization volume growth"><input id="ctrl-md-npt" type="checkbox" title="Enable adaptive Berendsen NPT constant-pressure barostat to measure live thermal expansion α_V(T)" ${uiState.mdNptBarostat ? 'checked' : ''} /> NPT α_V Barostat (P=0)</label>` : ''}` : ''}
       </div>
       ${mm === 'strain' ? `
       <div class="ctrl-group">
@@ -2724,21 +2834,53 @@ function renderSimControls() {
         <button id="ctrl-md-reset" class="action" title="Reset crystal lattice and atomic velocities to unstrained equilibrium">Reset</button>
       </div>` : mm === 'acoustic' ? `
       <div class="ctrl-group">
-        <button id="ctrl-md-pwave" class="action gold-btn" title="Inject a longitudinal compression pulse along the 3:1 bar to measure sound speed v_L">Fire P-Wave (v_L)</button>
-        <button id="ctrl-md-swave" class="action" title="Inject a transverse shear pulse along the 3:1 bar to measure shear wave speed v_T">Fire S-Wave (v_T)</button>
+        <button id="ctrl-md-pwave" class="action gold-btn" title="Inject a longitudinal compression pulse along the elongated crystal bar to measure sound speed v_L">Fire P-Wave (v_L)</button>
+        <button id="ctrl-md-swave" class="action" title="Inject a transverse shear pulse along the elongated crystal bar to measure shear wave speed v_T">Fire S-Wave (v_T)</button>
         <button id="ctrl-md-reset" class="action" title="Reset the elongated crystal bar to rest">Reset Bar</button>
       </div>` : `
       <div class="ctrl-group">
-        <button class="action" data-md-frac="0.30" title="Set T = 0.30 × T_m (crystalline solid phase)">Solid</button>
-        <button class="action gold-btn" data-md-frac="1.20" title="Set T = 1.20 × T_m (melted liquid phase)">Melt</button>
-        <button class="action" data-md-frac="2.40" title="Set T = 2.40 × T_m (high-energy vapor/gas phase)">Vapor</button>
-        <button id="ctrl-md-play" class="action" title="Play or pause real-time GPU Velocity-Verlet molecular dynamics">${uiState.mdPlaying ? 'Pause' : 'Play'}</button>
-        <button id="ctrl-md-reset" class="action" title="Rebuild the initial crystal lattice at the current target temperature">Reset</button>
-      </div>`}`;
+        <div class="ctrl-row">
+          <button class="action${uiState.mdPhasePreset === 'solid' ? ' active-toggle' : ''}" data-md-phase="solid" title="Cool to crystalline solid (${tSolid} K = 0.30 × T_m) with sharp Bragg g(r) peaks and high coordination">Solid</button>
+          <button class="action${uiState.mdPhasePreset === 'melt' ? ' active-toggle' : ' gold-btn'}" data-md-phase="melt" title="Heat above melting point (${tMeltLiquid} K) to melt the crystal into a diffusing cohesive liquid">Melt</button>
+          <button class="action${uiState.mdPhasePreset === 'vapor' ? ' active-toggle' : ' danger-btn'}" data-md-phase="vapor" title="Heat above boiling point (${tVapor} K) to overcome cohesive energy and boil atoms into free vapor gas">Vapor</button>
+        </div>
+        <div class="ctrl-row">
+          <button id="ctrl-md-play" class="action" title="Play or pause real-time GPU Velocity-Verlet molecular dynamics">${uiState.mdPlaying ? 'Pause' : 'Play'}</button>
+          <button id="ctrl-md-reset" class="action" title="Rebuild a pristine crystal lattice at the current target temperature">Reset Crystal</button>
+        </div>
+      </div>`}
+      <div class="ctrl-group">
+        <div class="ctrl-row">
+          <label title="Choose physical GPU quantity driving per-atom 3D coloring">Color</label>
+          <button class="action${uiState.mdColorMode === 0 ? ' active-toggle' : ''}" data-md-col="0" title="Color each atom by its true local kinetic temperature T_i = m v² / (3 k_B) relative to T_m">Temp</button>
+          <button class="action${uiState.mdColorMode === 1 ? ' active-toggle' : ''}" data-md-col="1" title="Color by live GPU first-shell coordination z_i: sapphire Solid, emerald-gold Liquid, magenta Vapor">Phase</button>
+          <button class="action${uiState.mdColorMode === 2 ? ' active-toggle' : ''}" data-md-col="2" title="Color by live GPU per-atom potential energy E_pot,i to highlight surfaces, vacancies &amp; strain">Stress</button>
+        </div>
+        <div class="ctrl-row">
+          <label title="Supercell particle count powered by ULG's O(N) WebGPU 3D spatial cell-list">Atoms</label>
+          <button class="action${uiState.mdSizePreset === 'small' ? ' active-toggle' : ''}" data-md-size="small" title="Compact supercell (~128–216 atoms, lightest GPU load)">~200</button>
+          <button class="action${uiState.mdSizePreset === 'medium' ? ' active-toggle' : ''}" data-md-size="medium" title="Standard high-fidelity supercell (~432–512 atoms, O(N) GPU cell list)">~500</button>
+          <button class="action${uiState.mdSizePreset === 'large' ? ' active-toggle' : ''}" data-md-size="large" title="Large high-resolution supercell (~864–1,000 atoms, O(N) GPU cell list)">~900</button>
+        </div>
+      </div>`;
 
     document.getElementById('ctrl-md-t')?.addEventListener('input', (e) => {
       uiState.mdTargetTempK = Number(e.target.value);
+      uiState.mdPhasePreset = null;
       document.getElementById('lbl-md-t').textContent = String(uiState.mdTargetTempK);
+    });
+    document.getElementById('ctrl-md-ch-drop')?.addEventListener('click', () => {
+      uiState.mdChamberMode = 'drop';
+      initLiveMdForActiveSpecimen(uiState.mdTargetTempK, uiState.mdMode);
+      renderSimControls();
+      redrawCurrentTab();
+    });
+    document.getElementById('ctrl-md-ch-bulk')?.addEventListener('click', () => {
+      uiState.mdChamberMode = 'bulk';
+      uiState.mdNptBarostat = true;
+      initLiveMdForActiveSpecimen(uiState.mdTargetTempK, uiState.mdMode);
+      renderSimControls();
+      redrawCurrentTab();
     });
     document.getElementById('ctrl-md-npt')?.addEventListener('change', (e) => {
       uiState.mdNptBarostat = Boolean(e.target.checked);
@@ -2753,18 +2895,40 @@ function renderSimControls() {
       liveMdSession?.applyStrain({ shearXY: 0.04 });
     });
     document.getElementById('ctrl-md-pwave')?.addEventListener('click', () => {
-      liveMdSession?.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.36 });
+      liveMdSession?.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.40 });
     });
     document.getElementById('ctrl-md-swave')?.addEventListener('click', () => {
-      liveMdSession?.injectAcousticPulse({ polarization: 'transverse', amplitude: 0.36 });
+      liveMdSession?.injectAcousticPulse({ polarization: 'transverse', amplitude: 0.40 });
     });
-    for (const btn of simControls.querySelectorAll('[data-md-frac]')) {
+    for (const btn of simControls.querySelectorAll('[data-md-phase]')) {
       btn.addEventListener('click', () => {
-        const frac = Number(btn.dataset.mdFrac);
-        uiState.mdTargetTempK = Math.max(15, Math.min(tMax, Math.round(tMelt * frac)));
-        document.getElementById('lbl-md-t').textContent = String(uiState.mdTargetTempK);
-        const sl = document.getElementById('ctrl-md-t');
-        if (sl) sl.value = String(uiState.mdTargetTempK);
+        const phase = btn.dataset.mdPhase;
+        const tgtT = phase === 'solid' ? tSolid : (phase === 'melt' ? tMeltLiquid : tVapor);
+        uiState.mdPhasePreset = phase;
+        uiState.mdTargetTempK = Math.max(15, Math.min(tMax, tgtT));
+        uiState.mdPlaying = true;
+        if (uiState.mdChamberMode === 'bulk') uiState.mdNptBarostat = true;
+        // Re-anchor MSD & VACF so diffusion slope & Lindemann ratio cleanly measure the newly selected phase!
+        liveMdSession?.resetMsdOrigin?.();
+        liveMdHistory = [];
+        liveMdVacfHistory = [];
+        renderSimControls();
+        redrawCurrentTab();
+      });
+    }
+    for (const btn of simControls.querySelectorAll('[data-md-col]')) {
+      btn.addEventListener('click', () => {
+        uiState.mdColorMode = Number(btn.dataset.mdCol) || 0;
+        renderSimControls();
+        renderViewportSync();
+      });
+    }
+    for (const btn of simControls.querySelectorAll('[data-md-size]')) {
+      btn.addEventListener('click', () => {
+        uiState.mdSizePreset = btn.dataset.mdSize || 'medium';
+        initLiveMdForActiveSpecimen(uiState.mdTargetTempK, uiState.mdMode);
+        renderSimControls();
+        redrawCurrentTab();
       });
     }
     document.getElementById('ctrl-md-play')?.addEventListener('click', () => {
@@ -3171,12 +3335,18 @@ function renderViewportSync() {
     gpuRenderer.renderLiveMd({
       positionsBuffer: liveMdSession.positionsBuffer,
       velocitiesBuffer: liveMdSession.velocitiesBuffer,
+      forcesBuffer: liveMdSession.forcesBuffer,
       atomCount: liveMdSession.atomCount,
       boxLengthsA: liveMdSession.boxLengthsA,
+      initBoxLengthsA: liveMdSession.initBoxLengthsA,
+      rNearestNeighborA: liveMdConfigMeta?.rNearestNeighborA ?? liveMdSession.rNearestNeighborA,
+      meltingPointK: liveMdConfigMeta?.meltingPointK ?? 600,
+      cohesiveEnergyEv: liveMdConfigMeta?.cohesiveEnergyEv ?? 1.5,
+      colorMode: uiState.mdColorMode,
       yaw: camYaw,
       pitch: camPitch,
-      tint: em?.opticalSrgb || [0.65, 0.80, 0.96],
-      velocityColorScale: 32.0
+      camDist: Math.max(1.85, Math.min(6.2, camDist + 0.35)),
+      tint: em?.opticalSrgb || [0.65, 0.80, 0.96]
     });
   } else if (currentTab === 'compound') {
     const cm = uiState.chemViewMode;
@@ -3700,7 +3870,7 @@ function redrawCurrentTab() {
     setHud(
       `Zero-Copy WebGPU MD [${modeNames[mm] || mm}] — ${meta?.label || b?.materialKey || ''} (${meta?.crystalStructure || ''})`,
       md
-        ? `Atoms: ${md.atomCount} | t=${fmt(md.timeFs, 1)} fs | T=${fmt(md.temperatureK, 1)} K | P=${fmt(md.pressureGPa, 2)} GPa | V/V₀=${fmt(md.volumeRatio ?? 1, 3)} | MSD=${fmt(md.msdA2, 4)} Å²`
+        ? `Atoms: ${md.atomCount}${md.usedCellList ? ' (O(N) Grid)' : ''} | t=${fmt(md.timeFs, 1)} fs | T=${fmt(md.temperatureK, 0)} K | ⟨Z⟩=${fmt(md.meanCoordination ?? 0, 1)}/${md.idealCoordination ?? 12} | δ_L=${fmt(md.lindemannRatio ?? 0, 2)} | MSD=${fmt(md.msdA2, 2)} Å²`
         : 'Initializing live WebGPU MD buffers…'
     );
     if (md) {
@@ -3719,8 +3889,16 @@ function redrawCurrentTab() {
         setBottomOverlay(`<div class="live-meter">Free-Surface Vacuum Slab (L_z=${fmt(md.boxLengthsA?.[2] ?? 0, 1)} Å): Kirkwood–Buff GPU γ=<b>${fmt(md.surfaceTensionNPerM ?? 0, 3)} N/m</b> (closure ${fmt(b?.thermodynamic?.surfaceTensionNPerM ?? 0, 3)} N/m)</div>`);
       } else if (mm === 'acoustic') {
         setBottomOverlay(`<div class="live-meter">Acoustic Crystal Bar (L_x=${fmt(md.boxLengthsA?.[0] ?? 0, 1)} Å): DFT v_L=${fmt(b?.mechanical?.soundSpeedLongMPerS ?? 0, 0)} m/s · v_T=${fmt(b?.mechanical?.soundSpeedTransMPerS ?? 0, 0)} m/s</div>`);
-      } else if (uiState.mdNptBarostat) {
-        setBottomOverlay(`<div class="live-meter">NPT Barostat Active: V/V₀=<b>${fmt(md.volumeRatio ?? 1, 4)}</b> (Thermal Expansion α_V=${fmt((b?.thermodynamic?.thermalExpansionVolPerK || 0) * 1e6, 1)} ppm/K)</div>`);
+      } else {
+        const phLabel = String(md.emergentPhase || 'solid').toUpperCase();
+        const phColor = phLabel === 'VAPOR' ? '#f472b6' : (phLabel === 'BOILING' ? '#fb923c' : (phLabel === 'LIQUID' ? '#34d399' : '#38bdf8'));
+        const sPct = Math.round((md.solidFraction ?? 1) * 100);
+        const lPct = Math.round((md.liquidFraction ?? 0) * 100);
+        const vPct = Math.round((md.vaporFraction ?? 0) * 100);
+        const boxTxt = uiState.mdChamberMode === 'bulk' && uiState.mdNptBarostat
+          ? ` · V/V₀=<b>${fmt(md.volumeRatio ?? 1, 3)}</b> · P=${fmt(md.pressureGPa, 2)} GPa`
+          : ` · Drop/Vapor Chamber`;
+        setBottomOverlay(`<div class="live-meter">Emergent Phase: <b style="color:${phColor}">${phLabel}</b> · <span style="color:#38bdf8">Solid ${sPct}%</span> · <span style="color:#34d399">Liq ${lPct}%</span> · <span style="color:#f472b6">Vap ${vPct}%</span>${boxTxt}</div>`);
       }
     }
 
@@ -4097,7 +4275,7 @@ async function stepActiveSimulationOnce() {
     }
   } else if (currentTab === 'md' && liveMdSession) {
     uiState.mdPlaying = false;
-    const nptTarget = (uiState.mdMode === 'strain' || (uiState.mdMode === 'equilibrium' && uiState.mdNptBarostat)) ? 0.0 : null;
+    const nptTarget = (uiState.mdMode === 'strain' || (uiState.mdMode === 'equilibrium' && uiState.mdChamberMode === 'bulk' && uiState.mdNptBarostat)) ? 0.0 : null;
     const tel = await liveMdSession.stepBatch(1, {
       readTelemetry: true,
       temperatureK: uiState.mdTargetTempK,
@@ -4324,8 +4502,9 @@ function tickSimulationLoop(nowMs) {
   // 5. Live Zero-Copy WebGPU Molecular Dynamics stepping on Tab 4 (Scales true Velocity-Verlet dtFs * dtScale!)
   if (currentTab === 'md' && liveMdSession && uiState.mdPlaying && !liveMdBusy) {
     liveMdBusy = true;
-    const nptTarget = (uiState.mdMode === 'strain' || (uiState.mdMode === 'equilibrium' && uiState.mdNptBarostat)) ? 0.0 : null;
-    const mdSteps = spd > 1.0 ? Math.min(8, Math.round(4 * spd)) : 4;
+    const nptTarget = (uiState.mdMode === 'strain' || (uiState.mdMode === 'equilibrium' && uiState.mdChamberMode === 'bulk' && uiState.mdNptBarostat)) ? 0.0 : null;
+    const baseMdSteps = IS_MOBILE_GPU_PROFILE ? 6 : 10;
+    const mdSteps = spd > 1.0 ? Math.min(20, Math.round(baseMdSteps * spd)) : baseMdSteps;
     liveMdSession.stepBatch(mdSteps, {
       readTelemetry: true,
       temperatureK: uiState.mdTargetTempK,
@@ -5145,17 +5324,40 @@ function syncDebugState() {
       syncDebugState();
       return tel;
     },
-    setMdMode: (mode, tempK = null) => {
-      initLiveMdForActiveSpecimen(tempK, mode);
+    setMdMode: (mode, tempK = null, opts = {}) => {
+      if (opts?.chamberMode) uiState.mdChamberMode = opts.chamberMode;
+      const explicitColor = opts?.colorMode != null;
+      if (explicitColor) uiState.mdColorMode = Number(opts.colorMode) || 0;
+      if (opts?.sizePreset) uiState.mdSizePreset = opts.sizePreset;
+      initLiveMdForActiveSpecimen(tempK, mode, { preserveColorMode: explicitColor });
       syncAccordionState();
       renderSimControls();
       redrawCurrentTab();
       syncDebugState();
     },
-    stepMd: async (steps = 16, { strainX = 0, shearXY = 0, pulse = null, npt = false } = {}) => {
+    setMdPhasePreset: (phase) => {
+      const b = getActiveBundle();
+      const temps = computeMdPhaseTemperatures(
+        liveMdConfigMeta?.meltingPointK || b?.thermodynamic?.meltingPointK || 600,
+        liveMdConfigMeta?.boilingPointK || b?.thermodynamic?.boilingPointK || 1500,
+        liveMdConfigMeta?.potentialModel ?? 1
+      );
+      const tgtT = phase === 'solid' ? temps.tSolid : (phase === 'melt' ? temps.tMeltLiquid : temps.tVapor);
+      uiState.mdPhasePreset = phase;
+      uiState.mdTargetTempK = tgtT;
+      liveMdSession?.resetMsdOrigin?.();
+      liveMdHistory = [];
+      liveMdVacfHistory = [];
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+      return { phase, targetTempK: tgtT, ...temps };
+    },
+    stepMd: async (steps = 16, { strainX = 0, shearXY = 0, pulse = null, npt = false, temperatureK = null } = {}) => {
       if (!liveMdSession) return null;
+      if (temperatureK != null) uiState.mdTargetTempK = Number(temperatureK);
       if (strainX || shearXY) liveMdSession.applyStrain({ strainX, shearXY });
-      if (pulse) liveMdSession.injectAcousticPulse({ polarization: pulse, amplitude: 0.36 });
+      if (pulse) liveMdSession.injectAcousticPulse({ polarization: pulse, amplitude: 0.40 });
       const tel = await liveMdSession.stepBatch(steps, {
         readTelemetry: true,
         temperatureK: uiState.mdTargetTempK,

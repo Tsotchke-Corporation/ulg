@@ -2,13 +2,13 @@
 
 - **Start here:** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) first for
   the full **40-order-of-magnitude bottom-up + bidirectional bookend roadmap
-  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**7/8
+  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**ALL 8/8
   formally accepted:** `G5`, `G7`, [`Gate 0`](../done/gate0-foundation-arch.md),
   [`Gate 1`](../done/gate1-periodic-table.md),
   [`Gate 2`](../done/gate2-reactions-polytope-atlas.md),
-  [`Gate 3`](../done/gate3-continuum-substrate-and-physics.md), and
-  [`Gate 4`](../done/gate4-studio-presentation.md); only **Gate 5** honestly
-  `in_progress` at `a5c632cb`), Section 3 GPU budgets, and exact execution
+  [`Gate 3`](../done/gate3-continuum-substrate-and-physics.md),
+  [`Gate 4`](../done/gate4-studio-presentation.md), and
+  [`Gate 5`](../done/gate5-planetary-to-supergalactic.md) at `846ddaee`), Section 3 GPU budgets, and exact execution
   sequence.
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
@@ -100,15 +100,12 @@ Completed items live in [`plan/done/`](../done/); superseded items live in
 
 ---
 
-## Priority 5 — Gate 5: Planetary → Stellar → Galactic → Supergalactic Cosmology (`10⁺⁶ → 10⁺²⁵ m`)
+## Priority 5 — Gate 5: Planetary → Stellar → Galactic → Supergalactic Cosmology (`10⁺⁶ → 10⁺²⁵ m`) — **FORMALLY ACCEPTED (`3/3 PASS`, 2026-11-24)**
 
-> Completes ULG's 40-order-of-magnitude scale ladder on the **exact same GPU
-> primitives** built in Gates 0–3: `fft3dWebGpu` (Gate 0B) + canonical `SS`
-> Scale Atlas multipole + Gate 1 nuclear/atomic closures + Gate 2 Polytope
-> Atlases + `peercompute-core` multi-host domain partitioning.
+> Formal acceptance record: [`plan/done/gate5-planetary-to-supergalactic.md`](../done/gate5-planetary-to-supergalactic.md) (`846ddaee`, `3/3 PASS`, `status: complete` on `FRESH` ICC index). Files below remain in `plan/todo/` strictly for optional post-acceptance operational checks (physical 2-machine WAN/TURN deployment & MESA/PREM advisory table expansion).
 
-| File | Sub-Scale | Live-Code Reality (`c09644f8`, 2026-11-23) & Open Work |
+| File | Sub-Scale | Live-Code Reality (`846ddaee`, 2026-11-24) & Optional Post-Acceptance Work |
 |---|---|---|
-| [`planetary-to-supergalactic-scale-atlas-plan.md`](planetary-to-supergalactic-scale-atlas-plan.md) | **Gate 5 (Master)** | **5A–5D + Priority 5 Hybrid TreePM, Canonical Scale-Atlas Multipole & 2-Browser WebRTC TreePM LANDED & VERIFIED (`c09644f8`):** `planetaryStructureGpu.js`, `stellarNucleosynthesisBridge.js`, `galacticIsmCoolingGpu.js`, **`scaleAtlasAstrophysicsGravityBridge.js`** wired into BOTH `selfGravitatingHydroGpu.js` & `cosmicQuantumGpuKernels.js` (`momentumRelError < 1e-4`, `+5000` shift `< 1e-4`), **Hybrid FLRW TreePM** (`supergalacticTreePmGpu.js`: short-range `3×3×3` Gaussian-split tree + long-range `fft3dWebGpu` PM), and **2-browser-context WebRTC `RTCDataChannel` multi-host TreePM** (`priority5ScaleAtlasAndWebRtcTreePm.native.test.mjs`). Open: physical 2-machine WAN/TURN validation after `agy` ships PeerCompute extensions & formal receipt. |
-| [`hydrogen-nebula-to-star-fusion-bridge-plan.md`](hydrogen-nebula-to-star-fusion-bridge-plan.md) | Gate 5B (Stellar) | `selfGravitatingHydroGpu.js` wired onto canonical `SchroederScaleAtlas` multipole (`evaluateSelfGravitatingHydroScaleAtlasMultipoleWebGpu`, `c09644f8`) + Gate 1 nuclear Q-values & RK4 Lane–Emden in `stellarNucleosynthesisBridge.js`; open: retire internal octree fallback & add MESA advisory tables. |
-| [`distributed-peercompute-network-stack-plan.md`](distributed-peercompute-network-stack-plan.md) | Gate 5D / Multi-Host | **2-Browser-Context WebRTC `RTCDataChannel` A6 (`priority3GpuAndWebRtc`) + Multi-Host TreePM (`priority5ScaleAtlasAndWebRtcTreePm`, signaling WS closed + G5 CAS leases + fail-closed peer-loss reassignment) PASS (`c09644f8`)**; open: physical 2-machine WAN/NAT/STUN/TURN validation once `agy` ships `../peercompute` extensions. |
+| [`planetary-to-supergalactic-scale-atlas-plan.md`](planetary-to-supergalactic-scale-atlas-plan.md) | **Gate 5 (Accepted)** | **Gate 5 ACCEPTED (`846ddaee`):** Canonical parallel `SchroederScaleAtlas` multipole (zero private octrees), inline WGSL Polytope-Atlas planetary interiors (fail-closed), Gate 1 nuclear/atomic cooling closures, 1-submit FLRW 3D-FFT TreePM + live GPU `P(k)`, official `SpatialTileLeaseBroker` disjoint-slab 2-browser WebRTC, locked-camera visuals (`10/10` PNGs verified), `5/5` Vulkan/WebRTC PASS, `KERNEL_CLEAN`. |
+| [`hydrogen-nebula-to-star-fusion-bridge-plan.md`](hydrogen-nebula-to-star-fusion-bridge-plan.md) | Gate 5B (Accepted) | **Gate 5B ACCEPTED (`846ddaee`):** Private octree deleted; canonical `createSchroederScaleAtlasGravitySolverWebGpu` + Gate 1 exact `β⁺/EC` Q-values + conservative `Q * dX` heating + WebGPU nuclear/Lane–Emden live & verified. Optional: offline MESA advisory table expansion. |
+| [`distributed-peercompute-network-stack-plan.md`](distributed-peercompute-network-stack-plan.md) | Gate 5D (Accepted) | **Gate 5D ACCEPTED (`846ddaee`):** Official PeerCompute `SpatialTileLeaseBroker` + 32-byte GPU-reduced multipole exchange + measurable cross-slab gravity pull + fail-closed eviction/reclaim proven across real 2-browser WebRTC (signaling WS closed). Optional operational check: physical 2-machine WAN/NAT/STUN/TURN deployment. |

@@ -5,11 +5,11 @@
 #
 # HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
 # .icc/completion-oracles.yaml target passes on one reviewed
-# `ulg.campaign.receipt.v1` bundle on disk. Today 7/8 active gates are
-# formally accepted: g5-reservation, g7-release-audit, gate0-foundation-arch,
-# gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas,
-# gate3-continuum-substrate-and-physics, and gate4-studio-presentation.
-# Only gate5-planetary-to-supergalactic remains in_progress.
+# `ulg.campaign.receipt.v1` bundle on disk. All 8/8 active Scale-Ladder &
+# campaign gates are now formally accepted: g5-reservation, g7-release-audit,
+# gate0-foundation-arch, gate1-periodic-table-engine,
+# gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics,
+# gate4-studio-presentation, and gate5-planetary-to-supergalactic.
 
 goals:
   - id: gate0-foundation-arch
@@ -65,12 +65,12 @@ goals:
   - id: gate5-planetary-to-supergalactic
     task_id: ulg-gate5-planetary-to-supergalactic
     priority: medium
-    status: in_progress
+    status: completed
     goal: "Priority 5 (Gate 5, 10^+6 -> 10^+25 m): Planetary (Polytope-Atlas interiors + symplectic N-body), Stellar (unified SS hydro + Gate 1 nuclear networks), Galactic (unified SS multipole + ISM hydro + Gate 1 atomic cooling + SMBH), and Supergalactic Cosmology (expanding FLRW comoving GPU 3D-FFT TreePM + multi-host PeerCompute domain partitioning)"
     oracle: ulg-gate5-planetary-to-supergalactic
     depends_on: [gate0-foundation-arch, gate2-reactions-and-polytope-atlas, gate3-continuum-substrate-and-physics]
-    reason: "Gates 5A-5D + Priority 5 Hybrid TreePM, canonical Scale-Atlas multipole unification, & real 2-browser WebRTC TreePM implemented & verified (4326c34e..c09644f8): planetaryStructureGpu, stellarNucleosynthesisBridge, galacticIsmCoolingGpu, scaleAtlasAstrophysicsGravityBridge wired into selfGravitatingHydroGpu & cosmicQuantumGpuKernels (momentumRelError < 1e-4, +5000 shift < 1e-4), hybrid short-range 3x3x3 Gaussian-split Tree + long-range fft3dWebGpu PM in supergalacticTreePmGpu + supergalactic.html, and real 2-browser-context WebRTC RTCDataChannel multi-host TreePM with signaling closed + G5 CAS leases + fail-closed peer-loss reassignment. Remains in_progress pending physical 2-machine WAN test & formal receipt bundle."
-    tags: [ulg-scale-ladder, gate-5, planetary, stellar, galactic, supergalactic]
+    reason: "Accepted 2026-11-24 at commit 846ddaee (dirty: false): ICC completion-oracle ulg-gate5-planetary-to-supergalactic 3/3 PASS (status: complete) on FRESH ICC index after independent adversarial read-only review ACCEPT (66ba0501; pre-acceptance audit cd3aaaf8 preserved verbatim at pre-acceptance-audit-cd3aaaf8.md). Closed all B1-B8 blockers: canonical parallel @workgroup_size(64/256) SchroederScaleAtlas multipole default gravity with zero private octrees and zero @workgroup_size(1) (bhTransMaxDiff=4.46e-6, multipoleMomentumRelError=0), inline WGSL eval_polytope_atlas_bank_2d planetary interiors with overflow-free MoI scaling and fail-closed out-of-domain rejection, exact Gate 1 beta+/EC Q-values (26.731 MeV total / 26.201 MeV thermal) + WebGPU nuclear/Lane-Emden + conservative Q*dX stellar heating, race-free ping-pong compressible SPH ISM hydro with Gate 1 atomic cooling & symmetric Paczynski-Wiita SMBH recoil (momentumDrift < 1e-3), 1-submit/step (13<=25 passes) FLRW 3D-FFT TreePM with live 16-bin GPU P(k) & full-Nyquist GPU Zeldovich ICs & GPUBufferUsage.VERTEX on particleBuf, official PeerCompute SpatialTileLeaseBroker fail-closed disjoint-slab 2-browser WebRTC (signaling WS closed, 32-byte GPU multipole exchange, measurable +X cross-slab pull, fail-closed peer eviction/reclaim), cosmic-quantum supergalactic-cosmic 0 errors & 151343 changed px, all 10 locked-camera PNGs visually verified (210265 pure WebGPU cosmic-web px outside HUD), 5/5 native Vulkan + WebRTC PASS, 6215/6215 host PASS, 37M dist/ (0 AI/ort-wasm), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate5-acceptance-20261123/ and plan/done/gate5-planetary-to-supergalactic.md."
+    tags: [ulg-scale-ladder, gate-5, planetary, stellar, galactic, supergalactic, accepted]
 
   - id: g5-reservation
     task_id: ulg-g5-reservation

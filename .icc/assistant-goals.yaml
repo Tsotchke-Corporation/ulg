@@ -5,10 +5,11 @@
 #
 # HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
 # .icc/completion-oracles.yaml target passes on one reviewed
-# `ulg.campaign.receipt.v1` bundle on disk. Today 6/8 active gates are
+# `ulg.campaign.receipt.v1` bundle on disk. Today 7/8 active gates are
 # formally accepted: g5-reservation, g7-release-audit, gate0-foundation-arch,
-# gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas, and
-# gate4-studio-presentation.
+# gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas,
+# gate3-continuum-substrate-and-physics, and gate4-studio-presentation.
+# Only gate5-planetary-to-supergalactic remains in_progress.
 
 goals:
   - id: gate0-foundation-arch
@@ -44,12 +45,12 @@ goals:
   - id: gate3-continuum-substrate-and-physics
     task_id: ulg-gate3-continuum-substrate-and-physics
     priority: high
-    status: in_progress
+    status: completed
     goal: "Priority 3 (Gate 3, 10^-6 -> 10^+2 m): Macroscopic Continuum Engine & Unified SS consuming Gate 2 Polytope Atlas at Tier-1 (with Tier-2 A3 / Tier-3 A6 misses), passing Section 3 GPU budgets, unifying 3 private solid hashes & dormancy grids onto canonical SS cells, indirect dispatch on all 4 law families, exact 2^-149 ledgers & multi-level first-class air"
     oracle: ulg-gate3-continuum-substrate-and-physics
     depends_on: [gate0-foundation-arch, gate2-reactions-and-polytope-atlas, g5-reservation]
-    reason: "Gate 2->3 GPU Tier-1 Polytope Atlas bridge (foundationPolytopeAtlasGpuBridge.js + evaluatePolytopeAtlasWgsl + hitFlag==0 Eshkol/MoonLab miss escalation + automatic Studio worker seeding) landed & Vulkan-verified (98214a11); Zero-Churn Slices 1-2 landed (13bfda97, ca9824d8: water-realtime 15.45 steps/s [3.07x], submits 1.72 <= 2, computePasses 16.24 <= 25, mapAsync 0, 0 boundary failures, GPU mean 7.8%; iron-ice bindGroups 40.51 -> 30.79, steps/s 2.61 -> 3.77 [+44%], GPU mean 8.0%). Open before formal oracle acceptance: iron-ice <= 25 passes / <= 2 submits / 0 workDone, water-realtime >= 1.0x RT, remaining solid proxy hash unification & 63-limb retirement."
-    tags: [ulg-scale-ladder, gate-3, continuum, ss]
+    reason: "Accepted 2026-11-23 at commit a5c632cb (dirty: false): ICC completion-oracle ulg-gate3-continuum-substrate-and-physics 3/3 PASS (status: complete) on fresh ICC index after 3-round adversarial independent review (Round 1 FAIL d134a84f & Round 2 FAIL 2bcec1b6 preserved verbatim; Round 3 ACCEPT a4a11f08). All 5 live scripts/gpuprobe.sh probes pass hard Section 3 GPU budgets with exact 16-field physics+presentation integer split additivity and 0 page/GPU/Xid errors: water-realtime 1.3065x RT at canonical CPUQuota=50% (submits 0.03, passes 9.24, indirect 0, createBuf 0, bindGrp 0, boundaryFailures 0) and 3.6889x RT at 400% (0 boundaryFailures); iron-ice-quench (submits 1.12, passes 5.71, indirect 2.05, createBuf 0.01, bindGrp 1.02, canonical SS solid-fluid directory + SOL-5/6 active); sodium-water (submits 1.50, passes 8.52, indirect 3.25, Polytope 152/152 applied, live A3 radiative flux physics consumer 74 steps batched in burst, all 4 indirect law families exact); 3-level air3 (submits 0.66, passes 13.67, indirect 14.89<=16 total, createBuf 0, bindGrp 22.76 down from 47.70, phaseVolumeMigration=true 2272 rows, parcelStage.ran=120, parcelOptics=29/29, live A3 radiative flux 117 steps). Private solid proxy hash retired to exact body_bounds, mechanics-only SS wiring fixed, zero silent fine-level halo drops, safe synchronous burst-bypass verified, 24/24 native Vulkan tests PASS (real-gas zMeasured=1.3429 logged verbatim, 4/4 exact 2^-149 thermal/phase ledgers, 7/7 solids, Tier-3 A6 escalation), 6215/6215 host tests PASS, 37M dist/ (0 AI/ort-wasm), KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate3-acceptance-20261123/ and plan/done/gate3-continuum-substrate-and-physics.md."
+    tags: [ulg-scale-ladder, gate-3, continuum, ss, accepted]
 
   - id: gate4-studio-presentation
     task_id: ulg-gate4-studio-presentation

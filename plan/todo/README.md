@@ -2,12 +2,13 @@
 
 - **Start here:** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) first for
   the full **40-order-of-magnitude bottom-up + bidirectional bookend roadmap
-  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**6/8
+  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**7/8
   formally accepted:** `G5`, `G7`, [`Gate 0`](../done/gate0-foundation-arch.md),
   [`Gate 1`](../done/gate1-periodic-table.md),
-  [`Gate 2`](../done/gate2-reactions-polytope-atlas.md), and
-  [`Gate 4`](../done/gate4-studio-presentation.md); only Gates 3 and 5 honestly
-  `in_progress` at `b46bf134`), Section 3 GPU budgets, and exact execution
+  [`Gate 2`](../done/gate2-reactions-polytope-atlas.md),
+  [`Gate 3`](../done/gate3-continuum-substrate-and-physics.md), and
+  [`Gate 4`](../done/gate4-studio-presentation.md); only **Gate 5** honestly
+  `in_progress` at `a5c632cb`), Section 3 GPU budgets, and exact execution
   sequence.
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
@@ -56,12 +57,9 @@ Completed items live in [`plan/done/`](../done/); superseded items live in
 
 ---
 
-## Priority 3 — Gate 3: Macroscopic Continuum Engine & Unified SS (`10⁻⁶ → 10⁺² m`)
+## Priority 3 — Gate 3: Macroscopic Continuum Engine & Unified SS (`10⁻⁶ → 10⁺² m`) — **FORMALLY ACCEPTED (`3/3 PASS`, 2026-11-23)**
 
-> Consumes the Gate 2 Polytope Atlas natively at Tier-1 GPU speed, unifies all
-> solids and dynamic laws onto canonical Schroeder Simulation (`SS`) cells,
-> turns on exact `2^-149` ledgers & multi-level first-class air by default, and
-> passes Section 3 GPU budgets. Consolidates legacy A1–A6, G2–G4, G6.
+> Formal acceptance record: [`plan/done/gate3-continuum-substrate-and-physics.md`](../done/gate3-continuum-substrate-and-physics.md) (`a5c632cb`, `3/3 PASS`: all 5 live `scripts/gpuprobe.sh` probes pass hard Section 3 GPU budgets incl. `water-realtime = 1.3065x RT` at `CPUQuota=50%` & 3-level `air3` `indirect=14.89<=16` & `createBuf=0`, inline WGSL Tier-1 Polytope Atlas + live GPU A3 radiative flux + Tier-3 A6 escalation, unified SS solids with private proxy hash retired, `24/24` Vulkan PASS, `6,215/6,215` host PASS, `KERNEL_CLEAN`). Files below remain open strictly for post-Gate-5 refinements (foreground refraction depth-rejection, cavitation tensile-floor fix, dynamic material-volume LOD `1 -> 8` / `8 -> 1`, and remaining non-SS legacy cleanup).
 
 | File | Sub-Track | Live-Code Reality (`d687b37e`, 2026-11-23) & Open Work |
 |---|---|---|

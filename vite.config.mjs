@@ -21,6 +21,7 @@ const siblingRoot = (relativePath) => {
   }
   return fileURLToPath(new URL('../' + relativePath, import.meta.url));
 };
+const peercomputeWorkspaceRoot = siblingRoot('peercompute');
 const peercomputeRoot = siblingRoot('peercompute/peercompute');
 const webGpuMarchingCubesRoot = siblingRoot('webgpu-marching-cubes');
 const localHttpsKeyPath = fileURLToPath(new URL('./.cache/vite-https/key.pem', import.meta.url));
@@ -646,6 +647,7 @@ export default defineConfig({
     fs: {
       allow: [
         repoRoot,
+        peercomputeWorkspaceRoot,
         peercomputeRoot,
         webGpuMarchingCubesRoot
       ]

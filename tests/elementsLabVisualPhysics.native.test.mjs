@@ -92,6 +92,9 @@ test('Material Physics Lab: MoonLab orbitals, live Maxwell Photon-Shell Gold/Wat
       await window.__ulgElementsLabApi.solveElement(79, null, { switchToTab: 'crystal' });
     });
     await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 79 && window.__ulgElementsLabState?.currentTab === 'crystal', null, { timeout: 45_000 });
+    await page.evaluate(() => window.__ulgElementsLabApi.setCrystalViewMode('bloch'));
+    await saveLabCapture(page, '03a-au-3d-bloch-crystal');
+    await page.evaluate(() => window.__ulgElementsLabApi.setCrystalViewMode('tdks-atom'));
     const auTdksRel = await page.evaluate(() => window.__ulgElementsLabApi.stepTdks(28));
     console.log('[lab-au-tdks-rel-ON]', JSON.stringify(auTdksRel));
     await saveLabCapture(page, '03-au-tdks-cloud-photon-rel');

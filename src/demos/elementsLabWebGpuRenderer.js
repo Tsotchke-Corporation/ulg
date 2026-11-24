@@ -259,7 +259,8 @@ fn sample_voxel(p_unit: vec3<f32>) -> vec4<f32> {
 @fragment
 fn fs_raymarch(in: VsOut) -> @location(0) vec4<f32> {
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
-  let ndc = vec2<f32>(in.uv.x * aspect, in.uv.y);
+  let inv_portrait = 1.0 / max(0.35, min(1.0, aspect));
+  let ndc = vec2<f32>(in.uv.x * aspect, in.uv.y) * inv_portrait;
   let ro = rotate_cam(vec3<f32>(0.0, 0.0, 2.85), u.yaw, u.pitch);
   let rd = normalize(rotate_cam(normalize(vec3<f32>(ndc * 0.62, -1.0)), u.yaw, u.pitch));
 
@@ -350,7 +351,7 @@ fn vs_atom(
   let view = world_to_view(p_norm);
 
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
-  let fov_scale = 1.65;
+  let fov_scale = 1.65 * min(1.0, aspect);
   let rad = u.box_l.w;
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
@@ -411,7 +412,7 @@ fn vs_wire(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
   );
   let view = world_to_view(edges[vid]);
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
-  let fov_scale = 1.65;
+  let fov_scale = 1.65 * min(1.0, aspect);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
   let depth_z = clamp((view.z - 0.35) / 8.0, 0.001, 0.999);
@@ -553,7 +554,7 @@ fn vs_cloud(
   let pt = points[iid];
   let view = project_pt(pt.xyz);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.95;
+  let fov = 1.95 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.25, view.z);
   let cx = view.x * fov * inv_z / aspect;
   let cy = view.y * fov * inv_z;
@@ -598,7 +599,7 @@ fn vs_nucleus(@builtin(vertex_index) vid: u32) -> VsOut {
   let corner = quad[vid];
   let view = project_pt(vec3<f32>(0.0));
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.95;
+  let fov = 1.95 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.25, view.z);
   let rad = max(0.012, u.color_b.w * fov * inv_z);
   var out: VsOut;
@@ -655,7 +656,7 @@ fn vs_guides(@builtin(vertex_index) vid: u32) -> GuideOut {
   }
   let view = project_pt(p);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.95;
+  let fov = 1.95 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.25, view.z);
   var out: GuideOut;
   out.clip_pos = vec4<f32>(view.x * fov * inv_z / aspect, view.y * fov * inv_z, 0.5, 1.0);
@@ -704,7 +705,7 @@ fn project_ps(p: vec3<f32>) -> vec3<f32> {
 fn world_to_clip(p: vec3<f32>) -> vec4<f32> {
   let view = project_ps(p);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.85;
+  let fov = 1.85 * min(1.0, aspect);
   let z_safe = max(0.3, view.z);
   // True perspective-correct clip coordinates (w = z_safe) so quad UV interpolation has ZERO diagonal kink!
   return vec4<f32>(view.x * fov / aspect, view.y * fov, 0.5 * z_safe, z_safe);
@@ -898,7 +899,7 @@ fn vs_driven_shells(
 
   let view = project_ps(wpos);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.85;
+  let fov = 1.85 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.3, view.z);
   let rad = max(1.5 / max(1.0, u.res_yaw_pitch.y), 0.0095 * fov * inv_z);
 
@@ -994,7 +995,7 @@ fn vs_tdks_field(@builtin(vertex_index) vid: u32) -> TdksFieldOut {
   let wxy = vec2<f32>(q.x * 2.15, q.y * 1.45);
   let view = project_tdks(vec3<f32>(wxy.x, wxy.y, 0.0));
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.92;
+  let fov = 1.92 * min(1.0, aspect);
   let z_safe = max(0.3, view.z);
   var out: TdksFieldOut;
   out.clip_pos = vec4<f32>(view.x * fov / aspect, view.y * fov, 0.55 * z_safe, z_safe);
@@ -1107,7 +1108,7 @@ fn vs_tdks_cloud(
   let p_world = pos4.xyz * 0.92 + vec3<f32>(0.0, u.bloch_state.w * 0.045 * (0.4 + pos4.w), 0.0);
   let view = project_tdks(p_world);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.92;
+  let fov = 1.92 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.3, view.z);
 
   let min_px = 0.95 / max(1.0, u.res_yaw_pitch.y);
@@ -1158,21 +1159,41 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     throw new Error('Failed to acquire WebGPU canvas context on #gpu-canvas');
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
+  const maxTexDim = Math.max(2048, Number(device.limits?.maxTextureDimension2D) || 4096);
   let configuredW = 0;
   let configuredH = 0;
   function configureCanvas(w, h) {
-    canvas.width = w;
-    canvas.height = h;
-    ctx.configure({
-      device,
-      format,
-      alphaMode: 'opaque',
-      usage: 0x10 | 0x01 // RENDER_ATTACHMENT | COPY_SRC
-    });
-    configuredW = w;
-    configuredH = h;
+    const safeW = Math.max(64, Math.min(maxTexDim, Math.trunc(w)));
+    const safeH = Math.max(64, Math.min(maxTexDim, Math.trunc(h)));
+    canvas.width = safeW;
+    canvas.height = safeH;
+    const configs = [
+      { device, format, alphaMode: 'opaque', usage: 0x10 | 0x01 },
+      { device, format, alphaMode: 'opaque' },
+      { device, format, alphaMode: 'premultiplied' }
+    ];
+    let configured = false;
+    let lastErr = null;
+    for (const cfg of configs) {
+      try {
+        ctx.configure(cfg);
+        configured = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!configured && lastErr) throw lastErr;
+    configuredW = safeW;
+    configuredH = safeH;
   }
-  configureCanvas(Math.max(320, canvas.clientWidth || 640), Math.max(240, canvas.clientHeight || 480));
+  const initRect = canvas.getBoundingClientRect();
+  const initMobile = typeof window !== 'undefined' && (window.innerWidth < 1120 || window.matchMedia?.('(pointer: coarse)')?.matches);
+  const initDpr = Math.min(typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1, initMobile ? 1.5 : 2.0);
+  configureCanvas(
+    Math.max(64, Math.round((initRect.width || canvas.clientWidth || 640) * initDpr)),
+    Math.max(64, Math.round((initRect.height || canvas.clientHeight || 480) * initDpr))
+  );
 
   // Pipelines
   const atomicComputeModule = device.createShaderModule({ code: ATOMIC_VOLUME_COMPUTE_WGSL, label: 'ulg-lab-atomic-vol-cs' });
@@ -1359,8 +1380,13 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
 
   function ensureCanvasSize() {
     const rect = canvas.getBoundingClientRect();
-    const w = Math.max(320, Math.floor(rect.width));
-    const h = Math.max(240, Math.floor(rect.height));
+    if (rect.width < 2 || rect.height < 2) {
+      return { w: configuredW || 320, h: configuredH || 240 };
+    }
+    const isMobileVp = typeof window !== 'undefined' && (window.innerWidth < 1120 || window.matchMedia?.('(pointer: coarse)')?.matches);
+    const dpr = Math.min(typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1, isMobileVp ? 1.5 : 2.0);
+    const w = Math.max(64, Math.min(maxTexDim, Math.round(rect.width * dpr)));
+    const h = Math.max(64, Math.min(maxTexDim, Math.round(rect.height * dpr)));
     if (canvas.width !== w || canvas.height !== h || configuredW !== w || configuredH !== h) {
       configureCanvas(w, h);
     }

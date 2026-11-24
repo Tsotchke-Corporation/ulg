@@ -104,6 +104,40 @@ const g7Card = document.getElementById('g7-card');
 const plot1Title = document.getElementById('plot1-title');
 const plot2Title = document.getElementById('plot2-title');
 const plot3Title = document.getElementById('plot3-title');
+const mobileDrawerBtn = document.getElementById('mobile-drawer-btn');
+const mobileDrawerClose = document.getElementById('mobile-drawer-close');
+const drawerBackdrop = document.getElementById('drawer-backdrop');
+const resetViewBtn = document.getElementById('canvas-reset-view-btn');
+const webgpuFallbackEl = document.getElementById('webgpu-fallback');
+const webgpuFallbackTitle = document.getElementById('webgpu-fallback-title');
+const webgpuFallbackMsg = document.getElementById('webgpu-fallback-msg');
+const webgpuReloadBtn = document.getElementById('webgpu-reload-btn');
+
+const IS_MOBILE_GPU_PROFILE = typeof window !== 'undefined' && (
+  window.matchMedia?.('(pointer: coarse)')?.matches
+  || window.innerWidth < 900
+  || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '')
+);
+
+function isDrawerMode() {
+  return typeof window !== 'undefined' && window.innerWidth < 1120;
+}
+
+function setMobileDrawerOpen(open) {
+  const next = Boolean(open) && isDrawerMode();
+  document.body.classList.toggle('drawer-open', next);
+  if (drawerBackdrop) drawerBackdrop.setAttribute('aria-hidden', next ? 'false' : 'true');
+}
+
+function showWebGpuFallback(title, msg) {
+  if (webgpuFallbackTitle && title) webgpuFallbackTitle.textContent = title;
+  if (webgpuFallbackMsg && msg) webgpuFallbackMsg.textContent = msg;
+  webgpuFallbackEl?.classList.add('visible');
+}
+
+function hideWebGpuFallback() {
+  webgpuFallbackEl?.classList.remove('visible');
+}
 
 let gpuDevice = null;
 let gpuRenderer = null;
@@ -153,9 +187,9 @@ const uiState = {
   m: 0,
   functional: 'pbe',              // 'pbe' | 'lda' | 'bare'
   relativisticSpinOrbit: true,
-  pointCount: 240000,
-  pointSize: 0.012,
-  opacity: 0.24,
+  pointCount: IS_MOBILE_GPU_PROFILE ? 90000 : 240000,
+  pointSize: IS_MOBILE_GPU_PROFILE ? 0.015 : 0.012,
+  opacity: IS_MOBILE_GPU_PROFILE ? 0.30 : 0.24,
   alternateShellColors: true,
   colorMode: 0,                   // 0 = alternating radial shells, 1 = +-psi phase
   shellColorA: '#ffffff',
@@ -346,44 +380,129 @@ async function handlePolytopePointer(e, isClick = false) {
   redrawCurrentTab();
 }
 
+function resetCameraView() {
+  camYaw = 0.42;
+  camPitch = 0.28;
+  camDist = 2.85;
+  renderViewportSync();
+}
+
 function attachCanvasInteractions() {
   let polyHoverPending = false;
+  const activePointers = new Map();
+  let lastPinchDist = 0;
+  let tapStart = null;
+  let lastCleanTap = null;
+
+  function pinchDistance() {
+    const pts = [...activePointers.values()];
+    if (pts.length < 2) return 0;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
     if (currentTab === 'polytope') {
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { canvas.setPointerCapture?.(e.pointerId); } catch {}
       handlePolytopePointer(e, true);
       return;
     }
-    isDragging = true;
-    lastPtrX = e.clientX;
-    lastPtrY = e.clientY;
-    canvas.setPointerCapture?.(e.pointerId);
+
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { canvas.setPointerCapture?.(e.pointerId); } catch {}
+    if (activePointers.size === 1) {
+      isDragging = true;
+      lastPtrX = e.clientX;
+      lastPtrY = e.clientY;
+      lastPinchDist = 0;
+      tapStart = e.pointerType === 'touch'
+        ? { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, t: performance.now() }
+        : null;
+    } else if (activePointers.size >= 2) {
+      isDragging = false;
+      tapStart = null;
+      lastCleanTap = null;
+      lastPinchDist = pinchDistance();
+    }
   });
+
   canvas.addEventListener('pointermove', (e) => {
     if (currentTab === 'polytope') {
+      if (e.pointerType !== 'mouse' && !activePointers.has(e.pointerId)) return;
       if (!polyHoverPending) {
         polyHoverPending = true;
-        handlePolytopePointer(e, false).finally(() => { polyHoverPending = false; });
+        handlePolytopePointer(e, activePointers.has(e.pointerId)).finally(() => { polyHoverPending = false; });
       }
       return;
     }
+    if (!activePointers.has(e.pointerId)) return;
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (tapStart && tapStart.id === e.pointerId && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) > 10) {
+      tapStart.moved = true;
+    }
+
+    if (activePointers.size >= 2) {
+      const dist = pinchDistance();
+      if (lastPinchDist > 4 && dist > 4) {
+        const scale = lastPinchDist / dist;
+        camDist = Math.max(1.3, Math.min(5.4, camDist * scale));
+        renderViewportSync();
+      }
+      lastPinchDist = dist;
+      return;
+    }
+
     if (!isDragging) return;
     const dx = e.clientX - lastPtrX;
     const dy = e.clientY - lastPtrY;
     lastPtrX = e.clientX;
     lastPtrY = e.clientY;
-    camYaw += dx * 0.008;
-    camPitch = Math.max(-1.25, Math.min(1.25, camPitch + dy * 0.008));
+    const sens = e.pointerType === 'touch' ? 0.0105 : 0.008;
+    camYaw += dx * sens;
+    camPitch = Math.max(-1.25, Math.min(1.25, camPitch + dy * sens));
     renderViewportSync();
   });
-  const stop = () => { isDragging = false; };
+
+  const stop = (e) => {
+    const wasCleanTap = Boolean(
+      tapStart && tapStart.id === e.pointerId && !tapStart.moved && activePointers.size === 1
+      && (performance.now() - tapStart.t) < 260
+    );
+    activePointers.delete(e.pointerId);
+    if (activePointers.size === 1) {
+      const rem = [...activePointers.values()][0];
+      lastPtrX = rem.x;
+      lastPtrY = rem.y;
+      isDragging = currentTab !== 'polytope';
+      lastPinchDist = 0;
+    } else {
+      isDragging = false;
+      lastPinchDist = 0;
+      if (wasCleanTap && currentTab !== 'polytope') {
+        const now = performance.now();
+        if (lastCleanTap && (now - lastCleanTap.t) < 300 && Math.hypot(e.clientX - lastCleanTap.x, e.clientY - lastCleanTap.y) < 32) {
+          lastCleanTap = null;
+          resetCameraView();
+        } else {
+          lastCleanTap = { x: e.clientX, y: e.clientY, t: now };
+        }
+      }
+      tapStart = null;
+    }
+  };
   canvas.addEventListener('pointerup', stop);
   canvas.addEventListener('pointercancel', stop);
+  canvas.addEventListener('dblclick', () => {
+    if (currentTab !== 'polytope') resetCameraView();
+  });
   canvas.addEventListener('wheel', (e) => {
     if (currentTab === 'polytope') return;
     e.preventDefault();
-    camDist = Math.max(1.4, Math.min(5.2, camDist + Math.sign(e.deltaY) * 0.18));
+    camDist = Math.max(1.3, Math.min(5.4, camDist + Math.sign(e.deltaY) * 0.18));
     renderViewportSync();
   }, { passive: false });
+  resetViewBtn?.addEventListener('click', () => resetCameraView());
 }
 
 function buildPeriodicTableButtons() {
@@ -404,6 +523,7 @@ function buildPeriodicTableButtons() {
       selectedA = null;
       zInput.value = String(Z);
       aInput.value = String(mostStableMassNumberForZ(Z));
+      setMobileDrawerOpen(false);
       runElementDerivation(Z, null);
     });
     ptGrid.appendChild(btn);
@@ -482,6 +602,15 @@ function renderG7Card(bundle, g7) {
 // ============================================================================
 
 function getPlotCtx(cv) {
+  const rect = cv.getBoundingClientRect();
+  if (rect.width >= 120 && rect.height >= 60) {
+    const targetW = Math.round(rect.width);
+    const targetH = Math.round(rect.height);
+    if (Math.abs(cv.width - targetW) > 2 || Math.abs(cv.height - targetH) > 2) {
+      cv.width = targetW;
+      cv.height = targetH;
+    }
+  }
   return cv.getContext('2d', { willReadFrequently: true });
 }
 
@@ -917,7 +1046,7 @@ function rebuildOrbitalPointCloud() {
     rGrid: atom.radialGrid?.r || null,
     u0: findU(pairSpec.n0, pairSpec.l0),
     u1: findU(pairSpec.n1, pairSpec.l1),
-    pointCount: 180000,
+    pointCount: IS_MOBILE_GPU_PROFILE ? 80000 : 180000,
     screeningExchange: uiState.functional !== 'bare',
     relativisticSpinOrbit: uiState.relativisticSpinOrbit,
     seed: uiState.cloudSeed,
@@ -958,7 +1087,7 @@ function initPhotonShellSessionForActiveSpecimen() {
       n1: pairSpec.n1,
       l1: pairSpec.l1,
       m: pairSpec.m,
-      pointCount: 160000,
+      pointCount: IS_MOBILE_GPU_PROFILE ? 75000 : 160000,
       screeningExchange: true,
       relativisticSpinOrbit: true,
       reusePosBuffer: liveTdksPairCloud?.posBuffer ?? null,
@@ -1548,10 +1677,11 @@ function renderViewportSync() {
       });
     } else if (uiState.crystalViewMode === 'photon-shell' && livePhotonSession) {
       const shellCloud = getShellBufferForPhotonScene();
+      const maxShellPts = IS_MOBILE_GPU_PROFILE ? 700 : 1800;
       gpuRenderer.renderPhotonShellScene({
         photonSession: livePhotonSession,
         shellPointsBuffer: shellCloud?.pointsBuffer ?? null,
-        shellPointCount: Math.min(1800, shellCloud?.pointCount || 1400),
+        shellPointCount: Math.min(maxShellPts, shellCloud?.pointCount || maxShellPts),
         yaw: (camYaw - 0.42) * 0.45,
         pitch: Math.max(0.25, Math.min(1.48, 1.08 + (camPitch - 0.28) * 0.6)),
         camDist: Math.max(2.2, Math.min(4.6, camDist + 0.30)),
@@ -1974,8 +2104,16 @@ function redrawCurrentTab() {
 // ============================================================================
 
 let frameCounter = 0;
+let rafId = null;
+
+function scheduleNextFrame() {
+  if (document.hidden || rafId != null) return;
+  rafId = requestAnimationFrame(tickSimulationLoop);
+}
 
 function tickSimulationLoop(nowMs) {
+  rafId = null;
+  if (document.hidden) return;
   frameCounter += 1;
 
   // User-requested optional rotation ONLY when user explicitly clicked Rotate (starts OFF!)
@@ -2058,7 +2196,7 @@ function tickSimulationLoop(nowMs) {
       .finally(() => { liveMdBusy = false; });
   }
 
-  requestAnimationFrame(tickSimulationLoop);
+  scheduleNextFrame();
 }
 
 // ============================================================================
@@ -2173,7 +2311,7 @@ async function rebuildNebImageClouds() {
       weights: params.weights,
       boxHalfBohr: params.boxHalfBohr,
       mode: uiState.molOrbitalMode,
-      pointCount: 110000,
+      pointCount: IS_MOBILE_GPU_PROFILE ? 50000 : 110000,
       seed: 1
     });
     currentNebImageClouds.push(cloud);
@@ -2380,6 +2518,7 @@ async function runReactionCombiner(aRaw, bRaw) {
     for (const btn of reactionResultsEl.querySelectorAll('[data-bf-idx]')) {
       btn.addEventListener('click', () => {
         const prod = rxn.derivedProducts[Number(btn.dataset.bfIdx)];
+        setMobileDrawerOpen(false);
         if (prod) activateCompoundBackfeed(prod, 'crystal');
       });
     }
@@ -2421,7 +2560,11 @@ async function runReactionCombiner(aRaw, bRaw) {
 function setActiveTab(tabName) {
   currentTab = tabName;
   for (const b of document.querySelectorAll('.tab-btn')) {
-    b.classList.toggle('active', b.dataset.tab === tabName);
+    const isAct = b.dataset.tab === tabName;
+    b.classList.toggle('active', isAct);
+    if (isAct && isDrawerMode()) {
+      b.scrollIntoView?.({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+    }
   }
   renderSimControls();
   redrawCurrentTab();
@@ -2436,6 +2579,8 @@ function syncDebugState() {
     activeSpecimenKind,
     currentTab,
     rendererBackend: 'webgpu',
+    isMobileProfile: IS_MOBILE_GPU_PROFILE,
+    camera: { yaw: camYaw, pitch: camPitch, dist: camDist },
     cameraAutoSpin: false,
     mdPerFrameCpuPositionReadback: false,
     Z: isComp ? null : selectedZ,
@@ -2528,7 +2673,8 @@ function syncDebugState() {
         renderViewportSync();
         resolve(canvas.toDataURL('image/png'));
       });
-    })
+    }),
+    getCamera: () => ({ yaw: camYaw, pitch: camPitch, dist: camDist })
   };
 }
 
@@ -2540,12 +2686,21 @@ async function boot() {
   buildPeriodicTableButtons();
   attachCanvasInteractions();
 
+  // Mobile slide-over drawer controls & keyboard Escape close
+  mobileDrawerBtn?.addEventListener('click', () => setMobileDrawerOpen(!document.body.classList.contains('drawer-open')));
+  mobileDrawerClose?.addEventListener('click', () => setMobileDrawerOpen(false));
+  drawerBackdrop?.addEventListener('click', () => setMobileDrawerOpen(false));
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') setMobileDrawerOpen(false);
+  });
+  webgpuReloadBtn?.addEventListener('click', () => window.location.reload());
+
   for (const btn of document.querySelectorAll('.tab-btn')) {
     btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
   }
 
-  // Quick hero showcase presets
-  for (const chip of document.querySelectorAll('#hero-presets [data-hero-z]')) {
+  // Quick hero showcase presets (sidebar + mobile quick bar!)
+  for (const chip of document.querySelectorAll('#hero-presets [data-hero-z], #mobile-quick-presets [data-hero-z]')) {
     chip.addEventListener('click', () => {
       const z = Number(chip.dataset.heroZ);
       const a = chip.dataset.heroA ? Number(chip.dataset.heroA) : null;
@@ -2554,23 +2709,26 @@ async function boot() {
       zInput.value = String(z);
       if (aInput) aInput.value = String(a ?? mostStableMassNumberForZ(z));
       if (tab === 'crystal') uiState.crystalViewMode = 'tdks-atom';
+      setMobileDrawerOpen(false);
       runElementDerivation(z, a, { switchToTab: tab });
     });
   }
-  for (const chip of document.querySelectorAll('#hero-presets [data-hero-compound]')) {
+  for (const chip of document.querySelectorAll('#hero-presets [data-hero-compound], #mobile-quick-presets [data-hero-compound]')) {
     chip.addEventListener('click', () => {
       const f = chip.dataset.heroCompound;
       const tab = chip.dataset.heroTab || 'crystal';
       compoundInput.value = f;
       if (tab === 'crystal') uiState.crystalViewMode = 'photon-shell';
+      setMobileDrawerOpen(false);
       runCompoundDerivation(f, { backfeedAllTabs: true, switchToTab: tab });
     });
   }
-  for (const chip of document.querySelectorAll('#hero-presets [data-hero-react]')) {
+  for (const chip of document.querySelectorAll('#hero-presets [data-hero-react], #mobile-quick-presets [data-hero-react]')) {
     chip.addEventListener('click', () => {
       const [a, b] = chip.dataset.heroReact.split('|');
       if (reactantAInput) reactantAInput.value = a;
       if (reactantBInput) reactantBInput.value = b;
+      setMobileDrawerOpen(false);
       runReactionCombiner(a, b);
     });
   }
@@ -2579,6 +2737,7 @@ async function boot() {
       const [a, b] = chip.dataset.rxn.split('|');
       if (reactantAInput) reactantAInput.value = a;
       if (reactantBInput) reactantBInput.value = b;
+      setMobileDrawerOpen(false);
       runReactionCombiner(a, b);
     });
   }
@@ -2589,18 +2748,22 @@ async function boot() {
     const parsedA = aRaw ? Math.trunc(Number(aRaw)) : null;
     selectedZ = z;
     selectedA = parsedA && parsedA >= z && parsedA <= 310 ? parsedA : null;
+    setMobileDrawerOpen(false);
     runElementDerivation(z, selectedA);
   });
   resetABtn?.addEventListener('click', () => {
     const z = Math.max(1, Math.min(118, Math.trunc(Number(zInput.value) || selectedZ)));
     selectedZ = z; selectedA = null;
     if (aInput) aInput.value = String(mostStableMassNumberForZ(z));
+    setMobileDrawerOpen(false);
     runElementDerivation(z, null);
   });
   runReactionBtn?.addEventListener('click', () => {
+    setMobileDrawerOpen(false);
     runReactionCombiner(reactantAInput?.value, reactantBInput?.value);
   });
   solveCompoundBtn.addEventListener('click', () => {
+    setMobileDrawerOpen(false);
     runCompoundDerivation(compoundInput.value || 'H2O');
   });
 
@@ -2623,17 +2786,69 @@ async function boot() {
   });
 
   let adapter = null;
-  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
-    adapter = await navigator.gpu?.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) await new Promise((r) => setTimeout(r, 250));
-  }
-  if (!adapter) {
+  if (!navigator.gpu) {
     statusBadge.textContent = 'WebGPU unavailable (fail-closed)';
+    showWebGpuFallback(
+      'WebGPU Not Supported in This Browser',
+      'ULG Material Physics Lab runs live Dirac–KS, TD-KS, 2D Maxwell–FDTD, MD, and Polytope compute shaders on WebGPU. Use Chrome 121+ on Android/Desktop or Safari 26+ on iOS/macOS over HTTPS.'
+    );
     return;
   }
-  gpuDevice = await adapter.requestDevice();
+  for (let attempt = 0; attempt < 8 && !adapter; attempt += 1) {
+    try {
+      adapter = await navigator.gpu.requestAdapter(attempt < 4 ? { powerPreference: 'high-performance' } : undefined);
+    } catch {
+      adapter = null;
+    }
+    if (!adapter) await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!adapter) {
+    statusBadge.textContent = 'WebGPU adapter unavailable';
+    showWebGpuFallback(
+      'WebGPU GPU Adapter Unavailable',
+      'Your browser exposes navigator.gpu, but no compatible WebGPU hardware adapter was returned. Ensure hardware acceleration / WebGPU is enabled in browser settings and retry.'
+    );
+    return;
+  }
+  try {
+    gpuDevice = await adapter.requestDevice();
+  } catch (err) {
+    statusBadge.textContent = 'WebGPU device error';
+    showWebGpuFallback('WebGPU Device Initialization Failed', err?.message || String(err));
+    return;
+  }
+  hideWebGpuFallback();
   gpuDevice.addEventListener('uncapturederror', (e) => console.error('WebGPU error:', e.error?.message || String(e.error)));
+  gpuDevice.lost?.then((info) => {
+    statusBadge.textContent = 'WebGPU context lost';
+    showWebGpuFallback(
+      'WebGPU Context Paused / Lost',
+      `Mobile OS or GPU driver reclaimed the WebGPU device (${info?.reason || 'unknown'}). Tap below to restore live GPU simulations.`
+    );
+  });
   gpuRenderer = createElementsLabWebGpuRenderer(gpuDevice, canvas);
+
+  // ResizeObserver & orientation change sync for crisp mobile/tablet viewport + 2D plots
+  let resizeTimer = null;
+  const handleViewportResize = () => {
+    if (!isDrawerMode()) setMobileDrawerOpen(false);
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      redrawCurrentTab();
+    }, 60);
+  };
+  if (typeof ResizeObserver === 'function' && canvas.parentElement) {
+    new ResizeObserver(handleViewportResize).observe(canvas.parentElement);
+  }
+  window.addEventListener('resize', handleViewportResize, { passive: true });
+  window.addEventListener('orientationchange', handleViewportResize, { passive: true });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      redrawCurrentTab();
+      scheduleNextFrame();
+    }
+  });
 
   const params = new URLSearchParams(window.location.search);
   const startZ = Math.max(1, Math.min(118, Math.trunc(Number(params.get('z')) || 26)));
@@ -2647,7 +2862,7 @@ async function boot() {
   zInput.value = String(startZ);
   if (aInput) aInput.value = String(startA ?? mostStableMassNumberForZ(startZ));
   await runElementDerivation(startZ, startA, { switchToTab: startTab || null });
-  requestAnimationFrame(tickSimulationLoop);
+  scheduleNextFrame();
 }
 
 boot();

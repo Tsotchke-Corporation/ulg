@@ -38,7 +38,7 @@ import { resolveSphSpatialGasHistoryVolumeInput, resolveSphSpatialGasChainPressu
 import { createSphExactHistoryGasVolumeWgsl } from './sphExactHistoryGasVolumeWgsl.js';
 import { createSchroederSpatialChainVolumeGpu } from './schroederSpatialChainVolumeGpu.js';
 import { SCHROEDER_SPATIAL_MAX_CONTIGUOUS_CHAIN_LEVELS } from '../../../ulg-gpu-abi/src/schroederSpatialScaleAtlas.js';
-import { createCachedExplicitBindGroup } from '../webgpuComputeLayout.js';
+import { createCachedExplicitBindGroup, getCachedPipelineBindGroupLayout } from '../webgpuComputeLayout.js';
 import { createSphSpatialGasChainFreeVolumeWgsl } from './sphSpatialGasChainFreeVolumeWgsl.js';
 import { sphSpatialGasChainPressureWgsl } from './sphSpatialGasChainPressureWgsl.js';
 import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
@@ -1247,7 +1247,7 @@ export function createSphSpatialGasFreeVolumeGpu(device, {
         selectedResources = resources
       ) => createCachedExplicitBindGroup(device, {
         label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
-        layout: pipelineObject.getBindGroupLayout(0),
+        layout: getCachedPipelineBindGroupLayout(pipelineObject, 0),
         entries: [
           ...Array.from(selectedResources, ([binding, buffer]) => ({
             binding,

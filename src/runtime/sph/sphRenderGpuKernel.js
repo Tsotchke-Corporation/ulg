@@ -3953,7 +3953,7 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
       computeBufferBinding(3, 'uniform')
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       {
@@ -4221,7 +4221,7 @@ export async function buildSphMaterialInterfaceCompactCandidateFieldWebGpu({
     entryPoint: 'main',
     bindings: compactCandidateBindings
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       {
@@ -5662,7 +5662,7 @@ export async function summarizeSphRenderFieldSurfacesWebGpu({
       computeBufferBinding(3, 'uniform')
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       {
@@ -5975,7 +5975,7 @@ export async function buildSphRenderMarchingCubeCellsWebGpu({
       computeBufferBinding(3, 'uniform')
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       {
@@ -6475,7 +6475,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   });
   markProgress('surface-vertices-pipeline-complete');
   markProgress('surface-vertices-bind-group-started');
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       {
@@ -7290,7 +7290,7 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   });
   markProgress('surface-draw-metadata-pipeline-complete');
   markProgress('surface-draw-metadata-bind-group-started');
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       {

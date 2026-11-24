@@ -23048,7 +23048,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
             computeBufferBinding(2, 'uniform')
           ]
         });
-        const bindGroup = device.createBindGroup({
+        const bindGroup = createCachedExplicitBindGroup(device, {
           layout: bindGroupLayout,
           entries: [
             { binding: 0, resource: { buffer: sourceBuffer } },
@@ -32056,7 +32056,7 @@ async function compactResidentProductHistoryArenaWebGpu({
       0,
       new Uint32Array([rowCount, strideFloats / 4, 0, 0])
     );
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceSlot.buffer } },
@@ -32207,7 +32207,7 @@ export async function compactResidentProductEventBufferWebGpu({
   try {
     device.pushErrorScope?.('validation');
     device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([rowCount, strideFloats / 4, 0, 0]));
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceBuffer } },

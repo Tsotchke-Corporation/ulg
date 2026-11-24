@@ -14,6 +14,7 @@ import {
 import {
   acquireQueueOrderedPooledBuffer,
   createCachedExplicitBindGroup,
+  getCachedPipelineBindGroupLayout,
   registerQueueOrderedPooledBufferReturn,
   releaseOrDestroyQueueOrderedPooledBuffer
 } from '../webgpuComputeLayout.js';
@@ -1359,7 +1360,7 @@ export async function encodeSphParticipatingMediumPack(
     );
     const packBindGroup = createCachedExplicitBindGroup(runtimeRecord.device, {
       label: 'ulg-sph-participating-medium-pack-bind-group',
-      layout: packPipeline.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(packPipeline, 0),
       entries: [
         { binding: 0, resource: { buffer: descriptorRecord.fieldRowsBuffer } },
         { binding: 1, resource: { buffer: routeRowsBuffer } },
@@ -1547,7 +1548,7 @@ export async function encodeSphParticipatingMediumRender(
   ) {
     bindGroup = runtimeRecord.device.createBindGroup({
       label: 'ulg-sph-participating-medium-render-bind-group',
-      layout: renderPipeline.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(renderPipeline, 0),
       entries: [
         { binding: 0, resource: { buffer: frameRecord.renderUniformBuffer } },
         { binding: 1, resource: frameRecord.opticalTextureView },

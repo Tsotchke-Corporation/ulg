@@ -33,6 +33,7 @@ import {
   regionalClosureLaneBindings
 } from '../material/regionalClosureWorkerLane.js';
 import { packResponseFunctionsForGpu, responseFunctionGpuWgsl } from '../material/responseFunctionGpu.js';
+import { createCachedExplicitBindGroup } from '../webgpuComputeLayout.js';
 import { unwrapWebGpuCacheDevice } from '../webgpuComputeLayout.js';
 
 // The Eshkol-derived Tait stiffness as an A4 response function, packed once
@@ -1175,7 +1176,7 @@ export function encodeSphImplicitPressureRegionalClosureScheduleTick(device, enc
     0,
     new Uint32Array([particleCount, 0, 0, 0])
   );
-  const packGroup = device.createBindGroup({
+  const packGroup = createCachedExplicitBindGroup(device, {
     label: 'ulg-sph-implicit-pressure-a3-pack-group',
     layout: cache.regionalPackLayout,
     entries: [
@@ -1372,35 +1373,25 @@ export function encodeSphImplicitPressureSolve(device, encoder, {
     ? regionalClosureLaneBindings(cache.regionalLane).tableBuffer
     : null;
   const activeStiffnessTable = options.stiffnessTableBuffer ?? activeA3Table ?? cache.stiffnessTable;
-  const groupKey = (source) => [source, stateBuffer, thermoBuffer, mechanicsBuffer, gridBuffer, activeStiffnessTable];
-  const bindGroup = (source) => {
-    const key = groupKey(source);
-    for (const [cachedKey, group] of workspace.bindGroups) {
-      if (cachedKey.every((entry, i) => entry === key[i])) return group;
-    }
-    const group = device.createBindGroup({
-      label: `ulg-sph-implicit-pressure-group-${source}`,
-      layout: cache.layout,
-      entries: [
-        { binding: 0, resource: { buffer: workspace.params[source] } },
-        { binding: 1, resource: { buffer: stateBuffer } },
-        { binding: 2, resource: { buffer: thermoBuffer } },
-        { binding: 3, resource: { buffer: mechanicsBuffer } },
-        { binding: 4, resource: { buffer: gridBuffer } },
-        { binding: 5, resource: { buffer: workspace.cgDiag } },
-        { binding: 6, resource: { buffer: workspace.iterAcc } },
-        { binding: 7, resource: { buffer: workspace.cgR } },
-        { binding: 8, resource: { buffer: workspace.cgP } },
-        { binding: 9, resource: { buffer: workspace.cgQ } },
-        { binding: 10, resource: { buffer: workspace.scalars } },
-        { binding: 11, resource: { buffer: workspace.partials } },
-        { binding: 12, resource: { buffer: activeStiffnessTable } }
-      ]
-    });
-    if (workspace.bindGroups.size >= 16) workspace.bindGroups.clear();
-    workspace.bindGroups.set(key, group);
-    return group;
-  };
+  const bindGroup = (source) => createCachedExplicitBindGroup(device, {
+    label: `ulg-sph-implicit-pressure-group-${source}`,
+    layout: cache.layout,
+    entries: [
+      { binding: 0, resource: { buffer: workspace.params[source] } },
+      { binding: 1, resource: { buffer: stateBuffer } },
+      { binding: 2, resource: { buffer: thermoBuffer } },
+      { binding: 3, resource: { buffer: mechanicsBuffer } },
+      { binding: 4, resource: { buffer: gridBuffer } },
+      { binding: 5, resource: { buffer: workspace.cgDiag } },
+      { binding: 6, resource: { buffer: workspace.iterAcc } },
+      { binding: 7, resource: { buffer: workspace.cgR } },
+      { binding: 8, resource: { buffer: workspace.cgP } },
+      { binding: 9, resource: { buffer: workspace.cgQ } },
+      { binding: 10, resource: { buffer: workspace.scalars } },
+      { binding: 11, resource: { buffer: workspace.partials } },
+      { binding: 12, resource: { buffer: activeStiffnessTable } }
+    ]
+  });
   const fromVelocity = bindGroup(0);
   const fromDirection = bindGroup(1);
   const forDiagonal = bindGroup(2);

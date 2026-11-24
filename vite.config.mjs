@@ -350,7 +350,7 @@ function excludeUnusedPeerComputeInference() {
   };
 }
 
-const RETIRED_63_LIMB_MODULE_RE = /(?:^|\/)(?:sphExactRational(?:Quantity|Projection)Wgsl|sphExactPhaseCarrier(?:Stage|Quantity)Gpu|sphExactPhaseInitialQuantityGpu|sphExactG2pQuantity(?:Gpu|Wgsl)|sphExactHistory(?:P2g|G2p)(?:Gpu|Wgsl)|sphExactHistoryGasVolumeWgsl|sphExactMechanicsRefresh(?:Gpu|Wgsl)|sphExactThermalQuantityGpu|sphExactCarriedReactionGpu|sphExactReactionSourceGpu|sphExactReactionOutput(?:Gpu|Wgsl)|sphExactReactionChemistryBudget(?:Wgsl|Metadata)|sphExactPlacement[A-Za-z0-9_]*|sphExactAerosolQuantities|sphExactVaporAerosol(?:Quantities|Endpoints)Gpu|sphExactResidentProductHistoryWgsl|sphResidentProductHistoryParallelAppendGpu)\.js$/;
+const RETIRED_63_LIMB_MODULE_RE = /(?:^|\/)(?:sphExactRational(?:Quantity|Projection)Wgsl|sphExactPhaseCarrier(?:Stage|Quantity)Gpu|sphExactPhaseInitialQuantityGpu|sphExactG2pQuantity(?:Gpu|Wgsl)|sphExactHistory(?:P2g|G2p)(?:Gpu|Wgsl)|sphExactHistoryGasVolumeWgsl|sphExactMechanicsRefresh(?:Gpu|Wgsl)|sphExactThermalQuantityGpu|sphExactCarriedReactionGpu|sphExactReactionSourceGpu|sphExactReactionOutput(?:Gpu|Wgsl)|sphExactReactionChemistryBudget(?:Wgsl|Metadata)|sphExactPlacement[A-Za-z0-9_]*|sphExactAerosolQuantities|sphExactVaporAerosol(?:Quantities|Endpoints)Gpu|sphExactResidentProductHistoryWgsl)\.js$/;
 const RETIRED_63_LIMB_VIRTUAL_PREFIX = '\0ulg-retired-63limb:';
 
 function extractModuleExportNames(sourceText) {
@@ -470,7 +470,10 @@ function excludeRetiredProductionRoutes() {
     transform(code, id) {
       if (!isBuild) return null;
       const cleanId = id.split('?')[0];
-      if (!cleanId.includes('/src/runtime/sph/')) return null;
+      if (
+        !cleanId.includes('/src/runtime/sph/')
+        && !cleanId.endsWith('/ulg-gpu-abi/src/sphReactionStrictGate.js')
+      ) return null;
       let next = code;
       let changed = false;
       const stripped = stripExportedFunctionBodies(next, [

@@ -34,7 +34,7 @@ import {
 import {
   createWebGpuStableRadixScanUnique
 } from '../webgpuRadixScanUnique.js';
-import { createCachedExplicitBindGroup } from '../webgpuComputeLayout.js';
+import { createCachedExplicitBindGroup, getCachedPipelineBindGroupLayout } from '../webgpuComputeLayout.js';
 import {
   tagWebGpuBufferDevice,
   webGpuBufferMatchesDevice,
@@ -807,7 +807,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
     }
     const bindGroup = createCachedExplicitBindGroup(device, {
       label: bindLabel,
-      layout: pipeline.getBindGroupLayout(0),
+      layout: getCachedPipelineBindGroupLayout(pipeline, 0),
       entries: bindings.map((binding, index) => ({
         binding,
         resource: boundResources[index]
@@ -1858,7 +1858,7 @@ export function createSchroederSpatialMechanicsFieldViewGpu(device, {
       );
       const bindGroup = createCachedExplicitBindGroup(device, {
         label: `${label}-arena-${arena.arenaIndex}-topology-successor-bindings`,
-        layout: topologySuccessorPipeline.getBindGroupLayout(0),
+        layout: getCachedPipelineBindGroupLayout(topologySuccessorPipeline, 0),
         entries: [
           { binding: 0, resource: { buffer: topologyPredecessor.fieldViewBuffer } },
           { binding: 1, resource: { buffer: arena.fieldViewBuffer } },

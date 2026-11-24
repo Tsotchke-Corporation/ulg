@@ -7,9 +7,28 @@ const DEVICE_SHADER_MODULE_CACHE = new WeakMap();
 const DEVICE_EXPLICIT_COMPUTE_LAYOUT_CACHE = new WeakMap();
 const DEVICE_PIPELINE_PREWARM_INFLIGHT = new WeakMap();
 const DEVICE_EXPLICIT_BIND_GROUP_CACHE = new WeakMap();
+const PIPELINE_BIND_GROUP_LAYOUT_CACHE = new WeakMap();
 const GPU_RESOURCE_ID_MAP = new WeakMap();
 let nextGpuResourceId = 1;
 const MAX_CACHED_BIND_GROUPS_PER_LAYOUT = 128;
+
+export function getCachedPipelineBindGroupLayout(pipeline, index = 0) {
+  if (!pipeline || typeof pipeline.getBindGroupLayout !== 'function') {
+    return null;
+  }
+  const slot = Number(index) || 0;
+  let byIndex = PIPELINE_BIND_GROUP_LAYOUT_CACHE.get(pipeline);
+  if (!byIndex) {
+    byIndex = new Map();
+    PIPELINE_BIND_GROUP_LAYOUT_CACHE.set(pipeline, byIndex);
+  }
+  let layout = byIndex.get(slot);
+  if (!layout) {
+    layout = pipeline.getBindGroupLayout(slot);
+    if (layout) byIndex.set(slot, layout);
+  }
+  return layout;
+}
 
 function gpuResourceId(resource) {
   let id = GPU_RESOURCE_ID_MAP.get(resource);

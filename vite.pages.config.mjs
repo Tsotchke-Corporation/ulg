@@ -1,9 +1,16 @@
 import { defineConfig } from 'vite';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const pagesRepoRoot = fileURLToPath(new URL('.', import.meta.url));
+const pagesPeercomputeRoot = (() => {
+  for (const base of ['../', '../../../../']) {
+    const candidate = fileURLToPath(new URL(`${base}peercompute/peercompute`, import.meta.url));
+    if (existsSync(candidate)) return realpathSync(candidate);
+  }
+  return fileURLToPath(new URL('../peercompute/peercompute', import.meta.url));
+})();
 const RETIRED_63_LIMB_MODULE_RE = /(?:^|\/)(?:sphExactRational(?:Quantity|Projection)Wgsl|sphExactPhaseCarrier(?:Stage|Quantity)Gpu|sphExactPhaseInitialQuantityGpu|sphExactG2pQuantity(?:Gpu|Wgsl)|sphExactHistory(?:P2g|G2p)(?:Gpu|Wgsl)|sphExactHistoryGasVolumeWgsl|sphExactMechanicsRefresh(?:Gpu|Wgsl)|sphExactThermalQuantityGpu|sphExactCarriedReactionGpu|sphExactReactionSourceGpu|sphExactReactionOutput(?:Gpu|Wgsl)|sphExactReactionChemistryBudget(?:Wgsl|Metadata)|sphExactPlacement[A-Za-z0-9_]*|sphExactAerosolQuantities|sphExactVaporAerosol(?:Quantities|Endpoints)Gpu|sphExactResidentProductHistoryWgsl)\.js$/;
 const RETIRED_63_LIMB_VIRTUAL_PREFIX = '\0ulg-pages-retired-63limb:';
 
@@ -241,6 +248,10 @@ export default defineConfig({
         supergalactic: fileURLToPath(new URL('./supergalactic.html', import.meta.url)),
         cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url)),
         stellarGenesis: fileURLToPath(new URL('./stellar-genesis.html', import.meta.url)),
+        peercomputeComputeWorker: resolve(
+          pagesPeercomputeRoot,
+          'src/peercompute/computeManager/computeWorker.js'
+        ),
         sphMlsMpmGpuStep: fileURLToPath(
           new URL('./src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url)
         ),
@@ -278,6 +289,9 @@ export default defineConfig({
       preserveEntrySignatures: 'exports-only',
       output: {
         entryFileNames(chunk) {
+          if (chunk.name === 'peercomputeComputeWorker') {
+            return 'assets/peercomputeCompute.worker.js';
+          }
           if (chunk.name === 'sphMlsMpmGpuStep') return 'assets/sphMlsMpmGpuStep.js';
           if (chunk.name === 'ulgMechanicsResidentStageRunner') {
             return 'assets/ulgMechanicsResidentStage.worker.js';

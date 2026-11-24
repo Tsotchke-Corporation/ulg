@@ -7,7 +7,8 @@ import {
   StateManager,
   GPUHubManager,
   createResidentStageWorkerBackend,
-  createRemoteResultQuorumValidator
+  createRemoteResultQuorumValidator,
+  registerDefaultWorkerBootstrapURL
 } from './runtime/peercomputeCore.js';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
 import childWorkerModuleUrl from './services/dummyChild.worker.js?worker&url';
@@ -15,6 +16,12 @@ import serviceWorkerModuleUrl from './services/dummyService.worker.js?worker&url
 import residentMechanicsStageWorkerModuleUrl from './services/ulgMechanicsResidentStage.worker.js?worker&url';
 import ulgRuntimeWorkerModuleUrl from './services/ulgRuntime.worker.js?worker&url';
 import { mountUlgSimStudioApp } from './visualization/ulgSimStudioApp.js';
+
+if (import.meta.env.PROD) {
+  registerDefaultWorkerBootstrapURL(
+    new URL('./assets/peercomputeCompute.worker.js', document.baseURI).href
+  );
+}
 
 const peercomputeModule = Object.freeze({
   NodeKernel,

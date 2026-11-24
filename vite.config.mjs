@@ -526,13 +526,91 @@ export default defineConfig({
     copyPlanBackgroundsPlugin()
   ],
   build: {
+    modulePreload: false,
     rollupOptions: {
       input: {
         index: fileURLToPath(new URL('./index.html', import.meta.url)),
         elementsLab: fileURLToPath(new URL('./elements-lab.html', import.meta.url)),
         supergalactic: fileURLToPath(new URL('./supergalactic.html', import.meta.url)),
         cosmicQuantum: fileURLToPath(new URL('./cosmic-quantum.html', import.meta.url)),
-        stellarGenesis: fileURLToPath(new URL('./stellar-genesis.html', import.meta.url))
+        stellarGenesis: fileURLToPath(new URL('./stellar-genesis.html', import.meta.url)),
+        peercomputeComputeWorker: resolve(
+          peercomputeRoot,
+          'src/peercompute/computeManager/computeWorker.js'
+        ),
+        sphMlsMpmGpuStep: fileURLToPath(
+          new URL('./src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url)
+        ),
+        ulgMechanicsResidentStageRunner: fileURLToPath(
+          new URL('./src/services/ulgMechanicsResidentStage.worker.js', import.meta.url)
+        ),
+        residentRenderCandidateMailbox: fileURLToPath(
+          new URL('./src/visualization/residentRenderCandidateMailbox.js', import.meta.url)
+        ),
+        webgpuDeviceLimits: fileURLToPath(
+          new URL('./src/runtime/webgpuDeviceLimits.js', import.meta.url)
+        ),
+        webgpuComputeLayout: fileURLToPath(
+          new URL('./src/runtime/webgpuComputeLayout.js', import.meta.url)
+        ),
+        workerOwnedIsosurfacePresenter: fileURLToPath(
+          new URL('./src/services/workerOwnedIsosurfacePresenter.js', import.meta.url)
+        ),
+        workerPresentationOpportunity: fileURLToPath(
+          new URL('./src/services/workerPresentationOpportunity.js', import.meta.url)
+        ),
+        workerOwnedIsosurfaceMotion: fileURLToPath(
+          new URL('./src/services/workerOwnedIsosurfaceMotion.js', import.meta.url)
+        ),
+        schroederWorkerScheduleRouteEvidence: fileURLToPath(
+          new URL('./src/runtime/sph/schroederWorkerScheduleRouteEvidence.js', import.meta.url)
+        ),
+        residentPresentationSubmissionGap: fileURLToPath(
+          new URL('./src/runtime/sph/residentPresentationSubmissionGap.js', import.meta.url)
+        ),
+        sphWorkerPresentationQos: fileURLToPath(
+          new URL('./src/runtime/sph/sphWorkerPresentationQos.js', import.meta.url)
+        )
+      },
+      preserveEntrySignatures: 'exports-only',
+      output: {
+        entryFileNames(chunk) {
+          if (chunk.name === 'peercomputeComputeWorker') {
+            return 'assets/peercomputeCompute.worker.js';
+          }
+          if (chunk.name === 'sphMlsMpmGpuStep') return 'assets/sphMlsMpmGpuStep.js';
+          if (chunk.name === 'ulgMechanicsResidentStageRunner') {
+            return 'assets/ulgMechanicsResidentStage.worker.js';
+          }
+          if (chunk.name === 'residentRenderCandidateMailbox') {
+            return 'visualization/residentRenderCandidateMailbox.js';
+          }
+          if (chunk.name === 'webgpuDeviceLimits') {
+            return 'runtime/webgpuDeviceLimits.js';
+          }
+          if (chunk.name === 'webgpuComputeLayout') {
+            return 'runtime/webgpuComputeLayout.js';
+          }
+          if (chunk.name === 'workerOwnedIsosurfacePresenter') {
+            return 'assets/workerOwnedIsosurfacePresenter.js';
+          }
+          if (chunk.name === 'workerPresentationOpportunity') {
+            return 'assets/workerPresentationOpportunity.js';
+          }
+          if (chunk.name === 'workerOwnedIsosurfaceMotion') {
+            return 'assets/workerOwnedIsosurfaceMotion.js';
+          }
+          if (chunk.name === 'schroederWorkerScheduleRouteEvidence') {
+            return 'runtime/sph/schroederWorkerScheduleRouteEvidence.js';
+          }
+          if (chunk.name === 'residentPresentationSubmissionGap') {
+            return 'runtime/sph/residentPresentationSubmissionGap.js';
+          }
+          if (chunk.name === 'sphWorkerPresentationQos') {
+            return 'runtime/sph/sphWorkerPresentationQos.js';
+          }
+          return 'assets/[name]-[hash].js';
+        }
       }
     }
   },

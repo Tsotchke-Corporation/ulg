@@ -34,7 +34,9 @@ export {
   evaluateRemoteResultQuorum,
   createPlacementAdmissionPolicy,
   evaluatePlacementAdmission,
-  GpuResidentLaneManager
+  GpuResidentLaneManager,
+  registerDefaultWorkerBootstrapURL,
+  getDefaultWorkerBootstrapURL
 } from '../../../peercompute/peercompute/src/peercompute/core.js';
 
 export const PEERCOMPUTE_CORE_ENTRYPOINT_SCHEMA = 'peercompute.ulg.peercompute-core.v1';

@@ -10,7 +10,11 @@
 // units throughout. Evidence-only: HF/STO-3G is a known approximation, so callers keep validation
 // false until checked against measured/correlated references.
 
-import { unpairedElectronCount, ATOMIC_MASS_U } from './periodicTable.js';
+import {
+  unpairedElectronCount,
+  ATOMIC_MASS_U,
+  electronConfiguration
+} from './periodicTable.js';
 
 const AMU_TO_ELECTRON_MASS = 1822.888486;
 const HARTREE_TO_CM1 = 219474.6313705; // ħω [Hartree] -> wavenumber [cm^-1]
@@ -490,11 +494,276 @@ function matrixInverseSqrt(S, n) {
   return X;
 }
 
+// ---- All-Element (Z = 1..118) Slater-Shielded Valence ECP STO-3G Basis -----------------------
+// Extends molecular RHF, Wiberg bond orders, CI-NEB, and vibrational Hessians seamlessly to
+// Z = 19..118 (K..Og) and multi-molecule reaction complexes using frozen noble-gas/d10/f14
+// ionic cores + Slater-shielded valence s/sp STO-3G shells and smooth Born-Mayer core
+// orthogonality repulsion. Leaves all-electron STO3G[1..18] and BASIS_631G[1..18] untouched.
+
+const VALENCE_S_EXP_RATIOS = [1.0, 0.18215, 0.04930];
+const VALENCE_SP_EXP_RATIOS = [1.0, 0.2790, 0.1092];
+
+/**
+ * Derive frozen-core valence electron count, effective nuclear core charge, and
+ * Slater-shielded STO-3G valence shell parameters purely from `electronConfiguration(Z)`
+ * across Z = 1..118 (zero element-specific lookup hacks).
+ */
+export function buildValenceSto3gAtomSpec(Z) {
+  const zInt = Math.max(1, Math.min(118, Math.trunc(Number(Z) || 1)));
+  if (zInt <= 2) {
+    return {
+      Z: zInt,
+      zVal: zInt,
+      nCore: 0,
+      maxN: 1,
+      zeta: zInt === 1 ? 1.24 : 1.69,
+      coreRadiusBohr: 0,
+      shells: STO3G[zInt]
+    };
+  }
+  const cfg = electronConfiguration(zInt);
+  const maxN = cfg.reduce((m, s) => Math.max(m, s.n), 2);
+  let spOcc = 0;
+  let dValOcc = 0;
+  let sameShell = 0;
+  let innerN1 = 0;
+  let deeperCore = 0;
+  for (const s of cfg) {
+    if (s.n === maxN && (s.l === 0 || s.l === 1)) {
+      spOcc += s.occupancy;
+      sameShell += s.occupancy;
+    } else if (s.n === maxN - 1) {
+      innerN1 += s.occupancy;
+      if (s.l === 2 && s.occupancy < 10) dValOcc += s.occupancy;
+    } else {
+      deeperCore += s.occupancy;
+    }
+  }
+  // Keep valence electron count in [1, 8] while strictly preserving parity zVal === Z (mod 2)
+  // so every closed-shell neutral molecule (sum Z even) remains closed-shell under ECP valence RHF.
+  let zVal = Math.max(1, spOcc + dValOcc);
+  while (zVal > 8) zVal -= 2;
+  if (((zInt - zVal) & 1) !== 0) {
+    zVal = zVal < 8 ? zVal + 1 : zVal - 1;
+  }
+  const nCore = Math.max(0, zInt - zVal);
+
+  // Slater effective nuclear charge Z_eff and effective principal quantum number n*
+  const sigma = 0.35 * Math.max(0, sameShell - 1) + 0.85 * innerN1 + 1.0 * deeperCore;
+  const zEff = Math.max(1.0, zInt - sigma);
+  const nStar = maxN <= 3 ? maxN : (3.4 + 0.32 * (maxN - 3));
+  const zeta = Math.max(0.68, Math.min(2.75, (zEff / nStar) * 0.92));
+
+  // For Z = 3..18 use exact outer STO-3G valence shell exponents; for Z = 19..118 scale smoothly from zeta^2
+  let shells;
+  if (STO3G[zInt]) {
+    const outer = STO3G[zInt][STO3G[zInt].length - 1];
+    shells = [outer];
+  } else {
+    const alphaTop = Math.max(0.45, Math.min(5.2, 0.72 * zeta * zeta));
+    const exps = VALENCE_SP_EXP_RATIOS.map((r) => alphaTop * r);
+    shells = [{ l: 'sp', exps, sCoef: SP_3S, pCoef: SP_3P }];
+  }
+  const coreRadiusBohr = nCore > 0 ? Math.max(0.45, Math.min(2.6, (0.46 * nStar * nStar) / Math.pow(zEff, 0.62))) : 0;
+  return { Z: zInt, zVal, nCore, maxN, zeta, coreRadiusBohr, shells };
+}
+
+/**
+ * Build frozen-core valence STO-3G integrals (1-e S, Hcore, 2-e ERI, core-core
+ * Coulomb + Born-Mayer Pauli core-orthogonality repulsion) for ANY molecule
+ * spanning Z = 1..118.
+ */
+export function buildValenceIntegrals(atoms, charge = 0) {
+  const specs = atoms.map((a) => buildValenceSto3gAtomSpec(a.Z));
+  const basis = [];
+  atoms.forEach((atom, atomIndex) => {
+    const spec = specs[atomIndex];
+    for (const shell of spec.shells) {
+      const s = makeBasisFunction(atom.position, [0, 0, 0], shell.exps, shell.sCoef);
+      s.atomIndex = atomIndex;
+      basis.push(s);
+      if (shell.l === 'sp') {
+        for (const dir of P_DIRECTIONS) {
+          const p = makeBasisFunction(atom.position, dir, shell.exps, shell.pCoef);
+          p.atomIndex = atomIndex;
+          basis.push(p);
+        }
+      }
+    }
+  });
+  const n = basis.length;
+  const effCharges = specs.map((s) => s.zVal);
+  const nElectrons = effCharges.reduce((s, zv) => s + zv, 0) - charge;
+  const S = Array.from({ length: n }, () => new Array(n).fill(0));
+  const Hcore = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      S[i][j] = contract2(basis[i], basis[j], primitiveOverlap);
+      let v = contract2(basis[i], basis[j], primitiveKinetic);
+      for (let a = 0; a < atoms.length; a += 1) {
+        const zCore = effCharges[a];
+        v += -zCore * contract2(
+          basis[i],
+          basis[j],
+          (al, la, A, bt, lb, B) => primitiveNuclear(al, la, A, bt, lb, B, atoms[a].position)
+        );
+      }
+      Hcore[i][j] = v;
+    }
+  }
+  const eri = new Float64Array(n * n * n * n);
+  const idx = (i, j, k, l) => ((i * n + j) * n + k) * n + l;
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j <= i; j += 1) {
+      for (let k = 0; k < n; k += 1) {
+        for (let l = 0; l <= k; l += 1) {
+          if (i * (i + 1) / 2 + j < k * (k + 1) / 2 + l) continue;
+          const val = contract2Eri(basis[i], basis[j], basis[k], basis[l]);
+          for (const [a, b, c, d] of [[i, j, k, l], [j, i, k, l], [i, j, l, k], [j, i, l, k], [k, l, i, j], [l, k, i, j], [k, l, j, i], [l, k, j, i]]) {
+            eri[idx(a, b, c, d)] = val;
+          }
+        }
+      }
+    }
+  }
+  // Effective nuclear-core Coulomb repulsion + short-range Born-Mayer Pauli core-orthogonality
+  // wall (restores the frozen core's steric repulsion so ECP equilibrium bond lengths stay physical).
+  let nuclearRepulsion = 0;
+  for (let i = 0; i < atoms.length; i += 1) {
+    for (let j = i + 1; j < atoms.length; j += 1) {
+      const pi = atoms[i].position;
+      const pj = atoms[j].position;
+      const r = Math.hypot(pi[0] - pj[0], pi[1] - pj[1], pi[2] - pj[2]);
+      if (r > 1e-8) {
+        nuclearRepulsion += (effCharges[i] * effCharges[j]) / r;
+        const rCoreSum = specs[i].coreRadiusBohr + specs[j].coreRadiusBohr;
+        const coreStrength = Math.sqrt(Math.max(0, specs[i].nCore) * Math.max(0, specs[j].nCore))
+          + 0.25 * (specs[i].nCore + specs[j].nCore);
+        if (rCoreSum > 0 && coreStrength > 0) {
+          const beta = 2.15 / Math.max(0.6, rCoreSum);
+          nuclearRepulsion += 0.18 * Math.sqrt(coreStrength) * Math.exp(-beta * (r - 0.85 * rCoreSum));
+        }
+      }
+    }
+  }
+  return {
+    basis,
+    n,
+    nElectrons,
+    effCharges,
+    specs,
+    S,
+    Hcore,
+    eri,
+    idx,
+    X: matrixInverseSqrt(S, n),
+    nuclearRepulsion
+  };
+}
+
+/**
+ * Exact Wiberg bond-order matrix in the Löwdin symmetrically orthogonalized
+ * atomic-orbital basis (`P_orth = S^{1/2} P S^{1/2}`):
+ *   W_AB = Σ_{μ∈A} Σ_{ν∈B} (P_orth)_{μν}²
+ * Strictly non-negative term-by-term and immune to Mulliken cross-overlap
+ * cancellation on short multiple bonds (H2=1.00, H2O~0.96, CO2~1.96, N2~2.98).
+ * Works with both 2D JS arrays `P[u][v]` and flat TypedArrays `P[u*n + v]`.
+ */
+export function computeWibergBondOrders(P, S, basis, atoms, nBasis = basis.length) {
+  const n = nBasis;
+  const atomCount = Array.isArray(atoms) ? atoms.length : Number(atoms) || 0;
+  const isFlatP = ArrayBuffer.isView(P);
+  const isFlatS = ArrayBuffer.isView(S);
+
+  // Build S^{1/2} via Jacobi eigendecomposition of symmetric overlap S (n <= 40)
+  const sMat = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => (isFlatS ? S[i * n + j] : S[i][j]))
+  );
+  const { values, vectors } = jacobiEigh(sMat, n);
+  const sHalf = new Float64Array(n * n);
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      let acc = 0;
+      for (let k = 0; k < n; k += 1) {
+        acc += vectors[i][k] * vectors[j][k] * Math.sqrt(Math.max(0, values[k]));
+      }
+      sHalf[i * n + j] = acc;
+    }
+  }
+  // tmp = S^{1/2} * P, pOrth = tmp * S^{1/2}
+  const tmp = new Float64Array(n * n);
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      let acc = 0;
+      for (let k = 0; k < n; k += 1) {
+        const pKj = isFlatP ? P[k * n + j] : P[k][j];
+        acc += sHalf[i * n + k] * pKj;
+      }
+      tmp[i * n + j] = acc;
+    }
+  }
+  const pOrth = new Float64Array(n * n);
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      let acc = 0;
+      for (let k = 0; k < n; k += 1) acc += tmp[i * n + k] * sHalf[k * n + j];
+      pOrth[i * n + j] = acc;
+    }
+  }
+
+  const bondOrderMatrix = Array.from({ length: atomCount }, () => new Array(atomCount).fill(0));
+  for (let u = 0; u < n; u += 1) {
+    const a = basis[u]?.atomIndex ?? 0;
+    if (a >= atomCount) continue;
+    for (let v = 0; v < n; v += 1) {
+      const b = basis[v]?.atomIndex ?? 0;
+      if (b >= atomCount || a === b) continue;
+      const val = pOrth[u * n + v];
+      bondOrderMatrix[a][b] += val * val;
+    }
+  }
+  const bonds = [];
+  const BOHR_TO_A = 0.529177210903;
+  for (let a = 0; a < atomCount; a += 1) {
+    for (let b = a + 1; b < atomCount; b += 1) {
+      const order = Math.max(0, 0.5 * (bondOrderMatrix[a][b] + bondOrderMatrix[b][a]));
+      bondOrderMatrix[a][b] = order;
+      bondOrderMatrix[b][a] = order;
+      let lengthBohr = null;
+      if (Array.isArray(atoms) && atoms[a] && atoms[b]) {
+        const pa = Array.isArray(atoms[a].position) ? atoms[a].position : [atoms[a].x || 0, atoms[a].y || 0, atoms[a].z || 0];
+        const pb = Array.isArray(atoms[b].position) ? atoms[b].position : [atoms[b].x || 0, atoms[b].y || 0, atoms[b].z || 0];
+        lengthBohr = Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]);
+      }
+      const withinBondRange = lengthBohr == null || (order >= 0.55 ? lengthBohr < 7.2 : lengthBohr <= 3.85);
+      if (order >= 0.16 && withinBondRange) {
+        const kind = order >= 2.45
+          ? 'triple'
+          : (order >= 1.55 ? 'double' : (order >= 0.60 ? 'single' : 'partial'));
+        bonds.push(Object.freeze({
+          a,
+          b,
+          order,
+          kind,
+          lengthBohr,
+          lengthA: lengthBohr != null ? lengthBohr * BOHR_TO_A : null
+        }));
+      }
+    }
+  }
+  return { bondOrderMatrix, bonds };
+}
+
 // Build the basis, one-electron matrices (S, Hcore), the two-electron integrals, S^{-1/2}, and the
 // nuclear repulsion for a molecule — shared by the RHF and UHF drivers.
 function buildIntegrals(atoms, charge, basisName = 'sto-3g') {
+  const key = String(basisName || 'sto-3g').trim().toLowerCase();
+  if (key === 'valence-sto3g' || key === 'ecp-sto3g') {
+    return buildValenceIntegrals(atoms, charge);
+  }
   const basis = buildBasis(atoms, basisName);
   const n = basis.length;
+  const effCharges = atoms.map((a) => a.Z);
   const nElectrons = atoms.reduce((s, a) => s + a.Z, 0) - charge;
   const S = Array.from({ length: n }, () => new Array(n).fill(0));
   const Hcore = Array.from({ length: n }, () => new Array(n).fill(0));
@@ -523,7 +792,7 @@ function buildIntegrals(atoms, charge, basisName = 'sto-3g') {
       }
     }
   }
-  return { basis, n, nElectrons, S, Hcore, eri, idx, X: matrixInverseSqrt(S, n), nuclearRepulsion: nuclearRepulsionEnergy(atoms) };
+  return { basis, n, nElectrons, effCharges, S, Hcore, eri, idx, X: matrixInverseSqrt(S, n), nuclearRepulsion: nuclearRepulsionEnergy(atoms) };
 }
 
 // Diagonalize a Fock matrix in the orthonormal basis and return the orbital coefficients (columns

@@ -26,6 +26,7 @@ import {
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
 import { solveAtomFullWebGpu } from '../runtime/electronicStructure/radialKohnShamWebGpu.js';
 import {
+  buildMultiSpeciesCrystalLattice,
   deriveCompoundBundleWebGpu,
   discoverAndDeriveReactionProductsWebGpu
 } from '../runtime/material/recursiveCompoundPipeline.js';
@@ -35,8 +36,32 @@ import {
 } from '../runtime/material/polytopeAtlasBuilder.js';
 import {
   climbingImageNEBWebGpu,
+  registerMolecularRhfSimulationModule,
   solveMoleculeRhfWebGpu
 } from '../runtime/electronicStructure/molecularHartreeFockWebGpu.js';
+import {
+  computeReactionThermodynamicsCurve,
+  registerReactionPathwayClosureArtifact,
+  registerReactionPathwaySimulationModule,
+  solveReactionPathwayWebGpu
+} from '../runtime/chemistry/reactionPathwayWebGpu.js';
+import {
+  computeVibrationalModesWebGpu,
+  optimizeMolecularGeometryWebGpu,
+  registerMolecularVibrationsClosureArtifact,
+  registerMolecularVibrationsSimulationModule
+} from '../runtime/chemistry/molecularVibrationsWebGpu.js';
+import {
+  createReactiveChemistryMdSessionWebGpu,
+  registerReactiveChemistryClosureArtifact,
+  registerReactiveChemistrySimulationModule
+} from '../runtime/chemistry/reactiveChemistryMdWebGpu.js';
+import {
+  ELEMENT_FAMILIES,
+  ELEMENT_NAMES,
+  buildIupacPeriodicTableEntries,
+  familyForZ
+} from './periodicTableMetadata.js';
 import {
   computeStarkPolarizationState,
   createQuantumBlochPhotonSession,
@@ -46,6 +71,11 @@ import {
   sampleMolecularOrbitalCloudWebGpu,
   solveDeltaScfIonizationWebGpu
 } from '../runtime/electronicStructure/orbitalPointCloudWebGpu.js';
+import {
+  createAtomTdks3dSessionWebGpu,
+  registerAtomTdks3dClosureArtifact,
+  registerAtomTdks3dSimulationModule
+} from '../runtime/electronicStructure/atomTdks3dWebGpu.js';
 import {
   createNuclearTunnelingTdseWebGpu,
   createPhotonShellOpticsSessionWebGpu,
@@ -76,11 +106,16 @@ import { createElementsLabWebGpuRenderer } from './elementsLabWebGpuRenderer.js'
 // Register ALL reusable canonical ULG simulation modules on boot (shared with Studio & Triad!)
 try {
   registerOrbitalCloudSimulationModule(defaultSimulationModuleRegistry);
+  registerAtomTdks3dSimulationModule(defaultSimulationModuleRegistry);
   registerPhotonShellSimulationModules(defaultSimulationModuleRegistry);
   registerSpinLatticeSimulationModule(defaultSimulationModuleRegistry);
   registerElectronTransportSimulationModule(defaultSimulationModuleRegistry);
   registerMdSimulationModules(defaultSimulationModuleRegistry);
   registerNuclearFissionSimulationModule(defaultSimulationModuleRegistry);
+  registerMolecularRhfSimulationModule(defaultSimulationModuleRegistry);
+  registerReactionPathwaySimulationModule(defaultSimulationModuleRegistry);
+  registerMolecularVibrationsSimulationModule(defaultSimulationModuleRegistry);
+  registerReactiveChemistrySimulationModule(defaultSimulationModuleRegistry);
 } catch {
   // Already registered in hot-reload session
 }
@@ -113,7 +148,6 @@ const specimenHistoryEl = document.getElementById('specimen-history');
 const plot1 = document.getElementById('plot1');
 const plot2 = document.getElementById('plot2');
 const plot3 = document.getElementById('plot3');
-const ptGrid = document.getElementById('pt-grid');
 const zInput = document.getElementById('z-input');
 const aInput = document.getElementById('a-input');
 const resetABtn = document.getElementById('reset-a-btn');
@@ -138,6 +172,25 @@ const webgpuFallbackEl = document.getElementById('webgpu-fallback');
 const webgpuFallbackTitle = document.getElementById('webgpu-fallback-title');
 const webgpuFallbackMsg = document.getElementById('webgpu-fallback-msg');
 const webgpuReloadBtn = document.getElementById('webgpu-reload-btn');
+// Real 18-Column IUPAC Periodic Table Modal & Accordion Refs
+const ptModal = document.getElementById('pt-modal');
+const iupacPtGrid = document.getElementById('iupac-pt-grid');
+const ptSearchInput = document.getElementById('pt-search');
+const ptActionMode = document.getElementById('pt-action-mode');
+const ptModalClose = document.getElementById('pt-modal-close');
+const ptFilterChips = document.getElementById('pt-filter-chips');
+const ptHoverText = document.getElementById('pt-hover-text');
+const ptModalAInput = document.getElementById('pt-modal-a');
+const ptLegendEl = document.getElementById('pt-legend');
+const openPtBtn = document.getElementById('open-pt-btn');
+const elementTileBtn = document.getElementById('element-tile-btn');
+const barOpenPtBtn = document.getElementById('bar-open-pt-btn');
+const mobileOpenPtBtn = document.getElementById('mobile-open-pt-btn');
+const tileZEl = document.getElementById('tile-z');
+const tileSymEl = document.getElementById('tile-sym');
+const tileNameEl = document.getElementById('tile-name');
+const tileSubEl = document.getElementById('tile-sub');
+const accordionNav = document.getElementById('accordion-nav');
 
 const IS_MOBILE_GPU_PROFILE = typeof window !== 'undefined' && (
   window.matchMedia?.('(pointer: coarse)')?.matches
@@ -190,6 +243,9 @@ let liveOrbitalCloud = null;      // Atomic OR Molecular GPU point cloud
 let liveMolOrbitalCloud = null;   // Molecular RHF GPU point cloud (Total / HOMO / LUMO)
 let liveTdksPairCloud = null;     // 180K-point dipole-coupled (phi0, phi1) GPU quantum basis!
 let liveBlochSession = null;      // Real-time Optical Bloch / TD-KS quantum dipole integrator!
+let liveTdks3dSession = null;     // Live 3D Self-Consistent Maxwell-Kohn-Sham Yee FDTD session!
+let liveTdks3dTelemetry = null;
+let liveTdks3dBusy = false;
 let livePhotonSession = null;     // 2D 128x128 Maxwell-ADE-FDTD Bulk Optical Cavity session
 let livePhotonTelemetry = null;
 let livePhotonBusy = false;
@@ -219,6 +275,18 @@ let liveBatemanSeries = null;
 let liveDeltaScfResult = null;    // Live GPU Delta-SCF Cation Ionization result
 let liveStarkState = null;        // Live Static E-Field Stark Polarization state
 
+// New Canonical Chemistry & Multi-Species Crystal Sessions!
+let currentReactionPathway = null; // Full multi-molecule GPU CI-NEB (A+B -> TS‡ -> C+D)
+let currentGeomOpt = null;         // Live GPU geometry optimization trajectory
+let currentVibrations = null;      // Live GPU Hessian vibrational normal modes & IR/Raman
+let currentElementCrystal = null;  // Multi-atom unit cell with coordination bonds for elements
+let liveReactiveMdSession = null;  // 3D WebGPU Reactive Chemistry MD Chamber (A+B <=> C+D)
+let liveReactiveMdTelemetry = null;
+let liveReactiveMdHistory = [];
+let liveReactiveMdBusy = false;
+let vibAnimPhase = 0;
+let activePtFilter = 'all';
+
 // Interactive simulation controls state
 const uiState = {
   // Tab 1: Nuclear TDSE, Fission Saddle & Bateman Decay
@@ -246,11 +314,15 @@ const uiState = {
   autoRotate: false,              // Fixed camera by default (cameraAutoSpin: false!)
   cloudSeed: 1,
   molOrbitalMode: 0,              // 0 = Total rho, 1 = HOMO, 2 = LUMO
-  // Tab 3: Optics (2D Maxwell Crystal Slab & Single-Atom TD-KS), 3D Bloch, Crystal Cell, Spin-Lattice LLG & Transport
+  // Tab 3: Optics (2D Maxwell Crystal Slab & Single-Atom TD-KS), 3D Bloch, Multi-Species Crystal Cell, Spin-Lattice LLG & Transport
   crystalViewMode: 'photon-shell', // 'photon-shell' | 'bloch' | 'lattice' | 'tdks-atom' | 'spin-llg' | 'transport'
+  crystalColorMode: 0,             // 0 = CPK species, 1 = formal charge MEP
   photonPlaying: true,
   photonModeMono: false,          // false = RGB White Light, true = Single-lambda probe
   probeWavelengthNm: 440,
+  tdksPolMode: 0,                 // 0 = Linear E_y, 1 = Linear E_z, 2 = Circular LCP
+  tdksFieldView: 0,               // 0 = 3D Volume, 1 = Scattered E_scatt Only, 2 = 3D Volume + Phase Cut
+  tdksOrbitalPreset: 'valence',   // 'valence' | 'd2' | 'd0' | 'p0' | 's0' | 'f0'
   spinTempK: 300,
   spinFieldBTesla: 0.5,
   spinSweepB: false,
@@ -264,11 +336,24 @@ const uiState = {
   mdNptBarostat: false,
   mdPlaying: true,
   mdTargetTempK: 300,
-  // Tab 5: CI-NEB Reaction Scrubber
+  // Tab 5: Chemistry — 3D Molecule + Wiberg Bonds, Multi-Molecule CI-NEB, Geom Opt & Vibrations, 3D Reactive MD!
+  chemViewMode: 'molecule',       // 'molecule' | 'reaction-path' | 'vibrations' | 'reactive-md'
+  molColorMode: 0,                // 0 = CPK, 1 = Mulliken MEP
+  molShowDipole: true,
+  molShowOrbitalOverlay: false,
   nebImageIdx: 0,
   nebPlaying: false,
   nebLastTickMs: 0,
-  // Tab 6: Polytope Atlas Interactive Cursor + Pressure Regime
+  vibModeIdx: 0,
+  vibPlaying: true,
+  vibIsotopeDeuterated: false,
+  rxMdTempK: 340,
+  rxMdCatalyst: false,
+  rxMdThermostat: false,
+  rxMdPlaying: true,
+  // Tab 6: True 3D Convex Polytope Phase Surface + 2D Exact Facets + Residual Heatmap
+  polytopeViewMode: '3d-surface', // '3d-surface' | '2d-facets' | 'residual-map'
+  polytopeShowFacets: true,
   polytopeRegime: 'lab',          // 'lab' (10 GPa) | 'planetary' (1 TPa)
   polytopeProbe: null
 };
@@ -352,6 +437,15 @@ function chooseDipoleTransitionPair(Z, atomResult) {
   }
   const last = cfg[cfg.length - 1] || { n: 1, l: 0 };
   return { n0: last.n, l0: 0, n1: Math.max(2, last.n), l1: 1, m: 0 };
+}
+
+function resolveTdksOrbitalSpec(Z, atomResult, preset = 'valence') {
+  if (preset === 'd2') return { n0: 5, l0: 2, n1: 6, l1: 3, m: 2 };
+  if (preset === 'd0') return { n0: 5, l0: 2, n1: 6, l1: 1, m: 0 };
+  if (preset === 'p0') return { n0: 2, l0: 1, n1: 3, l1: 0, m: 0 };
+  if (preset === 's0') return { n0: 3, l0: 0, n1: 3, l1: 1, m: 0 };
+  if (preset === 'f0') return { n0: 4, l0: 3, n1: 5, l1: 2, m: 0 };
+  return chooseDipoleTransitionPair(Z, atomResult);
 }
 
 function setHud(title, sub) {
@@ -445,6 +539,10 @@ function resetCameraView() {
   renderViewportSync();
 }
 
+function isPolytope2dProbeMode() {
+  return currentTab === 'polytope' && uiState.polytopeViewMode !== '3d-surface';
+}
+
 function attachCanvasInteractions() {
   let polyHoverPending = false;
   const activePointers = new Map();
@@ -459,7 +557,7 @@ function attachCanvasInteractions() {
   }
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (currentTab === 'polytope') {
+    if (isPolytope2dProbeMode()) {
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       try { canvas.setPointerCapture?.(e.pointerId); } catch {}
       handlePolytopePointer(e, true);
@@ -473,9 +571,7 @@ function attachCanvasInteractions() {
       lastPtrX = e.clientX;
       lastPtrY = e.clientY;
       lastPinchDist = 0;
-      tapStart = e.pointerType === 'touch'
-        ? { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, t: performance.now() }
-        : null;
+      tapStart = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false, t: performance.now(), pointerType: e.pointerType };
     } else if (activePointers.size >= 2) {
       isDragging = false;
       tapStart = null;
@@ -485,7 +581,7 @@ function attachCanvasInteractions() {
   });
 
   canvas.addEventListener('pointermove', (e) => {
-    if (currentTab === 'polytope') {
+    if (isPolytope2dProbeMode()) {
       if (e.pointerType !== 'mouse' && !activePointers.has(e.pointerId)) return;
       if (!polyHoverPending) {
         polyHoverPending = true;
@@ -496,7 +592,7 @@ function attachCanvasInteractions() {
     if (!activePointers.has(e.pointerId)) return;
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    if (tapStart && tapStart.id === e.pointerId && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) > 10) {
+    if (tapStart && tapStart.id === e.pointerId && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) > 8) {
       tapStart.moved = true;
     }
 
@@ -525,19 +621,23 @@ function attachCanvasInteractions() {
   const stop = (e) => {
     const wasCleanTap = Boolean(
       tapStart && tapStart.id === e.pointerId && !tapStart.moved && activePointers.size === 1
-      && (performance.now() - tapStart.t) < 260
+      && (performance.now() - tapStart.t) < 280
     );
+    const tapType = tapStart?.pointerType || e.pointerType;
     activePointers.delete(e.pointerId);
     if (activePointers.size === 1) {
       const rem = [...activePointers.values()][0];
       lastPtrX = rem.x;
       lastPtrY = rem.y;
-      isDragging = currentTab !== 'polytope';
+      isDragging = !isPolytope2dProbeMode();
       lastPinchDist = 0;
     } else {
       isDragging = false;
       lastPinchDist = 0;
-      if (wasCleanTap && currentTab !== 'polytope') {
+      if (wasCleanTap && currentTab === 'polytope' && uiState.polytopeViewMode === '3d-surface') {
+        // Clean click/tap on 3D Polytope Surface evaluates live GPU probe and drops the 3D vertical pin!
+        handlePolytopePointer(e, true);
+      } else if (wasCleanTap && tapType === 'touch' && !isPolytope2dProbeMode()) {
         const now = performance.now();
         if (lastCleanTap && (now - lastCleanTap.t) < 300 && Math.hypot(e.clientX - lastCleanTap.x, e.clientY - lastCleanTap.y) < 32) {
           lastCleanTap = null;
@@ -552,10 +652,10 @@ function attachCanvasInteractions() {
   canvas.addEventListener('pointerup', stop);
   canvas.addEventListener('pointercancel', stop);
   canvas.addEventListener('dblclick', () => {
-    if (currentTab !== 'polytope') resetCameraView();
+    if (!isPolytope2dProbeMode()) resetCameraView();
   });
   canvas.addEventListener('wheel', (e) => {
-    if (currentTab === 'polytope') return;
+    if (isPolytope2dProbeMode()) return;
     e.preventDefault();
     camDist = Math.max(1.3, Math.min(5.4, camDist + Math.sign(e.deltaY) * 0.18));
     renderViewportSync();
@@ -563,34 +663,229 @@ function attachCanvasInteractions() {
   resetViewBtn?.addEventListener('click', () => resetCameraView());
 }
 
+const IUPAC_ENTRIES = buildIupacPeriodicTableEntries();
+
+function openPeriodicTableModal(open = true, { actionMode = null } = {}) {
+  if (!ptModal) return;
+  if (actionMode && ptActionMode) ptActionMode.value = actionMode;
+  ptModal.classList.toggle('open', Boolean(open));
+  if (open) {
+    if (ptModalAInput) ptModalAInput.value = selectedA ? String(selectedA) : '';
+    ptSearchInput?.focus?.();
+    applyPeriodicTableFilters();
+  }
+}
+
+function applyPeriodicTableFilters() {
+  if (!iupacPtGrid) return;
+  const q = String(ptSearchInput?.value || '').trim().toLowerCase();
+  for (const cell of iupacPtGrid.querySelectorAll('.pt-cell')) {
+    const z = Number(cell.dataset.z);
+    const entry = IUPAC_ENTRIES[z - 1];
+    let matchFilter = true;
+    if (activePtFilter === 'ferromagnet') matchFilter = entry.isFerromagnet;
+    else if (activePtFilter === 'superconductor') matchFilter = entry.isSuperconductor;
+    else if (activePtFilter === 'reactive-metal') matchFilter = entry.isReactiveMetal;
+    else if (activePtFilter !== 'all') matchFilter = entry.family === activePtFilter;
+
+    let matchSearch = true;
+    if (q) {
+      matchSearch = String(z) === q
+        || entry.symbol.toLowerCase().includes(q)
+        || entry.name.toLowerCase().includes(q)
+        || entry.family.includes(q);
+    }
+    cell.classList.toggle('dimmed', !(matchFilter && matchSearch));
+  }
+}
+
 function buildPeriodicTableButtons() {
-  ptGrid.innerHTML = '';
-  for (let Z = 1; Z <= 118; Z += 1) {
+  if (!iupacPtGrid) return;
+  iupacPtGrid.innerHTML = '';
+
+  // Detached Lanthanide (57-71) and Actinide (89-103) range indicators in Group 3 rows 6 & 7
+  const makePlaceholder = (row, col, title, range) => {
+    const el = document.createElement('div');
+    el.className = 'pt-placeholder';
+    el.style.gridRow = String(row);
+    el.style.gridColumn = String(col);
+    el.innerHTML = `<span>${range}</span><span style="font-size:7.5px;opacity:0.8;">${title}</span>`;
+    return el;
+  };
+  iupacPtGrid.appendChild(makePlaceholder(6, 3, 'La–Lu', '57–71'));
+  iupacPtGrid.appendChild(makePlaceholder(7, 3, 'Ac–Lr', '89–103'));
+
+  for (const entry of IUPAC_ENTRIES) {
     const btn = document.createElement('button');
-    let cls = 'el-btn';
-    if (NOBLE_GASES.has(Z)) cls += ' noble';
-    else if (HALOGENS.has(Z)) cls += ' halogen';
-    else if (ALKALIS.has(Z)) cls += ' alkali';
-    else if ((Z >= 21 && Z <= 30) || (Z >= 39 && Z <= 48) || (Z >= 72 && Z <= 80)) cls += ' metal-d';
-    if (Z === selectedZ && activeSpecimenKind === 'element') cls += ' active';
-    btn.className = cls;
-    btn.dataset.z = String(Z);
-    btn.innerHTML = `<small>${Z}</small>${ELEMENT_SYMBOLS[Z - 1]}`;
-    btn.addEventListener('click', () => {
-      selectedZ = Z;
-      selectedA = null;
-      zInput.value = String(Z);
-      aInput.value = String(mostStableMassNumberForZ(Z));
-      setMobileDrawerOpen(false);
-      runElementDerivation(Z, null);
+    btn.type = 'button';
+    btn.className = `pt-cell pt-fam-${entry.family}${entry.Z === selectedZ && activeSpecimenKind === 'element' ? ' active' : ''}`;
+    btn.dataset.z = String(entry.Z);
+    // Row 8 & 9 sit below the 10px spacer (CSS grid rows 9 & 10!)
+    const cssRow = entry.row >= 8 ? entry.row + 1 : entry.row;
+    btn.style.gridRow = String(cssRow);
+    btn.style.gridColumn = String(entry.col);
+    btn.innerHTML = `<span class="c-z">${entry.Z}</span><span class="c-sym">${entry.symbol}</span><span class="c-name">${entry.name}</span>`;
+    btn.title = `${entry.name} (${entry.symbol}, Z=${entry.Z}) · ${ELEMENT_FAMILIES[entry.family]?.label || entry.family} · ${entry.massU} u`;
+
+    btn.addEventListener('mouseenter', () => {
+      if (ptHoverText) {
+        const famLabel = ELEMENT_FAMILIES[entry.family]?.label || entry.family;
+        const tags = [
+          entry.isFerromagnet ? 'Ferromagnet' : null,
+          entry.isSuperconductor ? 'BCS Superconductor' : null,
+          entry.isReactiveMetal ? 'Water/Acid Reactive' : null
+        ].filter(Boolean).join(' · ');
+        ptHoverText.innerHTML = `<b>${entry.symbol} (Z=${entry.Z}) · ${entry.name}</b> — ${famLabel} · ${entry.massU} u · A*=${mostStableMassNumberForZ(entry.Z)}${tags ? ` · <span style="color:#facc15">${tags}</span>` : ''}`;
+      }
     });
-    ptGrid.appendChild(btn);
+
+    btn.addEventListener('click', () => {
+      const mode = ptActionMode?.value || 'solve';
+      if (mode === 'reactant-a') {
+        if (reactantAInput) reactantAInput.value = entry.symbol;
+        openPeriodicTableModal(false);
+        setActiveTab('compound');
+        return;
+      }
+      if (mode === 'reactant-b') {
+        if (reactantBInput) reactantBInput.value = entry.symbol;
+        openPeriodicTableModal(false);
+        setActiveTab('compound');
+        return;
+      }
+      const rawA = ptModalAInput?.value?.trim();
+      const parsedA = rawA ? Math.trunc(Number(rawA)) : null;
+      const useA = parsedA && parsedA >= entry.Z && parsedA <= 310 ? parsedA : null;
+      selectedZ = entry.Z;
+      selectedA = useA;
+      zInput.value = String(entry.Z);
+      aInput.value = String(useA ?? mostStableMassNumberForZ(entry.Z));
+      openPeriodicTableModal(false);
+      setMobileDrawerOpen(false);
+      runElementDerivation(entry.Z, useA);
+    });
+    iupacPtGrid.appendChild(btn);
+  }
+
+  // Render 10-family IUPAC color legend
+  if (ptLegendEl) {
+    ptLegendEl.innerHTML = Object.entries(ELEMENT_FAMILIES).map(([, info]) =>
+      `<span><i style="background:${info.color};"></i>${info.label}</span>`
+    ).join('');
+  }
+
+  // Wire modal search, filters, open/close triggers
+  ptSearchInput?.addEventListener('input', applyPeriodicTableFilters);
+  for (const chip of (ptFilterChips?.querySelectorAll('[data-pt-filter]') || [])) {
+    chip.addEventListener('click', () => {
+      activePtFilter = chip.dataset.ptFilter || 'all';
+      for (const c of ptFilterChips.querySelectorAll('[data-pt-filter]')) {
+        c.classList.toggle('gold', c === chip);
+      }
+      applyPeriodicTableFilters();
+    });
+  }
+  openPtBtn?.addEventListener('click', () => openPeriodicTableModal(true));
+  elementTileBtn?.addEventListener('click', () => openPeriodicTableModal(true));
+  barOpenPtBtn?.addEventListener('click', () => openPeriodicTableModal(true));
+  mobileOpenPtBtn?.addEventListener('click', () => openPeriodicTableModal(true));
+  ptModalClose?.addEventListener('click', () => openPeriodicTableModal(false));
+  ptModal?.addEventListener('click', (ev) => {
+    if (ev.target === ptModal) openPeriodicTableModal(false);
+  });
+
+  // Wire Hierarchical Left-Side Accordion headers & nested sub-simulation items
+  if (accordionNav) {
+    for (const hdr of accordionNav.querySelectorAll('.acc-header')) {
+      hdr.addEventListener('click', () => {
+        const grp = hdr.closest('.acc-group');
+        if (!grp) return;
+        const tab = hdr.dataset.accTab;
+        if (tab) {
+          const alreadyActive = currentTab === tab;
+          if (alreadyActive) {
+            grp.classList.toggle('open');
+          } else {
+            grp.classList.add('open');
+            setActiveTab(tab);
+          }
+        } else {
+          grp.classList.toggle('open');
+        }
+      });
+    }
+    for (const btn of accordionNav.querySelectorAll('.acc-item-btn[data-nav-tab]')) {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.navTab;
+        const sub = btn.dataset.navSub;
+        if (tab === 'nuclear') {
+          uiState.nuclearViewMode = sub;
+          if (sub === 'fission') updateNuclearFissionVolume();
+        } else if (tab === 'atomic') {
+          uiState.atomicViewMode = sub;
+        } else if (tab === 'crystal') {
+          uiState.crystalViewMode = sub;
+          if (sub === 'spin-llg' && !liveSpinSession) initSpinLatticeForActiveSpecimen();
+          if (sub === 'transport' && !liveTransportSession) initElectronTransportForActiveSpecimen();
+        } else if (tab === 'md') {
+          initLiveMdForActiveSpecimen(null, sub);
+        } else if (tab === 'compound') {
+          uiState.chemViewMode = sub;
+          if (sub === 'reactive-md' && !liveReactiveMdSession) initReactiveMdForActiveReaction();
+          if (sub === 'vibrations' && !currentVibrations) {
+            ensureCompoundForTab5().then(() => runGeometryOptAndVibrationsWebGpu());
+          }
+        } else if (tab === 'polytope') {
+          uiState.polytopeViewMode = sub;
+        }
+        setMobileDrawerOpen(false);
+        setActiveTab(tab);
+      });
+    }
   }
 }
 
 function updateActiveElementButton() {
-  for (const btn of ptGrid.querySelectorAll('.el-btn')) {
-    btn.classList.toggle('active', activeSpecimenKind === 'element' && Number(btn.dataset.z) === selectedZ);
+  if (iupacPtGrid) {
+    for (const btn of iupacPtGrid.querySelectorAll('.pt-cell')) {
+      btn.classList.toggle('active', activeSpecimenKind === 'element' && Number(btn.dataset.z) === selectedZ);
+    }
+  }
+  const b = getActiveBundle();
+  if (activeSpecimenKind === 'compound' && b) {
+    if (tileZEl) tileZEl.textContent = `ΣZ=${b.nuclear.totalProtonsZ}`;
+    if (tileSymEl) tileSymEl.textContent = String(b.materialKey || 'Cmpd').slice(0, 4);
+    if (tileNameEl) tileNameEl.textContent = `Compound: ${b.materialKey}`;
+    if (tileSubEl) tileSubEl.textContent = `${b.mechanical.crystalStructure} · ${fmt(b.nuclear.molarMassU, 2)} u`;
+  } else {
+    const entry = IUPAC_ENTRIES[Math.max(0, Math.min(117, selectedZ - 1))];
+    const actualA = currentElementRes?.bundle?.nuclear?.A ?? selectedA ?? mostStableMassNumberForZ(selectedZ);
+    const famLabel = ELEMENT_FAMILIES[entry.family]?.label || entry.family;
+    if (tileZEl) tileZEl.textContent = String(entry.Z);
+    if (tileSymEl) tileSymEl.textContent = entry.symbol;
+    if (tileNameEl) tileNameEl.textContent = `${entry.name} (${entry.symbol}-${actualA})`;
+    if (tileSubEl) tileSubEl.textContent = `${famLabel} · ${entry.massU} u`;
+  }
+}
+
+function syncAccordionState() {
+  if (!accordionNav) return;
+  for (const grp of accordionNav.querySelectorAll('.acc-group[data-acc-tab]')) {
+    const isAct = grp.dataset.accTab === currentTab;
+    grp.classList.toggle('active-group', isAct);
+    if (isAct) grp.classList.add('open');
+  }
+  const activeSubMap = {
+    nuclear: uiState.nuclearViewMode,
+    atomic: uiState.atomicViewMode,
+    crystal: uiState.crystalViewMode,
+    md: uiState.mdMode,
+    compound: uiState.chemViewMode,
+    polytope: uiState.polytopeViewMode
+  };
+  for (const btn of accordionNav.querySelectorAll('.acc-item-btn[data-nav-tab]')) {
+    const match = btn.dataset.navTab === currentTab && btn.dataset.navSub === activeSubMap[currentTab];
+    btn.classList.toggle('active', match);
   }
 }
 
@@ -1085,32 +1380,97 @@ function rebuildOrbitalPointCloud() {
     try { prevBuf.destroy(); } catch {}
   }
 
-  // Also sample the 180K-point dipole-coupled (phi0, phi1) GPU quantum basis for live TD-KS Photon interaction!
-  const pairSpec = chooseDipoleTransitionPair(atom.atomicNumberZ, atom);
-  const findU = (nn, ll) => {
-    if (!Array.isArray(atom.orbitalWavefunctions) || !Array.isArray(atom.orbitals)) return null;
-    const i = atom.orbitals.findIndex((o) => o.n === nn && o.l === ll);
-    return i >= 0 ? atom.orbitalWavefunctions[i] : null;
-  };
+  // Also sample the 180K-point dipole-coupled (phi0, phi1) GPU quantum basis for live 3D Maxwell-TDKS interaction!
+  rebuildTdksPairAnd3dGrid();
+}
+
+function rebuildTdksPairAnd3dGrid({ resetField = true } = {}) {
+  if (!gpuDevice) return;
+  const em = getActiveElectromagnetic();
+  let repZ = selectedZ;
+  let rGrid = null;
+  let findU = () => null;
+
+  if (activeSpecimenKind === 'compound' && currentCompoundRes) {
+    const sites = currentCompoundRes.bundle?.nuclear?.isotopologueSites || [];
+    repZ = sites.reduce((mx, s) => Math.max(mx, s.Z || 1), 8);
+  } else if (currentElementRes?.visualData?.atom) {
+    const atom = currentElementRes.visualData.atom;
+    repZ = atom.atomicNumberZ;
+    rGrid = atom.radialGrid?.r || null;
+    findU = (nn, ll) => {
+      if (!Array.isArray(atom.orbitalWavefunctions) || !Array.isArray(atom.orbitals)) return null;
+      const i = atom.orbitals.findIndex((o) => o.n === nn && o.l === ll);
+      return i >= 0 ? atom.orbitalWavefunctions[i] : null;
+    };
+  }
+
+  const pairSpec = resolveTdksOrbitalSpec(repZ, currentElementRes?.visualData?.atom || null, uiState.tdksOrbitalPreset);
+  const u0 = findU(pairSpec.n0, pairSpec.l0);
+  const u1 = findU(pairSpec.n1, pairSpec.l1);
+
   const prevPos = liveTdksPairCloud?.posBuffer ?? null;
   const prevAmp = liveTdksPairCloud?.ampBuffer ?? null;
   liveTdksPairCloud = sampleDipoleCoupledOrbitalPairWebGpu(gpuDevice, {
-    Z: atom.atomicNumberZ,
+    Z: repZ,
     n0: pairSpec.n0,
     l0: pairSpec.l0,
     n1: pairSpec.n1,
     l1: pairSpec.l1,
     m: pairSpec.m,
-    rGrid: atom.radialGrid?.r || null,
-    u0: findU(pairSpec.n0, pairSpec.l0),
-    u1: findU(pairSpec.n1, pairSpec.l1),
-    pointCount: IS_MOBILE_GPU_PROFILE ? 80000 : 180000,
+    rGrid,
+    u0,
+    u1,
+    pointCount: IS_MOBILE_GPU_PROFILE ? 75000 : 180000,
     screeningExchange: uiState.functional !== 'bare',
     relativisticSpinOrbit: uiState.relativisticSpinOrbit,
     seed: uiState.cloudSeed,
     reusePosBuffer: prevPos,
     reuseAmpBuffer: prevAmp
   });
+
+  if (liveTdks3dSession) {
+    try { liveTdks3dSession.destroy(); } catch {}
+    liveTdks3dSession = null;
+  }
+  liveTdks3dTelemetry = null;
+  if (em) {
+    liveTdks3dSession = createAtomTdks3dSessionWebGpu(gpuDevice, em, {
+      Z: repZ,
+      n0: pairSpec.n0,
+      l0: pairSpec.l0,
+      n1: pairSpec.n1,
+      l1: pairSpec.l1,
+      m: pairSpec.m,
+      rGrid,
+      u0,
+      u1,
+      screeningExchange: uiState.functional !== 'bare',
+      relativisticSpinOrbit: uiState.relativisticSpinOrbit,
+      gridN: IS_MOBILE_GPU_PROFILE ? 24 : 32,
+      probeWavelengthNm: uiState.probeWavelengthNm,
+      polMode: uiState.tdksPolMode,
+      modeMono: uiState.photonModeMono
+    });
+    if (resetField) {
+      // Advance 34 Yee-FDTD steps so the 3D photon wavepacket is visibly hitting & scattering off the 3D orbital lobes on frame 1!
+      liveTdks3dSession.stepSync(34);
+      liveTdks3dSession.readTelemetry().then((tel) => {
+        if (!tel) return;
+        liveTdks3dTelemetry = tel;
+        const b = getActiveBundle();
+        if (b) {
+          registerAtomTdks3dClosureArtifact({
+            closureRegistry: labClosureRegistry,
+            materialKey: b.materialKey,
+            telemetry: tel
+          }).catch(() => {});
+        }
+        if (window.__ulgElementsLabState) window.__ulgElementsLabState.tdks3dTelemetry = tel;
+        if (currentTab === 'crystal' && uiState.crystalViewMode === 'tdks-atom') redrawCurrentTab();
+      }).catch(() => {});
+    }
+  }
 }
 
 function getShellBufferForPhotonScene() {
@@ -1133,25 +1493,8 @@ function initPhotonShellSessionForActiveSpecimen() {
   // Step TD-KS wavepacket into active cloud interaction (t = 3.6 fs) so electron cloud is visibly sloshing on frame 1!
   for (let k = 0; k < 45; k += 1) liveBlochSession.stepFs(0.08);
 
-  // For backfed compounds, build a representative 180K-point molecular valence-transition pair cloud too!
-  if (activeSpecimenKind === 'compound' && currentCompoundRes) {
-    const sites = currentCompoundRes.bundle?.nuclear?.isotopologueSites || [];
-    const repZ = sites.reduce((mx, s) => Math.max(mx, s.Z || 1), 8);
-    const pairSpec = chooseDipoleTransitionPair(repZ, null);
-    liveTdksPairCloud = sampleDipoleCoupledOrbitalPairWebGpu(gpuDevice, {
-      Z: repZ,
-      n0: pairSpec.n0,
-      l0: pairSpec.l0,
-      n1: pairSpec.n1,
-      l1: pairSpec.l1,
-      m: pairSpec.m,
-      pointCount: IS_MOBILE_GPU_PROFILE ? 75000 : 160000,
-      screeningExchange: true,
-      relativisticSpinOrbit: true,
-      reusePosBuffer: liveTdksPairCloud?.posBuffer ?? null,
-      reuseAmpBuffer: liveTdksPairCloud?.ampBuffer ?? null
-    });
-  }
+  // Build / refresh the 3D Self-Consistent Maxwell-Kohn-Sham grid & 180K-pt orbital cloud for active element OR compound!
+  rebuildTdksPairAnd3dGrid({ resetField: true });
 
   livePhotonSession = createPhotonShellOpticsSessionWebGpu(gpuDevice, em, {
     probeWavelengthNm: uiState.probeWavelengthNm
@@ -1491,6 +1834,116 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) 
   }
 }
 
+function initReactiveMdForActiveReaction(overrideOpts = {}) {
+  if (!gpuDevice) return;
+  if (liveReactiveMdSession) {
+    try { liveReactiveMdSession.destroy(); } catch {}
+    liveReactiveMdSession = null;
+  }
+  liveReactiveMdTelemetry = null;
+  liveReactiveMdHistory = [];
+
+  const cand = currentReactionRes?.candidates?.[0] || null;
+  const path = currentReactionPathway;
+  const eq = overrideOpts.equation || path?.equation || cand?.equation || '2 Na + 2 H2O -> 2 NaOH + H2';
+  const rLabels = cand?.reactants?.map((t) => t.formula) || ['A', 'B'];
+  const pLabels = cand?.products?.map((t) => t.formula) || ['C', 'D'];
+  const speciesLabels = [
+    rLabels[0] || 'A',
+    rLabels[1] || rLabels[0] || 'B',
+    pLabels[0] || 'C',
+    pLabels[1] || pLabels[0] || 'D'
+  ];
+  const eaEv = overrideOpts.forwardBarrierEv ?? path?.forwardBarrierEv ?? 0.95;
+  const dHEv = overrideOpts.reactionEnthalpyEv
+    ?? (cand?.energetics?.reactionEnthalpyJPerBalancedEquation != null
+      ? Math.max(-4.5, Math.min(2.5, cand.energetics.reactionEnthalpyJPerBalancedEquation / 96485.3))
+      : -1.65);
+
+  liveReactiveMdSession = createReactiveChemistryMdSessionWebGpu(gpuDevice, {
+    equation: eq,
+    speciesLabels,
+    moleculeCount: IS_MOBILE_GPU_PROFILE ? 128 : 192,
+    forwardBarrierEv: eaEv,
+    reactionEnthalpyEv: dHEv,
+    temperatureK: uiState.rxMdTempK,
+    catalystEnabled: uiState.rxMdCatalyst,
+    thermostatEnabled: uiState.rxMdThermostat
+  });
+  liveReactiveMdSession.stepBatch(6, { readObs: true }).then((tel) => {
+    if (!tel) return;
+    liveReactiveMdTelemetry = tel;
+    liveReactiveMdHistory.push({
+      step: tel.stepIndex,
+      fA: tel.fracA,
+      fB: tel.fracB,
+      fC: tel.fracC,
+      fD: tel.fracD,
+      T: tel.temperatureK
+    });
+    registerReactiveChemistryClosureArtifact({
+      closureRegistry: labClosureRegistry,
+      equation: eq,
+      telemetry: tel
+    }).catch(() => {});
+    if (currentTab === 'compound' && uiState.chemViewMode === 'reactive-md') redrawCurrentTab();
+    syncDebugState();
+  }).catch(() => {});
+}
+
+async function ensureCompoundForTab5() {
+  if (currentCompoundRes || !gpuDevice) return currentCompoundRes;
+  await runCompoundDerivation(compoundInput?.value || 'H2O', { backfeedAllTabs: false, switchToTab: 'compound' });
+  return currentCompoundRes;
+}
+
+async function runGeometryOptAndVibrationsWebGpu({ deuterated = uiState.vibIsotopeDeuterated } = {}) {
+  if (!gpuDevice) return null;
+  await ensureCompoundForTab5();
+  const mqm = currentCompoundRes?.visualData?.molQm;
+  const formula = currentCompoundRes?.bundle?.materialKey || 'H2O';
+  if (!mqm?.atoms?.length || mqm.atoms.length < 2 || mqm.atoms.length > 6) {
+    return null;
+  }
+  uiState.vibIsotopeDeuterated = Boolean(deuterated);
+  statusBadge.textContent = `GPU Opt & Hessian (${formula}${deuterated ? ' [D]' : ''})…`;
+  try {
+    // 1. Optimize geometry on WebGPU (or reuse already-optimized coords if only isotope mass toggled!)
+    if (!currentGeomOpt || currentGeomOpt.formula !== formula) {
+      const opt = await optimizeMolecularGeometryWebGpu(gpuDevice, mqm.atoms, {
+        maxSteps: mqm.atoms.length <= 3 ? 6 : 4,
+        basisName: mqm.basisUsed || 'auto'
+      });
+      currentGeomOpt = { ...opt, formula };
+    }
+    // 2. Compute isotope-mass-weighted GPU Hessian & IR/Raman normal modes
+    const optAtoms = currentGeomOpt.atoms;
+    const massesU = optAtoms.map((a) => {
+      if (a.Z === 1 && uiState.vibIsotopeDeuterated) return 2.01410178; // Deuterium substitution!
+      return null;
+    });
+    const vibs = await computeVibrationalModesWebGpu(gpuDevice, optAtoms, {
+      massesU,
+      basisName: currentGeomOpt.basisUsed || 'auto'
+    });
+    currentVibrations = { ...vibs, formula, deuterated: uiState.vibIsotopeDeuterated };
+    uiState.vibModeIdx = Math.min(uiState.vibModeIdx, Math.max(0, vibs.modes.length - 1));
+    await registerMolecularVibrationsClosureArtifact({
+      closureRegistry: labClosureRegistry,
+      formula: `${formula}${deuterated ? '-D' : ''}`,
+      vibrations: vibs
+    }).catch(() => {});
+    statusBadge.textContent = `${formula} · ${vibs.modes.length} GPU Modes (ZPE=${fmt(vibs.totalZpeEv, 2)} eV)`;
+    renderSimControls();
+    redrawCurrentTab();
+    syncDebugState();
+    return currentVibrations;
+  } catch (err) {
+    statusBadge.textContent = `Vib err: ${err.message}`;
+    return null;
+  }
+}
+
 // ============================================================================
 // Contextual Live Simulation Control Bar (MoonLab-Grade per Tab!)
 // ============================================================================
@@ -1760,6 +2213,27 @@ function renderSimControls() {
         <label>λ=<b id="lbl-lambda">${uiState.probeWavelengthNm}</b>nm</label>
         <input id="ctrl-lambda" type="range" min="380" max="780" step="10" value="${uiState.probeWavelengthNm}" style="width:72px;" />
       </div>
+      ${uiState.crystalViewMode === 'tdks-atom' ? `
+      <div class="ctrl-group">
+        <label>Orbital</label>
+        <select id="ctrl-tdks-orb" title="Switch 3D orbital geometry inside the 3D Maxwell-KS solver!">
+          <option value="valence" ${uiState.tdksOrbitalPreset === 'valence' ? 'selected' : ''}>Active Valence</option>
+          <option value="d2" ${uiState.tdksOrbitalPreset === 'd2' ? 'selected' : ''}>5d m=2 Cloverleaf</option>
+          <option value="d0" ${uiState.tdksOrbitalPreset === 'd0' ? 'selected' : ''}>5d m=0 Axial+Ring</option>
+          <option value="p0" ${uiState.tdksOrbitalPreset === 'p0' ? 'selected' : ''}>2p_y Dumbbell</option>
+          <option value="s0" ${uiState.tdksOrbitalPreset === 's0' ? 'selected' : ''}>3s Sphere</option>
+          <option value="f0" ${uiState.tdksOrbitalPreset === 'f0' ? 'selected' : ''}>4f Octupole</option>
+        </select>
+        <label>Pol</label>
+        <button class="action${uiState.tdksPolMode === 0 ? ' active-toggle' : ''}" data-tpol="0">E_y</button>
+        <button class="action${uiState.tdksPolMode === 1 ? ' active-toggle' : ''}" data-tpol="1">E_z</button>
+        <button class="action${uiState.tdksPolMode === 2 ? ' active-toggle' : ''}" data-tpol="2">Circ ↻</button>
+        <select id="ctrl-tdks-view" title="3D Maxwell field volumetric display mode">
+          <option value="0" ${uiState.tdksFieldView === 0 ? 'selected' : ''}>3D Volume</option>
+          <option value="1" ${uiState.tdksFieldView === 1 ? 'selected' : ''}>Scattered E_scatt</option>
+          <option value="2" ${uiState.tdksFieldView === 2 ? 'selected' : ''}>Vol + Phase Cut</option>
+        </select>
+      </div>` : ''}
       <div class="ctrl-group">
         <button id="ctrl-ps-fire" class="action gold-btn">Fire Pulse</button>
         <button id="ctrl-ps-play" class="action">${uiState.photonPlaying ? 'Pause' : 'Play'}</button>
@@ -1776,6 +2250,12 @@ function renderSimControls() {
         <button id="ctrl-spin-sweep" class="action${uiState.spinSweepB ? ' active-toggle' : ' gold-btn'}">${uiState.spinSweepB ? 'Stop Sweep' : 'Sweep Hysteresis B'}</button>
         <button id="ctrl-spin-hot" class="action">Heat &gt; T_c</button>
         <button id="ctrl-spin-reset" class="action">Randomize</button>
+      </div>` : ''}
+      ${uiState.crystalViewMode === 'lattice' ? `
+      <div class="ctrl-group">
+        <label>Ion Coloring</label>
+        <button id="ctrl-cry-cpk" class="action${uiState.crystalColorMode === 0 ? ' active-toggle' : ''}">CPK Species</button>
+        <button id="ctrl-cry-mep" class="action${uiState.crystalColorMode === 1 ? ' active-toggle' : ''}">Formal Charge (±)</button>
       </div>` : ''}
       ${isTrans ? `
       <div class="ctrl-group">
@@ -1850,13 +2330,36 @@ function renderSimControls() {
     });
     document.getElementById('ctrl-ps-rgb')?.addEventListener('click', () => {
       uiState.photonModeMono = false;
+      liveTdks3dSession?.resetPulse({ nextModeMono: false });
+      liveTdks3dSession?.stepSync(32);
       renderSimControls();
       redrawCurrentTab();
     });
     document.getElementById('ctrl-ps-mono')?.addEventListener('click', () => {
       uiState.photonModeMono = true;
+      liveTdks3dSession?.resetPulse({ nextModeMono: true, nextProbeWavelengthNm: uiState.probeWavelengthNm });
+      liveTdks3dSession?.stepSync(32);
       renderSimControls();
       redrawCurrentTab();
+    });
+    document.getElementById('ctrl-tdks-orb')?.addEventListener('change', (e) => {
+      uiState.tdksOrbitalPreset = e.target.value || 'valence';
+      rebuildTdksPairAnd3dGrid({ resetField: true });
+      renderSimControls();
+      redrawCurrentTab();
+    });
+    for (const btn of simControls.querySelectorAll('[data-tpol]')) {
+      btn.addEventListener('click', () => {
+        uiState.tdksPolMode = Number(btn.dataset.tpol) || 0;
+        liveTdks3dSession?.resetPulse({ nextPolMode: uiState.tdksPolMode });
+        liveTdks3dSession?.stepSync(34);
+        renderSimControls();
+        redrawCurrentTab();
+      });
+    }
+    document.getElementById('ctrl-tdks-view')?.addEventListener('change', (e) => {
+      uiState.tdksFieldView = Number(e.target.value) || 0;
+      renderViewportSync();
     });
     document.getElementById('ctrl-lambda')?.addEventListener('input', (e) => {
       uiState.probeWavelengthNm = Number(e.target.value);
@@ -1864,6 +2367,8 @@ function renderSimControls() {
       uiState.photonModeMono = true;
       liveBlochSession?.reset(uiState.probeWavelengthNm);
       for (let k = 0; k < 35; k += 1) liveBlochSession?.stepFs(0.08);
+      liveTdks3dSession?.resetPulse({ nextProbeWavelengthNm: uiState.probeWavelengthNm, nextModeMono: true });
+      liveTdks3dSession?.stepSync(34);
       livePhotonSession?.reset(null, { nextProbeWavelengthNm: uiState.probeWavelengthNm });
       livePhotonSession?.stepSync(100);
       renderSimControls();
@@ -1871,6 +2376,12 @@ function renderSimControls() {
     });
     document.getElementById('ctrl-ps-fire')?.addEventListener('click', () => {
       liveBlochSession?.reset(uiState.probeWavelengthNm);
+      liveTdks3dSession?.resetPulse({
+        nextProbeWavelengthNm: uiState.probeWavelengthNm,
+        nextPolMode: uiState.tdksPolMode,
+        nextModeMono: uiState.photonModeMono
+      });
+      liveTdks3dSession?.stepSync(16);
       livePhotonSession?.reset(null, { nextProbeWavelengthNm: uiState.probeWavelengthNm });
       livePhotonSession?.stepSync(60);
       uiState.photonPlaying = true;
@@ -1880,6 +2391,16 @@ function renderSimControls() {
     document.getElementById('ctrl-ps-play')?.addEventListener('click', () => {
       uiState.photonPlaying = !uiState.photonPlaying;
       renderSimControls();
+    });
+    document.getElementById('ctrl-cry-cpk')?.addEventListener('click', () => {
+      uiState.crystalColorMode = 0;
+      renderSimControls();
+      redrawCurrentTab();
+    });
+    document.getElementById('ctrl-cry-mep')?.addEventListener('click', () => {
+      uiState.crystalColorMode = 1;
+      renderSimControls();
+      redrawCurrentTab();
     });
     document.getElementById('ctrl-ps-rel')?.addEventListener('change', (e) => {
       uiState.relativisticSpinOrbit = Boolean(e.target.checked);
@@ -1971,24 +2492,84 @@ function renderSimControls() {
       redrawCurrentTab();
     });
   } else if (currentTab === 'compound') {
-    const nImgs = currentNebBarrier?.energiesEv?.length || 0;
+    const cm = uiState.chemViewMode;
     const formula = currentCompoundRes?.bundle?.materialKey || compoundInput.value || 'H2O';
+    const pathObj = currentReactionPathway || currentNebBarrier;
+    const nImgs = pathObj?.energiesEv?.length || 0;
+    const hasH = Boolean(currentCompoundRes?.visualData?.molQm?.atoms?.some((a) => a.Z === 1));
+
     simControls.innerHTML = `
-      ${nImgs >= 2 ? `<div class="ctrl-group">
-        <label>CI-NEB ξ=<b id="lbl-neb-xi">${(uiState.nebImageIdx / Math.max(1, nImgs - 1)).toFixed(2)}</b> (Img #${uiState.nebImageIdx}/${nImgs - 1}${uiState.nebImageIdx === currentNebBarrier.saddleImageIndex ? ' ‡ TS' : ''})</label>
-        <input id="ctrl-neb-xi" type="range" min="0" max="${nImgs - 1}" step="1" value="${uiState.nebImageIdx}" style="width:96px;" />
-        <button id="ctrl-neb-play" class="action">${uiState.nebPlaying ? 'Pause MEP' : 'Play Reaction Path'}</button>
-      </div>` : ''}
       <div class="ctrl-group">
-        <label>Orbital</label>
+        <button class="action${cm === 'molecule' ? ' active-toggle' : ''}" data-chemview="molecule">3D Molecule &amp; Bonds</button>
+        <button class="action${cm === 'reaction-path' ? ' active-toggle' : ''}" data-chemview="reaction-path">Reaction Path (A+B→TS‡)</button>
+        <button class="action${cm === 'vibrations' ? ' active-toggle' : ''}" data-chemview="vibrations">Geom Opt &amp; Vibrations</button>
+        <button class="action${cm === 'reactive-md' ? ' active-toggle' : ''}" data-chemview="reactive-md">3D Reactive MD</button>
+      </div>
+      ${(cm === 'molecule' || cm === 'reaction-path') ? `
+      <div class="ctrl-group">
+        <button id="ctrl-mol-cpk" class="action${uiState.molColorMode === 0 ? ' active-toggle' : ''}">CPK</button>
+        <button id="ctrl-mol-mep" class="action${uiState.molColorMode === 1 ? ' active-toggle' : ''}" title="Mulliken Electrostatic Potential (δ⁻ red ↔ δ⁺ blue)">MEP (±q)</button>
+        <label><input id="ctrl-mol-dip" type="checkbox" ${uiState.molShowDipole ? 'checked' : ''} /> Dipole μ</label>
+        <label><input id="ctrl-mol-orb" type="checkbox" ${uiState.molShowOrbitalOverlay ? 'checked' : ''} /> Orbital Cloud</label>
+      </div>` : ''}
+      ${cm === 'reaction-path' && nImgs >= 2 ? `
+      <div class="ctrl-group">
+        <label>ξ=<b id="lbl-neb-xi">${(uiState.nebImageIdx / Math.max(1, nImgs - 1)).toFixed(2)}</b> (#${uiState.nebImageIdx}/${nImgs - 1}${uiState.nebImageIdx === pathObj.saddleImageIndex ? ' ‡ TS' : ''})</label>
+        <input id="ctrl-neb-xi" type="range" min="0" max="${nImgs - 1}" step="1" value="${Math.min(uiState.nebImageIdx, nImgs - 1)}" style="width:94px;" />
+        <button id="ctrl-neb-play" class="action">${uiState.nebPlaying ? 'Pause' : 'Play Path'}</button>
+        <button id="ctrl-neb-ts" class="action gold-btn">TS‡</button>
+      </div>` : ''}
+      ${(cm === 'molecule' || cm === 'reaction-path') && uiState.molShowOrbitalOverlay ? `
+      <div class="ctrl-group">
         <button class="action${uiState.molOrbitalMode === 0 ? ' active-toggle' : ''}" data-c-mol="0">Total ρ</button>
         <button class="action${uiState.molOrbitalMode === 1 ? ' active-toggle' : ''}" data-c-mol="1">HOMO</button>
         <button class="action${uiState.molOrbitalMode === 2 ? ' active-toggle' : ''}" data-c-mol="2">LUMO</button>
-      </div>
-      ${currentCompoundRes ? `<div class="ctrl-group">
-        <button id="ctrl-backfeed-now" class="action gold-btn">Backfeed ${formula} → All Property, Optics, MD &amp; Polytope Sims</button>
+      </div>` : ''}
+      ${cm === 'vibrations' ? `
+      <div class="ctrl-group">
+        <button id="ctrl-vib-run" class="action gold-btn">Solve GPU Opt + Hessian</button>
+        ${currentVibrations?.modes?.length ? `
+        <select id="ctrl-vib-mode">${currentVibrations.modes.map((m, i) =>
+          `<option value="${i}" ${i === uiState.vibModeIdx ? 'selected' : ''}>Mode ${i + 1}: ${Math.round(m.freqCm1)} cm⁻¹ (${m.label})</option>`
+        ).join('')}</select>
+        <button id="ctrl-vib-play" class="action">${uiState.vibPlaying ? 'Pause' : 'Animate'}</button>` : ''}
+        ${hasH ? `<label title="Substitute H (1.008 u) with Deuterium D (2.014 u) to observe 1/√2 vibrational redshift!"><input id="ctrl-vib-deut" type="checkbox" ${uiState.vibIsotopeDeuterated ? 'checked' : ''} /> H→D Isotope</label>` : ''}
+      </div>` : ''}
+      ${cm === 'reactive-md' ? `
+      <div class="ctrl-group">
+        <button id="ctrl-rx-spark" class="action danger-btn">⚡ Ignition Spark</button>
+        <button id="ctrl-rx-cat" class="action${uiState.rxMdCatalyst ? ' active-toggle' : ''}">Catalyst (−48% E_a)</button>
+        <label><input id="ctrl-rx-therm" type="checkbox" ${uiState.rxMdThermostat ? 'checked' : ''} /> Bath</label>
+        <label>T₀=<b id="lbl-rx-t">${uiState.rxMdTempK}</b>K</label>
+        <input id="ctrl-rx-t" type="range" min="150" max="1800" step="25" value="${uiState.rxMdTempK}" style="width:76px;" />
+        <button id="ctrl-rx-play" class="action">${uiState.rxMdPlaying ? 'Pause' : 'Play'}</button>
+        <button id="ctrl-rx-reset" class="action">Reset</button>
+      </div>` : ''}
+      ${currentCompoundRes && cm === 'molecule' ? `<div class="ctrl-group">
+        <button id="ctrl-backfeed-now" class="action gold-btn">Backfeed ${formula} → All Tabs</button>
       </div>` : ''}`;
 
+    for (const btn of simControls.querySelectorAll('[data-chemview]')) {
+      btn.addEventListener('click', async () => {
+        uiState.chemViewMode = btn.dataset.chemview;
+        syncAccordionState();
+        if (uiState.chemViewMode === 'reactive-md' && !liveReactiveMdSession) {
+          initReactiveMdForActiveReaction();
+        } else if (uiState.chemViewMode === 'vibrations' && !currentVibrations) {
+          renderSimControls();
+          await runGeometryOptAndVibrationsWebGpu();
+        } else if (!currentCompoundRes && uiState.chemViewMode !== 'reactive-md') {
+          await ensureCompoundForTab5();
+        }
+        renderSimControls();
+        redrawCurrentTab();
+        syncDebugState();
+      });
+    }
+    document.getElementById('ctrl-mol-cpk')?.addEventListener('click', () => { uiState.molColorMode = 0; renderSimControls(); redrawCurrentTab(); });
+    document.getElementById('ctrl-mol-mep')?.addEventListener('click', () => { uiState.molColorMode = 1; renderSimControls(); redrawCurrentTab(); });
+    document.getElementById('ctrl-mol-dip')?.addEventListener('change', (e) => { uiState.molShowDipole = Boolean(e.target.checked); renderViewportSync(); });
+    document.getElementById('ctrl-mol-orb')?.addEventListener('change', (e) => { uiState.molShowOrbitalOverlay = Boolean(e.target.checked); renderSimControls(); renderViewportSync(); });
     document.getElementById('ctrl-neb-xi')?.addEventListener('input', (e) => {
       uiState.nebImageIdx = Number(e.target.value);
       uiState.nebPlaying = false;
@@ -1999,6 +2580,14 @@ function renderSimControls() {
       uiState.nebPlaying = !uiState.nebPlaying;
       renderSimControls();
     });
+    document.getElementById('ctrl-neb-ts')?.addEventListener('click', () => {
+      if (pathObj) {
+        uiState.nebImageIdx = pathObj.saddleImageIndex ?? 0;
+        uiState.nebPlaying = false;
+        renderSimControls();
+        redrawCurrentTab();
+      }
+    });
     for (const btn of simControls.querySelectorAll('[data-c-mol]')) {
       btn.addEventListener('click', () => {
         uiState.molOrbitalMode = Number(btn.dataset.cMol);
@@ -2008,21 +2597,99 @@ function renderSimControls() {
         redrawCurrentTab();
       });
     }
+    document.getElementById('ctrl-vib-run')?.addEventListener('click', () => runGeometryOptAndVibrationsWebGpu());
+    document.getElementById('ctrl-vib-mode')?.addEventListener('change', (e) => {
+      uiState.vibModeIdx = Number(e.target.value);
+      redrawCurrentTab();
+    });
+    document.getElementById('ctrl-vib-play')?.addEventListener('click', () => {
+      uiState.vibPlaying = !uiState.vibPlaying;
+      renderSimControls();
+    });
+    document.getElementById('ctrl-vib-deut')?.addEventListener('change', (e) => {
+      runGeometryOptAndVibrationsWebGpu({ deuterated: Boolean(e.target.checked) });
+    });
+    document.getElementById('ctrl-rx-spark')?.addEventListener('click', () => {
+      if (!liveReactiveMdSession) initReactiveMdForActiveReaction();
+      liveReactiveMdSession?.igniteSpark(2.85);
+      uiState.rxMdPlaying = true;
+      renderSimControls();
+    });
+    document.getElementById('ctrl-rx-cat')?.addEventListener('click', () => {
+      uiState.rxMdCatalyst = !uiState.rxMdCatalyst;
+      renderSimControls();
+    });
+    document.getElementById('ctrl-rx-therm')?.addEventListener('change', (e) => {
+      uiState.rxMdThermostat = Boolean(e.target.checked);
+    });
+    document.getElementById('ctrl-rx-t')?.addEventListener('input', (e) => {
+      uiState.rxMdTempK = Number(e.target.value);
+      document.getElementById('lbl-rx-t').textContent = String(uiState.rxMdTempK);
+    });
+    document.getElementById('ctrl-rx-play')?.addEventListener('click', () => {
+      uiState.rxMdPlaying = !uiState.rxMdPlaying;
+      renderSimControls();
+    });
+    document.getElementById('ctrl-rx-reset')?.addEventListener('click', () => {
+      initReactiveMdForActiveReaction();
+      renderSimControls();
+      redrawCurrentTab();
+    });
     document.getElementById('ctrl-backfeed-now')?.addEventListener('click', () => {
       activateCompoundBackfeed(currentCompoundRes, 'crystal');
     });
   } else if (currentTab === 'polytope') {
+    const pm = uiState.polytopeViewMode;
+    const bounds = currentAtlas && gpuRenderer ? gpuRenderer.getPolytopeAxisBounds(currentAtlas) : { minLt: 1, maxLt: 4.2, minLp: 2, maxLp: 10 };
+    const pLt = uiState.polytopeProbe ? Math.log10(Math.max(1, uiState.polytopeProbe.temperatureK)) : Math.log10(300);
+    const pLp = uiState.polytopeProbe ? Math.log10(Math.max(1e-6, uiState.polytopeProbe.pressurePa)) : Math.log10(101325);
     simControls.innerHTML = `
       <div class="ctrl-group">
-        <label>Pressure Domain</label>
-        <button id="ctrl-poly-lab" class="action${uiState.polytopeRegime === 'lab' ? ' active-toggle' : ''}">Lab (10 GPa)</button>
-        <button id="ctrl-poly-plan" class="action${uiState.polytopeRegime === 'planetary' ? ' active-toggle' : ''}">Planetary Core (1 TPa)</button>
+        <button class="action${pm === '3d-surface' ? ' active-toggle' : ''}" data-pview="3d-surface">3D Phase Surface (T,P,ρ)</button>
+        <button class="action${pm === '2d-facets' ? ' active-toggle' : ''}" data-pview="2d-facets">2D Facet Map</button>
+        <button class="action${pm === 'residual-map' ? ' active-toggle' : ''}" data-pview="residual-map">Chebyshev Error %</button>
       </div>
       <div class="ctrl-group">
-        <label>Hover or click anywhere on the GPU phase diagram to run live <code>eval_polytope_atlas_2d</code> (incl. hatched fail-closed outer border!)</label>
+        <button id="ctrl-poly-lab" class="action${uiState.polytopeRegime === 'lab' ? ' active-toggle' : ''}">Lab 10 GPa</button>
+        <button id="ctrl-poly-plan" class="action${uiState.polytopeRegime === 'planetary' ? ' active-toggle' : ''}">Planetary 1 TPa</button>
+        ${pm === '3d-surface' ? `<label><input id="ctrl-poly-facets" type="checkbox" ${uiState.polytopeShowFacets ? 'checked' : ''} /> Facets</label>` : ''}
+      </div>
+      <div class="ctrl-group">
+        <label>log₁₀T=<b id="lbl-p-lt">${pLt.toFixed(2)}</b></label>
+        <input id="ctrl-p-lt" type="range" min="${bounds.minLt.toFixed(2)}" max="${bounds.maxLt.toFixed(2)}" step="0.03" value="${Math.max(bounds.minLt, Math.min(bounds.maxLt, pLt)).toFixed(2)}" style="width:74px;" />
+        <label>log₁₀P=<b id="lbl-p-lp">${pLp.toFixed(1)}</b></label>
+        <input id="ctrl-p-lp" type="range" min="${bounds.minLp.toFixed(2)}" max="${bounds.maxLp.toFixed(2)}" step="0.1" value="${Math.max(bounds.minLp, Math.min(bounds.maxLp, pLp)).toFixed(2)}" style="width:74px;" />
+        <button id="ctrl-p-amb" class="action">300K/1atm</button>
+        <button id="ctrl-p-oos" class="action danger-btn">Fail-Closed Test</button>
       </div>`;
+    for (const btn of simControls.querySelectorAll('[data-pview]')) {
+      btn.addEventListener('click', () => {
+        uiState.polytopeViewMode = btn.dataset.pview;
+        syncAccordionState();
+        renderSimControls();
+        redrawCurrentTab();
+        syncDebugState();
+      });
+    }
     document.getElementById('ctrl-poly-lab')?.addEventListener('click', () => rebuildPolytopeAtlasForRegime('lab'));
     document.getElementById('ctrl-poly-plan')?.addEventListener('click', () => rebuildPolytopeAtlasForRegime('planetary'));
+    document.getElementById('ctrl-poly-facets')?.addEventListener('change', (e) => {
+      uiState.polytopeShowFacets = Boolean(e.target.checked);
+      renderViewportSync();
+    });
+    const probeFromSliders = async () => {
+      const lt = Number(document.getElementById('ctrl-p-lt')?.value ?? 2.48);
+      const lp = Number(document.getElementById('ctrl-p-lp')?.value ?? 5.0);
+      const lblT = document.getElementById('lbl-p-lt');
+      const lblP = document.getElementById('lbl-p-lp');
+      if (lblT) lblT.textContent = lt.toFixed(2);
+      if (lblP) lblP.textContent = lp.toFixed(1);
+      await window.__ulgElementsLabApi?.probePolytope?.(10 ** lt, 10 ** lp);
+    };
+    document.getElementById('ctrl-p-lt')?.addEventListener('input', probeFromSliders);
+    document.getElementById('ctrl-p-lp')?.addEventListener('input', probeFromSliders);
+    document.getElementById('ctrl-p-amb')?.addEventListener('click', () => window.__ulgElementsLabApi?.probePolytope?.(300, 101325));
+    document.getElementById('ctrl-p-oos')?.addEventListener('click', () => window.__ulgElementsLabApi?.probePolytope?.(1.0, 1e14));
   }
 }
 
@@ -2131,10 +2798,13 @@ function renderViewportSync() {
       gpuRenderer.renderTdksPhotonCloudScene({
         pairCloud: liveTdksPairCloud,
         blochSession: liveBlochSession,
-        yaw: (camYaw - 0.42) * 0.8 + 0.14,
-        pitch: Math.max(-0.85, Math.min(0.85, (camPitch - 0.28) * 0.8 + 0.12)),
-        camDist,
+        tdks3dSession: liveTdks3dSession,
+        yaw: camYaw,
+        pitch: camPitch,
+        camDist: Math.max(1.9, Math.min(4.8, camDist - 0.15)),
         modeMono: uiState.photonModeMono,
+        polMode: uiState.tdksPolMode,
+        fieldViewMode: uiState.tdksFieldView,
         probeRgb: wavelengthNmToRgb(uiState.probeWavelengthNm),
         emergentReflSrgb: livePhotonTelemetry?.emergentReflectedSrgb || em?.opticalSrgb || [0.94, 0.86, 0.65],
         pointSize: uiState.pointSize
@@ -2189,6 +2859,30 @@ function renderViewportSync() {
         tint: em?.opticalSrgb || [0.34, 0.88, 0.65],
         showFermiIso: bulk.isMetal
       });
+    } else if (uiState.crystalViewMode === 'lattice') {
+      const multiCry = activeSpecimenKind === 'compound'
+        ? currentCompoundRes?.visualData?.multiSpeciesCrystal
+        : currentElementCrystal;
+      if (multiCry) {
+        gpuRenderer.renderMultiSpeciesCrystalScene({
+          crystal: multiCry,
+          colorMode: uiState.crystalColorMode,
+          yaw: camYaw,
+          pitch: camPitch,
+          camDist: Math.max(2.0, Math.min(5.2, camDist + 0.35))
+        });
+      } else if (liveMdSession) {
+        gpuRenderer.renderLiveMd({
+          positionsBuffer: liveMdSession.positionsBuffer,
+          velocitiesBuffer: liveMdSession.velocitiesBuffer,
+          atomCount: liveMdSession.atomCount,
+          boxLengthsA: liveMdSession.boxLengthsA,
+          yaw: camYaw,
+          pitch: camPitch,
+          tint: em?.opticalSrgb || [0.65, 0.82, 0.96],
+          velocityColorScale: 16.0
+        });
+      }
     } else if (liveMdSession) {
       gpuRenderer.renderLiveMd({
         positionsBuffer: liveMdSession.positionsBuffer,
@@ -2213,48 +2907,96 @@ function renderViewportSync() {
       tint: em?.opticalSrgb || [0.65, 0.80, 0.96],
       velocityColorScale: 32.0
     });
-  } else if (currentTab === 'compound' && currentCompoundRes) {
-    const nebCloud = currentNebImageClouds[uiState.nebImageIdx] || null;
-    if (nebCloud?.pointsBuffer) {
-      gpuRenderer.renderOrbitalPointCloud({
-        pointsBuffer: nebCloud.pointsBuffer,
-        pointCount: nebCloud.pointCount,
+  } else if (currentTab === 'compound') {
+    const cm = uiState.chemViewMode;
+    const tNow = performance.now() * 1e-3;
+    if (cm === 'reactive-md' && liveReactiveMdSession) {
+      gpuRenderer.renderReactiveMdScene({
+        posBuffer: liveReactiveMdSession.getActivePosBuffer(),
+        velBuffer: liveReactiveMdSession.getActiveVelBuffer(),
+        moleculeCount: liveReactiveMdSession.moleculeCount,
         yaw: camYaw,
         pitch: camPitch,
-        camDist,
-        pointSize: 0.015,
-        opacity: 0.34,
-        alternateShellColors: true,
-        colorA: [1.0, 0.64, 0.30],
-        colorB: [0.46, 0.72, 1.0],
-        showGuides: uiState.showGuides,
-        showNucleus: false
+        camDist: Math.max(2.1, Math.min(5.2, camDist + 0.30))
       });
-    } else if (liveMolOrbitalCloud?.pointsBuffer) {
-      gpuRenderer.renderOrbitalPointCloud({
-        pointsBuffer: liveMolOrbitalCloud.pointsBuffer,
-        pointCount: liveMolOrbitalCloud.pointCount,
+    } else if (cm === 'vibrations' && currentVibrations?.atoms?.length) {
+      const modeObj = currentVibrations.modes?.[uiState.vibModeIdx] || null;
+      gpuRenderer.renderMoleculeScene({
+        atoms: currentVibrations.atoms,
+        bonds: currentVibrations.bonds || [],
+        mullikenCharges: currentGeomOpt?.rhfResult?.mullikenCharges || currentCompoundRes?.visualData?.molQm?.mullikenCharges || null,
+        dipoleVecDebye: currentGeomOpt?.rhfResult?.dipoleVecDebye || null,
+        displacements: modeObj?.displacements || null,
+        vibPhase: vibAnimPhase,
+        vibAmplitude: 0.32,
+        colorMode: uiState.molColorMode,
+        showDipole: uiState.molShowDipole,
+        orbitalCloud: null,
         yaw: camYaw,
         pitch: camPitch,
-        camDist,
-        pointSize: 0.015,
-        opacity: 0.34,
-        alternateShellColors: true,
-        colorA: [1.0, 0.64, 0.30],
-        colorB: [0.46, 0.72, 1.0],
-        showGuides: uiState.showGuides,
-        showNucleus: false
+        camDist: Math.max(2.0, Math.min(5.0, camDist + 0.25)),
+        timeS: tNow
+      });
+    } else if (cm === 'reaction-path' && (currentReactionPathway?.images?.length || currentNebBarrier?.images?.length)) {
+      const pathImgs = currentReactionPathway?.images || currentNebBarrier?.images;
+      const idx = Math.max(0, Math.min(pathImgs.length - 1, uiState.nebImageIdx));
+      const img = pathImgs[idx];
+      const nebCloud = uiState.molShowOrbitalOverlay ? (currentNebImageClouds[idx] || null) : null;
+      gpuRenderer.renderMoleculeScene({
+        atoms: img.atoms || img,
+        bonds: img.bonds || [],
+        mullikenCharges: img.mullikenCharges || null,
+        dipoleVecDebye: img.dipoleVecDebye || null,
+        colorMode: uiState.molColorMode,
+        showDipole: uiState.molShowDipole,
+        orbitalCloud: nebCloud,
+        yaw: camYaw,
+        pitch: camPitch,
+        camDist: Math.max(2.0, Math.min(5.2, camDist + 0.30)),
+        timeS: tNow
+      });
+    } else if (currentCompoundRes?.visualData?.molQm?.atoms?.length) {
+      const mqm = currentCompoundRes.visualData.molQm;
+      gpuRenderer.renderMoleculeScene({
+        atoms: mqm.atoms,
+        bonds: mqm.bonds || [],
+        mullikenCharges: mqm.mullikenCharges || null,
+        dipoleVecDebye: mqm.dipoleVecDebye || null,
+        colorMode: uiState.molColorMode,
+        showDipole: uiState.molShowDipole,
+        orbitalCloud: uiState.molShowOrbitalOverlay ? liveMolOrbitalCloud : null,
+        yaw: camYaw,
+        pitch: camPitch,
+        camDist: Math.max(2.0, Math.min(5.0, camDist + 0.25)),
+        timeS: tNow
+      });
+    } else if (currentCompoundRes?.visualData?.multiSpeciesCrystal) {
+      gpuRenderer.renderMultiSpeciesCrystalScene({
+        crystal: currentCompoundRes.visualData.multiSpeciesCrystal,
+        colorMode: uiState.molColorMode,
+        yaw: camYaw,
+        pitch: camPitch,
+        camDist: Math.max(2.1, Math.min(5.2, camDist + 0.35))
       });
     } else if (currentCompoundLattice) {
       gpuRenderer.renderStaticCrystalLattice({
         ...currentCompoundLattice,
         yaw: camYaw,
         pitch: camPitch,
-        tint: currentCompoundRes.bundle.electromagnetic.opticalSrgb || [0.75, 0.82, 0.95]
+        tint: currentCompoundRes?.bundle?.electromagnetic?.opticalSrgb || [0.75, 0.82, 0.95]
       });
     }
   } else if (currentTab === 'polytope' && currentAtlas) {
-    gpuRenderer.renderPolytopeAtlas(currentAtlas, uiState.polytopeProbe);
+    gpuRenderer.renderPolytopeAtlas3D({
+      atlas: currentAtlas,
+      viewMode: uiState.polytopeViewMode,
+      probe: uiState.polytopeProbe,
+      mdTempK: liveMdTelemetry?.temperatureK ?? uiState.mdTargetTempK ?? null,
+      yaw: camYaw + 0.22,
+      pitch: Math.max(0.16, Math.min(1.32, camPitch + 0.30)),
+      camDist: Math.max(2.1, Math.min(5.4, camDist + 0.35)),
+      showFacetEdges: uiState.polytopeShowFacets
+    });
   }
 }
 
@@ -2495,11 +3237,15 @@ function redrawCurrentTab() {
       const nLive = chG?.nMeasuredFdtd ?? chP?.nMeasuredFdtd ?? chR?.nMeasuredFdtd;
       const bCh = liveBlochSession?.channels?.[uiState.photonModeMono ? 3 : 2];
       if (uiState.crystalViewMode === 'tdks-atom' && liveTdksPairCloud && liveBlochSession) {
-        const gLbl = `${liveTdksPairCloud.n0}${L_NAMES[liveTdksPairCloud.l0] || ''}`;
+        const gLbl = `${liveTdksPairCloud.n0}${L_NAMES[liveTdksPairCloud.l0] || ''}(m=${liveTdksPairCloud.m})`;
         const eLbl = `${liveTdksPairCloud.n1}${L_NAMES[liveTdksPairCloud.l1] || ''}`;
+        const polTxt = ['E_y', 'E_z', 'Circular LCP'][uiState.tdksPolMode] || 'E_y';
+        const gN = liveTdks3dSession?.gridN || 32;
+        const scPct = liveTdks3dTelemetry ? `${fmt(liveTdks3dTelemetry.scattRatio * 100, 1)}%` : '…';
+        const xpolPct = liveTdks3dTelemetry ? `${fmt(liveTdks3dTelemetry.crossPolFraction * 100, 1)}%` : '…';
         setHud(
-          `Live WebGPU TD-KS Electron Cloud |ψ(r,t)|² ↔ Photon Wavepacket — ${b.materialKey} (${gLbl} ↔ ${eLbl})`,
-          `${liveTdksPairCloud.pointCount.toLocaleString()} GPU samples · ΔE=${fmt(liveBlochSession.transEv, 2)} eV (${liveBlochSession.transLabel}) · Excited |c_${eLbl}|²=${fmt((bCh?.rho11 || 0) * 100, 1)}% · Dipole d(t)=${fmt(bCh?.dipole || 0, 2)} · t=${fmt(liveBlochSession.getTimeFs(), 2)} fs`
+          `Live WebGPU 3D (${gN}³) Maxwell–Kohn–Sham Wavepacket ↔ Orbital — ${b.materialKey} (${gLbl} ↔ ${eLbl})`,
+          `3D Yee FDTD + ${liveTdksPairCloud.pointCount.toLocaleString()}-pt Dirac–KS · Pol=${polTxt} · ΔE=${fmt(liveBlochSession.transEv, 2)} eV · 3D Scatt=${scPct} (Cross-Pol ${xpolPct}) · t=${fmt(liveBlochSession.getTimeFs(), 2)} fs`
         );
       } else if (tel) {
         const oscTxt = tel.oscillators.filter((o) => o.active).slice(0, 2)
@@ -2519,7 +3265,11 @@ function redrawCurrentTab() {
           const bR = liveBlochSession.channels[0];
           const bG = liveBlochSession.channels[1];
           const bB = liveBlochSession.channels[2];
-          nBadge = `TD-KS Shell Excitation |c₁|²: <span style="color:#f87171">610nm=${fmt(bR.rho11 * 100, 1)}%</span> · <span style="color:#4ade80">535nm=${fmt(bG.rho11 * 100, 1)}%</span> · <span style="color:#60a5fa">440nm=${fmt(bB.rho11 * 100, 1)}%</span> | Blue Abs=${fmt(bB.absorbedEnergy, 2)}`;
+          const t3 = liveTdks3dTelemetry;
+          const t3Txt = t3
+            ? `3D Maxwell–KS: Scatt=<b>${fmt(t3.scattRatio * 100, 1)}%</b> · Cross-Pol=<b>${fmt(t3.crossPolFraction * 100, 1)}%</b> · Lobe Abs=<b>${fmt(t3.absorbedEnergy, 1)}</b> · Aniso=<b>${fmt(t3.angularAnisotropy, 2)}</b> | `
+            : '';
+          nBadge = `${t3Txt}|c₁|²: <span style="color:#f87171">610nm=${fmt(bR.rho11 * 100, 1)}%</span> · <span style="color:#4ade80">535nm=${fmt(bG.rho11 * 100, 1)}%</span> · <span style="color:#60a5fa">440nm=${fmt(bB.rho11 * 100, 1)}%</span>`;
         } else if (!tel.isMetal) {
           nBadge = `Live 2D FDTD n(λ) = <b>${nLive ? fmt(nLive, 3) : 'propagating…'}</b> (analytic ${fmt(chG.analyticNRe, 2)})${snellTxt} · T=${fmt(chG.transmittance * 100, 1)}%`;
         } else {
@@ -2672,68 +3422,206 @@ function redrawCurrentTab() {
         label: `MSD(t) Å² · Diffusion slope spikes above T_m!`, color: '#38bdf8', yMin: 0
       });
     }
-  } else if (currentTab === 'compound' && currentCompoundRes) {
-    const mqm = currentCompoundRes.visualData.molQm;
-    const cb = currentCompoundRes.bundle;
-    const neb = currentNebBarrier;
-    const xiTxt = neb ? ` · CI-NEB Image #${uiState.nebImageIdx}/${neb.energiesEv.length - 1} (ΔE=${fmt(neb.energiesEv[uiState.nebImageIdx], 2)} eV${uiState.nebImageIdx === neb.saddleImageIndex ? ' ‡ TS' : ''})` : '';
-    setHud(
-      mqm
-        ? `WebGPU 3D Reactive RHF Orbitals — ${cb.materialKey}${xiTxt}`
-        : `WebGPU 3D Ionic/Covalent Crystal — ${cb.materialKey} (${cb.mechanical.crystalStructure})`,
-      mqm
-        ? `E = ${fmt(mqm.totalEnergyHa, 3)} Ha · μ = ${fmt(mqm.dipoleDebye, 2)} D · HOMO-LUMO Gap = ${fmt(mqm.homoLumoGapEv, 2)} eV · GPU RHF calls=${neb?.gpuRhfCalls ?? 1}`
-        : `a₀ = ${fmt(cb.mechanical.latticeConstantA, 2)} Å · ρ = ${fmt(cb.mechanical.densityKgPerM3, 0)} kg/m³ · Gap = ${fmt(cb.electromagnetic.bandGapEv, 2)} eV`
-    );
-    if (mqm?.orbitalEnergiesHa) {
-      plot1Title.textContent = `Molecular Orbital Spectrum (${cb.materialKey} GPU RHF)`;
-      drawPlotLine(plot1, mqm.orbitalEnergiesHa.map((_, i) => i), mqm.orbitalEnergiesHa, {
-        label: `MO Energy (Ha) | HOMO-LUMO Gap = ${fmt(mqm.homoLumoGapEv, 2)} eV`, color: '#c084fc'
+  } else if (currentTab === 'compound') {
+    const cm = uiState.chemViewMode;
+    const mqm = currentCompoundRes?.visualData?.molQm || null;
+    const cb = currentCompoundRes?.bundle || null;
+    const pathObj = currentReactionPathway || currentNebBarrier;
+
+    if (cm === 'reactive-md' && liveReactiveMdSession) {
+      const rt = liveReactiveMdTelemetry;
+      const lbls = rt?.speciesLabels || liveReactiveMdSession.params.speciesLabels;
+      setHud(
+        `Live WebGPU 3D Reactive Chemistry MD Chamber — ${liveReactiveMdSession.params.equation}`,
+        rt
+          ? `${rt.moleculeCount} GPU molecules · T=${Math.round(rt.temperatureK)} K · Conversion=${fmt(rt.conversionFrac * 100, 1)}% · Fwd=${rt.totalFwdEvents} · Rev=${rt.totalRevEvents} · Stoich=${rt.stoichiometryConserved ? 'EXACT' : 'ERR'}`
+          : 'Stepping 3D WebGPU reactive collision chamber…'
+      );
+      if (rt) {
+        setBottomOverlay(
+          `<div class="live-meter"><span style="color:#38bdf8">${lbls[0]}=${rt.countA}</span> · <span style="color:#fb923c">${lbls[1]}=${rt.countB}</span> → <span style="color:#34d399">${lbls[2]}=${rt.countC}</span> + <span style="color:#e879f9">${lbls[3]}=${rt.countD}</span> · E_a=${fmt(rt.forwardBarrierEv, 2)} eV${rt.catalystEnabled ? ' (CATALYST −48%)' : ''} · ΔH=${fmt(rt.reactionEnthalpyEv, 2)} eV</div>`
+        );
+      }
+      plot1Title.textContent = `Live Species Populations [A],[B],[C],[D](t)`;
+      if (liveReactiveMdHistory.length >= 2) {
+        const xs = liveReactiveMdHistory.map((h) => h.step);
+        drawMultiLinePlot(plot1, [
+          { xs, ys: liveReactiveMdHistory.map((h) => h.fA * 100), color: '#38bdf8', width: 2 },
+          { xs, ys: liveReactiveMdHistory.map((h) => h.fB * 100), color: '#fb923c', width: 1.6 },
+          { xs, ys: liveReactiveMdHistory.map((h) => h.fC * 100), color: '#34d399', width: 2.2 },
+          { xs, ys: liveReactiveMdHistory.map((h) => h.fD * 100), color: '#e879f9', width: 1.6 }
+        ], { label: `${lbls[0]}/${lbls[1]} (cyan/amber) → ${lbls[2]}/${lbls[3]} (green/pink) %`, yMin: 0, yMax: 55 });
+        plot2Title.textContent = 'Live Exothermic Chamber Temperature T(t) (K)';
+        drawPlotLine(plot2, xs, liveReactiveMdHistory.map((h) => h.T), {
+          label: 'Chamber T(t) K (spikes on exothermic ignition!)', color: '#facc15', yMin: 0
+        });
+      }
+      const thermo = currentReactionPathway?.thermodynamics
+        || computeReactionThermodynamicsCurve(liveReactiveMdSession.params.forwardBarrierEv, liveReactiveMdSession.params.reactionEnthalpyEv);
+      plot3Title.textContent = 'Arrhenius Rate log₁₀ k(T) vs 1000/T (K⁻¹)';
+      drawPlotLine(plot3, Array.from(thermo.invT1000PerK), Array.from(thermo.log10KRate), {
+        label: `log10 k(T) · ΔG°₂₉₈=${fmt(thermo.deltaG298KjPerMol, 1)} kJ/mol`, color: '#c084fc'
       });
-    } else {
-      plot1Title.textContent = `Ionic/Covalent Crystal Summary (${cb.materialKey})`;
-      drawPlotLine(plot1, [0, 1, 2], [cb.mechanical.bulkModulusPa * 1e-9, cb.mechanical.shearModulusPa * 1e-9, cb.electromagnetic.bandGapEv * 10], {
-        label: `K=${fmt(cb.mechanical.bulkModulusPa * 1e-9, 1)} GPa · G=${fmt(cb.mechanical.shearModulusPa * 1e-9, 1)} GPa`,
-        color: '#c084fc', yMin: 0
-      });
+    } else if (cm === 'vibrations') {
+      const vib = currentVibrations;
+      const modeObj = vib?.modes?.[uiState.vibModeIdx] || null;
+      setHud(
+        vib
+          ? `WebGPU Geometry Opt & Vibrational Normal Modes — ${vib.formula}${vib.deuterated ? ' (Deuterated D)' : ''}`
+          : `Click "Solve GPU Opt + Hessian" to compute live GPU vibrational normal modes`,
+        vib && modeObj
+          ? `Mode ${uiState.vibModeIdx + 1}/${vib.modes.length}: ν=${fmt(modeObj.freqCm1, 1)} cm⁻¹ (${modeObj.label}) · IR=${fmt(modeObj.irIntensityKmPerMol, 1)} km/mol · ZPE=${fmt(vib.totalZpeEv, 3)} eV (${fmt(vib.totalZpeKjPerMol, 1)} kJ/mol)`
+          : 'Eckart-projected GPU RHF Hessian diagonalized on WebGPU via Gate 0B eigensolver'
+      );
+      if (vib) {
+        setBottomOverlay(
+          `<div class="live-meter">GPU Hessian Modes (${vib.basisUsed}): ${vib.modes.map((m, i) => `${i === uiState.vibModeIdx ? '<b>' : ''}${Math.round(m.freqCm1)} cm⁻¹${i === uiState.vibModeIdx ? '</b>' : ''}`).join(' · ')} | Total ZPE = <b>${fmt(vib.totalZpeEv, 3)} eV</b></div>`
+        );
+      }
+      if (currentGeomOpt?.trajectory?.length >= 2) {
+        plot1Title.textContent = `GPU Geometry Relaxation ΔE(step) (${currentGeomOpt.steps} steps)`;
+        drawPlotLine(
+          plot1,
+          currentGeomOpt.trajectory.map((t) => t.step),
+          currentGeomOpt.trajectory.map((t) => t.energyEvRel),
+          { label: `ΔE_relax = ${fmt(currentGeomOpt.relaxationEv, 3)} eV · GPU RHF calls=${currentGeomOpt.gpuRhfCalls}`, color: '#34d399' }
+        );
+      }
+      if (vib?.spectrum) {
+        plot2Title.textContent = `GPU IR (gold) & Raman (cyan) Vibrational Spectrum — ${vib.formula}${vib.deuterated ? ' [D]' : ''}`;
+        const maxIr = Math.max(1e-3, ...vib.spectrum.irSpectrum);
+        const maxRam = Math.max(1e-3, ...vib.spectrum.ramanSpectrum);
+        drawMultiLinePlot(plot2, [
+          { xs: Array.from(vib.spectrum.wavenumbersCm1), ys: Array.from(vib.spectrum.irSpectrum, (v) => (v / maxIr) * 100), color: '#facc15', width: 2 },
+          { xs: Array.from(vib.spectrum.wavenumbersCm1), ys: Array.from(vib.spectrum.ramanSpectrum, (v) => (v / maxRam) * 85), color: '#38bdf8', width: 1.5 }
+        ], {
+          label: 'Normalized IR |∂μ/∂Q|² (gold) & Raman (cyan) vs ν (cm⁻¹)',
+          yMin: 0, yMax: 108,
+          vLine: modeObj && modeObj.freqCm1 > 0 ? { x: modeObj.freqCm1, color: '#f472b6', label: `${Math.round(modeObj.freqCm1)}` } : null
+        });
+        plot3Title.textContent = 'Normal-Mode Frequencies ν_k (cm⁻¹) & IR Intensities';
+        drawPlotLine(plot3, vib.modes.map((_, i) => i + 1), vib.modes.map((m) => m.freqCm1), {
+          label: `Masses: ${vib.massesU.map((m) => m.toFixed(1)).join(', ')} u · ZPE=${fmt(vib.totalZpeEv, 3)} eV`,
+          color: '#c084fc', yMin: 0
+        });
+      }
+    } else if (cm === 'reaction-path' && pathObj) {
+      const imgs = pathObj.images || [];
+      const idx = Math.max(0, Math.min(Math.max(0, imgs.length - 1), uiState.nebImageIdx));
+      const curImg = imgs[idx];
+      const xi = idx / Math.max(1, (pathObj.energiesEv?.length || 2) - 1);
+      setHud(
+        `WebGPU Multi-Molecule CI-NEB Pathway — ${pathObj.equation || cb?.materialKey || ''}`,
+        `Image #${idx}/${Math.max(0, (pathObj.energiesEv?.length || 1) - 1)} (ξ=${xi.toFixed(2)}${idx === pathObj.saddleImageIndex ? ' ‡ TRANSITION STATE' : ''}) · E_a=${fmt(pathObj.forwardBarrierEv, 2)} eV · ΔE=${fmt(pathObj.energiesEv?.[idx] ?? 0, 2)} eV · GPU RHF=${pathObj.gpuRhfCalls}`
+      );
+      if (curImg?.bonds?.length) {
+        const bTxt = curImg.bonds.slice(0, 5).map((b) => {
+          const za = curImg.atoms?.[b.a]?.Z; const zb = curImg.atoms?.[b.b]?.Z;
+          const sym = `${symbolForZ(za) || za}${b.kind === 'triple' ? '≡' : (b.kind === 'double' ? '=' : (b.kind === 'partial' ? '⋯‡' : '–'))}${symbolForZ(zb) || zb}`;
+          return `${sym}(${b.order.toFixed(2)})`;
+        }).join(' · ');
+        setBottomOverlay(`<div class="live-meter">Live Wiberg Bonds at ξ=${xi.toFixed(2)}: ${bTxt} · μ=${fmt(curImg.dipoleDebye, 2)} D</div>`);
+      }
+      if (pathObj.energiesEv?.length >= 3) {
+        plot1Title.textContent = `WebGPU CI-NEB Barrier (E_a = ${fmt(pathObj.forwardBarrierEv, 2)} eV)`;
+        const xs = pathObj.energiesEv.map((_, i) => i / (pathObj.energiesEv.length - 1));
+        drawPlotLine(plot1, xs, pathObj.energiesEv, {
+          label: `GPU MEP ΔE (eV) · TS‡ #${pathObj.saddleImageIndex} (${pathObj.basisUsed || 'sto-3g'})`,
+          color: '#ff9c54',
+          yMin: Math.min(0, ...pathObj.energiesEv),
+          vLine: { x: xi, color: '#38bdf8', label: `ξ=${xi.toFixed(2)}` }
+        });
+      }
+      // Plot 2: Live Wiberg Bond-Order Evolution B_AB(ξ) across the reaction coordinate!
+      if (imgs.length >= 3 && imgs[0]?.bondOrderMatrix) {
+        plot2Title.textContent = 'Wiberg Bond-Order Evolution B_AB(ξ) (Breaking vs Forming!)';
+        const nA = imgs[0].atoms.length;
+        const pairTrack = [];
+        for (let a = 0; a < nA; a += 1) {
+          for (let b = a + 1; b < nA; b += 1) {
+            const vals = imgs.map((im) => im.bondOrderMatrix?.[a]?.[b] ?? 0);
+            const span = Math.max(...vals) - Math.min(...vals);
+            if (Math.max(...vals) > 0.25) pairTrack.push({ a, b, vals, span });
+          }
+        }
+        pairTrack.sort((x, y) => y.span - x.span);
+        const topPairs = pairTrack.slice(0, 4);
+        const cols = ['#f87171', '#34d399', '#38bdf8', '#facc15'];
+        const xs = imgs.map((im) => im.xi);
+        if (topPairs.length > 0) {
+          drawMultiLinePlot(plot2, topPairs.map((pt, pi) => ({ xs, ys: pt.vals, color: cols[pi % cols.length], width: 2 })), {
+            label: topPairs.map((pt) => `${symbolForZ(imgs[0].atoms[pt.a].Z)}–${symbolForZ(imgs[0].atoms[pt.b].Z)}`).join(', ') + ' vs ξ',
+            yMin: 0,
+            vLine: { x: xi, color: '#ffffff', label: '' }
+          });
+        }
+      }
+      // Plot 3: Arrhenius & Van 't Hoff ΔG(T)
+      if (pathObj.thermodynamics) {
+        const th = pathObj.thermodynamics;
+        plot3Title.textContent = `Van 't Hoff ΔG(T) (ΔG°₂₉₈ = ${fmt(th.deltaG298KjPerMol, 1)} kJ/mol)`;
+        drawPlotLine(plot3, Array.from(th.tempsK), Array.from(th.deltaGKjPerMol), {
+          label: `ΔG(T) kJ/mol vs T(K) · ${th.spontaneousAt298K ? 'Spontaneous at 298K' : 'Endergonic at 298K'}`,
+          color: '#34d399',
+          hLine: { y: 0, color: '#facc15', label: 'ΔG=0' }
+        });
+      }
+    } else if (cb) {
+      // Default Tab 5 View: 3D Molecule + Wiberg Bond Orders + Mulliken MEP + Dipole Vector μ!
+      const bList = mqm?.bonds || [];
+      setHud(
+        mqm
+          ? `WebGPU 3D Molecular Structure, Wiberg Bonds & MEP — ${cb.materialKey} (${mqm.basisUsed})`
+          : `WebGPU 3D Multi-Species Crystal — ${cb.materialKey} (${cb.mechanical.crystalStructure})`,
+        mqm
+          ? `E = ${fmt(mqm.totalEnergyHa, 3)} Ha · μ = ${fmt(mqm.dipoleDebye, 2)} D · Gap = ${fmt(mqm.homoLumoGapEv, 2)} eV · ${bList.length} Wiberg bond${bList.length === 1 ? '' : 's'}`
+          : `a₀ = ${fmt(cb.mechanical.latticeConstantA, 2)} Å · ρ = ${fmt(cb.mechanical.densityKgPerM3, 0)} kg/m³ · Gap = ${fmt(cb.electromagnetic.bandGapEv, 2)} eV`
+      );
+      if (mqm) {
+        const bondSummary = bList.slice(0, 5).map((b) => {
+          const za = mqm.atoms[b.a]?.Z; const zb = mqm.atoms[b.b]?.Z;
+          const sym = `${symbolForZ(za) || za}${b.kind === 'triple' ? '≡' : (b.kind === 'double' ? '=' : (b.kind === 'partial' ? '⋯' : '–'))}${symbolForZ(zb) || zb}`;
+          return `${sym} (${b.order.toFixed(2)}, ${fmt(b.lengthA, 2)} Å)`;
+        }).join(' · ') || 'Ionic/Van der Waals complex';
+        setBottomOverlay(`<div class="live-meter">Wiberg Bonds: ${bondSummary} · |μ|=${fmt(mqm.dipoleDebye, 2)} D · Mode=${uiState.molColorMode === 1 ? 'Mulliken MEP (±q)' : 'CPK'}</div>`);
+      }
+      if (mqm?.orbitalEnergiesHa) {
+        plot1Title.textContent = `GPU Molecular Orbital Spectrum (${cb.materialKey})`;
+        drawPlotLine(plot1, mqm.orbitalEnergiesHa.map((_, i) => i), mqm.orbitalEnergiesHa, {
+          label: `MO Energy (Ha) | HOMO-LUMO Gap = ${fmt(mqm.homoLumoGapEv, 2)} eV`, color: '#c084fc'
+        });
+        plot2Title.textContent = `Mulliken Atomic Charges q_i & Wiberg Bond Orders (${cb.materialKey})`;
+        const qs = mqm.mullikenCharges || [0, 0];
+        drawPlotLine(plot2, qs.map((_, i) => i), qs, {
+          label: `Charges: ${mqm.atoms.map((a, i) => `${symbolForZ(a.Z)}:${qs[i] >= 0 ? '+' : ''}${fmt(qs[i], 2)}`).join(' ')}`,
+          color: '#34d399', hLine: { y: 0, color: '#64748b', label: '0e' }
+        });
+      } else {
+        plot1Title.textContent = `Multi-Species Crystal Moduli (${cb.materialKey})`;
+        drawPlotLine(plot1, [0, 1, 2], [cb.mechanical.bulkModulusPa * 1e-9, cb.mechanical.shearModulusPa * 1e-9, cb.electromagnetic.bandGapEv * 10], {
+          label: `K=${fmt(cb.mechanical.bulkModulusPa * 1e-9, 1)} GPa · G=${fmt(cb.mechanical.shearModulusPa * 1e-9, 1)} GPa`,
+          color: '#c084fc', yMin: 0
+        });
+        plot2Title.textContent = `Compound Phase Transitions (${cb.materialKey})`;
+        drawPlotLine(plot2, [0, 1, 2], [0, cb.thermodynamic.meltingPointK, cb.thermodynamic.boilingPointK], {
+          label: `T_m = ${fmt(cb.thermodynamic.meltingPointK, 0)} K · T_b = ${fmt(cb.thermodynamic.boilingPointK, 0)} K`,
+          color: '#38bdf8', yMin: 0
+        });
+      }
+      plot3Title.textContent = `Compound GPU Optical UV-Vis Spectrum (${cb.materialKey})`;
+      drawOpticalSpectrumPlot(plot3, cb.electromagnetic.spectralWavelengthsNm, cb.electromagnetic.spectralReflectance, cb.electromagnetic.spectralNRe, cb.electromagnetic.opticalSrgb, cb.materialKey);
     }
-    if (neb?.energiesEv?.length >= 3) {
-      plot2Title.textContent = `WebGPU CI-NEB Barrier (${cb.materialKey}: E_a = ${fmt(neb.forwardBarrierEv, 2)} eV)`;
-      const xs = neb.energiesEv.map((_, i) => i / (neb.energiesEv.length - 1));
-      drawPlotLine(plot2, xs, neb.energiesEv, {
-        label: `GPU MEP ΔE (eV) · TS‡ #${neb.saddleImageIndex} (${neb.pathwayLabel})`,
-        color: '#ff9c54',
-        yMin: Math.min(0, ...neb.energiesEv)
-      });
-      const p2ctx = getPlotCtx(plot2);
-      const ys = neb.energiesEv;
-      const loY = Math.min(0, ...ys);
-      const hiY = Math.max(1e-6, ...ys);
-      const plotDot = (imgIdx, color, lbl) => {
-        const sx = 26 + (imgIdx / Math.max(1, ys.length - 1)) * (plot2.width - 36);
-        const sy = plot2.height - 18 - ((ys[imgIdx] - loY) / Math.max(1e-9, hiY - loY)) * (plot2.height - 37);
-        p2ctx.fillStyle = color;
-        p2ctx.beginPath();
-        p2ctx.arc(sx, sy, 4.5, 0, Math.PI * 2);
-        p2ctx.fill();
-        if (lbl) p2ctx.fillText(lbl, Math.min(plot2.width - 36, sx + 6), Math.max(22, sy - 4));
-      };
-      plotDot(neb.saddleImageIndex, '#facc15', '‡ TS');
-      plotDot(uiState.nebImageIdx, '#38bdf8', '');
-    } else {
-      plot2Title.textContent = `Compound Phase Transitions (${cb.materialKey})`;
-      drawPlotLine(plot2, [0, 1, 2], [0, cb.thermodynamic.meltingPointK, cb.thermodynamic.boilingPointK], {
-        label: `T_m = ${fmt(cb.thermodynamic.meltingPointK, 0)} K · T_b = ${fmt(cb.thermodynamic.boilingPointK, 0)} K`,
-        color: '#38bdf8', yMin: 0
-      });
-    }
-    plot3Title.textContent = `Compound GPU Optical UV-Vis Spectrum (${cb.materialKey})`;
-    drawOpticalSpectrumPlot(plot3, cb.electromagnetic.spectralWavelengthsNm, cb.electromagnetic.spectralReflectance, cb.electromagnetic.spectralNRe, cb.electromagnetic.opticalSrgb, cb.materialKey);
   } else if (currentTab === 'polytope' && currentAtlas) {
     const p = uiState.polytopeProbe;
+    const pm = uiState.polytopeViewMode;
+    const modeLabel = pm === '3d-surface'
+      ? '3D Convex Phase Surface (log₁₀ T, log₁₀ P, log₁₀ ρ)'
+      : (pm === 'residual-map' ? 'GPU Chebyshev Fit Residual Error Map' : '2D Exact GPU Facet Map');
     setHud(
-      `Live WebGPU eval_polytope_atlas_2d — ${currentAtlas.materialKey} (${currentAtlas.polytopeCount} Convex Cells · ${uiState.polytopeRegime === 'planetary' ? '1 TPa Planetary' : '10 GPa Lab'})`,
-      `Slanted Clausius–Clapeyron A x <= b · Clenshaw Chebyshev log10(ρ) contours · Hover/Click to probe GPU`
+      `WebGPU ${modeLabel} — ${currentAtlas.materialKey} (${currentAtlas.polytopeCount} Cells · ${uiState.polytopeRegime === 'planetary' ? '1 TPa' : '10 GPa'})`,
+      pm === '3d-surface'
+        ? `Drag to 3D orbit · Tap/Click or slide (log₁₀T, log₁₀P) to drop glowing GPU probe pin · Cyan pin = Live MD state · Red skirt = fail-closed`
+        : `Slanted Clausius–Clapeyron A x <= b · Live GPU eval_polytope_atlas_2d · Hover/Tap to probe`
     );
     if (p) {
       if (p.hit) {
@@ -2786,10 +3674,31 @@ function tickSimulationLoop(nowMs) {
     camYaw += 0.008;
   }
 
-  // 1. Live WebGPU TD-KS Electron-Cloud + 2D Maxwell–ADE-FDTD stepping on Tab 3!
+  // 1. Live WebGPU 3D Maxwell-Kohn-Sham Electron-Cloud + 2D Maxwell–ADE-FDTD stepping on Tab 3!
   if (currentTab === 'crystal' && (uiState.crystalViewMode === 'tdks-atom' || uiState.crystalViewMode === 'photon-shell') && uiState.photonPlaying) {
     if (liveBlochSession) {
       liveBlochSession.stepFs(0.065);
+    }
+    if (uiState.crystalViewMode === 'tdks-atom' && liveTdks3dSession) {
+      if (liveTdks3dSession.getStepIndex() >= 115) {
+        liveTdks3dSession.resetPulse({
+          nextProbeWavelengthNm: uiState.probeWavelengthNm,
+          nextPolMode: uiState.tdksPolMode,
+          nextModeMono: uiState.photonModeMono
+        });
+        liveTdks3dSession.stepSync(10);
+      } else {
+        liveTdks3dSession.stepSync(1);
+      }
+      if (!liveTdks3dBusy && frameCounter % 8 === 0) {
+        liveTdks3dBusy = true;
+        liveTdks3dSession.readTelemetry({ nonBlocking: true }).then((tel) => {
+          if (!tel) return;
+          liveTdks3dTelemetry = tel;
+          if (window.__ulgElementsLabState) window.__ulgElementsLabState.tdks3dTelemetry = tel;
+          if (currentTab === 'crystal' && uiState.crystalViewMode === 'tdks-atom') redrawCurrentTab();
+        }).catch(() => {}).finally(() => { liveTdks3dBusy = false; });
+      }
     }
     if (livePhotonSession) {
       if (livePhotonSession.getStepIndex() >= 380) {
@@ -2927,6 +3836,47 @@ function tickSimulationLoop(nowMs) {
       .finally(() => { liveMdBusy = false; });
   }
 
+  // 6. Live Tab 5 Chemistry animations: 3D Normal-Mode Vibrations, CI-NEB Playback, & Zero-Copy 3D Reactive MD!
+  if (currentTab === 'compound') {
+    if (uiState.chemViewMode === 'vibrations' && currentVibrations && uiState.vibPlaying) {
+      const freq = Math.abs(currentVibrations.modes?.[uiState.vibModeIdx]?.freqCm1 || 1500);
+      vibAnimPhase += 0.08 + Math.min(0.14, freq / 26000);
+    }
+    const activePath = currentReactionPathway || currentNebBarrier;
+    if (uiState.chemViewMode === 'reaction-path' && uiState.nebPlaying && activePath?.energiesEv?.length >= 2) {
+      if (nowMs - uiState.nebLastTickMs > 460) {
+        uiState.nebLastTickMs = nowMs;
+        uiState.nebImageIdx = (uiState.nebImageIdx + 1) % activePath.energiesEv.length;
+        renderSimControls();
+        redrawCurrentTab();
+      }
+    }
+    if (uiState.chemViewMode === 'reactive-md' && liveReactiveMdSession && uiState.rxMdPlaying && !liveReactiveMdBusy && frameCounter % 2 === 0) {
+      liveReactiveMdBusy = true;
+      liveReactiveMdSession.stepBatch(3, {
+        temperatureK: uiState.rxMdTempK,
+        catalyst: uiState.rxMdCatalyst,
+        thermostat: uiState.rxMdThermostat,
+        readObs: true,
+        nonBlocking: true
+      })
+        .then((tel) => {
+          if (!tel) return;
+          liveReactiveMdTelemetry = tel;
+          liveReactiveMdHistory.push({
+            step: tel.stepIndex,
+            fA: tel.fracA, fB: tel.fracB, fC: tel.fracC, fD: tel.fracD,
+            T: tel.temperatureK
+          });
+          if (liveReactiveMdHistory.length > 80) liveReactiveMdHistory.shift();
+          if (window.__ulgElementsLabState) window.__ulgElementsLabState.reactiveMdTelemetry = tel;
+          if (currentTab === 'compound' && uiState.chemViewMode === 'reactive-md') redrawCurrentTab();
+        })
+        .catch(() => {})
+        .finally(() => { liveReactiveMdBusy = false; });
+    }
+  }
+
   scheduleNextFrame();
 }
 
@@ -3018,7 +3968,18 @@ async function runElementDerivation(Z, massNumberA = null, { preserveQuantumNumb
       degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax], materialIndex: Z
     });
     uiState.polytopeProbe = null;
+    try {
+      currentElementCrystal = buildMultiSpeciesCrystalLattice(currentElementRes.bundle.symbol || symbolForZ(Z), {
+        crystalStructure: currentElementRes.bundle.mechanical.crystalStructure,
+        latticeConstantA: currentElementRes.bundle.mechanical.latticeConstantA,
+        cellsPerSide: 2,
+        paulingIonicity: 0
+      });
+    } catch {
+      currentElementCrystal = null;
+    }
     initLiveMdForActiveSpecimen();
+    updateActiveElementButton();
     renderBundleCard(currentElementRes.bundle, currentDecayChain);
     renderG7Card(currentElementRes.bundle, currentElementRes.g7Advisory);
     pushSpecimenHistory({ kind: 'element', Z, A: actualA, label: currentElementRes.bundle.nuclear.isotope });
@@ -3042,14 +4003,15 @@ async function rebuildNebImageClouds() {
     }
   }
   currentNebImageClouds = [];
-  if (!gpuDevice || !currentNebBarrier?.imageOrbitalParams?.length) return;
-  for (const params of currentNebBarrier.imageOrbitalParams) {
+  const srcParams = currentReactionPathway?.imageOrbitalParams || currentNebBarrier?.imageOrbitalParams || [];
+  if (!gpuDevice || !srcParams.length) return;
+  for (const params of srcParams) {
     const cloud = sampleMolecularOrbitalCloudWebGpu(gpuDevice, {
       posZeta: params.posZeta,
       weights: params.weights,
       boxHalfBohr: params.boxHalfBohr,
       mode: uiState.molOrbitalMode,
-      pointCount: IS_MOBILE_GPU_PROFILE ? 50000 : 110000,
+      pointCount: IS_MOBILE_GPU_PROFILE ? 45000 : 95000,
       seed: 1
     });
     currentNebImageClouds.push(cloud);
@@ -3058,8 +4020,7 @@ async function rebuildNebImageClouds() {
 
 async function computeLiveCiNebBarrierWebGpu(compoundRes) {
   const atoms = compoundRes?.visualData?.molQm?.atoms;
-  if (!gpuDevice || !Array.isArray(atoms) || atoms.length < 2 || atoms.length > 5) return null;
-  if (atoms.some((a) => a.Z > 10)) return null;
+  if (!gpuDevice || !Array.isArray(atoms) || atoms.length < 2 || atoms.length > 6) return null;
   const reactant = atoms.map((a) => ({ Z: a.Z, position: [a.x, a.y, a.z] }));
   let product;
   let pathwayLabel;
@@ -3075,36 +4036,16 @@ async function computeLiveCiNebBarrierWebGpu(compoundRes) {
     pathwayLabel = 'bond stretch MEP (WebGPU)';
   }
   try {
-    const neb = await climbingImageNEBWebGpu(gpuDevice, reactant, product, {
+    const path = await solveReactionPathwayWebGpu(gpuDevice, {
+      reactantAtoms: reactant,
+      productAtoms: product,
+      equation: `${compoundRes.bundle.materialKey} (${pathwayLabel})`,
       nImages: 5,
-      maxSteps: 4,
-      stepSize: 0.14,
-      climbStartStep: 1,
-      basisName: 'sto-3g'
+      maxNebSteps: 3,
+      basisName: compoundRes.visualData.molQm.basisUsed || 'auto',
+      sampleVolumes: true
     });
-    const e0 = neb.energiesHa[0];
-    const HA_TO_EV = 27.211386245988;
-    const energiesEv = neb.energiesHa.map((e) => (e - e0) * HA_TO_EV);
-    // Solve GPU RHF orbital envelopes at every NEB image so scrubbing ξ: 0 → 1 shows REAL orbital evolution!
-    const imageOrbitalParams = [];
-    for (const imgAtoms of neb.images) {
-      const rhf = await solveMoleculeRhfWebGpu(gpuDevice, imgAtoms, {
-        maxScf: 22, volDim: 16, sampleVolume: true
-      });
-      if (rhf?.atomOrbitalParams) imageOrbitalParams.push(rhf.atomOrbitalParams);
-    }
-    return {
-      backend: neb.backend,
-      gpuRhfCalls: neb.gpuRhfCalls + imageOrbitalParams.length,
-      pathwayLabel,
-      saddleImageIndex: neb.saddleImageIndex,
-      forwardBarrierEv: neb.forwardBarrierHa * HA_TO_EV,
-      reverseBarrierEv: neb.reverseBarrierHa * HA_TO_EV,
-      energiesHa: neb.energiesHa,
-      energiesEv,
-      steps: neb.steps,
-      imageOrbitalParams
-    };
+    return path;
   } catch {
     return null;
   }
@@ -3151,6 +4092,11 @@ function buildCompositeNuclearForCompound(compoundRes) {
 async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
   if (!gpuDevice || !compoundRes) return;
   currentCompoundRes = compoundRes;
+  const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
+  currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, compoundRes.bundle, {
+    degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax]
+  });
+  uiState.polytopeProbe = null;
   activeSpecimenKind = 'compound';
   updateActiveElementButton();
   currentCompoundNuclearVolGpu = buildCompositeNuclearForCompound(compoundRes);
@@ -3166,11 +4112,6 @@ async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
   initSpinLatticeForActiveSpecimen();
   initElectronTransportForActiveSpecimen();
   initLiveMdForActiveSpecimen();
-  const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
-  currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, compoundRes.bundle, {
-    degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax]
-  });
-  uiState.polytopeProbe = null;
   renderBundleCard(compoundRes.bundle);
   renderG7Card(compoundRes.bundle, { hasReference: false, note: 'Backfed compound running live across Nuclear, RHF QM, Maxwell Photon–Shell Optics, WebGPU MD & Polytope Atlas.' });
   pushSpecimenHistory({ kind: 'compound', formula: compoundRes.bundle.materialKey, label: compoundRes.bundle.materialKey });
@@ -3197,9 +4138,27 @@ async function runCompoundDerivation(formula, { backfeedAllTabs = false, switchT
       massU: Math.max(2, Number(currentCompoundRes.bundle.nuclear.molarMassU || 28)),
       temperatureK: 300
     });
-    currentNebBarrier = await computeLiveCiNebBarrierWebGpu(currentCompoundRes);
-    uiState.nebImageIdx = currentNebBarrier ? currentNebBarrier.saddleImageIndex : 0;
-    await rebuildNebImageClouds();
+    currentGeomOpt = null;
+    currentVibrations = null;
+    currentReactionPathway = null;
+    // Run fast GPU CI-NEB eagerly for small <= 9-bf molecules (e.g. H2O < 0.5 s); larger molecules compute lazily on Reaction Path tab!
+    const molAtomsList = currentCompoundRes?.visualData?.molQm?.atoms || [];
+    const estBf = molAtomsList.reduce((s, a) => s + (a.Z <= 2 ? 1 : (a.Z <= 10 ? 5 : 9)), 0);
+    if (estBf > 0 && estBf <= 10 && (!backfeedAllTabs || switchToTab === 'compound')) {
+      currentNebBarrier = await computeLiveCiNebBarrierWebGpu(currentCompoundRes);
+      uiState.nebImageIdx = currentNebBarrier ? currentNebBarrier.saddleImageIndex : 0;
+      await rebuildNebImageClouds();
+    } else {
+      currentNebBarrier = null;
+      uiState.nebImageIdx = 0;
+    }
+    if (!backfeedAllTabs) uiState.chemViewMode = 'molecule';
+
+    const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
+    currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentCompoundRes.bundle, {
+      degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax]
+    });
+    uiState.polytopeProbe = null;
 
     activeSpecimenKind = 'compound';
     updateActiveElementButton();
@@ -3209,11 +4168,6 @@ async function runCompoundDerivation(formula, { backfeedAllTabs = false, switchT
     initElectronTransportForActiveSpecimen();
     initLiveMdForActiveSpecimen();
 
-    const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
-    currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentCompoundRes.bundle, {
-      degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax]
-    });
-    uiState.polytopeProbe = null;
     renderBundleCard(currentCompoundRes.bundle);
     renderG7Card(currentCompoundRes.bundle, { hasReference: false, note: 'Recursive compound feedback bundle (zero hardcoded compound table).' });
     pushSpecimenHistory({ kind: 'compound', formula: currentCompoundRes.bundle.materialKey, label: currentCompoundRes.bundle.materialKey });
@@ -3276,9 +4230,32 @@ async function runReactionCombiner(aRaw, bRaw) {
       massU: Math.max(2, Number(primary.bundle.nuclear.molarMassU || 28)),
       temperatureK: 300
     });
-    currentNebBarrier = await computeLiveCiNebBarrierWebGpu(primary);
+    // Solve REAL multi-molecule GPU CI-NEB pathway (A + B -> TS‡ -> C + D) + seed Reactive MD chamber!
+    currentGeomOpt = null;
+    currentVibrations = null;
+    currentReactionPathway = null;
+    if (cand) {
+      try {
+        statusBadge.textContent = `Solving GPU CI-NEB (${cand.equation})…`;
+        currentReactionPathway = await solveReactionPathwayWebGpu(gpuDevice, {
+          candidate: cand,
+          nImages: 5,
+          sampleVolumes: true
+        });
+        await registerReactionPathwayClosureArtifact({
+          closureRegistry: labClosureRegistry,
+          equation: cand.equation,
+          pathway: currentReactionPathway
+        }).catch(() => {});
+      } catch {
+        currentReactionPathway = null;
+      }
+    }
+    currentNebBarrier = currentReactionPathway || await computeLiveCiNebBarrierWebGpu(primary);
     uiState.nebImageIdx = currentNebBarrier ? currentNebBarrier.saddleImageIndex : 0;
+    uiState.chemViewMode = currentReactionPathway ? 'reaction-path' : 'molecule';
     await rebuildNebImageClouds();
+    initReactiveMdForActiveReaction();
     activeSpecimenKind = 'compound';
     updateActiveElementButton();
     rebuildOrbitalPointCloud();
@@ -3310,6 +4287,13 @@ function setActiveTab(tabName) {
       b.scrollIntoView?.({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
     }
   }
+  syncAccordionState();
+  if (tabName === 'compound' && !currentCompoundRes && uiState.chemViewMode !== 'reactive-md' && gpuDevice) {
+    ensureCompoundForTab5();
+  }
+  if (tabName === 'compound' && uiState.chemViewMode === 'reactive-md' && !liveReactiveMdSession && gpuDevice) {
+    initReactiveMdForActiveReaction();
+  }
   renderSimControls();
   redrawCurrentTab();
   syncDebugState();
@@ -3322,6 +4306,8 @@ function syncDebugState() {
     mode: isComp ? 'compound' : 'element',
     activeSpecimenKind,
     currentTab,
+    chemViewMode: uiState.chemViewMode,
+    polytopeViewMode: uiState.polytopeViewMode,
     rendererBackend: 'webgpu',
     isMobileProfile: IS_MOBILE_GPU_PROFILE,
     camera: { yaw: camYaw, pitch: camPitch, dist: camDist },
@@ -3336,11 +4322,50 @@ function syncDebugState() {
     functional: uiState.functional,
     bundle: b,
     decayChain: currentDecayChain,
-    nebBackend: currentNebBarrier?.backend ?? null,
-    nebBarrier: currentNebBarrier,
+    nebBackend: (currentReactionPathway || currentNebBarrier)?.backend ?? null,
+    nebBarrier: currentReactionPathway || currentNebBarrier,
+    reactionPathway: currentReactionPathway
+      ? {
+          equation: currentReactionPathway.equation,
+          basisUsed: currentReactionPathway.basisUsed,
+          imageCount: currentReactionPathway.images.length,
+          saddleImageIndex: currentReactionPathway.saddleImageIndex,
+          forwardBarrierEv: currentReactionPathway.forwardBarrierEv,
+          reactionEnergyEv: currentReactionPathway.reactionEnergyEv,
+          gpuRhfCalls: currentReactionPathway.gpuRhfCalls,
+          saddleBonds: currentReactionPathway.images[currentReactionPathway.saddleImageIndex]?.bonds || []
+        }
+      : null,
+    vibrations: currentVibrations
+      ? {
+          formula: currentVibrations.formula,
+          deuterated: currentVibrations.deuterated,
+          totalZpeEv: currentVibrations.totalZpeEv,
+          modesCm1: currentVibrations.modes.map((m) => m.freqCm1),
+          irIntensities: currentVibrations.modes.map((m) => m.irIntensityKmPerMol)
+        }
+      : null,
+    geomOpt: currentGeomOpt
+      ? {
+          formula: currentGeomOpt.formula,
+          steps: currentGeomOpt.steps,
+          relaxationEv: currentGeomOpt.relaxationEv,
+          converged: currentGeomOpt.converged
+        }
+      : null,
+    reactiveMdTelemetry: liveReactiveMdTelemetry,
+    multiSpeciesCrystal: (isComp ? currentCompoundRes?.visualData?.multiSpeciesCrystal : currentElementCrystal)
+      ? {
+          prototype: (isComp ? currentCompoundRes.visualData.multiSpeciesCrystal : currentElementCrystal).prototype,
+          atomCount: (isComp ? currentCompoundRes.visualData.multiSpeciesCrystal : currentElementCrystal).atomCount,
+          bondCount: (isComp ? currentCompoundRes.visualData.multiSpeciesCrystal : currentElementCrystal).bondCount,
+          speciesLegend: (isComp ? currentCompoundRes.visualData.multiSpeciesCrystal : currentElementCrystal).speciesLegend
+        }
+      : null,
     atlasPolytopeCount: currentAtlas?.polytopeCount ?? 0,
     polytopeProbe: uiState.polytopeProbe,
     photonTelemetry: livePhotonTelemetry,
+    tdks3dTelemetry: liveTdks3dTelemetry,
     spinTelemetry: liveSpinTelemetry,
     transportTelemetry: liveTransportTelemetry,
     mdTelemetry: liveMdTelemetry,
@@ -3358,9 +4383,60 @@ function syncDebugState() {
     closureCount: labClosureStore.size,
     g7Advisory: isComp ? null : currentElementRes?.g7Advisory
   };
-  // Clean programmatic test/verification API (used by headless Vulkan PNG capture!)
+  // Clean programmatic test/verification API (100% backward compatible + new Chemistry & 3D Polytope hooks!)
   window.__ulgElementsLabApi = {
     setTab: (t) => setActiveTab(t),
+    openPeriodicTableModal: (open = true, opts = {}) => openPeriodicTableModal(open, opts),
+    setChemViewMode: async (mode) => {
+      uiState.chemViewMode = mode;
+      if (mode === 'reactive-md' && !liveReactiveMdSession) initReactiveMdForActiveReaction();
+      if (mode === 'vibrations' && !currentVibrations) await runGeometryOptAndVibrationsWebGpu();
+      setActiveTab('compound');
+    },
+    setMoleculeStyle: ({ colorMode = null, showDipole = null, showOrbitalOverlay = null } = {}) => {
+      if (colorMode != null) uiState.molColorMode = Number(colorMode);
+      if (showDipole != null) uiState.molShowDipole = Boolean(showDipole);
+      if (showOrbitalOverlay != null) uiState.molShowOrbitalOverlay = Boolean(showOrbitalOverlay);
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+    },
+    setNebImage: (idx) => {
+      uiState.nebImageIdx = Math.max(0, Math.trunc(Number(idx) || 0));
+      uiState.nebPlaying = false;
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+    },
+    runGeometryOptAndVibrations: (opts = {}) => runGeometryOptAndVibrationsWebGpu(opts),
+    stepReactiveMd: async (steps = 24, { spark = 0, catalyst = null, thermostat = null, temperatureK = null } = {}) => {
+      if (!liveReactiveMdSession) initReactiveMdForActiveReaction();
+      if (!liveReactiveMdSession) return null;
+      if (temperatureK != null) uiState.rxMdTempK = temperatureK;
+      if (catalyst != null) uiState.rxMdCatalyst = Boolean(catalyst);
+      if (thermostat != null) uiState.rxMdThermostat = Boolean(thermostat);
+      if (spark > 0) liveReactiveMdSession.igniteSpark(spark);
+      const tel = await liveReactiveMdSession.stepBatch(steps, {
+        temperatureK: uiState.rxMdTempK,
+        catalyst: uiState.rxMdCatalyst,
+        thermostat: uiState.rxMdThermostat,
+        readObs: true
+      });
+      if (tel) {
+        liveReactiveMdTelemetry = tel;
+        liveReactiveMdHistory.push({ step: tel.stepIndex, fA: tel.fracA, fB: tel.fracB, fC: tel.fracC, fD: tel.fracD, T: tel.temperatureK });
+      }
+      redrawCurrentTab();
+      syncDebugState();
+      return tel;
+    },
+    setPolytopeViewMode: (mode) => {
+      uiState.polytopeViewMode = mode;
+      syncAccordionState();
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+    },
     solveElement: (Z, A = null, opts = {}) => {
       selectedZ = Z; selectedA = A;
       zInput.value = String(Z);
@@ -3379,16 +4455,55 @@ function syncDebugState() {
     },
     setCrystalViewMode: (mode) => {
       uiState.crystalViewMode = mode;
+      syncAccordionState();
       renderSimControls();
       redrawCurrentTab();
     },
     stepTdks: (steps = 40) => {
       if (!liveBlochSession) return null;
       for (let i = 0; i < steps; i += 1) liveBlochSession.stepFs(0.065);
+      if (liveTdks3dSession) liveTdks3dSession.stepSync(Math.max(1, Math.min(48, Math.trunc(steps))));
       redrawCurrentTab();
       return liveBlochSession.channels.map((c) => ({
         nm: c.wavelengthNm, rho11: c.rho11, dipole: c.dipole, absorbed: c.absorbedEnergy
       }));
+    },
+    setTdksConfig: ({ orbitalPreset = null, polMode = null, fieldView = null, modeMono = null, probeWavelengthNm = null } = {}) => {
+      let needRebuild = false;
+      if (orbitalPreset != null && orbitalPreset !== uiState.tdksOrbitalPreset) {
+        uiState.tdksOrbitalPreset = String(orbitalPreset);
+        needRebuild = true;
+      }
+      if (polMode != null) uiState.tdksPolMode = Number(polMode) || 0;
+      if (fieldView != null) uiState.tdksFieldView = Number(fieldView) || 0;
+      if (modeMono != null) uiState.photonModeMono = Boolean(modeMono);
+      if (probeWavelengthNm != null) uiState.probeWavelengthNm = Number(probeWavelengthNm) || 440;
+      if (needRebuild) {
+        rebuildTdksPairAnd3dGrid({ resetField: false });
+      }
+      liveTdks3dSession?.resetPulse({
+        nextProbeWavelengthNm: uiState.probeWavelengthNm,
+        nextPolMode: uiState.tdksPolMode,
+        nextModeMono: uiState.photonModeMono
+      });
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+    },
+    stepTdks3d: async (steps = 34) => {
+      if (!liveTdks3dSession) return null;
+      const tel = await liveTdks3dSession.stepBatch(steps, { readObs: true });
+      if (tel) liveTdks3dTelemetry = tel;
+      redrawCurrentTab();
+      syncDebugState();
+      return tel;
+    },
+    setCamera: (yaw, pitch, dist = null) => {
+      if (Number.isFinite(Number(yaw))) camYaw = Number(yaw);
+      if (Number.isFinite(Number(pitch))) camPitch = Number(pitch);
+      if (dist != null && Number.isFinite(Number(dist))) camDist = Number(dist);
+      renderViewportSync();
+      syncDebugState();
     },
     stepPhotonFdtd: async (steps = 220) => {
       if (!livePhotonSession) return null;
@@ -3515,7 +4630,10 @@ async function boot() {
   mobileDrawerClose?.addEventListener('click', () => setMobileDrawerOpen(false));
   drawerBackdrop?.addEventListener('click', () => setMobileDrawerOpen(false));
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') setMobileDrawerOpen(false);
+    if (ev.key === 'Escape') {
+      openPeriodicTableModal(false);
+      setMobileDrawerOpen(false);
+    }
   });
   webgpuReloadBtn?.addEventListener('click', () => window.location.reload());
 
@@ -3543,8 +4661,11 @@ async function boot() {
     chip.addEventListener('click', () => {
       const f = chip.dataset.heroCompound;
       const tab = chip.dataset.heroTab || 'crystal';
+      const cview = chip.dataset.heroCview || null;
+      const chem = chip.dataset.heroChem || null;
       compoundInput.value = f;
-      if (tab === 'crystal') uiState.crystalViewMode = 'photon-shell';
+      if (tab === 'crystal') uiState.crystalViewMode = cview || 'photon-shell';
+      if (tab === 'compound' && chem) uiState.chemViewMode = chem;
       setMobileDrawerOpen(false);
       runCompoundDerivation(f, { backfeedAllTabs: true, switchToTab: tab });
     });

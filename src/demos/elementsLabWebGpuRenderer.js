@@ -949,30 +949,37 @@ fn fs_shell_dot(in: ShellDotOut) -> @location(0) vec4<f32> {
 }
 `;
 
-// Single-Atom Time-Dependent Kohn-Sham (TD-KS) Electron Cloud <-> Photon Wavepacket
-// Renderer: renders BOTH the live 180K-point MoonLab-grade evolving quantum superposition
-//   |psi(r,t)|^2 = rho_00 |phi_0|^2 + rho_11 |phi_1|^2 + 2 Re(rho_01) phi_0 phi_1
-// AND the volumetric incident photon wavefront + retarded spherical Hertzian dipole
-// re-radiation rings E_rad(r,t) ~ sin(theta) d''(t - r/c) / r!
+// Single-Atom 3D Self-Consistent Real-Space Maxwell-Kohn-Sham (3D Yee FDTD +
+// 3D Orbital-Geometry Anisotropic Susceptibility + Dynamically Coupled 180K-pt
+// Dirac-KS Electron Cloud) Renderer:
+//   Pass 1 (`vs_tdks_field` / `fs_tdks_field`): Full-screen TRUE 3D volumetric
+//     raymarcher of the live N^3 GPU Maxwell fields (E_tot, E_inc, P, J) —
+//     ZERO flat 2D quad, ZERO hard quad border at ANY 360-deg orbit angle!
+//   Pass 2 (`vs_tdks_cloud` / `fs_tdks_cloud`): 180K-pt Dirac-KS orbital cloud
+//     where every point trilinearly samples the live 3D GPU polarization P(r,t)
+//     and local excitation rho_11(r,t) to physically flex, phase-ripple, and
+//     luminesce directly on the struck 3D orbital lobes without white core washout!
 const TDKS_PHOTON_CLOUD_WGSL = /* wgsl */ `
 struct TdksUniforms {
   res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
-  cam_time: vec4<f32>,      // (cam_dist, time_fs, pulse_t0, pulse_width)
+  cam_grid: vec4<f32>,      // (cam_dist, grid_n, world_half, field_view_mode)
   bloch_state: vec4<f32>,   // (rho00, rho11, 2*Re[rho01], e_now)
-  wave_rgb: vec4<f32>,      // (omega_rad_fs, mode_mono, hist_cursor, hist_len)
+  wave_meta: vec4<f32>,     // (pol_mode, mode_mono, time_fs, point_size)
   refl_srgb: vec4<f32>,     // (emergent_r, emergent_g, emergent_b, blue_rho11)
-  probe_rgb: vec4<f32>,     // (probe_r, probe_g, probe_b, point_size)
+  probe_rgb: vec4<f32>,     // (probe_r, probe_g, probe_b, atom_radius)
 };
 
 @group(0) @binding(0) var<uniform> u: TdksUniforms;
 @group(0) @binding(1) var<storage, read> pair_pos: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> pair_amp: array<vec4<f32>>;
-// rad_hist: 4 channels * 128 retarded dipole acceleration samples (channel 0=R, 1=G, 2=B, 3=Probe)
-@group(0) @binding(3) var<storage, read> rad_hist: array<f32>;
+@group(0) @binding(3) var<storage, read> e_tot_3d: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> e_inc_3d: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> pol_3d: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> j_3d: array<vec4<f32>>;
 
-struct TdksFieldOut {
+struct TdksVolOut {
   @builtin(position) clip_pos: vec4<f32>,
-  @location(0) world_xy: vec2<f32>,
+  @location(0) ndc: vec2<f32>,
 };
 
 fn project_tdks(p: vec3<f32>) -> vec3<f32> {
@@ -981,110 +988,297 @@ fn project_tdks(p: vec3<f32>) -> vec3<f32> {
   let x1 = p.x * cy - p.z * sy;
   let z1 = p.x * sy + p.z * cy;
   let y2 = p.y * cp - z1 * sp;
-  let z2 = p.y * sp + z1 * cp + u.cam_time.x;
+  let z2 = p.y * sp + z1 * cp + u.cam_grid.x;
   return vec3<f32>(x1, y2, z2);
 }
 
-fn sample_retarded_dipole(ch: u32, r_world: f32) -> f32 {
-  let hlen = u32(max(8.0, u.wave_rgb.w));
-  let cur = u32(u.wave_rgb.z);
-  // Propagation delay in ring-buffer steps (~24 steps per unit world radius -> clear visible spherical wave rings!)
-  let lag = r_world * 24.0;
-  let lag0 = u32(floor(lag));
-  if (lag0 + 1u >= hlen) { return 0.0; }
-  let f = fract(lag);
-  let idx0 = (cur + hlen - (lag0 % hlen)) % hlen;
-  let idx1 = (cur + hlen - ((lag0 + 1u) % hlen)) % hlen;
-  let base = ch * hlen;
-  return mix(rad_hist[base + idx0], rad_hist[base + idx1], f);
+// Exact mathematical inverse of project_tdks rotation (M^T = R_y(-yaw) * R_x(-pitch))
+fn inv_rot_tdks(v: vec3<f32>) -> vec3<f32> {
+  let cy = cos(u.res_yaw_pitch.z); let sy = sin(u.res_yaw_pitch.z);
+  let cp = cos(u.res_yaw_pitch.w); let sp = sin(u.res_yaw_pitch.w);
+  let vx1 = v.x;
+  let vy1 = v.y * cp + v.z * sp;
+  let vz1 = -v.y * sp + v.z * cp;
+  return vec3<f32>(
+    vx1 * cy + vz1 * sy,
+    vy1,
+    -vx1 * sy + vz1 * cy
+  );
 }
 
-// 1. Volumetric 3D Electromagnetic Wavepacket + Retarded Concentric Dipole Radiation Plane (z = 0 cutting through atom!)
+fn grid_idx3(ix: u32, iy: u32, iz: u32, n: u32) -> u32 {
+  return (iz * n + iy) * n + ix;
+}
+
+fn sample_grid_trilin_e_tot(p: vec3<f32>) -> vec4<f32> {
+  let nf = max(4.0, u.cam_grid.y);
+  let n = u32(nf);
+  let wh = max(0.5, u.cam_grid.z);
+  let uvw = (p / wh * 0.5 + 0.5) * nf - 0.5;
+  if (uvw.x < 0.0 || uvw.y < 0.0 || uvw.z < 0.0 || uvw.x >= nf - 1.0 || uvw.y >= nf - 1.0 || uvw.z >= nf - 1.0) {
+    return vec4<f32>(0.0);
+  }
+  let i0 = vec3<u32>(u32(floor(uvw.x)), u32(floor(uvw.y)), u32(floor(uvw.z)));
+  let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(n - 1u));
+  let f = fract(uvw);
+  let c000 = e_tot_3d[grid_idx3(i0.x, i0.y, i0.z, n)];
+  let c100 = e_tot_3d[grid_idx3(i1.x, i0.y, i0.z, n)];
+  let c010 = e_tot_3d[grid_idx3(i0.x, i1.y, i0.z, n)];
+  let c110 = e_tot_3d[grid_idx3(i1.x, i1.y, i0.z, n)];
+  let c001 = e_tot_3d[grid_idx3(i0.x, i0.y, i1.z, n)];
+  let c101 = e_tot_3d[grid_idx3(i1.x, i0.y, i1.z, n)];
+  let c011 = e_tot_3d[grid_idx3(i0.x, i1.y, i1.z, n)];
+  let c111 = e_tot_3d[grid_idx3(i1.x, i1.y, i1.z, n)];
+  let cx00 = mix(c000, c100, f.x);
+  let cx10 = mix(c010, c110, f.x);
+  let cx01 = mix(c001, c101, f.x);
+  let cx11 = mix(c011, c111, f.x);
+  return mix(mix(cx00, cx10, f.y), mix(cx01, cx11, f.y), f.z);
+}
+
+fn sample_grid_trilin_e_inc(p: vec3<f32>) -> vec4<f32> {
+  let nf = max(4.0, u.cam_grid.y);
+  let n = u32(nf);
+  let wh = max(0.5, u.cam_grid.z);
+  let uvw = (p / wh * 0.5 + 0.5) * nf - 0.5;
+  if (uvw.x < 0.0 || uvw.y < 0.0 || uvw.z < 0.0 || uvw.x >= nf - 1.0 || uvw.y >= nf - 1.0 || uvw.z >= nf - 1.0) {
+    return vec4<f32>(0.0);
+  }
+  let i0 = vec3<u32>(u32(floor(uvw.x)), u32(floor(uvw.y)), u32(floor(uvw.z)));
+  let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(n - 1u));
+  let f = fract(uvw);
+  let c000 = e_inc_3d[grid_idx3(i0.x, i0.y, i0.z, n)];
+  let c100 = e_inc_3d[grid_idx3(i1.x, i0.y, i0.z, n)];
+  let c010 = e_inc_3d[grid_idx3(i0.x, i1.y, i0.z, n)];
+  let c110 = e_inc_3d[grid_idx3(i1.x, i1.y, i0.z, n)];
+  let c001 = e_inc_3d[grid_idx3(i0.x, i0.y, i1.z, n)];
+  let c101 = e_inc_3d[grid_idx3(i1.x, i0.y, i1.z, n)];
+  let c011 = e_inc_3d[grid_idx3(i0.x, i1.y, i1.z, n)];
+  let c111 = e_inc_3d[grid_idx3(i1.x, i1.y, i1.z, n)];
+  let cx00 = mix(c000, c100, f.x);
+  let cx10 = mix(c010, c110, f.x);
+  let cx01 = mix(c001, c101, f.x);
+  let cx11 = mix(c011, c111, f.x);
+  return mix(mix(cx00, cx10, f.y), mix(cx01, cx11, f.y), f.z);
+}
+
+fn sample_grid_trilin_pol(p: vec3<f32>) -> vec4<f32> {
+  let nf = max(4.0, u.cam_grid.y);
+  let n = u32(nf);
+  let wh = max(0.5, u.cam_grid.z);
+  let uvw = (p / wh * 0.5 + 0.5) * nf - 0.5;
+  if (uvw.x < 0.0 || uvw.y < 0.0 || uvw.z < 0.0 || uvw.x >= nf - 1.0 || uvw.y >= nf - 1.0 || uvw.z >= nf - 1.0) {
+    return vec4<f32>(0.0);
+  }
+  let i0 = vec3<u32>(u32(floor(uvw.x)), u32(floor(uvw.y)), u32(floor(uvw.z)));
+  let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(n - 1u));
+  let f = fract(uvw);
+  let c000 = pol_3d[grid_idx3(i0.x, i0.y, i0.z, n)];
+  let c100 = pol_3d[grid_idx3(i1.x, i0.y, i0.z, n)];
+  let c010 = pol_3d[grid_idx3(i0.x, i1.y, i0.z, n)];
+  let c110 = pol_3d[grid_idx3(i1.x, i1.y, i0.z, n)];
+  let c001 = pol_3d[grid_idx3(i0.x, i0.y, i1.z, n)];
+  let c101 = pol_3d[grid_idx3(i1.x, i0.y, i1.z, n)];
+  let c011 = pol_3d[grid_idx3(i0.x, i1.y, i1.z, n)];
+  let c111 = pol_3d[grid_idx3(i1.x, i1.y, i1.z, n)];
+  let cx00 = mix(c000, c100, f.x);
+  let cx10 = mix(c010, c110, f.x);
+  let cx01 = mix(c001, c101, f.x);
+  let cx11 = mix(c011, c111, f.x);
+  return mix(mix(cx00, cx10, f.y), mix(cx01, cx11, f.y), f.z);
+}
+
+fn sample_grid_trilin_j(p: vec3<f32>) -> vec4<f32> {
+  let nf = max(4.0, u.cam_grid.y);
+  let n = u32(nf);
+  let wh = max(0.5, u.cam_grid.z);
+  let uvw = (p / wh * 0.5 + 0.5) * nf - 0.5;
+  if (uvw.x < 0.0 || uvw.y < 0.0 || uvw.z < 0.0 || uvw.x >= nf - 1.0 || uvw.y >= nf - 1.0 || uvw.z >= nf - 1.0) {
+    return vec4<f32>(0.0);
+  }
+  let i0 = vec3<u32>(u32(floor(uvw.x)), u32(floor(uvw.y)), u32(floor(uvw.z)));
+  let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(n - 1u));
+  let f = fract(uvw);
+  let c000 = j_3d[grid_idx3(i0.x, i0.y, i0.z, n)];
+  let c100 = j_3d[grid_idx3(i1.x, i0.y, i0.z, n)];
+  let c010 = j_3d[grid_idx3(i0.x, i1.y, i0.z, n)];
+  let c110 = j_3d[grid_idx3(i1.x, i1.y, i0.z, n)];
+  let c001 = j_3d[grid_idx3(i0.x, i0.y, i1.z, n)];
+  let c101 = j_3d[grid_idx3(i1.x, i0.y, i1.z, n)];
+  let c011 = j_3d[grid_idx3(i0.x, i1.y, i1.z, n)];
+  let c111 = j_3d[grid_idx3(i1.x, i1.y, i1.z, n)];
+  let cx00 = mix(c000, c100, f.x);
+  let cx10 = mix(c010, c110, f.x);
+  let cx01 = mix(c001, c101, f.x);
+  let cx11 = mix(c011, c111, f.x);
+  return mix(mix(cx00, cx10, f.y), mix(cx01, cx11, f.y), f.z);
+}
+
+// Pass 1: Full-screen TRUE 3D Volumetric Raymarcher of Live N^3 Maxwell-KS Fields
 @vertex
-fn vs_tdks_field(@builtin(vertex_index) vid: u32) -> TdksFieldOut {
-  var quad = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
-    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+fn vs_tdks_field(@builtin(vertex_index) vid: u32) -> TdksVolOut {
+  var tri = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 3.0, -1.0),
+    vec2<f32>(-1.0,  3.0)
   );
-  let q = quad[vid];
-  let wxy = vec2<f32>(q.x * 2.15, q.y * 1.45);
-  let view = project_tdks(vec3<f32>(wxy.x, wxy.y, 0.0));
-  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
-  let fov = 1.92 * min(1.0, aspect);
-  let z_safe = max(0.3, view.z);
-  var out: TdksFieldOut;
-  out.clip_pos = vec4<f32>(view.x * fov / aspect, view.y * fov, 0.55 * z_safe, z_safe);
-  out.world_xy = wxy;
+  let ndc = tri[vid];
+  var out: TdksVolOut;
+  out.clip_pos = vec4<f32>(ndc, 0.5, 1.0);
+  out.ndc = ndc;
   return out;
 }
 
 @fragment
-fn fs_tdks_field(in: TdksFieldOut) -> @location(0) vec4<f32> {
-  let x = in.world_xy.x;
-  let y = in.world_xy.y;
-  let r = length(in.world_xy);
-  // Collimated optical beam waist around y = 0 so the incident photon packet travels
-  // cleanly across the atom instead of washing the entire viewport in a flat wall!
-  let beam_env_y = exp(-0.5 * (y / 0.36) * (y / 0.36));
-  let c_vis = 0.56; // visual speed of light (world units / fs)
-  let t_ret_inc = u.cam_time.y - x / c_vis;
-  let dt_inc = t_ret_inc - u.cam_time.z;
-  let env_inc = exp(-0.5 * (dt_inc / u.cam_time.w) * (dt_inc / u.cam_time.w)) * beam_env_y;
+fn fs_tdks_field(in: TdksVolOut) -> @location(0) vec4<f32> {
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.92 * min(1.0, aspect);
+  let d_view = normalize(vec3<f32>(in.ndc.x * aspect / fov, in.ndc.y / fov, 1.0));
+  let ro = inv_rot_tdks(vec3<f32>(0.0, 0.0, -u.cam_grid.x));
+  let rd = normalize(inv_rot_tdks(d_view));
 
-  // Angular radiation pattern of a Y-polarized oscillating quantum dipole d_y(t): sin(theta_y) = |x| / r
-  let sin_dip = clamp(abs(x) / max(0.08, r), 0.14, 1.0);
-  let r_falloff = smoothstep(0.18, 0.42, r) / (0.65 + r * 1.15);
-
-  var col = vec3<f32>(0.0);
-
-  // Subtle concentric distance reticle around the atom (fades smoothly to 0 well inside quad)
-  let ring_d = smoothstep(0.009, 0.0, abs(fract(r * 1.5) - 0.5)) * 0.035 * exp(-0.5 * (r / 1.15) * (r / 1.15));
-  col = col + vec3<f32>(0.24, 0.42, 0.68) * ring_d;
-
-  if (u.wave_rgb.y > 0.5) {
-    // Single-lambda coherent wavepacket + exact retarded Hertzian dipole re-radiation rings!
-    let e_inc = env_inc * cos(u.wave_rgb.x * dt_inc);
-    let e_rad = sample_retarded_dipole(3u, r) * sin_dip * r_falloff * 1.35;
-    let e_tot = e_inc + e_rad;
-    let crest = max(0.0, e_tot);
-    let trough = max(0.0, -e_tot);
-    let c_pos = u.probe_rgb.rgb;
-    let c_neg = mix(u.probe_rgb.rgb * 0.32, vec3<f32>(0.18, 0.38, 0.82), 0.45);
-    col = col + c_pos * crest * 0.42 + c_neg * trough * 0.24 + u.probe_rgb.rgb * abs(e_rad) * 0.38;
-  } else {
-    // Coherent white-light photon wavepacket + retarded dipole re-radiation rings:
-    // Use one coherent group carrier for the incident white packet (eliminating artificial
-    // R/G/B carrier-beating rainbow stripes!) while coloring the retarded dipole rings
-    // strictly by the live emergent reflected/scattered spectrum (Gold vs Silver)!
-    let carrier = cos(3.55 * dt_inc);
-    let inc_wave = env_inc * (0.26 + 0.74 * abs(carrier));
-    let trans_att = select(1.0, 0.48 + 0.52 * (1.0 - u.refl_srgb.w), x > 0.0);
-    // Subtle physical blue-absorption shift downstream of the atom (x > 0)
-    let inc_tint = vec3<f32>(0.92, 0.95, 1.0 * trans_att);
-    let inc_rgb = inc_tint * inc_wave * 0.34;
-
-    let rad_r = sample_retarded_dipole(0u, r);
-    let rad_g = sample_retarded_dipole(1u, r);
-    let rad_b = sample_retarded_dipole(2u, r);
-    let rad_mag = (abs(rad_r) + abs(rad_g) + abs(rad_b)) * 0.3333 * sin_dip * r_falloff;
-    let refl = max(u.refl_srgb.rgb, vec3<f32>(0.18));
-    let sc_rgb = refl * (rad_mag * 1.15 + smoothstep(0.14, 0.68, rad_mag) * 0.32);
-
-    col = col + inc_rgb + sc_rgb;
+  // Ray-sphere intersection against spherical optical cavity (R = 1.88 -> ZERO box edges ever!)
+  let rad_cav = min(1.88, u.cam_grid.z * 0.94);
+  let b_sph = dot(ro, rd);
+  let c_sph = dot(ro, ro) - rad_cav * rad_cav;
+  let disc = b_sph * b_sph - c_sph;
+  if (disc <= 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  }
+  let sq = sqrt(disc);
+  let t0 = max(0.05, -b_sph - sq);
+  let t1 = -b_sph + sq;
+  if (t1 <= t0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
-  // Smooth elliptical Gaussian fade well inside quad bounds -> ZERO hard quad border at any orbit angle!
-  let ell = (x / 1.65) * (x / 1.65) + (y / 1.05) * (y / 1.05);
-  let vig = exp(-0.75 * ell) * smoothstep(2.05, 1.25, abs(x)) * smoothstep(1.38, 0.82, abs(y));
-  let out_rgb = clamp(col * vig, vec3<f32>(0.0), vec3<f32>(0.92));
-  return vec4<f32>(out_rgb, max(out_rgb.r, max(out_rgb.g, out_rgb.b)));
+  // Deterministic blue-noise-like screen jitter to eliminate volume slicing bands
+  let jitter = fract(sin(dot(in.clip_pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+  let steps = 56u;
+  let dt = (t1 - t0) / f32(steps);
+
+  let mode_mono = u.wave_meta.y > 0.5;
+  let fview = u.cam_grid.w; // 0 = 3D Volume, 1 = Scattered Only, 2 = 3D Volume + Phase Cut
+  let scatt_tint = select(
+    max(u.refl_srgb.rgb, vec3<f32>(0.96, 0.76, 0.28)),
+    mix(u.probe_rgb.rgb, vec3<f32>(1.0, 0.78, 0.28), 0.35),
+    mode_mono
+  );
+  let inc_tint_pos = select(vec3<f32>(0.52, 0.88, 1.00), mix(u.probe_rgb.rgb, vec3<f32>(0.45, 0.92, 1.0), 0.40), mode_mono);
+  let inc_tint_neg = select(vec3<f32>(0.18, 0.36, 0.96), mix(u.probe_rgb.rgb * 0.42, vec3<f32>(0.24, 0.28, 0.96), 0.55), mode_mono);
+
+  var acc_rgb = vec3<f32>(0.0);
+  var acc_a = 0.0;
+
+  for (var s = 0u; s < steps; s = s + 1u) {
+    let t = t0 + (f32(s) + jitter) * dt;
+    let p = ro + rd * t;
+    let r = length(p);
+    let sph_fade = smoothstep(rad_cav, rad_cav * 0.68, r);
+    if (sph_fade <= 0.002) { continue; }
+
+    let et4 = sample_grid_trilin_e_tot(p);
+    let ei4 = sample_grid_trilin_e_inc(p);
+    let es = et4.xyz - ei4.xyz;
+    let es_mag = length(es);
+
+    // 1. Live 3D Incident Photon Wavefront Sheets (sharp curved iso-crests, ZERO flat haze!)
+    var step_rgb = vec3<f32>(0.0);
+    var step_d = 0.0;
+    if (fview < 0.5 || fview > 1.5) {
+      let pol_signed = select(
+        select(ei4.y, ei4.z, u.wave_meta.x > 0.5 && u.wave_meta.x < 1.5),
+        ei4.y * 0.707 + ei4.z * 0.707,
+        u.wave_meta.x > 1.5
+      );
+      // Thin iso-crest sheets around peaks & troughs -> unmistakable 3D marching wavefront planes!
+      let a_pol = abs(pol_signed);
+      let crest_sheet = smoothstep(0.24, 0.62, max(0.0, pol_signed));
+      let trough_sheet = smoothstep(0.24, 0.62, max(0.0, -pol_signed));
+      let crest_sharp = pow(crest_sheet, 2.0);
+      let trough_sharp = pow(trough_sheet, 2.0);
+      // Slight outer-beam rim highlight so the 3D cylindrical wavepacket reads cleanly from any angle
+      let beam_r = length(p.yz);
+      let rim_w = 0.65 + 0.55 * smoothstep(0.18, 0.72, beam_r) * smoothstep(1.35, 0.78, beam_r);
+      step_rgb = step_rgb + (inc_tint_pos * crest_sharp * 1.15 + inc_tint_neg * trough_sharp * 0.72) * rim_w;
+      step_d = step_d + (crest_sharp * 0.068 + trough_sharp * 0.044) * rim_w * clamp(a_pol, 0.0, 1.5);
+    }
+
+    // 2. Live 3D Scattered Multipole Wave Shells (E_scatt = E_tot - E_inc) curving & rippling off the orbital lobes!
+    if (es_mag > 0.012) {
+      let es_signed = select(
+        select(es.y, es.z, u.wave_meta.x > 0.5 && u.wave_meta.x < 1.5),
+        es.y * 0.707 + es.z * 0.707,
+        u.wave_meta.x > 1.5
+      );
+      // Crisp positive/negative scattered wavefront crests wrapping in 3D around the lobes!
+      let sc_pos = pow(smoothstep(0.025, 0.24, max(0.0, es_signed)), 1.45);
+      let sc_neg = pow(smoothstep(0.025, 0.24, max(0.0, -es_signed)), 1.45);
+      let cross_mag = select(length(vec2<f32>(es.x, es.z)), length(vec2<f32>(es.x, es.y)), u.wave_meta.x > 0.5 && u.wave_meta.x < 1.5);
+      let sc_cross = pow(smoothstep(0.022, 0.20, cross_mag), 1.4);
+      let sc_boost = select(1.0, 1.85, fview > 0.5 && fview < 1.5);
+      let c_pos = mix(scatt_tint, vec3<f32>(1.00, 0.82, 0.24), 0.45);
+      let c_neg = vec3<f32>(0.98, 0.34, 0.72);
+      let c_xpol = vec3<f32>(0.22, 0.96, 0.88);
+      step_rgb = step_rgb + (c_pos * sc_pos * 1.75 + c_neg * sc_neg * 1.15 + c_xpol * sc_cross * 1.35) * sc_boost;
+      step_d = step_d + (sc_pos * 0.095 + sc_neg * 0.065 + sc_cross * 0.075) * sc_boost;
+    }
+
+    // 3. Local 3D Orbital Energy Absorption Glow (E · J strictly inside struck lobes)
+    if (r < 1.18) {
+      let p4 = sample_grid_trilin_pol(p);
+      let j4 = sample_grid_trilin_j(p);
+      let abs_g = clamp(j4.w * 0.75 + p4.w * 0.55, 0.0, 1.2);
+      if (abs_g > 0.05) {
+        let abs_col = mix(vec3<f32>(1.0, 0.72, 0.18), vec3<f32>(1.0, 0.32, 0.74), clamp(p4.w * 1.3, 0.0, 1.0));
+        step_rgb = step_rgb + abs_col * abs_g * 0.42;
+        step_d = step_d + abs_g * 0.022;
+      }
+    }
+
+    // Subtle crisp nucleus pinpoint at r = 0
+    let nuc = exp(-r * r * 180.0);
+    if (nuc > 0.02) {
+      step_rgb = step_rgb + vec3<f32>(1.0, 0.94, 0.76) * nuc * 1.8;
+      step_d = step_d + nuc * 0.18;
+    }
+
+    let a_step = clamp(step_d * sph_fade * (dt * 14.0), 0.0, 0.42);
+    acc_rgb = acc_rgb + (1.0 - acc_a) * step_rgb * sph_fade * dt * 1.85;
+    acc_a = acc_a + (1.0 - acc_a) * a_step;
+    if (acc_a > 0.92) { break; }
+  }
+
+  // Optional crisp circular equatorial wave-diffraction phase cut (fview == 2, ZERO square edges!)
+  if (fview > 1.5 && abs(rd.z) > 0.05) {
+    let tz = -ro.z / rd.z;
+    if (tz > 0.05) {
+      let pz = ro + rd * tz;
+      let rz = length(pz.xy);
+      if (rz < 1.72) {
+        let etz = sample_grid_trilin_e_tot(pz);
+        let eiz = sample_grid_trilin_e_inc(pz);
+        let esz = etz.xyz - eiz.xyz;
+        let fade_z = smoothstep(1.72, 1.18, rz);
+        let ph_val = etz.y + etz.z;
+        let line_c = smoothstep(0.09, 0.0, abs(fract(ph_val * 2.2) - 0.5)) * smoothstep(0.05, 0.25, length(etz.xyz));
+        let ring = smoothstep(0.012, 0.0, abs(rz - 1.05)) * 0.14;
+        let cut_col = mix(vec3<f32>(0.28, 0.74, 1.0), scatt_tint, clamp(length(esz) * 2.4, 0.0, 1.0));
+        acc_rgb = acc_rgb + (cut_col * (line_c * 0.28 + length(esz) * 0.42) + vec3<f32>(0.35, 0.55, 0.85) * ring) * fade_z;
+        acc_a = clamp(acc_a + (line_c * 0.16 + ring) * fade_z, 0.0, 0.94);
+      }
+    }
+  }
+
+  // Soft filmic tone curve so overlapping 3D wavefronts stay vivid & legible without clipping!
+  let mapped = acc_rgb / (vec3<f32>(1.0) + acc_rgb * 0.72);
+  return vec4<f32>(mapped, clamp(acc_a, 0.0, 0.92));
 }
 
-// 2. Live 180K-Point MoonLab-Grade Evolving Quantum Electron Cloud |psi(r,t)|^2!
-//    Evaluates exact quantum superposition probability weight:
-//      w_i(t) = rho_00 |phi_0|^2 + rho_11 |phi_1|^2 + 2 Re(rho_01) phi_0 phi_1
-//    NO fake rigid shift — the actual 3D quantum cloud sloshes through opposite-parity
-//    interference AND blooms into the excited orbital |phi_1|^2 as photons are absorbed!
+// Pass 2: Dynamically Coupled 180K-Point 3D Dirac-KS Electron Cloud!
+// Every point samples the LIVE 3D GPU polarization P(r,t), E_scatt(r,t), and local
+// excited density rho_11(r,t) at its exact 3D position -> front lobes flex & light up
+// BEFORE back lobes with true finite-c phase lag and razor-sharp nodal shells!
 struct TdksPtOut {
   @builtin(position) clip_pos: vec4<f32>,
   @location(0) local_uv: vec2<f32>,
@@ -1104,42 +1298,55 @@ fn vs_tdks_cloud(
   let pos4 = pair_pos[iid];
   let amp4 = pair_amp[iid];
 
-  let rho00 = u.bloch_state.x;
-  let rho11 = u.bloch_state.y;
-  let two_re01 = u.bloch_state.z;
+  let atom_r = max(0.5, u.probe_rgb.w);
+  let p_base = pos4.xyz * (atom_r * 1.16);
+
+  // LIVE 3D GPU FIELD COUPLING at this electron sample's exact 3D coordinate!
+  let e_loc = sample_grid_trilin_e_tot(p_base);
+  let ei_loc = sample_grid_trilin_e_inc(p_base);
+  let pol_loc = sample_grid_trilin_pol(p_base);
+  let j_loc = sample_grid_trilin_j(p_base);
+  let e_scatt_loc = e_loc.xyz - ei_loc.xyz;
+
+  // Local retarded 3D polarization deformation (front lobes react before rear lobes!)
+  let disp = pol_loc.xyz * 0.26 + e_scatt_loc * 0.085;
+  let p_world = p_base + disp;
+
+  let rho11_loc = clamp(pol_loc.w * 0.90 + u.bloch_state.y * 0.22, 0.0, 0.96);
+  let rho00_loc = max(0.10, 1.0 - rho11_loc);
+  // Local dipole projection of P(r,t) along radial lobe vector drives opposite-parity interference!
+  let r_hat = select(vec3<f32>(0.0, 1.0, 0.0), normalize(pos4.xyz), length(pos4.xyz) > 1e-4);
+  let pol_proj = clamp(dot(pol_loc.xyz, r_hat) * 2.6 + u.bloch_state.z * 0.25, -1.6, 1.6);
 
   let p0_sq = amp4.x * amp4.x;
   let p1_sq = amp4.y * amp4.y;
-  let cross = two_re01 * amp4.x * amp4.y;
-  let prob_w = max(0.0, rho00 * p0_sq + rho11 * p1_sq + cross);
+  let cross = pol_proj * amp4.x * amp4.y;
+  let prob_w = max(0.0, rho00_loc * p0_sq * 1.35 + rho11_loc * p1_sq * 0.95 + cross * 0.72);
 
-  // Subtle physical Stark polarizability breathing (secondary to quantum interference!)
-  let p_world = pos4.xyz * 0.92 + vec3<f32>(0.0, u.bloch_state.w * 0.045 * (0.4 + pos4.w), 0.0);
   let view = project_tdks(p_world);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
   let fov = 1.92 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.3, view.z);
 
   let min_px = 1.0 / max(1.0, u.res_yaw_pitch.y);
-  let world_r = clamp(u.probe_rgb.w * 0.56 * fov * inv_z, min_px * 1.15, 0.0155);
+  let world_r = clamp(u.wave_meta.w * 0.56 * fov * inv_z, min_px * 1.15, 0.0155);
 
-  // Color decomposition strictly by quantum-mechanical contribution at this 3D point:
-  //   Ground shell (phi_0^2): MoonLab crisp white / royal violet (#FFFFFF / #612BDE)
-  //   Dipole interference (+cross / -cross): electric cyan / warm amber polarization shift
-  //   Excited shell population (rho_11 * phi_1^2): radiant resonant gold-magenta bloom!
-  let base_gnd = select(vec3<f32>(0.44, 0.24, 0.96), vec3<f32>(0.95, 0.97, 1.0), amp4.w >= 0.0);
-  let exc_col = vec3<f32>(1.0, 0.78, 0.24); // Radiant resonant excitation gold
-  let dip_col = select(vec3<f32>(0.30, 0.82, 1.0), vec3<f32>(0.98, 0.50, 0.84), cross >= 0.0);
+  // High-contrast jewel-like MoonLab orbital lobes + crisp struck-lobe glow (ZERO white washout!):
+  let base_gnd = select(vec3<f32>(0.48, 0.26, 1.00), vec3<f32>(0.88, 0.94, 1.00), amp4.w >= 0.0);
+  let exc_col = vec3<f32>(1.00, 0.80, 0.22);
+  let dip_col = select(vec3<f32>(0.20, 0.94, 1.00), vec3<f32>(1.00, 0.36, 0.82), pol_proj >= 0.0);
 
-  let gnd_frac = (rho00 * p0_sq) / max(1e-4, prob_w);
-  let exc_frac = (rho11 * p1_sq) / max(1e-4, prob_w);
-  let dip_frac = clamp(abs(cross) / max(1e-4, prob_w), 0.0, 0.85);
+  let pol_mag = clamp(length(pol_loc.xyz) * 3.0 + length(j_loc.xyz) * 1.8, 0.0, 1.0);
+  let exc_glow = clamp(rho11_loc * 1.45 + j_loc.w * 0.75, 0.0, 1.0);
 
-  var rgb = base_gnd * clamp(gnd_frac, 0.0, 1.0) + exc_col * clamp(exc_frac * 1.35, 0.0, 1.05);
-  rgb = mix(rgb, dip_col, dip_frac * 0.62);
-  let shade = clamp(0.92 - 0.28 * pos4.w, 0.34, 0.96);
-  // Crisp MoonLab additive exposure (bright jewel-like orbital lobes without white core saturation!)
-  let alpha = clamp(0.025 * sqrt(prob_w), 0.0, 0.095);
+  var rgb = mix(base_gnd, dip_col, pol_mag * 0.72);
+  rgb = mix(rgb, exc_col, exc_glow * 0.78);
+
+  // Crisp lobe definition with gentle core density cap so radial nodes & cloverleaf petals pop!
+  let radial_att = mix(0.28, 1.0, smoothstep(0.06, 0.36, pos4.w));
+  let shade = clamp(0.94 - 0.18 * pos4.w, 0.42, 0.98);
+  let excite_boost = 1.0 + pol_mag * 0.48 + exc_glow * 0.52;
+  let alpha = clamp(0.022 * pow(prob_w, 0.65) * radial_att * excite_boost, 0.0, 0.064);
 
   var out: TdksPtOut;
   out.clip_pos = vec4<f32>(
@@ -1154,10 +1361,10 @@ fn vs_tdks_cloud(
 
 @fragment
 fn fs_tdks_cloud(in: TdksPtOut) -> @location(0) vec4<f32> {
-  if (in.color.a <= 0.001) { discard; }
+  if (in.color.a <= 0.0008) { discard; }
   let r2 = dot(in.local_uv, in.local_uv);
   if (r2 > 1.0) { discard; }
-  let soft = exp(-r2 * 3.4) * (1.0 - r2);
+  let soft = exp(-r2 * 3.6) * (1.0 - r2);
   let a = in.color.a * soft;
   return vec4<f32>(in.color.rgb * a, a);
 }
@@ -1414,6 +1621,691 @@ fn fs_tr_dot(in: TrPtOut) -> @location(0) vec4<f32> {
 }
 `;
 
+// ============================================================================
+// 3D Ball-and-Stick Molecule, Wiberg Bond Orders, Dipole Arrow & Multi-Species
+// Crystal Renderer (`MOLECULE_3D_WGSL`) — Depth-Buffered Phong/Fresnel WebGPU!
+// ============================================================================
+const MOLECULE_3D_WGSL = /* wgsl */ `
+struct MolSceneUniforms {
+  res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
+  cam_meta: vec4<f32>,      // (cam_dist, scale_norm, color_mode (0=CPK, 1=MEP), time_s)
+  center_off: vec4<f32>,    // (cx, cy, cz, show_box)
+  box_half: vec4<f32>,      // (hx, hy, hz, 0)
+};
+
+// atoms_pos_r: vec4(x, y, z, radius_world)
+// atoms_meta:  vec4(cpk_r, cpk_g, cpk_b, mulliken_charge)
+// seg_a:       vec4(ax, ay, az, radius_world)
+// seg_b:       vec4(bx, by, bz, flags_and_order) -> flags: 0=solid bond, 1=dashed TS‡, 2=dipole arrow shaft, 3=dipole head
+@group(0) @binding(0) var<uniform> u: MolSceneUniforms;
+@group(0) @binding(1) var<storage, read> atoms_pos_r: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> atoms_meta: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> seg_a: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> seg_b: array<vec4<f32>>;
+
+struct MolAtomOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) local_uv: vec2<f32>,
+  @location(1) color: vec3<f32>,
+  @location(2) rim_tint: vec3<f32>,
+};
+
+struct MolBondOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) uv_along: vec2<f32>, // x in [0,1] along bond, y in [-1,1] across cylinder
+  @location(1) color: vec3<f32>,
+  @location(2) mode_order: vec2<f32>, // (mode, order)
+};
+
+fn project_mol(p_raw: vec3<f32>) -> vec3<f32> {
+  let p = (p_raw - u.center_off.xyz) * u.cam_meta.y;
+  let cy = cos(u.res_yaw_pitch.z); let sy = sin(u.res_yaw_pitch.z);
+  let cp = cos(u.res_yaw_pitch.w); let sp = sin(u.res_yaw_pitch.w);
+  let x1 = p.x * cy - p.z * sy;
+  let z1 = p.x * sy + p.z * cy;
+  let y2 = p.y * cp - z1 * sp;
+  let z2 = p.y * sp + z1 * cp + u.cam_meta.x;
+  return vec3<f32>(x1, y2, z2);
+}
+
+fn mep_color(q: f32) -> vec3<f32> {
+  // Mulliken Electrostatic Potential coloring: δ- crimson-amber <-> 0 pearl <-> δ+ electric sapphire
+  let t = clamp(q * 1.65, -1.0, 1.0);
+  let c_neg = vec3<f32>(0.96, 0.28, 0.24);
+  let c_mid = vec3<f32>(0.88, 0.91, 0.96);
+  let c_pos = vec3<f32>(0.20, 0.56, 1.00);
+  return select(mix(c_mid, c_neg, -t), mix(c_mid, c_pos, t), t >= 0.0);
+}
+
+@vertex
+fn vs_mol_atom(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32
+) -> MolAtomOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+  );
+  let corner = quad[vid];
+  let pr = atoms_pos_r[iid];
+  let ameta = atoms_meta[iid];
+  let view = project_mol(pr.xyz);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.88 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let rad = pr.w * u.cam_meta.y;
+  let cx = view.x * fov * inv_z / aspect;
+  let cy = view.y * fov * inv_z;
+  let rx = rad * fov * inv_z / aspect;
+  let ry = rad * fov * inv_z;
+  let depth_z = clamp((view.z - rad * 0.62 - 0.35) / 10.0, 0.001, 0.999);
+
+  let is_mep = u.cam_meta.z > 0.5;
+  let col = select(ameta.rgb, mep_color(ameta.w), is_mep);
+  let rim = select(vec3<f32>(0.42, 0.78, 1.0), mep_color(ameta.w * 1.4), is_mep);
+
+  var out: MolAtomOut;
+  out.clip_pos = vec4<f32>(cx + corner.x * rx, cy + corner.y * ry, depth_z, 1.0);
+  out.local_uv = corner;
+  out.color = col;
+  out.rim_tint = rim;
+  return out;
+}
+
+@fragment
+fn fs_mol_atom(in: MolAtomOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.local_uv, in.local_uv);
+  if (r2 > 1.0) { discard; }
+  let nz = sqrt(max(0.0, 1.0 - r2));
+  let n = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let light1 = normalize(vec3<f32>(-0.42, 0.65, 0.63));
+  let light2 = normalize(vec3<f32>(0.55, -0.30, 0.78));
+  let diff = max(0.16, dot(n, light1)) * 0.86 + max(0.0, dot(n, light2)) * 0.24;
+  let half_v = normalize(light1 + vec3<f32>(0.0, 0.0, 1.0));
+  let spec = pow(max(0.0, dot(n, half_v)), 34.0) * 0.78;
+  let rim = pow(1.0 - nz, 2.6) * 0.32;
+  let rgb = in.color * diff + vec3<f32>(1.0) * spec + in.rim_tint * rim;
+  return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+@vertex
+fn vs_mol_bond(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32
+) -> MolBondOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
+  );
+  let q = quad[vid];
+  let sa = seg_a[iid];
+  let sb = seg_b[iid];
+  let va = project_mol(sa.xyz);
+  let vb = project_mol(sb.xyz);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.88 * min(1.0, aspect);
+
+  let za = max(0.35, va.z);
+  let zb = max(0.35, vb.z);
+  let pa = vec2<f32>(va.x * fov / (za * aspect), va.y * fov / za);
+  let pb = vec2<f32>(vb.x * fov / (zb * aspect), vb.y * fov / zb);
+  let axis = pb - pa;
+  let axis_len = max(1e-4, length(axis));
+  let dir = axis / axis_len;
+  let perp_raw = vec2<f32>(-dir.y * aspect, dir.x / aspect);
+  let perp_n = normalize(perp_raw + vec2<f32>(1e-6, 0.0));
+
+  let z_interp = mix(za, zb, q.x);
+  let mode = floor(sb.w + 0.001);
+  let order = fract(sb.w) * 4.0;
+  let taper = select(1.0, max(0.0, 1.0 - q.x), mode >= 2.5);
+  let half_w = sa.w * u.cam_meta.y * fov / z_interp * taper;
+  let base_p = mix(pa, pb, q.x);
+  let ndc = base_p + vec2<f32>(perp_n.x / aspect, perp_n.y) * (q.y * half_w);
+  let depth_z = clamp((z_interp - 0.35) / 10.0 + 0.002, 0.001, 0.999);
+
+  var col = vec3<f32>(0.74, 0.82, 0.94);
+  if (mode >= 0.5 && mode < 1.5) {
+    col = vec3<f32>(1.0, 0.62, 0.26);
+  } else if (mode >= 1.5) {
+    col = vec3<f32>(1.0, 0.86, 0.24);
+  }
+
+  var out: MolBondOut;
+  out.clip_pos = vec4<f32>(ndc.x, ndc.y, depth_z, 1.0);
+  out.uv_along = q;
+  out.color = col;
+  out.mode_order = vec2<f32>(mode, max(0.2, order));
+  return out;
+}
+
+@fragment
+fn fs_mol_bond(in: MolBondOut) -> @location(0) vec4<f32> {
+  let mode = in.mode_order.x;
+  if (mode >= 0.5 && mode < 1.5) {
+    let dash = fract(in.uv_along.x * 7.5 - u.cam_meta.w * 0.35);
+    if (dash > 0.54) { discard; }
+  }
+  let y = clamp(in.uv_along.y, -1.0, 1.0);
+  let cyl_z = sqrt(max(0.02, 1.0 - y * y));
+  let shade = 0.32 + 0.68 * max(0.0, y * 0.45 + cyl_z * 0.88);
+  let spec = pow(max(0.0, y * 0.35 + cyl_z * 0.93), 18.0) * 0.45;
+  let pulse = select(1.0, 0.85 + 0.25 * sin(u.cam_meta.w * 4.5), mode >= 0.5 && mode < 1.5);
+  let rgb = (in.color * shade + vec3<f32>(0.95) * spec) * pulse;
+  return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+@vertex
+fn vs_mol_box(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+  var edges = array<vec3<f32>, 24>(
+    vec3<f32>(-1,-1,-1), vec3<f32>( 1,-1,-1),
+    vec3<f32>(-1, 1,-1), vec3<f32>( 1, 1,-1),
+    vec3<f32>(-1,-1, 1), vec3<f32>( 1,-1, 1),
+    vec3<f32>(-1, 1, 1), vec3<f32>( 1, 1, 1),
+    vec3<f32>(-1,-1,-1), vec3<f32>(-1, 1,-1),
+    vec3<f32>( 1,-1,-1), vec3<f32>( 1, 1,-1),
+    vec3<f32>(-1,-1, 1), vec3<f32>(-1, 1, 1),
+    vec3<f32>( 1,-1, 1), vec3<f32>( 1, 1, 1),
+    vec3<f32>(-1,-1,-1), vec3<f32>(-1,-1, 1),
+    vec3<f32>( 1,-1,-1), vec3<f32>( 1,-1, 1),
+    vec3<f32>(-1, 1,-1), vec3<f32>(-1, 1, 1),
+    vec3<f32>( 1, 1,-1), vec3<f32>( 1, 1, 1)
+  );
+  let p = u.center_off.xyz + edges[vid] * u.box_half.xyz;
+  let view = project_mol(p);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.88 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let depth_z = clamp((view.z - 0.35) / 10.0, 0.001, 0.999);
+  return vec4<f32>(view.x * fov * inv_z / aspect, view.y * fov * inv_z, depth_z, 1.0);
+}
+
+@fragment
+fn fs_mol_box() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.36, 0.78, 1.0, 0.36);
+}
+`;
+
+// ============================================================================
+// Zero-Copy 3D Reactive Chemistry MD Chamber Renderer (`REACTIVE_MD_RENDER_WGSL`)
+// Reads `posBuffer` & `velBuffer` DIRECTLY from `reactiveChemistryMdWebGpu`!
+// ============================================================================
+const REACTIVE_MD_RENDER_WGSL = /* wgsl */ `
+struct RxRenderUniforms {
+  res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
+  cam_meta: vec4<f32>,      // (cam_dist, radius_world, box_half, 0)
+};
+
+@group(0) @binding(0) var<uniform> u: RxRenderUniforms;
+@group(0) @binding(1) var<storage, read> pos_sp: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> vel_flash: array<vec4<f32>>;
+
+struct RxOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) local_uv: vec2<f32>,
+  @location(1) color: vec3<f32>,
+  @location(2) flash: f32,
+};
+
+fn project_rx(p: vec3<f32>) -> vec3<f32> {
+  let cy = cos(u.res_yaw_pitch.z); let sy = sin(u.res_yaw_pitch.z);
+  let cp = cos(u.res_yaw_pitch.w); let sp = sin(u.res_yaw_pitch.w);
+  let x1 = p.x * cy - p.z * sy;
+  let z1 = p.x * sy + p.z * cy;
+  let y2 = p.y * cp - z1 * sp;
+  let z2 = p.y * sp + z1 * cp + u.cam_meta.x;
+  return vec3<f32>(x1, y2, z2);
+}
+
+@vertex
+fn vs_rx_mol(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32
+) -> RxOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+  );
+  let corner = quad[vid];
+  let ps = pos_sp[iid];
+  let vf = vel_flash[iid];
+  let sp = u32(round(ps.w));
+  let flash = clamp(vf.w, 0.0, 1.0);
+  let view = project_rx(ps.xyz);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.78 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let rad = u.cam_meta.y * (1.0 + flash * 0.55);
+  let cx = view.x * fov * inv_z / aspect;
+  let cy = view.y * fov * inv_z;
+  let rx = rad * fov * inv_z / aspect;
+  let ry = rad * fov * inv_z;
+  let depth_z = clamp((view.z - 0.35) / 9.0, 0.001, 0.999);
+
+  var col = vec3<f32>(0.22, 0.74, 0.98);
+  if (sp == 1u) { col = vec3<f32>(0.99, 0.58, 0.22); }
+  else if (sp == 2u) { col = vec3<f32>(0.20, 0.86, 0.60); }
+  else if (sp >= 3u) { col = vec3<f32>(0.91, 0.46, 0.98); }
+
+  var out: RxOut;
+  out.clip_pos = vec4<f32>(cx + corner.x * rx, cy + corner.y * ry, depth_z, 1.0);
+  out.local_uv = corner;
+  out.color = col;
+  out.flash = flash;
+  return out;
+}
+
+@fragment
+fn fs_rx_mol(in: RxOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.local_uv, in.local_uv);
+  if (r2 > 1.0) { discard; }
+  let nz = sqrt(max(0.0, 1.0 - r2));
+  let n = normalize(vec3<f32>(in.local_uv.x, in.local_uv.y, nz));
+  let light = normalize(vec3<f32>(-0.4, 0.65, 0.64));
+  let diff = max(0.18, dot(n, light));
+  let half_v = normalize(light + vec3<f32>(0.0, 0.0, 1.0));
+  let spec = pow(max(0.0, dot(n, half_v)), 26.0) * 0.72;
+  let rim = pow(1.0 - nz, 2.4) * 0.32;
+  let base_rgb = in.color * diff + vec3<f32>(1.0) * spec + in.color * rim;
+  let burst_rgb = vec3<f32>(1.0, 0.94, 0.62) * (0.95 + 0.45 * nz);
+  let rgb = mix(base_rgb, burst_rgb, in.flash * 0.82);
+  return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+@vertex
+fn vs_rx_box(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+  var edges = array<vec3<f32>, 24>(
+    vec3<f32>(-1,-1,-1), vec3<f32>( 1,-1,-1),
+    vec3<f32>(-1, 1,-1), vec3<f32>( 1, 1,-1),
+    vec3<f32>(-1,-1, 1), vec3<f32>( 1,-1, 1),
+    vec3<f32>(-1, 1, 1), vec3<f32>( 1, 1, 1),
+    vec3<f32>(-1,-1,-1), vec3<f32>(-1, 1,-1),
+    vec3<f32>( 1,-1,-1), vec3<f32>( 1, 1,-1),
+    vec3<f32>(-1,-1, 1), vec3<f32>(-1, 1, 1),
+    vec3<f32>( 1,-1, 1), vec3<f32>( 1, 1, 1),
+    vec3<f32>(-1,-1,-1), vec3<f32>(-1,-1, 1),
+    vec3<f32>( 1,-1,-1), vec3<f32>( 1,-1, 1),
+    vec3<f32>(-1, 1,-1), vec3<f32>(-1, 1, 1),
+    vec3<f32>( 1, 1,-1), vec3<f32>( 1, 1, 1)
+  );
+  let view = project_rx(edges[vid] * u.cam_meta.z);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.78 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let depth_z = clamp((view.z - 0.35) / 9.0, 0.001, 0.999);
+  return vec4<f32>(view.x * fov * inv_z / aspect, view.y * fov * inv_z, depth_z, 1.0);
+}
+
+@fragment
+fn fs_rx_box() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.42, 0.78, 1.0, 0.34);
+}
+`;
+
+// ============================================================================
+// True 3D Orbitable WebGPU Convex Polytope Phase Surface (log10 T, log10 P, log10 rho)
+// + Chebyshev Residual Error Heatmap (`POLYTOPE_3D_SURFACE_WGSL`)!
+// Evaluates `eval_polytope_atlas_2d` directly inside GPU vertex & fragment shaders!
+// ============================================================================
+const POLYTOPE_3D_SURFACE_WGSL = /* wgsl */ `
+${evaluatePolytopeAtlasWgsl}
+
+struct Poly3DUniforms {
+  res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
+  bounds: vec4<f32>,        // (min_lt, max_lt, min_lp, max_lp)
+  height_cam: vec4<f32>,    // (min_lrho, max_lrho, cam_dist, grid_n)
+  probe_state: vec4<f32>,   // (probe_fx, probe_fy, probe_active, mode: 0=3d-surface, 2=residual-2d)
+  md_beacon: vec4<f32>,     // (md_fx, md_fy, md_active, show_wire_facets)
+};
+
+@group(0) @binding(0) var<uniform> u: Poly3DUniforms;
+@group(0) @binding(1) var<storage, read> polytope_atlas: array<f32>;
+
+struct Poly3DOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) uv_tp: vec2<f32>,
+  @location(1) world_pos: vec3<f32>,
+  @location(2) normal: vec3<f32>,
+  @location(3) eval_vec: vec4<f32>,
+};
+
+struct LineOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+fn project_p3d(p: vec3<f32>) -> vec3<f32> {
+  let cy = cos(u.res_yaw_pitch.z); let sy = sin(u.res_yaw_pitch.z);
+  let cp = cos(u.res_yaw_pitch.w); let sp = sin(u.res_yaw_pitch.w);
+  let x1 = p.x * cy - p.z * sy;
+  let z1 = p.x * sy + p.z * cy;
+  // Positive pitch looks cleanly DOWN from above onto the 3D phase relief surface!
+  let y2 = p.y * cp + z1 * sp;
+  let z2 = -p.y * sp + z1 * cp + u.height_cam.z;
+  return vec3<f32>(x1, y2, z2);
+}
+
+fn eval_surface_height(fx: f32, fy: f32) -> vec4<f32> {
+  let log_t = mix(u.bounds.x, u.bounds.y, clamp(fx, 0.0, 1.0));
+  let log_p = mix(u.bounds.z, u.bounds.w, clamp(fy, 0.0, 1.0));
+  let T = pow(10.0, log_t);
+  let P = pow(10.0, log_p);
+  let res = eval_polytope_atlas_2d(&polytope_atlas, T, P);
+  if (res.w < 0.5) {
+    return vec4<f32>(-0.58, res.y, -1.0, 0.0);
+  }
+  let lrho = log2(max(1e-5, res.x)) * 0.3010299956639812;
+  let h_norm = clamp((lrho - u.height_cam.x) / max(0.5, u.height_cam.y - u.height_cam.x), 0.0, 1.0);
+  let y_world = h_norm * 1.12 - 0.50;
+  return vec4<f32>(y_world, res.y, res.z, 1.0);
+}
+
+fn lookup_polytope_rel_err(T: f32, P: f32, fx: f32, fy: f32) -> vec2<f32> {
+  let count = u32(polytope_atlas[0u]);
+  let log_p = log2(max(1e-12, P)) * 0.3010299956639812;
+  let lt_span = max(0.5, u.bounds.y - u.bounds.x);
+  let lp_span = max(0.5, u.bounds.w - u.bounds.z);
+  var best_err = -1.0;
+  var best_margin = -1e9;
+  var best_edge_dist = 1.0;
+  for (var i = 0u; i < count; i = i + 1u) {
+    let rec = 4u + i * 16u;
+    let valid_flag = polytope_atlas[rec + 14u];
+    if (valid_flag < 0.5) { continue; }
+    let t_min = polytope_atlas[rec + 2u];
+    let t_max = polytope_atlas[rec + 3u];
+    let lp_min = polytope_atlas[rec + 4u];
+    let lp_max = polytope_atlas[rec + 5u];
+    if (T < t_min || T > t_max || log_p < lp_min || log_p > lp_max) { continue; }
+    let f_count = u32(polytope_atlas[rec + 1u]);
+    let f_off = u32(polytope_atlas[rec + 8u]);
+    var min_slack = 1e9;
+    var min_screen_d = 1.0;
+    var inside = true;
+    for (var fi = 0u; fi < f_count; fi = fi + 1u) {
+      let fo = f_off + fi * 4u;
+      let a_t = polytope_atlas[fo + 0u];
+      let a_p = polytope_atlas[fo + 1u];
+      let b_v = polytope_atlas[fo + 2u];
+      let raw_s = b_v - (a_t * T + a_p * log_p);
+      let slack = raw_s / max(1e-6, polytope_atlas[fo + 3u]);
+      if (slack < -1e-4) { inside = false; break; }
+      min_slack = min(min_slack, max(0.0, slack));
+      // Normalize facet gradient into screen (fx, fy) coordinates so hairline width is uniform across all log-T decades!
+      let g_fx = a_t * T * 2.30258509 * lt_span;
+      let g_fy = a_p * lp_span;
+      let screen_d = max(0.0, raw_s) / max(1e-5, length(vec2<f32>(g_fx, g_fy)));
+      min_screen_d = min(min_screen_d, screen_d);
+    }
+    if (inside && min_slack >= best_margin) {
+      best_margin = min_slack;
+      best_err = polytope_atlas[rec + 10u];
+      best_edge_dist = min_screen_d;
+    }
+  }
+  return vec2<f32>(best_err, best_edge_dist);
+}
+
+@vertex
+fn vs_poly3d_mesh(@builtin(vertex_index) vid: u32) -> Poly3DOut {
+  let gn = u32(max(8.0, u.height_cam.w));
+  let cell_idx = vid / 6u;
+  let tri_v = vid % 6u;
+  let cx = cell_idx % gn;
+  let cy = cell_idx / gn;
+
+  var offsets = array<vec2<u32>, 6>(
+    vec2<u32>(0u, 0u), vec2<u32>(1u, 0u), vec2<u32>(1u, 1u),
+    vec2<u32>(0u, 0u), vec2<u32>(1u, 1u), vec2<u32>(0u, 1u)
+  );
+  let off = offsets[tri_v];
+  let fx = f32(cx + off.x) / f32(gn);
+  let fy = f32(cy + off.y) / f32(gn);
+
+  let ev = eval_surface_height(fx, fy);
+  let eps = 1.0 / f32(gn);
+  let ev_r = eval_surface_height(min(1.0, fx + eps), fy);
+  let ev_u = eval_surface_height(fx, min(1.0, fy + eps));
+
+  let world_x = (fx * 2.0 - 1.0) * 1.15;
+  let world_z = (fy * 2.0 - 1.0) * 1.15;
+  let world_y = ev.x;
+  let wpos = vec3<f32>(world_x, world_y, world_z);
+
+  let dx = 2.30 * eps;
+  let tx = vec3<f32>(dx, ev_r.x - ev.x, 0.0);
+  let tz = vec3<f32>(0.0, ev_u.x - ev.x, dx);
+  let nrm = normalize(cross(tz, tx));
+
+  let view = project_p3d(wpos);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.78 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let depth_z = clamp((view.z - 0.35) / 10.0, 0.001, 0.999);
+
+  var out: Poly3DOut;
+  out.clip_pos = vec4<f32>(view.x * fov * inv_z / aspect, view.y * fov * inv_z, depth_z, 1.0);
+  out.uv_tp = vec2<f32>(fx, fy);
+  out.world_pos = wpos;
+  out.normal = nrm;
+  out.eval_vec = ev;
+  return out;
+}
+
+@fragment
+fn fs_poly3d_mesh(in: Poly3DOut) -> @location(0) vec4<f32> {
+  let log_t = mix(u.bounds.x, u.bounds.y, in.uv_tp.x);
+  let log_p = mix(u.bounds.z, u.bounds.w, in.uv_tp.y);
+  let T = pow(10.0, log_t);
+  let P = pow(10.0, log_p);
+  let res = eval_polytope_atlas_2d(&polytope_atlas, T, P);
+
+  let n = normalize(in.normal);
+  let light1 = normalize(vec3<f32>(-0.45, 0.80, 0.40));
+  let light2 = normalize(vec3<f32>(0.65, 0.45, -0.55));
+  let diff = max(0.24, dot(n, light1)) * 0.85 + max(0.0, dot(n, light2)) * 0.28;
+  let half_v = normalize(light1 + vec3<f32>(0.0, 0.35, 0.94));
+  let spec = pow(max(0.0, dot(n, half_v)), 26.0) * 0.34;
+
+  if (res.w < 0.5) {
+    let hatch = step(0.84, fract((in.uv_tp.x + in.uv_tp.y) * 26.0)) * 0.14;
+    let col = vec3<f32>(0.09, 0.04, 0.07) + vec3<f32>(hatch, hatch * 0.25, hatch * 0.35);
+    return vec4<f32>(col, 1.0);
+  }
+
+  let rho = max(1e-5, res.x);
+  let margin = res.y;
+  let pcode = u32(max(0.0, floor(res.z + 0.5)));
+  var base_col = vec3<f32>(0.24, 0.72, 1.00);
+  if (pcode == 1u) { base_col = vec3<f32>(0.16, 0.85, 0.60); }
+  else if (pcode == 2u) { base_col = vec3<f32>(0.99, 0.58, 0.22); }
+  else if (pcode >= 3u) { base_col = vec3<f32>(0.76, 0.48, 1.00); }
+
+  let lrho = log2(rho) * 0.3010299956639812;
+  let contour = smoothstep(0.055, 0.0, abs(fract(lrho * 1.5) - 0.5)) * 0.11;
+  let er_edge = lookup_polytope_rel_err(T, P, in.uv_tp.x, in.uv_tp.y).y;
+  let facet_glow = select(0.0, smoothstep(0.008, 0.0, er_edge) * 0.48, u.md_beacon.w > 0.5);
+  let cliff = smoothstep(0.50, 0.96, 1.0 - abs(n.y)) * 0.14;
+
+  var col = base_col * diff + vec3<f32>(spec * 0.7 + contour) + vec3<f32>(0.96, 0.92, 0.72) * facet_glow + base_col * cliff;
+  if (u.probe_state.z > 0.5) {
+    let d_pr = length(in.uv_tp - u.probe_state.xy);
+    let ring = smoothstep(0.012, 0.0, abs(d_pr - 0.028)) * 0.95;
+    let dot_p = smoothstep(0.014, 0.0, d_pr) * 0.95;
+    col = mix(col, vec3<f32>(1.0, 0.94, 0.45), clamp(ring + dot_p, 0.0, 1.0));
+  }
+  return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+@vertex
+fn vs_poly3d_lines(@builtin(vertex_index) vid: u32) -> LineOut {
+  var p = vec3<f32>(0.0);
+  var col = vec4<f32>(0.36, 0.72, 1.0, 0.32);
+
+  let bx = 1.15;
+  let y0 = -0.58;
+  let y1 = 0.66;
+
+  if (vid < 24u) {
+    var box_e = array<vec3<f32>, 24>(
+      vec3<f32>(-bx, y0, -bx), vec3<f32>( bx, y0, -bx),
+      vec3<f32>(-bx, y0,  bx), vec3<f32>( bx, y0,  bx),
+      vec3<f32>(-bx, y0, -bx), vec3<f32>(-bx, y0,  bx),
+      vec3<f32>( bx, y0, -bx), vec3<f32>( bx, y0,  bx),
+      vec3<f32>(-bx, y1, -bx), vec3<f32>( bx, y1, -bx),
+      vec3<f32>(-bx, y1,  bx), vec3<f32>( bx, y1,  bx),
+      vec3<f32>(-bx, y1, -bx), vec3<f32>(-bx, y1,  bx),
+      vec3<f32>( bx, y1, -bx), vec3<f32>( bx, y1,  bx),
+      vec3<f32>(-bx, y0, -bx), vec3<f32>(-bx, y1, -bx),
+      vec3<f32>( bx, y0, -bx), vec3<f32>( bx, y1, -bx),
+      vec3<f32>(-bx, y0,  bx), vec3<f32>(-bx, y1,  bx),
+      vec3<f32>( bx, y0,  bx), vec3<f32>( bx, y1,  bx)
+    );
+    p = box_e[vid];
+    if (vid < 2u) { col = vec4<f32>(1.0, 0.62, 0.32, 0.78); }
+    else if (vid == 4u || vid == 5u) { col = vec4<f32>(0.34, 0.86, 1.0, 0.78); }
+    else if (vid == 16u || vid == 17u) { col = vec4<f32>(0.34, 0.96, 0.66, 0.78); }
+  } else if (vid < 40u) {
+    let gi = vid - 24u;
+    let line_id = gi / 2u;
+    let end_id = gi % 2u;
+    let is_z = line_id >= 4u;
+    let k = f32((line_id % 4u) + 1u) / 5.0;
+    let coord = (k * 2.0 - 1.0) * bx;
+    let span = select(-bx, bx, end_id == 1u);
+    p = select(vec3<f32>(coord, y0, span), vec3<f32>(span, y0, coord), is_z);
+    col = vec4<f32>(0.34, 0.56, 0.82, 0.22);
+  } else if (vid < 44u) {
+    if (u.probe_state.z > 0.5) {
+      let fx = clamp(u.probe_state.x, 0.0, 1.0);
+      let fy = clamp(u.probe_state.y, 0.0, 1.0);
+      let ev = eval_surface_height(fx, fy);
+      let wx = (fx * 2.0 - 1.0) * bx;
+      let wz = (fy * 2.0 - 1.0) * bx;
+      let wy_top = select(y0 + 0.35, ev.x + 0.24, ev.w > 0.5);
+      let pi = vid - 40u;
+      if (pi == 0u) { p = vec3<f32>(wx, y0, wz); }
+      else if (pi == 1u) { p = vec3<f32>(wx, wy_top, wz); }
+      else if (pi == 2u) { p = vec3<f32>(wx - 0.08, wy_top, wz); }
+      else { p = vec3<f32>(wx + 0.08, wy_top, wz); }
+      col = select(vec4<f32>(1.0, 0.32, 0.32, 1.0), vec4<f32>(1.0, 0.92, 0.35, 1.0), ev.w > 0.5);
+    } else {
+      col = vec4<f32>(0.0);
+    }
+  } else {
+    if (u.md_beacon.z > 0.5) {
+      let fx = clamp(u.md_beacon.x, 0.0, 1.0);
+      let fy = clamp(u.md_beacon.y, 0.0, 1.0);
+      let ev = eval_surface_height(fx, fy);
+      let wx = (fx * 2.0 - 1.0) * bx;
+      let wz = (fy * 2.0 - 1.0) * bx;
+      p = select(vec3<f32>(wx, y0, wz), vec3<f32>(wx, ev.x + 0.28, wz), vid == 45u);
+      col = vec4<f32>(0.22, 0.96, 1.0, 0.95);
+    } else {
+      col = vec4<f32>(0.0);
+    }
+  }
+
+  let view = project_p3d(p);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.78 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let depth_z = clamp((view.z - 0.35) / 10.0, 0.001, 0.999);
+  var out: LineOut;
+  out.clip_pos = vec4<f32>(view.x * fov * inv_z / aspect, view.y * fov * inv_z, depth_z, 1.0);
+  out.color = col;
+  return out;
+}
+
+@fragment
+fn fs_poly3d_lines(in: LineOut) -> @location(0) vec4<f32> {
+  if (in.color.a <= 0.01) { discard; }
+  return in.color;
+}
+
+struct ResOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_poly_residual(@builtin(vertex_index) vid: u32) -> ResOut {
+  var pts = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var out: ResOut;
+  out.pos = vec4<f32>(pts[vid], 0.0, 1.0);
+  out.uv = pts[vid] * 0.5 + 0.5;
+  return out;
+}
+
+@fragment
+fn fs_poly_residual(in: ResOut) -> @location(0) vec4<f32> {
+  if (in.uv.x < 0.06 || in.uv.x > 0.96 || in.uv.y < 0.08 || in.uv.y > 0.90) {
+    return vec4<f32>(0.024, 0.042, 0.078, 1.0);
+  }
+  let fx = (in.uv.x - 0.06) / 0.90;
+  let fy = (in.uv.y - 0.08) / 0.82;
+  let T = pow(10.0, mix(u.bounds.x, u.bounds.y, fx));
+  let P = pow(10.0, mix(u.bounds.z, u.bounds.w, fy));
+  let er = lookup_polytope_rel_err(T, P, fx, fy);
+  var col = vec3<f32>(0.05, 0.04, 0.07);
+  if (er.x < 0.0) {
+    let hatch = step(0.88, fract((in.uv.x + in.uv.y) * 28.0)) * 0.085;
+    col = vec3<f32>(0.07, 0.04, 0.07) + vec3<f32>(hatch, hatch * 0.35, hatch * 0.45);
+  } else {
+    let log_e = log2(max(1e-5, er.x)) * 0.3010299956639812;
+    let t = clamp((log_e + 4.5) / 3.2, 0.0, 1.0);
+    let c0 = vec3<f32>(0.12, 0.24, 0.64);
+    let c1 = vec3<f32>(0.14, 0.78, 0.66);
+    let c2 = vec3<f32>(0.98, 0.78, 0.22);
+    let c3 = vec3<f32>(0.96, 0.26, 0.28);
+    if (t < 0.35) { col = mix(c0, c1, t / 0.35); }
+    else if (t < 0.72) { col = mix(c1, c2, (t - 0.35) / 0.37); }
+    else { col = mix(c2, c3, (t - 0.72) / 0.28); }
+    let edge = smoothstep(0.0055, 0.0, er.y) * 0.68;
+    col = mix(col, vec3<f32>(0.96, 0.98, 1.0), edge);
+  }
+  if (u.probe_state.z > 0.5) {
+    let d_pt = length(vec2<f32>(fx - u.probe_state.x, fy - u.probe_state.y));
+    let ring = smoothstep(0.006, 0.0, abs(d_pt - 0.022)) * 0.95;
+    col = mix(col, vec3<f32>(1.0, 0.95, 0.55), ring);
+  }
+  return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+`;
+
+function cpkColorForZ(Z) {
+  const z = Math.max(1, Math.min(118, Math.trunc(Number(Z) || 1)));
+  if (z === 1) return [0.95, 0.97, 1.00];
+  if (z === 6) return [0.36, 0.40, 0.46];
+  if (z === 7) return [0.24, 0.50, 0.98];
+  if (z === 8) return [0.95, 0.24, 0.24];
+  if (z === 9 || z === 17) return [0.22, 0.88, 0.46];
+  if (z === 15) return [1.00, 0.55, 0.16];
+  if (z === 16) return [0.98, 0.86, 0.22];
+  if (z === 35) return [0.76, 0.26, 0.22];
+  if (z === 53) return [0.64, 0.24, 0.86];
+  if (z === 3 || z === 11 || z === 19 || z === 37 || z === 55 || z === 87) return [0.68, 0.46, 0.98];
+  if (z === 4 || z === 12 || z === 20 || z === 38 || z === 56 || z === 88) return [0.30, 0.84, 0.36];
+  if (z === 13 || z === 14 || z === 31 || z === 32 || z === 50 || z === 82) return [0.68, 0.76, 0.86];
+  if (z === 26) return [0.90, 0.46, 0.26];
+  if (z === 29) return [0.92, 0.54, 0.30];
+  if (z === 47) return [0.85, 0.88, 0.94];
+  if (z === 79) return [0.98, 0.82, 0.28];
+  if (z === 30) return [0.56, 0.62, 0.86];
+  if (z === 2 || z === 10 || z === 18 || z === 36 || z === 54 || z === 86 || z === 118) return [0.36, 0.88, 0.96];
+  return [0.72, 0.76, 0.86];
+}
+
+function visualRadiusBohrForZ(Z) {
+  const z = Math.max(1, Math.min(118, Math.trunc(Number(Z) || 1)));
+  if (z === 1) return 0.54;
+  if (z <= 2) return 0.58;
+  if (z <= 10) return 0.78;
+  if (z <= 18) return 0.94;
+  if (z <= 36) return 1.04;
+  return 1.14;
+}
+
 export function createElementsLabWebGpuRenderer(device, canvas) {
   const ctx = canvas.getContext('webgpu');
   if (!ctx) {
@@ -1608,13 +2500,13 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
   });
   const trUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
 
-  // Single-Atom TD-KS Quantum Electron Cloud <-> Photon Wavepacket Pipelines
+  // Single-Atom 3D Maxwell-Kohn-Sham Volumetric Wavefield + Coupled Dirac-KS Cloud Pipelines
   const tdksModule = device.createShaderModule({ code: TDKS_PHOTON_CLOUD_WGSL, label: 'ulg-lab-tdks-photon-cloud' });
   const tdksFieldPipe = device.createRenderPipeline({
     label: 'ulg-lab-tdks-field-pipe',
     layout: 'auto',
     vertex: { module: tdksModule, entryPoint: 'vs_tdks_field' },
-    fragment: { module: tdksModule, entryPoint: 'fs_tdks_field', targets: [{ format, blend: additiveBlend }] },
+    fragment: { module: tdksModule, entryPoint: 'fs_tdks_field', targets: [{ format, blend: alphaBlend }] },
     primitive: { topology: 'triangle-list' }
   });
   const tdksCloudPipe = device.createRenderPipeline({
@@ -1625,7 +2517,87 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     primitive: { topology: 'triangle-list' }
   });
   const tdksUniformBuf = device.createBuffer({ size: 96, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const tdksRadHistBuf = device.createBuffer({ size: 4 * 128 * 4, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+
+  // 3D Ball-and-Stick Molecule, Wiberg Bonds, Dipole Arrow & Multi-Species Crystal Pipelines
+  const mol3dModule = device.createShaderModule({ code: MOLECULE_3D_WGSL, label: 'ulg-lab-mol-3d' });
+  const molAtomPipe = device.createRenderPipeline({
+    label: 'ulg-lab-mol-atom-pipe',
+    layout: 'auto',
+    vertex: { module: mol3dModule, entryPoint: 'vs_mol_atom' },
+    fragment: { module: mol3dModule, entryPoint: 'fs_mol_atom', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+  });
+  const molBondPipe = device.createRenderPipeline({
+    label: 'ulg-lab-mol-bond-pipe',
+    layout: 'auto',
+    vertex: { module: mol3dModule, entryPoint: 'vs_mol_bond' },
+    fragment: { module: mol3dModule, entryPoint: 'fs_mol_bond', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+  });
+  const molBoxPipe = device.createRenderPipeline({
+    label: 'ulg-lab-mol-box-pipe',
+    layout: 'auto',
+    vertex: { module: mol3dModule, entryPoint: 'vs_mol_box' },
+    fragment: { module: mol3dModule, entryPoint: 'fs_mol_box', targets: [{ format, blend: alphaBlend }] },
+    primitive: { topology: 'line-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }
+  });
+  const molUniformBuf = device.createBuffer({ size: 64, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  let molAtomsPosBuf = device.createBuffer({ size: 256 * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+  let molAtomsMetaBuf = device.createBuffer({ size: 256 * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+  let molSegABuf = device.createBuffer({ size: 512 * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+  let molSegBBuf = device.createBuffer({ size: 512 * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+  let molAtomCap = 256;
+  let molSegCap = 512;
+
+  // Zero-Copy 3D Reactive Chemistry MD Chamber Pipelines
+  const rxMdModule = device.createShaderModule({ code: REACTIVE_MD_RENDER_WGSL, label: 'ulg-lab-reactive-md-render' });
+  const rxMolPipe = device.createRenderPipeline({
+    label: 'ulg-lab-rx-mol-pipe',
+    layout: 'auto',
+    vertex: { module: rxMdModule, entryPoint: 'vs_rx_mol' },
+    fragment: { module: rxMdModule, entryPoint: 'fs_rx_mol', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+  });
+  const rxBoxPipe = device.createRenderPipeline({
+    label: 'ulg-lab-rx-box-pipe',
+    layout: 'auto',
+    vertex: { module: rxMdModule, entryPoint: 'vs_rx_box' },
+    fragment: { module: rxMdModule, entryPoint: 'fs_rx_box', targets: [{ format, blend: alphaBlend }] },
+    primitive: { topology: 'line-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }
+  });
+  const rxUniformBuf = device.createBuffer({ size: 32, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+
+  // True 3D Convex Polytope Surface + Axis Cage + Residual Heatmap Pipelines
+  const poly3dModule = device.createShaderModule({ code: POLYTOPE_3D_SURFACE_WGSL, label: 'ulg-lab-polytope-3d' });
+  const poly3dMeshPipe = device.createRenderPipeline({
+    label: 'ulg-lab-poly3d-mesh-pipe',
+    layout: 'auto',
+    vertex: { module: poly3dModule, entryPoint: 'vs_poly3d_mesh' },
+    fragment: { module: poly3dModule, entryPoint: 'fs_poly3d_mesh', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+  });
+  const poly3dLinePipe = device.createRenderPipeline({
+    label: 'ulg-lab-poly3d-lines-pipe',
+    layout: 'auto',
+    vertex: { module: poly3dModule, entryPoint: 'vs_poly3d_lines' },
+    fragment: { module: poly3dModule, entryPoint: 'fs_poly3d_lines', targets: [{ format, blend: alphaBlend }] },
+    primitive: { topology: 'line-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }
+  });
+  const polyResPipe = device.createRenderPipeline({
+    label: 'ulg-lab-poly-residual-pipe',
+    layout: 'auto',
+    vertex: { module: poly3dModule, entryPoint: 'vs_poly_residual' },
+    fragment: { module: poly3dModule, entryPoint: 'fs_poly_residual', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const poly3dUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
 
   // Reusable uniforms & dummy placeholder buffers
   const volUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
@@ -2256,17 +3228,19 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
   }
 
   /**
-   * Render Single-Atom Time-Dependent Kohn-Sham (TD-KS) Electron Cloud <-> Photon
-   * Wavepacket Interaction: 180K-point MoonLab quantum cloud evolving exact
-   * |c0(t) phi0 + c1(t) phi1|^2 interference + retarded spherical dipole re-radiation!
+   * Render Single-Atom True 3D Self-Consistent Maxwell–Kohn–Sham Wavepacket
+   * Scattering & Dynamically Coupled 180K-Point Dirac–KS Electron Cloud (ZERO-COPY!).
    */
   function renderTdksPhotonCloudScene({
     pairCloud,
     blochSession,
+    tdks3dSession = null,
     yaw = 0.24,
     pitch = 0.20,
-    camDist = 2.85,
+    camDist = 3.15,
     modeMono = false,
+    polMode = 0,
+    fieldViewMode = 0,
     probeRgb = [0.35, 0.55, 1.0],
     emergentReflSrgb = [0.94, 0.86, 0.65],
     pointSize = 0.012
@@ -2274,16 +3248,6 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     if (!pairCloud?.posBuffer || !pairCloud?.ampBuffer || !blochSession) return;
     const { w, h } = ensureCanvasSize();
 
-    // Pack all 4 channels' 128-slot retarded dipole acceleration histories (2 KB)
-    const hLen = blochSession.historyLen;
-    const flatHist = new Float32Array(4 * hLen);
-    for (let c = 0; c < 4; c += 1) {
-      flatHist.set(blochSession.channels[c].radHistory, c * hLen);
-    }
-    device.queue.writeBuffer(tdksRadHistBuf, 0, flatHist);
-
-    // Choose active Bloch channel driving the 3D quantum cloud interference:
-    //   Mono mode -> tunable probe channel 3; RGB mode -> weighted superposition highlighting resonant Blue channel 2!
     const chDrive = modeMono ? blochSession.channels[3] : blochSession.channels[2];
     const chR = blochSession.channels[0];
     const chG = blochSession.channels[1];
@@ -2297,20 +3261,31 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
       : (0.75 * chR.rho01Re + 0.75 * chG.rho01Re + 1.1 * chB.rho01Re);
     const eNow = modeMono ? chDrive.eNow : (chR.eNow + chG.eNow + chB.eNow) * 0.45;
 
+    const gridN = tdks3dSession?.gridN || 1;
+    const worldHalf = tdks3dSession?.worldHalf || 2.0;
+    const atomRadius = tdks3dSession?.atomRadius || 1.05;
+    const eTotBuf = tdks3dSession?.eFieldBuffer || dummyVec4Buf;
+    const eIncBuf = tdks3dSession?.eIncBuffer || dummyVec4Buf;
+    const polBuf = tdks3dSession?.polBuffer || dummyVec4Buf;
+    const jBuf = tdks3dSession?.jBuffer || dummyVec4Buf;
+
     device.queue.writeBuffer(tdksUniformBuf, 0, new Float32Array([
       w, h, yaw, pitch,
-      camDist, blochSession.getTimeFs(), blochSession.pulseT0Fs, blochSession.pulseWidthFs,
+      camDist, gridN, worldHalf, fieldViewMode,
       rho00, rho11, twoRe01, eNow,
-      chDrive.omega, modeMono ? 1.0 : 0.0, blochSession.getHistCursor(), hLen,
+      polMode, modeMono ? 1.0 : 0.0, blochSession.getTimeFs(), pointSize,
       emergentReflSrgb[0] ?? 0.9, emergentReflSrgb[1] ?? 0.85, emergentReflSrgb[2] ?? 0.7, chB.rho11,
-      probeRgb[0] ?? 0.35, probeRgb[1] ?? 0.55, probeRgb[2] ?? 1.0, pointSize
+      probeRgb[0] ?? 0.35, probeRgb[1] ?? 0.55, probeRgb[2] ?? 1.0, atomRadius
     ]));
 
     const fieldBg = device.createBindGroup({
       layout: tdksFieldPipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: tdksUniformBuf } },
-        { binding: 3, resource: { buffer: tdksRadHistBuf } }
+        { binding: 3, resource: { buffer: eTotBuf } },
+        { binding: 4, resource: { buffer: eIncBuf } },
+        { binding: 5, resource: { buffer: polBuf } },
+        { binding: 6, resource: { buffer: jBuf } }
       ]
     });
     const cloudBg = device.createBindGroup({
@@ -2318,7 +3293,11 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
       entries: [
         { binding: 0, resource: { buffer: tdksUniformBuf } },
         { binding: 1, resource: { buffer: pairCloud.posBuffer } },
-        { binding: 2, resource: { buffer: pairCloud.ampBuffer } }
+        { binding: 2, resource: { buffer: pairCloud.ampBuffer } },
+        { binding: 3, resource: { buffer: eTotBuf } },
+        { binding: 4, resource: { buffer: eIncBuf } },
+        { binding: 5, resource: { buffer: polBuf } },
+        { binding: 6, resource: { buffer: jBuf } }
       ]
     });
 
@@ -2328,12 +3307,14 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
         view: ctx.getCurrentTexture().createView(),
         loadOp: 'clear',
         storeOp: 'store',
-        clearValue: { r: 0.005, g: 0.008, b: 0.016, a: 1 }
+        clearValue: { r: 0.006, g: 0.010, b: 0.022, a: 1 }
       }]
     });
-    pass.setPipeline(tdksFieldPipe);
-    pass.setBindGroup(0, fieldBg);
-    pass.draw(6);
+    if (tdks3dSession) {
+      pass.setPipeline(tdksFieldPipe);
+      pass.setBindGroup(0, fieldBg);
+      pass.draw(3);
+    }
 
     pass.setPipeline(tdksCloudPipe);
     pass.setBindGroup(0, cloudBg);
@@ -2447,6 +3428,488 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     device.queue.submit([enc.finish()]);
   }
 
+  function ensureMolBuffers(atomCount, segCount) {
+    const needA = Math.max(16, atomCount);
+    if (needA > molAtomCap) {
+      molAtomCap = Math.max(needA, molAtomCap * 2);
+      molAtomsPosBuf.destroy();
+      molAtomsMetaBuf.destroy();
+      molAtomsPosBuf = device.createBuffer({ size: molAtomCap * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+      molAtomsMetaBuf = device.createBuffer({ size: molAtomCap * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+    }
+    const needS = Math.max(16, segCount);
+    if (needS > molSegCap) {
+      molSegCap = Math.max(needS, molSegCap * 2);
+      molSegABuf.destroy();
+      molSegBBuf.destroy();
+      molSegABuf = device.createBuffer({ size: molSegCap * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+      molSegBBuf = device.createBuffer({ size: molSegCap * 16, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+    }
+  }
+
+  function renderMoleculeScene({
+    atoms = [],
+    bonds = [],
+    mullikenCharges = null,
+    dipoleVecDebye = null,
+    displacements = null,
+    vibPhase = 0,
+    vibAmplitude = 0.28,
+    colorMode = 0,
+    showDipole = true,
+    orbitalCloud = null,
+    yaw = 0.45,
+    pitch = 0.28,
+    camDist = 3.1,
+    timeS = 0
+  }) {
+    if (!Array.isArray(atoms) || atoms.length === 0) return;
+    const { w, h } = ensureCanvasSize();
+    const nA = atoms.length;
+    const vibSin = displacements ? Math.sin(vibPhase) * vibAmplitude : 0;
+    const posList = atoms.map((a, i) => {
+      const bx = Array.isArray(a.position) ? a.position[0] : (a.x || 0);
+      const by = Array.isArray(a.position) ? a.position[1] : (a.y || 0);
+      const bz = Array.isArray(a.position) ? a.position[2] : (a.z || 0);
+      const d = displacements?.[i];
+      return [
+        bx + (d ? d[0] * vibSin : 0),
+        by + (d ? d[1] * vibSin : 0),
+        bz + (d ? d[2] * vibSin : 0)
+      ];
+    });
+    let cx = 0; let cy = 0; let cz = 0;
+    for (const p of posList) { cx += p[0]; cy += p[1]; cz += p[2]; }
+    cx /= nA; cy /= nA; cz /= nA;
+
+    let maxExtent = 1.65;
+    for (let i = 0; i < nA; i += 1) {
+      const p = posList[i];
+      maxExtent = Math.max(maxExtent, Math.hypot(p[0] - cx, p[1] - cy, p[2] - cz) + visualRadiusBohrForZ(atoms[i].Z));
+    }
+    const scaleNorm = 1.25 / maxExtent;
+
+    const segs = [];
+    for (const b of (bonds || [])) {
+      const pa = posList[b.a];
+      const pb = posList[b.b];
+      if (!pa || !pb) continue;
+      const dx = pb[0] - pa[0]; const dy = pb[1] - pa[1]; const dz = pb[2] - pa[2];
+      const len = Math.hypot(dx, dy, dz);
+      if (len < 1e-4) continue;
+      const ux = dx / len; const uy = dy / len; const uz = dz / len;
+      // Prefer Z-cross so horizontal bonds (e.g. O=C=O along X) stack double/triple bars cleanly vertically!
+      const ref = Math.abs(uz) < 0.85 ? [0, 0, 1] : [0, 1, 0];
+      let px = uy * ref[2] - uz * ref[1];
+      let py = uz * ref[0] - ux * ref[2];
+      let pz = ux * ref[1] - uy * ref[0];
+      const pl = Math.max(1e-5, Math.hypot(px, py, pz));
+      px /= pl; py /= pl; pz /= pl;
+
+      const ord = Math.max(0.16, Math.min(3.5, Number(b.order) || 1.0));
+      const kind = b.kind || (ord >= 2.45 ? 'triple' : (ord >= 1.55 ? 'double' : (ord >= 0.60 ? 'single' : 'partial')));
+      const ordFrac = Math.min(0.99, ord / 4.0);
+      if (kind === 'partial') {
+        segs.push({ a: pa, b: pb, r: 0.11 + 0.08 * ord, modeOrder: 1.0 + ordFrac });
+      } else if (kind === 'double') {
+        const off = 0.16;
+        for (const sgn of [-1, 1]) {
+          segs.push({
+            a: [pa[0] + px * off * sgn, pa[1] + py * off * sgn, pa[2] + pz * off * sgn],
+            b: [pb[0] + px * off * sgn, pb[1] + py * off * sgn, pb[2] + pz * off * sgn],
+            r: 0.11,
+            modeOrder: 0.0 + ordFrac
+          });
+        }
+      } else if (kind === 'triple') {
+        const off = 0.20;
+        for (const sgn of [-1, 0, 1]) {
+          segs.push({
+            a: [pa[0] + px * off * sgn, pa[1] + py * off * sgn, pa[2] + pz * off * sgn],
+            b: [pb[0] + px * off * sgn, pb[1] + py * off * sgn, pb[2] + pz * off * sgn],
+            r: 0.095,
+            modeOrder: 0.0 + ordFrac
+          });
+        }
+      } else {
+        segs.push({ a: pa, b: pb, r: 0.15, modeOrder: 0.0 + ordFrac });
+      }
+    }
+
+    if (showDipole && Array.isArray(dipoleVecDebye) && dipoleVecDebye.length === 3) {
+      const dMag = Math.hypot(dipoleVecDebye[0], dipoleVecDebye[1], dipoleVecDebye[2]);
+      if (dMag > 0.08) {
+        const arrowLen = Math.min(maxExtent * 0.95, 0.7 + dMag * 0.36);
+        const ux = dipoleVecDebye[0] / dMag;
+        const uy = dipoleVecDebye[1] / dMag;
+        const uz = dipoleVecDebye[2] / dMag;
+        const tail = [cx - ux * arrowLen * 0.45, cy - uy * arrowLen * 0.45, cz - uz * arrowLen * 0.45];
+        const mid = [cx + ux * arrowLen * 0.35, cy + uy * arrowLen * 0.35, cz + uz * arrowLen * 0.35];
+        const tip = [cx + ux * arrowLen * 0.72, cy + uy * arrowLen * 0.72, cz + uz * arrowLen * 0.72];
+        segs.push({ a: tail, b: mid, r: 0.09, modeOrder: 2.25 });
+        segs.push({ a: mid, b: tip, r: 0.24, modeOrder: 3.25 });
+      }
+    }
+
+    ensureMolBuffers(nA, Math.max(1, segs.length));
+    const aPos = new Float32Array(nA * 4);
+    const aMeta = new Float32Array(nA * 4);
+    for (let i = 0; i < nA; i += 1) {
+      const p = posList[i];
+      const cpk = cpkColorForZ(atoms[i].Z);
+      const q = Array.isArray(mullikenCharges) ? (Number(mullikenCharges[i]) || 0) : 0;
+      aPos.set([p[0], p[1], p[2], visualRadiusBohrForZ(atoms[i].Z)], i * 4);
+      aMeta.set([cpk[0], cpk[1], cpk[2], q], i * 4);
+    }
+    const sA = new Float32Array(Math.max(1, segs.length) * 4);
+    const sB = new Float32Array(Math.max(1, segs.length) * 4);
+    for (let i = 0; i < segs.length; i += 1) {
+      const sg = segs[i];
+      sA.set([sg.a[0], sg.a[1], sg.a[2], sg.r], i * 4);
+      sB.set([sg.b[0], sg.b[1], sg.b[2], sg.modeOrder], i * 4);
+    }
+
+    device.queue.writeBuffer(molUniformBuf, 0, new Float32Array([
+      w, h, yaw, pitch,
+      camDist, scaleNorm, colorMode, timeS,
+      cx, cy, cz, 0.0,
+      maxExtent, maxExtent, maxExtent, 0.0
+    ]));
+    device.queue.writeBuffer(molAtomsPosBuf, 0, aPos);
+    device.queue.writeBuffer(molAtomsMetaBuf, 0, aMeta);
+    device.queue.writeBuffer(molSegABuf, 0, sA);
+    device.queue.writeBuffer(molSegBBuf, 0, sB);
+
+    const atomBg = device.createBindGroup({
+      layout: molAtomPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: molUniformBuf } },
+        { binding: 1, resource: { buffer: molAtomsPosBuf } },
+        { binding: 2, resource: { buffer: molAtomsMetaBuf } }
+      ]
+    });
+    const bondBg = segs.length > 0
+      ? device.createBindGroup({
+        layout: molBondPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: molUniformBuf } },
+          { binding: 3, resource: { buffer: molSegABuf } },
+          { binding: 4, resource: { buffer: molSegBBuf } }
+        ]
+      })
+      : null;
+
+    const enc = device.createCommandEncoder({ label: 'ulg-lab-render-mol3d' });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0.012, g: 0.020, b: 0.040, a: 1 }
+      }],
+      depthStencilAttachment: {
+        view: depthTex.createView(),
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1.0
+      }
+    });
+    if (bondBg) {
+      pass.setPipeline(molBondPipe);
+      pass.setBindGroup(0, bondBg);
+      pass.draw(6, segs.length);
+    }
+    pass.setPipeline(molAtomPipe);
+    pass.setBindGroup(0, atomBg);
+    pass.draw(6, nA);
+    pass.end();
+
+    if (orbitalCloud?.pointsBuffer && orbitalCloud.pointCount > 0) {
+      device.queue.writeBuffer(cloudUniformBuf, 0, new Float32Array([
+        w, h, yaw, pitch,
+        camDist, 0.013, 0.24, 1.0,
+        1.0, 0.64, 0.30, 0.0,
+        0.38, 0.72, 1.0, 0.014,
+        0.0, 0.0, 0.0, 0.0
+      ]));
+      const cloudBg = device.createBindGroup({
+        layout: cloudPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: cloudUniformBuf } },
+          { binding: 1, resource: { buffer: orbitalCloud.pointsBuffer } }
+        ]
+      });
+      const oPass = enc.beginRenderPass({
+        colorAttachments: [{
+          view: ctx.getCurrentTexture().createView(),
+          loadOp: 'load',
+          storeOp: 'store'
+        }]
+      });
+      oPass.setPipeline(cloudPipe);
+      oPass.setBindGroup(0, cloudBg);
+      oPass.draw(6, orbitalCloud.pointCount);
+      oPass.end();
+    }
+    device.queue.submit([enc.finish()]);
+  }
+
+  function renderMultiSpeciesCrystalScene({
+    crystal,
+    colorMode = 0,
+    yaw = 0.48,
+    pitch = 0.30,
+    camDist = 3.25
+  }) {
+    if (!crystal?.positions || !(crystal.atomCount > 0)) return;
+    const { w, h } = ensureCanvasSize();
+    const nA = crystal.atomCount;
+    const nB = crystal.bondCount || 0;
+    const lx = crystal.boxLengthsA?.[0] || 8;
+    const ly = crystal.boxLengthsA?.[1] || lx;
+    const lz = crystal.boxLengthsA?.[2] || lx;
+    const cx = lx * 0.5; const cy = ly * 0.5; const cz = lz * 0.5;
+    const maxHalf = Math.max(lx, ly, lz) * 0.5;
+    const scaleNorm = 1.05 / Math.max(1.0, maxHalf);
+
+    ensureMolBuffers(nA, Math.max(1, nB));
+    const aPos = new Float32Array(nA * 4);
+    const aMeta = new Float32Array(nA * 4);
+    for (let i = 0; i < nA; i += 1) {
+      const px = crystal.positions[i * 4 + 0];
+      const py = crystal.positions[i * 4 + 1];
+      const pz = crystal.positions[i * 4 + 2];
+      const rA = crystal.positions[i * 4 + 3];
+      const Z = crystal.speciesMeta[i * 4 + 0];
+      const q = crystal.speciesMeta[i * 4 + 1];
+      const cpk = cpkColorForZ(Z);
+      aPos.set([px, py, pz, Math.max(0.28, Math.min(0.68, rA * 0.42))], i * 4);
+      aMeta.set([cpk[0], cpk[1], cpk[2], q * 0.55], i * 4);
+    }
+    const sA = new Float32Array(Math.max(1, nB) * 4);
+    const sB = new Float32Array(Math.max(1, nB) * 4);
+    for (let i = 0; i < nB; i += 1) {
+      const ia = crystal.bonds[i * 2 + 0];
+      const ib = crystal.bonds[i * 2 + 1];
+      sA.set([crystal.positions[ia * 4], crystal.positions[ia * 4 + 1], crystal.positions[ia * 4 + 2], 0.11], i * 4);
+      sB.set([crystal.positions[ib * 4], crystal.positions[ib * 4 + 1], crystal.positions[ib * 4 + 2], 0.25], i * 4);
+    }
+
+    device.queue.writeBuffer(molUniformBuf, 0, new Float32Array([
+      w, h, yaw, pitch,
+      camDist, scaleNorm, colorMode, 0.0,
+      cx, cy, cz, 1.0,
+      lx * 0.5, ly * 0.5, lz * 0.5, 0.0
+    ]));
+    device.queue.writeBuffer(molAtomsPosBuf, 0, aPos);
+    device.queue.writeBuffer(molAtomsMetaBuf, 0, aMeta);
+    device.queue.writeBuffer(molSegABuf, 0, sA);
+    device.queue.writeBuffer(molSegBBuf, 0, sB);
+
+    const atomBg = device.createBindGroup({
+      layout: molAtomPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: molUniformBuf } },
+        { binding: 1, resource: { buffer: molAtomsPosBuf } },
+        { binding: 2, resource: { buffer: molAtomsMetaBuf } }
+      ]
+    });
+    const bondBg = nB > 0
+      ? device.createBindGroup({
+        layout: molBondPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: molUniformBuf } },
+          { binding: 3, resource: { buffer: molSegABuf } },
+          { binding: 4, resource: { buffer: molSegBBuf } }
+        ]
+      })
+      : null;
+    const boxBg = device.createBindGroup({
+      layout: molBoxPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: molUniformBuf } }]
+    });
+
+    const enc = device.createCommandEncoder({ label: 'ulg-lab-render-multispecies-crystal' });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0.012, g: 0.020, b: 0.042, a: 1 }
+      }],
+      depthStencilAttachment: {
+        view: depthTex.createView(),
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1.0
+      }
+    });
+    if (bondBg) {
+      pass.setPipeline(molBondPipe);
+      pass.setBindGroup(0, bondBg);
+      pass.draw(6, nB);
+    }
+    pass.setPipeline(molAtomPipe);
+    pass.setBindGroup(0, atomBg);
+    pass.draw(6, nA);
+    pass.setPipeline(molBoxPipe);
+    pass.setBindGroup(0, boxBg);
+    pass.draw(24, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  function renderReactiveMdScene({
+    posBuffer,
+    velBuffer,
+    moleculeCount = 192,
+    yaw = 0.45,
+    pitch = 0.28,
+    camDist = 3.15
+  }) {
+    if (!posBuffer || !velBuffer || !(moleculeCount > 0)) return;
+    const { w, h } = ensureCanvasSize();
+    device.queue.writeBuffer(rxUniformBuf, 0, new Float32Array([
+      w, h, yaw, pitch,
+      camDist, 0.078, 1.0, 0.0
+    ]));
+    const molBg = device.createBindGroup({
+      layout: rxMolPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: rxUniformBuf } },
+        { binding: 1, resource: { buffer: posBuffer } },
+        { binding: 2, resource: { buffer: velBuffer } }
+      ]
+    });
+    const boxBg = device.createBindGroup({
+      layout: rxBoxPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: rxUniformBuf } }]
+    });
+    const enc = device.createCommandEncoder({ label: 'ulg-lab-render-reactive-md' });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0.012, g: 0.018, b: 0.036, a: 1 }
+      }],
+      depthStencilAttachment: {
+        view: depthTex.createView(),
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1.0
+      }
+    });
+    pass.setPipeline(rxMolPipe);
+    pass.setBindGroup(0, molBg);
+    pass.draw(6, moleculeCount);
+    pass.setPipeline(rxBoxPipe);
+    pass.setBindGroup(0, boxBg);
+    pass.draw(24, 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  function renderPolytopeAtlas3D({
+    atlas,
+    viewMode = '3d-surface',
+    probe = null,
+    mdTempK = null,
+    yaw = 0.62,
+    pitch = 0.56,
+    camDist = 3.25,
+    showFacetEdges = true
+  }) {
+    if (!atlas?.packedGpuAtlas?.data || !atlas?.polytopes?.length) return;
+    if (viewMode === '2d-facets') {
+      renderPolytopeAtlas(atlas, probe);
+      return;
+    }
+    const { w, h } = ensureCanvasSize();
+    const polyBuf = ensurePolytopeBuffer(atlas);
+    const { minLt, maxLt, minLp, maxLp } = getPolytopeAxisBounds(atlas);
+    const probeActive = probe && Number.isFinite(probe.fx) && Number.isFinite(probe.fy) ? 1.0 : 0.0;
+    const mdActive = Number.isFinite(mdTempK) && mdTempK > 0 ? 1.0 : 0.0;
+    const mdFx = mdActive > 0.5
+      ? Math.max(0, Math.min(1, (Math.log10(Math.max(1, mdTempK)) - minLt) / Math.max(1e-6, maxLt - minLt)))
+      : 0.5;
+    const mdFy = Math.max(0, Math.min(1, (Math.log10(101325) - minLp) / Math.max(1e-6, maxLp - minLp)));
+    const gridN = 68;
+
+    device.queue.writeBuffer(poly3dUniformBuf, 0, new Float32Array([
+      w, h, yaw, pitch,
+      minLt, maxLt, minLp, maxLp,
+      -2.2, 4.4, camDist, gridN,
+      probeActive > 0.5 ? probe.fx : -1.0, probeActive > 0.5 ? probe.fy : -1.0, probeActive, viewMode === 'residual-map' ? 2.0 : 0.0,
+      mdFx, mdFy, mdActive, showFacetEdges ? 1.0 : 0.0
+    ]));
+
+    if (viewMode === 'residual-map') {
+      const bg = device.createBindGroup({
+        layout: polyResPipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: poly3dUniformBuf } },
+          { binding: 1, resource: { buffer: polyBuf } }
+        ]
+      });
+      const enc = device.createCommandEncoder({ label: 'ulg-lab-render-poly-res' });
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{
+          view: ctx.getCurrentTexture().createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0.02, g: 0.035, b: 0.067, a: 1 }
+        }]
+      });
+      pass.setPipeline(polyResPipe);
+      pass.setBindGroup(0, bg);
+      pass.draw(3);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      return;
+    }
+
+    const meshBg = device.createBindGroup({
+      layout: poly3dMeshPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: poly3dUniformBuf } },
+        { binding: 1, resource: { buffer: polyBuf } }
+      ]
+    });
+    const lineBg = device.createBindGroup({
+      layout: poly3dLinePipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: poly3dUniformBuf } },
+        { binding: 1, resource: { buffer: polyBuf } }
+      ]
+    });
+
+    const enc = device.createCommandEncoder({ label: 'ulg-lab-render-poly3d' });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0.012, g: 0.020, b: 0.042, a: 1 }
+      }],
+      depthStencilAttachment: {
+        view: depthTex.createView(),
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1.0
+      }
+    });
+    pass.setPipeline(poly3dMeshPipe);
+    pass.setBindGroup(0, meshBg);
+    pass.draw(gridN * gridN * 6);
+
+    pass.setPipeline(poly3dLinePipe);
+    pass.setBindGroup(0, lineBg);
+    pass.draw(46);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
   return Object.freeze({
     backend: 'webgpu',
     format,
@@ -2458,9 +3921,13 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     renderTdksPhotonCloudScene,
     renderSpinLatticeScene,
     renderElectronTransportScene,
+    renderMoleculeScene,
+    renderMultiSpeciesCrystalScene,
+    renderReactiveMdScene,
     renderLiveMd,
     renderStaticCrystalLattice,
     renderPolytopeAtlas,
+    renderPolytopeAtlas3D,
     probePolytopeAtlasOnGpu,
     getPolytopeAxisBounds
   });

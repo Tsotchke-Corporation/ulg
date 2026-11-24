@@ -176,51 +176,60 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   // ---- 4. GPU Optical / Complex Dielectric Spectrum eps(omega), n(lambda), k(lambda), sRGB ----
   // Extract relativistic d/f -> s/p interband oscillators directly from the
   // already-solved GPU `atomResult.orbitals` (zero CPU `solveAtom()` fallback!).
+  const lNames = ['s', 'p', 'd', 'f', 'g'];
+  const gpuInterbandOscillators = [];
+  if (bulkResult.isMetal && Array.isArray(atomResult?.orbitals) && atomResult.orbitals.length > 0) {
+    const nBohr = Math.max(1e-9, nElecCond) * (BOHR_TO_M ** 3);
+    const kF = Math.cbrt(3 * Math.PI * Math.PI * nBohr);
+    const kTf = Math.sqrt((4 * kF) / Math.PI);
+    const eGasEv = 0.5 * HA_TO_EV * kTf * kTf;
+    const occupied = atomResult.orbitals.filter((o) => Number(o.occupancy ?? o.occ ?? 0) > 0);
+    const targets = atomResult.orbitals.filter((o) => Number(o.occupancy ?? o.occ ?? 0) < 2 * (2 * o.l + 1));
+    for (const from of occupied) {
+      if (from.l < 2) continue;
+      const capFrom = 2 * (2 * from.l + 1);
+      const occFrom = Number(from.occupancy ?? from.occ ?? 0);
+      // Upper spin-orbit edge j = l + 1/2 (e.g. Au 5d_5/2) governs visible absorption onset!
+      const hasSoEdge = Number.isFinite(from.energyJPlusHa);
+      const fromHa = hasSoEdge
+        ? from.energyJPlusHa
+        : Number(from.energyHa ?? from.energy ?? -0.5);
+      for (const to of targets) {
+        if (to.n === from.n && to.l === from.l) continue;
+        // Electric-dipole selection rule Delta l = +-1 (d -> p, f -> d)
+        if (Math.abs(to.l - from.l) !== 1) continue;
+        const toHa = Number(to.energyHa ?? to.energy ?? -0.05);
+        if (!(toHa > fromHa)) continue;
+        // Solid-state Pauli-blocking Fermi-level shift: occupied conduction electrons fill the
+        // bottom of the sp band up to E_F, shifting interband absorption onset upward above
+        // raw atomic KS virtual eigenvalues (general across all metals, zero element IDs!).
+        const fermiShiftEv = Math.max(0.0, Math.min(1.6, 0.16 * Number(bulkResult.fermiEnergyEv || 0)));
+        const rawGapEv = (toHa - fromHa) * HA_TO_EV + fermiShiftEv;
+        if (!(rawGapEv > 0.2 && rawGapEv < 9.5)) continue;
+        const capTo = 2 * (2 * to.l + 1);
+        const occTo = Number(to.occupancy ?? to.occ ?? 0);
+        const filled = Math.min(1, Math.max(0, occFrom / capFrom));
+        const vacancy = Math.min(1, Math.max(0, 1 - occTo / capTo));
+        const angular = to.l > from.l ? (from.l + 1) / (2 * from.l + 1) : from.l / (2 * from.l + 1);
+        const strengthWeight = filled * vacancy * angular * (from.l === 2 ? 1.85 : 0.75);
+        if (!(strengthWeight > 0)) continue;
+        const dampingEv = Math.max(0.22, 0.10 * rawGapEv + 0.032 * eGasEv * Math.sqrt(strengthWeight));
+        const soSub = hasSoEdge ? `(${2 * from.l + 1}/2)` : '';
+        const transitionLabel = `${from.n}${lNames[from.l] || from.l}${soSub}→${to.n}${lNames[to.l] || to.l}`;
+        gpuInterbandOscillators.push(Object.freeze({ energyEv: rawGapEv, dampingEv, strengthWeight, transitionLabel }));
+      }
+    }
+    gpuInterbandOscillators.sort((a, b) => a.energyEv - b.energyEv || b.strengthWeight - a.strengthWeight);
+    gpuInterbandOscillators.splice(4);
+  }
+
+  // Drude damping from Bloch-Gruneisen scattering rate + open-d-band interband damping
+  const drudeScatterEv = bulkResult.isMetal
+    ? Math.max(0.08, Math.min(2.6, (HBAR * (nElecCond * E_CHARGE * E_CHARGE) / Math.max(1e-20, M_ELECTRON * electricalConductivitySPerM)) / EV_TO_J + (dOcc > 0 && dOcc < 10 ? 0.55 : 0)))
+    : 0.25;
+
   let optics = null;
   if (device && typeof device.createBuffer === 'function') {
-    const gpuInterbandOscillators = [];
-    if (bulkResult.isMetal && Array.isArray(atomResult?.orbitals) && atomResult.orbitals.length > 0) {
-      const nBohr = Math.max(1e-9, nElecCond) * (BOHR_TO_M ** 3);
-      const kF = Math.cbrt(3 * Math.PI * Math.PI * nBohr);
-      const kTf = Math.sqrt((4 * kF) / Math.PI);
-      const eGasEv = 0.5 * HA_TO_EV * kTf * kTf;
-      const occupied = atomResult.orbitals.filter((o) => Number(o.occupancy ?? o.occ ?? 0) > 0);
-      const targets = atomResult.orbitals.filter((o) => Number(o.occupancy ?? o.occ ?? 0) < 2 * (2 * o.l + 1));
-      for (const from of occupied) {
-        if (from.l < 2) continue;
-        const capFrom = 2 * (2 * from.l + 1);
-        const occFrom = Number(from.occupancy ?? from.occ ?? 0);
-        // Upper spin-orbit edge j = l + 1/2 (e.g. Au 5d_5/2) governs visible absorption onset!
-        const fromHa = Number.isFinite(from.energyJPlusHa)
-          ? from.energyJPlusHa
-          : Number(from.energyHa ?? from.energy ?? -0.5);
-        for (const to of targets) {
-          if (to.n === from.n && to.l === from.l) continue;
-          // Electric-dipole selection rule Delta l = +-1 (d -> p, f -> d)
-          if (Math.abs(to.l - from.l) !== 1) continue;
-          const toHa = Number(to.energyHa ?? to.energy ?? -0.05);
-          if (!(toHa > fromHa)) continue;
-          const rawGapEv = (toHa - fromHa) * HA_TO_EV;
-          if (!(rawGapEv > 0.2 && rawGapEv < 8.0)) continue;
-          const capTo = 2 * (2 * to.l + 1);
-          const occTo = Number(to.occupancy ?? to.occ ?? 0);
-          const filled = Math.min(1, Math.max(0, occFrom / capFrom));
-          const vacancy = Math.min(1, Math.max(0, 1 - occTo / capTo));
-          const angular = to.l > from.l ? (from.l + 1) / (2 * from.l + 1) : from.l / (2 * from.l + 1);
-          const strengthWeight = filled * vacancy * angular * (from.l === 2 ? 1.85 : 0.75);
-          if (!(strengthWeight > 0)) continue;
-          const dampingEv = Math.max(0.22, 0.10 * rawGapEv + 0.032 * eGasEv * Math.sqrt(strengthWeight));
-          gpuInterbandOscillators.push({ energyEv: rawGapEv, dampingEv, strengthWeight });
-        }
-      }
-      gpuInterbandOscillators.sort((a, b) => a.energyEv - b.energyEv || b.strengthWeight - a.strengthWeight);
-      gpuInterbandOscillators.splice(4);
-    }
-
-    // Drude damping from Bloch-Gruneisen scattering rate + open-d-band interband damping
-    const drudeScatterEv = bulkResult.isMetal
-      ? Math.max(0.08, Math.min(2.6, (HBAR * (nElecCond * E_CHARGE * E_CHARGE) / Math.max(1e-20, M_ELECTRON * electricalConductivitySPerM)) / EV_TO_J + (dOcc > 0 && dOcc < 10 ? 0.55 : 0)))
-      : 0.25;
     const req = bulkResult.isMetal
       ? {
         mode: OPTICAL_RESOLVER_MODE_DRUDE_LORENTZ,
@@ -262,6 +271,8 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     isMetal: bulkResult.isMetal,
     bandGapEv: bulkResult.bandGapEv,
     plasmaEnergyEv,
+    drudeDampingEv: drudeScatterEv,
+    interbandOscillators: Object.freeze(gpuInterbandOscillators),
     workFunctionEv,
     electronPhononLambda: lambdaEp,
     electricalConductivitySPerM,
@@ -279,6 +290,7 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     spectralWavelengthsNm: optics?.spectralSamples?.map((s) => s.wavelengthNm) ?? null,
     spectralReflectance: optics?.spectralSamples?.map((s) => s.reflectance ?? 0) ?? null,
     spectralNRe: optics?.spectralSamples?.map((s) => s.nRe ?? 1) ?? null,
+    spectralAbsorptionPerM: optics?.spectralSamples?.map((s) => s.absorptionPerM ?? 0) ?? null,
     accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
     provenance: Object.freeze({
       status: optics ? (optics.resolverStatus || 'webgpu-derived') : 'reduced-estimate',

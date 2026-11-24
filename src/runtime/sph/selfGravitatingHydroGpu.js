@@ -7,7 +7,8 @@
  *   1. Live GPU system center-of-mass `(R_com, V_com)` reduction so the spatial
  *      hierarchy is strictly translation- and Galilean-invariant for ANY shifted
  *      cloud or multi-body system anywhere in R^3.
- *   2. 3-level Barnes-Hut octree (`16^3` leaves + `4^3` coarse) in COM-relative
+ *   2. Canonical parallel Schroeder Scale Atlas multipole gravity
+ *      (`createSchroederScaleAtlasGravitySolverWebGpu`) in COM-relative
  *      coordinates computing self-gravity `a_grav` and local gravitational
  *      potential `Phi_i` directly from actual particle masses `m_i`.
  *   3. Full-domain uniform `32^3` compressible hydrodynamics grid spanning the

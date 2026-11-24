@@ -3,15 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ULG — First-Principles Periodic Table, Quantum Lab & Polytope Atlas</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23050810'/%3E%3Cellipse cx='32' cy='32' rx='24' ry='10' fill='none' stroke='%237c4dff' stroke-width='3' transform='rotate(35 32 32)'/%3E%3Cellipse cx='32' cy='32' rx='24' ry='10' fill='none' stroke='%2356c2ff' stroke-width='3' transform='rotate(-35 32 32)'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23facc15'/%3E%3C/svg%3E" />
+    <title>ULG — First-Principles Material Physics Lab, Photon–Shell Optics &amp; Polytope Atlas</title>
     <style>
       :root {
-        --bg: #080d16;
-        --panel: rgba(14, 22, 36, 0.92);
-        --border: rgba(120, 175, 255, 0.22);
+        --bg: #050810;
+        --panel: rgba(11, 16, 28, 0.96);
+        --card: rgba(20, 27, 44, 0.72);
+        --border: rgba(124, 164, 240, 0.22);
         --accent: #56c2ff;
         --accent2: #ff9c54;
-        --text: #e6eefc;
+        --violet: #7c4dff;
+        --green: #34d399;
+        --gold: #facc15;
+        --danger: #f87171;
+        --text: #e8eefc;
         --muted: #8fa4c4;
       }
       * { box-sizing: border-box; }
@@ -21,83 +27,146 @@
         font-family: Inter, system-ui, -apple-system, sans-serif;
         overflow: hidden;
       }
-      .shell { display: grid; grid-template-columns: 360px 1fr; grid-template-rows: 48px 1fr; height: 100vh; }
+      .shell { display: grid; grid-template-columns: 356px 1fr; grid-template-rows: 46px 1fr; height: 100vh; }
       header {
         grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between;
-        padding: 0 16px; background: #0c1424; border-bottom: 1px solid var(--border);
+        padding: 0 14px; background: #090e1a; border-bottom: 1px solid var(--border); gap: 10px;
       }
-      header h1 { font-size: 14px; font-weight: 700; margin: 0; letter-spacing: 0.04em; color: var(--accent); }
-      .nav-links { display: flex; gap: 10px; font-size: 12px; }
+      header h1 { font-size: 13px; font-weight: 700; margin: 0; letter-spacing: 0.04em; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .nav-links { display: flex; gap: 7px; font-size: 11px; flex-shrink: 0; }
       .nav-links a {
-        color: var(--text); text-decoration: none; padding: 4px 10px; border-radius: 6px;
+        color: var(--text); text-decoration: none; padding: 4px 9px; border-radius: 6px;
         border: 1px solid var(--border); background: rgba(255,255,255,0.03);
       }
       .nav-links a:hover { border-color: var(--accent); color: var(--accent); }
       .sidebar {
         background: var(--panel); border-right: 1px solid var(--border);
-        padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+        padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 9px;
       }
+      .hero-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+      .chip {
+        background: rgba(86, 194, 255, 0.10); border: 1px solid rgba(86, 194, 255, 0.30);
+        color: #dbeafe; border-radius: 999px; padding: 3px 8px; font-size: 10px;
+        cursor: pointer; font-weight: 600; transition: 0.12s;
+      }
+      .chip:hover { background: rgba(86, 194, 255, 0.26); border-color: var(--accent); }
+      .chip.gold { background: rgba(250, 204, 21, 0.16); border-color: rgba(250, 204, 21, 0.55); color: #fef08a; }
+      .chip.react { background: rgba(124, 77, 255, 0.16); border-color: rgba(167, 139, 250, 0.5); color: #e9d5ff; }
       .pt-grid {
-        display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px;
+        display: grid; grid-template-columns: repeat(9, 1fr); gap: 2.5px;
+        max-height: 205px; overflow-y: auto; padding-right: 2px;
       }
       .el-btn {
-        background: rgba(255,255,255,0.04); border: 1px solid rgba(140,180,255,0.18);
-        color: var(--text); border-radius: 4px; padding: 3px 2px; font-size: 10px;
-        cursor: pointer; text-align: center; line-height: 1.15;
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(140,180,255,0.16);
+        color: var(--text); border-radius: 4px; padding: 2.5px 1px; font-size: 9.5px;
+        cursor: pointer; text-align: center; line-height: 1.1;
       }
-      .el-btn.active { background: rgba(86,194,255,0.28); border-color: var(--accent); font-weight: 700; }
-      .el-btn small { display: block; font-size: 8px; color: var(--muted); }
+      .el-btn:hover { border-color: rgba(86,194,255,0.65); background: rgba(86,194,255,0.14); }
+      .el-btn.active { background: rgba(86,194,255,0.30); border-color: var(--accent); font-weight: 700; color: #fff; }
+      .el-btn.metal-d { border-color: rgba(250, 204, 21, 0.24); }
+      .el-btn.noble { border-color: rgba(167, 139, 250, 0.35); }
+      .el-btn.halogen { border-color: rgba(52, 211, 153, 0.30); }
+      .el-btn.alkali { border-color: rgba(251, 146, 60, 0.34); }
+      .el-btn small { display: block; font-size: 7.5px; color: var(--muted); }
       .card {
-        background: rgba(255,255,255,0.03); border: 1px solid var(--border);
-        border-radius: 8px; padding: 10px; font-size: 12px;
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 8px; padding: 9px 10px; font-size: 11.5px;
       }
-      .card h3 { margin: 0 0 6px; font-size: 12px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
-      .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+      .card h3 { margin: 0 0 6px; font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.055em; display: flex; justify-content: space-between; align-items: center; }
+      .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.045); font-size: 11px; }
       .kv span:first-child { color: var(--muted); }
+      .kv span:last-child { text-align: right; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10.5px; }
       .main { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+      .specimen-bar {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 5px 12px; background: #0a1020; border-bottom: 1px solid rgba(124,164,240,0.16);
+        font-size: 11px; flex-wrap: wrap;
+      }
+      .specimen-pill {
+        display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+        border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.04);
+        font-weight: 600;
+      }
+      .specimen-pill.backfed { border-color: rgba(192,132,252,0.7); background: rgba(124,77,255,0.22); color: #f3e8ff; }
+      .swatch { display: inline-block; width: 13px; height: 13px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.45); vertical-align: middle; }
       .tabs {
-        display: flex; gap: 6px; padding: 8px 12px; background: #0c1424; border-bottom: 1px solid var(--border);
+        display: flex; gap: 5px; padding: 6px 12px; background: #090f1d; border-bottom: 1px solid var(--border);
         flex-wrap: wrap;
       }
       .tab-btn {
         background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--text);
-        padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+        padding: 5px 10px; border-radius: 6px; font-size: 11.5px; cursor: pointer; font-weight: 500;
       }
-      .tab-btn.active { background: rgba(86,194,255,0.22); border-color: var(--accent); color: #fff; font-weight: 600; }
-      .viewport-wrap { flex: 1; position: relative; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
-      .canvas-stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #050911; }
-      #gpu-canvas { width: 100%; height: 100%; display: block; background: #050911; cursor: grab; }
+      .tab-btn:hover { border-color: rgba(86,194,255,0.6); }
+      .tab-btn.active { background: rgba(86,194,255,0.22); border-color: var(--accent); color: #fff; font-weight: 700; }
+      .sim-controls {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+        padding: 6px 12px; background: rgba(12, 17, 30, 0.98); border-bottom: 1px solid var(--border);
+        font-size: 11px; min-height: 36px;
+      }
+      .ctrl-group {
+        display: inline-flex; align-items: center; gap: 5px;
+        background: rgba(255,255,255,0.035); border: 1px solid rgba(140,180,255,0.16);
+        border-radius: 6px; padding: 3px 7px;
+      }
+      .ctrl-group label { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+      .ctrl-group input[type="range"] { width: 82px; accent-color: var(--violet); padding: 0; border: none; background: transparent; }
+      .ctrl-group input[type="color"] { width: 22px; height: 18px; padding: 0; border: 1px solid var(--border); background: transparent; cursor: pointer; }
+      .ctrl-group input[type="checkbox"] { accent-color: var(--violet); margin: 0; cursor: pointer; }
+      .viewport-wrap { flex: 1; position: relative; display: grid; grid-template-columns: 1fr 346px; min-height: 0; }
+      .canvas-stage { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: #020408; }
+      #gpu-canvas { width: 100%; height: 100%; display: block; background: #020408; cursor: grab; }
       #gpu-canvas:active { cursor: grabbing; }
       #gpu-hud {
-        position: absolute; top: 10px; left: 12px; right: 12px; pointer-events: none;
-        display: flex; flex-direction: column; gap: 4px;
-        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+        position: absolute; top: 9px; left: 12px; right: 12px; pointer-events: none;
+        display: flex; flex-direction: column; gap: 3px;
+        text-shadow: 0 1px 5px rgba(0, 0, 0, 0.96);
+        background: rgba(5, 9, 18, 0.72); border: 1px solid rgba(124, 164, 240, 0.18);
+        border-radius: 7px; padding: 6px 10px; max-width: fit-content; backdrop-filter: blur(4px);
       }
-      #gpu-hud-title { font-size: 13px; font-weight: 700; color: var(--accent); }
-      #gpu-hud-sub { font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; color: var(--text); opacity: 0.92; }
+      #gpu-hud-title { font-size: 12.5px; font-weight: 700; color: var(--accent); }
+      #gpu-hud-sub { font-size: 10.5px; font-family: ui-monospace, SFMono-Regular, monospace; color: var(--text); opacity: 0.94; }
+      #gpu-overlay-bottom {
+        position: absolute; bottom: 9px; left: 12px; right: 12px; pointer-events: none;
+        display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; flex-wrap: wrap;
+      }
+      .live-meter {
+        background: rgba(7, 12, 24, 0.86); border: 1px solid rgba(124, 164, 240, 0.30);
+        border-radius: 7px; padding: 5px 9px; font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 10.5px; color: #e2e8f0; backdrop-filter: blur(4px);
+      }
+      .live-meter.fail-closed { border-color: rgba(248, 113, 113, 0.85); color: #fecaca; background: rgba(55, 12, 18, 0.9); }
       .plot-pane {
-        background: rgba(10,16,28,0.95); border-left: 1px solid var(--border);
-        padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+        background: rgba(8,13,24,0.98); border-left: 1px solid var(--border);
+        padding: 9px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
       }
-      canvas.plot { width: 100%; height: 148px; background: #070d18; border: 1px solid var(--border); border-radius: 6px; }
+      canvas.plot { width: 100%; height: 138px; background: #060b14; border: 1px solid var(--border); border-radius: 6px; display: block; }
       .badge {
         display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px;
         background: rgba(255,156,84,0.18); border: 1px solid rgba(255,156,84,0.5); color: var(--accent2);
       }
-      .row { display: flex; gap: 6px; align-items: center; }
+      .row { display: flex; gap: 5px; align-items: center; }
       input, select, button.action {
-        background: #0d1729; color: var(--text); border: 1px solid var(--border);
-        border-radius: 6px; padding: 5px 8px; font-size: 12px;
+        background: #0d1628; color: var(--text); border: 1px solid var(--border);
+        border-radius: 6px; padding: 4px 7px; font-size: 11px;
       }
-      button.action { background: rgba(86,194,255,0.2); border-color: var(--accent); cursor: pointer; font-weight: 600; }
+      button.action { background: rgba(86,194,255,0.18); border-color: var(--accent); cursor: pointer; font-weight: 600; }
+      button.action:hover { background: rgba(86,194,255,0.32); }
+      button.action.active-toggle { background: rgba(124,77,255,0.36); border-color: #a78bfa; color: #fff; }
+      button.action.gold-btn { background: rgba(250,204,21,0.20); border-color: var(--gold); color: #fef08a; }
+      button.action.backfeed-btn { background: linear-gradient(90deg, rgba(124,77,255,0.35), rgba(52,211,153,0.30)); border-color: var(--green); color: #ecfdf5; width: 100%; padding: 6px 9px; margin-top: 5px; }
+      .product-card {
+        background: rgba(124,77,255,0.09); border: 1px solid rgba(167,139,250,0.35);
+        border-radius: 6px; padding: 6px 8px; margin-top: 6px; font-size: 11px;
+      }
     </style>
   </head>
   <body>
     <div class="shell">
       <header>
-        <h1>ULG — FIRST-PRINCIPLES PERIODIC TABLE, QUANTUM LAB &amp; POLYTOPE ATLAS (Z = 1..118)</h1>
+        <h1>ULG — FIRST-PRINCIPLES MATERIAL PHYSICS LAB, PHOTON–SHELL OPTICS &amp; POLYTOPE ATLAS</h1>
         <div class="nav-links">
-          <a href="./">Studio Continuum</a>
+          <a href="./index.html">Studio Continuum</a>
           <a href="./cosmic-quantum.html">Cosmic ↔ Quantum</a>
           <a href="./stellar-genesis.html">Stellar Genesis</a>
           <a href="./supergalactic.html">Supergalactic TreePM ↗</a>
@@ -106,31 +175,55 @@
 
       <aside class="sidebar">
         <div class="card">
-          <h3>Periodic Table &amp; Isotopes (Z = 1..118, A)</h3>
-          <div class="row" style="margin-bottom:6px;">
-            <label style="font-size:11px;color:var(--muted);">Z</label>
-            <input id="z-input" type="number" min="1" max="118" value="26" style="width:58px;" />
-            <label style="font-size:11px;color:var(--muted);">A</label>
-            <input id="a-input" type="number" min="1" max="310" placeholder="A*" title="Mass number A (leave empty for valley of stability A*)" style="width:62px;" />
-            <button id="reset-a-btn" class="action" title="Reset to valley-of-stability mass number A*" style="padding:5px 7px;">A*</button>
-            <button id="solve-z-btn" class="action">Solve</button>
-          </div>
-          <div class="row" style="margin-bottom:8px;justify-content:space-between;">
+          <h3>
+            <span>Periodic Table &amp; Isotopes (Z = 1..118)</span>
             <span id="status-badge" class="badge">booting…</span>
-            <span style="font-size:10px;color:var(--muted);">Click Chart of Nuclides to pick (Z, A)</span>
+          </h3>
+          <div class="hero-chips" id="hero-presets">
+            <button class="chip gold" data-hero-z="79" data-hero-tab="crystal" title="Inspect relativistic 5d→6p Gold color in live Maxwell Photon–Shell simulation!">Au Gold Color</button>
+            <button class="chip" data-hero-z="47" data-hero-tab="crystal">Ag Silver</button>
+            <button class="chip" data-hero-z="29" data-hero-tab="crystal">Cu Copper</button>
+            <button class="chip" data-hero-z="26" data-hero-tab="atomic">Fe Orbital</button>
+            <button class="chip" data-hero-z="6" data-hero-tab="crystal">C Diamond</button>
+            <button class="chip" data-hero-z="14" data-hero-tab="crystal">Si</button>
+            <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Tunnel</button>
+            <button class="chip react" data-hero-compound="H2O" data-hero-tab="crystal">H₂O n(λ)</button>
+            <button class="chip react" data-hero-react="Na|H2O">Na + H₂O ⚡</button>
+          </div>
+          <div class="row" style="margin-bottom:6px;">
+            <label style="font-size:10.5px;color:var(--muted);">Z</label>
+            <input id="z-input" type="number" min="1" max="118" value="26" style="width:52px;" />
+            <label style="font-size:10.5px;color:var(--muted);">A</label>
+            <input id="a-input" type="number" min="1" max="310" placeholder="A*" title="Mass number A (blank = valley of stability A*)" style="width:58px;" />
+            <button id="reset-a-btn" class="action" title="Reset to valley-of-stability mass number A*">A*</button>
+            <button id="solve-z-btn" class="action" style="flex:1;">Solve GPU</button>
           </div>
           <div id="pt-grid" class="pt-grid"></div>
         </div>
 
         <div class="card">
-          <h3>Reaction → Compound &amp; Isotopologue (Gate 2)</h3>
+          <h3>Chemistry Combiner → Compound Backfeed</h3>
+          <div class="row" style="margin-bottom:5px;">
+            <input id="reactant-a" type="text" value="Na" placeholder="A (e.g. Na)" style="width:74px;" />
+            <span style="color:var(--muted);font-weight:700;">+</span>
+            <input id="reactant-b" type="text" value="H2O" placeholder="B (e.g. H2O)" style="flex:1;" />
+            <button id="run-reaction-btn" class="action">React</button>
+          </div>
+          <div class="hero-chips" id="reaction-presets" style="margin-bottom:6px;">
+            <button class="chip react" data-rxn="Na|H2O">Na+H₂O</button>
+            <button class="chip react" data-rxn="H2|O2">H₂+O₂</button>
+            <button class="chip react" data-rxn="Na|Cl2">Na+Cl₂</button>
+            <button class="chip react" data-rxn="Fe|O2">Fe+O₂</button>
+            <button class="chip react" data-rxn="Cs|F2">Cs+F₂</button>
+            <button class="chip react" data-rxn="Al|O2">Al+O₂</button>
+            <button class="chip react" data-rxn="C|O2">C+O₂</button>
+            <button class="chip react" data-rxn="Si|O2">Si+O₂</button>
+          </div>
           <div class="row">
-            <input id="compound-input" type="text" value="H2O" placeholder="e.g. H2O, D2O, 235UF6, NaCl" style="flex:1;" />
+            <input id="compound-input" type="text" value="H2O" placeholder="Formula: H2O, D2O, NaCl, 235UF6" style="flex:1;" />
             <button id="solve-compound-btn" class="action">Derive</button>
           </div>
-          <div style="font-size:11px;color:var(--muted);margin-top:6px;">
-            Feeds any compound or isotopologue (<code>D2O</code>, <code>T2O</code>, <code>235UF6</code>, <code>14CO2</code>) back through GPU Molecular RHF / Crystal DFT + ZPE MD → Polytope Atlas.
-          </div>
+          <div id="reaction-results"></div>
         </div>
 
         <div id="bundle-readout" class="card">
@@ -140,35 +233,46 @@
       </aside>
 
       <main class="main">
+        <div class="specimen-bar" id="specimen-bar">
+          <div class="row" style="gap:8px;flex-wrap:wrap;">
+            <span id="active-specimen-pill" class="specimen-pill">Loading Fe-56…</span>
+            <span id="specimen-backfeed-hint" style="color:var(--muted);font-size:10.5px;">All 6 tabs run live GPU physics on the active specimen</span>
+          </div>
+          <div id="specimen-history" class="row" style="gap:4px;flex-wrap:wrap;"></div>
+        </div>
+
         <div class="tabs">
-          <button class="tab-btn active" data-tab="nuclear">1. Nuclear (10⁻¹⁵ m)</button>
-          <button class="tab-btn" data-tab="atomic">2. Atomic QM (10⁻¹⁰ m)</button>
-          <button class="tab-btn" data-tab="crystal">3. Crystal &amp; EM (10⁻⁹ m)</button>
+          <button class="tab-btn active" data-tab="nuclear">1. Nuclear &amp; TDSE (10⁻¹⁵ m)</button>
+          <button class="tab-btn" data-tab="atomic">2. Schrödinger / Dirac–KS (10⁻¹⁰ m)</button>
+          <button class="tab-btn" data-tab="crystal">3. Photon–Shell Optics &amp; DFT (10⁻⁹ m)</button>
           <button class="tab-btn" data-tab="md">4. Live WebGPU MD</button>
-          <button class="tab-btn" data-tab="compound">5. Compound &amp; Reaction QM</button>
+          <button class="tab-btn" data-tab="compound">5. Chemistry, CI-NEB &amp; Backfeed</button>
           <button class="tab-btn" data-tab="polytope">6. Convex Polytope Atlas</button>
         </div>
+
+        <div id="sim-controls" class="sim-controls"></div>
 
         <div class="viewport-wrap">
           <div class="canvas-stage">
             <canvas id="gpu-canvas"></canvas>
             <div id="gpu-hud">
               <div id="gpu-hud-title">WebGPU 3D Scientific Viewport</div>
-              <div id="gpu-hud-sub">Direct GPU storage-buffer rendering (fixed camera; drag to orbit)</div>
+              <div id="gpu-hud-sub">Direct GPU storage-buffer rendering (fixed camera; drag to orbit, scroll to zoom)</div>
             </div>
+            <div id="gpu-overlay-bottom"></div>
           </div>
           <section class="plot-pane">
             <div class="card">
               <h3 id="plot1-title">Chart of Nuclides / Live Diagnostic</h3>
-              <canvas id="plot1" class="plot" width="320" height="148"></canvas>
+              <canvas id="plot1" class="plot" width="324" height="138"></canvas>
             </div>
             <div class="card">
-              <h3 id="plot2-title">WKB Barrier / Bands / RDF / Polytopes</h3>
-              <canvas id="plot2" class="plot" width="320" height="148"></canvas>
+              <h3 id="plot2-title">WKB Barrier &amp; TDSE / Bands / RDF / Polytopes</h3>
+              <canvas id="plot2" class="plot" width="324" height="138"></canvas>
             </div>
             <div id="plot3-card" class="card">
-              <h3 id="plot3-title">Spectral UV-Vis / Angular |Y_lm|² / MD Telemetry</h3>
-              <canvas id="plot3" class="plot" width="320" height="130"></canvas>
+              <h3 id="plot3-title">Photon–Shell Absorption / UV-Vis / Angular / MD</h3>
+              <canvas id="plot3" class="plot" width="324" height="128"></canvas>
             </div>
             <div id="g7-card" class="card">
               <h3>Accuracy Tier &amp; Offline G7 Advisory</h3>

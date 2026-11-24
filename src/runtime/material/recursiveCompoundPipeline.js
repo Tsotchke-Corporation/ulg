@@ -346,40 +346,56 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
   }
 
   // Representative live WebGPU MD verification matching actual crystal symmetry & exact formula-unit volume!
+  const tProbeMd = Math.max(15, Math.min(temperatureK, 0.65 * meltingPointK));
+  const formulaVolA3 = (molMassKg / Math.max(1, densityKgPerM3)) * 1e30;
+  const basisCount = crystalStructure.startsWith('cscl') || crystalStructure === 'bcc'
+    ? 2
+    : (crystalStructure.startsWith('zincblende') || crystalStructure === 'diamond' ? 8 : 4);
+  const mdLatticeA = Math.max(2.6, Math.min(9.5, Math.cbrt(formulaVolA3 * basisCount)));
+  const rNnFactor = basisCount === 2
+    ? Math.sqrt(3) / 2
+    : (basisCount === 8 ? Math.sqrt(3) / 4 : 1 / Math.SQRT2);
+  const rNnMd = mdLatticeA * rNnFactor;
+  const mdConfig = Object.freeze({
+    crystalStructure,
+    latticeConstantA: mdLatticeA,
+    massU: Math.max(2, molarMassU),
+    potentialModel: isIonicSolid ? MD_POTENTIAL_MODELS.MORSE_EAM : MD_POTENTIAL_MODELS.LENNARD_JONES,
+    modelName: isIonicSolid ? 'Morse+EAM (Ionic Lattice)' : 'Lennard-Jones (Molecular/Dispersion)',
+    epsilonEv: Math.max(0.005, Math.min(1.5, cohesiveEnergyEv / 8.0)),
+    sigmaOrR0A: isIonicSolid ? Math.max(1.8, rNnMd * 1.08) : Math.max(1.8, rNnMd / Math.pow(2, 1 / 6)),
+    alphaOrLambda: 1.4,
+    eamAEv: isIonicSolid ? cohesiveEnergyEv * 0.2 : 0,
+    eamBeta: 1.4,
+    rcutA: Math.max(4.5, mdLatticeA * 1.25),
+    dtFs: Math.min(2.0, Math.max(0.5, 0.14 * Math.sqrt(Math.max(2, molarMassU)))),
+    defaultTemperatureK: tProbeMd
+  });
+
   let mdTelemetry = null;
   if (runLiveMd && device && typeof device.createBuffer === 'function') {
-    const tProbe = Math.max(15, Math.min(temperatureK, 0.65 * meltingPointK));
-    const formulaVolA3 = (molMassKg / Math.max(1, densityKgPerM3)) * 1e30;
-    const basisCount = crystalStructure.startsWith('cscl') || crystalStructure === 'bcc'
-      ? 2
-      : (crystalStructure.startsWith('zincblende') || crystalStructure === 'diamond' ? 8 : 4);
-    const mdLatticeA = Math.max(2.6, Math.min(9.5, Math.cbrt(formulaVolA3 * basisCount)));
     const init = buildCrystalMdState({
-      crystalStructure,
+      crystalStructure: mdConfig.crystalStructure,
       cellsPerSide: mdCellsPerSide,
-      latticeConstantA: mdLatticeA,
-      massU: Math.max(2, molarMassU),
-      temperatureK: tProbe
+      latticeConstantA: mdConfig.latticeConstantA,
+      massU: mdConfig.massU,
+      temperatureK: tProbeMd
     });
-    const rNnFactor = basisCount === 2
-      ? Math.sqrt(3) / 2
-      : (basisCount === 8 ? Math.sqrt(3) / 4 : 1 / Math.SQRT2);
-    const rNnMd = mdLatticeA * rNnFactor;
     const session = createMolecularDynamicsSessionWebGpu(device, {
       ...init,
-      potentialModel: isIonicSolid ? MD_POTENTIAL_MODELS.MORSE_EAM : MD_POTENTIAL_MODELS.LENNARD_JONES,
-      epsilonEv: Math.max(0.005, Math.min(1.5, cohesiveEnergyEv / 8.0)),
-      sigmaOrR0A: isIonicSolid ? Math.max(1.8, rNnMd * 1.08) : Math.max(1.8, rNnMd / Math.pow(2, 1 / 6)),
-      alphaOrLambda: 1.4,
-      eamAEv: isIonicSolid ? cohesiveEnergyEv * 0.2 : 0,
-      eamBeta: 1.4,
-      rcutA: Math.max(4.5, mdLatticeA * 1.25),
-      dtFs: 1.5,
-      targetTemperatureK: tProbe,
+      potentialModel: mdConfig.potentialModel,
+      epsilonEv: mdConfig.epsilonEv,
+      sigmaOrR0A: mdConfig.sigmaOrR0A,
+      alphaOrLambda: mdConfig.alphaOrLambda,
+      eamAEv: mdConfig.eamAEv,
+      eamBeta: mdConfig.eamBeta,
+      rcutA: mdConfig.rcutA,
+      dtFs: mdConfig.dtFs,
+      targetTemperatureK: tProbeMd,
       thermostatCouplingFs: 40
     });
     try {
-      mdTelemetry = await session.stepBatch(mdSteps, { readTelemetry: true, temperatureK: tProbe });
+      mdTelemetry = await session.stepBatch(mdSteps, { readTelemetry: true, temperatureK: tProbeMd });
     } finally {
       session.destroy();
     }
@@ -453,6 +469,9 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     electromagnetic: {
       isMetal,
       bandGapEv,
+      plasmaEnergyEv: isMetal ? Math.max(1.5, Number(optics?.plasmaEnergyEv) || 8.0) : 0,
+      drudeDampingEv: isMetal ? 0.45 : 0.08,
+      interbandOscillators: [],
       electricalConductivitySPerM: electricalCond,
       staticDielectricConstant: isMetal ? Infinity : (1 + Math.pow(9.5 / Math.max(0.5, bandGapEv), 2) + (molQm?.dipoleDebye ?? 0) ** 2 * 18),
       magneticPhase: (totalZ % 2 === 1) ? 'paramagnetic' : 'diamagnetic',
@@ -460,7 +479,9 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
       refractiveIndex550Nm: derivedIor550,
       reflectance550Nm: derivedReflectance550,
       spectralWavelengthsNm: optics?.spectralSamples?.map((s) => s.wavelengthNm) ?? null,
-      spectralReflectance: optics?.spectralSamples?.map((s) => s.reflectance ?? 0) ?? null
+      spectralReflectance: optics?.spectralSamples?.map((s) => s.reflectance ?? 0) ?? null,
+      spectralNRe: optics?.spectralSamples?.map((s) => s.nRe ?? derivedIor550) ?? null,
+      spectralAbsorptionPerM: optics?.spectralSamples?.map((s) => s.absorptionPerM ?? 0) ?? null
     },
     mechanical: {
       crystalStructure,
@@ -509,8 +530,55 @@ export async function deriveCompoundBundleWebGpu(device, formula, {
     visualData: Object.freeze({
       molQm,
       optics,
-      mdTelemetry
+      mdTelemetry,
+      mdConfig
     })
+  });
+}
+
+function maybeBalancedHydrogenOxygenCandidate(leftFormula, rightFormula) {
+  let dA;
+  let dB;
+  try {
+    dA = describeIsotopologueFormula(leftFormula);
+    dB = describeIsotopologueFormula(rightFormula);
+  } catch {
+    return null;
+  }
+  if (dA.elements.length !== 1 || dB.elements.length !== 1) return null;
+  const hSide = dA.elements[0].Z === 1 ? { f: leftFormula, d: dA } : (dB.elements[0].Z === 1 ? { f: rightFormula, d: dB } : null);
+  const oSide = dA.elements[0].Z === 8 ? { f: leftFormula, d: dA } : (dB.elements[0].Z === 8 ? { f: rightFormula, d: dB } : null);
+  if (!hSide || !oSide) return null;
+  const hSite = hSide.d.sites[0];
+  const hSym = hSite.A === 2 ? 'D' : (hSite.A === 3 ? 'T' : 'H');
+  const hPerMol = hSide.d.elements[0].count;
+  const oPerMol = oSide.d.elements[0].count;
+  const prodFormula = `${hSym}2O`;
+  // Balance cH * hPerMol = 2 * cProd and cO * oPerMol = cProd
+  const cProd = (hPerMol === 1 && oPerMol === 1) ? 1 : 2;
+  const cH = (2 * cProd) / hPerMol;
+  const cO = cProd / oPerMol;
+  const fmtT = (c, f) => (c === 1 ? f : `${c} ${f}`);
+  return Object.freeze({
+    familyId: 'hydrogen-oxygen-synthesis',
+    familyLabel: 'hydrogen + oxygen -> water synthesis',
+    equation: `${fmtT(cH, hSide.f)} + ${fmtT(cO, oSide.f)} -> ${fmtT(cProd, prodFormula)}`,
+    reactants: [
+      { coefficient: cH, formula: hSide.f, atomCounts: { 1: hPerMol } },
+      { coefficient: cO, formula: oSide.f, atomCounts: { 8: oPerMol } }
+    ],
+    products: [
+      { coefficient: cProd, formula: prodFormula, atomCounts: { 1: 2, 8: 1 } }
+    ],
+    productFormula: prodFormula,
+    atomBalance: { balanced: true, reactants: { 1: 2 * cProd, 8: cProd }, products: { 1: 2 * cProd, 8: cProd } },
+    energetics: {
+      model: 'provisional-hydrogen-oxygen-combustion-v0',
+      provisional: true,
+      reactionEnthalpyJPerBalancedEquation: -241_800 * cProd
+    },
+    sedenionScope: { reactiveClass: 'reactive' },
+    scientificValidation: false
   });
 }
 
@@ -526,8 +594,11 @@ export async function discoverAndDeriveReactionProductsWebGpu(device, reactantMa
   for (let i = 0; i < list.length; i += 1) {
     for (let j = i + 1; j < list.length; j += 1) {
       const discovery = discoverReactionCandidates(list[i], list[j], options.discoveryOptions || {});
-      if (Array.isArray(discovery?.candidates)) {
+      if (Array.isArray(discovery?.candidates) && discovery.candidates.length > 0) {
         candidates.push(...discovery.candidates);
+      } else {
+        const hoCand = maybeBalancedHydrogenOxygenCandidate(list[i], list[j]);
+        if (hoCand) candidates.push(hoCand);
       }
     }
   }
@@ -559,6 +630,7 @@ export async function discoverAndDeriveReactionProductsWebGpu(device, reactantMa
     schema: 'ulg.reaction-feedback-pipeline-webgpu.v1',
     reactants: Object.freeze([...list]),
     candidateCount: candidates.length,
+    candidates: Object.freeze(candidates),
     productFormulas: Object.freeze(productFormulas),
     derivedProducts: Object.freeze(derivedProducts)
   });

@@ -334,6 +334,13 @@ export async function solveMoleculeRhfWebGpu(device, atoms, {
       volDim,
       boxHalfBohr: maxCoord,
       volumeData,
+      atomOrbitalParams: Object.freeze({
+        posZeta: new Float32Array(posZeta),
+        weights: new Float32Array(weights),
+        boxHalfBohr: maxCoord,
+        homoIdx,
+        lumoIdx
+      }),
       accuracyTier: ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
       provenance: Object.freeze({
         status: 'webgpu-derived',

@@ -217,8 +217,15 @@ fn ks_hartree_pbe_xc(@builtin(local_invocation_id) lid: vec3<u32>) {
   workgroupBarrier();
 
   if (i < n) {
+    if (params.use_pbe == 2u) {
+      vh_grid[i] = 0.0;
+      fxc_grid[i] = 0.0;
+      vxc_grid[i] = 0.0;
+      velec_grid[i] = 0.0;
+      return;
+    }
     var vxc_val: f32 = df_drho;
-    if (params.use_pbe != 0u && rhoi > 1e-13) {
+    if (params.use_pbe == 1u && rhoi > 1e-13) {
       var div_term: f32 = 0.0;
       if (i > 0u && i + 1u < n) {
         div_term = (sh_r2dfdg[i + 1u] - sh_r2dfdg[i - 1u]) / (2.0 * dx * ri);
@@ -1126,13 +1133,15 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   rMaxBohr = null,
   mixing = 0.25,
   maxScf = 60,
-  returnRadialDensity = true
+  returnRadialDensity = true,
+  returnOrbitalWavefunctions = false
 } = {}) {
   if (!device || typeof device.createComputePipeline !== 'function') {
     throw new TypeError('solveAtomFullWebGpu requires a valid WebGPU GPUDevice.');
   }
   const n = Math.min(RADIAL_KS_WEBGPU_GRID_N, Math.max(64, Math.floor(gridPointsN)));
-  const usePbe = String(functional || 'pbe').toLowerCase() === 'pbe' ? 1 : 0;
+  const funcNorm = String(functional || 'pbe').toLowerCase();
+  const usePbe = funcNorm === 'bare' ? 2 : (funcNorm === 'pbe' ? 1 : 0);
   const useRel = scalarRelativistic ? 1 : 0;
   const rNucBohr = Math.max(0, Number(nuclearChargeRadiusBohr) || 0);
   const rMax = rMaxBohr ?? Math.max(20, 60 / Math.sqrt(atomicNumberZ));
@@ -1179,11 +1188,15 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
   const fxcBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE });
   const velecBuf = device.createBuffer({ size: bytes, usage: GPU_BUF_STORAGE });
   const auxBuf = device.createBuffer({ size: bytes * 4, usage: GPU_BUF_STORAGE });
-  const orbUBuf = device.createBuffer({ size: Math.max(1, orbCount) * bytes, usage: GPU_BUF_STORAGE });
+  const orbUBuf = device.createBuffer({
+    size: Math.max(1, orbCount) * bytes,
+    usage: returnOrbitalWavefunctions ? (GPU_BUF_STORAGE | GPU_BUF_COPY_SRC) : GPU_BUF_STORAGE
+  });
   const orbMetaBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_DST | GPU_BUF_COPY_SRC });
   const summaryBuf = device.createBuffer({ size: 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
   const soBuf = device.createBuffer({ size: Math.max(1, orbCount) * 16, usage: GPU_BUF_STORAGE | GPU_BUF_COPY_SRC });
-  const totalReadBytes = 16 + Math.max(1, orbCount) * 16 + Math.max(1, orbCount) * 16 + bytes;
+  const orbUBytes = returnOrbitalWavefunctions ? Math.max(1, orbCount) * bytes : 0;
+  const totalReadBytes = 16 + Math.max(1, orbCount) * 16 + Math.max(1, orbCount) * 16 + bytes + orbUBytes;
   const finalReadBuf = device.createBuffer({ size: totalReadBytes, usage: GPU_BUF_MAP_READ | GPU_BUF_COPY_DST });
 
   try {
@@ -1240,6 +1253,9 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
     enc.copyBufferToBuffer(orbMetaBuf, 0, finalReadBuf, 16, metaBytes);
     enc.copyBufferToBuffer(soBuf, 0, finalReadBuf, 16 + metaBytes, metaBytes);
     enc.copyBufferToBuffer(rhoBuf, 0, finalReadBuf, 16 + metaBytes * 2, bytes);
+    if (returnOrbitalWavefunctions && orbUBytes > 0) {
+      enc.copyBufferToBuffer(orbUBuf, 0, finalReadBuf, 16 + metaBytes * 2 + bytes, orbUBytes);
+    }
     device.queue.submit([enc.finish()]);
 
     await finalReadBuf.mapAsync(GPU_MAP_READ);
@@ -1255,7 +1271,11 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
     const metaOffset = 4;
     const soOffset = 4 + orbCount * 4;
     const rhoOffset = 4 + orbCount * 8;
+    const orbUOffset = rhoOffset + n;
     const finalRho = Array.from(allFloats.slice(rhoOffset, rhoOffset + n));
+    const orbitalWavefunctions = returnOrbitalWavefunctions
+      ? Array.from({ length: orbCount }, (_, s) => allFloats.slice(orbUOffset + s * n, orbUOffset + (s + 1) * n))
+      : null;
 
     let sumOcc = 0;
     let electronCount = 0;
@@ -1302,7 +1322,7 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       symbol: symbolForZ(atomicNumberZ),
       atomicNumberZ,
       configuration: cfg,
-      functional: usePbe ? 'pbe' : 'lda',
+      functional: usePbe === 2 ? 'bare' : (usePbe ? 'pbe' : 'lda'),
       relativisticMethod: useRel
         ? (spinOrbit ? 'koelling-harmon-gpu+spin-orbit+qed' : 'koelling-harmon-gpu+qed')
         : (spinOrbit ? 'schrodinger-log-gpu+spin-orbit' : 'schrodinger-log-gpu'),
@@ -1324,6 +1344,7 @@ export async function solveAtomFullWebGpu(device, atomicNumberZ, {
       perScfCpuReadbacks: 0,
       webgpuProgramHash: RADIAL_KS_WEBGPU_PROGRAM_HASH,
       ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: finalRho, dx } } : {}),
+      ...(returnOrbitalWavefunctions && orbitalWavefunctions ? { orbitalWavefunctions } : {}),
       validation: Object.freeze({
         scientificValidation: false,
         webgpuParity: false

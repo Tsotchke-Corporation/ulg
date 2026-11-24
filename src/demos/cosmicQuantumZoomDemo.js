@@ -1388,7 +1388,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
       `;
     } else if (rid === 'molecular-lattice' && mol) {
       const bondStr = mol.bondDiscoveryTrace.bonds.map((b) => `B=${b.mayerBondOrder.toFixed(2)} (${(b.distanceM * 1e12).toFixed(0)}pm)`).join(', ');
-      const nebSvg = nebModeActive ? buildNebEnergySvg(ensureNebReactionPath(), nebReactionXi) : '';
+      const nebSvg = nebModeActive ? buildNebEnergySvg(cachedNebPath, nebReactionXi) : '';
       regimeSpecificHtml = `
         <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:8px;">
           <div style="font-weight:600;color:#5eead4;margin-bottom:6px;">Molecular HF Density, CI-NEB &amp; Polytopes</div>

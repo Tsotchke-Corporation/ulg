@@ -87,7 +87,11 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
   atomicMaxScf = 55,
   atomicGridPointsN = 256,
   nuclearVolDim = 24,
-  blochGridN = 16
+  blochGridN = 16,
+  functional = 'pbe',
+  scalarRelativistic = true,
+  spinOrbit = true,
+  returnOrbitalWavefunctions = false
 } = {}) {
   const Z = Math.trunc(Number(atomicNumberZ));
   if (!(Z >= 1 && Z <= 118)) {
@@ -120,9 +124,9 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
 
   // Stage P1.2: 100% GPU-Resident Finite-Nucleus Relativistic Atomic DFT (+ reduced-mass & hyperfine)
   const atom = await solveAtomFullWebGpu(device, Z, {
-    functional: 'pbe',
-    spinOrbit: true,
-    scalarRelativistic: true,
+    functional,
+    spinOrbit,
+    scalarRelativistic,
     configuration: augmentedCfg,
     nuclearChargeRadiusBohr: nuclear.chargeRadiusBohr,
     nuclearMassU: nuclear.atomicMassU,
@@ -131,7 +135,8 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
     gridPointsN: atomicGridPointsN,
     rMinBohr: Math.min(1e-4, Math.max(1e-5, nuclear.chargeRadiusBohr * 0.5)),
     maxScf: atomicMaxScf,
-    returnRadialDensity: true
+    returnRadialDensity: true,
+    returnOrbitalWavefunctions
   });
 
   // Stage P1.3a: GPU Periodic Plane-Wave Bulk Solid DFT + 3D Bloch Density (isotope mass propagated!)
@@ -224,6 +229,8 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       fermiEnergyEv: bulk.fermiEnergyEv,
       dosAtFermiStatesPerEvAtom: bulk.dosAtFermiStatesPerEvAtom,
       plasmaEnergyEv: em.plasmaEnergyEv,
+      drudeDampingEv: em.drudeDampingEv,
+      interbandOscillators: em.interbandOscillators,
       workFunctionEv: em.workFunctionEv,
       electricalConductivitySPerM: em.electricalConductivitySPerM,
       electricalResistivityOhmM: em.electricalResistivityOhmM,
@@ -237,6 +244,9 @@ export async function deriveElementBundleWebGpu(device, atomicNumberZ, {
       opticalSrgb: em.opticalSrgb,
       refractiveIndex550Nm: em.refractiveIndex550Nm,
       reflectance550Nm: em.reflectance550Nm,
+      spectralWavelengthsNm: em.spectralWavelengthsNm,
+      spectralReflectance: em.spectralReflectance,
+      spectralNRe: em.spectralNRe,
       oscillatorSource: em.provenance?.oscillatorSource ?? 'none'
     },
     mechanical: {

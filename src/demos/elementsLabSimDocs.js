@@ -222,14 +222,15 @@ export const SIMULATION_DOCS = Object.freeze({
     scale: '10⁻⁸ m (Atomistic MD)',
     moduleKey: 'md-mechanical-probe@1',
     whatYouSee:
-      'Hundreds to ~1,000 live interacting atoms rendered zero-copy with depth-correct spherical shading directly from WebGPU storage buffers. In Drop & Vapor open-chamber mode, watch a faceted solid crystal melt from its free surfaces into a cohesive liquid droplet and boil off into a chamber-filling vapor gas; in Bulk NPT mode, watch the periodic lattice expand visibly inside the gold V₀ reference wireframe.',
+      'From 500 up to 100,000+ live interacting atoms rendered zero-copy with depth-correct spherical shading directly from WebGPU storage buffers. In Drop & Vapor open-chamber mode, watch a faceted solid crystal melt from its free surfaces into a cohesive liquid droplet and boil off into a chamber-filling vapor gas; in Bulk NPT mode, watch the periodic lattice expand visibly inside the gold V₀ reference wireframe.',
     gpuPhysics:
-      'Runs an O(N) 3D uniform spatial cell-listed Velocity-Verlet integrator on WebGPU with DFT-fitted Morse+Finnis–Sinclair EAM, Shifted-Force Lennard-Jones, or 3-body Stillinger–Weber potentials, exact exponential thermostatting, adaptive-compressibility Berendsen NPT barostat, live GPU per-atom coordination z_i & Solid/Liquid/Vapor phase classification, g(r), MSD, Lindemann δ_L, and VACF phonon VDOS.',
+      'Runs an O(N) lock-free linked-cell 3D spatial grid Velocity-Verlet integrator on WebGPU (scaling cleanly past 100,000 atoms within the universal 8-storage-buffer baseline) with DFT-fitted Morse+Finnis–Sinclair EAM, Shifted-Force Lennard-Jones, or 3-body Stillinger–Weber potentials, exact exponential thermostatting, adaptive-compressibility Berendsen NPT barostat, live GPU per-atom coordination z_i & Solid/Liquid/Vapor phase classification, g(r), MSD, Lindemann δ_L, and VACF phonon VDOS.',
     whyInUlg:
       'Representative MD cells bridge atomic DFT up to macroscopic continuum equations of state, melting/boiling coexistence curves, and Polytope Atlases.',
     tryThis: [
       'Click Solid, Melt, and Vapor to watch the faceted crystal physically melt into a diffusing liquid droplet and then boil into fast gas atoms (color by Phase to see sapphire solid → emerald liquid → magenta vapor live!).',
-      'Switch Chamber to Bulk NPT or raise Atom Count to ~900, and drop Sim Speed to 0.25× to watch atomic collisions with a 4× finer Verlet timestep.'
+      'Toggle Gravity ↓ ON to activate downward body acceleration (−m g ŷ) and a smooth harmonic chamber floor — watch a solid crystal drop and land on the floor, a melted droplet pool into a sessile liquid puddle, or vapor settle into a barometric atmosphere!',
+      'Scale Atoms up to 10K, 50K, or 100K to watch a true 100,000-atom nanoscale crystal evolve on WebGPU, or switch Chamber to Bulk NPT and drop Sim Speed to 0.25×.'
     ]
   },
   'md:strain': {

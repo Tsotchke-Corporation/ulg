@@ -366,7 +366,10 @@ fn vs_atom(
 
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let fov_scale = 1.65 * min(1.0, aspect);
-  let rad = clamp(u.box_l.w / norm_half, 0.022, 0.16);
+  let rad_world = u.box_l.w / norm_half;
+  // Keep 100K-atom nanoscale spheres crisp without sub-pixel flicker or overdraw mush!
+  let min_px_rad = (1.35 * max(0.5, view.z)) / max(1.0, min(u.resolution.x, u.resolution.y) * 0.5 * fov_scale);
+  let rad = clamp(max(rad_world, min_px_rad), 0.004, 0.16);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
   let rx = (rad * fov_scale) / max(0.35, view.z * aspect);
@@ -457,9 +460,14 @@ fn fs_atom(in: VsOut) -> FsOut {
   return out;
 }
 
-// Periodic Simulation-Box Wireframe Lines (24 vertices = 12 edges; supports live box & V0 ghost box!)
+struct WireOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+// Periodic Simulation-Box Wireframe Lines (24 vertices = 12 edges + optional 24-vertex gravity floor grid!)
 @vertex
-fn vs_wire(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
+fn vs_wire(@builtin(vertex_index) vid: u32) -> WireOut {
   var edges = array<vec3<f32>, 24>(
     vec3<f32>(-1,-1,-1), vec3<f32>( 1,-1,-1),
     vec3<f32>(-1, 1,-1), vec3<f32>( 1, 1,-1),
@@ -477,23 +485,44 @@ fn vs_wire(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
   let live_half = max(vec3<f32>(0.5), u.box_l.xyz * 0.5);
   let ref_half = max(live_half, u.ref_box_cam.xyz * 0.5);
   let norm_half = max(ref_half.x, max(ref_half.y, ref_half.z));
-  let active_half = select(live_half, max(vec3<f32>(0.5), u.ref_box_cam.xyz * 0.5), u.render_cfg.z > 0.5);
+  let is_ghost = u.render_cfg.z > 0.5;
+  let grav_on = u.render_cfg.w > 0.5;
+  let active_half = select(live_half, max(vec3<f32>(0.5), u.ref_box_cam.xyz * 0.5), is_ghost);
   let box_scale = active_half / norm_half;
-  let view = world_to_view(edges[vid] * box_scale);
+
+  var p_unit = vec3<f32>(0.0);
+  var col = select(vec4<f32>(0.34, 0.76, 1.0, 0.38), vec4<f32>(0.98, 0.80, 0.28, 0.36), is_ghost);
+  if (vid < 24u) {
+    p_unit = edges[vid];
+    if (!is_ghost && grav_on && p_unit.y < -0.5) {
+      col = vec4<f32>(0.98, 0.78, 0.34, 0.64);
+    }
+  } else {
+    // 12 crisp floor grid lines (6 X-lines + 6 Z-lines) on the bottom gravity plane y = -1!
+    let gi = vid - 24u;
+    let line_id = gi / 2u;
+    let end_id = gi % 2u;
+    let is_z = line_id >= 6u;
+    let frac = (f32((line_id % 6u) + 1u) / 7.0) * 2.0 - 1.0;
+    let span = select(-1.0, 1.0, end_id == 1u);
+    p_unit = select(vec3<f32>(frac, -1.0, span), vec3<f32>(span, -1.0, frac), is_z);
+    col = vec4<f32>(0.96, 0.74, 0.32, 0.30);
+  }
+  let view = world_to_view(p_unit * box_scale);
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let fov_scale = 1.65 * min(1.0, aspect);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
   let depth_z = clamp((view.z - 0.35) / 10.0, 0.001, 0.999);
-  return vec4<f32>(cx, cy, depth_z, 1.0);
+  var out: WireOut;
+  out.clip_pos = vec4<f32>(cx, cy, depth_z, 1.0);
+  out.color = col;
+  return out;
 }
 
 @fragment
-fn fs_wire() -> @location(0) vec4<f32> {
-  if (u.render_cfg.z > 0.5) {
-    return vec4<f32>(0.98, 0.80, 0.28, 0.36);
-  }
-  return vec4<f32>(0.34, 0.76, 1.0, 0.38);
+fn fs_wire(in: WireOut) -> @location(0) vec4<f32> {
+  return in.color;
 }
 `;
 
@@ -2883,6 +2912,7 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     meltingPointK = 600,
     cohesiveEnergyEv = 1.5,
     colorMode = 0,
+    gravityEnabled = false,
     yaw = 0.45,
     pitch = 0.32,
     camDist = 3.25,
@@ -2903,13 +2933,14 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     const effCamDist = Math.max(1.75, Math.min(6.4, Number(camDist) || 3.25));
     const safeTm = Math.max(25, Number(meltingPointK) || 600);
     const safeEcoh = Math.max(0.08, Number(cohesiveEnergyEv) || 1.5);
+    const gravFlag = gravityEnabled ? 1.0 : 0.0;
 
     const uData = new Float32Array([
       w, h, yaw, pitch,
       lx, ly, lz, atomRadA,
       rlx, rly, rlz, effCamDist,
       tint[0] ?? 0.65, tint[1] ?? 0.80, tint[2] ?? 0.96, safeTm,
-      Number(colorMode) || 0, safeEcoh, 0.0, 0.0
+      Number(colorMode) || 0, safeEcoh, 0.0, gravFlag
     ]);
     device.queue.writeBuffer(atomUniformBuf, 0, uData);
 
@@ -2958,7 +2989,7 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
 
     pass.setPipeline(wirePipe);
     pass.setBindGroup(0, wireBg);
-    pass.draw(24, 1);
+    pass.draw(gravityEnabled ? 48 : 24, 1);
 
     if (showRefWire) {
       const refWireBg = device.createBindGroup({

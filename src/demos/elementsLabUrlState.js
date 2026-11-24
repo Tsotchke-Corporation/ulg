@@ -193,6 +193,10 @@ export function parseElementsLabUrlState(search = '') {
   const simSpeed = spdRaw != null && Number.isFinite(Number(spdRaw))
     ? Math.max(0.05, Math.min(2.0, Number(spdRaw)))
     : null;
+  const gravRaw = params.get('grav');
+  const mdGravity = gravRaw != null
+    ? (gravRaw === '1' || gravRaw.toLowerCase() === 'true')
+    : null;
 
   // Optional 3D camera framing (`cam=yaw,pitch,dist`)
   let camera = null;
@@ -234,6 +238,7 @@ export function parseElementsLabUrlState(search = '') {
     vibDeuterated,
     polytopeRegime,
     simSpeed,
+    mdGravity,
     camera
   });
 }
@@ -268,6 +273,7 @@ export function serializeElementsLabUrlState({
   vibDeuterated = false,
   polytopeRegime = 'lab',
   simSpeed = 1.0,
+  mdGravity = false,
   camera = null
 } = {}, { includeCamera = false } = {}) {
   const params = new URLSearchParams();
@@ -323,6 +329,9 @@ export function serializeElementsLabUrlState({
   } else if (safeTab === 'md') {
     if (Number.isFinite(tempK)) {
       params.set('T', String(Math.round(tempK)));
+    }
+    if (mdGravity) {
+      params.set('grav', '1');
     }
   } else if (safeTab === 'compound') {
     if (molColorMode === 1) params.set('mep', '1');

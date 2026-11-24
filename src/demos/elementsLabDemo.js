@@ -551,6 +551,7 @@ const uiState = {
   mdSizePreset: IS_MOBILE_GPU_PROFILE ? 'small' : 'medium', // 'small' (~200) | 'medium' (~500) | 'large' (~900)
   mdPhasePreset: 'solid',         // 'solid' | 'melt' | 'vapor' | null
   mdNptBarostat: true,
+  mdGravity: false,
   mdPlaying: true,
   mdTargetTempK: 300,
   // Tab 5: Chemistry — 3D Molecule + Wiberg Bonds, Multi-Molecule CI-NEB, Geom Opt & Vibrations, 3D Reactive MD!
@@ -2005,27 +2006,28 @@ function chooseMdCellsForMode(crystalStructure, modeKey, sizePreset = 'medium') 
   const s = String(crystalStructure || 'fcc').toLowerCase();
   const isBcc = s === 'bcc' || s.startsWith('cscl');
   const isDia = s === 'diamond' || s.startsWith('zincblende');
-  const tier = sizePreset === 'large' ? 2 : (sizePreset === 'small' ? 0 : 1);
+  const tierMap = { small: 0, medium: 1, '2k': 2, '10k': 3, '50k': 4, '100k': 5, large: 2 };
+  const tier = tierMap[sizePreset] ?? 1;
 
   if (modeKey === 'acoustic') {
-    if (isBcc) return [[6, 2, 2], [9, 3, 3], [12, 4, 3]][tier];
-    if (isDia) return [[5, 2, 2], [7, 2, 2], [9, 3, 3]][tier];
-    return [[6, 2, 2], [8, 3, 3], [10, 3, 3]][tier];
+    if (isBcc) return [[6, 2, 2], [9, 3, 3], [16, 6, 5], [27, 10, 9], [46, 17, 16], [58, 21, 21]][tier];
+    if (isDia) return [[5, 2, 2], [7, 2, 2], [10, 4, 4], [17, 7, 6], [30, 11, 10], [37, 13, 13]][tier];
+    return [[6, 2, 2], [8, 3, 3], [13, 5, 4], [22, 8, 7], [37, 13, 13], [46, 17, 16]][tier];
   }
   if (modeKey === 'thermal') {
-    if (isBcc) return [[5, 3, 3], [8, 3, 3], [10, 4, 4]][tier];
-    if (isDia) return [[4, 2, 2], [6, 2, 2], [8, 3, 3]][tier];
-    return [[4, 2, 2], [6, 3, 3], [8, 3, 3]][tier];
+    if (isBcc) return [[5, 3, 3], [8, 3, 3], [15, 6, 6], [25, 10, 10], [42, 17, 17], [53, 22, 22]][tier];
+    if (isDia) return [[4, 2, 2], [6, 2, 2], [9, 4, 4], [16, 7, 6], [26, 11, 11], [33, 14, 14]][tier];
+    return [[4, 2, 2], [6, 3, 3], [12, 5, 5], [20, 8, 8], [34, 14, 14], [42, 17, 17]][tier];
   }
   if (modeKey === 'surface') {
-    if (isBcc) return [[4, 4, 4], [5, 5, 5], [6, 6, 6]][tier];
-    if (isDia) return [[2, 2, 2], [3, 3, 3], [4, 4, 4]][tier];
-    return [[3, 3, 3], [4, 4, 4], [5, 5, 5]][tier];
+    if (isBcc) return [[4, 4, 4], [5, 5, 5], [10, 10, 10], [17, 17, 17], [29, 29, 30], [37, 37, 37]][tier];
+    if (isDia) return [[2, 2, 2], [3, 3, 3], [6, 6, 6], [11, 11, 11], [18, 18, 19], [23, 23, 24]][tier];
+    return [[3, 3, 3], [4, 4, 4], [8, 8, 8], [14, 14, 13], [23, 23, 24], [29, 29, 30]][tier];
   }
-  // equilibrium, strain, shear — rich cubic supercells scaled cleanly by Bravais basis size
-  if (isBcc) return [[4, 4, 4], [6, 6, 6], [8, 8, 7]][tier];     // 128 / 432 / 896 atoms
-  if (isDia) return [[3, 3, 3], [4, 4, 4], [5, 5, 5]][tier];     // 216 / 512 / 1000 atoms
-  return [[3, 3, 3], [5, 5, 5], [6, 6, 6]][tier];                // 108 / 500 / 864 atoms
+  // equilibrium, strain, shear: ~200 / ~500 / ~2K / ~10K / ~50K / ~100K atoms!
+  if (isBcc) return [[4, 4, 4], [6, 6, 6], [10, 10, 10], [17, 17, 17], [29, 29, 30], [37, 37, 37]][tier];
+  if (isDia) return [[3, 3, 3], [4, 4, 4], [6, 6, 6], [11, 11, 11], [18, 18, 19], [23, 23, 24]][tier];
+  return [[3, 3, 3], [5, 5, 5], [8, 8, 8], [14, 14, 13], [23, 23, 24], [29, 29, 30]][tier];
 }
 
 function computeMdPhaseTemperatures(tMeltRaw, tBoilRaw, potentialModel = 1) {
@@ -2059,6 +2061,7 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null, 
     try { liveMdSession.destroy(); } catch {}
     liveMdSession = null;
   }
+  liveMdBusy = false;
   liveMdTelemetry = null;
   liveMdHistory = [];
   liveMdVacfHistory = [];
@@ -2118,7 +2121,9 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null, 
       targetTemperatureK: tTarget,
       thermostatCouplingFs: 18,
       meltingPointK: tMelt,
-      bulkModulusGPa: bulkModGPa
+      bulkModulusGPa: bulkModGPa,
+      cohesiveEnergyEv: eCohEv,
+      gravityEnabled: uiState.mdGravity
     });
     liveMdConfigMeta = {
       label: b.materialKey,
@@ -2176,7 +2181,9 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null, 
       targetTemperatureK: tTarget,
       thermostatCouplingFs: 18,
       meltingPointK: tMelt,
-      bulkModulusGPa: bulkModGPa
+      bulkModulusGPa: bulkModGPa,
+      cohesiveEnergyEv: eCohEv,
+      gravityEnabled: uiState.mdGravity
     });
     liveMdConfigMeta = {
       label: b.nuclear.isotope || b.symbol,
@@ -2202,17 +2209,22 @@ function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null, 
       liveMdSession.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.40 });
     }
     // Kick 2 initial GPU steps so pos.w coordination & force.w potential energy populate immediately on frame 1!
-    liveMdSession.stepBatch(2, {
+    const sessionRef = liveMdSession;
+    liveMdBusy = true;
+    sessionRef.stepBatch(2, {
       readTelemetry: true,
       temperatureK: uiState.mdTargetTempK,
       nptBarostatGPa: null,
       nonBlocking: true
     }).then((tel) => {
-      if (!tel || !liveMdSession) return;
+      if (!tel || liveMdSession !== sessionRef) return;
       liveMdTelemetry = tel;
       liveMdHistory.push({ t: tel.timeFs, T: tel.temperatureK, msd: tel.msdA2 });
+      if (window.__ulgElementsLabState) window.__ulgElementsLabState.mdTelemetry = tel;
       if (currentTab === 'md') redrawCurrentTab();
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => {
+      if (liveMdSession === sessionRef) liveMdBusy = false;
+    });
   }
   if (liveMdTelemetry && liveMdHistory.length === 0) {
     liveMdHistory.push({ t: 0, T: liveMdTelemetry.temperatureK, msd: liveMdTelemetry.msdA2 });
@@ -2851,16 +2863,21 @@ function renderSimControls() {
       </div>`}
       <div class="ctrl-group">
         <div class="ctrl-row">
+          <button id="ctrl-md-grav" class="action${uiState.mdGravity ? ' active-toggle' : ''}" title="Toggle live GPU downward gravity (−m g ŷ, Bond-scaled MD acceleration) with physical harmonic floor &amp; ceiling walls so crystals land, melted droplets pool into sessile puddles, and vapor forms a barometric atmosphere!">Gravity ↓ ${uiState.mdGravity ? 'ON' : 'OFF'}</button>
+        </div>
+        <div class="ctrl-row">
           <label title="Choose physical GPU quantity driving per-atom 3D coloring">Color</label>
           <button class="action${uiState.mdColorMode === 0 ? ' active-toggle' : ''}" data-md-col="0" title="Color each atom by its true local kinetic temperature T_i = m v² / (3 k_B) relative to T_m">Temp</button>
           <button class="action${uiState.mdColorMode === 1 ? ' active-toggle' : ''}" data-md-col="1" title="Color by live GPU first-shell coordination z_i: sapphire Solid, emerald-gold Liquid, magenta Vapor">Phase</button>
           <button class="action${uiState.mdColorMode === 2 ? ' active-toggle' : ''}" data-md-col="2" title="Color by live GPU per-atom potential energy E_pot,i to highlight surfaces, vacancies &amp; strain">Stress</button>
         </div>
         <div class="ctrl-row">
-          <label title="Supercell particle count powered by ULG's O(N) WebGPU 3D spatial cell-list">Atoms</label>
-          <button class="action${uiState.mdSizePreset === 'small' ? ' active-toggle' : ''}" data-md-size="small" title="Compact supercell (~128–216 atoms, lightest GPU load)">~200</button>
-          <button class="action${uiState.mdSizePreset === 'medium' ? ' active-toggle' : ''}" data-md-size="medium" title="Standard high-fidelity supercell (~432–512 atoms, O(N) GPU cell list)">~500</button>
-          <button class="action${uiState.mdSizePreset === 'large' ? ' active-toggle' : ''}" data-md-size="large" title="Large high-resolution supercell (~864–1,000 atoms, O(N) GPU cell list)">~900</button>
+          <label title="Supercell particle count powered by ULG's lock-free O(N) WebGPU linked-cell spatial grid (scales up to 100,000+ atoms!)">Atoms</label>
+          <button class="action${uiState.mdSizePreset === 'medium' || uiState.mdSizePreset === 'small' ? ' active-toggle' : ''}" data-md-size="${IS_MOBILE_GPU_PROFILE ? 'small' : 'medium'}" title="Fast interactive supercell (~${IS_MOBILE_GPU_PROFILE ? '200' : '500'} atoms, instant melting &amp; boiling)">${IS_MOBILE_GPU_PROFILE ? '200' : '500'}</button>
+          <button class="action${uiState.mdSizePreset === '2k' || uiState.mdSizePreset === 'large' ? ' active-toggle' : ''}" data-md-size="2k" title="2,000-atom nanoscale crystal supercell on O(N) WebGPU linked cells">2K</button>
+          <button class="action${uiState.mdSizePreset === '10k' ? ' active-toggle' : ''}" data-md-size="10k" title="10,000-atom mesoscale crystal/droplet on O(N) WebGPU linked cells">10K</button>
+          ${!IS_MOBILE_GPU_PROFILE ? `<button class="action${uiState.mdSizePreset === '50k' ? ' active-toggle' : ''}" data-md-size="50k" title="50,000-atom high-resolution WebGPU MD simulation">50K</button>
+          <button class="action${uiState.mdSizePreset === '100k' ? ' active-toggle' : ''}" data-md-size="100k" title="100,000-atom extreme-scale WebGPU MD crystal, liquid droplet &amp; vapor cloud!">100K</button>` : ''}
         </div>
       </div>`;
 
@@ -2884,6 +2901,13 @@ function renderSimControls() {
     });
     document.getElementById('ctrl-md-npt')?.addEventListener('change', (e) => {
       uiState.mdNptBarostat = Boolean(e.target.checked);
+    });
+    document.getElementById('ctrl-md-grav')?.addEventListener('click', () => {
+      uiState.mdGravity = !uiState.mdGravity;
+      liveMdSession?.setGravity?.(uiState.mdGravity);
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
     });
     document.getElementById('ctrl-md-comp')?.addEventListener('click', () => {
       liveMdSession?.applyStrain({ strainX: -0.03 });
@@ -3343,6 +3367,7 @@ function renderViewportSync() {
       meltingPointK: liveMdConfigMeta?.meltingPointK ?? 600,
       cohesiveEnergyEv: liveMdConfigMeta?.cohesiveEnergyEv ?? 1.5,
       colorMode: uiState.mdColorMode,
+      gravityEnabled: uiState.mdGravity,
       yaw: camYaw,
       pitch: camPitch,
       camDist: Math.max(1.85, Math.min(6.2, camDist + 0.35)),
@@ -3493,6 +3518,7 @@ function buildCurrentUrlDescriptor() {
     vibDeuterated: uiState.vibIsotopeDeuterated,
     polytopeRegime: uiState.polytopeRegime,
     simSpeed: uiState.simSpeed,
+    mdGravity: uiState.mdGravity,
     camera: { yaw: camYaw, pitch: camPitch, dist: camDist }
   };
 }
@@ -3870,7 +3896,7 @@ function redrawCurrentTab() {
     setHud(
       `Zero-Copy WebGPU MD [${modeNames[mm] || mm}] — ${meta?.label || b?.materialKey || ''} (${meta?.crystalStructure || ''})`,
       md
-        ? `Atoms: ${md.atomCount}${md.usedCellList ? ' (O(N) Grid)' : ''} | t=${fmt(md.timeFs, 1)} fs | T=${fmt(md.temperatureK, 0)} K | ⟨Z⟩=${fmt(md.meanCoordination ?? 0, 1)}/${md.idealCoordination ?? 12} | δ_L=${fmt(md.lindemannRatio ?? 0, 2)} | MSD=${fmt(md.msdA2, 2)} Å²`
+        ? `Atoms: ${Number(md.atomCount || 0).toLocaleString()}${md.usedCellList ? ` (O(N) ${md.cellDims ? md.cellDims.join('×') : 'Grid'})` : ''} | t=${fmt(md.timeFs, 1)} fs | T=${fmt(md.temperatureK, 0)} K | ⟨Z⟩=${fmt(md.meanCoordination ?? 0, 1)}/${md.idealCoordination ?? 12} | δ_L=${fmt(md.lindemannRatio ?? 0, 2)} | MSD=${fmt(md.msdA2, 2)} Å²`
         : 'Initializing live WebGPU MD buffers…'
     );
     if (md) {
@@ -3898,7 +3924,10 @@ function redrawCurrentTab() {
         const boxTxt = uiState.mdChamberMode === 'bulk' && uiState.mdNptBarostat
           ? ` · V/V₀=<b>${fmt(md.volumeRatio ?? 1, 3)}</b> · P=${fmt(md.pressureGPa, 2)} GPa`
           : ` · Drop/Vapor Chamber`;
-        setBottomOverlay(`<div class="live-meter">Emergent Phase: <b style="color:${phColor}">${phLabel}</b> · <span style="color:#38bdf8">Solid ${sPct}%</span> · <span style="color:#34d399">Liq ${lPct}%</span> · <span style="color:#f472b6">Vap ${vPct}%</span>${boxTxt}</div>`);
+        const gravTxt = md.gravityEnabled
+          ? ` · <span style="color:#facc15">g↓ ${fmt(md.gravityAccelAPerPs2, 1)} Å/ps²</span> · ⟨y⟩=${Math.round((md.meanYFrac ?? 0.5) * 100)}%`
+          : '';
+        setBottomOverlay(`<div class="live-meter">Emergent Phase: <b style="color:${phColor}">${phLabel}</b> · <span style="color:#38bdf8">Solid ${sPct}%</span> · <span style="color:#34d399">Liq ${lPct}%</span> · <span style="color:#f472b6">Vap ${vPct}%</span>${boxTxt}${gravTxt}</div>`);
       }
     }
 
@@ -4501,11 +4530,15 @@ function tickSimulationLoop(nowMs) {
 
   // 5. Live Zero-Copy WebGPU Molecular Dynamics stepping on Tab 4 (Scales true Velocity-Verlet dtFs * dtScale!)
   if (currentTab === 'md' && liveMdSession && uiState.mdPlaying && !liveMdBusy) {
+    const sessionRef = liveMdSession;
     liveMdBusy = true;
     const nptTarget = (uiState.mdMode === 'strain' || (uiState.mdMode === 'equilibrium' && uiState.mdChamberMode === 'bulk' && uiState.mdNptBarostat)) ? 0.0 : null;
-    const baseMdSteps = IS_MOBILE_GPU_PROFILE ? 6 : 10;
-    const mdSteps = spd > 1.0 ? Math.min(20, Math.round(baseMdSteps * spd)) : baseMdSteps;
-    liveMdSession.stepBatch(mdSteps, {
+    const nAtoms = sessionRef.atomCount || 500;
+    const baseMdSteps = nAtoms >= 45000
+      ? 1
+      : (nAtoms >= 8000 ? 3 : (nAtoms >= 1500 ? 5 : (IS_MOBILE_GPU_PROFILE ? 6 : 10)));
+    const mdSteps = spd > 1.0 ? Math.min(nAtoms >= 45000 ? 2 : 20, Math.max(1, Math.round(baseMdSteps * spd))) : baseMdSteps;
+    sessionRef.stepBatch(mdSteps, {
       readTelemetry: true,
       temperatureK: uiState.mdTargetTempK,
       nptBarostatGPa: nptTarget,
@@ -4513,7 +4546,7 @@ function tickSimulationLoop(nowMs) {
       dtScale
     })
       .then((tel) => {
-        if (!tel || !liveMdSession) return;
+        if (!tel || liveMdSession !== sessionRef) return;
         liveMdTelemetry = tel;
         liveMdHistory.push({ t: tel.timeFs, T: tel.temperatureK, msd: tel.msdA2 });
         if (liveMdHistory.length > 80) liveMdHistory.shift();
@@ -4527,7 +4560,9 @@ function tickSimulationLoop(nowMs) {
         if (currentTab === 'md') redrawCurrentTab();
       })
       .catch(() => {})
-      .finally(() => { liveMdBusy = false; });
+      .finally(() => {
+        if (liveMdSession === sessionRef) liveMdBusy = false;
+      });
   }
 
   // 6. Live Tab 5 Chemistry animations: 3D Normal-Mode Vibrations, CI-NEB Playback, & Zero-Copy 3D Reactive MD!
@@ -5329,11 +5364,20 @@ function syncDebugState() {
       const explicitColor = opts?.colorMode != null;
       if (explicitColor) uiState.mdColorMode = Number(opts.colorMode) || 0;
       if (opts?.sizePreset) uiState.mdSizePreset = opts.sizePreset;
+      if (opts?.gravity != null) uiState.mdGravity = Boolean(opts.gravity);
       initLiveMdForActiveSpecimen(tempK, mode, { preserveColorMode: explicitColor });
       syncAccordionState();
       renderSimControls();
       redrawCurrentTab();
       syncDebugState();
+    },
+    setMdGravity: (enabled, opts = {}) => {
+      uiState.mdGravity = Boolean(enabled);
+      const info = liveMdSession?.setGravity?.(uiState.mdGravity, opts) || { enabled: uiState.mdGravity };
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+      return info;
     },
     setMdPhasePreset: (phase) => {
       const b = getActiveBundle();
@@ -5654,6 +5698,7 @@ async function boot() {
   if (urlState.vibDeuterated != null) uiState.vibIsotopeDeuterated = urlState.vibDeuterated;
   if (urlState.polytopeRegime) uiState.polytopeRegime = urlState.polytopeRegime;
   if (urlState.simSpeed != null) setSimSpeed(urlState.simSpeed);
+  if (urlState.mdGravity != null) uiState.mdGravity = Boolean(urlState.mdGravity);
   if (urlState.hasExplicitQuantumNumbers) {
     if (urlState.n != null) uiState.n = urlState.n;
     if (urlState.l != null) uiState.l = Math.min(uiState.n - 1, urlState.l);

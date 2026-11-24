@@ -175,8 +175,63 @@ test('All 5 canonical material-property WebGPU simulations: LLG Magnetism, Drude
     assert.ok(mdVapor.emergentPhase === 'vapor' || mdVapor.vaporFraction >= 0.45, `Vapor preset must boil into free vapor gas: phase=${mdVapor.emergentPhase}, V=${mdVapor.vaporFraction}`);
     assert.ok(mdVapor.meanCoordination < mdSolid.meanCoordination * 0.45, `Vapor coordination must collapse far below crystal: ${mdVapor.meanCoordination} vs ${mdSolid.meanCoordination}`);
 
-    // Stress-Strain
-    await page.evaluate(() => window.__ulgElementsLabApi.setMdMode('strain', 150, { colorMode: 2 }));
+    // Live GPU Gravity Toggle Proof (500-atom Cu droplet falls onto harmonic chamber floor!)
+    await page.evaluate(() => window.__ulgElementsLabApi.setMdMode('equilibrium', 2350, { chamberMode: 'drop', colorMode: 1, sizePreset: 'medium', gravity: false }));
+    const mdZeroG = await page.evaluate(() => window.__ulgElementsLabApi.stepMd(24, { temperatureK: 2350 }));
+    await page.click('#ctrl-md-grav');
+    const mdGravDrop = await page.evaluate(async () => {
+      let tel = null;
+      for (let k = 0; k < 18; k += 1) {
+        tel = await window.__ulgElementsLabApi.stepMd(60, { temperatureK: 2350 });
+      }
+      return tel;
+    });
+    await saveShot(page, '06e-cu-md-gravity-drop');
+    console.log('[sim3-cu-gravity]', JSON.stringify({
+      zeroGEnabled: mdZeroG.gravityEnabled,
+      zeroGMeanY: Number((mdZeroG.meanYFrac ?? 0.5).toFixed(3)),
+      gravEnabled: mdGravDrop.gravityEnabled,
+      gravAccAPerPs2: Number((mdGravDrop.gravityAccelAPerPs2 ?? 0).toFixed(2)),
+      gravMeanY: Number((mdGravDrop.meanYFrac ?? 0.5).toFixed(3)),
+      gravT: Math.round(mdGravDrop.temperatureK),
+      gravPhase: mdGravDrop.emergentPhase
+    }));
+    assert.equal(mdZeroG.gravityEnabled, false, 'Gravity must start OFF by default');
+    assert.equal(mdGravDrop.gravityEnabled, true, 'Clicking #ctrl-md-grav must enable live GPU gravity');
+    assert.ok(mdGravDrop.meanYFrac < mdZeroG.meanYFrac - 0.06, `Gravity must pull droplet center-of-mass down toward floor: ${mdGravDrop.meanYFrac} vs ${mdZeroG.meanYFrac}`);
+    assert.ok(mdGravDrop.meanYFrac > 0.04, `Harmonic floor wall must keep atoms bounded inside chamber: ${mdGravDrop.meanYFrac}`);
+    await page.click('#ctrl-md-grav'); // turn gravity back OFF cleanly
+
+    // 100,000-Atom Extreme-Scale O(N) Linked-Cell WebGPU MD Proof!
+    await page.click('[data-md-phase="solid"]');
+    const t0_100k = Date.now();
+    await page.click('[data-md-size="100k"]');
+    await page.waitForFunction(() => (window.__ulgElementsLabState?.mdTelemetry?.atomCount || 0) >= 100000, null, { timeout: 30_000 });
+    const md100k = await page.evaluate(async () => {
+      const tStart = performance.now();
+      const tel = await window.__ulgElementsLabApi.stepMd(4, { temperatureK: 272 });
+      return { ...tel, stepMs: performance.now() - tStart };
+    });
+    console.log('[sim3-cu-100k-atoms]', JSON.stringify({
+      atomCount: md100k.atomCount,
+      usedCellList: md100k.usedCellList,
+      cellDims: md100k.cellDims,
+      T: Math.round(md100k.temperatureK),
+      epotPerAtomEv: Number((md100k.potentialEnergyEv / md100k.atomCount).toFixed(3)),
+      coord: Number(md100k.meanCoordination.toFixed(2)),
+      phase: md100k.emergentPhase,
+      step4Ms: Math.round(md100k.stepMs),
+      totalSetupAndStepMs: Date.now() - t0_100k
+    }));
+    assert.ok(md100k.atomCount >= 100000, `100K preset must simulate >=100,000 real GPU atoms, got ${md100k.atomCount}`);
+    assert.equal(md100k.usedCellList, true, '100K MD must use O(N) lock-free linked-cell spatial grid');
+    assert.ok(Number.isFinite(md100k.temperatureK) && md100k.temperatureK > 10 && md100k.temperatureK < 2000, `100K T finite & non-overflowing: ${md100k.temperatureK}`);
+    assert.ok(Number.isFinite(md100k.potentialEnergyEv) && md100k.potentialEnergyEv < -1e4, `100K E_pot must be cohesive & non-overflowing: ${md100k.potentialEnergyEv}`);
+    assert.ok(md100k.meanCoordination > 8.0 && md100k.meanCoordination <= 12.5, `100K FCC coordination must be ~11.4, got ${md100k.meanCoordination}`);
+    await saveShot(page, '06d-cu-md-100k-atoms');
+
+    // Reset back to standard 500-atom size for mechanical/NEMD sub-tests
+    await page.evaluate(() => window.__ulgElementsLabApi.setMdMode('strain', 150, { colorMode: 2, sizePreset: 'medium' }));
     const mdBase = await page.evaluate(() => window.__ulgElementsLabApi.stepMd(12, { npt: false }));
     const mdComp = await page.evaluate(() => window.__ulgElementsLabApi.stepMd(24, { strainX: -0.04, npt: true }));
     await saveShot(page, '06-cu-md-strain');

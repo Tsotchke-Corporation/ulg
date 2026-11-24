@@ -1,9 +1,11 @@
 // Gate 0B: Shared WebGPU Atomic Molecular Dynamics Engine
 // (`src/runtime/gpuMath/molecularDynamicsWebGpu.js`).
 //
-// GPU-resident O(N) cell-listed Velocity-Verlet MD engine supporting three
-// universal potential families derived from Gate 1-2 DFT closures (zero
-// hardcoded per-element hacks):
+// GPU-resident O(N) lock-free linked-cell Velocity-Verlet MD engine scaling
+// cleanly from 32 atoms up to 100,000+ atoms inside the universal 8-storage-
+// buffer WebGPU baseline (zero per-cell overflow, zero O(N^2) blowup, dynamic
+// anti-overflow i32 atomic telemetry). Supports three universal potential
+// families derived from Gate 1-2 DFT closures (zero hardcoded per-element hacks):
 //   0: Shifted-force Lennard-Jones + London dispersion (noble gases, vdW)
 //   1: Morse + Finnis-Sinclair Embedded Atom Model (EAM metals)
 //   2: Stillinger-Weber 2-body + 3-body tetrahedral angular (covalent sp3)
@@ -50,13 +52,12 @@ const GPU_BUFFER_USAGE = Object.freeze({
 export const MD_TIME_UNIT_FS = 10.1805057;
 export const KB_EV_PER_K = 8.617333262e-5;
 const TELEMETRY_WORDS = 128; // 16 core scalars + 64 RDF bins + 4 VACF/heat + 32 spatial-slab bins + 12 phase/coord stats
-const CELL_MAX_DIM = 12;
-const MAX_CELLS = CELL_MAX_DIM * CELL_MAX_DIM * CELL_MAX_DIM; // 1728
-const MAX_PER_CELL = 64;
+const MAX_LINKED_CELLS = 131072; // up to ~50x50x50 cells (< 1 MB total with 100K atom_next!)
 
 export const molecularDynamicsWebGpuWgsl = /* wgsl */ `
 struct MdParams {
-  // x=atomCount, y=potentialModel (0=LJ, 1=Morse+EAM, 2=SW), z=rdfBins(64), w=thermostatActive | (expMode << 8)
+  // x=atomCount, y=potentialModel (0=LJ, 1=Morse+EAM, 2=SW), z=rdfStride (>=1),
+  // w=thermostatActive (bit0) | wallYActive (bit1) | (expMode << 8)
   counts: vec4<u32>,
   // x=boxLx, y=boxLy, z=boxLz, w=dt_internal
   box_dt: vec4<f32>,
@@ -70,15 +71,18 @@ struct MdParams {
   nemd: vec4<f32>,
   // x=strain_sz, y=shear_xy, z=pulse_amp, w=pulse_pol (0=longitudinal X, 1=transverse Y)
   nemd2: vec4<f32>,
-  // x=cellNx, y=cellNy, z=cellNz, w=useCellList (0=direct, 1=O(N) 3D cell list)
+  // x=cellNx, y=cellNy, z=cellNz, w=nextBase (0 = direct O(N^2), >0 = O(N) linked-list active & atom_next base offset)
   cell_cfg: vec4<u32>,
-  // x=r_nn_A, y=ideal_coord, z=melting_t_k, w=max_dv_step (safety cap against extreme high-T overlap spikes)
+  // x=r_nn_A, y=ideal_coord, z=melting_t_k, w=max_dv_step
   phase_cfg: vec4<f32>,
+  // x=energyScale, y=msdScale, z=vacfScale, w=coordScale (dynamic anti-overflow scaling up to 100K+ atoms!)
+  scale_cfg: vec4<f32>,
+  // x=gravity_acc_int (A/t0^2 along -Y), y=v_cm_y (COM-frame thermostat), z=wall_dc_A, w=wall_k_ev_per_A2
+  grav_cfg: vec4<f32>,
 };
 
-const MAX_CELLS_U: u32 = 1728u;
-const MAX_PER_CELL_U: u32 = 64u;
-const CELL_ATOMS_BASE_U: u32 = 1729u;
+const EMPTY_CELL_U: u32 = 0xFFFFFFFFu;
+const MAX_CELL_WALK_U: u32 = 4096u;
 
 @group(0) @binding(0) var<uniform> params: MdParams;
 // pos: xyz in [0, box), w = normalized local first-shell coordination (z_i / Z_ideal)
@@ -91,20 +95,29 @@ const CELL_ATOMS_BASE_U: u32 = 1729u;
 @group(0) @binding(4) var<storage, read_write> unwrapped: array<vec4<f32>>;
 // init_state: [0..n-1] = pos_init (MSD ref), [n..2n-1] = vel_init (VACF/VDOS ref)
 @group(0) @binding(5) var<storage, read> init_state: array<vec4<f32>>;
-// telemetry: fixed-point scaled atomic accumulators
-//   [0]=E_kin*1e4, [1]=E_pot*1e4, [2]=virial*1e4, [3]=msd*1e4,
-//   [4]=px*1e4, [5]=py*1e4, [6]=pz*1e4, [7]=sxy*1e4, [8]=sxz*1e4, [9]=syz*1e4,
-//   [10]=vir_x*1e4, [11]=vir_y*1e4, [12]=vir_z*1e4, [13]=kin_x*1e4, [14]=kin_y*1e4, [15]=kin_z*1e4,
-//   [16..79]=RDF histogram bins, [80]=vacf_num*1e5, [81]=vacf_den*1e5, [82]=heat_add*1e5, [83]=heat_rem*1e5,
-//   [84..115]=8 spatial slabs * 4 (count, ke*1e4, vx*1e4, vy*1e4),
-//   [116]=coord_sum*100, [117]=solid_count, [118]=liquid_count, [119]=vapor_count
+// telemetry: fixed-point scaled atomic accumulators (scaled dynamically by scale_cfg!)
+//   [0]=E_kin*eS, [1]=E_pot*eS, [2]=virial*eS, [3]=msd*mS,
+//   [4]=px*eS, [5]=py*eS, [6]=pz*eS, [7]=sxy*eS, [8]=sxz*eS, [9]=syz*eS,
+//   [10]=vir_x*eS, [11]=vir_y*eS, [12]=vir_z*eS, [13]=kin_x*eS, [14]=kin_y*eS, [15]=kin_z*eS,
+//   [16..79]=RDF histogram bins, [80]=vacf_num*vS, [81]=vacf_den*vS, [82]=heat_add*vS, [83]=heat_rem*vS,
+//   [84..115]=8 spatial slabs * 4 (count, ke*eS, vx*eS, vy*eS),
+//   [116]=coord_sum*cS, [117]=solid_count, [118]=liquid_count, [119]=vapor_count
 @group(0) @binding(6) var<storage, read_write> telemetry: array<atomic<i32>>;
-// cell_grid (single packed O(N) spatial buffer — keeps total storage buffers = 7 <= 8 WebGPU baseline limit!):
-//   [0..1727] = cell atom counts, [1728] = overflow sentinel, [1729 + cid * 64 + slot] = atom index
+// cell_grid (single lock-free linked-cell buffer — total storage buffers = 7 <= 8 WebGPU baseline!):
+//   [0 .. nextBase-1]           = cell_head[cid] (EMPTY_CELL_U if empty)
+//   [nextBase .. nextBase+n-1]  = atom_next[i]   (next atom index in cell)
 @group(0) @binding(7) var<storage, read_write> cell_grid: array<atomic<u32>>;
 
 fn min_image(d: vec3<f32>, box_l: vec3<f32>) -> vec3<f32> {
   return d - box_l * round(d / box_l);
+}
+
+fn min_image_cfg(d: vec3<f32>, box_l: vec3<f32>, wall_y: bool) -> vec3<f32> {
+  var out = d - box_l * round(d / box_l);
+  if (wall_y) {
+    out.y = d.y;
+  }
+  return out;
 }
 
 fn wrap_box(p: vec3<f32>, box_l: vec3<f32>) -> vec3<f32> {
@@ -130,28 +143,22 @@ fn reset_telemetry(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @compute @workgroup_size(64)
 fn clear_cell_list(@builtin(global_invocation_id) id: vec3<u32>) {
-  let total_cells = params.cell_cfg.x * params.cell_cfg.y * params.cell_cfg.z;
+  let total_cells = params.cell_cfg.w;
   if (id.x < total_cells) {
-    atomicStore(&cell_grid[id.x], 0u);
-  }
-  if (id.x == 0u) {
-    atomicStore(&cell_grid[MAX_CELLS_U], 0u);
+    atomicStore(&cell_grid[id.x], EMPTY_CELL_U);
   }
 }
 
 @compute @workgroup_size(64)
 fn build_cell_list(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
-  if (i >= params.counts.x || params.cell_cfg.w == 0u) { return; }
+  let next_base = params.cell_cfg.w;
+  if (i >= params.counts.x || next_base == 0u) { return; }
   let dims = max(params.cell_cfg.xyz, vec3<u32>(1u));
   let cc = atom_cell_coord(pos[i].xyz, params.box_dt.xyz, dims);
   let cid = cell_linear_idx(cc, dims);
-  let slot = atomicAdd(&cell_grid[cid], 1u);
-  if (slot < MAX_PER_CELL_U) {
-    atomicStore(&cell_grid[CELL_ATOMS_BASE_U + cid * MAX_PER_CELL_U + slot], i);
-  } else {
-    atomicStore(&cell_grid[MAX_CELLS_U], 1u);
-  }
+  let prev = atomicExchange(&cell_grid[cid], i);
+  atomicStore(&cell_grid[next_base + i], prev);
 }
 
 @compute @workgroup_size(64)
@@ -159,10 +166,16 @@ fn apply_affine_strain(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
   if (i >= params.counts.x) { return; }
   let box_l = params.box_dt.xyz;
+  let wall_y = (params.counts.w & 2u) != 0u;
   let s_vec = vec3<f32>(params.nemd.z, params.nemd.w, params.nemd2.x);
   var p3 = pos[i].xyz * s_vec;
   p3.x = p3.x + params.nemd2.y * (p3.y - 0.5 * box_l.y);
-  pos[i] = vec4<f32>(wrap_box(p3, box_l), pos[i].w);
+  var p_wrapped = wrap_box(p3, box_l);
+  if (wall_y) {
+    let y_pad = min(0.15, 0.04 * box_l.y);
+    p_wrapped.y = clamp(p3.y, y_pad, box_l.y - y_pad);
+  }
+  pos[i] = vec4<f32>(p_wrapped, pos[i].w);
   var u3 = unwrapped[i].xyz * s_vec;
   u3.x = u3.x + params.nemd2.y * (u3.y - 0.5 * box_l.y);
   unwrapped[i] = vec4<f32>(u3, unwrapped[i].w);
@@ -174,7 +187,6 @@ fn inject_acoustic_pulse(@builtin(global_invocation_id) id: vec3<u32>) {
   if (i >= params.counts.x) { return; }
   let box_l = params.box_dt.xyz;
   let fx = pos[i].x / max(1.0e-5, box_l.x);
-  // Zero-mean localized dipole/Gaussian planar acoustic wavepacket near x = 0.14 Lx
   let d = fx - 0.14;
   let env = exp(-(d * d) / (2.0 * 0.055 * 0.055));
   let env_back = exp(-((fx - 0.86) * (fx - 0.86)) / (2.0 * 0.055 * 0.055));
@@ -194,6 +206,7 @@ fn vv_half_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
   if (i >= params.counts.x) { return; }
   let dt = params.box_dt.w;
   let box_l = params.box_dt.xyz;
+  let wall_y = (params.counts.w & 2u) != 0u;
   let v4 = vel[i];
   let m = max(v4.w, 1.0e-6);
   let f3 = force[i].xyz;
@@ -205,9 +218,22 @@ fn vv_half_kick_drift(@builtin(global_invocation_id) id: vec3<u32>) {
       dv = dv * (max_dv / dv_len);
     }
   }
-  let v_half = v4.xyz + dv;
+  var v_half = v4.xyz + dv;
   let dr = v_half * dt;
-  let p_new = wrap_box(pos[i].xyz + dr, box_l);
+  let p_raw = pos[i].xyz + dr;
+  var p_new = wrap_box(p_raw, box_l);
+  if (wall_y) {
+    let y_pad = min(0.15, 0.04 * box_l.y);
+    var py = p_raw.y;
+    if (py < y_pad) {
+      py = y_pad + (y_pad - py) * 0.5;
+      if (v_half.y < 0.0) { v_half.y = -v_half.y * 0.85; }
+    } else if (py > box_l.y - y_pad) {
+      py = (box_l.y - y_pad) - (py - (box_l.y - y_pad)) * 0.5;
+      if (v_half.y > 0.0) { v_half.y = -v_half.y * 0.85; }
+    }
+    p_new.y = clamp(py, y_pad, box_l.y - y_pad);
+  }
   pos[i] = vec4<f32>(p_new, pos[i].w);
   unwrapped[i] = vec4<f32>(unwrapped[i].xyz + dr, unwrapped[i].w);
   vel[i] = vec4<f32>(v_half, m);
@@ -220,6 +246,7 @@ fn compute_eam_density(@builtin(global_invocation_id) id: vec3<u32>) {
   let n = params.counts.x;
   if (i >= n || params.counts.y != 1u) { return; }
   let box_l = params.box_dt.xyz;
+  let wall_y = (params.counts.w & 2u) != 0u;
   let r0 = params.pot0.y;
   let rcut = params.pot0.w;
   let rcut2 = rcut * rcut;
@@ -227,8 +254,8 @@ fn compute_eam_density(@builtin(global_invocation_id) id: vec3<u32>) {
   let pi = pos[i].xyz;
   var rho = 0.0;
 
-  let use_grid = params.cell_cfg.w == 1u && atomicLoad(&cell_grid[MAX_CELLS_U]) == 0u;
-  if (use_grid) {
+  let next_base = params.cell_cfg.w;
+  if (next_base > 0u) {
     let dims = max(params.cell_cfg.xyz, vec3<u32>(1u));
     let ci = atom_cell_coord(pi, box_l, dims);
     let dx_min = select(0i, -1i, dims.x >= 3u);
@@ -240,22 +267,26 @@ fn compute_eam_density(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var dz = dz_min; dz <= dz_max; dz = dz + 1i) {
       let cz = select(u32(dz), u32((i32(ci.z) + dz + i32(dims.z)) % i32(dims.z)), dims.z >= 3u);
       for (var dy = dy_min; dy <= dy_max; dy = dy + 1i) {
-        let cy = select(u32(dy), u32((i32(ci.y) + dy + i32(dims.y)) % i32(dims.y)), dims.y >= 3u);
+        let cy_raw = select(dy, i32(ci.y) + dy, dims.y >= 3u);
+        if (wall_y && (cy_raw < 0i || cy_raw >= i32(dims.y))) { continue; }
+        let cy = select(u32(cy_raw), u32((cy_raw + i32(dims.y)) % i32(dims.y)), !wall_y && dims.y >= 3u);
         for (var dx = dx_min; dx <= dx_max; dx = dx + 1i) {
           let cx = select(u32(dx), u32((i32(ci.x) + dx + i32(dims.x)) % i32(dims.x)), dims.x >= 3u);
           let cid = cell_linear_idx(vec3<u32>(cx, cy, cz), dims);
-          let cnt = min(atomicLoad(&cell_grid[cid]), MAX_PER_CELL_U);
-          let base = CELL_ATOMS_BASE_U + cid * MAX_PER_CELL_U;
-          for (var s = 0u; s < cnt; s = s + 1u) {
-            let j = atomicLoad(&cell_grid[base + s]);
-            if (j == i) { continue; }
-            let d = min_image(pi - pos[j].xyz, box_l);
-            let r2 = dot(d, d);
-            if (r2 < rcut2 && r2 > 1.0e-8) {
-              let r = sqrt(r2);
-              let sf = 1.0 - r / rcut;
-              rho = rho + exp(-beta * (r - r0)) * sf * sf;
+          var j = atomicLoad(&cell_grid[cid]);
+          var guard = 0u;
+          while (j != EMPTY_CELL_U && guard < MAX_CELL_WALK_U) {
+            if (j != i) {
+              let d = min_image_cfg(pi - pos[j].xyz, box_l, wall_y);
+              let r2 = dot(d, d);
+              if (r2 < rcut2 && r2 > 1.0e-8) {
+                let r = sqrt(r2);
+                let sf = 1.0 - r / rcut;
+                rho = rho + exp(-beta * (r - r0)) * sf * sf;
+              }
             }
+            j = atomicLoad(&cell_grid[next_base + j]);
+            guard = guard + 1u;
           }
         }
       }
@@ -263,7 +294,7 @@ fn compute_eam_density(@builtin(global_invocation_id) id: vec3<u32>) {
   } else {
     for (var j = 0u; j < n; j = j + 1u) {
       if (j == i) { continue; }
-      let d = min_image(pi - pos[j].xyz, box_l);
+      let d = min_image_cfg(pi - pos[j].xyz, box_l, wall_y);
       let r2 = dot(d, d);
       if (r2 < rcut2 && r2 > 1.0e-8) {
         let r = sqrt(r2);
@@ -273,7 +304,6 @@ fn compute_eam_density(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
 
-  // Store F'(rho) = -0.5 * A / sqrt(rho + eps) in unwrapped[i].w and embed energy in force[i].w
   let a_eam = params.pot1.x;
   let dF = -0.5 * a_eam / sqrt(max(rho, 1.0e-6));
   unwrapped[i].w = dF;
@@ -286,6 +316,9 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
   let n = params.counts.x;
   if (i >= n) { return; }
   let model = params.counts.y;
+  let rdf_stride = max(1u, params.counts.z);
+  let sample_rdf = params.ctrl.z > 0.5 && (i % rdf_stride) == 0u;
+  let wall_y = (params.counts.w & 2u) != 0u;
   let box_l = params.box_dt.xyz;
   let eps = params.pot0.x;
   let sig = params.pot0.y;
@@ -314,13 +347,12 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
   let dFi = unwrapped[i].w;
   let beta = max(params.pot1.y, 0.25);
 
-  // Stillinger-Weber 3-body nearest-neighbor list gathered during the same pair scan!
   var nb_vec: array<vec3<f32>, 12>;
   var nb_r: array<f32, 12>;
   var nb_count = 0u;
 
-  let use_grid = params.cell_cfg.w == 1u && atomicLoad(&cell_grid[MAX_CELLS_U]) == 0u;
-  if (use_grid) {
+  let next_base = params.cell_cfg.w;
+  if (next_base > 0u) {
     let dims = max(params.cell_cfg.xyz, vec3<u32>(1u));
     let ci = atom_cell_coord(pi, box_l, dims);
     let dx_min = select(0i, -1i, dims.x >= 3u);
@@ -332,73 +364,78 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var dz = dz_min; dz <= dz_max; dz = dz + 1i) {
       let cz = select(u32(dz), u32((i32(ci.z) + dz + i32(dims.z)) % i32(dims.z)), dims.z >= 3u);
       for (var dy = dy_min; dy <= dy_max; dy = dy + 1i) {
-        let cy = select(u32(dy), u32((i32(ci.y) + dy + i32(dims.y)) % i32(dims.y)), dims.y >= 3u);
+        let cy_raw = select(dy, i32(ci.y) + dy, dims.y >= 3u);
+        if (wall_y && (cy_raw < 0i || cy_raw >= i32(dims.y))) { continue; }
+        let cy = select(u32(cy_raw), u32((cy_raw + i32(dims.y)) % i32(dims.y)), !wall_y && dims.y >= 3u);
         for (var dx = dx_min; dx <= dx_max; dx = dx + 1i) {
           let cx = select(u32(dx), u32((i32(ci.x) + dx + i32(dims.x)) % i32(dims.x)), dims.x >= 3u);
           let cid = cell_linear_idx(vec3<u32>(cx, cy, cz), dims);
-          let cnt = min(atomicLoad(&cell_grid[cid]), MAX_PER_CELL_U);
-          let base = CELL_ATOMS_BASE_U + cid * MAX_PER_CELL_U;
-          for (var s = 0u; s < cnt; s = s + 1u) {
-            let j = atomicLoad(&cell_grid[base + s]);
-            if (j == i) { continue; }
-            let d = min_image(pi - pos[j].xyz, box_l);
-            let r2 = dot(d, d);
-            if (r2 >= rcut2 || r2 <= 1.0e-8) { continue; }
-            let r = sqrt(r2);
-            if (r2 < r_coord_cut2) { coord_i = coord_i + 1u; }
-            if (model == 2u && nb_count < 12u) {
-              nb_vec[nb_count] = -d;
-              nb_r[nb_count] = r;
-              nb_count = nb_count + 1u;
-            }
-            if (params.ctrl.z > 0.5) {
-              let bin = u32(clamp((r / rcut) * 64.0, 0.0, 63.0));
-              atomicAdd(&telemetry[16u + bin], 1);
-            }
-            var f_scalar = 0.0;
-            var u_pair = 0.0;
-            if (model == 0u) {
-              let sr = sig / r;
-              let sr2 = sr * sr;
-              let sr6 = sr2 * sr2 * sr2;
-              let sr12 = sr6 * sr6;
-              u_pair = 4.0 * eps * (sr12 - sr6) - lj_ecut + (r - rcut) * lj_fcut;
-              let f_mag = 24.0 * eps * (2.0 * sr12 - sr6) / r - lj_fcut;
-              f_scalar = f_mag / r;
-            } else if (model == 1u) {
-              let ex = exp(-alpha * (r - sig));
-              let sf = 1.0 - r / rcut;
-              let sf2 = sf * sf;
-              let u_morse = eps * (ex * ex - 2.0 * ex);
-              let du_morse = 2.0 * eps * alpha * (ex - ex * ex);
-              u_pair = u_morse * sf2;
-              let du_dr = du_morse * sf2 - u_morse * (2.0 * sf / rcut);
-              let ex_rho = exp(-beta * (r - sig));
-              let drho_dr = ex_rho * (-beta * sf2 - 2.0 * sf / rcut);
-              let dFj = unwrapped[j].w;
-              let f_mag = -du_dr - (dFi + dFj) * drho_dr;
-              f_scalar = f_mag / r;
-            } else {
-              let rs = r / sig;
-              let a_sw = rcut / sig;
-              let denom = rs - a_sw;
-              if (denom < -1.0e-4) {
-                let ex_sw = exp(1.0 / denom);
-                let inv_r4 = 1.0 / (rs * rs * rs * rs);
-                let term = 0.6022245584 * inv_r4 - 1.0;
-                u_pair = 7.049556277 * eps * term * ex_sw;
-                let dterm = -4.0 * 0.6022245584 * inv_r4 / rs;
-                let du_drs = 7.049556277 * eps * ex_sw * (dterm - term / (denom * denom));
-                f_scalar = -(du_drs / sig) / r;
+          var j = atomicLoad(&cell_grid[cid]);
+          var guard = 0u;
+          while (j != EMPTY_CELL_U && guard < MAX_CELL_WALK_U) {
+            if (j != i) {
+              let d = min_image_cfg(pi - pos[j].xyz, box_l, wall_y);
+              let r2 = dot(d, d);
+              if (r2 < rcut2 && r2 > 1.0e-8) {
+                let r = sqrt(r2);
+                if (r2 < r_coord_cut2) { coord_i = coord_i + 1u; }
+                if (model == 2u && nb_count < 12u) {
+                  nb_vec[nb_count] = -d;
+                  nb_r[nb_count] = r;
+                  nb_count = nb_count + 1u;
+                }
+                if (sample_rdf) {
+                  let bin = u32(clamp((r / rcut) * 64.0, 0.0, 63.0));
+                  atomicAdd(&telemetry[16u + bin], 1);
+                }
+                var f_scalar = 0.0;
+                var u_pair = 0.0;
+                if (model == 0u) {
+                  let sr = sig / r;
+                  let sr2 = sr * sr;
+                  let sr6 = sr2 * sr2 * sr2;
+                  let sr12 = sr6 * sr6;
+                  u_pair = 4.0 * eps * (sr12 - sr6) - lj_ecut + (r - rcut) * lj_fcut;
+                  let f_mag = 24.0 * eps * (2.0 * sr12 - sr6) / r - lj_fcut;
+                  f_scalar = f_mag / r;
+                } else if (model == 1u) {
+                  let ex = exp(-alpha * (r - sig));
+                  let sf = 1.0 - r / rcut;
+                  let sf2 = sf * sf;
+                  let u_morse = eps * (ex * ex - 2.0 * ex);
+                  let du_morse = 2.0 * eps * alpha * (ex - ex * ex);
+                  u_pair = u_morse * sf2;
+                  let du_dr = du_morse * sf2 - u_morse * (2.0 * sf / rcut);
+                  let ex_rho = exp(-beta * (r - sig));
+                  let drho_dr = ex_rho * (-beta * sf2 - 2.0 * sf / rcut);
+                  let dFj = unwrapped[j].w;
+                  let f_mag = -du_dr - (dFi + dFj) * drho_dr;
+                  f_scalar = f_mag / r;
+                } else {
+                  let rs = r / sig;
+                  let a_sw = rcut / sig;
+                  let denom = rs - a_sw;
+                  if (denom < -1.0e-4) {
+                    let ex_sw = exp(1.0 / denom);
+                    let inv_r4 = 1.0 / (rs * rs * rs * rs);
+                    let term = 0.6022245584 * inv_r4 - 1.0;
+                    u_pair = 7.049556277 * eps * term * ex_sw;
+                    let dterm = -4.0 * 0.6022245584 * inv_r4 / rs;
+                    let du_drs = 7.049556277 * eps * ex_sw * (dterm - term / (denom * denom));
+                    f_scalar = -(du_drs / sig) / r;
+                  }
+                }
+                let fij = d * f_scalar;
+                fi = fi + fij;
+                epot_i = epot_i + 0.5 * u_pair;
+                vir_v = vir_v + 0.5 * (d * fij);
+                sxy = sxy + 0.5 * d.x * fij.y;
+                sxz = sxz + 0.5 * d.x * fij.z;
+                syz = syz + 0.5 * d.y * fij.z;
               }
             }
-            let fij = d * f_scalar;
-            fi = fi + fij;
-            epot_i = epot_i + 0.5 * u_pair;
-            vir_v = vir_v + 0.5 * (d * fij);
-            sxy = sxy + 0.5 * d.x * fij.y;
-            sxz = sxz + 0.5 * d.x * fij.z;
-            syz = syz + 0.5 * d.y * fij.z;
+            j = atomicLoad(&cell_grid[next_base + j]);
+            guard = guard + 1u;
           }
         }
       }
@@ -406,7 +443,7 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
   } else {
     for (var j = 0u; j < n; j = j + 1u) {
       if (j == i) { continue; }
-      let d = min_image(pi - pos[j].xyz, box_l);
+      let d = min_image_cfg(pi - pos[j].xyz, box_l, wall_y);
       let r2 = dot(d, d);
       if (r2 >= rcut2 || r2 <= 1.0e-8) { continue; }
       let r = sqrt(r2);
@@ -416,7 +453,7 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
         nb_r[nb_count] = r;
         nb_count = nb_count + 1u;
       }
-      if (params.ctrl.z > 0.5) {
+      if (sample_rdf) {
         let bin = u32(clamp((r / rcut) * 64.0, 0.0, 63.0));
         atomicAdd(&telemetry[16u + bin], 1);
       }
@@ -500,21 +537,43 @@ fn compute_forces(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
 
-  // Write normalized local coordination z_i / Z_ideal into pos[i].w for zero-copy phase rendering!
+  // Optional universal gravity body force (-m * g * y_hat) & smooth C^1 harmonic floor/ceiling walls
+  let g_acc = params.grav_cfg.x;
+  let m_i = max(vel[i].w, 1.0e-6);
+  if (g_acc > 0.0) {
+    fi.y = fi.y - m_i * g_acc;
+    epot_i = epot_i + m_i * g_acc * pi.y;
+  }
+  if (wall_y) {
+    let dc = max(0.35, params.grav_cfg.z);
+    let kw = max(0.0, params.grav_cfg.w);
+    if (pi.y < dc) {
+      let pen = dc - pi.y;
+      fi.y = fi.y + kw * pen;
+      epot_i = epot_i + 0.5 * kw * pen * pen;
+    } else if (pi.y > box_l.y - dc) {
+      let pen = pi.y - (box_l.y - dc);
+      fi.y = fi.y - kw * pen;
+      epot_i = epot_i + 0.5 * kw * pen * pen;
+    }
+  }
+
   pos[i] = vec4<f32>(pi, clamp(f32(coord_i) / ideal_coord, 0.0, 1.5));
   force[i] = vec4<f32>(fi, epot_i);
 
   if (params.ctrl.z > 0.5) {
+    let e_s = params.scale_cfg.x;
+    let c_s = params.scale_cfg.w;
     let vir_i = vir_v.x + vir_v.y + vir_v.z;
-    atomicAdd(&telemetry[1], i32(clamp(epot_i * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[2], i32(clamp(vir_i * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[7], i32(clamp(sxy * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[8], i32(clamp(sxz * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[9], i32(clamp(syz * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[10], i32(clamp(vir_v.x * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[11], i32(clamp(vir_v.y * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[12], i32(clamp(vir_v.z * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[116], i32(coord_i * 100u));
+    atomicAdd(&telemetry[1], i32(clamp(epot_i * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[2], i32(clamp(vir_i * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[7], i32(clamp(sxy * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[8], i32(clamp(sxz * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[9], i32(clamp(syz * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[10], i32(clamp(vir_v.x * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[11], i32(clamp(vir_v.y * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[12], i32(clamp(vir_v.z * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[116], i32(f32(coord_i) * c_s));
   }
 }
 
@@ -543,7 +602,6 @@ fn vv_second_kick_reduce(@builtin(global_invocation_id) id: vec3<u32>) {
   var heat_delta_rem = 0.0;
 
   if (exp_mode == 3u) {
-    // Couette Shear NEMD: opposite boundary slab velocity drive along X (bottom y < 0.18 -> -v_wall, top y > 0.82 -> +v_wall)
     let fy = p3.y / max(1.0e-5, box_l.y);
     let v_wall = params.ctrl.w;
     if (fy < 0.18) {
@@ -552,12 +610,10 @@ fn vv_second_kick_reduce(@builtin(global_invocation_id) id: vec3<u32>) {
       v_new.x = mix(v_new.x, v_wall, 0.25);
     }
     if (therm_on) {
-      // Thermostat transverse (y, z) thermal velocity only so Couette x-shear profile stays physical!
       v_new.y = v_new.y * params.ctrl.y;
       v_new.z = v_new.z * params.ctrl.y;
     }
   } else if (exp_mode == 4u) {
-    // Thermal Gradient NEMD: hot slab x in [0, 0.20] and cold slab x in [0.50, 0.70]
     let fx = p3.x / max(1.0e-5, box_l.x);
     let ke_before = 0.5 * m * dot(v_new, v_new);
     if (fx < 0.20) {
@@ -570,59 +626,66 @@ fn vv_second_kick_reduce(@builtin(global_invocation_id) id: vec3<u32>) {
       heat_delta_rem = ke_before - ke_after;
     }
   } else if (therm_on) {
-    v_new = v_new * params.ctrl.y;
+    let vy_cm = select(0.0, params.grav_cfg.y, params.grav_cfg.x > 0.0);
+    v_new = vec3<f32>(
+      v_new.x * params.ctrl.y,
+      vy_cm + (v_new.y - vy_cm) * params.ctrl.y,
+      v_new.z * params.ctrl.y
+    );
   }
 
   vel[i] = vec4<f32>(v_new, m);
 
   if (params.ctrl.z > 0.5) {
+    let e_s = params.scale_cfg.x;
+    let m_s = params.scale_cfg.y;
+    let v_s = params.scale_cfg.z;
     let ekin = 0.5 * m * dot(v_new, v_new);
-    let kin_v = m * (v_new * v_new); // 2 * K_alpha
+    let kin_v = m * (v_new * v_new);
     let disp = unwrapped[i].xyz - init_state[i].xyz;
     let msd_i = dot(disp, disp);
     let v0 = init_state[params.counts.x + i].xyz;
     let vacf_i = dot(v_new, v0);
     let vacf_d = dot(v0, v0);
 
-    // Per-atom physical structural phase classification (Coordination z_norm & Lindemann displacement)
     let r_nn = max(1.2, params.phase_cfg.x);
     let disp_norm = sqrt(max(0.0, msd_i)) / r_nn;
     let z_norm = p4.w;
     if (z_norm < 0.22) {
-      atomicAdd(&telemetry[119], 1i); // Unbonded Vapor / Gas
+      atomicAdd(&telemetry[119], 1i);
     } else if (z_norm >= 0.45 && disp_norm < 0.36) {
-      atomicAdd(&telemetry[117], 1i); // Crystalline / Bound Solid
+      atomicAdd(&telemetry[117], 1i);
     } else {
-      atomicAdd(&telemetry[118], 1i); // Diffusing Liquid / Coexistence Interface
+      atomicAdd(&telemetry[118], 1i);
     }
 
-    atomicAdd(&telemetry[0], i32(clamp(ekin * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[3], i32(clamp(msd_i * 1.0e4, 0.0, 2.0e7)));
-    atomicAdd(&telemetry[4], i32(clamp(m * v_new.x * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[5], i32(clamp(m * v_new.y * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[6], i32(clamp(m * v_new.z * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[13], i32(clamp(kin_v.x * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[14], i32(clamp(kin_v.y * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[15], i32(clamp(kin_v.z * 1.0e4, -2.0e9, 2.0e9)));
-    atomicAdd(&telemetry[80], i32(clamp(vacf_i * 1.0e5, -2.0e8, 2.0e8)));
-    atomicAdd(&telemetry[81], i32(clamp(vacf_d * 1.0e5, 0.0, 2.0e8)));
-    atomicAdd(&telemetry[82], i32(clamp(heat_delta_add * 1.0e5, -2.0e8, 2.0e8)));
-    atomicAdd(&telemetry[83], i32(clamp(heat_delta_rem * 1.0e5, -2.0e8, 2.0e8)));
+    atomicAdd(&telemetry[0], i32(clamp(ekin * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[3], i32(clamp(msd_i * m_s, 0.0, 1.0e7)));
+    atomicAdd(&telemetry[4], i32(clamp(m * v_new.x * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[5], i32(clamp(m * v_new.y * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[6], i32(clamp(m * v_new.z * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[13], i32(clamp(kin_v.x * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[14], i32(clamp(kin_v.y * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[15], i32(clamp(kin_v.z * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[80], i32(clamp(vacf_i * v_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[81], i32(clamp(vacf_d * v_s, 0.0, 1.0e7)));
+    atomicAdd(&telemetry[82], i32(clamp(heat_delta_add * v_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[83], i32(clamp(heat_delta_rem * v_s, -1.0e7, 1.0e7)));
 
-    // 8-slab spatial diagnostics (along Y for Shear NEMD, along X for Thermal NEMD & Acoustic waves!)
     let coord_f = select(p3.x / max(1.0e-5, box_l.x), p3.y / max(1.0e-5, box_l.y), exp_mode == 3u);
     let slab = u32(clamp(floor(coord_f * 8.0), 0.0, 7.0));
     let sbase = 84u + slab * 4u;
     atomicAdd(&telemetry[sbase + 0u], 1i);
-    atomicAdd(&telemetry[sbase + 1u], i32(clamp(ekin * 1.0e4, -2.0e8, 2.0e8)));
-    atomicAdd(&telemetry[sbase + 2u], i32(clamp(v_new.x * 1.0e4, -2.0e8, 2.0e8)));
-    atomicAdd(&telemetry[sbase + 3u], i32(clamp(v_new.y * 1.0e4, -2.0e8, 2.0e8)));
+    atomicAdd(&telemetry[sbase + 1u], i32(clamp(ekin * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[sbase + 2u], i32(clamp(v_new.x * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[sbase + 3u], i32(clamp(v_new.y * e_s, -1.0e7, 1.0e7)));
+    atomicAdd(&telemetry[120], i32(clamp(p3.y / max(1.0e-5, box_l.y), 0.0, 1.0) * params.scale_cfg.w));
   }
 }
 `;
 
 /**
- * Create a GPU-resident Atomic Molecular Dynamics session.
+ * Create a GPU-resident Atomic Molecular Dynamics session (scales cleanly to 100K+ atoms!).
  * Fails closed without a live GPUDevice.
  */
 export function createMolecularDynamicsSessionWebGpu(device, {
@@ -644,7 +707,10 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   idealCoordination = null,
   meltingPointK = null,
   bulkModulusGPa = null,
-  crystalStructure = null
+  cohesiveEnergyEv = null,
+  crystalStructure = null,
+  gravityEnabled = false,
+  gravityAccelInternal = null
 } = {}) {
   if (!device || typeof device.createBuffer !== 'function') {
     throw new TypeError('createMolecularDynamicsSessionWebGpu requires a live WebGPU GPUDevice');
@@ -655,6 +721,11 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   if (!(atomCount >= 2 && velArr.length === atomCount * 4)) {
     throw new RangeError(`Invalid MD buffers: atomCount=${atomCount}, velFloats=${velArr.length}`);
   }
+  const maxStorageBytes = Number(device.limits?.maxStorageBufferBindingSize) || (128 * 1024 * 1024);
+  if (atomCount * 32 > maxStorageBytes) {
+    throw new RangeError(`MD init_state (${atomCount * 32} B) exceeds device maxStorageBufferBindingSize (${maxStorageBytes} B)`);
+  }
+
   const box = Array.isArray(boxLengthsA)
     ? [Number(boxLengthsA[0]), Number(boxLengthsA[1]), Number(boxLengthsA[2])]
     : [Number(boxLengthsA), Number(boxLengthsA), Number(boxLengthsA)];
@@ -676,6 +747,18 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   const resolvedBulkModGPa = Number.isFinite(Number(bulkModulusGPa)) && Number(bulkModulusGPa) > 0.2
     ? Number(bulkModulusGPa)
     : Math.max(2.0, Math.min(350, (Number(epsilonEv) * 160.22) / Math.max(4, resolvedRnn ** 3) * 28));
+  const resolvedMassU = Math.max(1.0, Number(velArr[3]) || 28.0);
+  const resolvedEcoh = Number.isFinite(Number(cohesiveEnergyEv)) && Number(cohesiveEnergyEv) > 0.01
+    ? Number(cohesiveEnergyEv)
+    : Math.max(0.04, Number(epsilonEv) * 6.0 + Number(eamAEv) * 1.6);
+
+  // Dynamic i32 atomic fixed-point scales — zero overflow from 16 atoms to 200,000+ atoms!
+  const energyScale = atomCount <= 2000 ? 1e4 : Math.max(10, Math.floor(2e7 / atomCount));
+  const msdScale = atomCount <= 2000 ? 1e4 : Math.max(2, Math.floor(2e6 / atomCount));
+  const vacfScale = atomCount <= 2000 ? 1e5 : Math.max(10, Math.floor(2e7 / atomCount));
+  const coordScale = atomCount <= 8000 ? 100 : 10;
+  const rdfStride = atomCount <= 4096 ? 1 : Math.max(2, Math.floor(atomCount / 4096));
+  const rdfSampledAtoms = Math.ceil(atomCount / rdfStride);
 
   const bindings = [
     computeBufferBinding(0, 'uniform'),
@@ -688,7 +771,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     computeBufferBinding(7, 'storage')
   ];
   const mkPipe = (entry) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-gpumath-md-${entry}.v4`,
+    cacheKey: `ulg-gpumath-md-${entry}.v6`,
     label: `ulg-gpumath-md-${entry}`,
     code: molecularDynamicsWebGpuWgsl,
     entryPoint: entry,
@@ -712,7 +795,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   };
   const paramsBuf = device.createBuffer({
     label: 'ulg-md-params',
-    size: 144,
+    size: 176,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const posBuf = mkBuf('ulg-md-pos', posArr, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC);
@@ -733,9 +816,11 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     size: TELEMETRY_WORDS * 4,
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   });
+  const cellGridBytes = Math.min(maxStorageBytes, (MAX_LINKED_CELLS + atomCount + 64) * 4);
+  const maxCellsForBuf = Math.max(1, Math.min(MAX_LINKED_CELLS, Math.floor(cellGridBytes / 4) - atomCount - 16));
   const cellGridBuf = device.createBuffer({
-    label: 'ulg-md-cell-grid',
-    size: (MAX_CELLS + 1 + MAX_CELLS * MAX_PER_CELL) * 4,
+    label: 'ulg-md-linked-cell-grid',
+    size: Math.max(64, (maxCellsForBuf + atomCount + 16) * 4),
     usage: GPU_BUFFER_USAGE.STORAGE
   });
 
@@ -764,17 +849,47 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   let cumulativeStrainX = 0.0;
   let cumulativeStrainY = 0.0;
   let cumulativeShearXY = 0.0;
+  let curGravityEnabled = Boolean(gravityEnabled);
+  let curGravityCustomAcc = Number.isFinite(Number(gravityAccelInternal)) && Number(gravityAccelInternal) > 0
+    ? Number(gravityAccelInternal)
+    : null;
+  let curGravityStrength = 1.0;
+  let lastVyCm = 0.0;
   let readPromise = null;
   let destroyed = false;
 
+  const computeEffectiveGravityAcc = () => {
+    if (!curGravityEnabled) return 0.0;
+    if (curGravityCustomAcc != null) return curGravityCustomAcc * curGravityStrength;
+    // Universal Bond-scaled MD gravity: m * g * L_y ~ 2.0 * E_coh (clamped so per-layer
+    // hydrostatic weight never crushes crystals while Solid lands cleanly, Melt pools into
+    // a sessile droplet on the floor, and Vapor forms a barometric atmosphere!).
+    const raw = (2.0 * resolvedEcoh) / Math.max(1.0, resolvedMassU * Math.max(12.0, box[1]));
+    const maxSafe = (0.14 * resolvedEcoh) / Math.max(1.0, resolvedMassU * Math.max(1.5, resolvedRnn));
+    return Math.max(1.5e-5, Math.min(maxSafe, raw)) * curGravityStrength;
+  };
+
   const computeCellGrid = () => {
     const safeRcut = Math.max(0.5, Number(rcutA));
-    const nx = Math.max(1, Math.min(CELL_MAX_DIM, Math.floor(box[0] / safeRcut)));
-    const ny = Math.max(1, Math.min(CELL_MAX_DIM, Math.floor(box[1] / safeRcut)));
-    const nz = Math.max(1, Math.min(CELL_MAX_DIM, Math.floor(box[2] / safeRcut)));
+    let nx = Math.max(1, Math.floor(box[0] / safeRcut));
+    let ny = Math.max(1, Math.floor(box[1] / safeRcut));
+    let nz = Math.max(1, Math.floor(box[2] / safeRcut));
+    if (nx * ny * nz > maxCellsForBuf) {
+      const shrink = Math.cbrt(maxCellsForBuf / (nx * ny * nz));
+      nx = Math.max(1, Math.floor(nx * shrink));
+      ny = Math.max(1, Math.floor(ny * shrink));
+      nz = Math.max(1, Math.floor(nz * shrink));
+      while (nx * ny * nz > maxCellsForBuf) {
+        if (nx >= ny && nx >= nz && nx > 1) nx -= 1;
+        else if (ny >= nz && ny > 1) ny -= 1;
+        else if (nz > 1) nz -= 1;
+        else break;
+      }
+    }
     const totalCells = nx * ny * nz;
-    const useCellList = (atomCount >= 160 && totalCells >= 8) ? 1 : 0;
-    return { nx, ny, nz, totalCells, useCellList };
+    const useCellList = (atomCount >= 128 && totalCells >= 8) ? 1 : 0;
+    const nextBase = useCellList ? totalCells : 0;
+    return { nx, ny, nz, totalCells, useCellList, nextBase };
   };
 
   const writeParams = ({
@@ -795,11 +910,14 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     const dtEffFs = Number(dtFs) * safeDtScale;
     const dtEffInt = dtInternal * safeDtScale;
     const grid = computeCellGrid();
-    // Safety impulse cap ONLY fires on pathological close-contact kicks (> 0.28 r_NN per step) during extreme high-T vaporization.
     const maxDvStep = useThermostat ? Math.max(0.45, (0.28 * resolvedRnn) / Math.max(0.02, dtEffInt)) : 0.0;
-    const ab = new ArrayBuffer(144);
-    const flagsW = (useThermostat ? 1 : 0) | ((expMode & 15) << 8);
-    new Uint32Array(ab, 0, 4).set([atomCount, potentialModel, 64, flagsW]);
+    const gravAcc = computeEffectiveGravityAcc();
+    const wallYActive = curGravityEnabled && gravAcc > 0;
+    const wallDc = Math.min(0.85 * resolvedRnn, 0.14 * box[1]);
+    const wallK = wallYActive ? (0.025 * resolvedMassU) / Math.max(4e-4, dtEffInt * dtEffInt) : 0.0;
+    const ab = new ArrayBuffer(176);
+    const flagsW = (useThermostat ? 1 : 0) | (wallYActive ? 2 : 0) | ((expMode & 15) << 8);
+    new Uint32Array(ab, 0, 4).set([atomCount, potentialModel, rdfStride, flagsW]);
     new Float32Array(ab, 16, 4).set([box[0], box[1], box[2], dtEffInt]);
     new Float32Array(ab, 32, 4).set([epsilonEv, sigmaOrR0A, alphaOrLambda, rcutA]);
     new Float32Array(ab, 48, 4).set([eamAEv, eamBeta, swGamma, targetTemperatureK]);
@@ -811,8 +929,10 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     ]);
     new Float32Array(ab, 80, 4).set([hotScale, coldScale, strainSx, strainSy]);
     new Float32Array(ab, 96, 4).set([strainSz, shearXY, pulseAmp, pulsePol]);
-    new Uint32Array(ab, 112, 4).set([grid.nx, grid.ny, grid.nz, grid.useCellList]);
+    new Uint32Array(ab, 112, 4).set([grid.nx, grid.ny, grid.nz, grid.nextBase]);
     new Float32Array(ab, 128, 4).set([resolvedRnn, resolvedIdealCoord, resolvedMeltingK, maxDvStep]);
+    new Float32Array(ab, 144, 4).set([energyScale, msdScale, vacfScale, coordScale]);
+    new Float32Array(ab, 160, 4).set([gravAcc, wallYActive ? lastVyCm : 0.0, wallDc, wallK]);
     device.queue.writeBuffer(paramsBuf, 0, ab);
     return grid;
   };
@@ -820,7 +940,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   const wg = Math.ceil(atomCount / 64);
 
   function encodeForces(pass, grid) {
-    if (grid.useCellList) {
+    if (grid.nextBase > 0) {
       pass.setPipeline(clearCellPipe.pipeline);
       pass.dispatchWorkgroups(Math.max(1, Math.ceil(grid.totalCells / 64)));
       pass.setPipeline(buildCellPipe.pipeline);
@@ -840,13 +960,41 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     curThermalDeltaT = Number(thermalDeltaT) || 0;
   }
 
+  function setGravity(enabled, { accelInternal = null, strength = null } = {}) {
+    const nextEn = Boolean(enabled);
+    if (accelInternal !== undefined) {
+      curGravityCustomAcc = (accelInternal != null && Number.isFinite(Number(accelInternal)) && Number(accelInternal) > 0)
+        ? Number(accelInternal)
+        : null;
+    }
+    if (strength != null && Number.isFinite(Number(strength)) && Number(strength) > 0) {
+      curGravityStrength = Math.max(0.1, Math.min(5.0, Number(strength)));
+    }
+    if (nextEn !== curGravityEnabled) {
+      curGravityEnabled = nextEn;
+      lastVyCm = 0.0;
+      forcesInitialized = false;
+    }
+    return getGravity();
+  }
+
+  function getGravity() {
+    const accelInternal = computeEffectiveGravityAcc();
+    const accelAPerPs2 = accelInternal * (1e6 / (MD_TIME_UNIT_FS * MD_TIME_UNIT_FS));
+    return {
+      enabled: curGravityEnabled,
+      strength: curGravityStrength,
+      accelInternal,
+      accelAPerPs2
+    };
+  }
+
   function applyStrain({ strainX = 0, strainY = 0, strainZ = 0, shearXY = 0 } = {}) {
     if (destroyed) return;
     const sx = Math.max(0.82, Math.min(1.22, 1 + Number(strainX || 0)));
     const sy = Math.max(0.82, Math.min(1.22, 1 + Number(strainY || 0)));
     const sz = Math.max(0.82, Math.min(1.22, 1 + Number(strainZ || 0)));
     const gxy = Math.max(-0.22, Math.min(0.22, Number(shearXY || 0)));
-    // Keep NPT volume ratio within physical bounds [0.6x, 12.0x] of initial volume
     const nextLx = Math.max(initBox[0] * 0.78, Math.min(initBox[0] * 2.35, box[0] * sx));
     const nextLy = Math.max(initBox[1] * 0.78, Math.min(initBox[1] * 2.35, box[1] * sy));
     const nextLz = Math.max(initBox[2] * 0.78, Math.min(initBox[2] * 2.35, box[2] * sz));
@@ -916,8 +1064,6 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     const safeDtScale = Math.max(0.05, Math.min(1.0, Number(dtScale) || 1.0));
     const dtEffFs = Number(dtFs) * safeDtScale;
     const useTherm = Number(temperatureK) > 0 && Number(thermostatCouplingFs) > 0;
-    // Exact exponential relaxation across all `steps` substeps so velScale^(2*steps) = T_end / T_cur
-    // (eliminates multi-step overshoot when jumping 10x between Solid, Melt, and Vapor!).
     let velScale = 1.0;
     if (useTherm && lastTempK > 0) {
       const tTgt = Math.max(1, Number(temperatureK));
@@ -937,29 +1083,29 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     const hotScale = Math.max(0.96, Math.min(1.018, Math.pow(hotRatio, 0.5 / nSub)));
     const coldScale = Math.max(0.955, Math.min(1.015, Math.pow(coldRatio, 0.5 / nSub)));
 
-    const encoder = device.createCommandEncoder({ label: `ulg-md-batch-${steps}` });
-    if (!forcesInitialized) {
-      const gInit = writeParams({ collectTelemetry: false, scaleVel: 1.0, useThermostat: false, hotScale: 1.0, coldScale: 1.0, dtScale: safeDtScale });
-      const pInit = encoder.beginComputePass({ label: 'ulg-md-init-forces' });
-      pInit.setBindGroup(0, bg);
-      encodeForces(pInit, gInit);
-      pInit.end();
-      forcesInitialized = true;
-    }
-
-    if (steps > 1) {
-      const gLoop = writeParams({ collectTelemetry: false, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale, dtScale: safeDtScale });
-      const pLoop = encoder.beginComputePass({ label: 'ulg-md-steps-loop' });
-      pLoop.setBindGroup(0, bg);
-      for (let s = 0; s < steps - 1; s += 1) {
-        pLoop.setPipeline(driftPipe.pipeline); pLoop.dispatchWorkgroups(wg);
-        encodeForces(pLoop, gLoop);
-        pLoop.setPipeline(kickPipe.pipeline); pLoop.dispatchWorkgroups(wg);
+    if (!forcesInitialized || steps > 1) {
+      const encoder = device.createCommandEncoder({ label: `ulg-md-batch-${steps}` });
+      if (!forcesInitialized) {
+        const gInit = writeParams({ collectTelemetry: false, scaleVel: 1.0, useThermostat: false, hotScale: 1.0, coldScale: 1.0, dtScale: safeDtScale });
+        const pInit = encoder.beginComputePass({ label: 'ulg-md-init-forces' });
+        pInit.setBindGroup(0, bg);
+        encodeForces(pInit, gInit);
+        pInit.end();
+        forcesInitialized = true;
       }
-      pLoop.end();
+      if (steps > 1) {
+        const gLoop = writeParams({ collectTelemetry: false, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale, dtScale: safeDtScale });
+        const pLoop = encoder.beginComputePass({ label: 'ulg-md-steps-loop' });
+        pLoop.setBindGroup(0, bg);
+        for (let s = 0; s < steps - 1; s += 1) {
+          pLoop.setPipeline(driftPipe.pipeline); pLoop.dispatchWorkgroups(wg);
+          encodeForces(pLoop, gLoop);
+          pLoop.setPipeline(kickPipe.pipeline); pLoop.dispatchWorkgroups(wg);
+        }
+        pLoop.end();
+      }
+      device.queue.submit([encoder.finish()]);
     }
-
-    device.queue.submit([encoder.finish()]);
 
     const encFinal = device.createCommandEncoder({ label: 'ulg-md-final-step' });
     const gFinal = writeParams({ collectTelemetry: readTelemetry, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale, dtScale: safeDtScale });
@@ -991,27 +1137,34 @@ export function createMolecularDynamicsSessionWebGpu(device, {
       const words = new Int32Array(readTelemetryBuf.getMappedRange().slice(0, TELEMETRY_WORDS * 4));
       readTelemetryBuf.unmap();
 
-      const kineticEnergyEv = words[0] / 1e4;
-      const potentialEnergyEv = words[1] / 1e4;
+      const kineticEnergyEv = words[0] / energyScale;
+      const potentialEnergyEv = words[1] / energyScale;
       const totalEnergyEv = kineticEnergyEv + potentialEnergyEv;
-      const virialEv = words[2] / 1e4;
-      const msdA2 = words[3] / (1e4 * atomCount);
-      const momentum = [words[4] / 1e4, words[5] / 1e4, words[6] / 1e4];
+      const virialEv = words[2] / energyScale;
+      const msdA2 = words[3] / (msdScale * atomCount);
+      const momentum = [words[4] / energyScale, words[5] / energyScale, words[6] / energyScale];
       const volumeA3 = box[0] * box[1] * box[2];
       const dof = Math.max(1, 3 * atomCount - 3);
-      const instantTempK = (2 * kineticEnergyEv) / (dof * KB_EV_PER_K);
+      const totalMassU = atomCount * resolvedMassU;
+      const vyCm = momentum[1] / Math.max(1e-6, totalMassU);
+      const keCm = curGravityEnabled
+        ? 0.5 * (momentum[0] * momentum[0] + momentum[1] * momentum[1] + momentum[2] * momentum[2]) / Math.max(1e-6, totalMassU)
+        : 0.0;
+      const keThermalEv = Math.max(1e-9, kineticEnergyEv - keCm);
+      const instantTempK = (2 * keThermalEv) / (dof * KB_EV_PER_K);
       lastTempK = Number.isFinite(instantTempK) && instantTempK > 0 ? instantTempK : lastTempK;
+      lastVyCm = curGravityEnabled && Number.isFinite(vyCm) ? vyCm : 0.0;
       const evA3ToGPa = 160.2176634;
       const pressureGPa = ((2 * kineticEnergyEv + virialEv) / (3 * volumeA3)) * evA3ToGPa;
       const stressOffDiagGPa = [
-        (words[7] / 1e4 / volumeA3) * evA3ToGPa,
-        (words[8] / 1e4 / volumeA3) * evA3ToGPa,
-        (words[9] / 1e4 / volumeA3) * evA3ToGPa
+        (words[7] / energyScale / volumeA3) * evA3ToGPa,
+        (words[8] / energyScale / volumeA3) * evA3ToGPa,
+        (words[9] / energyScale / volumeA3) * evA3ToGPa
       ];
       const diagPressureGPa = [
-        ((words[13] / 1e4 + words[10] / 1e4) / volumeA3) * evA3ToGPa,
-        ((words[14] / 1e4 + words[11] / 1e4) / volumeA3) * evA3ToGPa,
-        ((words[15] / 1e4 + words[12] / 1e4) / volumeA3) * evA3ToGPa
+        ((words[13] / energyScale + words[10] / energyScale) / volumeA3) * evA3ToGPa,
+        ((words[14] / energyScale + words[11] / energyScale) / volumeA3) * evA3ToGPa,
+        ((words[15] / energyScale + words[12] / energyScale) / volumeA3) * evA3ToGPa
       ];
 
       const surfaceTensionNPerM = Math.max(
@@ -1019,16 +1172,17 @@ export function createMolecularDynamicsSessionWebGpu(device, {
         0.5 * box[2] * (0.5 * (diagPressureGPa[0] + diagPressureGPa[1]) - diagPressureGPa[2]) * 0.1
       );
 
-      const vacfDen = words[81] / 1e5;
-      const vacf = vacfDen > 1e-6 ? Math.max(-1.2, Math.min(1.2, (words[80] / 1e5) / vacfDen)) : 0;
-      const heatAddedEv = words[82] / 1e5;
-      const heatRemovedEv = words[83] / 1e5;
+      const vacfDen = words[81] / vacfScale;
+      const vacf = vacfDen > 1e-6 ? Math.max(-1.2, Math.min(1.2, (words[80] / vacfScale) / vacfDen)) : 0;
+      const heatAddedEv = words[82] / vacfScale;
+      const heatRemovedEv = words[83] / vacfScale;
 
-      // GPU-reduced real-time coordination & structural phase fractions
-      const meanCoordination = words[116] / (100 * atomCount);
+      const meanCoordination = words[116] / (coordScale * atomCount);
       const solidCount = Math.max(0, words[117]);
       const liquidCount = Math.max(0, words[118]);
       const vaporCount = Math.max(0, words[119]);
+      const meanYFrac = words[120] / (coordScale * atomCount);
+      const gravInfo = getGravity();
       const solidFraction = solidCount / atomCount;
       const liquidFraction = liquidCount / atomCount;
       const vaporFraction = vaporCount / atomCount;
@@ -1051,10 +1205,10 @@ export function createMolecularDynamicsSessionWebGpu(device, {
         const cnt = Math.max(0, words[base]);
         slabCounts[sb] = cnt;
         if (cnt > 0) {
-          const keSlab = words[base + 1] / 1e4;
+          const keSlab = words[base + 1] / energyScale;
           slabTempK[sb] = (2 * keSlab) / (3 * cnt * KB_EV_PER_K);
-          slabVx[sb] = (words[base + 2] / 1e4) / cnt;
-          slabVy[sb] = (words[base + 3] / 1e4) / cnt;
+          slabVx[sb] = (words[base + 2] / energyScale) / cnt;
+          slabVy[sb] = (words[base + 3] / energyScale) / cnt;
         }
       }
       if (expMode === MD_EXPERIMENT_MODES.THERMAL_NEMD) {
@@ -1087,7 +1241,6 @@ export function createMolecularDynamicsSessionWebGpu(device, {
         }
       }
 
-      // Adaptive compressibility Berendsen NPT Barostat (scales by 1 / K_0 so soft vdW and stiff metals both relax cleanly!)
       if (nptBarostatGPa != null && Number.isFinite(Number(nptBarostatGPa))) {
         const pTgt = Number(nptBarostatGPa);
         const betaGain = Math.max(0.0005, Math.min(0.012, 0.065 / Math.max(2.0, resolvedBulkModGPa)));
@@ -1111,7 +1264,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
       for (let b = 0; b < 64; b += 1) {
         const rMid = (b + 0.5) * dr;
         const shellVol = 4 * Math.PI * rMid * rMid * dr;
-        const ideal = Math.max(1e-9, atomCount * rhoNum * shellVol);
+        const ideal = Math.max(1e-9, rdfSampledAtoms * rhoNum * shellVol);
         rdfCounts[b] = words[16 + b] / ideal;
       }
 
@@ -1123,7 +1276,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
       return Object.freeze({
         schema: ULG_GPU_MD_SCHEMA,
         backend: 'webgpu',
-        usedCellList: gFinal.useCellList === 1,
+        usedCellList: gFinal.nextBase > 0,
         cellDims: Object.freeze([gFinal.nx, gFinal.ny, gFinal.nz]),
         experimentMode: expMode,
         totalSteps,
@@ -1150,6 +1303,10 @@ export function createMolecularDynamicsSessionWebGpu(device, {
         liquidFraction,
         vaporFraction,
         emergentPhase,
+        gravityEnabled: gravInfo.enabled,
+        gravityAccelInternal: gravInfo.accelInternal,
+        gravityAccelAPerPs2: gravInfo.accelAPerPs2,
+        meanYFrac,
         vacf,
         momentum,
         stressOffDiagGPa,
@@ -1204,6 +1361,8 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     velocitiesBuffer: velBuf,
     forcesBuffer: forceBuf,
     setExperimentMode,
+    setGravity,
+    getGravity,
     applyStrain,
     injectAcousticPulse,
     resetVacfOrigin,
@@ -1318,17 +1477,9 @@ export function registerMdSimulationModules(registry) {
 }
 
 /**
- * Build a zero-net-momentum crystalline MD initial state matching the actual
- * solved Bravais/covalent crystal symmetry (`fcc`, `vdw-fcc`, `bcc`, `hcp`,
- * `diamond`) at its exact equilibrium atomic density.
- *
- * Supports:
- *   - `chamberScale > 1.0`: centers the condensed crystal inside a larger
- *     periodic chamber with free surfaces (eliminating artificial defect-free
- *     superheating and allowing genuine Solid -> Liquid Droplet -> Boiling Vapor!)
- *   - `vacancyFraction > 0`: seeds physical equilibrium Schottky vacancies in
- *     periodic bulk crystals so melting nucleates near thermodynamic T_m
- *   - `vacuumZFactor > 1.0`: free-surface slab geometry along Z for gamma(T)
+ * Build a zero-net-momentum crystalline MD initial state (zero temporary JS array
+ * allocation — builds 100,000+ atoms in < 8 ms!) matching the actual solved
+ * Bravais/covalent crystal symmetry (`fcc`, `vdw-fcc`, `bcc`, `hcp`, `diamond`).
  */
 export function buildCrystalMdState({
   crystalStructure = 'fcc',
@@ -1361,7 +1512,7 @@ export function buildCrystalMdState({
       [0.5, 0.5, 0.5]
     ];
     rNearestNeighborA = a * Math.sqrt(3) / 2;
-    idealCoordination = 14; // 8 first-shell + 6 second-shell within 1.25 * r_NN
+    idealCoordination = 14;
   } else if (struct === 'diamond' || struct.startsWith('zincblende')) {
     basis = [
       [0, 0, 0], [0.5, 0.5, 0], [0.5, 0, 0.5], [0, 0.5, 0.5],
@@ -1401,7 +1552,23 @@ export function buildCrystalMdState({
   };
   const gauss = () => Math.sqrt(-2 * Math.log(rand())) * Math.cos(2 * Math.PI * rand());
 
-  const rawSites = [];
+  const basisLen = basis.length;
+  const totalSites = basisLen * nxCell * nyCell * nzCell;
+  let dropSet = null;
+  let nDrop = 0;
+  if (vacFrac > 0 && totalSites >= 64) {
+    nDrop = Math.max(1, Math.min(Math.floor(totalSites * 0.05), Math.round(totalSites * vacFrac)));
+    const stride = Math.max(3, Math.floor(totalSites / (nDrop + 1)));
+    dropSet = new Set();
+    for (let k = 1; k <= nDrop; k += 1) {
+      dropSet.add((k * stride + Math.floor(stride * 0.5)) % totalSites);
+    }
+    nDrop = dropSet.size;
+  }
+
+  const atomCount = totalSites - nDrop;
+  const positions = new Float32Array(atomCount * 4);
+  const velocities = new Float32Array(atomCount * 4);
   const ax = a * cellScale[0];
   const ay = a * cellScale[1];
   const az = a * cellScale[2];
@@ -1415,68 +1582,56 @@ export function buildCrystalMdState({
   const yOffset = cScale > 1.01 ? 0.5 * (boxLy - crystalLy) : 0;
   const zOffset = (vacZ > 1.01 || cScale > 1.01) ? 0.5 * (boxLz - crystalLz) : 0;
 
+  const sigmaV = Math.sqrt(Math.max(1e-9, KB_EV_PER_K * temperatureK / Math.max(massU, 1e-6)));
+  let rawIdx = 0;
+  let idx = 0;
+  let vxSum = 0; let vySum = 0; let vzSum = 0;
   for (let ix = 0; ix < nxCell; ix += 1) {
     for (let iy = 0; iy < nyCell; iy += 1) {
       for (let iz = 0; iz < nzCell; iz += 1) {
-        for (const [bx, by, bz] of basis) {
-          rawSites.push([
-            (ix + bx) * ax + xOffset,
-            (iy + by) * ay + yOffset,
-            (iz + bz) * az + zOffset
-          ]);
+        for (let bi = 0; bi < basisLen; bi += 1) {
+          const skip = dropSet !== null && dropSet.has(rawIdx);
+          rawIdx += 1;
+          if (skip) continue;
+          const bSite = basis[bi];
+          const off = idx * 4;
+          positions[off + 0] = (ix + bSite[0]) * ax + xOffset;
+          positions[off + 1] = (iy + bSite[1]) * ay + yOffset;
+          positions[off + 2] = (iz + bSite[2]) * az + zOffset;
+          positions[off + 3] = 1.0;
+          const vx = gauss() * sigmaV;
+          const vy = gauss() * sigmaV;
+          const vz = gauss() * sigmaV;
+          velocities[off + 0] = vx;
+          velocities[off + 1] = vy;
+          velocities[off + 2] = vz;
+          velocities[off + 3] = massU;
+          vxSum += vx; vySum += vy; vzSum += vz;
+          idx += 1;
         }
       }
     }
   }
 
-  // Optional deterministic Schottky thermal vacancies for bulk periodic nucleation
-  let sites = rawSites;
-  if (vacFrac > 0 && rawSites.length >= 64) {
-    const nDrop = Math.max(1, Math.min(Math.floor(rawSites.length * 0.05), Math.round(rawSites.length * vacFrac)));
-    const stride = Math.max(3, Math.floor(rawSites.length / (nDrop + 1)));
-    const dropSet = new Set();
-    for (let k = 1; k <= nDrop; k += 1) {
-      dropSet.add((k * stride + Math.floor(stride * 0.5)) % rawSites.length);
-    }
-    sites = rawSites.filter((_, idx) => !dropSet.has(idx));
-  }
-
-  const atomCount = sites.length;
-  const positions = new Float32Array(atomCount * 4);
-  const velocities = new Float32Array(atomCount * 4);
-  const sigmaV = Math.sqrt(Math.max(1e-9, KB_EV_PER_K * temperatureK / Math.max(massU, 1e-6)));
-  let vxSum = 0; let vySum = 0; let vzSum = 0;
-  for (let i = 0; i < atomCount; i += 1) {
-    positions[i * 4 + 0] = sites[i][0];
-    positions[i * 4 + 1] = sites[i][1];
-    positions[i * 4 + 2] = sites[i][2];
-    positions[i * 4 + 3] = 1.0; // initial normalized coordination
-    const vx = gauss() * sigmaV;
-    const vy = gauss() * sigmaV;
-    const vz = gauss() * sigmaV;
-    velocities[i * 4 + 0] = vx;
-    velocities[i * 4 + 1] = vy;
-    velocities[i * 4 + 2] = vz;
-    velocities[i * 4 + 3] = massU;
-    vxSum += vx; vySum += vy; vzSum += vz;
-  }
   vxSum /= atomCount; vySum /= atomCount; vzSum /= atomCount;
   let ke = 0;
   for (let i = 0; i < atomCount; i += 1) {
-    velocities[i * 4 + 0] -= vxSum;
-    velocities[i * 4 + 1] -= vySum;
-    velocities[i * 4 + 2] -= vzSum;
-    const vx = velocities[i * 4 + 0];
-    const vy = velocities[i * 4 + 1];
-    const vz = velocities[i * 4 + 2];
+    const off = i * 4;
+    const vx = velocities[off + 0] - vxSum;
+    const vy = velocities[off + 1] - vySum;
+    const vz = velocities[off + 2] - vzSum;
+    velocities[off + 0] = vx;
+    velocities[off + 1] = vy;
+    velocities[off + 2] = vz;
     ke += 0.5 * massU * (vx * vx + vy * vy + vz * vz);
   }
   const targetKe = 0.5 * (3 * atomCount - 3) * KB_EV_PER_K * temperatureK;
   const scale = ke > 0 ? Math.sqrt(targetKe / ke) : 0;
   for (let i = 0; i < atomCount; i += 1) {
-    velocities[i * 4 + 0] *= scale;
-    velocities[i * 4 + 1] *= scale;
-    velocities[i * 4 + 2] *= scale;
+    const off = i * 4;
+    velocities[off + 0] *= scale;
+    velocities[off + 1] *= scale;
+    velocities[off + 2] *= scale;
   }
   return {
     crystalStructure: struct,

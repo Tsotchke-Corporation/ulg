@@ -23,6 +23,7 @@ import {
 } from '../src/runtime/nuclear/nuclearStructureGpu.js';
 import { computeStarkPolarizationState } from '../src/runtime/electronicStructure/orbitalPointCloudWebGpu.js';
 import { createSimulationModuleRegistry } from '../src/runtime/simulationModuleRegistry.js';
+import { parseElementsLabUrlState, serializeElementsLabUrlState } from '../src/demos/elementsLabUrlState.js';
 import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 
 test('Sim 1 (Spin-Lattice LLG): exchange sign and parameters emerge from magnetic phase (zero element hacks)', () => {
@@ -70,6 +71,10 @@ test('Sim 3 & 4 (MD Mechanical, NEMD & Phonon VDOS): elongated acoustic cells, v
   assert.ok(bulkVac.atomCount < 2 * 216 && bulkVac.atomCount > 2 * 216 - 12, 'Bulk vacancy mode must seed physical Schottky vacancies');
   assert.equal(bulkVac.idealCoordination, 14);
 
+  const scale100k = buildCrystalMdState({ crystalStructure: 'fcc', cellsVec: [29, 29, 30], chamberScale: 2.35, latticeConstantA: 3.61, massU: 63.5, temperatureK: 300 });
+  assert.equal(scale100k.atomCount, 100920, '29x29x30 FCC supercell must build 100,920 zero-momentum atoms cleanly');
+  assert.equal(scale100k.positions.length, 100920 * 4);
+
   // Synthetic 5 THz damped harmonic VACF -> VDOS peak must recover ~5 THz!
   const dtFs = 10;
   const fTargetThz = 5.0;
@@ -77,6 +82,11 @@ test('Sim 3 & 4 (MD Mechanical, NEMD & Phonon VDOS): elongated acoustic cells, v
   const spec = computePhononVdosFromVacf(vacf, dtFs, 48);
   assert.ok(Math.abs(spec.peakThz - fTargetThz) < 1.0, `VDOS peak=${spec.peakThz} THz expected ~${fTargetThz} THz`);
   assert.equal(MD_EXPERIMENT_MODES.SURFACE_SLAB, 5);
+  const gravUrl = serializeElementsLabUrlState({ specimenKind: 'element', Z: 29, tab: 'md', view: 'equilibrium', tempK: 2350, mdGravity: true });
+  assert.ok(gravUrl.includes('grav=1'), `expected grav=1 in MD URL, got ${gravUrl}`);
+  const parsedGrav = parseElementsLabUrlState(gravUrl);
+  assert.equal(parsedGrav.mdGravity, true);
+  assert.equal(parseElementsLabUrlState('?el=Cu&tab=md').mdGravity, null);
 });
 
 test('Sim 5 (Atomic Stark Polarization & Nuclear Bohr-Wheeler Fission): linear p = alpha_0 E & fissility barrier scaling', () => {

@@ -246,3 +246,101 @@ test('Chemistry depth, 3D Multi-Species Crystals, True 3D Convex Polytope Surfac
     await browser.close();
   }
 });
+
+test('URL deep-link hydration and live shareable URL sync across element 3D Maxwell-KS, compound molecule, and 3D polytope views on Vulkan WebGPU', {
+  skip: !RUN_NATIVE && 'set ULG_RUN_NATIVE_WEBGPU=1 to run native Vulkan URL deep-link test',
+  timeout: 180_000
+}, async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--headless=new',
+      '--enable-unsafe-webgpu',
+      '--use-angle=vulkan',
+      '--enable-features=Vulkan,UseSkiaRenderer',
+      '--disable-gpu-sandbox',
+      '--ignore-gpu-blocklist'
+    ]
+  });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+    const page = await context.newPage();
+    const pageErrors = [];
+    const gpuErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(e.message));
+    page.on('console', (m) => {
+      if (m.type() === 'error' && /webgpu|validation|shader/i.test(m.text())) gpuErrors.push(m.text());
+    });
+
+    // 1. Deep-link directly into Gold 3D Maxwell-KS 5d(m=2) Circular 440nm (tab inferred from view!)
+    await page.goto(`${SERVER_URL}/elements-lab.html?el=Au&view=tdks-atom&orb=d2&pol=circ&lam=440&cam=0.85,0.45,3.05`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 79 && window.__ulgElementsLabState?.currentTab === 'crystal' && Boolean(window.__ulgElementsLabState?.tdks3dTelemetry), null, { timeout: 60_000 });
+    const auLinkState = await page.evaluate(() => ({
+      Z: window.__ulgElementsLabState.Z,
+      tab: window.__ulgElementsLabState.currentTab,
+      orb: window.__ulgElementsLabState.tdks3dTelemetry.orbital,
+      polMode: window.__ulgElementsLabState.tdks3dTelemetry.polMode,
+      cam: window.__ulgElementsLabApi.getCamera(),
+      search: window.location.search,
+      shareUrl: window.__ulgElementsLabApi.getShareUrl({ includeCamera: true }),
+      title: document.title
+    }));
+    console.log('[url-deeplink-au-tdks]', JSON.stringify(auLinkState));
+    assert.equal(auLinkState.Z, 79);
+    assert.equal(auLinkState.tab, 'crystal');
+    assert.equal(auLinkState.orb.m, 2);
+    assert.equal(auLinkState.polMode, 2);
+    assert.ok(Math.abs(auLinkState.cam.yaw - 0.85) < 0.02);
+    assert.ok(auLinkState.search.includes('el=Au') && auLinkState.search.includes('view=tdks-atom') && auLinkState.search.includes('orb=d2') && auLinkState.search.includes('pol=circ') && auLinkState.search.includes('lam=440'));
+    assert.ok(auLinkState.shareUrl.includes('cam=0.85%2C0.45%2C3.05') || auLinkState.shareUrl.includes('cam=0.85,0.45,3.05'));
+    assert.ok(auLinkState.title.includes('Au'));
+
+    // Live URL bar sync when switching view/specimen interactively
+    await page.evaluate(() => window.__ulgElementsLabApi.setCrystalViewMode('spin-llg'));
+    const afterSwitchSearch = await page.evaluate(() => window.location.search);
+    assert.ok(afterSwitchSearch.includes('el=Au') && afterSwitchSearch.includes('view=spin-llg'), `URL must sync on view change: ${afterSwitchSearch}`);
+
+    // 2. Deep-link directly into CO2 3D double-bond molecule view!
+    await page.goto(`${SERVER_URL}/elements-lab.html?compound=CO2&view=molecule`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__ulgElementsLabState?.formula === 'CO2' && window.__ulgElementsLabState?.currentTab === 'compound', null, { timeout: 60_000 });
+    const co2LinkState = await page.evaluate(() => ({
+      formula: window.__ulgElementsLabState.formula,
+      tab: window.__ulgElementsLabState.currentTab,
+      chemViewMode: window.__ulgElementsLabState.chemViewMode,
+      bonds: window.__ulgElementsLabState.bundle.atomic.bonds,
+      search: window.location.search,
+      title: document.title
+    }));
+    console.log('[url-deeplink-co2-mol]', JSON.stringify(co2LinkState));
+    assert.equal(co2LinkState.formula, 'CO2');
+    assert.equal(co2LinkState.chemViewMode, 'molecule');
+    assert.ok(co2LinkState.bonds.length === 2 && co2LinkState.bonds.every((b) => b.kind === 'double'));
+    assert.ok(co2LinkState.search.includes('compound=CO2') && co2LinkState.search.includes('view=molecule'));
+
+    // 3. Deep-link directly into H2O 3D Planetary Polytope Surface!
+    await page.goto(`${SERVER_URL}/elements-lab.html?compound=H2O&view=3d-surface&regime=planetary`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__ulgElementsLabState?.formula === 'H2O' && window.__ulgElementsLabState?.currentTab === 'polytope', null, { timeout: 60_000 });
+    const polyLinkState = await page.evaluate(() => ({
+      formula: window.__ulgElementsLabState.formula,
+      tab: window.__ulgElementsLabState.currentTab,
+      polyView: window.__ulgElementsLabState.polytopeViewMode,
+      search: window.location.search
+    }));
+    console.log('[url-deeplink-h2o-polytope]', JSON.stringify(polyLinkState));
+    assert.equal(polyLinkState.formula, 'H2O');
+    assert.equal(polyLinkState.tab, 'polytope');
+    assert.equal(polyLinkState.polyView, '3d-surface');
+    assert.ok(polyLinkState.search.includes('compound=H2O') && polyLinkState.search.includes('regime=planetary'));
+
+    // Click Share Link button and confirm UI feedback & zero errors
+    await page.click('#share-link-btn');
+    await page.waitForTimeout(120);
+    const btnTxt = await page.textContent('#share-link-btn');
+    assert.ok(btnTxt.includes('✓'), `Share button should show copied/updated confirmation, got: ${btnTxt}`);
+
+    assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join('; ')}`);
+    assert.deepEqual(gpuErrors, [], `unexpected WebGPU errors: ${gpuErrors.join('; ')}`);
+  } finally {
+    await browser.close();
+  }
+});

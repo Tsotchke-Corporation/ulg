@@ -28,6 +28,11 @@ import {
 } from '../src/runtime/electronicStructure/atomTdks3dWebGpu.js';
 import { buildMultiSpeciesCrystalLattice } from '../src/runtime/material/recursiveCompoundPipeline.js';
 import { buildIupacPeriodicTableEntries } from '../src/demos/periodicTableMetadata.js';
+import {
+  formatElementsLabPageTitle,
+  parseElementsLabUrlState,
+  serializeElementsLabUrlState
+} from '../src/demos/elementsLabUrlState.js';
 import { createSimulationModuleRegistry } from '../src/runtime/simulationModuleRegistry.js';
 
 test('Slater-shielded valence STO-3G ECP spec covers ALL Z=1..118 with exact parity conservation', () => {
@@ -208,4 +213,52 @@ test('All 5 new canonical chemistry & 3D Maxwell-KS modules register cleanly on 
   const eqBin = 128;
   assert.ok(Math.abs(d2.polarTable[eqBin * 4 + 1]) > 0.9, '5d m=2 must peak on equatorial plane');
   assert.ok(Math.abs(p0.polarTable[eqBin * 4 + 1]) < 0.05, '2p m=0 must have equatorial nodal plane');
+});
+
+test('Shareable URL state encoder/decoder round-trips elements, isotopes, compounds, reactions, views, and camera', () => {
+  // 1. Gold 3D Maxwell-KS 5d(m=2) circular 440nm deep link (with inferred tab from view!)
+  const pTdks = parseElementsLabUrlState('?el=Au&view=tdks-atom&orb=d2&pol=circ&lam=440&cam=0.85,0.45,3.05');
+  assert.equal(pTdks.specimenKind, 'element');
+  assert.equal(pTdks.Z, 79);
+  assert.equal(pTdks.tab, 'crystal');
+  assert.equal(pTdks.view, 'tdks-atom');
+  assert.equal(pTdks.tdksOrbitalPreset, 'd2');
+  assert.equal(pTdks.tdksPolMode, 2);
+  assert.equal(pTdks.photonModeMono, true);
+  assert.equal(pTdks.probeWavelengthNm, 440);
+  assert.deepEqual(pTdks.camera, { yaw: 0.85, pitch: 0.45, dist: 3.05 });
+
+  const qTdks = serializeElementsLabUrlState(pTdks, { includeCamera: true });
+  assert.ok(qTdks.includes('el=Au') && qTdks.includes('tab=crystal') && qTdks.includes('view=tdks-atom') && qTdks.includes('orb=d2') && qTdks.includes('pol=circ') && qTdks.includes('lam=440') && qTdks.includes('cam='));
+
+  // 2. Legacy ?z=27&a=60 isotope & ?el=U-235 shorthand
+  const pCo = parseElementsLabUrlState('?z=27&a=60');
+  assert.equal(pCo.Z, 27);
+  assert.equal(pCo.A, 60);
+  const pU = parseElementsLabUrlState('?el=U-235&view=fission&b2=0.72');
+  assert.equal(pU.Z, 92);
+  assert.equal(pU.A, 235);
+  assert.equal(pU.tab, 'nuclear');
+  assert.equal(pU.view, 'fission');
+  assert.equal(pU.fissionBeta2, 0.72);
+  assert.ok(serializeElementsLabUrlState(pU).includes('el=U&a=235&tab=nuclear&view=fission&b2=0.72'));
+
+  // 3. Compound deep links (CO2 3D double bonds + H2O Planetary 3D Polytope)
+  const pPoly = parseElementsLabUrlState('?compound=H2O&view=3d-surface&regime=planetary');
+  assert.equal(pPoly.specimenKind, 'compound');
+  assert.equal(pPoly.formula, 'H2O');
+  assert.equal(pPoly.tab, 'polytope');
+  assert.equal(pPoly.view, '3d-surface');
+  assert.equal(pPoly.polytopeRegime, 'planetary');
+  assert.equal(serializeElementsLabUrlState(pPoly), '?compound=H2O&tab=polytope&view=3d-surface&regime=planetary');
+
+  // 4. Reaction deep links accept comma, pipe, or plus/space separators!
+  for (const raw of ['?react=HCl,NaOH&view=reaction-path', '?react=HCl|NaOH&tab=compound&view=reaction-path', '?react=HCl+NaOH&view=reaction-path']) {
+    const pRx = parseElementsLabUrlState(raw);
+    assert.equal(pRx.specimenKind, 'reaction');
+    assert.deepEqual(pRx.reactants, ['HCl', 'NaOH']);
+    assert.equal(pRx.tab, 'compound');
+    assert.equal(pRx.view, 'reaction-path');
+  }
+  assert.ok(formatElementsLabPageTitle({ specimenKind: 'reaction', reactants: ['HCl', 'NaOH'], tab: 'compound', view: 'reaction-path' }).includes('HCl + NaOH'));
 });

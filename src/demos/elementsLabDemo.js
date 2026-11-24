@@ -63,6 +63,11 @@ import {
   familyForZ
 } from './periodicTableMetadata.js';
 import {
+  formatElementsLabPageTitle,
+  parseElementsLabUrlState,
+  serializeElementsLabUrlState
+} from './elementsLabUrlState.js';
+import {
   computeStarkPolarizationState,
   createQuantumBlochPhotonSession,
   registerOrbitalCloudSimulationModule,
@@ -185,6 +190,7 @@ const ptLegendEl = document.getElementById('pt-legend');
 const openPtBtn = document.getElementById('open-pt-btn');
 const elementTileBtn = document.getElementById('element-tile-btn');
 const barOpenPtBtn = document.getElementById('bar-open-pt-btn');
+const shareLinkBtn = document.getElementById('share-link-btn');
 const mobileOpenPtBtn = document.getElementById('mobile-open-pt-btn');
 const tileZEl = document.getElementById('tile-z');
 const tileSymEl = document.getElementById('tile-sym');
@@ -230,6 +236,9 @@ let currentCompoundRes = null;
 let currentCompoundNuclearVolGpu = null;
 let currentCompoundLattice = null;
 let currentReactionRes = null;
+let lastReactionPair = null;        // [reactantA, reactantB] when user ran Reaction Combiner (for shareable ?react=A,B URLs!)
+let urlSyncSuppressed = true;       // Suppresses URL writes during initial boot hydration so incoming query string stays intact until hydrated
+let lastSyncedQuery = '';
 let currentAtlas = null;
 let currentDecayChain = null;
 let currentNebBarrier = null;
@@ -3000,9 +3009,86 @@ function renderViewportSync() {
   }
 }
 
+function getActiveSubViewForTab(tabName = currentTab) {
+  if (tabName === 'nuclear') return uiState.nuclearViewMode;
+  if (tabName === 'atomic') return uiState.atomicViewMode;
+  if (tabName === 'crystal') return uiState.crystalViewMode;
+  if (tabName === 'md') return uiState.mdMode;
+  if (tabName === 'compound') return uiState.chemViewMode;
+  if (tabName === 'polytope') return uiState.polytopeViewMode;
+  return null;
+}
+
+function buildCurrentUrlDescriptor() {
+  const isRxnView = Boolean(
+    lastReactionPair
+    && activeSpecimenKind === 'compound'
+    && currentTab === 'compound'
+    && (uiState.chemViewMode === 'reaction-path' || uiState.chemViewMode === 'reactive-md')
+  );
+  const specimenKind = isRxnView
+    ? 'reaction'
+    : (activeSpecimenKind === 'compound' ? 'compound' : 'element');
+  const activeTempK = currentTab === 'md'
+    ? uiState.mdTargetTempK
+    : (currentTab === 'crystal' && uiState.crystalViewMode === 'spin-llg'
+      ? uiState.spinTempK
+      : (currentTab === 'crystal' && uiState.crystalViewMode === 'transport'
+        ? uiState.transportTempK
+        : (currentTab === 'compound' && uiState.chemViewMode === 'reactive-md' ? uiState.rxMdTempK : null)));
+  return {
+    specimenKind,
+    Z: selectedZ,
+    A: selectedA ?? currentElementRes?.bundle?.nuclear?.A ?? null,
+    formula: currentCompoundRes?.bundle?.materialKey || compoundInput?.value || null,
+    reactants: isRxnView ? lastReactionPair : null,
+    tab: currentTab,
+    view: getActiveSubViewForTab(currentTab),
+    n: uiState.n,
+    l: uiState.l,
+    m: uiState.m,
+    functional: uiState.functional,
+    relativisticSpinOrbit: uiState.relativisticSpinOrbit,
+    tdksOrbitalPreset: uiState.tdksOrbitalPreset,
+    tdksPolMode: uiState.tdksPolMode,
+    tdksFieldView: uiState.tdksFieldView,
+    photonModeMono: uiState.photonModeMono,
+    probeWavelengthNm: uiState.probeWavelengthNm,
+    fissionBeta2: uiState.fissionBeta2,
+    tempK: activeTempK,
+    molColorMode: uiState.molColorMode,
+    molShowOrbitalOverlay: uiState.molShowOrbitalOverlay,
+    vibDeuterated: uiState.vibIsotopeDeuterated,
+    polytopeRegime: uiState.polytopeRegime,
+    camera: { yaw: camYaw, pitch: camPitch, dist: camDist }
+  };
+}
+
+function getShareableUrl({ includeCamera = true } = {}) {
+  const desc = buildCurrentUrlDescriptor();
+  const q = serializeElementsLabUrlState(desc, { includeCamera });
+  if (typeof window === 'undefined') return q;
+  return `${window.location.origin}${window.location.pathname}${q}`;
+}
+
+function syncBrowserUrl({ force = false } = {}) {
+  if (urlSyncSuppressed || typeof window === 'undefined' || !window.history?.replaceState) return;
+  const desc = buildCurrentUrlDescriptor();
+  const nextQuery = serializeElementsLabUrlState(desc, { includeCamera: false });
+  if (!force && nextQuery === lastSyncedQuery) return;
+  lastSyncedQuery = nextQuery;
+  try {
+    window.history.replaceState(null, '', `${window.location.pathname}${nextQuery}`);
+    document.title = formatElementsLabPageTitle(desc);
+  } catch {
+    // Ignore history restrictions in sandboxed iframes
+  }
+}
+
 function redrawCurrentTab() {
   if (!gpuRenderer) return;
   renderViewportSync();
+  syncBrowserUrl();
   setBottomOverlay('');
 
   if (currentTab === 'nuclear') {
@@ -3917,6 +4003,7 @@ async function runElementDerivation(Z, massNumberA = null, { preserveQuantumNumb
     : null;
   const label = resolvedA != null ? `${symbolForZ(Z)}-${resolvedA}` : `${symbolForZ(Z)} (Z=${Z})`;
   statusBadge.textContent = `Solving ${label}…`;
+  lastReactionPair = null;
   activeSpecimenKind = 'element';
   updateActiveElementButton();
   try {
@@ -4091,6 +4178,7 @@ function buildCompositeNuclearForCompound(compoundRes) {
  */
 async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
   if (!gpuDevice || !compoundRes) return;
+  lastReactionPair = null;
   currentCompoundRes = compoundRes;
   const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
   currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, compoundRes.bundle, {
@@ -4122,6 +4210,7 @@ async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
 
 async function runCompoundDerivation(formula, { backfeedAllTabs = false, switchToTab = 'compound' } = {}) {
   if (!gpuDevice) return;
+  lastReactionPair = null;
   statusBadge.textContent = `Deriving ${formula}…`;
   try {
     currentCompoundRes = await deriveCompoundBundleWebGpu(gpuDevice, formula, {
@@ -4219,6 +4308,7 @@ async function runReactionCombiner(aRaw, bRaw) {
       });
     }
     // Load the first discovered product into Tab 5 (with CI-NEB) AND let user one-click backfeed any product!
+    lastReactionPair = [a, b];
     const primary = rxn.derivedProducts[0];
     compoundInput.value = primary.bundle.materialKey;
     currentCompoundRes = primary;
@@ -4302,6 +4392,7 @@ function setActiveTab(tabName) {
 function syncDebugState() {
   const b = getActiveBundle();
   const isComp = activeSpecimenKind === 'compound';
+  syncBrowserUrl();
   window.__ulgElementsLabState = {
     mode: isComp ? 'compound' : 'element',
     activeSpecimenKind,
@@ -4505,6 +4596,7 @@ function syncDebugState() {
       renderViewportSync();
       syncDebugState();
     },
+    getShareUrl: (opts = {}) => getShareableUrl(opts),
     stepPhotonFdtd: async (steps = 220) => {
       if (!livePhotonSession) return null;
       const tel = await livePhotonSession.stepBatch(steps, { readObs: true });
@@ -4797,18 +4889,139 @@ async function boot() {
     }
   });
 
-  const params = new URLSearchParams(window.location.search);
-  const startZ = Math.max(1, Math.min(118, Math.trunc(Number(params.get('z')) || 26)));
-  const startAParam = params.get('a');
-  const startA = startAParam && Number.isFinite(Number(startAParam))
-    ? Math.max(startZ, Math.min(310, Math.trunc(Number(startAParam))))
-    : null;
-  const startTab = params.get('tab');
-  selectedZ = startZ;
-  selectedA = startA;
-  zInput.value = String(startZ);
-  if (aInput) aInput.value = String(startA ?? mostStableMassNumberForZ(startZ));
-  await runElementDerivation(startZ, startA, { switchToTab: startTab || null });
+  shareLinkBtn?.addEventListener('click', async () => {
+    const shareUrl = getShareableUrl({ includeCamera: true });
+    try {
+      window.history?.replaceState?.(null, '', shareUrl);
+      lastSyncedQuery = new URL(shareUrl).search;
+    } catch {}
+    let copied = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+        copied = true;
+      }
+    } catch {}
+    if (!copied) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = shareUrl;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        copied = document.execCommand('copy');
+        ta.remove();
+      } catch {}
+    }
+    if (shareLinkBtn) {
+      const prev = shareLinkBtn.textContent;
+      shareLinkBtn.textContent = copied ? '✓ Link Copied!' : '✓ URL Updated';
+      setTimeout(() => { shareLinkBtn.textContent = prev || '🔗 Share Link'; }, 1800);
+    }
+  });
+
+  const urlState = parseElementsLabUrlState(window.location.search);
+  // Pre-apply view, electronic, optical, and camera parameters from URL before initial GPU derivation!
+  if (urlState.functional) uiState.functional = urlState.functional;
+  if (urlState.relativisticSpinOrbit != null) uiState.relativisticSpinOrbit = urlState.relativisticSpinOrbit;
+  if (urlState.tdksOrbitalPreset) uiState.tdksOrbitalPreset = urlState.tdksOrbitalPreset;
+  if (urlState.tdksPolMode != null) uiState.tdksPolMode = urlState.tdksPolMode;
+  if (urlState.tdksFieldView != null) uiState.tdksFieldView = urlState.tdksFieldView;
+  if (urlState.probeWavelengthNm != null) uiState.probeWavelengthNm = urlState.probeWavelengthNm;
+  if (urlState.photonModeMono != null) uiState.photonModeMono = urlState.photonModeMono;
+  if (urlState.fissionBeta2 != null) uiState.fissionBeta2 = urlState.fissionBeta2;
+  if (urlState.molColorMode != null) uiState.molColorMode = urlState.molColorMode;
+  if (urlState.molShowOrbitalOverlay != null) uiState.molShowOrbitalOverlay = urlState.molShowOrbitalOverlay;
+  if (urlState.vibDeuterated != null) uiState.vibIsotopeDeuterated = urlState.vibDeuterated;
+  if (urlState.polytopeRegime) uiState.polytopeRegime = urlState.polytopeRegime;
+  if (urlState.hasExplicitQuantumNumbers) {
+    if (urlState.n != null) uiState.n = urlState.n;
+    if (urlState.l != null) uiState.l = Math.min(uiState.n - 1, urlState.l);
+    if (urlState.m != null) uiState.m = Math.max(-uiState.l, Math.min(uiState.l, urlState.m));
+  }
+  if (urlState.view) {
+    const t = urlState.tab || 'nuclear';
+    if (t === 'nuclear') uiState.nuclearViewMode = urlState.view;
+    else if (t === 'atomic') uiState.atomicViewMode = urlState.view;
+    else if (t === 'crystal') uiState.crystalViewMode = urlState.view;
+    else if (t === 'md') uiState.mdMode = urlState.view;
+    else if (t === 'compound') uiState.chemViewMode = urlState.view;
+    else if (t === 'polytope') uiState.polytopeViewMode = urlState.view;
+  }
+  if (urlState.camera) {
+    camYaw = urlState.camera.yaw;
+    camPitch = urlState.camera.pitch;
+    if (urlState.camera.dist != null) camDist = urlState.camera.dist;
+  }
+
+  if (urlState.specimenKind === 'reaction' && urlState.reactants) {
+    const [ra, rb] = urlState.reactants;
+    if (reactantAInput) reactantAInput.value = ra;
+    if (reactantBInput) reactantBInput.value = rb;
+    await runReactionCombiner(ra, rb);
+    if (urlState.tab === 'compound' && urlState.view) {
+      uiState.chemViewMode = urlState.view;
+      if (urlState.view === 'reactive-md') {
+        if (urlState.tempK != null) uiState.rxMdTempK = urlState.tempK;
+        initReactiveMdForActiveReaction();
+      } else if (urlState.view === 'vibrations') {
+        await runGeometryOptAndVibrationsWebGpu({ deuterated: uiState.vibIsotopeDeuterated });
+      }
+      setActiveTab('compound');
+    } else if (urlState.tab && urlState.tab !== 'compound') {
+      setActiveTab(urlState.tab);
+    }
+  } else if (urlState.specimenKind === 'compound' && urlState.formula) {
+    if (compoundInput) compoundInput.value = urlState.formula;
+    const targetTab = urlState.tab || 'compound';
+    await runCompoundDerivation(urlState.formula, { backfeedAllTabs: true, switchToTab: targetTab });
+    if (targetTab === 'compound' && urlState.view) {
+      uiState.chemViewMode = urlState.view;
+      if (urlState.view === 'vibrations') {
+        await runGeometryOptAndVibrationsWebGpu({ deuterated: uiState.vibIsotopeDeuterated });
+      } else if (urlState.view === 'reactive-md') {
+        if (urlState.tempK != null) uiState.rxMdTempK = urlState.tempK;
+        initReactiveMdForActiveReaction();
+      }
+      setActiveTab('compound');
+    } else if (targetTab === 'md' && urlState.tempK != null) {
+      initLiveMdForActiveSpecimen(urlState.tempK, urlState.view || uiState.mdMode);
+      setActiveTab('md');
+    } else if (targetTab === 'crystal' && urlState.view === 'transport' && urlState.tempK != null) {
+      initElectronTransportForActiveSpecimen(urlState.tempK);
+      setActiveTab('crystal');
+    } else if (targetTab === 'crystal' && urlState.view === 'spin-llg' && urlState.tempK != null) {
+      uiState.spinTempK = urlState.tempK;
+      setActiveTab('crystal');
+    }
+  } else {
+    selectedZ = urlState.Z;
+    selectedA = urlState.A;
+    zInput.value = String(selectedZ);
+    if (aInput) aInput.value = String(selectedA ?? mostStableMassNumberForZ(selectedZ));
+    await runElementDerivation(selectedZ, selectedA, {
+      preserveQuantumNumbers: urlState.hasExplicitQuantumNumbers,
+      switchToTab: urlState.tab || null
+    });
+    if (urlState.tab === 'nuclear' && urlState.view === 'fission') {
+      updateNuclearFissionVolume();
+      redrawCurrentTab();
+    } else if (urlState.tab === 'md' && urlState.tempK != null) {
+      initLiveMdForActiveSpecimen(urlState.tempK, urlState.view || uiState.mdMode);
+      redrawCurrentTab();
+    } else if (urlState.tab === 'crystal' && urlState.view === 'transport' && urlState.tempK != null) {
+      initElectronTransportForActiveSpecimen(urlState.tempK);
+      redrawCurrentTab();
+    } else if (urlState.tab === 'crystal' && urlState.view === 'spin-llg' && urlState.tempK != null) {
+      uiState.spinTempK = urlState.tempK;
+      redrawCurrentTab();
+    }
+  }
+
+  urlSyncSuppressed = false;
+  syncBrowserUrl({ force: true });
+  syncDebugState();
   scheduleNextFrame();
 }
 

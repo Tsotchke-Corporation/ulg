@@ -145,8 +145,12 @@ test('Gate 5D & Flagship Labs native Vulkan proof: 1-submit GPU Zel\'dovich FLRW
       const st = window.__ulgCosmicQuantumDemo?.getState?.();
       return st?.primaryRegimeId === 'supergalactic-cosmic' && (st?.cosmicWebSteps ?? 0) >= 3;
     }, null, { timeout: 60_000 });
-    const cqState = await cqPage.evaluate(() => window.__ulgCosmicQuantumDemo.getState());
+    const cqState = await cqPage.evaluate(() => ({
+      ...window.__ulgCosmicQuantumDemo.getState(),
+      gpuErrors: (globalThis.__ulgWebGpuUncapturedErrors || []).filter((e) => e.label === 'cosmic-quantum-demo')
+    }));
     assert.deepEqual(cqErrors, [], `cosmic-quantum.html supergalactic-cosmic crashed with page errors: ${cqErrors.join('; ')}`);
+    assert.deepEqual(cqState.gpuErrors, [], `cosmic-quantum.html supergalactic-cosmic emitted WebGPU uncaptured errors: ${JSON.stringify(cqState.gpuErrors)}`);
     assert.equal(cqState.primaryRegimeId, 'supergalactic-cosmic');
     assert.equal(cqState.cameraAutoSpin, false);
     assert.ok(cqState.cosmicWebSteps >= 3, `Expected >= 3 supergalactic-cosmic steps, got ${cqState.cosmicWebSteps}`);

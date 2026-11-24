@@ -29,6 +29,7 @@ const GPU_BUFFER_USAGE = Object.freeze({
   MAP_READ: 0x01,
   COPY_SRC: 0x04,
   COPY_DST: 0x08,
+  VERTEX: 0x20,
   UNIFORM: 0x40,
   STORAGE: 0x80
 });
@@ -1201,7 +1202,7 @@ export function createSupergalacticTreePmSessionWebGpu(device, {
   const particleBuf = device.createBuffer({
     label: 'ulg-supergalactic-particles',
     size: Math.max(64, ic.data.byteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+    usage: GPU_BUFFER_USAGE.VERTEX | GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
   });
   if (ic.data.byteLength > 0) {
     device.queue.writeBuffer(particleBuf, 0, ic.data);

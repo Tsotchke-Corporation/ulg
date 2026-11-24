@@ -1,0 +1,1 @@
+import{i as e}from"./sphResidentClockGpu-2QAmznOI.js";export{e as resolveSphResidentClockOrigin};

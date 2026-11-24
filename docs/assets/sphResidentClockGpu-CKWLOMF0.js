@@ -1,0 +1,25 @@
+import{S as e,c as t,l as n,n as r,u as i,x as a}from"./webgpuComputeLayout-tWh43k53.js";import{i as o}from"./sphGpuDeviceIdentity-CsdIpAMj.js";const s=1396919345,c=131072,l=new WeakMap;function u(e){let t=new Uint32Array(2);return new DataView(t.buffer).setFloat64(0,e,!0),[...t]}function d(e,t){let n=l.get(e);if(!n||n.device!==t||n.destroyed||n.buffer.destroyed===!0)throw TypeError(`Resident clock requires its original live same-device record`);return n}function f(e,t){return d(e,t),!0}function p(...e){let t=(t,n)=>{let r=e.map(e=>e?.[t]).filter(e=>e!=null);if(r.some(e=>!n(e)||e!==r[0]))throw TypeError(`Resident clock source ${t} is inconsistent or invalid`);return r[0]??0};return Object.freeze({baseStep:t(`step`,e=>Number.isSafeInteger(e)&&e>=0),baseTime:t(`time`,e=>Number.isFinite(e)&&e>=0)})}function m({device:p,source:m=null,baseStep:h=0,baseTime:g=0,dt:_,controlBuffer:v}={}){if(!Number.isFinite(_)||_<=0||!v||v.size<12)throw TypeError(`Resident clock requires a positive duration and final admission control`);let y=m==null?null:d(m,p);if(y){if(y.ownerClosed)throw TypeError(`Resident clock owner has retired`);if(!y.encoded)throw TypeError(`Resident clock predecessor has not encoded its admission`);if(_!==y.dt)throw TypeError(`Resident clock duration changed inside its segment`);h=y.baseStep,g=y.baseTime}if(!Number.isSafeInteger(h)||h<0||!Number.isFinite(g)||g<0||!Number.isFinite(g+_))throw RangeError(`Resident clock requires a finite nonnegative origin`);let b=typeof globalThis.GPUDevice==`function`&&p instanceof globalThis.GPUDevice,x=[],S=(e,t,n)=>{let i=o(b?a(r(p,{bucketKey:e,label:e,size:t,usage:n}),p,{bucketKey:e,size:t,usage:n}):p.createBuffer({label:e,size:t,usage:n}),p);return x.push(i),i},C=!1,w,T=!1,E=!1;y&&y.borrows++;let D=()=>{C||(C=!0,y&&--y.borrows===0&&y.ownerClosed&&y.dispose())};try{let r=new Uint32Array(16);r[0]=s,r[1]=1,r[4]=h%4294967296,r[5]=Math.floor(h/4294967296),r.set(u(g),6),r.set(u(_),8);let a=y?.buffer??S(`ulg-resident-clock-origin`,64,136);y||p.queue.writeBuffer(a,0,r);let o=S(`ulg-resident-clock-successor`,64,140),d=S(`ulg-resident-clock-parameters`,64,72);r[10]=Math.min(4294967295,2**53-1-h,Math.floor((Number.MAX_VALUE-g)/_)),p.queue.writeBuffer(d,0,r);let C=`
+@group(0) @binding(0) var<storage,read> source:array<u32>;
+@group(0) @binding(1) var<storage,read_write> next:array<u32>;
+@group(0) @binding(2) var<storage,read_write> control:array<atomic<u32>>;
+struct Params { a:vec4<u32>, b:vec4<u32>, c:vec4<u32>, d:vec4<u32> };
+@group(0) @binding(3) var<uniform> params:Params;
+@compute @workgroup_size(1) fn check() {
+  var valid=source[0]==${s}u && source[1]==1u;
+  valid=valid && all(vec4<u32>(source[4],source[5],source[6],source[7])==params.b)
+    && source[8]==params.c.x && source[9]==params.c.y;
+  valid=valid && source[2]<params.c.z && source[12]!=0xffffffffu
+    && source[3]<=source[12] && source[2]==source[12]-source[3]
+    && source[13]==0u && source[14]==0u && source[15]==0u;
+  if(!valid) { atomicOr(&control[2],${c}u); }
+}
+@compute @workgroup_size(1) fn advance() {
+  for(var i=0u;i<16u;i++) {next[i]=source[i];}
+  let error=atomicLoad(&control[2]);
+  // Invalid/corrupted origins are never converted into new valid records.
+  if((error & ${c}u)!=0u) {return;}
+  let accepted=error==0u;
+  next[2]=source[2]+select(0u,1u,accepted);
+  next[3]=source[3]+select(1u,0u,accepted);
+  next[10]=select(0u,1u,accepted); next[11]=error; next[12]=source[12]+1u;
+}`,O=e=>{let r=i(p,{code:C,entryPoint:e,cacheKey:`ulg-resident-clock-v1-${e}`,label:`ulg-resident-clock-${e}`,bindings:[`read-only-storage`,`storage`,`storage`,`uniform`].map((e,n)=>t(n,e))}),s=n(p,{layout:r.bindGroupLayout,entries:[a,o,v,d].map((e,t)=>({binding:t,resource:{buffer:e}}))});return e=>{let t=e.beginComputePass();t.setPipeline(r.pipeline),t.setBindGroup(0,s),t.dispatchWorkgroups(1),t.end()}},k=O(`check`),A=O(`advance`);w={device:p,buffer:o,baseStep:h,baseTime:g,dt:_,borrows:0,destroyed:!1,encoded:!1,encoder:null,ownerClosed:!1};let j=o.destroy.bind(o);o.destroy=()=>{if(!w.destroyed)throw Error(`Resident clock belongs to its retained producer`);b?(o.destroy=j,e(o)):j()},w.dispose=()=>w.destroyed?!1:(w.destroyed=!0,b?(o.destroy=j,e(o)):j(),!0);let M=()=>{if(!E){E=!0,D();for(let t of x)t!==o&&e(t)}},N=Object.freeze({schema:`peercompute.ulg.resident-clock.v1`,buffer:o,baseStep:h,baseTime:g,dt:_});return l.set(N,w),Object.freeze({clock:N,check(e){if(f(N,p),y&&f(m,p),w.encoder)throw TypeError(`Resident clock check cannot be replayed`);w.encoder=e,k(e)},advance(e){if(f(N,p),w.encoder!==e||w.encoded)throw TypeError(`Resident clock advance requires its original single check`);A(e),w.encoded=!0},transfer(){if(f(N,p),!w.encoded||T)throw TypeError(`Clock handover requires its single encoded successor`);return T=!0,Object.freeze({clock:N,destroy(){return w.ownerClosed?!1:(w.ownerClosed=!0,w.borrows||w.dispose(),!0)}})},destroy(){if(E)return!1;if(!T&&w.borrows)throw Error(`Resident clock is retained by a successor`);return M(),T||w.dispose(),!0}})}catch(e){D();for(let e of x)e.destroy();throw e}}export{f as a,p as i,s as n,m as r,c as t};

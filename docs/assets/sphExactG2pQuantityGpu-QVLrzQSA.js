@@ -1,0 +1,1 @@
+var e=()=>{throw Error(`Superseded 63-limb exact-rational route retired in production WebGPU build; use canonical 9-limb 2^-149 integer ledger.`)};export{e as prepareSphExactG2pQuantities};

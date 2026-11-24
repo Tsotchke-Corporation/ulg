@@ -1,5 +1,5 @@
 export const SEDENION_REACTION_SCOPE_SCHEMA = 'peercompute.ulg.sedenion-reaction-scope.v0';
-export const SEDENION_REACTION_SCOPE_SOURCE_REF = 'sedenion-periodic-table-pdf:/home/cos/projects/peercompute/plan/refs/sedenion periodic table.pdf';
+export const SEDENION_REACTION_SCOPE_SOURCE_REF = 'sedenion-periodic-table-pdf:peercompute/plan/refs/sedenion periodic table.pdf';
 export const SEDENION_REACTION_SCOPE_FINGERPRINT = [
   SEDENION_REACTION_SCOPE_SCHEMA,
   'fano-triples:123-145-167-246-257-347-356',

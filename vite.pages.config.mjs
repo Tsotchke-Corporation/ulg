@@ -252,6 +252,10 @@ export default defineConfig({
           pagesPeercomputeRoot,
           'src/peercompute/computeManager/computeWorker.js'
         ),
+        peercomputeWorkerTaskHost: resolve(
+          pagesPeercomputeRoot,
+          'src/peercompute/computeManager/workerTaskHost.js'
+        ),
         sphMlsMpmGpuStep: fileURLToPath(
           new URL('./src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url)
         ),
@@ -291,6 +295,9 @@ export default defineConfig({
         entryFileNames(chunk) {
           if (chunk.name === 'peercomputeComputeWorker') {
             return 'assets/peercomputeCompute.worker.js';
+          }
+          if (chunk.name === 'peercomputeWorkerTaskHost') {
+            return 'assets/workerTaskHost.js';
           }
           if (chunk.name === 'sphMlsMpmGpuStep') return 'assets/sphMlsMpmGpuStep.js';
           if (chunk.name === 'ulgMechanicsResidentStageRunner') {

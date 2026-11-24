@@ -1,0 +1,1 @@
+import{installComputeWorkerHost as e}from"./workerTaskHost.js";e(self);

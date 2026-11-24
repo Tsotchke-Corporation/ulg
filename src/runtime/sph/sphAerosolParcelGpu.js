@@ -14,7 +14,7 @@ import {
   sphAerosolInventoryPartialsWgsl,
   sphAerosolInventoryFinalizeWgsl
 } from './sphAerosolParcelWgsl.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice, webGpuBufferMatchesDevice } from './sphGpuDeviceIdentity.js';
 import { watchSphDeviceLossFor } from './sphDeviceLossRelay.js';
 import {
@@ -264,7 +264,7 @@ export function createSphAerosolParcelFamilyWebGpu({ device, capacity, parcels =
       code: sphAerosolParcelInitializeWgsl, entryPoint: 'initialize_aerosol',
       bindings: [computeBufferBinding(0, 'storage'), computeBufferBinding(1, 'uniform')]
     });
-    const group = device.createBindGroup({ layout: info.bindGroupLayout, entries: [
+    const group = createCachedExplicitBindGroup(device, { layout: info.bindGroupLayout, entries: [
       { binding: 0, resource: { buffer } }, { binding: 1, resource: { buffer: params } }
     ] });
     const encoder = device.createCommandEncoder();
@@ -490,7 +490,7 @@ export async function runSphAerosolCondensateExtractionWebGpu({ device, sourceFa
       const info = createCachedExplicitComputePipeline(device, { cacheKey: `ulg-aerosol-${name}.v0`,
         label: `ulg-aerosol-${name}`, code, entryPoint: name,
         bindings: types.map((type, binding) => computeBufferBinding(binding, type)) });
-      const group = device.createBindGroup({ layout: info.bindGroupLayout,
+      const group = createCachedExplicitBindGroup(device, { layout: info.bindGroupLayout,
         entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
       return { info, group };
     };
@@ -1062,7 +1062,7 @@ export function createSphAerosolCombinedBudgetStage({ device, sourceFamily, term
         const partials = allocate(device, resources, `ulg-aerosol-budget-partials-${index}`, count * SPH_AEROSOL_BUDGET_BYTES, STORAGE);
         const output = allocate(device, resources, `ulg-aerosol-budget-${index}`, SPH_AEROSOL_BUDGET_BYTES, STORAGE | COPY_SRC);
         device.queue.writeBuffer(params, 0, new Uint32Array([particleCount, record.capacity, count, record.generation]));
-        const bind = (layout, buffers) => device.createBindGroup({ layout,
+        const bind = (layout, buffers) => createCachedExplicitBindGroup(device, { layout,
           entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
         return { count, dispatch, output,
           partialGroup: bind(partialInfo.bindGroupLayout, [state, thermo, record.buffer, partials, params]),

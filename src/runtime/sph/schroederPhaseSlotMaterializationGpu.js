@@ -1,6 +1,6 @@
 import { schroederPhaseSlotCaloricWgsl } from './schroederPhaseSlotCaloricWgsl.js';
 import { createSchroederPhaseSlotLedgerStage } from './schroederPhaseSlotLedgerGpu.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
 // Fixed phase-carrier v2 storage. This stage produces a private candidate;
@@ -397,7 +397,7 @@ export function createSchroederPhaseSlotMaterializer(device, {
         encoder.copyBufferToBuffer(sourceMechanicsBuffer, 0, mechanicsBuffer, 0, mechanicsBuffer.size);
         const buffers = [slotAssignmentBuffer, sourceStateBuffer, sourceThermoBuffer, sourceMechanicsBuffer,
           spareLineagesBuffer, segmentBuffer, preparationBuffer, stateBuffer, thermoBuffer, mechanicsBuffer, evidenceBuffer, paramsBuffer];
-        const group = device.createBindGroup({ layout: pipelines[0].bindGroupLayout,
+        const group = createCachedExplicitBindGroup(device, { layout: pipelines[0].bindGroupLayout,
           entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
         for (const [index, p] of pipelines.entries()) {
           const pass = encoder.beginComputePass({ label: p.label });

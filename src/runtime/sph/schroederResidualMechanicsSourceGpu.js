@@ -7,7 +7,7 @@ import { allocateSchroederSpatialSuccessorBufferFamilyIdentity } from './schroed
 import { runSchroederLevelAssignmentWebGpu } from './schroederHierarchyGpu.js';
 import { createSphExactMassWgsl } from './sphExactMassWgsl.js';
 import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
-import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA }
   from '../../../ulg-gpu-abi/src/index.js';
@@ -224,7 +224,7 @@ fn fail(){atomicOr(&control[2],${SCHROEDER_RESIDUAL_MECHANICS_SOURCE_ERROR}u);}
         cacheKey:`ulg-residual-mechanics-source-v4-${phaseLayout?.carrierLineageCount??0}-${phaseLayout?.carrierLaneCount??0}-${phaseLayout?.lineageCount??0}-${entryPoint}`,
         bindings:['read-only-storage','storage','storage','storage','storage','storage','uniform','read-only-storage','read-only-storage']
           .map((type,binding)=>computeBufferBinding(binding,type))});
-      return{pipeline:pipeline.pipeline,group:device.createBindGroup({layout:pipeline.bindGroupLayout,
+      return{pipeline:pipeline.pipeline,group:createCachedExplicitBindGroup(device,{layout:pipeline.bindGroupLayout,
         entries:resourcesForPass.map((buffer,binding)=>({binding,resource:{buffer}}))}),
         groups:Math.ceil((entryPoint==='inspect'?carrierCount:entryPoint==='reserve'?count:history.capacity)/64)};
     });
@@ -319,7 +319,7 @@ export async function runSchroederResidualMechanicsLevelAssignment({device,sourc
 }`;
     const p=createCachedExplicitComputePipeline(device,{code,entryPoint:'gate',cacheKey:'ulg-residual-source-assignment-gate-v1',
       bindings:[computeBufferBinding(0,'read-only-storage'),computeBufferBinding(1,'storage')]});
-    const group=device.createBindGroup({layout:p.bindGroupLayout,entries:[source.controlBuffer,assignment.assignmentBuffer]
+    const group=createCachedExplicitBindGroup(device,{layout:p.bindGroupLayout,entries:[source.controlBuffer,assignment.assignmentBuffer]
       .map((buffer,binding)=>({binding,resource:{buffer}}))});
     const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(p.pipeline);
     pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(source.particleCount/64));pass.end();

@@ -844,7 +844,7 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
           layout: getCachedPipelineBindGroupLayout(pipelineObject, 0),
           entries: bindingEntries
         });
-        if (bucket.length >= 32) bucket.shift();
+        if (bucket.length >= 64) bucket.shift();
         bucket.push({
           pipeline: pipelineObject,
           entries: bindingEntries.map(({ binding, resource: bindingResource }) => ({

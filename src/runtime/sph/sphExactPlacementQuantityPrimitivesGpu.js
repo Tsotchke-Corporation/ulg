@@ -2,7 +2,7 @@ import { sphExactPlacementQuantityLayout, encodeSphExactPlacementMolarMetadata }
   from './sphExactPlacementQuantityWgsl.js';
 import { sphExactPlacementQuantityPrimitivesPipelineDescriptors, sphExactPlacementQuantityPrimitivesScratchLayout,
   sphExactPlacementQuantityPrimitivesStageParams } from './sphExactPlacementQuantityPrimitivesWgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 /** Alternative numeric schedule inside the SAME existing routing owner.
  * Allocation, derived-buffer tracking, source holds, admission/revalidation,
@@ -83,7 +83,9 @@ export async function runSphExactPlacementQuantityPrimitivesCandidateWebGpu({ pa
     if (carriedSourceLayout && (stages[index].stage === 'primitive' || stages[index].carriedBinding)) {
       entries.push({ binding: 11, resource: { buffer: source.quantities.quantityBuffer } });
     }
-    return device.createBindGroup({ layout: pipeline.bindGroupLayout, entries });
+    return (typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice)
+      ? createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout, entries })
+      : device.createBindGroup({ layout: pipeline.bindGroupLayout, entries });
   });
   const encoder = device.createCommandEncoder(); encoder.clearBuffer(outputBuffer); encoder.clearBuffer(scratchBuffer);
   const pass = encoder.beginComputePass();

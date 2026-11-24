@@ -96,6 +96,7 @@ import {
   abortQueueOrderedSubmissionBatch,
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   createQueueOrderedSubmissionBatch,
@@ -971,7 +972,7 @@ export async function runSchroederCrossLevelGridRestrictionWebGpu({
             computeBufferBinding(2, 'uniform')
           ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: compactHierarchy
         ? [
@@ -1098,7 +1099,7 @@ export async function runSchroederSameGridMomentumAccumulationWebGpu({
         ]
       }
     );
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: source.gridBuffer } },
@@ -1193,7 +1194,7 @@ export async function runSchroederCrossLevelGridProlongationWebGpu({
             computeBufferBinding(2, 'uniform')
           ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: compactHierarchy
         ? [
@@ -1341,7 +1342,7 @@ export async function runSchroederCrossLevelGridVelocityDeltaProlongationWebGpu(
             computeBufferBinding(3, 'uniform')
           ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: compactHierarchy
         ? [
@@ -1494,7 +1495,7 @@ export async function runSchroederCrossLevelInvariantEvidenceWebGpu({
           computeBufferBinding(4, 'uniform')
         ]
       });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: fine.gridBuffer } },
@@ -1635,7 +1636,7 @@ export async function runSchroederCrossLevelGridConservationSummaryWebGpu({
         computeBufferBinding(3, 'uniform')
       ]
     });
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: fine.gridBuffer } },

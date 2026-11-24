@@ -1,6 +1,6 @@
 import { sphExactPlacementQuantityLayout, encodeSphExactPlacementMolarMetadata,
   createSphExactPlacementQuantityWgsl } from './sphExactPlacementQuantityWgsl.js';
-import { computeBufferBinding, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitBindGroup, prewarmCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 /** Materialize the original, routed-current and compact residual quantities
  * inside the existing routing owner's lifetime. This is not a public source
@@ -43,7 +43,7 @@ export async function runSphExactPlacementQuantityCandidateWebGpu({ parent, phys
   const resources = [physicalOutput.sourcePackedBuffer, selected.outputBuffer, inventory.buffer,
     physicalOutput.auxiliaryBuffer, physicalOutput.compactCompanionBuffer, physicalOutput.compactCountBuffer,
     metadataBuffer, outputBuffer, paramsBuffer];
-  const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+  const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
     entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } })) });
   const encoder = device.createCommandEncoder(); encoder.clearBuffer(outputBuffer);
   const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group);

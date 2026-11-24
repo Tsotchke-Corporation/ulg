@@ -5,6 +5,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   deferSubmittedWorkCleanup
 } from '../webgpuComputeLayout.js';
@@ -819,7 +820,7 @@ export function createSphPhaseCarrierOneToFourMaterializationWebGpuEncoderStage(
       device,
       sphPhaseCarrierOneToFourPipelineDescriptor()
     );
-    const bindGroup = device.createBindGroup({
+    const bindGroup = createCachedExplicitBindGroup(device, {
       layout: pipeline.bindGroupLayout,
       entries: [
         {

@@ -3,6 +3,7 @@ import { validateSphExactMassFormat, encodeSphExactMass }
 import {
   acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   prewarmCachedExplicitComputePipeline,
   deferConfirmedSubmittedWorkCleanup,
@@ -234,7 +235,7 @@ export async function createSphExactMassInventoryFromResidualMechanicsWebGpu({de
     const p=createCachedExplicitComputePipeline(device,{code,entryPoint:'gather',
       cacheKey:`ulg-residual-mechanics-mass-v2-${source.carrierCount}-${source.historyCapacity}-${source.phaseLayout?.lineageCount??0}`,
       bindings:[computeBufferBinding(0,'read-only-storage'),computeBufferBinding(1,'read-only-storage'),computeBufferBinding(2,'storage')]});
-    const group=device.createBindGroup({layout:p.bindGroupLayout,entries:[source.history.buffer,source.controlBuffer,record.buffer]
+    const group=createCachedExplicitBindGroup(device,{layout:p.bindGroupLayout,entries:[source.history.buffer,source.controlBuffer,record.buffer]
       .map((buffer,binding)=>({binding,resource:{buffer}}))});
     const encoder=device.createCommandEncoder();
     if(source.phaseLayout){
@@ -296,7 +297,7 @@ fn gather_vapor_particle_mass(@builtin(global_invocation_id) id: vec3<u32>) {
       bindings: ['read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
     if (!pipeline.pipeline) throw pipeline.error ?? new Error('Exact exchange mass gather unavailable');
     resolve(held, { device });
-    const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+    const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
       entries: [buffer, record.buffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
     const encoder = device.createCommandEncoder({ label: 'ulg-exact-mass-vapor-successor' });
     const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group);
@@ -370,7 +371,7 @@ export async function createSphExactMassInventoryFromPhaseTransferWebGpu({ devic
       bindings: ['read-only-storage', 'storage'].map((type, binding) => computeBufferBinding(binding, type)) });
     if (!pipeline.pipeline) throw pipeline.error ?? new Error('Exact phase mass gather unavailable');
     resolve(result, token); held.validate();
-    const group = device.createBindGroup({ layout: pipeline.bindGroupLayout,
+    const group = createCachedExplicitBindGroup(device, { layout: pipeline.bindGroupLayout,
       entries: [buffer, record.buffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
     const encoder = device.createCommandEncoder(); const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(Math.ceil(words / 64)); pass.end();
@@ -604,7 +605,7 @@ async function runExactMassCandidate({ device, sourceReads, outputRowCount, dest
       });
       const buffers = [params, joined, edges, output.buffer, control];
       if (partition) buffers.push(destinations);
-      const group = device.createBindGroup({ layout: info.bindGroupLayout,
+      const group = createCachedExplicitBindGroup(device, { layout: info.bindGroupLayout,
         entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
       return { info, group };
     });

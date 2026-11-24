@@ -2,6 +2,7 @@ import { tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 import {
   acquireQueueOrderedPooledBuffer,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   registerQueueOrderedPooledBufferReturn,
   releaseOrDestroyQueueOrderedPooledBuffer
@@ -137,7 +138,7 @@ struct Params { a:vec4<u32>, b:vec4<u32>, c:vec4<u32>, d:vec4<u32> };
         cacheKey: `ulg-resident-clock-v1-${entryPoint}`, label: `ulg-resident-clock-${entryPoint}`,
         bindings: ['read-only-storage','storage','storage','uniform']
           .map((type,binding) => computeBufferBinding(binding,type)) });
-      const group = device.createBindGroup({ layout:pipeline.bindGroupLayout,
+      const group = createCachedExplicitBindGroup(device, { layout:pipeline.bindGroupLayout,
         entries:[sourceBuffer,buffer,controlBuffer,parameters]
           .map((buffer,binding) => ({binding,resource:{buffer}})) });
       return encoder => {

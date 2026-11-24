@@ -4130,14 +4130,14 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   const outStateBuffer = useQueueOrderedThermalPool
     ? registerQueueOrderedPooledBufferReturn(
         tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-          bucketKey: 'ulg-sph-resident-particle-state',
+          bucketKey: 'ulg-sph-thermal-output-state',
           label: 'ulg-sph-thermal-output-state',
           size: outStateByteLength,
           usage: thermalOutUsage
         }), device),
         device,
         {
-          bucketKey: 'ulg-sph-resident-particle-state',
+          bucketKey: 'ulg-sph-thermal-output-state',
           size: outStateByteLength,
           usage: thermalOutUsage
         }
@@ -4152,14 +4152,14 @@ function createSphThermalStepWebGpuEncoderStageImpl({
   const outThermoBuffer = useQueueOrderedThermalPool
     ? registerQueueOrderedPooledBufferReturn(
         tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-          bucketKey: 'ulg-sph-resident-particle-thermo',
+          bucketKey: 'ulg-sph-thermal-output-thermo',
           label: 'ulg-sph-thermal-output-thermo',
           size: outThermoByteLength,
           usage: thermalOutUsage
         }), device),
         device,
         {
-          bucketKey: 'ulg-sph-resident-particle-thermo',
+          bucketKey: 'ulg-sph-thermal-output-thermo',
           size: outThermoByteLength,
           usage: thermalOutUsage
         }
@@ -4421,12 +4421,12 @@ function createSphThermalStepWebGpuEncoderStageImpl({
       && thermalPrimarySubmissionObserved === true
     ) {
       releaseQueueOrderedPooledBuffer(device, outStateBuffer, {
-        bucketKey: 'ulg-sph-resident-particle-state',
+        bucketKey: 'ulg-sph-thermal-output-state',
         size: outStateByteLength,
         usage: thermalOutUsage
       });
       releaseQueueOrderedPooledBuffer(device, outThermoBuffer, {
-        bucketKey: 'ulg-sph-resident-particle-thermo',
+        bucketKey: 'ulg-sph-thermal-output-thermo',
         size: outThermoByteLength,
         usage: thermalOutUsage
       });

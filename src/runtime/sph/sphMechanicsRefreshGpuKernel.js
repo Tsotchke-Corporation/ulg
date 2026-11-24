@@ -893,12 +893,12 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     mlsMpmParticleState.mechanics.byteLength,
     mlsMpmParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT
   );
-  const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
+  const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
   const outMechanicsBuffer = useQueueOrderedRefreshPool
     ? registerQueueOrderedPooledBufferReturn(
         tagWebGpuBufferDevice(
           acquireQueueOrderedPooledBuffer(device, {
-            bucketKey: 'ulg-sph-resident-particle-mechanics',
+            bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
             label: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
             size: outMechanicsByteLength,
             usage: outMechanicsUsage
@@ -907,7 +907,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
         ),
         device,
         {
-          bucketKey: 'ulg-sph-resident-particle-mechanics',
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
           size: outMechanicsByteLength,
           usage: outMechanicsUsage
         }
@@ -1146,7 +1146,7 @@ fn eval_tier1_polytope_refresh(
     if (useQueueOrderedRefreshPool) {
       if (buffer === outMechanicsBuffer) {
         releaseQueueOrderedPooledBuffer(device, buffer, {
-          bucketKey: 'ulg-sph-resident-particle-mechanics',
+          bucketKey: 'ulg-mls-mpm-mechanics-refresh-output-mechanics',
           size: outMechanicsByteLength,
           usage: outMechanicsUsage
         });

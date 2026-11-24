@@ -2612,11 +2612,8 @@ export function acquireQueueOrderedPooledBuffer(
     if (!pool.lost) {
       const fullKey = `${bucketKey}:${normalizedSize}:${normalizedUsage}`;
       const bucket = pool.buckets.get(fullKey);
-      const useLifoReuse = !mapReadEligible
-        && typeof globalThis.GPUDevice === 'function'
-        && device instanceof globalThis.GPUDevice;
       while (bucket && bucket.length > 0) {
-        const reused = useLifoReuse ? bucket.pop() : bucket.shift();
+        const reused = bucket.shift();
         if (!reused) continue;
         queueOrderedPooledBuffersInPool.delete(reused);
         if (

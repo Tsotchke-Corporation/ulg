@@ -47,6 +47,7 @@ import { gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffe
 import {
   cancelQueueOrderedCleanupClaim,
   computeBufferBinding,
+  createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
   createQueueOrderedCleanupClaimIssuer,
   deferSubmittedWorkCleanup,
@@ -4084,7 +4085,7 @@ export function runSphPressureInterfaceParticleBinsWebGpu({
       computeBufferBinding(4, 'uniform')
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: particleSource.stateBuffer } },
@@ -4254,7 +4255,7 @@ export function runSphPressureInterfaceSpatialExactNearContactKinematicsWebGpu({
       computeBufferBinding(7, 'read-only-storage')
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: interfaceElementsBuffer } },
@@ -4601,7 +4602,7 @@ export function runSphPressureInterfaceContactKinematicsWebGpu({
       computeBufferBinding(16, 'read-only-storage')
     ]
   });
-  const bindGroup = device.createBindGroup({
+  const bindGroup = createCachedExplicitBindGroup(device, {
     layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: interfaceElementsBuffer } },
@@ -5840,7 +5841,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureAuthorityConsumerStatus =
         'cpu-seeded-gas-pressure-authority-consumer-borrowed-pre-submit';
     } else {
-      const bindGroup = device.createBindGroup({
+      const bindGroup = createCachedExplicitBindGroup(device, {
         layout: bindGroupLayout,
         entries: [
           publicEntries[0],

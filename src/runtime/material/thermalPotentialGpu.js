@@ -413,8 +413,20 @@ function isRealWebGpuDevice(device) {
 }
 function allocation(r) {
   if (r.generations.size >= THERMAL_POTENTIAL_LIMITS.maxGenerations) throw new Error('G6 generation capacity exhausted');
-  const buffer = (label, size) => r.device.createBuffer({ label, size, usage: 0x80|0x08|0x04 });
   const slot = [0,1,2].find(i=>![...r.generations].some(g=>g.slot===i));
+  if (isRealWebGpuDevice(r.device) && r.recycledGenerations?.length > 0) {
+    const gen = r.recycledGenerations.pop();
+    gen.slot = slot;
+    gen.refs = 0;
+    gen.retired = false;
+    gen.destroyed = false;
+    gen.receiptCopied = false;
+    gen.reservation = null;
+    r.device.queue.writeBuffer(gen.table, 0, new Float32Array([r.count, 4 + r.count * 16, 0, 0]));
+    r.generations.add(gen);
+    return gen;
+  }
+  const buffer = (label, size) => r.device.createBuffer({ label, size, usage: 0x80|0x08|0x04 });
   const gen = {slot,refs:0,retired:false,destroyed:false,bindGroup:null,receiptRead:null,receiptCopied:false};
   try {
     gen.table=buffer('g6-potential-table',(4+r.count*24)*4);
@@ -429,10 +441,16 @@ function allocation(r) {
 }
 function collect(r, gen) {
   if (!gen.retired || gen.refs || gen.destroyed) return;
+  r.generations.delete(gen);
+  if(gen.reservation){releaseReservation(r,{token:gen.reservation});gen.reservation=null;}
+  if (!r.closed && isRealWebGpuDevice(r.device) && r.recycledGenerations.length < THERMAL_POTENTIAL_LIMITS.maxGenerations) {
+    gen.receiptCopied = false;
+    r.recycledGenerations.push(gen);
+    return;
+  }
   gen.destroyed=true;
   gen.bindGroup=null;
-  gen.table.destroy(); gen.metadata.destroy(); gen.receipt.destroy(); gen.receiptRead?.destroy(); r.generations.delete(gen);
-  if(gen.reservation)releaseReservation(r,{token:gen.reservation});
+  gen.table.destroy(); gen.metadata.destroy(); gen.receipt.destroy(); gen.receiptRead?.destroy();
   if (r.closed && r.generations.size === 0) r.requests.destroy();
 }
 function releaseReservation(r, c) {
@@ -452,7 +470,7 @@ export function createThermalPotentialGpu(device, { thermalResponseGraphUpload: 
   }
   const r = { device, upload, source: Object.fromEntries(sourceFields.map(k=>[k,upload[k]])),
     count: upload.graphCount, ledger: reservationLedger, owner:`ulg-g6-thermal-${nextOwner++}`,
-    generations:new Set(), ordinal:0, closed:false, pending:null };
+    generations:new Set(), recycledGenerations:[], ordinal:0, closed:false, pending:null };
   try {
   r.requests=device.createBuffer({ label:'g6-potential-requests',size:(16+r.count*4)*4,usage:0x80|0x08|0x04 });
   const module=device.createShaderModule({label:'g6-thermal-potential-fit',code:thermalPotentialFitWgsl});
@@ -610,5 +628,7 @@ export function cancelThermalPotentialCandidateGpu(candidate) {const c=candidate
 export function destroyThermalPotentialGpu(cache) {
   const r=caches.get(cache);if(!r||r.closed)return;r.closed=true;
   if(r.pending)settle(r.pending,false);
-  for(const g of r.generations){g.retired=true;collect(r,g);}
+  for(const g of [...r.recycledGenerations]){g.retired=true;collect(r,g);}
+  r.recycledGenerations.length=0;
+  for(const g of [...r.generations]){g.retired=true;collect(r,g);}
 }

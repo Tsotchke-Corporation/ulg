@@ -209,6 +209,12 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
       const { stableOpticalMaterialId, GPU_PHASE_IDS } = await import('/src/runtime/material/opticalGpuBuffers.js');
       const { buildMlsMpmMechanicsMaterialTable } = await import('/src/runtime/sph/sphMechanicsMaterialTable.js');
       const { runMlsMpmMechanicsRefreshWebGpu } = await import('/src/runtime/sph/sphMechanicsRefreshGpuKernel.js');
+      const { createSphExactMechanicsRefreshWgsl } = await import('/src/runtime/sph/sphExactMechanicsRefreshWgsl.js');
+      const { evaluatePolytopeAtlasWgsl } = await import('/ulg-gpu-abi/src/materialFoundationAbi.js');
+      const {
+        runGasPolytopeEosProofNative,
+        sphSpatialGasLedgerEosPolytopeWgsl
+      } = await import('/tests/fixtures/priority3GasPolytopeNative.js');
       const { ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA, MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT } = await import('/ulg-gpu-abi/src/index.js');
       const thermalDorm = await import('/src/runtime/sph/schroederThermalDormancyGpu.js');
       const reactDorm = await import('/src/runtime/sph/schroederReactionDormancyGpu.js');
@@ -220,11 +226,18 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
         const info = await device.createShaderModule({ label, code }).getCompilationInfo();
         return info.messages.filter((m) => m.type === 'error').map((m) => `${label}:${m.lineNum}:${m.linePos} ${m.message}`);
       };
+      const exactPolytopeWgsl = createSphExactMechanicsRefreshWgsl()
+        .replace(
+          'fn material_bank_warm_input_anchor()',
+          `${evaluatePolytopeAtlasWgsl}\n@group(0) @binding(12) var<storage, read> polytope_atlas: array<f32>;\nfn material_bank_warm_input_anchor()`
+        );
       const compileErrors = [
         ...(await compileCheck('thermalDormSs', thermalDorm.schroederThermalDormancySsWgsl)),
         ...(await compileCheck('reactDormSs', reactDorm.schroederReactionDormancySsWgsl)),
         ...(await compileCheck('solidThermalSs', solidThermal.schroederSolidFluidThermalSsWgsl)),
-        ...(await compileCheck('solidContactSs', solidContact.schroederSolidFluidContactSsWgsl))
+        ...(await compileCheck('solidContactSs', solidContact.schroederSolidFluidContactSsWgsl)),
+        ...(await compileCheck('exactMechanicsPolytopeB12', exactPolytopeWgsl)),
+        ...(await compileCheck('spatialGasEosPolytopeB10', sphSpatialGasLedgerEosPolytopeWgsl))
       ];
       if (compileErrors.length) {
         device.destroy();
@@ -234,8 +247,9 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
       // 1. Seed multi-material GPU Polytope Atlas bank with exact runtime stableOpticalMaterialId mapping.
       const h2oId = stableOpticalMaterialId('h2o');
       const feId = stableOpticalMaterialId('fe');
-      const seeded = await seedStudioFoundationTriadOnDevice(device, ['h2o', 'fe'], {
-        materialIdByKey: { h2o: h2oId, fe: feId }
+      const n2Id = stableOpticalMaterialId('n2');
+      const seeded = await seedStudioFoundationTriadOnDevice(device, ['h2o', 'fe', 'n2'], {
+        materialIdByKey: { h2o: h2oId, fe: feId, n2: n2Id }
       });
       const binding = getFoundationPolytopeGpuBinding(device);
 
@@ -309,13 +323,37 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
       });
       await device.queue.onSubmittedWorkDone();
       const escalationPoll = await consumeAndEscalatePolytopeReceiptOnDevice(device, { scheduleEpoch: 1 });
-      // Wait for async escalation promise to settle
-      await new Promise((r) => setTimeout(r, 150));
+      // Wait for async Tier-3 escalation + atlas bank rebuild to advance generation
+      let postEscalationBinding = getFoundationPolytopeGpuBinding(device);
+      for (let waitStep = 0; waitStep < 40 && postEscalationBinding.generation <= binding.generation; waitStep += 1) {
+        await new Promise((r) => setTimeout(r, 50));
+        postEscalationBinding = getFoundationPolytopeGpuBinding(device);
+      }
+      // Closed-loop verification: re-run mechanics refresh on the SAME 3 particles and verify
+      // the previously missed 95000 K state now HITS the newly derived convex polytope cell!
+      const refreshOut2 = await runMlsMpmMechanicsRefreshWebGpu({
+        device,
+        sphParticleState: { schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, particleCount: 3, state, thermo },
+        mlsMpmParticleState: { schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA, particleCount: 3, mechanics },
+        mechanicsMaterialTable: table,
+        sphParticleUpload: { stateBuffer: stBuf, thermoBuffer: thBuf },
+        mlsMpmParticleUpload: { mechanicsBuffer: mcBuf },
+        retainOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        capturePolytopeReceipt: true
+      });
+      await device.queue.onSubmittedWorkDone();
+      const postEscalationPoll = await consumeAndEscalatePolytopeReceiptOnDevice(device, { scheduleEpoch: 2 });
       const liveStatus = globalThis.__ulgPolytopeAtlasLiveStatus ?? null;
       stBuf.destroy();
       thBuf.destroy();
       mcBuf.destroy();
       refreshOut?.mechanicsBuffer?.destroy?.();
+      refreshOut2?.mechanicsBuffer?.destroy?.();
+
+      // 1b. Live Vulkan proof of `sphSpatialGasLedgerEosGpu` consuming `@binding(10)` Polytope Atlas
+      //     (authority[34] POLYTOPE_HIT_COUNT > 0 AND real-gas `z_poly` pressure modulation applied!).
+      const gasPolytopeProof = await runGasPolytopeEosProofNative(device, { feId, n2Id });
 
       // 2. Build a canonical SCHROEDER_SPATIAL_EPOCH_DIRECTORY_ABI v2 buffer for SS dormancy & solid-fluid coupling.
       const buildCanonicalSsDir = (positions, spacingM, level = 0, chartId = 0) => {
@@ -496,6 +534,12 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
         polytopeAtlasBound: refreshOut?.polytopeAtlasBound ?? false,
         refreshPolytopeGen: refreshOut?.polytopeAtlasGeneration ?? 0,
         escalationPoll,
+        postEscalationBinding: {
+          generation: postEscalationBinding?.generation ?? 0,
+          materialCount: postEscalationBinding?.materialCount ?? 0
+        },
+        postEscalationPoll,
+        gasPolytopeProof,
         liveStatus,
         dormUniform,
         dormStep,
@@ -513,14 +557,28 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
     assert.deepEqual(out.gpuErrors, []);
     assert.deepEqual(pageErrors, []);
 
-    // 1. In-shader WGSL Polytope Atlas Bank + schedule-boundary miss escalation
+    // 1. In-shader WGSL Polytope Atlas Bank + schedule-boundary miss escalation + closed-loop rebuilt hit
     assert.equal(out.polytopeAtlasBound, true, `Polytope atlas bank must bind at @binding(8): ${JSON.stringify({ maxStorageSlots: out.maxStorageSlots, seededBank: out.seededBank, bindingActive: out.bindingActive, bankMaterialCount: out.bankMaterialCount })}`);
-    assert.ok(out.bankMaterialCount >= 2, `Expected >= 2 materials in packed GPU bank, got ${out.bankMaterialCount}`);
+    assert.ok(out.bankMaterialCount >= 3, `Expected >= 3 materials in packed GPU bank, got ${out.bankMaterialCount}`);
     assert.equal(out.escalationPoll?.hits, 2, `Expected 2 in-domain WGSL polytope hits (H2O + Fe), got ${JSON.stringify(out.escalationPoll)}`);
+    assert.equal(out.escalationPoll?.applied, 2, `Expected 2 phase-matched applied WGSL polytope hits (H2O liquid + Fe solid), got ${JSON.stringify(out.escalationPoll)}`);
+    assert.equal(out.escalationPoll?.phaseMismatches, 0, `Expected 0 phase mismatches on H2O liquid + Fe solid, got ${JSON.stringify(out.escalationPoll)}`);
     assert.equal(out.escalationPoll?.misses, 1, `Expected 1 out-of-domain WGSL polytope miss (95000 K), got ${JSON.stringify(out.escalationPoll)}`);
     assert.ok(Boolean(out.escalationPoll?.triggeredEscalationKey), `Out-of-domain WGSL miss must trigger async Triad escalation: ${JSON.stringify(out.escalationPoll)}`);
-    assert.ok((out.liveStatus?.cumulativeHits ?? 0) >= 2 && (out.liveStatus?.cumulativeMisses ?? 0) >= 1,
-      `Live status must record cumulative hits/misses: ${JSON.stringify(out.liveStatus)}`);
+    assert.ok((out.postEscalationBinding?.generation ?? 0) >= 2, `Tier-3 escalation must rebuild resident GPU atlas bank (gen >= 2): ${JSON.stringify(out.postEscalationBinding)}`);
+    assert.equal(out.postEscalationPoll?.hits, 3, `Closed-loop post-escalation mechanics refresh must hit all 3 particles (including previously missed 95000 K): ${JSON.stringify(out.postEscalationPoll)}`);
+    assert.equal(out.postEscalationPoll?.misses, 0, `Closed-loop post-escalation mechanics refresh must have 0 misses: ${JSON.stringify(out.postEscalationPoll)}`);
+    assert.ok((out.postEscalationPoll?.atlasGeneration ?? 0) >= 2, `Closed-loop receipt must report rebuilt atlas generation >= 2: ${JSON.stringify(out.postEscalationPoll)}`);
+    assert.ok((out.liveStatus?.cumulativeHits ?? 0) >= 5 && (out.liveStatus?.cumulativeMisses ?? 0) >= 1 && (out.liveStatus?.cumulativeApplied ?? 0) >= 4,
+      `Live status must record cumulative hits/applied/misses: ${JSON.stringify(out.liveStatus)}`);
+
+    // 1b. Live Vulkan spatial gas ledger EOS consuming @binding(10) Polytope Atlas (non-ideal z_poly modulation)
+    assert.equal(out.gasPolytopeProof?.ready, true, `Spatial gas EOS polytope proof failed: ${JSON.stringify(out.gasPolytopeProof)}`);
+    assert.equal(out.gasPolytopeProof?.polytopeHitCount, 1, `Spatial gas EOS must record 1 Polytope Atlas hit in authority[34]: ${JSON.stringify(out.gasPolytopeProof)}`);
+    assert.equal(out.gasPolytopeProof?.polytopeMissCount, 0, `Spatial gas EOS must record 0 misses in authority[35]: ${JSON.stringify(out.gasPolytopeProof)}`);
+    const zMeasured = out.gasPolytopeProof.pressurePa / Math.max(1, out.gasPolytopeProof.idealPressurePa);
+    assert.ok(zMeasured > 1.25 && zMeasured < 1.45,
+      `Spatial gas EOS must consume pa_gas to apply real-gas compressibility z_poly (~1.35 for 1.35x density N2), got z=${zMeasured.toFixed(4)} (${JSON.stringify(out.gasPolytopeProof)})`);
 
     // 2a. Canonical SS thermal dormancy
     assert.deepEqual(out.dormUniform.slice(0, 3), [0, 64, 64], 'Canonical SS thermal dormancy: uniform field must be 100% dormant');

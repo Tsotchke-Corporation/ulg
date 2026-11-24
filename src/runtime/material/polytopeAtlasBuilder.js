@@ -210,11 +210,17 @@ export async function publishPolytopeBundleToTriadGpuRegistry(device, bundle, op
 export function evaluateBundleDensityEos(bundle, phase, temperatureK, pressurePa) {
   const T = Math.max(1, Number(temperatureK));
   const P = Math.max(1e-3, Number(pressurePa));
-  const rho0 = Math.max(1, Number(bundle.mechanical.densityKgPerM3));
-  const K0 = Math.max(1e6, Number(bundle.mechanical.bulkModulusPa));
-  const alphaV = Math.max(1e-6, Math.min(5e-3, Number(bundle.thermodynamic.thermalExpansionVolPerK ?? 4e-5)));
-  const tRef = Number(bundle.thermodynamic.temperatureK ?? 300);
-  const molarMassKg = (Number(bundle.nuclear.atomicMassU ?? bundle.nuclear.molarMassU ?? 28)) * 1e-3;
+  const rho0 = Math.max(1, Number(bundle?.mechanical?.densityKgPerM3 ?? 1000));
+  const K0 = Math.max(1e6, Number(bundle?.mechanical?.bulkModulusPa ?? 2e9));
+  const alphaV = Math.max(1e-6, Math.min(5e-3, Number(bundle?.thermodynamic?.thermalExpansionVolPerK ?? 4e-5)));
+  const tRef = Number(bundle?.thermodynamic?.temperatureK ?? 300);
+  const molarMassKg = (Number(
+    bundle?.nuclear?.atomicMassU
+    ?? bundle?.nuclear?.molarMassU
+    ?? bundle?.molarMassU
+    ?? bundle?.atomicMassU
+    ?? (bundle?.molarMassKgPerMol ? bundle.molarMassKgPerMol * 1e3 : 28)
+  )) * 1e-3;
 
   if (phase === 'solid') {
     // Exact thermodynamic integral of volumetric thermal expansion alpha_V = -(1/rho)(d rho / dT)_P:

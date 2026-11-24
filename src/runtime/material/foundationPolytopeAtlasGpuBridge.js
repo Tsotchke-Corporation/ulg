@@ -34,6 +34,7 @@ import { stableOpticalMaterialId } from './opticalGpuBuffers.js';
 import { createMaterialPolytopeRegistry } from './materialPolytopeRegistry.js';
 import {
   compilePolytopeEshkolHigherOrderLaws,
+  evaluateBundleDensityEos,
   publishPolytopeBundleToTriadGpuRegistry,
   synthesizePolytopeMoonlabTriadClosures
 } from './polytopeAtlasBuilder.js';
@@ -87,6 +88,7 @@ export function lookupFoundationPolytopeRecord(materialKey) {
     oxygen: 'o2',
     hydrogen: 'h2',
     nitrogen: 'n2',
+    air: 'n2',
     argon: 'ar'
   };
   const mapped = aliases[key];
@@ -386,9 +388,75 @@ export async function evaluatePolytopeAtlasBatchWebGpu(device, {
 }
 
 /**
+ * Build a freshly derived Tier-3 convex polytope cell covering a missed
+ * `(temperatureK, pressurePa)` state from Eshkol AD + Gate 1-2 EOS physics so
+ * rebuilding the Tier-1 GPU bank closes subsequent lookups (`hitFlag == 1`).
+ */
+function buildEscalatedConvexPolytopeCell(rec, { temperatureK, pressurePa }) {
+  const tCenter = Math.max(15, Number(temperatureK) || 300);
+  const pCenter = Math.max(100, Number(pressurePa) || 101325);
+  const logPCenter = Math.log10(pCenter);
+  const tLo = Math.max(1, tCenter * 0.75);
+  const tHi = Math.max(tLo + 50, tCenter * 1.25);
+  const logPLo = Math.max(-2, logPCenter - 0.75);
+  const logPHi = Math.min(14, logPCenter + 0.75);
+  const tm = Number(rec.thermodynamic?.meltingPointK || 1e9);
+  const tb = Number(rec.thermodynamic?.boilingPointK || 1e9);
+  const phase = tCenter >= Math.max(tb * 2.5, 10000)
+    ? 'plasma'
+    : (tCenter >= tb ? 'gas' : (tCenter >= tm ? 'liquid' : 'solid'));
+  const phaseCode = phase === 'solid' ? 0 : (phase === 'liquid' ? 1 : (phase === 'gas' ? 2 : 3));
+  const rhoCenter = Math.max(1e-6, evaluateBundleDensityEos(rec, phase, tCenter, pCenter));
+  const rhoTLo = Math.max(1e-6, evaluateBundleDensityEos(rec, phase, tLo, pCenter));
+  const rhoTHi = Math.max(1e-6, evaluateBundleDensityEos(rec, phase, tHi, pCenter));
+  const rhoPLo = Math.max(1e-6, evaluateBundleDensityEos(rec, phase, tCenter, 10 ** logPLo));
+  const rhoPHi = Math.max(1e-6, evaluateBundleDensityEos(rec, phase, tCenter, 10 ** logPHi));
+  const lnCenter = Math.log(rhoCenter);
+  const c00 = lnCenter;
+  const c10 = 0.5 * (Math.log(rhoTHi) - Math.log(rhoTLo));
+  const c01 = 0.5 * (Math.log(rhoPHi) - Math.log(rhoPLo));
+  const closureHash = String(rec.closureHash || 'foundation-v1');
+  const tSpan = Math.max(1, tHi - tLo);
+  const lpSpan = Math.max(1, logPHi - logPLo);
+  return Object.freeze({
+    polytopeId: `${rec.materialKey}:${phase}:escalated:${Math.round(tCenter)}K:${Math.round(logPCenter * 10)}`,
+    materialKey: String(rec.materialKey),
+    family: rec.family || 'element',
+    phase,
+    accuracyTier: rec.accuracyTier || ULG_ACCURACY_TIERS.TIER_2_REPRESENTATIVE_EFFECTIVE,
+    closureHash,
+    invalidationKey: `${closureHash}:escalated:${Math.round(tCenter)}`,
+    axes: Object.freeze([
+      Object.freeze({ name: 'temperatureK', unit: 'K', min: tLo, max: tHi }),
+      Object.freeze({ name: 'pressurePa', unit: 'Pa', min: 10 ** logPLo, max: 10 ** logPHi, scale: 'log10' })
+    ]),
+    inequalities: Object.freeze([
+      Object.freeze({ a: Object.freeze([-1, 0]), b: -tLo, scale: tSpan }),
+      Object.freeze({ a: Object.freeze([1, 0]), b: tHi, scale: tSpan }),
+      Object.freeze({ a: Object.freeze([0, -1]), b: -logPLo, scale: lpSpan }),
+      Object.freeze({ a: Object.freeze([0, 1]), b: logPHi, scale: lpSpan })
+    ]),
+    fit: Object.freeze({
+      valid: true,
+      valueTransform: 'exp',
+      degrees: Object.freeze([1, 1]),
+      coefficients: new Float32Array([c00, c01, c10, 0]),
+      maxRelativeError: 0.02,
+      uncertaintyBound: 0.05
+    }),
+    provenance: Object.freeze({
+      status: 'triad-escalated-convex-polytope',
+      scientificValidation: false
+    })
+  });
+}
+
+/**
  * Escalate a Tier-1 GPU Polytope Atlas out-of-domain miss (`hitFlag == 0`) to
- * Tier-3 Eshkol + MoonLab Triad synthesis and adopt the resulting 5-slot GPU
- * closure directly onto `triadClosureGpuRegistry` at the schedule boundary.
+ * Tier-3 Eshkol + MoonLab Triad synthesis, adopt the resulting 5-slot GPU
+ * closure onto `triadClosureGpuRegistry`, AND append a provenance-bound convex
+ * polytope cell covering `(temperatureK, pressurePa)` into the device's Tier-1
+ * Polytope Atlas bank so subsequent lookups hit cleanly (`hitFlag == 1`).
  */
 export async function escalatePolytopeMissToTriadGpu(device, {
   materialKey,
@@ -404,17 +472,35 @@ export async function escalatePolytopeMissToTriadGpu(device, {
       materialKey
     });
   }
-  const tLo = Math.max(15, Math.min(Number(temperatureK) * 0.7, Number(rec.thermodynamic?.meltingPointK || 300) * 0.5));
-  const tHi = Math.max(tLo + 120, Number(temperatureK) * 1.25);
+  const tCenter = Math.max(15, Number(temperatureK) || 300);
+  const tLo = Math.max(15, tCenter * 0.75);
+  const tHi = Math.max(tLo + 120, tCenter * 1.25);
+  const tm = Number(rec.thermodynamic?.meltingPointK || 1e9);
+  const tb = Number(rec.thermodynamic?.boilingPointK || 1e9);
+  const eshkolPhase = tCenter >= tb ? 'gas' : (tCenter >= tm ? 'liquid' : 'solid');
   const eshkolLaws = compilePolytopeEshkolHigherOrderLaws(rec, {
-    phase: temperatureK >= (rec.thermodynamic?.boilingPointK || 1e9)
-      ? 'gas'
-      : (temperatureK >= (rec.thermodynamic?.meltingPointK || 1e9) ? 'liquid' : 'solid'),
+    phase: eshkolPhase,
     temperatureRangeK: [tLo, tHi]
   });
   const triadResult = await publishPolytopeBundleToTriadGpuRegistry(device, rec, {
     temperatureRangeK: [tLo, tHi]
   });
+  let rebuiltBank = null;
+  if (device && typeof device.createBuffer === 'function') {
+    const state = getOrCreateDevicePolytopeState(device);
+    const cell = buildEscalatedConvexPolytopeCell(rec, { temperatureK, pressurePa });
+    const existing = state.derivedPolytopesByKey.get(rec.materialKey) ?? [];
+    if (existing.length < 16) {
+      existing.push(cell);
+      state.derivedPolytopesByKey.set(rec.materialKey, existing);
+    }
+    state.seededKeys.add(rec.materialKey);
+    rebuiltBank = rebuildFoundationPolytopeBankOnDevice(
+      device,
+      [...state.seededKeys],
+      { materialIdByKey: state.lastMaterialIdByKey }
+    );
+  }
   return Object.freeze({
     escalated: true,
     materialKey: rec.materialKey,
@@ -422,6 +508,7 @@ export async function escalatePolytopeMissToTriadGpu(device, {
     eshkolLawId: eshkolLaws.densityLaw.id,
     surrogateRelativeBound: eshkolLaws.surrogateRelativeBound,
     triadStatus: triadResult.gpuRegistryStatus,
+    atlasBankGeneration: rebuiltBank?.generation ?? 0,
     pressurePa
   });
 }
@@ -435,7 +522,7 @@ const DEFAULT_STUDIO_POLYTOPE_KEYS = Object.freeze([
   'naoh', 'csf', 'h2', 'o2', 'n2', 'air', 'ar', 'cl2', 'co2', 'al2o3', 'nacl'
 ]);
 
-export const ULG_POLYTOPE_RECEIPT_WORDS = 8;
+export const ULG_POLYTOPE_RECEIPT_WORDS = 10;
 export const ULG_POLYTOPE_RECEIPT_BYTES = ULG_POLYTOPE_RECEIPT_WORDS * Uint32Array.BYTES_PER_ELEMENT;
 
 function retirePolytopeBufferSafely(device, buffer) {
@@ -455,6 +542,8 @@ function getOrCreateDevicePolytopeState(device) {
     state = {
       seededKeys: new Set(),
       materialIdToKey: new Map(),
+      lastMaterialIdByKey: new Map(),
+      derivedPolytopesByKey: new Map(),
       seededAtMs: Date.now(),
       atlasBuffer: null,
       missReadbackBuffer: null,
@@ -469,6 +558,8 @@ function getOrCreateDevicePolytopeState(device) {
       adoptedGenerations: 0,
       cumulativeHits: 0,
       cumulativeMisses: 0,
+      cumulativeApplied: 0,
+      cumulativePhaseMismatches: 0,
       lastReceipt: null
     };
     devicePolytopeState.set(key, state);
@@ -479,8 +570,8 @@ function getOrCreateDevicePolytopeState(device) {
 /**
  * Pack and upload ONE GPU-resident multi-material Convex Polytope Atlas bank
  * (`ulg.polytope-atlas-bank-gpu-buffer.v1`) on `device` covering every seeded
- * material key & numeric Studio materialId (`thermo0.x`). Zero per-step churn:
- * allocated once per bank generation and retired safely after submitted work.
+ * material key & numeric Studio materialId (`thermo0.x`), including any
+ * Tier-3 escalated convex polytope cells derived at schedule boundaries.
  */
 export function rebuildFoundationPolytopeBankOnDevice(
   device,
@@ -495,7 +586,9 @@ export function rebuildFoundationPolytopeBankOnDevice(
     if (!Number.isFinite(id) || idToEntry.has(id)) return;
     const rec = lookupFoundationPolytopeRecord(rawKey);
     if (!rec) return;
-    const polytopes = hydrateFoundationPolytopes(rec);
+    const basePolytopes = hydrateFoundationPolytopes(rec);
+    const derived = state.derivedPolytopesByKey.get(rec.materialKey) ?? [];
+    const polytopes = derived.length > 0 ? [...basePolytopes, ...derived] : basePolytopes;
     if (!polytopes.length) return;
     idToEntry.set(id, {
       materialId: id,
@@ -511,8 +604,12 @@ export function rebuildFoundationPolytopeBankOnDevice(
       ? [...materialIdByKey.entries()]
       : Object.entries(materialIdByKey);
     for (const [k, v] of pairs) {
+      state.lastMaterialIdByKey.set(k, v);
       addEntry(v, k);
     }
+  }
+  for (const [k, v] of state.lastMaterialIdByKey.entries()) {
+    addEntry(v, k);
   }
   const allKeys = new Set([
     ...DEFAULT_STUDIO_POLYTOPE_KEYS,
@@ -534,6 +631,7 @@ export function rebuildFoundationPolytopeBankOnDevice(
   if (entries.length === 0) return null;
   const packedBank = packPolytopeAtlasBankForGpu(entries);
   const nextGen = state.generation + 1;
+  packedBank.data[2] = nextGen;
   const nextAtlasBuf = device.createBuffer({
     label: `ulg-tier1-polytope-atlas-bank-g${nextGen}`,
     size: Math.max(64, packedBank.data.byteLength),
@@ -620,8 +718,12 @@ export async function consumeAndEscalatePolytopeReceiptOnDevice(device) {
     const missTempK = missClaimed ? f32View[5] : 0;
     const missPressPa = missClaimed ? f32View[6] : 0;
     const atlasGen = words[7] >>> 0;
+    const applied = words[8] >>> 0;
+    const phaseMismatches = words[9] >>> 0;
     state.cumulativeHits += hits;
     state.cumulativeMisses += misses;
+    state.cumulativeApplied += applied;
+    state.cumulativePhaseMismatches += phaseMismatches;
 
     let triggeredEscalationKey = null;
     if (misses > 0 && missClaimed && Number.isFinite(missTempK) && missTempK > 0) {
@@ -649,7 +751,9 @@ export async function consumeAndEscalatePolytopeReceiptOnDevice(device) {
               state.adoptedGenerations += 1;
             }
           })
-          .catch(() => {})
+          .catch((err) => {
+            state.lastEscalationError = String(err?.message || err);
+          })
           .finally(() => {
             state.escalationsInFlight.delete(dedupKey);
           });
@@ -662,8 +766,12 @@ export async function consumeAndEscalatePolytopeReceiptOnDevice(device) {
       materialCount: state.materialCount,
       hits,
       misses,
+      applied,
+      phaseMismatches,
       cumulativeHits: state.cumulativeHits,
       cumulativeMisses: state.cumulativeMisses,
+      cumulativeApplied: state.cumulativeApplied,
+      cumulativePhaseMismatches: state.cumulativePhaseMismatches,
       missSample: missClaimed
         ? Object.freeze({
             materialId: missMatId,

@@ -2558,14 +2558,23 @@ export function queueOrderedPooledDeviceAllocationOwnership(device) {
 
 export function acquireQueueOrderedPooledBuffer(
   device,
-  { bucketKey, label, size, usage } = {}
+  { bucketKey, label, size, usage, allowMapReadPool = false } = {}
 ) {
   const normalizedSize = Math.max(4, Math.ceil(Number(size) || 4));
   const normalizedUsage = Number(usage) || 0;
+  const mapReadEligible = Boolean(
+    allowMapReadPool
+    && (normalizedUsage & MAP_WRITE_BIT) === 0
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   const poolable = Boolean(
     device
     && bucketKey
-    && (normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) === 0
+    && (
+      (normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) === 0
+      || mapReadEligible
+    )
   );
   if (poolable) {
     const pool = queueOrderedBufferPoolForDevice(device);
@@ -2576,24 +2585,52 @@ export function acquireQueueOrderedPooledBuffer(
         const reused = bucket.shift();
         if (!reused) continue;
         queueOrderedPooledBuffersInPool.delete(reused);
-        if (queueOrderedDestroyedBuffers.has(reused) || reused.destroyed === true) {
+        if (
+          queueOrderedDestroyedBuffers.has(reused)
+          || reused.destroyed === true
+          || (
+            (normalizedUsage & MAP_READ_BIT) !== 0
+            && reused.mapState != null
+            && reused.mapState !== 'unmapped'
+          )
+        ) {
           continue;
         }
         return reused;
       }
     }
   }
-  return device.createBuffer({
+  const created = device.createBuffer({
     label,
     size: normalizedSize,
     usage: normalizedUsage
   });
+  if (
+    poolable
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+    && typeof created?.destroy === 'function'
+  ) {
+    const origDestroy = created.destroy;
+    try {
+      created.destroy = function trackedPooledDestroy(...args) {
+        queueOrderedPooledBuffersInPool.delete(created);
+        const result = origDestroy.apply(this, args);
+        queueOrderedDestroyedBuffers.add(created);
+        queueOrderedPooledBufferReturnByBuffer.delete(created);
+        return result;
+      };
+    } catch {
+      // Non-writable destroy property; fall back to explicit tracker updates.
+    }
+  }
+  return created;
 }
 
 export function releaseQueueOrderedPooledBuffer(
   device,
   buffer,
-  { bucketKey, size, usage } = {}
+  { bucketKey, size, usage, allowMapReadPool = false } = {}
 ) {
   if (!buffer) return false;
   if (queueOrderedDestroyedBuffers.has(buffer) || buffer.destroyed === true) {
@@ -2602,17 +2639,31 @@ export function releaseQueueOrderedPooledBuffer(
   }
   const normalizedSize = Math.max(4, Math.ceil(Number(size ?? buffer.size) || 4));
   const normalizedUsage = Number(usage ?? buffer.usage) || 0;
+  const mapReadEligible = Boolean(
+    allowMapReadPool
+    && (normalizedUsage & MAP_WRITE_BIT) === 0
+    && (buffer.mapState == null || buffer.mapState === 'unmapped')
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
   if (
     !device
     || !bucketKey
-    || (normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0
+    || (
+      (normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0
+      && !mapReadEligible
+    )
   ) {
+    queueOrderedPooledBuffersInPool.delete(buffer);
     buffer.destroy?.();
+    queueOrderedDestroyedBuffers.add(buffer);
     return false;
   }
   const pool = queueOrderedBufferPoolForDevice(device);
   if (pool.lost) {
+    queueOrderedPooledBuffersInPool.delete(buffer);
     buffer.destroy?.();
+    queueOrderedDestroyedBuffers.add(buffer);
     return false;
   }
   const fullKey = `${bucketKey}:${normalizedSize}:${normalizedUsage}`;
@@ -2626,7 +2677,9 @@ export function releaseQueueOrderedPooledBuffer(
     return true;
   }
   if (bucket.length >= QUEUE_ORDERED_POOL_BUCKET_LIMIT) {
+    queueOrderedPooledBuffersInPool.delete(buffer);
     buffer.destroy?.();
+    queueOrderedDestroyedBuffers.add(buffer);
     return false;
   }
   bucket.push(buffer);
@@ -2639,12 +2692,18 @@ const queueOrderedPooledBufferReturnByBuffer = new WeakMap();
 export function registerQueueOrderedPooledBufferReturn(
   buffer,
   device,
-  { bucketKey, size, usage } = {}
+  { bucketKey, size, usage, allowMapReadPool = false } = {}
 ) {
   if (!buffer || !device || !bucketKey) return buffer;
   const normalizedSize = Math.max(4, Math.ceil(Number(size ?? buffer.size) || 4));
   const normalizedUsage = Number(usage ?? buffer.usage) || 0;
-  if ((normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0) {
+  const mapReadEligible = Boolean(
+    allowMapReadPool
+    && (normalizedUsage & MAP_WRITE_BIT) === 0
+    && typeof globalThis.GPUDevice === 'function'
+    && device instanceof globalThis.GPUDevice
+  );
+  if ((normalizedUsage & (MAP_READ_BIT | MAP_WRITE_BIT)) !== 0 && !mapReadEligible) {
     return buffer;
   }
   queueOrderedPooledBuffersInPool.delete(buffer);
@@ -2652,7 +2711,8 @@ export function registerQueueOrderedPooledBufferReturn(
     device,
     bucketKey,
     size: normalizedSize,
-    usage: normalizedUsage
+    usage: normalizedUsage,
+    allowMapReadPool: mapReadEligible
   });
   return buffer;
 }
@@ -2663,6 +2723,10 @@ export function releaseOrDestroyQueueOrderedPooledBuffer(
 ) {
   if (!buffer) return false;
   if (queueOrderedPooledBuffersInPool.has(buffer)) return true;
+  if (queueOrderedDestroyedBuffers.has(buffer) || buffer.destroyed === true) {
+    queueOrderedPooledBufferReturnByBuffer.delete(buffer);
+    return false;
+  }
   const spec = queueOrderedPooledBufferReturnByBuffer.get(buffer);
   if (spec) {
     queueOrderedPooledBufferReturnByBuffer.delete(buffer);
@@ -2670,6 +2734,8 @@ export function releaseOrDestroyQueueOrderedPooledBuffer(
       return releaseQueueOrderedPooledBuffer(spec.device, buffer, spec);
     }
   }
+  queueOrderedPooledBuffersInPool.delete(buffer);
   buffer.destroy?.();
+  queueOrderedDestroyedBuffers.add(buffer);
   return false;
 }

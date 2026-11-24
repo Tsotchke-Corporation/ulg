@@ -73,6 +73,7 @@ import {
   deferSubmittedWorkCleanup,
   deferConfirmedSubmittedWorkCleanup,
   registerQueueOrderedCleanupClaim,
+  registerQueueOrderedPooledBufferReturn,
   releaseQueueOrderedPooledBuffer,
   sealQueueOrderedFinalConsumerCapability,
   submitQueueOrderedWork,
@@ -3245,12 +3246,25 @@ export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
   });
 
   const ownedBuffers = [];
+  const usePooledBuffers = typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice;
+  const acquireOrCreate = (bucketKey, label, size, usage) => {
+    if (!usePooledBuffers) {
+      return tagWebGpuBufferDevice(device.createBuffer({ label, size, usage }), device);
+    }
+    const buf = tagWebGpuBufferDevice(
+      acquireQueueOrderedPooledBuffer(device, { bucketKey, label, size, usage }),
+      device
+    );
+    registerQueueOrderedPooledBufferReturn(buf, device, { bucketKey, size, usage });
+    return buf;
+  };
   try {
-    const paramsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: 'ulg-mls-mpm-terminal-motion-watch-bin-params',
-      size: SEPARATION_PARAMS_BYTES,
-      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
-    }), device);
+    const paramsBuffer = acquireOrCreate(
+      'ulg-mls-mpm-terminal-motion-watch-bin-params',
+      'ulg-mls-mpm-terminal-motion-watch-bin-params',
+      SEPARATION_PARAMS_BYTES,
+      GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    );
     ownedBuffers.push(paramsBuffer);
     if (paramsBuffer.size !== SEPARATION_PARAMS_BYTES) {
       throw new RangeError(
@@ -3275,11 +3289,12 @@ export function encodeMlsMpmParticleMotionWatchBins(device, encoder, {
     view.setFloat32(44, minimumCellSizeM, true);
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-    const binsBuffer = tagWebGpuBufferDevice(device.createBuffer({
-      label: 'ulg-mls-mpm-terminal-motion-watch-bins',
-      size: devicePlan.binByteLength,
-      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
-    }), device);
+    const binsBuffer = acquireOrCreate(
+      'ulg-mls-mpm-terminal-motion-watch-bins',
+      'ulg-mls-mpm-terminal-motion-watch-bins',
+      devicePlan.binByteLength,
+      GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    );
     ownedBuffers.push(binsBuffer);
     if (binsBuffer.size !== devicePlan.binByteLength) {
       throw new RangeError(

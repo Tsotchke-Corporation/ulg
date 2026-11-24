@@ -89,14 +89,26 @@ const hook = (options = {}) => {
     attributionEnabled: Boolean(options.attributionEnabled), timelineEnabled: Boolean(options.timelineEnabled),
     passTimingEnabled: Boolean(options.passTimingEnabled) };
   G.readSubmitTimeline = () => G.submitTimeline ?? null;
-  const encDev = new WeakMap(), passDev = new WeakMap(), queueDev = new WeakMap(), traceBuffers = new WeakMap();
+  const encDev = new WeakMap(), encPres = new WeakMap(), encHasRender = new WeakMap(), encHasPhysCompute = new WeakMap(), cbPres = new WeakMap(), passDev = new WeakMap(), passPres = new WeakMap(), queueDev = new WeakMap(), traceBuffers = new WeakMap();
+  const PRES_LABEL_RE = /marching-cubes|native-surface-temperature|worker-owned-isosurface|worker-native-surface|worker-native-background|ulg-sph-render-|ulg-sph-participating-medium|ulg-sph-extension-surface|ulg-optical-material|ulg-optical-spectral|isosurface-presenter|surface-mesh|offscreen-render/i;
+  const PRES_STACK_RE = /workerOwnedIsosurfacePresenter|workerOwnedNativeSurfaceMaterial|sphRenderFieldGpu|sphParticipatingMediumGpu|sphSurfaceMeshGpu|nativeSurfaceTemperature|marchingCubes|renderFrame|presentSubmissionBoundary|updateCommittedSurface/i;
+  const isPresentationCall = (label, stack) => (
+    (globalThis.__ulgGpuPresentationDepth || 0) > 0
+    || (label ? PRES_LABEL_RE.test(String(label)) : false)
+    || (stack ? PRES_STACK_RE.test(String(stack)) : false)
+  );
+  const bumpCounter = (e, field, pres, delta = 1) => {
+    if (!e) return;
+    e.c[field] += delta;
+    (pres ? e.cPres : e.cPhys)[field] += delta;
+  };
   const fresh = () => ({ encoders: 0, computePasses: 0, renderPasses: 0, dispatch: 0, dispatchIndirect: 0,
     submits: 0, commandBuffers: 0, writeBuffer: 0, writeBytes: 0, mapAsync: 0, workDone: 0, createBuffer: 0,
     pipelines: 0, bindGroups: 0, setBindGroup: 0, copies: 0 });
   const entryFor = device => {
     let e = G.devices.find(x => x.device === device);
     if (!e) {
-      e = { device, c: fresh() };
+      e = { device, c: fresh(), cPhys: fresh(), cPres: fresh() };
       G.devices.push(e); queueDev.set(device.queue, e);
       // S0_TICK_PUMP=1: keep one onSubmittedWorkDone pending per device (no GPU
       // work), to test whether completion latency comes from idle device ticks.
@@ -132,8 +144,21 @@ const hook = (options = {}) => {
     wrapped.__s0 = true; proto[name] = wrapped;
   };
   wrap(GPUDevice.prototype, 'createCommandEncoder', function (o, a) {
-    const e = entryFor(this); e.c.encoders++;
-    const encoder = Reflect.apply(o, this, a); encDev.set(encoder, e); return encoder;
+    const e = entryFor(this);
+    const label = String(a[0]?.label || '');
+    const pres = isPresentationCall(label, G.attributionEnabled ? String(new Error().stack || '') : '');
+    bumpCounter(e, 'encoders', pres);
+    const encoder = Reflect.apply(o, this, a);
+    encDev.set(encoder, e);
+    encPres.set(encoder, pres);
+    return encoder;
+  });
+  wrap(GPUCommandEncoder.prototype, 'finish', function (o, a) {
+    const cb = Reflect.apply(o, this, a);
+    const hasPhys = encHasPhysCompute.get(this) === true;
+    const isPres = !hasPhys && (encHasRender.get(this) === true || encPres.get(this) === true);
+    cbPres.set(cb, isPres);
+    return cb;
   });
   // Host-overhead attribution: who creates buffers, waits on the queue, and
   // maps buffers, per counted window (labels and the first app call site).
@@ -190,13 +215,15 @@ const hook = (options = {}) => {
     return Reflect.apply(o, this, a);
   });
   wrap(GPUDevice.prototype, 'createBuffer', function (o, a) {
-    entryFor(this).c.createBuffer++;
-    if (G.attributionEnabled) tally('createBuffer', String(a[0]?.label || '(unlabelled) ' + callSite()).replace(/-\d+(-|$)/g, '-#$1').slice(0, 120));
+    const e = entryFor(this);
+    const label = a[0]?.label || '';
+    const stackStr = G.attributionEnabled ? String(new Error().stack || '') : '';
+    bumpCounter(e, 'createBuffer', isPresentationCall(label, stackStr));
+    if (G.attributionEnabled) tally('createBuffer', String(label || '(unlabelled) ' + callSite()).replace(/-\d+(-|$)/g, '-#$1').slice(0, 120));
     // Contact audit: make ActiveSource view buffers copyable (usage only).
     const activeView = G.contactAudit && /^ulg-schroeder-(spatial|direct)-active-source-view.*-view$/.test(a[0]?.label || '');
     if (activeView) a = [{ ...a[0], usage: a[0].usage | GPUBufferUsage.COPY_SRC }];
     const buffer = Reflect.apply(o, this, a);
-    const label = a[0]?.label || '';
     if (activeView) { buffer.__s0Device = this; (G.activeSourceViews ??= []).push({ buffer, label }); if (G.activeSourceViews.length > 4) G.activeSourceViews.shift(); }
     if (/canonical-(field-)?authority-trace-readback$/.test(label)) traceBuffers.set(buffer, label);
     // Two-level diagnosis: parent-field workspace buffers (header counters name
@@ -233,15 +260,21 @@ const hook = (options = {}) => {
     return buffer;
   });
   for (const name of ['createComputePipeline', 'createComputePipelineAsync', 'createRenderPipeline', 'createRenderPipelineAsync']) {
-    wrap(GPUDevice.prototype, name, function (o, a) { entryFor(this).c.pipelines++; return Reflect.apply(o, this, a); });
+    wrap(GPUDevice.prototype, name, function (o, a) {
+      const pres = name.includes('Render') || isPresentationCall(a[0]?.label || '', G.attributionEnabled ? String(new Error().stack || '') : '');
+      bumpCounter(entryFor(this), 'pipelines', pres);
+      return Reflect.apply(o, this, a);
+    });
   }
   // Proposal audit: after every canonical thermal apply pass, copy the
   // proposal header (binding 10) into a ring, on either route.
   const receiptEncoders = new WeakSet();
   const bindGroupEntries = new WeakMap(), applyPasses = new WeakMap(), evidenceFor = new WeakMap(), graphControlFor = new WeakMap(), cleanupControlFor = new WeakMap(), thermoFor = new WeakMap(), graphPassFor = new WeakMap(), directoryEvidenceFor = new WeakMap(), activeViewInputs = new WeakMap();
   wrap(GPUDevice.prototype, 'createBindGroup', function (o, a) {
-    entryFor(this).c.bindGroups++;
-    if (G.attributionEnabled) tally('bindGroup', String(a[0]?.label || callSite()).replace(/\d+/g, '#').slice(0, 120));
+    const label = a[0]?.label || '';
+    const stackStr = G.attributionEnabled ? String(new Error().stack || '') : '';
+    bumpCounter(entryFor(this), 'bindGroups', isPresentationCall(label, stackStr));
+    if (G.attributionEnabled) tally('bindGroup', String(label || callSite()).replace(/\d+/g, '#').slice(0, 120));
     const group = Reflect.apply(o, this, a);
     // A probe hook must never throw into the app: entries may be any iterable.
     if (G.proposalAudit) try {
@@ -350,9 +383,12 @@ const hook = (options = {}) => {
     const e = encDev.get(this);
     if (G.passTimingEnabled) a = [passTimer(this, e, a[0])];
     const pass = Reflect.apply(o, this, a);
-    if (G.attributionEnabled) passLabels.set(pass, String(a[0]?.label || '(unlabelled)'));
+    const passLabel = String(a[0]?.label || '');
+    if (G.attributionEnabled) passLabels.set(pass, passLabel || '(unlabelled)');
     if (G.passTraceSlots.length || options.workspaceTimeline) passMeta.set(pass, { encoder: this, device: e?.device ?? null, label: a[0]?.label || '', groups: [] });
-    if (e) { e.c.computePasses++; passDev.set(pass, e); }
+    const isPres = PRES_LABEL_RE.test(passLabel) || encPres.get(this) === true;
+    if (!isPres) encHasPhysCompute.set(this, true);
+    if (e) { bumpCounter(e, 'computePasses', isPres); passDev.set(pass, e); passPres.set(pass, isPres); }
     if (G.proposalAudit && G.counting && a[0]?.label === 'ulg-exact-reaction-ledger' && e && !receiptEncoders.has(this)
         && G.receiptBuffers?.length) {
       receiptEncoders.add(this);
@@ -544,15 +580,19 @@ const hook = (options = {}) => {
     }
   };
   wrap(GPUCommandEncoder.prototype, 'beginRenderPass', function (o, a) {
-    const e = encDev.get(this); if (e) e.c.renderPasses++;
+    const e = encDev.get(this);
+    encHasRender.set(this, true);
+    bumpCounter(e, 'renderPasses', true);
     return Reflect.apply(o, this, a);
   });
   wrap(GPUComputePassEncoder.prototype, 'dispatchWorkgroups', function (o, a) {
-    const e = passDev.get(this); if (e) e.c.dispatch++;
+    const e = passDev.get(this);
+    bumpCounter(e, 'dispatch', passPres.get(this) === true);
     return Reflect.apply(o, this, a);
   });
   wrap(GPUComputePassEncoder.prototype, 'dispatchWorkgroupsIndirect', function (o, a) {
-    const e = passDev.get(this); if (e) e.c.dispatchIndirect++;
+    const e = passDev.get(this);
+    bumpCounter(e, 'dispatchIndirect', passPres.get(this) === true);
     if (G.attributionEnabled) {
       const passLabel = passLabels.get(this);
       tally('indirect', (passLabel && passLabel !== '(unlabelled)' ? String(passLabel) : `(unlabelled) ${callSite()}`)
@@ -561,7 +601,13 @@ const hook = (options = {}) => {
     return Reflect.apply(o, this, a);
   });
   wrap(GPUQueue.prototype, 'submit', function (o, a) {
-    const e = queueDev.get(this); if (e) { e.c.submits++; e.c.commandBuffers += a[0]?.length || 0; }
+    const e = queueDev.get(this);
+    const cbs = Array.isArray(a[0]) ? a[0] : [];
+    const presSubmit = cbs.length > 0 && cbs.every(cb => cbPres.get(cb) === true);
+    if (e) {
+      bumpCounter(e, 'submits', presSubmit);
+      bumpCounter(e, 'commandBuffers', presSubmit, cbs.length);
+    }
     // S0_SUBMIT_NUDGE=workdone|map: after each submit, an onSubmittedWorkDone
     // call, or a 4-byte copy plus mapAsync (no app work), to isolate why the
     // pass census's per-encoder readback speeds the lane up.
@@ -641,16 +687,24 @@ const hook = (options = {}) => {
       if (coldLabel === 'ulg-exact-mass-initial' && G.lastThermoWrite) G.ledgerCold.thermo = G.lastThermoWrite;
     }
     const e = queueDev.get(this);
-    if (e) { e.c.writeBuffer++; e.c.writeBytes += a[4] ?? (a[2]?.byteLength ?? 0); }
+    if (e) {
+      const wPres = isPresentationCall(coldLabel || '', '');
+      bumpCounter(e, 'writeBuffer', wPres);
+      bumpCounter(e, 'writeBytes', wPres, a[4] ?? (a[2]?.byteLength ?? 0));
+    }
     return Reflect.apply(o, this, a);
   });
   wrap(GPUQueue.prototype, 'onSubmittedWorkDone', function (o, a) {
-    const e = queueDev.get(this); if (e) e.c.workDone++;
+    const e = queueDev.get(this);
+    const stackStr = G.attributionEnabled ? String(new Error().stack || '') : '';
+    bumpCounter(e, 'workDone', isPresentationCall('', stackStr));
     if (G.attributionEnabled) tally('workDone', callSite());
     return Reflect.apply(o, this, a);
   });
   wrap(GPUBuffer.prototype, 'mapAsync', function (o, a) {
-    for (const e of G.devices) e.c.mapAsync++;
+    const stackStr = G.attributionEnabled ? String(new Error().stack || '') : '';
+    const mPres = isPresentationCall(this.label || '', stackStr);
+    for (const e of G.devices) bumpCounter(e, 'mapAsync', mPres);
     if (G.attributionEnabled) tally('mapAsync', String(this.label || '') + ' @ ' + callSite());
     return Reflect.apply(o, this, a);
   });
@@ -1167,8 +1221,8 @@ const hook = (options = {}) => {
     }
     return out;
   };
-  G.reset = () => { for (const e of G.devices) e.c = fresh(); G.traces = []; G.traceDrops = 0; G.ledgerLabels = {}; };
-  G.snapshot = () => ({ devices: G.devices.map(e => ({ lost: e.lost ?? null, counters: { ...e.c } })),
+  G.reset = () => { for (const e of G.devices) { e.c = fresh(); e.cPhys = fresh(); e.cPres = fresh(); } G.traces = []; G.traceDrops = 0; G.ledgerLabels = {}; };
+  G.snapshot = () => ({ devices: G.devices.map(e => ({ lost: e.lost ?? null, counters: { ...e.c }, physicsCounters: { ...e.cPhys }, presentationCounters: { ...e.cPres } })),
     traces: G.traces, traceDrops: G.traceDrops, ledgerLabels: G.ledgerLabels, gpuErrors: G.gpuErrors ?? [] });
 };
 
@@ -1740,6 +1794,8 @@ try {
   console.log(JSON.stringify({ lawScopeReceipt: evidence.lawScopeReceipt }));
   evidence.polytopeAtlasLiveStatus = (await inAll(() => globalThis.__ulgPolytopeAtlasLiveStatus ?? null)).filter(entry => entry.value);
   console.log(JSON.stringify({ polytopeAtlasLiveStatus: evidence.polytopeAtlasLiveStatus }));
+  evidence.a3ThermalRegional = (await inAll(() => globalThis.__ulgA3ThermalRegionalClosureStatus ?? null)).filter(entry => entry.value);
+  console.log(JSON.stringify({ a3ThermalRegional: evidence.a3ThermalRegional }));
   evidence.a5SolidStatus = (await inAll(() => globalThis.__ulgA5SolidStatus ?? null)).filter(entry => entry.value);
   console.log(JSON.stringify({ a5SolidStatus: evidence.a5SolidStatus }));
   evidence.implicitPressure = (await inAll(() => globalThis.__ulgImplicitPressure ?? null)).filter(entry => entry.value);
@@ -1787,6 +1843,10 @@ try {
     wallS, steps, simS, stepsPerS: steps != null ? steps / wallS : null,
     simSecondsPerWallSecond: simS / wallS, dtS: steps ? simS / steps : null,
     perStep: busiest && steps ? Object.fromEntries(Object.entries(busiest.counters)
+      .map(([key, value]) => [key, Number((value / steps).toFixed(2))])) : null,
+    physicsPerStep: busiest?.physicsCounters && steps ? Object.fromEntries(Object.entries(busiest.physicsCounters)
+      .map(([key, value]) => [key, Number((value / steps).toFixed(2))])) : null,
+    presentationPerStep: busiest?.presentationCounters && steps ? Object.fromEntries(Object.entries(busiest.presentationCounters)
       .map(([key, value]) => [key, Number((value / steps).toFixed(2))])) : null,
     busiestDevice: busiest,
     devices: snapshots.map(s => ({ context: s.context, devices: s.value.devices, traceDrops: s.value.traceDrops })),

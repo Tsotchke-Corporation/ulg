@@ -2840,8 +2840,24 @@ fn aggregate_cells(
     record_eos_error(CONTROL_ERROR_EOS_INVALID);
     return;
   }
-  let pressure_pa = mole_temperature_k
+  var pressure_pa = mole_temperature_k
     * params.gas_constant_j_per_mol_k / free_volume_m3;
+  ${usePolytopeAtlas ? `let cell_mean_t = mole_temperature_k / max(total_moles, 1.0e-30);
+  let pa_gas = eval_polytope_atlas_bank_2d(&polytope_atlas, dominant_material_id, cell_mean_t, max(pressure_pa, 1.0));
+  if (pa_gas.w >= 0.5 && pa_gas.x > 0.0 && finite_f32(pa_gas.x)) {
+    atomicAdd(&authority[34u], 1u);
+    if (pa_gas.z >= 1.5) {
+      // Non-ideal real-gas compressibility modulation from Gate 2 Polytope Atlas density rho_poly(T, P):
+      // Z = rho_cell / rho_poly(T, P), bounded safely to [0.5, 2.0].
+      let rho_cell = total_mass_kg / max(free_volume_m3, 1.0e-30);
+      let z_poly = clamp(rho_cell / pa_gas.x, 0.5, 2.0);
+      if (finite_f32(z_poly)) {
+        pressure_pa = pressure_pa * z_poly;
+      }
+    }
+  } else {
+    atomicAdd(&authority[35u], 1u);
+  }` : ''}
   let cell = vec3<i32>(
     decoded_signed_order_key(key_word(cell_index, 2u)),
     decoded_signed_order_key(key_word(cell_index, 3u)),
@@ -2899,13 +2915,6 @@ fn aggregate_cells(
   pressure_cells[output + 11u] = free_volume_m3;
   gas_mixture_write(cell_index, mixture);
   ${caloricModule ? 'gas_caloric_write(cell_index, caloric);' : ''}
-  ${usePolytopeAtlas ? `let cell_mean_t = mole_temperature_k / max(total_moles, 1.0e-30);
-  let pa_gas = eval_polytope_atlas_bank_2d(&polytope_atlas, dominant_material_id, cell_mean_t, max(pressure_pa, 1.0));
-  if (pa_gas.w >= 0.5 && pa_gas.x > 0.0 && finite_f32(pa_gas.x)) {
-    atomicAdd(&authority[34u], 1u);
-  } else {
-    atomicAdd(&authority[35u], 1u);
-  }` : ''}
   atomicAdd(&authority[11u], 1u);
   atomicAdd(&authority[31u], 1u);
 }
@@ -3058,6 +3067,7 @@ fn finalize_eos() {
 
 }
 export const sphSpatialGasLedgerEosWgsl = gasLedgerEosWgsl();
+export const sphSpatialGasLedgerEosPolytopeWgsl = gasLedgerEosWgsl(null, true);
 
 function adapterPipelines(device, exactHistory = false) {
   // The genuine source/count ABI stays unchanged. Only the numeric binding
@@ -3142,7 +3152,7 @@ function eosPipelines(device, caloricModule = null, usePolytopeAtlas = false) {
   const code = (caloricModule || usePolytopeAtlas)
     ? gasLedgerEosWgsl(caloricModule, usePolytopeAtlas)
     : sphSpatialGasLedgerEosWgsl;
-  const variant = `${caloricModule ? 'caloric.v2' : 'v5'}${usePolytopeAtlas ? '-polytope-t1' : ''}`;
+  const variant = `${caloricModule ? 'caloric.v2' : 'v5'}${usePolytopeAtlas ? '-polytope-t1-v2' : ''}`;
   const bindings = [
     computeBufferBinding(0, 'read-only-storage'),
     computeBufferBinding(1, 'read-only-storage'),
@@ -5835,7 +5845,7 @@ export async function runSphSpatialGasLedgerEosRetainedWebGpu({
     finalizerPass.end();
     const speciesDiagnosticDescriptor = encodeSphSpatialGasSpeciesDiagnostics({
       device, slot, allocate: createOwnedBuffer, encoder: eosEncoder,
-      eosEntries: eosEntries.filter((entry) => entry.binding < 11),
+      eosEntries: eosEntries.filter((entry) => entry.binding < 10),
       eosWgsl: sphSpatialGasLedgerEosWgsl, options: normalizedSpeciesDiagnostics,
       productBuffer: productBindingBuffer, productByteLength: productBindingByteLength,
       productCapacity: productCandidateCapacity,
@@ -6847,6 +6857,8 @@ export async function observeSphSpatialGasLedgerEosOracle(execution) {
     pressureValues,
     pressureCells,
     controlWords: control.words,
+    polytopeHitCount: (control.words[SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS.POLYTOPE_HIT_COUNT] ?? 0) >>> 0,
+    polytopeMissCount: (control.words[SPH_SPATIAL_GAS_AUTHORITY_CONTROL_OFFSETS.POLYTOPE_MISS_COUNT] ?? 0) >>> 0,
     controlStatusFlags: control.status,
     controlErrorFlags: control.errors,
     liveGasCandidateCount: control.liveResidualCount,

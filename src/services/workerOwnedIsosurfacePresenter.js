@@ -3388,7 +3388,8 @@ export function createWorkerOwnedIsosurfacePresenter({
     },
     hasSubmissionBoundaryOpportunity() {
       const frame = currentFrame;
-      if (disposed || !presentationPlaying || !frame?.motionField?.buffer || !frame.motionPacing
+      if (disposed || !presentationPlaying || renderLaneDepth > 0
+        || !frame?.motionField?.buffer || !frame.motionPacing
         || frame.invalidationEpoch !== invalidationEpoch) return false;
       return isosurfaceMotionAge(frame.motionPacing, temporalNowMs())
         > (frame.lastDisplayedMotionAgeS || 0);

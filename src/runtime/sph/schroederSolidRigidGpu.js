@@ -47,8 +47,14 @@ export const SCHROEDER_SOLID_MEMBER_WORDS = 8;
 export const SCHROEDER_SOLID_REDUCTION_ROWS = 16;
 const FORMAT = SPH_EXACT_THERMAL_ENERGY_FORMAT;
 const COUNTER_WORDS_PER_ROW = 4 * FORMAT.wordCount;
-const PROXY_GRID_BUCKETS = 4096;
 const GPU_BUFFER_USAGE = Object.freeze({ STORAGE: 0x80, UNIFORM: 0x40, COPY_SRC: 0x04, COPY_DST: 0x08 });
+
+function nextPowerOfTwoBuckets(count) {
+  let buckets = 16;
+  const target = Math.max(16, Math.min(1024, Math.trunc(Number(count) || 0) * 2));
+  while (buckets < target) buckets <<= 1;
+  return buckets;
+}
 
 /** The rigid-lane WGSL; `workgroupSize` only changes the member dispatch shape. */
 export function schroederSolidRigidWgsl({ workgroupSize = 64 } = {}) {
@@ -93,15 +99,14 @@ struct RigidParams {
 @group(0) @binding(10) var<storage, read_write> lattice: array<vec4<f32>>;
 // Per body, 8 vec4: the rebased frame (flag in rebase[base + 7].x).
 @group(0) @binding(11) var<storage, read_write> rebase: array<vec4<f32>>;
-// GPU spatial cell hash for O(P) body-body proxy pairing:
-// [cell_head[4096], max_radius_bits, proxy_next[proxyCount]]
+// Compact dynamically-sized proxy cell table for multi-body (bodyCount >= 2)
+// pairing: [cell_head[params.counts.w], max_radius_bits, proxy_next[proxyCount]]
+// Single-body scenes allocate only a 16-byte placeholder (0 grid buckets).
 @group(0) @binding(12) var<storage, read_write> proxy_grid: array<atomic<u32>>;
 
 const FRAME_VEC4: u32 = ${SCHROEDER_SOLID_FRAME_WORDS / 4}u;
 const MEMBER_VEC4: u32 = ${SCHROEDER_SOLID_MEMBER_WORDS / 4}u;
 const ROWS: u32 = ${SCHROEDER_SOLID_REDUCTION_ROWS}u;
-const PROXY_GRID_BUCKETS: u32 = ${PROXY_GRID_BUCKETS}u;
-const PROXY_GRID_MASK: u32 = ${PROXY_GRID_BUCKETS - 1}u;
 const PROXY_EMPTY_NODE: u32 = 0xffffffffu;
 
 fn quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -381,43 +386,50 @@ fn scatter_pair_impulse(g: PairGeometry, impulse: vec3<f32>) {
 }
 
 fn proxy_hash_cell(c: vec3<i32>) -> u32 {
-  return ((bitcast<u32>(c.x) * 73856093u) ^ (bitcast<u32>(c.y) * 19349663u) ^ (bitcast<u32>(c.z) * 83492791u)) & PROXY_GRID_MASK;
+  let mask = max(params.counts.w, 1u) - 1u;
+  return ((bitcast<u32>(c.x) * 73856093u) ^ (bitcast<u32>(c.y) * 19349663u) ^ (bitcast<u32>(c.z) * 83492791u)) & mask;
 }
 
 fn proxy_cell_edge() -> f32 {
-  let max_r = bitcast<f32>(atomicLoad(&proxy_grid[PROXY_GRID_BUCKETS]));
+  let buckets = params.counts.w;
+  let max_r = bitcast<f32>(atomicLoad(&proxy_grid[buckets]));
   let max_dist = 2.25 * max_r + params.contact.w + params.gravity_dt.w * 2.0 * params.contact2.y;
   return max(max_dist * 1.01, 1.0e-4);
 }
 
 @compute @workgroup_size(64)
 fn clear_proxy_grid(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x < PROXY_GRID_BUCKETS) { atomicStore(&proxy_grid[id.x], PROXY_EMPTY_NODE); }
-  if (id.x == 0u) { atomicStore(&proxy_grid[PROXY_GRID_BUCKETS], 0u); }
+  let buckets = params.counts.w;
+  if (buckets == 0u) { return; }
+  if (id.x < buckets) { atomicStore(&proxy_grid[id.x], PROXY_EMPTY_NODE); }
+  if (id.x == 0u) { atomicStore(&proxy_grid[buckets], 0u); }
 }
 
 @compute @workgroup_size(64)
 fn measure_proxy_radius(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
-  if (i >= params.counts.z || params.counts.x < 2u || !proxy_alive(i)) { return; }
+  let buckets = params.counts.w;
+  if (buckets == 0u || i >= params.counts.z || params.counts.x < 2u || !proxy_alive(i)) { return; }
   let r = proxies[i * 2u].w;
-  if (r > 0.0) { atomicMax(&proxy_grid[PROXY_GRID_BUCKETS], bitcast<u32>(r)); }
+  if (r > 0.0) { atomicMax(&proxy_grid[buckets], bitcast<u32>(r)); }
 }
 
 @compute @workgroup_size(64)
 fn bin_proxies(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
-  if (i >= params.counts.z || params.counts.x < 2u || !proxy_alive(i)) { return; }
+  let buckets = params.counts.w;
+  if (buckets == 0u || i >= params.counts.z || params.counts.x < 2u || !proxy_alive(i)) { return; }
   let p = proxy_world_point(i);
   let bucket = proxy_hash_cell(vec3<i32>(floor(p / proxy_cell_edge())));
   let prev = atomicExchange(&proxy_grid[bucket], i);
-  atomicStore(&proxy_grid[PROXY_GRID_BUCKETS + 1u + i], prev);
+  atomicStore(&proxy_grid[buckets + 1u + i], prev);
 }
 
 @compute @workgroup_size(64)
 fn warm_start_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
-  if (i >= params.counts.z || params.counts.x < 2u) { return; }
+  let buckets = params.counts.w;
+  if (buckets == 0u || i >= params.counts.z || params.counts.x < 2u) { return; }
   let s0 = proxy_state[i * 4u + 2u]; let s1 = proxy_state[i * 4u + 3u];
   var best = 3.0e38; var partner = 0xffffffffu;
   if (proxy_alive(i)) {
@@ -439,7 +451,7 @@ fn warm_start_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
           seen_count += 1u;
           var j = atomicLoad(&proxy_grid[bucket]);
           while (j != PROXY_EMPTY_NODE) {
-            let next_j = atomicLoad(&proxy_grid[PROXY_GRID_BUCKETS + 1u + j]);
+            let next_j = atomicLoad(&proxy_grid[buckets + 1u + j]);
             if (j > i && proxy_body(j) != body && proxy_alive(j)) {
               let gap = length(proxy_world_point(j) - p) - radius - proxies[j * 2u].w;
               if (gap < best || (gap == best && j < partner)) { best = gap; partner = j; }
@@ -978,7 +990,7 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
     'drift_bodies',
     'rebase_prepare', 'rebase_members', 'rebase_proxies', 'rebase_commit']
     .map(entryPoint => [entryPoint, createCachedExplicitComputePipeline(device, {
-      cacheKey: `ulg-solid-rigid-${entryPoint}-wg${workgroupSize}.v1`, label: `ulg-solid-rigid-${entryPoint}`, code, entryPoint, bindings })]));
+      cacheKey: `ulg-solid-rigid-${entryPoint}-wg${workgroupSize}.v2`, label: `ulg-solid-rigid-${entryPoint}`, code, entryPoint, bindings })]));
   const params = device.createBuffer({ label: 'ulg-solid-rigid-params', size: 96,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const memberWorldBuffer = device.createBuffer({ label: 'ulg-solid-member-world', size: memberCount * 32,
@@ -995,8 +1007,12 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
     size: bodyCount * SCHROEDER_SOLID_LATTICE_FLOATS * 4, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const rebaseBuffer = device.createBuffer({ label: 'ulg-solid-rebase', size: bodyCount * SCHROEDER_SOLID_FRAME_WORDS * 4,
     usage: GPU_BUFFER_USAGE.STORAGE });
-  const proxyGridBuffer = device.createBuffer({ label: 'ulg-solid-proxy-grid',
-    size: (PROXY_GRID_BUCKETS + 1 + Math.max(1, proxyCount)) * 4, usage: GPU_BUFFER_USAGE.STORAGE });
+  const proxyCellBuckets = (bodyCount >= 2 && proxyCount > 0) ? nextPowerOfTwoBuckets(proxyCount) : 0;
+  const proxyGridBuffer = device.createBuffer({
+    label: proxyCellBuckets > 0 ? 'ulg-solid-proxy-cell-table' : 'ulg-solid-proxy-cell-placeholder',
+    size: proxyCellBuckets > 0 ? (proxyCellBuckets + 1 + Math.max(1, proxyCount)) * 4 : 16,
+    usage: GPU_BUFFER_USAGE.STORAGE
+  });
   const proxyStateBuffer = device.createBuffer({ label: 'ulg-solid-proxy-state', size: Math.max(1, proxyCount) * 64,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const contactCounterBuffer = device.createBuffer({ label: 'ulg-solid-contact-counters',
@@ -1005,7 +1021,7 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
   const impulseLedgerBuffer = device.createBuffer({ label: 'ulg-solid-impulse-ledger',
     size: bodyCount * 3 * FORMAT.wordCount * 4, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const words = new ArrayBuffer(96), u = new Uint32Array(words), f = new Float32Array(words);
-  u.set([bodyCount, memberCount, proxyCount, 0], 0);
+  u.set([bodyCount, memberCount, proxyCount, proxyCellBuckets], 0);
   f.set([...gravity, 0], 4); f.set([...torque, 0], 8); f.set([...boxM, 0], 12);
   f.set([contactLaw.restitution, contactLaw.friction, contactLaw.baumgarte, contactLaw.slopM], 16);
   // Body-body partner reach: proxies closer than the near band plus two steps
@@ -1046,8 +1062,8 @@ export function createSchroederSolidRigidStage({ device, bodyCount, memberCount,
         const bodyPairs = bodyCount >= 2;
         dispatch('kick_bodies', bodyGroups);
         dispatch('warm_start_proxies', proxyGroups);
-        if (bodyPairs) {
-          dispatch('clear_proxy_grid', Math.ceil(PROXY_GRID_BUCKETS / 64));
+        if (bodyPairs && proxyCellBuckets > 0) {
+          dispatch('clear_proxy_grid', Math.ceil(proxyCellBuckets / 64));
           dispatch('measure_proxy_radius', proxyGroups);
           dispatch('bin_proxies', proxyGroups);
           dispatch('warm_start_pairs', proxyGroups);

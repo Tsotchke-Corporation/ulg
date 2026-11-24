@@ -12783,6 +12783,11 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
           onPresentationSubmissionBoundary: tier0PresentationQosEnabled
             ? tier0PresentationSubmissionBoundary
             : null,
+          canPresentSubmissionBoundary: tier0PresentationQosEnabled
+            && tier0RealtimePacing
+            && typeof canPresentTier0SubmissionBoundary === 'function'
+            ? canPresentTier0SubmissionBoundary
+            : null,
           // Real-time pacing also pipelines the boundaries (one outstanding).
           pipelinePresentationBoundaries: Boolean(tier0PresentationQosEnabled && tier0RealtimePacing
             && globalThis.__ulgTier0PipelineBoundaries !== false),
@@ -14255,12 +14260,15 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         : resolveSubmitBurstEligibility().stepsPerFlush;
       if (
         submitBurstOpened
+        && stepOrdinal < stepCount
         && stepOrdinal % effectiveStepsPerFlush === 0
       ) {
         // Cadence bound: even if no fence request forced a flush this
         // window, held work never spans more than K steps (or 1 step under
         // live interactive canonical presentation so shared-queue renders
-        // never wait behind multi-step physics bursts).
+        // never wait behind multi-step physics bursts). On the final step
+        // (`stepOrdinal === stepCount`), let `burst-close` submit the final
+        // step together with its schedule-terminal watch work in one submit.
         flushWorkerQueueSubmitBurst(state.workerDevice, 'step-cadence');
       }
       if (

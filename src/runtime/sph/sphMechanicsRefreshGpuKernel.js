@@ -972,15 +972,16 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
   const maxStorageSlots = typeof device?.limits?.maxStorageBuffersPerShaderStage === 'number'
     ? device.limits.maxStorageBuffersPerShaderStage
     : 0;
-  const polytopeBinding = exact ? { active: false } : getFoundationPolytopeGpuBinding(device);
+  const polytopeBinding = getFoundationPolytopeGpuBinding(device);
+  const polytopeBindingSlot = exact ? 12 : 8;
+  const requiredPolytopeStorageSlots = exact ? 9 : 8;
   const usePolytopeAtlas = Boolean(
-    !exact
-    && polytopeBinding.active
+    polytopeBinding.active
     && polytopeBinding.atlasBuffer
-    && maxStorageSlots >= 8
+    && maxStorageSlots >= requiredPolytopeStorageSlots
   );
   const triadBinding = getTriadClosureGpuBinding(device);
-  const requiredTriadStorageSlots = (exact || usePolytopeAtlas) ? 11 : 10;
+  const requiredTriadStorageSlots = 10 + (exact ? 1 : 0) + (usePolytopeAtlas ? 1 : 0);
   const useTriadEnvelopes = Boolean(
     triadBinding.active
     && maxStorageSlots >= requiredTriadStorageSlots
@@ -989,7 +990,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     ? /* wgsl */ `
 ${evaluatePolytopeAtlasWgsl}
 
-@group(0) @binding(8) var<storage, read> polytope_atlas: array<f32>;
+@group(0) @binding(${polytopeBindingSlot}) var<storage, read> polytope_atlas: array<f32>;
 
 fn eval_tier1_polytope_refresh(
   material_id: f32,
@@ -997,22 +998,31 @@ fn eval_tier1_polytope_refresh(
   temperature_k: f32,
   current_density: f32,
   sound_speed: f32,
+  volume_ratio_j: f32,
   base_rest_density: f32
 ) -> f32 {
   let c_safe = max(sound_speed, 100.0);
-  let p_est = clamp(max(101325.0, current_density * c_safe * c_safe * 0.142857), 100.0, 1.0e10);
+  let j_safe = clamp(select(1.0, volume_ratio_j, volume_ratio_j > 0.0 && mechanics_refresh_finite(volume_ratio_j)), 0.25, 4.0);
+  let inv_j = 1.0 / j_safe;
+  let inv_j2 = inv_j * inv_j;
+  let inv_j7 = inv_j2 * inv_j2 * inv_j2 * inv_j;
+  let bulk_tait = current_density * c_safe * c_safe * 0.14285714;
+  let p_mech = max(0.0, bulk_tait * (inv_j7 - 1.0));
+  let p_est = clamp(101325.0 + p_mech, 100.0, 1.0e10);
   let pa = eval_polytope_atlas_bank_2d(&polytope_atlas, material_id, temperature_k, p_est);
   if (pa.w >= 0.5 && pa.x > 0.0 && mechanics_refresh_finite(pa.x)) {
     atomicAdd(&authority_validation[1u], 1u);
-    atomicStore(&authority_validation[7u], ${polytopeBinding.generation >>> 0}u);
+    atomicStore(&authority_validation[7u], u32(polytope_atlas[2u]));
     let atlas_phase = select(select(select(0.0, 1.0, phase_id >= 1.5 && phase_id < 2.5), 2.0, phase_id >= 2.5 && phase_id < 3.5), 3.0, phase_id >= 3.5);
     if (abs(pa.z - atlas_phase) < 0.5) {
+      atomicAdd(&authority_validation[8u], 1u);
       return clamp(pa.x, base_rest_density * 0.85, base_rest_density * 1.15);
     }
+    atomicAdd(&authority_validation[9u], 1u);
     return base_rest_density;
   }
   atomicAdd(&authority_validation[2u], 1u);
-  atomicStore(&authority_validation[7u], ${polytopeBinding.generation >>> 0}u);
+  atomicStore(&authority_validation[7u], u32(polytope_atlas[2u]));
   let claimed = atomicCompareExchangeWeak(&authority_validation[3u], 0u, 1u);
   if (claimed.exchanged) {
     atomicStore(&authority_validation[4u], u32(max(0.0, floor(material_id + 0.5))));
@@ -1032,7 +1042,7 @@ fn eval_tier1_polytope_refresh(
       )
       .replace(
         '  let rest_density = thermo0.w;',
-        '  let rest_density = eval_tier1_polytope_refresh(thermo0.x, thermo0.y, thermo0.z, thermo0.w, phase_mechanics.sound_speed, thermo0.w);'
+        '  let prev_j_poly = out_mechanics[mechanics_base + 4u].z;\n  let rest_density = eval_tier1_polytope_refresh(thermo0.x, thermo0.y, thermo0.z, thermo0.w, phase_mechanics.sound_speed, prev_j_poly, thermo0.w);'
       );
   }
   if (useTriadEnvelopes) {
@@ -1048,16 +1058,17 @@ fn eval_tier1_polytope_refresh(
   }
   const extraBindings = [
     ...(exact ? [computeBufferBinding(8, 'read-only-storage')] : []),
-    ...(usePolytopeAtlas ? [computeBufferBinding(8, 'read-only-storage')] : []),
+    ...(!exact && usePolytopeAtlas ? [computeBufferBinding(8, 'read-only-storage')] : []),
     ...(useTriadEnvelopes
       ? [
           computeBufferBinding(9, 'read-only-storage'),
           computeBufferBinding(10, 'read-only-storage'),
           computeBufferBinding(11, 'storage')
         ]
-      : [])
+      : []),
+    ...(exact && usePolytopeAtlas ? [computeBufferBinding(12, 'read-only-storage')] : [])
   ];
-  const polytopeCacheSuffix = usePolytopeAtlas ? '-polytope-t1-v1' : '';
+  const polytopeCacheSuffix = usePolytopeAtlas ? `-polytope-t1-v2-b${polytopeBindingSlot}` : '';
   const triadCacheSuffix = useTriadEnvelopes ? '-triad-a4-v1' : '';
   const refreshPipeline = createCachedExplicitComputePipeline(device, {
     cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}${polytopeCacheSuffix}${triadCacheSuffix}`,
@@ -1103,14 +1114,15 @@ fn eval_tier1_polytope_refresh(
     { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } },
     { binding: 7, resource: { buffer: authorityValidationBuffer } },
     ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : []),
-    ...(usePolytopeAtlas ? [{ binding: 8, resource: { buffer: polytopeBinding.atlasBuffer } }] : []),
+    ...(!exact && usePolytopeAtlas ? [{ binding: 8, resource: { buffer: polytopeBinding.atlasBuffer } }] : []),
     ...(useTriadEnvelopes
       ? [
           { binding: 9, resource: { buffer: triadBinding.tableBuffer } },
           { binding: 10, resource: { buffer: triadBinding.materialMapBuffer } },
           { binding: 11, resource: { buffer: triadBinding.receiptBuffer } }
         ]
-      : [])
+      : []),
+    ...(exact && usePolytopeAtlas ? [{ binding: 12, resource: { buffer: polytopeBinding.atlasBuffer } }] : [])
   ];
   exact?.bind(authorityValidationBuffer);
   const bindGroup = createCachedExplicitBindGroup(device, {

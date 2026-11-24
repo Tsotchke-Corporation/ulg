@@ -402,7 +402,9 @@ fn couple_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
     let spacing = base_spacing * exp2(f32(level));
     if (!(spacing > 0.0)) { continue; }
     let level_key = bitcast<u32>(level) ^ 0x80000000u;
-    let halo_r = clamp(i32(ceil(max_reach / spacing)), 1i, 2i);
+    let halo_needed = i32(ceil(max_reach / spacing));
+    let halo_r = clamp(halo_needed, 1i, 6i);
+    if (halo_needed > 6i && level < max_level) { continue; }
     let base_cell = vec3<i32>(floor(x_m / spacing));
     for (var dz = -halo_r; dz <= halo_r; dz = dz + 1i) {
       for (var dy = -halo_r; dy <= halo_r; dy = dy + 1i) {

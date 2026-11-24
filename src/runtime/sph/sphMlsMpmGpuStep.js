@@ -14651,6 +14651,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
   registerSubmittedCleanup = null,
   maxSubstepsPerSubmission = null,
   onPresentationSubmissionBoundary = null,
+  canPresentSubmissionBoundary = null,
   // A1 real-time pacing: keep at most one presentation boundary outstanding
   // while the next chunk is encoded and submitted, instead of idling the GPU
   // through each frame's completion round trip. Boundaries are still called
@@ -15835,6 +15836,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
         && index < count - 1
         && currentSubmissionStepCount
           >= normalizedMaxSubstepsPerSubmission
+        && (typeof canPresentSubmissionBoundary !== 'function'
+          || canPresentSubmissionBoundary() === true)
       ) {
         submitCurrentSequenceEncoder(currentSubmissionStepCount);
         presentationBoundaryCount += 1;
@@ -31709,13 +31712,43 @@ export async function observeResidentProductHistoryLiveRowBound(
   ) {
     return null;
   }
+  const prevObserved = residentProductHistoryObservedBoundByDevice.get(device);
+  if (
+    prevObserved
+    && prevObserved.controlBuffer === gpuCountRecord.controlBuffer
+    && prevObserved.offsetBytes === gpuCountRecord.offsetBytes
+    && Number.isInteger(prevObserved.observedLiveRowCount)
+    && Number.isInteger(record.liveRowCountUpperBound)
+    && record.liveRowCountUpperBound <= prevObserved.observedLiveRowCount
+  ) {
+    const exactObserved = prevObserved.observedLiveRowCount;
+    const tightened = Math.min(record.liveRowCountUpperBound, Math.max(1, exactObserved));
+    return {
+      schema: 'peercompute.ulg.sph-product-history-live-bound-observation.v0',
+      observedLiveRowCount: exactObserved,
+      previousUpperBound: record.liveRowCountUpperBound,
+      tightenedUpperBound: tightened,
+      arenaRowCapacity: record.logicalRowCount,
+      readbackByteLength: 4,
+      arenaIdentity
+    };
+  }
   let readBuffer = null;
+  const isRealDevice = typeof globalThis.GPUDevice === 'function' && device instanceof globalThis.GPUDevice;
   try {
-    readBuffer = device.createBuffer({
-      label: 'ulg-product-history-live-count-observation',
-      size: 4,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    readBuffer = isRealDevice
+      ? acquireQueueOrderedPooledBuffer(device, {
+          bucketKey: 'ulg-product-history-live-count-observation',
+          label: 'ulg-product-history-live-count-observation',
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          allowMapReadPool: true
+        })
+      : device.createBuffer({
+          label: 'ulg-product-history-live-count-observation',
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
     const encoder = device.createCommandEncoder({
       label: 'ulg-product-history-live-count-observation'
     });
@@ -31743,7 +31776,9 @@ export async function observeResidentProductHistoryLiveRowBound(
     record.liveRowCountUpperBound = tightened;
     residentProductHistoryObservedBoundByDevice.set(device, {
       bound: Math.max(1, observed),
-      observedLiveRowCount: observed
+      observedLiveRowCount: observed,
+      controlBuffer: gpuCountRecord.controlBuffer,
+      offsetBytes: gpuCountRecord.offsetBytes
     });
     if (
       residentProductMass
@@ -31769,7 +31804,22 @@ export async function observeResidentProductHistoryLiveRowBound(
   } catch {
     return null;
   } finally {
-    try { readBuffer?.destroy(); } catch { /* observation is advisory */ }
+    if (readBuffer) {
+      if (isRealDevice) {
+        try {
+          releaseQueueOrderedPooledBuffer(device, readBuffer, {
+            bucketKey: 'ulg-product-history-live-count-observation',
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            allowMapReadPool: true
+          });
+        } catch {
+          try { readBuffer.destroy(); } catch { /* observation is advisory */ }
+        }
+      } else {
+        try { readBuffer.destroy(); } catch { /* observation is advisory */ }
+      }
+    }
   }
 }
 
@@ -40110,7 +40160,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         : runMlsMpmG2pWithOptionalWebGpu(g2pStageOptions)
     ));
     // G3 coherent rigid bodies on the mechanics-only route as well.
-    const mechanicsOnlySolidFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
+    const mechanicsOnlySolidFluid = solidRigidReleaseFluidBuffers(
+      sphParticleState,
+      sphParticleUpload,
+      g2pReconstruction,
+      { spatialEpochGeneration: schroederSpatialEpochGeneration }
+    );
     runSchroederSolidRigidLaneStep(
       ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
       { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: mechanicsOnlySolidFluid });
@@ -42350,6 +42405,8 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
         args.maxSubstepsPerSubmission ?? null,
       onPresentationSubmissionBoundary:
         args.onPresentationSubmissionBoundary ?? null,
+      canPresentSubmissionBoundary:
+        args.canPresentSubmissionBoundary ?? null,
       pipelinePresentationBoundaries:
         args.pipelinePresentationBoundaries === true,
       // PROF-0. Opt-in per run. The device must also have been created with

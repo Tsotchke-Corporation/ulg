@@ -303,8 +303,8 @@ fn contact_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
     let level_key = bitcast<u32>(level) ^ 0x80000000u;
     let reach_level = max(max_reach, a + spacing + params.law.y);
     let halo_needed = i32(ceil(reach_level / spacing));
-    let halo_r = clamp(halo_needed, 1i, 6i);
-    if (halo_needed > 6i && level < max_level) { continue; }
+    let halo_r = clamp(halo_needed, 1i, 8i);
+    if (halo_needed > 8i) { error |= 2u; }
     let base_cell = vec3<i32>(floor(xm / spacing));
     for (var dz = -halo_r; dz <= halo_r; dz = dz + 1i) {
       for (var dy = -halo_r; dy <= halo_r; dy = dy + 1i) {
@@ -365,8 +365,7 @@ fn contact_members_ss(@builtin(global_invocation_id) id: vec3<u32>) {
       }
     }
   }
-  if (contacts == 0u) { return; }
-  atomicAdd(&contact_ledger[0], contacts);
+  if (contacts > 0u) { atomicAdd(&contact_ledger[0], contacts); }
   if (error != 0u) { atomicOr(&contact_ledger[1], error); }
 }
 

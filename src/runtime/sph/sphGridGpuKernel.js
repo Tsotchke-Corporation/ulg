@@ -3617,35 +3617,73 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
           3 * Uint32Array.BYTES_PER_ELEMENT
         );
       };
-      copyIndirectArgs();
+      const directFieldP2gAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+        && typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice;
+      const maxP2gWorkgroupsPerDim = Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535;
+      const compactCeilingGroups = Math.ceil(
+        Math.max(1, Number(gridSpec?.gridNodeCount ?? mechanicsFieldExecution?.gridNodeCount ?? 0)) / 64
+      );
+      const fieldCeilingGroups = Math.ceil(
+        Math.max(1, Number(mechanicsFieldExecution?.fieldCapacity ?? 0)) / 64
+      );
+      const useDirectCompactValidation = directFieldP2gAllowed
+        && compactCeilingGroups > 0
+        && compactCeilingGroups <= maxP2gWorkgroupsPerDim;
+      const useDirectFieldP2g = directFieldP2gAllowed
+        && fieldCeilingGroups > 0
+        && fieldCeilingGroups <= maxP2gWorkgroupsPerDim;
+      if (!useDirectCompactValidation || !useDirectFieldP2g) {
+        copyIndirectArgs();
+      }
       const validationPass = encoder.beginComputePass();
       validationPass.setPipeline(compactValidationPipelineInfo.pipeline);
       validationPass.setBindGroup(0, compactValidationBindGroup);
-      validationPass.dispatchWorkgroupsIndirect(compactMechanicsIndirectBuffer, 0);
+      if (useDirectCompactValidation) {
+        validationPass.dispatchWorkgroups(compactCeilingGroups, 1, 1);
+      } else {
+        validationPass.dispatchWorkgroupsIndirect(compactMechanicsIndirectBuffer, 0);
+      }
       validationPass.setPipeline(fieldValidationPipelineInfo.pipeline);
       validationPass.setBindGroup(0, fieldValidationBindGroup);
-      validationPass.dispatchWorkgroupsIndirect(mechanicsFieldIndirectBuffer, 0);
+      if (useDirectFieldP2g) {
+        validationPass.dispatchWorkgroups(fieldCeilingGroups, 1, 1);
+      } else {
+        validationPass.dispatchWorkgroupsIndirect(mechanicsFieldIndirectBuffer, 0);
+      }
       validationPass.end();
-      copyIndirectArgs();
+      if (!useDirectCompactValidation || !useDirectFieldP2g) {
+        copyIndirectArgs();
+      }
       const productionPass = encoder.beginComputePass();
       productionPass.setPipeline(fieldClearPipelineInfo.pipeline);
       productionPass.setBindGroup(0, fieldClearBindGroup);
-      productionPass.dispatchWorkgroupsIndirect(mechanicsFieldIndirectBuffer, 0);
+      if (useDirectFieldP2g) {
+        productionPass.dispatchWorkgroups(fieldCeilingGroups, 1, 1);
+      } else {
+        productionPass.dispatchWorkgroupsIndirect(mechanicsFieldIndirectBuffer, 0);
+      }
       productionPass.setPipeline(pipeline);
       productionPass.setBindGroup(0, bindGroup);
-      if (activeSourceV2P2gEnabled) {
+      const p2gParticleCeilingGroups = Math.max(1, Math.ceil(sphParticleState.particleCount / 64));
+      if (
+        activeSourceV2P2gEnabled
+        && !(directFieldP2gAllowed && p2gParticleCeilingGroups <= maxP2gWorkgroupsPerDim)
+      ) {
         productionPass.dispatchWorkgroupsIndirect(
           mechanicsFieldBinding.activeSourceBuffer,
           mechanicsFieldBinding.activeSourceActiveDispatchOffsetBytes
         );
       } else {
-        productionPass.dispatchWorkgroups(
-          Math.max(1, Math.ceil(sphParticleState.particleCount / 64))
-        );
+        productionPass.dispatchWorkgroups(p2gParticleCeilingGroups);
       }
       productionPass.setPipeline(finalizePipeline);
       productionPass.setBindGroup(0, finalizeBindGroup);
-      productionPass.dispatchWorkgroupsIndirect(mechanicsFieldIndirectBuffer, 0);
+      if (useDirectFieldP2g) {
+        productionPass.dispatchWorkgroups(fieldCeilingGroups, 1, 1);
+      } else {
+        productionPass.dispatchWorkgroupsIndirect(mechanicsFieldIndirectBuffer, 0);
+      }
       productionPass.setPipeline(fieldSealPipelineInfo.pipeline);
       productionPass.setBindGroup(0, fieldSealBindGroup);
       productionPass.dispatchWorkgroups(1);

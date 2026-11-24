@@ -1480,6 +1480,19 @@ export function createWorkerOwnedIsosurfacePresenter({
       device.pushErrorScope('validation');
       validationScopeOpen = true;
     }
+    const bypassPhysicsBurst = !submissionBoundary
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice;
+    const runWithDecoupledBypass = (fn) => {
+      if (!bypassPhysicsBurst) return fn();
+      const previous = globalThis.__ulgDecoupledPresentationBypassBurst;
+      globalThis.__ulgDecoupledPresentationBypassBurst = true;
+      try {
+        return fn();
+      } finally {
+        globalThis.__ulgDecoupledPresentationBypassBurst = previous;
+      }
+    };
     try {
       const encoder = device.createCommandEncoder({
         label: 'ulg-worker-owned-isosurface-presentation'
@@ -1494,116 +1507,118 @@ export function createWorkerOwnedIsosurfacePresenter({
           inverse: inverseViewProjectionMatrix, ...options
         }) !== true) throw new Error('native isosurface draw is missing mandatory GPU buffers');
       };
-      const opaquePass = encoder.beginRenderPass({
-        label: 'ulg-worker-owned-isosurface-opaque-pass',
-        colorAttachments: [{
-          view: colorView, clearValue: material.clearValue(frame),
-          loadOp: 'clear', storeOp: 'store'
-        }],
-        depthStencilAttachment: {
-          view: depthView, depthClearValue: 1,
-          depthLoadOp: 'clear', depthStoreOp: 'store'
-        }
-      });
-      try {
-        material.drawBackground(opaquePass, frame);
-        const activeDeformableFamily = frame?.deformableSolidFamily
-          ?? latestSchroederDeformableSolidSurfaceFamily(device);
-        const deformableSolidDomainIds = (
-          activeDeformableFamily
-          && !activeDeformableFamily.destroyed
-          && activeDeformableFamily.device === device
-          && Array.isArray(frame.viewProjectionMatrix)
-        )
-          ? new Set(
-              activeDeformableFamily.entries
-                .map((entry) => Number(entry.domainId))
-                .filter((id) => Number.isFinite(id) && id > 0)
-            )
-          : null;
-        for (const surface of orderedSurfaces) {
-          if (workerNativeSurfaceKind(surface) !== 'opaque') continue;
-          // Explicit SOL-4 deformable solid carriers render their watertight
-          // material-space surface mesh directly; skip duplicate solid metaballs
-          // for the same renderDomainId while keeping any melted liquid surfaces.
-          if (
-            deformableSolidDomainIds
-            && Number(surface?.metadata?.phaseId) === 1
-            && deformableSolidDomainIds.has(Number(surface?.metadata?.renderDomainId))
-          ) {
-            continue;
-          }
-          drawNative(opaquePass, surface);
-        }
-        // Rigid & deformable solid shape carriers draw inside the opaque pass (no separate pass).
-        drawSolidRigidShapes(opaquePass, frame);
-        drawDeformableSolidSurfaces(opaquePass, frame);
-      } finally { opaquePass.end(); }
-
-      // Each condensed surface gets its own rear-depth map and scene-color
-      // snapshot. Front and rear passes use the same camera and motion age.
-      // The native fragment writes alpha one with depth, not an alpha shell.
-      const refractiveSurfaces = orderedSurfaces.filter(surface =>
-        workerNativeSurfaceKind(surface) === 'refractive');
-      if (refractiveSurfaces.length) passOrder.push('refractive-isosurface');
-      for (const surface of refractiveSurfaces) {
-        material.copySceneColor(encoder, colorTexture);
-        const backPass = encoder.beginRenderPass({
-          label: 'ulg-worker-owned-isosurface-refractive-backface-pass',
-          colorAttachments: [],
+      runWithDecoupledBypass(() => {
+        const opaquePass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-opaque-pass',
+          colorAttachments: [{
+            view: colorView, clearValue: material.clearValue(frame),
+            loadOp: 'clear', storeOp: 'store'
+          }],
           depthStencilAttachment: {
-            view: material.backDepthView(), depthClearValue: 1,
+            view: depthView, depthClearValue: 1,
             depthLoadOp: 'clear', depthStoreOp: 'store'
           }
         });
-        try { drawNative(backPass, surface, { backface: true }); }
-        finally { backPass.end(); }
-        const frontPass = encoder.beginRenderPass({
-          label: 'ulg-worker-owned-isosurface-refractive-pass',
-          colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
-          depthStencilAttachment: {
-            view: depthView, depthLoadOp: 'load', depthStoreOp: 'store'
-          }
-        });
         try {
-          drawNative(frontPass, surface, { refractive: true });
-          const reqNuclear = frame?.request?.nuclearCherenkovSources;
-          if (frame?.request && 'nuclearCherenkovSources' in frame.request && !(reqNuclear?.sources?.length > 0)) {
-            if (latestSphNuclearCherenkovState(device)?.activeSourceCount > 0) {
-              clearSphNuclearCherenkovState(device);
+          material.drawBackground(opaquePass, frame);
+          const activeDeformableFamily = frame?.deformableSolidFamily
+            ?? latestSchroederDeformableSolidSurfaceFamily(device);
+          const deformableSolidDomainIds = (
+            activeDeformableFamily
+            && !activeDeformableFamily.destroyed
+            && activeDeformableFamily.device === device
+            && Array.isArray(frame.viewProjectionMatrix)
+          )
+            ? new Set(
+                activeDeformableFamily.entries
+                  .map((entry) => Number(entry.domainId))
+                  .filter((id) => Number.isFinite(id) && id > 0)
+              )
+            : null;
+          for (const surface of orderedSurfaces) {
+            if (workerNativeSurfaceKind(surface) !== 'opaque') continue;
+            // Explicit SOL-4 deformable solid carriers render their watertight
+            // material-space surface mesh directly; skip duplicate solid metaballs
+            // for the same renderDomainId while keeping any melted liquid surfaces.
+            if (
+              deformableSolidDomainIds
+              && Number(surface?.metadata?.phaseId) === 1
+              && deformableSolidDomainIds.has(Number(surface?.metadata?.renderDomainId))
+            ) {
+              continue;
             }
-          } else {
-            let nuclearState = latestSphNuclearCherenkovState(device);
-            if (reqNuclear?.sources?.length > 0 && !(nuclearState?.activeSourceCount > 0)) {
-              seedSphNuclearCherenkovSources(device, { nuclearDescriptor: reqNuclear });
-              nuclearState = latestSphNuclearCherenkovState(device);
+            drawNative(opaquePass, surface);
+          }
+          // Rigid & deformable solid shape carriers draw inside the opaque pass (no separate pass).
+          drawSolidRigidShapes(opaquePass, frame);
+          drawDeformableSolidSurfaces(opaquePass, frame);
+        } finally { opaquePass.end(); }
+
+        // Each condensed surface gets its own rear-depth map and scene-color
+        // snapshot. Front and rear passes use the same camera and motion age.
+        // The native fragment writes alpha one with depth, not an alpha shell.
+        const refractiveSurfaces = orderedSurfaces.filter(surface =>
+          workerNativeSurfaceKind(surface) === 'refractive');
+        if (refractiveSurfaces.length) passOrder.push('refractive-isosurface');
+        for (const surface of refractiveSurfaces) {
+          material.copySceneColor(encoder, colorTexture);
+          const backPass = encoder.beginRenderPass({
+            label: 'ulg-worker-owned-isosurface-refractive-backface-pass',
+            colorAttachments: [],
+            depthStencilAttachment: {
+              view: material.backDepthView(), depthClearValue: 1,
+              depthLoadOp: 'clear', depthStoreOp: 'store'
             }
-            if (nuclearState?.activeSourceCount > 0 && nuclearState.cherenkovSourcesBuffer) {
-              cherenkovVolumetricRenderer ??= createSphCherenkovVolumetricRenderer(device, {
-                colorFormat: format,
-                depthFormat
-              });
-              const res = material.getSurfaceDrawResources?.(frame, surface);
-              const vertices = surface.translation?.surfaceVertices;
-              const indirect = surface.translation?.surfaceDraw?.drawIndirectRowsBuffer;
-              if (res?.opticalRecordsBuffer && vertices && indirect && surface.uniformBuffer) {
-                cherenkovVolumetricRenderer.draw(frontPass, {
-                  compactPositionRowsBuffer: vertices.compactPositionRowsBuffer,
-                  compactNormalRowsBuffer: vertices.compactNormalRowsBuffer,
-                  drawIndirectRowsBuffer: indirect,
-                  cameraUniformBuffer: surface.uniformBuffer,
-                  opticalRecordsBuffer: res.opticalRecordsBuffer,
-                  motionFieldBuffer: frame.motionField?.buffer ?? null,
-                  motionUniformBuffer: res.motionUniformBuffer ?? null,
-                  backDepthView: material.backDepthView(),
-                  cherenkovSourcesBuffer: nuclearState.cherenkovSourcesBuffer
+          });
+          try { drawNative(backPass, surface, { backface: true }); }
+          finally { backPass.end(); }
+          const frontPass = encoder.beginRenderPass({
+            label: 'ulg-worker-owned-isosurface-refractive-pass',
+            colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+            depthStencilAttachment: {
+              view: depthView, depthLoadOp: 'load', depthStoreOp: 'store'
+            }
+          });
+          try {
+            drawNative(frontPass, surface, { refractive: true });
+            const reqNuclear = frame?.request?.nuclearCherenkovSources;
+            if (frame?.request && 'nuclearCherenkovSources' in frame.request && !(reqNuclear?.sources?.length > 0)) {
+              if (latestSphNuclearCherenkovState(device)?.activeSourceCount > 0) {
+                clearSphNuclearCherenkovState(device);
+              }
+            } else {
+              let nuclearState = latestSphNuclearCherenkovState(device);
+              if (reqNuclear?.sources?.length > 0 && !(nuclearState?.activeSourceCount > 0)) {
+                seedSphNuclearCherenkovSources(device, { nuclearDescriptor: reqNuclear });
+                nuclearState = latestSphNuclearCherenkovState(device);
+              }
+              if (nuclearState?.activeSourceCount > 0 && nuclearState.cherenkovSourcesBuffer) {
+                cherenkovVolumetricRenderer ??= createSphCherenkovVolumetricRenderer(device, {
+                  colorFormat: format,
+                  depthFormat
                 });
+                const res = material.getSurfaceDrawResources?.(frame, surface);
+                const vertices = surface.translation?.surfaceVertices;
+                const indirect = surface.translation?.surfaceDraw?.drawIndirectRowsBuffer;
+                if (res?.opticalRecordsBuffer && vertices && indirect && surface.uniformBuffer) {
+                  cherenkovVolumetricRenderer.draw(frontPass, {
+                    compactPositionRowsBuffer: vertices.compactPositionRowsBuffer,
+                    compactNormalRowsBuffer: vertices.compactNormalRowsBuffer,
+                    drawIndirectRowsBuffer: indirect,
+                    cameraUniformBuffer: surface.uniformBuffer,
+                    opticalRecordsBuffer: res.opticalRecordsBuffer,
+                    motionFieldBuffer: frame.motionField?.buffer ?? null,
+                    motionUniformBuffer: res.motionUniformBuffer ?? null,
+                    backDepthView: material.backDepthView(),
+                    cherenkovSourcesBuffer: nuclearState.cherenkovSourcesBuffer
+                  });
+                }
               }
             }
           }
+          finally { frontPass.end(); }
         }
-        finally { frontPass.end(); }
-      }
+      });
       if (packedMedium) {
         passOrder.push('depth-clipped-participating-medium');
         const volumePass = encoder.beginRenderPass({
@@ -1617,25 +1632,28 @@ export function createWorkerOwnedIsosurfacePresenter({
               cameraPositionM: frame.cameraPositionM, viewportSize,
               depthTextureView: depthView, lightDirection: [0.38, 0.82, 0.42],
               motionField: frame.motionField,
-              motionAgeS: dampedIsosurfaceShaderMotionAgeS(frame)
+              motionAgeS: dampedIsosurfaceShaderMotionAgeS(frame),
+              decoupledBurstBypass: bypassPhysicsBurst
             }
           );
         } finally { volumePass.end(); }
       }
       passOrder.push('transparent-isosurface-and-overlay');
-      const vaporPass = encoder.beginRenderPass({
-        label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
-        colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
-        depthStencilAttachment: {
-          view: depthView, depthLoadOp: 'load', depthStoreOp: 'discard'
-        }
+      runWithDecoupledBypass(() => {
+        const vaporPass = encoder.beginRenderPass({
+          label: 'ulg-worker-owned-isosurface-transparent-overlay-pass',
+          colorAttachments: [{ view: colorView, loadOp: 'load', storeOp: 'store' }],
+          depthStencilAttachment: {
+            view: depthView, depthLoadOp: 'load', depthStoreOp: 'discard'
+          }
+        });
+        try {
+          for (const surface of orderedSurfaces) {
+            if (workerNativeSurfaceKind(surface) === 'vapor') drawNative(vaporPass, surface);
+          }
+          drawOverlay?.(vaporPass, frame.viewProjectionMatrix, frame.boxDimsM);
+        } finally { vaporPass.end(); }
       });
-      try {
-        for (const surface of orderedSurfaces) {
-          if (workerNativeSurfaceKind(surface) === 'vapor') drawNative(vaporPass, surface);
-        }
-        drawOverlay?.(vaporPass, frame.viewProjectionMatrix, frame.boxDimsM);
-      } finally { vaporPass.end(); }
       submittedPassOrder = Object.freeze(passOrder);
       if (!frameIsCurrent()) {
         await closeValidationScope();
@@ -1658,15 +1676,9 @@ export function createWorkerOwnedIsosurfacePresenter({
         await closeValidationScope();
         return false;
       }
-      const bypassPhysicsBurst = !submissionBoundary
-        && typeof globalThis.GPUDevice === 'function'
-        && device instanceof globalThis.GPUDevice;
-      if (bypassPhysicsBurst) globalThis.__ulgDecoupledPresentationBypassBurst = true;
-      try {
+      runWithDecoupledBypass(() => {
         device.queue.submit([commandBuffer]);
-      } finally {
-        if (bypassPhysicsBurst) globalThis.__ulgDecoupledPresentationBypassBurst = false;
-      }
+      });
       submissionQueued = true;
       submittedRenderSerial += 1;
       wakeRenderSubmitWaiters();
@@ -1712,7 +1724,7 @@ export function createWorkerOwnedIsosurfacePresenter({
       );
     }
     presentationQueueCompletionCount = presentationQueueCompletionSerial;
-    const queueCompletion = device.queue.onSubmittedWorkDone();
+    const queueCompletion = runWithDecoupledBypass(() => device.queue.onSubmittedWorkDone());
     let gpuCompletionObserved = false;
     const settledQueueCompletion = Promise.resolve(queueCompletion).then(
       () => {
@@ -3397,10 +3409,25 @@ export function createWorkerOwnedIsosurfacePresenter({
     hasSubmissionBoundaryOpportunity() {
       const frame = currentFrame;
       if (disposed || !presentationPlaying || renderLaneDepth > 0
+        || activePresentationQueueCompletion != null
         || !frame?.motionField?.buffer || !frame.motionPacing
         || frame.invalidationEpoch !== invalidationEpoch) return false;
-      return isosurfaceMotionAge(frame.motionPacing, temporalNowMs())
-        > (frame.lastDisplayedMotionAgeS || 0);
+      const ageS = isosurfaceMotionAge(frame.motionPacing, temporalNowMs());
+      const prevAgeS = frame.lastDisplayedMotionAgeS || 0;
+      if (!(ageS > prevAgeS) || !(ageS < frame.motionPacing.maxSimulationAgeS)) return false;
+      const prevShaderF32 = Math.fround(
+        dampedIsosurfaceShaderMotionAgeS({
+          motionPacing: frame.motionPacing,
+          drawMotionAgeS: prevAgeS
+        })
+      );
+      const nextShaderF32 = Math.fround(
+        dampedIsosurfaceShaderMotionAgeS({
+          motionPacing: frame.motionPacing,
+          drawMotionAgeS: ageS
+        })
+      );
+      return nextShaderF32 > prevShaderF32;
     },
     getPresentationSubmitSerial() {
       return submittedRenderSerial;

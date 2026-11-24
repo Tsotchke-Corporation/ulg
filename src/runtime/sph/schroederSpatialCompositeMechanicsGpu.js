@@ -375,6 +375,18 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
     owners.set(execution, owner);
     try {
       cross?.encodeMoments(encoder);
+      const directCompositeAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+        && typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice;
+      const maxWorkgroupsPerDim = Number(device.limits?.maxComputeWorkgroupsPerDimension) || 65535;
+      const dispatchGuardedCeiling = (pass, capacity, indirectBuf, indirectOff) => {
+        const groups = Math.max(1, Math.ceil(Math.max(1, Number(capacity) || 0) / 64));
+        if (directCompositeAllowed && groups <= maxWorkgroupsPerDim) {
+          pass.dispatchWorkgroups(groups, 1, 1);
+        } else {
+          pass.dispatchWorkgroupsIndirect(indirectBuf, indirectOff);
+        }
+      };
       for (const [i, pair] of authority.pairAuthorities.entries()) {
         const parent = pair.parentFieldView, output = arena.pairs[i];
         const previous = i ? authority.pairAuthorities[i-1].parentFieldView : null;
@@ -399,7 +411,7 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
         pass.setBindGroup(0, group);
         pass.setPipeline(pipelines[0]); pass.dispatchWorkgroups(1);
         pass.setPipeline(pipelines[1]);
-        pass.dispatchWorkgroupsIndirect(parent.parentFieldViewBuffer, 60*4);
+        dispatchGuardedCeiling(pass, layouts[i].parentFieldCapacity, parent.parentFieldViewBuffer, 60*4);
         pass.setPipeline(pipelines[2]); pass.dispatchWorkgroups(1);
         pass.end();
       }
@@ -430,12 +442,24 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
     floats[13]=forces.cflFactor;floats[14]=forces.wallBarrierElasticStiffnessNPerM;
     floats[15]=forces.wallBarrierContactScale;floats[16]=forces.wallBarrierMinGapM;
     device.queue.writeBuffer(c.forceParamsBuffer,0,fp);
+    const directCorrAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice;
+    const maxCorrWorkgroups = Number(device.limits?.maxComputeWorkgroupsPerDimension) || 65535;
+    const dispatchCorrCeiling = (pass, capacity, indirectBuf, indirectOff) => {
+      const groups = Math.max(1, Math.ceil(Math.max(1, Number(capacity) || 0) / 64));
+      if (directCorrAllowed && groups <= maxCorrWorkgroups) {
+        pass.dispatchWorkgroups(groups, 1, 1);
+      } else {
+        pass.dispatchWorkgroupsIndirect(indirectBuf, indirectOff);
+      }
+    };
     const forcePass=encoder.beginComputePass({label:`${label}-coarsest-force`});
     forcePass.setBindGroup(0,group(forceBundle,[topology.parentFieldViewBuffer,top.stateBuffer,c.updatedBuffers[last],c.forceParamsBuffer]));
     for (let stage=0;stage<forceBundle.pipelines.length;stage++) {
       forcePass.setPipeline(forceBundle.pipelines[stage]);
       if (stage===0 || stage===4) forcePass.dispatchWorkgroups(1);
-      else forcePass.dispatchWorkgroupsIndirect(topology.parentFieldViewBuffer,60*4);
+      else dispatchCorrCeiling(forcePass, top.layout.parentFieldCapacity, topology.parentFieldViewBuffer, 60*4);
     }
     forcePass.end();
     for (let i=last;i>=0;i--) {
@@ -455,7 +479,12 @@ export function createSchroederSpatialCompositeMechanicsGpu(device, {
       for (let stage=0;stage<prolongBundle.pipelines.length;stage++) {
         pass.setPipeline(prolongBundle.pipelines[stage]);
         if (stage===0 || stage===3) pass.dispatchWorkgroups(1);
-        else pass.dispatchWorkgroupsIndirect(parent.parentFieldViewBuffer,(stage===1 ? 64 : 68)*4);
+        else dispatchCorrCeiling(
+          pass,
+          stage === 1 ? params[5] : params[6],
+          parent.parentFieldViewBuffer,
+          (stage===1 ? 64 : 68)*4
+        );
       }
       pass.end();
       owner.cross?.encodePair(encoder,i,i?c.updatedBuffers[i-1]:c.nativeBuffers[0],c.nativeBuffers[i+1],execution.pairs[i].stateBuffer,execution.pairs[i].sourceStateBuffer,execution.completionOrdinal,forces);

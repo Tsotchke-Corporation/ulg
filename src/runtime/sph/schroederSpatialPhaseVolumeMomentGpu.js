@@ -27,6 +27,7 @@ import {
   webGpuBufferMatchesDevice,
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
+import { getCachedPipelineBindGroupLayout } from '../webgpuComputeLayout.js';
 
 const UINT32_BYTES = Uint32Array.BYTES_PER_ELEMENT;
 const FIELD_VIEW_DISPATCH_OFFSET_BYTES = 60 * UINT32_BYTES;
@@ -831,15 +832,19 @@ export function createSchroederSpatialPhaseVolumeMomentGpu(device, {
                 && (left.resource?.size ?? null) === (right.resource?.size ?? null);
             })
           ) {
+            if (i < bucket.length - 1) {
+              bucket.splice(i, 1);
+              bucket.push(cached);
+            }
             return cached.bindGroup;
           }
         }
         const created = device.createBindGroup({
           label: `${label}-arena-${arena.arenaIndex}-${suffix}-bindings`,
-          layout: pipelineObject.getBindGroupLayout(0),
+          layout: getCachedPipelineBindGroupLayout(pipelineObject, 0),
           entries: bindingEntries
         });
-        if (bucket.length >= 8) bucket.shift();
+        if (bucket.length >= 32) bucket.shift();
         bucket.push({
           pipeline: pipelineObject,
           entries: bindingEntries.map(({ binding, resource: bindingResource }) => ({

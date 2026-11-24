@@ -14399,6 +14399,48 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
         controlPlaneYieldReceipt = scheduleControlPlaneTaskYielder.close();
       }
     }
+    let a3ThermalTickEncodedInBurst = false;
+    if (submitBurstOpened && !scheduleLoopError && !state.cancelRequested) {
+      const lastA3ThermalStepPre = Number(record._a3ThermalLastTickStep);
+      const laneStepPre = Number(record.schroederLane?.sphParticleUpload?.step ?? 0);
+      const shouldRunA3InBurst = Boolean(
+        !Number.isFinite(lastA3ThermalStepPre)
+        || stepCount > 8
+        || (laneStepPre - lastA3ThermalStepPre) >= 16
+      );
+      if (
+        shouldRunA3InBurst
+        && state.workerDevice
+        && record.schroederLane?.sphParticleUpload?.stateBuffer
+        && record.schroederLane?.sphParticleUpload?.thermoBuffer
+        && Number(record.schroederLane?.sphParticleUpload?.particleCount) > 0
+        && globalThis.__ulgDisableA3ThermalRegionalLane !== true
+      ) {
+        try {
+          const a3ThermalEncoder = state.workerDevice.createCommandEncoder({
+            label: 'ulg-worker-a3-thermal-regional-schedule-tick'
+          });
+          const a3ThermalTick = encodeSphThermalRegionalClosureScheduleTick(
+            state.workerDevice,
+            a3ThermalEncoder,
+            {
+              stateBuffer: record.schroederLane.sphParticleUpload.stateBuffer,
+              thermoBuffer: record.schroederLane.sphParticleUpload.thermoBuffer,
+              particleCount: record.schroederLane.sphParticleUpload.particleCount,
+              boxDimsM: record.schroederLane.boxDimensionsM ?? [1, 1, 1],
+              scheduleId
+            }
+          );
+          if (a3ThermalTick) {
+            state.workerDevice.queue.submit([a3ThermalEncoder.finish()]);
+            record._a3ThermalLastTickStep = laneStepPre;
+            a3ThermalTickEncodedInBurst = true;
+          }
+        } catch {
+          // Keep A3 thermal regional sampling isolated from physics admission.
+        }
+      }
+    }
     if (submitBurstOpened) {
       // Close before any terminal fence so the last window's held work is
       // on the queue and later submits (terminal snapshots, next schedule
@@ -15887,7 +15929,8 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
     }
     const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
     const shouldRunA3ThermalTick = Boolean(
-      (
+      !a3ThermalTickEncodedInBurst
+      && (
         !Number.isFinite(lastA3ThermalStep)
         || stepCount > 8
         || (laneStepAfterSchedule - lastA3ThermalStep) >= 16

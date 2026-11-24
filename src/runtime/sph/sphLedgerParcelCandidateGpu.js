@@ -63,14 +63,14 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
     && device instanceof globalThis.GPUDevice
   );
   const physical = {}, parcelBuffers = [], owned = [];
-  const make = (label, size) => {
+  const make = (label, size, bucketKey = label) => {
     const usage = 128 | 4 | 8;
     const b = tagWebGpuBufferDevice(
       useQueueOrderedPool
         ? registerQueueOrderedPooledBufferReturn(
-            acquireQueueOrderedPooledBuffer(device, { bucketKey: label, label, size, usage }),
+            acquireQueueOrderedPooledBuffer(device, { bucketKey, label, size, usage }),
             device,
-            { bucketKey: label, size, usage }
+            { bucketKey, size, usage }
           )
         : device.createBuffer({ label, size, usage }),
       device
@@ -88,9 +88,14 @@ export async function runSphLedgerParcelCandidateWebGpu(args) {
     const energyBuffer = make('ulg-parcel-candidate-energy', record.exactEnergy.energyBuffer.size);
     const energy = Object.freeze({ ...record.exactEnergy, energyBuffer });
     const encoder = device.createCommandEncoder({ label: 'ulg-parcel-candidate' });
+    const sharedPhysicalBucketKeys = {
+      stateBuffer: 'ulg-sph-resident-particle-state',
+      thermoBuffer: 'ulg-sph-resident-particle-thermo',
+      mechanicsBuffer: 'ulg-sph-resident-particle-mechanics'
+    };
     for (const [key, input] of Object.entries({ stateBuffer: sourceStateBuffer,
       thermoBuffer: sourceThermoBuffer, mechanicsBuffer: sourceMechanicsBuffer })) {
-      physical[key] = make(`ulg-parcel-candidate-${key}`, input.size);
+      physical[key] = make(`ulg-parcel-candidate-${key}`, input.size, sharedPhysicalBucketKeys[key]);
       encoder.copyBufferToBuffer(input, 0, physical[key], 0, input.size);
     }
     const fields = {};

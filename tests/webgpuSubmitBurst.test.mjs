@@ -908,3 +908,42 @@ test('queueOrderedPooledDeviceAllocationOwnership enumerates pooled buffers and 
   assert.equal(reacquired, b2);
   assert.equal(releaseQueueOrderedPooledBuffer(device, b1, { bucketKey: 'assign', size: 64, usage: 0x84 }), false);
 });
+
+test('decoupled presentation burst-bypass preserves uniform->submit->fence order without splitting held physics bursts', async () => {
+  const { device, ops } = createFakeDevice();
+  armWorkerQueueSubmitBurst(device);
+  const physParams = device.createBuffer({ label: 'physics-params', size: 16 });
+  const presUniform = device.createBuffer({ label: 'ulg-worker-owned-isosurface-uniform-0', size: 16 });
+  openWorkerQueueSubmitBurst(device, { label: 'physics-step', pooledWriteThrough: true });
+
+  // Physics queues held work + pooled write-through update.
+  device.queue.submit(['physics-step-1']);
+  device.queue.writeBuffer(physParams, 0, new Float32Array([1, 2, 3, 4]));
+  assert.equal(ops.length, 0, 'physics work and pooled write stay held while burst is open');
+
+  // Decoupled autonomous presentation updates its own uniform, submits, and fences under bypass.
+  const prevBypass = globalThis.__ulgDecoupledPresentationBypassBurst;
+  globalThis.__ulgDecoupledPresentationBypassBurst = true;
+  try {
+    device.queue.writeBuffer(presUniform, 0, new Float32Array([9, 8, 7, 6]));
+    device.queue.submit(['pres-swapchain-frame']);
+    await device.queue.onSubmittedWorkDone();
+  } finally {
+    globalThis.__ulgDecoupledPresentationBypassBurst = prevBypass;
+  }
+
+  // Presentation ran in exact writeBuffer -> submit -> fence order while physics remained held.
+  assert.deepEqual(ops.map((entry) => entry.op), ['writeBuffer', 'submit', 'fence']);
+  assert.equal(ops[0].buffer, presUniform);
+  assert.deepEqual(ops[1].commandBuffers, ['pres-swapchain-frame']);
+  const midStats = workerQueueSubmitBurstStats(device);
+  assert.equal(midStats.flushCount, 0, 'decoupled presentation must not flush held physics burst');
+  assert.equal(midStats.fenceFlushCount, 0, 'decoupled presentation fence must not trigger fence-request flush');
+
+  // Closing the physics burst flushes the original physics work + pooled staging upload intact.
+  const closeStats = closeWorkerQueueSubmitBurst(device, 'burst-close');
+  assert.equal(closeStats.flushCount, 1);
+  assert.equal(closeStats.fenceFlushCount, 0);
+  const lastSubmit = ops.filter((entry) => entry.op === 'submit').at(-1);
+  assert.ok(lastSubmit.commandBuffers.includes('physics-step-1'));
+});

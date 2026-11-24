@@ -1,4 +1,8 @@
 import { SPH_RESIDENT_CLOCK_MAGIC, SPH_RESIDENT_CLOCK_ERROR } from './sphResidentClockGpu.js';
+import {
+  acquireQueueOrderedPooledBuffer,
+  releaseQueueOrderedPooledBuffer
+} from '../webgpuComputeLayout.js';
 
 const publications = new WeakMap();
 const attemptedSteps = new WeakSet();
@@ -69,11 +73,17 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep,
   }
   attemptedSteps.add(finalStep);
   const read=acquireSphParticleExactMassRead(finalStep.nextParticleUploads.sphParticleUpload,device,finalStep.nextParticleUploads);
-  let staging,plan,record,published=false;
+  let staging,stagingUnmapped=false,plan,record,published=false;
   try {
     const clock=read.residentClock;
     if (!clock || clock!==finalStep.clock) throw new TypeError('Chain batch lost its accepted clock');
-    staging=device.createBuffer({label:'ulg-chain-batch-terminal-receipt',size:128,usage:1|8});
+    staging=acquireQueueOrderedPooledBuffer(device, {
+      bucketKey:'ulg-chain-batch-terminal-receipt',
+      label:'ulg-chain-batch-terminal-receipt',
+      size:128,
+      usage:1|8,
+      allowMapReadPool:true
+    });
     const encoder=device.createCommandEncoder();
     encoder.copyBufferToBuffer(clock.buffer,0,staging,0,64);
     encoder.copyBufferToBuffer(finalStep.admissionControlBuffer,0,staging,64,64);
@@ -81,6 +91,7 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep,
     await staging.mapAsync(1);
     const bytes=staging.getMappedRange().slice(0), words=new Uint32Array(bytes), floats=new DataView(bytes);
     staging.unmap();
+    stagingUnmapped=true;
     const accepted=words[2],rejected=words[3],attempted=words[12],error=words[18];
     if (words[0]!==SPH_RESIDENT_CLOCK_MAGIC || words[1]!==1 || words[16]!==0x53434331
       || words[17]!== (error===0?3:5) || (error&SPH_RESIDENT_CLOCK_ERROR)!==0
@@ -171,7 +182,18 @@ export async function publishSchroederSpatialChainBatchWebGpu({device,finalStep,
         })().catch(error=>{retirement=null;throw error;});return retirement;
       }});
   } finally {
-    staging?.destroy();
+    if (staging) {
+      if (stagingUnmapped) {
+        releaseQueueOrderedPooledBuffer(device, staging, {
+          bucketKey:'ulg-chain-batch-terminal-receipt',
+          size:128,
+          usage:1|8,
+          allowMapReadPool:true
+        });
+      } else {
+        staging.destroy?.();
+      }
+    }
     if (!published) {
       if(plan)abandonPreparedSchroederSpatialSuccessorSourceFamilyPublication(plan,{reason:'chain batch publication did not complete'});
       if(record)record.closed=true;

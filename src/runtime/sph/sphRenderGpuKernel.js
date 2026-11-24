@@ -8850,13 +8850,19 @@ export async function buildSphRenderFieldWebGpu({
         )
       );
       const sourceProductEventBuffer = borrowedProductEventBuffer
-        || ownUnpublishedBuffer(writeStorageBuffer(
-          device,
-          'ulg-sph-render-field-product-events',
-          productEventRows
-            || new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
-          GPU_BUFFER_USAGE.COPY_SRC
-        ));
+        || (productEventRows
+          ? ownUnpublishedBuffer(writeStorageBuffer(
+              device,
+              'ulg-sph-render-field-product-events',
+              productEventRows,
+              GPU_BUFFER_USAGE.COPY_SRC
+            ))
+          : ownUnpublishedBuffer(acquireRenderPooledBuffer(device, {
+              bucketKey: 'ulg-sph-render-field-product-events-empty',
+              label: 'ulg-sph-render-field-product-events',
+              size: SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+              usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST | GPU_BUFFER_USAGE.COPY_SRC
+            })));
       const sourceDispersedMediumOpticsBuffer =
         borrowedDispersedMediumOpticsBuffer
         || (dispersedMediumOpticsRows
@@ -9997,16 +10003,18 @@ export async function extractSphRenderRowsWebGpu({
         ));
       const materialBankParticleSizeBuffer =
         borrowedMaterialBankParticleSizeBuffer
-        || ownUnpublishedRenderRowsBuffer(writeStorageBuffer(
-          device,
-          materialBankParticleSizeRowCount > 0
-            ? 'ulg-sph-render-material-bank-particle-size-rows'
-            : 'ulg-sph-render-material-bank-particle-size-rows-empty',
-          materialBankParticleSizeRowCount > 0
-            && packedMaterialBankParticleSizeRows?.byteLength > 0
-            ? packedMaterialBankParticleSizeRows
-            : new Float32Array(16)
-        ));
+        || (materialBankParticleSizeRowCount > 0 && packedMaterialBankParticleSizeRows?.byteLength > 0
+          ? ownUnpublishedRenderRowsBuffer(writeStorageBuffer(
+              device,
+              'ulg-sph-render-material-bank-particle-size-rows',
+              packedMaterialBankParticleSizeRows
+            ))
+          : ownUnpublishedRenderRowsBuffer(acquireRenderPooledBuffer(device, {
+              bucketKey: 'ulg-sph-render-material-bank-particle-size-rows-empty',
+              label: 'ulg-sph-render-material-bank-particle-size-rows-empty',
+              size: 16 * Float32Array.BYTES_PER_ELEMENT,
+              usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+            })));
       const renderRowsBuffer = ownUnpublishedRenderRowsBuffer(
         acquireRenderPooledBuffer(device, {
           bucketKey: 'ulg-sph-render-rows',

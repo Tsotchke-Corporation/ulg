@@ -239,11 +239,18 @@ export function prepareSchroederChainCrossTransport({device,transaction,localLaw
         pass.end();
       },
       encodeAdmission(encoder){
+        const directAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+          && typeof globalThis.GPUDevice === 'function'
+          && device instanceof globalThis.GPUDevice;
+        const maxGroups = device.limits?.maxComputeWorkgroupsPerDimension ?? 65535;
         for(const [i,level]of levels.entries()){
           const field=level.mechanicsFieldView.fieldViewBuffer;
           const pass=encoder.beginComputePass({label:'ulg-chain-cross-native-angular'});pass.setPipeline(reduce.pipeline);
           pass.setBindGroup(0,createCachedExplicitBindGroup(device,{label:'ulg-chain-cross-angular-bg',layout:reduce.layout,entries:[field,ledger,reductionUniforms[i]].map((buffer,binding)=>({binding,resource:{buffer}}))}));
-          pass.dispatchWorkgroupsIndirect(field,60*4);pass.end();
+          const groups = Math.max(1, Math.ceil(Math.max(1, Number(nativeCapacities[i]) || 0) / 64));
+          if (directAllowed && groups <= maxGroups) pass.dispatchWorkgroups(groups, 1, 1);
+          else pass.dispatchWorkgroupsIndirect(field,60*4);
+          pass.end();
         }
         const pass=encoder.beginComputePass({label:'ulg-chain-cross-angular-admission'});pass.setBindGroup(0,groups[0]);
         pass.setPipeline(pipelines[6]);pass.dispatchWorkgroups(1);pass.end();

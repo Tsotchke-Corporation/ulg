@@ -36,6 +36,10 @@ import {
   webGpuDeviceId
 } from './sphGpuDeviceIdentity.js';
 import {
+  createCachedExplicitBindGroup,
+  getCachedPipelineBindGroupLayout
+} from '../webgpuComputeLayout.js';
+import {
   validateLocallySubmittedMlsMpmMechanicsFieldGridUpdate,
   validateSubmittedMlsMpmMechanicsFieldGridUpdate
 } from './sphGridUpdateGpuKernel.js';
@@ -2219,9 +2223,9 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   function bindGroup(execution, pipelineName) {
     const pipelineObject = pipelines[pipelineName];
     const resources = resourcesFor(execution);
-    return device.createBindGroup({
-      label: `${label}-${pipelineName}-group-${execution.arenaGeneration}`,
-      layout: pipelineObject.getBindGroupLayout(0),
+    return createCachedExplicitBindGroup(device, {
+      label: `${label}-${pipelineName}-group`,
+      layout: getCachedPipelineBindGroupLayout(pipelineObject, 0),
       entries: PIPELINE_BINDINGS[pipelineName].map((binding) => ({
         binding,
         resource: binding === 3
@@ -2244,8 +2248,8 @@ export function createSchroederSpatialParentFieldMechanicsWorkspaceGpu(device, {
   function sharedBindGroup(execution, sharedLayout, bindings, suffix) {
     if (!sharedLayout) return null;
     const resources = resourcesFor(execution);
-    return device.createBindGroup({
-      label: `${label}-${suffix}-group-${execution.arenaGeneration}`,
+    return createCachedExplicitBindGroup(device, {
+      label: `${label}-${suffix}-group`,
       layout: sharedLayout.bindGroupLayout,
       entries: bindings.map((binding) => ({
         binding,

@@ -13082,6 +13082,7 @@ export async function mountSphPhaseDemoOverlay({
       });
       const adaptiveStepCount = (
         adaptiveSyncCadenceEnabled
+        && !initialTier0RealtimePacing
         && evidence.workerLaneActive
         && evidence.effectiveStepCount > 2
       )

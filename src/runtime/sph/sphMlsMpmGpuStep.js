@@ -13413,7 +13413,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gPass = mechanicsFieldProductionPass || encoder.beginComputePass();
     p2gPass.setPipeline(p2gPipeline);
     p2gPass.setBindGroup(0, p2gBindGroup);
-    if (activeSourceV2P2gEnabled) {
+    const p2gParticleCeilingGroups = Math.max(1, Math.ceil(particleCount / 64));
+    const directActiveSourceP2gAllowed = globalThis.__ulgForceIndirectFieldConsumers !== true
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice
+      && p2gParticleCeilingGroups <= (Number(device?.limits?.maxComputeWorkgroupsPerDimension) || 65535);
+    if (activeSourceV2P2gEnabled && !directActiveSourceP2gAllowed) {
       if (typeof p2gPass.dispatchWorkgroupsIndirect !== 'function') {
         throw new Error(
           'ActiveSource-v2 P2G requires GPU-authored indirect dispatch'
@@ -13424,7 +13429,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         schroederActiveNodeFilter.activeSourceActiveDispatchOffsetBytes
       );
     } else {
-      p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+      p2gPass.dispatchWorkgroups(p2gParticleCeilingGroups);
     }
     if (!mechanicsFieldProductionPass) p2gPass.end();
     const p2gFinalizePass = mechanicsFieldProductionPass
@@ -40172,7 +40177,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
       sphParticleState,
       sphParticleUpload,
       g2pReconstruction,
-      { spatialEpochGeneration: schroederSpatialEpochGeneration }
+      schroederSpatialEpochGeneration
     );
     runSchroederSolidRigidLaneStep(
       ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),

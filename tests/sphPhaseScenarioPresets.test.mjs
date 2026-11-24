@@ -89,7 +89,7 @@ test('standard presets share one worker-owned single-source SS runtime', () => {
       'iron-ice-quench': '16',
       'sodium-water': '64',
       'cesium-fluorine': '16',
-      'water-realtime': '16'
+      'water-realtime': '64'
     }
   );
   const realtime = SPH_PHASE_SCENARIO_PRESETS.find((entry) => entry.id === 'water-realtime');

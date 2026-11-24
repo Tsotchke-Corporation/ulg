@@ -8,6 +8,8 @@ import {
 import {
   SCHROEDER_SOLID_BODIES_SCHEMA
 } from '../src/runtime/sph/schroederSolidRigidLane.js';
+import { schroederSolidRigidWgsl } from '../src/runtime/sph/schroederSolidRigidGpu.js';
+import fs from 'node:fs';
 
 test('SOL-4 deformable mechanicsMode validates cleanly and builds clone-safe surface carrier in sphPhaseDemo', async () => {
   const normalized = normalizeSphInitialBodies([
@@ -82,4 +84,32 @@ test('SOL-5/SOL-6 rigid body declaration carries physical sizeM and fracture str
   assert.ok(rb.bodies[0].fracture?.shearStrengthPa > 0);
   const cloned = structuredClone(rb);
   assert.deepEqual(cloned.bodies[0].sizeM, [0.16, 0.16, 0.16]);
+});
+
+test('Gate 3 B2: unified SS solid wiring passes raw generation on mechanics-only route, retires private solid hash, and never silently skips fine SS levels', () => {
+  // 1. Mechanics-only route must pass schroederSpatialEpochGeneration directly (unwrapped).
+  const stepSrc = fs.readFileSync(new URL('../src/runtime/sph/sphMlsMpmGpuStep.js', import.meta.url), 'utf8');
+  assert.equal(
+    stepSrc.includes('{ spatialEpochGeneration: schroederSpatialEpochGeneration }'),
+    false,
+    'mechanics-only solidRigidReleaseFluidBuffers call must not wrap schroederSpatialEpochGeneration in an object'
+  );
+  const directCallMatches = stepSrc.match(/solidRigidReleaseFluidBuffers\(\s*sphParticleState,\s*sphParticleUpload,\s*g2pReconstruction,\s*schroederSpatialEpochGeneration\s*\)/g) || [];
+  assert.ok(directCallMatches.length >= 2, `Expected both main and mechanics-only routes to pass schroederSpatialEpochGeneration directly, found ${directCallMatches.length}`);
+
+  // 2. Multi-body rigid broadphase must use exact body bounding spheres, zero private proxy spatial hash.
+  const rigidWgsl = schroederSolidRigidWgsl();
+  assert.equal(rigidWgsl.includes('proxy_hash_cell'), false, 'rigid WGSL must not define private proxy_hash_cell');
+  assert.equal(rigidWgsl.includes('clear_proxy_grid'), false, 'rigid WGSL must not define private clear_proxy_grid');
+  assert.equal(rigidWgsl.includes('bin_proxies'), false, 'rigid WGSL must not define private bin_proxies');
+  assert.equal(rigidWgsl.includes('fn clear_body_bounds'), true, 'rigid WGSL must compute exact body_bounds');
+  assert.equal(rigidWgsl.includes('fn measure_body_bounds'), true, 'rigid WGSL must measure per-body bounding spheres');
+
+  // 3. Solid-fluid SS contact and thermal must never silently skip fine levels and must flag halo overflow.
+  const contactWgsl = fs.readFileSync(new URL('../src/runtime/sph/schroederSolidFluidContactGpu.js', import.meta.url), 'utf8');
+  const thermalWgsl = fs.readFileSync(new URL('../src/runtime/sph/schroederSolidFluidThermalGpu.js', import.meta.url), 'utf8');
+  assert.equal(contactWgsl.includes('halo_needed > 6i && level < max_level'), false, 'solid-fluid contact must not silently skip fine SS levels');
+  assert.equal(thermalWgsl.includes('halo_needed > 6i && level < max_level'), false, 'solid-fluid thermal must not silently skip fine SS levels');
+  assert.equal(contactWgsl.includes('if (halo_needed > 8i) { error |= 2u; }'), true, 'solid-fluid contact must flag SS halo overflow explicitly');
+  assert.equal(thermalWgsl.includes('if (halo_needed > 8i) { atomicOr(&coupling_ledger[2], 4); }'), true, 'solid-fluid thermal must flag SS halo overflow explicitly');
 });

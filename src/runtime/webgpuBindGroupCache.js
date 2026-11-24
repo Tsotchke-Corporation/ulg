@@ -16,7 +16,7 @@
 // key. Per-layout stores are pruned FIFO past a bounded entry count so
 // transient-buffer keys cannot grow the cache without bound.
 
-const PER_LAYOUT_ENTRY_CAP = 256;
+const PER_LAYOUT_ENTRY_CAP = 1024;
 
 const bufferIdentities = new WeakMap();
 let nextBufferIdentity = 1;
@@ -64,7 +64,11 @@ export function cachedWebGpuBindGroup(device, { label, layout, entries }) {
   }
   const store = layoutStore(layout);
   const cached = store.get(key);
-  if (cached) return cached;
+  if (cached) {
+    store.delete(key);
+    store.set(key, cached);
+    return cached;
+  }
   const bindGroup = device.createBindGroup({ label, layout, entries });
   if (store.size >= PER_LAYOUT_ENTRY_CAP) {
     const oldest = store.keys().next().value;

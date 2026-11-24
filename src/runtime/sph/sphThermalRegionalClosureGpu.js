@@ -92,7 +92,9 @@ fn consume_thermal_regional_radiation(@builtin(global_invocation_id) id: vec3<u3
     atomicAdd(&consumer_stats[1], 1u);
   }
   let flux = consumer_params.rad.z * consumer_params.rad.y * (t4_norm - consumer_params.rad.x);
-  radiative_flux_out[p] = vec4<f32>(flux, t4_norm, used_fit, f32(region_id));
+  // Store fitted temperature m.x in .w so downstream thermal kernels can fail-closed
+  // to exact pow4(T) whenever a particle's temperature drifts outside the A3 envelope.
+  radiative_flux_out[p] = vec4<f32>(flux, t4_norm, used_fit, m.x);
 }
 `;
 
@@ -161,7 +163,9 @@ const GPU_BUFFER_USAGE = Object.freeze({
 });
 const GPU_SHADER_STAGE_COMPUTE = globalThis.GPUShaderStage?.COMPUTE ?? 0x04;
 
-const cacheByDevice = new WeakMap();
+const A3_THERMAL_REGIONAL_CACHE_SYMBOL = Symbol.for('ulg.a3ThermalRegionalByDevice');
+const cacheByDevice = globalThis[A3_THERMAL_REGIONAL_CACHE_SYMBOL]
+  || (globalThis[A3_THERMAL_REGIONAL_CACHE_SYMBOL] = new WeakMap());
 
 function ensureThermalRegionalCache(device, particleCount) {
   const keyDevice = unwrapWebGpuCacheDevice(device);
@@ -241,7 +245,8 @@ function ensureThermalRegionalCache(device, particleCount) {
       lane: null,
       evaluatedSchedules: 0,
       adoptedSchedules: 0,
-      consumedSchedules: 0
+      consumedSchedules: 0,
+      physicsConsumedSteps: 0
     };
     cacheByDevice.set(keyDevice, cache);
   }
@@ -283,6 +288,49 @@ export function getSphThermalRegionalClosureLane(device) {
   if (!device) return null;
   const cached = cacheByDevice.get(unwrapWebGpuCacheDevice(device));
   return cached?.lane ?? null;
+}
+
+export function getSphThermalRegionalRadiativeFluxBinding(device) {
+  if (!device) return null;
+  const cached = cacheByDevice.get(unwrapWebGpuCacheDevice(device));
+  if (
+    !cached?.radiativeFluxBuffer
+    || cached.radiativeFluxBuffer.destroyed === true
+    || !(cached.adoptedSchedules > 0)
+    || !(cached.consumedSchedules > 0)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    radiativeFluxBuffer: cached.radiativeFluxBuffer,
+    consumerStatsBuffer: cached.consumerStatsBuffer,
+    memberCapacity: cached.memberCapacity,
+    adoptedSchedules: cached.adoptedSchedules,
+    consumedSchedules: cached.consumedSchedules,
+    physicsConsumedSteps: cached.physicsConsumedSteps
+  });
+}
+
+export function noteSphThermalRegionalPhysicsConsumption(device) {
+  if (!device) return 0;
+  const cached = cacheByDevice.get(unwrapWebGpuCacheDevice(device));
+  if (!cached) return 0;
+  cached.physicsConsumedSteps += 1;
+  const prev = globalThis.__ulgA3ThermalRegionalClosureStatus;
+  if (prev && typeof prev === 'object') {
+    const next = Object.freeze({
+      ...prev,
+      thermalKernelPhysicsConsumerSteps: cached.physicsConsumedSteps,
+      livePhysicsConsumerActive: cached.physicsConsumedSteps > 0
+    });
+    globalThis.__ulgA3ThermalRegionalClosureStatus = next;
+    globalThis.__ulgA3RegionalClosureStatus = Object.freeze({
+      ...(globalThis.__ulgA3RegionalClosureStatus ?? { active: true }),
+      active: true,
+      thermal: next
+    });
+  }
+  return cached.physicsConsumedSteps;
 }
 
 export function destroySphThermalRegionalClosureResources(device) {
@@ -456,7 +504,9 @@ export function encodeSphThermalRegionalClosureScheduleTick(device, encoder, {
     evaluatedSchedules: cache.evaluatedSchedules,
     adoptedSchedules: cache.adoptedSchedules,
     consumedSchedules: cache.consumedSchedules,
+    thermalKernelPhysicsConsumerSteps: cache.physicsConsumedSteps,
     liveGpuConsumerActive: Boolean(consumed),
+    livePhysicsConsumerActive: cache.physicsConsumedSteps > 0,
     externalSourceFingerprint: bindings.externalSourceFingerprint
   });
   globalThis.__ulgA3ThermalRegionalClosureStatus = thermalStatus;

@@ -577,6 +577,9 @@ test('Gate 3 native Vulkan proof: inline WGSL eval_polytope_atlas_bank_2d in mec
     assert.equal(out.gasPolytopeProof?.polytopeHitCount, 1, `Spatial gas EOS must record 1 Polytope Atlas hit in authority[34]: ${JSON.stringify(out.gasPolytopeProof)}`);
     assert.equal(out.gasPolytopeProof?.polytopeMissCount, 0, `Spatial gas EOS must record 0 misses in authority[35]: ${JSON.stringify(out.gasPolytopeProof)}`);
     const zMeasured = out.gasPolytopeProof.pressurePa / Math.max(1, out.gasPolytopeProof.idealPressurePa);
+    console.log(
+      `[priority3-gas-polytope] pressurePa=${out.gasPolytopeProof.pressurePa.toFixed(2)} idealPressurePa=${out.gasPolytopeProof.idealPressurePa.toFixed(2)} zMeasured=${zMeasured.toFixed(4)} hits=${out.gasPolytopeProof.polytopeHitCount} misses=${out.gasPolytopeProof.polytopeMissCount}`
+    );
     assert.ok(zMeasured > 1.25 && zMeasured < 1.45,
       `Spatial gas EOS must consume pa_gas to apply real-gas compressibility z_poly (~1.35 for 1.35x density N2), got z=${zMeasured.toFixed(4)} (${JSON.stringify(out.gasPolytopeProof)})`);
 

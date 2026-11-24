@@ -10,7 +10,7 @@ const DEVICE_EXPLICIT_BIND_GROUP_CACHE = new WeakMap();
 const PIPELINE_BIND_GROUP_LAYOUT_CACHE = new WeakMap();
 const GPU_RESOURCE_ID_MAP = new WeakMap();
 let nextGpuResourceId = 1;
-const MAX_CACHED_BIND_GROUPS_PER_LAYOUT = 128;
+const MAX_CACHED_BIND_GROUPS_PER_LAYOUT = 1024;
 
 export function getCachedPipelineBindGroupLayout(pipeline, index = 0) {
   if (!pipeline || typeof pipeline.getBindGroupLayout !== 'function') {
@@ -87,7 +87,11 @@ export function createCachedExplicitBindGroup(device, descriptor) {
     byLayout.set(layout, cache);
   }
   const cached = cache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached;
+  }
   const bindGroup = device.createBindGroup(descriptor);
   if (cache.size >= MAX_CACHED_BIND_GROUPS_PER_LAYOUT) {
     const oldestKey = cache.keys().next().value;
@@ -1426,6 +1430,13 @@ export function armWorkerQueueSubmitBurst(device) {
   };
   if (record.realWriteBuffer) {
     queue.writeBuffer = (buffer, bufferOffset, data, dataOffset, size) => {
+      if (record.open && globalThis.__ulgDecoupledPresentationBypassBurst === true) {
+        // Decoupled autonomous presentation updates presentation-owned uniform
+        // buffers immediately before its bypassed realSubmit, never diverting
+        // into physics pooledPendingCopies or flushing held physics compute.
+        bumpWorkerQueueSubmitEpoch(record);
+        return record.realWriteBuffer(buffer, bufferOffset, data, dataOffset, size);
+      }
       if (record.open && hasHeldBurstWork(record)) {
         const stamp = record.bufferStamps.get(buffer);
         if (!(typeof stamp === 'number' && stamp > record.heldSubmitStamp)) {
@@ -1484,6 +1495,10 @@ export function armWorkerQueueSubmitBurst(device) {
   }
   if (record.realWriteTexture) {
     queue.writeTexture = (...writeArgs) => {
+      if (record.open && globalThis.__ulgDecoupledPresentationBypassBurst === true) {
+        bumpWorkerQueueSubmitEpoch(record);
+        return record.realWriteTexture(...writeArgs);
+      }
       if (record.open && hasHeldBurstWork(record)) {
         record.stats.staleWriteFlushCount += 1;
         flushWorkerQueueSubmitBurst(device, 'write-texture');
@@ -1494,6 +1509,11 @@ export function armWorkerQueueSubmitBurst(device) {
   }
   if (record.realOnSubmittedWorkDone) {
     queue.onSubmittedWorkDone = () => {
+      if (record.open && globalThis.__ulgDecoupledPresentationBypassBurst === true) {
+        // Decoupled autonomous presentation fences its own already-submitted
+        // swapchain render pass without flushing held physics compute bursts.
+        return record.realOnSubmittedWorkDone();
+      }
       if (record.open && hasHeldBurstWork(record)) {
         record.stats.fenceFlushCount += 1;
         flushWorkerQueueSubmitBurst(device, 'fence-request');
@@ -2592,8 +2612,11 @@ export function acquireQueueOrderedPooledBuffer(
     if (!pool.lost) {
       const fullKey = `${bucketKey}:${normalizedSize}:${normalizedUsage}`;
       const bucket = pool.buckets.get(fullKey);
+      const useLifoReuse = !mapReadEligible
+        && typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice;
       while (bucket && bucket.length > 0) {
-        const reused = bucket.shift();
+        const reused = useLifoReuse ? bucket.pop() : bucket.shift();
         if (!reused) continue;
         queueOrderedPooledBuffersInPool.delete(reused);
         if (

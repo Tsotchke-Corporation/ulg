@@ -141,10 +141,15 @@ export function createSchroederSpatialChainVolumeGpu(device, {
     const pass=encoder.beginComputePass();pass.setBindGroup(0,group);
     pass.setPipeline(b.pipelines[0]);pass.dispatchWorkgroups(1);
     pass.setPipeline(b.pipelines[1]);
-    if(indirect)pass.dispatchWorkgroupsIndirect(indirect,240);
-    else {
-      const groups=Math.ceil(count/64),max=device.limits?.maxComputeWorkgroupsPerDimension ?? 65535;
-      pass.dispatchWorkgroups(Math.min(groups,max),Math.ceil(groups/max));
+    const useDirectVolumeCeiling = globalThis.__ulgForceIndirectFieldConsumers !== true
+      && typeof globalThis.GPUDevice === 'function'
+      && device instanceof globalThis.GPUDevice;
+    const directVolumeGroups = Math.max(1, Math.ceil(Math.max(1, Number(count) || 0) / 64));
+    const maxVolumeGroups = device.limits?.maxComputeWorkgroupsPerDimension ?? 65535;
+    if (indirect && !(useDirectVolumeCeiling && directVolumeGroups <= maxVolumeGroups)) {
+      pass.dispatchWorkgroupsIndirect(indirect,240);
+    } else {
+      pass.dispatchWorkgroups(Math.min(directVolumeGroups,maxVolumeGroups),Math.ceil(directVolumeGroups/maxVolumeGroups));
     }
     pass.setPipeline(b.pipelines[2]);pass.dispatchWorkgroups(1);pass.end();
   }

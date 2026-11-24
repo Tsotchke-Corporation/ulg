@@ -4743,11 +4743,11 @@ async function runMlsMpmG2pWebGpuImpl({
     && typeof globalThis.GPUDevice === 'function'
     && device instanceof globalThis.GPUDevice
   );
-  const outStateUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
-  const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC;
+  const outStateUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
+  const outMechanicsUsage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST;
   const outStateBuffer = useQueueOrderedPool
     ? ownAllocation(tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-        bucketKey: 'ulg-mls-mpm-g2p-state-out',
+        bucketKey: 'ulg-sph-resident-particle-state',
         label: 'ulg-mls-mpm-g2p-state-out',
         size: Math.max(4, stateByteLength),
         usage: outStateUsage
@@ -4755,7 +4755,7 @@ async function runMlsMpmG2pWebGpuImpl({
     : createOwnedTaggedBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: outStateUsage });
   const outMechanicsBuffer = useQueueOrderedPool
     ? ownAllocation(tagWebGpuBufferDevice(acquireQueueOrderedPooledBuffer(device, {
-        bucketKey: 'ulg-mls-mpm-g2p-mechanics-out',
+        bucketKey: 'ulg-sph-resident-particle-mechanics',
         label: 'ulg-mls-mpm-g2p-mechanics-out',
         size: Math.max(4, mechanicsByteLength),
         usage: outMechanicsUsage
@@ -5522,7 +5522,7 @@ async function runMlsMpmG2pWebGpuImpl({
             try {
               if (useQueueOrderedPool) {
                 releaseQueueOrderedPooledBuffer(device, outStateBuffer, {
-                  bucketKey: 'ulg-mls-mpm-g2p-state-out',
+                  bucketKey: 'ulg-sph-resident-particle-state',
                   size: Math.max(4, stateByteLength),
                   usage: outStateUsage
                 });
@@ -5539,7 +5539,7 @@ async function runMlsMpmG2pWebGpuImpl({
             try {
               if (useQueueOrderedPool) {
                 releaseQueueOrderedPooledBuffer(device, outMechanicsBuffer, {
-                  bucketKey: 'ulg-mls-mpm-g2p-mechanics-out',
+                  bucketKey: 'ulg-sph-resident-particle-mechanics',
                   size: Math.max(4, mechanicsByteLength),
                   usage: outMechanicsUsage
                 });

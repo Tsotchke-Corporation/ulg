@@ -1500,7 +1500,8 @@ export async function encodeSphParticipatingMediumRender(
     stepCount = DEFAULT_STEP_COUNT,
     depthEpsilon = 1e-6,
     motionField = null,
-    motionAgeS = 0
+    motionAgeS = 0,
+    decoupledBurstBypass = false
   } = {}
 ) {
   const runtimeRecord = assertRuntime(runtime);
@@ -1528,18 +1529,25 @@ export async function encodeSphParticipatingMediumRender(
   const motionRowCount = motionBuffer === runtimeRecord.emptyMotionBuffer
     ? 0
     : Math.max(0, Math.floor(Number(motionField?.rowCount) || 0));
-  const uniformReceipt = writeRenderUniforms(frameRecord, {
-    inverseViewProjectionMatrix,
-    cameraPositionM,
-    viewportSize,
-    lightDirection,
-    lightIntensity,
-    ambientIntensity,
-    stepCount,
-    depthEpsilon,
-    motionAgeS,
-    motionRowCount
-  });
+  const prevBypass = globalThis.__ulgDecoupledPresentationBypassBurst;
+  if (decoupledBurstBypass) globalThis.__ulgDecoupledPresentationBypassBurst = true;
+  let uniformReceipt;
+  try {
+    uniformReceipt = writeRenderUniforms(frameRecord, {
+      inverseViewProjectionMatrix,
+      cameraPositionM,
+      viewportSize,
+      lightDirection,
+      lightIntensity,
+      ambientIntensity,
+      stepCount,
+      depthEpsilon,
+      motionAgeS,
+      motionRowCount
+    });
+  } finally {
+    if (decoupledBurstBypass) globalThis.__ulgDecoupledPresentationBypassBurst = prevBypass;
+  }
   let bindGroup = frameRecord.cachedRenderBindGroup;
   if (
     !bindGroup

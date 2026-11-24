@@ -1160,8 +1160,8 @@ fn fs_tdks_field(in: TdksVolOut) -> @location(0) vec4<f32> {
   let mode_mono = u.wave_meta.y > 0.5;
   let fview = u.cam_grid.w; // 0 = 3D Volume, 1 = Scattered Only, 2 = 3D Volume + Phase Cut
   let scatt_tint = select(
-    max(u.refl_srgb.rgb, vec3<f32>(0.96, 0.76, 0.28)),
-    mix(u.probe_rgb.rgb, vec3<f32>(1.0, 0.78, 0.28), 0.35),
+    clamp(u.refl_srgb.rgb * 1.10, vec3<f32>(0.24), vec3<f32>(1.0)),
+    mix(u.probe_rgb.rgb, vec3<f32>(1.0, 0.84, 0.42), 0.28),
     mode_mono
   );
   let inc_tint_pos = select(vec3<f32>(0.52, 0.88, 1.00), mix(u.probe_rgb.rgb, vec3<f32>(0.45, 0.92, 1.0), 0.40), mode_mono);
@@ -1217,7 +1217,7 @@ fn fs_tdks_field(in: TdksVolOut) -> @location(0) vec4<f32> {
       let cross_mag = select(length(vec2<f32>(es.x, es.z)), length(vec2<f32>(es.x, es.y)), u.wave_meta.x > 0.5 && u.wave_meta.x < 1.5);
       let sc_cross = pow(smoothstep(0.022, 0.20, cross_mag), 1.4);
       let sc_boost = select(1.0, 1.85, fview > 0.5 && fview < 1.5);
-      let c_pos = mix(scatt_tint, vec3<f32>(1.00, 0.82, 0.24), 0.45);
+      let c_pos = select(scatt_tint, mix(scatt_tint, vec3<f32>(1.00, 0.86, 0.44), 0.22), mode_mono);
       let c_neg = vec3<f32>(0.98, 0.34, 0.72);
       let c_xpol = vec3<f32>(0.22, 0.96, 0.88);
       step_rgb = step_rgb + (c_pos * sc_pos * 1.75 + c_neg * sc_neg * 1.15 + c_xpol * sc_cross * 1.35) * sc_boost;

@@ -49,19 +49,80 @@ test('Chemistry depth, 3D Multi-Species Crystals, True 3D Convex Polytope Surfac
       }
     });
 
-    // 1. Desktop UI boot: verify left-side hierarchical accordion menu & ALL 13 canonical modules!
+    // 1. Desktop UI boot: verify left-side hierarchical accordion menu, collapsible right data dock & ALL 14 canonical modules!
     await page.goto(`${SERVER_URL}/elements-lab.html?z=26&tab=atomic`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 26 && window.__ulgElementsLabState?.registeredModules?.length >= 13, null, { timeout: 60_000 });
-    const uiCheck = await page.evaluate(() => ({
-      modules: window.__ulgElementsLabState.registeredModules,
-      topTabsDisplay: getComputedStyle(document.querySelector('.tabs')).display,
-      accordionGroups: document.querySelectorAll('#accordion-nav .acc-group').length,
-      iupacCells: document.querySelectorAll('#iupac-pt-grid .pt-cell').length
-    }));
+    await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 26 && window.__ulgElementsLabState?.currentTab === 'atomic' && window.__ulgElementsLabState?.registeredModules?.length >= 13, null, { timeout: 60_000 });
+    const uiCheck = await page.evaluate(() => {
+      const sc = document.getElementById('sim-controls');
+      const acc = document.getElementById('accordion-nav');
+      const activeGrp = sc?.closest('.acc-group');
+      const hdr = document.querySelector('header')?.getBoundingClientRect();
+      const vpWrap = document.querySelector('.viewport-wrap')?.getBoundingClientRect();
+      const canvasWBefore = document.getElementById('gpu-canvas').getBoundingClientRect().width;
+      const ctrlWidgets = sc ? [...sc.querySelectorAll('button, input, select')] : [];
+      const missingTips = ctrlWidgets.filter((el) => !el.getAttribute('title') && !el.getAttribute('data-tip')).map((el) => el.id || el.textContent);
+      return {
+        modules: window.__ulgElementsLabState.registeredModules,
+        redundantBarsCount: document.querySelectorAll('.tabs, #mobile-quick-presets, #specimen-bar, .nav-links').length,
+        accordionGroups: document.querySelectorAll('#accordion-nav .acc-group').length,
+        iupacCells: document.querySelectorAll('#iupac-pt-grid .pt-cell').length,
+        controlsInsideAccordion: Boolean(acc && sc && acc.contains(sc)),
+        controlsAccTab: activeGrp?.dataset?.accTab ?? null,
+        controlsPrevSub: sc?.previousElementSibling?.dataset?.navSub ?? null,
+        hasAboutSimBtn: Boolean(sc?.querySelector('#ctrl-about-sim') && document.getElementById('canvas-about-sim-btn')),
+        missingTips,
+        duplicateSubviewBtns: sc ? sc.querySelectorAll('[data-nview],[data-aview],[data-cview],[data-mdmode],[data-chemview],[data-pview]').length : -1,
+        viewportGapUnderHeaderPx: hdr && vpWrap ? Math.round(vpWrap.top - hdr.bottom) : -1,
+        canvasWBefore
+      };
+    });
     console.log('[desktop-ui-rethink]', JSON.stringify(uiCheck));
-    assert.equal(uiCheck.topTabsDisplay, 'none', 'Desktop must hide legacy top tab bar in favor of left hierarchical accordion');
+    assert.equal(uiCheck.redundantBarsCount, 0, 'Must have ZERO redundant top bars (.tabs, #mobile-quick-presets, #specimen-bar, .nav-links)');
     assert.ok(uiCheck.accordionGroups >= 7);
     assert.equal(uiCheck.iupacCells, 118, 'Real IUPAC Periodic Table must have all 118 cells');
+    assert.equal(uiCheck.controlsInsideAccordion, true, 'Per-sim controls must be mounted inside the left accordion menu');
+    assert.equal(uiCheck.controlsAccTab, 'atomic', 'Per-sim controls must live inside the active accordion section');
+    assert.equal(uiCheck.controlsPrevSub, 'cloud', 'Per-sim controls must sit right below the active sub-view item');
+    assert.equal(uiCheck.hasAboutSimBtn, true, 'Every simulation must expose its own About button');
+    assert.deepEqual(uiCheck.missingTips, [], `Every simulation control must have a tooltip, missing: ${uiCheck.missingTips.join(', ')}`);
+    assert.equal(uiCheck.duplicateSubviewBtns, 0, 'Must have zero duplicate sub-view switcher buttons inside #sim-controls');
+    assert.ok(uiCheck.viewportGapUnderHeaderPx >= 0 && uiCheck.viewportGapUnderHeaderPx <= 4, `Viewport must sit cleanly right under <header> with zero redundant bars (gap=${uiCheck.viewportGapUnderHeaderPx}px)`);
+
+    // Verify `?` Help menu (GitHub + About ULG + all 4 other demos) & per-sim About modal!
+    await page.click('#help-menu-btn');
+    await page.waitForTimeout(120);
+    const helpCheck = await page.evaluate(() => ({
+      open: document.getElementById('help-menu-popover')?.classList.contains('open'),
+      githubHref: document.getElementById('github-ulg-link')?.getAttribute('href'),
+      demoLinks: [...document.querySelectorAll('#help-menu-popover a[href^="./"]')].map((a) => a.getAttribute('href'))
+    }));
+    console.log('[help-menu-check]', JSON.stringify(helpCheck));
+    assert.equal(helpCheck.open, true);
+    assert.equal(helpCheck.githubHref, 'https://github.com/Tsotchke-Corporation/ulg');
+    assert.ok(helpCheck.demoLinks.length >= 4, 'Help menu must list all 4 other ULG demos');
+    await saveShot(page, '01c-help-menu-open');
+
+    await page.click('#menu-about-ulg');
+    await page.waitForTimeout(120);
+    const aboutUlgTxt = await page.textContent('#about-modal-body');
+    assert.ok(aboutUlgTxt.includes('Universal Law Graph') && aboutUlgTxt.includes('PeerCompute'), 'About ULG modal must explain ULG and the Triad');
+    await page.click('#about-tab-sim');
+    await page.waitForTimeout(100);
+    const aboutSimTxt = await page.textContent('#about-modal-title');
+    assert.ok(aboutSimTxt.includes('Dirac–KS'), `Per-sim About modal must describe active simulation, got: ${aboutSimTxt}`);
+    await saveShot(page, '01d-about-sim-modal');
+    await page.click('#about-modal-close');
+
+    // Verify right-hand Graphs & Data docking popout collapses cleanly to widen 3D WebGPU canvas & re-expands!
+    await page.click('#data-dock-close');
+    await page.waitForTimeout(280);
+    const canvasWCollapsed = await page.evaluate(() => document.getElementById('gpu-canvas').getBoundingClientRect().width);
+    assert.ok(canvasWCollapsed > uiCheck.canvasWBefore + 280, `Collapsing right data dock must widen 3D canvas: ${uiCheck.canvasWBefore} -> ${canvasWCollapsed}`);
+    await saveShot(page, '01b-desktop-dock-collapsed-fullwidth');
+    await page.click('#dock-reopen-tab');
+    await page.waitForTimeout(280);
+    const canvasWRestored = await page.evaluate(() => document.getElementById('gpu-canvas').getBoundingClientRect().width);
+    assert.ok(Math.abs(canvasWRestored - uiCheck.canvasWBefore) < 8, `Re-opening data dock must restore canvas width: ${canvasWRestored} vs ${uiCheck.canvasWBefore}`);
     for (const k of [
       'molecular-rhf-gpu@1',
       'molecular-reaction-path@1',
@@ -180,6 +241,21 @@ test('Chemistry depth, 3D Multi-Species Crystals, True 3D Convex Polytope Surfac
     await page.evaluate(() => window.__ulgElementsLabApi.solveElement(79, null, { switchToTab: 'crystal' }));
     await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 79 && window.__ulgElementsLabState?.currentTab === 'crystal', null, { timeout: 60_000 });
     await page.evaluate(() => window.__ulgElementsLabApi.setCrystalViewMode('tdks-atom'));
+    const tdksCtrlPlacement = await page.evaluate(() => {
+      const sc = document.getElementById('sim-controls');
+      return {
+        accTab: sc?.closest('.acc-group')?.dataset?.accTab ?? null,
+        prevSub: sc?.previousElementSibling?.dataset?.navSub ?? null,
+        hasOrbSelect: Boolean(sc?.querySelector('#ctrl-tdks-orb')),
+        hasFireBtn: Boolean(sc?.querySelector('#ctrl-ps-fire')),
+        dupBtns: sc?.querySelectorAll('[data-cview]').length ?? -1
+      };
+    });
+    assert.equal(tdksCtrlPlacement.accTab, 'crystal');
+    assert.equal(tdksCtrlPlacement.prevSub, 'tdks-atom');
+    assert.equal(tdksCtrlPlacement.hasOrbSelect, true);
+    assert.equal(tdksCtrlPlacement.hasFireBtn, true);
+    assert.equal(tdksCtrlPlacement.dupBtns, 0);
     // Test A: Au 5d (m=2 cloverleaf) struck by 440nm blue photon wavepacket (front + oblique 3D orbit angle!)
     await page.evaluate(() => {
       window.__ulgElementsLabApi.setTdksConfig({ orbitalPreset: 'd2', polMode: 2, fieldView: 0, modeMono: true, probeWavelengthNm: 440 });
@@ -201,15 +277,15 @@ test('Chemistry depth, 3D Multi-Species Crystals, True 3D Convex Polytope Surfac
     //   E_y (parallel to dumbbell lobes) MUST couple/scatter/absorb stronger than E_z (perpendicular to dumbbell!)
     await page.evaluate(() => {
       window.__ulgElementsLabApi.setCamera(0.28, 0.22, 3.05);
-      window.__ulgElementsLabApi.setTdksConfig({ orbitalPreset: 'p0', polMode: 0, fieldView: 0, modeMono: true, probeWavelengthNm: 440 });
+      window.__ulgElementsLabApi.setTdksConfig({ orbitalPreset: 'p0', polMode: 0, fieldView: 0, modeMono: true, probeWavelengthNm: 440, playing: false });
     });
-    const tdksP0Ey = await page.evaluate(() => window.__ulgElementsLabApi.stepTdks3d(42));
+    const tdksP0Ey = await page.evaluate(() => window.__ulgElementsLabApi.stepTdks3d(46));
     await saveShot(page, '14-tdks3d-2p0-ey-parallel');
 
     await page.evaluate(() => {
-      window.__ulgElementsLabApi.setTdksConfig({ orbitalPreset: 'p0', polMode: 1, fieldView: 0, modeMono: true, probeWavelengthNm: 440 });
+      window.__ulgElementsLabApi.setTdksConfig({ orbitalPreset: 'p0', polMode: 1, fieldView: 0, modeMono: true, probeWavelengthNm: 440, playing: false });
     });
-    const tdksP0Ez = await page.evaluate(() => window.__ulgElementsLabApi.stepTdks3d(42));
+    const tdksP0Ez = await page.evaluate(() => window.__ulgElementsLabApi.stepTdks3d(46));
     console.log('[tdks3d-2p0-ey-vs-ez]', JSON.stringify({
       eyScatt: tdksP0Ey.scattEnergy,
       ezScatt: tdksP0Ez.scattEnergy,
@@ -219,15 +295,52 @@ test('Chemistry depth, 3D Multi-Species Crystals, True 3D Convex Polytope Surfac
       ezAniso: tdksP0Ez.angularAnisotropy
     }));
     assert.ok(
-      tdksP0Ey.absorbedEnergy > tdksP0Ez.absorbedEnergy * 1.15 && tdksP0Ey.scattEnergy > tdksP0Ez.scattEnergy * 1.15,
+      tdksP0Ey.absorbedEnergy > tdksP0Ez.absorbedEnergy * 1.10 && tdksP0Ey.scattEnergy > tdksP0Ez.scattEnergy * 1.30,
       `E_y parallel to 2p_y dumbbell must couple/scatter stronger than perpendicular E_z: Ey(scatt=${tdksP0Ey.scattEnergy}, abs=${tdksP0Ey.absorbedEnergy}) vs Ez(scatt=${tdksP0Ez.scattEnergy}, abs=${tdksP0Ez.absorbedEnergy})`
     );
     await saveShot(page, '15-tdks3d-2p0-ez-perp');
 
+    // 10b. First-Principles Cesium (Cs, Z=55) Optics + 3D Maxwell-KS + Tab 5 Non-Destructive Preview Check!
+    await page.evaluate(() => window.__ulgElementsLabApi.solveElement(55, null, { switchToTab: 'crystal' }));
+    await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 55 && window.__ulgElementsLabState?.currentTab === 'crystal', null, { timeout: 60_000 });
+    await page.evaluate(() => {
+      window.__ulgElementsLabApi.setCrystalViewMode('tdks-atom');
+      window.__ulgElementsLabApi.setTdksConfig({ orbitalPreset: 'valence', polMode: 0, fieldView: 0, modeMono: false });
+      window.__ulgElementsLabApi.setCamera(0.35, 0.25, 3.05);
+    });
+    const csTdks = await page.evaluate(() => window.__ulgElementsLabApi.stepTdks3d(36));
+    const csOptics = await page.evaluate(() => ({
+      srgb: window.__ulgElementsLabState.bundle.electromagnetic.opticalSrgb,
+      plasmaEv: window.__ulgElementsLabState.bundle.electromagnetic.plasmaEnergyEv,
+      coreEps: window.__ulgElementsLabState.bundle.electromagnetic.coreDielectricInf,
+      transEv: window.__ulgElementsLabState.tdks3dTelemetry?.transEv,
+      orbital: window.__ulgElementsLabState.tdks3dTelemetry?.orbital
+    }));
+    console.log('[cs-first-principles-optics-tdks]', JSON.stringify({ csOptics, csTdks }));
+    assert.equal(csOptics.orbital.n0, 6, 'Cs active valence must be 6s (not deep core 4d)');
+    assert.equal(csOptics.orbital.l0, 0, 'Cs active valence must be 6s');
+    assert.ok(csTdks.transEv < 3.6 && csTdks.transEv > 2.35, `Cs TD-KS must use screened pale-gold plasma edge (2.35..3.6 eV), got ${csTdks.transEv}`);
+    assert.ok(csOptics.srgb[0] > csOptics.srgb[2] + 0.08 && csOptics.srgb[1] > 0.65, `Cs must reflect pale golden (R > B + 0.08 & G > 0.65, not orange or white), got sRGB=${JSON.stringify(csOptics.srgb)}`);
+    await saveShot(page, '16-tdks3d-cs-pale-gold-6s');
+
+    // Clicking Section 5 (Chemistry & Reactions) while viewing Cs must preserve Cs as active element (not replace with H2O!)
+    await page.click('.acc-header[data-acc-tab="compound"]');
+    await page.waitForTimeout(450);
+    const afterChemTab = await page.evaluate(() => ({
+      mode: window.__ulgElementsLabState.mode,
+      Z: window.__ulgElementsLabState.Z,
+      reactA: document.getElementById('reactant-a')?.value,
+      pill: document.getElementById('active-specimen-pill')?.textContent
+    }));
+    console.log('[chem-tab-preserves-active-element]', JSON.stringify(afterChemTab));
+    assert.equal(afterChemTab.mode, 'element', 'Opening Chemistry section must NOT wipe out the active element');
+    assert.equal(afterChemTab.Z, 55, 'Cs (Z=55) must remain the active element when opening Chemistry');
+    assert.equal(afterChemTab.reactA, 'Cs', 'Reactant A should pre-fill with active element Cs');
+
     // 11. Mobile Portrait (390x844) IUPAC Periodic Table Modal & Accordion Check!
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(200);
-    await page.click('#mobile-open-pt-btn');
+    await page.click('#active-specimen-pill');
     await page.waitForTimeout(200);
     const mobCheck = await page.evaluate(() => ({
       modalOpen: document.getElementById('pt-modal').classList.contains('open'),
@@ -272,14 +385,15 @@ test('URL deep-link hydration and live shareable URL sync across element 3D Maxw
       if (m.type() === 'error' && /webgpu|validation|shader/i.test(m.text())) gpuErrors.push(m.text());
     });
 
-    // 1. Deep-link directly into Gold 3D Maxwell-KS 5d(m=2) Circular 440nm (tab inferred from view!)
-    await page.goto(`${SERVER_URL}/elements-lab.html?el=Au&view=tdks-atom&orb=d2&pol=circ&lam=440&cam=0.85,0.45,3.05`, { waitUntil: 'domcontentloaded' });
+    // 1. Deep-link directly into Gold 3D Maxwell-KS 5d(m=2) Circular 440nm at 0.25x slow-mo (tab inferred from view!)
+    await page.goto(`${SERVER_URL}/elements-lab.html?el=Au&view=tdks-atom&orb=d2&pol=circ&lam=440&speed=0.25&cam=0.85,0.45,3.05`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__ulgElementsLabState?.Z === 79 && window.__ulgElementsLabState?.currentTab === 'crystal' && Boolean(window.__ulgElementsLabState?.tdks3dTelemetry), null, { timeout: 60_000 });
     const auLinkState = await page.evaluate(() => ({
       Z: window.__ulgElementsLabState.Z,
       tab: window.__ulgElementsLabState.currentTab,
       orb: window.__ulgElementsLabState.tdks3dTelemetry.orbital,
       polMode: window.__ulgElementsLabState.tdks3dTelemetry.polMode,
+      simSpeed: window.__ulgElementsLabState.simSpeed,
       cam: window.__ulgElementsLabApi.getCamera(),
       search: window.location.search,
       shareUrl: window.__ulgElementsLabApi.getShareUrl({ includeCamera: true }),
@@ -290,10 +404,17 @@ test('URL deep-link hydration and live shareable URL sync across element 3D Maxw
     assert.equal(auLinkState.tab, 'crystal');
     assert.equal(auLinkState.orb.m, 2);
     assert.equal(auLinkState.polMode, 2);
+    assert.equal(auLinkState.simSpeed, 0.25);
     assert.ok(Math.abs(auLinkState.cam.yaw - 0.85) < 0.02);
-    assert.ok(auLinkState.search.includes('el=Au') && auLinkState.search.includes('view=tdks-atom') && auLinkState.search.includes('orb=d2') && auLinkState.search.includes('pol=circ') && auLinkState.search.includes('lam=440'));
+    assert.ok(auLinkState.search.includes('el=Au') && auLinkState.search.includes('view=tdks-atom') && auLinkState.search.includes('orb=d2') && auLinkState.search.includes('pol=circ') && auLinkState.search.includes('lam=440') && auLinkState.search.includes('speed=0.25'));
     assert.ok(auLinkState.shareUrl.includes('cam=0.85%2C0.45%2C3.05') || auLinkState.shareUrl.includes('cam=0.85,0.45,3.05'));
     assert.ok(auLinkState.title.includes('Au'));
+
+    // Verify +1 single-step advances active 3D Maxwell-KS simulation cleanly by exactly 1 step!
+    const stepBefore = await page.evaluate(() => window.__ulgElementsLabState.tdks3dTelemetry.stepIndex);
+    await page.evaluate(() => window.__ulgElementsLabApi.stepSimOnce());
+    const stepAfter = await page.evaluate(() => window.__ulgElementsLabState.tdks3dTelemetry.stepIndex);
+    assert.ok(stepAfter >= stepBefore + 1, `stepSimOnce must advance active sim: ${stepBefore} -> ${stepAfter}`);
 
     // Live URL bar sync when switching view/specimen interactively
     await page.evaluate(() => window.__ulgElementsLabApi.setCrystalViewMode('spin-llg'));

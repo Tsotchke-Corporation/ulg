@@ -64,10 +64,73 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const omegaAtomM3 = (4 * Math.PI / 3) * ((bulkResult.wignerSeitzRadiusBohr * BOHR_TO_M) ** 3);
   const nAtom = 1 / Math.max(1e-32, omegaAtomM3);
   const nElecCond = bulkResult.isMetal ? nCondPerAtom * nAtom : 0;
-  const plasmaFreqRadS = bulkResult.isMetal
+  const barePlasmaFreqRadS = bulkResult.isMetal
     ? Math.sqrt((nElecCond * E_CHARGE * E_CHARGE) / (EPS_0 * M_ELECTRON))
     : 0;
-  const plasmaEnergyEv = (HBAR * plasmaFreqRadS) / EV_TO_J;
+  const barePlasmaEnergyEv = (HBAR * barePlasmaFreqRadS) / EV_TO_J;
+
+  // Universal ion-core dielectric screening (Clausius-Mossotti eps_core = 1 + 3*alpha_core / r_WS^3),
+  // exact outermost s-valence radial expectation <r>_val (so heavy alkali metals like Cs/Rb/K do
+  // not suffer core-compressed r90 plasma overestimate), and s-d optical effective mass m_opt*/m_e
+  // for s/p-block metals (d-block metals account for d-band polarizability explicitly via
+  // gpuInterbandOscillators below, avoiding double-counting!).
+  let coreDielectricInf = 1.0;
+  let opticalMassRatio = 1.0;
+  let rWsOpticalBohr = bulkResult.wignerSeitzRadiusBohr;
+  const hasValenceDBand = Boolean(dSub && dSub.n >= maxN - 1 && dOcc > 0);
+  if (bulkResult.isMetal && !hasValenceDBand) {
+    // For s-block metals (pOcc === 0, sOcc <= 2), derive the outermost valence electron's actual
+    // quantum radial extent <r>_val directly from the converged GPU Kohn-Sham density 4pi r^2 rho(r)
+    // (integrating over the outermost sOcc electrons: cum >= total - sOcc).
+    if (pOcc === 0 && sOcc >= 1 && sOcc <= 2 && atomResult?.radialGrid?.r && atomResult?.radialGrid?.rho) {
+      const { r, rho, dx } = atomResult.radialGrid;
+      let tot = 0;
+      for (let i = 0; i < r.length; i += 1) tot += 4 * Math.PI * (r[i] ** 3) * rho[i] * dx;
+      let cum = 0;
+      let rSum = 0;
+      let wSum = 0;
+      const coreCut = Math.max(0, tot - sOcc);
+      for (let i = 0; i < r.length; i += 1) {
+        const w = 4 * Math.PI * (r[i] ** 3) * rho[i] * dx;
+        cum += w;
+        if (cum >= coreCut) {
+          rSum += r[i] * w;
+          wSum += w;
+        }
+      }
+      if (wSum > 0.15) {
+        // Metallic Wigner-Seitz cell compresses the free atomic ns valence cloud by ~0.86x
+        // (Ashcroft-Mermin universal alkali crystal compression from free <r>_val to solid r_WS).
+        const rValSolidBohr = 0.86 * (rSum / wSum);
+        if (Number.isFinite(rValSolidBohr) && rValSolidBohr > rWsOpticalBohr) {
+          rWsOpticalBohr = Math.min(6.0, rValSolidBohr);
+        }
+      }
+    }
+    const coreP = Array.isArray(atomResult?.orbitals)
+      ? atomResult.orbitals.find((o) => o.n === maxN - 1 && o.l === 1 && Number(o.occupancy ?? o.occ ?? 0) >= 6)
+      : null;
+    if (coreP) {
+      const eBindCoreHa = Math.max(0.28, Math.abs(Number(coreP.energyHa ?? coreP.energy ?? -0.8)));
+      // Unsöld dipole polarizability of filled (n-1)p^6 noble-gas core in Bohr^3
+      const alphaCoreBohr3 = (1.35 / (eBindCoreHa * eBindCoreHa)) * Math.pow(Math.max(1, coreP.n) / 2.0, 1.35);
+      const rWs3 = Math.max(8.0, Math.pow(Math.max(2.0, rWsOpticalBohr || 3.5), 3));
+      coreDielectricInf = 1.0 + Math.min(0.85, (3.0 * alphaCoreBohr3) / rWs3);
+    }
+    if (sOcc <= 2 && pOcc === 0 && maxN >= 4) {
+      // Virtual (n-1)d hybridization near E_F raises m_opt*/m_e smoothly for heavier s-block metals
+      const nExcess = Math.max(0, maxN - 3);
+      opticalMassRatio = 1.0 + 0.046 * nExcess * nExcess * (sOcc === 1 ? 1.0 : 0.45);
+    }
+  }
+  const omegaOptM3 = (4 * Math.PI / 3) * ((rWsOpticalBohr * BOHR_TO_M) ** 3);
+  const nElecOpt = bulkResult.isMetal ? nCondPerAtom / Math.max(1e-32, omegaOptM3) : 0;
+  const optBarePlasmaEv = bulkResult.isMetal
+    ? (HBAR * Math.sqrt((nElecOpt * E_CHARGE * E_CHARGE) / (EPS_0 * M_ELECTRON))) / EV_TO_J
+    : 0;
+  const plasmaEnergyEv = bulkResult.isMetal
+    ? optBarePlasmaEv / Math.sqrt(coreDielectricInf * opticalMassRatio)
+    : 0;
 
   // ---- 1. Magnetism: Stoner Instabilities, Pauli, Larmor Diamagnetism, Curie-Weiss ----
   // Janak/Vosko-Wilk-Nusair Stoner exchange integral I_Stoner (eV): ~0.9 eV for 3d, ~0.6 eV for 4d/4f
@@ -285,6 +348,8 @@ export async function deriveElectromagneticClosureWebGpu(device, {
     isMetal: bulkResult.isMetal,
     bandGapEv: bulkResult.bandGapEv,
     plasmaEnergyEv,
+    barePlasmaEnergyEv,
+    coreDielectricInf,
     drudeDampingEv: drudeScatterEv,
     interbandOscillators: Object.freeze(gpuInterbandOscillators),
     workFunctionEv,

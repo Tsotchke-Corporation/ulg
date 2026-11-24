@@ -216,8 +216,8 @@ test('All 5 new canonical chemistry & 3D Maxwell-KS modules register cleanly on 
 });
 
 test('Shareable URL state encoder/decoder round-trips elements, isotopes, compounds, reactions, views, and camera', () => {
-  // 1. Gold 3D Maxwell-KS 5d(m=2) circular 440nm deep link (with inferred tab from view!)
-  const pTdks = parseElementsLabUrlState('?el=Au&view=tdks-atom&orb=d2&pol=circ&lam=440&cam=0.85,0.45,3.05');
+  // 1. Gold 3D Maxwell-KS 5d(m=2) circular 440nm deep link (with inferred tab from view + slow-mo speed!)
+  const pTdks = parseElementsLabUrlState('?el=Au&view=tdks-atom&orb=d2&pol=circ&lam=440&speed=0.25&cam=0.85,0.45,3.05');
   assert.equal(pTdks.specimenKind, 'element');
   assert.equal(pTdks.Z, 79);
   assert.equal(pTdks.tab, 'crystal');
@@ -226,10 +226,11 @@ test('Shareable URL state encoder/decoder round-trips elements, isotopes, compou
   assert.equal(pTdks.tdksPolMode, 2);
   assert.equal(pTdks.photonModeMono, true);
   assert.equal(pTdks.probeWavelengthNm, 440);
+  assert.equal(pTdks.simSpeed, 0.25);
   assert.deepEqual(pTdks.camera, { yaw: 0.85, pitch: 0.45, dist: 3.05 });
 
   const qTdks = serializeElementsLabUrlState(pTdks, { includeCamera: true });
-  assert.ok(qTdks.includes('el=Au') && qTdks.includes('tab=crystal') && qTdks.includes('view=tdks-atom') && qTdks.includes('orb=d2') && qTdks.includes('pol=circ') && qTdks.includes('lam=440') && qTdks.includes('cam='));
+  assert.ok(qTdks.includes('el=Au') && qTdks.includes('tab=crystal') && qTdks.includes('view=tdks-atom') && qTdks.includes('orb=d2') && qTdks.includes('pol=circ') && qTdks.includes('lam=440') && qTdks.includes('speed=0.25') && qTdks.includes('cam='));
 
   // 2. Legacy ?z=27&a=60 isotope & ?el=U-235 shorthand
   const pCo = parseElementsLabUrlState('?z=27&a=60');

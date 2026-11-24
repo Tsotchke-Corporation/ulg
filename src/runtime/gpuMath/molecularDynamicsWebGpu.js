@@ -527,6 +527,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
   let lastHotTempK = lastTempK * 1.25;
   let lastColdTempK = Math.max(1, lastTempK * 0.75);
   let totalSteps = 0;
+  let totalTimeFs = 0;
   let forcesInitialized = false;
   let expMode = MD_EXPERIMENT_MODES.EQUILIBRIUM;
   let curShearWallVel = 0.0;
@@ -548,16 +549,19 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     strainSz = 1.0,
     shearXY = 0.0,
     pulseAmp = 0.0,
-    pulsePol = 0.0
+    pulsePol = 0.0,
+    dtScale = 1.0
   } = {}) => {
+    const safeDtScale = Math.max(0.05, Math.min(1.0, Number(dtScale) || 1.0));
+    const dtEffFs = Number(dtFs) * safeDtScale;
     const ab = new ArrayBuffer(112);
     const flagsW = (useThermostat ? 1 : 0) | ((expMode & 15) << 8);
     new Uint32Array(ab, 0, 4).set([atomCount, potentialModel, 64, flagsW]);
-    new Float32Array(ab, 16, 4).set([box[0], box[1], box[2], dtInternal]);
+    new Float32Array(ab, 16, 4).set([box[0], box[1], box[2], dtInternal * safeDtScale]);
     new Float32Array(ab, 32, 4).set([epsilonEv, sigmaOrR0A, alphaOrLambda, rcutA]);
     new Float32Array(ab, 48, 4).set([eamAEv, eamBeta, swGamma, targetTemperatureK]);
     new Float32Array(ab, 64, 4).set([
-      thermostatCouplingFs > 0 ? dtFs / thermostatCouplingFs : 0,
+      thermostatCouplingFs > 0 ? dtEffFs / thermostatCouplingFs : 0,
       scaleVel,
       collectTelemetry ? 1.0 : 0.0,
       curShearWallVel
@@ -622,7 +626,8 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     readTelemetry = true,
     temperatureK = targetTemperatureK,
     nptBarostatGPa = null,
-    nonBlocking = false
+    nonBlocking = false,
+    dtScale = 1.0
   } = {}) {
     if (destroyed) return null;
     if (readTelemetry && readPromise) {
@@ -632,10 +637,12 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     }
 
     const steps = Math.max(1, Math.trunc(Number(numSteps)));
+    const safeDtScale = Math.max(0.05, Math.min(1.0, Number(dtScale) || 1.0));
+    const dtEffFs = Number(dtFs) * safeDtScale;
     const useTherm = Number(temperatureK) > 0 && Number(thermostatCouplingFs) > 0;
     let velScale = 1.0;
     if (useTherm && lastTempK > 0) {
-      const alphaT = Math.min(0.5, dtFs / thermostatCouplingFs);
+      const alphaT = Math.min(0.5, dtEffFs / thermostatCouplingFs);
       velScale = Math.sqrt(Math.max(0.25, Math.min(4.0, 1 + alphaT * (Number(temperatureK) / lastTempK - 1))));
     }
     const baseT = Math.max(5, Number(temperatureK) || 300);
@@ -651,7 +658,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     // Batch steps into a single CommandEncoder + single queue.submit (zero host waits!)
     const encoder = device.createCommandEncoder({ label: `ulg-md-batch-${steps}` });
     if (!forcesInitialized) {
-      writeParams({ collectTelemetry: false, scaleVel: 1.0, useThermostat: false, hotScale: 1.0, coldScale: 1.0 });
+      writeParams({ collectTelemetry: false, scaleVel: 1.0, useThermostat: false, hotScale: 1.0, coldScale: 1.0, dtScale: safeDtScale });
       const pInit = encoder.beginComputePass({ label: 'ulg-md-init-forces' });
       pInit.setBindGroup(0, bg);
       if (potentialModel === MD_POTENTIAL_MODELS.MORSE_EAM) {
@@ -665,7 +672,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     }
 
     if (steps > 1) {
-      writeParams({ collectTelemetry: false, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale });
+      writeParams({ collectTelemetry: false, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale, dtScale: safeDtScale });
       const pLoop = encoder.beginComputePass({ label: 'ulg-md-steps-loop' });
       pLoop.setBindGroup(0, bg);
       for (let s = 0; s < steps - 1; s += 1) {
@@ -683,7 +690,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     device.queue.submit([encoder.finish()]);
 
     const encFinal = device.createCommandEncoder({ label: 'ulg-md-final-step' });
-    writeParams({ collectTelemetry: readTelemetry, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale });
+    writeParams({ collectTelemetry: readTelemetry, scaleVel: velScale, useThermostat: useTherm, hotScale, coldScale, dtScale: safeDtScale });
     const pFinal = encFinal.beginComputePass({ label: 'ulg-md-final-pass' });
     pFinal.setBindGroup(0, bg);
     if (readTelemetry) {
@@ -702,6 +709,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
     }
     device.queue.submit([encFinal.finish()]);
     totalSteps += steps;
+    totalTimeFs += steps * dtEffFs;
 
     if (!readTelemetry) return null;
 
@@ -795,7 +803,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
         const dxM = Math.max(1e-10, 0.5 * box[0] * 1e-10);
         const areaM2 = Math.max(1e-20, box[1] * box[2] * 1e-20);
         const qAvgJ = 0.5 * (Math.abs(heatAddedEv) + Math.abs(heatRemovedEv)) * 1.602176634e-19;
-        const jqWPerM2 = qAvgJ / (2 * areaM2 * Math.max(1e-16, dtFs * 1e-15));
+        const jqWPerM2 = qAvgJ / (2 * areaM2 * Math.max(1e-16, dtEffFs * 1e-15));
         if (jqWPerM2 > 0) {
           nemdThermalCondWPerMK = jqWPerM2 / (dTMeas / dxM);
         }
@@ -839,7 +847,7 @@ export function createMolecularDynamicsSessionWebGpu(device, {
         backend: 'webgpu',
         experimentMode: expMode,
         totalSteps,
-        timeFs: totalSteps * dtFs,
+        timeFs: totalTimeFs,
         atomCount,
         boxLengthsA: Object.freeze([...box]),
         volumeRatio,

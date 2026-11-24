@@ -785,6 +785,11 @@ export function createAtomTdks3dSessionWebGpu(device, electromagnetic = {}, {
       transEv = Math.max(0.8, Number(vis.energyEv) || 3.1);
       gammaEv = Math.max(0.24, Number(vis.dampingEv) || 0.55);
       transLabel = vis.transitionLabel || 'd→p';
+    } else if (isMetal) {
+      const wp = Math.max(1.2, Math.min(8.5, Number(emObj?.plasmaEnergyEv) || 4.5));
+      transEv = wp;
+      gammaEv = Math.max(0.22, Math.min(1.1, (Number(emObj?.drudeDampingEv) || 0.25) * 1.4));
+      transLabel = `Plasma/Valence (${wp.toFixed(2)} eV)`;
     } else {
       const gap = Math.max(0.5, Number(emObj?.bandGapEv) || 5.2);
       transEv = Math.max(2.4, Math.min(6.5, gap + 1.1));

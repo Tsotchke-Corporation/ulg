@@ -380,10 +380,11 @@ export function createReactiveChemistryMdSessionWebGpu(device, options = {}) {
 
   initChamber({ temperatureK: curTempK, seed: options.seed ?? 1337 });
 
-  function writeUniform(uBuf, sIdx, collectObs, sparkVal) {
+  function writeUniform(uBuf, sIdx, collectObs, sparkVal, dtScale = 1.0) {
+    const safeDtScale = Math.max(0.05, Math.min(1.0, Number(dtScale) || 1.0));
     const ab = new ArrayBuffer(64);
     new Uint32Array(ab, 0, 4).set([count >>> 0, sIdx >>> 0, collectObs ? 1 : 0, thermostatEnabled ? 1 : 0]);
-    new Float32Array(ab, 16, 4).set([dt, boxHalf, sigma, reactRadius]);
+    new Float32Array(ab, 16, 4).set([dt * safeDtScale, boxHalf, sigma, reactRadius]);
     new Float32Array(ab, 32, 4).set([params.eaFwdSim, params.eaRevSim, params.deltaHSim, curTempK / params.tempUnitK]);
     new Float32Array(ab, 48, 4).set([sparkVal, catalystEnabled ? 0.52 : 1.0, 1.0, 0.0]);
     device.queue.writeBuffer(uBuf, 0, ab);
@@ -397,7 +398,8 @@ export function createReactiveChemistryMdSessionWebGpu(device, options = {}) {
     temperatureK = null,
     catalyst = null,
     thermostat = null,
-    collectObsOnLast = false
+    collectObsOnLast = false,
+    dtScale = 1.0
   } = {}) {
     if (destroyed) return;
     if (temperatureK != null && Number.isFinite(Number(temperatureK))) curTempK = Math.max(50, Number(temperatureK));
@@ -408,7 +410,7 @@ export function createReactiveChemistryMdSessionWebGpu(device, options = {}) {
     for (let s = 0; s < steps; s += 1) {
       const sparkNow = (s === 0 && pendingSpark > 0) ? pendingSpark : 0.0;
       if (s === 0) pendingSpark = 0.0;
-      writeUniform(uPool[s], stepIndex + s, collectObsOnLast && s === steps - 1, sparkNow);
+      writeUniform(uPool[s], stepIndex + s, collectObsOnLast && s === steps - 1, sparkNow, dtScale);
     }
     const wg = Math.ceil(count / 64);
     const enc = device.createCommandEncoder({ label: 'ulg-reactive-md-batch' });
@@ -507,13 +509,14 @@ export function createReactiveChemistryMdSessionWebGpu(device, options = {}) {
     catalyst = null,
     thermostat = null,
     readObs = true,
-    nonBlocking = false
+    nonBlocking = false,
+    dtScale = 1.0
   } = {}) {
     let rem = Math.max(1, Math.trunc(numSteps));
     while (rem > 0) {
       const chunk = Math.min(MAX_BATCH, rem);
       const isLast = rem === chunk;
-      stepSync(chunk, { temperatureK, catalyst, thermostat, collectObsOnLast: readObs && isLast });
+      stepSync(chunk, { temperatureK, catalyst, thermostat, collectObsOnLast: readObs && isLast, dtScale });
       rem -= chunk;
     }
     return readObs ? readTelemetry({ nonBlocking }) : null;

@@ -189,6 +189,10 @@ export function parseElementsLabUrlState(search = '') {
   const vibDeuterated = deutRaw != null ? (deutRaw === '1' || deutRaw.toLowerCase() === 'true') : null;
   const regRaw = String(params.get('regime') || '').trim().toLowerCase();
   const polytopeRegime = (regRaw === 'planetary' || regRaw === 'lab') ? regRaw : null;
+  const spdRaw = params.get('speed');
+  const simSpeed = spdRaw != null && Number.isFinite(Number(spdRaw))
+    ? Math.max(0.05, Math.min(2.0, Number(spdRaw)))
+    : null;
 
   // Optional 3D camera framing (`cam=yaw,pitch,dist`)
   let camera = null;
@@ -229,6 +233,7 @@ export function parseElementsLabUrlState(search = '') {
     molShowOrbitalOverlay,
     vibDeuterated,
     polytopeRegime,
+    simSpeed,
     camera
   });
 }
@@ -262,6 +267,7 @@ export function serializeElementsLabUrlState({
   molShowOrbitalOverlay = false,
   vibDeuterated = false,
   polytopeRegime = 'lab',
+  simSpeed = 1.0,
   camera = null
 } = {}, { includeCamera = false } = {}) {
   const params = new URLSearchParams();
@@ -327,6 +333,10 @@ export function serializeElementsLabUrlState({
     }
   } else if (safeTab === 'polytope') {
     if (polytopeRegime === 'planetary') params.set('regime', 'planetary');
+  }
+
+  if (simSpeed != null && Number.isFinite(Number(simSpeed)) && Number(simSpeed) > 0 && Math.abs(Number(simSpeed) - 1.0) >= 0.025) {
+    params.set('speed', Number(simSpeed).toFixed(2).replace(/0+$/, '').replace(/\.$/, ''));
   }
 
   if (includeCamera && camera && Number.isFinite(camera.yaw) && Number.isFinite(camera.pitch)) {

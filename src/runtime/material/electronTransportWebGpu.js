@@ -344,18 +344,20 @@ export function createElectronTransportSessionWebGpu(device, electromagnetic = {
 
   initCarriers();
 
-  function writeUniform(uBuf, sIdx, collectObs) {
+  function writeUniform(uBuf, sIdx, collectObs, dtScale = 1.0) {
+    const safeDtScale = Math.max(0.05, Math.min(1.0, Number(dtScale) || 1.0));
     const eNorm = Math.max(-2.5, Math.min(2.5, curEField / 1.0e4));
     const eAccel = 0.16 * eNorm;
     const vTherm = Math.max(0.05, Math.min(0.45, 0.14 * Math.sqrt(curTempK / 300)));
+    const pScatScaled = 1.0 - Math.pow(Math.max(0.0, 1.0 - trParams.scatterProbStep), safeDtScale);
     const ab = new ArrayBuffer(48);
     new Uint32Array(ab, 0, 4).set([n, sIdx >>> 0, trParams.isMetal ? 1 : 0, collectObs ? 1 : 0]);
-    new Float32Array(ab, 16, 4).set([eAccel, trParams.scatterProbStep, vTherm, trParams.cooperFraction]);
-    new Float32Array(ab, 32, 4).set([trParams.activeCarrierFraction, trParams.phononVibAmp, 0.28, 0]);
+    new Float32Array(ab, 16, 4).set([eAccel, pScatScaled, vTherm, trParams.cooperFraction]);
+    new Float32Array(ab, 32, 4).set([trParams.activeCarrierFraction, trParams.phononVibAmp, 0.28 * safeDtScale, 0]);
     device.queue.writeBuffer(uBuf, 0, ab);
   }
 
-  function stepSync(numSteps = 4, { temperatureK: nextT = null, eFieldVPerM: nextE = null, collectObsOnLast = false } = {}) {
+  function stepSync(numSteps = 4, { temperatureK: nextT = null, eFieldVPerM: nextE = null, collectObsOnLast = false, dtScale = 1.0 } = {}) {
     if (destroyed) return;
     let paramsDirty = false;
     if (nextT != null && Number.isFinite(Number(nextT))) {
@@ -371,7 +373,7 @@ export function createElectronTransportSessionWebGpu(device, electromagnetic = {
     }
     const steps = Math.max(1, Math.min(MAX_BATCH, Math.trunc(numSteps)));
     for (let s = 0; s < steps; s += 1) {
-      writeUniform(uPool[s], stepIndex + s, collectObsOnLast && s === steps - 1);
+      writeUniform(uPool[s], stepIndex + s, collectObsOnLast && s === steps - 1, dtScale);
     }
     const wg = Math.ceil(n / 64);
     const enc = device.createCommandEncoder({ label: 'ulg-tr-batch' });
@@ -459,12 +461,12 @@ export function createElectronTransportSessionWebGpu(device, electromagnetic = {
     }
   }
 
-  async function stepBatch(numSteps = 12, { temperatureK: nextT = null, eFieldVPerM: nextE = null, readObs = true, nonBlocking = false } = {}) {
+  async function stepBatch(numSteps = 12, { temperatureK: nextT = null, eFieldVPerM: nextE = null, readObs = true, nonBlocking = false, dtScale = 1.0 } = {}) {
     let rem = Math.max(1, Math.trunc(numSteps));
     while (rem > 0) {
       const chunk = Math.min(MAX_BATCH, rem);
       const isLast = rem === chunk;
-      stepSync(chunk, { temperatureK: nextT, eFieldVPerM: nextE, collectObsOnLast: readObs && isLast });
+      stepSync(chunk, { temperatureK: nextT, eFieldVPerM: nextE, collectObsOnLast: readObs && isLast, dtScale });
       rem -= chunk;
     }
     return readObs ? readTelemetry({ nonBlocking }) : null;

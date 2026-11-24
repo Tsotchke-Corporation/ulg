@@ -1058,6 +1058,11 @@ export function createQuantumBlochPhotonSession(electromagnetic = {}, { probeWav
     transEv = Math.max(0.6, Number(blueEdge.energyEv) || 3.0);
     gammaEv = Math.max(0.22, Number(blueEdge.dampingEv) || 0.55);
     transLabel = blueEdge.transitionLabel || 'd→p';
+  } else if (isMetal) {
+    const wp = Math.max(1.2, Math.min(8.5, Number(electromagnetic?.plasmaEnergyEv) || 4.5));
+    transEv = wp;
+    gammaEv = Math.max(0.22, Math.min(1.1, (Number(electromagnetic?.drudeDampingEv) || 0.25) * 1.4));
+    transLabel = `Plasma/Valence (${wp.toFixed(2)} eV)`;
   } else {
     const gap = Math.max(0.5, Number(electromagnetic?.bandGapEv) || 5.5);
     transEv = Math.max(2.6, gap + 1.4);

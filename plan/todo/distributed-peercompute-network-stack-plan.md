@@ -9,8 +9,8 @@ Date: 2026-06-14 AKDT
 > `ReservationLedger` CAS tile leases (`distributedSpatialPartitioner.js`), real
 > GPU-computed supergalactic TreePM tile multipole summaries, exact global mass
 > conservation, and fail-closed peer-loss tile reassignment. External PeerCompute
-> extension spec handed off to `agy` at `/home/cos/projects/peercompute/plan/todo/ulg-scale-ladder-peercompute-extensions.md`.
-> Open: physical 2-machine WAN/STUN/TURN validation once `agy` ships extensions.
+> extension spec completed & archived at `/home/cos/projects/peercompute/plan/todo/done/ulg-scale-ladder-peercompute-extensions.md` (merged in `peercompute` `c5c24a76`).
+> Open: physical 2-machine WAN/STUN/TURN validation.
 
 ## Purpose
 

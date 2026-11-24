@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { existsSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import viteConfig from '../vite.config.mjs';
 import {
   PEERCOMPUTE_CORE_ENTRYPOINT_SCHEMA,
   NodeKernel,
   ComputeManager,
   StateManager,
-  ReservationLedger
+  ReservationLedger,
+  SpatialTileLeaseBroker
 } from '../src/runtime/peercomputeCore.js';
 import {
   ULG_ACCURACY_TIERS,
@@ -29,6 +33,18 @@ test('Gate 0A: peercomputeCore exposes pure scheduling/state/reservation primiti
   assert.equal(typeof ComputeManager, 'function');
   assert.equal(typeof StateManager, 'function');
   assert.equal(typeof ReservationLedger, 'function');
+  assert.equal(typeof SpatialTileLeaseBroker, 'function');
+
+  // Verify Vite dev server fs.allow covers the restructured PeerCompute workspace
+  // root so hoisted workspace node_modules/ (e.g. yjs, libp2p) never 403.
+  const siblingPeercomputeWorkspace = fileURLToPath(new URL('../../peercompute', import.meta.url));
+  if (existsSync(siblingPeercomputeWorkspace)) {
+    const allowed = (viteConfig?.server?.fs?.allow || []).map((p) => (existsSync(p) ? realpathSync(p) : p));
+    assert.ok(
+      allowed.includes(realpathSync(siblingPeercomputeWorkspace)),
+      `vite.config.mjs server.fs.allow must include PeerCompute workspace root ${siblingPeercomputeWorkspace}`
+    );
+  }
 });
 
 test('Gate 0C: ulg.material-property-bundle.v1 validates 5 domains, accuracy tiers, and fail-closed policy', () => {

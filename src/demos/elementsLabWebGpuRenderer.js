@@ -347,12 +347,13 @@ fn vs_atom(
   let pos4 = positions[iid];
   let vel4 = velocities[iid];
   let half_box = max(vec3<f32>(0.5), u.box_l.xyz * 0.5);
-  let p_norm = (pos4.xyz - half_box) / half_box;
+  let max_half = max(half_box.x, max(half_box.y, half_box.z));
+  let p_norm = (pos4.xyz - half_box) / max_half;
   let view = world_to_view(p_norm);
 
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let fov_scale = 1.65 * min(1.0, aspect);
-  let rad = u.box_l.w;
+  let rad = u.box_l.w * clamp(min(half_box.x, min(half_box.y, half_box.z)) / max_half, 0.42, 1.0);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
   let cy = (view.y * fov_scale) / max(0.35, view.z);
   let rx = (rad * fov_scale) / max(0.35, view.z * aspect);
@@ -410,7 +411,10 @@ fn vs_wire(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
     vec3<f32>(-1, 1,-1), vec3<f32>(-1, 1, 1),
     vec3<f32>( 1, 1,-1), vec3<f32>( 1, 1, 1)
   );
-  let view = world_to_view(edges[vid]);
+  let half_box = max(vec3<f32>(0.5), u.box_l.xyz * 0.5);
+  let max_half = max(half_box.x, max(half_box.y, half_box.z));
+  let box_scale = half_box / max_half;
+  let view = world_to_view(edges[vid] * box_scale);
   let aspect = u.resolution.x / max(1.0, u.resolution.y);
   let fov_scale = 1.65 * min(1.0, aspect);
   let cx = (view.x * fov_scale) / max(0.35, view.z * aspect);
@@ -520,6 +524,7 @@ struct OrbitalCloudUniforms {
   cam_style: vec4<f32>,     // (cam_dist, point_size, opacity, alt_shell_colors)
   color_a: vec4<f32>,       // (r, g, b, show_guides)
   color_b: vec4<f32>,       // (r, g, b, nuc_radius)
+  stark: vec4<f32>,         // (stark_mix_lambda, e_field_norm, 0, 0)
 };
 
 @group(0) @binding(0) var<uniform> u: OrbitalCloudUniforms;
@@ -552,7 +557,12 @@ fn vs_cloud(
   );
   let corner = quad[vid];
   let pt = points[iid];
-  let view = project_pt(pt.xyz);
+  // First-order Stark perturbation dipolar cloud shift opposite to applied +X electric field:
+  // outer valence shells polarize more strongly (~r^2) than tight core shells!
+  let r2_pt = dot(pt.xyz, pt.xyz);
+  let stark_lam = u.stark.x;
+  let pos_eff = pt.xyz - vec3<f32>(stark_lam * (0.42 + 0.85 * min(1.8, r2_pt)), 0.0, 0.0);
+  let view = project_pt(pos_eff);
   let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
   let fov = 1.95 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.25, view.z);
@@ -567,11 +577,16 @@ fn vs_cloud(
 
   let shade = abs(pt.w);
   let is_a = pt.w >= 0.0;
-  let base_rgb = select(
+  var base_rgb = select(
     u.color_a.rgb,
     select(u.color_b.rgb, u.color_a.rgb, is_a),
     u.cam_style.w > 0.5
   );
+  if (abs(stark_lam) > 0.01) {
+    let pol_side = clamp(-pos_eff.x * sign(stark_lam) * 1.4, -1.0, 1.0);
+    let pol_col = select(vec3<f32>(1.0, 0.55, 0.28), vec3<f32>(0.32, 0.88, 1.0), pol_side >= 0.0);
+    base_rgb = mix(base_rgb, pol_col, min(0.55, abs(stark_lam) * 1.15) * abs(pol_side));
+  }
 
   var out: VsOut;
   out.clip_pos = vec4<f32>(cx + corner.x * rx, cy + corner.y * ry, 0.5, 1.0);
@@ -1008,67 +1023,61 @@ fn fs_tdks_field(in: TdksFieldOut) -> @location(0) vec4<f32> {
   let x = in.world_xy.x;
   let y = in.world_xy.y;
   let r = length(in.world_xy);
-  let beam_env_y = exp(-0.5 * (y / 0.72) * (y / 0.72));
+  // Collimated optical beam waist around y = 0 so the incident photon packet travels
+  // cleanly across the atom instead of washing the entire viewport in a flat wall!
+  let beam_env_y = exp(-0.5 * (y / 0.36) * (y / 0.36));
   let c_vis = 0.56; // visual speed of light (world units / fs)
   let t_ret_inc = u.cam_time.y - x / c_vis;
   let dt_inc = t_ret_inc - u.cam_time.z;
   let env_inc = exp(-0.5 * (dt_inc / u.cam_time.w) * (dt_inc / u.cam_time.w)) * beam_env_y;
 
   // Angular radiation pattern of a Y-polarized oscillating quantum dipole d_y(t): sin(theta_y) = |x| / r
-  let sin_dip = clamp(abs(x) / max(0.08, r), 0.12, 1.0);
-  let r_falloff = smoothstep(0.14, 0.34, r) / (0.55 + r * 1.05);
+  let sin_dip = clamp(abs(x) / max(0.08, r), 0.14, 1.0);
+  let r_falloff = smoothstep(0.18, 0.42, r) / (0.65 + r * 1.15);
 
-  var col = vec3<f32>(0.006, 0.009, 0.018);
+  var col = vec3<f32>(0.0);
 
-  // Subtle polar optical reference rings around the atom
-  let ring_d = smoothstep(0.012, 0.0, abs(fract(r * 1.5) - 0.5)) * 0.045 * smoothstep(2.1, 0.2, r);
-  col = col + vec3<f32>(0.25, 0.40, 0.65) * ring_d;
+  // Subtle concentric distance reticle around the atom (fades smoothly to 0 well inside quad)
+  let ring_d = smoothstep(0.009, 0.0, abs(fract(r * 1.5) - 0.5)) * 0.035 * exp(-0.5 * (r / 1.15) * (r / 1.15));
+  col = col + vec3<f32>(0.24, 0.42, 0.68) * ring_d;
 
   if (u.wave_rgb.y > 0.5) {
     // Single-lambda coherent wavepacket + exact retarded Hertzian dipole re-radiation rings!
     let e_inc = env_inc * cos(u.wave_rgb.x * dt_inc);
-    let e_rad = sample_retarded_dipole(3u, r) * sin_dip * r_falloff * 1.65;
-    // Left of atom (x < 0): incident + backscattered; Right of atom (x > 0): phase-shifted transmitted superposition!
+    let e_rad = sample_retarded_dipole(3u, r) * sin_dip * r_falloff * 1.35;
     let e_tot = e_inc + e_rad;
-    let inc_glow = abs(e_inc) * 0.42;
-    let rad_glow = abs(e_rad) * 0.85;
     let crest = max(0.0, e_tot);
     let trough = max(0.0, -e_tot);
     let c_pos = u.probe_rgb.rgb;
-    let c_neg = mix(u.probe_rgb.rgb * 0.35, vec3<f32>(0.18, 0.38, 0.85), 0.5);
-    col = col + c_pos * crest * 0.52 + c_neg * trough * 0.36 + u.probe_rgb.rgb * (rad_glow * 0.55 + inc_glow * 0.15);
+    let c_neg = mix(u.probe_rgb.rgb * 0.32, vec3<f32>(0.18, 0.38, 0.82), 0.45);
+    col = col + c_pos * crest * 0.42 + c_neg * trough * 0.24 + u.probe_rgb.rgb * abs(e_rad) * 0.38;
   } else {
-    // RGB White-Light Photon Wavepacket colliding with the Quantum Electron Cloud!
-    //   Incident packet (x < 0): pure luminous WHITE wavefronts (R = G = B)!
-    //   Retarded spherical dipole re-radiation rings: colored in the EXACT live emergent
-    //   scattered spectrum (GOLD on Relativistic Gold because Blue is absorbed into 6p; SILVER when Relativistic OFF!)
-    let om_r = 3.09; // 610nm rad/fs
-    let om_g = 3.52; // 535nm rad/fs
-    let om_b = 4.28; // 440nm rad/fs
-    let inc_r = env_inc * cos(om_r * dt_inc);
-    let inc_g = env_inc * cos(om_g * dt_inc);
-    let inc_b = env_inc * cos(om_b * dt_inc);
+    // Coherent white-light photon wavepacket + retarded dipole re-radiation rings:
+    // Use one coherent group carrier for the incident white packet (eliminating artificial
+    // R/G/B carrier-beating rainbow stripes!) while coloring the retarded dipole rings
+    // strictly by the live emergent reflected/scattered spectrum (Gold vs Silver)!
+    let carrier = cos(3.55 * dt_inc);
+    let inc_wave = env_inc * (0.26 + 0.74 * abs(carrier));
+    let trans_att = select(1.0, 0.48 + 0.52 * (1.0 - u.refl_srgb.w), x > 0.0);
+    // Subtle physical blue-absorption shift downstream of the atom (x > 0)
+    let inc_tint = vec3<f32>(0.92, 0.95, 1.0 * trans_att);
+    let inc_rgb = inc_tint * inc_wave * 0.34;
 
-    let rad_r = sample_retarded_dipole(0u, r) * sin_dip * r_falloff * 1.55;
-    let rad_g = sample_retarded_dipole(1u, r) * sin_dip * r_falloff * 1.55;
-    let rad_b = sample_retarded_dipole(2u, r) * sin_dip * r_falloff * 1.55;
-
-    // Weight re-radiated RGB rings by the real emergent FDTD reflectance spectrum so Gold radiates GOLD rings & Silver radiates SILVER!
+    let rad_r = sample_retarded_dipole(0u, r);
+    let rad_g = sample_retarded_dipole(1u, r);
+    let rad_b = sample_retarded_dipole(2u, r);
+    let rad_mag = (abs(rad_r) + abs(rad_g) + abs(rad_b)) * 0.3333 * sin_dip * r_falloff;
     let refl = max(u.refl_srgb.rgb, vec3<f32>(0.18));
-    let sc_rgb = vec3<f32>(abs(rad_r) * refl.r, abs(rad_g) * refl.g, abs(rad_b) * refl.b);
-    // Incident wavefront attenuates smoothly past the atom according to real absorption while dipole wave radiates outward!
-    let trans_att = select(1.0, 0.45 + 0.55 * (1.0 - u.refl_srgb.w), x > 0.0);
-    let inc_rgb = vec3<f32>(abs(inc_r), abs(inc_g), abs(inc_b) * trans_att) * 0.34;
+    let sc_rgb = refl * (rad_mag * 1.15 + smoothstep(0.14, 0.68, rad_mag) * 0.32);
 
-    col = col + inc_rgb + sc_rgb * 0.78;
-    // Highlight concentric dipole re-radiation crests subtly
-    let dip_wave = abs(rad_r + rad_g + rad_b) * 0.33;
-    col = col + refl * smoothstep(0.18, 0.75, dip_wave) * 0.35;
+    col = col + inc_rgb + sc_rgb;
   }
 
-  // Smooth edge vignette so field blends cleanly into deep MoonLab void
-  let vig = smoothstep(2.2, 1.35, abs(x)) * smoothstep(1.48, 0.95, abs(y));
-  return vec4<f32>(clamp(col * vig, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+  // Smooth elliptical Gaussian fade well inside quad bounds -> ZERO hard quad border at any orbit angle!
+  let ell = (x / 1.65) * (x / 1.65) + (y / 1.05) * (y / 1.05);
+  let vig = exp(-0.75 * ell) * smoothstep(2.05, 1.25, abs(x)) * smoothstep(1.38, 0.82, abs(y));
+  let out_rgb = clamp(col * vig, vec3<f32>(0.0), vec3<f32>(0.92));
+  return vec4<f32>(out_rgb, max(out_rgb.r, max(out_rgb.g, out_rgb.b)));
 }
 
 // 2. Live 180K-Point MoonLab-Grade Evolving Quantum Electron Cloud |psi(r,t)|^2!
@@ -1111,25 +1120,26 @@ fn vs_tdks_cloud(
   let fov = 1.92 * min(1.0, aspect);
   let inv_z = 1.0 / max(0.3, view.z);
 
-  let min_px = 0.95 / max(1.0, u.res_yaw_pitch.y);
-  let world_r = max(min_px * 1.15, u.probe_rgb.w * 0.62 * fov * inv_z);
+  let min_px = 1.0 / max(1.0, u.res_yaw_pitch.y);
+  let world_r = clamp(u.probe_rgb.w * 0.56 * fov * inv_z, min_px * 1.15, 0.0155);
 
   // Color decomposition strictly by quantum-mechanical contribution at this 3D point:
   //   Ground shell (phi_0^2): MoonLab crisp white / royal violet (#FFFFFF / #612BDE)
   //   Dipole interference (+cross / -cross): electric cyan / warm amber polarization shift
   //   Excited shell population (rho_11 * phi_1^2): radiant resonant gold-magenta bloom!
-  let base_gnd = select(vec3<f32>(0.42, 0.22, 0.94), vec3<f32>(0.96, 0.97, 1.0), amp4.w >= 0.0);
+  let base_gnd = select(vec3<f32>(0.44, 0.24, 0.96), vec3<f32>(0.95, 0.97, 1.0), amp4.w >= 0.0);
   let exc_col = vec3<f32>(1.0, 0.78, 0.24); // Radiant resonant excitation gold
-  let dip_col = select(vec3<f32>(0.32, 0.82, 1.0), vec3<f32>(1.0, 0.52, 0.85), cross >= 0.0);
+  let dip_col = select(vec3<f32>(0.30, 0.82, 1.0), vec3<f32>(0.98, 0.50, 0.84), cross >= 0.0);
 
   let gnd_frac = (rho00 * p0_sq) / max(1e-4, prob_w);
   let exc_frac = (rho11 * p1_sq) / max(1e-4, prob_w);
   let dip_frac = clamp(abs(cross) / max(1e-4, prob_w), 0.0, 0.85);
 
-  var rgb = base_gnd * clamp(gnd_frac, 0.0, 1.0) + exc_col * clamp(exc_frac * 1.4, 0.0, 1.2);
-  rgb = mix(rgb, dip_col, dip_frac * 0.65);
-  let shade = clamp(0.96 - 0.35 * pos4.w, 0.3, 1.0);
-  let alpha = clamp(0.052 * sqrt(prob_w), 0.0, 0.22);
+  var rgb = base_gnd * clamp(gnd_frac, 0.0, 1.0) + exc_col * clamp(exc_frac * 1.35, 0.0, 1.05);
+  rgb = mix(rgb, dip_col, dip_frac * 0.62);
+  let shade = clamp(0.92 - 0.28 * pos4.w, 0.34, 0.96);
+  // Crisp MoonLab additive exposure (bright jewel-like orbital lobes without white core saturation!)
+  let alpha = clamp(0.025 * sqrt(prob_w), 0.0, 0.095);
 
   var out: TdksPtOut;
   out.clip_pos = vec4<f32>(
@@ -1144,10 +1154,261 @@ fn vs_tdks_cloud(
 
 @fragment
 fn fs_tdks_cloud(in: TdksPtOut) -> @location(0) vec4<f32> {
-  if (in.color.a <= 0.004) { discard; }
+  if (in.color.a <= 0.001) { discard; }
   let r2 = dot(in.local_uv, in.local_uv);
   if (r2 > 1.0) { discard; }
-  let soft = exp(-r2 * 3.1) * (1.0 - r2);
+  let soft = exp(-r2 * 3.4) * (1.0 - r2);
+  let a = in.color.a * soft;
+  return vec4<f32>(in.color.rgb * a, a);
+}
+`;
+
+// ============================================================================
+// 3D Instanced WebGPU Spin-Lattice (sLLG) Magnetic Arrows Renderer (Zero-Copy!)
+// ============================================================================
+const SPIN_LATTICE_RENDER_WGSL = /* wgsl */ `
+struct SpinSceneUniforms {
+  res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
+  dims_cam: vec4<f32>,      // (nx, ny, nz, cam_dist)
+  field_meta: vec4<f32>,    // (bz_tesla, is_afm, arrow_scale, 0)
+};
+
+@group(0) @binding(0) var<uniform> u: SpinSceneUniforms;
+@group(0) @binding(1) var<storage, read> spins: array<vec4<f32>>;
+
+struct SpinArrowOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) color: vec3<f32>,
+  @location(1) shade: f32,
+};
+
+fn project_spin(p: vec3<f32>) -> vec3<f32> {
+  let cy = cos(u.res_yaw_pitch.z); let sy = sin(u.res_yaw_pitch.z);
+  let cp = cos(u.res_yaw_pitch.w); let sp = sin(u.res_yaw_pitch.w);
+  let x1 = p.x * cy - p.z * sy;
+  let z1 = p.x * sy + p.z * cy;
+  let y2 = p.y * cp - z1 * sp;
+  let z2 = p.y * sp + z1 * cp + u.dims_cam.w;
+  return vec3<f32>(x1, y2, z2);
+}
+
+@vertex
+fn vs_spin_arrow(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32
+) -> SpinArrowOut {
+  let nx = u32(max(1.0, u.dims_cam.x));
+  let ny = u32(max(1.0, u.dims_cam.y));
+  let nz = u32(max(1.0, u.dims_cam.z));
+  let n_tot = nx * ny * nz;
+
+  // Last instance (iid == n_tot) renders a large translucent external B_z field indicator beside the lattice!
+  var center = vec3<f32>(0.0);
+  var dir = vec3<f32>(0.0, 1.0, 0.0);
+  var arrow_len = u.field_meta.z;
+  var arrow_w = arrow_len * 0.28;
+  var col = vec3<f32>(1.0, 0.85, 0.35);
+
+  if (iid < n_tot) {
+    let ix = iid % nx;
+    let iy = (iid / nx) % ny;
+    let iz = iid / (nx * ny);
+    let fx = (f32(ix) / max(1.0, f32(nx - 1u))) * 2.0 - 1.0;
+    let fy = (f32(iy) / max(1.0, f32(ny - 1u))) * 2.0 - 1.0;
+    let fz = (f32(iz) / max(1.0, f32(nz - 1u))) * 2.0 - 1.0;
+    center = vec3<f32>(fx, fz, fy) * 0.92; // Map physical magnetic z-axis UP onto world Y!
+    let s4 = spins[iid];
+    // Map spin (sx, sy, sz) -> world (sx, sz, sy) so +z magnetization points cleanly UP!
+    dir = normalize(vec3<f32>(s4.x, s4.z, s4.y) + vec3<f32>(1e-5, 0.0, 0.0));
+    let sz = clamp(s4.z, -1.0, 1.0);
+    // Color by spin z-projection: -1 deep sapphire blue -> 0 emerald teal -> +1 radiant solar gold/crimson!
+    let c_down = vec3<f32>(0.22, 0.50, 1.0);
+    let c_mid = vec3<f32>(0.20, 0.88, 0.68);
+    let c_up = vec3<f32>(1.0, 0.72, 0.22);
+    col = select(mix(c_down, c_mid, sz + 1.0), mix(c_mid, c_up, sz), sz >= 0.0);
+  } else {
+    // External applied B_z field indicator on the right margin of the lattice
+    let bz = u.field_meta.x;
+    center = vec3<f32>(1.30, 0.0, 0.0);
+    dir = vec3<f32>(0.0, select(-1.0, 1.0, bz >= 0.0), 0.0);
+    arrow_len = clamp(abs(bz) * 0.14, 0.0, 0.65);
+    arrow_w = select(0.0, 0.085, arrow_len > 0.02);
+    col = select(vec3<f32>(0.35, 0.72, 1.0), vec3<f32>(1.0, 0.90, 0.35), bz >= 0.0);
+  }
+
+  // 2D camera-facing billboard arrow aligned strictly along the projected 3D spin direction!
+  let view_c = project_spin(center);
+  let view_tip = project_spin(center + dir * arrow_len);
+  let view_tail = project_spin(center - dir * (arrow_len * 0.45));
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.90 * min(1.0, aspect);
+
+  let inv_z_c = 1.0 / max(0.35, view_c.z);
+  let p_tip = vec2<f32>(view_tip.x * fov / (max(0.35, view_tip.z) * aspect), view_tip.y * fov / max(0.35, view_tip.z));
+  let p_tail = vec2<f32>(view_tail.x * fov / (max(0.35, view_tail.z) * aspect), view_tail.y * fov / max(0.35, view_tail.z));
+  let axis_2d = p_tip - p_tail;
+  let axis_len = max(0.008, length(axis_2d));
+  let fwd = axis_2d / axis_len;
+  let perp = vec2<f32>(-fwd.y / aspect, fwd.x * aspect);
+  let perp_n = normalize(perp);
+
+  // 9 vertices = 3 triangles: shaft quad (6 verts) + arrowhead triangle (3 verts)
+  var local = array<vec2<f32>, 9>(
+    vec2<f32>(0.0, -0.26), vec2<f32>(0.62, -0.26), vec2<f32>(0.62,  0.26),
+    vec2<f32>(0.0, -0.26), vec2<f32>(0.62,  0.26), vec2<f32>(0.0,   0.26),
+    vec2<f32>(0.54, -0.78), vec2<f32>(1.00,  0.00), vec2<f32>(0.54,  0.78)
+  );
+  let lv = local[vid];
+  let half_w = arrow_w * fov * inv_z_c;
+  let ndc = p_tail + fwd * (lv.x * axis_len) + vec2<f32>(perp_n.x / aspect, perp_n.y) * (lv.y * half_w);
+  let depth_z = clamp((view_c.z - 0.35) / 8.0, 0.001, 0.999);
+
+  var out: SpinArrowOut;
+  out.clip_pos = vec4<f32>(ndc.x, ndc.y, depth_z, 1.0);
+  out.color = col;
+  out.shade = 0.55 + 0.45 * lv.x;
+  return out;
+}
+
+@fragment
+fn fs_spin_arrow(in: SpinArrowOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(in.color * in.shade, 1.0);
+}
+`;
+
+// ============================================================================
+// 3D WebGPU Electron-Phonon & Superconducting Transport Renderer (Zero-Copy!)
+// ============================================================================
+const ELECTRON_TRANSPORT_RENDER_WGSL = /* wgsl */ `
+struct TransportSceneUniforms {
+  res_yaw_pitch: vec4<f32>, // (w, h, yaw, pitch)
+  cam_env: vec4<f32>,       // (cam_dist, phonon_vib_amp, time_s, is_superconducting)
+  field_meta: vec4<f32>,    // (e_field_norm, carrier_count, 0, 0)
+};
+
+@group(0) @binding(0) var<uniform> u: TransportSceneUniforms;
+@group(0) @binding(1) var<storage, read> c_pos: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> c_vel: array<vec4<f32>>;
+
+struct TrPtOut {
+  @builtin(position) clip_pos: vec4<f32>,
+  @location(0) local_uv: vec2<f32>,
+  @location(1) color: vec4<f32>,
+};
+
+fn project_tr(p: vec3<f32>) -> vec3<f32> {
+  let cy = cos(u.res_yaw_pitch.z); let sy = sin(u.res_yaw_pitch.z);
+  let cp = cos(u.res_yaw_pitch.w); let sp = sin(u.res_yaw_pitch.w);
+  let x1 = p.x * cy - p.z * sy;
+  let z1 = p.x * sy + p.z * cy;
+  let y2 = p.y * cp - z1 * sp;
+  let z2 = p.y * sp + z1 * cp + u.cam_env.x;
+  return vec3<f32>(x1, y2, z2);
+}
+
+// Pass 1: 4x4x4 = 64 vibrating crystal ion cores oscillating with Debye phonon amplitude!
+@vertex
+fn vs_phonon_ions(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32
+) -> TrPtOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+  );
+  let corner = quad[vid];
+  let ix = iid % 4u;
+  let iy = (iid / 4u) % 4u;
+  let iz = iid / 16u;
+  var p = (vec3<f32>(f32(ix), f32(iy), f32(iz)) / 3.0) * 1.72 - 0.86;
+  // Acoustic phonon displacement wave driven by exact bundle thermal phonon amplitude!
+  let ph = u.cam_env.z * 7.5 + f32(ix) * 1.3 + f32(iy) * 1.7 + f32(iz) * 2.1;
+  let amp = u.cam_env.y * 0.42;
+  p = p + vec3<f32>(sin(ph), cos(ph * 1.13), sin(ph * 0.87 + 1.0)) * amp;
+
+  let view = project_tr(p);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.90 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+  let r = 0.048 * fov * inv_z;
+  let col = select(vec3<f32>(0.28, 0.42, 0.62), vec3<f32>(0.36, 0.72, 0.88), u.cam_env.w > 0.5);
+
+  var out: TrPtOut;
+  out.clip_pos = vec4<f32>(
+    view.x * fov * inv_z / aspect + corner.x * r / aspect,
+    view.y * fov * inv_z + corner.y * r,
+    0.55, 1.0
+  );
+  out.local_uv = corner;
+  out.color = vec4<f32>(col, 0.45);
+  return out;
+}
+
+// Pass 2: Streaming conduction electrons, holes, Cooper pairs & red phonon scattering flashes!
+@vertex
+fn vs_carriers(
+  @builtin(vertex_index) vid: u32,
+  @builtin(instance_index) iid: u32
+) -> TrPtOut {
+  var quad = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+  );
+  let corner = quad[vid];
+  let p4 = c_pos[iid];
+  let v4 = c_vel[iid];
+  let ctype = p4.w;
+  let flash = clamp(v4.w, 0.0, 1.0);
+
+  let p_w = p4.xyz * 0.96;
+  let view = project_tr(p_w);
+  let aspect = u.res_yaw_pitch.x / max(1.0, u.res_yaw_pitch.y);
+  let fov = 1.90 * min(1.0, aspect);
+  let inv_z = 1.0 / max(0.35, view.z);
+
+  // Elongate moving carriers along velocity vector so drift vs random thermal motion is visually unmistakable!
+  let view_tip = project_tr(p_w + v4.xyz * 0.24);
+  let inv_zt = 1.0 / max(0.35, view_tip.z);
+  let p0_2d = vec2<f32>(view.x * fov * inv_z / aspect, view.y * fov * inv_z);
+  let p1_2d = vec2<f32>(view_tip.x * fov * inv_zt / aspect, view_tip.y * fov * inv_zt);
+  let dv_2d = p1_2d - p0_2d;
+  let dv_len = length(dv_2d);
+  let fwd = select(vec2<f32>(1.0, 0.0), dv_2d / max(1e-5, dv_len), dv_len > 0.002);
+  let perp = normalize(vec2<f32>(-fwd.y / aspect, fwd.x * aspect));
+
+  let base_r = select(0.022, 0.032, ctype < -1.5) * fov * inv_z;
+  let stretch = select(1.0, clamp(1.0 + dv_len / max(0.008, base_r), 1.0, 4.5), ctype != 0.0);
+  let rad_x = base_r * stretch + flash * base_r * 1.4;
+  let rad_y = base_r * (1.0 + flash * 1.2);
+  let offset = fwd * (corner.x * rad_x) + vec2<f32>(perp.x / aspect, perp.y) * (corner.y * rad_y);
+
+  var col = vec3<f32>(0.24, 0.84, 1.0); // normal electron: electric cyan
+  var alpha = 0.78;
+  if (ctype == 0.0) {
+    col = vec3<f32>(0.42, 0.30, 0.65); // bound valence state: subtle violet
+    alpha = 0.24;
+  } else if (ctype > 0.5) {
+    col = vec3<f32>(1.0, 0.38, 0.76); // thermally activated hole (+): radiant magenta
+    alpha = 0.85;
+  } else if (ctype < -1.5) {
+    col = vec3<f32>(1.0, 0.86, 0.34); // superconducting Cooper pair: radiant gold!
+    alpha = 0.92;
+  }
+  // Phonon scattering burst highlights collision site in bright orange-red!
+  col = mix(col, vec3<f32>(1.0, 0.34, 0.14), flash * 0.90);
+
+  var out: TrPtOut;
+  out.clip_pos = vec4<f32>(p0_2d.x + offset.x, p0_2d.y + offset.y, 0.45, 1.0);
+  out.local_uv = corner;
+  out.color = vec4<f32>(col, alpha);
+  return out;
+}
+
+@fragment
+fn fs_tr_dot(in: TrPtOut) -> @location(0) vec4<f32> {
+  let r2 = dot(in.local_uv, in.local_uv);
+  if (r2 > 1.0) { discard; }
+  let soft = exp(-r2 * 2.8) * (1.0 - r2);
   let a = in.color.a * soft;
   return vec4<f32>(in.color.rgb * a, a);
 }
@@ -1313,10 +1574,39 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     primitive: { topology: 'triangle-list' }
   });
 
-  const cloudUniformBuf = device.createBuffer({ size: 64, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+  const cloudUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const psUniformBuf = device.createBuffer({ size: 80, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
   const compNucPosBuf = device.createBuffer({ size: 256, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
   const compNucMetaBuf = device.createBuffer({ size: 256, usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST });
+
+  // 3D Spin-Lattice (sLLG) & Electron-Phonon Transport Pipelines
+  const spinModule = device.createShaderModule({ code: SPIN_LATTICE_RENDER_WGSL, label: 'ulg-lab-spin-llg-render' });
+  const spinPipe = device.createRenderPipeline({
+    label: 'ulg-lab-spin-arrow-pipe',
+    layout: 'auto',
+    vertex: { module: spinModule, entryPoint: 'vs_spin_arrow' },
+    fragment: { module: spinModule, entryPoint: 'fs_spin_arrow', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+  });
+  const spinUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
+
+  const trModule = device.createShaderModule({ code: ELECTRON_TRANSPORT_RENDER_WGSL, label: 'ulg-lab-electron-tr-render' });
+  const trIonPipe = device.createRenderPipeline({
+    label: 'ulg-lab-tr-ions-pipe',
+    layout: 'auto',
+    vertex: { module: trModule, entryPoint: 'vs_phonon_ions' },
+    fragment: { module: trModule, entryPoint: 'fs_tr_dot', targets: [{ format, blend: additiveBlend }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const trCarrierPipe = device.createRenderPipeline({
+    label: 'ulg-lab-tr-carriers-pipe',
+    layout: 'auto',
+    vertex: { module: trModule, entryPoint: 'vs_carriers' },
+    fragment: { module: trModule, entryPoint: 'fs_tr_dot', targets: [{ format, blend: additiveBlend }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const trUniformBuf = device.createBuffer({ size: 48, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
 
   // Single-Atom TD-KS Quantum Electron Cloud <-> Photon Wavepacket Pipelines
   const tdksModule = device.createShaderModule({ code: TDKS_PHOTON_CLOUD_WGSL, label: 'ulg-lab-tdks-photon-cloud' });
@@ -1324,7 +1614,7 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     label: 'ulg-lab-tdks-field-pipe',
     layout: 'auto',
     vertex: { module: tdksModule, entryPoint: 'vs_tdks_field' },
-    fragment: { module: tdksModule, entryPoint: 'fs_tdks_field', targets: [{ format }] },
+    fragment: { module: tdksModule, entryPoint: 'fs_tdks_field', targets: [{ format, blend: additiveBlend }] },
     primitive: { topology: 'triangle-list' }
   });
   const tdksCloudPipe = device.createRenderPipeline({
@@ -1835,7 +2125,9 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     colorA = [1.0, 1.0, 1.0],
     colorB = [0.38, 0.17, 0.87], // MoonLab #612BDE
     showGuides = false,
-    showNucleus = true
+    showNucleus = true,
+    starkMixLambda = 0.0,
+    eFieldNorm = 0.0
   }) {
     if (!pointsBuffer || !(pointCount > 0)) return;
     const { w, h } = ensureCanvasSize();
@@ -1843,7 +2135,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
       w, h, yaw, pitch,
       camDist, pointSize, opacity, alternateShellColors ? 1.0 : 0.0,
       colorA[0] ?? 1.0, colorA[1] ?? 1.0, colorA[2] ?? 1.0, showGuides ? 1.0 : 0.0,
-      colorB[0] ?? 0.38, colorB[1] ?? 0.17, colorB[2] ?? 0.87, 0.018
+      colorB[0] ?? 0.38, colorB[1] ?? 0.17, colorB[2] ?? 0.87, 0.018,
+      starkMixLambda, eFieldNorm, 0.0, 0.0
     ]));
 
     const cloudBg = device.createBindGroup({
@@ -2049,6 +2342,111 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     device.queue.submit([enc.finish()]);
   }
 
+  /**
+   * Render 3D WebGPU Stochastic LLG Spin-Lattice Magnetic Arrows ZERO-COPY!
+   */
+  function renderSpinLatticeScene({
+    spinsBuffer,
+    dims = [10, 10, 10],
+    yaw = 0.48,
+    pitch = 0.32,
+    camDist = 3.1,
+    fieldBZTesla = 0.0,
+    isAntiferro = false
+  }) {
+    if (!spinsBuffer) return;
+    const { w, h } = ensureCanvasSize();
+    const [nx, ny, nz] = dims;
+    const arrowScale = 1.65 / Math.max(nx, ny, nz);
+    device.queue.writeBuffer(spinUniformBuf, 0, new Float32Array([
+      w, h, yaw, pitch,
+      nx, ny, nz, camDist,
+      fieldBZTesla, isAntiferro ? 1.0 : 0.0, arrowScale, 0.0
+    ]));
+    const bg = device.createBindGroup({
+      layout: spinPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: spinUniformBuf } },
+        { binding: 1, resource: { buffer: spinsBuffer } }
+      ]
+    });
+    const enc = device.createCommandEncoder({ label: 'ulg-lab-render-spins' });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0.014, g: 0.022, b: 0.044, a: 1 }
+      }],
+      depthStencilAttachment: {
+        view: depthTex.createView(),
+        depthLoadOp: 'clear',
+        depthStoreOp: 'store',
+        depthClearValue: 1.0
+      }
+    });
+    pass.setPipeline(spinPipe);
+    pass.setBindGroup(0, bg);
+    pass.draw(9, nx * ny * nz + 1);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  /**
+   * Render 3D WebGPU Drude-Boltzmann Electron-Phonon & Superconducting Transport ZERO-COPY!
+   */
+  function renderElectronTransportScene({
+    posBuffer,
+    velBuffer,
+    carrierCount = 1024,
+    yaw = 0.42,
+    pitch = 0.28,
+    camDist = 2.95,
+    eFieldVPerM = 1e4,
+    phononVibAmp = 0.03,
+    timeS = 0,
+    isSuperconducting = false
+  }) {
+    if (!posBuffer || !velBuffer || !(carrierCount > 0)) return;
+    const { w, h } = ensureCanvasSize();
+    device.queue.writeBuffer(trUniformBuf, 0, new Float32Array([
+      w, h, yaw, pitch,
+      camDist, phononVibAmp, timeS, isSuperconducting ? 1.0 : 0.0,
+      eFieldVPerM / 1e4, carrierCount, 0.0, 0.0
+    ]));
+    const ionBg = device.createBindGroup({
+      layout: trIonPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: trUniformBuf } }]
+    });
+    const carBg = device.createBindGroup({
+      layout: trCarrierPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: trUniformBuf } },
+        { binding: 1, resource: { buffer: posBuffer } },
+        { binding: 2, resource: { buffer: velBuffer } }
+      ]
+    });
+    const enc = device.createCommandEncoder({ label: 'ulg-lab-render-transport' });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: isSuperconducting
+          ? { r: 0.012, g: 0.020, b: 0.056, a: 1 }
+          : { r: 0.010, g: 0.016, b: 0.034, a: 1 }
+      }]
+    });
+    pass.setPipeline(trIonPipe);
+    pass.setBindGroup(0, ionBg);
+    pass.draw(6, 64);
+    pass.setPipeline(trCarrierPipe);
+    pass.setBindGroup(0, carBg);
+    pass.draw(6, carrierCount);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
   return Object.freeze({
     backend: 'webgpu',
     format,
@@ -2058,6 +2456,8 @@ export function createElementsLabWebGpuRenderer(device, canvas) {
     renderOrbitalPointCloud,
     renderPhotonShellScene,
     renderTdksPhotonCloudScene,
+    renderSpinLatticeScene,
+    renderElectronTransportScene,
     renderLiveMd,
     renderStaticCrystalLattice,
     renderPolytopeAtlas,

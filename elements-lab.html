@@ -352,9 +352,11 @@
             <button class="chip" data-hero-z="47" data-hero-tab="crystal">Ag Silver</button>
             <button class="chip" data-hero-z="29" data-hero-tab="crystal">Cu Copper</button>
             <button class="chip" data-hero-z="26" data-hero-tab="atomic">Fe Orbital</button>
+            <button class="chip" data-hero-z="26" data-hero-tab="crystal" data-hero-cview="spin-llg">Fe Magnet</button>
+            <button class="chip" data-hero-z="82" data-hero-tab="crystal" data-hero-cview="transport">Pb Supercond</button>
             <button class="chip" data-hero-z="6" data-hero-tab="crystal">C Diamond</button>
-            <button class="chip" data-hero-z="14" data-hero-tab="crystal">Si</button>
-            <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Tunnel</button>
+            <button class="chip" data-hero-z="14" data-hero-tab="crystal" data-hero-cview="transport">Si Semi</button>
+            <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Fission</button>
             <button class="chip react" data-hero-compound="H2O" data-hero-tab="crystal">H₂O n(λ)</button>
             <button class="chip react" data-hero-react="Na|H2O">Na + H₂O ⚡</button>
           </div>
@@ -411,20 +413,19 @@
 
         <div class="mobile-quick-bar" id="mobile-quick-presets">
           <button class="chip gold" data-hero-z="79" data-hero-tab="crystal">Au Gold Color</button>
-          <button class="chip" data-hero-z="47" data-hero-tab="crystal">Ag Silver</button>
-          <button class="chip" data-hero-z="29" data-hero-tab="crystal">Cu Copper</button>
+          <button class="chip" data-hero-z="26" data-hero-tab="crystal" data-hero-cview="spin-llg">Fe Magnet</button>
+          <button class="chip" data-hero-z="82" data-hero-tab="crystal" data-hero-cview="transport">Pb Supercond</button>
           <button class="chip" data-hero-z="26" data-hero-tab="atomic">Fe Orbital</button>
-          <button class="chip" data-hero-z="6" data-hero-tab="crystal">C Diamond</button>
-          <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Tunnel</button>
+          <button class="chip" data-hero-z="92" data-hero-a="235" data-hero-tab="nuclear">²³⁵U Fission</button>
           <button class="chip react" data-hero-compound="H2O" data-hero-tab="crystal">H₂O n(λ)</button>
           <button class="chip react" data-hero-react="Na|H2O">Na + H₂O ⚡</button>
         </div>
 
         <div class="tabs">
-          <button class="tab-btn active" data-tab="nuclear">1. Nuclear &amp; TDSE (10⁻¹⁵ m)</button>
-          <button class="tab-btn" data-tab="atomic">2. Schrödinger / Dirac–KS (10⁻¹⁰ m)</button>
-          <button class="tab-btn" data-tab="crystal">3. Photon–Shell Optics &amp; DFT (10⁻⁹ m)</button>
-          <button class="tab-btn" data-tab="md">4. Live WebGPU MD</button>
+          <button class="tab-btn active" data-tab="nuclear">1. Nuclear, TDSE &amp; Fission</button>
+          <button class="tab-btn" data-tab="atomic">2. Dirac–KS, Stark &amp; ΔSCF</button>
+          <button class="tab-btn" data-tab="crystal">3. Optics, Magnetism &amp; Transport</button>
+          <button class="tab-btn" data-tab="md">4. MD, Mechanics &amp; NEMD</button>
           <button class="tab-btn" data-tab="compound">5. Chemistry, CI-NEB &amp; Backfeed</button>
           <button class="tab-btn" data-tab="polytope">6. Convex Polytope Atlas</button>
         </div>

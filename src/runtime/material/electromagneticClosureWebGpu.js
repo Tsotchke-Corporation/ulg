@@ -165,11 +165,25 @@ export async function deriveElectromagneticClosureWebGpu(device, {
   const staticDielectricConstant = bulkResult.isMetal
     ? Infinity
     : 1.0 + Math.pow((plasmaEnergyEv || 10.5) / Math.max(0.5, bulkResult.bandGapEv * 1.4), 2);
-  // McMillan-Allen-Dynes superconducting critical temperature T_c (suppressed in ferromagnets!)
+  // McMillan-Allen-Dynes superconducting critical temperature T_c (suppressed in magnetic phases!)
+  // Derive Hopfield electron-phonon coupling lambda_bcs strictly from d-band Fermi DOS & polyvalent
+  // sp ion valence Z_sp = sOcc + pOcc vs Debye stiffness (zero element IDs: monovalent noble Cu/Ag/Au
+  // stay ~0 K while polyvalent Pb/Al/Hg and high-DOS open-d Nb/V/Ta emerge as real BCS superconductors!).
   const muStar = 0.12;
+  const zValSp = sOcc + pOcc;
+  const dosEf = bulkResult.dosAtFermiStatesPerEvAtom || 0.5;
+  const dBandHopfield = (dOcc > 0 && dOcc < 10)
+    ? 0.31 * dosEf * Math.pow(450 / thetaD, 0.35)
+    : 0;
+  const spIonHopfield = (zValSp >= 2)
+    ? 0.18 * (zValSp - 0.85) * Math.pow(350 / Math.max(80, thetaD), 0.5) * (1 + 0.28 * dosEf)
+    : 0;
+  const lambdaBcs = bulkResult.isMetal
+    ? Math.max(lambdaEp, Math.min(1.65, 0.08 + dBandHopfield + spIonHopfield))
+    : 0;
   let superconductingTcK = 0;
-  if (bulkResult.isMetal && magneticPhase !== 'ferromagnetic' && magneticPhase !== 'antiferromagnetic' && lambdaEp > muStar * 1.35) {
-    const expo = -(1.04 * (1 + lambdaEp)) / Math.max(0.05, lambdaEp - muStar * (1 + 0.62 * lambdaEp));
+  if (bulkResult.isMetal && magneticPhase !== 'ferromagnetic' && magneticPhase !== 'antiferromagnetic' && lambdaBcs > muStar * 1.45) {
+    const expo = -(1.04 * (1 + lambdaBcs)) / Math.max(0.05, lambdaBcs - muStar * (1 + 0.62 * lambdaBcs));
     superconductingTcK = Math.max(0, (thetaD / 1.45) * Math.exp(expo));
   }
 

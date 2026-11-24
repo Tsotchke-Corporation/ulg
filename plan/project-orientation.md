@@ -146,7 +146,7 @@ SS README, `Agents.md`, `STATUS.md`, the Triad v0.5 addendum, PeerCompute's
 branch-scope-review docs, plus ICC architecture summaries for all four repos.
 
 Sampled rather than read line by line: `plan/log.md` (41k lines),
-`plan/implementation-status.md` (6.1k), PeerCompute's `plan/log.md` (55k),
+`plan/implementation-status.md` (6.1k), PeerCompute's `plan/log/` (`log-summary.md` & `detail/`, migrated from legacy 55k-line `plan/log.md`),
 Eshkol's remaining ~140k-line doc tree, MoonLab's ~51k-line API reference. Those
 are append-only narrative and per-call API reference; the design content is in
 the documents listed above. Total documentation surface across the four repos is

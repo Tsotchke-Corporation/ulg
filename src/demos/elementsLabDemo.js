@@ -14,10 +14,17 @@ import {
 } from '../runtime/electronicStructure/periodicTable.js';
 import {
   mostStableMassNumberForZ,
-  deriveNuclearClosure
+  deriveNuclearClosure,
+  bohrWheelerFissionCurve,
+  buildFissionDeformationVolumeWebGpu,
+  registerNuclearFissionSimulationModule
 } from '../runtime/nuclear/nuclearStructureGpu.js';
-import { deriveNuclearDecayChain } from '../runtime/material/nuclearCherenkovClosure.js';
+import {
+  deriveNuclearDecayChain,
+  stepIsotopeInventoryLedger
+} from '../runtime/material/nuclearCherenkovClosure.js';
 import { deriveElementBundleWebGpu } from '../runtime/material/periodicTableEngineWebGpu.js';
+import { solveAtomFullWebGpu } from '../runtime/electronicStructure/radialKohnShamWebGpu.js';
 import {
   deriveCompoundBundleWebGpu,
   discoverAndDeriveReactionProductsWebGpu
@@ -31,11 +38,13 @@ import {
   solveMoleculeRhfWebGpu
 } from '../runtime/electronicStructure/molecularHartreeFockWebGpu.js';
 import {
+  computeStarkPolarizationState,
   createQuantumBlochPhotonSession,
   registerOrbitalCloudSimulationModule,
   sampleAtomicOrbitalCloudWebGpu,
   sampleDipoleCoupledOrbitalPairWebGpu,
-  sampleMolecularOrbitalCloudWebGpu
+  sampleMolecularOrbitalCloudWebGpu,
+  solveDeltaScfIonizationWebGpu
 } from '../runtime/electronicStructure/orbitalPointCloudWebGpu.js';
 import {
   createNuclearTunnelingTdseWebGpu,
@@ -44,17 +53,34 @@ import {
   registerPhotonShellSimulationModules
 } from '../runtime/material/photonShellOpticsWebGpu.js';
 import {
+  createSpinLatticeSessionWebGpu,
+  registerSpinLatticeClosureArtifact,
+  registerSpinLatticeSimulationModule
+} from '../runtime/material/spinLatticeMagnetismWebGpu.js';
+import {
+  createElectronTransportSessionWebGpu,
+  registerElectronTransportClosureArtifact,
+  registerElectronTransportSimulationModule
+} from '../runtime/material/electronTransportWebGpu.js';
+import {
+  MD_EXPERIMENT_MODES,
   buildCrystalMdState,
-  createMolecularDynamicsSessionWebGpu
+  computePhononVdosFromVacf,
+  createMolecularDynamicsSessionWebGpu,
+  registerMdSimulationModules
 } from '../runtime/gpuMath/molecularDynamicsWebGpu.js';
 import { ClosureRegistry } from '../runtime/ClosureRegistry.js';
 import { defaultSimulationModuleRegistry } from '../runtime/simulationModuleRegistry.js';
 import { createElementsLabWebGpuRenderer } from './elementsLabWebGpuRenderer.js';
 
-// Register reusable canonical ULG simulation modules on boot (shared with Studio & Triad!)
+// Register ALL reusable canonical ULG simulation modules on boot (shared with Studio & Triad!)
 try {
   registerOrbitalCloudSimulationModule(defaultSimulationModuleRegistry);
   registerPhotonShellSimulationModules(defaultSimulationModuleRegistry);
+  registerSpinLatticeSimulationModule(defaultSimulationModuleRegistry);
+  registerElectronTransportSimulationModule(defaultSimulationModuleRegistry);
+  registerMdSimulationModules(defaultSimulationModuleRegistry);
+  registerNuclearFissionSimulationModule(defaultSimulationModuleRegistry);
 } catch {
   // Already registered in hot-reload session
 }
@@ -173,20 +199,42 @@ let liveTdseBusy = false;
 let liveMdSession = null;         // Zero-copy WebGPU MD session (Elements AND Compounds!)
 let liveMdTelemetry = null;
 let liveMdHistory = [];
+let liveMdVacfHistory = [];
+let liveMdStrainHistory = [];
 let liveMdBusy = false;
 let liveMdConfigMeta = null;
 
+// New Canonical Material-Property GPU Sessions (Sims 1–5!)
+let liveSpinSession = null;       // 3D WebGPU Stochastic LLG Spin-Lattice (Magnetism)
+let liveSpinTelemetry = null;
+let liveSpinHistory = [];         // Hysteresis M(B) / M(T) trace
+let liveSpinBusy = false;
+let liveTransportSession = null;  // 3D WebGPU Drude-Boltzmann & BCS Transport
+let liveTransportTelemetry = null;
+let liveTransportHistory = [];
+let liveTransportBusy = false;
+let liveFissionVolGpu = null;     // 3D WebGPU Bohr-Wheeler Fission Saddle/Scission volume
+let liveFissionCurve = null;
+let liveBatemanSeries = null;
+let liveDeltaScfResult = null;    // Live GPU Delta-SCF Cation Ionization result
+let liveStarkState = null;        // Live Static E-Field Stark Polarization state
+
 // Interactive simulation controls state
 const uiState = {
-  // Tab 1: Nuclear TDSE
+  // Tab 1: Nuclear TDSE, Fission Saddle & Bateman Decay
+  nuclearViewMode: 'tdse',        // 'tdse' | 'fission' | 'bateman'
   tdsePlaying: true,
-  // Tab 2: MoonLab-grade Atomic / Molecular QM
+  fissionBeta2: 0.0,
+  fissionPlaying: false,
+  // Tab 2: MoonLab-grade Atomic / Molecular QM + Stark Polarization + Delta-SCF Ionization
   atomicViewMode: 'cloud',        // 'cloud' | 'volume'
   n: 3,
   l: 2,
   m: 0,
   functional: 'pbe',              // 'pbe' | 'lda' | 'bare'
   relativisticSpinOrbit: true,
+  starkFieldVPerA: 0.0,
+  ionizedCation: false,
   pointCount: IS_MOBILE_GPU_PROFILE ? 90000 : 240000,
   pointSize: IS_MOBILE_GPU_PROFILE ? 0.015 : 0.012,
   opacity: IS_MOBILE_GPU_PROFILE ? 0.30 : 0.24,
@@ -198,12 +246,22 @@ const uiState = {
   autoRotate: false,              // Fixed camera by default (cameraAutoSpin: false!)
   cloudSeed: 1,
   molOrbitalMode: 0,              // 0 = Total rho, 1 = HOMO, 2 = LUMO
-  // Tab 3: Single-Atom TD-KS Electron-Cloud <-> Photon & Bulk 2D Maxwell-ADE-FDTD Slab
-  crystalViewMode: 'tdks-atom',   // 'tdks-atom' | 'photon-shell' | 'bloch' | 'lattice'
+  // Tab 3: Optics (2D Maxwell Crystal Slab & Single-Atom TD-KS), 3D Bloch, Crystal Cell, Spin-Lattice LLG & Transport
+  crystalViewMode: 'photon-shell', // 'photon-shell' | 'bloch' | 'lattice' | 'tdks-atom' | 'spin-llg' | 'transport'
   photonPlaying: true,
   photonModeMono: false,          // false = RGB White Light, true = Single-lambda probe
   probeWavelengthNm: 440,
-  // Tab 4: Live WebGPU MD
+  spinTempK: 300,
+  spinFieldBTesla: 0.5,
+  spinSweepB: false,
+  spinSweepDir: 1,
+  spinPlaying: true,
+  transportTempK: 300,
+  transportEFieldVPerM: 10000,
+  transportPlaying: true,
+  // Tab 4: Live WebGPU MD, Mechanical Stress-Strain/Acoustic & NEMD Viscosity/Heat/Surface
+  mdMode: 'equilibrium',          // 'equilibrium' | 'strain' | 'acoustic' | 'shear' | 'thermal' | 'surface'
+  mdNptBarostat: false,
   mdPlaying: true,
   mdTargetTempK: 300,
   // Tab 5: CI-NEB Reaction Scrubber
@@ -1128,25 +1186,228 @@ function initNuclearTdseForActiveElement() {
   liveTdseSession = createNuclearTunnelingTdseWebGpu(gpuDevice, nuc);
 }
 
-function initLiveMdForActiveSpecimen(overrideTempK = null) {
+function computeBatemanDecayCurves(decayChain) {
+  if (!decayChain?.steps?.length) return null;
+  const steps = decayChain.steps;
+  const firstHalfLife = Math.max(1e-6, Math.min(1e24, Number(steps[0].halfLifeS) || 1));
+  // Build custom channel map from Gate 1 derived chain so arbitrary (Z, A) nuclides step cleanly!
+  const chanMap = {};
+  for (const s of steps) chanMap[s.isotope] = s;
+  const tracked = [steps[0].isotope, steps[0].daughterIsotope];
+  if (steps.length >= 2 && !tracked.includes(steps[1].daughterIsotope)) tracked.push(steps[1].daughterIsotope);
+  if (decayChain.endIsotope && !tracked.includes(decayChain.endIsotope)) tracked.push(decayChain.endIsotope);
+
+  const nPts = 36;
+  const tHalfUnits = [];
+  const curves = tracked.map((name) => ({ name, frac: [] }));
+  const N0 = 1e6;
+  let inv = [{ isotope: steps[0].isotope, A: steps[0].A, atomCount: N0 }];
+  const dtStep = (firstHalfLife * 6.0) / (nPts - 1);
+  for (let k = 0; k < nPts; k += 1) {
+    tHalfUnits.push((k * dtStep) / firstHalfLife);
+    for (let c = 0; c < tracked.length; c += 1) {
+      const entry = inv.find((e) => e.isotope === tracked[c]);
+      curves[c].frac.push((entry?.atomCount || 0) / N0);
+    }
+    if (k < nPts - 1) {
+      const res = stepIsotopeInventoryLedger(inv, dtStep, { channels: chanMap });
+      inv = res.nextInventory;
+    }
+  }
+  return { tHalfUnits, firstHalfLifeS: firstHalfLife, curves };
+}
+
+function updateNuclearFissionVolume() {
+  if (!gpuDevice || activeSpecimenKind !== 'element' || !currentElementRes?.visualData?.nuclear) return;
+  const nuc = currentElementRes.visualData.nuclear;
+  liveFissionCurve = bohrWheelerFissionCurve(nuc.Z, nuc.A);
+  liveFissionVolGpu = buildFissionDeformationVolumeWebGpu(gpuDevice, nuc, {
+    beta2: uiState.fissionBeta2,
+    dim: IS_MOBILE_GPU_PROFILE ? 24 : 28,
+    reuseBuffer: liveFissionVolGpu?.buffer ?? null
+  });
+}
+
+function updateStarkStateForActiveElement() {
+  const activeAtom = (uiState.ionizedCation && liveDeltaScfResult?.cationAtom)
+    ? liveDeltaScfResult.cationAtom
+    : currentElementRes?.visualData?.atom;
+  if (!activeAtom) { liveStarkState = null; return; }
+  liveStarkState = computeStarkPolarizationState({
+    atomResult: activeAtom,
+    eFieldVPerA: uiState.starkFieldVPerA
+  });
+}
+
+async function toggleDeltaScfIonization(enableCation) {
+  if (!gpuDevice || activeSpecimenKind !== 'element' || !currentElementRes?.visualData?.atom) return;
+  uiState.ionizedCation = Boolean(enableCation);
+  if (uiState.ionizedCation && (!liveDeltaScfResult || liveDeltaScfResult.Z !== selectedZ)) {
+    statusBadge.textContent = `Solving ΔSCF ${symbolForZ(selectedZ)}⁺…`;
+    const baseAtom = currentElementRes.visualData.atom;
+    const nuc = currentElementRes.visualData.nuclear;
+    liveDeltaScfResult = await solveDeltaScfIonizationWebGpu(gpuDevice, {
+      Z: selectedZ,
+      solveAtomFullWebGpu,
+      baseConfiguration: electronConfiguration(selectedZ),
+      baseAtomResult: baseAtom,
+      functional: uiState.functional,
+      scalarRelativistic: uiState.relativisticSpinOrbit,
+      spinOrbit: uiState.relativisticSpinOrbit,
+      nuclearChargeRadiusBohr: nuc?.chargeRadiusBohr,
+      nuclearMassU: nuc?.atomicMassU
+    });
+    statusBadge.textContent = `${symbolForZ(selectedZ)}⁺ I₁=${fmt(liveDeltaScfResult?.ionizationEnergyEv, 2)} eV`;
+  }
+  // Re-sample 3D orbital point cloud directly from contracted cation (or neutral) GPU KS wavefunction!
+  const srcAtom = (uiState.ionizedCation && liveDeltaScfResult?.cationAtom)
+    ? liveDeltaScfResult.cationAtom
+    : currentElementRes.visualData.atom;
+  if (srcAtom) {
+    let solvedU = null;
+    if (Array.isArray(srcAtom.orbitalWavefunctions) && Array.isArray(srcAtom.orbitals)) {
+      const oi = srcAtom.orbitals.findIndex((o) => o.n === uiState.n && o.l === uiState.l);
+      if (oi >= 0) solvedU = srcAtom.orbitalWavefunctions[oi];
+    }
+    const prevBuf = liveOrbitalCloud?.pointsBuffer ?? null;
+    liveOrbitalCloud = sampleAtomicOrbitalCloudWebGpu(gpuDevice, {
+      Z: uiState.ionizedCation ? srcAtom.atomicNumberZ + 0.65 : srcAtom.atomicNumberZ,
+      n: uiState.n,
+      l: uiState.l,
+      m: uiState.m,
+      pointCount: uiState.pointCount,
+      rGrid: srcAtom.radialGrid?.r || null,
+      orbitalU: solvedU,
+      screeningExchange: uiState.functional !== 'bare',
+      relativisticSpinOrbit: uiState.relativisticSpinOrbit,
+      colorMode: uiState.colorMode,
+      seed: uiState.cloudSeed,
+      reuseBuffer: prevBuf
+    });
+  }
+  updateStarkStateForActiveElement();
+  renderSimControls();
+  redrawCurrentTab();
+  syncDebugState();
+}
+
+function initSpinLatticeForActiveSpecimen() {
+  if (!gpuDevice) return;
+  if (liveSpinSession) {
+    try { liveSpinSession.destroy(); } catch {}
+    liveSpinSession = null;
+  }
+  liveSpinTelemetry = null;
+  liveSpinHistory = [];
+  const b = getActiveBundle();
+  const em = getActiveElectromagnetic();
+  if (!b || !em) return;
+  const tc = Number(em.curieOrNeelTempK) || 0;
+  uiState.spinTempK = (em.magneticPhase === 'ferromagnetic' || em.magneticPhase === 'antiferromagnetic') && tc > 20
+    ? Math.max(10, Math.round(tc * 0.45))
+    : 300;
+  const side = IS_MOBILE_GPU_PROFILE ? 8 : 10;
+  liveSpinSession = createSpinLatticeSessionWebGpu(gpuDevice, em, b.mechanical || {}, {
+    nx: side, ny: side, nz: side,
+    temperatureK: uiState.spinTempK,
+    fieldBZTesla: uiState.spinFieldBTesla
+  });
+  liveSpinSession.stepBatch(18, { readObs: true }).then((tel) => {
+    if (!tel) return;
+    liveSpinTelemetry = tel;
+    liveSpinHistory.push({ B: tel.fieldBZTesla, Mz: tel.magnetizationZ, Mmag: tel.magnetizationMag, Mstag: tel.staggeredOrderMag, T: tel.temperatureK });
+    registerSpinLatticeClosureArtifact({
+      closureRegistry: labClosureRegistry,
+      materialKey: b.materialKey,
+      electromagnetic: em,
+      mechanical: b.mechanical,
+      telemetry: tel
+    }).catch(() => {});
+    if (currentTab === 'crystal' && uiState.crystalViewMode === 'spin-llg') redrawCurrentTab();
+    syncDebugState();
+  }).catch(() => {});
+}
+
+function initElectronTransportForActiveSpecimen(overrideTempK = null) {
+  if (!gpuDevice) return;
+  if (liveTransportSession) {
+    try { liveTransportSession.destroy(); } catch {}
+    liveTransportSession = null;
+  }
+  liveTransportTelemetry = null;
+  liveTransportHistory = [];
+  const b = getActiveBundle();
+  const em = getActiveElectromagnetic();
+  if (!b || !em) return;
+  const tc = Number(em.superconductingTcK) || 0;
+  if (overrideTempK != null) {
+    uiState.transportTempK = Math.max(0.5, Number(overrideTempK));
+  } else if (tc > 0.8 && uiState.crystalViewMode === 'transport') {
+    uiState.transportTempK = Math.max(0.5, Number((tc * 0.35).toFixed(1)));
+  } else {
+    uiState.transportTempK = 300;
+  }
+  liveTransportSession = createElectronTransportSessionWebGpu(gpuDevice, em, b.mechanical || {}, {
+    carrierCount: IS_MOBILE_GPU_PROFILE ? 512 : 1024,
+    temperatureK: uiState.transportTempK,
+    eFieldVPerM: uiState.transportEFieldVPerM
+  });
+  liveTransportSession.stepBatch(16, { readObs: true }).then((tel) => {
+    if (!tel) return;
+    liveTransportTelemetry = tel;
+    liveTransportHistory.push({ T: tel.temperatureK, drift: tel.meanDriftNorm, scatter: tel.measuredScatterRateFrac, sigma: tel.sigmaGpuSPerM });
+    registerElectronTransportClosureArtifact({
+      closureRegistry: labClosureRegistry,
+      materialKey: b.materialKey,
+      electromagnetic: em,
+      mechanical: b.mechanical,
+      telemetry: tel
+    }).catch(() => {});
+    if (currentTab === 'crystal' && uiState.crystalViewMode === 'transport') redrawCurrentTab();
+    syncDebugState();
+  }).catch(() => {});
+}
+
+function initLiveMdForActiveSpecimen(overrideTempK = null, overrideMode = null) {
+  if (overrideMode) uiState.mdMode = overrideMode;
   if (liveMdSession) {
     try { liveMdSession.destroy(); } catch {}
     liveMdSession = null;
   }
   liveMdTelemetry = null;
   liveMdHistory = [];
+  liveMdVacfHistory = [];
+  liveMdStrainHistory = [];
   liveMdConfigMeta = null;
   if (!gpuDevice) return;
+
+  const modeKey = uiState.mdMode || 'equilibrium';
+  const modeMap = {
+    equilibrium: MD_EXPERIMENT_MODES.EQUILIBRIUM,
+    strain: MD_EXPERIMENT_MODES.STRAIN,
+    acoustic: MD_EXPERIMENT_MODES.ACOUSTIC,
+    shear: MD_EXPERIMENT_MODES.SHEAR_NEMD,
+    thermal: MD_EXPERIMENT_MODES.THERMAL_NEMD,
+    surface: MD_EXPERIMENT_MODES.SURFACE_SLAB
+  };
+  const modeCode = modeMap[modeKey] ?? MD_EXPERIMENT_MODES.EQUILIBRIUM;
+  const cellsVec = modeKey === 'acoustic'
+    ? [5, 2, 2]
+    : (modeKey === 'thermal' ? [4, 2, 2] : null);
+  const vacuumZFactor = modeKey === 'surface' ? 2.5 : 1.0;
 
   if (activeSpecimenKind === 'compound' && currentCompoundRes?.visualData?.mdConfig) {
     const cfg = currentCompoundRes.visualData.mdConfig;
     const b = currentCompoundRes.bundle;
     const tMelt = Math.max(20, Number(b.thermodynamic.meltingPointK || 300));
-    const tTarget = overrideTempK ?? Math.max(20, Math.min(2400, 0.70 * tMelt));
+    const defaultFrac = modeKey === 'shear' ? 1.25 : (modeKey === 'strain' || modeKey === 'acoustic' ? 0.25 : 0.70);
+    const tTarget = overrideTempK ?? Math.max(20, Math.min(2400, defaultFrac * tMelt));
     uiState.mdTargetTempK = Math.round(tTarget);
     const init = buildCrystalMdState({
       crystalStructure: cfg.crystalStructure,
       cellsPerSide: 2,
+      cellsVec,
+      vacuumZFactor,
       latticeConstantA: cfg.latticeConstantA,
       massU: cfg.massU,
       temperatureK: tTarget
@@ -1169,6 +1430,7 @@ function initLiveMdForActiveSpecimen(overrideTempK = null) {
       crystalStructure: cfg.crystalStructure,
       modelName: cfg.modelName,
       rcutA: cfg.rcutA,
+      dtFs: cfg.dtFs,
       meltingPointK: tMelt
     };
     liveMdTelemetry = currentCompoundRes.visualData.mdTelemetry;
@@ -1178,11 +1440,15 @@ function initLiveMdForActiveSpecimen(overrideTempK = null) {
     const b = currentElementRes.bundle;
     const massU = Math.max(1, Number(b.nuclear.atomicMassU || 28));
     const tMelt = Math.max(20, Number(b.thermodynamic.meltingPointK || 600));
-    const tTarget = overrideTempK ?? Math.max(30, Math.min(1800, 0.70 * tMelt));
+    const defaultFrac = modeKey === 'shear' ? 1.25 : (modeKey === 'strain' || modeKey === 'acoustic' ? 0.25 : 0.70);
+    const tTarget = overrideTempK ?? Math.max(30, Math.min(2200, defaultFrac * tMelt));
     uiState.mdTargetTempK = Math.round(tTarget);
+    const dtFs = Math.min(2.0, Math.max(0.45, 0.09 * Math.sqrt(massU)));
     const init = buildCrystalMdState({
       crystalStructure: bulk.crystalStructure,
-      cellsPerSide: 3,
+      cellsPerSide: modeKey === 'surface' ? 2 : 3,
+      cellsVec,
+      vacuumZFactor,
       latticeConstantA: Math.max(2.4, Number(bulk.latticeConstantA || 3.6)),
       massU,
       temperatureK: tTarget
@@ -1197,7 +1463,7 @@ function initLiveMdForActiveSpecimen(overrideTempK = null) {
       eamAEv: pot.eamAEv,
       eamBeta: pot.eamBeta,
       swGamma: pot.swGamma,
-      dtFs: Math.min(2.0, Math.max(0.45, 0.09 * Math.sqrt(massU))),
+      dtFs,
       targetTemperatureK: tTarget,
       thermostatCouplingFs: 35
     });
@@ -1206,9 +1472,19 @@ function initLiveMdForActiveSpecimen(overrideTempK = null) {
       crystalStructure: bulk.crystalStructure,
       modelName: pot.modelName,
       rcutA: pot.rcutA,
+      dtFs,
       meltingPointK: tMelt
     };
     liveMdTelemetry = currentElementRes.visualData.thermo.mdTelemetry;
+  }
+  if (liveMdSession) {
+    liveMdSession.setExperimentMode(modeCode, {
+      shearWallVel: modeKey === 'shear' ? 0.14 : 0.0,
+      thermalDeltaT: modeKey === 'thermal' ? Math.max(40, Math.round(uiState.mdTargetTempK * 0.40)) : 0.0
+    });
+    if (modeKey === 'acoustic') {
+      liveMdSession.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.34 });
+    }
   }
   if (liveMdTelemetry) {
     liveMdHistory.push({ t: 0, T: liveMdTelemetry.temperatureK, msd: liveMdTelemetry.msdA2 });
@@ -1224,14 +1500,49 @@ function renderSimControls() {
   const b = getActiveBundle();
 
   if (currentTab === 'nuclear') {
+    const isEl = activeSpecimenKind === 'element';
     simControls.innerHTML = `
       <div class="ctrl-group">
-        <button id="ctrl-tdse-play" class="action">${uiState.tdsePlaying ? 'Pause TDSE' : 'Play TDSE'}</button>
-        <button id="ctrl-tdse-reset" class="action">Reset α-Wavepacket</button>
+        <button class="action${uiState.nuclearViewMode === 'tdse' ? ' active-toggle' : ''}" data-nview="tdse">Fermi + TDSE</button>
+        ${isEl ? `<button class="action${uiState.nuclearViewMode === 'fission' ? ' active-toggle' : ''}" data-nview="fission" title="Live 3D GPU Bohr-Wheeler quadrupole/necking liquid-drop fission!">3D Fission Saddle</button>` : ''}
+        ${isEl ? `<button class="action${uiState.nuclearViewMode === 'bateman' ? ' active-toggle' : ''}" data-nview="bateman">Bateman Decay</button>` : ''}
       </div>
-      <div class="ctrl-group">
-        <label>Live 1D Symplectic Visscher TDSE inside Gate 1 Woods–Saxon + Coulomb Gamow Barrier</label>
-      </div>`;
+      ${uiState.nuclearViewMode === 'fission' && isEl ? `
+        <div class="ctrl-group">
+          <label>β₂=<b id="lbl-fiss-b2">${uiState.fissionBeta2.toFixed(2)}</b></label>
+          <input id="ctrl-fiss-b2" type="range" min="0" max="1.35" step="0.03" value="${uiState.fissionBeta2}" style="width:96px;" />
+          <button id="ctrl-fiss-play" class="action gold-btn">${uiState.fissionPlaying ? 'Pause' : 'Play Fission'}</button>
+          <button id="ctrl-fiss-saddle" class="action">Saddle β*</button>
+        </div>` : `
+        <div class="ctrl-group">
+          <button id="ctrl-tdse-play" class="action">${uiState.tdsePlaying ? 'Pause TDSE' : 'Play TDSE'}</button>
+          <button id="ctrl-tdse-reset" class="action">Reset α-Wavepacket</button>
+        </div>`}`;
+    for (const btn of simControls.querySelectorAll('[data-nview]')) {
+      btn.addEventListener('click', () => {
+        uiState.nuclearViewMode = btn.dataset.nview;
+        if (uiState.nuclearViewMode === 'fission') updateNuclearFissionVolume();
+        renderSimControls();
+        redrawCurrentTab();
+      });
+    }
+    document.getElementById('ctrl-fiss-b2')?.addEventListener('input', (e) => {
+      uiState.fissionBeta2 = Number(e.target.value);
+      document.getElementById('lbl-fiss-b2').textContent = uiState.fissionBeta2.toFixed(2);
+      updateNuclearFissionVolume();
+      redrawCurrentTab();
+    });
+    document.getElementById('ctrl-fiss-play')?.addEventListener('click', () => {
+      uiState.fissionPlaying = !uiState.fissionPlaying;
+      renderSimControls();
+    });
+    document.getElementById('ctrl-fiss-saddle')?.addEventListener('click', () => {
+      uiState.fissionBeta2 = liveFissionCurve?.saddleBeta ?? 0.72;
+      uiState.fissionPlaying = false;
+      updateNuclearFissionVolume();
+      renderSimControls();
+      redrawCurrentTab();
+    });
     document.getElementById('ctrl-tdse-play')?.addEventListener('click', () => {
       uiState.tdsePlaying = !uiState.tdsePlaying;
       renderSimControls();
@@ -1314,6 +1625,11 @@ function renderSimControls() {
           <button class="action${uiState.atomicViewMode === 'volume' ? ' active-toggle' : ''}" data-aview="volume">Vol</button>
           <button id="ctrl-regen" class="action">Resample</button>
           <button id="ctrl-rotate" class="action${uiState.autoRotate ? ' active-toggle' : ''}">${uiState.autoRotate ? 'Pause' : 'Rotate'}</button>
+        </div>
+        <div class="ctrl-group">
+          <label title="Apply static electric field E to measure polarizability alpha_0 & Stark dipole shift">Stark E=<b id="lbl-stark">${uiState.starkFieldVPerA.toFixed(1)}</b> V/Å</label>
+          <input id="ctrl-stark" type="range" min="-5" max="5" step="0.5" value="${uiState.starkFieldVPerA}" style="width:76px;" />
+          <button id="ctrl-ionize" class="action${uiState.ionizedCation ? ' active-toggle' : ''}" title="Remove 1 valence electron and re-solve GPU Dirac-KS cation (Delta-SCF I_1)">${uiState.ionizedCation ? 'Cation +1 (ΔSCF ON)' : 'Ionize −1e⁻ (ΔSCF)'}</button>
         </div>`;
 
       document.getElementById('ctrl-n')?.addEventListener('input', (e) => {
@@ -1393,6 +1709,15 @@ function renderSimControls() {
         rebuildOrbitalPointCloud();
         renderViewportSync();
       });
+      document.getElementById('ctrl-stark')?.addEventListener('input', (e) => {
+        uiState.starkFieldVPerA = Number(e.target.value);
+        document.getElementById('lbl-stark').textContent = uiState.starkFieldVPerA.toFixed(1);
+        updateStarkStateForActiveElement();
+        redrawCurrentTab();
+      });
+      document.getElementById('ctrl-ionize')?.addEventListener('click', () => {
+        toggleDeltaScfIonization(!uiState.ionizedCation);
+      });
     }
     for (const btn of simControls.querySelectorAll('[data-aview]')) {
       btn.addEventListener('click', () => {
@@ -1411,13 +1736,24 @@ function renderSimControls() {
     });
   } else if (currentTab === 'crystal') {
     const isElement = activeSpecimenKind === 'element';
+    const em = getActiveElectromagnetic();
+    const tcMag = Math.max(100, Math.round(Number(em?.curieOrNeelTempK) || 400));
+    const spinTMax = Math.max(1200, Math.round(tcMag * 2.2));
+    const tcSup = Number(em?.superconductingTcK) || 0;
+    const isOptics = uiState.crystalViewMode === 'tdks-atom' || uiState.crystalViewMode === 'photon-shell';
+    const isSpin = uiState.crystalViewMode === 'spin-llg';
+    const isTrans = uiState.crystalViewMode === 'transport';
+
     simControls.innerHTML = `
       <div class="ctrl-group">
-        <button class="action${uiState.crystalViewMode === 'tdks-atom' ? ' active-toggle' : ''}" data-cview="tdks-atom" title="Live 180K-point Dirac-KS quantum electron cloud evolving |psi(r,t)|^2 under photon dipole coupling + retarded Hertzian re-radiation!">Atom TD-KS Cloud↔Photon</button>
-        <button class="action${uiState.crystalViewMode === 'photon-shell' ? ' active-toggle' : ''}" data-cview="photon-shell" title="2D 128x128 Maxwell-ADE-FDTD bulk slab showing Snell refraction bending & Golden vs Silver reflected beam!">2D Maxwell Slab (Snell)</button>
+        <button class="action${uiState.crystalViewMode === 'photon-shell' ? ' active-toggle' : ''}" data-cview="photon-shell">2D Maxwell Slab (Snell)</button>
         ${isElement ? `<button class="action${uiState.crystalViewMode === 'bloch' ? ' active-toggle' : ''}" data-cview="bloch">3D Bloch + Fermi</button>` : ''}
         <button class="action${uiState.crystalViewMode === 'lattice' ? ' active-toggle' : ''}" data-cview="lattice">Crystal Cell</button>
+        <button class="action${uiState.crystalViewMode === 'tdks-atom' ? ' active-toggle' : ''}" data-cview="tdks-atom">Atom TD-KS Cloud↔Photon</button>
+        <button class="action${isSpin ? ' active-toggle' : ''}" data-cview="spin-llg" title="3D WebGPU Stochastic LLG Spin-Lattice: ferromagnetism, Curie T_C, hysteresis M(B) & Neel AFM!">3D Spin Lattice (LLG)</button>
+        <button class="action${isTrans ? ' active-toggle' : ''}" data-cview="transport" title="3D WebGPU Drude-Boltzmann electron-phonon scattering, semiconductor activation & BCS T_c!">e⁻ Conduction / T_c</button>
       </div>
+      ${isOptics ? `
       <div class="ctrl-group">
         <button id="ctrl-ps-rgb" class="action${!uiState.photonModeMono ? ' active-toggle' : ''}">White Light (RGB)</button>
         <button id="ctrl-ps-mono" class="action${uiState.photonModeMono ? ' active-toggle' : ''}">Single λ</button>
@@ -1427,18 +1763,91 @@ function renderSimControls() {
       <div class="ctrl-group">
         <button id="ctrl-ps-fire" class="action gold-btn">Fire Pulse</button>
         <button id="ctrl-ps-play" class="action">${uiState.photonPlaying ? 'Pause' : 'Play'}</button>
-        ${isElement ? `<label title="Toggle Dirac-KS Relativistic + Spin-Orbit LIVE! On Gold (Z=79), watch 5d→6p shift from UV to Blue, turning Silver → Gold!">
-          <input id="ctrl-ps-rel" type="checkbox" ${uiState.relativisticSpinOrbit ? 'checked' : ''} /> Relativistic (Au Color!)
-        </label>` : ''}
-      </div>`;
+        ${isElement ? `<label><input id="ctrl-ps-rel" type="checkbox" ${uiState.relativisticSpinOrbit ? 'checked' : ''} /> Relativistic (Au Color!)</label>` : ''}
+      </div>` : ''}
+      ${isSpin ? `
+      <div class="ctrl-group">
+        <label>T=<b id="lbl-spin-t">${Math.round(uiState.spinTempK)}</b>K${tcMag > 0 && em?.curieOrNeelTempK > 0 ? ` (T_c=${Math.round(em.curieOrNeelTempK)}K)` : ''}</label>
+        <input id="ctrl-spin-t" type="range" min="10" max="${spinTMax}" step="10" value="${Math.min(spinTMax, Math.round(uiState.spinTempK))}" style="width:88px;" />
+        <label>B_z=<b id="lbl-spin-b">${uiState.spinFieldBTesla.toFixed(1)}</b>T</label>
+        <input id="ctrl-spin-b" type="range" min="-5" max="5" step="0.2" value="${uiState.spinFieldBTesla}" style="width:82px;" />
+      </div>
+      <div class="ctrl-group">
+        <button id="ctrl-spin-sweep" class="action${uiState.spinSweepB ? ' active-toggle' : ' gold-btn'}">${uiState.spinSweepB ? 'Stop Sweep' : 'Sweep Hysteresis B'}</button>
+        <button id="ctrl-spin-hot" class="action">Heat &gt; T_c</button>
+        <button id="ctrl-spin-reset" class="action">Randomize</button>
+      </div>` : ''}
+      ${isTrans ? `
+      <div class="ctrl-group">
+        <label>T=<b id="lbl-tr-t">${uiState.transportTempK < 20 ? uiState.transportTempK.toFixed(1) : Math.round(uiState.transportTempK)}</b>K${tcSup > 0.1 ? ` (T_c=${tcSup.toFixed(1)}K)` : ''}</label>
+        <input id="ctrl-tr-t" type="range" min="1" max="1200" step="1" value="${Math.min(1200, Math.round(uiState.transportTempK))}" style="width:90px;" />
+        <label>E=<b id="lbl-tr-e">${(uiState.transportEFieldVPerM / 1e3).toFixed(0)}</b> kV/m</label>
+        <input id="ctrl-tr-e" type="range" min="-20000" max="20000" step="2000" value="${uiState.transportEFieldVPerM}" style="width:78px;" />
+      </div>
+      <div class="ctrl-group">
+        ${tcSup > 0.1 ? `<button id="ctrl-tr-cryo" class="action gold-btn">Cryo T&lt;T_c (${Math.max(1, tcSup * 0.35).toFixed(1)}K)</button>` : ''}
+        <button class="action" data-tr-t="80">80K</button>
+        <button class="action" data-tr-t="300">300K</button>
+        <button class="action" data-tr-t="900">900K</button>
+        <button id="ctrl-tr-play" class="action">${uiState.transportPlaying ? 'Pause' : 'Play'}</button>
+      </div>` : ''}`;
 
     for (const btn of simControls.querySelectorAll('[data-cview]')) {
       btn.addEventListener('click', () => {
         uiState.crystalViewMode = btn.dataset.cview;
+        if (uiState.crystalViewMode === 'spin-llg' && !liveSpinSession) initSpinLatticeForActiveSpecimen();
+        if (uiState.crystalViewMode === 'transport' && !liveTransportSession) initElectronTransportForActiveSpecimen();
         renderSimControls();
         redrawCurrentTab();
       });
     }
+    document.getElementById('ctrl-spin-t')?.addEventListener('input', (e) => {
+      uiState.spinTempK = Number(e.target.value);
+      document.getElementById('lbl-spin-t').textContent = String(Math.round(uiState.spinTempK));
+    });
+    document.getElementById('ctrl-spin-b')?.addEventListener('input', (e) => {
+      uiState.spinFieldBTesla = Number(e.target.value);
+      uiState.spinSweepB = false;
+      document.getElementById('lbl-spin-b').textContent = uiState.spinFieldBTesla.toFixed(1);
+    });
+    document.getElementById('ctrl-spin-sweep')?.addEventListener('click', () => {
+      uiState.spinSweepB = !uiState.spinSweepB;
+      if (uiState.spinSweepB) liveSpinHistory = [];
+      renderSimControls();
+    });
+    document.getElementById('ctrl-spin-hot')?.addEventListener('click', () => {
+      uiState.spinTempK = Math.min(spinTMax, Math.round(Math.max(600, tcMag * 1.55)));
+      uiState.spinFieldBTesla = 0.0;
+      uiState.spinSweepB = false;
+      renderSimControls();
+    });
+    document.getElementById('ctrl-spin-reset')?.addEventListener('click', () => {
+      liveSpinSession?.resetDomains({ orderedBias: 0.0, initSeed: Math.floor(Math.random() * 1e6) + 1 });
+      liveSpinHistory = [];
+      redrawCurrentTab();
+    });
+    document.getElementById('ctrl-tr-t')?.addEventListener('input', (e) => {
+      uiState.transportTempK = Number(e.target.value);
+      document.getElementById('lbl-tr-t').textContent = String(Math.round(uiState.transportTempK));
+    });
+    document.getElementById('ctrl-tr-e')?.addEventListener('input', (e) => {
+      uiState.transportEFieldVPerM = Number(e.target.value);
+      document.getElementById('lbl-tr-e').textContent = (uiState.transportEFieldVPerM / 1e3).toFixed(0);
+    });
+    document.getElementById('ctrl-tr-cryo')?.addEventListener('click', () => {
+      uiState.transportTempK = Math.max(0.5, Number((tcSup * 0.35).toFixed(1)));
+      renderSimControls();
+    });
+    for (const btn of simControls.querySelectorAll('[data-tr-t]')) {
+      btn.addEventListener('click', () => {
+        uiState.transportTempK = Number(btn.dataset.trT);
+        renderSimControls();
+      });
+    }
+    document.getElementById('ctrl-tr-play')?.addEventListener('click', () => {
+      uiState.transportPlaying = !uiState.transportPlaying;
+      renderSimControls();
+    });
     document.getElementById('ctrl-ps-rgb')?.addEventListener('click', () => {
       uiState.photonModeMono = false;
       renderSimControls();
@@ -1479,26 +1888,69 @@ function renderSimControls() {
   } else if (currentTab === 'md') {
     const tMelt = Math.max(20, Math.round(liveMdConfigMeta?.meltingPointK || b?.thermodynamic?.meltingPointK || 600));
     const tMax = Math.max(1500, Math.min(8000, Math.round(tMelt * 3.0)));
+    const mm = uiState.mdMode;
     simControls.innerHTML = `
       <div class="ctrl-group">
-        <label>T=<b id="lbl-md-t">${uiState.mdTargetTempK}</b> K (T_m=${tMelt} K)</label>
-        <input id="ctrl-md-t" type="range" min="15" max="${tMax}" step="10" value="${Math.min(tMax, uiState.mdTargetTempK)}" style="width:110px;" />
+        <button class="action${mm === 'equilibrium' ? ' active-toggle' : ''}" data-mdmode="equilibrium">Equil + Phonons</button>
+        <button class="action${mm === 'strain' ? ' active-toggle' : ''}" data-mdmode="strain">Stress–Strain (K,G,ν)</button>
+        <button class="action${mm === 'acoustic' ? ' active-toggle' : ''}" data-mdmode="acoustic">Acoustic (v_L,v_T)</button>
+        <button class="action${mm === 'shear' ? ' active-toggle' : ''}" data-mdmode="shear">Shear Viscosity (η)</button>
+        <button class="action${mm === 'thermal' ? ' active-toggle' : ''}" data-mdmode="thermal">Heat Flow (κ)</button>
+        <button class="action${mm === 'surface' ? ' active-toggle' : ''}" data-mdmode="surface">Free Surface (γ)</button>
       </div>
+      <div class="ctrl-group">
+        <label>T=<b id="lbl-md-t">${uiState.mdTargetTempK}</b>K (T_m=${tMelt}K)</label>
+        <input id="ctrl-md-t" type="range" min="15" max="${tMax}" step="10" value="${Math.min(tMax, uiState.mdTargetTempK)}" style="width:92px;" />
+        ${mm === 'equilibrium' ? `<label><input id="ctrl-md-npt" type="checkbox" ${uiState.mdNptBarostat ? 'checked' : ''} /> NPT α_V</label>` : ''}
+      </div>
+      ${mm === 'strain' ? `
+      <div class="ctrl-group">
+        <button id="ctrl-md-comp" class="action gold-btn">Compress −3%</button>
+        <button id="ctrl-md-stretch" class="action">Stretch +3%</button>
+        <button id="ctrl-md-shear" class="action">Shear γ_xy +4%</button>
+        <button id="ctrl-md-reset" class="action">Reset</button>
+      </div>` : mm === 'acoustic' ? `
+      <div class="ctrl-group">
+        <button id="ctrl-md-pwave" class="action gold-btn">Fire P-Wave (v_L)</button>
+        <button id="ctrl-md-swave" class="action">Fire S-Wave (v_T)</button>
+        <button id="ctrl-md-reset" class="action">Reset Bar</button>
+      </div>` : `
       <div class="ctrl-group">
         <button class="action" data-md-frac="0.30">Solid</button>
-        <button class="action" data-md-frac="0.72">Warm</button>
-        <button class="action gold-btn" data-md-frac="1.18">Melt</button>
-        <button class="action" data-md-frac="1.65">Liquid</button>
-        <button class="action" data-md-frac="2.50">Vapor</button>
-      </div>
-      <div class="ctrl-group">
-        <button id="ctrl-md-play" class="action">${uiState.mdPlaying ? 'Pause MD' : 'Play MD'}</button>
-        <button id="ctrl-md-reset" class="action">Reset Lattice</button>
-      </div>`;
+        <button class="action gold-btn" data-md-frac="1.20">Melt</button>
+        <button class="action" data-md-frac="2.40">Vapor</button>
+        <button id="ctrl-md-play" class="action">${uiState.mdPlaying ? 'Pause' : 'Play'}</button>
+        <button id="ctrl-md-reset" class="action">Reset</button>
+      </div>`}`;
 
+    for (const btn of simControls.querySelectorAll('[data-mdmode]')) {
+      btn.addEventListener('click', () => {
+        initLiveMdForActiveSpecimen(null, btn.dataset.mdmode);
+        renderSimControls();
+        redrawCurrentTab();
+      });
+    }
     document.getElementById('ctrl-md-t')?.addEventListener('input', (e) => {
       uiState.mdTargetTempK = Number(e.target.value);
       document.getElementById('lbl-md-t').textContent = String(uiState.mdTargetTempK);
+    });
+    document.getElementById('ctrl-md-npt')?.addEventListener('change', (e) => {
+      uiState.mdNptBarostat = Boolean(e.target.checked);
+    });
+    document.getElementById('ctrl-md-comp')?.addEventListener('click', () => {
+      liveMdSession?.applyStrain({ strainX: -0.03 });
+    });
+    document.getElementById('ctrl-md-stretch')?.addEventListener('click', () => {
+      liveMdSession?.applyStrain({ strainX: 0.03 });
+    });
+    document.getElementById('ctrl-md-shear')?.addEventListener('click', () => {
+      liveMdSession?.applyStrain({ shearXY: 0.04 });
+    });
+    document.getElementById('ctrl-md-pwave')?.addEventListener('click', () => {
+      liveMdSession?.injectAcousticPulse({ polarization: 'longitudinal', amplitude: 0.36 });
+    });
+    document.getElementById('ctrl-md-swave')?.addEventListener('click', () => {
+      liveMdSession?.injectAcousticPulse({ polarization: 'transverse', amplitude: 0.36 });
     });
     for (const btn of simControls.querySelectorAll('[data-md-frac]')) {
       btn.addEventListener('click', () => {
@@ -1514,7 +1966,8 @@ function renderSimControls() {
       renderSimControls();
     });
     document.getElementById('ctrl-md-reset')?.addEventListener('click', () => {
-      initLiveMdForActiveSpecimen(uiState.mdTargetTempK);
+      initLiveMdForActiveSpecimen(uiState.mdTargetTempK, uiState.mdMode);
+      renderSimControls();
       redrawCurrentTab();
     });
   } else if (currentTab === 'compound') {
@@ -1590,6 +2043,15 @@ function renderViewportSync() {
         pitch: camPitch,
         tint: [1.0, 0.58, 0.30]
       });
+    } else if (uiState.nuclearViewMode === 'fission' && liveFissionVolGpu) {
+      gpuRenderer.renderVolume3D({
+        gpuVec4Buffer: liveFissionVolGpu.buffer,
+        dim: liveFissionVolGpu.dim,
+        channels: 4,
+        yaw: camYaw,
+        pitch: camPitch,
+        tint: [1.0, 0.62, 0.34]
+      });
     } else if (currentElementRes?.visualData?.nuclear) {
       const nuc = currentElementRes.visualData.nuclear;
       gpuRenderer.renderVolume3D({
@@ -1649,7 +2111,9 @@ function renderViewportSync() {
         colorA: hexToRgbArr(uiState.shellColorA),
         colorB: hexToRgbArr(uiState.shellColorB),
         showGuides: uiState.showGuides,
-        showNucleus: true
+        showNucleus: true,
+        starkMixLambda: liveStarkState?.starkMixLambda ?? 0,
+        eFieldNorm: (uiState.starkFieldVPerA || 0) / 5.0
       });
     } else if (currentAtomicVolGpu) {
       gpuRenderer.renderVolume3D({
@@ -1689,6 +2153,30 @@ function renderViewportSync() {
         probeRgb: wavelengthNmToRgb(uiState.probeWavelengthNm),
         slabTint: em?.opticalSrgb || [0.82, 0.86, 0.94],
         waveGain: 1.05
+      });
+    } else if (uiState.crystalViewMode === 'spin-llg' && liveSpinSession) {
+      gpuRenderer.renderSpinLatticeScene({
+        spinsBuffer: liveSpinSession.getActiveSpinsBuffer(),
+        dims: liveSpinSession.dims,
+        yaw: camYaw,
+        pitch: camPitch,
+        camDist: Math.max(2.1, Math.min(5.0, camDist + 0.25)),
+        fieldBZTesla: uiState.spinFieldBTesla,
+        isAntiferro: liveSpinSession.params.magneticPhase === 'antiferromagnetic'
+      });
+    } else if (uiState.crystalViewMode === 'transport' && liveTransportSession) {
+      const trP = liveTransportSession.getParams();
+      gpuRenderer.renderElectronTransportScene({
+        posBuffer: liveTransportSession.posBuffer,
+        velBuffer: liveTransportSession.velBuffer,
+        carrierCount: liveTransportSession.carrierCount,
+        yaw: camYaw,
+        pitch: camPitch,
+        camDist,
+        eFieldVPerM: uiState.transportEFieldVPerM,
+        phononVibAmp: trP.phononVibAmp,
+        timeS: performance.now() * 1e-3,
+        isSuperconducting: trP.isSuperconducting
       });
     } else if (uiState.crystalViewMode === 'bloch' && activeSpecimenKind === 'element' && currentElementRes?.visualData?.bulk) {
       const bulk = currentElementRes.visualData.bulk;
@@ -1800,17 +2288,57 @@ function redrawCurrentTab() {
       });
     } else if (currentElementRes?.visualData?.nuclear) {
       const nuc = currentElementRes.visualData.nuclear;
-      setHud(
-        `WebGPU 3D Volumetric Nuclear Fermi Density — ${nuc.isotope} (R_rms = ${fmt(nuc.chargeRadiusFm, 2)} fm)`,
-        `B/A = ${fmt(nuc.bindingPerNucleonMeV, 3)} MeV · I^π = ${nuc.spinI}${nuc.parity} · μ_I = ${fmt(nuc.magneticMomentMuN, 2)} μ_N · Mode: ${nuc.dominantMode}`
-      );
-      if (liveTdseTelemetry) {
-        setBottomOverlay(`<div class="live-meter">Live GPU TDSE (step ${liveTdseTelemetry.stepCount}): P_well=${fmt(liveTdseTelemetry.pInside * 100, 1)}% · P_barrier=${fmt(liveTdseTelemetry.pBarrier * 100, 2)}% · P_tunneled=${fmt(liveTdseTelemetry.pTunneled * 100, 3)}%</div>`);
+      if (uiState.nuclearViewMode === 'fission' && liveFissionCurve) {
+        const fc = liveFissionCurve;
+        const stage = uiState.fissionBeta2 >= fc.scissionBeta ? 'SCISSION (2 FRAGMENTS)' : (uiState.fissionBeta2 >= fc.saddleBeta * 0.85 ? 'NEAR SADDLE BARRIER' : 'ELONGATING');
+        setHud(
+          `WebGPU 3D Bohr–Wheeler Nuclear Fission — ${nuc.isotope} (β₂=${uiState.fissionBeta2.toFixed(2)} · ${stage})`,
+          `Fissility x=${fmt(fc.fissility, 3)} · Barrier E_f=${fmt(fc.barrierMeV, 2)} MeV (β*=${fmt(fc.saddleBeta, 2)}) · E_surf0=${fmt(fc.eSurf0MeV, 1)} MeV · E_coul0=${fmt(fc.eCoul0MeV, 1)} MeV`
+        );
+        setBottomOverlay(`<div class="live-meter">Live 3D Liquid-Drop Fission: β₂=${uiState.fissionBeta2.toFixed(2)} · Saddle β*=${fmt(fc.saddleBeta, 2)} · E_f=${fmt(fc.barrierMeV, 2)} MeV · ${stage}</div>`);
+        plot1Title.textContent = 'GPU 118×200 Chart of Nuclides (Click to Pick Z, A)';
+        drawNuclideChart(plot1, nuc);
+        plot2Title.textContent = `Bohr–Wheeler Deformation Barrier ΔE(β₂) — ${nuc.isotope}`;
+        drawPlotLine(plot2, Array.from(fc.betas), Array.from(fc.deltaEMeV), {
+          label: `ΔE(β₂) MeV · Barrier E_f=${fmt(fc.barrierMeV, 1)} MeV`,
+          color: '#fb923c',
+          hLine: { y: 0, color: '#64748b', label: '0 MeV' },
+          vLine: { x: uiState.fissionBeta2, color: '#38bdf8', label: `β=${uiState.fissionBeta2.toFixed(2)}` }
+        });
+      } else if (uiState.nuclearViewMode === 'bateman') {
+        setHud(
+          `Exact Nucleon-Conserving Bateman Decay Kinetics — ${nuc.isotope}`,
+          currentDecayChain?.steps?.length
+            ? `Chain: ${currentDecayChain.steps.slice(0, 4).map((s) => `${s.isotope}→${s.daughterIsotope}(${s.mode})`).join(' → ')} · Total Q=${fmt(currentDecayChain.totalEnergyMeV, 2)} MeV`
+            : `${nuc.isotope} is stable (zero decay flux; try U-235, Co-60, or C-14!)`
+        );
+        plot1Title.textContent = 'GPU 118×200 Chart of Nuclides (Click to Pick Z, A)';
+        drawNuclideChart(plot1, nuc);
+        plot2Title.textContent = `Bateman Isotope Populations N_i(t)/N₀ — ${nuc.isotope}`;
+        if (liveBatemanSeries?.curves?.length) {
+          const cols = ['#facc15', '#38bdf8', '#c084fc', '#34d399'];
+          drawMultiLinePlot(
+            plot2,
+            liveBatemanSeries.curves.map((c, ci) => ({ xs: liveBatemanSeries.tHalfUnits, ys: c.frac, color: cols[ci % cols.length], width: 2 })),
+            { label: liveBatemanSeries.curves.map((c) => c.name).join(' → ') + ' vs t / t½', yMin: 0, yMax: 1.05 }
+          );
+          setBottomOverlay(`<div class="live-meter">Bateman Ledger: ${liveBatemanSeries.curves.map((c) => c.name).join(' → ')} (t½=${fmt(liveBatemanSeries.firstHalfLifeS, 2)} s · ΣA_i N_i exact)</div>`);
+        } else {
+          drawPlotLine(plot2, [0, 1, 2, 3], [1, 1, 1, 1], { label: `${nuc.isotope} stable (N/N₀ = 1.0)`, color: '#34d399', yMin: 0, yMax: 1.1 });
+        }
+      } else {
+        setHud(
+          `WebGPU 3D Volumetric Nuclear Fermi Density — ${nuc.isotope} (R_rms = ${fmt(nuc.chargeRadiusFm, 2)} fm)`,
+          `B/A = ${fmt(nuc.bindingPerNucleonMeV, 3)} MeV · I^π = ${nuc.spinI}${nuc.parity} · μ_I = ${fmt(nuc.magneticMomentMuN, 2)} μ_N · Mode: ${nuc.dominantMode}`
+        );
+        if (liveTdseTelemetry) {
+          setBottomOverlay(`<div class="live-meter">Live GPU TDSE (step ${liveTdseTelemetry.stepCount}): P_well=${fmt(liveTdseTelemetry.pInside * 100, 1)}% · P_barrier=${fmt(liveTdseTelemetry.pBarrier * 100, 2)}% · P_tunneled=${fmt(liveTdseTelemetry.pTunneled * 100, 3)}%</div>`);
+        }
+        plot1Title.textContent = 'GPU 118×200 Chart of Nuclides (Click to Pick Z, A)';
+        drawNuclideChart(plot1, nuc);
+        plot2Title.textContent = `Live GPU TDSE Tunneling vs WKB Gamow Barrier (Q_α = ${fmt(nuc.qAlphaMeV, 2)} MeV)`;
+        drawTdseBarrierPlot(plot2, nuc, liveTdseTelemetry);
       }
-      plot1Title.textContent = 'GPU 118×200 Chart of Nuclides (Click to Pick Z, A)';
-      drawNuclideChart(plot1, nuc);
-      plot2Title.textContent = `Live GPU TDSE Tunneling vs WKB Gamow Barrier (Q_α = ${fmt(nuc.qAlphaMeV, 2)} MeV)`;
-      drawTdseBarrierPlot(plot2, nuc, liveTdseTelemetry);
       plot3Title.textContent = `Fermi Proton/Neutron Skin Profile ρ(r) — ${nuc.isotope}`;
       const rs = Array.from({ length: 40 }, (_, i) => (i / 39) * Math.max(8, nuc.chargeRadiusFm * 2.1));
       const rhoP = rs.map((r) => 1 / (1 + Math.exp((r - nuc.chargeRadiusFm) / 0.54)));
@@ -1852,10 +2380,16 @@ function redrawCurrentTab() {
         ? 'EXACT GPU Kohn–Sham Eigenstate u_nl(r)'
         : 'Slater-KS Screened Associated Laguerre R_nl(r)';
       setHud(
-        `WebGPU 3D Schrödinger / Dirac–KS Orbital |ψ_${uiState.n}${L_NAMES[uiState.l] || uiState.l},${uiState.m}|² — ${atom.symbol} (Z=${atom.atomicNumberZ})`,
+        `WebGPU 3D Schrödinger / Dirac–KS Orbital |ψ_${uiState.n}${L_NAMES[uiState.l] || uiState.l},${uiState.m}|² — ${atom.symbol}${uiState.ionizedCation ? '⁺ (ΔSCF Cation)' : ''} (Z=${atom.atomicNumberZ})`,
         `${liveOrbitalCloud?.pointCount?.toLocaleString() || '0'} GPU samples · ${cloudSrc} · ${atom.relativisticMethod} · E = ${fmt(atom.totalEnergyHa, 2)} Ha`
       );
-      setBottomOverlay(`<div class="live-meter">n=${uiState.n}, l=${uiState.l} (${L_NAMES[uiState.l] || uiState.l}), m=${uiState.m} · Radial Nodes=${liveOrbitalCloud?.radialNodeCount ?? (uiState.n - uiState.l - 1)} · Extent=±${fmt(liveOrbitalCloud?.rExtentBohr || 4, 2)} a₀ · XC=${atom.functional.toUpperCase()}</div>`);
+      const starkTxt = liveStarkState
+        ? ` · α₀=${fmt(liveStarkState.alpha0Angstrom3, 2)} Å³ (${fmt(liveStarkState.alpha0Bohr3, 1)} a₀³)${Math.abs(uiState.starkFieldVPerA) > 0.05 ? ` · p=${fmt(liveStarkState.inducedDipoleDebye, 2)} D · ΔE=${fmt(liveStarkState.starkShiftEv * 1e3, 1)} meV` : ''}`
+        : '';
+      const dscfTxt = uiState.ionizedCation && liveDeltaScfResult
+        ? ` · ΔSCF I₁=${fmt(liveDeltaScfResult.ionizationEnergyEv, 2)} eV (−1e⁻ ${liveDeltaScfResult.removedShell})`
+        : '';
+      setBottomOverlay(`<div class="live-meter">n=${uiState.n}, l=${uiState.l} (${L_NAMES[uiState.l] || uiState.l}), m=${uiState.m} · Nodes=${liveOrbitalCloud?.radialNodeCount ?? (uiState.n - uiState.l - 1)}${starkTxt}${dscfTxt}</div>`);
       plot1Title.textContent = 'Radial Probability 4πr²ρ(r) & Selected Subshell |u_nl(r)|²';
       const prob = rg.r.map((rv, i) => 4 * Math.PI * rv * rv * rg.rho[i]);
       const capIdx = rg.r.findIndex((rv) => rv > Math.max(6, (liveOrbitalCloud?.rExtentBohr || 6) * 1.1));
@@ -1889,7 +2423,74 @@ function redrawCurrentTab() {
     const b = getActiveBundle();
     const em = getActiveElectromagnetic();
     const tel = livePhotonTelemetry;
-    if ((uiState.crystalViewMode === 'tdks-atom' || uiState.crystalViewMode === 'photon-shell') && b) {
+    if (uiState.crystalViewMode === 'spin-llg' && b) {
+      const st = liveSpinTelemetry;
+      const ph = st?.magneticPhase || em?.magneticPhase || 'diamagnetic';
+      setHud(
+        `Live WebGPU 3D Stochastic LLG Spin-Lattice — ${b.materialKey} (${ph.toUpperCase()})`,
+        st
+          ? `${st.spinCount} GPU spins · J=${fmt(st.exchangeJEv * 1e3, 2)} meV · T=${Math.round(st.temperatureK)} K${st.curieOrNeelTempK > 0 ? ` (T_c=${Math.round(st.curieOrNeelTempK)} K)` : ''} · B_z=${st.fieldBZTesla.toFixed(1)} T · M_z=${fmt(st.magnetizationZ, 3)} · |M_stag|=${fmt(st.staggeredOrderMag, 3)}`
+          : 'Stepping 3D sLLG spin lattice on WebGPU…'
+      );
+      if (st) {
+        setBottomOverlay(
+          `<div class="live-meter">Phase: <b>${ph.toUpperCase()}</b> · M_z=<b>${fmt(st.magnetizationZ, 3)}</b> · |M|=<b>${fmt(st.magnetizationMag, 3)}</b> · Néel |M_stag|=<b>${fmt(st.staggeredOrderMag, 3)}</b> · ⟨s_i·s_j⟩=${fmt(st.neighborAlign, 3)}</div>`
+        );
+      }
+      plot1Title.textContent = `Live Spin Hysteresis / Field Response M_z(B_z) — ${b.materialKey}`;
+      if (liveSpinHistory.length >= 2) {
+        drawPlotLine(plot1, liveSpinHistory.map((h) => h.B), liveSpinHistory.map((h) => h.Mz), {
+          label: `M_z vs B_z (T) · Sweep B to trace ferromagnetic hysteresis!`,
+          color: '#facc15', yMin: -1.05, yMax: 1.05, hLine: { y: 0, color: '#64748b', label: '0' }
+        });
+        plot2Title.textContent = 'Ferro |M| (gold) vs Néel Antiferro |M_stag| (cyan)';
+        const stepsX = liveSpinHistory.map((_, i) => i);
+        drawMultiLinePlot(plot2, [
+          { xs: stepsX, ys: liveSpinHistory.map((h) => h.Mmag), color: '#facc15', width: 2 },
+          { xs: stepsX, ys: liveSpinHistory.map((h) => h.Mstag), color: '#38bdf8', width: 2 }
+        ], { label: '|M| vs |M_stag| order parameters (drops to ~0 above T_c!)', yMin: 0, yMax: 1.05 });
+      }
+    } else if (uiState.crystalViewMode === 'transport' && b) {
+      const tr = liveTransportTelemetry;
+      const modeLbl = tr?.isSuperconducting
+        ? 'SUPERCONDUCTING BCS CONDENSATE (ρ = 0 Ω·m!)'
+        : (tr?.isMetal ? 'DRUDE–BLOCH–GRÜNEISEN METAL' : `SEMICONDUCTOR / INSULATOR (E_g=${fmt(em?.bandGapEv, 2)} eV)`);
+      setHud(
+        `Live WebGPU 3D Electron–Phonon & BCS Transport — ${b.materialKey}`,
+        tr
+          ? `${modeLbl} · T=${tr.temperatureK < 20 ? tr.temperatureK.toFixed(1) : Math.round(tr.temperatureK)} K · Mobile=${tr.mobileCount}/${tr.carrierCount}${tr.cooperCount > 0 ? ` · Cooper=${tr.cooperCount}` : ''} · Scatters=${tr.scatterEvents}/step`
+          : 'Stepping 3D Drude–Boltzmann electron transport on WebGPU…'
+      );
+      if (tr) {
+        const sigTxt = tr.isSuperconducting ? '∞ S/m (ZERO RESISTANCE!)' : `${fmt(tr.sigmaGpuSPerM, 2)} S/m (ρ=${fmt(tr.resistivityGpuOhmM, 2)} Ω·m)`;
+        setBottomOverlay(
+          `<div class="live-meter">GPU σ(T)=<b>${sigTxt}</b> · Drift ⟨J_x⟩=${fmt(tr.meanDriftNorm, 3)} · Phonon Scatters=${tr.scatterEvents}/step</div>`
+        );
+      }
+      plot1Title.textContent = `Live GPU Carrier Drift & Phonon Scattering — ${b.materialKey}`;
+      if (liveTransportHistory.length >= 2) {
+        const xs = liveTransportHistory.map((_, i) => i);
+        drawMultiLinePlot(plot1, [
+          { xs, ys: liveTransportHistory.map((h) => Math.abs(h.drift) * 4), color: '#38bdf8', width: 2 },
+          { xs, ys: liveTransportHistory.map((h) => h.scatter), color: '#fb923c', width: 1.8 }
+        ], { label: 'Scaled Drift Current (cyan) vs Phonon Scatter Rate (orange)', yMin: 0 });
+      }
+      plot2Title.textContent = `Conductivity Curve log10 σ(T) (1..1200 K) — ${b.materialKey}`;
+      const ts = Array.from({ length: 30 }, (_, i) => 1 + (i / 29) * 1199);
+      const lsig = ts.map((T) => {
+        const tc = Number(em?.superconductingTcK) || 0;
+        if (em?.isMetal && tc > 0.1 && T < tc) return 12;
+        const thetaD = Math.max(25, b.mechanical?.debyeTemperatureK || 250);
+        const s300 = Math.max(1e-18, em?.electricalConductivitySPerM || 1e6);
+        if (em?.isMetal) return Math.log10(Math.max(1, s300 * (300 / Math.max(15, T))));
+        const eg = Math.max(0.1, em?.bandGapEv || 2.0);
+        return Math.max(-18, Math.min(8, Math.log10(s300) + (eg / (2 * 8.617e-5)) * (1 / 300 - 1 / Math.max(10, T)) / Math.LN10));
+      });
+      drawPlotLine(plot2, ts, lsig, {
+        label: 'log10 σ(T) S/m vs T(K)', color: '#34d399',
+        vLine: { x: uiState.transportTempK, color: '#facc15', label: `${Math.round(uiState.transportTempK)}K` }
+      });
+    } else if ((uiState.crystalViewMode === 'tdks-atom' || uiState.crystalViewMode === 'photon-shell') && b) {
       const chR = tel?.channels?.[0]; const chG = tel?.channels?.[1]; const chB = tel?.channels?.[2]; const chP = tel?.channels?.[3];
       const nLive = chG?.nMeasuredFdtd ?? chP?.nMeasuredFdtd ?? chR?.nMeasuredFdtd;
       const bCh = liveBlochSession?.channels?.[uiState.photonModeMono ? 3 : 2];
@@ -1958,7 +2559,9 @@ function redrawCurrentTab() {
       );
     }
 
-    if (activeSpecimenKind === 'element' && currentElementRes?.visualData?.bulk) {
+    if (uiState.crystalViewMode === 'spin-llg' || uiState.crystalViewMode === 'transport') {
+      // Plots 1 & 2 already populated by live Spin-LLG / Electron-Transport above!
+    } else if (activeSpecimenKind === 'element' && currentElementRes?.visualData?.bulk) {
       const bulk = currentElementRes.visualData.bulk;
       plot2Title.textContent = 'Electronic DOS g(E) & Brillouin Fermi Level';
       drawMultiLinePlot(plot2, [
@@ -1986,22 +2589,84 @@ function redrawCurrentTab() {
     const b = getActiveBundle();
     const md = liveMdTelemetry;
     const meta = liveMdConfigMeta;
+    const mm = uiState.mdMode;
+    const modeNames = {
+      equilibrium: 'Equilibrium + Phonon VDOS',
+      strain: 'Uniaxial/Shear Stress–Strain (K, G, ν)',
+      acoustic: 'Acoustic Phonon Wave (v_L, v_T)',
+      shear: 'Couette Shear NEMD Viscosity (η)',
+      thermal: 'Hot/Cold Slab NEMD Thermal Cond. (κ)',
+      surface: 'Free-Surface Vacuum Slab (γ)'
+    };
     setHud(
-      `Zero-Copy WebGPU Instanced 3D MD — ${meta?.label || b?.materialKey || ''} (${meta?.crystalStructure || ''}, ${meta?.modelName || ''})`,
+      `Zero-Copy WebGPU MD [${modeNames[mm] || mm}] — ${meta?.label || b?.materialKey || ''} (${meta?.crystalStructure || ''})`,
       md
-        ? `Atoms: ${md.atomCount} | Steps: ${md.totalSteps} | t=${fmt(md.timeFs, 1)} fs | T=${fmt(md.temperatureK, 1)} K (target ${uiState.mdTargetTempK} K) | P=${fmt(md.pressureGPa, 2)} GPa | MSD=${fmt(md.msdA2, 4)} Å²`
+        ? `Atoms: ${md.atomCount} | t=${fmt(md.timeFs, 1)} fs | T=${fmt(md.temperatureK, 1)} K | P=${fmt(md.pressureGPa, 2)} GPa | V/V₀=${fmt(md.volumeRatio ?? 1, 3)} | MSD=${fmt(md.msdA2, 4)} Å²`
         : 'Initializing live WebGPU MD buffers…'
     );
+    if (md) {
+      if (mm === 'strain') {
+        const pxx = md.diagPressureGPa?.[0] ?? md.pressureGPa;
+        const sxy = md.stressOffDiagGPa?.[0] ?? 0;
+        const nuTxt = md.poissonMeasured != null ? fmt(md.poissonMeasured, 3) : 'compress to measure';
+        setBottomOverlay(`<div class="live-meter">Strain ε_x=${fmt((md.strainX || 0) * 100, 1)}% · γ_xy=${fmt((md.shearXY || 0) * 100, 1)}% · σ_xx=${fmt(pxx, 2)} GPa · σ_xy=${fmt(sxy, 2)} GPa · Live ν=${nuTxt}</div>`);
+      } else if (mm === 'shear') {
+        const etaMs = md.nemdViscosityPaS != null ? `${fmt(md.nemdViscosityPaS * 1e3, 2)} mPa·s` : 'equilibrating…';
+        setBottomOverlay(`<div class="live-meter">Live Couette NEMD: σ_xy=${fmt(md.stressOffDiagGPa?.[0] ?? 0, 3)} GPa · GPU η=<b>${etaMs}</b> (closure ${fmt((b?.thermodynamic?.dynamicViscosityLiquidPaS || 0) * 1e3, 2)} mPa·s)</div>`);
+      } else if (mm === 'thermal') {
+        const kTxt = md.nemdThermalCondWPerMK != null ? `${fmt(md.nemdThermalCondWPerMK, 1)} W/m·K` : 'building dT/dx…';
+        setBottomOverlay(`<div class="live-meter">Live Thermal NEMD: T_hot=${fmt(md.slabTempK?.[0] ?? md.temperatureK, 0)} K → T_cold=${fmt(md.slabTempK?.[4] ?? md.temperatureK, 0)} K · GPU κ_ph=<b>${kTxt}</b></div>`);
+      } else if (mm === 'surface') {
+        setBottomOverlay(`<div class="live-meter">Free-Surface Vacuum Slab (L_z=${fmt(md.boxLengthsA?.[2] ?? 0, 1)} Å): Kirkwood–Buff GPU γ=<b>${fmt(md.surfaceTensionNPerM ?? 0, 3)} N/m</b> (closure ${fmt(b?.thermodynamic?.surfaceTensionNPerM ?? 0, 3)} N/m)</div>`);
+      } else if (mm === 'acoustic') {
+        setBottomOverlay(`<div class="live-meter">Acoustic Crystal Bar (L_x=${fmt(md.boxLengthsA?.[0] ?? 0, 1)} Å): DFT v_L=${fmt(b?.mechanical?.soundSpeedLongMPerS ?? 0, 0)} m/s · v_T=${fmt(b?.mechanical?.soundSpeedTransMPerS ?? 0, 0)} m/s</div>`);
+      } else if (uiState.mdNptBarostat) {
+        setBottomOverlay(`<div class="live-meter">NPT Barostat Active: V/V₀=<b>${fmt(md.volumeRatio ?? 1, 4)}</b> (Thermal Expansion α_V=${fmt((b?.thermodynamic?.thermalExpansionVolPerK || 0) * 1e6, 1)} ppm/K)</div>`);
+      }
+    }
+
     if (md?.rdf) {
       plot1Title.textContent = 'GPU Radial Distribution Function g(r) (Order → Melting)';
       const rAxis = Array.from(md.rdf).map((_, i) => ((i + 0.5) / md.rdf.length) * (meta?.rcutA || 5.5));
       drawPlotLine(plot1, rAxis, Array.from(md.rdf), { label: 'g(r) vs r (Å) — sharp peaks=solid, broad=liquid', color: '#34d399', yMin: 0 });
     }
-    plot2Title.textContent = `Live MD Temperature T(t) (${meta?.label || ''})`;
-    if (liveMdHistory.length >= 2) {
+    if (mm === 'shear' && md?.slabVx) {
+      plot2Title.textContent = 'Live Couette Shear Velocity Profile v_x(y)';
+      drawPlotLine(plot2, [0, 1, 2, 3, 4, 5, 6, 7], Array.from(md.slabVx), {
+        label: '8-slab Couette v_x(y) (Å/t₀) across Y', color: '#38bdf8', hLine: { y: 0, color: '#64748b', label: '0' }
+      });
+    } else if (mm === 'thermal' && md?.slabTempK) {
+      plot2Title.textContent = 'Live NEMD Spatial Temperature Gradient T(x)';
+      drawPlotLine(plot2, [0, 1, 2, 3, 4, 5, 6, 7], Array.from(md.slabTempK), {
+        label: '8-slab T(x) K (Hot slab #0–1 → Cold slab #4–5)', color: '#fb923c', yMin: 0
+      });
+    } else if (mm === 'acoustic' && md?.slabVx && md?.slabVy) {
+      plot2Title.textContent = 'Live Acoustic Wavefront Profile v_x (P) & v_y (S)';
       drawMultiLinePlot(plot2, [
-        { xs: liveMdHistory.map((h) => h.t), ys: liveMdHistory.map((h) => h.T), color: '#ff9c54', width: 2 }
-      ], { label: `T(t) K · T_m=${fmt(meta?.meltingPointK || 600, 0)} K`, yMin: 0, hLine: { y: meta?.meltingPointK || 600, color: '#facc15', label: 'T_m' } });
+        { xs: [0, 1, 2, 3, 4, 5, 6, 7], ys: Array.from(md.slabVx), color: '#facc15', width: 2 },
+        { xs: [0, 1, 2, 3, 4, 5, 6, 7], ys: Array.from(md.slabVy), color: '#38bdf8', width: 2 }
+      ], { label: 'P-wave v_x (gold) & S-wave v_y (cyan) across crystal bar', hLine: { y: 0, color: '#64748b', label: '0' } });
+    } else if (mm === 'strain' && liveMdStrainHistory.length >= 2) {
+      plot2Title.textContent = 'Live GPU Virial Stress vs Strain σ_xx(ε_x)';
+      drawPlotLine(plot2, liveMdStrainHistory.map((h) => h.eps * 100), liveMdStrainHistory.map((h) => h.pxx), {
+        label: 'σ_xx (GPa) vs ε_x (%) · slope = elastic stiffness', color: '#facc15', hLine: { y: 0, color: '#64748b', label: '0' }
+      });
+    } else {
+      plot2Title.textContent = `Live MD Temperature T(t) (${meta?.label || ''})`;
+      if (liveMdHistory.length >= 2) {
+        drawMultiLinePlot(plot2, [
+          { xs: liveMdHistory.map((h) => h.t), ys: liveMdHistory.map((h) => h.T), color: '#ff9c54', width: 2 }
+        ], { label: `T(t) K · T_m=${fmt(meta?.meltingPointK || 600, 0)} K`, yMin: 0, hLine: { y: meta?.meltingPointK || 600, color: '#facc15', label: 'T_m' } });
+      }
+    }
+
+    if (liveMdVacfHistory.length >= 8 && (mm === 'equilibrium' || mm === 'acoustic')) {
+      const spec = computePhononVdosFromVacf(liveMdVacfHistory, (meta?.dtFs || 1.0) * 4, 32);
+      plot3Title.textContent = `GPU Phonon Vibrational DOS g(ω) (Peak ${fmt(spec.peakThz, 1)} THz)`;
+      drawPlotLine(plot3, Array.from(spec.freqsThz), Array.from(spec.vdos), {
+        label: `VACF FFT g(f) vs THz · Θ_D,eff≈${Math.round(spec.effectiveDebyeK)} K`, color: '#c084fc', yMin: 0, yMax: 1.08
+      });
+    } else if (liveMdHistory.length >= 2) {
       plot3Title.textContent = 'Live MD Mean-Squared Displacement MSD(t) (Å²)';
       drawPlotLine(plot3, liveMdHistory.map((h) => h.t), liveMdHistory.map((h) => h.msd), {
         label: `MSD(t) Å² · Diffusion slope spikes above T_m!`, color: '#38bdf8', yMin: 0
@@ -2149,8 +2814,61 @@ function tickSimulationLoop(nowMs) {
     }
   }
 
-  // 2. Live WebGPU 1D Symplectic Quantum Tunneling TDSE stepping on Tab 1!
-  if (currentTab === 'nuclear' && activeSpecimenKind === 'element' && liveTdseSession && uiState.tdsePlaying && !liveTdseBusy && frameCounter % 3 === 0) {
+  // 1b. Live WebGPU 3D Stochastic LLG Spin-Lattice Magnetism on Tab 3!
+  if (currentTab === 'crystal' && uiState.crystalViewMode === 'spin-llg' && liveSpinSession && uiState.spinPlaying && !liveSpinBusy && frameCounter % 2 === 0) {
+    if (uiState.spinSweepB) {
+      uiState.spinFieldBTesla += uiState.spinSweepDir * 0.16;
+      if (uiState.spinFieldBTesla >= 4.8) { uiState.spinFieldBTesla = 4.8; uiState.spinSweepDir = -1; }
+      if (uiState.spinFieldBTesla <= -4.8) { uiState.spinFieldBTesla = -4.8; uiState.spinSweepDir = 1; }
+      const bLbl = document.getElementById('lbl-spin-b');
+      if (bLbl) bLbl.textContent = uiState.spinFieldBTesla.toFixed(1);
+    }
+    liveSpinBusy = true;
+    liveSpinSession.stepBatch(8, {
+      temperatureK: uiState.spinTempK,
+      fieldBZTesla: uiState.spinFieldBTesla,
+      readObs: true,
+      nonBlocking: true
+    }).then((tel) => {
+      if (!tel) return;
+      liveSpinTelemetry = tel;
+      liveSpinHistory.push({ B: tel.fieldBZTesla, Mz: tel.magnetizationZ, Mmag: tel.magnetizationMag, Mstag: tel.staggeredOrderMag, T: tel.temperatureK });
+      if (liveSpinHistory.length > 90) liveSpinHistory.shift();
+      if (window.__ulgElementsLabState) window.__ulgElementsLabState.spinTelemetry = tel;
+      if (currentTab === 'crystal' && uiState.crystalViewMode === 'spin-llg') redrawCurrentTab();
+    }).catch(() => {}).finally(() => { liveSpinBusy = false; });
+  }
+
+  // 1c. Live WebGPU 3D Drude-Boltzmann & BCS Electron Transport on Tab 3!
+  if (currentTab === 'crystal' && uiState.crystalViewMode === 'transport' && liveTransportSession && uiState.transportPlaying && !liveTransportBusy && frameCounter % 2 === 0) {
+    liveTransportBusy = true;
+    liveTransportSession.stepBatch(3, {
+      temperatureK: uiState.transportTempK,
+      eFieldVPerM: uiState.transportEFieldVPerM,
+      readObs: true,
+      nonBlocking: true
+    }).then((tel) => {
+      if (!tel) return;
+      liveTransportTelemetry = tel;
+      liveTransportHistory.push({ T: tel.temperatureK, drift: tel.meanDriftNorm, scatter: tel.measuredScatterRateFrac, sigma: tel.sigmaGpuSPerM });
+      if (liveTransportHistory.length > 70) liveTransportHistory.shift();
+      if (window.__ulgElementsLabState) window.__ulgElementsLabState.transportTelemetry = tel;
+      if (currentTab === 'crystal' && uiState.crystalViewMode === 'transport') redrawCurrentTab();
+    }).catch(() => {}).finally(() => { liveTransportBusy = false; });
+  }
+
+  // 2. Live WebGPU 1D Symplectic Quantum Tunneling TDSE / 3D Fission Playback on Tab 1!
+  if (currentTab === 'nuclear' && activeSpecimenKind === 'element' && uiState.nuclearViewMode === 'fission' && uiState.fissionPlaying && frameCounter % 3 === 0) {
+    uiState.fissionBeta2 += 0.025;
+    if (uiState.fissionBeta2 > 1.35) uiState.fissionBeta2 = 0.0;
+    const fSl = document.getElementById('ctrl-fiss-b2');
+    const fLb = document.getElementById('lbl-fiss-b2');
+    if (fSl) fSl.value = String(uiState.fissionBeta2);
+    if (fLb) fLb.textContent = uiState.fissionBeta2.toFixed(2);
+    updateNuclearFissionVolume();
+    redrawCurrentTab();
+  }
+  if (currentTab === 'nuclear' && activeSpecimenKind === 'element' && uiState.nuclearViewMode === 'tdse' && liveTdseSession && uiState.tdsePlaying && !liveTdseBusy && frameCounter % 3 === 0) {
     liveTdseBusy = true;
     liveTdseSession.stepBatch(14, { nonBlocking: true }).then((tel) => {
       if (!tel) return;
@@ -2184,12 +2902,25 @@ function tickSimulationLoop(nowMs) {
   // 5. Live Zero-Copy WebGPU Molecular Dynamics stepping on Tab 4 (Elements AND Backfed Compounds!)
   if (currentTab === 'md' && liveMdSession && uiState.mdPlaying && !liveMdBusy) {
     liveMdBusy = true;
-    liveMdSession.stepBatch(4, { readTelemetry: true, temperatureK: uiState.mdTargetTempK })
+    const nptTarget = (uiState.mdMode === 'strain' || (uiState.mdMode === 'equilibrium' && uiState.mdNptBarostat)) ? 0.0 : null;
+    liveMdSession.stepBatch(4, {
+      readTelemetry: true,
+      temperatureK: uiState.mdTargetTempK,
+      nptBarostatGPa: nptTarget,
+      nonBlocking: true
+    })
       .then((tel) => {
-        if (!liveMdSession) return;
+        if (!tel || !liveMdSession) return;
         liveMdTelemetry = tel;
         liveMdHistory.push({ t: tel.timeFs, T: tel.temperatureK, msd: tel.msdA2 });
         if (liveMdHistory.length > 80) liveMdHistory.shift();
+        liveMdVacfHistory.push(tel.vacf ?? 0);
+        if (liveMdVacfHistory.length > 64) liveMdVacfHistory.shift();
+        if (uiState.mdMode === 'strain') {
+          liveMdStrainHistory.push({ eps: tel.strainX || 0, pxx: tel.diagPressureGPa?.[0] ?? tel.pressureGPa });
+          if (liveMdStrainHistory.length > 60) liveMdStrainHistory.shift();
+        }
+        if (window.__ulgElementsLabState) window.__ulgElementsLabState.mdTelemetry = tel;
         if (currentTab === 'md') redrawCurrentTab();
       })
       .catch(() => {})
@@ -2268,13 +2999,20 @@ async function runElementDerivation(Z, massNumberA = null, { preserveQuantumNumb
       totalElectrons: atom.electronCount,
       dim: 32
     });
+    uiState.ionizedCation = false;
+    liveDeltaScfResult = null;
+    updateStarkStateForActiveElement();
     rebuildOrbitalPointCloud();
     initPhotonShellSessionForActiveSpecimen();
+    initSpinLatticeForActiveSpecimen();
+    initElectronTransportForActiveSpecimen();
     initNuclearTdseForActiveElement();
 
     const actualA = currentElementRes.bundle.nuclear.A;
     if (aInput) aInput.value = String(actualA);
     currentDecayChain = deriveNuclearDecayChain(Z, actualA, { maxDepth: 12 });
+    liveBatemanSeries = computeBatemanDecayCurves(currentDecayChain);
+    updateNuclearFissionVolume();
     const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, currentElementRes.bundle, {
       degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2, pressureRangePa: [1e2, pMax], materialIndex: Z
@@ -2425,6 +3163,8 @@ async function activateCompoundBackfeed(compoundRes, targetTab = 'crystal') {
   });
   rebuildOrbitalPointCloud();
   initPhotonShellSessionForActiveSpecimen();
+  initSpinLatticeForActiveSpecimen();
+  initElectronTransportForActiveSpecimen();
   initLiveMdForActiveSpecimen();
   const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
   currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, compoundRes.bundle, {
@@ -2465,6 +3205,8 @@ async function runCompoundDerivation(formula, { backfeedAllTabs = false, switchT
     updateActiveElementButton();
     rebuildOrbitalPointCloud();
     initPhotonShellSessionForActiveSpecimen();
+    initSpinLatticeForActiveSpecimen();
+    initElectronTransportForActiveSpecimen();
     initLiveMdForActiveSpecimen();
 
     const pMax = uiState.polytopeRegime === 'planetary' ? 1e12 : 1e10;
@@ -2541,6 +3283,8 @@ async function runReactionCombiner(aRaw, bRaw) {
     updateActiveElementButton();
     rebuildOrbitalPointCloud();
     initPhotonShellSessionForActiveSpecimen();
+    initSpinLatticeForActiveSpecimen();
+    initElectronTransportForActiveSpecimen();
     initLiveMdForActiveSpecimen();
     currentAtlas = await buildMaterialPolytopeAtlasWebGpu(gpuDevice, primary.bundle, {
       degrees: [4, 3], relativeTolerance: 0.05, maxBisectDepth: 2
@@ -2597,6 +3341,13 @@ function syncDebugState() {
     atlasPolytopeCount: currentAtlas?.polytopeCount ?? 0,
     polytopeProbe: uiState.polytopeProbe,
     photonTelemetry: livePhotonTelemetry,
+    spinTelemetry: liveSpinTelemetry,
+    transportTelemetry: liveTransportTelemetry,
+    mdTelemetry: liveMdTelemetry,
+    starkState: liveStarkState,
+    deltaScfResult: liveDeltaScfResult ? { ionizationEnergyEv: liveDeltaScfResult.ionizationEnergyEv, removedShell: liveDeltaScfResult.removedShell } : null,
+    fissionCurve: liveFissionCurve ? { fissility: liveFissionCurve.fissility, barrierMeV: liveFissionCurve.barrierMeV, saddleBeta: liveFissionCurve.saddleBeta } : null,
+    batemanCurves: liveBatemanSeries?.curves?.length ?? 0,
     tdseTelemetry: liveTdseTelemetry
       ? { stepCount: liveTdseTelemetry.stepCount, pInside: liveTdseTelemetry.pInside, pTunneled: liveTdseTelemetry.pTunneled }
       : null,
@@ -2674,7 +3425,80 @@ function syncDebugState() {
         resolve(canvas.toDataURL('image/png'));
       });
     }),
-    getCamera: () => ({ yaw: camYaw, pitch: camPitch, dist: camDist })
+    getCamera: () => ({ yaw: camYaw, pitch: camPitch, dist: camDist }),
+    setNuclearMode: (mode, beta2 = null) => {
+      uiState.nuclearViewMode = mode;
+      if (beta2 != null) uiState.fissionBeta2 = Number(beta2);
+      if (mode === 'fission') updateNuclearFissionVolume();
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+    },
+    setStarkField: (eVPerA) => {
+      uiState.starkFieldVPerA = Number(eVPerA) || 0;
+      updateStarkStateForActiveElement();
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+      return liveStarkState;
+    },
+    triggerDeltaScfIonize: async (enable = true) => {
+      await toggleDeltaScfIonization(enable);
+      return liveDeltaScfResult ? { ionizationEnergyEv: liveDeltaScfResult.ionizationEnergyEv, removedShell: liveDeltaScfResult.removedShell } : null;
+    },
+    stepSpinLattice: async (steps = 48, { temperatureK = null, fieldBZTesla = null } = {}) => {
+      if (!liveSpinSession) initSpinLatticeForActiveSpecimen();
+      if (!liveSpinSession) return null;
+      if (temperatureK != null) uiState.spinTempK = temperatureK;
+      if (fieldBZTesla != null) uiState.spinFieldBTesla = fieldBZTesla;
+      const tel = await liveSpinSession.stepBatch(steps, { temperatureK: uiState.spinTempK, fieldBZTesla: uiState.spinFieldBTesla, readObs: true });
+      if (tel) {
+        liveSpinTelemetry = tel;
+        liveSpinHistory.push({ B: tel.fieldBZTesla, Mz: tel.magnetizationZ, Mmag: tel.magnetizationMag, Mstag: tel.staggeredOrderMag, T: tel.temperatureK });
+      }
+      redrawCurrentTab();
+      syncDebugState();
+      return tel;
+    },
+    stepElectronTransport: async (steps = 32, { temperatureK = null, eFieldVPerM = null } = {}) => {
+      if (!liveTransportSession) initElectronTransportForActiveSpecimen(temperatureK);
+      if (!liveTransportSession) return null;
+      if (temperatureK != null) uiState.transportTempK = temperatureK;
+      if (eFieldVPerM != null) uiState.transportEFieldVPerM = eFieldVPerM;
+      const tel = await liveTransportSession.stepBatch(steps, { temperatureK: uiState.transportTempK, eFieldVPerM: uiState.transportEFieldVPerM, readObs: true });
+      if (tel) {
+        liveTransportTelemetry = tel;
+        liveTransportHistory.push({ T: tel.temperatureK, drift: tel.meanDriftNorm, scatter: tel.measuredScatterRateFrac, sigma: tel.sigmaGpuSPerM });
+      }
+      redrawCurrentTab();
+      syncDebugState();
+      return tel;
+    },
+    setMdMode: (mode, tempK = null) => {
+      initLiveMdForActiveSpecimen(tempK, mode);
+      renderSimControls();
+      redrawCurrentTab();
+      syncDebugState();
+    },
+    stepMd: async (steps = 16, { strainX = 0, shearXY = 0, pulse = null, npt = false } = {}) => {
+      if (!liveMdSession) return null;
+      if (strainX || shearXY) liveMdSession.applyStrain({ strainX, shearXY });
+      if (pulse) liveMdSession.injectAcousticPulse({ polarization: pulse, amplitude: 0.36 });
+      const tel = await liveMdSession.stepBatch(steps, {
+        readTelemetry: true,
+        temperatureK: uiState.mdTargetTempK,
+        nptBarostatGPa: npt ? 0.0 : null
+      });
+      if (tel) {
+        liveMdTelemetry = tel;
+        liveMdHistory.push({ t: tel.timeFs, T: tel.temperatureK, msd: tel.msdA2 });
+        liveMdVacfHistory.push(tel.vacf ?? 0);
+        if (uiState.mdMode === 'strain') liveMdStrainHistory.push({ eps: tel.strainX || 0, pxx: tel.diagPressureGPa?.[0] ?? tel.pressureGPa });
+      }
+      redrawCurrentTab();
+      syncDebugState();
+      return tel;
+    }
   };
 }
 
@@ -2705,10 +3529,12 @@ async function boot() {
       const z = Number(chip.dataset.heroZ);
       const a = chip.dataset.heroA ? Number(chip.dataset.heroA) : null;
       const tab = chip.dataset.heroTab || null;
+      const cview = chip.dataset.heroCview || null;
       selectedZ = z; selectedA = a;
       zInput.value = String(z);
       if (aInput) aInput.value = String(a ?? mostStableMassNumberForZ(z));
-      if (tab === 'crystal') uiState.crystalViewMode = 'tdks-atom';
+      if (tab === 'crystal') uiState.crystalViewMode = cview || 'photon-shell';
+      if (tab === 'nuclear' && z >= 90) { uiState.nuclearViewMode = 'fission'; uiState.fissionBeta2 = 0.72; }
       setMobileDrawerOpen(false);
       runElementDerivation(z, a, { switchToTab: tab });
     });

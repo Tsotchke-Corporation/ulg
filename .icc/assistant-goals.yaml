@@ -5,8 +5,8 @@
 #
 # HONESTY RULE: Only mark a goal `completed` (`accepted`) after its
 # .icc/completion-oracles.yaml target passes on one reviewed
-# `ulg.campaign.receipt.v1` bundle on disk. Today 5/8 active gates are
-# formally accepted: g5-reservation, g7-release-audit,
+# `ulg.campaign.receipt.v1` bundle on disk. Today 6/8 active gates are
+# formally accepted: g5-reservation, g7-release-audit, gate0-foundation-arch,
 # gate1-periodic-table-engine, gate2-reactions-and-polytope-atlas, and
 # gate4-studio-presentation.
 
@@ -14,12 +14,12 @@ goals:
   - id: gate0-foundation-arch
     task_id: ulg-gate0-foundation-arch
     priority: high
-    status: in_progress
+    status: completed
     goal: "Priority 0 (Gate 0): Split slim peercompute-core (<45 MB dist, 0 ort-wasm), build reusable WebGPU gpuMath substrate (batched eigensolver, 3D FFT, WebGPU MD, polytope Chebyshev), lock Material-Bundle & Polytope-Atlas ABIs, and complete Continuum Zero-Churn Step Loop hygiene"
     oracle: ulg-gate0-foundation-arch
     depends_on: []
-    reason: "0A-0C landed & Vulkan-verified (0af39d00: peercomputeCore.js + worker.plugins cut dist/ 117.5 MB -> 36 MB with 0 AI assets; src/runtime/gpuMath/ eigensolver/fft3d/MD/polytope-fit PASS on Vulkan; materialFoundationAbi.js + evaluatePolytopeAtlasWgsl locked). 0D Slices 1-2 landed (13bfda97, ca9824d8: water-realtime K-step pacing fixed with 0 boundary failures, submits 1.72 <= 2, 15.45 steps/s [3.07x faster], GPU mean 7.8%; 7 SS view bindGroup caches upgraded to 8-slot LRU + nativeSurfaceTemperatureWgsl slab binding cutting iron-ice bindGroups 40.51 -> 30.79, steps/s 2.61 -> 3.77 [+44%], GPU mean 8.0%). Remaining before formal oracle receipt: finish iron-ice <= 25 passes / <= 2 submits / 0 workDone, contact deduplication, & 63-limb retirement."
-    tags: [ulg-scale-ladder, gate-0, foundation-first, next]
+    reason: "Accepted 2026-11-23 at commit b46bf134 (dirty: false): ICC completion-oracle ulg-gate0-foundation-arch 3/3 PASS (status: complete) on fresh ICC index after 2-round adversarial independent review (Round 1 FAIL 2d851edd preserved at independent-review-round1-fail.md; Round 2 ACCEPT 1a8eddd4). Verified single peercompute/core.js import (src/runtime/peercomputeCore.js:40), dist/ = 37 MB (<45 MB, 0 AI/ort-wasm assets), shared peercomputeCompute.worker.js + resident stage entrypoints verified live on built dist/index.html?preset=sodium-water&autoplay=1 (24 steps, 0 page/console/HTTP errors), gate0GpuMath.native.test.mjs 1/1 PASS (4.23s), canonical ABIs locked, S0_ATTRIBUTION=1 steady-state physics createBuffer=0.003/step & bindGroups=0.059/step on water-realtime (24.49 steps/s, submits 1.68<=2, passes 15.43<=25, boundaryFailures=1 disclosed) and 0/step createBuffer & 0.000/step physics bindGroups on iron-ice-quench (encoders -80%, passes 19.95<=25, bindGroups -61%, thermalPotential cadence-deferred 18144 hits), iron-ice unilateral contact deduplicated, production dist/ strips finalizeSphReactionStrictGateCpu & 63-limb sphExactRational* (0 refs) while preserving blocksA/blocksB parallel product-history append, 6213/6213 host tests PASS, KERNEL_CLEAN. Evidence: /home/cos/.cache/icc/repos/ulg/gate0-acceptance-20261123/ and plan/done/gate0-foundation-arch.md."
+    tags: [ulg-scale-ladder, gate-0, foundation-first, accepted]
 
   - id: gate1-periodic-table-engine
     task_id: ulg-gate1-periodic-table-engine

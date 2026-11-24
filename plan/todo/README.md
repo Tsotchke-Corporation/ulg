@@ -2,11 +2,12 @@
 
 - **Start here:** Read [`plan/CURRENT-PLAN.md`](../CURRENT-PLAN.md) first for
   the full **40-order-of-magnitude bottom-up + bidirectional bookend roadmap
-  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**5/8
-  formally accepted:** `G5`, `G7`, [`Gate 1`](../done/gate1-periodic-table.md),
+  (`10⁻¹⁵ m` Nuclear → `10⁺²⁵ m` Supergalactic)**, honest 8-gate scorecard (**6/8
+  formally accepted:** `G5`, `G7`, [`Gate 0`](../done/gate0-foundation-arch.md),
+  [`Gate 1`](../done/gate1-periodic-table.md),
   [`Gate 2`](../done/gate2-reactions-polytope-atlas.md), and
-  [`Gate 4`](../done/gate4-studio-presentation.md); Gates 0, 3, and 5 honestly
-  `in_progress` at `44bb6f13`), Section 3 GPU budgets, and exact execution
+  [`Gate 4`](../done/gate4-studio-presentation.md); only Gates 3 and 5 honestly
+  `in_progress` at `b46bf134`), Section 3 GPU budgets, and exact execution
   sequence.
 - **Historical todo log archive:** The superseded 3,638-line June–Nov routing log
   lives at [`plan/moot/superseded-todo-readme-log-2026-11-22.md`](../moot/superseded-todo-readme-log-2026-11-22.md).
@@ -18,11 +19,9 @@ Completed items live in [`plan/done/`](../done/); superseded items live in
 
 ---
 
-## Priority 0 — Gate 0: Architectural & GPU Numerical Foundation *(Do First)*
+## Priority 0 — Gate 0: Architectural & GPU Numerical Foundation — **FORMALLY ACCEPTED (`3/3 PASS`, 2026-11-23)**
 
-> Builds the shared WebGPU numerical substrate (`gpuMath`: eigensolver, 3D FFT,
-> GPU MD, GPU Chebyshev), slim `peercompute-core` packaging, canonical
-> Material-Bundle & Polytope-Atlas ABIs, and Continuum Zero-Churn Step Loop.
+> Formal acceptance record: [`plan/done/gate0-foundation-arch.md`](../done/gate0-foundation-arch.md) (`b46bf134`, `3/3 PASS`). The files below remain open in `plan/todo/` strictly for **Gate 3** shared-device presentation/MC churn, full Section 3 continuum budgets, OPFS warm cache, and post-acceptance refinements.
 
 | File | Gate | Live-Code Reality (`b9e86811`, 2026-11-23) & Open Work |
 |---|---|---|

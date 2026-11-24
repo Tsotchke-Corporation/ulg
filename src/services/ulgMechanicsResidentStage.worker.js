@@ -12685,7 +12685,12 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
               tier0PresentationBoundaryAudit.invocations.push(observation);
               try {
                 const boundaryOpts = tier0RealtimePacing
-                  ? { maxSubstepsPerSubmission: tier0PresentationMaxSubstepsPerSubmission }
+                  ? {
+                      maxSubstepsPerSubmission: Math.max(
+                        tier0PresentationMaxSubstepsPerSubmission,
+                        Number(metadata?.chunkStepCount) || 0
+                      )
+                    }
                   : undefined;
                 const receipt = await
                   onTier0PresentationSubmissionBoundary(metadata, boundaryOpts);

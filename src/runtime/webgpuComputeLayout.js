@@ -1357,6 +1357,17 @@ export function armWorkerQueueSubmitBurst(device) {
   };
   workerQueueSubmitBurstRecords.set(device, record);
   queue.submit = (commandBuffers) => {
+    if (
+      record.open
+      && globalThis.__ulgDecoupledPresentationBypassBurst === true
+      && commandBuffers.length > 0
+      && commandBuffers.every(
+        (cb) => !Array.isArray(cb && typeof cb === 'object' ? cb[VIRTUAL_BURST_COMPUTE_OPS] : null)
+      )
+    ) {
+      record.stats.directSubmitTotal += 1;
+      return record.realSubmit(commandBuffers);
+    }
     if (record.open) {
       if (record.pooledPendingCopies.length > 0) {
         workerQueueSubmitBurstSealPooledCopies(device, record);

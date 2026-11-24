@@ -90,7 +90,7 @@ const hook = (options = {}) => {
     passTimingEnabled: Boolean(options.passTimingEnabled) };
   G.readSubmitTimeline = () => G.submitTimeline ?? null;
   const encDev = new WeakMap(), encPres = new WeakMap(), encHasRender = new WeakMap(), encHasPhysCompute = new WeakMap(), cbPres = new WeakMap(), passDev = new WeakMap(), passPres = new WeakMap(), queueDev = new WeakMap(), traceBuffers = new WeakMap();
-  const PRES_LABEL_RE = /marching-cubes|native-surface-temperature|worker-owned-isosurface|worker-native-surface|worker-native-background|ulg-sph-render-|ulg-sph-participating-medium|ulg-sph-extension-surface|ulg-optical-material|ulg-optical-spectral|isosurface-presenter|surface-mesh|offscreen-render/i;
+  const PRES_LABEL_RE = /marching-cubes|native-surface-temperature|worker-owned-isosurface|worker-native-surface|worker-native-background|ulg-sph-render-|ulg-sph-participating-medium|ulg-sph-extension-surface|ulg-optical-material|ulg-optical-spectral|isosurface-presenter|surface-mesh|offscreen-render|offscreen-presentation/i;
   const PRES_STACK_RE = /workerOwnedIsosurfacePresenter|workerOwnedNativeSurfaceMaterial|sphRenderFieldGpu|sphParticipatingMediumGpu|sphSurfaceMeshGpu|nativeSurfaceTemperature|marchingCubes|renderFrame|presentSubmissionBoundary|updateCommittedSurface/i;
   const isPresentationCall = (label, stack) => (
     (globalThis.__ulgGpuPresentationDepth || 0) > 0

@@ -16482,16 +16482,24 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpuImpl({
     finalStep.residentMaxSpeedMPerS = continuationBounds.maxSpeedMPerS;
     finalStep.residentPositionBoundsSource = continuationBounds.source;
     finalStep.residentActiveGridDispatchHint = activeGridDispatch;
+    const actualSubmissionMode = (
+      presentationQueueQosChunkingEnabled
+      && commandSubmissionCount > 1
+    )
+      ? 'queue-ordered-presentation-qos-chunks'
+      : 'single-terminal-submission';
+    const effectiveMaxSubstepsPerSubmission = actualSubmissionMode
+      === 'queue-ordered-presentation-qos-chunks'
+      ? Math.max(normalizedMaxSubstepsPerSubmission, ...submissionStepCounts)
+      : null;
     finalStep.fusedResidentSequence = {
       schema: 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
       status: 'fused-resident-sequence-executed',
       stepCount: count,
-      submissionMode,
+      submissionMode: actualSubmissionMode,
       commandSubmissionCount,
       submissionStepCounts: [...submissionStepCounts],
-      maxSubstepsPerSubmission: presentationQueueQosChunkingEnabled
-        ? normalizedMaxSubstepsPerSubmission
-        : null,
+      maxSubstepsPerSubmission: effectiveMaxSubstepsPerSubmission,
       presentationBoundaryCount,
       presentationBoundaryCompletedCount,
       presentationBoundaryFailureCount,

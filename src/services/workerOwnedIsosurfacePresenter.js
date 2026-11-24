@@ -1658,7 +1658,15 @@ export function createWorkerOwnedIsosurfacePresenter({
         await closeValidationScope();
         return false;
       }
-      device.queue.submit([commandBuffer]);
+      const bypassPhysicsBurst = !submissionBoundary
+        && typeof globalThis.GPUDevice === 'function'
+        && device instanceof globalThis.GPUDevice;
+      if (bypassPhysicsBurst) globalThis.__ulgDecoupledPresentationBypassBurst = true;
+      try {
+        device.queue.submit([commandBuffer]);
+      } finally {
+        if (bypassPhysicsBurst) globalThis.__ulgDecoupledPresentationBypassBurst = false;
+      }
       submissionQueued = true;
       submittedRenderSerial += 1;
       wakeRenderSubmitWaiters();

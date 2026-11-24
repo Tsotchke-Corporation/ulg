@@ -7,6 +7,10 @@ import {
 import {
   evaluateAstrophysicsScaleAtlasMultipoleWebGpu
 } from '../runtime/astrophysics/scaleAtlasAstrophysicsGravityBridge.js';
+import {
+  createSchroederScaleAtlasGravitySolverWebGpu,
+  schroederScaleAtlasResidentGravityWgsl
+} from '../runtime/sph/schroederScaleAtlasMultipoleGpu.js';
 
 const USAGE_STORAGE = 0x0080;
 const USAGE_UNIFORM = 0x0040;
@@ -394,185 +398,34 @@ fn step_nbody(
 `;
 
 /**
- * Resident 3D Translation-Invariant Hierarchical Barnes-Hut Octree Gravity Shader (WGSL)
- * matching the `eshkols-in-space` 8-float interleaved `Body` ABI.
- *
- * Uses live exact IEEE-754 float32 COM reduction (`bh_com_reduce`) so the `16^3`
- * leaf octree + `4^3` coarse octree are anchored to the live system COM rather
- * than world origin `(0, 0, 0)`, plus exact Newton's Shell Theorem self-leaf gravity.
+ * Resident N-body time integrator consuming accelerations directly from ULG's
+ * canonical GPU `SchroederScaleAtlas` multipole gravity solver
+ * (`schroederScaleAtlasMultipoleGpu.js` — ZERO private octrees!).
  */
-export const cosmicBarnesHutOctreeWgsl = /* wgsl */ `
+export const cosmicScaleAtlasIntegrateWgsl = /* wgsl */ `
 struct Body {
   pos_mass: vec4<f32>,
   vel_radius: vec4<f32>,
 };
 
-struct BhParams {
+struct AtlasIntegrateParams {
   count: u32,
   mode: u32,
   pad0: u32,
   pad1: u32,
   dt: f32,
-  gravity: f32,
-  softening2: f32,
   hubble_drag: f32,
   inv_a3: f32,
-  box_half: f32,
-  theta2: f32,
   pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> src_bodies: array<Body>;
 @group(0) @binding(1) var<storage, read_write> dst_bodies: array<Body>;
-// 4,096 leaves * 4 i32 slots = 16,384 atomic<i32>: [mass_q, mx_q, my_q, mz_q]
-@group(0) @binding(2) var<storage, read_write> leaf_accum: array<atomic<i32>>;
-// 4,096 L2 monopole nodes + 64 L1 coarse nodes + 1 COM node (index 4160) = 4,161 vec4<f32>
-@group(0) @binding(3) var<storage, read_write> tree_nodes: array<vec4<f32>>;
-@group(0) @binding(4) var<uniform> params: BhParams;
-
-const L2_DIM: u32 = 16u;
-const L2_COUNT: u32 = 4096u;
-const L1_DIM: u32 = 4u;
-const L1_COUNT: u32 = 64u;
-const TREE_COM_IDX: u32 = 4160u;
-const Q_MASS: f32 = 8192.0;
-const Q_MOM: f32 = 512.0;
-
-var<workgroup> wg_com_m: array<f32, 256>;
-var<workgroup> wg_com_p: array<vec3<f32>, 256>;
+@group(0) @binding(2) var<storage, read> ss_acc_phi: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: AtlasIntegrateParams;
 
 @compute @workgroup_size(64)
-fn bh_clear_tree(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i < L2_COUNT) {
-    let base = i * 4u;
-    atomicStore(&leaf_accum[base + 0u], 0);
-    atomicStore(&leaf_accum[base + 1u], 0);
-    atomicStore(&leaf_accum[base + 2u], 0);
-    atomicStore(&leaf_accum[base + 3u], 0);
-    tree_nodes[i] = vec4<f32>(0.0);
-  }
-  if (i < L1_COUNT) {
-    tree_nodes[L2_COUNT + i] = vec4<f32>(0.0);
-  }
-}
-
-@compute @workgroup_size(256)
-fn bh_com_reduce(@builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x;
-  var m_sum = 0.0;
-  var p_sum = vec3<f32>(0.0);
-  var i = tid;
-  loop {
-    if (i >= params.count) { break; }
-    let pm = src_bodies[i].pos_mass;
-    if (pm.w > 0.0) {
-      m_sum = m_sum + pm.w;
-      p_sum = p_sum + pm.xyz * pm.w;
-    }
-    i = i + 256u;
-  }
-  wg_com_m[tid] = m_sum;
-  wg_com_p[tid] = p_sum;
-  workgroupBarrier();
-
-  var stride = 128u;
-  loop {
-    if (stride == 0u) { break; }
-    if (tid < stride) {
-      wg_com_m[tid] = wg_com_m[tid] + wg_com_m[tid + stride];
-      wg_com_p[tid] = wg_com_p[tid] + wg_com_p[tid + stride];
-    }
-    workgroupBarrier();
-    stride = stride >> 1u;
-  }
-  if (tid == 0u) {
-    let m_tot = wg_com_m[0u];
-    if (m_tot > 1e-6) {
-      tree_nodes[TREE_COM_IDX] = vec4<f32>(wg_com_p[0u] / m_tot, m_tot);
-    } else {
-      tree_nodes[TREE_COM_IDX] = vec4<f32>(0.0);
-    }
-  }
-}
-
-fn clamp_cell(v: f32, half_extent: f32) -> u32 {
-  let u = clamp((v + half_extent) / (2.0 * half_extent), 0.0, 0.9999);
-  return min(15u, u32(u * 16.0));
-}
-
-@compute @workgroup_size(64)
-fn bh_deposit_leaves(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= params.count) { return; }
-  let pm = src_bodies[i].pos_mass;
-  if (pm.w <= 0.0) { return; }
-  let com = tree_nodes[TREE_COM_IDX].xyz;
-  let rel = pm.xyz - com;
-  let cx = clamp_cell(rel.x, params.box_half);
-  let cy = clamp_cell(rel.y, params.box_half);
-  let cz = clamp_cell(rel.z, params.box_half);
-  let cell = (cz * 256u) + (cy * 16u) + cx;
-  let base = cell * 4u;
-  let mq = i32(round(clamp(pm.w * Q_MASS, -1e8, 1e8)));
-  let mxq = i32(round(clamp(pm.w * rel.x * Q_MOM, -1e8, 1e8)));
-  let myq = i32(round(clamp(pm.w * rel.y * Q_MOM, -1e8, 1e8)));
-  let mzq = i32(round(clamp(pm.w * rel.z * Q_MOM, -1e8, 1e8)));
-  atomicAdd(&leaf_accum[base + 0u], mq);
-  atomicAdd(&leaf_accum[base + 1u], mxq);
-  atomicAdd(&leaf_accum[base + 2u], myq);
-  atomicAdd(&leaf_accum[base + 3u], mzq);
-}
-
-@compute @workgroup_size(64)
-fn bh_finalize_leaves(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let cell = gid.x;
-  if (cell >= L2_COUNT) { return; }
-  let base = cell * 4u;
-  let m = f32(atomicLoad(&leaf_accum[base + 0u])) / Q_MASS;
-  if (m > 1e-6) {
-    let inv_m = 1.0 / m;
-    let cx = (f32(atomicLoad(&leaf_accum[base + 1u])) / Q_MOM) * inv_m;
-    let cy = (f32(atomicLoad(&leaf_accum[base + 2u])) / Q_MOM) * inv_m;
-    let cz = (f32(atomicLoad(&leaf_accum[base + 3u])) / Q_MOM) * inv_m;
-    tree_nodes[cell] = vec4<f32>(cx, cy, cz, m);
-  } else {
-    tree_nodes[cell] = vec4<f32>(0.0);
-  }
-}
-
-@compute @workgroup_size(64)
-fn bh_reduce_coarse(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let p = gid.x;
-  if (p >= L1_COUNT) { return; }
-  let px = p & 3u;
-  let py = (p >> 2u) & 3u;
-  let pz = (p >> 4u) & 3u;
-  var m_sum = 0.0;
-  var mom = vec3<f32>(0.0);
-  for (var dz = 0u; dz < 4u; dz = dz + 1u) {
-    for (var dy = 0u; dy < 4u; dy = dy + 1u) {
-      for (var dx = 0u; dx < 4u; dx = dx + 1u) {
-        let lx = px * 4u + dx;
-        let ly = py * 4u + dy;
-        let lz = pz * 4u + dz;
-        let leaf = tree_nodes[(lz * 256u) + (ly * 16u) + lx];
-        if (leaf.w > 0.0) {
-          m_sum = m_sum + leaf.w;
-          mom = mom + leaf.xyz * leaf.w;
-        }
-      }
-    }
-  }
-  if (m_sum > 1e-6) {
-    tree_nodes[L2_COUNT + p] = vec4<f32>(mom / m_sum, m_sum);
-  } else {
-    tree_nodes[L2_COUNT + p] = vec4<f32>(0.0);
-  }
-}
-
-@compute @workgroup_size(64)
-fn bh_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn ss_atlas_nbody_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let idx = gid.x;
   if (idx >= params.count) { return; }
   let self_pm = src_bodies[idx].pos_mass;
@@ -581,63 +434,13 @@ fn bh_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     dst_bodies[idx] = Body(vec4<f32>(0.0), vec4<f32>(0.0));
     return;
   }
-
-  let com = tree_nodes[TREE_COM_IDX].xyz;
-  let self_rel = self_pm.xyz - com;
-  let l1_size = (2.0 * params.box_half) / 4.0;
-  let leaf_w = (2.0 * params.box_half) / 16.0;
-  let r_cell2 = 0.05 * leaf_w * leaf_w + params.softening2;
-  let open_thresh2 = (l1_size * l1_size) / max(0.05, params.theta2);
-  let self_cell_x = clamp_cell(self_rel.x, params.box_half);
-  let self_cell_y = clamp_cell(self_rel.y, params.box_half);
-  let self_cell_z = clamp_cell(self_rel.z, params.box_half);
-  let self_leaf_id = (self_cell_z * 256u) + (self_cell_y * 16u) + self_cell_x;
-
-  var acc = vec3<f32>(0.0);
-  for (var p = 0u; p < L1_COUNT; p = p + 1u) {
-    let coarse = tree_nodes[L2_COUNT + p];
-    if (coarse.w <= 0.0) { continue; }
-    let d_c = coarse.xyz - self_rel;
-    let dist2_c = dot(d_c, d_c);
-    if (dist2_c > open_thresh2) {
-      let r2 = dist2_c + params.softening2;
-      let inv_r = inverseSqrt(r2);
-      acc = acc + d_c * (coarse.w * inv_r * inv_r * inv_r);
-    } else {
-      let px = p & 3u;
-      let py = (p >> 2u) & 3u;
-      let pz = (p >> 4u) & 3u;
-      for (var dz = 0u; dz < 4u; dz = dz + 1u) {
-        for (var dy = 0u; dy < 4u; dy = dy + 1u) {
-          for (var dx = 0u; dx < 4u; dx = dx + 1u) {
-            let leaf_id = ((pz * 4u + dz) * 256u) + ((py * 4u + dy) * 16u) + (px * 4u + dx);
-            let leaf = tree_nodes[leaf_id];
-            if (leaf.w <= 0.0) { continue; }
-            if (leaf_id == self_leaf_id) {
-              let eff_m = leaf.w - self_pm.w;
-              if (eff_m <= 1e-6) { continue; }
-              let eff_pos = (leaf.xyz * leaf.w - self_rel * self_pm.w) / eff_m;
-              let d = eff_pos - self_rel;
-              let inv_rc = inverseSqrt(r_cell2);
-              acc = acc + d * (eff_m * inv_rc * inv_rc * inv_rc);
-              continue;
-            }
-            let d = leaf.xyz - self_rel;
-            let r2 = dot(d, d) + params.softening2;
-            let inv_r = inverseSqrt(r2);
-            acc = acc + d * (leaf.w * inv_r * inv_r * inv_r);
-          }
-        }
-      }
-    }
-  }
-
+  let acc = ss_acc_phi[idx].xyz;
   var vel = self_vr.xyz;
   if (params.mode == 1u) {
     let drag = max(0.0, 1.0 - params.hubble_drag * params.dt);
-    vel = vel * drag + acc * (params.gravity * params.inv_a3 * params.dt);
+    vel = vel * drag + acc * (params.inv_a3 * params.dt);
   } else {
-    vel = vel + acc * (params.gravity * params.dt);
+    vel = vel + acc * params.dt;
   }
   let pos = self_pm.xyz + vel * params.dt;
   dst_bodies[idx] = Body(vec4<f32>(pos, self_pm.w), vec4<f32>(vel, self_vr.w));
@@ -820,19 +623,19 @@ export function createResidentTiledNBodyEngine({
 }
 
 /**
- * Strictly GPU-native Translation-Invariant Hierarchical Barnes-Hut Octree N-body
- * engine scaling cleanly to 32,768 - 262,144+ stars with zero per-frame readback.
- * Fails closed when WebGPU `device` is absent (zero CPU mirror solver).
+ * Strictly GPU-native Translation-Invariant Canonical `SchroederScaleAtlas`
+ * Multipole N-body engine scaling cleanly to 32,768 - 262,144+ stars with
+ * zero per-frame readback and ZERO private octrees.
  */
-export function createResidentBarnesHutNBodyEngine({
+export function createResidentScaleAtlasMultipoleNBodyEngine({
   device = null,
   initialBodies,
   mode = 0,
   boxHalf = 16.0,
   theta = 0.65,
-  label = 'ulg-cosmic-bh'
+  label = 'ulg-cosmic-ss-atlas'
 }) {
-  assertWebGpuDevice(device, 'createResidentBarnesHutNBodyEngine');
+  assertWebGpuDevice(device, 'createResidentScaleAtlasMultipoleNBodyEngine');
   let hostBodies = Float32Array.from(initialBodies);
   const count = hostBodies.length / 8;
   let stepIndex = 0;
@@ -845,44 +648,41 @@ export function createResidentBarnesHutNBodyEngine({
     device.createBuffer({ label: `${label}-buf-0`, size: byteLength, usage: bodyUsage }),
     device.createBuffer({ label: `${label}-buf-1`, size: byteLength, usage: bodyUsage })
   ];
-  const leafAccumBuf = device.createBuffer({ label: `${label}-leaf-accum`, size: 4096 * 16, usage: USAGE_STORAGE });
-  const treeNodesBuf = device.createBuffer({ label: `${label}-tree-nodes`, size: 4161 * 16, usage: USAGE_STORAGE });
-  const paramsBuffer = device.createBuffer({ label: `${label}-params`, size: 48, usage: USAGE_UNIFORM | USAGE_COPY_DST });
+  const ssAtlasGravity = createSchroederScaleAtlasGravitySolverWebGpu(device, {
+    maxCount: count,
+    strideFloats: 8,
+    chartLevel: 70,
+    useAdjSoftening: false,
+    qMass: 8192.0,
+    qMom: 512.0,
+    rCellFactor: 0.05,
+    label: `${label}-gravity`
+  });
+  const paramsBuffer = device.createBuffer({ label: `${label}-params`, size: 32, usage: USAGE_UNIFORM | USAGE_COPY_DST });
   const stagingBuffer = device.createBuffer({ label: `${label}-staging`, size: byteLength, usage: USAGE_COPY_DST | USAGE_MAP_READ });
   device.queue.writeBuffer(buffers[0], 0, hostBodies);
   device.queue.writeBuffer(buffers[1], 0, hostBodies);
 
-  const bindings = [
-    computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'storage'),
-    computeBufferBinding(2, 'storage'),
-    computeBufferBinding(3, 'storage'),
-    computeBufferBinding(4, 'uniform')
-  ];
-  const mk = (entryPoint) => createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-cosmic-bh-${entryPoint}.v2`,
-    label: `ulg-cosmic-bh-${entryPoint}`,
-    code: cosmicBarnesHutOctreeWgsl,
-    entryPoint,
-    bindings
+  const integratePipe = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-cosmic-ss-atlas-integrate.v1',
+    label: 'ulg-cosmic-ss-atlas-integrate',
+    code: cosmicScaleAtlasIntegrateWgsl,
+    entryPoint: 'ss_atlas_nbody_integrate',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
   });
-  const pipes = {
-    clear: mk('bh_clear_tree'),
-    comReduce: mk('bh_com_reduce'),
-    deposit: mk('bh_deposit_leaves'),
-    finalize: mk('bh_finalize_leaves'),
-    reduce: mk('bh_reduce_coarse'),
-    integrate: mk('bh_integrate')
-  };
   const mkBg = (src, dst, idx) => createCachedExplicitBindGroup(device, {
-    layout: pipes.integrate.bindGroupLayout,
+    layout: integratePipe.bindGroupLayout,
     label: `${label}-bg-${idx}`,
     entries: [
       { binding: 0, resource: { buffer: src } },
       { binding: 1, resource: { buffer: dst } },
-      { binding: 2, resource: { buffer: leafAccumBuf } },
-      { binding: 3, resource: { buffer: treeNodesBuf } },
-      { binding: 4, resource: { buffer: paramsBuffer } }
+      { binding: 2, resource: { buffer: ssAtlasGravity.accPhiBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
     ]
   });
   const bindGroups = [mkBg(buffers[0], buffers[1], 0), mkBg(buffers[1], buffers[0], 1)];
@@ -914,51 +714,34 @@ export function createResidentBarnesHutNBodyEngine({
     readback = false
   } = {}) {
     if (disposed || !buffers) return hostBodies;
-    const paramData = new ArrayBuffer(48);
+    const invA3 = mode === 1 ? 1 / Math.max(0.05, scaleFactorA ** 3) : 1.0;
+    ssAtlasGravity.writeParams({
+      count,
+      gravityG: gravity,
+      softening2: softening * softening,
+      boxHalf,
+      theta2: theta * theta
+    });
+    const paramData = new ArrayBuffer(32);
     const u32 = new Uint32Array(paramData);
     const f32 = new Float32Array(paramData);
-    const invA3 = mode === 1 ? 1 / Math.max(0.05, scaleFactorA ** 3) : 1.0;
     u32[0] = count;
     u32[1] = mode;
     f32[4] = dt;
-    f32[5] = gravity;
-    f32[6] = softening * softening;
-    f32[7] = mode === 1 ? 2 * hubbleRate : 0;
-    f32[8] = invA3;
-    f32[9] = boxHalf;
-    f32[10] = theta * theta;
+    f32[5] = mode === 1 ? 2 * hubbleRate : 0;
+    f32[6] = invA3;
     device.queue.writeBuffer(paramsBuffer, 0, paramData);
 
     const srcIdx = ping;
     const dstIdx = 1 - ping;
-    const bg = bindGroups[srcIdx];
     const bodyGroups = Math.ceil(count / 64);
 
     // 1 single coalesced compute pass & 1 queue.submit per step
-    const encoder = device.createCommandEncoder({ label: `${label}-bh-step-${stepIndex}` });
-    const pass = encoder.beginComputePass({ label: `${label}-bh-pass` });
-    pass.setPipeline(pipes.clear.pipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(64);
-
-    pass.setPipeline(pipes.comReduce.pipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(1);
-
-    pass.setPipeline(pipes.deposit.pipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(bodyGroups);
-
-    pass.setPipeline(pipes.finalize.pipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(64);
-
-    pass.setPipeline(pipes.reduce.pipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(1);
-
-    pass.setPipeline(pipes.integrate.pipeline);
-    pass.setBindGroup(0, bg);
+    const encoder = device.createCommandEncoder({ label: `${label}-step-${stepIndex}` });
+    const pass = encoder.beginComputePass({ label: `${label}-pass` });
+    ssAtlasGravity.encodeIntoPass(pass, { srcBuffer: buffers[srcIdx], count });
+    pass.setPipeline(integratePipe.pipeline);
+    pass.setBindGroup(0, bindGroups[srcIdx]);
     pass.dispatchWorkgroups(bodyGroups);
     pass.end();
 
@@ -1005,8 +788,7 @@ export function createResidentBarnesHutNBodyEngine({
     disposed = true;
     buffers?.[0]?.destroy();
     buffers?.[1]?.destroy();
-    leafAccumBuf?.destroy();
-    treeNodesBuf?.destroy();
+    ssAtlasGravity.destroy();
     paramsBuffer?.destroy();
     stagingBuffer?.destroy();
     buffers = null;
@@ -1015,10 +797,11 @@ export function createResidentBarnesHutNBodyEngine({
   return {
     get count() { return count; },
     get activeCount() { return count; },
+    get strideFloats() { return 8; },
     get stepIndex() { return stepIndex; },
     get scaleFactorA() { return scaleFactorA; },
     get backend() { return 'webgpu'; },
-    get gravityMode() { return 'webgpu-barnes-hut-octree'; },
+    get gravityMode() { return ssAtlasGravity.gravityMode; },
     getBodies: () => hostBodies,
     readbackBodies,
     getResidentBuffer,
@@ -1027,6 +810,9 @@ export function createResidentBarnesHutNBodyEngine({
     dispose
   };
 }
+
+// Backward-compatible export name delegating strictly to the canonical SchroederScaleAtlas solver
+export const createResidentBarnesHutNBodyEngine = createResidentScaleAtlasMultipoleNBodyEngine;
 
 /**
  * Derive continuous constitutive mechanical/thermodynamic parameters for the
@@ -1039,32 +825,18 @@ export function deriveContinuumConstitutiveParams({
   meltingPointK = null,
   boilingPointK = null,
   cohesiveEnergyEv = null,
-  temperatureK = 298.15,
-  phase = null
+  temperatureK = 298.15
 } = {}) {
   const T = Math.max(1.0, Number(temperatureK) || 298.15);
-  let tm = Number.isFinite(Number(meltingPointK)) && Number(meltingPointK) > 0 ? Number(meltingPointK) : null;
-  let tb = Number.isFinite(Number(boilingPointK)) && Number(boilingPointK) > 0 ? Number(boilingPointK) : null;
-  let cohEv = Number.isFinite(Number(cohesiveEnergyEv)) && Number(cohesiveEnergyEv) >= 0 ? Number(cohesiveEnergyEv) : null;
-
-  if (tm === null || tb === null) {
-    if (phase === 'gas') {
-      tm = tm ?? 120;
-      tb = tb ?? 180;
-      cohEv = cohEv ?? 0.08;
-    } else if (phase === 'liquid') {
-      tm = tm ?? 234.3;
-      tb = tb ?? 629.9;
-      cohEv = cohEv ?? 0.67;
-    } else {
-      tm = tm ?? 1200;
-      tb = tb ?? 2800;
-      cohEv = cohEv ?? 3.4;
-    }
+  const tm = Number(meltingPointK);
+  const tb = Number(boilingPointK);
+  if (!(Number.isFinite(tm) && tm > 0) || !(Number.isFinite(tb) && tb > 0)) {
+    throw new RangeError(
+      'deriveContinuumConstitutiveParams fails closed: explicit positive meltingPointK and boilingPointK are required (zero discrete phase fallbacks).'
+    );
   }
-  if (cohEv === null) {
-    cohEv = Math.max(0.05, tb / 900);
-  }
+  const cohRaw = Number(cohesiveEnergyEv);
+  const cohEv = Number.isFinite(cohRaw) && cohRaw >= 0 ? cohRaw : Math.max(0.05, tb / 900);
 
   // Smooth continuous thermodynamic order parameters from T / T_m and T / T_b
   const tNormMelt = T / Math.max(1.0, tm);
@@ -1488,27 +1260,40 @@ export function createResidentCosmicModuleRegistration({
   scaleRangeM,
   zeroCopy = false
 }) {
+  const strideElements = Math.max(8, Math.trunc(Number(engine.strideFloats) || 8));
+  const strideBytes = strideElements * 4;
   const stateLayout = {
     tensorId: 'bodies',
     dtype: 'f32',
     layout: 'interleaved',
-    strideElements: 8,
-    strideBytes: 32,
-    fields: ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'radius']
+    strideElements,
+    strideBytes,
+    fields: strideElements >= 16
+      ? ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'rhoVis', 'ax', 'ay', 'az', 'localDelta', 'species', 'halo', 'aScale', 'pad']
+      : ['x', 'y', 'z', 'mass', 'vx', 'vy', 'vz', 'radius']
   };
+  const isMicroSph = Boolean(engine.gravityMode?.startsWith('webgpu-micro-sph'));
+  const isScaleAtlas = engine.gravityMode === 'webgpu-schroeder-scale-atlas-multipole';
+  const isTreePm = engine.gravityMode === 'webgpu-flrw-fft3d-treepm';
   return {
     method,
     kernel: {
-      sourceModule: 'src/demos/cosmicQuantumGpuKernels.js',
-      entryPoint: engine.gravityMode?.startsWith('webgpu-micro-sph')
+      sourceModule: isScaleAtlas
+        ? 'src/runtime/sph/schroederScaleAtlasMultipoleGpu.js'
+        : isTreePm
+          ? 'src/runtime/astrophysics/supergalacticTreePmGpu.js'
+          : 'src/demos/cosmicQuantumGpuKernels.js',
+      entryPoint: isMicroSph
         ? 'step_continuum_micro_sph'
-        : engine.gravityMode === 'webgpu-barnes-hut-octree'
-          ? 'bh_integrate'
-          : 'step_nbody',
-      wgsl: engine.gravityMode?.startsWith('webgpu-micro-sph')
+        : isScaleAtlas
+          ? 'ss_atlas_nbody_integrate'
+          : isTreePm
+            ? 'cic_kick_drift'
+            : 'step_nbody',
+      wgsl: isMicroSph
         ? continuumMicroSphWgsl
-        : engine.gravityMode === 'webgpu-barnes-hut-octree'
-          ? cosmicBarnesHutOctreeWgsl
+        : isScaleAtlas
+          ? `${schroederScaleAtlasResidentGravityWgsl}\n${cosmicScaleAtlasIntegrateWgsl}`
           : cosmicNBodyTiledWgsl,
       workgroupSize: 64
     },
@@ -1525,18 +1310,23 @@ export function createResidentCosmicModuleRegistration({
       const fromStep = engine.stepIndex;
       const params = capsule.input?.parameters || {};
       const doReadback = params.readback !== undefined ? Boolean(params.readback) : !zeroCopy;
-      const bodies = await engine.step({ ...params, readback: doReadback });
+      const stepOut = await engine.step({ ...params, readback: doReadback });
       const toStep = engine.stepIndex;
+      const residentBytes = (stepOut instanceof Float32Array && stepOut.byteLength > 0)
+        ? stepOut.byteLength
+        : engine.count * strideBytes;
       leaseSession.publishBuffer({
         resourceKey: 'bodies',
         buffer: engine.getResidentBuffer(),
         destroyFn: () => true,
-        byteLength: bodies.byteLength,
+        byteLength: residentBytes,
         rowCount: engine.count,
         layout: stateLayout,
         stepIndex: toStep,
         portableSnapshotFn: async () => Float32Array.from(
-          doReadback ? bodies : await engine.readbackBodies()
+          (doReadback && stepOut instanceof Float32Array)
+            ? stepOut
+            : await engine.readbackBodies()
         )
       });
       const leaseHandle = leaseSession.borrowBufferReadLease({
@@ -1548,12 +1338,12 @@ export function createResidentCosmicModuleRegistration({
         artifactId: `${capsule.taskId}:${method.model}:${toStep}`,
         taskKind: capsule.taskKind,
         closureRef: { module: 'src/demos/cosmicQuantumGpuKernels.js', entryPoint: engine.gravityMode },
-        representation: 'nbody-interleaved-f32',
+        representation: strideElements >= 16 ? 'nbody-interleaved-f32-64b' : 'nbody-interleaved-f32',
         outputs: {
           deltas: [{ operation: 'replace', tensorId: 'bodies', fromStep, toStep }]
         },
         execution: {
-          backend: engine.backend,
+          backend: engine.backend ?? 'webgpu',
           stage: `${method.model}.step`,
           placement: 'local',
           gravityMode: engine.gravityMode,
@@ -1562,7 +1352,7 @@ export function createResidentCosmicModuleRegistration({
         },
         validity: {
           finite: true,
-          bodyCount: engine.activeCount,
+          bodyCount: engine.activeCount ?? engine.count,
           slotCount: engine.count
         },
         validation: {

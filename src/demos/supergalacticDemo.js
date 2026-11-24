@@ -1,12 +1,19 @@
 // Gate 5D Top-Anchor Interactive Supergalactic FLRW TreePM Demo (`src/demos/supergalacticDemo.js`).
-// Evolves Zel'dovich P(k) dark-matter + baryon cosmic-web filaments live on
-// WebGPU using Gate 0B's `fft3dWebGpu` (shared with Gate 1 Bulk Solid DFT!)
-// and renders directly via zero-copy WebGPU compute->render instanced billboards
-// synchronously inside requestAnimationFrame (zero await before getCurrentTexture!).
+// Evolves full-Nyquist GPU Zel'dovich P(k) dark-matter + baryon cosmic-web filaments
+// live on WebGPU using Gate 0B's `fft3dWebGpu` (1 queue.submit/step, live 16-bin
+// GPU P(k) power-spectrum telemetry) and renders via zero-copy WebGPU compute->render
+// instanced billboards synchronously inside requestAnimationFrame.
+// Locked camera by default (`cameraAutoSpin: false`; opt-in via `?cameraAutoSpin=1`)
+// with interactive pointer-drag orbit controls.
 
-import { createSupergalacticTreePmSessionWebGpu } from '../runtime/astrophysics/supergalacticTreePmGpu.js';
+import {
+  buildZeldovichCosmologyICsWebGpu,
+  createSupergalacticTreePmSessionWebGpu
+} from '../runtime/astrophysics/supergalacticTreePmGpu.js';
+import { attachWebGpuUncapturedErrorTelemetry } from '../runtime/webgpuDeviceLimits.js';
 
 const canvas = document.getElementById('viewport');
+const pkCanvas = document.getElementById('pk-canvas');
 const hudAz = document.getElementById('hud-az');
 const hudSigma = document.getElementById('hud-sigma');
 const hudDmax = document.getElementById('hud-dmax');
@@ -14,6 +21,10 @@ const hudN = document.getElementById('hud-n');
 const hudStatus = document.getElementById('hud-status');
 const toggleBtn = document.getElementById('toggle-run');
 const resetBtn = document.getElementById('reset-sim');
+const spinBtn = document.getElementById('toggle-spin');
+
+const urlParams = new URLSearchParams(window.location.search);
+let cameraAutoSpin = urlParams.get('cameraAutoSpin') === '1';
 
 const renderWgsl = /* wgsl */ `
 struct RenderUniforms {
@@ -65,7 +76,6 @@ fn vs_main(
   let pt_size = (0.0055 + 0.011 * rho) * inv_z;
   let ndc = center + vec2<f32>((uv.x * pt_size) / max(0.5, u.aspect), uv.y * pt_size);
 
-  // Dark matter filaments (indigo -> cyan -> gold halo cores); baryonic WHIM (amber)
   let col_dm = mix(vec3<f32>(0.22, 0.35, 0.85), vec3<f32>(0.38, 0.86, 1.0), rho);
   let col_hi = mix(col_dm, vec3<f32>(1.0, 0.88, 0.50), smoothstep(0.50, 1.0, rho));
   let col = select(col_hi, mix(vec3<f32>(0.90, 0.38, 0.22), vec3<f32>(1.0, 0.82, 0.48), rho), is_baryon);
@@ -92,6 +102,85 @@ let running = true;
 let stepping = false;
 let angleY = 0.42;
 let angleX = 0.28;
+let dragging = false;
+let lastPointerX = 0;
+let lastPointerY = 0;
+let firstPkSnapshot = null;
+
+function drawPowerSpectrum(pk) {
+  if (!pkCanvas || !pk || !pk.kBins?.length) return;
+  const ctx2d = pkCanvas.getContext('2d');
+  if (!ctx2d) return;
+  const w = pkCanvas.width;
+  const h = pkCanvas.height;
+  ctx2d.fillStyle = '#050b16';
+  ctx2d.fillRect(0, 0, w, h);
+
+  if (!firstPkSnapshot && pk.pkValues.some((v) => v > 0)) {
+    firstPkSnapshot = { kBins: [...pk.kBins], pkValues: [...pk.pkValues] };
+  }
+
+  const logK = pk.kBins.map((k) => Math.log10(Math.max(1e-4, k)));
+  const logP = pk.pkValues.map((p) => Math.log10(Math.max(1e-6, p)));
+  const kMin = Math.min(...logK);
+  const kMax = Math.max(kMin + 0.2, ...logK);
+  const allP = [...logP, ...(firstPkSnapshot ? firstPkSnapshot.pkValues.map((p) => Math.log10(Math.max(1e-6, p))) : [])];
+  const pMin = Math.min(...allP) - 0.3;
+  const pMax = Math.max(pMin + 1.0, ...allP) + 0.3;
+
+  const mapX = (lk) => 12 + ((lk - kMin) / (kMax - kMin)) * (w - 22);
+  const mapY = (lp) => (h - 14) - ((lp - pMin) / (pMax - pMin)) * (h - 28);
+
+  ctx2d.strokeStyle = 'rgba(148,163,184,0.18)';
+  ctx2d.lineWidth = 1;
+  ctx2d.strokeRect(10, 12, w - 20, h - 24);
+
+  if (firstPkSnapshot) {
+    ctx2d.beginPath();
+    ctx2d.strokeStyle = 'rgba(148,163,184,0.55)';
+    ctx2d.setLineDash([3, 3]);
+    firstPkSnapshot.kBins.forEach((k, i) => {
+      const x = mapX(Math.log10(Math.max(1e-4, k)));
+      const y = mapY(Math.log10(Math.max(1e-6, firstPkSnapshot.pkValues[i])));
+      if (i === 0) ctx2d.moveTo(x, y); else ctx2d.lineTo(x, y);
+    });
+    ctx2d.stroke();
+    ctx2d.setLineDash([]);
+  }
+
+  ctx2d.beginPath();
+  ctx2d.strokeStyle = '#38bdf8';
+  ctx2d.lineWidth = 2;
+  logK.forEach((lk, i) => {
+    const x = mapX(lk);
+    const y = mapY(logP[i]);
+    if (i === 0) ctx2d.moveTo(x, y); else ctx2d.lineTo(x, y);
+  });
+  ctx2d.stroke();
+
+  ctx2d.fillStyle = '#94a3b8';
+  ctx2d.font = '10px monospace';
+  ctx2d.fillText(`GPU P(k) · D(a)/D0=${(pk.linearGrowthRatio || 1).toFixed(2)}x`, 12, 10);
+}
+
+canvas.addEventListener('pointerdown', (ev) => {
+  dragging = true;
+  lastPointerX = ev.clientX;
+  lastPointerY = ev.clientY;
+  canvas.setPointerCapture?.(ev.pointerId);
+});
+canvas.addEventListener('pointermove', (ev) => {
+  if (!dragging) return;
+  const dx = ev.clientX - lastPointerX;
+  const dy = ev.clientY - lastPointerY;
+  lastPointerX = ev.clientX;
+  lastPointerY = ev.clientY;
+  angleY += dx * 0.008;
+  angleX = Math.max(-1.45, Math.min(1.45, angleX + dy * 0.008));
+});
+const endDrag = () => { dragging = false; };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
 
 async function boot() {
   let adapter = null;
@@ -104,7 +193,7 @@ async function boot() {
     return;
   }
   device = await adapter.requestDevice();
-  device.addEventListener('uncapturederror', (e) => console.error('WebGPU error:', e.error));
+  attachWebGpuUncapturedErrorTelemetry(device, { label: 'supergalactic-demo' });
 
   const ctx = canvas.getContext('webgpu');
   const format = navigator.gpu.getPreferredCanvasFormat();
@@ -141,14 +230,23 @@ async function boot() {
   const uBuf = device.createBuffer({ size: 16, usage: 0x40 | 0x08 });
   let renderBg = null;
 
-  const initSession = () => {
+  const initSession = async () => {
     if (session) session.destroy();
+    firstPkSnapshot = null;
+    const gpuIc = await buildZeldovichCosmologyICsWebGpu(device, {
+      gridPerSide: 24,
+      fftGridN: 32,
+      boxLengthMpc: 200,
+      aInit: 0.05,
+      amplitude: 0.42
+    });
     session = createSupergalacticTreePmSessionWebGpu(device, {
       gridPerSide: 24,
       pmGridN: 32,
       boxLengthMpc: 200,
       aInit: 0.05,
-      da: 0.012
+      da: 0.012,
+      initialConditions: gpuIc
     });
     renderBg = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -158,15 +256,22 @@ async function boot() {
       ]
     });
     hudN.textContent = `${session.particleCount.toLocaleString()} / 32³ FFT`;
-    hudStatus.textContent = 'running (zero-copy WebGPU)';
+    hudStatus.textContent = 'running (1-submit GPU TreePM)';
   };
-  initSession();
+  await initSession();
 
   toggleBtn.addEventListener('click', () => {
     running = !running;
     toggleBtn.textContent = running ? 'Pause' : 'Resume';
   });
-  resetBtn.addEventListener('click', () => initSession());
+  resetBtn.addEventListener('click', () => { void initSession(); });
+  if (spinBtn) {
+    spinBtn.textContent = cameraAutoSpin ? 'Auto-Orbit: On' : 'Auto-Orbit: Off';
+    spinBtn.addEventListener('click', () => {
+      cameraAutoSpin = !cameraAutoSpin;
+      spinBtn.textContent = cameraAutoSpin ? 'Auto-Orbit: On' : 'Auto-Orbit: Off';
+    });
+  }
 
   function kickPhysicsStep() {
     if (!running || stepping || !session) return;
@@ -176,9 +281,17 @@ async function boot() {
         hudAz.textContent = `a=${tel.scaleFactorA.toFixed(3)} · z=${tel.redshiftZ.toFixed(2)}`;
         hudSigma.textContent = tel.sigmaDensity.toFixed(3);
         hudDmax.textContent = tel.maxOverdensity.toFixed(2);
-        window.__ulgSupergalacticState = tel;
+        drawPowerSpectrum(tel.powerSpectrumPk);
+        window.__ulgSupergalacticState = {
+          ...tel,
+          cameraAutoSpin,
+          cameraAngles: [angleY, angleX],
+          gpuErrorCount: (globalThis.__ulgWebGpuUncapturedErrors || []).filter((e) => e.label === 'supergalactic-demo').length
+        };
       }
-      if (session && session.getState().aScale >= 1.25) initSession();
+      if (session && session.getState().aScale >= 1.25) {
+        void initSession();
+      }
     }).catch((err) => {
       console.error('TreePM step error:', err);
     }).finally(() => {
@@ -187,9 +300,8 @@ async function boot() {
   }
 
   function frame() {
-    // 1. Render current resident GPU particle buffer SYNCHRONOUSLY inside rAF!
     if (session && renderBg) {
-      angleY += 0.004;
+      if (cameraAutoSpin && !dragging) angleY += 0.004;
       const aspect = canvas.width / Math.max(1, canvas.height);
       device.queue.writeBuffer(uBuf, 0, Float32Array.from([angleY, angleX, 2 / session.boxLengthMpc, aspect]));
       const enc = device.createCommandEncoder({ label: 'ulg-supergalactic-render' });
@@ -207,11 +319,10 @@ async function boot() {
       pass.end();
       device.queue.submit([enc.finish()]);
     }
-    // 2. Advance FLRW TreePM physics asynchronously decoupled from presentation!
     kickPhysicsStep();
     requestAnimationFrame(frame);
   }
-  // Diagnostic helper for headless Vulkan visual verification (zero desktop focus steal)
+
   window.__ulgCaptureSupergalacticPng = async () => {
     if (!session || !renderBg) return null;
     const w = Math.min(1280, Math.max(320, canvas.width));

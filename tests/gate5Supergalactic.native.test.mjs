@@ -2,21 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 // Gate 5D + Live Flagship Labs Native Vulkan Proof:
-//   1. `supergalacticTreePmGpu`: Expanding FLRW comoving 3D-FFT TreePM cosmology
-//      (sharing Gate 0B `fft3dWebGpu`) evolves Zel'dovich P(k) initial conditions
-//      from z=19 -> z<4, proving real gravitational structure growth
-//      (`sigmaDensity` & `maxOverdensity` grow monotonically, net momentum conserved,
-//      0 GPU errors).
-//   2. Live browser load of `elements-lab.html` AND `supergalactic.html` in
-//      headless Vulkan Chrome: zero page/console errors, live GPU state advances,
-//      captures verification screenshots to scratch/.
+//   1. `supergalacticTreePmGpu`: Full-Nyquist GPU Zel'dovich ICs (`buildZeldovichCosmologyICsWebGpu`)
+//      + 1-submit/step Expanding FLRW Comoving Symplectic KDK 3D-FFT TreePM (`fft3dWebGpu`):
+//      proves `submitsPerStep === 1`, live 16-bin GPU `P(k)` power-spectrum growth, monotonic
+//      `sigmaDensity` & `maxOverdensity` growth, tight linear momentum conservation, 0 GPU errors.
+//   2. Live headless Vulkan load of `elements-lab.html`, `supergalactic.html` (`cameraAutoSpin: false`,
+//      live GPU `P(k)`), AND `cosmic-quantum.html` stepping `supergalactic-cosmic` (`B7` regression proof!).
 
 const RUN_NATIVE = process.env.ULG_RUN_NATIVE_WEBGPU === '1'
   || process.env.ULG_RUN_NATIVE_GATE5 === '1';
 const BASE_URL = process.env.ULG_THERMAL_BASE_URL || 'https://127.0.0.1:5173/';
 const CHROME = process.env.ULG_THERMAL_CHROME || '/usr/bin/google-chrome';
 
-test('Gate 5D & Flagship Labs native Vulkan proof: FLRW 3D-FFT TreePM structure growth + elements-lab.html + supergalactic.html', {
+test('Gate 5D & Flagship Labs native Vulkan proof: 1-submit GPU Zel\'dovich FLRW 3D-FFT TreePM + GPU P(k) + cosmic-quantum supergalactic-cosmic', {
   skip: RUN_NATIVE ? false : 'set ULG_RUN_NATIVE_WEBGPU=1 for native Vulkan Gate 5D proof',
   timeout: 180_000
 }, async () => {
@@ -28,7 +26,7 @@ test('Gate 5D & Flagship Labs native Vulkan proof: FLRW 3D-FFT TreePM structure 
   });
 
   try {
-    // 1. Direct GPU FLRW TreePM physics invariant proof
+    // 1. Direct GPU Zel'dovich + 1-submit FLRW TreePM + GPU P(k) invariant proof
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await ctx.newPage();
     const pageErrors = [];
@@ -46,13 +44,26 @@ test('Gate 5D & Flagship Labs native Vulkan proof: FLRW 3D-FFT TreePM structure 
       const gpuErrors = [];
       device.addEventListener('uncapturederror', (e) => gpuErrors.push(String(e.error?.message ?? e)));
 
-      const { createSupergalacticTreePmSessionWebGpu } = await import('/src/runtime/astrophysics/supergalacticTreePmGpu.js');
+      const {
+        buildZeldovichCosmologyICsWebGpu,
+        createSupergalacticTreePmSessionWebGpu
+      } = await import('/src/runtime/astrophysics/supergalacticTreePmGpu.js');
+
+      const gpuIc = await buildZeldovichCosmologyICsWebGpu(device, {
+        gridPerSide: 20,
+        fftGridN: 32,
+        boxLengthMpc: 200,
+        aInit: 0.05,
+        amplitude: 0.40,
+        seed: 20261123
+      });
       const sim = createSupergalacticTreePmSessionWebGpu(device, {
         gridPerSide: 20,
         pmGridN: 32,
         boxLengthMpc: 200,
         aInit: 0.05,
-        da: 0.03
+        da: 0.03,
+        initialConditions: gpuIc
       });
       const first = await sim.step({ readTelemetry: true });
       let last = first;
@@ -61,29 +72,41 @@ test('Gate 5D & Flagship Labs native Vulkan proof: FLRW 3D-FFT TreePM structure 
       }
       sim.destroy();
       device.destroy();
-      return { status: 'ok', gpuErrors, first, last };
+      return { status: 'ok', gpuErrors, icBackend: gpuIc.icBackend, first, last };
     });
     await ctx.close();
 
     assert.deepEqual(pageErrors, []);
     assert.equal(cosmoOut.status, 'ok');
     assert.deepEqual(cosmoOut.gpuErrors, []);
+    assert.equal(cosmoOut.icBackend, 'webgpu-fft3d-zeldovich-full-nyquist');
+    assert.equal(cosmoOut.last.submitsPerStep, 1, `TreePM must fuse into 1 submit/step (got ${cosmoOut.last.submitsPerStep})`);
+    assert.equal(cosmoOut.last.integrator, 'symplectic-comoving-kdk');
     assert.ok(cosmoOut.last.scaleFactorA > cosmoOut.first.scaleFactorA + 0.35);
     assert.ok(cosmoOut.last.redshiftZ < cosmoOut.first.redshiftZ);
     assert.ok(cosmoOut.last.sigmaDensity > cosmoOut.first.sigmaDensity,
       `Structure growth: sigma ${cosmoOut.first.sigmaDensity} -> ${cosmoOut.last.sigmaDensity}`);
     assert.ok(cosmoOut.last.maxOverdensity > cosmoOut.first.maxOverdensity,
       `Halo collapse: delta_max ${cosmoOut.first.maxOverdensity} -> ${cosmoOut.last.maxOverdensity}`);
+    // Live GPU P(k) power-spectrum assertions
+    assert.ok(cosmoOut.first.powerSpectrumPk.kBins.length >= 6, 'GPU P(k) must populate >= 6 radial k-shells');
+    assert.ok(cosmoOut.last.powerSpectrumPk.lowKPower > cosmoOut.first.powerSpectrumPk.lowKPower,
+      `GPU P(k) low-k power must grow with a(t): ${cosmoOut.first.powerSpectrumPk.lowKPower} -> ${cosmoOut.last.powerSpectrumPk.lowKPower}`);
+    assert.ok(cosmoOut.last.powerSpectrumPk.linearGrowthRatio > 1.05,
+      `Linear growth ratio D(a)/D0 must exceed 1.05 (got ${cosmoOut.last.powerSpectrumPk.linearGrowthRatio})`);
+    // Tight float32 comoving momentum conservation
     const momMag = Math.hypot(...cosmoOut.last.momentum);
-    assert.ok(momMag < cosmoOut.last.particleCount * 0.05, `Comoving momentum conservation: |P|=${momMag}`);
+    const meanSpeed = Math.sqrt((2 * Math.max(1e-6, cosmoOut.last.kineticEnergy)) / cosmoOut.last.particleCount);
+    const relMom = momMag / Math.max(1e-3, cosmoOut.last.particleCount * meanSpeed);
+    assert.ok(relMom < 2e-2, `Comoving linear momentum conservation failed: |P|=${momMag}, rel=${relMom}`);
 
-    // 2. Live headless Vulkan load of elements-lab.html & supergalactic.html
+    // 2. Live headless Vulkan load of elements-lab.html
     const labCtx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
     const labPage = await labCtx.newPage();
     const labErrors = [];
     labPage.on('pageerror', (e) => labErrors.push(String(e).slice(0, 300)));
     await labPage.goto(`${BASE_URL}elements-lab.html?z=26`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await labPage.waitForFunction(() => Boolean(window.__ulgElementsLabState?.bundle), { timeout: 60_000 });
+    await labPage.waitForFunction(() => Boolean(window.__ulgElementsLabState?.bundle), null, { timeout: 60_000 });
     const labState = await labPage.evaluate(() => window.__ulgElementsLabState);
     assert.deepEqual(labErrors, []);
     assert.equal(labState.bundle.symbol, 'Fe');
@@ -91,17 +114,44 @@ test('Gate 5D & Flagship Labs native Vulkan proof: FLRW 3D-FFT TreePM structure 
     assert.ok(labState.atlasPolytopeCount >= 4);
     await labCtx.close();
 
+    // 3. Live headless Vulkan load of supergalactic.html (locked camera default + live GPU P(k))
     const sgCtx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
     const sgPage = await sgCtx.newPage();
     const sgErrors = [];
     sgPage.on('pageerror', (e) => sgErrors.push(String(e).slice(0, 300)));
     await sgPage.goto(`${BASE_URL}supergalactic.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await sgPage.waitForFunction(() => (window.__ulgSupergalacticState?.stepIndex ?? 0) >= 5, { timeout: 60_000 });
+    await sgPage.waitForFunction(() => (window.__ulgSupergalacticState?.stepIndex ?? 0) >= 5, null, { timeout: 60_000 });
     const sgState = await sgPage.evaluate(() => window.__ulgSupergalacticState);
     assert.deepEqual(sgErrors, []);
+    assert.equal(sgState.cameraAutoSpin, false, 'supergalactic.html must default to locked camera (cameraAutoSpin: false)');
+    assert.equal(sgState.submitsPerStep, 1);
+    assert.equal(sgState.gpuErrorCount, 0);
     assert.ok(sgState.stepIndex >= 5);
     assert.ok(sgState.sigmaDensity > 0);
+    assert.ok(sgState.powerSpectrumPk.kBins.length >= 6);
     await sgCtx.close();
+
+    // 4. B7 regression test: cosmic-quantum.html stepping supergalactic-cosmic stop with ZERO crashes!
+    const cqCtx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+    const cqPage = await cqCtx.newPage();
+    const cqErrors = [];
+    cqPage.on('pageerror', (e) => cqErrors.push(String(e).slice(0, 300)));
+    await cqPage.goto(`${BASE_URL}cosmic-quantum.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await cqPage.waitForFunction(() => Boolean(window.__ulgCosmicQuantumDemo?.getState?.().ready), null, { timeout: 60_000 });
+    await cqPage.evaluate(() => {
+      window.__ulgCosmicQuantumDemo.setLog10Span(26.5);
+    });
+    await cqPage.waitForFunction(() => {
+      const st = window.__ulgCosmicQuantumDemo?.getState?.();
+      return st?.primaryRegimeId === 'supergalactic-cosmic' && (st?.cosmicWebSteps ?? 0) >= 3;
+    }, null, { timeout: 60_000 });
+    const cqState = await cqPage.evaluate(() => window.__ulgCosmicQuantumDemo.getState());
+    assert.deepEqual(cqErrors, [], `cosmic-quantum.html supergalactic-cosmic crashed with page errors: ${cqErrors.join('; ')}`);
+    assert.equal(cqState.primaryRegimeId, 'supergalactic-cosmic');
+    assert.equal(cqState.cameraAutoSpin, false);
+    assert.ok(cqState.cosmicWebSteps >= 3, `Expected >= 3 supergalactic-cosmic steps, got ${cqState.cosmicWebSteps}`);
+    assert.equal(cqState.galacticGravityMode, 'webgpu-schroeder-scale-atlas-multipole');
+    await cqCtx.close();
   } finally {
     await browser.close();
   }

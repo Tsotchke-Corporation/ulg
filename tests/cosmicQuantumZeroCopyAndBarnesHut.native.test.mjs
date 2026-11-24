@@ -312,7 +312,7 @@ test('Translation-invariant 32K Barnes-Hut Octree, unified continuous continuum 
 
     console.log('Barnes-Hut 32K + Continuous Continuum + Volumetric Raymarcher Vulkan Proof:', JSON.stringify(result));
     assert.deepEqual(result.errors, []);
-    assert.equal(result.bhMode, 'webgpu-barnes-hut-octree');
+    assert.equal(result.bhMode, 'webgpu-schroeder-scale-atlas-multipole');
     assert.equal(result.bhCount, 32768);
     assert.equal(result.zeroCopySkipped, true);
     assert.equal(result.presenterStats.zeroCopy, true);

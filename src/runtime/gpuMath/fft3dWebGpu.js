@@ -323,6 +323,30 @@ export function createFft3dWorkspaceWebGpu(device, n) {
   const bgPoissonAB = mkBg(poissonUniform, bufA, bufB);
   const bgPoissonBA = mkBg(poissonUniform, bufB, bufA);
 
+  // Pre-allocated per-axis Poisson uniform slots (0=phi, 1=dx, 2=dy, 3=dz) so callers
+  // (e.g. Gate 5D TreePM) can run ONE forward FFT followed by all 3 spectral gradients +
+  // inverse FFTs inside ONE single CommandEncoder & ONE queue.submit!
+  const axisPoissonUniforms = [0, 1, 2, 3].map(() => {
+    const buf = device.createBuffer({
+      size: 32,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    ownedUniforms.push(buf);
+    return buf;
+  });
+  const bgAxisPoissonFromA = axisPoissonUniforms.map((uBuf) => mkBg(uBuf, bufA, bufB));
+  const bgAxisPoissonFromB = axisPoissonUniforms.map((uBuf) => mkBg(uBuf, bufB, bufA));
+  const kSpaceBgCache = new WeakMap();
+
+  function getAxisPoissonBgFromExternal(kSrcBuffer, axisIdx) {
+    let list = kSpaceBgCache.get(kSrcBuffer);
+    if (!list) {
+      list = axisPoissonUniforms.map((uBuf) => mkBg(uBuf, kSrcBuffer, bufA));
+      kSpaceBgCache.set(kSrcBuffer, list);
+    }
+    return list[axisIdx];
+  }
+
   function encodePlan(encoder, plan, label) {
     const pass = encoder.beginComputePass({ label });
     for (const step of plan.steps) {
@@ -332,6 +356,14 @@ export function createFft3dWorkspaceWebGpu(device, n) {
     }
     pass.end();
     return plan.outputBuffer;
+  }
+
+  function writeAxisPoissonUniform(axisIdx, { boxLength = 1, smoothR2 = 0 } = {}) {
+    const ab = new ArrayBuffer(32);
+    new Uint32Array(ab, 0, 4).set([dim, logN, 0, 0]);
+    new Float32Array(ab, 16, 3).set([-1, Number(boxLength), Number(smoothR2)]);
+    new Uint32Array(ab, 28, 1).set([axisIdx]);
+    device.queue.writeBuffer(axisPoissonUniforms[axisIdx], 0, ab);
   }
 
   return Object.freeze({
@@ -349,6 +381,38 @@ export function createFft3dWorkspaceWebGpu(device, n) {
     encodeInverseFrom(encoder, srcBuffer) {
       const plan = srcBuffer === bufA ? inverseFromA : inverseFromB;
       return encodePlan(encoder, plan, `ulg-fft3d-inv-${dim}`);
+    },
+    writeAxisPoissonParams({ boxLength = 1, smoothR2 = 0 } = {}) {
+      for (let ax = 0; ax <= 3; ax += 1) {
+        writeAxisPoissonUniform(ax, { boxLength, smoothR2 });
+      }
+    },
+    /**
+     * Apply spectral Green's function + gradient (`gradAxis` 0..3) directly from an
+     * ALREADY-transformed k-space buffer (`kSrcBuffer`, e.g. saved copy of `forwardOutputBuffer`)
+     * into `bufA` and immediately encode the inverse 3D FFT — ZERO redundant forward FFTs,
+     * allowing all 3 axes to fuse into ONE CommandEncoder & ONE `queue.submit`!
+     */
+    encodePoissonInverseFromKSpace(encoder, kSrcBuffer, { gradAxis = 0 } = {}) {
+      const ax = Math.max(0, Math.min(3, Math.trunc(gradAxis)));
+      let bg;
+      let phiKBuf;
+      if (kSrcBuffer === bufA) {
+        bg = bgAxisPoissonFromA[ax];
+        phiKBuf = bufB;
+      } else if (kSrcBuffer === bufB) {
+        bg = bgAxisPoissonFromB[ax];
+        phiKBuf = bufA;
+      } else {
+        bg = getAxisPoissonBgFromExternal(kSrcBuffer, ax);
+        phiKBuf = bufA;
+      }
+      const pPass = encoder.beginComputePass({ label: `ulg-poisson-kspace-ax${ax}-${dim}` });
+      pPass.setPipeline(pipes.poisson.pipeline);
+      pPass.setBindGroup(0, bg);
+      pPass.dispatchWorkgroups(Math.ceil(total / 64));
+      pPass.end();
+      return encodePlan(encoder, phiKBuf === bufA ? inverseFromA : inverseFromB, `ulg-poisson-inv-ax${ax}-${dim}`);
     },
     /**
      * Encode `phi = Poisson^{-1}(rhs)` in-workspace starting from `bufA` = complex rhs.

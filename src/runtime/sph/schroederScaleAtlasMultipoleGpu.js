@@ -130,22 +130,40 @@ fn mp_find_chart(chart_id: u32) -> u32 {
   return NO_PARENT;
 }
 
-@compute @workgroup_size(1)
-fn init_multipole_receipt() {
-  for (var i = 0u; i < 16u; i = i + 1u) {
-    atomicStore(&receipt[i], 0u);
+var<workgroup> wg_mp_m: array<f32, 64>;
+var<workgroup> wg_mp_mr: array<vec3<f32>, 64>;
+var<workgroup> wg_mp_lum: array<f32, 64>;
+var<workgroup> wg_mp_area: array<f32, 64>;
+var<workgroup> wg_mp_cnt: array<u32, 64>;
+var<workgroup> wg_mp_com: vec3<f32>;
+var<workgroup> wg_mp_mass_tot: f32;
+var<workgroup> wg_mp_maxr: array<f32, 64>;
+var<workgroup> wg_mp_qd: array<vec3<f32>, 64>;
+var<workgroup> wg_mp_qo: array<vec3<f32>, 64>;
+
+@compute @workgroup_size(64)
+fn init_multipole_receipt(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = lid.x;
+  if (i < 16u) {
+    var val = 0u;
+    if (i == 0u) { val = RECEIPT_MAGIC; }
+    else if (i == 1u) { val = 1u; }
+    atomicStore(&receipt[i], val);
   }
-  atomicStore(&receipt[0], RECEIPT_MAGIC);
-  atomicStore(&receipt[1], 1u);
 }
 
-// One thread per active chart deterministically reduces all resident particles
-// belonging to that chart into exact conserved monopole, COM, quadrupole, and
-// radiative luminosity moments, then lifts COM to root-chart double-float units.
-@compute @workgroup_size(1)
-fn reduce_chart_multipoles(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let c_idx = gid.x;
+// Parallel 64-thread workgroup per active chart deterministically reduces all
+// resident particles belonging to that chart into exact conserved monopole,
+// COM, quadrupole, and radiative luminosity moments, then lifts COM to root-chart
+// double-float units via canonical SchroederScaleAtlas dyadic rebasing.
+@compute @workgroup_size(64)
+fn reduce_chart_multipoles(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>
+) {
+  let c_idx = wid.x;
   if (c_idx >= params.chart_count) { return; }
+  let tid = lid.x;
   let chart = charts[c_idx];
   let cid = chart.chart_id;
 
@@ -155,78 +173,130 @@ fn reduce_chart_multipoles(@builtin(global_invocation_id) gid: vec3<u32>) {
   var area_sum = 0.0;
   var count = 0u;
 
-  for (var i = 0u; i < params.particle_count; i = i + 1u) {
+  var i = tid;
+  loop {
+    if (i >= params.particle_count) { break; }
     let p = particles[i];
-    if (p.chart_id != cid || !(p.mass_kg > 0.0)) { continue; }
-    mass_sum = mass_sum + p.mass_kg;
-    mr_sum = mr_sum + p.mass_kg * p.pos_local;
-    let t = max(p.temperature_k, 0.0);
-    let t2 = t * t;
-    let a_eff = max(p.effective_area_m2, 0.0);
-    lum_sum = lum_sum + a_eff * params.stefan_boltzmann * t2 * t2;
-    area_sum = area_sum + a_eff;
-    count = count + 1u;
+    if (p.chart_id == cid && p.mass_kg > 0.0) {
+      mass_sum = mass_sum + p.mass_kg;
+      mr_sum = mr_sum + p.mass_kg * p.pos_local;
+      let t = max(p.temperature_k, 0.0);
+      let t2 = t * t;
+      let a_eff = max(p.effective_area_m2, 0.0);
+      lum_sum = lum_sum + a_eff * params.stefan_boltzmann * t2 * t2;
+      area_sum = area_sum + a_eff;
+      count = count + 1u;
+    }
+    i = i + 64u;
   }
 
-  var com = vec3<f32>(0.0);
-  if (mass_sum > 0.0) {
-    com = mr_sum / mass_sum;
+  wg_mp_m[tid] = mass_sum;
+  wg_mp_mr[tid] = mr_sum;
+  wg_mp_lum[tid] = lum_sum;
+  wg_mp_area[tid] = area_sum;
+  wg_mp_cnt[tid] = count;
+  workgroupBarrier();
+
+  var stride = 32u;
+  loop {
+    if (stride == 0u) { break; }
+    if (tid < stride) {
+      wg_mp_m[tid] = wg_mp_m[tid] + wg_mp_m[tid + stride];
+      wg_mp_mr[tid] = wg_mp_mr[tid] + wg_mp_mr[tid + stride];
+      wg_mp_lum[tid] = wg_mp_lum[tid] + wg_mp_lum[tid + stride];
+      wg_mp_area[tid] = wg_mp_area[tid] + wg_mp_area[tid + stride];
+      wg_mp_cnt[tid] = wg_mp_cnt[tid] + wg_mp_cnt[tid + stride];
+    }
+    workgroupBarrier();
+    stride = stride >> 1u;
   }
 
+  if (tid == 0u) {
+    let m_tot = wg_mp_m[0u];
+    wg_mp_mass_tot = m_tot;
+    wg_mp_com = select(vec3<f32>(0.0), wg_mp_mr[0u] / max(m_tot, 1e-30), m_tot > 0.0);
+  }
+  workgroupBarrier();
+
+  let com = wg_mp_com;
+  let m_tot = wg_mp_mass_tot;
   var max_r = 0.0;
   var q_diag = vec3<f32>(0.0);
   var q_off = vec3<f32>(0.0);
-  if (mass_sum > 0.0) {
-    for (var i = 0u; i < params.particle_count; i = i + 1u) {
-      let p = particles[i];
-      if (p.chart_id != cid || !(p.mass_kg > 0.0)) { continue; }
-      let d = p.pos_local - com;
-      let d2 = dot(d, d);
-      max_r = max(max_r, sqrt(d2));
-      q_diag.x = q_diag.x + p.mass_kg * (3.0 * d.x * d.x - d2);
-      q_diag.y = q_diag.y + p.mass_kg * (3.0 * d.y * d.y - d2);
-      q_diag.z = q_diag.z + p.mass_kg * (3.0 * d.z * d.z - d2);
-      q_off.x = q_off.x + p.mass_kg * (3.0 * d.x * d.y);
-      q_off.y = q_off.y + p.mass_kg * (3.0 * d.x * d.z);
-      q_off.z = q_off.z + p.mass_kg * (3.0 * d.y * d.z);
+  if (m_tot > 0.0) {
+    var j = tid;
+    loop {
+      if (j >= params.particle_count) { break; }
+      let p = particles[j];
+      if (p.chart_id == cid && p.mass_kg > 0.0) {
+        let d = p.pos_local - com;
+        let d2 = dot(d, d);
+        max_r = max(max_r, sqrt(d2));
+        q_diag.x = q_diag.x + p.mass_kg * (3.0 * d.x * d.x - d2);
+        q_diag.y = q_diag.y + p.mass_kg * (3.0 * d.y * d.y - d2);
+        q_diag.z = q_diag.z + p.mass_kg * (3.0 * d.z * d.z - d2);
+        q_off.x = q_off.x + p.mass_kg * (3.0 * d.x * d.y);
+        q_off.y = q_off.y + p.mass_kg * (3.0 * d.x * d.z);
+        q_off.z = q_off.z + p.mass_kg * (3.0 * d.y * d.z);
+      }
+      j = j + 64u;
     }
   }
 
-  // Lift COM to root chart in double-float units via exact dyadic scaling.
-  var cur_hi = com;
-  var cur_lo = vec3<f32>(0.0);
-  var cur_idx = c_idx;
-  for (var step = 0u; step < MAX_HOPS; step = step + 1u) {
-    let cur_c = charts[cur_idx];
-    if (cur_c.parent_chart_id == NO_PARENT || (cur_c.flags & 1u) == 0u) { break; }
-    let parent_idx = mp_find_chart(cur_c.parent_chart_id);
-    if (parent_idx == NO_PARENT) {
-      atomicOr(&receipt[2], 1u);
-      break;
+  wg_mp_maxr[tid] = max_r;
+  wg_mp_qd[tid] = q_diag;
+  wg_mp_qo[tid] = q_off;
+  workgroupBarrier();
+
+  stride = 32u;
+  loop {
+    if (stride == 0u) { break; }
+    if (tid < stride) {
+      wg_mp_maxr[tid] = max(wg_mp_maxr[tid], wg_mp_maxr[tid + stride]);
+      wg_mp_qd[tid] = wg_mp_qd[tid] + wg_mp_qd[tid + stride];
+      wg_mp_qo[tid] = wg_mp_qo[tid] + wg_mp_qo[tid + stride];
     }
-    let rebased = ss_atlas_rebase_child_to_parent(cur_hi + cur_lo, cur_c);
-    cur_hi = rebased[0];
-    cur_lo = rebased[1];
-    cur_idx = parent_idx;
+    workgroupBarrier();
+    stride = stride >> 1u;
   }
 
-  var m: ChartMultipoleMoment;
-  m.mass_kg = mass_sum;
-  m.bounding_radius_local = max_r;
-  m.luminosity_w = lum_sum;
-  m.effective_area_m2 = area_sum;
-  m.com_local = com;
-  m.particle_count = count;
-  m.q_diag = q_diag;
-  m.pad0 = 0.0;
-  m.q_off = q_off;
-  m.pad1 = 0.0;
-  m.root_com_hi = cur_hi;
-  m.root_level = charts[cur_idx].global_base_level;
-  m.root_com_lo = cur_lo;
-  m.pad2 = 0.0;
-  moments[c_idx] = m;
-  atomicAdd(&receipt[3], count);
+  if (tid == 0u) {
+    // Lift COM to root chart in double-float units via exact dyadic scaling.
+    var cur_hi = com;
+    var cur_lo = vec3<f32>(0.0);
+    var cur_idx = c_idx;
+    for (var step = 0u; step < MAX_HOPS; step = step + 1u) {
+      let cur_c = charts[cur_idx];
+      if (cur_c.parent_chart_id == NO_PARENT || (cur_c.flags & 1u) == 0u) { break; }
+      let parent_idx = mp_find_chart(cur_c.parent_chart_id);
+      if (parent_idx == NO_PARENT) {
+        atomicOr(&receipt[2], 1u);
+        break;
+      }
+      let rebased = ss_atlas_rebase_child_to_parent(cur_hi + cur_lo, cur_c);
+      cur_hi = rebased[0];
+      cur_lo = rebased[1];
+      cur_idx = parent_idx;
+    }
+
+    var m: ChartMultipoleMoment;
+    m.mass_kg = m_tot;
+    m.bounding_radius_local = wg_mp_maxr[0u];
+    m.luminosity_w = wg_mp_lum[0u];
+    m.effective_area_m2 = wg_mp_area[0u];
+    m.com_local = com;
+    m.particle_count = wg_mp_cnt[0u];
+    m.q_diag = wg_mp_qd[0u];
+    m.pad0 = 0.0;
+    m.q_off = wg_mp_qo[0u];
+    m.pad1 = 0.0;
+    m.root_com_hi = cur_hi;
+    m.root_level = charts[cur_idx].global_base_level;
+    m.root_com_lo = cur_lo;
+    m.pad2 = 0.0;
+    moments[c_idx] = m;
+    atomicAdd(&receipt[3], wg_mp_cnt[0u]);
+  }
 }
 
 // Compute the exact pairwise displacement (target_com - source_com) in meters,
@@ -259,7 +329,7 @@ fn mp_quadrupole_force_on_unit_mass(q_diag: vec3<f32>, q_off: vec3<f32>, r_vec: 
   return (params.gravity_g * inv_r4) * (qn - 2.5 * n_q_n * n);
 }
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(64)
 fn evaluate_cross_chart_coupling(@builtin(global_invocation_id) gid: vec3<u32>) {
   let a_idx = gid.x;
   if (a_idx >= params.chart_count) { return; }
@@ -376,13 +446,16 @@ fn evaluate_cross_chart_coupling(@builtin(global_invocation_id) gid: vec3<u32>) 
   atomicAdd(&receipt[5], far_pairs);
 }
 
-@compute @workgroup_size(1)
-fn seal_multipole_receipt() {
+@compute @workgroup_size(64)
+fn seal_multipole_receipt(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x;
   var total_f = vec3<f32>(0.0);
   var sum_f_mag = 0.0;
   var total_rad = 0.0;
   var sum_rad_mag = 0.0;
-  for (var i = 0u; i < params.chart_count; i = i + 1u) {
+  var i = tid;
+  loop {
+    if (i >= params.chart_count) { break; }
     let o = outputs[i];
     if (!mp_finite3(o.net_force_n) || !mp_finite(o.net_radiative_power_w)) {
       atomicOr(&receipt[2], 4u);
@@ -391,19 +464,45 @@ fn seal_multipole_receipt() {
     sum_f_mag = sum_f_mag + length(o.net_force_n);
     total_rad = total_rad + o.net_radiative_power_w;
     sum_rad_mag = sum_rad_mag + abs(o.net_radiative_power_w);
+    i = i + 64u;
   }
-  let mom_rel_err = select(0.0, length(total_f) / sum_f_mag, sum_f_mag > 0.0);
-  let rad_rel_err = select(0.0, abs(total_rad) / sum_rad_mag, sum_rad_mag > 0.0);
-  atomicStore(&receipt[6], bitcast<u32>(mom_rel_err));
-  atomicStore(&receipt[7], bitcast<u32>(rad_rel_err));
-  if (!(mom_rel_err <= 1e-5)) {
-    atomicOr(&receipt[2], 8u);
+  wg_mp_mr[tid] = total_f;
+  wg_mp_m[tid] = sum_f_mag;
+  wg_mp_lum[tid] = total_rad;
+  wg_mp_area[tid] = sum_rad_mag;
+  workgroupBarrier();
+
+  var stride = 32u;
+  loop {
+    if (stride == 0u) { break; }
+    if (tid < stride) {
+      wg_mp_mr[tid] = wg_mp_mr[tid] + wg_mp_mr[tid + stride];
+      wg_mp_m[tid] = wg_mp_m[tid] + wg_mp_m[tid + stride];
+      wg_mp_lum[tid] = wg_mp_lum[tid] + wg_mp_lum[tid + stride];
+      wg_mp_area[tid] = wg_mp_area[tid] + wg_mp_area[tid + stride];
+    }
+    workgroupBarrier();
+    stride = stride >> 1u;
   }
-  if (!(rad_rel_err <= 1e-5)) {
-    atomicOr(&receipt[2], 16u);
+
+  if (tid == 0u) {
+    let tf = wg_mp_mr[0u];
+    let sf = wg_mp_m[0u];
+    let tr = wg_mp_lum[0u];
+    let sr = wg_mp_area[0u];
+    let mom_rel_err = select(0.0, length(tf) / sf, sf > 0.0);
+    let rad_rel_err = select(0.0, abs(tr) / sr, sr > 0.0);
+    atomicStore(&receipt[6], bitcast<u32>(mom_rel_err));
+    atomicStore(&receipt[7], bitcast<u32>(rad_rel_err));
+    if (!(mom_rel_err <= 1e-5)) {
+      atomicOr(&receipt[2], 8u);
+    }
+    if (!(rad_rel_err <= 1e-5)) {
+      atomicOr(&receipt[2], 16u);
+    }
+    let err = atomicLoad(&receipt[2]);
+    atomicStore(&receipt[1], select(5u, 3u, err == 0u));
   }
-  let err = atomicLoad(&receipt[2]);
-  atomicStore(&receipt[1], select(5u, 3u, err == 0u));
 }
 `;
 
@@ -449,28 +548,28 @@ export async function runSchroederScaleAtlasMultipoleWebGpu(device, {
     computeBufferBinding(5, 'uniform')
   ];
   const initPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-scale-atlas-mp-init.v1',
+    cacheKey: 'ulg-scale-atlas-mp-init.v2-wg64',
     label: 'ulg-scale-atlas-mp-init',
     code: schroederScaleAtlasMultipoleWgsl,
     entryPoint: 'init_multipole_receipt',
     bindings
   });
   const reducePipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-scale-atlas-mp-reduce.v1',
+    cacheKey: 'ulg-scale-atlas-mp-reduce.v2-wg64',
     label: 'ulg-scale-atlas-mp-reduce',
     code: schroederScaleAtlasMultipoleWgsl,
     entryPoint: 'reduce_chart_multipoles',
     bindings
   });
   const couplePipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-scale-atlas-mp-couple.v1',
+    cacheKey: 'ulg-scale-atlas-mp-couple.v2-wg64',
     label: 'ulg-scale-atlas-mp-couple',
     code: schroederScaleAtlasMultipoleWgsl,
     entryPoint: 'evaluate_cross_chart_coupling',
     bindings
   });
   const sealPipe = createCachedExplicitComputePipeline(device, {
-    cacheKey: 'ulg-scale-atlas-mp-seal.v1',
+    cacheKey: 'ulg-scale-atlas-mp-seal.v2-wg64',
     label: 'ulg-scale-atlas-mp-seal',
     code: schroederScaleAtlasMultipoleWgsl,
     entryPoint: 'seal_multipole_receipt',
@@ -556,7 +655,7 @@ export async function runSchroederScaleAtlasMultipoleWebGpu(device, {
     pass.dispatchWorkgroups(chartCount);
     pass.setPipeline(couplePipe.pipeline);
     pass.setBindGroup(0, coupleBg);
-    pass.dispatchWorkgroups(chartCount);
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(chartCount / 64)));
     pass.setPipeline(sealPipe.pipeline);
     pass.setBindGroup(0, sealBg);
     pass.dispatchWorkgroups(1);
@@ -617,4 +716,419 @@ export async function runSchroederScaleAtlasMultipoleWebGpu(device, {
     readReceipt.destroy();
     readOutputs.destroy();
   }
+}
+
+
+export const ULG_SCHROEDER_SCALE_ATLAS_RESIDENT_GRAVITY_SCHEMA =
+  'peercompute.ulg.schroeder-scale-atlas-resident-gravity.v1';
+
+const ATLAS_GRAV_L2_COUNT = 4096;
+const ATLAS_GRAV_L1_COUNT = 64;
+const ATLAS_GRAV_TOTAL_CHARTS = ATLAS_GRAV_L2_COUNT + ATLAS_GRAV_L1_COUNT;
+
+/**
+ * Canonical GPU-Resident SchroederScaleAtlas Hierarchical Multipole Gravity Solver.
+ *
+ * Replaces all bespoke private astrophysics octrees (5B stellar hydro, 5C galactic
+ * N-body & ISM) with ONE canonical, parallel (`@workgroup_size(64)` / `@workgroup_size(256)`),
+ * COM-rebased dyadic-chart multipole solver operating directly on resident GPU particle
+ * buffers (`strideFloats` = 8, 12, or 16) with zero CPU subsampling or binning.
+ *
+ * Writes per-particle `vec4(ax, ay, az, grav_phi)` into `acc_phi[0..count-1]`,
+ * live system COM `vec4(R_com.xyz, M_tot)` into `acc_phi[count]`, and live
+ * center-of-mass velocity `vec4(V_com.xyz, 0)` into `acc_phi[count + 1]`.
+ */
+export const schroederScaleAtlasResidentGravityWgsl = /* wgsl */ `
+struct AtlasGravityParams {
+  count: u32,
+  stride_vec4: u32,
+  use_adj_softening: u32,
+  chart_level: i32,
+  gravity_g: f32,
+  softening2: f32,
+  box_half: f32,
+  theta2: f32,
+  q_mass: f32,
+  q_mom: f32,
+  r_cell_factor: f32,
+  pad0: f32,
+};
+
+@group(0) @binding(0) var<storage, read> src_raw: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> chart_accum: array<atomic<i32>>;
+@group(0) @binding(2) var<storage, read_write> atlas_moments: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> acc_phi: array<vec4<f32>>;
+@group(0) @binding(4) var<uniform> params: AtlasGravityParams;
+
+const SS_L2_COUNT: u32 = ${ATLAS_GRAV_L2_COUNT}u;
+const SS_L1_COUNT: u32 = ${ATLAS_GRAV_L1_COUNT}u;
+
+var<workgroup> wg_ss_m: array<f32, 256>;
+var<workgroup> wg_ss_p: array<vec3<f32>, 256>;
+var<workgroup> wg_ss_v: array<vec3<f32>, 256>;
+
+fn ss_clamp_chart16(v: f32, half_extent: f32) -> u32 {
+  let u = clamp((v + half_extent) / max(2.0 * half_extent, 1e-6), 0.0, 0.9999);
+  return min(15u, u32(u * 16.0));
+}
+
+fn ss_chart_idx16(cx: u32, cy: u32, cz: u32) -> u32 {
+  return (cz * 256u) + (cy * 16u) + cx;
+}
+
+@compute @workgroup_size(64)
+fn ss_atlas_grav_clear(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i < SS_L2_COUNT) {
+    let base = i * 4u;
+    atomicStore(&chart_accum[base + 0u], 0);
+    atomicStore(&chart_accum[base + 1u], 0);
+    atomicStore(&chart_accum[base + 2u], 0);
+    atomicStore(&chart_accum[base + 3u], 0);
+    atlas_moments[i] = vec4<f32>(0.0);
+  }
+  if (i < SS_L1_COUNT) {
+    atlas_moments[SS_L2_COUNT + i] = vec4<f32>(0.0);
+  }
+}
+
+@compute @workgroup_size(256)
+fn ss_atlas_grav_com_reduce(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x;
+  let sv = params.stride_vec4;
+  var m_sum = 0.0;
+  var p_sum = vec3<f32>(0.0);
+  var v_sum = vec3<f32>(0.0);
+  var i = tid;
+  loop {
+    if (i >= params.count) { break; }
+    let pm = src_raw[i * sv + 0u];
+    let vel = src_raw[i * sv + 1u].xyz;
+    if (pm.w > 0.0) {
+      m_sum = m_sum + pm.w;
+      p_sum = p_sum + pm.xyz * pm.w;
+      v_sum = v_sum + vel * pm.w;
+    }
+    i = i + 256u;
+  }
+  wg_ss_m[tid] = m_sum;
+  wg_ss_p[tid] = p_sum;
+  wg_ss_v[tid] = v_sum;
+  workgroupBarrier();
+
+  var stride = 128u;
+  loop {
+    if (stride == 0u) { break; }
+    if (tid < stride) {
+      wg_ss_m[tid] = wg_ss_m[tid] + wg_ss_m[tid + stride];
+      wg_ss_p[tid] = wg_ss_p[tid] + wg_ss_p[tid + stride];
+      wg_ss_v[tid] = wg_ss_v[tid] + wg_ss_v[tid + stride];
+    }
+    workgroupBarrier();
+    stride = stride >> 1u;
+  }
+  if (tid == 0u) {
+    let m_tot = wg_ss_m[0u];
+    if (m_tot > 1e-6) {
+      let inv_m = 1.0 / m_tot;
+      acc_phi[params.count] = vec4<f32>(wg_ss_p[0u] * inv_m, m_tot);
+      acc_phi[params.count + 1u] = vec4<f32>(wg_ss_v[0u] * inv_m, 0.0);
+    } else {
+      acc_phi[params.count] = vec4<f32>(0.0);
+      acc_phi[params.count + 1u] = vec4<f32>(0.0);
+    }
+  }
+}
+
+@compute @workgroup_size(64)
+fn ss_atlas_grav_bin_charts(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.count) { return; }
+  let pm = src_raw[i * params.stride_vec4 + 0u];
+  if (!(pm.w > 0.0)) { return; }
+  let com = acc_phi[params.count].xyz;
+  let rel = pm.xyz - com;
+  let cx = ss_clamp_chart16(rel.x, params.box_half);
+  let cy = ss_clamp_chart16(rel.y, params.box_half);
+  let cz = ss_clamp_chart16(rel.z, params.box_half);
+  let base = ss_chart_idx16(cx, cy, cz) * 4u;
+  atomicAdd(&chart_accum[base + 0u], i32(round(clamp(pm.w * params.q_mass, -1e8, 1e8))));
+  atomicAdd(&chart_accum[base + 1u], i32(round(clamp(pm.w * rel.x * params.q_mom, -1e8, 1e8))));
+  atomicAdd(&chart_accum[base + 2u], i32(round(clamp(pm.w * rel.y * params.q_mom, -1e8, 1e8))));
+  atomicAdd(&chart_accum[base + 3u], i32(round(clamp(pm.w * rel.z * params.q_mom, -1e8, 1e8))));
+}
+
+@compute @workgroup_size(64)
+fn ss_atlas_grav_finalize_charts(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let cell = gid.x;
+  if (cell >= SS_L2_COUNT) { return; }
+  let base = cell * 4u;
+  let m = f32(atomicLoad(&chart_accum[base + 0u])) / params.q_mass;
+  if (m > 1e-6) {
+    let inv_m = 1.0 / m;
+    let cx = (f32(atomicLoad(&chart_accum[base + 1u])) / params.q_mom) * inv_m;
+    let cy = (f32(atomicLoad(&chart_accum[base + 2u])) / params.q_mom) * inv_m;
+    let cz = (f32(atomicLoad(&chart_accum[base + 3u])) / params.q_mom) * inv_m;
+    atlas_moments[cell] = vec4<f32>(cx, cy, cz, m);
+  } else {
+    atlas_moments[cell] = vec4<f32>(0.0);
+  }
+}
+
+@compute @workgroup_size(64)
+fn ss_atlas_grav_rollup_parents(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let p = gid.x;
+  if (p >= SS_L1_COUNT) { return; }
+  let px = p & 3u;
+  let py = (p >> 2u) & 3u;
+  let pz = (p >> 4u) & 3u;
+  var m_sum = 0.0;
+  var mom = vec3<f32>(0.0);
+  for (var dz = 0u; dz < 4u; dz = dz + 1u) {
+    for (var dy = 0u; dy < 4u; dy = dy + 1u) {
+      for (var dx = 0u; dx < 4u; dx = dx + 1u) {
+        let leaf = atlas_moments[ss_chart_idx16(px * 4u + dx, py * 4u + dy, pz * 4u + dz)];
+        if (leaf.w > 0.0) {
+          m_sum = m_sum + leaf.w;
+          mom = mom + leaf.xyz * leaf.w;
+        }
+      }
+    }
+  }
+  if (m_sum > 1e-6) {
+    atlas_moments[SS_L2_COUNT + p] = vec4<f32>(mom / m_sum, m_sum);
+  } else {
+    atlas_moments[SS_L2_COUNT + p] = vec4<f32>(0.0);
+  }
+}
+
+@compute @workgroup_size(64)
+fn ss_atlas_grav_eval_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx >= params.count) { return; }
+  let self_pm = src_raw[idx * params.stride_vec4 + 0u];
+  if (!(self_pm.w > 0.0)) {
+    acc_phi[idx] = vec4<f32>(0.0);
+    return;
+  }
+  let com = acc_phi[params.count].xyz;
+  let self_rel = self_pm.xyz - com;
+  let l1_size = (2.0 * params.box_half) / 4.0;
+  let leaf_w = (2.0 * params.box_half) / 16.0;
+  let r_cell2 = params.r_cell_factor * leaf_w * leaf_w + params.softening2;
+  let open_thresh2 = (l1_size * l1_size) / max(0.05, params.theta2);
+  let self_cx = ss_clamp_chart16(self_rel.x, params.box_half);
+  let self_cy = ss_clamp_chart16(self_rel.y, params.box_half);
+  let self_cz = ss_clamp_chart16(self_rel.z, params.box_half);
+  let self_chart_id = ss_chart_idx16(self_cx, self_cy, self_cz);
+
+  var acc = vec3<f32>(0.0);
+  var phi = 0.0;
+  for (var p = 0u; p < SS_L1_COUNT; p = p + 1u) {
+    let coarse = atlas_moments[SS_L2_COUNT + p];
+    if (coarse.w <= 0.0) { continue; }
+    let d_c = coarse.xyz - self_rel;
+    let dist2_c = dot(d_c, d_c);
+    if (dist2_c > open_thresh2) {
+      let r2 = dist2_c + params.softening2;
+      let inv_r = inverseSqrt(r2);
+      acc = acc + d_c * (coarse.w * inv_r * inv_r * inv_r);
+      phi = phi + coarse.w * inv_r;
+    } else {
+      let px = p & 3u;
+      let py = (p >> 2u) & 3u;
+      let pz = (p >> 4u) & 3u;
+      for (var dz = 0u; dz < 4u; dz = dz + 1u) {
+        for (var dy = 0u; dy < 4u; dy = dy + 1u) {
+          for (var dx = 0u; dx < 4u; dx = dx + 1u) {
+            let lx = px * 4u + dx;
+            let ly = py * 4u + dy;
+            let lz = pz * 4u + dz;
+            let chart_id = ss_chart_idx16(lx, ly, lz);
+            let leaf = atlas_moments[chart_id];
+            if (leaf.w <= 0.0) { continue; }
+            if (chart_id == self_chart_id) {
+              // Exact Newton's Shell Theorem self-chart gravity: sum m_i a_i == 0 identically.
+              let eff_m = leaf.w - self_pm.w;
+              if (eff_m <= 1e-6) { continue; }
+              let eff_pos = (leaf.xyz * leaf.w - self_rel * self_pm.w) / eff_m;
+              let d = eff_pos - self_rel;
+              let inv_rc = inverseSqrt(r_cell2);
+              acc = acc + d * (eff_m * inv_rc * inv_rc * inv_rc);
+              phi = phi + eff_m * inverseSqrt(dot(d, d) + params.softening2);
+              continue;
+            }
+            let d = leaf.xyz - self_rel;
+            var r2 = dot(d, d) + params.softening2;
+            if (params.use_adj_softening != 0u) {
+              let is_adj = (abs(i32(lx) - i32(self_cx)) <= 1)
+                && (abs(i32(ly) - i32(self_cy)) <= 1)
+                && (abs(i32(lz) - i32(self_cz)) <= 1);
+              r2 = dot(d, d) + select(params.softening2, r_cell2, is_adj);
+            }
+            let inv_r = inverseSqrt(r2);
+            acc = acc + d * (leaf.w * inv_r * inv_r * inv_r);
+            phi = phi + leaf.w * inverseSqrt(dot(d, d) + params.softening2);
+          }
+        }
+      }
+    }
+  }
+  acc_phi[idx] = vec4<f32>(acc * params.gravity_g, phi * params.gravity_g);
+}
+`;
+
+/**
+ * Create a reusable canonical resident-GPU `SchroederScaleAtlas` hierarchical
+ * multipole gravity solver. Encodes directly into the caller's existing compute
+ * pass so multi-stage astrophysics integrators stay at 1 submit / 1 compute pass.
+ */
+export function createSchroederScaleAtlasGravitySolverWebGpu(device, {
+  maxCount,
+  strideFloats = 8,
+  chartLevel = 35,
+  useAdjSoftening = false,
+  qMass = 8192.0,
+  qMom = 512.0,
+  rCellFactor = 0.05,
+  label = 'ulg-ss-atlas-gravity'
+} = {}) {
+  if (!device || typeof device.createBuffer !== 'function') {
+    throw new TypeError('createSchroederScaleAtlasGravitySolverWebGpu requires a live WebGPU GPUDevice');
+  }
+  const resolvedMaxCount = Math.max(1, Math.trunc(Number(maxCount)));
+  const strideVec4 = Math.max(2, Math.trunc(Number(strideFloats) / 4));
+  const chartAccumBuf = device.createBuffer({
+    label: `${label}-chart-accum`,
+    size: ATLAS_GRAV_L2_COUNT * 16,
+    usage: USAGE_STORAGE
+  });
+  const atlasMomentsBuf = device.createBuffer({
+    label: `${label}-moments`,
+    size: ATLAS_GRAV_TOTAL_CHARTS * 16,
+    usage: USAGE_STORAGE | USAGE_COPY_SRC
+  });
+  // Per-particle vec4(ax, ay, az, phi) + 2 trailing COM slots [com_pos_mass, com_vel]
+  const accPhiBuf = device.createBuffer({
+    label: `${label}-acc-phi`,
+    size: (resolvedMaxCount + 2) * 16,
+    usage: USAGE_STORAGE | USAGE_COPY_SRC
+  });
+  const paramsBuf = device.createBuffer({
+    label: `${label}-params`,
+    size: 48,
+    usage: USAGE_UNIFORM | USAGE_COPY_DST
+  });
+
+  const bindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'storage'),
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(3, 'storage'),
+    computeBufferBinding(4, 'uniform')
+  ];
+  const mkPipe = (entryPoint) => createCachedExplicitComputePipeline(device, {
+    cacheKey: `ulg-ss-atlas-resident-grav-${entryPoint}.v1`,
+    label: `ulg-ss-atlas-resident-grav-${entryPoint}`,
+    code: schroederScaleAtlasResidentGravityWgsl,
+    entryPoint,
+    bindings
+  });
+  const pipes = {
+    clear: mkPipe('ss_atlas_grav_clear'),
+    comReduce: mkPipe('ss_atlas_grav_com_reduce'),
+    binCharts: mkPipe('ss_atlas_grav_bin_charts'),
+    finalizeCharts: mkPipe('ss_atlas_grav_finalize_charts'),
+    rollupParents: mkPipe('ss_atlas_grav_rollup_parents'),
+    evalParticles: mkPipe('ss_atlas_grav_eval_particles')
+  };
+
+  function writeParams({
+    count = resolvedMaxCount,
+    gravityG = 1.0,
+    softening2 = 0.04,
+    boxHalf = 16.0,
+    theta2 = 0.65 * 0.65
+  } = {}) {
+    const ab = new ArrayBuffer(48);
+    const u32 = new Uint32Array(ab);
+    const i32 = new Int32Array(ab);
+    const f32 = new Float32Array(ab);
+    u32[0] = Math.min(resolvedMaxCount, Math.max(1, Math.trunc(Number(count))));
+    u32[1] = strideVec4;
+    u32[2] = useAdjSoftening ? 1 : 0;
+    i32[3] = Math.trunc(Number(chartLevel));
+    f32[4] = Number(gravityG);
+    f32[5] = Number(softening2);
+    f32[6] = Number(boxHalf);
+    f32[7] = Number(theta2);
+    f32[8] = Number(qMass);
+    f32[9] = Number(qMom);
+    f32[10] = Number(rCellFactor);
+    f32[11] = 0;
+    device.queue.writeBuffer(paramsBuf, 0, ab);
+  }
+
+  function bindGroupFor(srcBuffer) {
+    return createCachedExplicitBindGroup(device, {
+      label: `${label}-bg`,
+      layout: pipes.evalParticles.bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: srcBuffer } },
+        { binding: 1, resource: { buffer: chartAccumBuf } },
+        { binding: 2, resource: { buffer: atlasMomentsBuf } },
+        { binding: 3, resource: { buffer: accPhiBuf } },
+        { binding: 4, resource: { buffer: paramsBuf } }
+      ]
+    });
+  }
+
+  function encodeIntoPass(pass, { srcBuffer, count = resolvedMaxCount } = {}) {
+    const n = Math.min(resolvedMaxCount, Math.max(1, Math.trunc(Number(count))));
+    const bg = bindGroupFor(srcBuffer);
+    const pGroups = Math.ceil(n / 64);
+
+    pass.setPipeline(pipes.clear.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(ATLAS_GRAV_L2_COUNT / 64));
+
+    pass.setPipeline(pipes.comReduce.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(1);
+
+    pass.setPipeline(pipes.binCharts.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(pGroups);
+
+    pass.setPipeline(pipes.finalizeCharts.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(ATLAS_GRAV_L2_COUNT / 64));
+
+    pass.setPipeline(pipes.rollupParents.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(Math.ceil(ATLAS_GRAV_L1_COUNT / 64));
+
+    pass.setPipeline(pipes.evalParticles.pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(pGroups);
+  }
+
+  return Object.freeze({
+    schema: ULG_SCHROEDER_SCALE_ATLAS_RESIDENT_GRAVITY_SCHEMA,
+    gravityMode: 'webgpu-schroeder-scale-atlas-multipole',
+    maxCount: resolvedMaxCount,
+    strideFloats: strideVec4 * 4,
+    accPhiBuffer: accPhiBuf,
+    atlasMomentsBuffer: atlasMomentsBuf,
+    comPosSlotIndex: resolvedMaxCount,
+    comVelSlotIndex: resolvedMaxCount + 1,
+    writeParams,
+    encodeIntoPass,
+    destroy() {
+      chartAccumBuf.destroy();
+      atlasMomentsBuf.destroy();
+      accPhiBuf.destroy();
+      paramsBuf.destroy();
+    }
+  });
 }

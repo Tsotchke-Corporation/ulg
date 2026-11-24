@@ -14,7 +14,8 @@ import {
   validateDerivationVisualizationBundle
 } from '../runtime/electronicStructure/quantumDerivationArtifacts.js';
 import { BOHR_TO_M } from '../runtime/electronicStructure/uniformElectronGas.js';
-import { climbingImageNEB } from '../runtime/electronicStructure/molecularHartreeFock.js';
+import { climbingImageNEBWebGpu } from '../runtime/electronicStructure/molecularHartreeFockWebGpu.js';
+import { lookupFoundationPolytopeRecord } from '../runtime/material/foundationPolytopeAtlasGpuBridge.js';
 import { eshkolHelmholtzProgram } from '../runtime/material/eshkolTriadClosures.js';
 import {
   COSMIC_QUANTUM_SCALE_REGIMES,
@@ -99,8 +100,8 @@ const MOLECULAR_PRESETS = Object.freeze({
 
 const GALAXY_TIERS = Object.freeze({
   '4k-direct': { id: '4k-direct', label: '4K Direct', count: 4096, mode: 'direct' },
-  '32k-bh': { id: '32k-bh', label: '32K BH Octree', count: 32768, mode: 'barnes-hut' },
-  '65k-bh': { id: '65k-bh', label: '65K BH Octree', count: 65536, mode: 'barnes-hut' }
+  '32k-bh': { id: '32k-bh', label: '32K Scale Atlas', count: 32768, mode: 'barnes-hut' },
+  '65k-bh': { id: '65k-bh', label: '65K Scale Atlas', count: 65536, mode: 'barnes-hut' }
 });
 
 const REGIME_CENTERS_LOG10 = Object.freeze({
@@ -881,9 +882,9 @@ export async function mountCosmicQuantumZoomDemo(container) {
   let currentPolytopeStatus = 'accepted';
   let currentPolytopeResolution = null;
 
-  function ensureNebReactionPath() {
+  async function ensureNebReactionPath() {
     if (cachedNebPath) return cachedNebPath;
-    // Closed-shell 10-electron first-principles CI-NEB: H2O bent -> linear D_inf_h TS -> inverted H2O
+    // Closed-shell 10-electron first-principles WebGPU CI-NEB: H2O bent -> linear D_inf_h TS -> inverted H2O
     const reactant = [
       { Z: 8, position: [0, 0, 0] },
       { Z: 1, position: [1.43, 1.108, 0] },
@@ -894,12 +895,12 @@ export async function mountCosmicQuantumZoomDemo(container) {
       { Z: 1, position: [1.43, -1.108, 0] },
       { Z: 1, position: [-1.43, -1.108, 0] }
     ];
-    cachedNebPath = climbingImageNEB(reactant, product, {
-      nImages: 7,
-      maxSteps: 14,
+    cachedNebPath = await climbingImageNEBWebGpu(gpuDevice, reactant, product, {
+      nImages: 5,
+      maxSteps: 6,
       springK: 0.12,
       stepSize: 0.16,
-      basis: 'sto-3g'
+      basisName: 'sto-3g'
     });
     return cachedNebPath;
   }
@@ -950,7 +951,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
     let activeFormula;
     let activeBasis = selectedBasis;
     if (nebModeActive) {
-      const neb = ensureNebReactionPath();
+      const neb = await ensureNebReactionPath();
       activeAtoms = interpolateNebAtoms(neb, nebReactionXi);
       activeFormula = 'H2O';
       activeBasis = 'sto-3g';
@@ -973,14 +974,19 @@ export async function mountCosmicQuantumZoomDemo(container) {
     });
     currentMolecularArtifact = built.artifact;
 
-    // Real MaterialPolytopeRegistry state-domain membership evaluation (fail-closed)
-    polytopeRegistry.discoverMaterialPolytopes({
-      materialKey: preset.formula,
-      family: 'compound',
-      meltingPointK: preset.formula === 'H2O' ? 273.15 : 150,
-      boilingPointK: preset.formula === 'H2O' ? 373.15 : 300,
-      closureHash: `${preset.formula}:${activeBasis}:${nebModeActive ? 'neb' : 'eq'}`
-    });
+    // Real MaterialPolytopeRegistry state-domain membership evaluation sourced from Gate 1-2 foundation atlas (zero material-name hardcodes!)
+    const atlasRec = lookupFoundationPolytopeRecord(preset.formula);
+    const derivedMeltK = Number(atlasRec?.thermodynamic?.meltingPointK);
+    const derivedBoilK = Number(atlasRec?.thermodynamic?.boilingPointK);
+    if (Number.isFinite(derivedMeltK) && derivedMeltK > 0 && Number.isFinite(derivedBoilK) && derivedBoilK > derivedMeltK) {
+      polytopeRegistry.discoverMaterialPolytopes({
+        materialKey: preset.formula,
+        family: 'compound',
+        meltingPointK: derivedMeltK,
+        boilingPointK: derivedBoilK,
+        closureHash: `${preset.formula}:${activeBasis}:${nebModeActive ? 'neb' : 'eq'}`
+      });
+    }
     const probeTempK = nebModeActive ? (298.15 + nebReactionXi * 140.0) : 298.15;
     currentPolytopeResolution = polytopeRegistry.resolveState(preset.formula, {
       temperatureK: probeTempK,
@@ -1733,6 +1739,9 @@ export async function mountCosmicQuantumZoomDemo(container) {
     return camState;
   }
 
+  const cqUrlParams = new URLSearchParams(window.location.search);
+  const cameraAutoSpin = cqUrlParams.get('cameraAutoSpin') === '1';
+
   function frame() {
     if (disposed) return;
     rafId = requestAnimationFrame(frame);
@@ -1747,9 +1756,11 @@ export async function mountCosmicQuantumZoomDemo(container) {
 
     if (simRunning) {
       simClock += 0.016;
-      if (continuumHelmholtzGroup) continuumHelmholtzGroup.rotation.y -= 0.003;
-      molecularGroup.rotation.y += 0.004;
-      atomicGroup.rotation.y += 0.005;
+      if (cameraAutoSpin) {
+        if (continuumHelmholtzGroup) continuumHelmholtzGroup.rotation.y -= 0.003;
+        molecularGroup.rotation.y += 0.004;
+        atomicGroup.rotation.y += 0.005;
+      }
     }
 
     const camState = applyContinuousZoomPose();
@@ -1795,6 +1806,7 @@ export async function mountCosmicQuantumZoomDemo(container) {
         readbackBytesPerFrame: galPresenterStats?.readbackBytesPerFrame ?? null,
         cosmicWebSteps: cosmicWebEngine.stepIndex,
         cosmicScaleFactorA: cosmicWebEngine.scaleFactorA,
+        cameraAutoSpin,
         atomicElementZ: selectedElementZ,
         atomicFunctional: selectedFunctional,
         orbitalModeId: selectedOrbitalMode,

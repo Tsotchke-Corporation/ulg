@@ -245,10 +245,12 @@ export async function mountStellarGenesisDemo(container) {
   const zeroCopyActive = Boolean(renderer.isWebGPURenderer);
   const particleCount = 8192;
 
-  // 1. Register quantum-derived 2D plasma EOS & opacity closure in ULG's ClosureRegistry
+  // 1. Register WebGPU quantum-derived 2D plasma EOS & opacity closure in ULG's ClosureRegistry
   const artifactCache = new ArtifactCache();
   const closureRegistry = new ClosureRegistry({ artifactCache });
-  const registeredClosure = await registerPlasmaFusionClosureArtifact({ closureRegistry });
+  const registeredClosure = await registerPlasmaFusionClosureArtifact({ closureRegistry, device: gpuDevice });
+  const sgUrlParams = new URLSearchParams(window.location.search);
+  const cameraAutoSpin = sgUrlParams.get('cameraAutoSpin') === '1';
 
   // 2. Instantiate ULG's general GPU-native self-gravitating hydro module (ZERO preset flags!)
   const initialBodies0 = createHydrogenNebulaInitialBodies({
@@ -612,7 +614,7 @@ export async function mountStellarGenesisDemo(container) {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
     currentLog10Span += (targetLog10Span - currentLog10Span) * 0.14;
-    if (!dragging) camYaw += 0.0018;
+    if (cameraAutoSpin && !dragging) camYaw += 0.0018;
 
     if (simRunning && !stepBusy) {
       void stepSimulationOnce();
@@ -633,6 +635,8 @@ export async function mountStellarGenesisDemo(container) {
       return {
         presetId: activePresetId,
         moduleModel: 'self-gravitating-hydro@1',
+        gravityMode: engine.gravityMode,
+        cameraAutoSpin,
         closureId: registeredClosure.artifact.closureId,
         backend: engine.backend,
         rendererBackend,

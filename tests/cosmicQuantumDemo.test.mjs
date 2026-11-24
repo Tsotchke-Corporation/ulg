@@ -6,18 +6,23 @@ import { createSimulationModuleRegistry } from '../src/runtime/simulationModuleR
 import { createCosmicQuantumScaleBridge } from '../src/runtime/sph/cosmicQuantumScaleBridge.js';
 import {
   PLANETARY_SYSTEM_SPECS,
-  cosmicBarnesHutOctreeWgsl,
+  cosmicScaleAtlasIntegrateWgsl,
   cosmicNBodyTiledWgsl,
   continuumMicroSphWgsl,
   createContinuumSpecimenBodies,
   createCosmicWebBodies,
   createGalacticBodies,
   createPlanetarySystemBodies,
+  createResidentScaleAtlasMultipoleNBodyEngine,
   createResidentBarnesHutNBodyEngine,
   createResidentContinuumDropletEngine,
   createResidentTiledNBodyEngine,
   deriveContinuumConstitutiveParams
 } from '../src/demos/cosmicQuantumGpuKernels.js';
+import {
+  schroederScaleAtlasMultipoleWgsl,
+  schroederScaleAtlasResidentGravityWgsl
+} from '../src/runtime/sph/schroederScaleAtlasMultipoleGpu.js';
 import {
   VOLUMETRIC_ORBITAL_MODES,
   buildOrbitalVolumeData,
@@ -33,17 +38,26 @@ test('Star Spec anti-hack static gate: zero phase_mode, zero origin bowl, zero C
     'phase_mode',
     'stepCpuFallbackBodies',
     'r_xz > 1.45',
-    'cpu-fallback'
+    'cpu-fallback',
+    'cosmicBarnesHutOctreeWgsl',
+    'fn bh_deposit_leaves'
   ]) {
     assert.equal(kernelSrc.includes(forbidden), false,
-      `cosmicQuantumGpuKernels.js must not contain forbidden hack/fallback token "${forbidden}"`);
+      `cosmicQuantumGpuKernels.js must not contain forbidden hack/fallback/private-octree token "${forbidden}"`);
   }
   assert.ok(cosmicNBodyTiledWgsl.includes('fn step_nbody'));
   assert.ok(cosmicNBodyTiledWgsl.includes('workgroupBarrier()'));
-  assert.ok(cosmicBarnesHutOctreeWgsl.includes('fn bh_com_reduce'));
-  assert.ok(cosmicBarnesHutOctreeWgsl.includes('fn bh_deposit_leaves'));
-  assert.ok(cosmicBarnesHutOctreeWgsl.includes('fn bh_integrate'));
+  assert.ok(schroederScaleAtlasResidentGravityWgsl.includes('fn ss_atlas_grav_com_reduce'));
+  assert.ok(schroederScaleAtlasResidentGravityWgsl.includes('fn ss_atlas_grav_bin_charts'));
+  assert.ok(schroederScaleAtlasResidentGravityWgsl.includes('fn ss_atlas_grav_eval_particles'));
+  assert.ok(cosmicScaleAtlasIntegrateWgsl.includes('fn ss_atlas_nbody_integrate'));
+  assert.equal(schroederScaleAtlasMultipoleWgsl.includes('@workgroup_size(1)'), false,
+    'Canonical SchroederScaleAtlas multipole WGSL must have ZERO @workgroup_size(1) serial bottlenecks');
   assert.ok(continuumMicroSphWgsl.includes('fn step_continuum_micro_sph'));
+
+  // Fail-closed constitutive params: missing meltingPointK/boilingPointK must throw rather than branch on discrete phase
+  assert.throws(() => deriveContinuumConstitutiveParams({ phase: 'liquid' }), /fails closed/i);
+  assert.equal(createResidentBarnesHutNBodyEngine, createResidentScaleAtlasMultipoleNBodyEngine);
 
   const demoSrc = fs.readFileSync(path.join(ROOT, 'src/demos/cosmicQuantumZoomDemo.js'), 'utf8');
   for (const forbiddenDemo of [

@@ -144,14 +144,19 @@ export function createZeroCopyResidentBodyPresenter({
         clamp(float(tb).mul(rim).add(speedBoost), float(0.0), float(1.0))
       );
     } else if (palette === 'cosmic-web') {
+      // Live GPU overdensity stored in vel_rho.w (`rho_vis` in [0.05..1.0] from supergalacticTreePmGpu.js),
+      // falling back to mass scale only if vel_rho.w is zero.
+      const aVelRadius = attribute('aVelRadius', 'vec4');
+      const rhoVis = clamp(aVelRadius.w, float(0.0), float(1.0));
       const mNorm = clamp(mass.div(float(5.5)), float(0.0), float(1.0));
-      const rawScale = float(0.026).add(pow(mNorm, float(0.72)).mul(float(0.068)));
+      const densNorm = select(rhoVis.greaterThan(float(0.001)), rhoVis, mNorm);
+      const rawScale = float(0.022).add(pow(densNorm, float(0.75)).mul(float(0.072)));
       starScale = select(alive, rawScale, float(0.0));
-      starColor = vec3(
-        float(0.34).add(mNorm.mul(float(0.66))),
-        float(0.24).add(mNorm.mul(float(0.56))),
-        float(0.96).sub(mNorm.mul(float(0.52)))
-      );
+      const colVoid = vec3(float(0.20), float(0.32), float(0.86));
+      const colFil = vec3(float(0.36), float(0.84), float(1.0));
+      const colHalo = vec3(float(1.0), float(0.88), float(0.46));
+      const loCol = mix(colVoid, colFil, clamp(densNorm.mul(float(1.6)), float(0.0), float(1.0)));
+      starColor = mix(loCol, colHalo, clamp(densNorm.sub(float(0.45)).mul(float(1.85)), float(0.0), float(1.0)));
     } else {
       // Translation-invariant galactic astrophysics palette driven strictly by
       // physical stellar mass and radius (zero origin-anchored distance cutoffs!)

@@ -36,6 +36,10 @@ test('Star Spec anti-hack static gate: zero origin hacks, zero logT_virial targe
   const engineSrc = fs.readFileSync(path.join(ROOT, 'src/runtime/sph/selfGravitatingHydroGpu.js'), 'utf8');
   assert.equal(engineSrc.includes('stepCpuFallbackSelfGravitatingHydro'), false,
     'Production CPU mirror solver must be deleted (GPU-native only)');
+  assert.equal(engineSrc.includes('outer_tree'), false,
+    'Private Barnes-Hut octree must be deleted in favor of canonical SchroederScaleAtlas multipole');
+  assert.ok(engineSrc.includes('createSchroederScaleAtlasGravitySolverWebGpu'),
+    'selfGravitatingHydroGpu.js must wire canonical SchroederScaleAtlas multipole gravity');
 
   const demoSrc = fs.readFileSync(path.join(ROOT, 'src/demos/stellarGenesisDemo.js'), 'utf8');
   for (const forbiddenProp of [

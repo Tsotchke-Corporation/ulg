@@ -1738,6 +1738,10 @@ try {
   console.log(JSON.stringify({ reactionDormancy: evidence.reactionDormancy }));
   evidence.lawScopeReceipt = (await inAll(() => globalThis.__ulgLastLawScopeReceipt ?? null)).filter(entry => entry.value);
   console.log(JSON.stringify({ lawScopeReceipt: evidence.lawScopeReceipt }));
+  evidence.polytopeAtlasLiveStatus = (await inAll(() => globalThis.__ulgPolytopeAtlasLiveStatus ?? null)).filter(entry => entry.value);
+  console.log(JSON.stringify({ polytopeAtlasLiveStatus: evidence.polytopeAtlasLiveStatus }));
+  evidence.a5SolidStatus = (await inAll(() => globalThis.__ulgA5SolidStatus ?? null)).filter(entry => entry.value);
+  console.log(JSON.stringify({ a5SolidStatus: evidence.a5SolidStatus }));
   evidence.implicitPressure = (await inAll(() => globalThis.__ulgImplicitPressure ?? null)).filter(entry => entry.value);
   evidence.thermalPotential = (await inAll(() => globalThis.__ulgThermalPotentialStatus ?? null)).filter(entry => entry.value);
   console.log(JSON.stringify({ implicitPressure: evidence.implicitPressure }));

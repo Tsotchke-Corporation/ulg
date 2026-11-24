@@ -17,16 +17,20 @@
 import foundationPolytopeAtlasBank from '../../../data/material-properties/foundation-polytope-atlas.json' with { type: 'json' };
 import {
   ULG_POLYTOPE_ATLAS_GPU_BUFFER_SCHEMA,
+  ULG_POLYTOPE_ATLAS_BANK_GPU_BUFFER_SCHEMA,
   ULG_ACCURACY_TIERS,
   packPolytopeAtlasForGpu,
+  packPolytopeAtlasBankForGpu,
   evaluatePolytopeAtlasWgsl
 } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 import {
   computeBufferBinding,
   createCachedExplicitBindGroup,
   createCachedExplicitComputePipeline,
+  deferSubmittedWorkCleanup,
   unwrapWebGpuCacheDevice
 } from '../webgpuComputeLayout.js';
+import { stableOpticalMaterialId } from './opticalGpuBuffers.js';
 import { createMaterialPolytopeRegistry } from './materialPolytopeRegistry.js';
 import {
   compilePolytopeEshkolHigherOrderLaws,
@@ -59,7 +63,8 @@ for (const comp of (foundationPolytopeAtlasBank.compounds || [])) {
   if (comp?.formula) RECORDS_BY_KEY.set(String(comp.formula).toLowerCase(), comp);
 }
 
-const devicePolytopeState = new WeakMap();
+const DEVICE_POLYTOPE_STATE_SYM = Symbol.for('ulg.foundationPolytopeDeviceState.v1');
+const devicePolytopeState = (globalThis[DEVICE_POLYTOPE_STATE_SYM] ??= new WeakMap());
 
 /**
  * Look up a first-principles Gate 1–2 material/compound record in
@@ -421,20 +426,279 @@ export async function escalatePolytopeMissToTriadGpu(device, {
   });
 }
 
+const DEFAULT_STUDIO_POLYTOPE_KEYS = Object.freeze([
+  'h2o', 'water', 'ice', 'steam',
+  'fe', 'iron',
+  'na', 'sodium',
+  'cs', 'cesium',
+  'f', 'fluorine',
+  'naoh', 'csf', 'h2', 'o2', 'n2', 'air', 'ar', 'cl2', 'co2', 'al2o3', 'nacl'
+]);
+
+export const ULG_POLYTOPE_RECEIPT_WORDS = 8;
+export const ULG_POLYTOPE_RECEIPT_BYTES = ULG_POLYTOPE_RECEIPT_WORDS * Uint32Array.BYTES_PER_ELEMENT;
+
+function retirePolytopeBufferSafely(device, buffer) {
+  if (!buffer || typeof buffer.destroy !== 'function') return;
+  try {
+    if (deferSubmittedWorkCleanup(device, () => { try { buffer.destroy(); } catch {} })) return;
+  } catch {
+    // Fallback below.
+  }
+  try { buffer.destroy(); } catch {}
+}
+
+function getOrCreateDevicePolytopeState(device) {
+  const key = unwrapWebGpuCacheDevice(device);
+  let state = devicePolytopeState.get(key);
+  if (!state) {
+    state = {
+      seededKeys: new Set(),
+      materialIdToKey: new Map(),
+      seededAtMs: Date.now(),
+      atlasBuffer: null,
+      missReadbackBuffer: null,
+      generation: 0,
+      materialCount: 0,
+      packedFloatCount: 0,
+      receiptCopyPending: false,
+      receiptPollInFlight: false,
+      escalationsInFlight: new Set(),
+      escalatedKeys: new Set(),
+      escalationCount: 0,
+      adoptedGenerations: 0,
+      cumulativeHits: 0,
+      cumulativeMisses: 0,
+      lastReceipt: null
+    };
+    devicePolytopeState.set(key, state);
+  }
+  return state;
+}
+
+/**
+ * Pack and upload ONE GPU-resident multi-material Convex Polytope Atlas bank
+ * (`ulg.polytope-atlas-bank-gpu-buffer.v1`) on `device` covering every seeded
+ * material key & numeric Studio materialId (`thermo0.x`). Zero per-step churn:
+ * allocated once per bank generation and retired safely after submitted work.
+ */
+export function rebuildFoundationPolytopeBankOnDevice(
+  device,
+  materialKeys = DEFAULT_STUDIO_POLYTOPE_KEYS,
+  { materialIdByKey = null } = {}
+) {
+  if (!device || typeof device.createBuffer !== 'function') return null;
+  const state = getOrCreateDevicePolytopeState(device);
+  const idToEntry = new Map();
+  const addEntry = (numericId, rawKey) => {
+    const id = Number(numericId);
+    if (!Number.isFinite(id) || idToEntry.has(id)) return;
+    const rec = lookupFoundationPolytopeRecord(rawKey);
+    if (!rec) return;
+    const polytopes = hydrateFoundationPolytopes(rec);
+    if (!polytopes.length) return;
+    idToEntry.set(id, {
+      materialId: id,
+      materialKey: rec.materialKey,
+      accuracyTier: rec.accuracyTier,
+      polytopes
+    });
+    state.materialIdToKey.set(id, rec.materialKey);
+  };
+
+  if (materialIdByKey && typeof materialIdByKey === 'object') {
+    const pairs = materialIdByKey instanceof Map
+      ? [...materialIdByKey.entries()]
+      : Object.entries(materialIdByKey);
+    for (const [k, v] of pairs) {
+      addEntry(v, k);
+    }
+  }
+  const allKeys = new Set([
+    ...DEFAULT_STUDIO_POLYTOPE_KEYS,
+    ...state.seededKeys,
+    ...(Array.isArray(materialKeys) ? materialKeys : [])
+  ]);
+  for (const rawKey of allKeys) {
+    const norm = String(rawKey || '').trim().toLowerCase();
+    if (!norm) continue;
+    addEntry(stableOpticalMaterialId(norm), norm);
+    const rec = lookupFoundationPolytopeRecord(norm);
+    if (rec?.materialKey) {
+      addEntry(stableOpticalMaterialId(rec.materialKey), rec.materialKey);
+      addEntry(stableOpticalMaterialId(rec.materialKey.toLowerCase()), rec.materialKey);
+    }
+  }
+
+  const entries = [...idToEntry.values()];
+  if (entries.length === 0) return null;
+  const packedBank = packPolytopeAtlasBankForGpu(entries);
+  const nextGen = state.generation + 1;
+  const nextAtlasBuf = device.createBuffer({
+    label: `ulg-tier1-polytope-atlas-bank-g${nextGen}`,
+    size: Math.max(64, packedBank.data.byteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(nextAtlasBuf, 0, packedBank.data);
+  if (!state.missReadbackBuffer) {
+    state.missReadbackBuffer = device.createBuffer({
+      label: 'ulg-tier1-polytope-miss-receipt-readback',
+      size: ULG_POLYTOPE_RECEIPT_BYTES,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
+  }
+  const prevAtlasBuf = state.atlasBuffer;
+  state.atlasBuffer = nextAtlasBuf;
+  state.generation = nextGen;
+  state.materialCount = packedBank.materialCount;
+  state.packedFloatCount = packedBank.totalFloats;
+  if (prevAtlasBuf) retirePolytopeBufferSafely(device, prevAtlasBuf);
+  return Object.freeze({
+    schema: ULG_POLYTOPE_ATLAS_BANK_GPU_BUFFER_SCHEMA,
+    generation: state.generation,
+    materialCount: state.materialCount,
+    packedFloatCount: state.packedFloatCount
+  });
+}
+
+/**
+ * Retrieve the resident GPU multi-material Polytope Atlas bank binding for
+ * hot-loop WGSL kernels (`mlsMpmMechanicsRefreshWgsl`, `sphSpatialGasLedgerEosGpu`).
+ * Zero allocations.
+ */
+export function getFoundationPolytopeGpuBinding(device) {
+  const key = device ? unwrapWebGpuCacheDevice(device) : null;
+  const state = key ? devicePolytopeState.get(key) : null;
+  if (!state || !state.atlasBuffer || state.materialCount <= 0) {
+    return Object.freeze({
+      active: false,
+      generation: 0,
+      materialCount: 0,
+      atlasBuffer: null,
+      missReadbackBuffer: null
+    });
+  }
+  return Object.freeze({
+    active: true,
+    generation: state.generation,
+    materialCount: state.materialCount,
+    atlasBuffer: state.atlasBuffer,
+    missReadbackBuffer: state.missReadbackBuffer
+  });
+}
+
+export function markPolytopeReceiptCopiedOnDevice(device) {
+  const key = device ? unwrapWebGpuCacheDevice(device) : null;
+  const state = key ? devicePolytopeState.get(key) : null;
+  if (state) state.receiptCopyPending = true;
+}
+
+/**
+ * Poll the 32-byte pooled Polytope Atlas hit/miss receipt ONLY at an already-
+ * fenced schedule boundary (0 extra `onSubmittedWorkDone` waits, 0 per-step
+ * `mapAsync`). On `hitFlag == 0` misses, fire-and-forget bounded async Tier-3
+ * Eshkol + MoonLab Triad synthesis (`maxInFlight = 2`) for adoption at the
+ * next schedule boundary.
+ */
+export async function consumeAndEscalatePolytopeReceiptOnDevice(device) {
+  const key = device ? unwrapWebGpuCacheDevice(device) : null;
+  const state = key ? devicePolytopeState.get(key) : null;
+  if (!state || !state.receiptCopyPending || state.receiptPollInFlight || !state.missReadbackBuffer) {
+    return state?.lastReceipt ?? null;
+  }
+  state.receiptCopyPending = false;
+  state.receiptPollInFlight = true;
+  try {
+    await state.missReadbackBuffer.mapAsync(GPU_BUFFER_USAGE.MAP_READ);
+    const words = new Uint32Array(state.missReadbackBuffer.getMappedRange().slice(0, ULG_POLYTOPE_RECEIPT_BYTES));
+    state.missReadbackBuffer.unmap();
+    const hits = words[1] >>> 0;
+    const misses = words[2] >>> 0;
+    const missClaimed = words[3] >>> 0;
+    const missMatId = words[4] >>> 0;
+    const f32View = new Float32Array(words.buffer);
+    const missTempK = missClaimed ? f32View[5] : 0;
+    const missPressPa = missClaimed ? f32View[6] : 0;
+    const atlasGen = words[7] >>> 0;
+    state.cumulativeHits += hits;
+    state.cumulativeMisses += misses;
+
+    let triggeredEscalationKey = null;
+    if (misses > 0 && missClaimed && Number.isFinite(missTempK) && missTempK > 0) {
+      const matKey = state.materialIdToKey.get(missMatId) || null;
+      const quantT = Math.round(missTempK / 25) * 25;
+      const quantLogP = Math.round(Math.log10(Math.max(1, missPressPa)) * 4);
+      const dedupKey = `${matKey || missMatId}:${quantT}:${quantLogP}`;
+      if (
+        matKey
+        && !state.escalatedKeys.has(dedupKey)
+        && !state.escalationsInFlight.has(dedupKey)
+        && state.escalationsInFlight.size < 2
+      ) {
+        state.escalationsInFlight.add(dedupKey);
+        triggeredEscalationKey = dedupKey;
+        void escalatePolytopeMissToTriadGpu(device, {
+          materialKey: matKey,
+          temperatureK: missTempK,
+          pressurePa: Math.max(1, missPressPa)
+        })
+          .then((res) => {
+            if (res?.escalated) {
+              state.escalatedKeys.add(dedupKey);
+              state.escalationCount += 1;
+              state.adoptedGenerations += 1;
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            state.escalationsInFlight.delete(dedupKey);
+          });
+      }
+    }
+
+    const snapshot = Object.freeze({
+      schema: ULG_POLYTOPE_ATLAS_BANK_GPU_BUFFER_SCHEMA,
+      atlasGeneration: atlasGen || state.generation,
+      materialCount: state.materialCount,
+      hits,
+      misses,
+      cumulativeHits: state.cumulativeHits,
+      cumulativeMisses: state.cumulativeMisses,
+      missSample: missClaimed
+        ? Object.freeze({
+            materialId: missMatId,
+            materialKey: state.materialIdToKey.get(missMatId) ?? null,
+            temperatureK: missTempK,
+            pressurePa: missPressPa
+          })
+        : null,
+      triggeredEscalationKey,
+      escalationCount: state.escalationCount,
+      adoptedGenerations: state.adoptedGenerations
+    });
+    state.lastReceipt = snapshot;
+    globalThis.__ulgPolytopeAtlasLiveStatus = snapshot;
+    return snapshot;
+  } catch {
+    return state.lastReceipt;
+  } finally {
+    state.receiptPollInFlight = false;
+  }
+}
+
 /**
  * Automatically seed Studio's live WebGPU device with Gate 1–2 Foundation
  * Polytope Atlas + Eshkol/MoonLab 5-slot Triad GPU closures for the active
  * continuum materials (zero per-step allocation churn — executes once per
  * device/material key at schedule boundary!).
  */
-export async function seedStudioFoundationTriadOnDevice(device, materialKeys = ['h2o', 'fe', 'na', 'cs', 'f', 'naoh', 'csf']) {
+export async function seedStudioFoundationTriadOnDevice(
+  device,
+  materialKeys = ['h2o', 'fe', 'na', 'cs', 'f', 'naoh', 'csf', 'n2', 'ar', 'h2'],
+  { materialIdByKey = null } = {}
+) {
   if (!device || typeof device.createBuffer !== 'function') return null;
-  const key = unwrapWebGpuCacheDevice(device);
-  let state = devicePolytopeState.get(key);
-  if (!state) {
-    state = { seededKeys: new Set(), seededAtMs: Date.now() };
-    devicePolytopeState.set(key, state);
-  }
+  const state = getOrCreateDevicePolytopeState(device);
   const newlySeeded = [];
   for (const rawKey of materialKeys) {
     const norm = String(rawKey || '').trim().toLowerCase();
@@ -458,11 +722,13 @@ export async function seedStudioFoundationTriadOnDevice(device, materialKeys = [
       // Isolate individual material seeding from live physics schedule admission.
     }
   }
+  const bankInfo = rebuildFoundationPolytopeBankOnDevice(device, materialKeys, { materialIdByKey });
   const status = Object.freeze({
     schema: ULG_FOUNDATION_POLYTOPE_GPU_BRIDGE_SCHEMA,
     seededCount: state.seededKeys.size,
     seededMaterials: Object.freeze([...state.seededKeys]),
     newlySeeded: Object.freeze(newlySeeded),
+    polytopeBank: bankInfo,
     triadDeviceStatus: getTriadClosureDeviceStatus(device)
   });
   globalThis.__ulgFoundationPolytopeStatus = status;
@@ -476,6 +742,13 @@ export function getFoundationPolytopeDeviceStatus(device) {
     schema: ULG_FOUNDATION_POLYTOPE_GPU_BRIDGE_SCHEMA,
     seededCount: state?.seededKeys?.size ?? 0,
     seededMaterials: Object.freeze(state ? [...state.seededKeys] : []),
+    polytopeBankGeneration: state?.generation ?? 0,
+    polytopeBankMaterialCount: state?.materialCount ?? 0,
+    cumulativeHits: state?.cumulativeHits ?? 0,
+    cumulativeMisses: state?.cumulativeMisses ?? 0,
+    escalationCount: state?.escalationCount ?? 0,
+    adoptedGenerations: state?.adoptedGenerations ?? 0,
+    lastReceipt: state?.lastReceipt ?? null,
     triadDeviceStatus: getTriadClosureDeviceStatus(device)
   });
 }

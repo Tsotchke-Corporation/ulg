@@ -28,6 +28,7 @@ import {
   registerTriadClosureBundleOnDevice
 } from '../runtime/material/triadClosureGpuRegistry.js';
 import {
+  consumeAndEscalatePolytopeReceiptOnDevice,
   seedStudioFoundationTriadOnDevice
 } from '../runtime/material/foundationPolytopeAtlasGpuBridge.js';
 import {
@@ -12524,10 +12525,40 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       ) {
         record.foundationPolytopeSeeded = true;
         try {
-          await seedStudioFoundationTriadOnDevice(record.workerDevice);
+          const materialIdByKey = new Map();
+          const sceneMaterials = [
+            ...(Array.isArray(record.schroederLane?.mechanicsMaterialTable?.materials)
+              ? record.schroederLane.mechanicsMaterialTable.materials
+              : []),
+            ...(Array.isArray(record.schroederLane?.thermalMaterialTable?.materials)
+              ? record.schroederLane.thermalMaterialTable.materials
+              : [])
+          ];
+          const activeMaterialKeys = [];
+          for (const mat of sceneMaterials) {
+            const key = String(mat?.material ?? mat?.materialKey ?? mat?.formula ?? mat?.id ?? '').trim().toLowerCase();
+            const numId = Number(mat?.materialId ?? mat?.gpuMaterialId);
+            if (key) {
+              activeMaterialKeys.push(key);
+              if (Number.isFinite(numId)) materialIdByKey.set(key, numId);
+            }
+          }
+          await seedStudioFoundationTriadOnDevice(
+            record.workerDevice,
+            activeMaterialKeys.length > 0 ? activeMaterialKeys : undefined,
+            { materialIdByKey }
+          );
         } catch {
           // Keep Foundation Polytope Atlas seeding isolated from schedule admission.
         }
+      }
+      if (
+        sampleLawActivationReceiptThisSchedule
+        && record.workerDevice
+        && typeof globalThis.GPUDevice === 'function'
+        && record.workerDevice instanceof globalThis.GPUDevice
+      ) {
+        globalThis.__ulgCapturePolytopeReceiptThisStep = true;
       }
       if (
         record.workerDevice
@@ -15828,6 +15859,19 @@ export async function runUlgMechanicsResidentStageWorkerSchedulePayload(
       };
     }
     state.thermalPotentialFinished = !cancelled;
+    if (
+      !cancelled
+      && sampleLawActivationReceiptThisSchedule
+      && record.workerDevice
+      && typeof globalThis.GPUDevice === 'function'
+      && record.workerDevice instanceof globalThis.GPUDevice
+    ) {
+      try {
+        await consumeAndEscalatePolytopeReceiptOnDevice(record.workerDevice);
+      } catch {
+        // Keep schedule-boundary Polytope Atlas receipt polling isolated from physics admission.
+      }
+    }
     const lastA3ThermalStep = Number(record._a3ThermalLastTickStep);
     const shouldRunA3ThermalTick = Boolean(
       (

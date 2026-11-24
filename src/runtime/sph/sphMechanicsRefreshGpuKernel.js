@@ -4,6 +4,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmMechanicsRefreshWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { evaluatePolytopeAtlasWgsl } from '../../../ulg-gpu-abi/src/materialFoundationAbi.js';
 import { createSphExactMechanicsRefreshWgsl } from './sphExactMechanicsRefreshWgsl.js';
 import { prepareSphExactMechanicsRefresh } from './sphExactMechanicsRefreshGpu.js';
 import {
@@ -11,6 +12,12 @@ import {
   registerGasResponseTableOnDevice,
   triadClosureMechanicsRefreshWgsl
 } from '../material/triadClosureGpuRegistry.js';
+import {
+  getFoundationPolytopeGpuBinding,
+  markPolytopeReceiptCopiedOnDevice,
+  ULG_POLYTOPE_RECEIPT_BYTES,
+  ULG_POLYTOPE_RECEIPT_WORDS
+} from '../material/foundationPolytopeAtlasGpuBridge.js';
 import { assertSphMechanicsGasLayout } from '../../../ulg-gpu-abi/src/sphGasConstitutive.js';
 import { assertSphCondensableInitializationMatches } from './sphCondensableParticleInitialization.js';
 import {
@@ -630,6 +637,8 @@ function outputEnvelope({
   authorityValidationStatus = 'not-observed',
   authorityValidationFailureCount = null,
   authorityValidationBuffer = null,
+  polytopeAtlasBound = false,
+  polytopeAtlasGeneration = 0,
   readbackTelemetry = createGpuReadbackTelemetry({
     scope: 'mls-mpm-mechanics-refresh',
     complete: false,
@@ -672,6 +681,8 @@ function outputEnvelope({
     authorityValidationStatus,
     authorityValidationFailureCount,
     authorityValidationBuffer,
+    polytopeAtlasBound: Boolean(polytopeAtlasBound),
+    polytopeAtlasGeneration: Number(polytopeAtlasGeneration) || 0,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     fullParticleReadbackPerformed:
       readbackMode !== NO_FULL_READBACK_MODE,
@@ -929,54 +940,115 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
   const authorityValidationUsage = GPU_BUFFER_USAGE.STORAGE
     | GPU_BUFFER_USAGE.COPY_DST
     | GPU_BUFFER_USAGE.COPY_SRC;
+  const authorityValidationByteLength = ULG_POLYTOPE_RECEIPT_BYTES;
   const poolAuthorityValidation = Boolean(useQueueOrderedRefreshPool);
   const authorityValidationBuffer = poolAuthorityValidation
     ? registerQueueOrderedPooledBufferReturn(
         acquireQueueOrderedPooledBuffer(device, {
           bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
           label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-          size: Uint32Array.BYTES_PER_ELEMENT,
+          size: authorityValidationByteLength,
           usage: authorityValidationUsage
         }),
         device,
         {
           bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-          size: Uint32Array.BYTES_PER_ELEMENT,
+          size: authorityValidationByteLength,
           usage: authorityValidationUsage
         }
       )
     : device.createBuffer({
         label: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-        size: Uint32Array.BYTES_PER_ELEMENT,
+        size: authorityValidationByteLength,
         usage: authorityValidationUsage
       });
   if (exact?.retainAcceptance) exact.retainAcceptanceBuffer(authorityValidationBuffer);
   device.queue.writeBuffer(
     authorityValidationBuffer,
     0,
-    new Uint32Array([0])
+    new Uint32Array(ULG_POLYTOPE_RECEIPT_WORDS)
   );
   const baseRefreshCode = exact ? createSphExactMechanicsRefreshWgsl() : mlsMpmMechanicsRefreshWgsl;
+  const maxStorageSlots = typeof device?.limits?.maxStorageBuffersPerShaderStage === 'number'
+    ? device.limits.maxStorageBuffersPerShaderStage
+    : 0;
+  const polytopeBinding = exact ? { active: false } : getFoundationPolytopeGpuBinding(device);
+  const usePolytopeAtlas = Boolean(
+    !exact
+    && polytopeBinding.active
+    && polytopeBinding.atlasBuffer
+    && maxStorageSlots >= 8
+  );
   const triadBinding = getTriadClosureGpuBinding(device);
-  const requiredTriadStorageSlots = exact ? 11 : 10;
+  const requiredTriadStorageSlots = (exact || usePolytopeAtlas) ? 11 : 10;
   const useTriadEnvelopes = Boolean(
     triadBinding.active
-    && typeof device?.limits?.maxStorageBuffersPerShaderStage === 'number'
-    && device.limits.maxStorageBuffersPerShaderStage >= requiredTriadStorageSlots
+    && maxStorageSlots >= requiredTriadStorageSlots
   );
-  const refreshCode = useTriadEnvelopes
-    ? baseRefreshCode
-        .replace(
-          'fn material_bank_warm_input_anchor()',
-          `${triadClosureMechanicsRefreshWgsl()}\n\nfn material_bank_warm_input_anchor()`
-        )
-        .replace(
-          '  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    phase_mechanics.solid,\n    phase_mechanics.status,\n    phase_mechanics.bulk,\n    phase_mechanics.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    phase_mechanics.lambda,\n    phase_mechanics.sound_speed,\n    phase_mechanics.eos_model,\n    phase_mechanics.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    phase_mechanics.dynamic_viscosity,\n    phase_mechanics.surface_tension,\n    row7.w\n  );',
-          '  let resolved_pm = apply_triad_a4_mechanics_envelopes(\n    thermo0.x,\n    thermo0.z,\n    state0.w / current_volume,\n    next_volume_ratio_j,\n    phase_mechanics\n  );\n  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    resolved_pm.solid,\n    resolved_pm.status,\n    resolved_pm.bulk,\n    resolved_pm.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    resolved_pm.lambda,\n    resolved_pm.sound_speed,\n    resolved_pm.eos_model,\n    resolved_pm.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    resolved_pm.dynamic_viscosity,\n    resolved_pm.surface_tension,\n    row7.w\n  );'
-        )
-    : baseRefreshCode;
+  const polytopeWgslSnippet = usePolytopeAtlas
+    ? /* wgsl */ `
+${evaluatePolytopeAtlasWgsl}
+
+@group(0) @binding(8) var<storage, read> polytope_atlas: array<f32>;
+
+fn eval_tier1_polytope_refresh(
+  material_id: f32,
+  phase_id: f32,
+  temperature_k: f32,
+  current_density: f32,
+  sound_speed: f32,
+  base_rest_density: f32
+) -> f32 {
+  let c_safe = max(sound_speed, 100.0);
+  let p_est = clamp(max(101325.0, current_density * c_safe * c_safe * 0.142857), 100.0, 1.0e10);
+  let pa = eval_polytope_atlas_bank_2d(&polytope_atlas, material_id, temperature_k, p_est);
+  if (pa.w >= 0.5 && pa.x > 0.0 && mechanics_refresh_finite(pa.x)) {
+    atomicAdd(&authority_validation[1u], 1u);
+    atomicStore(&authority_validation[7u], ${polytopeBinding.generation >>> 0}u);
+    let atlas_phase = select(select(select(0.0, 1.0, phase_id >= 1.5 && phase_id < 2.5), 2.0, phase_id >= 2.5 && phase_id < 3.5), 3.0, phase_id >= 3.5);
+    if (abs(pa.z - atlas_phase) < 0.5) {
+      return clamp(pa.x, base_rest_density * 0.85, base_rest_density * 1.15);
+    }
+    return base_rest_density;
+  }
+  atomicAdd(&authority_validation[2u], 1u);
+  atomicStore(&authority_validation[7u], ${polytopeBinding.generation >>> 0}u);
+  let claimed = atomicCompareExchangeWeak(&authority_validation[3u], 0u, 1u);
+  if (claimed.exchanged) {
+    atomicStore(&authority_validation[4u], u32(max(0.0, floor(material_id + 0.5))));
+    atomicStore(&authority_validation[5u], bitcast<u32>(temperature_k));
+    atomicStore(&authority_validation[6u], bitcast<u32>(p_est));
+  }
+  return base_rest_density;
+}
+`
+    : '';
+  let refreshCode = baseRefreshCode;
+  if (usePolytopeAtlas) {
+    refreshCode = refreshCode
+      .replace(
+        'fn material_bank_warm_input_anchor()',
+        `${polytopeWgslSnippet}\n\nfn material_bank_warm_input_anchor()`
+      )
+      .replace(
+        '  let rest_density = thermo0.w;',
+        '  let rest_density = eval_tier1_polytope_refresh(thermo0.x, thermo0.y, thermo0.z, thermo0.w, phase_mechanics.sound_speed, thermo0.w);'
+      );
+  }
+  if (useTriadEnvelopes) {
+    refreshCode = refreshCode
+      .replace(
+        'fn material_bank_warm_input_anchor()',
+        `${triadClosureMechanicsRefreshWgsl()}\n\nfn material_bank_warm_input_anchor()`
+      )
+      .replace(
+        '  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    phase_mechanics.solid,\n    phase_mechanics.status,\n    phase_mechanics.bulk,\n    phase_mechanics.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    phase_mechanics.lambda,\n    phase_mechanics.sound_speed,\n    phase_mechanics.eos_model,\n    phase_mechanics.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    phase_mechanics.dynamic_viscosity,\n    phase_mechanics.surface_tension,\n    row7.w\n  );',
+        '  let resolved_pm = apply_triad_a4_mechanics_envelopes(\n    thermo0.x,\n    thermo0.z,\n    state0.w / current_volume,\n    next_volume_ratio_j,\n    phase_mechanics\n  );\n  out_mechanics[mechanics_base + 5u] = vec4<f32>(\n    resolved_pm.solid,\n    resolved_pm.status,\n    resolved_pm.bulk,\n    resolved_pm.shear\n  );\n  out_mechanics[mechanics_base + 6u] = vec4<f32>(\n    resolved_pm.lambda,\n    resolved_pm.sound_speed,\n    resolved_pm.eos_model,\n    resolved_pm.status\n  );\n  out_mechanics[mechanics_base + 7u] = vec4<f32>(\n    row7.x,\n    resolved_pm.dynamic_viscosity,\n    resolved_pm.surface_tension,\n    row7.w\n  );'
+      );
+  }
   const extraBindings = [
     ...(exact ? [computeBufferBinding(8, 'read-only-storage')] : []),
+    ...(usePolytopeAtlas ? [computeBufferBinding(8, 'read-only-storage')] : []),
     ...(useTriadEnvelopes
       ? [
           computeBufferBinding(9, 'read-only-storage'),
@@ -985,9 +1057,10 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
         ]
       : [])
   ];
+  const polytopeCacheSuffix = usePolytopeAtlas ? '-polytope-t1-v1' : '';
   const triadCacheSuffix = useTriadEnvelopes ? '-triad-a4-v1' : '';
   const refreshPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}${triadCacheSuffix}`,
+    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-main${exact ? '-exact-quantities-v1' : ''}${polytopeCacheSuffix}${triadCacheSuffix}`,
     label: 'ulg-mls-mpm-mechanics-refresh',
     code: refreshCode,
     entryPoint: 'main',
@@ -1004,7 +1077,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     ]
   });
   const commitPipeline = createCachedExplicitComputePipeline(device, {
-    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-commit${exact ? '-exact-quantities-v1' : ''}${triadCacheSuffix}`,
+    cacheKey: `ulg-mls-mpm-mechanics-refresh.v5-transactional-commit${exact ? '-exact-quantities-v1' : ''}${polytopeCacheSuffix}${triadCacheSuffix}`,
     label: 'ulg-mls-mpm-mechanics-refresh-commit',
     code: refreshCode,
     entryPoint: 'commit_or_restore',
@@ -1030,6 +1103,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     { binding: 6, resource: { buffer: materialBankWarmInputBinding.buffer } },
     { binding: 7, resource: { buffer: authorityValidationBuffer } },
     ...(exact ? [{ binding: 8, resource: { buffer: exact.projectionBuffer } }] : []),
+    ...(usePolytopeAtlas ? [{ binding: 8, resource: { buffer: polytopeBinding.atlasBuffer } }] : []),
     ...(useTriadEnvelopes
       ? [
           { binding: 9, resource: { buffer: triadBinding.tableBuffer } },
@@ -1077,7 +1151,7 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
       if (poolAuthorityValidation && buffer === authorityValidationBuffer) {
         releaseQueueOrderedPooledBuffer(device, buffer, {
           bucketKey: 'ulg-mls-mpm-mechanics-refresh-authority-validation',
-          size: Uint32Array.BYTES_PER_ELEMENT,
+          size: authorityValidationByteLength,
           usage: authorityValidationUsage
         });
         return;
@@ -1154,6 +1228,8 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
     authorityValidationStatus:
       'mechanics-refresh-authority-validation-gpu-resident',
     authorityValidationBuffer,
+    polytopeAtlasBound: usePolytopeAtlas,
+    polytopeAtlasGeneration: polytopeBinding.generation ?? 0,
     readbackTelemetry: readbackMode === NO_FULL_READBACK_MODE
       ? createGpuReadbackTelemetry({
           scope: 'mls-mpm-mechanics-refresh-webgpu',
@@ -1196,6 +1272,21 @@ export function createMlsMpmMechanicsRefreshWebGpuEncoderStage(args = {}) {
         Math.ceil(sphParticleState.particleCount / 64)
       );
       commitPass.end();
+      if (
+        usePolytopeAtlas
+        && polytopeBinding.missReadbackBuffer
+        && (args.capturePolytopeReceipt === true || globalThis.__ulgCapturePolytopeReceiptThisStep === true)
+      ) {
+        globalThis.__ulgCapturePolytopeReceiptThisStep = false;
+        encoder.copyBufferToBuffer(
+          authorityValidationBuffer,
+          0,
+          polytopeBinding.missReadbackBuffer,
+          0,
+          authorityValidationByteLength
+        );
+        markPolytopeReceiptCopiedOnDevice(device);
+      }
       exact?.encode(encoder, true);
     },
     cleanupSubmittedWork: cleanup

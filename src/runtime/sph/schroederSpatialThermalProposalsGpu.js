@@ -1057,7 +1057,8 @@ function acquireThermalDormancyStage(device, entry, config, particleCount, smoot
       // Conduction support max(2h, r_a + r_b); radiation support
       // RADIATION_PAIR_RANGE_RADII * (r_a + r_b).
       supportFloorM: 2 * smoothingLengthM,
-      radiusMultiplier: 2 * Math.max(1, RADIATION_PAIR_RANGE_RADII)
+      radiusMultiplier: 2 * Math.max(1, RADIATION_PAIR_RANGE_RADII),
+      canonicalSsDirectoryMode: true
     });
     entry.thermalDormancyStages.set(key, stage);
     for (const buffer of new Set([
@@ -14278,7 +14279,11 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           const dormancyPass = encoder.beginComputePass({ label: 'ulg-thermal-dormancy' });
           record.thermalDormancyStage.encodeIntoPass(dormancyPass, {
             stateBuffer,
-            temperatureBuffer: record.derivedBuffer
+            temperatureBuffer: record.derivedBuffer,
+            spatialDirectoryBuffer: record.execution?.directoryBuffer ?? null,
+            spatialBaseGridSpacingM: record.execution?.queryBaseGridSpacingM ?? 0,
+            spatialMinLevel: record.execution?.queryMinLevel ?? 0,
+            spatialMaxLevel: record.execution?.queryMaxLevel ?? 0
           });
           if (record.radiationDormancyStage) {
             record.radiationDormancyStage.encodeIntoPass(dormancyPass, {
@@ -14313,6 +14318,9 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
           diagnostic.particleCount = record.particleCount;
           diagnostic.derivedBuffer = record.derivedBuffer;
           diagnostic.smoothingLengthM = record.preparedLawConfig?.smoothingLengthM ?? null;
+          diagnostic.canonicalSsDirectoryActive = Boolean(
+            record.execution?.directoryBuffer && Number(record.execution?.queryBaseGridSpacingM) > 0
+          );
           diagnostic.readCounts ??= async () => {
             const live = diagnostic.stage;
             if (!live) return null;
@@ -14329,7 +14337,8 @@ export function createSchroederSpatialMatchedTimeThermalProposalEncoderStage({
               particleCount: diagnostic.particleCount, counts: Array.from(words.slice(0, 4)),
               cells: live.cells, smoothingLengthM: diagnostic.smoothingLengthM,
               maxRadiusM: f32(words[4]), maxTemperatureK: f32(words[6]),
-              minTemperatureK: f32((~words[7]) >>> 0) };
+              minTemperatureK: f32((~words[7]) >>> 0),
+              canonicalSsDirectoryActive: Boolean(diagnostic.canonicalSsDirectoryActive) };
           };
         }
         if (localActiveProjection) {

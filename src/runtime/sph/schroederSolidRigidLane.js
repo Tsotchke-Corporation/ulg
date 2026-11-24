@@ -292,21 +292,35 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
   // burst pooled write-through, which encodes writeBuffer as copyBufferToBuffer).
   family.stage.prepare?.(dtSeconds);
   family.thermalStage?.prepare?.(encoder, dtSeconds, { releaseEnabled });
+  const ssFluidDirectoryArgs = Boolean(
+    fluid?.fluidDirectoryBuffer && Number(fluid?.fluidBaseGridSpacingM) > 0
+  )
+    ? {
+        fluidDirectoryBuffer: fluid.fluidDirectoryBuffer,
+        fluidBaseGridSpacingM: fluid.fluidBaseGridSpacingM,
+        fluidChartId: fluid.fluidChartId ?? 0,
+        fluidMinLevel: fluid.fluidMinLevel ?? 0,
+        fluidMaxLevel: fluid.fluidMaxLevel ?? 0
+      }
+    : {};
+  const useCanonicalSsFluidDir = Boolean(ssFluidDirectoryArgs.fluidDirectoryBuffer);
   if (couplingEligible) {
     family.couplingStage.prepare?.(encoder, dtSeconds, {
       particleCount: fluid.particleCount,
       exactEnergyBuffer: fluid.exactEnergyBuffer ?? null,
-      exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0
+      exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0,
+      ...ssFluidDirectoryArgs
     });
   }
   const canShareSolidGrid = Boolean(
-    couplingEligible && contactEligible && family.couplingStage?.spatialGrid
+    !useCanonicalSsFluidDir && couplingEligible && contactEligible && family.couplingStage?.spatialGrid
   );
   if (contactEligible) {
     family.contactStage.prepare?.(dtSeconds, {
       particleCount: fluid.particleCount,
       sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
-      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0
+      sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
+      ...ssFluidDirectoryArgs
     });
   }
   if (releaseEnabled) {
@@ -329,12 +343,14 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
     && family.couplingStage.encode(encoder, dtSeconds, { memberThermoBuffer: family.thermalStage.thermoBuffer,
       fluidStateBuffer: fluid.stateBuffer, fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
       exactEnergyBuffer: fluid.exactEnergyBuffer ?? null, exactEnergyRowCount: fluid.exactEnergyRowCount ?? 0,
+      ...ssFluidDirectoryArgs,
       pass, prepared: true });
   family.lastContactEnabled = contactEligible
     && family.contactStage.encode(encoder, dtSeconds, { fluidStateBuffer: fluid.stateBuffer,
       fluidThermoBuffer: fluid.thermoBuffer, particleCount: fluid.particleCount,
       sharedSpatialGrid: canShareSolidGrid ? family.couplingStage.spatialGrid : null,
       sharedGridSlopM: canShareSolidGrid ? family.couplingStage.slopM : 0,
+      ...ssFluidDirectoryArgs,
       pass, prepared: true });
   if (releaseEnabled) family.releaseStage.encode(encoder, { ...fluid, pass, prepared: true });
   family.fractureStage?.encode(encoder, dtSeconds, { pass, prepared: true, skipIfNoLoads: true });
@@ -430,11 +446,13 @@ export function runSchroederSolidRigidLaneStep(family, { device, dtSeconds, grav
       fluidThermalRows: live.fluidThermalRows.length };
   };
   counters.family = family;
+  counters.canonicalSsFluidDirectoryActive = useCanonicalSsFluidDir;
   globalThis.__ulgA5SolidStatus = Object.freeze({
     active: true,
     rigidBodyCount: family.bodyCount,
     memberCount: family.memberCount,
     steps: family.steps,
+    canonicalSsFluidDirectoryActive: useCanonicalSsFluidDir,
     sol4DeformableSurfaceCount: globalThis.__ulgA5SolidStatus?.sol4DeformableSurfaceCount ?? 0,
     sol4Steps: globalThis.__ulgA5SolidStatus?.sol4Steps ?? 0,
     sol5FractureActive: Boolean(family.fractureStage),

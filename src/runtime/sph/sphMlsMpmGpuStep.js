@@ -38155,7 +38155,12 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     });
   // G3 coherent rigid bodies: one SE(3) step per resident step, on the same
   // device and queue, after the continuum mechanics.
-  const solidReleaseFluid = solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction);
+  const solidReleaseFluid = solidRigidReleaseFluidBuffers(
+    sphParticleState,
+    sphParticleUpload,
+    g2pReconstruction,
+    schroederSpatialEpochGeneration
+  );
   runSchroederSolidRigidLaneStep(
     ensureSchroederSolidRigidFamilyForUpload(sphParticleUpload, sphParticleState?.rigidBodies, resolvedDevice),
     { device: resolvedDevice, dtSeconds, gravity, boxM: dims, fluid: solidReleaseFluid });
@@ -43230,7 +43235,12 @@ export function destroyMlsMpmResidentStepsBuffers(execution, {
 // energy and exact mass buffers travel alongside so thermal exchange and melt
 // release preserve the integer sum(U - S) and exact-mass ledgers; only the
 // retired rational initialQuantities route stays disabled.
-function solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pReconstruction) {
+function solidRigidReleaseFluidBuffers(
+  sphParticleState,
+  sphParticleUpload,
+  g2pReconstruction,
+  spatialEpochGeneration = null
+) {
   if (sphParticleState?.exactMass?.initialQuantities === true) return null;
   const g2p = retainedG2pOutputBuffers(g2pReconstruction);
   const thermoBuffer = sphParticleUpload?.thermoBuffer ?? null;
@@ -43240,11 +43250,23 @@ function solidRigidReleaseFluidBuffers(sphParticleState, sphParticleUpload, g2pR
   if ((sphParticleState?.exactMass || sphParticleState?.coldExactMassInput) && (!exactEnergy || !exactMassBuffer)) {
     return null;
   }
+  const ssExec = spatialEpochGeneration?.execution ?? null;
+  const hasCanonicalSsDir = Boolean(
+    ssExec?.directoryBuffer
+    && Number(ssExec?.queryBaseGridSpacingM) > 0
+  );
   return {
     stateBuffer: g2p.stateBuffer,
     mechanicsBuffer: g2p.mechanicsBuffer,
     thermoBuffer,
     particleCount: sphParticleState?.particleCount ?? 0,
+    ...(hasCanonicalSsDir ? {
+      fluidDirectoryBuffer: ssExec.directoryBuffer,
+      fluidBaseGridSpacingM: Number(ssExec.queryBaseGridSpacingM),
+      fluidChartId: Number(ssExec.queryChartId) || 0,
+      fluidMinLevel: Number(ssExec.queryMinLevel) || 0,
+      fluidMaxLevel: Number(ssExec.queryMaxLevel) || 0
+    } : {}),
     ...(exactEnergy && exactMassBuffer ? {
       exactEnergyBuffer: exactEnergy.energyBuffer,
       exactEnergyRowCount: exactEnergy.rowCount,

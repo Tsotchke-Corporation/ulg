@@ -484,7 +484,8 @@ function acquireReactionDormancyStage(device, arenaEntry, config, {
       reactionCount,
       reactionRecordStrideVec4s: REACTION_RECORD_VEC4S,
       stateStrideVec4s: 2,
-      thermoStrideVec4s: 3
+      thermoStrideVec4s: 3,
+      canonicalSsDirectoryMode: true
     });
     arenaEntry.reactionDormancyStages.set(key, stage);
   }
@@ -4085,7 +4086,11 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       proposalByteLength,
       uncertaintyBuffer: reactionDormancy?.uncertaintyBuffer ?? null,
       uncertaintyWordOffset: reactionDormancy?.uncertaintyWordOffset ?? 0,
-      writeInvalidProposalOnDormant: useIndirectActiveProposal
+      writeInvalidProposalOnDormant: useIndirectActiveProposal,
+      spatialDirectoryBuffer: directoryBuffer,
+      spatialBaseGridSpacingM: generation?.execution?.queryBaseGridSpacingM ?? 0,
+      spatialMinLevel: generation?.execution?.queryMinLevel ?? 0,
+      spatialMaxLevel: generation?.execution?.queryMaxLevel ?? 0
     });
     // G4 per-schedule receipt: this step's counts into the schedule ring.
     encodeLawActivationCount(encoder, device, 'reaction', reactionDormancyStage.countBuffer);
@@ -4094,6 +4099,9 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
     diagnostic.encodes += 1;
     diagnostic.device = device;
     diagnostic.stage = reactionDormancyStage;
+    diagnostic.canonicalSsDirectoryActive = Boolean(
+      directoryBuffer && Number(generation?.execution?.queryBaseGridSpacingM) > 0
+    );
     diagnostic.readCounts ??= async () => {
       const live = diagnostic.stage;
       if (!live) return null;
@@ -4104,7 +4112,8 @@ export async function runSchroederSpatialReactionDiscoveryProposalWebGpu({
       await copy.mapAsync(1);
       const counts = Array.from(new Uint32Array(copy.getMappedRange().slice(0)));
       copy.unmap(); copy.destroy();
-      return { encodes: diagnostic.encodes, counts, cells: live.cells, cellEdgeFloorM: live.cellEdgeFloorM };
+      return { encodes: diagnostic.encodes, counts, cells: live.cells, cellEdgeFloorM: live.cellEdgeFloorM,
+        canonicalSsDirectoryActive: Boolean(diagnostic.canonicalSsDirectoryActive) };
     };
   }
   const proposalTimestampSpan = beginReactionDiscoveryTimestampSpan(

@@ -6,6 +6,7 @@
 export const ULG_MATERIAL_PROPERTY_BUNDLE_SCHEMA = 'ulg.material-property-bundle.v1';
 export const ULG_POLYTOPE_ATLAS_SCHEMA = 'ulg.polytope-atlas.v1';
 export const ULG_POLYTOPE_ATLAS_GPU_BUFFER_SCHEMA = 'ulg.polytope-atlas-gpu-buffer.v1';
+export const ULG_POLYTOPE_ATLAS_BANK_GPU_BUFFER_SCHEMA = 'ulg.polytope-atlas-bank-gpu-buffer.v1';
 
 export const ULG_ACCURACY_TIERS = Object.freeze({
   TIER_1_QUANTITATIVE: 'tier-1-quantitative',
@@ -133,6 +134,8 @@ export function validateMaterialPropertyBundle(bundle) {
 export const POLYTOPE_ATLAS_GPU_HEADER_FLOATS = 4;
 export const POLYTOPE_ATLAS_GPU_RECORD_FLOATS = 16;
 export const POLYTOPE_ATLAS_GPU_FACET_FLOATS = 4;
+export const POLYTOPE_ATLAS_BANK_HEADER_FLOATS = 4;
+export const POLYTOPE_ATLAS_BANK_DIR_ENTRY_FLOATS = 4;
 
 const PHASE_CODE = Object.freeze({
   solid: 0,
@@ -221,6 +224,59 @@ export function packPolytopeAtlasForGpu(polytopes, { materialIndex = 0 } = {}) {
   });
 }
 
+/**
+ * Pack multiple materials' Convex Polytope Atlases into ONE GPU-resident
+ * read-only Float32Array bank (`ulg.polytope-atlas-bank-gpu-buffer.v1`):
+ *   Header (4 floats): [materialCount, failClosedFlag=1, 0, 0]
+ *   Directory (4 floats x materialCount):
+ *     [materialIdF32, atlasOffsetFloats, polytopeCount, accuracyTierCode]
+ *   Payload: each material's verbatim `packPolytopeAtlasForGpu` blob at `atlasOffsetFloats`.
+ */
+export function packPolytopeAtlasBankForGpu(entries = []) {
+  const list = Array.isArray(entries) ? entries.filter((e) => e && Number.isFinite(Number(e.materialId))) : [];
+  const packedEntries = [];
+  let totalPayloadFloats = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const entry = list[i];
+    const packed = entry.packedGpuAtlas?.data instanceof Float32Array
+      ? entry.packedGpuAtlas
+      : packPolytopeAtlasForGpu(entry.polytopes || [], { materialIndex: i });
+    packedEntries.push({
+      materialId: Number(entry.materialId),
+      materialKey: String(entry.materialKey || ''),
+      tierCode: TIER_CODE[entry.accuracyTier] ?? 2,
+      packed
+    });
+    totalPayloadFloats += packed.data.length;
+  }
+  const dirStart = POLYTOPE_ATLAS_BANK_HEADER_FLOATS;
+  const payloadStart = dirStart + packedEntries.length * POLYTOPE_ATLAS_BANK_DIR_ENTRY_FLOATS;
+  const totalFloats = Math.max(16, payloadStart + totalPayloadFloats);
+  const data = new Float32Array(totalFloats);
+  data[0] = packedEntries.length;
+  data[1] = 1; // fail-closed flag
+  data[2] = 0;
+  data[3] = 0;
+
+  let cursor = payloadStart;
+  for (let i = 0; i < packedEntries.length; i += 1) {
+    const item = packedEntries[i];
+    const d = dirStart + i * POLYTOPE_ATLAS_BANK_DIR_ENTRY_FLOATS;
+    data[d + 0] = item.materialId;
+    data[d + 1] = cursor;
+    data[d + 2] = item.packed.polytopeCount;
+    data[d + 3] = item.tierCode;
+    data.set(item.packed.data, cursor);
+    cursor += item.packed.data.length;
+  }
+  return Object.freeze({
+    schema: ULG_POLYTOPE_ATLAS_BANK_GPU_BUFFER_SCHEMA,
+    materialCount: packedEntries.length,
+    totalFloats,
+    data
+  });
+}
+
 // Reusable WGSL Polytope-Atlas half-space membership + Clenshaw Chebyshev evaluator.
 // Fail-closed: returns vec4(value, margin, phaseCode, hitFlag); hitFlag == 0.0
 // signals outside-domain miss (never extrapolates silently!).
@@ -241,12 +297,13 @@ fn polytope_clenshaw_1d(atlas: ptr<storage, array<f32>, read>, u: f32, base: u32
   return 0.0;
 }
 
-fn eval_polytope_atlas_2d(
+fn eval_polytope_atlas_2d_at(
   atlas: ptr<storage, array<f32>, read>,
+  base_off: u32,
   temperature_k: f32,
   pressure_pa: f32
 ) -> vec4<f32> {
-  let count = u32((*atlas)[0]);
+  let count = u32((*atlas)[base_off]);
   if (count == 0u || !(pressure_pa > 0.0) || !(temperature_k > 0.0)) {
     return vec4<f32>(0.0, -1.0, -1.0, 0.0);
   }
@@ -254,10 +311,10 @@ fn eval_polytope_atlas_2d(
   var best_idx = 0xffffffffu;
   var best_margin = -1.0e30;
   for (var i = 0u; i < count; i = i + 1u) {
-    let r = 4u + i * 16u;
+    let r = base_off + 4u + i * 16u;
     if ((*atlas)[r + 14u] < 0.5) { continue; }
     let facet_count = u32((*atlas)[r + 1u]);
-    let facet_off = u32((*atlas)[r + 8u]);
+    let facet_off = base_off + u32((*atlas)[r + 8u]);
     var inside = true;
     var min_margin = 1.0e30;
     for (var f = 0u; f < facet_count; f = f + 1u) {
@@ -281,7 +338,7 @@ fn eval_polytope_atlas_2d(
   if (best_idx == 0xffffffffu) {
     return vec4<f32>(0.0, -1.0, -1.0, 0.0);
   }
-  let r = 4u + best_idx * 16u;
+  let r = base_off + 4u + best_idx * 16u;
   let phase_code = (*atlas)[r + 0u];
   let coeff_off_f = (*atlas)[r + 9u];
   if (coeff_off_f < 0.0) {
@@ -293,7 +350,7 @@ fn eval_polytope_atlas_2d(
   let lp_max = (*atlas)[r + 5u];
   let c0 = u32((*atlas)[r + 6u]) + 1u;
   let c1 = u32((*atlas)[r + 7u]) + 1u;
-  let coeff_off = u32(coeff_off_f);
+  let coeff_off = base_off + u32(coeff_off_f);
   let u0 = clamp(2.0 * (temperature_k - t_min) / max(t_max - t_min, 1.0e-30) - 1.0, -1.0, 1.0);
   let u1 = clamp(2.0 * (log_p - lp_min) / max(lp_max - lp_min, 1.0e-30) - 1.0, -1.0, 1.0);
   var b1 = 0.0;
@@ -314,5 +371,33 @@ fn eval_polytope_atlas_2d(
   let valid_mode = (*atlas)[r + 14u];
   let out_val = select(val, exp(clamp(val, -80.0, 80.0)), valid_mode > 1.5);
   return vec4<f32>(out_val, best_margin, phase_code, 1.0);
+}
+
+fn eval_polytope_atlas_2d(
+  atlas: ptr<storage, array<f32>, read>,
+  temperature_k: f32,
+  pressure_pa: f32
+) -> vec4<f32> {
+  return eval_polytope_atlas_2d_at(atlas, 0u, temperature_k, pressure_pa);
+}
+
+fn eval_polytope_atlas_bank_2d(
+  atlas: ptr<storage, array<f32>, read>,
+  material_id: f32,
+  temperature_k: f32,
+  pressure_pa: f32
+) -> vec4<f32> {
+  let mat_count = u32((*atlas)[0u]);
+  if (mat_count == 0u || !(pressure_pa > 0.0) || !(temperature_k > 0.0)) {
+    return vec4<f32>(0.0, -1.0, -1.0, 0.0);
+  }
+  for (var m = 0u; m < mat_count; m = m + 1u) {
+    let d = 4u + m * 4u;
+    if (abs((*atlas)[d + 0u] - material_id) < 0.5) {
+      let base_off = u32((*atlas)[d + 1u]);
+      return eval_polytope_atlas_2d_at(atlas, base_off, temperature_k, pressure_pa);
+    }
+  }
+  return vec4<f32>(0.0, -1.0, -1.0, 0.0);
 }
 `;
